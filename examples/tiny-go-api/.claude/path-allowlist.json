@@ -1,0 +1,11 @@
+{
+  "_doc": "Per-(agent_type, path) allowlist for the tiny-go-api example. Consumed by scripts/hooks/path-allowlist.sh. The 'lead' key matches the framework's hi_sender_role default for events with no .agent_type field. The 'tiny-api' key matches the project specialist. Paths are globs; allow is checked first; deny overrides.",
+  "lead": {
+    "allow": ["**"],
+    "deny": [".env", ".env.*", "**/.git/**"]
+  },
+  "tiny-api": {
+    "allow": ["cmd/**", "go.mod", "go.sum"],
+    "deny": []
+  }
+}
