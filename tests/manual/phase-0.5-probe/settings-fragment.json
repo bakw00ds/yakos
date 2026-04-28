@@ -1,0 +1,35 @@
+{
+  "_doc": "Phase 0.5 probe — paste the `hooks` block below into your probe project's .claude/settings.json (merge with any existing hooks). Wires three probe scripts: TaskCompleted/TaskCreated event capture + a wildcard PreToolUse for sanity. Cleanup: revert settings.json after the probe; archive the captured data; remove the probe scripts. NEVER use this against a production project.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/probe/probe-allpretool.sh"
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/probe/probe-taskcompleted.sh"
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/probe/probe-taskcreated.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

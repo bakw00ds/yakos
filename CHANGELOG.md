@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-04-28
+
+### Added — Phase 0.5 probe deliverables
+
+Test infrastructure for the Phase 0.5 probe (operator-driven; needed
+to flip the two REPORT-only hooks to BLOCKING in v0.2). Doesn't
+change runtime behavior — adds artifacts under `tests/manual/`.
+
+- `tests/manual/phase-0.5-probe/probe-taskcompleted.sh` —
+  TaskCompleted matcher; captures full stdin + env per fire.
+- `tests/manual/phase-0.5-probe/probe-taskcreated.sh` —
+  TaskCreated matcher; same shape.
+- `tests/manual/phase-0.5-probe/probe-allpretool.sh` — wildcard
+  PreToolUse capture; sanity check for task-related tool calls.
+- `tests/manual/phase-0.5-probe/settings-fragment.json` —
+  `hooks` block to merge into a probe project's `.claude/settings.json`.
+- `tests/manual/phase-0.5-probe/README.md` — operator playbook with
+  a step-by-step prompt sequence for the live session, plus the
+  inspection checklist for `~/.claude/tasks/<team>/`.
+- `docs/architecture/phase-0.5-results.md` — results-doc template
+  mirroring Phase 1.7's shape; filled in after probe runs.
+
+`docs/v0.2-notes.md` updated to reference the probe location and
+mark it "deliverables ready, not yet run."
+
+The probe answers:
+
+1. The exact stdin shape of `TaskCompleted` hooks (is `agent_type`
+   present? how is the task identified? is `blockedBy` in stdin?).
+2. The format of `~/.claude/tasks/<team>/` files (per-task or
+   single-file? schema? state-transition representation?).
+
+Both unlock the BLOCKING upgrade in v0.2.
+
 ## [0.1.2] — 2026-04-28
 
 ### Fixed (documentation drift)
