@@ -186,6 +186,9 @@ validate_tree() {
 
     # Line-budget WARNs (per Phase 1.5 §10 + STYLE.md §7)
     check_line_budgets "$base"
+
+    # Playbook reference resolution — broken references are ERRORs.
+    check_playbook_references "$base"
 }
 
 # ---- standards checks (framework-mode only; STYLE.md §1-§7) ----------------
@@ -221,6 +224,38 @@ check_line_budgets() {
             warn "$f: rule is $n lines (budget 60-150)"
         fi
     done < <(find "$base/rules" -type f -name '*.md' ! -name 'INDEX.md' ! -name 'README.md' 2>/dev/null)
+}
+
+check_playbook_references() {
+    # Walk every agent .md and rule .md under $base and verify each
+    # `playbook:<name>` reference resolves to a real file in
+    # $YAKOS_ROOT/lib/playbooks/<name>.md (or the project's own
+    # playbooks/ directory if that ever lands).
+    #
+    # Broken references are ERRORs (per spec — playbooks are
+    # institutional knowledge; a broken ref means the agent will read
+    # a missing reference at session time, which is a real defect).
+    local base="$1"
+    [ -d "$base" ] || return 0
+
+    local pb_dir="$YAKOS_ROOT/lib/playbooks"
+
+    # Collect referenced playbooks across all md files in the base
+    local refs
+    refs="$(grep -rhE '^[[:space:]]*-[[:space:]]*playbook:[A-Za-z0-9._/-]+' \
+                  "$base/agents" "$base/rules" "$base/skills" 2>/dev/null \
+            | sed -E 's/.*playbook:([A-Za-z0-9._/-]+).*/\1/' \
+            | sort -u || true)"
+
+    [ -n "$refs" ] || return 0
+
+    while IFS= read -r ref; do
+        [ -n "$ref" ] || continue
+        local target="$pb_dir/${ref}.md"
+        if [ ! -f "$target" ]; then
+            err "broken playbook reference: 'playbook:$ref' — no file at $target"
+        fi
+    done <<< "$refs"
 }
 
 check_shebang_strict_mode() {

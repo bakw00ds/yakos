@@ -8,6 +8,7 @@ model: sonnet
 references:
   - rule:commit-format
   - rule:pr-conventions
+  - playbook:04-docs-architecture
 ---
 
 # Doc Writer

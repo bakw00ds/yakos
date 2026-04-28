@@ -9,6 +9,7 @@ references:
   - rule:commit-format
   - rule:pr-conventions
   - rule:git-hygiene
+  - playbook:02-code-quality
 ---
 
 # Code Reviewer

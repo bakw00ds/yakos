@@ -8,6 +8,7 @@ model: sonnet
 references:
   - rule:git-hygiene
   - rule:commit-format
+  - playbook:02-code-quality
 ---
 
 # Test Runner

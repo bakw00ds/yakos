@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Batch 5.7 (framework playbooks)
+
+- 6 framework playbooks under `lib/playbooks/` (1,445 lines total),
+  closing the Phase 1.5 §4 gap Batch 3 flagged. Ported from
+  PandaOS audit work with light cleanup on 01–05 and full
+  generalization on 06:
+    - `01-security.md` (248 lines) — secret scanning, SAST,
+      dependency vulns, DAST, OpenAPI fuzzing, OWASP API Top 10
+      walkthrough.
+    - `02-code-quality.md` (172 lines) — coverage thresholds,
+      complexity, flake detection, mutation testing, dead-code
+      checks. Multi-language tool examples.
+    - `03-ui-ux-a11y.md` (211 lines) — Lighthouse / axe / pa11y /
+      Playwright; WCAG 2.2 AA target; keyboard nav, screen reader,
+      forms, responsive sweep.
+    - `04-docs-architecture.md` (226 lines) — OpenAPI generation,
+      C4 levels 1-3, ADRs, runbooks, link checking.
+    - `05-performance.md` (257 lines) — k6 load testing, pgbadger,
+      pprof / clinic, microbenchmarks, SLO baseline table.
+    - `06-regulated-data.md` (331 lines) — generalized from
+      HIPAA-specific to multi-framework: HIPAA, GDPR, CCPA/CPRA,
+      SOC 2, engagement-data. Three-control-family structure
+      preserved.
+- 4 agent reference fields wired:
+  `security-reviewer` → `playbook:01-security`,
+  `code-reviewer` and `test-runner` → `playbook:02-code-quality`,
+  `doc-writer` → `playbook:04-docs-architecture`.
+- `cli/lib/validate.sh` `check_playbook_references()` —
+  **broken `playbook:` references are ERROR-level**, not WARN.
+  Exit 1. The framework's first ERROR-tier standards check.
+
 ### Added — Batch 5.5 (local-model integration templates)
 
 - `lib/skills/local-llm/SKILL.md` (108 lines, in 80–180 budget) —

@@ -8,6 +8,7 @@ model: opus
 references:
   - rule:secret-handling
   - rule:git-hygiene
+  - playbook:01-security
 ---
 
 # Security Reviewer
