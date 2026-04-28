@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — VERSION file format migrated to four-part semver
+
+`VERSION` migrated from `0.1.4` (three-part `major.minor.patch`) to
+`0.1.4.0` (four-part `major.minor.patch.hotfix`). The fourth tier
+(`hotfix`) is reserved for emergency fixes to deployed versions
+outside normal release flow. The `version-bump` skill (this same
+release) encodes the bump semantics; the pre-push gate enforces them.
+
+This is a format change only — `0.1.4.0` is the same release as
+`0.1.4`. Existing `v0.1.4` tag preserved as-is; future tags use
+the four-part form (`v0.2.0.0` next).
+
 ### Added — runtime-dispatch skill + clarified team-shapes
 
 Confirmed via re-probe (within `TeamCreate` context) that project-level
