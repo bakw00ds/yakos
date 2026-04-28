@@ -1,11 +1,217 @@
 #!/usr/bin/env bash
-# validate.sh — STUB (Batch 1B).
-# Will: schema + reference validation. Three modes:
-#   yakos validate           → framework lib/
-#   yakos validate <path>    → project .claude/
-#   yakos validate --all     → both
+# validate.sh — schema + reference validation.
+#
+# Three modes:
+#   yakos validate                framework lib/
+#   yakos validate <path>         project .claude/ (rooted at <path>)
+#   yakos validate --all          both
+#
+# v0.1 lib/ is empty (agents/skills/rules arrive in Batch 3). This
+# subcommand handles the empty case cleanly with informational output.
+# Frontmatter+reference validation against populated lib/ is layered in
+# Batch 3 alongside the agent/skill files.
+#
+# Validation uses python3 if available for proper YAML/JSON parsing;
+# without python3 it degrades to grep-based checks and surfaces a
+# "limited validation" warning.
+
 set -eu
-echo "yakos validate: not yet implemented (stub for Batch 1B)" >&2
-echo "               Will: schema + reference validation in three modes" >&2
-echo "               (framework lib/, project .claude/, or --all)." >&2
+
+: "${YAKOS_ROOT:?YAKOS_ROOT must be set; run via 'yakos validate'}"
+: "${YAKOS_LIB:?YAKOS_LIB must be set; run via 'yakos validate'}"
+# shellcheck source=./compat.sh
+. "$YAKOS_LIB/compat.sh"
+
+ALL=0
+TARGETS=()
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help)
+            cat <<EOF
+yakos validate [<project-path>] [--all]
+
+Schema + reference validation. Three modes:
+
+  yakos validate                Validate the framework's lib/ (this repo).
+  yakos validate <path>         Validate <path>/.claude/ for a project.
+  yakos validate --all          Validate framework lib/ AND the project's
+                                .claude/ (must also pass <path>).
+
+v0.1 lib/ is intentionally empty — this command handles the empty
+case and reports cleanly. Full frontmatter+reference validation runs
+once Batch 3 populates lib/agents/, lib/skills/, lib/rules/.
+
+Uses python3 if available for full YAML/JSON parsing; degrades to
+grep-based checks otherwise (with a "limited validation" warning).
+EOF
+            exit 0
+            ;;
+        --all) ALL=1 ;;
+        --*) ct_die "validate: unknown flag '$arg'" ;;
+        *) TARGETS+=("$arg") ;;
+    esac
+done
+
+errors=0
+warnings=0
+
+err()  { printf '  [err]  %s\n' "$*"; errors=$((errors + 1)); }
+warn() { printf '  [warn] %s\n' "$*"; warnings=$((warnings + 1)); }
+ok()   { printf '  [ok]   %s\n' "$*"; }
+info() { printf '  [info] %s\n' "$*"; }
+
+# ---- python3 capability check -----------------------------------------------
+
+PYTHON_OK=0
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_OK=1
+fi
+if [ "$PYTHON_OK" = "0" ]; then
+    warn "python3 not found; running limited validation (grep-based checks only)"
+fi
+
+# ---- per-tree validators ----------------------------------------------------
+
+count_dir_files() {
+    # Number of files matching a name pattern under a tree, excluding
+    # .gitkeep / README.md and dotfiles
+    local tree="$1" pattern="$2"
+    [ -d "$tree" ] || { echo 0; return; }
+    find "$tree" -type f -name "$pattern" \
+        ! -name '.*' ! -name 'README.md' 2>/dev/null | wc -l | tr -d ' '
+}
+
+validate_yaml_frontmatter() {
+    # Returns 0 if the file appears to have well-formed YAML frontmatter
+    # (i.e. starts with --- and has a closing ---). Strict YAML parsing
+    # requires python3.
+    local f="$1"
+    [ -f "$f" ] || return 1
+    # The file must start with --- on line 1
+    head -n 1 "$f" 2>/dev/null | grep -q '^---$' || return 1
+    # And have a closing --- somewhere in the next 200 lines
+    head -n 200 "$f" 2>/dev/null | tail -n +2 | grep -qx '^---$'
+}
+
+validate_python_frontmatter() {
+    # Strict YAML parse. Requires python3.
+    local f="$1"
+    python3 - "$f" <<'PY' 2>/dev/null
+import sys, re
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+except Exception as e:
+    print(f"read error: {e}", file=sys.stderr)
+    sys.exit(2)
+m = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
+if not m:
+    print("no YAML frontmatter block", file=sys.stderr)
+    sys.exit(3)
+body = m.group(1)
+try:
+    import yaml  # type: ignore
+    yaml.safe_load(body)
+except ImportError:
+    # Best-effort: just check key: value structure
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line and not line.startswith("- "):
+            print(f"suspicious frontmatter line: {line}", file=sys.stderr)
+            sys.exit(4)
+except Exception as e:
+    print(f"yaml parse error: {e}", file=sys.stderr)
+    sys.exit(5)
+PY
+    return $?
+}
+
+validate_tree() {
+    local label="$1" base="$2"
+    echo
+    echo "$label: $base"
+    if [ ! -d "$base" ]; then
+        info "directory does not exist; nothing to validate"
+        return 0
+    fi
+    local n_agents n_skills n_rules
+    n_agents="$(count_dir_files "$base/agents" '*.md')"
+    n_skills="$(count_dir_files "$base/skills" 'SKILL.md')"
+    n_rules="$(count_dir_files "$base/rules" '*.md')"
+    info "agents: $n_agents | skills: $n_skills | rules: $n_rules"
+
+    if [ "$n_agents" -eq 0 ] && [ "$n_skills" -eq 0 ] && [ "$n_rules" -eq 0 ]; then
+        info "no agents/skills/rules to validate (this is expected for the empty lib/ in v0.1)"
+        return 0
+    fi
+
+    # When populated (Batch 3+), run full frontmatter checks
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        if [ "$PYTHON_OK" = "1" ]; then
+            if ! validate_python_frontmatter "$f"; then
+                err "$f: bad YAML frontmatter"
+                continue
+            fi
+        else
+            if ! validate_yaml_frontmatter "$f"; then
+                warn "$f: missing or malformed --- frontmatter (limited check)"
+                continue
+            fi
+        fi
+        ok "$f"
+    done < <(find "$base/agents" -type f -name '*.md' ! -name 'README.md' 2>/dev/null
+             find "$base/skills" -type f -name 'SKILL.md' 2>/dev/null
+             find "$base/rules"  -type f -name '*.md' ! -name 'README.md' ! -name 'INDEX.md' 2>/dev/null)
+
+    # settings.json (project-only)
+    if [ -f "$base/settings.json" ]; then
+        if ct_json_valid "$base/settings.json"; then
+            ok "$base/settings.json: valid JSON"
+        else
+            err "$base/settings.json: not valid JSON"
+        fi
+    fi
+
+    if [ -f "$base/path-allowlist.json" ]; then
+        if ct_json_valid "$base/path-allowlist.json"; then
+            ok "$base/path-allowlist.json: valid JSON"
+        else
+            err "$base/path-allowlist.json: not valid JSON"
+        fi
+    fi
+}
+
+# ---- mode selection ---------------------------------------------------------
+
+if [ "$ALL" = "1" ]; then
+    validate_tree "framework" "$YAKOS_ROOT/lib"
+    if [ "${#TARGETS[@]}" -gt 0 ]; then
+        for t in "${TARGETS[@]}"; do
+            validate_tree "project" "$t/.claude"
+        done
+    else
+        warn "--all without a project path; only framework lib/ was validated"
+    fi
+elif [ "${#TARGETS[@]}" -eq 0 ]; then
+    validate_tree "framework" "$YAKOS_ROOT/lib"
+else
+    for t in "${TARGETS[@]}"; do
+        # If the user passes <project>/.claude directly we accept that too
+        case "$t" in
+            */.claude|*/.claude/) base="$t" ;;
+            *) base="$t/.claude" ;;
+        esac
+        validate_tree "project" "$base"
+    done
+fi
+
+echo
+echo "Summary: $errors error(s), $warnings warning(s)"
+if [ "$errors" -gt 0 ]; then
+    exit 1
+fi
 exit 0

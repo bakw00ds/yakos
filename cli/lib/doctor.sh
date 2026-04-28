@@ -10,13 +10,14 @@ set -eu
 # shellcheck source=./compat.sh
 . "$YAKOS_LIB/compat.sh"
 
+PROJECT_PATH=""
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
             cat <<EOF
-yakos doctor — verify YakOS install + environment health
+yakos doctor [<project-path>] — verify YakOS install + environment health
 
-Checks:
+Without arguments, checks:
     Required commands (bash, git, jq)
     Optional commands (gtimeout, gsed, shellcheck, python3) — surfaced as INFO
     ~/.yakos pointer exists and resolves to an existing repo
@@ -25,16 +26,27 @@ Checks:
     ~/.claude/settings.json is valid JSON if present
     ~/.claude/projects/ is intact (informational; never modified)
 
-Usage: yakos doctor
+If <project-path> is passed, additionally checks:
+    For each file in <project>/scripts/hooks/, compares the file's SHA-256
+    against its .framework-hash sibling (written by 'yakos init') and
+    surfaces DRIFT (informational, not an error — projects are expected
+    to customize).
+
+Usage: yakos doctor [<project-path>]
 
 Exit code:
-    0   No errors (warnings/info OK)
+    0   No errors (warnings/info/drift OK)
     1   One or more errors
 EOF
             exit 0
             ;;
+        --*)
+            ct_die "doctor: unknown flag '$arg'"
+            ;;
         *)
-            ct_die "doctor: unknown argument '$arg' (try --help)"
+            if [ -z "$PROJECT_PATH" ]; then PROJECT_PATH="$arg"
+            else ct_die "doctor: too many positional args"
+            fi
             ;;
     esac
 done
@@ -169,6 +181,43 @@ else
     info "$CLAUDE_DIR/projects/ does not exist (no auto-memory yet)"
 fi
 echo ""
+
+# ---- project hook drift (only when project path passed) --------------------
+
+if [ -n "$PROJECT_PATH" ]; then
+    echo "Project hook drift: $PROJECT_PATH/scripts/hooks/"
+    if [ ! -d "$PROJECT_PATH" ]; then
+        err "project path not found: $PROJECT_PATH"
+    elif [ ! -d "$PROJECT_PATH/scripts/hooks" ]; then
+        info "$PROJECT_PATH/scripts/hooks/ does not exist (run 'yakos init <name> --project $PROJECT_PATH')"
+    else
+        drift=0
+        unhashed=0
+        clean=0
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            hash_file="${f}.framework-hash"
+            if [ ! -f "$hash_file" ]; then
+                unhashed=$((unhashed + 1))
+                continue
+            fi
+            expected="$(cat "$hash_file")"
+            actual="$(ct_sha256 "$f")"
+            if [ "$expected" = "$actual" ]; then
+                clean=$((clean + 1))
+            else
+                rel="${f#$PROJECT_PATH/}"
+                info "DRIFT: $rel  (expected $expected, got $actual; not an error — projects are expected to customize)"
+                drift=$((drift + 1))
+            fi
+        done < <(find "$PROJECT_PATH/scripts/hooks" -type f \
+                       ! -name '*.framework-hash' \
+                       ! -name '.gitkeep' \
+                       ! -name 'README.md' 2>/dev/null)
+        ok "$clean clean, $drift drifted, $unhashed unhashed (no .framework-hash sibling)"
+    fi
+    echo ""
+fi
 
 # ---- summary ----------------------------------------------------------------
 

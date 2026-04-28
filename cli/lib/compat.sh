@@ -139,3 +139,48 @@ ct_iso_utc() {
     # Compact UTC timestamp suitable for filenames: 20260428T091500Z
     date -u +%Y%m%dT%H%M%SZ
 }
+
+ct_iso_now_z() {
+    # Full ISO-8601 with Z suffix: 2026-04-28T09:15:00Z
+    date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+# ---- hashing --------------------------------------------------------------
+
+ct_sha256() {
+    # Print the hex SHA-256 of a file. shasum (-a 256) is present on macOS
+    # and most Linux distros via perl-shasum or openssl wrappers.
+    local f="$1"
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$f" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$f" | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$f" | awk '{print $NF}'
+    else
+        ct_die "ct_sha256: no shasum/sha256sum/openssl found"
+    fi
+}
+
+# ---- project path encoding -----------------------------------------------
+
+ct_encode_project_path() {
+    # Claude Code encodes project paths into ~/.claude/projects/<encoded>/ by
+    # replacing '/' and '.' with '-'. This helper does the same.
+    #
+    # Example: /Users/tw/code/panda-os-3.0 → -Users-tw-code-panda-os-3-0
+    #
+    # The leading slash becomes a leading hyphen.
+    local p="$1"
+    # First normalize to absolute (resolves './' and trailing slash)
+    case "$p" in
+        /*) : ;;
+        *)  p="$(cd "$p" 2>/dev/null && pwd -P)" ;;
+    esac
+    # Strip trailing slash
+    p="${p%/}"
+    # Replace '/' and '.' with '-'
+    p="${p//\//-}"
+    p="${p//./-}"
+    printf '%s\n' "$p"
+}
