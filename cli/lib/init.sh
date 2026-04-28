@@ -112,11 +112,20 @@ fi
 
 mkdir -p "$CURRENT_DIR/logs" "$CURRENT_DIR/artifacts" "$CURRENT_DIR/reports" "$WORK_DIR/archive"
 
-# .session-started-history — empty JSON array (appended by SessionStart hook in Batch 2)
-SESSION_HISTORY="$CURRENT_DIR/.session-started-history"
+# .session-started-history.ndjson — append-only NDJSON; team-lifecycle.sh
+# appends a "team_created" event on each TeamCreate. Empty file is a valid
+# zero-line NDJSON.
+SESSION_HISTORY="$CURRENT_DIR/.session-started-history.ndjson"
 if [ ! -f "$SESSION_HISTORY" ]; then
-    printf '[]\n' > "$SESSION_HISTORY"
+    : > "$SESSION_HISTORY"
     ct_log "wrote $SESSION_HISTORY"
+fi
+# Migrate legacy JSON-array file from Batch 1B if present
+LEGACY_HISTORY="$CURRENT_DIR/.session-started-history"
+if [ -f "$LEGACY_HISTORY" ] && jq -e 'type == "array"' "$LEGACY_HISTORY" >/dev/null 2>&1; then
+    jq -c '.[]?' "$LEGACY_HISTORY" >> "$SESSION_HISTORY" 2>/dev/null || true
+    rm -f "$LEGACY_HISTORY"
+    ct_log "migrated legacy $LEGACY_HISTORY → $SESSION_HISTORY"
 fi
 
 # .gitignore
@@ -182,7 +191,7 @@ if [ -d "$PROJECT_HOOKS_SRC" ]; then
         chmod +x "$dst" 2>/dev/null || true
         # framework-hash sibling
         ct_sha256 "$src" > "${dst}.framework-hash"
-    done < <(find "$PROJECT_HOOKS_SRC" -type f 2>/dev/null)
+    done < <(find -L "$PROJECT_HOOKS_SRC" -type f 2>/dev/null)
 fi
 
 ct_log "hooks copied: $hook_copied new, $hook_overwritten overwritten, $hook_skipped skipped (use --force to refresh existing)"

@@ -32,6 +32,31 @@ manually or by a future BLOCKING dispatcher (v0.2).
 
 Records go to `${CLAUDE_PROJECT_DIR}/work/current/logs/<hook>.ndjson`.
 
+## No-block policy for telemetry hooks
+
+Telemetry hooks **never block**. They always exit 0 even on internal
+failure. Preventing the user's actual work because of a logging hiccup
+is the wrong tradeoff for observation-only code.
+
+Telemetry (always exit 0):
+- `team-lifecycle.sh`
+- `session-end-check.sh` (audit, not enforcement)
+- `mailbox-mirror.sh`
+- `path-log.sh`
+- any hook whose primary purpose is observation
+
+Enforcement (may exit 2 to BLOCK):
+- `path-allowlist.sh`
+- `secret-scan.sh`
+- `task-dependency-gate.sh` *(REPORT-only in v0.1)*
+- `task-complete-dispatch.sh` *(REPORT-only in v0.1)*
+- per-domain validators
+
+Failing closed (refusing the action) is the right behavior for
+enforcement hooks. Failing open is a security issue. Failing
+unconditionally on telemetry is a UX issue. Each row above gets the
+right kind of failure handling.
+
 ## Bypass mechanism
 
 Every hook checks `work/current/hook-bypass.md` before deciding to block.

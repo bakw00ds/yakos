@@ -31,9 +31,11 @@ case_check() {
         "$setup_fn" "$tmp"
     fi
 
+    # Pin work-directory resolution to the temp dir so hooks write here,
+    # not into ~/agent-control/.
     local actual_rc=0
     local stdout_capture
-    stdout_capture="$(CLAUDE_PROJECT_DIR="$tmp" bash "$HOOKS/$hook" < "$FIXT/$fixture" 2>/dev/null)" || actual_rc=$?
+    stdout_capture="$(YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$tmp" bash "$HOOKS/$hook" < "$FIXT/$fixture" 2>/dev/null)" || actual_rc=$?
 
     # Verify rc
     local rc_ok=0

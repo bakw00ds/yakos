@@ -18,12 +18,29 @@ if [ "${HO_LOADED:-0}" = "1" ]; then
 fi
 HO_LOADED=1
 
+# paths.sh provides yakos_work_dir / yakos_current_dir / yakos_logs_dir /
+# yakos_bypass_file etc. — the canonical resolver shared with the CLI.
+# It lives at $HOOK_DIR/lib/paths.sh in both the framework tree and any
+# project that ran 'yakos init' (init copies it).
+__ho_self_dir="$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+if [ -f "$__ho_self_dir/paths.sh" ]; then
+    # shellcheck source=./paths.sh
+    . "$__ho_self_dir/paths.sh"
+fi
+
 ho_now() {
     date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
 ho_logdir() {
-    printf '%s' "${CLAUDE_PROJECT_DIR:-.}/work/current/logs"
+    # Use the canonical resolver if available, otherwise fall back to the
+    # in-repo path. Tests can override via $YAKOS_WORK_DIR or
+    # $YAKOS_INPLACE_WORK=1 (see paths.sh).
+    if command -v yakos_logs_dir >/dev/null 2>&1; then
+        yakos_logs_dir
+    else
+        printf '%s' "${CLAUDE_PROJECT_DIR:-.}/work/current/logs"
+    fi
 }
 
 ho_log() {
@@ -79,7 +96,12 @@ ho_check_bypass() {
     # heading in work/current/hook-bypass.md. The format-example block
     # above that header is ignored.
     local hook="$1" scope="${2:-}"
-    local bypass_file="${CLAUDE_PROJECT_DIR:-.}/work/current/hook-bypass.md"
+    local bypass_file
+    if command -v yakos_bypass_file >/dev/null 2>&1; then
+        bypass_file="$(yakos_bypass_file)"
+    else
+        bypass_file="${CLAUDE_PROJECT_DIR:-.}/work/current/hook-bypass.md"
+    fi
     [ -f "$bypass_file" ] || return 1
 
     awk -v hook="$hook" -v scope="$scope" '

@@ -70,12 +70,19 @@ case "$TAG" in
 esac
 
 CONTROL_DIR="$HOME/agent-control/$PROJECT"
-WORK_DIR="$CONTROL_DIR/work"
-CURRENT_DIR="$WORK_DIR/current"
+[ -d "$CONTROL_DIR" ] || ct_die "archive: project '$PROJECT' not found at $CONTROL_DIR (run 'yakos init' first)"
+
+# Resolve through the canonical resolver so we agree with init/status/hooks.
+# shellcheck source=./paths.sh
+. "$YAKOS_LIB/paths.sh"
+export YAKOS_PROJECT_NAME="$PROJECT"
+unset YAKOS_WORK_DIR YAKOS_INPLACE_WORK 2>/dev/null || true
+
+WORK_DIR="$(yakos_work_dir)"
+CURRENT_DIR="$(yakos_current_dir)"
 ARCHIVE_DIR="$WORK_DIR/archive"
 DEST_DIR="$ARCHIVE_DIR/$TAG"
 
-[ -d "$CONTROL_DIR" ] || ct_die "archive: project '$PROJECT' not found at $CONTROL_DIR (run 'yakos init' first)"
 [ -d "$CURRENT_DIR" ] || ct_die "archive: $CURRENT_DIR does not exist (nothing to archive)"
 
 # --auto-tag: append a numeric suffix on conflict
@@ -91,7 +98,7 @@ fi
 
 # ---- expired-bypass check ---------------------------------------------------
 
-BYPASS_FILE="$CURRENT_DIR/hook-bypass.md"
+BYPASS_FILE="$(yakos_bypass_file)"
 expired_entries=""
 if [ -f "$BYPASS_FILE" ]; then
     # Only count `## bypass:` headings that appear AFTER `## Active entries`.
@@ -154,13 +161,13 @@ mkdir -p "$ARCHIVE_DIR"
 mv "$CURRENT_DIR" "$DEST_DIR"
 mkdir -p "$CURRENT_DIR/logs" "$CURRENT_DIR/artifacts" "$CURRENT_DIR/reports"
 
-# Restore the bypass file template + empty session history in the fresh current/
-cp "$YAKOS_ROOT/lib/settings/hook-bypass.template.md" "$CURRENT_DIR/hook-bypass.md"
-printf '[]\n' > "$CURRENT_DIR/.session-started-history"
+# Restore the bypass file template + empty NDJSON session history in fresh current/
+cp "$YAKOS_ROOT/lib/settings/hook-bypass.template.md" "$(yakos_bypass_file)"
+: > "$(yakos_session_history_file)"
 
 # ---- append session ledger entry --------------------------------------------
 
-SESSIONS_LOG="$WORK_DIR/sessions.ndjson"
+SESSIONS_LOG="$(yakos_sessions_log_file)"
 ts="$(ct_iso_now_z)"
 jq -nc \
     --arg ts "$ts" \

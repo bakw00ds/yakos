@@ -21,8 +21,14 @@ if [ "$(hi_tool)" != "SendMessage" ]; then
     exit 0
 fi
 
-LOGDIR="${CLAUDE_PROJECT_DIR:-.}/work/current"
-mkdir -p "$LOGDIR" 2>/dev/null || true
+# paths.sh is sourced transitively through hook-output.sh; resolver always
+# present after that line.
+if command -v yakos_messages_log_file >/dev/null 2>&1; then
+    MESSAGES_LOG="$(yakos_messages_log_file)"
+else
+    MESSAGES_LOG="${CLAUDE_PROJECT_DIR:-.}/work/current/messages.ndjson"
+fi
+mkdir -p "$(dirname -- "$MESSAGES_LOG")" 2>/dev/null || true
 
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 sender="$(hi_sender_role)"
@@ -42,7 +48,7 @@ jq -nc \
     --arg session "$session" \
     --arg transcript "$transcript" \
     '{ts: $ts, from: $from, to: $to, summary: $summary, body: $body, session_id: $session, transcript_path: $transcript}' \
-    >> "$LOGDIR/messages.ndjson"
+    >> "$MESSAGES_LOG"
 
 # Also a structured log entry (so hook-counting tooling sees this hook ran).
 extra="$(jq -nc --arg from "$sender" --arg to "$to" --arg summary "$summary" \

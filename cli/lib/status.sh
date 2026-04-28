@@ -41,40 +41,56 @@ done
 CONTROL_DIR="$HOME/agent-control/$PROJECT"
 [ -d "$CONTROL_DIR" ] || ct_die "status: project '$PROJECT' not found at $CONTROL_DIR"
 
-WORK_DIR="$CONTROL_DIR/work"
-CURRENT_DIR="$WORK_DIR/current"
+# Resolve work paths through the canonical resolver — same one hooks use.
+# YAKOS_PROJECT_NAME pins the resolver to the agent-control name regardless
+# of cwd, so 'yakos status <project>' works from anywhere.
+# shellcheck source=./paths.sh
+. "$YAKOS_LIB/paths.sh"
+export YAKOS_PROJECT_NAME="$PROJECT"
+unset YAKOS_WORK_DIR YAKOS_INPLACE_WORK 2>/dev/null || true
+
+# Migrate legacy JSON-array session history to NDJSON if present
+yakos_migrate_session_history 2>/dev/null || true
+
+WORK_DIR="$(yakos_work_dir)"
+CURRENT_DIR="$(yakos_current_dir)"
 ARCHIVE_DIR="$WORK_DIR/archive"
+SESSION_STARTED_FILE="$(yakos_session_started_file)"
+SESSION_HISTORY="$(yakos_session_history_file)"
 
 # ---- session age ------------------------------------------------------------
 
-SESSION_HISTORY="$CURRENT_DIR/.session-started-history"
-session_started=""
 session_age_label="not started"
 session_warning=""
-if [ -f "$SESSION_HISTORY" ]; then
-    # Take the last entry's "started_at" if any
-    last_started="$(jq -r 'if type=="array" and length>0 then (.[length-1].started_at // empty) else empty end' "$SESSION_HISTORY" 2>/dev/null || true)"
-    if [ -n "$last_started" ]; then
-        session_started="$last_started"
-        # Age in seconds via jq
-        age_s="$(printf '%s' "$last_started" | jq -Rr 'try (now - fromdateiso8601 | floor | tostring) catch "?"')"
-        case "$age_s" in
-            ?|"") session_age_label="started $last_started (age unknown)" ;;
-            *)
-                if [ "$age_s" -lt 60 ]; then
-                    session_age_label="started ${last_started} (${age_s}s ago)"
-                elif [ "$age_s" -lt 3600 ]; then
-                    session_age_label="started ${last_started} ($((age_s / 60))m ago)"
-                else
-                    h=$((age_s / 3600))
-                    m=$(( (age_s % 3600) / 60 ))
-                    session_age_label="started ${last_started} (${h}h ${m}m ago)"
-                fi
-                if [ "$age_s" -gt 14400 ]; then  # 4 hours
-                    session_warning="session age >4h. consider 'yakos team restart $PROJECT' for context hygiene."
-                fi
-                ;;
-        esac
+last_started=""
+
+# Prefer the .session-started single-line file (overwritten on each TeamCreate
+# by team-lifecycle.sh). Fall back to the most recent team_created event in
+# the NDJSON history.
+if [ -f "$SESSION_STARTED_FILE" ]; then
+    last_started="$(head -n 1 "$SESSION_STARTED_FILE" 2>/dev/null || true)"
+fi
+if [ -z "$last_started" ] && [ -f "$SESSION_HISTORY" ]; then
+    last_started="$(jq -rc 'select(.event=="team_created") | .ts' "$SESSION_HISTORY" 2>/dev/null | tail -n 1 || true)"
+fi
+
+if [ -n "$last_started" ]; then
+    age_s="$(printf '%s' "$last_started" | jq -Rr 'try (now - fromdateiso8601 | floor | tostring) catch "?"')"
+    if [ "$age_s" = "?" ] || [ -z "$age_s" ]; then
+        session_age_label="started $last_started (age unknown)"
+    else
+            if [ "$age_s" -lt 60 ]; then
+                session_age_label="started ${last_started} (${age_s}s ago)"
+            elif [ "$age_s" -lt 3600 ]; then
+                session_age_label="started ${last_started} ($((age_s / 60))m ago)"
+            else
+                h=$((age_s / 3600))
+                m=$(( (age_s % 3600) / 60 ))
+                session_age_label="started ${last_started} (${h}h ${m}m ago)"
+            fi
+            if [ "$age_s" -gt 14400 ]; then  # 4 hours
+                session_warning="session age >4h. consider 'yakos team restart $PROJECT' for context hygiene."
+            fi
     fi
 fi
 

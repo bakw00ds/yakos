@@ -145,6 +145,41 @@ ct_iso_now_z() {
     date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
+ct_iso_to_epoch() {
+    # Parse an ISO-8601 timestamp into seconds-since-epoch.
+    # Accepts forms produced by ct_iso_now_z (UTC, "Z" suffix). Falls
+    # through GNU `date -d` and BSD `date -j -f`.
+    local iso="$1"
+    [ -n "$iso" ] || { printf '0'; return; }
+    if date -u -d "$iso" +%s >/dev/null 2>&1; then
+        date -u -d "$iso" +%s
+    elif date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s >/dev/null 2>&1; then
+        date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s
+    else
+        printf '0'
+    fi
+}
+
+ct_dir_size_bytes() {
+    # Portable directory-size in bytes. GNU du has -b (apparent size in
+    # bytes); BSD/macOS du does not, so we fall back to -k (kilobytes)
+    # and multiply.
+    local dir="$1"
+    [ -d "$dir" ] || { printf '0'; return; }
+    local n
+    n="$(du -sb "$dir" 2>/dev/null | awk 'NR==1 {print $1}')"
+    if [ -n "$n" ] && [ "$n" -eq "$n" ] 2>/dev/null; then
+        printf '%s' "$n"
+        return
+    fi
+    n="$(du -sk "$dir" 2>/dev/null | awk 'NR==1 {print $1}')"
+    if [ -n "$n" ] && [ "$n" -eq "$n" ] 2>/dev/null; then
+        printf '%d' "$((n * 1024))"
+    else
+        printf '0'
+    fi
+}
+
 # ---- hashing --------------------------------------------------------------
 
 ct_sha256() {

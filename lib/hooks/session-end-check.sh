@@ -1,48 +1,63 @@
 #!/usr/bin/env bash
 # session-end-check.sh — SessionEnd hook (final state audit).
 #
-# SessionEnd cannot block exit. This hook produces a durable record of the
-# session's terminal state: stuck teammates, stale decisions.md, expired
-# bypass entries, and a hook-by-hook summary. Always exits 0.
+# This is a TELEMETRY HOOK. It NEVER blocks. SessionEnd hooks cannot block
+# exit anyway, but every write must be guarded — preventing the user's
+# session from ending cleanly because of a telemetry hiccup is the wrong
+# tradeoff. (See lib/hooks/README.md "No-block policy for telemetry hooks".)
 #
-# Replaces the "lead shuts down before work is done" failure mode by
-# making the audit visible after the fact.
+# Behavior:
+#
+#   1. Run audit checks (decisions.md staleness, expired hook bypasses,
+#      per-hook outcome counts) and emit a structured ho_log record. WARN
+#      severity when something needs attention; otherwise REPORT.
+#
+#   2. Idempotent session summary in sessions.ndjson:
+#        - If .session-summarized marker exists, team-lifecycle.sh's
+#          TeamDelete branch already wrote the summary. Remove the marker
+#          and skip.
+#        - Otherwise, append a session-end summary with exit_kind set to
+#          "session_end_without_team_delete", with the same idempotency
+#          check on (session_id, exit_kind).
 
 set -eu
 
 HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 . "$HOOK_DIR/lib/hook-input.sh"
 . "$HOOK_DIR/lib/hook-output.sh"
+# shellcheck source=./lib/compat.sh
+[ -f "$HOOK_DIR/lib/compat.sh" ] && . "$HOOK_DIR/lib/compat.sh"
 
 hi_init
 
-CURRENT_DIR="${CLAUDE_PROJECT_DIR:-.}/work/current"
-LOGDIR="$CURRENT_DIR/logs"
-mkdir -p "$LOGDIR" 2>/dev/null || true
+session_id="$(hi_session_id)"
+ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# ---- decisions.md staleness -------------------------------------------------
+current_dir="$(yakos_current_dir)"
+logs_dir="$(yakos_logs_dir)"
+mkdir -p "$current_dir" "$logs_dir" 2>/dev/null || true
+
+# ---- audit: decisions.md staleness -----------------------------------------
 
 decisions_stale="false"
 decisions_age_s=0
-if [ -f "$CURRENT_DIR/decisions.md" ]; then
-    mtime="$(stat -f '%m' "$CURRENT_DIR/decisions.md" 2>/dev/null \
-            || stat -c '%Y' "$CURRENT_DIR/decisions.md" 2>/dev/null \
+if [ -f "$current_dir/decisions.md" ]; then
+    mtime="$(stat -f '%m' "$current_dir/decisions.md" 2>/dev/null \
+            || stat -c '%Y' "$current_dir/decisions.md" 2>/dev/null \
             || echo 0)"
     now_s="$(date +%s)"
     if [ "$mtime" -gt 0 ]; then
         decisions_age_s=$((now_s - mtime))
-        if [ "$decisions_age_s" -gt 7200 ]; then
-            decisions_stale="true"
-        fi
+        [ "$decisions_age_s" -gt 7200 ] && decisions_stale="true"
     fi
 fi
 
-# ---- expired bypass entries -------------------------------------------------
+# ---- audit: expired bypass entries -----------------------------------------
 
 expired_count=0
 expired_ids=""
-BYPASS_FILE="$CURRENT_DIR/hook-bypass.md"
-if [ -f "$BYPASS_FILE" ]; then
+bypass_file="$(yakos_bypass_file)"
+if [ -f "$bypass_file" ]; then
     while IFS=$'\t' read -r id exp; do
         [ -n "$id" ] || continue
         [ -n "$exp" ] || continue
@@ -65,21 +80,19 @@ if [ -f "$BYPASS_FILE" ]; then
             split(line, parts, /[[:space:]]/)
             print id "\t" parts[1]
         }
-    ' "$BYPASS_FILE")
+    ' "$bypass_file")
 fi
 
-# ---- per-hook outcome counts ------------------------------------------------
+# ---- audit: per-hook outcome counts ----------------------------------------
 
 block_count=0
 warn_count=0
 report_count=0
 hook_summary='{}'
-if [ -d "$LOGDIR" ]; then
+if [ -d "$logs_dir" ]; then
     while IFS= read -r f; do
         [ -n "$f" ] || continue
-        # Count records by severity for this hook
         name="$(basename "$f" .ndjson)"
-        # Skip our own log file to avoid recursion in subsequent runs
         [ "$name" = "session-end-check" ] && continue
         b="$(jq -c 'select(.severity=="BLOCK")' "$f" 2>/dev/null | wc -l | tr -d ' ')"
         w="$(jq -c 'select(.severity=="WARN")'  "$f" 2>/dev/null | wc -l | tr -d ' ')"
@@ -89,12 +102,12 @@ if [ -d "$LOGDIR" ]; then
         report_count=$((report_count + r))
         hook_summary="$(jq -nc --argjson prev "$hook_summary" --arg n "$name" --argjson b "$b" --argjson w "$w" --argjson r "$r" \
             '$prev + {($n): {block:$b, warn:$w, report:$r}}')"
-    done < <(find "$LOGDIR" -maxdepth 1 -type f -name '*.ndjson' 2>/dev/null)
+    done < <(find "$logs_dir" -maxdepth 1 -type f -name '*.ndjson' 2>/dev/null)
 fi
 
-# ---- terminal state record --------------------------------------------------
+# ---- audit log entry --------------------------------------------------------
 
-extra="$(jq -nc \
+audit_extra="$(jq -nc \
     --arg decisions_stale "$decisions_stale" \
     --argjson decisions_age "$decisions_age_s" \
     --argjson expired_count "$expired_count" \
@@ -109,6 +122,75 @@ severity="REPORT"
 [ "$decisions_stale" = "true" ] && severity="WARN"
 [ "$expired_count" -gt 0 ] && severity="WARN"
 
-ho_log "session-end-check" "$severity" "pass" "session terminal state recorded" "$extra"
+ho_log "session-end-check" "$severity" "pass" "session terminal state recorded" "$audit_extra"
+
+# ---- session summary (idempotent) ------------------------------------------
+
+marker_file="$(yakos_summarized_marker_file)"
+if [ -f "$marker_file" ]; then
+    # team-lifecycle TeamDelete already wrote the summary for this session.
+    rm -f "$marker_file" 2>/dev/null || true
+    exit 0
+fi
+
+sessions_log="$(yakos_sessions_log_file)"
+mkdir -p "$(dirname -- "$sessions_log")" 2>/dev/null || true
+touch "$sessions_log" 2>/dev/null || true
+
+exit_kind="session_end_without_team_delete"
+
+# Idempotency check
+if [ -s "$sessions_log" ] && command -v jq >/dev/null 2>&1; then
+    if jq -e --arg sid "$session_id" --arg ek "$exit_kind" \
+           'select(.session_id == $sid and .exit_kind == $ek)' \
+           "$sessions_log" 2>/dev/null | grep -q .; then
+        exit 0
+    fi
+fi
+
+# Best-effort start timestamp from .session-started, then history
+ts_start=""
+if [ -f "$(yakos_session_started_file)" ]; then
+    ts_start="$(head -n 1 "$(yakos_session_started_file)" 2>/dev/null || true)"
+fi
+if [ -z "$ts_start" ] && [ -f "$(yakos_session_history_file)" ] && command -v jq >/dev/null 2>&1; then
+    ts_start="$(jq -rc --arg sid "$session_id" \
+        'select(.session_id == $sid and .event == "team_created") | .ts' \
+        "$(yakos_session_history_file)" 2>/dev/null | tail -n 1 || true)"
+fi
+
+duration="null"
+if [ -n "$ts_start" ] && command -v ct_iso_to_epoch >/dev/null 2>&1; then
+    start_s="$(ct_iso_to_epoch "$ts_start")"
+    end_s="$(ct_iso_to_epoch "$ts")"
+    if [ "$start_s" -gt 0 ] && [ "$end_s" -gt 0 ]; then
+        duration="$((end_s - start_s))"
+    fi
+fi
+
+team_name=""
+if [ -f "$(yakos_session_history_file)" ] && command -v jq >/dev/null 2>&1; then
+    team_name="$(jq -rc --arg sid "$session_id" \
+        'select(.session_id == $sid and .event == "team_created") | .team_name' \
+        "$(yakos_session_history_file)" 2>/dev/null | tail -n 1 || true)"
+fi
+
+scratchpad_bytes=0
+if command -v ct_dir_size_bytes >/dev/null 2>&1; then
+    scratchpad_bytes="$(ct_dir_size_bytes "$current_dir")"
+fi
+
+if command -v jq >/dev/null 2>&1; then
+    jq -nc \
+        --arg ts_start "${ts_start:-}" \
+        --arg ts_end "$ts" \
+        --argjson duration "$duration" \
+        --arg team "${team_name:-}" \
+        --arg sid "$session_id" \
+        --argjson size "$scratchpad_bytes" \
+        --arg ek "$exit_kind" \
+        '{ts_start: $ts_start, ts_end: $ts_end, duration_seconds: $duration, team_name: $team, session_id: $sid, scratchpad_size_bytes: $size, exit_kind: $ek}' \
+        >> "$sessions_log" 2>/dev/null || true
+fi
 
 exit 0
