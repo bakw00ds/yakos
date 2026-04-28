@@ -91,6 +91,35 @@ do dependency updates, security backports, eventual archival. v0.1's
 
 ---
 
+## Stack-specialist templates (v0.1.4)
+
+The framework ships five generic stack-specialist templates carrying
+discipline only — no stack names, no specific file paths. They're the
+shape of the work, not the implementation:
+
+- `backend` — server-side application code
+- `frontend` — web UI
+- `mobile` — iOS/Android client
+- `database` — schema, migrations, repository layer
+- `maintainer` — routine hygiene (dep bumps, lint, dead-code)
+
+A project deploys these templates by writing a thin `extends:` wrapper
+in `<project>/.claude/agents/<role>.md` that names the stack
+(Go/Echo, Next.js/React, Flutter, Postgres/pgx, etc.), the file paths
+(`api/internal/...`, `web/src/...`), and the project's incident lore.
+The wrapper carries only the project-specific delta — the framework
+template carries the discipline.
+
+This is the same `extends:` mechanism `examples/tiny-go-api/.claude/agents/`
+uses for `lead-template` and `test-runner`; it's now available for the
+full team shape.
+
+These templates **complement** the v0.2 cross-cutting roster
+(architect, incident-responder, release-manager, etc., listed below)
+— they're not a substitute for it.
+
+---
+
 ## Team shapes — buildable from v0.1
 
 These compositions can be assembled from agents YakOS v0.1 ships,
@@ -105,10 +134,10 @@ Roles:
 
 - `lead` — orchestrates
 - `planner` (Opus) — decomposes into 3–5 tasks
-- backend specialist (project-specific, e.g. `go-api`) — implements
-  API
-- frontend specialist (project-specific, e.g. `nextjs`) — implements
-  UI
+- `backend` (Sonnet) — implements API; project's `extends:` agent
+  fills in the stack (Go, Node, Python, etc.)
+- `frontend` (Sonnet) — implements UI; project's `extends:` agent
+  fills in the stack (React, Vue, Svelte, etc.)
 - `test-runner` (Sonnet) — verifies
 - `code-reviewer` (Sonnet) — reviews diffs at handoffs
 - `doc-writer` (Sonnet) — updates README/CHANGELOG
@@ -126,8 +155,9 @@ Roles:
 
 - `lead`
 - `planner`
-- mobile specialist (project-specific, e.g. `flutter-ui`)
-- backend specialist
+- `mobile` (Sonnet) — project's `extends:` agent picks the platform
+  framework (Flutter, React Native, native iOS/Android, etc.)
+- `backend`
 - `test-runner`
 - `code-reviewer`
 
@@ -163,8 +193,9 @@ Roles:
 
 - `lead`
 - `planner`
-- db-migrations specialist (project-specific) — writes the migration
-- backend specialist (for any API contract updates)
+- `database` (Sonnet) — writes the migration; project's `extends:`
+  agent picks the RDBMS and migration runner conventions
+- `backend` (for any API contract updates)
 - `test-runner`
 - `security-reviewer` (Opus) — migrations touch production data
 
@@ -197,11 +228,14 @@ When to spawn: scheduled dependency-update sweep.
 Roles:
 
 - `lead`
-- `dependency-update` skill (NOT an agent — it's a skill the lead
-  invokes)
+- `maintainer` (Sonnet) — runs dep bumps, lint baseline drains,
+  dead-code passes; project's `extends:` agent supplies stack-
+  specific commands
+- `dependency-update` skill (the mechanics; `maintainer` invokes it)
 - `security-reviewer` — flags vulnerabilities being patched
 - `test-runner` — verifies the suite still passes
-- one specialist per language touched by the updates
+- one specialist per language touched by the updates (only when a
+  major-version bump needs domain judgement)
 
 The `dependency-update` skill (v0.1 ships this) handles the
 mechanics; specialists evaluate breaking changes; the security-

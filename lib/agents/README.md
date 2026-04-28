@@ -6,6 +6,8 @@ these (per Phase 1.5 §17 override semantics).
 
 ## Inventory
 
+### Cross-cutting roles
+
 | Agent | Role | Model | Purpose |
 |---|---|---|---|
 | `lead-template` | orchestrator | opus | Base lead pattern; project leads `extends:` this. |
@@ -15,6 +17,22 @@ these (per Phase 1.5 §17 override semantics).
 | `security-reviewer` | reviewer | opus | Audits changes for security and data-handling issues. |
 | `troubleshooter` | specialist | sonnet | Read-only diagnosis; never edits; dispatches fixes. |
 | `doc-writer` | specialist | sonnet | Writes/updates docs, changelogs, release notes. |
+| `maintainer` | maintainer | sonnet | Routine hygiene — dep bumps, lint baseline, dead-code, version+changelog parity. |
+
+### Stack-specialist templates
+
+Discipline-only templates. Project versions `extends:` these and add
+stack-specific build commands, file paths, and incident lore. The
+templates use `<placeholder>` syntax for project-specific paths
+(e.g., `<contracts-dir>`, `<frontend-dir>`); the project's
+`extends:` agent fills them in.
+
+| Agent | Role | Model | Purpose |
+|---|---|---|---|
+| `backend` | specialist | sonnet | Server-side application code; reads db-contracts, writes api-contracts. |
+| `frontend` | specialist | sonnet | Web UI; consumes api-contracts; types-from-source-of-truth. |
+| `mobile` | specialist | sonnet | iOS/Android client; generated API client; native-platform defense. |
+| `database` | specialist | sonnet | Schema, migrations, repository layer; writes db-contracts. |
 
 Agents are loaded into a project at install time via the per-file symlink
 mechanism (`yakos install`). Project-specific overrides are loaded from

@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-04-28
+
+### Added — stack-specialist agent templates
+
+Five generic `extends:`-able agent templates derived by generalizing
+PandaOS's project agents during the Phase 8 migration. Each carries
+the discipline of the role with no stack names or specific file paths
+— projects deploy a thin `extends:` wrapper carrying only the
+project-specific delta (stack, paths, incident lore).
+
+- [`lib/agents/backend.md`](lib/agents/backend.md) — server-side
+  application code; reads db-contracts, writes api-contracts,
+  enforces DTO-at-the-boundary and audit-log-on-mutation.
+- [`lib/agents/frontend.md`](lib/agents/frontend.md) — web UI;
+  consumes api-contracts, types-from-source-of-truth, doesn't add to
+  tracked lint baselines.
+- [`lib/agents/mobile.md`](lib/agents/mobile.md) — iOS/Android
+  client; generated API client, native-platform usage-description
+  defense, tap-target floors.
+- [`lib/agents/database.md`](lib/agents/database.md) — schema,
+  sequential migrations, repository layer; writes db-contracts;
+  parameterized queries only; cascade-delete on user-data FKs.
+- [`lib/agents/maintainer.md`](lib/agents/maintainer.md) — routine
+  hygiene (dep bumps, lint baseline drains, dead-code, version +
+  changelog parity); never touches business logic.
+
+These complement the v0.2 cross-cutting roster (`architect`,
+`incident-responder`, `release-manager`, etc.) — they fill in
+stack-shaped specialists where the v0.2 roster covers cross-cutting
+roles. See [`docs/v0.2-notes.md`](docs/v0.2-notes.md) for the
+distinction.
+
+[`docs/team-shapes.md`](docs/team-shapes.md) updated: the existing
+"buildable from v0.1" team shapes now reference the framework
+templates directly instead of "(project-specific, e.g. `go-api`)".
+A new "Stack-specialist templates" subsection introduces the
+`extends:` deployment pattern.
+
+[`lib/agents/README.md`](lib/agents/README.md) inventory now
+distinguishes "Cross-cutting roles" from "Stack-specialist templates".
+
 ## [0.1.3] — 2026-04-28
 
 ### Added — Phase 0.5 probe deliverables
