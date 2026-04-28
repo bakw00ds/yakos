@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Batch 4 (documentation)
+
+- `README.md` (expanded) — quickstart, install, bootstrap, common
+  workflows, full doc map.
+- `PHILOSOPHY.md` (expanded; Batch 2.75 stub preserved verbatim) —
+  full hard/soft taxonomy, trust-but-verify, flat-not-hierarchical,
+  specialists-narrow, prefer-writing-over-reading, orchestration
+  shapes (new framing).
+- `CUSTOMIZING.md` — one worked example each for adding project
+  specialists, hooks, rules, skills.
+- `MIGRATING.md` — porting from tmux + dispatch-CLI setups; references
+  Phase 1.5 §21 migration map.
+- `COOKBOOK.md` — four common-workflow recipes (feature touching DB/
+  API/UI, parallel review team, bug investigation with adversarial
+  agents, releasing a version).
+- `INCIDENT-CATALOG.md` — durable IDed incident records: v2.49.0
+  force-push, v2.62.4 worktree-collision, v2.62.7.2 manifest-drift,
+  v2.65.1.1 EXTRACT-week, v2.65.1.2 dual-runner-conflict,
+  v2.62.43-51 auto-resolve-timing, v2.62.57 cwd-bug, flutter-tester-
+  hang (recurring), agent-pre-push-secret-leak.
+- `docs/team-shapes.md` — recommended team compositions per project
+  type and lifecycle stage. Names six v0.2 candidate agents
+  (architect, incident-responder, log-analyst, devops-infra,
+  performance-engineer, privacy-reviewer, accessibility-reviewer,
+  ux-reviewer). Referenced from COOKBOOK.md and PHILOSOPHY.md
+  Orchestration shapes section.
+- `COMPATIBILITY.md` — supported environments, required and optional
+  tools, known caveats.
+
+### Added — Batch 3 (generic agents + skills + cross-cutting rules)
+
+- 7 generic agents in `lib/agents/`: `lead-template`, `planner`,
+  `test-runner`, `code-reviewer`, `security-reviewer`, `troubleshooter`,
+  `doc-writer`. All within the 80–140 line budget. Each answers the
+  five specialist questions per
+  `docs/engineering-standards.md §9`.
+- 11 skills in `lib/skills/`: `pre-commit`, `test-suite`,
+  `session-recovery`, `project-init`, `gather-feedback`,
+  `deploy-check`, `verify-agent-work`, `split-mega-task`,
+  `contract-handoff`, `phase-complete`, `dependency-update`. All
+  within the 80–180 line budget.
+- 4 cross-cutting rules in `lib/rules/`: `git-hygiene`,
+  `commit-format`, `secret-handling` (path-scoped on `.env*`,
+  credentials/, *.pem), `pr-conventions`. All within the 60–150
+  line budget.
+- README/INDEX files for each `lib/{agents,skills,rules}/` directory.
+- `lib/playbooks/` remains empty in v0.1; populated in v0.2.
+
 ### Added — Batch 2.75 (engineering standards)
 
 - `STYLE.md` — quick-reference engineering standards (shell, comments,
