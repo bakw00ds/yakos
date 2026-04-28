@@ -183,12 +183,195 @@ validate_tree() {
             err "$base/path-allowlist.json: not valid JSON"
         fi
     fi
+
+    # Line-budget WARNs (per Phase 1.5 §10 + STYLE.md §7)
+    check_line_budgets "$base"
+}
+
+# ---- standards checks (framework-mode only; STYLE.md §1-§7) ----------------
+
+check_line_budgets() {
+    # WARN on any agent/skill/rule file outside its line budget.
+    local base="$1"
+    [ -d "$base" ] || return 0
+
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        local n
+        n="$(wc -l < "$f" | tr -d ' ')"
+        if [ "$n" -lt 80 ] || [ "$n" -gt 140 ]; then
+            warn "$f: agent file is $n lines (budget 80-140)"
+        fi
+    done < <(find "$base/agents" -type f -name '*.md' ! -name 'README.md' 2>/dev/null)
+
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        local n
+        n="$(wc -l < "$f" | tr -d ' ')"
+        if [ "$n" -lt 80 ] || [ "$n" -gt 180 ]; then
+            warn "$f: skill is $n lines (budget 80-180)"
+        fi
+    done < <(find "$base/skills" -type f -name 'SKILL.md' 2>/dev/null)
+
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        local n
+        n="$(wc -l < "$f" | tr -d ' ')"
+        if [ "$n" -lt 60 ] || [ "$n" -gt 150 ]; then
+            warn "$f: rule is $n lines (budget 60-150)"
+        fi
+    done < <(find "$base/rules" -type f -name '*.md' ! -name 'INDEX.md' ! -name 'README.md' 2>/dev/null)
+}
+
+check_shebang_strict_mode() {
+    # WARN if a shell script under cli/ or lib/hooks/ lacks the shebang
+    # or `set -euo pipefail`.
+    local roots=("$YAKOS_ROOT/cli" "$YAKOS_ROOT/lib/hooks")
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        local first
+        first="$(head -n 1 "$f" 2>/dev/null || true)"
+        case "$first" in
+            '#!/usr/bin/env bash'|'#!/bin/bash') ;;
+            *) warn "$f: missing or non-bash shebang"; continue ;;
+        esac
+        # Files that look like sourced libraries (use `return 0` source-guard
+        # pattern) intentionally don't run `set -e` — that would propagate
+        # into the caller's shell.
+        if grep -qE 'return 0 2>/dev/null \|\| exit 0' "$f" 2>/dev/null; then
+            continue
+        fi
+        # Look for set -euo pipefail (or set -eu — close enough for v0.1)
+        if ! head -n 50 "$f" 2>/dev/null | grep -qE '^set -e[a-z]*[u][a-z]*'; then
+            warn "$f: missing 'set -e[u][o pipefail]' near top"
+        fi
+    done < <(find "${roots[@]}" -type f -name '*.sh' ! -name '*.framework-hash' 2>/dev/null)
+    # Also check the entry point
+    [ -f "$YAKOS_ROOT/cli/yakos" ] && {
+        if ! head -n 50 "$YAKOS_ROOT/cli/yakos" | grep -qE '^set -e'; then
+            warn "$YAKOS_ROOT/cli/yakos: missing 'set -e' near top"
+        fi
+    }
+}
+
+check_header_purpose() {
+    # WARN if a script in cli/ or lib/hooks/ doesn't have a "Purpose:" line
+    # somewhere in the first 30 lines.
+    local roots=("$YAKOS_ROOT/cli" "$YAKOS_ROOT/lib/hooks")
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        # Skip the framework-hash sibling files
+        case "$f" in *.framework-hash) continue ;; esac
+        if ! head -n 30 "$f" 2>/dev/null | grep -qE '^# (Purpose|purpose):'; then
+            warn "$f: header lacks 'Purpose:' line (see STYLE.md §2)"
+        fi
+    done < <(find "${roots[@]}" -type f -name '*.sh' 2>/dev/null)
+}
+
+check_executable_bits() {
+    # ERROR (not WARN) on hook .sh files that aren't executable. This
+    # would actually break hook execution.
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        if [ ! -x "$f" ]; then
+            err "$f: hook script is not executable (chmod +x to fix)"
+        fi
+    done < <(find "$YAKOS_ROOT/lib/hooks" -maxdepth 2 -type f -name '*.sh' \
+                 ! -path '*/lib/*' 2>/dev/null)
+}
+
+check_todo_only_files() {
+    # WARN on files where >50% of non-empty lines start with "# TODO" or "// TODO".
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        local total nonempty todo
+        total="$(wc -l < "$f" | tr -d ' ')"
+        [ "$total" -lt 5 ] && continue
+        nonempty="$(grep -cv '^[[:space:]]*$' "$f" 2>/dev/null | tr -d ' ')"
+        [ "${nonempty:-0}" -lt 5 ] && continue
+        todo="$(grep -cE '^[[:space:]]*(#|//)[[:space:]]*TODO' "$f" 2>/dev/null | tr -d ' ')"
+        if [ "${todo:-0}" -gt 0 ] && [ "$((todo * 2))" -gt "$nonempty" ]; then
+            warn "$f: appears to be TODO-only ($todo TODOs of $nonempty non-empty lines)"
+        fi
+    done < <(find "$YAKOS_ROOT/cli" "$YAKOS_ROOT/lib" -type f \
+                 \( -name '*.sh' -o -name '*.md' \) 2>/dev/null)
+}
+
+check_dark_code() {
+    # WARN on hooks/scripts not referenced from CLI dispatch, settings template,
+    # SKILL.md, or any docs/ markdown file.
+    local refs_file="${TMPDIR:-/tmp}/yakos-validate-refs-$$"
+    {
+        [ -f "$YAKOS_ROOT/cli/yakos" ] && cat "$YAKOS_ROOT/cli/yakos"
+        find "$YAKOS_ROOT/lib/settings" -type f \( -name '*.json' -o -name '*.template.*' \) -exec cat {} \; 2>/dev/null
+        find "$YAKOS_ROOT/lib/skills" -name 'SKILL.md' -exec cat {} \; 2>/dev/null
+        find "$YAKOS_ROOT/docs" -name '*.md' -exec cat {} \; 2>/dev/null
+        find "$YAKOS_ROOT" -maxdepth 1 -name '*.md' -exec cat {} \; 2>/dev/null
+        find "$YAKOS_ROOT/lib/hooks" -name 'README.md' -exec cat {} \; 2>/dev/null
+    } > "$refs_file" 2>/dev/null
+
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        local base
+        base="$(basename "$f")"
+        # Skip framework helpers (always referenced indirectly via sourcing)
+        case "$base" in
+            hook-input.sh|hook-output.sh|paths.sh|compat.sh|README.md) continue ;;
+        esac
+        if ! grep -qF "$base" "$refs_file" 2>/dev/null; then
+            warn "$f: potential dark code — '$base' is not referenced anywhere (settings.template.json, SKILL.md, docs/, or CLI)"
+        fi
+    done < <(find "$YAKOS_ROOT/lib/hooks" "$YAKOS_ROOT/cli/lib" -type f -name '*.sh' 2>/dev/null)
+
+    rm -f "$refs_file" 2>/dev/null || true
+}
+
+check_skill_md_sections() {
+    # WARN on SKILL.md missing required sections.
+    local required=("Purpose" "Scope" "Automated pass" "Manual pass" "Known gotchas")
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        for sec in "${required[@]}"; do
+            if ! grep -qE "^##[[:space:]]+${sec}\b" "$f" 2>/dev/null; then
+                warn "$f: SKILL.md missing section '## ${sec}'"
+            fi
+        done
+    done < <(find "$YAKOS_ROOT/lib/skills" -name 'SKILL.md' 2>/dev/null)
+}
+
+check_agent_md_sections() {
+    # WARN on agent files missing required sections.
+    local required=("Purpose" "Execution" "Special rules" "Handling peer messages" "Personality")
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        # Skip lead-template until Batch 3 ships content
+        case "$(basename "$f")" in lead-template.md) continue ;; esac
+        for sec in "${required[@]}"; do
+            if ! grep -qE "^##[[:space:]]+${sec}\b" "$f" 2>/dev/null; then
+                warn "$f: agent file missing section '## ${sec}'"
+            fi
+        done
+    done < <(find "$YAKOS_ROOT/lib/agents" -type f -name '*.md' \
+                 ! -name 'README.md' ! -name 'INDEX.md' 2>/dev/null)
+}
+
+run_standards_checks() {
+    echo
+    echo "Standards checks (WARN-only in v0.1; see STYLE.md):"
+    check_shebang_strict_mode
+    check_header_purpose
+    check_executable_bits
+    check_todo_only_files
+    check_dark_code
+    check_skill_md_sections
+    check_agent_md_sections
 }
 
 # ---- mode selection ---------------------------------------------------------
 
 if [ "$ALL" = "1" ]; then
     validate_tree "framework" "$YAKOS_ROOT/lib"
+    run_standards_checks
     if [ "${#TARGETS[@]}" -gt 0 ]; then
         for t in "${TARGETS[@]}"; do
             validate_tree "project" "$t/.claude"
@@ -198,6 +381,7 @@ if [ "$ALL" = "1" ]; then
     fi
 elif [ "${#TARGETS[@]}" -eq 0 ]; then
     validate_tree "framework" "$YAKOS_ROOT/lib"
+    run_standards_checks
 else
     for t in "${TARGETS[@]}"; do
         # If the user passes <project>/.claude directly we accept that too

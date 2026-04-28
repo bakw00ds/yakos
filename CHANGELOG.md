@@ -7,10 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Future batches (1B → 6) will add: remaining CLI subcommands (update, init,
-validate, archive, status, team), reference hooks + per-domain validators
-+ fixtures, generic agents/skills/rules, full documentation, the
-`tiny-go-api` example, and a temporary-HOME end-to-end smoke test.
+### Added — Batch 2.75 (engineering standards)
+
+- `STYLE.md` — quick-reference engineering standards (shell, comments,
+  logging, testing, no dark code, defensive input, agent quality)
+- `docs/engineering-standards.md` — explanatory guide with worked examples
+  for each STYLE.md section
+- `tests/README.md` — test layout and fixture naming convention
+- `PHILOSOPHY.md` — stub with the "Standards as control" section
+  (Batch 4 will expand)
+- `cli/lib/validate.sh` standards checks: shebang/strict-mode, header
+  Purpose comment, executable bits on hooks, TODO-only files, dark-code
+  detection (unreferenced scripts), SKILL.md required sections, agent
+  required sections, line budgets (agents 80-140, skills 80-180,
+  rules 60-150). All WARN-only in v0.1.
+- README references to STYLE.md and PHILOSOPHY.md.
+
+### Fixed — Batch 2 retrofit (post-Batch-2 defect fix)
+
+- Work-directory resolution unified between CLI and hooks via
+  `cli/lib/paths.sh`. Previously hooks wrote to `${CLAUDE_PROJECT_DIR}/work/`
+  while CLI read from `~/agent-control/<project>/work/` — `yakos status`
+  saw nothing and hooks polluted the project repo.
+- `.session-started-history` migrated from JSON array to NDJSON
+  (`.session-started-history.ndjson`). One event per line, append-only.
+- Idempotent session summaries keyed on `(session_id, exit_kind)` —
+  re-firing a hook doesn't duplicate ledger entries.
+- `team-lifecycle.sh` and `session-end-check.sh` rewritten with no-block
+  policy (telemetry hooks always exit 0).
+- `ct_dir_size_bytes` and `ct_iso_to_epoch` added to compat.sh.
+- Symlink approach for shared helpers: `lib/hooks/lib/{paths,compat}.sh`
+  symlink to `cli/lib/{paths,compat}.sh`. `init -L` dereferences when
+  copying to projects.
+- `cli/lib/init.sh` migrates legacy `.session-started-history` if found.
+
+### Future batches
+
+Batches 3–6 will add: generic agents/skills/rules under the new standards,
+full documentation, the `tiny-go-api` example, and a temporary-HOME
+end-to-end smoke test.
 
 ## [0.1.0] — Batch 1A
 

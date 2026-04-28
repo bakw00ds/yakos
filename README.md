@@ -73,11 +73,24 @@ Files YakOS didn't create are left in place. Auto-memory at
 - The `tiny-go-api` example project — Batch 5.
 - End-to-end smoke test — Batch 6.
 
+## Engineering standards
+
+YakOS code follows a defined standard. See:
+
+- [STYLE.md](STYLE.md) — quick reference
+- [docs/engineering-standards.md](docs/engineering-standards.md) — explanatory guide with examples
+- [tests/README.md](tests/README.md) — test layout and fixture naming
+
+Standards are enforced lightly via `yakos validate` (WARN-only in v0.1).
+
 ## Documentation
 
+- [STYLE.md](STYLE.md) — engineering standards (the law)
+- [PHILOSOPHY.md](PHILOSOPHY.md) — hard/soft control taxonomy + framing
 - [docs/architecture/phase-1.5-architecture.md](docs/architecture/phase-1.5-architecture.md) — the spec
 - [docs/architecture/phase-0-validation-results.md](docs/architecture/phase-0-validation-results.md) — Agent Teams primitives validated
 - [docs/architecture/phase-1.7-results.md](docs/architecture/phase-1.7-results.md) — SendMessage hookability validated
+- [docs/architecture/phase-2-execution-plan.md](docs/architecture/phase-2-execution-plan.md) — build sequence
 - [CHANGELOG.md](CHANGELOG.md)
 
 ## License
