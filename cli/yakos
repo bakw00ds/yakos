@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# yakos — entry point for the YakOS CLI.
+#
+# Dispatches to cli/lib/<subcommand>.sh. Sources compat.sh so subcommands
+# inherit the ct_* helpers.
+
+set -eu
+
+# Resolve YAKOS_ROOT — the directory containing this script's parent.
+# We don't rely on `realpath` here since compat.sh isn't loaded yet; we use
+# a portable bash recipe that works on macOS bash 3.2 too.
+__yakos_self="${BASH_SOURCE[0]:-$0}"
+__yakos_self_dir="$(cd "$(dirname -- "$__yakos_self")" && pwd -P)"
+YAKOS_ROOT="$(cd "$__yakos_self_dir/.." && pwd -P)"
+YAKOS_LIB="$YAKOS_ROOT/cli/lib"
+export YAKOS_ROOT YAKOS_LIB
+
+# shellcheck source=cli/lib/compat.sh
+. "$YAKOS_LIB/compat.sh"
+
+VERSION_FILE="$YAKOS_ROOT/VERSION"
+if [ -r "$VERSION_FILE" ]; then
+    YAKOS_VERSION="$(cat "$VERSION_FILE")"
+else
+    YAKOS_VERSION="unknown"
+fi
+export YAKOS_VERSION
+
+usage() {
+    cat <<EOF
+yakos $YAKOS_VERSION — multi-project agent framework for Claude Code
+
+Usage:
+    yakos <command> [args...]
+    yakos --version | -v
+    yakos --help    | -h
+
+Functional commands (Batch 1A):
+    install       Install YakOS into ~/.claude (per-file symlinks +
+                  safe settings.json merge)
+    uninstall     Remove YakOS-owned symlinks. Auto-memory at
+                  ~/.claude/projects/ is NEVER touched.
+    doctor        Verify install + environment health
+    --version     Print the version
+    --help        Print this help
+
+Stub commands (will be implemented in Batch 1B):
+    update        git pull + relink with change reporting
+    init          Bootstrap a project's ~/agent-control/<name>/
+    validate      Schema + reference validation
+    archive       Roll work/current/ into work/archive/<tag>/
+    status        Per-project dashboard
+    team          Team lifecycle (e.g. 'yakos team restart <project>')
+
+Examples:
+    yakos install
+    yakos doctor
+    yakos uninstall
+
+The framework lives at:  $YAKOS_ROOT
+EOF
+}
+
+cmd="${1:-}"
+if [ "$#" -gt 0 ]; then
+    shift
+fi
+
+case "$cmd" in
+    "" | -h | --help | help)
+        usage
+        ;;
+    -v | --version)
+        echo "yakos $YAKOS_VERSION"
+        ;;
+    install | uninstall | update | init | doctor | validate | archive | status | team)
+        script="$YAKOS_LIB/${cmd}.sh"
+        if [ ! -f "$script" ]; then
+            ct_die "internal error: $script not found"
+        fi
+        # Run the subcommand in a child bash so subcommand `set -e` etc.
+        # doesn't bleed into the dispatcher.
+        bash "$script" "$@"
+        ;;
+    *)
+        echo "yakos: unknown command '$cmd'" >&2
+        echo >&2
+        usage >&2
+        exit 64  # EX_USAGE
+        ;;
+esac
