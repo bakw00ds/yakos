@@ -1,0 +1,14 @@
+{
+  "session_id": "fixture-task-unblocked-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "TaskCompleted",
+  "task": {
+    "id": "wire-up-meal-plan-routes",
+    "description": "Wire /v1/meal-plans routes into the router",
+    "blockedBy": [],
+    "status": "completed"
+  }
+}

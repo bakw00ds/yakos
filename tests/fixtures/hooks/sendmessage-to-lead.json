@@ -1,0 +1,18 @@
+{
+  "session_id": "fixture-tolead-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "SendMessage",
+  "tool_input": {
+    "to": "team-lead",
+    "summary": "blocker reached: schema needs lead approval",
+    "message": "I am blocked on the meal-plans schema PR. Need your approval before db can apply migration 148.",
+    "type": "message",
+    "recipient": "team-lead",
+    "content": "I am blocked on the meal-plans schema PR. Need your approval before db can apply migration 148."
+  },
+  "tool_use_id": "toolu_fixture_tolead_001"
+}

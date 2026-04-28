@@ -1,0 +1,17 @@
+{
+  "session_id": "fixture-lead-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "SendMessage",
+  "tool_input": {
+    "to": "go-api",
+    "summary": "ship plan approval",
+    "message": "Approved. Proceed with implementation; remember to update changelog with feedback citation.",
+    "type": "message",
+    "recipient": "go-api",
+    "content": "Approved. Proceed with implementation; remember to update changelog with feedback citation."
+  },
+  "tool_use_id": "toolu_fixture_lead_001"
+}

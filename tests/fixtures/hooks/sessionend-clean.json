@@ -1,0 +1,8 @@
+{
+  "session_id": "fixture-sessionend-clean-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "hook_event_name": "SessionEnd",
+  "matcher": "logout"
+}

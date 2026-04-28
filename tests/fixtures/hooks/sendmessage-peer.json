@@ -1,0 +1,18 @@
+{
+  "session_id": "fixture-peer-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "SendMessage",
+  "tool_input": {
+    "to": "flutter-ui",
+    "summary": "OpenAPI spec for /v1/clients updated",
+    "message": "I added the new fields. Spec at api/docs/openapi.yaml. Run npm run gen to regenerate TS types.",
+    "type": "message",
+    "recipient": "flutter-ui",
+    "content": "I added the new fields. Spec at api/docs/openapi.yaml. Run npm run gen to regenerate TS types."
+  },
+  "tool_use_id": "toolu_fixture_peer_001"
+}

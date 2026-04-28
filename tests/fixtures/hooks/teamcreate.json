@@ -1,0 +1,13 @@
+{
+  "session_id": "fixture-teamcreate-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "TeamCreate",
+  "tool_input": {
+    "name": "fixture-team",
+    "description": "Test team for hook fixtures"
+  },
+  "tool_use_id": "toolu_fixture_teamcreate_001"
+}

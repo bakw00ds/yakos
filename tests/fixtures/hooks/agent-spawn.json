@@ -1,0 +1,14 @@
+{
+  "session_id": "fixture-agent-spawn-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Agent",
+  "tool_input": {
+    "subagent_type": "go-api",
+    "agent_id": "api",
+    "team": "fixture-team"
+  },
+  "tool_use_id": "toolu_fixture_agent_001"
+}

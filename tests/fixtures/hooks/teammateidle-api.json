@@ -1,0 +1,10 @@
+{
+  "session_id": "fixture-idle-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "TeammateIdle",
+  "teammate_name": "api",
+  "team_name": "fixture-team"
+}

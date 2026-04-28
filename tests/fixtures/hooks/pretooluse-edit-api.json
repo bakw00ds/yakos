@@ -1,0 +1,15 @@
+{
+  "session_id": "fixture-edit-api-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "api/main.go",
+    "old_string": "package main",
+    "new_string": "package main\n// edited"
+  },
+  "tool_use_id": "toolu_fixture_edit_api_001"
+}

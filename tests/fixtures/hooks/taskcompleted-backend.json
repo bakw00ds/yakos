@@ -1,0 +1,14 @@
+{
+  "session_id": "fixture-task-backend-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "TaskCompleted",
+  "task": {
+    "id": "backend-task-001",
+    "description": "Add /v1/foo endpoint",
+    "blockedBy": [],
+    "status": "completed"
+  }
+}

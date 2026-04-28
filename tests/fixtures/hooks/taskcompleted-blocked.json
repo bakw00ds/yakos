@@ -1,0 +1,14 @@
+{
+  "session_id": "fixture-task-blocked-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "TaskCompleted",
+  "task": {
+    "id": "implement-meal-plan-endpoints",
+    "description": "Implement /v1/meal-plans endpoints",
+    "blockedBy": ["db-migrate-meal-plans"],
+    "status": "completed"
+  }
+}

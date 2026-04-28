@@ -1,0 +1,14 @@
+{
+  "session_id": "fixture-task-frontend-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "nextjs",
+  "hook_event_name": "TaskCompleted",
+  "task": {
+    "id": "frontend-task-001",
+    "description": "Add Foo component",
+    "blockedBy": [],
+    "status": "completed"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "session_id": "fixture-edit-web-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "web/index.js",
+    "old_string": "// foo",
+    "new_string": "// edited by go-api (should be blocked)"
+  },
+  "tool_use_id": "toolu_fixture_edit_web_001"
+}
