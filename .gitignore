@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+._*
+
+# Claude Code internals
+.claude/scheduled_tasks.lock
+.claude/projects/
+
+# Editor backups & temp
+*~
+*.swp
+*.swo
+*.tmp
+*.bak
+
+# YakOS settings backups (created at install time in $HOME, not in this repo,
+# but list anyway in case anyone runs install with HOME=this repo)
+*.yakos-bak-*
+
+# Test scratch
+/tmp-test-home/
