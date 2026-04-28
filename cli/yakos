@@ -52,10 +52,19 @@ Stub commands (will be implemented in Batch 1B):
     status        Per-project dashboard
     team          Team lifecycle (e.g. 'yakos team restart <project>')
 
+Release / version commands:
+    version-bump  Bump VERSION + prepend CHANGELOG entry (and commit)
+                  Args: --component {major|minor|patch|hotfix}
+                        [--message <text>] [--no-commit]
+    git-hooks     Install / uninstall / status the pre-push version gate
+                  Args: install | uninstall | status
+
 Examples:
     yakos install
     yakos doctor
     yakos uninstall
+    yakos version-bump --component patch --message "fix: stale doctor message"
+    yakos git-hooks install   # in current project repo
 
 The framework lives at:  $YAKOS_ROOT
 EOF
@@ -80,6 +89,20 @@ case "$cmd" in
         fi
         # Run the subcommand in a child bash so subcommand `set -e` etc.
         # doesn't bleed into the dispatcher.
+        bash "$script" "$@"
+        ;;
+    version-bump)
+        bump_script="$YAKOS_ROOT/lib/skills/version-bump/scripts/bump.sh"
+        if [ ! -x "$bump_script" ]; then
+            ct_die "version-bump skill not found or not executable at $bump_script; run 'yakos doctor'"
+        fi
+        bash "$bump_script" "$@"
+        ;;
+    git-hooks)
+        script="$YAKOS_LIB/git-hooks.sh"
+        if [ ! -f "$script" ]; then
+            ct_die "internal error: $script not found"
+        fi
         bash "$script" "$@"
         ;;
     *)
