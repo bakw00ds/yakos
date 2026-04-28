@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — runtime-dispatch skill + clarified team-shapes
+
+Confirmed via re-probe (within `TeamCreate` context) that project-level
+`.claude/agents/<role>.md` files remain non-discoverable as
+`subagent_type` values in the current Claude Code runtime — the team
+config accepts arbitrary `agentType` strings, but
+`Agent({subagent_type: "<project-role>"})` returns "not found"
+regardless of team membership.
+
+- [`lib/skills/dispatch-as-project-agent/SKILL.md`](lib/skills/dispatch-as-project-agent/SKILL.md)
+  — workable dispatch pattern: spawn a `general-purpose` Agent with
+  the project agent body (and any `extends:` parent) injected into
+  the prompt. Documents what the spawned agent loses (hook coverage,
+  TaskList integration, mailbox routing) and the lead's manual-pass
+  responsibilities (verify the diff, run per-domain validators
+  manually, mirror peer decisions to `decisions.md`).
+- [`docs/team-shapes.md`](docs/team-shapes.md) — new
+  "Runtime dispatch in v0.1" section explaining what works
+  (`TeamCreate`, `TaskList`, path-scoped rules, the dispatch skill)
+  and what doesn't (project `subagent_type` resolution, hook firing
+  on injected dispatch). Both team shape catalogs in this doc point
+  at the dispatch skill.
+
+When Claude Code adds project-agent discovery, the skill becomes
+unnecessary; the on-disk discipline already binds at runtime.
+
 ## [0.1.4] — 2026-04-28
 
 ### Added — stack-specialist agent templates

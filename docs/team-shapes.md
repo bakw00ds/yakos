@@ -91,6 +91,55 @@ do dependency updates, security backports, eventual archival. v0.1's
 
 ---
 
+## Runtime dispatch in v0.1 (read this before delegating)
+
+Project-level `.claude/agents/<role>.md` files are **not discoverable
+as `subagent_type` values** by the Claude Code Agent tool, even within
+a `TeamCreate` context. Confirmed twice: Phase 8 probe and a
+v0.1.4 retest. The Agent tool resolves only the runtime built-ins
+(`general-purpose`, `Explore`, `Plan`, `claude-code-guide`,
+`statusline-setup`).
+
+This is a Claude Code limitation, not a YakOS one. The on-disk layout
+is correct and ready; the runtime binding hasn't shipped.
+
+**What works today:**
+
+- `TeamCreate` creates the team file + task list. The lead becomes a
+  team member with `agentType: <whatever-string>`.
+- `TaskCreate` / `TaskList` / `TaskUpdate` / `SendMessage` operate
+  against the team's task list.
+- Path-scoped rules in `<project>/.claude/rules/` auto-load on file
+  reads.
+- Spawning a teammate with discipline applied: use the
+  [`dispatch-as-project-agent`](../lib/skills/dispatch-as-project-agent/SKILL.md)
+  skill — it spawns a `general-purpose` Agent with the project agent
+  body (and any `extends:` parent) injected into the prompt.
+
+**What doesn't work:**
+
+- `Agent({subagent_type: "<project-role>"})` — returns "Agent type
+  not found".
+- The `team-lifecycle.sh`, `task-complete-dispatch.sh`, and
+  per-domain validator hooks tied to TeamCreate-spawned members
+  don't fire when you dispatch via `general-purpose` injection. The
+  lead runs validators manually.
+
+**Operating model in v0.1:**
+
+The lead in this session reads all project agent bodies during
+familiarization, then either (a) wears the hat directly when
+single-mind work suffices, or (b) uses `dispatch-as-project-agent` to
+spawn a `general-purpose` worker carrying the discipline. Either
+path, the lead remains the safety net for hooks the runtime would
+otherwise enforce.
+
+When Claude Code adds project agent discovery (no ETA from upstream),
+the team shapes below "just work" without the dispatch skill — the
+on-disk discipline becomes runtime-bindable.
+
+---
+
 ## Stack-specialist templates (v0.1.4)
 
 The framework ships five generic stack-specialist templates carrying
