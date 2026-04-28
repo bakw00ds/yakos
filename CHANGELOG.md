@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-04-28
+
+### Fixed
+
+- `yakos install` "Next steps" output no longer references
+  `Batch 1B; not yet implemented` — a stale Batch 1A stub message
+  that wasn't refreshed when `init` shipped. The output now shows
+  the real `yakos init <name> --project <path>` invocation.
+
 ### Added — Batch 5.7 (framework playbooks)
 
 - 6 framework playbooks under `lib/playbooks/` (1,445 lines total),

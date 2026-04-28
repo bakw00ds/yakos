@@ -202,8 +202,8 @@ YakOS install complete.
     Settings:      $SETTINGS_FILE
 
 Next steps:
-    yakos doctor       Verify everything resolved
-    yakos init         (Batch 1B; not yet implemented)
+    yakos doctor                              Verify everything resolved
+    yakos init <name> --project <path>        Bootstrap a project on top of YakOS
 
 Auto-memory at $CLAUDE_DIR/projects/ was not touched.
 EOF
