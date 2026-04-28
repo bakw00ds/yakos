@@ -88,6 +88,32 @@ Other CI providers should work but aren't actively tested. The
 fixture suite (`tests/run-hook-fixtures.sh`) is the smoke test;
 expect it to pass on any environment with the required tools.
 
+## Optional integrations
+
+YakOS does not require any of these. They enable the
+[`local-llm`](../yakos/lib/skills/local-llm/SKILL.md) skill and
+related patterns. Detection is reported by `yakos doctor`.
+
+| Tool | Purpose | Install |
+|---|---|---|
+| Ollama | Local LLM inference | https://ollama.com |
+| LM Studio (`lms`) | OpenAI-compatible local API | https://lmstudio.ai |
+| `llama-server` (llama.cpp) | Lightweight local inference | https://github.com/ggerganov/llama.cpp |
+
+**External provider API keys** (set as environment variables; never as
+command args). These are NOT used by Claude Code or YakOS core; they
+are detected by doctor only for awareness when configuring custom MCP
+servers or future provider routing (v0.2+):
+
+| Variable | Purpose |
+|---|---|
+| `OPENAI_API_KEY` | OpenAI / ChatGPT API access |
+| `ANTHROPIC_API_KEY` | Anthropic API direct access (separate from Claude Code) |
+| `GEMINI_API_KEY` | Google Gemini API access |
+
+`yakos doctor` reports presence/absence of each. **Values are never
+printed.**
+
 ## What's NOT yet supported
 
 - **Windows.** WSL works (it's Linux); native Windows shell does

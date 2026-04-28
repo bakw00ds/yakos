@@ -217,6 +217,59 @@ adding agents speculatively is itself a soft-vs-hard tradeoff (soft:
 
 ---
 
+## Local models are workers, not the orchestrator
+
+YakOS is built on Agent Teams, which is part of Claude Code's runtime.
+Local models cannot replace Claude in this role:
+
+- The `SendMessage` tool exists in Claude Code, not Ollama.
+- The shared task list is managed by Claude Code's session.
+- Teammate spawning, lifecycle, idle detection are Claude Code
+  primitives.
+- Hooks fire on Claude Code's tool surface, not on local-model
+  invocations.
+
+This isn't a limitation we're fighting; it's the design. Local models
+are excellent at bulk transformation, classification, extraction, and
+first-pass screening. They are not currently good at multi-step
+reasoning, novel decision-making, or operating tools safely.
+
+The pattern that works:
+
+- Claude (the lead and specialists) does orchestration and judgment.
+- Local models do volume transformation when invoked through skills,
+  hooks, or future MCP tools.
+- Local model output goes to `work/current/artifacts/` for review.
+- Claude reads the artifact and makes the decision.
+
+The pattern that doesn't work:
+
+- "Save subscription cost by routing the lead to Llama." This loses
+  Agent Teams, the task list, all hooks, and the entire YakOS
+  architecture.
+
+The [`local-llm`](lib/skills/local-llm/SKILL.md) skill (Batch 5.5)
+packages the safe-handoff pattern. The
+[worked example](docs/examples/local-model-routing.md) shows it
+end-to-end.
+
+### Data boundary
+
+Ollama and other local runtimes keep inference local — content stays
+on your machine, no network calls.
+
+Future provider routing (v0.2+) crosses a network boundary; YakOS
+treats that crossing as a policy decision per project. Defaults
+assume content shouldn't leave the machine; project-level
+`<project>/.claude/rules/data-boundary.md` rules can adjust for
+projects with explicit provider agreements.
+
+For specific YakOS contexts (HIPAA-adjacent health data, pentest
+engagement materials, client work product), default to local-only
+inference unless a written exception exists.
+
+---
+
 ## Standards as control
 
 The hard/soft control taxonomy applies to engineering standards too.

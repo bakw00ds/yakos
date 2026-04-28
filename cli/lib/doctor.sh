@@ -219,6 +219,47 @@ if [ -n "$PROJECT_PATH" ]; then
     echo ""
 fi
 
+# ---- optional integrations (informational; never blocks) -------------------
+#
+# Local LLM runtimes and external provider API keys. Detection is
+# presence-only; **values are never printed**. These are NOT used by Claude
+# Code or YakOS core; they're surfaced here for awareness when a user is
+# configuring custom MCP servers, future provider routing (v0.2+), or the
+# local-llm skill.
+
+echo "Optional local/cross-model tooling"
+for tool in ollama lms llama-server; do
+    if command -v "$tool" >/dev/null 2>&1; then
+        # Best-effort version probe; ignore failures.
+        version="$("$tool" --version 2>/dev/null | head -n 1 | tr -d '\r' || echo "")"
+        if [ -n "$version" ]; then
+            ok "$tool: found ($version)"
+        else
+            ok "$tool: found"
+        fi
+    else
+        info "$tool: not found"
+    fi
+done
+echo ""
+
+echo "External provider API keys (NOT used by YakOS or Claude Code core;"
+echo "relevant only for custom MCP servers or future provider routing)"
+for var in OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY; do
+    # The presence check uses indirect expansion via `eval` since bash 3.2
+    # doesn't have ${!var}. Caution: never print "$value", only the result
+    # of the test.
+    eval "value=\${${var}:-}"
+    if [ -n "${value:-}" ]; then
+        ok "${var}: set"
+    else
+        info "${var}: not set"
+    fi
+done
+echo ""
+info "(All integrations above are optional. See COMPATIBILITY.md and COOKBOOK.md for usage.)"
+echo ""
+
 # ---- summary ----------------------------------------------------------------
 
 echo "Summary: $errors error(s), $warnings warning(s)"

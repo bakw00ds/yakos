@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Batch 5.5 (local-model integration templates)
+
+- `lib/skills/local-llm/SKILL.md` (108 lines, in 80–180 budget) —
+  the safe-handoff pattern for local model use. Documents the
+  output-trust-model warning, when-to-use vs when-NOT-to-use, the
+  artifact-then-review pattern.
+- `lib/skills/local-llm/scripts/ollama-prompt.sh` — reference
+  implementation. Required `--template` / `--input` / `--output`;
+  optional `--model` / `--max-bytes` / `--force`. Streams via
+  mktemp + trap. Generates sidecar metadata via `jq --arg`. Exits
+  0 / 2 / 3 / 4 per STYLE.md exit-code conventions. Validates
+  user inputs before checking ollama presence so bad-args errors
+  surface independently of "install ollama."
+- 4 prompt templates: `summarize`, `classify`, `extract`,
+  `sanity-check`. Generic; project-specific overrides go in
+  `<project>/.claude/skills/local-llm/templates/`.
+- `docs/examples/local-model-routing.md` — worked release-summary
+  example end-to-end.
+- `cli/lib/doctor.sh` extended with optional-tooling detection:
+  ollama / lms / llama-server (presence + version);
+  OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY (presence
+  ONLY — values never printed; verified via sentinel test).
+- `COOKBOOK.md` "Pattern 5: Using local models safely" — output-
+  trust model, four sub-patterns, data-boundary policy.
+- `COMPATIBILITY.md` "Optional integrations" section.
+- `PHILOSOPHY.md` "Local models are workers, not the orchestrator"
+  + "Data boundary" sections.
+
+### Added — Batch 5 (tiny-go-api example)
+
+- `examples/tiny-go-api/` — minimal Go HTTP server demonstrating
+  YakOS end-to-end. Single endpoint (GET /hello), two test cases,
+  no external deps. Agents prefixed `tiny-` per spec; rules
+  path-scoped to `cmd/**`; 17 hook copies with `.framework-hash`
+  siblings under `scripts/hooks/`.
+- Spec deviation: `cmd/server/` instead of `api/` (Go build conflict
+  with directory of the same name). Documented in BATCH-5-STATUS.md.
+
 ### Added — Batch 4 (documentation)
 
 - `README.md` (expanded) — quickstart, install, bootstrap, common

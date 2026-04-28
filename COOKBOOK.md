@@ -197,6 +197,89 @@ Use the **release-prep team** from team-shapes.md.
 
 ---
 
+## Pattern 5: Using local models safely
+
+Local models (Ollama, LM Studio, llama.cpp) are useful for bulk
+transformation, classification, and sanity checking. They are NOT a
+replacement for Claude in agent orchestration or final judgment. The
+[`local-llm` skill](lib/skills/local-llm/SKILL.md) packages the
+safe-handoff pattern.
+
+### Output trust model
+
+Local model output is **untrusted**. Input files may contain
+adversarial prompts (injection in issue templates, customer feedback,
+log lines). Treat output as a draft requiring review; never let it
+influence enforcement decisions; verify any structured output before
+acting on it. The skill writes to `work/current/artifacts/`
+specifically because that directory is for review, not direct
+consumption.
+
+### Pattern 5a — skill-level handoff (most common)
+
+Best for: summarization, classification, extraction, synthetic data.
+
+```sh
+bash lib/skills/local-llm/scripts/ollama-prompt.sh \
+    --template summarize \
+    --input  work/current/artifacts/changelog.txt \
+    --output work/current/artifacts/changelog-summary.md
+```
+
+The model runs locally; output + sidecar metadata land in
+`work/current/artifacts/`; an agent reads the artifact and decides.
+Worked example: [docs/examples/local-model-routing.md](docs/examples/local-model-routing.md).
+
+### Pattern 5b — hook-level prefilter (advanced)
+
+A `PreToolUse` or `TaskCompleted` hook can shell out to a local model
+for cheap pre-screening — best for high-volume gates where the local
+model is the obvious-fine / obviously-suspicious filter and Claude
+handles ambiguous cases. Out of scope for v0.1's reference hooks; the
+pattern is mentioned for completeness.
+
+### Pattern 5c — MCP model router (v0.2+)
+
+Not in v0.1. A small MCP server can expose multiple models (Ollama,
+OpenAI, Gemini) under a unified `route_to_model` tool, letting agents
+pick per task. Roadmap-only.
+
+### Pattern 5d — adversarial second opinion
+
+For high-stakes review (security, deploys, data-modifying changes),
+ask Claude AND a different model family. Different models have
+different blind spots; agreement is cheap insurance. v0.1 ships the
+local-llm skill; the second-opinion pattern is documented here but
+not automated.
+
+### Data boundary
+
+Ollama and other local runtimes keep inference local — content stays
+on your machine, no network calls. Future MCP routing (v0.2+) to
+provider APIs will send content to third parties. Before adding
+provider routing:
+
+- Don't send secrets, API keys, or credentials.
+- Don't send PHI or HIPAA-regulated data unless your project's BAA
+  status with that provider is documented and current.
+- Don't send customer engagement data (pentest findings, red-team
+  artifacts, client materials) without per-engagement approval.
+- Project-level rules in `<project>/.claude/rules/data-boundary.md`
+  take precedence over framework defaults.
+
+### What NOT to do
+
+- Don't make a local model the orchestrator. Claude Code IS the
+  runtime. (See [PHILOSOPHY.md](PHILOSOPHY.md) "Local models are
+  workers, not the orchestrator.")
+- Don't trust local model output for safety-critical decisions.
+- Don't let local model output modify project source directly. Always
+  output to `work/current/artifacts/` for review.
+- Don't pipe API keys into hooks or skills as command-line args
+  (visible in process list). Use env vars the script reads.
+
+---
+
 ## Anti-patterns to avoid
 
 - **Reusing the same team across unrelated work.** Spawn fresh teams

@@ -1,0 +1,16 @@
+You are a precise classifier. Read the input below and classify each
+line or distinct entry into one of these categories:
+
+- bug: something is broken
+- feature: new functionality requested
+- question: someone is asking for information
+- noise: spam, off-topic, or duplicate
+- unclear: cannot classify confidently
+
+Output format: one line per entry, format
+"<category>: <original first 80 chars>".
+
+If the input is a single document rather than a list, output one
+classification for the whole document.
+
+If you cannot classify, mark "unclear" rather than guessing.
