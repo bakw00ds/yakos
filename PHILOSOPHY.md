@@ -314,9 +314,13 @@ doc is a recommendation. Without the doc, the validator is a mystery.
 
 Things this philosophy says are valuable that v0.1 doesn't yet ship:
 
-- **Playbooks.** Phase 1.5 §4 lists 6 domain playbooks
-  (`01-security` through `06-hipaa-phi`); v0.1's `lib/playbooks/` is
-  empty. Domain-specific procedural content lives there in v0.2.
+- **Playbooks for v0.2 agents.** v0.1.1 ships 6 framework playbooks
+  (`01-security`, `02-code-quality`, `03-ui-ux-a11y`,
+  `04-docs-architecture`, `05-performance`, `06-regulated-data`).
+  The v0.2 agent roster (architect, incident-responder, log-analyst,
+  performance-engineer, privacy-reviewer, accessibility-reviewer,
+  ux-reviewer) needs corresponding playbooks; populated when each
+  agent ships.
 - **Architect, incident-responder, log-analyst, performance-engineer,
   privacy-reviewer, accessibility-reviewer, ux-reviewer.** v0.2
   candidates per [docs/team-shapes.md](docs/team-shapes.md).

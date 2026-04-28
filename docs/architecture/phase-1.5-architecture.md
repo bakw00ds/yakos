@@ -228,7 +228,10 @@ yakos/
 │   │   ├── 03-ui-ux-a11y.md
 │   │   ├── 04-docs-architecture.md
 │   │   ├── 05-performance.md
-│   │   └── 06-hipaa-phi.md
+│   │   └── 06-hipaa-phi.md         # NOTE: renamed to 06-regulated-data.md
+│   │                               # in Batch 5.7 (HIPAA→multi-framework
+│   │                               # generalization). See BATCH-5.7-STATUS.md
+│   │                               # and CHANGELOG.md.
 │   │
 │   ├── rules/                      # Cross-language conventions
 │   │   ├── git-hygiene.md

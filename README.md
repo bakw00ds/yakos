@@ -178,9 +178,11 @@ Engineering:
 
 ## Not in v0.1
 
-- **`lib/playbooks/` is empty.** Phase 1.5 §4 lists 6 playbooks (security,
-  code-quality, UI/UX/a11y, docs, performance, HIPAA/PHI); v0.2
-  populates them.
+- **PandaOS migration as a worked example.** The first real
+  before/after migration story is Phase 8, post-v0.1 (separate
+  Claude Code session). Until then,
+  [MIGRATING.md](MIGRATING.md) describes the mechanics without an
+  end-to-end case study.
 - **The architect, incident-responder, log-analyst, devops-infra,
   performance-engineer, privacy-reviewer, accessibility-reviewer, and
   ux-reviewer agents.** Roadmap in

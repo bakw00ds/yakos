@@ -186,9 +186,9 @@ Roles:
 - `security-reviewer` — final security pass before tag
 
 Notes: The `release-auditor` invokes the 6-domain audit playbook
-(once Phase 1.5 §4's playbooks are populated in v0.2). The lead
-approves findings and decides what blocks the release vs ships
-as a known-issue.
+(see [`lib/playbooks/`](../lib/playbooks/) — populated in v0.1.1).
+The lead approves findings and decides what blocks the release vs
+ships as a known-issue.
 
 ### Maintenance / dependency team (Stage 5)
 

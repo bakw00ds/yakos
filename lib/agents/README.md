@@ -30,8 +30,10 @@ Every file here:
 - Answers the **five specialist questions** documented in
   [docs/engineering-standards.md §9](../../docs/engineering-standards.md).
 - Stays within the 80–140 line budget enforced by `yakos validate`.
-- Never references playbooks not yet shipped (lib/playbooks/ is empty
-  in v0.1; v0.2 populates it).
+- `playbook:` references must resolve to a real file in
+  `lib/playbooks/` — `yakos validate` reports broken references
+  as ERROR-level (not WARN). v0.1.1 ships 6 framework playbooks;
+  reference them via `playbook:<name>` in the `references:` field.
 
 When adding a new generic agent:
 

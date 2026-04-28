@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-04-28
+
+### Fixed (documentation drift)
+
+Surfaced by a v0.1.1 cold-read familiarization session, where a
+fresh lead reading the project end-to-end caught four documents
+still claiming `lib/playbooks/` was empty after Batch 5.7 had
+populated it.
+
+- `README.md` "Not in v0.1": removed the "lib/playbooks/ is empty"
+  bullet (now wrong); replaced with a PandaOS-migration roadmap
+  bullet that's actually still deferred.
+- `PHILOSOPHY.md` "Not in v0.1": rewrote the playbooks bullet to
+  acknowledge v0.1.1 ships the 6 framework playbooks; the deferred
+  work is playbooks for the v0.2 agent roster, not the framework
+  baseline.
+- `lib/agents/README.md`: rewrote the "Standards" bullet about
+  playbook references — now describes the validate.sh ERROR-level
+  check on broken `playbook:` refs (added in Batch 5.7) rather than
+  saying playbooks aren't shipped.
+- `docs/team-shapes.md`: release-prep team's `release-auditor` note
+  no longer says "once Phase 1.5 §4's playbooks are populated in
+  v0.2"; now points at `lib/playbooks/` directly.
+- `docs/architecture/phase-1.5-architecture.md`: inline note added
+  next to the `06-hipaa-phi.md` directory listing pointing at the
+  Batch 5.7 rename to `06-regulated-data.md`. The spec line itself
+  preserved as a frozen historical record (the rename is documented
+  in BATCH-5.7-STATUS.md and the changelog).
+
+### Added
+
+- `docs/v0.2-notes.md` — holding place for v0.2 planning
+  observations. Initial entries:
+    - **G1: Lead supervision has no hard counterpart.** The
+      "don't do specialist work" rule is purely soft; no hook
+      detects when the lead drifts into doing specialist work
+      itself. Possible v0.2: SessionEnd-time check comparing
+      lead-vs-teammate edit counts.
+    - **G2: `yakos validate` doesn't detect documentation drift.**
+      Demonstrated by the four bullets above slipping past every
+      validate run since Batch 5.7. Possible v0.2: a
+      `yakos validate --docs` mode with a maintained list of
+      stale-phrase patterns.
+    - **G3: Inventory counts include INDEX.md / README.md.**
+      Trivial cosmetic; one-line fix in `count_dir_files()`.
+    - Phase 0.5 probe shape (needed to flip REPORT-only hooks to
+      BLOCKING in v0.2).
+    - The v0.2 agent roster from `docs/team-shapes.md` with shipping
+      requirements per agent.
+
 ## [0.1.1] — 2026-04-28
 
 ### Fixed
