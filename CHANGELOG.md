@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — capability patterns absorbed from oh-my-openagent
+
+After surveying [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)
+(an autonomous-first multi-model orchestration harness for OpenCode),
+three capability gaps were identified and closed. The borrowing is
+deliberate: yakOS's human-in-loop posture stays; the new capabilities
+preserve the audit trail and approval gates.
+
+- [`lib/skills/hashed-edit/`](lib/skills/hashed-edit/SKILL.md) —
+  hash-anchored line edits. Adapted from OMA's `hashline_edit` pattern
+  (which reports reducing stale-line edit failures from ~93% → 32% on
+  Grok Code). Two helper scripts:
+  - `scripts/read-with-hashes.sh` — outputs `<lineno>#<hash>|<content>`
+    per line (4-char hex digest from `cksum % 65536`).
+  - `scripts/edit-by-hash.sh` — applies a single-line edit IFF the
+    current line's hash matches the anchor; refuses with a diff and
+    exit code 5 on mismatch.
+  The runtime enforcement (PreToolUse hook intercepting all `Edit`
+  calls) is deferred to v0.3 pending the Phase 0.5 probe's `Edit`
+  tool stdin shape confirmation.
+
+- [`lib/skills/iterate-until/`](lib/skills/iterate-until/SKILL.md) —
+  formal "loop work-then-verify until done" pattern. yakOS-flavored
+  Ralph Loop: the verifier is **never** the agent's own judgement —
+  it's a test command, hook exit code, `yakos validate` result, or
+  human-readable check. Hard iteration cap (default 3); each
+  iteration's diff + verifier output logged to
+  `work/current/iterations/<task-id>/<i>.md`; on cap reached,
+  escalation to the human is mandatory.
+
+- [`PHILOSOPHY.md`](PHILOSOPHY.md) — new "Human-in-the-loop by design"
+  section makes the posture explicit. yakOS is built for
+  production-touching work in audit-sensitive domains; it is **not**
+  trying to be autonomous-first. Surfaced as the single most important
+  thing to understand about yakOS relative to other agentic frameworks.
+  Architectural consequences (plan-approval gates, audit-trail
+  richness, soft+hard control pairing, lead-supervises-not-executes)
+  spelled out.
+
+What did NOT land in this batch (deferred with stated reasons):
+
+- **Multi-model category routing** — design-only for v0.3. yakOS's
+  current `model: opus|sonnet|haiku` agent-frontmatter primitive is
+  the seed; OMA's category-based routing (`ultrabrain`, `quick`,
+  `deep`, etc.) is the mature form. Not implementing without a clear
+  driver.
+- **Composable middleware-style hooks** — defer until next hook addition.
+- **Skill-embedded MCPs** — requires MCP infrastructure yakOS doesn't
+  have yet.
+- **npm package distribution** — only relevant if yakOS goes public.
+- **Auto-update CLI command** — separate concern; the existing
+  `update` stub becomes its own ticket.
+
+[`lib/skills/README.md`](lib/skills/README.md) inventory backfilled
+to include `local-llm`, `dispatch-as-project-agent`, `version-bump`,
+plus the two new skills.
+
 ### Added — release-audit scaffolding (`lib/skills/release-audit/`)
 
 Copied the reusable building blocks of the PandaOS release-audit skill

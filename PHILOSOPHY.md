@@ -102,6 +102,72 @@ mode is the right one for its job.
 
 ---
 
+## Human-in-the-loop by design
+
+YakOS is built for production-touching work in audit-sensitive
+domains. The posture is deliberate: **the human is in the loop, not
+the bottleneck.** This is the design center, not a limitation we'd
+remove if we could.
+
+This is the single most important thing to understand about YakOS
+relative to other agentic frameworks. Some frameworks treat human
+intervention during agent work as a *failure signal* — every pause
+to ask the human is a missed opportunity for autonomy. YakOS treats
+human intervention as an architectural primitive — every plan gets
+approved, every destructive operation gets confirmed, every
+cross-domain decision surfaces for review.
+
+The architectural consequences:
+
+- **Plan-approval before destructive work.** Schema migrations, force
+  pushes, mass deletes, deploys, anything that can't be trivially
+  rolled back — surface the plan, the lead approves explicitly, the
+  human approves what the lead can't.
+- **Audit trail richness as a load-bearing feature, not an
+  afterthought.** NDJSON structured logs with severity tiers
+  (BLOCK/WARN/REPORT/PASS), `decisions.md` mirroring of mailbox DMs,
+  pre-push gate audit log, version-bump trail, incident catalog with
+  stable IDs. If a decision happened, there's a written record;
+  if there's no record, the decision didn't happen.
+- **Soft+hard control pairing catches intent failure.** The agent
+  body says "you don't edit web/"; the path-allowlist hook blocks
+  the edit if intent fails. Both layers exist because either alone
+  is insufficient.
+- **Lead supervises, does not autonomous-execute.** A teammate doing
+  specialist work the lead could have done is fine; a lead doing
+  specialist work the teammate could have done is a failure mode
+  documented in v0.2-notes.md (gap G1).
+- **Iteration loops have a human-checkable verifier.** When work
+  loops until "done", the verifier is a test command, a hook, or a
+  human-readable check — not the agent's own judgement that work is
+  complete.
+
+Why this posture for this audience:
+
+- **Production-touching work is the use case.** PandaOS handles
+  health-adjacent data; ChaOS handles operational systems; the next
+  project will touch something that matters. An autonomous-first
+  framework optimizes for greenfield prototyping where mistakes are
+  cheap. yakOS optimizes for environments where mistakes have audit
+  consequences.
+- **Regulated domains need audit trails.** HIPAA, GDPR, CCPA, SOC 2,
+  contractual data-handling — all of them require *who decided what
+  and when*. An agent that completes work autonomously without a
+  human-readable decision trail can't satisfy that requirement.
+- **The cost of an unverified autonomous decision compounds.** One
+  agent's wrong decision becomes the next agent's premise. By the
+  time it surfaces, the trail is buried under N subsequent edits.
+  Surfacing decisions for human review is the cheapest place to
+  catch them.
+
+This is not a stance against capability. yakOS will absorb capability
+patterns from autonomous-first frameworks (edit resilience, iteration
+loops, multi-model routing) — but the human-loop framing stays. The
+test for any new capability: does it preserve the audit trail and
+the approval gates? If yes, ship it. If no, redesign it.
+
+---
+
 ## Flat, not hierarchical
 
 A team in YakOS has a lead and N teammates. The lead **coordinates**;

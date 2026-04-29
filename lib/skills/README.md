@@ -21,6 +21,11 @@ the orchestrator itself stays per-project (see
 | `contract-handoff` | implement | Publish API/DB/UI contracts for downstream teammates. |
 | `phase-complete` | review | Verify a phase's exit criteria before declaring done. |
 | `dependency-update` | maintain | Survey and apply dependency updates safely. |
+| `local-llm` | implement | Hand off bulk transformation work to a local LLM via Ollama. |
+| `dispatch-as-project-agent` | orchestrate | Spawn a generic Agent wearing a project-agent's discipline (workaround for v0.1 runtime not discovering project agents). |
+| `version-bump` | release | Bump VERSION + prepend CHANGELOG entry + commit, with four-part semver semantics. |
+| `hashed-edit` | implement | Hash-anchored line edits — refuse the edit if the target line content changed since the read. Adapted from oh-my-openagent's hashline pattern. |
+| `iterate-until` | implement | Loop a work-then-verify cycle until a human-checkable verifier passes, with a hard iteration cap and audit trail. yakOS-flavored Ralph Loop. |
 | `release-audit/` | scaffolding | Templates + 7 auditor-agent definitions consumed by per-project release-audit SKILL.md (orchestrator stays in `<project>/.claude/skills/`). |
 
 ## Standards
