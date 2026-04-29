@@ -1,7 +1,10 @@
 # Generic skills
 
-Reusable, domain-agnostic skills available to every project. Project-specific
-skills (e.g. `release-audit`) live in `<project>/.claude/skills/`.
+Reusable, domain-agnostic skills available to every project. The
+`release-audit/` directory is **scaffolding** (templates + auditor
+agents) that project-level release-audit `SKILL.md` files consume —
+the orchestrator itself stays per-project (see
+`release-audit/README.md`).
 
 ## Inventory
 
@@ -18,6 +21,7 @@ skills (e.g. `release-audit`) live in `<project>/.claude/skills/`.
 | `contract-handoff` | implement | Publish API/DB/UI contracts for downstream teammates. |
 | `phase-complete` | review | Verify a phase's exit criteria before declaring done. |
 | `dependency-update` | maintain | Survey and apply dependency updates safely. |
+| `release-audit/` | scaffolding | Templates + 7 auditor-agent definitions consumed by per-project release-audit SKILL.md (orchestrator stays in `<project>/.claude/skills/`). |
 
 ## Standards
 

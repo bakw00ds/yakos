@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — release-audit scaffolding (`lib/skills/release-audit/`)
+
+Copied the reusable building blocks of the PandaOS release-audit skill
+into the framework. Scope per the design constraint already documented
+in `lib/skills/README.md`: the **orchestrator (`SKILL.md`) stays
+per-project**; the framework hosts only the templates and the auditor
+agent definitions.
+
+What landed:
+
+- `lib/skills/release-audit/templates/` — 4 report templates: `scope.md`,
+  `domain-report.md`, `executive-summary.md`, `dispositions.md`. Generic
+  `{{version}}` / `{{operator}}` placeholders only; no project specifics.
+- `lib/skills/release-audit/agents/` — 7 auditor agent definitions:
+  `lead-auditor`, `security-auditor`, `code-quality-auditor`,
+  `uiux-auditor`, `docs-auditor`, `performance-auditor`,
+  `regulated-data-auditor` (the source PandaOS `hipaa-auditor` was
+  renamed to match the framework's `lib/playbooks/06-regulated-data.md`
+  rename and rewritten to reference HIPAA / GDPR / CCPA / SOC 2 /
+  contract-bound data rather than HIPAA-only).
+- Each auditor agent's `playbook:` frontmatter field points at
+  `lib/playbooks/<NN>-<domain>.md` directly — no per-project copying of
+  the playbooks needed.
+- `lib/skills/release-audit/README.md` documents the consumer pattern
+  and the deliberate omission of a `SKILL.md` (this directory is
+  scaffolding; `yakos validate` should treat it as an exception or use
+  the README presence as the marker).
+- `lib/skills/README.md` inventory updated with a `release-audit/`
+  scaffolding row + preamble clarifying the framework/project split.
+
+What did NOT land:
+
+- The orchestrator `SKILL.md` itself stays in PandaOS at
+  `<project>/.claude/skills/pandaos-release-audit/SKILL.md`. It still
+  references the project-local `references/domains/*` and
+  `agents/*` paths; migrating PandaOS to consume the framework
+  scaffolding is a separate change.
+- The 6 domain playbooks under `references/domains/` in the source —
+  these have drifted from `lib/playbooks/` in unknown direction.
+  Reconciliation is a separate Batch.
+
 ### Changed — VERSION file format migrated to four-part semver
 
 `VERSION` migrated from `0.1.4` (three-part `major.minor.patch`) to
