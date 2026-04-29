@@ -1,0 +1,5 @@
+lib/agents/lead-template.md
+lib/skills/test-suite/SKILL.md
+lib/rules/git-hygiene.md
+lib/playbooks/01-security.md
+lib/hooks/path-allowlist.sh

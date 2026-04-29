@@ -1,0 +1,5 @@
+scripts/some-helper.sh
+random/path/foo.txt
+.github/workflows/ci.yml
+Makefile
+package.json

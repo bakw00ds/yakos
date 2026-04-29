@@ -1,0 +1,8 @@
+README.md
+PHILOSOPHY.md
+docs/team-shapes.md
+docs/architecture/phase-0-validation-results.md
+CHANGELOG.md
+LICENSE
+tests/fixtures/version/README.md
+examples/tiny-go-api/cmd/server/main.go

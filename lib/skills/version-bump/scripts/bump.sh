@@ -275,33 +275,70 @@ trap 'rm -f "$NEW_ENTRY_FILE" "$TMP_CHANGELOG"' EXIT
     printf '\n'
 } > "$NEW_ENTRY_FILE"
 
-# Detect the [Unreleased] heading first so we can pick the right path.
+# Three paths:
+#   (1) No [Unreleased] heading at all: prepend new entry at top.
+#   (2) [Unreleased] heading exists AND has substantive content (any
+#       non-blank line between it and the next `## [` heading): PROMOTE
+#       — rename [Unreleased] to [VERSION] — DATE, add a fresh empty
+#       [Unreleased] above. The promoted content becomes the new
+#       version's body; --message and auto-generated bullets are
+#       ignored (they'd be redundant — the body already describes the
+#       work).
+#   (3) [Unreleased] heading exists but is empty: use the original
+#       insert-under-[Unreleased] path so --message / auto-generated
+#       bullets land in the new version's body.
 if grep -q '^## \[Unreleased\]' "$CHANGELOG_PATH"; then
-    awk -v entry_file="$NEW_ENTRY_FILE" '
-        BEGIN { inserted = 0 }
-        /^## \[Unreleased\]/ && inserted == 0 {
-            print
-            # Consume one trailing blank line if present.
-            if ((getline nl) > 0) {
-                if (nl == "") {
-                    print ""
-                } else {
-                    pending = nl
+    UNRELEASED_HAS_CONTENT="$(awk '
+        BEGIN { in_unreleased = 0; has_content = 0 }
+        /^## \[Unreleased\]/ { in_unreleased = 1; next }
+        in_unreleased && /^## \[/ { in_unreleased = 0 }
+        in_unreleased && /[^[:space:]]/ { has_content = 1 }
+        END { print (has_content ? 1 : 0) }
+    ' "$CHANGELOG_PATH")"
+
+    if [ "$UNRELEASED_HAS_CONTENT" = "1" ]; then
+        # Promote: rename [Unreleased] to [VERSION] — DATE, add fresh
+        # empty [Unreleased] above. Skip the auto-generated entry file
+        # (the promoted content IS the entry).
+        ct_log "[Unreleased] section has content; promoting to [$NEW_VERSION] — $DATE_TODAY (--message ignored)"
+        awk -v new_header="$ENTRY_HEADER" '
+            /^## \[Unreleased\]/ && !replaced {
+                print "## [Unreleased]"
+                print ""
+                print new_header
+                replaced = 1
+                next
+            }
+            { print }
+        ' "$CHANGELOG_PATH" > "$TMP_CHANGELOG"
+    else
+        # Empty [Unreleased]: insert auto-generated entry under it.
+        awk -v entry_file="$NEW_ENTRY_FILE" '
+            BEGIN { inserted = 0 }
+            /^## \[Unreleased\]/ && inserted == 0 {
+                print
+                # Consume one trailing blank line if present.
+                if ((getline nl) > 0) {
+                    if (nl == "") {
+                        print ""
+                    } else {
+                        pending = nl
+                    }
                 }
+                while ((getline line < entry_file) > 0) {
+                    print line
+                }
+                close(entry_file)
+                if (pending != "") {
+                    print pending
+                    pending = ""
+                }
+                inserted = 1
+                next
             }
-            while ((getline line < entry_file) > 0) {
-                print line
-            }
-            close(entry_file)
-            if (pending != "") {
-                print pending
-                pending = ""
-            }
-            inserted = 1
-            next
-        }
-        { print }
-    ' "$CHANGELOG_PATH" > "$TMP_CHANGELOG"
+            { print }
+        ' "$CHANGELOG_PATH" > "$TMP_CHANGELOG"
+    fi
 else
     # No [Unreleased] heading — prepend at top.
     {

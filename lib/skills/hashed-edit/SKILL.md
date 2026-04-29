@@ -116,15 +116,22 @@ The lead does the verification the runtime would otherwise do:
 
 ## Future enforcement (v0.3+)
 
-This v0.1.5 ships the helper scripts as opt-in tools. The next step
-is a `PreToolUse` hook that intercepts every `Edit` call, computes
-the expected hash from the agent's `old_string`, compares against the
-current file content, and refuses the edit if they diverge. That
-makes hashed-edit the default, not the opt-in.
+This release ships the helper scripts as opt-in tools. The next step
+is a `PreToolUse` hook that intercepts every `Edit` / `MultiEdit`
+call, detects when the agent's `old_string` doesn't match the file's
+current content (i.e., the file changed since the agent's last
+Read), and refuses the edit with a diff. That makes the staleness
+check the default, not the opt-in.
 
-The hook is deferred to v0.3 because:
+The hook is deferred to v0.3 for design reasons, not Phase 0.5
+reasons:
 
-- The Phase 0.5 probe needs to confirm `Edit` tool's stdin payload
-  shape before the hook can read it correctly.
+- The `Edit` tool's stdin payload shape is already known
+  (`hi_old_string`, `hi_new_string`, `hi_file_path` in
+  `lib/hooks/lib/hook-input.sh`).
+- The interesting design question is *what counts as stale* —
+  Edit's exact-string-match semantics already catch some cases;
+  the hook should only fire when the agent's `old_string` matches
+  but represents content that was true at a previous Read.
 - Auto-enforcement changes the agent contract; the helper-script
   shape lets us iterate on the format before locking it.

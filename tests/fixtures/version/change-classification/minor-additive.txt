@@ -1,0 +1,5 @@
+lib/agents/architect.md
+lib/skills/new-skill/SKILL.md
+lib/rules/python-backend.md
+lib/playbooks/07-cost-controls.md
+lib/hooks/audit-trail.sh

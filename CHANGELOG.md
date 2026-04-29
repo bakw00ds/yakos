@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1.0] — 2026-04-29
+
+### Polished — deferred items from v0.2.0.0 closed; Phase 0.5 probe run
+
+Closing the v0.2.0.0 status report's "Known shortfalls / follow-ups
+for v0.3+" list. Five of six items addressed; two stay deferred with
+updated reasons.
+
+**Closed:**
+
+- **Test fixtures populated** under
+  [`tests/fixtures/version/change-classification/`](tests/fixtures/version/change-classification/)
+  — six fixture files (one per classification tier) plus a README
+  explaining the convention. Documented expected classifications;
+  ready for a v0.3+ runner script.
+- **`version-bump` skill awkward on major-release consolidation —
+  fixed.** The skill now detects whether `[Unreleased]` has
+  substantive content. If yes: PROMOTES it to the new versioned
+  header (rename) and adds a fresh empty `[Unreleased]` above. If
+  no (empty section): keeps the original insert-under-[Unreleased]
+  path. `--message` is ignored on promotion (the body already
+  describes the work).
+- **MAJOR_BREAKING classification rules tightened.** The gate now
+  detects deletions (via `git diff --diff-filter=D`) and classifies
+  deletion of public-surface files as MAJOR_BREAKING. Public surface
+  expanded: framework agents/skills/rules/playbooks, top-level
+  Claude-Code hooks, per-domain validators, hook contract libs
+  (`lib/hooks/lib/hook-input.sh`, `hook-output.sh`), CLI subcommands
+  + entrypoint, schema files, and settings templates. Modifications
+  to hook contract libs or settings templates also classify as
+  MAJOR_BREAKING (path-only can't tell if a specific change is
+  breaking; conservative wins).
+- **Phase 0.5 probe — partial in-session run.** A bigger finding
+  than the original probe expected:
+  [`docs/architecture/phase-0.5-results.md`](docs/architecture/phase-0.5-results.md)
+  documents that **TaskCreate / TaskList / TaskUpdate aren't
+  exposed as tools** in this Claude Code build (verified for both
+  lead and a spawned `general-purpose` teammate). The
+  `~/.claude/tasks/<team>/` directory only contains a sentinel
+  `.lock` file. Bonus findings captured: full
+  `~/.claude/teams/<team>/config.json` member schema (including
+  `color`, `tmuxPaneId`, `backendType`, verbatim `prompt` capture);
+  `~/.claude/teams/<team>/inboxes/<recipient>.json` mailbox file
+  format; shutdown protocol field-name drift
+  (`shutdown_approved` vs documented `shutdown_response`); force-
+  cleanup via `rm -rf` works when `TeamDelete` blocks on stuck
+  members. v0.2-notes.md updated to reflect that the BLOCKING
+  upgrade of `task-dependency-gate.sh` and `task-complete-dispatch.sh`
+  is now gated on a Claude Code runtime feature, not a schema
+  confirmation.
+- **`hashed-edit` SKILL.md "Future enforcement" reasoning corrected.**
+  The auto-enforcement hook is gated on design (what counts as
+  stale, given Edit's exact-match semantics?), not on Phase 0.5.
+  Edit tool stdin shape was already known via the existing
+  `hi_old_string` / `hi_new_string` / `hi_file_path` primitives.
+
+**Stays deferred (reasons updated):**
+
+- **Hashed-edit runtime PreToolUse hook** — needs design pass on
+  whether the staleness check is stateless (compute hash from
+  `old_string` only, redundant with Edit's exact-match) or stateful
+  (track per-session "agent last read this file at hash X", refuse
+  Edit if file changed since). Stateful version requires a
+  per-session state store yakOS doesn't have yet.
+- **`yakos iterate-until` CLI subcommand** — keep deferred until
+  the procedural skill shape settles via real usage.
+
+**Not done (operator action):**
+
+- **shellcheck on the gate hook** — `shellcheck` not installed
+  system-wide; would require `brew install shellcheck` (system-level
+  change deferred to operator decision).
+- **Operator-driven Phase 0.5 probe** still useful for the
+  remaining open question: does `TaskCompleted` ever fire on this
+  Claude Code build? Run `tests/manual/phase-0.5-probe/` from a
+  fresh session if/when a build with `TaskCreate`/`TaskUpdate`
+  becomes available.
+
 ## [0.2.0.0] — 2026-04-29
 
 ### Added — pre-push version gate (Part B of the v0.2.0 build)

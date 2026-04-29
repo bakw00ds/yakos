@@ -133,12 +133,41 @@ fi
 # Gather changed files since the tag.
 CHANGED="$(git diff --name-only --diff-filter=ACMRT "$LAST_TAG..HEAD" 2>/dev/null || echo "")"
 NEW="$(git diff --name-only --diff-filter=A "$LAST_TAG..HEAD" 2>/dev/null || echo "")"
+DELETED="$(git diff --name-only --diff-filter=D "$LAST_TAG..HEAD" 2>/dev/null || echo "")"
 
-if [ -z "$CHANGED" ]; then
+if [ -z "$CHANGED" ] && [ -z "$DELETED" ]; then
     echo "yakos pre-push gate: no file changes since $LAST_TAG; allowing push" >&2
     log_decision allow "no-changes" none none
     exit 0
 fi
+
+# A path is "public surface" if removing it would break consumers.
+# Deletion of any of these → MAJOR_BREAKING.
+is_public_surface() {
+    case "$1" in
+        # Top-level framework agents/skills/rules/playbooks (external consumers)
+        lib/agents/*.md) return 0 ;;
+        lib/skills/*/SKILL.md) return 0 ;;
+        lib/rules/*.md) return 0 ;;
+        lib/playbooks/*.md) return 0 ;;
+        # Top-level Claude-Code hooks (default install surface)
+        lib/hooks/*.sh) return 0 ;;
+        # Per-domain validators (called by task-complete-dispatch)
+        lib/hooks/per-domain/*.sh) return 0 ;;
+        # Hook contract libraries (consumed by hook authors)
+        lib/hooks/lib/hook-input.sh|lib/hooks/lib/hook-output.sh) return 0 ;;
+        # CLI subcommands + entrypoint
+        cli/yakos) return 0 ;;
+        cli/lib/install.sh|cli/lib/uninstall.sh|cli/lib/init.sh|cli/lib/doctor.sh) return 0 ;;
+        cli/lib/validate.sh|cli/lib/archive.sh|cli/lib/status.sh|cli/lib/team.sh) return 0 ;;
+        cli/lib/update.sh|cli/lib/git-hooks.sh) return 0 ;;
+        # Schema files
+        *_schema.json|*-schema.json) return 0 ;;
+        # Settings templates (install-time surface)
+        lib/settings/*.template.json) return 0 ;;
+    esac
+    return 1
+}
 
 classify_file() {
     # Echo the classification for a path.
@@ -147,6 +176,15 @@ classify_file() {
     case "$path" in
         # Schema-defining files: major
         *_schema.json|*-schema.json|docs/architecture/*frontmatter*spec*) echo MAJOR_BREAKING; return ;;
+        # Hook contract libs (hook authors depend on these): modifications
+        # are MAJOR if they could change the contract — but path-only can't
+        # tell, so be conservative and flag as MAJOR_BREAKING.
+        lib/hooks/lib/hook-input.sh|lib/hooks/lib/hook-output.sh) echo MAJOR_BREAKING; return ;;
+        # Settings templates: install-time contract surface
+        lib/settings/*.template.json)
+            if [ "$is_new" = "1" ]; then echo MINOR_ADDITIVE; else echo MAJOR_BREAKING; fi
+            return
+            ;;
         # Doc paths: doc-only
         docs/*|*.md|README|README.*|LICENSE*|CONTRIBUTING*|CHANGELOG*|VERSION) echo DOC_ONLY; return ;;
         # Skills/agents/rules/playbooks: additive vs refinement
@@ -180,6 +218,22 @@ highest=DOC_ONLY
 declare -i n_doc=0 n_patch=0 n_minor=0 n_major=0
 classifications=""
 
+# First: classify deletions. Deletion of a public-surface file is
+# MAJOR_BREAKING (consumers depending on that path break). Deletion
+# of an internal file is PATCH_REFACTOR.
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if is_public_surface "$f"; then
+        cls=MAJOR_BREAKING
+        n_major=$((n_major + 1))
+    else
+        cls=PATCH_REFACTOR
+        n_patch=$((n_patch + 1))
+    fi
+    classifications="$classifications$cls (deleted) $f"$'\n'
+done <<< "$DELETED"
+
+# Then: classify the rest (additions, modifications, renames).
 while IFS= read -r f; do
     [ -n "$f" ] || continue
     is_new=0
