@@ -17,26 +17,39 @@ gets both.
 
 ## Status
 
-**v0.1.0** — initial release. Ships:
+**v0.2.2.0** — production-touching, audit-trail-first. Ships:
 
-- CLI for install / uninstall / doctor / init / validate / archive /
-  status / team-restart / update.
-- 8 reference hooks under `lib/hooks/` (2 BLOCKING, 4 LOG/AUDIT, 2
-  REPORT-only with documented UNCLEAR status).
-- 5 per-domain validators (backend / frontend / mobile / db /
-  changelog).
-- 7 generic agents + 11 skills + 4 cross-cutting rules. All under
-  the line budgets in [STYLE.md](STYLE.md).
-- Engineering standards documentation: [STYLE.md](STYLE.md),
-  [docs/engineering-standards.md](docs/engineering-standards.md),
-  [tests/README.md](tests/README.md).
-- Documentation: this README, [PHILOSOPHY.md](PHILOSOPHY.md),
-  [CUSTOMIZING.md](CUSTOMIZING.md), [MIGRATING.md](MIGRATING.md),
-  [COOKBOOK.md](COOKBOOK.md), [docs/team-shapes.md](docs/team-shapes.md),
-  [INCIDENT-CATALOG.md](INCIDENT-CATALOG.md),
-  [COMPATIBILITY.md](COMPATIBILITY.md).
+- **CLI**: install / uninstall / doctor (with `--probe-runtime`) / init
+  (with `--with-gate`) / validate / archive / status / team / update /
+  version-bump / git-hooks.
+- **8 reference Claude Code hooks** under `lib/hooks/` (path-allowlist,
+  secret-scan, mailbox-mirror, path-log, team-lifecycle, session-end-check
+  with team-inbox snapshot, task-dependency-gate, task-complete-dispatch).
+  5 per-domain validators (backend / frontend / mobile / db / changelog).
+- **1 git hook**: pre-push version gate (`lib/hooks/git/`) with
+  classification-aware enforcement and NDJSON audit trail at
+  `~/.yakos-state/gate-log.ndjson`.
+- **12 generic agents** under the 80–140 line budget. Cross-cutting
+  roles (lead-template, planner, code-reviewer, security-reviewer,
+  test-runner, troubleshooter, doc-writer, maintainer) + stack-specialist
+  templates with `extends:` deployment (backend, frontend, mobile,
+  database).
+- **16 skills** under `lib/skills/` including: contract-handoff,
+  dispatch-as-project-agent (workaround for project-agent runtime
+  non-discovery), hashed-edit (OMA-inspired stale-line catch),
+  iterate-until (formal "loop until human-checkable verifier passes"),
+  version-bump (4-part semver with `[Unreleased]` promote-on-bump),
+  release-audit/ scaffolding (templates + 7 auditor sub-agents).
+- **Posture made explicit**: PHILOSOPHY.md "Human-in-the-loop by
+  design" section. yakOS optimizes for production-touching work in
+  audit-sensitive domains, not autonomous-first prototyping.
+- **Phase 0.5 findings documented**: project-level `.claude/agents/`
+  files aren't runtime-discoverable as `subagent_type` (Claude Code
+  limitation, workaround via `dispatch-as-project-agent` skill).
+  TaskCreate/TaskList/TaskUpdate not exposed in current Claude Code
+  build. Both findings tracked in `INCIDENT-CATALOG.md`.
 
-See [CHANGELOG.md](CHANGELOG.md) for what landed in each batch.
+See [CHANGELOG.md](CHANGELOG.md) for what landed in each release.
 
 ## Prerequisites
 
@@ -103,14 +116,36 @@ any project-specific skills.
 ## Verify and operate
 
 ```sh
-yakos doctor                 # environment + install health
-yakos doctor /path/to/proj   # also checks for hook drift
-yakos validate               # standards check on framework lib/
-yakos validate /path/to/proj # standards check on project's .claude/
-yakos status <project>       # per-project dashboard
-yakos archive <project> <tag>  # roll work/current/ → work/archive/<tag>/
-yakos team restart <project>   # archive + relaunch instructions
+yakos doctor                       # environment + install health
+yakos doctor /path/to/proj         # also checks hook drift + gate status
+yakos doctor --probe-runtime       # report Claude Code runtime feature state
+yakos validate                     # standards check on framework lib/
+yakos validate /path/to/proj       # standards check on project's .claude/
+yakos status <project>             # per-project dashboard
+yakos archive <project> <tag>      # roll work/current/ → work/archive/<tag>/
+yakos team restart <project>       # archive + relaunch instructions
 ```
+
+## Releasing — version-bump + pre-push gate
+
+YakOS uses four-part semver (`major.minor.patch.hotfix`) and ships a
+pre-push gate that refuses substantive code changes without a matching
+VERSION bump.
+
+```sh
+# Inside the project repo (run once):
+yakos git-hooks install     # installs the pre-push gate
+
+# Each release:
+yakos version-bump --component {major|minor|patch|hotfix}
+git push                    # gate verifies VERSION bump matches change scope
+```
+
+If `[Unreleased]` has substantive content, `version-bump` PROMOTES it
+to a versioned header (rename) instead of inserting beside it. Bump
+semantics are documented in [STYLE.md §8](STYLE.md). Gate audit trail
+at `~/.yakos-state/gate-log.ndjson`. Override:
+`YAKOS_GATE_DISABLE=1 git push` (logged).
 
 ## Update
 
@@ -176,28 +211,38 @@ Engineering:
 - [lib/hooks/README.md](lib/hooks/README.md) — hook authoring contract
 - [tests/README.md](tests/README.md) — test layout
 
-## Not in v0.1
+## Not in v0.2.x
 
-- **PandaOS migration as a worked example.** The first real
-  before/after migration story is Phase 8, post-v0.1 (separate
-  Claude Code session). Until then,
-  [MIGRATING.md](MIGRATING.md) describes the mechanics without an
-  end-to-end case study.
+Tracked roadmap items, gated for clear reasons:
+
 - **The architect, incident-responder, log-analyst, devops-infra,
   performance-engineer, privacy-reviewer, accessibility-reviewer, and
-  ux-reviewer agents.** Roadmap in
-  [docs/team-shapes.md](docs/team-shapes.md).
-- **`task-dependency-gate.sh` and `task-complete-dispatch.sh` ship as
-  REPORT-only.** Phase 0 didn't dump the TaskCompleted stdin schema.
-  v0.2 needs a small probe to flip them to BLOCKING. Both have the
-  routing logic in place; v0.1 logs the decision they would make.
-- **Auto-migration tooling.** v0.1 expects manual migration per
-  [MIGRATING.md](MIGRATING.md). A `yakos migrate` may show up in v0.2.
-- **Multi-team coordination, cross-machine teams, auto-team-shape
-  suggestion, and PandaOS migration.** See the per-doc "Not in v0.1"
-  sections for specifics.
-- **Specialist refinement against real use.** Phase 7 — opens *after*
-  1–3 weeks of real use produce evidence on what to refine.
+  ux-reviewer agents.** Cross-cutting roster per
+  [docs/team-shapes.md](docs/team-shapes.md). Add as concrete demand
+  surfaces from real use.
+- **`task-dependency-gate.sh` and `task-complete-dispatch.sh` BLOCKING
+  upgrade.** Was scheduled for v0.2; gated on a Claude Code runtime
+  feature (TaskCreate/TaskUpdate not currently exposed — see
+  [`docs/architecture/phase-0.5-results.md`](docs/architecture/phase-0.5-results.md)
+  and `incident:v0.2.1-task-tools-not-exposed`).
+- **Hashed-edit runtime PreToolUse hook.** Helper scripts ship in
+  `lib/skills/hashed-edit/`; the auto-enforcement hook needs design
+  pass on stateless vs stateful staleness check.
+- **`yakos iterate-until` CLI subcommand.** Procedural skill ships at
+  `lib/skills/iterate-until/`; lift into a CLI once the procedural
+  shape settles via real usage.
+- **Multi-model category routing.** Design-only for v0.3+; current
+  `model: opus|sonnet|haiku` agent-frontmatter primitive is the seed.
+- **Composable middleware-style hooks.** Refactor of the existing 8
+  hooks into a stackable middleware pipeline. Defer until next hook
+  addition forces the issue.
+- **Skill-embedded MCPs.** Requires MCP infrastructure yakOS doesn't
+  have yet.
+- **npm packaging + i18n + multi-language docs.** Strategic decisions
+  gated on going-public. Currently solo-multiplier-shaped.
+- **Per-session state store.** Would unlock the stateful hashed-edit
+  hook and other features. Design pass needed (file-based JSON,
+  SQLite, per-process?).
 
 ## License
 

@@ -3,5 +3,3 @@ cli/lib/uninstall.sh
 cli/lib/init.sh
 cli/lib/doctor.sh
 cli/yakos
-lib/hooks/lib/hook-input.sh
-lib/hooks/lib/hook-output.sh

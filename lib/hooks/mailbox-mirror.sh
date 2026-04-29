@@ -7,6 +7,13 @@
 #
 # Phase 1.7 confirmed clean: SendMessage is hookable, the hook payload
 # carries full body, sender (.agent_type — absent = lead), and recipient.
+#
+# Companion to this live-fire hook: Phase 0.5 (2026-04-29) found the
+# durable on-disk inbox at ~/.claude/teams/<team>/inboxes/<recipient>.json.
+# Peer-to-peer DMs that don't transit the lead's hook context still
+# land there. session-end-check.sh snapshots those inbox files into
+# work/current/team-inboxes/ at session end as a complementary audit
+# path.
 
 set -eu
 

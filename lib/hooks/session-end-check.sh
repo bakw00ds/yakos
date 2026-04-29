@@ -180,6 +180,33 @@ if command -v ct_dir_size_bytes >/dev/null 2>&1; then
     scratchpad_bytes="$(ct_dir_size_bytes "$current_dir")"
 fi
 
+# Snapshot team mailbox inbox files into the session audit log. Per
+# Phase 0.5 (2026-04-29), `~/.claude/teams/<team>/inboxes/<recipient>.json`
+# is the durable on-disk record of every peer DM — including
+# peer-to-peer DMs that never transit the lead's hook context. The
+# PreToolUse `mailbox-mirror.sh` hook captures live SendMessage calls,
+# but it can miss messages routed teammate-to-teammate. Snapshotting
+# at session end ensures the full peer-DM history lands in the audit
+# trail. Per the no-block telemetry policy, every step is guarded.
+teams_dir="$HOME/.claude/teams"
+if [ -d "$teams_dir" ] && [ -n "$team_name" ]; then
+    inbox_src="$teams_dir/$team_name/inboxes"
+    if [ -d "$inbox_src" ]; then
+        snapshot_dst="$current_dir/team-inboxes"
+        mkdir -p "$snapshot_dst" 2>/dev/null || true
+        snap_count=0
+        for f in "$inbox_src"/*.json; do
+            [ -f "$f" ] || continue
+            base="$(basename -- "$f")"
+            cp "$f" "$snapshot_dst/${base}" 2>/dev/null && snap_count=$((snap_count + 1)) || true
+        done
+        if [ "$snap_count" -gt 0 ] && command -v jq >/dev/null 2>&1; then
+            ho_log "session-end-check" "REPORT" "pass" "snapshotted $snap_count inbox file(s) from team $team_name" \
+                "$(jq -nc --arg t "$team_name" --argjson n "$snap_count" '{team: $t, inbox_files: $n}' 2>/dev/null)" 2>/dev/null || true
+        fi
+    fi
+fi
+
 if command -v jq >/dev/null 2>&1; then
     jq -nc \
         --arg ts_start "${ts_start:-}" \

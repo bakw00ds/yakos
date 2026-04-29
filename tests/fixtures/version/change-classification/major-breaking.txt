@@ -1,4 +1,6 @@
 lib/agents/_schema.json
 lib/skills/_schema.json
 docs/architecture/phase-1.5-frontmatter-spec.md
+lib/hooks/lib/hook-input.sh
+lib/hooks/lib/hook-output.sh
 lib/hooks/lib/hook-input-schema.json

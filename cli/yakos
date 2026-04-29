@@ -35,29 +35,34 @@ Usage:
     yakos --version | -v
     yakos --help    | -h
 
-Functional commands (Batch 1A):
+Install / lifecycle:
     install       Install YakOS into ~/.claude (per-file symlinks +
                   safe settings.json merge)
     uninstall     Remove YakOS-owned symlinks. Auto-memory at
                   ~/.claude/projects/ is NEVER touched.
-    doctor        Verify install + environment health
+    update        git pull on the framework + refresh symlinks; reports
+                  changed files and applied commits.
+    doctor        Verify install + environment health.
+                  Args: [<project-path>] [--probe-runtime]
     --version     Print the version
     --help        Print this help
 
-Stub commands (will be implemented in Batch 1B):
-    update        git pull + relink with change reporting
+Project bootstrap / inspection:
     init          Bootstrap a project's ~/agent-control/<name>/
-    validate      Schema + reference validation
+                  Args: <name> --project <path> [--force] [--with-gate]
+    validate      Schema + reference validation (framework or project)
+                  Args: [<project-path>] [--all]
     archive       Roll work/current/ into work/archive/<tag>/
     status        Per-project dashboard
     team          Team lifecycle (e.g. 'yakos team restart <project>')
 
-Release / version commands:
-    version-bump  Bump VERSION + prepend CHANGELOG entry (and commit)
+Release / version:
+    version-bump  Bump VERSION + prepend CHANGELOG entry (and commit).
+                  Promotes [Unreleased] when it has substantive content.
                   Args: --component {major|minor|patch|hotfix}
                         [--message <text>] [--no-commit]
-    git-hooks     Install / uninstall / status the pre-push version gate
-                  Args: install | uninstall | status
+    git-hooks     Install / uninstall / status the pre-push version gate.
+                  Args: install | uninstall | status [--force]
 
 Examples:
     yakos install

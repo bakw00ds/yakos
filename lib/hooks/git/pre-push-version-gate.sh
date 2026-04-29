@@ -10,7 +10,7 @@
 #   YAKOS_GATE_VERBOSE=1   print classification breakdown
 # Outputs:
 #   stdout/stderr: human-readable status messages
-#   ~/.yakos/gate-log.ndjson: append-only audit trail (allow/refuse/override)
+#   ~/.yakos-state/gate-log.ndjson: append-only audit trail (allow/refuse/override)
 # Exit codes: 0 push allowed, 1 push refused, 2 internal error
 #
 # Classification by path:
@@ -33,7 +33,7 @@ set -euo pipefail
 
 # ---- Setup -----------------------------------------------------------------
 
-GATE_LOG_DIR="${YAKOS_GATE_LOG_DIR:-$HOME/.yakos}"
+GATE_LOG_DIR="${YAKOS_GATE_LOG_DIR:-$HOME/.yakos-state}"
 GATE_LOG="${GATE_LOG_DIR}/gate-log.ndjson"
 
 log_decision() {
@@ -172,6 +172,11 @@ is_public_surface() {
 classify_file() {
     # Echo the classification for a path.
     # $1=path, $2=is-new (1 or 0)
+    #
+    # Order matters: more-specific patterns first. The doc-paths case
+    # below uses `*.md` which would otherwise swallow framework markdown
+    # files (lib/agents/*.md etc.); those need their own classification
+    # rule first. v0.2.1.0 had this bug — fixture-runner caught it.
     local path="$1" is_new="$2"
     case "$path" in
         # Schema-defining files: major
@@ -185,9 +190,8 @@ classify_file() {
             if [ "$is_new" = "1" ]; then echo MINOR_ADDITIVE; else echo MAJOR_BREAKING; fi
             return
             ;;
-        # Doc paths: doc-only
-        docs/*|*.md|README|README.*|LICENSE*|CONTRIBUTING*|CHANGELOG*|VERSION) echo DOC_ONLY; return ;;
-        # Skills/agents/rules/playbooks: additive vs refinement
+        # Skills/agents/rules/playbooks: additive vs refinement.
+        # Must come before docs case — *.md would otherwise match these.
         lib/agents/*|lib/skills/*|lib/rules/*|lib/playbooks/*)
             if [ "$is_new" = "1" ]; then echo MINOR_ADDITIVE; else echo PATCH_REFINEMENT; fi
             return
@@ -200,6 +204,8 @@ classify_file() {
             ;;
         # CLI internals: refactor
         cli/lib/*|cli/yakos) echo PATCH_REFACTOR; return ;;
+        # Doc paths: doc-only (top-level docs + anything under docs/)
+        docs/*|README|README.*|LICENSE*|CONTRIBUTING*|CHANGELOG*|VERSION|*.md) echo DOC_ONLY; return ;;
         # Tests, fixtures: doc-class for gating purposes (test-only changes
         # don't need a version bump under our v0.2 rules)
         tests/*) echo DOC_ONLY; return ;;
@@ -316,7 +322,7 @@ echo "  yakos version-bump --component $required" >&2
 echo "  git push   # retry" >&2
 echo "" >&2
 echo "To override (use only when you know what you're doing):" >&2
-echo "  YAKOS_GATE_DISABLE=1 git push   # logged to $GATE_LOG" >&2
+echo "  YAKOS_GATE_DISABLE=1 git push   # logged to $GATE_LOG (NDJSON audit)" >&2
 echo "" >&2
 
 log_decision refuse "version-not-bumped" "$required" none

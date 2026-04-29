@@ -36,14 +36,14 @@ project's installed copy and the framework version.
 Every project-local pre-push hook honors:
 
 - `YAKOS_GATE_DISABLE=1 git push` — bypass the gate. Logged to
-  `~/.yakos/gate-log.ndjson` with reason `YAKOS_GATE_DISABLE=1`.
+  `~/.yakos-state/gate-log.ndjson` with reason `YAKOS_GATE_DISABLE=1`.
 - `git push --no-verify` — bypasses ALL git hooks (not just YakOS's).
   Native git mechanism. Use sparingly.
 
 ## Audit trail
 
 Every gate decision (allow / refuse / override / error) appends one
-NDJSON line to `~/.yakos/gate-log.ndjson` with timestamp, repo path,
+NDJSON line to `~/.yakos-state/gate-log.ndjson` with timestamp, repo path,
 HEAD SHA, last tag, decision, required tier, actual bump, and reason.
 
 This is the canonical record. If a push happened, the gate either

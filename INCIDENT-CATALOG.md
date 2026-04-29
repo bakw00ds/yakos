@@ -297,6 +297,126 @@ review.
 
 ---
 
+## incident:v0.2.0-project-agent-runtime-non-discovery
+
+**Date:** 2026-04-28
+**Project:** YakOS itself (Phase 8 PandaOS migration probe + v0.2 re-test)
+**Severity:** P2 — feature works on disk, doesn't work at runtime
+
+**Summary:** Project-level agents at `<project>/.claude/agents/<role>.md`
+are NOT discoverable as `subagent_type` values by the Claude Code
+Agent tool, even within a `TeamCreate` context, even with the file
+present at the session's `cwd/.claude/agents/` from session start
+(retest 2026-04-28 confirmed all three discovery paths fail).
+The Agent tool resolves only the runtime built-ins
+(`general-purpose`, `Explore`, `Plan`, `claude-code-guide`,
+`statusline-setup`).
+
+**Impact:** YakOS's per-project agent design (project-specific
+specialists override or extend framework templates) is documentary
+only — the on-disk discipline doesn't bind at runtime. Multi-agent
+dispatch with project-scoped discipline requires the
+`dispatch-as-project-agent` skill (general-purpose + injected agent
+body) as a workaround.
+
+**Root cause:** Claude Code limitation, not a YakOS one. The
+runtime's agent-type registry doesn't enumerate
+`<cwd>/.claude/agents/` or any `--add-dir`'d directory.
+
+**Prevented by:**
+- `skill:dispatch-as-project-agent` (yakOS v0.2.0.0) — the workable
+  dispatch pattern. Documents what the spawned agent loses (hook
+  coverage, TaskList integration, mailbox routing) and the lead's
+  manual-pass responsibilities.
+- Documentation in `docs/team-shapes.md` "Runtime dispatch in v0.1"
+  section spells out what works and what doesn't.
+
+**Related rules / agents:** `lib/skills/dispatch-as-project-agent/SKILL.md`,
+`docs/team-shapes.md`.
+
+---
+
+## incident:v0.2.1-task-tools-not-exposed
+
+**Date:** 2026-04-29
+**Project:** YakOS itself (Phase 0.5 probe)
+**Severity:** P2 — planned BLOCKING upgrade now gated on a runtime
+feature
+
+**Summary:** During the in-session Phase 0.5 probe, neither the lead
+nor a spawned `general-purpose` teammate has access to `TaskCreate`,
+`TaskList`, or `TaskUpdate`. The team-task coordination primitive
+documented in `TeamCreate`'s description isn't implemented as exposed
+tools in this Claude Code build. The `~/.claude/tasks/<team>/`
+directory is created at TeamCreate time but contains only a sentinel
+empty `.lock` file because nothing has the tools to populate it.
+
+**Impact:** YakOS's planned v0.2 BLOCKING upgrade for
+`task-dependency-gate.sh` and `task-complete-dispatch.sh` (both
+REPORT-only since v0.1) is now blocked on a Claude Code runtime
+feature, not just a schema confirmation. If `TaskCreate`/`TaskUpdate`
+aren't tools, `TaskCompleted` may never fire regardless of stdin
+shape.
+
+**Root cause:** Claude Code build state — the docs reference these
+tools but they aren't wired in this version. Either build-flag
+gated, removed but not documented, or available only in a different
+Claude Code variant (Cowork, Anthropic-hosted teams, OpenCode).
+
+**Prevented by:**
+- `task-dependency-gate.sh` and `task-complete-dispatch.sh` stay
+  REPORT-only until either (a) a Claude Code build with TaskCreate
+  arrives, or (b) an alternate trigger mechanism is identified.
+- `yakos doctor --probe-runtime` (v0.2.2.0) detects the absence
+  programmatically and reports it.
+- `docs/architecture/phase-0.5-results.md` documents the finding +
+  what was captured + what remains unclear.
+
+**Related rules / agents:** `lib/hooks/task-dependency-gate.sh`,
+`lib/hooks/task-complete-dispatch.sh`,
+`docs/architecture/phase-0.5-results.md`.
+
+---
+
+## incident:v0.2.1-shutdown-protocol-drift
+
+**Date:** 2026-04-29
+**Project:** YakOS itself (Phase 0.5 probe; opportunistic finding)
+**Severity:** P3 — operational nuisance; manual workaround exists
+
+**Summary:** The lead-side shutdown protocol documented in
+`SendMessage`'s description (`shutdown_request` →
+`shutdown_response` with `request_id`) doesn't match what the
+runtime actually emits. A spawned teammate replied with
+`{"type":"shutdown_approved","requestId":"...","paneId":"in-process","backendType":"in-process"}`
+— field-name drift (`shutdown_approved` vs `shutdown_response`,
+`requestId` vs `request_id`). The teammate then continued to be
+considered "active" by the team-state tracker; three subsequent
+`TeamDelete` calls (8s, 20s, 30s waits) all returned "Cannot
+cleanup team with 1 active member(s)". Force-cleanup via
+`rm -rf ~/.claude/teams/<team> ~/.claude/tasks/<team>` works.
+
+**Impact:** Teams created in a session can't always be cleaned up
+via `TeamDelete`. Each stuck team leaks a small amount of
+filesystem state into `~/.claude/teams/` until force-cleaned.
+
+**Root cause:** Schema drift between docs and runtime. The
+`tmuxPaneId: "in-process"` backend may not honor process termination
+at all — there's no separate process to kill; the "teammate" is a
+record that the harness considers alive until something it doesn't
+surface changes its state.
+
+**Prevented by:**
+- `team-lifecycle.sh` (REPORT-only in v0.1; v0.3 candidate to
+  surface stuck-team detection).
+- Operator runbook: when `TeamDelete` blocks, force-cleanup via
+  `rm -rf ~/.claude/teams/<team> ~/.claude/tasks/<team>`.
+
+**Related rules / agents:** `lib/hooks/team-lifecycle.sh`,
+`docs/architecture/phase-0.5-results.md`.
+
+---
+
 ## Adding new incidents
 
 When an incident concludes:

@@ -299,13 +299,141 @@ provider routing:
 
 ---
 
-## Not in v0.1
+## Pattern 6: Dispatching with project-agent discipline
+
+**When:** the lead wants to dispatch role-specific work (backend /
+frontend / mobile / database / etc.) and the project has agent
+definitions under `.claude/agents/` — but the runtime doesn't
+discover those as `subagent_type` values (Phase 0.5 finding;
+incident:v0.2.0-project-agent-runtime-non-discovery).
+
+### Flow
+
+```
+1. Lead reads <project>/.claude/agents/<role>.md.
+2. If frontmatter declares `extends: <framework-template>`, lead
+   also reads <yakos>/lib/agents/<framework-template>.md.
+3. Lead spawns: Agent({
+     subagent_type: "general-purpose",
+     prompt: <preamble> + <framework body> + <project body> + <task>
+   })
+4. On return, lead audits the diff and runs validators manually
+   (per-domain validators don't fire on injected dispatch).
+5. Lead mirrors any decisions to decisions.md.
+```
+
+The skill at [`lib/skills/dispatch-as-project-agent/`](lib/skills/dispatch-as-project-agent/SKILL.md)
+documents the procedure + what the spawned agent loses (hook
+coverage, TaskList integration, mailbox routing) and the lead's
+manual-pass responsibilities.
+
+When Claude Code adds project-agent discovery, this pattern becomes
+unnecessary — the on-disk discipline binds at runtime.
+
+---
+
+## Pattern 7: Hash-anchored edits for long sessions
+
+**When:** editing a large file across many turns. The agent's stored
+context of "what line N contains" can drift from the file's actual
+state if other tool calls have rewritten the line.
+
+### Flow
+
+```
+1. Read the target region with hash anchors:
+     bash lib/skills/hashed-edit/scripts/read-with-hashes.sh \
+       <file> --start <N> --end <M>
+   Output: <lineno>#<hash>|<content> per line.
+
+2. Plan the edit. Reference the line by anchor (e.g. "42#a3f1"),
+   not by line number alone.
+
+3. Apply via:
+     bash lib/skills/hashed-edit/scripts/edit-by-hash.sh \
+       <file> 42#a3f1 "<new content>"
+   On hash mismatch: exit 5 + diff. Re-read, re-reason, retry.
+```
+
+Adapted from [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)'s
+hashline_edit pattern. Use for risk-asymmetric edits (migrations,
+secrets-adjacent config) and concurrent-write scenarios. For trivial
+single-line edits in a single agent's session, the standard `Edit`
+tool's exact-match is enough.
+
+---
+
+## Pattern 8: Iterate until verifier passes
+
+**When:** a fix needs work-then-verify-then-refine cycles. A test
+needs to pass, a lint count needs to drop, a build needs to compile.
+
+### Flow
+
+```
+1. Lead defines the verifier — a single shell command (or yakos
+   subcommand, or hook) that exits 0 on pass.
+2. Lead caps iterations (default --max-iter 3).
+3. For each iteration: specialist applies fix → run verifier →
+   if pass: break. If fail: log diff + verifier output to
+   work/current/iterations/<task-id>/<i>.md, feed back as input
+   to next iteration.
+4. On cap: lead surfaces the full iteration history to the human.
+   No silent cap-exceeding.
+```
+
+The skill at [`lib/skills/iterate-until/`](lib/skills/iterate-until/SKILL.md)
+documents the contract. Verifier is **never** the agent's own
+judgement — always a human-checkable command/hook/check. yakOS-
+flavored Ralph Loop with hard cap and audit trail.
+
+---
+
+## Pattern 9: Releasing with version-bump + pre-push gate
+
+**When:** shipping a release for any project (yakOS itself or any
+yakOS-managed project that runs `yakos git-hooks install`).
+
+### One-time setup (per project)
+
+```sh
+yakos git-hooks install   # installs <repo>/.git/hooks/pre-push
+```
+
+### Per-release flow
+
+```sh
+# 1. Land your changes; let [Unreleased] in CHANGELOG accumulate
+#    substantive entries describing what shipped.
+
+# 2. Bump:
+yakos version-bump --component {major|minor|patch|hotfix}
+# If [Unreleased] has content: PROMOTED to versioned header
+# (rename) + fresh empty [Unreleased] above.
+# If empty: --message bullet inserted under [Unreleased].
+
+# 3. Tag + push:
+git tag -a v$(cat VERSION) -m "release v$(cat VERSION)"
+git push origin main && git push origin v$(cat VERSION)
+# Pre-push gate verifies VERSION change matches diff classification.
+```
+
+Bump tier semantics in [STYLE.md §8](STYLE.md). Override:
+`YAKOS_GATE_DISABLE=1 git push` (logged to
+`~/.yakos-state/gate-log.ndjson`).
+
+---
+
+## Not in v0.2.x
 
 - **Multi-team coordination.** A "team-of-teams" pattern (a release
-  manager coordinating across feature teams) isn't a primitive in
-  v0.1. v0.2+ if real demand surfaces.
+  manager coordinating across feature teams) isn't a primitive yet.
+  v0.3+ if real demand surfaces.
 - **Resumable interrupted teams.** If a team session crashes mid-
   flight, recovery is via the `session-recovery` skill, but the
   task list state may not be perfectly aligned with reality —
   reconciliation is manual.
-- **Cross-machine teams.** Single-machine in v0.1.
+- **Cross-machine teams.** Single-machine throughout v0.2.x.
+- **Native runtime dispatch of project agents.** Project-level
+  `.claude/agents/` not discoverable as `subagent_type`; use
+  `dispatch-as-project-agent` skill (Pattern 6).

@@ -79,7 +79,7 @@ cmd_install() {
     chmod +x "$dst"
     ct_sha256 "$GATE_SRC" > "$hash_sibling"
     ct_log "pre-push gate installed at $dst"
-    ct_log "  to override: YAKOS_GATE_DISABLE=1 git push   (logged to ~/.yakos/gate-log.ndjson)"
+    ct_log "  to override: YAKOS_GATE_DISABLE=1 git push   (logged to ~/.yakos-state/gate-log.ndjson)"
     ct_log "  to remove:   yakos git-hooks uninstall"
 }
 

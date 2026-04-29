@@ -1,0 +1,106 @@
+name: CI
+
+# YakOS framework CI. Runs on every PR + every push to main.
+# Jobs are cheap and fail fast: shellcheck, validate, fixture suite.
+# Heavier integration tests (init/install/doctor/uninstall flow) run
+# on a single Linux runner — adding macOS doubles cost without proving
+# much given v0.1's bash 3.2 floor is the binding constraint.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update -y && sudo apt-get install -y shellcheck
+      - name: Lint shell scripts
+        run: |
+          # Lint all shell scripts under cli/, lib/hooks/, lib/skills/.
+          # Use SC1091 disable for sourced files we don't have on the
+          # ubuntu runner's path.
+          set -e
+          # shellcheck source=/dev/null
+          find cli lib/hooks lib/skills tests -type f -name '*.sh' \
+            -not -name '*.framework-hash' \
+            -print0 \
+            | xargs -0 shellcheck -S warning -e SC1091 -x
+
+  validate:
+    name: yakos validate (framework)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq + python3
+        run: sudo apt-get update -y && sudo apt-get install -y jq python3
+      - name: Run yakos validate
+        run: |
+          ./cli/yakos validate
+          # Fail if any error-level findings (warnings are OK in v0.2.x)
+          ./cli/yakos validate 2>&1 | grep -E '^Summary:' | grep -E '0 error\(s\)'
+
+  fixture-suite:
+    name: pre-push gate fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run version-gate fixture runner
+        run: |
+          ./tests/run-version-gate-fixtures.sh
+
+  hook-fixtures:
+    name: hook fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq
+        run: sudo apt-get update -y && sudo apt-get install -y jq
+      - name: Run hook fixture suite
+        run: |
+          if [ -x ./tests/run-hook-fixtures.sh ]; then
+            ./tests/run-hook-fixtures.sh
+          else
+            echo "tests/run-hook-fixtures.sh not present or not executable; skipping"
+          fi
+
+  install-flow:
+    name: install / init / doctor / uninstall (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq + python3
+        run: sudo apt-get update -y && sudo apt-get install -y jq python3
+      - name: yakos install (against the runner's $HOME)
+        run: |
+          ./cli/yakos install
+      - name: yakos doctor
+        run: |
+          ./cli/yakos doctor
+      - name: bootstrap a throwaway project
+        run: |
+          set -e
+          tmp=$(mktemp -d)
+          cd "$tmp"
+          git init -q -b main
+          git config user.email ci@yakos.test
+          git config user.name "yakos-ci"
+          echo "0.1.0.0" > VERSION
+          echo "# probe" > README.md
+          git add . && git commit -qm initial
+          cd "$GITHUB_WORKSPACE"
+          ./cli/yakos init smoketest --project "$tmp" --with-gate
+          ./cli/yakos doctor "$tmp"
+          ./cli/yakos validate "$tmp"
+          # Confirm pre-push gate landed
+          test -x "$tmp/.git/hooks/pre-push"
+          test -f "$tmp/.git/hooks/pre-push.framework-hash"
+      - name: yakos uninstall
+        run: |
+          ./cli/yakos uninstall

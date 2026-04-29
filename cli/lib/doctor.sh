@@ -11,11 +11,12 @@ set -eu
 . "$YAKOS_LIB/compat.sh"
 
 PROJECT_PATH=""
+PROBE_RUNTIME=0
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
             cat <<EOF
-yakos doctor [<project-path>] — verify YakOS install + environment health
+yakos doctor [<project-path>] [--probe-runtime] — verify YakOS install + environment health
 
 Without arguments, checks:
     Required commands (bash, git, jq)
@@ -31,8 +32,17 @@ If <project-path> is passed, additionally checks:
     against its .framework-hash sibling (written by 'yakos init') and
     surfaces DRIFT (informational, not an error — projects are expected
     to customize).
+    Pre-push version gate installation status and drift.
 
-Usage: yakos doctor [<project-path>]
+If --probe-runtime is passed, additionally reports:
+    Filesystem-side state of Claude Code Agent Teams (~/.claude/teams/,
+    ~/.claude/tasks/, count of active teams, inbox files).
+    The last known state of in-session-only runtime tools (TaskCreate /
+    TaskList / TaskUpdate) recorded at ~/.yakos-state/runtime-probe.json.
+    The exact prompt to ask in a Claude Code session to refresh the
+    last-known state.
+
+Usage: yakos doctor [<project-path>] [--probe-runtime]
 
 Exit code:
     0   No errors (warnings/info/drift OK)
@@ -40,6 +50,7 @@ Exit code:
 EOF
             exit 0
             ;;
+        --probe-runtime) PROBE_RUNTIME=1 ;;
         --*)
             ct_die "doctor: unknown flag '$arg'"
             ;;
@@ -281,6 +292,86 @@ done
 echo ""
 info "(All integrations above are optional. See COMPATIBILITY.md and COOKBOOK.md for usage.)"
 echo ""
+
+# ---- runtime feature probe (--probe-runtime only) -------------------------
+#
+# Doctor is a shell script; it can't actually call Claude Code's
+# ToolSearch / Agent / TeamCreate to probe runtime tool availability.
+# What it can do: report filesystem-side state, surface the last-known
+# state of session-only tools (recorded by an in-session probe at
+# ~/.yakos-state/runtime-probe.json), and tell the operator the exact prompt
+# to refresh that state.
+
+if [ "$PROBE_RUNTIME" = "1" ]; then
+    echo "Claude Code runtime feature probe"
+
+    # Filesystem-side state — directly observable.
+    teams_dir="$HOME/.claude/teams"
+    tasks_dir="$HOME/.claude/tasks"
+    if [ -d "$teams_dir" ]; then
+        n_teams="$(find "$teams_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+        ok "$teams_dir/ exists ($n_teams team(s))"
+    else
+        info "$teams_dir/ does not exist (no teams created yet)"
+    fi
+    if [ -d "$tasks_dir" ]; then
+        n_tasks="$(find "$tasks_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+        n_tasksfiles="$(find "$tasks_dir" -type f ! -name '.lock' 2>/dev/null | wc -l | tr -d ' ')"
+        if [ "$n_tasksfiles" = "0" ] && [ "$n_tasks" -gt 0 ]; then
+            info "$tasks_dir/ has $n_tasks team dir(s); 0 task files (consistent with TaskCreate not exposed; see incident:v0.2.1-task-tools-not-exposed)"
+        else
+            info "$tasks_dir/ has $n_tasks team dir(s), $n_tasksfiles task file(s)"
+        fi
+    else
+        info "$tasks_dir/ does not exist (no teams created yet)"
+    fi
+    n_inboxes="$(find "$teams_dir" -path '*/inboxes/*.json' 2>/dev/null | wc -l | tr -d ' ')"
+    info "mailbox files (inboxes/*.json): $n_inboxes across all teams"
+    echo ""
+
+    # In-session tools — reported from the last in-session probe artifact,
+    # if one exists.
+    probe_file="$HOME/.yakos-state/runtime-probe.json"
+    echo "In-session tool availability (last known state):"
+    if [ -f "$probe_file" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            ts="$(jq -r '.timestamp // "unknown"' "$probe_file" 2>/dev/null)"
+            cc_ver="$(jq -r '.claude_code_version // "unknown"' "$probe_file" 2>/dev/null)"
+            info "Last probe: $ts (Claude Code build: $cc_ver)"
+            for tool in TaskCreate TaskList TaskUpdate; do
+                state="$(jq -r --arg t "$tool" '.tools[$t] // "unknown"' "$probe_file" 2>/dev/null)"
+                case "$state" in
+                    available)    ok "$tool: AVAILABLE" ;;
+                    unavailable)  info "$tool: NOT AVAILABLE" ;;
+                    *)            info "$tool: $state" ;;
+                esac
+            done
+        else
+            info "(install jq for richer probe-file parsing)"
+            info "  raw probe file at: $probe_file"
+        fi
+    else
+        info "no probe file found at $probe_file"
+        info "  per the most recent in-session probe (2026-04-29):"
+        info "  TaskCreate / TaskList / TaskUpdate: NOT AVAILABLE in this Claude Code build"
+        info "  see docs/architecture/phase-0.5-results.md and incident:v0.2.1-task-tools-not-exposed"
+    fi
+    echo ""
+
+    echo "To refresh the last-known state, run this prompt in a Claude Code session:"
+    cat <<'EOF'
+
+  Run this in your next Claude Code session to refresh the runtime probe:
+
+      Run ToolSearch with query "select:TaskCreate,TaskList,TaskUpdate".
+      Report each tool as "available" if a schema returned, or "unavailable"
+      if "No matching deferred tools found". Then write the result to
+      ~/.yakos-state/runtime-probe.json with shape:
+      {"timestamp":"<iso>","claude_code_version":"<env>","tools":{"TaskCreate":"available|unavailable",...}}
+
+EOF
+    echo ""
+fi
 
 # ---- summary ----------------------------------------------------------------
 

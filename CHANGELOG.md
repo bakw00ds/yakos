@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2.0] — 2026-04-29
+
+### Added — runtime probe + audit polish + framework-side CI
+
+Closing the "What else can improve yakOS?" survey. 10 items shipped;
+8 explicitly deferred with reasons. v0.2.x now has CI, a runtime
+feature probe, an inbox-snapshot audit path, a fixture-driven
+classification test, and a substantively refreshed documentation
+surface.
+
+**Closed:**
+
+- **`yakos doctor --probe-runtime`** — reports filesystem-side state
+  of Claude Code Agent Teams, last-known in-session tool availability
+  from `~/.yakos-state/runtime-probe.json`, and the exact prompt to
+  refresh that state in a Claude Code session. Closes the "how would
+  I know when TaskCreate becomes available?" question.
+- **`~/.yakos` path collision fixed.** v0.2.0.0 placed the gate-log
+  at `~/.yakos/gate-log.ndjson`, but `~/.yakos` is the YAKOS_ROOT
+  pointer FILE — writes were silently failing. Relocated audit state
+  to `~/.yakos-state/` (gate-log + runtime-probe). All references
+  updated (gate hook, git-hooks driver, doctor, STYLE.md, README,
+  hook README).
+- **`mailbox-mirror.sh` upgrade** — `session-end-check.sh` now
+  snapshots all team inbox files
+  (`~/.claude/teams/<team>/inboxes/<recipient>.json`) into
+  `work/current/team-inboxes/` at session end. Captures peer-to-peer
+  DMs that don't transit lead context (uses Phase 0.5 finding).
+- **Test-fixture runner** at
+  [`tests/run-version-gate-fixtures.sh`](tests/run-version-gate-fixtures.sh).
+  Sources `classify_file` and `is_public_surface` from the gate hook
+  (via awk extraction) and asserts each fixture path matches its
+  filename-encoded expected classification. **Caught a real bug**:
+  `classify_file`'s `*.md` doc-paths case was firing BEFORE the
+  `lib/agents/*` etc. case, so all framework markdown files were
+  classifying as DOC_ONLY when they should've been PATCH_REFINEMENT.
+  Reordered the case statement; 34/34 fixtures now pass.
+- **`yakos update` and `yakos archive`** — confirmed not stubs
+  (both implemented since earlier batches). Help text updated to
+  remove stale "Stub commands" labels; commands now grouped by
+  function (lifecycle / project / release).
+- **`INCIDENT-CATALOG.md` refreshed** with three new v0.2.x entries:
+  `incident:v0.2.0-project-agent-runtime-non-discovery`,
+  `incident:v0.2.1-task-tools-not-exposed`,
+  `incident:v0.2.1-shutdown-protocol-drift`.
+- **README modernization** — Status section reflects v0.2.2.0
+  shipped capabilities (12 agents, 16 skills, 8 hooks + git
+  pre-push gate, posture clarification). New "Releasing —
+  version-bump + pre-push gate" section. "Not in v0.1" → "Not in
+  v0.2.x" with current deferral reasons.
+- **`COOKBOOK.md` refresh** — four new patterns added (Pattern 6:
+  dispatching with project-agent discipline, Pattern 7: hash-anchored
+  edits, Pattern 8: iterate-until verifier, Pattern 9: releasing
+  with version-bump + pre-push gate).
+- **[`docs/adopting.md`](docs/adopting.md)** — new guide for
+  adopting yakOS into an existing project (distinct from
+  MIGRATING.md which targets migration from a tmux + dispatch-CLI
+  setup). Five-command minimum-friction path; documents what lands
+  in the project, what to add over time, common adoption questions.
+- **CI pipeline** at `.github/workflows/ci.yml`. Five jobs:
+  shellcheck (lints all .sh under cli/lib/hooks/lib/skills/tests),
+  yakos validate (asserts 0 errors), gate-fixture suite (34/34
+  pass), hook-fixtures (existing test runner), install-flow smoke
+  (init/doctor/validate/uninstall against a throwaway repo).
+
+**Stays deferred (with reasons):**
+
+- 8 v0.2 cross-cutting agents (architect, incident-responder,
+  release-manager, devops-infra, log-analyst, performance-engineer,
+  privacy-reviewer, accessibility-reviewer/ux-reviewer) — need
+  real-use signal per `docs/v0.2-notes.md`. Add as concrete demand
+  surfaces.
+- Real-use examples beyond `examples/tiny-go-api/` — need stack
+  input (Python? Next.js+Postgres? CLI tool? Multiple?).
+- Composable middleware-style hooks — substantial refactor; defer
+  until next hook addition forces the issue.
+- Per-session state store — design pass needed (file-based JSON,
+  SQLite, per-process? affects scope of stateful hooks downstream).
+- Multi-model category routing — design-only; current
+  `model: opus|sonnet|haiku` agent-frontmatter primitive is
+  sufficient until a routing-driven workload appears.
+- Skill-embedded MCPs — requires MCP infrastructure yakOS doesn't
+  have yet.
+- npm package distribution + i18n — strategic, gated on
+  going-public decision.
+- Hashed-edit runtime PreToolUse hook — design pass on stateless vs
+  stateful staleness check (gating reason corrected from Phase 0.5
+  in v0.2.1.0).
+- `yakos iterate-until` CLI subcommand — wait for procedural shape
+  to settle via real usage.
+
 ## [0.2.1.0] — 2026-04-29
 
 ### Polished — deferred items from v0.2.0.0 closed; Phase 0.5 probe run

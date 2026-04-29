@@ -307,7 +307,7 @@ outside normal release flow; it must not become a "any push" tier.
 The gate detects hotfix-only bumps (only the 4th component changed)
 and allows the push regardless of classification.
 
-To override the gate (logged to `~/.yakos/gate-log.ndjson`):
+To override the gate (logged to `~/.yakos-state/gate-log.ndjson`):
 
 ```sh
 YAKOS_GATE_DISABLE=1 git push
