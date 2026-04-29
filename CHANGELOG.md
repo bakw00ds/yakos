@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0.0] — 2026-04-29
+
+### Added — pre-push version gate (Part B of the v0.2.0 build)
+
+Closes the version-bump loop started in v0.1.4.0 (Part A — the
+`version-bump` skill itself). Substantive code changes can no longer
+be pushed without a corresponding VERSION change, unless the operator
+explicitly overrides via `YAKOS_GATE_DISABLE=1` (logged) or
+`git push --no-verify` (native git bypass).
+
+- [`lib/hooks/git/pre-push-version-gate.sh`](lib/hooks/git/pre-push-version-gate.sh)
+  — the gate. Classifies changed files since the last `v*.*.*` tag
+  (DOC_ONLY / PATCH_REFINEMENT / PATCH_REFACTOR / MINOR_ADDITIVE /
+  MAJOR_BREAKING / DEFAULT_PATCH), determines required bump tier from
+  the highest classification, and refuses the push if VERSION wasn't
+  bumped accordingly. Honors hotfix-only bumps as an emergency
+  bypass. Every decision (allow/refuse/override/error) appends one
+  NDJSON line to `~/.yakos/gate-log.ndjson` for audit.
+- [`cli/lib/git-hooks.sh`](cli/lib/git-hooks.sh) — `yakos git-hooks
+  {install|uninstall|status}`. Install copies the gate to
+  `<repo>/.git/hooks/pre-push` with a `.framework-hash` sibling for
+  drift detection. Uninstall refuses to remove non-YakOS hooks.
+  Status reports installation + drift state.
+- [`cli/lib/init.sh`](cli/lib/init.sh) — new `--with-gate` flag
+  installs the gate as part of `yakos init <name> --project <path>`.
+  Skips `lib/hooks/git/` from the framework hook-copy loop (those
+  are project-side git hooks, not Claude Code hooks; they belong in
+  `<repo>/.git/hooks/`, not `<project>/scripts/hooks/`).
+- [`cli/lib/doctor.sh`](cli/lib/doctor.sh) — when run with a
+  `<project-path>`, additionally reports pre-push gate status:
+  installed/not-installed, YakOS-owned/foreign, current/drifted.
+- [`lib/hooks/git/README.md`](lib/hooks/git/README.md) — documents
+  the contract, install path, override mechanism, and audit-log
+  location.
+- [`STYLE.md`](STYLE.md) — new "§8. Versioning discipline" section
+  documents bump semantics, the gate, the override mechanism, and
+  the hotfix-tier reservation.
+
+Smoke-tested end-to-end: doc-only allows, code-without-bump refuses
+with classification + remediation steps, hotfix-only bump allows,
+override env var works and is logged, NDJSON audit trail intact.
+
 ### Added — capability patterns absorbed from oh-my-openagent
 
 After surveying [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)

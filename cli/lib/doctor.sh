@@ -217,6 +217,28 @@ if [ -n "$PROJECT_PATH" ]; then
         ok "$clean clean, $drift drifted, $unhashed unhashed (no .framework-hash sibling)"
     fi
     echo ""
+
+    # Pre-push version gate status (project-side git hook)
+    echo "Pre-push version gate: $PROJECT_PATH/.git/hooks/pre-push"
+    GATE_DST="$PROJECT_PATH/.git/hooks/pre-push"
+    GATE_HASH_SIBLING="${GATE_DST}.framework-hash"
+    GATE_SRC="$YAKOS_ROOT/lib/hooks/git/pre-push-version-gate.sh"
+    if [ ! -e "$GATE_DST" ]; then
+        info "not installed (install: 'yakos git-hooks install' from inside the project, or 'yakos init <name> --project $PROJECT_PATH --with-gate')"
+    elif [ ! -f "$GATE_HASH_SIBLING" ]; then
+        info "present but not YakOS-owned (no .framework-hash sibling)"
+    elif [ ! -f "$GATE_SRC" ]; then
+        info "installed but framework source missing at $GATE_SRC"
+    else
+        gate_expected="$(cat "$GATE_HASH_SIBLING")"
+        gate_actual_src="$(ct_sha256 "$GATE_SRC")"
+        if [ "$gate_expected" = "$gate_actual_src" ]; then
+            ok "installed (current version, no drift)"
+        else
+            info "DRIFT: installed gate differs from framework (refresh: 'yakos git-hooks install --force')"
+        fi
+    fi
+    echo ""
 fi
 
 # ---- optional integrations (informational; never blocks) -------------------

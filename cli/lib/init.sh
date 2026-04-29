@@ -27,10 +27,11 @@ set -eu
 NAME=""
 PROJECT=""
 FORCE=0
+WITH_GATE=0
 
 usage() {
     cat <<EOF
-yakos init <name> --project <path> [--force]
+yakos init <name> --project <path> [--force] [--with-gate]
 
 Bootstrap a project for use with YakOS:
   - Creates ~/agent-control/<n>/ with work/current/{logs,artifacts,reports}/
@@ -47,6 +48,11 @@ Arguments:
   --project <path>   Absolute path to the project's git repo.
   --force            Overwrite existing files in <project>/scripts/hooks/.
                      Other files are never overwritten in v0.1.
+  --with-gate        Also install the pre-push version gate into
+                     <project>/.git/hooks/pre-push. Equivalent to
+                     running 'yakos git-hooks install' from the project
+                     after init. Refuses if a non-YakOS pre-push hook
+                     exists (rerun with --force to overwrite).
   --help, -h         Print this help.
 EOF
 }
@@ -65,6 +71,7 @@ while [ "$#" -gt 0 ]; do
             PROJECT="${1#--project=}"
             ;;
         --force) FORCE=1 ;;
+        --with-gate) WITH_GATE=1 ;;
         --*) ct_die "init: unknown flag '$1' (try --help)" ;;
         *)
             if [ -z "$NAME" ]; then
@@ -172,9 +179,13 @@ if [ -d "$PROJECT_HOOKS_SRC" ]; then
     while IFS= read -r src; do
         [ -n "$src" ] || continue
         rel="${src#$PROJECT_HOOKS_SRC/}"
-        # Skip framework-only files
+        # Skip framework-only files. `git/` is the YakOS git-hooks subdir
+        # (project-side git hooks like pre-push-version-gate.sh) — those
+        # belong in <repo>/.git/hooks/, NOT in <project>/scripts/hooks/,
+        # and are managed by `yakos git-hooks install`.
         case "$rel" in
             .gitkeep|README.md|*/README.md) continue ;;
+            git/*) continue ;;
         esac
         dst="$PROJECT_HOOKS_DST/$rel"
         mkdir -p "$(dirname -- "$dst")"
@@ -234,6 +245,35 @@ EOF
     ct_log "wrote $MEMORY_FILE"
 fi
 
+# ---- optional: install pre-push version gate -------------------------------
+
+GATE_STATUS="not requested (--with-gate to enable)"
+if [ "$WITH_GATE" = "1" ]; then
+    GATE_DST="$PROJECT_ABS/.git/hooks/pre-push"
+    GATE_HASH_SIBLING="${GATE_DST}.framework-hash"
+    GATE_SRC="$YAKOS_ROOT/lib/hooks/git/pre-push-version-gate.sh"
+    if [ ! -f "$GATE_SRC" ]; then
+        ct_log "WARN: --with-gate requested but gate source missing at $GATE_SRC; skipping"
+        GATE_STATUS="skipped (source missing)"
+    elif [ -e "$GATE_DST" ] && [ "$FORCE" != "1" ]; then
+        # Is it ours?
+        if [ -f "$GATE_HASH_SIBLING" ]; then
+            ct_log "pre-push gate already installed at $GATE_DST"
+            GATE_STATUS="already installed"
+        else
+            ct_log "WARN: --with-gate requested but a non-YakOS pre-push hook exists at $GATE_DST; rerun with --force to overwrite"
+            GATE_STATUS="skipped (non-YakOS hook present)"
+        fi
+    else
+        mkdir -p "$(dirname -- "$GATE_DST")"
+        cp "$GATE_SRC" "$GATE_DST"
+        chmod +x "$GATE_DST"
+        ct_sha256 "$GATE_SRC" > "$GATE_HASH_SIBLING"
+        ct_log "installed pre-push version gate at $GATE_DST"
+        GATE_STATUS="installed"
+    fi
+fi
+
 # ---- summary ----------------------------------------------------------------
 
 cat <<EOF
@@ -244,6 +284,7 @@ YakOS init complete for '$NAME'.
   Project:      $PROJECT_ABS
   Auto-memory:  $MEMORY_FILE
   Hooks:        $hook_copied new, $hook_overwritten overwritten, $hook_skipped skipped
+  Push gate:    $GATE_STATUS
 
 To start a session:
   cd $CONTROL_DIR

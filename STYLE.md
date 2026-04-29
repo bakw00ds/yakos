@@ -278,6 +278,46 @@ specialization model.
 
 ---
 
+## 8. Versioning discipline
+
+YakOS uses four-part semver: `major.minor.patch.hotfix`. Every push
+that changes substantive code must include a corresponding VERSION
+change. The pre-push gate (`yakos git-hooks install`) enforces this.
+
+To bump:
+
+```sh
+yakos version-bump --component {major|minor|patch|hotfix}
+```
+
+Bump semantics:
+
+| Component | Use for |
+|---|---|
+| **major** | Breaking schema/CLI changes (resets minor/patch/hotfix to 0) |
+| **minor** | Additive features — new agent, skill, playbook, CLI command (resets patch/hotfix) |
+| **patch** | Bug fixes, refactors, non-breaking refinement (resets hotfix) |
+| **hotfix** | Emergency fix to a deployed version, outside normal release flow |
+
+Doc-only commits (touching only `docs/`, `*.md`, `tests/`, `examples/`)
+do not require a bump and the gate passes through.
+
+The hotfix tier specifically is reserved for emergency-only fixes
+outside normal release flow; it must not become a "any push" tier.
+The gate detects hotfix-only bumps (only the 4th component changed)
+and allows the push regardless of classification.
+
+To override the gate (logged to `~/.yakos/gate-log.ndjson`):
+
+```sh
+YAKOS_GATE_DISABLE=1 git push
+```
+
+`git push --no-verify` also bypasses (native git mechanism, also
+logged by any subsequent gate run).
+
+---
+
 ## See also
 
 - [docs/engineering-standards.md](docs/engineering-standards.md) — the explanatory guide with worked examples
