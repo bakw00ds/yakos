@@ -18,6 +18,9 @@ these (per Phase 1.5 §17 override semantics).
 | `troubleshooter` | specialist | sonnet | Read-only diagnosis; never edits; dispatches fixes. |
 | `doc-writer` | specialist | sonnet | Writes/updates docs, changelogs, release notes. |
 | `maintainer` | maintainer | sonnet | Routine hygiene — dep bumps, lint baseline, dead-code, version+changelog parity. |
+| `architect` | specialist | opus | Read-only design + ADR authoring; recommends, doesn't implement. |
+| `incident-responder` | specialist | opus | Coordinates production incidents; dispatch-don't-fix. |
+| `release-manager` | specialist | sonnet | Release mechanics: VERSION + changelog + tag + smoke. |
 
 ### Stack-specialist templates
 
@@ -60,3 +63,17 @@ When adding a new generic agent:
 3. Add an entry to the inventory table above.
 4. If the role belongs to a specific project, write it in
    `<project>/.claude/agents/` instead.
+
+## Frontmatter fields
+
+| Field | Required | Purpose |
+|---|---|---|
+| `id` | yes | Unique identifier; addressable as `subagent_type` and via `yakos dispatch <id>`. |
+| `role` | yes | One of `orchestrator`, `specialist`, `reviewer`, `maintainer`. |
+| `domain` | yes | Free-form domain tag (`backend-service`, `release`, `cross-cutting`). |
+| `mode` | yes | Inline list of operating modes (`[feature, fix]`). |
+| `tools` | yes | Inline list of tool names the agent may use. |
+| `model` | yes | One of `opus`, `sonnet`, `haiku`. |
+| `references` | yes | List of `rule:`, `playbook:`, `incident:` references. |
+| `extends` | optional | Parent template id (e.g. `extends: backend`). |
+| `runtime` | optional, v0.4.2+ | Preferred runtime: `claude` \| `codex` \| `gemini`. Used by `yakos dispatch` to pick the CLI. Default: yakOS's runtime resolver (env var → state file → claude). |

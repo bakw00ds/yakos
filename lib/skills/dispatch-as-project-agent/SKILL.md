@@ -10,23 +10,44 @@ mode: [orchestrate]
 
 ## Purpose
 
-In Claude Code as of v0.1.4 of YakOS, project-level agents at
-`<project>/.claude/agents/<role>.md` are NOT discoverable as
-`subagent_type` values by the Agent tool. The Agent tool only resolves
-the runtime built-ins (`general-purpose`, `Explore`, `Plan`,
-`claude-code-guide`, `statusline-setup`). This is a Claude Code
-limitation, not a YakOS one — confirmed by the Phase 8 probe and
-re-confirmed within a `TeamCreate` context (the team config accepts
-arbitrary `agentType` strings, but `Agent({subagent_type: "..."})`
-still fails for project-defined types).
+In Claude Code, project-level agents at
+`<project>/.claude/agents/<role>.md` are NOT natively discoverable
+as `subagent_type` values by the Agent tool. The Agent tool only
+resolves the runtime built-ins (`general-purpose`, `Explore`,
+`Plan`, `claude-code-guide`, `statusline-setup`). This is a Claude
+Code limitation, not a YakOS one (incident:v0.2.0).
 
-This skill is the workable dispatch pattern in the meantime: spawn a
-`general-purpose` agent and inject the project agent's body into the
-prompt. The spawned agent operates with the discipline declared in
-the file even though the runtime doesn't natively bind it.
+**v0.3.0+: yakos start solves this for whole sessions.** Launching
+via `yakos start <project>` composes a `--agents` JSON object from
+both framework + project agent files and passes it on the claude
+command line — project agents become addressable as
+`subagent_type` for the session's lifetime. If you started the
+session with `yakos start`, you do NOT need this skill for the
+common case.
 
-When Claude Code adds project agent discovery, this skill becomes
-unnecessary — the on-disk layout is already ready.
+**v0.4.2+: yakos dispatch covers cross-runtime + non-yakos-start
+sessions.** When the lead needs to dispatch a project agent in a
+session that wasn't launched via `yakos start` (e.g. a bare
+`claude` session), or wants to route the specialist to a different
+runtime (codex / gemini) than the lead, run from a Bash tool:
+
+    yakos dispatch <agent-name> "<task description>"
+
+This shells out to the right runtime CLI per the agent's
+frontmatter `runtime:` field, runs the agent non-interactively,
+and returns the captured output. Audit trail at
+`~/.yakos-state/dispatch-log.ndjson`.
+
+**This skill (the inline-injection technique) is still useful** for
+two cases:
+1. Read-only diagnosis tasks that should run inside the lead's
+   context (cheaper than spawning a new process).
+2. Quick one-offs where the agent body is small enough to copy
+   into the prompt and the dispatch latency of `yakos dispatch`
+   isn't worth the round-trip.
+
+For multi-file write tasks, prefer `yakos dispatch` — it gives
+each specialist a fresh context window and a clean exit.
 
 ## Scope
 

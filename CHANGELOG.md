@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2.0] — 2026-05-08
+
+### Added — multi-runtime support, phase 3: yakos dispatch (mixed-runtime)
+
+Phase 3 of the v0.4 multi-runtime arc closes the "mix of agents from
+different instances" use case. A project can now declare per-agent
+runtime preferences and dispatch each specialist to its preferred
+CLI from a single lead session.
+
+**`yakos dispatch <agent-name> "<task>"`** — new subcommand at
+`cli/lib/dispatch.sh`. Reads the agent's frontmatter `runtime:`
+field, spawns the right CLI in non-interactive mode (claude `-p` /
+codex `exec` / gemini `-p`), returns the captured output. Designed
+for the lead to invoke via the Bash tool — cross-runtime dispatch
+becomes one shell line. Audit trail at
+`~/.yakos-state/dispatch-log.ndjson` (start + finish events with
+exit code).
+
+**`runtime:` agent frontmatter field** documented in
+`lib/agents/README.md`. Optional, v0.4.2+. Default precedence:
+- `--runtime` flag on `yakos dispatch` overrides everything
+- agent frontmatter `runtime: <id>` next
+- `YAKOS_RUNTIME` env var → `~/.yakos-state/default-runtime` →
+  `claude` (the runtime resolver chain).
+
+**`dispatch-as-project-agent` skill update** — now positions
+`yakos start` (v0.3) and `yakos dispatch` (v0.4.2) as the
+primary paths for project-agent dispatch; the in-session
+inline-injection technique remains useful for two cases (read-only
+diagnosis + quick one-offs) but is no longer the default path.
+
+**Example mix** (in a project's agent files):
+```yaml
+# .claude/agents/backend.md      → runtime: claude   (orchestration)
+# .claude/agents/frontend.md     → runtime: gemini   (UI iteration)
+# .claude/agents/code-reviewer.md → runtime: codex    (deep code review)
+```
+
+The lead session (claude) calls `yakos dispatch frontend "..."`
+from Bash; gemini-cli runs the frontend specialist headlessly; the
+captured output returns to the lead. Each specialist gets a fresh
+context window from a process boundary; the lead synthesizes.
+
 ## [0.4.1.0] — 2026-05-08
 
 ### Added — multi-runtime support, phase 2: gemini-cli adapter

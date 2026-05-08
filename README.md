@@ -111,7 +111,7 @@ Or run bare `yakos` from inside `~/agent-control/<project-name>/` or
 the project repo — it auto-detects which project you mean.
 
 By default `yakos start` launches Claude Code. v0.4+ also supports
-[OpenAI Codex](https://github.com/openai/codex) and (in v0.4.1)
+[OpenAI Codex](https://github.com/openai/codex) and
 [Gemini CLI](https://github.com/google-gemini/gemini-cli) as
 alternative runtimes:
 
@@ -119,6 +119,16 @@ alternative runtimes:
 yakos start myapp --runtime codex
 yakos auth status                    # per-runtime cli + auth state
 yakos auth login codex --as-default  # set codex as the default
+```
+
+**Mixed-runtime dispatch** (v0.4.2): a project can declare per-agent
+runtime preferences in agent frontmatter and let the lead dispatch
+each specialist to its preferred CLI:
+
+```sh
+# Inside a session (or any shell):
+yakos dispatch frontend "implement the login form"     # routes to agent's runtime:
+yakos dispatch backend "..." --runtime codex           # override per call
 ```
 
 See [docs/runtime-matrix.md](docs/runtime-matrix.md) for the

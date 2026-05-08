@@ -60,6 +60,11 @@ Project bootstrap / launch / inspection:
     auth          Per-runtime auth: status / login / logout / set-default.
                   Args: status [<runtime>] | login <runtime> [--as-default]
                         | logout <runtime> | set-default <runtime>
+    dispatch      One-shot cross-runtime agent dispatch (v0.4.2+).
+                  Args: <agent-name> "<task>" [--runtime <id>]
+                        [--project <path>] [--timeout <secs>]
+                  Reads agent frontmatter `runtime:` to pick the CLI;
+                  --runtime overrides. Captures stdout, returns rc.
     validate      Schema + reference validation (framework or project)
                   Args: [<project-path>] [--all]
     archive       Roll work/current/ into work/archive/<tag>/
@@ -165,7 +170,7 @@ case "$cmd" in
     -v | --version)
         echo "yakos $YAKOS_VERSION"
         ;;
-    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth)
+    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch)
         script="$YAKOS_LIB/${cmd}.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"
