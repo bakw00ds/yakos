@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1.0] — 2026-05-08
+
+### Added — multi-runtime support, phase 2: gemini-cli adapter
+
+Phase 2 of the v0.4 multi-runtime arc. Codex shipped in v0.4.0;
+gemini-cli ships now. Phase 3 (mixed-runtime dispatch) follows.
+
+**Gemini adapter (cli/lib/runtimes/gemini.sh):**
+- Markdown emitter converts yakOS agents to gemini-cli's
+  frontmatter+body format (`name`, `description`, `tools`, `model`,
+  with the prompt body as markdown).
+- Materializes to `<project>/.gemini/agents/yakos-*.md` (gitignored
+  via the patterns added by `yakos init`).
+- Launch via `gemini --include-directories <repo> --approval-mode=yolo`.
+- One-shot dispatch via `gemini -p "@yakos-<agent> <task>"` — uses
+  gemini's native `@agent-name` delegation syntax.
+- Auth detected via `~/.gemini/` OAuth state, `GEMINI_API_KEY`, or
+  `GOOGLE_GENAI_USE_VERTEXAI=true`.
+- Capabilities advertised: `path-allowlist-hard`, `hooks`. NOT:
+  `inline-agents` (file-based only), `mcp-flag` (MCP must be
+  inline in `settings.json`), `system-prompt-flag` (system prompt
+  only via `GEMINI_SYSTEM_MD` env var).
+
+**MCP synthesis** — when `<project>/.mcp.json` exists (Claude-style
+config), the gemini adapter merges its `mcpServers` block into
+`<project>/.gemini/settings.json` so mcp servers flow to gemini
+sessions transparently. A timestamped backup is taken before the
+merge so the operator's hand-edits aren't lost
+(`settings.json.yakos-bak-<iso>`, gitignored).
+
+**`yakos auth status gemini`** now reports CLI + auth + capabilities
+just like the other runtimes.
+
+**Empirical findings (gemini-cli 0.41.2, May 2026):**
+- Subagents shipped in April 2026 — markdown frontmatter format
+  with `name`/`description` required.
+- 11-event hook surface (richer than Claude's 7); operator can use
+  yakOS's reference hooks once converted to gemini's hook schema
+  (deferred — adapter ships file-emitter only).
+- No `--add-dir`; uses `--include-directories <comma-separated>`.
+- No `--mcp-config` flag — see MCP synthesis above.
+
 ## [0.4.0.0] — 2026-05-08
 
 ### Added — multi-runtime support, phase 1: codex adapter

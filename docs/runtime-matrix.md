@@ -12,7 +12,7 @@ v0.4.1; mixed-runtime dispatch in v0.4.2).
 
 | Capability | claude | codex | gemini |
 |---|---|---|---|
-| Adapter shipping | v0.3 (always) | **v0.4.0** | v0.4.1 (planned) |
+| Adapter shipping | v0.3 (always) | **v0.4.0** | **v0.4.1** |
 | `inline-agents` (CLI-flag JSON injection) | ✅ `--agents` | ❌ file-based only | ❌ file-based only |
 | `path-allowlist-hard` | ✅ `--add-dir` | ✅ `--add-dir` | ✅ `--include-directories` |
 | `hooks` | ✅ 7 events | ✅ 6 events | ✅ 11 events |
@@ -48,17 +48,21 @@ v0.4.1; mixed-runtime dispatch in v0.4.2).
   v0.4.2).
 - Auth detected at `$CODEX_HOME/auth.json` or `OPENAI_API_KEY`.
 
-### gemini (v0.4.1, planned)
+### gemini (v0.4.1)
 
 - Materializes to `<project>/.gemini/agents/yakos-<name>.md`
-  (markdown with YAML frontmatter — same format as yakOS source).
-- Synthesizes `<project>/.gemini/settings.json` (no `--mcp-config`
-  flag — MCP must be inline in settings).
-- System prompt via `GEMINI_SYSTEM_MD` env var (full-replace
-  semantics — adapter is careful to preserve default safety
-  rules).
+  (markdown with YAML frontmatter — closest format to yakOS
+  source; minimal translation needed).
+- When `<project>/.mcp.json` is present, merges its `mcpServers`
+  block into `<project>/.gemini/settings.json` (gemini-cli has no
+  `--mcp-config` flag — MCP is inline). A timestamped backup is
+  written before the merge.
 - Exec's `gemini --include-directories <repo> --approval-mode=yolo`.
-- Auth: OAuth (free tier), `GEMINI_API_KEY`, or Vertex AI.
+- Dispatch (v0.4.2) uses gemini's native `@<agent-name>`
+  delegation syntax: `gemini -p "@yakos-<agent> <task>"`.
+- Auth: OAuth (free tier, `~/.gemini/` creds files),
+  `GEMINI_API_KEY` env, or Vertex AI
+  (`GOOGLE_GENAI_USE_VERTEXAI=true` + gcloud).
 
 ## Soft-degrade rules
 
