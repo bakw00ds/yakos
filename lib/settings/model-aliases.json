@@ -1,0 +1,25 @@
+{
+  "_doc": "Semantic model aliases per runtime. Override per-project via .yakos.yml.",
+  "aliases": {
+    "cheap": {
+      "claude": "haiku",
+      "codex": "gpt-5-nano",
+      "gemini": "gemini-2.5-flash"
+    },
+    "balanced": {
+      "claude": "sonnet",
+      "codex": "gpt-5-mini",
+      "gemini": "gemini-2.5-pro"
+    },
+    "best": {
+      "claude": "opus",
+      "codex": "gpt-5",
+      "gemini": "gemini-2.5-pro"
+    },
+    "reasoning": {
+      "claude": "opus",
+      "codex": "o4-mini",
+      "gemini": "gemini-2.5-pro"
+    }
+  }
+}

@@ -136,6 +136,30 @@ frontmatter field, **token-usage telemetry** in the dispatch audit
 log, and `yakos hooks install <runtime>` to translate the
 path-allowlist + secret-scan hooks for codex/gemini.
 
+**Project-level config** (v0.7+): drop a `.yakos.yml` in the project
+root to set defaults across many agents:
+
+```yaml
+default-runtime: claude
+default-fallback: [codex]
+per-domain:
+  code-review: codex
+  ui: gemini
+model-aliases:
+  cheap:
+    claude: haiku
+    codex: gpt-5-nano
+```
+
+Then agent frontmatter can reference `model: cheap` and yakOS resolves
+it per-runtime at dispatch time.
+
+**CI integration** (v0.7+): the reusable workflow at
+[`.github/workflows/yakos-dispatch.yml`](.github/workflows/yakos-dispatch.yml)
+runs a yakos agent in GitHub Actions — for security-reviewer-on-PR
+or architect-sign-off-on-migrations gates. See
+[docs/ci-integration.md](docs/ci-integration.md).
+
 **Portable memory** (v0.5+): the lead's auto-memory and operator
 notes live at `~/.yakos-state/memory/<project>/` as a single source
 of truth, materialized into each runtime's native location on

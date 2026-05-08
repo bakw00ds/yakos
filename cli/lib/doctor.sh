@@ -12,6 +12,7 @@ set -eu
 
 PROJECT_PATH=""
 PROBE_RUNTIME=0
+FIX=0
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
@@ -34,6 +35,14 @@ If <project-path> is passed, additionally checks:
     to customize).
     Pre-push version gate installation status and drift.
 
+If --fix is passed, attempts auto-remediation of cheap fixes:
+    - missing ~/.yakos-state subdirs (memory, runtime-probes)
+    - missing yakOS gitignore patterns in <project>/.gitignore
+    - missing per-project .session-started-history.ndjson
+    - missing or stale .framework-hash siblings on hook scripts
+      (only refreshes when the hook content matches framework src;
+      preserves intentional project drift)
+
 If --probe-runtime is passed, additionally reports:
     Filesystem-side state of Claude Code Agent Teams (~/.claude/teams/,
     ~/.claude/tasks/, count of active teams, inbox files).
@@ -51,6 +60,7 @@ EOF
             exit 0
             ;;
         --probe-runtime) PROBE_RUNTIME=1 ;;
+        --fix) FIX=1 ;;
         --*)
             ct_die "doctor: unknown flag '$arg'"
             ;;
@@ -439,6 +449,90 @@ EOF
         done
     else
         info "no runtime-probe history yet (run 'yakos start' against each runtime)"
+    fi
+    echo ""
+fi
+
+# ---- fix mode (v0.7+) -----------------------------------------------------
+# Auto-remediate the cheap, idempotent fixes that don't require operator
+# judgment: gitignore patterns, missing audit-log files, missing
+# ~/.yakos-state subdirs, missing per-project session-history.
+
+if [ "$FIX" = "1" ]; then
+    echo ""
+    echo "Auto-fix (--fix):"
+    fixed=0
+
+    # 1. ~/.yakos-state subdirs
+    for sub in "" "/runtime-probes" "/memory"; do
+        if [ ! -d "$HOME/.yakos-state$sub" ]; then
+            mkdir -p "$HOME/.yakos-state$sub"
+            ok "created $HOME/.yakos-state$sub"
+            fixed=$((fixed + 1))
+        fi
+    done
+
+    # 2. project-level fixes (only if PROJECT_PATH is set)
+    if [ -n "$PROJECT_PATH" ] && [ -d "$PROJECT_PATH" ]; then
+        # gitignore patterns
+        gi="$PROJECT_PATH/.gitignore"
+        if [ -f "$gi" ] && ! grep -qF '.codex/agents/yakos-' "$gi" 2>/dev/null; then
+            {
+                printf '\n# yakOS — runtime-emitted agent files (added by doctor --fix)\n'
+                printf '.codex/agents/yakos-*.toml\n'
+                printf '.gemini/agents/yakos-*.md\n'
+                printf '.gemini/settings.json.yakos-bak-*\n'
+            } >> "$gi"
+            ok "appended yakos gitignore patterns to $gi"
+            fixed=$((fixed + 1))
+        fi
+
+        # session-history file (some old projects pre-init-NDJSON)
+        for nm in "$HOME/agent-control"/*; do
+            [ -d "$nm" ] || continue
+            ppf="$nm/.project-path"
+            [ -f "$ppf" ] || continue
+            pp="$(head -1 "$ppf")"
+            if [ "$pp" = "$PROJECT_PATH" ] || [ "$pp" = "$(ct_realpath "$PROJECT_PATH")" ]; then
+                hist="$nm/work/current/.session-started-history.ndjson"
+                if [ ! -f "$hist" ] && [ -d "$nm/work/current" ]; then
+                    : > "$hist"
+                    ok "created $hist"
+                    fixed=$((fixed + 1))
+                fi
+            fi
+        done
+
+        # framework-hash siblings on hooks (refresh stale)
+        if [ -d "$PROJECT_PATH/scripts/hooks" ]; then
+            for hf in "$PROJECT_PATH/scripts/hooks"/*.sh; do
+                [ -f "$hf" ] || continue
+                hash_sib="${hf}.framework-hash"
+                src="$YAKOS_ROOT/lib/hooks/$(basename -- "$hf")"
+                [ -f "$src" ] || continue
+                expected="$(ct_sha256 "$src")"
+                if [ ! -f "$hash_sib" ] || [ "$(cat "$hash_sib" 2>/dev/null)" != "$expected" ]; then
+                    if [ ! -f "$hash_sib" ]; then
+                        echo "$expected" > "$hash_sib"
+                        ok "wrote missing framework-hash for $(basename -- "$hf")"
+                        fixed=$((fixed + 1))
+                    else
+                        # Only refresh hash if hook content matches the framework src;
+                        # if the project diverged, leave the hash alone (drift is
+                        # informational, not an error).
+                        if cmp -s "$hf" "$src"; then
+                            echo "$expected" > "$hash_sib"
+                            ok "refreshed stale framework-hash for $(basename -- "$hf")"
+                            fixed=$((fixed + 1))
+                        fi
+                    fi
+                fi
+            done
+        fi
+    fi
+
+    if [ "$fixed" = "0" ]; then
+        info "nothing to fix"
     fi
     echo ""
 fi

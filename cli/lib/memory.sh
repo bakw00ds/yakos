@@ -26,7 +26,10 @@ Subcommands:
   put <key> <file> [<project>]   Add or replace a memory from a file.
   migrate-from-claude [<project>]  Copy claude's auto-memory into yakOS.
   sync <runtime> [<project>]     Materialize yakOS memory into runtime
-                                 native location. v0.5: claude only.
+                                 native location.
+  diff <runtime> [<project>]     Diff yakOS canonical memory store
+                                 against the runtime's mirror; show
+                                 added / removed / modified.
 
 If <project> is omitted, infers from cwd (matches `yakos start`).
 
@@ -86,7 +89,7 @@ SUB="${1:-}"
 
 case "$SUB" in
     "" | -h | --help | help) usage; exit 0 ;;
-    list|show|put|migrate-from-claude|sync) ;;
+    list|show|put|migrate-from-claude|sync|diff) ;;
     *) ct_die "memory: unknown subcommand '$SUB' (try --help)" ;;
 esac
 
@@ -328,6 +331,133 @@ this automatically. Manual gemini sessions need the export.
 EOF
             ;;
         *) ct_die "memory sync: unknown runtime '$RUNTIME' (claude|codex|gemini)" ;;
+    esac
+    exit 0
+fi
+
+# ---- subcommand: diff ------------------------------------------------------
+
+if [ "$SUB" = "diff" ]; then
+    RUNTIME="${1:-}"
+    PROJECT="${2:-$(infer_project || true)}"
+    [ -n "$RUNTIME" ] || ct_die "memory diff: <runtime> required"
+    [ -n "$PROJECT" ] || ct_die "memory diff: project name required"
+
+    cd_path="$HOME/agent-control/$PROJECT/.project-path"
+    [ -f "$cd_path" ] || ct_die "memory diff: $cd_path missing"
+    project_repo="$(head -1 "$cd_path")"
+    src="$(mem_dir_for_project "$PROJECT")"
+    [ -d "$src" ] || { echo "no yakos memory at $src — nothing to diff"; exit 0; }
+
+    echo "yakos memory diff — $PROJECT vs $RUNTIME mirror"
+    echo "  source:  $src"
+
+    case "$RUNTIME" in
+        claude)
+            encoded="$(claude_encode_path "$project_repo")"
+            target="$HOME/.claude/projects/$encoded"
+            echo "  mirror:  $target"
+            echo
+            if [ ! -d "$target" ]; then
+                echo "  (mirror does not exist; sync has not run)"
+                exit 0
+            fi
+            yakos_n=0
+            mirror_n=0
+            same=0
+            modified=0
+            only_yakos=()
+            only_mirror=()
+            modified_files=()
+
+            while IFS= read -r f; do
+                [ -n "$f" ] || continue
+                base="$(basename -- "$f")"
+                yakos_n=$((yakos_n + 1))
+                if [ -f "$target/$base" ]; then
+                    if cmp -s "$f" "$target/$base"; then
+                        same=$((same + 1))
+                    else
+                        modified=$((modified + 1))
+                        modified_files+=("$base")
+                    fi
+                else
+                    only_yakos+=("$base")
+                fi
+            done < <(find "$src" -maxdepth 1 -type f -name '*.md' 2>/dev/null)
+
+            while IFS= read -r f; do
+                [ -n "$f" ] || continue
+                base="$(basename -- "$f")"
+                mirror_n=$((mirror_n + 1))
+                [ -f "$src/$base" ] || only_mirror+=("$base")
+            done < <(find "$target" -maxdepth 1 -type f -name '*.md' 2>/dev/null)
+
+            echo "  yakos store: $yakos_n file(s); claude mirror: $mirror_n file(s); same: $same; modified: $modified"
+            if [ "${#only_yakos[@]}" -gt 0 ]; then
+                echo "  only in yakos store (run 'yakos memory sync claude $PROJECT'):"
+                for b in "${only_yakos[@]}"; do printf '    + %s\n' "$b"; done
+            fi
+            if [ "${#only_mirror[@]}" -gt 0 ]; then
+                echo "  only in claude mirror (claude wrote them; not in yakos store):"
+                for b in "${only_mirror[@]}"; do printf '    - %s\n' "$b"; done
+            fi
+            if [ "${#modified_files[@]}" -gt 0 ]; then
+                echo "  modified (yakos and mirror differ):"
+                for b in "${modified_files[@]}"; do printf '    ~ %s\n' "$b"; done
+            fi
+            ;;
+        codex)
+            target="$project_repo/.codex/AGENTS.md"
+            echo "  mirror:  $target (yakos block only)"
+            echo
+            if [ ! -f "$target" ]; then
+                echo "  (mirror does not exist; sync has not run)"
+                exit 0
+            fi
+            block_present=0
+            grep -qF '<!-- yakos-memory-start' "$target" 2>/dev/null && block_present=1
+            if [ "$block_present" = "0" ]; then
+                echo "  (no yakos-memory block in AGENTS.md; sync has not run or it was removed)"
+                exit 0
+            fi
+            mirror_age="$(stat -f '%m' "$target" 2>/dev/null || stat -c '%Y' "$target" 2>/dev/null || echo 0)"
+            src_newest=0
+            while IFS= read -r f; do
+                [ -n "$f" ] || continue
+                ft="$(stat -f '%m' "$f" 2>/dev/null || stat -c '%Y' "$f" 2>/dev/null || echo 0)"
+                [ "$ft" -gt "$src_newest" ] && src_newest="$ft"
+            done < <(find "$src" -maxdepth 1 -type f -name '*.md' 2>/dev/null)
+            if [ "$src_newest" -gt "$mirror_age" ]; then
+                echo "  STALE — yakos memory was modified after the last sync"
+                echo "  re-run: yakos memory sync codex $PROJECT"
+            else
+                echo "  in sync (mirror modified at $mirror_age; newest yakos file at $src_newest)"
+            fi
+            ;;
+        gemini)
+            target="$project_repo/.gemini/yakos-system.md"
+            echo "  mirror:  $target"
+            echo
+            if [ ! -f "$target" ]; then
+                echo "  (mirror does not exist; sync has not run)"
+                exit 0
+            fi
+            mirror_age="$(stat -f '%m' "$target" 2>/dev/null || stat -c '%Y' "$target" 2>/dev/null || echo 0)"
+            src_newest=0
+            while IFS= read -r f; do
+                [ -n "$f" ] || continue
+                ft="$(stat -f '%m' "$f" 2>/dev/null || stat -c '%Y' "$f" 2>/dev/null || echo 0)"
+                [ "$ft" -gt "$src_newest" ] && src_newest="$ft"
+            done < <(find "$src" -maxdepth 1 -type f -name '*.md' 2>/dev/null)
+            if [ "$src_newest" -gt "$mirror_age" ]; then
+                echo "  STALE — yakos memory was modified after the last sync"
+                echo "  re-run: yakos memory sync gemini $PROJECT"
+            else
+                echo "  in sync"
+            fi
+            ;;
+        *) ct_die "memory diff: unknown runtime '$RUNTIME' (claude|codex|gemini)" ;;
     esac
     exit 0
 fi

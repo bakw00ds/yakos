@@ -19,3 +19,8 @@
 
 # Test scratch
 /tmp-test-home/
+
+# yakOS — runtime-emitted agent files (added by doctor --fix)
+.codex/agents/yakos-*.toml
+.gemini/agents/yakos-*.md
+.gemini/settings.json.yakos-bak-*

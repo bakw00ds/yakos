@@ -165,22 +165,39 @@ AGENT_FILE="$(find_agent_file "$AGENT_NAME" || true)"
 
 FM="$(yk_agents_extract_frontmatter "$AGENT_FILE")"
 AGENT_RUNTIME="$(yk_agents_fm_get "$FM" "runtime")"
+AGENT_DOMAIN="$(yk_agents_fm_get "$FM" "domain")"
 AGENT_FALLBACK="$(yk_agents_fm_list "$FM" "runtime-fallback" || true)"
 
-# Build the runtime preference chain.
-# Override > frontmatter `runtime:` > yakos default → then frontmatter
-# `runtime-fallback:` list, in order.
+# Project config (.yakos.yml) extends the resolution chain (v0.7+):
+#   --runtime override
+#   > agent frontmatter `runtime:`
+#   > .yakos.yml per-domain[<agent.domain>]
+#   > .yakos.yml default-runtime
+#   > YAKOS_RUNTIME env
+#   > ~/.yakos-state/default-runtime
+#   > claude
+# then frontmatter runtime-fallback + .yakos.yml default-fallback list.
+# shellcheck source=./project-config.sh
+. "$YAKOS_LIB/project-config.sh"
+
+PCFG_RT="$(yk_pcfg_resolve_runtime "$PROJECT" "$AGENT_NAME" "$AGENT_DOMAIN" "$AGENT_RUNTIME")"
+
 RUNTIME_CHAIN=""
 if [ -n "$RUNTIME_OVERRIDE" ]; then
     RUNTIME_CHAIN="$RUNTIME_OVERRIDE"
-elif [ -n "$AGENT_RUNTIME" ]; then
-    RUNTIME_CHAIN="$AGENT_RUNTIME"
+elif [ -n "$PCFG_RT" ]; then
+    RUNTIME_CHAIN="$PCFG_RT"
 else
     RUNTIME_CHAIN="$(yk_rt_default)"
 fi
+PCFG_FALLBACK="$(yk_pcfg_get_list "$PROJECT" "default-fallback" || true)"
 if [ -n "$AGENT_FALLBACK" ]; then
     RUNTIME_CHAIN="$RUNTIME_CHAIN
 $AGENT_FALLBACK"
+fi
+if [ -n "$PCFG_FALLBACK" ]; then
+    RUNTIME_CHAIN="$RUNTIME_CHAIN
+$PCFG_FALLBACK"
 fi
 
 # Resolve the chain: pick the first runtime where check_cli + check_auth

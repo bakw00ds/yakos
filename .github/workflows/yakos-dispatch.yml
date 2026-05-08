@@ -1,0 +1,174 @@
+name: yakOS dispatch (reusable)
+
+# Reusable workflow that runs `yakos dispatch <agent>` against a project
+# in CI. Useful patterns:
+#   - security-reviewer on every PR
+#   - code-reviewer on PRs touching specific paths
+#   - architect sign-off on migration PRs
+
+on:
+  workflow_call:
+    inputs:
+      agent:
+        description: "yakOS agent id to dispatch"
+        required: true
+        type: string
+      task:
+        description: "Task prompt (passed verbatim to the agent)"
+        required: true
+        type: string
+      runtime:
+        description: "Override runtime (claude | codex | gemini); empty = agent frontmatter default"
+        required: false
+        type: string
+        default: ""
+      project_path:
+        description: "Path to the project repo (defaults to checkout dir)"
+        required: false
+        type: string
+        default: "."
+      yakos_ref:
+        description: "yakos repo ref to install from"
+        required: false
+        type: string
+        default: "main"
+      timeout_minutes:
+        description: "Dispatch timeout in minutes"
+        required: false
+        type: number
+        default: 10
+      fail_on_nonzero:
+        description: "If true, fail the job when the dispatched agent exits non-zero"
+        required: false
+        type: boolean
+        default: true
+
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false
+      OPENAI_API_KEY:
+        required: false
+      GEMINI_API_KEY:
+        required: false
+
+    outputs:
+      agent_response:
+        description: "The agent's captured stdout (markdown / text)"
+        value: ${{ jobs.dispatch.outputs.agent_response }}
+      exit_code:
+        description: "The runtime CLI exit code"
+        value: ${{ jobs.dispatch.outputs.exit_code }}
+      usage_json:
+        description: "JSON blob of token usage (real, where the runtime supports it)"
+        value: ${{ jobs.dispatch.outputs.usage_json }}
+
+jobs:
+  dispatch:
+    name: yakos dispatch ${{ inputs.agent }}
+    runs-on: ubuntu-latest
+    outputs:
+      agent_response: ${{ steps.run.outputs.agent_response }}
+      exit_code: ${{ steps.run.outputs.exit_code }}
+      usage_json: ${{ steps.run.outputs.usage_json }}
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - name: Checkout caller's project
+        uses: actions/checkout@v4
+
+      - name: Install yakOS
+        run: |
+          set -e
+          sudo apt-get update -y && sudo apt-get install -y jq python3
+          git clone --depth 1 --branch "${{ inputs.yakos_ref }}" \
+              https://github.com/bakw00ds/yakos.git /tmp/yakos
+          /tmp/yakos/cli/yakos install
+          echo "/tmp/yakos/cli" >> $GITHUB_PATH
+
+      - name: Install runtime CLI (per requested runtime)
+        run: |
+          set -e
+          rt="${{ inputs.runtime }}"
+          if [ -z "$rt" ]; then
+            # Fall back to claude if no runtime override; the agent
+            # frontmatter may select a different one but we can only
+            # install one CLI per CI step.
+            rt="claude"
+          fi
+          case "$rt" in
+            claude) npm install -g @anthropic-ai/claude-code ;;
+            codex)  npm install -g @openai/codex ;;
+            gemini) npm install -g @google/gemini-cli ;;
+            *) echo "unknown runtime '$rt'"; exit 1 ;;
+          esac
+
+      - name: yakos init
+        run: |
+          set -e
+          # Treat the checked-out project as the yakos project. CI is
+          # ephemeral so the control dir lives under $RUNNER_TEMP.
+          export HOME="${RUNNER_TEMP:-/tmp}/yakos-home"
+          mkdir -p "$HOME"
+          /tmp/yakos/cli/yakos init ci-project \
+              --project "$(pwd)/${{ inputs.project_path }}"
+
+      - name: Dispatch
+        id: run
+        timeout-minutes: ${{ inputs.timeout_minutes }}
+        run: |
+          set -e
+          export HOME="${RUNNER_TEMP:-/tmp}/yakos-home"
+          out_file="$RUNNER_TEMP/agent-out.md"
+          usage_file="$RUNNER_TEMP/usage.json"
+          : > "$usage_file"
+
+          rt_args=""
+          if [ -n "${{ inputs.runtime }}" ]; then
+            rt_args="--runtime ${{ inputs.runtime }}"
+          fi
+
+          set +e
+          /tmp/yakos/cli/yakos dispatch \
+              "${{ inputs.agent }}" \
+              "${{ inputs.task }}" \
+              --project "$(pwd)/${{ inputs.project_path }}" \
+              $rt_args \
+              > "$out_file" 2>&1
+          rc=$?
+          set -e
+
+          # The dispatch-log will have the usage object as its last entry.
+          if [ -f "$HOME/.yakos-state/dispatch-log.ndjson" ]; then
+            tail -1 "$HOME/.yakos-state/dispatch-log.ndjson" \
+                | jq -c '.usage // {}' > "$usage_file" 2>/dev/null || true
+          fi
+
+          # Surface outputs.
+          {
+            printf 'agent_response<<__YAKOS_EOF\n'
+            cat "$out_file"
+            printf '\n__YAKOS_EOF\n'
+            printf 'exit_code=%s\n' "$rc"
+            printf 'usage_json<<__YAKOS_EOF\n'
+            cat "$usage_file" 2>/dev/null
+            printf '\n__YAKOS_EOF\n'
+          } >> "$GITHUB_OUTPUT"
+
+          # Pretty-print into the run summary.
+          {
+            printf '## yakOS dispatch — %s\n\n' "${{ inputs.agent }}"
+            printf '**Task**: %s\n\n' "${{ inputs.task }}"
+            printf '**Exit code**: %s\n\n' "$rc"
+            printf '### Agent response\n\n'
+            cat "$out_file"
+            printf '\n\n### Usage\n\n```json\n'
+            cat "$usage_file" 2>/dev/null
+            printf '\n```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ inputs.fail_on_nonzero }}" = "true" ] && [ "$rc" != "0" ]; then
+            exit "$rc"
+          fi
+          exit 0

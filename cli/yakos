@@ -78,6 +78,8 @@ Project bootstrap / launch / inspection:
     cost          Aggregate dispatch-log telemetry into a per-runtime / per-agent
                   cost report (v0.6+).
                   Args: [--since <ISO>] [--by agent|runtime|day]
+    session       Session lifecycle export + listing (v0.7+).
+                  Args: export <project> [<tag>] | list <project>
     validate      Schema + reference validation (framework or project)
                   Args: [<project-path>] [--all]
     archive       Roll work/current/ into work/archive/<tag>/
@@ -183,7 +185,7 @@ case "$cmd" in
     -v | --version)
         echo "yakos $YAKOS_VERSION"
         ;;
-    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost)
+    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session)
         script="$YAKOS_LIB/${cmd}.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"

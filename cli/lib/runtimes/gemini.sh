@@ -180,6 +180,34 @@ yk_rt_gemini_dispatch() {
 
     local framed="@yakos-$agent_name $task"
 
+    if [ -n "${YAKOS_USAGE_OUT:-}" ]; then
+        # gemini -p --output-format stream-json emits NDJSON events;
+        # the 'usage' on the final response carries token counts.
+        local raw_tmp
+        raw_tmp="$(mktemp -t yakos-gemini-raw.XXXXXX)"
+
+        gemini --include-directories "$project" \
+               --approval-mode=yolo \
+               --output-format stream-json \
+               -p "$framed" > "$raw_tmp" 2>/dev/null
+        local rc=$?
+
+        # Extract response text from content events.
+        jq -r 'select(.type == "content") | .content // empty' \
+            "$raw_tmp" 2>/dev/null
+
+        # gemini's final response event has a 'usage' or 'tokens' field.
+        jq -c 'select(.usage != null) | .usage |
+            {input_tokens: (.prompt_tokens // .input_tokens // 0),
+             output_tokens: (.completion_tokens // .output_tokens // 0),
+             cache_read: (.cached_content_tokens // 0),
+             total_tokens: (.total_tokens // 0)}' \
+            "$raw_tmp" 2>/dev/null | tail -1 > "$YAKOS_USAGE_OUT"
+
+        rm -f "$raw_tmp" 2>/dev/null
+        return "$rc"
+    fi
+
     gemini --include-directories "$project" \
            --approval-mode=yolo \
            -p "$framed"

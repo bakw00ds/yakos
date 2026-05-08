@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0.0] — 2026-05-08
+
+### Added — declarative config, full real telemetry, session export, CI workflow, doctor --fix
+
+Closes the v0.6 follow-up requests on 2026-05-08: project-level
+declarative config, semantic model aliases, real telemetry for
+codex+gemini, memory drift detection, session export, GitHub
+Actions integration, doctor auto-remediation, cost-summary skill.
+
+**Project-level `.yakos.yml`** (cli/lib/project-config.sh):
+- `default-runtime`, `default-fallback`, `default-permission`
+- `per-domain.<domain>: <runtime>` for routing by agent domain
+- `model-aliases.<alias>.<runtime>: <model>` for project-specific
+  alias overrides
+- Resolution chain (highest priority first): `--runtime` flag →
+  agent frontmatter `runtime:` → `.yakos.yml` per-domain →
+  `.yakos.yml` default-runtime → env / state / claude.
+
+**Semantic model aliases** (`lib/settings/model-aliases.json`):
+- `cheap`, `balanced`, `best`, `reasoning` map to per-runtime model
+  names. `model: cheap` in agent frontmatter resolves to haiku on
+  claude, gpt-5-nano on codex, gemini-2.5-flash on gemini. Project
+  `.yakos.yml` overrides these.
+
+**Real telemetry for codex + gemini** (closes the v0.6.0 deferred
+"per-runtime token counts"):
+- `runtimes/codex.sh::dispatch` honors `YAKOS_USAGE_OUT`: runs with
+  `codex exec --json`, parses `turn.completed` event for usage,
+  writes `{input_tokens, output_tokens, cache_read, total_tokens}`.
+- `runtimes/gemini.sh::dispatch` honors `YAKOS_USAGE_OUT`: runs with
+  `gemini -p --output-format stream-json`, parses the final usage
+  event. Field names normalized across runtimes for the dispatch-log.
+
+**`yakos memory diff <runtime>`** (cli/lib/memory.sh):
+- Compares yakOS canonical memory store against the runtime's mirror.
+- claude: per-file added/removed/modified.
+- codex: marker-block age vs. yakos-store newest mtime; reports
+  STALE if memory has been updated post-sync.
+- gemini: file-mtime drift comparison against yakos-system.md.
+
+**`yakos doctor --fix`** (cli/lib/doctor.sh):
+- Auto-remediates cheap, idempotent issues:
+  missing `~/.yakos-state` subdirs, missing yakOS gitignore patterns,
+  missing per-project `.session-started-history.ndjson`, missing or
+  stale `.framework-hash` siblings on hook scripts (only refreshes
+  when hook content matches framework src; preserves intentional
+  project drift).
+
+**`yakos session export <project> [<tag>]`** (cli/lib/session.sh):
+- Bundles a session into a tar.gz under `<control>/work/exports/`:
+  decisions, reports, mailbox snapshots, sliced launch-log +
+  dispatch-log entries, memory snapshot, runtime-probe history,
+  manifest. For incident review and operator handoff.
+- `yakos session list <project>` enumerates current + archived +
+  exported sessions.
+
+**GitHub Actions integration**
+(`.github/workflows/yakos-dispatch.yml` + `docs/ci-integration.md`):
+- Reusable workflow callable via `uses:
+  bakw00ds/yakos/.github/workflows/yakos-dispatch.yml@main`.
+- Inputs: `agent`, `task`, `runtime`, `fail_on_nonzero`, `timeout_minutes`.
+- Outputs: `agent_response`, `exit_code`, `usage_json`.
+- docs/ci-integration.md walks security-reviewer-on-PR and
+  architect-sign-off-on-migrations as worked examples.
+
+**Cost-summary skill** (`lib/skills/cost-summary/SKILL.md`):
+- Wraps `yakos cost --json` in a daily/weekly summary skill.
+- Optional webhook posting via `YAKOS_COST_WEBHOOK` env var (Slack /
+  Discord / Mattermost / generic JSON receivers). yakOS doesn't
+  bundle the webhook secret.
+
 ## [0.6.0.0] — 2026-05-08
 
 ### Added — agent scaffolding, real telemetry, memory portability complete, cost report
