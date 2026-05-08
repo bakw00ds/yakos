@@ -47,9 +47,14 @@ Install / lifecycle:
     --version     Print the version
     --help        Print this help
 
-Project bootstrap / inspection:
+Project bootstrap / launch / inspection:
     init          Bootstrap a project's ~/agent-control/<name>/
                   Args: <name> --project <path> [--force] [--with-gate]
+    start         Launch a Claude Code session for a bootstrapped project.
+                  Args: [<name>] [--safe] [--dry-run] [--continue|--resume <id>]
+                        [--ide] [--bare] [--model <alias>] [--strict-mcp]
+                  Composes --agents JSON from framework + project agents
+                  and exec's claude with --add-dir + --permission-mode.
     validate      Schema + reference validation (framework or project)
                   Args: [<project-path>] [--all]
     archive       Roll work/current/ into work/archive/<tag>/
@@ -68,6 +73,10 @@ Examples:
     yakos install
     yakos doctor
     yakos uninstall
+    yakos init myapp --project ~/code/myapp
+    yakos start myapp                     # explicit
+    yakos                                 # auto-detect from cwd
+    yakos start myapp --safe              # prompts on
     yakos version-bump --component patch --message "fix: stale doctor message"
     yakos git-hooks install   # in current project repo
 
@@ -80,14 +89,78 @@ if [ "$#" -gt 0 ]; then
     shift
 fi
 
+# Bare-yakos autodetect: if invoked with no args, infer what the operator
+# wants from the current directory. Three contexts:
+#   1. Inside ~/agent-control/<name>/  → start a session for <name>.
+#   2. Inside a yakos-bootstrapped project repo (matches a control dir's
+#      .project-path) → start a session for the matching <name>.
+#   3. Inside a git repo without bootstrap → suggest `yakos init`.
+#   4. Anywhere else → print full usage (current behavior).
+if [ -z "$cmd" ]; then
+    cwd_real="$(cd "$PWD" 2>/dev/null && pwd -P)"
+    ac_root="$HOME/agent-control"
+    detected_name=""
+    detected_reason=""
+
+    case "$cwd_real" in
+        "$ac_root"/*)
+            rest="${cwd_real#$ac_root/}"
+            detected_name="${rest%%/*}"
+            detected_reason="cwd is ~/agent-control/$detected_name"
+            ;;
+    esac
+
+    if [ -z "$detected_name" ] && [ -d "$ac_root" ]; then
+        for cd_path in "$ac_root"/*/.project-path; do
+            [ -f "$cd_path" ] || continue
+            proj="$(head -1 "$cd_path" 2>/dev/null)"
+            proj_real="$(cd "$proj" 2>/dev/null && pwd -P || true)"
+            [ -n "$proj_real" ] || continue
+            case "$cwd_real" in
+                "$proj_real"|"$proj_real"/*)
+                    detected_name="$(basename -- "$(dirname -- "$cd_path")")"
+                    detected_reason="cwd is inside the project repo for '$detected_name'"
+                    break
+                    ;;
+            esac
+        done
+    fi
+
+    if [ -n "$detected_name" ]; then
+        echo "yakos: detected project '$detected_name' ($detected_reason)" >&2
+        echo "       launching session..." >&2
+        echo >&2
+        bash "$YAKOS_LIB/start.sh" "$detected_name"
+        exit $?
+    fi
+
+    if [ -d "$cwd_real/.git" ] || git -C "$cwd_real" rev-parse --git-dir >/dev/null 2>&1; then
+        cat >&2 <<EOF
+yakos: this looks like a git repo but is not bootstrapped for yakos.
+
+To bootstrap (creates ~/agent-control/<name>/, copies hooks, drops settings):
+    yakos init <name> --project $cwd_real
+
+Then start a session:
+    yakos start <name>
+
+(Or run 'yakos --help' for the full command list.)
+EOF
+        exit 0
+    fi
+
+    usage
+    exit 0
+fi
+
 case "$cmd" in
-    "" | -h | --help | help)
+    -h | --help | help)
         usage
         ;;
     -v | --version)
         echo "yakos $YAKOS_VERSION"
         ;;
-    install | uninstall | update | init | doctor | validate | archive | status | team)
+    install | uninstall | update | init | doctor | validate | archive | status | team | start)
         script="$YAKOS_LIB/${cmd}.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"

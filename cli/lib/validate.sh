@@ -351,7 +351,7 @@ check_dark_code() {
         base="$(basename "$f")"
         # Skip framework helpers (always referenced indirectly via sourcing)
         case "$base" in
-            hook-input.sh|hook-output.sh|paths.sh|compat.sh|README.md) continue ;;
+            hook-input.sh|hook-output.sh|paths.sh|compat.sh|agents-compose.sh|README.md) continue ;;
         esac
         if ! grep -qF "$base" "$refs_file" 2>/dev/null; then
             warn "$f: potential dark code — '$base' is not referenced anywhere (settings.template.json, SKILL.md, docs/, or CLI)"

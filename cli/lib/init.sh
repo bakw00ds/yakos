@@ -287,8 +287,11 @@ YakOS init complete for '$NAME'.
   Push gate:    $GATE_STATUS
 
 To start a session:
-  cd $CONTROL_DIR
-  claude --add-dir $PROJECT_ABS
+  yakos start $NAME
+
+(Or run bare 'yakos' from $CONTROL_DIR or $PROJECT_ABS — auto-detects.)
+Use 'yakos start $NAME --dry-run' to preview the launch command;
+'yakos start $NAME --safe' to enable permission prompts.
 
 Customize:
   $PATH_ALLOWLIST

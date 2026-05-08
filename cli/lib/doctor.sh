@@ -371,6 +371,54 @@ if [ "$PROBE_RUNTIME" = "1" ]; then
 
 EOF
     echo ""
+
+    # ---- yakos start agent injection projection ----------------------------
+    # Report what `yakos start <name>` would register if invoked from the
+    # given project. Closes "would my project agents actually bind?" without
+    # requiring a real session launch.
+    echo "yakos start projection (--agents JSON injection):"
+    if [ -n "$PROJECT_PATH" ] && [ -d "$PROJECT_PATH" ]; then
+        if [ -f "$YAKOS_LIB/agents-compose.sh" ]; then
+            # shellcheck source=./agents-compose.sh
+            . "$YAKOS_LIB/agents-compose.sh" 2>/dev/null || true
+            if command -v yk_agents_compose >/dev/null 2>&1; then
+                composed_json="$(yk_agents_compose "$YAKOS_ROOT" "$PROJECT_PATH" 2>/dev/null || echo '{}')"
+                n_agents="$(printf '%s' "$composed_json" | jq 'length' 2>/dev/null || echo 0)"
+                fw_count="$(find "$YAKOS_ROOT/lib/agents" -maxdepth 1 -name '*.md' \
+                    ! -name 'README.md' ! -name 'lead-template.md' 2>/dev/null \
+                    | wc -l | tr -d ' ')"
+                proj_count=0
+                if [ -d "$PROJECT_PATH/.claude/agents" ]; then
+                    proj_count="$(find "$PROJECT_PATH/.claude/agents" -maxdepth 1 -name '*.md' \
+                        ! -name 'README.md' 2>/dev/null | wc -l | tr -d ' ')"
+                fi
+                ok "would inject $n_agents agent(s) ($fw_count framework + $proj_count project; project overrides on id collision)"
+                if [ "$n_agents" -gt 0 ]; then
+                    info "addressable subagent_types after launch:"
+                    printf '%s' "$composed_json" | jq -r 'keys[]' 2>/dev/null \
+                        | sed 's/^/    /'
+                fi
+            else
+                info "agents-compose.sh did not load cleanly; skipping projection"
+            fi
+        else
+            info "agents-compose.sh not found at $YAKOS_LIB/agents-compose.sh"
+        fi
+    else
+        info "pass <project-path> to see the agents that would be injected"
+    fi
+    echo ""
+
+    # ---- launch log audit trail -----------------------------------------------
+    launch_log="$HOME/.yakos-state/launch-log.ndjson"
+    if [ -f "$launch_log" ]; then
+        n_launches="$(wc -l < "$launch_log" 2>/dev/null | tr -d ' ')"
+        last_launch="$(tail -1 "$launch_log" 2>/dev/null | jq -r '.ts // "unknown"' 2>/dev/null || echo unknown)"
+        info "launch-log.ndjson: $n_launches recorded session launch(es); last at $last_launch"
+    else
+        info "launch-log.ndjson: none yet (run 'yakos start <name>' to populate)"
+    fi
+    echo ""
 fi
 
 # ---- summary ----------------------------------------------------------------

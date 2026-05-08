@@ -17,11 +17,19 @@ gets both.
 
 ## Status
 
-**v0.2.2.0** — production-touching, audit-trail-first. Ships:
+**v0.3.0** — session-launch UX, runtime-bound project agents. Ships:
 
 - **CLI**: install / uninstall / doctor (with `--probe-runtime`) / init
-  (with `--with-gate`) / validate / archive / status / team / update /
-  version-bump / git-hooks.
+  (with `--with-gate`) / **start** (NEW) / validate / archive / status /
+  team / update / version-bump / git-hooks. Bare `yakos` autodetects
+  the current project from `cwd`.
+- **`yakos start <name>`** — single-command session launcher. Composes
+  `--agents` JSON from framework + project agents, exec's `claude
+  --add-dir <repo> --permission-mode bypassPermissions --agents <json>`.
+  Auto-detects `<project>/.mcp.json` for `--mcp-config`. Pass-throughs
+  for `--continue` / `--resume` / `--fork-session` / `--ide` / `--bare` /
+  `--strict-mcp` / `--model`. Audit trail at
+  `~/.yakos-state/launch-log.ndjson`.
 - **8 reference Claude Code hooks** under `lib/hooks/` (path-allowlist,
   secret-scan, mailbox-mirror, path-log, team-lifecycle, session-end-check
   with team-inbox snapshot, task-dependency-gate, task-complete-dispatch).
@@ -29,25 +37,27 @@ gets both.
 - **1 git hook**: pre-push version gate (`lib/hooks/git/`) with
   classification-aware enforcement and NDJSON audit trail at
   `~/.yakos-state/gate-log.ndjson`.
-- **12 generic agents** under the 80–140 line budget. Cross-cutting
+- **15 generic agents** under the 80–140 line budget. Cross-cutting
   roles (lead-template, planner, code-reviewer, security-reviewer,
-  test-runner, troubleshooter, doc-writer, maintainer) + stack-specialist
+  test-runner, troubleshooter, doc-writer, maintainer, **architect**,
+  **incident-responder**, **release-manager**) + stack-specialist
   templates with `extends:` deployment (backend, frontend, mobile,
   database).
 - **16 skills** under `lib/skills/` including: contract-handoff,
-  dispatch-as-project-agent (workaround for project-agent runtime
-  non-discovery), hashed-edit (OMA-inspired stale-line catch),
-  iterate-until (formal "loop until human-checkable verifier passes"),
-  version-bump (4-part semver with `[Unreleased]` promote-on-bump),
-  release-audit/ scaffolding (templates + 7 auditor sub-agents).
+  dispatch-as-project-agent (still useful for ad-hoc dispatch even
+  with `--agents` injection in place), hashed-edit (OMA-inspired
+  stale-line catch), iterate-until (formal "loop until human-checkable
+  verifier passes"), version-bump (4-part semver with `[Unreleased]`
+  promote-on-bump), release-audit/ scaffolding.
 - **Posture made explicit**: PHILOSOPHY.md "Human-in-the-loop by
   design" section. yakOS optimizes for production-touching work in
   audit-sensitive domains, not autonomous-first prototyping.
-- **Phase 0.5 findings documented**: project-level `.claude/agents/`
-  files aren't runtime-discoverable as `subagent_type` (Claude Code
-  limitation, workaround via `dispatch-as-project-agent` skill).
-  TaskCreate/TaskList/TaskUpdate not exposed in current Claude Code
-  build. Both findings tracked in `INCIDENT-CATALOG.md`.
+- **Runtime findings**: project-level `.claude/agents/*.md` files are
+  STILL not natively runtime-discoverable as `subagent_type` in claude
+  2.1.136 (`incident:v0.2.0`). v0.3 closes this for normal operation
+  via `yakos start`'s `--agents` JSON injection. TaskCreate / TaskList /
+  TaskUpdate also not exposed in current Claude Code build
+  (`incident:v0.2.1-task-tools-not-exposed`).
 
 See [CHANGELOG.md](CHANGELOG.md) for what landed in each release.
 
@@ -94,9 +104,21 @@ auto-memory `MEMORY.md` index exists.
 ## Run a session
 
 ```sh
-cd ~/agent-control/<project-name>
-claude --add-dir /path/to/your/project
+yakos start <project-name>
 ```
+
+Or run bare `yakos` from inside `~/agent-control/<project-name>/` or
+the project repo — it auto-detects which project you mean.
+
+`yakos start` composes the framework + project agents into the
+`claude --agents` JSON (so project-level specialists become
+addressable as `subagent_type` — works around
+`incident:v0.2.0-project-agent-runtime-non-discovery`), passes
+`--add-dir <repo>`, defaults to `--permission-mode bypassPermissions`,
+and auto-detects `<project>/.mcp.json` for `--mcp-config`. Use
+`--safe` to keep permission prompts on, `--dry-run` to preview the
+exec'd command, `--continue` / `--resume <id>` / `--fork-session` /
+`--ide` / `--bare` / `--model <alias>` as pass-throughs to claude.
 
 The lead agent loads the framework's generic agents, the project's
 specialists, the path-scoped rules that match files Claude reads, and
@@ -211,15 +233,16 @@ Engineering:
 - [lib/hooks/README.md](lib/hooks/README.md) — hook authoring contract
 - [tests/README.md](tests/README.md) — test layout
 
-## Not in v0.2.x
+## Not in v0.3.x
 
 Tracked roadmap items, gated for clear reasons:
 
-- **The architect, incident-responder, log-analyst, devops-infra,
-  performance-engineer, privacy-reviewer, accessibility-reviewer, and
-  ux-reviewer agents.** Cross-cutting roster per
-  [docs/team-shapes.md](docs/team-shapes.md). Add as concrete demand
-  surfaces from real use.
+- **The log-analyst, devops-infra, performance-engineer, privacy-
+  reviewer, accessibility-reviewer, and ux-reviewer agents.** v0.3
+  added architect, incident-responder, and release-manager from the
+  cross-cutting roster (highest demand, lowest design risk). The
+  remaining six wait for concrete demand from real use per
+  [docs/team-shapes.md](docs/team-shapes.md).
 - **`task-dependency-gate.sh` and `task-complete-dispatch.sh` BLOCKING
   upgrade.** Was scheduled for v0.2; gated on a Claude Code runtime
   feature (TaskCreate/TaskUpdate not currently exposed — see

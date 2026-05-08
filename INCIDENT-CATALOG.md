@@ -302,36 +302,55 @@ review.
 **Date:** 2026-04-28
 **Project:** YakOS itself (Phase 8 PandaOS migration probe + v0.2 re-test)
 **Severity:** P2 — feature works on disk, doesn't work at runtime
+**Status (2026-05-08):** RESOLVED for normal operation via
+`yakos start`'s `--agents` JSON injection (v0.3.0). Underlying
+runtime limitation in claude 2.1.136 unchanged; the workaround
+fully restores `subagent_type` addressability for project agents.
 
 **Summary:** Project-level agents at `<project>/.claude/agents/<role>.md`
 are NOT discoverable as `subagent_type` values by the Claude Code
 Agent tool, even within a `TeamCreate` context, even with the file
 present at the session's `cwd/.claude/agents/` from session start
-(retest 2026-04-28 confirmed all three discovery paths fail).
-The Agent tool resolves only the runtime built-ins
-(`general-purpose`, `Explore`, `Plan`, `claude-code-guide`,
-`statusline-setup`).
+(retest 2026-04-28 confirmed all three discovery paths fail;
+re-confirmed 2026-05-08 against claude 2.1.136). The Agent tool
+resolves only the runtime built-ins (`general-purpose`, `Explore`,
+`Plan`, `claude-code-guide`, `statusline-setup`).
 
 **Impact:** YakOS's per-project agent design (project-specific
 specialists override or extend framework templates) is documentary
 only — the on-disk discipline doesn't bind at runtime. Multi-agent
-dispatch with project-scoped discipline requires the
+dispatch with project-scoped discipline previously required the
 `dispatch-as-project-agent` skill (general-purpose + injected agent
-body) as a workaround.
+body) as a per-call workaround.
 
 **Root cause:** Claude Code limitation, not a YakOS one. The
 runtime's agent-type registry doesn't enumerate
 `<cwd>/.claude/agents/` or any `--add-dir`'d directory.
 
-**Prevented by:**
-- `skill:dispatch-as-project-agent` (yakOS v0.2.0.0) — the workable
-  dispatch pattern. Documents what the spawned agent loses (hook
-  coverage, TaskList integration, mailbox routing) and the lead's
-  manual-pass responsibilities.
-- Documentation in `docs/team-shapes.md` "Runtime dispatch in v0.1"
-  section spells out what works and what doesn't.
+**Resolution (v0.3.0, 2026-05-08):** `yakos start` composes the
+`--agents` JSON at launch from `lib/agents/*.md` + project
+`.claude/agents/*.md` and passes it via `claude --agents '<json>'`.
+Claude Code 2.1.136's `--agents` flag DOES register agents as
+addressable `subagent_type` values for the session's lifetime
+(empirically verified). 21 agents (11 framework + 10 PandaOS)
+registered cleanly in the verification probe. Project agents
+override framework on id collision via jq merge precedence.
 
-**Related rules / agents:** `lib/skills/dispatch-as-project-agent/SKILL.md`,
+**Prevented by:**
+- **`yakos start`** (v0.3.0) — composes and injects `--agents` JSON
+  at session launch. The default path; closes the incident for
+  normal use.
+- **`skill:dispatch-as-project-agent`** (yakOS v0.2.0.0, still
+  shipping) — useful when launching a project agent ad-hoc inside
+  a session that wasn't started with `yakos start`, or when
+  combining a project-agent body with `Explore`-type discipline.
+  The agent-body injection technique remains valid.
+- Documentation in `docs/team-shapes.md` "Runtime dispatch" section
+  spells out which path applies when.
+
+**Related rules / agents:** `cli/lib/start.sh`,
+`cli/lib/agents-compose.sh`,
+`lib/skills/dispatch-as-project-agent/SKILL.md`,
 `docs/team-shapes.md`.
 
 ---

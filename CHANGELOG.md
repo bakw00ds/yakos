@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0.0] — 2026-05-08
+
+### Added — `yakos start`, --agents JSON injection, three new agents
+
+Closing the "session launch UX" gap reported on 2026-05-08. Three
+operator pain points addressed:
+
+- **`yakos start <name>`** — new launcher subcommand at
+  [`cli/lib/start.sh`](cli/lib/start.sh). Resolves the project repo
+  from `~/agent-control/<name>/.project-path`, composes the
+  `--agents` JSON, exec's `claude --add-dir <repo>
+  --permission-mode bypassPermissions --agents <json>`. Replaces
+  the v0.2.x manual flow (`cd ~/agent-control/<name> && claude
+  --add-dir ...`). Flags: `--safe` (prompts on), `--dry-run`,
+  `--print-agents`, `--no-agents`; pass-throughs `--continue`,
+  `--resume <id>`, `--fork-session`, `--ide`, `--bare`,
+  `--strict-mcp`, `--model <alias>`. Auto-detects
+  `<project>/.mcp.json` for `--mcp-config`.
+- **Bare-`yakos` autodetect.** Running `yakos` with no args inside
+  `~/agent-control/<name>/` or inside a yakos-bootstrapped project
+  repo launches that project's session. Outside both, suggests
+  `yakos init` (in a git repo) or prints help.
+- **`--agents` JSON injection** at
+  [`cli/lib/agents-compose.sh`](cli/lib/agents-compose.sh).
+  Closes `incident:v0.2.0-project-agent-runtime-non-discovery`:
+  project agents at `<project>/.claude/agents/*.md` were not
+  runtime-discoverable as `subagent_type`. The composer scans
+  framework + project agent files, parses YAML frontmatter,
+  resolves `extends:`, and emits a single JSON object. Project
+  agents override framework on id collision. Empirically verified
+  against claude 2.1.136 on 2026-05-08: all 21 composed agents
+  registered as addressable `subagent_type` values alongside the
+  built-ins.
+- **Three new framework agents.** `architect.md` (read-only design
+  + ADR authoring), `incident-responder.md` (production-incident
+  coordination, dispatch-don't-fix), `release-manager.md` (release
+  mechanics: VERSION + changelog + tag + smoke). All under the
+  80–140 line agent budget and aligned with the existing
+  cross-cutting roster shape.
+- **Doctor `--probe-runtime` projection.** When a project path is
+  passed, `yakos doctor --probe-runtime` now reports the count and
+  names of agents that would be injected by `yakos start`, plus
+  the launch-log audit-trail status.
+- **Audit trail.** Each `yakos start` appends a `session_launched`
+  event to `<control>/work/current/.session-started-history.ndjson`
+  AND `~/.yakos-state/launch-log.ndjson` (project, repo, perm
+  mode, agent count, ISO timestamp).
+- **README + init/team output updated** — manual `claude --add-dir`
+  print blocks in `cli/lib/init.sh` and `cli/lib/team.sh` replaced
+  with `yakos start <name>` instructions. README "Run a session"
+  section rewritten.
+
+**Empirical findings (claude 2.1.136, probed 2026-05-08):**
+
+- `claude --agents '<json>'` accepts a `{"<name>": {description,
+  prompt, tools[], model}}` shape and registers the agents as
+  addressable `subagent_type` values. Built-in agents
+  (general-purpose, Explore, Plan, statusline-setup) remain
+  available alongside.
+- File-based agents at `~/.claude/agents/*.md` and
+  `<project>/.claude/agents/*.md` are STILL not runtime-addressable
+  in claude 2.1.136 (incident:v0.2.0 unchanged). The `--agents`
+  injection is the working path until upstream support lands.
+
 ## [0.2.2.0] — 2026-04-29
 
 ### Added — runtime probe + audit polish + framework-side CI

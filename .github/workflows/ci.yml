@@ -101,6 +101,28 @@ jobs:
           # Confirm pre-push gate landed
           test -x "$tmp/.git/hooks/pre-push"
           test -f "$tmp/.git/hooks/pre-push.framework-hash"
+      - name: yakos start --dry-run (verify launcher composes valid cmd)
+        run: |
+          set -e
+          # --dry-run prints the command without exec'ing claude.
+          out="$(./cli/yakos start smoketest --dry-run 2>&1)"
+          echo "$out"
+          # Banner sanity
+          echo "$out" | grep -qE '^  project:[[:space:]]+smoketest$'
+          echo "$out" | grep -qE '^  permission:[[:space:]]+bypassPermissions$'
+          echo "$out" | grep -qE '^  agents:[[:space:]]+[0-9]+ registered'
+          # Composed command sanity — must include the four key flags
+          echo "$out" | grep -qE '\-\-add-dir'
+          echo "$out" | grep -qE '\-\-permission-mode bypassPermissions'
+          echo "$out" | grep -qE '\-\-agents'
+          # --safe path swaps permission mode
+          out_safe="$(./cli/yakos start smoketest --dry-run --safe 2>&1)"
+          echo "$out_safe" | grep -qE '^  permission:[[:space:]]+default$'
+          # --print-agents emits valid JSON
+          ./cli/yakos start smoketest --print-agents | jq -e 'type == "object" and (length > 0)'
+          # Doctor projection includes addressable agent list
+          ./cli/yakos doctor "$tmp" --probe-runtime 2>&1 \
+            | grep -qE 'would inject [0-9]+ agent\(s\)'
       - name: yakos uninstall
         run: |
           ./cli/yakos uninstall

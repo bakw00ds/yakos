@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # team.sh — team lifecycle subcommands.
 #
+# Purpose: archive a project's work/current/ and print relaunch
+# instructions. v0.3+ relaunch goes through `yakos start <project>`.
+#
 # v0.1 ships only `yakos team restart <project>`:
 #   1. Pick a tag (auto-generated from timestamp).
 #   2. Archive work/current/ via 'yakos archive <project> <tag> --auto-tag'.
@@ -101,8 +104,7 @@ fi
 cat <<EOF
 
 Team archived. To start a fresh session:
-  cd $CONTROL_DIR
-  claude --add-dir $project_repo
+  yakos start $PROJECT
 
-(v0.1 does not auto-relaunch claude.)
+(Or run bare 'yakos' from $CONTROL_DIR or $project_repo — auto-detects.)
 EOF
