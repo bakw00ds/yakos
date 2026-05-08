@@ -424,7 +424,90 @@ Bump tier semantics in [STYLE.md §8](STYLE.md). Override:
 
 ---
 
-## Not in v0.2.x
+## Pattern 10: Default-claude project with one codex helper agent
+
+When the lead runs on claude but you want one specialist running on
+codex (e.g. for deep code review or a particular task type),
+configure it via per-agent runtime frontmatter.
+
+### Setup
+
+Create the codex agent with the scaffold helper:
+
+```sh
+cd ~/code/myapp
+yakos agent new codex-reviewer \
+    --runtime codex \
+    --domain code-review \
+    --model o4-mini \
+    --tools "Read, Grep, Bash"
+```
+
+That writes `<project>/.claude/agents/codex-reviewer.md` with:
+
+```yaml
+---
+id: codex-reviewer
+role: specialist
+domain: code-review
+mode: [feature]
+tools: [Read, Grep, Bash]
+model: o4-mini
+runtime: codex
+references: []
+---
+
+# Codex Reviewer
+
+## Purpose
+TODO — fill in.
+...
+```
+
+Edit the body to describe what this agent does. Then verify:
+
+```sh
+yakos agents lint           # clean? all runtimes resolve?
+yakos auth status codex     # codex CLI installed + authed?
+```
+
+### Use it
+
+Launch a normal claude session:
+
+```sh
+yakos start myapp           # default runtime: claude
+```
+
+Inside the session, the lead delegates most work via the in-session
+`Agent` tool with `subagent_type=<name>` (those run on claude). For
+the codex agent, the lead uses `Bash` to call:
+
+```sh
+yakos dispatch codex-reviewer "review the auth middleware in pkg/auth/"
+```
+
+The codex CLI runs the agent headlessly, the response comes back
+to the lead's stdout, and dispatch-log.ndjson records the cost
+(real tokens captured for claude; rough estimate for codex/gemini
+until v0.6.x extends per-runtime telemetry).
+
+### Mixed-runtime tips
+
+- Add a `runtime-fallback: [claude]` to the agent so it falls back
+  to claude when codex is unavailable:
+  ```yaml
+  runtime: codex
+  runtime-fallback: [claude]
+  ```
+- `yakos cost --by agent` shows where time and tokens went per
+  specialist after a few dispatches.
+- `yakos doctor --probe-runtime` flags codex/gemini version drift
+  between sessions — useful when an adapter starts misbehaving.
+
+---
+
+## Not in v0.6.x
 
 - **Multi-team coordination.** A "team-of-teams" pattern (a release
   manager coordinating across feature teams) isn't a primitive yet.

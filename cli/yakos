@@ -71,6 +71,13 @@ Project bootstrap / launch / inspection:
                   Args: install <runtime> --project <path> | status [<path>]
     memory        Portable yakOS memory across runtimes (v0.5+).
                   Args: list | show <key> | put <key> <file> | sync <runtime>
+    agent / agents
+                  Agent file lifecycle (v0.6+).
+                  Args: new <name> --runtime <id> [--extends <id>] | lint
+                  `agents` is a plural alias for the lint subcommand.
+    cost          Aggregate dispatch-log telemetry into a per-runtime / per-agent
+                  cost report (v0.6+).
+                  Args: [--since <ISO>] [--by agent|runtime|day]
     validate      Schema + reference validation (framework or project)
                   Args: [<project-path>] [--all]
     archive       Roll work/current/ into work/archive/<tag>/
@@ -176,7 +183,7 @@ case "$cmd" in
     -v | --version)
         echo "yakos $YAKOS_VERSION"
         ;;
-    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory)
+    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost)
         script="$YAKOS_LIB/${cmd}.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"
@@ -205,6 +212,10 @@ case "$cmd" in
             ct_die "internal error: $script not found"
         fi
         bash "$script" "$@"
+        ;;
+    agents)
+        # 'agents' is a plural alias for 'agent' to make `yakos agents lint` natural.
+        bash "$YAKOS_LIB/agent.sh" "$@"
         ;;
     *)
         echo "yakos: unknown command '$cmd'" >&2

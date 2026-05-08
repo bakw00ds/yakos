@@ -153,6 +153,15 @@ yk_rt_gemini_launch() {
     yk_rt_gemini_materialize_agents "$YAKOS_ROOT" "$project" >/dev/null
     yk_rt_gemini_synth_settings "$project"
 
+    # If yakos memory sync gemini has been run, the synthesized
+    # system.md gets exported as GEMINI_SYSTEM_MD so memory flows
+    # into the session context.
+    local sysmd="$project/.gemini/yakos-system.md"
+    if [ -f "$sysmd" ] && [ -z "${GEMINI_SYSTEM_MD:-}" ]; then
+        export GEMINI_SYSTEM_MD="$sysmd"
+        ct_log "gemini: exported GEMINI_SYSTEM_MD=$sysmd"
+    fi
+
     local args=( --include-directories "$project" )
     case "$perm_mode" in
         bypass) args+=( --approval-mode=yolo ) ;;

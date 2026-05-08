@@ -112,8 +112,6 @@ yk_rt_claude_dispatch() {
     local agents_json
     agents_json="$(yk_agents_compose "$YAKOS_ROOT" "$project")"
 
-    # Build a single-agent JSON for the dispatch by extracting the
-    # named agent. If the agent isn't in the composed set, fail loudly.
     local single
     single="$(printf '%s' "$agents_json" | jq --arg n "$agent_name" \
         'if has($n) then {($n): .[$n]} else null end')"
@@ -121,15 +119,44 @@ yk_rt_claude_dispatch() {
         ct_die "claude_dispatch: agent '$agent_name' not found in composed set"
     fi
 
-    # Phrase the task so claude routes through the named agent.
-    # Empirically the simplest route is to prepend an explicit Agent-tool
-    # instruction to the prompt.
     local framed
     framed="Use the Agent tool to dispatch the following task to subagent_type=\"$agent_name\". Return only the subagent's final report.
 
 Task:
 $task"
 
+    # If the caller (dispatch.sh) set YAKOS_USAGE_OUT, run claude with
+    # --output-format stream-json, parse the final result event for
+    # actual token usage, write to that path, and reconstruct the
+    # text-only response for stdout.
+    if [ -n "${YAKOS_USAGE_OUT:-}" ]; then
+        local raw_tmp
+        raw_tmp="$(mktemp -t yakos-claude-raw.XXXXXX)"
+
+        claude --agents "$single" \
+               --permission-mode bypassPermissions \
+               --add-dir "$project" \
+               --output-format stream-json \
+               --verbose \
+               -p "$framed" > "$raw_tmp" 2>/dev/null
+        local rc=$?
+
+        # Extract assistant text and the final result event's usage.
+        jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text' \
+            "$raw_tmp" 2>/dev/null
+        jq -c 'select(.type == "result") | {input_tokens: .usage.input_tokens,
+            output_tokens: .usage.output_tokens,
+            cache_read: .usage.cache_read_input_tokens,
+            cache_creation: .usage.cache_creation_input_tokens,
+            duration_ms: .duration_ms,
+            total_cost_usd: .total_cost_usd}' \
+            "$raw_tmp" 2>/dev/null | tail -1 > "$YAKOS_USAGE_OUT"
+
+        rm -f "$raw_tmp" 2>/dev/null
+        return "$rc"
+    fi
+
+    # Default path — text-only, no telemetry capture.
     claude --agents "$single" \
            --permission-mode bypassPermissions \
            --add-dir "$project" \

@@ -231,15 +231,100 @@ if [ "$SUB" = "sync" ]; then
             done < <(find "$src" -maxdepth 1 -type f -name '*.md' 2>/dev/null)
             echo "synced $count file(s) → $target"
             ;;
-        codex|gemini)
-            cat <<EOF
-memory sync $RUNTIME: not yet implemented in v0.5.0.
-Planned for v0.5.1 (see docs/memory-portability.md):
-  codex:  appends yakOS memory index + key files into <project>/.codex/AGENTS.md
-  gemini: synthesizes <project>/.gemini/system.md and points GEMINI_SYSTEM_MD at it
+        codex)
+            # codex reads <project>/.codex/AGENTS.md as system context
+            # (32 KiB cap). Bracket yakos-owned content with markers so
+            # re-syncs replace just that section without clobbering the
+            # operator's own AGENTS.md.
+            target="$project_repo/.codex/AGENTS.md"
+            mkdir -p "$project_repo/.codex"
+            marker_start='<!-- yakos-memory-start (managed; do not edit by hand) -->'
+            marker_end='<!-- yakos-memory-end -->'
 
-For now, the project's source-of-truth memory is at:
-  $src
+            body_tmp="$(mktemp -t yakos-mem-codex.XXXXXX)"
+            {
+                printf '%s\n' "$marker_start"
+                printf '\n# yakOS memory (synced from %s)\n\n' "$src"
+                if [ -f "$src/MEMORY.md" ]; then
+                    printf '## Memory index\n\n'
+                    sed -n '1,50p' "$src/MEMORY.md"
+                    printf '\n'
+                fi
+                printf '## Memories\n\n'
+                while IFS= read -r f; do
+                    [ -n "$f" ] || continue
+                    base="$(basename -- "$f")"
+                    case "$base" in MEMORY.md) continue ;; esac
+                    printf '### %s\n\n' "$base"
+                    cat "$f"
+                    printf '\n\n'
+                done < <(find "$src" -maxdepth 1 -type f -name '*.md' ! -name 'MEMORY.md' 2>/dev/null | sort)
+                printf '%s\n' "$marker_end"
+            } > "$body_tmp"
+
+            # Truncate to 28 KiB to leave headroom under codex's 32 KiB
+            # AGENTS.md merge cap.
+            body_size="$(wc -c < "$body_tmp" | tr -d ' ')"
+            if [ "$body_size" -gt 28672 ]; then
+                head -c 28000 "$body_tmp" > "${body_tmp}.t" && mv "${body_tmp}.t" "$body_tmp"
+                printf '\n... (truncated to fit 32 KiB AGENTS.md cap; full memory at %s)\n%s\n' \
+                    "$src" "$marker_end" >> "$body_tmp"
+                ct_log "memory sync codex: truncated $body_size B → 28 KiB to fit codex cap"
+            fi
+
+            # Splice into AGENTS.md, replacing any prior yakos block.
+            if [ ! -f "$target" ]; then
+                cp "$body_tmp" "$target"
+            else
+                merged_tmp="$(mktemp -t yakos-mem-codex-merged.XXXXXX)"
+                # Strip any existing yakos block via awk; then append fresh.
+                awk -v start="$marker_start" -v end="$marker_end" '
+                    $0 == start { in_yakos = 1; next }
+                    $0 == end   { in_yakos = 0; next }
+                    !in_yakos   { print }
+                ' "$target" > "$merged_tmp"
+                printf '\n' >> "$merged_tmp"
+                cat "$body_tmp" >> "$merged_tmp"
+                mv "$merged_tmp" "$target"
+            fi
+            rm -f "$body_tmp" 2>/dev/null
+            echo "synced yakOS memory into $target"
+            ;;
+        gemini)
+            # gemini accepts a system-prompt override via GEMINI_SYSTEM_MD
+            # env var pointing at a markdown file. Synthesize that file
+            # under <project>/.gemini/yakos-system.md; the gemini adapter's
+            # launch path will export GEMINI_SYSTEM_MD when it sees the
+            # file. The operator can also `export GEMINI_SYSTEM_MD=...`
+            # manually.
+            target="$project_repo/.gemini/yakos-system.md"
+            mkdir -p "$project_repo/.gemini"
+            {
+                printf '# yakOS-injected system context for %s\n\n' "$PROJECT"
+                printf 'Auto-synthesized %s from %s — do not edit by hand.\n\n' "$(ct_iso_now_z)" "$src"
+                if [ -f "$src/MEMORY.md" ]; then
+                    printf '## Memory index\n\n'
+                    cat "$src/MEMORY.md"
+                    printf '\n'
+                fi
+                printf '## Memories\n\n'
+                while IFS= read -r f; do
+                    [ -n "$f" ] || continue
+                    base="$(basename -- "$f")"
+                    case "$base" in MEMORY.md) continue ;; esac
+                    printf '### %s\n\n' "$base"
+                    cat "$f"
+                    printf '\n\n'
+                done < <(find "$src" -maxdepth 1 -type f -name '*.md' ! -name 'MEMORY.md' 2>/dev/null | sort)
+            } > "$target"
+            cat <<EOF
+synced yakOS memory into $target
+
+Activate by exporting GEMINI_SYSTEM_MD before launching gemini:
+  export GEMINI_SYSTEM_MD="$target"
+
+The gemini adapter's launch path (yakos start --runtime gemini) does
+this automatically. Manual gemini sessions need the export.
 EOF
             ;;
         *) ct_die "memory sync: unknown runtime '$RUNTIME' (claude|codex|gemini)" ;;

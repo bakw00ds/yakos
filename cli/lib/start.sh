@@ -352,8 +352,30 @@ fi
 
 mkdir -p "$HOME/.yakos-state" 2>/dev/null || true
 LAUNCH_LOG="$HOME/.yakos-state/launch-log.ndjson"
+ct_rotate_log "$LAUNCH_LOG" 2>/dev/null || true
 printf '%s\n' "$session_event" >> "$LAUNCH_LOG" 2>/dev/null || \
     ct_log "WARN: could not append to $LAUNCH_LOG"
+
+# ---- runtime-probe snapshot (drift detection) ------------------------------
+# Capture each runtime CLI's --version + capability set. yakos doctor
+# --probe-runtime compares this snapshot to the prior one and warns
+# on schema/version drift so the operator knows when an adapter may
+# need updating.
+PROBE_DIR="$HOME/.yakos-state/runtime-probes"
+mkdir -p "$PROBE_DIR" 2>/dev/null || true
+case "$RUNTIME" in
+    claude) rt_ver="$(claude --version 2>/dev/null | head -1 || echo unknown)" ;;
+    codex)  rt_ver="$(codex --version 2>/dev/null | head -1 || echo unknown)" ;;
+    gemini) rt_ver="$(gemini --version 2>/dev/null | head -1 || echo unknown)" ;;
+    *)      rt_ver="unknown" ;;
+esac
+probe_snapshot="$(jq -cn \
+    --arg t "$ts" \
+    --arg runtime "$RUNTIME" \
+    --arg version "$rt_ver" \
+    --arg caps "$CAPS" \
+    '{ts:$t, runtime:$runtime, version:$version, capabilities:$caps}')"
+printf '%s\n' "$probe_snapshot" >> "$PROBE_DIR/${RUNTIME}.ndjson" 2>/dev/null || true
 
 # ---- exec runtime ----------------------------------------------------------
 

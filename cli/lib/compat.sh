@@ -180,6 +180,38 @@ ct_dir_size_bytes() {
     fi
 }
 
+# ---- log rotation --------------------------------------------------------
+
+# ct_rotate_log <file> [<size-bytes>] [<keep>]
+#   If <file> exceeds <size-bytes> (default 5 MB), rotate it to <file>.1,
+#   shifting older archives up to <keep> (default 5). Idempotent + safe on
+#   missing files. Used by launch-log.ndjson and dispatch-log.ndjson so
+#   ~/.yakos-state/ doesn't grow unbounded.
+ct_rotate_log() {
+    local file="$1"
+    local max_bytes="${2:-5242880}"
+    local keep="${3:-5}"
+
+    [ -f "$file" ] || return 0
+    local sz
+    sz="$(stat -c '%s' "$file" 2>/dev/null \
+        || stat -f '%z' "$file" 2>/dev/null \
+        || wc -c < "$file" 2>/dev/null | tr -d ' ' \
+        || echo 0)"
+    [ "$sz" -ge "$max_bytes" ] || return 0
+
+    [ -f "${file}.${keep}" ] && rm -f "${file}.${keep}"
+    local i=$((keep - 1))
+    while [ "$i" -ge 1 ]; do
+        if [ -f "${file}.${i}" ]; then
+            mv "${file}.${i}" "${file}.$((i + 1))"
+        fi
+        i=$((i - 1))
+    done
+    mv "$file" "${file}.1"
+    : > "$file"
+}
+
 # ---- hashing --------------------------------------------------------------
 
 ct_sha256() {

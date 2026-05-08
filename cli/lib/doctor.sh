@@ -419,6 +419,28 @@ EOF
         info "launch-log.ndjson: none yet (run 'yakos start <name>' to populate)"
     fi
     echo ""
+
+    # ---- runtime-probe drift detection (v0.6+) -------------------------------
+    probe_dir="$HOME/.yakos-state/runtime-probes"
+    echo "Runtime version drift (last 2 probes per runtime):"
+    if [ -d "$probe_dir" ]; then
+        for f in "$probe_dir"/*.ndjson; do
+            [ -f "$f" ] || continue
+            rt="$(basename -- "$f" .ndjson)"
+            n="$(wc -l < "$f" 2>/dev/null | tr -d ' ')"
+            if [ "$n" = "0" ]; then continue; fi
+            cur="$(tail -1 "$f" | jq -r '.version' 2>/dev/null)"
+            prev="$(tail -2 "$f" | head -1 | jq -r '.version' 2>/dev/null)"
+            if [ "$cur" = "$prev" ] || [ "$n" = "1" ]; then
+                ok "$rt: $cur ($n probe(s) on file)"
+            else
+                info "$rt: $cur (DRIFT — was '$prev'; review adapter for schema changes)"
+            fi
+        done
+    else
+        info "no runtime-probe history yet (run 'yakos start' against each runtime)"
+    fi
+    echo ""
 fi
 
 # ---- summary ----------------------------------------------------------------

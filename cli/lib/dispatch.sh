@@ -213,6 +213,7 @@ ts_start="$(ct_iso_now_z)"
 
 mkdir -p "$HOME/.yakos-state" 2>/dev/null || true
 DISPATCH_LOG="$HOME/.yakos-state/dispatch-log.ndjson"
+ct_rotate_log "$DISPATCH_LOG" 2>/dev/null || true
 event_start="$(jq -cn \
     --arg t "$ts_start" \
     --arg agent "$AGENT_NAME" \
@@ -226,16 +227,20 @@ printf '%s\n' "$event_start" >> "$DISPATCH_LOG" 2>/dev/null || true
 
 echo "yakos dispatch: agent=$AGENT_NAME runtime=$RUNTIME project=$PROJECT" >&2
 
-# Capture stdout to a tempfile, time the call. Wall-clock + output-byte
-# size give a rough proxy for cost without runtime-specific stream-json
-# parsing (proper token telemetry is v0.6+ per docs/telemetry.md).
+# Capture stdout to a tempfile, time the call. Adapter writes real
+# token usage to YAKOS_USAGE_OUT (v0.6+); chars/4 estimates are
+# computed regardless as a fallback.
 out_tmp="$(mktemp -t yakos-dispatch.XXXXXX)"
+usage_tmp="$(mktemp -t yakos-dispatch-usage.XXXXXX)"
+export YAKOS_USAGE_OUT="$usage_tmp"
 epoch_start="$(ct_iso_to_epoch "$ts_start" 2>/dev/null || date +%s)"
 
 set +e
 ct_timeout "$TIMEOUT" yk_rt_dispatch "$PROJECT" "$AGENT_NAME" "$TASK" >"$out_tmp" 2>&1
 rc=$?
 set -e
+
+unset YAKOS_USAGE_OUT
 
 epoch_end="$(date +%s)"
 duration_s=$(( epoch_end - epoch_start ))
@@ -248,6 +253,17 @@ est_output_tokens=$(( out_bytes / 4 ))
 cat "$out_tmp"
 rm -f "$out_tmp" 2>/dev/null || true
 
+# If the adapter wrote real token usage, fold it into the event.
+real_usage="null"
+if [ -s "$usage_tmp" ]; then
+    real_usage="$(cat "$usage_tmp" 2>/dev/null || echo null)"
+    # Validate it parses; if not, drop to null so jq doesn't choke.
+    if ! printf '%s' "$real_usage" | jq -e . >/dev/null 2>&1; then
+        real_usage="null"
+    fi
+fi
+rm -f "$usage_tmp" 2>/dev/null || true
+
 ts_end="$(ct_iso_now_z)"
 event_end="$(jq -cn \
     --arg t "$ts_end" \
@@ -259,10 +275,12 @@ event_end="$(jq -cn \
     --argjson task_b "$task_bytes" \
     --argjson in_tok "$est_input_tokens" \
     --argjson out_tok "$est_output_tokens" \
+    --argjson usage "$real_usage" \
     '{type:"dispatch_finished", ts:$t, agent:$agent, runtime:$runtime,
       exit_code:$rc, duration_s:$dur,
       output_bytes:$out_b, task_bytes:$task_b,
-      est_input_tokens:$in_tok, est_output_tokens:$out_tok}')"
+      est_input_tokens:$in_tok, est_output_tokens:$out_tok}
+      + (if $usage != null then {usage:$usage} else {} end)')"
 printf '%s\n' "$event_end" >> "$DISPATCH_LOG" 2>/dev/null || true
 
 exit "$rc"

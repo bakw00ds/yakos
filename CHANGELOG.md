@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0.0] — 2026-05-08
+
+### Added — agent scaffolding, real telemetry, memory portability complete, cost report
+
+Closes the v0.5 follow-up requests on 2026-05-08: scaffold
+per-agent runtime overrides, real token telemetry (claude),
+finish memory sync (codex + gemini), cost reporting, log rotation,
+runtime-probe drift detection.
+
+**Agent scaffolding & lint:**
+- `yakos agent new <name> --runtime <id> [--extends <id>]
+  [--role ...] [--domain ...] [--model ...] [--tools "..."]
+  [--force]` — drops a starter agent file at
+  `<project>/.claude/agents/<name>.md` with the requested
+  frontmatter. Useful for the "default-all-claude with one
+  codex/gemini helper" pattern (see COOKBOOK Pattern 10).
+- `yakos agents lint` — audits every project agent file:
+  required frontmatter fields, `runtime:` is in the known list,
+  `runtime-fallback:` entries valid, `extends:` target exists,
+  body has `## Purpose` section. Exit 1 on any error.
+
+**Real token telemetry (claude):**
+- `cli/lib/runtimes/claude.sh::dispatch` honors
+  `YAKOS_USAGE_OUT` env var: when set, runs claude with
+  `--output-format stream-json --verbose`, parses the final
+  `result` event, writes `{input_tokens, output_tokens,
+  cache_read, cache_creation, duration_ms, total_cost_usd}` to
+  the path. dispatch.sh wires this in automatically — every
+  `dispatch_finished` event in `~/.yakos-state/dispatch-log.ndjson`
+  now carries an authoritative `usage` object alongside the
+  chars/4 estimate. Codex + gemini real telemetry is v0.6.1+.
+
+**Memory sync codex + gemini (closes v0.5 deferred):**
+- `yakos memory sync codex <project>` appends
+  `<!-- yakos-memory-start --> ... <!-- yakos-memory-end -->`
+  block into `<project>/.codex/AGENTS.md` (re-syncs replace just
+  the block; truncates content above 28 KiB to leave headroom
+  under codex's 32 KiB cap).
+- `yakos memory sync gemini <project>` synthesizes
+  `<project>/.gemini/yakos-system.md`. The gemini adapter's
+  launch path auto-exports `GEMINI_SYSTEM_MD` when this file
+  exists, so `yakos start --runtime gemini` picks up the
+  synthesized memory.
+
+**Cost report (`yakos cost`):**
+- Aggregates `~/.yakos-state/dispatch-log*.ndjson` (rotation-aware)
+  by runtime / agent / day. Flags: `--since <ISO>`, `--by agent|
+  runtime|day`, `--json`. Pretty table by default; sortable JSON
+  for tooling. Token columns use the chars/4 estimate today;
+  v0.6.x will overlay real per-runtime usage.
+
+**Log rotation (`ct_rotate_log`):**
+- Helper in compat.sh: rotate at 5 MB, keep 5 archives. start.sh
+  rotates `launch-log.ndjson` per-launch; dispatch.sh rotates
+  `dispatch-log.ndjson` per-dispatch. `~/.yakos-state/` no longer
+  grows unbounded.
+
+**Runtime-probe drift detection:**
+- Each `yakos start` appends a snapshot
+  (`{ts, runtime, version, capabilities}`) to
+  `~/.yakos-state/runtime-probes/<runtime>.ndjson`.
+- `yakos doctor --probe-runtime` compares the last two probes
+  per runtime and warns on version drift so the operator knows
+  when an adapter may need updating against a new CLI release.
+
+**Documentation:**
+- COOKBOOK Pattern 10: "Default-claude project with one codex
+  helper agent" — full worked example.
+- README pointers updated; "Not in v0.6.x" section reframed.
+
 ## [0.5.0.0] — 2026-05-08
 
 ### Added — lead dispatch discipline + hooks portability + memory + telemetry
