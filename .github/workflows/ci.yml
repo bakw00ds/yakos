@@ -101,6 +101,23 @@ jobs:
           # Confirm pre-push gate landed
           test -x "$tmp/.git/hooks/pre-push"
           test -f "$tmp/.git/hooks/pre-push.framework-hash"
+      - name: yakos auth status (per-runtime probe)
+        run: |
+          out="$(./cli/yakos auth status 2>&1)"
+          echo "$out"
+          # Should always print all known runtimes (even if uninstalled)
+          echo "$out" | grep -qE '^  claude'
+          echo "$out" | grep -qE '^  codex'
+          echo "$out" | grep -qE '^  gemini'
+      - name: yakos start --runtime codex --dry-run (always works without codex installed)
+        run: |
+          set -e
+          # Dry-run does not require the codex binary.
+          out="$(./cli/yakos start smoketest --runtime codex --dry-run 2>&1)"
+          echo "$out"
+          echo "$out" | grep -qE '^  runtime:[[:space:]]+codex'
+          echo "$out" | grep -qE 'codex --add-dir'
+          echo "$out" | grep -qE 'dangerously-bypass-approvals-and-sandbox'
       - name: yakos start --dry-run (verify launcher composes valid cmd)
         run: |
           set -e

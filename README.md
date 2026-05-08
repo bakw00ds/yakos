@@ -110,6 +110,20 @@ yakos start <project-name>
 Or run bare `yakos` from inside `~/agent-control/<project-name>/` or
 the project repo — it auto-detects which project you mean.
 
+By default `yakos start` launches Claude Code. v0.4+ also supports
+[OpenAI Codex](https://github.com/openai/codex) and (in v0.4.1)
+[Gemini CLI](https://github.com/google-gemini/gemini-cli) as
+alternative runtimes:
+
+```sh
+yakos start myapp --runtime codex
+yakos auth status                    # per-runtime cli + auth state
+yakos auth login codex --as-default  # set codex as the default
+```
+
+See [docs/runtime-matrix.md](docs/runtime-matrix.md) for the
+capability matrix and trade-offs.
+
 `yakos start` composes the framework + project agents into the
 `claude --agents` JSON (so project-level specialists become
 addressable as `subagent_type` — works around

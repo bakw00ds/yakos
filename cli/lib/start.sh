@@ -1,29 +1,20 @@
 #!/usr/bin/env bash
-# start.sh — launch a Claude Code session for a yakos-bootstrapped project.
+# start.sh — launch a Claude/codex/gemini session for a yakos-bootstrapped project.
 #
 # Purpose: end the manual `cd ~/agent-control/<name> && claude --add-dir ...`
 # pattern, default to bypassPermissions, and inject project + framework
-# agents into --agents JSON so subagent_type binds at runtime
-# (workaround for incident:v0.2.0-project-agent-runtime-non-discovery).
+# agents via the right path for the chosen runtime (Claude: --agents JSON;
+# codex: <project>/.codex/agents/yakos-*.toml; gemini: similar).
 #
-# Replaces the v0.2.x manual flow:
-#     cd ~/agent-control/<name>
-#     claude --add-dir <project> --permission-mode bypassPermissions
+# v0.4.0+ supports multiple runtimes. The runtime is selected via:
+#   1. --runtime <id> flag on the command line
+#   2. YAKOS_RUNTIME environment variable
+#   3. ~/.yakos-state/default-runtime file (set by `yakos auth login --as-default`)
+#   4. Fallback: claude
 #
-# What this command does:
-#   1. Resolve <name> → control dir → project repo (.project-path).
-#   2. Compose --agents JSON via cli/lib/agents-compose.sh (framework
-#      + project agents). Project agents override framework on id collision.
-#   3. Auto-detect <project>/.mcp.json and pass --mcp-config.
-#   4. exec claude with --add-dir, --permission-mode, --agents, and any
-#      pass-through flags the operator added.
-#   5. Append a session_launched event to:
-#        ~/agent-control/<name>/work/current/.session-started-history.ndjson
-#        ~/.yakos-state/launch-log.ndjson
-#
-# Defaults match the operator's stated preference (bypassPermissions);
-# --safe restores prompts (default permission mode). Pass-through flags
-# allow --continue / --resume / --fork-session / --ide / --bare.
+# Audit trail is appended at:
+#   <control>/work/current/.session-started-history.ndjson
+#   ~/.yakos-state/launch-log.ndjson
 
 set -eu
 
@@ -33,53 +24,58 @@ set -eu
 . "$YAKOS_LIB/compat.sh"
 # shellcheck source=./agents-compose.sh
 . "$YAKOS_LIB/agents-compose.sh"
+# shellcheck source=./runtime-resolve.sh
+. "$YAKOS_LIB/runtime-resolve.sh"
 
 usage() {
     cat <<'EOF'
-yakos start [<name>] [flags] — launch a Claude Code session for a project.
+yakos start [<name>] [flags] — launch a session for a yakos project.
 
-Resolves the project repo from ~/agent-control/<name>/.project-path, composes
-the --agents JSON (framework + project agents), and exec's claude with
---add-dir <repo> --permission-mode bypassPermissions --agents <json>.
+Resolves the project repo from ~/agent-control/<name>/.project-path,
+loads the chosen runtime adapter, materializes agents in the right
+format, and exec's the session. <name> is inferred from the cwd if
+not supplied.
 
-If <name> is omitted, infers it from the current directory:
-    cwd ~ ~/agent-control/<name>/  → use <name>
-    cwd is a yakos-bootstrapped project repo  → use the matching control dir
+Runtime selection:
+    --runtime <id>        claude (default) | codex | gemini
+                          Falls back to YAKOS_RUNTIME env or
+                          ~/.yakos-state/default-runtime.
 
 Permission mode:
-    --safe                Run with --permission-mode default (prompts on).
-    (default)             Run with --permission-mode bypassPermissions.
+    --safe                Prompts on (claude: --permission-mode default;
+                          codex: default sandbox; gemini: default).
+    (default)             bypass — claude bypassPermissions / codex
+                          --dangerously-bypass-approvals-and-sandbox /
+                          gemini --approval-mode=yolo.
 
 Agent injection:
-    --no-agents           Skip --agents composition (debug; agents won't bind).
+    --no-agents           Skip materialization (debug; agents won't bind).
 
-Session passthroughs (forwarded to `claude`):
-    --continue, -c        Continue most recent conversation in the cwd.
-    --resume <id>         Resume a specific session id.
-    --fork-session        With --resume / --continue, fork to a new id.
-    --ide                 Auto-attach to a single available IDE.
-    --bare                Minimal mode (skip hooks/LSP/auto-memory etc.).
-    --strict-mcp          Pass --strict-mcp-config to claude.
-    --model <alias>       Override default model for the session (sonnet|opus|haiku|<full>).
+Session passthroughs (forwarded to the runtime CLI when supported):
+    --continue, -c        claude only — continue most recent.
+    --resume <id>         claude / codex (codex resume <id>).
+    --fork-session        claude / codex (codex fork).
+    --ide                 claude only — auto-attach to IDE.
+    --bare                claude only — minimal mode.
+    --strict-mcp          claude only — pass --strict-mcp-config.
+    --model <alias>       Forward to runtime if it supports a model flag.
 
 Inspection:
-    --dry-run             Print the resolved claude command + agent count
-                          and exit 0 without launching.
-    --print-agents        Print the composed --agents JSON to stdout
-                          and exit 0 (useful for debugging).
-    --                    End of yakos flags; everything after is forwarded
-                          to claude verbatim.
+    --dry-run             Print what would be exec'd; exit 0.
+    --print-agents        Print the composed agent JSON; exit 0.
+    --                    End of yakos flags; rest passed to runtime CLI.
 
 Examples:
-    yakos start                 # in ~/agent-control/myapp/
-    yakos start myapp           # from anywhere
-    yakos start myapp --safe
-    yakos start myapp --continue
+    yakos start                       # auto-detect, claude (default)
+    yakos start myapp
+    yakos start myapp --runtime codex
+    yakos start myapp --runtime gemini --safe
     yakos start myapp --dry-run
 EOF
 }
 
 NAME=""
+RUNTIME=""
 SAFE=0
 NO_AGENTS=0
 DRY_RUN=0
@@ -93,11 +89,15 @@ STRICT_MCP=0
 MODEL=""
 PASSTHROUGH=()
 
-# ---- argument parsing -------------------------------------------------------
-
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
+        --runtime)
+            shift
+            [ "$#" -gt 0 ] || ct_die "start: --runtime requires an id"
+            RUNTIME="$1"
+            ;;
+        --runtime=*) RUNTIME="${1#--runtime=}" ;;
         --safe) SAFE=1 ;;
         --no-agents) NO_AGENTS=1 ;;
         --dry-run) DRY_RUN=1 ;;
@@ -139,12 +139,10 @@ if [ -z "$NAME" ]; then
     ac_real="$(ct_realpath "$HOME/agent-control")"
     case "$cwd_real" in
         "$ac_real"/*)
-            # cwd is ~/agent-control/<name>/...; take the first path segment.
             rest="${cwd_real#$ac_real/}"
             NAME="${rest%%/*}"
             ;;
         *)
-            # Try matching cwd against any control dir's .project-path.
             if [ -d "$HOME/agent-control" ]; then
                 for cd_path in "$HOME/agent-control"/*/.project-path; do
                     [ -f "$cd_path" ] || continue
@@ -172,108 +170,168 @@ CONTROL_DIR="$HOME/agent-control/$NAME"
 [ -d "$CONTROL_DIR" ] || ct_die "start: project '$NAME' not bootstrapped — run 'yakos init $NAME --project <path>' first"
 
 PROJECT_PATH_FILE="$CONTROL_DIR/.project-path"
-if [ ! -f "$PROJECT_PATH_FILE" ]; then
-    ct_die "start: $PROJECT_PATH_FILE missing — re-run 'yakos init' to repair"
-fi
+[ -f "$PROJECT_PATH_FILE" ] || ct_die "start: $PROJECT_PATH_FILE missing — re-run 'yakos init' to repair"
 PROJECT_REPO="$(head -1 "$PROJECT_PATH_FILE")"
-[ -d "$PROJECT_REPO" ] || ct_die "start: project repo not found at $PROJECT_REPO (per .project-path)"
+[ -d "$PROJECT_REPO" ] || ct_die "start: project repo not found at $PROJECT_REPO"
 
-# ---- permission mode --------------------------------------------------------
+# ---- runtime selection ------------------------------------------------------
 
-if [ "$SAFE" = "1" ]; then
-    PERM_MODE="default"
-else
-    PERM_MODE="bypassPermissions"
+if [ -z "$RUNTIME" ]; then
+    RUNTIME="$(yk_rt_default)"
+fi
+yk_rt_is_known "$RUNTIME" || ct_die "start: unknown runtime '$RUNTIME' (known: $(yk_rt_known | tr '\n' ' '))"
+yk_rt_load "$RUNTIME"
+
+# ---- preflight checks -------------------------------------------------------
+
+CLI_OK=1; AUTH_OK=1
+yk_rt_check_cli 2>/dev/null || CLI_OK=0
+if [ "$CLI_OK" = "1" ]; then
+    yk_rt_check_auth 2>/dev/null || AUTH_OK=0
 fi
 
-# ---- compose --agents JSON --------------------------------------------------
+if [ "$DRY_RUN" != "1" ] && [ "$PRINT_AGENTS" != "1" ]; then
+    if [ "$CLI_OK" != "1" ]; then
+        ct_die "start: '$RUNTIME' CLI not on PATH. Install it, then retry. (--dry-run works without the CLI installed.)"
+    fi
+    if [ "$AUTH_OK" != "1" ]; then
+        ct_log "WARN: '$RUNTIME' auth not detected; the runtime may prompt or fail. Run 'yakos auth login $RUNTIME' to fix."
+    fi
+fi
 
-AGENTS_JSON=""
+# Translate perm mode to the abstract bypass|safe used by adapters.
+PERM_MODE="bypass"; [ "$SAFE" = "1" ] && PERM_MODE="safe"
+
+# ---- agent count for banner -------------------------------------------------
+
 AGENT_COUNT=0
-if [ "$NO_AGENTS" != "1" ]; then
-    AGENTS_JSON="$(yk_agents_compose "$YAKOS_ROOT" "$PROJECT_REPO")"
-    AGENT_COUNT="$(printf '%s' "$AGENTS_JSON" | jq 'length')"
+if [ "$NO_AGENTS" != "1" ] && command -v jq >/dev/null 2>&1; then
+    composed="$(yk_agents_compose "$YAKOS_ROOT" "$PROJECT_REPO" 2>/dev/null || echo '{}')"
+    AGENT_COUNT="$(printf '%s' "$composed" | jq 'length' 2>/dev/null || echo 0)"
 fi
 
 if [ "$PRINT_AGENTS" = "1" ]; then
-    if [ -n "$AGENTS_JSON" ]; then
-        printf '%s\n' "$AGENTS_JSON"
-    else
-        echo "{}"
-    fi
+    yk_agents_compose "$YAKOS_ROOT" "$PROJECT_REPO"
     exit 0
-fi
-
-# ---- assemble claude command -----------------------------------------------
-
-CLAUDE_ARGS=( "--add-dir" "$PROJECT_REPO" "--permission-mode" "$PERM_MODE" )
-
-if [ -n "$AGENTS_JSON" ] && [ "$AGENT_COUNT" -gt 0 ]; then
-    CLAUDE_ARGS+=( "--agents" "$AGENTS_JSON" )
-fi
-
-# MCP auto-detect: if <project>/.mcp.json exists, pass it.
-PROJECT_MCP="$PROJECT_REPO/.mcp.json"
-if [ -f "$PROJECT_MCP" ]; then
-    CLAUDE_ARGS+=( "--mcp-config" "$PROJECT_MCP" )
-    if [ "$STRICT_MCP" = "1" ]; then
-        CLAUDE_ARGS+=( "--strict-mcp-config" )
-    fi
-fi
-
-if [ -n "$MODEL" ]; then CLAUDE_ARGS+=( "--model" "$MODEL" ); fi
-if [ "$BARE" = "1" ]; then CLAUDE_ARGS+=( "--bare" ); fi
-if [ "$IDE" = "1" ]; then CLAUDE_ARGS+=( "--ide" ); fi
-if [ "$CONTINUE" = "1" ]; then CLAUDE_ARGS+=( "--continue" ); fi
-if [ -n "$RESUME" ]; then CLAUDE_ARGS+=( "--resume" "$RESUME" ); fi
-if [ "$FORK" = "1" ]; then CLAUDE_ARGS+=( "--fork-session" ); fi
-
-# Pass-through after `--`.
-if [ "${#PASSTHROUGH[@]}" -gt 0 ]; then
-    CLAUDE_ARGS+=( "${PASSTHROUGH[@]}" )
 fi
 
 # ---- preflight banner -------------------------------------------------------
 
+CAPS="$(yk_rt_capabilities)"
 print_banner() {
     cat <<EOF
 yakos start — preflight
   project:        $NAME
   repo:           $PROJECT_REPO
   control dir:    $CONTROL_DIR
+  runtime:        $RUNTIME ($CAPS)
+  cli:            $( [ "$CLI_OK" = "1" ] && printf 'OK' || printf 'NOT FOUND (--dry-run only)' )
+  auth:           $( [ "$AUTH_OK" = "1" ] && printf 'OK' || printf 'NOT CONFIGURED (run: yakos auth login %s)' "$RUNTIME" )
   permission:     $PERM_MODE
   agents:         $AGENT_COUNT registered$( [ "$NO_AGENTS" = "1" ] && printf ' (--no-agents: suppressed)' || true )
-  mcp:            $( [ -f "$PROJECT_MCP" ] && printf '%s\n' "$PROJECT_MCP$( [ "$STRICT_MCP" = "1" ] && printf ' (strict)' || true )" || printf '(none — no .mcp.json)\n' )
-  model:          ${MODEL:-(default)}
-  mode flags:     $( [ "$BARE" = "1" ] && printf 'bare ' || true )$( [ "$IDE" = "1" ] && printf 'ide ' || true )$( [ "$CONTINUE" = "1" ] && printf 'continue ' || true )$( [ -n "$RESUME" ] && printf 'resume=%s ' "$RESUME" || true )$( [ "$FORK" = "1" ] && printf 'fork ' || true )
+  mode flags:     $( [ "$BARE" = "1" ] && printf 'bare ' || true )$( [ "$IDE" = "1" ] && printf 'ide ' || true )$( [ "$CONTINUE" = "1" ] && printf 'continue ' || true )$( [ -n "$RESUME" ] && printf 'resume=%s ' "$RESUME" || true )$( [ "$FORK" = "1" ] && printf 'fork ' || true )$( [ -n "$MODEL" ] && printf 'model=%s ' "$MODEL" || true )
 EOF
 }
 print_banner
+
+# ---- soft-degrade warnings --------------------------------------------------
+
+# Warn when a feature is requested but the runtime can't honor it.
+warn_unsupported() {
+    local cap="$1"
+    local feature="$2"
+    case ",$CAPS," in
+        *",$cap,"*) return 0 ;;
+        *) ct_log "NOTE: '$RUNTIME' does not support $feature ($cap); flag will be ignored." ;;
+    esac
+}
+
+if [ "$CONTINUE" = "1" ]; then
+    case "$RUNTIME" in
+        claude) : ;;
+        *) warn_unsupported "fork-headless" "--continue (claude-specific)" ;;
+    esac
+fi
+if [ "$IDE" = "1" ] && [ "$RUNTIME" != "claude" ]; then
+    ct_log "NOTE: --ide is claude-specific; ignored for $RUNTIME."
+fi
+if [ "$BARE" = "1" ] && [ "$RUNTIME" != "claude" ]; then
+    ct_log "NOTE: --bare is claude-specific; ignored for $RUNTIME."
+fi
+if [ "$STRICT_MCP" = "1" ] && [ "$RUNTIME" != "claude" ]; then
+    ct_log "NOTE: --strict-mcp is claude-specific; ignored for $RUNTIME."
+fi
+
+# ---- assemble runtime-specific extra flags ----------------------------------
+
+EXTRA_FLAGS=()
+case "$RUNTIME" in
+    claude)
+        [ -n "$MODEL" ]      && EXTRA_FLAGS+=( --model "$MODEL" )
+        [ "$BARE" = "1" ]    && EXTRA_FLAGS+=( --bare )
+        [ "$IDE" = "1" ]     && EXTRA_FLAGS+=( --ide )
+        [ "$CONTINUE" = "1" ] && EXTRA_FLAGS+=( --continue )
+        [ -n "$RESUME" ]     && EXTRA_FLAGS+=( --resume "$RESUME" )
+        [ "$FORK" = "1" ]    && EXTRA_FLAGS+=( --fork-session )
+        if [ "$STRICT_MCP" = "1" ] && [ -f "$PROJECT_REPO/.mcp.json" ]; then
+            EXTRA_FLAGS+=( --strict-mcp-config )
+        fi
+        ;;
+    codex)
+        if [ -n "$RESUME" ]; then EXTRA_FLAGS+=( resume "$RESUME" ); fi
+        # codex's session resumption uses subcommand syntax; the adapter
+        # currently launches plain `codex` — full --resume support is a
+        # follow-up.
+        ;;
+    gemini)
+        if [ -n "$RESUME" ]; then EXTRA_FLAGS+=( --resume "$RESUME" ); fi
+        if [ -n "$MODEL" ]; then EXTRA_FLAGS+=( --model "$MODEL" ); fi
+        ;;
+esac
+
+if [ "${#PASSTHROUGH[@]}" -gt 0 ]; then
+    EXTRA_FLAGS+=( "${PASSTHROUGH[@]}" )
+fi
 
 # ---- dry-run exit -----------------------------------------------------------
 
 if [ "$DRY_RUN" = "1" ]; then
     echo
-    echo "Dry run — would exec:"
-    printf '  claude'
-    for a in "${CLAUDE_ARGS[@]}"; do
-        case "$a" in
-            *--agents) printf ' %s' "$a" ;;
-            *)
-                # Truncate the JSON arg for display.
-                if [ "${#a}" -gt 80 ] && case "$a" in '{'*) true ;; *) false ;; esac; then
-                    printf " '<%d-byte agents JSON>'" "${#a}"
-                else
-                    printf ' %q' "$a"
-                fi
-                ;;
-        esac
-    done
+    echo "Dry run — would exec via runtime '$RUNTIME':"
+    case "$RUNTIME" in
+        claude)
+            printf '  claude --add-dir %q --permission-mode %s' \
+                "$PROJECT_REPO" \
+                "$( [ "$SAFE" = "1" ] && printf 'default' || printf 'bypassPermissions' )"
+            [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf " --agents '<%d agents JSON>'" "$AGENT_COUNT"
+            [ -f "$PROJECT_REPO/.mcp.json" ] && printf ' --mcp-config %q' "$PROJECT_REPO/.mcp.json"
+            ;;
+        codex)
+            printf '  codex --add-dir %q' "$PROJECT_REPO"
+            [ "$SAFE" != "1" ] && printf ' --dangerously-bypass-approvals-and-sandbox'
+            [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf "  # + %d agents staged at %s/.codex/agents/yakos-*.toml" "$AGENT_COUNT" "$PROJECT_REPO"
+            ;;
+        gemini)
+            printf '  gemini --include-directories %q' "$PROJECT_REPO"
+            [ "$SAFE" != "1" ] && printf ' --approval-mode=yolo'
+            [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf "  # + %d agents staged at %s/.gemini/agents/yakos-*.md" "$AGENT_COUNT" "$PROJECT_REPO"
+            ;;
+    esac
+    if [ "${#EXTRA_FLAGS[@]}" -gt 0 ]; then
+        for f in "${EXTRA_FLAGS[@]}"; do printf ' %q' "$f"; done
+    fi
     printf '\n'
     exit 0
 fi
 
-# ---- audit-trail events ----------------------------------------------------
+# ---- materialize agents -----------------------------------------------------
+
+if [ "$NO_AGENTS" != "1" ]; then
+    yk_rt_materialize_agents "$YAKOS_ROOT" "$PROJECT_REPO" >/dev/null 2>&1 || \
+        ct_log "WARN: agent materialization for runtime '$RUNTIME' returned non-zero"
+fi
+
+# ---- audit trail -----------------------------------------------------------
 
 ts="$(ct_iso_now_z)"
 session_event="$(jq -cn \
@@ -281,8 +339,10 @@ session_event="$(jq -cn \
     --arg name "$NAME" \
     --arg repo "$PROJECT_REPO" \
     --arg perm "$PERM_MODE" \
+    --arg runtime "$RUNTIME" \
     --argjson agents "$AGENT_COUNT" \
-    '{type:"session_launched", ts:$t, project:$name, repo:$repo, permission_mode:$perm, agent_count:$agents}')"
+    '{type:"session_launched", ts:$t, project:$name, repo:$repo,
+      runtime:$runtime, permission_mode:$perm, agent_count:$agents}')"
 
 SESSION_HISTORY="$CONTROL_DIR/work/current/.session-started-history.ndjson"
 if [ -d "$(dirname -- "$SESSION_HISTORY")" ]; then
@@ -290,21 +350,14 @@ if [ -d "$(dirname -- "$SESSION_HISTORY")" ]; then
         ct_log "WARN: could not append to $SESSION_HISTORY"
 fi
 
-LAUNCH_LOG_DIR="$HOME/.yakos-state"
-mkdir -p "$LAUNCH_LOG_DIR" 2>/dev/null || true
-LAUNCH_LOG="$LAUNCH_LOG_DIR/launch-log.ndjson"
+mkdir -p "$HOME/.yakos-state" 2>/dev/null || true
+LAUNCH_LOG="$HOME/.yakos-state/launch-log.ndjson"
 printf '%s\n' "$session_event" >> "$LAUNCH_LOG" 2>/dev/null || \
     ct_log "WARN: could not append to $LAUNCH_LOG"
 
-# ---- exec claude -----------------------------------------------------------
+# ---- exec runtime ----------------------------------------------------------
 
-if ! command -v claude >/dev/null 2>&1; then
-    ct_die "start: 'claude' CLI not on PATH (https://docs.claude.com/en/docs/claude-code)"
-fi
-
-# cd to control dir so claude treats it as cwd (enables auto-memory at the
-# right path and keeps work/current/ accessible from inside the session).
 cd "$CONTROL_DIR" || ct_die "start: failed to cd $CONTROL_DIR"
 
 echo
-exec claude "${CLAUDE_ARGS[@]}"
+yk_rt_launch "$PROJECT_REPO" "$PERM_MODE" "${EXTRA_FLAGS[@]}"

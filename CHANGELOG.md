@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0.0] — 2026-05-08
+
+### Added — multi-runtime support, phase 1: codex adapter
+
+Closing the "can yakOS work with codex / gemini-cli?" question
+reported on 2026-05-08. Phase 1 ships codex; phase 2 (gemini-cli)
+and phase 3 (mixed-runtime dispatch) follow.
+
+**Runtime abstraction layer** — `cli/lib/runtimes/{claude,codex}.sh`
+implement a shared contract: `check_cli`, `check_auth`,
+`capabilities`, `materialize_agents`, `cleanup_agents`, `launch`,
+`dispatch`. `cli/lib/runtime-resolve.sh` picks one and binds the
+namespaced functions under `yk_rt_*` aliases.
+
+**Codex adapter (cli/lib/runtimes/codex.sh):**
+- TOML emitter converts yakOS markdown agents to codex's
+  `name`/`description`/`developer_instructions` schema.
+- Materializes to `<project>/.codex/agents/yakos-*.toml` (gitignored).
+- Launch via `codex --add-dir <repo> --dangerously-bypass-approvals-and-sandbox`.
+- One-shot dispatch via `codex exec` (used by upcoming `yakos
+  dispatch`).
+- Auth detected via `$CODEX_HOME/auth.json` or `OPENAI_API_KEY`.
+- Capabilities: `path-allowlist-hard`, `hooks`,
+  `system-prompt-flag`, `fork-headless` (no `inline-agents` —
+  codex requires file-based materialization).
+
+**`yakos start --runtime <id>`** flag added. Default runtime is
+`claude`; falls back to `YAKOS_RUNTIME` env or
+`~/.yakos-state/default-runtime`. `--dry-run` shows the runtime-
+specific exec command. Soft-degrade warnings printed when a
+session-passthrough flag (`--ide`, `--bare`, etc.) isn't supported
+by the chosen runtime.
+
+**`yakos auth` subcommand:**
+- `yakos auth status [<runtime>]` — per-runtime CLI + auth state
+  + capability matrix. Default-runtime marker shown.
+- `yakos auth login <runtime> [--as-default]` — execs the
+  runtime's login flow (codex: `codex login`; claude/gemini
+  print the relevant flow since they don't have a non-interactive
+  login).
+- `yakos auth logout <runtime>` — best-effort credential removal.
+- `yakos auth set-default <runtime>` — persists the default to
+  `~/.yakos-state/default-runtime`.
+
+**`yakos init` upgrade** — appends runtime-emitted agent file
+patterns (`.codex/agents/yakos-*.toml`, `.gemini/agents/yakos-*.md`)
+to the project `.gitignore` so materialized files never land in
+commits.
+
+**Empirical findings (codex 0.129.0, May 2026):**
+- TOML agent format requires `name` + `description` +
+  `developer_instructions`; `model` and `sandbox_mode` optional.
+- No `--agents` JSON injection equivalent; file-based discovery
+  is the only path.
+- `--add-dir` and approval/sandbox modes match Claude
+  conceptually; flag names differ.
+
 ## [0.3.0.0] — 2026-05-08
 
 ### Added — `yakos start`, --agents JSON injection, three new agents

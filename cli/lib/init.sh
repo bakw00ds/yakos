@@ -245,6 +245,24 @@ EOF
     ct_log "wrote $MEMORY_FILE"
 fi
 
+# ---- ensure project .gitignore covers yakOS-emitted runtime agent files -----
+# yakOS materializes per-runtime agent files at <project>/.codex/agents/yakos-*.toml
+# and <project>/.gemini/agents/yakos-*.md (v0.4.0+). They MUST NOT land in
+# project commits — add the patterns to .gitignore if absent.
+PROJECT_GITIGNORE="$PROJECT_ABS/.gitignore"
+yakos_gi_marker="# yakOS — runtime-emitted agent files (v0.4.0+)"
+if [ -f "$PROJECT_GITIGNORE" ] && grep -qF "$yakos_gi_marker" "$PROJECT_GITIGNORE" 2>/dev/null; then
+    : # already present
+else
+    {
+        printf '\n%s\n' "$yakos_gi_marker"
+        printf '.codex/agents/yakos-*.toml\n'
+        printf '.gemini/agents/yakos-*.md\n'
+        printf '.gemini/settings.json.yakos-bak-*\n'
+    } >> "$PROJECT_GITIGNORE"
+    ct_log "appended yakos runtime-agent patterns to $PROJECT_GITIGNORE"
+fi
+
 # ---- optional: install pre-push version gate -------------------------------
 
 GATE_STATUS="not requested (--with-gate to enable)"

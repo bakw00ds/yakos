@@ -50,11 +50,16 @@ Install / lifecycle:
 Project bootstrap / launch / inspection:
     init          Bootstrap a project's ~/agent-control/<name>/
                   Args: <name> --project <path> [--force] [--with-gate]
-    start         Launch a Claude Code session for a bootstrapped project.
-                  Args: [<name>] [--safe] [--dry-run] [--continue|--resume <id>]
-                        [--ide] [--bare] [--model <alias>] [--strict-mcp]
-                  Composes --agents JSON from framework + project agents
-                  and exec's claude with --add-dir + --permission-mode.
+    start         Launch a session for a bootstrapped project (claude / codex / gemini).
+                  Args: [<name>] [--runtime <id>] [--safe] [--dry-run]
+                        [--continue|--resume <id>] [--ide] [--bare]
+                        [--model <alias>] [--strict-mcp]
+                  Materializes agents in the runtime's native format
+                  (claude: --agents JSON; codex: TOML files; gemini: md
+                  files) and exec's the chosen runtime CLI.
+    auth          Per-runtime auth: status / login / logout / set-default.
+                  Args: status [<runtime>] | login <runtime> [--as-default]
+                        | logout <runtime> | set-default <runtime>
     validate      Schema + reference validation (framework or project)
                   Args: [<project-path>] [--all]
     archive       Roll work/current/ into work/archive/<tag>/
@@ -160,7 +165,7 @@ case "$cmd" in
     -v | --version)
         echo "yakos $YAKOS_VERSION"
         ;;
-    install | uninstall | update | init | doctor | validate | archive | status | team | start)
+    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth)
         script="$YAKOS_LIB/${cmd}.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"
