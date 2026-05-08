@@ -235,6 +235,11 @@ yk_agents_compose_dir() {
 # yk_agents_compose <yakos-root> <project-root>
 #   Compose the full --agents JSON for a yakos-launched session.
 #   Project agents override framework agents with the same id.
+#
+# Memoizes per (yakos_root, project_root) pair within a single shell
+# process — start.sh and dispatch.sh call this multiple times per
+# invocation (count → print → materialize); without the cache each
+# pass re-walks lib/agents/.
 yk_agents_compose() {
     local yakos_root="$1"
     local project_root="${2:-}"
@@ -243,14 +248,25 @@ yk_agents_compose() {
         ct_die "agents-compose: jq is required (brew install jq)"
     fi
 
+    local cache_key
+    cache_key="$(printf '%s|%s' "$yakos_root" "$project_root" | tr -c 'A-Za-z0-9' '_')"
+    local cache_var="YK_AGENTS_CACHE_${cache_key}"
+
+    # Bash 3.2-compatible cache lookup via eval.
+    local cached
+    eval "cached=\${$cache_var:-}"
+    if [ -n "$cached" ]; then
+        # Cached values are base64-encoded to survive newlines in env vars.
+        printf '%s\n' "$cached" | base64 -d 2>/dev/null
+        return 0
+    fi
+
     local fw_dir="$yakos_root/lib/agents"
     local proj_dir=""
     if [ -n "$project_root" ] && [ -d "$project_root/.claude/agents" ]; then
         proj_dir="$project_root/.claude/agents"
     fi
 
-    # Compose framework first, then project. jq's `+` operator at merge
-    # time gives project keys precedence — exactly the override we want.
     local merged
     merged="$(
         {
@@ -264,6 +280,11 @@ yk_agents_compose() {
         printf '{}\n'
         return 0
     fi
+
+    # Stash in cache for subsequent calls in the same process.
+    # shellcheck disable=SC2163
+    eval "$cache_var=\"\$(printf '%s' \"\$merged\" | base64)\""
+    eval "export $cache_var"
 
     printf '%s\n' "$merged"
 }

@@ -121,7 +121,7 @@ yakos auth status                    # per-runtime cli + auth state
 yakos auth login codex --as-default  # set codex as the default
 ```
 
-**Mixed-runtime dispatch** (v0.4.2): a project can declare per-agent
+**Mixed-runtime dispatch** (v0.4.2+): a project can declare per-agent
 runtime preferences in agent frontmatter and let the lead dispatch
 each specialist to its preferred CLI:
 
@@ -129,6 +129,22 @@ each specialist to its preferred CLI:
 # Inside a session (or any shell):
 yakos dispatch frontend "implement the login form"     # routes to agent's runtime:
 yakos dispatch backend "..." --runtime codex           # override per call
+```
+
+v0.5+ adds **runtime fallback chains** via the `runtime-fallback:`
+frontmatter field, **token-usage telemetry** in the dispatch audit
+log, and `yakos hooks install <runtime>` to translate the
+path-allowlist + secret-scan hooks for codex/gemini.
+
+**Portable memory** (v0.5+): the lead's auto-memory and operator
+notes live at `~/.yakos-state/memory/<project>/` as a single source
+of truth, materialized into each runtime's native location on
+launch. See [docs/memory-portability.md](docs/memory-portability.md).
+
+```sh
+yakos memory list <project>
+yakos memory migrate-from-claude <project>   # one-shot import
+yakos memory sync claude <project>           # mirror to ~/.claude/projects/...
 ```
 
 See [docs/runtime-matrix.md](docs/runtime-matrix.md) for the

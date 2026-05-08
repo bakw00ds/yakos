@@ -64,7 +64,13 @@ Project bootstrap / launch / inspection:
                   Args: <agent-name> "<task>" [--runtime <id>]
                         [--project <path>] [--timeout <secs>]
                   Reads agent frontmatter `runtime:` to pick the CLI;
-                  --runtime overrides. Captures stdout, returns rc.
+                  --runtime overrides. Honors `runtime-fallback:` list
+                  if the preferred runtime is unavailable. Captures
+                  stdout + token usage; returns rc.
+    hooks         Translate yakOS hooks to runtime-native config (v0.5+).
+                  Args: install <runtime> --project <path> | status [<path>]
+    memory        Portable yakOS memory across runtimes (v0.5+).
+                  Args: list | show <key> | put <key> <file> | sync <runtime>
     validate      Schema + reference validation (framework or project)
                   Args: [<project-path>] [--all]
     archive       Roll work/current/ into work/archive/<tag>/
@@ -170,7 +176,7 @@ case "$cmd" in
     -v | --version)
         echo "yakos $YAKOS_VERSION"
         ;;
-    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch)
+    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory)
         script="$YAKOS_LIB/${cmd}.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"
@@ -188,6 +194,13 @@ case "$cmd" in
         ;;
     git-hooks)
         script="$YAKOS_LIB/git-hooks.sh"
+        if [ ! -f "$script" ]; then
+            ct_die "internal error: $script not found"
+        fi
+        bash "$script" "$@"
+        ;;
+    hooks)
+        script="$YAKOS_LIB/hooks-install.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"
         fi

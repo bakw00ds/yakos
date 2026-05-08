@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0.0] — 2026-05-08
+
+### Added — lead dispatch discipline + hooks portability + memory + telemetry
+
+Closes the v0.4 follow-up requests on 2026-05-08: enforce lead-
+dispatch, port hooks across runtimes, add cost/usage telemetry,
+runtime fallback chain, and portable memory across runtimes.
+
+**Lead dispatch hard control (lib/agents/lead-template.md):**
+- `Edit` removed from the lead's tools array. The lead literally
+  cannot edit code — code changes go through dispatched specialists.
+- New "Dispatch decision rubric" section with three questions the
+  lead asks per task.
+- Body strengthened: "Always dispatch. Never edit code yourself."
+  is the rule; `Bash` retained for orchestration only (git-status,
+  yakos dispatch, read-only test invocations).
+
+**Code quality / refactor:**
+- `cli/lib/runtimes/_emitter-shared.sh` extracts the python3-via-
+  tempfile helper, used by both codex.sh and gemini.sh.
+- agents-compose memoizes per-(yakos-root, project) pair so `yakos
+  start`'s count → print → materialize chain doesn't re-walk
+  lib/agents repeatedly.
+- Comment density reduced — "Empirically..." technical journals
+  moved into doc files (docs/runtime-matrix.md, docs/memory-
+  portability.md).
+
+**Test fixtures (tests/run-runtime-fixtures.sh):**
+- 28 assertions covering: framework agent compose, project-override,
+  `extends:` resolution, compose cache, codex TOML emitter shape,
+  gemini markdown emitter shape, runtime-resolve default + env-var
+  override, capability matrix lookups.
+- Wired into CI as a separate job.
+
+**`yakos hooks install <runtime> --project <path>`** at
+`cli/lib/hooks-install.sh`. Translates the subset of yakOS hooks
+that map cleanly (path-allowlist + secret-scan) into codex and
+gemini native config files (`<project>/.codex/hooks.json`,
+`<project>/.gemini/settings.json`'s `hooks` block). Hooks that
+depend on TaskCreate / TeamCreate / SendMessage events stay
+claude-only with a stated note. Backups taken before overwrite.
+`yakos hooks status` reports per-runtime install state.
+
+**Runtime fallback chain (cli/lib/dispatch.sh):**
+- New optional agent frontmatter field `runtime-fallback: [list]`.
+- `yakos dispatch` builds a chain: override → frontmatter
+  `runtime:` → yakos default → frontmatter `runtime-fallback:`.
+- Walks the chain, picking the first runtime where check_cli +
+  check_auth both pass. Logs each skipped runtime so the operator
+  knows why a non-preferred runtime was used.
+
+**Telemetry in dispatch-log.ndjson:**
+- Each `dispatch_finished` event now records `duration_s`,
+  `output_bytes`, `task_bytes`, `est_input_tokens`, `est_output_tokens`
+  (rough chars/4 estimate). Real per-runtime token telemetry from
+  stream-json output is v0.6+.
+
+**Portable memory (`yakos memory` + docs/memory-portability.md):**
+- Single source of truth at `~/.yakos-state/memory/<project>/`.
+- v0.5 ships: `list`, `show`, `put`, `migrate-from-claude`,
+  `sync claude`. `sync codex` and `sync gemini` planned for v0.5.1.
+- Design doc covers what yakOS owns (auto-memory) vs. what the
+  project repo owns (decisions/ADRs), per-runtime materialization
+  targets, and the threat model.
+
+**Documentation sweep:**
+- README updated with the new commands; runtime-matrix refreshed
+  with the v0.5 capability rows.
+- `lib/agents/README.md` documents the `runtime` and
+  `runtime-fallback` frontmatter fields and lists the 14 framework
+  agents (added architect / incident-responder / release-manager
+  in v0.3).
+
 ## [0.4.2.0] — 2026-05-08
 
 ### Added — multi-runtime support, phase 3: yakos dispatch (mixed-runtime)

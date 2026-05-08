@@ -77,3 +77,4 @@ When adding a new generic agent:
 | `references` | yes | List of `rule:`, `playbook:`, `incident:` references. |
 | `extends` | optional | Parent template id (e.g. `extends: backend`). |
 | `runtime` | optional, v0.4.2+ | Preferred runtime: `claude` \| `codex` \| `gemini`. Used by `yakos dispatch` to pick the CLI. Default: yakOS's runtime resolver (env var → state file → claude). |
+| `runtime-fallback` | optional, v0.5+ | List of fallback runtimes, e.g. `[codex, claude]`. If the preferred runtime fails check_cli or check_auth, `yakos dispatch` walks this list. |

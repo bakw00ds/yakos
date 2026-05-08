@@ -351,7 +351,7 @@ check_dark_code() {
         base="$(basename "$f")"
         # Skip framework helpers (always referenced indirectly via sourcing)
         case "$base" in
-            hook-input.sh|hook-output.sh|paths.sh|compat.sh|agents-compose.sh|runtime-resolve.sh|README.md) continue ;;
+            hook-input.sh|hook-output.sh|paths.sh|compat.sh|agents-compose.sh|runtime-resolve.sh|hooks-install.sh|README.md) continue ;;
         esac
         # Skip runtime adapters (sourced by runtime-resolve.sh, not dispatched directly)
         case "$f" in

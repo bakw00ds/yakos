@@ -55,6 +55,17 @@ jobs:
         run: |
           ./tests/run-version-gate-fixtures.sh
 
+  runtime-fixtures:
+    name: runtime adapter fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq + python3
+        run: sudo apt-get update -y && sudo apt-get install -y jq python3
+      - name: Run runtime fixture suite
+        run: |
+          ./tests/run-runtime-fixtures.sh
+
   hook-fixtures:
     name: hook fixtures
     runs-on: ubuntu-latest
