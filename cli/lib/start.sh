@@ -230,6 +230,10 @@ yakos start — preflight
   permission:     $PERM_MODE
   agents:         $AGENT_COUNT registered$( [ "$NO_AGENTS" = "1" ] && printf ' (--no-agents: suppressed)' || true )
   mode flags:     $( [ "$BARE" = "1" ] && printf 'bare ' || true )$( [ "$IDE" = "1" ] && printf 'ide ' || true )$( [ "$CONTINUE" = "1" ] && printf 'continue ' || true )$( [ -n "$RESUME" ] && printf 'resume=%s ' "$RESUME" || true )$( [ "$FORK" = "1" ] && printf 'fork ' || true )$( [ -n "$MODEL" ] && printf 'model=%s ' "$MODEL" || true )
+
+  Lead discipline (rule:lead-dispatch-discipline):
+    lead = decompose / integrate / supervise. specialists = parallel.
+    sequential only when the next task depends on the previous.
 EOF
 }
 print_banner

@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0.1] — 2026-05-09
+
+### Added — `rule:lead-dispatch-discipline` (always-loaded)
+
+Codifies the four-line dispatch rule as a top-level always-loaded
+rule so every yakOS-launched session inherits the discipline by
+default. The rule was implicit in `lead-template.md` since v0.5;
+this release makes it the framework's explicit operating posture.
+
+**`lib/rules/lead-dispatch-discipline.md`** — new always-loaded
+rule. The four-line rule:
+1. Lead = decompose, integrate, supervise. Synthesizes.
+2. Sub-agents = author / research / scan in parallel.
+3. Parallel when work is genuinely independent.
+4. Sequential only when the next task depends on the previous.
+
+Plus: when it's OK for the lead to do specialist work (almost
+never; tightly scoped exceptions documented), what the rule is
+NOT (not a permission system; the hard control is `Edit` removed
+from lead's tools), runtime-agnostic (claude/codex/gemini/plugins
+all dispatch via `yakos dispatch` for parallel cross-runtime work).
+
+**`lib/agents/lead-template.md`** restructured:
+- Purpose section leads with the four-line rule, citing the new
+  always-loaded rule.
+- `references:` lists `rule:lead-dispatch-discipline` first.
+- Special rules section trimmed; the heavy detail lives in the
+  rule, not the agent body.
+
+**`yakos start` preflight banner** prints a one-line reminder of
+the lead discipline before exec'ing the runtime CLI:
+
+```
+  Lead discipline (rule:lead-dispatch-discipline):
+    lead = decompose / integrate / supervise. specialists = parallel.
+    sequential only when the next task depends on the previous.
+```
+
+**`lib/rules/INDEX.md`** updated to register the new rule.
+
+`yakos validate --strict` remains 0 errors / 0 warnings.
+
 ## [0.10.0.0] — 2026-05-09
 
 ### Added — 13 new framework agents, 15 new skills, 15 prompt refinements

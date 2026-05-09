@@ -7,6 +7,7 @@ Rules shared across projects. Path-scoped or always-loaded; per Phase 1.5
 
 | Rule | Path scope | Purpose |
 |---|---|---|
+| `lead-dispatch-discipline` | always-loaded | Lead decomposes / integrates / synthesizes; specialists do specialist work; parallel by default. |
 | `git-hygiene` | always-loaded | Worktree, commit, force-push behavior. |
 | `commit-format` | always-loaded | Conventional Commits convention with exceptions. |
 | `secret-handling` | `**/.env*`, credential patterns | Cross-project: never commit secrets. |
