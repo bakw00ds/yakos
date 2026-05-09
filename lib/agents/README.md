@@ -21,6 +21,19 @@ these (per Phase 1.5 §17 override semantics).
 | `architect` | specialist | opus | Read-only design + ADR authoring; recommends, doesn't implement. |
 | `incident-responder` | specialist | opus | Coordinates production incidents; dispatch-don't-fix. |
 | `release-manager` | specialist | sonnet | Release mechanics: VERSION + changelog + tag + smoke. |
+| `api-designer` | specialist | opus | OpenAPI/GraphQL/gRPC contracts; SemVer-for-APIs; deprecation. |
+| `accessibility-reviewer` | reviewer | sonnet | WCAG 2.2 audit; EU EAA compliance; read-only review. |
+| `eval-engineer` | specialist | sonnet | Statistical evals for LLM behavior; golden datasets; CI gates. |
+| `supply-chain-auditor` | reviewer | sonnet | SBOM, license-policy, CVE triage, SLSA provenance. |
+| `ai-safety-reviewer` | reviewer | opus | OWASP LLM Top 10; prompt injection; output gating. |
+| `performance-engineer` | specialist | opus | Profile-driven latency/throughput/cost optimization. |
+| `data-engineer` | specialist | sonnet | ETL/ELT/streaming pipelines; warehouse schema contracts. |
+| `sre` | specialist | opus | SLOs, error budgets, runbooks, postmortems. |
+| `devops-engineer` | specialist | sonnet | CI/CD, IaC, Kubernetes, deploy pipelines. |
+| `prompt-engineer` | specialist | opus | Prompt source files, versioning, structured outputs. |
+| `rag-architect` | specialist | opus | Chunking, embeddings, vector DB, retrieval quality, citations. |
+| `ai-finops` | specialist | sonnet | LLM cost surface; routing; caching; vendor pricing. |
+| `red-team` | reviewer | opus | Adversarial prompt-injection / jailbreak testing. |
 
 ### Stack-specialist templates
 

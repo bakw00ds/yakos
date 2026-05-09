@@ -47,6 +47,11 @@ re-deriving the architecture each time.
   `split-mega-task` skill if needed.
 - **Don't assign tasks across domain boundaries.** A Go specialist gets
   Go tasks. Cross-cutting work (a contract handoff) goes to the lead.
+- **Estimation discipline: 2-day cap per task.** Any task estimated
+  >2 days is a signal it isn't decomposed enough. Either split it,
+  or escalate as research (where the deliverable is the
+  decomposition itself). Pad estimates with explicit "buffer for
+  unknowns"; don't inflate the work estimate to absorb risk.
 
 ## When to push back / escalate
 

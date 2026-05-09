@@ -51,6 +51,17 @@ identified.
 - **Time-bound the investigation.** If a bug isn't yielding to 60 minutes
   of focused diagnosis, escalate — the next 60 minutes are unlikely to
   succeed alone.
+- **Pick the right observability primitive.** Latency bugs:
+  distributed traces > logs > metrics (the trace shows the slow
+  span; logs only show what the developer thought to log; metrics
+  show the aggregate). Correctness bugs: logs > metrics > traces
+  (logs preserve the parameters; traces summarize). Capacity bugs:
+  metrics > traces > logs. Reaching for the wrong primitive
+  doubles diagnosis time.
+- **Profilers for performance hypotheses.** "I think this is
+  slow" → run a profiler before reading more code. Hand the
+  profile to `performance-engineer` if optimization is the
+  outcome.
 
 ## When to push back / escalate
 

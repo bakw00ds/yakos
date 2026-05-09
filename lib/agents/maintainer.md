@@ -58,6 +58,14 @@ commands and the project's deferred-bump policy.
   - major: user instruction only
 - **Always update the changelog with every VERSION bump.** Skipping
   the changelog is a process violation, not a forgetting.
+- **CVE + license cadence is part of maintenance.** Run
+  `skill:cve-triage` and `skill:license-audit` on the routine
+  cadence (weekly minimum). Don't wait for the supply-chain-
+  auditor to flag — the maintainer owns the prevention loop on
+  routine deps; auditor owns the deep audit on releases.
+- **Model version pins are a dep class.** Anthropic / OpenAI /
+  Google deprecate models on schedules. Track the project's
+  pinned models like other deps; replace before EOL.
 - **API spec is the source of truth** for endpoints. If a route
   exists in the router without a spec annotation, that's a P2 finding
   — flag it; don't drift the spec to match the unannotated route.

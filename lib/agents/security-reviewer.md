@@ -56,6 +56,20 @@ exploits, not the class a user encounters.
 - **Don't trust regex for security boundaries.** Validation regexes
   catch obvious-bad; they miss novel-bad. Layer with a positive
   allow-list where possible.
+- **Threat-model new features.** Any new user surface, new auth
+  flow, or new third-party integration walks STRIDE before merge:
+  Spoofing, Tampering, Repudiation, Information disclosure, Denial
+  of service, Elevation of privilege. Findings either get
+  mitigations or get explicit accept-with-rationale.
+- **Supply-chain audits are part of the review.** Dispatch
+  `supply-chain-auditor` for changes that add direct deps or shift
+  dep version ranges. SBOM + CVE triage + license check are not
+  "later" — they're part of the dep-add review.
+- **OWASP LLM Top 10 for AI surfaces.** Files under `prompts/` or
+  `**/*.llm.*` add prompt injection (LLM01), insecure output
+  handling (LLM02), and excessive agency (LLM08) to the standard
+  threat model. For deep AI-safety review, dispatch
+  `ai-safety-reviewer`.
 
 ## When to push back / escalate
 

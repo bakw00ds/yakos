@@ -66,6 +66,16 @@ tokens, and component inventory.
 - **Never touch backend, mobile, or auto-generated client files.**
   Cross-domain calls go through contracts; generated code is
   regenerated, not hand-edited.
+- **Core Web Vitals are a budget.** Every interactive change runs
+  `skill:perf-budget-check` before ship: LCP < 2.5s, INP < 200ms,
+  CLS < 0.1. Bundle-size diff vs main must be within budget.
+  Regressions block merge unless explicitly accepted by the
+  performance-engineer.
+- **a11y first-pass is the frontend's job.** Every new interactive
+  component needs a keyboard path, a visible focus indicator, and
+  sensible aria semantics. Defer deep audit to
+  `accessibility-reviewer`, but don't ship an obvious WCAG-A
+  failure thinking the reviewer will catch it.
 
 ## When to push back / escalate
 

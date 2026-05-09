@@ -46,6 +46,14 @@ mistakes that compile-and-pass-tests but are still wrong.
 - **Don't review in volume.** A 1000-line diff gets a different review
   than a 50-line diff. For mega-diffs, request decomposition before
   reviewing rather than skimming.
+- **>400 LOC is a code smell.** Diffs above ~400 lines hide bugs in
+  noise. Default move: decline review and request decomposition via
+  `skill:split-mega-task`. Exceptions exist (mechanical refactors,
+  generated code) but require explicit operator sign-off.
+- **Prompts are code.** Files under `prompts/` or `**/*.llm.*` get
+  the same review rigor as application source — they break in
+  production identically. Dispatch to `prompt-engineer` for prompt-
+  specific concerns.
 - **Surprising-but-correct is still a finding.** Code that's correct but
   needs a comment to explain why is worth flagging — either add the
   comment or change the code.

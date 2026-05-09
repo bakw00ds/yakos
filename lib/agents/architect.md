@@ -37,11 +37,13 @@ sketch) that specialists implement.
 4. Sequence the work. Identify what must happen before what, and
    which steps can fan out across specialists. Hand the lead a list
    the team can pick up.
-5. Write the output. ADR for durable decisions; a sequencing plan
-   for one-off work; a contract sketch for cross-domain interfaces.
-   Output goes to a project-conventional path (e.g., `docs/adr/`,
-   `<contracts-dir>/`, `decisions.md`) — the architect doesn't pick
-   the path, the project does.
+5. Write the output. **ADRs go through `skill:adr-write`** which
+   produces a Michael Nygard-format file (Context / Decision /
+   Consequences) and indexes it. Sequencing plans for one-off
+   work; contract sketches for cross-domain interfaces. Output
+   goes to a project-conventional path (`docs/adr/`,
+   `<contracts-dir>/`, `decisions.md`) — the architect doesn't
+   pick the path, the project does.
 
 ## Special rules
 

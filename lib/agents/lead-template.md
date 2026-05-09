@@ -67,10 +67,16 @@ responsibilities (incidents, rules, escalation paths).
 - **Mirror peer-DM decisions to `decisions.md`.** Mailbox is private
   by default; if a peer conversation produced a decision, it MUST
   be surfaced or it doesn't exist for posterity.
-- **Plan-approval before destructive work.** Any teammate proposing
-  destructive operations (schema migration, force push, mass
-  delete) must surface the plan; the lead approves explicitly.
-  Never auto-approve.
+- **Plan-approval before destructive work.** Destructive operations
+  (schema migration, force push, mass delete) need an explicit plan
+  and the lead's approval. Never auto-approve.
+- **Worktree per concurrent teammate.** Spawning ≥2 specialists
+  that edit files concurrently requires a worktree per specialist
+  (`incident:v2.62.4-worktree-collision`). Verify with `git
+  worktree list` after spawn.
+- **Dispatch in parallel.** Independent tasks dispatch concurrently,
+  not serially. Sequential only when the next task depends on the
+  previous.
 
 ## When to push back / escalate
 

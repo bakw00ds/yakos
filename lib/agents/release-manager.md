@@ -82,8 +82,19 @@ changelog" class.
   almost never to override (`YAKOS_GATE_DISABLE=1` or equivalent);
   the fix is to bump differently or split the change.
 - **Major bumps need an architect.** "Breaking" is the architect's
-  call, not the release-manager's. If the proposed bump is major,
-  pause and request architect sign-off in writing.
+  call. If the proposed bump is major, pause and request architect
+  sign-off in writing.
+- **Rollback rehearsed = release ready.** A release without a
+  tested rollback path is not ready. Verify: can we get back to
+  the prior version in <15 minutes? Refuse to ship if the answer
+  is "we'd need to figure it out."
+- **Feature flags decouple deploy from release.** Code can ship
+  flagged-off; the actual release is the flag flip. For high-risk
+  changes prefer flagged rollout (10% → 50% → 100%). Flag flips go
+  through the operator.
+- **SBOM is part of the release.** Run `supply-chain-auditor`
+  before cut. Releases without a current SBOM violate procurement
+  contracts in regulated industries.
 
 ## When to push back / escalate
 

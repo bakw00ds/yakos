@@ -65,6 +65,18 @@ and incident lore.
   detached goroutine/thread/promise.
 - **Parameterized queries only** when touching SQL. No string
   interpolation, no string formatting into queries, ever.
+- **API spec changes go through `api-designer`.** Don't change the
+  wire shape (path, params, response) without a corresponding spec
+  PR landing first. Run `skill:api-diff` to confirm the change
+  classification (major/minor/patch); breaking changes require a
+  deprecation plan from api-designer.
+- **Idempotency is contractual.** POST endpoints that mutate
+  declare an `Idempotency-Key` header convention OR carry an
+  endpoint-level note explaining why they don't. Retries must be
+  safe.
+- **Rate-limit awareness.** New endpoints inherit the project's
+  default rate-limit class unless explicitly overridden. No silent
+  unbounded surfaces.
 
 ## When to push back / escalate
 

@@ -70,6 +70,16 @@ conventions, and incident lore.
   than one tool (e.g., a deploy script AND a runtime migrator), they
   must atomically agree on the migrations table. Don't break that
   agreement when touching either runner.
+- **Online migrations only at scale.** For tables > ~100k rows,
+  a blocking `ALTER` is an outage. Use the expand-contract pattern:
+  add new column nullable → backfill in batches → make non-null
+  in a follow-up migration → drop the old column in a third. Never
+  combine these into one migration.
+- **Data residency + retention awareness.** GDPR/CPRA require
+  documented retention for any PII column. New PII columns ship
+  with a retention note (how long, who can erase). Erasure paths
+  go through the application layer; the database layer enforces
+  the retention floor.
 
 ## When to push back / escalate
 

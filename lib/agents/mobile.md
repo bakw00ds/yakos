@@ -66,6 +66,16 @@ design tokens.
   navigation bars get blocked otherwise.
 - **Never touch backend, web, or generated-client source trees.**
   Generated code is regenerated, not hand-edited.
+- **Store-policy compliance is a release gate.** App Store + Play
+  Store guidelines change quarterly. Tracking, IDFA usage, push
+  notifications without permission, location-without-justification,
+  data-safety declaration drift — all surface as App Store rejection
+  with a 24+ hour cycle time. Read the latest policy when adding
+  any of these surfaces.
+- **Every native permission needs a usage description.** iOS
+  `NSXxxUsageDescription` keys, Android `<uses-permission>` +
+  rationale strings. A native crash on permission request is the
+  most expensive bug in mobile (no logs, ships at TestFlight time).
 
 ## When to push back / escalate
 

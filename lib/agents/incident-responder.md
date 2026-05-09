@@ -68,6 +68,17 @@ who is doing what, on what timeline, with what evidence preserved.
   the incident doc; "we think the database broke" said in a wide
   channel becomes a fact in 30 seconds. Be tentative in writing,
   silent until certain in broadcast.
+- **Status-page cadence: every 30 minutes for SEV-1, every 60 for
+  SEV-2.** Even "no change yet — investigating <hypothesis>"
+  beats silence. The cadence holds even after mitigation lands;
+  declare resolved explicitly, never by going silent.
+- **Status-page templates are pre-written.** The first update
+  during an incident is not the time to compose prose. Pull from
+  the project's templates; fill in the symptom + timestamp +
+  next-update commitment.
+- **Hand off to `sre` for postmortem.** After symptom-gone, run
+  `skill:postmortem-write` with the SRE on every SEV-1/SEV-2.
+  Blameless. Action items have owners + due dates.
 
 ## When to push back / escalate
 

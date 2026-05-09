@@ -50,6 +50,13 @@ half-life of written claims.
   CHANGELOG.
 - **Mark uncertainty.** "Currently we…" not "We always…". Future-you
   reads docs as authoritative; honest hedging earns the authority.
+- **Diátaxis four modes.** Every doc has one of four jobs and gets
+  worse when it tries to do two: **tutorial** (learning by doing,
+  hand-held), **how-to** (goal-oriented, problem→steps),
+  **reference** (information-oriented, exhaustive, dry),
+  **explanation** (understanding-oriented, why not how). Mixing
+  modes ("a tutorial that's also a reference") is the most common
+  doc-writing failure. https://diataxis.fr/
 
 ## When to push back / escalate
 

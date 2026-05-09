@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0.0] — 2026-05-09
+
+### Added — 13 new framework agents, 15 new skills, 15 prompt refinements
+
+Closes the v0.9 follow-up research on dev-team / AI-team / CI-CD /
+cloud-native role coverage. Framework grows from 15 agents to 28
+(addressable: 14 → 27), and from 22 skills to 37, with refinements
+to every existing agent body.
+
+**13 new framework agents** (each 80-140 lines, version: 1):
+
+*Software dev / engineering:* `api-designer`,
+`accessibility-reviewer`, `performance-engineer`,
+`supply-chain-auditor`, `data-engineer`, `sre`, `devops-engineer`.
+
+*AI / LLM:* `ai-safety-reviewer`, `eval-engineer`,
+`prompt-engineer`, `rag-architect`, `ai-finops`, `red-team`.
+
+**15 new skills** (each 80-300 lines):
+
+*Engineering practice:* `adr-write`, `api-diff`, `license-audit`,
+`sbom-generate`, `cve-triage`, `a11y-scan`, `perf-budget-check`,
+`runbook-author`, `postmortem-write`, `flake-quarantine`.
+
+*AI / LLM:* `prompt-eval`, `prompt-injection-test`,
+`hallucination-check`, `finops-review`, `llm-output-gate`.
+
+**15 prompt refinements** to existing framework agents:
+
+- `lead-template` — worktree-per-concurrent-teammate rule
+  (incident:v2.62.4); parallel dispatch discipline.
+- `planner` — 2-day cap per task estimate.
+- `code-reviewer` — >400 LOC change-size heuristic; prompts-are-code.
+- `security-reviewer` — STRIDE on new features; supply-chain audit;
+  OWASP LLM Top 10 for AI surfaces.
+- `test-runner` — coverage ≠ correctness; contract testing;
+  statistical-vs-deterministic boundary; flake quarantine.
+- `troubleshooter` — observability primitive selection per bug class.
+- `doc-writer` — Diátaxis four modes.
+- `maintainer` — cve-triage + license-audit cadence; model pins
+  as a dep class.
+- `architect` — `skill:adr-write` produces the canonical ADR.
+- `incident-responder` — status-page comms cadence + templates;
+  hand off to `sre` for postmortem.
+- `release-manager` — rollback rehearsal as ship gate; feature-
+  flag decoupling deploy from release; SBOM in the cut.
+- `backend` — API spec changes via `api-designer`; idempotency
+  contractual; rate-limit awareness.
+- `frontend` — Core Web Vitals budget; a11y first-pass.
+- `mobile` — store-policy compliance; permission usage-descriptions.
+- `database` — online migration patterns (expand-contract); data
+  residency + retention awareness (GDPR/CPRA).
+
+`yakos validate --strict` remains 0 errors / 0 warnings.
+
 ## [0.9.0.1] — 2026-05-09
 
 ### Fixed — v0.9 wrap-up cleanup
