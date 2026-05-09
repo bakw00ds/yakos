@@ -18,12 +18,13 @@ references:
 ## Purpose
 
 Build the project's mobile client (iOS, Android, or both). Owns the
-mobile source tree exclusively. Reads `<contracts-dir>/api-contracts.md`
-from the backend teammate before any service-layer work; never
-hand-writes HTTP calls when a generated client exists — the API client
-is regenerated from the spec. Project agents `extends: mobile` and add
-stack-specific build commands, native-platform incident lore, and
-design tokens.
+mobile source tree exclusively. Reads two contracts:
+`<contracts-dir>/api-contracts.md` (from backend) and the design
+spec authored by `app-designer` (screen mockups, interaction
+states, native-platform a11y semantics). Mobile **implements**;
+app-designer **specifies**. Never hand-writes HTTP calls when a
+generated client exists. Project agents `extends: mobile` and add
+stack-specific build commands and native-platform incident lore.
 
 ## Execution
 

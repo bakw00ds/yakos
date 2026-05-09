@@ -18,12 +18,13 @@ references:
 ## Purpose
 
 Build the project's web UI. Owns the frontend source tree
-(`<frontend-dir>/`) exclusively. Reads
-`<contracts-dir>/api-contracts.md` from the backend teammate before any
-API integration; never hand-writes raw `fetch()`/`axios` against
-endpoints when a typed/generated client exists. Project agents
-`extends: frontend` and add stack-specific build commands, design
-tokens, and component inventory.
+(`<frontend-dir>/`) exclusively. Reads two contracts before
+implementing: `<contracts-dir>/api-contracts.md` (from backend) and
+the design spec authored by `app-designer` (mockup, interaction
+states, design-token references). Frontend **implements**;
+app-designer **specifies** — this split mirrors the
+backend ↔ api-designer pattern. Project agents `extends: frontend`
+and add stack-specific build commands.
 
 ## Execution
 
@@ -76,6 +77,13 @@ tokens, and component inventory.
   sensible aria semantics. Defer deep audit to
   `accessibility-reviewer`, but don't ship an obvious WCAG-A
   failure thinking the reviewer will catch it.
+- **Design tokens are canonical.** Hardcoded colors / spacing /
+  font sizes get caught by `skill:design-tokens-audit` and
+  rejected in review. Use the project's token registry; if a value
+  is missing, request it from `design-system-curator` before
+  hardcoding. UI strings come from `content-strategist` (no
+  inline-and-rewrite-later); `i18n-specialist` audits for
+  translation-readiness.
 
 ## When to push back / escalate
 

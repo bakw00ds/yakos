@@ -34,6 +34,11 @@ these (per Phase 1.5 §17 override semantics).
 | `rag-architect` | specialist | opus | Chunking, embeddings, vector DB, retrieval quality, citations. |
 | `ai-finops` | specialist | sonnet | LLM cost surface; routing; caching; vendor pricing. |
 | `red-team` | reviewer | opus | Adversarial prompt-injection / jailbreak testing. |
+| `app-designer` | specialist | opus | UI/UX: information architecture, wireframes, interaction patterns, design tokens. Specifies; doesn't implement. |
+| `ux-researcher` | specialist | opus | User research, usability studies, persona authoring. Insights flow upstream to app-designer. |
+| `design-system-curator` | maintainer | sonnet | Owns design tokens, component inventory, drift between Figma and code. |
+| `content-strategist` | specialist | sonnet | UI strings, microcopy, error messages, voice & tone, terminology consistency. |
+| `i18n-specialist` | specialist | sonnet | Locale support, RTL, CLDR pluralization, translation pipeline. |
 
 ### Stack-specialist templates
 

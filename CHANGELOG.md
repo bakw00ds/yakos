@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0.0] — 2026-05-09
+
+### Added — design / UX / i18n: 5 new agents + 7 new skills
+
+Closes the "no UI/UX designer agent" gap raised on 2026-05-09.
+Framework grows 28 agents → 33 (addressable 27 → 32) and 37 skills →
+44, completing the design-pipeline coverage from research → design →
+implementation → audit.
+
+**5 new framework agents** (each 80-140 lines, version: 1):
+
+- `app-designer` — UI/UX specialist. Owns information architecture,
+  wireframes (markdown / mermaid), interaction patterns, design
+  tokens. Specifies; doesn't implement (mirrors api-designer ↔
+  backend pattern).
+- `ux-researcher` — user research, usability studies, persona
+  authoring, JTBD framing. Insights flow upstream to app-designer.
+- `design-system-curator` — owns design tokens (colors, spacing,
+  typography, motion), component inventory, drift between Figma
+  library and code library.
+- `content-strategist` — in-product UI strings, microcopy, voice &
+  tone guide, error-message discipline. Distinct from `doc-writer`
+  (external docs).
+- `i18n-specialist` — locale support, RTL handling, CLDR
+  pluralization, `Intl` formatting, translation pipeline.
+
+**7 new skills:**
+
+- `interaction-patterns` — Nielsen's 10 + WCAG 2.2 first-pass
+  heuristic eval.
+- `design-tokens-audit` — codebase-vs-token-registry drift scan.
+- `mockup-review` — structured mockup review (info hierarchy,
+  states, responsive, copy slots, token usage).
+- `usability-review` — heuristic eval against working prototype
+  with Nielsen severity scale.
+- `i18n-audit` — hardcoded strings, missing keys, RTL breakage,
+  date/number/currency hardcoding.
+- `ux-writing-review` — voice/tone/clarity audit (verb buttons,
+  actionable errors, no jargon, no idioms).
+- `persona-write` — persona scaffold (JTBD framing, anti-statements,
+  evidence pointers, decay tracking).
+
+**Refinements to existing agents:**
+
+- `frontend` — Purpose split: implements per `app-designer`'s spec;
+  Special rules add design-token canonicalness + UI-string source
+  (content-strategist) + translation-readiness (i18n-specialist).
+- `mobile` — Purpose updated to read both api-contracts AND
+  app-designer's design spec.
+- `accessibility-reviewer` — adds pair-with-`app-designer` on
+  mockup review (10× cheaper to catch a11y at design stage); RTL
+  co-ownership with `i18n-specialist`.
+
+Authoring dispatched in parallel to 2 sub-agents per
+`rule:lead-dispatch-discipline`. Lead synthesized + integrated
+the 3 prompt refinements; sub-agent A authored 5 agents;
+sub-agent B authored 7 skills.
+
+`yakos validate --strict` remains 0 errors / 0 warnings.
+
 ## [0.10.0.1] — 2026-05-09
 
 ### Added — `rule:lead-dispatch-discipline` (always-loaded)

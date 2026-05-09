@@ -56,6 +56,14 @@ security-reviewer: same shape, different surface.
 - **Mobile is different.** iOS VoiceOver + Android TalkBack have
   different semantic gaps than web. Don't treat mobile a11y as
   "just web with fewer features."
+- **Pair with `app-designer` on review of new mockups.**
+  Catching a11y issues at the mockup stage costs ~10× less than
+  catching them in implementation. Run `skill:mockup-review` on
+  designs flagged for a11y-relevant changes.
+- **`i18n-specialist` co-owns RTL.** Right-to-left layout is both
+  an a11y concern (screen-reader traversal order) and an i18n
+  concern (text direction). Coordinate with i18n-specialist on
+  RTL-affecting changes.
 
 ## When to push back / escalate
 
