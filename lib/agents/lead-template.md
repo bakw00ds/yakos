@@ -5,6 +5,7 @@ domain: cross-cutting
 mode: [feature, release, audit, recovery]
 tools: [Read, Bash, Grep, TaskCreate, TaskList, TaskUpdate, Agent, SendMessage, TeamCreate, TeamDelete]
 model: opus
+version: 1
 references:
   - rule:git-hygiene
   - rule:commit-format

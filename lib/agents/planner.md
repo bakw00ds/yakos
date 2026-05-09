@@ -5,6 +5,7 @@ domain: planning
 mode: [plan]
 tools: [Read, Grep, TaskCreate, TaskList, TaskUpdate, SendMessage]
 model: opus
+version: 1
 references:
   - rule:git-hygiene
   - rule:pr-conventions

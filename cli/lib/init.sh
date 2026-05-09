@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# init.sh — bootstrap a project for use with YakOS.
+# Purpose: init.sh — bootstrap a project for use with YakOS.
 #
 # Behavior (build prompt §"`yakos init` — required behavior"):
 #   1. Verify project path exists and is a git repo.

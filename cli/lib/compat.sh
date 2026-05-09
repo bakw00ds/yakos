@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# compat.sh — cross-platform helpers used by every yakos CLI subcommand.
+# Purpose: compat.sh — cross-platform helpers used by every yakos CLI subcommand.
 #
 # This file is meant to be SOURCED, not executed:
 #     source "$YAKOS_LIB/compat.sh"

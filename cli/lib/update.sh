@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# update.sh — pull the YakOS repo and refresh symlinks.
+# Purpose: update.sh — pull the YakOS repo and refresh symlinks.
 #
 # Behavior:
 #   1. cd $YAKOS_ROOT && git pull (with --ff-only by default).

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# frontend-validate.sh — per-domain validator for web/frontend tasks.
+# Purpose: frontend-validate.sh — per-domain validator for web/frontend tasks.
 #
 # Runs lint + test if a package.json is present and scripts are defined.
 # Skips with PASS if not.

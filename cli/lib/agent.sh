@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agent.sh — agent-file lifecycle commands.
+# Purpose: agent.sh — agent-file lifecycle commands.
 #
 # Subcommands:
 #   yakos agent new <name> [--runtime <id>] [--project <path>] [--extends <id>]
@@ -293,9 +293,29 @@ if [ "$SUB" = "lint" ]; then
         # extends: target exists in framework or project
         ext="$(yk_agents_fm_get "$fm" "extends")"
         if [ -n "$ext" ]; then
-            if [ ! -f "$YAKOS_ROOT/lib/agents/${ext}.md" ] && [ ! -f "$proj_dir/${ext}.md" ]; then
+            ext_file=""
+            if [ -f "$YAKOS_ROOT/lib/agents/${ext}.md" ]; then
+                ext_file="$YAKOS_ROOT/lib/agents/${ext}.md"
+            elif [ -f "$proj_dir/${ext}.md" ]; then
+                ext_file="$proj_dir/${ext}.md"
+            else
                 err "$(basename -- "$f"): extends '$ext' not found in framework or project agents"
                 local_errs=$((local_errs + 1))
+            fi
+
+            # v0.9: surface framework-agent version drift. Project records
+            # `extends-version: <n>`; if the framework's current `version:`
+            # is higher, the project's expectations are stale and the
+            # operator should re-read the parent body.
+            if [ -n "$ext_file" ]; then
+                ext_fm="$(yk_agents_extract_frontmatter "$ext_file")"
+                fw_ver="$(yk_agents_fm_get "$ext_fm" "version")"
+                proj_ext_ver="$(yk_agents_fm_get "$fm" "extends-version")"
+                if [ -n "$fw_ver" ] && [ -n "$proj_ext_ver" ] && [ "$fw_ver" != "$proj_ext_ver" ]; then
+                    warn "$(basename -- "$f"): extends-version $proj_ext_ver but framework $ext is at version $fw_ver — review with 'yakos agent diff $(basename -- "$f" .md)'"
+                elif [ -n "$fw_ver" ] && [ -z "$proj_ext_ver" ]; then
+                    warn "$(basename -- "$f"): extends '$ext' (v$fw_ver) but no 'extends-version:' recorded — add to track future drift"
+                fi
             fi
         fi
 

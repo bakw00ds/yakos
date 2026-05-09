@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# path-log.sh — PreToolUse companion to path-allowlist.sh.
+# Purpose: path-log.sh — PreToolUse companion to path-allowlist.sh.
 #
 # Always logs, never blocks. Defense-in-depth: if path-allowlist.sh is
 # accidentally disabled or misconfigured, this hook still records every

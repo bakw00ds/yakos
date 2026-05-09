@@ -5,6 +5,7 @@ domain: security
 mode: [audit, review]
 tools: [Read, Grep, Bash, TaskList, SendMessage]
 model: opus
+version: 1
 references:
   - rule:secret-handling
   - rule:git-hygiene

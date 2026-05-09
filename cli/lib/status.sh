@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# status.sh — per-project dashboard.
+# Purpose: status.sh — per-project dashboard.
 #
 # Reports session age (.session-started-history), scratchpad size,
 # recent hook outcomes (logs/*.ndjson), bypass count, mailbox count,

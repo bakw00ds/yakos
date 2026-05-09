@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# task-complete-dispatch.sh — TaskCompleted hook (REPORT-ONLY in v0.1).
+# Purpose: task-complete-dispatch.sh — TaskCompleted hook (REPORT-ONLY in v0.1).
 #
 # Status: REPORT-ONLY (build-prompt §"REPORT-only fallback rule").
 #

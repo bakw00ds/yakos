@@ -5,6 +5,7 @@ domain: testing
 mode: [implement, review]
 tools: [Read, Bash, Grep, TaskList, TaskUpdate, SendMessage]
 model: sonnet
+version: 1
 references:
   - rule:git-hygiene
   - rule:commit-format

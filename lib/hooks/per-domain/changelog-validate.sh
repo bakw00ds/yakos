@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# changelog-validate.sh — per-domain validator for changelog citations.
+# Purpose: changelog-validate.sh — per-domain validator for changelog citations.
 #
 # Enforces the convention: every BE-only change shipped under a combined
 # release MUST include a "Feedback #<8hex>" citation in the changelog

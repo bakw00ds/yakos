@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# paths.sh — canonical path resolver for YakOS state files.
+# Purpose: paths.sh — canonical path resolver for YakOS state files.
 #
 # Source-of-truth for where work/current/ lives. CLI subcommands AND hook
 # scripts source this file so they agree on:

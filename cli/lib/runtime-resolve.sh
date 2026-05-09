@@ -18,17 +18,37 @@ set -eu
 
 # Known runtimes in order of capability fidelity (closest analog to
 # yakos's original target — Claude Code — first).
-YK_RT_KNOWN="claude codex gemini"
+YK_RT_KNOWN_BUILTIN="claude codex gemini"
+
+# yk_rt_plugins
+#   Stdout one plugin runtime id per line, derived from
+#   ~/.yakos/plugins/<id>/runtime.sh.
+yk_rt_plugins() {
+    local d="$HOME/.yakos/plugins"
+    [ -d "$d" ] || return 0
+    local p
+    for p in "$d"/*/runtime.sh; do
+        [ -f "$p" ] || continue
+        # parent dir name = plugin id
+        basename -- "$(dirname -- "$p")"
+    done
+}
 
 yk_rt_known() {
-    printf '%s\n' "$YK_RT_KNOWN" | tr ' ' '\n'
+    {
+        printf '%s\n' "$YK_RT_KNOWN_BUILTIN" | tr ' ' '\n'
+        yk_rt_plugins
+    } | grep -v '^$' | sort -u
 }
 
 yk_rt_is_known() {
-    case " $YK_RT_KNOWN " in
+    # Built-in fast path.
+    case " $YK_RT_KNOWN_BUILTIN " in
         *" $1 "*) return 0 ;;
-        *) return 1 ;;
     esac
+    # Plugin lookup.
+    [ -f "$HOME/.yakos/plugins/$1/runtime.sh" ] && return 0
+    return 1
 }
 
 # yk_rt_load <runtime-id>
@@ -41,8 +61,15 @@ yk_rt_load() {
         ct_die "runtime-resolve: unknown runtime '$id' (known: $YK_RT_KNOWN)"
     fi
     local adapter="$YAKOS_LIB/runtimes/${id}.sh"
+    # v0.9+: plugin runtimes live under ~/.yakos/plugins/<id>/runtime.sh.
+    # Built-in adapters take precedence; plugin path is the fallback.
     if [ ! -f "$adapter" ]; then
-        ct_die "runtime-resolve: adapter not found at $adapter"
+        local plugin_adapter="$HOME/.yakos/plugins/${id}/runtime.sh"
+        if [ -f "$plugin_adapter" ]; then
+            adapter="$plugin_adapter"
+        else
+            ct_die "runtime-resolve: adapter not found at $adapter (and no plugin at $plugin_adapter)"
+        fi
     fi
     # shellcheck source=/dev/null
     . "$adapter"

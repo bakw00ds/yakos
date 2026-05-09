@@ -5,6 +5,7 @@ domain: code-quality
 mode: [review]
 tools: [Read, Grep, Bash, TaskList, SendMessage]
 model: sonnet
+version: 1
 references:
   - rule:commit-format
   - rule:pr-conventions

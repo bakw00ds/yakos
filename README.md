@@ -233,24 +233,29 @@ semantics are documented in [STYLE.md §8](STYLE.md). Gate audit trail
 at `~/.yakos-state/gate-log.ndjson`. Override:
 `YAKOS_GATE_DISABLE=1 git push` (logged).
 
-## Update
+## Update / uninstall
+
+See [UPGRADING.md](UPGRADING.md) for the authoritative upgrade path
+from any prior version, schema migration table, full-uninstall
+procedure, and rollback steps.
+
+Quick path:
 
 ```sh
-cd ~/code/yakos
-git pull
-./cli/yakos update    # git pull + relink + change report
+cd ~/code/yakos && git pull
+./cli/yakos update                                 # relink symlinks
+./cli/yakos doctor                                 # verify
+for cd in ~/agent-control/*/; do
+    p="$(head -1 "$cd/.project-path" 2>/dev/null)"
+    [ -d "$p" ] && ./cli/yakos doctor "$p" --fix && \
+        ./cli/yakos migrate "$(basename "$cd")"
+done
 ```
 
-## Uninstall
-
-```sh
-./cli/yakos uninstall
-```
-
-Removes only the YakOS-owned symlinks and the `~/.yakos` pointer.
-Files YakOS didn't create are left in place. Auto-memory at
-`~/.claude/projects/` is **never** touched, no matter what flags you
-pass — this rule supersedes every other consideration in v0.1.
+To uninstall: `./cli/yakos uninstall` removes yakOS-owned symlinks
+and the `~/.yakos` pointer. Auto-memory at `~/.claude/projects/`,
+`~/.yakos-state/`, and `~/agent-control/` are **never** touched
+without explicit operator intervention.
 
 ## Engineering standards
 

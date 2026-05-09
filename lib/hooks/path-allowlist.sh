@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# path-allowlist.sh — PreToolUse hook on Edit|Write|MultiEdit.
+# Purpose: path-allowlist.sh — PreToolUse hook on Edit|Write|MultiEdit.
 #
 # Hard-control enforcement of (agent_type, path) allowlists. Reads
 # <project>/.claude/path-allowlist.json:

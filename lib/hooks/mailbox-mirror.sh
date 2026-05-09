@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mailbox-mirror.sh — PreToolUse hook on SendMessage.
+# Purpose: mailbox-mirror.sh — PreToolUse hook on SendMessage.
 #
 # Mirrors every team-internal SendMessage call (peer DM, lead → teammate,
 # teammate → lead) to work/current/messages.ndjson. Always exits 0; this

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# team-lifecycle.sh — PreToolUse on TeamCreate|Agent|TeamDelete.
+# Purpose: team-lifecycle.sh — PreToolUse on TeamCreate|Agent|TeamDelete.
 #
 # This is a TELEMETRY HOOK. It NEVER blocks. Always exits 0.
 # (See lib/hooks/README.md "No-block policy for telemetry hooks".)

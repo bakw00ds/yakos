@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# secret-scan.sh — PreToolUse hook on Edit|Write|MultiEdit.
+# Purpose: secret-scan.sh — PreToolUse hook on Edit|Write|MultiEdit.
 #
 # Refuses tool calls whose written content matches well-known secret
 # patterns (AWS keys, GitHub tokens, generic API keys, private-key blocks).

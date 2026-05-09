@@ -5,6 +5,7 @@ domain: cross-cutting
 mode: [design, audit]
 tools: [Read, Grep, SendMessage]
 model: opus
+version: 1
 references:
   - rule:pr-conventions
   - rule:git-hygiene

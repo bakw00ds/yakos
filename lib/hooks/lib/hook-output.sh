@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hook-output.sh — structured NDJSON logging + bypass + block helpers.
+# Purpose: hook-output.sh — structured NDJSON logging + bypass + block helpers.
 #
 # Severity tiers (from Phase 1.5 §12):
 #   BLOCK  — exit 2; tool call refused

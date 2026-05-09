@@ -5,6 +5,7 @@ domain: backend-service
 mode: [feature, fix, refactor]
 tools: [Read, Edit, Write, Bash, Grep, TaskList, TaskUpdate, SendMessage]
 model: sonnet
+version: 1
 references:
   - rule:git-hygiene
   - rule:commit-format

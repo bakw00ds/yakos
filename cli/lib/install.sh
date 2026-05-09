@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — first-time install for YakOS.
+# Purpose: install.sh — first-time install for YakOS.
 #
 # Behavior:
 #   1. Per-FILE symlinks from $HOME/.claude/{agents,skills,rules,playbooks}/

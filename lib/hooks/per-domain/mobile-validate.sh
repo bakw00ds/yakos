@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mobile-validate.sh — per-domain validator for Flutter / mobile tasks.
+# Purpose: mobile-validate.sh — per-domain validator for Flutter / mobile tasks.
 #
 # Runs `flutter analyze` and `flutter test` (timeout-wrapped per the
 # flutter-tester-hang incident). Skips with PASS when no flutter project.

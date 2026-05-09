@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# session-end-check.sh — SessionEnd hook (final state audit).
+# Purpose: session-end-check.sh — SessionEnd hook (final state audit).
 #
 # This is a TELEMETRY HOOK. It NEVER blocks. SessionEnd hooks cannot block
 # exit anyway, but every write must be guarded — preventing the user's

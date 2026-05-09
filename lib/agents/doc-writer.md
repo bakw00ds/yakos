@@ -5,6 +5,7 @@ domain: documentation
 mode: [implement, review]
 tools: [Read, Edit, Write, Grep, TaskList, TaskUpdate, SendMessage]
 model: sonnet
+version: 1
 references:
   - rule:commit-format
   - rule:pr-conventions

@@ -5,6 +5,7 @@ domain: release
 mode: [release]
 tools: [Read, Edit, Bash, Grep, SendMessage]
 model: sonnet
+version: 1
 references:
   - rule:commit-format
   - rule:pr-conventions

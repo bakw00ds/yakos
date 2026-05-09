@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# session.sh — session lifecycle commands beyond start.
+# Purpose: session.sh — session lifecycle commands beyond start.
 #
 # Subcommands:
 #   yakos session export <project> <tag>  Bundle session artifacts

@@ -507,7 +507,83 @@ until v0.6.x extends per-runtime telemetry).
 
 ---
 
-## Not in v0.6.x
+## Pattern 11: Reverse dispatch (codex specialist calls back to claude lead)
+
+A specialist running on one runtime can dispatch work back to an
+agent on a different runtime. This is the same `yakos dispatch`
+mechanism — runtime-agnostic — used in reverse.
+
+### Setup
+
+The codex agent's frontmatter declares its runtime, plus its
+`tools:` list must include `Bash`:
+
+```yaml
+---
+id: codex-deep-reviewer
+role: reviewer
+domain: code-review
+mode: [feature]
+tools: [Read, Grep, Bash]
+model: o4-mini
+runtime: codex
+references: []
+---
+
+# Codex Deep Reviewer
+
+## Purpose
+Deep review on a single file or function. When the review uncovers
+an architectural concern, escalate via `yakos dispatch architect
+"<concern>"` — the architect runs on claude, gets fresh context,
+and returns its judgment to this reviewer's stdout.
+```
+
+### Use it
+
+A claude lead session dispatches the codex reviewer:
+
+```sh
+yakos dispatch codex-deep-reviewer "review pkg/auth/middleware.go"
+```
+
+Inside the codex session, the reviewer's body says: when an
+architectural concern surfaces, run:
+
+```sh
+yakos dispatch architect "the auth middleware mixes
+authorization and request logging. Should these be split?"
+```
+
+That call shells out to a fresh claude session with the architect
+agent's discipline. The architect returns its recommendation; the
+reviewer reads it on stdout and includes it in the review report
+returned to the original claude lead.
+
+### Why it works
+
+`yakos dispatch` is a CLI command, not a runtime feature. Any
+runtime that has Bash available (which is all three built-ins
+plus most plugins) can call it. The dispatch-log records both
+calls — original lead → codex, then codex → architect on claude
+— so the audit trail captures the full chain.
+
+### Tips
+
+- **Avoid loops.** A reviewer that always re-dispatches everything
+  to the architect will burn budget. Use specific triggers
+  ("when X kind of concern surfaces") in the agent body.
+- **Cost stacking.** Each cross-runtime hop is a separate dispatch
+  with its own cost. `yakos cost --by agent` shows the chain so
+  you can see if reverse dispatches are paying their keep.
+- **Timeout chains.** If the outer dispatch has a 5-minute
+  timeout and the inner calls another 5-minute dispatch, the
+  inner can starve. Set inner agents' `max-duration-s` lower
+  than the outer's timeout.
+
+---
+
+## Not in v0.9.x
 
 - **Multi-team coordination.** A "team-of-teams" pattern (a release
   manager coordinating across feature teams) isn't a primitive yet.

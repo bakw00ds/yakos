@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hook-input.sh — stdin JSON helpers shared by every YakOS hook script.
+# Purpose: hook-input.sh — stdin JSON helpers shared by every YakOS hook script.
 #
 # Usage in a hook:
 #     . "$HOOK_DIR/lib/hook-input.sh"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# archive.sh — roll work/current/ → work/archive/<tag>/ for a project.
+# Purpose: archive.sh — roll work/current/ → work/archive/<tag>/ for a project.
 #
 # Behavior (build prompt §"yakos archive — required behavior"):
 #   1. Validate <project> exists in ~/agent-control/

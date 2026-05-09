@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cost.sh — aggregate dispatch-log telemetry into a per-runtime / per-agent
+# Purpose: cost.sh — aggregate dispatch-log telemetry into a per-runtime / per-agent
 # cost report.
 #
 # Reads ~/.yakos-state/dispatch-log.ndjson (rotated archives optional) and

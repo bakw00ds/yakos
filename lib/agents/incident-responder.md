@@ -5,6 +5,7 @@ domain: operations
 mode: [recover, mitigate]
 tools: [Read, Grep, Bash, SendMessage]
 model: opus
+version: 1
 references:
   - rule:git-hygiene
   - rule:pr-conventions

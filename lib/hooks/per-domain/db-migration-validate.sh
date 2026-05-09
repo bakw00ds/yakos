@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# db-migration-validate.sh — per-domain validator for DB migrations.
+# Purpose: db-migration-validate.sh — per-domain validator for DB migrations.
 #
 # v0.1 checks naming conventions only (project-portable). Real schema
 # validation (parse SQL, run against staging DB) belongs in CI; this

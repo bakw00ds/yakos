@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# backend-validate.sh — per-domain validator for backend (Go) tasks.
+# Purpose: backend-validate.sh — per-domain validator for backend (Go) tasks.
 #
 # Invocation contract:
 #   backend-validate.sh [<project-relative-path>]

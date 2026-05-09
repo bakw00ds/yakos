@@ -81,6 +81,19 @@ jobs:
             echo "tests/run-hook-fixtures.sh not present or not executable; skipping"
           fi
 
+  e2e:
+    name: end-to-end smoke (every subcommand)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq + python3
+        run: sudo apt-get update -y && sudo apt-get install -y jq python3
+      - name: Run e2e
+        env:
+          ORIG_HOME: ${{ github.workspace }}
+        run: |
+          ./tests/run-e2e.sh
+
   install-flow:
     name: install / init / doctor / uninstall (smoke)
     runs-on: ubuntu-latest

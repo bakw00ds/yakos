@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# doctor.sh — verify YakOS install + environment health.
+# Purpose: doctor.sh — verify YakOS install + environment health.
 #
 # Exits 0 if everything looks good or only WARN findings; exits 1 if any
 # ERROR-severity finding is reported.

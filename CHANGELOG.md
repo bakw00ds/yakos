@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0.0] — 2026-05-09
+
+### Added — migrate, plugin, e2e + strict, teach, MCP-as-agent, UPGRADING.md
+
+Closes the v0.8 follow-up requests on 2026-05-09: schema migrations,
+plugin model for community runtime adapters, end-to-end smoke,
+validate strict mode, agent versioning, lessons-learned mechanism,
+MCP-as-agent design, reverse-dispatch documentation, and the
+authoritative upgrade/uninstall guide.
+
+**`UPGRADING.md`** — the upgrade authority. Covers any-version →
+current path (`git pull` + `yakos update` + per-project `doctor
+--fix` + `migrate`), what survives an upgrade vs. needs manual
+migration, schema migration table, full uninstall + nuclear wipe,
+rollback procedure, when to re-init.
+
+**`yakos migrate <project>`** (cli/lib/migrate.sh):
+- Walks the `.yakos.yml` schema ladder in version order.
+- Backs up to `.yakos-bak-<iso>` before any edit.
+- Idempotent (re-run on current is a no-op).
+- `--dry-run`, `--from`, `--to` flags.
+- Migration table: `(none) → 0.7 → 0.8 → 0.9` (current).
+
+**`yakos plugin` model** (cli/lib/plugin.sh + docs/plugin-spec.md):
+- `~/.yakos/plugins/<id>/runtime.sh` — community runtime adapters
+  loaded by runtime-resolve.sh after built-ins.
+- `yakos plugin install <git-url-or-local-path> [--id] [--force]`
+  — clones + validates (8 required functions present in runtime.sh)
+  + rolls back on failure.
+- `yakos plugin list` — name + VERSION + broken-plugin detection.
+- `yakos plugin remove <id>`.
+- Built-in runtimes (claude/codex/gemini) protected from shadowing.
+- docs/plugin-spec.md walks the contract + capability tags +
+  telemetry contract + a complete minimal example.
+
+**Versioned framework agents:**
+- `version: <int>` field added to all 15 framework agent
+  frontmatters (lead-template, planner, code-reviewer,
+  security-reviewer, test-runner, troubleshooter, doc-writer,
+  maintainer, architect, incident-responder, release-manager,
+  backend, frontend, mobile, database — all stamped at version 1).
+- `extends-version: <int>` is the new project-side companion.
+- `yakos agents lint` warns when the framework parent has bumped
+  past the project's recorded extends-version, with a suggestion
+  to run `yakos agent diff <name>`.
+
+**`tests/run-e2e.sh`** + CI integration:
+- 31 assertions exercising every yakos subcommand against a
+  throwaway $HOME / project: install, doctor, init, agent new,
+  agents lint, agent diff, start (dry-run + print-agents), auth
+  status, doctor --probe-runtime + --fix, memory list, cost,
+  session list + export, migrate (initial seed + idempotent),
+  plugin list, validate (default + --strict), uninstall (verifies
+  symlinks removed; verifies ~/.claude/projects untouched).
+- New CI job `e2e` runs alongside install-flow.
+
+**`yakos validate --strict`:**
+- Promotes warnings to errors. Used by the framework's own CI
+  to hold the line on style violations.
+- All hooks under `lib/hooks/` now have `Purpose:` headers (was
+  the bulk of pre-existing warnings).
+
+**`yakos teach <agent> <lesson-file>`** (cli/lib/teach.sh):
+- Appends a dated bullet to a project agent's `## Lessons learned`
+  section so the operator can evolve agent discipline without
+  forking the framework template.
+- Creates the section if absent; `--section` overrides the heading.
+- Backs up the agent file before editing.
+- `--dry-run` previews.
+
+**`mcp-as-agent` skill** (lib/skills/mcp-as-agent/SKILL.md):
+- Design + worked example for wrapping an MCP server in an agent
+  shell. Lets the operator dispatch tool-side work via the same
+  `yakos dispatch <name>` interface as LLM specialists.
+- Cost contract: ~50–200 routing tokens + the MCP's own work, vs.
+  $0.10–$0.50 for a full specialist.
+
+**Reverse-dispatch documentation** (COOKBOOK Pattern 11):
+- A codex specialist can call back into claude (or any other
+  runtime) via `yakos dispatch <agent>` from its Bash tool.
+- Audit trail captures the full chain in dispatch-log.
+
+**Header cleanup pass:**
+- All `cli/lib/*.sh` and `lib/hooks/**/*.sh` now carry a
+  `# Purpose:` header line per STYLE.md §2.
+- This closes the `validate --strict` warning chain on framework
+  internals; only `lib/skills/gather-feedback/SKILL.md` (300
+  lines, over the 180 budget) is grandfathered.
+
 ## [0.8.0.0] — 2026-05-09
 
 ### Added — schema-versioned config, rate limits, agent diff/test, multi-project cost, three new skills

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uninstall.sh — remove YakOS-managed state from $HOME/.claude.
+# Purpose: uninstall.sh — remove YakOS-managed state from $HOME/.claude.
 #
 # Behavior contract (from the build prompt):
 #   1. Remove every symlink under ~/.claude/{agents,skills,rules,playbooks}/

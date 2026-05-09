@@ -185,7 +185,7 @@ case "$cmd" in
     -v | --version)
         echo "yakos $YAKOS_VERSION"
         ;;
-    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session)
+    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach)
         script="$YAKOS_LIB/${cmd}.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# validate.sh — schema + reference validation.
+# Purpose: validate.sh — schema + reference validation.
 #
 # Three modes:
 #   yakos validate                framework lib/
@@ -23,6 +23,7 @@ set -eu
 . "$YAKOS_LIB/compat.sh"
 
 ALL=0
+STRICT=0
 TARGETS=()
 for arg in "$@"; do
     case "$arg" in
@@ -47,6 +48,7 @@ EOF
             exit 0
             ;;
         --all) ALL=1 ;;
+        --strict) STRICT=1 ;;
         --*) ct_die "validate: unknown flag '$arg'" ;;
         *) TARGETS+=("$arg") ;;
     esac
@@ -56,7 +58,15 @@ errors=0
 warnings=0
 
 err()  { printf '  [err]  %s\n' "$*"; errors=$((errors + 1)); }
-warn() { printf '  [warn] %s\n' "$*"; warnings=$((warnings + 1)); }
+warn() {
+    if [ "$STRICT" = "1" ]; then
+        printf '  [err]  %s (strict mode)\n' "$*"
+        errors=$((errors + 1))
+    else
+        printf '  [warn] %s\n' "$*"
+        warnings=$((warnings + 1))
+    fi
+}
 ok()   { printf '  [ok]   %s\n' "$*"; }
 info() { printf '  [info] %s\n' "$*"; }
 
@@ -354,7 +364,7 @@ check_dark_code() {
             hook-input.sh|hook-output.sh|paths.sh|compat.sh|agents-compose.sh|runtime-resolve.sh|hooks-install.sh|README.md) continue ;;
             # CLI subcommand scripts: dispatched via cli/yakos's `cmd.sh`
             # construction, not literal references. Treat as referenced.
-            agent.sh|cost.sh|memory.sh|session.sh|project-config.sh) continue ;;
+            agent.sh|cost.sh|memory.sh|session.sh|project-config.sh|migrate.sh|plugin.sh|teach.sh) continue ;;
         esac
         # Skip runtime adapters (sourced by runtime-resolve.sh, not dispatched directly)
         case "$f" in
