@@ -27,6 +27,11 @@ on:
         required: false
         type: string
         default: "."
+      yakos_repo:
+        description: "yakos repo to install from (owner/name). Override when calling from a fork."
+        required: false
+        type: string
+        default: "bakw00ds/yakos"
       yakos_ref:
         description: "yakos repo ref to install from"
         required: false
@@ -83,7 +88,7 @@ jobs:
           set -e
           sudo apt-get update -y && sudo apt-get install -y jq python3
           git clone --depth 1 --branch "${{ inputs.yakos_ref }}" \
-              https://github.com/bakw00ds/yakos.git /tmp/yakos
+              "https://github.com/${{ inputs.yakos_repo }}.git" /tmp/yakos
           /tmp/yakos/cli/yakos install
           echo "/tmp/yakos/cli" >> $GITHUB_PATH
 

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0.1] — 2026-05-09
+
+### Fixed — v0.9 wrap-up cleanup
+
+Closes the three follow-up concerns flagged at v0.9.0.0:
+
+- **session-recovery skill: Operating rules block.** The skill now
+  reads every `feedback_*.md` referenced from `MEMORY.md` and
+  surfaces the rules verbatim in an `Operating rules` block in the
+  recap output. Previously the index was scanned but the rules
+  weren't enforced — sessions reliably violated them on the first
+  task. (Diff was carried over from a prior session; landing now.)
+- **CI workflow parameterized for forks.** `yakos-dispatch.yml`
+  gains a `yakos_repo` input (default: `bakw00ds/yakos`). Forks /
+  community can override at the install step without copying the
+  workflow file. `docs/ci-integration.md` documents the fork-
+  friendly call pattern.
+- **Skill line budget bumped 180 → 350.** Procedural skills
+  (`gather-feedback`, `mcp-as-agent`, `agent-audit`,
+  `dispatch-as-project-agent`) legitimately exceed the agent budget
+  because they document multi-step recipes with worked examples.
+  Lower bound stays at 80. **`yakos validate --strict` is now
+  0 errors, 0 warnings.**
+
 ## [0.9.0.0] — 2026-05-09
 
 ### Added — migrate, plugin, e2e + strict, teach, MCP-as-agent, UPGRADING.md

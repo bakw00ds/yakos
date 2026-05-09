@@ -221,8 +221,13 @@ check_line_budgets() {
         [ -n "$f" ] || continue
         local n
         n="$(wc -l < "$f" | tr -d ' ')"
-        if [ "$n" -lt 80 ] || [ "$n" -gt 180 ]; then
-            warn "$f: skill is $n lines (budget 80-180)"
+        # v0.9.1: bumped upper bound from 180 → 350. Procedural skills
+        # (gather-feedback, mcp-as-agent, agent-audit, dispatch-as-
+        # project-agent) legitimately exceed the agent budget because
+        # they document multi-step recipes with worked examples.
+        # Lower bound stays at 80 (smaller = under-specified).
+        if [ "$n" -lt 80 ] || [ "$n" -gt 350 ]; then
+            warn "$f: skill is $n lines (budget 80-350)"
         fi
     done < <(find "$base/skills" -type f -name 'SKILL.md' 2>/dev/null)
 

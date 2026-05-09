@@ -37,7 +37,16 @@ Walks state in priority order:
    Phase 1.7's mailbox-mirror).
 7. **Read `~/.claude/projects/<encoded>/MEMORY.md`** index — the
    cross-session memory the lead has accumulated.
-8. **Read the `.session-started` timestamp** — how long has this
+8. **Read every `feedback_*.md` file** referenced from MEMORY.md.
+   The index alone is insufficient: feedback memories encode durable
+   operating rules (e.g. "always delegate coding work in parallel",
+   "write session checkpoints every milestone"), and a session that
+   only skims the index reliably violates them on the first task.
+   Surface each feedback rule explicitly in the recap output — one
+   line per rule, in an **Operating rules** block — not as a pointer
+   to the file, but as the rule itself, so the lead cannot proceed
+   without seeing it.
+9. **Read the `.session-started` timestamp** — how long has this
    session been running? Above 4 hours, suggest `yakos team restart`.
 
 With `--full`, also surveys:
@@ -71,7 +80,16 @@ Session recovered.
   Messages:   <n in current session>
   Open PRs:   <n> (with --full)
   Recent hooks: <one-line summary of last few outcomes>
+
+Operating rules (from feedback memories — apply on every task this session):
+  • <rule 1, quoted from feedback_*.md>
+  • <rule 2, quoted from feedback_*.md>
+  • ...
 ```
+
+The **Operating rules** block is mandatory whenever any
+`feedback_*.md` is referenced from MEMORY.md. Empty block = bug,
+not an empty list — go re-read step 8.
 
 After this, the agent has enough to either resume or escalate.
 

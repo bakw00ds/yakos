@@ -135,6 +135,25 @@ Pipe job outputs into a billing dashboard or, simpler, leave the
 default `## yakOS dispatch — <agent>` block in the run summary —
 GitHub renders it inline on the run page.
 
+## Forks and alternative yakOS sources
+
+The `uses:` line of a caller workflow points at a concrete repo.
+The default upstream is `bakw00ds/yakos@main`. To call into a fork
+(or a pinned commit), change the `uses:` line and pass `yakos_repo`:
+
+```yaml
+uses: <your-org>/yakos/.github/workflows/yakos-dispatch.yml@<sha>
+with:
+  yakos_repo: <your-org>/yakos       # used by the install step
+  yakos_ref: <sha>                   # checkout ref for install
+  agent: ...
+```
+
+The `yakos_repo` input controls where the workflow's install step
+clones from at runtime; the `uses:` line controls which workflow
+file actually runs. They're independent — typically you point both
+at the same fork.
+
 ## Caveats
 
 - **Auth.** Each runtime CLI uses its own auth (claude:
