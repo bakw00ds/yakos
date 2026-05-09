@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0.1] — 2026-05-09
+
+### Added — `docs/overview.md` + refreshed README Status
+
+Authoritative "what is yakOS" document. Covers: how the launch
+path works (operator → cli/yakos → start.sh → runtime-resolve.sh
+→ adapter → composed agents → exec); architecture by layer
+(framework repo / user-level state / per-project state /
+per-project config / runtime adapters); full 33-agent inventory
+grouped by role family (orchestration, code quality, stack
+specialists, operations, API+data, security, AI/LLM, design+UX+
+i18n); full 44-skill inventory grouped by cadence; 5
+always-loaded rules + capability matrix for the 3 built-in
+runtime adapters; ~20 CLI subcommands grouped by lifecycle /
+sessions / agents / auth / memory / cost / plugins / quality;
+audit-trail layout; pointers to companion docs.
+
+README "Status" section refreshed from the v0.3 snapshot to the
+v0.11 reality: 33 agents (was 15), 44 skills (was 16), 5
+always-loaded rules (was 4), 3 runtime adapters + plugin model
+(was claude-only). Points at `docs/overview.md` for depth
+instead of repeating the inventory in the README.
+
 ## [0.11.0.0] — 2026-05-09
 
 ### Added — design / UX / i18n: 5 new agents + 7 new skills

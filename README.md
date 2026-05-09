@@ -17,47 +17,71 @@ gets both.
 
 ## Status
 
-**v0.3.0** — session-launch UX, runtime-bound project agents. Ships:
+**v0.11.0.0** — multi-runtime, design-pipeline complete,
+`yakos validate --strict`: 0 errors / 0 warnings.
 
-- **CLI**: install / uninstall / doctor (with `--probe-runtime`) / init
-  (with `--with-gate`) / **start** (NEW) / validate / archive / status /
-  team / update / version-bump / git-hooks. Bare `yakos` autodetects
-  the current project from `cwd`.
-- **`yakos start <name>`** — single-command session launcher. Composes
-  `--agents` JSON from framework + project agents, exec's `claude
-  --add-dir <repo> --permission-mode bypassPermissions --agents <json>`.
-  Auto-detects `<project>/.mcp.json` for `--mcp-config`. Pass-throughs
-  for `--continue` / `--resume` / `--fork-session` / `--ide` / `--bare` /
-  `--strict-mcp` / `--model`. Audit trail at
-  `~/.yakos-state/launch-log.ndjson`.
-- **8 reference Claude Code hooks** under `lib/hooks/` (path-allowlist,
-  secret-scan, mailbox-mirror, path-log, team-lifecycle, session-end-check
-  with team-inbox snapshot, task-dependency-gate, task-complete-dispatch).
-  5 per-domain validators (backend / frontend / mobile / db / changelog).
-- **1 git hook**: pre-push version gate (`lib/hooks/git/`) with
-  classification-aware enforcement and NDJSON audit trail at
+For a guided overview of what yakOS is, how it works, the
+architecture, and the full agent + skill inventory, read
+[**docs/overview.md**](docs/overview.md). The bullet list below
+is the at-a-glance summary; the overview is the depth.
+
+- **CLI**: ~20 subcommands — `install`, `update`, `uninstall`,
+  `doctor` (`--probe-runtime`, `--fix`), `init` (`--with-gate`),
+  `migrate`, `start` (`--runtime`, `--safe`, `--dry-run`,
+  `--continue`, `--resume`, `--bare`, `--ide`), `dispatch`
+  (cross-runtime), `auth`, `memory`, `cost`, `agent`/`agents`,
+  `plugin`, `hooks`, `session`, `validate` (`--strict`),
+  `version-bump`, `git-hooks`, `archive`, `status`, `team`, `teach`.
+  Bare `yakos` autodetects the current project from cwd.
+- **`yakos start <name>`** — single-command session launcher.
+  Materializes agents in the runtime's native format
+  (claude: `--agents` JSON injection; codex: TOML files;
+  gemini: markdown frontmatter), exec's the chosen runtime CLI
+  with the right flags. Audit trail at
+  `~/.yakos-state/launch-log.ndjson`. Banner reminds the operator
+  of `rule:lead-dispatch-discipline` at every launch.
+- **3 runtime adapters** — claude, codex, gemini — plus a plugin
+  model for community runtimes
+  (see [docs/plugin-spec.md](docs/plugin-spec.md)).
+- **33 framework agents** spanning orchestration (lead-template,
+  planner, architect), code quality (code-reviewer,
+  security-reviewer, test-runner, troubleshooter, doc-writer,
+  maintainer), stack specialists (backend, frontend, mobile,
+  database), operations (release-manager, incident-responder,
+  sre, devops-engineer, performance-engineer), API + data
+  (api-designer, data-engineer), security (supply-chain-auditor),
+  AI/LLM (prompt-engineer, eval-engineer, ai-safety-reviewer,
+  red-team, rag-architect, ai-finops), and design + UX + i18n
+  (app-designer, ux-researcher, design-system-curator,
+  accessibility-reviewer, content-strategist, i18n-specialist).
+- **44 skills** for cadence-driven work — release management, agent
+  audit, eval gating, prompt injection testing, postmortem
+  authoring, ADR scaffolding, license/CVE/SBOM auditing, a11y
+  scanning, perf budget enforcement, and more. Full inventory
+  in [docs/overview.md](docs/overview.md).
+- **5 always-loaded rules** — `lead-dispatch-discipline`
+  (lead orchestrates / specialists do; parallel by default),
+  `git-hygiene`, `commit-format`, `pr-conventions`, plus the
+  path-scoped `secret-handling`.
+- **8 reference Claude Code hooks** under `lib/hooks/` plus 5
+  per-domain validators. Hook conversion to codex/gemini config
+  via `yakos hooks install`.
+- **1 git hook** — pre-push version gate with classification-aware
+  enforcement and NDJSON audit trail at
   `~/.yakos-state/gate-log.ndjson`.
-- **15 generic agents** under the 80–140 line budget. Cross-cutting
-  roles (lead-template, planner, code-reviewer, security-reviewer,
-  test-runner, troubleshooter, doc-writer, maintainer, **architect**,
-  **incident-responder**, **release-manager**) + stack-specialist
-  templates with `extends:` deployment (backend, frontend, mobile,
-  database).
-- **16 skills** under `lib/skills/` including: contract-handoff,
-  dispatch-as-project-agent (still useful for ad-hoc dispatch even
-  with `--agents` injection in place), hashed-edit (OMA-inspired
-  stale-line catch), iterate-until (formal "loop until human-checkable
-  verifier passes"), version-bump (4-part semver with `[Unreleased]`
-  promote-on-bump), release-audit/ scaffolding.
-- **Posture made explicit**: PHILOSOPHY.md "Human-in-the-loop by
-  design" section. yakOS optimizes for production-touching work in
-  audit-sensitive domains, not autonomous-first prototyping.
-- **Runtime findings**: project-level `.claude/agents/*.md` files are
-  STILL not natively runtime-discoverable as `subagent_type` in claude
-  2.1.136 (`incident:v0.2.0`). v0.3 closes this for normal operation
-  via `yakos start`'s `--agents` JSON injection. TaskCreate / TaskList /
-  TaskUpdate also not exposed in current Claude Code build
-  (`incident:v0.2.1-task-tools-not-exposed`).
+- **Lead is restricted by tool, not just convention**:
+  `lead-template.md` does not include `Edit` (v0.5+). Code edits
+  go through dispatched specialists. The four-line dispatch
+  rule loads in every session via `rule:lead-dispatch-discipline`.
+- **Per-runtime real telemetry** — claude (via stream-json),
+  codex (`exec --json`), gemini (stream-json) emit token usage
+  + cost into `dispatch-log.ndjson`. `yakos cost --by agent`
+  rolls up.
+- **Portable cross-runtime memory** — single source of truth at
+  `~/.yakos-state/memory/<project>/`; per-runtime materialization
+  via `yakos memory sync <runtime>`.
+- **Posture**: audit-trail-first, human-in-the-loop by design.
+  See [PHILOSOPHY.md](PHILOSOPHY.md).
 
 See [CHANGELOG.md](CHANGELOG.md) for what landed in each release.
 
