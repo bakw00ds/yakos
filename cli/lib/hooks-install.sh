@@ -67,6 +67,11 @@ install_codex_hooks() {
         cp "$target" "$target.yakos-bak-$(ct_iso_utc)"
     fi
 
+    # v0.8: also translate the project's path-allowlist.json data into
+    # codex's permissions.<name> table where possible. The hook script
+    # remains the runtime-time gate; permissions adds defense in depth.
+    install_codex_permissions "$project"
+
     local entries='[]'
     while IFS='|' read -r hook_name _ codex_evt _ a b c; do
         [ -n "$hook_name" ] || continue
@@ -92,6 +97,42 @@ install_codex_hooks() {
     ')"
     printf '%s\n' "$final" > "$target"
     ct_log "wrote codex hooks config: $target ($(printf '%s' "$entries" | jq 'length') entries)"
+}
+
+install_codex_permissions() {
+    local project="$1"
+    local src="$project/.claude/path-allowlist.json"
+    local cfg="$project/.codex/config.toml"
+    [ -f "$src" ] || return 0
+    [ -f "$cfg" ] || printf '# yakOS managed: codex configuration\n' > "$cfg"
+
+    # Extract the allow + deny lists from yakOS's claude-shaped JSON.
+    # Schema (yakos): {"allow": ["pattern", ...], "deny": [...]}
+    local allow deny
+    allow="$(jq -r '.allow // [] | .[]' "$src" 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+    deny="$(jq -r '.deny // [] | .[]' "$src" 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+
+    # Strip any prior yakos-managed permissions block (idempotent re-run).
+    awk '
+        /^# yakos-permissions-start$/ { skip = 1; next }
+        /^# yakos-permissions-end$/   { skip = 0; next }
+        !skip { print }
+    ' "$cfg" > "${cfg}.t" && mv "${cfg}.t" "$cfg"
+
+    {
+        printf '\n# yakos-permissions-start\n'
+        printf '[permissions.yakos-paths]\n'
+        if [ -n "$allow" ]; then
+            printf 'filesystem.allow_glob = [%s]\n' \
+                "$(printf '%s\n' "$allow" | tr ',' '\n' | awk 'NF { printf "\"%s\",", $0 }' | sed 's/,$//')"
+        fi
+        if [ -n "$deny" ]; then
+            printf 'filesystem.deny_glob = [%s]\n' \
+                "$(printf '%s\n' "$deny" | tr ',' '\n' | awk 'NF { printf "\"%s\",", $0 }' | sed 's/,$//')"
+        fi
+        printf '# yakos-permissions-end\n'
+    } >> "$cfg"
+    ct_log "translated path-allowlist.json into $cfg [permissions.yakos-paths]"
 }
 
 install_gemini_hooks() {

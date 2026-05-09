@@ -8,6 +8,7 @@
 #
 # Schema (all fields optional):
 #
+#   yakos: 0.8                         # schema version — used by future migrations
 #   default-runtime: claude            # or codex | gemini
 #   default-fallback: [claude]         # falls back if default unavailable
 #   default-permission: bypass         # or safe
@@ -29,11 +30,34 @@ set -eu
 
 : "${YAKOS_LIB:?project-config.sh: YAKOS_LIB must be set}"
 
+# Schema versions yakOS knows how to read. Bumping this list is the
+# public marker that a future yakOS release may need a migration.
+YK_PCFG_SCHEMA_KNOWN="0.7 0.8"
+YK_PCFG_SCHEMA_CURRENT="0.8"
+
 # yk_pcfg_path <project>
 #   Stdout the canonical path of the project's .yakos.yml (whether
 #   it exists or not).
 yk_pcfg_path() {
     printf '%s\n' "$1/.yakos.yml"
+}
+
+# yk_pcfg_schema_check <project>
+#   Read the `yakos:` schema field and verify it's a known version.
+#   Empty (file absent or no field) returns 0 — backward compatibility
+#   with pre-v0.8 projects. Unknown version returns 1 + warning to stderr.
+yk_pcfg_schema_check() {
+    local project="$1"
+    local v
+    v="$(yk_pcfg_get "$project" "yakos")"
+    [ -n "$v" ] || return 0
+    case " $YK_PCFG_SCHEMA_KNOWN " in
+        *" $v "*) return 0 ;;
+        *)
+            ct_log "WARN: $project/.yakos.yml declares yakos: $v but yakOS knows $YK_PCFG_SCHEMA_KNOWN"
+            return 1
+            ;;
+    esac
 }
 
 # yk_pcfg_get <project> <key>

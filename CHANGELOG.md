@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0.0] — 2026-05-09
+
+### Added — schema-versioned config, rate limits, agent diff/test, multi-project cost, three new skills
+
+Closes the v0.7 follow-up requests on 2026-05-08: schema-versioned
+.yakos.yml, per-agent rate limits enforced from telemetry, agent
+inheritance auditing, fixture-based agent smoke tests, multi-project
+cost rollups, codex permissions translation, three new audit/recap
+skills.
+
+**Schema-versioned `.yakos.yml`:**
+- `yakos: 0.8` schema field. Reader (project-config.sh) emits a
+  warning on unknown versions; backward-compatible with pre-v0.8
+  projects (missing field treated as "old, no migration needed").
+
+**Per-agent rate limits:**
+- New agent frontmatter fields:
+  - `max-cost-per-task: 0.50` — flagged as `budget_violation` event
+    in dispatch-log when real telemetry's `total_cost_usd` exceeds.
+    Currently observation-only (post-call); pre-flight estimates
+    are v0.9+.
+  - `max-duration-s: 300` — applied as the dispatch timeout if
+    smaller than the global `--timeout`.
+
+**`yakos agent diff <name>`:**
+- Shows a `diff -u` between an agent's `extends:` parent body and
+  the project version's body — so the operator can audit what the
+  override actually changes vs. inherits. Falls back to "no
+  extends:" message if the agent doesn't inherit.
+
+**`yakos agent test <name> --fixture <dir>`:**
+- Smoke-tests an agent against a fixture: dispatches with
+  `<dir>/prompt.md` as the task; compares output against
+  `<dir>/expected.md` (or `expected-contains.txt`,
+  `expected-min-bytes`). Suitable for CI gates: green when the
+  agent's response contains the asserted strings.
+
+**`yakos cost --by project` / `--all-projects`:**
+- New `project` aggregation axis. `--all-projects` (or `--by project`)
+  rolls up every project that has appeared in the dispatch-log.
+
+**Codex permissions translation** (`yakos hooks install codex`):
+- Reads `<project>/.claude/path-allowlist.json` and writes a
+  `[permissions.yakos-paths]` block in `<project>/.codex/config.toml`
+  with `filesystem.allow_glob` / `deny_glob`. Defense-in-depth on
+  top of the existing PreToolUse hook translation.
+
+**Three new framework skills:**
+- `lib/skills/session-summary/` — end-of-session markdown report
+  (dispatched agents, total cost, key decisions from decisions.md,
+  duration). Optional save to `work/current/SESSION-SUMMARY.md`.
+- `lib/skills/agent-audit/` — scans dispatch-log for misuse
+  patterns: lead-did-specialist-work (lead's Bash touched code),
+  wrong-runtime drift (declared `runtime:` vs. actual majority),
+  budget violations, repeated failures, unused agents.
+- `lib/skills/runtime-pick/` — given a task description,
+  recommends `<agent>` on `<runtime>` with one-line reasoning,
+  plus 1-2 alternatives. Reduces friction in mixed-runtime
+  projects.
+
 ## [0.7.0.0] — 2026-05-08
 
 ### Added — declarative config, full real telemetry, session export, CI workflow, doctor --fix

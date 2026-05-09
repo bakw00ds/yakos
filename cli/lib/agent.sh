@@ -41,6 +41,21 @@ Subcommands:
                     --tools "<list>"  Comma-separated tool names.
                     --force           Overwrite if exists.
 
+  diff <name> [<project>]
+                  Show the diff between a project agent's body and
+                  its `extends:` parent's body, so the operator can
+                  audit what their override actually changes. Falls
+                  back to "no extends:" message if the agent doesn't
+                  inherit. Uses the system 'diff -u' for output.
+
+  test <name> --fixture <dir> [--project <path>]
+                  Smoke-test the agent: dispatch with the prompt at
+                  <dir>/prompt.md, compare result against
+                  <dir>/expected.md (substring match by default).
+                  Optional <dir>/expected-min-bytes / <dir>/expected-
+                  max-bytes / <dir>/expected-contains.txt for richer
+                  assertions. Suitable for CI gates.
+
   lint [<project>]    Audit every agent file:
                       - frontmatter has required fields (id, role, domain)
                       - runtime: (if set) is in known list
@@ -87,7 +102,7 @@ SUB="${1:-}"
 
 case "$SUB" in
     "" | -h | --help | help) usage; exit 0 ;;
-    new|lint) ;;
+    new|lint|diff|test) ;;
     *) ct_die "agent: unknown subcommand '$SUB' (try --help)" ;;
 esac
 
@@ -298,4 +313,152 @@ if [ "$SUB" = "lint" ]; then
     echo
     echo "lint summary: $total agent(s), $errors error(s), $warnings warning(s)"
     [ "$errors" -eq 0 ] && exit 0 || exit 1
+fi
+
+# ---- subcommand: diff -----------------------------------------------------
+
+if [ "$SUB" = "diff" ]; then
+    NAME=""
+    PROJECT=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -h|--help) usage; exit 0 ;;
+            --project) shift; PROJECT="$1" ;;
+            --project=*) PROJECT="${1#--project=}" ;;
+            -*) ct_die "agent diff: unknown flag '$1'" ;;
+            *)
+                if [ -z "$NAME" ]; then NAME="$1"
+                else ct_die "agent diff: too many positional args"
+                fi
+                ;;
+        esac
+        shift
+    done
+    [ -n "$NAME" ] || ct_die "agent diff: <name> required"
+    [ -n "$PROJECT" ] || PROJECT="$(infer_project || true)"
+    [ -n "$PROJECT" ] || ct_die "agent diff: --project required"
+
+    proj_file="$PROJECT/.claude/agents/${NAME}.md"
+    [ -f "$proj_file" ] || ct_die "agent diff: $proj_file not found"
+
+    fm="$(yk_agents_extract_frontmatter "$proj_file")"
+    parent="$(yk_agents_fm_get "$fm" "extends")"
+    if [ -z "$parent" ]; then
+        cat <<EOF
+agent diff: $NAME does not extend a framework template (no 'extends:' field).
+The project agent is the source of truth for its discipline.
+EOF
+        exit 0
+    fi
+
+    parent_file="$YAKOS_ROOT/lib/agents/${parent}.md"
+    if [ ! -f "$parent_file" ]; then
+        parent_file="$PROJECT/.claude/agents/${parent}.md"
+    fi
+    [ -f "$parent_file" ] || ct_die "agent diff: parent '${parent}' not found"
+
+    parent_body_tmp="$(mktemp -t yakos-agent-diff-parent.XXXXXX)"
+    proj_body_tmp="$(mktemp -t yakos-agent-diff-proj.XXXXXX)"
+    yk_agents_extract_body "$parent_file" > "$parent_body_tmp"
+    yk_agents_extract_body "$proj_file" > "$proj_body_tmp"
+
+    echo "agent diff: $NAME (extends: $parent)"
+    echo "--- $parent_file"
+    echo "+++ $proj_file"
+    diff -u "$parent_body_tmp" "$proj_body_tmp" || true
+
+    rm -f "$parent_body_tmp" "$proj_body_tmp" 2>/dev/null
+    exit 0
+fi
+
+# ---- subcommand: test -----------------------------------------------------
+
+if [ "$SUB" = "test" ]; then
+    NAME=""
+    FIXTURE=""
+    PROJECT=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -h|--help) usage; exit 0 ;;
+            --fixture) shift; FIXTURE="$1" ;;
+            --fixture=*) FIXTURE="${1#--fixture=}" ;;
+            --project) shift; PROJECT="$1" ;;
+            --project=*) PROJECT="${1#--project=}" ;;
+            -*) ct_die "agent test: unknown flag '$1'" ;;
+            *)
+                if [ -z "$NAME" ]; then NAME="$1"
+                else ct_die "agent test: too many positional args"
+                fi
+                ;;
+        esac
+        shift
+    done
+    [ -n "$NAME" ] || ct_die "agent test: <name> required"
+    [ -n "$FIXTURE" ] || ct_die "agent test: --fixture <dir> required"
+    [ -d "$FIXTURE" ] || ct_die "agent test: fixture dir not found: $FIXTURE"
+    [ -f "$FIXTURE/prompt.md" ] || ct_die "agent test: $FIXTURE/prompt.md required"
+
+    [ -n "$PROJECT" ] || PROJECT="$(infer_project || true)"
+    [ -n "$PROJECT" ] || ct_die "agent test: --project required"
+
+    prompt="$(cat "$FIXTURE/prompt.md")"
+    out_tmp="$(mktemp -t yakos-agent-test-out.XXXXXX)"
+
+    echo "agent test: $NAME with fixture $FIXTURE"
+    set +e
+    bash "$YAKOS_LIB/dispatch.sh" "$NAME" "$prompt" --project "$PROJECT" > "$out_tmp" 2>&1
+    rc=$?
+    set -e
+
+    out_size="$(wc -c < "$out_tmp" | tr -d ' ')"
+    failures=0
+
+    # Substring assertions (newline-separated patterns).
+    if [ -f "$FIXTURE/expected-contains.txt" ]; then
+        while IFS= read -r needle; do
+            [ -n "$needle" ] || continue
+            if grep -qF "$needle" "$out_tmp"; then
+                printf '  [ok]   contains: %s\n' "$needle"
+            else
+                printf '  [FAIL] missing: %s\n' "$needle"
+                failures=$((failures + 1))
+            fi
+        done < "$FIXTURE/expected-contains.txt"
+    elif [ -f "$FIXTURE/expected.md" ]; then
+        # Coarse substring match: any non-blank line of expected.md must
+        # appear in the output.
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            case "$line" in '#'*|'<!--'*) continue ;; esac
+            if grep -qF "$line" "$out_tmp"; then
+                printf '  [ok]   matches expected: %.60s\n' "$line"
+            else
+                printf '  [FAIL] missing expected: %.60s\n' "$line"
+                failures=$((failures + 1))
+            fi
+        done < "$FIXTURE/expected.md"
+    fi
+
+    if [ -f "$FIXTURE/expected-min-bytes" ]; then
+        min="$(cat "$FIXTURE/expected-min-bytes")"
+        if [ "$out_size" -ge "$min" ]; then
+            printf '  [ok]   output size %d bytes >= min %d\n' "$out_size" "$min"
+        else
+            printf '  [FAIL] output too short: %d bytes < min %d\n' "$out_size" "$min"
+            failures=$((failures + 1))
+        fi
+    fi
+
+    if [ "$rc" != "0" ]; then
+        printf '  [FAIL] dispatch exit code %d\n' "$rc"
+        failures=$((failures + 1))
+    else
+        printf '  [ok]   dispatch exit code 0\n'
+    fi
+
+    rm -f "$out_tmp" 2>/dev/null
+
+    echo
+    echo "agent test summary: $failures failure(s)"
+    [ "$failures" -eq 0 ] && exit 0 || exit 1
 fi

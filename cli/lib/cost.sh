@@ -15,9 +15,14 @@ set -eu
 
 usage() {
     cat <<'EOF'
-yakos cost [--since <ISO-date>] [--by agent|runtime|day] [--json]
+yakos cost [--since <ISO>] [--by agent|runtime|day|project]
+            [--all-projects] [--json]
 
 Aggregate dispatch-log.ndjson telemetry. Defaults to all-time, by-runtime.
+
+By default, --by project / --all-projects rolls up across every project
+that has appeared in the dispatch-log. Useful for multi-project burn-rate
+review.
 
 Flags:
   --since <ISO-date>   Filter events with ts >= <ISO-date>. Examples:
@@ -45,6 +50,7 @@ EOF
 SINCE=""
 BY="runtime"
 EMIT_JSON=0
+ALL_PROJECTS=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -54,6 +60,7 @@ while [ "$#" -gt 0 ]; do
         --by) shift; [ "$#" -gt 0 ] || ct_die "cost: --by requires an axis"; BY="$1" ;;
         --by=*) BY="${1#--by=}" ;;
         --json) EMIT_JSON=1 ;;
+        --all-projects) ALL_PROJECTS=1 ;;
         -*) ct_die "cost: unknown flag '$1'" ;;
         *) ct_die "cost: unexpected argument '$1'" ;;
     esac
@@ -61,9 +68,13 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$BY" in
-    agent|runtime|day) ;;
-    *) ct_die "cost: --by must be agent | runtime | day, got '$BY'" ;;
+    agent|runtime|day|project) ;;
+    *) ct_die "cost: --by must be agent | runtime | day | project, got '$BY'" ;;
 esac
+
+if [ "$BY" = "project" ]; then
+    ALL_PROJECTS=1
+fi
 
 LOG_DIR="$HOME/.yakos-state"
 PATTERN="$LOG_DIR/dispatch-log*.ndjson"
@@ -110,6 +121,7 @@ case "$BY" in
     agent)   key_expr='.agent' ;;
     runtime) key_expr='.runtime' ;;
     day)     key_expr='.ts | split("T")[0]' ;;
+    project) key_expr='.project // "(unknown)"' ;;
 esac
 
 # jq-side rollup. Note: input is NDJSON (one event per line); use -s to

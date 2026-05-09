@@ -167,6 +167,21 @@ FM="$(yk_agents_extract_frontmatter "$AGENT_FILE")"
 AGENT_RUNTIME="$(yk_agents_fm_get "$FM" "runtime")"
 AGENT_DOMAIN="$(yk_agents_fm_get "$FM" "domain")"
 AGENT_FALLBACK="$(yk_agents_fm_list "$FM" "runtime-fallback" || true)"
+AGENT_MAX_COST="$(yk_agents_fm_get "$FM" "max-cost-per-task" || true)"
+AGENT_MAX_DURATION="$(yk_agents_fm_get "$FM" "max-duration-s" || true)"
+
+# Apply max-duration-s as the dispatch timeout if set and < TIMEOUT.
+if [ -n "$AGENT_MAX_DURATION" ]; then
+    case "$AGENT_MAX_DURATION" in
+        *[!0-9]*) ct_log "WARN: agent max-duration-s '$AGENT_MAX_DURATION' is not numeric; ignoring" ;;
+        *)
+            if [ "$AGENT_MAX_DURATION" -lt "$TIMEOUT" ]; then
+                TIMEOUT="$AGENT_MAX_DURATION"
+                ct_log "dispatch: applying agent max-duration-s=$TIMEOUT"
+            fi
+            ;;
+    esac
+fi
 
 # Project config (.yakos.yml) extends the resolution chain (v0.7+):
 #   --runtime override
@@ -274,12 +289,34 @@ rm -f "$out_tmp" 2>/dev/null || true
 real_usage="null"
 if [ -s "$usage_tmp" ]; then
     real_usage="$(cat "$usage_tmp" 2>/dev/null || echo null)"
-    # Validate it parses; if not, drop to null so jq doesn't choke.
     if ! printf '%s' "$real_usage" | jq -e . >/dev/null 2>&1; then
         real_usage="null"
     fi
 fi
 rm -f "$usage_tmp" 2>/dev/null || true
+
+# Enforce max-cost-per-task. Only meaningful when the runtime returned
+# real telemetry with a total_cost_usd field (claude today). Logged as
+# a budget_violation event so the operator can audit; does not retry
+# the dispatch — the call already happened. Future v0.9+ may add
+# pre-flight cost estimates.
+if [ -n "$AGENT_MAX_COST" ] && [ "$real_usage" != "null" ]; then
+    actual_cost="$(printf '%s' "$real_usage" | jq -r '.total_cost_usd // empty')"
+    if [ -n "$actual_cost" ]; then
+        if awk -v a="$actual_cost" -v m="$AGENT_MAX_COST" 'BEGIN { exit !(a + 0 > m + 0) }'; then
+            ct_log "WARN: dispatch exceeded max-cost-per-task: \$$actual_cost > \$$AGENT_MAX_COST (agent=$AGENT_NAME)"
+            violation_event="$(jq -cn \
+                --arg t "$(ct_iso_now_z)" \
+                --arg agent "$AGENT_NAME" \
+                --arg runtime "$RUNTIME" \
+                --arg actual "$actual_cost" \
+                --arg max "$AGENT_MAX_COST" \
+                '{type:"budget_violation", ts:$t, agent:$agent, runtime:$runtime,
+                  actual_cost_usd:($actual|tonumber), max_cost_usd:($max|tonumber)}')"
+            printf '%s\n' "$violation_event" >> "$DISPATCH_LOG" 2>/dev/null || true
+        fi
+    fi
+fi
 
 ts_end="$(ct_iso_now_z)"
 event_end="$(jq -cn \
