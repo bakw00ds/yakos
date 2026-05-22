@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: cycle-counter.sh — count user prompts; emit retro signal at every 10th.
 #
 # Hook context: UserPromptSubmit. Telemetry hook (always exit 0).

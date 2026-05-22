@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # compat.sh — cross-platform helpers used by every yakos CLI subcommand.
 #
 # This file is meant to be SOURCED, not executed:

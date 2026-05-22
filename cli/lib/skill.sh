@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: skill.sh — manage skill candidates produced by the librarian.
 #
 # Subcommands:

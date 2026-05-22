@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # runtimes/agy.sh — Google Antigravity CLI (agy) adapter.
 #
 # Purpose: implement the runtime contract (runtimes/README.md) for `agy`.

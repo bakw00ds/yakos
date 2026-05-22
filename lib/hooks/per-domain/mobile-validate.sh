@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: mobile-validate.sh — per-domain validator for Flutter / mobile tasks.
 #
 # Runs `flutter analyze` and `flutter test` (timeout-wrapped per the

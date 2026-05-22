@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: context-threshold.sh — emit NOTE at 75%; auto-checkpoint at 90%.
 #
 # Hook context: UserPromptSubmit (cheap; runs before every prompt).

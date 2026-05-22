@@ -362,4 +362,11 @@ Tracked roadmap items, gated for clear reasons:
 
 ## License
 
-TBD.
+Apache License 2.0. See [LICENSE](LICENSE) for the full text.
+
+Copyright 2026 bakw00ds.
+
+Source files carry an `SPDX-License-Identifier: Apache-2.0` marker for
+machine-readable license detection. The Apache 2.0 patent grant (§3)
+and defensive-termination clause apply automatically to all
+contributions submitted under [§5](LICENSE).

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: plugin.sh — manage external runtime adapters.
 #
 # Plugins live at ~/.yakos/plugins/<id>/ and provide a runtime.sh that

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: retro.sh — manage 10-cycle retrospectives (Plan 3 M1 / Capability C).
 #
 # The cycle-counter hook (lib/hooks/cycle-counter.sh) increments a counter

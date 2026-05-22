@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: Apply an in-place line replacement to a file, anchored by a
 #   content hash. Refuses the edit if the hash of the current line at
 #   the target line number doesn't match — that mismatch means the

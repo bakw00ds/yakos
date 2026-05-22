@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # team-lifecycle.sh — PreToolUse on TeamCreate|Agent|TeamDelete.
 #
 # This is a TELEMETRY HOOK. It NEVER blocks. Always exits 0.

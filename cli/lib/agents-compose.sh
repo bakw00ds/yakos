@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # agents-compose.sh — compose --agents JSON for `claude --agents`.
 #
 # Purpose: produce a single JSON object suitable for `claude --agents`

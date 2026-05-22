@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """
 claude-sdk-dispatch.py — invoke Anthropic Claude Agent SDK for yakOS.
 

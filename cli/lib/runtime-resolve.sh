@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # runtime-resolve.sh — resolve a runtime id to the adapter that implements it.
 #
 # Purpose: keep `yakos start`, `yakos dispatch`, `yakos auth`, and

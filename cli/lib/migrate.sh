@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: migrate.sh — upgrade a project's .yakos.yml schema between versions.
 #
 # Each migration is identity unless the field set actually changed. The

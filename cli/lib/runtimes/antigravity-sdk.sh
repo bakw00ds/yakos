@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: runtimes/antigravity-sdk.sh — Google Antigravity SDK (Python) adapter.
 #
 # Headless-dispatch-only adapter alongside agy.sh. Uses the

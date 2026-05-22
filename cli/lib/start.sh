@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # start.sh — launch a Claude/codex/gemini session for a yakos-bootstrapped project.
 #
 # Purpose: end the manual `cd ~/agent-control/<name> && claude --add-dir ...`

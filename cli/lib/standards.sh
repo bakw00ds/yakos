@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: standards.sh — manage cross-project standards opt-ins (Plan 4 M4).
 #
 # Cross-project standards (Plan 4) commit a project to one or more

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # memory.sh — portable yakOS memory across runtimes.
 #
 # Purpose: store durable operator-private observations at

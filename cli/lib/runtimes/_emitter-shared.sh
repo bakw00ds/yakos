@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # _emitter-shared.sh — shared helper for runtime adapter agent emitters.
 #
 # Purpose: factor out the python3-via-tempfile pattern so codex.sh and

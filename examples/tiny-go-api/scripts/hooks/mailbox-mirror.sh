@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # mailbox-mirror.sh — PreToolUse hook on SendMessage.
 #
 # Mirrors every team-internal SendMessage call (peer DM, lead → teammate,

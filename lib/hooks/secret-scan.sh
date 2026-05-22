@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: secret-scan.sh — PreToolUse hook on Edit|Write|MultiEdit.
 #
 # Refuses tool calls whose written content matches well-known secret

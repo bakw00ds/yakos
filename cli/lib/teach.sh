@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: append a "Lessons learned" section to a project agent's body
 # so the operator can evolve framework agents without forking the source.
 #

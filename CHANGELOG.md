@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0.1] — 2026-05-22
+
+### Added — Apache License 2.0
+
+yakOS is now licensed under Apache License 2.0.
+
+- `LICENSE` at repo root containing the full Apache 2.0 text +
+  `Copyright 2026 bakw00ds` notice.
+- `README.md` — `## License` section updated from "TBD" to point at
+  the LICENSE file.
+- 93 tracked `.sh` and `.py` source files marked with
+  `# SPDX-License-Identifier: Apache-2.0` on line 2 (immediately
+  after the shebang). Markdown docs deliberately not marked —
+  convention is to put the license on the repository, not on each
+  doc page.
+
+Why Apache 2.0 vs MIT: explicit patent grant (§3) + defensive-
+termination clause matter in the agent-framework space, which has
+active patent activity around orchestration / dispatch patterns.
+The patent grant is self-executing — every contributor's
+contribution carries the grant by virtue of submitting under
+this license (§5). No CLA required at this stage; if outside
+contributors arrive, consider adding a DCO sign-off requirement.
+
 ## [0.25.0.0] — 2026-05-22
 
 ### Added — Plan 5 M2: antigravity-sdk runtime adapter (Google Antigravity SDK)

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # project-config.sh — read project-level yakOS config.
 #
 # Purpose: support a declarative <project>/.yakos.yml that overrides

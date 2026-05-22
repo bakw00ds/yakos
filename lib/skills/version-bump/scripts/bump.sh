@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: Bump four-part VERSION, prepend a CHANGELOG entry, and (optionally)
 #          commit the change with a standard "chore(version): bump to X.Y.Z.W"
 #          message.

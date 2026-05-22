@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # team.sh — team lifecycle subcommands.
 #
 # Purpose: archive a project's work/current/ and print relaunch

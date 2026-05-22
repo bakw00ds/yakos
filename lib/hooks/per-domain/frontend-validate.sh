@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: frontend-validate.sh — per-domain validator for web/frontend tasks.
 #
 # Runs lint + test if a package.json is present and scripts are defined.

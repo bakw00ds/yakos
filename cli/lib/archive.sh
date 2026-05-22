@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: archive.sh — roll work/current/ → work/archive/<tag>/ for a project.
 #
 # Behavior (build prompt §"yakos archive — required behavior"):

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: cost.sh — aggregate dispatch-log telemetry into a per-runtime / per-agent
 # cost report.
 #

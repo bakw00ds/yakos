@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: Capture full TaskCompleted stdin per call. Phase 0.5 probe.
 # Inputs:  Stdin JSON from the TaskCompleted hook event.
 # Outputs:

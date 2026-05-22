@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # run-hook-fixtures.sh — drive every hook against every relevant fixture.
 #
 # For each (hook, fixture, expected-outcome) tuple:

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: kanban.sh — manage <work>/current/kanban.md as a 3-column board.
 #
 # Subcommands:

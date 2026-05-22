@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # runtimes/claude.sh — Claude Code adapter.
 #
 # Purpose: implement the runtime contract (cli/lib/runtimes/README.md)

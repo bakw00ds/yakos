@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # dispatch.sh — one-shot cross-runtime agent dispatch.
 #
 # Purpose: spawn a yakOS agent on the runtime its frontmatter declares

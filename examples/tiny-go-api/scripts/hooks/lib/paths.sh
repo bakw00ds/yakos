@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # paths.sh — canonical path resolver for YakOS state files.
 #
 # Source-of-truth for where work/current/ lives. CLI subcommands AND hook

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: end-to-end smoke that exercises every yakOS subcommand
 # against a throwaway project, verifying the install → init → use →
 # uninstall cycle works without manual steps. Designed for CI.

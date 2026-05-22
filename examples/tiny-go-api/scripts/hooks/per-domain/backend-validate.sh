@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # backend-validate.sh — per-domain validator for backend (Go) tasks.
 #
 # Invocation contract:

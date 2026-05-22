@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # db-migration-validate.sh — per-domain validator for DB migrations.
 #
 # v0.1 checks naming conventions only (project-portable). Real schema

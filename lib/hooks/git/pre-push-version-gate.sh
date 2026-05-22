@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: Refuse `git push` if substantive code changed since the last
 #   version tag without a corresponding VERSION change in the push.
 #   Doc-only changes pass through.

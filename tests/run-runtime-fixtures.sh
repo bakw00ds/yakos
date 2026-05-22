@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: Smoke + golden tests for the v0.4 runtime adapter layer.
 # Inputs:  none
 # Outputs: stdout: per-test pass/fail; stderr: error context

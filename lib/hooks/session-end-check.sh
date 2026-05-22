@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: session-end-check.sh — SessionEnd hook (final state audit).
 #
 # This is a TELEMETRY HOOK. It NEVER blocks. SessionEnd hooks cannot block

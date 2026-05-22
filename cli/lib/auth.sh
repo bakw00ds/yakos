@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # auth.sh — wrapper for per-runtime auth flows.
 #
 # Purpose: give the operator a single command to log in to claude / codex /

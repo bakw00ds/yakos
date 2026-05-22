@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # path-log.sh — PreToolUse companion to path-allowlist.sh.
 #
 # Always logs, never blocks. Defense-in-depth: if path-allowlist.sh is

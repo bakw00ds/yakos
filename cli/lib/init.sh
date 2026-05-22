@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: init.sh — bootstrap a project for use with YakOS.
 #
 # Behavior (build prompt §"`yakos init` — required behavior"):

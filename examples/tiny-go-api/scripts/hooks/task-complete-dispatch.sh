@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # task-complete-dispatch.sh — TaskCompleted hook (REPORT-ONLY in v0.1).
 #
 # Status: REPORT-ONLY (build-prompt §"REPORT-only fallback rule").

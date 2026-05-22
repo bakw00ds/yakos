@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: install.sh — first-time install for YakOS.
 #
 # Behavior:

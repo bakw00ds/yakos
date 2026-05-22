@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: compact.sh — manual + threshold-configurable context compaction.
 #
 # Subcommands:

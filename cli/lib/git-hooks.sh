@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: Manage YakOS git hooks for the current project repo.
 #   Subcommands: install | uninstall | status.
 #   Installs the pre-push version gate into <repo>/.git/hooks/pre-push

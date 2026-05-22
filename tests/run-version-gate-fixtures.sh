@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: Drive the gate hook's classify_file() against documented fixtures.
 #   Each fixture under tests/fixtures/version/change-classification/ is a
 #   newline-separated list of paths; the filename encodes the expected

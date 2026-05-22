@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: runtimes/claude-sdk.sh — Anthropic Claude Agent SDK (Python) adapter.
 #
 # Headless-dispatch-only adapter alongside claude.sh. Uses the

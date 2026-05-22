@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: Read a file and tag every line with a content-hash anchor.
 #   Output format: <lineno>#<hash>|<content>
 #   The hash is a 4-char hex digest of the line content (cksum % 65536).

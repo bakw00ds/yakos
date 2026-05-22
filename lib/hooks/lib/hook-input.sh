@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: hook-input.sh — stdin JSON helpers shared by every YakOS hook script.
 #
 # Usage in a hook:

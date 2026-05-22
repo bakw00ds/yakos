@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """
 antigravity-sdk-dispatch.py — invoke Google Antigravity SDK for yakOS.
 

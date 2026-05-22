@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: Invoke a local Ollama model with a templated prompt; write
 #          response + sidecar metadata to work/current/artifacts/.
 # Inputs:

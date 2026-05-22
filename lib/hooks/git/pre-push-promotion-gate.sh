@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: pre-push-promotion-gate.sh — refuse pushes that violate env promotion order.
 #
 # This is an ADDITIONAL git pre-push hook composed alongside the existing

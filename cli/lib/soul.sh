@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: soul.sh — operator-personal soul files (Plan 3 M1 / Capability A).
 #
 # A soul is the operator's personal identity/preferences file. yakOS reads

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: status.sh — per-project dashboard.
 #
 # Reports session age (.session-started-history), scratchpad size,

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: hook-output.sh — structured NDJSON logging + bypass + block helpers.
 #
 # Severity tiers (from Phase 1.5 §12):

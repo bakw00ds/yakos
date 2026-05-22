@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # runtimes/codex.sh — OpenAI Codex CLI adapter.
 #
 # Purpose: implement the runtime contract (see runtimes/README.md) for

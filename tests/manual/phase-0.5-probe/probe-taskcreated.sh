@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: Capture full TaskCreated stdin per call. Phase 0.5 probe.
 #          Bonus visibility — TaskCreated may share the schema's spine
 #          with TaskCompleted; useful for confirming the JSON shape.

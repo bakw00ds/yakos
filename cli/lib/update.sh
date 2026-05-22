@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: update.sh — pull the YakOS repo and refresh symlinks.
 #
 # Behavior:

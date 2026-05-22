@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: uninstall.sh — remove YakOS-managed state from $HOME/.claude.
 #
 # Behavior contract (from the build prompt):

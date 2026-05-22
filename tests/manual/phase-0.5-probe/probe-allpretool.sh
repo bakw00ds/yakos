@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: Wildcard PreToolUse capture. Sanity check that we're not
 #          missing task-related events under unexpected names. Catches
 #          TaskUpdate, TaskCreate, TaskList, TaskDelete (if they exist

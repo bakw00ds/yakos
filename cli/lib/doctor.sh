@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: doctor.sh — verify YakOS install + environment health.
 #
 # Exits 0 if everything looks good or only WARN findings; exits 1 if any

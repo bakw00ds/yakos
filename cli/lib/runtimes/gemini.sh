@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Purpose: gemini.sh — DEPRECATION SHIM. Routes all --runtime gemini
 # invocations through agy.sh and emits a one-time deprecation NOTE.
 #

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # hooks-install.sh — install yakOS reference hooks into a runtime's
 # native hook configuration.
 #

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # check-tools.sh — bootstrap tool readiness check for release-audit
 #
 # Usage:
