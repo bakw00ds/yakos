@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0.0] — 2026-05-22
+
+### Added — UX + verification follow-ups (4 high-leverage + 4 nits)
+
+Closes the eight follow-ups identified during the post-public-launch
+review:
+
+**High-leverage UX:**
+
+- **NEW `cli/lib/quickstart.sh`** — single-command path from "fresh
+  clone" to "session started against the cwd". Detects three states
+  (yakOS not installed / cwd is unbootstrapped git repo / project
+  already bootstrapped) and runs only what's needed. Idempotent.
+  Wired into `cli/yakos` dispatcher; `yakos quickstart` is now the
+  recommended first command for new users.
+- **`cli/lib/update.sh --all`** — after the framework update, walks
+  every `~/agent-control/*/` and runs `doctor --fix` + `migrate` on
+  each. Replaces the multi-line shell loop in the README. Reports a
+  per-project pass/skip/fail summary; exits nonzero if any project
+  failed.
+
+**Verification infrastructure:**
+
+- **NEW `tests/run-multi-dev-e2e.sh`** — end-to-end Plan 1 test that
+  spawns real concurrent bash subshells (alice + bob) and verifies
+  the protocol works under actual concurrency, not single-process
+  simulation. Five scenarios: claim/block, bypass warn+pass,
+  team_deleted releases claims, mode-negotiation ack roundtrip,
+  mode-negotiation timeout default. **10/10 passing.** This is the
+  first real validation that Plan 1 works as designed.
+- **NEW `tests/run-runtime-live.sh`** — conditional SDK smoke test.
+  Executes claude-sdk + antigravity-sdk against trivial agents IF
+  the SDKs are pip-installed AND credentials are present. Otherwise
+  SKIPs cleanly with install hints. Verifies (a) response contains
+  expected text and (b) usage telemetry was written. Safe to run on
+  any host; not in CI by default (costs real API money). Opt in via
+  `YAKOS_RUNTIME_LIVE=1`.
+
+**Hygiene nits:**
+
+- **NEW `SECURITY.md`** — responsible-disclosure policy, supported-
+  versions table, in-scope vs out-of-scope clarification, response-
+  time commitments, recognition policy. Email contact:
+  `bakw00ds87@gmail.com`.
+- **`cli/lib/runtimes/gemini.sh` — hard cutoff on 2026-09-01.** The
+  deprecation shim now `ct_die`'s on/after the removal date with
+  explicit migration instructions. Override available via
+  `YAKOS_GEMINI_SHIM_FORCE=1` (logged for audit). Before the cutoff,
+  behavior is unchanged (NOTE on first invocation).
+- **Tag backfill v0.3.0.0 → v0.28.0.0** — 32 missing tags created on
+  their actual VERSION-bump commits and pushed to origin. Operators
+  can now `git checkout v0.<X>.0.0` for any historical version.
+- **`runtime-fallback` claim verified** — read `cli/lib/dispatch.sh:170-241`;
+  the field IS fully wired (reads frontmatter, builds chain with
+  project-config + agent fallback + runtime default, walks for first
+  available, logs each step). README claim is accurate; no fix needed.
+  Recorded here so future me doesn't re-question it.
+
+**Known untested paths (still):**
+
+- claude-sdk + antigravity-sdk live execution has only been smoke-
+  ready since v0.30 — actually running them requires pip-installing
+  the SDKs, which is operator-environment specific.
+
 ## [0.29.1.0] — 2026-05-22
 
 ### Added — Project hygiene for going public

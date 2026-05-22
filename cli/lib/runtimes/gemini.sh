@@ -10,6 +10,11 @@
 # then, existing user configs with `runtime: gemini` continue to work
 # without code changes; the underlying calls hit `agy`.
 #
+# On/after the removal date, the shim hard-fails via ct_die unless
+# YAKOS_GEMINI_SHIM_FORCE=1 is set (operator override for the
+# emergency case where migration is mid-flight). The override is
+# logged so the audit trail shows the shim was used past EOL.
+#
 # To migrate explicitly:
 #   - .yakos.yml: set `default-runtime: agy`
 #   - agent frontmatter: change `runtime: gemini` to `runtime: agy`
@@ -25,12 +30,35 @@ set -eu
 # shellcheck source=./agy.sh
 . "$YAKOS_LIB/runtimes/agy.sh"
 
+_YK_RT_GEMINI_REMOVAL_DATE="2026-09-01"
+
+_yk_rt_gemini_past_removal() {
+    # Returns 0 if today is on/after the removal date.
+    local today
+    today="$(date -u +%Y-%m-%d)"
+    [ "$today" \> "$_YK_RT_GEMINI_REMOVAL_DATE" ] || \
+        [ "$today" = "$_YK_RT_GEMINI_REMOVAL_DATE" ]
+}
+
 _yk_rt_gemini_warn() {
-    if [ -z "${YAKOS_GEMINI_DEPRECATION_WARNED:-}" ]; then
+    if _yk_rt_gemini_past_removal; then
+        ct_log "ERROR: --runtime gemini was scheduled for removal on $_YK_RT_GEMINI_REMOVAL_DATE."
+        ct_log "       Gemini CLI stopped serving requests on 2026-06-18; agy is the successor."
+        ct_log "       Migration steps:"
+        ct_log "         1. Update .yakos.yml: set 'default-runtime: agy'"
+        ct_log "         2. Update each agent's frontmatter: 'runtime: gemini' → 'runtime: agy'"
+        ct_log "         3. Re-run hook install: 'yakos hooks install agy'"
+        ct_log "       Override (NOT recommended; shim will be deleted in a future release):"
+        ct_log "         export YAKOS_GEMINI_SHIM_FORCE=1"
+        if [ -z "${YAKOS_GEMINI_SHIM_FORCE:-}" ]; then
+            ct_die "gemini.sh: deprecation shim disabled past removal date; see steps above"
+        fi
+        ct_log "       YAKOS_GEMINI_SHIM_FORCE=1 set — continuing under override."
+    elif [ -z "${YAKOS_GEMINI_DEPRECATION_WARNED:-}" ]; then
         ct_log "NOTE: --runtime gemini is deprecated."
         ct_log "      Gemini CLI stops serving requests 2026-06-18."
         ct_log "      Routing to 'agy' (Antigravity CLI; Gemini CLI successor)."
-        ct_log "      Update .yakos.yml + agent frontmatter to 'agy' before 2026-09-01"
+        ct_log "      Update .yakos.yml + agent frontmatter to 'agy' before $_YK_RT_GEMINI_REMOVAL_DATE"
         ct_log "      (shim removal). See agy-adapter-plan.md migration recipe."
         export YAKOS_GEMINI_DEPRECATION_WARNED=1
     fi

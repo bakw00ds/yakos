@@ -36,6 +36,9 @@ Usage:
     yakos --help    | -h
 
 Install / lifecycle:
+    quickstart    One-command path: install (if needed) → init (if cwd
+                  is a git repo) → start. Idempotent. (v0.30+)
+                  Args: [--runtime <id>] [--multi-dev] [--safe] [--dry-run]
     install       Install YakOS into ~/.claude (per-file symlinks +
                   safe settings.json merge)
     uninstall     Remove YakOS-owned symlinks. Auto-memory at
@@ -208,7 +211,7 @@ case "$cmd" in
     -v | --version)
         echo "yakos $YAKOS_VERSION"
         ;;
-    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach | soul | retro | skill | compact | checkpoint | kanban | env | standards | peer)
+    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach | soul | retro | skill | compact | checkpoint | kanban | env | standards | peer | quickstart)
         script="$YAKOS_LIB/${cmd}.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"
