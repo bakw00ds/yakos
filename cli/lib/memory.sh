@@ -104,7 +104,17 @@ if [ "$SUB" = "list" ]; then
         echo "(no memory yet for '$PROJECT' at $dir)"
         exit 0
     fi
-    echo "yakos memory — $PROJECT  ($dir)"
+    # Plan 1 M1: if dir is a symlink to a coord/memory path, surface that
+    # — operators need to know they're operating on shared state.
+    shared_note=""
+    if [ -L "$dir" ]; then
+        target="$(readlink "$dir" 2>/dev/null || echo '<unreadable>')"
+        case "$target" in
+            */var/lib/yakos/*|*/yakos/*/memory) shared_note=" [shared via --multi-dev → $target]" ;;
+            *) shared_note=" [symlink → $target]" ;;
+        esac
+    fi
+    echo "yakos memory — $PROJECT  ($dir)$shared_note"
     echo
     if [ -f "$dir/MEMORY.md" ]; then
         echo "  Index (MEMORY.md):"

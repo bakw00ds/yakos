@@ -271,6 +271,49 @@ fi
 # configuring custom MCP servers, future provider routing (v0.2+), or the
 # local-llm skill.
 
+# ---- multi-dev coord (Plan 1 / v0.27+) -------------------------------------
+echo "Multi-dev coord (co-pilot mode; optional)"
+COORD_ROOT="${YAKOS_COORD_ROOT:-/var/lib/yakos}"
+if [ ! -d "$COORD_ROOT" ]; then
+    info "$COORD_ROOT does not exist (no multi-dev coord; see docs/co-pilot-mode.md to provision)"
+else
+    if [ ! -w "$COORD_ROOT" ]; then
+        info "$COORD_ROOT exists but is not writable by you ($USER) — group membership / umask?"
+    else
+        ok "$COORD_ROOT exists and is writable"
+    fi
+    n_projects="$(find "$COORD_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+    info "$n_projects project(s) provisioned under $COORD_ROOT"
+
+    # If a project arg was given, check that project's coord
+    if [ -n "$PROJECT_PATH" ]; then
+        proj_name="$(basename -- "$PROJECT_PATH")"
+        proj_coord="$COORD_ROOT/$proj_name/coord"
+        if [ -d "$proj_coord" ]; then
+            ok "  $proj_name: coord dir present at $proj_coord"
+            n_sessions="$(find "$proj_coord/sessions" -name '*.ndjson' 2>/dev/null | wc -l | tr -d ' ')"
+            info "  $proj_name: $n_sessions session ledger(s) on file"
+            user_mem="$HOME/.yakos-state/memory/$proj_name"
+            if [ -L "$user_mem" ]; then
+                target="$(readlink "$user_mem" 2>/dev/null || echo '<unreadable>')"
+                expected="$COORD_ROOT/$proj_name/memory"
+                if [ "$target" = "$expected" ]; then
+                    ok "  $proj_name: memory symlink correct ($user_mem → $expected)"
+                else
+                    info "  $proj_name: memory symlink points to '$target'; expected '$expected'"
+                fi
+            elif [ -d "$user_mem" ]; then
+                info "  $proj_name: $user_mem is a directory, not a symlink (run 'yakos init --multi-dev')"
+            else
+                info "  $proj_name: $user_mem not present"
+            fi
+        else
+            info "  $proj_name: coord not provisioned for this project (run 'yakos init --multi-dev $proj_name --project $PROJECT_PATH')"
+        fi
+    fi
+fi
+echo ""
+
 echo "Optional local/cross-model tooling"
 for tool in ollama lms llama-server; do
     if command -v "$tool" >/dev/null 2>&1; then

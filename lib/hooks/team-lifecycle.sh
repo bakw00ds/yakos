@@ -155,10 +155,20 @@ kanban_move_first() {
     ' "$kb" > "$tmp" 2>/dev/null && mv "$tmp" "$kb" 2>/dev/null || rm -f "$tmp" 2>/dev/null
 }
 
+# Plan 1 M1 — mirror lifecycle events to coord/activity.ndjson when
+# multi-dev coord is enabled. No-op when coord dir absent.
+coord_mirror() {
+    local kind="$1" extra="${2:-{\}}"
+    command -v yakos_coord_emit >/dev/null 2>&1 || return 0
+    yakos_coord_emit "$kind" "$extra" 2>/dev/null || true
+}
+
 case "$tool" in
     TeamCreate)
         team_name="$(printf '%s' "$tool_input" | jq -r '.name // empty' 2>/dev/null || true)"
         emit_event "team_created"
+        coord_mirror "team_created" \
+            "$(jq -nc --arg team "$team_name" '{team_name: $team}' 2>/dev/null || echo '{}')"
 
         # Plan 3 M4 — kanban auto-update: first TODO task → IN PROGRESS.
         kanban_move_first "TODO" "IN PROGRESS" "-" 2>/dev/null || true
@@ -183,11 +193,16 @@ case "$tool" in
     Agent)
         emit_event "agent_spawned"
         # Intentionally do NOT touch .session-started or history.
+        agent_name="$(printf '%s' "$tool_input" | jq -r '.subagent_type // empty' 2>/dev/null || true)"
+        coord_mirror "agent_spawn" \
+            "$(jq -nc --arg agent "$agent_name" '{agent: $agent}' 2>/dev/null || echo '{}')"
         ;;
 
     TeamDelete)
         team_name="$(printf '%s' "$tool_input" | jq -r '.name // empty' 2>/dev/null || true)"
         emit_event "team_deleted"
+        coord_mirror "team_deleted" \
+            "$(jq -nc --arg team "$team_name" '{team_name: $team}' 2>/dev/null || echo '{}')"
 
         # Plan 3 M4 — kanban auto-update: first IN PROGRESS task → DONE.
         kanban_move_first "IN PROGRESS" "DONE" "x" 2>/dev/null || true

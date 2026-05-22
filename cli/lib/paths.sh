@@ -97,6 +97,107 @@ yakos_messages_log_file() {
     printf '%s/messages.ndjson' "$(yakos_current_dir)"
 }
 
+# ----------------------------------------------------------------------------
+# Plan 1 (multi-dev coordination) — coord helpers
+#
+# Multi-dev shared-dev-box coordination lives at
+# /var/lib/yakos/<project>/coord/ owned by group yakos-coord. The
+# coord directory is OPTIONAL — vanilla yakOS works without it; all
+# hooks no-op via yakos_coord_enabled when it's absent.
+#
+# Root overridable via YAKOS_COORD_ROOT for tests + dev boxes that
+# prefer a different location.
+# ----------------------------------------------------------------------------
+
+yakos_coord_root() {
+    printf '%s' "${YAKOS_COORD_ROOT:-/var/lib/yakos}"
+}
+
+yakos_coord_dir() {
+    printf '%s/%s/coord' "$(yakos_coord_root)" "$(yakos_project_name)"
+}
+
+yakos_coord_activity_log() {
+    printf '%s/activity.ndjson' "$(yakos_coord_dir)"
+}
+
+yakos_coord_sessions_dir() {
+    printf '%s/sessions' "$(yakos_coord_dir)"
+}
+
+yakos_coord_session_file() {
+    # Per-session NDJSON ledger: <user>@<host>-<pid>.ndjson. Stable for
+    # the lifetime of this process (pid is fixed); two concurrent sessions
+    # from the same user on the same box get different files because their
+    # pids differ.
+    local user host pid
+    user="${USER:-$(id -un 2>/dev/null || echo unknown)}"
+    host="${HOSTNAME:-$(hostname -s 2>/dev/null || echo unknown)}"
+    pid="${YAKOS_SESSION_PID:-$$}"
+    printf '%s/%s@%s-%s.ndjson' "$(yakos_coord_sessions_dir)" "$user" "$host" "$pid"
+}
+
+yakos_coord_claims_file() {
+    printf '%s/active-claims.json' "$(yakos_coord_dir)"
+}
+
+yakos_coord_memory_dir() {
+    # Sibling of coord/ — shared canonical memory store. memory.sh
+    # symlinks ~/.yakos-state/memory/<project>/ here when --multi-dev.
+    printf '%s/%s/memory' "$(yakos_coord_root)" "$(yakos_project_name)"
+}
+
+yakos_coord_enabled() {
+    # Return 0 iff coord is configured AND writable by this process.
+    # Hooks call this; if it returns non-zero they no-op silently.
+    local d
+    d="$(yakos_coord_dir)"
+    [ -d "$d" ] && [ -w "$d" ]
+}
+
+yakos_coord_emit() {
+    # Append a single event to BOTH the shared activity.ndjson AND the
+    # per-session ledger. Atomic-per-line via stdio append. No-op when
+    # coord is disabled. Never blocks.
+    #
+    # Args: <kind> <json-detail>
+    #   <kind>          string event kind (claim_intent, mode_proposal, etc)
+    #   <json-detail>   pre-built JSON object string (must parse as JSON)
+    yakos_coord_enabled || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local kind="$1" detail="${2:-{\}}"
+    local user host pid sid ts agent
+    user="${USER:-$(id -un 2>/dev/null || echo unknown)}"
+    host="${HOSTNAME:-$(hostname -s 2>/dev/null || echo unknown)}"
+    pid="${YAKOS_SESSION_PID:-$$}"
+    sid="${CLAUDE_SESSION_ID:-${YAKOS_SESSION_ID:-unknown}}"
+    agent="${YAKOS_AGENT_ID:-}"
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    local event
+    event="$(jq -nc \
+        --arg ts "$ts" \
+        --arg kind "$kind" \
+        --arg user "$user" \
+        --arg host "$host" \
+        --argjson pid "$pid" \
+        --arg sid "$sid" \
+        --arg agent "$agent" \
+        --argjson detail "$detail" \
+        '{ts: $ts, kind: $kind,
+          actor: {user: $user, host: $host, pid: $pid,
+                  session_id: $sid, agent: ($agent | select(length>0))},
+          detail: $detail}' 2>/dev/null)"
+    [ -n "$event" ] || return 0
+
+    # Append to the per-session ledger and the shared activity log.
+    # mkdir -p first — coord-readme.template doesn't create sessions/.
+    mkdir -p "$(yakos_coord_sessions_dir)" 2>/dev/null || return 0
+    printf '%s\n' "$event" >> "$(yakos_coord_session_file)" 2>/dev/null || true
+    printf '%s\n' "$event" >> "$(yakos_coord_activity_log)" 2>/dev/null || true
+}
+
 yakos_migrate_session_history() {
     # One-shot migration: if the legacy .session-started-history file exists
     # as a JSON array (Batch 1B format), convert to NDJSON at the new path.

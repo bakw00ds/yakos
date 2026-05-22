@@ -239,6 +239,19 @@ EOF
 }
 print_banner
 
+# ---- multi-dev coord: emit session_launched event ---------------------------
+# Plan 1 M1 — when coord is enabled, append a session_launched event so
+# peers see this session start. No-op when coord absent. Set
+# YAKOS_PROJECT_NAME so paths.sh helpers resolve to the right project.
+if command -v yakos_coord_enabled >/dev/null 2>&1 || \
+   { [ -r "$YAKOS_LIB/paths.sh" ] && . "$YAKOS_LIB/paths.sh"; }; then
+    YAKOS_PROJECT_NAME="$NAME" yakos_coord_emit "session_launched" \
+        "$(jq -nc --arg runtime "$RUNTIME" --arg perm "$PERM_MODE" --arg repo "$PROJECT_REPO" \
+            '{runtime: $runtime, perm_mode: $perm, project_repo: $repo}' 2>/dev/null \
+            || echo '{}')" \
+        2>/dev/null || true
+fi
+
 # ---- soft-degrade warnings --------------------------------------------------
 
 # Warn when a feature is requested but the runtime can't honor it.

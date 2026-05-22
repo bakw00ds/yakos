@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0.0] — 2026-05-22
+
+### Added — Plan 1 M1: multi-dev co-pilot mode (awareness only)
+
+Two human developers can now run yakOS in parallel on the same shared
+dev box and see each other's session activity. This is the first of
+three Plan 1 milestones (per `rosy-crafting-candy.md`).
+
+**Coordination substrate (`/var/lib/yakos/<project>/`):**
+
+- `coord/activity.ndjson` — append-only shared event stream
+- `coord/sessions/<user>@<host>-<pid>.ndjson` — per-session ledgers
+- `coord/active-claims.json` — M2 placeholder
+- `memory/` — shared canonical memory store (symlinked from each user's
+  `~/.yakos-state/memory/<name>/`)
+- `coord/README.md` — on-disk format spec
+
+The coord directory is OPTIONAL; vanilla yakOS works without it. All
+hooks no-op via `yakos_coord_enabled` when the dir is absent.
+
+**Paths helpers (`cli/lib/paths.sh` — symlinked from
+`lib/hooks/lib/paths.sh`):**
+
+- `yakos_coord_root()` — `${YAKOS_COORD_ROOT:-/var/lib/yakos}`
+- `yakos_coord_dir()` / `_activity_log()` / `_sessions_dir()` /
+  `_session_file()` / `_claims_file()` / `_memory_dir()`
+- `yakos_coord_enabled()` — return 0 iff coord exists and is writable
+- `yakos_coord_emit <kind> <json-detail>` — append one event to BOTH
+  the per-session ledger and the shared activity log; safe under
+  concurrent writes
+
+**Mirroring hooks (extended):**
+
+- `lib/hooks/team-lifecycle.sh` — TeamCreate / Agent / TeamDelete
+  emit `team_created` / `agent_spawn` / `team_deleted` events
+- `lib/hooks/mailbox-mirror.sh` — SendMessage emits `send_message`
+  events (body excluded; only from/to/summary go to shared log because
+  peer DMs are private by default)
+
+**CLI surface:**
+
+- **NEW `cli/lib/peer.sh`** — `yakos peer status [<project>]` lists
+  active peer sessions; `yakos peer log [--since <iso>] [<project>]`
+  tails the shared activity stream. Wired into `cli/yakos` dispatcher.
+- **`cli/lib/init.sh --multi-dev` flag** — provisions
+  `/var/lib/yakos/<name>/{coord,memory,sessions}/`, drops the coord
+  README, symlinks `~/.yakos-state/memory/<name>/` → shared store.
+  Prints the one-time admin recipe (groupadd / usermod / mkdir / chmod
+  2775) when `/var/lib/yakos` doesn't exist or isn't writable.
+- **`cli/lib/doctor.sh` extended** — coord checks: dir presence,
+  writability, project count, per-project session ledgers, memory
+  symlink correctness.
+- **`cli/lib/start.sh` extended** — emits `session_launched` event
+  when coord is enabled (so peers see this session start).
+- **`cli/lib/memory.sh list` extended** — surfaces `[shared via
+  --multi-dev → ...]` when the project's memory dir is symlinked to
+  a coord/memory path.
+
+**Lead persona:**
+
+- `lib/agents/lead-template.md` — new bullet 7 under `## Execution`:
+  "If `yakos peer status` shows active peer sessions, read recent
+  activity before dispatching."
+
+**Documentation:**
+
+- `docs/co-pilot-mode.md` — operator guide: topology, admin setup,
+  per-project provisioning, editor integration, failure modes
+- `lib/settings/coord-readme.template.md` — dropped into the coord
+  dir at init time; documents the on-disk schema
+
+**What v0.27 does NOT yet ship** (per the M1/M2/M3 phasing):
+
+- Per-file claim hooks (M2 — v0.28)
+- Mode negotiation protocol (M3 — v0.29)
+- Multi-dev coord rule + peer-sync skill (M3 — v0.29)
+
+**Failure modes:**
+
+- Coord dir missing or wrong perms → `yakos doctor` reports info; hooks
+  no-op; harnesses work as vanilla yakOS
+- Group misconfigured → `init --multi-dev` prints the admin recipe;
+  refuses to create symlinks until perms are correct
+
 ## [0.26.0.0] — 2026-05-22
 
 ### Added — Plan 5 M3: claude-sdk + antigravity-sdk upgrades (sub-agents + telemetry)

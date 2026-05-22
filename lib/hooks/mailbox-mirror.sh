@@ -63,4 +63,15 @@ extra="$(jq -nc --arg from "$sender" --arg to "$to" --arg summary "$summary" \
     '{from: $from, to: $to, summary: $summary}')"
 ho_log "mailbox-mirror" "REPORT" "pass" "logged peer message" "$extra"
 
+# Plan 1 M1 — mirror to coord/activity.ndjson when multi-dev coord is
+# enabled. No-op when coord dir absent. Body excluded for the shared
+# log (only sender/recipient/summary) — full body stays in the local
+# messages.ndjson because peer DMs are private by default.
+if command -v yakos_coord_emit >/dev/null 2>&1; then
+    yakos_coord_emit "send_message" \
+        "$(jq -nc --arg from "$sender" --arg to "$to" --arg summary "$summary" \
+            '{from: $from, to: $to, summary: $summary}' 2>/dev/null || echo '{}')" \
+        2>/dev/null || true
+fi
+
 exit 0

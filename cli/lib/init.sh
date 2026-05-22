@@ -29,6 +29,7 @@ NAME=""
 PROJECT=""
 FORCE=0
 WITH_GATE=0
+MULTI_DEV=0
 
 usage() {
     cat <<EOF
@@ -54,6 +55,13 @@ Arguments:
                      running 'yakos git-hooks install' from the project
                      after init. Refuses if a non-YakOS pre-push hook
                      exists (rerun with --force to overwrite).
+  --multi-dev        Co-pilot mode (Plan 1 / v0.27+). Provisions the
+                     shared coord dir at /var/lib/yakos/<name>/coord/
+                     (must already exist and be writable by your group
+                     — see docs/co-pilot-mode.md for the one-time admin
+                     recipe) and symlinks ~/.yakos-state/memory/<name>/
+                     into the shared store. Idempotent — each user runs
+                     it independently to wire their own memory symlink.
   --help, -h         Print this help.
 EOF
 }
@@ -73,6 +81,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --force) FORCE=1 ;;
         --with-gate) WITH_GATE=1 ;;
+        --multi-dev) MULTI_DEV=1 ;;
         --*) ct_die "init: unknown flag '$1' (try --help)" ;;
         *)
             if [ -z "$NAME" ]; then
@@ -306,6 +315,72 @@ if [ "$WITH_GATE" = "1" ]; then
     fi
 fi
 
+# ---- optional: --multi-dev (Plan 1 / v0.27+) -------------------------------
+
+COORD_STATUS="not requested (--multi-dev to enable)"
+if [ "$MULTI_DEV" = "1" ]; then
+    # shellcheck source=./paths.sh
+    . "$YAKOS_LIB/paths.sh"
+    COORD_ROOT_DEFAULT="/var/lib/yakos"
+    COORD_ROOT="${YAKOS_COORD_ROOT:-$COORD_ROOT_DEFAULT}"
+    COORD_DIR="$COORD_ROOT/$NAME/coord"
+    COORD_MEMORY="$COORD_ROOT/$NAME/memory"
+    COORD_SESSIONS="$COORD_DIR/sessions"
+
+    # Probe the root: if it doesn't exist or isn't writable, print the
+    # admin recipe rather than trying sudo ourselves (one-time setup is
+    # the operator's responsibility).
+    if [ ! -d "$COORD_ROOT" ] || [ ! -w "$COORD_ROOT" ]; then
+        cat <<EOF >&2
+
+WARN: --multi-dev requested but $COORD_ROOT is missing or not writable
+      by you ($USER). Run the one-time admin recipe first:
+
+      sudo groupadd -f yakos-coord
+      sudo usermod -a -G yakos-coord $USER
+      # (log out + back in, or 'newgrp yakos-coord')
+      sudo mkdir -p $COORD_ROOT
+      sudo chgrp yakos-coord $COORD_ROOT
+      sudo chmod 2775 $COORD_ROOT
+      # In your shell rc: umask 0002
+
+      Then re-run: yakos init --multi-dev $NAME --project $PROJECT_ABS
+
+      Full guide: docs/co-pilot-mode.md
+EOF
+        COORD_STATUS="skipped ($COORD_ROOT not writable; see docs/co-pilot-mode.md)"
+    else
+        mkdir -p "$COORD_DIR" "$COORD_MEMORY" "$COORD_SESSIONS" 2>/dev/null \
+            || ct_die "init: could not create $COORD_DIR (perms? umask?)"
+        # Drop the README if not present
+        COORD_README="$COORD_DIR/README.md"
+        if [ ! -f "$COORD_README" ]; then
+            cp "$YAKOS_ROOT/lib/settings/coord-readme.template.md" "$COORD_README" 2>/dev/null \
+                && ct_log "wrote $COORD_README"
+        fi
+        # Per-user memory symlink: ~/.yakos-state/memory/<name>/ → shared
+        USER_MEM_PARENT="$HOME/.yakos-state/memory"
+        USER_MEM="$USER_MEM_PARENT/$NAME"
+        mkdir -p "$USER_MEM_PARENT"
+        if [ -L "$USER_MEM" ]; then
+            # Already symlinked — verify target. If wrong, repoint.
+            existing="$(readlink "$USER_MEM" 2>/dev/null || true)"
+            if [ "$existing" != "$COORD_MEMORY" ]; then
+                ct_log "WARN: $USER_MEM points to '$existing'; expected '$COORD_MEMORY'. Leaving as-is (manual fix needed)."
+            else
+                ct_log "$USER_MEM → $COORD_MEMORY (already linked)"
+            fi
+        elif [ -d "$USER_MEM" ]; then
+            ct_log "WARN: $USER_MEM exists as a directory (not a symlink); not converting automatically."
+            ct_log "      Move its contents into $COORD_MEMORY then 'rm -rf $USER_MEM && ln -s $COORD_MEMORY $USER_MEM'."
+        else
+            ln -s "$COORD_MEMORY" "$USER_MEM" \
+                && ct_log "linked $USER_MEM → $COORD_MEMORY"
+        fi
+        COORD_STATUS="provisioned at $COORD_DIR (group inherits via setgid)"
+    fi
+fi
+
 # ---- summary ----------------------------------------------------------------
 
 cat <<EOF
@@ -317,6 +392,7 @@ YakOS init complete for '$NAME'.
   Auto-memory:  $MEMORY_FILE
   Hooks:        $hook_copied new, $hook_overwritten overwritten, $hook_skipped skipped
   Push gate:    $GATE_STATUS
+  Coord:        $COORD_STATUS
 
 To start a session:
   yakos start $NAME
