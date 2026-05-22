@@ -19,9 +19,20 @@ Outputs:
   stderr: errors / log lines
   exit 0 on success, non-zero on error
 
-The Claude Agent SDK is async-only (uses anyio). This script wraps a
-single query() invocation; for bidirectional / multi-turn use cases the
-adapter should be extended to use ClaudeSDKClient.
+v0.26 (Plan 5 M3) — verified against the SDK's examples/ + types.py
+(not the README, which is incomplete). Real surface used:
+
+  - Per-agent `model` via AgentDefinition (alias: "sonnet"/"opus"/
+    "haiku"/"inherit" OR full model ID).
+  - Sub-agents via `agents={name: AgentDefinition(...)}` dict in
+    ClaudeAgentOptions; all teammates from the composition are
+    surfaced so the dispatched agent CAN delegate via Task.
+  - ResultMessage.total_cost_usd, .duration_ms, .num_turns, .usage,
+    .model_usage, .permission_denials — written to YAKOS_USAGE_OUT
+    when set.
+  - `tools=` (base set) vs `allowed_tools=` (auto-allowed without
+    prompting). yakOS's per-agent tools: frontmatter restricts the
+    AGENT's tool surface, so it maps to AgentDefinition.tools.
 """
 
 import json
@@ -51,41 +62,101 @@ def read_env():
     if agent_id not in agents:
         die(f"agent '{agent_id}' not in composed agents "
             f"(have: {sorted(agents.keys())[:5]}...)")
-    return agent_id, project, agents[agent_id]
+    return agent_id, project, agents
 
 
-async def run(agent_id: str, project: str, agent_def: dict, task: str) -> int:
-    # Import inside async run() so import failures surface as die() not
-    # as a Python startup error.
+def _build_agent_definition(AgentDefinition, agent_def: dict):
+    """Translate a yakOS composed-agent entry into a SDK AgentDefinition.
+
+    yakOS agent shape (post-compose):
+      {
+        "prompt": "...full agent body...",
+        "tools": ["Read", "Edit", ...],
+        "model": "sonnet" | "opus" | "haiku" | full-model-id,
+        "description": "one-line description"
+      }
+    Fields beyond description+prompt are optional.
+    """
+    kwargs = {
+        "description": agent_def.get("description")
+            or f"yakOS-composed agent",
+        "prompt": agent_def.get("prompt", ""),
+    }
+    tools = agent_def.get("tools")
+    if isinstance(tools, list) and tools:
+        kwargs["tools"] = tools
+    model = agent_def.get("model")
+    if isinstance(model, str) and model:
+        kwargs["model"] = model
+    return AgentDefinition(**kwargs)
+
+
+def _extract_usage(msg) -> dict:
+    """Pull cost + telemetry from a ResultMessage.
+
+    Documented (claude-agent-sdk types.py): total_cost_usd,
+    duration_ms, duration_api_ms, num_turns, session_id,
+    stop_reason, usage, model_usage, permission_denials.
+    """
+    data = {}
+    for attr in ("total_cost_usd", "duration_ms", "duration_api_ms",
+                 "num_turns", "session_id", "stop_reason",
+                 "usage", "model_usage", "permission_denials",
+                 "is_error", "subtype"):
+        if hasattr(msg, attr):
+            v = getattr(msg, attr)
+            if v is not None:
+                data[attr] = v
+    return data
+
+
+async def run(agent_id: str, project: str, agents: dict, task: str) -> int:
     try:
         from claude_agent_sdk import (
-            query,
-            ClaudeAgentOptions,
+            AgentDefinition,
             AssistantMessage,
+            ClaudeAgentOptions,
             ResultMessage,
             TextBlock,
+            query,
         )
     except ImportError as exc:
         die(f"claude-agent-sdk not importable: {exc}. "
             f"Install: pip install claude-agent-sdk (python 3.10+)")
 
-    # Build ClaudeAgentOptions from the composed agent JSON.
-    # README-confirmed options: system_prompt, allowed_tools,
-    # disallowed_tools, cwd, mcp_servers, cli_path.
-    # Note: README does NOT document a model parameter; the SDK uses the
-    # bundled CLI's default. yakOS's per-agent model: frontmatter is
-    # recorded as intent but does not pass through to the SDK at v0.24.
+    # The dispatched agent runs as the primary system_prompt — that's
+    # yakOS's headless-dispatch semantic. Other composed agents are
+    # made AVAILABLE as sub-agents via options.agents so the dispatched
+    # agent can delegate via Task if its prompt expects to.
+    dispatched = agents[agent_id]
+
     options_kwargs = {
         "cwd": project,
-        "system_prompt": agent_def.get("prompt", ""),
+        "system_prompt": dispatched.get("prompt", ""),
     }
-    tools = agent_def.get("tools")
-    if tools and isinstance(tools, list) and tools:
-        options_kwargs["allowed_tools"] = tools
+    tools = dispatched.get("tools")
+    if isinstance(tools, list) and tools:
+        # tools= sets the BASE set the agent can call; this is the
+        # right knob for yakOS frontmatter `tools:` restrictions.
+        options_kwargs["tools"] = tools
+    model = dispatched.get("model")
+    if isinstance(model, str) and model:
+        options_kwargs["model"] = model
+
+    # Sub-agent availability: surface every OTHER agent in the
+    # composition. If the composition has only the dispatched agent,
+    # skip — empty agents= dict is fine but a one-item dict containing
+    # only the same agent the SDK is already running is confusing.
+    sibling_defs = {
+        name: _build_agent_definition(AgentDefinition, defn)
+        for name, defn in agents.items()
+        if name != agent_id
+    }
+    if sibling_defs:
+        options_kwargs["agents"] = sibling_defs
 
     options = ClaudeAgentOptions(**options_kwargs)
 
-    # Accumulate assistant text + (if surfaced) usage from ResultMessage.
     text_chunks = []
     usage_data = None
 
@@ -95,59 +166,32 @@ async def run(agent_id: str, project: str, agent_def: dict, task: str) -> int:
                 if isinstance(block, TextBlock):
                     text_chunks.append(block.text)
         elif isinstance(msg, ResultMessage):
-            # README doesn't document ResultMessage fields explicitly;
-            # probe for known-likely attribute names. If absent we fall
-            # back to byte-estimate (handled by the bash wrapper or
-            # YAKOS_USAGE_OUT consumer).
-            usage_data = {}
-            for attr in ("usage", "input_tokens", "output_tokens",
-                         "duration_ms", "total_cost_usd"):
-                if hasattr(msg, attr):
-                    usage_data[attr] = getattr(msg, attr)
-            # If `.usage` is itself a nested object, flatten common fields.
-            if "usage" in usage_data and not isinstance(usage_data["usage"],
-                                                       (int, float, str)):
-                usage_obj = usage_data.pop("usage")
-                for attr in ("input_tokens", "output_tokens",
-                             "cache_read_input_tokens",
-                             "cache_creation_input_tokens"):
-                    if hasattr(usage_obj, attr):
-                        usage_data[attr] = getattr(usage_obj, attr)
+            usage_data = _extract_usage(msg)
 
-    # Write assistant text to stdout.
     sys.stdout.write("".join(text_chunks))
     sys.stdout.flush()
 
-    # Write usage telemetry if available + requested.
     usage_out = os.environ.get("YAKOS_USAGE_OUT")
-    if usage_out and usage_data:
+    if usage_out:
         try:
             with open(usage_out, "w") as f:
-                json.dump(usage_data, f)
+                json.dump(usage_data or {"source": "claude-sdk-no-result-message"},
+                          f, default=str)
         except OSError as exc:
             sys.stderr.write(
                 f"claude-sdk-dispatch: could not write usage to "
                 f"{usage_out}: {exc}\n"
             )
-    elif usage_out:
-        # Best-effort: write empty marker so the bash wrapper knows we
-        # tried but had no data.
-        try:
-            with open(usage_out, "w") as f:
-                json.dump({"source": "claude-sdk-no-result-message"}, f)
-        except OSError:
-            pass
 
     return 0
 
 
 def main() -> int:
-    agent_id, project, agent_def = read_env()
+    agent_id, project, agents = read_env()
     task = sys.stdin.read()
     if not task:
         die("empty task on stdin")
 
-    # anyio.run is the SDK's documented entry point per the README example.
     try:
         import anyio
     except ImportError as exc:
@@ -155,7 +199,7 @@ def main() -> int:
             f"claude-agent-sdk; reinstall the SDK to pull it in")
 
     try:
-        anyio.run(run, agent_id, project, agent_def, task)
+        anyio.run(run, agent_id, project, agents, task)
     except Exception as exc:
         die(f"agent invocation failed: {type(exc).__name__}: {exc}")
     return 0

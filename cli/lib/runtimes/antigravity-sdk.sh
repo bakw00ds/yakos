@@ -15,17 +15,24 @@
 # the agy TUI for interactive sessions. dispatch verb uses Agent.chat()
 # via a small async Python script.
 #
-# Verified against the upstream README (antigravity-sdk-python repo):
+# Verified against the upstream SDK (examples/getting_started/
+# {subagents.py,observability.py,persona_config.py} at v0.26):
 #   package           google-antigravity (pip install google-antigravity)
-#   import            from google.antigravity import Agent, LocalAgentConfig, CapabilitiesConfig
+#   import            from google.antigravity import Agent, LocalAgentConfig
+#                     from google.antigravity import types (CapabilitiesConfig,
+#                                                            BuiltinTools, ...)
 #   async only        uses asyncio
 #   config            LocalAgentConfig(system_instructions=, api_key=,
 #                                       capabilities=, tools=, mcp_servers=,
-#                                       policies=, triggers=)
-#   default policy    READ-ONLY — must pass CapabilitiesConfig() to enable writes
+#                                       policies=, triggers=, hooks=)
+#   default policy    READ-ONLY — adapter passes CapabilitiesConfig() to enable writes
+#   sub-agents        CapabilitiesConfig(enable_subagents=True); agent
+#                     autonomously spawns via BuiltinTools.START_SUBAGENT
+#   usage/cost        agent.conversation.total_usage exposes prompt_token_count /
+#                     response_token_count / total_token_count / thoughts_token_count
+#                     (per examples/getting_started/observability.py)
 #   auth              GEMINI_API_KEY env var or config api_key=
-#   model param       NOT documented in README (SDK chooses Gemini model)
-#   usage/cost        NOT documented in README
+#   model param       NOT documented at v0.26 (SDK chooses Gemini model)
 #   cwd param         NOT documented — adapter sets python process cwd before
 #                     constructing Agent
 #   tool name model   antigravity-native names (view_file, run_command, ...) not
@@ -51,12 +58,13 @@ set -eu
 yk_rt_antigravity_sdk_id() { printf 'antigravity-sdk\n'; }
 
 yk_rt_antigravity_sdk_capabilities() {
-    # vs agy.sh: programmatic-agents because Agent class is a first-class
-    # context manager (not a forked CLI process); mcp-in-process via
-    # McpStdioServer; declarative-policies for the deny/allow/ask_user/enforce
-    # system. native-telemetry NOT confirmed (ChatResponse.text() returns
-    # str; no usage object surfaced in README).
-    printf 'programmatic-agents,path-allowlist-soft,mcp-in-process,declarative-policies,headless-only,async-asyncio\n'
+    # vs agy.sh: programmatic-agents (Agent context manager, not forked
+    # CLI process); sub-agents (CapabilitiesConfig(enable_subagents=True)
+    # — agent autonomously spawns subagents ad-hoc); native-telemetry
+    # (agent.conversation.total_usage exposes token counts at session
+    # end); mcp-in-process via McpStdioServer; declarative-policies for
+    # the deny/allow/ask_user/enforce system.
+    printf 'programmatic-agents,sub-agents,native-telemetry,path-allowlist-soft,mcp-in-process,declarative-policies,headless-only,async-asyncio\n'
 }
 
 # ---------------------------------------------------------------------------

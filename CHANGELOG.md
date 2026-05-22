@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0.0] — 2026-05-22
+
+### Added — Plan 5 M3: claude-sdk + antigravity-sdk upgrades (sub-agents + telemetry)
+
+Closes the M3 items deferred at v0.24/v0.25. Both SDK adapters were
+under-utilizing their SDKs because v0.24/v0.25 research was
+README-only; the actual APIs in the SDK source (examples/ + types.py)
+are much richer than the READMEs let on. v0.26 corrects this.
+
+**claude-sdk (cli/lib/runtimes/claude-sdk*.py + .sh):**
+
+- **Sub-agent dispatch** via `ClaudeAgentOptions.agents={name:
+  AgentDefinition(...)}` dict. All composed teammates EXCEPT the
+  dispatched agent are surfaced as available sub-agents, so the
+  dispatched agent can delegate via Task to siblings if its prompt
+  expects to. (Discovered in examples/agents.py.)
+- **Model passthrough** — top-level `options.model` AND per-agent
+  `AgentDefinition.model` accept aliases ("sonnet"/"opus"/"haiku"/
+  "inherit") OR full model IDs. v0.24 said "README doesn't document a
+  model parameter" — wrong; types.py shows it exists at both layers.
+- **Real telemetry** from `ResultMessage`: total_cost_usd, duration_ms,
+  duration_api_ms, num_turns, session_id, stop_reason, usage,
+  model_usage, permission_denials. v0.24 used a hasattr probe loop
+  hoping to find usage fields; v0.26 uses the documented surface
+  directly.
+- **Correct tools field** — switched from `allowed_tools=` (which is
+  auto-allow without prompting) to `tools=` (base set the agent can
+  call). yakOS per-agent frontmatter `tools:` semantically restricts
+  the agent's surface — that's `tools=`, not `allowed_tools=`.
+- New capabilities advertised: `sub-agents`, `native-telemetry`,
+  `model-passthrough`.
+
+**antigravity-sdk (cli/lib/runtimes/antigravity-sdk*.py + .sh):**
+
+- **Sub-agent dispatch** via `CapabilitiesConfig(enable_subagents=
+  True)`. Antigravity's pattern is different from Claude's: the
+  agent autonomously decides to spawn a subagent via `BuiltinTools.
+  START_SUBAGENT` rather than pre-binding teammate definitions in
+  options. Adapter enables the capability whenever the composition
+  has more than one agent. (Discovered in examples/getting_started/
+  subagents.py.)
+- **Real telemetry** from `agent.conversation.total_usage` exposing
+  prompt_token_count, response_token_count, total_token_count,
+  thoughts_token_count, plus turn_count from
+  `agent.conversation.turn_count`. v0.25 said "no usage/cost
+  surface" — wrong; the Conversation API (Layer 2) carries it.
+  (Discovered in examples/getting_started/observability.py.)
+- New capabilities advertised: `sub-agents`, `native-telemetry`.
+
+**Remaining gaps** (recorded for future work):
+
+- antigravity-sdk: no documented `model` parameter on LocalAgentConfig
+  at v0.26; SDK chooses Gemini model. No documented `cwd=` — adapter
+  still relies on `os.chdir(project)`.
+- claude-sdk: no per-tool-call usage breakdown (model_usage is whole-
+  session, not per-call).
+- Neither SDK ships an explicit "handoff" pattern; sub-agent
+  dispatch is via the SDK's own routing (Claude: prompt-driven via
+  options.agents; Antigravity: autonomous via START_SUBAGENT tool).
+
 ## [0.25.0.1] — 2026-05-22
 
 ### Added — Apache License 2.0

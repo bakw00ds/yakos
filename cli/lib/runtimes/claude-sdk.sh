@@ -14,16 +14,26 @@
 # the CLI for interactive sessions. dispatch verb uses query() via a
 # small async Python script.
 #
-# Verified against the upstream README (claude-agent-sdk-python repo):
+# Verified against the upstream SDK (examples/agents.py + types.py;
+# README is incomplete — types.py is the source of truth at v0.26):
 #   package           claude-agent-sdk (pip install claude-agent-sdk)
-#   import            from claude_agent_sdk import query, ClaudeSDKClient, ClaudeAgentOptions
+#   import            from claude_agent_sdk import query, AgentDefinition,
+#                                                 ClaudeAgentOptions, ResultMessage,
+#                                                 AssistantMessage, TextBlock
 #   async only        uses anyio
-#   options           system_prompt / allowed_tools / disallowed_tools / cwd /
-#                     mcp_servers / cli_path
-#   message types     AssistantMessage / UserMessage / SystemMessage / ResultMessage
-#   text accessor     msg.content[i].text (TextBlock instances)
-#   model param       NOT documented in README (SDK inherits CLI default)
-#   usage/cost        NOT documented in README (ResultMessage may carry; probe at runtime)
+#   top-level options system_prompt, tools (base set), allowed_tools (auto-allow),
+#                     model, cwd, add_dirs, mcp_servers, setting_sources,
+#                     agents (sub-agent dict)
+#   AgentDefinition   description, prompt, tools, model, disallowedTools,
+#                     skills, memory, mcpServers, initialPrompt, maxTurns
+#   ResultMessage     total_cost_usd, duration_ms, duration_api_ms, num_turns,
+#                     session_id, stop_reason, usage, model_usage,
+#                     permission_denials  (real telemetry — not the
+#                     "probe and hope" of v0.24)
+#   model param       PRESENT — top-level options.model AND per-agent
+#                     AgentDefinition.model (alias: sonnet|opus|haiku|inherit
+#                     OR full model id)
+#   sub-agents        via options.agents={"name": AgentDefinition(...)} dict
 #   auth              bundled CLI handles credentials; same chain as claude.sh
 
 set -eu
@@ -43,11 +53,12 @@ set -eu
 yk_rt_claude_sdk_id() { printf 'claude-sdk\n'; }
 
 yk_rt_claude_sdk_capabilities() {
-    # vs claude.sh: native-telemetry NOT confirmed in README; downgraded to
-    # estimate-only until ResultMessage is verified to carry usage data at
-    # runtime. mcp-flag is the in-process MCP server pattern, more capable
-    # than claude.sh's --mcp-config since it supports SDK-defined tools.
-    printf 'programmatic-agents,path-allowlist-soft,mcp-in-process,headless-only,async-anyio\n'
+    # vs claude.sh: programmatic-agents (async query iterator);
+    # sub-agents (options.agents={} dict; dispatched agent can delegate
+    # via Task to siblings); native-telemetry (ResultMessage.total_cost_usd
+    # + .duration_ms + .num_turns + .usage); model-passthrough (per-agent
+    # model via AgentDefinition); mcp-in-process for SDK-defined tools.
+    printf 'programmatic-agents,sub-agents,native-telemetry,model-passthrough,path-allowlist-soft,mcp-in-process,headless-only,async-anyio\n'
 }
 
 # ---------------------------------------------------------------------------
