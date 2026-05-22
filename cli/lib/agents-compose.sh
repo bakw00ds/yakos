@@ -281,12 +281,91 @@ yk_agents_compose() {
         return 0
     fi
 
+    # Splice souls into lead's prompt (Plan 3 M1 / Capability A).
+    # Reads ~/.yakos-state/soul/global.md and per-project layer; prepends
+    # them to the LEAD agent's prompt only. Specialists do NOT see souls.
+    # No-op if no soul files exist (current behavior unchanged for users
+    # without souls). See lib/settings/soul.template.md and cli/lib/soul.sh.
+    merged="$(yk_agents_apply_soul "$merged" "$project_root")"
+
     # Stash in cache for subsequent calls in the same process.
     # shellcheck disable=SC2163
     eval "$cache_var=\"\$(printf '%s' \"\$merged\" | base64)\""
     eval "export $cache_var"
 
     printf '%s\n' "$merged"
+}
+
+# yk_agents_apply_soul <composed-json> <project-root>
+#   Read ~/.yakos-state/soul/{global,<project-slug>}.md (if present);
+#   prepend them to the LEAD agent's `prompt` field. Project-layer
+#   wins on conflict (Phase 1.5 §17 precedence).
+#
+#   Identifies the lead by: agent whose `id` starts with "lead-" OR
+#   equals "lead" OR whose role frontmatter equals "orchestrator".
+#   (The composed JSON only carries id/desc/prompt/tools/model — role
+#   isn't in the value-shape — so we lean on the id-prefix heuristic.)
+#
+#   No-op (returns input unchanged) if neither soul file exists. Keeps
+#   yakOS behavior identical for users who haven't created souls.
+yk_agents_apply_soul() {
+    local composed="$1" project_root="${2:-}"
+    local soul_dir="$HOME/.yakos-state/soul"
+    local global_soul="$soul_dir/global.md"
+    local project_soul=""
+
+    if [ -n "$project_root" ]; then
+        # Slug = basename of project root. Matches soul.sh convention.
+        project_soul="$soul_dir/$(basename -- "$project_root").md"
+    fi
+
+    # Fast no-op: if neither soul file exists, return composed unchanged.
+    if [ ! -f "$global_soul" ] && { [ -z "$project_soul" ] || [ ! -f "$project_soul" ]; }; then
+        printf '%s' "$composed"
+        return 0
+    fi
+
+    # Read and concatenate souls in precedence order (global first; project
+    # appended afterward — agent reads top-to-bottom so later overrides
+    # earlier, matching Phase 1.5 §17 project-wins semantics).
+    local soul_text=""
+    if [ -f "$global_soul" ]; then
+        soul_text="## Operator soul (global)
+
+$(cat "$global_soul")
+
+"
+    fi
+    if [ -n "$project_soul" ] && [ -f "$project_soul" ]; then
+        soul_text="${soul_text}## Operator soul (this project)
+
+$(cat "$project_soul")
+
+"
+    fi
+
+    # Find the lead agent's key. Try ids in this order:
+    #   lead-template, lead, project-lead, plus any key starting with "lead-".
+    local lead_id
+    lead_id="$(printf '%s' "$composed" | jq -r '
+        ([keys[] | select(. == "lead-template" or . == "lead" or . == "project-lead")] +
+         [keys[] | select(startswith("lead-"))])
+        | unique[0] // empty')"
+
+    if [ -z "$lead_id" ] || [ "$lead_id" = "null" ]; then
+        # No lead identified — return composed unchanged. (Some sessions
+        # may legitimately have no lead, e.g. headless dispatch tests.)
+        ct_log "agents-compose: soul splice skipped — no lead-* agent detected"
+        printf '%s' "$composed"
+        return 0
+    fi
+
+    # Splice soul_text in FRONT of the lead's prompt. Use jq's --arg to
+    # safely pass the soul text through (handles newlines, quotes, etc.).
+    printf '%s' "$composed" | jq \
+        --arg lead "$lead_id" \
+        --arg soul "$soul_text" \
+        '.[$lead].prompt = ($soul + .[$lead].prompt)'
 }
 
 # yk_agents_count <yakos-root> <project-root>

@@ -436,6 +436,64 @@ surface changes its state.
 
 ---
 
+## incident:librarian-self-congratulation-2026-05-22
+
+**Date:** 2026-05-22 (design-time constraint, not a post-incident
+record — pre-emptive entry recording a known failure mode from
+peer framework before yakOS hits it)
+**Project:** YakOS framework (Plan 3 framework-internal capabilities)
+**Severity:** P2 — would degrade skill library quality over weeks
+to months; cosmetic in the short term
+
+**Summary:** Hermes Agent (Nous Research) ships a self-authored
+`SKILL.md` Curator process. The community has documented that
+the Curator is self-congratulatory: it proposes too many skills,
+generalizes too eagerly, and praises its own observations. The
+result over time is a skill library polluted with shallow,
+paraphrastic skills — `clean-up-files`, `cleanup-files`,
+`file-cleaner`, all of which describe the agent's normal
+behavior, not reusable disciplines.
+
+**Impact:** A self-promoting librarian-equivalent in yakOS would
+degrade the framework's skill library (`lib/skills/`) and project
+skill libraries (`<project>/.claude/skills/`) with low-value
+entries that nonetheless load into session context. The
+cumulative drag on session context is the load-bearing harm.
+
+**Root cause (in peer framework):** The Curator agent's prompt
+treats every observed pattern as worthy of capture. No
+anti-promotion bias. No requirement to cite ≥N specific evidence
+points. No human-approval gate before promotion.
+
+**Prevented by:**
+- `lib/agents/librarian.md` — yakOS's analogous agent, with
+  explicit anti-self-congratulatory discipline in the
+  Personality section
+- Manual `yakos skill promote <slug>` (Plan 3 M2) — required
+  operator action before any candidate becomes a real skill
+- `lib/rules/retrospective-discipline.md` — explicit ban on
+  the lead promoting skills directly
+- `~/.yakos-state/skill-graveyard.ndjson` — repeat-rejection
+  tracking; re-proposed candidates produce a warning
+- `yakos skill stats` — promotion-to-proposal ratio surfaces
+  pathological librarian behavior
+
+**Related rules / agents / playbooks:**
+- `lib/agents/librarian.md` (new in Plan 3 M1)
+- `lib/rules/retrospective-discipline.md` (new in Plan 3 M1)
+- `lib/hooks/cycle-counter.sh` (new in Plan 3 M1)
+- `framework-internal-plan.md` §4 (Capability B — self-learning
+  skill generation)
+
+**References (external):**
+- [Hermes Agent skill-generation post](https://aiskill.market/blog/self-improving-agents-hermes-writes-skills) —
+  documents the failure mode this entry exists to prevent
+- [Voyager paper §4](https://arxiv.org/abs/2305.16291) —
+  contrasts: Voyager's self-verifier as a discipline that yakOS
+  borrows for the librarian's anti-spam stance
+
+---
+
 ## Adding new incidents
 
 When an incident concludes:

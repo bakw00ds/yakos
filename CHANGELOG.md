@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0.0] — 2026-05-22
+
+### Added — Plan 3 M1: retrospective foundation + souls
+
+First milestone of the framework-internal capabilities plan
+(`/Users/tw/agent-control/yakOS/framework-internal-plan.md`).
+Closes wishlist items: 10-cycle retrospective + souls files.
+
+**Retrospective half:**
+
+- `lib/agents/librarian.md` — meta-learner agent (Sonnet-tier).
+  Runs the 10-cycle retro: reads transcript + scratchpad tail +
+  hook logs; writes durable artifacts (lessons, mistakes,
+  skill-candidates, drift-report, soul-proposed-edits) to
+  `<work>/current/`. Personality calibrated against Hermes
+  Agent's documented self-congratulatory skill-spam failure mode
+  (see `incident:librarian-self-congratulation-2026-05-22`).
+  Reject 90% of candidate observations by default.
+- `lib/rules/retrospective-discipline.md` — always-loaded rule
+  (imported via CLAUDE.md). Tells the lead what to do when the
+  `.retro-due` marker fires: dispatch librarian, wait for
+  summary, surface one-line to operator, remove marker.
+- `lib/hooks/cycle-counter.sh` — UserPromptSubmit hook.
+  Increments `<work>/current/.cycle-count` on every prompt; at
+  every 10th cycle, touches `.retro-due` marker and emits NOTE
+  to stderr. Operator-tunable via `~/.yakos-state/settings.json`
+  `retro.cycle_length` and `retro.auto_dispatch`.
+- `lib/settings/settings.template.json` — wired the new
+  `UserPromptSubmit` event with cycle-counter. Future
+  `yakos init` invocations install the hook by default.
+
+**Souls half:**
+
+- `cli/lib/soul.sh` — soul CLI (show / edit / history / revert /
+  pending / approve / reject). Souls are two-layered:
+  `~/.yakos-state/soul/global.md` (user-global) and
+  `~/.yakos-state/soul/<project-slug>.md` (per-project; shadows
+  global per Phase 1.5 §17). Snapshots created on every edit.
+- `cli/lib/agents-compose.sh` — new `yk_agents_apply_soul()`
+  function spliced into `yk_agents_compose`. Reads soul files;
+  prepends to LEAD agent's prompt only (specialists do not see
+  souls per the narrowness-of-specialists discipline). No-op
+  when no soul files exist — preserves existing behavior for
+  users without souls.
+- `lib/settings/soul.template.md` — first-time soul template
+  with operator-fillable sections.
+
+**Retro CLI:**
+
+- `cli/lib/retro.sh` — `now / last / history / status / disable
+  / enable`. Manual cadence control alongside the automated
+  hook-driven cadence.
+
+**Dispatcher + validator:**
+
+- `cli/yakos` — `soul` and `retro` registered in subcommand
+  allowlist; help text updated.
+- `cli/lib/validate.sh` — `soul.sh` and `retro.sh` added to the
+  CLI dark-code exemption list (same as agent.sh, memory.sh,
+  etc. — dispatched via variable expansion).
+
+**Incident catalog:**
+
+- `incident:librarian-self-congratulation-2026-05-22` —
+  pre-emptive entry documenting the Hermes Agent skill-spam
+  failure mode this design explicitly prevents.
+
+Plan 3 M1 souls/approve and skill-promote/reject mechanics
+are stubbed; full operator-approval flow ships with Plan 3 M2
+(skill candidate CLI + promotion log).
+
 ## [0.12.0.0] — 2026-05-22
 
 ### Added — generic release-audit + 2 new domains (mobile, infra)
