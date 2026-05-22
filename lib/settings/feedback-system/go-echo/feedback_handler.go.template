@@ -1,0 +1,173 @@
+// yakOS Standard 4 — feedback API handler (Go + Echo).
+//
+// Drop into <project>/api/internal/handler/feedback_handler.go.
+// Adjust imports + middleware constants to match the project's auth
+// middleware. Pairs with feedback_service.go + feedback_repository.go
+// (drop alongside).
+
+package handler
+
+import (
+	"net/http"
+	"strconv"
+
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+)
+
+// FeedbackHandler exposes the feedback subsystem HTTP API.
+type FeedbackHandler struct {
+	svc FeedbackService
+}
+
+// FeedbackService is the interface this handler depends on. Implement
+// it (or wrap your existing service) — keeps the handler testable.
+type FeedbackService interface {
+	Submit(ctx context.Context, userID uuid.UUID, req SubmitFeedbackRequest) (*Feedback, error)
+	ListForUser(ctx context.Context, userID uuid.UUID, p ListParams) (*FeedbackListResult, error)
+	ListAdmin(ctx context.Context, filter FeedbackFilter, p ListParams) (*FeedbackListResult, error)
+	UpdateStatus(ctx context.Context, id uuid.UUID, status string, notes string, by uuid.UUID) (*Feedback, error)
+}
+
+// NewFeedbackHandler constructs the handler.
+func NewFeedbackHandler(svc FeedbackService) *FeedbackHandler {
+	return &FeedbackHandler{svc: svc}
+}
+
+// Submit handles POST /api/v1/feedback (any authenticated user).
+func (h *FeedbackHandler) Submit(c echo.Context) error {
+	userID, ok := c.Get("user_id").(uuid.UUID) // adjust to project's auth ctx key
+	if !ok {
+		return echo.NewHTTPError(http.StatusUnauthorized, "auth required")
+	}
+	var req SubmitFeedbackRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	f, err := h.svc.Submit(c.Request().Context(), userID, req)
+	if err != nil {
+		return mapError(c, err)
+	}
+	return c.JSON(http.StatusCreated, f)
+}
+
+// ListForUser handles GET /api/v1/feedback/me.
+func (h *FeedbackHandler) ListForUser(c echo.Context) error {
+	userID, ok := c.Get("user_id").(uuid.UUID)
+	if !ok {
+		return echo.NewHTTPError(http.StatusUnauthorized, "auth required")
+	}
+	p := parseListParams(c)
+	result, err := h.svc.ListForUser(c.Request().Context(), userID, p)
+	if err != nil {
+		return mapError(c, err)
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+// ListAdmin handles GET /api/v1/admin/feedback (admin only).
+//
+// TODO(yakos): wrap with admin-role middleware from project's auth layer.
+func (h *FeedbackHandler) ListAdmin(c echo.Context) error {
+	filter := FeedbackFilter{
+		Type:        c.QueryParam("type"),
+		Status:      c.QueryParam("status"),
+		Environment: c.QueryParam("environment"),
+		UserRole:    c.QueryParam("user_role"),
+	}
+	p := parseListParams(c)
+	result, err := h.svc.ListAdmin(c.Request().Context(), filter, p)
+	if err != nil {
+		return mapError(c, err)
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+// UpdateStatus handles PATCH /api/v1/admin/feedback/:id/status.
+func (h *FeedbackHandler) UpdateStatus(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid id")
+	}
+	by, ok := c.Get("user_id").(uuid.UUID)
+	if !ok {
+		return echo.NewHTTPError(http.StatusUnauthorized, "auth required")
+	}
+	var req struct {
+		Status     string `json:"status"`
+		AdminNotes string `json:"admin_notes,omitempty"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	f, err := h.svc.UpdateStatus(c.Request().Context(), id, req.Status, req.AdminNotes, by)
+	if err != nil {
+		return mapError(c, err)
+	}
+	return c.JSON(http.StatusOK, f)
+}
+
+// --- helpers ---
+
+func parseListParams(c echo.Context) ListParams {
+	page, _ := strconv.Atoi(c.QueryParam("page"))
+	limit, _ := strconv.Atoi(c.QueryParam("limit"))
+	if page <= 0 {
+		page = 1
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	return ListParams{Page: page, Limit: limit}
+}
+
+func mapError(c echo.Context, err error) error {
+	// Project-specific error mapping; this is a stub.
+	return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+}
+
+// --- types (move to internal/service if you prefer that layout) ---
+
+type SubmitFeedbackRequest struct {
+	Type    string `json:"type"`
+	Subject string `json:"subject"`
+	Message string `json:"message"`
+	// Optional enrichments — operator wires in UI if columns present:
+	ScreenshotURL string `json:"screenshot_url,omitempty"`
+	PageURL       string `json:"page_url,omitempty"`
+	AppVersion    string `json:"app_version,omitempty"`
+}
+
+type Feedback struct {
+	ID         uuid.UUID `json:"id"`
+	UserID     uuid.UUID `json:"user_id"`
+	Type       string    `json:"type"`
+	Subject    string    `json:"subject"`
+	Message    string    `json:"message"`
+	Status     string    `json:"status"`
+	ReviewedBy *uuid.UUID `json:"reviewed_by,omitempty"`
+	AdminNotes string    `json:"admin_notes,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+type FeedbackFilter struct {
+	Type, Status, Environment, UserRole string
+}
+
+type ListParams struct {
+	Page, Limit int
+}
+
+type FeedbackListResult struct {
+	Items []Feedback `json:"items"`
+	Total int        `json:"total"`
+	Page  int        `json:"page"`
+	Limit int        `json:"limit"`
+}
+
+// NOTE: this template omits `context` and `time` imports for brevity;
+// add them when dropping into a real project (the IDE will surface them).

@@ -7,6 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0.0] — 2026-05-22
+
+### Added — Plan 4 M3: monitors + feedback standards
+
+Third milestone of the cross-project standards plan. Closes
+wishlist items: runners/monitor systems + panda-os3.0 feedback
+system port.
+
+**Standard 3 — Monitors (rule + skill):**
+
+- `lib/rules/monitor-discipline.md` — every long-running service
+  ships with supervisor config + real `/healthz` (not no-op) +
+  documented restart runbook. References `lib/agents/sre.md`
+  + `lib/agents/devops-engineer.md`.
+- `lib/skills/monitor-scaffold/SKILL.md` — per-supervisor
+  scaffold (systemd, pm2, k8s, docker-compose). Drops in
+  supervisor config + `/healthz` stub + runbook skeleton per
+  service in `profile.monitors.targets`.
+
+**Standard 4 — Feedback (rule + skill + vendored templates):**
+
+- `lib/rules/feedback-discipline.md` — `feedback` table +
+  submit/list/update API + UI widget + CHANGELOG citation
+  closure. Codifies the cite-without-data + resolved-
+  without-citation anti-patterns first documented in
+  panda-os3.0. References
+  `incident:feedback-citation-orphans-2026-04-28`.
+- `lib/skills/feedback-scaffold/SKILL.md` — DB migration +
+  API + UI + admin-page scaffold per stack
+  (`--db postgres|mysql|sqlite`,
+  `--backend go-echo|node-express|node-nest|python-fastapi`,
+  `--frontend react|vue|svelte`, `--with-screenshot`,
+  `--with-admin-page`). Most opinionated scaffold in the
+  standards bucket; auto-deselects for `library`/`cli-tool`/
+  `data-pipeline` profile types.
+- `lib/settings/feedback-system/postgres/feedback.up.sql.template`
+  — base schema (essentials + optional-enrichment ALTERs
+  commented).
+- `lib/settings/feedback-system/postgres/feedback.down.sql.template`
+  — rename-to-archive (not drop, per discipline rule —
+  user-submitted data is not safely re-creatable).
+- `lib/settings/feedback-system/go-echo/feedback_handler.go.template`
+  — Echo handler skeleton with Submit / ListForUser /
+  ListAdmin / UpdateStatus.
+- `lib/settings/feedback-system/web-react/FeedbackPanel.tsx.template`
+  — React submit panel skeleton with type/subject/message
+  + screenshot TODO.
+
+The vendored templates are cleanly-authored generic shapes
+based on the panda-os3.0 design (with the operator's
+permission to reference it). The yakOS framework does NOT
+ship Jwelkin LLC proprietary code; templates are
+independently-authored starting points for operator projects.
+
+**Audit-time enforcement (playbook extensions):**
+
+- `lib/playbooks/02-code-quality.md` — new `## §Feedback
+  wiring` section. Detects feedback table absence (P1),
+  endpoint absence (P1), widget absence (P2),
+  cite-without-data orphans (P1 per unmatched citation),
+  resolved-without-citation orphans (P3 per row). Composes
+  with already-shipped `lib/hooks/per-domain/changelog-validate.sh`.
+- `lib/playbooks/08-infra-deploy-deps.md` — new `## §Monitor
+  presence` section. Detects supervisor config absence (P1),
+  `/healthz` absence (P1), no-op healthcheck (P2), restart
+  policy absence (P2), runbook absence (P3).
+
+**Incident catalog:**
+
+- `incident:feedback-citation-orphans-2026-04-28` — documents
+  the panda-os3.0 backfill that discovered cite-without-data
+  + resolved-without-citation at scale (~280 records).
+  Defines the design constraint for yakOS's feedback Standard.
+
+Standards 1–6 are now ALL shipped (logging + changelog-ui +
+monitors + feedback + architecture-viz + about-page).
+`yakos standards` CLI deferred to Plan 4 M4. Operator opts
+in via direct `.yakos.yml` edit.
+
 ## [0.19.0.0] — 2026-05-22
 
 ### Added — Plan 4 M2: changelog-ui + architecture-viz standards

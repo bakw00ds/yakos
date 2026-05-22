@@ -1,0 +1,40 @@
+-- yakOS Standard 4 — feedback system base migration (Postgres).
+--
+-- Drop into <project>/<migrations-dir>/<NNN>_feedback.up.sql where NNN is
+-- the next available 3-digit migration number for the project.
+--
+-- Schema essentials (operator opts in to enrichments via follow-up
+-- migrations — see skill:feedback-scaffold for the additive ALTER set).
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    type        VARCHAR(20) NOT NULL
+                CHECK (type IN ('bug', 'feature', 'other')),
+    subject     VARCHAR(500) NOT NULL,
+    message     TEXT NOT NULL,
+    status      VARCHAR(20) NOT NULL DEFAULT 'new'
+                CHECK (status IN ('new', 'reviewed', 'in_progress',
+                                  'resolved', 'dismissed')),
+    reviewed_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    admin_notes TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_user    ON feedback(user_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_status  ON feedback(status);
+CREATE INDEX IF NOT EXISTS idx_feedback_type    ON feedback(type);
+CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback(created_at);
+
+-- Optional enrichments (uncomment to include at migration time, or run
+-- as a follow-up additive migration):
+--
+-- ALTER TABLE feedback ADD COLUMN screenshot_url TEXT;
+-- ALTER TABLE feedback ADD COLUMN page_url       TEXT;
+-- ALTER TABLE feedback ADD COLUMN app_version    VARCHAR(20);
+-- ALTER TABLE feedback ADD COLUMN browser        VARCHAR(255);
+-- ALTER TABLE feedback ADD COLUMN os             VARCHAR(255);
+-- ALTER TABLE feedback ADD COLUMN user_role      VARCHAR(20);
+-- ALTER TABLE feedback ADD COLUMN environment    VARCHAR(20);
+-- ALTER TABLE feedback ADD COLUMN platform       VARCHAR(20) DEFAULT 'web';

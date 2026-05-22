@@ -494,6 +494,68 @@ points. No human-approval gate before promotion.
 
 ---
 
+## incident:feedback-citation-orphans-2026-04-28
+
+**Date:** 2026-04-28 (panda-os3.0 backfill discovery; folded into
+yakOS as a cross-project design constraint 2026-05-22)
+**Project:** panda-os3.0 (source); yakOS framework (lessons)
+**Severity:** P2 — audit-trail completeness; not user-visible
+
+**Summary:** At ~280 feedback records, two distinct
+audit-trail failure modes were discovered in panda-os3.0's
+feedback citation pattern:
+
+1. **Cite-without-data**: CHANGELOG entries citing
+   `Feedback #<8hex>` where no feedback row existed with that
+   prefix. Causes observed: typo'd hex; feedback record deleted
+   after citation written; citation written before the feedback
+   row was committed.
+2. **Resolved-without-citation**: feedback rows with
+   `status = 'resolved'` but no CHANGELOG entry citing the row's
+   8-hex prefix. Cause: developer marked the row resolved but
+   skipped the changelog update.
+
+Both modes silently degrade the user-facing audit trail:
+users who reported issues didn't see their reports in the
+changelog when fixed; the framework's "feedback drives
+changelog" loop was broken.
+
+**Impact:** Loss of the closure-of-loop social contract with
+users who took the time to submit feedback. No technical
+downstream consequence, but a meaningful trust signal eroded
+over months of accumulating orphans.
+
+**Root cause:** Citation pattern was a human-discipline-only
+convention. No git-layer enforcement existed at the time;
+`lib/hooks/per-domain/changelog-validate.sh` was added v2.91.1
+(panda numbering) after this incident as a partial fix
+(enforces citation presence at the git boundary; doesn't
+catch cite-without-data orphans).
+
+**Prevented by:**
+- `lib/hooks/per-domain/changelog-validate.sh` (already shipped
+  in yakOS) — enforces "every BE-only change cites a feedback
+  ID or `[no-feedback]`" at the git layer
+- `lib/rules/feedback-discipline.md` (this milestone) — codifies
+  the closure-of-loop discipline for projects that opt into
+  Standard 4
+- `lib/playbooks/02-code-quality.md` §Feedback wiring (this
+  milestone) — release-audit catches both orphan modes via DB
+  reconciliation
+- panda-os3.0 `deploy/sql/backfill-orphan-feedback-resolutions.sql`
+  — the SQL backfill that initially discovered the at-scale
+  failure mode
+
+**Related rules / agents / playbooks:**
+- `lib/rules/feedback-discipline.md`
+- `lib/rules/changelog-ui-discipline.md` (composes — citation
+  link in UI)
+- `lib/hooks/per-domain/changelog-validate.sh`
+- `lib/playbooks/02-code-quality.md` §Feedback wiring
+- `cross-project-standards-plan.md` §6
+
+---
+
 ## Adding new incidents
 
 When an incident concludes:

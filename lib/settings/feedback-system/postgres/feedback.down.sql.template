@@ -1,0 +1,13 @@
+-- yakOS Standard 4 — feedback system rollback (Postgres).
+--
+-- Down migrations should preserve data when possible. Per
+-- rule:feedback-discipline, dropping the feedback table on rollback is
+-- forbidden — users' reports are not safely re-creatable.
+--
+-- Default behavior: rename to archive table. Operator may comment out
+-- the rename and use DROP if recreating in dev.
+
+ALTER TABLE feedback RENAME TO feedback_archived;
+
+-- Uncomment ONLY in dev to fully drop:
+-- DROP TABLE IF EXISTS feedback;

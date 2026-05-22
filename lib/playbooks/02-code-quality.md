@@ -216,3 +216,61 @@ in its `.yakos.yml` (`profile.standards.logging: true`). See
 If audit finds no logger module but `profile.standards.logging
 == true`, surface the recommendation to run
 `skill:logging-scaffold`.
+
+## §Feedback wiring (gated on profile.standards.feedback)
+
+Audit checks fire only when the project has opted into Standard 4
+in its `.yakos.yml` (`profile.standards.feedback: true`). See
+`rule:feedback-discipline` and `skill:feedback-scaffold`.
+
+### Automated checks
+
+- **`feedback` table exists** in the project's DB schema. Detect
+  by scanning `<migrations-dir>/*feedback*.up.sql` (or
+  equivalent). Severity: **P1** if absent.
+
+- **Feedback submit endpoint exists.** Grep for `POST .* feedback`
+  route registrations in handler files. Severity: **P1** if
+  absent.
+
+- **Feedback widget exists in frontend.** Grep for
+  `FeedbackPanel` or `Feedback` component in `src/components/`
+  (or equivalent). Severity: **P2** if absent.
+
+- **Cite-without-data orphans.** For every `Feedback #<8hex>`
+  citation in `CHANGELOG.md`, verify a matching feedback row
+  exists with `id::text LIKE '<8hex>%'`. Requires DB query
+  capability during audit; falls back to "manual verification
+  required" if DB not accessible.  Severity: **P1** per
+  unmatched citation.
+
+- **Resolved-without-citation orphans.** For every feedback
+  row with `status = 'resolved'`, look for a CHANGELOG entry
+  citing the row's 8-hex prefix. Severity: **P3** per
+  unmatched resolved row (audit-trail gap).
+
+### Manual checks
+
+- **Citation pattern enforced at git layer.** Verify
+  `lib/hooks/per-domain/changelog-validate.sh` is installed
+  and active (project copies it to `<repo>/scripts/hooks/`).
+  Severity: **P2** if absent; **P3** if installed but bypassed
+  frequently (check `~/.yakos-state/gate-log.ndjson` for
+  override frequency).
+
+- **Status transitions valid.** Verify the project's
+  update-status code enforces the allowed transition table
+  (per `rule:feedback-discipline`). Specifically: terminal
+  states (`resolved`, `dismissed`) should not silently
+  transition back to `new`. Severity: **P2**.
+
+- **Admin reviewer page wired.** If the project ships an admin
+  surface, the feedback list+filter UI exists at
+  `/admin/feedback`. Severity: **P3** if absent and
+  `--with-admin-page` was used at scaffold time.
+
+### Skill scaffold
+
+If audit finds no feedback subsystem but
+`profile.standards.feedback == true`, surface the
+recommendation to run `skill:feedback-scaffold`.

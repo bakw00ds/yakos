@@ -1,0 +1,150 @@
+// yakOS Standard 4 — feedback submit panel (React).
+//
+// Drop into <project>/web/src/components/FeedbackPanel.tsx (or your
+// project's component path). Adjust API client + auth store imports
+// to match the project.
+
+"use client";
+
+import { useState, useEffect, useRef } from "react";
+
+type FeedbackType = "bug" | "feature" | "other";
+
+const FEEDBACK_TYPES: { value: FeedbackType; label: string }[] = [
+  { value: "bug", label: "Bug" },
+  { value: "feature", label: "Feature" },
+  { value: "other", label: "Other" },
+];
+
+interface FeedbackPanelProps {
+  open: boolean;
+  onClose: () => void;
+  // TODO: wire to your project's API client.
+  // Expected shape:
+  //   submitFeedback({ type, subject, message }) → Promise<{ id }>
+  submitFeedback?: (req: {
+    type: FeedbackType;
+    subject: string;
+    message: string;
+  }) => Promise<{ id: string }>;
+}
+
+export function FeedbackPanel({
+  open,
+  onClose,
+  submitFeedback,
+}: FeedbackPanelProps) {
+  const [type, setType] = useState<FeedbackType>("bug");
+  const [subject, setSubject] = useState("");
+  const [message, setMessage] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // Reset form when opened.
+  useEffect(() => {
+    if (open) {
+      setType("bug");
+      setSubject("");
+      setMessage("");
+      setError(null);
+    }
+  }, [open]);
+
+  // Close on Escape.
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!subject.trim() || !message.trim()) {
+      setError("Subject and message are required.");
+      return;
+    }
+    if (!submitFeedback) {
+      setError("Feedback API not wired. See FeedbackPanel.tsx props.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await submitFeedback({ type, subject, message });
+      onClose();
+      // TODO: toast notification — wire to your project's toast system.
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Submission failed");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="feedback-panel-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="feedback-panel-title"
+    >
+      <div className="feedback-panel" ref={panelRef}>
+        <header>
+          <h2 id="feedback-panel-title">Send feedback</h2>
+          <button type="button" onClick={onClose} aria-label="Close">×</button>
+        </header>
+        <form onSubmit={handleSubmit}>
+          <fieldset>
+            <legend>Type</legend>
+            {FEEDBACK_TYPES.map((t) => (
+              <label key={t.value}>
+                <input
+                  type="radio"
+                  name="type"
+                  value={t.value}
+                  checked={type === t.value}
+                  onChange={() => setType(t.value)}
+                />
+                {t.label}
+              </label>
+            ))}
+          </fieldset>
+          <label>
+            Subject
+            <input
+              type="text"
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+              maxLength={500}
+              required
+            />
+          </label>
+          <label>
+            Message
+            <textarea
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              rows={6}
+              required
+            />
+          </label>
+          {/* TODO: screenshot capture — wire to your project's storage
+              (S3 / GCS / local + signed URL). See feedback-scaffold
+              skill's Known Gotchas. */}
+          {error && <p className="error">{error}</p>}
+          <div className="actions">
+            <button type="button" onClick={onClose}>Cancel</button>
+            <button type="submit" disabled={submitting}>
+              {submitting ? "Sending…" : "Send"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}

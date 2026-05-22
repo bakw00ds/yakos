@@ -276,6 +276,64 @@ Severity heuristics:
 - Stale doc references in runbooks, missing one-of-many CI matrix →
   **P3**
 
+## §Monitor presence (gated on profile.standards.monitors)
+
+Audit checks fire only when the project has opted into Standard 3
+in its `.yakos.yml` (`profile.standards.monitors: true`). See
+`rule:monitor-discipline` and `skill:monitor-scaffold`.
+
+### Automated checks
+
+- **Supervisor config per target service.** For each service
+  in `profile.monitors.targets`, look for at least one of:
+  `deploy/systemd/<service>.service`, an entry in
+  `ecosystem.config.js`/`.json` (pm2), a Deployment yaml in
+  `deploy/k8s/` referencing the service name, or a
+  `docker-compose.yml` service entry. Severity: **P1** if
+  absent.
+
+- **`/healthz` (or `/health`, `/ready`) endpoint present.** Grep
+  handler / route files for the literal path. Severity: **P1**
+  if absent in a target service.
+
+- **Healthcheck is not a one-line return.** Read the
+  healthcheck handler body; if it's a single literal
+  `return 200` / `c.JSON(200, "ok")` / `res.send("ok")`
+  with no actual liveness check (no DB ping, no downstream
+  test), flag. Severity: **P2**.
+
+- **Supervisor restart policy declared.** systemd unit has
+  `Restart=...` directive; pm2 has `autorestart: true`; k8s
+  has restart policy; docker-compose has `restart:`. Severity:
+  **P2** if absent (Manual-only restart is fine for short-lived
+  jobs but suspect for services in `profile.monitors.targets`).
+
+- **Runbook exists.** Look for
+  `docs/runbooks/<service>-runbook.md` or `RUNBOOK.md` at
+  repo root with a section per target service. Severity: **P3**
+  per service without a runbook.
+
+### Manual checks
+
+- **Healthcheck checks actual dependencies.** The handler
+  pings the DB, verifies queue accessibility, confirms
+  downstream services reachable. Severity: **P2** per
+  service whose healthcheck skips obvious deps.
+
+- **Initial-delay tuning.** k8s `initialDelaySeconds` is at
+  least 30 for slow-starting services (boot migrations,
+  warm cache, etc.). Severity: **P3** if tuned too tight.
+
+- **Drain procedure documented.** Runbook covers graceful
+  shutdown (SIGTERM handling, in-flight request drain,
+  load-balancer deregistration). Severity: **P3** if not
+  documented.
+
+### Skill scaffold
+
+If audit finds gaps but `profile.standards.monitors == true`,
+surface the recommendation to run `skill:monitor-scaffold`.
+
 ## Known gotchas (cross-project)
 
 - **Edge tunnel restarts cause transient instability.** Each restart
