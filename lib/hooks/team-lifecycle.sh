@@ -74,10 +74,93 @@ emit_event() {
     ho_log "team-lifecycle" "REPORT" "pass" "team-lifecycle: $event" "$extra"
 }
 
+# Kanban auto-update (Plan 3 M4). Moves the first matching task block from
+# one column to another in <work>/current/kanban.md. No-op if file doesn't
+# exist (project hasn't opted into kanban). NEVER throws — telemetry hook.
+#
+# Args: <src-column> <dst-column> <new-checkbox-char>
+#   src-column: "TODO" | "IN PROGRESS" | "DONE"
+#   dst-column: same
+#   new-checkbox-char: " " | "-" | "x"
+kanban_move_first() {
+    local src="$1" dst="$2" cbox="$3"
+    local kb="$current_dir/kanban.md"
+    [ -f "$kb" ] || return 0
+
+    local tmp
+    tmp="$(mktemp -t yakos-kb.XXXXXX)" || return 0
+
+    awk -v src="$src" -v dst="$dst" -v cbox="$cbox" '
+        # Captured task block stored in `task_buf`; emitted when we hit dst section.
+        BEGIN { state = "scan"; task_first = ""; task_rest = ""; moved = 0 }
+
+        # Source section header — start scanning for first task line.
+        $0 ~ "^## " src "[[:space:]]*$" {
+            print; state = "in_src"; next
+        }
+
+        # Inside source section: first "- [<x>] " line is the task to capture.
+        state == "in_src" && !moved && /^- \[/ {
+            task_first = $0
+            state = "capturing_cont"
+            next
+        }
+
+        # Continuation lines of the captured task (indented 2+ spaces).
+        state == "capturing_cont" && /^  / {
+            task_rest = task_rest $0 "\n"
+            next
+        }
+
+        # End of captured task block (non-indent, non-task line); emit nothing,
+        # transition back to in_src to pass through the rest.
+        state == "capturing_cont" {
+            moved = 1
+            state = "in_src"
+            # fall through to normal print of current line
+        }
+
+        # Any new section ends the in_src state.
+        /^## / && state == "in_src" {
+            state = "scan"
+        }
+
+        # Destination section: print header, then re-insert task block with new checkbox.
+        $0 ~ "^## " dst "[[:space:]]*$" {
+            print
+            if (moved) {
+                # Replace first "- [<any>]" with "- [<cbox>]"
+                line = task_first
+                sub(/^- \[.\]/, "- [" cbox "]", line)
+                print line
+                if (length(task_rest) > 0) printf "%s", task_rest
+                moved_emitted = 1
+            }
+            next
+        }
+
+        # Default: pass through.
+        { print }
+
+        END {
+            # If we captured but didnt emit (src found, dst missing), best
+            # not to drop the task — emit a warning marker.
+            if (moved && !moved_emitted) {
+                print "# WARN: yakos kanban auto-update found src but no dst section"
+                print task_first
+                printf "%s", task_rest
+            }
+        }
+    ' "$kb" > "$tmp" 2>/dev/null && mv "$tmp" "$kb" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+}
+
 case "$tool" in
     TeamCreate)
         team_name="$(printf '%s' "$tool_input" | jq -r '.name // empty' 2>/dev/null || true)"
         emit_event "team_created"
+
+        # Plan 3 M4 — kanban auto-update: first TODO task → IN PROGRESS.
+        kanban_move_first "TODO" "IN PROGRESS" "-" 2>/dev/null || true
 
         # .session-started — overwrite with current ts
         started_file="$(yakos_session_started_file)"
@@ -104,6 +187,9 @@ case "$tool" in
     TeamDelete)
         team_name="$(printf '%s' "$tool_input" | jq -r '.name // empty' 2>/dev/null || true)"
         emit_event "team_deleted"
+
+        # Plan 3 M4 — kanban auto-update: first IN PROGRESS task → DONE.
+        kanban_move_first "IN PROGRESS" "DONE" "x" 2>/dev/null || true
 
         sessions_log="$(yakos_sessions_log_file)"
         history_file="$(yakos_session_history_file)"

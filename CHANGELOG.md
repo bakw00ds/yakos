@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0.0] — 2026-05-22
+
+### Added — Plan 3 M4: kanban scratchpad
+
+Fourth milestone of the framework-internal capabilities plan.
+Closes wishlist item: kanban for projects yakOS builds.
+
+**New CLI:**
+
+- `cli/lib/kanban.sh` — `yakos kanban {(no-args→render), --html
+  [<out>], add "<title>", move <id> <col>, done <id>}`. Three
+  columns (TODO / IN PROGRESS / DONE) maintained as plain
+  markdown in `<work>/current/kanban.md`. Operator manages
+  manually via `add` / `move`; the team-lifecycle hook
+  auto-progresses tasks on team lifecycle events.
+
+**Auto-update from team-lifecycle hook:**
+
+- `lib/hooks/team-lifecycle.sh` extended with `kanban_move_first`
+  helper that block-moves the first task from one column to
+  another. Triggers:
+  - **TeamCreate** → first `## TODO` task → `## IN PROGRESS`
+    with checkbox `[ ] → [-]`
+  - **TeamDelete** → first `## IN PROGRESS` task → `## DONE`
+    with checkbox `[-] → [x]`
+  - **Agent** spawn → no kanban change (subagent within active
+    team)
+  Auto-update is a no-op if `<work>/current/kanban.md` doesn't
+  exist (project hasn't opted in). Failures are silenced —
+  telemetry hook never blocks user work.
+
+**New rule:**
+
+- `lib/rules/kanban-discipline.md` — always-loaded. Tells the
+  lead when to write to the kanban (pre-dispatch; on scope
+  discovery; on blocker identification), when NOT to write
+  (mid-tool-call; internal sub-tasks; bouncing tasks between
+  columns), and the anti-patterns to avoid (over-granular
+  TODOs; stale DONE accumulation).
+
+**New skill:**
+
+- `lib/skills/kanban-tend/SKILL.md` — encapsulates the lead's
+  kanban-maintenance discipline. Triggered pre-dispatch,
+  periodically (every retrospective cycle), and at archive
+  time. Composes with the team-lifecycle auto-update.
+
+**Wiring:**
+
+- `cli/yakos` — `kanban` registered in subcommand allowlist;
+  help text updated.
+- `cli/lib/validate.sh` — `kanban.sh` added to dark-code
+  exemption.
+
+Multi-dev kanban sharing across the coord dir is deferred to
+a follow-on plan (framework-internal §16.4) once both Plan 3
+M4 and the multi-dev coord plan (rosy-crafting-candy) ship.
+
 ## [0.15.0.0] — 2026-05-22
 
 ### Added — Plan 3 M3: context-window management

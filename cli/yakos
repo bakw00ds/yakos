@@ -92,6 +92,9 @@ Project bootstrap / launch / inspection:
                   Args: now | threshold [N] | history
     checkpoint    Session-state snapshots for rewind (v0.15+).
                   Args: now | list | resume <id> | clean [--age <days>]
+    kanban        Manage 3-column markdown WIP board (v0.16+).
+                  Args: (none for render) | --html [<out>] | add "<title>"
+                        | move <id> <col> | done <id>
     validate      Schema + reference validation (framework or project)
                   Args: [<project-path>] [--all]
     archive       Roll work/current/ into work/archive/<tag>/
@@ -197,7 +200,7 @@ case "$cmd" in
     -v | --version)
         echo "yakos $YAKOS_VERSION"
         ;;
-    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach | soul | retro | skill | compact | checkpoint)
+    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach | soul | retro | skill | compact | checkpoint | kanban)
         script="$YAKOS_LIB/${cmd}.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"
