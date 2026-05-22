@@ -112,6 +112,10 @@ Project bootstrap / launch / inspection:
                   See docs/mcp-integration.md.
     completion    Emit / install shell tab-completion for the yakos CLI
                   (v0.32+). Args: bash | zsh | install (auto-detects shell)
+    supervise     Manage the live shadow-agent supervisor that watches the
+                  lead for drift / accuracy / intent (v0.33+).
+                  Args: enable | disable | status | tail [--watch] | clear
+                  See docs/supervisor-mode.md.
     validate      Schema + reference validation (framework or project)
                   Args: [<project-path>] [--all]
     archive       Roll work/current/ into work/archive/<tag>/
@@ -217,7 +221,7 @@ case "$cmd" in
     -v | --version)
         echo "yakos $YAKOS_VERSION"
         ;;
-    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach | soul | retro | skill | compact | checkpoint | kanban | env | standards | peer | quickstart | mcp | completion)
+    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach | soul | retro | skill | compact | checkpoint | kanban | env | standards | peer | quickstart | mcp | completion | supervise)
         script="$YAKOS_LIB/${cmd}.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"

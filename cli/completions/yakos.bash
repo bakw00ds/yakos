@@ -29,7 +29,7 @@ _yakos() {
     local top_cmds="quickstart install uninstall update init doctor validate \
 archive status team start auth dispatch memory agent agents cost session \
 migrate plugin teach soul retro skill compact checkpoint kanban env standards \
-peer mcp hooks version-bump git-hooks completion --help --version -h -v help"
+peer mcp hooks version-bump git-hooks completion supervise --help --version -h -v help"
 
     # Known runtimes — used for --runtime, auth, etc.
     local runtimes="claude claude-sdk codex agy antigravity-sdk gemini"
@@ -208,6 +208,13 @@ peer mcp hooks version-bump git-hooks completion --help --version -h -v help"
             if [ "$cword" -eq 2 ]; then
                 # shellcheck disable=SC2207
                 COMPREPLY=( $(compgen -W "bash zsh install" -- "$cur") )
+                return 0
+            fi
+            ;;
+        supervise)
+            if [ "$cword" -eq 2 ]; then
+                # shellcheck disable=SC2207
+                COMPREPLY=( $(compgen -W "enable disable status tail clear" -- "$cur") )
                 return 0
             fi
             ;;

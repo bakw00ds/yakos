@@ -7,6 +7,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0.0] — 2026-05-22
+
+### Added — Live shadow-agent supervisor (drift / accuracy / intent monitoring)
+
+A second agent now runs in parallel to the lead, watches recent tool
+calls, and judges drift on a four-axis rubric (intent alignment /
+factual accuracy / hard-control respect / scope risk). On CRITICAL
+findings in active mode (default), the lead's next tool call is
+blocked with actionable bypass options.
+
+This is the "live shadow-agent" pattern, distinct from yakOS's
+existing after-the-fact `librarian` agent (which curates skill
+candidates from completed sessions). Both reference the
+anti-Hermes-spam discipline; the supervisor inherits the
+"PASS-when-uncertain" posture so false-positive blocks stay low.
+
+Disabled by default. Opt in per-project via `yakos supervise enable`
+or `.yakos.yml` `supervisor.enabled: true`.
+
+**New agent:**
+
+- `lib/agents/supervisor.md` — Sonnet-tier judge (`model: balanced`,
+  resolves to whatever sonnet is current per runtime). Tools-restricted
+  to Read + Grep — supervisor never edits code. Detection only.
+
+**New hooks:**
+
+- `lib/hooks/supervisor-stream.sh` — PostToolUse. Appends every tool
+  call to a rolling 50-entry buffer at
+  `work/current/supervisor-buffer.ndjson`. Increments
+  `.supervisor-counter`. Every Nth call (default 10), forks a
+  background supervisor dispatch via `nohup`/`disown` — never blocks
+  the lead. Respects `YAKOS_SUPERVISOR_DISABLE=1` env + `.yakos.yml`
+  `supervisor.enabled: false`.
+- `lib/hooks/supervisor-gate.sh` — PreToolUse. Reads most-recent
+  finding from `supervisor-findings.ndjson`. PASS → allow; WARN →
+  stderr-surface once per finding + allow; CRITICAL → block (rc=2)
+  with actionable message, unless: (a) `block_on_critical: false`
+  (passive mode); (b) `hook-bypass.md` has an entry with
+  `Scope: finding=<ts>`; (c) `YAKOS_SUPERVISOR_DISABLE=1` env set.
+
+**New CLI:**
+
+- **`yakos supervise`** — `enable | disable | status | tail [--watch] |
+  clear`. enable/disable safely toggle `.yakos.yml`
+  `supervisor.enabled` (uses awk to preserve other keys; appends a
+  fresh block if absent). status shows config + buffer + counter +
+  recent findings. tail follows new findings. clear wipes runtime
+  state (buffer/findings/counter) but preserves config.
+
+**Wired into settings.template.json:**
+
+- supervisor-gate.sh added to PreToolUse Edit|Write|MultiEdit chain
+  between path-log and peer-claim
+- supervisor-stream.sh added to a new PostToolUse matcher: "*" (all
+  tools), so the buffer captures the lead's full activity, not just
+  file edits
+
+**Config schema (`.yakos.yml`):**
+
+```yaml
+supervisor:
+  enabled: true               # opt in
+  runtime: claude             # which runtime dispatches the supervisor
+  agent: supervisor           # framework agent id; rarely overridden
+  score_every_n_calls: 10     # cost vs latency tradeoff
+  block_on_critical: true     # active mode; false = surface-only
+```
+
+Template at `lib/settings/yakos.yml.template` updated with a
+commented-out supervisor block so operators see the schema.
+
+**Tab completion + dispatcher wiring:**
+
+- `yakos supervise <TAB>` completes to `enable / disable / status /
+  tail / clear` in both bash + zsh
+- `cli/yakos` dispatcher accepts `supervise` as a top-level command
+- Help text updated
+
+**Documentation:**
+
+- New `docs/supervisor-mode.md` — full operator guide (~250 lines):
+  why-this-exists, how-it-works flow diagram, the four-axis rubric,
+  setup, configuration, common commands, what happens on CRITICAL,
+  cost estimates, limitations, troubleshooting.
+
+**End-to-end test:**
+
+- **NEW `tests/run-supervisor-e2e.sh`** — 10 scenarios covering
+  stream behavior (3) + fork triggering (1) + gate behavior on
+  PASS/WARN/CRITICAL (3) + env/config/bypass override paths (3).
+  **11/11 passing** (the +1 comes from sub-checks; see test output).
+  Uses a fake-yakos CLI to verify the fork without actually
+  invoking a real LLM dispatch (no API cost in CI).
+
+**Verified this session:**
+
+- All 11 supervisor e2e scenarios pass
+- Multi-dev e2e regression: still 10/10
+- `yakos validate --strict`: 0 errors / 0 warnings
+- Hooks honor env override (`YAKOS_SUPERVISOR_DISABLE=1`) at both
+  stream and gate
+- Hooks honor `.yakos.yml` `supervisor.enabled: false`
+- Gate honors `block_on_critical: false` (passive mode)
+- Gate honors `hook-bypass.md` `Scope: finding=<ts>`
+
+**Note on the Hermes comparison:**
+
+Hermes Agent (Nous Research, MIT-licensed) is a single
+self-improving agent, NOT a supervisor pattern. The "anti-Hermes-spam
+discipline" yakOS uses (originally for the librarian agent, now
+inherited by the supervisor) refers to Hermes's known failure mode
+of over-eager autonomous skill creation. The supervisor pattern
+itself is a yakOS-specific addition.
+
 ## [0.32.0.0] — 2026-05-22
 
 ### Added — Tab completion + README refresh

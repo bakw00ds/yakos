@@ -51,6 +51,23 @@ profile:
   # changelog-ui:
   #   component_path: web/src/components/Changelog.tsx
 
+# ---- supervisor mode (v0.33+) ----------------------------------------------
+# A live shadow agent that watches the lead's tool calls and judges
+# drift / accuracy / intent. Fires every score_every_n_calls on a
+# cheaper runtime than the lead. See docs/supervisor-mode.md.
+#
+# Disabled by default — opt in by flipping enabled to true.
+#
+# supervisor:
+#   enabled: true
+#   runtime: claude                # which runtime to dispatch supervisor on
+#   agent: supervisor              # agent file id (rarely overridden)
+#   score_every_n_calls: 10        # cost vs latency tradeoff
+#   block_on_critical: true        # active mode; false = surface-only
+#
+# Emergency bypass (any session):
+#   export YAKOS_SUPERVISOR_DISABLE=1
+
 # ---- environment workflows (Plan 3 M5 / v0.17+) ----------------------------
 # Uncomment + customize to enable dev→test→prod promotion gates.
 #

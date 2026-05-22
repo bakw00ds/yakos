@@ -21,11 +21,15 @@
     "PreToolUse": [
       {
         "matcher": "Edit|Write|MultiEdit",
-        "_doc_hook_order": "telemetry-first (path-log preserves audit even when later hooks block), then ascending by cost. peer-claim is cheap FS lookup; path-allowlist is cheap JSON lookup; secret-scan is most expensive (regex over full content).",
+        "_doc_hook_order": "telemetry-first (path-log preserves audit even when later hooks block), then ascending by cost. supervisor-gate is cheap FS lookup; peer-claim is cheap FS lookup; path-allowlist is cheap JSON lookup; secret-scan is most expensive (regex over full content).",
         "hooks": [
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/path-log.sh"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/supervisor-gate.sh"
           },
           {
             "type": "command",
@@ -68,6 +72,16 @@
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/peer-claim-confirm.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "_doc": "v0.33 supervisor: stream every tool call to the rolling buffer; every N calls fork the supervisor dispatch. No-op when supervisor not enabled in .yakos.yml.",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/supervisor-stream.sh"
           }
         ]
       }

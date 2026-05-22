@@ -52,6 +52,7 @@ _yakos() {
         'version-bump:bump VERSION + prepend CHANGELOG entry'
         'git-hooks:install/uninstall pre-push version gate'
         'completion:emit/install shell completion scripts'
+        'supervise:manage the live shadow-agent supervisor'
     )
 
     runtimes=(claude claude-sdk codex agy antigravity-sdk gemini)
@@ -163,6 +164,12 @@ _yakos() {
                     if (( CURRENT == 2 )); then
                         _values 'completion subcommand' \
                             'bash' 'zsh' 'install'
+                    fi
+                    ;;
+                supervise)
+                    if (( CURRENT == 2 )); then
+                        _values 'supervise subcommand' \
+                            'enable' 'disable' 'status' 'tail' 'clear'
                     fi
                     ;;
                 hooks)
