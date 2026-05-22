@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0.0] — 2026-05-22
+
+### Added — Plan 3 M3: context-window management
+
+Third milestone of the framework-internal capabilities plan.
+Closes wishlist item: research memories at 60–75% threshold.
+Ships in three tiers: hook + compact CLI (M3.1), checkpoint
+CLI (M3.2), paged-memory design sketch (M3.3, no code).
+
+**Tier 1 (M3.1) — proactive threshold hook + compact CLI:**
+
+- `lib/hooks/context-threshold.sh` — UserPromptSubmit hook.
+  Probes token usage from the active runtime's transcript at
+  every prompt. At 75% (default): emits NOTE recommending
+  `yakos compact now`. At 90% (default): emits STRONG warning
+  AND auto-creates a checkpoint at `<work>/current/checkpoints/<iso>/`
+  preserving plan.md / decisions.md / contracts.md / status.md.
+  Thresholds operator-tunable via
+  `~/.yakos-state/settings.json` `context_thresholds.{notice,warning}`.
+  Per-runtime probe: claude transcript-size heuristic shipped;
+  codex / agy report `probe_unavailable` (added in follow-on).
+- `cli/lib/compact.sh` — `yakos compact {now, threshold [N],
+  history}`. `now` currently prints the `/compact` slash command
+  for operator paste (tmux send-keys integration deferred to v2
+  per master-sequencing). Threshold subcommand tunes the notice
+  level in `~/.yakos-state/settings.json`. History reads
+  `~/.yakos-state/compact-log.ndjson`.
+
+**Tier 2 (M3.2) — checkpoint subsystem:**
+
+- `cli/lib/checkpoint.sh` — `yakos checkpoint {now, list, resume
+  <id>, clean [--age <days>]}`. Checkpoints land at
+  `<work>/current/checkpoints/<iso>/` with `summary.md` (librarian-
+  written placeholder in M3.2; full librarian integration in
+  M3.2 follow-on), `scratchpad/` copy, `token-snapshot.txt`,
+  `session-id.txt`, `manifest.json`. `resume <id>` issues a
+  `--fork-session <session-id>` command via the active runtime.
+  `clean --age <days>` GCs checkpoints older than the
+  threshold (default 30 days).
+
+**Tier 3 (M3.3) — paged-memory design sketch (NO CODE):**
+
+- `docs/architecture/paged-memory-design.md` — design doc for
+  future Letta-style three-tier memory (core / recall /
+  archival) via an MCP server. Includes decision criteria for
+  when to ship Tier 3 (≥3 months of Tier 1+2 usage data; ≥5
+  documented context-overflow incidents; etc.). Defer-by-design
+  until real usage data justifies the complexity.
+
+**Wiring:**
+
+- `lib/settings/settings.template.json` — added
+  `context-threshold.sh` to the existing `UserPromptSubmit`
+  hook array (runs alongside `cycle-counter.sh`). Order:
+  cycle-counter first (cheap counter increment); context-threshold
+  second (transcript-size probe).
+- `cli/yakos` — `compact` and `checkpoint` registered in
+  subcommand allowlist; help text updated.
+- `cli/lib/validate.sh` — `compact.sh` and `checkpoint.sh`
+  added to dark-code exemption.
+
+**Token-probe scope (per user M0 decision):**
+
+- claude: transcript-size heuristic (bytes/4 estimate against
+  200k window default). Shipped.
+- codex: `probe_unavailable` REPORT log emitted; no NOTE/WARN
+  fires. Codex probe lands in a follow-on once codex transcript
+  format is verified.
+- agy: same `probe_unavailable` posture until agy adapter
+  (Plan 2) ships and the transcript path is confirmed.
+
 ## [0.14.0.0] — 2026-05-22
 
 ### Added — Plan 3 M2: self-learning skill generation

@@ -88,6 +88,10 @@ Project bootstrap / launch / inspection:
                   Args: candidates [--review] | promote <slug> [--global]
                         | reject <slug> [--reason "<t>"] | defer <slug> <N>
                         | stats
+    compact       Context compaction (v0.15+); pairs with context-threshold hook.
+                  Args: now | threshold [N] | history
+    checkpoint    Session-state snapshots for rewind (v0.15+).
+                  Args: now | list | resume <id> | clean [--age <days>]
     validate      Schema + reference validation (framework or project)
                   Args: [<project-path>] [--all]
     archive       Roll work/current/ into work/archive/<tag>/
@@ -193,7 +197,7 @@ case "$cmd" in
     -v | --version)
         echo "yakos $YAKOS_VERSION"
         ;;
-    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach | soul | retro | skill)
+    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach | soul | retro | skill | compact | checkpoint)
         script="$YAKOS_LIB/${cmd}.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"
