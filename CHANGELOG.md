@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0.0] — 2026-05-22
+
+### Added — Plan 3 M2: self-learning skill generation
+
+Second milestone of the framework-internal capabilities plan.
+Closes wishlist item: self-learning skill generation. Builds
+on M1 (v0.13.0.0) — the librarian writes candidates to
+`<work>/current/skill-candidates.md`; this milestone gives the
+operator the CLI to review + promote/reject/defer them.
+
+**New CLI surface:**
+
+- `cli/lib/skill.sh` — `yakos skill {candidates, promote, reject,
+  defer, stats}`. Operator-gated promotion of librarian-proposed
+  skills. Anti-spam discipline baked in (see §16.1 / §16.2 of
+  framework-internal-plan.md):
+  - `promote <slug>` — extracts candidate body, validates via
+    `yakos validate --strict`, writes
+    `<project>/.claude/skills/<slug>/SKILL.md` (or `lib/skills/`
+    with `--global`), logs promotion event.
+  - `reject <slug> --reason "<t>"` — appends to
+    `~/.yakos-state/skill-graveyard.ndjson` with an evidence-
+    fingerprint (sha256 of cycle numbers from candidate's
+    Source evidence section, first 12 chars). Catches renamed-
+    but-same-evidence proposals (`cleanup-files` →
+    `clean-up-files`) so the repeat-rejection warning fires
+    regardless of slug paraphrase.
+  - `defer <slug> <N>` — re-check after N more cycles.
+  - `stats` — lifetime proposal/promotion/rejection counts
+    with **calibration warnings**: <5% promotion rate over 100+
+    candidates flags an over-eager librarian; >40% flags
+    under-skeptical. Hints at tuning
+    `skill_candidates.{min_confidence,min_evidence_count}` in
+    `~/.yakos-state/settings.json`.
+
+**New template:**
+
+- `lib/settings/skill.template.md` — sentinel-filled template
+  used at promotion time. Frontmatter and required sections
+  match yakOS skill validator (Purpose / Scope / Automated pass
+  / Manual pass / Known gotchas).
+
+**Promotion log:**
+
+- `~/.yakos-state/promotion-log.ndjson` (NDJSON, append-only)
+  with events `{proposed, promoted, rejected, deferred,
+  promote_failed}`. Per-user cross-session ledger; `yakos skill
+  stats` reads from it.
+
+**Anti-spam disciplines:**
+
+- §16.1 evidence-fingerprint dedup — re-proposed-with-different-
+  slug-but-same-evidence candidates trigger the same repeat-
+  rejection warning as direct slug repeats.
+- §16.2 calibration warnings — surface pathological librarian
+  promotion rates over a meaningful sample size (≥100
+  proposals).
+
+**Wiring:**
+
+- `cli/yakos` — `skill` registered in subcommand allowlist;
+  help text updated.
+- `cli/lib/validate.sh` — `skill.sh` added to dark-code
+  exemption list (same pattern as agent.sh, memory.sh, soul.sh,
+  retro.sh).
+
 ## [0.13.0.0] — 2026-05-22
 
 ### Added — Plan 3 M1: retrospective foundation + souls

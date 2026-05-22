@@ -84,6 +84,10 @@ Project bootstrap / launch / inspection:
                   Args: show|edit|history|revert|pending|approve|reject ...
     retro         Manage 10-cycle retrospectives (v0.12+).
                   Args: now | last | history | status | disable | enable
+    skill         Manage skill candidates produced by the librarian (v0.14+).
+                  Args: candidates [--review] | promote <slug> [--global]
+                        | reject <slug> [--reason "<t>"] | defer <slug> <N>
+                        | stats
     validate      Schema + reference validation (framework or project)
                   Args: [<project-path>] [--all]
     archive       Roll work/current/ into work/archive/<tag>/
@@ -189,7 +193,7 @@ case "$cmd" in
     -v | --version)
         echo "yakos $YAKOS_VERSION"
         ;;
-    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach | soul | retro)
+    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach | soul | retro | skill)
         script="$YAKOS_LIB/${cmd}.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"
