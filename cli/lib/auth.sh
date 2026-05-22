@@ -81,7 +81,8 @@ print_runtime_status() {
         case "$id" in
             claude) cli_hint="install: https://docs.claude.com/en/docs/claude-code" ;;
             codex)  cli_hint="install: npm install -g @openai/codex" ;;
-            gemini) cli_hint="install: npm install -g @google/gemini-cli" ;;
+            gemini) cli_hint="install: npm install -g @google/gemini-cli (DEPRECATED 2026-06-18; use agy)" ;;
+            agy)    cli_hint="install: curl -fsSL https://antigravity.google/cli/install.sh | bash" ;;
         esac
     fi
 
@@ -149,7 +150,7 @@ if [ "$SUB" = "login" ]; then
         shift
     done
 
-    [ -n "$target" ] || ct_die "auth login: <runtime> required (claude|codex|gemini)"
+    [ -n "$target" ] || ct_die "auth login: <runtime> required (claude|codex|gemini|agy)"
     yk_rt_is_known "$target" || ct_die "auth login: unknown runtime '$target'"
 
     yk_rt_load "$target"
@@ -189,6 +190,26 @@ gemini-cli supports three auth paths:
         export GOOGLE_GENAI_USE_VERTEXAI=true
 
 After configuring one, run 'yakos auth status gemini' to verify.
+
+NOTE: Gemini CLI stops serving requests 2026-06-18. Migrate to agy:
+      yakos auth login agy --as-default
+EOF
+            ;;
+        agy)
+            cat <<'EOF'
+agy (Antigravity CLI) uses Google OAuth via system keyring on first
+run. yakOS doesn't drive the OAuth flow — agy does, interactively.
+
+  1. Run agy once interactively:
+        agy
+        # Browser opens; complete Google OAuth.
+        # Close the TUI when done (the credentials are now cached).
+
+  2. (Optional) headless / SSH / CI:
+        export ANTIGRAVITY_API_KEY="..."
+
+After either, run 'yakos auth status agy' to verify.
+Credentials live in your keychain + ~/.gemini/antigravity-cli/.
 EOF
             ;;
     esac
@@ -234,6 +255,19 @@ gemini-cli stores OAuth state in its own config dir. To clear:
     rm -rf ~/.gemini/auth.json    # if present
     unset GEMINI_API_KEY
     unset GOOGLE_GENAI_USE_VERTEXAI
+EOF
+            ;;
+        agy)
+            cat <<'EOF'
+agy stores OAuth state in your system keychain plus
+~/.gemini/antigravity-cli/. To fully sign out:
+    1. Remove keychain entry (macOS: Keychain Access → search "antigravity"
+       or "gemini"; Linux: secret-tool clear; Windows: Credential Manager)
+    2. rm -rf ~/.gemini/antigravity-cli/conversations
+    3. unset ANTIGRAVITY_API_KEY
+
+Or simpler: re-run 'agy' interactively to reauthenticate as a different
+account; the keychain entry gets overwritten.
 EOF
             ;;
     esac

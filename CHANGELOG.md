@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0.0] — 2026-05-22
+
+### Added — Plan 2 agy follow-ons: hooks install + auth + doctor + context-threshold probes
+
+Closes the deferred agy integration items from v0.21.0.0.
+Now `yakos hooks install agy`, `yakos auth {status,login,
+logout} agy`, and `yakos doctor` all handle agy properly,
+and `lib/hooks/context-threshold.sh` probes both codex and
+agy (previously claude-only).
+
+**Hooks installer:**
+
+- `cli/lib/hooks-install.sh` — added `install_agy_hooks`
+  function + `agy)` dispatch case. Per Antigravity migration
+  guide, agy hooks share JSON format with Gemini CLI's; only
+  the output path differs (`.gemini/settings.json` →
+  `.agents/hooks.json`, top-level object rather than .hooks
+  block of settings.json). Reuses the same translation logic
+  with the new destination.
+
+**Auth surface:**
+
+- `cli/lib/auth.sh` — added `agy` cases to:
+  - `status`: install hint `curl -fsSL
+    https://antigravity.google/cli/install.sh | bash`
+  - `login`: documents the OAuth browser flow (interactive
+    `agy` first-run) and headless `ANTIGRAVITY_API_KEY` env
+    var path
+  - `logout`: per-OS keychain cleanup pointers (macOS Keychain
+    Access; Linux secret-tool; Windows Credential Manager)
+    plus `~/.gemini/antigravity-cli/conversations` cleanup
+  - `gemini` login text augmented with migration pointer
+    (`yakos auth login agy --as-default`)
+  - `gemini` status install hint flagged DEPRECATED 2026-06-18
+
+**Doctor extension:**
+
+- `cli/lib/doctor.sh` — agy is auto-discovered for cli/auth
+  probes via `yk_rt_known` (no per-runtime branching needed).
+  Extended the `--fix` gitignore patcher to include agy's
+  `.agents/skills/yakos-*.md`, `.agents/mcp_config.json`,
+  and `.agents/hooks.json` patterns alongside the existing
+  codex/gemini patterns.
+
+- `cli/lib/init.sh` — same gitignore additions so freshly-
+  initialized projects start with the full pattern set.
+
+**Context-window probes (was claude-only; now 3-runtime):**
+
+- `lib/hooks/context-threshold.sh` — replaced
+  `_probe_context_pct_codex` and `_probe_context_pct_agy`
+  stubs (which returned 1) with real implementations:
+  - **codex**: `~/.codex/sessions/<id>/` most-recent-modified
+    dir; size in bytes / 4 as token estimate against 256k
+    default window (GPT-5 family typical)
+  - **agy**: `~/.gemini/antigravity-cli/conversations/<uuid>.pb`
+    most-recent-modified file; size / 4 against 1M default
+    window (Gemini 3.x family). Protobuf is binary so the
+    bytes/4 heuristic is rough but trend-accurate enough for
+    threshold gating.
+
+The 75% / 90% NOTE + auto-checkpoint behavior now fires for
+codex and agy sessions, not just claude. Operators with mixed-
+runtime workflows get parity.
+
+**No CLI-level behavior change** beyond the new agy-specific
+subcommand paths. Existing scripts continue to work.
+
 ## [0.22.0.0] — 2026-05-22
 
 ### Added — Plan 4 M4: standards CLI + operator doc (closes Plan 4)

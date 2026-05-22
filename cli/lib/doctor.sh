@@ -482,6 +482,9 @@ if [ "$FIX" = "1" ]; then
                 printf '.codex/agents/yakos-*.toml\n'
                 printf '.gemini/agents/yakos-*.md\n'
                 printf '.gemini/settings.json.yakos-bak-*\n'
+                printf '.agents/skills/yakos-*.md\n'
+                printf '.agents/mcp_config.json\n'
+                printf '.agents/hooks.json\n'
             } >> "$gi"
             ok "appended yakos gitignore patterns to $gi"
             fixed=$((fixed + 1))

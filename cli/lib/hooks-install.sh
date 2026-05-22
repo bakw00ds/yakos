@@ -135,6 +135,56 @@ install_codex_permissions() {
     ct_log "translated path-allowlist.json into $cfg [permissions.yakos-paths]"
 }
 
+install_agy_hooks() {
+    # Per Antigravity migration guide, agy hooks share JSON format with
+    # the Gemini CLI's. Only the output path changes:
+    #   gemini → <project>/.gemini/settings.json (.hooks block)
+    #   agy    → <project>/.agents/hooks.json    (top-level object)
+    # Same translation logic; new destination.
+    local project="$1"
+    local force="$2"
+    local target="$project/.agents/hooks.json"
+    local hooks_dir="$project/scripts/hooks"
+
+    [ -d "$hooks_dir" ] || ct_die "hooks install agy: $hooks_dir missing — run 'yakos init' first"
+
+    mkdir -p "$project/.agents"
+    if [ -f "$target" ] && [ "$force" != "1" ]; then
+        cp "$target" "$target.yakos-bak-$(ct_iso_utc)"
+    else
+        [ -f "$target" ] || printf '{}\n' > "$target"
+    fi
+
+    local hooks_block='{}'
+    while IFS='|' read -r hook_name _ _ gemini_evt a b c; do
+        [ -n "$hook_name" ] || continue
+        local hook_path="$hooks_dir/${hook_name}.sh"
+        if [ ! -x "$hook_path" ]; then
+            ct_log "hooks install agy: $hook_path not found; skipping"
+            continue
+        fi
+        local matcher_regex
+        matcher_regex="$(printf '%s|%s|%s' "$a" "$b" "$c" | tr '|' '\n' | grep -v '^$' | tr '\n' '|' | sed 's/|$//')"
+        hooks_block="$(printf '%s' "$hooks_block" | jq \
+            --arg evt "$gemini_evt" \
+            --arg name "yakos-${hook_name}" \
+            --arg cmd "$hook_path" \
+            --arg matcher "^($matcher_regex)$" \
+            '.[$evt] = (.[$evt] // []) + [{
+                matcher: $matcher,
+                hooks: [{name: $name, type: "command", command: $cmd, timeout: 30000}]
+            }]')"
+    done <<< "$HOOK_PORTS"
+
+    # agy hooks.json: top-level object with .hooks key (Gemini-shape but
+    # extracted out of settings.json into its own file per migration guide).
+    local final
+    final="$(jq --argjson hooks "$hooks_block" \
+        '{hooks: ((.hooks // {}) + $hooks)}' "$target")"
+    printf '%s\n' "$final" > "$target"
+    ct_log "wrote agy hooks into: $target"
+}
+
 install_gemini_hooks() {
     local project="$1"
     local force="$2"
@@ -224,6 +274,7 @@ EOF
             ;;
         codex)  install_codex_hooks  "$PROJECT" "$FORCE" ;;
         gemini) install_gemini_hooks "$PROJECT" "$FORCE" ;;
+        agy)    install_agy_hooks    "$PROJECT" "$FORCE" ;;
     esac
     exit 0
 fi

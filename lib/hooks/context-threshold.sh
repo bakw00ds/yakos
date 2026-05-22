@@ -68,13 +68,48 @@ _probe_context_pct_claude() {
 }
 
 _probe_context_pct_codex() {
-    # TODO(M3.1): codex transcript probe. Likely ~/.codex/sessions/<id>.
-    return 1
+    # Codex stores session state at ~/.codex/sessions/<id>/. Use the
+    # most-recently-modified session dir's size as a proxy. Window
+    # default 256k (GPT-5 family typical).
+    local sessions_root="$HOME/.codex/sessions"
+    [ -d "$sessions_root" ] || return 1
+    local latest
+    latest="$(find "$sessions_root" -maxdepth 1 -mindepth 1 -type d -print 2>/dev/null \
+        | xargs -I{} stat -f '%m %N' {} 2>/dev/null \
+        | sort -n -r | head -1 | awk '{print $2}')"
+    [ -n "$latest" ] && [ -d "$latest" ] || return 1
+    local size estimated_tokens window_size pct
+    size="$(du -sk "$latest" 2>/dev/null | awk '{print $1 * 1024}')"
+    [ -n "$size" ] && [ "$size" -gt 0 ] || return 1
+    estimated_tokens=$((size / 4))
+    window_size=256000
+    pct=$((estimated_tokens * 100 / window_size))
+    [ "$pct" -gt 100 ] && pct=100
+    printf '%d\n' "$pct"
 }
 
 _probe_context_pct_agy() {
-    # TODO(M3.1): agy transcript probe. ~/.config/antigravity/ or similar.
-    return 1
+    # agy stores conversations as protobuf at
+    # ~/.gemini/antigravity-cli/conversations/<uuid>.pb. Use the most-
+    # recently-modified .pb file's size as a proxy for active context.
+    # Window default 1M (Gemini 3.x family). The bytes/4 estimate is
+    # rough for protobuf (compressed binary) but trend-accurate enough
+    # for threshold gating.
+    local conv_root="$HOME/.gemini/antigravity-cli/conversations"
+    [ -d "$conv_root" ] || return 1
+    local latest
+    latest="$(find "$conv_root" -maxdepth 1 -type f -name '*.pb' -print 2>/dev/null \
+        | xargs -I{} stat -f '%m %N' {} 2>/dev/null \
+        | sort -n -r | head -1 | awk '{print $2}')"
+    [ -n "$latest" ] && [ -f "$latest" ] || return 1
+    local size estimated_tokens window_size pct
+    size="$(wc -c < "$latest" 2>/dev/null)"
+    [ -n "$size" ] && [ "$size" -gt 0 ] || return 1
+    estimated_tokens=$((size / 4))
+    window_size=1000000
+    pct=$((estimated_tokens * 100 / window_size))
+    [ "$pct" -gt 100 ] && pct=100
+    printf '%d\n' "$pct"
 }
 
 runtime="${YAKOS_RUNTIME:-claude}"

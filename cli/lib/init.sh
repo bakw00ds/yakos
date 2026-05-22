@@ -269,6 +269,9 @@ else
         printf '.codex/agents/yakos-*.toml\n'
         printf '.gemini/agents/yakos-*.md\n'
         printf '.gemini/settings.json.yakos-bak-*\n'
+        printf '.agents/skills/yakos-*.md\n'
+        printf '.agents/mcp_config.json\n'
+        printf '.agents/hooks.json\n'
     } >> "$PROJECT_GITIGNORE"
     ct_log "appended yakos runtime-agent patterns to $PROJECT_GITIGNORE"
 fi
