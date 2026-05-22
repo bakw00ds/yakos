@@ -6,7 +6,7 @@
 audit-first hooks, and multi-developer coordination.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.29.0.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.32.0.0-orange.svg)](CHANGELOG.md)
 [![Stability: alpha](https://img.shields.io/badge/stability-alpha-red.svg)](#status)
 
 yakOS turns the agent primitives that ship in these CLIs (sub-agent
@@ -24,21 +24,40 @@ broken work. Anything safety-critical gets both.
 > **Not affiliated with Anthropic, OpenAI, or Google.** yakOS uses
 > these companies' agent CLIs as runtimes; the framework is independent.
 
-## TL;DR — get running in 4 commands
+## TL;DR — get running in one command
 
 ```sh
 git clone https://github.com/bakw00ds/yakos.git ~/code/yakos
-cd ~/code/yakos && ./cli/yakos install            # symlinks + safe settings.json merge
-./cli/yakos init myapp --project ~/code/myapp     # bootstrap a project
-yakos start myapp                                  # launch a session (claude by default)
+cd ~/code/your-project && ~/code/yakos/cli/yakos quickstart
 ```
 
-That's it. From inside `~/agent-control/myapp/` or `~/code/myapp` you
-can also just type bare `yakos` — it auto-detects which project you mean.
+`quickstart` (v0.30+) detects what's been done and runs only what's
+needed: install yakOS if missing → init the project if cwd is a git
+repo → start a session. Idempotent; safe to re-run.
 
-Want a different runtime? `yakos start myapp --runtime codex`. Want
-two developers coordinating on the same dev box?
-`yakos init --multi-dev` — see [docs/co-pilot-mode.md](docs/co-pilot-mode.md).
+After install, you can drop the path and just type `yakos`.
+
+### Common scenarios
+
+| Goal | One command |
+|---|---|
+| First-time install + run against a git repo | `yakos quickstart` |
+| Bootstrap then start a project explicitly | `yakos init myapp --project ~/code/myapp && yakos start myapp` |
+| Auto-detect project from cwd | `yakos` (bare) |
+| Auth into every installed runtime in one pass | `yakos auth login --all` |
+| Run with a non-default runtime | `yakos start myapp --runtime codex` |
+| Two developers on the same dev box | `yakos init --multi-dev myapp --project /srv/code/myapp` |
+| See what peer sessions are doing | `yakos peer status` / `yakos peer log` |
+| Cross-runtime dispatch (shell) | `yakos dispatch <agent> "<task>" --runtime agy` |
+| Cross-runtime dispatch (native, from Claude) | `yakos mcp install` once, then call `dispatch_codex(...)` etc. as tools |
+| Multi-turn cross-runtime | `continue_codex(conversation_id=..., task=...)` via MCP |
+| Update everything | `yakos update --all` (framework + every per-project state) |
+| Tab completion (bash/zsh) | `yakos completion install` |
+| Health check | `yakos doctor` |
+
+Full multi-developer / shared-dev-box guide:
+[docs/co-pilot-mode.md](docs/co-pilot-mode.md). Cross-runtime MCP
+guide: [docs/mcp-integration.md](docs/mcp-integration.md).
 
 ## Architecture
 
@@ -139,23 +158,104 @@ yakos peer claims                    # see active per-file claims
 
 Full guide: [docs/co-pilot-mode.md](docs/co-pilot-mode.md).
 
+## Cross-runtime dispatch from a Claude session (MCP)
+
+A running Claude Code session can call codex / agy / SDK agents as
+**native MCP tool calls** instead of shelling out via Bash. Multi-turn
+conversations supported for codex / agy / claude / claude-sdk
+(antigravity-sdk lacks cross-process resume).
+
+```sh
+pip install mcp                                # one-time, Anthropic's MCP Python SDK
+cd ~/code/myapp
+yakos mcp install                              # writes .mcp.json in cwd
+# restart your Claude Code session in this project
+```
+
+Tools the lead sees in the session:
+
+```
+dispatch_codex(agent, task)                    # one-shot
+continue_codex(conversation_id, task)          # multi-turn
+
+dispatch_agy(...) / continue_agy(...)
+dispatch_claude_sdk(...) / continue_claude_sdk(...)
+dispatch_claude(...) / continue_claude(...)    # peer claude session
+dispatch_antigravity_sdk(...)                  # one-shot only
+```
+
+Each `dispatch_*` returns response text + a yakOS `conversation_id` +
+telemetry (duration, token usage). Pass that id to the matching
+`continue_*` to keep the agent's context alive across turns. State at
+`~/.yakos-state/mcp-conversations.json`.
+
+Full guide: [docs/mcp-integration.md](docs/mcp-integration.md).
+
+## Tab completion
+
+Bash and zsh completion ship in the box. Install with:
+
+```sh
+yakos completion install      # auto-detects shell + writes to conventional path
+```
+
+Or emit the script to a custom location:
+
+```sh
+yakos completion bash > ~/.local/share/bash-completion/completions/yakos
+yakos completion zsh  > ~/.zsh/completions/_yakos
+```
+
+Tab completion covers: top-level subcommands, nested subcommands
+(`peer status`, `mcp install`, `auth login`, `memory show`, ...),
+dynamic **project name completion** from `~/agent-control/*/`, and
+**runtime name completion** for `--runtime` / `auth` args.
+
 ## Common commands
 
 ```sh
-yakos                                # auto-detect project from cwd → start
+# Bootstrap + launch
+yakos quickstart                     # install + init + start (idempotent)
+yakos                                # bare — auto-detect from cwd → start
 yakos start <name>                   # explicit launch
+yakos init <name> --project <path>   # bootstrap (add --multi-dev for co-pilot mode)
+
+# Health + update
 yakos doctor                         # environment + install health
 yakos validate --strict              # standards check (0 errors expected)
-yakos dispatch <agent> "<task>"      # one-shot cross-runtime agent dispatch
+yakos update                         # framework: git pull + relink
+yakos update --all                   # framework + every per-project state
+
+# Auth
+yakos auth login --all               # log into every installed runtime
+yakos auth status                    # unified view across all runtimes
+
+# Dispatch (cross-runtime)
+yakos dispatch <agent> "<task>"      # one-shot, picks runtime from frontmatter
+yakos dispatch <agent> "<task>" --runtime codex
+yakos mcp install                    # then call dispatch_* / continue_* as MCP tools
+
+# Multi-dev co-pilot
+yakos peer status                    # active peer sessions
+yakos peer log [--since <iso>]       # tail shared activity stream
+yakos peer claims                    # active per-file claims
+yakos peer propose-mode --mode serialize --targets 'src/auth/**' --reason '...'
+
+# Observability + memory
 yakos cost --by agent                # aggregate token/cost telemetry
-yakos memory list <name>             # show project memory
+yakos memory list <name>             # project memory (shared symlink → coord if multi-dev)
 yakos archive <name> <tag>           # promote work/current/ → work/archive/<tag>/
-yakos peer status                    # multi-dev: peer sessions
+
+# Standards + completion
 yakos standards list                 # cross-project standards opt-ins
+yakos completion install             # shell tab completion
+
+# Release flow
 yakos version-bump --component minor # bump VERSION + CHANGELOG entry
+yakos git-hooks install              # pre-push version gate in current repo
 ```
 
-Full subcommand list: `yakos --help`. There are 27 subcommands.
+Full subcommand list: `yakos --help`. There are 28 subcommands.
 
 ## Cross-project standards
 
@@ -185,13 +285,29 @@ Full matrix: [COMPATIBILITY.md](COMPATIBILITY.md).
 
 ## Status
 
-**v0.29.0.0** — alpha, pre-1.0. Active development. API stability:
+**v0.32.0.0** — alpha, pre-1.0. Active development. API stability:
 CLI commands and `.yakos.yml` schema are stable within minor versions;
 hook contract and agent frontmatter are stable within major versions.
 SemVer is four-part: `MAJOR.MINOR.PATCH.HOTFIX`. See
 [CHANGELOG.md](CHANGELOG.md) for what landed in each release.
 
-`yakos validate --strict`: **0 errors / 0 warnings**.
+`yakos validate --strict`: **0 errors / 0 warnings**. Multi-dev
+end-to-end test: **10/10 passing** under real concurrent processes.
+
+### Recent landings since v0.29 (when the repo went public)
+
+- **v0.30** — `yakos quickstart`, `yakos update --all`, multi-dev e2e
+  test (real concurrent processes, 10/10), live runtime smoke test
+  (conditional SDK exec), SECURITY.md, gemini.sh hard cutoff on
+  2026-09-01, 32 tags backfilled (v0.3.0.0 → v0.28.0.0)
+- **v0.31** — MCP server with 9 cross-runtime tools (5 dispatch + 4
+  continue), multi-turn resume substrate (YAKOS_CONVERSATION_ID
+  env-var convention threaded through codex / agy / claude /
+  claude-sdk adapters), `yakos auth login --all`, `yakos mcp`
+  subcommand, docs/mcp-integration.md operator guide
+- **v0.32** — bash + zsh tab completion (with dynamic project name
+  discovery), `yakos completion {bash,zsh,install}` subcommand,
+  README refresh
 
 ## Documentation map
 
@@ -205,6 +321,7 @@ SemVer is four-part: `MAJOR.MINOR.PATCH.HOTFIX`. See
 **Multi-runtime:**
 
 - [docs/runtime-matrix.md](docs/runtime-matrix.md) — per-runtime capabilities
+- [docs/mcp-integration.md](docs/mcp-integration.md) — cross-runtime tools inside a Claude Code session
 - [docs/memory-portability.md](docs/memory-portability.md) — cross-runtime memory
 - [docs/plugin-spec.md](docs/plugin-spec.md) — write your own runtime adapter
 
@@ -214,6 +331,7 @@ SemVer is four-part: `MAJOR.MINOR.PATCH.HOTFIX`. See
 - [docs/cross-project-standards.md](docs/cross-project-standards.md) — opt-in standards
 - [docs/ci-integration.md](docs/ci-integration.md) — yakOS in GitHub Actions
 - [docs/team-shapes.md](docs/team-shapes.md) — recommended team compositions
+- [SECURITY.md](SECURITY.md) — responsible disclosure policy
 
 **Reference:**
 

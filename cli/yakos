@@ -110,6 +110,8 @@ Project bootstrap / launch / inspection:
                   Claude Code sees cross-runtime dispatch as native tools.
                   (v0.31+). Args: install | uninstall | status | probe
                   See docs/mcp-integration.md.
+    completion    Emit / install shell tab-completion for the yakos CLI
+                  (v0.32+). Args: bash | zsh | install (auto-detects shell)
     validate      Schema + reference validation (framework or project)
                   Args: [<project-path>] [--all]
     archive       Roll work/current/ into work/archive/<tag>/
@@ -215,7 +217,7 @@ case "$cmd" in
     -v | --version)
         echo "yakos $YAKOS_VERSION"
         ;;
-    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach | soul | retro | skill | compact | checkpoint | kanban | env | standards | peer | quickstart | mcp)
+    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach | soul | retro | skill | compact | checkpoint | kanban | env | standards | peer | quickstart | mcp | completion)
         script="$YAKOS_LIB/${cmd}.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"

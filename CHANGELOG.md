@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0.0] — 2026-05-22
+
+### Added — Tab completion + README refresh
+
+**Shell tab completion (bash + zsh):**
+
+- `cli/completions/yakos.bash` — bash completion script. Covers:
+  top-level subcommands; nested subcommands for peer / mcp / auth /
+  memory / standards / skill / soul / retro / compact / checkpoint /
+  kanban / env / hooks / agent / completion / version-bump; dynamic
+  **project name completion** from `~/agent-control/*/`; runtime
+  name completion for `--runtime` and `auth login/logout/status/
+  set-default <runtime>`.
+- `cli/completions/yakos.zsh` — zsh completion script (uses
+  `_arguments` + `_describe` for native zsh ergonomics).
+- **NEW `yakos completion`** subcommand:
+  - `yakos completion bash` — emit the bash script to stdout
+  - `yakos completion zsh` — emit the zsh script to stdout
+  - `yakos completion install` — auto-detect shell from `$SHELL`,
+    write to `~/.local/share/bash-completion/completions/yakos` or
+    `~/.zsh/completions/_yakos`, print the source-line for the
+    operator's shell rc. Overridable via `YAKOS_COMPLETION_SHELL`,
+    `BASH_COMPLETION_USER_DIR`, `YAKOS_ZSH_COMPDIR`.
+
+**README refresh:**
+
+- TL;DR rewritten to lead with `yakos quickstart` (one command vs
+  the previous four-command flow)
+- New **Common scenarios** table covering the workflows operators
+  actually want: first-time install, multi-dev setup, cross-runtime
+  dispatch, MCP integration, tab completion, update everything
+- New section: **Cross-runtime dispatch from a Claude session (MCP)**
+  documenting the v0.31 MCP server tools (dispatch_* / continue_*)
+- New section: **Tab completion** with install instructions
+- **Common commands** section expanded — now covers quickstart, auth
+  login --all, peer subcommands, mcp install, completion install,
+  update --all (subcommand count updated to 28)
+- Status section bumped to v0.32 with a "Recent landings since
+  v0.29" callout summarizing what's shipped since the repo went
+  public
+- Documentation map adds `docs/mcp-integration.md` and `SECURITY.md`
+- Version badge: 0.29.0.0 → 0.32.0.0
+
+**Verified this session:**
+
+- bash completion: top-level + nested + dynamic project names all
+  return correct suggestions in a sourced bash shell
+- zsh completion: `zsh -n` syntax-checks clean
+- `yakos completion install` to tmp dirs (both bash and zsh modes)
+  writes files at the right paths, prints correct source-lines
+
 ## [0.31.0.0] — 2026-05-22
 
 ### Added — MCP server for cross-runtime dispatch + auth login --all + multi-turn resume
