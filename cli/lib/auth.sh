@@ -79,11 +79,12 @@ print_runtime_status() {
         cli_state="OK"
     else
         case "$id" in
-            claude)     cli_hint="install: https://docs.claude.com/en/docs/claude-code" ;;
-            claude-sdk) cli_hint="install: pip install claude-agent-sdk (python 3.10+)" ;;
-            codex)      cli_hint="install: npm install -g @openai/codex" ;;
-            gemini)     cli_hint="install: npm install -g @google/gemini-cli (DEPRECATED 2026-06-18; use agy)" ;;
-            agy)        cli_hint="install: curl -fsSL https://antigravity.google/cli/install.sh | bash" ;;
+            claude)          cli_hint="install: https://docs.claude.com/en/docs/claude-code" ;;
+            claude-sdk)      cli_hint="install: pip install claude-agent-sdk (python 3.10+)" ;;
+            codex)           cli_hint="install: npm install -g @openai/codex" ;;
+            gemini)          cli_hint="install: npm install -g @google/gemini-cli (DEPRECATED 2026-06-18; use agy)" ;;
+            agy)             cli_hint="install: curl -fsSL https://antigravity.google/cli/install.sh | bash" ;;
+            antigravity-sdk) cli_hint="install: pip install google-antigravity (bundles compiled binary)" ;;
         esac
     fi
 
@@ -151,17 +152,25 @@ if [ "$SUB" = "login" ]; then
         shift
     done
 
-    [ -n "$target" ] || ct_die "auth login: <runtime> required (claude|claude-sdk|codex|gemini|agy)"
+    [ -n "$target" ] || ct_die "auth login: <runtime> required (claude|claude-sdk|codex|gemini|agy|antigravity-sdk)"
     yk_rt_is_known "$target" || ct_die "auth login: unknown runtime '$target'"
 
-    # claude-sdk bundles the Claude Code CLI under the hood and uses the
-    # same credentials. Delegate auth login UX to the claude case.
-    if [ "$target" = "claude-sdk" ]; then
-        ct_log "claude-sdk: bundles Claude Code CLI; using claude auth flow"
-        target_for_login=claude
-    else
-        target_for_login="$target"
-    fi
+    # SDK adapters delegate their login UX to the underlying CLI's flow
+    # since they share credentials with the bundled binary.
+    case "$target" in
+        claude-sdk)
+            ct_log "claude-sdk: bundles Claude Code CLI; using claude auth flow"
+            target_for_login=claude
+            ;;
+        antigravity-sdk)
+            ct_log "antigravity-sdk: shares Google auth posture; using agy auth flow"
+            ct_log "antigravity-sdk: SDK additionally reads GEMINI_API_KEY directly"
+            target_for_login=agy
+            ;;
+        *)
+            target_for_login="$target"
+            ;;
+    esac
 
     yk_rt_load "$target"
     yk_rt_check_cli || ct_die "auth login: '$target' CLI not on PATH; install it first"
@@ -270,7 +279,11 @@ gemini-cli stores OAuth state in its own config dir. To clear:
     unset GOOGLE_GENAI_USE_VERTEXAI
 EOF
             ;;
-        agy)
+        agy|antigravity-sdk)
+            if [ "$target" = "antigravity-sdk" ]; then
+                ct_log "antigravity-sdk: shares Google credential surface with agy; routing logout to agy"
+                ct_log "antigravity-sdk: SDK also reads GEMINI_API_KEY directly — unset it separately"
+            fi
             cat <<'EOF'
 agy stores OAuth state in your system keychain plus
 ~/.gemini/antigravity-cli/. To fully sign out:
@@ -278,6 +291,7 @@ agy stores OAuth state in your system keychain plus
        or "gemini"; Linux: secret-tool clear; Windows: Credential Manager)
     2. rm -rf ~/.gemini/antigravity-cli/conversations
     3. unset ANTIGRAVITY_API_KEY
+    4. unset GEMINI_API_KEY
 
 Or simpler: re-run 'agy' interactively to reauthenticate as a different
 account; the keychain entry gets overwritten.

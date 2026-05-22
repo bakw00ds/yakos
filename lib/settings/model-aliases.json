@@ -1,34 +1,39 @@
 {
   "_doc": "Semantic model aliases per runtime. Override per-project via .yakos.yml.",
   "_note_claude_sdk": "claude-sdk inherits whatever model the bundled Claude Code CLI defaults to; the SDK README does not document a model parameter at v0.24. Aliases listed for forward compatibility; SDK ignores them today.",
+  "_note_antigravity_sdk": "antigravity-sdk inherits the SDK's default Gemini model; the README does not document a model parameter at v0.25. Aliases listed for forward compatibility; SDK ignores them today.",
   "aliases": {
     "cheap": {
       "claude": "haiku",
       "claude-sdk": "haiku",
       "codex": "gpt-5-nano",
       "gemini": "gemini-2.5-flash",
-      "agy": "gemini-3.5-flash"
+      "agy": "gemini-3.5-flash",
+      "antigravity-sdk": "gemini-3.5-flash"
     },
     "balanced": {
       "claude": "sonnet",
       "claude-sdk": "sonnet",
       "codex": "gpt-5-mini",
       "gemini": "gemini-2.5-pro",
-      "agy": "gemini-3.1-pro"
+      "agy": "gemini-3.1-pro",
+      "antigravity-sdk": "gemini-3.1-pro"
     },
     "best": {
       "claude": "opus",
       "claude-sdk": "opus",
       "codex": "gpt-5",
       "gemini": "gemini-2.5-pro",
-      "agy": "claude-opus-4.6"
+      "agy": "claude-opus-4.6",
+      "antigravity-sdk": "claude-opus-4.6"
     },
     "reasoning": {
       "claude": "opus",
       "claude-sdk": "opus",
       "codex": "o4-mini",
       "gemini": "gemini-2.5-pro",
-      "agy": "claude-opus-4.6"
+      "agy": "claude-opus-4.6",
+      "antigravity-sdk": "claude-opus-4.6"
     }
   }
 }

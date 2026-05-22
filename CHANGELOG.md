@@ -7,6 +7,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0.0] — 2026-05-22
+
+### Added — Plan 5 M2: antigravity-sdk runtime adapter (Google Antigravity SDK)
+
+Second Plan 5 milestone — adds `antigravity-sdk` as a fifth headless
+runtime alongside `claude`, `claude-sdk`, `codex`, and `agy`. Uses the
+official Google Antigravity SDK
+(https://github.com/google-antigravity/antigravity-sdk-python) for
+programmatic agent loop control via async `Agent.chat()` rather than
+text-streaming through a forked CLI process.
+
+**Adapter:**
+
+- `cli/lib/runtimes/antigravity-sdk.sh` — implements the 8-verb runtime
+  contract. `launch` delegates to `agy.sh` (SDK is headless-only;
+  humans use the agy TUI). `dispatch` execs the
+  `antigravity-sdk-dispatch.py` script with the composed agents JSON
+  passed via env.
+- `cli/lib/runtimes/antigravity-sdk-dispatch.py` — async Python script
+  using `asyncio.run(...)` with `async with Agent(LocalAgentConfig(...))
+  as agent: response = await agent.chat(task); async for token in
+  response`. Streams tokens to stdout in real-time; probes the response
+  object for usage attributes (optional; SDK README does not document).
+
+**Registration:**
+
+- `cli/lib/runtime-resolve.sh` — adds `antigravity-sdk` to
+  `YK_RT_KNOWN_BUILTIN`.
+- `cli/lib/auth.sh` — adds `antigravity-sdk)` install-hint case;
+  `auth login antigravity-sdk` delegates to the `agy` UX (Google
+  OAuth + GEMINI_API_KEY env); `auth logout antigravity-sdk` shares
+  the `agy` credential cleanup (plus a note to unset GEMINI_API_KEY).
+- `lib/settings/model-aliases.json` — adds `antigravity-sdk` entries
+  mirroring `agy`'s aliases. Annotated that the SDK currently inherits
+  the bundled default Gemini model (the README does not document a
+  model parameter at v0.25); aliases are forward-compatible.
+
+**Capabilities advertised:**
+
+`programmatic-agents,path-allowlist-soft,mcp-in-process,declarative-policies,headless-only,async-asyncio`
+
+Differences from `agy.sh` (CLI adapter):
+- **+programmatic-agents** — `Agent` is a first-class async context
+  manager
+- **+mcp-in-process** — `McpStdioServer` config for SDK-attached MCP
+  servers
+- **+declarative-policies** — SDK exposes a `deny/allow/ask_user/enforce`
+  policy system (more granular than allowlist files)
+- **+async-asyncio** — uses asyncio directly (not anyio like claude-sdk)
+- **+headless-only** — no interactive surface (use agy CLI for TUI)
+- **path-allowlist-soft** (downgraded from agy's `-hard`) — SDK's
+  default-deny posture is bypassed by `CapabilitiesConfig()` at the
+  adapter; rely on yakOS path-allowlist hooks for enforcement
+
+**Verified vs README** (https://github.com/google-antigravity/antigravity-sdk-python):
+- Package: `google-antigravity` (pip; bundles compiled binary in the
+  PyPI wheel — cloning the repo alone is insufficient)
+- Import: `from google.antigravity import Agent, LocalAgentConfig, CapabilitiesConfig`
+- Async-only via `asyncio`
+- `LocalAgentConfig(system_instructions=, api_key=, capabilities=, tools=, mcp_servers=, policies=, triggers=)`
+- Note: `system_instructions` (plural), not `system_prompt`
+- Default policy: **READ-ONLY** — adapter passes `CapabilitiesConfig()`
+  to enable writes
+- Auth: `GEMINI_API_KEY` env var or `api_key=` config field
+- Streaming: `async for token in response` yields str text tokens
+
+**Documentation gaps in upstream README** (recorded here for future M-bumps):
+- No explicit `model:` parameter — SDK chooses Gemini model
+- No documented usage/token/cost surface on `ChatResponse`
+- No documented `cwd=` parameter — adapter `os.chdir(project)` before
+  constructing `Agent` to match agy's `--add-dir` semantics
+- No documented keychain reuse from agy CLI — adapter requires
+  `GEMINI_API_KEY` env var explicitly to claim auth OK
+
+**Tool allowlist note:**
+
+yakOS's per-agent `allowed_tools: [Edit, Read, Write, Bash]` does NOT
+pass through to the Antigravity SDK at v0.25. The SDK's policy system
+uses native tool names (`view_file`, `run_command`, ...) that don't
+map 1:1 to yakOS's claude-style tool namespace. The adapter opts into
+`CapabilitiesConfig()` (all tools enabled) and relies on yakOS
+path-allowlist hooks for write gating — same posture as the `agy` CLI
+adapter. A future M3 could translate yakOS tool names → SDK policy
+entries when a stable mapping table exists.
+
+**Out of scope at M2:**
+- Custom Python tool functions via `tools=[...]` (lets agent call
+  in-process Python callables; powerful, but no yakOS contract yet)
+- Triggers (`every(...)`) — background-task scheduling; out of yakOS
+  current scope
+- Per-tool yakOS → SDK policy translation (deferred to Plan 5 M3)
+- Hooks install for antigravity-sdk
+
 ## [0.24.0.0] — 2026-05-22
 
 ### Added — Plan 5 M1: claude-sdk runtime adapter (Anthropic Claude Agent SDK)

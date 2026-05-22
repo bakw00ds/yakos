@@ -18,14 +18,17 @@ set -eu
 
 # Known runtimes in order of capability fidelity (closest analog to
 # yakos's original target — Claude Code — first).
-# - claude:     Anthropic Claude Code CLI (interactive + headless)
-# - claude-sdk: Anthropic Claude Agent SDK (Python, headless-only;
-#               bundles the Claude Code CLI under the hood — launch
-#               delegates to claude.sh)
-# - codex:      OpenAI Codex CLI
-# - agy:        Google Antigravity CLI (Gemini 3.x); replaces gemini
-# - gemini:     deprecated shim for legacy Gemini CLI, sources agy.sh
-YK_RT_KNOWN_BUILTIN="claude claude-sdk codex agy gemini"
+# - claude:          Anthropic Claude Code CLI (interactive + headless)
+# - claude-sdk:      Anthropic Claude Agent SDK (Python, headless-only;
+#                    bundles Claude Code CLI under the hood — launch
+#                    delegates to claude.sh)
+# - codex:           OpenAI Codex CLI
+# - agy:             Google Antigravity CLI (Gemini 3.x); replaces gemini
+# - antigravity-sdk: Google Antigravity SDK (Python, headless-only;
+#                    bundles compiled runtime binary in the PyPI wheel —
+#                    launch delegates to agy.sh)
+# - gemini:          deprecated shim for legacy Gemini CLI, sources agy.sh
+YK_RT_KNOWN_BUILTIN="claude claude-sdk codex agy antigravity-sdk gemini"
 
 # yk_rt_plugins
 #   Stdout one plugin runtime id per line, derived from
