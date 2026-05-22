@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0.0] — 2026-05-22
+
+### Added — Plan 5 M1: claude-sdk runtime adapter (Anthropic Claude Agent SDK)
+
+First Plan 5 milestone — adds `claude-sdk` as a fourth headless
+runtime alongside `claude`, `codex`, and `agy`. Uses the official
+Anthropic Claude Agent SDK
+(https://github.com/anthropics/claude-agent-sdk-python) for
+programmatic agent loop control via async `query()` rather than
+text-streaming through a forked CLI process.
+
+**Adapter:**
+
+- `cli/lib/runtimes/claude-sdk.sh` — implements the 8-verb runtime
+  contract. `launch` delegates to `claude.sh` (SDK is headless-only;
+  humans use the interactive CLI). `dispatch` execs the
+  `claude-sdk-dispatch.py` script with the composed agents JSON
+  passed via env.
+- `cli/lib/runtimes/claude-sdk-dispatch.py` — async Python script
+  using `anyio.run(query, options=ClaudeAgentOptions(...))`. Walks
+  the response stream, extracts `TextBlock` text from
+  `AssistantMessage` blocks, and probes `ResultMessage` for usage
+  attributes (optional; SDK README does not document the surface).
+
+**Registration:**
+
+- `cli/lib/runtime-resolve.sh` — adds `claude-sdk` (and `agy`,
+  retroactively) to `YK_RT_KNOWN_BUILTIN`.
+- `cli/lib/auth.sh` — adds `claude-sdk)` install-hint case; `auth
+  login claude-sdk` delegates to the `claude` UX; `auth logout
+  claude-sdk` shares the `claude` credential cleanup. Rationale:
+  the SDK bundles the Claude Code CLI under the hood and uses
+  identical credentials.
+- `lib/settings/model-aliases.json` — adds `claude-sdk` entries
+  mirroring `claude`'s aliases. Annotated that the SDK currently
+  inherits the bundled CLI's default model (the README does not
+  document a model parameter at v0.24); aliases are forward-
+  compatible if upstream adds the surface.
+
+**Capabilities advertised:**
+
+`programmatic-agents,path-allowlist-soft,mcp-in-process,headless-only,async-anyio`
+
+Differences from `claude.sh`:
+- **+programmatic-agents** — async iterator over messages, not
+  text-stream parsing
+- **+mcp-in-process** — `mcp_servers` option supports SDK-defined
+  in-process tools (vs claude.sh's `--mcp-config` file-based servers)
+- **+async-anyio** — anyio-based; concurrent dispatch is the natural
+  pattern for this adapter
+- **+headless-only** — no interactive surface
+- **-native-telemetry** (downgraded) — `ResultMessage` may carry
+  usage data but README does not document the fields; probe-and-
+  fallback rather than guarantee. Telemetry treated as estimate-only
+  until confirmed at runtime.
+
+**Verified vs README** (https://github.com/anthropics/claude-agent-sdk-python):
+- Package: `claude-agent-sdk` (pip)
+- Import: `from claude_agent_sdk import query, ClaudeSDKClient, ClaudeAgentOptions`
+- Async-only via anyio
+- `ClaudeAgentOptions(system_prompt=, allowed_tools=, disallowed_tools=, cwd=, mcp_servers=, cli_path=)`
+- Message types: `AssistantMessage` / `UserMessage` / `SystemMessage` / `ResultMessage`
+- Text via `TextBlock` instances in `message.content`
+
+**Documentation gaps in upstream README** (recorded here for future M-bumps):
+- No explicit `model:` parameter — SDK inherits bundled CLI default
+- No documented usage/token/cost surface
+- No explicit sub-agent / session-forking API (CHANGELOG mentions
+  but README doesn't show usage)
+
+If a future SDK release fills these gaps, advance `claude-sdk` to
+M2 with native-telemetry capability + model passthrough.
+
+**Out of scope at M1:**
+- Antigravity-SDK adapter (Plan 5 M2) — separate; SDK package name
+  not yet verified
+- Sub-agent / spawn-style dispatch via `ClaudeSDKClient` (Plan 5 M3)
+- Hooks install for claude-sdk (uses bundled CLI's hook surface;
+  cli/lib/hooks-install.sh currently has no `claude-sdk)` case —
+  follow-up if usage surfaces it as needed)
+
 ## [0.23.0.0] — 2026-05-22
 
 ### Added — Plan 2 agy follow-ons: hooks install + auth + doctor + context-threshold probes

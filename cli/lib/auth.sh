@@ -79,10 +79,11 @@ print_runtime_status() {
         cli_state="OK"
     else
         case "$id" in
-            claude) cli_hint="install: https://docs.claude.com/en/docs/claude-code" ;;
-            codex)  cli_hint="install: npm install -g @openai/codex" ;;
-            gemini) cli_hint="install: npm install -g @google/gemini-cli (DEPRECATED 2026-06-18; use agy)" ;;
-            agy)    cli_hint="install: curl -fsSL https://antigravity.google/cli/install.sh | bash" ;;
+            claude)     cli_hint="install: https://docs.claude.com/en/docs/claude-code" ;;
+            claude-sdk) cli_hint="install: pip install claude-agent-sdk (python 3.10+)" ;;
+            codex)      cli_hint="install: npm install -g @openai/codex" ;;
+            gemini)     cli_hint="install: npm install -g @google/gemini-cli (DEPRECATED 2026-06-18; use agy)" ;;
+            agy)        cli_hint="install: curl -fsSL https://antigravity.google/cli/install.sh | bash" ;;
         esac
     fi
 
@@ -150,13 +151,22 @@ if [ "$SUB" = "login" ]; then
         shift
     done
 
-    [ -n "$target" ] || ct_die "auth login: <runtime> required (claude|codex|gemini|agy)"
+    [ -n "$target" ] || ct_die "auth login: <runtime> required (claude|claude-sdk|codex|gemini|agy)"
     yk_rt_is_known "$target" || ct_die "auth login: unknown runtime '$target'"
+
+    # claude-sdk bundles the Claude Code CLI under the hood and uses the
+    # same credentials. Delegate auth login UX to the claude case.
+    if [ "$target" = "claude-sdk" ]; then
+        ct_log "claude-sdk: bundles Claude Code CLI; using claude auth flow"
+        target_for_login=claude
+    else
+        target_for_login="$target"
+    fi
 
     yk_rt_load "$target"
     yk_rt_check_cli || ct_die "auth login: '$target' CLI not on PATH; install it first"
 
-    case "$target" in
+    case "$target_for_login" in
         claude)
             cat <<'EOF'
 claude does not have a non-interactive login command. Two options:
@@ -230,7 +240,10 @@ if [ "$SUB" = "logout" ]; then
     yk_rt_is_known "$target" || ct_die "auth logout: unknown runtime '$target'"
 
     case "$target" in
-        claude)
+        claude|claude-sdk)
+            if [ "$target" = "claude-sdk" ]; then
+                ct_log "claude-sdk: shares credentials with claude (bundled CLI); routing logout to claude"
+            fi
             if [ -f "$HOME/.claude/auth.json" ]; then
                 rm -f "$HOME/.claude/auth.json"
                 echo "removed ~/.claude/auth.json"

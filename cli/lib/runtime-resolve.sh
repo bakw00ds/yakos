@@ -18,7 +18,14 @@ set -eu
 
 # Known runtimes in order of capability fidelity (closest analog to
 # yakos's original target — Claude Code — first).
-YK_RT_KNOWN_BUILTIN="claude codex gemini"
+# - claude:     Anthropic Claude Code CLI (interactive + headless)
+# - claude-sdk: Anthropic Claude Agent SDK (Python, headless-only;
+#               bundles the Claude Code CLI under the hood — launch
+#               delegates to claude.sh)
+# - codex:      OpenAI Codex CLI
+# - agy:        Google Antigravity CLI (Gemini 3.x); replaces gemini
+# - gemini:     deprecated shim for legacy Gemini CLI, sources agy.sh
+YK_RT_KNOWN_BUILTIN="claude claude-sdk codex agy gemini"
 
 # yk_rt_plugins
 #   Stdout one plugin runtime id per line, derived from
@@ -79,11 +86,15 @@ yk_rt_load() {
     # Bind namespaced functions to stable aliases. Each adapter must
     # implement every verb listed here; missing ones will surface at
     # call time as "command not found" rather than a silent fallback.
-    local verb
+    # Sanitize the id for the bash function name (hyphens → underscores),
+    # so e.g. claude-sdk → yk_rt_claude_sdk_<verb>. The runtime id stays
+    # hyphenated everywhere it's user-facing (config, env, CLI).
+    local id_safe verb
+    id_safe="${id//-/_}"
     for verb in id check_cli check_auth capabilities \
                 materialize_agents cleanup_agents \
                 launch dispatch; do
-        eval "yk_rt_${verb}() { yk_rt_${id}_${verb} \"\$@\"; }"
+        eval "yk_rt_${verb}() { yk_rt_${id_safe}_${verb} \"\$@\"; }"
     done
 }
 
