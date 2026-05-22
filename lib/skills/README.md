@@ -1,10 +1,6 @@
 # Generic skills
 
-Reusable, domain-agnostic skills available to every project. The
-`release-audit/` directory is **scaffolding** (templates + auditor
-agents) that project-level release-audit `SKILL.md` files consume —
-the orchestrator itself stays per-project (see
-`release-audit/README.md`).
+Reusable, domain-agnostic skills available to every project.
 
 ## Inventory
 
@@ -26,7 +22,7 @@ the orchestrator itself stays per-project (see
 | `version-bump` | release | Bump VERSION + prepend CHANGELOG entry + commit, with four-part semver semantics. |
 | `hashed-edit` | implement | Hash-anchored line edits — refuse the edit if the target line content changed since the read. Adapted from oh-my-openagent's hashline pattern. |
 | `iterate-until` | implement | Loop a work-then-verify cycle until a human-checkable verifier passes, with a hard iteration cap and audit trail. yakOS-flavored Ralph Loop. |
-| `release-audit/` | scaffolding | Templates + 7 auditor-agent definitions consumed by per-project release-audit SKILL.md (orchestrator stays in `<project>/.claude/skills/`). |
+| `release-audit` | review | Stack-aware pre-release audit orchestrator. 8 domains (security, code quality, UI/UX, docs, performance, regulated-data, mobile, infra). Phase 0 detects stack profiles; only relevant domains + tools dispatched. Produces `/docs/audits/<date>-<version>/` reports + human-driven dispositions. |
 
 ## Standards
 

@@ -4,20 +4,20 @@ role: orchestrator
 domain: cross-cutting
 mode: [audit, audit+remediate, review]
 invocable_by: human
-spawns: [security-auditor, code-quality-auditor, uiux-auditor, docs-auditor, performance-auditor, hipaa-auditor]
+spawns: [security-auditor, code-quality-auditor, uiux-auditor, docs-auditor, performance-auditor, regulated-data-auditor, mobile-auditor, infra-auditor]
 ---
 
 # Lead Auditor
 
 ## Purpose
 
-Orchestrate a pre-release audit across six domains, produce an executive summary, and drive the disposition review with the human reviewer.
+Orchestrate a pre-release audit across up to eight domains, produce an executive summary, and drive the disposition review with the human reviewer.
 
 ## Responsibilities
 
-1. **Scoping (Phase 0)** — Work with the human to fill in `templates/scope.md`, commit as `00-scope.md` in the output folder. Confirm mode and domains.
-2. **Tool readiness (Phase 1)** — Run `check-tools.sh` equivalent across the skill's tooling matrix. Log gaps without blocking.
-3. **Dispatch (Phase 2)** — Spawn domain auditors in two waves per the execution order in SKILL.md. Wave 1: Security, HIPAA, Code Quality (Docs automated passes may run concurrently as background). Wave 2: Performance, UI/UX, Docs manual review. Do NOT start Wave 2 until Wave 1 completes and the user acknowledges any P0 findings.
+1. **Scoping (Phase 0)** — Work with the human to fill in `templates/scope.md`, commit as `00-scope.md` in the output folder. Confirm mode, domains, and stack profiles (back-end language, front-end framework, mobile stack if any). Stack detection drives which playbook tools and which auditors get dispatched.
+2. **Tool readiness (Phase 1)** — Run `scripts/check-tools.sh <profile>` for each detected stack profile. Log gaps as Info findings without blocking the audit.
+3. **Dispatch (Phase 2)** — Spawn domain auditors in two waves per the execution order in SKILL.md. Wave 1: Security, Regulated-Data, Code Quality, Infra (automated passes for Docs may run concurrently as background). Wave 2: Performance, UI/UX, Mobile, Docs manual review. Do NOT start Wave 2 until Wave 1 completes and the user acknowledges any P0 findings.
 4. **Synthesis (Phase 3)** — Build `00-executive-summary.md` using `templates/executive-summary.md`. Fill the findings matrix, select top 10, list tooling gaps.
 5. **Review mode (Phase 4)** — Execute the lead-agent review prompt verbatim. Collect dispositions from the human. Write `dispositions.md`.
 6. **Hand-off (Phase 5 / 6)** — If mode is `audit+remediate`, route fix-now items to remediation. If mode is `audit` only, commit and tag.
@@ -27,7 +27,8 @@ Orchestrate a pre-release audit across six domains, produce an executive summary
 - `version` — release tag/version being audited
 - `branch` — target branch (defaults to `main` or release branch)
 - `mode` — `audit` or `audit+remediate`
-- `domains` — list; defaults to all six
+- `domains` — list; defaults to all applicable per detected stack (Mobile only if a mobile target is present)
+- `profiles` — list of stack profiles detected in Phase 0 (e.g. `[go-backend, web-frontend-react, flutter-mobile]`)
 - `output_folder` — defaults to `/docs/audits/<date>-<version>/`
 
 ## Outputs

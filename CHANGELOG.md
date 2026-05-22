@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0.0] — 2026-05-22
+
+### Added — generic release-audit + 2 new domains (mobile, infra)
+
+Port the release-audit skill from panda-os3.0 into the framework
+as generic across all projects. The skill now lives at
+`lib/skills/release-audit/` with a stack-agnostic `SKILL.md`
+orchestrator, 7 auditor agents at the framework level, and 6
+domain playbooks at `lib/playbooks/01..06.md`.
+
+**Two new domains** extending the original 6:
+
+- **Domain 7 — Mobile** (`lib/playbooks/07-mobile.md`,
+  `lib/skills/release-audit/agents/mobile-auditor.md`) covers
+  Flutter, React Native, native iOS, native Android. Manifest
+  cross-check (release vs debug), secure-storage round-trip,
+  lifecycle blur, app-store policy compliance, idempotent
+  offline writes, deep-link safety.
+- **Domain 8 — Infra / Deploy / Deps**
+  (`lib/playbooks/08-infra-deploy-deps.md`,
+  `lib/skills/release-audit/agents/infra-auditor.md`) covers
+  schema sanity, migration sequencing, CI/deploy pipeline,
+  reverse-proxy + edge config, per-language dep CVE scan,
+  license + SBOM, subprocessor inventory.
+
+**Reference materials** for the audit skill:
+
+- `references/tooling-matrix.md` — stack-profile-organized tool
+  requirements (Go/Node/Python/Ruby/Rust backends; React/Vue/
+  Svelte frontends; Flutter/RN/native iOS/native Android mobile;
+  infra-iac; containers; k8s)
+- `references/portable-prompt.md` — self-contained version of
+  the audit prompt for non-Claude-Code runtimes
+- `scripts/check-tools.sh` — stack-profile-driven tool readiness
+  checker for Phase 1 of an audit run
+
+**Lead-auditor agent updated** to dispatch the two new auditors
+(mobile + infra) per the two-wave execution order in the
+orchestrator.
+
+Generalized from panda's specifics: HIPAA-specific playbook
+renamed to "regulated-data" with GDPR/CCPA/SOC2 framings;
+Flutter-specific mobile playbook generalized to all mobile
+stacks; PandaOS-nginx-specific infra playbook generalized to
+reverse-proxy patterns.
+
 ## [0.11.0.1] — 2026-05-09
 
 ### Added — `docs/overview.md` + refreshed README Status
