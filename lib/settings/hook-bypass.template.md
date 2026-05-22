@@ -31,6 +31,29 @@ writes to its log, so the forensic record remains.
 **Follow-up:** <what removes this bypass>
 ```
 
+## peer-claim Scope idiom (Plan 1 M2 / v0.28+)
+
+When bypassing a `peer-claim` block (another developer's session holds
+a file you need to edit), the Scope must include both the file and the
+peer it pins to:
+
+```markdown
+## bypass:override-alice-login
+
+**Hook:** peer-claim
+**Reason:** alice and I coordinated via DM — she handed off auth/login.ts; her session was killed by SIGKILL so the claim won't release naturally.
+**Approved by:** bob
+**Created:** 2026-05-22T15:00:00Z
+**Expires:** 2026-05-22T16:00:00Z
+**Scope:** file=src/auth/login.ts peer=alice@dev01
+**Follow-up:** alice restarts her session at 16:00; bypass auto-expires.
+```
+
+Substring matching: `file=src/auth/login.ts peer=alice@dev01` matches
+both the file path AND the peer; either field alone wildcards in the
+other dimension (e.g. `peer=alice@dev01` alone matches any file claimed
+by alice).
+
 ## Active entries
 
 (none)

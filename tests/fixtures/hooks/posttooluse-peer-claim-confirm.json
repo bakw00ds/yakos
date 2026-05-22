@@ -1,0 +1,21 @@
+{
+  "_doc": "Plan 1 M2 fixture: PostToolUse Edit after a successful write. With coord enabled, expect: hook posts claim_confirmed event, rebuilds active-claims.json atomically, exits 0.",
+  "session_id": "fixture-peer-claim-confirm-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "api/handlers.go",
+    "old_string": "// foo",
+    "new_string": "// foo\n// edited"
+  },
+  "tool_response": {
+    "filePath": "api/handlers.go",
+    "oldString": "// foo",
+    "newString": "// foo\n// edited"
+  },
+  "tool_use_id": "toolu_peer_claim_confirm_001"
+}

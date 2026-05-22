@@ -1,0 +1,16 @@
+{
+  "_doc": "Plan 1 M2 fixture: PreToolUse Edit on a file with no existing claim. With coord enabled and active-claims.json absent or empty, expect: hook posts claim_intent event, exits 0, no block.",
+  "session_id": "fixture-peer-claim-pass-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "api/handlers.go",
+    "old_string": "// foo",
+    "new_string": "// foo\n// edited"
+  },
+  "tool_use_id": "toolu_peer_claim_pass_001"
+}

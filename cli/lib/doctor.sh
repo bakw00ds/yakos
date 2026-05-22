@@ -293,6 +293,23 @@ else
             ok "  $proj_name: coord dir present at $proj_coord"
             n_sessions="$(find "$proj_coord/sessions" -name '*.ndjson' 2>/dev/null | wc -l | tr -d ' ')"
             info "  $proj_name: $n_sessions session ledger(s) on file"
+            # Plan 1 M2 — claim staleness sweep: claims expired but still
+            # in active-claims.json. Indicates a session died holding a
+            # claim and no peer has triggered a rebuild yet.
+            claims_file="$proj_coord/active-claims.json"
+            if [ -f "$claims_file" ] && command -v jq >/dev/null 2>&1; then
+                now_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                stale="$(jq -r --arg now "$now_ts" \
+                    '.claims[]? | select(.owners[0].expires_at <= $now) |
+                    "  \(.path) — \(.owners[0].user)@\(.owners[0].host) (expired \(.owners[0].expires_at))"' \
+                    "$claims_file" 2>/dev/null)"
+                if [ -n "$stale" ]; then
+                    info "  $proj_name: STALE CLAIMS detected (run any 'yakos peer claims' to trigger rebuild):"
+                    printf '  %s\n' "$stale" | head -5
+                else
+                    ok "  $proj_name: no stale claims"
+                fi
+            fi
             user_mem="$HOME/.yakos-state/memory/$proj_name"
             if [ -L "$user_mem" ]; then
                 target="$(readlink "$user_mem" 2>/dev/null || echo '<unreadable>')"

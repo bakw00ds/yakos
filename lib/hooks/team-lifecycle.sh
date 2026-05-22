@@ -156,11 +156,13 @@ kanban_move_first() {
 }
 
 # Plan 1 M1 — mirror lifecycle events to coord/activity.ndjson when
-# multi-dev coord is enabled. No-op when coord dir absent.
+# multi-dev coord is enabled. No-op when coord dir absent. Always
+# attributes to "lead" since TeamCreate/Agent/TeamDelete are
+# lead-initiated.
 coord_mirror() {
     local kind="$1" extra="${2:-{\}}"
     command -v yakos_coord_emit >/dev/null 2>&1 || return 0
-    yakos_coord_emit "$kind" "$extra" 2>/dev/null || true
+    YAKOS_AGENT_ID="lead" yakos_coord_emit "$kind" "$extra" 2>/dev/null || true
 }
 
 case "$tool" in
@@ -201,6 +203,10 @@ case "$tool" in
     TeamDelete)
         team_name="$(printf '%s' "$tool_input" | jq -r '.name // empty' 2>/dev/null || true)"
         emit_event "team_deleted"
+        # Plan 1 M2 — releases all this session's claims via the
+        # peer-claim-confirm rebuild logic (claim_intent / _confirmed
+        # events are filtered out when the actor matches a team_deleted
+        # actor with the same user+host+pid).
         coord_mirror "team_deleted" \
             "$(jq -nc --arg team "$team_name" '{team_name: $team}' 2>/dev/null || echo '{}')"
 

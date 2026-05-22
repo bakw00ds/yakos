@@ -1,0 +1,16 @@
+{
+  "_doc": "Plan 1 M2 fixture: PreToolUse Edit on a file held by a different peer, BUT with an active hook-bypass.md entry covering 'peer-claim' + Scope 'file=src/auth/login.ts peer=alice@dev01'. Expect: hook logs WARN, posts claim_intent with via_bypass=true, exits 0.",
+  "session_id": "fixture-peer-claim-warn-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "backend-pro",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "src/auth/login.ts",
+    "old_string": "validate()",
+    "new_string": "validate(false)"
+  },
+  "tool_use_id": "toolu_peer_claim_warn_001"
+}

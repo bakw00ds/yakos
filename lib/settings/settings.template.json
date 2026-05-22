@@ -20,11 +20,16 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Edit|Write",
+        "matcher": "Edit|Write|MultiEdit",
+        "_doc_hook_order": "telemetry-first (path-log preserves audit even when later hooks block), then ascending by cost. peer-claim is cheap FS lookup; path-allowlist is cheap JSON lookup; secret-scan is most expensive (regex over full content).",
         "hooks": [
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/path-log.sh"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/peer-claim.sh"
           },
           {
             "type": "command",
@@ -51,6 +56,18 @@
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/team-lifecycle.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "_doc": "Plan 1 M2 — flips peer-claim intent → confirmed and rebuilds active-claims.json. No-op when multi-dev coord is not enabled.",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/peer-claim-confirm.sh"
           }
         ]
       }

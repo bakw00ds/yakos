@@ -31,9 +31,13 @@ yakos peer <subcommand> [args...]
 Multi-developer coordination on a shared dev box (Plan 1 / co-pilot mode).
 Reads / appends shared state at /var/lib/yakos/<project>/coord/.
 
-Subcommands (v0.27 — M1 awareness only):
-  status [<project>]              Active peer sessions for the project.
-  log [--since <iso>] [<project>] Tail coord/activity.ndjson.
+Subcommands:
+  status [<project>]              Active peer sessions for the project. (M1)
+  log [--since <iso>] [<project>] Tail coord/activity.ndjson. (M1)
+  claim <file> [<project>]        Manually claim a file (operator override). (M2)
+  release <file> [<project>]      Release this session's claim on a file. (M2)
+  claims [<project>]              List all active claims for the project. (M2)
+  deadlock [<project>]            Compute wait-for graph from activity log. (M2)
 
 Setup:
   Each developer runs 'yakos init --multi-dev <name> --project <path>'.
@@ -126,10 +130,7 @@ SUB="${1:-}"
 
 case "$SUB" in
     "" | -h | --help | help) usage; exit 0 ;;
-    status|log) ;;
-    claim|release|deadlock)
-        ct_die "peer: '$SUB' is a Plan 1 M2 subcommand (v0.28+); not available in this build"
-        ;;
+    status|log|claim|release|claims|deadlock) ;;
     propose-mode|respond-mode)
         ct_die "peer: '$SUB' is a Plan 1 M3 subcommand (v0.29+); not available in this build"
         ;;
@@ -215,6 +216,132 @@ if [ "$SUB" = "log" ]; then
         tail -n 50 "$LOG"
     fi
 
+    exit 0
+fi
+
+# ---- subcommand: claims (list active claims) -------------------------------
+
+if [ "$SUB" = "claims" ]; then
+    PROJECT="$(resolve_project "${1:-}")"
+    COORD="$(require_coord "$PROJECT")"
+    CLAIMS_FILE="$COORD/active-claims.json"
+    if [ ! -f "$CLAIMS_FILE" ]; then
+        echo "yakos peer claims: no active-claims.json yet (no edits posted)"
+        exit 0
+    fi
+    echo "yakos peer claims — project: $PROJECT"
+    echo "generated_at: $(jq -r '.generated_at // "-"' "$CLAIMS_FILE" 2>/dev/null)"
+    echo
+    printf '  %-50s %-10s %-22s %s\n' "PATH" "STATUS" "EXPIRES" "OWNER"
+    jq -r '.claims[]? |
+        .path as $p |
+        .owners[0] as $o |
+        "  \($p) \($o.status) \($o.expires_at) \($o.user)@\($o.host) (agent: \($o.agent // "-"))"' \
+        "$CLAIMS_FILE" 2>/dev/null || true
+    exit 0
+fi
+
+# ---- subcommand: claim (manual claim — operator override) ------------------
+
+if [ "$SUB" = "claim" ]; then
+    [ "$#" -ge 1 ] || ct_die "peer claim: <file> required"
+    FILE="$1"
+    PROJECT="$(resolve_project "${2:-}")"
+    COORD="$(require_coord "$PROJECT")"
+
+    me_user="${USER:-$(id -un)}"
+    me_host="${HOSTNAME:-$(hostname -s)}"
+    me_pid="${YAKOS_SESSION_PID:-$$}"
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    exp="$(date -u -j -v '+1800S' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || date -u -d '+1800 seconds' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+
+    event="$(jq -nc \
+        --arg ts "$ts" \
+        --arg user "$me_user" \
+        --arg host "$me_host" \
+        --argjson pid "$me_pid" \
+        --arg path "$FILE" \
+        --arg exp "$exp" \
+        '{ts: $ts, kind: "claim_confirmed",
+          actor: {user: $user, host: $host, pid: $pid,
+                  session_id: "manual", agent: "operator"},
+          detail: {path: $path, ttl_seconds: 1800, expires_at: $exp,
+                   source: "yakos peer claim"}}')"
+    printf '%s\n' "$event" >> "$COORD/activity.ndjson"
+    mkdir -p "$COORD/sessions"
+    printf '%s\n' "$event" >> "$COORD/sessions/${me_user}@${me_host}-${me_pid}.ndjson"
+    echo "claimed: $FILE for ${me_user}@${me_host} (30min TTL)"
+    echo "view with: yakos peer claims $PROJECT"
+    exit 0
+fi
+
+# ---- subcommand: release ---------------------------------------------------
+
+if [ "$SUB" = "release" ]; then
+    [ "$#" -ge 1 ] || ct_die "peer release: <file> required"
+    FILE="$1"
+    PROJECT="$(resolve_project "${2:-}")"
+    COORD="$(require_coord "$PROJECT")"
+
+    me_user="${USER:-$(id -un)}"
+    me_host="${HOSTNAME:-$(hostname -s)}"
+    me_pid="${YAKOS_SESSION_PID:-$$}"
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    event="$(jq -nc \
+        --arg ts "$ts" \
+        --arg user "$me_user" \
+        --arg host "$me_host" \
+        --argjson pid "$me_pid" \
+        --arg path "$FILE" \
+        '{ts: $ts, kind: "claim_released",
+          actor: {user: $user, host: $host, pid: $pid,
+                  session_id: "manual", agent: "operator"},
+          detail: {path: $path, source: "yakos peer release"}}')"
+    printf '%s\n' "$event" >> "$COORD/activity.ndjson"
+    mkdir -p "$COORD/sessions"
+    printf '%s\n' "$event" >> "$COORD/sessions/${me_user}@${me_host}-${me_pid}.ndjson"
+    echo "released: $FILE (claim removed from active-claims.json on next rebuild)"
+    exit 0
+fi
+
+# ---- subcommand: deadlock --------------------------------------------------
+
+if [ "$SUB" = "deadlock" ]; then
+    PROJECT="$(resolve_project "${1:-}")"
+    COORD="$(require_coord "$PROJECT")"
+    CLAIMS_FILE="$COORD/active-claims.json"
+    ACTIVITY_LOG="$COORD/activity.ndjson"
+
+    if [ ! -f "$CLAIMS_FILE" ] || [ ! -f "$ACTIVITY_LOG" ]; then
+        echo "yakos peer deadlock: no claims or activity log to analyze"
+        exit 0
+    fi
+
+    echo "yakos peer deadlock — project: $PROJECT"
+    echo
+    # Wait-for: any session that posted claim_intent on a path another
+    # session currently holds (per active-claims.json).
+    blockers="$(jq -r --slurpfile claims "$CLAIMS_FILE" '
+        select(.kind == "claim_intent") |
+        . as $intent |
+        ($claims[0].claims[]? |
+            select(.path == $intent.detail.path) |
+            .owners[0] as $owner |
+            select($owner.user != $intent.actor.user
+                   or $owner.host != $intent.actor.host
+                   or $owner.pid != $intent.actor.pid) |
+            "  \($intent.actor.user)@\($intent.actor.host) wants \($intent.detail.path) — held by \($owner.user)@\($owner.host)"
+        )' "$ACTIVITY_LOG" 2>/dev/null | sort -u)"
+    if [ -z "$blockers" ]; then
+        echo "  (no current wait-for edges; no deadlock candidates)"
+    else
+        echo "Wait-for edges (current):"
+        echo "$blockers"
+        echo
+        echo "Cycle detection deferred to v0.29; surface to humans for now."
+    fi
     exit 0
 fi
 

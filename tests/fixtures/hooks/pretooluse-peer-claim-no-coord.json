@@ -1,0 +1,16 @@
+{
+  "_doc": "Plan 1 M2 fixture: PreToolUse Edit with multi-dev coord NOT enabled (no /var/lib/yakos/<project>/coord/ dir). Expect: hook exits 0 silently — no block, no log entry. This is the common single-dev case.",
+  "session_id": "fixture-peer-claim-no-coord-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "api/handlers.go",
+    "old_string": "// foo",
+    "new_string": "// foo\n// edited"
+  },
+  "tool_use_id": "toolu_peer_claim_nocoord_001"
+}

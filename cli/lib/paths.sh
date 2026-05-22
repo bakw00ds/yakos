@@ -187,7 +187,8 @@ yakos_coord_emit() {
         --argjson detail "$detail" \
         '{ts: $ts, kind: $kind,
           actor: {user: $user, host: $host, pid: $pid,
-                  session_id: $sid, agent: ($agent | select(length>0))},
+                  session_id: $sid,
+                  agent: (if ($agent | length) > 0 then $agent else null end)},
           detail: $detail}' 2>/dev/null)"
     [ -n "$event" ] || return 0
 

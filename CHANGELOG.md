@@ -7,6 +7,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0.0] — 2026-05-22
+
+### Added — Plan 1 M2: per-file claims with hook enforcement
+
+Edit conflicts caught at the source: when two peers try to edit the
+same file, the second one's PreToolUse hook blocks with an
+explanatory message and bypass instructions. Parallel work on
+different files is unaffected — the claim is per-file, not
+per-session.
+
+**Hooks:**
+
+- **NEW `lib/hooks/peer-claim.sh`** — PreToolUse on
+  `Edit|Write|MultiEdit`. Resolves target to repo-relative form,
+  rebuilds `active-claims.json` from the activity log tail if missing,
+  checks for conflicting unexpired peer claim, and either blocks
+  (exit 2 with explanation citing owner + expiration + bypass
+  instructions), passes-with-bypass (WARN + `via_bypass: true` on the
+  emitted claim_intent), or passes-fresh (emits `claim_intent`, or
+  `claim_renewed` if this session already holds the claim).
+- **NEW `lib/hooks/peer-claim-confirm.sh`** — PostToolUse on
+  `Edit|Write|MultiEdit`. Emits `claim_confirmed` and rebuilds
+  `active-claims.json` atomically (write to `.tmp`, then `mv`).
+
+**Claim semantics:**
+
+- **TTL is liveness, not deadline.** Defaults per file type:
+  - SQL / migrations: 1800s (30 min)
+  - scratchpad markdown (decisions/contracts/plan/status/findings): 120s
+  - lock files (*.lock, package-lock.json, go.sum, Cargo.lock,
+    Pipfile.lock): 300s
+  - everything else: 600s (10 min)
+- **Two-phase**: `claim_intent` precedes the edit; `claim_confirmed`
+  follows successful edit. Intents older than 60s without confirmation
+  expire fast.
+- **Per-file, not per-area.** No nested implication; each file claimed
+  explicitly.
+- **Session-scoped.** TeamDelete (in team-lifecycle.sh) releases all
+  claims by that session via the projection rebuild.
+
+**CLI:**
+
+- **`cli/lib/peer.sh` extended** — new subcommands:
+  - `claims [<project>]` — list active claims with status / expiration /
+    owner
+  - `claim <file> [<project>]` — manual claim (operator override; 30min TTL)
+  - `release <file> [<project>]` — release this session's claim
+  - `deadlock [<project>]` — compute wait-for edges from the activity
+    log (cycle detection deferred to v0.29)
+
+**Settings template:**
+
+- `lib/settings/settings.template.json` — Edit matcher widened to
+  `Edit|Write|MultiEdit`, peer-claim wired in between path-log and
+  path-allowlist (telemetry-first, then ascending by cost). New
+  PostToolUse block matching the same tools dispatches to
+  peer-claim-confirm.
+
+**Bypass:**
+
+- `lib/settings/hook-bypass.template.md` — new section documenting the
+  peer-claim Scope idiom: `file=<path> peer=<user>@<host>`. Substring
+  matching: either field alone wildcards in the other dimension.
+
+**Doctor:**
+
+- `cli/lib/doctor.sh` — claim-staleness sweep when given a project
+  arg. Surfaces claims that expired but are still listed in
+  `active-claims.json` (indicates a session died holding a claim and
+  no peer has triggered a rebuild yet).
+
+**Hook fixtures:**
+
+- `tests/fixtures/hooks/pretooluse-peer-claim-{pass,block,warn-bypass,no-coord}.json`
+- `tests/fixtures/hooks/posttooluse-peer-claim-confirm.json`
+
+**Bug fixed in v0.27 substrate:**
+
+- `cli/lib/paths.sh::yakos_coord_emit` used `($agent | select(length>0))`
+  which filtered out the entire event when `YAKOS_AGENT_ID` was empty.
+  Replaced with `if ($agent | length) > 0 then $agent else null end` so
+  events emit with `agent: null` rather than nothing at all.
+- Lifecycle + mailbox mirror hooks now export `YAKOS_AGENT_ID` (set to
+  "lead" for team-lifecycle, to the sender for mailbox) so coord events
+  are attributed correctly.
+
+**What v0.28 does NOT yet ship:**
+
+- Mode-negotiation protocol (M3 — v0.29)
+- `multi-dev-coord.md` rule + `peer-sync` skill (M3 — v0.29)
+- Cycle-detection in `peer deadlock` — current implementation lists
+  wait-for edges only
+
 ## [0.27.0.0] — 2026-05-22
 
 ### Added — Plan 1 M1: multi-dev co-pilot mode (awareness only)
