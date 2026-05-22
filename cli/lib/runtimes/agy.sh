@@ -235,6 +235,14 @@ yk_rt_agy_dispatch() {
     # first real dispatch.
     local framed="@yakos-$agent_name $task"
 
+    # Multi-turn (v0.31+): if YAKOS_CONVERSATION_ID is set, use
+    # --conversation <uuid> to continue. agy stores conversations at
+    # ~/.gemini/antigravity-cli/conversations/<uuid>.pb.
+    local resume_args=()
+    if [ -n "${YAKOS_CONVERSATION_ID:-}" ]; then
+        resume_args=(--conversation "$YAKOS_CONVERSATION_ID")
+    fi
+
     # Plain text output (no JSON mode in agy 1.0.1). For YAKOS_USAGE_OUT
     # we estimate via bytes/4 — agy doesn't expose token counts in the
     # headless surface (cli.log has glog-format telemetry but parsing
@@ -245,10 +253,29 @@ yk_rt_agy_dispatch() {
 
     agy --add-dir "$project" \
         --dangerously-skip-permissions \
+        "${resume_args[@]}" \
         -p "$framed" > "$out_tmp" 2>/dev/null
     local rc=$?
 
     cat "$out_tmp"
+
+    # Capture the conversation UUID for YAKOS_SESSION_OUT. agy writes
+    # the new (or updated) conversation file to the conversations dir
+    # immediately on completion. Pick the most-recently-modified .pb
+    # file as our session identity.
+    if [ -n "${YAKOS_SESSION_OUT:-}" ]; then
+        local conv_root="$HOME/.gemini/antigravity-cli/conversations"
+        if [ -d "$conv_root" ]; then
+            local latest
+            latest="$(find "$conv_root" -maxdepth 1 -type f -name '*.pb' \
+                -print 2>/dev/null \
+                | xargs -I{} stat -f '%m %N' {} 2>/dev/null \
+                | sort -n -r | head -1 | awk '{print $2}')"
+            if [ -n "$latest" ]; then
+                basename -- "$latest" .pb > "$YAKOS_SESSION_OUT"
+            fi
+        fi
+    fi
 
     if [ -n "${YAKOS_USAGE_OUT:-}" ]; then
         local task_bytes out_bytes

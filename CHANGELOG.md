@@ -7,6 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0.0] — 2026-05-22
+
+### Added — MCP server for cross-runtime dispatch + auth login --all + multi-turn resume
+
+A Claude Code session can now call codex / agy / SDK agents as
+**native MCP tool calls** rather than shelling out via Bash. Multi-
+turn conversations are supported for runtimes whose CLIs expose
+session resume (codex, agy, claude, claude-sdk; antigravity-sdk
+deferred — SDK lacks cross-process resume).
+
+**MCP server (`cli/lib/mcp/yakos-mcp-server.py`):**
+
+- 9 tools exposed: `dispatch_codex / _agy / _claude_sdk /
+  _antigravity_sdk / _claude` (one-shot) +
+  `continue_codex / _agy / _claude_sdk / _claude` (multi-turn).
+- Each `dispatch_*` returns response text + yakOS `conversation_id` +
+  telemetry (duration_ms + usage dict).
+- Each `continue_*` takes (conversation_id, task), looks up the
+  runtime-native resume id, dispatches with `YAKOS_CONVERSATION_ID`
+  set, returns the next turn's response.
+- State persisted at `~/.yakos-state/mcp-conversations.json`.
+- Helpful error if the `mcp` Python package isn't installed (`pip
+  install mcp`).
+
+**Runtime adapter changes (multi-turn substrate):**
+
+- New env-var convention: `YAKOS_CONVERSATION_ID` (input — resume
+  this native session) + `YAKOS_SESSION_OUT` (output — write the
+  native session id here for future resume). Adapters updated:
+  - `cli/lib/runtimes/codex.sh` — uses `codex resume <session_id>`;
+    captures session_id from JSON stream
+  - `cli/lib/runtimes/agy.sh` — uses `agy --conversation <uuid>`;
+    captures the latest .pb conversation file as the session id
+  - `cli/lib/runtimes/claude.sh` — uses `claude --resume <id>`;
+    captures session_id from stream-json events
+  - `cli/lib/runtimes/claude-sdk-dispatch.py` — sets
+    `ClaudeAgentOptions.resume=<id>` when YAKOS_CONVERSATION_ID is
+    set; falls back to fresh dispatch if the SDK version doesn't
+    support the kwarg (with stderr warning)
+  - `cli/lib/runtimes/antigravity-sdk-dispatch.py` — intentionally
+    unchanged; SDK's Conversation API requires same-process state
+    that yakOS dispatch doesn't preserve
+
+**New CLI surface (`yakos mcp`):**
+
+- `install [--project <path>]` — writes/merges `.mcp.json` entry
+  with absolute paths to the server script + YAKOS_ROOT env. Default
+  project: cwd. Creates the file if absent; preserves other servers
+  if present.
+- `uninstall [--project <path>]` — removes the yakos-dispatch entry
+  (backup created first).
+- `status [--project <path>]` — shows server script presence,
+  .mcp.json entry state, mcp python package importability.
+- `probe` — verifies `pip install mcp` was run.
+
+**`yakos auth login --all`** — walks every installed runtime and
+runs its login flow sequentially. Skips uninstalled CLIs; skips SDK
+adapters (they share creds with the bundled CLI). Continues past
+per-runtime failures with a clear summary. Quick-win for first-time
+operator setup.
+
+**Documentation:**
+
+- New `docs/mcp-integration.md` — operator guide: prerequisites,
+  install (per-project + global), tool reference, usage examples,
+  conversation state, limitations, troubleshooting.
+
+**Validated this session:**
+
+- All adapters bash-syntax-check + python-compile clean
+- `yakos mcp install/status/uninstall` smoke-tested in tmp project;
+  jq merge preserves other servers correctly; backups land at
+  expected path
+- `yakos auth login --all` shows 3 OK / 3 SKIP on this machine
+  (agy/claude/codex authed; SDK siblings + gemini deprecated skip)
+- MCP server import-fails with helpful message when `mcp` package
+  absent (verified on this host)
+
+**Untested in live conditions (deferred to operator):**
+
+- Actual MCP roundtrip from a Claude Code session against the new
+  tools. Verifiable once the operator runs `pip install mcp` AND
+  `yakos mcp install` AND restarts a session in the project. The
+  protocol surface is well-defined; the upstream `mcp` Python SDK
+  is stable.
+- claude-sdk's `resume` kwarg — set per the SDK's documented
+  `ClaudeAgentOptions` field. If the installed SDK version doesn't
+  accept it, the adapter falls back to fresh dispatch with a stderr
+  warning rather than erroring.
+
 ## [0.30.0.0] — 2026-05-22
 
 ### Added — UX + verification follow-ups (4 high-leverage + 4 nits)

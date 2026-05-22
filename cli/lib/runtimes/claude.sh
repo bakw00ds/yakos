@@ -126,11 +126,17 @@ yk_rt_claude_dispatch() {
 Task:
 $task"
 
-    # If the caller (dispatch.sh) set YAKOS_USAGE_OUT, run claude with
-    # --output-format stream-json, parse the final result event for
-    # actual token usage, write to that path, and reconstruct the
-    # text-only response for stdout.
-    if [ -n "${YAKOS_USAGE_OUT:-}" ]; then
+    # Multi-turn (v0.31+): if YAKOS_CONVERSATION_ID is set, resume that
+    # claude session via --resume <session_id>.
+    local resume_args=()
+    if [ -n "${YAKOS_CONVERSATION_ID:-}" ]; then
+        resume_args=(--resume "$YAKOS_CONVERSATION_ID")
+    fi
+
+    # If the caller (dispatch.sh) set YAKOS_USAGE_OUT or
+    # YAKOS_SESSION_OUT, run claude with --output-format stream-json so
+    # we can parse the final result event for both usage and session_id.
+    if [ -n "${YAKOS_USAGE_OUT:-}" ] || [ -n "${YAKOS_SESSION_OUT:-}" ]; then
         local raw_tmp
         raw_tmp="$(mktemp -t yakos-claude-raw.XXXXXX)"
 
@@ -139,19 +145,28 @@ $task"
                --add-dir "$project" \
                --output-format stream-json \
                --verbose \
+               "${resume_args[@]}" \
                -p "$framed" > "$raw_tmp" 2>/dev/null
         local rc=$?
 
-        # Extract assistant text and the final result event's usage.
         jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text' \
             "$raw_tmp" 2>/dev/null
-        jq -c 'select(.type == "result") | {input_tokens: .usage.input_tokens,
-            output_tokens: .usage.output_tokens,
-            cache_read: .usage.cache_read_input_tokens,
-            cache_creation: .usage.cache_creation_input_tokens,
-            duration_ms: .duration_ms,
-            total_cost_usd: .total_cost_usd}' \
-            "$raw_tmp" 2>/dev/null | tail -1 > "$YAKOS_USAGE_OUT"
+
+        if [ -n "${YAKOS_USAGE_OUT:-}" ]; then
+            jq -c 'select(.type == "result") | {input_tokens: .usage.input_tokens,
+                output_tokens: .usage.output_tokens,
+                cache_read: .usage.cache_read_input_tokens,
+                cache_creation: .usage.cache_creation_input_tokens,
+                duration_ms: .duration_ms,
+                total_cost_usd: .total_cost_usd}' \
+                "$raw_tmp" 2>/dev/null | tail -1 > "$YAKOS_USAGE_OUT"
+        fi
+
+        if [ -n "${YAKOS_SESSION_OUT:-}" ]; then
+            # Claude's stream-json emits session_id in the init or result event.
+            jq -r 'select(.session_id != null) | .session_id' \
+                "$raw_tmp" 2>/dev/null | head -1 > "$YAKOS_SESSION_OUT"
+        fi
 
         rm -f "$raw_tmp" 2>/dev/null
         return "$rc"
@@ -161,5 +176,6 @@ $task"
     claude --agents "$single" \
            --permission-mode bypassPermissions \
            --add-dir "$project" \
+           "${resume_args[@]}" \
            -p "$framed"
 }

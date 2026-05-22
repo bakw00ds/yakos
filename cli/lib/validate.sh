@@ -370,7 +370,7 @@ check_dark_code() {
             hook-input.sh|hook-output.sh|paths.sh|compat.sh|agents-compose.sh|runtime-resolve.sh|hooks-install.sh|README.md) continue ;;
             # CLI subcommand scripts: dispatched via cli/yakos's `cmd.sh`
             # construction, not literal references. Treat as referenced.
-            agent.sh|cost.sh|memory.sh|session.sh|project-config.sh|migrate.sh|plugin.sh|teach.sh|soul.sh|retro.sh|skill.sh|compact.sh|checkpoint.sh|kanban.sh|env.sh|standards.sh|peer.sh|quickstart.sh) continue ;;
+            agent.sh|cost.sh|memory.sh|session.sh|project-config.sh|migrate.sh|plugin.sh|teach.sh|soul.sh|retro.sh|skill.sh|compact.sh|checkpoint.sh|kanban.sh|env.sh|standards.sh|peer.sh|quickstart.sh|mcp.sh) continue ;;
         esac
         # Skip runtime adapters (sourced by runtime-resolve.sh, not dispatched directly)
         case "$f" in
