@@ -1,0 +1,56 @@
+name: CodeQL
+
+# Security analysis for the Python surface of yakOS. The framework
+# is primarily bash (covered by shellcheck in ci.yml); the Python
+# files are the SDK dispatch scripts at cli/lib/runtimes/*.py.
+#
+# CodeQL is overkill for two files today; the value is in the
+# Security tab being populated and the workflow catching issues as
+# the Python surface grows.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/*.py"
+      - ".github/workflows/codeql.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/*.py"
+      - ".github/workflows/codeql.yml"
+  schedule:
+    # Weekly run catches drift in upstream rule packs even when no
+    # Python changes.
+    - cron: "23 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  packages: read
+
+jobs:
+  analyze:
+    name: Analyze (python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

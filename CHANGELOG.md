@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.1.0] — 2026-05-22
+
+### Added — Project hygiene for going public
+
+The repo is public as of v0.29.1.0. This release adds the project
+hygiene that comes with that status: a public-facing README, supply-
+chain security wiring, and CodeQL coverage of the Python surface.
+
+**README.md (rewrite):**
+
+- New TL;DR (install → bootstrap → start in 4 commands)
+- 4-layer architecture diagram (framework → user state → project
+  config → per-project ephemeral)
+- Key concepts table (agent / skill / rule / playbook / hook /
+  runtime adapter)
+- Runtime support matrix (claude / codex / claude-sdk / agy /
+  antigravity-sdk / gemini-deprecated)
+- Multi-developer co-pilot mode pointer
+- Cross-project standards summary
+- FAQ section answering the obvious questions (why "yakOS",
+  vs LangChain / AutoGen / CrewAI, runtime independence, multi-dev
+  scope, production-readiness)
+- Affiliation disclaimer ("Not affiliated with Anthropic, OpenAI,
+  or Google")
+- Stale agent/skill counts refreshed to current numbers (34/53/16/8/12)
+
+**Supply-chain / security:**
+
+- `.github/dependabot.yml` — weekly check of GitHub Actions deps;
+  Python deps deliberately not pinned (yakOS doesn't bundle a runtime
+  for them — operators install in their own envs).
+- `.github/workflows/codeql.yml` — CodeQL analysis for the Python
+  surface (`cli/lib/runtimes/*.py` — claude-sdk + antigravity-sdk
+  dispatch). `security-and-quality` query pack. Triggers on
+  Python-touching PRs + push to main + weekly cron.
+
+**Repository visibility:**
+
+- Repo flipped public at https://github.com/bakw00ds/yakos
+- Topics set: `claude-code`, `codex`, `antigravity`, `agent-framework`,
+  `multi-agent`, `llm-tools`, `bash`, `developer-tools`
+- Description: "Multi-runtime agent framework (Claude Code, Codex,
+  Antigravity) with hard/soft controls, audit-first hooks, and
+  multi-dev coordination."
+- v0.29.0.0 GitHub Release created (backfilled tag on commit 0162b50)
+
+**Not in this release** (deferred to a later v0.30+):
+
+- CODE_OF_CONDUCT.md (operator chose to skip for now)
+- CONTRIBUTING.md (operator chose to skip for now)
+- SECURITY.md (will land when external researchers start reporting)
+
 ## [0.29.0.0] — 2026-05-22
 
 ### Added — Plan 1 M3: mode negotiation (closes Plan 1)
