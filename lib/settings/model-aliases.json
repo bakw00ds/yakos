@@ -4,22 +4,26 @@
     "cheap": {
       "claude": "haiku",
       "codex": "gpt-5-nano",
-      "gemini": "gemini-2.5-flash"
+      "gemini": "gemini-2.5-flash",
+      "agy": "gemini-3.5-flash"
     },
     "balanced": {
       "claude": "sonnet",
       "codex": "gpt-5-mini",
-      "gemini": "gemini-2.5-pro"
+      "gemini": "gemini-2.5-pro",
+      "agy": "gemini-3.1-pro"
     },
     "best": {
       "claude": "opus",
       "codex": "gpt-5",
-      "gemini": "gemini-2.5-pro"
+      "gemini": "gemini-2.5-pro",
+      "agy": "claude-opus-4.6"
     },
     "reasoning": {
       "claude": "opus",
       "codex": "o4-mini",
-      "gemini": "gemini-2.5-pro"
+      "gemini": "gemini-2.5-pro",
+      "agy": "claude-opus-4.6"
     }
   }
 }

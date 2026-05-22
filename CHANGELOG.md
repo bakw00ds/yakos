@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0.0] — 2026-05-22
+
+### Added — Plan 2: agy adapter (Gemini CLI successor)
+
+Closes wishlist item: Antigravity 2.0 + agy CLI support.
+Critical path before Gemini CLI shutdown on 2026-06-18.
+
+**M0 verified against `agy --version 1.0.1`:**
+
+- `--add-dir <path>` exists (workspace scope, claude-compatible
+  flag name) → capability tag `path-allowlist-hard`
+- `--dangerously-skip-permissions` for bypass mode
+- `--sandbox` as an extra safety primitive (yakOS exposes as
+  the "safe" permission mode)
+- `-c` / `--continue` for resume most-recent; `--conversation
+  <id>` for resume by ID (NOT `--resume`)
+- `-p "<prompt>"` with **positional prompt arg** (NOT stdin);
+  plain Markdown output (no `--output-format` / no JSON mode)
+- No top-level `-m` model selection — model selected via agy
+  config or TUI `/model`; yakOS's per-agent `model:`
+  frontmatter does not translate at the CLI surface
+- Auth via Google OAuth + keyring (same chain as old Gemini CLI;
+  cli.log confirmed at `~/.gemini/antigravity-cli/cli.log`)
+- MCP config: `~/.gemini/config/mcp_config.json` (gemini-shared)
+  + workspace `.agents/mcp_config.json` (per migration guide;
+  `mcpServers` outer key dropped + `url` → `serverUrl` rename)
+- Conversation storage: `~/.gemini/antigravity-cli/conversations/<uuid>.pb`
+  (protobuf — confirmed; not human-readable)
+- Plugin migration: `agy plugin import gemini` (operator-run;
+  not yakOS adapter logic)
+
+**New runtime adapter:**
+
+- `cli/lib/runtimes/agy.sh` — 8-verb implementation per the
+  runtime adapter contract. Materializes agents to
+  `<project>/.agents/skills/yakos-*.md` (migration-guide
+  location). Auto-translates `<project>/.mcp.json` →
+  `<project>/.agents/mcp_config.json` with the breaking field
+  rename (`mcpServers` → top-level; `url` → `serverUrl`).
+  Dispatch via `agy --add-dir <project>
+  --dangerously-skip-permissions -p "@yakos-<name> <task>"`.
+  Plain-text output; usage tokens estimate-only (bytes/4)
+  since agy has no headless telemetry surface.
+
+**Deprecation shim:**
+
+- `cli/lib/runtimes/gemini.sh` — rewritten as a thin shim
+  sourcing `agy.sh` and delegating all 8 verbs to its
+  counterparts. Emits one-time `NOTE: --runtime gemini is
+  deprecated` per session. Removal date: 2026-09-01 (3 months
+  after Gemini CLI shutdown). Existing
+  `--runtime gemini` + agent frontmatter `runtime: gemini`
+  invocations continue to work transparently.
+
+**Model aliases:**
+
+- `lib/settings/model-aliases.json` — added `agy:` entry per
+  alias tier (cheap/balanced/best/reasoning). NOTE: yakOS
+  passes the model id into agent materialization, but agy
+  1.0.1 doesn't expose `-m` at the CLI, so the alias serves
+  documentation purposes. Future agy releases may surface
+  model selection at the headless interface.
+
+**Cross-vendor capability surfaced via agy:**
+
+- agy 1.0.1 supports cross-vendor routing in its TUI
+  (`/model` switches between Gemini 3.5 Flash, Gemini 3.1 Pro,
+  Claude Sonnet 4.6 Thinking, Claude Opus 4.6 Thinking,
+  GPT-OSS 120B). yakOS doesn't currently surface this at the
+  CLI (agy doesn't expose it); operators set the default
+  model via agy TUI `/model` and yakOS dispatches through.
+
+**Out of scope for this milestone (deferred):**
+
+- `yakos hooks install agy` — hook translation. Per migration
+  guide, agy hooks share format with Gemini CLI hooks; planned
+  extension to `cli/lib/hooks-install.sh` to add `install_agy`
+  that reuses gemini's translator with output path
+  `.agents/hooks.json`.
+- `yakos auth login agy` / `yakos auth status agy` extensions.
+- `yakos doctor` agy probe.
+- Codex + agy token-usage probes for `lib/hooks/context-threshold.sh`
+  (claude-only currently; agy will need its own probe via
+  cli.log parsing or a future API).
+- Plan 5 SDK adapters (claude-sdk + antigravity-sdk) remain
+  drafts; will follow once Anthropic Agent SDK package name
+  is confirmed.
+
 ## [0.20.0.0] — 2026-05-22
 
 ### Added — Plan 4 M3: monitors + feedback standards
