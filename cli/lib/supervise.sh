@@ -24,6 +24,9 @@ Manage the live shadow-agent supervisor (v0.33+).
 Subcommands:
   enable [<project>]          Flip .yakos.yml supervisor.enabled to true.
   disable [<project>]         Flip to false.
+  set <key> <value> [<proj>]  Set a single supervisor config key in .yakos.yml.
+                              Common keys: block_on_critical, score_every_n_calls,
+                              runtime, agent. (Used by the supervisor-toggle skill.)
   status [<project>]          Config snapshot + buffer + recent findings count.
   tail [<project>] [--watch]  Print recent findings (--watch follows).
   clear [<project>]           Wipe buffer + findings + counter (keeps config).
@@ -161,7 +164,7 @@ SUB="${1:-}"
 
 case "$SUB" in
     "" | -h | --help | help) usage; exit 0 ;;
-    enable|disable|status|tail|clear) ;;
+    enable|disable|status|tail|clear|set) ;;
     *) ct_die "supervise: unknown subcommand '$SUB' (try --help)" ;;
 esac
 
@@ -295,6 +298,79 @@ if [ "$SUB" = "tail" ]; then
             echo "---"
         done
     fi
+    exit 0
+fi
+
+# ---- set <key> <value> -----------------------------------------------------
+
+if [ "$SUB" = "set" ]; then
+    [ "$#" -ge 2 ] || ct_die "supervise set: <key> <value> required (e.g. block_on_critical false)"
+    KEY="$1"
+    VAL="$2"
+    PROJECT="$(resolve_project "${3:-}")"
+    resolve_project_paths "$PROJECT"
+
+    # Validate the key is one we know about
+    case "$KEY" in
+        enabled|runtime|agent|score_every_n_calls|block_on_critical) ;;
+        *) ct_die "supervise set: unknown key '$KEY' (allowed: enabled / runtime / agent / score_every_n_calls / block_on_critical)" ;;
+    esac
+
+    # Validate boolean values for bool keys
+    case "$KEY" in
+        enabled|block_on_critical)
+            case "$VAL" in
+                true|false) ;;
+                *) ct_die "supervise set $KEY: value must be 'true' or 'false' (got '$VAL')" ;;
+            esac
+            ;;
+        score_every_n_calls)
+            case "$VAL" in
+                ''|*[!0-9]*) ct_die "supervise set $KEY: value must be a positive integer (got '$VAL')" ;;
+            esac
+            ;;
+    esac
+
+    [ -f "$yakos_yml" ] || ct_die "supervise set: $yakos_yml missing; run 'yakos init' first"
+
+    # No-op if already at target
+    if grep -A 10 '^[[:space:]]*supervisor:' "$yakos_yml" 2>/dev/null \
+        | grep -q "^[[:space:]]*$KEY:[[:space:]]*$VAL[[:space:]]*$"; then
+        echo "supervisor.$KEY is already '$VAL' in $yakos_yml — no change"
+        exit 0
+    fi
+
+    tmp="$yakos_yml.tmp.$$"
+    if grep -q '^[[:space:]]*supervisor:' "$yakos_yml" 2>/dev/null; then
+        # Block exists — replace or add the specific key
+        awk -v key="$KEY" -v val="$VAL" '
+            BEGIN { in_super=0; replaced=0 }
+            /^[[:space:]]*supervisor:[[:space:]]*$/ { in_super=1; print; next }
+            in_super && $0 ~ "^[[:space:]]*"key":" {
+                sub(key":.*", key": " val)
+                replaced=1
+                print
+                next
+            }
+            in_super && /^[^[:space:]#]/ {
+                if (!replaced) { print "  " key ": " val; replaced=1 }
+                in_super=0
+            }
+            { print }
+            END { if (in_super && !replaced) { print "  " key ": " val } }
+        ' "$yakos_yml" > "$tmp"
+        mv "$tmp" "$yakos_yml"
+    else
+        # No supervisor block — append a fresh one with just this key
+        {
+            cat "$yakos_yml"
+            printf '\n# Added by `yakos supervise set` on %s\nsupervisor:\n  %s: %s\n' \
+                "$(ct_iso_now_z)" "$KEY" "$VAL"
+        } > "$tmp"
+        mv "$tmp" "$yakos_yml"
+    fi
+
+    echo "set supervisor.$KEY: $VAL in $yakos_yml"
     exit 0
 fi
 

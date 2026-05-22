@@ -20,6 +20,16 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "*",
+        "_doc": "v0.34 budget-guard runs on every tool call; no-op when .yakos.yml has no budget block",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/budget-guard.sh"
+          }
+        ]
+      },
+      {
         "matcher": "Edit|Write|MultiEdit",
         "_doc_hook_order": "telemetry-first (path-log preserves audit even when later hooks block), then ascending by cost. supervisor-gate is cheap FS lookup; peer-claim is cheap FS lookup; path-allowlist is cheap JSON lookup; secret-scan is most expensive (regex over full content).",
         "hooks": [
@@ -82,6 +92,10 @@
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/supervisor-stream.sh"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/output-injection-scan.sh"
           }
         ]
       }

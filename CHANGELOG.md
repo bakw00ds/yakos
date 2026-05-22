@@ -7,6 +7,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0.0] — 2026-05-22
+
+### Added — Harness-engineering gap closes (awesome-harness-engineering review)
+
+Five bundled additions filling gaps identified by a review of
+[awesome-harness-engineering](https://github.com/ai-boost/awesome-harness-engineering)
+against yakOS's current state. The patterns are well-established;
+this release wires them into the framework.
+
+**1. `supervisor-toggle` skill** (answers question raised in this session)
+
+- **NEW `lib/skills/supervisor-toggle/SKILL.md`** — Haiku-tier
+  skill that documents when/why/how to flip the supervisor's
+  `block_on_critical` setting from a running session, plus
+  rationale for switching to passive (false-positive frequency)
+  or active (entering high-stakes phase).
+- **NEW `yakos supervise set <key> <value>`** subcommand backs the
+  skill — safely edits `.yakos.yml` via awk (preserves other keys);
+  validates booleans + positive-int values per key; idempotent.
+
+**2. Prompt-injection scanner** (closes the MCP cross-runtime attack surface)
+
+- **NEW `lib/hooks/output-injection-scan.sh`** — PostToolUse hook
+  on `*` that scans inbound tool output (Bash / Read / WebFetch /
+  any `mcp__*`) for known injection patterns drawn from
+  [tldrsec/prompt-injection-defenses](https://github.com/tldrsec/prompt-injection-defenses)
+  and OWASP LLM01:
+  - ignore-previous-instructions family
+  - disregard-system-prompt
+  - role-override attempts (`you are now ...`)
+  - prompt-impersonation (`^SYSTEM:` at line start)
+  - model-format token injection (`<|im_start|>` etc.)
+  - private-key markers + API-key shapes (sk-ant-, AKIA…, ghp_, etc.)
+  - long base64 blobs (400+ chars)
+  - zero-width / direction-override unicode (steganographic)
+- WARN-only — never blocks. Surfaces via stderr; lead decides.
+- Disable via `YAKOS_INJECTION_SCAN_DISABLE=1` env or
+  `.yakos.yml` `injection_scan.enabled: false`.
+- **NEW `lib/playbooks/09-prompt-injection-defense.md`** — operator
+  guide covering threat model (esp. MCP cross-runtime relays added
+  in v0.31), framework defenses, what the lead does on WARN, when
+  to refuse to proceed.
+
+**3. Loop + budget guardrails**
+
+- **NEW `lib/hooks/budget-guard.sh`** — PreToolUse hook on `*` that
+  enforces three per-session caps (any → ho_block):
+  - `max_tool_calls` — total tool-call count this session
+  - `max_wall_seconds` — wall-clock since first tool call
+  - `max_repeat_same_tool` — same tool repeated N times in a row
+    (loop detection)
+- Counters persist at `work/current/.budget-state.json`.
+- Per-cap bypass via hook-bypass.md `Scope: cap=<key>`.
+- Emergency disable: `YAKOS_BUDGET_DISABLE=1`.
+- `.yakos.yml` template gains commented-out `budget:` block.
+- Closes the production-cost-runaway gap raised by
+  [InfoWorld's "FinOps for Agents"](https://www.infoworld.com/article/4138748/finops-for-agents-loop-limits-tool-call-caps-and-the-new-unit-economics-of-agentic-saas.html).
+
+**4. `AGENTS.md` emission**
+
+- **NEW `lib/settings/agents.md.template`** — cross-tool agent
+  instructions file. `yakos init` now writes `<project>/AGENTS.md`
+  alongside `CLAUDE.md` (idempotent; only writes if absent).
+- `AGENTS.md` is the emerging cross-tool standard read by codex,
+  cursor, openhands, aider, sweep, and others. Same purpose as
+  `CLAUDE.md` but vendor-neutral.
+- Template explains the relationship between AGENTS.md, CLAUDE.md,
+  and `.yakos.yml`, and includes a "delete this section once done"
+  scaffold for operator customization.
+
+**5. `HARNESS_CHECKLIST.md` + `yakos doctor --production`**
+
+- **NEW `lib/settings/harness-checklist.template.md`** — operator-
+  facing pre-production review covering security posture, hook
+  discipline, agent discipline, budget + supervisor, tests, plus
+  non-automated governance items (permissions, MCP audit, cost
+  ceiling, on-call, rollback playbook, multi-dev sign-off).
+- **NEW `yakos doctor --production <project-path>`** — programmatic
+  execution of the automatable items. Reports PASS / WARN / FAIL
+  per item. Surfaces:
+  - missing SECURITY.md / path-allowlist.json / required hooks
+  - active hook-bypass entries (production state should be empty)
+  - pre-push version gate installation state
+  - agent frontmatter with missing `tools:` or empty `tools: []`
+  - .yakos.yml missing budget or supervisor blocks
+  - supervisor passive-mode warning (for production)
+- Inspired by [AI Harness Scorecard](https://github.com/anthropics/ai-harness-scorecard)
+  and the awesome-harness `templates/HARNESS_CHECKLIST.md`.
+
+**Settings template:**
+
+- PreToolUse chain extended: `*` matcher with `budget-guard.sh` first
+  (cheapest gate; affects all tools)
+- PostToolUse `*` matcher extended with `output-injection-scan.sh`
+  alongside existing `supervisor-stream.sh`
+
+**Validated this session:**
+
+- All hooks bash-syntax-check clean
+- `yakos validate --strict`: 0 errors / 0 warnings
+- Multi-dev e2e regression: still 10/10
+- Supervisor e2e regression: still 11/11
+- `yakos supervise set block_on_critical false/true` round-trip
+  verified in tmp project; idempotent + preserves other yaml keys
+
+**Gap analysis recorded:** see also v0.34.0.0 commit message for the
+broader awesome-harness gap analysis (top 10 patterns reviewed; this
+release ships 5). Remaining items deferred per their leverage / cost:
+
+- Behavioral fingerprinting for regression testing (~3 hr; current
+  e2e + multi-dev coord + supervisor cover most of the value)
+- State-machine guardrails per workflow phase (~2 hr; per-agent
+  `tools:` covers most of the surface)
+- PLAN.md/IMPLEMENT.md long-horizon artifact templates (~30 min;
+  yakOS already has semantically equivalent `work/current/plan.md`,
+  `decisions.md`, `findings.md` — adopting OpenAI's exact naming
+  would create migration churn)
+- Cost-per-Accepted-Outcome (CAPO) metric (~2 hr; instrumentation
+  heavier than the value at this scale)
+- Excessive-Agency audit skill (OWASP LLM06) (~30 min; covered
+  implicitly by `yakos doctor --production`)
+
 ## [0.33.0.0] — 2026-05-22
 
 ### Added — Live shadow-agent supervisor (drift / accuracy / intent monitoring)

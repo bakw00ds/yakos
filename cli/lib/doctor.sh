@@ -14,6 +14,7 @@ set -eu
 PROJECT_PATH=""
 PROBE_RUNTIME=0
 FIX=0
+PRODUCTION=0
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
@@ -62,6 +63,7 @@ EOF
             ;;
         --probe-runtime) PROBE_RUNTIME=1 ;;
         --fix) FIX=1 ;;
+        --production) PRODUCTION=1 ;;
         --*)
             ct_die "doctor: unknown flag '$arg'"
             ;;
@@ -599,6 +601,139 @@ if [ "$FIX" = "1" ]; then
         info "nothing to fix"
     fi
     echo ""
+fi
+
+# ---- production checklist (--production) ----------------------------------
+# v0.34+: programmatic execution of lib/settings/harness-checklist.template.md
+# automatable items. Surfaces PASS/WARN/FAIL per item. Operator-facing
+# governance items are listed but not checked (this is yakos, not a
+# compliance auditor).
+
+if [ "$PRODUCTION" = "1" ]; then
+    [ -n "$PROJECT_PATH" ] || ct_die "doctor --production requires <project-path>"
+
+    echo ""
+    echo "=== Production-readiness checklist (--production) ==="
+    echo "    See lib/settings/harness-checklist.template.md for the full list."
+    echo ""
+
+    prod_errs=0; prod_warns=0
+    pok()  { printf '  [PASS] %s\n' "$*"; }
+    pwarn(){ printf '  [WARN] %s\n' "$*"; prod_warns=$((prod_warns + 1)); }
+    pfail(){ printf '  [FAIL] %s\n' "$*"; prod_errs=$((prod_errs + 1)); }
+
+    # Security posture
+    echo "Security posture:"
+    if [ -f "$YAKOS_ROOT/SECURITY.md" ]; then pok "framework SECURITY.md present"; else pfail "SECURITY.md missing"; fi
+
+    # No real-looking secrets in project tree (avoid scanning .git/)
+    if command -v rg >/dev/null 2>&1; then
+        sec_grep=$(rg -l -E '(sk-ant-[A-Za-z0-9_-]{30,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|BEGIN[[:space:]]+(RSA|EC)[[:space:]]+PRIVATE[[:space:]]+KEY)' \
+            "$PROJECT_PATH" --glob '!**/.git/**' --glob '!tests/fixtures/**' 2>/dev/null | head -5)
+    else
+        sec_grep=$(grep -rlE '(sk-ant-[A-Za-z0-9_-]{30,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|BEGIN[[:space:]]+(RSA|EC)[[:space:]]+PRIVATE[[:space:]]+KEY)' \
+            "$PROJECT_PATH" --exclude-dir=.git --exclude-dir=node_modules 2>/dev/null | head -5)
+    fi
+    if [ -z "$sec_grep" ]; then pok "no obvious-secret patterns in tree"; else pwarn "potential secrets in: $(echo "$sec_grep" | tr '\n' ' ')"; fi
+
+    if [ -f "$PROJECT_PATH/.claude/path-allowlist.json" ]; then
+        pok "path-allowlist.json present"
+        # Non-empty check
+        n="$(jq 'length' "$PROJECT_PATH/.claude/path-allowlist.json" 2>/dev/null || echo 0)"
+        if [ "${n:-0}" -gt 0 ]; then
+            pok "path-allowlist.json has $n agent entr(ies)"
+        else
+            pwarn "path-allowlist.json is empty {} — no agent has restrictions"
+        fi
+    else
+        pfail "path-allowlist.json missing at $PROJECT_PATH/.claude/path-allowlist.json"
+    fi
+
+    for hook in secret-scan.sh output-injection-scan.sh budget-guard.sh supervisor-gate.sh; do
+        if [ -x "$PROJECT_PATH/scripts/hooks/$hook" ]; then
+            pok "$hook installed + executable"
+        else
+            pwarn "$hook not installed at $PROJECT_PATH/scripts/hooks/$hook"
+        fi
+    done
+
+    # Hook discipline
+    echo ""
+    echo "Hook discipline:"
+    name="$(basename -- "$PROJECT_PATH")"
+    bypass="$HOME/agent-control/$name/work/current/hook-bypass.md"
+    if [ -f "$bypass" ]; then
+        if awk '/^## Active entries/{a=1; next} a && /^## bypass:/{found=1} END{exit found?1:0}' "$bypass"; then
+            pok "hook-bypass.md has no active entries"
+        else
+            pwarn "hook-bypass.md has active entries — production-ready state should be empty"
+        fi
+    else
+        pwarn "hook-bypass.md missing (run yakos init first)"
+    fi
+
+    # Pre-push gate
+    if [ -f "$PROJECT_PATH/.git/hooks/pre-push" ] && [ -f "$PROJECT_PATH/.git/hooks/pre-push.framework-hash" ]; then
+        pok "pre-push version gate installed (yakOS-owned)"
+    else
+        pwarn "pre-push version gate not installed (run yakos git-hooks install)"
+    fi
+
+    # Agent discipline — scan project's .claude/agents/ for tools: declarations
+    echo ""
+    echo "Agent discipline:"
+    if [ -d "$PROJECT_PATH/.claude/agents" ]; then
+        agent_count=0; missing_tools=0; empty_tools=0
+        for f in "$PROJECT_PATH/.claude/agents"/*.md; do
+            [ -f "$f" ] || continue
+            agent_count=$((agent_count + 1))
+            if ! awk '/^---$/{c++} c==1 && /^tools:/{found=1} c==2{exit} END{exit found?0:1}' "$f"; then
+                missing_tools=$((missing_tools + 1))
+            elif awk '/^---$/{c++} c==1 && /^tools:[[:space:]]*\[\][[:space:]]*$/{empty=1} c==2{exit} END{exit empty?0:1}' "$f"; then
+                empty_tools=$((empty_tools + 1))
+            fi
+        done
+        if [ "$agent_count" -eq 0 ]; then
+            pwarn "no project agents in .claude/agents/ (using framework only)"
+        else
+            [ "$missing_tools" -eq 0 ] && pok "$agent_count project agent(s); all declare tools:" || pwarn "$missing_tools/$agent_count agents missing tools: declaration"
+            [ "$empty_tools" -eq 0 ] && pok "no agents with empty tools: []" || pfail "$empty_tools agent(s) have tools: [] (= unrestricted)"
+        fi
+    else
+        pwarn "no .claude/agents/ in project (framework agents only)"
+    fi
+
+    # Budget + supervisor configured
+    echo ""
+    echo "Budget + supervisor:"
+    yakos_yml="$PROJECT_PATH/.yakos.yml"
+    if [ -f "$yakos_yml" ]; then
+        grep -q '^[[:space:]]*budget:' "$yakos_yml" && pok "budget block present in .yakos.yml" \
+            || pwarn "no budget block in .yakos.yml (no per-session caps)"
+        if grep -A 10 '^[[:space:]]*supervisor:' "$yakos_yml" 2>/dev/null \
+            | grep -q '^[[:space:]]*enabled:[[:space:]]*true[[:space:]]*$'; then
+            pok "supervisor.enabled: true"
+            if grep -A 10 '^[[:space:]]*supervisor:' "$yakos_yml" 2>/dev/null \
+                | grep -q '^[[:space:]]*block_on_critical:[[:space:]]*true[[:space:]]*$'; then
+                pok "supervisor.block_on_critical: true (active mode)"
+            else
+                pwarn "supervisor in passive mode (block_on_critical: false) — fine for low-stakes, surface-only for production"
+            fi
+        else
+            pwarn "supervisor not enabled — production-ready posture should have it on"
+        fi
+    else
+        pfail ".yakos.yml missing (run yakos init)"
+    fi
+
+    echo ""
+    echo "Production checklist: $prod_errs error(s), $prod_warns warning(s)"
+    [ "$prod_errs" -eq 0 ] || errors=$((errors + prod_errs))
+    [ "$prod_warns" -eq 0 ] || warnings=$((warnings + prod_warns))
+    echo ""
+    echo "Non-automated items (operator responsibility) — see"
+    echo "  lib/settings/harness-checklist.template.md sections under"
+    echo "  'Non-automated checks' for the full list."
 fi
 
 # ---- summary ----------------------------------------------------------------

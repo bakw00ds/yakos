@@ -255,6 +255,18 @@ EOF
     ct_log "wrote $MEMORY_FILE"
 fi
 
+# ---- AGENTS.md (v0.34+) ----------------------------------------------------
+# Cross-tool agent instructions file (codex / cursor / openhands / aider /
+# sweep convention). yakOS writes CLAUDE.md for Claude Code; AGENTS.md
+# is the same idea for the broader ecosystem. Idempotent — never
+# overwrites an existing AGENTS.md.
+AGENTS_MD="$PROJECT_ABS/AGENTS.md"
+AGENTS_MD_TEMPLATE="$YAKOS_ROOT/lib/settings/agents.md.template"
+if [ -f "$AGENTS_MD_TEMPLATE" ] && [ ! -f "$AGENTS_MD" ]; then
+    cp "$AGENTS_MD_TEMPLATE" "$AGENTS_MD"
+    ct_log "wrote $AGENTS_MD (cross-tool agent instructions; codex/cursor/openhands)"
+fi
+
 # ---- .yakos.yml project config (Plan 4 / v0.18+) ---------------------------
 # Drop a sensible default at the project root. Idempotent; only writes if
 # absent. Operator edits to opt into standards and environments.
