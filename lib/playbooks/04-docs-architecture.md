@@ -215,6 +215,51 @@ Group by:
 4. Code documentation coverage (with percentages per package)
 5. Link rot
 
+## §About page presence (gated on profile.standards.about-page)
+
+Audit checks fire only when the project has opted into Standard 6
+in its `.yakos.yml` (`profile.standards.about-page: true`). See
+`rule:about-page-discipline` and `skill:about-page-scaffold`.
+
+### Automated checks
+
+- **About route exists.** Look for a route named `about` or
+  `/about`:
+  - Next.js: `app/about/page.{tsx,jsx}` or `pages/about.{tsx,jsx}`
+  - Vue: `src/views/About.vue` or `src/pages/About.vue`
+  - Svelte: `src/routes/about/+page.svelte`
+  - Static HTML: `about.html` at project root
+  Severity: **P3** if absent.
+
+- **Placeholder text still present.** Grep for leftover
+  sentinels: `**TODO**:`, `Lorem ipsum`, `<replace this>`,
+  `(operator fills in)`. Severity: **P3**.
+
+- **Last-modified staleness.** If `git log -1 --format=%ct
+  <file>` shows last modification > 90 days ago AND the project
+  has active commits in the same window, the page is stale.
+  Severity: **P3**.
+
+### Manual checks
+
+- **Three-paragraph structure.** What does it do? Who is it for?
+  How do I get started? Each one short paragraph (≤80 words).
+
+- **Links to changelog + architecture pages.** If the project
+  has also opted into `changelog-ui` (Standard 2) or
+  `architecture-viz` (Standard 5), the about page links to them
+  or collapses into the architecture page.
+
+- **Voice matches the operator soul.** Long-lived
+  operator-souls declaring "direct, terse" mismatch with
+  marketing-flavored about copy. Soft finding; lead can revise.
+
+### Skill scaffold
+
+If audit finds no about page but `profile.standards.about-page
+== true`, surface the recommendation to run
+`skill:about-page-scaffold`.
+
 ## Known gotchas (cross-project)
 
 - Documentation generators that require annotations on handlers

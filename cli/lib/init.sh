@@ -245,6 +245,16 @@ EOF
     ct_log "wrote $MEMORY_FILE"
 fi
 
+# ---- .yakos.yml project config (Plan 4 / v0.18+) ---------------------------
+# Drop a sensible default at the project root. Idempotent; only writes if
+# absent. Operator edits to opt into standards and environments.
+YAKOS_YML="$PROJECT_ABS/.yakos.yml"
+YAKOS_YML_TEMPLATE="$YAKOS_ROOT/lib/settings/yakos.yml.template"
+if [ -f "$YAKOS_YML_TEMPLATE" ] && [ ! -f "$YAKOS_YML" ]; then
+    cp "$YAKOS_YML_TEMPLATE" "$YAKOS_YML"
+    ct_log "wrote $YAKOS_YML (edit to opt into standards + environments)"
+fi
+
 # ---- ensure project .gitignore covers yakOS-emitted runtime agent files -----
 # yakOS materializes per-runtime agent files at <project>/.codex/agents/yakos-*.toml
 # and <project>/.gemini/agents/yakos-*.md (v0.4.0+). They MUST NOT land in

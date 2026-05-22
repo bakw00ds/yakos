@@ -163,6 +163,8 @@ Group findings by:
 3. Flaky tests (list with pass/fail pattern)
 4. E2E gaps (which critical journeys are unprotected)
 5. Style/idiom issues (aggregated, with representative examples)
+6. Logging discipline (only when `profile.standards.logging == true`
+   — see §Logging discipline below)
 
 Effort estimates (S/M/L/XL → hours):
 
@@ -170,3 +172,47 @@ Effort estimates (S/M/L/XL → hours):
 - M: 2–8h
 - L: 1–3d
 - XL: > 3d (recommend splitting)
+
+## §Logging discipline (gated on profile.standards.logging)
+
+Audit checks fire only when the project has opted into Standard 1
+in its `.yakos.yml` (`profile.standards.logging: true`). See
+`rule:logging-discipline` for the operator-facing rule and
+`skill:logging-scaffold` for the one-shot scaffold.
+
+### Automated checks
+
+- **No `print` / `console.log` / `println!` in non-test
+  production code.** Detection by grep:
+  - Go: `grep -rE '\bfmt\.(Print|Println|Printf)\b' --include='*.go' --exclude-dir=vendor --exclude='*_test.go'`
+  - Node/TS: `grep -rE '\bconsole\.(log|info|warn|error|debug)\b' src/ --include='*.ts' --include='*.tsx' --include='*.js' --exclude='*.test.*'`
+  - Python: `grep -rE '^\s*print\(' --include='*.py' --exclude='*test*' --exclude='*_test*'`
+  - Rust: `grep -rE '\b(println|eprintln|print|eprint)!' src/ --include='*.rs'`
+  Severity: **P2** per occurrence (cumulative). > 20 in active
+  code → escalate to P1.
+
+- **Stack traces logged without context.** Raw `err.Error()` /
+  `e.message` / `traceback.format_exc()` in error-log call sites.
+  Severity: **P3**, P2 in critical paths (auth, payment, data
+  integrity).
+
+- **Inconsistent log levels.** Same logical event class emitted
+  at multiple severities across the codebase. Severity: **P3**.
+
+### Manual checks
+
+- **Secrets in log messages.** Composes with
+  `rule:secret-handling`. Severity: **P0** on any hit.
+
+- **Structured fields on long-running entry points.** Service
+  entry/exit logs at `info` with at minimum `{ts, level,
+  component, message, trace_id}`. Severity: **P3** on missing.
+
+- **Log levels follow project criteria.** Operator-defined floor
+  in `profile.logging.levels` (`.yakos.yml`).
+
+### Skill scaffold
+
+If audit finds no logger module but `profile.standards.logging
+== true`, surface the recommendation to run
+`skill:logging-scaffold`.

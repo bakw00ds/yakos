@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0.0] — 2026-05-22
+
+### Added — Plan 4 M1: cross-project standards (profile + logging + about-page)
+
+First milestone of the cross-project standards plan. Closes
+wishlist items: service logging discipline + about page for new
+users. Introduces the `.yakos.yml` `profile:` schema that drives
+which standards a project commits to.
+
+**New rule (cross-cutting):**
+
+- `lib/rules/profile-standards.md` — path-scoped to `.yakos.yml`.
+  Tells the lead to read `profile.standards.*` at session start
+  and dispatch the relevant per-standard rules / skills /
+  playbook checks based on what the project has opted into.
+
+**Standard 1 — Logging (rule + skill):**
+
+- `lib/rules/logging-discipline.md` — every service emits
+  structured logs (`ts`, `level`, `component`, `message`,
+  `trace_id`); no `print` / `console.log` / `println!` in
+  production code; secrets never logged; consistent levels.
+  References `rule:secret-handling`.
+- `lib/skills/logging-scaffold/SKILL.md` — one-shot scaffold per
+  backend stack (Go `slog`, Node `pino`, Python
+  `python-json-logger`, Rust `tracing`). Drops in a logger
+  module + example wiring.
+
+**Standard 6 — About page (rule + skill):**
+
+- `lib/rules/about-page-discipline.md` — every user-facing
+  project has a 3-paragraph "what is this?" page for first-time
+  users; updated when major features ship.
+- `lib/skills/about-page-scaffold/SKILL.md` — one-shot scaffold
+  per frontend stack (Next.js, React+Vite, Vue, Svelte, static
+  HTML). Drops in route + 3-paragraph template. Optional merge
+  into the architecture-viz page when both standards are
+  enabled.
+
+**Project bootstrap:**
+
+- `lib/settings/yakos.yml.template` — `.yakos.yml` skeleton with
+  profile section (all standards opt-in default false), runtime
+  preferences (commented), and environments block (commented).
+  Operator edits after init to opt into standards.
+- `cli/lib/init.sh` extended — copies the template to
+  `<project>/.yakos.yml` at init time (idempotent; only writes
+  if absent). The operator opts into standards by editing.
+
+**Audit-time enforcement (playbook extensions):**
+
+- `lib/playbooks/02-code-quality.md` — new `## §Logging
+  discipline` section. Audits fire only when
+  `profile.standards.logging == true`. Detects bare `print` /
+  `console.log` patterns per stack (Go/Node/Python/Rust);
+  scores P2 cumulative, escalating to P1 at >20 occurrences.
+  Stack-trace-without-context, inconsistent levels, secrets in
+  log messages (P0 via `rule:secret-handling`).
+- `lib/playbooks/04-docs-architecture.md` — new `## §About page
+  presence` section. Audits fire only when
+  `profile.standards.about-page == true`. About-route existence
+  per frontend; placeholder-text detection; 90-day staleness vs
+  active commits.
+
+**Profile types** (from `lib/settings/yakos.yml.template`):
+`web-app`, `service`, `library`, `cli-tool`, `data-pipeline`.
+Each type's auto-suggested standards documented in the template.
+
+Remaining 4 standards (changelog-ui, monitors, feedback,
+architecture-viz) deferred to Plan 4 M2/M3/M4. Standards CLI
+(`yakos standards {list, enable, disable, check}`) deferred to
+Plan 4 M4 — operator currently opts in/out via direct
+`.yakos.yml` edit.
+
 ## [0.17.0.0] — 2026-05-22
 
 ### Added — Plan 3 M5: Prod/Test/Dev workflows
