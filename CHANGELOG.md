@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0.0] — 2026-05-22
+
+### Added — Plan 4 M2: changelog-ui + architecture-viz standards
+
+Second milestone of the cross-project standards plan. Closes
+wishlist items: changelog with versioning visible in UI +
+architecture visualization in UI.
+
+**Standard 2 — Changelog UI (rule + skill):**
+
+- `lib/rules/changelog-ui-discipline.md` — every UI-bearing
+  project surfaces version + latest changelog at the UI layer;
+  release notes visible without leaving the app. Source MUST
+  be the same `CHANGELOG.md` the pre-push gate enforces — no
+  parallel artifacts. Version display MUST match VERSION file.
+- `lib/skills/changelog-ui-scaffold/SKILL.md` — one-shot
+  scaffold per frontend stack (Next.js App/Pages Router,
+  React + Vite, Vue, Svelte, static HTML). Drops in a
+  `<Changelog />` component, a `<VersionBadge />`, and the
+  build-time `CHANGELOG.md` import (Vite `?raw`, Next.js MDX,
+  Webpack `raw-loader`, or static preprocessing). Optional
+  `--merge-with-about` flag composes with Standard 6.
+
+**Standard 5 — Architecture viz (rule + skill):**
+
+- `lib/rules/architecture-viz-discipline.md` — architecture
+  artifacts (C4 diagrams, ADRs, tech-debt log, SBOM, novel-
+  capabilities log) updated BEFORE material architecture
+  changes commit. Diagram source-of-truth must be Mermaid
+  `.mmd`; PNG-only diagrams rot.
+- `lib/skills/architecture-viz-scaffold/SKILL.md` — the
+  heaviest scaffold in the standards bucket. Generates a
+  static architecture page that reads `docs/architecture/*.mmd`
+  (Mermaid → SVG via `mmdc` at build time), `docs/adr/*.md`,
+  `docs/tech-debt.md`, `docs/novel-capabilities.md`,
+  `CHANGELOG.md`, and `sbom.spdx.json` into one navigable UI.
+  Per-framework variants for Next.js / React-Vite / Vue /
+  Svelte / static HTML. Seeds skeleton source files if absent.
+  `--regenerate` flag for idempotent re-runs after material
+  architecture changes. `--include-about` flag composes with
+  Standard 6.
+
+**Audit-time enforcement (playbook 04 extensions):**
+
+- `lib/playbooks/04-docs-architecture.md` — two new sections:
+  - `## §Changelog UI presence` — gated on
+    `profile.standards.changelog-ui == true`. Checks UI
+    component references `CHANGELOG.md`; version display
+    matches VERSION; single changelog source.
+  - `## §Architecture viz presence` — gated on
+    `profile.standards.architecture-viz == true`. Checks
+    `docs/architecture/*.mmd` present; ADRs exist;
+    tech-debt + novel-capabilities logs present; architecture
+    page renders; diagram freshness (P2 stale if older than
+    youngest modified service dir); PNG-only diagrams (P2,
+    "rot guaranteed").
+
+**Composition with existing yakOS primitives:**
+
+- `lib/agents/architect.md` (already-shipped) — owns
+  architecture-viz surface; the rule references their
+  discipline
+- `skill:adr-write` (already-shipped) — used by
+  architecture-viz scaffold to seed `0001-initial-architecture.md`
+- `skill:sbom-generate` (already-shipped) — produces
+  `sbom.spdx.json` consumed by architecture page renderer
+- `skill:version-bump` (already-shipped) — prepends
+  CHANGELOG entries that the changelog-ui surfaces
+
+Standards 3 (monitors) and 4 (feedback) deferred to Plan 4 M3.
+`yakos standards` CLI deferred to Plan 4 M4. Operator currently
+opts in via direct `.yakos.yml` edit.
+
 ## [0.18.0.0] — 2026-05-22
 
 ### Added — Plan 4 M1: cross-project standards (profile + logging + about-page)

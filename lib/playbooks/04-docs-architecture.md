@@ -215,6 +215,98 @@ Group by:
 4. Code documentation coverage (with percentages per package)
 5. Link rot
 
+## §Changelog UI presence (gated on profile.standards.changelog-ui)
+
+Audit checks fire only when the project has opted into Standard 2
+in its `.yakos.yml` (`profile.standards.changelog-ui: true`). See
+`rule:changelog-ui-discipline` and `skill:changelog-ui-scaffold`.
+
+### Automated checks
+
+- **Changelog UI component / page exists** and references
+  `CHANGELOG.md`. Grep for the literal string `CHANGELOG.md`
+  or `Changelog` import statements in `src/` and `app/`.
+  Severity: **P2** if `CHANGELOG.md` exists but no UI
+  references it.
+
+- **Version display matches VERSION file.** Read the project's
+  VERSION file (or `package.json` version); grep for a hard-
+  coded version string in source code that DIFFERS. Severity:
+  **P1**.
+
+- **Latest CHANGELOG entry visible in a UI flow.** Heuristic
+  search: any UI file referencing `## [<version>]` parsing or
+  unreleased-section logic. Severity: **P2** if absent.
+
+### Manual checks
+
+- **Single changelog source.** Confirm no parallel artifacts
+  (e.g. `web/public/release-notes.md` separate from
+  `CHANGELOG.md`). Severity: **P2** on divergence.
+
+- **Build-time vs runtime fetch.** Prefer build-time import
+  (immutable); runtime fetch from `public/CHANGELOG.md` is
+  acceptable but adds a network round-trip. Severity: P3
+  recommendation.
+
+### Skill scaffold
+
+If no changelog UI exists but
+`profile.standards.changelog-ui == true`, surface the
+recommendation to run `skill:changelog-ui-scaffold`.
+
+## §Architecture viz presence (gated on profile.standards.architecture-viz)
+
+Audit checks fire only when the project has opted into Standard 5
+in its `.yakos.yml`
+(`profile.standards.architecture-viz: true`). See
+`rule:architecture-viz-discipline` and
+`skill:architecture-viz-scaffold`.
+
+### Automated checks
+
+- **`docs/architecture/` directory exists** with at least
+  `system.mmd`, `container.mmd`, `component.mmd`. Severity:
+  **P2** if missing.
+
+- **ADRs present.** `docs/adr/` exists with ≥1 ADR. Severity:
+  **P2** if missing.
+
+- **Tech-debt log present.** `docs/tech-debt.md` exists.
+  Severity: **P3** if missing.
+
+- **Novel-capabilities log present.** `docs/novel-capabilities.md`
+  exists. Severity: **P3** if missing.
+
+- **Architecture page renders.** Either
+  `<project>/docs/architecture.html` exists OR the project's
+  framework has an `/architecture` route. Severity: **P2** if
+  source artifacts exist but no rendered page.
+
+- **Diagram freshness.** For each `docs/architecture/*.mmd`,
+  compare mtime against the youngest modified service directory
+  (`api/`, `web/`, `mobile/`, `src/`). Diagram older than
+  youngest service = **P2** (stale).
+
+### Manual checks
+
+- **ADRs have `Status:` declarations.** Each ADR includes
+  `Status: Proposed | Accepted | Superseded by ADR-N |
+  Deprecated`. Severity: **P3** on missing.
+
+- **Architecture page links from primary nav.** Operator
+  decision; rec on missing.
+
+- **PNG-only diagrams.** If `docs/architecture/` has `.png`
+  files without `.mmd` siblings, the source-of-truth is
+  missing. Severity: **P2** (rot guaranteed).
+
+### Skill scaffolds
+
+- `skill:architecture-viz-scaffold` for the renderer
+- `skill:adr-write` (already shipped) for ADR creation
+- `skill:sbom-generate` (already shipped) for SBOM generation
+
 ## §About page presence (gated on profile.standards.about-page)
 
 Audit checks fire only when the project has opted into Standard 6
