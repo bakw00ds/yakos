@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0.0] — 2026-05-22
+
+### Added — Plan 3 M5: Prod/Test/Dev workflows
+
+Fifth (final) milestone of the framework-internal capabilities
+plan. Closes wishlist item: managing Prod/Test/Dev workflows
+and where to push code / promote branches.
+
+**New rule:**
+
+- `lib/rules/environment-discipline.md` — path-scoped to
+  `.yakos.yml`. Tells the lead: code flows `dev → test → prod`
+  via configured branches; never push directly to test or prod
+  from a dev session; use `yakos env promote` for transitions.
+  References `rule:git-hygiene`, `rule:pr-conventions`,
+  `rule:commit-format`. Anti-pattern: "I'll just push this fix
+  directly to main; it's urgent."
+
+**New CLI:**
+
+- `cli/lib/env.sh` — `yakos env {status, list, validate,
+  promote <from> <to>}`. Reads project's `.yakos.yml`
+  `environments:` block (dev/test/prod each mapped to a git
+  branch). `promote` is pluggable across PR tools: detects
+  `gh` → `glab` → falls back to plain git push + URL hint.
+  Avoids hard-coding GitHub.
+
+**New skill:**
+
+- `lib/skills/promote-branch/SKILL.md` — guided promotion
+  workflow. Pre-checks (clean working tree, remote sync) →
+  invoke `yakos env promote` → operator reviews + merges per
+  project convention. Never auto-merges; human signature
+  required on prod promotions per audit-trail-first posture.
+
+**New git hook (optional install):**
+
+- `lib/hooks/git/pre-push-promotion-gate.sh` — refuses pushes
+  that violate dev→test→prod order when `.yakos.yml` declares
+  environments. Direct push to prod-branch from anywhere other
+  than test-branch → REFUSE. Direct push to test-branch from
+  anywhere other than dev-branch → REFUSE. Push to dev-branch
+  → ALLOW (dev is the inbox). Logged decisions to
+  `~/.yakos-state/gate-log.ndjson` (composed log alongside
+  version-gate). Bypass: `YAKOS_PROMOTION_OVERRIDE=1 git push`
+  (logged).
+
+**Installer extension:**
+
+- `cli/lib/git-hooks.sh` — `yakos git-hooks install
+  --promotion-gate` composes both gates into one pre-push hook
+  (version-gate first, then promotion-gate). Each gate's bypass
+  env var works independently. `.framework-hash` records the
+  composition for drift detection.
+
+**Wiring:**
+
+- `cli/yakos` — `env` registered in subcommand allowlist.
+- `cli/lib/validate.sh` — `env.sh` added to dark-code exemption.
+
+`.yakos.yml` schema additions documented in
+`lib/rules/environment-discipline.md`. Deploy-infra integrations
+(opinionated templates for k8s / Heroku / Vercel) are out of
+scope for v1; the gate enforces the workflow, projects pick the
+deploy target.
+
 ## [0.16.0.0] — 2026-05-22
 
 ### Added — Plan 3 M4: kanban scratchpad
