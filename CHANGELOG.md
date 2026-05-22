@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0.0] — 2026-05-22
+
+### Added — Plan 4 M4: standards CLI + operator doc (closes Plan 4)
+
+Fourth and final milestone of the cross-project standards plan.
+Closes Plan 4 entirely (M1–M4 all shipped: profile schema +
+6 standards + CLI + docs).
+
+**New CLI:**
+
+- `cli/lib/standards.sh` — `yakos standards {list, enable,
+  disable, check, init}`. Manages cross-project standards
+  opt-ins via `.yakos.yml` profile.standards.* without
+  hand-editing YAML.
+  - `list` — table of all 6 standards with enabled/disabled
+    state + suggested-for-current-type column.
+  - `enable <name>` / `disable <name>` — toggles
+    `profile.standards.<name>` in `.yakos.yml`. Uses awk for
+    in-place YAML edit (preserves indentation + trailing
+    comments). Appends a fresh `profile.standards.<name>`
+    entry if the key was absent.
+  - `check` — preview-only release-audit summary per active
+    standard (which playbook section + what it catches +
+    which scaffold to run if missing).
+  - `init` — interactive profile-type prompt + bulk-enable
+    suggested standards for the chosen type.
+
+**Project-type defaults baked into the CLI** (mirrors the
+`yakos.yml.template` documentation):
+
+- `web-app` → logging, changelog-ui, monitors, feedback,
+  architecture-viz, about-page (all 6)
+- `service` → logging, monitors, architecture-viz
+- `library` → architecture-viz, about-page
+- `cli-tool` → logging, about-page
+- `data-pipeline` → logging, monitors
+
+**New operator doc:**
+
+- `docs/cross-project-standards.md` — full operator guide.
+  Covers: what cross-project standards are; the
+  soft/scaffold/hard three-layer pattern; project-type
+  defaults; `.yakos.yml` schema; CLI surface; typical
+  first-time flow; per-standard quick reference; how
+  standards compose with `release-audit`; composition with
+  existing yakOS primitives (architect / sre /
+  supply-chain-auditor / adr-write / sbom-generate /
+  version-bump / changelog-validate hook).
+
+**Wiring:**
+
+- `cli/yakos` — `standards` registered in subcommand
+  allowlist; help text updated.
+- `cli/lib/validate.sh` — `standards.sh` added to dark-code
+  exemption.
+
+**Plan 4 status: COMPLETE.** All 6 standards have rules +
+skills + audit-time playbook checks + CLI management +
+operator doc. The cross-project-standards plan
+(`/Users/tw/agent-control/yakOS/cross-project-standards-plan.md`)
+is fully realized in framework code on main.
+
 ## [0.21.0.0] — 2026-05-22
 
 ### Added — Plan 2: agy adapter (Gemini CLI successor)
