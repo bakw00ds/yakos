@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0.0] — 2026-05-22
+
+### Added — Plan 1 M3: mode negotiation (closes Plan 1)
+
+The third and final Plan 1 milestone. Lead personas now have a
+documented protocol for deciding parallel-vs-serialize-vs-defer
+when peer sessions are active, with synchronous ack/reject
+negotiation backed by the activity stream.
+
+**Soft control (rules + skills):**
+
+- **NEW `lib/rules/multi-dev-coord.md`** — paths-scoped to `CLAUDE.md`,
+  so it only loads when a project's CLAUDE.md `@imports` it (which
+  happens via `init --multi-dev`). Documents the 4-step protocol:
+  session-start awareness → mode proposal → mode kinds (parallel /
+  serialize / defer) → audit trail. Includes anti-patterns
+  (dispatching first, silent override, 3+ peer pairwise assumption).
+- **NEW `lib/skills/peer-sync/SKILL.md`** — Sonnet-tier, lead-
+  invocable skill that synthesizes `yakos peer status` + `yakos peer
+  log` + `yakos peer claims` into a single context-block summary
+  (< 500 tokens). Output includes recent decisions, active claims,
+  in-flight mode proposals, and a dispatch advisory (SAFE /
+  CONTENDED / WAIT paths).
+
+**CLI:**
+
+- **`cli/lib/peer.sh` extended** — two new subcommands:
+  - `propose-mode --mode parallel|serialize|defer --targets <glob>...
+    [--reason <t>] [--timeout <secs>]` — emits a `mode_proposal`
+    event and **waits synchronously** (default 60s, configurable) for
+    a `mode_response`. On timeout, defaults to serialize and emits a
+    synthetic `mode_response` with `timeout: true` so the audit trail
+    shows the decision was made without peer ack.
+  - `respond-mode --to <proposal-id> --ack|--reject [--reason <t>]` —
+    responds to a peer's proposal. Get the proposal id from
+    `yakos peer log`.
+
+**init.sh wiring:**
+
+- `cli/lib/init.sh --multi-dev` now also creates / updates
+  `<project>/CLAUDE.md` with `@import yakos/multi-dev-coord` so the
+  rule loads automatically in project sessions. Idempotent — no
+  duplicate imports if rerun.
+
+**Lead persona:**
+
+- `lib/agents/lead-template.md` — bullet 7 strengthened from a generic
+  "read peer activity" reminder to a concrete reference to the rule
+  and skill: "run the `peer-sync` skill for a summary, then follow
+  `rule:multi-dev-coord` — propose mode before dispatching into
+  contended paths, wait synchronously for ack/reject."
+
+**End-to-end smoke verified:** propose-mode emits, times out at the
+configured deadline, emits a synthetic timeout response with
+`timeout: true`; respond-mode --ack writes a clean mode_response
+event keyed to the proposal_id.
+
+**What v0.29 does NOT ship (deliberate scope gates):**
+
+- N-party negotiation language (data schema supports N owners; rule +
+  CLI language remain pairwise for v1 simplicity, per the plan's
+  out-of-scope list).
+- Auto-cycle-detection in `peer deadlock` (still surface-only).
+- Distributed multi-box coordination (Plan 1 is single-box by
+  explicit design — see `docs/co-pilot-mode.md`).
+
+This commit closes Plan 1. Outstanding plans on the master sequencing
+list: none — all Plan 1, Plan 2, Plan 3, Plan 4, Plan 5 milestones
+have shipped.
+
 ## [0.28.0.0] — 2026-05-22
 
 ### Added — Plan 1 M2: per-file claims with hook enforcement

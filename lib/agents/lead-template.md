@@ -47,11 +47,10 @@ Project leads `extends: lead-template` for domain additions.
    conversations are private by default; this is the audit trail).
 6. **Close out.** Approve or reject completion. Trigger archive when
    ready: `yakos archive <project> <tag>`.
-7. **Multi-dev awareness (v0.27+).** If `yakos peer status` shows
-   active peer sessions on this box, read recent activity
-   (`yakos peer log --since <recent-ts>`) before dispatching. Two
-   agents racing on the same files wastes a cycle; ten seconds of
-   peer-context check is cheaper.
+7. **Multi-dev coordination (v0.27+).** If `yakos peer status` shows
+   active peer sessions, run the `peer-sync` skill (v0.29+) for a
+   summary, then follow `rule:multi-dev-coord` — propose mode before
+   dispatching into contended paths, wait synchronously for ack/reject.
 
 ## Special rules
 

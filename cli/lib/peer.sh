@@ -38,6 +38,12 @@ Subcommands:
   release <file> [<project>]      Release this session's claim on a file. (M2)
   claims [<project>]              List all active claims for the project. (M2)
   deadlock [<project>]            Compute wait-for graph from activity log. (M2)
+  propose-mode --mode <m> --targets <glob>... [--reason <t>] [--timeout <secs>] [<project>]
+                                  Propose parallel/serialize/defer for contended
+                                  targets; wait synchronously up to 60s (default)
+                                  for peer's mode_response. (M3)
+  respond-mode --to <proposal-id> --ack|--reject [--reason <t>] [<project>]
+                                  Respond to a peer's mode proposal. (M3)
 
 Setup:
   Each developer runs 'yakos init --multi-dev <name> --project <path>'.
@@ -130,10 +136,7 @@ SUB="${1:-}"
 
 case "$SUB" in
     "" | -h | --help | help) usage; exit 0 ;;
-    status|log|claim|release|claims|deadlock) ;;
-    propose-mode|respond-mode)
-        ct_die "peer: '$SUB' is a Plan 1 M3 subcommand (v0.29+); not available in this build"
-        ;;
+    status|log|claim|release|claims|deadlock|propose-mode|respond-mode) ;;
     *) ct_die "peer: unknown subcommand '$SUB' (try --help)" ;;
 esac
 
@@ -342,6 +345,175 @@ if [ "$SUB" = "deadlock" ]; then
         echo
         echo "Cycle detection deferred to v0.29; surface to humans for now."
     fi
+    exit 0
+fi
+
+# ---- subcommand: propose-mode (M3) -----------------------------------------
+
+if [ "$SUB" = "propose-mode" ]; then
+    MODE=""
+    TARGETS=()
+    REASON=""
+    TIMEOUT=60
+    PROJECT=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --mode) shift; MODE="${1:-}" ;;
+            --mode=*) MODE="${1#--mode=}" ;;
+            --targets) shift; TARGETS+=("${1:-}") ;;
+            --targets=*) TARGETS+=("${1#--targets=}") ;;
+            --reason) shift; REASON="${1:-}" ;;
+            --reason=*) REASON="${1#--reason=}" ;;
+            --timeout) shift; TIMEOUT="${1:-60}" ;;
+            --timeout=*) TIMEOUT="${1#--timeout=}" ;;
+            -*) ct_die "peer propose-mode: unknown flag '$1'" ;;
+            *)
+                if [ -z "$PROJECT" ]; then PROJECT="$1"
+                else ct_die "peer propose-mode: too many positional args"
+                fi
+                ;;
+        esac
+        shift
+    done
+
+    [ -n "$MODE" ] || ct_die "peer propose-mode: --mode required (parallel|serialize|defer)"
+    case "$MODE" in
+        parallel|serialize|defer) ;;
+        *) ct_die "peer propose-mode: --mode must be parallel|serialize|defer (got '$MODE')" ;;
+    esac
+    [ "${#TARGETS[@]}" -gt 0 ] || ct_die "peer propose-mode: at least one --targets required"
+
+    PROJECT="$(resolve_project "$PROJECT")"
+    COORD="$(require_coord "$PROJECT")"
+
+    me_user="${USER:-$(id -un)}"
+    me_host="${HOSTNAME:-$(hostname -s)}"
+    me_pid="${YAKOS_SESSION_PID:-$$}"
+    proposal_id="$(date -u +%s)-$me_pid-$RANDOM"
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    targets_json="$(printf '%s\n' "${TARGETS[@]}" | jq -R . | jq -sc .)"
+
+    event="$(jq -nc \
+        --arg ts "$ts" \
+        --arg user "$me_user" \
+        --arg host "$me_host" \
+        --argjson pid "$me_pid" \
+        --arg pid_s "$proposal_id" \
+        --arg mode "$MODE" \
+        --argjson targets "$targets_json" \
+        --arg reason "$REASON" \
+        '{ts: $ts, kind: "mode_proposal",
+          actor: {user: $user, host: $host, pid: $pid,
+                  session_id: "operator", agent: "lead"},
+          detail: {proposal_id: $pid_s, proposed_mode: $mode,
+                   targets: $targets, reason: $reason}}')"
+    printf '%s\n' "$event" >> "$COORD/activity.ndjson"
+    mkdir -p "$COORD/sessions"
+    printf '%s\n' "$event" >> "$COORD/sessions/${me_user}@${me_host}-${me_pid}.ndjson"
+
+    echo "proposed mode '$MODE' on targets [${TARGETS[*]}] — proposal_id=$proposal_id"
+    echo "waiting up to ${TIMEOUT}s for peer mode_response..."
+
+    deadline=$(($(date -u +%s) + TIMEOUT))
+    response=""
+    while [ "$(date -u +%s)" -lt "$deadline" ]; do
+        response="$(jq -c --arg pid "$proposal_id" \
+            'select(.kind == "mode_response" and .detail.proposal_id == $pid)' \
+            "$COORD/activity.ndjson" 2>/dev/null | tail -n 1)"
+        [ -n "$response" ] && break
+        sleep 1
+    done
+
+    if [ -z "$response" ]; then
+        echo "TIMEOUT: no peer response within ${TIMEOUT}s. Defaulting to serialize."
+        ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        timeout_event="$(jq -nc \
+            --arg ts "$ts" \
+            --arg user "$me_user" \
+            --arg host "$me_host" \
+            --argjson pid "$me_pid" \
+            --arg pid_s "$proposal_id" \
+            '{ts: $ts, kind: "mode_response",
+              actor: {user: $user, host: $host, pid: $pid,
+                      session_id: "operator", agent: "lead"},
+              detail: {proposal_id: $pid_s, response: "default_serialize",
+                       reason: "peer did not respond within timeout",
+                       timeout: true}}')"
+        printf '%s\n' "$timeout_event" >> "$COORD/activity.ndjson"
+        printf '%s\n' "$timeout_event" >> "$COORD/sessions/${me_user}@${me_host}-${me_pid}.ndjson"
+        exit 0
+    fi
+
+    peer_response="$(printf '%s' "$response" | jq -r '.detail.response')"
+    peer_reason="$(printf '%s' "$response" | jq -r '.detail.reason // "(no reason)"')"
+    peer_who="$(printf '%s' "$response" | jq -r '.actor.user + "@" + .actor.host')"
+    echo "RESPONSE from $peer_who: $peer_response"
+    echo "reason: $peer_reason"
+
+    if [ "$peer_response" = "reject" ]; then
+        echo "STOP: peer rejected. Coordinate before retrying; don't silently override."
+        exit 1
+    fi
+    exit 0
+fi
+
+# ---- subcommand: respond-mode (M3) -----------------------------------------
+
+if [ "$SUB" = "respond-mode" ]; then
+    TO=""
+    ACK=0
+    REJECT=0
+    REASON=""
+    PROJECT=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --to) shift; TO="${1:-}" ;;
+            --to=*) TO="${1#--to=}" ;;
+            --ack) ACK=1 ;;
+            --reject) REJECT=1 ;;
+            --reason) shift; REASON="${1:-}" ;;
+            --reason=*) REASON="${1#--reason=}" ;;
+            -*) ct_die "peer respond-mode: unknown flag '$1'" ;;
+            *)
+                if [ -z "$PROJECT" ]; then PROJECT="$1"
+                else ct_die "peer respond-mode: too many positional args"
+                fi
+                ;;
+        esac
+        shift
+    done
+
+    [ -n "$TO" ] || ct_die "peer respond-mode: --to <proposal-id> required (get from 'yakos peer log')"
+    [ "$ACK" = "1" ] || [ "$REJECT" = "1" ] || ct_die "peer respond-mode: --ack or --reject required"
+    [ "$ACK" = "1" ] && [ "$REJECT" = "1" ] && ct_die "peer respond-mode: --ack and --reject are mutually exclusive"
+
+    PROJECT="$(resolve_project "$PROJECT")"
+    COORD="$(require_coord "$PROJECT")"
+
+    me_user="${USER:-$(id -un)}"
+    me_host="${HOSTNAME:-$(hostname -s)}"
+    me_pid="${YAKOS_SESSION_PID:-$$}"
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    response="ack"
+    [ "$REJECT" = "1" ] && response="reject"
+
+    event="$(jq -nc \
+        --arg ts "$ts" \
+        --arg user "$me_user" \
+        --arg host "$me_host" \
+        --argjson pid "$me_pid" \
+        --arg pid_s "$TO" \
+        --arg resp "$response" \
+        --arg reason "$REASON" \
+        '{ts: $ts, kind: "mode_response",
+          actor: {user: $user, host: $host, pid: $pid,
+                  session_id: "operator", agent: "lead"},
+          detail: {proposal_id: $pid_s, response: $resp, reason: $reason}}')"
+    printf '%s\n' "$event" >> "$COORD/activity.ndjson"
+    mkdir -p "$COORD/sessions"
+    printf '%s\n' "$event" >> "$COORD/sessions/${me_user}@${me_host}-${me_pid}.ndjson"
+    echo "responded $response to proposal $TO"
     exit 0
 fi
 

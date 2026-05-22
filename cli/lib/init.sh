@@ -377,7 +377,29 @@ EOF
             ln -s "$COORD_MEMORY" "$USER_MEM" \
                 && ct_log "linked $USER_MEM → $COORD_MEMORY"
         fi
-        COORD_STATUS="provisioned at $COORD_DIR (group inherits via setgid)"
+        # Plan 1 M3: import multi-dev-coord rule into the project's
+        # CLAUDE.md. Rules with `paths:` only load when a matching file
+        # is read; lead-template only loads when this rule is referenced
+        # via @-import in CLAUDE.md.
+        PROJECT_CLAUDEMD="$PROJECT_ABS/CLAUDE.md"
+        IMPORT_LINE='@import yakos/multi-dev-coord'
+        if [ ! -f "$PROJECT_CLAUDEMD" ]; then
+            cat > "$PROJECT_CLAUDEMD" <<EOF
+# CLAUDE.md — $NAME
+
+This file is loaded by Claude Code at session start. Operator-edits OK.
+
+## yakOS imports
+
+$IMPORT_LINE
+EOF
+            ct_log "wrote $PROJECT_CLAUDEMD with multi-dev-coord rule import"
+        elif ! grep -qF "$IMPORT_LINE" "$PROJECT_CLAUDEMD" 2>/dev/null; then
+            printf '\n%s  # added by yakos init --multi-dev (v0.29+)\n' "$IMPORT_LINE" \
+                >> "$PROJECT_CLAUDEMD"
+            ct_log "appended multi-dev-coord import to $PROJECT_CLAUDEMD"
+        fi
+        COORD_STATUS="provisioned at $COORD_DIR (group inherits via setgid); CLAUDE.md import wired"
     fi
 fi
 
