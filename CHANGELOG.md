@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0.1] — 2026-05-22
+
+### Changed — README refreshed for v0.33 / v0.34 / v0.35 additions
+
+Documentation-only patch. README's content was stale from v0.32;
+this brings it current.
+
+Updates:
+- Version badge: 0.32.0.0 → 0.35.0.0
+- Tagline counts: 34→35 agents, 53→57 skills, 8→9 playbooks,
+  12→17 hooks, 28→32 subcommands
+- Architecture diagram: refreshed component examples
+- TL;DR Common scenarios table: added `peer handoff`, `supervise
+  enable`, `doctor --production` rows
+- **NEW section: "Live shadow-agent supervisor"** — covers
+  enable/status/tail/set commands, three bypass escalation paths,
+  defense-in-depth context (output-injection-scan, budget-guard)
+- Common commands section: added `supervise *`, `peer handoff`,
+  `checkpoint now`, `doctor --production`
+- Status section: bumped to v0.35.0.0; "Recent landings" extended
+  with v0.33 / v0.34 / v0.35 entries
+- Documentation map: added `docs/supervisor-mode.md` and
+  `CONTRIBUTING.md`
+- Development section: refreshed test-runner checklist (now lists
+  all 5 e2e suites that run in CI); points at CONTRIBUTING.md
+
 ## [0.35.0.0] — 2026-05-22
 
 ### Added — CI/lead-template fixes + 3 skills + context-inject hook + community files

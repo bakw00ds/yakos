@@ -6,14 +6,14 @@
 audit-first hooks, and multi-developer coordination.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.32.0.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.35.0.0-orange.svg)](CHANGELOG.md)
 [![Stability: alpha](https://img.shields.io/badge/stability-alpha-red.svg)](#status)
 
 yakOS turns the agent primitives that ship in these CLIs (sub-agent
 dispatch, hooks, settings, MCP) into a reliable multi-agent workflow
-across many projects. It bundles 34 framework agents, 53 skills, 16
-rules, 8 playbooks, and 12 reference hooks behind a single CLI; the
-same workflow runs on every supported runtime.
+across many projects. It bundles 35 framework agents, 57 skills, 16
+rules, 9 playbooks, and 17 reference hooks behind a single CLI (32
+subcommands); the same workflow runs on every supported runtime.
 
 The framework is built on a **hard / soft control taxonomy**
 ([PHILOSOPHY.md](PHILOSOPHY.md)): soft controls (agent prompts,
@@ -48,9 +48,12 @@ After install, you can drop the path and just type `yakos`.
 | Run with a non-default runtime | `yakos start myapp --runtime codex` |
 | Two developers on the same dev box | `yakos init --multi-dev myapp --project /srv/code/myapp` |
 | See what peer sessions are doing | `yakos peer status` / `yakos peer log` |
+| Hand off work to a peer | `yakos peer handoff --to <user@host> --completed-scope ... --next-action ...` |
 | Cross-runtime dispatch (shell) | `yakos dispatch <agent> "<task>" --runtime agy` |
 | Cross-runtime dispatch (native, from Claude) | `yakos mcp install` once, then call `dispatch_codex(...)` etc. as tools |
 | Multi-turn cross-runtime | `continue_codex(conversation_id=..., task=...)` via MCP |
+| Enable the live shadow-agent supervisor | `yakos supervise enable` |
+| Pre-production readiness check | `yakos doctor --production <project>` |
 | Update everything | `yakos update --all` (framework + every per-project state) |
 | Tab completion (bash/zsh) | `yakos completion install` |
 | Health check | `yakos doctor` |
@@ -68,11 +71,14 @@ and a well-defined boundary with its neighbors.
 ┌────────────────────────────────────────────────────────────────────┐
 │                  Layer 1 — Framework (this repo)                   │
 │  Versioned, install-once, shared across all projects.              │
-│  - 34 agents (lead-template, planner, code-reviewer, ...)          │
-│  - 53 skills (release-audit, eval-gate, postmortem, ...)           │
-│  - 16 rules (lead-dispatch, git-hygiene, ...)                      │
-│  - 8 playbooks (security, ui-ux-a11y, regulated-data, ...)         │
-│  - 12 hooks (path-allowlist, secret-scan, peer-claim, ...)         │
+│  - 35 agents (lead-template, planner, code-reviewer, supervisor)   │
+│  - 57 skills (release-audit, eval-gate, peer-handoff,              │
+│    evidence-based-debugging, hook-bypass-review, ...)              │
+│  - 16 rules (lead-dispatch, git-hygiene, multi-dev-coord, ...)     │
+│  - 9 playbooks (security, ui-ux-a11y, prompt-injection-defense)    │
+│  - 17 hooks (path-allowlist, secret-scan, peer-claim,              │
+│    supervisor-{stream,gate}, output-injection-scan,                │
+│    budget-guard, context-inject, ...)                              │
 │  - 6 runtime adapters (claude / codex / agy / claude-sdk /         │
 │    antigravity-sdk / gemini-deprecated-shim)                       │
 └────────────────────────────────────────────────────────────────────┘
@@ -191,6 +197,39 @@ telemetry (duration, token usage). Pass that id to the matching
 
 Full guide: [docs/mcp-integration.md](docs/mcp-integration.md).
 
+## Live shadow-agent supervisor
+
+A second agent runs in parallel to the lead, watches recent tool
+calls, and judges drift on a four-axis rubric (intent alignment /
+factual accuracy / hard-control respect / scope risk). On CRITICAL
+findings in active mode, the next lead tool call is blocked with
+actionable bypass options.
+
+Disabled by default; opt in per-project:
+
+```sh
+yakos supervise enable                       # flips .yakos.yml supervisor.enabled
+yakos supervise status                       # config + recent findings
+yakos supervise tail --watch                 # follow findings live
+yakos supervise set block_on_critical false  # switch to passive (surface-only)
+```
+
+Three bypass escalation paths when the supervisor is wrong:
+1. Per-finding bypass — add `Scope: finding=<ts>` to `hook-bypass.md`
+2. Passive mode — `supervisor.block_on_critical: false` (still scores,
+   never blocks)
+3. Emergency — `export YAKOS_SUPERVISOR_DISABLE=1` (session-scope)
+
+Also runs as defense-in-depth alongside:
+- **`output-injection-scan`** hook — scans tool output (Bash / Read /
+  WebFetch / MCP) for known prompt-injection patterns
+- **`budget-guard`** hook — per-session caps on tool calls, wall-clock,
+  loop detection (same tool repeated N times)
+
+Full guide: [docs/supervisor-mode.md](docs/supervisor-mode.md).
+Prompt-injection threat model:
+[lib/playbooks/09-prompt-injection-defense.md](lib/playbooks/09-prompt-injection-defense.md).
+
 ## Tab completion
 
 Bash and zsh completion ship in the box. Install with:
@@ -240,11 +279,20 @@ yakos peer status                    # active peer sessions
 yakos peer log [--since <iso>]       # tail shared activity stream
 yakos peer claims                    # active per-file claims
 yakos peer propose-mode --mode serialize --targets 'src/auth/**' --reason '...'
+yakos peer handoff --to alice@dev01 --completed-scope '...' --next-action '...'
+
+# Live supervisor (drift / accuracy / intent monitoring)
+yakos supervise enable               # opt in per-project
+yakos supervise status               # config + buffer + recent findings
+yakos supervise tail --watch         # follow findings live
+yakos supervise set block_on_critical false  # passive (surface-only) mode
 
 # Observability + memory
 yakos cost --by agent                # aggregate token/cost telemetry
 yakos memory list <name>             # project memory (shared symlink → coord if multi-dev)
 yakos archive <name> <tag>           # promote work/current/ → work/archive/<tag>/
+yakos checkpoint now                 # snapshot session state for rewind
+yakos doctor --production <project>  # pre-prod readiness check
 
 # Standards + completion
 yakos standards list                 # cross-project standards opt-ins
@@ -255,7 +303,7 @@ yakos version-bump --component minor # bump VERSION + CHANGELOG entry
 yakos git-hooks install              # pre-push version gate in current repo
 ```
 
-Full subcommand list: `yakos --help`. There are 28 subcommands.
+Full subcommand list: `yakos --help`. There are 32 subcommands.
 
 ## Cross-project standards
 
@@ -285,29 +333,45 @@ Full matrix: [COMPATIBILITY.md](COMPATIBILITY.md).
 
 ## Status
 
-**v0.32.0.0** — alpha, pre-1.0. Active development. API stability:
+**v0.35.0.0** — alpha, pre-1.0. Active development. API stability:
 CLI commands and `.yakos.yml` schema are stable within minor versions;
 hook contract and agent frontmatter are stable within major versions.
 SemVer is four-part: `MAJOR.MINOR.PATCH.HOTFIX`. See
 [CHANGELOG.md](CHANGELOG.md) for what landed in each release.
 
-`yakos validate --strict`: **0 errors / 0 warnings**. Multi-dev
-end-to-end test: **10/10 passing** under real concurrent processes.
+`yakos validate --strict`: **0 errors / 0 warnings**.
+Multi-dev e2e: **10/10**. Supervisor e2e: **11/11**.
+Both run in CI on every PR + push to main.
 
 ### Recent landings since v0.29 (when the repo went public)
 
 - **v0.30** — `yakos quickstart`, `yakos update --all`, multi-dev e2e
-  test (real concurrent processes, 10/10), live runtime smoke test
-  (conditional SDK exec), SECURITY.md, gemini.sh hard cutoff on
-  2026-09-01, 32 tags backfilled (v0.3.0.0 → v0.28.0.0)
+  test, live runtime smoke test, SECURITY.md, gemini.sh hard cutoff
+  on 2026-09-01, 32 tags backfilled (v0.3.0.0 → v0.28.0.0)
 - **v0.31** — MCP server with 9 cross-runtime tools (5 dispatch + 4
   continue), multi-turn resume substrate (YAKOS_CONVERSATION_ID
-  env-var convention threaded through codex / agy / claude /
-  claude-sdk adapters), `yakos auth login --all`, `yakos mcp`
-  subcommand, docs/mcp-integration.md operator guide
+  env-var threaded through codex / agy / claude / claude-sdk
+  adapters), `yakos auth login --all`, `yakos mcp` subcommand,
+  docs/mcp-integration.md
 - **v0.32** — bash + zsh tab completion (with dynamic project name
-  discovery), `yakos completion {bash,zsh,install}` subcommand,
-  README refresh
+  discovery), `yakos completion {bash,zsh,install}` subcommand
+- **v0.33** — **live shadow-agent supervisor** with 4-axis rubric
+  (intent / accuracy / hard-control / scope risk), can block lead
+  on CRITICAL (active mode) or surface-only (passive); `yakos
+  supervise {enable,disable,status,tail,clear,set}`,
+  docs/supervisor-mode.md
+- **v0.34** — `supervisor-toggle` skill (flip block_on_critical
+  mid-session), **prompt-injection scanner** for tool output (esp.
+  MCP cross-runtime relays), **loop + budget guardrails** (per-
+  session token / wall-clock / repeat caps), **AGENTS.md
+  emission** at init (cross-tool compatibility — codex / cursor /
+  openhands), **`yakos doctor --production`** + harness-checklist
+  template
+- **v0.35** — CI now runs multi-dev + supervisor e2e on every PR;
+  3 new skills (`evidence-based-debugging`, `hook-bypass-review`,
+  `peer-handoff`); `yakos peer handoff` CLI; **context-inject
+  hook** (opt-in UserPromptSubmit surfacing decisions/budget/peers/
+  supervisor); CONTRIBUTING.md + issue/PR templates
 
 ## Documentation map
 
@@ -328,10 +392,12 @@ end-to-end test: **10/10 passing** under real concurrent processes.
 **Operations:**
 
 - [docs/co-pilot-mode.md](docs/co-pilot-mode.md) — multi-dev coord on a shared box
+- [docs/supervisor-mode.md](docs/supervisor-mode.md) — live shadow-agent supervisor
 - [docs/cross-project-standards.md](docs/cross-project-standards.md) — opt-in standards
 - [docs/ci-integration.md](docs/ci-integration.md) — yakOS in GitHub Actions
 - [docs/team-shapes.md](docs/team-shapes.md) — recommended team compositions
 - [SECURITY.md](SECURITY.md) — responsible disclosure policy
+- [CONTRIBUTING.md](CONTRIBUTING.md) — development setup, conventions, validate-before-push
 
 **Reference:**
 
@@ -343,22 +409,30 @@ end-to-end test: **10/10 passing** under real concurrent processes.
 
 ## Development
 
-Contributions welcome. Follow the conventions in [STYLE.md](STYLE.md)
-and [docs/engineering-standards.md](docs/engineering-standards.md); the
-commit format is [Conventional Commits](https://www.conventionalcommits.org/)
-per [lib/rules/commit-format.md](lib/rules/commit-format.md).
+Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
+development setup, branch / commit conventions, and the full
+validate-before-push checklist. Conventions follow
+[STYLE.md](STYLE.md) +
+[docs/engineering-standards.md](docs/engineering-standards.md); commits
+use [Conventional Commits](https://www.conventionalcommits.org/) per
+[lib/rules/commit-format.md](lib/rules/commit-format.md).
 
 Before opening a PR:
 
 ```sh
 ./cli/yakos validate --strict        # must report 0 errors
-./tests/run-hook-fixtures.sh         # hook regression tests
-./tests/run-runtime-fixtures.sh      # runtime adapter tests
+./tests/run-hook-fixtures.sh         # hook regression
+./tests/run-multi-dev-e2e.sh         # 10/10 expected
+./tests/run-supervisor-e2e.sh        # 11/11 expected
+./tests/run-runtime-fixtures.sh      # runtime adapter regression
+./tests/run-e2e.sh                   # subcommand smoke
 ```
 
-Security disclosure: email the maintainer privately rather than
-filing a public issue. A formal `SECURITY.md` will land in a later
-release.
+All five test suites also run in CI on every PR. See
+`.github/PULL_REQUEST_TEMPLATE.md` for the description shape.
+
+Security disclosure: see [SECURITY.md](SECURITY.md). Email the
+maintainer privately; never open a public issue for vulnerabilities.
 
 ## FAQ
 
