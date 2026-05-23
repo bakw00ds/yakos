@@ -94,6 +94,28 @@ jobs:
         run: |
           ./tests/run-e2e.sh
 
+  multi-dev-e2e:
+    name: multi-dev coord e2e (concurrent processes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq + python3
+        run: sudo apt-get update -y && sudo apt-get install -y jq python3
+      - name: Run multi-dev e2e (Plan 1)
+        run: |
+          ./tests/run-multi-dev-e2e.sh
+
+  supervisor-e2e:
+    name: supervisor live-shadow agent e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq + python3
+        run: sudo apt-get update -y && sudo apt-get install -y jq python3
+      - name: Run supervisor e2e (Plan v0.33)
+        run: |
+          ./tests/run-supervisor-e2e.sh
+
   install-flow:
     name: install / init / doctor / uninstall (smoke)
     runs-on: ubuntu-latest

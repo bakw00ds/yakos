@@ -73,6 +73,19 @@ profile:
 #
 # Reference: https://www.infoworld.com/article/4138748/finops-for-agents
 
+# ---- context injection (v0.35+) --------------------------------------------
+# UserPromptSubmit hook that surfaces recent session context before
+# each prompt: decisions.md tail, budget remaining, peer-status,
+# recent supervisor CRITICAL. All sections individually toggleable.
+# DEFAULT OFF — opt in to avoid surprise context bloat.
+#
+# context_inject:
+#   enabled: true
+#   inject_decisions: true       # tail of decisions.md
+#   inject_budget: true          # if budget block configured
+#   inject_peers: true           # if multi-dev coord enabled
+#   inject_supervisor: true      # most recent CRITICAL finding
+
 # ---- output-injection scanner (v0.34+) -------------------------------------
 # PostToolUse hook that scans tool output (Bash/Read/WebFetch/mcp__*)
 # for known prompt-injection patterns. Detection only — never blocks.

@@ -7,6 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0.0] — 2026-05-22
+
+### Added — CI/lead-template fixes + 3 skills + context-inject hook + community files
+
+Closes the gaps identified in the post-v0.34 review session.
+
+**Real bugs fixed:**
+
+- **CI now runs the new e2e tests.** `.github/workflows/ci.yml`
+  gains two new jobs: `multi-dev-e2e` (runs
+  `tests/run-multi-dev-e2e.sh`, 10/10) and `supervisor-e2e` (runs
+  `tests/run-supervisor-e2e.sh`, 11/11). Previously these existed
+  but were only invoked manually — any commit could have broken
+  Plan 1 or the supervisor without CI catching it.
+- **Lead template bullet 7 updated** to reference v0.33 supervisor
+  + v0.34 output-injection-scan: "If a supervisor `CRITICAL` or
+  `output-injection-scan WARN` surfaces, READ the underlying
+  evidence (findings ndjson / tool output) before reacting — do
+  not blanket-bypass." Trimmed Personality section by one line
+  to stay within the 80-140 line budget.
+
+**New skills (3):**
+
+- **`lib/skills/evidence-based-debugging/SKILL.md`** (sonnet-tier)
+  — constrains the agent to cite runtime evidence (stack traces,
+  log lines, variable snapshots, timestamps) before proposing fixes.
+  Anti-pattern caught: "patch and pray." Includes a required
+  diagnosis template the specialist must produce before the lead
+  approves the fix. Maps to
+  [Syncause/debug-skill](https://github.com/Syncause/debug-skill)
+  from awesome-harness-engineering.
+- **`lib/skills/hook-bypass-review/SKILL.md`** (haiku-tier) —
+  audit skill invoked before `yakos archive` (or weekly). Reads
+  `work/current/hook-bypass.md`; flags EXPIRED / STALE /
+  pattern-flagged entries (same Scope bypassed >2x in 14 days
+  suggests the underlying hook needs tuning rather than the
+  bypass being legitimate).
+- **`lib/skills/peer-handoff/SKILL.md`** (sonnet-tier) —
+  multi-dev coordination skill for the "I'm done, your turn"
+  pattern. Documents the protocol: sender emits structured
+  `peer_handoff` event + releases claims + updates decisions.md;
+  receiver runs `peer-sync` + acks/rejects via
+  `peer_handoff_response`.
+
+**New CLI:**
+
+- **`yakos peer handoff`** subcommand backs the peer-handoff skill.
+  Two modes: send (`--to <user@host> --completed-scope <s>
+  --notes <s> --next-action <s>`) emits a `peer_handoff` event;
+  ack/reject (`--ack <handoff-id>` or `--reject <handoff-id>
+  --reason <s>`) closes the loop. Smoke-tested in a tmp project.
+
+**New hook:**
+
+- **`lib/hooks/context-inject.sh`** (UserPromptSubmit) — surfaces
+  useful session context to the lead before each prompt: tail of
+  `decisions.md`, budget remaining (cap vs current), peer-status
+  one-liner (multi-dev), most recent supervisor CRITICAL. All four
+  sections individually toggleable in `.yakos.yml`. **Disabled by
+  default** — operators opt in via `context_inject.enabled: true`
+  to avoid surprise context bloat. Per LangChain's "middleware
+  lets you customize your agent harness" pattern from awesome-
+  harness-engineering.
+
+**Community files:**
+
+- **`CONTRIBUTING.md`** — development setup, branch + commit
+  conventions, validate-before-push checklist, PR description
+  template, hook fixture pattern, what kinds of changes are
+  welcome / need discussion first, security disclosure pointer.
+- **`.github/ISSUE_TEMPLATE/bug_report.md`** — structured bug
+  report with reproduction steps + environment + doctor output.
+- **`.github/ISSUE_TEMPLATE/feature_request.md`** — structured
+  proposal with use case + why existing features don't cover it
+  + criticality rating + awesome-harness pattern link.
+- **`.github/PULL_REQUEST_TEMPLATE.md`** — Summary + Test plan
+  (with explicit test runner checkboxes) + Version bump +
+  Risks/limitations + affected hooks/agents/skills.
+
+**Settings template:**
+
+- `context-inject.sh` wired into UserPromptSubmit chain alongside
+  `cycle-counter.sh` and `context-threshold.sh`.
+- `.yakos.yml` template gains commented `context_inject:` block
+  with all four section toggles.
+
+**Validated this session:**
+
+- `yakos validate --strict`: 0 errors / 0 warnings
+- Multi-dev e2e regression: still **10/10**
+- Supervisor e2e regression: still **11/11**
+- `yakos peer handoff` smoke test in tmp project emits correct
+  event with handoff_id + structured fields
+- Lead template line count: 139 / budget 140
+
+**Skipped per operator request:**
+
+- CODE_OF_CONDUCT.md (deferred)
+
 ## [0.34.0.0] — 2026-05-22
 
 ### Added — Harness-engineering gap closes (awesome-harness-engineering review)

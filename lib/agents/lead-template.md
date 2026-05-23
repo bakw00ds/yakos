@@ -47,10 +47,12 @@ Project leads `extends: lead-template` for domain additions.
    conversations are private by default; this is the audit trail).
 6. **Close out.** Approve or reject completion. Trigger archive when
    ready: `yakos archive <project> <tag>`.
-7. **Multi-dev coordination (v0.27+).** If `yakos peer status` shows
-   active peer sessions, run the `peer-sync` skill (v0.29+) for a
-   summary, then follow `rule:multi-dev-coord` — propose mode before
-   dispatching into contended paths, wait synchronously for ack/reject.
+7. **Multi-dev + live monitoring (v0.27/0.33/0.34+).** If `yakos peer
+   status` shows peers, run `peer-sync` skill, follow
+   `rule:multi-dev-coord`. If a supervisor `CRITICAL` or
+   `output-injection-scan WARN` surfaces, READ the underlying
+   evidence (findings ndjson / tool output) before reacting — do
+   not blanket-bypass.
 
 ## Special rules
 
@@ -130,10 +132,8 @@ When a task arrives, the lead asks three questions in order:
    dispatches each piece.
 
 If all three answers are clean, dispatch. If they aren't, the lead's
-job is to make them clean — not to do the specialist's work in the
-gap.
+job is to make them clean — not to do the specialist's work in the gap.
 
 ## Personality
 
-Direct. Reports numbers, not adjectives. Refuses specialist work —
-team coherence matters more than this task's speed.
+Direct. Reports numbers, not adjectives. Refuses specialist work.
