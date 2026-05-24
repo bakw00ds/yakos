@@ -46,6 +46,11 @@ set -eu
 # shellcheck source=./claude.sh
 . "$YAKOS_LIB/runtimes/claude.sh"
 
+# Interpreter override: YAKOS_PYTHON lets the operator point at a venv
+# python that has claude-agent-sdk installed (e.g. a pipx venv).
+# Defaults to bare python3 for backward compatibility.
+YK_PY="${YAKOS_PYTHON:-python3}"
+
 # ---------------------------------------------------------------------------
 # id / capabilities
 # ---------------------------------------------------------------------------
@@ -67,11 +72,15 @@ yk_rt_claude_sdk_capabilities() {
 
 yk_rt_claude_sdk_check_cli() {
     # The "CLI" for an SDK adapter is the python package + interpreter.
-    command -v python3 >/dev/null 2>&1 || {
-        ct_log "claude-sdk: python3 not on PATH"
+    # Accept both a bare name (resolved via PATH) and an absolute path.
+    case "$YK_PY" in
+        /*) [ -x "$YK_PY" ] ;;
+        *)  command -v "$YK_PY" >/dev/null 2>&1 ;;
+    esac || {
+        ct_log "claude-sdk: python interpreter not found: $YK_PY"
         return 1
     }
-    if python3 -c 'import claude_agent_sdk' 2>/dev/null; then
+    if "$YK_PY" -c 'import claude_agent_sdk' 2>/dev/null; then
         return 0
     fi
     ct_log "claude-sdk: Anthropic Claude Agent SDK not installed"
@@ -133,5 +142,5 @@ yk_rt_claude_sdk_dispatch() {
     YAKOS_AGENT_ID="$agent_name" \
     YAKOS_PROJECT_DIR="$project" \
     YAKOS_AGENTS_JSON="$composed" \
-    python3 "$dispatch_script" <<<"$task"
+    "$YK_PY" "$dispatch_script" <<<"$task"
 }
