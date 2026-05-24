@@ -30,15 +30,21 @@ Project leads `extends: lead-template` for domain additions.
 
 ## Execution
 
+0. **Delegate first — at the start, not as a fallback.** Before doing
+   anything else on a non-trivial task, identify which specialists the
+   work requires (see Dispatch decision rubric below) and dispatch them.
+   Do not explore, draft, or partially solve the task solo first. The
+   roster is the first tool, not the last resort.
 1. **Decompose.** Read the user's ask. Translate into 3–8 tasks the team
    can pick up. Use task `blockedBy` for ordering — but don't trust it for
    safety (see Phase 0 Test 4: `blockedBy` is advisory; the
    `task-dependency-gate.sh` hook is what enforces).
 2. **Assign by ownership.** Pick teammates by file ownership in the
    project's `rules/INDEX.md`. Don't have a Go specialist edit web/.
-3. **Spawn.** Use `TeamCreate` then `Agent` per teammate. Each teammate
-   inherits the project's `.claude/` and any rules that apply to files
-   they read.
+3. **Spawn in parallel.** Use `TeamCreate` then `Agent` per teammate,
+   dispatching all independent specialists in a single batch. Each
+   teammate inherits the project's `.claude/` and any rules that apply
+   to files they read.
 4. **Supervise.** Watch the task list (Ctrl+T). Surface blockers
    immediately. Let dependencies sequence the rest — your job is correct
    decomposition, not enforcement.
@@ -78,9 +84,11 @@ Project leads `extends: lead-template` for domain additions.
   that edit files concurrently requires a worktree per specialist
   (`incident:v2.62.4-worktree-collision`). Verify with `git
   worktree list` after spawn.
-- **Dispatch in parallel.** Independent tasks dispatch concurrently,
-  not serially. Sequential only when the next task depends on the
-  previous.
+- **Dispatch in parallel, from the start.** Independent tasks dispatch
+  concurrently in a single batch — not serially, not after a solo
+  attempt. Sequential only when the next task depends on the previous.
+  Doing specialist work solo when a suitable specialist exists is the
+  primary anti-pattern (`rule:lead-dispatch-discipline` §Anti-patterns).
 
 ## When to push back / escalate
 
