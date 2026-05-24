@@ -446,6 +446,113 @@ _kanban_pid_is_server() {
     ps -o command= -p "$pid" 2>/dev/null | grep -q '[p]ython'
 }
 
+# _kanban_find_live_pids <canonical_board_file>
+#   Print one pid per line for every python process that is a kanban web
+#   server for THIS PROJECT'S board, listening on 127.0.0.1.
+#
+# Project scoping — all four conditions must hold:
+#   1. The process is python (ps command= contains "python").
+#   2. It is listening on 127.0.0.1 on some TCP port.
+#   3. Its parent process command contains "kanban.sh" (belt-and-suspenders).
+#   4. Its OWN argv contains the canonical board file path as a token.
+#      cmd_serve embeds that path when launching python so it is always
+#      visible in ps output.  This is the authoritative project gate: only
+#      servers that were started for this exact board file match.
+#
+# Path canonicalization (via ct_realpath) ensures that case-variant or
+# symlink-variant paths — e.g. /github/yakos vs /github/yakOS on a
+# case-insensitive FS — resolve to the same string before comparison.
+#
+# Portability: lsof is available on macOS and most Linux distros; the
+# fallback uses ss (iproute2, present on Linux) then netstat. On a system
+# with none of these the function emits nothing (safe: callers treat an
+# empty result as "no live servers found").
+_kanban_find_live_pids() {
+    local board_file="$1"
+    [ -n "$board_file" ] || return 0
+
+    # Collect python pids listening on 127.0.0.1 via whichever tool exists.
+    local listen_pids=""
+    if command -v lsof >/dev/null 2>&1; then
+        # lsof -F outputs machine-parseable lines: pNNN / fNNN etc.
+        # We want the pid column for LISTEN entries on 127.0.0.1.
+        listen_pids="$(lsof -iTCP@127.0.0.1 -sTCP:LISTEN -nP -F p 2>/dev/null \
+            | sed -n 's/^p//p')"
+    elif command -v ss >/dev/null 2>&1; then
+        # ss output: State Recv-Q Send-Q Local:Port Peer:Port Process
+        # The process field (pid=NNN) only appears with -p and when run as
+        # the process owner or root; filter to 127.0.0.1 listeners.
+        listen_pids="$(ss -tlnp 2>/dev/null \
+            | awk '/127\.0\.0\.1/{
+                match($0, /pid=([0-9]+)/, a)
+                if (a[1]) print a[1]
+              }')"
+    elif command -v netstat >/dev/null 2>&1; then
+        # netstat -tlnp (Linux); -anp (BSD) — try both forms silently.
+        listen_pids="$(netstat -tlnp 2>/dev/null \
+            | awk '/127\.0\.0\.1.*LISTEN/{
+                split($NF, a, "/"); if (a[1]+0 > 0) print a[1]
+              }')"
+    fi
+
+    [ -n "$listen_pids" ] || return 0
+
+    # For each listening pid: verify python, kanban.sh parent, and — the
+    # authoritative project gate — own argv contains this board's path.
+    local pid ppid own_cmd parent_cmd
+    printf '%s\n' "$listen_pids" | sort -u | while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        own_cmd="$(ps -o command= -p "$pid" 2>/dev/null)"
+        # Must be a python process we own.
+        printf '%s' "$own_cmd" | grep -q '[p]ython' || continue
+        # Own argv must carry this board's canonical path as a token.
+        # fgrep (-F) treats the path as a literal string, not a regex.
+        printf '%s' "$own_cmd" | grep -qF "$board_file" || continue
+        # Belt-and-suspenders: parent must be a kanban.sh invocation.
+        ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+        [ -n "$ppid" ] || continue
+        parent_cmd="$(ps -o command= -p "$ppid" 2>/dev/null)"
+        printf '%s' "$parent_cmd" | grep -q 'kanban\.sh' || continue
+        printf '%s\n' "$pid"
+    done
+}
+
+# _kanban_port_for_pid <pid> — print the TCP port the pid is listening on
+# (127.0.0.1 only). Prints nothing if not found. Uses lsof/ss/netstat in
+# the same priority order as _kanban_find_live_pids.
+_kanban_port_for_pid() {
+    local pid="$1"
+    [ -n "$pid" ] || return 0
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -iTCP@127.0.0.1 -sTCP:LISTEN -nP -a -p "$pid" 2>/dev/null \
+            | awk 'NR>1{n=split($9,a,":"); if(n>1) print a[n]; exit}'
+    elif command -v ss >/dev/null 2>&1; then
+        ss -tlnp 2>/dev/null \
+            | awk -v p="$pid" '/127\.0\.0\.1/ && $0 ~ "pid=" p "[^0-9]" {
+                split($4,a,":"); print a[length(a)]; exit}'
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -tlnp 2>/dev/null \
+            | awk -v p="$pid" '/127\.0\.0\.1.*LISTEN/ {
+                split($NF,a,"/")
+                if (a[1]==p) { split($4,b,":"); print b[length(b)]; exit }
+              }'
+    fi
+}
+
+# _kanban_state_recover <pid> <port> — write (or overwrite) the state file
+# with the live server's details. Called when the scan finds a live server
+# that the state file doesn't know about (stale or missing state file).
+_kanban_state_recover() {
+    local pid="$1" port="$2"
+    local state host url project
+    state="$(_kanban_state_file)"
+    host="127.0.0.1"
+    url="http://${host}:${port}"
+    project="${YAKOS_PROJECT_NAME:-$(yakos_project_name)}"
+    printf '{"pid":%s,"host":"%s","port":%s,"url":"%s","project":"%s"}\n' \
+        "$pid" "$host" "$port" "$url" "$project" > "$state"
+}
+
 # cmd_serve [--port N] [--host H] [--no-open]
 #   Launch a small web UI that renders the board live and lets the
 #   operator add/move tasks from the browser. Mutations shell back into
@@ -472,10 +579,36 @@ cmd_serve() {
 
     # Don't double-bind: if a server is already up for this project's board,
     # point the operator at it instead of starting a second one.
+    #
+    # Two-layer check:
+    #   1. Fast path — state file records a live pid (common case).
+    #   2. Scan path — state file is absent/stale but a kanban server is
+    #      already running (the orphan-leak window). Recover the state file
+    #      so subsequent status/stop calls work, then return without binding.
     if _kanban_server_alive; then
         ct_log "kanban web UI already running → $(_kanban_state_get url)"
         ct_log "(use 'yakos kanban stop' to stop it)"
         return 0
+    fi
+    # Scan path: state file absent/stale but this board's server may still be
+    # running.  Resolve the board path now so the scan is project-scoped.
+    # (canon_file is set below after _kanban_seed; we need it here, so compute
+    # it early using the raw _kanban_file path — _kanban_seed is a no-op when
+    # the file exists, which is true for any board that has had serve called
+    # before.)
+    local _early_file _early_canon _scan_pid _scan_port _scan_url
+    _early_file="$(_kanban_file)"
+    _early_canon="$(ct_realpath "$_early_file" 2>/dev/null || printf '%s' "$_early_file")"
+    _scan_pid="$(_kanban_find_live_pids "$_early_canon" | head -1)"
+    if [ -n "$_scan_pid" ]; then
+        _scan_port="$(_kanban_port_for_pid "$_scan_pid")"
+        if [ -n "$_scan_port" ]; then
+            _scan_url="http://127.0.0.1:${_scan_port}"
+            ct_log "kanban web UI already running → ${_scan_url} (pid ${_scan_pid}; state file was stale — recovered)"
+            ct_log "(use 'yakos kanban stop' to stop it)"
+            _kanban_state_recover "$_scan_pid" "$_scan_port"
+            return 0
+        fi
     fi
 
     case "$port" in
@@ -491,8 +624,13 @@ cmd_serve() {
     esac
 
     _kanban_seed
-    local file project state
+    local file canon_file project state
     file="$(_kanban_file)"
+    # Canonical board path: resolve via ct_realpath so case-variant or
+    # symlink-variant paths (e.g. /github/yakos vs /github/yakOS on a
+    # case-insensitive FS) normalise to the same string.  This token is
+    # embedded in the python argv so _kanban_find_live_pids can match it.
+    canon_file="$(ct_realpath "$file" 2>/dev/null || printf '%s' "$file")"
     project="${YAKOS_PROJECT_NAME:-$(yakos_project_name)}"
     state="$(_kanban_state_file)"
 
@@ -519,7 +657,7 @@ cmd_serve() {
     KANBAN_STATE="$state" \
     KANBAN_DEFAULT_CATEGORIES="$KANBAN_DEFAULT_CATEGORIES" \
     YAKOS_WORK_DIR="$(yakos_work_dir)" \
-    python3 - <<'PY' &
+    python3 - "$canon_file" <<'PY' &
 import json, os, re, signal, subprocess, sys, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1999,24 +2137,52 @@ cmd_serve_status() {
     fi
 }
 
-# cmd_serve_stop — stop the running web UI for this board (if any).
+# cmd_serve_stop — stop ALL kanban web servers for THIS PROJECT'S board.
+#
+# Strategy:
+#   1. Collect pids from the state file (fast, common case) and from a
+#      project-scoped live process scan (catches orphans the state file
+#      doesn't know about).  The scan filters by this board's canonical
+#      file path, so servers for OTHER projects are never in the candidate
+#      set and are never killed.
+#   2. For each candidate pid, verify with _kanban_pid_is_server before
+#      killing — never kill a recycled/unrelated pid.
+#   3. Report each pid terminated via ct_log.
+#   4. Remove the state file at the end regardless.
 cmd_serve_stop() {
-    if ! _kanban_server_alive; then
-        ct_log "kanban web UI: not running"
-        rm -f "$(_kanban_state_file)" 2>/dev/null || true
-        return 0
-    fi
-    local pid; pid="$(_kanban_state_get pid)"
-    # Guard against a recycled pid: only kill if it still looks like our
-    # python server. SIGTERM → python shuts down gracefully and removes its
-    # own state file; we also rm here in case it was already gone.
-    if _kanban_pid_is_server "$pid"; then
-        kill "$pid" 2>/dev/null || true
-        ct_log "kanban web UI: stopped (pid $pid)"
-    else
-        ct_log "kanban web UI: recorded pid $pid is not our server (stale); clearing state"
-    fi
+    local found=0
+
+    # Resolve this board's canonical path for project-scoped scan.
+    local stop_file stop_canon
+    stop_file="$(_kanban_file)"
+    stop_canon="$(ct_realpath "$stop_file" 2>/dev/null || printf '%s' "$stop_file")"
+
+    # Candidate set: state-file pid (may be empty/stale) + project-scoped scan.
+    local state_pid scan_pids all_pids
+    state_pid="$(_kanban_state_get pid 2>/dev/null || true)"
+    scan_pids="$(_kanban_find_live_pids "$stop_canon")"
+
+    # Merge into a deduplicated list.
+    all_pids="$(printf '%s\n%s\n' "$state_pid" "$scan_pids" \
+        | tr -s '\n' '\n' | grep -E '^[0-9]+$' | sort -nu)"
+
+    local pid
+    for pid in $all_pids; do
+        # Safety gate: only kill if the pid still looks like our python server.
+        if _kanban_pid_is_server "$pid"; then
+            kill "$pid" 2>/dev/null || true
+            ct_log "kanban web UI: stopped (pid $pid)"
+            found=$((found + 1))
+        else
+            ct_log "kanban web UI: pid $pid is not our server (stale or recycled); skipping"
+        fi
+    done
+
     rm -f "$(_kanban_state_file)" 2>/dev/null || true
+
+    if [ "$found" -eq 0 ]; then
+        ct_log "kanban web UI: not running"
+    fi
 }
 
 case "${1:-}" in
