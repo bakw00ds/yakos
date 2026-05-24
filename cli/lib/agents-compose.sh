@@ -161,12 +161,22 @@ yk_agents_compose_one() {
             | jq -s '.')"
     fi
 
-    # Build model field — only include if non-empty AND a known alias.
+    # Build model field — only include if non-empty AND resolvable.
     # Empirical: claude accepts haiku|sonnet|opus aliases on --agents.
+    # The framework also uses cross-runtime semantic aliases
+    # (cheap/balanced/best/reasoning); resolve those to claude's
+    # concrete aliases here so agent frontmatter can stay
+    # runtime-agnostic (see docs/supervisor-mode.md, runtime-pick).
     local model_filter='.'
     if [ -n "$model" ]; then
+        local resolved_model="$model"
         case "$model" in
-            haiku|sonnet|opus) model_filter='.[$id].model = $model' ;;
+            cheap)            resolved_model='haiku' ;;
+            balanced)         resolved_model='sonnet' ;;
+            best|reasoning)   resolved_model='opus' ;;
+        esac
+        case "$resolved_model" in
+            haiku|sonnet|opus) model="$resolved_model"; model_filter='.[$id].model = $model' ;;
             *) ct_log "agents-compose: WARN unknown model '$model' for $id; omitting from JSON" ;;
         esac
     fi
