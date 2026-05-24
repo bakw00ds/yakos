@@ -11,6 +11,7 @@
 #   yakos kanban notes <id> "<text>"   # set/replace notes field (any column)
 #   yakos kanban move <id> <col>       # move task between columns
 #   yakos kanban done <id>             # shortcut: move <id> to DONE
+#   yakos kanban delete <id>           # hard-delete a task (also: rm)
 #
 # Task block format:
 #   - [ ] K-1 — title
@@ -375,6 +376,43 @@ cmd_move() {
 }
 
 cmd_done() { cmd_move "$1" "DONE"; }
+
+# cmd_delete <id> — hard-delete a task from kanban.md (removes the task
+# header line and all its indented sub-field lines).  The deleted task is
+# echoed back so the operator can see exactly what was removed.  kanban.md
+# is recoverable from git history if a delete was accidental.
+cmd_delete() {
+    local id="${1:-}"
+    [ -n "$id" ] || ct_die "id required: yakos kanban delete <id>"
+
+    local file
+    file="$(_kanban_file)"
+    [ -f "$file" ] || ct_die "kanban.md not found"
+
+    # Verify the id exists before attempting a rewrite.  Use the same whole-
+    # token match (" K-N ") that cmd_notes / cmd_move use so K-1 never
+    # accidentally matches K-10 or K-11.
+    local match
+    match="$(grep -n "^- \[.\]" "$file" | grep " ${id} " || true)"
+    [ -n "$match" ] || ct_die "task '$id' not found in kanban.md"
+
+    # Capture the title for the confirmation echo.
+    local title
+    title="$(printf '%s' "$match" | sed 's/.*'"$id"' [—-] //')"
+
+    # Strip the task block (header + immediately following "  - " sub-field
+    # lines) using the same awk pattern as cmd_move pass-1.
+    awk -v id="$id" '
+        BEGIN { in_blk = 0 }
+        /^- \[.\]/ && index($0, " " id " ") > 0 {
+            in_blk = 1; next
+        }
+        in_blk && /^  - / { next }
+        { in_blk = 0; print }
+    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+
+    ct_log "deleted: $id — $title"
+}
 
 # ---- web UI lifecycle helpers ----------------------------------------------
 # The running server records {pid,host,port,url,project} in a small state
@@ -998,6 +1036,67 @@ textarea:focus {
   padding: .22rem .5rem;
 }
 
+/* ── Delete affordance ──────────────────────────────────────────────────── */
+/* Idle "Delete" trigger — subtle; sits at the bottom of each card. */
+.delete-wrap { margin-top: .4rem; }
+.delete-trigger {
+  border: 1px solid transparent;
+  background: none;
+  color: var(--kb-muted);
+  border-radius: 7px;
+  padding: .22rem .5rem;
+  font-size: .72rem;
+  cursor: pointer;
+  text-align: left;
+  transition: background .12s ease, color .12s ease, border-color .12s ease;
+}
+.delete-trigger:hover {
+  background: var(--kb-cat-bug-soft);
+  color: var(--kb-cat-bug);
+  border-color: var(--kb-cat-bug-soft);
+}
+.delete-trigger:focus-visible { outline: 2px solid var(--kb-cat-bug); outline-offset: 2px; }
+/* Confirm row: revealed on first click, contains Confirm + Cancel. */
+.delete-confirm {
+  display: none;
+  align-items: center;
+  gap: .4rem;
+  flex-wrap: wrap;
+  margin-top: .3rem;
+}
+.delete-confirm.visible { display: flex; }
+.delete-confirm-label {
+  font-size: .72rem;
+  color: var(--kb-cat-bug);
+  font-weight: 600;
+  flex: 1 1 100%;
+}
+.delete-confirm-yes {
+  border: 1px solid var(--kb-cat-bug);
+  background: var(--kb-cat-bug-soft);
+  color: var(--kb-cat-bug);
+  border-radius: 7px;
+  padding: .22rem .55rem;
+  font-size: .72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity .12s ease;
+}
+.delete-confirm-yes:hover { opacity: .82; }
+.delete-confirm-yes:focus-visible { outline: 2px solid var(--kb-cat-bug); outline-offset: 2px; }
+.delete-confirm-no {
+  border: 1px solid var(--kb-border);
+  background: var(--kb-card);
+  color: var(--kb-muted);
+  border-radius: 7px;
+  padding: .22rem .55rem;
+  font-size: .72rem;
+  cursor: pointer;
+  transition: border-color .12s ease;
+}
+.delete-confirm-no:hover { border-color: var(--kb-accent); }
+.delete-confirm-no:focus-visible { outline: 2px solid var(--kb-accent); outline-offset: 2px; }
+
 /* ── Toast ──────────────────────────────────────────────────────────────── */
 .toast-stack {
   position: fixed;
@@ -1438,6 +1537,7 @@ function buildCard(t, col) {
 
   card.appendChild(buildNotes(id, t.notes));
   card.appendChild(buildMoveActions(id, col));
+  card.appendChild(buildDeleteButton(id, t.title));
 
   // Drag wiring
   card.addEventListener("dragstart", e => {
@@ -1524,6 +1624,83 @@ function buildMoveActions(id, col) {
     });
     wrap.appendChild(btn);
   }
+  return wrap;
+}
+
+/* Delete affordance: idle trigger + explicit inline Confirm/Cancel pair.
+   First click on “Delete”: hides the trigger, reveals a confirm row with
+   a labelled “Confirm delete” button (red) and a “Cancel” button.  The
+   confirm button POSTs to /api/delete.  Cancel (or a 6s auto-timeout)
+   reverts to idle.  No document-level capture listeners, no text-swap
+   on the same element — the confirm is a separate clickable button with
+   its own handler, so there is no event-ordering race. */
+function buildDeleteButton(id, title) {
+  const wrap = el(“div”, { class: “delete-wrap” });
+
+  // Idle trigger.
+  const trigger = el(“button”, {
+    class: “delete-trigger”,
+    attrs: { type: “button”, “aria-label”: “Delete task “ + id },
+    text: “Delete”
+  });
+
+  // Confirm row (hidden until first click).
+  const confirmRow = el(“div”, { class: “delete-confirm” });
+  const label = el(“div”, {
+    class: “delete-confirm-label”,
+    text: “Delete “” + (title || id) + “”?”
+  });
+  const yesBtn = el(“button”, {
+    class: “delete-confirm-yes”,
+    attrs: { type: “button”, “aria-label”: “Confirm delete task “ + id },
+    text: “Confirm delete”
+  });
+  const noBtn = el(“button”, {
+    class: “delete-confirm-no”,
+    attrs: { type: “button”, “aria-label”: “Cancel delete task “ + id },
+    text: “Cancel”
+  });
+  confirmRow.append(label, yesBtn, noBtn);
+  wrap.append(trigger, confirmRow);
+
+  let autoResetTimer = null;
+
+  function showIdle() {
+    if (autoResetTimer) { clearTimeout(autoResetTimer); autoResetTimer = null; }
+    trigger.hidden = false;
+    confirmRow.classList.remove(“visible”);
+    yesBtn.disabled = false;
+  }
+
+  function showConfirm() {
+    trigger.hidden = true;
+    confirmRow.classList.add(“visible”);
+    yesBtn.focus();
+    // Auto-revert after 6s if operator walks away.
+    autoResetTimer = setTimeout(showIdle, 6000);
+  }
+
+  trigger.addEventListener(“click”, e => {
+    e.stopPropagation();
+    showConfirm();
+  });
+
+  noBtn.addEventListener(“click”, e => {
+    e.stopPropagation();
+    showIdle();
+  });
+
+  yesBtn.addEventListener(“click”, async e => {
+    e.stopPropagation();
+    if (autoResetTimer) { clearTimeout(autoResetTimer); autoResetTimer = null; }
+    yesBtn.disabled = true;
+    const data = await post(“/api/delete”, { id });
+    // If the POST failed, data is null and toast() was already called.
+    // Re-enable so the operator can try again.
+    if (!data) { yesBtn.disabled = false; return; }
+    renderBoard(data);
+  });
+
   return wrap;
 }
 
@@ -1708,6 +1885,13 @@ class Handler(BaseHTTPRequestHandler):
             if "\\" in notes:
                 return self._send(400, json.dumps({"error": "notes may not contain backslashes"}))
             result = run_kanban(["notes", tid, notes])
+        elif self.path == "/api/delete":
+            # Accept {id}. Validate id format; shell into cmd_delete which
+            # validates existence and echoes the removed task.
+            tid = str(data.get("id", "")).strip()
+            if not ID_RE.match(tid):
+                return self._send(400, json.dumps({"error": "bad task id"}))
+            result = run_kanban(["delete", tid])
         else:
             return self._send(404, json.dumps({"error": "not found"}))
 
@@ -1840,6 +2024,7 @@ case "${1:-}" in
     notes)          shift; cmd_notes "$@" ;;
     move)           shift; cmd_move "$@" ;;
     done)           shift; cmd_done "$@" ;;
+    delete|rm)      shift; cmd_delete "$@" ;;
     --html)         shift; cmd_render_html "$@" ;;
     serve|--serve)  shift; cmd_serve "$@" ;;
     status)         shift; cmd_serve_status "$@" ;;
@@ -1861,6 +2046,7 @@ yakos kanban — 3-column markdown board in scratchpad
   yakos kanban notes <id> "<text>"   # set/replace notes field (any column)
   yakos kanban move <id> <col>       # move between columns
   yakos kanban done <id>             # shortcut to DONE
+  yakos kanban delete <id>           # hard-delete a task (also: rm)
 
 Known categories: bug  feature  chore  question  other  (arbitrary values accepted)
 EOF
