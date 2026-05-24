@@ -96,8 +96,17 @@ Project bootstrap / launch / inspection:
     checkpoint    Session-state snapshots for rewind (v0.15+).
                   Args: now | list | resume <id> | clean [--age <days>]
     kanban        Manage 3-column markdown WIP board (v0.16+).
-                  Args: (none for render) | --html [<out>] | add "<title>"
-                        | move <id> <col> | done <id>
+                  Args: (none for render) | --html [<out>]
+                        | serve [--port N] [--host H] [--no-open]
+                        | status | stop
+                        | add "<title>" [--category <c>] [--notes "<t>"]
+                        | notes <id> "<text>" | move <id> <col> | done <id>
+                  Cards carry a category (bug/feature/chore/question/other,
+                  extensible) and a status-notes field. serve launches a
+                  loopback web UI (random high port) for viewing + managing
+                  the board — light/dark theme, category filter, inline notes,
+                  drag-and-drop. Auto-starts on 'yakos start'
+                  (disable: YAKOS_KANBAN_AUTOSERVE=0).
     env           Dev/test/prod environment management via .yakos.yml (v0.17+).
                   Args: status | list | validate | promote <from> <to>
     standards     Cross-project standards opt-ins (v0.22+).

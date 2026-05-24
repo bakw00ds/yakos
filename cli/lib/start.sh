@@ -66,6 +66,12 @@ Inspection:
     --print-agents        Print the composed agent JSON; exit 0.
     --                    End of yakos flags; rest passed to runtime CLI.
 
+Kanban web UI:
+    On launch, the project's kanban board web UI starts in the
+    background (loopback, random high port) and its URL is printed.
+    Disable with YAKOS_KANBAN_AUTOSERVE=0. Manage with
+    'yakos kanban status' / 'yakos kanban stop'.
+
 Examples:
     yakos start                       # auto-detect, claude (default)
     yakos start myapp
@@ -394,6 +400,48 @@ probe_snapshot="$(jq -cn \
     --arg caps "$CAPS" \
     '{ts:$t, runtime:$runtime, version:$version, capabilities:$caps}')"
 printf '%s\n' "$probe_snapshot" >> "$PROBE_DIR/${RUNTIME}.ndjson" 2>/dev/null || true
+
+# ---- kanban web UI auto-start ----------------------------------------------
+# Launch the project's kanban board web UI in the background and report its
+# URL so the operator can view/manage WIP in a browser alongside the session.
+# Loopback-only, random high port. Opt out with YAKOS_KANBAN_AUTOSERVE=0;
+# skipped silently when python3 is unavailable. Reuses an already-running
+# server for this project rather than starting a second one.
+if [ "${YAKOS_KANBAN_AUTOSERVE:-1}" != "0" ] && command -v python3 >/dev/null 2>&1; then
+    (
+        export YAKOS_PROJECT_NAME="$NAME"
+        . "$YAKOS_LIB/paths.sh" 2>/dev/null || exit 0
+        kdir="$(yakos_current_dir)"
+        state="$kdir/.kanban-serve.json"
+        log="$kdir/.kanban-serve.log"
+        mkdir -p "$kdir" 2>/dev/null || true
+
+        read_url() { sed -n 's/.*"url":"\([^"]*\)".*/\1/p' "$state" 2>/dev/null | head -1; }
+        alive() {
+            local p
+            p="$(sed -n 's/.*"pid":[[:space:]]*\([0-9]*\).*/\1/p' "$state" 2>/dev/null | head -1)"
+            [ -n "$p" ] && kill -0 "$p" 2>/dev/null
+        }
+
+        if [ -f "$state" ] && alive; then
+            printf '  kanban web UI:  %s (already running)\n' "$(read_url)"
+            exit 0
+        fi
+
+        nohup bash "$YAKOS_LIB/kanban.sh" serve --no-open >"$log" 2>&1 &
+        url=""
+        i=0
+        while [ "$i" -lt 15 ]; do
+            if [ -f "$state" ]; then url="$(read_url)"; [ -n "$url" ] && break; fi
+            i=$((i + 1)); sleep 0.2
+        done
+        if [ -n "$url" ]; then
+            printf '  kanban web UI:  %s   (stop: yakos kanban stop)\n' "$url"
+        else
+            printf '  kanban web UI:  failed to start — see %s\n' "$log"
+        fi
+    )
+fi
 
 # ---- exec runtime ----------------------------------------------------------
 
