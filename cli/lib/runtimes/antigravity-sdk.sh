@@ -51,6 +51,11 @@ set -eu
 # shellcheck source=./agy.sh
 . "$YAKOS_LIB/runtimes/agy.sh"
 
+# Interpreter override: YAKOS_PYTHON lets the operator point at a venv
+# python that has google-antigravity installed (e.g. a pipx venv).
+# Defaults to bare python3 for backward compatibility.
+YK_PY="${YAKOS_PYTHON:-python3}"
+
 # ---------------------------------------------------------------------------
 # id / capabilities
 # ---------------------------------------------------------------------------
@@ -72,11 +77,15 @@ yk_rt_antigravity_sdk_capabilities() {
 # ---------------------------------------------------------------------------
 
 yk_rt_antigravity_sdk_check_cli() {
-    command -v python3 >/dev/null 2>&1 || {
-        ct_log "antigravity-sdk: python3 not on PATH"
+    # Accept both a bare name (resolved via PATH) and an absolute path.
+    case "$YK_PY" in
+        /*) [ -x "$YK_PY" ] ;;
+        *)  command -v "$YK_PY" >/dev/null 2>&1 ;;
+    esac || {
+        ct_log "antigravity-sdk: python interpreter not found: $YK_PY"
         return 1
     }
-    if python3 -c 'from google.antigravity import Agent' 2>/dev/null; then
+    if "$YK_PY" -c 'from google.antigravity import Agent' 2>/dev/null; then
         return 0
     fi
     ct_log "antigravity-sdk: Google Antigravity SDK not installed"
@@ -150,5 +159,5 @@ yk_rt_antigravity_sdk_dispatch() {
     YAKOS_AGENT_ID="$agent_name" \
     YAKOS_PROJECT_DIR="$project" \
     YAKOS_AGENTS_JSON="$composed" \
-    python3 "$dispatch_script" <<<"$task"
+    "$YK_PY" "$dispatch_script" <<<"$task"
 }
