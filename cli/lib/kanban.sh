@@ -1367,6 +1367,7 @@ let lastBoard = null;              // last fetched board data; re-sorted on sort
 let openEditors = new Set();       // card ids with their notes editor open
 let dragId = null;
 let pollTimer = null;
+let liveErrShown = false;          // guard: show poll-failure toast only once per error run
 
 const slug = c => c.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
@@ -1460,9 +1461,44 @@ function initTheme() {
 
 /* ── Meta + add-form + filter bar ─────────────────────────────────────────── */
 async function loadMeta() {
-  let m;
-  try { m = await getJSON("/api/meta"); }
-  catch (e) { return; }                      // keep defaults; banner stays
+  let res, m;
+  try {
+    res = await fetch("/api/meta");
+  } catch (e) {
+    // Network-level failure: fetch itself threw (e.g. TypeError from a
+    // browser extension blocking loopback requests, or the server stopped).
+    const msg = "Can't reach the kanban server — a browser extension may be"
+      + " blocking localhost requests, or the server stopped."
+      + " Open this page via http://127.0.0.1:<port> directly.";
+    document.getElementById("project-name").textContent = "Connection error";
+    toast(msg);
+    return;
+  }
+  if (!res.ok) {
+    let errMsg;
+    if (res.status === 403) {
+      let rejectedHost = "";
+      try {
+        const body = await res.json();
+        if (body && body.host) rejectedHost = " (rejected host: " + body.host + ")";
+      } catch (_) { /* ignore parse failure */ }
+      errMsg = "Server rejected the request (forbidden host" + rejectedHost + ")."
+        + " Open this page via http://127.0.0.1:<port> or http://localhost:<port>.";
+    } else {
+      let detail = "";
+      try { const body = await res.json(); if (body && body.error) detail = ": " + body.error; }
+      catch (_) { /* ignore */ }
+      errMsg = "Server error loading board metadata (HTTP " + res.status + detail + ").";
+    }
+    document.getElementById("project-name").textContent = "Load error";
+    toast(errMsg);
+    return;
+  }
+  try { m = await res.json(); } catch (e) {
+    document.getElementById("project-name").textContent = "Load error";
+    toast("Server returned unreadable metadata — check server logs.");
+    return;
+  }
   META = {
     project: m.project || "kanban",
     file: m.file || "",
@@ -1890,11 +1926,46 @@ function initAddForm() {
   });
 }
 
-/* ── Poll loop (silent on read failures) ───────────────────────────────────── */
+/* ── Poll loop ──────────────────────────────────────────────────────────────── */
 async function refresh() {
-  let board;
-  try { board = await getJSON("/api/board"); }
-  catch (e) { setLive(false); return; }       // poll path: fail quietly
+  let res, board;
+  try {
+    res = await fetch("/api/board");
+  } catch (e) {
+    // Network-level failure (fetch threw). Show one toast per consecutive run
+    // of failures so the retry loop doesn't spam.
+    if (!liveErrShown) {
+      liveErrShown = true;
+      toast("Can't reach the kanban server — a browser extension may be blocking"
+        + " localhost requests, or the server stopped.");
+    }
+    setLive(false);
+    return;
+  }
+  if (!res.ok) {
+    if (!liveErrShown) {
+      liveErrShown = true;
+      if (res.status === 403) {
+        let rejectedHost = "";
+        try {
+          const body = await res.json();
+          if (body && body.host) rejectedHost = " (rejected host: " + body.host + ")";
+        } catch (_) { /* ignore */ }
+        toast("Server rejected the request (forbidden host" + rejectedHost + ")."
+          + " Open this page via http://127.0.0.1:<port> or http://localhost:<port>.");
+      } else {
+        toast("Board refresh failed (HTTP " + res.status + "). Retrying…");
+      }
+    }
+    setLive(false);
+    return;
+  }
+  try { board = await res.json(); } catch (e) {
+    if (!liveErrShown) { liveErrShown = true; toast("Board response unreadable — check server logs."); }
+    setLive(false);
+    return;
+  }
+  liveErrShown = false;   // clear flag: connection is healthy again
   setLive(true);
   renderBoard(board);
 }
@@ -1904,7 +1975,7 @@ function setLive(ok) {
   dot.classList.toggle("stale", !ok);
   txt.textContent = ok
     ? "Local board · auto-refresh " + (POLL_MS / 1000) + "s · 127.0.0.1 only"
-    : "Reconnecting… (board server unreachable)";
+    : "Reconnecting… (board server unreachable — see error message above)";
 }
 
 /* ── Boot ───────────────────────────────────────────────────────────────── */
@@ -1935,7 +2006,7 @@ class Handler(BaseHTTPRequestHandler):
         # Host, which won't be in ALLOWED_HOSTS.
         host = (self.headers.get("Host", "") or "").rsplit(":", 1)[0]
         if host not in ALLOWED_HOSTS:
-            self._send(403, json.dumps({"error": "forbidden host"}))
+            self._send(403, json.dumps({"error": "forbidden host", "host": host}))
             return False
         return True
 
