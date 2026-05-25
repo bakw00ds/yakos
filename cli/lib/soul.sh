@@ -171,14 +171,12 @@ cmd_pending() {
 }
 
 cmd_approve() {
-    local edit_slug="$1"
     ct_log "soul approve: not yet implemented (M1 ships read/edit/history; approve/reject deferred to when librarian is dispatched)"
     ct_log "      proposed-edit format: see librarian agent + framework-internal-plan.md §3.4"
     exit 0
 }
 
 cmd_reject() {
-    local edit_slug="$1"
     ct_log "soul reject: not yet implemented (same status as 'soul approve' above)"
     exit 0
 }

@@ -134,38 +134,54 @@ yk_rt_codex_dispatch() {
 Task:
 $task"
 
-    if [ -n "${YAKOS_USAGE_OUT:-}" ]; then
-        # codex exec --json emits NDJSON events; the final 'response.completed'
-        # event carries usage in the response.usage field. Pipe to a tee, parse
-        # the final usage event into YAKOS_USAGE_OUT, and reconstruct the
-        # text-only output for stdout.
+    # Multi-turn (v0.31+): if YAKOS_CONVERSATION_ID is set, resume that
+    # codex session rather than starting fresh. codex exposes session
+    # resumption via 'codex resume <session_id>'.
+    local resume_args=()
+    if [ -n "${YAKOS_CONVERSATION_ID:-}" ]; then
+        resume_args=(resume "$YAKOS_CONVERSATION_ID")
+    else
+        resume_args=(exec)
+    fi
+
+    if [ -n "${YAKOS_USAGE_OUT:-}" ] || [ -n "${YAKOS_SESSION_OUT:-}" ]; then
+        # JSON mode — needed for usage telemetry AND for capturing the
+        # session_id so subsequent calls can resume.
         local raw_tmp
         raw_tmp="$(mktemp -t yakos-codex-raw.XXXXXX)"
 
-        codex exec --add-dir "$project" \
+        codex "${resume_args[@]}" \
+                   --add-dir "$project" \
                    --dangerously-bypass-approvals-and-sandbox \
                    --json \
                    "$framed" > "$raw_tmp" 2>/dev/null
         local rc=$?
 
-        # codex output items: assistant deltas, tool calls, final result.
-        # Extract assistant message texts.
         jq -r 'select(.type == "item.completed") | .item.text // empty' \
             "$raw_tmp" 2>/dev/null
 
-        # Final usage typically appears in a 'turn.completed' event.
-        jq -c 'select(.type == "turn.completed") | .usage |
-            {input_tokens: (.input_tokens // .prompt_tokens // 0),
-             output_tokens: (.output_tokens // .completion_tokens // 0),
-             cache_read: (.cache_read_input_tokens // 0),
-             total_tokens: (.total_tokens // 0)}' \
-            "$raw_tmp" 2>/dev/null | tail -1 > "$YAKOS_USAGE_OUT"
+        if [ -n "${YAKOS_USAGE_OUT:-}" ]; then
+            jq -c 'select(.type == "turn.completed") | .usage |
+                {input_tokens: (.input_tokens // .prompt_tokens // 0),
+                 output_tokens: (.output_tokens // .completion_tokens // 0),
+                 cache_read: (.cache_read_input_tokens // 0),
+                 total_tokens: (.total_tokens // 0)}' \
+                "$raw_tmp" 2>/dev/null | tail -1 > "$YAKOS_USAGE_OUT"
+        fi
+
+        if [ -n "${YAKOS_SESSION_OUT:-}" ]; then
+            # codex emits session_id in the initial 'session.started' or
+            # similar event. Try a few likely field names.
+            jq -r 'select(.session_id != null) | .session_id' \
+                "$raw_tmp" 2>/dev/null | head -1 > "$YAKOS_SESSION_OUT"
+        fi
 
         rm -f "$raw_tmp" 2>/dev/null
         return "$rc"
     fi
 
-    codex exec --add-dir "$project" \
+    codex "${resume_args[@]}" \
+               --add-dir "$project" \
                --dangerously-bypass-approvals-and-sandbox \
                --output-last-message - \
                "$framed"

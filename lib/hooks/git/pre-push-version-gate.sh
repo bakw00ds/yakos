@@ -151,12 +151,12 @@ is_public_surface() {
         lib/skills/*/SKILL.md) return 0 ;;
         lib/rules/*.md) return 0 ;;
         lib/playbooks/*.md) return 0 ;;
-        # Top-level Claude-Code hooks (default install surface)
-        lib/hooks/*.sh) return 0 ;;
-        # Per-domain validators (called by task-complete-dispatch)
-        lib/hooks/per-domain/*.sh) return 0 ;;
         # Hook contract libraries (consumed by hook authors)
         lib/hooks/lib/hook-input.sh|lib/hooks/lib/hook-output.sh) return 0 ;;
+        # Per-domain validators (called by task-complete-dispatch)
+        lib/hooks/per-domain/*.sh) return 0 ;;
+        # Top-level Claude-Code hooks (default install surface)
+        lib/hooks/*.sh) return 0 ;;
         # CLI subcommands + entrypoint
         cli/yakos) return 0 ;;
         cli/lib/install.sh|cli/lib/uninstall.sh|cli/lib/init.sh|cli/lib/doctor.sh) return 0 ;;
@@ -262,7 +262,7 @@ if [ "$n_major" -gt 0 ]; then
 elif [ "$n_minor" -gt 0 ]; then
     highest=MINOR_ADDITIVE; required=minor
 elif [ "$n_patch" -gt 0 ]; then
-    highest=PATCH; required=patch
+    highest=PATCH; required="patch"
 elif [ "$n_doc" -gt 0 ]; then
     highest=DOC_ONLY; required=none
 fi

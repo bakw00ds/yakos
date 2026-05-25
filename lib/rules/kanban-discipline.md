@@ -19,7 +19,9 @@ two audiences:
 1. **The lead** — visible scratchpad for tracking what's
    dispatched, what's pending, what's complete
 2. **The operator** — `yakos kanban` renders it readably; `yakos
-   kanban --html` produces a shareable snapshot
+   kanban --html` produces a shareable snapshot; `yakos kanban
+   serve` opens a live web UI for viewing and managing the board
+   (add / move / drag-drop) from a browser
 
 The board is filesystem-shaped (markdown) for the same reasons
 all yakOS scratchpad artifacts are: greppable, version-controlled,

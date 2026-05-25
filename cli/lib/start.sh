@@ -66,6 +66,12 @@ Inspection:
     --print-agents        Print the composed agent JSON; exit 0.
     --                    End of yakos flags; rest passed to runtime CLI.
 
+Kanban web UI:
+    On launch, the project's kanban board web UI starts in the
+    background (loopback, random high port) and its URL is printed.
+    Disable with YAKOS_KANBAN_AUTOSERVE=0. Manage with
+    'yakos kanban status' / 'yakos kanban stop'.
+
 Examples:
     yakos start                       # auto-detect, claude (default)
     yakos start myapp
@@ -228,7 +234,7 @@ yakos start — preflight
   runtime:        $RUNTIME ($CAPS)
   cli:            $( [ "$CLI_OK" = "1" ] && printf 'OK' || printf 'NOT FOUND (--dry-run only)' )
   auth:           $( [ "$AUTH_OK" = "1" ] && printf 'OK' || printf 'NOT CONFIGURED (run: yakos auth login %s)' "$RUNTIME" )
-  permission:     $PERM_MODE
+  permission:     $( [ "$PERM_MODE" = "bypass" ] && printf 'bypassPermissions' || printf 'default' )
   agents:         $AGENT_COUNT registered$( [ "$NO_AGENTS" = "1" ] && printf ' (--no-agents: suppressed)' || true )
   mode flags:     $( [ "$BARE" = "1" ] && printf 'bare ' || true )$( [ "$IDE" = "1" ] && printf 'ide ' || true )$( [ "$CONTINUE" = "1" ] && printf 'continue ' || true )$( [ -n "$RESUME" ] && printf 'resume=%s ' "$RESUME" || true )$( [ "$FORK" = "1" ] && printf 'fork ' || true )$( [ -n "$MODEL" ] && printf 'model=%s ' "$MODEL" || true )
 
@@ -321,18 +327,18 @@ if [ "$DRY_RUN" = "1" ]; then
             printf '  claude --add-dir %q --permission-mode %s' \
                 "$PROJECT_REPO" \
                 "$( [ "$SAFE" = "1" ] && printf 'default' || printf 'bypassPermissions' )"
-            [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf " --agents '<%d agents JSON>'" "$AGENT_COUNT"
-            [ -f "$PROJECT_REPO/.mcp.json" ] && printf ' --mcp-config %q' "$PROJECT_REPO/.mcp.json"
+            { [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf " --agents '<%d agents JSON>'" "$AGENT_COUNT"; } || true
+            { [ -f "$PROJECT_REPO/.mcp.json" ] && printf ' --mcp-config %q' "$PROJECT_REPO/.mcp.json"; } || true
             ;;
         codex)
             printf '  codex --add-dir %q' "$PROJECT_REPO"
-            [ "$SAFE" != "1" ] && printf ' --dangerously-bypass-approvals-and-sandbox'
-            [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf "  # + %d agents staged at %s/.codex/agents/yakos-*.toml" "$AGENT_COUNT" "$PROJECT_REPO"
+            { [ "$SAFE" != "1" ] && printf ' --dangerously-bypass-approvals-and-sandbox'; } || true
+            { [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf "  # + %d agents staged at %s/.codex/agents/yakos-*.toml" "$AGENT_COUNT" "$PROJECT_REPO"; } || true
             ;;
         gemini)
             printf '  gemini --include-directories %q' "$PROJECT_REPO"
-            [ "$SAFE" != "1" ] && printf ' --approval-mode=yolo'
-            [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf "  # + %d agents staged at %s/.gemini/agents/yakos-*.md" "$AGENT_COUNT" "$PROJECT_REPO"
+            { [ "$SAFE" != "1" ] && printf ' --approval-mode=yolo'; } || true
+            { [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf "  # + %d agents staged at %s/.gemini/agents/yakos-*.md" "$AGENT_COUNT" "$PROJECT_REPO"; } || true
             ;;
     esac
     if [ "${#EXTRA_FLAGS[@]}" -gt 0 ]; then
@@ -394,6 +400,48 @@ probe_snapshot="$(jq -cn \
     --arg caps "$CAPS" \
     '{ts:$t, runtime:$runtime, version:$version, capabilities:$caps}')"
 printf '%s\n' "$probe_snapshot" >> "$PROBE_DIR/${RUNTIME}.ndjson" 2>/dev/null || true
+
+# ---- kanban web UI auto-start ----------------------------------------------
+# Launch the project's kanban board web UI in the background and report its
+# URL so the operator can view/manage WIP in a browser alongside the session.
+# Loopback-only, random high port. Opt out with YAKOS_KANBAN_AUTOSERVE=0;
+# skipped silently when python3 is unavailable. Reuses an already-running
+# server for this project rather than starting a second one.
+if [ "${YAKOS_KANBAN_AUTOSERVE:-1}" != "0" ] && command -v python3 >/dev/null 2>&1; then
+    (
+        export YAKOS_PROJECT_NAME="$NAME"
+        . "$YAKOS_LIB/paths.sh" 2>/dev/null || exit 0
+        kdir="$(yakos_current_dir)"
+        state="$kdir/.kanban-serve.json"
+        log="$kdir/.kanban-serve.log"
+        mkdir -p "$kdir" 2>/dev/null || true
+
+        read_url() { sed -n 's/.*"url":"\([^"]*\)".*/\1/p' "$state" 2>/dev/null | head -1; }
+        alive() {
+            local p
+            p="$(sed -n 's/.*"pid":[[:space:]]*\([0-9]*\).*/\1/p' "$state" 2>/dev/null | head -1)"
+            [ -n "$p" ] && kill -0 "$p" 2>/dev/null
+        }
+
+        if [ -f "$state" ] && alive; then
+            printf '  kanban web UI:  %s (already running)\n' "$(read_url)"
+            exit 0
+        fi
+
+        nohup bash "$YAKOS_LIB/kanban.sh" serve --no-open >"$log" 2>&1 &
+        url=""
+        i=0
+        while [ "$i" -lt 15 ]; do
+            if [ -f "$state" ]; then url="$(read_url)"; [ -n "$url" ] && break; fi
+            i=$((i + 1)); sleep 0.2
+        done
+        if [ -n "$url" ]; then
+            printf '  kanban web UI:  %s   (stop: yakos kanban stop)\n' "$url"
+        else
+            printf '  kanban web UI:  failed to start — see %s\n' "$log"
+        fi
+    )
+fi
 
 # ---- exec runtime ----------------------------------------------------------
 

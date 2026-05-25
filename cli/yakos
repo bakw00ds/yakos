@@ -36,6 +36,9 @@ Usage:
     yakos --help    | -h
 
 Install / lifecycle:
+    quickstart    One-command path: install (if needed) → init (if cwd
+                  is a git repo) → start. Idempotent. (v0.30+)
+                  Args: [--runtime <id>] [--multi-dev] [--safe] [--dry-run]
     install       Install YakOS into ~/.claude (per-file symlinks +
                   safe settings.json merge)
     uninstall     Remove YakOS-owned symlinks. Auto-memory at
@@ -93,8 +96,17 @@ Project bootstrap / launch / inspection:
     checkpoint    Session-state snapshots for rewind (v0.15+).
                   Args: now | list | resume <id> | clean [--age <days>]
     kanban        Manage 3-column markdown WIP board (v0.16+).
-                  Args: (none for render) | --html [<out>] | add "<title>"
-                        | move <id> <col> | done <id>
+                  Args: (none for render) | --html [<out>]
+                        | serve [--port N] [--host H] [--no-open]
+                        | status | stop
+                        | add "<title>" [--category <c>] [--notes "<t>"]
+                        | notes <id> "<text>" | move <id> <col> | done <id>
+                  Cards carry a category (bug/feature/chore/question/other,
+                  extensible) and a status-notes field. serve launches a
+                  loopback web UI (random high port) for viewing + managing
+                  the board — light/dark theme, category filter, inline notes,
+                  drag-and-drop. Auto-starts on 'yakos start'
+                  (disable: YAKOS_KANBAN_AUTOSERVE=0).
     env           Dev/test/prod environment management via .yakos.yml (v0.17+).
                   Args: status | list | validate | promote <from> <to>
     standards     Cross-project standards opt-ins (v0.22+).
@@ -103,6 +115,16 @@ Project bootstrap / launch / inspection:
                   Args: status [<project>] | log [--since <iso>] [<project>]
                   M2 adds: claim / release / deadlock. M3 adds: propose-mode /
                   respond-mode. See docs/co-pilot-mode.md.
+    mcp           Wire the yakOS MCP server into a project's .mcp.json so
+                  Claude Code sees cross-runtime dispatch as native tools.
+                  (v0.31+). Args: install | uninstall | status | probe
+                  See docs/mcp-integration.md.
+    completion    Emit / install shell tab-completion for the yakos CLI
+                  (v0.32+). Args: bash | zsh | install (auto-detects shell)
+    supervise     Manage the live shadow-agent supervisor that watches the
+                  lead for drift / accuracy / intent (v0.33+).
+                  Args: enable | disable | status | tail [--watch] | clear
+                  See docs/supervisor-mode.md.
     validate      Schema + reference validation (framework or project)
                   Args: [<project-path>] [--all]
     archive       Roll work/current/ into work/archive/<tag>/
@@ -208,7 +230,7 @@ case "$cmd" in
     -v | --version)
         echo "yakos $YAKOS_VERSION"
         ;;
-    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach | soul | retro | skill | compact | checkpoint | kanban | env | standards | peer)
+    install | uninstall | update | init | doctor | validate | archive | status | team | start | auth | dispatch | memory | agent | cost | session | migrate | plugin | teach | soul | retro | skill | compact | checkpoint | kanban | env | standards | peer | quickstart | mcp | completion | supervise)
         script="$YAKOS_LIB/${cmd}.sh"
         if [ ! -f "$script" ]; then
             ct_die "internal error: $script not found"

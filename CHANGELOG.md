@@ -7,6 +7,649 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0.0] — 2026-05-24
+
+### Fixed — supervisor's `balanced` model no longer dropped on claude
+
+`agents-compose.sh` only accepted the concrete claude aliases
+(`haiku`/`sonnet`/`opus`) when composing `--agents` JSON, so the
+supervisor agent's `model: balanced` triggered a launch-time
+`WARN unknown model 'balanced'` and the agent was registered with
+no model pin. The composer now resolves the framework's cross-runtime
+semantic aliases — `cheap`→`haiku`, `balanced`→`sonnet`,
+`best`/`reasoning`→`opus` — so agent frontmatter can stay
+runtime-agnostic (as documented in `docs/supervisor-mode.md` and the
+`runtime-pick` skill). Truly-unknown values still warn and are omitted.
+
+### Added — kanban web UI (`yakos kanban serve`) + auto-start on launch
+
+The kanban board can now be viewed *and managed* from a browser, not
+just rendered as a static snapshot.
+
+- **`yakos kanban serve [--port N] [--host H] [--no-open]`** starts a
+  small loopback-only HTTP server (python3, consistent with the
+  project's existing `validate.sh` / `mcp.sh` python usage — yakOS is
+  a bash framework and ships no compiled toolchain). It serves a
+  project banner page with the three columns live, drag-and-drop
+  between columns, per-card move/done buttons, an add box, and column
+  counts. Mutations shell back into `yakos kanban add` / `move`, so the
+  CLI, the lifecycle hooks, and the web UI all edit the same
+  `kanban.md` — no second source of truth. Auto-refreshes every 3s.
+- **Random high port, loopback default.** With no `--port`, the OS
+  assigns a free ephemeral port and the server binds `127.0.0.1` only;
+  the board is local session state, not exposed on the network.
+- **Auto-starts on `yakos start`** and prints the URL alongside the
+  launch banner. Reuses an already-running server for the project
+  rather than double-binding. Opt out with `YAKOS_KANBAN_AUTOSERVE=0`.
+- **`yakos kanban status` / `yakos kanban stop`** report and tear down
+  the running server (tracked via a `.kanban-serve.json` state file in
+  the session scratchpad).
+- **Light + dark theme.** Follows the OS `prefers-color-scheme` by
+  default with a persistent toggle. Category-aware palette with
+  WCAG-AA-checked contrast.
+- **Hardening** (from a security + code review pass): the state file is
+  written by the server only *after* it binds (the launcher polls it, so
+  a reported URL is always live); `Host`-header allowlist (DNS-rebinding
+  defense); a warning when `--host` is non-loopback; request-body size
+  cap; stale-pid guard before `stop` kills anything.
+
+### Added — kanban categories + status notes
+
+Task cards now carry a **category** (`bug` / `feature` / `chore` /
+`question` / `other`, with arbitrary user values accepted) and a
+freeform single-line **notes** field for status.
+
+- `yakos kanban add "<title>" [--category <c>] [--notes "<t>"]`
+  (flags accepted before or after the title) and a new
+  `yakos kanban notes <id> "<text>"`. The task-block format gains
+  `category:` and `notes:` lines; `move` preserves the full block.
+- Field edits go through `awk` reading values from the environment
+  (`ENVIRON[]`), so titles/notes containing `/`, `&`, `|`, or literal
+  backslash sequences can't corrupt the markdown or inject lines.
+- Web UI: a **category filter bar** (All + one chip per category) that
+  shows/hides cards across all columns without breaking drag-and-drop,
+  colored category chips + card accents, and an **inline notes editor**
+  per card (`POST /api/notes`). `/api/meta` now advertises the category
+  list; `/api/add` takes a `category`.
+
+### Changed — lead delegates to the roster from the start
+
+`rule:lead-dispatch-discipline` gains an explicit "item 0 — delegate to
+the roster first, always, from the start" plus a late/solo-work
+anti-pattern and a conflict-free-parallel guardrail (distinct file
+scopes or isolated worktrees; converging outputs become artifacts the
+lead integrates — see `rule:git-hygiene`). `lead-template.md` updated to
+match. The `gather-feedback` skill now populates the board with
+categorized cards (provenance + status in notes) and a greppable
+`[src:<source>:<id>]` dedup token so re-runs don't duplicate.
+
+## [0.35.0.1] — 2026-05-22
+
+### Changed — README refreshed for v0.33 / v0.34 / v0.35 additions
+
+Documentation-only patch. README's content was stale from v0.32;
+this brings it current.
+
+Updates:
+- Version badge: 0.32.0.0 → 0.35.0.0
+- Tagline counts: 34→35 agents, 53→57 skills, 8→9 playbooks,
+  12→17 hooks, 28→32 subcommands
+- Architecture diagram: refreshed component examples
+- TL;DR Common scenarios table: added `peer handoff`, `supervise
+  enable`, `doctor --production` rows
+- **NEW section: "Live shadow-agent supervisor"** — covers
+  enable/status/tail/set commands, three bypass escalation paths,
+  defense-in-depth context (output-injection-scan, budget-guard)
+- Common commands section: added `supervise *`, `peer handoff`,
+  `checkpoint now`, `doctor --production`
+- Status section: bumped to v0.35.0.0; "Recent landings" extended
+  with v0.33 / v0.34 / v0.35 entries
+- Documentation map: added `docs/supervisor-mode.md` and
+  `CONTRIBUTING.md`
+- Development section: refreshed test-runner checklist (now lists
+  all 5 e2e suites that run in CI); points at CONTRIBUTING.md
+
+## [0.35.0.0] — 2026-05-22
+
+### Added — CI/lead-template fixes + 3 skills + context-inject hook + community files
+
+Closes the gaps identified in the post-v0.34 review session.
+
+**Real bugs fixed:**
+
+- **CI now runs the new e2e tests.** `.github/workflows/ci.yml`
+  gains two new jobs: `multi-dev-e2e` (runs
+  `tests/run-multi-dev-e2e.sh`, 10/10) and `supervisor-e2e` (runs
+  `tests/run-supervisor-e2e.sh`, 11/11). Previously these existed
+  but were only invoked manually — any commit could have broken
+  Plan 1 or the supervisor without CI catching it.
+- **Lead template bullet 7 updated** to reference v0.33 supervisor
+  + v0.34 output-injection-scan: "If a supervisor `CRITICAL` or
+  `output-injection-scan WARN` surfaces, READ the underlying
+  evidence (findings ndjson / tool output) before reacting — do
+  not blanket-bypass." Trimmed Personality section by one line
+  to stay within the 80-140 line budget.
+
+**New skills (3):**
+
+- **`lib/skills/evidence-based-debugging/SKILL.md`** (sonnet-tier)
+  — constrains the agent to cite runtime evidence (stack traces,
+  log lines, variable snapshots, timestamps) before proposing fixes.
+  Anti-pattern caught: "patch and pray." Includes a required
+  diagnosis template the specialist must produce before the lead
+  approves the fix. Maps to
+  [Syncause/debug-skill](https://github.com/Syncause/debug-skill)
+  from awesome-harness-engineering.
+- **`lib/skills/hook-bypass-review/SKILL.md`** (haiku-tier) —
+  audit skill invoked before `yakos archive` (or weekly). Reads
+  `work/current/hook-bypass.md`; flags EXPIRED / STALE /
+  pattern-flagged entries (same Scope bypassed >2x in 14 days
+  suggests the underlying hook needs tuning rather than the
+  bypass being legitimate).
+- **`lib/skills/peer-handoff/SKILL.md`** (sonnet-tier) —
+  multi-dev coordination skill for the "I'm done, your turn"
+  pattern. Documents the protocol: sender emits structured
+  `peer_handoff` event + releases claims + updates decisions.md;
+  receiver runs `peer-sync` + acks/rejects via
+  `peer_handoff_response`.
+
+**New CLI:**
+
+- **`yakos peer handoff`** subcommand backs the peer-handoff skill.
+  Two modes: send (`--to <user@host> --completed-scope <s>
+  --notes <s> --next-action <s>`) emits a `peer_handoff` event;
+  ack/reject (`--ack <handoff-id>` or `--reject <handoff-id>
+  --reason <s>`) closes the loop. Smoke-tested in a tmp project.
+
+**New hook:**
+
+- **`lib/hooks/context-inject.sh`** (UserPromptSubmit) — surfaces
+  useful session context to the lead before each prompt: tail of
+  `decisions.md`, budget remaining (cap vs current), peer-status
+  one-liner (multi-dev), most recent supervisor CRITICAL. All four
+  sections individually toggleable in `.yakos.yml`. **Disabled by
+  default** — operators opt in via `context_inject.enabled: true`
+  to avoid surprise context bloat. Per LangChain's "middleware
+  lets you customize your agent harness" pattern from awesome-
+  harness-engineering.
+
+**Community files:**
+
+- **`CONTRIBUTING.md`** — development setup, branch + commit
+  conventions, validate-before-push checklist, PR description
+  template, hook fixture pattern, what kinds of changes are
+  welcome / need discussion first, security disclosure pointer.
+- **`.github/ISSUE_TEMPLATE/bug_report.md`** — structured bug
+  report with reproduction steps + environment + doctor output.
+- **`.github/ISSUE_TEMPLATE/feature_request.md`** — structured
+  proposal with use case + why existing features don't cover it
+  + criticality rating + awesome-harness pattern link.
+- **`.github/PULL_REQUEST_TEMPLATE.md`** — Summary + Test plan
+  (with explicit test runner checkboxes) + Version bump +
+  Risks/limitations + affected hooks/agents/skills.
+
+**Settings template:**
+
+- `context-inject.sh` wired into UserPromptSubmit chain alongside
+  `cycle-counter.sh` and `context-threshold.sh`.
+- `.yakos.yml` template gains commented `context_inject:` block
+  with all four section toggles.
+
+**Validated this session:**
+
+- `yakos validate --strict`: 0 errors / 0 warnings
+- Multi-dev e2e regression: still **10/10**
+- Supervisor e2e regression: still **11/11**
+- `yakos peer handoff` smoke test in tmp project emits correct
+  event with handoff_id + structured fields
+- Lead template line count: 139 / budget 140
+
+**Skipped per operator request:**
+
+- CODE_OF_CONDUCT.md (deferred)
+
+## [0.34.0.0] — 2026-05-22
+
+### Added — Harness-engineering gap closes (awesome-harness-engineering review)
+
+Five bundled additions filling gaps identified by a review of
+[awesome-harness-engineering](https://github.com/ai-boost/awesome-harness-engineering)
+against yakOS's current state. The patterns are well-established;
+this release wires them into the framework.
+
+**1. `supervisor-toggle` skill** (answers question raised in this session)
+
+- **NEW `lib/skills/supervisor-toggle/SKILL.md`** — Haiku-tier
+  skill that documents when/why/how to flip the supervisor's
+  `block_on_critical` setting from a running session, plus
+  rationale for switching to passive (false-positive frequency)
+  or active (entering high-stakes phase).
+- **NEW `yakos supervise set <key> <value>`** subcommand backs the
+  skill — safely edits `.yakos.yml` via awk (preserves other keys);
+  validates booleans + positive-int values per key; idempotent.
+
+**2. Prompt-injection scanner** (closes the MCP cross-runtime attack surface)
+
+- **NEW `lib/hooks/output-injection-scan.sh`** — PostToolUse hook
+  on `*` that scans inbound tool output (Bash / Read / WebFetch /
+  any `mcp__*`) for known injection patterns drawn from
+  [tldrsec/prompt-injection-defenses](https://github.com/tldrsec/prompt-injection-defenses)
+  and OWASP LLM01:
+  - ignore-previous-instructions family
+  - disregard-system-prompt
+  - role-override attempts (`you are now ...`)
+  - prompt-impersonation (`^SYSTEM:` at line start)
+  - model-format token injection (`<|im_start|>` etc.)
+  - private-key markers + API-key shapes (sk-ant-, AKIA…, ghp_, etc.)
+  - long base64 blobs (400+ chars)
+  - zero-width / direction-override unicode (steganographic)
+- WARN-only — never blocks. Surfaces via stderr; lead decides.
+- Disable via `YAKOS_INJECTION_SCAN_DISABLE=1` env or
+  `.yakos.yml` `injection_scan.enabled: false`.
+- **NEW `lib/playbooks/09-prompt-injection-defense.md`** — operator
+  guide covering threat model (esp. MCP cross-runtime relays added
+  in v0.31), framework defenses, what the lead does on WARN, when
+  to refuse to proceed.
+
+**3. Loop + budget guardrails**
+
+- **NEW `lib/hooks/budget-guard.sh`** — PreToolUse hook on `*` that
+  enforces three per-session caps (any → ho_block):
+  - `max_tool_calls` — total tool-call count this session
+  - `max_wall_seconds` — wall-clock since first tool call
+  - `max_repeat_same_tool` — same tool repeated N times in a row
+    (loop detection)
+- Counters persist at `work/current/.budget-state.json`.
+- Per-cap bypass via hook-bypass.md `Scope: cap=<key>`.
+- Emergency disable: `YAKOS_BUDGET_DISABLE=1`.
+- `.yakos.yml` template gains commented-out `budget:` block.
+- Closes the production-cost-runaway gap raised by
+  [InfoWorld's "FinOps for Agents"](https://www.infoworld.com/article/4138748/finops-for-agents-loop-limits-tool-call-caps-and-the-new-unit-economics-of-agentic-saas.html).
+
+**4. `AGENTS.md` emission**
+
+- **NEW `lib/settings/agents.md.template`** — cross-tool agent
+  instructions file. `yakos init` now writes `<project>/AGENTS.md`
+  alongside `CLAUDE.md` (idempotent; only writes if absent).
+- `AGENTS.md` is the emerging cross-tool standard read by codex,
+  cursor, openhands, aider, sweep, and others. Same purpose as
+  `CLAUDE.md` but vendor-neutral.
+- Template explains the relationship between AGENTS.md, CLAUDE.md,
+  and `.yakos.yml`, and includes a "delete this section once done"
+  scaffold for operator customization.
+
+**5. `HARNESS_CHECKLIST.md` + `yakos doctor --production`**
+
+- **NEW `lib/settings/harness-checklist.template.md`** — operator-
+  facing pre-production review covering security posture, hook
+  discipline, agent discipline, budget + supervisor, tests, plus
+  non-automated governance items (permissions, MCP audit, cost
+  ceiling, on-call, rollback playbook, multi-dev sign-off).
+- **NEW `yakos doctor --production <project-path>`** — programmatic
+  execution of the automatable items. Reports PASS / WARN / FAIL
+  per item. Surfaces:
+  - missing SECURITY.md / path-allowlist.json / required hooks
+  - active hook-bypass entries (production state should be empty)
+  - pre-push version gate installation state
+  - agent frontmatter with missing `tools:` or empty `tools: []`
+  - .yakos.yml missing budget or supervisor blocks
+  - supervisor passive-mode warning (for production)
+- Inspired by [AI Harness Scorecard](https://github.com/anthropics/ai-harness-scorecard)
+  and the awesome-harness `templates/HARNESS_CHECKLIST.md`.
+
+**Settings template:**
+
+- PreToolUse chain extended: `*` matcher with `budget-guard.sh` first
+  (cheapest gate; affects all tools)
+- PostToolUse `*` matcher extended with `output-injection-scan.sh`
+  alongside existing `supervisor-stream.sh`
+
+**Validated this session:**
+
+- All hooks bash-syntax-check clean
+- `yakos validate --strict`: 0 errors / 0 warnings
+- Multi-dev e2e regression: still 10/10
+- Supervisor e2e regression: still 11/11
+- `yakos supervise set block_on_critical false/true` round-trip
+  verified in tmp project; idempotent + preserves other yaml keys
+
+**Gap analysis recorded:** see also v0.34.0.0 commit message for the
+broader awesome-harness gap analysis (top 10 patterns reviewed; this
+release ships 5). Remaining items deferred per their leverage / cost:
+
+- Behavioral fingerprinting for regression testing (~3 hr; current
+  e2e + multi-dev coord + supervisor cover most of the value)
+- State-machine guardrails per workflow phase (~2 hr; per-agent
+  `tools:` covers most of the surface)
+- PLAN.md/IMPLEMENT.md long-horizon artifact templates (~30 min;
+  yakOS already has semantically equivalent `work/current/plan.md`,
+  `decisions.md`, `findings.md` — adopting OpenAI's exact naming
+  would create migration churn)
+- Cost-per-Accepted-Outcome (CAPO) metric (~2 hr; instrumentation
+  heavier than the value at this scale)
+- Excessive-Agency audit skill (OWASP LLM06) (~30 min; covered
+  implicitly by `yakos doctor --production`)
+
+## [0.33.0.0] — 2026-05-22
+
+### Added — Live shadow-agent supervisor (drift / accuracy / intent monitoring)
+
+A second agent now runs in parallel to the lead, watches recent tool
+calls, and judges drift on a four-axis rubric (intent alignment /
+factual accuracy / hard-control respect / scope risk). On CRITICAL
+findings in active mode (default), the lead's next tool call is
+blocked with actionable bypass options.
+
+This is the "live shadow-agent" pattern, distinct from yakOS's
+existing after-the-fact `librarian` agent (which curates skill
+candidates from completed sessions). Both reference the
+anti-Hermes-spam discipline; the supervisor inherits the
+"PASS-when-uncertain" posture so false-positive blocks stay low.
+
+Disabled by default. Opt in per-project via `yakos supervise enable`
+or `.yakos.yml` `supervisor.enabled: true`.
+
+**New agent:**
+
+- `lib/agents/supervisor.md` — Sonnet-tier judge (`model: balanced`,
+  resolves to whatever sonnet is current per runtime). Tools-restricted
+  to Read + Grep — supervisor never edits code. Detection only.
+
+**New hooks:**
+
+- `lib/hooks/supervisor-stream.sh` — PostToolUse. Appends every tool
+  call to a rolling 50-entry buffer at
+  `work/current/supervisor-buffer.ndjson`. Increments
+  `.supervisor-counter`. Every Nth call (default 10), forks a
+  background supervisor dispatch via `nohup`/`disown` — never blocks
+  the lead. Respects `YAKOS_SUPERVISOR_DISABLE=1` env + `.yakos.yml`
+  `supervisor.enabled: false`.
+- `lib/hooks/supervisor-gate.sh` — PreToolUse. Reads most-recent
+  finding from `supervisor-findings.ndjson`. PASS → allow; WARN →
+  stderr-surface once per finding + allow; CRITICAL → block (rc=2)
+  with actionable message, unless: (a) `block_on_critical: false`
+  (passive mode); (b) `hook-bypass.md` has an entry with
+  `Scope: finding=<ts>`; (c) `YAKOS_SUPERVISOR_DISABLE=1` env set.
+
+**New CLI:**
+
+- **`yakos supervise`** — `enable | disable | status | tail [--watch] |
+  clear`. enable/disable safely toggle `.yakos.yml`
+  `supervisor.enabled` (uses awk to preserve other keys; appends a
+  fresh block if absent). status shows config + buffer + counter +
+  recent findings. tail follows new findings. clear wipes runtime
+  state (buffer/findings/counter) but preserves config.
+
+**Wired into settings.template.json:**
+
+- supervisor-gate.sh added to PreToolUse Edit|Write|MultiEdit chain
+  between path-log and peer-claim
+- supervisor-stream.sh added to a new PostToolUse matcher: "*" (all
+  tools), so the buffer captures the lead's full activity, not just
+  file edits
+
+**Config schema (`.yakos.yml`):**
+
+```yaml
+supervisor:
+  enabled: true               # opt in
+  runtime: claude             # which runtime dispatches the supervisor
+  agent: supervisor           # framework agent id; rarely overridden
+  score_every_n_calls: 10     # cost vs latency tradeoff
+  block_on_critical: true     # active mode; false = surface-only
+```
+
+Template at `lib/settings/yakos.yml.template` updated with a
+commented-out supervisor block so operators see the schema.
+
+**Tab completion + dispatcher wiring:**
+
+- `yakos supervise <TAB>` completes to `enable / disable / status /
+  tail / clear` in both bash + zsh
+- `cli/yakos` dispatcher accepts `supervise` as a top-level command
+- Help text updated
+
+**Documentation:**
+
+- New `docs/supervisor-mode.md` — full operator guide (~250 lines):
+  why-this-exists, how-it-works flow diagram, the four-axis rubric,
+  setup, configuration, common commands, what happens on CRITICAL,
+  cost estimates, limitations, troubleshooting.
+
+**End-to-end test:**
+
+- **NEW `tests/run-supervisor-e2e.sh`** — 10 scenarios covering
+  stream behavior (3) + fork triggering (1) + gate behavior on
+  PASS/WARN/CRITICAL (3) + env/config/bypass override paths (3).
+  **11/11 passing** (the +1 comes from sub-checks; see test output).
+  Uses a fake-yakos CLI to verify the fork without actually
+  invoking a real LLM dispatch (no API cost in CI).
+
+**Verified this session:**
+
+- All 11 supervisor e2e scenarios pass
+- Multi-dev e2e regression: still 10/10
+- `yakos validate --strict`: 0 errors / 0 warnings
+- Hooks honor env override (`YAKOS_SUPERVISOR_DISABLE=1`) at both
+  stream and gate
+- Hooks honor `.yakos.yml` `supervisor.enabled: false`
+- Gate honors `block_on_critical: false` (passive mode)
+- Gate honors `hook-bypass.md` `Scope: finding=<ts>`
+
+**Note on the Hermes comparison:**
+
+Hermes Agent (Nous Research, MIT-licensed) is a single
+self-improving agent, NOT a supervisor pattern. The "anti-Hermes-spam
+discipline" yakOS uses (originally for the librarian agent, now
+inherited by the supervisor) refers to Hermes's known failure mode
+of over-eager autonomous skill creation. The supervisor pattern
+itself is a yakOS-specific addition.
+
+## [0.32.0.0] — 2026-05-22
+
+### Added — Tab completion + README refresh
+
+**Shell tab completion (bash + zsh):**
+
+- `cli/completions/yakos.bash` — bash completion script. Covers:
+  top-level subcommands; nested subcommands for peer / mcp / auth /
+  memory / standards / skill / soul / retro / compact / checkpoint /
+  kanban / env / hooks / agent / completion / version-bump; dynamic
+  **project name completion** from `~/agent-control/*/`; runtime
+  name completion for `--runtime` and `auth login/logout/status/
+  set-default <runtime>`.
+- `cli/completions/yakos.zsh` — zsh completion script (uses
+  `_arguments` + `_describe` for native zsh ergonomics).
+- **NEW `yakos completion`** subcommand:
+  - `yakos completion bash` — emit the bash script to stdout
+  - `yakos completion zsh` — emit the zsh script to stdout
+  - `yakos completion install` — auto-detect shell from `$SHELL`,
+    write to `~/.local/share/bash-completion/completions/yakos` or
+    `~/.zsh/completions/_yakos`, print the source-line for the
+    operator's shell rc. Overridable via `YAKOS_COMPLETION_SHELL`,
+    `BASH_COMPLETION_USER_DIR`, `YAKOS_ZSH_COMPDIR`.
+
+**README refresh:**
+
+- TL;DR rewritten to lead with `yakos quickstart` (one command vs
+  the previous four-command flow)
+- New **Common scenarios** table covering the workflows operators
+  actually want: first-time install, multi-dev setup, cross-runtime
+  dispatch, MCP integration, tab completion, update everything
+- New section: **Cross-runtime dispatch from a Claude session (MCP)**
+  documenting the v0.31 MCP server tools (dispatch_* / continue_*)
+- New section: **Tab completion** with install instructions
+- **Common commands** section expanded — now covers quickstart, auth
+  login --all, peer subcommands, mcp install, completion install,
+  update --all (subcommand count updated to 28)
+- Status section bumped to v0.32 with a "Recent landings since
+  v0.29" callout summarizing what's shipped since the repo went
+  public
+- Documentation map adds `docs/mcp-integration.md` and `SECURITY.md`
+- Version badge: 0.29.0.0 → 0.32.0.0
+
+**Verified this session:**
+
+- bash completion: top-level + nested + dynamic project names all
+  return correct suggestions in a sourced bash shell
+- zsh completion: `zsh -n` syntax-checks clean
+- `yakos completion install` to tmp dirs (both bash and zsh modes)
+  writes files at the right paths, prints correct source-lines
+
+## [0.31.0.0] — 2026-05-22
+
+### Added — MCP server for cross-runtime dispatch + auth login --all + multi-turn resume
+
+A Claude Code session can now call codex / agy / SDK agents as
+**native MCP tool calls** rather than shelling out via Bash. Multi-
+turn conversations are supported for runtimes whose CLIs expose
+session resume (codex, agy, claude, claude-sdk; antigravity-sdk
+deferred — SDK lacks cross-process resume).
+
+**MCP server (`cli/lib/mcp/yakos-mcp-server.py`):**
+
+- 9 tools exposed: `dispatch_codex / _agy / _claude_sdk /
+  _antigravity_sdk / _claude` (one-shot) +
+  `continue_codex / _agy / _claude_sdk / _claude` (multi-turn).
+- Each `dispatch_*` returns response text + yakOS `conversation_id` +
+  telemetry (duration_ms + usage dict).
+- Each `continue_*` takes (conversation_id, task), looks up the
+  runtime-native resume id, dispatches with `YAKOS_CONVERSATION_ID`
+  set, returns the next turn's response.
+- State persisted at `~/.yakos-state/mcp-conversations.json`.
+- Helpful error if the `mcp` Python package isn't installed (`pip
+  install mcp`).
+
+**Runtime adapter changes (multi-turn substrate):**
+
+- New env-var convention: `YAKOS_CONVERSATION_ID` (input — resume
+  this native session) + `YAKOS_SESSION_OUT` (output — write the
+  native session id here for future resume). Adapters updated:
+  - `cli/lib/runtimes/codex.sh` — uses `codex resume <session_id>`;
+    captures session_id from JSON stream
+  - `cli/lib/runtimes/agy.sh` — uses `agy --conversation <uuid>`;
+    captures the latest .pb conversation file as the session id
+  - `cli/lib/runtimes/claude.sh` — uses `claude --resume <id>`;
+    captures session_id from stream-json events
+  - `cli/lib/runtimes/claude-sdk-dispatch.py` — sets
+    `ClaudeAgentOptions.resume=<id>` when YAKOS_CONVERSATION_ID is
+    set; falls back to fresh dispatch if the SDK version doesn't
+    support the kwarg (with stderr warning)
+  - `cli/lib/runtimes/antigravity-sdk-dispatch.py` — intentionally
+    unchanged; SDK's Conversation API requires same-process state
+    that yakOS dispatch doesn't preserve
+
+**New CLI surface (`yakos mcp`):**
+
+- `install [--project <path>]` — writes/merges `.mcp.json` entry
+  with absolute paths to the server script + YAKOS_ROOT env. Default
+  project: cwd. Creates the file if absent; preserves other servers
+  if present.
+- `uninstall [--project <path>]` — removes the yakos-dispatch entry
+  (backup created first).
+- `status [--project <path>]` — shows server script presence,
+  .mcp.json entry state, mcp python package importability.
+- `probe` — verifies `pip install mcp` was run.
+
+**`yakos auth login --all`** — walks every installed runtime and
+runs its login flow sequentially. Skips uninstalled CLIs; skips SDK
+adapters (they share creds with the bundled CLI). Continues past
+per-runtime failures with a clear summary. Quick-win for first-time
+operator setup.
+
+**Documentation:**
+
+- New `docs/mcp-integration.md` — operator guide: prerequisites,
+  install (per-project + global), tool reference, usage examples,
+  conversation state, limitations, troubleshooting.
+
+**Validated this session:**
+
+- All adapters bash-syntax-check + python-compile clean
+- `yakos mcp install/status/uninstall` smoke-tested in tmp project;
+  jq merge preserves other servers correctly; backups land at
+  expected path
+- `yakos auth login --all` shows 3 OK / 3 SKIP on this machine
+  (agy/claude/codex authed; SDK siblings + gemini deprecated skip)
+- MCP server import-fails with helpful message when `mcp` package
+  absent (verified on this host)
+
+**Untested in live conditions (deferred to operator):**
+
+- Actual MCP roundtrip from a Claude Code session against the new
+  tools. Verifiable once the operator runs `pip install mcp` AND
+  `yakos mcp install` AND restarts a session in the project. The
+  protocol surface is well-defined; the upstream `mcp` Python SDK
+  is stable.
+- claude-sdk's `resume` kwarg — set per the SDK's documented
+  `ClaudeAgentOptions` field. If the installed SDK version doesn't
+  accept it, the adapter falls back to fresh dispatch with a stderr
+  warning rather than erroring.
+
+## [0.30.0.0] — 2026-05-22
+
+### Added — UX + verification follow-ups (4 high-leverage + 4 nits)
+
+Closes the eight follow-ups identified during the post-public-launch
+review:
+
+**High-leverage UX:**
+
+- **NEW `cli/lib/quickstart.sh`** — single-command path from "fresh
+  clone" to "session started against the cwd". Detects three states
+  (yakOS not installed / cwd is unbootstrapped git repo / project
+  already bootstrapped) and runs only what's needed. Idempotent.
+  Wired into `cli/yakos` dispatcher; `yakos quickstart` is now the
+  recommended first command for new users.
+- **`cli/lib/update.sh --all`** — after the framework update, walks
+  every `~/agent-control/*/` and runs `doctor --fix` + `migrate` on
+  each. Replaces the multi-line shell loop in the README. Reports a
+  per-project pass/skip/fail summary; exits nonzero if any project
+  failed.
+
+**Verification infrastructure:**
+
+- **NEW `tests/run-multi-dev-e2e.sh`** — end-to-end Plan 1 test that
+  spawns real concurrent bash subshells (alice + bob) and verifies
+  the protocol works under actual concurrency, not single-process
+  simulation. Five scenarios: claim/block, bypass warn+pass,
+  team_deleted releases claims, mode-negotiation ack roundtrip,
+  mode-negotiation timeout default. **10/10 passing.** This is the
+  first real validation that Plan 1 works as designed.
+- **NEW `tests/run-runtime-live.sh`** — conditional SDK smoke test.
+  Executes claude-sdk + antigravity-sdk against trivial agents IF
+  the SDKs are pip-installed AND credentials are present. Otherwise
+  SKIPs cleanly with install hints. Verifies (a) response contains
+  expected text and (b) usage telemetry was written. Safe to run on
+  any host; not in CI by default (costs real API money). Opt in via
+  `YAKOS_RUNTIME_LIVE=1`.
+
+**Hygiene nits:**
+
+- **NEW `SECURITY.md`** — responsible-disclosure policy, supported-
+  versions table, in-scope vs out-of-scope clarification, response-
+  time commitments, recognition policy. Email contact:
+  `bakw00ds87@gmail.com`.
+- **`cli/lib/runtimes/gemini.sh` — hard cutoff on 2026-09-01.** The
+  deprecation shim now `ct_die`'s on/after the removal date with
+  explicit migration instructions. Override available via
+  `YAKOS_GEMINI_SHIM_FORCE=1` (logged for audit). Before the cutoff,
+  behavior is unchanged (NOTE on first invocation).
+- **Tag backfill v0.3.0.0 → v0.28.0.0** — 32 missing tags created on
+  their actual VERSION-bump commits and pushed to origin. Operators
+  can now `git checkout v0.<X>.0.0` for any historical version.
+- **`runtime-fallback` claim verified** — read `cli/lib/dispatch.sh:170-241`;
+  the field IS fully wired (reads frontmatter, builds chain with
+  project-config + agent fallback + runtime default, walks for first
+  available, logs each step). README claim is accurate; no fix needed.
+  Recorded here so future me doesn't re-question it.
+
+**Known untested paths (still):**
+
+- claude-sdk + antigravity-sdk live execution has only been smoke-
+  ready since v0.30 — actually running them requires pip-installing
+  the SDKs, which is operator-environment specific.
+
 ## [0.29.1.0] — 2026-05-22
 
 ### Added — Project hygiene for going public

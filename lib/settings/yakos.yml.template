@@ -51,6 +51,66 @@ profile:
   # changelog-ui:
   #   component_path: web/src/components/Changelog.tsx
 
+# ---- budget guardrails (v0.34+) --------------------------------------------
+# Per-session caps enforced by budget-guard.sh (PreToolUse hook).
+# Any cap exceeded blocks the next tool call until the operator either
+# adds a bypass entry, raises the cap, or starts a new session.
+#
+# Defaults below are conservative; tune for your workflow. All caps
+# optional; omitting one means no enforcement for that dimension.
+#
+# Emergency disable: export YAKOS_BUDGET_DISABLE=1
+#
+# budget:
+#   enabled: true
+#   max_tool_calls: 500             # session-wide
+#   max_wall_seconds: 7200          # 2 hours
+#   max_repeat_same_tool: 8         # loop detection — same tool in a row
+#
+# Bypass example in work/current/hook-bypass.md:
+#   **Hook:** budget
+#   **Scope:** cap=max_tool_calls
+#
+# Reference: https://www.infoworld.com/article/4138748/finops-for-agents
+
+# ---- context injection (v0.35+) --------------------------------------------
+# UserPromptSubmit hook that surfaces recent session context before
+# each prompt: decisions.md tail, budget remaining, peer-status,
+# recent supervisor CRITICAL. All sections individually toggleable.
+# DEFAULT OFF — opt in to avoid surprise context bloat.
+#
+# context_inject:
+#   enabled: true
+#   inject_decisions: true       # tail of decisions.md
+#   inject_budget: true          # if budget block configured
+#   inject_peers: true           # if multi-dev coord enabled
+#   inject_supervisor: true      # most recent CRITICAL finding
+
+# ---- output-injection scanner (v0.34+) -------------------------------------
+# PostToolUse hook that scans tool output (Bash/Read/WebFetch/mcp__*)
+# for known prompt-injection patterns. Detection only — never blocks.
+# See lib/playbooks/09-prompt-injection-defense.md.
+#
+# injection_scan:
+#   enabled: true     # set to false to disable
+
+# ---- supervisor mode (v0.33+) ----------------------------------------------
+# A live shadow agent that watches the lead's tool calls and judges
+# drift / accuracy / intent. Fires every score_every_n_calls on a
+# cheaper runtime than the lead. See docs/supervisor-mode.md.
+#
+# Disabled by default — opt in by flipping enabled to true.
+#
+# supervisor:
+#   enabled: true
+#   runtime: claude                # which runtime to dispatch supervisor on
+#   agent: supervisor              # agent file id (rarely overridden)
+#   score_every_n_calls: 10        # cost vs latency tradeoff
+#   block_on_critical: true        # active mode; false = surface-only
+#
+# Emergency bypass (any session):
+#   export YAKOS_SUPERVISOR_DISABLE=1
+
 # ---- environment workflows (Plan 3 M5 / v0.17+) ----------------------------
 # Uncomment + customize to enable dev→test→prod promotion gates.
 #

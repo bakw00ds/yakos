@@ -10,8 +10,8 @@ set -eu
 TARGET="${1:-}"
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 HOOK_DIR_PARENT="$(cd "$(dirname -- "$0")/.." && pwd -P)"
-# shellcheck source=../../../cli/lib/compat.sh
 COMPAT="$HOOK_DIR_PARENT/../../cli/lib/compat.sh"
+# shellcheck source=../../../cli/lib/compat.sh
 [ -f "$COMPAT" ] && . "$COMPAT" || true
 
 emit_json() {

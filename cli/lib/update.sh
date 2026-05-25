@@ -15,6 +15,7 @@ set -eu
 . "$YAKOS_LIB/compat.sh"
 
 ALLOW_NON_FF=0
+ALL_PROJECTS=0
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
@@ -30,11 +31,16 @@ changed files under lib/ (which is what install/uninstall consume).
 
 Options:
   --allow-non-ff   Allow non-fast-forward pulls (default: refuses).
+  --all            After the framework update, walk every
+                   ~/agent-control/*/ and run 'yakos doctor <repo> --fix'
+                   + 'yakos migrate <name>' on each. Surfaces drift
+                   and refreshes per-project hook copies in one shot.
   --help, -h       Print this help.
 EOF
             exit 0
             ;;
         --allow-non-ff) ALLOW_NON_FF=1 ;;
+        --all) ALL_PROJECTS=1 ;;
         *) ct_die "update: unknown flag '$arg'" ;;
     esac
 done
@@ -73,3 +79,50 @@ fi
 
 echo "Refreshing symlinks via 'yakos install'..."
 bash "$YAKOS_LIB/install.sh"
+
+# ---- optional: --all → per-project migrate + doctor ------------------------
+if [ "$ALL_PROJECTS" = "1" ]; then
+    ac_root="$HOME/agent-control"
+    if [ ! -d "$ac_root" ]; then
+        echo
+        echo "no projects to update (no $ac_root)"
+        exit 0
+    fi
+    echo
+    echo "Updating per-project state (--all)..."
+    n_total=0; n_ok=0; n_skipped=0; n_failed=0
+    for cd_dir in "$ac_root"/*/; do
+        [ -d "$cd_dir" ] || continue
+        n_total=$((n_total + 1))
+        proj_name="$(basename -- "$cd_dir")"
+        cd_path="$cd_dir/.project-path"
+        if [ ! -f "$cd_path" ]; then
+            ct_log "  $proj_name: SKIP (no .project-path; orphaned control dir?)"
+            n_skipped=$((n_skipped + 1))
+            continue
+        fi
+        proj_repo="$(head -1 "$cd_path")"
+        if [ ! -d "$proj_repo" ]; then
+            ct_log "  $proj_name: SKIP (project repo $proj_repo not present on this host)"
+            n_skipped=$((n_skipped + 1))
+            continue
+        fi
+        echo
+        echo "  $proj_name → $proj_repo"
+        # doctor --fix is forgiving — it reports drift, doesn't fail the loop
+        bash "$YAKOS_LIB/doctor.sh" "$proj_repo" --fix 2>&1 | sed 's/^/    /' || true
+        # migrate is the real work — if it fails, count and continue
+        if [ -f "$YAKOS_LIB/migrate.sh" ]; then
+            if bash "$YAKOS_LIB/migrate.sh" "$proj_name" 2>&1 | sed 's/^/    /'; then
+                n_ok=$((n_ok + 1))
+            else
+                n_failed=$((n_failed + 1))
+            fi
+        else
+            n_ok=$((n_ok + 1))
+        fi
+    done
+    echo
+    echo "update --all summary: $n_total project(s), $n_ok ok, $n_skipped skipped, $n_failed failed"
+    [ "$n_failed" -eq 0 ] || exit 1
+fi

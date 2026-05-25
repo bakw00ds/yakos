@@ -121,6 +121,63 @@ anything that mutates the source systems. Read-only by design.
      `app_version` are likely release-specific regressions; bugs
      spread across versions are likely longstanding issues.
 
+## Populate kanban board
+
+After the automated pass completes (categories and signal scores assigned),
+push each actionable entry onto the kanban board in `<work>/current/kanban.md`.
+Skip `noise` entries — they don't belong on the board.
+
+### Category mapping
+
+| Gather category | Kanban `--category` |
+|---|---|
+| bug | `bug` |
+| feature | `feature` |
+| unclear | `question` |
+| question | `question` |
+| (maintenance / debt items) | `chore` |
+| anything else | `other` |
+
+### Dedup token
+
+Every card title must embed a stable source reference token of the form
+`[src:<source>:<id>]`, where `<source>` is the configured source name and
+`<id>` is the entry's native ID from that source. Example:
+`Login crash on Safari [src:github:4821]`.
+
+**Before adding a card, grep the kanban file for the token:**
+
+```sh
+grep -qF '[src:github:4821]' "$(yakos_current_dir)/kanban.md" \
+  && echo "already present — skip" \
+  || yakos kanban add "Login crash on Safari [src:github:4821]" --category bug
+```
+
+If the token is already in the file (in any column, any card), skip that
+entry entirely. Do not update or move existing cards — the operator owns
+column placement. This keeps re-runs fully idempotent without a database.
+
+### Notes field
+
+After adding a card, set its notes via `yakos kanban notes <id> "<text>"`.
+Pack three things into the single line (keep it short):
+
+```
+src:<source>:<id> | status:<entry-status> | score:<signal_score>
+```
+
+Example: `src:github:4821 | status:new | score:0.87`
+
+If the entry is flagged `regression_window: true`, append ` | regression`
+so the operator can spot it without opening the full artifact.
+
+### What to skip
+
+- `noise` entries — don't add them.
+- Entries whose dedup token already appears in `kanban.md` — skip silently.
+- New cards always land in TODO. Do not call `yakos kanban move` or
+  `yakos kanban done` — column triage belongs to the operator.
+
 ## Manual pass
 
 The invoking agent reviews the categorization for false categorizations

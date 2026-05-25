@@ -46,8 +46,9 @@ ct_realpath() {
         ( cd "$p" 2>/dev/null && pwd -P ) && return 0
     fi
     if [ -e "$p" ] || [ -L "$p" ]; then
-        local d="$(dirname -- "$p")"
-        local b="$(basename -- "$p")"
+        local d b
+        d="$(dirname -- "$p")"
+        b="$(basename -- "$p")"
         ( cd "$d" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$b" ) && return 0
     fi
     # Path doesn't exist; print the absolute form anyway.

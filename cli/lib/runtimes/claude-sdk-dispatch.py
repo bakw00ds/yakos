@@ -143,6 +143,14 @@ async def run(agent_id: str, project: str, agents: dict, task: str) -> int:
     if isinstance(model, str) and model:
         options_kwargs["model"] = model
 
+    # Multi-turn (v0.31+): if YAKOS_CONVERSATION_ID is set, resume that
+    # SDK session. The Claude Agent SDK accepts a `resume` option that
+    # takes a session_id. If the upstream SDK rejects the kwarg (older
+    # version), we catch + fall back to fresh.
+    resume_id = os.environ.get("YAKOS_CONVERSATION_ID")
+    if resume_id:
+        options_kwargs["resume"] = resume_id
+
     # Sub-agent availability: surface every OTHER agent in the
     # composition. If the composition has only the dispatched agent,
     # skip — empty agents= dict is fine but a one-item dict containing
@@ -155,7 +163,20 @@ async def run(agent_id: str, project: str, agents: dict, task: str) -> int:
     if sibling_defs:
         options_kwargs["agents"] = sibling_defs
 
-    options = ClaudeAgentOptions(**options_kwargs)
+    try:
+        options = ClaudeAgentOptions(**options_kwargs)
+    except TypeError as exc:
+        # The `resume` field may not be supported on older SDK versions.
+        # Retry without it and warn.
+        if "resume" in str(exc) and "resume" in options_kwargs:
+            sys.stderr.write(
+                f"claude-sdk-dispatch: resume not supported by installed "
+                f"claude-agent-sdk; starting fresh ({exc})\n"
+            )
+            del options_kwargs["resume"]
+            options = ClaudeAgentOptions(**options_kwargs)
+        else:
+            raise
 
     text_chunks = []
     usage_data = None
@@ -181,6 +202,20 @@ async def run(agent_id: str, project: str, agents: dict, task: str) -> int:
             sys.stderr.write(
                 f"claude-sdk-dispatch: could not write usage to "
                 f"{usage_out}: {exc}\n"
+            )
+
+    # Capture session_id for multi-turn resume (v0.31+). ResultMessage
+    # carries the session id used by this run; mcp-server stashes it for
+    # subsequent continue_claude_sdk calls.
+    session_out = os.environ.get("YAKOS_SESSION_OUT")
+    if session_out and usage_data and usage_data.get("session_id"):
+        try:
+            with open(session_out, "w") as f:
+                f.write(str(usage_data["session_id"]))
+        except OSError as exc:
+            sys.stderr.write(
+                f"claude-sdk-dispatch: could not write session id to "
+                f"{session_out}: {exc}\n"
             )
 
     return 0

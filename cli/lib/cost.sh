@@ -51,7 +51,6 @@ EOF
 SINCE=""
 BY="runtime"
 EMIT_JSON=0
-ALL_PROJECTS=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -61,7 +60,7 @@ while [ "$#" -gt 0 ]; do
         --by) shift; [ "$#" -gt 0 ] || ct_die "cost: --by requires an axis"; BY="$1" ;;
         --by=*) BY="${1#--by=}" ;;
         --json) EMIT_JSON=1 ;;
-        --all-projects) ALL_PROJECTS=1 ;;
+        --all-projects) : ;;
         -*) ct_die "cost: unknown flag '$1'" ;;
         *) ct_die "cost: unexpected argument '$1'" ;;
     esac
@@ -72,10 +71,6 @@ case "$BY" in
     agent|runtime|day|project) ;;
     *) ct_die "cost: --by must be agent | runtime | day | project, got '$BY'" ;;
 esac
-
-if [ "$BY" = "project" ]; then
-    ALL_PROJECTS=1
-fi
 
 LOG_DIR="$HOME/.yakos-state"
 PATTERN="$LOG_DIR/dispatch-log*.ndjson"

@@ -75,8 +75,8 @@ _probe_context_pct_codex() {
     local sessions_root="$HOME/.codex/sessions"
     [ -d "$sessions_root" ] || return 1
     local latest
-    latest="$(find "$sessions_root" -maxdepth 1 -mindepth 1 -type d -print 2>/dev/null \
-        | xargs -I{} stat -f '%m %N' {} 2>/dev/null \
+    latest="$(find "$sessions_root" -maxdepth 1 -mindepth 1 -type d -print0 2>/dev/null \
+        | xargs -0 -I{} stat -f '%m %N' {} 2>/dev/null \
         | sort -n -r | head -1 | awk '{print $2}')"
     [ -n "$latest" ] && [ -d "$latest" ] || return 1
     local size estimated_tokens window_size pct
@@ -99,8 +99,8 @@ _probe_context_pct_agy() {
     local conv_root="$HOME/.gemini/antigravity-cli/conversations"
     [ -d "$conv_root" ] || return 1
     local latest
-    latest="$(find "$conv_root" -maxdepth 1 -type f -name '*.pb' -print 2>/dev/null \
-        | xargs -I{} stat -f '%m %N' {} 2>/dev/null \
+    latest="$(find "$conv_root" -maxdepth 1 -type f -name '*.pb' -print0 2>/dev/null \
+        | xargs -0 -I{} stat -f '%m %N' {} 2>/dev/null \
         | sort -n -r | head -1 | awk '{print $2}')"
     [ -n "$latest" ] && [ -f "$latest" ] || return 1
     local size estimated_tokens window_size pct

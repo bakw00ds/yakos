@@ -140,9 +140,11 @@ fi
 if [ "$SUB" = "login" ]; then
     target=""
     AS_DEFAULT=0
+    DO_ALL=0
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --as-default) AS_DEFAULT=1 ;;
+            --all) DO_ALL=1 ;;
             -*) ct_die "auth login: unknown flag '$1'" ;;
             *)
                 if [ -z "$target" ]; then target="$1"
@@ -153,7 +155,59 @@ if [ "$SUB" = "login" ]; then
         shift
     done
 
-    [ -n "$target" ] || ct_die "auth login: <runtime> required (claude|claude-sdk|codex|gemini|agy|antigravity-sdk)"
+    # --all: walk every installed runtime sequentially. Skip uninstalled
+    # CLIs; continue past per-runtime failures so the operator sees the
+    # full picture in one pass.
+    if [ "$DO_ALL" = "1" ]; then
+        [ -z "$target" ] || ct_die "auth login --all: do not also pass a runtime name"
+        echo "yakos auth login --all"
+        echo "  walks every installed runtime; uninstalled CLIs are skipped."
+        echo
+        n_ok=0; n_fail=0; n_skip=0
+        for id in $(yk_rt_known); do
+            # Skip SDK adapters since they share creds with their bundled
+            # CLI — logging into claude covers claude-sdk; logging into
+            # agy covers antigravity-sdk.
+            case "$id" in
+                claude-sdk|antigravity-sdk)
+                    echo "  $id: skip (shares credentials with bundled CLI; covered by sibling)"
+                    n_skip=$((n_skip + 1))
+                    continue
+                    ;;
+                gemini)
+                    echo "  $id: skip (deprecated; use 'yakos auth login agy' instead)"
+                    n_skip=$((n_skip + 1))
+                    continue
+                    ;;
+            esac
+            yk_rt_load "$id"
+            if ! yk_rt_check_cli 2>/dev/null; then
+                echo "  $id: SKIP (CLI not installed)"
+                n_skip=$((n_skip + 1))
+                continue
+            fi
+            if yk_rt_check_auth 2>/dev/null; then
+                echo "  $id: OK (already authed)"
+                n_ok=$((n_ok + 1))
+                continue
+            fi
+            echo
+            echo "  --- logging into $id ---"
+            if bash "$YAKOS_LIB/auth.sh" login "$id"; then
+                echo "  $id: OK"
+                n_ok=$((n_ok + 1))
+            else
+                echo "  $id: FAILED (see output above)"
+                n_fail=$((n_fail + 1))
+            fi
+        done
+        echo
+        echo "summary: $n_ok ok, $n_skip skipped, $n_fail failed"
+        [ "$n_fail" -eq 0 ] || exit 1
+        exit 0
+    fi
+
+    [ -n "$target" ] || ct_die "auth login: <runtime> required (claude|claude-sdk|codex|gemini|agy|antigravity-sdk), or pass --all"
     yk_rt_is_known "$target" || ct_die "auth login: unknown runtime '$target'"
 
     # SDK adapters delegate their login UX to the underlying CLI's flow

@@ -47,7 +47,6 @@ esac
 
 PROJECT=""
 TAG=""
-YES=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -h|--help)
@@ -64,7 +63,7 @@ EOF
             [ "$#" -gt 0 ] || ct_die "team restart: --tag requires a value"
             TAG="$1"
             ;;
-        --yes|-y) YES=1 ;;
+        --yes|-y) : ;;
         --*) ct_die "team restart: unknown flag '$1'" ;;
         *)
             if [ -z "$PROJECT" ]; then PROJECT="$1"

@@ -18,7 +18,7 @@
 
 set -eu
 
-: "${YAKOS_LIB:?peer.sh: YAKOS_LIB must be set; run via 'yakos peer'}"
+: "${YAKOS_LIB:=$(cd "$(dirname -- "$0")" && pwd -P)}"
 # shellcheck source=./compat.sh
 . "$YAKOS_LIB/compat.sh"
 # shellcheck source=./paths.sh
@@ -44,6 +44,11 @@ Subcommands:
                                   for peer's mode_response. (M3)
   respond-mode --to <proposal-id> --ack|--reject [--reason <t>] [<project>]
                                   Respond to a peer's mode proposal. (M3)
+  handoff --to <user@host> --completed-scope <s> --notes <s> --next-action <s> [<project>]
+                                  Hand off work to another peer; emits a
+                                  peer_handoff event with structured context. (v0.35+)
+  handoff --ack <handoff-id> | --reject <handoff-id> [--reason <t>] [<project>]
+                                  Acknowledge or reject a received handoff. (v0.35+)
 
 Setup:
   Each developer runs 'yakos init --multi-dev <name> --project <path>'.
@@ -136,7 +141,7 @@ SUB="${1:-}"
 
 case "$SUB" in
     "" | -h | --help | help) usage; exit 0 ;;
-    status|log|claim|release|claims|deadlock|propose-mode|respond-mode) ;;
+    status|log|claim|release|claims|deadlock|propose-mode|respond-mode|handoff) ;;
     *) ct_die "peer: unknown subcommand '$SUB' (try --help)" ;;
 esac
 
@@ -514,6 +519,94 @@ if [ "$SUB" = "respond-mode" ]; then
     mkdir -p "$COORD/sessions"
     printf '%s\n' "$event" >> "$COORD/sessions/${me_user}@${me_host}-${me_pid}.ndjson"
     echo "responded $response to proposal $TO"
+    exit 0
+fi
+
+# ---- subcommand: handoff (v0.35) -------------------------------------------
+
+if [ "$SUB" = "handoff" ]; then
+    TO=""
+    COMPLETED=""
+    NOTES=""
+    NEXT_ACTION=""
+    ACK=""
+    REJECT=""
+    REASON=""
+    PROJECT=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --to) shift; TO="${1:-}" ;;
+            --to=*) TO="${1#--to=}" ;;
+            --completed-scope) shift; COMPLETED="${1:-}" ;;
+            --completed-scope=*) COMPLETED="${1#--completed-scope=}" ;;
+            --notes) shift; NOTES="${1:-}" ;;
+            --notes=*) NOTES="${1#--notes=}" ;;
+            --next-action) shift; NEXT_ACTION="${1:-}" ;;
+            --next-action=*) NEXT_ACTION="${1#--next-action=}" ;;
+            --ack) shift; ACK="${1:-}" ;;
+            --ack=*) ACK="${1#--ack=}" ;;
+            --reject) shift; REJECT="${1:-}" ;;
+            --reject=*) REJECT="${1#--reject=}" ;;
+            --reason) shift; REASON="${1:-}" ;;
+            --reason=*) REASON="${1#--reason=}" ;;
+            -*) ct_die "peer handoff: unknown flag '$1'" ;;
+            *)
+                if [ -z "$PROJECT" ]; then PROJECT="$1"
+                else ct_die "peer handoff: too many positional args"
+                fi
+                ;;
+        esac
+        shift
+    done
+
+    PROJECT="$(resolve_project "$PROJECT")"
+    COORD="$(require_coord "$PROJECT")"
+    me_user="${USER:-$(id -un)}"
+    me_host="${HOSTNAME:-$(hostname -s)}"
+    me_pid="${YAKOS_SESSION_PID:-$$}"
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    if [ -n "$ACK" ] || [ -n "$REJECT" ]; then
+        target="$ACK"
+        response="ack"
+        if [ -n "$REJECT" ]; then target="$REJECT"; response="reject"; fi
+        event="$(jq -nc \
+            --arg ts "$ts" --arg user "$me_user" --arg host "$me_host" \
+            --argjson pid "$me_pid" \
+            --arg target "$target" --arg resp "$response" --arg reason "$REASON" \
+            '{ts: $ts, kind: "peer_handoff_response",
+              actor: {user: $user, host: $host, pid: $pid,
+                      session_id: "operator", agent: "lead"},
+              detail: {handoff_id: $target, response: $resp, reason: $reason}}')"
+        printf '%s\n' "$event" >> "$COORD/activity.ndjson"
+        mkdir -p "$COORD/sessions"
+        printf '%s\n' "$event" >> "$COORD/sessions/${me_user}@${me_host}-${me_pid}.ndjson"
+        echo "handoff $response: $target"
+        exit 0
+    fi
+
+    [ -n "$TO" ] || ct_die "peer handoff: --to <user@host> required"
+    [ -n "$COMPLETED" ] || ct_die "peer handoff: --completed-scope required"
+
+    handoff_id="$(date -u +%s)-$me_pid-$RANDOM"
+    event="$(jq -nc \
+        --arg ts "$ts" --arg user "$me_user" --arg host "$me_host" \
+        --argjson pid "$me_pid" \
+        --arg hid "$handoff_id" --arg to "$TO" \
+        --arg comp "$COMPLETED" --arg notes "$NOTES" --arg next "$NEXT_ACTION" \
+        '{ts: $ts, kind: "peer_handoff",
+          actor: {user: $user, host: $host, pid: $pid,
+                  session_id: "operator", agent: "lead"},
+          detail: {handoff_id: $hid, to: $to, completed_scope: $comp,
+                   notes: $notes, next_action: $next}}')"
+    printf '%s\n' "$event" >> "$COORD/activity.ndjson"
+    mkdir -p "$COORD/sessions"
+    printf '%s\n' "$event" >> "$COORD/sessions/${me_user}@${me_host}-${me_pid}.ndjson"
+
+    echo "handoff sent to $TO — handoff_id=$handoff_id"
+    echo "remember to:"
+    echo "  - release any claims on the completed scope ('yakos peer release <file>')"
+    echo "  - update work/current/decisions.md with the handoff summary"
     exit 0
 fi
 

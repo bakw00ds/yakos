@@ -81,16 +81,21 @@ glob_match() {
     # for v0.1: `**/web/**` and `web/**` both match `web/index.js` here.
     # This is a deliberate v0.1 simplification; deeper matching wants a
     # real fnmatch implementation in v0.2.
+    # SC2254: unquoted $g/$g2 is intentional — these ARE glob patterns that
+    # must expand as patterns in case, not as literals.
+    # shellcheck disable=SC2254
     case "$p" in
         $g) return 0 ;;
         *) ;;
     esac
     # Try with `**` collapsed to `*`
     local g2="${g//\*\*/*}"
+    # shellcheck disable=SC2254
     case "$p" in
         $g2) return 0 ;;
     esac
     # Try matching just the basename glob
+    # shellcheck disable=SC2254
     case "$(basename "$p")" in
         $g) return 0 ;;
     esac
