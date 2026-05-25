@@ -62,7 +62,7 @@ fi
 case "$rel_file" in
     *.sql|*/migrations/*) TTL=1800 ;;
     decisions.md|contracts.md|plan.md|status.md|findings.md) TTL=120 ;;
-    *.lock|*-lock.*|package-lock.json|go.sum|Cargo.lock|Pipfile.lock) TTL=300 ;;
+    *.lock|*-lock.*|go.sum) TTL=300 ;;
     *) TTL=600 ;;
 esac
 
@@ -72,11 +72,9 @@ esac
 me_user="${USER:-$(id -un 2>/dev/null || echo unknown)}"
 me_host="${HOSTNAME:-$(hostname -s 2>/dev/null || echo unknown)}"
 me_pid="${YAKOS_SESSION_PID:-$$}"
-me_sid="${CLAUDE_SESSION_ID:-${YAKOS_SESSION_ID:-unknown}}"
 me_agent="$(hi_sender_role)"
 export YAKOS_AGENT_ID="$me_agent"
 now_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-now_epoch="$(date -u +%s)"
 
 CLAIMS_FILE="$(yakos_coord_claims_file)"
 ACTIVITY_LOG="$(yakos_coord_activity_log)"
