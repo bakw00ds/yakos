@@ -103,7 +103,7 @@ flip_supervisor_enabled() {
 
     # If already in the desired state, no-op
     if grep -A 10 '^[[:space:]]*supervisor:' "$yakos_yml" 2>/dev/null \
-        | grep -q "^[[:space:]]*enabled:[[:space:]]*$target_state[[:space:]]*$"; then
+        | grep -q "^[[:space:]]*enabled:[[:space:]]*${target_state}[[:space:]]*$"; then
         echo "supervisor.enabled is already '$target_state' in $yakos_yml — no change"
         return 0
     fi
@@ -335,7 +335,7 @@ if [ "$SUB" = "set" ]; then
 
     # No-op if already at target
     if grep -A 10 '^[[:space:]]*supervisor:' "$yakos_yml" 2>/dev/null \
-        | grep -q "^[[:space:]]*$KEY:[[:space:]]*$VAL[[:space:]]*$"; then
+        | grep -q "^[[:space:]]*$KEY:[[:space:]]*${VAL}[[:space:]]*$"; then
         echo "supervisor.$KEY is already '$VAL' in $yakos_yml — no change"
         exit 0
     fi
