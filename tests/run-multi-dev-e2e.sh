@@ -26,8 +26,6 @@ set -eu
 REPO_ROOT="$(cd "$(dirname -- "$0")/.." && pwd -P)"
 HOOKS="$REPO_ROOT/lib/hooks"
 PEER_CLI="$REPO_ROOT/cli/lib/peer.sh"
-COMPAT="$REPO_ROOT/cli/lib/compat.sh"
-PATHS_SH="$REPO_ROOT/cli/lib/paths.sh"
 
 pass=0
 fail=0

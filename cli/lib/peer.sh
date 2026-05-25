@@ -18,7 +18,7 @@
 
 set -eu
 
-: "${YAKOS_LIB:?peer.sh: YAKOS_LIB must be set; run via 'yakos peer'}"
+: "${YAKOS_LIB:=$(cd "$(dirname -- "$0")" && pwd -P)}"
 # shellcheck source=./compat.sh
 . "$YAKOS_LIB/compat.sh"
 # shellcheck source=./paths.sh
