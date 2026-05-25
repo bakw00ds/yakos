@@ -68,7 +68,7 @@ prod_branch="$(_yaml_get prod branch)"
 
 # Read stdin: each line is "<local_ref> <local_oid> <remote_ref> <remote_oid>".
 violation=""
-while read -r local_ref local_oid remote_ref remote_oid; do
+while read -r local_ref _local_oid remote_ref _remote_oid; do
     # Strip refs/heads/ prefix.
     target_branch="${remote_ref#refs/heads/}"
     source_branch="${local_ref#refs/heads/}"

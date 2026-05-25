@@ -106,7 +106,7 @@ teardown_work
 
 setup_work
 kanban add "completed task" --category chore >/dev/null 2>&1
-kanban done K-1 >/dev/null 2>&1
+kanban 'done' K-1 >/dev/null 2>&1
 board="$WORK_TMP/work/current/kanban.md"
 kanban delete K-1 >/dev/null 2>&1
 check "case5: task removed from DONE column"  "$( grep -q 'K-1' "$board" && echo 0 || echo 1 )"

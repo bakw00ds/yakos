@@ -22,7 +22,6 @@ set -eu
 PROJECT=""
 TAG=""
 AUTO_TAG=0
-YES=0
 
 usage() {
     cat <<EOF
@@ -48,7 +47,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
         --auto-tag) AUTO_TAG=1 ;;
-        --yes|-y) YES=1 ;;
+        --yes|-y) : ;;
         --*) ct_die "archive: unknown flag '$1'" ;;
         *)
             if [ -z "$PROJECT" ]; then PROJECT="$1"

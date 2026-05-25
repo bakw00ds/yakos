@@ -185,7 +185,7 @@ run_kanban() {
 
 wd1="$(make_work)"
 result="$(start_server "$wd1")"
-read -r bp1 pp1 port1 <<< "$result"
+read -r bp1 pp1 _ <<< "$result"
 
 ports_before="$(lsof -iTCP@127.0.0.1 -sTCP:LISTEN -nP 2>/dev/null | wc -l | tr -d ' ')"
 out="$(run_kanban "$wd1" serve --no-open 2>&1)"
@@ -205,7 +205,7 @@ kill "$pp1" 2>/dev/null || true; kill "$bp1" 2>/dev/null || true; sleep 0.2
 
 wd2="$(make_work)"
 result="$(start_server "$wd2")"
-read -r bp2 pp2 port2 <<< "$result"
+read -r bp2 pp2 _ <<< "$result"
 state2="$wd2/work/current/.kanban-serve.json"
 
 check "case2: state file present after first serve" \
@@ -236,7 +236,7 @@ kill "$pp2" 2>/dev/null || true; kill "$bp2" 2>/dev/null || true; sleep 0.2
 
 wd3="$(make_work)"
 result="$(start_server "$wd3")"
-read -r bp3 pp3 port3 <<< "$result"
+read -r _ pp3 _ <<< "$result"
 
 run_kanban "$wd3" stop >/dev/null 2>&1
 sleep 0.3
@@ -250,7 +250,7 @@ check "case3: state file removed after stop" \
 
 wd4="$(make_work)"
 result="$(start_server "$wd4")"
-read -r bp4 pp4 port4 <<< "$result"
+read -r _ pp4 _ <<< "$result"
 rm -f "$wd4/work/current/.kanban-serve.json"
 
 check "case4: orphan pid alive before stop" \
@@ -271,7 +271,7 @@ check "case4: stop output mentions 'stopped'" \
 
 wd5="$(make_work)"
 result="$(start_server "$wd5")"
-read -r bp5 pp5 port5 <<< "$result"
+read -r _ pp5 _ <<< "$result"
 
 orphan_py="$(spawn_orphan_server "$wd5")"
 sleep 0.3   # let lsof register the new listener
@@ -305,7 +305,7 @@ wdA="$(make_work)"
 wdB="$(make_work)"
 
 resultA="$(start_server "$wdA")"
-read -r bpA ppA portA <<< "$resultA"
+read -r _ ppA portA <<< "$resultA"
 
 resultB="$(start_server "$wdB")"
 read -r bpB ppB portB <<< "$resultB"
@@ -322,7 +322,6 @@ rm -f "$wdA/work/current/.kanban-serve.json"
 
 # serve for project A (stale state) must NOT adopt project B's server.
 out_serve="$(run_kanban "$wdA" serve --no-open 2>&1)"
-rc_serve=$?
 check "case6: serve A with stale state finds A's server (not B's)" \
     "$(printf '%s' "$out_serve" | grep -q 'already running' && echo 1 || echo 0)"
 # The recovered URL must contain A's port, not B's.
