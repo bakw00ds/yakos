@@ -19,7 +19,7 @@
 #   yakos cost (empty)
 #   yakos session list
 #   yakos session export <name> e2e-test
-#   yakos migrate <name> (no .yakos.yml → seed v0.7 → v0.8)
+#   yakos migrate <name> (.yakos.yml already at v0.9 from init; idempotent)
 #   yakos plugin list (empty)
 #   yakos uninstall
 #
@@ -154,11 +154,11 @@ step "yakos session export"    ./cli/yakos session export test-project e2e-test
 [ -f "$HOME/agent-control/test-project/work/exports/test-project-e2e-test.tar.gz" ] \
     && ok "export bundle written" || fail "export bundle missing"
 
-# 15. migrate (creates fresh .yakos.yml at v0.8)
+# 15. migrate (.yakos.yml already exists at v0.9 from init; migrate is a no-op)
 step "yakos migrate"           ./cli/yakos migrate test-project
 [ -f "$PROJ/.yakos.yml" ] && ok ".yakos.yml created" || fail ".yakos.yml not created"
-grep -q "^yakos: 0.8$" "$PROJ/.yakos.yml" && ok "schema stamped at 0.8" \
-    || fail "schema not stamped at 0.8"
+grep -q "^yakos: 0.9$" "$PROJ/.yakos.yml" && ok "schema stamped at 0.9" \
+    || fail "schema not stamped at 0.9"
 
 # Re-run migrate is idempotent (no-op).
 step_grep "yakos migrate idempotent" "already at|nothing to do" \
