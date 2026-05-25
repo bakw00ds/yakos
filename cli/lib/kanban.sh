@@ -1773,30 +1773,30 @@ function buildMoveActions(id, col) {
    on the same element — the confirm is a separate clickable button with
    its own handler, so there is no event-ordering race. */
 function buildDeleteButton(id, title) {
-  const wrap = el(“div”, { class: “delete-wrap” });
+  const wrap = el("div", { class: "delete-wrap" });
 
   // Idle trigger.
-  const trigger = el(“button”, {
-    class: “delete-trigger”,
-    attrs: { type: “button”, “aria-label”: “Delete task “ + id },
-    text: “Delete”
+  const trigger = el("button", {
+    class: "delete-trigger",
+    attrs: { type: "button", "aria-label": "Delete task " + id },
+    text: "Delete"
   });
 
   // Confirm row (hidden until first click).
-  const confirmRow = el(“div”, { class: “delete-confirm” });
-  const label = el(“div”, {
-    class: “delete-confirm-label”,
-    text: “Delete “” + (title || id) + “”?”
+  const confirmRow = el("div", { class: "delete-confirm" });
+  const label = el("div", {
+    class: "delete-confirm-label",
+    text: "Delete \u201c" + (title || id) + "\u201d?"
   });
-  const yesBtn = el(“button”, {
-    class: “delete-confirm-yes”,
-    attrs: { type: “button”, “aria-label”: “Confirm delete task “ + id },
-    text: “Confirm delete”
+  const yesBtn = el("button", {
+    class: "delete-confirm-yes",
+    attrs: { type: "button", "aria-label": "Confirm delete task " + id },
+    text: "Confirm delete"
   });
-  const noBtn = el(“button”, {
-    class: “delete-confirm-no”,
-    attrs: { type: “button”, “aria-label”: “Cancel delete task “ + id },
-    text: “Cancel”
+  const noBtn = el("button", {
+    class: "delete-confirm-no",
+    attrs: { type: "button", "aria-label": "Cancel delete task " + id },
+    text: "Cancel"
   });
   confirmRow.append(label, yesBtn, noBtn);
   wrap.append(trigger, confirmRow);
@@ -1806,33 +1806,33 @@ function buildDeleteButton(id, title) {
   function showIdle() {
     if (autoResetTimer) { clearTimeout(autoResetTimer); autoResetTimer = null; }
     trigger.hidden = false;
-    confirmRow.classList.remove(“visible”);
+    confirmRow.classList.remove("visible");
     yesBtn.disabled = false;
   }
 
   function showConfirm() {
     trigger.hidden = true;
-    confirmRow.classList.add(“visible”);
+    confirmRow.classList.add("visible");
     yesBtn.focus();
     // Auto-revert after 6s if operator walks away.
     autoResetTimer = setTimeout(showIdle, 6000);
   }
 
-  trigger.addEventListener(“click”, e => {
+  trigger.addEventListener("click", e => {
     e.stopPropagation();
     showConfirm();
   });
 
-  noBtn.addEventListener(“click”, e => {
+  noBtn.addEventListener("click", e => {
     e.stopPropagation();
     showIdle();
   });
 
-  yesBtn.addEventListener(“click”, async e => {
+  yesBtn.addEventListener("click", async e => {
     e.stopPropagation();
     if (autoResetTimer) { clearTimeout(autoResetTimer); autoResetTimer = null; }
     yesBtn.disabled = true;
-    const data = await post(“/api/delete”, { id });
+    const data = await post("/api/delete", { id });
     // If the POST failed, data is null and toast() was already called.
     // Re-enable so the operator can try again.
     if (!data) { yesBtn.disabled = false; return; }
