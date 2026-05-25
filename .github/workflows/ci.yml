@@ -184,7 +184,9 @@ jobs:
           # --print-agents emits valid JSON
           ./cli/yakos start smoketest --print-agents | jq -e 'type == "object" and (length > 0)'
           # Doctor projection includes addressable agent list
-          ./cli/yakos doctor "$tmp" --probe-runtime 2>&1 \
+          # $tmp is not available cross-step; read path from the control dir.
+          proj_path="$(head -1 "$HOME/agent-control/smoketest/.project-path")"
+          ./cli/yakos doctor "$proj_path" --probe-runtime 2>&1 \
             | grep -qE 'would inject [0-9]+ agent\(s\)'
       - name: yakos uninstall
         run: |
