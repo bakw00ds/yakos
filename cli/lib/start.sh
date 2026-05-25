@@ -234,7 +234,7 @@ yakos start — preflight
   runtime:        $RUNTIME ($CAPS)
   cli:            $( [ "$CLI_OK" = "1" ] && printf 'OK' || printf 'NOT FOUND (--dry-run only)' )
   auth:           $( [ "$AUTH_OK" = "1" ] && printf 'OK' || printf 'NOT CONFIGURED (run: yakos auth login %s)' "$RUNTIME" )
-  permission:     $PERM_MODE
+  permission:     $( [ "$PERM_MODE" = "bypass" ] && printf 'bypassPermissions' || printf 'default' )
   agents:         $AGENT_COUNT registered$( [ "$NO_AGENTS" = "1" ] && printf ' (--no-agents: suppressed)' || true )
   mode flags:     $( [ "$BARE" = "1" ] && printf 'bare ' || true )$( [ "$IDE" = "1" ] && printf 'ide ' || true )$( [ "$CONTINUE" = "1" ] && printf 'continue ' || true )$( [ -n "$RESUME" ] && printf 'resume=%s ' "$RESUME" || true )$( [ "$FORK" = "1" ] && printf 'fork ' || true )$( [ -n "$MODEL" ] && printf 'model=%s ' "$MODEL" || true )
 
@@ -327,18 +327,18 @@ if [ "$DRY_RUN" = "1" ]; then
             printf '  claude --add-dir %q --permission-mode %s' \
                 "$PROJECT_REPO" \
                 "$( [ "$SAFE" = "1" ] && printf 'default' || printf 'bypassPermissions' )"
-            [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf " --agents '<%d agents JSON>'" "$AGENT_COUNT"
-            [ -f "$PROJECT_REPO/.mcp.json" ] && printf ' --mcp-config %q' "$PROJECT_REPO/.mcp.json"
+            { [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf " --agents '<%d agents JSON>'" "$AGENT_COUNT"; } || true
+            { [ -f "$PROJECT_REPO/.mcp.json" ] && printf ' --mcp-config %q' "$PROJECT_REPO/.mcp.json"; } || true
             ;;
         codex)
             printf '  codex --add-dir %q' "$PROJECT_REPO"
-            [ "$SAFE" != "1" ] && printf ' --dangerously-bypass-approvals-and-sandbox'
-            [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf "  # + %d agents staged at %s/.codex/agents/yakos-*.toml" "$AGENT_COUNT" "$PROJECT_REPO"
+            { [ "$SAFE" != "1" ] && printf ' --dangerously-bypass-approvals-and-sandbox'; } || true
+            { [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf "  # + %d agents staged at %s/.codex/agents/yakos-*.toml" "$AGENT_COUNT" "$PROJECT_REPO"; } || true
             ;;
         gemini)
             printf '  gemini --include-directories %q' "$PROJECT_REPO"
-            [ "$SAFE" != "1" ] && printf ' --approval-mode=yolo'
-            [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf "  # + %d agents staged at %s/.gemini/agents/yakos-*.md" "$AGENT_COUNT" "$PROJECT_REPO"
+            { [ "$SAFE" != "1" ] && printf ' --approval-mode=yolo'; } || true
+            { [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf "  # + %d agents staged at %s/.gemini/agents/yakos-*.md" "$AGENT_COUNT" "$PROJECT_REPO"; } || true
             ;;
     esac
     if [ "${#EXTRA_FLAGS[@]}" -gt 0 ]; then
