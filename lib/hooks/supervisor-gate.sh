@@ -22,6 +22,8 @@ set -eu
 HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 . "$HOOK_DIR/lib/hook-input.sh"
 . "$HOOK_DIR/lib/hook-output.sh"
+# shellcheck source=lib/paths.sh
+. "$HOOK_DIR/lib/paths.sh"
 
 hi_init
 

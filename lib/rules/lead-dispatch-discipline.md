@@ -13,6 +13,14 @@ agent (framework template or project override) is in charge.
 
 ## The four-line rule
 
+0. **Delegate to the roster first, always, from the start.**
+   The lead's default, at the very beginning of a session, is to
+   identify which specialist(s) the task requires and dispatch them.
+   Not after a solo attempt. Not after exploring the codebase alone.
+   The first action on any non-trivial task is decompose-and-dispatch.
+   Doing specialist work solo when a suitable specialist exists is
+   the primary anti-pattern this rule exists to prevent.
+
 1. **Lead in this session = decompose, integrate, supervise. Synthesizes.**
    The lead does not edit code. The lead does not run specialist
    commands. The lead reads, plans, dispatches, and re-reads what
@@ -28,6 +36,10 @@ agent (framework template or project override) is in charge.
    separate files; researching distinct domains; auditing
    non-overlapping modules). Use multiple Agent calls in the same
    tool batch, OR multiple `yakos dispatch` shell-outs concurrently.
+   Parallel dispatch must be conflict-free: give each specialist a
+   distinct file scope or an isolated worktree; if two specialists'
+   outputs converge on one file, they return artifacts and the lead
+   integrates (`rule:git-hygiene` §Worktree).
 
 4. **Sequential only when the next task depends on the previous**
    (a `git pull` before reading new files; a contract handoff
@@ -42,6 +54,9 @@ agent (framework template or project override) is in charge.
 - **Lead inhabiting specialist roles** produces context-bloat,
   confused audit trails, and the "lead silently fixed it" class of
   bug that bypasses every project gate.
+- **Delegating late** — exploring and partially solving a task solo
+  before dispatching — is the same failure as not delegating at all.
+  The specialist roster exists to be used from the start.
 - **Concurrent file-edits without worktree separation** caused
   `incident:v2.62.4-worktree-collision`. The parallel-dispatch
   pattern requires the worktree-per-teammate discipline from
@@ -108,6 +123,21 @@ Almost never. The exceptions are tightly scoped:
   codex (concurrent `codex exec` shell-outs), gemini (concurrent
   `gemini -p` invocations), and any plugin runtime via `yakos
   dispatch`.
+
+## Anti-patterns
+
+- **Solo specialist work.** The lead does the specialist's job (edits
+  code, runs linters, writes docs) instead of dispatching the
+  appropriate specialist. The roster exists; use it.
+- **Late dispatch.** The lead explores, partially solves, or drafts
+  output solo, then dispatches only when stuck. Dispatch happens at
+  the start, not as a fallback.
+- **Serial dispatch of independent work.** Dispatching specialists
+  one-at-a-time when their tasks are independent. Use a single
+  parallel batch.
+- **Owning a file a specialist should own.** If a file is in a
+  specialist's domain, the specialist edits it — even if the lead's
+  read confirms what the change should be.
 
 ## References
 

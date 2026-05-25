@@ -268,8 +268,8 @@ yk_rt_agy_dispatch() {
         if [ -d "$conv_root" ]; then
             local latest
             latest="$(find "$conv_root" -maxdepth 1 -type f -name '*.pb' \
-                -print 2>/dev/null \
-                | xargs -I{} stat -f '%m %N' {} 2>/dev/null \
+                -print0 2>/dev/null \
+                | xargs -0 -I{} stat -f '%m %N' {} 2>/dev/null \
                 | sort -n -r | head -1 | awk '{print $2}')"
             if [ -n "$latest" ]; then
                 basename -- "$latest" .pb > "$YAKOS_SESSION_OUT"

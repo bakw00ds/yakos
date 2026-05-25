@@ -7,6 +7,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0.0] — 2026-05-24
+
+### Fixed — supervisor's `balanced` model no longer dropped on claude
+
+`agents-compose.sh` only accepted the concrete claude aliases
+(`haiku`/`sonnet`/`opus`) when composing `--agents` JSON, so the
+supervisor agent's `model: balanced` triggered a launch-time
+`WARN unknown model 'balanced'` and the agent was registered with
+no model pin. The composer now resolves the framework's cross-runtime
+semantic aliases — `cheap`→`haiku`, `balanced`→`sonnet`,
+`best`/`reasoning`→`opus` — so agent frontmatter can stay
+runtime-agnostic (as documented in `docs/supervisor-mode.md` and the
+`runtime-pick` skill). Truly-unknown values still warn and are omitted.
+
+### Added — kanban web UI (`yakos kanban serve`) + auto-start on launch
+
+The kanban board can now be viewed *and managed* from a browser, not
+just rendered as a static snapshot.
+
+- **`yakos kanban serve [--port N] [--host H] [--no-open]`** starts a
+  small loopback-only HTTP server (python3, consistent with the
+  project's existing `validate.sh` / `mcp.sh` python usage — yakOS is
+  a bash framework and ships no compiled toolchain). It serves a
+  project banner page with the three columns live, drag-and-drop
+  between columns, per-card move/done buttons, an add box, and column
+  counts. Mutations shell back into `yakos kanban add` / `move`, so the
+  CLI, the lifecycle hooks, and the web UI all edit the same
+  `kanban.md` — no second source of truth. Auto-refreshes every 3s.
+- **Random high port, loopback default.** With no `--port`, the OS
+  assigns a free ephemeral port and the server binds `127.0.0.1` only;
+  the board is local session state, not exposed on the network.
+- **Auto-starts on `yakos start`** and prints the URL alongside the
+  launch banner. Reuses an already-running server for the project
+  rather than double-binding. Opt out with `YAKOS_KANBAN_AUTOSERVE=0`.
+- **`yakos kanban status` / `yakos kanban stop`** report and tear down
+  the running server (tracked via a `.kanban-serve.json` state file in
+  the session scratchpad).
+- **Light + dark theme.** Follows the OS `prefers-color-scheme` by
+  default with a persistent toggle. Category-aware palette with
+  WCAG-AA-checked contrast.
+- **Hardening** (from a security + code review pass): the state file is
+  written by the server only *after* it binds (the launcher polls it, so
+  a reported URL is always live); `Host`-header allowlist (DNS-rebinding
+  defense); a warning when `--host` is non-loopback; request-body size
+  cap; stale-pid guard before `stop` kills anything.
+
+### Added — kanban categories + status notes
+
+Task cards now carry a **category** (`bug` / `feature` / `chore` /
+`question` / `other`, with arbitrary user values accepted) and a
+freeform single-line **notes** field for status.
+
+- `yakos kanban add "<title>" [--category <c>] [--notes "<t>"]`
+  (flags accepted before or after the title) and a new
+  `yakos kanban notes <id> "<text>"`. The task-block format gains
+  `category:` and `notes:` lines; `move` preserves the full block.
+- Field edits go through `awk` reading values from the environment
+  (`ENVIRON[]`), so titles/notes containing `/`, `&`, `|`, or literal
+  backslash sequences can't corrupt the markdown or inject lines.
+- Web UI: a **category filter bar** (All + one chip per category) that
+  shows/hides cards across all columns without breaking drag-and-drop,
+  colored category chips + card accents, and an **inline notes editor**
+  per card (`POST /api/notes`). `/api/meta` now advertises the category
+  list; `/api/add` takes a `category`.
+
+### Changed — lead delegates to the roster from the start
+
+`rule:lead-dispatch-discipline` gains an explicit "item 0 — delegate to
+the roster first, always, from the start" plus a late/solo-work
+anti-pattern and a conflict-free-parallel guardrail (distinct file
+scopes or isolated worktrees; converging outputs become artifacts the
+lead integrates — see `rule:git-hygiene`). `lead-template.md` updated to
+match. The `gather-feedback` skill now populates the board with
+categorized cards (provenance + status in notes) and a greppable
+`[src:<source>:<id>]` dedup token so re-runs don't duplicate.
+
+## [0.35.0.1] — 2026-05-22
+
+### Changed — README refreshed for v0.33 / v0.34 / v0.35 additions
+
+Documentation-only patch. README's content was stale from v0.32;
+this brings it current.
+
+Updates:
+- Version badge: 0.32.0.0 → 0.35.0.0
+- Tagline counts: 34→35 agents, 53→57 skills, 8→9 playbooks,
+  12→17 hooks, 28→32 subcommands
+- Architecture diagram: refreshed component examples
+- TL;DR Common scenarios table: added `peer handoff`, `supervise
+  enable`, `doctor --production` rows
+- **NEW section: "Live shadow-agent supervisor"** — covers
+  enable/status/tail/set commands, three bypass escalation paths,
+  defense-in-depth context (output-injection-scan, budget-guard)
+- Common commands section: added `supervise *`, `peer handoff`,
+  `checkpoint now`, `doctor --production`
+- Status section: bumped to v0.35.0.0; "Recent landings" extended
+  with v0.33 / v0.34 / v0.35 entries
+- Documentation map: added `docs/supervisor-mode.md` and
+  `CONTRIBUTING.md`
+- Development section: refreshed test-runner checklist (now lists
+  all 5 e2e suites that run in CI); points at CONTRIBUTING.md
+
 ## [0.35.0.0] — 2026-05-22
 
 ### Added — CI/lead-template fixes + 3 skills + context-inject hook + community files

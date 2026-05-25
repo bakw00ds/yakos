@@ -44,11 +44,12 @@ fi
 case "$rel_file" in
     *.sql|*/migrations/*) TTL=1800 ;;
     decisions.md|contracts.md|plan.md|status.md|findings.md) TTL=120 ;;
-    *.lock|*-lock.*|package-lock.json|go.sum|Cargo.lock|Pipfile.lock) TTL=300 ;;
+    *.lock|*-lock.*|go.sum) TTL=300 ;;
     *) TTL=600 ;;
 esac
 
-export YAKOS_AGENT_ID="$(hi_sender_role)"
+YAKOS_AGENT_ID="$(hi_sender_role)"
+export YAKOS_AGENT_ID
 now_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 exp_iso="$(date -u -j -v "+${TTL}S" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
     || date -u -d "+${TTL} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"

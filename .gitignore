@@ -24,3 +24,14 @@
 .codex/agents/yakos-*.toml
 .gemini/agents/yakos-*.md
 .gemini/settings.json.yakos-bak-*
+
+# yakOS — runtime-emitted agent files (v0.4.0+)
+.agents/skills/yakos-*.md
+.agents/mcp_config.json
+.agents/hooks.json
+
+# Local / per-machine state — never tracked
+.claude/settings.local.json
+.claude/worktrees/
+.antigravitycli/
+cli/lib/mcp/.venv/

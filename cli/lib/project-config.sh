@@ -9,7 +9,7 @@
 #
 # Schema (all fields optional):
 #
-#   yakos: 0.8                         # schema version — used by future migrations
+#   yakos: 0.9                         # schema version — used by future migrations
 #   default-runtime: claude            # or codex | gemini
 #   default-fallback: [claude]         # falls back if default unavailable
 #   default-permission: bypass         # or safe
@@ -33,8 +33,9 @@ set -eu
 
 # Schema versions yakOS knows how to read. Bumping this list is the
 # public marker that a future yakOS release may need a migration.
-YK_PCFG_SCHEMA_KNOWN="0.7 0.8"
-YK_PCFG_SCHEMA_CURRENT="0.8"
+YK_PCFG_SCHEMA_KNOWN="0.7 0.8 0.9"
+# shellcheck disable=SC2034  # consumed by migrate.sh when sourced
+YK_PCFG_SCHEMA_CURRENT="0.9"
 
 # yk_pcfg_path <project>
 #   Stdout the canonical path of the project's .yakos.yml (whether
