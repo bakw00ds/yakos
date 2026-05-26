@@ -443,6 +443,71 @@ if [ "${YAKOS_KANBAN_AUTOSERVE:-1}" != "0" ] && command -v python3 >/dev/null 2>
     )
 fi
 
+# ---- workspace hook wiring (claude only) -----------------------------------
+# Claude Code loads hooks from CLAUDE_PROJECT_DIR (.claude/settings.json),
+# which resolves to CONTROL_DIR — not PROJECT_REPO. The supervisor
+# PostToolUse hooks live in PROJECT_REPO/scripts/hooks/ and are wired in the
+# repo's settings.json, but that file is only --add-dir'd (for file access),
+# not treated as the hook source. Fix: derive the hooks block from the repo's
+# own .claude/settings.json (single source of truth) and install it into
+# CONTROL_DIR/.claude/settings.json with paths rewritten to absolute.
+#
+# Derivation: extract .hooks from PROJECT_REPO/.claude/settings.json, then
+# walk every string leaf and replace the literal "${CLAUDE_PROJECT_DIR}"
+# placeholder with the absolute PROJECT_REPO path. Any hook command not
+# using that placeholder passes through unchanged.
+#
+# Merge strategy: read any existing CONTROL_DIR/.claude/settings.json, inject
+# the derived hooks block (overwriting only "hooks"), write back.
+# settings.local.json (permissions) is a separate file and is never touched.
+#
+# Idempotent: re-running yakos start refreshes the wiring without duplicating
+# hook entries (the hooks block is replaced wholesale each run).
+# Edge cases: missing repo settings.json or absent .hooks key → skip with
+# a warning rather than writing an empty or garbage hooks block.
+if [ "$RUNTIME" = "claude" ] && command -v jq >/dev/null 2>&1; then
+    _repo_settings="$PROJECT_REPO/.claude/settings.json"
+    _ws_claude_dir="$CONTROL_DIR/.claude"
+    _ws_settings="$_ws_claude_dir/settings.json"
+
+    # Derive the hooks block from the repo's canonical settings.json.
+    # walk() rewrites "${CLAUDE_PROJECT_DIR}" → absolute PROJECT_REPO path
+    # on every string leaf inside .hooks only; other keys are untouched.
+    _hooks_json=""
+    if [ -f "$_repo_settings" ]; then
+        _hooks_json="$(jq -e --arg repo "$PROJECT_REPO" \
+            '.hooks | if . == null then error("no .hooks key") else . end
+             | walk(if type=="string"
+                    then gsub("\\$\\{CLAUDE_PROJECT_DIR\\}"; $repo)
+                    else . end)' \
+            "$_repo_settings" 2>/dev/null)" \
+            || { ct_log "WARN: start: $PROJECT_REPO/.claude/settings.json missing .hooks key; workspace hook wiring skipped"; _hooks_json=""; }
+    else
+        ct_log "WARN: start: $PROJECT_REPO/.claude/settings.json not found; workspace hook wiring skipped"
+    fi
+
+    if [ -n "$_hooks_json" ]; then
+        mkdir -p "$_ws_claude_dir" 2>/dev/null || true
+
+        # Read existing workspace settings.json (or start from {}) and merge
+        # the derived hooks block in, preserving all other keys.
+        _existing="{}"
+        if [ -f "$_ws_settings" ]; then
+            _existing="$(jq '.' "$_ws_settings" 2>/dev/null || echo '{}')"
+        fi
+
+        _merged="$(printf '%s' "$_existing" | \
+            jq --argjson hooks "$_hooks_json" '. + {hooks: $hooks}')" \
+            || { ct_log "WARN: start: jq merge failed; workspace hook wiring skipped"; _merged=""; }
+
+        if [ -n "$_merged" ]; then
+            printf '%s\n' "$_merged" > "$_ws_settings" 2>/dev/null || \
+                ct_log "WARN: start: could not write $_ws_settings; supervisor hooks will not fire"
+            ct_log "INFO: workspace hook wiring refreshed: $_ws_settings"
+        fi
+    fi
+fi
+
 # ---- exec runtime ----------------------------------------------------------
 
 cd "$CONTROL_DIR" || ct_die "start: failed to cd $CONTROL_DIR"
