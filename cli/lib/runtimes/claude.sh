@@ -242,6 +242,14 @@ yk_rt_claude_launch() {
         args+=( "$@" )
     fi
 
+    # --allow-root / YAKOS_ALLOW_ROOT=1: inject IS_SANDBOX=1 so claude's
+    # root-bypass guard passes. Only meaningful for bypass mode in a root
+    # environment (container). Setting it in non-root contexts is harmless.
+    if [ "${YAKOS_ALLOW_ROOT:-0}" = "1" ]; then
+        ct_log "WARNING: running claude in bypass mode as root — only safe in a disposable/sandboxed container"
+        IS_SANDBOX=1 exec claude "${args[@]}"
+    fi
+
     exec claude "${args[@]}"
 }
 
@@ -277,6 +285,14 @@ $task"
         resume_args=(--resume "$YAKOS_CONVERSATION_ID")
     fi
 
+    # When --allow-root / YAKOS_ALLOW_ROOT=1 is active, prefix the claude
+    # invocation with IS_SANDBOX=1 so the root-bypass guard in the binary
+    # passes. This applies to both headless dispatch paths below.
+    # Use the _sandbox_ok flag + conditional to stay bash 3.2-compatible
+    # (empty array expansion with set -u is unreliable on 3.2).
+    local _sandbox_ok=0
+    [ "${YAKOS_ALLOW_ROOT:-0}" = "1" ] && _sandbox_ok=1
+
     # If the caller (dispatch.sh) set YAKOS_USAGE_OUT or
     # YAKOS_SESSION_OUT, run claude with --output-format stream-json so
     # we can parse the final result event for both usage and session_id.
@@ -284,13 +300,23 @@ $task"
         local raw_tmp
         raw_tmp="$(mktemp -t yakos-claude-raw.XXXXXX)"
 
-        claude --agents "$single" \
+        if [ "$_sandbox_ok" = "1" ]; then
+            IS_SANDBOX=1 claude --agents "$single" \
                --permission-mode bypassPermissions \
                --add-dir "$project" \
                --output-format stream-json \
                --verbose \
                "${resume_args[@]}" \
                -p "$framed" > "$raw_tmp" 2>/dev/null
+        else
+            claude --agents "$single" \
+               --permission-mode bypassPermissions \
+               --add-dir "$project" \
+               --output-format stream-json \
+               --verbose \
+               "${resume_args[@]}" \
+               -p "$framed" > "$raw_tmp" 2>/dev/null
+        fi
         local rc=$?
 
         jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text' \
@@ -317,9 +343,17 @@ $task"
     fi
 
     # Default path — text-only, no telemetry capture.
-    claude --agents "$single" \
-           --permission-mode bypassPermissions \
-           --add-dir "$project" \
-           "${resume_args[@]}" \
-           -p "$framed"
+    if [ "$_sandbox_ok" = "1" ]; then
+        IS_SANDBOX=1 claude --agents "$single" \
+               --permission-mode bypassPermissions \
+               --add-dir "$project" \
+               "${resume_args[@]}" \
+               -p "$framed"
+    else
+        claude --agents "$single" \
+               --permission-mode bypassPermissions \
+               --add-dir "$project" \
+               "${resume_args[@]}" \
+               -p "$framed"
+    fi
 }
