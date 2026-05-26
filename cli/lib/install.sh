@@ -9,7 +9,15 @@
 #      overwrite without --force).
 #   2. Writes $HOME/.yakos containing the absolute path to YAKOS_ROOT
 #      (used by uninstall to identify our symlinks).
-#   3. Safely merges the experimental-agent-teams env var into
+#   3. Creates a managed launcher symlink at $HOME/.local/bin/yakos
+#      → $YAKOS_ROOT_ABS/cli/yakos. Only created or refreshed if the
+#      existing entry is either absent or a yakOS-owned symlink (i.e.
+#      it already resolves into this repo). Foreign binaries and foreign
+#      symlinks are left alone with a warning. The launcher path is
+#      recorded in $HOME/.yakos-state/install-manifest so uninstall
+#      removes exactly that entry. If $HOME/.local/bin is not on $PATH,
+#      a one-line instruction is printed.
+#   4. Safely merges the experimental-agent-teams env var into
 #      $HOME/.claude/settings.json:
 #        - If file doesn't exist: creates it with just the env block and
 #          touches $HOME/.claude/.yakos-created-settings as a marker
@@ -38,6 +46,12 @@ Creates per-file symlinks under ~/.claude/{agents,skills,rules,playbooks}/
 that point into this repo's lib/. Existing files in those directories are
 preserved (use --force to overwrite YakOS-owned symlinks).
 
+Creates a managed launcher symlink at ~/.local/bin/yakos → this repo's
+cli/yakos. The symlink is only created (or refreshed) when there is no
+existing 'yakos' entry at that path or it already points into this repo.
+Foreign binaries/symlinks are left alone with a warning. Records the
+launcher path in ~/.yakos-state/install-manifest for clean uninstall.
+
 Safely merges the experimental-agent-teams env var into
 ~/.claude/settings.json. If the file already exists, it is validated as
 JSON and a timestamped backup is created before merge.
@@ -53,6 +67,7 @@ Options:
 Never touches:
     ~/.claude/projects/    (auto-memory)
     Unknown keys in settings.json
+    Foreign yakos binaries or symlinks at ~/.local/bin/yakos
 EOF
             exit 0
             ;;
@@ -69,12 +84,17 @@ CLAUDE_DIR="$HOME/.claude"
 YAKOS_POINTER="$HOME/.yakos"
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 CREATED_MARKER="$CLAUDE_DIR/.yakos-created-settings"
+YAKOS_STATE_DIR="$HOME/.yakos-state"
+INSTALL_MANIFEST="$YAKOS_STATE_DIR/install-manifest"
+LAUNCHER_DIR="$HOME/.local/bin"
+LAUNCHER_PATH="$LAUNCHER_DIR/yakos"
 
 YAKOS_ROOT_ABS="$(ct_realpath "$YAKOS_ROOT")"
 
 ct_log "Installing YakOS from $YAKOS_ROOT_ABS into $CLAUDE_DIR"
 
 mkdir -p "$CLAUDE_DIR"
+mkdir -p "$YAKOS_STATE_DIR"
 
 # ---- 0. preflight: bail before touching state if existing settings.json is invalid
 
@@ -86,6 +106,71 @@ fi
 
 printf '%s\n' "$YAKOS_ROOT_ABS" > "$YAKOS_POINTER"
 ct_log "Wrote $YAKOS_POINTER"
+
+# ---- 1a. managed launcher symlink -------------------------------------------
+# Target: $HOME/.local/bin/yakos → $YAKOS_ROOT_ABS/cli/yakos
+# Rules:
+#   - If no entry at LAUNCHER_PATH: create symlink, record in manifest.
+#   - If existing entry is a symlink resolving into YAKOS_ROOT_ABS (or any
+#     yakOS root, identified by the same canonical cli/yakos target name):
+#     refresh it to point at this root, record in manifest.
+#   - If existing entry is a real file or a symlink pointing outside this
+#     repo: warn and leave it alone.
+
+LAUNCHER_TARGET="$YAKOS_ROOT_ABS/cli/yakos"
+LAUNCHER_CREATED=0
+
+mkdir -p "$LAUNCHER_DIR"
+
+if [ -L "$LAUNCHER_PATH" ]; then
+    existing_target="$(ct_realpath "$LAUNCHER_PATH" 2>/dev/null || true)"
+    # Check if it resolves into this yakOS root specifically, or if it resolves
+    # into any path whose basename is "yakos" inside a "cli/" directory
+    # (i.e. a yakOS-shaped launcher from a different clone location).
+    case "$existing_target" in
+        "$YAKOS_ROOT_ABS"/*)
+            # Already owned by this exact root — refresh.
+            rm -f "$LAUNCHER_PATH"
+            ln -s "$LAUNCHER_TARGET" "$LAUNCHER_PATH"
+            ct_log "Refreshed launcher symlink: $LAUNCHER_PATH → $LAUNCHER_TARGET"
+            LAUNCHER_CREATED=1
+            ;;
+        */cli/yakos)
+            # Looks like a yakOS launcher from a different clone — we own it
+            # by shape. Refresh to point at this root.
+            rm -f "$LAUNCHER_PATH"
+            ln -s "$LAUNCHER_TARGET" "$LAUNCHER_PATH"
+            ct_log "Refreshed yakOS launcher symlink (was: $existing_target): $LAUNCHER_PATH → $LAUNCHER_TARGET"
+            LAUNCHER_CREATED=1
+            ;;
+        *)
+            ct_log "WARNING: $LAUNCHER_PATH is a symlink pointing to '$existing_target' (not yakOS-owned). Leaving it alone. To use this yakOS install, add $YAKOS_ROOT_ABS/cli to your PATH or remove/rename the existing launcher."
+            ;;
+    esac
+elif [ -e "$LAUNCHER_PATH" ]; then
+    # Real file — never touch it.
+    ct_log "WARNING: $LAUNCHER_PATH exists and is not a symlink (real file). Leaving it alone. To use this yakOS install, add $YAKOS_ROOT_ABS/cli to your PATH or remove/rename the existing binary."
+else
+    # Nothing there — create it.
+    ln -s "$LAUNCHER_TARGET" "$LAUNCHER_PATH"
+    ct_log "Created launcher symlink: $LAUNCHER_PATH → $LAUNCHER_TARGET"
+    LAUNCHER_CREATED=1
+fi
+
+if [ "$LAUNCHER_CREATED" = "1" ]; then
+    # Record in manifest so uninstall removes exactly this.
+    printf 'launcher=%s\n' "$LAUNCHER_PATH" > "$INSTALL_MANIFEST"
+    ct_log "Recorded launcher in $INSTALL_MANIFEST"
+    # PATH guidance if the dir is not on PATH.
+    case ":${PATH}:" in
+        *":$LAUNCHER_DIR:"*) : ;;
+        *)
+            printf '\nNOTE: %s is not on your PATH.\n' "$LAUNCHER_DIR"
+            printf 'Add this line to your shell profile (~/.bashrc, ~/.zshrc, etc.):\n'
+            printf '    export PATH="%s:$PATH"\n\n' "$LAUNCHER_DIR"
+            ;;
+    esac
+fi
 
 # ---- 2. per-file symlinks ----------------------------------------------------
 
@@ -195,10 +280,17 @@ merge_settings
 
 # ---- 4. summary -------------------------------------------------------------
 
+_launcher_note="not managed (foreign or real-file collision — see warnings above)"
+if [ "$LAUNCHER_CREATED" = "1" ]; then
+    _launcher_note="$LAUNCHER_PATH → $LAUNCHER_TARGET"
+fi
+
 cat <<EOF
 
 YakOS install complete.
     Pointer:       $YAKOS_POINTER → $YAKOS_ROOT_ABS
+    Launcher:      $_launcher_note
+    Manifest:      $INSTALL_MANIFEST
     Symlinks:      $link_count created, $overwrite_count refreshed, $skip_count skipped
     Settings:      $SETTINGS_FILE
 
