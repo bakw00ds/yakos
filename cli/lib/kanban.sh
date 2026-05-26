@@ -205,7 +205,12 @@ EOF
                     print "<li>" catspan task_title notesdiv "</li>"
                 }
                 line = $0
+                # Strip strict form: - [ ] K-3 — title
                 gsub(/^- \[.\] K-[0-9]+ [—-] /, "", line)
+                # Strip freeform form: - [id] — title  or  - [id] title
+                # Remove the leading "- [<id>]" prefix and optional separator.
+                gsub(/^- \[[^\]]*\][[:space:]]*(— |—|-[[:space:]])/, "", line)
+                gsub(/^- \[[^\]]*\][[:space:]]*/, "", line)
                 task_title = line; task_cat = ""; task_notes = ""
                 next
             }
@@ -682,11 +687,18 @@ ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 _mutate_lock = threading.Lock()
 
 HEAD_RE = re.compile(r"^##\s+(.+?)\s*$")
-TASK_RE = re.compile(r"^-\s*\[([ xX])\]\s*(K-\d+)\s*[—-]\s*(.*)$")
+# Strict form: - [ ] K-3 — title  /  - [x] K-3 — title
+# Bracket content is a single char that is a space, x, or X (checkbox).
+TASK_STRICT_RE = re.compile(r"^-\s*\[([ xX])\]\s*(K-\d+)\s*[—-]\s*(.*)$")
+# Freeform form: - [<id>] <rest>  where <id> is NOT a bare checkbox char.
+# Matches any non-empty bracket content that is not solely " ", "x", or "X".
+TASK_FREE_RE   = re.compile(r"^-\s*\[([^ xX][^\]]*|[^ xX])\]\s*(.*)$")
 ASSIGNED_RE = re.compile(r"^\s+-\s*assigned:\s*(.*)$")
 BLOCKERS_RE = re.compile(r"^\s+-\s*blockers:\s*(.*)$")
 CATEGORY_RE = re.compile(r"^\s+-\s*category:\s*(.*)$")
 NOTES_RE    = re.compile(r"^\s+-\s*notes:\s*(.*)$")
+# Separator that freeform titles may begin with (em-dash or ASCII hyphen).
+_FREE_SEP_RE = re.compile(r"^[—-]\s*")
 
 
 def parse_board():
@@ -706,10 +718,24 @@ def parse_board():
             continue
         if cur is None:
             continue
-        m = TASK_RE.match(line)
+        # Try strict form first (checkbox + K-N id).
+        m = TASK_STRICT_RE.match(line)
         if m:
             task = {"id": m.group(2), "title": m.group(3).strip(),
                     "done": m.group(1).lower() == "x",
+                    "category": "other", "assigned": "",
+                    "blockers": "", "notes": ""}
+            cols[cur].append(task)
+            continue
+        # Try freeform form (arbitrary bracket id, no checkbox semantics).
+        fm = TASK_FREE_RE.match(line)
+        if fm:
+            fid   = fm.group(1).strip()
+            frest = fm.group(2).strip()
+            # Strip a leading em-dash or ASCII hyphen separator if present.
+            ftitle = _FREE_SEP_RE.sub("", frest, count=1).strip()
+            task = {"id": fid, "title": ftitle,
+                    "done": False,
                     "category": "other", "assigned": "",
                     "blockers": "", "notes": ""}
             cols[cur].append(task)
@@ -1623,10 +1649,22 @@ function sortItems(items) {
       return a.i - b.i;
     });
   } else if (activeSort === "id") {
+    // K-<num> ids sort numerically; freeform ids (e.g. "#219", "gov",
+    // "71.2") fall back to stable insertion order via string comparison
+    // rather than coercing everything to 0 and losing order.
     indexed.sort((a, b) => {
-      const na = parseInt((a.t.id || "K-0").replace("K-", ""), 10) || 0;
-      const nb = parseInt((b.t.id || "K-0").replace("K-", ""), 10) || 0;
-      return na - nb;
+      const ia = String(a.t.id || "");
+      const ib = String(b.t.id || "");
+      const ka = /^K-(\d+)$/.exec(ia);
+      const kb = /^K-(\d+)$/.exec(ib);
+      if (ka && kb) return parseInt(ka[1], 10) - parseInt(kb[1], 10);
+      // Mixed or both freeform: numeric K-N beats freeform (comes first),
+      // two freeform ids are compared lexicographically for a stable sort.
+      if (ka) return -1;
+      if (kb) return 1;
+      if (ia < ib) return -1;
+      if (ia > ib) return 1;
+      return a.i - b.i;
     });
   }
   return indexed.map(x => x.t);
