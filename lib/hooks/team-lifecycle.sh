@@ -195,7 +195,11 @@ case "$tool" in
     Agent)
         emit_event "agent_spawned"
         # Intentionally do NOT touch .session-started or history.
-        agent_name="$(printf '%s' "$tool_input" | jq -r '.subagent_type // empty' 2>/dev/null || true)"
+        # Strip "yakos:" prefix from subagent_type so coord records bare ids
+        # (e.g. "backend", not "yakos:backend"). hi_strip_rt_prefix is defined
+        # in hook-input.sh, which is already sourced above.
+        agent_name_raw="$(printf '%s' "$tool_input" | jq -r '.subagent_type // empty' 2>/dev/null || true)"
+        agent_name="$(hi_strip_rt_prefix "$agent_name_raw")"
         coord_mirror "agent_spawn" \
             "$(jq -nc --arg agent "$agent_name" '{agent: $agent}' 2>/dev/null || echo '{}')"
         ;;
