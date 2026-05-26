@@ -31,7 +31,7 @@ set -eu
 
 usage() {
     cat <<'EOF'
-yakos quickstart [--runtime <id>] [--multi-dev] [--safe] [--dry-run]
+yakos quickstart [--runtime <id>] [--multi-dev] [--safe] [--dry-run] [--allow-root]
 
 One command to go from "fresh clone" to "session started against the cwd".
 
@@ -47,12 +47,14 @@ Examples:
   yakos quickstart                  # install if needed, init, start
   yakos quickstart --multi-dev      # bootstrap with co-pilot mode
   yakos quickstart --runtime codex  # start with codex instead of claude
+  yakos quickstart --allow-root     # container/root bypass mode
 EOF
 }
 
 RUNTIME=""
 MULTI_DEV=0
 SAFE=0
+ALLOW_ROOT=0
 DRY_RUN=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -61,6 +63,7 @@ while [ "$#" -gt 0 ]; do
         --runtime=*) RUNTIME="${1#--runtime=}" ;;
         --multi-dev) MULTI_DEV=1 ;;
         --safe) SAFE=1 ;;
+        --allow-root) ALLOW_ROOT=1 ;;
         --dry-run) DRY_RUN=1 ;;
         *) ct_die "quickstart: unknown argument '$1' (try --help)" ;;
     esac
@@ -183,5 +186,6 @@ echo "step 3/3: start session for '$NAME'"
 start_args=("$NAME")
 [ -n "$RUNTIME" ] && start_args+=(--runtime "$RUNTIME")
 [ "$SAFE" = "1" ] && start_args+=(--safe)
+[ "$ALLOW_ROOT" = "1" ] && start_args+=(--allow-root)
 [ "$DRY_RUN" = "1" ] && start_args+=(--dry-run)
 exec bash "$YAKOS_LIB/start.sh" "${start_args[@]}"

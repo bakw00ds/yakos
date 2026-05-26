@@ -48,6 +48,10 @@ Permission mode:
     (default)             bypass — claude bypassPermissions / codex
                           --dangerously-bypass-approvals-and-sandbox /
                           gemini --approval-mode=yolo.
+    --allow-root          Opt-in: allow bypass mode when running as root
+                          (e.g. inside a container). Equivalent to setting
+                          YAKOS_ALLOW_ROOT=1. Only safe in a disposable/
+                          sandboxed container. Has no effect with --safe.
 
 Agent injection:
     --no-agents           Skip materialization (debug; agents won't bind).
@@ -78,12 +82,14 @@ Examples:
     yakos start myapp --runtime codex
     yakos start myapp --runtime gemini --safe
     yakos start myapp --dry-run
+    yakos start myapp --allow-root    # container/root bypass mode
 EOF
 }
 
 NAME=""
 RUNTIME=""
 SAFE=0
+ALLOW_ROOT=0
 NO_AGENTS=0
 DRY_RUN=0
 PRINT_AGENTS=0
@@ -96,6 +102,9 @@ STRICT_MCP=0
 MODEL=""
 PASSTHROUGH=()
 
+# Honor YAKOS_ALLOW_ROOT env var as equivalent to --allow-root.
+[ "${YAKOS_ALLOW_ROOT:-0}" = "1" ] && ALLOW_ROOT=1
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
@@ -106,6 +115,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --runtime=*) RUNTIME="${1#--runtime=}" ;;
         --safe) SAFE=1 ;;
+        --allow-root) ALLOW_ROOT=1 ;;
         --no-agents) NO_AGENTS=1 ;;
         --dry-run) DRY_RUN=1 ;;
         --print-agents) PRINT_AGENTS=1 ;;
@@ -209,6 +219,10 @@ fi
 # Translate perm mode to the abstract bypass|safe used by adapters.
 PERM_MODE="bypass"; [ "$SAFE" = "1" ] && PERM_MODE="safe"
 
+# Export ALLOW_ROOT so runtime adapters can read it without requiring
+# a new positional arg in the yk_rt_launch contract.
+export YAKOS_ALLOW_ROOT="$ALLOW_ROOT"
+
 # ---- agent count for banner -------------------------------------------------
 
 AGENT_COUNT=0
@@ -234,7 +248,7 @@ yakos start — preflight
   runtime:        $RUNTIME ($CAPS)
   cli:            $( [ "$CLI_OK" = "1" ] && printf 'OK' || printf 'NOT FOUND (--dry-run only)' )
   auth:           $( [ "$AUTH_OK" = "1" ] && printf 'OK' || printf 'NOT CONFIGURED (run: yakos auth login %s)' "$RUNTIME" )
-  permission:     $( [ "$PERM_MODE" = "bypass" ] && printf 'bypassPermissions' || printf 'default' )
+  permission:     $( [ "$PERM_MODE" = "bypass" ] && printf 'bypassPermissions' || printf 'default' )$( [ "$ALLOW_ROOT" = "1" ] && printf ' (allow-root)' || true )
   agents:         $AGENT_COUNT registered$( [ "$NO_AGENTS" = "1" ] && printf ' (--no-agents: suppressed)' || true )
   mode flags:     $( [ "$BARE" = "1" ] && printf 'bare ' || true )$( [ "$IDE" = "1" ] && printf 'ide ' || true )$( [ "$CONTINUE" = "1" ] && printf 'continue ' || true )$( [ -n "$RESUME" ] && printf 'resume=%s ' "$RESUME" || true )$( [ "$FORK" = "1" ] && printf 'fork ' || true )$( [ -n "$MODEL" ] && printf 'model=%s ' "$MODEL" || true )
 
@@ -324,7 +338,8 @@ if [ "$DRY_RUN" = "1" ]; then
     echo "Dry run — would exec via runtime '$RUNTIME':"
     case "$RUNTIME" in
         claude)
-            printf '  claude --add-dir %q --permission-mode %s' \
+            { [ "$ALLOW_ROOT" = "1" ] && printf '  IS_SANDBOX=1 '; } || printf '  '
+            printf 'claude --add-dir %q --permission-mode %s' \
                 "$PROJECT_REPO" \
                 "$( [ "$SAFE" = "1" ] && printf 'default' || printf 'bypassPermissions' )"
             { [ "$AGENT_COUNT" -gt 0 ] && [ "$NO_AGENTS" != "1" ] && printf " --agents '<%d agents JSON>'" "$AGENT_COUNT"; } || true
