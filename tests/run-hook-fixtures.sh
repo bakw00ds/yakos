@@ -87,6 +87,21 @@ setup_no_allowlist() {
     : # no path-allowlist.json
 }
 
+setup_allowlist_strict_namespaced() {
+    # Same policy as setup_allowlist_strict but keyed on bare "go-api".
+    # Used to verify that a namespaced agent ("yakos:go-api") hits the
+    # same policy after hi_sender_role strips the prefix.
+    cat > "$1/.claude/path-allowlist.json" <<'EOF'
+{
+  "lead": {"allow": ["**"], "deny": [".env", ".env.*"]},
+  "go-api": {
+    "allow": ["api/**", "internal/**"],
+    "deny": ["api/migrations/**"]
+  }
+}
+EOF
+}
+
 setup_with_bypass() {
     # Bypass file with one active entry covering path-allowlist on web/index.js
     mkdir -p "$1/work/current"
@@ -124,6 +139,8 @@ case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlis
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_with_bypass     # bypass dir + allowlist absent → permissive
 case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlist setup_no_allowlist    # no allowlist → permissive WARN
+# namespaced agent ("yakos:go-api") must hit bare-keyed policy ("go-api")
+case_check path-allowlist.sh   pretooluse-edit-api-namespaced.json 0 path-allowlist setup_allowlist_strict_namespaced
 
 # --- path-log ---
 case_check path-log.sh         pretooluse-edit-api.json          0 path-log
@@ -142,6 +159,8 @@ case_check mailbox-mirror.sh   sendmessage-to-lead.json          0 mailbox-mirro
 # --- team-lifecycle ---
 case_check team-lifecycle.sh   teamcreate.json                   0 team-lifecycle
 case_check team-lifecycle.sh   agent-spawn.json                  0 team-lifecycle
+# namespaced subagent_type (yakos: prefix) must also pass
+case_check team-lifecycle.sh   agent-spawn-namespaced.json       0 team-lifecycle
 
 # --- session-end-check ---
 case_check session-end-check.sh sessionend-clean.json            0 session-end-check

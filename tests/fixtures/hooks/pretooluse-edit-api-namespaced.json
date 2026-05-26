@@ -1,0 +1,15 @@
+{
+  "session_id": "fixture-namespaced-agent-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "yakos:go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "api/handler.go",
+    "old_string": "old",
+    "new_string": "new"
+  },
+  "tool_use_id": "toolu_fixture_namespaced_001"
+}

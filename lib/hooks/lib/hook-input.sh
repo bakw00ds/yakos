@@ -61,10 +61,30 @@ hi_session_id()   { hi_field '.session_id'; }
 hi_transcript()   { hi_field '.transcript_path'; }
 hi_cwd()          { hi_field '.cwd'; }
 
-# Sender role: "lead" if .agent_type absent, otherwise the agent_type string.
+# hi_strip_rt_prefix <value>
+#   Strip the leading "yakos:" namespace prefix that claude attaches when
+#   agents are registered via --plugin-dir with the "yakos" plugin name
+#   (E2BIG fix, runtimes/claude.sh). Returns the bare agent id.
+#   Example: "yakos:backend" → "backend", "lead" → "lead".
+#   Only strips the exact "yakos:" prefix — does not touch other colons
+#   (e.g. a project agent legitimately named "myns:helper" is left alone).
+hi_strip_rt_prefix() {
+    local v="$1"
+    case "$v" in
+        yakos:*) printf '%s' "${v#yakos:}" ;;
+        *)        printf '%s' "$v" ;;
+    esac
+}
+
+# Sender role: "lead" if .agent_type absent, otherwise the agent_type string
+# with any "yakos:" namespace prefix stripped (see hi_strip_rt_prefix).
 # Reading from stdin JSON, NOT $CLAUDE_CODE_AGENT (per Phase 1.7: env var
 # is missing in team SendMessage hook fires).
-hi_sender_role()  { hi_field_or '.agent_type' 'lead'; }
+hi_sender_role() {
+    local raw
+    raw="$(hi_field_or '.agent_type' 'lead')"
+    hi_strip_rt_prefix "$raw"
+}
 
 # Tool-specific shortcuts
 hi_file_path()    { hi_field '.tool_input.file_path'; }
