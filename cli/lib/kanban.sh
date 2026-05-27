@@ -178,6 +178,7 @@ cmd_render_html() {
     cat > "$out" <<'EOF'
 <!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>yakOS kanban</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiIgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2Ij48cmVjdCB4PSIxIiB5PSIzIiB3aWR0aD0iNCIgaGVpZ2h0PSIxMCIgcng9IjEiIGZpbGw9ImhzbCgyMTEsOTAlLDQyJSkiLz48cmVjdCB4PSI2IiB5PSIzIiB3aWR0aD0iNCIgaGVpZ2h0PSIxMCIgcng9IjEiIGZpbGw9ImhzbCgyMTEsOTAlLDQyJSkiLz48cmVjdCB4PSIxMSIgeT0iMyIgd2lkdGg9IjQiIGhlaWdodD0iMTAiIHJ4PSIxIiBmaWxsPSJoc2woMjExLDkwJSw0MiUpIi8+PC9zdmc+">
 <style>
 body { font-family: -apple-system, sans-serif; margin: 2em; }
 .cols { display: flex; gap: 1em; }
@@ -783,6 +784,7 @@ PAGE = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kanban</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiIgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2Ij48cmVjdCB4PSIxIiB5PSIzIiB3aWR0aD0iNCIgaGVpZ2h0PSIxMCIgcng9IjEiIGZpbGw9ImhzbCgyMTEsOTAlLDQyJSkiLz48cmVjdCB4PSI2IiB5PSIzIiB3aWR0aD0iNCIgaGVpZ2h0PSIxMCIgcng9IjEiIGZpbGw9ImhzbCgyMTEsOTAlLDQyJSkiLz48cmVjdCB4PSIxMSIgeT0iMyIgd2lkdGg9IjQiIGhlaWdodD0iMTAiIHJ4PSIxIiBmaWxsPSJoc2woMjExLDkwJSw0MiUpIi8+PC9zdmc+">
 <style>
 /* ── Design tokens (light / dark) ───────────────────────────────────────── */
 :root {
@@ -2070,6 +2072,8 @@ class Handler(BaseHTTPRequestHandler):
             cats = _board_categories(board)
             self._send(200, json.dumps({"project": PROJECT, "file": KANBAN_FILE,
                                         "columns": COLUMNS, "categories": cats}))
+        elif path == "/favicon.ico":
+            self._send(204, "")
         else:
             self._send(404, json.dumps({"error": "not found"}))
 
