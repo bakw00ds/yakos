@@ -272,6 +272,15 @@ yk_rt_claude_dispatch() {
         ct_die "claude_dispatch: agent '$agent_name' not found in composed set"
     fi
 
+    # If dispatch.sh set YAKOS_MODEL_OVERRIDE, patch the agent's model field
+    # in the single-agent JSON so the runtime uses the requested tier.
+    if [ -n "${YAKOS_MODEL_OVERRIDE:-}" ]; then
+        single="$(printf '%s' "$single" | jq \
+            --arg n "$agent_name" \
+            --arg m "$YAKOS_MODEL_OVERRIDE" \
+            '.[$n].model = $m')"
+    fi
+
     local framed
     framed="Use the Agent tool to dispatch the following task to subagent_type=\"$agent_name\". Return only the subagent's final report.
 

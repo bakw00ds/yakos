@@ -1,0 +1,34 @@
+{
+  "case_id": "flaky-snapshot-03",
+  "task": "A Jest snapshot test (`UserCard.test.tsx`) passes on every developer machine but fails on CI with: `1 snapshot failed: Received value does not match stored snapshot`. The snapshot file is committed. No code changed between the last green CI run and the failing one. Explain why this pattern occurs and what the likely root cause is.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "identifies-environment-delta",
+        "weight": 0.45,
+        "type": "binary"
+      },
+      {
+        "name": "names-likely-causes",
+        "weight": 0.35,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "distinguishes-flake-from-real-failure",
+        "weight": 0.2,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Identifies that snapshot mismatches with no code change point to a rendering environment difference (fonts, OS, locale, date/time, non-deterministic ordering)",
+    "Names at least one concrete likely cause: Node version difference, platform-specific rendering, timezone in CI vs local, or non-deterministic component output",
+    "Classifies this as a flake or environment failure — not a real code regression",
+    "Recommends updating the snapshot in CI and/or pinning the environment, rather than papering over with --updateSnapshot on every run",
+    "Does NOT modify any source or test files"
+  ],
+  "context_files": [],
+  "max_duration_s": 60,
+  "max_cost_usd": 0.03,
+  "tags": ["jest", "snapshot", "ci", "flake", "environment-delta"]
+}

@@ -200,6 +200,9 @@ validate_tree() {
 
     # Playbook reference resolution — broken references are ERRORs.
     check_playbook_references "$base"
+
+    # Golden-case eval validation (project mode)
+    check_eval_dirs "$base"
 }
 
 # ---- standards checks (framework-mode only; STYLE.md §1-§7) ----------------
@@ -413,6 +416,167 @@ check_agent_md_sections() {
                  ! -name 'README.md' ! -name 'INDEX.md' 2>/dev/null)
 }
 
+# ---- golden-case eval validation -------------------------------------------
+#
+# For each agent .md under lib/agents/ (and project .claude/agents/ when a
+# project path is provided), check whether a sibling eval/ directory exists
+# with case-*.json files.  If present, validate each file against the
+# golden-case schema:
+#
+#   case_id            string
+#   task               string
+#   rubric.criteria[]  array of {name:str, weight:num, type:"binary"|"scalar_0_1"}
+#   expected_outcomes  array of strings
+#   context_files      array of relative path strings
+#   max_duration_s     integer > 0
+#   max_cost_usd       number  > 0
+#   tags               array of strings
+#
+# Violations in default mode: WARN.  In strict mode (--strict): ERROR.
+# Additionally WARN when an agent has model-policy: frontmatter but no
+# eval/ dir (policy without evidence).
+
+_validate_eval_case_file() {
+    # Returns 0 if valid; prints reason to stderr and returns 1 if not.
+    # Uses only jq features compatible with jq 1.5+.
+    # Avoids `path` as a parameter name (reserved keyword in jq).
+    # Validates the root object as a whole; criteria are checked via
+    # all() to avoid fan-out that would leave . bound to a criterion.
+    local f="$1"
+    local reason
+    reason="$(jq -e '
+        # Top-level string fields
+        if (.case_id | type) != "string" then
+            error("case_id must be a string")
+        else . end |
+        if (.task | type) != "string" then
+            error("task must be a string")
+        else . end |
+        # rubric
+        if (.rubric | type) != "object" then
+            error("rubric must be an object")
+        else . end |
+        if (.rubric.criteria | type) != "array" then
+            error("rubric.criteria must be an array")
+        else . end |
+        if (.rubric.criteria | length) == 0 then
+            error("rubric.criteria must be non-empty")
+        else . end |
+        # Validate every criterion without fan-out: use indices
+        if (.rubric.criteria | to_entries | map(
+                if (.value.name | type) != "string" then
+                    error("criteria[\(.key)].name must be a string")
+                else . end |
+                if (.value.weight | type) != "number" then
+                    error("criteria[\(.key)].weight must be a number")
+                else . end |
+                if (.value.weight <= 0 or .value.weight > 1) then
+                    error("criteria[\(.key)].weight must be in (0,1]")
+                else . end |
+                if (.value.type != "binary" and .value.type != "scalar_0_1") then
+                    error("criteria[\(.key)].type must be binary or scalar_0_1")
+                else . end
+            ) | length) >= 0 then . else . end |
+        # expected_outcomes
+        if (.expected_outcomes | type) != "array" then
+            error("expected_outcomes must be an array")
+        else . end |
+        if (.expected_outcomes | length) == 0 then
+            error("expected_outcomes must be non-empty")
+        else . end |
+        # context_files
+        if (.context_files | type) != "array" then
+            error("context_files must be an array")
+        else . end |
+        # max_duration_s
+        if (.max_duration_s | type) != "number" then
+            error("max_duration_s must be a number")
+        else . end |
+        if .max_duration_s <= 0 then
+            error("max_duration_s must be > 0")
+        else . end |
+        # max_cost_usd
+        if (.max_cost_usd | type) != "number" then
+            error("max_cost_usd must be a number")
+        else . end |
+        if .max_cost_usd <= 0 then
+            error("max_cost_usd must be > 0")
+        else . end |
+        # tags
+        if (.tags | type) != "array" then
+            error("tags must be an array")
+        else . end |
+        "ok"
+    ' "$f" 2>&1)"
+    if printf '%s' "$reason" | grep -q '"ok"'; then
+        return 0
+    fi
+    printf '%s\n' "$reason" >&2
+    return 1
+}
+
+check_eval_dirs() {
+    # Walk agent search roots provided as arguments.  For each agent .md
+    # file that has a sibling eval/ directory, validate every case-*.json
+    # therein.  Also warn when model-policy: is set but eval/ is absent.
+    local root="$1"
+    [ -d "$root" ] || return 0
+
+    while IFS= read -r agent_file; do
+        [ -n "$agent_file" ] || continue
+        case "$(basename -- "$agent_file")" in README.md|INDEX.md|lead-template.md) continue ;; esac
+
+        local agent_dir
+        agent_dir="$(dirname -- "$agent_file")"
+        local agent_base
+        agent_base="$(basename -- "$agent_file" .md)"
+
+        # Locate the eval/ sibling: <agents-dir>/<id>/eval/ OR
+        # a top-level sibling eval/ next to the .md file.
+        local eval_dir=""
+        if [ -d "${agent_dir}/${agent_base}/eval" ]; then
+            eval_dir="${agent_dir}/${agent_base}/eval"
+        elif [ -d "${agent_dir}/eval" ] && [ "$(basename -- "$agent_dir")" = "$agent_base" ]; then
+            eval_dir="${agent_dir}/eval"
+        fi
+
+        # Check for model-policy: without eval/
+        local fm
+        fm="$(awk '
+            BEGIN { in_fm=0 }
+            NR==1 && /^---[[:space:]]*$/ { in_fm=1; next }
+            in_fm==1 && /^---[[:space:]]*$/ { exit }
+            in_fm==1 { print }
+        ' "$agent_file")"
+        local model_policy
+        model_policy="$(printf '%s\n' "$fm" | \
+            awk -v k="model-policy" '$1==k":" { $1=""; sub(/^ /,"",$0); print; exit }')"
+
+        if [ -n "$model_policy" ] && [ -z "$eval_dir" ]; then
+            warn "$agent_file: has model-policy:$model_policy but no eval/ directory — create cases before routing can recommend"
+        fi
+
+        [ -n "$eval_dir" ] || continue
+
+        # Validate each case file found
+        local case_count=0
+        while IFS= read -r case_file; do
+            [ -n "$case_file" ] || continue
+            case_count=$((case_count + 1))
+            local err_out
+            if err_out="$(_validate_eval_case_file "$case_file" 2>&1)"; then
+                ok "eval case $case_file"
+            else
+                warn "$case_file: golden-case schema violation: $err_out"
+            fi
+        done < <(find "$eval_dir" -maxdepth 1 -name 'case-*.json' -type f 2>/dev/null | sort)
+
+        if [ "$case_count" -eq 0 ]; then
+            warn "$eval_dir: eval/ directory exists but contains no case-*.json files"
+        fi
+    done < <(find "$root/agents" -maxdepth 1 -name '*.md' -type f 2>/dev/null)
+}
+
 run_standards_checks() {
     echo
     echo "Standards checks (WARN-only in v0.1; see STYLE.md):"
@@ -423,6 +587,8 @@ run_standards_checks() {
     check_dark_code
     check_skill_md_sections
     check_agent_md_sections
+    # Golden-case eval validation for framework agents
+    check_eval_dirs "$YAKOS_ROOT/lib"
 }
 
 # ---- mode selection ---------------------------------------------------------

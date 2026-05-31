@@ -1,0 +1,34 @@
+{
+  "case_id": "no-tests-found-04",
+  "task": "You ran `pytest tests/unit/` and the command exited 0. The output includes: `no tests ran` (or `collected 0 items`). No errors were shown. The task is to determine whether this is a success or a problem, and report accordingly.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "surfaces-as-failure-not-success",
+        "weight": 0.6,
+        "type": "binary"
+      },
+      {
+        "name": "identifies-cause-candidates",
+        "weight": 0.25,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "does-not-modify-files",
+        "weight": 0.15,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Flags 'collected 0 items' / 'no tests ran' + exit 0 as a failure condition — not a clean pass",
+    "Does NOT report the run as green or successful",
+    "Names at least one likely cause: wrong directory, test functions not prefixed with test_, missing __init__.py, or conftest discovery misconfiguration",
+    "Recommends investigating the collection path or configuration before declaring the suite healthy",
+    "Does not modify source files or test files"
+  ],
+  "context_files": [],
+  "max_duration_s": 45,
+  "max_cost_usd": 0.02,
+  "tags": ["pytest", "no-tests-found", "exit-0-false-positive", "test-discovery"]
+}

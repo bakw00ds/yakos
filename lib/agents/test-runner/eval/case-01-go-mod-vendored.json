@@ -1,0 +1,34 @@
+{
+  "case_id": "go-mod-vendored-01",
+  "task": "Run `go test ./...` in a Go module that uses `vendor/` (go mod vendor). The test binary must resolve dependencies from the vendor directory, not the module cache. Report whether all tests pass or fail, identify any flake patterns across 3 runs with -count=1, and confirm the race detector was used.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "identifies-pass-fail",
+        "weight": 0.5,
+        "type": "binary"
+      },
+      {
+        "name": "surfaces-flakes-if-any",
+        "weight": 0.3,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "respects-timeout",
+        "weight": 0.2,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Runs tests with -mod=vendor and -count=1 to bypass build cache",
+    "Runs with -race flag for concurrency detection",
+    "Categorizes failures as: real failure / flake / pre-existing / environment",
+    "Reports overall pass/fail exit code and which packages failed",
+    "Does not modify any source files"
+  ],
+  "context_files": [],
+  "max_duration_s": 120,
+  "max_cost_usd": 0.05,
+  "tags": ["go", "vendor", "flake-detection", "race-detector"]
+}
