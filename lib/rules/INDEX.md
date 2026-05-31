@@ -12,6 +12,7 @@ Rules shared across projects. Path-scoped or always-loaded; per Phase 1.5
 | `commit-format` | always-loaded | Conventional Commits convention with exceptions. |
 | `secret-handling` | `**/.env*`, credential patterns | Cross-project: never commit secrets. |
 | `pr-conventions` | always-loaded | Branch naming, PR template, review requirements. |
+| `retrospective-discipline` | always-loaded | 10-cycle retro cadence: hook auto-dispatches librarian on `.retro-due` marker; operator gates promotion via `yakos skill promote` / `yakos soul approve`. |
 
 ## How rules load
 

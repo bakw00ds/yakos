@@ -12,6 +12,11 @@
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/cycle-counter.sh"
           },
           {
+            "_doc": "retro-dispatch runs after cycle-counter so the .retro-due marker is already written when this fires.",
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/retro-dispatch.sh"
+          },
+          {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/context-threshold.sh"
           },
