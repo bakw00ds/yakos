@@ -1,0 +1,12 @@
+{
+  "model_id": "gpt-5-nano",
+  "scores": {
+    "acceptance_criteria_specificity": 0.5,
+    "assumption_surfacing": 1.0,
+    "decomposition_granularity": 0,
+    "dependency_clarity": 1.0,
+    "domain_boundaries_respected": 1.0,
+    "risk_rollback_honesty": 1.0
+  },
+  "notes": "One task estimated at 3 weeks: violates the 2-day cap and the minimum task count of 2. decomposition_granularity is 0. The task's done_means names the directory and test suite which is partially specific (0.5). Assumptions section lists 5 specific items. No dependency concerns with a single task. Domain correct. Risks has a rollback note."
+}

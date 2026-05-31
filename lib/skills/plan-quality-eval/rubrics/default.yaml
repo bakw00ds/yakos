@@ -1,0 +1,135 @@
+# Plan Quality Rubric — default
+# Each dimension is scored 0 / 0.5 / 1.0 (fail / partial / pass).
+# Weights must sum to 1.0. Pass threshold: aggregate >= 0.75.
+
+schema_version: "1"
+pass_threshold: 0.75
+
+dimensions:
+  - name: acceptance_criteria_specificity
+    weight: 0.25
+    definition: >
+      Every task has a verifiable "done means" line naming files,
+      endpoints, or observable behavior. Vague completions are scored 0;
+      partially specific score 0.5; fully specific with named artifact
+      or test score 1.0.
+    evidence_judges_look_for: >
+      Each task lists at least one concrete artifact (file path, endpoint
+      path, test name) OR a named observable behavior. The "done means"
+      phrase or equivalent must appear in the task body.
+    scoring_guide:
+      score_0: "No tasks have a verifiable done-means line; completions are vague or absent."
+      score_0_5: "Some tasks have a verifiable done-means, but at least one task is missing one or uses vague language."
+      score_1_0: "All tasks have at least one concrete artifact, endpoint, or test name named explicitly."
+    anti_example: |
+      ## Tasks
+      ### T-1: Implement auth
+      agent_type: backend
+      estimate: 1 day
+      # No done_means line; nothing verifiable.
+
+  - name: assumption_surfacing
+    weight: 0.15
+    definition: >
+      The plan explicitly names runtime, environment, input-shape, and
+      contract assumptions. A plan with no assumptions block scores 0;
+      a block with 1-2 items scores 0.5; three or more items OR per-task
+      inline assumes tags score 1.0.
+    evidence_judges_look_for: >
+      A dedicated Assumptions H2 section with at least 3 bullet items,
+      OR tasks with inline assumes tags. Each assumption names a specific
+      dependency such as runtime version, env var presence, external
+      service SLA, or schema shape.
+    scoring_guide:
+      score_0: "No assumptions section and no inline assumes tags."
+      score_0_5: "Assumptions section exists but has fewer than 3 items and no inline tags, OR items are too vague."
+      score_1_0: "Three or more specific assumptions listed, OR per-task inline assumes tags cover all cross-domain dependencies."
+    anti_example: |
+      ## Assumptions
+      - System is running.
+      # Only 1 item, too vague; scores 0.5 at best.
+
+  - name: decomposition_granularity
+    weight: 0.20
+    definition: >
+      Tasks are at most 2-day estimates and the total task count is
+      between 2 and 7. A single mega-task or more than 7 tasks scores 0;
+      tasks in range but at least one exceeds 2 days scores 0.5; all
+      constraints met scores 1.0.
+    evidence_judges_look_for: >
+      A Tasks section with 2 to 7 distinct tasks, each carrying an
+      explicit estimate. No single task may declare or imply more than
+      2 days of work.
+    scoring_guide:
+      score_0: "Fewer than 2 tasks OR more than 7 tasks OR no estimates provided."
+      score_0_5: "Task count is in range with estimates, but at least one task has an estimate over 2 days."
+      score_1_0: "Between 2 and 7 tasks, all estimates present, all at most 2 days."
+    anti_example: |
+      ## Tasks
+      ### T-1: Build the whole backend
+      estimate: 2 weeks
+      # One task over 2 days; scores 0.
+
+  - name: dependency_clarity
+    weight: 0.15
+    definition: >
+      blockedBy edges form a DAG; sequential reasons are stated;
+      parallel-eligible tasks are flagged. A plan with no blockedBy
+      info where dependencies clearly exist scores 0; blockedBy present
+      but no reasons scores 0.5; blockedBy with one-line reason per
+      edge scores 1.0.
+    evidence_judges_look_for: >
+      Each task that has a blockedBy field lists the reason (one line)
+      why it cannot start until the predecessor is done. Tasks with no
+      sequential dependency are either unmarked or marked as
+      parallel-eligible. No circular blockedBy chains.
+    scoring_guide:
+      score_0: "Tasks have obvious ordering dependencies but no blockedBy field at all, OR the blockedBy chain contains a cycle."
+      score_0_5: "blockedBy fields present but no reasons given (just task IDs listed)."
+      score_1_0: "Each blockedBy edge has a one-line reason; parallel-eligible tasks are noted; no cycles."
+    anti_example: |
+      ### T-3: Deploy
+      blockedBy: [T-1, T-2]
+      # No reason given; why does deploy need both? Scores 0.5.
+
+  - name: domain_boundaries_respected
+    weight: 0.15
+    definition: >
+      Each task is assigned to exactly one domain specialist; cross-domain
+      handoffs are explicit contract steps and not inline edits by the
+      wrong specialist. Tasks assigned to backend that contain frontend
+      file edits score 0 on this dimension.
+    evidence_judges_look_for: >
+      Each task has an agent_type field matching the domain of the work
+      described. Cross-domain work is a separate task with a
+      contract-handoff agent_type or an explicit handoff note.
+    scoring_guide:
+      score_0: "At least one task crosses domain boundaries without an explicit handoff step, OR agent_type fields are missing."
+      score_0_5: "agent_type fields present, but at least one task describes work spanning two domains without a handoff task."
+      score_1_0: "Every task maps to a single domain; cross-domain work is broken into separate tasks with explicit handoffs."
+    anti_example: |
+      ### T-2: Add endpoint and update the React component
+      agent_type: backend
+      # Backend task touching frontend code; crosses domain boundary.
+
+  - name: risk_rollback_honesty
+    weight: 0.10
+    definition: >
+      Irreversible work (DB migrations, force pushes, data deletions) is
+      flagged in a Risks section with a rollback note per irreversible
+      step. No risks section scores 0; section exists but omits rollback
+      detail scores 0.5; each irreversible item has a rollback line
+      scores 1.0.
+    evidence_judges_look_for: >
+      A Risks H2 section. For each task that performs irreversible work,
+      a corresponding risk bullet with a rollback line. Plans with no
+      irreversible work may score 1.0 if the plan explicitly states there
+      are no irreversible steps.
+    scoring_guide:
+      score_0: "Plan includes irreversible work but has no Risks section."
+      score_0_5: "Risks section exists but rollback notes are missing or too vague for irreversible steps."
+      score_1_0: "Each irreversible step has a specific rollback note, OR the plan explicitly documents no irreversible steps."
+    anti_example: |
+      ## Risks
+      - Migration could fail.
+      # No rollback note; scores 0.5 or 0 depending on severity.

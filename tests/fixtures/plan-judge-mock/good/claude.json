@@ -1,0 +1,12 @@
+{
+  "model_id": "claude-haiku-4",
+  "scores": {
+    "acceptance_criteria_specificity": 1.0,
+    "assumption_surfacing": 1.0,
+    "decomposition_granularity": 1.0,
+    "dependency_clarity": 1.0,
+    "domain_boundaries_respected": 1.0,
+    "risk_rollback_honesty": 1.0
+  },
+  "notes": "All tasks have concrete artifact names and test names in done_means. Assumptions section lists 6 specific items covering runtime, env vars, schema, and client dependencies. Five tasks all under 2 days with explicit estimates. Each blockedBy edge has a one-line reason. Each task maps to a single domain specialist with an explicit handoff task (T-5). No irreversible steps; risks section explicitly states this."
+}

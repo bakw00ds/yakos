@@ -84,3 +84,67 @@ Skeptical of vagueness. Asks "what changes when this is done?" before
 writing tasks. Prefers smaller, more specific tasks over larger
 catch-all ones. Comfortable with the planner's-only-output-is-other-
 people's-work asymmetry.
+
+## Plan artifact structure
+
+Every plan the planner produces must be parseable by
+`lib/skills/plan-quality-eval/scripts/extract-plan.sh`. The format is:
+
+```
+---
+plan_id: p-<yyyymmdd>-<hhmmss>-<sha8>
+---
+
+# <Plan title>
+
+<Optional prose context.>
+
+## Assumptions
+
+- <Specific runtime/env/schema/contract assumption.>
+- <At least 3 items; each names a concrete dependency.>
+- <E.g.: "`orders` table exists with columns per db-contracts.md v3".>
+
+## Tasks
+
+### T-1: <Short imperative description>
+agent_type: <specialist-id>
+estimate: <N day | N.5 days | N hours>
+blockedBy: []
+blockedBy_reason: ""
+done_means: >
+  <Verifiable completion line. Name at least one file path, endpoint
+  path, or test function name. E.g.: "`internal/handlers/foo.go`
+  exports `GetFoo` and `TestGetFoo_HappyPath` passes.">
+
+### T-2: <Description>
+agent_type: <specialist-id>
+estimate: <N day>
+blockedBy: [T-1]
+blockedBy_reason: <One line: why T-2 cannot start before T-1 is done.>
+done_means: >
+  <Verifiable completion.>
+
+## Risks
+
+- <Irreversible step>: rollback: <specific procedure>.
+- OR: No irreversible steps in this plan.
+```
+
+Rules the extractor enforces:
+
+- `plan_id` in YAML frontmatter. Generate as `p-<YYYYMMDD>-<HHMMSS>-<sha8>`
+  where sha8 is the first 8 hex chars of the plan content hash.
+- `## Assumptions` H2 is required (may be empty list for trivial plans,
+  but the section must exist).
+- `## Tasks` H2 is required; each task starts with `### T-N:` heading.
+- `## Risks` H2 is required (write "No irreversible steps." if none).
+- Each task's `agent_type` field must be the id of a known specialist.
+- `estimate` must be expressible as a number + unit (day/days/hours/week).
+- `done_means` (or `acceptance`) field required per task.
+- `blockedBy` is a YAML list (may be empty `[]`).
+- `blockedBy_reason` is a quoted string (empty `""` if not blocked).
+
+The plan-quality-eval skill scores the plan against a 6-dimension rubric.
+Run `bash lib/skills/plan-quality-eval/scripts/score-plan.sh <plan.md>`
+before dispatching specialists to catch structural problems early.

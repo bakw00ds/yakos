@@ -1,0 +1,12 @@
+{
+  "model_id": "claude-haiku-4",
+  "scores": {
+    "acceptance_criteria_specificity": 0.5,
+    "assumption_surfacing": 1.0,
+    "decomposition_granularity": 1.0,
+    "dependency_clarity": 1.0,
+    "domain_boundaries_respected": 0,
+    "risk_rollback_honesty": 1.0
+  },
+  "notes": "T-1 is assigned to backend but its done_means requires changes to web/src/components/NotificationBell.tsx (frontend) and mobile/lib/notifications.dart (mobile). This crosses three domain boundaries in a single task without explicit handoff steps. domain_boundaries_respected scores 0. Other dimensions score well."
+}

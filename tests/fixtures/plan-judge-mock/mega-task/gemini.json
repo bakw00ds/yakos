@@ -1,0 +1,12 @@
+{
+  "model_id": "gemini-2.5-flash",
+  "scores": {
+    "acceptance_criteria_specificity": 0.5,
+    "assumption_surfacing": 1.0,
+    "decomposition_granularity": 0,
+    "dependency_clarity": 1.0,
+    "domain_boundaries_respected": 1.0,
+    "risk_rollback_honesty": 1.0
+  },
+  "notes": "Single mega-task spanning 3 weeks fails the decomposition rubric on both the count (1 < 2) and the estimate (3 weeks > 2 days). The done_means is partially verifiable — file path is named but 'all endpoints' is too broad. Assumptions section is strong. Risks has a specific rollback. Domain correctly assigned."
+}

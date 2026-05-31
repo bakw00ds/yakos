@@ -1,0 +1,12 @@
+{
+  "model_id": "claude-haiku-4",
+  "scores": {
+    "acceptance_criteria_specificity": 0.5,
+    "assumption_surfacing": 1.0,
+    "decomposition_granularity": 0,
+    "dependency_clarity": 1.0,
+    "domain_boundaries_respected": 1.0,
+    "risk_rollback_honesty": 1.0
+  },
+  "notes": "Single task of 3 weeks violates the 2-day cap and there is only 1 task (minimum is 2). This is the primary failure: decomposition_granularity scores 0. Assumptions section is thorough with 5 items. The single task has no blockedBy dependency issues. Domain assignment is correct. Risks section has a rollback note."
+}

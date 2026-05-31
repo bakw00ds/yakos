@@ -1,0 +1,12 @@
+{
+  "model_id": "gpt-5-nano",
+  "scores": {
+    "acceptance_criteria_specificity": 0,
+    "assumption_surfacing": 0.5,
+    "decomposition_granularity": 1.0,
+    "dependency_clarity": 1.0,
+    "domain_boundaries_respected": 1.0,
+    "risk_rollback_honesty": 1.0
+  },
+  "notes": "acceptance_criteria_specificity scores 0: the done_means for T-1 says 'directory reorganized' and 'existing unit tests pass' — no specific file names, no specific test names. This is the key finding. Other dimensions look fine: 3 assumptions present, 2 tasks under 2 days, blockedBy reason given, single domain per task, no irreversible steps."
+}
