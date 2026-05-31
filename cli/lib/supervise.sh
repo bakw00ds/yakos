@@ -30,12 +30,22 @@ Subcommands:
   status [<project>]          Config snapshot + buffer + recent findings count.
   tail [<project>] [--watch]  Print recent findings (--watch follows).
   clear [<project>]           Wipe buffer + findings + counter (keeps config).
+  pending [<project>]         List unacknowledged surface_to_operator+ findings.
+  ack <finding-id> [<proj>] [--note "..."]
+                              Acknowledge a pending escalation finding.
+  ack-all [<project>] [--note "..."]
+                              Acknowledge all currently-pending escalation findings.
 
 Project resolution: arg if given, else inferred from cwd (matches
 'yakos start' / 'yakos peer status').
 
 Emergency session bypass (no edit to .yakos.yml needed):
   export YAKOS_SUPERVISOR_DISABLE=1
+
+Acknowledgement state:
+  ~/.yakos-state/supervisor-acks.ndjson — append-only; one ack record per line.
+  Finding IDs: f-<ts-safe>-<project>-<linenum>
+  Format: {"ts":"<ISO>","finding_id":"<id>","project":"<name>","user":"<user>","note":"<...>"}
 
 See docs/supervisor-mode.md for the full guide.
 EOF
@@ -164,7 +174,7 @@ SUB="${1:-}"
 
 case "$SUB" in
     "" | -h | --help | help) usage; exit 0 ;;
-    enable|disable|status|tail|clear|set) ;;
+    enable|disable|status|tail|clear|set|pending|ack|ack-all) ;;
     *) ct_die "supervise: unknown subcommand '$SUB' (try --help)" ;;
 esac
 
@@ -384,6 +394,255 @@ if [ "$SUB" = "clear" ]; then
         [ -f "$f" ] && rm -f "$f" && removed=$((removed + 1))
     done
     echo "supervise clear: removed $removed file(s) for $PROJECT (config in .yakos.yml preserved)"
+    exit 0
+fi
+
+# ---- shared ack helpers ---------------------------------------------------
+
+YAKOS_STATE_DIR="${HOME}/.yakos-state"
+ACK_FILE="${YAKOS_STATE_DIR}/supervisor-acks.ndjson"
+
+# Finding ID derivation — must match supervisor-ack-gate.sh exactly:
+#   f-<ts-colons-as-hyphens>-<project>-<linenum>
+derive_finding_id() {
+    local raw_ts="$1" proj="$2" linenum="$3"
+    local safe_ts="${raw_ts//:/-}"
+    printf 'f-%s-%s-%s' "$safe_ts" "$proj" "$linenum"
+}
+
+# List all pending findings for the given project (findings file path, project name).
+# Output: tab-separated lines: <finding_id>\t<recommended_action>\t<rationale>
+list_pending_findings() {
+    local findings_file="$1" proj="$2"
+
+    [ -f "$findings_file" ] || return 0
+
+    # Build acknowledged set for this project
+    local acks_set=""
+    if [ -f "$ACK_FILE" ] && [ -s "$ACK_FILE" ]; then
+        acks_set="$(jq -r --arg p "$proj" \
+            'select(.project == $p) | .finding_id // empty' \
+            "$ACK_FILE" 2>/dev/null || true)"
+    fi
+
+    local linenum=0
+    while IFS= read -r line; do
+        linenum=$((linenum + 1))
+        [ -n "$line" ] || continue
+        if ! printf '%s' "$line" | jq empty 2>/dev/null; then
+            continue
+        fi
+
+        local recommended
+        recommended="$(printf '%s' "$line" | jq -r '.recommended_action // "continue"' 2>/dev/null || true)"
+        case "$recommended" in
+            surface_to_operator|block_next_tool|halt) ;;
+            *) continue ;;
+        esac
+
+        local raw_ts
+        raw_ts="$(printf '%s' "$line" | jq -r '.ts // ""' 2>/dev/null || true)"
+        local fid
+        fid="$(derive_finding_id "$raw_ts" "$proj" "$linenum")"
+
+        # Check if acked
+        case "$acks_set" in
+            "$fid"|"$fid"$'\n'*|*$'\n'"$fid"|*$'\n'"$fid"$'\n'*) continue ;;
+        esac
+
+        local rationale
+        rationale="$(printf '%s' "$line" | jq -r '.rationale // "(no rationale)"' 2>/dev/null || true)"
+        printf '%s\t%s\t%s\n' "$fid" "$recommended" "$rationale"
+    done < "$findings_file"
+}
+
+write_ack() {
+    local fid="$1" proj="$2" note="$3"
+    mkdir -p "$YAKOS_STATE_DIR"
+    local user="${USER:-$(id -un 2>/dev/null || echo unknown)}"
+    local ts
+    ts="$(ct_iso_now_z)"
+    jq -nc \
+        --arg ts "$ts" \
+        --arg finding_id "$fid" \
+        --arg project "$proj" \
+        --arg user "$user" \
+        --arg note "$note" \
+        '{ts: $ts, finding_id: $finding_id, project: $project, user: $user, note: $note}' \
+        >> "$ACK_FILE"
+}
+
+# ---- pending ---------------------------------------------------------------
+
+if [ "$SUB" = "pending" ]; then
+    PROJECT="$(resolve_project "${1:-}")"
+    resolve_project_paths "$PROJECT"
+
+    command -v jq >/dev/null 2>&1 || ct_die "supervise pending: jq is required"
+
+    if [ ! -f "$findings" ]; then
+        echo "supervise pending: no findings file at $findings"
+        exit 0
+    fi
+
+    echo "yakos supervise pending — project: $PROJECT"
+    echo ""
+
+    pending_output="$(list_pending_findings "$findings" "$PROJECT")"
+    if [ -z "$pending_output" ]; then
+        echo "  No unacknowledged escalation findings."
+        exit 0
+    fi
+
+    echo "  Unacknowledged escalation findings (surface_to_operator+):"
+    echo ""
+    while IFS=$'\t' read -r fid action rationale; do
+        printf '  [%s]\n' "$fid"
+        printf '    action:   %s\n' "$action"
+        printf '    rationale: %s\n' "$rationale"
+        echo ""
+    done <<< "$pending_output"
+
+    echo "Acknowledge with:"
+    first_id="$(printf '%s' "$pending_output" | head -n 1 | cut -f1)"
+    echo "  yakos supervise ack ${first_id} [--note \"...\"]"
+    echo "  yakos supervise ack-all [--note \"...\"]"
+    exit 0
+fi
+
+# ---- ack -------------------------------------------------------------------
+
+if [ "$SUB" = "ack" ]; then
+    command -v jq >/dev/null 2>&1 || ct_die "supervise ack: jq is required"
+
+    FINDING_ID="${1:-}"
+    [ -n "$FINDING_ID" ] || ct_die "supervise ack: <finding-id> required (try 'yakos supervise pending')"
+    shift
+
+    NOTE=""
+    PROJECT_ARG=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --note)
+                shift
+                NOTE="${1:-}"
+                shift
+                ;;
+            --note=*)
+                NOTE="${1#--note=}"
+                shift
+                ;;
+            -*)
+                ct_die "supervise ack: unknown flag '$1'"
+                ;;
+            *)
+                [ -z "$PROJECT_ARG" ] && PROJECT_ARG="$1" || ct_die "supervise ack: too many positional args"
+                shift
+                ;;
+        esac
+    done
+
+    PROJECT="$(resolve_project "$PROJECT_ARG")"
+    resolve_project_paths "$PROJECT"
+
+    if [ ! -f "$findings" ]; then
+        ct_die "supervise ack: no findings file at $findings"
+    fi
+
+    # Verify the finding_id refers to an actual escalation finding in this project
+    pending_output="$(list_pending_findings "$findings" "$PROJECT")"
+    if [ -z "$pending_output" ]; then
+        echo "supervise ack: no pending escalation findings for $PROJECT — nothing to acknowledge"
+        exit 0
+    fi
+
+    # Check that the given id is in the pending list OR already acked
+    found_in_pending=0
+    while IFS=$'\t' read -r fid _action _rationale; do
+        if [ "$fid" = "$FINDING_ID" ]; then
+            found_in_pending=1
+            break
+        fi
+    done <<< "$pending_output"
+
+    if [ "$found_in_pending" -eq 0 ]; then
+        # Check if it's already acked
+        already_acked=0
+        if [ -f "$ACK_FILE" ]; then
+            if jq -e --arg fid "$FINDING_ID" --arg proj "$PROJECT" \
+                'select(.finding_id == $fid and .project == $proj)' \
+                "$ACK_FILE" 2>/dev/null | grep -q .; then
+                already_acked=1
+            fi
+        fi
+        if [ "$already_acked" -eq 1 ]; then
+            echo "supervise ack: $FINDING_ID is already acknowledged for $PROJECT"
+            exit 0
+        fi
+        ct_die "supervise ack: finding '$FINDING_ID' not found in pending escalations for $PROJECT (run 'yakos supervise pending' to list)"
+    fi
+
+    write_ack "$FINDING_ID" "$PROJECT" "$NOTE"
+    echo "Acknowledged: $FINDING_ID (project: $PROJECT)"
+    [ -n "$NOTE" ] && echo "  note: $NOTE"
+    echo "  ack record appended to: $ACK_FILE"
+    exit 0
+fi
+
+# ---- ack-all ---------------------------------------------------------------
+
+if [ "$SUB" = "ack-all" ]; then
+    command -v jq >/dev/null 2>&1 || ct_die "supervise ack-all: jq is required"
+
+    NOTE=""
+    PROJECT_ARG=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --note)
+                shift
+                NOTE="${1:-}"
+                shift
+                ;;
+            --note=*)
+                NOTE="${1#--note=}"
+                shift
+                ;;
+            -*)
+                ct_die "supervise ack-all: unknown flag '$1'"
+                ;;
+            *)
+                [ -z "$PROJECT_ARG" ] && PROJECT_ARG="$1" || ct_die "supervise ack-all: too many positional args"
+                shift
+                ;;
+        esac
+    done
+
+    PROJECT="$(resolve_project "$PROJECT_ARG")"
+    resolve_project_paths "$PROJECT"
+
+    if [ ! -f "$findings" ]; then
+        echo "supervise ack-all: no findings file at $findings — nothing to acknowledge"
+        exit 0
+    fi
+
+    pending_output="$(list_pending_findings "$findings" "$PROJECT")"
+    if [ -z "$pending_output" ]; then
+        echo "supervise ack-all: no pending escalation findings for $PROJECT"
+        exit 0
+    fi
+
+    acked_count=0
+    while IFS=$'\t' read -r fid _action _rationale; do
+        [ -n "$fid" ] || continue
+        write_ack "$fid" "$PROJECT" "$NOTE"
+        echo "  Acknowledged: $fid"
+        acked_count=$((acked_count + 1))
+    done <<< "$pending_output"
+
+    echo ""
+    echo "ack-all: acknowledged $acked_count finding(s) for $PROJECT"
+    [ -n "$NOTE" ] && echo "  note: $NOTE"
+    echo "  ack records appended to: $ACK_FILE"
     exit 0
 fi
 
