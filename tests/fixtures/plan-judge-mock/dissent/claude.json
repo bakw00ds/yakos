@@ -1,0 +1,12 @@
+{
+  "model_id": "claude-haiku-4",
+  "scores": {
+    "acceptance_criteria_specificity": 1.0,
+    "assumption_surfacing": 0.5,
+    "decomposition_granularity": 1.0,
+    "dependency_clarity": 1.0,
+    "domain_boundaries_respected": 1.0,
+    "risk_rollback_honesty": 1.0
+  },
+  "notes": "Plan is well-structured. acceptance_criteria_specificity is strong: file paths and test names are present. The assumptions section has 3 items which meets the minimum. Decomposition is clean with 2 tasks each under 2 days. blockedBy reason provided. Domain assignment correct. No irreversible steps."
+}

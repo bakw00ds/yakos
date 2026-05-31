@@ -1,0 +1,12 @@
+{
+  "model_id": "gpt-5-nano",
+  "scores": {
+    "acceptance_criteria_specificity": 1.0,
+    "assumption_surfacing": 1.0,
+    "decomposition_granularity": 1.0,
+    "dependency_clarity": 1.0,
+    "domain_boundaries_respected": 1.0,
+    "risk_rollback_honesty": 1.0
+  },
+  "notes": "Clean plan: all tasks have specific file and test names in done_means; 4 specific assumptions; 3 tasks all under 2 days; blockedBy edges have reasons; each task has a single domain specialist; no irreversible steps."
+}

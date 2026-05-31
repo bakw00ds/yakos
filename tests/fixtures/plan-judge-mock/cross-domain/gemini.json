@@ -1,0 +1,12 @@
+{
+  "model_id": "gemini-2.5-flash",
+  "scores": {
+    "acceptance_criteria_specificity": 0.5,
+    "assumption_surfacing": 1.0,
+    "decomposition_granularity": 1.0,
+    "dependency_clarity": 1.0,
+    "domain_boundaries_respected": 0,
+    "risk_rollback_honesty": 1.0
+  },
+  "notes": "T-1 combines backend Go code, React TypeScript, and Flutter Dart in a single task assigned to the backend specialist. Three distinct domain boundaries crossed with no handoff tasks. domain_boundaries_respected = 0. The plan has good assumption coverage and a clean risk section."
+}

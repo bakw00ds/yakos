@@ -1,0 +1,12 @@
+{
+  "model_id": "gpt-5-nano",
+  "scores": {
+    "acceptance_criteria_specificity": 1.0,
+    "assumption_surfacing": 1.0,
+    "decomposition_granularity": 1.0,
+    "dependency_clarity": 1.0,
+    "domain_boundaries_respected": 1.0,
+    "risk_rollback_honesty": 1.0
+  },
+  "notes": "Excellent plan structure. All done_means entries are verifiable: file paths named, test function names given, HTTP status codes specified. Assumptions section covers 6 specific dependencies. Five tasks, all small. blockedBy chains are documented with reasons. Each task has a single agent_type matching its content. Risks section correctly notes no irreversible steps."
+}
