@@ -73,6 +73,10 @@
         "hooks": [
           {
             "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/supervisor-ack-gate.sh"
+          },
+          {
+            "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/team-lifecycle.sh"
           }
         ]

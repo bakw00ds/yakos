@@ -111,6 +111,22 @@ profile:
 # Emergency bypass (any session):
 #   export YAKOS_SUPERVISOR_DISABLE=1
 
+# ---- supervisor escalation gate (v0.34+) -----------------------------------
+# Blocks TeamCreate and Agent dispatches when the supervisor has written
+# a finding with recommended_action: surface_to_operator, block_next_tool,
+# or halt that has not yet been acknowledged by the operator.
+#
+# Operator acknowledgement: yakos supervise ack <finding-id> [--note "..."]
+# List pending:             yakos supervise pending
+# Ack all:                  yakos supervise ack-all [--note "..."]
+# Ack state:                ~/.yakos-state/supervisor-acks.ndjson (append-only)
+#
+# Default: ON (gate is active when supervisor mode is in use).
+# Per-project opt-out:
+#
+# supervise:
+#   gate_on_escalation: true   # set to false to disable the ack gate for this project
+
 # ---- environment workflows (Plan 3 M5 / v0.17+) ----------------------------
 # Uncomment + customize to enable dev→test→prod promotion gates.
 #
