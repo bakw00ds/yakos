@@ -1,0 +1,34 @@
+{
+  "case_id": "pytest-conftest-failure-02",
+  "task": "A pytest run exits with: `ERROR collecting tests/integration/test_api.py` and `ImportError while importing test module`. The conftest.py in tests/integration/ imports a fixture from conftest.py in the project root, but the root conftest.py was recently modified to remove that fixture. Diagnose the fixture-collection failure, identify the root cause, and propose a fix or clear next step for the relevant specialist.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "identifies-root-cause",
+        "weight": 0.5,
+        "type": "binary"
+      },
+      {
+        "name": "proposes-fix-or-next-step",
+        "weight": 0.35,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "no-fake-fixes",
+        "weight": 0.15,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Identifies the specific fixture name that is missing from root conftest.py",
+    "Traces the import chain: tests/integration/conftest.py → root conftest.py → missing fixture",
+    "Does NOT attempt to modify conftest.py or any source file directly",
+    "Proposes dispatching a fix to the relevant specialist (e.g., backend or developer)",
+    "Reports environment-failure category is NOT applicable here — this is a real failure"
+  ],
+  "context_files": [],
+  "max_duration_s": 90,
+  "max_cost_usd": 0.04,
+  "tags": ["pytest", "conftest", "fixture", "collection-error", "import-error"]
+}

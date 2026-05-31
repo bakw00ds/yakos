@@ -1,0 +1,34 @@
+{
+  "case_id": "segfault-cgo-05",
+  "task": "A Go test suite exits with: `SIGSEGV: segmentation violation` during `go test -race ./binding/...`. The crash stack trace shows the fault address in a cgo frame at `binding/bridge.c:142`. No changes were made to the C code recently; the binding wraps a third-party C library. Diagnose the segfault and recommend a path forward.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "locates-fault-in-cgo-boundary",
+        "weight": 0.4,
+        "type": "binary"
+      },
+      {
+        "name": "recommends-actionable-diagnostic-steps",
+        "weight": 0.4,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "does-not-modify-source",
+        "weight": 0.2,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Identifies that the fault is at the cgo boundary (Go → C) rather than in pure Go code",
+    "Notes that the race detector itself can expose hidden memory errors in cgo bindings that only manifest under concurrent access",
+    "Recommends at least one diagnostic step: run without -race to isolate race-detector overhead; check library version / thread-safety docs; use CGO_CFLAGS=-fsanitize=address for ASAN",
+    "Recommends dispatching to the specialist who owns the C binding, not attempting to patch C code directly",
+    "Does not modify any source, test, or C files"
+  ],
+  "context_files": [],
+  "max_duration_s": 90,
+  "max_cost_usd": 0.04,
+  "tags": ["go", "cgo", "segfault", "race-detector", "c-binding"]
+}

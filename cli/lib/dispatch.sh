@@ -49,21 +49,33 @@ Arguments:
 
 Flags:
   --runtime <id>    Override the agent's frontmatter `runtime:` field.
+  --model <tier>    Override the model tier for this dispatch only.
+                    Accepted values: haiku | sonnet | opus.
+                    Recorded as model_chosen_by:"override" in the
+                    dispatch-log. Does not affect the runtime selection.
   --project <path>  Project repo path. Defaults to inferring from cwd
                     (matches `yakos start`'s inference).
   --timeout <secs>  Max time to wait. Default 600s.
+  --eval-run-id <id>
+                    Mark this dispatch as part of a model-routing eval
+                    run. Sets model_chosen_by:"eval" and eval_run_id in
+                    the dispatch-log. Intended for use by the eval
+                    harness (Phase 2); not for operator use.
 
 Audit trail at ~/.yakos-state/dispatch-log.ndjson.
 
 Examples:
   yakos dispatch backend "implement the /v1/meal-plans GET handler"
   yakos dispatch troubleshooter "diagnose why login_test fails on CI" --runtime codex
+  yakos dispatch test-runner "run the suite" --model sonnet
 EOF
 }
 
 AGENT_NAME=""
 TASK=""
 RUNTIME_OVERRIDE=""
+MODEL_OVERRIDE=""
+EVAL_RUN_ID=""
 PROJECT=""
 TIMEOUT=600
 
@@ -76,6 +88,18 @@ while [ "$#" -gt 0 ]; do
             RUNTIME_OVERRIDE="$1"
             ;;
         --runtime=*) RUNTIME_OVERRIDE="${1#--runtime=}" ;;
+        --model)
+            shift
+            [ "$#" -gt 0 ] || ct_die "dispatch: --model requires a tier (haiku|sonnet|opus)"
+            MODEL_OVERRIDE="$1"
+            ;;
+        --model=*) MODEL_OVERRIDE="${1#--model=}" ;;
+        --eval-run-id)
+            shift
+            [ "$#" -gt 0 ] || ct_die "dispatch: --eval-run-id requires an id string"
+            EVAL_RUN_ID="$1"
+            ;;
+        --eval-run-id=*) EVAL_RUN_ID="${1#--eval-run-id=}" ;;
         --project)
             shift
             [ "$#" -gt 0 ] || ct_die "dispatch: --project requires a path"
@@ -170,6 +194,49 @@ AGENT_DOMAIN="$(yk_agents_fm_get "$FM" "domain")"
 AGENT_FALLBACK="$(yk_agents_fm_list "$FM" "runtime-fallback" || true)"
 AGENT_MAX_COST="$(yk_agents_fm_get "$FM" "max-cost-per-task" || true)"
 AGENT_MAX_DURATION="$(yk_agents_fm_get "$FM" "max-duration-s" || true)"
+AGENT_MODEL_FM="$(yk_agents_fm_get "$FM" "model" || true)"
+AGENT_MODEL_POLICY="$(yk_agents_fm_get "$FM" "model-policy" || true)"
+
+# ---- model resolution -------------------------------------------------------
+# Precedence (highest to lowest):
+#   1. --model flag (CLI override)          → model_chosen_by: "override"
+#   2. --eval-run-id flag                   → model_chosen_by: "eval"
+#   3. model-policy: frontmatter (promoted) → model_chosen_by: "policy"
+#   4. model: frontmatter (default)         → model_chosen_by: "frontmatter"
+#
+# Valid tiers: haiku | sonnet | opus
+_validate_model_tier() {
+    case "$1" in
+        haiku|sonnet|opus) return 0 ;;
+        *) ct_die "dispatch: invalid model tier '$1' (must be haiku|sonnet|opus)" ;;
+    esac
+}
+
+MODEL_CHOSEN_BY="frontmatter"
+MODEL_RESOLVED="${AGENT_MODEL_FM:-sonnet}"
+
+# eval takes precedence over policy/frontmatter but not over CLI --model
+if [ -n "$EVAL_RUN_ID" ]; then
+    MODEL_CHOSEN_BY="eval"
+    # eval dispatches still pick the model from frontmatter/policy unless
+    # --model is also given (CLI override wins unconditionally below).
+fi
+
+# Promoted policy overrides frontmatter (Phase 3 sets model-policy:)
+if [ -n "$AGENT_MODEL_POLICY" ]; then
+    _validate_model_tier "$AGENT_MODEL_POLICY"
+    MODEL_RESOLVED="$AGENT_MODEL_POLICY"
+    if [ "$MODEL_CHOSEN_BY" != "eval" ]; then
+        MODEL_CHOSEN_BY="policy"
+    fi
+fi
+
+# CLI --model flag overrides everything
+if [ -n "$MODEL_OVERRIDE" ]; then
+    _validate_model_tier "$MODEL_OVERRIDE"
+    MODEL_RESOLVED="$MODEL_OVERRIDE"
+    MODEL_CHOSEN_BY="override"
+fi
 
 # Apply max-duration-s as the dispatch timeout if set and < TIMEOUT.
 if [ -n "$AGENT_MAX_DURATION" ]; then
@@ -258,7 +325,7 @@ printf '%s\n' "$event_start" >> "$DISPATCH_LOG" 2>/dev/null || true
 
 # ---- run the dispatch ------------------------------------------------------
 
-echo "yakos dispatch: agent=$AGENT_NAME runtime=$RUNTIME project=$PROJECT" >&2
+echo "yakos dispatch: agent=$AGENT_NAME runtime=$RUNTIME model=$MODEL_RESOLVED (by:$MODEL_CHOSEN_BY) project=$PROJECT" >&2
 
 # Capture stdout to a tempfile, time the call. Adapter writes real
 # token usage to YAKOS_USAGE_OUT (v0.6+); chars/4 estimates are
@@ -266,6 +333,11 @@ echo "yakos dispatch: agent=$AGENT_NAME runtime=$RUNTIME project=$PROJECT" >&2
 out_tmp="$(mktemp -t yakos-dispatch.XXXXXX)"
 usage_tmp="$(mktemp -t yakos-dispatch-usage.XXXXXX)"
 export YAKOS_USAGE_OUT="$usage_tmp"
+# Export the resolved model so the runtime adapter can inject it into the
+# agent payload when building the --agents JSON. Adapters read
+# YAKOS_MODEL_OVERRIDE when it is non-empty; they fall back to the
+# model field already embedded in the agent JSON otherwise.
+export YAKOS_MODEL_OVERRIDE="$MODEL_RESOLVED"
 epoch_start="$(ct_iso_to_epoch "$ts_start" 2>/dev/null || date +%s)"
 
 set +e
@@ -274,6 +346,7 @@ rc=$?
 set -e
 
 unset YAKOS_USAGE_OUT
+unset YAKOS_MODEL_OVERRIDE
 
 epoch_end="$(date +%s)"
 duration_s=$(( epoch_end - epoch_start ))
@@ -320,6 +393,9 @@ if [ -n "$AGENT_MAX_COST" ] && [ "$real_usage" != "null" ]; then
 fi
 
 ts_end="$(ct_iso_now_z)"
+# eval_run_id is null unless --eval-run-id was passed.
+_eval_run_id_json="null"
+[ -n "$EVAL_RUN_ID" ] && _eval_run_id_json="\"$EVAL_RUN_ID\""
 event_end="$(jq -cn \
     --arg t "$ts_end" \
     --arg agent "$AGENT_NAME" \
@@ -331,10 +407,16 @@ event_end="$(jq -cn \
     --argjson in_tok "$est_input_tokens" \
     --argjson out_tok "$est_output_tokens" \
     --argjson usage "$real_usage" \
+    --arg model_chosen_by "$MODEL_CHOSEN_BY" \
+    --arg model_resolved "$MODEL_RESOLVED" \
+    --argjson eval_run_id "$_eval_run_id_json" \
     '{type:"dispatch_finished", ts:$t, agent:$agent, runtime:$runtime,
       exit_code:$rc, duration_s:$dur,
       output_bytes:$out_b, task_bytes:$task_b,
-      est_input_tokens:$in_tok, est_output_tokens:$out_tok}
+      est_input_tokens:$in_tok, est_output_tokens:$out_tok,
+      model_chosen_by:$model_chosen_by,
+      model_resolved:$model_resolved,
+      eval_run_id:$eval_run_id}
       + (if $usage != null then {usage:$usage} else {} end)')"
 printf '%s\n' "$event_end" >> "$DISPATCH_LOG" 2>/dev/null || true
 
