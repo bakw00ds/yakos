@@ -46,6 +46,8 @@ yakos start myapp                       # launch a session
 | `yakos update` | `git pull` framework + refresh symlinks |
 | `yakos uninstall` | Remove yakOS-owned symlinks (never touches your memory) |
 | `yakos skill plan-quality-eval <plan.md>` | Score a plan against the 6-dimension rubric |
+| `yakos plan score show\|history\|override` | Surface plan-quality-eval log records |
+| `yakos model-routing eval\|list\|show` | Evaluate an agent's golden-set across haiku/sonnet/opus; surface routing candidates |
 
 Full list: `yakos --help` (32 subcommands).
 
