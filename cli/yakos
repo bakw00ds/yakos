@@ -248,6 +248,14 @@ case "$cmd" in
         # Consume the 'plan' word; pass remaining args (e.g. 'score show')
         bash "$script" "$@"
         ;;
+    model-routing)
+        # 'yakos model-routing eval|list|show|...' routes to model-routing.sh
+        script="$YAKOS_LIB/model-routing.sh"
+        if [ ! -f "$script" ]; then
+            ct_die "internal error: $script not found"
+        fi
+        bash "$script" "$@"
+        ;;
     version-bump)
         bump_script="$YAKOS_ROOT/lib/skills/version-bump/scripts/bump.sh"
         if [ ! -x "$bump_script" ]; then

@@ -148,3 +148,107 @@ the test-runner agent's domain:
 - `case-03-flaky-snapshot.json` — snapshot mismatch on CI
 - `case-04-no-tests-found.json` — exit-0 false positive
 - `case-05-segfault-in-cgo.json` — cgo SIGSEGV diagnosis
+
+---
+
+## Phase 2: eval harness mechanics
+
+Phase 2 ships `yakos model-routing eval` — operator runs it to produce a
+promotion candidate (or a refused-reason).  Promotion itself is Phase 3.
+
+### Running an eval
+
+```bash
+yakos model-routing eval <agent-id> [--judge <agent>] \
+                                     [--max-cost-usd <n>] \
+                                     [--project <path>]
+```
+
+The harness:
+
+1. Validates `<agent>/eval/` cases against the schema above.
+2. Refuses if `n_cases < min_cases_for_eval` (default 5).
+3. Dispatches each case at haiku / sonnet / opus using
+   `yakos dispatch --model <tier> --eval-run-id <run_id>`.
+4. Scores each response with a judge agent (never the same agent as the
+   subject — this is a hard constraint with no `--force` override).
+5. Computes Wilson 95% CI lower bounds on per-tier pass-rates.
+6. Emits a candidate to `~/.yakos-state/model-routing-candidates.ndjson`
+   or a `candidate_refused` record with a machine-readable reason.
+
+### Anti-self-congratulation constraint
+
+Enforced at two layers:
+
+- **CLI layer** (`cli/lib/model-routing.sh`): if `--judge` resolves to
+  the same agent id as the subject, the command exits with a fatal error
+  before any dispatch.
+- **Agent definition** (`lib/agents/model-routing-eval.md`): tools list
+  is `[Read, Bash, Grep]` — no `Edit` or `Write`.  No path through Phase 2
+  can rewrite an agent's `model:` frontmatter.
+
+### Wilson 95% CI guard
+
+Candidate emission requires the lower bound of the candidate tier's Wilson
+confidence interval to be within epsilon of the current tier's observed
+pass-rate.  For runs with fewer than `min_cases_for_confidence` (default 12)
+cases, a stricter floor applies: ≥2× cost saving AND ≥0.10 pass-rate margin.
+
+Formula (pure awk, no scipy):
+
+```
+phat   = k / n
+z      = 1.96
+denom  = 1 + z^2/n
+center = (phat + z^2/(2n)) / denom
+margin = z * sqrt(phat*(1-phat)/n + z^2/(4*n^2)) / denom
+lower  = center - margin
+```
+
+### Reviewing candidates
+
+```bash
+yakos model-routing list           # latest candidate per agent
+yakos model-routing show <agent>   # full evidence + last 3 run records
+```
+
+### Log files
+
+| File | Contents |
+|------|----------|
+| `~/.yakos-state/model-routing-eval-log.ndjson` | `eval_run_started`, `eval_case`, `eval_run_finished`, `candidate_refused`, `budget_exceeded` records |
+| `~/.yakos-state/model-routing-candidates.ndjson` | One record per candidate; latest-per-agent semantics for `list`/`show` |
+
+### model_routing settings
+
+These keys live under `model_routing:` in `~/.yakos-state/settings.json`.
+Defaults apply when the file is absent or the key is missing — the CLI
+never requires the file to exist.
+
+```json
+{
+  "model_routing": {
+    "epsilon_pass_rate":        0.05,
+    "min_cases_for_eval":       5,
+    "min_cases_for_confidence": 12,
+    "max_eval_run_cost_usd":    5.00,
+    "weekly_max_cost_usd":      50.00
+  }
+}
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `epsilon_pass_rate` | 0.05 | Maximum acceptable pass-rate drop when promoting to a cheaper tier |
+| `min_cases_for_eval` | 5 | Minimum cases to start a run; fewer cases → `candidate_refused` with reason `min_cases` |
+| `min_cases_for_confidence` | 12 | Cases required for the CI-only gate; below this the strict floor applies |
+| `max_eval_run_cost_usd` | 5.00 | Hard per-run spend cap; run aborts mid-case if exceeded |
+| `weekly_max_cost_usd` | 50.00 | Rolling 7-day spend limit across all eval runs |
+
+### Phase 3 preview
+
+`yakos model-routing promote <agent> [--tier <tier>]` — writes
+`model-policy: <tier>` into the agent frontmatter after operator review.
+`yakos model-routing reject  <agent>` — records a rejection in the log
+and suppresses future candidates for a configurable cool-down period.
+`yakos model-routing history [<agent>]` — tabular view of all past runs.

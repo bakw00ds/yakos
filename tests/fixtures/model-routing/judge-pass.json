@@ -1,0 +1,1 @@
+{"case_id":"mock","tier":"sonnet","composite":0.92,"criteria_scores":[{"name":"identifies-pass-fail","score":1.0}],"pass":true,"notes":"mock judge: pass"}
