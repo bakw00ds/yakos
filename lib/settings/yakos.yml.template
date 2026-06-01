@@ -127,6 +127,18 @@ profile:
 # supervise:
 #   gate_on_escalation: true   # set to false to disable the ack gate for this project
 
+# ---- plan quality gate (v0.X+) ---------------------------------------------
+# PostToolUse hook that auto-scores work/current/plan.md on every write,
+# using the 3-judge cross-vendor panel from the plan-quality-eval skill.
+# Operator CLI: yakos plan score show | history | override <plan_id> --reason "..."
+# See lib/skills/plan-quality-eval/SKILL.md for rubric + scoring details.
+#
+# plan_quality:
+#   enabled: true            # set to false to disable auto-scoring entirely
+#   mode: surface            # surface: notify only | block: block next dispatch
+#   threshold: 0.75          # weighted aggregate pass threshold (0..1)
+#   cost_ceiling_usd: 0.15   # hard cost ceiling per scoring run
+
 # ---- environment workflows (Plan 3 M5 / v0.17+) ----------------------------
 # Uncomment + customize to enable dev→test→prod promotion gates.
 #

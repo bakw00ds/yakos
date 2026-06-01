@@ -81,6 +81,11 @@
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/supervisor-ack-gate.sh"
           },
           {
+            "_doc": "Phase 2 plan-quality-gate PreToolUse path: blocks TeamCreate|Agent when .plan-blocked marker is present. Override with 'yakos plan score override <plan_id> --reason ...'",
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/plan-quality-gate.sh"
+          },
+          {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/team-lifecycle.sh"
           }
@@ -95,6 +100,16 @@
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/peer-claim-confirm.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "_doc": "Phase 2 plan-quality-gate: auto-scores work/current/plan.md on write. Surfaces or blocks when aggregate score < threshold. No-op for non-plan.md writes. Conservative: infra errors → WARN + PASS.",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/plan-quality-gate.sh"
           }
         ]
       },
