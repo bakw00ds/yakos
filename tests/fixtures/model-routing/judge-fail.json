@@ -1,0 +1,1 @@
+{"case_id":"mock","tier":"haiku","composite":0.20,"criteria_scores":[{"name":"identifies-pass-fail","score":0.2}],"pass":false,"notes":"mock judge: fail"}
