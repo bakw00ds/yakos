@@ -28,6 +28,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/doctor"
 	"github.com/bakw00ds/yakos/internal/initialize"
+	"github.com/bakw00ds/yakos/internal/install"
 	"github.com/bakw00ds/yakos/internal/kanban"
 	"github.com/bakw00ds/yakos/internal/passthrough"
 	"github.com/bakw00ds/yakos/internal/refresh"
@@ -52,6 +53,7 @@ var portedCommands = []portedCommand{
 	{Name: "team", Since: "0.44.0", Notes: "full feature parity with cli/lib/team.sh; archive step now native Go (rank 10)"},
 	{Name: "archive", Since: "0.45.0", Notes: "full feature parity with cli/lib/archive.sh; worktree cleanup deferred (manual, v0.1)"},
 	{Name: "init", Since: "0.46.0", Notes: "full feature parity with cli/lib/init.sh; hook copy advisory printed (bash refresh handles hooks); --with-gate/--multi-dev advisory only in Phase 1"},
+	{Name: "install", Since: "0.47.0", Notes: "full feature parity with cli/lib/install.sh; --force/--dry-run supported; per-file symlinks into ~/.claude/{agents,skills,rules,playbooks}; launcher symlink at ~/.local/bin/yakos; settings.json env merge"},
 }
 
 type portedCommand struct {
@@ -113,6 +115,8 @@ func main() {
 		runArchive(yakosRoot, args[1:])
 	case "init":
 		runInit(args[1:])
+	case "install":
+		runInstall(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -1633,6 +1637,68 @@ func runInit(args []string) {
 
 	if _, err := initialize.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "init: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runInstall implements `yakos install` natively in Go.
+//
+// Usage mirrors cli/lib/install.sh exactly:
+//
+//	yakos install [--force] [--dry-run]
+//	yakos install --help
+//
+// Creates per-file symlinks under ~/.claude/{agents,skills,rules,playbooks}/
+// pointing into $YAKOS_ROOT/lib/. Manages a launcher symlink at
+// ~/.local/bin/yakos. Merges CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 into
+// ~/.claude/settings.json.
+//
+// YAKOS_ROOT must be set in the environment (set by the bash entry-point;
+// also resolved from the binary location by main()).
+func runInstall(yakosRoot string, args []string) {
+	force := false
+	dryRun := false
+
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help":
+			install.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case "--force":
+			force = true
+		case "--dry-run":
+			dryRun = true
+		default:
+			fmt.Fprintf(os.Stderr, "install: unknown argument %q (try --help)\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	// Resolve YAKOS_ROOT from env (bash entry-point may set it).
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+	if yakosRoot == "" {
+		fmt.Fprintln(os.Stderr, "install: YAKOS_ROOT is not set")
+		os.Exit(1)
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := install.Config{
+		YakosRoot: yakosRoot,
+		HomeDir:   home,
+		Force:     force,
+		DryRun:    dryRun,
+		Writer:    os.Stdout,
+		ErrWriter: os.Stderr,
+	}
+
+	if _, err := install.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "install: %v\n", err)
 		os.Exit(1)
 	}
 }
