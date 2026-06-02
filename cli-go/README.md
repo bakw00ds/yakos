@@ -33,21 +33,99 @@ make test           # go test ./cli-go/...
 make lint           # go vet ./cli-go/... (+ golangci-lint if installed)
 ```
 
-## Install (side-by-side with bash yakos)
+## Install (recommended — curl installer)
 
-The Go binary installs as `yakos-go` (different name during the transition so
-the existing `yakos` bash binary is untouched):
+The easiest way to install the Go binary alongside your existing bash `yakos`:
 
 ```sh
-make install        # copies ./bin/yakos → ~/.local/bin/yakos-go
+curl -fsSL https://raw.githubusercontent.com/bakw00ds/yakos/main/scripts/install.sh | sh
 ```
 
-After installation, `yakos-go <anything>` behaves identically to
-`yakos <anything>` for unported commands (both proxy to bash).
+This downloads the correct binary for your platform, verifies the SHA256
+checksum, and installs to `~/.local/bin/yakos` (Mac/Linux) or
+`%USERPROFILE%\bin\yakos.exe` (Windows Git Bash).
+
+Options:
+
+```sh
+# Install a specific version
+curl -fsSL .../install.sh | sh -s -- --version 0.37.0
+
+# Preview without downloading
+curl -fsSL .../install.sh | sh -s -- --dry-run
+
+# Custom install directory
+curl -fsSL .../install.sh | sh -s -- --prefix /usr/local/bin
+```
+
+See `docs/go-shadow-mode.md` for full coexistence, selection, and uninstall
+details.
+
+## Install (from source — requires Go toolchain)
+
+```sh
+make install        # copies ./bin/yakos → ~/.local/bin/yakos
+```
+
+`make install` installs the Go binary as **`yakos`** — the same name as the
+bash binary. The two coexist; see §YAKOS_IMPL below for how to choose which
+one runs.
+
+## YAKOS_IMPL — selecting the active implementation
+
+Both the Go binary and the bash `yakos` install under the name `yakos`. The
+`YAKOS_IMPL` environment variable controls which logic runs when the Go binary
+is on PATH:
+
+| `YAKOS_IMPL` value | Behavior |
+|---|---|
+| unset (default) | Fully transparent: every invocation is proxied to bash yakos. The Go binary is invisible. |
+| `bash` | Same as unset. |
+| `go` | Go-native routing: `--version`, `go-port-status` handled natively; everything else proxied to bash. |
+
+### Opting in
+
+```sh
+# One-off: run a single command via the Go binary
+YAKOS_IMPL=go yakos --version
+
+# Session-wide: add to your shell profile
+export YAKOS_IMPL=go
+
+# Permanent in a project dotenv (.envrc via direnv, etc.)
+echo 'export YAKOS_IMPL=go' >> .envrc
+```
+
+### Coexistence strategy
+
+The recommended install during Phase 1:
+
+1. Bash yakos installed via the normal path (e.g., `~/.local/bin/yakos` or
+   symlinked from the repo's `cli/yakos`).
+2. Go binary installed via `make install` to a directory that appears
+   **earlier** on PATH (e.g., `~/.local/bin/` if that's already first).
+3. Leave `YAKOS_IMPL` unset → bash behavior preserved for all existing scripts
+   and muscle memory.
+4. Set `YAKOS_IMPL=go` to explore the Go binary at will.
+
+When `YAKOS_IMPL` is unset, `yakos <anything>` is byte-for-byte equivalent
+between the two binaries — the Go binary proxies every call intact.
+
+### Switching back
+
+```sh
+unset YAKOS_IMPL          # or YAKOS_IMPL=bash
+```
+
+No state is written by the Go binary when it proxies; switching back mid-session
+is safe.
 
 ## Shadow-mode commands
 
-| Command | Handled by |
+The table below describes behavior when `YAKOS_IMPL=go`. When `YAKOS_IMPL` is
+unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
+
+| Command | Handled by (YAKOS_IMPL=go) |
 |---|---|
 | `yakos --version` | Go (prints VERSION + " (go)" suffix) |
 | `yakos go-port-status` | Go (migration tracker) |

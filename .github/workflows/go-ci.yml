@@ -12,6 +12,8 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'Makefile'
+      - 'scripts/install.sh'
+      - 'scripts/uninstall-yakos-go.sh'
       - '.github/workflows/go-ci.yml'
   pull_request:
     branches: [main]
@@ -20,6 +22,8 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'Makefile'
+      - 'scripts/install.sh'
+      - 'scripts/uninstall-yakos-go.sh'
       - '.github/workflows/go-ci.yml'
   workflow_dispatch:
 
@@ -100,3 +104,70 @@ jobs:
             Write-Error "Expected migration tracker header"
             exit 1
           }
+
+  install-sh-smoke:
+    # Validates install.sh --dry-run on each supported platform without
+    # requiring an actual published release. Uses mock env vars to exercise
+    # the platform-detection and argument-parsing paths.
+    name: install.sh smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # Windows Git Bash is tested via ubuntu-latest with OS override below.
+        # A separate windows-latest job is omitted: the install.sh is a POSIX
+        # sh script that requires Git Bash on Windows; runners have it but
+        # the default shell differs. The --dry-run path is safe to test on
+        # Linux/macOS runners for all platforms by overriding MOCK_OS.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: install.sh --dry-run (native platform)
+        shell: sh
+        run: |
+          # --dry-run must exit 0 and print the "DRY RUN" header.
+          out="$(sh scripts/install.sh --dry-run 2>&1)"
+          echo "$out"
+          echo "$out" | grep -F "DRY RUN"
+          echo "$out" | grep -F "Install path:"
+          echo "$out" | grep -F "No files were downloaded or modified."
+
+      - name: install.sh --dry-run --version arg
+        shell: sh
+        run: |
+          out="$(sh scripts/install.sh --dry-run --version 0.37.0 2>&1)"
+          echo "$out"
+          echo "$out" | grep -F "0.37.0"
+
+      - name: install.sh --dry-run --prefix arg
+        shell: sh
+        run: |
+          out="$(sh scripts/install.sh --dry-run --prefix /tmp/yakos-test 2>&1)"
+          echo "$out"
+          echo "$out" | grep -F "/tmp/yakos-test"
+
+      - name: install.sh --help exits 0
+        shell: sh
+        run: sh scripts/install.sh --help
+
+      - name: uninstall-yakos-go.sh --dry-run (nothing installed)
+        shell: sh
+        run: |
+          out="$(sh scripts/uninstall-yakos-go.sh --dry-run 2>&1)"
+          echo "$out"
+          echo "$out" | grep -F "DRY RUN"
+
+      - name: uninstall-yakos-go.sh --help exits 0
+        shell: sh
+        run: sh scripts/uninstall-yakos-go.sh --help
+
+      - name: POSIX sh compliance check (dash)
+        # dash is the strictest POSIX sh. ubuntu-latest has it; macOS uses sh.
+        if: runner.os == 'Linux'
+        run: |
+          # dash rejects bashisms. If install.sh has any, this fails.
+          dash scripts/install.sh --help
+          dash scripts/uninstall-yakos-go.sh --help

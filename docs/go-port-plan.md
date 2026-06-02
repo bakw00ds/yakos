@@ -162,6 +162,7 @@ Recorded here so future implementers do not relitigate. To override, propose in 
 | 13 | Atomic file writes | `os.WriteFile` to temp + `os.Rename` for kanban.md, settings.json, dispatch-log batched flushes | Crash safety; matches bash's `mv` trick | Refresh (rank 6) |
 | 14 | Embed | `//go:embed` for templates, completion scripts, kanban serve HTML/JS | Single-binary distribution requirement | Per-command as needed |
 | 15 | Error model | Wrapped errors via `fmt.Errorf("...: %w", err)`; exit codes match bash (`2` for usage, `64` for unknown command, etc.) | Operator scripts read exit codes today | Bootstrap |
+| 16 | Sign-off authority | Lead can self-declare a phase complete when all §3 exit criteria are green in CI; operator review is advisory. Load-bearing parity sign-offs (kanban file format, dispatch-log schema) remain operator-confirmed. | Operator decided 2026-06-02: CI-green criteria are objective enough for lead self-declaration; removes bottleneck on routine milestones. *Amended 2026-06-02: lead can self-declare with CI-green exit criteria; operator review remains advisory.* | Bootstrap (answered) |
 
 ## 7. Risk register
 
@@ -198,7 +199,7 @@ Relative weeks from Phase 1 start. Lead doesn't control wall-clock; weeks are un
 - **Week 8:** Phase 1 exit criteria audit. Distribution + install.sh + docs land. Operator runs the full exit-criteria checklist. **Phase 1 sign-off OR descope to Phase 1.5.**
 - **Week 8 + ≥3 weeks adoption:** Phase 2 kickoff review.
 
-Operator review points are explicit. Lead does not declare phases complete unilaterally — the operator signs off per the criteria in §3.
+Operator review points are explicit. Lead can self-declare Phase 1 complete when all §3 exit criteria are confirmed green in CI; operator review at that point is advisory (see Decision #6 amendment). Load-bearing sign-off points (Week 2 kanban parity, Week 3 dispatch-log schema parity) remain operator-confirmed.
 
 ## 9. Open questions for the operator
 
@@ -221,6 +222,7 @@ Each has a recommendation + a decide-before tag. The lead surfaces these to the 
 
 6. **Sign-off authority for marking phases complete: operator only, or lead-can-self-declare-with-checklist?**
    *Recommendation:* operator only. The exit criteria in §3 are explicit enough that the lead can prepare a "ready for sign-off" PR but cannot mark Phase 1 done. *Decide before:* Bootstrap.
+   **Decided 2026-06-02:** Lead can self-declare with CI-green exit criteria; operator review remains advisory. Load-bearing parity sign-offs (kanban file format week 2, dispatch-log schema week 3) remain operator-confirmed. Moved to Decision #16 in §6.
 
 7. **YAML library choice (`gopkg.in/yaml.v3` recommended in Decision #7).** Confirm or redirect. *Decide before:* `validate` port (rank 2).
 

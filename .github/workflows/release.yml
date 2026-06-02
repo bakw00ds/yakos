@@ -1,0 +1,206 @@
+name: Release
+
+# Triggered on git tag push matching v* (e.g., v0.37.0, v1.0.0).
+# Builds the Go binary for all 5 supported platforms, computes SHA256
+# checksums, and creates a GitHub Release with all binaries attached.
+#
+# Signing: NOT performed in Phase 1. macOS Gatekeeper + Windows SmartScreen
+# will show first-run warnings. Notarization / code-signing is tracked as a
+# Phase 1.5 item — add it here when the Apple/MS certificates are in place.
+#
+# Actions pinned:
+#   actions/checkout       v4  (sha: 11bd71901bbe5b1630ceea73d27597364c9af683)
+#   actions/setup-go       v5  (sha: d35c59abb061a4a6fb18e82ac0862c26744d6ab5)
+#   softprops/action-gh-release v2 (sha: e7a8f85ef1a4e586a519bbcf6d9cfe9516e4f4d6)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.37.0) — for manual dry-runs only'
+        required: false
+
+permissions:
+  contents: write  # required for creating the GitHub Release + uploading assets
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            suffix: ''
+          - goos: darwin
+            goarch: amd64
+            suffix: ''
+          - goos: linux
+            goarch: arm64
+            suffix: ''
+          - goos: linux
+            goarch: amd64
+            suffix: ''
+          - goos: windows
+            goarch: amd64
+            suffix: '.exe'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # Pin: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        # Pin: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version-file: 'cli-go/go.mod'
+          cache-dependency-path: 'cli-go/go.sum'
+
+      # Derive version from the git tag (refs/tags/v0.37.0 → 0.37.0) or
+      # fall back to the VERSION file so workflow_dispatch also produces
+      # a sensible binary name.
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="$(cat VERSION)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          ASSET="yakos-v${{ steps.version.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}"
+          mkdir -p dist
+          cd cli-go && go build \
+            -trimpath \
+            -ldflags="-s -w -X github.com/bakw00ds/yakos/internal/version.Version=${{ steps.version.outputs.version }}" \
+            -o "../dist/${ASSET}" \
+            ./cmd/yakos
+          echo "ASSET=${ASSET}" >> "$GITHUB_ENV"
+
+      - name: Compute SHA256
+        run: |
+          cd dist
+          sha256sum "${ASSET}" > "${ASSET}.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/${{ env.ASSET }}
+            dist/${{ env.ASSET }}.sha256
+          retention-days: 1
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed for git log since last tag
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Build checksums.txt
+        run: |
+          cd dist
+          # Collect all individual .sha256 sidecar files into one canonical
+          # checksums.txt, then remove the sidecars.
+          cat *.sha256 | sort > checksums.txt
+          rm -f *.sha256
+          echo "--- checksums.txt ---"
+          cat checksums.txt
+
+      - name: Resolve version + tag
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="$(cat VERSION)"
+            TAG="v${VERSION}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          # Use CHANGELOG.md section for this version if it exists;
+          # otherwise fall back to git log since the previous tag.
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+
+          NOTES_FILE="$(mktemp)"
+
+          # Attempt to extract the matching section from CHANGELOG.md.
+          # A section starts with ## [VERSION] and ends at the next ## line.
+          if grep -q "## \[${VERSION}\]" CHANGELOG.md 2>/dev/null; then
+            awk "/^## \[${VERSION}\]/{found=1; next} found && /^## \[/{exit} found{print}" \
+              CHANGELOG.md > "${NOTES_FILE}"
+          fi
+
+          # If CHANGELOG extraction produced nothing, use git log.
+          if [ ! -s "${NOTES_FILE}" ]; then
+            PREV_TAG="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo '')"
+            if [ -n "${PREV_TAG}" ]; then
+              git log --oneline "${PREV_TAG}..${TAG}" >> "${NOTES_FILE}"
+            else
+              git log --oneline >> "${NOTES_FILE}"
+            fi
+          fi
+
+          # Prepend install instructions to the notes.
+          {
+            printf '## Install\n\n'
+            printf '```sh\n'
+            printf 'curl -fsSL https://raw.githubusercontent.com/bakw00ds/yakos/main/scripts/install.sh | sh\n'
+            printf '```\n\n'
+            printf 'Or install a specific version:\n\n'
+            printf '```sh\n'
+            printf 'curl -fsSL https://raw.githubusercontent.com/bakw00ds/yakos/main/scripts/install.sh | sh -s -- --version %s\n' "${VERSION}"
+            printf '```\n\n'
+            printf 'See [docs/go-shadow-mode.md](docs/go-shadow-mode.md) for coexistence details.\n\n'
+            printf '---\n\n'
+            cat "${NOTES_FILE}"
+          } > release-notes.md
+
+          echo "notes_file=release-notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        # Pin: softprops/action-gh-release@e7a8f85ef1a4e586a519bbcf6d9cfe9516e4f4d6
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "yakos ${{ steps.version.outputs.tag }} (Go)"
+          body_path: release-notes.md
+          draft: false
+          prerelease: false
+          files: |
+            dist/yakos-*
+            dist/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
