@@ -27,6 +27,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/doctor"
+	"github.com/bakw00ds/yakos/internal/initialize"
 	"github.com/bakw00ds/yakos/internal/kanban"
 	"github.com/bakw00ds/yakos/internal/passthrough"
 	"github.com/bakw00ds/yakos/internal/refresh"
@@ -50,6 +51,7 @@ var portedCommands = []portedCommand{
 	{Name: "dispatch", Since: "0.43.0", Notes: "full feature parity with cli/lib/dispatch.sh; PRs #15/#31/#32/#34/#39/#40 invariants"},
 	{Name: "team", Since: "0.44.0", Notes: "full feature parity with cli/lib/team.sh; archive step now native Go (rank 10)"},
 	{Name: "archive", Since: "0.45.0", Notes: "full feature parity with cli/lib/archive.sh; worktree cleanup deferred (manual, v0.1)"},
+	{Name: "init", Since: "0.46.0", Notes: "full feature parity with cli/lib/init.sh; hook copy advisory printed (bash refresh handles hooks); --with-gate/--multi-dev advisory only in Phase 1"},
 }
 
 type portedCommand struct {
@@ -109,6 +111,8 @@ func main() {
 		runTeam(yakosRoot, args[1:])
 	case "archive":
 		runArchive(yakosRoot, args[1:])
+	case "init":
+		runInit(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -1522,6 +1526,115 @@ func printTeamRestartHelp(w io.Writer) {
 Archive work/current/ for <project> and print relaunch instructions.
 Does NOT auto-launch claude in v0.1.
 `)
+}
+
+// runInit implements `yakos init` natively in Go.
+//
+// Usage mirrors cli/lib/init.sh exactly:
+//
+//	yakos init <name> --project <path> [--force] [--template <kind>]
+//	                  [--dry-run] [--with-gate] [--multi-dev] [--help]
+//
+// The subcommand name in the dispatch switch is "init"; the Go package is
+// named "initialize" to avoid the reserved word collision (package init is
+// special in Go).
+//
+// Bash flags --with-gate and --multi-dev are accepted for CLI parity but
+// print advisory messages in the Go port; the underlying operations
+// (git hook installation, /var/lib/yakos coord provisioning) delegate to
+// bash in Phase 1.
+func runInit(args []string) {
+	name := ""
+	project := ""
+	template := ""
+	force := false
+	withGate := false
+	multiDev := false
+	dryRun := false
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			initialize.PrintHelp(os.Stdout)
+			os.Exit(0)
+
+		case arg == "--project":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "init: --project requires a path")
+				os.Exit(1)
+			}
+			project = args[i]
+		case len(arg) > 10 && arg[:10] == "--project=":
+			project = arg[10:]
+
+		case arg == "--template":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "init: --template requires a kind (base, rails, go, python, node, rust, static-site)")
+				os.Exit(1)
+			}
+			template = args[i]
+		case len(arg) > 11 && arg[:11] == "--template=":
+			template = arg[11:]
+
+		case arg == "--force":
+			force = true
+		case arg == "--with-gate":
+			withGate = true
+		case arg == "--multi-dev":
+			multiDev = true
+		case arg == "--dry-run":
+			dryRun = true
+
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "init: unknown flag %q (try --help)\n", arg)
+			os.Exit(1)
+
+		default:
+			if name == "" {
+				name = arg
+			} else {
+				fmt.Fprintf(os.Stderr, "init: unexpected positional argument %q\n", arg)
+				os.Exit(1)
+			}
+		}
+	}
+
+	if name == "" {
+		initialize.PrintHelp(os.Stderr)
+		fmt.Fprintln(os.Stderr, "init: missing <name>")
+		os.Exit(1)
+	}
+	if project == "" {
+		initialize.PrintHelp(os.Stderr)
+		fmt.Fprintln(os.Stderr, "init: --project <path> is required")
+		os.Exit(1)
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := initialize.Config{
+		Name:        name,
+		ProjectPath: project,
+		Template:    template,
+		Force:       force,
+		WithGate:    withGate,
+		MultiDev:    multiDev,
+		DryRun:      dryRun,
+		HomeDir:     home,
+		Writer:      os.Stdout,
+		ErrWriter:   os.Stderr,
+	}
+
+	if _, err := initialize.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "init: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // exitWith calls os.Exit with the code returned by passthrough.Run.
