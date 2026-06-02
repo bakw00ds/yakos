@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Mock runtime fixture: prints >4KB to stderr and exits 1.
+# Used to verify truncation (stderr_truncated: true, stderr_tail <= 4096 bytes).
+# 100 lines of ~61 chars = ~6100 bytes total, well over the 4096 byte limit.
+i=0
+while [ "$i" -lt 100 ]; do
+    printf 'line %03d: this is a long error line to trigger truncation logic\n' "$i" >&2
+    i=$((i + 1))
+done
+exit 1

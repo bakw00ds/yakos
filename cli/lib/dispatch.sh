@@ -351,6 +351,7 @@ echo "yakos dispatch: agent=$AGENT_NAME runtime=$RUNTIME model=$MODEL_RESOLVED (
 # computed regardless as a fallback.
 out_tmp="$(mktemp -t yakos-dispatch.XXXXXX)"
 usage_tmp="$(mktemp -t yakos-dispatch-usage.XXXXXX)"
+stderr_tmp="$(mktemp -t yakos-dispatch-stderr.XXXXXX)"
 export YAKOS_USAGE_OUT="$usage_tmp"
 # Export the resolved model so the runtime adapter can inject it into the
 # agent payload when building the --agents JSON. Adapters read
@@ -359,10 +360,25 @@ export YAKOS_USAGE_OUT="$usage_tmp"
 export YAKOS_MODEL_OVERRIDE="$MODEL_RESOLVED"
 epoch_start="$(ct_iso_to_epoch "$ts_start" 2>/dev/null || date +%s)"
 
+# Run the adapter with stderr split: one copy goes to the terminal (fd 2),
+# the other is saved to stderr_tmp for post-mortem logging on failure.
+# Option B: dispatch.sh owns the capture; adapters are oblivious.
+#
+# We redirect the adapter's fd 2 to stderr_tmp, then after the call
+# replay stderr_tmp back to the caller's terminal. This buffers stderr
+# rather than streaming it, but dispatch is non-interactive (headless),
+# so the post-call replay is acceptable. Real-time terminal passthrough
+# via process substitution is unreliable across bash 3.2 / bash 5 / zsh
+# differences in wait-on-process-substitution semantics; buffered replay
+# is portable and race-free.
 set +e
-ct_timeout "$TIMEOUT" yk_rt_dispatch "$PROJECT" "$AGENT_NAME" "$TASK" >"$out_tmp" 2>&1
+ct_timeout "$TIMEOUT" yk_rt_dispatch "$PROJECT" "$AGENT_NAME" "$TASK" \
+    >"$out_tmp" 2>"$stderr_tmp"
 rc=$?
 set -e
+# Replay captured stderr to the caller's terminal so interactive debugging
+# still works. This comes after the runtime exits; acceptable for headless.
+cat "$stderr_tmp" >&2 2>/dev/null || true
 
 unset YAKOS_USAGE_OUT
 unset YAKOS_MODEL_OVERRIDE
@@ -377,6 +393,36 @@ est_output_tokens=$(( out_bytes / 4 ))
 
 cat "$out_tmp"
 rm -f "$out_tmp" 2>/dev/null || true
+
+# ---- stderr capture for dispatch-log -----------------------------------------
+# Only populated when exit_code != 0. Successful runs record null to keep
+# the log clean. Limit: last 4 KB or last 30 lines, whichever is smaller.
+# ANSI escape codes are stripped before persisting.
+stderr_tail_json="null"
+stderr_truncated_json="false"
+if [ "$rc" -ne 0 ] && [ -s "$stderr_tmp" ]; then
+    stderr_raw_size="$(wc -c < "$stderr_tmp" 2>/dev/null | tr -d ' ' || echo 0)"
+    # Strip ANSI escapes. sed -E with the ANSI pattern is POSIX-compatible;
+    # the character class covers CSI sequences (ESC [ ... m and friends).
+    stderr_stripped="$(sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$stderr_tmp" 2>/dev/null || cat "$stderr_tmp" 2>/dev/null || true)"
+    # Extract last 30 lines.
+    stderr_last30="$(printf '%s' "$stderr_stripped" | tail -n 30 2>/dev/null || true)"
+    # Truncate to 4096 bytes maximum. Use head -c for byte-level truncation.
+    stderr_tail_raw="$(printf '%s' "$stderr_last30" | head -c 4096 2>/dev/null || printf '%s' "$stderr_last30")"
+    # Determine if we truncated.
+    stderr_tail_bytes="$(printf '%s' "$stderr_tail_raw" | wc -c | tr -d ' ' || echo 0)"
+    if [ "$stderr_raw_size" -gt 4096 ] || \
+       [ "$(printf '%s' "$stderr_stripped" | wc -l | tr -d ' ')" -gt 30 ]; then
+        stderr_truncated_json="true"
+    fi
+    # Encode as a JSON string using jq @json so quotes/newlines/backslashes
+    # are escaped correctly. If stderr_tail_raw is empty after stripping,
+    # leave stderr_tail_json as null.
+    if [ -n "$stderr_tail_raw" ]; then
+        stderr_tail_json="$(printf '%s' "$stderr_tail_raw" | jq -Rs '.' 2>/dev/null || echo 'null')"
+    fi
+fi
+rm -f "$stderr_tmp" 2>/dev/null || true
 
 # If the adapter wrote real token usage, fold it into the event.
 real_usage="null"
@@ -429,13 +475,17 @@ event_end="$(jq -cn \
     --arg model_chosen_by "$MODEL_CHOSEN_BY" \
     --arg model_resolved "$MODEL_RESOLVED" \
     --argjson eval_run_id "$_eval_run_id_json" \
+    --argjson stderr_tail "$stderr_tail_json" \
+    --argjson stderr_truncated "$stderr_truncated_json" \
     '{type:"dispatch_finished", ts:$t, agent:$agent, runtime:$runtime,
       exit_code:$rc, duration_s:$dur,
       output_bytes:$out_b, task_bytes:$task_b,
       est_input_tokens:$in_tok, est_output_tokens:$out_tok,
       model_chosen_by:$model_chosen_by,
       model_resolved:$model_resolved,
-      eval_run_id:$eval_run_id}
+      eval_run_id:$eval_run_id,
+      stderr_tail:$stderr_tail,
+      stderr_truncated:$stderr_truncated}
       + (if $usage != null then {usage:$usage} else {} end)')"
 printf '%s\n' "$event_end" >> "$DISPATCH_LOG" 2>/dev/null || true
 

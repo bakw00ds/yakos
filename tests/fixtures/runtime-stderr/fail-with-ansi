@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Mock runtime fixture: prints ANSI-colored error to stderr, exits 1.
+# The log entry should strip escape codes, leaving plain text.
+printf '\033[31mred error: something went wrong\033[0m\n' >&2
+exit 1

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Mock runtime fixture: prints stderr with JSON-special chars (quotes, braces,
+# newlines, backslashes). Used to verify jq-safe encoding round-trips.
+printf '{"error": "model \\"gpt-5.5\\" not found"}\nline2: backslash \\ here\n' >&2
+exit 1
