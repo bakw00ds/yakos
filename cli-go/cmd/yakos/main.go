@@ -15,11 +15,13 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"text/tabwriter"
 
 	"github.com/bakw00ds/yakos/internal/passthrough"
+	"github.com/bakw00ds/yakos/internal/validate"
 	"github.com/bakw00ds/yakos/internal/version"
 )
 
@@ -27,8 +29,7 @@ import (
 // bootstrap phase this list is empty. Add entries here as subcommands are
 // ported in subsequent dispatch tasks.
 var portedCommands = []portedCommand{
-	// Example entry once a command is ported:
-	// {Name: "kanban", Since: "0.40.0", Notes: "full feature parity"},
+	{Name: "validate", Since: "0.37.0", Notes: "full feature parity with cli/lib/validate.sh"},
 }
 
 type portedCommand struct {
@@ -70,6 +71,8 @@ func main() {
 		runHelp(yakosRoot, args)
 	case "go-port-status":
 		runPortStatus()
+	case "validate":
+		runValidate(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -131,6 +134,95 @@ func runPortStatus() {
 
 	mustPrint(fmt.Sprintf("\n  Ported: %d / total subcommands tracked: %d\n",
 		len(portedCommands), len(portedCommands)))
+}
+
+// runValidate implements `yakos validate` natively in Go.
+//
+// Usage mirrors cli/lib/validate.sh exactly:
+//
+//	yakos validate              — framework mode (validates $YAKOS_ROOT/lib/)
+//	yakos validate <path>       — project mode (validates <path>/.claude/)
+//	yakos validate --all        — both framework and project
+//	yakos validate --strict     — warnings become errors
+//	yakos validate --help       — print help and exit 0
+//
+// YAKOS_ROOT must be set in the environment (the bash entry-point sets it;
+// in tests it is injected via Case.Env).
+func runValidate(yakosRoot string, args []string) {
+	allMode := false
+	strict := false
+	var targets []string
+
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help":
+			printValidateHelp(os.Stdout)
+			os.Exit(0)
+		case "--all":
+			allMode = true
+		case "--strict", "-s":
+			strict = true
+		default:
+			if len(arg) > 0 && arg[0] == '-' {
+				fmt.Fprintf(os.Stderr, "validate: unknown flag %q\n", arg)
+				os.Exit(1)
+			}
+			targets = append(targets, arg)
+		}
+	}
+
+	// YAKOS_ROOT can be overridden by env (matches bash behaviour where the
+	// entry-point sets it before sourcing validate.sh).
+	if envRoot := os.Getenv("YAKOS_ROOT"); envRoot != "" {
+		yakosRoot = envRoot
+	}
+
+	cfg := validate.Config{
+		YakosRoot: yakosRoot,
+		Strict:    strict,
+		Writer:    os.Stdout,
+		ErrWriter: os.Stderr,
+	}
+
+	var r *validate.Result
+	switch {
+	case allMode:
+		r = validate.RunAll(cfg, targets)
+	case len(targets) == 0:
+		r = validate.RunFramework(cfg)
+	default:
+		r = &validate.Result{}
+		for _, t := range targets {
+			sub := validate.RunProject(cfg, t)
+			r.Errors += sub.Errors
+			r.Warnings += sub.Warnings
+			r.Findings = append(r.Findings, sub.Findings...)
+		}
+	}
+
+	exitCode := validate.PrintSummary(os.Stdout, r)
+	os.Exit(exitCode)
+}
+
+// printValidateHelp prints the help text for `yakos validate`, matching the
+// bash validate.sh --help output exactly.
+func printValidateHelp(w io.Writer) {
+	_, _ = fmt.Fprint(w, `yakos validate [<project-path>] [--all]
+
+Schema + reference validation. Three modes:
+
+  yakos validate                Validate the framework's lib/ (this repo).
+  yakos validate <path>         Validate <path>/.claude/ for a project.
+  yakos validate --all          Validate framework lib/ AND the project's
+                                .claude/ (must also pass <path>).
+
+v0.1 lib/ is intentionally empty — this command handles the empty
+case and reports cleanly. Full frontmatter+reference validation runs
+once Batch 3 populates lib/agents/, lib/skills/, lib/rules/.
+
+Uses python3 if available for full YAML/JSON parsing; degrades to
+grep-based checks otherwise (with a "limited validation" warning).
+`)
 }
 
 // exitWith calls os.Exit with the code returned by passthrough.Run.

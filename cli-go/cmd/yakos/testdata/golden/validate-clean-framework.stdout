@@ -1,0 +1,135 @@
+
+framework: /Users/tw/github/yakOS/lib
+  [info] agents: 38 | skills: 58 | rules: 17
+  [ok]   /Users/tw/github/yakOS/lib/agents/code-reviewer.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/test-runner.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/prompt-engineer.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/security-reviewer.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/lead-template.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/performance-engineer.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/maintainer.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/architect.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/api-designer.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/release-manager.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/ai-finops.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/ai-safety-reviewer.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/doc-writer.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/supply-chain-auditor.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/model-routing-eval.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/devops-engineer.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/ux-researcher.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/troubleshooter.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/app-designer.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/rag-architect.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/backend.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/general-codex.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/content-strategist.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/design-system-curator.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/incident-responder.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/planner.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/general-agy.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/frontend.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/red-team.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/librarian.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/eval-engineer.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/accessibility-reviewer.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/sre.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/data-engineer.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/supervisor.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/mobile.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/i18n-specialist.md
+  [ok]   /Users/tw/github/yakOS/lib/agents/database.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/plan-quality-eval/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/session-recovery/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/interaction-patterns/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/local-llm/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/peer-sync/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/cve-triage/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/evidence-based-debugging/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/session-summary/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/prompt-eval/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/changelog-ui-scaffold/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/logging-scaffold/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/mockup-review/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/hook-bypass-review/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/supervisor-toggle/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/about-page-scaffold/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/cost-summary/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/postmortem-write/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/license-audit/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/promote-branch/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/prompt-injection-test/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/phase-complete/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/perf-budget-check/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/usability-review/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/verify-agent-work/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/version-bump/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/runtime-pick/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/flake-quarantine/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/llm-output-gate/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/i18n-audit/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/release-audit/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/hallucination-check/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/mcp-as-agent/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/gather-feedback/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/iterate-until/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/deploy-check/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/adr-write/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/agent-audit/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/hashed-edit/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/ux-writing-review/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/design-tokens-audit/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/dispatch-as-project-agent/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/project-init/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/peer-handoff/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/split-mega-task/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/test-suite/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/finops-review/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/runbook-author/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/monitor-scaffold/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/persona-write/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/sbom-generate/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/api-diff/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/a11y-scan/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/architecture-viz-scaffold/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/contract-handoff/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/dependency-update/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/pre-commit/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/feedback-scaffold/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/skills/kanban-tend/SKILL.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/environment-discipline.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/changelog-ui-discipline.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/logging-discipline.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/secret-handling.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/commit-format.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/kanban-discipline.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/lead-dispatch-discipline.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/git-hygiene.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/pr-conventions.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/multi-dev-coord.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/architecture-viz-discipline.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/about-page-discipline.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/feedback-discipline.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/retrospective-discipline.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/profile-standards.md
+  [ok]   /Users/tw/github/yakOS/lib/rules/monitor-discipline.md
+  [warn] /Users/tw/github/yakOS/lib/agents/lead-template.md: agent file is 147 lines (budget 80-140)
+  [warn] /Users/tw/github/yakOS/lib/agents/planner.md: agent file is 150 lines (budget 80-140)
+  [warn] /Users/tw/github/yakOS/lib/agents/eval-engineer.md: agent file is 216 lines (budget 80-140)
+  [warn] /Users/tw/github/yakOS/lib/skills/gather-feedback/SKILL.md: skill is 357 lines (budget 80-350)
+  [ok]   eval case /Users/tw/github/yakOS/lib/agents/test-runner/eval/case-01-go-mod-vendored.json
+  [ok]   eval case /Users/tw/github/yakOS/lib/agents/test-runner/eval/case-02-pytest-conftest-failure.json
+  [ok]   eval case /Users/tw/github/yakOS/lib/agents/test-runner/eval/case-03-flaky-snapshot.json
+  [ok]   eval case /Users/tw/github/yakOS/lib/agents/test-runner/eval/case-04-no-tests-found.json
+  [ok]   eval case /Users/tw/github/yakOS/lib/agents/test-runner/eval/case-05-segfault-in-cgo.json
+  [warn] /Users/tw/github/yakOS/lib/agents/model-routing-eval.md: has model-policy:pinned but no eval/ directory — create cases before routing can recommend
+
+Standards checks (WARN-only in v0.1; see STYLE.md):
+  [ok]   eval case /Users/tw/github/yakOS/lib/agents/test-runner/eval/case-01-go-mod-vendored.json
+  [ok]   eval case /Users/tw/github/yakOS/lib/agents/test-runner/eval/case-02-pytest-conftest-failure.json
+  [ok]   eval case /Users/tw/github/yakOS/lib/agents/test-runner/eval/case-03-flaky-snapshot.json
+  [ok]   eval case /Users/tw/github/yakOS/lib/agents/test-runner/eval/case-04-no-tests-found.json
+  [ok]   eval case /Users/tw/github/yakOS/lib/agents/test-runner/eval/case-05-segfault-in-cgo.json
+  [warn] /Users/tw/github/yakOS/lib/agents/model-routing-eval.md: has model-policy:pinned but no eval/ directory — create cases before routing can recommend
+
+Summary: 0 error(s), 6 warning(s)

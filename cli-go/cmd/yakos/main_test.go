@@ -52,18 +52,41 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 	}
 }
 
-// TestPortedCommandsEmpty confirms the bootstrap invariant: no subcommands
-// are ported yet. This test fails intentionally when the first real
-// subcommand is added so the developer is prompted to update both
-// portedCommands AND this test.
-func TestPortedCommandsEmpty(t *testing.T) {
-	if len(portedCommands) != 0 {
+// TestPortedCommandsCount confirms that the ported command count matches the
+// expected number.  Update this test each time a new subcommand is ported.
+//
+// Current ported commands: validate (rank 2 in go-port-plan.md).
+func TestPortedCommandsCount(t *testing.T) {
+	const want = 1
+	if len(portedCommands) != want {
 		t.Errorf(
-			"expected 0 ported commands in bootstrap phase; got %d — "+
-				"update this test when the first subcommand is ported",
-			len(portedCommands),
+			"expected %d ported command(s); got %d — "+
+				"update portedCommands in main.go and this test count together",
+			want, len(portedCommands),
 		)
 	}
+}
+
+// TestPortedCommandsNames verifies each ported command entry is well-formed.
+func TestPortedCommandsNames(t *testing.T) {
+	for i, cmd := range portedCommands {
+		if cmd.Name == "" {
+			t.Errorf("portedCommands[%d].Name is empty", i)
+		}
+		if cmd.Since == "" {
+			t.Errorf("portedCommands[%d].Since is empty", i)
+		}
+	}
+}
+
+// TestValidateCommandEntry asserts that "validate" is in the ported list.
+func TestValidateCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "validate" {
+			return
+		}
+	}
+	t.Error("expected 'validate' in portedCommands; not found")
 }
 
 // TestPortedCommandStruct verifies the portedCommand struct has the expected
