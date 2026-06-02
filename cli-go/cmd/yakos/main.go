@@ -22,6 +22,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/doctor"
+	"github.com/bakw00ds/yakos/internal/kanban"
 	"github.com/bakw00ds/yakos/internal/passthrough"
 	"github.com/bakw00ds/yakos/internal/refresh"
 	"github.com/bakw00ds/yakos/internal/status"
@@ -38,6 +39,7 @@ var portedCommands = []portedCommand{
 	{Name: "status", Since: "0.39.0", Notes: "full feature parity with cli/lib/status.sh"},
 	{Name: "doctor", Since: "0.40.0", Notes: "full feature parity with cli/lib/doctor.sh"},
 	{Name: "refresh", Since: "0.41.0", Notes: "full feature parity with cli/lib/refresh.sh"},
+	{Name: "kanban", Since: "0.42.0", Notes: "full feature parity with cli/lib/kanban.sh (serve deferred to rank 41)"},
 }
 
 type portedCommand struct {
@@ -89,6 +91,8 @@ func main() {
 		runDoctor(yakosRoot, args[1:])
 	case "refresh":
 		runRefresh(yakosRoot, args[1:])
+	case "kanban":
+		runKanban(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -652,6 +656,381 @@ Without --project or --all, infers from cwd (same as yakos start).
 Exit codes:
   0   Success (including no-op when already in sync)
   1   Error (bad project path, corrupt JSON, etc.)
+`)
+}
+
+// runKanban implements `yakos kanban` natively in Go.
+//
+// Usage mirrors cli/lib/kanban.sh exactly:
+//
+//	yakos kanban                       # render TUI (default)
+//	yakos kanban --html [<out>]        # render static HTML snapshot
+//	yakos kanban add "<title>" [--category <c>] [--notes "<text>"]
+//	yakos kanban notes <id> "<text>"   # set/replace notes field
+//	yakos kanban move <id> <col>       # move between columns
+//	yakos kanban done <id>             # shortcut to DONE
+//	yakos kanban delete <id>           # hard-delete a task (also: rm)
+//	yakos kanban serve [...]           # deferred to rank 41
+//	yakos kanban status                # deferred with serve
+//	yakos kanban stop                  # deferred with serve
+//	yakos kanban --help                # print help
+//
+// The kanban.md file is resolved from YAKOS_WORK_DIR env variable, or from the
+// canonical path $HOME/agent-control/<YAKOS_PROJECT>/work/current/kanban.md.
+// When neither is set, the current working directory is searched for a
+// work/current/kanban.md.
+func runKanban(yakosRoot string, args []string) {
+	if len(args) == 0 {
+		renderKanbanTUI()
+		return
+	}
+
+	switch args[0] {
+	case "--help", "-h", "help":
+		printKanbanHelp(os.Stdout)
+		os.Exit(0)
+	case "--html":
+		renderKanbanHTML(args[1:])
+	case "add":
+		kanbanAdd(args[1:])
+	case "notes":
+		kanbanNotes(args[1:])
+	case "move":
+		kanbanMove(args[1:])
+	case "done":
+		kanbanDone(args[1:])
+	case "delete", "rm":
+		kanbanDelete(args[1:])
+	case "serve", "--serve", "status", "stop":
+		// Serve mode (and its status/stop companions) are rank 41; defer.
+		fmt.Fprintln(os.Stderr, "kanban: serve mode is rank 41 in the port plan and is not yet implemented in the Go binary.")
+		fmt.Fprintln(os.Stderr, "  Use: YAKOS_IMPL=bash yakos kanban "+args[0])
+		os.Exit(1)
+	default:
+		fmt.Fprintf(os.Stderr, "kanban: unknown subcommand %q (try --help)\n", args[0])
+		os.Exit(1)
+	}
+}
+
+// kanbanFilePath resolves the path to kanban.md.
+//
+// Resolution order (mirrors cli/lib/paths.sh priority):
+//  1. YAKOS_WORK_DIR env → $YAKOS_WORK_DIR/current/kanban.md
+//  2. YAKOS_INPLACE_WORK=1 + CLAUDE_PROJECT_DIR → $CLAUDE_PROJECT_DIR/work/current/kanban.md
+//  3. $HOME/agent-control/$YAKOS_PROJECT_NAME/work/current/kanban.md
+//  4. Fallback: ./work/current/kanban.md relative to cwd
+func kanbanFilePath() string {
+	if v := os.Getenv("YAKOS_WORK_DIR"); v != "" {
+		return filepath.Join(v, "current", "kanban.md")
+	}
+	if os.Getenv("YAKOS_INPLACE_WORK") == "1" {
+		if pd := os.Getenv("CLAUDE_PROJECT_DIR"); pd != "" {
+			return filepath.Join(pd, "work", "current", "kanban.md")
+		}
+	}
+	if proj := os.Getenv("YAKOS_PROJECT_NAME"); proj != "" {
+		home := os.Getenv("HOME")
+		if home == "" {
+			home = "/tmp"
+		}
+		return filepath.Join(home, "agent-control", proj, "work", "current", "kanban.md")
+	}
+	// Fallback: look in cwd.
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+	return filepath.Join(cwd, "work", "current", "kanban.md")
+}
+
+// loadBoard reads and parses the kanban.md at path. If the file does not
+// exist and create is true, a seeded empty board is returned. If the file
+// does not exist and create is false, an error is returned.
+func loadBoard(path string, create bool) (*kanban.Board, error) {
+	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		if !create {
+			return nil, fmt.Errorf("kanban.md not found at %s", path)
+		}
+		return kanban.Seed(), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	b, err := kanban.Parse(f)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return b, nil
+}
+
+// ensureKanbanDir creates the directory containing the kanban.md if needed.
+func ensureKanbanDir(path string) error {
+	dir := filepath.Dir(path)
+	return os.MkdirAll(dir, 0755) //nolint:gosec
+}
+
+func renderKanbanTUI() {
+	path := kanbanFilePath()
+	b, err := loadBoard(path, true)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kanban: %v\n", err)
+		os.Exit(1)
+	}
+	if err := b.RenderTUI(os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "kanban: render: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func renderKanbanHTML(args []string) {
+	path := kanbanFilePath()
+	outPath := filepath.Join(filepath.Dir(path), "kanban.html")
+	if len(args) > 0 {
+		outPath = args[0]
+	}
+
+	b, err := loadBoard(path, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kanban: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Write to temp then rename (atomic).
+	tmp := outPath + ".tmp"
+	f, err := os.Create(tmp) //nolint:gosec
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kanban: create %s: %v\n", tmp, err)
+		os.Exit(1)
+	}
+	if err := b.RenderHTML(f, path); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		fmt.Fprintf(os.Stderr, "kanban: render html: %v\n", err)
+		os.Exit(1)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		fmt.Fprintf(os.Stderr, "kanban: close %s: %v\n", tmp, err)
+		os.Exit(1)
+	}
+	if err := os.Rename(tmp, outPath); err != nil {
+		_ = os.Remove(tmp)
+		fmt.Fprintf(os.Stderr, "kanban: rename %s: %v\n", outPath, err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "kanban: rendered: %s\n", outPath)
+}
+
+func kanbanAdd(args []string) {
+	category := "other"
+	notes := ""
+	title := ""
+
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "--category":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "kanban add: --category needs a value")
+				os.Exit(1)
+			}
+			category = args[i]
+		case "--notes":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "kanban add: --notes needs a value")
+				os.Exit(1)
+			}
+			notes = args[i]
+		default:
+			if len(args[i]) > 0 && args[i][0] == '-' && args[i] != "--" {
+				// Check for --category=<v> and --notes=<v> forms.
+				if len(args[i]) > 11 && args[i][:11] == "--category=" {
+					category = args[i][11:]
+				} else if len(args[i]) > 8 && args[i][:8] == "--notes=" {
+					notes = args[i][8:]
+				} else if args[i] == "--" {
+					i++
+					if i < len(args) && title == "" {
+						title = args[i]
+					}
+				} else {
+					fmt.Fprintf(os.Stderr, "kanban add: unknown option %q\n", args[i])
+					os.Exit(1)
+				}
+			} else {
+				if title == "" {
+					title = args[i]
+				} else {
+					fmt.Fprintf(os.Stderr, "kanban add: unexpected argument %q\n", args[i])
+					os.Exit(1)
+				}
+			}
+		}
+		i++
+	}
+
+	if title == "" {
+		fmt.Fprintln(os.Stderr, `kanban add: title required: yakos kanban add "<title>"`)
+		os.Exit(1)
+	}
+
+	path := kanbanFilePath()
+	if err := ensureKanbanDir(path); err != nil {
+		fmt.Fprintf(os.Stderr, "kanban add: mkdir %s: %v\n", filepath.Dir(path), err)
+		os.Exit(1)
+	}
+
+	b, err := loadBoard(path, true)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kanban add: %v\n", err)
+		os.Exit(1)
+	}
+
+	id := b.Add(title, category, notes)
+
+	if err := b.Save(path); err != nil {
+		fmt.Fprintf(os.Stderr, "kanban add: save: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "kanban: added: %s \xe2\x80\x94 %s (category: %s)\n", id, title, category)
+}
+
+func kanbanNotes(args []string) {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, `kanban notes: id and text required: yakos kanban notes <id> "<text>"`)
+		os.Exit(1)
+	}
+	id := args[0]
+	text := args[1]
+
+	path := kanbanFilePath()
+	b, err := loadBoard(path, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kanban notes: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := b.SetNotes(id, text); err != nil {
+		fmt.Fprintf(os.Stderr, "kanban notes: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := b.Save(path); err != nil {
+		fmt.Fprintf(os.Stderr, "kanban notes: save: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "kanban: notes set for %s\n", id)
+}
+
+func kanbanMove(args []string) {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "kanban move: id and column required: yakos kanban move <id> <col>")
+		os.Exit(1)
+	}
+	id := args[0]
+	col, err := kanban.NormalizeColumn(args[1])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kanban move: %v\n", err)
+		os.Exit(1)
+	}
+
+	path := kanbanFilePath()
+	b, loadErr := loadBoard(path, false)
+	if loadErr != nil {
+		fmt.Fprintf(os.Stderr, "kanban move: %v\n", loadErr)
+		os.Exit(1)
+	}
+
+	if err := b.Move(id, col); err != nil {
+		fmt.Fprintf(os.Stderr, "kanban move: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := b.Save(path); err != nil {
+		fmt.Fprintf(os.Stderr, "kanban move: save: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "kanban: moved %s to %s\n", id, col)
+}
+
+func kanbanDone(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "kanban done: id required: yakos kanban done <id>")
+		os.Exit(1)
+	}
+	id := args[0]
+
+	path := kanbanFilePath()
+	b, err := loadBoard(path, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kanban done: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := b.Done(id); err != nil {
+		fmt.Fprintf(os.Stderr, "kanban done: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := b.Save(path); err != nil {
+		fmt.Fprintf(os.Stderr, "kanban done: save: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "kanban: moved %s to DONE\n", id)
+}
+
+func kanbanDelete(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "kanban delete: id required: yakos kanban delete <id>")
+		os.Exit(1)
+	}
+	id := args[0]
+
+	path := kanbanFilePath()
+	b, err := loadBoard(path, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kanban delete: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := b.Delete(id); err != nil {
+		fmt.Fprintf(os.Stderr, "kanban delete: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := b.Save(path); err != nil {
+		fmt.Fprintf(os.Stderr, "kanban delete: save: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "kanban: deleted: %s\n", id)
+}
+
+// printKanbanHelp prints the help text for `yakos kanban`, matching the
+// bash kanban.sh --help output.
+func printKanbanHelp(w io.Writer) {
+	_, _ = fmt.Fprint(w, `yakos kanban — 3-column markdown board in scratchpad
+
+  yakos kanban                       # render TUI
+  yakos kanban --html [<out>]        # render static HTML snapshot
+  yakos kanban serve [--port N]      # live web UI: view + manage
+                                     #   [--host H] [--no-open]
+                                     #   (default: random high port on 127.0.0.1)
+                                     #   NOTE: serve is rank 41; use YAKOS_IMPL=bash for now
+  yakos kanban status                # is the web UI running? print its URL
+  yakos kanban stop                  # stop the running web UI
+  yakos kanban add "<title>"         # append to TODO
+                [--category <c>]     #   category (default: other)
+                [--notes "<text>"]   #   initial notes (single line)
+  yakos kanban notes <id> "<text>"   # set/replace notes field (any column)
+  yakos kanban move <id> <col>       # move between columns
+  yakos kanban done <id>             # shortcut to DONE
+  yakos kanban delete <id>           # hard-delete a task (also: rm)
+
+Known categories: bug  feature  chore  question  other  (arbitrary values accepted)
 `)
 }
 

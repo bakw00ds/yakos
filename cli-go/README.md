@@ -8,10 +8,10 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate, cost, status, doctor, refresh ported.** The `validate`, `cost`,
-`status`, `doctor`, and `refresh` subcommands are implemented natively in Go (ranks 2–6 in
-`docs/go-port-plan.md`). All other commands proxy to bash yakos. Run
-`yakos go-port-status` to see the current migration tracker.
+**Phase 1 — validate, cost, status, doctor, refresh, kanban ported.** The `validate`, `cost`,
+`status`, `doctor`, `refresh`, and `kanban` subcommands are implemented natively in Go (ranks 2–7 in
+`docs/go-port-plan.md`). The `kanban serve` submode is deferred to rank 41. All other commands
+proxy to bash yakos. Run `yakos go-port-status` to see the current migration tracker.
 
 The porting plan lives at `docs/go-port-plan.md` (written in parallel by the
 planner agent; commit it once the plan is finalized).
@@ -136,6 +136,7 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos status <project>` | Go (full feature parity with `cli/lib/status.sh`) |
 | `yakos doctor [args]` | Go (full feature parity with `cli/lib/doctor.sh`; `--fix` proxied to bash) |
 | `yakos refresh [args]` | Go (full feature parity with `cli/lib/refresh.sh`) |
+| `yakos kanban [args]` | Go (full feature parity with `cli/lib/kanban.sh`; `serve` deferred to rank 41) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 
@@ -176,7 +177,12 @@ cli-go/
       cost_test.go         # unit tests (table-driven)
       format_test.go       # unit tests for output formatters
     kanban/
-      parse.go             # read-only kanban.md parser (sliver ahead of rank-7 full port)
+      parse.go             # kanban.md parser (Board struct, Parse, Summary)
+      write.go             # atomic Board.Save(path) — temp-rename write + schema sidecar
+      mutate.go            # Board.Add, Move, Done, Delete, SetNotes, rebuildTyped
+      schema.go            # .kanban.schema-version sidecar reader/writer (Decision A)
+      render.go            # RenderTUI (3-column ASCII box) and RenderHTML (static snapshot)
+      kanban_test.go       # 58 tests: 16 round-trip fixtures + 42 unit tests
     status/
       status.go            # Status function, Config/Report types, path resolution
       format.go            # Format + PrintHelp, byte-matching bash output
@@ -208,7 +214,7 @@ cli-go/
 2. Add a case in `cmd/yakos/main.go` routing the subcommand name to your
    implementation instead of `passthrough.Run`.
 3. Add the entry to `portedCommands` in `main.go`.
-4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 5).
+4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 6).
 5. Add parity tests in `cmd/yakos/<name>_parity_test.go` using the paritytest harness.
 
 ## CI
