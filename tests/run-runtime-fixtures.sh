@@ -287,8 +287,8 @@ fi
 
 # ---- 10. general-codex + general-gemini agent files exist with valid fm ------
 echo
-echo "Test 10: general-{codex,gemini} agents exist with valid frontmatter"
-for agent_id in general-codex general-gemini; do
+echo "Test 10: general-{codex,agy} agents exist with valid frontmatter"
+for agent_id in general-codex general-agy; do
     agent_file="$REPO_ROOT/lib/agents/${agent_id}.md"
     if [ ! -f "$agent_file" ]; then
         fail "$agent_id: file not found at $agent_file"
@@ -328,7 +328,7 @@ done
 echo
 echo "Test 11: runtime: pinned (not claude); model: set to concrete model IDs"
 # Format: "agent-id:expected-runtime:expected-model"
-for check in "general-codex:codex:gpt-5.5" "general-gemini:gemini:gemini-3.5"; do
+for check in "general-codex:codex:gpt-5" "general-agy:agy:gemini-2.5-pro"; do
     agent_id="${check%%:*}"
     rest="${check#*:}"
     expected_rt="${rest%%:*}"
@@ -371,7 +371,7 @@ done
 
 # ---- 12. find_agent_file resolves general-codex + general-gemini ------------
 echo
-echo "Test 12: find_agent_file resolves general-codex and general-gemini"
+echo "Test 12: find_agent_file resolves general-codex and general-agy"
 # Inline a minimal find_agent_file using the helpers already sourced above.
 _find_agent_fw() {
     local id="$1"
@@ -389,7 +389,7 @@ _find_agent_fw() {
     done
     return 1
 }
-for agent_id in general-codex general-gemini; do
+for agent_id in general-codex general-agy; do
     resolved="$(_find_agent_fw "$agent_id" || true)"
     if [ -n "$resolved" ] && [ -f "$resolved" ]; then
         ok "$agent_id: find_agent_file resolved to $resolved"
@@ -400,7 +400,7 @@ done
 
 # ---- 13. compose includes general-codex + general-gemini --------------------
 echo
-echo "Test 13: yk_agents_compose includes general-codex and general-gemini"
+echo "Test 13: yk_agents_compose includes general-codex and general-agy"
 # Use a fresh shell to avoid cache pollution from Test 1.
 composed="$(bash -c '
     set -eu
@@ -410,7 +410,7 @@ composed="$(bash -c '
     . "$YAKOS_LIB/agents-compose.sh"
     yk_agents_compose "$YAKOS_ROOT" ""
 ' 2>/dev/null)"
-for agent_id in general-codex general-gemini; do
+for agent_id in general-codex general-agy; do
     if printf '%s' "$composed" | jq -e --arg n "$agent_id" 'has($n)' >/dev/null; then
         ok "compose includes agent: $agent_id"
     else
@@ -420,11 +420,11 @@ done
 
 # ---- 14. yakos validate --strict passes on both new agents ------------------
 echo
-echo "Test 14: yakos validate --strict passes on general-codex and general-gemini"
+echo "Test 14: yakos validate --strict passes on general-codex and general-agy"
 # Run validate in framework mode (no project path) and capture per-agent output.
 validate_out="$(YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$YAKOS_LIB" \
     bash "$YAKOS_LIB/validate.sh" --strict 2>&1 || true)"
-for agent_id in general-codex general-gemini; do
+for agent_id in general-codex general-agy; do
     agent_file="$REPO_ROOT/lib/agents/${agent_id}.md"
     # validate emits "[ok]   <path>" on success; "[err]  <path>:" on failure.
     if printf '%s\n' "$validate_out" | grep -qE "^\s+\[ok\]\s+${agent_file}$"; then

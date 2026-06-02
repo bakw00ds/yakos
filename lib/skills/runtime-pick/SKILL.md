@@ -133,12 +133,12 @@ yakos auth status
 
 ## Generalist runtime-pinned agents
 
-When the recommendation is "use codex" or "use gemini" for a
+When the recommendation is "use codex" or "use agy" for a
 generalist task (no specific domain specialist required), dispatch via:
 
 ```sh
 yakos dispatch general-codex "<task>"
-yakos dispatch general-gemini "<task>"
+yakos dispatch general-agy "<task>"
 ```
 
 These are runtime-pinned generalist agents — no `--runtime` flag
