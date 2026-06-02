@@ -8,11 +8,12 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team ported.** The `validate`,
-`cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, and `team` subcommands are implemented
-natively in Go (ranks 2–9 in `docs/go-port-plan.md`). The `kanban serve` submode is deferred to
-rank 41. The `team restart` archive step delegates to bash `archive.sh` (rank 10, not yet ported).
-All other commands proxy to bash yakos. Run `yakos go-port-status` to see the current migration tracker.
+**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive ported.** The
+`validate`, `cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, `team`, and `archive`
+subcommands are implemented natively in Go (ranks 2–10 in `docs/go-port-plan.md`). The `kanban serve`
+submode is deferred to rank 41. Worktree cleanup at archive time is explicitly NOT in scope (same
+caveat as bash; manual in v0.1). All other commands proxy to bash yakos. Run `yakos go-port-status`
+to see the current migration tracker.
 
 The porting plan lives at `docs/go-port-plan.md` (written in parallel by the
 planner agent; commit it once the plan is finalized).
@@ -139,7 +140,8 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos refresh [args]` | Go (full feature parity with `cli/lib/refresh.sh`) |
 | `yakos kanban [args]` | Go (full feature parity with `cli/lib/kanban.sh`; `serve` deferred to rank 41) |
 | `yakos dispatch <agent> "<task>" [args]` | Go (full feature parity with `cli/lib/dispatch.sh`; PRs #15/#31/#32/#34/#39/#40) |
-| `yakos team restart <project> [args]` | Go (full feature parity with `cli/lib/team.sh`; archive step delegates to bash rank 10) |
+| `yakos archive <project> <tag> [args]` | Go (full feature parity with `cli/lib/archive.sh`; worktree cleanup deferred, manual in v0.1) |
+| `yakos team restart <project> [args]` | Go (full feature parity with `cli/lib/team.sh`; archive step uses native Go when YAKOS_IMPL=go) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 
@@ -158,6 +160,7 @@ cli-go/
       refresh_parity_test.go   # parity tests for refresh subcommand
       dispatch_parity_test.go  # parity tests for dispatch subcommand (10 scenarios)
       team_parity_test.go      # parity tests for team subcommand (14 scenarios)
+      archive_parity_test.go  # parity tests for archive subcommand (14 scenarios)
       testdata/
         fixtures/cost/         # dispatch-log NDJSON fixtures for cost tests
         fixtures/status/       # work-tree fixtures for status tests (5 shapes)
@@ -207,9 +210,12 @@ cli-go/
       settings.go          # four-phase settings.json smart merge + MergeSettingsFiles
       symlinks.go          # agent symlink sync (create/refresh/warn-real-file)
       refresh_test.go      # unit tests (settings:8, hooks:5, agents:5 = 18 tests)
+    archive/
+      archive.go           # Run(cfg Config) — native Go archive (rank 10); atomic move + bypass check
+      archive_test.go      # ≥15 unit tests
     team/
       team.go              # Restart(cfg Config) + Config/RestartResult types + isoTag
-      archive.go           # RunArchiveBash — shells out to cli/lib/archive.sh (rank 10)
+      archive.go           # RunArchive — native Go (YAKOS_IMPL=go) or RunArchiveBash fallback
       team_test.go         # 27 unit tests (isoTag, trimNewline, Restart scenarios)
     paritytest/
       paritytest.go        # parity test harness for all Phase 1 ports
@@ -224,7 +230,7 @@ cli-go/
 2. Add a case in `cmd/yakos/main.go` routing the subcommand name to your
    implementation instead of `passthrough.Run`.
 3. Add the entry to `portedCommands` in `main.go`.
-4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 8).
+4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 9).
 5. Add parity tests in `cmd/yakos/<name>_parity_test.go` using the paritytest harness.
 
 ## CI

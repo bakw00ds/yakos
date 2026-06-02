@@ -23,6 +23,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/bakw00ds/yakos/internal/archive"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/doctor"
@@ -47,7 +48,8 @@ var portedCommands = []portedCommand{
 	{Name: "refresh", Since: "0.41.0", Notes: "full feature parity with cli/lib/refresh.sh"},
 	{Name: "kanban", Since: "0.42.0", Notes: "full feature parity with cli/lib/kanban.sh (serve deferred to rank 41)"},
 	{Name: "dispatch", Since: "0.43.0", Notes: "full feature parity with cli/lib/dispatch.sh; PRs #15/#31/#32/#34/#39/#40 invariants"},
-	{Name: "team", Since: "0.44.0", Notes: "full feature parity with cli/lib/team.sh; archive step delegates to bash (rank 10)"},
+	{Name: "team", Since: "0.44.0", Notes: "full feature parity with cli/lib/team.sh; archive step now native Go (rank 10)"},
+	{Name: "archive", Since: "0.45.0", Notes: "full feature parity with cli/lib/archive.sh; worktree cleanup deferred (manual, v0.1)"},
 }
 
 type portedCommand struct {
@@ -105,6 +107,8 @@ func main() {
 		runDispatch(yakosRoot, args[1:])
 	case "team":
 		runTeam(yakosRoot, args[1:])
+	case "archive":
+		runArchive(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -1329,6 +1333,81 @@ Examples:
   yakos dispatch troubleshooter "diagnose why login_test fails on CI" --runtime codex
   yakos dispatch test-runner "run the suite" --model sonnet
 `)
+}
+
+// runArchive implements `yakos archive` natively in Go.
+//
+// Usage mirrors cli/lib/archive.sh exactly:
+//
+//	yakos archive <project> <tag> [--auto-tag] [--yes]
+//	yakos archive --help
+//
+// Rolls work/current/ into work/archive/<tag>/ for the named project under
+// ~/agent-control/. Refuses to archive while expired hook-bypass entries remain.
+//
+// NOTE: worktree cleanup is explicitly NOT performed (same caveat as bash).
+// Per git-hygiene rule §Worktree: "Cleanup happens at archive time —
+// yakos archive does NOT clean worktrees; that's manual still in v0.1."
+func runArchive(yakosRoot string, args []string) {
+	project := ""
+	tag := ""
+	autoTag := false
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			archive.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case arg == "--auto-tag":
+			autoTag = true
+		case arg == "--yes" || arg == "-y":
+			// Accepted for parity; the Go implementation is always non-interactive.
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "archive: unknown flag %q\n", arg)
+			os.Exit(1)
+		default:
+			if project == "" {
+				project = arg
+			} else if tag == "" {
+				tag = arg
+			} else {
+				fmt.Fprintln(os.Stderr, "archive: too many positional args")
+				os.Exit(1)
+			}
+		}
+	}
+
+	if project == "" {
+		archive.PrintHelp(os.Stderr)
+		fmt.Fprintln(os.Stderr, "archive: missing <project>")
+		os.Exit(1)
+	}
+	if tag == "" {
+		archive.PrintHelp(os.Stderr)
+		fmt.Fprintln(os.Stderr, "archive: missing <tag>")
+		os.Exit(1)
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := archive.Config{
+		YakosRoot: yakosRoot,
+		Project:   project,
+		Tag:       tag,
+		AutoTag:   autoTag,
+		HomeDir:   home,
+		Writer:    os.Stdout,
+		ErrWriter: os.Stderr,
+	}
+
+	if _, err := archive.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "archive: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // runTeam implements `yakos team` natively in Go.

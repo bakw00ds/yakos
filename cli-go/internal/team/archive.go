@@ -5,12 +5,45 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/bakw00ds/yakos/internal/archive"
 )
 
+// RunArchive is the production ArchiveFn used by Restart.
+//
+// When YAKOS_IMPL=go it calls archive.Run directly (native Go implementation,
+// rank 10 in the port plan). Otherwise it falls back to RunArchiveBash which
+// shells out to cli/lib/archive.sh — preserving bash-parity during the
+// transition period.
+//
+// The native path always passes AutoTag=true to mirror the --auto-tag flag
+// that team restart uses, matching the previous RunArchiveBash call.
+func RunArchive(yakosRoot, project, tag string) error {
+	if os.Getenv("YAKOS_IMPL") == "go" {
+		home := os.Getenv("HOME")
+		if home == "" {
+			home = "/tmp"
+		}
+		cfg := archive.Config{
+			YakosRoot: yakosRoot,
+			Project:   project,
+			Tag:       tag,
+			AutoTag:   true,
+			HomeDir:   home,
+			Writer:    os.Stdout,
+			ErrWriter: os.Stderr,
+		}
+		if _, err := archive.Run(cfg); err != nil {
+			return fmt.Errorf("archive: %w", err)
+		}
+		return nil
+	}
+	return RunArchiveBash(yakosRoot, project, tag)
+}
+
 // RunArchiveBash shells out to cli/lib/archive.sh using the same env-var
-// wiring that the bash `yakos` entry-point uses.  This is the production
-// implementation of ArchiveFn for as long as `yakos archive` has not been
-// ported to Go (rank 10 in the port plan).
+// wiring that the bash `yakos` entry-point uses.  This is retained as a
+// fallback for YAKOS_IMPL != "go" during the Phase 1 transition period.
 //
 // It runs:
 //

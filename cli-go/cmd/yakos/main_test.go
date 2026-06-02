@@ -57,9 +57,9 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 //
 // Current ported commands: validate (rank 2), cost (rank 3), status (rank 4),
 // doctor (rank 5), refresh (rank 6), kanban (rank 7), dispatch (rank 8),
-// team (rank 9).
+// team (rank 9), archive (rank 10).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 8
+	const want = 9
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
@@ -159,6 +159,16 @@ func TestTeamCommandEntry(t *testing.T) {
 		}
 	}
 	t.Error("expected 'team' in portedCommands; not found")
+}
+
+// TestArchiveCommandEntry asserts that "archive" is in the ported list.
+func TestArchiveCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "archive" {
+			return
+		}
+	}
+	t.Error("expected 'archive' in portedCommands; not found")
 }
 
 // TestPortedCommandStruct verifies the portedCommand struct has the expected

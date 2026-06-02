@@ -6,13 +6,9 @@
 // restart <project>:
 //  1. Derive an archive tag from the current UTC time (auto-<ISO-8601>),
 //     unless --tag overrides it.
-//  2. Delegate to `yakos archive <project> <tag> --auto-tag --yes` (still
-//     bash in Phase 1; archive is rank 10 in the port plan).
+//  2. Delegate to archive.Run (native Go, rank 10) when YAKOS_IMPL=go;
+//     otherwise shell out to bash cli/lib/archive.sh as a fallback.
 //  3. Print relaunch instructions.
-//
-// The package intentionally has no direct dependency on the archive package
-// (not yet ported). Archiving is delegated via passthrough.RunArchive, which
-// shells out to the bash archive.sh through the existing passthrough shim.
 package team
 
 import (
@@ -164,12 +160,11 @@ func trimNewline(s string) string {
 	return s
 }
 
-// defaultArchive is the production ArchiveFn: it shells out to the bash
-// archive.sh through the existing passthrough shim.
+// defaultArchive is the production ArchiveFn.
 //
-// It constructs the equivalent of:
-//
-//	YAKOS_ROOT=<root> YAKOS_LIB=<root>/lib bash <root>/cli/lib/archive.sh <project> <tag> --auto-tag --yes
+// When YAKOS_IMPL=go it delegates to the native Go archive implementation
+// (archive.Run via RunArchive). Otherwise it shells out to the bash
+// archive.sh through the existing passthrough shim (RunArchiveBash).
 func defaultArchive(yakosRoot, project, tag string) error {
-	return RunArchiveBash(yakosRoot, project, tag)
+	return RunArchive(yakosRoot, project, tag)
 }
