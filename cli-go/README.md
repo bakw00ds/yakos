@@ -8,8 +8,8 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate, cost, status ported.** The `validate`, `cost`, and
-`status` subcommands are implemented natively in Go (ranks 2–4 in
+**Phase 1 — validate, cost, status, doctor ported.** The `validate`, `cost`,
+`status`, and `doctor` subcommands are implemented natively in Go (ranks 2–5 in
 `docs/go-port-plan.md`). All other commands proxy to bash yakos. Run
 `yakos go-port-status` to see the current migration tracker.
 
@@ -134,6 +134,7 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos validate [args]` | Go (full feature parity with `cli/lib/validate.sh`) |
 | `yakos cost [args]` | Go (full feature parity with `cli/lib/cost.sh`) |
 | `yakos status <project>` | Go (full feature parity with `cli/lib/status.sh`) |
+| `yakos doctor [args]` | Go (full feature parity with `cli/lib/doctor.sh`; `--fix` proxied to bash) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 
@@ -148,9 +149,11 @@ cli-go/
       validate_parity_test.go  # parity tests for validate subcommand
       cost_parity_test.go      # parity tests for cost subcommand
       status_parity_test.go    # parity tests for status subcommand
+      doctor_parity_test.go    # parity tests for doctor subcommand
       testdata/
         fixtures/cost/         # dispatch-log NDJSON fixtures for cost tests
         fixtures/status/       # work-tree fixtures for status tests (5 shapes)
+        fixtures/doctor/       # install-shape fixtures for doctor tests (4 shapes)
         golden/                # captured bash baselines for golden comparisons
   internal/
     version/
@@ -175,6 +178,14 @@ cli-go/
       status.go            # Status function, Config/Report types, path resolution
       format.go            # Format + PrintHelp, byte-matching bash output
       status_test.go       # unit tests (table-driven)
+    doctor/
+      doctor.go            # Run function, Config/Report/Section/Severity types, all 13 check sections
+      helpers.go           # sha256File, countDirs, hookDriftReport, agent audit helpers
+      format.go            # PrintHelp (byte-matching bash --help output)
+      doctor_test.go       # unit tests (12 Go-native tests)
+    deploydrift/
+      deploydrift.go       # shared drift detection for doctor (rank 5) and refresh (rank 6)
+                           # CheckDir(hooksDir, projectDir) + CheckFile(installed, sidecar, src)
     paritytest/
       paritytest.go        # parity test harness for all Phase 1 ports
   go.mod                   # module github.com/bakw00ds/yakos (root: cli-go/)

@@ -21,6 +21,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/bakw00ds/yakos/internal/cost"
+	"github.com/bakw00ds/yakos/internal/doctor"
 	"github.com/bakw00ds/yakos/internal/passthrough"
 	"github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/validate"
@@ -34,6 +35,7 @@ var portedCommands = []portedCommand{
 	{Name: "validate", Since: "0.37.0", Notes: "full feature parity with cli/lib/validate.sh"},
 	{Name: "cost", Since: "0.38.0", Notes: "full feature parity with cli/lib/cost.sh"},
 	{Name: "status", Since: "0.39.0", Notes: "full feature parity with cli/lib/status.sh"},
+	{Name: "doctor", Since: "0.40.0", Notes: "full feature parity with cli/lib/doctor.sh"},
 }
 
 type portedCommand struct {
@@ -81,6 +83,8 @@ func main() {
 		runCost(args[1:])
 	case "status":
 		runStatus(args[1:])
+	case "doctor":
+		runDoctor(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -439,6 +443,74 @@ func runStatus(args []string) {
 		fmt.Fprintf(os.Stderr, "yakos: write error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runDoctor implements `yakos doctor` natively in Go.
+//
+// Usage mirrors cli/lib/doctor.sh exactly:
+//
+//	yakos doctor [<project-path>] [--probe-runtime] [--production]
+//	yakos doctor --help
+//
+// Exits 0 when no errors found (warnings/info/drift are OK).
+// Exits 1 when one or more error-severity findings are reported.
+// The --fix flag is recognised but rejected (Phase 1 scope constraint).
+func runDoctor(yakosRoot string, args []string) {
+	projectPath := ""
+	probeRuntime := false
+	production := false
+
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help":
+			doctor.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case "--probe-runtime":
+			probeRuntime = true
+		case "--production":
+			production = true
+		case "--fix":
+			fmt.Fprintln(os.Stderr, "doctor: --fix is not yet implemented in the Go port (see ideas wishlist rank 5)")
+			fmt.Fprintln(os.Stderr, "  Use 'YAKOS_IMPL=bash yakos doctor --fix' to reach the bash implementation.")
+			os.Exit(1)
+		default:
+			if len(arg) > 0 && arg[0] == '-' {
+				fmt.Fprintf(os.Stderr, "doctor: unknown flag %q\n", arg)
+				os.Exit(1)
+			}
+			if projectPath != "" {
+				fmt.Fprintln(os.Stderr, "doctor: too many positional args")
+				os.Exit(1)
+			}
+			projectPath = arg
+		}
+	}
+
+	// Resolve YAKOS_LIB from env.
+	yakosLib := os.Getenv("YAKOS_LIB")
+	if yakosLib == "" && yakosRoot != "" {
+		yakosLib = filepath.Join(yakosRoot, "lib")
+	}
+
+	cfg := doctor.Config{
+		YakosRoot:    yakosRoot,
+		YakosLib:     yakosLib,
+		ProjectPath:  projectPath,
+		ProbeRuntime: probeRuntime,
+		Production:   production,
+		Writer:       os.Stdout,
+		ErrWriter:    os.Stderr,
+	}
+
+	report, err := doctor.Run(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doctor: %v\n", err)
+		os.Exit(1)
+	}
+	if report.Errors > 0 {
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 // exitWith calls os.Exit with the code returned by passthrough.Run.
