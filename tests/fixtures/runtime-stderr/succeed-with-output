@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Mock runtime fixture: prints normal output to stdout, exits 0.
+# stderr is empty (success path).
+printf 'Task complete. Here is the result.\n'
+exit 0
