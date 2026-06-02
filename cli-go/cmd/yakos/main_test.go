@@ -55,9 +55,9 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 // TestPortedCommandsCount confirms that the ported command count matches the
 // expected number.  Update this test each time a new subcommand is ported.
 //
-// Current ported commands: validate (rank 2 in go-port-plan.md).
+// Current ported commands: validate (rank 2), cost (rank 3 in go-port-plan.md).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 1
+	const want = 2
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
@@ -87,6 +87,16 @@ func TestValidateCommandEntry(t *testing.T) {
 		}
 	}
 	t.Error("expected 'validate' in portedCommands; not found")
+}
+
+// TestCostCommandEntry asserts that "cost" is in the ported list.
+func TestCostCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "cost" {
+			return
+		}
+	}
+	t.Error("expected 'cost' in portedCommands; not found")
 }
 
 // TestPortedCommandStruct verifies the portedCommand struct has the expected

@@ -8,9 +8,10 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate ported.** The `validate` subcommand is implemented
-natively in Go (rank 2 in `docs/go-port-plan.md`). All other commands proxy
-to bash yakos. Run `yakos go-port-status` to see the current migration tracker.
+**Phase 1 — validate + cost ported.** The `validate` and `cost` subcommands
+are implemented natively in Go (ranks 2–3 in `docs/go-port-plan.md`). All
+other commands proxy to bash yakos. Run `yakos go-port-status` to see the
+current migration tracker.
 
 The porting plan lives at `docs/go-port-plan.md` (written in parallel by the
 planner agent; commit it once the plan is finalized).
@@ -131,6 +132,7 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos --version` | Go (prints VERSION + " (go)" suffix) |
 | `yakos go-port-status` | Go (migration tracker) |
 | `yakos validate [args]` | Go (full feature parity with `cli/lib/validate.sh`) |
+| `yakos cost [args]` | Go (full feature parity with `cli/lib/cost.sh`) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 
@@ -140,9 +142,13 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 cli-go/
   cmd/
     yakos/
-      main.go              # entry point + arg routing
+      main.go                  # entry point + arg routing
       main_test.go
       validate_parity_test.go  # parity tests for validate subcommand
+      cost_parity_test.go      # parity tests for cost subcommand
+      testdata/
+        fixtures/cost/         # dispatch-log NDJSON fixtures for cost tests
+        golden/                # captured bash baselines for golden comparisons
   internal/
     version/
       version.go           # reads root VERSION file; import as github.com/bakw00ds/yakos/internal/version
@@ -154,6 +160,12 @@ cli-go/
       validate.go          # validate logic (agents/skills/rules/frontmatter/playbook-refs/eval-cases)
       frontmatter.go       # YAML frontmatter parser using gopkg.in/yaml.v3
       validate_test.go     # unit tests (table-driven; per-rule fixtures)
+    cost/
+      dispatchlog.go       # streaming NDJSON reader + LogFiles/StreamFinished/StreamFiles
+      cost.go              # Axis enum, Aggregate function, sortRows
+      format.go            # PrintTable, PrintJSON, PrintNoFiles, PrintNoEvents
+      cost_test.go         # unit tests (table-driven)
+      format_test.go       # unit tests for output formatters
     paritytest/
       paritytest.go        # parity test harness for all Phase 1 ports
   go.mod                   # module github.com/bakw00ds/yakos (root: cli-go/)
@@ -167,7 +179,8 @@ cli-go/
 2. Add a case in `cmd/yakos/main.go` routing the subcommand name to your
    implementation instead of `passthrough.Run`.
 3. Add the entry to `portedCommands` in `main.go`.
-4. Update `TestPortedCommandsEmpty` in `main_test.go` to reflect the new count.
+4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count.
+5. Add parity tests in `cmd/yakos/<name>_parity_test.go` using the paritytest harness.
 
 ## CI
 
