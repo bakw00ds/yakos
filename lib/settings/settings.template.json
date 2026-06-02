@@ -155,6 +155,11 @@
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/session-end-check.sh"
+          },
+          {
+            "_doc": "Phase 3 plan-quality: best-effort outcome capture for any open plan_id. Non-blocking; writes null for fields it cannot compute. Skipped when 'yakos work close' was already run.",
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/plan-outcome-capture.sh"
           }
         ]
       }

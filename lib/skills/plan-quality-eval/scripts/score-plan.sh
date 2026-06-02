@@ -44,7 +44,11 @@ PLAN_FILE=""
 RUBRIC_FILE="$SKILL_DIR/rubrics/default.yaml"
 PLANNER_MODEL="${YAKOS_PLANNER_MODEL:-}"
 DRY_RUN=0
+CALIBRATE=0
 MAX_COST_USD="${YAKOS_PLAN_EVAL_MAX_COST_USD:-0.15}"
+CALIBRATION_LOG="${YAKOS_CALIBRATION_LOG:-$HOME/.yakos-state/plan-quality-calibration-log.ndjson}"
+CALIBRATE_THRESHOLD=0.85
+CALIBRATE_DIM_THRESHOLD=0.70
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -53,6 +57,7 @@ while [ "$#" -gt 0 ]; do
         --planner-model) shift; PLANNER_MODEL="$1" ;;
         --planner-model=*) PLANNER_MODEL="${1#--planner-model=}" ;;
         --dry-run)      DRY_RUN=1 ;;
+        --calibrate)    CALIBRATE=1 ;;
         --*)            ct_die "score-plan.sh: unknown flag '$1'" ;;
         *)
             if [ -z "$PLAN_FILE" ]; then
@@ -64,6 +69,282 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+
+# ---- calibrate mode (run before normal plan file check) ----------------------
+if [ "$CALIBRATE" = "1" ]; then
+    GOLDEN_DIR="$SKILL_DIR/golden"
+    if [ ! -d "$GOLDEN_DIR" ]; then
+        ct_die "score-plan.sh --calibrate: golden directory not found at $GOLDEN_DIR"
+    fi
+
+    if ! command -v jq >/dev/null 2>&1; then
+        ct_die "score-plan.sh --calibrate: jq is required"
+    fi
+
+    ct_log "score-plan: calibrate mode — scoring all plans in $GOLDEN_DIR"
+
+    DIMENSIONS=(
+        "acceptance_criteria_specificity"
+        "assumption_surfacing"
+        "decomposition_granularity"
+        "dependency_clarity"
+        "domain_boundaries_respected"
+        "risk_rollback_honesty"
+    )
+
+    # Collect per-(judge,dim) signed deltas and per-dim agreement counts
+    # agreement = panel median within 0.5 of human label
+    declare -A dim_agree_count
+    declare -A dim_total_count
+    declare -A judge_dim_delta_sum
+    declare -A judge_dim_delta_count
+
+    for dim in "${DIMENSIONS[@]}"; do
+        dim_agree_count[$dim]=0
+        dim_total_count[$dim]=0
+    done
+
+    GOLDEN_COUNT=0
+    GOLDEN_RESULTS="[]"
+
+    for plan_dir in "$GOLDEN_DIR"/*/; do
+        [ -d "$plan_dir" ] || continue
+        plan_file="$plan_dir/plan.md"
+        labels_file="$plan_dir/labels.yaml"
+        [ -f "$plan_file" ] || continue
+        [ -f "$labels_file" ] || continue
+
+        plan_name="$(basename "$plan_dir")"
+        ct_log "score-plan: calibrating $plan_name"
+
+        # Score the plan (capture the log record)
+        local_tmp_home="$(mktemp -d -t yakos-calib.XXXXXX)"
+        mkdir -p "$local_tmp_home/.yakos-state"
+
+        score_rc=0
+        YAKOS_PLAN_JUDGE_MOCK="${YAKOS_PLAN_JUDGE_MOCK:-}" \
+            HOME="$local_tmp_home" \
+            bash "$0" "$plan_file" \
+            --rubric "$RUBRIC_FILE" \
+            >/dev/null 2>/dev/null || score_rc=$?
+
+        local_log="$local_tmp_home/.yakos-state/plan-quality-log.ndjson"
+        if [ ! -f "$local_log" ]; then
+            ct_log "WARN: calibrate: no log produced for $plan_name; skipping"
+            rm -rf "$local_tmp_home"
+            continue
+        fi
+
+        scored_record="$(tail -1 "$local_log")"
+        rm -rf "$local_tmp_home"
+
+        if [ -z "$scored_record" ] || ! printf '%s' "$scored_record" | jq empty 2>/dev/null; then
+            ct_log "WARN: calibrate: invalid record for $plan_name; skipping"
+            continue
+        fi
+
+        GOLDEN_COUNT=$((GOLDEN_COUNT + 1))
+
+        # Compare per-dimension median to labels.yaml
+        for dim in "${DIMENSIONS[@]}"; do
+            # Parse label from labels.yaml (simple grep)
+            human_label="$(grep "^${dim}:" "$labels_file" 2>/dev/null | awk -F: '{print $2}' | tr -d ' ' || echo "")"
+            [ -z "$human_label" ] && human_label="null"
+
+            panel_median="$(printf '%s' "$scored_record" | jq -r ".per_dimension_median.${dim} // \"null\"")"
+
+            dim_total_count[$dim]=$((${dim_total_count[$dim]:-0} + 1))
+
+            # Agreement: |median - label| <= 0.5
+            if [ "$human_label" != "null" ] && [ "$panel_median" != "null" ]; then
+                agreement="$(awk -v m="$panel_median" -v h="$human_label" \
+                    'BEGIN { diff = m - h; if (diff < 0) diff = -diff; print (diff <= 0.5) ? "yes" : "no" }')"
+                [ "$agreement" = "yes" ] && dim_agree_count[$dim]=$((${dim_agree_count[$dim]:-0} + 1))
+            fi
+
+            # Per-judge bias: compute signed delta for each judge
+            panel_json="$(printf '%s' "$scored_record" | jq -c '.panel // []')"
+            judge_count="$(printf '%s' "$panel_json" | jq 'length')"
+            for j_idx in $(seq 0 $((judge_count - 1))); do
+                judge_id="$(printf '%s' "$panel_json" | jq -r ".[$j_idx].model_id // \"judge-$j_idx\"")"
+                judge_score="$(printf '%s' "$panel_json" | jq -r ".[$j_idx].scores.${dim} // \"null\"")"
+
+                if [ "$judge_score" != "null" ] && [ "$human_label" != "null" ]; then
+                    delta="$(awk -v j="$judge_score" -v h="$human_label" 'BEGIN { printf "%.4f", j - h }')"
+                    key="${judge_id}__${dim}"
+                    judge_dim_delta_sum[$key]="${judge_dim_delta_sum[$key]:-0}"
+                    judge_dim_delta_sum[$key]="$(awk -v s="${judge_dim_delta_sum[$key]}" -v d="$delta" 'BEGIN { printf "%.4f", s+d }')"
+                    judge_dim_delta_count[$key]=$((${judge_dim_delta_count[$key]:-0} + 1))
+                fi
+            done
+
+            # Collect result for this plan/dim
+            GOLDEN_RESULTS="$(printf '%s' "$GOLDEN_RESULTS" | jq -c \
+                --arg pn "$plan_name" \
+                --arg dim "$dim" \
+                --arg hl "$human_label" \
+                --arg pm "$panel_median" \
+                '. + [{plan: $pn, dim: $dim, human_label: ($hl | tonumber? // null), panel_median: ($pm | tonumber? // null)}]' 2>/dev/null || echo "$GOLDEN_RESULTS")"
+        done
+    done
+
+    if [ "$GOLDEN_COUNT" -eq 0 ]; then
+        ct_die "score-plan.sh --calibrate: no valid golden plans found in $GOLDEN_DIR"
+    fi
+
+    # ---- compute summary stats -----------------------------------------------
+
+    echo ""
+    echo "Plan-quality judge calibration (n=$GOLDEN_COUNT golden plans)"
+    echo ""
+    echo "  Per-dimension agreement rate (panel median within 0.5 of human label):"
+
+    total_agree=0
+    total_dims=0
+    dim_agree_rates=""
+
+    for dim in "${DIMENSIONS[@]}"; do
+        total="${dim_total_count[$dim]:-0}"
+        agree="${dim_agree_count[$dim]:-0}"
+        if [ "$total" -gt 0 ]; then
+            rate="$(awk -v a="$agree" -v t="$total" 'BEGIN { printf "%.2f", a/t }')"
+        else
+            rate="n/a"
+        fi
+        flag=""
+        if [ "$rate" != "n/a" ]; then
+            below_dim="$(awk -v r="$rate" -v t="$CALIBRATE_DIM_THRESHOLD" 'BEGIN { print (r < t) ? "yes" : "no" }')"
+            [ "$below_dim" = "yes" ] && flag=" *** BELOW THRESHOLD (< $CALIBRATE_DIM_THRESHOLD)"
+            total_agree=$((total_agree + agree))
+            total_dims=$((total_dims + total))
+        fi
+        printf "    %-44s %s%s\n" "$dim" "$rate" "$flag"
+        dim_agree_rates="${dim_agree_rates} $dim=$rate"
+    done
+
+    overall_rate="n/a"
+    if [ "$total_dims" -gt 0 ]; then
+        overall_rate="$(awk -v a="$total_agree" -v t="$total_dims" 'BEGIN { printf "%.2f", a/t }')"
+    fi
+
+    echo ""
+    echo "  Overall calibration score: $overall_rate"
+
+    trustworthy="yes"
+    if [ "$overall_rate" != "n/a" ]; then
+        trustworthy="$(awk -v r="$overall_rate" -v t="$CALIBRATE_THRESHOLD" 'BEGIN { print (r >= t) ? "yes" : "no" }')"
+    fi
+    if [ "$trustworthy" = "yes" ]; then
+        echo "  Gate status: TRUSTWORTHY (>= $CALIBRATE_THRESHOLD)"
+    else
+        echo "  Gate status: NEEDS REVIEW (< $CALIBRATE_THRESHOLD — consider rubric revision)"
+    fi
+
+    # ---- per-judge bias -------------------------------------------------------
+
+    echo ""
+    echo "  Per-judge signed delta (judge_score - human_label, per dimension):"
+
+    # Collect unique judge IDs
+    judge_ids=""
+    for key in "${!judge_dim_delta_sum[@]}"; do
+        jid="${key%__*}"
+        case " $judge_ids " in
+            *" $jid "*) ;;
+            *) judge_ids="$judge_ids $jid" ;;
+        esac
+    done
+
+    for jid in $judge_ids; do
+        echo "    Judge: $jid"
+        for dim in "${DIMENSIONS[@]}"; do
+            key="${jid}__${dim}"
+            cnt="${judge_dim_delta_count[$key]:-0}"
+            if [ "$cnt" -gt 0 ]; then
+                mean="$(awk -v s="${judge_dim_delta_sum[$key]:-0}" -v c="$cnt" 'BEGIN { printf "%+.3f", s/c }')"
+            else
+                mean="n/a"
+            fi
+            printf "      %-44s mean_delta=%s\n" "$dim" "$mean"
+        done
+    done
+
+    # ---- recommendations -------------------------------------------------------
+
+    echo ""
+    echo "  Recommendations:"
+    has_rec=0
+    for dim in "${DIMENSIONS[@]}"; do
+        total="${dim_total_count[$dim]:-0}"
+        agree="${dim_agree_count[$dim]:-0}"
+        if [ "$total" -gt 0 ]; then
+            rate="$(awk -v a="$agree" -v t="$total" 'BEGIN { printf "%.2f", a/t }')"
+            below_dim="$(awk -v r="$rate" -v t="$CALIBRATE_DIM_THRESHOLD" 'BEGIN { print (r < t) ? "yes" : "no" }')"
+            if [ "$below_dim" = "yes" ]; then
+                echo "    - Consider revising rubric definition or scoring guide for: $dim (agreement=$rate)"
+                has_rec=1
+            fi
+        fi
+    done
+    [ "$has_rec" = "0" ] && echo "    None — all dimensions above threshold."
+
+    # ---- write calibration log record ----------------------------------------
+
+    CAL_TS="$(ct_iso_now_z)"
+    mkdir -p "$(dirname "$CALIBRATION_LOG")"
+
+    # Build dim_rates JSON object
+    DIM_RATES_JSON="$(jq -nc \
+        --arg a0 "${dim_agree_count[acceptance_criteria_specificity]:-0}" \
+        --arg t0 "${dim_total_count[acceptance_criteria_specificity]:-0}" \
+        --arg a1 "${dim_agree_count[assumption_surfacing]:-0}" \
+        --arg t1 "${dim_total_count[assumption_surfacing]:-0}" \
+        --arg a2 "${dim_agree_count[decomposition_granularity]:-0}" \
+        --arg t2 "${dim_total_count[decomposition_granularity]:-0}" \
+        --arg a3 "${dim_agree_count[dependency_clarity]:-0}" \
+        --arg t3 "${dim_total_count[dependency_clarity]:-0}" \
+        --arg a4 "${dim_agree_count[domain_boundaries_respected]:-0}" \
+        --arg t4 "${dim_total_count[domain_boundaries_respected]:-0}" \
+        --arg a5 "${dim_agree_count[risk_rollback_honesty]:-0}" \
+        --arg t5 "${dim_total_count[risk_rollback_honesty]:-0}" \
+        '{
+            acceptance_criteria_specificity: (if ($t0|tonumber) > 0 then (($a0|tonumber)/($t0|tonumber)) else null end),
+            assumption_surfacing:            (if ($t1|tonumber) > 0 then (($a1|tonumber)/($t1|tonumber)) else null end),
+            decomposition_granularity:       (if ($t2|tonumber) > 0 then (($a2|tonumber)/($t2|tonumber)) else null end),
+            dependency_clarity:              (if ($t3|tonumber) > 0 then (($a3|tonumber)/($t3|tonumber)) else null end),
+            domain_boundaries_respected:     (if ($t4|tonumber) > 0 then (($a4|tonumber)/($t4|tonumber)) else null end),
+            risk_rollback_honesty:           (if ($t5|tonumber) > 0 then (($a5|tonumber)/($t5|tonumber)) else null end)
+        }')"
+
+    jq -cn \
+        --arg type "calibration_run" \
+        --arg ts "$CAL_TS" \
+        --arg rubric_file "$RUBRIC_FILE" \
+        --argjson golden_count "$GOLDEN_COUNT" \
+        --argjson dim_agreement_rates "$DIM_RATES_JSON" \
+        --arg overall_agreement "$overall_rate" \
+        --arg trustworthy "$trustworthy" \
+        --arg threshold "$CALIBRATE_THRESHOLD" \
+        '{
+            type: $type,
+            ts: $ts,
+            rubric_file: $rubric_file,
+            golden_count: $golden_count,
+            dim_agreement_rates: $dim_agreement_rates,
+            overall_agreement: ($overall_agreement | tonumber? // null),
+            trustworthy: ($trustworthy == "yes"),
+            calibration_threshold: ($threshold | tonumber)
+        }' >> "$CALIBRATION_LOG"
+
+    ct_log "score-plan: calibration record written to $CALIBRATION_LOG"
+    echo ""
+
+    if [ "$trustworthy" = "yes" ]; then
+        exit 0
+    else
+        exit 1
+    fi
+fi
 
 [ -n "$PLAN_FILE" ] || { echo "Usage: score-plan.sh <plan.md> [flags]" >&2; exit 1; }
 [ -f "$PLAN_FILE" ] || ct_die "score-plan.sh: plan file not found: $PLAN_FILE"

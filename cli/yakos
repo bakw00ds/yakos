@@ -239,6 +239,30 @@ case "$cmd" in
         # doesn't bleed into the dispatcher.
         bash "$script" "$@"
         ;;
+    work)
+        # 'yakos work close ...' routes to work-close.sh
+        subcmd="${1:-}"
+        [ "$#" -gt 0 ] && shift
+        case "$subcmd" in
+            close)
+                script="$YAKOS_LIB/work-close.sh"
+                if [ ! -f "$script" ]; then
+                    ct_die "internal error: $script not found"
+                fi
+                bash "$script" "$@"
+                ;;
+            -h|--help|help|"")
+                echo "yakos work <subcommand>"
+                echo ""
+                echo "Subcommands:"
+                echo "  close   Close the current work session and capture outcome telemetry"
+                ;;
+            *)
+                echo "yakos work: unknown subcommand '$subcmd'" >&2
+                exit 64
+                ;;
+        esac
+        ;;
     plan)
         # 'yakos plan score ...' routes to plan-score.sh
         script="$YAKOS_LIB/plan-score.sh"
