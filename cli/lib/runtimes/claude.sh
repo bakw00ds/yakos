@@ -315,6 +315,7 @@ $task"
                --add-dir "$project" \
                --output-format stream-json \
                --verbose \
+               --exclude-dynamic-system-prompt-sections \
                "${resume_args[@]}" \
                -p "$framed" > "$raw_tmp" 2>/dev/null
         else
@@ -323,6 +324,7 @@ $task"
                --add-dir "$project" \
                --output-format stream-json \
                --verbose \
+               --exclude-dynamic-system-prompt-sections \
                "${resume_args[@]}" \
                -p "$framed" > "$raw_tmp" 2>/dev/null
         fi
@@ -356,12 +358,14 @@ $task"
         IS_SANDBOX=1 claude --agents "$single" \
                --permission-mode bypassPermissions \
                --add-dir "$project" \
+               --exclude-dynamic-system-prompt-sections \
                "${resume_args[@]}" \
                -p "$framed"
     else
         claude --agents "$single" \
                --permission-mode bypassPermissions \
                --add-dir "$project" \
+               --exclude-dynamic-system-prompt-sections \
                "${resume_args[@]}" \
                -p "$framed"
     fi
