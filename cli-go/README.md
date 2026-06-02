@@ -8,8 +8,8 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate, cost, status, doctor ported.** The `validate`, `cost`,
-`status`, and `doctor` subcommands are implemented natively in Go (ranks 2–5 in
+**Phase 1 — validate, cost, status, doctor, refresh ported.** The `validate`, `cost`,
+`status`, `doctor`, and `refresh` subcommands are implemented natively in Go (ranks 2–6 in
 `docs/go-port-plan.md`). All other commands proxy to bash yakos. Run
 `yakos go-port-status` to see the current migration tracker.
 
@@ -135,6 +135,7 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos cost [args]` | Go (full feature parity with `cli/lib/cost.sh`) |
 | `yakos status <project>` | Go (full feature parity with `cli/lib/status.sh`) |
 | `yakos doctor [args]` | Go (full feature parity with `cli/lib/doctor.sh`; `--fix` proxied to bash) |
+| `yakos refresh [args]` | Go (full feature parity with `cli/lib/refresh.sh`) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 
@@ -150,10 +151,12 @@ cli-go/
       cost_parity_test.go      # parity tests for cost subcommand
       status_parity_test.go    # parity tests for status subcommand
       doctor_parity_test.go    # parity tests for doctor subcommand
+      refresh_parity_test.go   # parity tests for refresh subcommand
       testdata/
         fixtures/cost/         # dispatch-log NDJSON fixtures for cost tests
         fixtures/status/       # work-tree fixtures for status tests (5 shapes)
         fixtures/doctor/       # install-shape fixtures for doctor tests (4 shapes)
+        fixtures/refresh/      # project-state fixtures for refresh tests (5 shapes)
         golden/                # captured bash baselines for golden comparisons
   internal/
     version/
@@ -186,6 +189,12 @@ cli-go/
     deploydrift/
       deploydrift.go       # shared drift detection for doctor (rank 5) and refresh (rank 6)
                            # CheckDir(hooksDir, projectDir) + CheckFile(installed, sidecar, src)
+                           # SHA256File exported for refresh sidecar writes
+    refresh/
+      refresh.go           # Run(cfg Config) + hook sync + project discovery helpers
+      settings.go          # four-phase settings.json smart merge + MergeSettingsFiles
+      symlinks.go          # agent symlink sync (create/refresh/warn-real-file)
+      refresh_test.go      # unit tests (settings:8, hooks:5, agents:5 = 18 tests)
     paritytest/
       paritytest.go        # parity test harness for all Phase 1 ports
   go.mod                   # module github.com/bakw00ds/yakos (root: cli-go/)
@@ -199,7 +208,7 @@ cli-go/
 2. Add a case in `cmd/yakos/main.go` routing the subcommand name to your
    implementation instead of `passthrough.Run`.
 3. Add the entry to `portedCommands` in `main.go`.
-4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count.
+4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 5).
 5. Add parity tests in `cmd/yakos/<name>_parity_test.go` using the paritytest harness.
 
 ## CI
