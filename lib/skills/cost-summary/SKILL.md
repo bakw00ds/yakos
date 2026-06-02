@@ -58,10 +58,18 @@ gets a markdown summary, optionally posts to a Slack/Discord webhook.
    yakos cost --since "${SINCE}" --json --by day     > /tmp/cost-day.json
    ```
 
-3. Compose the markdown summary. Include three tables (runtime,
-   agent, day) and the totals. Mark the est-tokens columns
-   "estimate" so readers know to consult the runtime's own billing
-   for billable numbers.
+3. Compose the markdown summary. Before the tables, emit a one-line
+   pending model-routing notice:
+   ```sh
+   MR_CANDS="${HOME}/.yakos-state/model-routing-candidates.ndjson"
+   if [ -s "$MR_CANDS" ]; then
+       n="$(jq -rs '[.[].agent] | unique | length' "$MR_CANDS" 2>/dev/null || echo 0)"
+       echo "pending model-routing candidates: $n (run \`yakos model-routing list\` to see)"
+   fi
+   ```
+   Then include three tables (runtime, agent, day) and the totals.
+   Mark the est-tokens columns "estimate" so readers know to consult
+   the runtime's own billing for billable numbers.
 
 4. Print to stdout. If `--post` is set AND `YAKOS_COST_WEBHOOK` is
    non-empty, also POST:

@@ -513,10 +513,13 @@ else
 fi
 
 # ============================================================
-# Test 11: promote stub exits 0 with "not yet implemented"
+# Test 11: promote — Phase 3 implemented.
+#   test-runner is in lib/agents/ (framework); without --global it should
+#   refuse with a remediation message. No candidate is seeded here so it
+#   will fail on framework-agent guard first.
 # ============================================================
 echo
-echo "Test 11: promote stub"
+echo "Test 11: promote (Phase 3) — framework-agent guard fires without --global"
 
 PROMOTE_RC=0
 PROMOTE_OUT="$(
@@ -528,22 +531,24 @@ PROMOTE_OUT="$(
     bash "$YAKOS_LIB/model-routing.sh" promote test-runner 2>&1
 )" || PROMOTE_RC=$?
 
-if [ "$PROMOTE_RC" -eq 0 ]; then
-    ok "promote exits 0"
+if [ "$PROMOTE_RC" -ne 0 ]; then
+    ok "promote test-runner (framework agent, no --global) exits non-zero ($PROMOTE_RC)"
 else
-    fail "promote should exit 0 (stub), got $PROMOTE_RC"
+    fail "promote should exit non-zero for framework agent without --global"
 fi
-if printf '%s' "$PROMOTE_OUT" | grep -qi 'not yet implemented\|phase 3'; then
-    ok "promote prints 'not yet implemented'"
+if printf '%s' "$PROMOTE_OUT" | grep -qi '\-\-global\|Pass --global'; then
+    ok "promote mentions --global remediation"
 else
-    fail "promote output missing 'not yet implemented': $PROMOTE_OUT"
+    fail "promote missing --global remediation message: $PROMOTE_OUT"
 fi
 
 # ============================================================
-# Test 12: reject stub exits 0 with "not yet implemented"
+# Test 12: reject — Phase 3 implemented.
+#   test-runner has no pending candidate in this context; should exit non-zero
+#   with a helpful message.
 # ============================================================
 echo
-echo "Test 12: reject stub"
+echo "Test 12: reject (Phase 3) — no candidate exits non-zero with helpful message"
 
 REJECT_RC=0
 REJECT_OUT="$(
@@ -555,22 +560,23 @@ REJECT_OUT="$(
     bash "$YAKOS_LIB/model-routing.sh" reject test-runner 2>&1
 )" || REJECT_RC=$?
 
-if [ "$REJECT_RC" -eq 0 ]; then
-    ok "reject exits 0"
+if [ "$REJECT_RC" -ne 0 ]; then
+    ok "reject exits non-zero when no candidate on file ($REJECT_RC)"
 else
-    fail "reject should exit 0 (stub), got $REJECT_RC"
+    fail "reject should exit non-zero when no candidate exists"
 fi
-if printf '%s' "$REJECT_OUT" | grep -qi 'not yet implemented\|phase 3'; then
-    ok "reject prints 'not yet implemented'"
+if printf '%s' "$REJECT_OUT" | grep -qi 'no candidate\|not found'; then
+    ok "reject error message mentions no candidate"
 else
-    fail "reject output missing 'not yet implemented': $REJECT_OUT"
+    fail "reject error message unclear: $REJECT_OUT"
 fi
 
 # ============================================================
-# Test 13: history stub exits 0 with "not yet implemented"
+# Test 13: history — Phase 3 implemented.
+#   No history/graveyard seeded here; should exit 0 with a "no records" message.
 # ============================================================
 echo
-echo "Test 13: history stub"
+echo "Test 13: history (Phase 3) — empty history exits 0 with informative message"
 
 HISTORY_RC=0
 HISTORY_OUT="$(
@@ -583,14 +589,14 @@ HISTORY_OUT="$(
 )" || HISTORY_RC=$?
 
 if [ "$HISTORY_RC" -eq 0 ]; then
-    ok "history exits 0"
+    ok "history exits 0 when no records exist"
 else
-    fail "history should exit 0 (stub), got $HISTORY_RC"
+    fail "history should exit 0, got $HISTORY_RC"
 fi
-if printf '%s' "$HISTORY_OUT" | grep -qi 'not yet implemented\|phase 3'; then
-    ok "history prints 'not yet implemented'"
+if printf '%s' "$HISTORY_OUT" | grep -qi 'no history\|no records\|not found'; then
+    ok "history prints informative empty-state message"
 else
-    fail "history output missing 'not yet implemented': $HISTORY_OUT"
+    fail "history empty-state message unclear: $HISTORY_OUT"
 fi
 
 # ============================================================

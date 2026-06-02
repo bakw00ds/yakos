@@ -100,3 +100,30 @@ When adding a new generic agent:
 | `runtime-fallback` | optional, v0.5+ | List of fallback runtimes, e.g. `[codex, claude]`. If the preferred runtime fails check_cli or check_auth, `yakos dispatch` walks this list. |
 | `max-cost-per-task` | optional, v0.8+ | Cost ceiling in USD (e.g. `0.50`). When the runtime returns real `total_cost_usd` telemetry and exceeds this value, dispatch-log emits a `budget_violation` event. Observation-only post-call; pre-flight is v0.9+. |
 | `max-duration-s` | optional, v0.8+ | Per-dispatch timeout in seconds (e.g. `300`). Applied if smaller than the global `--timeout`. |
+| `model-policy` | optional, v0.10+ | `pinned` (default; never auto-routes) \| `prefer-haiku-if-eval-equal` \| `prefer-sonnet-if-eval-equal` \| `eval-driven`. Controls how `yakos model-routing eval` interprets promotion candidates. `pinned` agents are never auto-promoted; operator must run `yakos model-routing promote` explicitly. |
+| `model-policy-epsilon` | optional, v0.10+ | Float in [0, 0.30]. Per-agent override of the framework ε default (default 0.05). The eval harness uses this value instead of the global `epsilon_pass_rate` setting when computing the Wilson CI gate for this agent. |
+
+### Model routing and promotion
+
+The `model:` field reflects the **effective tier at compose time** — it
+is the value `yakos dispatch` uses to select the model for each run.
+The model-routing eval harness (`yakos model-routing eval`) may produce
+a candidate suggesting a cheaper tier. Promotion is **operator-only**:
+
+```sh
+yakos model-routing promote <agent-id>          # project agent
+yakos model-routing promote <agent-id> --global # framework agent (lib/agents/)
+```
+
+Promotion rewrites `model:` atomically (tempfile + mv), backs up the
+prior file to `~/.yakos-state/model-routing-backups/`, appends a
+history entry to `~/.yakos-state/model-routing-history.ndjson`, and
+validates the tree with `yakos validate --strict` before committing.
+If validation fails the backup is restored.
+
+No hook, agent, or auto-script may call `model-routing promote`. The
+CLI write is the only permitted promotion path. This follows the
+deliberate friction pattern established by
+`incident:librarian-self-congratulation-2026-05-22` — the same reason
+`yakos skill promote` is operator-gated and the `model-routing-eval`
+agent's tools list excludes `Edit` and `Write`.
