@@ -328,7 +328,7 @@ done
 echo
 echo "Test 11: runtime: pinned (not claude); model: set to concrete model IDs"
 # Format: "agent-id:expected-runtime:expected-model"
-for check in "general-codex:codex:gpt-5.5" "general-agy:gemini:gemini-3.5"; do
+for check in "general-codex:codex:gpt-5" "general-agy:gemini:gemini-3.5"; do
     agent_id="${check%%:*}"
     rest="${check#*:}"
     expected_rt="${rest%%:*}"
