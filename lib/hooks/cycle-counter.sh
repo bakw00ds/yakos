@@ -27,6 +27,18 @@ HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 . "$HOOK_DIR/lib/hook-output.sh"
 # shellcheck source=lib/paths.sh
 . "$HOOK_DIR/lib/paths.sh"
+# compat.sh is needed for ct_log; resolve via YAKOS_ROOT
+if [ -z "${YAKOS_ROOT:-}" ]; then
+    YAKOS_ROOT="$(cd "$HOOK_DIR/../.." && pwd -P)"
+fi
+YAKOS_LIB="${YAKOS_LIB:-$YAKOS_ROOT/cli/lib}"
+if [ -f "$YAKOS_LIB/compat.sh" ]; then
+    # shellcheck source=../../cli/lib/compat.sh
+    . "$YAKOS_LIB/compat.sh"
+else
+    # Minimal inline fallback so the hook can still emit diagnostics
+    ct_log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+fi
 
 hi_init
 
