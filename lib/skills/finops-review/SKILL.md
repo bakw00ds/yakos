@@ -97,12 +97,40 @@ savings, not a blame report. Owned by the `ai-finops` agent.
    tolerance > 1h (declared in agent frontmatter), (c) calls are
    independent (no chaining). The skill emits a candidate list.
 
-6. **Compose the report.**
+6. **Pending routing candidates.**
+   Read `~/.yakos-state/model-routing-candidates.ndjson` and surface
+   any pending model-routing opportunities as part of the review.
+   ```sh
+   # List pending candidates, ranked by estimated monthly savings.
+   MR_CANDS="${HOME}/.yakos-state/model-routing-candidates.ndjson"
+   if [ -s "$MR_CANDS" ]; then
+       echo "### Pending model-routing candidates"
+       jq -rs '
+           group_by(.agent) |
+           map(sort_by(.generated_at) | last) |
+           sort_by(-.estimated_monthly_savings_usd) |
+           .[] |
+           "  \(.agent): \(.current_model) -> \(.suggested_model)" +
+           "  est. savings=~$\(.estimated_monthly_savings_usd)/mo" +
+           "  n=\(.evidence.n_cases)  run=\(.evidence.eval_run_id)"
+       ' "$MR_CANDS"
+       echo
+       echo "  Promote via: yakos model-routing promote <agent-id>"
+       echo "  Reject via:  yakos model-routing reject  <agent-id> [--note \"reason\"]"
+   fi
+   ```
+   Each candidate entry includes `estimated_monthly_savings_usd` (from
+   the eval run), the evidence `n_cases`, and the eval run id so the
+   operator can cross-reference the eval log. List ranked by savings
+   desc; tail roll into "and N more" for long lists (> 10).
+
+7. **Compose the report.**
    - **Headline:** total spend, vs prior period delta.
    - **Top features by spend:** table, with "% of total" column.
    - **Optimization opportunities:** ranked by est. monthly savings.
      Each item: what to change, why, est. $/mo saved, est. effort
-     (hours).
+     (hours). Include pending model-routing candidates from step 6
+     in this ranking.
    - **Routing audit:** agents whose actual model differs from
      declared; agents that should be downgraded.
    - **Cache health:** prompts under 70% hit rate, with the
@@ -111,7 +139,7 @@ savings, not a blame report. Owned by the `ai-finops` agent.
      batch-equivalent.
    - Pin block: window, dispatch count, source log version.
 
-7. Optionally post to `$YAKOS_FINOPS_WEBHOOK` if `--post` is set.
+8. Optionally post to `$YAKOS_FINOPS_WEBHOOK` if `--post` is set.
 
 ## Manual pass
 

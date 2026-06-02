@@ -808,24 +808,304 @@ cmd_show() {
     fi
 }
 
-# ---- Phase 3 stubs ----------------------------------------------------------
+# ---- Phase 3 state paths ----------------------------------------------------
+
+MR_HISTORY="${YAKOS_MR_HISTORY:-${YAKOS_STATE_DIR}/model-routing-history.ndjson}"
+MR_GRAVEYARD="${YAKOS_MR_GRAVEYARD:-${YAKOS_STATE_DIR}/model-routing-graveyard.ndjson}"
+MR_BACKUPS_DIR="${YAKOS_MR_BACKUPS_DIR:-${YAKOS_STATE_DIR}/model-routing-backups}"
+
+# ---- Phase 3 helpers --------------------------------------------------------
+
+# _mr_find_agent_for_promote <agent-id> [--global]
+# Resolves the agent file for promotion.
+#   - project override first (cwd or $YAKOS_PROJECT_DIR)
+#   - then framework lib/agents/
+# Sets _MR_AGENT_FILE and _MR_AGENT_IS_FRAMEWORK (0=project, 1=framework).
+_mr_find_agent_for_promote() {
+    local id="$1" want_global="${2:-0}"
+    local project_dir="${YAKOS_PROJECT_DIR:-$(pwd -P)}"
+
+    # Try project override first.
+    local project_agent=""
+    for d in \
+        "${project_dir}/.claude/agents" \
+        "${YAKOS_PROJECT_DIR:-}/.claude/agents"
+    do
+        [ -d "$d" ] || continue
+        [ -f "$d/${id}.md" ] || continue
+        project_agent="$d/${id}.md"
+        break
+    done
+
+    local framework_agent="${YAKOS_ROOT}/lib/agents/${id}.md"
+
+    if [ -n "$project_agent" ]; then
+        _MR_AGENT_FILE="$project_agent"
+        _MR_AGENT_IS_FRAMEWORK=0
+        return 0
+    elif [ -f "$framework_agent" ]; then
+        _MR_AGENT_FILE="$framework_agent"
+        _MR_AGENT_IS_FRAMEWORK=1
+        return 0
+    fi
+    return 1
+}
+
+# _mr_latest_candidate <agent-id>
+# Prints the most recent candidate JSON line for the agent, or empty string.
+_mr_latest_candidate() {
+    local id="$1"
+    [ -f "$MR_CANDIDATES" ] || { printf ''; return 0; }
+    jq -s --arg agent "$id" \
+        '[.[] | select(.agent == $agent)] | sort_by(.generated_at) | last // empty' \
+        "$MR_CANDIDATES" 2>/dev/null || printf ''
+}
+
+# _mr_strip_candidate <agent-id>
+# Filters all rows for agent from MR_CANDIDATES (latest-per-agent semantics).
+_mr_strip_candidate() {
+    local id="$1"
+    [ -f "$MR_CANDIDATES" ] || return 0
+    local tmp
+    tmp="$(mktemp -t yakos-mr-strip.XXXXXX)"
+    jq -c --arg agent "$id" 'select(.agent != $agent)' "$MR_CANDIDATES" > "$tmp" 2>/dev/null || true
+    mv "$tmp" "$MR_CANDIDATES"
+}
+
+# _mr_rewrite_model_frontmatter <file> <new_model>
+# Atomically rewrites the model: line in a YAML frontmatter block.
+# Strategy: awk identifies the line within the ---...--- block and
+# replaces only that line, preserving all other bytes byte-for-byte.
+# Writes to a tempfile then mv over original (atomic).
+_mr_rewrite_model_frontmatter() {
+    local file="$1" new_model="$2"
+    local tmp
+    tmp="$(mktemp -t yakos-mr-rewrite.XXXXXX)"
+    awk -v new_model="$new_model" '
+        BEGIN { in_fm=0; done=0 }
+        NR==1 && /^---[[:space:]]*$/ { in_fm=1; print; next }
+        in_fm && /^---[[:space:]]*$/ { in_fm=0; done=1; print; next }
+        in_fm && !done && /^model:[[:space:]]/ {
+            print "model: " new_model
+            next
+        }
+        { print }
+    ' "$file" > "$tmp"
+    mv "$tmp" "$file"
+}
+
+# _mr_graveyard_count <agent-id> <suggested-model>
+# Count how many times (agent, suggested_model) appears in the graveyard.
+_mr_graveyard_count() {
+    local id="$1" suggested="$2"
+    [ -f "$MR_GRAVEYARD" ] || { echo 0; return; }
+    jq -r --arg agent "$id" --arg sug "$suggested" \
+        'select(.agent == $agent and .suggested_model == $sug) | .agent' \
+        "$MR_GRAVEYARD" 2>/dev/null | wc -l | tr -d ' '
+}
+
+# ---- subcommand: promote ----------------------------------------------------
 
 cmd_promote() {
-    echo "yakos model-routing promote: not yet implemented — Phase 3 work"
-    echo "  See docs/eval-format.md for the planned promote workflow."
-    exit 0
+    local agent_id="" want_global=0
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --global) want_global=1 ;;
+            --*) ct_die "model-routing promote: unknown flag '$1'" ;;
+            *)
+                [ -z "$agent_id" ] || ct_die "model-routing promote: unexpected argument '$1'"
+                agent_id="$1"
+                ;;
+        esac
+        shift
+    done
+
+    [ -n "$agent_id" ] || ct_die "model-routing promote: missing <agent-id>"
+
+    # 1. Locate agent file.
+    _mr_find_agent_for_promote "$agent_id" "$want_global" \
+        || ct_die "model-routing promote: agent '$agent_id' not found in project or framework"
+
+    local agent_file="$_MR_AGENT_FILE"
+    local is_framework="$_MR_AGENT_IS_FRAMEWORK"
+
+    # 2. Framework guard — require --global.
+    if [ "$is_framework" -eq 1 ] && [ "$want_global" -eq 0 ]; then
+        ct_die "model-routing promote: '$agent_id' is a framework-shipped agent.
+Pass --global to promote a framework-shipped agent (rewrites lib/agents/${agent_id}.md under YAKOS_ROOT)."
+    fi
+
+    # 3. Find the most recent candidate.
+    local cand
+    cand="$(_mr_latest_candidate "$agent_id")"
+    if [ -z "$cand" ] || [ "$cand" = "null" ]; then
+        ct_die "model-routing promote: no candidate on file for '$agent_id' (run: yakos model-routing eval $agent_id)"
+    fi
+
+    local current_model suggested_model eval_run_id
+    current_model="$(printf '%s' "$cand" | jq -r '.current_model // "unknown"')"
+    suggested_model="$(printf '%s' "$cand" | jq -r '.suggested_model // "unknown"')"
+    eval_run_id="$(printf '%s' "$cand" | jq -r '.evidence.eval_run_id // "unknown"')"
+
+    # 4. Backup before write.
+    mkdir -p "$MR_BACKUPS_DIR" 2>/dev/null || true
+    local ts_safe
+    ts_safe="$(date -u +%Y%m%dT%H%M%SZ)"
+    local backup_file="${MR_BACKUPS_DIR}/${agent_id}-${ts_safe}.md"
+    cp "$agent_file" "$backup_file"
+
+    # 5. Atomic frontmatter rewrite (tempfile + mv).
+    _mr_rewrite_model_frontmatter "$agent_file" "$suggested_model"
+
+    # 6. Validate. If validation fails, restore from backup and exit non-zero.
+    local validate_target
+    if [ "$is_framework" -eq 1 ]; then
+        validate_target="$YAKOS_ROOT"
+    else
+        validate_target="${YAKOS_PROJECT_DIR:-$(pwd -P)}"
+    fi
+    if ! bash "$YAKOS_LIB/validate.sh" --strict "$validate_target" >/dev/null 2>&1; then
+        ct_log "model-routing promote: validate --strict failed; restoring backup"
+        cp "$backup_file" "$agent_file"
+        ct_die "model-routing promote: validation failed after rewrite; original restored from $backup_file"
+    fi
+
+    # 7. Append history entry.
+    mkdir -p "$YAKOS_STATE_DIR" 2>/dev/null || true
+    local history_rec
+    history_rec="$(jq -cn \
+        --arg ts "$(ct_iso_now_z)" \
+        --arg agent "$agent_id" \
+        --arg from_model "$current_model" \
+        --arg to_model "$suggested_model" \
+        --arg eval_run_id "$eval_run_id" \
+        --arg by_user "$(id -un 2>/dev/null || echo unknown)" \
+        '{ts:$ts,action:"promoted",agent:$agent,from_model:$from_model,
+          to_model:$to_model,eval_run_id:$eval_run_id,by_user:$by_user}')"
+    printf '%s\n' "$history_rec" >> "$MR_HISTORY"
+
+    # 8. Strip candidate from candidates file.
+    _mr_strip_candidate "$agent_id"
+
+    echo "model-routing promote: $agent_id"
+    echo "  $current_model -> $suggested_model"
+    echo "  agent file: $agent_file"
+    echo "  backup:     $backup_file"
 }
+
+# ---- subcommand: reject -----------------------------------------------------
 
 cmd_reject() {
-    echo "yakos model-routing reject: not yet implemented — Phase 3 work"
-    echo "  See docs/eval-format.md for the planned reject workflow."
-    exit 0
+    local agent_id="" note="" force=0
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --note)   shift; note="$1" ;;
+            --note=*) note="${1#--note=}" ;;
+            --force)  force=1 ;;
+            --*) ct_die "model-routing reject: unknown flag '$1'" ;;
+            *)
+                [ -z "$agent_id" ] || ct_die "model-routing reject: unexpected argument '$1'"
+                agent_id="$1"
+                ;;
+        esac
+        shift
+    done
+
+    [ -n "$agent_id" ] || ct_die "model-routing reject: missing <agent-id>"
+
+    # Find the most recent candidate.
+    local cand
+    cand="$(_mr_latest_candidate "$agent_id")"
+    if [ -z "$cand" ] || [ "$cand" = "null" ]; then
+        ct_die "model-routing reject: no candidate on file for '$agent_id'"
+    fi
+
+    local suggested_model eval_run_id
+    suggested_model="$(printf '%s' "$cand" | jq -r '.suggested_model // "unknown"')"
+    eval_run_id="$(printf '%s' "$cand" | jq -r '.evidence.eval_run_id // "unknown"')"
+
+    # Repeat-rejection guard: if (agent, suggested_model) rejected >= 3 times, warn+exit unless --force.
+    local reject_count
+    reject_count="$(_mr_graveyard_count "$agent_id" "$suggested_model")"
+    if [ "$reject_count" -ge 3 ] && [ "$force" -eq 0 ]; then
+        ct_die "model-routing reject: ($agent_id, $suggested_model) has been rejected $reject_count times already.
+Pass --force to reject again despite the repeat-rejection guard."
+    fi
+
+    # Strip candidate from candidates file.
+    _mr_strip_candidate "$agent_id"
+
+    # Append to graveyard.
+    mkdir -p "$YAKOS_STATE_DIR" 2>/dev/null || true
+    local grave_rec
+    grave_rec="$(jq -cn \
+        --arg ts "$(ct_iso_now_z)" \
+        --arg agent "$agent_id" \
+        --arg suggested_model "$suggested_model" \
+        --arg eval_run_id "$eval_run_id" \
+        --arg reason "$note" \
+        --arg by_user "$(id -un 2>/dev/null || echo unknown)" \
+        '{ts:$ts,agent:$agent,suggested_model:$suggested_model,
+          eval_run_id:$eval_run_id,reason:$reason,by_user:$by_user}')"
+    printf '%s\n' "$grave_rec" >> "$MR_GRAVEYARD"
+
+    echo "model-routing reject: $agent_id (suggested: $suggested_model)"
+    [ -n "$note" ] && echo "  note: $note" || true
 }
 
+# ---- subcommand: history ----------------------------------------------------
+
 cmd_history() {
-    echo "yakos model-routing history: not yet implemented — Phase 3 work"
-    echo "  See docs/eval-format.md for the planned history workflow."
-    exit 0
+    local filter_agent="${1:-}"
+
+    # Read history (promoted) and graveyard (rejected) into one stream.
+    local combined
+    combined="$(
+        {
+            if [ -f "$MR_HISTORY" ]; then
+                jq -c --arg f "$filter_agent" \
+                    'if $f == "" then . else select(.agent == $f) end' \
+                    "$MR_HISTORY" 2>/dev/null || true
+            fi
+            if [ -f "$MR_GRAVEYARD" ]; then
+                # Normalize graveyard to match history shape for display.
+                jq -c --arg f "$filter_agent" '
+                    if $f == "" then . else select(.agent == $f) end
+                    | {ts: .ts, action: "rejected", agent: .agent,
+                       from_model: .suggested_model, to_model: "-",
+                       reason: (.reason // ""), by_user: (.by_user // ""),
+                       eval_run_id: (.eval_run_id // "")}
+                ' "$MR_GRAVEYARD" 2>/dev/null || true
+            fi
+        } | sort -t'"' -k4,4 -r
+    )"
+
+    if [ -z "$combined" ]; then
+        echo "(no history records found)"
+        return 0
+    fi
+
+    printf '%-26s %-10s %-20s %-20s %-30s %s\n' \
+        "ts" "action" "agent" "from_model -> to_model" "reason" "by_user"
+    printf '%s\n' "$(printf '%.0s-' {1..110})" 2>/dev/null || \
+        printf '%0.s-' 1 2 3 4 5 6 7 8 9 10 1 2 3 4 5 6 7 8 9 10 1 2 3 4 5 6 7 8 9 10 1 2 3 4 5 6 7 8 9 10 1 2 3 4 5 6 7 8 9 10 && printf '\n'
+
+    printf '%s\n' "$combined" | while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        local ts action agent from_model to_model reason by_user
+        ts="$(printf '%s' "$line" | jq -r '.ts // ""')"
+        action="$(printf '%s' "$line" | jq -r '.action // ""')"
+        agent="$(printf '%s' "$line" | jq -r '.agent // ""')"
+        from_model="$(printf '%s' "$line" | jq -r '.from_model // ""')"
+        to_model="$(printf '%s' "$line" | jq -r '.to_model // ""')"
+        reason="$(printf '%s' "$line" | jq -r '.reason // ""')"
+        by_user="$(printf '%s' "$line" | jq -r '.by_user // ""')"
+        printf '%-26s %-10s %-20s %-20s %-30s %s\n' \
+            "$ts" "$action" "$agent" "${from_model} -> ${to_model}" \
+            "${reason:0:29}" "$by_user"
+    done
 }
 
 # ---- usage ------------------------------------------------------------------
@@ -834,7 +1114,7 @@ usage() {
     cat <<'EOF'
 yakos model-routing <subcommand> [args...]
 
-Phase 2 subcommands:
+Subcommands:
   eval <agent-id> [--judge <agent>] [--max-cost-usd <n>]
                   [--cases <glob>]  [--project <path>]
       Run a model-routing eval for <agent-id>.  Dispatches each eval/
@@ -849,14 +1129,27 @@ Phase 2 subcommands:
   show <agent-id>
       Full evidence for one agent's latest candidate + last 3 run records.
 
-Phase 3 stubs (not yet implemented):
-  promote <agent-id> [--tier <tier>]
-  reject  <agent-id> [--reason "<text>"]
+  promote <agent-id> [--global]
+      Operator-gated: rewrite the agent's model: frontmatter to the
+      suggested tier. Backs up the prior file; validates; records history.
+      For framework-shipped agents (lib/agents/), --global is required.
+      No --force option; promotion is always deliberate.
+
+  reject <agent-id> [--note "<text>"] [--force]
+      Discard the pending candidate.  Records reason in the graveyard.
+      Repeat-rejection guard: exits 1 if (agent, model) rejected >= 3
+      times already; --force bypasses the guard.
+
   history [<agent-id>]
+      Show promotion + rejection history, sorted by ts descending.
+      Optional <agent-id> filters to one agent.
 
 Logs written to:
   ~/.yakos-state/model-routing-eval-log.ndjson
   ~/.yakos-state/model-routing-candidates.ndjson
+  ~/.yakos-state/model-routing-history.ndjson
+  ~/.yakos-state/model-routing-graveyard.ndjson
+  ~/.yakos-state/model-routing-backups/<agent-id>-<ts>.md
 EOF
 }
 
