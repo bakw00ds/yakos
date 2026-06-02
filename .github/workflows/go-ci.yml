@@ -1,0 +1,102 @@
+name: Go CI
+
+# Runs on every PR and push to main for the Go CLI port (cli-go/).
+# This workflow is independent of the existing bash CI (ci.yml) and
+# intentionally does not touch any bash CI jobs.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cli-go/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+      - '.github/workflows/go-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'cli-go/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+      - '.github/workflows/go-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  go-build-test:
+    name: build + test (${{ matrix.os }}, go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go: [stable]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go ${{ matrix.go }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: cli-go/go.sum
+
+      - name: Download modules
+        working-directory: cli-go
+        run: go mod download
+
+      - name: go vet
+        working-directory: cli-go
+        run: go vet ./...
+
+      - name: go test
+        working-directory: cli-go
+        # Use -count=1 to bypass test result cache in CI.
+        run: go test -count=1 -race -timeout 60s ./...
+
+      - name: Build binary (native)
+        # Build from the module root (cli-go/) and output to repo-root bin/.
+        # On Windows the binary name becomes yakos.exe automatically.
+        shell: bash
+        run: |
+          mkdir -p bin
+          cd cli-go && go build -o ../bin/yakos ./cmd/yakos
+
+      - name: Smoke test — --version flag (unix)
+        if: runner.os != 'Windows'
+        run: |
+          out=$(./bin/yakos --version)
+          echo "version output: $out"
+          echo "$out" | grep -E '\(go\)'
+
+      - name: Smoke test — --version flag (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $out = .\bin\yakos.exe --version
+          Write-Host "version output: $out"
+          if ($out -notmatch '\(go\)') {
+            Write-Error "Expected (go) suffix in version output"
+            exit 1
+          }
+
+      - name: Smoke test — go-port-status (unix)
+        if: runner.os != 'Windows'
+        run: |
+          out=$(./bin/yakos go-port-status)
+          echo "$out"
+          echo "$out" | grep -E 'subcommand migration tracker'
+          echo "$out" | grep -E 'No subcommands ported to Go yet'
+
+      - name: Smoke test — go-port-status (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $out = .\bin\yakos.exe go-port-status
+          Write-Host "$out"
+          if ($out -notmatch 'subcommand migration tracker') {
+            Write-Error "Expected migration tracker header"
+            exit 1
+          }
