@@ -48,7 +48,7 @@ Bash sources are under `cli/lib/`. Line counts are LOC of the current `.sh` file
 | Rank | Subcommand | Source | Lines | Size | Deps | Test approach | Shadow-mode contract | Open Qs |
 |---|---|---|---|---|---|---|---|---|
 | 1 | **bootstrap** | (new) | — | M (~16h) | go mod, internal/proxy, internal/version | smoke: `yakos --version`; proxy: `yakos status` (delegates to bash) returns identical exit + stdout | identical `--version` line; proxy is transparent | binary name during transition |
-| 2 | `validate` | `cli/lib/validate.sh` | 568 | M (~14h) | internal/agentmd parser, internal/yamlish | golden-file: 30 fixture agents → match bash output exactly | stdout/stderr identical to bash; exit codes identical | use a YAML lib or hand-roll the lightweight frontmatter parser? |
+| 2 | `validate` | `cli/lib/validate.sh` | 568 | M (~14h) | internal/agentmd parser, internal/yamlish | golden-file: 30 fixture agents → match bash output exactly | stdout/stderr identical to bash; exit codes identical | use a YAML lib or hand-roll the lightweight frontmatter parser? | **status: shipped** (2026-06-02; uses gopkg.in/yaml.v3 per Decision #7; sorted output identical to bash) |
 | 3 | `cost` | `cli/lib/cost.sh` | 133 | S (~6h) | internal/dispatchlog reader (JSONL) | unit: parse fixture dispatch-log lines; integration: bash vs Go on same log | numeric output matches to 4 decimal places | none |
 | 4 | `status` | `cli/lib/status.sh` | 206 | S (~8h) | internal/workdir, internal/kanban (read-only) | golden: 4 work-tree shapes (empty / TODO-only / IN-PROGRESS / mixed) | stdout matches bash, lines may be re-ordered if documented | none |
 | 5 | `doctor` | `cli/lib/doctor.sh` | 679 | L (~24h) | internal/probe, internal/runtime-resolve | golden across 3 install shapes (fresh, drifted, broken) | check ordering preserved; non-zero exit on same conditions | how to test `--probe-runtime` without claude CLI in CI? mock layer? |
@@ -253,3 +253,4 @@ Each has a recommendation + a decide-before tag. The lead surfaces these to the 
 ## Change log
 
 - 2026-06-02: Plan written; Phase 1 bootstrap landed.
+- 2026-06-02: `validate` subcommand ported (rank 2). Sorted output byte-identical to bash; exit codes match; parity tests green.

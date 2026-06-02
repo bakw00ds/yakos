@@ -8,8 +8,9 @@ commands not yet ported.
 
 ## Status
 
-**Bootstrap phase.** Zero subcommands ported to Go. All commands proxy to
-bash yakos. Run `yakos go-port-status` to see the current migration tracker.
+**Phase 1 — validate ported.** The `validate` subcommand is implemented
+natively in Go (rank 2 in `docs/go-port-plan.md`). All other commands proxy
+to bash yakos. Run `yakos go-port-status` to see the current migration tracker.
 
 The porting plan lives at `docs/go-port-plan.md` (written in parallel by the
 planner agent; commit it once the plan is finalized).
@@ -129,6 +130,7 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 |---|---|
 | `yakos --version` | Go (prints VERSION + " (go)" suffix) |
 | `yakos go-port-status` | Go (migration tracker) |
+| `yakos validate [args]` | Go (full feature parity with `cli/lib/validate.sh`) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 
@@ -140,6 +142,7 @@ cli-go/
     yakos/
       main.go              # entry point + arg routing
       main_test.go
+      validate_parity_test.go  # parity tests for validate subcommand
   internal/
     version/
       version.go           # reads root VERSION file; import as github.com/bakw00ds/yakos/internal/version
@@ -147,6 +150,12 @@ cli-go/
     passthrough/
       passthrough.go       # exec's bash yakos for unported subcommands; import as github.com/bakw00ds/yakos/internal/passthrough
       passthrough_test.go
+    validate/
+      validate.go          # validate logic (agents/skills/rules/frontmatter/playbook-refs/eval-cases)
+      frontmatter.go       # YAML frontmatter parser using gopkg.in/yaml.v3
+      validate_test.go     # unit tests (table-driven; per-rule fixtures)
+    paritytest/
+      paritytest.go        # parity test harness for all Phase 1 ports
   go.mod                   # module github.com/bakw00ds/yakos (root: cli-go/)
   go.sum
   README.md                # this file
