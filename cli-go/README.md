@@ -8,10 +8,10 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate, cost, status, doctor, refresh, kanban ported.** The `validate`, `cost`,
-`status`, `doctor`, `refresh`, and `kanban` subcommands are implemented natively in Go (ranks 2–7 in
-`docs/go-port-plan.md`). The `kanban serve` submode is deferred to rank 41. All other commands
-proxy to bash yakos. Run `yakos go-port-status` to see the current migration tracker.
+**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch ported.** The `validate`,
+`cost`, `status`, `doctor`, `refresh`, `kanban`, and `dispatch` subcommands are implemented natively
+in Go (ranks 2–8 in `docs/go-port-plan.md`). The `kanban serve` submode is deferred to rank 41. All
+other commands proxy to bash yakos. Run `yakos go-port-status` to see the current migration tracker.
 
 The porting plan lives at `docs/go-port-plan.md` (written in parallel by the
 planner agent; commit it once the plan is finalized).
@@ -137,6 +137,7 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos doctor [args]` | Go (full feature parity with `cli/lib/doctor.sh`; `--fix` proxied to bash) |
 | `yakos refresh [args]` | Go (full feature parity with `cli/lib/refresh.sh`) |
 | `yakos kanban [args]` | Go (full feature parity with `cli/lib/kanban.sh`; `serve` deferred to rank 41) |
+| `yakos dispatch <agent> "<task>" [args]` | Go (full feature parity with `cli/lib/dispatch.sh`; PRs #15/#31/#32/#34/#39/#40) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 
@@ -153,11 +154,13 @@ cli-go/
       status_parity_test.go    # parity tests for status subcommand
       doctor_parity_test.go    # parity tests for doctor subcommand
       refresh_parity_test.go   # parity tests for refresh subcommand
+      dispatch_parity_test.go  # parity tests for dispatch subcommand (10 scenarios)
       testdata/
         fixtures/cost/         # dispatch-log NDJSON fixtures for cost tests
         fixtures/status/       # work-tree fixtures for status tests (5 shapes)
         fixtures/doctor/       # install-shape fixtures for doctor tests (4 shapes)
         fixtures/refresh/      # project-state fixtures for refresh tests (5 shapes)
+        fixtures/dispatch/     # fixture agents for dispatch tests
         golden/                # captured bash baselines for golden comparisons
   internal/
     version/
