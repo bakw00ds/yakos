@@ -149,3 +149,68 @@ judge calibration. Responsibilities:
   Eval-engineer role: per-project threshold configuration.
 - **Phase 3:** outcome telemetry, judge calibration, ground-truth
   dataset, quarterly calibration cycle. Eval-engineer owns all of it.
+
+## Quarterly Bias-Check Ritual (Phase 3)
+
+Run quarterly (every ~90 days) to verify that the judge panel's scoring
+remains aligned with human-rated ground truth.
+
+### Steps
+
+1. **Run calibration against the golden set:**
+   ```
+   yakos skill plan-quality-eval --calibrate
+   ```
+   This invokes `score-plan.sh --calibrate`, scores all plans under
+   `lib/skills/plan-quality-eval/golden/`, compares panel medians to
+   `labels.yaml` per dimension, and writes a record to
+   `~/.yakos-state/plan-quality-calibration-log.ndjson`.
+
+2. **Evaluate results:**
+   - If **overall calibration < 0.85**: file an issue with the calibration
+     report output. Propose a rubric revision addressing the dimensions
+     with lowest agreement. Do NOT apply changes unilaterally.
+   - If **any single dimension < 0.70**: flag that dimension specifically.
+     Low per-dimension agreement indicates rubric language that judges
+     interpret inconsistently — the scoring_guide or definition needs
+     tightening.
+   - If **any judge shows consistent bias > ±0.2 signed delta** on a
+     dimension: flag the judge + dimension pair. Consider requesting that
+     the operator add or replace a judge model for that dimension.
+
+3. **Rotate one bad-fixture plan per quarter:**
+   Replace one `bad-*` plan with a new failure pattern drawn from recent
+   production incidents (plans that scored well but produced high scope
+   creep or rework). This prevents the golden set from ossifying around
+   patterns the judges have "memorized."
+   - Archive the replaced plan to `lib/skills/plan-quality-eval/golden/archive/`.
+   - Update `.version` after any golden-set change:
+     ```
+     find golden -name 'plan.md' | sort | xargs cat | shasum -a 256
+     ```
+   - Commit the new `.version` alongside the fixture change.
+
+4. **Re-baseline `.version` on every rubric edit:**
+   Any change to `rubrics/default.yaml` invalidates prior calibration
+   comparisons. Bump the `schema_version` field in the rubric, recompute
+   `.version`, and note the change date in a commit message.
+
+5. **Run `yakos plan score correlate`** to check whether rubric changes
+   improve the empirical correlation between plan scores and outcomes:
+   ```
+   yakos plan score correlate --since <date-of-last-rubric-change>
+   ```
+   If Pearson r for any dimension drops after a rubric change, the change
+   may have reduced discriminative power — review before shipping.
+
+### Thresholds (do not adjust unilaterally)
+
+| Metric | Trustworthy | Needs review | Action required |
+|---|---|---|---|
+| Overall calibration | >= 0.85 | 0.70–0.85 | File issue |
+| Per-dimension agreement | >= 0.70 | < 0.70 | Flag + propose revision |
+| Judge signed delta | |delta| < 0.2 | |delta| >= 0.2 | Flag judge |
+
+Raising or lowering the 0.85 trustworthy-gate threshold is an operator
+decision. The eval-engineer may recommend and provide supporting data,
+but the operator approves the change.

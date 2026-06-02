@@ -1,0 +1,6 @@
+acceptance_criteria_specificity: 1.0
+assumption_surfacing: 1.0
+decomposition_granularity: 1.0
+dependency_clarity: 1.0
+domain_boundaries_respected: 1.0
+risk_rollback_honesty: 0.5

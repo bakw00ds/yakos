@@ -1,0 +1,5 @@
+f29142523c00c46aeccfdcb1461ff131774511fc870a60d9625bababb00d3fe9
+# SHA-256 of concatenated plan.md content from all golden/*/plan.md files (sorted).
+# Re-baseline this hash on every rubric edit or golden-set change:
+#   find golden -name 'plan.md' | sort | xargs cat | shasum -a 256
+# Committed: 2026-06-02
