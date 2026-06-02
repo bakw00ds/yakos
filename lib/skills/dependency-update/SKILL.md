@@ -72,6 +72,13 @@ Test suite after: <pass|fail>
 Recommendation:   <commit|review-first|hold>
 ```
 
+## Deployment drift
+
+Framework-level hook scripts in `<project>/scripts/hooks/` can also drift from
+`lib/hooks/` as the framework evolves. That is not a dependency update — use
+`yakos refresh [--project <path>|--all]` to detect and repair hook-script drift,
+settings.json registration drift, and agent-symlink drift in one command.
+
 ## Known gotchas
 
 - "Patch" updates are usually safe. *Usually*. A maintainer can ship

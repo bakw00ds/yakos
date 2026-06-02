@@ -44,6 +44,7 @@ yakos start myapp                       # launch a session
 | `yakos supervise enable` | Turn on the live shadow-agent supervisor |
 | `yakos doctor` | Environment + install health check |
 | `yakos update` | `git pull` framework + refresh symlinks |
+| `yakos refresh` | Detect and repair per-project deployment drift (hooks + settings.json + agent symlinks) |
 | `yakos uninstall` | Remove yakOS-owned symlinks (never touches your memory) |
 | `yakos skill plan-quality-eval <plan.md>` | Score a plan against the 6-dimension rubric |
 | `yakos plan score show\|history\|override` | Surface plan-quality-eval log records |
