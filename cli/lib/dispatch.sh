@@ -465,6 +465,7 @@ event_end="$(jq -cn \
     --arg t "$ts_end" \
     --arg agent "$AGENT_NAME" \
     --arg runtime "$RUNTIME" \
+    --arg project "$PROJECT" \
     --argjson rc "$rc" \
     --argjson dur "$duration_s" \
     --argjson out_b "$out_bytes" \
@@ -478,6 +479,7 @@ event_end="$(jq -cn \
     --argjson stderr_tail "$stderr_tail_json" \
     --argjson stderr_truncated "$stderr_truncated_json" \
     '{type:"dispatch_finished", ts:$t, agent:$agent, runtime:$runtime,
+      project:$project,
       exit_code:$rc, duration_s:$dur,
       output_bytes:$out_b, task_bytes:$task_b,
       est_input_tokens:$in_tok, est_output_tokens:$out_tok,
