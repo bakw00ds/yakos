@@ -5,7 +5,7 @@ domain: cross-cutting
 mode: [author, review, report]
 tools: [Read, Edit, Write, Bash, Grep, SendMessage]
 runtime: codex
-model: gpt-5.5
+model: gpt-5
 version: 1
 references:
   - rule:lead-dispatch-discipline

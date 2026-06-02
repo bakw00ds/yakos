@@ -220,13 +220,15 @@ yk_agents_compose_dir() {
         fm="$(yk_agents_extract_frontmatter "$file")"
         body="$(yk_agents_extract_body "$file")"
 
-        # Prefer frontmatter `id`; fall back to filename without .md.
+        # Use the filename stem as the canonical agent id.
+        # The frontmatter `id` field is validated by `yakos validate` but
+        # does NOT override the filename-derived key in the composed JSON.
+        # This ensures that `yk_agents_compose` and `find_agent_file` agree
+        # on the same key (both use the filename stem as the lookup path).
+        # If frontmatter `id` were used here it would silently diverge from
+        # any caller that resolves agents by filename (e.g. dispatch, tests).
         raw_id="$(yk_agents_fm_get "$fm" "id")"
-        if [ -n "$raw_id" ]; then
-            id="$raw_id"
-        else
-            id="${base%.md}"
-        fi
+        id="${base%.md}"
 
         model="$(yk_agents_fm_get "$fm" "model")"
         extends_name="$(yk_agents_fm_get "$fm" "extends")"
