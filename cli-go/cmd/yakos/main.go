@@ -31,6 +31,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/refresh"
 	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/status"
+	"github.com/bakw00ds/yakos/internal/team"
 	"github.com/bakw00ds/yakos/internal/validate"
 	"github.com/bakw00ds/yakos/internal/version"
 )
@@ -46,6 +47,7 @@ var portedCommands = []portedCommand{
 	{Name: "refresh", Since: "0.41.0", Notes: "full feature parity with cli/lib/refresh.sh"},
 	{Name: "kanban", Since: "0.42.0", Notes: "full feature parity with cli/lib/kanban.sh (serve deferred to rank 41)"},
 	{Name: "dispatch", Since: "0.43.0", Notes: "full feature parity with cli/lib/dispatch.sh; PRs #15/#31/#32/#34/#39/#40 invariants"},
+	{Name: "team", Since: "0.44.0", Notes: "full feature parity with cli/lib/team.sh; archive step delegates to bash (rank 10)"},
 }
 
 type portedCommand struct {
@@ -101,6 +103,8 @@ func main() {
 		runKanban(yakosRoot, args[1:])
 	case "dispatch":
 		runDispatch(yakosRoot, args[1:])
+	case "team":
+		runTeam(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -1324,6 +1328,120 @@ Examples:
   yakos dispatch backend "implement the /v1/meal-plans GET handler"
   yakos dispatch troubleshooter "diagnose why login_test fails on CI" --runtime codex
   yakos dispatch test-runner "run the suite" --model sonnet
+`)
+}
+
+// runTeam implements `yakos team` natively in Go.
+//
+// Usage mirrors cli/lib/team.sh exactly:
+//
+//	yakos team restart <project> [--tag <tag>] [--yes]
+//	yakos team --help
+//
+// The only subcommand in v0.1 is `restart`. It archives work/current/ for
+// the given project (by delegating to bash archive.sh, which is rank 10 in
+// the port plan) and prints relaunch instructions.
+func runTeam(yakosRoot string, args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		printTeamHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+	switch sub {
+	case "restart":
+		runTeamRestart(yakosRoot, args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "team: unknown subcommand %q (try --help)\n", sub)
+		os.Exit(1)
+	}
+}
+
+// runTeamRestart handles `yakos team restart <project> [--tag <tag>] [--yes]`.
+func runTeamRestart(yakosRoot string, args []string) {
+	project := ""
+	tag := ""
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			printTeamRestartHelp(os.Stdout)
+			os.Exit(0)
+		case arg == "--tag":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "team restart: --tag requires a value")
+				os.Exit(1)
+			}
+			tag = args[i]
+		case len(arg) > 6 && arg[:6] == "--tag=":
+			tag = arg[6:]
+		case arg == "--yes" || arg == "-y":
+			// Accepted for parity; the Go implementation is always non-interactive.
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "team restart: unknown flag %q\n", arg)
+			os.Exit(1)
+		default:
+			if project == "" {
+				project = arg
+			} else {
+				fmt.Fprintln(os.Stderr, "team restart: too many positional args")
+				os.Exit(1)
+			}
+		}
+	}
+
+	if project == "" {
+		fmt.Fprintln(os.Stderr, "team restart: missing <project> (try --help)")
+		os.Exit(1)
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := team.Config{
+		YakosRoot: yakosRoot,
+		Project:   project,
+		Tag:       tag,
+		HomeDir:   home,
+		Writer:    os.Stdout,
+		ErrWriter: os.Stderr,
+	}
+
+	if _, err := team.Restart(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "team: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// printTeamHelp prints the help text for `yakos team`, matching the
+// bash team.sh usage() output exactly.
+func printTeamHelp(w io.Writer) {
+	_, _ = fmt.Fprint(w, `yakos team <subcommand> [args...]
+
+Subcommands:
+  restart <project>     Archive work/current/ and print instructions to
+                        relaunch a fresh claude session. Does NOT
+                        auto-relaunch in v0.1.
+
+Options on 'restart':
+  --tag <tag>           Override the auto-generated archive tag.
+  --yes                 Skip the confirmation summary.
+
+Other 'team' subcommands may be added in later versions.
+`)
+}
+
+// printTeamRestartHelp prints the per-subcommand help for `yakos team restart`,
+// matching the bash team.sh inline help exactly.
+func printTeamRestartHelp(w io.Writer) {
+	_, _ = fmt.Fprint(w, `yakos team restart <project> [--tag <tag>] [--yes]
+
+Archive work/current/ for <project> and print relaunch instructions.
+Does NOT auto-launch claude in v0.1.
 `)
 }
 

@@ -56,9 +56,10 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 // expected number.  Update this test each time a new subcommand is ported.
 //
 // Current ported commands: validate (rank 2), cost (rank 3), status (rank 4),
-// doctor (rank 5), refresh (rank 6), kanban (rank 7), dispatch (rank 8).
+// doctor (rank 5), refresh (rank 6), kanban (rank 7), dispatch (rank 8),
+// team (rank 9).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 7
+	const want = 8
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
@@ -138,6 +139,26 @@ func TestKanbanCommandEntry(t *testing.T) {
 		}
 	}
 	t.Error("expected 'kanban' in portedCommands; not found")
+}
+
+// TestDispatchCommandEntry asserts that "dispatch" is in the ported list.
+func TestDispatchCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "dispatch" {
+			return
+		}
+	}
+	t.Error("expected 'dispatch' in portedCommands; not found")
+}
+
+// TestTeamCommandEntry asserts that "team" is in the ported list.
+func TestTeamCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "team" {
+			return
+		}
+	}
+	t.Error("expected 'team' in portedCommands; not found")
 }
 
 // TestPortedCommandStruct verifies the portedCommand struct has the expected
