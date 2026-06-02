@@ -267,10 +267,12 @@ yk_rt_agy_dispatch() {
         local conv_root="$HOME/.gemini/antigravity-cli/conversations"
         if [ -d "$conv_root" ]; then
             local latest
-            latest="$(find "$conv_root" -maxdepth 1 -type f -name '*.pb' \
-                -print0 2>/dev/null \
-                | xargs -0 -I{} stat -f '%m %N' {} 2>/dev/null \
-                | sort -n -r | head -1 | awk '{print $2}')"
+            local _mtime_list=""
+            while IFS= read -r -d '' _f; do
+                _mt="$(stat -f '%m' "$_f" 2>/dev/null || stat -c '%Y' "$_f" 2>/dev/null || true)"
+                [ -n "$_mt" ] && _mtime_list="${_mtime_list}${_mt} ${_f}"$'\n'
+            done < <(find "$conv_root" -maxdepth 1 -type f -name '*.pb' -print0 2>/dev/null)
+            latest="$(printf '%s' "$_mtime_list" | sort -n -r | head -1 | awk '{print $2}')"
             if [ -n "$latest" ]; then
                 basename -- "$latest" .pb > "$YAKOS_SESSION_OUT"
             fi
