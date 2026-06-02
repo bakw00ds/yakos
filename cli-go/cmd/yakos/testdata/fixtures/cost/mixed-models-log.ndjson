@@ -1,0 +1,4 @@
+{"type":"dispatch_finished","ts":"2026-02-01T00:00:00Z","agent":"old-agent","runtime":"claude","exit_code":0,"duration_s":10,"est_input_tokens":5,"est_output_tokens":20}
+{"type":"dispatch_finished","ts":"2026-02-02T00:00:00Z","agent":"new-agent","runtime":"claude","exit_code":0,"duration_s":15,"est_input_tokens":100,"est_output_tokens":50,"model_resolved":"claude-sonnet-4-5","model_chosen_by":"model-routing"}
+{"type":"dispatch_finished","ts":"2026-02-03T00:00:00Z","agent":"old-agent","runtime":"claude","exit_code":1,"duration_s":5,"est_input_tokens":10,"est_output_tokens":30}
+{"type":"dispatch_finished","ts":"2026-02-04T00:00:00Z","agent":"new-agent","runtime":"claude","exit_code":0,"duration_s":20,"est_input_tokens":200,"est_output_tokens":100,"model_resolved":"claude-opus-4","model_chosen_by":"model-routing","usage":{"input_tokens":210,"output_tokens":110,"cache_read":1000,"cache_creation":500,"duration_ms":18000,"total_cost_usd":0.5}}

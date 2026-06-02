@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"text/tabwriter"
 
+	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/passthrough"
 	"github.com/bakw00ds/yakos/internal/validate"
 	"github.com/bakw00ds/yakos/internal/version"
@@ -30,6 +31,7 @@ import (
 // ported in subsequent dispatch tasks.
 var portedCommands = []portedCommand{
 	{Name: "validate", Since: "0.37.0", Notes: "full feature parity with cli/lib/validate.sh"},
+	{Name: "cost", Since: "0.38.0", Notes: "full feature parity with cli/lib/cost.sh"},
 }
 
 type portedCommand struct {
@@ -73,6 +75,8 @@ func main() {
 		runPortStatus()
 	case "validate":
 		runValidate(yakosRoot, args[1:])
+	case "cost":
+		runCost(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -222,6 +226,147 @@ once Batch 3 populates lib/agents/, lib/skills/, lib/rules/.
 
 Uses python3 if available for full YAML/JSON parsing; degrades to
 grep-based checks otherwise (with a "limited validation" warning).
+`)
+}
+
+// runCost implements `yakos cost` natively in Go.
+//
+// Usage mirrors cli/lib/cost.sh exactly:
+//
+//	yakos cost                        — all-time, by-runtime table
+//	yakos cost --by agent             — group by agent
+//	yakos cost --by day --since DATE  — day-level view since a date
+//	yakos cost --json                 — machine-readable JSON
+//	yakos cost --help                 — print help and exit 0
+//
+// The log directory defaults to $HOME/.yakos-state; override via
+// YAKOS_DISPATCH_LOG (set to the log directory, not the file).
+// Parity tests set YAKOS_DISPATCH_LOG to a temp dir containing a
+// fixture dispatch-log.ndjson.
+func runCost(args []string) {
+	since := ""
+	by := "runtime"
+	emitJSON := false
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			printCostHelp(os.Stdout)
+			os.Exit(0)
+		case arg == "--since":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "cost: --since requires a date")
+				os.Exit(1)
+			}
+			since = args[i]
+		case len(arg) > 8 && arg[:8] == "--since=":
+			since = arg[8:]
+		case arg == "--by":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "cost: --by requires an axis")
+				os.Exit(1)
+			}
+			by = args[i]
+		case len(arg) > 5 && arg[:5] == "--by=":
+			by = arg[5:]
+		case arg == "--json":
+			emitJSON = true
+		case arg == "--all-projects":
+			// accepted as a no-op (mirrors bash behaviour)
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "cost: unknown flag %q\n", arg)
+			os.Exit(1)
+		default:
+			fmt.Fprintf(os.Stderr, "cost: unexpected argument %q\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	axis, err := cost.ParseAxis(by)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+
+	// Resolve log directory.  YAKOS_DISPATCH_LOG overrides the default.
+	logDir := filepath.Join(os.Getenv("HOME"), ".yakos-state")
+	if v := os.Getenv("YAKOS_DISPATCH_LOG"); v != "" {
+		logDir = v
+	}
+
+	files, err := cost.LogFiles(logDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cost: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(files) == 0 {
+		if err := cost.PrintNoFiles(os.Stdout, emitJSON, logDir); err != nil {
+			fmt.Fprintf(os.Stderr, "yakos: write error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	ch := cost.StreamFiles(files, since)
+	rpt := cost.Aggregate(ch, axis, 0)
+
+	if rpt.Events == 0 {
+		if err := cost.PrintNoEvents(os.Stdout, emitJSON, since); err != nil {
+			fmt.Fprintf(os.Stderr, "yakos: write error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	if emitJSON {
+		if err := cost.PrintJSON(os.Stdout, rpt); err != nil {
+			fmt.Fprintf(os.Stderr, "yakos: write error: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		if err := cost.PrintTable(os.Stdout, rpt, since, by); err != nil {
+			fmt.Fprintf(os.Stderr, "yakos: write error: %v\n", err)
+			os.Exit(1)
+		}
+	}
+}
+
+// printCostHelp prints the help text for `yakos cost`, matching the
+// bash cost.sh --help output exactly.
+func printCostHelp(w io.Writer) {
+	_, _ = fmt.Fprint(w, `yakos cost [--since <ISO>] [--by agent|runtime|day|project]
+            [--all-projects] [--json]
+
+Aggregate dispatch-log.ndjson telemetry. Defaults to all-time, by-runtime.
+
+By default, --by project / --all-projects rolls up across every project
+that has appeared in the dispatch-log. Useful for multi-project burn-rate
+review.
+
+Flags:
+  --since <ISO-date>   Filter events with ts >= <ISO-date>. Examples:
+                       --since 2026-05-01 (start of day)
+                       --since 2026-05-08T12:00:00Z
+  --by <axis>          Aggregation axis: agent, runtime (default), day.
+  --json               Emit machine-readable JSON instead of a table.
+
+Sources rolled up:
+  ~/.yakos-state/dispatch-log.ndjson      (current)
+  ~/.yakos-state/dispatch-log.*.ndjson    (rotated archives)
+
+Token columns:
+  est_in / est_out — chars/4 estimate from prompt/output bytes.
+  Real per-runtime token counts arrive in v0.6.x once stream-json
+  parsing per-adapter lands.
+
+Examples:
+  yakos cost
+  yakos cost --by agent --since 2026-05-01
+  yakos cost --by day --json | jq
 `)
 }
 

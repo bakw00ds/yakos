@@ -1,0 +1,14 @@
+{"type":"dispatch_started","ts":"2026-01-01T08:00:00Z","agent":"architect","runtime":"claude","project":"/proj/alpha","task_preview":"design the system"}
+{"type":"dispatch_finished","ts":"2026-01-01T08:00:30Z","agent":"architect","runtime":"claude","project":"/proj/alpha","exit_code":0,"duration_s":30,"output_bytes":500,"task_bytes":100,"est_input_tokens":25,"est_output_tokens":125}
+{"type":"dispatch_started","ts":"2026-01-01T09:00:00Z","agent":"backend","runtime":"claude","project":"/proj/alpha","task_preview":"implement API"}
+{"type":"dispatch_finished","ts":"2026-01-01T09:01:00Z","agent":"backend","runtime":"claude","project":"/proj/alpha","exit_code":0,"duration_s":60,"output_bytes":1200,"task_bytes":200,"est_input_tokens":50,"est_output_tokens":300}
+{"type":"dispatch_started","ts":"2026-01-01T14:00:00Z","agent":"architect","runtime":"claude","project":"/proj/alpha","task_preview":"review PR"}
+{"type":"dispatch_finished","ts":"2026-01-01T14:00:45Z","agent":"architect","runtime":"claude","project":"/proj/alpha","exit_code":0,"duration_s":45,"output_bytes":800,"task_bytes":150,"est_input_tokens":37,"est_output_tokens":200}
+{"type":"dispatch_started","ts":"2026-01-02T10:00:00Z","agent":"frontend","runtime":"codex","project":"/proj/beta","task_preview":"build UI"}
+{"type":"dispatch_finished","ts":"2026-01-02T10:01:30Z","agent":"frontend","runtime":"codex","project":"/proj/beta","exit_code":0,"duration_s":90,"output_bytes":2000,"task_bytes":300,"est_input_tokens":75,"est_output_tokens":500}
+{"type":"dispatch_started","ts":"2026-01-02T15:00:00Z","agent":"backend","runtime":"claude","project":"/proj/beta","task_preview":"fix bug"}
+{"type":"dispatch_finished","ts":"2026-01-02T15:00:20Z","agent":"backend","runtime":"claude","project":"/proj/beta","exit_code":1,"duration_s":20,"output_bytes":300,"task_bytes":80,"est_input_tokens":20,"est_output_tokens":75}
+{"type":"dispatch_started","ts":"2026-01-03T11:00:00Z","agent":"frontend","runtime":"codex","project":"/proj/alpha","task_preview":"add tests"}
+{"type":"dispatch_finished","ts":"2026-01-03T11:00:50Z","agent":"frontend","runtime":"codex","project":"/proj/alpha","exit_code":0,"duration_s":50,"output_bytes":900,"task_bytes":120,"est_input_tokens":30,"est_output_tokens":225}
+{"type":"dispatch_started","ts":"2026-01-03T16:00:00Z","agent":"architect","runtime":"claude","project":"/proj/beta","task_preview":"write docs"}
+{"type":"dispatch_finished","ts":"2026-01-03T16:01:10Z","agent":"architect","runtime":"claude","project":"/proj/beta","exit_code":0,"duration_s":70,"output_bytes":1500,"task_bytes":250,"est_input_tokens":62,"est_output_tokens":375}
