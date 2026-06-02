@@ -262,6 +262,29 @@ else
     fail "gemini is missing 'hooks' capability"
 fi
 
+# ---- 9. claude dispatch arg array contains --exclude-dynamic-system-prompt-sections
+echo
+echo "Test 9: yk_rt_claude_dispatch includes --exclude-dynamic-system-prompt-sections"
+# shellcheck source=../cli/lib/runtimes/claude.sh
+. "$YAKOS_LIB/runtimes/claude.sh"
+claude_sh="$YAKOS_LIB/runtimes/claude.sh"
+hit_count="$(grep -c -- '--exclude-dynamic-system-prompt-sections' "$claude_sh" || true)"
+# There are exactly two -p invocation sites in yk_rt_claude_dispatch;
+# each must carry the flag.
+if [ "${hit_count:-0}" -ge 2 ]; then
+    ok "claude.sh yk_rt_claude_dispatch has --exclude-dynamic-system-prompt-sections on both -p invocations ($hit_count occurrences)"
+else
+    fail "claude.sh missing --exclude-dynamic-system-prompt-sections on one or more -p invocations (found $hit_count; need >= 2)"
+fi
+# Also confirm the flag is NOT present in yk_rt_claude_launch (the exec
+# path above the dispatch function, which must never carry it).
+launch_block="$(sed -n '/^yk_rt_claude_launch/,/^yk_rt_claude_dispatch/p' "$claude_sh")"
+if printf '%s\n' "$launch_block" | grep -q -- '--exclude-dynamic-system-prompt-sections'; then
+    fail "yk_rt_claude_launch unexpectedly contains --exclude-dynamic-system-prompt-sections (must be dispatch-only)"
+else
+    ok "yk_rt_claude_launch correctly does NOT carry the flag"
+fi
+
 # ---- summary -----------------------------------------------------------------
 echo
 echo "yakos runtime fixtures: $PASS passed, $FAIL failed"
