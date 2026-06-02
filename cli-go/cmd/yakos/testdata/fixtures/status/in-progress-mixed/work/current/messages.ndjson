@@ -1,0 +1,2 @@
+{"type":"message","from":"lead","ts":"2026-06-01T08:15:00Z","body":"Starting status port"}
+{"type":"message","from":"backend","ts":"2026-06-01T08:20:00Z","body":"Status port in progress"}
