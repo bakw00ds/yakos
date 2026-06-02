@@ -131,6 +131,28 @@ yakos auth status
   agent's `runtime-fallback:` chain instead of the preferred
   runtime.
 
+## Generalist runtime-pinned agents
+
+When the recommendation is "use codex" or "use gemini" for a
+generalist task (no specific domain specialist required), dispatch via:
+
+```sh
+yakos dispatch general-codex "<task>"
+yakos dispatch general-gemini "<task>"
+```
+
+These are runtime-pinned generalist agents — no `--runtime` flag
+needed. The `runtime:` frontmatter handles routing automatically.
+
+For tasks that fit an existing specialist (backend / security-reviewer
+/ planner / etc.), prefer the specialist + `--runtime` override:
+
+```sh
+yakos dispatch backend "<task>" --runtime codex
+```
+
+The specialist's domain conventions apply regardless of runtime.
+
 ## References
 
 - `cli/lib/dispatch.sh` — the call this skill recommends.

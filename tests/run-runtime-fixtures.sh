@@ -285,6 +285,159 @@ else
     ok "yk_rt_claude_launch correctly does NOT carry the flag"
 fi
 
+# ---- 10. general-codex + general-gemini agent files exist with valid fm ------
+echo
+echo "Test 10: general-{codex,gemini} agents exist with valid frontmatter"
+for agent_id in general-codex general-gemini; do
+    agent_file="$REPO_ROOT/lib/agents/${agent_id}.md"
+    if [ ! -f "$agent_file" ]; then
+        fail "$agent_id: file not found at $agent_file"
+        continue
+    fi
+    ok "$agent_id: file exists"
+
+    # Frontmatter has opening and closing ---
+    if head -n 1 "$agent_file" | grep -q '^---$' \
+       && head -n 200 "$agent_file" | tail -n +2 | grep -qx '^---$'; then
+        ok "$agent_id: frontmatter delimiters present"
+    else
+        fail "$agent_id: missing frontmatter --- delimiters"
+    fi
+
+    # Required fields present
+    fm="$(yk_agents_extract_frontmatter "$agent_file")"
+    for field in id role domain runtime model version; do
+        val="$(yk_agents_fm_get "$fm" "$field")"
+        if [ -n "$val" ]; then
+            ok "$agent_id: frontmatter field '$field' = $val"
+        else
+            fail "$agent_id: frontmatter missing required field '$field'"
+        fi
+    done
+
+    # Body has ## Purpose section
+    body="$(yk_agents_extract_body "$agent_file")"
+    if printf '%s\n' "$body" | grep -qE '^##[[:space:]]+Purpose[[:space:]]*$'; then
+        ok "$agent_id: body has '## Purpose' section"
+    else
+        fail "$agent_id: body missing '## Purpose' section"
+    fi
+done
+
+# ---- 11. runtime: + model: fields pinned to expected values -----------------
+echo
+echo "Test 11: runtime: pinned (not claude); model: set to concrete model IDs"
+# Format: "agent-id:expected-runtime:expected-model"
+for check in "general-codex:codex:gpt-5.5" "general-gemini:gemini:gemini-3.5"; do
+    agent_id="${check%%:*}"
+    rest="${check#*:}"
+    expected_rt="${rest%%:*}"
+    expected_model="${rest##*:}"
+    agent_file="$REPO_ROOT/lib/agents/${agent_id}.md"
+    if [ ! -f "$agent_file" ]; then
+        fail "$agent_id: file not found (skip runtime+model field check)"
+        continue
+    fi
+    fm="$(yk_agents_extract_frontmatter "$agent_file")"
+
+    # runtime check
+    actual_rt="$(yk_agents_fm_get "$fm" "runtime")"
+    if [ "$actual_rt" = "$expected_rt" ]; then
+        ok "$agent_id: runtime = $actual_rt (expected $expected_rt)"
+    else
+        fail "$agent_id: runtime = '$actual_rt' (expected '$expected_rt')"
+    fi
+    if [ "$actual_rt" = "claude" ]; then
+        fail "$agent_id: runtime must not be 'claude' (defeats the purpose)"
+    fi
+
+    # model check — must be the concrete ID, not a semantic alias
+    actual_model="$(yk_agents_fm_get "$fm" "model")"
+    if [ "$actual_model" = "$expected_model" ]; then
+        ok "$agent_id: model = $actual_model (expected $expected_model)"
+    else
+        fail "$agent_id: model = '$actual_model' (expected '$expected_model')"
+    fi
+    # model must not be a semantic alias (balanced/cheap/best/reasoning)
+    case "$actual_model" in
+        balanced|cheap|best|reasoning)
+            fail "$agent_id: model '$actual_model' is a semantic alias, not a concrete model ID"
+            ;;
+        *)
+            ok "$agent_id: model '$actual_model' is a concrete model ID (not a semantic alias)"
+            ;;
+    esac
+done
+
+# ---- 12. find_agent_file resolves general-codex + general-gemini ------------
+echo
+echo "Test 12: find_agent_file resolves general-codex and general-gemini"
+# Inline a minimal find_agent_file using the helpers already sourced above.
+_find_agent_fw() {
+    local id="$1"
+    local d f fm fm_id
+    d="$REPO_ROOT/lib/agents"
+    for f in "$d"/*.md; do
+        [ -f "$f" ] || continue
+        case "$(basename -- "$f")" in README.md|lead-template.md) continue ;; esac
+        fm="$(yk_agents_extract_frontmatter "$f")"
+        fm_id="$(yk_agents_fm_get "$fm" "id")"
+        if [ "$fm_id" = "$id" ] || [ "${f%.md}" = "$d/$id" ]; then
+            printf '%s\n' "$f"
+            return 0
+        fi
+    done
+    return 1
+}
+for agent_id in general-codex general-gemini; do
+    resolved="$(_find_agent_fw "$agent_id" || true)"
+    if [ -n "$resolved" ] && [ -f "$resolved" ]; then
+        ok "$agent_id: find_agent_file resolved to $resolved"
+    else
+        fail "$agent_id: find_agent_file did not resolve"
+    fi
+done
+
+# ---- 13. compose includes general-codex + general-gemini --------------------
+echo
+echo "Test 13: yk_agents_compose includes general-codex and general-gemini"
+# Use a fresh shell to avoid cache pollution from Test 1.
+composed="$(bash -c '
+    set -eu
+    export YAKOS_ROOT="'"$REPO_ROOT"'"
+    export YAKOS_LIB="'"$YAKOS_LIB"'"
+    . "$YAKOS_LIB/compat.sh"
+    . "$YAKOS_LIB/agents-compose.sh"
+    yk_agents_compose "$YAKOS_ROOT" ""
+' 2>/dev/null)"
+for agent_id in general-codex general-gemini; do
+    if printf '%s' "$composed" | jq -e --arg n "$agent_id" 'has($n)' >/dev/null; then
+        ok "compose includes agent: $agent_id"
+    else
+        fail "compose missing agent: $agent_id"
+    fi
+done
+
+# ---- 14. yakos validate --strict passes on both new agents ------------------
+echo
+echo "Test 14: yakos validate --strict passes on general-codex and general-gemini"
+# Run validate in framework mode (no project path) and capture per-agent output.
+validate_out="$(YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$YAKOS_LIB" \
+    bash "$YAKOS_LIB/validate.sh" --strict 2>&1 || true)"
+for agent_id in general-codex general-gemini; do
+    agent_file="$REPO_ROOT/lib/agents/${agent_id}.md"
+    # validate emits "[ok]   <path>" on success; "[err]  <path>:" on failure.
+    if printf '%s\n' "$validate_out" | grep -qE "^\s+\[ok\]\s+${agent_file}$"; then
+        ok "$agent_id: yakos validate --strict passed"
+    elif printf '%s\n' "$validate_out" | grep -qE "^\s+\[err\].*${agent_id}"; then
+        fail "$agent_id: yakos validate --strict reported an error"
+        printf '%s\n' "$validate_out" | grep -E "${agent_id}" | sed 's/^/    /' >&2
+    else
+        fail "$agent_id: could not find validate output for agent"
+        printf '%s\n' "$validate_out" | grep -E "general-" | sed 's/^/    /' >&2
+    fi
+done
+
 # ---- summary -----------------------------------------------------------------
 echo
 echo "yakos runtime fixtures: $PASS passed, $FAIL failed"
