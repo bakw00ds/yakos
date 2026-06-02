@@ -114,13 +114,19 @@
         ]
       },
       {
-        "matcher": "*",
-        "_doc": "v0.33 supervisor: stream every tool call to the rolling buffer; every N calls fork the supervisor dispatch. No-op when supervisor not enabled in .yakos.yml.",
+        "matcher": "Edit|Write|MultiEdit|Bash",
+        "_doc": "v0.34 supervisor: stream mutation tool calls to the rolling buffer; pre-filter sieves noise before any LLM dispatch. Reads override per .yakos.yml supervisor.matcher. No-op when supervisor not enabled in .yakos.yml.",
         "hooks": [
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/supervisor-stream.sh"
-          },
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "_doc": "v0.33 output-injection scanner: scans every tool output for prompt-injection patterns. Kept on '*' — reads are the injection attack surface, not just writes.",
+        "hooks": [
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/output-injection-scan.sh"

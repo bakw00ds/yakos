@@ -26,7 +26,7 @@ Subcommands:
   disable [<project>]         Flip to false.
   set <key> <value> [<proj>]  Set a single supervisor config key in .yakos.yml.
                               Common keys: block_on_critical, score_every_n_calls,
-                              runtime, agent. (Used by the supervisor-toggle skill.)
+                              runtime, agent, model, matcher. (supervisor-toggle skill.)
   status [<project>]          Config snapshot + buffer + recent findings count.
   tail [<project>] [--watch]  Print recent findings (--watch follows).
   clear [<project>]           Wipe buffer + findings + counter (keeps config).
@@ -226,7 +226,7 @@ if [ "$SUB" = "status" ]; then
             echo "  enabled:     no"
         fi
         # Surface the runtime + block setting
-        for key in runtime agent score_every_n_calls block_on_critical; do
+        for key in runtime agent score_every_n_calls block_on_critical model matcher; do
             v="$(grep -A 10 '^[[:space:]]*supervisor:' "$yakos_yml" 2>/dev/null \
                 | grep -E "^[[:space:]]*$key:[[:space:]]*" \
                 | head -1 | awk -F: '{print $2}' | xargs)"
@@ -322,8 +322,8 @@ if [ "$SUB" = "set" ]; then
 
     # Validate the key is one we know about
     case "$KEY" in
-        enabled|runtime|agent|score_every_n_calls|block_on_critical) ;;
-        *) ct_die "supervise set: unknown key '$KEY' (allowed: enabled / runtime / agent / score_every_n_calls / block_on_critical)" ;;
+        enabled|runtime|agent|score_every_n_calls|block_on_critical|model|matcher) ;;
+        *) ct_die "supervise set: unknown key '$KEY' (allowed: enabled / runtime / agent / score_every_n_calls / block_on_critical / model / matcher)" ;;
     esac
 
     # Validate boolean values for bool keys
@@ -337,6 +337,12 @@ if [ "$SUB" = "set" ]; then
         score_every_n_calls)
             case "$VAL" in
                 ''|*[!0-9]*) ct_die "supervise set $KEY: value must be a positive integer (got '$VAL')" ;;
+            esac
+            ;;
+        model)
+            case "$VAL" in
+                haiku|sonnet|opus) ;;
+                *) ct_die "supervise set model: value must be haiku, sonnet, or opus (got '$VAL')" ;;
             esac
             ;;
     esac
