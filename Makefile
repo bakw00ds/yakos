@@ -7,7 +7,7 @@
 #   make build         — build Go binary to ./bin/yakos
 #   make test          — run Go tests
 #   make lint          — run go vet (+ golangci-lint if installed)
-#   make install       — install Go binary as yakos-go to ~/.local/bin/
+#   make install       — install Go binary as yakos to ~/.local/bin/
 #   make clean         — remove ./bin/ artifacts
 #   make build-mac     — cross-compile for macOS arm64
 #   make build-linux   — cross-compile for Linux amd64
@@ -18,7 +18,7 @@ CLI_GO_DIR  := cli-go
 BINARY_NAME := yakos
 BIN_DIR     := $(CURDIR)/bin
 INSTALL_DIR := $(HOME)/.local/bin
-INSTALL_NAME := yakos-go
+INSTALL_NAME := yakos
 
 .PHONY: all build build-mac build-mac-amd64 build-linux build-windows test lint install clean help
 
@@ -63,8 +63,10 @@ lint:
 		echo "golangci-lint not installed; skipping (go vet passed)"; \
 	fi
 
-## install: copy ./bin/yakos to $(INSTALL_DIR)/yakos-go
-#           Different name during transition so bash yakos is unaffected.
+## install: copy ./bin/yakos to $(INSTALL_DIR)/yakos
+#           Installs as "yakos" — same name as the bash binary.
+#           PATH ordering and/or YAKOS_IMPL=go selects which impl runs.
+#           See cli-go/README.md §YAKOS_IMPL for coexistence details.
 install: build
 	mkdir -p $(INSTALL_DIR)
 	cp $(BIN_DIR)/$(BINARY_NAME) $(INSTALL_DIR)/$(INSTALL_NAME)

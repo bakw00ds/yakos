@@ -1,15 +1,16 @@
 // Command yakos is the Go port of the yakOS CLI.
 //
-// During the bash-to-Go transition, this binary operates in "shadow mode":
-// it handles a small set of Go-native commands and proxies everything else
-// to the existing bash yakos at cli/yakos. This makes the Go binary a drop-in
-// replacement that callers can adopt incrementally.
+// The binary installs alongside the existing bash yakos under the SAME name.
+// The YAKOS_IMPL environment variable controls which implementation is active:
 //
-// Shadow mode conventions:
-//   - yakos --version  → prints VERSION + " (go)" suffix
-//   - yakos --help     → proxies to bash, prefixes with a transition note
-//   - yakos go-port-status → lists ported vs proxied subcommands (Go-only)
-//   - yakos <anything> → proxied to bash yakos with the same args
+//   YAKOS_IMPL=go   — use Go-native routing: --version, --help, go-port-status
+//                     handled natively; everything else proxied to bash yakos.
+//   YAKOS_IMPL=bash — proxy EVERY invocation to bash yakos transparently.
+//   (unset)         — same as YAKOS_IMPL=bash (safe default).
+//
+// This lets operators place the Go binary ahead of bash yakos on PATH and
+// only experience Go behavior when they explicitly opt in via YAKOS_IMPL=go.
+// Without the variable the Go binary is completely invisible.
 package main
 
 import (
@@ -48,7 +49,15 @@ func main() {
 
 	args := os.Args[1:]
 
-	// Route built-in Go commands before falling through to bash passthrough.
+	// YAKOS_IMPL selects the active implementation.
+	// Unset or "bash" → proxy every invocation to bash yakos transparently.
+	// "go"            → use Go-native routing for supported commands.
+	if impl := os.Getenv("YAKOS_IMPL"); impl != "go" {
+		// Totally invisible: forward all args to bash and exit with its code.
+		exitWith(passthrough.Run(yakosRoot, args))
+	}
+
+	// YAKOS_IMPL=go: route built-in Go commands, proxy everything else.
 	if len(args) == 0 {
 		// No args: proxy to bash (it prints usage).
 		exitWith(passthrough.Run(yakosRoot, args))
