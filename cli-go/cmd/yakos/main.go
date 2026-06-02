@@ -22,6 +22,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/passthrough"
+	"github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/validate"
 	"github.com/bakw00ds/yakos/internal/version"
 )
@@ -32,6 +33,7 @@ import (
 var portedCommands = []portedCommand{
 	{Name: "validate", Since: "0.37.0", Notes: "full feature parity with cli/lib/validate.sh"},
 	{Name: "cost", Since: "0.38.0", Notes: "full feature parity with cli/lib/cost.sh"},
+	{Name: "status", Since: "0.39.0", Notes: "full feature parity with cli/lib/status.sh"},
 }
 
 type portedCommand struct {
@@ -77,6 +79,8 @@ func main() {
 		runValidate(yakosRoot, args[1:])
 	case "cost":
 		runCost(args[1:])
+	case "status":
+		runStatus(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -368,6 +372,73 @@ Examples:
   yakos cost --by agent --since 2026-05-01
   yakos cost --by day --json | jq
 `)
+}
+
+// runStatus implements `yakos status` natively in Go.
+//
+// Usage mirrors cli/lib/status.sh exactly:
+//
+//	yakos status <project>   — print dashboard for <project> under ~/agent-control/
+//	yakos status --help      — print help and exit 0
+//
+// The project's work directory is resolved following paths.sh priority:
+//
+//  1. YAKOS_WORK_DIR
+//  2. YAKOS_INPLACE_WORK=1 + CLAUDE_PROJECT_DIR
+//  3. $HOME/agent-control/<project>/work  (canonical)
+func runStatus(args []string) {
+	project := ""
+
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help":
+			status.PrintHelp(os.Stdout)
+			os.Exit(0)
+		default:
+			if len(arg) > 0 && arg[0] == '-' {
+				fmt.Fprintf(os.Stderr, "status: unknown flag %q\n", arg)
+				os.Exit(1)
+			}
+			if project != "" {
+				fmt.Fprintln(os.Stderr, "status: too many positional args")
+				os.Exit(1)
+			}
+			project = arg
+		}
+	}
+
+	if project == "" {
+		fmt.Fprintln(os.Stderr, "status: missing <project> (try --help)")
+		os.Exit(1)
+	}
+
+	// Verify the control directory exists (mirrors bash's directory check).
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+	controlDir := filepath.Join(home, "agent-control", project)
+	if _, err := os.Stat(controlDir); err != nil {
+		fmt.Fprintf(os.Stderr, "status: project %q not found at %s\n", project, controlDir)
+		os.Exit(1)
+	}
+
+	cfg := status.Config{
+		Project:   project,
+		Writer:    os.Stdout,
+		ErrWriter: os.Stderr,
+	}
+
+	rpt, err := status.Status(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "status: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := status.Format(os.Stdout, rpt); err != nil {
+		fmt.Fprintf(os.Stderr, "yakos: write error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // exitWith calls os.Exit with the code returned by passthrough.Run.

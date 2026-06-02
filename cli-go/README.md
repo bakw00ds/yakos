@@ -8,10 +8,10 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate + cost ported.** The `validate` and `cost` subcommands
-are implemented natively in Go (ranks 2–3 in `docs/go-port-plan.md`). All
-other commands proxy to bash yakos. Run `yakos go-port-status` to see the
-current migration tracker.
+**Phase 1 — validate, cost, status ported.** The `validate`, `cost`, and
+`status` subcommands are implemented natively in Go (ranks 2–4 in
+`docs/go-port-plan.md`). All other commands proxy to bash yakos. Run
+`yakos go-port-status` to see the current migration tracker.
 
 The porting plan lives at `docs/go-port-plan.md` (written in parallel by the
 planner agent; commit it once the plan is finalized).
@@ -133,6 +133,7 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos go-port-status` | Go (migration tracker) |
 | `yakos validate [args]` | Go (full feature parity with `cli/lib/validate.sh`) |
 | `yakos cost [args]` | Go (full feature parity with `cli/lib/cost.sh`) |
+| `yakos status <project>` | Go (full feature parity with `cli/lib/status.sh`) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 
@@ -146,8 +147,10 @@ cli-go/
       main_test.go
       validate_parity_test.go  # parity tests for validate subcommand
       cost_parity_test.go      # parity tests for cost subcommand
+      status_parity_test.go    # parity tests for status subcommand
       testdata/
         fixtures/cost/         # dispatch-log NDJSON fixtures for cost tests
+        fixtures/status/       # work-tree fixtures for status tests (5 shapes)
         golden/                # captured bash baselines for golden comparisons
   internal/
     version/
@@ -166,6 +169,12 @@ cli-go/
       format.go            # PrintTable, PrintJSON, PrintNoFiles, PrintNoEvents
       cost_test.go         # unit tests (table-driven)
       format_test.go       # unit tests for output formatters
+    kanban/
+      parse.go             # read-only kanban.md parser (sliver ahead of rank-7 full port)
+    status/
+      status.go            # Status function, Config/Report types, path resolution
+      format.go            # Format + PrintHelp, byte-matching bash output
+      status_test.go       # unit tests (table-driven)
     paritytest/
       paritytest.go        # parity test harness for all Phase 1 ports
   go.mod                   # module github.com/bakw00ds/yakos (root: cli-go/)
