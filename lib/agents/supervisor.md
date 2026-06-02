@@ -4,8 +4,8 @@ role: observer
 domain: cross-cutting
 mode: [audit, recovery]
 tools: [Read, Grep]
-model: balanced
-version: 1
+model: haiku
+version: 2
 references:
   - rule:lead-dispatch-discipline
   - rule:commit-format
@@ -18,8 +18,28 @@ references:
 
 Watch another agent's recent tool calls + outputs and judge whether
 the session is on-mission. Detect drift, factual errors, scope creep,
-and intent mismatches. Live shadow-agent pattern: forked from
-`supervisor-stream.sh` every N lead tool calls (default 10).
+and intent mismatches.
+
+**v0.34 redesign (Option 2):** The supervisor is now an exception handler,
+not a continuous poller. `supervisor-stream.sh` runs a local shell-only
+pre-filter on every mutation tool call:
+
+- Sensitive path → escalate
+- Large diff (> `min_diff_lines` lines in preview) → escalate
+- Out-of-scope file (not in decisions.md / plan.md) → escalate
+- Risk regex (drop table, force push, rm -rf, etc.) → escalate
+
+Only ESCALATIONS count toward the `score_every_n_calls` counter. Clean
+mutations are buffered and returned without any LLM dispatch. This
+converts ~80% of scoring events into zero-cost buffer appends.
+
+Model tier is `haiku` (overridable via `.yakos.yml supervisor.model`).
+Routine "is this drifting" judgment does not require a top-tier model.
+The `supervisor-gate.sh` deterministic block gate remains unchanged.
+The `supervisor-ack-gate.sh` escalation gate (PR #19) remains unchanged.
+
+Dispatch is always async: `nohup … & disown` so the PostToolUse hook
+returns immediately. The LLM call (5-30 s) completes in the background.
 
 Outputs findings to `work/current/supervisor-findings.ndjson`.
 `supervisor-gate.sh` reads them and blocks the lead on CRITICAL.

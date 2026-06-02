@@ -94,10 +94,13 @@ profile:
 # injection_scan:
 #   enabled: true     # set to false to disable
 
-# ---- supervisor mode (v0.33+) ----------------------------------------------
-# A live shadow agent that watches the lead's tool calls and judges
-# drift / accuracy / intent. Fires every score_every_n_calls on a
-# cheaper runtime than the lead. See docs/supervisor-mode.md.
+# ---- supervisor mode (v0.34+, Option 2 redesign) ----------------------------
+# A live shadow agent that watches the lead's mutation tool calls and judges
+# drift / accuracy / intent. v0.34 adds a local shell-only pre-filter that
+# runs before any LLM dispatch, cutting ~80% of scoring events.
+#
+# Architecture: matcher (Edit|Write|MultiEdit|Bash) → pre-filter → escalation
+# counter → async LLM dispatch → supervisor-gate.sh deterministic block.
 #
 # Disabled by default — opt in by flipping enabled to true.
 #
@@ -105,8 +108,31 @@ profile:
 #   enabled: true
 #   runtime: claude                # which runtime to dispatch supervisor on
 #   agent: supervisor              # agent file id (rarely overridden)
-#   score_every_n_calls: 10        # cost vs latency tradeoff
+#   score_every_n_calls: 10        # cost vs latency tradeoff (escalations only)
 #   block_on_critical: true        # active mode; false = surface-only
+#   model: haiku                   # haiku | sonnet | opus (override tier)
+#   #
+#   # matcher: "Edit|Write|MultiEdit|Bash"  # default; set to "*" for verbose mode
+#   # (The matcher in .claude/settings.json is what Claude Code actually uses.
+#   #  This key is for documentation; 'yakos init' templates it into settings.json.)
+#   #
+#   # pre_filter:
+#   #   enabled: true              # set to false to revert to pre-v0.34 behavior
+#   #   min_diff_lines: 20         # diff > this many lines → escalate
+#   #   risk_regex:                # additional patterns beyond the built-in list
+#   #     - "drop\\s+table"
+#   #     - "force.*push"
+#   #     - "rm\\s+-rf"
+#   #
+#   # Built-in risk_regex patterns (always active when pre_filter.enabled: true):
+#   #   drop[[:space:]]+table
+#   #   force.*push
+#   #   rm[[:space:]]+-rf
+#   #   chmod[[:space:]]+777
+#   #   (password|secret|api_key|token) = <long-non-env-value>
+#   #
+#   # Future: supervisor.runtime: local-llm → Ollama integration (TODO in
+#   # supervisor-stream.sh; local-llm runtime is a no-op placeholder for now)
 #
 # Emergency bypass (any session):
 #   export YAKOS_SUPERVISOR_DISABLE=1
