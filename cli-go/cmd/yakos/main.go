@@ -14,17 +14,22 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/bakw00ds/yakos/internal/cost"
+	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/doctor"
 	"github.com/bakw00ds/yakos/internal/kanban"
 	"github.com/bakw00ds/yakos/internal/passthrough"
 	"github.com/bakw00ds/yakos/internal/refresh"
+	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/validate"
 	"github.com/bakw00ds/yakos/internal/version"
@@ -40,6 +45,7 @@ var portedCommands = []portedCommand{
 	{Name: "doctor", Since: "0.40.0", Notes: "full feature parity with cli/lib/doctor.sh"},
 	{Name: "refresh", Since: "0.41.0", Notes: "full feature parity with cli/lib/refresh.sh"},
 	{Name: "kanban", Since: "0.42.0", Notes: "full feature parity with cli/lib/kanban.sh (serve deferred to rank 41)"},
+	{Name: "dispatch", Since: "0.43.0", Notes: "full feature parity with cli/lib/dispatch.sh; PRs #15/#31/#32/#34/#39/#40 invariants"},
 }
 
 type portedCommand struct {
@@ -93,6 +99,8 @@ func main() {
 		runRefresh(yakosRoot, args[1:])
 	case "kanban":
 		runKanban(yakosRoot, args[1:])
+	case "dispatch":
+		runDispatch(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -1031,6 +1039,291 @@ func printKanbanHelp(w io.Writer) {
   yakos kanban delete <id>           # hard-delete a task (also: rm)
 
 Known categories: bug  feature  chore  question  other  (arbitrary values accepted)
+`)
+}
+
+// runDispatch implements `yakos dispatch` natively in Go.
+//
+// Usage mirrors cli/lib/dispatch.sh exactly:
+//
+//	yakos dispatch <agent-name> "<task-prompt>" [flags]
+//
+// Flags:
+//
+//	--runtime <id>       Override the agent's frontmatter runtime: field
+//	--model <tier>       Override the model tier (haiku|sonnet|opus); aliases expanded
+//	--project <path>     Project repo path
+//	--timeout <secs>     Max time to wait (default 600)
+//	--eval-run-id <id>   Mark as model-routing eval dispatch
+//	--allow-root         Set IS_SANDBOX=1 for root-user container dispatch
+//	--help               Print help and exit 0
+//
+// Exits with the dispatch'd runtime's exit code.
+func runDispatch(yakosRoot string, args []string) {
+	agentName := ""
+	task := ""
+	runtimeOverride := ""
+	modelOverride := ""
+	evalRunID := ""
+	project := ""
+	timeoutSecs := 0
+	allowRoot := false
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			printDispatchHelp(os.Stdout)
+			os.Exit(0)
+
+		case arg == "--runtime":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "dispatch: --runtime requires an id")
+				os.Exit(1)
+			}
+			runtimeOverride = args[i]
+		case len(arg) > 10 && arg[:10] == "--runtime=":
+			runtimeOverride = arg[10:]
+
+		case arg == "--model":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "dispatch: --model requires a tier (haiku|sonnet|opus)")
+				os.Exit(1)
+			}
+			modelOverride = args[i]
+		case len(arg) > 8 && arg[:8] == "--model=":
+			modelOverride = arg[8:]
+
+		case arg == "--eval-run-id":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "dispatch: --eval-run-id requires an id string")
+				os.Exit(1)
+			}
+			evalRunID = args[i]
+		case len(arg) > 14 && arg[:14] == "--eval-run-id=":
+			evalRunID = arg[14:]
+
+		case arg == "--project":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "dispatch: --project requires a path")
+				os.Exit(1)
+			}
+			project = args[i]
+		case len(arg) > 10 && arg[:10] == "--project=":
+			project = arg[10:]
+
+		case arg == "--timeout":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "dispatch: --timeout requires a number")
+				os.Exit(1)
+			}
+			n, err := strconv.Atoi(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "dispatch: --timeout value %q is not a number\n", args[i])
+				os.Exit(1)
+			}
+			timeoutSecs = n
+		case len(arg) > 10 && arg[:10] == "--timeout=":
+			n, err := strconv.Atoi(arg[10:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "dispatch: --timeout value %q is not a number\n", arg[10:])
+				os.Exit(1)
+			}
+			timeoutSecs = n
+
+		case arg == "--allow-root":
+			allowRoot = true
+
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "dispatch: unknown flag %q (try --help)\n", arg)
+			os.Exit(1)
+
+		default:
+			if agentName == "" {
+				agentName = arg
+			} else if task == "" {
+				task = arg
+			} else {
+				fmt.Fprintln(os.Stderr, "dispatch: too many positional args (use --help)")
+				os.Exit(1)
+			}
+		}
+	}
+
+	if agentName == "" {
+		printDispatchHelp(os.Stderr)
+		fmt.Fprintln(os.Stderr, "dispatch: missing <agent-name>")
+		os.Exit(1)
+	}
+	if task == "" {
+		printDispatchHelp(os.Stderr)
+		fmt.Fprintln(os.Stderr, "dispatch: missing <task-prompt>")
+		os.Exit(1)
+	}
+
+	// Resolve project from env or inference (mirrors dispatch.sh project resolution).
+	if project == "" {
+		project = os.Getenv("YAKOS_PROJECT_PATH")
+	}
+	if project == "" {
+		// Try to infer from the current working directory via agent-control layout.
+		cwd, _ := os.Getwd()
+		home := os.Getenv("HOME")
+		project = inferProjectFromCWD(cwd, home)
+	}
+	if project == "" {
+		fmt.Fprintln(os.Stderr, "dispatch: cannot infer project; pass --project <path>")
+		os.Exit(1)
+	}
+	if stat, err := os.Stat(project); err != nil || !stat.IsDir() {
+		fmt.Fprintf(os.Stderr, "dispatch: project path not found or not a directory: %s\n", project)
+		os.Exit(1)
+	}
+
+	// Resolve model alias (e.g. "balanced" → "sonnet").
+	// The runtime package validates only concrete tiers; we expand aliases here.
+	if modelOverride != "" {
+		modelOverride = runtime.ResolveAlias(modelOverride)
+		if !runtime.ValidateTier(modelOverride) {
+			fmt.Fprintf(os.Stderr, "dispatch: invalid model tier %q (must be haiku|sonnet|opus)\n", modelOverride)
+			os.Exit(1)
+		}
+	}
+
+	// Log the dispatch parameters to stderr (mirrors dispatch.sh:347).
+	resolvedModel := modelOverride
+	if resolvedModel == "" {
+		resolvedModel = "(from frontmatter)"
+	}
+	chosenBy := "frontmatter"
+	if modelOverride != "" {
+		chosenBy = "override"
+	} else if evalRunID != "" {
+		chosenBy = "eval"
+	}
+	runtimeDesc := runtimeOverride
+	if runtimeDesc == "" {
+		runtimeDesc = "(from frontmatter)"
+	}
+	fmt.Fprintf(os.Stderr, "yakos dispatch: agent=%s runtime=%s model=%s (by:%s) project=%s\n",
+		agentName, runtimeDesc, resolvedModel, chosenBy, project)
+
+	req := dispatch.Request{
+		AgentName: agentName,
+		Task:      task,
+		Project:   project,
+		Runtime:   runtimeOverride,
+		Model:     modelOverride,
+		EvalRunID: evalRunID,
+		AllowRoot: allowRoot,
+		Timeout:   timeoutSecs,
+		YakosRoot: yakosRoot,
+	}
+
+	stdout, _, err := dispatch.Run(context.Background(), req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dispatch: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Write captured stdout to the terminal.
+	if len(stdout) > 0 {
+		if _, err := os.Stdout.Write(stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "dispatch: write stdout: %v\n", err)
+			os.Exit(1)
+		}
+	}
+}
+
+// inferProjectFromCWD attempts to resolve a project path from cwd using the
+// ~/agent-control/<name>/.project-path convention (mirrors dispatch.sh project inference).
+func inferProjectFromCWD(cwd, home string) string {
+	if home == "" {
+		return ""
+	}
+	acRoot := filepath.Join(home, "agent-control")
+	// Check if cwd is inside agent-control.
+	if len(cwd) > len(acRoot)+1 && cwd[:len(acRoot)] == acRoot {
+		rest := cwd[len(acRoot)+1:]
+		name := rest
+		if idx := len(name); idx > 0 {
+			// Take first path component.
+			for i, c := range name {
+				if c == '/' || c == os.PathSeparator {
+					name = name[:i]
+					break
+				}
+			}
+		}
+		ppFile := filepath.Join(acRoot, name, ".project-path")
+		if data, err := os.ReadFile(ppFile); err == nil { //nolint:gosec
+			return strings.TrimSpace(string(data))
+		}
+	}
+	// Scan all agent-control entries.
+	entries, err := os.ReadDir(acRoot)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		ppFile := filepath.Join(acRoot, e.Name(), ".project-path")
+		data, err := os.ReadFile(ppFile) //nolint:gosec
+		if err != nil {
+			continue
+		}
+		p := strings.TrimSpace(string(data))
+		if cwd == p || len(cwd) > len(p)+1 && cwd[:len(p)] == p && cwd[len(p)] == '/' {
+			return p
+		}
+	}
+	return ""
+}
+
+// printDispatchHelp prints the help text for `yakos dispatch`, matching the
+// bash dispatch.sh --help output exactly.
+func printDispatchHelp(w io.Writer) {
+	_, _ = fmt.Fprint(w, `yakos dispatch <agent-name> "<task-prompt>" [flags]
+
+Spawn a yakOS agent on the runtime its frontmatter declares (or a
+runtime override). One-shot, non-interactive — captures stdout and
+returns the runtime's exit code.
+
+Arguments:
+  <agent-name>      The agent's id (e.g. backend, security-reviewer,
+                    pandaos-database). Must exist in the composed agent
+                    set for the project.
+  <task-prompt>     The work to do. Quoted so the lead can pass a
+                    multi-line description.
+
+Flags:
+  --runtime <id>    Override the agent's frontmatter `+"`"+`runtime:`+"`"+` field.
+  --model <tier>    Override the model tier for this dispatch only.
+                    Accepted values: haiku | sonnet | opus.
+                    Recorded as model_chosen_by:"override" in the
+                    dispatch-log. Does not affect the runtime selection.
+  --project <path>  Project repo path. Defaults to inferring from cwd
+                    (matches `+"`"+`yakos start`+"`"+`'s inference).
+  --timeout <secs>  Max time to wait. Default 600s.
+  --eval-run-id <id>
+                    Mark this dispatch as part of a model-routing eval
+                    run. Sets model_chosen_by:"eval" and eval_run_id in
+                    the dispatch-log. Intended for use by the eval
+                    harness (Phase 2); not for operator use.
+
+Audit trail at ~/.yakos-state/dispatch-log.ndjson.
+
+Examples:
+  yakos dispatch backend "implement the /v1/meal-plans GET handler"
+  yakos dispatch troubleshooter "diagnose why login_test fails on CI" --runtime codex
+  yakos dispatch test-runner "run the suite" --model sonnet
 `)
 }
 

@@ -56,9 +56,9 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 // expected number.  Update this test each time a new subcommand is ported.
 //
 // Current ported commands: validate (rank 2), cost (rank 3), status (rank 4),
-// doctor (rank 5), refresh (rank 6), kanban (rank 7).
+// doctor (rank 5), refresh (rank 6), kanban (rank 7), dispatch (rank 8).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 6
+	const want = 7
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
