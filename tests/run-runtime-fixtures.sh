@@ -285,10 +285,10 @@ else
     ok "yk_rt_claude_launch correctly does NOT carry the flag"
 fi
 
-# ---- 10. general-codex + general-gemini agent files exist with valid fm ------
+# ---- 10. general-codex + general-agy agent files exist with valid fm ------
 echo
 echo "Test 10: general-{codex,gemini} agents exist with valid frontmatter"
-for agent_id in general-codex general-gemini; do
+for agent_id in general-codex general-agy; do
     agent_file="$REPO_ROOT/lib/agents/${agent_id}.md"
     if [ ! -f "$agent_file" ]; then
         fail "$agent_id: file not found at $agent_file"
@@ -328,7 +328,7 @@ done
 echo
 echo "Test 11: runtime: pinned (not claude); model: set to concrete model IDs"
 # Format: "agent-id:expected-runtime:expected-model"
-for check in "general-codex:codex:gpt-5.5" "general-gemini:gemini:gemini-3.5"; do
+for check in "general-codex:codex:gpt-5.5" "general-agy:gemini:gemini-3.5"; do
     agent_id="${check%%:*}"
     rest="${check#*:}"
     expected_rt="${rest%%:*}"
@@ -369,9 +369,9 @@ for check in "general-codex:codex:gpt-5.5" "general-gemini:gemini:gemini-3.5"; d
     esac
 done
 
-# ---- 12. find_agent_file resolves general-codex + general-gemini ------------
+# ---- 12. find_agent_file resolves general-codex + general-agy ------------
 echo
-echo "Test 12: find_agent_file resolves general-codex and general-gemini"
+echo "Test 12: find_agent_file resolves general-codex and general-agy"
 # Inline a minimal find_agent_file using the helpers already sourced above.
 _find_agent_fw() {
     local id="$1"
@@ -389,7 +389,7 @@ _find_agent_fw() {
     done
     return 1
 }
-for agent_id in general-codex general-gemini; do
+for agent_id in general-codex general-agy; do
     resolved="$(_find_agent_fw "$agent_id" || true)"
     if [ -n "$resolved" ] && [ -f "$resolved" ]; then
         ok "$agent_id: find_agent_file resolved to $resolved"
@@ -398,9 +398,9 @@ for agent_id in general-codex general-gemini; do
     fi
 done
 
-# ---- 13. compose includes general-codex + general-gemini --------------------
+# ---- 13. compose includes general-codex + general-agy --------------------
 echo
-echo "Test 13: yk_agents_compose includes general-codex and general-gemini"
+echo "Test 13: yk_agents_compose includes general-codex and general-agy"
 # Use a fresh shell to avoid cache pollution from Test 1.
 composed="$(bash -c '
     set -eu
@@ -410,7 +410,7 @@ composed="$(bash -c '
     . "$YAKOS_LIB/agents-compose.sh"
     yk_agents_compose "$YAKOS_ROOT" ""
 ' 2>/dev/null)"
-for agent_id in general-codex general-gemini; do
+for agent_id in general-codex general-agy; do
     if printf '%s' "$composed" | jq -e --arg n "$agent_id" 'has($n)' >/dev/null; then
         ok "compose includes agent: $agent_id"
     else
@@ -420,11 +420,11 @@ done
 
 # ---- 14. yakos validate --strict passes on both new agents ------------------
 echo
-echo "Test 14: yakos validate --strict passes on general-codex and general-gemini"
+echo "Test 14: yakos validate --strict passes on general-codex and general-agy"
 # Run validate in framework mode (no project path) and capture per-agent output.
 validate_out="$(YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$YAKOS_LIB" \
     bash "$YAKOS_LIB/validate.sh" --strict 2>&1 || true)"
-for agent_id in general-codex general-gemini; do
+for agent_id in general-codex general-agy; do
     agent_file="$REPO_ROOT/lib/agents/${agent_id}.md"
     # validate emits "[ok]   <path>" on success; "[err]  <path>:" on failure.
     if printf '%s\n' "$validate_out" | grep -qE "^\s+\[ok\]\s+${agent_file}$"; then
@@ -437,6 +437,90 @@ for agent_id in general-codex general-gemini; do
         printf '%s\n' "$validate_out" | grep -E "general-" | sed 's/^/    /' >&2
     fi
 done
+
+# ---- 15. dual-stat portability: BSD stat succeeds (macOS happy-path) --------
+echo
+echo "Test 15: dual-stat portability — BSD stat first-wins (macOS)"
+_stat_test_dir="$WORKDIR/stat-test-bsd"
+mkdir -p "$_stat_test_dir"
+_stat_test_file="$_stat_test_dir/probe.pb"
+printf 'hello' > "$_stat_test_file"
+
+# Exercise the same pattern used in the fixed code paths: BSD first, GNU fallback.
+_bsd_result="$(stat -f '%m' "$_stat_test_file" 2>/dev/null || stat -c '%Y' "$_stat_test_file" 2>/dev/null || true)"
+if [ -n "$_bsd_result" ] && printf '%s' "$_bsd_result" | grep -qE '^[0-9]+$'; then
+    ok "dual-stat: BSD 'stat -f %m' returns numeric mtime ($( printf '%s' "$_bsd_result" | head -c 15 ))"
+else
+    fail "dual-stat: BSD 'stat -f %m' did not return a numeric mtime (got '$_bsd_result')"
+fi
+
+# Confirm a find+loop using the dual-stat pattern produces non-empty mtime list.
+_mtime_list=""
+while IFS= read -r -d '' _f; do
+    _mt="$(stat -f '%m' "$_f" 2>/dev/null || stat -c '%Y' "$_f" 2>/dev/null || true)"
+    [ -n "$_mt" ] && _mtime_list="${_mtime_list}${_mt} ${_f}"$'\n'
+done < <(find "$_stat_test_dir" -maxdepth 1 -type f -name '*.pb' -print0 2>/dev/null)
+_found="$(printf '%s' "$_mtime_list" | sort -n -r | head -1 | awk '{print $2}')"
+if [ -n "$_found" ] && [ -f "$_found" ]; then
+    ok "dual-stat loop: find+loop selects correct file ($( basename "$_found" ))"
+else
+    fail "dual-stat loop: find+loop returned empty or non-existent file ('$_found')"
+fi
+
+# ---- 16. dual-stat portability: GNU stat fallback path ----------------------
+echo
+echo "Test 16: dual-stat portability — GNU stat fallback (simulated Linux)"
+# Build a fake 'stat' that simulates GNU behavior:
+#   -f flag → exits non-zero with an error message (BSD-only flag; GNU rejects it)
+#   -c '%Y' → prints a known synthetic mtime (1700000042) regardless of file
+# This lets the test run without an actual Linux box or GNU stat binary.
+_fake_stat_dir="$WORKDIR/fake-stat-bin"
+mkdir -p "$_fake_stat_dir"
+cat > "$_fake_stat_dir/stat" <<'FAKESTAT'
+#!/usr/bin/env bash
+# Simulated GNU stat: -f flag unsupported; -c '%Y' emits synthetic mtime.
+for arg in "$@"; do
+    case "$arg" in
+        -f) printf 'stat: invalid option -- '\''f'\''\n' >&2; exit 1 ;;
+    esac
+done
+# For -c '%Y' <file>: emit a fixed synthetic epoch so the test is deterministic.
+printf '1700000042\n'
+FAKESTAT
+chmod +x "$_fake_stat_dir/stat"
+
+_gnu_test_file="$WORKDIR/stat-test-bsd/probe.pb"   # reuse file from Test 15
+# Run the dual-stat expression with the fake stat shadowing the real one.
+_gnu_result="$(PATH="$_fake_stat_dir:$PATH" bash -c '
+    stat -f "%m" "$1" 2>/dev/null || stat -c "%Y" "$1" 2>/dev/null || true
+' -- "$_gnu_test_file")"
+if [ -n "$_gnu_result" ] && printf '%s' "$_gnu_result" | grep -qE '^[0-9]+$'; then
+    ok "dual-stat: GNU fallback 'stat -c %Y' returns numeric mtime (${_gnu_result})"
+else
+    fail "dual-stat: GNU fallback did not return a numeric mtime (got '$_gnu_result')"
+fi
+
+# Verify the fallback value matches the synthetic mtime from the fake stat.
+if [ "$_gnu_result" = "1700000042" ]; then
+    ok "dual-stat: confirmed GNU fallback path was taken (synthetic mtime matches)"
+else
+    fail "dual-stat: unexpected mtime '$_gnu_result' — BSD path may have run when GNU was expected"
+fi
+
+# Repeat the find+loop pattern with the fake stat on PATH; confirm non-empty output.
+_mtime_list2=""
+while IFS= read -r -d '' _f; do
+    _mt="$(PATH="$_fake_stat_dir:$PATH" bash -c '
+        stat -f "%m" "$1" 2>/dev/null || stat -c "%Y" "$1" 2>/dev/null || true
+    ' -- "$_f")"
+    [ -n "$_mt" ] && _mtime_list2="${_mtime_list2}${_mt} ${_f}"$'\n'
+done < <(find "$WORKDIR/stat-test-bsd" -maxdepth 1 -type f -name '*.pb' -print0 2>/dev/null)
+_found2="$(printf '%s' "$_mtime_list2" | sort -n -r | head -1 | awk '{print $2}')"
+if [ -n "$_found2" ] && [ -f "$_found2" ]; then
+    ok "dual-stat loop (GNU fallback): find+loop returns non-empty file path ($( basename "$_found2" ))"
+else
+    fail "dual-stat loop (GNU fallback): find+loop returned empty or non-existent file ('$_found2')"
+fi
 
 # ---- summary -----------------------------------------------------------------
 echo
