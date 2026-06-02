@@ -212,8 +212,27 @@ _validate_model_tier() {
     esac
 }
 
+# _resolve_model_alias <alias-or-tier>
+#   Translates semantic aliases (cheap/balanced/best/reasoning) used in agent
+#   frontmatter into concrete tier names. If the input is already a concrete
+#   tier it passes through unchanged. Prints the resolved name to stdout.
+#   Mirrors the mapping in agents-compose.sh:_compose_one_agent (kept in sync
+#   manually — both are 4-line case blocks; extract only if a third call-site
+#   appears).
+_resolve_model_alias() {
+    case "$1" in
+        cheap)              printf 'haiku'  ;;
+        balanced)           printf 'sonnet' ;;
+        best|reasoning)     printf 'opus'   ;;
+        *)                  printf '%s' "$1" ;;
+    esac
+}
+
 MODEL_CHOSEN_BY="frontmatter"
-MODEL_RESOLVED="${AGENT_MODEL_FM:-sonnet}"
+# Resolve semantic aliases from frontmatter so the logged value is always a
+# concrete tier name (haiku/sonnet/opus). Cost audits read model_resolved
+# directly; they should not need to know yakOS alias conventions.
+MODEL_RESOLVED="$(_resolve_model_alias "${AGENT_MODEL_FM:-sonnet}")"
 
 # eval takes precedence over policy/frontmatter but not over CLI --model
 if [ -n "$EVAL_RUN_ID" ]; then

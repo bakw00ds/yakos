@@ -395,6 +395,164 @@ else
 fi
 
 # ============================================================
+# Tests 11-15: semantic alias expansion in model_resolved
+#
+# Each test writes a one-off agent .md with the alias under test into the
+# fake project, dispatches without --model (so frontmatter wins), and
+# asserts that model_resolved in the log is the concrete tier, not the
+# alias string.
+# ============================================================
+echo
+echo "Test 11: frontmatter model:balanced → model_resolved=sonnet"
+cat > "$FAKE_PROJECT/.claude/agents/alias-agent.md" <<'AGEOF'
+---
+id: alias-agent
+role: specialist
+domain: testing
+mode: [implement]
+tools: [Read]
+model: balanced
+version: 1
+references: []
+---
+# Alias Agent
+## Purpose
+Test alias expansion.
+## Execution
+1. Do nothing.
+## Special rules
+- None.
+## Handling peer messages
+Pass.
+## Personality
+Neutral.
+AGEOF
+entry="$(HOME="$FAKE_HOME" \
+    YAKOS_ROOT="$REPO_ROOT" \
+    YAKOS_LIB="$YAKOS_LIB" \
+    bash "$REPO_ROOT/cli/lib/dispatch.sh" \
+        alias-agent "test task" \
+        --project "$FAKE_PROJECT" \
+        --runtime mock-rt >/dev/null 2>&1 || true
+    grep '"dispatch_finished"' "$FAKE_HOME/.yakos-state/dispatch-log.ndjson" 2>/dev/null | tail -1)"
+if printf '%s' "$entry" | jq -e '.model_resolved == "sonnet"' >/dev/null 2>&1; then
+    ok "model:balanced → model_resolved=sonnet"
+else
+    fail "model:balanced should resolve to sonnet (got: $(printf '%s' "$entry" | jq -r '.model_resolved // "missing"' 2>/dev/null))"
+fi
+
+echo
+echo "Test 12: frontmatter model:cheap → model_resolved=haiku"
+cat > "$FAKE_PROJECT/.claude/agents/alias-agent.md" <<'AGEOF'
+---
+id: alias-agent
+role: specialist
+domain: testing
+mode: [implement]
+tools: [Read]
+model: cheap
+version: 1
+references: []
+---
+# Alias Agent
+## Purpose
+Test alias expansion.
+## Execution
+1. Do nothing.
+## Special rules
+- None.
+## Handling peer messages
+Pass.
+## Personality
+Neutral.
+AGEOF
+entry="$(HOME="$FAKE_HOME" \
+    YAKOS_ROOT="$REPO_ROOT" \
+    YAKOS_LIB="$YAKOS_LIB" \
+    bash "$REPO_ROOT/cli/lib/dispatch.sh" \
+        alias-agent "test task" \
+        --project "$FAKE_PROJECT" \
+        --runtime mock-rt >/dev/null 2>&1 || true
+    grep '"dispatch_finished"' "$FAKE_HOME/.yakos-state/dispatch-log.ndjson" 2>/dev/null | tail -1)"
+if printf '%s' "$entry" | jq -e '.model_resolved == "haiku"' >/dev/null 2>&1; then
+    ok "model:cheap → model_resolved=haiku"
+else
+    fail "model:cheap should resolve to haiku (got: $(printf '%s' "$entry" | jq -r '.model_resolved // "missing"' 2>/dev/null))"
+fi
+
+echo
+echo "Test 13: frontmatter model:best → model_resolved=opus"
+cat > "$FAKE_PROJECT/.claude/agents/alias-agent.md" <<'AGEOF'
+---
+id: alias-agent
+role: specialist
+domain: testing
+mode: [implement]
+tools: [Read]
+model: best
+version: 1
+references: []
+---
+# Alias Agent
+## Purpose
+Test alias expansion.
+## Execution
+1. Do nothing.
+## Special rules
+- None.
+## Handling peer messages
+Pass.
+## Personality
+Neutral.
+AGEOF
+entry="$(HOME="$FAKE_HOME" \
+    YAKOS_ROOT="$REPO_ROOT" \
+    YAKOS_LIB="$YAKOS_LIB" \
+    bash "$REPO_ROOT/cli/lib/dispatch.sh" \
+        alias-agent "test task" \
+        --project "$FAKE_PROJECT" \
+        --runtime mock-rt >/dev/null 2>&1 || true
+    grep '"dispatch_finished"' "$FAKE_HOME/.yakos-state/dispatch-log.ndjson" 2>/dev/null | tail -1)"
+if printf '%s' "$entry" | jq -e '.model_resolved == "opus"' >/dev/null 2>&1; then
+    ok "model:best → model_resolved=opus"
+else
+    fail "model:best should resolve to opus (got: $(printf '%s' "$entry" | jq -r '.model_resolved // "missing"' 2>/dev/null))"
+fi
+
+echo
+echo "Test 14: frontmatter model:sonnet (concrete) → model_resolved=sonnet passthrough"
+# Reuse the original test-runner agent which has model:sonnet.
+entry="$(dispatch_and_get_log)"
+if printf '%s' "$entry" | jq -e '.model_resolved == "sonnet"' >/dev/null 2>&1; then
+    ok "model:sonnet passthrough → model_resolved=sonnet"
+else
+    fail "model:sonnet should pass through as sonnet (got: $(printf '%s' "$entry" | jq -r '.model_resolved // "missing"' 2>/dev/null))"
+fi
+
+echo
+echo "Test 15: --model haiku CLI override wins over balanced frontmatter"
+# alias-agent still has model:best from Test 13; override with --model haiku.
+entry="$(HOME="$FAKE_HOME" \
+    YAKOS_ROOT="$REPO_ROOT" \
+    YAKOS_LIB="$YAKOS_LIB" \
+    bash "$REPO_ROOT/cli/lib/dispatch.sh" \
+        alias-agent "test task" \
+        --project "$FAKE_PROJECT" \
+        --runtime mock-rt \
+        --model haiku >/dev/null 2>&1 || true
+    grep '"dispatch_finished"' "$FAKE_HOME/.yakos-state/dispatch-log.ndjson" 2>/dev/null | tail -1)"
+if printf '%s' "$entry" | jq -e '.model_resolved == "haiku"' >/dev/null 2>&1; then
+    ok "CLI --model haiku overrides alias frontmatter → model_resolved=haiku"
+else
+    fail "--model haiku should win over frontmatter alias (got: $(printf '%s' "$entry" | jq -r '.model_resolved // "missing"' 2>/dev/null))"
+fi
+if printf '%s' "$entry" | jq -e '.model_chosen_by == "override"' >/dev/null 2>&1; then
+    ok "model_chosen_by=override when CLI --model flag used"
+else
+    fail "model_chosen_by should be 'override' when CLI --model used"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo
