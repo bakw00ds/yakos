@@ -553,6 +553,59 @@ else
 fi
 
 # ============================================================
+# Test 16: dispatch_finished contains project field
+# ============================================================
+echo
+echo "Test 16: dispatch_finished event contains 'project' field"
+entry="$(dispatch_and_get_log)"
+if printf '%s' "$entry" | jq -e 'has("project")' >/dev/null 2>&1; then
+    ok "dispatch_finished has 'project' field"
+else
+    fail "dispatch_finished missing 'project' field"
+fi
+
+# ============================================================
+# Test 17: project field is the absolute project path, not a basename
+# ============================================================
+echo
+echo "Test 17: project field is absolute path, not just a basename"
+entry="$(dispatch_and_get_log)"
+proj_val="$(printf '%s' "$entry" | jq -r '.project // ""' 2>/dev/null)"
+# Must start with / (absolute) and equal FAKE_PROJECT exactly.
+if [ "$proj_val" = "$FAKE_PROJECT" ]; then
+    ok "project field matches absolute path: $proj_val"
+else
+    fail "project field should be '$FAKE_PROJECT', got: '$proj_val'"
+fi
+
+# ============================================================
+# Test 18: dispatch_started also contains project field
+# ============================================================
+echo
+echo "Test 18: dispatch_started event contains 'project' field"
+# Drain any previous log so we can inspect the started event just written.
+started_log="$FAKE_HOME/.yakos-state/dispatch-log.ndjson"
+# Run a fresh dispatch and grab the most recent dispatch_started entry.
+HOME="$FAKE_HOME" \
+YAKOS_ROOT="$REPO_ROOT" \
+YAKOS_LIB="$YAKOS_LIB" \
+bash "$REPO_ROOT/cli/lib/dispatch.sh" \
+    test-runner "project field test" \
+    --project "$FAKE_PROJECT" \
+    --runtime mock-rt >/dev/null 2>&1 || true
+started_entry="$(grep '"dispatch_started"' "$started_log" 2>/dev/null | tail -1)"
+if printf '%s' "$started_entry" | jq -e 'has("project")' >/dev/null 2>&1; then
+    started_proj="$(printf '%s' "$started_entry" | jq -r '.project // ""' 2>/dev/null)"
+    if [ "$started_proj" = "$FAKE_PROJECT" ]; then
+        ok "dispatch_started has project field: $started_proj"
+    else
+        fail "dispatch_started project field should be '$FAKE_PROJECT', got: '$started_proj'"
+    fi
+else
+    fail "dispatch_started missing 'project' field"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo
