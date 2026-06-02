@@ -23,6 +23,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/doctor"
 	"github.com/bakw00ds/yakos/internal/passthrough"
+	"github.com/bakw00ds/yakos/internal/refresh"
 	"github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/validate"
 	"github.com/bakw00ds/yakos/internal/version"
@@ -36,6 +37,7 @@ var portedCommands = []portedCommand{
 	{Name: "cost", Since: "0.38.0", Notes: "full feature parity with cli/lib/cost.sh"},
 	{Name: "status", Since: "0.39.0", Notes: "full feature parity with cli/lib/status.sh"},
 	{Name: "doctor", Since: "0.40.0", Notes: "full feature parity with cli/lib/doctor.sh"},
+	{Name: "refresh", Since: "0.41.0", Notes: "full feature parity with cli/lib/refresh.sh"},
 }
 
 type portedCommand struct {
@@ -85,6 +87,8 @@ func main() {
 		runStatus(args[1:])
 	case "doctor":
 		runDoctor(yakosRoot, args[1:])
+	case "refresh":
+		runRefresh(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -511,6 +515,144 @@ func runDoctor(yakosRoot string, args []string) {
 		os.Exit(1)
 	}
 	os.Exit(0)
+}
+
+// runRefresh implements `yakos refresh` natively in Go.
+//
+// Usage mirrors cli/lib/refresh.sh exactly:
+//
+//	yakos refresh                        — infer project from cwd
+//	yakos refresh --project <path>       — explicit single project
+//	yakos refresh --all                  — discover all wired projects
+//	yakos refresh --dry-run              — report changes without writing
+//	yakos refresh --help                 — print help and exit 0
+//
+// YAKOS_ROOT must be set in the environment (set by the bash entry-point;
+// in tests it is injected via the env map).
+func runRefresh(yakosRoot string, args []string) {
+	dryRun := false
+	allProjects := false
+	explicitProject := ""
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			printRefreshHelp(os.Stdout)
+			os.Exit(0)
+		case arg == "--dry-run":
+			dryRun = true
+		case arg == "--all":
+			allProjects = true
+		case arg == "--project":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "refresh: --project requires a path")
+				os.Exit(1)
+			}
+			explicitProject = args[i]
+		case len(arg) > 10 && arg[:10] == "--project=":
+			explicitProject = arg[10:]
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "refresh: unknown argument %q (try --help)\n", arg)
+			os.Exit(1)
+		default:
+			fmt.Fprintf(os.Stderr, "refresh: unknown argument %q (try --help)\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	// Resolve YAKOS_ROOT from env (bash entry-point may set it).
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+	if yakosRoot == "" {
+		fmt.Fprintln(os.Stderr, "refresh: YAKOS_ROOT is not set")
+		os.Exit(1)
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	// Validate prerequisites exist.
+	hooksRoot := filepath.Join(yakosRoot, "lib", "hooks")
+	if _, err := os.Stat(hooksRoot); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "refresh: lib/hooks not found at %s (bad YAKOS_ROOT?)\n", hooksRoot)
+		os.Exit(1)
+	}
+	templateFile := filepath.Join(yakosRoot, "lib", "settings", "settings.template.json")
+	if _, err := os.Stat(templateFile); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "refresh: settings template not found at %s\n", templateFile)
+		os.Exit(1)
+	}
+
+	// Collect target projects.
+	var projectPaths []string
+	switch {
+	case explicitProject != "":
+		projectPaths = []string{explicitProject}
+	case allProjects:
+		projectPaths = refresh.CollectProjects(home)
+		if len(projectPaths) == 0 {
+			_, _ = fmt.Fprintln(os.Stdout, "No yakos-wired projects found under ~/agent-control/ or ~/github/.")
+			_, _ = fmt.Fprintln(os.Stdout, "Run 'yakos init <name> --project <path>' to bootstrap a project.")
+			os.Exit(0)
+		}
+	default:
+		// Infer from cwd.
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = "."
+		}
+		proj := refresh.InferProjectFromCWD(cwd, home)
+		if proj == "" {
+			fmt.Fprintf(os.Stderr, "refresh: cannot infer project from cwd %q. Use --project <path> or --all.\n", cwd)
+			os.Exit(1)
+		}
+		projectPaths = []string{proj}
+	}
+
+	cfg := refresh.Config{
+		YakosRoot:    yakosRoot,
+		ProjectPaths: projectPaths,
+		DryRun:       dryRun,
+		Writer:       os.Stdout,
+		ErrWriter:    os.Stderr,
+		HomeDir:      home,
+	}
+
+	_, err := refresh.Run(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "refresh: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// printRefreshHelp prints the help text for `yakos refresh`, matching the
+// bash refresh.sh --help output exactly.
+func printRefreshHelp(w io.Writer) {
+	_, _ = fmt.Fprint(w, `yakos refresh [--project <path>|--all] [--dry-run]
+
+Detect and repair per-project deployment drift:
+  - Hook scripts in <project>/scripts/hooks/ synced from lib/hooks/
+  - settings.json hook registrations smart-merged from lib/settings/settings.template.json
+  - ~/.claude/agents/ symlinks refreshed from lib/agents/
+
+Options:
+  --project <path>  Repair a specific project path.
+  --all             Discover all wired projects (~/agent-control/*/ +
+                    ~/github/*/.claude/settings.json) and refresh each.
+  --dry-run         Print what WOULD change without writing anything.
+  --help, -h        Print this help.
+
+Without --project or --all, infers from cwd (same as yakos start).
+
+Exit codes:
+  0   Success (including no-op when already in sync)
+  1   Error (bad project path, corrupt JSON, etc.)
+`)
 }
 
 // exitWith calls os.Exit with the code returned by passthrough.Run.
