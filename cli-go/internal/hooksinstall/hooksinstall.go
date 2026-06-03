@@ -144,6 +144,8 @@ Subcommands:
                                        Supported: codex, gemini, agy.
   status [<project>]                   Report which hooks are installed
                                        per-runtime for the project.
+  lint [--hooks-dir <path>]            Lint .star Starlark hook files
+                                       in the given directory (Phase 3).
 
 Hooks translated for codex / gemini / agy in v0.5:
   - path-allowlist (PreToolUse / BeforeTool)
@@ -162,7 +164,8 @@ script deployment only.
 
 Examples:
   yakos hooks install codex --project ~/code/myapp
-  yakos hooks status ~/code/myapp`)
+  yakos hooks status ~/code/myapp
+  yakos hooks lint --hooks-dir lib/hooks/`)
 }
 
 // ---- install ----------------------------------------------------------------
@@ -205,15 +208,15 @@ func matcherRegex(matchers []string) string {
 }
 
 // hookScriptPath returns the absolute path to a hook script.
-// Returns ("", false) if the script doesn't exist or isn't executable.
+// Returns ("", false) if the script doesn't exist or isn't considered executable.
+// The executable check is platform-aware: see executable_unix.go / executable_windows.go.
 func hookScriptPath(hooksDir, scriptName string) (string, bool) {
 	p := filepath.Join(hooksDir, scriptName+".sh")
 	fi, err := os.Stat(p)
 	if err != nil {
 		return "", false
 	}
-	// Executable by owner (mode & 0o100).
-	return p, fi.Mode()&0o100 != 0
+	return p, isExecutable(fi)
 }
 
 // ---- codex ------------------------------------------------------------------

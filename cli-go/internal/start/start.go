@@ -380,13 +380,15 @@ func Run(cfg Config) (*Banner, error) {
 		AuditEvent:   auditEvent,
 	}
 
-	// Run from the control directory (mirrors `cd "$CONTROL_DIR" && exec ...`).
-	if err := os.Chdir(controlDir); err != nil {
-		_, _ = fmt.Fprintf(ew, "WARN: start: could not cd to %s: %v\n", controlDir, err)
-	}
-
 	execFn := cfg.ExecFn
 	if execFn == nil {
+		// Production path: cd to the control directory then exec.
+		// The chdir is deferred to just before exec so that test code injecting
+		// ExecFn is not affected by a cwd side-effect (tests use t.TempDir() paths
+		// and would leak cwd state across parallel subtests if chdir ran earlier).
+		if err := os.Chdir(controlDir); err != nil {
+			_, _ = fmt.Fprintf(ew, "WARN: start: could not cd to %s: %v\n", controlDir, err)
+		}
 		execFn = defaultExec
 	}
 	if err := execFn(argv0, argv, execEnv); err != nil {

@@ -40,7 +40,6 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -193,9 +192,6 @@ func TestSoulParity_Edit_SeedsWhenAbsent(t *testing.T) {
 // ---- scenario (f): edit snapshots existing file before edit -----------------
 
 func TestSoulParity_Edit_SnapshotsExistingFile(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("soul snapshot filename contains ':'; Phase 1.5 followup")
-	}
 	home := t.TempDir()
 	original := "# Soul\n\noriginal\n"
 	makeSoulParityFile(t, home, "global", original)
@@ -254,16 +250,14 @@ func TestSoulParity_History_NoSnapshots(t *testing.T) {
 // ---- scenario (i): history — lists timestamps and byte counts ---------------
 
 func TestSoulParity_History_ListsSnapshots(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("soul snapshot filename contains ':'; Phase 1.5 followup")
-	}
 	home := t.TempDir()
 	histDir := filepath.Join(home, ".yakos-state", "soul", "history")
 	if err := os.MkdirAll(histDir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	ts1 := "2026-05-01T10:00:00Z"
-	ts2 := "2026-06-01T14:00:00Z"
+	// Use win-safe timestamp format (no colons, sortable).
+	ts1 := "20260501T100000Z"
+	ts2 := "20260601T140000Z"
 	if err := os.WriteFile(filepath.Join(histDir, "global-"+ts1+".md"), []byte("older"), 0644); err != nil {
 		t.Fatalf("write snap1: %v", err)
 	}
@@ -308,9 +302,6 @@ func TestSoulParity_Revert_MissingVersion_Error(t *testing.T) {
 // ---- scenario (k): revert happy path ----------------------------------------
 
 func TestSoulParity_Revert_HappyPath(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("soul snapshot filename contains ':'; Phase 1.5 followup")
-	}
 	home := t.TempDir()
 	soulDir := filepath.Join(home, ".yakos-state", "soul")
 	histDir := filepath.Join(soulDir, "history")
@@ -321,7 +312,8 @@ func TestSoulParity_Revert_HappyPath(t *testing.T) {
 	current := "# Current\n\ncurrent content\n"
 	makeSoulParityFile(t, home, "global", current)
 
-	snapVersion := "2026-01-01T00:00:00Z"
+	// Use win-safe timestamp format.
+	snapVersion := "20260101T000000Z"
 	oldContent := "# Old\n\nold content\n"
 	if err := os.WriteFile(filepath.Join(histDir, "global-"+snapVersion+".md"), []byte(oldContent), 0644); err != nil {
 		t.Fatalf("write snapshot: %v", err)

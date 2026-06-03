@@ -43,6 +43,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/bakw00ds/yakos/internal/timestamp"
 )
 
 // ---- public types -----------------------------------------------------------
@@ -176,7 +178,7 @@ func Run(cfg Config) (*Result, error) {
 	}
 
 	// Backup the agent file before editing.
-	backupSuffix := cfg.Now.UTC().Format("2006-01-02T15:04:05Z")
+	backupSuffix := timestamp.WinSafe(cfg.Now)
 	backupFile := agentFile + ".yakos-bak-" + backupSuffix
 	if err := copyFile(agentFile, backupFile); err != nil {
 		return nil, fmt.Errorf("teach: backup %s: %w", agentFile, err)

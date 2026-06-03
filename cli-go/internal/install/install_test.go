@@ -23,17 +23,17 @@ func symlinkOrSkip(t *testing.T, target, link string) {
 // t.TempDir()-based yakosRoot. Used as the target for "foreign symlink" tests
 // so that filepath.EvalSymlinks succeeds and the path is not under yakosRootAbs.
 //
-// On Windows, /dev/null does not exist; on all platforms we create a real file
-// in os.TempDir() so that EvalSymlinks can resolve it without error.
+// Uses t.TempDir() to allocate a unique directory per test, preventing races
+// when tests run in parallel with -parallel.
 func foreignTarget(t *testing.T) string {
 	t.Helper()
-	// os.TempDir() gives a system-level directory that exists on all platforms.
-	// We write a sentinel file there so the symlink target is resolvable.
-	target := filepath.Join(os.TempDir(), "yakos-test-foreign-target")
+	// Allocate a unique temp dir per test so parallel runs cannot collide on a
+	// shared path (the old os.TempDir()/yakos-test-foreign-target was a race).
+	dir := t.TempDir()
+	target := filepath.Join(dir, "yakos-test-foreign-target")
 	if err := os.WriteFile(target, []byte("foreign\n"), 0644); err != nil {
 		t.Fatalf("foreignTarget: could not write sentinel file %s: %v", target, err)
 	}
-	t.Cleanup(func() { _ = os.Remove(target) })
 	return target
 }
 
@@ -80,17 +80,22 @@ func baseConfig(t *testing.T, yakosRoot string) Config {
 // ---- (a) happy path ---------------------------------------------------------
 
 // TestInstall_HappyPath verifies that a fresh install creates all expected
-// artifacts: pointer file, launcher symlink, per-file symlinks, settings.json.
+// artifacts: pointer file, launcher symlink (or junction/copy fallback on
+// Windows), per-file symlinks (or junction/copy fallback), settings.json.
 func TestInstall_HappyPath(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// install relies on os.Symlink for per-file links and the launcher.
-		// Windows symlink semantics (privilege, Developer Mode) are Phase 1.5 scope.
-		// The production code degrades gracefully (LauncherSkipped, Symlinks.Created==0)
-		// but the happy-path assertions require successful creation.
-		t.Skip("symlink-dependent test; Windows symlink support is Phase 1.5 scope")
-	}
 	root := newFakeYakosRoot(t)
 	cfg := baseConfig(t, root)
+	if runtime.GOOS == "windows" {
+		// On Windows inject a no-op junction function so the test does not
+		// shell to mklink (which requires elevated privileges on CI runners).
+		// The fallback path for file symlinks copies the file, so we verify
+		// the artifact exists rather than asserting it is a symlink.
+		cfg.JunctionFn = func(target, link string) error {
+			// Simulate junction by creating an actual directory at link pointing
+			// to the same content. For test purposes, just create a marker file.
+			return os.MkdirAll(link, 0755)
+		}
+	}
 
 	res, err := Run(cfg)
 	if err != nil {
@@ -108,20 +113,23 @@ func TestInstall_HappyPath(t *testing.T) {
 		t.Errorf("pointer file should contain YAKOS_ROOT; got %q", string(pointerData))
 	}
 
-	// Launcher symlink.
+	// Launcher: must exist; on Unix must be a symlink; on Windows may be a
+	// copy or junction depending on privilege, but outcome must not be Skipped.
 	launcherPath := filepath.Join(home, ".local", "bin", "yakos")
-	linfo, err := os.Lstat(launcherPath)
-	if err != nil {
-		t.Fatalf("launcher symlink not created: %v", err)
+	if _, err := os.Lstat(launcherPath); err != nil {
+		t.Fatalf("launcher not created: %v", err)
 	}
-	if linfo.Mode()&os.ModeSymlink == 0 {
-		t.Errorf("launcher should be a symlink")
+	if runtime.GOOS != "windows" {
+		linfo, _ := os.Lstat(launcherPath)
+		if linfo.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("launcher should be a symlink on Unix")
+		}
 	}
 	if res.Launcher.Outcome != LauncherCreated {
 		t.Errorf("launcher outcome: got %q, want %q", res.Launcher.Outcome, LauncherCreated)
 	}
 
-	// Per-file symlinks created.
+	// Per-file symlinks (or fallback copies) created.
 	if res.Symlinks.Created == 0 {
 		t.Error("expected Created > 0 for fresh install")
 	}
