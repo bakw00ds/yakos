@@ -1,0 +1,12 @@
+{
+  "_doc": "Per-agent path allowlist consumed by scripts/hooks/path-allowlist.sh. Each agent_type key (matched against the 'agent_type' field of the PreToolUse stdin JSON; absent = lead) maps to an object with 'allow' and 'deny' glob arrays. The lead's policy is keyed under the literal string 'lead'. Globs use standard shell globstar syntax. The policy is allow-list-first: if 'allow' is present and a path doesn't match any allow glob, the action is blocked. 'deny' overrides allow. Remove this _doc key after customizing.",
+  "lead": {
+    "allow": ["**"],
+    "deny": [".env", ".env.*", "**/credentials/**", "**/.git/**"]
+  },
+  "_example_specialist": {
+    "_doc_example": "Replace this entry with one per project specialist (e.g. 'go-api', 'flutter-ui'). Specialist allow-lists should be tighter than the lead's. Delete this example block before relying on the file.",
+    "allow": ["api/**", "internal/**"],
+    "deny": ["api/migrations/**"]
+  }
+}

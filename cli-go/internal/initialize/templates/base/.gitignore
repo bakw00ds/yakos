@@ -1,0 +1,4 @@
+# YakOS agent-control directory — fully ignored from git.
+# This dir holds ephemeral per-session state (plan, contracts, logs,
+# scratchpads, archives). Never commit anything from here.
+*
