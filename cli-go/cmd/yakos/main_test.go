@@ -61,9 +61,10 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 // uninstall (rank 13), start (rank 14), update (rank 15), quickstart (rank 16),
 // auth (rank 17), memory (rank 18), agent (rank 19), session (rank 20),
 // migrate (rank 21), plugin (rank 22), teach (rank 23), soul (rank 24),
-// retro (rank 25), skill (rank 26), compact (rank 27), checkpoint (rank 28).
+// retro (rank 25), skill (rank 26), compact (rank 27), checkpoint (rank 28),
+// env (rank 29), standards (rank 30).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 27
+	const want = 29
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
