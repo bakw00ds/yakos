@@ -134,6 +134,42 @@ Platform split: Unix socket on Linux/macOS (`//go:build !windows`); named-pipe
 scaffold on Windows (`//go:build windows`) — true named pipe via go-winio is a
 follow-up PR. Windows cross-compile confirmed via `GOOS=windows GOARCH=amd64 go build`.
 
+### Phase 2 — MCP server + library extracts + RPC expansion (2026-06-03)
+
+Delivered as the Phase 2 expansion dispatch:
+
+| Package | Role | Tests |
+|---------|------|-------|
+| `cli-go/internal/mcpserver/` | Native MCP stdio server (protocol + tool registry + session loop) | 33 unit tests (initialize, tools/list round-trip, all 8 tools, error mapping) |
+| `cli-go/pkg/kanban/` | Public library extract of internal/kanban (Parse, Load, Add, Move, Done, Save, NormalizeColumn) | 5 Example tests |
+| `cli-go/pkg/cost/` | Public library extract of internal/cost (ParseAxis, LogFiles, StreamFinished, StreamFiles, Aggregate) | 3 Example tests |
+| `cli-go/pkg/status/` | Public library extract of internal/status (Run, Format, FormatTable, NewConfig) | 2 Example tests |
+| `cli-go/internal/serve/methods.go` | +8 RPC methods (kanban.add/move/done/list, refresh.run, cost.aggregate, status.read, supervise.pending) | 24 new unit tests |
+| `yakos mcp serve` subcommand | CLI entry-point for the MCP stdio server | Wired into cmd/yakos/main.go |
+
+Decision Q3 honored: stdio transport only. Streamable HTTP is a follow-up dispatch.
+
+MCP tool surface (8 tools):
+- `yakos.dispatch` — invoke a subagent
+- `yakos.kanban.list` — list board items (optional column filter)
+- `yakos.kanban.add` — add a task to TODO
+- `yakos.kanban.move` — move a task between columns
+- `yakos.kanban.done` — move a task to DONE
+- `yakos.refresh` — detect and repair deployment drift
+- `yakos.supervise.run` — read supervisor findings
+- `yakos.supervise.ack` — acknowledge a finding
+
+Register with Claude Code: `claude mcp add yakos -- yakos mcp serve`
+
+New daemon RPC methods (11 total, was 3):
+- `yakos.kanban.add` / `.move` / `.done` / `.list`
+- `yakos.refresh.run`
+- `yakos.cost.aggregate`
+- `yakos.status.read`
+- `yakos.supervise.pending`
+
+All param structs use `DisallowUnknownFields` — schema violations return `-32602`.
+
 - **`yakos serve` daemon** — one persistent process per dev session. Provides a Unix socket (`$XDG_RUNTIME_DIR/yakos.sock`) for the CLI to talk to instead of cold-starting. Wins: sub-ms subcommand response, in-memory kanban, single source of truth for dispatch-log writes. Sizing: M (~40h). Decision points: socket vs TCP on Windows? recommend named pipes.
 - **WebSocket multi-dev coordination** — daemon exposes WS endpoint for real-time kanban + presence ("alice is in IN PROGRESS on feat/billing") + cross-dev event bus. Sizing: L (~80h). Depends on daemon. Decision points: auth model for cross-machine (mTLS? shared token?).
 - **Native MCP server** — daemon exposes MCP tools: `yakos.dispatch`, `yakos.kanban.{add,move,done,list}`, `yakos.refresh`, `yakos.supervise`. Eliminates shell-out from MCP clients. Sizing: M (~50h). Depends on daemon. Decision points: MCP transport (stdio vs SSE vs streamable HTTP); recommend stdio + streamable HTTP.

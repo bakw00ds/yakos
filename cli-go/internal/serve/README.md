@@ -34,13 +34,30 @@ export YAKOS_DAEMON=auto   # uses daemon if running; falls back to in-process
 `<hash>` = first 16 hex chars of SHA-256 of the absolute workspace root path.
 Stable per workspace; no collisions in practice.
 
-## RPC methods (Phase 2 foundation — 3 methods)
+## RPC methods (11 total: 3 foundation + 8 expansion)
+
+### Foundation methods
 
 | Method | Params | Returns | Idempotent |
 |--------|--------|---------|------------|
 | `yakos.version` | none | `{version: string}` | Yes |
 | `yakos.kanban.summary` | none | `{summary, todo, in_progress, done}` | Yes |
-| `yakos.dispatch.run` | `{agent, task, project?, runtime?, model?, timeout?}` | `{exit_code, duration_s, output_bytes, model_resolved}` | No (each call spawns) |
+| `yakos.dispatch.run` | `{agent, task, project?, runtime?, model?, yakos_root?, timeout?}` | `{exit_code, duration_s, output_bytes, model_resolved}` | No (each call spawns) |
+
+### Expansion methods (Phase 2 dispatch)
+
+| Method | Params | Returns | Idempotent |
+|--------|--------|---------|------------|
+| `yakos.kanban.add` | `{title, category?, notes?}` | `{id}` | Conditionally |
+| `yakos.kanban.move` | `{id, to}` | `{ok: bool}` | Yes |
+| `yakos.kanban.done` | `{id}` | `{ok: bool}` | Yes |
+| `yakos.kanban.list` | `{column?, limit?}` | `{items: [{id, title, column}]}` | Yes |
+| `yakos.refresh.run` | `{dry_run?}` | `{output: string}` | Yes when dry_run=true |
+| `yakos.cost.aggregate` | `{by?, since?, limit?}` | `{Events, Rows}` | Yes |
+| `yakos.status.read` | `{project?}` | status Report struct | Yes |
+| `yakos.supervise.pending` | `{project?}` | `{pending_count, output}` | Yes |
+
+All params structs use `json.Decoder.DisallowUnknownFields` — unknown fields return `CodeInvalidParams (-32602)`.
 
 All methods follow JSON-RPC 2.0. Error codes:
 
