@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
@@ -34,6 +35,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/supervise"
 	"github.com/bakw00ds/yakos/internal/version"
+	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
 // registerMethods registers all daemon RPC methods on srv.
@@ -206,14 +208,39 @@ func handleDispatchRun(cfg Config) jsonrpc.Handler {
 			Timeout:   p.Timeout,
 		}
 
+		if cfg.Bus != nil {
+			cfg.Bus.Publish(wsbus.TopicDispatchStarted, wsbus.DispatchStartedPayload{
+				Agent:   p.Agent,
+				Project: project,
+				TS:      time.Now().UTC(),
+			})
+		}
+
 		stdout, result, err := dispatch.Run(ctx, req)
 		if err != nil {
+			if cfg.Bus != nil {
+				cfg.Bus.Publish(wsbus.TopicDispatchFinished, wsbus.DispatchFinishedPayload{
+					Agent:    p.Agent,
+					Project:  project,
+					ExitCode: -1,
+					TS:       time.Now().UTC(),
+				})
+			}
 			return nil, &jsonrpc.RPCError{
 				Code:    jsonrpc.CodeDispatchUnavailable,
 				Message: fmt.Sprintf("dispatch.run: %v", err),
 			}
 		}
 		_ = stdout // stdout is captured in the dispatch log; not returned via RPC
+
+		if cfg.Bus != nil {
+			cfg.Bus.Publish(wsbus.TopicDispatchFinished, wsbus.DispatchFinishedPayload{
+				Agent:    p.Agent,
+				Project:  project,
+				ExitCode: result.ExitCode,
+				TS:       time.Now().UTC(),
+			})
+		}
 
 		return dispatchRunResult{
 			ExitCode:      result.ExitCode,
@@ -262,6 +289,15 @@ func handleKanbanAdd(cfg Config) jsonrpc.Handler {
 		if err := board.Save(boardPath); err != nil {
 			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("kanban.add: save: %v", err)}
 		}
+
+		if cfg.Bus != nil {
+			cfg.Bus.Publish(wsbus.TopicKanbanAdded, wsbus.KanbanAddedPayload{
+				ID:     id,
+				Title:  p.Title,
+				Column: kanban.ColTODO,
+			})
+		}
+
 		return kanbanAddResult{ID: id}, nil
 	}
 }
@@ -318,6 +354,9 @@ func handleKanbanMove(cfg Config) jsonrpc.Handler {
 			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("kanban.move: %v", err)}
 		}
 
+		// Determine the "from" column before mutating.
+		fromCol := columnOfID(board, p.ID)
+
 		if err := board.Move(p.ID, col); err != nil {
 			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("kanban.move: %v", err)}
 		}
@@ -325,6 +364,15 @@ func handleKanbanMove(cfg Config) jsonrpc.Handler {
 		if err := board.Save(boardPath); err != nil {
 			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("kanban.move: save: %v", err)}
 		}
+
+		if cfg.Bus != nil {
+			cfg.Bus.Publish(wsbus.TopicKanbanMoved, wsbus.KanbanMovedPayload{
+				ID:   p.ID,
+				From: fromCol,
+				To:   col,
+			})
+		}
+
 		return kanbanMoveResult{OK: true}, nil
 	}
 }
@@ -355,6 +403,8 @@ func handleKanbanDone(cfg Config) jsonrpc.Handler {
 			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("kanban.done: %v", err)}
 		}
 
+		fromCol := columnOfID(board, p.ID)
+
 		if err := board.Done(p.ID); err != nil {
 			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("kanban.done: %v", err)}
 		}
@@ -362,6 +412,15 @@ func handleKanbanDone(cfg Config) jsonrpc.Handler {
 		if err := board.Save(boardPath); err != nil {
 			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("kanban.done: save: %v", err)}
 		}
+
+		if cfg.Bus != nil {
+			cfg.Bus.Publish(wsbus.TopicKanbanMoved, wsbus.KanbanMovedPayload{
+				ID:   p.ID,
+				From: fromCol,
+				To:   kanban.ColDone,
+			})
+		}
+
 		return kanbanMoveResult{OK: true}, nil
 	}
 }
@@ -425,6 +484,31 @@ func handleKanbanList(cfg Config) jsonrpc.Handler {
 		}
 		return kanbanListResult{Items: items}, nil
 	}
+}
+
+// columnOfID returns the column that currently contains the task with the given
+// ID prefix (e.g. "K-3").  Returns an empty string if the task is not found.
+func columnOfID(board *kanban.Board, id string) string {
+	prefix := id + " "
+	idDash := id + "\xe2\x80\x94" // "K-3—" without space
+	matches := func(items []string) bool {
+		for _, t := range items {
+			if strings.HasPrefix(t, prefix) || strings.HasPrefix(t, idDash) || t == id {
+				return true
+			}
+		}
+		return false
+	}
+	if matches(board.TODOItems) {
+		return kanban.ColTODO
+	}
+	if matches(board.InProgressItems) {
+		return kanban.ColInProgress
+	}
+	if matches(board.DoneItems) {
+		return kanban.ColDone
+	}
+	return ""
 }
 
 // splitKanbanTaskHeader splits "K-N — title" into (id, title).

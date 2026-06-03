@@ -1,0 +1,595 @@
+openapi: "3.1.0"
+info:
+  title: yakOS Daemon REST API
+  description: |
+    Thin REST layer over the yakOS daemon, aimed at IDE extensions whose
+    runtime cannot speak JSON-RPC over a Unix domain socket.
+
+    All endpoints are served on 127.0.0.1:7892 (loopback-only) by default.
+    The daemon starts the REST server alongside the JSON-RPC socket and the
+    WebSocket bus when `yakos serve` is invoked.
+
+    ## Authentication
+
+    Two-token model (per Phase 2 design Q7):
+
+    - **Read token** (`~/.yakos-state/rest-read-token`) — GET endpoints only.
+    - **Write token** (`~/.yakos-state/rest-write-token`) — GET + POST + PATCH.
+
+    Tokens are 32-byte random hex strings (64 characters), auto-generated on
+    first daemon start at mode 0600.  Rotate via `yakos serve --rotate-rest-tokens`.
+
+    Pass the token as `Authorization: Bearer <token>`.
+
+    ## Idempotency
+
+    - `POST /v1/dispatches` is **not idempotent** — each call spawns an agent.
+      Callers should supply an `Idempotency-Key` header if exactly-once semantics
+      are needed (the server does not enforce deduplication in Phase 2).
+    - `POST /v1/kanban/items` creates a new item on each call; the returned `id`
+      is stable per item.
+    - `PATCH /v1/kanban/items/{id}` is idempotent (set operation).
+    - `GET` endpoints are idempotent.
+
+  version: "0.1.0"
+  contact:
+    name: yakOS project
+    url: https://github.com/bakw00ds/yakos
+
+servers:
+  - url: http://127.0.0.1:7892
+    description: Local daemon (loopback only)
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/version:
+    get:
+      operationId: getVersion
+      summary: Return daemon version and Go runtime
+      description: |
+        Returns the running daemon version string and Go runtime version.
+        No authentication required — this endpoint is always public.
+      security: []
+      responses:
+        "200":
+          description: Version info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResponse"
+              example:
+                version: "0.36.0.0 (go)"
+                runtime: "go1.23.12"
+
+  /v1/kanban:
+    get:
+      operationId: listKanban
+      summary: List all kanban board items
+      description: |
+        Returns all items across all columns (TODO, IN PROGRESS, DONE).
+        Requires the read token.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Kanban board items
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KanbanListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/kanban/items:
+    post:
+      operationId: createKanbanItem
+      summary: Create a new kanban item in TODO
+      description: |
+        Appends a new item to the TODO column of the kanban board.
+        Requires the write token.
+
+        **Idempotency:** This endpoint is NOT idempotent — each call creates a
+        new item with a new auto-assigned ID. Supply an `Idempotency-Key` header
+        to document retry intent; the server does not deduplicate in Phase 2.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Optional client-supplied idempotency key (not enforced server-side in Phase 2)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KanbanCreateRequest"
+            example:
+              title: "implement health endpoint"
+              category: "feat"
+      responses:
+        "201":
+          description: Item created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KanbanCreateResponse"
+              example:
+                id: "K-5"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/kanban/items/{id}:
+    patch:
+      operationId: patchKanbanItem
+      summary: Move or update a kanban item
+      description: |
+        Moves an item to a different column or updates its notes.
+        At least one of `column` or `notes` must be provided.
+        This operation is idempotent: moving an item to the column it already
+        occupies is a no-op.
+        Requires the write token.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Kanban item ID, e.g. "K-5"
+          example: "K-5"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KanbanPatchRequest"
+            example:
+              column: "IN PROGRESS"
+      responses:
+        "200":
+          description: Item updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OKResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/dispatches:
+    get:
+      operationId: listDispatches
+      summary: List recent dispatches from the dispatch log
+      description: |
+        Returns dispatch_finished events from dispatch-log.ndjson.
+        Optionally filter by `since` (ISO-8601 timestamp lower bound).
+        Requires the read token.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: ISO-8601 timestamp; only events after this time are returned
+          example: "2026-06-01T00:00:00Z"
+      responses:
+        "200":
+          description: Dispatch list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DispatchesListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    post:
+      operationId: createDispatch
+      summary: Invoke an agent dispatch
+      description: |
+        Runs an agent dispatch synchronously and returns when the runtime exits.
+        This is a blocking call; the runtime timeout applies (default 600s).
+
+        **Idempotency:** This endpoint is NOT idempotent — each call spawns an
+        agent process. Supply an `Idempotency-Key` header to document retry
+        intent; the server does not deduplicate in Phase 2.
+
+        Requires the write token.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DispatchCreateRequest"
+            example:
+              agent: "backend"
+              task: "add a /health endpoint returning 200 OK"
+              runtime: "claude"
+      responses:
+        "202":
+          description: Dispatch completed (exit code may be non-zero)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DispatchCreateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          description: Dispatch runtime error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: yakos_root not configured on daemon
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/cost:
+    get:
+      operationId: getCost
+      summary: Aggregated dispatch cost report
+      description: |
+        Reads dispatch-log.ndjson and returns aggregated cost data.
+        The `by` parameter selects the aggregation axis.
+        Requires the read token.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: by
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [runtime, agent, day, project]
+            default: runtime
+          description: Aggregation axis
+      responses:
+        "200":
+          description: Cost report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CostResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/status:
+    get:
+      operationId: getStatus
+      summary: Project status report
+      description: |
+        Returns the structured status report for the workspace project,
+        identical to `yakos status` output.
+        Requires the read token.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Status report (schema matches internal/status.Report)
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Status report; shape matches internal/status.Report
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/supervise/pending:
+    get:
+      operationId: getSupervisePending
+      summary: List pending supervisor findings
+      description: |
+        Returns unacknowledged escalation findings from the supervisor.
+        Requires the read token.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Pending findings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SupervisePendingResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Use the read token for GET endpoints; use the write token for POST/PATCH.
+        Both tokens are in ~/.yakos-state/ at mode 0600.
+
+  schemas:
+    VersionResponse:
+      type: object
+      required: [version, runtime]
+      properties:
+        version:
+          type: string
+          description: Daemon version string (includes "(go)" suffix)
+          example: "0.36.0.0 (go)"
+        runtime:
+          type: string
+          description: Go runtime version
+          example: "go1.23.12"
+
+    KanbanItem:
+      type: object
+      required: [id, title, column]
+      properties:
+        id:
+          type: string
+          description: Task ID (K-N)
+          example: "K-5"
+        title:
+          type: string
+          description: Task title
+          example: "implement health endpoint"
+        column:
+          type: string
+          enum: [TODO, "IN PROGRESS", DONE]
+          description: Current column
+
+    KanbanListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/KanbanItem"
+
+    KanbanCreateRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          description: Task title (required)
+        column:
+          type: string
+          enum: [TODO, "IN PROGRESS", DONE]
+          description: Target column (default TODO)
+        category:
+          type: string
+          description: Task category (default "other")
+        notes:
+          type: string
+          description: Optional task notes
+
+    KanbanCreateResponse:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: Auto-assigned task ID
+          example: "K-5"
+
+    KanbanPatchRequest:
+      type: object
+      description: At least one field must be present
+      properties:
+        column:
+          type: string
+          enum: [TODO, "IN PROGRESS", DONE]
+          description: Move item to this column
+        notes:
+          type: string
+          description: Replace item notes
+
+    OKResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          example: true
+
+    DispatchRow:
+      type: object
+      properties:
+        ts:
+          type: string
+          format: date-time
+          description: Dispatch timestamp
+        agent:
+          type: string
+          description: Agent name
+        runtime:
+          type: string
+          description: Runtime used
+        exit_code:
+          type: integer
+          description: Process exit code
+        duration_s:
+          type: number
+          format: double
+          description: Wall-clock duration in seconds
+        model_resolved:
+          type: string
+          description: Resolved model tier
+
+    DispatchesListResponse:
+      type: object
+      required: [dispatches]
+      properties:
+        dispatches:
+          type: array
+          items:
+            $ref: "#/components/schemas/DispatchRow"
+
+    DispatchCreateRequest:
+      type: object
+      required: [agent, task]
+      properties:
+        agent:
+          type: string
+          description: Agent identifier
+          example: "backend"
+        task:
+          type: string
+          description: Task prompt passed to the agent
+          example: "add a /health endpoint"
+        runtime:
+          type: string
+          enum: [claude, codex, gemini, agy]
+          description: Runtime override (empty = resolve from frontmatter)
+        model:
+          type: string
+          enum: [haiku, sonnet, opus]
+          description: Model tier override
+        timeout:
+          type: integer
+          description: Timeout in seconds (0 = 600s default)
+
+    DispatchCreateResponse:
+      type: object
+      required: [exit_code, duration_s, model_resolved]
+      properties:
+        exit_code:
+          type: integer
+          description: Runtime process exit code (0 = success)
+        duration_s:
+          type: number
+          format: double
+          description: Wall-clock duration in seconds
+        model_resolved:
+          type: string
+          description: Concrete model tier used
+
+    CostRow:
+      type: object
+      properties:
+        Key:
+          type: string
+          description: Aggregation key (agent name, runtime, date, or project)
+        Count:
+          type: integer
+          format: int64
+        OK:
+          type: integer
+          format: int64
+        Fail:
+          type: integer
+          format: int64
+        TotalDurationS:
+          type: number
+          format: double
+        TotalInTokens:
+          type: integer
+          format: int64
+        TotalOutTokens:
+          type: integer
+          format: int64
+
+    CostResponse:
+      type: object
+      required: [by, rows]
+      properties:
+        by:
+          type: string
+          enum: [runtime, agent, day, project]
+          description: Aggregation axis used
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/CostRow"
+
+    SupervisePendingResponse:
+      type: object
+      required: [pending_count, output]
+      properties:
+        pending_count:
+          type: integer
+          description: Number of unacknowledged escalation findings
+        output:
+          type: string
+          description: Human-readable pending findings text
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Error description
+
+  responses:
+    Unauthorized:
+      description: Missing or malformed Authorization header
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "missing Authorization: Bearer token"
+    Forbidden:
+      description: Token present but insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "insufficient token permissions"
+    BadRequest:
+      description: Invalid request body or parameters
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "kanban.move: task K-99 not found"
