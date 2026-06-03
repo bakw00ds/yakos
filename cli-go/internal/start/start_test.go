@@ -1,0 +1,589 @@
+package start
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// ---- fixtures ---------------------------------------------------------------
+
+// newFakeProject creates a minimal ~/agent-control/<name>/ layout in a temp dir
+// and returns (home, controlDir, projectRepo).
+func newFakeProject(t *testing.T, name string) (home, controlDir, projectRepo string) {
+	t.Helper()
+	home = t.TempDir()
+	controlDir = filepath.Join(home, "agent-control", name)
+	projectRepo = t.TempDir() // separate temp dir for the project repo
+
+	if err := os.MkdirAll(controlDir, 0755); err != nil {
+		t.Fatalf("mkdir controlDir: %v", err)
+	}
+	// Write .project-path
+	if err := os.WriteFile(
+		filepath.Join(controlDir, ".project-path"),
+		[]byte(projectRepo+"\n"),
+		0644,
+	); err != nil {
+		t.Fatalf("write .project-path: %v", err)
+	}
+	// Create work/current/ so audit-log writes don't fail.
+	if err := os.MkdirAll(filepath.Join(controlDir, "work", "current"), 0755); err != nil {
+		t.Fatalf("mkdir work/current: %v", err)
+	}
+	return home, controlDir, projectRepo
+}
+
+// execCapture returns an ExecFn that records the first call's argv into called
+// and returns nil (simulating successful exec).
+func execCapture(called *[]string) func(string, []string, []string) error {
+	return func(argv0 string, argv []string, env []string) error {
+		*called = append(*called, argv...)
+		return nil
+	}
+}
+
+// ---- (a) dry-run: claude ----------------------------------------------------
+
+func TestRun_DryRun_Claude(t *testing.T) {
+	home, _, projectRepo := newFakeProject(t, "myapp")
+
+	var stdout, stderr bytes.Buffer
+	cfg := Config{
+		Name:      "myapp",
+		HomeDir:   home,
+		Runtime:   "claude",
+		DryRun:    true,
+		NoAgents:  true, // skip agent compose
+		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:    &stdout,
+		ErrWriter: &stderr,
+		Env:       map[string]string{"HOME": home},
+	}
+
+	banner, err := Run(cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if banner.DryRunCmd == "" {
+		t.Error("expected DryRunCmd to be non-empty")
+	}
+	if !strings.Contains(banner.DryRunCmd, "claude") {
+		t.Errorf("DryRunCmd should mention claude; got: %s", banner.DryRunCmd)
+	}
+	if !strings.Contains(banner.DryRunCmd, projectRepo) {
+		t.Errorf("DryRunCmd should mention projectRepo; got: %s", banner.DryRunCmd)
+	}
+	// Banner should have been printed.
+	out := stdout.String()
+	if !strings.Contains(out, "yakos start") {
+		t.Errorf("stdout should contain 'yakos start'; got:\n%s", out)
+	}
+	if !strings.Contains(out, "myapp") {
+		t.Errorf("stdout should contain project name 'myapp'; got:\n%s", out)
+	}
+	if !strings.Contains(out, "lead-dispatch-discipline") {
+		t.Errorf("stdout should contain lead-dispatch-discipline reminder; got:\n%s", out)
+	}
+}
+
+// ---- (b) dry-run: codex -----------------------------------------------------
+
+func TestRun_DryRun_Codex(t *testing.T) {
+	home, _, _ := newFakeProject(t, "codexapp")
+
+	var stdout bytes.Buffer
+	cfg := Config{
+		Name:      "codexapp",
+		HomeDir:   home,
+		Runtime:   "codex",
+		DryRun:    true,
+		NoAgents:  true,
+		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:    &stdout,
+		ErrWriter: &bytes.Buffer{},
+		Env:       map[string]string{"HOME": home},
+	}
+
+	banner, err := Run(cfg)
+	if err != nil {
+		t.Fatalf("Run (codex dry-run): %v", err)
+	}
+	if !strings.Contains(banner.DryRunCmd, "codex") {
+		t.Errorf("DryRunCmd should mention codex; got: %s", banner.DryRunCmd)
+	}
+	if !strings.Contains(banner.DryRunCmd, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Errorf("DryRunCmd should contain bypass flag; got: %s", banner.DryRunCmd)
+	}
+}
+
+// ---- (c) safe mode: codex ---------------------------------------------------
+
+func TestRun_DryRun_Codex_Safe(t *testing.T) {
+	home, _, _ := newFakeProject(t, "safeapp")
+
+	var stdout bytes.Buffer
+	cfg := Config{
+		Name:      "safeapp",
+		HomeDir:   home,
+		Runtime:   "codex",
+		DryRun:    true,
+		NoAgents:  true,
+		Safe:      true,
+		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:    &stdout,
+		ErrWriter: &bytes.Buffer{},
+		Env:       map[string]string{"HOME": home},
+	}
+
+	banner, err := Run(cfg)
+	if err != nil {
+		t.Fatalf("Run (safe): %v", err)
+	}
+	if strings.Contains(banner.DryRunCmd, "bypass") {
+		t.Errorf("safe mode DryRunCmd should not contain bypass; got: %s", banner.DryRunCmd)
+	}
+}
+
+// ---- (d) exec capture: builds correct argv ----------------------------------
+
+func TestRun_Exec_ClaudeArgv(t *testing.T) {
+	home, _, projectRepo := newFakeProject(t, "execapp")
+
+	var called []string
+	cfg := Config{
+		Name:      "execapp",
+		HomeDir:   home,
+		Runtime:   "claude",
+		NoAgents:  true,
+		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:    &bytes.Buffer{},
+		ErrWriter: &bytes.Buffer{},
+		Env:       map[string]string{"HOME": home, "PATH": os.Getenv("PATH")},
+		ExecFn:    execCapture(&called),
+	}
+
+	// Skip if claude is not on PATH (CI may not have it).
+	if _, err := os.Stat("/usr/bin/claude"); os.IsNotExist(err) {
+		if _, err2 := findInPATH("claude"); err2 != nil {
+			t.Skip("claude not on PATH; skipping exec-argv test")
+		}
+	}
+
+	_, err := Run(cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(called) == 0 {
+		t.Fatal("ExecFn was not called")
+	}
+	// argv[0] should be the binary name.
+	if !strings.Contains(called[0], "claude") {
+		t.Errorf("argv[0] should be claude binary; got %q", called[0])
+	}
+	// Should include --add-dir.
+	found := false
+	for i, a := range called {
+		if a == "--add-dir" && i+1 < len(called) && called[i+1] == projectRepo {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("argv should contain '--add-dir %s'; got %v", projectRepo, called)
+	}
+}
+
+// ---- (e) audit log written --------------------------------------------------
+
+func TestRun_AuditLog_Written(t *testing.T) {
+	home, controlDir, _ := newFakeProject(t, "auditapp")
+
+	var execCalled []string
+	cfg := Config{
+		Name:      "auditapp",
+		HomeDir:   home,
+		Runtime:   "claude",
+		NoAgents:  true,
+		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:    &bytes.Buffer{},
+		ErrWriter: &bytes.Buffer{},
+		Env:       map[string]string{"HOME": home, "PATH": os.Getenv("PATH")},
+		ExecFn:    execCapture(&execCalled),
+	}
+
+	if _, err := findInPATH("claude"); err != nil {
+		t.Skip("claude not on PATH; skipping audit-log test")
+	}
+
+	_, err := Run(cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	histFile := filepath.Join(controlDir, "work", "current", ".session-started-history.ndjson")
+	data, err := os.ReadFile(histFile)
+	if err != nil {
+		t.Fatalf("session history not written: %v", err)
+	}
+	if !strings.Contains(string(data), `"session_launched"`) {
+		t.Errorf("session history should contain session_launched event; got: %s", data)
+	}
+}
+
+// ---- (f) missing project → error -------------------------------------------
+
+func TestRun_MissingProject(t *testing.T) {
+	home := t.TempDir()
+	cfg := Config{
+		Name:      "nonexistent",
+		HomeDir:   home,
+		Runtime:   "claude",
+		NoAgents:  true,
+		Writer:    &bytes.Buffer{},
+		ErrWriter: &bytes.Buffer{},
+		Env:       map[string]string{"HOME": home},
+	}
+
+	_, err := Run(cfg)
+	if err == nil {
+		t.Fatal("expected error for missing project; got nil")
+	}
+	if !strings.Contains(err.Error(), "not bootstrapped") {
+		t.Errorf("error should mention 'not bootstrapped'; got: %v", err)
+	}
+}
+
+// ---- (g) unknown runtime → error -------------------------------------------
+
+func TestRun_UnknownRuntime(t *testing.T) {
+	home, _, _ := newFakeProject(t, "rtapp")
+
+	cfg := Config{
+		Name:      "rtapp",
+		HomeDir:   home,
+		Runtime:   "badruntime",
+		NoAgents:  true,
+		Writer:    &bytes.Buffer{},
+		ErrWriter: &bytes.Buffer{},
+		Env:       map[string]string{"HOME": home},
+	}
+
+	_, err := Run(cfg)
+	if err == nil {
+		t.Fatal("expected error for unknown runtime; got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown runtime") {
+		t.Errorf("error should mention 'unknown runtime'; got: %v", err)
+	}
+}
+
+// ---- (h) invalid name → error -----------------------------------------------
+
+func TestRun_InvalidName(t *testing.T) {
+	home := t.TempDir()
+	cfg := Config{
+		Name:      "bad name!",
+		HomeDir:   home,
+		Runtime:   "claude",
+		NoAgents:  true,
+		Writer:    &bytes.Buffer{},
+		ErrWriter: &bytes.Buffer{},
+		Env:       map[string]string{"HOME": home},
+	}
+
+	_, err := Run(cfg)
+	if err == nil {
+		t.Fatal("expected error for invalid name; got nil")
+	}
+	if !strings.Contains(err.Error(), "alphanumeric") {
+		t.Errorf("error should mention 'alphanumeric'; got: %v", err)
+	}
+}
+
+// ---- (i) banner contains all expected fields --------------------------------
+
+func TestRun_BannerFields(t *testing.T) {
+	home, _, projectRepo := newFakeProject(t, "bannerapp")
+
+	var stdout bytes.Buffer
+	cfg := Config{
+		Name:      "bannerapp",
+		HomeDir:   home,
+		Runtime:   "claude",
+		DryRun:    true,
+		NoAgents:  true,
+		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:    &stdout,
+		ErrWriter: &bytes.Buffer{},
+		Env:       map[string]string{"HOME": home},
+	}
+
+	_, err := Run(cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"yakos start — preflight",
+		"project:        bannerapp",
+		"repo:           " + projectRepo,
+		"runtime:        claude",
+		"cli:",
+		"auth:",
+		"permission:",
+		"agents:",
+		"mode flags:",
+		"lead = decompose / integrate / supervise",
+		"sequential only when the next task depends on the previous",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("banner missing %q;\nfull output:\n%s", want, out)
+		}
+	}
+}
+
+// ---- (j) mode flags label ---------------------------------------------------
+
+func TestBuildModeFlags(t *testing.T) {
+	cases := []struct {
+		cfg  Config
+		want string
+	}{
+		{Config{}, ""},
+		{Config{Bare: true}, "bare"},
+		{Config{IDE: true}, "ide"},
+		{Config{Continue: true}, "continue"},
+		{Config{Resume: "abc123"}, "resume=abc123"},
+		{Config{Fork: true}, "fork"},
+		{Config{Model: "haiku"}, "model=haiku"},
+		{Config{Bare: true, IDE: true, Continue: true}, "bare ide continue"},
+	}
+
+	for _, tc := range cases {
+		got := buildModeFlags(tc.cfg)
+		if got != tc.want {
+			t.Errorf("buildModeFlags(%+v) = %q; want %q", tc.cfg, got, tc.want)
+		}
+	}
+}
+
+// ---- (k) runtime capabilities -----------------------------------------------
+
+func TestRuntimeCapabilities(t *testing.T) {
+	cases := map[string]string{
+		"claude":          "interactive,headless,fork-headless,resume",
+		"claude-sdk":      "interactive,headless,fork-headless,resume",
+		"codex":           "interactive,headless",
+		"agy":             "interactive,headless,resume",
+		"antigravity-sdk": "interactive,headless,resume",
+		"gemini":          "interactive,headless",
+	}
+	for rt, want := range cases {
+		got := runtimeCapabilities(rt)
+		if got != want {
+			t.Errorf("runtimeCapabilities(%q) = %q; want %q", rt, got, want)
+		}
+	}
+}
+
+// ---- (l) known runtimes list ------------------------------------------------
+
+func TestKnownRuntimes(t *testing.T) {
+	for _, rt := range []string{"claude", "codex", "gemini", "agy"} {
+		if !isKnownRuntime(rt) {
+			t.Errorf("isKnownRuntime(%q) = false; want true", rt)
+		}
+	}
+	if isKnownRuntime("badruntime") {
+		t.Error("isKnownRuntime(badruntime) = true; want false")
+	}
+}
+
+// ---- (m) resolveDefaultRuntime: YAKOS_RUNTIME env --------------------------
+
+func TestResolveDefaultRuntime_Env(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{
+		"HOME":          home,
+		"YAKOS_RUNTIME": "codex",
+	}
+	got := resolveDefaultRuntime(home, env)
+	if got != "codex" {
+		t.Errorf("expected codex; got %q", got)
+	}
+}
+
+// ---- (n) resolveDefaultRuntime: default-runtime file -----------------------
+
+func TestResolveDefaultRuntime_File(t *testing.T) {
+	home := t.TempDir()
+	stateDir := filepath.Join(home, ".yakos-state")
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "default-runtime"), []byte("agy\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := resolveDefaultRuntime(home, map[string]string{"HOME": home})
+	if got != "agy" {
+		t.Errorf("expected agy; got %q", got)
+	}
+}
+
+// ---- (o) resolveDefaultRuntime: fallback ------------------------------------
+
+func TestResolveDefaultRuntime_Fallback(t *testing.T) {
+	home := t.TempDir()
+	got := resolveDefaultRuntime(home, map[string]string{"HOME": home})
+	if got != "claude" {
+		t.Errorf("expected claude fallback; got %q", got)
+	}
+}
+
+// ---- (p) audit event JSON ---------------------------------------------------
+
+func TestBuildAuditEvent(t *testing.T) {
+	ev, err := buildAuditEvent("2026-06-02T12:00:00Z", "myapp", "/repo", "claude", "bypass", 3)
+	if err != nil {
+		t.Fatalf("buildAuditEvent: %v", err)
+	}
+	for _, want := range []string{
+		`"session_launched"`,
+		`"myapp"`,
+		`"claude"`,
+		`"bypass"`,
+		`"agent_count":3`,
+	} {
+		if !strings.Contains(ev, want) {
+			t.Errorf("audit event missing %q; got: %s", want, ev)
+		}
+	}
+}
+
+// ---- (q) appendAuditLine: missing parent dir is a no-op --------------------
+
+func TestAppendAuditLine_MissingDir(t *testing.T) {
+	// Should not panic or create the file.
+	appendAuditLine("/no/such/dir/file.ndjson", `{"test":1}`)
+	if _, err := os.Stat("/no/such/dir/file.ndjson"); !os.IsNotExist(err) {
+		t.Error("appendAuditLine should not create parent directories")
+	}
+}
+
+// ---- (r) PrintHelp covers key phrases --------------------------------------
+
+func TestPrintHelp(t *testing.T) {
+	var buf bytes.Buffer
+	PrintHelp(&buf)
+	got := buf.String()
+
+	for _, phrase := range []string{
+		"yakos start",
+		"--runtime",
+		"--safe",
+		"--dry-run",
+		"--no-agents",
+		"--continue",
+		"--resume",
+		"--model",
+		"claude",
+		"codex",
+		"gemini",
+	} {
+		if !strings.Contains(got, phrase) {
+			t.Errorf("help text missing %q;\nfull output:\n%s", phrase, got)
+		}
+	}
+}
+
+// ---- (s) inferName from YAKOS_PROJECT_NAME ----------------------------------
+
+func TestInferName_FromEnv(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{
+		"HOME":               home,
+		"YAKOS_PROJECT_NAME": "envproject",
+	}
+	got, err := inferName(home, env)
+	if err != nil {
+		t.Fatalf("inferName: %v", err)
+	}
+	if got != "envproject" {
+		t.Errorf("expected 'envproject'; got %q", got)
+	}
+}
+
+// ---- (t) dry-run with allow-root -------------------------------------------
+
+func TestRun_DryRun_AllowRoot(t *testing.T) {
+	home, _, _ := newFakeProject(t, "rootapp")
+
+	var stdout bytes.Buffer
+	cfg := Config{
+		Name:      "rootapp",
+		HomeDir:   home,
+		Runtime:   "claude",
+		DryRun:    true,
+		NoAgents:  true,
+		AllowRoot: true,
+		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:    &stdout,
+		ErrWriter: &bytes.Buffer{},
+		Env:       map[string]string{"HOME": home},
+	}
+
+	banner, err := Run(cfg)
+	if err != nil {
+		t.Fatalf("Run (allow-root): %v", err)
+	}
+	if !strings.Contains(banner.DryRunCmd, "IS_SANDBOX=1") {
+		t.Errorf("allow-root dry-run should include IS_SANDBOX=1; got: %s", banner.DryRunCmd)
+	}
+	// Banner should show (allow-root) in permission line.
+	out := stdout.String()
+	if !strings.Contains(out, "allow-root") {
+		t.Errorf("banner should show 'allow-root'; got:\n%s", out)
+	}
+}
+
+// ---- (u) soft-degrade: IDE flag for non-claude runtime ---------------------
+
+func TestRun_DryRun_IDEWarnNonClaude(t *testing.T) {
+	home, _, _ := newFakeProject(t, "ideapp")
+
+	var stderr bytes.Buffer
+	cfg := Config{
+		Name:      "ideapp",
+		HomeDir:   home,
+		Runtime:   "codex",
+		DryRun:    true,
+		NoAgents:  true,
+		IDE:       true,
+		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:    &bytes.Buffer{},
+		ErrWriter: &stderr,
+		Env:       map[string]string{"HOME": home},
+	}
+
+	_, err := Run(cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "--ide is claude-specific") {
+		t.Errorf("expected warn about --ide; got: %s", stderr.String())
+	}
+}
+
+// ---- helpers ----------------------------------------------------------------
+
+// findInPATH is a test-only helper: returns the PATH env value and nil error.
+// Used only in skip guards to check whether a binary might be on PATH.
+func findInPATH(binary string) (string, error) {
+	p, _ := os.LookupEnv("PATH")
+	return p, nil // simplified check used in skip guards
+}
