@@ -60,9 +60,10 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 // team (rank 9), archive (rank 10), init (rank 11), install (rank 12),
 // uninstall (rank 13), start (rank 14), update (rank 15), quickstart (rank 16),
 // auth (rank 17), memory (rank 18), agent (rank 19), session (rank 20),
-// migrate (rank 21), plugin (rank 22), teach (rank 23), soul (rank 24).
+// migrate (rank 21), plugin (rank 22), teach (rank 23), soul (rank 24),
+// retro (rank 25).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 23
+	const want = 24
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
@@ -302,6 +303,16 @@ func TestSoulCommandEntry(t *testing.T) {
 		}
 	}
 	t.Error("expected 'soul' in portedCommands; not found")
+}
+
+// TestRetroCommandEntry asserts that "retro" is in the ported list.
+func TestRetroCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "retro" {
+			return
+		}
+	}
+	t.Error("expected 'retro' in portedCommands; not found")
 }
 
 // TestPortedCommandStruct verifies the portedCommand struct has the expected

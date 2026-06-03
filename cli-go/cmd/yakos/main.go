@@ -38,6 +38,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/plugin"
 	"github.com/bakw00ds/yakos/internal/quickstart"
 	"github.com/bakw00ds/yakos/internal/refresh"
+	"github.com/bakw00ds/yakos/internal/retro"
 	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/session"
 	"github.com/bakw00ds/yakos/internal/soul"
@@ -78,6 +79,7 @@ var portedCommands = []portedCommand{
 	{Name: "plugin", Since: "0.57.0", Notes: "full feature parity with cli/lib/plugin.sh; list/install/remove/validate/register/status subcommands; git URL + local-path install; function-header validation; rollback on failure; built-in id guard"},
 	{Name: "teach", Since: "0.58.0", Notes: "full feature parity with cli/lib/teach.sh; appends dated lesson bullets to project agent files under ## Lessons learned; --project/--section/--dry-run; atomic temp-rename writes; backup before edit"},
 	{Name: "soul", Since: "0.59.0", Notes: "full feature parity with cli/lib/soul.sh; show/edit/history/revert/pending subcommands; approve/reject print not-yet-implemented (M1 scope); two-layer (global/project) soul files; atomic writes; snapshot-before-edit; template seeding from lib/settings/soul.template.md"},
+	{Name: "retro", Since: "0.60.0", Notes: "full feature parity with cli/lib/retro.sh; now/disable/enable/status/last/history subcommands; sentinel flag at ~/.yakos-state/retro-disabled; atomic writes (Q8 temp-rename); .retro-due marker written by 'now'; session resolution via ProjectDir cfg override or YAKOS_PROJECT_NAME env or agent-control walk"},
 }
 
 type portedCommand struct {
@@ -165,6 +167,8 @@ func main() {
 		runTeach(args[1:])
 	case "soul":
 		runSoul(yakosRoot, args[1:])
+	case "retro":
+		runRetro(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -3109,6 +3113,45 @@ func runSoul(yakosRoot string, args []string) {
 
 	if _, err := soul.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "soul: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runRetro implements `yakos retro` natively in Go.
+//
+// Usage mirrors cli/lib/retro.sh exactly:
+//
+//	yakos retro now           — write .retro-due marker (manual trigger)
+//	yakos retro disable       — disable auto-trigger (counter still increments)
+//	yakos retro enable        — re-enable auto-trigger
+//	yakos retro status        — current state
+//	yakos retro last          — show last retro outputs from scratchpad
+//	yakos retro history       — cadence stats from cycle-counter logs
+//
+// State (enabled/disabled) is stored as a sentinel file at
+// ~/.yakos-state/retro-disabled. Present = disabled; absent = enabled.
+func runRetro(args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		retro.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := retro.Config{
+		Subcommand: sub,
+		HomeDir:    home,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	if _, err := retro.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "retro: %v\n", err)
 		os.Exit(1)
 	}
 }
