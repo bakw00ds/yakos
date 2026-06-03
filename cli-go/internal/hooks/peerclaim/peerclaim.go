@@ -428,11 +428,15 @@ func (h *Hook) toRelative(filePath string, in hooktype.HookInput) string {
 	if projectDir == "" {
 		projectDir = in.Env["CLAUDE_PROJECT_DIR"]
 	}
-	sep := string(filepath.Separator)
-	if projectDir != "" && strings.HasPrefix(filePath, projectDir+sep) {
-		return filePath[len(projectDir)+1:]
+	// Normalise both paths to forward slashes so the result is a portable
+	// claim key regardless of OS. Claim records are always written with "/"
+	// separators; matching must use the same form.
+	fileSlash := filepath.ToSlash(filePath)
+	projSlash := filepath.ToSlash(projectDir)
+	if projSlash != "" && strings.HasPrefix(fileSlash, projSlash+"/") {
+		return fileSlash[len(projSlash)+1:]
 	}
-	return filePath
+	return fileSlash
 }
 
 func (h *Hook) resolveUser(in hooktype.HookInput) string {

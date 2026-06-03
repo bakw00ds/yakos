@@ -115,7 +115,10 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 	if pct >= warningPct {
 		// Auto-checkpoint.
-		checkpointDir := filepath.Join(h.WorkCurrentDir, "checkpoints", ts)
+		// Replace colons in the ISO timestamp so the directory name is legal on
+		// Windows (colons are forbidden in path components there).
+		checkpointDirName := strings.ReplaceAll(ts, ":", "-")
+		checkpointDir := filepath.Join(h.WorkCurrentDir, "checkpoints", checkpointDirName)
 		if err := os.MkdirAll(checkpointDir, 0755); err == nil { //nolint:gosec
 			for _, f := range []string{"plan.md", "contracts.md", "decisions.md", "status.md"} {
 				src := filepath.Join(h.WorkCurrentDir, f)

@@ -85,11 +85,13 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	// Make path repo-relative for matching.
+	// Normalise to forward slashes so glob patterns (which always use "/")
+	// match correctly on Windows where filepath.Join produces backslashes.
 	projectDir := h.resolveProjectDir(in)
-	relFile := filePath
-	sep := string(filepath.Separator)
-	if projectDir != "" && strings.HasPrefix(filePath, projectDir+sep) {
-		relFile = filePath[len(projectDir)+1:]
+	relFile := filepath.ToSlash(filePath)
+	projSlash := filepath.ToSlash(projectDir)
+	if projSlash != "" && strings.HasPrefix(relFile, projSlash+"/") {
+		relFile = relFile[len(projSlash)+1:]
 	}
 
 	// Load the allowlist.
@@ -167,7 +169,17 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 // globMatch returns true if g matches p using filepath.Match semantics,
 // with a v0.1 simplification: '**' is collapsed to '*' (parity with bash
 // implementation).
+//
+// Both g and p are expected to use forward slashes (callers normalise via
+// filepath.ToSlash before calling). We use path.Match (not filepath.Match) so
+// the separator is always "/" regardless of the host OS, making glob patterns
+// platform-agnostic.
 func globMatch(g, p string) bool {
+	// Normalise to forward slashes so patterns defined with "/" match on
+	// Windows where paths might still contain backslashes.
+	g = filepath.ToSlash(g)
+	p = filepath.ToSlash(p)
+
 	// Direct match.
 	if ok, _ := filepath.Match(g, p); ok {
 		return true
