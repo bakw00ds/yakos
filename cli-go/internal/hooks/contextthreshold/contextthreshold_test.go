@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/hooks/contextthreshold"
+	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
 var fixedTime = time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
@@ -46,6 +46,20 @@ func writeSettings(t *testing.T, stateDir string, notice, warning int) {
 	t.Helper()
 	_ = os.MkdirAll(stateDir, 0755)
 	content := `{"context_thresholds":{"notice":` + itoa(notice) + `,"warning":` + itoa(warning) + `}}`
+	_ = os.WriteFile(filepath.Join(stateDir, "settings.json"), []byte(content), 0644)
+}
+
+func writeSettingsWithAuto(t *testing.T, stateDir string, notice, warning, auto int) {
+	t.Helper()
+	_ = os.MkdirAll(stateDir, 0755)
+	content := `{"context_thresholds":{"notice":` + itoa(notice) + `,"warning":` + itoa(warning) + `,"auto":` + itoa(auto) + `}}`
+	_ = os.WriteFile(filepath.Join(stateDir, "settings.json"), []byte(content), 0644)
+}
+
+func writeSettingsWithAutoDisabled(t *testing.T, stateDir string, notice, warning, auto int) {
+	t.Helper()
+	_ = os.MkdirAll(stateDir, 0755)
+	content := `{"context_thresholds":{"notice":` + itoa(notice) + `,"warning":` + itoa(warning) + `,"auto":` + itoa(auto) + `},"compact_auto_disabled":true}`
 	_ = os.WriteFile(filepath.Join(stateDir, "settings.json"), []byte(content), 0644)
 }
 
@@ -375,5 +389,222 @@ func TestContextThreshold_SettingsNoticeOverride(t *testing.T) {
 	// probe_unavailable because no transcript, but settings were read.
 	if rec["action"] == nil {
 		t.Error("expected log entry")
+	}
+}
+
+// ---- auto-compact threshold tests -------------------------------------------
+
+func TestContextThreshold_AutoCompact_MarkerWrittenWhenThresholdCrossed(t *testing.T) {
+	work := t.TempDir()
+	home := t.TempDir()
+	proj := t.TempDir()
+	stateDir := t.TempDir()
+	sessionID := "sess-auto-1"
+	// Set auto-compact threshold very low (1%) so a small file crosses it.
+	writeSettingsWithAuto(t, stateDir, 75, 90, 1)
+	writeClaudeTranscript(t, home, proj, sessionID, 500_000) // large enough to cross 1%
+
+	h := &contextthreshold.Hook{
+		WorkCurrentDir: work,
+		HomeDir:        home,
+		StateDir:       stateDir,
+		NowFn:          fixedNow,
+	}
+	in := hooktype.HookInput{
+		Env: map[string]string{
+			"YAKOS_RUNTIME":      "claude",
+			"CLAUDE_SESSION_ID":  sessionID,
+			"CLAUDE_PROJECT_DIR": proj,
+		},
+	}
+	out, err := h.Run(context.Background(), in)
+	if err != nil || out.ExitCode != 0 {
+		t.Fatalf("err=%v code=%d", err, out.ExitCode)
+	}
+	markerPath := filepath.Join(work, contextthreshold.CompactPendingMarker)
+	if _, err := os.Stat(markerPath); os.IsNotExist(err) {
+		t.Error("expected .compact-pending marker to be written when auto threshold crossed")
+	}
+}
+
+func TestContextThreshold_AutoCompact_NoMarkerWhenBelowThreshold(t *testing.T) {
+	work := t.TempDir()
+	home := t.TempDir()
+	proj := t.TempDir()
+	stateDir := t.TempDir()
+	sessionID := "sess-auto-2"
+	// Set auto-compact threshold very high (99%) so a small file does not cross it.
+	writeSettingsWithAuto(t, stateDir, 75, 90, 99)
+	writeClaudeTranscript(t, home, proj, sessionID, 500) // tiny transcript
+
+	h := &contextthreshold.Hook{
+		WorkCurrentDir: work,
+		HomeDir:        home,
+		StateDir:       stateDir,
+		NowFn:          fixedNow,
+	}
+	in := hooktype.HookInput{
+		Env: map[string]string{
+			"YAKOS_RUNTIME":      "claude",
+			"CLAUDE_SESSION_ID":  sessionID,
+			"CLAUDE_PROJECT_DIR": proj,
+		},
+	}
+	out, err := h.Run(context.Background(), in)
+	if err != nil || out.ExitCode != 0 {
+		t.Fatalf("err=%v code=%d", err, out.ExitCode)
+	}
+	markerPath := filepath.Join(work, contextthreshold.CompactPendingMarker)
+	if _, statErr := os.Stat(markerPath); !os.IsNotExist(statErr) {
+		t.Error("expected NO .compact-pending marker when below auto threshold")
+	}
+}
+
+func TestContextThreshold_AutoCompact_NoMarkerWhenAutoZero(t *testing.T) {
+	// When auto threshold is not set (0), no marker should be written.
+	work := t.TempDir()
+	home := t.TempDir()
+	proj := t.TempDir()
+	stateDir := t.TempDir()
+	sessionID := "sess-auto-3"
+	writeSettings(t, stateDir, 1, 2) // notice+warning very low but no auto
+	writeClaudeTranscript(t, home, proj, sessionID, 5_000_000)
+
+	h := &contextthreshold.Hook{
+		WorkCurrentDir: work,
+		HomeDir:        home,
+		StateDir:       stateDir,
+		NowFn:          fixedNow,
+	}
+	in := hooktype.HookInput{
+		Env: map[string]string{
+			"YAKOS_RUNTIME":      "claude",
+			"CLAUDE_SESSION_ID":  sessionID,
+			"CLAUDE_PROJECT_DIR": proj,
+		},
+	}
+	_, _ = h.Run(context.Background(), in)
+	markerPath := filepath.Join(work, contextthreshold.CompactPendingMarker)
+	if _, statErr := os.Stat(markerPath); !os.IsNotExist(statErr) {
+		t.Error("expected NO .compact-pending marker when auto threshold is 0 (disabled by default)")
+	}
+}
+
+func TestContextThreshold_AutoCompact_DisabledBySentinel(t *testing.T) {
+	work := t.TempDir()
+	home := t.TempDir()
+	proj := t.TempDir()
+	stateDir := t.TempDir()
+	sessionID := "sess-auto-4"
+	// Threshold is set but compact_auto_disabled: true suppresses the marker.
+	writeSettingsWithAutoDisabled(t, stateDir, 1, 2, 1)
+	writeClaudeTranscript(t, home, proj, sessionID, 5_000_000)
+
+	h := &contextthreshold.Hook{
+		WorkCurrentDir: work,
+		HomeDir:        home,
+		StateDir:       stateDir,
+		NowFn:          fixedNow,
+	}
+	in := hooktype.HookInput{
+		Env: map[string]string{
+			"YAKOS_RUNTIME":      "claude",
+			"CLAUDE_SESSION_ID":  sessionID,
+			"CLAUDE_PROJECT_DIR": proj,
+		},
+	}
+	_, _ = h.Run(context.Background(), in)
+	markerPath := filepath.Join(work, contextthreshold.CompactPendingMarker)
+	if _, statErr := os.Stat(markerPath); !os.IsNotExist(statErr) {
+		t.Error("expected NO .compact-pending marker when compact_auto_disabled is true")
+	}
+}
+
+func TestContextThreshold_AutoCompact_MarkerContainsTimestamp(t *testing.T) {
+	work := t.TempDir()
+	home := t.TempDir()
+	proj := t.TempDir()
+	stateDir := t.TempDir()
+	sessionID := "sess-auto-5"
+	writeSettingsWithAuto(t, stateDir, 75, 90, 1)
+	writeClaudeTranscript(t, home, proj, sessionID, 500_000)
+
+	h := &contextthreshold.Hook{
+		WorkCurrentDir: work,
+		HomeDir:        home,
+		StateDir:       stateDir,
+		NowFn:          fixedNow,
+	}
+	in := hooktype.HookInput{
+		Env: map[string]string{
+			"YAKOS_RUNTIME":      "claude",
+			"CLAUDE_SESSION_ID":  sessionID,
+			"CLAUDE_PROJECT_DIR": proj,
+		},
+	}
+	_, _ = h.Run(context.Background(), in)
+	markerPath := filepath.Join(work, contextthreshold.CompactPendingMarker)
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if !strings.Contains(string(data), "2026-01-15T10:00:00Z") {
+		t.Errorf("marker should contain fixed timestamp; got: %q", string(data))
+	}
+}
+
+func TestContextThreshold_AutoCompact_DefaultCompactPctValue(t *testing.T) {
+	if contextthreshold.DefaultCompactPct != 85 {
+		t.Errorf("DefaultCompactPct should be 85; got %d", contextthreshold.DefaultCompactPct)
+	}
+}
+
+func TestContextThreshold_AutoCompact_CompactPendingMarkerName(t *testing.T) {
+	if contextthreshold.CompactPendingMarker != ".compact-pending" {
+		t.Errorf("CompactPendingMarker should be '.compact-pending'; got %q", contextthreshold.CompactPendingMarker)
+	}
+}
+
+func TestContextThreshold_AutoCompact_LogIncludesAutoField(t *testing.T) {
+	work := t.TempDir()
+	home := t.TempDir()
+	proj := t.TempDir()
+	stateDir := t.TempDir()
+	sessionID := "sess-auto-6"
+	writeSettingsWithAuto(t, stateDir, 75, 90, 1)
+	writeClaudeTranscript(t, home, proj, sessionID, 500_000)
+
+	h := &contextthreshold.Hook{
+		WorkCurrentDir: work,
+		HomeDir:        home,
+		StateDir:       stateDir,
+		NowFn:          fixedNow,
+	}
+	in := hooktype.HookInput{
+		Env: map[string]string{
+			"YAKOS_RUNTIME":      "claude",
+			"CLAUDE_SESSION_ID":  sessionID,
+			"CLAUDE_PROJECT_DIR": proj,
+		},
+	}
+	_, _ = h.Run(context.Background(), in)
+	rec := readLastLog(t, filepath.Join(work, "logs", "context-threshold.ndjson"))
+	if rec["auto"] == nil {
+		t.Error("expected 'auto' field in log entry when auto threshold is set")
+	}
+	autoVal, _ := rec["auto"].(float64)
+	if int(autoVal) != 1 {
+		t.Errorf("expected auto=1 in log; got %v", rec["auto"])
+	}
+}
+
+func TestContextThreshold_AutoCompact_NoMarkerWhenNoWorkDir(t *testing.T) {
+	// Edge case: workCurrentDir empty → writeCompactPendingMarker is a no-op.
+	h := contextthreshold.New("")
+	h.NowFn = fixedNow
+	// Should not panic even with no work dir.
+	out, err := h.Run(context.Background(), hooktype.HookInput{Env: map[string]string{"YAKOS_RUNTIME": "claude"}})
+	if err != nil || out.ExitCode != 0 {
+		t.Fatalf("unexpected err=%v code=%d", err, out.ExitCode)
 	}
 }

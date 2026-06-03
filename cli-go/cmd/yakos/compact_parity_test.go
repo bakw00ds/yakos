@@ -365,11 +365,181 @@ func TestCompactParity_HelpText_KeyPhrases(t *testing.T) {
 		"history",
 		"/compact",
 		"M3.1",
+		"--auto",
+		"disable-auto",
 	}
 	for _, p := range phrases {
 		if !strings.Contains(help, p) {
 			t.Errorf("help text missing phrase %q; got:\n%s", p, help)
 		}
+	}
+}
+
+// ---- scenario (o): threshold show displays all three thresholds -------------
+
+func TestCompactParity_Threshold_ShowDisplaysAllThree(t *testing.T) {
+	cfg := newCompactConfig(t, "threshold")
+	cfg.ThresholdArg = "show"
+	res, err := compact.Run(cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	o := compactOut(cfg)
+	if !strings.Contains(o, "notice") {
+		t.Errorf("expected 'notice' in threshold show output; got: %q", o)
+	}
+	if !strings.Contains(o, "warning") {
+		t.Errorf("expected 'warning' in threshold show output; got: %q", o)
+	}
+	if !strings.Contains(o, "auto") {
+		t.Errorf("expected 'auto' in threshold show output; got: %q", o)
+	}
+	if res.AutoThreshold != 0 {
+		t.Errorf("expected AutoThreshold=0 (not configured); got %d", res.AutoThreshold)
+	}
+}
+
+// ---- scenario (p): threshold --auto sets auto-compact threshold -------------
+
+func TestCompactParity_Threshold_AutoSetsThreshold(t *testing.T) {
+	cfg := newCompactConfig(t, "threshold")
+	cfg.AutoArg = "85"
+	res, err := compact.Run(cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.ThresholdSet {
+		t.Error("expected ThresholdSet=true")
+	}
+	if res.AutoThreshold != 85 {
+		t.Errorf("expected AutoThreshold=85; got %d", res.AutoThreshold)
+	}
+
+	// Verify persisted to settings.json.
+	settingsPath := filepath.Join(cfg.HomeDir, ".yakos-state", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	thresholds, _ := m["context_thresholds"].(map[string]interface{})
+	if int(thresholds["auto"].(float64)) != 85 {
+		t.Errorf("expected context_thresholds.auto=85; got %v", thresholds["auto"])
+	}
+}
+
+// ---- scenario (q): threshold --auto rejects invalid values ------------------
+
+func TestCompactParity_Threshold_AutoRejectsInvalid(t *testing.T) {
+	for _, bad := range []string{"notanumber", "0", "100"} {
+		cfg := newCompactConfig(t, "threshold")
+		cfg.AutoArg = bad
+		_, err := compact.Run(cfg)
+		if err == nil {
+			t.Errorf("expected error for --auto %s", bad)
+		}
+	}
+}
+
+// ---- scenario (r): disable-auto writes sentinel ----------------------------
+
+func TestCompactParity_DisableAuto_WritesSentinel(t *testing.T) {
+	cfg := newCompactConfig(t, "disable-auto")
+	res, err := compact.Run(cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.AutoDisabled {
+		t.Error("expected AutoDisabled=true")
+	}
+	o := compactOut(cfg)
+	if !strings.Contains(o, "disabled") {
+		t.Errorf("expected 'disabled' in output; got: %q", o)
+	}
+
+	settingsPath := filepath.Join(cfg.HomeDir, ".yakos-state", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	if v, _ := m["compact_auto_disabled"].(bool); !v {
+		t.Errorf("expected compact_auto_disabled=true in settings; got %v", m["compact_auto_disabled"])
+	}
+}
+
+// ---- scenario (s): disable-auto sentinel cleared by --auto ------------------
+
+func TestCompactParity_Threshold_AutoClearsSentinel(t *testing.T) {
+	// First disable.
+	cfg := newCompactConfig(t, "disable-auto")
+	if _, err := compact.Run(cfg); err != nil {
+		t.Fatalf("disable-auto: %v", err)
+	}
+
+	// Then re-enable via --auto.
+	cfg2 := compact.Config{
+		Subcommand: "threshold",
+		AutoArg:    "80",
+		HomeDir:    cfg.HomeDir,
+		Writer:     &bytes.Buffer{},
+		ErrWriter:  &bytes.Buffer{},
+		Now:        cfg.Now,
+	}
+	if _, err := compact.Run(cfg2); err != nil {
+		t.Fatalf("threshold --auto: %v", err)
+	}
+
+	settingsPath := filepath.Join(cfg.HomeDir, ".yakos-state", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	// Sentinel should be gone.
+	if _, exists := m["compact_auto_disabled"]; exists {
+		t.Errorf("compact_auto_disabled should be removed when --auto is set; got %v", m["compact_auto_disabled"])
+	}
+	thresholds, _ := m["context_thresholds"].(map[string]interface{})
+	if int(thresholds["auto"].(float64)) != 80 {
+		t.Errorf("expected auto=80; got %v", thresholds["auto"])
+	}
+}
+
+// ---- scenario (t): threshold show reflects disabled state -------------------
+
+func TestCompactParity_Threshold_ShowReflectsDisabled(t *testing.T) {
+	cfg := newCompactConfig(t, "disable-auto")
+	if _, err := compact.Run(cfg); err != nil {
+		t.Fatalf("disable-auto: %v", err)
+	}
+
+	cfg2 := compact.Config{
+		Subcommand: "threshold",
+		HomeDir:    cfg.HomeDir,
+		Writer:     &bytes.Buffer{},
+		ErrWriter:  &bytes.Buffer{},
+		Now:        cfg.Now,
+	}
+	res, err := compact.Run(cfg2)
+	if err != nil {
+		t.Fatalf("threshold show: %v", err)
+	}
+	if !res.AutoDisabled {
+		t.Error("expected AutoDisabled=true in result after disable-auto")
+	}
+	o := cfg2.Writer.(*bytes.Buffer).String()
+	if !strings.Contains(o, "disabled") {
+		t.Errorf("expected 'disabled' in threshold show output; got: %q", o)
 	}
 }
 
