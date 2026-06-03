@@ -44,6 +44,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/retro"
 	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/skill"
+	"github.com/bakw00ds/yakos/internal/peer"
 	"github.com/bakw00ds/yakos/internal/session"
 	"github.com/bakw00ds/yakos/internal/soul"
 	"github.com/bakw00ds/yakos/internal/standards"
@@ -90,6 +91,7 @@ var portedCommands = []portedCommand{
 	{Name: "checkpoint", Since: "0.63.0", Notes: "full feature parity with cli/lib/checkpoint.sh; create/list/restore/clean subcommands; now+resume aliases; scratchpad copy of plan/decisions/contracts/status/kanban .md; manifest.json with ts/session_id/runtime/by_user; session-id resolution chain (cfg/env/history/unknown); atomic dir writes; M3.2 librarian digest deferred"},
 	{Name: "env", Since: "0.64.0", Notes: "full feature parity with cli/lib/env.sh; status/promote/validate/list subcommands; YAML environments section parsed; gh/glab/git PR tool detection; injectable GitFn+ExecFn+PRToolOverride for tests; atomic project-dir resolution"},
 	{Name: "standards", Since: "0.65.0", Notes: "full feature parity with cli/lib/standards.sh; list/enable/disable/check/init subcommands; all 6 Plan-4 standards; profile.type suggested matrix; atomic YAML rewrite (temp-rename, Q8); injectable PromptFn for init tests"},
+	{Name: "peer", Since: "0.66.0", Notes: "full feature parity with cli/lib/peer.sh; status/log/claim/release/claims/deadlock/propose-mode/respond-mode/handoff subcommands; mailbox package with O_APPEND+flock append + atomic temp-rename; byte-identical NDJSON format; injectable CoordDirFn+Now for tests"},
 }
 
 type portedCommand struct {
@@ -189,6 +191,8 @@ func main() {
 		runEnv(args[1:])
 	case "standards":
 		runStandards(args[1:])
+	case "peer":
+		runPeer(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -3604,6 +3608,62 @@ func runStandards(args []string) {
 
 	if _, err := standards.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "standards: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runPeer implements `yakos peer` natively in Go.
+//
+// Usage mirrors cli/lib/peer.sh exactly:
+//
+//	yakos peer status [<project>]
+//	yakos peer log [--since <iso>] [<project>]
+//	yakos peer claim <file> [<project>]
+//	yakos peer release <file> [<project>]
+//	yakos peer claims [<project>]
+//	yakos peer deadlock [<project>]
+//	yakos peer propose-mode --mode <m> --targets <glob>... [--reason <t>] [--timeout <secs>] [<project>]
+//	yakos peer respond-mode --to <proposal-id> --ack|--reject [--reason <t>] [<project>]
+//	yakos peer handoff --to <user@host> --completed-scope <s> --notes <s> --next-action <s> [<project>]
+//	yakos peer handoff --ack <handoff-id>|--reject <handoff-id> [--reason <t>] [<project>]
+//
+// Coord dir defaults to /var/lib/yakos/<project>/coord/. All subcommands
+// no-op cleanly when coord is not configured for the project (same
+// load-bearing guarantee as bash peer.sh).
+func runPeer(args []string) {
+	sub := ""
+	rest := args
+	if len(args) > 0 {
+		sub = args[0]
+		rest = args[1:]
+	}
+
+	if sub == "--help" || sub == "-h" || sub == "help" {
+		sub = "help"
+		rest = nil
+	}
+
+	cfg := peer.Config{
+		Subcommand: sub,
+		Args:       rest,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	if _, err := peer.Run(cfg); err != nil {
+		// Mirror bash exit-code convention for the two coord-check failures:
+		// missing coord → 64, not-writable → 77. We use exit 1 for other errors.
+		msg := err.Error()
+		fmt.Fprintln(os.Stderr, msg)
+		if strings.Contains(msg, "coord not configured") {
+			os.Exit(64)
+		}
+		if strings.Contains(msg, "not writable") {
+			os.Exit(77)
+		}
+		if strings.Contains(msg, "peer rejected") {
+			os.Exit(1)
+		}
 		os.Exit(1)
 	}
 }
