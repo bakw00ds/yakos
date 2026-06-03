@@ -40,6 +40,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/refresh"
 	"github.com/bakw00ds/yakos/internal/retro"
 	"github.com/bakw00ds/yakos/internal/runtime"
+	"github.com/bakw00ds/yakos/internal/skill"
 	"github.com/bakw00ds/yakos/internal/session"
 	"github.com/bakw00ds/yakos/internal/soul"
 	"github.com/bakw00ds/yakos/internal/start"
@@ -80,6 +81,7 @@ var portedCommands = []portedCommand{
 	{Name: "teach", Since: "0.58.0", Notes: "full feature parity with cli/lib/teach.sh; appends dated lesson bullets to project agent files under ## Lessons learned; --project/--section/--dry-run; atomic temp-rename writes; backup before edit"},
 	{Name: "soul", Since: "0.59.0", Notes: "full feature parity with cli/lib/soul.sh; show/edit/history/revert/pending subcommands; approve/reject print not-yet-implemented (M1 scope); two-layer (global/project) soul files; atomic writes; snapshot-before-edit; template seeding from lib/settings/soul.template.md"},
 	{Name: "retro", Since: "0.60.0", Notes: "full feature parity with cli/lib/retro.sh; now/disable/enable/status/last/history subcommands; sentinel flag at ~/.yakos-state/retro-disabled; atomic writes (Q8 temp-rename); .retro-due marker written by 'now'; session resolution via ProjectDir cfg override or YAKOS_PROJECT_NAME env or agent-control walk"},
+	{Name: "skill", Since: "0.61.0", Notes: "full feature parity with cli/lib/skill.sh; candidates/promote/reject/defer/stats subcommands; graveyard + fingerprint dedup (§16.1); calibration warnings (§16.2); atomic writes; validate gate on promote; --global promote to lib/skills/"},
 }
 
 type portedCommand struct {
@@ -169,6 +171,8 @@ func main() {
 		runSoul(yakosRoot, args[1:])
 	case "retro":
 		runRetro(args[1:])
+	case "skill":
+		runSkill(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -3152,6 +3156,166 @@ func runRetro(args []string) {
 
 	if _, err := retro.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "retro: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runSkill implements `yakos skill` natively in Go.
+//
+// Usage mirrors cli/lib/skill.sh exactly:
+//
+//	yakos skill candidates [--review]
+//	yakos skill promote <slug> [--global]
+//	yakos skill reject <slug> [--reason "<text>"]
+//	yakos skill defer <slug> <N>
+//	yakos skill stats
+//
+// Reads:  <work>/current/skill-candidates.md (librarian-written)
+//
+//	~/.yakos-state/skill-graveyard.ndjson (rejected history)
+//
+// Writes: <project>/.claude/skills/<slug>/SKILL.md (on promote)
+//
+//	lib/skills/<slug>/SKILL.md (on promote --global; rare)
+//	~/.yakos-state/promotion-log.ndjson
+//	~/.yakos-state/skill-graveyard.ndjson (on reject)
+//	<work>/current/skill-candidates.md (removes promoted/rejected entries)
+func runSkill(yakosRoot string, args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		skill.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+	rest := args[1:]
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+
+	cfg := skill.Config{
+		Subcommand: sub,
+		HomeDir:    home,
+		YakosRoot:  yakosRoot,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	switch sub {
+	case "candidates":
+		for _, arg := range rest {
+			if arg == "--review" {
+				cfg.Review = true
+			} else {
+				fmt.Fprintf(os.Stderr, "skill candidates: unknown flag %q (try --help)\n", arg)
+				os.Exit(1)
+			}
+		}
+
+	case "promote":
+		for i := 0; i < len(rest); i++ {
+			arg := rest[i]
+			switch {
+			case arg == "--global":
+				cfg.Global = true
+			case arg == "--project":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "skill promote: --project requires a path")
+					os.Exit(1)
+				}
+				cfg.ProjectPath = rest[i]
+			case len(arg) > 10 && arg[:10] == "--project=":
+				cfg.ProjectPath = arg[10:]
+			case len(arg) > 0 && arg[0] == '-':
+				fmt.Fprintf(os.Stderr, "skill promote: unknown flag %q (try --help)\n", arg)
+				os.Exit(1)
+			default:
+				if cfg.Slug == "" {
+					cfg.Slug = arg
+				} else {
+					fmt.Fprintln(os.Stderr, "skill promote: too many positional args")
+					os.Exit(1)
+				}
+			}
+		}
+		if cfg.Slug == "" {
+			skill.PrintHelp(os.Stderr)
+			fmt.Fprintln(os.Stderr, "skill promote: <slug> required")
+			os.Exit(1)
+		}
+
+	case "reject":
+		for i := 0; i < len(rest); i++ {
+			arg := rest[i]
+			switch {
+			case arg == "--reason":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "skill reject: --reason requires a value")
+					os.Exit(1)
+				}
+				cfg.Reason = rest[i]
+			case len(arg) > 9 && arg[:9] == "--reason=":
+				cfg.Reason = arg[9:]
+			case len(arg) > 0 && arg[0] == '-':
+				fmt.Fprintf(os.Stderr, "skill reject: unknown flag %q (try --help)\n", arg)
+				os.Exit(1)
+			default:
+				if cfg.Slug == "" {
+					cfg.Slug = arg
+				} else {
+					fmt.Fprintln(os.Stderr, "skill reject: too many positional args")
+					os.Exit(1)
+				}
+			}
+		}
+		if cfg.Slug == "" {
+			skill.PrintHelp(os.Stderr)
+			fmt.Fprintln(os.Stderr, "skill reject: <slug> required")
+			os.Exit(1)
+		}
+
+	case "defer":
+		positionals := make([]string, 0, 2)
+		for _, arg := range rest {
+			if len(arg) > 0 && arg[0] == '-' {
+				fmt.Fprintf(os.Stderr, "skill defer: unknown flag %q (try --help)\n", arg)
+				os.Exit(1)
+			}
+			positionals = append(positionals, arg)
+		}
+		if len(positionals) < 2 {
+			skill.PrintHelp(os.Stderr)
+			fmt.Fprintln(os.Stderr, "skill defer: <slug> and <N> required")
+			os.Exit(1)
+		}
+		cfg.Slug = positionals[0]
+		n, err := strconv.Atoi(positionals[1])
+		if err != nil || n <= 0 {
+			fmt.Fprintf(os.Stderr, "skill defer: <N> must be a positive integer; got %q\n", positionals[1])
+			os.Exit(1)
+		}
+		cfg.DeferCycles = n
+
+	case "stats":
+		for _, arg := range rest {
+			fmt.Fprintf(os.Stderr, "skill stats: unexpected argument %q (try --help)\n", arg)
+			os.Exit(1)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "skill: unknown subcommand %q (try 'yakos skill help')\n", sub)
+		os.Exit(1)
+	}
+
+	if _, err := skill.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "skill: %v\n", err)
 		os.Exit(1)
 	}
 }
