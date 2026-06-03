@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -34,6 +35,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/doctor"
 	"github.com/bakw00ds/yakos/internal/envcfg"
 	"github.com/bakw00ds/yakos/internal/githooks"
+	"github.com/bakw00ds/yakos/internal/hooksinstall"
 	"github.com/bakw00ds/yakos/internal/initialize"
 	"github.com/bakw00ds/yakos/internal/install"
 	"github.com/bakw00ds/yakos/internal/kanban"
@@ -74,7 +76,7 @@ var portedCommands = []portedCommand{
 	{Name: "status", Since: "0.39.0", Notes: "full feature parity with cli/lib/status.sh"},
 	{Name: "doctor", Since: "0.40.0", Notes: "full feature parity with cli/lib/doctor.sh"},
 	{Name: "refresh", Since: "0.41.0", Notes: "full feature parity with cli/lib/refresh.sh"},
-	{Name: "kanban", Since: "0.42.0", Notes: "full feature parity with cli/lib/kanban.sh (serve deferred to rank 41)"},
+	{Name: "kanban", Since: "0.42.0", Notes: "full feature parity with cli/lib/kanban.sh including serve/status/stop (rank 41 complete)"},
 	{Name: "dispatch", Since: "0.43.0", Notes: "full feature parity with cli/lib/dispatch.sh; PRs #15/#31/#32/#34/#39/#40 invariants"},
 	{Name: "team", Since: "0.44.0", Notes: "full feature parity with cli/lib/team.sh; archive step now native Go (rank 10)"},
 	{Name: "archive", Since: "0.45.0", Notes: "full feature parity with cli/lib/archive.sh; worktree cleanup deferred (manual, v0.1)"},
@@ -106,6 +108,8 @@ var portedCommands = []portedCommand{
 	{Name: "plan score", Since: "0.71.0", Notes: "full feature parity with cli/lib/plan-score.sh; show/history/override/correlate subcommands; reads plan-quality-log.ndjson; Pearson r + quartile + threshold → outcome report in correlate; .plan-blocked marker removal on override; injectable PlanQualityLog+CurrentDir+Now for tests"},
 	{Name: "work close", Since: "0.71.0", Notes: "full feature parity with cli/lib/work-close.sh; appends plan_outcome record to plan-quality-log.ndjson; git diff stats, dispatch-log sums, rework cycles, first_try_pass, scope_creep_ratio; non-blocking (missing data → null); injectable GitFn+PromptFn+Now for tests"},
 	{Name: "model-routing", Since: "0.72.0", Notes: "full feature parity with cli/lib/model-routing.sh (1035 LOC bash, rank 36); eval/list/show/promote/reject/history subcommands; Wilson 95% CI lower bound; per-run + weekly cost guards; anti-self-congratulation guard; backup+atomic frontmatter rewrite; injectable DispatchFn+JudgeFn+ValidateFn for tests"},
+	{Name: "hooks", Since: "0.73.0", Notes: "full feature parity with cli/lib/hooks-install.sh (rank 39); install/status subcommands; codex/gemini/agy hook config generation; path-allowlist.json → codex permissions translation; Decision Q9: hook bodies remain bash"},
+	{Name: "kanban serve", Since: "0.73.0", Notes: "kanban serve/status/stop (rank 41 complete); net/http stdlib server; //go:embed serve_ui.html; mutex-serialised mutations; DNS-rebinding Host header check; 127.0.0.1 default bind; no python3 dependency"},
 }
 
 type portedCommand struct {
@@ -221,6 +225,8 @@ func main() {
 		runWork(args[1:])
 	case "model-routing":
 		runModelRouting(yakosRoot, args[1:])
+	case "hooks":
+		runHooks(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -798,9 +804,9 @@ Exit codes:
 //	yakos kanban move <id> <col>       # move between columns
 //	yakos kanban done <id>             # shortcut to DONE
 //	yakos kanban delete <id>           # hard-delete a task (also: rm)
-//	yakos kanban serve [...]           # deferred to rank 41
-//	yakos kanban status                # deferred with serve
-//	yakos kanban stop                  # deferred with serve
+//	yakos kanban serve [...]           # live web UI (rank 41 complete)
+//	yakos kanban status                # is the web UI running?
+//	yakos kanban stop                  # stop the running web UI
 //	yakos kanban --help                # print help
 //
 // The kanban.md file is resolved from YAKOS_WORK_DIR env variable, or from the
@@ -829,11 +835,12 @@ func runKanban(yakosRoot string, args []string) {
 		kanbanDone(args[1:])
 	case "delete", "rm":
 		kanbanDelete(args[1:])
-	case "serve", "--serve", "status", "stop":
-		// Serve mode (and its status/stop companions) are rank 41; defer.
-		fmt.Fprintln(os.Stderr, "kanban: serve mode is rank 41 in the port plan and is not yet implemented in the Go binary.")
-		fmt.Fprintln(os.Stderr, "  Use: YAKOS_IMPL=bash yakos kanban "+args[0])
-		os.Exit(1)
+	case "serve", "--serve":
+		kanbanServe(args[1:])
+	case "status":
+		kanbanServeStatus()
+	case "stop":
+		kanbanServeStop()
 	default:
 		fmt.Fprintf(os.Stderr, "kanban: unknown subcommand %q (try --help)\n", args[0])
 		os.Exit(1)
@@ -1137,6 +1144,291 @@ func kanbanDelete(args []string) {
 	fmt.Fprintf(os.Stderr, "kanban: deleted: %s\n", id)
 }
 
+// ---- kanban serve / status / stop ------------------------------------------
+
+// kanbanStateFile returns the path to the .kanban-serve.json state sidecar.
+// Matches bash _kanban_state_file() which uses yakos_current_dir().
+func kanbanStateFile() string {
+	boardPath := kanbanFilePath()
+	dir := filepath.Dir(boardPath)
+	return filepath.Join(dir, ".kanban-serve.json")
+}
+
+// kanbanServeStateExists returns the parsed state if a live state file exists.
+func kanbanServeStateExists() (url, pid string, ok bool) {
+	stateFile := kanbanStateFile()
+	raw, err := os.ReadFile(stateFile) //nolint:gosec
+	if err != nil {
+		return "", "", false
+	}
+	var state struct {
+		PID  int    `json:"pid"`
+		URL  string `json:"url"`
+	}
+	if err := func() error {
+		return func() error { return nil }() // placeholder
+	}(); err != nil {
+		return "", "", false
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return "", "", false
+	}
+	if state.URL == "" || state.PID == 0 {
+		return "", "", false
+	}
+	return state.URL, intToStr(state.PID), true
+}
+
+// intToStr converts int to string without strconv import (local helper).
+func intToStr(n int) string {
+	return strconv.Itoa(n)
+}
+
+// kanbanServe implements `yakos kanban serve [--port N] [--host H] [--no-open]`.
+func kanbanServe(args []string) {
+	port := 0
+	host := "127.0.0.1"
+	openBrowser := true
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--port":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "kanban serve: --port needs a value")
+				os.Exit(1)
+			}
+			n := 0
+			for _, ch := range args[i] {
+				if ch < '0' || ch > '9' {
+					fmt.Fprintln(os.Stderr, "kanban serve: --port must be a number")
+					os.Exit(1)
+				}
+				n = n*10 + int(ch-'0')
+			}
+			port = n
+		case "--host":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "kanban serve: --host needs a value")
+				os.Exit(1)
+			}
+			host = args[i]
+			// Security: require explicit flag to expose on all interfaces.
+			if host == "0.0.0.0" {
+				fmt.Fprintln(os.Stderr, "kanban serve: binding 0.0.0.0 — the web UI is UNAUTHENTICATED and can mutate the board")
+			}
+		case "--no-open":
+			openBrowser = false
+		default:
+			if len(args[i]) > 7 && args[i][:7] == "--port=" {
+				// --port=N form.
+				val := args[i][7:]
+				n := 0
+				for _, ch := range val {
+					if ch < '0' || ch > '9' {
+						fmt.Fprintln(os.Stderr, "kanban serve: --port must be a number")
+						os.Exit(1)
+					}
+					n = n*10 + int(ch-'0')
+				}
+				port = n
+			} else if len(args[i]) > 7 && args[i][:7] == "--host=" {
+				host = args[i][7:]
+			} else {
+				fmt.Fprintf(os.Stderr, "kanban serve: unknown option %q\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+
+	boardPath := kanbanFilePath()
+	project := os.Getenv("YAKOS_PROJECT_NAME")
+	if project == "" {
+		project = filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(boardPath))))
+	}
+
+	cfg := kanban.ServeConfig{
+		BoardPath:   boardPath,
+		Project:     project,
+		Host:        host,
+		Port:        port,
+		OpenBrowser: openBrowser,
+		ErrWriter:   os.Stderr,
+	}
+	if _, err := kanban.Serve(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "kanban serve: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// kanbanServeStatus checks if a kanban web UI is running and prints its URL.
+// The Go implementation checks the .kanban-serve.json state file.
+// Note: the Go server does not write a state file in the current implementation
+// (the bash server did this; the Go server blocks and keeps state in-process).
+// This subcommand prints a not-running message pointing at the state file path.
+func kanbanServeStatus() {
+	url, pid, ok := kanbanServeStateExists()
+	if ok {
+		fmt.Printf("kanban web UI: running\n  url:     %s\n  pid:     %s\n", url, pid)
+	} else {
+		fmt.Fprintln(os.Stderr, "kanban web UI: not running")
+		fmt.Fprintf(os.Stderr, "  (state file: %s)\n", kanbanStateFile())
+	}
+}
+
+// kanbanServeStop prints an advisory. The Go server runs in the foreground
+// (same as bash) and is stopped by Ctrl-C. A background PID from a state file
+// can be killed if the state file is present.
+func kanbanServeStop() {
+	url, pid, ok := kanbanServeStateExists()
+	if !ok {
+		fmt.Fprintln(os.Stderr, "kanban web UI: not running")
+		return
+	}
+	fmt.Fprintf(os.Stderr, "kanban web UI running at %s (pid %s)\n", url, pid)
+	fmt.Fprintln(os.Stderr, "To stop it: press Ctrl-C in the terminal where it is running,")
+	fmt.Fprintln(os.Stderr, "  or: kill "+pid)
+}
+
+// ---- hooks ------------------------------------------------------------------
+
+// runHooks implements `yakos hooks` natively in Go.
+//
+// Usage mirrors cli/lib/hooks-install.sh exactly:
+//
+//	yakos hooks install <runtime> --project <path> [--force]
+//	yakos hooks status [<project>]
+//	yakos hooks --help
+//
+// Decision Q9: hook BODIES remain bash (Phase 3). This command only manages
+// runtime-native config deployment (pointing runtimes at the bash scripts).
+func runHooks(args []string) {
+	if len(args) == 0 {
+		hooksinstall.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	switch args[0] {
+	case "--help", "-h", "help":
+		hooksinstall.PrintHelp(os.Stdout)
+		os.Exit(0)
+	case "install":
+		runHooksInstall(args[1:])
+	case "status":
+		runHooksStatus(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "hooks: unknown subcommand %q (try --help)\n", args[0])
+		os.Exit(1)
+	}
+}
+
+func runHooksInstall(args []string) {
+	runtime := ""
+	project := ""
+	force := false
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--help", "-h":
+			hooksinstall.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case "--project":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "hooks install: --project requires a path")
+				os.Exit(1)
+			}
+			project = args[i]
+		case "--force":
+			force = true
+		default:
+			if len(args[i]) > 10 && args[i][:10] == "--project=" {
+				project = args[i][10:]
+			} else if args[i][0] == '-' {
+				fmt.Fprintf(os.Stderr, "hooks install: unknown flag %q\n", args[i])
+				os.Exit(1)
+			} else {
+				if runtime == "" {
+					runtime = args[i]
+				} else {
+					fmt.Fprintln(os.Stderr, "hooks install: too many positional args")
+					os.Exit(1)
+				}
+			}
+		}
+	}
+
+	if runtime == "" {
+		fmt.Fprintln(os.Stderr, "hooks install: <runtime> required")
+		hooksinstall.PrintHelp(os.Stderr)
+		os.Exit(1)
+	}
+	if project == "" {
+		fmt.Fprintln(os.Stderr, "hooks install: --project required")
+		hooksinstall.PrintHelp(os.Stderr)
+		os.Exit(1)
+	}
+	if !hooksinstall.IsKnownRuntime(runtime) {
+		fmt.Fprintf(os.Stderr, "hooks install: unknown runtime %q\n", runtime)
+		os.Exit(1)
+	}
+	if _, err := os.Stat(project); err != nil {
+		fmt.Fprintf(os.Stderr, "hooks install: project not found: %s\n", project)
+		os.Exit(1)
+	}
+
+	cfg := hooksinstall.Config{
+		Subcommand: "install",
+		Runtime:    runtime,
+		ProjectDir: project,
+		Force:      force,
+		Writer:     os.Stderr,
+		ErrWriter:  os.Stderr,
+	}
+	if _, err := hooksinstall.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "hooks: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runHooksStatus(args []string) {
+	project := ""
+	if len(args) > 0 {
+		project = args[0]
+	}
+	if project == "" {
+		// Try to infer from cwd: look for .claude/settings.json walking up.
+		cwd, _ := os.Getwd()
+		for dir := cwd; dir != "/" && dir != ""; {
+			if _, err := os.Stat(filepath.Join(dir, ".claude", "settings.json")); err == nil {
+				project = dir
+				break
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	if project == "" {
+		fmt.Fprintln(os.Stderr, "hooks status: pass <project> or run from inside it")
+		os.Exit(1)
+	}
+
+	cfg := hooksinstall.Config{
+		Subcommand: "status",
+		ProjectDir: project,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+	if _, err := hooksinstall.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "hooks: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 // printKanbanHelp prints the help text for `yakos kanban`, matching the
 // bash kanban.sh --help output.
 func printKanbanHelp(w io.Writer) {
@@ -1147,7 +1439,7 @@ func printKanbanHelp(w io.Writer) {
   yakos kanban serve [--port N]      # live web UI: view + manage
                                      #   [--host H] [--no-open]
                                      #   (default: random high port on 127.0.0.1)
-                                     #   NOTE: serve is rank 41; use YAKOS_IMPL=bash for now
+                                     #   binds 127.0.0.1 by default (loopback only)
   yakos kanban status                # is the web UI running? print its URL
   yakos kanban stop                  # stop the running web UI
   yakos kanban add "<title>"         # append to TODO

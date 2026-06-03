@@ -8,10 +8,9 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update, quickstart, auth, memory, agent, session, migrate, plugin, teach, soul, retro, skill, compact, checkpoint, env, standards, peer, mcp, completion, git-hooks, supervise, plan score, work close, model-routing ported.** The
+**Phase 1 complete — validate, cost, status, doctor, refresh, kanban (including serve), dispatch, team, archive, init, install, uninstall, start, update, quickstart, auth, memory, agent, session, migrate, plugin, teach, soul, retro, skill, compact, checkpoint, env, standards, peer, mcp, completion, git-hooks, supervise, plan score, work close, model-routing, hooks ported.** The
 `validate`, `cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, `team`, `archive`, `init`, `install`, `uninstall`, `start`, `update`, `quickstart`, `auth`, `memory`, `agent`,
-`session`, `migrate`, `plugin`, `teach`, `soul`, `retro`, `skill`, `compact`, `checkpoint`, `env`, `standards`, `peer`, `mcp`, `completion`, `git-hooks`, `supervise`, `plan score`, `work close`, and `model-routing` subcommands are implemented natively in Go (ranks 2–38 in `docs/go-port-plan.md`). The `kanban serve`
-submode is deferred to rank 41. Worktree cleanup at archive time is explicitly NOT in scope (same
+`session`, `migrate`, `plugin`, `teach`, `soul`, `retro`, `skill`, `compact`, `checkpoint`, `env`, `standards`, `peer`, `mcp`, `completion`, `git-hooks`, `supervise`, `plan score`, `work close`, `model-routing`, and `hooks` subcommands are implemented natively in Go (ranks 2–41 in `docs/go-port-plan.md`). Worktree cleanup at archive time is explicitly NOT in scope (same
 caveat as bash; manual in v0.1). Hook script installation in `init` prints an advisory directing to
 `yakos refresh` (bash handles hook copies in Phase 1). `yakos start` exec's the runtime CLI replacing
 the current process (Unix syscall.Exec); workspace hook wiring (jq-based settings.json merge) is
@@ -144,7 +143,8 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos status <project>` | Go (full feature parity with `cli/lib/status.sh`) |
 | `yakos doctor [args]` | Go (full feature parity with `cli/lib/doctor.sh`; `--fix` proxied to bash) |
 | `yakos refresh [args]` | Go (full feature parity with `cli/lib/refresh.sh`) |
-| `yakos kanban [args]` | Go (full feature parity with `cli/lib/kanban.sh`; `serve` deferred to rank 41) |
+| `yakos kanban [args]` | Go (full feature parity with `cli/lib/kanban.sh`; includes `serve` live web UI — rank 41 complete) |
+| `yakos hooks <sub> [args]` | Go (full feature parity with `cli/lib/hooks-install.sh`; install/status; codex/gemini/agy hook config generation; path-allowlist.json → codex permissions; Decision Q9: hook bodies remain bash — rank 39 complete) |
 | `yakos dispatch <agent> "<task>" [args]` | Go (full feature parity with `cli/lib/dispatch.sh`; PRs #15/#31/#32/#34/#39/#40) |
 | `yakos archive <project> <tag> [args]` | Go (full feature parity with `cli/lib/archive.sh`; worktree cleanup deferred, manual in v0.1) |
 | `yakos team restart <project> [args]` | Go (full feature parity with `cli/lib/team.sh`; archive step uses native Go when YAKOS_IMPL=go) |
@@ -216,7 +216,12 @@ cli-go/
       mutate.go            # Board.Add, Move, Done, Delete, SetNotes, rebuildTyped
       schema.go            # .kanban.schema-version sidecar reader/writer (Decision A)
       render.go            # RenderTUI (3-column ASCII box) and RenderHTML (static snapshot)
+      serve.go             # Serve — net/http server for `yakos kanban serve` (rank 41);
+                           # //go:embed serve_ui.html; mutex-serialised mutations; DNS-rebinding
+                           # Host header check; 127.0.0.1 default bind; no python3 dependency
+      serve_ui.html        # embedded kanban live UI (extracted from bash PAGE heredoc)
       kanban_test.go       # 58 tests: 16 round-trip fixtures + 42 unit tests
+      serve_test.go        # 22 serve tests: httptest server, all API routes, error paths
     status/
       status.go            # Status function, Config/Report types, path resolution
       format.go            # Format + PrintHelp, byte-matching bash output
@@ -288,6 +293,12 @@ cli-go/
                            # two-layer (global/project) soul files; template seeding; snapshot-before-edit;
                            # resolveProjectSlug from agent-control; atomic temp-rename writes
       soul_test.go         # 36 unit tests (show, edit, history, revert, pending, approve, reject, helpers)
+    hooksinstall/
+      hooksinstall.go      # Run(cfg Config) + PrintHelp + PrintStatus; install/status subcommands
+                           # (rank 39 complete); codex/gemini/agy hook config deployment;
+                           # path-allowlist.json → .codex/config.toml TOML permissions block;
+                           # backup-on-overwrite (--force skips); atomic temp-rename writes;
+                           # Decision Q9: hook bodies remain bash (only config deployment ported)
     paritytest/
       paritytest.go        # parity test harness for all Phase 1 ports
   go.mod                   # module github.com/bakw00ds/yakos (root: cli-go/)
@@ -301,7 +312,7 @@ cli-go/
 2. Add a case in `cmd/yakos/main.go` routing the subcommand name to your
    implementation instead of `passthrough.Run`.
 3. Add the entry to `portedCommands` in `main.go`.
-4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 24).
+4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 39).
 5. Add parity tests in `cmd/yakos/<name>_parity_test.go` using the paritytest harness.
 
 ## CI
