@@ -31,6 +31,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/initialize"
 	"github.com/bakw00ds/yakos/internal/install"
 	"github.com/bakw00ds/yakos/internal/kanban"
+	"github.com/bakw00ds/yakos/internal/memory"
 	"github.com/bakw00ds/yakos/internal/passthrough"
 	"github.com/bakw00ds/yakos/internal/quickstart"
 	"github.com/bakw00ds/yakos/internal/refresh"
@@ -64,6 +65,7 @@ var portedCommands = []portedCommand{
 	{Name: "update", Since: "0.50.0", Notes: "full feature parity with cli/lib/update.sh; git pull --ff-only + per-project refresh via refresh.CollectProjects + refresh.Run; --allow-non-ff/--all/--dry-run supported"},
 	{Name: "quickstart", Since: "0.51.0", Notes: "full feature parity with cli/lib/quickstart.sh; composes install+init+start; idempotent; --runtime/--multi-dev/--safe/--allow-root/--dry-run flags"},
 	{Name: "auth", Since: "0.52.0", Notes: "full feature parity with cli/lib/auth.sh; status/login/logout/set-default; OS keychain via go-keyring; graceful degradation on headless Linux"},
+	{Name: "memory", Since: "0.53.0", Notes: "full feature parity with cli/lib/memory.sh; list/read/write/delete/index-rebuild; MEMORY.md byte-identical index; schema sidecar; atomic writes"},
 }
 
 type portedCommand struct {
@@ -137,6 +139,8 @@ func main() {
 		runQuickstart(yakosRoot, args[1:])
 	case "auth":
 		runAuth(args[1:])
+	case "memory":
+		runMemory(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -2168,6 +2172,107 @@ func runAuth(args []string) {
 		fmt.Fprintf(os.Stderr, "auth: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runMemory implements `yakos memory` natively in Go.
+//
+// Usage mirrors cli/lib/memory.sh (rank 18):
+//
+//	yakos memory list                            — list MEMORY.md index + files
+//	yakos memory read <slug>                     — print a memory file's body
+//	yakos memory write <slug> <type> <body>      — create or replace a memory
+//	yakos memory delete <slug>                   — remove a memory file
+//	yakos memory index-rebuild                   — rewrite MEMORY.md from files
+//	yakos memory --help                          — print help and exit 0
+//
+// The memory directory is resolved from YAKOS_MEMORY_DIR env (for tests) or
+// from the encoded project path: ~/.claude/projects/<encoded>/memory/.
+// The project path is read from YAKOS_PROJECT_PATH or inferred from cwd.
+func runMemory(args []string) {
+	sub := ""
+	slug := ""
+	memType := ""
+	body := ""
+
+	if len(args) > 0 {
+		switch args[0] {
+		case "-h", "--help", "help":
+			memory.PrintHelp(os.Stdout)
+			os.Exit(0)
+		default:
+			sub = args[0]
+			args = args[1:]
+		}
+	}
+
+	// Per-subcommand positional arguments.
+	switch sub {
+	case "read", "delete":
+		if len(args) > 0 {
+			slug = args[0]
+		} else {
+			fmt.Fprintf(os.Stderr, "memory %s: <slug> required (try --help)\n", sub)
+			os.Exit(1)
+		}
+	case "write":
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "memory write: <slug> <type> <body> required (try --help)")
+			os.Exit(1)
+		}
+		slug = args[0]
+		memType = args[1]
+		body = args[2]
+	case "list", "index-rebuild", "":
+		// no positional args
+	default:
+		fmt.Fprintf(os.Stderr, "memory: unknown subcommand %q (try --help)\n", sub)
+		os.Exit(1)
+	}
+
+	// Resolve memory directory.
+	// Priority: YAKOS_MEMORY_DIR (test injection) → YAKOS_PROJECT_PATH encode → cwd inference.
+	memDir := os.Getenv("YAKOS_MEMORY_DIR")
+	if memDir == "" {
+		home := os.Getenv("HOME")
+		if home == "" {
+			home = "/tmp"
+		}
+		// Resolve project path.
+		projectPath := os.Getenv("YAKOS_PROJECT_PATH")
+		if projectPath == "" {
+			cwd, _ := os.Getwd()
+			projectPath = inferProjectFromCWD(cwd, home)
+		}
+		if projectPath == "" {
+			fmt.Fprintln(os.Stderr, "memory: cannot resolve project path; set YAKOS_PROJECT_PATH or run from inside a project")
+			os.Exit(1)
+		}
+		encoded := memoryEncodeProjectPath(projectPath)
+		memDir = filepath.Join(home, ".claude", "projects", encoded, "memory")
+	}
+
+	cfg := memory.Config{
+		MemoryDir:  memDir,
+		Subcommand: sub,
+		Slug:       slug,
+		Type:       memType,
+		Body:       body,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	if err := memory.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "memory: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// memoryEncodeProjectPath encodes a project path to the Claude Code format:
+// replaces '/' with '-', strips the leading '-'.  Mirrors initialize.encodeProjectPath.
+func memoryEncodeProjectPath(absPath string) string {
+	encoded := strings.ReplaceAll(absPath, "/", "-")
+	encoded = strings.TrimPrefix(encoded, "-")
+	return encoded
 }
 
 // exitWith calls os.Exit with the code returned by passthrough.Run.
