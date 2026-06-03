@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0.0] — 2026-06-03
+
+### Added — Go CLI port (Phase 1): 39 native subcommands
+
+The yakOS CLI has a parallel Go implementation at `cli-go/`. Shadow-mode coexistence with bash via `YAKOS_IMPL=go|bash` (unset = bash). When `YAKOS_IMPL=go` the Go binary handles 39 of 40 subcommands natively (rank 40 `version-bump` keeps delegating to the bash skill per Decision Q10); the remaining surface proxies invisibly to bash. Mac, Linux, and Windows-native binaries from a single Go module.
+
+- `validate cost status doctor refresh kanban dispatch team archive init install uninstall start update quickstart auth memory agent session migrate plugin teach soul retro skill compact checkpoint env standards peer mcp completion git-hooks supervise plan-score work-close model-routing hooks kanban-serve` — all native Go.
+- ~1,600 unit + ~400 parity tests against the bash baseline.
+- Distribution: tag-triggered cross-compile + GitHub Release; `curl scripts/install.sh | sh` installer.
+- Schema-version sidecars (Decision A) on kanban.md and memory dir for forward migrations.
+- Schema sidecars for all atomic-temp-rename writes (Decision Q8 — no flock in Phase 1).
+
+### Added — Phase 2: daemon, library, MCP, multi-dev
+
+`yakos serve` runs a long-lived daemon with five concurrent transports:
+
+- **JSON-RPC 2.0** over Unix socket (Linux/Mac) or TCP-loopback (Windows). 11 RPC methods covering dispatch, kanban CRUD, refresh, cost aggregation, status, supervise.
+- **WebSocket multi-dev bus** at `127.0.0.1:7891` (Bearer token). 5 event topics: kanban.added/moved, dispatch.started/finished, presence. In-memory ring buffer for `--since` replay (configurable via `YAKOS_WS_REPLAY_BUFFER`).
+- **REST API** at `127.0.0.1:7892` (two-token read/write model). 9 endpoints. OpenAPI 3.1 spec at `cli-go/internal/restapi/openapi.yaml`.
+- **gRPC API** at `127.0.0.1:7893` (two-token model). Services: Dispatch, Kanban (incl. server-stream Watch), Cost, Status, Refresh. Protobuf spec at `cli-go/proto/yakos/v1/`.
+- **Performance dashboard** at `127.0.0.1:7895` (separate read-only token per Q7). Embedded SPA via `go:embed` — no CDN runtime deps. Summary, time-series, by-axis, recent-dispatches views.
+- On-demand **MCP server** (stdio + streamable HTTP) at `yakos mcp serve`. 8 MCP tools.
+- **mTLS** for non-loopback connections. `yakos serve issue-client <name>` issues + signs client certs. CA at `~/.yakos-state/mtls/`.
+- `YAKOS_DAEMON` env to opt CLI into daemon-routed execution.
+
+**Embeddable Go library** at `pkg/`: `dispatch`, `kanban`, `cost`, `status`, `refresh`, `supervise`, `agent` — stable public APIs with godoc + Examples.
+
+### Added — Phase 3: hybrid hook framework + 21 Tier-0 hook ports
+
+Per `docs/go-port-phase3-hook-mitigation.md`, the Hybrid Strategy D framework ships:
+
+- **Tier 0** (Go-native baseline) — all 21 `lib/hooks/*.sh` ported to `cli-go/internal/hooks/<name>/`.
+- **Tier 1** (Starlark customization) — `lib/hooks/<name>.star` runs after Tier 0; `override = True` declaration replaces it. Sandbox limits `read_file` to `work/current/` + allow-list (Q3).
+- **Tier 2** (bash-user-hooks escape) — `lib/hooks-user/<name>.sh` runs after Tier 1; on Windows-without-bash, present-but-skipped with one-line diagnostic (Q2).
+- `YAKOS_HOOKS=go|bash|hybrid` env selects routing. Default `bash` (backward-compatible). `hybrid` runs both and logs divergence to `work/current/logs/hook-parity-divergence.ndjson`.
+- `yakos hooks lint` — Starlark static analysis (Q4).
+- `yakos hooks migrate` — SHA-256 baseline comparison to detect operator customizations; scaffolds `.star` stubs.
+- Hook-parity CI workflow comparing bash vs Go output byte-for-byte across deterministic fixtures (3 hooks shipped with fixtures; 18 follow-up).
+
+### Added — Phase 1.5 production polish
+
+- WinSafe timestamp helper (`internal/timestamp`) replaces RFC3339 colons in soul snapshot + teach backup filenames (Windows-portable).
+- `internal/install` symlink Windows fallback: junction (dir) or copy (file) when `os.Symlink` fails; real symlinks when DevMode is enabled.
+- `internal/winsec` — NTFS ACL hardening (`SetNamedSecurityInfo` with single-ACE DACL granting Full Control to current user only) on all token files. Replaces meaningless POSIX 0600 mode on Windows.
+- `internal/start` `Config.RestoreCwdOnReturn` for daemon-context invocations.
+- `internal/hooks/peerclaim` smart-degrade WARN on stale coordinator state (default 24h, `YAKOS_PEER_STALE_AFTER` env override).
+
+### Notes
+
+- Bash `yakos` remains the authoritative reference implementation through `YAKOS_IMPL=bash` (the default). No operator workflows are forced to migrate.
+- This release is unsigned. macOS first-run will show "unidentified developer"; Windows SmartScreen will warn. Code-signing is tracked as a Phase 1.5 follow-up.
+- 66 PRs landed across the session (#42 → #108). Go CI green on mac-latest, ubuntu-latest, and windows-latest.
+- `lib/hooks/legacy/` move is intentionally NOT executed yet — per Q7, gated on 2 release cycles of operator opt-in stability with zero parity divergence.
+
 ## [0.36.0.0] — 2026-05-24
 
 ### Fixed — supervisor's `balanced` model no longer dropped on claude
