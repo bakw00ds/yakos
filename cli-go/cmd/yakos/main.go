@@ -27,6 +27,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/agent"
 	"github.com/bakw00ds/yakos/internal/archive"
 	internalserve "github.com/bakw00ds/yakos/internal/serve"
+	"github.com/bakw00ds/yakos/internal/mcpserver"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/auth"
 	"github.com/bakw00ds/yakos/internal/checkpoint"
@@ -4128,6 +4129,10 @@ func runMCP(yakosRoot string, args []string) {
 	case "--help", "-h", "help":
 		mcp.PrintHelp(os.Stdout)
 		os.Exit(0)
+	case "serve":
+		// Native MCP server over stdio (Phase 2, decision Q3).
+		runMCPServe(yakosRoot, rest)
+		return
 	case "probe":
 		// probe takes no flags.
 		if len(rest) > 0 {
@@ -4166,6 +4171,72 @@ func runMCP(yakosRoot string, args []string) {
 
 	if _, err := mcp.Run(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+}
+
+// runMCPServe implements `yakos mcp serve` — the native MCP stdio server.
+//
+// This subcommand runs a single MCP (Model Context Protocol) session bound to
+// the calling process's stdin/stdout. Claude Code registers it via:
+//
+//	claude mcp add yakos -- yakos mcp serve
+//
+// Per decision Q3 (2026-06-02): stdio transport only in Phase 2.
+// Streamable HTTP is a follow-up dispatch.
+//
+// Flags: none currently.
+func runMCPServe(yakosRoot string, args []string) {
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help":
+			fmt.Fprint(os.Stdout, `yakos mcp serve
+
+Start a native MCP (Model Context Protocol) server on stdin/stdout.
+Claude Code registers this via: claude mcp add yakos -- yakos mcp serve
+
+Tool surface (Phase 2):
+  yakos.dispatch            Invoke a subagent
+  yakos.kanban.list         List kanban items
+  yakos.kanban.add          Add a task to TODO
+  yakos.kanban.move         Move a task between columns
+  yakos.kanban.done         Move a task to DONE
+  yakos.refresh             Detect and repair deployment drift
+  yakos.supervise.run       Read supervisor findings
+  yakos.supervise.ack       Acknowledge a supervisor finding
+
+Transport: JSON-RPC 2.0 over stdin/stdout (NDJSON).
+
+`)
+			os.Exit(0)
+		default:
+			fmt.Fprintf(os.Stderr, "mcp serve: unknown flag %q (try --help)\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	// Resolve workspace root from cwd.
+	workspaceRoot, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mcp serve: resolve cwd: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Read the binary version string for ServerInfo.
+	ver := ""
+	if v, err := version.Read(yakosRoot); err == nil {
+		ver = v
+	}
+
+	cfg := mcpserver.Config{
+		WorkspaceRoot: workspaceRoot,
+		YakosRoot:     yakosRoot,
+		Version:       ver,
+	}
+
+	ctx := context.Background()
+	if err := mcpserver.Serve(ctx, cfg, os.Stdin, os.Stdout); err != nil && err != context.Canceled {
+		fmt.Fprintf(os.Stderr, "mcp serve: %v\n", err)
 		os.Exit(1)
 	}
 }
