@@ -8,9 +8,9 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update ported.** The
-`validate`, `cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, `team`, `archive`, `init`, `install`, `uninstall`, `start`, and `update`
-subcommands are implemented natively in Go (ranks 2–15 in `docs/go-port-plan.md`). The `kanban serve`
+**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update, quickstart ported.** The
+`validate`, `cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, `team`, `archive`, `init`, `install`, `uninstall`, `start`, `update`, and `quickstart`
+subcommands are implemented natively in Go (ranks 2–16 in `docs/go-port-plan.md`). The `kanban serve`
 submode is deferred to rank 41. Worktree cleanup at archive time is explicitly NOT in scope (same
 caveat as bash; manual in v0.1). Hook script installation in `init` prints an advisory directing to
 `yakos refresh` (bash handles hook copies in Phase 1). `yakos start` exec's the runtime CLI replacing
@@ -147,6 +147,7 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos team restart <project> [args]` | Go (full feature parity with `cli/lib/team.sh`; archive step uses native Go when YAKOS_IMPL=go) |
 | `yakos install [--force] [--dry-run]` | Go (full feature parity with `cli/lib/install.sh`; per-file symlinks, launcher, settings.json merge) |
 | `yakos uninstall [--restore-settings] [--root <path>] [--dry-run]` | Go (full feature parity with `cli/lib/uninstall.sh`; removes YakOS-owned symlinks + launcher + pointer; partial-uninstall log+continue) |
+| `yakos quickstart [args]` | Go (full feature parity with `cli/lib/quickstart.sh`; composes install+init+start; idempotent; --runtime/--multi-dev/--safe/--allow-root/--dry-run) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 
@@ -247,7 +248,7 @@ cli-go/
 2. Add a case in `cmd/yakos/main.go` routing the subcommand name to your
    implementation instead of `passthrough.Run`.
 3. Add the entry to `portedCommands` in `main.go`.
-4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 12).
+4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 15).
 5. Add parity tests in `cmd/yakos/<name>_parity_test.go` using the paritytest harness.
 
 ## CI

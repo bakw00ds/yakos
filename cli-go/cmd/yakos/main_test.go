@@ -58,9 +58,9 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 // Current ported commands: validate (rank 2), cost (rank 3), status (rank 4),
 // doctor (rank 5), refresh (rank 6), kanban (rank 7), dispatch (rank 8),
 // team (rank 9), archive (rank 10), init (rank 11), install (rank 12),
-// uninstall (rank 13), start (rank 14), update (rank 15).
+// uninstall (rank 13), start (rank 14), update (rank 15), quickstart (rank 16).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 14
+	const want = 15
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
@@ -220,6 +220,16 @@ func TestUpdateCommandEntry(t *testing.T) {
 		}
 	}
 	t.Error("expected 'update' in portedCommands; not found")
+}
+
+// TestQuickstartCommandEntry asserts that "quickstart" is in the ported list.
+func TestQuickstartCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "quickstart" {
+			return
+		}
+	}
+	t.Error("expected 'quickstart' in portedCommands; not found")
 }
 
 // TestPortedCommandStruct verifies the portedCommand struct has the expected
