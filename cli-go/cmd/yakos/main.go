@@ -33,6 +33,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/passthrough"
 	"github.com/bakw00ds/yakos/internal/refresh"
 	"github.com/bakw00ds/yakos/internal/runtime"
+	"github.com/bakw00ds/yakos/internal/start"
 	"github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/team"
 	"github.com/bakw00ds/yakos/internal/uninstall"
@@ -56,6 +57,7 @@ var portedCommands = []portedCommand{
 	{Name: "init", Since: "0.46.0", Notes: "full feature parity with cli/lib/init.sh; hook copy advisory printed (bash refresh handles hooks); --with-gate/--multi-dev advisory only in Phase 1"},
 	{Name: "install", Since: "0.47.0", Notes: "full feature parity with cli/lib/install.sh; --force/--dry-run supported; per-file symlinks into ~/.claude/{agents,skills,rules,playbooks}; launcher symlink at ~/.local/bin/yakos; settings.json env merge"},
 	{Name: "uninstall", Since: "0.48.0", Notes: "full feature parity with cli/lib/uninstall.sh; removes YakOS-owned symlinks + launcher + pointer; --restore-settings/--root/--dry-run; partial-uninstall log+continue"},
+	{Name: "start", Since: "0.49.0", Notes: "full feature parity with cli/lib/start.sh; preflight banner + audit-log; exec deferred to runtime CLI; --dry-run/--print-agents/--safe/--allow-root/passthrough flags supported"},
 }
 
 type portedCommand struct {
@@ -121,6 +123,8 @@ func main() {
 		runInstall(yakosRoot, args[1:])
 	case "uninstall":
 		runUninstall(args[1:])
+	case "start":
+		runStart(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -1767,6 +1771,157 @@ func runUninstall(args []string) {
 
 	if _, err := uninstall.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "uninstall: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runStart implements `yakos start` natively in Go.
+//
+// Usage mirrors cli/lib/start.sh exactly:
+//
+//	yakos start [<name>] [flags]
+//
+// Resolves the project, selects a runtime, prints a preflight banner (including
+// the lead-dispatch-discipline one-liner), writes audit-log entries, and then
+// exec's the runtime CLI replacing the current process.
+//
+// The --dry-run and --print-agents modes exit without launching a runtime.
+//
+// YAKOS_ROOT is used for agent composition; it defaults to the value resolved
+// from the executable location (same as main()).
+func runStart(yakosRoot string, args []string) {
+	name := ""
+	runtime := ""
+	safe := false
+	allowRoot := false
+	noAgents := false
+	dryRun := false
+	printAgents := false
+	continueSession := false
+	resume := ""
+	fork := false
+	ide := false
+	bare := false
+	strictMCP := false
+	model := ""
+	var passthrough []string
+
+	// Honor YAKOS_ALLOW_ROOT env as equivalent to --allow-root.
+	if os.Getenv("YAKOS_ALLOW_ROOT") == "1" {
+		allowRoot = true
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			start.PrintHelp(os.Stdout)
+			os.Exit(0)
+
+		case arg == "--runtime":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "start: --runtime requires an id")
+				os.Exit(1)
+			}
+			runtime = args[i]
+		case len(arg) > 10 && arg[:10] == "--runtime=":
+			runtime = arg[10:]
+
+		case arg == "--safe":
+			safe = true
+		case arg == "--allow-root":
+			allowRoot = true
+		case arg == "--no-agents":
+			noAgents = true
+		case arg == "--dry-run":
+			dryRun = true
+		case arg == "--print-agents":
+			printAgents = true
+		case arg == "-c" || arg == "--continue":
+			continueSession = true
+		case arg == "--fork-session":
+			fork = true
+		case arg == "--ide":
+			ide = true
+		case arg == "--bare":
+			bare = true
+		case arg == "--strict-mcp":
+			strictMCP = true
+
+		case arg == "--resume":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "start: --resume requires a session id")
+				os.Exit(1)
+			}
+			resume = args[i]
+		case len(arg) > 9 && arg[:9] == "--resume=":
+			resume = arg[9:]
+
+		case arg == "--model":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "start: --model requires an alias")
+				os.Exit(1)
+			}
+			model = args[i]
+		case len(arg) > 8 && arg[:8] == "--model=":
+			model = arg[8:]
+
+		case arg == "--":
+			// Rest forwarded to runtime CLI.
+			passthrough = append(passthrough, args[i+1:]...)
+			i = len(args)
+
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "start: unknown flag %q (try --help)\n", arg)
+			os.Exit(1)
+
+		default:
+			if name == "" {
+				name = arg
+			} else {
+				fmt.Fprintf(os.Stderr, "start: unexpected positional argument %q\n", arg)
+				os.Exit(1)
+			}
+		}
+	}
+
+	// Resolve YAKOS_ROOT from env (bash entry-point may set it).
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := start.Config{
+		Name:        name,
+		YakosRoot:   yakosRoot,
+		HomeDir:     home,
+		Runtime:     runtime,
+		Safe:        safe,
+		AllowRoot:   allowRoot,
+		NoAgents:    noAgents,
+		DryRun:      dryRun,
+		PrintAgents: printAgents,
+		Continue:    continueSession,
+		Resume:      resume,
+		Fork:        fork,
+		IDE:         ide,
+		Bare:        bare,
+		StrictMCP:   strictMCP,
+		Model:       model,
+		Passthrough: passthrough,
+		Writer:      os.Stdout,
+		ErrWriter:   os.Stderr,
+	}
+
+	if _, err := start.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "start: %v\n", err)
 		os.Exit(1)
 	}
 }
