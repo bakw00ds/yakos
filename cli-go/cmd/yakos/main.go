@@ -28,13 +28,16 @@ import (
 	"github.com/bakw00ds/yakos/internal/auth"
 	"github.com/bakw00ds/yakos/internal/checkpoint"
 	"github.com/bakw00ds/yakos/internal/compact"
+	"github.com/bakw00ds/yakos/internal/completion"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/doctor"
 	"github.com/bakw00ds/yakos/internal/envcfg"
+	"github.com/bakw00ds/yakos/internal/githooks"
 	"github.com/bakw00ds/yakos/internal/initialize"
 	"github.com/bakw00ds/yakos/internal/install"
 	"github.com/bakw00ds/yakos/internal/kanban"
+	"github.com/bakw00ds/yakos/internal/mcp"
 	"github.com/bakw00ds/yakos/internal/memory"
 	"github.com/bakw00ds/yakos/internal/migrate"
 	"github.com/bakw00ds/yakos/internal/passthrough"
@@ -92,6 +95,9 @@ var portedCommands = []portedCommand{
 	{Name: "env", Since: "0.64.0", Notes: "full feature parity with cli/lib/env.sh; status/promote/validate/list subcommands; YAML environments section parsed; gh/glab/git PR tool detection; injectable GitFn+ExecFn+PRToolOverride for tests; atomic project-dir resolution"},
 	{Name: "standards", Since: "0.65.0", Notes: "full feature parity with cli/lib/standards.sh; list/enable/disable/check/init subcommands; all 6 Plan-4 standards; profile.type suggested matrix; atomic YAML rewrite (temp-rename, Q8); injectable PromptFn for init tests"},
 	{Name: "peer", Since: "0.66.0", Notes: "full feature parity with cli/lib/peer.sh; status/log/claim/release/claims/deadlock/propose-mode/respond-mode/handoff subcommands; mailbox package with O_APPEND+flock append + atomic temp-rename; byte-identical NDJSON format; injectable CoordDirFn+Now for tests"},
+	{Name: "mcp", Since: "0.67.0", Notes: "full feature parity with cli/lib/mcp.sh (Phase 1 read-only config management); install/uninstall/status/probe subcommands; atomic JSON writes (temp-rename, Q8); Windows %APPDATA%/claude/mcp.json per Q3 planner recommendation; native MCP server is Phase 2"},
+	{Name: "completion", Since: "0.68.0", Notes: "full feature parity with cli/lib/completion.sh; bash/zsh/fish/install subcommands; //go:embed templates (Decision D); shell auto-detection from $SHELL and YAKOS_COMPLETION_SHELL; BASH_COMPLETION_USER_DIR, YAKOS_ZSH_COMPDIR, XDG_CONFIG_HOME path overrides"},
+	{Name: "git-hooks", Since: "0.69.0", Notes: "full feature parity with cli/lib/git-hooks.sh; install/uninstall/status subcommands; --force/--promotion-gate flags; atomic temp-rename hook writes (Q8); .framework-hash sibling for YakOS ownership + drift detection; composed pre-push for version-gate+promotion-gate"},
 }
 
 type portedCommand struct {
@@ -193,6 +199,12 @@ func main() {
 		runStandards(args[1:])
 	case "peer":
 		runPeer(args[1:])
+	case "mcp":
+		runMCP(yakosRoot, args[1:])
+	case "completion":
+		runCompletion(args[1:])
+	case "git-hooks":
+		runGitHooks(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -3664,6 +3676,197 @@ func runPeer(args []string) {
 		if strings.Contains(msg, "peer rejected") {
 			os.Exit(1)
 		}
+		os.Exit(1)
+	}
+}
+
+// runMCP implements `yakos mcp` natively in Go.
+//
+// Usage mirrors cli/lib/mcp.sh exactly (Phase 1: read-only config management):
+//
+//	yakos mcp install   [--project <path>]   Add/refresh yakos-dispatch in .mcp.json.
+//	yakos mcp uninstall [--project <path>]   Remove yakos-dispatch from .mcp.json.
+//	yakos mcp status    [--project <path>]   Show whether the entry is present.
+//	yakos mcp probe                          Verify 'mcp' Python package is importable.
+//	yakos mcp --help                         Print help and exit 0.
+//
+// NOTE: the native MCP server is Phase 2 (Q3 design decision). This command
+// manages only the JSON registration that tells Claude Code where the server is.
+// MCP config file: <project>/.mcp.json. On Windows: %APPDATA%/claude/mcp.json.
+func runMCP(yakosRoot string, args []string) {
+	if len(args) == 0 {
+		mcp.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+	rest := args[1:]
+
+	switch sub {
+	case "--help", "-h", "help":
+		mcp.PrintHelp(os.Stdout)
+		os.Exit(0)
+	case "probe":
+		// probe takes no flags.
+		if len(rest) > 0 {
+			fmt.Fprintf(os.Stderr, "mcp probe: unexpected argument %q\n", rest[0])
+			os.Exit(1)
+		}
+	case "install", "uninstall", "status":
+		// These accept optional --project flag.
+	default:
+		fmt.Fprintf(os.Stderr, "mcp: unknown subcommand %q (try --help)\n", sub)
+		os.Exit(1)
+	}
+
+	// Resolve YAKOS_ROOT from env.
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+
+	project := ""
+	if sub != "probe" {
+		p, err := mcp.ParseArgs(sub, rest)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+			os.Exit(1)
+		}
+		project = p
+	}
+
+	cfg := mcp.Config{
+		Subcommand: sub,
+		Project:    project,
+		YakosRoot:  yakosRoot,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	if _, err := mcp.Run(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+}
+
+// runCompletion implements `yakos completion` natively in Go.
+//
+// Usage mirrors cli/lib/completion.sh exactly:
+//
+//	yakos completion bash      Print the bash completion script to stdout.
+//	yakos completion zsh       Print the zsh completion script to stdout.
+//	yakos completion fish      Print the fish completion script to stdout.
+//	yakos completion install   Auto-detect shell and write completion file.
+//	yakos completion --help    Print help and exit 0.
+//
+// Shell detection for install:
+//  1. YAKOS_COMPLETION_SHELL env var
+//  2. $SHELL suffix (bash/zsh/fish)
+//
+// Install paths:
+//
+//	bash: BASH_COMPLETION_USER_DIR or ~/.local/share/bash-completion/completions/yakos
+//	zsh:  YAKOS_ZSH_COMPDIR or ~/.zsh/completions/_yakos
+//	fish: XDG_CONFIG_HOME/fish/completions/yakos.fish or ~/.config/fish/completions/yakos.fish
+func runCompletion(args []string) {
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+	}
+
+	switch sub {
+	case "--help", "-h", "help":
+		completion.PrintHelp(os.Stdout)
+		os.Exit(0)
+	case "bash", "zsh", "fish", "install", "":
+		// valid
+	default:
+		fmt.Fprintf(os.Stderr, "completion: unknown subcommand %q (try --help)\n", sub)
+		os.Exit(1)
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := completion.Config{
+		Subcommand: sub,
+		HomeDir:    home,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	if _, err := completion.Run(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+}
+
+// runGitHooks implements `yakos git-hooks` natively in Go.
+//
+// Usage mirrors cli/lib/git-hooks.sh exactly:
+//
+//	yakos git-hooks install   [--force] [--promotion-gate]
+//	yakos git-hooks uninstall
+//	yakos git-hooks status
+//	yakos git-hooks --help
+//
+// Must be run from inside a git repository. Discovers the repo root via
+// `git rev-parse --show-toplevel`.
+//
+// Gate source: $YAKOS_ROOT/lib/hooks/git/pre-push-version-gate.sh
+// Promotion gate: $YAKOS_ROOT/lib/hooks/git/pre-push-promotion-gate.sh
+func runGitHooks(yakosRoot string, args []string) {
+	if len(args) == 0 {
+		githooks.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	// Resolve YAKOS_ROOT from env.
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+
+	sub := args[0]
+	rest := args[1:]
+
+	switch sub {
+	case "--help", "-h", "help":
+		githooks.PrintHelp(os.Stdout)
+		os.Exit(0)
+	case "install", "uninstall", "status":
+		// valid
+	default:
+		githooks.PrintHelp(os.Stderr)
+		fmt.Fprintf(os.Stderr, "git-hooks: unknown subcommand %q\n", sub)
+		os.Exit(2)
+	}
+
+	force := false
+	withPromotion := false
+	for _, arg := range rest {
+		switch arg {
+		case "--force":
+			force = true
+		case "--promotion-gate":
+			withPromotion = true
+		default:
+			fmt.Fprintf(os.Stderr, "git-hooks %s: unknown flag %q\n", sub, arg)
+			os.Exit(2)
+		}
+	}
+
+	cfg := githooks.Config{
+		Subcommand:        sub,
+		Force:             force,
+		WithPromotionGate: withPromotion,
+		YakosRoot:         yakosRoot,
+		Writer:            os.Stdout,
+		ErrWriter:         os.Stderr,
+	}
+
+	if _, err := githooks.Run(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}
 }

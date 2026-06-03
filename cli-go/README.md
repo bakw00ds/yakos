@@ -8,9 +8,9 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update, quickstart, auth, memory, agent, session, migrate, plugin, teach, soul, retro, skill, compact, checkpoint, env, standards, peer ported.** The
+**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update, quickstart, auth, memory, agent, session, migrate, plugin, teach, soul, retro, skill, compact, checkpoint, env, standards, peer, mcp, completion, git-hooks ported.** The
 `validate`, `cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, `team`, `archive`, `init`, `install`, `uninstall`, `start`, `update`, `quickstart`, `auth`, `memory`, `agent`,
-`session`, `migrate`, `plugin`, `teach`, `soul`, `retro`, `skill`, `compact`, `checkpoint`, `env`, `standards`, and `peer` subcommands are implemented natively in Go (ranks 2–31 in `docs/go-port-plan.md`). The `kanban serve`
+`session`, `migrate`, `plugin`, `teach`, `soul`, `retro`, `skill`, `compact`, `checkpoint`, `env`, `standards`, `peer`, `mcp`, `completion`, and `git-hooks` subcommands are implemented natively in Go (ranks 2–33, 38 in `docs/go-port-plan.md`). The `kanban serve`
 submode is deferred to rank 41. Worktree cleanup at archive time is explicitly NOT in scope (same
 caveat as bash; manual in v0.1). Hook script installation in `init` prints an advisory directing to
 `yakos refresh` (bash handles hook copies in Phase 1). `yakos start` exec's the runtime CLI replacing
@@ -161,6 +161,9 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos retro <sub> [args]` | Go (full feature parity with `cli/lib/retro.sh`; now/disable/enable/status/last/history subcommands; sentinel flag at `~/.yakos-state/retro-disabled`; atomic writes; .retro-due marker; session resolution via env/agent-control walk) |
 | `yakos skill <sub> [args]` | Go (full feature parity with `cli/lib/skill.sh`; candidates/promote/reject/defer/stats subcommands; graveyard + fingerprint dedup (§16.1); calibration warnings (§16.2); atomic writes; validate gate on promote; --global promote to lib/skills/) |
 | `yakos compact <sub> [args]` | Go (full feature parity with `cli/lib/compact.sh`; now/threshold/history subcommands; atomic writes for settings.json; O_APPEND for compact-log.ndjson; M3.1 auto-send deferred) |
+| `yakos mcp <sub> [args]` | Go (Phase 1 read-only config management: install/uninstall/status/probe; native MCP server is Phase 2 Q3; atomic JSON writes; Windows %APPDATA%/claude/mcp.json) |
+| `yakos completion <sub>` | Go (bash/zsh/fish/install subcommands; //go:embed templates; shell auto-detection; BASH_COMPLETION_USER_DIR/YAKOS_ZSH_COMPDIR/XDG_CONFIG_HOME overrides) |
+| `yakos git-hooks <sub> [--force] [--promotion-gate]` | Go (full feature parity with `cli/lib/git-hooks.sh`; install/uninstall/status; atomic hook writes; .framework-hash sibling for YakOS ownership + drift detection; composed pre-push for --promotion-gate) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 
