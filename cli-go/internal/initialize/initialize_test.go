@@ -33,6 +33,7 @@ package initialize
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -794,5 +795,296 @@ func TestTemplateKinds(t *testing.T) {
 		if !found {
 			t.Errorf("TemplateKinds missing %q", k)
 		}
+	}
+}
+
+// ---- Per-template minimum required files ------------------------------------
+
+// TestAllNonBaseTemplatesHaveMinimumFiles verifies every non-base template
+// ships yakos.yml, a .gitignore overlay, and at least 2 agent .md files.
+func TestAllNonBaseTemplatesHaveMinimumFiles(t *testing.T) {
+	nonBaseKinds := []string{"rails", "go", "python", "node", "rust", "static-site"}
+	for _, kind := range nonBaseKinds {
+		kind := kind
+		t.Run(kind, func(t *testing.T) {
+			files, err := TemplateFiles(kind)
+			if err != nil {
+				t.Fatalf("TemplateFiles(%q): %v", kind, err)
+			}
+
+			fileSet := make(map[string]bool, len(files))
+			for _, f := range files {
+				fileSet[f] = true
+			}
+
+			// yakos.yml must exist.
+			if !fileSet["templates/"+kind+"/yakos.yml"] {
+				t.Errorf("%s: missing yakos.yml", kind)
+			}
+
+			// .gitignore overlay must exist.
+			if !fileSet["templates/"+kind+"/.gitignore"] {
+				t.Errorf("%s: missing .gitignore overlay", kind)
+			}
+
+			// AGENTS.md must exist.
+			if !fileSet["templates/"+kind+"/AGENTS.md"] {
+				t.Errorf("%s: missing AGENTS.md overlay", kind)
+			}
+
+			// At least 2 agent .md files must exist under .claude/agents/.
+			agentPrefix := "templates/" + kind + "/.claude/agents/"
+			agentCount := 0
+			for _, f := range files {
+				if strings.HasPrefix(f, agentPrefix) && strings.HasSuffix(f, ".md") {
+					agentCount++
+				}
+			}
+			if agentCount < 2 {
+				t.Errorf("%s: expected at least 2 agent .md files under .claude/agents/; got %d", kind, agentCount)
+			}
+		})
+	}
+}
+
+// TestAllAgentFilesHaveValidFrontmatter verifies every agent .md in every
+// non-base template has parseable YAML frontmatter.
+func TestAllAgentFilesHaveValidFrontmatter(t *testing.T) {
+	nonBaseKinds := []string{"rails", "go", "python", "node", "rust", "static-site"}
+	for _, kind := range nonBaseKinds {
+		kind := kind
+		t.Run(kind, func(t *testing.T) {
+			files, err := TemplateFiles(kind)
+			if err != nil {
+				t.Fatalf("TemplateFiles(%q): %v", kind, err)
+			}
+			agentPrefix := "templates/" + kind + "/.claude/agents/"
+			for _, f := range files {
+				if !strings.HasPrefix(f, agentPrefix) || !strings.HasSuffix(f, ".md") {
+					continue
+				}
+				data, readErr := templates.ReadFile(f)
+				if readErr != nil {
+					t.Errorf("%s: cannot read embedded file %s: %v", kind, f, readErr)
+					continue
+				}
+				if err := checkFrontmatter(data); err != nil {
+					t.Errorf("%s: agent file %s: %v", kind, f, err)
+				}
+			}
+		})
+	}
+}
+
+// checkFrontmatter does a lightweight check: file starts with "---\n" and
+// has a closing "---" within 50 lines. Does not require the validate package.
+func checkFrontmatter(data []byte) error {
+	lines := strings.Split(string(data), "\n")
+	if len(lines) == 0 || strings.TrimRight(lines[0], "\r") != "---" {
+		return fmt.Errorf("does not start with YAML frontmatter fence '---'")
+	}
+	limit := 50
+	if len(lines) < limit {
+		limit = len(lines)
+	}
+	for i := 1; i < limit; i++ {
+		if strings.TrimRight(lines[i], "\r") == "---" {
+			return nil
+		}
+	}
+	return fmt.Errorf("no closing YAML frontmatter fence '---' within 50 lines")
+}
+
+// TestKindGitignoreContainsLangPatterns verifies each kind's .gitignore
+// overlay contains at least one language/framework-specific pattern.
+func TestKindGitignoreContainsLangPatterns(t *testing.T) {
+	tests := []struct {
+		kind    string
+		pattern string
+	}{
+		{"rails", "tmp/"},
+		{"go", "*.test"},
+		{"python", "__pycache__/"},
+		{"node", "node_modules/"},
+		{"rust", "target/"},
+		{"static-site", "_site/"},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.kind, func(t *testing.T) {
+			data, err := templates.ReadFile("templates/" + tc.kind + "/.gitignore")
+			if err != nil {
+				t.Fatalf("read .gitignore for %s: %v", tc.kind, err)
+			}
+			if !strings.Contains(string(data), tc.pattern) {
+				t.Errorf("%s .gitignore should contain %q; got:\n%s", tc.kind, tc.pattern, string(data))
+			}
+		})
+	}
+}
+
+// TestKindYakosYMLHasCommands verifies each kind's yakos.yml contains the
+// commands block with test/lint/build entries.
+func TestKindYakosYMLHasCommands(t *testing.T) {
+	tests := []struct {
+		kind        string
+		testCmd     string
+		profileType string
+	}{
+		{"rails", "bundle exec rspec", "web-app"},
+		{"go", "go test ./...", "service"},
+		{"python", "pytest", "service"},
+		{"node", "npm test", "web-app"},
+		{"rust", "cargo test", "cli-tool"},
+		{"static-site", "build", "static-site"},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.kind, func(t *testing.T) {
+			data, err := templates.ReadFile("templates/" + tc.kind + "/yakos.yml")
+			if err != nil {
+				t.Fatalf("read yakos.yml for %s: %v", tc.kind, err)
+			}
+			content := string(data)
+			if !strings.Contains(content, tc.testCmd) {
+				t.Errorf("%s yakos.yml should contain test command %q; got:\n%s", tc.kind, tc.testCmd, content)
+			}
+			if !strings.Contains(content, tc.profileType) {
+				t.Errorf("%s yakos.yml should mention profile type %q; got:\n%s", tc.kind, tc.profileType, content)
+			}
+			if !strings.Contains(content, "commands:") {
+				t.Errorf("%s yakos.yml should have a commands: block", tc.kind)
+			}
+		})
+	}
+}
+
+// TestRun_KindAgentsWrittenToProject verifies that running init with a non-base
+// template writes agent .md files into the project's .claude/agents/ directory.
+func TestRun_KindAgentsWrittenToProject(t *testing.T) {
+	proj := newGitRepo(t)
+	cfg := baseConfig(t, "agenttest", proj)
+	cfg.Template = "go"
+
+	if _, err := Run(cfg); err != nil {
+		t.Fatalf("Run(--template go): %v", err)
+	}
+
+	agentsDir := filepath.Join(proj, ".claude", "agents")
+	entries, err := os.ReadDir(agentsDir)
+	if err != nil {
+		t.Fatalf("ReadDir .claude/agents: %v", err)
+	}
+	var agents []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+			agents = append(agents, e.Name())
+		}
+	}
+	if len(agents) < 2 {
+		t.Errorf("expected at least 2 agent .md files in .claude/agents/; got %d: %v", len(agents), agents)
+	}
+
+	// backend.md must be present.
+	found := false
+	for _, a := range agents {
+		if a == "backend.md" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("backend.md not found in .claude/agents/; got: %v", agents)
+	}
+}
+
+// TestRun_KindGitignoreAppended verifies that running init with a non-base
+// template appends kind-specific .gitignore patterns to the project .gitignore.
+func TestRun_KindGitignoreAppended(t *testing.T) {
+	proj := newGitRepo(t)
+	cfg := baseConfig(t, "gitignore-kind-test", proj)
+	cfg.Template = "python"
+
+	if _, err := Run(cfg); err != nil {
+		t.Fatalf("Run(--template python): %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(proj, ".gitignore"))
+	if err != nil {
+		t.Fatalf("ReadFile .gitignore: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "__pycache__/") {
+		t.Errorf("python .gitignore pattern '__pycache__/' not found in project .gitignore:\n%s", got)
+	}
+}
+
+// TestRun_KindAGENTSMDOverride verifies that a non-base template writes its
+// own AGENTS.md instead of the base AGENTS.md.
+func TestRun_KindAGENTSMDOverride(t *testing.T) {
+	proj := newGitRepo(t)
+	cfg := baseConfig(t, "agentsmd-test", proj)
+	cfg.Template = "rust"
+
+	if _, err := Run(cfg); err != nil {
+		t.Fatalf("Run(--template rust): %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(proj, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("ReadFile AGENTS.md: %v", err)
+	}
+	// The rust AGENTS.md overlay must mention Rust-specific content.
+	if !strings.Contains(string(data), "Rust") {
+		t.Errorf("AGENTS.md for rust template should contain 'Rust'; got:\n%s", string(data))
+	}
+}
+
+// TestRun_AllTemplates verifies Run completes successfully for every non-base
+// template and writes the minimum required project files.
+func TestRun_AllTemplates(t *testing.T) {
+	for _, kind := range []string{"rails", "go", "python", "node", "rust", "static-site"} {
+		kind := kind
+		t.Run(kind, func(t *testing.T) {
+			proj := newGitRepo(t)
+			cfg := baseConfig(t, "alltest-"+kind, proj)
+			cfg.Template = kind
+
+			res, err := Run(cfg)
+			if err != nil {
+				t.Fatalf("Run(--template %s): %v", kind, err)
+			}
+
+			// yakos.yml must have been written.
+			yakosYML := filepath.Join(proj, ".yakos.yml")
+			if _, err := os.Stat(yakosYML); err != nil {
+				t.Errorf("%s: .yakos.yml not found: %v", kind, err)
+			}
+
+			// AGENTS.md must have been written.
+			agentsMD := filepath.Join(proj, "AGENTS.md")
+			if _, err := os.Stat(agentsMD); err != nil {
+				t.Errorf("%s: AGENTS.md not found: %v", kind, err)
+			}
+
+			// .claude/agents/ must have at least 2 agent files.
+			agentsDir := filepath.Join(proj, ".claude", "agents")
+			entries, readErr := os.ReadDir(agentsDir)
+			if readErr != nil {
+				t.Errorf("%s: .claude/agents/ not found: %v", kind, readErr)
+			} else {
+				count := 0
+				for _, e := range entries {
+					if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+						count++
+					}
+				}
+				if count < 2 {
+					t.Errorf("%s: expected at least 2 agent files in .claude/agents/; got %d", kind, count)
+				}
+			}
+
+			_ = res
+		})
 	}
 }

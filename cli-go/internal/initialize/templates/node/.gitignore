@@ -1,0 +1,12 @@
+# yakOS node template — language/framework additions
+# Appended by `yakos init --template node`.
+
+node_modules/
+dist/
+build/
+.next/
+.nuxt/
+.cache/
+.env.local
+.env.*.local
+*.tsbuildinfo

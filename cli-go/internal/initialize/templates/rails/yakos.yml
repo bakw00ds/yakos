@@ -7,14 +7,26 @@ yakos: 0.9
 profile:
   type: web-app
   standards:
-    logging: false
-    changelog-ui: false
-    monitors: false
-    feedback: false
-    architecture-viz: false
-    about-page: false
+    logging: false           # Standard 1 — structured service logs (e.g. lograge)
+    changelog-ui: false      # Standard 2 — version + CHANGELOG visible in UI
+    monitors: false          # Standard 3 — supervisor configs + /healthz
+    feedback: false          # Standard 4 — user feedback widget
+    architecture-viz: false  # Standard 5 — architecture page
+    about-page: false        # Standard 6 — about page for new users
 
-# Rails-specific notes:
-#   - default runtime: claude
-#   - test command: bundle exec rspec
-#   - migration guard: active (never run migrations without review)
+commands:
+  test:  bundle exec rspec
+  lint:  bundle exec rubocop
+  build: bundle install
+
+# ---- budget guardrails (v0.34+) --------------------------------------------
+# budget:
+#   enabled: true
+#   max_tool_calls: 500
+#   max_wall_seconds: 7200
+#   max_repeat_same_tool: 8
+
+# ---- Rails-specific notes --------------------------------------------------
+# migration guard: never run db:migrate without human review.
+# Controller changes must be covered by a request spec.
+# Model changes must be covered by a model spec under spec/models/.
