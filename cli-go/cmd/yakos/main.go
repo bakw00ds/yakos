@@ -3848,13 +3848,35 @@ func runCompact(args []string) {
 		ErrWriter:  os.Stderr,
 	}
 
-	// threshold subcommand: optional positional N.
-	if sub == "threshold" && len(rest) > 0 {
-		if len(rest) > 1 {
-			fmt.Fprintln(os.Stderr, "compact threshold: too many arguments (expected at most one: N)")
+	// threshold subcommand: supports positional N and --auto N flag.
+	//
+	//   yakos compact threshold          → show all three thresholds
+	//   yakos compact threshold show     → same
+	//   yakos compact threshold N        → set notice threshold to N
+	//   yakos compact threshold --auto N → set auto-compact threshold to N
+	if sub == "threshold" {
+		autoArg := ""
+		positional := []string{}
+		for i := 0; i < len(rest); i++ {
+			if rest[i] == "--auto" {
+				if i+1 >= len(rest) {
+					fmt.Fprintln(os.Stderr, "compact threshold: --auto requires a value (e.g. --auto 85)")
+					os.Exit(1)
+				}
+				autoArg = rest[i+1]
+				i++ // consume the value
+			} else {
+				positional = append(positional, rest[i])
+			}
+		}
+		if len(positional) > 1 {
+			fmt.Fprintln(os.Stderr, "compact threshold: too many arguments")
 			os.Exit(1)
 		}
-		cfg.ThresholdArg = rest[0]
+		if len(positional) == 1 {
+			cfg.ThresholdArg = positional[0]
+		}
+		cfg.AutoArg = autoArg
 	}
 
 	if _, err := compact.Run(cfg); err != nil {
