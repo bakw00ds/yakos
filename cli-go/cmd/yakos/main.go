@@ -54,6 +54,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/start"
 	"github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/planscore"
+	"github.com/bakw00ds/yakos/internal/routing"
 	"github.com/bakw00ds/yakos/internal/supervise"
 	"github.com/bakw00ds/yakos/internal/teach"
 	"github.com/bakw00ds/yakos/internal/workclose"
@@ -104,6 +105,7 @@ var portedCommands = []portedCommand{
 	{Name: "supervise", Since: "0.70.0", Notes: "full feature parity with cli/lib/supervise.sh; enable/disable/status/tail/clear/set/pending/ack/ack-all subcommands; PRs #28-#39 supervisor redesign preserved (gate-on-CRITICAL, ack tracking, finding IDs); atomic YAML writes (temp-rename, Q8); append-only supervisor-acks.ndjson; YAKOS_SUPERVISOR_DISABLE emergency bypass"},
 	{Name: "plan score", Since: "0.71.0", Notes: "full feature parity with cli/lib/plan-score.sh; show/history/override/correlate subcommands; reads plan-quality-log.ndjson; Pearson r + quartile + threshold → outcome report in correlate; .plan-blocked marker removal on override; injectable PlanQualityLog+CurrentDir+Now for tests"},
 	{Name: "work close", Since: "0.71.0", Notes: "full feature parity with cli/lib/work-close.sh; appends plan_outcome record to plan-quality-log.ndjson; git diff stats, dispatch-log sums, rework cycles, first_try_pass, scope_creep_ratio; non-blocking (missing data → null); injectable GitFn+PromptFn+Now for tests"},
+	{Name: "model-routing", Since: "0.72.0", Notes: "full feature parity with cli/lib/model-routing.sh (1035 LOC bash, rank 36); eval/list/show/promote/reject/history subcommands; Wilson 95% CI lower bound; per-run + weekly cost guards; anti-self-congratulation guard; backup+atomic frontmatter rewrite; injectable DispatchFn+JudgeFn+ValidateFn for tests"},
 }
 
 type portedCommand struct {
@@ -217,6 +219,8 @@ func main() {
 		runPlan(yakosRoot, args[1:])
 	case "work":
 		runWork(args[1:])
+	case "model-routing":
+		runModelRouting(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -4332,6 +4336,228 @@ func runWorkClose(args []string) {
 	}
 
 	if _, err := workclose.Run(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+}
+
+// runModelRouting implements `yakos model-routing` natively in Go.
+//
+// Usage mirrors cli/lib/model-routing.sh exactly:
+//
+//	yakos model-routing eval <agent-id> [--judge <agent>] [--max-cost-usd <n>]
+//	                                     [--cases <glob>] [--project <path>]
+//	yakos model-routing list
+//	yakos model-routing show <agent-id>
+//	yakos model-routing promote <agent-id> [--global]
+//	yakos model-routing reject <agent-id> [--note "<text>"] [--force]
+//	yakos model-routing history [<agent-id>]
+//
+// YAKOS_ROOT is resolved from the executable location (same as all other subcommands).
+func runModelRouting(yakosRoot string, args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		routing.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+	rest := args[1:]
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := routing.Config{
+		Subcommand: sub,
+		YakosRoot:  yakosRoot,
+		HomeDir:    home,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	// Apply YAKOS_ROOT override from env (matches other subcommands).
+	if envRoot := os.Getenv("YAKOS_ROOT"); envRoot != "" {
+		cfg.YakosRoot = envRoot
+	}
+
+	switch sub {
+	case "eval":
+		for i := 0; i < len(rest); i++ {
+			arg := rest[i]
+			switch {
+			case arg == "--judge":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "model-routing eval: --judge requires a value")
+					os.Exit(1)
+				}
+				cfg.Judge = rest[i]
+			case len(arg) > 8 && arg[:8] == "--judge=":
+				cfg.Judge = arg[8:]
+			case arg == "--max-cost-usd":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "model-routing eval: --max-cost-usd requires a value")
+					os.Exit(1)
+				}
+				v, err := strconv.ParseFloat(rest[i], 64)
+				if err != nil || v <= 0 {
+					fmt.Fprintf(os.Stderr, "model-routing eval: --max-cost-usd %q must be a positive number\n", rest[i])
+					os.Exit(1)
+				}
+				cfg.MaxCostUSD = v
+			case len(arg) > 15 && arg[:15] == "--max-cost-usd=":
+				v, err := strconv.ParseFloat(arg[15:], 64)
+				if err != nil || v <= 0 {
+					fmt.Fprintf(os.Stderr, "model-routing eval: --max-cost-usd value %q must be a positive number\n", arg[15:])
+					os.Exit(1)
+				}
+				cfg.MaxCostUSD = v
+			case arg == "--cases":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "model-routing eval: --cases requires a value")
+					os.Exit(1)
+				}
+				cfg.CasesGlob = rest[i]
+			case len(arg) > 8 && arg[:8] == "--cases=":
+				cfg.CasesGlob = arg[8:]
+			case arg == "--project":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "model-routing eval: --project requires a value")
+					os.Exit(1)
+				}
+				cfg.Project = rest[i]
+			case len(arg) > 10 && arg[:10] == "--project=":
+				cfg.Project = arg[10:]
+			case arg == "-h" || arg == "--help":
+				routing.PrintHelp(os.Stdout)
+				os.Exit(0)
+			case len(arg) > 0 && arg[0] == '-':
+				fmt.Fprintf(os.Stderr, "model-routing eval: unknown flag %q\n", arg)
+				os.Exit(1)
+			default:
+				if cfg.AgentID == "" {
+					cfg.AgentID = arg
+				} else {
+					fmt.Fprintf(os.Stderr, "model-routing eval: unexpected argument %q\n", arg)
+					os.Exit(1)
+				}
+			}
+		}
+
+	case "list":
+		for _, arg := range rest {
+			if arg == "-h" || arg == "--help" {
+				routing.PrintHelp(os.Stdout)
+				os.Exit(0)
+			}
+			fmt.Fprintf(os.Stderr, "model-routing list: unexpected argument %q\n", arg)
+			os.Exit(1)
+		}
+
+	case "show":
+		for _, arg := range rest {
+			if arg == "-h" || arg == "--help" {
+				routing.PrintHelp(os.Stdout)
+				os.Exit(0)
+			}
+			if len(arg) > 0 && arg[0] == '-' {
+				fmt.Fprintf(os.Stderr, "model-routing show: unknown flag %q\n", arg)
+				os.Exit(1)
+			}
+			if cfg.AgentID == "" {
+				cfg.AgentID = arg
+			} else {
+				fmt.Fprintf(os.Stderr, "model-routing show: unexpected argument %q\n", arg)
+				os.Exit(1)
+			}
+		}
+
+	case "promote":
+		for _, arg := range rest {
+			switch arg {
+			case "--global":
+				cfg.Global = true
+			case "-h", "--help":
+				routing.PrintHelp(os.Stdout)
+				os.Exit(0)
+			default:
+				if len(arg) > 0 && arg[0] == '-' {
+					fmt.Fprintf(os.Stderr, "model-routing promote: unknown flag %q\n", arg)
+					os.Exit(1)
+				}
+				if cfg.AgentID == "" {
+					cfg.AgentID = arg
+				} else {
+					fmt.Fprintf(os.Stderr, "model-routing promote: unexpected argument %q\n", arg)
+					os.Exit(1)
+				}
+			}
+		}
+
+	case "reject":
+		for i := 0; i < len(rest); i++ {
+			arg := rest[i]
+			switch {
+			case arg == "--note":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "model-routing reject: --note requires a value")
+					os.Exit(1)
+				}
+				cfg.Note = rest[i]
+			case len(arg) > 7 && arg[:7] == "--note=":
+				cfg.Note = arg[7:]
+			case arg == "--force":
+				cfg.Force = true
+			case arg == "-h" || arg == "--help":
+				routing.PrintHelp(os.Stdout)
+				os.Exit(0)
+			case len(arg) > 0 && arg[0] == '-':
+				fmt.Fprintf(os.Stderr, "model-routing reject: unknown flag %q\n", arg)
+				os.Exit(1)
+			default:
+				if cfg.AgentID == "" {
+					cfg.AgentID = arg
+				} else {
+					fmt.Fprintf(os.Stderr, "model-routing reject: unexpected argument %q\n", arg)
+					os.Exit(1)
+				}
+			}
+		}
+
+	case "history":
+		for _, arg := range rest {
+			if arg == "-h" || arg == "--help" {
+				routing.PrintHelp(os.Stdout)
+				os.Exit(0)
+			}
+			if len(arg) > 0 && arg[0] == '-' {
+				fmt.Fprintf(os.Stderr, "model-routing history: unknown flag %q\n", arg)
+				os.Exit(1)
+			}
+			if cfg.FilterAgent == "" {
+				cfg.FilterAgent = arg
+			} else {
+				fmt.Fprintf(os.Stderr, "model-routing history: unexpected argument %q\n", arg)
+				os.Exit(1)
+			}
+		}
+
+	case "-h", "--help", "help", "":
+		routing.PrintHelp(os.Stdout)
+		os.Exit(0)
+
+	default:
+		routing.PrintHelp(os.Stderr)
+		fmt.Fprintf(os.Stderr, "model-routing: unknown subcommand %q\n", sub)
+		os.Exit(64)
+	}
+
+	if _, err := routing.Run(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}
