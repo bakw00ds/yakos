@@ -254,9 +254,11 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 		if base == ".gitkeep" || base == "README.md" {
 			return nil
 		}
-		// Skip files under git/
+		// Skip files under git/ (admin-only, not deployed).
+		// Skip files under legacy/ (post-F6 holding area; canonical entries are
+		// the symlinks at lib/hooks/<name>.sh that refresh already visits).
 		parts := strings.SplitN(rel, string(filepath.Separator), 2)
-		if len(parts) > 0 && parts[0] == "git" {
+		if len(parts) > 0 && (parts[0] == "git" || parts[0] == "legacy") {
 			return nil
 		}
 
