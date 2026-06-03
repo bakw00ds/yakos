@@ -193,7 +193,10 @@ func (h *Hook) runPostToolUse(out hooktype.HookOutput, in hooktype.HookInput) (h
 	if filePath == "" {
 		filePath = stringField(in.Payload, "file_path")
 	}
-	if !strings.HasSuffix(filePath, filepath.FromSlash("/work/current/plan.md")) {
+	// Normalise to forward slashes before the suffix check so that Windows
+	// paths (which use "\") and mixed-separator paths both match the
+	// canonical "/work/current/plan.md" suffix.
+	if !strings.HasSuffix(filepath.ToSlash(filePath), "/work/current/plan.md") {
 		return out, nil
 	}
 
