@@ -72,6 +72,26 @@ The clock on "one release cycle" starts the moment the file lands in
 
 ---
 
+## Release tracker (F6 move criteria)
+
+Per Q7 of the hook-port plan, the `.sh` files in `lib/hooks/` move here
+after **2 releases of operator opt-in stability with zero parity
+divergence**. This section is the authoritative tracker.
+
+Update this list manually when each release is cut. When the list reaches
+2 stable releases, open a PR to move the `.sh` files per the criteria
+above.
+
+| # | Release | Date | Notes |
+|---|---|---|---|
+| 1 | v0.37.0.0 | 2026-06-03 | Go-native hooks ship; `YAKOS_HOOKS=bash` remains the default |
+
+**Target for move:** after release #2 appears in this table with zero
+parity-divergence reports filed in
+`work/current/logs/hook-parity-divergence.ndjson` or the issue tracker.
+
+---
+
 ## Do NOT add files here manually
 
 Files land here via the automated lifecycle process above, not by hand.

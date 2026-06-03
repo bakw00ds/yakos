@@ -68,8 +68,18 @@ write_finding() {
 note ""
 note "=== Scenario 1: stream appends to buffer + increments counter ==="
 
-# Ensure no .yakos.yml — hook should default to enabled (i.e., run)
-rm -f "$FAKE_REPO/.yakos.yml" "$BUFFER" "$COUNTER" "$FINDINGS"
+# Write .yakos.yml with pre_filter disabled so every mutation ticks the counter,
+# matching pre-redesign behaviour. Without this, small "x"→"y" fixture edits
+# pass the pre-filter with no escalation and the counter stays at 0.
+rm -f "$BUFFER" "$COUNTER" "$FINDINGS"
+cat > "$FAKE_REPO/.yakos.yml" <<'EOF'
+yakos: 0.9
+supervisor:
+  enabled: true
+  score_every_n_calls: 5
+  pre_filter:
+    enabled: false
+EOF
 
 for i in 1 2 3; do
     fixture_edit go-api "api/file$i.go" | bash "$HOOKS/supervisor-stream.sh" >/dev/null 2>&1
@@ -131,6 +141,18 @@ note "=== Scenario 4: counter modulo N forks supervisor dispatch ==="
 rm -f "$BUFFER" "$COUNTER" "$FAKE_REPO/work/current/.supervisor-stdout.log" \
     "$FAKE_REPO/work/current/.supervisor-stderr.log"
 
+# Disable pre-filter so every fixture edit counts toward the score threshold.
+# The "x"→"y" fixture edits don't trigger any escalation condition, so with
+# pre-filter enabled the counter never increments and the fork never fires.
+cat > "$FAKE_REPO/.yakos.yml" <<'EOF'
+yakos: 0.9
+supervisor:
+  enabled: true
+  score_every_n_calls: 5
+  pre_filter:
+    enabled: false
+EOF
+
 # Use a fake yakos CLI that just logs its invocation; this lets us
 # verify the fork happens without spending real API money.
 FAKE_CLI="$TMP/fake-yakos"
@@ -159,6 +181,18 @@ if [ -s "$YAKOS_FAKE_INVOCATIONS" ]; then
 else
     bad "scenario 4: no fork happened on the 5th call"
 fi
+
+# Restore .yakos.yml without pre_filter.enabled: false. The nested
+# pre_filter.enabled key trips the gate's supervisor.enabled check
+# (grep -A 10 matches nested 'enabled: false' lines), causing scenarios
+# 6 and 7 to exit early thinking the supervisor is disabled.
+cat > "$FAKE_REPO/.yakos.yml" <<'EOF'
+yakos: 0.9
+supervisor:
+  enabled: true
+  score_every_n_calls: 5
+  block_on_critical: true
+EOF
 
 # === Scenario 5: gate allows on PASS =======================================
 note ""

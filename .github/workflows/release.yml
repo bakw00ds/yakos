@@ -4,9 +4,19 @@ name: Release
 # Builds the Go binary for all 5 supported platforms, computes SHA256
 # checksums, and creates a GitHub Release with all binaries attached.
 #
-# Signing: NOT performed in Phase 1. macOS Gatekeeper + Windows SmartScreen
-# will show first-run warnings. Notarization / code-signing is tracked as a
-# Phase 1.5 item — add it here when the Apple/MS certificates are in place.
+# Signing: secret-gated — the workflow signs when the required secrets are
+# configured and skips signing (build still succeeds unsigned) when they
+# are absent. See the "sign-macos" and "sign-windows" jobs below.
+#
+#   macOS secrets (all required for signing + notarization):
+#     APPLE_CERT_BASE64, APPLE_CERT_PASSWORD, APPLE_DEVELOPER_ID,
+#     APPLE_TEAM_ID, APPLE_API_KEY_BASE64, APPLE_API_KEY_ID,
+#     APPLE_API_KEY_ISSUER_ID
+#
+#   Windows secrets (both required for Authenticode signing):
+#     WINDOWS_CERT_BASE64, WINDOWS_CERT_PASSWORD
+#
+#   Linux: not typically signed; SHA256 checksums are provided instead.
 #
 # Actions pinned:
 #   actions/checkout       v4  (sha: 11bd71901bbe5b1630ceea73d27597364c9af683)
@@ -105,9 +115,190 @@ jobs:
             dist/${{ env.ASSET }}.sha256
           retention-days: 1
 
+  # ---------------------------------------------------------------------------
+  # sign-macos: Apple Developer signing + notarization (secret-gated)
+  #
+  # Runs on macos-latest so codesign and xcrun notarytool are available.
+  # When APPLE_CERT_BASE64 is not configured, the job prints an info
+  # message and exits 0 so downstream jobs are unblocked.
+  # ---------------------------------------------------------------------------
+  sign-macos:
+    name: Sign macOS binaries
+    needs: build
+    runs-on: macos-latest
+
+    steps:
+      - name: Download macOS binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-darwin-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Sign and notarize (secret-gated)
+        env:
+          APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_KEY_ISSUER_ID: ${{ secrets.APPLE_API_KEY_ISSUER_ID }}
+        run: |
+          if [ -z "${APPLE_CERT_BASE64:-}" ]; then
+            echo "ℹ️ skipping macOS code-signing: APPLE_CERT_BASE64 not set"
+            echo "MACOS_SIGNED=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # 1. Decode + import cert into a temporary keychain
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          CERT_FILE="$RUNNER_TEMP/cert.p12"
+          printf '%s' "$APPLE_CERT_BASE64" | base64 --decode > "$CERT_FILE"
+          security import "$CERT_FILE" -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" \
+            "$(security list-keychains -d user | head -1 | tr -d '"')"
+
+          # 2. Sign each darwin binary
+          for binary in dist/yakos-*-darwin-*; do
+            [ -f "$binary" ] || continue
+            [[ "$binary" == *.sha256 ]] && continue
+            echo "Signing $binary"
+            codesign --sign "$APPLE_DEVELOPER_ID" \
+              --options runtime \
+              --timestamp \
+              --force \
+              "$binary"
+          done
+
+          # 3. Decode App Store Connect API key for notarytool
+          APIKEY_FILE="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$APIKEY_FILE"
+          chmod 600 "$APIKEY_FILE"
+
+          # 4. Notarize + staple each binary
+          for binary in dist/yakos-*-darwin-*; do
+            [ -f "$binary" ] || continue
+            [[ "$binary" == *.sha256 ]] && continue
+            echo "Notarizing $binary"
+            xcrun notarytool submit "$binary" \
+              --key "$APIKEY_FILE" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_KEY_ISSUER_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait
+            xcrun stapler staple "$binary" || true
+          done
+
+          # Clean up sensitive material from disk
+          rm -f "$CERT_FILE" "$APIKEY_FILE"
+          security delete-keychain "$KEYCHAIN_PATH" || true
+
+          echo "MACOS_SIGNED=true" >> "$GITHUB_ENV"
+          echo "macOS signing complete"
+
+      - name: Re-upload signed macOS binaries
+        if: env.MACOS_SIGNED == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-darwin-arm64
+          path: dist/yakos-*-darwin-arm64*
+          overwrite: true
+          retention-days: 1
+
+      - name: Re-upload signed macOS binaries (amd64)
+        if: env.MACOS_SIGNED == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-darwin-amd64
+          path: dist/yakos-*-darwin-amd64*
+          overwrite: true
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # sign-windows: Authenticode signing via signtool (secret-gated)
+  #
+  # Runs on windows-latest so signtool.exe is available via the Windows SDK.
+  # When WINDOWS_CERT_BASE64 is not configured, the job prints an info
+  # message and exits 0 so downstream jobs are unblocked.
+  # ---------------------------------------------------------------------------
+  sign-windows:
+    name: Sign Windows binary
+    needs: build
+    runs-on: windows-latest
+
+    steps:
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-windows-amd64
+          path: dist/
+          merge-multiple: true
+
+      - name: Sign with Authenticode (secret-gated)
+        shell: bash
+        env:
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if [ -z "${WINDOWS_CERT_BASE64:-}" ]; then
+            echo "ℹ️ skipping Windows code-signing: WINDOWS_CERT_BASE64 not set"
+            echo "WINDOWS_SIGNED=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          CERT_FILE="$(mktemp --suffix=.pfx)"
+          printf '%s' "$WINDOWS_CERT_BASE64" | base64 --decode > "$CERT_FILE"
+
+          # Locate signtool; Windows SDK installs it under Program Files
+          SIGNTOOL="$(find '/c/Program Files (x86)/Windows Kits' \
+            -name signtool.exe 2>/dev/null | sort -r | head -1 || true)"
+          if [ -z "$SIGNTOOL" ]; then
+            SIGNTOOL="$(find '/c/Program Files/Windows Kits' \
+              -name signtool.exe 2>/dev/null | sort -r | head -1 || true)"
+          fi
+          if [ -z "$SIGNTOOL" ]; then
+            echo "ERROR: signtool.exe not found; cannot sign Windows binary"
+            rm -f "$CERT_FILE"
+            exit 1
+          fi
+
+          for binary in dist/yakos-*-windows-*.exe; do
+            [ -f "$binary" ] || continue
+            echo "Signing $binary"
+            "$SIGNTOOL" sign \
+              /f "$CERT_FILE" \
+              /p "$WINDOWS_CERT_PASSWORD" \
+              /tr http://timestamp.digicert.com \
+              /td sha256 \
+              /fd sha256 \
+              "$binary"
+          done
+
+          rm -f "$CERT_FILE"
+          echo "WINDOWS_SIGNED=true" >> "$GITHUB_ENV"
+          echo "Windows signing complete"
+
+      - name: Re-upload signed Windows binary
+        if: env.WINDOWS_SIGNED == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-windows-amd64
+          path: dist/yakos-*-windows-amd64*
+          overwrite: true
+          retention-days: 1
+
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [build, sign-macos, sign-windows]
     runs-on: ubuntu-latest
 
     steps:
@@ -189,6 +380,32 @@ jobs:
           } > release-notes.md
 
           echo "notes_file=release-notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Emit signing summary
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          echo "## Signing summary for ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Platform | Signed |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          # Determine macOS signing status from artifact metadata heuristic:
+          # if codesign ran, the binary carries a code signature. We check
+          # whether the APPLE_CERT_BASE64 secret was non-empty in the signing
+          # job by testing an env var forwarded into this step.
+          if [ -n "${{ secrets.APPLE_CERT_BASE64 }}" ]; then
+            echo "| macOS (arm64 + amd64) | signed + notarized |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| macOS (arm64 + amd64) | unsigned (APPLE_CERT_BASE64 not set) |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ -n "${{ secrets.WINDOWS_CERT_BASE64 }}" ]; then
+            echo "| Windows (amd64) | signed (Authenticode) |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Windows (amd64) | unsigned (WINDOWS_CERT_BASE64 not set) |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "| Linux (arm64 + amd64) | unsigned; verify via checksums.txt |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
