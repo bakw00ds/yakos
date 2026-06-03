@@ -1,0 +1,12 @@
+{
+  "event": "PreToolUse",
+  "tool": "Write",
+  "payload": {
+    "file_path": "docs/go-port-plan.md",
+    "agent_type": "researcher"
+  },
+  "env": {
+    "YAKOS_AGENT_ROLE": "researcher"
+  },
+  "work_dir": ""
+}

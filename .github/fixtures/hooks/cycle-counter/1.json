@@ -1,0 +1,10 @@
+{
+  "event": "UserPromptSubmit",
+  "tool": "",
+  "payload": {},
+  "env": {
+    "YAKOS_AGENT_ROLE": "lead",
+    "YAKOS_RETRO_DISABLED": "false"
+  },
+  "work_dir": ""
+}

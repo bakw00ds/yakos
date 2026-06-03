@@ -1,0 +1,9 @@
+{
+  "event": "PreToolUse",
+  "tool": "Bash",
+  "payload": {},
+  "env": {
+    "YAKOS_AGENT_ROLE": "backend"
+  },
+  "work_dir": ""
+}

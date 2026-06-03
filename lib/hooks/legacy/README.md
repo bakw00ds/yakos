@@ -1,0 +1,80 @@
+# lib/hooks/legacy/ — bash hook lifecycle staging area
+
+**Current state: empty. Zero bash hooks have been moved here. All 21 bash
+hooks remain authoritative at `lib/hooks/*.sh`.**
+
+This directory is reserved for bash hooks that have been superseded by a
+Go-native Tier-0 counterpart AND have completed the operator opt-in
+stability window. No hooks move here until the criteria below are met.
+
+---
+
+## What this directory is for
+
+When a bash hook (`lib/hooks/<name>.sh`) has a stable Go-native Tier-0
+counterpart, the bash copy moves here for one release cycle before
+permanent removal. This gives operators who rely on the bash copy one
+release to notice and migrate.
+
+After the one-release window expires, the file is deleted from this
+directory entirely. There is no further retention.
+
+---
+
+## Move criteria (all three must be true before a .sh moves here)
+
+1. **Go-native Tier-0 is GA.** The corresponding hook under
+   `cli-go/internal/hooks/<name>/` passes CI with zero parity divergences
+   across all 21+ fixture inputs.
+
+2. **Operator opt-in stability.** `YAKOS_HOOKS=go` has been the default
+   setting for at least two releases with zero parity-divergence reports
+   filed against the hook (per `work/current/logs/hook-parity-divergence.ndjson`
+   and issue tracker).
+
+3. **Deprecation notice shipped.** The release notes for the release
+   immediately preceding the move must contain the deprecation notice:
+
+   > `<name>.sh`: bash copy deprecated; use `YAKOS_HOOKS=go`. Bash copy
+   > moves to `lib/hooks/legacy/` in the next release and will be removed
+   > one release after that.
+
+---
+
+## How `YAKOS_HOOKS` drives the lifecycle
+
+| `YAKOS_HOOKS` value | Runner behaviour |
+|---|---|
+| unset or `bash` (default) | Tier 2 (bash) fires; Tier 0 (Go) skipped |
+| `go` | Tier 0 (Go) fires; Tier 2 (bash) bypassed |
+| `hybrid` | Both fire; divergence written to `work/current/logs/hook-parity-divergence.ndjson` |
+
+Operators opt in to Go-native hooks by setting `YAKOS_HOOKS=go` in their
+project's `.yakos/profile.yaml` or shell environment. The transition from
+"bash default" to "go default" happens when the parity window closes (two
+releases of zero divergence across all opted-in operators).
+
+See `docs/go-port-phase3-hook-mitigation.md` §5 for the full migration path.
+
+---
+
+## Removal timeline example (illustrative)
+
+| Release | Event |
+|---|---|
+| v1.N | `YAKOS_HOOKS=go` becomes opt-in stable; hook.sh still in `lib/hooks/` |
+| v1.N+1 | Release notes: "hook.sh deprecated; see above" |
+| v1.N+2 | hook.sh MOVES to `lib/hooks/legacy/hook.sh` (this dir) |
+| v1.N+3 | hook.sh REMOVED from `lib/hooks/legacy/` entirely |
+
+The clock on "one release cycle" starts the moment the file lands in
+`lib/hooks/legacy/`, not when the deprecation notice ships.
+
+---
+
+## Do NOT add files here manually
+
+Files land here via the automated lifecycle process above, not by hand.
+If you need to preserve a customized bash hook, copy it to
+`lib/hooks-user/<name>.sh` instead (Tier-2 bash escape hatch — see
+`lib/hooks-user/README.md`).

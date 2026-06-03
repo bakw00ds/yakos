@@ -1,0 +1,12 @@
+{
+  "event": "PreToolUse",
+  "tool": "Edit",
+  "payload": {
+    "path": "lib/hooks/cycle-counter.sh",
+    "agent_type": "lead"
+  },
+  "env": {
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}
