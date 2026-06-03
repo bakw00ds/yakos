@@ -292,8 +292,13 @@ func (h *Hook) appendLog(out *hooktype.HookOutput, logFile, severity, action, me
 // encodeProjectPath encodes a project directory path the same way Claude does:
 // replace path separators and colons with hyphens and strip leading slashes.
 func encodeProjectPath(projectDir string) string {
-	// Mirrors Claude's project encoding: remove leading slash, replace / with -.
-	s := strings.TrimLeft(projectDir, "/")
+	// Normalise to forward slashes so the encoding is identical on all platforms
+	// (Claude uses a forward-slash encoding regardless of the OS path separator).
+	s := filepath.ToSlash(projectDir)
+	// Replace Windows drive colon (e.g. "C:") with a hyphen.
+	s = strings.ReplaceAll(s, ":", "-")
+	// Strip leading slash (or the leading "-" that replaced a drive colon).
+	s = strings.TrimLeft(s, "/")
 	s = strings.ReplaceAll(s, "/", "-")
 	return s
 }

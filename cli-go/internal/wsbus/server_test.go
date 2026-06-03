@@ -114,6 +114,12 @@ func TestServer_AcceptsBearerHeader(t *testing.T) {
 	conn := wsDialToken(t, wsURL, token)
 	defer conn.Close()
 
+	// Wait for the server-side goroutine to register the subscription before
+	// publishing. On Windows, goroutine scheduling is slower and the Publish
+	// can fire before handleWS has called bus.Subscribe, causing the event to
+	// be missed and the 2s read deadline to expire.
+	time.Sleep(20 * time.Millisecond)
+
 	b.Publish(TopicKanbanAdded, KanbanAddedPayload{ID: "K-1", Title: "test", Column: "TODO"})
 
 	ev := readEvent(t, conn)

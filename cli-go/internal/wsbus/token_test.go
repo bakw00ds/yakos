@@ -3,6 +3,7 @@ package wsbus
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -19,13 +20,18 @@ func TestLoadOrCreateToken_CreatesOnMissing(t *testing.T) {
 		t.Errorf("token length=%d; want 64", len(tok))
 	}
 
-	// File must exist with mode 0600.
+	// File must exist.
 	fi, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat token file: %v", err)
 	}
-	if fi.Mode() != 0600 {
-		t.Errorf("token file mode=%o; want 0600", fi.Mode())
+
+	// POSIX mode bits are not enforced on Windows NTFS; ACL-based hardening is a
+	// Phase 1.5 followup. Only check mode on non-Windows platforms.
+	if runtime.GOOS != "windows" {
+		if fi.Mode() != 0600 {
+			t.Errorf("token file mode=%o; want 0600", fi.Mode())
+		}
 	}
 }
 

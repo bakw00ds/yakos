@@ -3,6 +3,7 @@ package restapi
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -43,6 +44,11 @@ func TestLoadOrGenerateTokens_PersistsAndReloads(t *testing.T) {
 }
 
 func TestLoadOrGenerateTokens_FilesAreMode0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// NTFS does not enforce POSIX mode bits; ACL-based hardening is a
+		// Phase 1.5 followup. Skip rather than false-fail on Windows CI.
+		t.Skip("POSIX mode bits not enforced on Windows; ACL hardening is a Phase 1.5 followup")
+	}
 	dir := t.TempDir()
 	_, err := LoadOrGenerateTokens(dir)
 	if err != nil {

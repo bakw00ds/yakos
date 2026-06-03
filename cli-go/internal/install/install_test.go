@@ -109,7 +109,15 @@ func TestInstall_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pointer file not created: %v", err)
 	}
-	if !strings.Contains(string(pointerData), root) {
+	// install.go resolves YAKOS_ROOT via filepath.EvalSymlinks before writing the
+	// pointer file. On Windows, t.TempDir() may return an 8.3-shortened path
+	// (e.g. RUNNER~1) while EvalSymlinks returns the long-form path. Resolve root
+	// here so the comparison is always between two long-form absolute paths.
+	rootResolved := root
+	if r, err2 := filepath.EvalSymlinks(root); err2 == nil {
+		rootResolved = r
+	}
+	if !strings.Contains(string(pointerData), rootResolved) {
 		t.Errorf("pointer file should contain YAKOS_ROOT; got %q", string(pointerData))
 	}
 
