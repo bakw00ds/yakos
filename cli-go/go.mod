@@ -2,4 +2,10 @@ module github.com/bakw00ds/yakos
 
 go 1.23
 
-require gopkg.in/yaml.v3 v3.0.1 // indirect
+require (
+	github.com/danieljoos/wincred v1.2.3 // indirect
+	github.com/godbus/dbus/v5 v5.2.2 // indirect
+	github.com/zalando/go-keyring v0.2.8 // indirect
+	golang.org/x/sys v0.27.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+)
