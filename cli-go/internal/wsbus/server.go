@@ -147,21 +147,39 @@ func extractToken(r *http.Request) string {
 
 // handleWS is the core WebSocket handler.  It subscribes to all topics on the
 // bus and streams events to the client until the connection closes or ctx ends.
+//
+// Replay: if the upgrade request includes a ?since=<seq> query parameter, all
+// buffered events with Seq > since are sent to the client before joining the
+// live stream.  This allows reconnecting clients to catch up on missed events.
 func (s *Server) handleWS(conn *websocket.Conn) {
 	defer func() { _ = conn.Close() }()
 
+	// Subscribe before replaying history so we don't miss events published
+	// between replay completion and subscription setup.
 	sub := s.cfg.Bus.Subscribe("") // "" = all topics
 	defer sub.Unsubscribe()
 
 	ctx := conn.Request().Context()
+	enc := json.NewEncoder(conn)
+
+	// Replay buffered events if ?since=<seq> is present.
+	if sinceStr := conn.Request().URL.Query().Get("since"); sinceStr != "" {
+		if sinceSeq, err := parseInt64(sinceStr); err == nil {
+			for _, ev := range s.cfg.Bus.History(sinceSeq) {
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
+				if err := enc.Encode(ev); err != nil {
+					slog.Debug("wsbus: replay write error; dropping client", "err", err)
+					return
+				}
+			}
+		}
+	}
 
 	// Heartbeat: send a PING frame every 15s; client must pong within 5s.
 	// golang.org/x/net/websocket handles pong automatically at the protocol
 	// level, so we use a simple write-side ping by sending a JSON ping event.
 	pingTicker := time.NewTicker(15 * time.Second)
 	defer pingTicker.Stop()
-
-	enc := json.NewEncoder(conn)
 
 	for {
 		select {
@@ -190,4 +208,11 @@ func (s *Server) handleWS(conn *websocket.Conn) {
 			}
 		}
 	}
+}
+
+// parseInt64 parses s as a base-10 int64.
+func parseInt64(s string) (int64, error) {
+	var n int64
+	_, err := fmt.Sscanf(s, "%d", &n)
+	return n, err
 }

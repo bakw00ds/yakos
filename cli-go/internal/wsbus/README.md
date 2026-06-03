@@ -39,7 +39,25 @@ All event types are JSON objects with the envelope:
 ```
 
 `seq` is per-bus monotonically increasing. Clients use gaps to detect dropped
-events. No replay in Phase 2 (Q8 decision; Phase 3 candidate).
+events.
+
+## Event replay (Q8 override)
+
+The bus retains the last N events in an in-memory ring buffer (default 1000;
+override with `YAKOS_WS_REPLAY_BUFFER`). Reconnecting clients can request
+missed events via the `?since=<seq>` query parameter:
+
+```
+ws://127.0.0.1:7891/v1/events?since=42&token=<token>
+```
+
+The server replays all buffered events with `seq > 42` before joining the
+live stream. Subscription to the live stream happens before the replay drain
+to prevent missed events during the window between replay completion and live
+start.
+
+`Bus.History(sinceSeq)` returns replay events for non-WS consumers (used by
+the gRPC and REST layers).
 
 ### kanban.added
 
@@ -165,9 +183,11 @@ yakos events --topic kanban.*
 # Connect to a non-default address:
 yakos events --ws-addr 127.0.0.1:7456
 
-# Replay (Phase 3 only):
-yakos events --since 5m   # ERROR: not supported in Phase 2 (Q8)
+# Replay missed events since seq 42:
+yakos events --since 42
 ```
+
+The `--since` flag passes `?since=<seq>` on the WebSocket upgrade URL.
 
 ## Token rotation
 

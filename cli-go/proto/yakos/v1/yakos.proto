@@ -1,0 +1,171 @@
+// yakos.proto — gRPC service definitions for the yakOS daemon.
+//
+// Generated Go code lives in yakos.pb.go and yakos_grpc.pb.go.
+// Regenerate with:
+//   protoc --go_out=. --go_opt=paths=source_relative \
+//          --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+//          proto/yakos/v1/yakos.proto
+//
+// Phase 2 operator directive: commit generated files; no CI codegen step.
+
+syntax = "proto3";
+
+package yakos.v1;
+
+option go_package = "github.com/bakw00ds/yakos/proto/yakos/v1;yakosv1";
+
+// ---- Dispatch ---------------------------------------------------------------
+
+service Dispatch {
+  // Run starts an agent dispatch and returns the result when complete.
+  rpc Run(DispatchRunRequest) returns (DispatchRunResponse);
+
+  // Stream starts an agent dispatch and streams token output as it arrives,
+  // followed by a final summary message.
+  rpc Stream(DispatchRunRequest) returns (stream DispatchStreamChunk);
+}
+
+message DispatchRunRequest {
+  string agent      = 1;
+  string task       = 2;
+  string project    = 3;
+  string runtime    = 4;
+  string model      = 5;
+  string yakos_root = 6;
+  int32  timeout    = 7;
+}
+
+message DispatchRunResponse {
+  int32  exit_code       = 1;
+  double duration_s      = 2;
+  int64  output_bytes    = 3;
+  string model_resolved  = 4;
+}
+
+message DispatchStreamChunk {
+  // type is "token" for incremental output or "summary" for the final record.
+  string type            = 1;
+  string text            = 2;   // present when type == "token"
+  int32  exit_code       = 3;   // present when type == "summary"
+  double duration_s      = 4;   // present when type == "summary"
+  int64  output_bytes    = 5;   // present when type == "summary"
+  string model_resolved  = 6;   // present when type == "summary"
+}
+
+// ---- Kanban -----------------------------------------------------------------
+
+service Kanban {
+  rpc List(KanbanListRequest)   returns (KanbanListResponse);
+  rpc Add(KanbanAddRequest)     returns (KanbanAddResponse);
+  rpc Move(KanbanMoveRequest)   returns (KanbanMoveResponse);
+  rpc Done(KanbanDoneRequest)   returns (KanbanDoneResponse);
+  // Watch streams kanban update events to the caller.
+  rpc Watch(KanbanWatchRequest) returns (stream KanbanEvent);
+}
+
+message KanbanListRequest {
+  string column = 1; // empty = all columns
+  int32  limit  = 2; // 0 = no limit
+}
+
+message KanbanItem {
+  string id     = 1;
+  string title  = 2;
+  string column = 3;
+}
+
+message KanbanListResponse {
+  repeated KanbanItem items = 1;
+}
+
+message KanbanAddRequest {
+  string title    = 1;
+  string category = 2;
+  string notes    = 3;
+}
+
+message KanbanAddResponse {
+  string id = 1;
+}
+
+message KanbanMoveRequest {
+  string id = 1;
+  string to = 2;
+}
+
+message KanbanMoveResponse {
+  bool ok = 1;
+}
+
+message KanbanDoneRequest {
+  string id = 1;
+}
+
+message KanbanDoneResponse {
+  bool ok = 1;
+}
+
+message KanbanWatchRequest {}
+
+message KanbanEvent {
+  string op   = 1; // "added" | "moved" | "done"
+  string id   = 2;
+  string from = 3;
+  string to   = 4;
+  string title = 5;
+}
+
+// ---- Cost -------------------------------------------------------------------
+
+service Cost {
+  rpc Aggregate(CostAggregateRequest) returns (CostAggregateResponse);
+}
+
+message CostAggregateRequest {
+  string by    = 1; // "runtime" | "agent" | "day" | "project"
+  string since = 2; // ISO-8601 lower bound; empty = all
+  int32  limit = 3; // 0 = no limit
+}
+
+message CostRow {
+  string key        = 1;
+  int64  dispatches = 2;
+  double total_s    = 3;
+}
+
+message CostAggregateResponse {
+  string            by   = 1;
+  repeated CostRow  rows = 2;
+}
+
+// ---- Status -----------------------------------------------------------------
+
+service Status {
+  rpc Read(StatusReadRequest) returns (StatusReadResponse);
+}
+
+message StatusReadRequest {
+  string project = 1; // empty = infer from workspace
+}
+
+message StatusReadResponse {
+  string project      = 1;
+  string phase        = 2;
+  string summary      = 3;
+  int32  todo_count   = 4;
+  int32  done_count   = 5;
+}
+
+// ---- Refresh ----------------------------------------------------------------
+
+service Refresh {
+  rpc Run(RefreshRunRequest) returns (RefreshRunResponse);
+}
+
+message RefreshRunRequest {
+  bool dry_run = 1;
+}
+
+message RefreshRunResponse {
+  string output = 1;
+}

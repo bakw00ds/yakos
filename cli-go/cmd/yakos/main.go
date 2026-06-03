@@ -28,6 +28,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/agent"
 	"github.com/bakw00ds/yakos/internal/archive"
+	internalperfdash "github.com/bakw00ds/yakos/internal/perfdash"
 	internalserve "github.com/bakw00ds/yakos/internal/serve"
 	"github.com/bakw00ds/yakos/internal/mcpserver"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
@@ -5088,8 +5089,11 @@ func runServe(yakosRoot string, args []string) {
 	socketPath := ""
 	pidFile := ""
 	wsAddr := ""
+	perfAddr := ""
 	detach := false
 	rotateToken := false
+	rotatePerfToken := false
+	noPerfDash := false
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -5117,8 +5121,19 @@ func runServe(yakosRoot string, args []string) {
 				os.Exit(1)
 			}
 			wsAddr = args[i]
+		case "--perf-addr":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "serve: --perf-addr requires an address")
+				os.Exit(1)
+			}
+			perfAddr = args[i]
 		case "--rotate-ws-token":
 			rotateToken = true
+		case "--rotate-perf-token":
+			rotatePerfToken = true
+		case "--no-perf":
+			noPerfDash = true
 		case "--detach":
 			detach = true
 		default:
@@ -5128,6 +5143,8 @@ func runServe(yakosRoot string, args []string) {
 				pidFile = args[i][10:]
 			} else if len(args[i]) > 10 && args[i][:10] == "--ws-addr=" {
 				wsAddr = args[i][10:]
+			} else if len(args[i]) > 12 && args[i][:12] == "--perf-addr=" {
+				perfAddr = args[i][12:]
 			} else {
 				fmt.Fprintf(os.Stderr, "serve: unknown flag %q (try --help)\n", args[i])
 				os.Exit(1)
@@ -5147,6 +5164,20 @@ func runServe(yakosRoot string, args []string) {
 		os.Exit(0)
 	}
 
+	// --rotate-perf-token: generate a new perf dashboard token and exit.
+	if rotatePerfToken {
+		home, _ := os.UserHomeDir()
+		stateDir := filepath.Join(home, ".yakos-state")
+		tok, err := internalperfdash.RotatePerfToken(stateDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "serve: rotate-perf-token: %v\n", err)
+			os.Exit(1)
+		}
+		_ = tok
+		fmt.Fprintf(os.Stdout, "perf token rotated: %s\n", internalperfdash.PerfTokenFilePath(stateDir))
+		os.Exit(0)
+	}
+
 	if detach {
 		fmt.Fprintln(os.Stderr, "serve: --detach advisory: use 'yakos serve &' to background the daemon in your shell")
 		fmt.Fprintln(os.Stderr, "serve: for persistent startup see docs/integrations/ (systemd / launchd / Task Scheduler)")
@@ -5159,22 +5190,36 @@ func runServe(yakosRoot string, args []string) {
 		os.Exit(1)
 	}
 
+	// Resolve perf token for startup banner (before daemon blocks).
+	home, _ := os.UserHomeDir()
+	perfStateDir := filepath.Join(home, ".yakos-state")
+	perfTok, _ := internalperfdash.LoadOrCreatePerfToken(perfStateDir)
+
 	cfg := internalserve.Config{
 		WorkspaceRoot: workspaceRoot,
 		SocketPath:    socketPath,
 		PIDFile:       pidFile,
 		YakosRoot:     yakosRoot,
 		WSAddr:        wsAddr,
+		PerfAddr:      perfAddr,
+		NoPerfDash:    noPerfDash,
 	}
 
 	wsBindAddr := wsAddr
 	if wsBindAddr == "" {
 		wsBindAddr = "127.0.0.1:7891"
 	}
+	perfBindAddr := perfAddr
+	if perfBindAddr == "" {
+		perfBindAddr = "127.0.0.1:7895"
+	}
 
 	fmt.Fprintf(os.Stderr, "yakos serve: starting daemon for workspace %s\n", workspaceRoot)
 	fmt.Fprintf(os.Stderr, "yakos serve: socket at %s\n", jsonrpc.SocketPath(workspaceRoot))
 	fmt.Fprintf(os.Stderr, "yakos serve: ws events at ws://%s/v1/events\n", wsBindAddr)
+	if !noPerfDash {
+		fmt.Fprintf(os.Stderr, "yakos serve: perf dashboard: http://%s/#token=%s\n", perfBindAddr, perfTok)
+	}
 	fmt.Fprintln(os.Stderr, "yakos serve: press Ctrl-C to stop")
 
 	ctx := context.Background()
@@ -5370,19 +5415,24 @@ Example:
 }
 
 func printServeHelp(w io.Writer) {
-	_, _ = fmt.Fprint(w, `yakos serve [--socket <path>] [--pidfile <path>] [--ws-addr <addr>] [--detach] [--help]
+	_, _ = fmt.Fprint(w, `yakos serve [--socket <path>] [--pidfile <path>] [--ws-addr <addr>]
+             [--perf-addr <addr>] [--no-perf] [--detach] [--help]
 
 Start the yakos daemon for the current workspace.
 
 The daemon listens on a JSON-RPC 2.0 socket and routes subcommand calls
 from the CLI (when YAKOS_DAEMON=on|auto) without spawning a new process
 per invocation.  It also starts a WebSocket event server for real-time
-multi-dev coordination (see yakos events).
+multi-dev coordination (see yakos events) and a performance dashboard
+for dispatch-log analytics.
 
 The daemon is OFF by default (YAKOS_DAEMON=off). To opt in:
 
   export YAKOS_DAEMON=auto     # uses daemon if running; falls back otherwise
   yakos serve &                # start in background
+
+The performance dashboard URL (with token) is printed at startup:
+  yakos serve: perf dashboard: http://127.0.0.1:7895/#token=<perf-token>
 
 For persistent daemon startup, see docs/integrations/ for systemd (Linux),
 launchd (macOS), and Task Scheduler (Windows) unit files.
@@ -5393,7 +5443,11 @@ Flags:
   --ws-addr <addr>      WebSocket bind address (default 127.0.0.1:7891).
                         Loopback-only; non-loopback connections are rejected.
                         Cross-machine access requires mTLS (Phase 2, Q2).
+  --perf-addr <addr>    Performance dashboard bind address (default 127.0.0.1:7895).
+                        Loopback-only.
+  --no-perf             Disable the performance dashboard server.
   --rotate-ws-token     Generate a new WS bearer token and exit.
+  --rotate-perf-token   Generate a new perf dashboard token and exit.
   --detach              Print a backgrounding advisory (operator must use '&').
   --help, -h            Print this help.
 
@@ -5408,6 +5462,11 @@ WebSocket:
   ws://127.0.0.1:7891/v1/events (default)
   Token stored at ~/.yakos-state/ws-token (mode 0600).
   Use 'yakos events' to connect a debug client.
+
+Performance dashboard:
+  http://127.0.0.1:7895/#token=<perf-token> (default)
+  Token stored at ~/.yakos-state/perf-token (mode 0600).
+  Read-only; separate from WS and REST tokens (Phase 2, Q7).
 
 Exit codes:
   0   Clean shutdown (SIGTERM/SIGINT received).

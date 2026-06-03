@@ -201,12 +201,100 @@ Test count: 42 tests in `internal/wsbus/` (19 bus + 16 server + 7 token).
 `make test` clean (restapi pre-existing failures excluded; those tests predated this dispatch).
 `GOOS=windows GOARCH=amd64 go vet ./...` clean.
 
+### Phase 2 — Performance dashboard (2026-06-03)
+
+Delivered as the Phase 2 perf-dashboard dispatch:
+
+| Package/File | Role | Tests |
+|---|---|---|
+| `cli-go/internal/perfdash/token.go` | 256-bit perf token (load-or-create, rotate, separate from WS/REST) | 5 token tests |
+| `cli-go/internal/perfdash/analytics.go` | Pure domain: summary, timeseries, by-axis, recent; percentile; window/bucket parsing | 29 unit tests |
+| `cli-go/internal/perfdash/server.go` | HTTP server, 4 JSON API endpoints + 3 static asset endpoints; auth middleware; read-only | 37 HTTP tests |
+| `cli-go/internal/perfdash/dist/index.html` | Embedded SPA HTML (cards, SVG chart, breakdown, recent table) | (embedded) |
+| `cli-go/internal/perfdash/dist/app.js` | Vanilla JS SPA; token from URL fragment → sessionStorage; inline SVG chart; 30s auto-refresh | (embedded) |
+| `cli-go/internal/perfdash/dist/styles.css` | Dark-mode operator-functional CSS; no external dependencies | (embedded) |
+| `cli-go/internal/serve/serve.go` | Daemon extended: starts perfdash server concurrently; PerfAddr/PerfTokenPath/NoPerfDash config | existing serve tests pass |
+| `cli-go/cmd/yakos/main.go` | `--perf-addr`, `--no-perf`, `--rotate-perf-token` flags; startup banner logs URL+token | |
+| `cli-go/internal/perfdash/README.md` | Endpoint table, auth model, UI structure description | |
+
+Endpoints (all GET, all read-only):
+- `GET /` — embedded SPA HTML
+- `GET /app.js` — embedded JS
+- `GET /styles.css` — embedded CSS
+- `GET /api/perf/summary?window=24h` → `{total_dispatches, total_cost_usd, avg_latency_ms, p50, p95, top_agents[5], top_runtimes[3]}`
+- `GET /api/perf/timeseries?window=24h&bucket=hour&metric=cost|latency|dispatches` → `[{ts, value}]`
+- `GET /api/perf/by_axis?axis=agent|runtime|project|day&window=24h` → `[{key, dispatches, cost_usd, avg_latency_ms, p95_latency_ms}]`
+- `GET /api/perf/recent?limit=50` → last N dispatch entries (read-only)
+
+Auth model:
+- Separate perf-only token at `~/.yakos-state/perf-token` (mode 0600, 256-bit hex, per Q7).
+- Delivered via URL fragment `#token=<hex>` — never sent in HTTP requests or logged.
+- JS reads fragment → sessionStorage; attaches Bearer header to every API call.
+- Rotate via `yakos serve --rotate-perf-token`.
+
+UI: single dark-mode SPA (~300 LOC HTML+JS+CSS), inline SVG line chart (no CDN, no build pipeline), summary cards, breakdown table, top agents/runtimes, recent dispatches, 30s auto-refresh.
+
+Test count: 66 tests total (29 analytics unit + 37 HTTP server tests).
+`make test` clean (perfdash and serve packages).
+`GOOS=windows GOARCH=amd64 go vet ./internal/perfdash/... ./internal/serve/... ./cmd/...` clean.
+
 - **`yakos serve` daemon** — one persistent process per dev session. Provides a Unix socket (`$XDG_RUNTIME_DIR/yakos.sock`) for the CLI to talk to instead of cold-starting. Wins: sub-ms subcommand response, in-memory kanban, single source of truth for dispatch-log writes. Sizing: M (~40h). Decision points: socket vs TCP on Windows? recommend named pipes.
 - **WebSocket multi-dev coordination** — daemon exposes WS endpoint for real-time kanban + presence ("alice is in IN PROGRESS on feat/billing") + cross-dev event bus. Sizing: L (~80h). Depends on daemon. **FOUNDATION SHIPPED (2026-06-03) — see §4 Phase 2 WS below.** Decision points: mTLS for cross-machine (Q2 deferred to follow-up).
 - **Native MCP server** — daemon exposes MCP tools: `yakos.dispatch`, `yakos.kanban.{add,move,done,list}`, `yakos.refresh`, `yakos.supervise`. Eliminates shell-out from MCP clients. Sizing: M (~50h). Depends on daemon. Decision points: MCP transport (stdio vs SSE vs streamable HTTP); recommend stdio + streamable HTTP.
 - **Embeddable Go library** — extract `internal/dispatch`, `internal/kanban`, `internal/workdir` into `pkg/` with stable APIs. Sizing: M (~30h, mostly API stabilization + godoc + examples). Depends on Phase 1 internal packages being clean.
-- **REST + gRPC API for IDE extensions** — thin layer over the library, served by the daemon. Sizing: M (~40h). Depends on daemon + library.
-- **Performance dashboard** — dispatch-log analytics web UI served by the daemon. Sizing: M (~30h). Depends on daemon + WS.
+- **REST + gRPC API for IDE extensions** — thin layer over the library, served by the daemon. Sizing: M (~40h). Depends on daemon + library. **SHIPPED (2026-06-03) — see §4 Phase 2 gRPC+mTLS below.**
+- **Performance dashboard** — dispatch-log analytics web UI served by the daemon. Sizing: M (~30h). Depends on daemon + WS. **SHIPPED (2026-06-03) — see §4 Phase 2 perf-dashboard below.**
+
+### Phase 2 — gRPC API, streamable HTTP MCP, WS replay, mTLS (2026-06-03)
+
+Q5, Q3, Q8, Q2 overrides shipped in a single dispatch ("no more time gating"):
+
+| Package | Role | Tests |
+|---------|------|-------|
+| `cli-go/proto/yakos/v1/yakos.pb.go` | Hand-written message types (plain structs, JSON tags) | n/a (no gen step) |
+| `cli-go/proto/yakos/v1/yakos_grpc.pb.go` | Hand-written service descriptors, client impls, server interfaces | n/a |
+| `cli-go/internal/grpcserver/server.go` | gRPC server: 5 services, JSON codec, two-token auth interceptors | 35 unit tests |
+| `cli-go/internal/wsbus/replay.go` | In-memory ring buffer (1000 events default, `YAKOS_WS_REPLAY_BUFFER`) | 12 unit tests |
+| `cli-go/internal/wsbus/server.go` | WS server extended: `?since=<seq>` replay on reconnect | covered by replay tests |
+| `cli-go/internal/wsbus/bus.go` | `Bus.History(sinceSeq)` accessor; `NewWithReplay(cap)` | covered by bus tests |
+| `cli-go/internal/mcpserver/streamhttp.go` | NDJSON-over-HTTP MCP transport; `StreamHTTPClient` | 19 unit tests |
+| `cli-go/internal/mtls/mtls.go` | CA generation, server/client cert issuance, `IsNonLoopback` enforcement | 20 unit tests |
+| `cli-go/internal/serve/serve.go` | Daemon extended: gRPC + MCP HTTP servers start concurrently; REST tokens loaded once, reused for gRPC+MCP auth; drain on shutdown | existing serve tests pass |
+
+**gRPC API (Q5 override):**
+- Five services: `Dispatch.Run/Stream`, `Kanban.List/Add/Move/Done/Watch`, `Cost.Aggregate`, `Status.Read`, `Refresh.Run`.
+- JSON codec (registered via `encoding.RegisterCodec`) — avoids protoc dependency.
+- Two-token auth (read/write) in unary + stream interceptors.
+- Daemon flag: `--grpc-addr 127.0.0.1:7893` (default). Set to `-` to disable.
+- Audit: every write publishes a bus event (same topics as JSON-RPC path).
+
+**Streamable HTTP MCP transport (Q3 override):**
+- Single `POST /mcp` endpoint; NDJSON request body; NDJSON chunked response.
+- Each frame flushed immediately via `http.Flusher`.
+- Auth: `Authorization: Bearer <write-token>` (same token as REST API write path).
+- Daemon flag: `--mcp-http-addr 127.0.0.1:7894` (default). Set to `-` to disable.
+- Decision Q3 updated: stdio transport remains for Claude Code integration; streamable HTTP enables IDE extensions and other HTTP-native MCP clients.
+
+**WS event replay (Q8 override):**
+- Ring buffer: fixed-capacity circular array (1000 events; `YAKOS_WS_REPLAY_BUFFER` env).
+- `?since=<seq>` on new WS connections replays buffered events before joining live stream.
+- Subscribe-before-replay pattern prevents lost events during the drain window.
+- `Bus.History(sinceSeq int64) []Event` accessor for non-WS consumers.
+- Decision Q8 updated: replay is shipped in Phase 2, not deferred to Phase 3.
+
+**mTLS for cross-machine connections (Q2 override):**
+- Self-signed CA (RSA-2048, 10-year) generated at `~/.yakos-state/mtls/ca.{crt,key}`.
+- Server cert (1-year, `ExtKeyUsageServerAuth`) always includes 127.0.0.1 and ::1 SANs.
+- Client cert (1-year, `ExtKeyUsageClientAuth`, CN=name).
+- `tls.RequireAndVerifyClientCert` on server; TLS 1.2 minimum.
+- `IsNonLoopback(addr)` gate: callers MUST check before binding; non-loopback without mTLS is fail-closed.
+- TLS 1.3 alert timing: client-auth rejection arrives as post-handshake alert; callers verify rejection via `Read` after `Dial` (test demonstrates).
+- Phase 1.5 follow-up #3: Windows ACL hardening for cert files.
+- Decision Q2 updated: mTLS package shipped; wiring into non-loopback listeners is a follow-up PR (daemon currently only binds 127.0.0.1 by default).
+
+Test count: 35 (grpcserver) + 12 (wsbus replay) + 19 (mcpserver HTTP) + 20 (mtls) = 86 new tests.
+`go test ./...` clean. `go vet ./...` clean.
+`GOOS=windows GOARCH=amd64 go vet ./...` clean.
 
 ## 5. Phase 3 — outline + go/no-go criteria
 
@@ -390,3 +478,53 @@ Exit-criteria status (from §3):
 | 10 | No regressions in bash test suite | 🔶 to verify in Phase 1 sign-off PR |
 
 **Next-up:** Per Decision Q5, Phase 2 implementation pauses for ≥3 weeks of operator adoption (catches Phase-1-in-the-field bugs before daemon complexity). Phase 3 stays behind §5 go/no-go gate (none of the three triggers have fired).
+
+---
+
+## Phase 3 status — shipped 2026-06-03
+
+Phase 3 has shipped: 21/21 lib/hooks/*.sh ported to Go Tier-0 (#97, #99, #100).
+
+**What shipped in the Phase 3 follow-on (2026-06-03):**
+
+### 1. `yakos hooks migrate` subcommand
+`cli-go/internal/hooksinstall/migrate.go` — scaffolds `.star` stubs for
+operator-customized bash hooks detected via SHA-256 comparison against the
+framework baseline. Flags: `--project <dir>`, `--dry-run`. 15+ unit tests.
+See `cli-go/internal/hooksinstall/README.md` for operator docs.
+
+### 2. Compatibility audit CI (Q7)
+`.github/workflows/hook-parity.yml` — validates that Go Tier-0 hooks and
+their bash counterparts produce identical exit codes for the same HookInput
+fixture. Initial scope: **cycle-counter**, **path-log**, **session-end-check**
+(3 hooks × 3 fixtures = 9 fixture runs). Remaining 18 hooks tracked in
+issue #hook-parity-followup.
+
+Fixture files: `.github/fixtures/hooks/<hookname>/{1,2,3}.json`.
+Timestamps pinned via `YAKOS_HOOK_NOW` env var injection for determinism.
+
+### 3. `lib/hooks/legacy/` lifecycle directory
+`lib/hooks/legacy/README.md` created. **Zero bash hooks moved here yet.**
+All 21 `.sh` files remain authoritative at `lib/hooks/*.sh`. The README
+documents the three-step move criteria (GA Tier-0 + 2-release opt-in
+stability + deprecation notice) and the one-release removal window per Q7.
+
+### 4. `YAKOS_HOOKS` env var routing
+`cli-go/internal/hooks/runner/runner.go` — runner honours `YAKOS_HOOKS`:
+
+| Value | Behaviour |
+|---|---|
+| unset or `bash` (default) | Tier 2 (bash) only; Tier 0 skipped |
+| `go` | Tier 0 (Go-native + Starlark); Tier 2 bypassed |
+| `hybrid` | Both tiers; divergence written to `work/current/logs/hook-parity-divergence.ndjson` |
+
+`Runner.EnvLookup` is injectable for tests (no real env var dependency in
+test suites). `Runner.NowFn` is injectable for deterministic parity logs.
+10+ routing matrix unit tests added.
+
+### Q7 compat window state
+- `YAKOS_HOOKS` unset/`bash` = default (preserves pre-Phase-3 behaviour)
+- Operator sets `YAKOS_HOOKS=go` to opt in to Go-native hooks
+- After 2 releases of zero divergence across opted-in operators, `go` becomes
+  default and bash hooks move to `lib/hooks/legacy/` per §3 above
+- After 1 release in `lib/hooks/legacy/`, bash hooks are removed

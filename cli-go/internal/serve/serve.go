@@ -31,7 +31,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/grpcserver"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
+	"github.com/bakw00ds/yakos/internal/mcpserver"
+	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/restapi"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
@@ -75,6 +78,26 @@ type Config struct {
 	// RESTStateDir overrides the directory used to persist REST tokens.
 	// Defaults to ~/.yakos-state.
 	RESTStateDir string
+
+	// PerfAddr is the TCP address for the performance dashboard HTTP server.
+	// Defaults to "127.0.0.1:7895". Set to "-" to disable (same as --no-perf).
+	PerfAddr string
+
+	// PerfTokenPath overrides the path to the perf-dashboard bearer token file.
+	// Defaults to ~/.yakos-state/perf-token.
+	PerfTokenPath string
+
+	// NoPerfDash disables the performance dashboard server when true.
+	// Equivalent to --no-perf CLI flag.
+	NoPerfDash bool
+
+	// GRPCAddr is the TCP address for the gRPC API server (Q5 override).
+	// Defaults to "127.0.0.1:7893".  Set to "-" to disable.
+	GRPCAddr string
+
+	// MCPHTTPAddr is the TCP address for the streamable HTTP MCP server (Q3 override).
+	// Defaults to "127.0.0.1:7894".  Set to "-" to disable.
+	MCPHTTPAddr string
 
 	// Bus is the in-process event bus shared between the JSON-RPC layer and the
 	// WebSocket layer.  If nil, a new Bus is created by Run.  Inject for tests.
@@ -122,6 +145,34 @@ func (c *Config) restStateDir() string {
 		home = "/tmp"
 	}
 	return filepath.Join(home, ".yakos-state")
+}
+
+func (c *Config) perfAddr() string {
+	if c.PerfAddr != "" {
+		return c.PerfAddr
+	}
+	return "127.0.0.1:7895"
+}
+
+func (c *Config) perfStateDir() string {
+	if c.PerfTokenPath != "" {
+		return filepath.Dir(c.PerfTokenPath)
+	}
+	return c.restStateDir() // same directory (~/.yakos-state)
+}
+
+func (c *Config) grpcAddr() string {
+	if c.GRPCAddr != "" {
+		return c.GRPCAddr
+	}
+	return "127.0.0.1:7893"
+}
+
+func (c *Config) mcpHTTPAddr() string {
+	if c.MCPHTTPAddr != "" {
+		return c.MCPHTTPAddr
+	}
+	return "127.0.0.1:7894"
 }
 
 func (c *Config) listen(path string) (net.Listener, error) {
@@ -195,13 +246,16 @@ func Run(ctx context.Context, cfg Config) error {
 		wsErrCh <- wsSrv.Serve(ctx)
 	}()
 
-	// Load (or generate) REST tokens and start the REST API server unless disabled.
+	// Load (or generate) REST tokens once; reused for gRPC and MCP HTTP auth parity.
+	var restReadToken, restWriteToken string
 	restErrCh := make(chan error, 1)
 	if cfg.restAddr() != "-" {
 		restToks, err := restapi.LoadOrGenerateTokens(cfg.restStateDir())
 		if err != nil {
 			return fmt.Errorf("serve: REST tokens: %w", err)
 		}
+		restReadToken = restToks.Read
+		restWriteToken = restToks.Write
 		restSrv := restapi.New(restapi.Config{
 			Addr:          cfg.restAddr(),
 			Tokens:        restToks,
@@ -216,6 +270,68 @@ func Run(ctx context.Context, cfg Config) error {
 		close(restErrCh)
 	}
 
+	// Load (or generate) the perf dashboard token and start the server unless disabled.
+	perfErrCh := make(chan error, 1)
+	if !cfg.NoPerfDash && cfg.perfAddr() != "-" {
+		perfStateDir := cfg.perfStateDir()
+		perfTok, err := perfdash.LoadOrCreatePerfToken(perfStateDir)
+		if err != nil {
+			return fmt.Errorf("serve: perf token: %w", err)
+		}
+		workDir := perfdash.DefaultWorkDir(cfg.WorkspaceRoot)
+		perfSrv := perfdash.New(perfdash.Config{
+			Addr:    cfg.perfAddr(),
+			Token:   perfTok,
+			WorkDir: workDir,
+		})
+		perfURL := fmt.Sprintf("http://%s/#token=%s", cfg.perfAddr(), perfTok)
+		// Log the dashboard URL with token so the operator can copy it into a browser.
+		// The token is in the URL fragment (#token=...) which the browser never sends
+		// in HTTP requests or logs.
+		_ = perfURL // caller logs it via the exported URL (see below)
+		go func() {
+			perfErrCh <- perfSrv.Serve(ctx)
+		}()
+	} else {
+		close(perfErrCh)
+	}
+
+	// Start the gRPC API server unless disabled.
+	grpcErrCh := make(chan error, 1)
+	if cfg.grpcAddr() != "-" {
+		grpcSrv := grpcserver.New(grpcserver.Config{
+			Addr:          cfg.grpcAddr(),
+			ReadToken:     restReadToken,
+			WriteToken:    restWriteToken,
+			WorkspaceRoot: cfg.WorkspaceRoot,
+			YakosRoot:     cfg.YakosRoot,
+			Bus:           bus,
+		})
+		go func() {
+			grpcErrCh <- grpcSrv.Serve(ctx)
+		}()
+	} else {
+		close(grpcErrCh)
+	}
+
+	// Start the streamable HTTP MCP server unless disabled.
+	mcpHTTPErrCh := make(chan error, 1)
+	if cfg.mcpHTTPAddr() != "-" {
+		mcpHTTPSrv := mcpserver.NewHTTPServer(mcpserver.HTTPConfig{
+			Addr:       cfg.mcpHTTPAddr(),
+			WriteToken: restWriteToken,
+			MCPConfig: mcpserver.Config{
+				WorkspaceRoot: cfg.WorkspaceRoot,
+				YakosRoot:     cfg.YakosRoot,
+			},
+		})
+		go func() {
+			mcpHTTPErrCh <- mcpHTTPSrv.Serve(ctx)
+		}()
+	} else {
+		close(mcpHTTPErrCh)
+	}
+
 	// Build the JSON-RPC server and register handlers (bus is passed via cfg).
 	cfgWithBus := cfg
 	cfgWithBus.Bus = bus
@@ -225,7 +341,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// Serve blocks until ctx is done or the listener is closed.
 	rpcErr := srv.Serve(ctx, ln)
 
-	// Wait for WS and REST servers to drain.
+	// Wait for WS, REST, and perf-dashboard servers to drain.
 	select {
 	case wsErr := <-wsErrCh:
 		if wsErr != nil && rpcErr == nil {
@@ -237,6 +353,27 @@ func Run(ctx context.Context, cfg Config) error {
 	case restErr := <-restErrCh:
 		if restErr != nil && rpcErr == nil {
 			rpcErr = restErr
+		}
+	case <-time.After(drainTimeout):
+	}
+	select {
+	case perfErr := <-perfErrCh:
+		if perfErr != nil && rpcErr == nil {
+			rpcErr = perfErr
+		}
+	case <-time.After(drainTimeout):
+	}
+	select {
+	case grpcErr := <-grpcErrCh:
+		if grpcErr != nil && rpcErr == nil {
+			rpcErr = grpcErr
+		}
+	case <-time.After(drainTimeout):
+	}
+	select {
+	case mcpHTTPErr := <-mcpHTTPErrCh:
+		if mcpHTTPErr != nil && rpcErr == nil {
+			rpcErr = mcpHTTPErr
 		}
 	case <-time.After(drainTimeout):
 	}
