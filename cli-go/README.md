@@ -8,9 +8,9 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update, quickstart, auth, memory, agent, session, migrate, plugin, teach, soul, retro, skill, compact, checkpoint, env, standards, peer, mcp, completion, git-hooks, supervise, plan score, work close ported.** The
+**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update, quickstart, auth, memory, agent, session, migrate, plugin, teach, soul, retro, skill, compact, checkpoint, env, standards, peer, mcp, completion, git-hooks, supervise, plan score, work close, model-routing ported.** The
 `validate`, `cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, `team`, `archive`, `init`, `install`, `uninstall`, `start`, `update`, `quickstart`, `auth`, `memory`, `agent`,
-`session`, `migrate`, `plugin`, `teach`, `soul`, `retro`, `skill`, `compact`, `checkpoint`, `env`, `standards`, `peer`, `mcp`, `completion`, `git-hooks`, `supervise`, `plan score`, and `work close` subcommands are implemented natively in Go (ranks 2–35, 37–38 in `docs/go-port-plan.md`). The `kanban serve`
+`session`, `migrate`, `plugin`, `teach`, `soul`, `retro`, `skill`, `compact`, `checkpoint`, `env`, `standards`, `peer`, `mcp`, `completion`, `git-hooks`, `supervise`, `plan score`, `work close`, and `model-routing` subcommands are implemented natively in Go (ranks 2–38 in `docs/go-port-plan.md`). The `kanban serve`
 submode is deferred to rank 41. Worktree cleanup at archive time is explicitly NOT in scope (same
 caveat as bash; manual in v0.1). Hook script installation in `init` prints an advisory directing to
 `yakos refresh` (bash handles hook copies in Phase 1). `yakos start` exec's the runtime CLI replacing

@@ -64,9 +64,10 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 // retro (rank 25), skill (rank 26), compact (rank 27), checkpoint (rank 28),
 // env (rank 29), standards (rank 30), peer (rank 31),
 // mcp (rank 32), completion (rank 33), git-hooks (rank 38),
-// supervise (rank 34), plan score (rank 35), work close (rank 37).
+// supervise (rank 34), plan score (rank 35), work close (rank 37),
+// model-routing (rank 36).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 36
+	const want = 37
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
@@ -376,6 +377,16 @@ func TestWorkCloseCommandEntry(t *testing.T) {
 		}
 	}
 	t.Error("expected 'work close' in portedCommands; not found")
+}
+
+// TestModelRoutingCommandEntry asserts that "model-routing" is in the ported list.
+func TestModelRoutingCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "model-routing" {
+			return
+		}
+	}
+	t.Error("expected 'model-routing' in portedCommands; not found")
 }
 
 // TestPortedCommandStruct verifies the portedCommand struct has the expected
