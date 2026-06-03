@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -632,7 +633,14 @@ func TestParseArgsEmpty(t *testing.T) {
 // ---- config file mode -------------------------------------------------------
 
 // TestConfigFileMode verifies that the config file is written with mode 0600.
+//
+// On Windows, NTFS doesn't honor POSIX mode bits — hardening is done via the
+// winsec package (DACL with single-ACE for current user). Skipping the mode
+// check there; the equivalent ACL assertion lives in internal/winsec tests.
 func TestConfigFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits not honored on NTFS; ACL hardening verified in internal/winsec tests")
+	}
 	home := t.TempDir()
 	if err := SaveConfig(home, Config{Enabled: true}); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
