@@ -26,6 +26,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/agent"
 	"github.com/bakw00ds/yakos/internal/archive"
 	"github.com/bakw00ds/yakos/internal/auth"
+	"github.com/bakw00ds/yakos/internal/checkpoint"
 	"github.com/bakw00ds/yakos/internal/compact"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
@@ -84,6 +85,7 @@ var portedCommands = []portedCommand{
 	{Name: "retro", Since: "0.60.0", Notes: "full feature parity with cli/lib/retro.sh; now/disable/enable/status/last/history subcommands; sentinel flag at ~/.yakos-state/retro-disabled; atomic writes (Q8 temp-rename); .retro-due marker written by 'now'; session resolution via ProjectDir cfg override or YAKOS_PROJECT_NAME env or agent-control walk"},
 	{Name: "skill", Since: "0.61.0", Notes: "full feature parity with cli/lib/skill.sh; candidates/promote/reject/defer/stats subcommands; graveyard + fingerprint dedup (§16.1); calibration warnings (§16.2); atomic writes; validate gate on promote; --global promote to lib/skills/"},
 	{Name: "compact", Since: "0.62.0", Notes: "full feature parity with cli/lib/compact.sh; now/threshold/history subcommands; atomic writes for settings.json (temp-rename, Q8); O_APPEND for compact-log.ndjson; M3.1 auto-send deferred (prints slash-command advisory)"},
+	{Name: "checkpoint", Since: "0.63.0", Notes: "full feature parity with cli/lib/checkpoint.sh; create/list/restore/clean subcommands; now+resume aliases; scratchpad copy of plan/decisions/contracts/status/kanban .md; manifest.json with ts/session_id/runtime/by_user; session-id resolution chain (cfg/env/history/unknown); atomic dir writes; M3.2 librarian digest deferred"},
 }
 
 type portedCommand struct {
@@ -177,6 +179,8 @@ func main() {
 		runSkill(yakosRoot, args[1:])
 	case "compact":
 		runCompact(args[1:])
+	case "checkpoint":
+		runCheckpoint(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -3372,6 +3376,100 @@ func runCompact(args []string) {
 
 	if _, err := compact.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "compact: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runCheckpoint implements `yakos checkpoint` natively in Go.
+//
+// Usage mirrors cli/lib/checkpoint.sh exactly:
+//
+//	yakos checkpoint create                 # create snapshot (alias: now)
+//	yakos checkpoint list                   # list existing snapshots
+//	yakos checkpoint restore <id>           # resume via --fork-session (alias: resume)
+//	yakos checkpoint clean [--age <days>]   # GC old snapshots (default >30d)
+//	yakos checkpoint --help                 # print help and exit 0
+//
+// Snapshots live under <work>/current/checkpoints/<iso-ts>/ and contain:
+//
+//	summary.md, scratchpad/{plan,decisions,contracts,status,kanban}.md,
+//	token-snapshot.txt, session-id.txt, manifest.json
+//
+// Work directory is resolved via YAKOS_WORK_DIR env → YAKOS_INPLACE_WORK+
+// CLAUDE_PROJECT_DIR → $HOME/agent-control/$YAKOS_PROJECT_NAME/work.
+func runCheckpoint(args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		checkpoint.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+	rest := args[1:]
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := checkpoint.Config{
+		Subcommand: sub,
+		HomeDir:    home,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	switch sub {
+	case "restore", "resume":
+		if len(rest) == 0 {
+			fmt.Fprintln(os.Stderr, "checkpoint restore: missing <id>")
+			checkpoint.PrintHelp(os.Stderr)
+			os.Exit(1)
+		}
+		cfg.RestoreID = rest[0]
+
+	case "clean":
+		for i := 0; i < len(rest); i++ {
+			arg := rest[i]
+			switch {
+			case arg == "--age":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "checkpoint clean: --age requires a number (days)")
+					os.Exit(1)
+				}
+				n := 0
+				if _, err := fmt.Sscanf(rest[i], "%d", &n); err != nil || n <= 0 {
+					fmt.Fprintf(os.Stderr, "checkpoint clean: --age value %q is not a positive integer\n", rest[i])
+					os.Exit(1)
+				}
+				cfg.CleanAgeDays = n
+			case len(arg) > 6 && arg[:6] == "--age=":
+				val := arg[6:]
+				n := 0
+				if _, err := fmt.Sscanf(val, "%d", &n); err != nil || n <= 0 {
+					fmt.Fprintf(os.Stderr, "checkpoint clean: --age value %q is not a positive integer\n", val)
+					os.Exit(1)
+				}
+				cfg.CleanAgeDays = n
+			default:
+				fmt.Fprintf(os.Stderr, "checkpoint clean: unknown flag %q (try --help)\n", arg)
+				os.Exit(1)
+			}
+		}
+
+	case "create", "now", "list":
+		if len(rest) > 0 {
+			fmt.Fprintf(os.Stderr, "checkpoint %s: unexpected argument %q\n", sub, rest[0])
+			os.Exit(1)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "checkpoint: unknown subcommand %q (try --help)\n", sub)
+		os.Exit(1)
+	}
+
+	if _, err := checkpoint.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "checkpoint: %v\n", err)
 		os.Exit(1)
 	}
 }
