@@ -8,15 +8,16 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update, quickstart, auth, memory, agent, session ported.** The
+**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update, quickstart, auth, memory, agent, session, migrate ported.** The
 `validate`, `cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, `team`, `archive`, `init`, `install`, `uninstall`, `start`, `update`, `quickstart`, `auth`, `memory`, `agent`,
-and `session` subcommands are implemented natively in Go (ranks 2–20 in `docs/go-port-plan.md`). The `kanban serve`
+`session`, and `migrate` subcommands are implemented natively in Go (ranks 2–21 in `docs/go-port-plan.md`). The `kanban serve`
 submode is deferred to rank 41. Worktree cleanup at archive time is explicitly NOT in scope (same
 caveat as bash; manual in v0.1). Hook script installation in `init` prints an advisory directing to
 `yakos refresh` (bash handles hook copies in Phase 1). `yakos start` exec's the runtime CLI replacing
 the current process (Unix syscall.Exec); workspace hook wiring (jq-based settings.json merge) is
 handled by the bash wrapper in Phase 1. `yakos session export` is deferred (tar/gzip plumbing out of
-scope for Phase 1); use `YAKOS_IMPL=bash yakos session export` for that path. All other commands
+scope for Phase 1); use `YAKOS_IMPL=bash yakos session export` for that path. `yakos migrate down`
+is deferred to Phase 1.5; use `YAKOS_IMPL=bash yakos migrate` for rollback. All other commands
 proxy to bash yakos. Run `yakos go-port-status` to see the current migration tracker.
 
 The porting plan lives at `docs/go-port-plan.md` (written in parallel by the

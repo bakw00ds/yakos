@@ -33,6 +33,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/install"
 	"github.com/bakw00ds/yakos/internal/kanban"
 	"github.com/bakw00ds/yakos/internal/memory"
+	"github.com/bakw00ds/yakos/internal/migrate"
 	"github.com/bakw00ds/yakos/internal/passthrough"
 	"github.com/bakw00ds/yakos/internal/quickstart"
 	"github.com/bakw00ds/yakos/internal/refresh"
@@ -70,6 +71,7 @@ var portedCommands = []portedCommand{
 	{Name: "memory", Since: "0.53.0", Notes: "full feature parity with cli/lib/memory.sh; list/read/write/delete/index-rebuild; MEMORY.md byte-identical index; schema sidecar; atomic writes"},
 	{Name: "agent", Since: "0.54.0", Notes: "full feature parity with cli/lib/agent.sh; new/lint/diff/list subcommands; agents alias; docs (idea rank 9) md+html; reuses agentscompose+validate packages; atomic writes"},
 	{Name: "session", Since: "0.55.0", Notes: "full feature parity with cli/lib/session.sh; list/info/resume/fork subcommands; streams .session-started-history.ndjson; export deferred (tar/gzip out of scope for Phase 1)"},
+	{Name: "migrate", Since: "0.56.0", Notes: "full feature parity with cli/lib/migrate.sh; status/up subcommands; sidecar schema-version registry (kanban + memory); down deferred to Phase 1.5; atomic writes"},
 }
 
 type portedCommand struct {
@@ -149,6 +151,8 @@ func main() {
 		runAgent(yakosRoot, args[0], args[1:])
 	case "session":
 		runSession(args[1:])
+	case "migrate":
+		runMigrate(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -2724,6 +2728,80 @@ func runSession(args []string) {
 
 	if _, err := session.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "session: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runMigrate implements `yakos migrate` natively in Go.
+//
+// Usage mirrors cli/lib/migrate.sh (rank 21), adapted to target the
+// sidecar schema-version files managed by the kanban and memory packages
+// (Decision A, go-port-decisions-2026-06-02.md).
+//
+//	yakos migrate status              — show schema version for each sidecar format
+//	yakos migrate up [<format>]       — apply pending migrations (no-op in Phase 1)
+//	yakos migrate down [<format>]     — error; deferred to Phase 1.5
+//	yakos migrate --dry-run           — print what WOULD be done without writing
+//	yakos migrate --help              — print help and exit 0
+//
+// The work directory is resolved from YAKOS_WORK_DIR or
+// $HOME/agent-control/$YAKOS_PROJECT_NAME/work. The memory directory is
+// resolved from YAKOS_MEMORY_DIR or ~/.claude/projects/memory/.
+func runMigrate(args []string) {
+	sub := ""
+	format := ""
+	dryRun := false
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			migrate.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case arg == "--dry-run":
+			dryRun = true
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "migrate: unknown flag %q (try --help)\n", arg)
+			os.Exit(1)
+		default:
+			if sub == "" {
+				sub = arg
+			} else if format == "" {
+				format = arg
+			} else {
+				fmt.Fprintln(os.Stderr, "migrate: too many positional args (try --help)")
+				os.Exit(1)
+			}
+		}
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	workDir := os.Getenv("YAKOS_WORK_DIR")
+	if workDir == "" {
+		if proj := os.Getenv("YAKOS_PROJECT_NAME"); proj != "" {
+			workDir = filepath.Join(home, "agent-control", proj, "work")
+		}
+	}
+
+	memDir := os.Getenv("YAKOS_MEMORY_DIR")
+
+	cfg := migrate.Config{
+		Subcommand: sub,
+		Format:     format,
+		WorkDir:    workDir,
+		MemoryDir:  memDir,
+		HomeDir:    home,
+		DryRun:     dryRun,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	if _, err := migrate.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 		os.Exit(1)
 	}
 }
