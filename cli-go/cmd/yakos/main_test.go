@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,6 +15,9 @@ import (
 // Note: the IsDir check is required because macOS case-insensitive filesystems
 // match "VERSION" against a "version" subdirectory, which would produce a
 // false positive when walking through cli-go/internal/.
+//
+// Uses filepath.Dir for parent traversal so the walk works on Windows (where
+// path separators are `\`) as well as Unix.
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
@@ -21,11 +25,11 @@ func repoRoot(t *testing.T) string {
 		t.Fatalf("os.Getwd: %v", err)
 	}
 	for {
-		fi, err := os.Stat(dir + "/VERSION")
+		fi, err := os.Stat(filepath.Join(dir, "VERSION"))
 		if err == nil && !fi.IsDir() {
 			return dir
 		}
-		parent := dir[:strings.LastIndex(dir, "/")]
+		parent := filepath.Dir(dir)
 		if parent == "" || parent == dir {
 			t.Fatal("could not find repo root (no VERSION regular file in any parent dir)")
 		}
