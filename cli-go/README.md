@@ -8,9 +8,9 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update, quickstart, auth, memory, agent, session, migrate, plugin, teach, soul, retro, skill, compact, checkpoint, env, standards, peer, mcp, completion, git-hooks ported.** The
+**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update, quickstart, auth, memory, agent, session, migrate, plugin, teach, soul, retro, skill, compact, checkpoint, env, standards, peer, mcp, completion, git-hooks, supervise, plan score, work close ported.** The
 `validate`, `cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, `team`, `archive`, `init`, `install`, `uninstall`, `start`, `update`, `quickstart`, `auth`, `memory`, `agent`,
-`session`, `migrate`, `plugin`, `teach`, `soul`, `retro`, `skill`, `compact`, `checkpoint`, `env`, `standards`, `peer`, `mcp`, `completion`, and `git-hooks` subcommands are implemented natively in Go (ranks 2–33, 38 in `docs/go-port-plan.md`). The `kanban serve`
+`session`, `migrate`, `plugin`, `teach`, `soul`, `retro`, `skill`, `compact`, `checkpoint`, `env`, `standards`, `peer`, `mcp`, `completion`, `git-hooks`, `supervise`, `plan score`, and `work close` subcommands are implemented natively in Go (ranks 2–35, 37–38 in `docs/go-port-plan.md`). The `kanban serve`
 submode is deferred to rank 41. Worktree cleanup at archive time is explicitly NOT in scope (same
 caveat as bash; manual in v0.1). Hook script installation in `init` prints an advisory directing to
 `yakos refresh` (bash handles hook copies in Phase 1). `yakos start` exec's the runtime CLI replacing
@@ -164,6 +164,9 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos mcp <sub> [args]` | Go (Phase 1 read-only config management: install/uninstall/status/probe; native MCP server is Phase 2 Q3; atomic JSON writes; Windows %APPDATA%/claude/mcp.json) |
 | `yakos completion <sub>` | Go (bash/zsh/fish/install subcommands; //go:embed templates; shell auto-detection; BASH_COMPLETION_USER_DIR/YAKOS_ZSH_COMPDIR/XDG_CONFIG_HOME overrides) |
 | `yakos git-hooks <sub> [--force] [--promotion-gate]` | Go (full feature parity with `cli/lib/git-hooks.sh`; install/uninstall/status; atomic hook writes; .framework-hash sibling for YakOS ownership + drift detection; composed pre-push for --promotion-gate) |
+| `yakos supervise <sub> [args]` | Go (full feature parity with `cli/lib/supervise.sh`; enable/disable/status/tail/clear/set/pending/ack/ack-all subcommands; gate-on-CRITICAL, ack tracking, finding IDs; atomic YAML writes; YAKOS_SUPERVISOR_DISABLE bypass) |
+| `yakos plan score <sub> [args]` | Go (full feature parity with `cli/lib/plan-score.sh`; show/history/override/correlate subcommands; reads plan-quality-log.ndjson; Pearson r + quartile + threshold→outcome report; .plan-blocked marker removal on override) |
+| `yakos work close [args]` | Go (full feature parity with `cli/lib/work-close.sh`; appends plan_outcome record; git diff stats, dispatch-log sums, rework cycles, first_try_pass, scope_creep_ratio; non-blocking on missing data; injectable GitFn+PromptFn) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 

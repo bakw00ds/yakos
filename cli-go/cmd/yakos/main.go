@@ -53,8 +53,10 @@ import (
 	"github.com/bakw00ds/yakos/internal/standards"
 	"github.com/bakw00ds/yakos/internal/start"
 	"github.com/bakw00ds/yakos/internal/status"
+	"github.com/bakw00ds/yakos/internal/planscore"
 	"github.com/bakw00ds/yakos/internal/supervise"
 	"github.com/bakw00ds/yakos/internal/teach"
+	"github.com/bakw00ds/yakos/internal/workclose"
 	"github.com/bakw00ds/yakos/internal/team"
 	"github.com/bakw00ds/yakos/internal/uninstall"
 	"github.com/bakw00ds/yakos/internal/update"
@@ -100,6 +102,8 @@ var portedCommands = []portedCommand{
 	{Name: "completion", Since: "0.68.0", Notes: "full feature parity with cli/lib/completion.sh; bash/zsh/fish/install subcommands; //go:embed templates (Decision D); shell auto-detection from $SHELL and YAKOS_COMPLETION_SHELL; BASH_COMPLETION_USER_DIR, YAKOS_ZSH_COMPDIR, XDG_CONFIG_HOME path overrides"},
 	{Name: "git-hooks", Since: "0.69.0", Notes: "full feature parity with cli/lib/git-hooks.sh; install/uninstall/status subcommands; --force/--promotion-gate flags; atomic temp-rename hook writes (Q8); .framework-hash sibling for YakOS ownership + drift detection; composed pre-push for version-gate+promotion-gate"},
 	{Name: "supervise", Since: "0.70.0", Notes: "full feature parity with cli/lib/supervise.sh; enable/disable/status/tail/clear/set/pending/ack/ack-all subcommands; PRs #28-#39 supervisor redesign preserved (gate-on-CRITICAL, ack tracking, finding IDs); atomic YAML writes (temp-rename, Q8); append-only supervisor-acks.ndjson; YAKOS_SUPERVISOR_DISABLE emergency bypass"},
+	{Name: "plan score", Since: "0.71.0", Notes: "full feature parity with cli/lib/plan-score.sh; show/history/override/correlate subcommands; reads plan-quality-log.ndjson; Pearson r + quartile + threshold → outcome report in correlate; .plan-blocked marker removal on override; injectable PlanQualityLog+CurrentDir+Now for tests"},
+	{Name: "work close", Since: "0.71.0", Notes: "full feature parity with cli/lib/work-close.sh; appends plan_outcome record to plan-quality-log.ndjson; git diff stats, dispatch-log sums, rework cycles, first_try_pass, scope_creep_ratio; non-blocking (missing data → null); injectable GitFn+PromptFn+Now for tests"},
 }
 
 type portedCommand struct {
@@ -209,6 +213,10 @@ func main() {
 		runGitHooks(yakosRoot, args[1:])
 	case "supervise":
 		runSupervise(args[1:])
+	case "plan":
+		runPlan(yakosRoot, args[1:])
+	case "work":
+		runWork(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -4054,6 +4062,276 @@ func runSupervise(args []string) {
 	}
 
 	if _, err := supervise.Run(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+}
+
+// runPlan implements `yakos plan <subcommand>` natively in Go.
+//
+// Currently ported leaf subcommands:
+//
+//	yakos plan score show [<plan_id>]
+//	yakos plan score history [--project <name>] [--limit <n>]
+//	yakos plan score override <plan_id> --reason "<text>"
+//	yakos plan score correlate [--project <p>] [--since <iso>] [--min-n <n>]
+//
+// The bash source dispatches: yakos plan score <sub> and also yakos plan <sub>
+// directly. The Go port mirrors that: `plan score show` and `plan show` both
+// route to planscore.Run.
+func runPlan(yakosRoot string, args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		planscore.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+	rest := args[1:]
+
+	// Strip the redundant "score" wrapper when present: `plan score show` → sub=show.
+	if sub == "score" {
+		if len(rest) == 0 {
+			planscore.PrintHelp(os.Stdout)
+			os.Exit(0)
+		}
+		sub = rest[0]
+		rest = rest[1:]
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := planscore.Config{
+		Subcommand: sub,
+		HomeDir:    home,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	switch sub {
+	case "show":
+		if len(rest) > 0 && rest[0] != "" && rest[0][0] != '-' {
+			cfg.PlanID = rest[0]
+			rest = rest[1:]
+		}
+		for _, arg := range rest {
+			if arg == "-h" || arg == "--help" {
+				planscore.PrintHelp(os.Stdout)
+				os.Exit(0)
+			}
+			fmt.Fprintf(os.Stderr, "plan score show: unknown option %q (try --help)\n", arg)
+			os.Exit(1)
+		}
+
+	case "history":
+		for i := 0; i < len(rest); i++ {
+			arg := rest[i]
+			switch {
+			case arg == "--project":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "plan score history: --project requires a value")
+					os.Exit(1)
+				}
+				cfg.Project = rest[i]
+			case len(arg) > 10 && arg[:10] == "--project=":
+				cfg.Project = arg[10:]
+			case arg == "--limit":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "plan score history: --limit requires a value")
+					os.Exit(1)
+				}
+				n, err := strconv.Atoi(rest[i])
+				if err != nil || n <= 0 {
+					fmt.Fprintf(os.Stderr, "plan score history: --limit %q must be a positive integer\n", rest[i])
+					os.Exit(1)
+				}
+				cfg.Limit = n
+			case len(arg) > 8 && arg[:8] == "--limit=":
+				n, err := strconv.Atoi(arg[8:])
+				if err != nil || n <= 0 {
+					fmt.Fprintf(os.Stderr, "plan score history: --limit value %q must be a positive integer\n", arg[8:])
+					os.Exit(1)
+				}
+				cfg.Limit = n
+			case arg == "-h" || arg == "--help":
+				planscore.PrintHelp(os.Stdout)
+				os.Exit(0)
+			default:
+				fmt.Fprintf(os.Stderr, "plan score history: unknown option %q (try --help)\n", arg)
+				os.Exit(1)
+			}
+		}
+
+	case "override":
+		if len(rest) == 0 || rest[0][0] == '-' {
+			planscore.PrintHelp(os.Stderr)
+			fmt.Fprintln(os.Stderr, "plan score override: <plan_id> required")
+			os.Exit(1)
+		}
+		cfg.PlanID = rest[0]
+		rest = rest[1:]
+		for i := 0; i < len(rest); i++ {
+			arg := rest[i]
+			switch {
+			case arg == "--reason":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "plan score override: --reason requires a value")
+					os.Exit(1)
+				}
+				cfg.Reason = rest[i]
+			case len(arg) > 9 && arg[:9] == "--reason=":
+				cfg.Reason = arg[9:]
+			case arg == "-h" || arg == "--help":
+				planscore.PrintHelp(os.Stdout)
+				os.Exit(0)
+			default:
+				fmt.Fprintf(os.Stderr, "plan score override: unknown option %q (try --help)\n", arg)
+				os.Exit(1)
+			}
+		}
+
+	case "correlate":
+		for i := 0; i < len(rest); i++ {
+			arg := rest[i]
+			switch {
+			case arg == "--project":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "plan score correlate: --project requires a value")
+					os.Exit(1)
+				}
+				cfg.Project = rest[i]
+			case len(arg) > 10 && arg[:10] == "--project=":
+				cfg.Project = arg[10:]
+			case arg == "--since":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "plan score correlate: --since requires a value")
+					os.Exit(1)
+				}
+				cfg.Since = rest[i]
+			case len(arg) > 8 && arg[:8] == "--since=":
+				cfg.Since = arg[8:]
+			case arg == "--min-n":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "plan score correlate: --min-n requires a value")
+					os.Exit(1)
+				}
+				n, err := strconv.Atoi(rest[i])
+				if err != nil || n <= 0 {
+					fmt.Fprintf(os.Stderr, "plan score correlate: --min-n %q must be a positive integer\n", rest[i])
+					os.Exit(1)
+				}
+				cfg.MinN = n
+			case len(arg) > 7 && arg[:7] == "--min-n=":
+				n, err := strconv.Atoi(arg[7:])
+				if err != nil || n <= 0 {
+					fmt.Fprintf(os.Stderr, "plan score correlate: --min-n value %q must be a positive integer\n", arg[7:])
+					os.Exit(1)
+				}
+				cfg.MinN = n
+			case arg == "-h" || arg == "--help":
+				planscore.PrintHelp(os.Stdout)
+				os.Exit(0)
+			default:
+				fmt.Fprintf(os.Stderr, "plan score correlate: unknown option %q (try --help)\n", arg)
+				os.Exit(1)
+			}
+		}
+
+	case "-h", "--help", "help", "":
+		planscore.PrintHelp(os.Stdout)
+		os.Exit(0)
+
+	default:
+		fmt.Fprintf(os.Stderr, "plan score: unknown subcommand %q (try --help)\n", sub)
+		os.Exit(64)
+	}
+
+	if _, err := planscore.Run(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+}
+
+// runWork implements `yakos work <subcommand>` natively in Go.
+//
+// Currently ported leaf subcommands:
+//
+//	yakos work close [--plan-id <id>] [--no-prompt] [--project <path>]
+func runWork(args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		workclose.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+	rest := args[1:]
+
+	switch sub {
+	case "close":
+		runWorkClose(rest)
+	case "-h", "--help", "help":
+		workclose.PrintHelp(os.Stdout)
+		os.Exit(0)
+	default:
+		fmt.Fprintf(os.Stderr, "work: unknown subcommand %q (try --help)\n", sub)
+		os.Exit(64)
+	}
+}
+
+// runWorkClose handles `yakos work close [options]`.
+func runWorkClose(args []string) {
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := workclose.Config{
+		HomeDir:   home,
+		Writer:    os.Stdout,
+		ErrWriter: os.Stderr,
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--plan-id":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "work close: --plan-id requires a value")
+				os.Exit(1)
+			}
+			cfg.PlanID = args[i]
+		case len(arg) > 10 && arg[:10] == "--plan-id=":
+			cfg.PlanID = arg[10:]
+		case arg == "--no-prompt":
+			cfg.NoPrompt = true
+		case arg == "--project":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "work close: --project requires a value")
+				os.Exit(1)
+			}
+			cfg.ProjectDir = args[i]
+		case len(arg) > 10 && arg[:10] == "--project=":
+			cfg.ProjectDir = arg[10:]
+		case arg == "-h" || arg == "--help":
+			workclose.PrintHelp(os.Stdout)
+			os.Exit(0)
+		default:
+			fmt.Fprintf(os.Stderr, "work close: unknown option %q (try --help)\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	if _, err := workclose.Run(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}
