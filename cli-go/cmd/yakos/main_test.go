@@ -59,9 +59,9 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 // doctor (rank 5), refresh (rank 6), kanban (rank 7), dispatch (rank 8),
 // team (rank 9), archive (rank 10), init (rank 11), install (rank 12),
 // uninstall (rank 13), start (rank 14), update (rank 15), quickstart (rank 16),
-// auth (rank 17).
+// auth (rank 17), memory (rank 18).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 16
+	const want = 17
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
@@ -231,6 +231,16 @@ func TestQuickstartCommandEntry(t *testing.T) {
 		}
 	}
 	t.Error("expected 'quickstart' in portedCommands; not found")
+}
+
+// TestMemoryCommandEntry asserts that "memory" is in the ported list.
+func TestMemoryCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "memory" {
+			return
+		}
+	}
+	t.Error("expected 'memory' in portedCommands; not found")
 }
 
 // TestPortedCommandStruct verifies the portedCommand struct has the expected
