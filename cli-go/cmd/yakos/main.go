@@ -53,6 +53,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/standards"
 	"github.com/bakw00ds/yakos/internal/start"
 	"github.com/bakw00ds/yakos/internal/status"
+	"github.com/bakw00ds/yakos/internal/supervise"
 	"github.com/bakw00ds/yakos/internal/teach"
 	"github.com/bakw00ds/yakos/internal/team"
 	"github.com/bakw00ds/yakos/internal/uninstall"
@@ -98,6 +99,7 @@ var portedCommands = []portedCommand{
 	{Name: "mcp", Since: "0.67.0", Notes: "full feature parity with cli/lib/mcp.sh (Phase 1 read-only config management); install/uninstall/status/probe subcommands; atomic JSON writes (temp-rename, Q8); Windows %APPDATA%/claude/mcp.json per Q3 planner recommendation; native MCP server is Phase 2"},
 	{Name: "completion", Since: "0.68.0", Notes: "full feature parity with cli/lib/completion.sh; bash/zsh/fish/install subcommands; //go:embed templates (Decision D); shell auto-detection from $SHELL and YAKOS_COMPLETION_SHELL; BASH_COMPLETION_USER_DIR, YAKOS_ZSH_COMPDIR, XDG_CONFIG_HOME path overrides"},
 	{Name: "git-hooks", Since: "0.69.0", Notes: "full feature parity with cli/lib/git-hooks.sh; install/uninstall/status subcommands; --force/--promotion-gate flags; atomic temp-rename hook writes (Q8); .framework-hash sibling for YakOS ownership + drift detection; composed pre-push for version-gate+promotion-gate"},
+	{Name: "supervise", Since: "0.70.0", Notes: "full feature parity with cli/lib/supervise.sh; enable/disable/status/tail/clear/set/pending/ack/ack-all subcommands; PRs #28-#39 supervisor redesign preserved (gate-on-CRITICAL, ack tracking, finding IDs); atomic YAML writes (temp-rename, Q8); append-only supervisor-acks.ndjson; YAKOS_SUPERVISOR_DISABLE emergency bypass"},
 }
 
 type portedCommand struct {
@@ -205,6 +207,8 @@ func main() {
 		runCompletion(args[1:])
 	case "git-hooks":
 		runGitHooks(yakosRoot, args[1:])
+	case "supervise":
+		runSupervise(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -3866,6 +3870,190 @@ func runGitHooks(yakosRoot string, args []string) {
 	}
 
 	if _, err := githooks.Run(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+}
+
+// runSupervise implements `yakos supervise` natively in Go.
+//
+// Usage mirrors cli/lib/supervise.sh exactly (PRs #28–#39 redesign preserved):
+//
+//	yakos supervise enable  [<project>]
+//	yakos supervise disable [<project>]
+//	yakos supervise status  [<project>]
+//	yakos supervise tail    [<project>] [--watch] [--n <N>]
+//	yakos supervise clear   [<project>]
+//	yakos supervise set <key> <value> [<project>]
+//	yakos supervise pending [<project>]
+//	yakos supervise ack     <finding-id> [<project>] [--note "..."]
+//	yakos supervise ack-all [<project>] [--note "..."]
+//
+// Project resolution: explicit arg → inferred from cwd (agent-control walk).
+// Emergency bypass: export YAKOS_SUPERVISOR_DISABLE=1 (no .yakos.yml edit needed).
+func runSupervise(args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		supervise.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+	rest := args[1:]
+
+	// Validate subcommand before parsing flags.
+	switch sub {
+	case "enable", "disable", "status", "tail", "clear", "set", "pending", "ack", "ack-all":
+		// valid
+	default:
+		fmt.Fprintf(os.Stderr, "supervise: unknown subcommand %q (try --help)\n", sub)
+		os.Exit(1)
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := supervise.Config{
+		Subcommand: sub,
+		HomeDir:    home,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+		TailN:      10,
+	}
+
+	switch sub {
+	case "enable", "disable", "status", "clear", "pending":
+		// Optional positional: project name.
+		for _, arg := range rest {
+			if len(arg) > 0 && arg[0] == '-' {
+				fmt.Fprintf(os.Stderr, "supervise %s: unknown flag %q\n", sub, arg)
+				os.Exit(1)
+			}
+			if cfg.Project == "" {
+				cfg.Project = arg
+			} else {
+				fmt.Fprintf(os.Stderr, "supervise %s: too many positional args\n", sub)
+				os.Exit(1)
+			}
+		}
+
+	case "tail":
+		for i := 0; i < len(rest); i++ {
+			arg := rest[i]
+			switch {
+			case arg == "--watch" || arg == "-w":
+				cfg.Watch = true
+			case arg == "--n":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "supervise tail: --n requires a value")
+					os.Exit(1)
+				}
+				n, err := strconv.Atoi(rest[i])
+				if err != nil || n <= 0 {
+					fmt.Fprintf(os.Stderr, "supervise tail: --n value %q is not a positive integer\n", rest[i])
+					os.Exit(1)
+				}
+				cfg.TailN = n
+			case len(arg) > 4 && arg[:4] == "--n=":
+				n, err := strconv.Atoi(arg[4:])
+				if err != nil || n <= 0 {
+					fmt.Fprintf(os.Stderr, "supervise tail: --n value %q is not a positive integer\n", arg[4:])
+					os.Exit(1)
+				}
+				cfg.TailN = n
+			case len(arg) > 0 && arg[0] == '-':
+				fmt.Fprintf(os.Stderr, "supervise tail: unknown flag %q\n", arg)
+				os.Exit(1)
+			default:
+				if cfg.Project == "" {
+					cfg.Project = arg
+				} else {
+					fmt.Fprintln(os.Stderr, "supervise tail: too many positional args")
+					os.Exit(1)
+				}
+			}
+		}
+
+	case "set":
+		// Requires: <key> <value> [<project>]
+		if len(rest) < 2 {
+			fmt.Fprintln(os.Stderr, "supervise set: <key> <value> required (e.g. block_on_critical false)")
+			os.Exit(1)
+		}
+		cfg.Key = rest[0]
+		cfg.Value = rest[1]
+		if len(rest) >= 3 {
+			cfg.Project = rest[2]
+		}
+		if len(rest) > 3 {
+			fmt.Fprintln(os.Stderr, "supervise set: too many positional args")
+			os.Exit(1)
+		}
+
+	case "ack":
+		// Requires: <finding-id> [<project>] [--note "..."]
+		if len(rest) == 0 {
+			fmt.Fprintln(os.Stderr, "supervise ack: <finding-id> required (try 'yakos supervise pending')")
+			os.Exit(1)
+		}
+		cfg.FindingID = rest[0]
+		rest = rest[1:]
+		for i := 0; i < len(rest); i++ {
+			arg := rest[i]
+			switch {
+			case arg == "--note":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "supervise ack: --note requires a value")
+					os.Exit(1)
+				}
+				cfg.Note = rest[i]
+			case len(arg) > 7 && arg[:7] == "--note=":
+				cfg.Note = arg[7:]
+			case len(arg) > 0 && arg[0] == '-':
+				fmt.Fprintf(os.Stderr, "supervise ack: unknown flag %q\n", arg)
+				os.Exit(1)
+			default:
+				if cfg.Project == "" {
+					cfg.Project = arg
+				} else {
+					fmt.Fprintln(os.Stderr, "supervise ack: too many positional args")
+					os.Exit(1)
+				}
+			}
+		}
+
+	case "ack-all":
+		// Optional: [<project>] [--note "..."]
+		for i := 0; i < len(rest); i++ {
+			arg := rest[i]
+			switch {
+			case arg == "--note":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "supervise ack-all: --note requires a value")
+					os.Exit(1)
+				}
+				cfg.Note = rest[i]
+			case len(arg) > 7 && arg[:7] == "--note=":
+				cfg.Note = arg[7:]
+			case len(arg) > 0 && arg[0] == '-':
+				fmt.Fprintf(os.Stderr, "supervise ack-all: unknown flag %q\n", arg)
+				os.Exit(1)
+			default:
+				if cfg.Project == "" {
+					cfg.Project = arg
+				} else {
+					fmt.Fprintln(os.Stderr, "supervise ack-all: too many positional args")
+					os.Exit(1)
+				}
+			}
+		}
+	}
+
+	if _, err := supervise.Run(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}

@@ -63,9 +63,10 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 // migrate (rank 21), plugin (rank 22), teach (rank 23), soul (rank 24),
 // retro (rank 25), skill (rank 26), compact (rank 27), checkpoint (rank 28),
 // env (rank 29), standards (rank 30), peer (rank 31),
-// mcp (rank 32), completion (rank 33), git-hooks (rank 38).
+// mcp (rank 32), completion (rank 33), git-hooks (rank 38),
+// supervise (rank 34).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 33
+	const want = 34
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
@@ -345,6 +346,16 @@ func TestCheckpointCommandEntry(t *testing.T) {
 		}
 	}
 	t.Error("expected 'checkpoint' in portedCommands; not found")
+}
+
+// TestSupervisesCommandEntry asserts that "supervise" is in the ported list.
+func TestSupervisesCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "supervise" {
+			return
+		}
+	}
+	t.Error("expected 'supervise' in portedCommands; not found")
 }
 
 // TestPortedCommandStruct verifies the portedCommand struct has the expected
