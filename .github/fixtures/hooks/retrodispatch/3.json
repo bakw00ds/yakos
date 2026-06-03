@@ -1,0 +1,10 @@
+{
+  "event": "UserPromptSubmit",
+  "tool": "",
+  "payload": {},
+  "env": {
+    "YAKOS_AGENT_ROLE": "specialist",
+    "CLAUDE_SESSION_ID": "fixture-session-0003"
+  },
+  "work_dir": ""
+}

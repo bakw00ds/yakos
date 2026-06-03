@@ -1,0 +1,14 @@
+{
+  "event": "PostToolUse",
+  "tool": "Bash",
+  "payload": {
+    "tool_input": {
+      "command": "go test ./..."
+    },
+    "tool_response": "ok 0.1s"
+  },
+  "env": {
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

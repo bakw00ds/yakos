@@ -1,0 +1,16 @@
+{
+  "event": "PreToolUse",
+  "tool": "Agent",
+  "payload": {
+    "tool_input": {
+      "subagent_type": "backend",
+      "description": "implement feature"
+    }
+  },
+  "env": {
+    "YAKOS_SUPERVISOR_DISABLE": "0",
+    "YAKOS_AGENT_ROLE": "lead",
+    "CLAUDE_PROJECT_DIR": "/nonexistent-fixture-project-dir"
+  },
+  "work_dir": ""
+}

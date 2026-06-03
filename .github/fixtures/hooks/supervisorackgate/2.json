@@ -1,0 +1,15 @@
+{
+  "event": "PreToolUse",
+  "tool": "Agent",
+  "payload": {
+    "tool_input": {
+      "subagent_type": "backend",
+      "description": "implement winsec"
+    }
+  },
+  "env": {
+    "YAKOS_SUPERVISOR_DISABLE": "1",
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

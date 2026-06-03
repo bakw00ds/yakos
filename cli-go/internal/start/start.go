@@ -117,6 +117,17 @@ type Config struct {
 	// spawning a real process.
 	// Signature: execFn(argv0 string, argv []string, env []string) error
 	ExecFn func(argv0 string, argv []string, env []string) error
+
+	// RestoreCwdOnReturn, when true, saves the process cwd before the
+	// production-path os.Chdir(controlDir) call and restores it via a deferred
+	// call before Run returns.  Default false preserves the historical behaviour
+	// (cwd is left as controlDir after exec) which is correct for the CLI exec
+	// path where the process is replaced entirely by syscall.Exec anyway.
+	//
+	// Long-running daemon processes that invoke start.Run repeatedly (e.g. via
+	// the dispatch path) must set this to true so each invocation does not
+	// permanently pollute the daemon's working directory.
+	RestoreCwdOnReturn bool
 }
 
 // Banner holds all fields computed during the preflight phase.  It is
@@ -386,6 +397,13 @@ func Run(cfg Config) (*Banner, error) {
 		// The chdir is deferred to just before exec so that test code injecting
 		// ExecFn is not affected by a cwd side-effect (tests use t.TempDir() paths
 		// and would leak cwd state across parallel subtests if chdir ran earlier).
+		if cfg.RestoreCwdOnReturn {
+			// Long-running callers (daemons) ask us to restore cwd on return so
+			// the daemon's working directory is not permanently polluted.
+			if origCwd, err := os.Getwd(); err == nil {
+				defer func() { _ = os.Chdir(origCwd) }()
+			}
+		}
 		if err := os.Chdir(controlDir); err != nil {
 			_, _ = fmt.Fprintf(ew, "WARN: start: could not cd to %s: %v\n", controlDir, err)
 		}

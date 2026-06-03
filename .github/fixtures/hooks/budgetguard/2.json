@@ -1,0 +1,16 @@
+{
+  "event": "PreToolUse",
+  "tool": "Edit",
+  "payload": {
+    "tool_input": {
+      "path": "cli-go/internal/foo/bar.go",
+      "old_string": "x",
+      "new_string": "y"
+    }
+  },
+  "env": {
+    "YAKOS_BUDGET_DISABLE": "0",
+    "CLAUDE_PROJECT_DIR": "/nonexistent-fixture-project-dir"
+  },
+  "work_dir": ""
+}

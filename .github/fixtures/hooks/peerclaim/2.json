@@ -1,0 +1,14 @@
+{
+  "event": "PreToolUse",
+  "tool": "Write",
+  "payload": {
+    "tool_input": {
+      "path": "work/current/plan.md",
+      "content": "# Plan\n"
+    }
+  },
+  "env": {
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

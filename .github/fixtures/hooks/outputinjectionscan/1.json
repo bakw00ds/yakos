@@ -1,0 +1,15 @@
+{
+  "event": "PostToolUse",
+  "tool": "Bash",
+  "payload": {
+    "tool_input": {
+      "command": "echo hello"
+    },
+    "tool_response": "hello\n"
+  },
+  "env": {
+    "YAKOS_INJECTION_SCAN_DISABLE": "0",
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

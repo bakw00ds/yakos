@@ -39,6 +39,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/bakw00ds/yakos/internal/winsec"
 )
 
 // caKeyBits is the RSA key size for all certificates.
@@ -307,7 +309,8 @@ func pemEncodeKey(key *rsa.PrivateKey) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: der})
 }
 
-// writeFile writes data to path atomically (temp+rename) at mode 0600.
+// writeFile writes data to path atomically (temp+rename) at mode 0600, then
+// applies Windows NTFS ACL hardening via winsec.SecureFile (no-op on Unix).
 func writeFile(path string, data []byte) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0600); err != nil { //nolint:gosec
@@ -317,7 +320,9 @@ func writeFile(path string, data []byte) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	return nil
+	// Apply Windows NTFS ACL hardening (no-op on non-Windows; 0600 above
+	// is the POSIX guard on Unix/macOS).
+	return winsec.SecureFile(path)
 }
 
 // writeTLSCertKey writes a tls.Certificate's cert and private key to certPath/keyPath.

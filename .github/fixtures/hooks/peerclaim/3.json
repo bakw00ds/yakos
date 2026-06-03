@@ -1,0 +1,13 @@
+{
+  "event": "PreToolUse",
+  "tool": "Bash",
+  "payload": {
+    "tool_input": {
+      "command": "go test ./..."
+    }
+  },
+  "env": {
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

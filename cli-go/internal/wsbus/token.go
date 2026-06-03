@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bakw00ds/yakos/internal/winsec"
 )
 
 // defaultTokenFile returns the default path for the WS bearer token.
@@ -71,6 +73,11 @@ func generateToken(path string) (string, error) {
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("wsbus: rename token: %w", err)
+	}
+	// Apply Windows NTFS ACL hardening (no-op on non-Windows; 0600 above
+	// is the POSIX guard on Unix/macOS).
+	if err := winsec.SecureFile(path); err != nil {
+		return "", fmt.Errorf("wsbus: secure token file: %w", err)
 	}
 	return tok, nil
 }

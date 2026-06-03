@@ -34,12 +34,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/mailbox"
 )
+
+// defaultStaleAfter is the default freshness threshold for coord state.
+// Claims files older than this are considered stale and trigger a WARN.
+const defaultStaleAfter = 24 * time.Hour
 
 const hookName = "peer-claim"
 
@@ -99,6 +104,14 @@ type Hook struct {
 
 	// NowFn is injected for tests.
 	NowFn func() time.Time
+
+	// StatFn is injected for tests to override os.Stat on the claims file.
+	// When nil, os.Stat is used.
+	StatFn func(path string) (os.FileInfo, error)
+
+	// IsProcessRunningFn is injected for tests to override live-PID detection.
+	// When nil, the default OS-level check is used.
+	IsProcessRunningFn func(pid int) bool
 
 	// User/Host/PID identify this session (injected for tests).
 	User string
@@ -165,6 +178,10 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	if _, err := os.Stat(claimsFile); os.IsNotExist(err) {
 		rebuildClaims(claimsFile, activityLog, nowISO)
 	}
+
+	// Smart-degrade: if coord state IS present, check for staleness.
+	// A stale state emits a single WARN line but does not block (exit 0).
+	h.checkStaleCoordState(&out, claimsFile, now, in)
 
 	// Look up existing claim.
 	existing := lookupClaim(claimsFile, relFile, nowISO)
@@ -515,4 +532,78 @@ func (h *Hook) appendLog(out *hooktype.HookOutput, severity, action, message str
 	}
 	defer func() { _ = f.Close() }()
 	_, _ = f.Write(data)
+}
+
+// ---- stale coord-state detection --------------------------------------------
+
+// staleAfterDuration parses the YAKOS_PEER_STALE_AFTER env var (seconds) and
+// returns the threshold.  Falls back to defaultStaleAfter when the env var is
+// absent or unparseable.
+func staleAfterDuration(in hooktype.HookInput) time.Duration {
+	if raw := in.Env["YAKOS_PEER_STALE_AFTER"]; raw != "" {
+		if secs, err := strconv.ParseInt(raw, 10, 64); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return defaultStaleAfter
+}
+
+// checkStaleCoordState examines the active-claims file and emits a WARN line
+// to Stderr (without blocking) when the coord state is stale.  Staleness is
+// defined as either:
+//   - the claims file's modification time is older than the stale threshold, OR
+//   - at least one active claim's owner PID is not a running process.
+//
+// The hook continues to exit 0 in both cases — the intent is to surface a
+// maintenance hint, not to block agent work.
+func (h *Hook) checkStaleCoordState(out *hooktype.HookOutput, claimsFile string, now time.Time, in hooktype.HookInput) {
+	statFn := h.StatFn
+	if statFn == nil {
+		statFn = os.Stat
+	}
+
+	fi, err := statFn(claimsFile)
+	if err != nil {
+		// File absent or unreadable — not a stale-detection case.
+		return
+	}
+
+	threshold := staleAfterDuration(in)
+	if now.Sub(fi.ModTime()) > threshold {
+		msg := fmt.Sprintf("hook detected stale peer coord state (last modified %s ago, threshold %s); consider yakos peer cleanup",
+			now.Sub(fi.ModTime()).Round(time.Minute),
+			threshold.Round(time.Minute))
+		out.Stderr = fmt.Appendf(out.Stderr, "WARN [peer-claim]: %s\n", msg)
+		return
+	}
+
+	// File is fresh — check whether any active claim's owner PID is gone.
+	data, err := os.ReadFile(claimsFile) //nolint:gosec
+	if err != nil {
+		return
+	}
+	var claims activeClaims
+	if err := json.Unmarshal(data, &claims); err != nil {
+		return
+	}
+
+	isRunning := h.IsProcessRunningFn
+	if isRunning == nil {
+		isRunning = isProcessRunning
+	}
+
+	nowISO := mailbox.FormatTS(now)
+	for _, entry := range claims.Claims {
+		for _, owner := range entry.Owners {
+			if owner.ExpiresAt <= nowISO {
+				continue // already expired; skip
+			}
+			if owner.PID > 0 && !isRunning(owner.PID) {
+				msg := fmt.Sprintf("hook detected stale peer coord state from PID %d (not running); consider yakos peer cleanup",
+					owner.PID)
+				out.Stderr = fmt.Appendf(out.Stderr, "WARN [peer-claim]: %s\n", msg)
+				return
+			}
+		}
+	}
 }

@@ -1,0 +1,11 @@
+{
+  "event": "PostToolUse",
+  "tool": "",
+  "payload": {
+    "agent_type": "frontend"
+  },
+  "env": {
+    "YAKOS_AGENT_ROLE": "frontend"
+  },
+  "work_dir": ""
+}

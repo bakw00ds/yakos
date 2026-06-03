@@ -1,0 +1,14 @@
+{
+  "event": "PreToolUse",
+  "tool": "TeamCreate",
+  "payload": {
+    "tool_input": {
+      "name": "fixture-team"
+    }
+  },
+  "env": {
+    "YAKOS_SUPERVISOR_DISABLE": "1",
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

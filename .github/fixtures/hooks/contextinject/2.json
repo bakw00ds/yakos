@@ -1,0 +1,11 @@
+{
+  "event": "UserPromptSubmit",
+  "tool": "",
+  "payload": {},
+  "env": {
+    "YAKOS_CONTEXT_INJECT_DISABLE": "0",
+    "CLAUDE_PROJECT_DIR": "/nonexistent-fixture-project-dir",
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

@@ -1,0 +1,15 @@
+{
+  "event": "PostToolUse",
+  "tool": "Write",
+  "payload": {
+    "tool_input": {
+      "path": "work/current/plan.md",
+      "content": "# Plan\n"
+    },
+    "tool_response": "ok"
+  },
+  "env": {
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

@@ -1,0 +1,15 @@
+{
+  "event": "PreToolUse",
+  "tool": "TeamCreate",
+  "payload": {
+    "tool_input": {
+      "name": "fixture-team",
+      "description": "a test team"
+    }
+  },
+  "env": {
+    "YAKOS_PLAN_QUALITY_DISABLE": "1",
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

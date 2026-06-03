@@ -1,0 +1,11 @@
+{
+  "event": "UserPromptSubmit",
+  "tool": "",
+  "payload": {},
+  "env": {
+    "YAKOS_RUNTIME": "codex",
+    "YAKOS_AGENT_ROLE": "lead",
+    "CLAUDE_SESSION_ID": "fixture-session-0002"
+  },
+  "work_dir": ""
+}

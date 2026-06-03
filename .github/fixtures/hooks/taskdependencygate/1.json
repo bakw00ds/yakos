@@ -1,0 +1,14 @@
+{
+  "event": "PostToolUse",
+  "tool": "",
+  "payload": {
+    "task": {
+      "id": "fixture-task-001",
+      "blockedBy": []
+    }
+  },
+  "env": {
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

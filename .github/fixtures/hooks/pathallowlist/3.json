@@ -1,0 +1,15 @@
+{
+  "event": "PreToolUse",
+  "tool": "Write",
+  "payload": {
+    "tool_input": {
+      "path": "cli-go/internal/foo/bar.go",
+      "content": "package foo\n"
+    }
+  },
+  "env": {
+    "YAKOS_AGENT_ROLE": "lead",
+    "CLAUDE_PROJECT_DIR": "/nonexistent-fixture-project-dir"
+  },
+  "work_dir": ""
+}

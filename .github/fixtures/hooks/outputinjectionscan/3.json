@@ -1,0 +1,15 @@
+{
+  "event": "PostToolUse",
+  "tool": "Write",
+  "payload": {
+    "tool_input": {
+      "path": "notes.txt"
+    },
+    "tool_response": "ok"
+  },
+  "env": {
+    "YAKOS_INJECTION_SCAN_DISABLE": "0",
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

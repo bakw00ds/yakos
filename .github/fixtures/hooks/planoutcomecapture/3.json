@@ -1,0 +1,11 @@
+{
+  "event": "PostToolUse",
+  "tool": "",
+  "payload": {},
+  "env": {
+    "YAKOS_AGENT_ROLE": "specialist",
+    "YAKOS_PLAN_QUALITY_LOG": "/nonexistent-fixture-plan-quality-log.ndjson",
+    "YAKOS_DISPATCH_LOG": "/nonexistent-fixture-dispatch-log.ndjson"
+  },
+  "work_dir": ""
+}
