@@ -150,7 +150,7 @@ func TestResolveWorkDir_Canonical(t *testing.T) {
 	t.Setenv("YAKOS_PROJECT_NAME", "myproject")
 	cfg := Config{HomeDir: "/home/user"}
 	got := resolveWorkDir(cfg)
-	want := "/home/user/agent-control/myproject/work"
+	want := filepath.FromSlash("/home/user/agent-control/myproject/work")
 	if got != want {
 		t.Errorf("resolveWorkDir: got %q, want %q", got, want)
 	}

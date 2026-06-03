@@ -609,6 +609,13 @@ func TestRun_ExecFnCalled(t *testing.T) {
 	resolvedRoot, _ := filepath.EvalSymlinks(yakosRoot)
 	writePointer(t, home, resolvedRoot)
 
+	// start.Run calls os.Chdir(controlDir) before exec. On Windows, t.TempDir()
+	// cleanup cannot remove a directory while the process is cwd'd into it.
+	// Capture the original directory and restore it before cleanup runs.
+	// Registered AFTER t.TempDir() calls so it executes BEFORE their cleanup (LIFO order).
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+
 	var stdout, stderr bytes.Buffer
 	cap := &captureExec{}
 

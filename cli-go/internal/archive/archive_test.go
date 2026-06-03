@@ -181,7 +181,7 @@ func TestWorkDirFor_Default(t *testing.T) {
 	t.Setenv("YAKOS_WORK_DIR", "")
 	t.Setenv("YAKOS_INPLACE_WORK", "")
 	got := workDirFor("myproj", "/home/user")
-	want := "/home/user/agent-control/myproj/work"
+	want := filepath.FromSlash("/home/user/agent-control/myproj/work")
 	if got != want {
 		t.Errorf("workDirFor: got %q, want %q", got, want)
 	}

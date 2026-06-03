@@ -3,6 +3,7 @@ package start
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -166,11 +167,9 @@ func TestRun_Exec_ClaudeArgv(t *testing.T) {
 		ExecFn:    execCapture(&called),
 	}
 
-	// Skip if claude is not on PATH (CI may not have it).
-	if _, err := os.Stat("/usr/bin/claude"); os.IsNotExist(err) {
-		if _, err2 := findInPATH("claude"); err2 != nil {
-			t.Skip("claude not on PATH; skipping exec-argv test")
-		}
+	// Skip if claude is not on PATH (CI may not have it, including Windows runners).
+	if _, err := findInPATH("claude"); err != nil {
+		t.Skip("claude not on PATH; skipping exec-argv test")
 	}
 
 	_, err := Run(cfg)
@@ -581,9 +580,9 @@ func TestRun_DryRun_IDEWarnNonClaude(t *testing.T) {
 
 // ---- helpers ----------------------------------------------------------------
 
-// findInPATH is a test-only helper: returns the PATH env value and nil error.
-// Used only in skip guards to check whether a binary might be on PATH.
+// findInPATH is a test-only helper: returns the resolved binary path and nil
+// error when binary is found on PATH, or ("", err) when not found.
+// Used in skip guards to determine whether runtime binaries are available.
 func findInPATH(binary string) (string, error) {
-	p, _ := os.LookupEnv("PATH")
-	return p, nil // simplified check used in skip guards
+	return exec.LookPath(binary)
 }

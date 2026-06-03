@@ -23,11 +23,11 @@ func TestResolveWorkDir_Explicit(t *testing.T) {
 
 func TestResolveWorkDir_Inplace(t *testing.T) {
 	env := map[string]string{
-		"YAKOS_INPLACE_WORK":  "1",
-		"CLAUDE_PROJECT_DIR":  "/repos/myapp",
+		"YAKOS_INPLACE_WORK": "1",
+		"CLAUDE_PROJECT_DIR": "/repos/myapp",
 	}
 	got := resolveWorkDir("myproject", "/home/user", env)
-	if got != "/repos/myapp/work" {
+	if got != filepath.FromSlash("/repos/myapp/work") {
 		t.Errorf("expected /repos/myapp/work, got %q", got)
 	}
 }
@@ -35,7 +35,7 @@ func TestResolveWorkDir_Inplace(t *testing.T) {
 func TestResolveWorkDir_Canonical(t *testing.T) {
 	env := map[string]string{}
 	got := resolveWorkDir("myproject", "/home/user", env)
-	if got != "/home/user/agent-control/myproject/work" {
+	if got != filepath.FromSlash("/home/user/agent-control/myproject/work") {
 		t.Errorf("expected /home/user/agent-control/myproject/work, got %q", got)
 	}
 }

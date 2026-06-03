@@ -724,7 +724,7 @@ func TestResolveLogPath_CfgOverride(t *testing.T) {
 func TestResolveLogPath_Default(t *testing.T) {
 	cfg := Config{HomeDir: "/home/testuser"}
 	got := cfg.resolveLogPath()
-	want := "/home/testuser/.yakos-state/plan-quality-log.ndjson"
+	want := filepath.FromSlash("/home/testuser/.yakos-state/plan-quality-log.ndjson")
 	if got != want {
 		t.Errorf("expected %q; got %q", want, got)
 	}
