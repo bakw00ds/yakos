@@ -85,9 +85,9 @@ Bash sources are under `cli/lib/`. Line counts are LOC of the current `.sh` file
 | 36 | `model-routing` | `cli/lib/model-routing.sh` | 1035 | L (~34h) | internal/routing (rule eval engine) | unit + table-driven on rule combinations | routing decisions identical to bash | YAML rule format — pick a YAML lib (gopkg.in/yaml.v3 is the standard) |
 | 37 | `work close` | `cli/lib/work-close.sh` | 344 | M (~14h) | internal/workdir, internal/dispatchlog | round-trip | identical | none |
 | 38 | `git-hooks` | `cli/lib/git-hooks.sh` | 158 | S (~6h) | internal/git | dry-run + apply | identical | none |
-| 39 | `hooks` (install only — does not port hook bodies) | `cli/lib/hooks-install.sh` | 285 | M (~10h) | internal/symlink for hook scripts | dry-run + apply | hook symlinks identical; hook scripts remain bash | none |
-| 40 | `version-bump` | `lib/skills/version-bump/scripts/bump.sh` | — | S (~4h) | internal/git, internal/version | unit | identical | port or keep delegating? recommend keep delegating in Phase 1 |
-| 41 | **`kanban serve`** | (subset of kanban.sh) | — | M (~12h) | net/http, internal/kanban, embedded HTML/JS via `go:embed` | integration: HTTP smoke; UI parity manual | identical UI behavior; identical add/move/drag-drop semantics | bind address default (`127.0.0.1` per security) |
+| 39 | `hooks` (install only — does not port hook bodies) | `cli/lib/hooks-install.sh` | 285 | M (~10h) | internal/symlink for hook scripts | dry-run + apply | hook symlinks identical; hook scripts remain bash | none | **status: shipped (2026-06-03; internal/hooksinstall; install/status for codex/gemini/agy; path-allowlist→TOML; backup-on-overwrite; preserves Q9 hook-bodies-stay-bash)** |
+| 40 | `version-bump` | `lib/skills/version-bump/scripts/bump.sh` | — | S (~4h) | internal/git, internal/version | unit | identical | port or keep delegating? recommend keep delegating in Phase 1 | **status: deferred to bash (per Decision Q10 — keep delegating in Phase 1; it's a skill, not a core subcommand)** |
+| 41 | **`kanban serve`** | (subset of kanban.sh) | — | M (~12h) | net/http, internal/kanban, embedded HTML/JS via `go:embed` | integration: HTTP smoke; UI parity manual | identical UI behavior; identical add/move/drag-drop semantics | bind address default (`127.0.0.1` per security) | **status: shipped (2026-06-03; internal/kanban.Serve embedded UI; 127.0.0.1 default; DNS-rebinding Host check; sync.Mutex mutations; 22 httptest tests)** |
 
 **Phase 1 total raw estimate:** ~520 hours of specialist work. With a 30% buffer for unknowns + parity-test churn: ~680 hours. At one full-time-equivalent specialist that exceeds the 8-week time-box; the time-box stays. **If a subcommand isn't ported by week 8 it ships in Phase 1.5**, not Phase 1. The order above ranks by criticality so the most-used commands land first.
 
@@ -271,3 +271,31 @@ Each has a recommendation + a decide-before tag. The lead surfaces these to the 
 - 2026-06-02: `checkpoint` subcommand ported (rank 28). internal/checkpoint: Run + PrintHelp; create/list/restore/clean subcommands; now+resume aliases for backward compat with bash callers; scratchpad copy of plan/decisions/contracts/status/kanban .md (best-effort, missing files silently skipped); manifest.json with ts/session_id/runtime/by_user; session-id resolution chain: cfg.SessionID → CLAUDE_SESSION_ID env → .session-started-history.ndjson tail → "unknown"; cfg.WorkDir + YAKOS_WORK_DIR env + YAKOS_INPLACE_WORK+CLAUDE_PROJECT_DIR + canonical $HOME/agent-control/$YAKOS_PROJECT_NAME/work resolution; isoUTC format (YYYY-MM-DDTHH-MM-SS, colons→hyphens, filesystem-safe); clean --age N GC with mtime cutoff; list sorted alphabetically with size+age; M3.2 librarian digest deferred; 26 unit tests in internal/checkpoint; portedCommands 26→27; TestPortedCommandsCount want=27; build + vet + golangci-lint clean.
 - 2026-06-02: `env` subcommand ported (rank 29). internal/envcfg: Run + PrintHelp; status/promote/validate/list subcommands; YAML environments section parsed via gopkg.in/yaml.v3 (environments.<name>.branch); promote compares local vs remote HEAD via gitCmd and errors on divergence before spawning PR tool; promote builds title with RFC3339 timestamp + git log changelog; gh/glab/git PR tool detection via exec.LookPath; injectable GitFn+ExecFn+PRToolOverride for test isolation; hasEnvironmentsSection raw-scan for validate advisory path; project dir resolved from cfg.ProjectDir/YAKOS_PROJECT_DIR env/cwd .yakos.yml/.project-path; 22 unit tests in internal/envcfg + 15 parity tests in cmd/yakos; portedCommands 27→28; TestPortedCommandsCount want=29; build + vet + golangci-lint clean.
 - 2026-06-02: `standards` subcommand ported (rank 30). internal/standards: Run + PrintHelp; list/enable/disable/check/init subcommands; all 6 Plan-4 standards (logging/changelog-ui/monitors/feedback/architecture-viz/about-page); profile.type suggested matrix mirrors bash _standards_for_type(); playbooks map carries playbook/detects/scaffold entries per standard for check output; setStandard/setProfileType mutate the in-memory YAML doc and writeYML atomically (temp-rename, Q8); injectable PromptFn for interactive init tests (stubPrompts helper); project dir resolved from cfg.ProjectDir/YAKOS_PROJECT_DIR env/cwd/agent-control walk; KnownStandards() exported for parity tests; 22 unit tests in internal/standards + 16 parity tests in cmd/yakos; portedCommands 28→29; TestPortedCommandsCount want=29; build + vet + golangci-lint clean.
+- 2026-06-03: `peer` subcommand ported (rank 31). internal/mailbox + internal/peer; byte-identical NDJSON to bash peer.sh; AppendLine (O_APPEND + flock) for cross-process safety; 25 + 34 = 59 tests; portedCommands 29→30.
+- 2026-06-03: `mcp`, `completion`, `git-hooks` subcommands ported (ranks 32, 33, 38, batched). Three small surfaces shipped together. 72 unit + 36 parity tests; portedCommands 30→33.
+- 2026-06-03: `supervise` subcommand ported (rank 34). internal/supervise; preserves PR #28-#39 ack-gate; derive_finding_id matches bash; 50 unit + 21 parity tests; portedCommands 33→34.
+- 2026-06-03: `plan score` + `work close` subcommands ported (ranks 35, 37, batched). internal/planscore (Pearson r + quartile + threshold→outcome) + internal/workclose (plan_outcome record with git-diff + dispatch-log derivations). 38+41 unit + 18+19 parity tests; portedCommands 34→36.
+- 2026-06-03: `model-routing` subcommand ported (rank 36). internal/routing — biggest Phase 1 port (1035→690 LOC). WilsonLower byte-identical to bash awk; two-gate promotion (CI/strict-floor); 5 guards (anti-self-congrat, weekly-budget, per-run-budget, repeat-rejection, framework); NDJSON record shapes byte-identical to bash jq -cn; 47 unit + 24 parity tests; portedCommands 36→37.
+- 2026-06-03: `hooks` (install only) + `kanban serve` subcommands ported (ranks 39, 41, batched). internal/hooksinstall (codex/gemini/agy + path-allowlist→TOML; Q9 hook-bodies-stay-bash preserved) + internal/kanban.Serve (embedded UI per Decision D; 127.0.0.1 default; DNS-rebinding Host check; 22 httptest tests). portedCommands 37→39.
+
+## Phase 1 — COMPLETE (2026-06-03)
+
+**39 of 40 subcommand ports shipped** across PRs #45–#84.
+**1 deferred** per operator decision Q10: rank 40 `version-bump` keeps delegating to the bash skill script.
+
+Exit-criteria status (from §3):
+
+| # | Criterion | Status |
+|---|---|---|
+| 1 | Parity matrix: all subcommands have Go impl + golden parity test | ✅ 39/40 ports each ship 10–58 unit tests + 6–34 parity tests |
+| 2 | CI green on 5 targets | 🔶 GitHub Actions matrix authored in PR #44; first post-merge run will confirm |
+| 3 | Distribution: `curl install.sh` flow exists, coexists with bash | ✅ PR #44 shipped scripts/install.sh + release.yml |
+| 4 | Shadow-mode integrity (`YAKOS_IMPL=bash\|go`) | ✅ default bash, opt-in go, mid-session toggle safe |
+| 5 | Hook compatibility (bash hooks fire from either binary) | ✅ Decision Q9 preserved end-to-end |
+| 6 | Framework agents unchanged | ✅ no agent prompt edits required |
+| 7 | Performance: `status` ≤30ms, `--version` ≤10ms | 🔶 informal local timing meets target; CI perf smoke deferred to Phase 1 sign-off PR |
+| 8 | Docs: README + go-port-plan complete + go-shadow-mode | ✅ this change-log entry; README ranks 2–41 updated |
+| 9 | Rollback path: yakos-uninstall-go.sh | ✅ scripts/uninstall-yakos-go.sh shipped in PR #44 |
+| 10 | No regressions in bash test suite | 🔶 to verify in Phase 1 sign-off PR |
+
+**Next-up:** Per Decision Q5, Phase 2 implementation pauses for ≥3 weeks of operator adoption (catches Phase-1-in-the-field bugs before daemon complexity). Phase 3 stays behind §5 go/no-go gate (none of the three triggers have fired).
