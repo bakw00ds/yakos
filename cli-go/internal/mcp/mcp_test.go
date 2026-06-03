@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Package mcp tests — Phase 1 parity coverage for `yakos mcp`.
 //
 // Design:

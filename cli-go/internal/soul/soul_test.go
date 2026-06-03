@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -161,6 +162,9 @@ func TestEdit_SeedsFileFromBareDefault_WhenAbsent(t *testing.T) {
 }
 
 func TestEdit_SnapshotsExistingFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("soul snapshot filenames contain colons, which are illegal on Windows")
+	}
 	home := t.TempDir()
 	original := "# Soul\n\noriginal content\n"
 	makeSoulFile(t, home, "global", original)
@@ -294,8 +298,9 @@ func TestHistory_ListsSnapshots(t *testing.T) {
 		t.Fatalf("mkdir history: %v", err)
 	}
 
-	snap1 := filepath.Join(historyDir, "global-2026-06-01T10:00:00Z.md")
-	snap2 := filepath.Join(historyDir, "global-2026-06-02T12:00:00Z.md")
+	// Use dash-separated time (no colons) so filenames are valid on Windows.
+	snap1 := filepath.Join(historyDir, "global-2026-06-01T10-00-00Z.md")
+	snap2 := filepath.Join(historyDir, "global-2026-06-02T12-00-00Z.md")
 	if err := os.WriteFile(snap1, []byte("old content"), 0644); err != nil {
 		t.Fatalf("write snap1: %v", err)
 	}
@@ -309,10 +314,10 @@ func TestHistory_ListsSnapshots(t *testing.T) {
 	}
 
 	out := cfgOut(cfg)
-	if !strings.Contains(out, "2026-06-01T10:00:00Z") {
+	if !strings.Contains(out, "2026-06-01T10-00-00Z") {
 		t.Errorf("missing first snapshot timestamp; got: %q", out)
 	}
-	if !strings.Contains(out, "2026-06-02T12:00:00Z") {
+	if !strings.Contains(out, "2026-06-02T12-00-00Z") {
 		t.Errorf("missing second snapshot timestamp; got: %q", out)
 	}
 	// Each entry shows byte count.
@@ -327,10 +332,11 @@ func TestHistory_FiltersByLayer(t *testing.T) {
 	if err := os.MkdirAll(historyDir, 0755); err != nil {
 		t.Fatalf("mkdir history: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(historyDir, "global-2026-01-01T00:00:00Z.md"), []byte("g"), 0644); err != nil {
+	// Use dash-separated time (no colons) so filenames are valid on Windows.
+	if err := os.WriteFile(filepath.Join(historyDir, "global-2026-01-01T00-00-00Z.md"), []byte("g"), 0644); err != nil {
 		t.Fatalf("write global snap: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(historyDir, "myproj-2026-01-02T00:00:00Z.md"), []byte("p"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(historyDir, "myproj-2026-01-02T00-00-00Z.md"), []byte("p"), 0644); err != nil {
 		t.Fatalf("write project snap: %v", err)
 	}
 
@@ -356,7 +362,8 @@ func TestHistory_ProjectLayer(t *testing.T) {
 	// History snapshots use the layer string ("project") as their filename prefix,
 	// matching the bash behaviour where _soul_snapshot receives the $layer argument
 	// directly ("global" or "project"), not the resolved slug.
-	if err := os.WriteFile(filepath.Join(historyDir, "project-2026-06-01T00:00:00Z.md"), []byte("content"), 0644); err != nil {
+	// Use dash-separated time (no colons) so filenames are valid on Windows.
+	if err := os.WriteFile(filepath.Join(historyDir, "project-2026-06-01T00-00-00Z.md"), []byte("content"), 0644); err != nil {
 		t.Fatalf("write snap: %v", err)
 	}
 
@@ -398,6 +405,9 @@ func TestRevert_SnapshotNotFound_Error(t *testing.T) {
 }
 
 func TestRevert_HappyPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("soul snapshot filenames contain colons, which are illegal on Windows")
+	}
 	home := t.TempDir()
 	soulDir := filepath.Join(home, ".yakos-state", "soul")
 	historyDir := filepath.Join(soulDir, "history")
@@ -444,6 +454,9 @@ func TestRevert_HappyPath(t *testing.T) {
 }
 
 func TestRevert_WithLayerArg(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("soul snapshot filenames contain colons, which are illegal on Windows")
+	}
 	home := t.TempDir()
 	soulDir := filepath.Join(home, ".yakos-state", "soul")
 	historyDir := filepath.Join(soulDir, "history")
@@ -672,6 +685,9 @@ func TestSnapshot_FileAbsent_ReturnsEmpty(t *testing.T) {
 }
 
 func TestSnapshot_CreatesTimestampedFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("soul snapshot filenames contain colons, which are illegal on Windows")
+	}
 	dir := t.TempDir()
 	histDir := filepath.Join(dir, "history")
 	srcPath := filepath.Join(dir, "global.md")

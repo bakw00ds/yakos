@@ -649,7 +649,7 @@ func TestPrintHelp(t *testing.T) {
 
 func TestHistoryPath(t *testing.T) {
 	got := historyPath("/home/user/agent-control/myapp")
-	want := "/home/user/agent-control/myapp/work/current/.session-started-history.ndjson"
+	want := filepath.FromSlash("/home/user/agent-control/myapp/work/current/.session-started-history.ndjson")
 	if got != want {
 		t.Errorf("historyPath: got %q, want %q", got, want)
 	}

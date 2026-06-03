@@ -46,11 +46,37 @@ import (
 	"github.com/bakw00ds/yakos/internal/auth"
 )
 
+// authRepoRoot walks upward using filepath.Dir (Windows-safe) to find the repo
+// root directory containing a "VERSION" regular file.
+func authRepoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("authRepoRoot: os.Getwd: %v", err)
+	}
+	for {
+		fi, err := os.Stat(filepath.Join(dir, "VERSION"))
+		if err == nil && !fi.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("authRepoRoot: could not find repo root (no VERSION file in any parent)")
+		}
+		dir = parent
+	}
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 // resolveAuthBinary returns the path to the built Go binary.
+// Uses authRepoRoot (filepath-based, Windows-safe) instead of the shared
+// resolveGoBinary which walks via string-split on "/" and panics on Windows.
 func resolveAuthBinary() string {
-	return resolveGoBinary()
+	if v := os.Getenv("YAKOS_GO_BINARY"); v != "" {
+		return v
+	}
+	return filepath.Join(authRepoRoot(new(testing.T)), "bin", "yakos")
 }
 
 // runGoAuth runs the Go binary with YAKOS_IMPL=go and the given args.

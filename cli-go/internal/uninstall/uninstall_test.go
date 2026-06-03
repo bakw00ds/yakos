@@ -4,9 +4,36 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// symlinkOrSkip creates a symlink and skips the test if symlink creation is
+// not supported on this platform (e.g. Windows without Developer Mode).
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("os.Symlink not supported on this platform (%s); skipping symlink test: %v", runtime.GOOS, err)
+	}
+}
+
+// foreignTarget returns a path to a real file outside any t.TempDir()-based
+// yakosRoot. Used as the target for "foreign symlink" tests so that
+// filepath.EvalSymlinks resolves without error and the path is not under the
+// yakosRootAbs prefix.
+//
+// On Windows, /dev/null and /usr/bin/env do not exist. This helper creates a
+// sentinel file in os.TempDir() that is valid on all platforms.
+func foreignTarget(t *testing.T) string {
+	t.Helper()
+	target := filepath.Join(os.TempDir(), "yakos-test-foreign-target")
+	if err := os.WriteFile(target, []byte("foreign\n"), 0644); err != nil {
+		t.Fatalf("foreignTarget: could not write sentinel file %s: %v", target, err)
+	}
+	t.Cleanup(func() { _ = os.Remove(target) })
+	return target
+}
 
 // ---- test helpers ------------------------------------------------------------
 
@@ -237,15 +264,16 @@ func TestUninstall_ForeignSymlinkPreserved(t *testing.T) {
 		t.Fatalf("write .yakos: %v", err)
 	}
 
-	// Place a foreign symlink (points to /dev/null, which is outside the root).
+	// Place a foreign symlink pointing outside the root.
+	// /dev/null does not exist on Windows; use a cross-platform real file so
+	// filepath.EvalSymlinks resolves the target and the "foreign" check fires correctly.
 	agentsDir := filepath.Join(home, ".claude", "agents")
 	if err := os.MkdirAll(agentsDir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	ft := foreignTarget(t)
 	foreignLink := filepath.Join(agentsDir, "foreign.md")
-	if err := os.Symlink("/dev/null", foreignLink); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	symlinkOrSkip(t, ft, foreignLink)
 
 	cfg := baseConfig(home)
 	res, err := Run(cfg)
@@ -253,13 +281,13 @@ func TestUninstall_ForeignSymlinkPreserved(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// Foreign symlink must still exist.
-	target, err := os.Readlink(foreignLink)
+	// Foreign symlink must still exist and point to the original target.
+	got, err := os.Readlink(foreignLink)
 	if err != nil {
 		t.Fatalf("Readlink: %v", err)
 	}
-	if target != "/dev/null" {
-		t.Errorf("foreign symlink was redirected; got %q", target)
+	if got != ft {
+		t.Errorf("foreign symlink was redirected; got %q, want %q", got, ft)
 	}
 	if res.Symlinks.Kept == 0 {
 		t.Error("expected Symlinks.Kept > 0 for foreign symlink")
@@ -436,10 +464,11 @@ func TestUninstall_ForeignLauncherSymlinkKept(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(stateDir, "install-manifest"), []byte(manifest), 0644); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
-	// Symlink to a foreign real path.
-	if err := os.Symlink("/usr/bin/env", launcherPath); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	// Symlink to a foreign real file outside YAKOS_ROOT.
+	// /usr/bin/env does not exist on Windows; use a cross-platform real file so
+	// filepath.EvalSymlinks resolves the target and the "foreign" check fires correctly.
+	ft := foreignTarget(t)
+	symlinkOrSkip(t, ft, launcherPath)
 
 	cfg := baseConfig(home)
 	res, err := Run(cfg)
@@ -450,9 +479,9 @@ func TestUninstall_ForeignLauncherSymlinkKept(t *testing.T) {
 	if res.Launcher.Outcome != LauncherKept {
 		t.Errorf("Launcher.Outcome: got %q, want %q", res.Launcher.Outcome, LauncherKept)
 	}
-	target, _ := os.Readlink(launcherPath)
-	if target != "/usr/bin/env" {
-		t.Errorf("foreign launcher was redirected; got %q", target)
+	got, _ := os.Readlink(launcherPath)
+	if got != ft {
+		t.Errorf("foreign launcher was redirected; got %q, want %q", got, ft)
 	}
 }
 

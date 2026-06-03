@@ -532,12 +532,61 @@ func isGitRepo(path string) bool {
 }
 
 // encodeProjectPath encodes a project path to the format used by Claude Code
-// for ~/.claude/projects/. It mirrors ct_encode_project_path from compat.sh:
-// replaces '/' with '-', then trims a leading '-'.
+// for ~/.claude/projects/. It mirrors ct_encode_project_path from compat.sh
+// and extends it to handle Windows drive letters safely.
+//
+// Algorithm:
+//  1. Strip a Windows drive-letter prefix (e.g. "C:" or "c:") so that the
+//     colon never appears in a path component (colons are illegal in Windows
+//     directory names, even inside a longer path).
+//  2. Replace every path separator ('/' and '\') and every other character
+//     that is illegal in a Windows path component (':', '<', '>', '"', '|',
+//     '?', '*') with '-'.
+//  3. Trim leading and trailing '-' characters that result from the above
+//     replacements (e.g. an absolute Unix path "/foo" becomes "foo" not
+//     "-foo").
+//  4. Collapse consecutive '-' runs to a single '-' so that a Windows root
+//     like "C:\" doesn't produce "---".
+//  5. Return "root" for the degenerate case where only separators were
+//     present (e.g. "/" or "C:\").
+//
+// This produces identical output for the same logical project path on both
+// Unix and Windows.  Unix parity with bash ct_encode_project_path is
+// preserved: "/Users/bob/proj" → "Users-bob-proj".
 func encodeProjectPath(absPath string) string {
-	// Claude Code's encoding: replace each '/' with '-', strip leading '-'.
-	encoded := strings.ReplaceAll(absPath, "/", "-")
-	encoded = strings.TrimPrefix(encoded, "-")
+	s := absPath
+
+	// Step 1: strip Windows drive-letter prefix (e.g. "C:" or "c:").
+	// A drive prefix is exactly one ASCII letter followed by ':' at position 0.
+	if len(s) >= 2 && s[1] == ':' && ((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z')) {
+		s = s[2:]
+	}
+
+	// Step 2: replace separators and Windows-illegal chars with '-'.
+	var sb strings.Builder
+	sb.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case '/', '\\', ':', '<', '>', '"', '|', '?', '*':
+			sb.WriteByte('-')
+		default:
+			sb.WriteRune(r)
+		}
+	}
+	encoded := sb.String()
+
+	// Step 3: trim leading and trailing '-'.
+	encoded = strings.Trim(encoded, "-")
+
+	// Step 4: collapse consecutive '-' into a single '-'.
+	for strings.Contains(encoded, "--") {
+		encoded = strings.ReplaceAll(encoded, "--", "-")
+	}
+
+	// Step 5: guard against empty result (e.g. input was "/" or `C:\`).
+	if encoded == "" {
+		return "root"
+	}
 	return encoded
 }
 

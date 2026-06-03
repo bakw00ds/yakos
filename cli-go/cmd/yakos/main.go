@@ -2639,11 +2639,47 @@ func runMemory(args []string) {
 	}
 }
 
-// memoryEncodeProjectPath encodes a project path to the Claude Code format:
-// replaces '/' with '-', strips the leading '-'.  Mirrors initialize.encodeProjectPath.
+// memoryEncodeProjectPath encodes a project path to the Claude Code format
+// used for ~/.claude/projects/<encoded>/.  Mirrors initialize.encodeProjectPath
+// and is safe on both Unix and Windows.
+//
+// Algorithm: strip Windows drive-letter prefix (e.g. "C:"), replace path
+// separators and Windows-illegal chars ('/', '\', ':', '<', '>', '"', '|',
+// '?', '*') with '-', trim leading/trailing '-', collapse consecutive '-'
+// runs, return "root" for degenerate inputs like "/" or "C:\".
 func memoryEncodeProjectPath(absPath string) string {
-	encoded := strings.ReplaceAll(absPath, "/", "-")
-	encoded = strings.TrimPrefix(encoded, "-")
+	s := absPath
+
+	// Strip Windows drive-letter prefix (e.g. "C:" or "c:").
+	if len(s) >= 2 && s[1] == ':' && ((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z')) {
+		s = s[2:]
+	}
+
+	// Replace separators and Windows-illegal chars with '-'.
+	var sb strings.Builder
+	sb.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case '/', '\\', ':', '<', '>', '"', '|', '?', '*':
+			sb.WriteByte('-')
+		default:
+			sb.WriteRune(r)
+		}
+	}
+	encoded := sb.String()
+
+	// Trim leading and trailing '-'.
+	encoded = strings.Trim(encoded, "-")
+
+	// Collapse consecutive '-' into a single '-'.
+	for strings.Contains(encoded, "--") {
+		encoded = strings.ReplaceAll(encoded, "--", "-")
+	}
+
+	// Guard against empty result (e.g. "/" or `C:\`).
+	if encoded == "" {
+		return "root"
+	}
 	return encoded
 }
 

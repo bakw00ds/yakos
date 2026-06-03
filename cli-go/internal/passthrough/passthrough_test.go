@@ -3,6 +3,7 @@ package passthrough_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -40,7 +41,7 @@ func TestBashYakosPath(t *testing.T) {
 
 	root := "/some/root"
 	got := passthrough.BashYakosPath(root)
-	want := "/some/root/cli/yakos"
+	want := filepath.FromSlash("/some/root/cli/yakos")
 	if got != want {
 		t.Errorf("BashYakosPath(%q) = %q; want %q", root, got, want)
 	}
@@ -57,6 +58,10 @@ func TestBashYakosPath_ActualFile(t *testing.T) {
 }
 
 func TestRun_VersionFlag(t *testing.T) {
+	// Bash scripts are not executable on Windows; skip on that platform.
+	if runtime.GOOS == "windows" {
+		t.Skip("bash passthrough not supported on Windows")
+	}
 	// Skip if bash yakos is unavailable.
 	root := repoRoot(t)
 	bashPath := passthrough.BashYakosPath(root)

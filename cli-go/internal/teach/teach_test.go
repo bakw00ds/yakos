@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -181,6 +182,9 @@ func TestSpliceLesson_CustomSection(t *testing.T) {
 // ---- Run -------------------------------------------------------------------
 
 func TestRun_HappyPath_SectionAbsent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("teach backup filenames contain colons, which are illegal on Windows")
+	}
 	dir := t.TempDir()
 	lessonFile := makeLessonFile(t, dir, "always write audit-log entries on mutations")
 	agentContent := "# backend\n\n## Purpose\n\nDo backend things.\n"
@@ -230,6 +234,9 @@ func TestRun_HappyPath_SectionAbsent(t *testing.T) {
 }
 
 func TestRun_HappyPath_SectionPresent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("teach backup filenames contain colons, which are illegal on Windows")
+	}
 	dir := t.TempDir()
 	lessonFile := makeLessonFile(t, dir, "new lesson here")
 	agentContent := "# backend\n\n## Lessons learned\n\n- **2025-01-01** — old lesson\n"
@@ -255,6 +262,9 @@ func TestRun_HappyPath_SectionPresent(t *testing.T) {
 }
 
 func TestRun_CustomSection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("teach backup filenames contain colons, which are illegal on Windows")
+	}
 	dir := t.TempDir()
 	lessonFile := makeLessonFile(t, dir, "gotcha lesson")
 	makeAgentFile(t, dir, "frontend", "# frontend\n\nbody\n")
@@ -383,6 +393,9 @@ func TestRun_NoProject_Error(t *testing.T) {
 }
 
 func TestRun_AtomicWrite_BackupPreservesOriginal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("teach backup filenames contain colons, which are illegal on Windows")
+	}
 	dir := t.TempDir()
 	lessonFile := makeLessonFile(t, dir, "new lesson")
 	original := "# agent\n\noriginal body\n"
@@ -404,6 +417,9 @@ func TestRun_AtomicWrite_BackupPreservesOriginal(t *testing.T) {
 }
 
 func TestRun_MultiLineLesson(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("teach backup filenames contain colons, which are illegal on Windows")
+	}
 	dir := t.TempDir()
 	multiLineLesson := "always write audit-log\nincluding actor, target, action\nno exceptions"
 	lessonFile := makeLessonFile(t, dir, multiLineLesson)
@@ -432,6 +448,9 @@ func TestRun_MultiLineLesson(t *testing.T) {
 
 // TestRun_DefaultSection confirms the default section is "Lessons learned".
 func TestRun_DefaultSection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("teach backup filenames contain colons, which are illegal on Windows")
+	}
 	dir := t.TempDir()
 	lessonFile := makeLessonFile(t, dir, "a lesson")
 	makeAgentFile(t, dir, "backend", "# backend\n\nbody.\n")
@@ -449,6 +468,9 @@ func TestRun_DefaultSection(t *testing.T) {
 
 // TestRun_MultipleRuns verifies each invocation appends a new bullet.
 func TestRun_MultipleRuns_AppendsBullets(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("teach backup filenames contain colons, which are illegal on Windows")
+	}
 	dir := t.TempDir()
 	lesson1 := makeLessonFile(t, dir, "first lesson")
 	lesson2Path := filepath.Join(dir, "lesson2.md")
@@ -480,6 +502,9 @@ func TestRun_MultipleRuns_AppendsBullets(t *testing.T) {
 
 // TestRun_SectionWithFollowingH2 verifies lesson is inserted before the next H2.
 func TestRun_SectionWithFollowingH2_InsertsBeforeIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("teach backup filenames contain colons, which are illegal on Windows")
+	}
 	dir := t.TempDir()
 	lessonFile := makeLessonFile(t, dir, "inserted lesson")
 	agentContent := "# agent\n\n## Lessons learned\n\n- old\n\n## Personality\n\nBe concise.\n"

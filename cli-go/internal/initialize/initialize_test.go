@@ -132,21 +132,63 @@ func TestValidKind_Count(t *testing.T) {
 
 // ---- path encoding ----------------------------------------------------------
 
-// TestEncodeProjectPath verifies the encoding matches bash ct_encode_project_path.
+// TestEncodeProjectPath verifies the encoding matches bash ct_encode_project_path
+// on Unix paths and produces safe Windows-compatible directory names for
+// Windows-style paths.
 func TestEncodeProjectPath(t *testing.T) {
 	tests := []struct {
+		name  string
 		input string
 		want  string
 	}{
-		{"/Users/tw/github/myproject", "Users-tw-github-myproject"},
-		{"/home/user/project", "home-user-project"},
-		{"/tmp/proj", "tmp-proj"},
+		// Unix happy path — must stay byte-identical to bash ct_encode_project_path.
+		{"unix_typical", "/Users/tw/github/myproject", "Users-tw-github-myproject"},
+		{"unix_home_user", "/home/user/project", "home-user-project"},
+		{"unix_tmp", "/tmp/proj", "tmp-proj"},
+
+		// Windows-style paths (drive letter + backslashes).  These inputs can be
+		// fed on any OS by passing the literal string; the function must never
+		// produce a colon in the output.
+		{"windows_typical", `C:\Users\bob\proj`, "Users-bob-proj"},
+		{"windows_deep", `D:\work\repos\yakos`, "work-repos-yakos"},
+		{"windows_lowercase_drive", `c:\Users\RUNNER~1\AppData\Local\Temp\proj`, "Users-RUNNER~1-AppData-Local-Temp-proj"},
+
+		// Degenerate roots.
+		{"unix_root", "/", "root"},
+		{"windows_root", `C:\`, "root"},
+		{"windows_root_slash", `C:/`, "root"},
+
+		// Mixed separators.
+		{"mixed_separators", `C:/Users/bob\proj`, "Users-bob-proj"},
+
+		// Segments that contain Windows-illegal chars.
+		{"colon_in_segment", "/path/foo:bar/baz", "path-foo-bar-baz"},
+		{"angle_brackets", "/path/<foo>/baz", "path-foo-baz"},
+		{"pipe_question_star", "/path/a|b?c*d/e", "path-a-b-c-d-e"},
+		{"double_quote", `/path/a"b/c`, "path-a-b-c"},
+
+		// Consecutive separator collapse.
+		{"consecutive_slashes", "//tmp//proj", "tmp-proj"},
+
+		// Unix paths identical to Windows sibling (cross-platform consistency).
+		{"unix_users_bob", "/Users/bob/proj", "Users-bob-proj"},
 	}
 	for _, tc := range tests {
-		got := encodeProjectPath(tc.input)
-		if got != tc.want {
-			t.Errorf("encodeProjectPath(%q) = %q; want %q", tc.input, got, tc.want)
-		}
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := encodeProjectPath(tc.input)
+			if got != tc.want {
+				t.Errorf("encodeProjectPath(%q) = %q; want %q", tc.input, got, tc.want)
+			}
+			// Invariant: result must never contain ':'.
+			if strings.ContainsRune(got, ':') {
+				t.Errorf("encodeProjectPath(%q) produced colon in output: %q", tc.input, got)
+			}
+			// Invariant: result must never be empty.
+			if got == "" {
+				t.Errorf("encodeProjectPath(%q) returned empty string", tc.input)
+			}
+		})
 	}
 }
 
