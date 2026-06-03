@@ -5,13 +5,32 @@
 yakos: 0.9
 
 profile:
-  type: web-app
+  type: static-site
   standards:
-    logging: false
-    changelog-ui: false
-    about-page: false
+    logging: false           # Standard 1 — server-side access logs (CDN/edge)
+    changelog-ui: false      # Standard 2 — version + CHANGELOG visible in site
+    monitors: false          # Standard 3 — uptime + lighthouse scores
+    feedback: false          # Standard 4 — contact / feedback form
+    architecture-viz: false  # Standard 5 — architecture page
+    about-page: false        # Standard 6 — about page for visitors
 
-# Static-site-specific notes:
-#   - default runtime: claude
-#   - build command: (project-defined; e.g. hugo, jekyll, eleventy)
-#   - deploy: typically CI/CD via git push
+commands:
+  # Adjust build command to match your static-site generator:
+  #   Hugo:     hugo
+  #   Jekyll:   bundle exec jekyll build
+  #   Eleventy: npx @11ty/eleventy
+  #   Astro:    npm run build
+  test:  echo "no automated tests configured"
+  lint:  echo "no lint configured"
+  build: npm run build
+
+# ---- budget guardrails (v0.34+) --------------------------------------------
+# budget:
+#   enabled: true
+#   max_tool_calls: 200
+#   max_wall_seconds: 3600
+#   max_repeat_same_tool: 6
+
+# ---- Static-site notes -----------------------------------------------------
+# Content changes: agent edits source files; CI/CD builds + deploys.
+# Never commit built output (public/ or _site/); see .gitignore.
