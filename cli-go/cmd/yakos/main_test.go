@@ -64,9 +64,9 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 // retro (rank 25), skill (rank 26), compact (rank 27), checkpoint (rank 28),
 // env (rank 29), standards (rank 30), peer (rank 31),
 // mcp (rank 32), completion (rank 33), git-hooks (rank 38),
-// supervise (rank 34).
+// supervise (rank 34), plan score (rank 35), work close (rank 37).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 34
+	const want = 36
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
@@ -356,6 +356,26 @@ func TestSupervisesCommandEntry(t *testing.T) {
 		}
 	}
 	t.Error("expected 'supervise' in portedCommands; not found")
+}
+
+// TestPlanScoreCommandEntry asserts that "plan score" is in the ported list.
+func TestPlanScoreCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "plan score" {
+			return
+		}
+	}
+	t.Error("expected 'plan score' in portedCommands; not found")
+}
+
+// TestWorkCloseCommandEntry asserts that "work close" is in the ported list.
+func TestWorkCloseCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "work close" {
+			return
+		}
+	}
+	t.Error("expected 'work close' in portedCommands; not found")
 }
 
 // TestPortedCommandStruct verifies the portedCommand struct has the expected
