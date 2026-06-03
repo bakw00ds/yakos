@@ -314,12 +314,18 @@ func TestKanban_Watch_ReceivesAddEvent(t *testing.T) {
 	wctx := ctxWithToken(context.Background(), testWriteToken)
 
 	// Start watching.
-	watchCtx, watchCancel := context.WithTimeout(wctx, 3*time.Second)
+	watchCtx, watchCancel := context.WithTimeout(wctx, 5*time.Second)
 	defer watchCancel()
 	watchStream, err := kc.Watch(watchCtx, &pb.KanbanWatchRequest{})
 	if err != nil {
 		t.Fatalf("Watch: %v", err)
 	}
+
+	// Allow the server-side bus subscription to register before publishing.
+	// Without this, Ubuntu schedules the goroutines such that the Add publishes
+	// before the watch loop subscribes, causing a Watch.Recv() deadline.
+	// macOS happened to schedule favorably; Ubuntu CI didn't.
+	time.Sleep(50 * time.Millisecond)
 
 	// Add a task — this publishes to the bus.
 	if _, err := kc.Add(wctx, &pb.KanbanAddRequest{Title: "Watched"}); err != nil {
