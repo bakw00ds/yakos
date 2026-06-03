@@ -37,6 +37,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/quickstart"
 	"github.com/bakw00ds/yakos/internal/refresh"
 	"github.com/bakw00ds/yakos/internal/runtime"
+	"github.com/bakw00ds/yakos/internal/session"
 	"github.com/bakw00ds/yakos/internal/start"
 	"github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/team"
@@ -68,6 +69,7 @@ var portedCommands = []portedCommand{
 	{Name: "auth", Since: "0.52.0", Notes: "full feature parity with cli/lib/auth.sh; status/login/logout/set-default; OS keychain via go-keyring; graceful degradation on headless Linux"},
 	{Name: "memory", Since: "0.53.0", Notes: "full feature parity with cli/lib/memory.sh; list/read/write/delete/index-rebuild; MEMORY.md byte-identical index; schema sidecar; atomic writes"},
 	{Name: "agent", Since: "0.54.0", Notes: "full feature parity with cli/lib/agent.sh; new/lint/diff/list subcommands; agents alias; docs (idea rank 9) md+html; reuses agentscompose+validate packages; atomic writes"},
+	{Name: "session", Since: "0.55.0", Notes: "full feature parity with cli/lib/session.sh; list/info/resume/fork subcommands; streams .session-started-history.ndjson; export deferred (tar/gzip out of scope for Phase 1)"},
 }
 
 type portedCommand struct {
@@ -145,6 +147,8 @@ func main() {
 		runMemory(args[1:])
 	case "agent", "agents":
 		runAgent(yakosRoot, args[0], args[1:])
+	case "session":
+		runSession(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -2641,6 +2645,85 @@ func runAgentDocs(yakosRoot string, args []string) {
 		Writer:    w,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "agent docs: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runSession implements `yakos session` natively in Go.
+//
+// Usage mirrors cli/lib/session.sh and extends it with info/resume/fork:
+//
+//	yakos session list <project>               List sessions for a project.
+//	yakos session info <project> [<id>]        Show details for a session.
+//	yakos session resume <project> [<id>]      Print start flags to resume a session.
+//	yakos session fork <project> [<id>]        Print start flags to fork a session.
+//	yakos session --help                       Print help and exit 0.
+//
+// Session history is read from:
+//
+//	~/agent-control/<project>/work/current/.session-started-history.ndjson
+//
+// The export subcommand from bash session.sh is NOT ported in Phase 1;
+// it requires tar/gzip plumbing out of scope for the current batch.
+// Use YAKOS_IMPL=bash yakos session export for that path.
+func runSession(args []string) {
+	sub := ""
+	project := ""
+	id := ""
+
+	if len(args) > 0 {
+		switch args[0] {
+		case "-h", "--help", "help":
+			session.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case "export":
+			fmt.Fprintln(os.Stderr, "session: export is not yet implemented in the Go port (tar/gzip plumbing out of scope for Phase 1)")
+			fmt.Fprintln(os.Stderr, "  Use: YAKOS_IMPL=bash yakos session export")
+			os.Exit(1)
+		default:
+			sub = args[0]
+			args = args[1:]
+		}
+	}
+
+	// Each subcommand takes: <project> [<id>]
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			session.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "session: unknown flag %q (try --help)\n", arg)
+			os.Exit(1)
+		default:
+			if project == "" {
+				project = arg
+			} else if id == "" {
+				id = arg
+			} else {
+				fmt.Fprintln(os.Stderr, "session: too many positional args (try --help)")
+				os.Exit(1)
+			}
+		}
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := session.Config{
+		HomeDir:    home,
+		Subcommand: sub,
+		Project:    project,
+		ID:         id,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	if _, err := session.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "session: %v\n", err)
 		os.Exit(1)
 	}
 }
