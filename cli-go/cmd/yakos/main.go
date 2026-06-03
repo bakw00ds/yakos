@@ -40,6 +40,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/refresh"
 	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/session"
+	"github.com/bakw00ds/yakos/internal/soul"
 	"github.com/bakw00ds/yakos/internal/start"
 	"github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/teach"
@@ -76,6 +77,7 @@ var portedCommands = []portedCommand{
 	{Name: "migrate", Since: "0.56.0", Notes: "full feature parity with cli/lib/migrate.sh; status/up subcommands; sidecar schema-version registry (kanban + memory); down deferred to Phase 1.5; atomic writes"},
 	{Name: "plugin", Since: "0.57.0", Notes: "full feature parity with cli/lib/plugin.sh; list/install/remove/validate/register/status subcommands; git URL + local-path install; function-header validation; rollback on failure; built-in id guard"},
 	{Name: "teach", Since: "0.58.0", Notes: "full feature parity with cli/lib/teach.sh; appends dated lesson bullets to project agent files under ## Lessons learned; --project/--section/--dry-run; atomic temp-rename writes; backup before edit"},
+	{Name: "soul", Since: "0.59.0", Notes: "full feature parity with cli/lib/soul.sh; show/edit/history/revert/pending subcommands; approve/reject print not-yet-implemented (M1 scope); two-layer (global/project) soul files; atomic writes; snapshot-before-edit; template seeding from lib/settings/soul.template.md"},
 }
 
 type portedCommand struct {
@@ -161,6 +163,8 @@ func main() {
 		runPlugin(args[1:])
 	case "teach":
 		runTeach(args[1:])
+	case "soul":
+		runSoul(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -3062,6 +3066,49 @@ func runTeach(args []string) {
 
 	if _, err := teach.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "teach: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runSoul implements `yakos soul` natively in Go.
+//
+// Usage mirrors cli/lib/soul.sh exactly:
+//
+//	yakos soul show    [global|project]              — print current soul
+//	yakos soul edit    [global|project]              — open in $EDITOR
+//	yakos soul history [global|project]              — list version snapshots
+//	yakos soul revert  <version> [global|project]    — revert to snapshot
+//	yakos soul pending                               — list pending edits
+//	yakos soul approve <edit-slug>                   — apply pending (M1+ deferred)
+//	yakos soul reject  <edit-slug>                   — discard pending (M1+ deferred)
+//
+// Soul files live at ~/.yakos-state/soul/{global,<project-slug>}.md.
+// Snapshots are written atomically to ~/.yakos-state/soul/history/.
+func runSoul(yakosRoot string, args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		soul.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+	rest := args[1:]
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := soul.Config{
+		Subcommand: sub,
+		Args:       rest,
+		HomeDir:    home,
+		YakosRoot:  yakosRoot,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	if _, err := soul.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "soul: %v\n", err)
 		os.Exit(1)
 	}
 }
