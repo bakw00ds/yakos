@@ -23,6 +23,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/bakw00ds/yakos/internal/agent"
 	"github.com/bakw00ds/yakos/internal/archive"
 	"github.com/bakw00ds/yakos/internal/auth"
 	"github.com/bakw00ds/yakos/internal/cost"
@@ -66,6 +67,7 @@ var portedCommands = []portedCommand{
 	{Name: "quickstart", Since: "0.51.0", Notes: "full feature parity with cli/lib/quickstart.sh; composes install+init+start; idempotent; --runtime/--multi-dev/--safe/--allow-root/--dry-run flags"},
 	{Name: "auth", Since: "0.52.0", Notes: "full feature parity with cli/lib/auth.sh; status/login/logout/set-default; OS keychain via go-keyring; graceful degradation on headless Linux"},
 	{Name: "memory", Since: "0.53.0", Notes: "full feature parity with cli/lib/memory.sh; list/read/write/delete/index-rebuild; MEMORY.md byte-identical index; schema sidecar; atomic writes"},
+	{Name: "agent", Since: "0.54.0", Notes: "full feature parity with cli/lib/agent.sh; new/lint/diff/list subcommands; agents alias; docs (idea rank 9) md+html; reuses agentscompose+validate packages; atomic writes"},
 }
 
 type portedCommand struct {
@@ -141,6 +143,8 @@ func main() {
 		runAuth(args[1:])
 	case "memory":
 		runMemory(args[1:])
+	case "agent", "agents":
+		runAgent(yakosRoot, args[0], args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -2273,6 +2277,372 @@ func memoryEncodeProjectPath(absPath string) string {
 	encoded := strings.ReplaceAll(absPath, "/", "-")
 	encoded = strings.TrimPrefix(encoded, "-")
 	return encoded
+}
+
+// runAgent implements `yakos agent` (and its `yakos agents` plural alias)
+// natively in Go.
+//
+// Usage mirrors cli/lib/agent.sh exactly:
+//
+//	yakos agent new <name> [flags]      — scaffold a new project agent file
+//	yakos agent lint [<project>]        — audit every agent file in the project
+//	yakos agent diff <name> [flags]     — body diff vs extends: parent
+//	yakos agent list [--project <path>] [--json] — list composed roster
+//	yakos agent docs [--format md|html] — render auto-generated reference page
+//	yakos agents lint [<project>]       — plural alias for lint
+func runAgent(yakosRoot, cmdName string, args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		agent.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+	rest := args[1:]
+
+	// Resolve YAKOS_ROOT from env.
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := agent.Config{
+		YakosRoot: yakosRoot,
+		HomeDir:   home,
+		Writer:    os.Stdout,
+		ErrWriter: os.Stderr,
+	}
+
+	switch sub {
+	case "-h", "--help":
+		agent.PrintHelp(os.Stdout)
+		os.Exit(0)
+
+	case "new", "create":
+		cfg.Subcommand = "new"
+		parseAgentNewFlags(&cfg, rest)
+
+	case "lint":
+		cfg.Subcommand = "lint"
+		parseAgentLintFlags(&cfg, rest)
+
+	case "diff":
+		cfg.Subcommand = "diff"
+		parseAgentDiffFlags(&cfg, rest)
+
+	case "list":
+		cfg.Subcommand = "list"
+		parseAgentListFlags(&cfg, rest)
+
+	case "docs":
+		runAgentDocs(yakosRoot, rest)
+		return
+
+	default:
+		// The bash version also routes the plural 'agents lint' here; the
+		// command name is already "agent" or "agents" — allow 'lint' via
+		// 'yakos agents lint' which arrives as sub=lint above. Unknown
+		// subcommands get a helpful error.
+		fmt.Fprintf(os.Stderr, "%s: unknown subcommand %q (try --help)\n", cmdName, sub)
+		os.Exit(1)
+	}
+
+	r, err := agent.Run(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", cmdName, err)
+		os.Exit(1)
+	}
+	if r != nil && r.Errors > 0 {
+		os.Exit(1)
+	}
+}
+
+// parseAgentNewFlags parses flags for `yakos agent new`.
+func parseAgentNewFlags(cfg *agent.Config, args []string) {
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			agent.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case arg == "--runtime":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "agent new: --runtime requires an id")
+				os.Exit(1)
+			}
+			cfg.Runtime = args[i]
+		case len(arg) > 10 && arg[:10] == "--runtime=":
+			cfg.Runtime = arg[10:]
+		case arg == "--project":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "agent new: --project requires a path")
+				os.Exit(1)
+			}
+			cfg.Project = args[i]
+		case len(arg) > 10 && arg[:10] == "--project=":
+			cfg.Project = arg[10:]
+		case arg == "--extends":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "agent new: --extends requires an id")
+				os.Exit(1)
+			}
+			cfg.Extends = args[i]
+		case len(arg) > 10 && arg[:10] == "--extends=":
+			cfg.Extends = arg[10:]
+		case arg == "--role":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "agent new: --role requires a value")
+				os.Exit(1)
+			}
+			cfg.Role = args[i]
+		case len(arg) > 7 && arg[:7] == "--role=":
+			cfg.Role = arg[7:]
+		case arg == "--domain":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "agent new: --domain requires a value")
+				os.Exit(1)
+			}
+			cfg.Domain = args[i]
+		case len(arg) > 9 && arg[:9] == "--domain=":
+			cfg.Domain = arg[9:]
+		case arg == "--model":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "agent new: --model requires a value")
+				os.Exit(1)
+			}
+			cfg.Model = args[i]
+		case len(arg) > 8 && arg[:8] == "--model=":
+			cfg.Model = arg[8:]
+		case arg == "--tools":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "agent new: --tools requires a value")
+				os.Exit(1)
+			}
+			cfg.Tools = args[i]
+		case len(arg) > 8 && arg[:8] == "--tools=":
+			cfg.Tools = arg[8:]
+		case arg == "--force":
+			cfg.Force = true
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "agent new: unknown flag %q\n", arg)
+			os.Exit(1)
+		default:
+			if cfg.Name == "" {
+				cfg.Name = arg
+			} else {
+				fmt.Fprintf(os.Stderr, "agent new: too many positional args\n")
+				os.Exit(1)
+			}
+		}
+		i++
+	}
+	if cfg.Name == "" {
+		agent.PrintHelp(os.Stderr)
+		fmt.Fprintln(os.Stderr, "agent new: <name> required")
+		os.Exit(1)
+	}
+}
+
+// parseAgentLintFlags parses flags for `yakos agent lint`.
+func parseAgentLintFlags(cfg *agent.Config, args []string) {
+	for _, arg := range args {
+		switch {
+		case arg == "-h" || arg == "--help":
+			agent.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "agent lint: unknown flag %q\n", arg)
+			os.Exit(1)
+		default:
+			if cfg.Project == "" {
+				cfg.Project = arg
+			} else {
+				fmt.Fprintln(os.Stderr, "agent lint: too many positional args")
+				os.Exit(1)
+			}
+		}
+	}
+}
+
+// parseAgentDiffFlags parses flags for `yakos agent diff`.
+func parseAgentDiffFlags(cfg *agent.Config, args []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			agent.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case arg == "--project":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "agent diff: --project requires a path")
+				os.Exit(1)
+			}
+			cfg.Project = args[i]
+		case len(arg) > 10 && arg[:10] == "--project=":
+			cfg.Project = arg[10:]
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "agent diff: unknown flag %q\n", arg)
+			os.Exit(1)
+		default:
+			if cfg.Name == "" {
+				cfg.Name = arg
+			} else {
+				fmt.Fprintln(os.Stderr, "agent diff: too many positional args")
+				os.Exit(1)
+			}
+		}
+	}
+	if cfg.Name == "" {
+		fmt.Fprintln(os.Stderr, "agent diff: <name> required")
+		os.Exit(1)
+	}
+}
+
+// parseAgentListFlags parses flags for `yakos agent list`.
+func parseAgentListFlags(cfg *agent.Config, args []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			agent.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case arg == "--json":
+			cfg.JSON = true
+		case arg == "--project":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "agent list: --project requires a path")
+				os.Exit(1)
+			}
+			cfg.Project = args[i]
+		case len(arg) > 10 && arg[:10] == "--project=":
+			cfg.Project = arg[10:]
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "agent list: unknown flag %q\n", arg)
+			os.Exit(1)
+		default:
+			fmt.Fprintf(os.Stderr, "agent list: unexpected argument %q\n", arg)
+			os.Exit(1)
+		}
+	}
+}
+
+// runAgentDocs implements `yakos agent docs [--format md|html]`.
+func runAgentDocs(yakosRoot string, args []string) {
+	format := agent.DocsFormatMD
+	project := ""
+	outPath := ""
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			_, _ = fmt.Fprint(os.Stdout, "yakos agent docs [--format md|html] [--project <path>] [--out <file>]\n\n")
+			_, _ = fmt.Fprint(os.Stdout, "Render an auto-generated agent reference page from frontmatter.\n")
+			os.Exit(0)
+		case arg == "--format":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "agent docs: --format requires md or html")
+				os.Exit(1)
+			}
+			switch args[i] {
+			case "md", "markdown":
+				format = agent.DocsFormatMD
+			case "html":
+				format = agent.DocsFormatHTML
+			default:
+				fmt.Fprintf(os.Stderr, "agent docs: unknown format %q (md or html)\n", args[i])
+				os.Exit(1)
+			}
+		case len(arg) > 9 && arg[:9] == "--format=":
+			switch arg[9:] {
+			case "md", "markdown":
+				format = agent.DocsFormatMD
+			case "html":
+				format = agent.DocsFormatHTML
+			default:
+				fmt.Fprintf(os.Stderr, "agent docs: unknown format %q\n", arg[9:])
+				os.Exit(1)
+			}
+		case arg == "--project":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "agent docs: --project requires a path")
+				os.Exit(1)
+			}
+			project = args[i]
+		case len(arg) > 10 && arg[:10] == "--project=":
+			project = arg[10:]
+		case arg == "--out":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "agent docs: --out requires a path")
+				os.Exit(1)
+			}
+			outPath = args[i]
+		case len(arg) > 6 && arg[:6] == "--out=":
+			outPath = arg[6:]
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "agent docs: unknown flag %q\n", arg)
+			os.Exit(1)
+		default:
+			fmt.Fprintf(os.Stderr, "agent docs: unexpected argument %q\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	var w = os.Stdout
+	if outPath != "" {
+		// Atomic write.
+		tmp := outPath + ".tmp"
+		f, err := os.Create(tmp) //nolint:gosec
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "agent docs: create %s: %v\n", tmp, err)
+			os.Exit(1)
+		}
+		err = agent.RenderDocs(agent.DocsConfig{
+			YakosRoot: yakosRoot,
+			Project:   project,
+			Format:    format,
+			Writer:    f,
+		})
+		_ = f.Close()
+		if err != nil {
+			_ = os.Remove(tmp)
+			fmt.Fprintf(os.Stderr, "agent docs: %v\n", err)
+			os.Exit(1)
+		}
+		if err := os.Rename(tmp, outPath); err != nil {
+			_ = os.Remove(tmp)
+			fmt.Fprintf(os.Stderr, "agent docs: rename: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "agent docs: wrote %s\n", outPath)
+		return
+	}
+
+	if err := agent.RenderDocs(agent.DocsConfig{
+		YakosRoot: yakosRoot,
+		Project:   project,
+		Format:    format,
+		Writer:    w,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "agent docs: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // exitWith calls os.Exit with the code returned by passthrough.Run.
