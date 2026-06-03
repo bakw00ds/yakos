@@ -375,7 +375,7 @@ jobs:
             printf 'curl -fsSL https://raw.githubusercontent.com/bakw00ds/yakos/main/scripts/install.sh | sh -s -- --version %s\n' "${VERSION}"
             printf '```\n\n'
             printf 'See [docs/go-shadow-mode.md](docs/go-shadow-mode.md) for coexistence details.\n\n'
-            printf '---\n\n'
+            printf '%s\n\n' '---'
             cat "${NOTES_FILE}"
           } > release-notes.md
 
