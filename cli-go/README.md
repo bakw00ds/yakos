@@ -8,9 +8,9 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update, quickstart, auth, memory ported.** The
-`validate`, `cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, `team`, `archive`, `init`, `install`, `uninstall`, `start`, `update`, `quickstart`, `auth`, and `memory`
-subcommands are implemented natively in Go (ranks 2–18 in `docs/go-port-plan.md`). The `kanban serve`
+**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update, quickstart, auth, memory, agent ported.** The
+`validate`, `cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, `team`, `archive`, `init`, `install`, `uninstall`, `start`, `update`, `quickstart`, `auth`, `memory`, and `agent`
+subcommands are implemented natively in Go (ranks 2–19 in `docs/go-port-plan.md`). The `kanban serve`
 submode is deferred to rank 41. Worktree cleanup at archive time is explicitly NOT in scope (same
 caveat as bash; manual in v0.1). Hook script installation in `init` prints an advisory directing to
 `yakos refresh` (bash handles hook copies in Phase 1). `yakos start` exec's the runtime CLI replacing
@@ -150,6 +150,7 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos quickstart [args]` | Go (full feature parity with `cli/lib/quickstart.sh`; composes install+init+start; idempotent; --runtime/--multi-dev/--safe/--allow-root/--dry-run) |
 | `yakos auth [args]` | Go (full feature parity with `cli/lib/auth.sh`; status/login/logout/set-default; OS keychain via go-keyring; graceful degradation on headless Linux) |
 | `yakos memory <sub> [args]` | Go (full feature parity with `cli/lib/memory.sh`; list/read/write/delete/index-rebuild; MEMORY.md byte-identical index; schema sidecar; atomic writes) |
+| `yakos agent <sub> [args]` | Go (full feature parity with `cli/lib/agent.sh`; new/lint/diff/list/docs subcommands; `agents` plural alias; docs renders md+html reference pages; atomic writes) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 
@@ -248,6 +249,10 @@ cli-go/
       memory.go            # Run + PrintHelp; list/read/write/delete/index-rebuild; MEMORY.md parser;
                            # frontmatter YAML; schema sidecar; atomic writes
       memory_test.go       # 40 unit tests (parse, round-trip, write, delete, index-rebuild, schema)
+    agent/
+      agent.go             # Run + PrintHelp + RenderDocs; new/lint/diff/list/docs subcommands;
+                           # LCS-based go-native diff; atomic temp-rename writes; reuses agentscompose
+      agent_test.go        # 50 unit tests (template, name validation, frontmatter, lint, diff, list, docs)
     paritytest/
       paritytest.go        # parity test harness for all Phase 1 ports
   go.mod                   # module github.com/bakw00ds/yakos (root: cli-go/)
@@ -261,7 +266,7 @@ cli-go/
 2. Add a case in `cmd/yakos/main.go` routing the subcommand name to your
    implementation instead of `passthrough.Run`.
 3. Add the entry to `portedCommands` in `main.go`.
-4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 17).
+4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 18).
 5. Add parity tests in `cmd/yakos/<name>_parity_test.go` using the paritytest harness.
 
 ## CI
