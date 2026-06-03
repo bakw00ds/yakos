@@ -70,6 +70,8 @@ jobs:
 
       - name: Smoke test — --version flag (unix)
         if: runner.os != 'Windows'
+        env:
+          YAKOS_IMPL: go
         run: |
           out=$(./bin/yakos --version)
           echo "version output: $out"
@@ -78,6 +80,8 @@ jobs:
       - name: Smoke test — --version flag (windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          YAKOS_IMPL: go
         run: |
           $out = .\bin\yakos.exe --version
           Write-Host "version output: $out"
