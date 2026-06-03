@@ -31,6 +31,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/doctor"
+	"github.com/bakw00ds/yakos/internal/envcfg"
 	"github.com/bakw00ds/yakos/internal/initialize"
 	"github.com/bakw00ds/yakos/internal/install"
 	"github.com/bakw00ds/yakos/internal/kanban"
@@ -45,6 +46,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/skill"
 	"github.com/bakw00ds/yakos/internal/session"
 	"github.com/bakw00ds/yakos/internal/soul"
+	"github.com/bakw00ds/yakos/internal/standards"
 	"github.com/bakw00ds/yakos/internal/start"
 	"github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/teach"
@@ -86,6 +88,8 @@ var portedCommands = []portedCommand{
 	{Name: "skill", Since: "0.61.0", Notes: "full feature parity with cli/lib/skill.sh; candidates/promote/reject/defer/stats subcommands; graveyard + fingerprint dedup (§16.1); calibration warnings (§16.2); atomic writes; validate gate on promote; --global promote to lib/skills/"},
 	{Name: "compact", Since: "0.62.0", Notes: "full feature parity with cli/lib/compact.sh; now/threshold/history subcommands; atomic writes for settings.json (temp-rename, Q8); O_APPEND for compact-log.ndjson; M3.1 auto-send deferred (prints slash-command advisory)"},
 	{Name: "checkpoint", Since: "0.63.0", Notes: "full feature parity with cli/lib/checkpoint.sh; create/list/restore/clean subcommands; now+resume aliases; scratchpad copy of plan/decisions/contracts/status/kanban .md; manifest.json with ts/session_id/runtime/by_user; session-id resolution chain (cfg/env/history/unknown); atomic dir writes; M3.2 librarian digest deferred"},
+	{Name: "env", Since: "0.64.0", Notes: "full feature parity with cli/lib/env.sh; status/promote/validate/list subcommands; YAML environments section parsed; gh/glab/git PR tool detection; injectable GitFn+ExecFn+PRToolOverride for tests; atomic project-dir resolution"},
+	{Name: "standards", Since: "0.65.0", Notes: "full feature parity with cli/lib/standards.sh; list/enable/disable/check/init subcommands; all 6 Plan-4 standards; profile.type suggested matrix; atomic YAML rewrite (temp-rename, Q8); injectable PromptFn for init tests"},
 }
 
 type portedCommand struct {
@@ -181,6 +185,10 @@ func main() {
 		runCompact(args[1:])
 	case "checkpoint":
 		runCheckpoint(args[1:])
+	case "env":
+		runEnv(args[1:])
+	case "standards":
+		runStandards(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -3470,6 +3478,132 @@ func runCheckpoint(args []string) {
 
 	if _, err := checkpoint.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "checkpoint: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runEnv implements `yakos env` natively in Go.
+//
+// Usage mirrors cli/lib/env.sh exactly:
+//
+//	yakos env status                   # current branch → env mapping
+//	yakos env promote <from> <to>      # PR from env's branch → to env's branch
+//	yakos env validate                 # check .yakos.yml environments section
+//	yakos env list                     # list configured envs
+//	yakos env --help                   # print help and exit 0
+//
+// Environments are declared in <project>/.yakos.yml under `environments:`.
+// PR tool detection: gh → glab → git URL guidance.
+// Project dir resolved from YAKOS_PROJECT_DIR env, cwd, or .project-path.
+func runEnv(args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		envcfg.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+	rest := args[1:]
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := envcfg.Config{
+		Subcommand: sub,
+		HomeDir:    home,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	switch sub {
+	case "promote":
+		if len(rest) < 2 {
+			fmt.Fprintln(os.Stderr, "env promote: requires <from> and <to> env names")
+			envcfg.PrintHelp(os.Stderr)
+			os.Exit(1)
+		}
+		cfg.PromoteFrom = rest[0]
+		cfg.PromoteTo = rest[1]
+
+	case "status", "validate", "list":
+		if len(rest) > 0 {
+			fmt.Fprintf(os.Stderr, "env %s: unexpected argument %q\n", sub, rest[0])
+			os.Exit(1)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "env: unknown subcommand %q (try 'yakos env help')\n", sub)
+		os.Exit(1)
+	}
+
+	if _, err := envcfg.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "env: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runStandards implements `yakos standards` natively in Go.
+//
+// Usage mirrors cli/lib/standards.sh exactly:
+//
+//	yakos standards list               # show all 6 standards + state
+//	yakos standards enable  <name>     # set profile.standards.<name> = true
+//	yakos standards disable <name>     # set profile.standards.<name> = false
+//	yakos standards check              # preview what active standards catch
+//	yakos standards init               # interactive profile + standards selection
+//	yakos standards --help             # print help and exit 0
+//
+// State lives in <project>/.yakos.yml under profile.standards.*.
+// Project dir resolved from YAKOS_PROJECT_DIR env, cwd, or agent-control walk.
+// Atomic YAML rewrite via temp-rename (Q8) on enable/disable/init.
+func runStandards(args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		standards.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+	rest := args[1:]
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := standards.Config{
+		Subcommand: sub,
+		HomeDir:    home,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	switch sub {
+	case "enable", "disable":
+		if len(rest) == 0 {
+			fmt.Fprintf(os.Stderr, "standards %s: requires a standard name\n", sub)
+			standards.PrintHelp(os.Stderr)
+			os.Exit(1)
+		}
+		if len(rest) > 1 {
+			fmt.Fprintf(os.Stderr, "standards %s: too many arguments (expected one standard name)\n", sub)
+			os.Exit(1)
+		}
+		cfg.StandardName = rest[0]
+
+	case "list", "check", "init":
+		if len(rest) > 0 {
+			fmt.Fprintf(os.Stderr, "standards %s: unexpected argument %q\n", sub, rest[0])
+			os.Exit(1)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "standards: unknown subcommand %q (try 'yakos standards help')\n", sub)
+		os.Exit(1)
+	}
+
+	if _, err := standards.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "standards: %v\n", err)
 		os.Exit(1)
 	}
 }
