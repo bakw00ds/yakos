@@ -8,9 +8,9 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install ported.** The
-`validate`, `cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, `team`, `archive`, `init`, and `install`
-subcommands are implemented natively in Go (ranks 2–12 in `docs/go-port-plan.md`). The `kanban serve`
+**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall ported.** The
+`validate`, `cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, `team`, `archive`, `init`, `install`, and `uninstall`
+subcommands are implemented natively in Go (ranks 2–13 in `docs/go-port-plan.md`). The `kanban serve`
 submode is deferred to rank 41. Worktree cleanup at archive time is explicitly NOT in scope (same
 caveat as bash; manual in v0.1). Hook script installation in `init` prints an advisory directing to
 `yakos refresh` (bash handles hook copies in Phase 1). All other commands proxy to bash yakos. Run
@@ -144,6 +144,7 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos archive <project> <tag> [args]` | Go (full feature parity with `cli/lib/archive.sh`; worktree cleanup deferred, manual in v0.1) |
 | `yakos team restart <project> [args]` | Go (full feature parity with `cli/lib/team.sh`; archive step uses native Go when YAKOS_IMPL=go) |
 | `yakos install [--force] [--dry-run]` | Go (full feature parity with `cli/lib/install.sh`; per-file symlinks, launcher, settings.json merge) |
+| `yakos uninstall [--restore-settings] [--root <path>] [--dry-run]` | Go (full feature parity with `cli/lib/uninstall.sh`; removes YakOS-owned symlinks + launcher + pointer; partial-uninstall log+continue) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 
@@ -224,6 +225,9 @@ cli-go/
     install/
       install.go           # Run(cfg Config) — native Go install (rank 12); symlinks, launcher, settings merge
       install_test.go      # 23 unit tests (happy path, dry-run, force, preflight, idempotency, atomic)
+    uninstall/
+      uninstall.go         # Run(cfg Config) — native Go uninstall (rank 13); removes YakOS-owned symlinks + launcher + pointer; --restore-settings/--root/--dry-run; partial-uninstall log+continue
+      uninstall_test.go    # 21 unit tests (happy path, dry-run, dangling, foreign, real-file, stale pointer, round-trip, nested, partial failure)
     team/
       team.go              # Restart(cfg Config) + Config/RestartResult types + isoTag
       archive.go           # RunArchive — native Go (YAKOS_IMPL=go) or RunArchiveBash fallback
@@ -241,7 +245,7 @@ cli-go/
 2. Add a case in `cmd/yakos/main.go` routing the subcommand name to your
    implementation instead of `passthrough.Run`.
 3. Add the entry to `portedCommands` in `main.go`.
-4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 11).
+4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 12).
 5. Add parity tests in `cmd/yakos/<name>_parity_test.go` using the paritytest harness.
 
 ## CI
