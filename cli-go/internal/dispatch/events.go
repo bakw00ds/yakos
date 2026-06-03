@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/cost"
@@ -43,11 +42,9 @@ func appendEvent(path string, line []byte) error {
 	defer func() { _ = f.Close() }()
 
 	// flock for cross-process append safety (mirrors bash flock usage).
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		// Best-effort: proceed without lock on filesystems that don't support flock.
-		_ = err
-	}
-	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+	// Per-platform impl in lock_unix.go / lock_windows.go.
+	lockFile(f)
+	defer unlockFile(f)
 
 	line = append(line, '\n')
 	_, err = f.Write(line)

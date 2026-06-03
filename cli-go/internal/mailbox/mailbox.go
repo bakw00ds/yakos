@@ -31,7 +31,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -95,9 +94,10 @@ func AppendLine(path string, line []byte) error {
 	defer func() { _ = f.Close() }()
 
 	// Exclusive flock — best-effort; proceed without lock on filesystems
-	// (e.g. NFS) that don't support flock.
-	if lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); lockErr == nil {
-		defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+	// (e.g. NFS) that don't support flock. Per-platform impl in
+	// lock_unix.go / lock_windows.go.
+	if lockErr := lockFile(f); lockErr == nil {
+		defer func() { _ = unlockFile(f) }()
 	}
 
 	out := append(line, '\n') //nolint:gocritic
