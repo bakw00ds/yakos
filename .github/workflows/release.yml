@@ -408,7 +408,7 @@ jobs:
           echo "| Linux (arm64 + amd64) | unsigned; verify via checksums.txt |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         # Pin: softprops/action-gh-release@e7a8f85ef1a4e586a519bbcf6d9cfe9516e4f4d6
         with:
           tag_name: ${{ steps.version.outputs.tag }}
