@@ -25,12 +25,15 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
+	"github.com/bakw00ds/yakos/internal/restapi"
+	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
 // ErrAlreadyRunning is returned when a daemon for the same workspace is
@@ -54,6 +57,29 @@ type Config struct {
 	// YakosRoot is the framework root (for agent composition).
 	YakosRoot string
 
+	// WSAddr is the TCP address for the WebSocket event server.
+	// Defaults to "127.0.0.1:7891".  Use "127.0.0.1:0" for an OS-assigned port.
+	// Only loopback addresses are accepted; non-loopback connections are rejected
+	// at the HTTP layer (mTLS is the blessed cross-machine path per Q2 decision).
+	WSAddr string
+
+	// WSTokenPath overrides the path to the WS bearer-token file.
+	// Defaults to ~/.yakos-state/ws-token.
+	WSTokenPath string
+
+	// RESTAddr is the TCP address for the REST API HTTP server.
+	// Defaults to "127.0.0.1:7892".  Must be a loopback address.
+	// Set to "" to use the default.  Set to "-" to disable the REST server entirely.
+	RESTAddr string
+
+	// RESTStateDir overrides the directory used to persist REST tokens.
+	// Defaults to ~/.yakos-state.
+	RESTStateDir string
+
+	// Bus is the in-process event bus shared between the JSON-RPC layer and the
+	// WebSocket layer.  If nil, a new Bus is created by Run.  Inject for tests.
+	Bus *wsbus.Bus
+
 	// ListenFn is injected in tests to replace the real socket listener.
 	// nil means use jsonrpc.Listen.
 	ListenFn func(path string) (net.Listener, error)
@@ -73,6 +99,31 @@ func (c *Config) pidFile() string {
 	return jsonrpc.PIDPath(c.WorkspaceRoot)
 }
 
+func (c *Config) wsAddr() string {
+	if c.WSAddr != "" {
+		return c.WSAddr
+	}
+	return "127.0.0.1:7891"
+}
+
+func (c *Config) restAddr() string {
+	if c.RESTAddr != "" {
+		return c.RESTAddr
+	}
+	return "127.0.0.1:7892"
+}
+
+func (c *Config) restStateDir() string {
+	if c.RESTStateDir != "" {
+		return c.RESTStateDir
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+	return filepath.Join(home, ".yakos-state")
+}
+
 func (c *Config) listen(path string) (net.Listener, error) {
 	if c.ListenFn != nil {
 		return c.ListenFn(path)
@@ -81,8 +132,9 @@ func (c *Config) listen(path string) (net.Listener, error) {
 }
 
 // Run starts the daemon: writes the PID file, opens the JSON-RPC listener,
-// registers all method handlers, and blocks until ctx is cancelled or a
-// shutdown signal is received.
+// starts the WebSocket event server, starts the REST API server, registers all
+// method handlers, and blocks until ctx is cancelled or a shutdown signal is
+// received.
 //
 // Run returns nil on clean shutdown or ErrAlreadyRunning if another daemon
 // for the same workspace is already running.
@@ -111,16 +163,85 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	defer func() { _ = ln.Close() }()
 
-	// Build the JSON-RPC server and register handlers.
-	srv := jsonrpc.NewServer()
-	registerMethods(srv, cfg)
+	// Ensure we have an event bus.
+	bus := cfg.Bus
+	if bus == nil {
+		bus = wsbus.New()
+	}
+	defer bus.Stop()
 
-	// Merge external ctx with OS signals.
+	// Load (or create) the WS bearer token.
+	token, err := wsbus.LoadOrCreateToken(cfg.WSTokenPath)
+	if err != nil {
+		return fmt.Errorf("serve: ws token: %w", err)
+	}
+
+	// Build and start the WebSocket server concurrently.
+	wsSrv, err := wsbus.NewServer(wsbus.ServerConfig{
+		Addr:  cfg.wsAddr(),
+		Bus:   bus,
+		Token: token,
+	})
+	if err != nil {
+		return fmt.Errorf("serve: ws server: %w", err)
+	}
+
+	// Merge external ctx with OS signals before starting goroutines.
 	ctx, cancel := withSignals(ctx)
 	defer cancel()
 
+	wsErrCh := make(chan error, 1)
+	go func() {
+		wsErrCh <- wsSrv.Serve(ctx)
+	}()
+
+	// Load (or generate) REST tokens and start the REST API server unless disabled.
+	restErrCh := make(chan error, 1)
+	if cfg.restAddr() != "-" {
+		restToks, err := restapi.LoadOrGenerateTokens(cfg.restStateDir())
+		if err != nil {
+			return fmt.Errorf("serve: REST tokens: %w", err)
+		}
+		restSrv := restapi.New(restapi.Config{
+			Addr:          cfg.restAddr(),
+			Tokens:        restToks,
+			WorkspaceRoot: cfg.WorkspaceRoot,
+			YakosRoot:     cfg.YakosRoot,
+			StateDir:      cfg.restStateDir(),
+		})
+		go func() {
+			restErrCh <- restSrv.Serve(ctx)
+		}()
+	} else {
+		close(restErrCh)
+	}
+
+	// Build the JSON-RPC server and register handlers (bus is passed via cfg).
+	cfgWithBus := cfg
+	cfgWithBus.Bus = bus
+	srv := jsonrpc.NewServer()
+	registerMethods(srv, cfgWithBus)
+
 	// Serve blocks until ctx is done or the listener is closed.
-	return srv.Serve(ctx, ln)
+	rpcErr := srv.Serve(ctx, ln)
+
+	// Wait for WS and REST servers to drain.
+	select {
+	case wsErr := <-wsErrCh:
+		if wsErr != nil && rpcErr == nil {
+			rpcErr = wsErr
+		}
+	case <-time.After(drainTimeout):
+	}
+	select {
+	case restErr := <-restErrCh:
+		if restErr != nil && rpcErr == nil {
+			rpcErr = restErr
+		}
+	case <-time.After(drainTimeout):
+	}
+
+	return rpcErr
 }
 
 // withSignals returns a context that is cancelled when SIGTERM or SIGINT
@@ -176,4 +297,4 @@ func writePIDFile(path string) error {
 }
 
 // drainTimeout is the maximum time to wait for in-flight requests after shutdown.
-const drainTimeout = 5 * time.Second //nolint:deadcode,unused
+const drainTimeout = 5 * time.Second

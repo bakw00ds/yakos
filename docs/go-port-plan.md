@@ -170,8 +170,39 @@ New daemon RPC methods (11 total, was 3):
 
 All param structs use `DisallowUnknownFields` — schema violations return `-32602`.
 
+### Phase 2 — WebSocket multi-dev coordination foundation (2026-06-03)
+
+Delivered as the Phase 2 WebSocket dispatch:
+
+| Package | Role | Tests |
+|---------|------|-------|
+| `cli-go/internal/wsbus/bus.go` | In-process topic-based publish/subscribe event bus | 19 unit tests |
+| `cli-go/internal/wsbus/server.go` | HTTP WebSocket server (loopback-only, bearer token auth) | 16 unit tests |
+| `cli-go/internal/wsbus/token.go` | 256-bit token generation, load-or-create, rotation | 7 unit tests |
+| `cli-go/internal/wsbus/event.go` | Event envelope + typed payload structs | (covered by bus + server tests) |
+| `cli-go/internal/serve/serve.go` | Daemon extended: starts WS server concurrently; propagates Bus to method handlers | existing serve tests pass |
+| `cli-go/internal/serve/methods.go` | All 11 RPC methods emit bus events on mutations | existing method tests pass |
+| `yakos events` subcommand | CLI debug client: connect to daemon WS, print events, glob topic filter | wired into cmd/yakos/main.go |
+
+Event topics registered:
+- `kanban.added` — `{id, title, column}`
+- `kanban.moved` — `{id, from, to}` (from `kanban.move` and `kanban.done`)
+- `dispatch.started` — `{agent, project, ts}`
+- `dispatch.finished` — `{agent, project, exit_code, ts}`
+- `presence` — `{user, host, status}` (structure defined; emitter in follow-up)
+
+Auth model:
+- Token at `~/.yakos-state/ws-token` (mode 0600, 256-bit hex).
+- Auto-created on first daemon start; rotated via `yakos serve --rotate-ws-token`.
+- Accepted as `Authorization: Bearer <token>` header or `?token=` query param.
+- Non-loopback connections rejected HTTP 403 (Q2: mTLS for cross-machine is follow-up).
+
+Test count: 42 tests in `internal/wsbus/` (19 bus + 16 server + 7 token).
+`make test` clean (restapi pre-existing failures excluded; those tests predated this dispatch).
+`GOOS=windows GOARCH=amd64 go vet ./...` clean.
+
 - **`yakos serve` daemon** — one persistent process per dev session. Provides a Unix socket (`$XDG_RUNTIME_DIR/yakos.sock`) for the CLI to talk to instead of cold-starting. Wins: sub-ms subcommand response, in-memory kanban, single source of truth for dispatch-log writes. Sizing: M (~40h). Decision points: socket vs TCP on Windows? recommend named pipes.
-- **WebSocket multi-dev coordination** — daemon exposes WS endpoint for real-time kanban + presence ("alice is in IN PROGRESS on feat/billing") + cross-dev event bus. Sizing: L (~80h). Depends on daemon. Decision points: auth model for cross-machine (mTLS? shared token?).
+- **WebSocket multi-dev coordination** — daemon exposes WS endpoint for real-time kanban + presence ("alice is in IN PROGRESS on feat/billing") + cross-dev event bus. Sizing: L (~80h). Depends on daemon. **FOUNDATION SHIPPED (2026-06-03) — see §4 Phase 2 WS below.** Decision points: mTLS for cross-machine (Q2 deferred to follow-up).
 - **Native MCP server** — daemon exposes MCP tools: `yakos.dispatch`, `yakos.kanban.{add,move,done,list}`, `yakos.refresh`, `yakos.supervise`. Eliminates shell-out from MCP clients. Sizing: M (~50h). Depends on daemon. Decision points: MCP transport (stdio vs SSE vs streamable HTTP); recommend stdio + streamable HTTP.
 - **Embeddable Go library** — extract `internal/dispatch`, `internal/kanban`, `internal/workdir` into `pkg/` with stable APIs. Sizing: M (~30h, mostly API stabilization + godoc + examples). Depends on Phase 1 internal packages being clean.
 - **REST + gRPC API for IDE extensions** — thin layer over the library, served by the daemon. Sizing: M (~40h). Depends on daemon + library.

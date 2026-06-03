@@ -24,11 +24,15 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"net/http"
+
 	"github.com/bakw00ds/yakos/internal/agent"
 	"github.com/bakw00ds/yakos/internal/archive"
 	internalserve "github.com/bakw00ds/yakos/internal/serve"
 	"github.com/bakw00ds/yakos/internal/mcpserver"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
+	"github.com/bakw00ds/yakos/internal/wsbus"
+	"golang.org/x/net/websocket"
 	"github.com/bakw00ds/yakos/internal/auth"
 	"github.com/bakw00ds/yakos/internal/checkpoint"
 	"github.com/bakw00ds/yakos/internal/compact"
@@ -165,6 +169,13 @@ func main() {
 	case "refresh":
 		runRefresh(yakosRoot, args[1:])
 	case "kanban":
+		// When the daemon is running, route kanban mutations through the daemon
+		// so the WS event bus receives the events.  Reads fall through to in-process.
+		if daemonMode() != "off" {
+			if routed := maybeRouteToDaemon(yakosRoot, args); routed {
+				return
+			}
+		}
 		runKanban(yakosRoot, args[1:])
 	case "dispatch":
 		runDispatch(yakosRoot, args[1:])
@@ -232,6 +243,8 @@ func main() {
 		runHooks(args[1:])
 	case "serve":
 		runServe(yakosRoot, args[1:])
+	case "events":
+		runEvents(args[1:])
 	default:
 		// YAKOS_DAEMON routing: if the daemon is running and YAKOS_DAEMON=on|auto,
 		// route this subcommand through the JSON-RPC client instead of in-process.
@@ -5057,14 +5070,16 @@ func exitWith(code int, err error) {
 // The daemon is OFF by default (YAKOS_DAEMON=off per decision Q1).
 // Operators start it explicitly:
 //
-//	yakos serve [--socket <path>] [--pidfile <path>] [--help]
+//	yakos serve [--socket <path>] [--pidfile <path>] [--ws-addr <addr>] [--help]
 //
 // Flags:
 //
-//	--socket <path>   Override the default Unix socket / named pipe path.
-//	--pidfile <path>  Override the default PID file path.
-//	--detach          Print advisory (actual backgrounding is the operator's job).
-//	--help            Print help and exit 0.
+//	--socket <path>       Override the default Unix socket / named pipe path.
+//	--pidfile <path>      Override the default PID file path.
+//	--ws-addr <addr>      WebSocket bind address (default 127.0.0.1:7891).
+//	--rotate-ws-token     Rotate the WS bearer token and exit.
+//	--detach              Print advisory (actual backgrounding is the operator's job).
+//	--help                Print help and exit 0.
 //
 // YAKOS_DAEMON mode is NOT changed by running this command; the operator sets
 // YAKOS_DAEMON=on or YAKOS_DAEMON=auto in their shell rc to route CLI calls
@@ -5072,7 +5087,9 @@ func exitWith(code int, err error) {
 func runServe(yakosRoot string, args []string) {
 	socketPath := ""
 	pidFile := ""
+	wsAddr := ""
 	detach := false
+	rotateToken := false
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -5093,6 +5110,15 @@ func runServe(yakosRoot string, args []string) {
 				os.Exit(1)
 			}
 			pidFile = args[i]
+		case "--ws-addr":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "serve: --ws-addr requires an address")
+				os.Exit(1)
+			}
+			wsAddr = args[i]
+		case "--rotate-ws-token":
+			rotateToken = true
 		case "--detach":
 			detach = true
 		default:
@@ -5100,11 +5126,25 @@ func runServe(yakosRoot string, args []string) {
 				socketPath = args[i][9:]
 			} else if len(args[i]) > 10 && args[i][:10] == "--pidfile=" {
 				pidFile = args[i][10:]
+			} else if len(args[i]) > 10 && args[i][:10] == "--ws-addr=" {
+				wsAddr = args[i][10:]
 			} else {
 				fmt.Fprintf(os.Stderr, "serve: unknown flag %q (try --help)\n", args[i])
 				os.Exit(1)
 			}
 		}
+	}
+
+	// --rotate-ws-token: generate a new token and print the path, then exit.
+	if rotateToken {
+		tok, err := wsbus.RotateToken("")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "serve: rotate-ws-token: %v\n", err)
+			os.Exit(1)
+		}
+		_ = tok // token stored in file; print the path
+		fmt.Fprintf(os.Stdout, "ws token rotated: %s\n", wsbus.TokenFilePath())
+		os.Exit(0)
 	}
 
 	if detach {
@@ -5124,10 +5164,17 @@ func runServe(yakosRoot string, args []string) {
 		SocketPath:    socketPath,
 		PIDFile:       pidFile,
 		YakosRoot:     yakosRoot,
+		WSAddr:        wsAddr,
+	}
+
+	wsBindAddr := wsAddr
+	if wsBindAddr == "" {
+		wsBindAddr = "127.0.0.1:7891"
 	}
 
 	fmt.Fprintf(os.Stderr, "yakos serve: starting daemon for workspace %s\n", workspaceRoot)
 	fmt.Fprintf(os.Stderr, "yakos serve: socket at %s\n", jsonrpc.SocketPath(workspaceRoot))
+	fmt.Fprintf(os.Stderr, "yakos serve: ws events at ws://%s/v1/events\n", wsBindAddr)
 	fmt.Fprintln(os.Stderr, "yakos serve: press Ctrl-C to stop")
 
 	ctx := context.Background()
@@ -5145,14 +5192,192 @@ func runServe(yakosRoot string, args []string) {
 	}
 }
 
+// ---- WebSocket dial helpers (used by runEvents) -----------------------------
+
+// newWSConfig builds a *websocket.Config for the given ws:// URL and bearer token.
+func newWSConfig(wsURL, token string) (*websocket.Config, error) {
+	cfg, err := websocket.NewConfig(wsURL, "http://127.0.0.1/")
+	if err != nil {
+		return nil, err
+	}
+	cfg.Header = http.Header{"Authorization": {"Bearer " + token}}
+	return cfg, nil
+}
+
+// dialWSConfig dials a WebSocket using the given config.
+func dialWSConfig(cfg *websocket.Config) (*websocket.Conn, error) {
+	return websocket.DialConfig(cfg)
+}
+
+// receiveWSJSON reads one JSON frame from conn into v.
+func receiveWSJSON(conn *websocket.Conn, v interface{}) error {
+	return websocket.JSON.Receive(conn, v)
+}
+
+// runEvents implements `yakos events` — a WebSocket client that prints
+// events from the daemon's WS bus to stdout.
+//
+// Usage:
+//
+//	yakos events [--ws-addr <addr>] [--topic <topic>] [--since <duration>]
+//
+// Flags:
+//
+//	--ws-addr <addr>   WebSocket address (default 127.0.0.1:7891).
+//	--topic <topic>    Filter to a specific topic (supports exact match or glob "kanban.*").
+//	--since <duration> ERROR: replay is out of scope for Phase 2 (Q8 decision).
+//	--help             Print help and exit 0.
+func runEvents(args []string) {
+	wsAddr := "127.0.0.1:7891"
+	topic := ""
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			printEventsHelp(os.Stdout)
+			os.Exit(0)
+		case "--ws-addr":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "events: --ws-addr requires an address")
+				os.Exit(1)
+			}
+			wsAddr = args[i]
+		case "--topic":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "events: --topic requires a topic string")
+				os.Exit(1)
+			}
+			topic = args[i]
+		case "--since":
+			// Q8 decision: replay is out of scope for Phase 2.
+			fmt.Fprintln(os.Stderr, "events: --since is not supported in Phase 2 (event replay deferred to Phase 3)")
+			fmt.Fprintln(os.Stderr, "events: run without --since to receive live events from this moment forward")
+			os.Exit(1)
+		default:
+			if len(args[i]) > 10 && args[i][:10] == "--ws-addr=" {
+				wsAddr = args[i][10:]
+			} else if len(args[i]) > 8 && args[i][:8] == "--topic=" {
+				topic = args[i][8:]
+			} else {
+				fmt.Fprintf(os.Stderr, "events: unknown flag %q (try --help)\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+
+	// Load token from default location.
+	token, err := wsbus.LoadOrCreateToken("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "events: read ws token: %v\n", err)
+		os.Exit(1)
+	}
+
+	wsURL := "ws://" + wsAddr + "/v1/events"
+
+	cfg, err := newWSConfig(wsURL, token)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "events: build ws config: %v\n", err)
+		os.Exit(1)
+	}
+
+	conn, err := dialWSConfig(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "events: connect to %s: %v\n", wsURL, err)
+		fmt.Fprintln(os.Stderr, "events: is the daemon running? try: yakos serve --ws-addr "+wsAddr)
+		os.Exit(1)
+	}
+	defer conn.Close()
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+
+	for {
+		var ev wsbus.Event
+		if err := receiveWSJSON(conn, &ev); err != nil {
+			fmt.Fprintf(os.Stderr, "events: connection closed: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Skip ping events (internal heartbeat).
+		if ev.Topic == "ping" {
+			continue
+		}
+
+		// Apply topic glob filter.
+		if topic != "" && !matchTopic(topic, ev.Topic) {
+			continue
+		}
+
+		if err := enc.Encode(ev); err != nil {
+			fmt.Fprintf(os.Stderr, "events: encode: %v\n", err)
+			os.Exit(1)
+		}
+	}
+}
+
+// matchTopic returns true if pattern matches topic.
+// Supports trailing glob: "kanban.*" matches "kanban.added", "kanban.moved", etc.
+// Exact match always works.
+func matchTopic(pattern, topic string) bool {
+	if pattern == topic {
+		return true
+	}
+	if strings.HasSuffix(pattern, ".*") {
+		prefix := strings.TrimSuffix(pattern, ".*")
+		return strings.HasPrefix(topic, prefix+".")
+	}
+	if pattern == "*" {
+		return true
+	}
+	return false
+}
+
+func printEventsHelp(w io.Writer) {
+	_, _ = fmt.Fprint(w, `yakos events [--ws-addr <addr>] [--topic <pattern>] [--help]
+
+Connect to the yakos daemon WebSocket event stream and print events to stdout.
+Each event is printed as a JSON object (pretty-printed).
+
+The daemon must be running (yakos serve --ws-addr <addr>).
+
+Flags:
+  --ws-addr <addr>   WebSocket address to connect to (default 127.0.0.1:7891).
+  --topic <pattern>  Filter events by topic. Supports exact match or glob:
+                       kanban.added
+                       kanban.*        (all kanban events)
+                       *               (all events, same as omitting --topic)
+  --since <dur>      ERROR: replay is out of scope for Phase 2 (Q8).
+                     Event replay arrives in Phase 3 if signal emerges.
+  --help, -h         Print this help.
+
+Authentication:
+  Token is read from ~/.yakos-state/ws-token (same file the daemon writes).
+  Rotate the token with: yakos serve --rotate-ws-token
+
+Event topics:
+  kanban.added       A task was added to the board.
+  kanban.moved       A task was moved between columns.
+  dispatch.started   An agent dispatch started.
+  dispatch.finished  An agent dispatch finished (includes exit_code).
+  presence           A developer presence update.
+
+Example:
+  yakos serve --ws-addr 127.0.0.1:7891 &
+  yakos events --topic kanban.*
+`)
+}
+
 func printServeHelp(w io.Writer) {
-	_, _ = fmt.Fprint(w, `yakos serve [--socket <path>] [--pidfile <path>] [--detach] [--help]
+	_, _ = fmt.Fprint(w, `yakos serve [--socket <path>] [--pidfile <path>] [--ws-addr <addr>] [--detach] [--help]
 
 Start the yakos daemon for the current workspace.
 
 The daemon listens on a JSON-RPC 2.0 socket and routes subcommand calls
 from the CLI (when YAKOS_DAEMON=on|auto) without spawning a new process
-per invocation.
+per invocation.  It also starts a WebSocket event server for real-time
+multi-dev coordination (see yakos events).
 
 The daemon is OFF by default (YAKOS_DAEMON=off). To opt in:
 
@@ -5163,10 +5388,14 @@ For persistent daemon startup, see docs/integrations/ for systemd (Linux),
 launchd (macOS), and Task Scheduler (Windows) unit files.
 
 Flags:
-  --socket <path>   Override the socket/pipe path (default: platform XDG path).
-  --pidfile <path>  Override the PID file path.
-  --detach          Print a backgrounding advisory (operator must use '&').
-  --help, -h        Print this help.
+  --socket <path>       Override the socket/pipe path (default: platform XDG path).
+  --pidfile <path>      Override the PID file path.
+  --ws-addr <addr>      WebSocket bind address (default 127.0.0.1:7891).
+                        Loopback-only; non-loopback connections are rejected.
+                        Cross-machine access requires mTLS (Phase 2, Q2).
+  --rotate-ws-token     Generate a new WS bearer token and exit.
+  --detach              Print a backgrounding advisory (operator must use '&').
+  --help, -h            Print this help.
 
 Socket paths (defaults):
   Linux   $XDG_RUNTIME_DIR/yakos/<hash>.sock
@@ -5174,6 +5403,11 @@ Socket paths (defaults):
   Windows \\.\pipe\yakos-<uid>-<hash>
 
 <hash> is derived from the workspace root path (SHA-256 prefix, stable).
+
+WebSocket:
+  ws://127.0.0.1:7891/v1/events (default)
+  Token stored at ~/.yakos-state/ws-token (mode 0600).
+  Use 'yakos events' to connect a debug client.
 
 Exit codes:
   0   Clean shutdown (SIGTERM/SIGINT received).
@@ -5242,8 +5476,7 @@ func maybeRouteToDaemon(yakosRoot string, args []string) bool {
 
 	_ = rawVersion // version match logic is a follow-up; accept any live daemon for now
 
-	// Only the --version flag is currently routed for the smoke test.
-	// Full subcommand routing is added in the follow-up dispatch.
+	// Route --version.
 	if len(args) > 0 && (args[0] == "--version" || args[0] == "-v") {
 		var result struct {
 			Version string `json:"version"`
@@ -5254,5 +5487,104 @@ func maybeRouteToDaemon(yakosRoot string, args []string) bool {
 		}
 	}
 
+	// Route kanban mutations through the daemon so the WS bus receives events.
+	// Only the mutation subcommands are routed; reads fall through to in-process.
+	if len(args) >= 2 && args[0] == "kanban" {
+		routed, ok := routeKanbanViaDaemon(client, args[1:])
+		if ok {
+			if routed != "" {
+				fmt.Println(routed)
+			}
+			return true
+		}
+	}
+
 	return false
+}
+
+// routeKanbanViaDaemon handles kanban subcommand routing through the daemon RPC.
+// Returns (output, true) if the subcommand was handled, ("", false) otherwise.
+func routeKanbanViaDaemon(client *jsonrpc.Client, args []string) (string, bool) {
+	if len(args) == 0 {
+		return "", false
+	}
+	ctx := context.Background()
+	switch args[0] {
+	case "add":
+		if len(args) < 2 {
+			return "", false // let in-process handle the error
+		}
+		title := args[1]
+		var category, notes string
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--category":
+				i++
+				if i < len(args) {
+					category = args[i]
+				}
+			case "--notes":
+				i++
+				if i < len(args) {
+					notes = args[i]
+				}
+			}
+		}
+		params := map[string]string{"title": title}
+		if category != "" {
+			params["category"] = category
+		}
+		if notes != "" {
+			params["notes"] = notes
+		}
+		raw, err := client.Call(ctx, "yakos.kanban.add", params)
+		if err != nil {
+			return "", false // fall through to in-process
+		}
+		var result struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return "", false
+		}
+		return fmt.Sprintf("kanban: added: %s — %s (category: %s)", result.ID, title, func() string {
+			if category == "" {
+				return "other"
+			}
+			return category
+		}()), true
+
+	case "move":
+		if len(args) < 3 {
+			return "", false
+		}
+		raw, err := client.Call(ctx, "yakos.kanban.move", map[string]string{"id": args[1], "to": args[2]})
+		if err != nil {
+			return "", false
+		}
+		var result struct {
+			OK bool `json:"ok"`
+		}
+		if err := json.Unmarshal(raw, &result); err != nil || !result.OK {
+			return "", false
+		}
+		return fmt.Sprintf("kanban: moved %s to %s", args[1], args[2]), true
+
+	case "done":
+		if len(args) < 2 {
+			return "", false
+		}
+		raw, err := client.Call(ctx, "yakos.kanban.done", map[string]string{"id": args[1]})
+		if err != nil {
+			return "", false
+		}
+		var result struct {
+			OK bool `json:"ok"`
+		}
+		if err := json.Unmarshal(raw, &result); err != nil || !result.OK {
+			return "", false
+		}
+		return fmt.Sprintf("kanban: %s moved to DONE", args[1]), true
+	}
+	return "", false
 }
