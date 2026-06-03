@@ -734,8 +734,9 @@ func TestPerfTokenFilePath(t *testing.T) {
 func TestDefaultWorkDir(t *testing.T) {
 	root := "/some/workspace"
 	dir := perfdash.DefaultWorkDir(root)
-	if !strings.HasSuffix(dir, "work/current") {
-		t.Errorf("DefaultWorkDir=%q; should end in work/current", dir)
+	want := filepath.FromSlash("work/current")
+	if !strings.HasSuffix(dir, want) {
+		t.Errorf("DefaultWorkDir=%q; should end in %q", dir, want)
 	}
 }
 
