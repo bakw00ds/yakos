@@ -24,6 +24,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/bakw00ds/yakos/internal/archive"
+	"github.com/bakw00ds/yakos/internal/auth"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/doctor"
@@ -62,6 +63,7 @@ var portedCommands = []portedCommand{
 	{Name: "start", Since: "0.49.0", Notes: "full feature parity with cli/lib/start.sh; preflight banner + audit-log; exec deferred to runtime CLI; --dry-run/--print-agents/--safe/--allow-root/passthrough flags supported"},
 	{Name: "update", Since: "0.50.0", Notes: "full feature parity with cli/lib/update.sh; git pull --ff-only + per-project refresh via refresh.CollectProjects + refresh.Run; --allow-non-ff/--all/--dry-run supported"},
 	{Name: "quickstart", Since: "0.51.0", Notes: "full feature parity with cli/lib/quickstart.sh; composes install+init+start; idempotent; --runtime/--multi-dev/--safe/--allow-root/--dry-run flags"},
+	{Name: "auth", Since: "0.52.0", Notes: "full feature parity with cli/lib/auth.sh; status/login/logout/set-default; OS keychain via go-keyring; graceful degradation on headless Linux"},
 }
 
 type portedCommand struct {
@@ -133,6 +135,8 @@ func main() {
 		runUpdate(yakosRoot, args[1:])
 	case "quickstart":
 		runQuickstart(yakosRoot, args[1:])
+	case "auth":
+		runAuth(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -2088,6 +2092,80 @@ func runQuickstart(yakosRoot string, args []string) {
 
 	if _, err := quickstart.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "quickstart: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runAuth implements `yakos auth` natively in Go.
+//
+// Usage mirrors cli/lib/auth.sh exactly:
+//
+//	yakos auth status [<runtime>]      — report cli + auth state
+//	yakos auth login <runtime>         — print login instructions / exec runtime login
+//	yakos auth logout <runtime>        — best-effort credential removal
+//	yakos auth set-default <runtime>   — persist default runtime
+//	yakos auth --help                  — print help and exit 0
+//
+// OS keychain access uses github.com/zalando/go-keyring, which abstracts
+// macOS Keychain Services, Linux secret-service (D-Bus), and Windows DPAPI.
+// Keyring access degrades gracefully when the service is unavailable.
+func runAuth(args []string) {
+	sub := ""
+	target := ""
+	asDefault := false
+	doAll := false
+
+	if len(args) > 0 {
+		switch args[0] {
+		case "-h", "--help", "help":
+			auth.PrintHelp(os.Stdout)
+			os.Exit(0)
+		default:
+			sub = args[0]
+			args = args[1:]
+		}
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			auth.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case arg == "--as-default":
+			asDefault = true
+		case arg == "--all":
+			doAll = true
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "auth %s: unknown flag %q\n", sub, arg)
+			os.Exit(1)
+		default:
+			if target == "" {
+				target = arg
+			} else {
+				fmt.Fprintf(os.Stderr, "auth %s: too many positional args\n", sub)
+				os.Exit(1)
+			}
+		}
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := auth.Config{
+		HomeDir:    home,
+		Subcommand: sub,
+		Target:     target,
+		AsDefault:  asDefault,
+		All:        doAll,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	if _, err := auth.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "auth: %v\n", err)
 		os.Exit(1)
 	}
 }
