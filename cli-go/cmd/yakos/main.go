@@ -37,6 +37,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/team"
 	"github.com/bakw00ds/yakos/internal/uninstall"
+	"github.com/bakw00ds/yakos/internal/update"
 	"github.com/bakw00ds/yakos/internal/validate"
 	"github.com/bakw00ds/yakos/internal/version"
 )
@@ -58,6 +59,7 @@ var portedCommands = []portedCommand{
 	{Name: "install", Since: "0.47.0", Notes: "full feature parity with cli/lib/install.sh; --force/--dry-run supported; per-file symlinks into ~/.claude/{agents,skills,rules,playbooks}; launcher symlink at ~/.local/bin/yakos; settings.json env merge"},
 	{Name: "uninstall", Since: "0.48.0", Notes: "full feature parity with cli/lib/uninstall.sh; removes YakOS-owned symlinks + launcher + pointer; --restore-settings/--root/--dry-run; partial-uninstall log+continue"},
 	{Name: "start", Since: "0.49.0", Notes: "full feature parity with cli/lib/start.sh; preflight banner + audit-log; exec deferred to runtime CLI; --dry-run/--print-agents/--safe/--allow-root/passthrough flags supported"},
+	{Name: "update", Since: "0.50.0", Notes: "full feature parity with cli/lib/update.sh; git pull --ff-only + per-project refresh via refresh.CollectProjects + refresh.Run; --allow-non-ff/--all/--dry-run supported"},
 }
 
 type portedCommand struct {
@@ -125,6 +127,8 @@ func main() {
 		runUninstall(args[1:])
 	case "start":
 		runStart(yakosRoot, args[1:])
+	case "update":
+		runUpdate(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -1922,6 +1926,70 @@ func runStart(yakosRoot string, args []string) {
 
 	if _, err := start.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "start: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runUpdate implements `yakos update` natively in Go.
+//
+// Usage mirrors cli/lib/update.sh exactly:
+//
+//	yakos update                 — git pull --ff-only in YAKOS_ROOT
+//	yakos update --allow-non-ff  — allow non-fast-forward pulls
+//	yakos update --all           — pull + refresh all deployed projects
+//	yakos update --dry-run       — report what would happen without pulling
+//	yakos update --help          — print help and exit 0
+//
+// YAKOS_ROOT must be set in the environment (set by the bash entry-point;
+// also resolved from the binary location by main()).
+func runUpdate(yakosRoot string, args []string) {
+	allowNonFF := false
+	allProjects := false
+	dryRun := false
+
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help":
+			update.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case "--allow-non-ff":
+			allowNonFF = true
+		case "--all":
+			allProjects = true
+		case "--dry-run":
+			dryRun = true
+		default:
+			fmt.Fprintf(os.Stderr, "update: unknown argument %q (try --help)\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	// Resolve YAKOS_ROOT from env (bash entry-point may set it).
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+	if yakosRoot == "" {
+		fmt.Fprintln(os.Stderr, "update: YAKOS_ROOT is not set")
+		os.Exit(1)
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := update.Config{
+		YakosRoot:   yakosRoot,
+		HomeDir:     home,
+		AllowNonFF:  allowNonFF,
+		AllProjects: allProjects,
+		DryRun:      dryRun,
+		Writer:      os.Stdout,
+		ErrWriter:   os.Stderr,
+	}
+
+	if _, err := update.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "update: %v\n", err)
 		os.Exit(1)
 	}
 }
