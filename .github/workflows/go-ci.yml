@@ -88,7 +88,10 @@ jobs:
         env:
           YAKOS_IMPL: go
         run: |
-          $out = .\bin\yakos.exe --version
+          # Flatten to single string — multi-line output makes PowerShell
+          # treat $out as an array, and `-notmatch` against an array returns
+          # the non-matching elements (truthy when any line doesn't match).
+          $out = (.\bin\yakos.exe --version) -join "`n"
           Write-Host "version output: $out"
           if ($out -notmatch '\(go\)') {
             Write-Error "Expected (go) suffix in version output"
@@ -114,10 +117,15 @@ jobs:
         env:
           YAKOS_IMPL: go
         run: |
-          $out = .\bin\yakos.exe go-port-status
+          # Flatten to single string — see --version step for rationale.
+          $out = (.\bin\yakos.exe go-port-status) -join "`n"
           Write-Host "$out"
           if ($out -notmatch 'subcommand migration tracker') {
             Write-Error "Expected migration tracker header"
+            exit 1
+          }
+          if ($out -notmatch 'Ported: \d+') {
+            Write-Error "Expected ported count line"
             exit 1
           }
 
