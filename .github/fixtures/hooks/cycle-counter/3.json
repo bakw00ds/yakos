@@ -1,0 +1,9 @@
+{
+  "event": "UserPromptSubmit",
+  "tool": "",
+  "payload": {},
+  "env": {
+    "YAKOS_AGENT_ROLE": "specialist"
+  },
+  "work_dir": ""
+}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/hooks/runner"
@@ -58,7 +59,28 @@ func newErrorHook(name string) *mockHook {
 	}
 }
 
+// buildRunner builds a runner pre-pinned to YAKOS_HOOKS=go.
+// All pre-existing tests exercise Tier-0 (Go-native) behaviour; pinning
+// to "go" mode preserves their semantics independently of the real env var.
 func buildRunner(t *testing.T) (r *runner.Runner, hooksDir, userHooksDir, workDir string) {
+	t.Helper()
+	return buildRunnerMode(t, "go")
+}
+
+// goModeEnvLookup returns an EnvLookup that pins YAKOS_HOOKS=go.
+// Inject into runner.Runner.EnvLookup for tests that exercise Tier-0 / Starlark.
+func goModeEnvLookup() func(string) string {
+	return func(key string) string {
+		if key == "YAKOS_HOOKS" {
+			return "go"
+		}
+		return ""
+	}
+}
+
+// buildRunnerMode builds a runner with an explicit YAKOS_HOOKS mode injected
+// via EnvLookup. mode must be "go", "bash", or "hybrid".
+func buildRunnerMode(t *testing.T, mode string) (r *runner.Runner, hooksDir, userHooksDir, workDir string) {
 	t.Helper()
 	tmp := t.TempDir()
 	hooksDir = filepath.Join(tmp, "lib", "hooks")
@@ -71,6 +93,13 @@ func buildRunner(t *testing.T) (r *runner.Runner, hooksDir, userHooksDir, workDi
 	}
 	var w bytes.Buffer
 	r = runner.New(hooksDir, userHooksDir, workDir, nil, &w)
+	// Inject a deterministic env lookup so tests don't depend on real env state.
+	r.EnvLookup = func(key string) string {
+		if key == "YAKOS_HOOKS" {
+			return mode
+		}
+		return ""
+	}
 	return r, hooksDir, userHooksDir, workDir
 }
 
@@ -206,6 +235,13 @@ func TestRunner_BashSkipped_WhenNoBash(t *testing.T) {
 	var diagBuf bytes.Buffer
 	// Force-construct a runner with bash disabled by pointing to a nonexistent bash.
 	r := runner.NewWithBashPath(hooksDir, userHooksDir, workDir, nil, &diagBuf, "", false)
+	// Pin to bash mode so the .sh path is evaluated (not bypassed by go mode).
+	r.EnvLookup = func(key string) string {
+		if key == "YAKOS_HOOKS" {
+			return "bash"
+		}
+		return ""
+	}
 
 	h := newPassHook("bash-skip-hook")
 	shPath := filepath.Join(userHooksDir, "bash-skip-hook.sh")
@@ -236,6 +272,12 @@ func TestRunner_BashSkipped_Diagnostic_MentionsHookPath(t *testing.T) {
 
 	var diagBuf bytes.Buffer
 	r := runner.NewWithBashPath(hooksDir, userHooksDir, workDir, nil, &diagBuf, "", false)
+	r.EnvLookup = func(key string) string {
+		if key == "YAKOS_HOOKS" {
+			return "bash"
+		}
+		return ""
+	}
 	h := newPassHook("diag-hook")
 	shPath := filepath.Join(userHooksDir, "diag-hook.sh")
 	_ = os.WriteFile(shPath, []byte("#!/usr/bin/env bash\necho hi\n"), 0755)
@@ -423,6 +465,7 @@ func TestRunner_StarReadFile_Sandbox(t *testing.T) {
 
 	var w bytes.Buffer
 	r := runner.New(hooksDir, userHooksDir, workDir, nil, &w)
+	r.EnvLookup = goModeEnvLookup()
 	h := newPassHook("read-sandbox")
 
 	starPath := filepath.Join(hooksDir, "read-sandbox.star")
@@ -458,6 +501,7 @@ func TestRunner_StarReadFile_OutsideSandbox_Fails(t *testing.T) {
 
 	var w bytes.Buffer
 	r := runner.New(hooksDir, userHooksDir, workDir, nil, &w)
+	r.EnvLookup = goModeEnvLookup()
 	h := newPassHook("outside-sandbox")
 
 	starPath := filepath.Join(hooksDir, "outside-sandbox.star")
@@ -534,7 +578,8 @@ func TestRunner_Tier2_ExitCode2_Blocks(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available on PATH")
 	}
-	r, _, userHooksDir, _ := buildRunner(t)
+	// Use bash mode so Tier 2 is the active executor.
+	r, _, userHooksDir, _ := buildRunnerMode(t, "bash")
 	h := newPassHook("bash-block-hook")
 	shPath := filepath.Join(userHooksDir, "bash-block-hook.sh")
 	script := "#!/usr/bin/env bash\nexit 2\n"
@@ -574,6 +619,7 @@ func TestRunner_AllowPaths_PassedToStarlark(t *testing.T) {
 
 	var w bytes.Buffer
 	r := runner.New(hooksDir, userHooksDir, workDir, []string{allowDir}, &w)
+	r.EnvLookup = goModeEnvLookup()
 	h := newPassHook("allow-paths-test")
 	starPath := filepath.Join(hooksDir, "allow-paths-test.star")
 	script := fmt.Sprintf(`def on_event(ctx):
@@ -625,6 +671,7 @@ func TestRunner_StarWriteArtifact(t *testing.T) {
 	}
 	var w bytes.Buffer
 	r := runner.New(hooksDir, userHooksDir, workDir, nil, &w)
+	r.EnvLookup = goModeEnvLookup()
 	h := newPassHook("artifact-star")
 	starPath := filepath.Join(hooksDir, "artifact-star.star")
 	if err := os.WriteFile(starPath, []byte(`def on_event(ctx):
@@ -652,6 +699,7 @@ func TestRunner_StarInputAccessible(t *testing.T) {
 	}
 	var w bytes.Buffer
 	r := runner.New(hooksDir, userHooksDir, workDir, nil, &w)
+	r.EnvLookup = goModeEnvLookup()
 	h := newPassHook("input-access")
 	starPath := filepath.Join(hooksDir, "input-access.star")
 	if err := os.WriteFile(starPath, []byte(`def on_event(ctx):
@@ -718,5 +766,319 @@ def on_event(ctx):
 	}
 	if out.Artifacts["override-marker"] == nil {
 		t.Error("expected override-marker artifact from Starlark override")
+	}
+}
+
+// ---- YAKOS_HOOKS routing matrix tests ----------------------------------------
+// These tests exercise the three routing modes (go / bash / hybrid) via
+// the EnvLookup injection in buildRunnerMode.
+
+// TestRouting_GoMode_RunsTier0_NotBash verifies that YAKOS_HOOKS=go runs the
+// Go-native hook and bypasses the bash user-hook even when a .sh is present.
+func TestRouting_GoMode_RunsTier0_NotBash(t *testing.T) {
+	r, _, userHooksDir, _ := buildRunnerMode(t, "go")
+	called := false
+	h := &mockHook{
+		name: "go-mode-hook",
+		runFn: func(_ context.Context, _ hooktype.HookInput) (hooktype.HookOutput, error) {
+			called = true
+			return hooktype.HookOutput{ExitCode: 0, Stdout: []byte("tier0-ran")}, nil
+		},
+	}
+	// Write a .sh that would signal if bash ran.
+	shPath := filepath.Join(userHooksDir, "go-mode-hook.sh")
+	_ = os.WriteFile(shPath, []byte("#!/usr/bin/env bash\necho bash-ran\nexit 0\n"), 0755)
+
+	out, err := r.Run(context.Background(), h, makeInput("PreToolUse", "Edit"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !called {
+		t.Error("Tier-0 (Go) hook should have been called in go mode")
+	}
+	// Stdout from bash would be "bash-ran"; Tier-0 returns "tier0-ran".
+	// In go mode only Tier-0 stdout appears (bash not invoked).
+	if string(out.Stdout) != "tier0-ran" {
+		t.Errorf("expected 'tier0-ran' from Tier-0; got %q", string(out.Stdout))
+	}
+}
+
+// TestRouting_BashMode_SkipsTier0_RunsBash verifies that YAKOS_HOOKS=bash
+// (default) skips Tier 0 entirely and invokes the bash user-hook.
+func TestRouting_BashMode_SkipsTier0_RunsBash(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available on PATH")
+	}
+	r, _, userHooksDir, _ := buildRunnerMode(t, "bash")
+	tier0Called := false
+	h := &mockHook{
+		name: "bash-mode-hook",
+		runFn: func(_ context.Context, _ hooktype.HookInput) (hooktype.HookOutput, error) {
+			tier0Called = true
+			return hooktype.HookOutput{ExitCode: 0}, nil
+		},
+	}
+	shPath := filepath.Join(userHooksDir, "bash-mode-hook.sh")
+	_ = os.WriteFile(shPath, []byte("#!/usr/bin/env bash\nexit 0\n"), 0755)
+
+	_, err := r.Run(context.Background(), h, makeInput("PreToolUse", "Edit"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if tier0Called {
+		t.Error("Tier-0 (Go) should NOT have been called in bash mode")
+	}
+}
+
+// TestRouting_BashMode_NoShFile_ReturnsExitZero verifies that bash mode with
+// no .sh file present returns exit 0 (no-op) without error.
+func TestRouting_BashMode_NoShFile_ReturnsExitZero(t *testing.T) {
+	r, _, _, _ := buildRunnerMode(t, "bash")
+	h := newPassHook("bash-noop-hook")
+
+	out, err := r.Run(context.Background(), h, makeInput("PreToolUse", "Edit"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.ExitCode != 0 {
+		t.Errorf("expected ExitCode=0 for bash mode with no .sh; got %d", out.ExitCode)
+	}
+}
+
+// TestRouting_BashMode_NoBash_Skipped verifies that bash mode with a .sh
+// present but bash unavailable sets Skipped=true.
+func TestRouting_BashMode_NoBash_Skipped(t *testing.T) {
+	tmp := t.TempDir()
+	hooksDir := filepath.Join(tmp, "lib", "hooks")
+	userHooksDir := filepath.Join(tmp, "lib", "hooks-user")
+	workDir := filepath.Join(tmp, "work", "current")
+	for _, d := range []string{hooksDir, userHooksDir, workDir} {
+		_ = os.MkdirAll(d, 0755)
+	}
+	var diagBuf bytes.Buffer
+	r := runner.NewWithBashPath(hooksDir, userHooksDir, workDir, nil, &diagBuf, "", false)
+	r.EnvLookup = func(key string) string {
+		if key == "YAKOS_HOOKS" {
+			return "bash"
+		}
+		return ""
+	}
+	h := newPassHook("bash-nobash-hook")
+	shPath := filepath.Join(userHooksDir, "bash-nobash-hook.sh")
+	_ = os.WriteFile(shPath, []byte("#!/usr/bin/env bash\necho hi\n"), 0755)
+
+	out, err := r.Run(context.Background(), h, makeInput("PreToolUse", "Edit"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !out.Skipped {
+		t.Error("expected Skipped=true when bash unavailable in bash mode")
+	}
+}
+
+// TestRouting_HybridMode_RunsBoth verifies that YAKOS_HOOKS=hybrid fires both
+// Tier-0 and Tier-2 and returns Tier-0 output.
+func TestRouting_HybridMode_RunsBoth(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available on PATH")
+	}
+	r, _, userHooksDir, _ := buildRunnerMode(t, "hybrid")
+	tier0Called := false
+	h := &mockHook{
+		name: "hybrid-hook",
+		runFn: func(_ context.Context, _ hooktype.HookInput) (hooktype.HookOutput, error) {
+			tier0Called = true
+			return hooktype.HookOutput{ExitCode: 0, Stdout: []byte("go-out")}, nil
+		},
+	}
+	shPath := filepath.Join(userHooksDir, "hybrid-hook.sh")
+	_ = os.WriteFile(shPath, []byte("#!/usr/bin/env bash\nexit 0\n"), 0755)
+
+	out, err := r.Run(context.Background(), h, makeInput("PreToolUse", "Edit"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !tier0Called {
+		t.Error("Tier-0 should have been called in hybrid mode")
+	}
+	// Hybrid returns Go output.
+	if string(out.Stdout) != "go-out" {
+		t.Errorf("expected 'go-out' from hybrid mode; got %q", string(out.Stdout))
+	}
+}
+
+// TestRouting_HybridMode_DivergenceLogged verifies that when Go and bash
+// outputs differ, a parity-divergence log entry is written.
+func TestRouting_HybridMode_DivergenceLogged(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available on PATH")
+	}
+	r, _, userHooksDir, workDir := buildRunnerMode(t, "hybrid")
+	// Inject a fixed timestamp for determinism.
+	fixedTS := "2026-06-03T00:00:00Z"
+	r.NowFn = func() time.Time {
+		ts, _ := time.Parse(time.RFC3339, fixedTS)
+		return ts
+	}
+
+	h := &mockHook{
+		name: "diverge-hook",
+		runFn: func(_ context.Context, _ hooktype.HookInput) (hooktype.HookOutput, error) {
+			// Tier-0 exits 0.
+			return hooktype.HookOutput{ExitCode: 0}, nil
+		},
+	}
+	// Bash exits 1 — different from Go exit 0 → divergence.
+	shPath := filepath.Join(userHooksDir, "diverge-hook.sh")
+	_ = os.WriteFile(shPath, []byte("#!/usr/bin/env bash\nexit 1\n"), 0755)
+
+	_, err := r.Run(context.Background(), h, makeInput("PreToolUse", "Edit"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	logFile := filepath.Join(workDir, "logs", "hook-parity-divergence.ndjson")
+	data, readErr := os.ReadFile(logFile)
+	if readErr != nil {
+		t.Fatalf("parity divergence log not written: %v", readErr)
+	}
+	if !strings.Contains(string(data), "diverge-hook") {
+		t.Errorf("divergence log should mention hook name; got %q", string(data))
+	}
+	if !strings.Contains(string(data), fixedTS) {
+		t.Errorf("divergence log should contain fixed timestamp; got %q", string(data))
+	}
+}
+
+// TestRouting_HybridMode_NoDivergence_NoLog verifies that when Go and bash
+// outputs agree, no divergence log entry is written.
+func TestRouting_HybridMode_NoDivergence_NoLog(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available on PATH")
+	}
+	r, _, userHooksDir, workDir := buildRunnerMode(t, "hybrid")
+	h := &mockHook{
+		name: "nodiv-hook",
+		runFn: func(_ context.Context, _ hooktype.HookInput) (hooktype.HookOutput, error) {
+			return hooktype.HookOutput{ExitCode: 0}, nil
+		},
+	}
+	// Bash also exits 0 — same as Go → no divergence.
+	shPath := filepath.Join(userHooksDir, "nodiv-hook.sh")
+	_ = os.WriteFile(shPath, []byte("#!/usr/bin/env bash\nexit 0\n"), 0755)
+
+	_, err := r.Run(context.Background(), h, makeInput("PreToolUse", "Edit"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	logFile := filepath.Join(workDir, "logs", "hook-parity-divergence.ndjson")
+	if _, statErr := os.Stat(logFile); statErr == nil {
+		// File may exist from a previous run in the same temp dir; check it's empty or
+		// doesn't contain nodiv-hook.
+		data, _ := os.ReadFile(logFile)
+		if strings.Contains(string(data), "nodiv-hook") {
+			t.Errorf("should not log divergence when outputs agree; got %q", string(data))
+		}
+	}
+}
+
+// TestRouting_GoMode_DefaultWhenEnvEmpty verifies that an empty YAKOS_HOOKS
+// value falls back to "bash" mode (not "go" mode) per the spec.
+func TestRouting_DefaultMode_WhenEnvEmpty_IsBash(t *testing.T) {
+	tmp := t.TempDir()
+	hooksDir := filepath.Join(tmp, "lib", "hooks")
+	userHooksDir := filepath.Join(tmp, "lib", "hooks-user")
+	workDir := filepath.Join(tmp, "work", "current")
+	for _, d := range []string{hooksDir, userHooksDir, workDir} {
+		_ = os.MkdirAll(d, 0755)
+	}
+	var w bytes.Buffer
+	r := runner.New(hooksDir, userHooksDir, workDir, nil, &w)
+	// Inject empty env — should resolve to bash mode.
+	r.EnvLookup = func(_ string) string { return "" }
+
+	tier0Called := false
+	h := &mockHook{
+		name: "default-mode-hook",
+		runFn: func(_ context.Context, _ hooktype.HookInput) (hooktype.HookOutput, error) {
+			tier0Called = true
+			return hooktype.HookOutput{ExitCode: 0}, nil
+		},
+	}
+	// No .sh file present.
+	_, err := r.Run(context.Background(), h, makeInput("PreToolUse", "Edit"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if tier0Called {
+		t.Error("default mode (empty YAKOS_HOOKS) should be bash — Tier-0 must NOT be called")
+	}
+}
+
+// TestRouting_UnknownMode_FallsBackToBash verifies that an unknown YAKOS_HOOKS
+// value falls back to bash mode rather than panicking.
+func TestRouting_UnknownMode_FallsBackToBash(t *testing.T) {
+	tmp := t.TempDir()
+	hooksDir := filepath.Join(tmp, "lib", "hooks")
+	userHooksDir := filepath.Join(tmp, "lib", "hooks-user")
+	workDir := filepath.Join(tmp, "work", "current")
+	for _, d := range []string{hooksDir, userHooksDir, workDir} {
+		_ = os.MkdirAll(d, 0755)
+	}
+	var w bytes.Buffer
+	r := runner.New(hooksDir, userHooksDir, workDir, nil, &w)
+	r.EnvLookup = func(key string) string {
+		if key == "YAKOS_HOOKS" {
+			return "unknown-value"
+		}
+		return ""
+	}
+	h := newPassHook("unknown-mode-hook")
+	out, err := r.Run(context.Background(), h, makeInput("PreToolUse", "Edit"))
+	if err != nil {
+		t.Fatalf("Run should not error on unknown mode: %v", err)
+	}
+	// Bash mode with no .sh → exit 0 no-op.
+	if out.ExitCode != 0 {
+		t.Errorf("expected exit 0; got %d", out.ExitCode)
+	}
+}
+
+// TestRouting_GoMode_BlockPropagates verifies that Tier-0 ExitCode=2 in go
+// mode short-circuits without attempting bash.
+func TestRouting_GoMode_BlockPropagates(t *testing.T) {
+	r, _, userHooksDir, _ := buildRunnerMode(t, "go")
+	h := newBlockHook("go-block")
+	// Even with a .sh file present, bash must not run.
+	shPath := filepath.Join(userHooksDir, "go-block.sh")
+	_ = os.WriteFile(shPath, []byte("#!/usr/bin/env bash\necho bash-ran\nexit 0\n"), 0755)
+
+	out, err := r.Run(context.Background(), h, makeInput("PreToolUse", "Edit"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.ExitCode != 2 {
+		t.Errorf("expected ExitCode=2 from block; got %d", out.ExitCode)
+	}
+}
+
+// TestRouting_HybridMode_GoFailure_ReturnsBashOutput verifies that when
+// Tier-0 fails in hybrid mode the runner returns the bash output.
+func TestRouting_HybridMode_GoFailure_ReturnsBashOutput(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available on PATH")
+	}
+	r, _, userHooksDir, _ := buildRunnerMode(t, "hybrid")
+	h := newErrorHook("hybrid-go-fail")
+	// Bash exits 0 — should be returned as fallback.
+	shPath := filepath.Join(userHooksDir, "hybrid-go-fail.sh")
+	_ = os.WriteFile(shPath, []byte("#!/usr/bin/env bash\nexit 0\n"), 0755)
+
+	out, err := r.Run(context.Background(), h, makeInput("PreToolUse", "Edit"))
+	// Hybrid returns bash output when Go fails; err may be nil (bash succeeded).
+	_ = err
+	if out.ExitCode != 0 {
+		t.Errorf("expected bash fallback exit 0; got %d", out.ExitCode)
 	}
 }

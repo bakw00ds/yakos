@@ -1,0 +1,10 @@
+{
+  "event": "PostToolUse",
+  "tool": "",
+  "payload": {},
+  "env": {
+    "CLAUDE_SESSION_ID": "test-session-002",
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

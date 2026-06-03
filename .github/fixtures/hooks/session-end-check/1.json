@@ -1,0 +1,9 @@
+{
+  "event": "PostToolUse",
+  "tool": "",
+  "payload": {},
+  "env": {
+    "CLAUDE_SESSION_ID": "test-session-001"
+  },
+  "work_dir": ""
+}
