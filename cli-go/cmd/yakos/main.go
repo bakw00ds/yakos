@@ -20,13 +20,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"net/http"
 
 	"github.com/bakw00ds/yakos/internal/agent"
+	"github.com/bakw00ds/yakos/internal/telemetry"
 	"github.com/bakw00ds/yakos/internal/archive"
 	internalperfdash "github.com/bakw00ds/yakos/internal/perfdash"
 	internalserve "github.com/bakw00ds/yakos/internal/serve"
@@ -118,6 +121,7 @@ var portedCommands = []portedCommand{
 	{Name: "model-routing", Since: "0.72.0", Notes: "full feature parity with cli/lib/model-routing.sh (1035 LOC bash, rank 36); eval/list/show/promote/reject/history subcommands; Wilson 95% CI lower bound; per-run + weekly cost guards; anti-self-congratulation guard; backup+atomic frontmatter rewrite; injectable DispatchFn+JudgeFn+ValidateFn for tests"},
 	{Name: "hooks", Since: "0.73.0", Notes: "full feature parity with cli/lib/hooks-install.sh (rank 39); install/status subcommands; codex/gemini/agy hook config generation; path-allowlist.json → codex permissions translation; Decision Q9: hook bodies remain bash"},
 	{Name: "kanban serve", Since: "0.73.0", Notes: "kanban serve/status/stop (rank 41 complete); net/http stdlib server; //go:embed serve_ui.html; mutex-serialised mutations; DNS-rebinding Host header check; 127.0.0.1 default bind; no python3 dependency"},
+	{Name: "telemetry", Since: "0.74.0", Notes: "opt-in anonymised telemetry (ideas rank 10); enable/disable/status/set-endpoint/purge/show sub-subcommands; default off; no PII; local NDJSON log at ~/.yakos-state/telemetry.ndjson; operator-configured endpoint only; fail-silent shipper"},
 }
 
 type portedCommand struct {
@@ -137,6 +141,22 @@ func main() {
 	yakosRoot := filepath.Dir(filepath.Dir(exe))
 
 	args := os.Args[1:]
+
+	// Telemetry: record this invocation when main() returns.
+	// The call is fail-silent and costs ~1ms when telemetry is off.
+	// NOTE: subcommands that call os.Exit() bypass this defer.  That is
+	// intentional — telemetry is best-effort and must never block the CLI.
+	// The duration captured here therefore reflects only commands that return
+	// normally (e.g. help, go-port-status).  Error-path invocations that call
+	// os.Exit are not captured, which is an acceptable trade-off.
+	telemetryStartNano := time.Now().UnixNano()
+	telemetryHome := os.Getenv("HOME")
+	if telemetryHome == "" {
+		telemetryHome = "/tmp"
+	}
+	defer func() {
+		recordInvocation(telemetryHome, yakosRoot, args, telemetryStartNano)
+	}()
 
 	// YAKOS_IMPL selects the active implementation.
 	// Unset or "bash" → proxy every invocation to bash yakos transparently.
@@ -246,6 +266,8 @@ func main() {
 		runServe(yakosRoot, args[1:])
 	case "events":
 		runEvents(args[1:])
+	case "telemetry":
+		runTelemetry(args[1:])
 	default:
 		// YAKOS_DAEMON routing: if the daemon is running and YAKOS_DAEMON=on|auto,
 		// route this subcommand through the JSON-RPC client instead of in-process.
@@ -5646,4 +5668,90 @@ func routeKanbanViaDaemon(client *jsonrpc.Client, args []string) (string, bool) 
 		return fmt.Sprintf("kanban: %s moved to DONE", args[1]), true
 	}
 	return "", false
+}
+
+// ---- telemetry instrumentation ----------------------------------------------
+
+// currentGOOS returns runtime.GOOS.  Thin wrapper so the goruntime alias is
+// used only in this section and does not interfere with the `runtime` package
+// imported as the yakos internal/runtime package above.
+func currentGOOS() string { return goruntime.GOOS }
+
+// currentGOARCH returns runtime.GOARCH.
+func currentGOARCH() string { return goruntime.GOARCH }
+
+// recordInvocation builds and records a telemetry Event for the current CLI
+// invocation.  It is called from the deferred closure in main().
+// It is fail-silent: any error is swallowed.
+// startNano is the result of time.Now().UnixNano() captured before dispatch.
+func recordInvocation(home, yakosRoot string, args []string, startNano int64) {
+	endTime := time.Now()
+	durationMS := (endTime.UnixNano() - startNano) / 1e6
+	if durationMS < 0 {
+		durationMS = 0
+	}
+
+	cmd := ""
+	sub := ""
+	if len(args) > 0 {
+		cmd = args[0]
+	}
+	if len(args) > 1 && !strings.HasPrefix(args[1], "-") {
+		// Only record the second-level subcommand when it is not a flag.
+		sub = args[1]
+	}
+
+	v := "unknown"
+	if vv, err := version.Read(yakosRoot); err == nil {
+		v = vv
+	}
+
+	ev := telemetry.Event{
+		TS:           endTime.UTC(),
+		YakosVersion: v,
+		OS:           currentGOOS(),
+		Arch:         currentGOARCH(),
+		Command:      cmd,
+		Subcommand:   sub,
+		ExitCode:     0, // best-effort; subcommand runners call os.Exit directly
+		DurationMS:   durationMS,
+		AgentCount:   0,
+		Runtime:      nil,
+		SessionHash:  telemetry.SessionHash(),
+	}
+
+	telemetry.Record(home, ev)
+}
+
+// runTelemetry implements `yakos telemetry` natively in Go.
+//
+// Usage:
+//
+//	yakos telemetry enable [--endpoint URL]   — enable recording
+//	yakos telemetry disable                   — disable recording
+//	yakos telemetry status                    — print enabled?, endpoint, counts
+//	yakos telemetry set-endpoint <url>        — set/change endpoint
+//	yakos telemetry purge                     — delete local NDJSON log
+//	yakos telemetry show [--limit N]          — print last N records
+//	yakos telemetry --help                    — print help
+//
+// See cli-go/internal/telemetry/README.md for schema + privacy notes.
+func runTelemetry(args []string) {
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg, err := telemetry.ParseArgs(args, home)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "telemetry: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.Writer = os.Stdout
+	cfg.ErrWriter = os.Stderr
+
+	if _, err := telemetry.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "telemetry: %v\n", err)
+		os.Exit(1)
+	}
 }
