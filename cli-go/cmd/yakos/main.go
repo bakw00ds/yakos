@@ -35,6 +35,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/team"
+	"github.com/bakw00ds/yakos/internal/uninstall"
 	"github.com/bakw00ds/yakos/internal/validate"
 	"github.com/bakw00ds/yakos/internal/version"
 )
@@ -54,6 +55,7 @@ var portedCommands = []portedCommand{
 	{Name: "archive", Since: "0.45.0", Notes: "full feature parity with cli/lib/archive.sh; worktree cleanup deferred (manual, v0.1)"},
 	{Name: "init", Since: "0.46.0", Notes: "full feature parity with cli/lib/init.sh; hook copy advisory printed (bash refresh handles hooks); --with-gate/--multi-dev advisory only in Phase 1"},
 	{Name: "install", Since: "0.47.0", Notes: "full feature parity with cli/lib/install.sh; --force/--dry-run supported; per-file symlinks into ~/.claude/{agents,skills,rules,playbooks}; launcher symlink at ~/.local/bin/yakos; settings.json env merge"},
+	{Name: "uninstall", Since: "0.48.0", Notes: "full feature parity with cli/lib/uninstall.sh; removes YakOS-owned symlinks + launcher + pointer; --restore-settings/--root/--dry-run; partial-uninstall log+continue"},
 }
 
 type portedCommand struct {
@@ -117,6 +119,8 @@ func main() {
 		runInit(args[1:])
 	case "install":
 		runInstall(yakosRoot, args[1:])
+	case "uninstall":
+		runUninstall(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -1699,6 +1703,70 @@ func runInstall(yakosRoot string, args []string) {
 
 	if _, err := install.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "install: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runUninstall implements `yakos uninstall` natively in Go.
+//
+// Usage mirrors cli/lib/uninstall.sh exactly:
+//
+//	yakos uninstall [--restore-settings] [--root <path>] [--dry-run]
+//	yakos uninstall --help
+//
+// Removes per-file symlinks under ~/.claude/{agents,skills,rules,playbooks}/
+// that point into the YakOS repo. Removes the managed launcher symlink recorded
+// in ~/.yakos-state/install-manifest. Removes ~/.yakos and the manifest.
+// Handles settings.json according to the created-marker and --restore-settings.
+//
+// YAKOS_ROOT is not needed by uninstall (it reads ~/.yakos instead). The --root
+// flag overrides the pointer file, mirroring the bash --root flag.
+func runUninstall(args []string) {
+	restoreSettings := false
+	explicitRoot := ""
+	dryRun := false
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			uninstall.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case arg == "--restore-settings":
+			restoreSettings = true
+		case arg == "--dry-run":
+			dryRun = true
+		case arg == "--root":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "uninstall: --root requires a path argument")
+				os.Exit(1)
+			}
+			explicitRoot = args[i]
+		case len(arg) > 7 && arg[:7] == "--root=":
+			explicitRoot = arg[7:]
+		default:
+			fmt.Fprintf(os.Stderr, "uninstall: unknown argument %q (try --help)\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := uninstall.Config{
+		HomeDir:         home,
+		ExplicitRoot:    explicitRoot,
+		RestoreSettings: restoreSettings,
+		DryRun:          dryRun,
+		Writer:          os.Stdout,
+		ErrWriter:       os.Stderr,
+	}
+
+	if _, err := uninstall.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "uninstall: %v\n", err)
 		os.Exit(1)
 	}
 }
