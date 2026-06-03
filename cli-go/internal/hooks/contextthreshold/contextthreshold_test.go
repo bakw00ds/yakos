@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,16 +64,13 @@ func itoa(n int) string {
 // writeClaudeTranscript creates a fake transcript file to drive the probe.
 func writeClaudeTranscript(t *testing.T, homeDir, projectDir, sessionID string, sizeBytes int) {
 	t.Helper()
-	// Claude encodes project path: strip leading /, replace / with -.
-	project := projectDir
-	if len(project) > 0 && project[0] == '/' {
-		project = project[1:]
-	}
-	for i := 0; i < len(project); i++ {
-		if project[i] == '/' {
-			project = project[:i] + "-" + project[i+1:]
-		}
-	}
+	// Claude encodes project path: normalise to forward slashes, strip leading /,
+	// replace / with -, replace : (Windows drive separator) with -.
+	// This must match encodeProjectPath in contextthreshold.go exactly.
+	project := filepath.ToSlash(projectDir)
+	project = strings.ReplaceAll(project, ":", "-")
+	project = strings.TrimLeft(project, "/")
+	project = strings.ReplaceAll(project, "/", "-")
 	dir := filepath.Join(homeDir, ".claude", "projects", project)
 	_ = os.MkdirAll(dir, 0755)
 	data := make([]byte, sizeBytes)

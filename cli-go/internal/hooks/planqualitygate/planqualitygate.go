@@ -193,7 +193,7 @@ func (h *Hook) runPostToolUse(out hooktype.HookOutput, in hooktype.HookInput) (h
 	if filePath == "" {
 		filePath = stringField(in.Payload, "file_path")
 	}
-	if !strings.HasSuffix(filePath, "/work/current/plan.md") {
+	if !strings.HasSuffix(filePath, filepath.FromSlash("/work/current/plan.md")) {
 		return out, nil
 	}
 

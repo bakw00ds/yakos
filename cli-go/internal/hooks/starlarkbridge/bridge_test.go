@@ -11,6 +11,14 @@ import (
 	"github.com/bakw00ds/yakos/internal/hooks/starlarkbridge"
 )
 
+// toStarlarkPath converts an OS-native path to forward-slash form suitable for
+// embedding in a Starlark string literal. Starlark string parsing follows Python
+// escape rules, so a Windows path like C:\Users\... would produce invalid escape
+// sequences (\U, \R, …) unless converted to forward slashes first.
+func toStarlarkPath(p string) string {
+	return filepath.ToSlash(p)
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 func writeStar(t *testing.T, dir, name, content string) string {
@@ -157,7 +165,7 @@ func TestBridge_Apply_ReadFile_OutsideSandbox_Fails(t *testing.T) {
 	_ = os.WriteFile(outsideFile, []byte("secret"), 0644)
 
 	script := writeStar(t, sandboxDir, "outside.star", `def on_event(ctx):
-    data = ctx.read_file("`+outsideFile+`")
+    data = ctx.read_file("`+toStarlarkPath(outsideFile)+`")
 `)
 	b, err := starlarkbridge.New(script, []string{sandboxDir})
 	if err != nil {
@@ -374,7 +382,7 @@ func TestBridge_Apply_SandboxAbsolutePath_Allowed(t *testing.T) {
 	_ = os.WriteFile(dataFile, []byte("yes"), 0644)
 
 	script := writeStar(t, tmp, "abs.star", `def on_event(ctx):
-    data = ctx.read_file("`+dataFile+`")
+    data = ctx.read_file("`+toStarlarkPath(dataFile)+`")
     ctx.write_artifact("data", data)
 `)
 	b, err := starlarkbridge.New(script, []string{tmp})
@@ -400,7 +408,7 @@ func TestBridge_Apply_MultipleSandboxPaths(t *testing.T) {
 	_ = os.WriteFile(file2, []byte("from-s2"), 0644)
 
 	script := writeStar(t, sandbox1, "multi-sandbox.star", `def on_event(ctx):
-    data = ctx.read_file("`+file2+`")
+    data = ctx.read_file("`+toStarlarkPath(file2)+`")
     ctx.write_artifact("got", data)
 `)
 	b, err := starlarkbridge.New(script, []string{sandbox1, sandbox2})

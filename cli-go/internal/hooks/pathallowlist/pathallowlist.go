@@ -87,7 +87,8 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	// Make path repo-relative for matching.
 	projectDir := h.resolveProjectDir(in)
 	relFile := filePath
-	if projectDir != "" && strings.HasPrefix(filePath, projectDir+"/") {
+	sep := string(filepath.Separator)
+	if projectDir != "" && strings.HasPrefix(filePath, projectDir+sep) {
 		relFile = filePath[len(projectDir)+1:]
 	}
 

@@ -428,7 +428,8 @@ func (h *Hook) toRelative(filePath string, in hooktype.HookInput) string {
 	if projectDir == "" {
 		projectDir = in.Env["CLAUDE_PROJECT_DIR"]
 	}
-	if projectDir != "" && strings.HasPrefix(filePath, projectDir+"/") {
+	sep := string(filepath.Separator)
+	if projectDir != "" && strings.HasPrefix(filePath, projectDir+sep) {
 		return filePath[len(projectDir)+1:]
 	}
 	return filePath
