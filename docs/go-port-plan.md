@@ -110,6 +110,30 @@ Each criterion is testable (a reader can say yes/no without ambiguity):
 
 Scheduled to start when Phase 1 has been in operator hands ≥3 weeks with no rollback. Approx. 6–10 weeks.
 
+### Phase 2 — foundation shipped (2026-06-03)
+
+The following packages were delivered as the Phase 2 foundation dispatch:
+
+| Package | Role | Tests |
+|---------|------|-------|
+| `cli-go/internal/jsonrpc/` | JSON-RPC 2.0 server + client over Unix socket / named pipe | 20 unit tests (round-trip, error mapping, malformed input, concurrent connections) |
+| `cli-go/internal/serve/` | Daemon process: PID file, signal handling, method registry | 12 unit tests (harness over net.Pipe pair) |
+| `cli-go/pkg/dispatch/` | Public library extract of internal/dispatch | Example test; stable-API wrapper |
+| `yakos serve` subcommand | CLI entry-point for the daemon | Wired into cmd/yakos/main.go |
+
+RPC methods registered (proves the surface):
+- `yakos.version` — returns version string from VERSION file
+- `yakos.kanban.summary` — parses kanban.md and returns column counts
+- `yakos.dispatch.run` — wraps internal/dispatch.Run
+
+Decision Q1 honored: `YAKOS_DAEMON=off` by default. `YAKOS_DAEMON=auto` silently
+falls through to in-process if no daemon is reachable. `YAKOS_DAEMON=on` prints a
+WARN and falls through. No surprise daemons.
+
+Platform split: Unix socket on Linux/macOS (`//go:build !windows`); named-pipe
+scaffold on Windows (`//go:build windows`) — true named pipe via go-winio is a
+follow-up PR. Windows cross-compile confirmed via `GOOS=windows GOARCH=amd64 go build`.
+
 - **`yakos serve` daemon** — one persistent process per dev session. Provides a Unix socket (`$XDG_RUNTIME_DIR/yakos.sock`) for the CLI to talk to instead of cold-starting. Wins: sub-ms subcommand response, in-memory kanban, single source of truth for dispatch-log writes. Sizing: M (~40h). Decision points: socket vs TCP on Windows? recommend named pipes.
 - **WebSocket multi-dev coordination** — daemon exposes WS endpoint for real-time kanban + presence ("alice is in IN PROGRESS on feat/billing") + cross-dev event bus. Sizing: L (~80h). Depends on daemon. Decision points: auth model for cross-machine (mTLS? shared token?).
 - **Native MCP server** — daemon exposes MCP tools: `yakos.dispatch`, `yakos.kanban.{add,move,done,list}`, `yakos.refresh`, `yakos.supervise`. Eliminates shell-out from MCP clients. Sizing: M (~50h). Depends on daemon. Decision points: MCP transport (stdio vs SSE vs streamable HTTP); recommend stdio + streamable HTTP.

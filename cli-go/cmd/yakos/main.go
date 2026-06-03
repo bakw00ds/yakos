@@ -26,6 +26,8 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/agent"
 	"github.com/bakw00ds/yakos/internal/archive"
+	internalserve "github.com/bakw00ds/yakos/internal/serve"
+	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/auth"
 	"github.com/bakw00ds/yakos/internal/checkpoint"
 	"github.com/bakw00ds/yakos/internal/compact"
@@ -227,7 +229,16 @@ func main() {
 		runModelRouting(yakosRoot, args[1:])
 	case "hooks":
 		runHooks(args[1:])
+	case "serve":
+		runServe(yakosRoot, args[1:])
 	default:
+		// YAKOS_DAEMON routing: if the daemon is running and YAKOS_DAEMON=on|auto,
+		// route this subcommand through the JSON-RPC client instead of in-process.
+		// See internal/serve package for the daemon surface.
+		// This is resolved in routeViaDaemon; falls through to passthrough on miss.
+		if routed := maybeRouteToDaemon(yakosRoot, args); routed {
+			return
+		}
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
 	}
@@ -1317,6 +1328,8 @@ func runHooks(args []string) {
 		runHooksInstall(args[1:])
 	case "status":
 		runHooksStatus(args[1:])
+	case "lint":
+		runHooksLint(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "hooks: unknown subcommand %q (try --help)\n", args[0])
 		os.Exit(1)
@@ -1425,6 +1438,71 @@ func runHooksStatus(args []string) {
 	}
 	if _, err := hooksinstall.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "hooks: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runHooksLint(args []string) {
+	hooksDir := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--help", "-h":
+			fmt.Fprintln(os.Stdout, `yakos hooks lint [--hooks-dir <path>]
+
+Lint all .star files in the hooks directory.
+
+  --hooks-dir <path>   Directory containing .star files.
+                       Defaults to lib/hooks/ relative to YAKOS_ROOT.
+
+Checks performed:
+  - Syntax errors (parse + compile via go.starlark.net)
+  - override = True without on_event defined (always a no-op)
+  - Calls to ctx.X where X is not in the sandboxed API
+  - Unreachable code after return in on_event
+
+Exit codes:
+  0 — no errors (warnings may be present)
+  1 — one or more errors found`)
+			os.Exit(0)
+		case "--hooks-dir":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "hooks lint: --hooks-dir requires a path")
+				os.Exit(1)
+			}
+			hooksDir = args[i]
+		default:
+			if strings.HasPrefix(args[i], "--hooks-dir=") {
+				hooksDir = args[i][len("--hooks-dir="):]
+			} else {
+				fmt.Fprintf(os.Stderr, "hooks lint: unknown arg %q\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+
+	if hooksDir == "" {
+		// Default: lib/hooks/ relative to YAKOS_ROOT or binary location.
+		if envRoot := os.Getenv("YAKOS_ROOT"); envRoot != "" {
+			hooksDir = filepath.Join(envRoot, "lib", "hooks")
+		}
+	}
+	if hooksDir == "" {
+		fmt.Fprintln(os.Stderr, "hooks lint: --hooks-dir required (or set YAKOS_ROOT)")
+		os.Exit(1)
+	}
+
+	cfg := hooksinstall.LintConfig{
+		HooksDir:  hooksDir,
+		Writer:    os.Stdout,
+		ErrWriter: os.Stderr,
+	}
+	results, err := hooksinstall.RunLint(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hooks lint: %v\n", err)
+		os.Exit(1)
+	}
+	if results.ErrCount > 0 {
 		os.Exit(1)
 	}
 }
@@ -4899,4 +4977,211 @@ func exitWith(code int, err error) {
 		os.Exit(1)
 	}
 	os.Exit(code)
+}
+
+// ---- yakos serve ------------------------------------------------------------
+
+// runServe implements `yakos serve` — the Phase 2 daemon process.
+//
+// The daemon is OFF by default (YAKOS_DAEMON=off per decision Q1).
+// Operators start it explicitly:
+//
+//	yakos serve [--socket <path>] [--pidfile <path>] [--help]
+//
+// Flags:
+//
+//	--socket <path>   Override the default Unix socket / named pipe path.
+//	--pidfile <path>  Override the default PID file path.
+//	--detach          Print advisory (actual backgrounding is the operator's job).
+//	--help            Print help and exit 0.
+//
+// YAKOS_DAEMON mode is NOT changed by running this command; the operator sets
+// YAKOS_DAEMON=on or YAKOS_DAEMON=auto in their shell rc to route CLI calls
+// through the daemon.
+func runServe(yakosRoot string, args []string) {
+	socketPath := ""
+	pidFile := ""
+	detach := false
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			printServeHelp(os.Stdout)
+			os.Exit(0)
+		case "--socket":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "serve: --socket requires a path")
+				os.Exit(1)
+			}
+			socketPath = args[i]
+		case "--pidfile":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "serve: --pidfile requires a path")
+				os.Exit(1)
+			}
+			pidFile = args[i]
+		case "--detach":
+			detach = true
+		default:
+			if len(args[i]) > 9 && args[i][:9] == "--socket=" {
+				socketPath = args[i][9:]
+			} else if len(args[i]) > 10 && args[i][:10] == "--pidfile=" {
+				pidFile = args[i][10:]
+			} else {
+				fmt.Fprintf(os.Stderr, "serve: unknown flag %q (try --help)\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+
+	if detach {
+		fmt.Fprintln(os.Stderr, "serve: --detach advisory: use 'yakos serve &' to background the daemon in your shell")
+		fmt.Fprintln(os.Stderr, "serve: for persistent startup see docs/integrations/ (systemd / launchd / Task Scheduler)")
+	}
+
+	// Resolve workspace root from cwd (daemon is per-workspace).
+	workspaceRoot, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "serve: resolve cwd: %v\n", err)
+		os.Exit(1)
+	}
+
+	cfg := internalserve.Config{
+		WorkspaceRoot: workspaceRoot,
+		SocketPath:    socketPath,
+		PIDFile:       pidFile,
+		YakosRoot:     yakosRoot,
+	}
+
+	fmt.Fprintf(os.Stderr, "yakos serve: starting daemon for workspace %s\n", workspaceRoot)
+	fmt.Fprintf(os.Stderr, "yakos serve: socket at %s\n", jsonrpc.SocketPath(workspaceRoot))
+	fmt.Fprintln(os.Stderr, "yakos serve: press Ctrl-C to stop")
+
+	ctx := context.Background()
+	if err := internalserve.Run(ctx, cfg); err != nil {
+		if err == internalserve.ErrAlreadyRunning {
+			fmt.Fprintln(os.Stderr, "serve: daemon already running for this workspace")
+			os.Exit(75) // EX_TEMPFAIL per design §2
+		}
+		// Clean shutdown via signal returns a context.Canceled error; exit 0.
+		if err == context.Canceled {
+			os.Exit(0)
+		}
+		fmt.Fprintf(os.Stderr, "serve: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func printServeHelp(w io.Writer) {
+	_, _ = fmt.Fprint(w, `yakos serve [--socket <path>] [--pidfile <path>] [--detach] [--help]
+
+Start the yakos daemon for the current workspace.
+
+The daemon listens on a JSON-RPC 2.0 socket and routes subcommand calls
+from the CLI (when YAKOS_DAEMON=on|auto) without spawning a new process
+per invocation.
+
+The daemon is OFF by default (YAKOS_DAEMON=off). To opt in:
+
+  export YAKOS_DAEMON=auto     # uses daemon if running; falls back otherwise
+  yakos serve &                # start in background
+
+For persistent daemon startup, see docs/integrations/ for systemd (Linux),
+launchd (macOS), and Task Scheduler (Windows) unit files.
+
+Flags:
+  --socket <path>   Override the socket/pipe path (default: platform XDG path).
+  --pidfile <path>  Override the PID file path.
+  --detach          Print a backgrounding advisory (operator must use '&').
+  --help, -h        Print this help.
+
+Socket paths (defaults):
+  Linux   $XDG_RUNTIME_DIR/yakos/<hash>.sock
+  macOS   $TMPDIR/yakos/<hash>.sock
+  Windows \\.\pipe\yakos-<uid>-<hash>
+
+<hash> is derived from the workspace root path (SHA-256 prefix, stable).
+
+Exit codes:
+  0   Clean shutdown (SIGTERM/SIGINT received).
+  75  Another daemon is already running for this workspace (EX_TEMPFAIL).
+  1   Error.
+`)
+}
+
+// ---- YAKOS_DAEMON routing ---------------------------------------------------
+
+// daemonMode reads YAKOS_DAEMON from the environment.
+// Returns "off", "on", or "auto".
+func daemonMode() string {
+	v := os.Getenv("YAKOS_DAEMON")
+	switch v {
+	case "1", "on":
+		return "on"
+	case "auto":
+		return "auto"
+	default:
+		return "off"
+	}
+}
+
+// maybeRouteToDaemon checks YAKOS_DAEMON and routes the subcommand through the
+// daemon JSON-RPC client if a daemon is reachable. Returns true if the
+// subcommand was handled (or fatally errored). Returns false to fall through
+// to the bash passthrough.
+//
+// Current routing: only --version is routed (proof of concept for the
+// smoke test described in the dispatch brief). Full routing is a follow-up.
+func maybeRouteToDaemon(yakosRoot string, args []string) bool {
+	mode := daemonMode()
+	if mode == "off" {
+		return false
+	}
+
+	// Detect the daemon socket.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	socketPath := jsonrpc.SocketPath(cwd)
+
+	// Attempt to connect (200 ms timeout per design §2 detection).
+	conn, err := jsonrpc.Dial(socketPath)
+	if err != nil {
+		// Daemon not running.
+		if mode == "on" {
+			fmt.Fprintf(os.Stderr, "yakos: WARN daemon not running at %s (YAKOS_DAEMON=on); falling through to local exec\n", socketPath)
+		}
+		// auto: silent fallback.
+		return false
+	}
+
+	client := jsonrpc.NewClient(conn)
+	defer func() { _ = client.Close() }()
+
+	// Version match check: CLI major.minor must match daemon.
+	// On mismatch, fall back rather than failing hard.
+	rawVersion, vErr := client.Call(context.Background(), "yakos.version", nil)
+	if vErr != nil {
+		fmt.Fprintf(os.Stderr, "yakos: daemon ping failed: %v; falling through to local exec\n", vErr)
+		return false
+	}
+
+	_ = rawVersion // version match logic is a follow-up; accept any live daemon for now
+
+	// Only the --version flag is currently routed for the smoke test.
+	// Full subcommand routing is added in the follow-up dispatch.
+	if len(args) > 0 && (args[0] == "--version" || args[0] == "-v") {
+		var result struct {
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(rawVersion, &result); err == nil && result.Version != "" {
+			fmt.Println(result.Version + " [via daemon]")
+			return true
+		}
+	}
+
+	return false
 }
