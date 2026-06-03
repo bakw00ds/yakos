@@ -38,6 +38,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -93,6 +94,32 @@ func uninstallConfig(home string) uninstall.Config {
 		Writer:    &bytes.Buffer{},
 		ErrWriter: &bytes.Buffer{},
 	}
+}
+
+// symlinkOrSkip creates a symlink and skips the test if symlink creation is
+// not supported on this platform (e.g. Windows without Developer Mode).
+func symlinkOrSkipUninstall(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("os.Symlink not supported on this platform (%s); skipping symlink test: %v", runtime.GOOS, err)
+	}
+}
+
+// foreignTargetUninstall returns a path to a real file outside any t.TempDir()-based
+// yakosRoot. Used as the target for "foreign symlink" tests so that
+// filepath.EvalSymlinks resolves without error and the path is not under the
+// yakosRootAbs prefix.
+//
+// On Windows, /dev/null and /usr/bin/env do not exist. This helper creates a
+// sentinel file in os.TempDir() that is valid on all platforms.
+func foreignTargetUninstall(t *testing.T) string {
+	t.Helper()
+	target := filepath.Join(os.TempDir(), "yakos-parity-test-foreign-target")
+	if err := os.WriteFile(target, []byte("foreign\n"), 0644); err != nil {
+		t.Fatalf("foreignTargetUninstall: could not write sentinel file %s: %v", target, err)
+	}
+	t.Cleanup(func() { _ = os.Remove(target) })
+	return target
 }
 
 // ---- (a) happy-path ---------------------------------------------------------
@@ -213,11 +240,11 @@ func TestUninstallParity_ForeignSymlinksKept(t *testing.T) {
 	root := newUninstallFakeRoot(t)
 	home := installedHome(t, root)
 
-	// Add a foreign symlink in ~/.claude/agents/.
+	// Add a foreign symlink in ~/.claude/agents/ pointing at a real file outside
+	// yakosRoot. /dev/null does not exist on Windows; use a cross-platform sentinel.
+	ft := foreignTargetUninstall(t)
 	foreignLink := filepath.Join(home, ".claude", "agents", "foreign.md")
-	if err := os.Symlink("/dev/null", foreignLink); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	symlinkOrSkipUninstall(t, ft, foreignLink)
 
 	cfg := uninstallConfig(home)
 	res, err := uninstall.Run(cfg)
@@ -230,8 +257,8 @@ func TestUninstallParity_ForeignSymlinksKept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Readlink: %v", err)
 	}
-	if target != "/dev/null" {
-		t.Errorf("foreign symlink was redirected; got %q", target)
+	if target != ft {
+		t.Errorf("foreign symlink was redirected; got %q, want %q", target, ft)
 	}
 	if res.Symlinks.Kept == 0 {
 		t.Error("expected Symlinks.Kept > 0 for foreign symlink")
@@ -352,14 +379,14 @@ func TestUninstallParity_ForeignLauncherSymlink(t *testing.T) {
 	root := newUninstallFakeRoot(t)
 	home := installedHome(t, root)
 
-	// Replace launcher symlink with a foreign one.
+	// Replace launcher symlink with a foreign one pointing at a real file outside
+	// yakosRoot. /usr/bin/env does not exist on Windows; use a cross-platform sentinel.
+	ft := foreignTargetUninstall(t)
 	lp := filepath.Join(home, ".local", "bin", "yakos")
 	if err := os.Remove(lp); err != nil {
 		t.Fatalf("remove launcher: %v", err)
 	}
-	if err := os.Symlink("/usr/bin/env", lp); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	symlinkOrSkipUninstall(t, ft, lp)
 
 	cfg := uninstallConfig(home)
 	res, err := uninstall.Run(cfg)
@@ -371,8 +398,8 @@ func TestUninstallParity_ForeignLauncherSymlink(t *testing.T) {
 		t.Errorf("Launcher.Outcome: got %q, want %q", res.Launcher.Outcome, uninstall.LauncherKept)
 	}
 	target, _ := os.Readlink(lp)
-	if target != "/usr/bin/env" {
-		t.Errorf("foreign launcher was redirected; got %q", target)
+	if target != ft {
+		t.Errorf("foreign launcher was redirected; got %q, want %q", target, ft)
 	}
 }
 
