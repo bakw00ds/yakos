@@ -31,6 +31,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/install"
 	"github.com/bakw00ds/yakos/internal/kanban"
 	"github.com/bakw00ds/yakos/internal/passthrough"
+	"github.com/bakw00ds/yakos/internal/quickstart"
 	"github.com/bakw00ds/yakos/internal/refresh"
 	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/start"
@@ -60,6 +61,7 @@ var portedCommands = []portedCommand{
 	{Name: "uninstall", Since: "0.48.0", Notes: "full feature parity with cli/lib/uninstall.sh; removes YakOS-owned symlinks + launcher + pointer; --restore-settings/--root/--dry-run; partial-uninstall log+continue"},
 	{Name: "start", Since: "0.49.0", Notes: "full feature parity with cli/lib/start.sh; preflight banner + audit-log; exec deferred to runtime CLI; --dry-run/--print-agents/--safe/--allow-root/passthrough flags supported"},
 	{Name: "update", Since: "0.50.0", Notes: "full feature parity with cli/lib/update.sh; git pull --ff-only + per-project refresh via refresh.CollectProjects + refresh.Run; --allow-non-ff/--all/--dry-run supported"},
+	{Name: "quickstart", Since: "0.51.0", Notes: "full feature parity with cli/lib/quickstart.sh; composes install+init+start; idempotent; --runtime/--multi-dev/--safe/--allow-root/--dry-run flags"},
 }
 
 type portedCommand struct {
@@ -129,6 +131,8 @@ func main() {
 		runStart(yakosRoot, args[1:])
 	case "update":
 		runUpdate(yakosRoot, args[1:])
+	case "quickstart":
+		runQuickstart(yakosRoot, args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -1990,6 +1994,100 @@ func runUpdate(yakosRoot string, args []string) {
 
 	if _, err := update.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "update: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runQuickstart implements `yakos quickstart` natively in Go.
+//
+// Usage mirrors cli/lib/quickstart.sh exactly:
+//
+//	yakos quickstart [--runtime <id>] [--multi-dev] [--safe] [--allow-root] [--dry-run]
+//	yakos quickstart --help
+//
+// Detects the current state and runs only what is needed:
+//  1. yakOS not installed → yakos install
+//  2. cwd is a git repo not yet bootstrapped → yakos init
+//  3. project already bootstrapped → yakos start
+//
+// Each step delegates to the corresponding Go package (install, initialize, start).
+// Idempotent; safe to re-run against an already-onboarded project.
+func runQuickstart(yakosRoot string, args []string) {
+	runtime := ""
+	multiDev := false
+	safe := false
+	allowRoot := false
+	dryRun := false
+
+	// Honor YAKOS_ALLOW_ROOT env as equivalent to --allow-root.
+	if os.Getenv("YAKOS_ALLOW_ROOT") == "1" {
+		allowRoot = true
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			quickstart.PrintHelp(os.Stdout)
+			os.Exit(0)
+
+		case arg == "--runtime":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "quickstart: --runtime requires an id")
+				os.Exit(1)
+			}
+			runtime = args[i]
+		case len(arg) > 10 && arg[:10] == "--runtime=":
+			runtime = arg[10:]
+
+		case arg == "--multi-dev":
+			multiDev = true
+		case arg == "--safe":
+			safe = true
+		case arg == "--allow-root":
+			allowRoot = true
+		case arg == "--dry-run":
+			dryRun = true
+
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "quickstart: unknown flag %q (try --help)\n", arg)
+			os.Exit(1)
+
+		default:
+			fmt.Fprintf(os.Stderr, "quickstart: unexpected argument %q (try --help)\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	// Resolve YAKOS_ROOT from env (bash entry-point may set it).
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+	if yakosRoot == "" {
+		fmt.Fprintln(os.Stderr, "quickstart: YAKOS_ROOT is not set")
+		os.Exit(1)
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := quickstart.Config{
+		YakosRoot: yakosRoot,
+		HomeDir:   home,
+		Runtime:   runtime,
+		MultiDev:  multiDev,
+		Safe:      safe,
+		AllowRoot: allowRoot,
+		DryRun:    dryRun,
+		Writer:    os.Stdout,
+		ErrWriter: os.Stderr,
+	}
+
+	if _, err := quickstart.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "quickstart: %v\n", err)
 		os.Exit(1)
 	}
 }
