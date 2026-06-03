@@ -35,16 +35,24 @@ func (s *Subscription) Unsubscribe() {
 
 // Bus is a thread-safe in-process publish/subscribe event bus.
 //
-// The zero value is not usable; use [New].
+// The zero value is not usable; use [New] or [NewWithReplay].
 type Bus struct {
-	mu   sync.RWMutex
-	subs []*Subscription
-	seq  atomic.Int64
+	mu     sync.RWMutex
+	subs   []*Subscription
+	seq    atomic.Int64
+	replay *replayBuffer
 }
 
-// New creates and returns a ready Bus.
+// New creates and returns a ready Bus with the default replay buffer size
+// (1000 events, or YAKOS_WS_REPLAY_BUFFER if set).
 func New() *Bus {
-	return &Bus{}
+	return NewWithReplay(0)
+}
+
+// NewWithReplay creates a ready Bus with a replay buffer of the given capacity.
+// If capacity is 0, the default (YAKOS_WS_REPLAY_BUFFER or 1000) is used.
+func NewWithReplay(capacity int) *Bus {
+	return &Bus{replay: newReplayBuffer(capacity)}
 }
 
 // Subscribe returns a [Subscription] that receives events matching topic.
@@ -100,7 +108,25 @@ func (b *Bus) Publish(topic string, payload any) Event {
 		s.Unsubscribe()
 	}
 
+	// Record in the ring buffer for future replay.
+	if b.replay != nil {
+		b.replay.append(ev)
+	}
+
 	return ev
+}
+
+// History returns all buffered events with Seq > sinceSeq, in ascending Seq order.
+// If sinceSeq is 0, all retained events are returned.
+//
+// This supports the WS ?since=<seq> reconnect-replay feature (Q8 override):
+// new clients connect, pass their last-seen seq, and receive missed events
+// before joining the live stream.
+func (b *Bus) History(sinceSeq int64) []Event {
+	if b.replay == nil {
+		return nil
+	}
+	return b.replay.since(sinceSeq)
 }
 
 // Stop closes all active subscriptions.  After Stop, Publish is safe to call
