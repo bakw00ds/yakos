@@ -60,9 +60,9 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 // team (rank 9), archive (rank 10), init (rank 11), install (rank 12),
 // uninstall (rank 13), start (rank 14), update (rank 15), quickstart (rank 16),
 // auth (rank 17), memory (rank 18), agent (rank 19), session (rank 20),
-// migrate (rank 21).
+// migrate (rank 21), plugin (rank 22).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 20
+	const want = 21
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
@@ -272,6 +272,16 @@ func TestMigrateCommandEntry(t *testing.T) {
 		}
 	}
 	t.Error("expected 'migrate' in portedCommands; not found")
+}
+
+// TestPluginCommandEntry asserts that "plugin" is in the ported list.
+func TestPluginCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "plugin" {
+			return
+		}
+	}
+	t.Error("expected 'plugin' in portedCommands; not found")
 }
 
 // TestPortedCommandStruct verifies the portedCommand struct has the expected

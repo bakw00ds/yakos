@@ -35,6 +35,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/memory"
 	"github.com/bakw00ds/yakos/internal/migrate"
 	"github.com/bakw00ds/yakos/internal/passthrough"
+	"github.com/bakw00ds/yakos/internal/plugin"
 	"github.com/bakw00ds/yakos/internal/quickstart"
 	"github.com/bakw00ds/yakos/internal/refresh"
 	"github.com/bakw00ds/yakos/internal/runtime"
@@ -72,6 +73,7 @@ var portedCommands = []portedCommand{
 	{Name: "agent", Since: "0.54.0", Notes: "full feature parity with cli/lib/agent.sh; new/lint/diff/list subcommands; agents alias; docs (idea rank 9) md+html; reuses agentscompose+validate packages; atomic writes"},
 	{Name: "session", Since: "0.55.0", Notes: "full feature parity with cli/lib/session.sh; list/info/resume/fork subcommands; streams .session-started-history.ndjson; export deferred (tar/gzip out of scope for Phase 1)"},
 	{Name: "migrate", Since: "0.56.0", Notes: "full feature parity with cli/lib/migrate.sh; status/up subcommands; sidecar schema-version registry (kanban + memory); down deferred to Phase 1.5; atomic writes"},
+	{Name: "plugin", Since: "0.57.0", Notes: "full feature parity with cli/lib/plugin.sh; list/install/remove/validate/register/status subcommands; git URL + local-path install; function-header validation; rollback on failure; built-in id guard"},
 }
 
 type portedCommand struct {
@@ -153,6 +155,8 @@ func main() {
 		runSession(args[1:])
 	case "migrate":
 		runMigrate(args[1:])
+	case "plugin":
+		runPlugin(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -2802,6 +2806,155 @@ func runMigrate(args []string) {
 
 	if _, err := migrate.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runPlugin implements `yakos plugin` natively in Go.
+//
+// Usage mirrors cli/lib/plugin.sh exactly:
+//
+//	yakos plugin list
+//	yakos plugin install <source> [--id <id>] [--force]
+//	yakos plugin remove <id>
+//	yakos plugin validate <dir> [--id <id>]
+//	yakos plugin register <name> <dir>
+//	yakos plugin status
+//	yakos plugin --help
+//
+// Plugins live at ~/.yakos/plugins/<id>/runtime.sh. The built-in runtimes
+// claude, codex, and gemini are reserved and cannot be installed or removed.
+func runPlugin(args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		plugin.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+	rest := args[1:]
+
+	cfg := plugin.Config{
+		Subcommand: sub,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	switch sub {
+	case "list", "status":
+		// No extra args needed.
+
+	case "install":
+		for i := 0; i < len(rest); i++ {
+			arg := rest[i]
+			switch {
+			case arg == "-h" || arg == "--help":
+				plugin.PrintHelp(os.Stdout)
+				os.Exit(0)
+			case arg == "--force":
+				cfg.Force = true
+			case arg == "--id":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "plugin install: --id requires a value")
+					os.Exit(1)
+				}
+				cfg.ID = rest[i]
+			case len(arg) > 5 && arg[:5] == "--id=":
+				cfg.ID = arg[5:]
+			case len(arg) > 0 && arg[0] == '-':
+				fmt.Fprintf(os.Stderr, "plugin install: unknown flag %q (try --help)\n", arg)
+				os.Exit(1)
+			default:
+				if cfg.Source == "" {
+					cfg.Source = arg
+				} else {
+					fmt.Fprintln(os.Stderr, "plugin install: too many positional args (try --help)")
+					os.Exit(1)
+				}
+			}
+		}
+
+	case "remove":
+		for _, arg := range rest {
+			switch {
+			case arg == "-h" || arg == "--help":
+				plugin.PrintHelp(os.Stdout)
+				os.Exit(0)
+			case len(arg) > 0 && arg[0] == '-':
+				fmt.Fprintf(os.Stderr, "plugin remove: unknown flag %q (try --help)\n", arg)
+				os.Exit(1)
+			default:
+				if cfg.ID == "" {
+					cfg.ID = arg
+				} else {
+					fmt.Fprintln(os.Stderr, "plugin remove: too many positional args (try --help)")
+					os.Exit(1)
+				}
+			}
+		}
+
+	case "validate":
+		for i := 0; i < len(rest); i++ {
+			arg := rest[i]
+			switch {
+			case arg == "-h" || arg == "--help":
+				plugin.PrintHelp(os.Stdout)
+				os.Exit(0)
+			case arg == "--id":
+				i++
+				if i >= len(rest) {
+					fmt.Fprintln(os.Stderr, "plugin validate: --id requires a value")
+					os.Exit(1)
+				}
+				cfg.ID = rest[i]
+			case len(arg) > 5 && arg[:5] == "--id=":
+				cfg.ID = arg[5:]
+			case len(arg) > 0 && arg[0] == '-':
+				fmt.Fprintf(os.Stderr, "plugin validate: unknown flag %q (try --help)\n", arg)
+				os.Exit(1)
+			default:
+				if cfg.Dir == "" {
+					cfg.Dir = arg
+				} else {
+					fmt.Fprintln(os.Stderr, "plugin validate: too many positional args (try --help)")
+					os.Exit(1)
+				}
+			}
+		}
+
+	case "register":
+		// register <name> <dir>
+		positionals := make([]string, 0, 2)
+		for _, arg := range rest {
+			switch {
+			case arg == "-h" || arg == "--help":
+				plugin.PrintHelp(os.Stdout)
+				os.Exit(0)
+			case len(arg) > 0 && arg[0] == '-':
+				fmt.Fprintf(os.Stderr, "plugin register: unknown flag %q (try --help)\n", arg)
+				os.Exit(1)
+			default:
+				positionals = append(positionals, arg)
+			}
+		}
+		if len(positionals) >= 1 {
+			cfg.ID = positionals[0]
+		}
+		if len(positionals) >= 2 {
+			cfg.Dir = positionals[1]
+		}
+		if len(positionals) > 2 {
+			fmt.Fprintln(os.Stderr, "plugin register: too many positional args (try --help)")
+			os.Exit(1)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "plugin: unknown subcommand %q (try --help)\n", sub)
+		os.Exit(1)
+	}
+
+	if _, err := plugin.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "plugin: %v\n", err)
 		os.Exit(1)
 	}
 }
