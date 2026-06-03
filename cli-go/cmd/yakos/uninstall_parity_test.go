@@ -110,15 +110,17 @@ func symlinkOrSkipUninstall(t *testing.T, target, link string) {
 // filepath.EvalSymlinks resolves without error and the path is not under the
 // yakosRootAbs prefix.
 //
-// On Windows, /dev/null and /usr/bin/env do not exist. This helper creates a
-// sentinel file in os.TempDir() that is valid on all platforms.
+// Uses t.TempDir() to allocate a unique directory per test, preventing races
+// when tests run in parallel with -parallel.
 func foreignTargetUninstall(t *testing.T) string {
 	t.Helper()
-	target := filepath.Join(os.TempDir(), "yakos-parity-test-foreign-target")
+	// Allocate a unique temp dir per test so parallel runs cannot collide on a
+	// shared path (the old os.TempDir()/yakos-parity-test-foreign-target was a race).
+	dir := t.TempDir()
+	target := filepath.Join(dir, "yakos-parity-test-foreign-target")
 	if err := os.WriteFile(target, []byte("foreign\n"), 0644); err != nil {
 		t.Fatalf("foreignTargetUninstall: could not write sentinel file %s: %v", target, err)
 	}
-	t.Cleanup(func() { _ = os.Remove(target) })
 	return target
 }
 

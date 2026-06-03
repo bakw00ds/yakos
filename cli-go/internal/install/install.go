@@ -72,6 +72,13 @@ type Config struct {
 
 	// ErrWriter is the error destination. Defaults to os.Stderr.
 	ErrWriter io.Writer
+
+	// JunctionFn overrides the Windows NTFS-junction creation used as a fallback
+	// when os.Symlink fails for directory targets. When nil, the default
+	// implementation shells to `cmd /c mklink /J`. Injected in tests so they
+	// do not shell out to mklink on CI runners without Developer Mode.
+	// Ignored on non-Windows platforms.
+	JunctionFn func(target, link string) error
 }
 
 // SymlinkReport counts per-file symlink outcomes.
@@ -201,7 +208,7 @@ func Run(cfg Config) (*Result, error) {
 
 	// ---- 1a. managed launcher symlink ------------------------------------------
 
-	lrpt := manageLauncher(launcherDir, launcherPath, launcherTarget, yakosRootAbs, cfg.DryRun, cfg.Writer, cfg.ErrWriter)
+	lrpt := manageLauncher(launcherDir, launcherPath, launcherTarget, yakosRootAbs, cfg.DryRun, cfg.JunctionFn, cfg.Writer, cfg.ErrWriter)
 	result.Launcher = lrpt
 
 	if !cfg.DryRun && lrpt.Outcome != LauncherSkipped {
@@ -223,7 +230,7 @@ func Run(cfg Config) (*Result, error) {
 
 	// ---- 2. per-file symlinks ---------------------------------------------------
 
-	srpt, err := linkSubdirs(yakosRootAbs, claudeDir, cfg.Force, cfg.DryRun, cfg.Writer, cfg.ErrWriter)
+	srpt, err := linkSubdirs(yakosRootAbs, claudeDir, cfg.Force, cfg.DryRun, cfg.JunctionFn, cfg.Writer, cfg.ErrWriter)
 	if err != nil {
 		return nil, fmt.Errorf("install: per-file symlinks: %w", err)
 	}
@@ -262,8 +269,8 @@ func Run(cfg Config) (*Result, error) {
 }
 
 // manageLauncher handles the launcher symlink lifecycle. It is side-effect-free
-// when dryRun is true.
-func manageLauncher(launcherDir, launcherPath, launcherTarget, yakosRootAbs string, dryRun bool, w, ew io.Writer) LauncherReport {
+// when dryRun is true. junctionFn is forwarded to symlinkFile for Windows fallback.
+func manageLauncher(launcherDir, launcherPath, launcherTarget, yakosRootAbs string, dryRun bool, junctionFn func(string, string) error, w, ew io.Writer) LauncherReport {
 	if !dryRun {
 		if err := os.MkdirAll(launcherDir, 0755); err != nil { //nolint:gosec
 			_, _ = fmt.Fprintf(ew, "install: warning: could not create launcher dir %s: %v\n", launcherDir, err)
@@ -277,7 +284,7 @@ func manageLauncher(launcherDir, launcherPath, launcherTarget, yakosRootAbs stri
 			_, _ = fmt.Fprintf(w, "  [dry-run] would create launcher symlink: %s → %s\n", launcherPath, launcherTarget)
 			return LauncherReport{Outcome: LauncherCreated, Path: launcherPath, Target: launcherTarget}
 		}
-		if err2 := os.Symlink(launcherTarget, launcherPath); err2 != nil {
+		if err2 := symlinkFile(launcherTarget, launcherPath, junctionFn); err2 != nil {
 			_, _ = fmt.Fprintf(ew, "install: warning: could not create launcher symlink: %v\n", err2)
 			return LauncherReport{Outcome: LauncherSkipped, Path: launcherPath, Warning: err2.Error()}
 		}
@@ -309,7 +316,7 @@ func manageLauncher(launcherDir, launcherPath, launcherTarget, yakosRootAbs stri
 				return LauncherReport{Outcome: LauncherRefreshed, Path: launcherPath, Target: launcherTarget}
 			}
 			_ = os.Remove(launcherPath)
-			if err := os.Symlink(launcherTarget, launcherPath); err != nil {
+			if err := symlinkFile(launcherTarget, launcherPath, junctionFn); err != nil {
 				_, _ = fmt.Fprintf(ew, "install: warning: could not refresh launcher symlink: %v\n", err)
 				return LauncherReport{Outcome: LauncherSkipped, Path: launcherPath, Warning: err.Error()}
 			}
@@ -334,10 +341,10 @@ func manageLauncher(launcherDir, launcherPath, launcherTarget, yakosRootAbs stri
 }
 
 // linkSubdirs creates per-file symlinks for all four subdirs.
-func linkSubdirs(yakosRootAbs, claudeDir string, force, dryRun bool, w, ew io.Writer) (SymlinkReport, error) {
+func linkSubdirs(yakosRootAbs, claudeDir string, force, dryRun bool, junctionFn func(string, string) error, w, ew io.Writer) (SymlinkReport, error) {
 	var total SymlinkReport
 	for _, sub := range subdirs {
-		rpt, err := linkFilesIn(sub, yakosRootAbs, claudeDir, force, dryRun, w, ew)
+		rpt, err := linkFilesIn(sub, yakosRootAbs, claudeDir, force, dryRun, junctionFn, w, ew)
 		if err != nil {
 			return total, err
 		}
@@ -351,7 +358,7 @@ func linkSubdirs(yakosRootAbs, claudeDir string, force, dryRun bool, w, ew io.Wr
 // linkFilesIn handles one subdir (e.g. "agents").
 // It mirrors the bash link_files_in() logic: per-file recursive symlinks from
 // yakosRootAbs/lib/<sub>/ into claudeDir/<sub>/.
-func linkFilesIn(sub, yakosRootAbs, claudeDir string, force, dryRun bool, w, ew io.Writer) (SymlinkReport, error) {
+func linkFilesIn(sub, yakosRootAbs, claudeDir string, force, dryRun bool, junctionFn func(string, string) error, w, ew io.Writer) (SymlinkReport, error) {
 	var rpt SymlinkReport
 	srcRoot := filepath.Join(yakosRootAbs, "lib", sub)
 	dstRoot := filepath.Join(claudeDir, sub)
@@ -396,7 +403,7 @@ func linkFilesIn(sub, yakosRootAbs, claudeDir string, force, dryRun bool, w, ew 
 			if dryRun {
 				_, _ = fmt.Fprintf(w, "  [dry-run] would create symlink %s/%s\n", sub, rel)
 			} else {
-				if err := os.Symlink(srcPath, dstPath); err != nil {
+				if err := symlinkFile(srcPath, dstPath, junctionFn); err != nil {
 					_, _ = fmt.Fprintf(ew, "install: skip: could not create symlink %s: %v\n", dstPath, err)
 					rpt.Skipped++
 					return nil
@@ -424,7 +431,7 @@ func linkFilesIn(sub, yakosRootAbs, claudeDir string, force, dryRun bool, w, ew 
 						rpt.Refreshed++
 					} else {
 						_ = os.Remove(dstPath)
-						if err := os.Symlink(srcPath, dstPath); err != nil {
+						if err := symlinkFile(srcPath, dstPath, junctionFn); err != nil {
 							_, _ = fmt.Fprintf(ew, "install: skip: could not refresh symlink %s: %v\n", dstPath, err)
 							rpt.Skipped++
 						} else {

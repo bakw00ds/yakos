@@ -37,6 +37,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bakw00ds/yakos/internal/timestamp"
 )
 
 // ---- public types -----------------------------------------------------------
@@ -473,7 +475,7 @@ func snapshot(file, layer, historyDir string, now time.Time) (string, error) {
 		return "", fmt.Errorf("soul: mkdir history: %w", err)
 	}
 
-	ts := now.UTC().Format("2006-01-02T15:04:05Z")
+	ts := timestamp.WinSafe(now)
 	snapPath := filepath.Join(historyDir, layer+"-"+ts+".md")
 
 	data, err := os.ReadFile(file) //nolint:gosec

@@ -37,7 +37,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -100,9 +99,6 @@ func hooksCfgOut(cfg hooksinstall.Config) string { return cfg.Writer.(*bytes.Buf
 // ---- scenario (b): install codex creates hooks.json -------------------------
 
 func TestHooksParity_InstallCodex_CreatesHooksJSON(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("hookScriptPath executable-bit check (mode&0o100) always false on Windows; Phase 1.5 followup")
-	}
 	proj := hooksBuildProject(t)
 	cfg := hooksBuildCfg("install", "codex", proj)
 	res, err := hooksinstall.Run(cfg)
@@ -203,9 +199,6 @@ func TestHooksParity_InstallCodex_TranslatesPathAllowlist(t *testing.T) {
 // ---- scenario (e): install gemini creates settings.json ---------------------
 
 func TestHooksParity_InstallGemini_CreatesSettingsJSON(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("hookScriptPath executable-bit check (mode&0o100) always false on Windows; Phase 1.5 followup")
-	}
 	proj := hooksBuildProject(t)
 	cfg := hooksBuildCfg("install", "gemini", proj)
 	res, err := hooksinstall.Run(cfg)
@@ -248,9 +241,6 @@ func TestHooksParity_InstallGemini_CreatesSettingsJSON(t *testing.T) {
 // ---- scenario (f): install agy creates hooks.json ---------------------------
 
 func TestHooksParity_InstallAgy_CreatesHooksJSON(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("hookScriptPath executable-bit check (mode&0o100) always false on Windows; Phase 1.5 followup")
-	}
 	proj := hooksBuildProject(t)
 	cfg := hooksBuildCfg("install", "agy", proj)
 	res, err := hooksinstall.Run(cfg)
@@ -560,6 +550,72 @@ func TestHooksParity_IsKnownRuntime(t *testing.T) {
 	}
 	if hooksinstall.IsKnownRuntime("bogus") {
 		t.Error("expected 'bogus' to be unknown")
+	}
+}
+
+// ---- hooks lint subcommand --------------------------------------------------
+
+func TestHooksParity_Lint_ValidStarFile_NoErrors(t *testing.T) {
+	tmp := t.TempDir()
+	star := filepath.Join(tmp, "cycle-counter.star")
+	if err := os.WriteFile(star, []byte("def on_event(ctx):\n    ctx.log(\"ok\")\n"), 0644); err != nil {
+		t.Fatalf("write star: %v", err)
+	}
+	cfg := hooksinstall.LintConfig{
+		HooksDir:  tmp,
+		Writer:    &bytes.Buffer{},
+		ErrWriter: &bytes.Buffer{},
+	}
+	r, err := hooksinstall.RunLint(cfg)
+	if err != nil {
+		t.Fatalf("RunLint: %v", err)
+	}
+	if r.ErrCount != 0 {
+		t.Errorf("expected 0 errors; got %d", r.ErrCount)
+	}
+	if r.Total != 1 {
+		t.Errorf("expected 1 file; got %d", r.Total)
+	}
+}
+
+func TestHooksParity_Lint_SyntaxError_Reported(t *testing.T) {
+	tmp := t.TempDir()
+	star := filepath.Join(tmp, "bad.star")
+	if err := os.WriteFile(star, []byte("def on_event(ctx bad {{"), 0644); err != nil {
+		t.Fatalf("write star: %v", err)
+	}
+	cfg := hooksinstall.LintConfig{
+		HooksDir:  tmp,
+		Writer:    &bytes.Buffer{},
+		ErrWriter: &bytes.Buffer{},
+	}
+	r, err := hooksinstall.RunLint(cfg)
+	if err != nil {
+		t.Fatalf("RunLint: %v", err)
+	}
+	if r.ErrCount == 0 {
+		t.Error("expected error for syntax error")
+	}
+}
+
+func TestHooksParity_Lint_MissingDir_Error(t *testing.T) {
+	cfg := hooksinstall.LintConfig{
+		HooksDir:  "/nonexistent/hooks/dir",
+		Writer:    &bytes.Buffer{},
+		ErrWriter: &bytes.Buffer{},
+	}
+	_, err := hooksinstall.RunLint(cfg)
+	if err == nil {
+		t.Fatal("expected error for missing hooks dir")
+	}
+}
+
+func TestHooksParity_Lint_PrintHelp_MentionsLint(t *testing.T) {
+	var buf bytes.Buffer
+	hooksinstall.PrintHelp(&buf)
+	out := buf.String()
+	if !strings.Contains(out, "lint") {
+		t.Errorf("PrintHelp should mention 'lint' subcommand; got %q", out)
 	}
 }
 
