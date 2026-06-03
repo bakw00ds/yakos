@@ -92,15 +92,22 @@ jobs:
 
       - name: Smoke test — go-port-status (unix)
         if: runner.os != 'Windows'
+        env:
+          YAKOS_IMPL: go
         run: |
           out=$(./bin/yakos go-port-status)
           echo "$out"
           echo "$out" | grep -E 'subcommand migration tracker'
-          echo "$out" | grep -E 'No subcommands ported to Go yet'
+          # Phase 1 ships with 39+ subcommands ported; just verify the
+          # tracker emits a count line (not the v0.36-era "No subcommands
+          # ported to Go yet" sentinel).
+          echo "$out" | grep -E 'Ported: [0-9]+'
 
       - name: Smoke test — go-port-status (windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          YAKOS_IMPL: go
         run: |
           $out = .\bin\yakos.exe go-port-status
           Write-Host "$out"
