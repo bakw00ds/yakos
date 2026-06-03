@@ -8,9 +8,9 @@ commands not yet ported.
 
 ## Status
 
-**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update, quickstart, auth, memory, agent, session, migrate, plugin ported.** The
+**Phase 1 — validate, cost, status, doctor, refresh, kanban, dispatch, team, archive, init, install, uninstall, start, update, quickstart, auth, memory, agent, session, migrate, plugin, teach ported.** The
 `validate`, `cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, `team`, `archive`, `init`, `install`, `uninstall`, `start`, `update`, `quickstart`, `auth`, `memory`, `agent`,
-`session`, `migrate`, and `plugin` subcommands are implemented natively in Go (ranks 2–22 in `docs/go-port-plan.md`). The `kanban serve`
+`session`, `migrate`, `plugin`, and `teach` subcommands are implemented natively in Go (ranks 2–23 in `docs/go-port-plan.md`). The `kanban serve`
 submode is deferred to rank 41. Worktree cleanup at archive time is explicitly NOT in scope (same
 caveat as bash; manual in v0.1). Hook script installation in `init` prints an advisory directing to
 `yakos refresh` (bash handles hook copies in Phase 1). `yakos start` exec's the runtime CLI replacing
@@ -155,6 +155,7 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos agent <sub> [args]` | Go (full feature parity with `cli/lib/agent.sh`; new/lint/diff/list/docs subcommands; `agents` plural alias; docs renders md+html reference pages; atomic writes) |
 | `yakos session <sub> [args]` | Go (full feature parity with `cli/lib/session.sh`; list/info/resume/fork subcommands; streams .session-started-history.ndjson; export deferred to bash) |
 | `yakos plugin <sub> [args]` | Go (full feature parity with `cli/lib/plugin.sh`; list/install/remove/validate/register/status; git URL + local-path install; function-header validation; rollback on failure; built-in id guard) |
+| `yakos teach <agent> <lesson-file> [args]` | Go (full feature parity with `cli/lib/teach.sh`; appends dated lesson bullets to project agent files under `## Lessons learned`; --project/--section/--dry-run; atomic temp-rename writes; backup before edit) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 
@@ -261,6 +262,16 @@ cli-go/
       session.go           # Run + PrintHelp; list/info/resume/fork subcommands; streams
                            # .session-started-history.ndjson; export deferred (Phase 1 scope)
       session_test.go      # 33 unit tests (readHistory, resolveID, list, info, resume, fork, parseUint)
+    migrate/
+      migrate.go           # Run + PrintHelp; status/up subcommands; migration registry; down deferred
+      migrate_test.go      # 16 unit tests
+    plugin/
+      plugin.go            # Run + PrintHelp; list/install/remove/validate/register/status; git+local
+      plugin_test.go       # 18 unit tests
+    teach/
+      teach.go             # Run + PrintHelp; appends dated lesson bullets to project agent files;
+                           # formatLesson + spliceLesson (two-pass H2 splice); inferProject; atomic writes
+      teach_test.go        # 29 unit tests (formatLesson, spliceLesson, Run scenarios, inferProject, atomicWrite)
     paritytest/
       paritytest.go        # parity test harness for all Phase 1 ports
   go.mod                   # module github.com/bakw00ds/yakos (root: cli-go/)
@@ -274,7 +285,7 @@ cli-go/
 2. Add a case in `cmd/yakos/main.go` routing the subcommand name to your
    implementation instead of `passthrough.Run`.
 3. Add the entry to `portedCommands` in `main.go`.
-4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 21).
+4. Update `TestPortedCommandsCount` in `main_test.go` to reflect the new count (currently 22).
 5. Add parity tests in `cmd/yakos/<name>_parity_test.go` using the paritytest harness.
 
 ## CI

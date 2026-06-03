@@ -42,6 +42,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/session"
 	"github.com/bakw00ds/yakos/internal/start"
 	"github.com/bakw00ds/yakos/internal/status"
+	"github.com/bakw00ds/yakos/internal/teach"
 	"github.com/bakw00ds/yakos/internal/team"
 	"github.com/bakw00ds/yakos/internal/uninstall"
 	"github.com/bakw00ds/yakos/internal/update"
@@ -74,6 +75,7 @@ var portedCommands = []portedCommand{
 	{Name: "session", Since: "0.55.0", Notes: "full feature parity with cli/lib/session.sh; list/info/resume/fork subcommands; streams .session-started-history.ndjson; export deferred (tar/gzip out of scope for Phase 1)"},
 	{Name: "migrate", Since: "0.56.0", Notes: "full feature parity with cli/lib/migrate.sh; status/up subcommands; sidecar schema-version registry (kanban + memory); down deferred to Phase 1.5; atomic writes"},
 	{Name: "plugin", Since: "0.57.0", Notes: "full feature parity with cli/lib/plugin.sh; list/install/remove/validate/register/status subcommands; git URL + local-path install; function-header validation; rollback on failure; built-in id guard"},
+	{Name: "teach", Since: "0.58.0", Notes: "full feature parity with cli/lib/teach.sh; appends dated lesson bullets to project agent files under ## Lessons learned; --project/--section/--dry-run; atomic temp-rename writes; backup before edit"},
 }
 
 type portedCommand struct {
@@ -157,6 +159,8 @@ func main() {
 		runMigrate(args[1:])
 	case "plugin":
 		runPlugin(args[1:])
+	case "teach":
+		runTeach(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -2955,6 +2959,109 @@ func runPlugin(args []string) {
 
 	if _, err := plugin.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "plugin: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runTeach implements `yakos teach` natively in Go.
+//
+// Usage mirrors cli/lib/teach.sh exactly:
+//
+//	yakos teach <agent-name> <lesson-file> [flags]
+//
+// Flags:
+//
+//	--project <path>   Project root (defaults to inferred from ~/agent-control/).
+//	--section <name>   H2 heading to append under (default: "Lessons learned").
+//	--dry-run          Print what would be written; do not modify files.
+//	--help             Print help and exit 0.
+//
+// Appends a dated lesson bullet to the project agent file at
+// <project>/.claude/agents/<name>.md under the target section,
+// creating the section when absent. Backs up the original file before
+// every edit. Uses atomic temp-rename writes (Q8 / Decision A).
+func runTeach(args []string) {
+	agentName := ""
+	lessonFile := ""
+	project := ""
+	section := ""
+	dryRun := false
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			teach.PrintHelp(os.Stdout)
+			os.Exit(0)
+
+		case arg == "--project":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "teach: --project requires a path")
+				os.Exit(1)
+			}
+			project = args[i]
+		case len(arg) > 10 && arg[:10] == "--project=":
+			project = arg[10:]
+
+		case arg == "--section":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "teach: --section requires a name")
+				os.Exit(1)
+			}
+			section = args[i]
+		case len(arg) > 10 && arg[:10] == "--section=":
+			section = arg[10:]
+
+		case arg == "--dry-run":
+			dryRun = true
+
+		case len(arg) > 0 && arg[0] == '-':
+			fmt.Fprintf(os.Stderr, "teach: unknown flag %q (try --help)\n", arg)
+			os.Exit(1)
+
+		default:
+			if agentName == "" {
+				agentName = arg
+			} else if lessonFile == "" {
+				lessonFile = arg
+			} else {
+				fmt.Fprintln(os.Stderr, "teach: too many positional args (try --help)")
+				os.Exit(1)
+			}
+		}
+	}
+
+	if agentName == "" {
+		teach.PrintHelp(os.Stderr)
+		fmt.Fprintln(os.Stderr, "teach: <agent-name> required")
+		os.Exit(1)
+	}
+	if lessonFile == "" {
+		teach.PrintHelp(os.Stderr)
+		fmt.Fprintln(os.Stderr, "teach: <lesson-file> required")
+		os.Exit(1)
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := teach.Config{
+		AgentName:  agentName,
+		LessonFile: lessonFile,
+		ProjectDir: project,
+		Section:    section,
+		DryRun:     dryRun,
+		HomeDir:    home,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	if _, err := teach.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "teach: %v\n", err)
 		os.Exit(1)
 	}
 }
