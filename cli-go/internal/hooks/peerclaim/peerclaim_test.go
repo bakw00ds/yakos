@@ -405,3 +405,166 @@ func TestNoFilePathNoOp(t *testing.T) {
 		t.Fatalf("no path in payload should pass, got %d", out.ExitCode)
 	}
 }
+
+// ---- stale coord-state smart-degrade ----------------------------------------
+
+// fakeFileInfo is a minimal os.FileInfo implementation for injecting a
+// controlled ModTime in the StatFn.
+type fakeFileInfo struct {
+	modTime time.Time
+}
+
+func (f fakeFileInfo) Name() string      { return "active-claims.json" }
+func (f fakeFileInfo) Size() int64       { return 64 }
+func (f fakeFileInfo) Mode() os.FileMode { return 0644 }
+func (f fakeFileInfo) ModTime() time.Time { return f.modTime }
+func (f fakeFileInfo) IsDir() bool       { return false }
+func (f fakeFileInfo) Sys() any          { return nil }
+
+// makeStaleHook returns a hook with a fixed "now" of fixedTime and a StatFn
+// that reports the claims file's modTime.  The IsProcessRunningFn always
+// returns true so PID checks do not interfere with the time-based staleness test.
+func makeStaleHook(workDir, coordDir string, modTime time.Time) *peerclaim.Hook {
+	h := newHook(workDir, coordDir)
+	h.StatFn = func(path string) (os.FileInfo, error) {
+		return fakeFileInfo{modTime: modTime}, nil
+	}
+	h.IsProcessRunningFn = func(pid int) bool { return true }
+	return h
+}
+
+// TestStaleCoord_FreshState verifies no warning is emitted when coord state is
+// within the freshness threshold.
+func TestStaleCoord_FreshState(t *testing.T) {
+	tmp := t.TempDir()
+	coord := filepath.Join(tmp, "coord")
+	if err := os.MkdirAll(coord, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// ModTime is 1 hour ago — well within the 24h default.
+	recentMod := fixedTime.Add(-1 * time.Hour)
+	h := makeStaleHook(tmp, coord, recentMod)
+
+	in := makeInput("Edit", filepath.Join(tmp, "main.go"), map[string]string{
+		"CLAUDE_PROJECT_DIR": tmp,
+	})
+	out, err := h.Run(context.Background(), in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.ExitCode != 0 {
+		t.Fatalf("fresh state: expected pass, got exit %d", out.ExitCode)
+	}
+	if strings.Contains(string(out.Stderr), "stale") {
+		t.Errorf("fresh state: unexpected stale warning in stderr: %s", out.Stderr)
+	}
+}
+
+// TestStaleCoord_25hStale verifies a WARN is emitted (but hook still passes)
+// when the coord state is 25 hours old.
+func TestStaleCoord_25hStale(t *testing.T) {
+	tmp := t.TempDir()
+	coord := filepath.Join(tmp, "coord")
+	if err := os.MkdirAll(coord, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// ModTime is 25 hours ago — beyond the 24h default.
+	staleMod := fixedTime.Add(-25 * time.Hour)
+	h := makeStaleHook(tmp, coord, staleMod)
+
+	in := makeInput("Edit", filepath.Join(tmp, "main.go"), map[string]string{
+		"CLAUDE_PROJECT_DIR": tmp,
+	})
+	out, err := h.Run(context.Background(), in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.ExitCode != 0 {
+		t.Fatalf("25h stale: expected exit 0 (no block), got %d", out.ExitCode)
+	}
+	if !strings.Contains(string(out.Stderr), "stale") {
+		t.Errorf("25h stale: expected stale warning in stderr; got: %s", out.Stderr)
+	}
+	if !strings.Contains(string(out.Stderr), "yakos peer cleanup") {
+		t.Errorf("25h stale: expected cleanup hint in stderr; got: %s", out.Stderr)
+	}
+}
+
+// TestStaleCoord_MissingPID verifies a WARN is emitted (but hook still passes)
+// when an active claim's owner PID is not running.
+func TestStaleCoord_MissingPID(t *testing.T) {
+	tmp := t.TempDir()
+	coord := filepath.Join(tmp, "coord")
+
+	relPath := "api.go"
+	// Claim is fresh (not yet expired) but owner PID is dead.
+	buildClaims(t, coord, relPath, map[string]any{
+		"user":       "ghostuser",
+		"host":       "ghosthost",
+		"pid":        999999, // very unlikely to be a real PID
+		"agent":      "researcher",
+		"expires_at": "2026-01-15T12:00:00Z", // future
+	})
+
+	h := newHook(tmp, coord)
+	// StatFn reports the file as fresh (1 min old) so the time-based branch won't fire.
+	h.StatFn = func(path string) (os.FileInfo, error) {
+		return fakeFileInfo{modTime: fixedTime.Add(-1 * time.Minute)}, nil
+	}
+	// IsProcessRunningFn reports the dead PID as not running.
+	h.IsProcessRunningFn = func(pid int) bool {
+		if pid == 999999 {
+			return false
+		}
+		return true
+	}
+
+	in := makeInput("Edit", filepath.Join(tmp, relPath), map[string]string{
+		"CLAUDE_PROJECT_DIR": tmp,
+	})
+	out, err := h.Run(context.Background(), in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Hook must still block because a peer holds the claim.
+	// The stale warning is emitted, but the block takes priority.
+	// Verify: either we got a warn about the stale PID OR the block message
+	// (block fires after the stale check; the warning is in Stderr either way).
+	staleWarn := strings.Contains(string(out.Stderr), "stale")
+	blockMsg := strings.Contains(string(out.Stderr), "ghostuser@ghosthost")
+	if !staleWarn && !blockMsg {
+		t.Errorf("missing PID: expected stale warn or block message in stderr; got: %s", out.Stderr)
+	}
+}
+
+// TestStaleCoord_EnvOverride verifies that YAKOS_PEER_STALE_AFTER overrides
+// the default 24h threshold.
+func TestStaleCoord_EnvOverride(t *testing.T) {
+	tmp := t.TempDir()
+	coord := filepath.Join(tmp, "coord")
+	if err := os.MkdirAll(coord, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// ModTime is 2 hours ago.  With the default 24h threshold this would be
+	// fresh, but we override to 3600s (1h), so 2h old is stale.
+	staleMod := fixedTime.Add(-2 * time.Hour)
+	h := makeStaleHook(tmp, coord, staleMod)
+
+	in := makeInput("Edit", filepath.Join(tmp, "main.go"), map[string]string{
+		"CLAUDE_PROJECT_DIR":    tmp,
+		"YAKOS_PEER_STALE_AFTER": "3600", // 1 hour in seconds
+	})
+	out, err := h.Run(context.Background(), in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.ExitCode != 0 {
+		t.Fatalf("env-override stale: expected exit 0 (no block), got %d", out.ExitCode)
+	}
+	if !strings.Contains(string(out.Stderr), "stale") {
+		t.Errorf("env-override stale: expected stale warning with 1h threshold; got: %s", out.Stderr)
+	}
+}

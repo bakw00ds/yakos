@@ -1,0 +1,17 @@
+{
+  "event": "PreToolUse",
+  "tool": "SendMessage",
+  "payload": {
+    "tool_input": {
+      "to": "lead",
+      "summary": "task complete",
+      "message": "finished implementation of F3"
+    },
+    "agent_type": "backend"
+  },
+  "env": {
+    "YAKOS_AGENT_ROLE": "backend",
+    "CLAUDE_SESSION_ID": "fixture-session-0002"
+  },
+  "work_dir": ""
+}

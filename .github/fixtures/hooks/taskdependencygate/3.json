@@ -1,0 +1,9 @@
+{
+  "event": "PostToolUse",
+  "tool": "",
+  "payload": {},
+  "env": {
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

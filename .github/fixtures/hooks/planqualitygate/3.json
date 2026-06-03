@@ -1,0 +1,17 @@
+{
+  "event": "PostToolUse",
+  "tool": "Edit",
+  "payload": {
+    "tool_input": {
+      "path": "work/current/plan.md",
+      "old_string": "x",
+      "new_string": "y"
+    },
+    "tool_response": "ok"
+  },
+  "env": {
+    "YAKOS_PLAN_QUALITY_DISABLE": "1",
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

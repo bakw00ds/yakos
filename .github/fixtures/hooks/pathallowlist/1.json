@@ -1,0 +1,13 @@
+{
+  "event": "PreToolUse",
+  "tool": "Read",
+  "payload": {
+    "tool_input": {
+      "path": "cli-go/internal/foo/bar.go"
+    }
+  },
+  "env": {
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

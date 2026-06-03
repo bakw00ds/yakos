@@ -20,15 +20,19 @@ func TestLoadOrCreateToken_CreatesOnMissing(t *testing.T) {
 		t.Errorf("token length=%d; want 64", len(tok))
 	}
 
-	// File must exist.
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat token file: %v", err)
+	// The caller must be able to read the file regardless of platform.
+	// On Windows this verifies winsec.SecureFile did not lock out the current
+	// user; on Unix it also implicitly checks existence.
+	if _, err := os.ReadFile(path); err != nil { //nolint:gosec
+		t.Fatalf("current user cannot read token file after generation: %v", err)
 	}
 
-	// POSIX mode bits are not enforced on Windows NTFS; ACL-based hardening is a
-	// Phase 1.5 followup. Only check mode on non-Windows platforms.
+	// On non-Windows also assert POSIX 0600 mode bits.
 	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat token file: %v", err)
+		}
 		if fi.Mode() != 0600 {
 			t.Errorf("token file mode=%o; want 0600", fi.Mode())
 		}

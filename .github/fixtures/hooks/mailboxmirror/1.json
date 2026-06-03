@@ -1,0 +1,16 @@
+{
+  "event": "PreToolUse",
+  "tool": "SendMessage",
+  "payload": {
+    "tool_input": {
+      "to": "backend",
+      "summary": "contracts are ready",
+      "message": "api-contracts.md has been written"
+    }
+  },
+  "env": {
+    "YAKOS_AGENT_ROLE": "lead",
+    "CLAUDE_SESSION_ID": "fixture-session-0001"
+  },
+  "work_dir": ""
+}

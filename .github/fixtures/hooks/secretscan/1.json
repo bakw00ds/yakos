@@ -1,0 +1,14 @@
+{
+  "event": "PreToolUse",
+  "tool": "Write",
+  "payload": {
+    "tool_input": {
+      "path": "cli-go/internal/foo/bar.go",
+      "content": "package foo\n\nfunc Foo() {}\n"
+    }
+  },
+  "env": {
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

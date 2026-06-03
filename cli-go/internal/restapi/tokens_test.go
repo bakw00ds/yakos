@@ -44,11 +44,6 @@ func TestLoadOrGenerateTokens_PersistsAndReloads(t *testing.T) {
 }
 
 func TestLoadOrGenerateTokens_FilesAreMode0600(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// NTFS does not enforce POSIX mode bits; ACL-based hardening is a
-		// Phase 1.5 followup. Skip rather than false-fail on Windows CI.
-		t.Skip("POSIX mode bits not enforced on Windows; ACL hardening is a Phase 1.5 followup")
-	}
 	dir := t.TempDir()
 	_, err := LoadOrGenerateTokens(dir)
 	if err != nil {
@@ -56,12 +51,21 @@ func TestLoadOrGenerateTokens_FilesAreMode0600(t *testing.T) {
 	}
 	for _, name := range []string{readTokenFile, writeTokenFile} {
 		path := filepath.Join(dir, name)
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("stat %s: %v", path, err)
+		// Verify the file is readable by the current process. On Windows
+		// this confirms winsec.SecureFile did not lock out the current user;
+		// on Unix it also verifies the file exists.
+		if _, err := os.ReadFile(path); err != nil { //nolint:gosec
+			t.Fatalf("%s: current user cannot read token file after generation: %v", name, err)
 		}
-		if perm := info.Mode().Perm(); perm != 0600 {
-			t.Errorf("%s: perm=%o; want 0600", name, perm)
+		// On non-Windows platforms also assert the POSIX mode bits are 0600.
+		if runtime.GOOS != "windows" {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat %s: %v", name, err)
+			}
+			if perm := info.Mode().Perm(); perm != 0600 {
+				t.Errorf("%s: perm=%o; want 0600", name, perm)
+			}
 		}
 	}
 }

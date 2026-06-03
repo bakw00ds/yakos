@@ -1,0 +1,11 @@
+{
+  "event": "PostToolUse",
+  "tool": "",
+  "payload": {
+    "agent_type": "unknown-agent"
+  },
+  "env": {
+    "YAKOS_AGENT_ROLE": "unknown-agent"
+  },
+  "work_dir": ""
+}

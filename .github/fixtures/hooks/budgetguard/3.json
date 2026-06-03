@@ -1,0 +1,14 @@
+{
+  "event": "PreToolUse",
+  "tool": "Bash",
+  "payload": {
+    "tool_input": {
+      "command": "echo hello"
+    }
+  },
+  "env": {
+    "YAKOS_BUDGET_DISABLE": "1",
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

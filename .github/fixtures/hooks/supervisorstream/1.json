@@ -1,0 +1,17 @@
+{
+  "event": "PostToolUse",
+  "tool": "Edit",
+  "payload": {
+    "tool_input": {
+      "path": "cli-go/internal/foo/bar.go",
+      "old_string": "x",
+      "new_string": "y"
+    },
+    "tool_response": "ok"
+  },
+  "env": {
+    "YAKOS_SUPERVISOR_DISABLE": "1",
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

@@ -1,0 +1,10 @@
+{
+  "event": "UserPromptSubmit",
+  "tool": "",
+  "payload": {},
+  "env": {
+    "YAKOS_CONTEXT_INJECT_DISABLE": "1",
+    "YAKOS_AGENT_ROLE": "lead"
+  },
+  "work_dir": ""
+}

@@ -1,0 +1,12 @@
+{
+  "event": "PostToolUse",
+  "tool": "",
+  "payload": {},
+  "env": {
+    "YAKOS_AGENT_ROLE": "lead",
+    "YAKOS_PLAN_QUALITY_LOG": "/nonexistent-fixture-plan-quality-log.ndjson",
+    "YAKOS_DISPATCH_LOG": "/nonexistent-fixture-dispatch-log.ndjson",
+    "CLAUDE_SESSION_ID": "fixture-session-0001"
+  },
+  "work_dir": ""
+}
