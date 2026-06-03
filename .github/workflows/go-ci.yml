@@ -62,11 +62,16 @@ jobs:
 
       - name: Build binary (native)
         # Build from the module root (cli-go/) and output to repo-root bin/.
-        # On Windows the binary name becomes yakos.exe automatically.
+        # `go build -o` is literal — Windows needs the `.exe` suffix
+        # explicitly (unlike `go install`, which adds it automatically).
         shell: bash
         run: |
           mkdir -p bin
-          cd cli-go && go build -o ../bin/yakos ./cmd/yakos
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cd cli-go && go build -o ../bin/yakos.exe ./cmd/yakos
+          else
+            cd cli-go && go build -o ../bin/yakos ./cmd/yakos
+          fi
 
       - name: Smoke test — --version flag (unix)
         if: runner.os != 'Windows'
