@@ -1,0 +1,3 @@
+{
+  "_doc": "Per-user-per-project overrides. Loaded by Claude Code from ~/agent-control/<project>/settings.local.json. Anything you put here is yours alone — it's outside any git repo. Remove the _doc key when you add real overrides."
+}
