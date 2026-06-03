@@ -247,7 +247,9 @@ func Run(cfg Config) (*Banner, error) {
 		_, _ = fmt.Fprintf(ew, "WARN: %q auth not detected; the runtime may prompt or fail. Run 'yakos auth login %s' to fix.\n", runtime, runtime)
 	}
 
-	if !cfg.DryRun && !cfg.PrintAgents {
+	// Skip PATH check when a test has injected ExecFn — the test is mocking the
+	// runtime entirely, so a real binary on PATH is not required.
+	if !cfg.DryRun && !cfg.PrintAgents && cfg.ExecFn == nil {
 		if !cliOk {
 			return nil, fmt.Errorf("start: %q CLI not on PATH. Install it, then retry. (--dry-run works without the CLI installed.)", runtime)
 		}
@@ -840,9 +842,17 @@ func buildExtraFlags(cfg Config, projectRepo string) []string {
 // Returns an error if the runtime binary cannot be found.
 func buildExecArgs(runtime, projectRepo, permMode string, agentCount int, cfg Config, extraFlags []string, env map[string]string) (string, []string, []string, error) {
 	binary := runtimeBinary(runtime)
-	argv0, err := exec.LookPath(binary)
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("binary %q not on PATH: %w", binary, err)
+	var argv0 string
+	if cfg.ExecFn != nil {
+		// Test injected ExecFn — skip PATH resolution; use the bare binary name
+		// as argv0 so tests can assert on it.
+		argv0 = binary
+	} else {
+		resolved, err := exec.LookPath(binary)
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("binary %q not on PATH: %w", binary, err)
+		}
+		argv0 = resolved
 	}
 
 	var argv []string
