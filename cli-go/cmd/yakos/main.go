@@ -26,6 +26,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/agent"
 	"github.com/bakw00ds/yakos/internal/archive"
 	"github.com/bakw00ds/yakos/internal/auth"
+	"github.com/bakw00ds/yakos/internal/compact"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/doctor"
@@ -82,6 +83,7 @@ var portedCommands = []portedCommand{
 	{Name: "soul", Since: "0.59.0", Notes: "full feature parity with cli/lib/soul.sh; show/edit/history/revert/pending subcommands; approve/reject print not-yet-implemented (M1 scope); two-layer (global/project) soul files; atomic writes; snapshot-before-edit; template seeding from lib/settings/soul.template.md"},
 	{Name: "retro", Since: "0.60.0", Notes: "full feature parity with cli/lib/retro.sh; now/disable/enable/status/last/history subcommands; sentinel flag at ~/.yakos-state/retro-disabled; atomic writes (Q8 temp-rename); .retro-due marker written by 'now'; session resolution via ProjectDir cfg override or YAKOS_PROJECT_NAME env or agent-control walk"},
 	{Name: "skill", Since: "0.61.0", Notes: "full feature parity with cli/lib/skill.sh; candidates/promote/reject/defer/stats subcommands; graveyard + fingerprint dedup (§16.1); calibration warnings (§16.2); atomic writes; validate gate on promote; --global promote to lib/skills/"},
+	{Name: "compact", Since: "0.62.0", Notes: "full feature parity with cli/lib/compact.sh; now/threshold/history subcommands; atomic writes for settings.json (temp-rename, Q8); O_APPEND for compact-log.ndjson; M3.1 auto-send deferred (prints slash-command advisory)"},
 }
 
 type portedCommand struct {
@@ -173,6 +175,8 @@ func main() {
 		runRetro(args[1:])
 	case "skill":
 		runSkill(yakosRoot, args[1:])
+	case "compact":
+		runCompact(args[1:])
 	default:
 		// Shadow-mode passthrough: forward everything to bash yakos.
 		exitWith(passthrough.Run(yakosRoot, args))
@@ -3316,6 +3320,58 @@ func runSkill(yakosRoot string, args []string) {
 
 	if _, err := skill.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "skill: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runCompact implements `yakos compact` natively in Go.
+//
+// Usage mirrors cli/lib/compact.sh exactly:
+//
+//	yakos compact now              # print /compact for the active session (M3.1: auto-send via tmux)
+//	yakos compact threshold [N]    # show or set notice threshold (1-99; default 75)
+//	yakos compact history          # show last 50 compaction log entries
+//	yakos compact --help           # print help and exit 0
+//
+// Reads:  ~/.yakos-state/settings.json       (context_thresholds)
+//
+//	~/.yakos-state/compact-log.ndjson  (compaction history)
+//
+// Writes: ~/.yakos-state/settings.json       (atomic temp-rename, Q8) on threshold set
+//
+//	~/.yakos-state/compact-log.ndjson  (O_APPEND) on now
+func runCompact(args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		compact.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	sub := args[0]
+	rest := args[1:]
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg := compact.Config{
+		Subcommand: sub,
+		HomeDir:    home,
+		Writer:     os.Stdout,
+		ErrWriter:  os.Stderr,
+	}
+
+	// threshold subcommand: optional positional N.
+	if sub == "threshold" && len(rest) > 0 {
+		if len(rest) > 1 {
+			fmt.Fprintln(os.Stderr, "compact threshold: too many arguments (expected at most one: N)")
+			os.Exit(1)
+		}
+		cfg.ThresholdArg = rest[0]
+	}
+
+	if _, err := compact.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "compact: %v\n", err)
 		os.Exit(1)
 	}
 }

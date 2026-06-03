@@ -61,9 +61,9 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 // uninstall (rank 13), start (rank 14), update (rank 15), quickstart (rank 16),
 // auth (rank 17), memory (rank 18), agent (rank 19), session (rank 20),
 // migrate (rank 21), plugin (rank 22), teach (rank 23), soul (rank 24),
-// retro (rank 25), skill (rank 26).
+// retro (rank 25), skill (rank 26), compact (rank 27).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 25
+	const want = 26
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
@@ -323,6 +323,16 @@ func TestSkillCommandEntry(t *testing.T) {
 		}
 	}
 	t.Error("expected 'skill' in portedCommands; not found")
+}
+
+// TestCompactCommandEntry asserts that "compact" is in the ported list.
+func TestCompactCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "compact" {
+			return
+		}
+	}
+	t.Error("expected 'compact' in portedCommands; not found")
 }
 
 // TestPortedCommandStruct verifies the portedCommand struct has the expected
