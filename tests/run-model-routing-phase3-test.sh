@@ -135,21 +135,14 @@ T1_BACKUPS="$T1_DIR/state/model-routing-backups"
 make_candidate "my-agent" "opus" "sonnet" > "$T1_CANDS"
 
 # Use YAKOS_PROJECT_DIR so the promote command finds the project agent.
-MR_CANDS_OVERRIDE="$T1_CANDS" \
-MR_HISTORY_OVERRIDE="$T1_HIST" \
-MR_GRAVEYARD_OVERRIDE="$T1_GRAVE" \
-MR_BACKUPS_OVERRIDE="$T1_BACKUPS" \
-T1_OUT="$(
-    HOME="$FAKE_HOME" \
-    YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$MOCK_PASS_LIB" \
-    YAKOS_PROJECT_DIR="$T1_DIR/project" \
-    YAKOS_MR_CANDIDATES="$T1_CANDS" \
-    YAKOS_MR_HISTORY="$T1_HIST" \
-    YAKOS_MR_GRAVEYARD="$T1_GRAVE" \
-    YAKOS_MR_BACKUPS_DIR="$T1_BACKUPS" \
-    bash "$YAKOS_LIB/model-routing.sh" promote my-agent 2>&1 || true
-)"
+HOME="$FAKE_HOME" \
+YAKOS_ROOT="$REPO_ROOT" \
+YAKOS_PROJECT_DIR="$T1_DIR/project" \
+YAKOS_MR_CANDIDATES="$T1_CANDS" \
+YAKOS_MR_HISTORY="$T1_HIST" \
+YAKOS_MR_GRAVEYARD="$T1_GRAVE" \
+YAKOS_MR_BACKUPS_DIR="$T1_BACKUPS" \
+env YAKOS_LIB="$MOCK_PASS_LIB" bash "$YAKOS_LIB/model-routing.sh" promote my-agent >/dev/null 2>&1 || true
 
 # Check frontmatter rewritten.
 if grep -q 'model: sonnet' "$T1_AGENT" 2>/dev/null; then
@@ -210,12 +203,11 @@ make_candidate "global-agent" "opus" "haiku" > "$T2_CANDS"
 T2_OUT="$(
     HOME="$FAKE_HOME" \
     YAKOS_ROOT="$T2_DIR" \
-    YAKOS_LIB="$MOCK_PASS_LIB" \
     YAKOS_MR_CANDIDATES="$T2_CANDS" \
     YAKOS_MR_HISTORY="$T2_HIST" \
     YAKOS_MR_GRAVEYARD="$T2_GRAVE" \
     YAKOS_MR_BACKUPS_DIR="$T2_BACKUPS" \
-    bash "$YAKOS_LIB/model-routing.sh" promote global-agent --global 2>&1 || true
+    env YAKOS_LIB="$MOCK_PASS_LIB" bash "$YAKOS_LIB/model-routing.sh" promote global-agent --global 2>&1 || true
 )"
 
 if grep -q 'model: haiku' "$T2_DIR/lib/agents/global-agent.md" 2>/dev/null; then
@@ -241,7 +233,6 @@ T3_RC=0
 T3_OUT="$(
     HOME="$FAKE_HOME" \
     YAKOS_ROOT="$T3_DIR" \
-    YAKOS_LIB="$YAKOS_LIB" \
     YAKOS_MR_CANDIDATES="$T3_DIR/state/model-routing-candidates.ndjson" \
     YAKOS_MR_HISTORY="$T3_DIR/state/model-routing-history.ndjson" \
     YAKOS_MR_GRAVEYARD="$T3_DIR/state/model-routing-graveyard.ndjson" \
@@ -291,7 +282,6 @@ T4_RC=0
 T4_OUT="$(
     HOME="$FAKE_HOME" \
     YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$YAKOS_LIB" \
     YAKOS_PROJECT_DIR="$T4_DIR/project" \
     YAKOS_MR_CANDIDATES="$T4_DIR/state/model-routing-candidates.ndjson" \
     YAKOS_MR_HISTORY="$T4_DIR/state/model-routing-history.ndjson" \
@@ -331,13 +321,12 @@ T5_RC=0
 T5_OUT="$(
     HOME="$FAKE_HOME" \
     YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$MOCK_FAIL_LIB" \
     YAKOS_PROJECT_DIR="$T5_DIR/project" \
     YAKOS_MR_CANDIDATES="$T5_DIR/state/model-routing-candidates.ndjson" \
     YAKOS_MR_HISTORY="$T5_DIR/state/model-routing-history.ndjson" \
     YAKOS_MR_GRAVEYARD="$T5_DIR/state/model-routing-graveyard.ndjson" \
     YAKOS_MR_BACKUPS_DIR="$T5_DIR/state/model-routing-backups" \
-    bash "$YAKOS_LIB/model-routing.sh" promote val-agent 2>&1
+    env YAKOS_LIB="$MOCK_FAIL_LIB" bash "$YAKOS_LIB/model-routing.sh" promote val-agent 2>&1
 )" || T5_RC=$?
 
 if [ "$T5_RC" -ne 0 ]; then
@@ -376,7 +365,6 @@ make_candidate "reject-agent" "opus" "haiku" > "$T6_CANDS"
 T6_OUT="$(
     HOME="$FAKE_HOME" \
     YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$YAKOS_LIB" \
     YAKOS_MR_CANDIDATES="$T6_CANDS" \
     YAKOS_MR_HISTORY="$T6_DIR/state/model-routing-history.ndjson" \
     YAKOS_MR_GRAVEYARD="$T6_GRAVE" \
@@ -435,7 +423,6 @@ T7_RC=0
 T7_OUT="$(
     HOME="$FAKE_HOME" \
     YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$YAKOS_LIB" \
     YAKOS_MR_CANDIDATES="$T7_CANDS" \
     YAKOS_MR_HISTORY="$T7_DIR/state/model-routing-history.ndjson" \
     YAKOS_MR_GRAVEYARD="$T7_GRAVE" \
@@ -470,7 +457,6 @@ T7_FORCE_RC=0
 T7_FORCE_OUT="$(
     HOME="$FAKE_HOME" \
     YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$YAKOS_LIB" \
     YAKOS_MR_CANDIDATES="$T7_CANDS" \
     YAKOS_MR_HISTORY="$T7_DIR/state/model-routing-history.ndjson" \
     YAKOS_MR_GRAVEYARD="$T7_GRAVE" \
@@ -527,7 +513,6 @@ done
 T8_OUT="$(
     HOME="$FAKE_HOME" \
     YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$YAKOS_LIB" \
     YAKOS_MR_CANDIDATES="$T8_DIR/state/model-routing-candidates.ndjson" \
     YAKOS_MR_HISTORY="$T8_HIST" \
     YAKOS_MR_GRAVEYARD="$T8_GRAVE" \
@@ -560,7 +545,6 @@ fi
 T8_FILTER_OUT="$(
     HOME="$FAKE_HOME" \
     YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$YAKOS_LIB" \
     YAKOS_MR_CANDIDATES="$T8_DIR/state/model-routing-candidates.ndjson" \
     YAKOS_MR_HISTORY="$T8_HIST" \
     YAKOS_MR_GRAVEYARD="$T8_GRAVE" \
@@ -622,17 +606,14 @@ T9_BEFORE_CHECKSUM="$(grep -v 'model:' "$T9_AGENT" | cksum)"
 
 make_candidate "comment-agent" "opus" "haiku" > "$T9_DIR/state/model-routing-candidates.ndjson"
 
-T9_OUT="$(
-    HOME="$FAKE_HOME" \
-    YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$MOCK_PASS_LIB" \
-    YAKOS_PROJECT_DIR="$T9_DIR/project" \
-    YAKOS_MR_CANDIDATES="$T9_DIR/state/model-routing-candidates.ndjson" \
-    YAKOS_MR_HISTORY="$T9_DIR/state/model-routing-history.ndjson" \
-    YAKOS_MR_GRAVEYARD="$T9_DIR/state/model-routing-graveyard.ndjson" \
-    YAKOS_MR_BACKUPS_DIR="$T9_DIR/state/model-routing-backups" \
-    bash "$YAKOS_LIB/model-routing.sh" promote comment-agent 2>&1 || true
-)"
+HOME="$FAKE_HOME" \
+YAKOS_ROOT="$REPO_ROOT" \
+YAKOS_PROJECT_DIR="$T9_DIR/project" \
+YAKOS_MR_CANDIDATES="$T9_DIR/state/model-routing-candidates.ndjson" \
+YAKOS_MR_HISTORY="$T9_DIR/state/model-routing-history.ndjson" \
+YAKOS_MR_GRAVEYARD="$T9_DIR/state/model-routing-graveyard.ndjson" \
+YAKOS_MR_BACKUPS_DIR="$T9_DIR/state/model-routing-backups" \
+env YAKOS_LIB="$MOCK_PASS_LIB" bash "$YAKOS_LIB/model-routing.sh" promote comment-agent >/dev/null 2>&1 || true
 
 # model: line updated.
 if grep -q 'model: haiku' "$T9_AGENT" 2>/dev/null; then

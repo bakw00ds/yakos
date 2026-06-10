@@ -333,8 +333,7 @@ if [ -s "$_t5_calib_log" ]; then
         || fail "test-5: calibration record type=$_t5_type (expected calibration_run)"
 
     _t5_dim_rates="$(printf '%s' "$_t5_record" | jq '.dim_agreement_rates | type' 2>/dev/null || true)"
-    [ "$_t5_dim_rates" = "string" ] && [ "$_t5_dim_rates" = "object" ] || \
-        [ "$_t5_dim_rates" = "object" ] && ok "test-5: dim_agreement_rates is object" \
+    [ "$_t5_dim_rates" = "object" ] && ok "test-5: dim_agreement_rates is object" \
         || { note "dim_agreement_rates type=$_t5_dim_rates"; ok "test-5: dim_agreement_rates field present (type: $( printf '%s' "$_t5_record" | jq '.dim_agreement_rates | type' 2>/dev/null || echo unknown))"; }
 
     _t5_trustworthy="$(printf '%s' "$_t5_record" | jq 'has("trustworthy")' 2>/dev/null || true)"

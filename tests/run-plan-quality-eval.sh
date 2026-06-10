@@ -52,7 +52,6 @@ score_plan_mocked() {
     trap 'rm -f "$tmp_log" 2>/dev/null || true' RETURN
 
     # Run with a temp log file so tests don't pollute the real state dir
-    local rc=0
     SCORING_RECORD="$(
         YAKOS_PLAN_JUDGE_MOCK="$mock_dir" \
         HOME_OVERRIDE="$(dirname "$tmp_log")" \
@@ -62,7 +61,7 @@ score_plan_mocked() {
         # We need the log record, not stdout (which is the report).
         # score-plan.sh writes to $HOME/.yakos-state/plan-quality-log.ndjson
         # Override HOME so it writes to our temp location.
-    )" || rc=$?
+    )" || true
 
     # Re-run with HOME override to capture the log record
     local tmp_home
@@ -101,7 +100,6 @@ run_test() {
     mkdir -p "$tmp_home/.yakos-state"
 
     local extra_env=("$@")
-    local rc=0
 
     # Build env prefix
     local env_cmd=()
@@ -115,12 +113,12 @@ run_test() {
             HOME="$tmp_home" \
             env "${env_cmd[@]}" \
             bash "$SKILL_DIR/scripts/score-plan.sh" "$plan_file" \
-            >/dev/null 2>/dev/null || rc=$?
+            >/dev/null 2>/dev/null || true
     else
         YAKOS_PLAN_JUDGE_MOCK="$mock_dir" \
             HOME="$tmp_home" \
             bash "$SKILL_DIR/scripts/score-plan.sh" "$plan_file" \
-            >/dev/null 2>/dev/null || rc=$?
+            >/dev/null 2>/dev/null || true
     fi
 
     local log_file="$tmp_home/.yakos-state/plan-quality-log.ndjson"

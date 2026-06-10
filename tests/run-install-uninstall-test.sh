@@ -167,7 +167,7 @@ PROJECTS_DIR="$T1/.claude/projects"
 if [ -d "$PROJECTS_DIR" ]; then
     fail "install created ~/.claude/projects/ (should never touch it)"
 else
-    ok "~/.claude/projects/ not created by install"
+    ok "\$HOME/.claude/projects/ not created by install"
 fi
 
 # ===========================================================================
@@ -225,9 +225,9 @@ run_install "$T9" "$FAKE_ROOT9" || true
 run_uninstall "$T9" || true
 
 if [ -f "$T9/.claude/projects/some-project/MEMORY.md" ]; then
-    ok "~/.claude/projects/ preserved through install+uninstall"
+    ok "\$HOME/.claude/projects/ preserved through install+uninstall"
 else
-    fail "~/.claude/projects/some-project/MEMORY.md was removed (should be untouched)"
+    fail "\$HOME/.claude/projects/some-project/MEMORY.md was removed (should be untouched)"
 fi
 
 # ===========================================================================
