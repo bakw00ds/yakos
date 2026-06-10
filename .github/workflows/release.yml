@@ -129,7 +129,7 @@ jobs:
 
     steps:
       - name: Download macOS binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: binary-darwin-*
           path: dist/
@@ -237,7 +237,7 @@ jobs:
 
     steps:
       - name: Download Windows binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: binary-windows-amd64
           path: dist/
@@ -308,7 +308,7 @@ jobs:
           fetch-depth: 0  # needed for git log since last tag
 
       - name: Download all binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: binary-*
           path: dist/
