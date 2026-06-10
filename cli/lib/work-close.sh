@@ -23,7 +23,6 @@ set -eu
 
 PLAN_QUALITY_LOG="${YAKOS_PLAN_QUALITY_LOG:-$HOME/.yakos-state/plan-quality-log.ndjson}"
 DISPATCH_LOG="${YAKOS_DISPATCH_LOG:-$HOME/.yakos-state/dispatch-log.ndjson}"
-SESSIONS_LOG=""  # resolved below after paths.sh loads
 
 usage() {
     cat <<'EOF'
@@ -120,7 +119,6 @@ SESSION_START_TS="null"
 _resolve_session_start() {
     local current_dir
     current_dir="$(yakos_current_dir)"
-    SESSIONS_LOG="$(yakos_sessions_log_file)"
     local started_file
     started_file="$(yakos_session_started_file)"
 
@@ -212,12 +210,9 @@ COST_USD="null"
 
 _compute_dispatch_stats() {
     [ -f "$DISPATCH_LOG" ] || return
-    # Filter by session window if we have timestamps; otherwise sum all
-    local filter_expr='.tokens_total // 0'
-    local cost_expr='.cost_usd // 0'
+    # Filter by session window if we have timestamps; otherwise sum all.
 
     if [ -n "$SESSION_START_TS" ] && [ "$SESSION_START_TS" != "null" ]; then
-        filter_expr='select(.ts >= $start) | .tokens_total // 0'
         local result
         result="$(jq -r \
             --arg start "$SESSION_START_TS" \

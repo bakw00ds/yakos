@@ -44,7 +44,6 @@ fail() { printf '  [FAIL] %s\n' "$*" >&2; fail=$((fail + 1)); }
 WORKDIR="$(mktemp -d -t yakos-stderr-test.XXXXXX)"
 trap 'rm -rf "$WORKDIR" 2>/dev/null || true' EXIT INT TERM
 
-ORIG_HOME="$HOME"
 export HOME="$WORKDIR/fakehome"
 mkdir -p "$HOME/.yakos-state" "$HOME/.yakos/plugins/mock-stderr"
 
@@ -119,7 +118,6 @@ run_dispatch() {
 
     YAKOS_MOCK_FIXTURE="$fixture_path" \
     YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$YAKOS_LIB" \
     HOME="$WORKDIR/fakehome" \
     bash "$YAKOS_LIB/dispatch.sh" \
         test-agent "dummy task" \

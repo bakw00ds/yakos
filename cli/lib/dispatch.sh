@@ -409,8 +409,6 @@ if [ "$rc" -ne 0 ] && [ -s "$stderr_tmp" ]; then
     stderr_last30="$(printf '%s' "$stderr_stripped" | tail -n 30 2>/dev/null || true)"
     # Truncate to 4096 bytes maximum. Use head -c for byte-level truncation.
     stderr_tail_raw="$(printf '%s' "$stderr_last30" | head -c 4096 2>/dev/null || printf '%s' "$stderr_last30")"
-    # Determine if we truncated.
-    stderr_tail_bytes="$(printf '%s' "$stderr_tail_raw" | wc -c | tr -d ' ' || echo 0)"
     if [ "$stderr_raw_size" -gt 4096 ] || \
        [ "$(printf '%s' "$stderr_stripped" | wc -l | tr -d ' ')" -gt 30 ]; then
         stderr_truncated_json="true"
