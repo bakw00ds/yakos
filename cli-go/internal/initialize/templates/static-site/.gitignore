@@ -1,0 +1,10 @@
+# yakOS static-site template — language/framework additions
+# Appended by `yakos init --template static-site`.
+
+public/
+_site/
+.hugo_build.lock
+.jekyll-cache/
+.jekyll-metadata
+node_modules/
+dist/

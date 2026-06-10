@@ -545,8 +545,7 @@ jobs:
           echo "team-lifecycle: bash smoke PASS"
 
       # ---------------------------------------------------------------------------
-      # Go Tier-0 hook parity tests (exit-code parity only; `|| true` until
-      # Go implementations land for the 18 new hooks)
+      # Go Tier-0 hook parity tests (all 21 hooks; fixtures present for all)
       # ---------------------------------------------------------------------------
 
       - name: Go Tier-0 hook exit-code parity (cycle-counter)
@@ -555,7 +554,7 @@ jobs:
           YAKOS_HOOK_NOW: "2026-01-01T00:00:00Z"
         run: |
           go test -count=1 -timeout 30s -run TestHookParity_CycleCounter \
-            ./internal/hooks/cyclecounter/... || true
+            ./internal/hooks/cyclecounter/...
 
       - name: Go Tier-0 hook exit-code parity (path-log)
         working-directory: cli-go
@@ -563,7 +562,7 @@ jobs:
           YAKOS_HOOK_NOW: "2026-01-01T00:00:00Z"
         run: |
           go test -count=1 -timeout 30s -run TestHookParity_PathLog \
-            ./internal/hooks/pathlog/... || true
+            ./internal/hooks/pathlog/...
 
       - name: Go Tier-0 hook exit-code parity (session-end-check)
         working-directory: cli-go
@@ -571,7 +570,7 @@ jobs:
           YAKOS_HOOK_NOW: "2026-01-01T00:00:00Z"
         run: |
           go test -count=1 -timeout 30s -run TestHookParity_SessionEndCheck \
-            ./internal/hooks/sessionendcheck/... || true
+            ./internal/hooks/sessionendcheck/...
 
       - name: Summary
         if: always()
@@ -579,7 +578,7 @@ jobs:
         run: |
           echo ""
           echo "Hook parity audit complete."
-          echo "Full scope (21 hooks): cycle-counter, path-log, session-end-check + 18 F5 hooks."
+          echo "Full scope (21 hooks): all hooks have fixtures and bash smoke coverage."
           echo "Bash smoke tests cover all 21 hooks."
-          echo "Go Tier-0 parity tests (advisory, || true): cycle-counter, path-log, session-end-check."
-          echo "Go implementations for the 18 F5 hooks land in a follow-up PR."
+          echo "Go Tier-0 parity tests: cycle-counter, path-log, session-end-check."
+          echo "Go implementations for all 21 hooks are present in cli-go/internal/hooks/."

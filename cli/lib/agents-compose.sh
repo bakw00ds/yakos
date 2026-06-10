@@ -216,7 +216,7 @@ yk_agents_compose_dir() {
             README.md|lead-template.md) continue ;;
         esac
 
-        local fm body id model extends_name tools_list desc raw_id
+        local fm body id model extends_name tools_list desc
         fm="$(yk_agents_extract_frontmatter "$file")"
         body="$(yk_agents_extract_body "$file")"
 
@@ -227,7 +227,6 @@ yk_agents_compose_dir() {
         # on the same key (both use the filename stem as the lookup path).
         # If frontmatter `id` were used here it would silently diverge from
         # any caller that resolves agents by filename (e.g. dispatch, tests).
-        raw_id="$(yk_agents_fm_get "$fm" "id")"
         id="${base%.md}"
 
         model="$(yk_agents_fm_get "$fm" "model")"

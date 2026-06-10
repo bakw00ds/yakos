@@ -392,7 +392,7 @@ else
     ' "$SETTINGS_TEMPLATE" 2>/dev/null || true)"
 
     case "$sup_matcher" in
-        *Edit*|*Write*|*MultiEdit*|*Bash*)
+        *MultiEdit*|*Edit*|*Write*|*Bash*)
             ok "test (g): matcher '$sup_matcher' contains mutation verbs (not wildcard)"
             ;;
         "*")

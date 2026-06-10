@@ -422,7 +422,7 @@ done
 echo
 echo "Test 14: yakos validate --strict passes on general-codex and general-agy"
 # Run validate in framework mode (no project path) and capture per-agent output.
-validate_out="$(YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$YAKOS_LIB" \
+validate_out="$(YAKOS_ROOT="$REPO_ROOT" \
     bash "$YAKOS_LIB/validate.sh" --strict 2>&1 || true)"
 for agent_id in general-codex general-agy; do
     agent_file="$REPO_ROOT/lib/agents/${agent_id}.md"
