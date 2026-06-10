@@ -47,6 +47,10 @@ const defaultNoticeThreshold = 75
 // defaultWarningThreshold is the hard-warning threshold.
 const defaultWarningThreshold = 90
 
+// defaultAutoThreshold is the default auto-compact threshold (opt-in only;
+// 0 means not configured).
+const defaultAutoThreshold = 0
+
 // maxHistoryLines is the number of history entries shown by `compact history`.
 const maxHistoryLines = 50
 
@@ -54,12 +58,17 @@ const maxHistoryLines = 50
 
 // Config carries everything Run needs.
 type Config struct {
-	// Subcommand is one of: now, threshold, history, help.
+	// Subcommand is one of: now, threshold, history, disable-auto, help.
 	Subcommand string
 
 	// ThresholdArg is the optional N argument for `compact threshold N`.
 	// Empty string means "show"; a decimal integer string means "set".
 	ThresholdArg string
+
+	// AutoArg is the value for `compact threshold --auto N`.
+	// Empty means not provided. "0" explicitly disables auto-compact.
+	// Non-empty non-zero string sets the auto-compact threshold.
+	AutoArg string
 
 	// Runtime is used when logging a `now` compaction event.
 	// Defaults to the YAKOS_RUNTIME env var value, or "claude".
@@ -89,6 +98,13 @@ type Result struct {
 
 	// WarningThreshold is the effective warning threshold after the operation.
 	WarningThreshold int
+
+	// AutoThreshold is the effective auto-compact threshold after the operation.
+	// 0 means not configured (auto-compact off).
+	AutoThreshold int
+
+	// AutoDisabled is true when compact_auto_disabled sentinel is set.
+	AutoDisabled bool
 
 	// ThresholdSet is true when a threshold was written (set subcommand only).
 	ThresholdSet bool
@@ -135,6 +151,9 @@ func Run(cfg Config) (*Result, error) {
 	case "threshold":
 		return runThreshold(cfg, res, w, settingsPath)
 
+	case "disable-auto":
+		return runDisableAuto(res, w, settingsPath)
+
 	case "history":
 		return runHistory(res, w, logPath)
 
@@ -151,9 +170,12 @@ func Run(cfg Config) (*Result, error) {
 func PrintHelp(w io.Writer) {
 	_, _ = fmt.Fprint(w, `yakos compact — manage context compaction
 
-  yakos compact now              # invoke runtime's /compact (currently prints; M3.1 will auto-send)
-  yakos compact threshold [N]    # show or set notice threshold (default 75)
-  yakos compact history          # past compactions
+  yakos compact now                       # invoke runtime's /compact (currently prints; M3.1 will auto-send)
+  yakos compact threshold [N]             # show or set notice threshold (default 75)
+  yakos compact threshold --auto N        # enable auto-compact at N% (opt-in; default OFF)
+  yakos compact threshold show            # show all three thresholds (notice, warning, auto)
+  yakos compact disable-auto             # write compact_auto_disabled sentinel (opt-out)
+  yakos compact history                   # past compactions
 `)
 }
 
@@ -191,21 +213,60 @@ state if you want to be able to rewind from this point.
 }
 
 func runThreshold(cfg Config, res *Result, w io.Writer, settingsPath string) (*Result, error) {
-	if cfg.ThresholdArg == "" {
-		// Show current thresholds.
-		notice, warning, err := readThresholds(settingsPath)
+	// Handle --auto N: set the auto-compact threshold.
+	if cfg.AutoArg != "" {
+		n, err := strconv.Atoi(cfg.AutoArg)
 		if err != nil {
-			// Gracefully fall back to defaults when settings are absent/corrupt.
-			notice = defaultNoticeThreshold
-			warning = defaultWarningThreshold
+			return nil, fmt.Errorf("--auto threshold must be a number (1-99); got %q", cfg.AutoArg)
 		}
-		_, _ = fmt.Fprintf(w, "notice = %d%%, warning = %d%%\n", notice, warning)
+		if n < 1 || n > 99 {
+			return nil, fmt.Errorf("--auto threshold must be 1-99; got %d", n)
+		}
+
+		data, err := readSettingsJSON(settingsPath)
+		if err != nil {
+			data = map[string]interface{}{}
+		}
+		thresholds, _ := data["context_thresholds"].(map[string]interface{})
+		if thresholds == nil {
+			thresholds = map[string]interface{}{}
+		}
+		thresholds["auto"] = n
+		data["context_thresholds"] = thresholds
+		// Also clear any disable sentinel when operator explicitly sets auto.
+		delete(data, "compact_auto_disabled")
+
+		if err := writeSettingsJSON(settingsPath, data); err != nil {
+			return nil, fmt.Errorf("write settings: %w", err)
+		}
+		_, _ = fmt.Fprintf(w, "auto-compact threshold set to %d%% (Stop hook will trigger /compact when context crosses this level)\n", n)
+		res.AutoThreshold = n
+		res.ThresholdSet = true
+		// Read notice/warning for the result.
+		notice, warning, _, _ := readThresholds(settingsPath)
 		res.NoticeThreshold = notice
 		res.WarningThreshold = warning
 		return res, nil
 	}
 
-	// Validate the new threshold value.
+	if cfg.ThresholdArg == "" || cfg.ThresholdArg == "show" {
+		// Show all three thresholds.
+		notice, warning, auto, autoDisabled := readThresholds(settingsPath)
+		autoStr := "OFF (not configured)"
+		if autoDisabled {
+			autoStr = "OFF (disabled via 'yakos compact disable-auto')"
+		} else if auto > 0 {
+			autoStr = fmt.Sprintf("%d%%", auto)
+		}
+		_, _ = fmt.Fprintf(w, "notice = %d%%, warning = %d%%, auto-compact = %s\n", notice, warning, autoStr)
+		res.NoticeThreshold = notice
+		res.WarningThreshold = warning
+		res.AutoThreshold = auto
+		res.AutoDisabled = autoDisabled
+		return res, nil
+	}
+
+	// Validate the new notice threshold value.
 	n, err := strconv.Atoi(cfg.ThresholdArg)
 	if err != nil {
 		return nil, fmt.Errorf("threshold must be a number (1-99); got %q", cfg.ThresholdArg)
@@ -235,6 +296,24 @@ func runThreshold(cfg Config, res *Result, w io.Writer, settingsPath string) (*R
 	res.NoticeThreshold = n
 	res.WarningThreshold = defaultWarningThreshold
 	res.ThresholdSet = true
+	return res, nil
+}
+
+// runDisableAuto writes the compact_auto_disabled sentinel to settings.json.
+// This is the operator opt-out for auto-compact, distinct from simply not
+// configuring the auto threshold.
+func runDisableAuto(res *Result, w io.Writer, settingsPath string) (*Result, error) {
+	data, err := readSettingsJSON(settingsPath)
+	if err != nil {
+		data = map[string]interface{}{}
+	}
+	data["compact_auto_disabled"] = true
+
+	if err := writeSettingsJSON(settingsPath, data); err != nil {
+		return nil, fmt.Errorf("write settings: %w", err)
+	}
+	_, _ = fmt.Fprintln(w, "auto-compact disabled. Run 'yakos compact threshold --auto N' to re-enable.")
+	res.AutoDisabled = true
 	return res, nil
 }
 
@@ -344,23 +423,30 @@ func formatHistoryLine(raw string) string {
 }
 
 // readThresholds reads context_thresholds from settings.json.
-// Returns (notice, warning, error).
-func readThresholds(settingsPath string) (notice, warning int, err error) {
+// Returns (notice, warning, auto, autoDisabled).
+// auto == 0 means auto-compact is not configured.
+func readThresholds(settingsPath string) (notice, warning, auto int, autoDisabled bool) {
+	notice, warning, auto = defaultNoticeThreshold, defaultWarningThreshold, defaultAutoThreshold
 	data, err := readSettingsJSON(settingsPath)
 	if err != nil {
-		return defaultNoticeThreshold, defaultWarningThreshold, err
+		return
 	}
 	thresholds, _ := data["context_thresholds"].(map[string]interface{})
-
-	notice = defaultNoticeThreshold
-	if v, ok := thresholds["notice"].(float64); ok {
-		notice = int(v)
+	if thresholds != nil {
+		if v, ok := thresholds["notice"].(float64); ok {
+			notice = int(v)
+		}
+		if v, ok := thresholds["warning"].(float64); ok {
+			warning = int(v)
+		}
+		if v, ok := thresholds["auto"].(float64); ok {
+			auto = int(v)
+		}
 	}
-	warning = defaultWarningThreshold
-	if v, ok := thresholds["warning"].(float64); ok {
-		warning = int(v)
+	if v, ok := data["compact_auto_disabled"].(bool); ok {
+		autoDisabled = v
 	}
-	return notice, warning, nil
+	return
 }
 
 // readSettingsJSON reads and unmarshals settings.json, returning an empty map

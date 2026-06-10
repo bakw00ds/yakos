@@ -1,0 +1,9 @@
+# yakOS go template — language/framework additions
+# Appended by `yakos init --template go`.
+
+bin/
+*.test
+*.out
+vendor/
+/dist/
+coverage.txt

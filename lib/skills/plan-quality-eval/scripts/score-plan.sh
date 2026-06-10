@@ -121,12 +121,11 @@ if [ "$CALIBRATE" = "1" ]; then
         local_tmp_home="$(mktemp -d -t yakos-calib.XXXXXX)"
         mkdir -p "$local_tmp_home/.yakos-state"
 
-        score_rc=0
         YAKOS_PLAN_JUDGE_MOCK="${YAKOS_PLAN_JUDGE_MOCK:-}" \
             HOME="$local_tmp_home" \
             bash "$0" "$plan_file" \
             --rubric "$RUBRIC_FILE" \
-            >/dev/null 2>/dev/null || score_rc=$?
+            >/dev/null 2>/dev/null || true
 
         local_log="$local_tmp_home/.yakos-state/plan-quality-log.ndjson"
         if [ ! -f "$local_log" ]; then
@@ -777,7 +776,7 @@ fi
 AGGREGATE="$(printf '%s' "$SCORING_OUTPUT" | jq -r '.aggregate_score')"
 DISSENT="$(printf '%s' "$SCORING_OUTPUT" | jq -r '.dissent')"
 VERDICT="$(printf '%s' "$SCORING_OUTPUT" | jq -r '.verdict')"
-RECOMMENDED="$(printf '%s' "$SCORING_OUTPUT" | jq -r '.recommended_action')"
+# RECOMMENDED field extracted for potential future use (verdict drives gate logic below)."
 THRESHOLD="$(printf '%s' "$SCORING_OUTPUT" | jq -r '.threshold')"
 
 ct_log "score-plan: aggregate=$AGGREGATE threshold=$THRESHOLD dissent=$DISSENT verdict=$VERDICT"
