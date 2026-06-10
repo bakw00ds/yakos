@@ -605,7 +605,7 @@ echo "  new=$A_NEW ok=$A_OK warns=$A_WARN"
 echo ""
 
 # Per-project phases
-total=0; drift_count=0
+total=0
 echo "Project hook + settings refresh:"
 while IFS= read -r proj; do
     [ -n "$proj" ] || continue

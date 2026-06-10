@@ -300,8 +300,15 @@ func Run(cfg Config) (*Result, error) {
 	// ---- AGENTS.md -----------------------------------------------------------
 
 	agentsMD := filepath.Join(projAbs, "AGENTS.md")
-	if err := writeTemplateConditional("base", "AGENTS.md", agentsMD, cfg.Force, cfg.DryRun, res); err != nil {
-		return nil, err
+	if kind != "base" {
+		// Kind overlay provides its own AGENTS.md; use it instead of base.
+		if err := writeTemplateConditional(kind, "AGENTS.md", agentsMD, cfg.Force, cfg.DryRun, res); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := writeTemplateConditional("base", "AGENTS.md", agentsMD, cfg.Force, cfg.DryRun, res); err != nil {
+			return nil, err
+		}
 	}
 
 	// ---- .yakos.yml ----------------------------------------------------------
@@ -329,6 +336,30 @@ func Run(cfg Config) (*Result, error) {
 	} else {
 		if err := appendGitignorePatterns(projGitignore, giMarker); err != nil {
 			_, _ = fmt.Fprintf(cfg.ErrWriter, "init: warning: could not update project .gitignore: %v\n", err)
+		}
+	}
+
+	// ---- kind-specific .gitignore additions --------------------------------
+
+	if kind != "base" {
+		kindGiMarker := "# yakOS " + kind + " template additions"
+		if cfg.DryRun {
+			res.DryRunFiles = append(res.DryRunFiles, projGitignore+" (append "+kind+" patterns)")
+		} else {
+			if data, err := readTemplate(kind, ".gitignore"); err == nil {
+				if appendErr := appendKindGitignore(projGitignore, kindGiMarker, data); appendErr != nil {
+					_, _ = fmt.Fprintf(cfg.ErrWriter, "init: warning: could not append %s .gitignore additions: %v\n", kind, appendErr)
+				}
+			}
+			// If the kind has no .gitignore template, skip silently.
+		}
+	}
+
+	// ---- kind-specific .claude/agents/ files --------------------------------
+
+	if kind != "base" {
+		if err := writeKindAgents(kind, projAbs, cfg.Force, cfg.DryRun, res); err != nil {
+			return nil, err
 		}
 	}
 
@@ -494,6 +525,48 @@ func atomicWrite(path string, content []byte, mode os.FileMode) error {
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename %s → %s: %w", tmp, path, err)
+	}
+	return nil
+}
+
+// appendKindGitignore appends kind-specific .gitignore content to path if the
+// marker is not already present.
+func appendKindGitignore(path, marker string, content []byte) error {
+	if data, err := os.ReadFile(path); err == nil { //nolint:gosec
+		if strings.Contains(string(data), marker) {
+			return nil
+		}
+	}
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644) //nolint:gosec
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	_, err = fmt.Fprintf(f, "\n%s\n%s", marker, string(content))
+	return err
+}
+
+// writeKindAgents copies all .md files from templates/<kind>/.claude/agents/
+// into <projAbs>/.claude/agents/. Files are written conditionally (skip if
+// already present, unless force is set).
+func writeKindAgents(kind, projAbs string, force, dryRun bool, res *Result) error {
+	prefix := "templates/" + kind + "/.claude/agents"
+	entries, err := fs.ReadDir(templates, prefix)
+	if err != nil {
+		// No agents directory for this kind — skip silently.
+		return nil
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		src := ".claude/agents/" + e.Name()
+		dst := filepath.Join(projAbs, ".claude", "agents", e.Name())
+		if err := writeTemplateConditional(kind, src, dst, force, dryRun, res); err != nil {
+			return err
+		}
 	}
 	return nil
 }
