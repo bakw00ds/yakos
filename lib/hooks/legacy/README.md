@@ -1,7 +1,13 @@
 # lib/hooks/legacy/ — bash hook lifecycle staging area
 
-**Current state: empty. Zero bash hooks have been moved here. All 21 bash
-hooks remain authoritative at `lib/hooks/*.sh`.**
+**Status: MOVED 2026-06-03 with backward-compat symlinks at `lib/hooks/*.sh` —
+operator action: none required. Full removal scheduled for one release cycle
+after the next stable release.**
+
+All 21 bash hooks now live in this directory. Relative symlinks at
+`lib/hooks/<name>.sh → legacy/<name>.sh` preserve all existing operator
+invocation paths (`yakos refresh`, deployed project hooks, CI references).
+Remove those symlinks only when the removal criteria below are met.
 
 This directory is reserved for bash hooks that have been superseded by a
 Go-native Tier-0 counterpart AND have completed the operator opt-in
@@ -85,8 +91,13 @@ above.
 | # | Release | Date | Notes |
 |---|---|---|---|
 | 1 | v0.37.0.0 | 2026-06-03 | Go-native hooks ship; `YAKOS_HOOKS=bash` remains the default |
+| F6 | operator override | 2026-06-03 | All 21 `.sh` files moved to `lib/hooks/legacy/` ahead of release #2 (operator action). Backward-compat symlinks placed at `lib/hooks/*.sh`. |
 
-**Target for move:** after release #2 appears in this table with zero
+**Removal forecast:** symlinks at `lib/hooks/*.sh` may be deleted one release
+cycle after the next stable release that records zero parity-divergence reports.
+Update this tracker when release #2 is cut; then open the symlink-removal PR.
+
+**Target for symlink removal:** after release #2 appears in this table with zero
 parity-divergence reports filed in
 `work/current/logs/hook-parity-divergence.ndjson` or the issue tracker.
 

@@ -34,12 +34,24 @@ import (
 )
 
 const (
-	hookName           = "context-threshold"
-	defaultNoticePct   = 75
-	defaultWarningPct  = 90
+	hookName = "context-threshold"
+
+	defaultNoticePct  = 75
+	defaultWarningPct = 90
+
+	// DefaultCompactPct is the suggested auto-compact threshold (opt-in).
+	// Sits between notice (75%) and warning (90%), giving the compact a
+	// chance to run before the warning checkpoint fires.
+	DefaultCompactPct = 85
+
 	defaultWindowClaude = 200_000
 	defaultWindowCodex  = 256_000
 	defaultWindowAgy    = 1_000_000
+
+	// CompactPendingMarker is the filename written by context-threshold to
+	// work/current/ when the auto-compact threshold is crossed. The
+	// auto-compact-trigger Stop hook reads this marker and injects "/compact".
+	CompactPendingMarker = ".compact-pending"
 )
 
 // Settings mirrors the context_thresholds section of ~/.yakos-state/settings.json.
@@ -47,7 +59,9 @@ type Settings struct {
 	ContextThresholds struct {
 		Notice  *int `json:"notice"`
 		Warning *int `json:"warning"`
+		Auto    *int `json:"auto"`
 	} `json:"context_thresholds"`
+	CompactAutoDisabled bool `json:"compact_auto_disabled"`
 }
 
 // Hook implements runner.Hook for context threshold monitoring.
@@ -65,6 +79,12 @@ type Hook struct {
 
 	// NowFn is injected for tests.
 	NowFn func() time.Time
+
+	// MkdirAll is injected for tests (default: os.MkdirAll).
+	MkdirAll func(path string, perm os.FileMode) error
+
+	// WriteFile is injected for tests (default: os.WriteFile).
+	WriteFile func(name string, data []byte, perm os.FileMode) error
 }
 
 // New returns a Hook with sensible defaults.
@@ -90,7 +110,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	logFile := filepath.Join(h.WorkCurrentDir, "logs", hookName+".ndjson")
-	noticePct, warningPct := h.loadThresholds()
+	noticePct, warningPct, compactPct, autoDisabled := h.loadThresholds()
 	homeDir := h.homeDir()
 	runtime := in.Env["YAKOS_RUNTIME"]
 	if runtime == "" {
@@ -112,6 +132,14 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	ts := h.NowFn().UTC().Format(time.RFC3339)
+
+	// Write the .compact-pending marker when crossing the auto-compact threshold.
+	// This is opt-in: compactPct == 0 means the operator has not enabled auto-compact.
+	// The marker is written atomically (temp-rename) and consumed by the Stop hook
+	// (autocompacttrigger) which injects "/compact" as the next Claude Code turn.
+	if !autoDisabled && compactPct > 0 && pct >= compactPct {
+		h.writeCompactPendingMarker()
+	}
 
 	if pct >= warningPct {
 		// Auto-checkpoint.
@@ -136,19 +164,19 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 			"WARN: context at %d%% (threshold %d%%). Auto-checkpoint created at %s. Recommend 'yakos compact now' or '/compact'.\n",
 			pct, warningPct, checkpointDir)
 		h.appendLog(&out, logFile, "WARN", "checked",
-			fmt.Sprintf("pct=%d notice=%d warning=%d runtime=%s", pct, noticePct, warningPct, runtime),
-			map[string]any{"pct": pct, "notice": noticePct, "warning": warningPct, "runtime": runtime, "checkpoint": checkpointDir})
+			fmt.Sprintf("pct=%d notice=%d warning=%d auto=%d runtime=%s", pct, noticePct, warningPct, compactPct, runtime),
+			map[string]any{"pct": pct, "notice": noticePct, "warning": warningPct, "auto": compactPct, "runtime": runtime, "checkpoint": checkpointDir})
 	} else if pct >= noticePct {
 		out.Stderr = fmt.Appendf(out.Stderr,
 			"NOTE: context at %d%% (threshold %d%%). Recommend 'yakos compact now' or '/compact' before continuing.\n",
 			pct, noticePct)
 		h.appendLog(&out, logFile, "WARN", "checked",
-			fmt.Sprintf("pct=%d notice=%d warning=%d runtime=%s", pct, noticePct, warningPct, runtime),
-			map[string]any{"pct": pct, "notice": noticePct, "warning": warningPct, "runtime": runtime})
+			fmt.Sprintf("pct=%d notice=%d warning=%d auto=%d runtime=%s", pct, noticePct, warningPct, compactPct, runtime),
+			map[string]any{"pct": pct, "notice": noticePct, "warning": warningPct, "auto": compactPct, "runtime": runtime})
 	} else {
 		h.appendLog(&out, logFile, "REPORT", "checked",
-			fmt.Sprintf("pct=%d notice=%d warning=%d runtime=%s", pct, noticePct, warningPct, runtime),
-			map[string]any{"pct": pct, "notice": noticePct, "warning": warningPct, "runtime": runtime})
+			fmt.Sprintf("pct=%d notice=%d warning=%d auto=%d runtime=%s", pct, noticePct, warningPct, compactPct, runtime),
+			map[string]any{"pct": pct, "notice": noticePct, "warning": warningPct, "auto": compactPct, "runtime": runtime})
 	}
 
 	return out, nil
@@ -227,8 +255,10 @@ func (h *Hook) probeAgy(homeDir string) (int, error) {
 }
 
 // loadThresholds reads thresholds from ~/.yakos-state/settings.json.
-func (h *Hook) loadThresholds() (notice, warning int) {
-	notice, warning = defaultNoticePct, defaultWarningPct
+// Returns (notice, warning, compact, autoDisabled).
+// compact == 0 means auto-compact is not configured (opt-in default OFF).
+func (h *Hook) loadThresholds() (notice, warning, compact int, autoDisabled bool) {
+	notice, warning, compact = defaultNoticePct, defaultWarningPct, 0
 	stateDir := h.StateDir
 	if stateDir == "" {
 		stateDir = filepath.Join(h.homeDir(), ".yakos-state")
@@ -248,7 +278,37 @@ func (h *Hook) loadThresholds() (notice, warning int) {
 	if s.ContextThresholds.Warning != nil {
 		warning = *s.ContextThresholds.Warning
 	}
+	if s.ContextThresholds.Auto != nil {
+		compact = *s.ContextThresholds.Auto
+	}
+	autoDisabled = s.CompactAutoDisabled
 	return
+}
+
+// writeCompactPendingMarker writes work/current/.compact-pending atomically
+// (temp-rename, Q8). The auto-compact-trigger Stop hook reads this marker and
+// injects "/compact" as the next Claude Code turn.
+func (h *Hook) writeCompactPendingMarker() {
+	if h.WorkCurrentDir == "" {
+		return
+	}
+	mkdirAll := h.MkdirAll
+	if mkdirAll == nil {
+		mkdirAll = os.MkdirAll
+	}
+	writeFile := h.WriteFile
+	if writeFile == nil {
+		writeFile = os.WriteFile
+	}
+	if err := mkdirAll(h.WorkCurrentDir, 0755); err != nil { //nolint:gosec
+		return
+	}
+	markerPath := filepath.Join(h.WorkCurrentDir, CompactPendingMarker)
+	tmp := markerPath + ".tmp"
+	if err := writeFile(tmp, []byte(h.NowFn().UTC().Format(time.RFC3339)+"\n"), 0644); err != nil { //nolint:gosec
+		return
+	}
+	_ = os.Rename(tmp, markerPath)
 }
 
 func (h *Hook) homeDir() string {

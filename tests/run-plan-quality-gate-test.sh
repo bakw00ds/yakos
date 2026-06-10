@@ -30,7 +30,7 @@ set -eu
 REPO_ROOT="$(cd "$(dirname -- "$0")/.." && pwd -P)"
 HOOKS="$REPO_ROOT/lib/hooks"
 CLI_LIB="$REPO_ROOT/cli/lib"
-SKILL_DIR="$REPO_ROOT/lib/skills/plan-quality-eval"
+# SKILL_DIR is available for future tests that reference skill scripts directly.
 FIXTURES="$REPO_ROOT/tests/fixtures/plans"
 MOCK_BASE="$REPO_ROOT/tests/fixtures/plan-judge-mock"
 
@@ -589,8 +589,7 @@ fixture_edit_plan "$PLAN_PATH" \
 # CLI show
 if [ -f "$HOME/.yakos-state/plan-quality-log.ndjson" ] && \
    grep -q '"plan_scored"' "$HOME/.yakos-state/plan-quality-log.ndjson" 2>/dev/null; then
-    output="$(YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
-        YAKOS_PLAN_QUALITY_LOG="$HOME/.yakos-state/plan-quality-log.ndjson" \
+    output="$(YAKOS_PLAN_QUALITY_LOG="$HOME/.yakos-state/plan-quality-log.ndjson" \
         bash "$CLI_LIB/plan-score.sh" show 2>&1 || true)"
     if printf '%s' "$output" | grep -q "Plan Quality Report"; then
         ok "(l) CLI show: renders report header"
@@ -643,8 +642,7 @@ jq -nc \
       risk_count: 1}' \
     >> "$HOME/.yakos-state/plan-quality-log.ndjson"
 
-output="$(YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
-    YAKOS_PLAN_QUALITY_LOG="$HOME/.yakos-state/plan-quality-log.ndjson" \
+output="$(YAKOS_PLAN_QUALITY_LOG="$HOME/.yakos-state/plan-quality-log.ndjson" \
     bash "$CLI_LIB/plan-score.sh" history 2>&1 || true)"
 
 if printf '%s' "$output" | grep -q "p-test-history-fixture"; then
@@ -691,8 +689,7 @@ jq -nc --arg pid "$BLOCK_PLAN_ID" \
     > "$WORK_CURRENT/.plan-blocked"
 
 # Run override
-override_out="$(YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
-    YAKOS_PLAN_QUALITY_LOG="$HOME/.yakos-state/plan-quality-log.ndjson" \
+override_out="$(YAKOS_PLAN_QUALITY_LOG="$HOME/.yakos-state/plan-quality-log.ndjson" \
     bash "$CLI_LIB/plan-score.sh" override "$BLOCK_PLAN_ID" \
         --reason "reviewed and approved" 2>&1 || true)"
 
@@ -729,8 +726,7 @@ mkdir -p "$HOME/.yakos-state"
 touch "$HOME/.yakos-state/plan-quality-log.ndjson"
 
 override_rc=0
-YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
-    YAKOS_PLAN_QUALITY_LOG="$HOME/.yakos-state/plan-quality-log.ndjson" \
+YAKOS_PLAN_QUALITY_LOG="$HOME/.yakos-state/plan-quality-log.ndjson" \
     bash "$CLI_LIB/plan-score.sh" override "p-does-not-exist" \
         --reason "test" >/dev/null 2>&1 \
     || override_rc=$?

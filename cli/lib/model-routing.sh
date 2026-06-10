@@ -183,7 +183,6 @@ _mr_check_weekly_budget() {
 
 _mr_dispatch_case() {
     local subject="$1" task="$2" tier="$3" run_id="$4" project="$5"
-    local response_file cost duration_s input_tokens output_tokens
 
     if [ -n "${YAKOS_MR_MOCK_DISPATCH:-}" ]; then
         # Test-mode: read from mock directory.
@@ -374,7 +373,6 @@ cmd_eval() {
 
     local run_id
     run_id="$(_mr_gen_run_id)"
-    local tiers="haiku sonnet opus"
 
     # Emit eval_run_started.
     local started_rec
@@ -761,7 +759,7 @@ cmd_list() {
     ' "$MR_CANDIDATES" 2>/dev/null \
     | sort -t' ' -k1,1 -k8,8 \
     | awk '!seen[$1]++' \
-    | while IFS=' ' read -r agent cur sug savings n ci_str gen_at; do
+    | while IFS=' ' read -r agent cur sug savings n ci_str _gen_at; do
         printf '%-24s current=%-8s -> suggested=%-8s savings=~$%s/mo  n=%s  ci=[%s]\n' \
             "$agent" "$cur" "$sug" "$savings" "$n" "$ci_str"
     done
