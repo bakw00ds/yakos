@@ -107,7 +107,7 @@ jobs:
           sha256sum "${ASSET}" > "${ASSET}.sha256"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
@@ -207,7 +207,7 @@ jobs:
 
       - name: Re-upload signed macOS binaries
         if: env.MACOS_SIGNED == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binary-darwin-arm64
           path: dist/yakos-*-darwin-arm64*
@@ -216,7 +216,7 @@ jobs:
 
       - name: Re-upload signed macOS binaries (amd64)
         if: env.MACOS_SIGNED == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binary-darwin-amd64
           path: dist/yakos-*-darwin-amd64*
@@ -289,7 +289,7 @@ jobs:
 
       - name: Re-upload signed Windows binary
         if: env.WINDOWS_SIGNED == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binary-windows-amd64
           path: dist/yakos-*-windows-amd64*
