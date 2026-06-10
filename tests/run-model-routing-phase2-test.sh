@@ -136,7 +136,8 @@ EOF
 # Tests inject the appropriate file via YAKOS_MR_MOCK_JUDGE.
 
 JUDGE_PASS_FILE="$FIXTURES/judge-pass.json"
-JUDGE_FAIL_FILE="$FIXTURES/judge-fail.json"
+# judge-fail.json exists in fixtures for completeness but is not used in this
+# test file (low-confidence is simulated via the all-pass judge + margin math).
 
 # For most tests: sonnet and opus pass; haiku fails.
 # We create a "smart" judge wrapper that reads from different files
@@ -152,7 +153,6 @@ run_mr_eval() {
     local judge_file="${JUDGE_OVERRIDE:-$JUDGE_PASS_FILE}"
     HOME="$FAKE_HOME" \
     YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$YAKOS_LIB" \
     YAKOS_MR_EVAL_LOG="$MR_EVAL_LOG" \
     YAKOS_MR_CANDIDATES="$MR_CANDIDATES" \
     YAKOS_MR_MOCK_DISPATCH="$MOCK_DISPATCH_DIR" \
@@ -267,19 +267,16 @@ LOWCONF_CANDS="$LOWCONF_HOME/.yakos-state/model-routing-candidates.ndjson"
 # With all-pass judge (both sonnet and opus pass at 100%), sonnet has
 # 0 improvement over opus. For strict floor (5 cases < 12): requires
 # >= 0.10 pass-rate margin. Since both are 100%, margin = 0, so refused.
-LOWCONF_OUT="$(
-    HOME="$LOWCONF_HOME" \
-    YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$YAKOS_LIB" \
-    YAKOS_MR_EVAL_LOG="$LOWCONF_LOG" \
-    YAKOS_MR_CANDIDATES="$LOWCONF_CANDS" \
-    YAKOS_MR_MOCK_DISPATCH="$MOCK_DISPATCH_DIR" \
-    YAKOS_MR_MOCK_JUDGE="$JUDGE_PASS_FILE" \
-    bash "$YAKOS_LIB/model-routing.sh" eval \
-        test-runner \
-        --judge code-reviewer \
-        --project "$FAKE_PROJECT" 2>&1 || true
-)"
+HOME="$LOWCONF_HOME" \
+YAKOS_ROOT="$REPO_ROOT" \
+YAKOS_MR_EVAL_LOG="$LOWCONF_LOG" \
+YAKOS_MR_CANDIDATES="$LOWCONF_CANDS" \
+YAKOS_MR_MOCK_DISPATCH="$MOCK_DISPATCH_DIR" \
+YAKOS_MR_MOCK_JUDGE="$JUDGE_PASS_FILE" \
+bash "$YAKOS_LIB/model-routing.sh" eval \
+    test-runner \
+    --judge code-reviewer \
+    --project "$FAKE_PROJECT" >/dev/null 2>&1 || true
 
 if grep -q '"candidate_refused"' "$LOWCONF_LOG" 2>/dev/null; then
     refused_reason="$(grep '"candidate_refused"' "$LOWCONF_LOG" | tail -1 \
@@ -352,7 +349,6 @@ echo "Test 7: subject==judge hard refusal"
 SELF_JUDGE_RC=0
 HOME="$FAKE_HOME" \
 YAKOS_ROOT="$REPO_ROOT" \
-YAKOS_LIB="$YAKOS_LIB" \
 YAKOS_MR_EVAL_LOG="$MR_EVAL_LOG" \
 YAKOS_MR_CANDIDATES="$MR_CANDIDATES" \
 YAKOS_MR_MOCK_DISPATCH="$MOCK_DISPATCH_DIR" \
@@ -371,7 +367,6 @@ fi
 # Also verify the error message mentions self-evaluation.
 SELF_JUDGE_MSG="$(HOME="$FAKE_HOME" \
 YAKOS_ROOT="$REPO_ROOT" \
-YAKOS_LIB="$YAKOS_LIB" \
 YAKOS_MR_EVAL_LOG="$MR_EVAL_LOG" \
 YAKOS_MR_CANDIDATES="$MR_CANDIDATES" \
 YAKOS_MR_MOCK_DISPATCH="$MOCK_DISPATCH_DIR" \
@@ -402,7 +397,6 @@ BUDGET_CANDS="$BUDGET_HOME/.yakos-state/model-routing-candidates.ndjson"
 # will exceed the cap after 1 case.
 HOME="$BUDGET_HOME" \
 YAKOS_ROOT="$REPO_ROOT" \
-YAKOS_LIB="$YAKOS_LIB" \
 YAKOS_MR_EVAL_LOG="$BUDGET_LOG" \
 YAKOS_MR_CANDIDATES="$BUDGET_CANDS" \
 YAKOS_MR_MOCK_DISPATCH="$MOCK_DISPATCH_DIR" \
@@ -451,7 +445,6 @@ EOF
 LIST_OUT="$(
     HOME="$LIST_HOME" \
     YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$YAKOS_LIB" \
     YAKOS_MR_EVAL_LOG="/dev/null" \
     YAKOS_MR_CANDIDATES="$LIST_CANDS" \
     bash "$YAKOS_LIB/model-routing.sh" list 2>&1
@@ -494,7 +487,6 @@ done
 SHOW_OUT="$(
     HOME="$SHOW_HOME" \
     YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$YAKOS_LIB" \
     YAKOS_MR_EVAL_LOG="$SHOW_LOG" \
     YAKOS_MR_CANDIDATES="$SHOW_CANDS" \
     bash "$YAKOS_LIB/model-routing.sh" show backend 2>&1
@@ -525,7 +517,6 @@ PROMOTE_RC=0
 PROMOTE_OUT="$(
     HOME="$FAKE_HOME" \
     YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$YAKOS_LIB" \
     YAKOS_MR_EVAL_LOG="$MR_EVAL_LOG" \
     YAKOS_MR_CANDIDATES="$MR_CANDIDATES" \
     bash "$YAKOS_LIB/model-routing.sh" promote test-runner 2>&1
@@ -554,7 +545,6 @@ REJECT_RC=0
 REJECT_OUT="$(
     HOME="$FAKE_HOME" \
     YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$YAKOS_LIB" \
     YAKOS_MR_EVAL_LOG="$MR_EVAL_LOG" \
     YAKOS_MR_CANDIDATES="$MR_CANDIDATES" \
     bash "$YAKOS_LIB/model-routing.sh" reject test-runner 2>&1
@@ -582,7 +572,6 @@ HISTORY_RC=0
 HISTORY_OUT="$(
     HOME="$FAKE_HOME" \
     YAKOS_ROOT="$REPO_ROOT" \
-    YAKOS_LIB="$YAKOS_LIB" \
     YAKOS_MR_EVAL_LOG="$MR_EVAL_LOG" \
     YAKOS_MR_CANDIDATES="$MR_CANDIDATES" \
     bash "$YAKOS_LIB/model-routing.sh" history 2>&1
@@ -643,7 +632,6 @@ done
 FEW_RC=0
 HOME="$FEW_HOME" \
 YAKOS_ROOT="$REPO_ROOT" \
-YAKOS_LIB="$YAKOS_LIB" \
 YAKOS_MR_EVAL_LOG="$FEW_HOME/.yakos-state/model-routing-eval-log.ndjson" \
 YAKOS_MR_CANDIDATES="$FEW_HOME/.yakos-state/model-routing-candidates.ndjson" \
 YAKOS_MR_MOCK_DISPATCH="$MOCK_DISPATCH_DIR" \
@@ -676,7 +664,6 @@ echo "Test 15: subject==judge check also applies to agent IDs that match via --j
 ALT_RC=0
 HOME="$FAKE_HOME" \
 YAKOS_ROOT="$REPO_ROOT" \
-YAKOS_LIB="$YAKOS_LIB" \
 YAKOS_MR_EVAL_LOG="$MR_EVAL_LOG" \
 YAKOS_MR_CANDIDATES="$MR_CANDIDATES" \
 YAKOS_MR_MOCK_DISPATCH="$MOCK_DISPATCH_DIR" \

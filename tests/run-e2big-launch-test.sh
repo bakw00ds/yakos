@@ -364,6 +364,8 @@ fi
 
 echo
 echo "Test 17: hi_sender_role returns 'lead' when agent_type absent"
+# HI_INPUT is the global read by hi_sender_role (from hook-input.sh).
+# shellcheck disable=SC2034
 HI_INPUT='{"tool_name":"Edit","session_id":"test"}'
 got="$(hi_sender_role)"
 if [ "$got" = "lead" ]; then
@@ -393,6 +395,7 @@ if [ -n "$policy" ] && [ "$policy" != "null" ]; then
     # Check deny patterns (simplified — no glob, just prefix check for this test)
     deny_pattern="$(printf '%s' "$policy" | jq -r '.deny // [] | .[]' 2>/dev/null | head -1)"
     # Use bash case for fnmatch (same as path-allowlist.sh glob_match logic)
+    # shellcheck disable=SC2254  # intentional glob expansion in case pattern (mirrors path-allowlist.sh)
     case "$TEST_FILE" in
         ${deny_pattern/\*\*/*}) deny_hit="1" ;;
     esac

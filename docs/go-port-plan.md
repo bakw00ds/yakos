@@ -528,3 +528,46 @@ test suites). `Runner.NowFn` is injectable for deterministic parity logs.
 - After 2 releases of zero divergence across opted-in operators, `go` becomes
   default and bash hooks move to `lib/hooks/legacy/` per §3 above
 - After 1 release in `lib/hooks/legacy/`, bash hooks are removed
+
+---
+
+## Phase 1.5 — Telemetry (shipped 2026-06-03)
+
+Decision B (`docs/go-port-decisions-2026-06-02.md`) deferred the payload schema
+and endpoint to Phase 1.5.  Ideas rank 10 specified anonymised command + latency
++ error counters, default off.
+
+### What shipped
+
+**`yakos telemetry`** — `cli-go/internal/telemetry/` package + `cmd/yakos/main.go`
+wiring.  portedCommands 39→40; `TestPortedCommandsCount want=40`.
+
+Sub-subcommands: `enable [--endpoint URL]` / `disable` / `status` /
+`set-endpoint <url>` / `purge` / `show [--limit N]`.
+
+Files added:
+
+| File | Purpose |
+|---|---|
+| `internal/telemetry/event.go` | `Event` struct — the canonical NDJSON schema |
+| `internal/telemetry/config.go` | `Config` + `LoadConfig`/`SaveConfig` (0600, atomic temp-rename) |
+| `internal/telemetry/recorder.go` | `Record`, `CountRecords`, `ReadRecentRecords`, `PurgeLog` |
+| `internal/telemetry/shipper.go` | `ShipPending` (best-effort POST, 5s timeout, fail-silent) |
+| `internal/telemetry/session.go` | `SessionHash` (sha256 of CLAUDE_SESSION_ID, memoised) |
+| `internal/telemetry/redact.go` | `RedactEvent` defensive PII guard |
+| `internal/telemetry/telemetry.go` | `Run` + `ParseArgs` + `PrintHelp` |
+| `internal/telemetry/secure_unix.go` | No-op on Unix/macOS |
+| `internal/telemetry/secure_windows.go` | Delegates to `winsec.SecureFile` (PR #108 pattern) |
+| `internal/telemetry/telemetry_test.go` | 39 unit tests |
+| `internal/telemetry/README.md` | Schema + privacy + opt-in flow docs |
+
+### Privacy guarantees
+
+- Default off.  No data recorded or transmitted without `yakos telemetry enable`.
+- No PII ever — no usernames, hostnames, file paths, project names, tool inputs.
+- Network calls fail-silent.  CLI never blocks on telemetry shipping.
+- Config + log files: mode 0600 (Unix) / user-only DACL (Windows via winsec).
+- Session hash: SHA-256 of `CLAUDE_SESSION_ID` (or random nonce); irreversible.
+- No default endpoint.  Operators supply their own if they want network shipping.
+
+### Test count: 39

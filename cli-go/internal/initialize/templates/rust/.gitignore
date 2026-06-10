@@ -1,0 +1,7 @@
+# yakOS rust template — language/framework additions
+# Appended by `yakos init --template rust`.
+
+target/
+# Cargo.lock is committed for binary crates and omitted for library crates.
+# If this is a library, uncomment the next line:
+# Cargo.lock

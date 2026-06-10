@@ -149,6 +149,17 @@
       }
     ],
     "TeammateIdle": [],
+    "Stop": [
+      {
+        "_doc": "M3.1 auto-compact: checks for .compact-pending marker (written by context-threshold when context_thresholds.auto threshold is crossed) and injects /compact as the next turn. Opt-in via 'yakos compact threshold --auto 85'. No-op when marker absent or auto not configured.",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/auto-compact-trigger.sh"
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [
