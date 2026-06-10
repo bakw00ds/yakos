@@ -41,7 +41,6 @@ skip() { printf '  [skip] %s\n' "$*"; SKIP=$((SKIP + 1)); }
 
 FIXTURES="$REPO_ROOT/tests/fixtures/refresh"
 REFRESH_SH="$YAKOS_LIB/refresh.sh"
-TEMPLATE="$REPO_ROOT/lib/settings/settings.template.json"
 HOOKS_SRC="$REPO_ROOT/lib/hooks"
 
 # ---------------------------------------------------------------------------
@@ -365,7 +364,6 @@ T8="$WORKDIR/t8-agents"
 T8_HOME="$T8/home"
 mkdir -p "$T8_HOME/.claude/agents"
 
-AGENT_SRC="$REPO_ROOT/lib/agents/backend.md"
 AGENT_DST="$T8_HOME/.claude/agents/backend.md"
 
 # ---- 8a: missing → created
@@ -375,7 +373,7 @@ run_refresh_agents() {
 }
 cp -r "$FIXTURES/proj-in-sync" "$T8/project_dummy"
 
-AGENT_OUT_A="$(run_refresh_agents "$T8_HOME" 2>&1 || true)"
+run_refresh_agents "$T8_HOME" >/dev/null 2>&1 || true
 if [ -L "$AGENT_DST" ]; then
     ok "missing agent symlink backend.md created"
 else
@@ -424,8 +422,6 @@ mkdir -p "$T9/project/.claude" "$T9/project/scripts/hooks"
 # Write valid but minimal settings.json
 printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"${CLAUDE_PROJECT_DIR}/scripts/hooks/cycle-counter.sh"}]}]}}\n' \
     > "$T9/project/.claude/settings.json"
-
-HASH9_BEFORE="$(ct_sha256 "$T9/project/.claude/settings.json")"
 
 # Now inject a corrupt template that would cause python to fail
 CORRUPT_TEMPLATE="$WORKDIR/corrupt-template.json"
