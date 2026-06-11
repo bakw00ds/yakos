@@ -34,6 +34,14 @@
       "gemini": "gemini-2.5-pro",
       "agy": "claude-opus-4.6",
       "antigravity-sdk": "claude-opus-4.6"
+    },
+    "frontier": {
+      "claude": "fable",
+      "claude-sdk": "fable",
+      "codex": "gpt-5",
+      "gemini": "gemini-2.5-pro",
+      "agy": "claude-fable-5",
+      "antigravity-sdk": "claude-fable-5"
     }
   }
 }

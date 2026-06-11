@@ -111,7 +111,7 @@ Subcommands:
                     --role <r>        specialist | reviewer | maintainer
                                       (default: specialist).
                     --domain <text>   Free-form domain tag.
-                    --model <alias>   opus | sonnet | haiku | <full>.
+                    --model <alias>   fable | opus | sonnet | haiku | <full>.
                     --tools "<list>"  Comma-separated tool names.
                     --force           Overwrite if exists.
 

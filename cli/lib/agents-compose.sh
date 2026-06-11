@@ -174,9 +174,10 @@ yk_agents_compose_one() {
             cheap)            resolved_model='haiku' ;;
             balanced)         resolved_model='sonnet' ;;
             best|reasoning)   resolved_model='opus' ;;
+            frontier)         resolved_model='fable' ;;
         esac
         case "$resolved_model" in
-            haiku|sonnet|opus) model="$resolved_model"; model_filter='.[$id].model = $model' ;;
+            haiku|sonnet|opus|fable) model="$resolved_model"; model_filter='.[$id].model = $model' ;;
             *) ct_log "agents-compose: WARN unknown model '$model' for $id; omitting from JSON" ;;
         esac
     fi

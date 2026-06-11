@@ -19,9 +19,11 @@ func TestResolveAlias(t *testing.T) {
 		{"balanced", "sonnet"},
 		{"best", "opus"},
 		{"reasoning", "opus"},
+		{"frontier", "fable"},
 		{"haiku", "haiku"},
 		{"sonnet", "sonnet"},
 		{"opus", "opus"},
+		{"fable", "fable"},
 		{"unknown", "unknown"},
 		{"", ""},
 	}
@@ -35,8 +37,8 @@ func TestResolveAlias(t *testing.T) {
 
 // TestValidateTier verifies that only concrete tier names are accepted.
 func TestValidateTier(t *testing.T) {
-	valid := []string{"haiku", "sonnet", "opus"}
-	invalid := []string{"cheap", "balanced", "best", "reasoning", "", "gpt-4", "claude"}
+	valid := []string{"haiku", "sonnet", "opus", "fable"}
+	invalid := []string{"cheap", "balanced", "best", "reasoning", "frontier", "", "gpt-4", "claude"}
 
 	for _, v := range valid {
 		if !ValidateTier(v) {

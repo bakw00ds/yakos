@@ -1578,7 +1578,7 @@ Known categories: bug  feature  chore  question  other  (arbitrary values accept
 // Flags:
 //
 //	--runtime <id>       Override the agent's frontmatter runtime: field
-//	--model <tier>       Override the model tier (haiku|sonnet|opus); aliases expanded
+//	--model <tier>       Override the model tier (haiku|sonnet|opus|fable); aliases expanded
 //	--project <path>     Project repo path
 //	--timeout <secs>     Max time to wait (default 600)
 //	--eval-run-id <id>   Mark as model-routing eval dispatch
@@ -1616,7 +1616,7 @@ func runDispatch(yakosRoot string, args []string) {
 		case arg == "--model":
 			i++
 			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "dispatch: --model requires a tier (haiku|sonnet|opus)")
+				fmt.Fprintln(os.Stderr, "dispatch: --model requires a tier (haiku|sonnet|opus|fable)")
 				os.Exit(1)
 			}
 			modelOverride = args[i]
@@ -1717,7 +1717,7 @@ func runDispatch(yakosRoot string, args []string) {
 	if modelOverride != "" {
 		modelOverride = runtime.ResolveAlias(modelOverride)
 		if !runtime.ValidateTier(modelOverride) {
-			fmt.Fprintf(os.Stderr, "dispatch: invalid model tier %q (must be haiku|sonnet|opus)\n", modelOverride)
+			fmt.Fprintf(os.Stderr, "dispatch: invalid model tier %q (must be haiku|sonnet|opus|fable)\n", modelOverride)
 			os.Exit(1)
 		}
 	}
@@ -1833,7 +1833,7 @@ Arguments:
 Flags:
   --runtime <id>    Override the agent's frontmatter `+"`"+`runtime:`+"`"+` field.
   --model <tier>    Override the model tier for this dispatch only.
-                    Accepted values: haiku | sonnet | opus.
+                    Accepted values: haiku | sonnet | opus | fable.
                     Recorded as model_chosen_by:"override" in the
                     dispatch-log. Does not affect the runtime selection.
   --project <path>  Project repo path. Defaults to inferring from cwd

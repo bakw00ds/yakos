@@ -385,7 +385,7 @@ cmd_eval() {
         --argjson epsilon "$epsilon" \
         --argjson max_cost "$max_cost" \
         '{type:"eval_run_started",ts:$ts,run_id:$run_id,agent:$agent,
-          n_cases:$n_cases,tiers:["haiku","sonnet","opus"],
+          n_cases:$n_cases,tiers:["haiku","sonnet","opus","fable"],
           judge:$judge,epsilon:$epsilon,max_cost_usd:$max_cost}')"
     _mr_log_write "$started_rec"
 
@@ -397,6 +397,7 @@ cmd_eval() {
     local haiku_pass=0 haiku_total=0 haiku_cost=0
     local sonnet_pass=0 sonnet_total=0 sonnet_cost=0
     local opus_pass=0 opus_total=0 opus_cost=0
+    local fable_pass=0 fable_total=0 fable_cost=0
     local total_spent=0
     local budget_hit=0
 
@@ -411,7 +412,7 @@ cmd_eval() {
         expected_json="$(jq -c '.expected_outcomes' "$case_file")"
         rubric_json="$(jq -c '.rubric' "$case_file")"
 
-        for tier in haiku sonnet opus; do
+        for tier in haiku sonnet opus fable; do
             if [ "$budget_hit" -eq 1 ]; then break 2; fi
 
             # Dispatch subject.
@@ -493,6 +494,11 @@ cmd_eval() {
                     [ "$passed" = "true" ] && opus_pass=$((opus_pass + 1)) || true
                     opus_cost="$(awk -v a="$opus_cost" -v b="$case_cost" 'BEGIN{printf "%.6f",a+b}')"
                     ;;
+                fable)
+                    fable_total=$((fable_total + 1))
+                    [ "$passed" = "true" ] && fable_pass=$((fable_pass + 1)) || true
+                    fable_cost="$(awk -v a="$fable_cost" -v b="$case_cost" 'BEGIN{printf "%.6f",a+b}')"
+                    ;;
             esac
 
             total_spent="$(awk -v a="$total_spent" -v b="$case_cost" 'BEGIN{printf "%.6f",a+b}')"
@@ -518,25 +524,30 @@ cmd_eval() {
 
     # --- Compute pass-rates and Wilson CI lower bounds -----------------------
 
-    local haiku_rate sonnet_rate opus_rate
+    local haiku_rate sonnet_rate opus_rate fable_rate
     haiku_rate="$(awk -v p="$haiku_pass" -v t="$haiku_total" \
         'BEGIN{if(t==0){printf "0"}else{printf "%.6f",p/t}}')"
     sonnet_rate="$(awk -v p="$sonnet_pass" -v t="$sonnet_total" \
         'BEGIN{if(t==0){printf "0"}else{printf "%.6f",p/t}}')"
     opus_rate="$(awk -v p="$opus_pass" -v t="$opus_total" \
         'BEGIN{if(t==0){printf "0"}else{printf "%.6f",p/t}}')"
+    fable_rate="$(awk -v p="$fable_pass" -v t="$fable_total" \
+        'BEGIN{if(t==0){printf "0"}else{printf "%.6f",p/t}}')"
 
-    local haiku_ci sonnet_ci opus_ci
+    local haiku_ci sonnet_ci opus_ci fable_ci
     haiku_ci="$(wilson_lower "$haiku_pass" "$haiku_total")"
     sonnet_ci="$(wilson_lower "$sonnet_pass" "$sonnet_total")"
     opus_ci="$(wilson_lower "$opus_pass" "$opus_total")"
+    fable_ci="$(wilson_lower "$fable_pass" "$fable_total")"
 
-    local haiku_mean_cost sonnet_mean_cost opus_mean_cost
+    local haiku_mean_cost sonnet_mean_cost opus_mean_cost fable_mean_cost
     haiku_mean_cost="$(awk -v c="$haiku_cost" -v t="$haiku_total" \
         'BEGIN{if(t==0){printf "0"}else{printf "%.6f",c/t}}')"
     sonnet_mean_cost="$(awk -v c="$sonnet_cost" -v t="$sonnet_total" \
         'BEGIN{if(t==0){printf "0"}else{printf "%.6f",c/t}}')"
     opus_mean_cost="$(awk -v c="$opus_cost" -v t="$opus_total" \
+        'BEGIN{if(t==0){printf "0"}else{printf "%.6f",c/t}}')"
+    fable_mean_cost="$(awk -v c="$fable_cost" -v t="$fable_total" \
         'BEGIN{if(t==0){printf "0"}else{printf "%.6f",c/t}}')"
 
     # --- Promotion decision --------------------------------------------------
@@ -544,11 +555,11 @@ cmd_eval() {
     local candidate_tier="" candidate_reason="" candidate_emitted=false
 
     _tier_cheaper_than() {
-        # Returns 0 if $1 is cheaper than $2 (haiku < sonnet < opus).
+        # Returns 0 if $1 is cheaper than $2 (haiku < sonnet < opus < fable).
         local a="$1" b="$2"
         local va vb
-        case "$a" in haiku) va=1 ;; sonnet) va=2 ;; opus) va=3 ;; *) return 1 ;; esac
-        case "$b" in haiku) vb=1 ;; sonnet) vb=2 ;; opus) vb=3 ;; *) return 1 ;; esac
+        case "$a" in haiku) va=1 ;; sonnet) va=2 ;; opus) va=3 ;; fable) va=4 ;; *) return 1 ;; esac
+        case "$b" in haiku) vb=1 ;; sonnet) vb=2 ;; opus) vb=3 ;; fable) vb=4 ;; *) return 1 ;; esac
         [ "$va" -lt "$vb" ]
     }
 
@@ -558,6 +569,7 @@ cmd_eval() {
             haiku)  printf '%s %s' "$haiku_rate"  "$haiku_ci"  ;;
             sonnet) printf '%s %s' "$sonnet_rate" "$sonnet_ci" ;;
             opus)   printf '%s %s' "$opus_rate"   "$opus_ci"   ;;
+            fable)  printf '%s %s' "$fable_rate"  "$fable_ci"  ;;
         esac
     }
 
@@ -567,6 +579,7 @@ cmd_eval() {
             haiku)  printf '%s %s %s' "$haiku_rate"  "$haiku_ci"  "$haiku_mean_cost"  ;;
             sonnet) printf '%s %s %s' "$sonnet_rate" "$sonnet_ci" "$sonnet_mean_cost" ;;
             opus)   printf '%s %s %s' "$opus_rate"   "$opus_ci"   "$opus_mean_cost"   ;;
+            fable)  printf '%s %s %s' "$fable_rate"  "$fable_ci"  "$fable_mean_cost"  ;;
         esac
     }
 
@@ -578,9 +591,10 @@ cmd_eval() {
         haiku)  cur_mean_cost="$haiku_mean_cost"  ;;
         sonnet) cur_mean_cost="$sonnet_mean_cost" ;;
         opus)   cur_mean_cost="$opus_mean_cost"   ;;
+        fable)  cur_mean_cost="$fable_mean_cost"  ;;
     esac
 
-    for cand_tier in haiku sonnet; do
+    for cand_tier in haiku sonnet opus; do
         _tier_cheaper_than "$cand_tier" "$current_model" || continue
         local cand_info cand_rate cand_ci cand_cost
         cand_info="$(_candidate_rate_ci_cost "$cand_tier")"
@@ -593,6 +607,7 @@ cmd_eval() {
             haiku)  n_run="$haiku_total"  ;;
             sonnet) n_run="$sonnet_total" ;;
             opus)   n_run="$opus_total"   ;;
+            fable)  n_run="$fable_total"  ;;
         esac
 
         if [ "$n_run" -ge "$min_cases_conf" ]; then
@@ -657,19 +672,22 @@ cmd_eval() {
         --argjson haiku_r "$haiku_rate" \
         --argjson sonnet_r "$sonnet_rate" \
         --argjson opus_r "$opus_rate" \
+        --argjson fable_r "$fable_rate" \
         --argjson haiku_c "$haiku_mean_cost" \
         --argjson sonnet_c "$sonnet_mean_cost" \
         --argjson opus_c "$opus_mean_cost" \
+        --argjson fable_c "$fable_mean_cost" \
         --argjson haiku_ci "$haiku_ci" \
         --argjson sonnet_ci "$sonnet_ci" \
         --argjson opus_ci "$opus_ci" \
+        --argjson fable_ci "$fable_ci" \
         --argjson candidate_emitted "$candidate_emitted" \
         --arg candidate_tier "${candidate_tier:-null}" \
         --arg candidate_reason "${candidate_reason:-}" \
         '{type:"eval_run_finished",ts:$ts,run_id:$run_id,agent:$agent,
-          tier_pass_rates:{haiku:$haiku_r,sonnet:$sonnet_r,opus:$opus_r},
-          tier_mean_costs:{haiku:$haiku_c,sonnet:$sonnet_c,opus:$opus_c},
-          tier_ci_lower:{haiku:$haiku_ci,sonnet:$sonnet_ci,opus:$opus_ci},
+          tier_pass_rates:{haiku:$haiku_r,sonnet:$sonnet_r,opus:$opus_r,fable:$fable_r},
+          tier_mean_costs:{haiku:$haiku_c,sonnet:$sonnet_c,opus:$opus_c,fable:$fable_c},
+          tier_ci_lower:{haiku:$haiku_ci,sonnet:$sonnet_ci,opus:$opus_ci,fable:$fable_ci},
           candidate_emitted:$candidate_emitted,
           candidate_tier:(if $candidate_tier == "null" then null else $candidate_tier end),
           candidate_reason:$candidate_reason}')"
@@ -684,6 +702,7 @@ cmd_eval() {
         case "$candidate_tier" in
             haiku)  local ct_cost="$haiku_mean_cost" ;;
             sonnet) local ct_cost="$sonnet_mean_cost" ;;
+            opus)   local ct_cost="$opus_mean_cost"   ;;
             *) local ct_cost="0" ;;
         esac
         savings="$(awk -v cand_cost="$ct_cost" -v cur_cost="$cur_mean_cost" \
@@ -696,12 +715,15 @@ cmd_eval() {
             --argjson haiku_r "$haiku_rate" \
             --argjson sonnet_r "$sonnet_rate" \
             --argjson opus_r "$opus_rate" \
+            --argjson fable_r "$fable_rate" \
             --argjson haiku_ci "$haiku_ci" \
             --argjson sonnet_ci "$sonnet_ci" \
             --argjson opus_ci "$opus_ci" \
+            --argjson fable_ci "$fable_ci" \
             --argjson haiku_c "$haiku_mean_cost" \
             --argjson sonnet_c "$sonnet_mean_cost" \
             --argjson opus_c "$opus_mean_cost" \
+            --argjson fable_c "$fable_mean_cost" \
             --argjson n_cases "$n_cases" \
             --arg run_id "$run_id" \
             --argjson epsilon "$epsilon" \
@@ -710,9 +732,9 @@ cmd_eval() {
             --arg generated_at "$(ct_iso_now_z)" \
             '{agent:$agent,current_model:$current_model,suggested_model:$suggested_model,
               evidence:{
-                pass_rates:{haiku:$haiku_r,sonnet:$sonnet_r,opus:$opus_r},
-                ci_lower:{haiku:$haiku_ci,sonnet:$sonnet_ci,opus:$opus_ci},
-                mean_costs:{haiku:$haiku_c,sonnet:$sonnet_c,opus:$opus_c},
+                pass_rates:{haiku:$haiku_r,sonnet:$sonnet_r,opus:$opus_r,fable:$fable_r},
+                ci_lower:{haiku:$haiku_ci,sonnet:$sonnet_ci,opus:$opus_ci,fable:$fable_ci},
+                mean_costs:{haiku:$haiku_c,sonnet:$sonnet_c,opus:$opus_c,fable:$fable_c},
                 n_cases:$n_cases,eval_run_id:$run_id,epsilon_used:$epsilon,judge:$judge},
               estimated_monthly_savings_usd:$savings,
               generated_at:$generated_at}')"
@@ -730,6 +752,9 @@ cmd_eval() {
     printf '  %-8s   %5.1f%%    %5.1f%%    $%.4f\n' \
         "opus"   "$(awk -v r="$opus_rate"   'BEGIN{printf "%.1f",r*100}')" \
         "$(awk -v c="$opus_ci"   'BEGIN{printf "%.1f",c*100}')" "$opus_mean_cost"
+    printf '  %-8s   %5.1f%%    %5.1f%%    $%.4f\n' \
+        "fable"  "$(awk -v r="$fable_rate"  'BEGIN{printf "%.1f",r*100}')" \
+        "$(awk -v c="$fable_ci"  'BEGIN{printf "%.1f",c*100}')" "$fable_mean_cost"
     echo
     if $candidate_emitted; then
         echo "  candidate: $candidate_tier  (savings ~\$$savings/mo)"
@@ -1116,7 +1141,7 @@ Subcommands:
   eval <agent-id> [--judge <agent>] [--max-cost-usd <n>]
                   [--cases <glob>]  [--project <path>]
       Run a model-routing eval for <agent-id>.  Dispatches each eval/
-      case at haiku/sonnet/opus, scores with a judge, computes Wilson
+      case at haiku/sonnet/opus/fable, scores with a judge, computes Wilson
       95% CI bounds, and emits a candidate (or a refused-reason).
       Hard-refuses if judge == subject.
 

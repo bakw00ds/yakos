@@ -15,6 +15,7 @@ package runtime
 //	balanced   → sonnet
 //	best       → opus
 //	reasoning  → opus
+//	frontier   → fable
 //	(other)    → unchanged (pass-through)
 func ResolveAlias(alias string) string {
 	switch alias {
@@ -24,6 +25,8 @@ func ResolveAlias(alias string) string {
 		return "sonnet"
 	case "best", "reasoning":
 		return "opus"
+	case "frontier":
+		return "fable"
 	default:
 		return alias
 	}
@@ -34,7 +37,7 @@ func ResolveAlias(alias string) string {
 // aliases first.
 func ValidateTier(tier string) bool {
 	switch tier {
-	case "haiku", "sonnet", "opus":
+	case "haiku", "sonnet", "opus", "fable":
 		return true
 	default:
 		return false

@@ -458,6 +458,8 @@ func tierValue(tier string) int {
 		return 2
 	case "opus":
 		return 3
+	case "fable":
+		return 4
 	}
 	return 0
 }
@@ -616,7 +618,7 @@ func buildEvalRunStarted(now time.Time, runID, agentID string, nCases int, judge
 		"run_id":       runID,
 		"agent":        agentID,
 		"n_cases":      nCases,
-		"tiers":        []string{"haiku", "sonnet", "opus"},
+		"tiers":        []string{"haiku", "sonnet", "opus", "fable"},
 		"judge":        judge,
 		"epsilon":      epsilon,
 		"max_cost_usd": maxCost,
@@ -944,11 +946,12 @@ func runEval(cfg Config) (Result, error) {
 		"haiku":  {},
 		"sonnet": {},
 		"opus":   {},
+		"fable":  {},
 	}
 	var totalSpent float64
 	budgetHit := false
 
-	tiers := []string{"haiku", "sonnet", "opus"}
+	tiers := []string{"haiku", "sonnet", "opus", "fable"}
 
 outerLoop:
 	for _, caseFile := range caseFiles {
@@ -1050,20 +1053,22 @@ outerLoop:
 	haiku := stats["haiku"]
 	sonnet := stats["sonnet"]
 	opus := stats["opus"]
+	fable := stats["fable"]
 
 	haikuRate := haiku.rate()
 	sonnetRate := sonnet.rate()
 	opusRate := opus.rate()
+	fableRate := fable.rate()
 
 	haikuCI := WilsonLower(haiku.pass, haiku.total)
 	sonnetCI := WilsonLower(sonnet.pass, sonnet.total)
-	opusCI := WilsonLower(sonnet.pass, sonnet.total) // note: opus uses its own
-	// Fix: opus CI from opus stats.
-	opusCI = WilsonLower(opus.pass, opus.total)
+	opusCI := WilsonLower(opus.pass, opus.total)
+	fableCI := WilsonLower(fable.pass, fable.total)
 
 	haikuMeanCost := haiku.meanCost()
 	sonnetMeanCost := sonnet.meanCost()
 	opusMeanCost := opus.meanCost()
+	fableMeanCost := fable.meanCost()
 
 	// Promotion decision.
 	var curRate, curMeanCost float64
@@ -1077,6 +1082,9 @@ outerLoop:
 	case "opus":
 		curRate = opusRate
 		curMeanCost = opusMeanCost
+	case "fable":
+		curRate = fableRate
+		curMeanCost = fableMeanCost
 	default:
 		curRate = sonnetRate
 		curMeanCost = sonnetMeanCost
@@ -1084,7 +1092,7 @@ outerLoop:
 
 	var candidateTier, candidateReason string
 
-	for _, candTier := range []string{"haiku", "sonnet"} {
+	for _, candTier := range []string{"haiku", "sonnet", "opus"} {
 		if !tierCheaperThan(candTier, currentModel) {
 			continue
 		}
@@ -1101,6 +1109,11 @@ outerLoop:
 			candCI = sonnetCI
 			candCost = sonnetMeanCost
 			nRun = sonnet.total
+		case "opus":
+			candRate = opusRate
+			candCI = opusCI
+			candCost = opusMeanCost
+			nRun = opus.total
 		}
 
 		if nRun >= settings.MinCasesForConf {
@@ -1170,16 +1183,19 @@ outerLoop:
 			"haiku":  haikuRate,
 			"sonnet": sonnetRate,
 			"opus":   opusRate,
+			"fable":  fableRate,
 		},
 		"tier_mean_costs": map[string]float64{
 			"haiku":  haikuMeanCost,
 			"sonnet": sonnetMeanCost,
 			"opus":   opusMeanCost,
+			"fable":  fableMeanCost,
 		},
 		"tier_ci_lower": map[string]float64{
 			"haiku":  haikuCI,
 			"sonnet": sonnetCI,
 			"opus":   opusCI,
+			"fable":  fableCI,
 		},
 		"candidate_emitted": candidateEmitted,
 		"candidate_tier":    nilOrString(candidateTier),
@@ -1195,6 +1211,8 @@ outerLoop:
 			ctCost = haikuMeanCost
 		case "sonnet":
 			ctCost = sonnetMeanCost
+		case "opus":
+			ctCost = opusMeanCost
 		}
 		savings := curMeanCost - ctCost
 		if savings < 0 {
@@ -1207,9 +1225,9 @@ outerLoop:
 			"current_model":  currentModel,
 			"suggested_model": candidateTier,
 			"evidence": map[string]interface{}{
-				"pass_rates":   map[string]float64{"haiku": haikuRate, "sonnet": sonnetRate, "opus": opusRate},
-				"ci_lower":     map[string]float64{"haiku": haikuCI, "sonnet": sonnetCI, "opus": opusCI},
-				"mean_costs":   map[string]float64{"haiku": haikuMeanCost, "sonnet": sonnetMeanCost, "opus": opusMeanCost},
+				"pass_rates":   map[string]float64{"haiku": haikuRate, "sonnet": sonnetRate, "opus": opusRate, "fable": fableRate},
+				"ci_lower":     map[string]float64{"haiku": haikuCI, "sonnet": sonnetCI, "opus": opusCI, "fable": fableCI},
+				"mean_costs":   map[string]float64{"haiku": haikuMeanCost, "sonnet": sonnetMeanCost, "opus": opusMeanCost, "fable": fableMeanCost},
 				"n_cases":      nCases,
 				"eval_run_id":  runID,
 				"epsilon_used": settings.EpsilonPassRate,
@@ -1229,6 +1247,8 @@ outerLoop:
 		"sonnet", sonnetRate*100, sonnetCI*100, sonnetMeanCost)
 	fmt.Fprintf(cfg.Writer, "  %-8s   %5.1f%%    %5.1f%%    $%.4f\n",
 		"opus", opusRate*100, opusCI*100, opusMeanCost)
+	fmt.Fprintf(cfg.Writer, "  %-8s   %5.1f%%    %5.1f%%    $%.4f\n",
+		"fable", fableRate*100, fableCI*100, fableMeanCost)
 	fmt.Fprintln(cfg.Writer)
 
 	if candidateEmitted {
@@ -1239,6 +1259,8 @@ outerLoop:
 			ctCost = haikuMeanCost
 		case "sonnet":
 			ctCost = sonnetMeanCost
+		case "opus":
+			ctCost = opusMeanCost
 		}
 		savingsPerMo = (curMeanCost - ctCost) * 1000
 		if savingsPerMo < 0 {
@@ -1374,7 +1396,7 @@ func runList(cfg Config) (Result, error) {
 		n := r.nCases()
 		ci := r.ciLower()
 		var ciParts []string
-		for _, tier := range []string{"haiku", "sonnet", "opus"} {
+		for _, tier := range []string{"haiku", "sonnet", "opus", "fable"} {
 			if v, ok := ci[tier]; ok {
 				ciParts = append(ciParts, fmt.Sprintf("%s=%.6f", tier, v))
 			}

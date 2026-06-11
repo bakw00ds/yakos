@@ -484,7 +484,7 @@ components:
           description: Runtime override (empty = resolve from frontmatter)
         model:
           type: string
-          enum: [haiku, sonnet, opus]
+          enum: [haiku, sonnet, opus, fable]
           description: Model tier override
         timeout:
           type: integer

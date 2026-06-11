@@ -127,6 +127,9 @@ yk_rt_claude_write_plugin_dir() {
         desc="$(printf '%s' "$agent_obj" | jq -r '.description // ""')"
         prompt="$(printf '%s' "$agent_obj" | jq -r '.prompt // ""')"
         model="$(printf '%s' "$agent_obj" | jq -r '.model // ""')"
+        # Map the fable tier to the full model id for claude's plugin-dir.
+        # The claude CLI does not expose "fable" as a bare alias.
+        [ "$model" = "fable" ] && model="claude-fable-5"
 
         # tools in composed JSON is a JSON array: ["Read", "Edit", ...].
         # Plugin agent frontmatter expects a comma-separated inline list.
@@ -274,10 +277,19 @@ yk_rt_claude_dispatch() {
 
     # If dispatch.sh set YAKOS_MODEL_OVERRIDE, patch the agent's model field
     # in the single-agent JSON so the runtime uses the requested tier.
+    # Fable tier maps to the full model id "claude-fable-5" because the claude
+    # CLI does not expose "fable" as an alias (probed 2026-06-11; the installed
+    # claude CLI did not resolve the bare alias). Other tiers (haiku, sonnet,
+    # opus) are accepted as-is by the claude CLI.
     if [ -n "${YAKOS_MODEL_OVERRIDE:-}" ]; then
+        local _model_id
+        case "${YAKOS_MODEL_OVERRIDE}" in
+            fable) _model_id="claude-fable-5" ;;
+            *)     _model_id="${YAKOS_MODEL_OVERRIDE}" ;;
+        esac
         single="$(printf '%s' "$single" | jq \
             --arg n "$agent_name" \
-            --arg m "$YAKOS_MODEL_OVERRIDE" \
+            --arg m "$_model_id" \
             '.[$n].model = $m')"
     fi
 

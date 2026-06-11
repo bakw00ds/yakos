@@ -341,8 +341,8 @@ if [ "$SUB" = "set" ]; then
             ;;
         model)
             case "$VAL" in
-                haiku|sonnet|opus) ;;
-                *) ct_die "supervise set model: value must be haiku, sonnet, or opus (got '$VAL')" ;;
+                haiku|sonnet|opus|fable) ;;
+                *) ct_die "supervise set model: value must be haiku, sonnet, opus, or fable (got '$VAL')" ;;
             esac
             ;;
     esac
