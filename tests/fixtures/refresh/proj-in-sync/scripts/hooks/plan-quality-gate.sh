@@ -289,7 +289,7 @@ EOF
     AGGREGATE="$(printf '%s' "$RECORD" | jq -r '.aggregate_score // 0')"
     DISSENT="$(printf '%s' "$RECORD" | jq -r '.dissent // false')"
     PLAN_ID="$(printf '%s' "$RECORD" | jq -r '.plan_id // "unknown"')"
-    # VERDICT extracted but not used in gate logic (aggregate+dissent determine outcome).
+    # VERDICT extracted but not used in gate logic (aggregate+dissent determine outcome)."
 
     # Also copy the record to the real state log for persistence
     real_log="$HOME/.yakos-state/plan-quality-log.ndjson"
