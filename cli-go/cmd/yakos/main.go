@@ -29,6 +29,7 @@ import (
 	"net/http"
 
 	"github.com/bakw00ds/yakos/internal/agent"
+	"github.com/bakw00ds/yakos/internal/metrics"
 	"github.com/bakw00ds/yakos/internal/telemetry"
 	"github.com/bakw00ds/yakos/internal/archive"
 	internalperfdash "github.com/bakw00ds/yakos/internal/perfdash"
@@ -122,6 +123,7 @@ var portedCommands = []portedCommand{
 	{Name: "hooks", Since: "0.73.0", Notes: "full feature parity with cli/lib/hooks-install.sh (rank 39); install/status subcommands; codex/gemini/agy hook config generation; path-allowlist.json → codex permissions translation; Decision Q9: hook bodies remain bash"},
 	{Name: "kanban serve", Since: "0.73.0", Notes: "kanban serve/status/stop (rank 41 complete); net/http stdlib server; //go:embed serve_ui.html; mutex-serialised mutations; DNS-rebinding Host header check; 127.0.0.1 default bind; no python3 dependency"},
 	{Name: "telemetry", Since: "0.74.0", Notes: "opt-in anonymised telemetry (ideas rank 10); enable/disable/status/set-endpoint/purge/show sub-subcommands; default off; no PII; local NDJSON log at ~/.yakos-state/telemetry.ndjson; operator-configured endpoint only; fail-silent shipper"},
+	{Name: "metrics", Since: "0.75.0", Notes: "per-project commit-keyed metrics time series (Phase-1 MVP); collect/report/trend/compare verbs; [E] collectors from dispatch log + git + state; [T] analyzers for go-backend (go test/vet, golangci-lint, staticcheck, gocyclo, deadcode, gosec, govulncheck) + gitleaks cross-cutting; null≠0 invariant; append-only NDJSON at <project>/.yakos/metrics/history.ndjson; ADR-0001"},
 }
 
 type portedCommand struct {
@@ -268,6 +270,8 @@ func main() {
 		runEvents(args[1:])
 	case "telemetry":
 		runTelemetry(args[1:])
+	case "metrics":
+		runMetrics(args[1:])
 	default:
 		// YAKOS_DAEMON routing: if the daemon is running and YAKOS_DAEMON=on|auto,
 		// route this subcommand through the JSON-RPC client instead of in-process.
@@ -5743,6 +5747,38 @@ func recordInvocation(home, yakosRoot string, args []string, startNano int64) {
 	}
 
 	telemetry.Record(home, ev)
+}
+
+// runMetrics implements `yakos metrics` natively in Go.
+//
+// Usage:
+//
+//	yakos metrics collect [--trigger T] [--no-write] [--skip-analyzers] [--json]
+//	yakos metrics report [--json]
+//	yakos metrics trend [--metric PATH] [--last N] [--since TS]
+//	yakos metrics compare <shaA> <shaB>
+//	yakos metrics help
+//
+// Storage: <project>/.yakos/metrics/history.ndjson (append-only NDJSON).
+// See cli-go/internal/metrics/metrics.go and docs/adr/ADR-0001.md.
+func runMetrics(args []string) {
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/tmp"
+	}
+
+	cfg, err := metrics.ParseArgs(args, home)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "metrics: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.Writer = os.Stdout
+	cfg.ErrWriter = os.Stderr
+
+	if _, err := metrics.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "metrics: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // runTelemetry implements `yakos telemetry` natively in Go.
