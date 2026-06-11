@@ -1,0 +1,110 @@
+# metrics-budgets-example.yaml
+#
+# Example budgets.yaml for `yakos metrics gate`.
+# Copy to <project>/.yakos/metrics/budgets.yaml and customise.
+#
+# Run: yakos metrics gate
+#      yakos metrics gate --enforce    (override to enforce mode for a CI run)
+#      yakos metrics gate --json       (machine-readable output for CI parsers)
+#      yakos metrics gate --collect    (run a fresh collect first)
+#
+# See: yakos metrics help
+# See: docs/metrics-subsystem-plan.md
+
+# mode controls the default exit behaviour.
+#
+#   advisory (default) — report breaches but always exit 0.
+#                        Use this when first rolling out budgets; teams see
+#                        violations without breaking CI immediately.
+#
+#   enforce            — exit non-zero if any budget is breached.
+#                        Use this once teams have fixed existing violations
+#                        and want the gate to block merges.
+#
+# CLI flags --advisory / --enforce override this value for a single run.
+mode: advisory
+
+# regression_pct defines the threshold for regression-based checks.
+#
+# When set > 0, any budgeted metric that is MORE THAN regression_pct%
+# worse than the previous snapshot triggers a regression breach —
+# even if the absolute budget threshold is not yet crossed.
+#
+# This catches slow-bleed regressions that stay under the absolute budget
+# but are trending in the wrong direction.
+#
+# Set to 0 to disable regression checks entirely.
+regression_pct: 5
+
+# budgets maps metric dot-paths to thresholds.
+#
+# Direction is inferred per-metric:
+#
+#   CEILING (breach when value > threshold):
+#     All metrics not listed below. Higher is worse.
+#     Examples: secret_scan_hits, lint_findings, dead_code_symbols,
+#               duplication_pct, cve_count, vuln_count.
+#
+#   FLOOR (breach when value < threshold):
+#     Metrics where higher is better. Lower breaches the floor.
+#     Floor metrics: test.coverage_pct, test.test_pass_rate,
+#                    model_routing.right_sized_pct,
+#                    dispatch.first_try_success_rate.
+#
+# Override direction per-entry using the 'directions:' map below.
+#
+# Metric paths follow the schema in cli-go/internal/metrics/schema.go.
+# Map-valued fields use dot notation:
+#   security.cve_count_by_severity.<severity>   (npm audit CVEs)
+#   security.sast_findings_by_severity.<level>  (gosec findings)
+budgets:
+  # --- Security (ceilings) ---
+  # No secrets in git history.
+  security.secret_scan_hits: 0
+
+  # No known vulnerabilities.
+  security.vuln_count: 0
+
+  # No critical CVEs from npm audit.
+  security.cve_count_by_severity.critical: 0
+
+  # At most 2 high-severity CVEs (grace window).
+  security.cve_count_by_severity.high: 2
+
+  # No critical SAST findings from gosec.
+  # security.sast_findings_by_severity.HIGH: 0
+
+  # --- Test (floors) ---
+  # At least 70% line coverage.
+  test.coverage_pct: 70
+
+  # At least 99% of tests must pass.
+  # test.test_pass_rate: 0.99
+
+  # --- Code quality (ceilings) ---
+  # At most 5% duplicated code (jscpd; node profile only).
+  # code_quality.duplication_pct: 5
+
+  # At most 20 lint findings.
+  # code_quality.lint_findings: 20
+
+  # --- Dead code (ceilings) ---
+  # At most 20 unused exported symbols (deadcode; go-backend profile).
+  # dead_code.unused_exported_symbols: 20
+
+  # --- Model routing (floor) ---
+  # At least 80% of agents already on the recommended model tier.
+  # model_routing.right_sized_pct: 0.80
+
+  # --- Dispatch (floor) ---
+  # At least 85% first-try success rate.
+  # dispatch.first_try_success_rate: 0.85
+
+# directions optionally overrides the inferred direction for a specific path.
+# Uncomment and set to "floor" or "ceiling".
+#
+# Example: treat a custom ceiling metric as a floor:
+#   directions:
+#     code_quality.lint_findings: ceiling    # already the default; shown for clarity
+#     test.coverage_pct: floor               # already the default; shown for clarity
+directions: {}

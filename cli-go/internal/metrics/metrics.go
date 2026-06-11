@@ -40,6 +40,18 @@ type Config struct {
 	// ShaA and ShaB are the two commit SHAs for compare.
 	ShaA, ShaB string
 
+	// GateBudgetsPath overrides the budget file location for the gate subcommand.
+	GateBudgetsPath string
+
+	// GateAdvisory forces advisory mode for gate (exit 0 even on breach).
+	GateAdvisory bool
+
+	// GateEnforce forces enforce mode for gate (exit non-zero on breach).
+	GateEnforce bool
+
+	// GateCollect triggers a fresh collect before gating.
+	GateCollect bool
+
 	// ProjectDir overrides project directory resolution.
 	ProjectDir string
 
@@ -226,7 +238,39 @@ func ParseArgs(args []string, homeDir string) (Config, error) {
 			return cfg, fmt.Errorf("metrics compare: requires <shaA> <shaB>")
 		}
 
-	case "serve", "gate", "install-hook":
+	case "gate":
+		for i := 0; i < len(rest); i++ {
+			switch {
+			case rest[i] == "--advisory":
+				cfg.GateAdvisory = true
+			case rest[i] == "--enforce":
+				cfg.GateEnforce = true
+			case rest[i] == "--json":
+				cfg.EmitJSON = true
+			case rest[i] == "--collect":
+				cfg.GateCollect = true
+			case rest[i] == "--budgets":
+				i++
+				if i >= len(rest) {
+					return cfg, fmt.Errorf("metrics gate: --budgets requires a value")
+				}
+				cfg.GateBudgetsPath = rest[i]
+			case hasPrefix(rest[i], "--budgets="):
+				cfg.GateBudgetsPath = rest[i][len("--budgets="):]
+			case rest[i] == "--project":
+				i++
+				if i >= len(rest) {
+					return cfg, fmt.Errorf("metrics gate: --project requires a value")
+				}
+				cfg.ProjectDir = rest[i]
+			case hasPrefix(rest[i], "--project="):
+				cfg.ProjectDir = rest[i][len("--project="):]
+			default:
+				return cfg, fmt.Errorf("metrics gate: unknown flag %q", rest[i])
+			}
+		}
+
+	case "serve", "install-hook":
 		// Phase-2 stubs — no flags parsed.
 
 	case "help", "--help", "-h":
@@ -292,7 +336,29 @@ func Run(cfg Config) (*Result, error) {
 	case "compare":
 		return res, runCompare(cfg, home, w)
 
-	case "serve", "gate", "install-hook":
+	case "gate":
+		gateResult, err := RunGate(GateConfig{
+			BudgetsPath:   cfg.GateBudgetsPath,
+			ProjectDir:    cfg.ProjectDir,
+			HomeDir:       home,
+			StateDir:      cfg.StateDir,
+			ForceAdvisory: cfg.GateAdvisory,
+			ForceEnforce:  cfg.GateEnforce,
+			EmitJSON:      cfg.EmitJSON,
+			Collect:       cfg.GateCollect,
+			Writer:        w,
+			ErrWriter:     ew,
+			GitRunner:     runner,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if gateResult.ExitCode != 0 {
+			return nil, &gateExitError{Code: gateResult.ExitCode}
+		}
+		return res, nil
+
+	case "serve", "install-hook":
 		_, _ = fmt.Fprintf(ew, "metrics %s: not yet implemented (Phase-2)\n", cfg.Subcommand)
 		return res, nil
 
@@ -476,15 +542,26 @@ Subcommands:
 
   compare <shaA> <shaB>  Side-by-side diff of two snapshots by commit SHA prefix.
 
+  gate [--budgets PATH] [--advisory] [--enforce] [--json] [--collect]
+                         Check the latest snapshot against <project>/.yakos/metrics/budgets.yaml.
+                         --budgets PATH: override the budget file location.
+                         --advisory:    always exit 0, even on breach (overrides file mode).
+                         --enforce:     exit non-zero on breach (overrides file mode).
+                         --json:        emit machine-readable JSON.
+                         --collect:     run a fresh collect before gating.
+                         Default mode is advisory (exit 0). Set mode: enforce in
+                         budgets.yaml to gate CI. See docs/metrics-budgets-example.yaml.
+
   serve                  (Phase-2, not yet implemented)
-  gate                   (Phase-2, not yet implemented)
   install-hook           (Phase-2, not yet implemented)
 
 Storage:
   <project>/.yakos/metrics/history.ndjson  — append-only NDJSON, one line/snapshot.
+  <project>/.yakos/metrics/budgets.yaml    — gate budget file (for 'gate' subcommand).
 
 Null vs 0:
   Missing tool → metric is null (not measured), status → tool-missing.
   Tool ran but found nothing → metric is 0 (measured, result is zero).
+  Null metrics are NEVER treated as a breach in 'gate'.
 `)
 }

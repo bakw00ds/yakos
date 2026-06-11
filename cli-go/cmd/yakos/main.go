@@ -3,10 +3,10 @@
 // The binary installs alongside the existing bash yakos under the SAME name.
 // The YAKOS_IMPL environment variable controls which implementation is active:
 //
-//   YAKOS_IMPL=go   — use Go-native routing: --version, --help, go-port-status
-//                     handled natively; everything else proxied to bash yakos.
-//   YAKOS_IMPL=bash — proxy EVERY invocation to bash yakos transparently.
-//   (unset)         — same as YAKOS_IMPL=bash (safe default).
+//	YAKOS_IMPL=go   — use Go-native routing: --version, --help, go-port-status
+//	                  handled natively; everything else proxied to bash yakos.
+//	YAKOS_IMPL=bash — proxy EVERY invocation to bash yakos transparently.
+//	(unset)         — same as YAKOS_IMPL=bash (safe default).
 //
 // This lets operators place the Go binary ahead of bash yakos on PATH and
 // only experience Go behavior when they explicitly opt in via YAKOS_IMPL=go.
@@ -29,15 +29,7 @@ import (
 	"net/http"
 
 	"github.com/bakw00ds/yakos/internal/agent"
-	"github.com/bakw00ds/yakos/internal/metrics"
-	"github.com/bakw00ds/yakos/internal/telemetry"
 	"github.com/bakw00ds/yakos/internal/archive"
-	internalperfdash "github.com/bakw00ds/yakos/internal/perfdash"
-	internalserve "github.com/bakw00ds/yakos/internal/serve"
-	"github.com/bakw00ds/yakos/internal/mcpserver"
-	"github.com/bakw00ds/yakos/internal/jsonrpc"
-	"github.com/bakw00ds/yakos/internal/wsbus"
-	"golang.org/x/net/websocket"
 	"github.com/bakw00ds/yakos/internal/auth"
 	"github.com/bakw00ds/yakos/internal/checkpoint"
 	"github.com/bakw00ds/yakos/internal/compact"
@@ -50,33 +42,41 @@ import (
 	"github.com/bakw00ds/yakos/internal/hooksinstall"
 	"github.com/bakw00ds/yakos/internal/initialize"
 	"github.com/bakw00ds/yakos/internal/install"
+	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/kanban"
 	"github.com/bakw00ds/yakos/internal/mcp"
+	"github.com/bakw00ds/yakos/internal/mcpserver"
 	"github.com/bakw00ds/yakos/internal/memory"
+	"github.com/bakw00ds/yakos/internal/metrics"
 	"github.com/bakw00ds/yakos/internal/migrate"
 	"github.com/bakw00ds/yakos/internal/passthrough"
+	"github.com/bakw00ds/yakos/internal/peer"
+	internalperfdash "github.com/bakw00ds/yakos/internal/perfdash"
+	"github.com/bakw00ds/yakos/internal/planscore"
 	"github.com/bakw00ds/yakos/internal/plugin"
 	"github.com/bakw00ds/yakos/internal/quickstart"
 	"github.com/bakw00ds/yakos/internal/refresh"
 	"github.com/bakw00ds/yakos/internal/retro"
+	"github.com/bakw00ds/yakos/internal/routing"
 	"github.com/bakw00ds/yakos/internal/runtime"
-	"github.com/bakw00ds/yakos/internal/skill"
-	"github.com/bakw00ds/yakos/internal/peer"
+	internalserve "github.com/bakw00ds/yakos/internal/serve"
 	"github.com/bakw00ds/yakos/internal/session"
+	"github.com/bakw00ds/yakos/internal/skill"
 	"github.com/bakw00ds/yakos/internal/soul"
 	"github.com/bakw00ds/yakos/internal/standards"
 	"github.com/bakw00ds/yakos/internal/start"
 	"github.com/bakw00ds/yakos/internal/status"
-	"github.com/bakw00ds/yakos/internal/planscore"
-	"github.com/bakw00ds/yakos/internal/routing"
 	"github.com/bakw00ds/yakos/internal/supervise"
 	"github.com/bakw00ds/yakos/internal/teach"
-	"github.com/bakw00ds/yakos/internal/workclose"
 	"github.com/bakw00ds/yakos/internal/team"
+	"github.com/bakw00ds/yakos/internal/telemetry"
 	"github.com/bakw00ds/yakos/internal/uninstall"
 	"github.com/bakw00ds/yakos/internal/update"
 	"github.com/bakw00ds/yakos/internal/validate"
 	"github.com/bakw00ds/yakos/internal/version"
+	"github.com/bakw00ds/yakos/internal/workclose"
+	"github.com/bakw00ds/yakos/internal/wsbus"
+	"golang.org/x/net/websocket"
 )
 
 // portedCommands lists subcommands implemented natively in Go. During the
@@ -1214,8 +1214,8 @@ func kanbanServeStateExists() (url, pid string, ok bool) {
 		return "", "", false
 	}
 	var state struct {
-		PID  int    `json:"pid"`
-		URL  string `json:"url"`
+		PID int    `json:"pid"`
+		URL string `json:"url"`
 	}
 	if err := func() error {
 		return func() error { return nil }() // placeholder
@@ -5757,6 +5757,7 @@ func recordInvocation(home, yakosRoot string, args []string, startNano int64) {
 //	yakos metrics report [--json]
 //	yakos metrics trend [--metric PATH] [--last N] [--since TS]
 //	yakos metrics compare <shaA> <shaB>
+//	yakos metrics gate [--budgets PATH] [--advisory] [--enforce] [--json] [--collect]
 //	yakos metrics help
 //
 // Storage: <project>/.yakos/metrics/history.ndjson (append-only NDJSON).
@@ -5776,9 +5777,31 @@ func runMetrics(args []string) {
 	cfg.ErrWriter = os.Stderr
 
 	if _, err := metrics.Run(cfg); err != nil {
+		// metrics gate in enforce mode returns GateExitError with the intended
+		// exit code.  Do not print an error message — the gate already printed
+		// its breach table.
+		var gateErr *metrics.GateExitError
+		if isGateExitErr(err, &gateErr) {
+			os.Exit(gateErr.Code)
+		}
 		fmt.Fprintf(os.Stderr, "metrics: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// isGateExitErr checks whether err is (or wraps) a *metrics.GateExitError and
+// stores it in target.  This mirrors the pattern of errors.As but avoids
+// importing the errors package at top-level (it is already imported elsewhere
+// in this file — add it to imports if needed).
+func isGateExitErr(err error, target **metrics.GateExitError) bool {
+	if err == nil {
+		return false
+	}
+	if gee, ok := err.(*metrics.GateExitError); ok {
+		*target = gee
+		return true
+	}
+	return false
 }
 
 // runTelemetry implements `yakos telemetry` natively in Go.
