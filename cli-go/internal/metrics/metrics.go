@@ -13,7 +13,7 @@ import (
 // Config carries everything Run needs.
 type Config struct {
 	// Subcommand is one of: collect, report, trend, compare, serve, gate,
-	// install-hook.
+	// install-hook, uninstall-hook.
 	Subcommand string
 
 	// Trigger is the collect trigger label. One of: manual, git-hook, ci, release.
@@ -51,6 +51,16 @@ type Config struct {
 
 	// GateCollect triggers a fresh collect before gating.
 	GateCollect bool
+
+	// ServePort overrides the default dashboard port (7896).
+	ServePort int
+
+	// ServeHost overrides the default dashboard host (127.0.0.1).
+	// Non-loopback values are refused loudly.
+	ServeHost string
+
+	// ServeAllProjects enables the GET /api/metrics/projects rollup endpoint.
+	ServeAllProjects bool
 
 	// HookName is the git hook for install-hook / uninstall-hook.
 	// One of: post-commit (default), pre-push.
@@ -287,7 +297,61 @@ func ParseArgs(args []string, homeDir string) (Config, error) {
 		}
 
 	case "serve":
-		// Phase-3 stub — no flags parsed.
+		cfg.ServeHost = "127.0.0.1"
+		cfg.ServePort = 7896
+		for i := 0; i < len(rest); i++ {
+			switch {
+			case rest[i] == "--port":
+				i++
+				if i >= len(rest) {
+					return cfg, fmt.Errorf("metrics serve: --port requires a value")
+				}
+				n := 0
+				for _, ch := range rest[i] {
+					if ch < '0' || ch > '9' {
+						return cfg, fmt.Errorf("metrics serve: --port must be a number")
+					}
+					n = n*10 + int(ch-'0')
+				}
+				if n < 1 || n > 65535 {
+					return cfg, fmt.Errorf("metrics serve: --port %d out of range [1, 65535]", n)
+				}
+				cfg.ServePort = n
+			case hasPrefix(rest[i], "--port="):
+				val := rest[i][len("--port="):]
+				n := 0
+				for _, ch := range val {
+					if ch < '0' || ch > '9' {
+						return cfg, fmt.Errorf("metrics serve: --port must be a number")
+					}
+					n = n*10 + int(ch-'0')
+				}
+				if n < 1 || n > 65535 {
+					return cfg, fmt.Errorf("metrics serve: --port %d out of range [1, 65535]", n)
+				}
+				cfg.ServePort = n
+			case rest[i] == "--host":
+				i++
+				if i >= len(rest) {
+					return cfg, fmt.Errorf("metrics serve: --host requires a value")
+				}
+				cfg.ServeHost = rest[i]
+			case hasPrefix(rest[i], "--host="):
+				cfg.ServeHost = rest[i][len("--host="):]
+			case rest[i] == "--all-projects":
+				cfg.ServeAllProjects = true
+			case rest[i] == "--project":
+				i++
+				if i >= len(rest) {
+					return cfg, fmt.Errorf("metrics serve: --project requires a value")
+				}
+				cfg.ProjectDir = rest[i]
+			case hasPrefix(rest[i], "--project="):
+				cfg.ProjectDir = rest[i][len("--project="):]
+			default:
+				return cfg, fmt.Errorf("metrics serve: unknown flag %q", rest[i])
+			}
+		}
 
 	case "install-hook":
 		// Default hook is post-commit.
@@ -426,7 +490,9 @@ func Run(cfg Config) (*Result, error) {
 		return res, nil
 
 	case "serve":
-		_, _ = fmt.Fprintf(ew, "metrics serve: not yet implemented (Phase-3)\n")
+		// Phase-3: handled by the caller (main.go) via RunServe.
+		// This branch is unreachable when the CLI dispatches correctly.
+		_, _ = fmt.Fprintf(ew, "metrics serve: use yakos metrics serve (dispatched by CLI)\n")
 		return res, nil
 
 	case "install-hook":
@@ -665,7 +731,13 @@ Subcommands:
                          user content is preserved. Friendly no-op if not
                          installed.
 
-  serve                  (Phase-3, not yet implemented)
+  serve [--port N] [--host 127.0.0.1] [--project P] [--all-projects]
+                         Start the metrics dashboard HTTP server (Phase-3).
+                         Binds to 127.0.0.1 (loopback-only) by default.
+                         --host must be a loopback address; non-loopback is refused.
+                         --port: listen port (default 7896).
+                         --all-projects: also enable GET /api/metrics/projects rollup.
+                         Prints the dashboard URL with bearer token at startup.
 
 Storage:
   <project>/.yakos/metrics/history.ndjson  — append-only NDJSON, one line/snapshot.

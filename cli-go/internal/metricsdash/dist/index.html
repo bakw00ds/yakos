@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>yakOS Metrics Dashboard</title>
+<style>
+/* Reset & base */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+a { color: #63b3ed; }
+
+/* Layout */
+#app { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+
+/* Header */
+header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .75rem; margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid #2d3748; }
+header h1 { font-size: 1.25rem; font-weight: 700; color: #90cdf4; }
+.header-meta { font-size: .75rem; color: #718096; }
+button#refresh-btn { background: #2d3748; border: 1px solid #4a5568; color: #e2e8f0; padding: .35rem .75rem; border-radius: .375rem; cursor: pointer; font-size: .875rem; }
+button#refresh-btn:hover { background: #4a5568; }
+
+/* Auth error */
+.auth-error { background: #742a2a; border: 1px solid #c53030; border-radius: .5rem; padding: 1rem; margin-bottom: 1rem; }
+.auth-error code { background: #1a202c; padding: .2em .5em; border-radius: .25rem; font-size: .875rem; }
+.hidden { display: none !important; }
+
+/* Cards */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+.card { background: #1a202c; border: 1px solid #2d3748; border-radius: .5rem; padding: 1rem; }
+.card-label { font-size: .75rem; color: #718096; text-transform: uppercase; letter-spacing: .05em; margin-bottom: .5rem; }
+.card-value { font-size: 1.75rem; font-weight: 700; color: #90cdf4; font-variant-numeric: tabular-nums; }
+
+/* Sections */
+section { background: #1a202c; border: 1px solid #2d3748; border-radius: .5rem; padding: 1rem; margin-bottom: 1.25rem; }
+section h2 { font-size: .875rem; font-weight: 600; color: #a0aec0; text-transform: uppercase; letter-spacing: .05em; margin-bottom: .875rem; }
+
+/* Controls row */
+.controls { display: flex; align-items: center; gap: .75rem; margin-bottom: .875rem; flex-wrap: wrap; }
+label { font-size: .8rem; color: #a0aec0; }
+select { background: #2d3748; border: 1px solid #4a5568; color: #e2e8f0; padding: .3rem .5rem; border-radius: .375rem; font-size: .8rem; }
+
+/* Table */
+.data-table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+.data-table th { text-align: left; padding: .5rem .75rem; background: #2d3748; color: #a0aec0; font-weight: 600; border-bottom: 1px solid #4a5568; white-space: nowrap; }
+.data-table td { padding: .45rem .75rem; border-bottom: 1px solid #2d3748; color: #cbd5e0; font-variant-numeric: tabular-nums; }
+.data-table tr:hover td { background: #2d3748; }
+.data-table .mono { font-family: monospace; font-size: .75rem; }
+.data-table .null-val { color: #4a5568; }
+
+/* SVG chart */
+.chart-wrap { overflow-x: auto; }
+svg.chart { display: block; }
+.chart-line { fill: none; stroke: #63b3ed; stroke-width: 2; }
+.chart-dot { fill: #63b3ed; }
+.chart-axis text { fill: #718096; font-size: 10px; }
+.chart-axis line, .chart-axis path { stroke: #2d3748; }
+.chart-grid line { stroke: #2d3748; stroke-dasharray: 2 2; }
+.chart-empty { fill: #4a5568; font-size: 12px; text-anchor: middle; }
+
+/* Projects table */
+#projects-section { }
+.tag { display: inline-block; background: #2d3748; border-radius: 9999px; padding: .1em .5em; font-size: .7rem; color: #a0aec0; margin-left: .3em; }
+
+/* Loading / error inline */
+.msg { color: #718096; font-size: .875rem; padding: .5rem 0; }
+.err { color: #fc8181; font-size: .875rem; padding: .5rem 0; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>yakOS Metrics Dashboard</h1>
+    <div style="display:flex;gap:1rem;align-items:center;">
+      <span class="header-meta" id="project-label"></span>
+      <button id="refresh-btn">Refresh</button>
+      <span class="header-meta" id="last-updated"></span>
+    </div>
+  </header>
+
+  <div id="auth-error" class="auth-error hidden">
+    <p style="margin-bottom:.5rem;font-weight:600;">Authentication required.</p>
+    <p>Open this page as:</p>
+    <code>http://127.0.0.1:7896/#token=&lt;metrics-token&gt;</code>
+    <p style="margin-top:.5rem;">The token is printed by <code>yakos metrics serve</code> at startup.</p>
+  </div>
+
+  <div id="dashboard" class="hidden">
+    <!-- Latest snapshot cards -->
+    <div class="cards" id="snapshot-cards">
+      <div class="card">
+        <div class="card-label">Total Cost (USD)</div>
+        <div class="card-value" id="card-cost">—</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Task Count</div>
+        <div class="card-value" id="card-tasks">—</div>
+      </div>
+      <div class="card">
+        <div class="card-label">First-Try Success</div>
+        <div class="card-value" id="card-success">—</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Test Coverage</div>
+        <div class="card-value" id="card-coverage">—</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Secret Scan Hits</div>
+        <div class="card-value" id="card-secrets">—</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Lint Findings</div>
+        <div class="card-value" id="card-lint">—</div>
+      </div>
+    </div>
+
+    <!-- Trend section -->
+    <section id="trend-section">
+      <h2>Trend</h2>
+      <div class="controls">
+        <label>Metric
+          <select id="trend-metric">
+            <option value="efficiency.total_cost_usd">Total Cost (USD)</option>
+            <option value="efficiency.median_cost_per_task_usd">Median Cost/Task (USD)</option>
+            <option value="dispatch.first_try_success_rate">First-Try Success Rate</option>
+            <option value="test.coverage_pct">Test Coverage %</option>
+            <option value="test.test_pass_rate">Test Pass Rate</option>
+            <option value="model_routing.right_sized_pct">Right-Sized %</option>
+            <option value="dora.lead_time_median_hours">Lead Time (hours)</option>
+          </select>
+        </label>
+        <label>Last
+          <select id="trend-last">
+            <option value="5">5 snapshots</option>
+            <option value="10" selected>10 snapshots</option>
+            <option value="20">20 snapshots</option>
+            <option value="50">50 snapshots</option>
+          </select>
+        </label>
+      </div>
+      <div class="chart-wrap">
+        <svg class="chart" id="trend-svg" width="800" height="200" role="img" aria-label="Trend chart"></svg>
+      </div>
+    </section>
+
+    <!-- Snapshot history list -->
+    <section id="history-section">
+      <h2>Snapshot History</h2>
+      <div id="history-msg" class="msg"></div>
+      <table class="data-table" id="history-table" style="display:none">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Timestamp</th>
+            <th>Commit</th>
+            <th>Branch</th>
+          </tr>
+        </thead>
+        <tbody id="history-body"></tbody>
+      </table>
+    </section>
+
+    <!-- Compare section -->
+    <section id="compare-section">
+      <h2>Compare Two Snapshots</h2>
+      <div class="controls">
+        <label>Commit A <input id="sha-a" type="text" placeholder="sha prefix" style="background:#2d3748;border:1px solid #4a5568;color:#e2e8f0;padding:.3rem .5rem;border-radius:.375rem;font-size:.8rem;width:9rem;"></label>
+        <label>Commit B <input id="sha-b" type="text" placeholder="sha prefix" style="background:#2d3748;border:1px solid #4a5568;color:#e2e8f0;padding:.3rem .5rem;border-radius:.375rem;font-size:.8rem;width:9rem;"></label>
+        <button id="compare-btn" style="background:#2d3748;border:1px solid #4a5568;color:#e2e8f0;padding:.35rem .75rem;border-radius:.375rem;cursor:pointer;font-size:.8rem;">Compare</button>
+      </div>
+      <div id="compare-result"></div>
+    </section>
+
+    <!-- Cross-project rollup (only rendered when --all-projects) -->
+    <section id="projects-section" class="hidden">
+      <h2>Cross-Project Rollup</h2>
+      <div id="projects-msg" class="msg"></div>
+      <table class="data-table" id="projects-table" style="display:none">
+        <thead>
+          <tr><th>Project</th><th>Snapshots</th><th>Latest Commit</th><th>Total Cost (USD)</th><th>Coverage %</th></tr>
+        </thead>
+        <tbody id="projects-body"></tbody>
+      </table>
+    </section>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ---- auth -------------------------------------------------------------------
+function getToken() {
+  let tok = sessionStorage.getItem('metrics_token');
+  if (tok) return tok;
+  const frag = window.location.hash;
+  const match = frag.match(/[#&]token=([0-9a-f]{64})/);
+  if (match) {
+    tok = match[1];
+    sessionStorage.setItem('metrics_token', tok);
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+    return tok;
+  }
+  return null;
+}
+
+function authHeader(tok) {
+  return tok ? { 'Authorization': 'Bearer ' + tok } : {};
+}
+
+// ---- fetch ------------------------------------------------------------------
+async function apiFetch(path, tok) {
+  const resp = await fetch(path, { headers: authHeader(tok) });
+  if (resp.status === 401 || resp.status === 403) throw new AuthError(resp.status);
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => resp.statusText);
+    throw new Error('API ' + resp.status + ': ' + t);
+  }
+  return resp.json();
+}
+
+class AuthError extends Error {
+  constructor(status) { super('auth ' + status); this.status = status; }
+}
+
+// ---- DOM helpers ------------------------------------------------------------
+function el(id) { return document.getElementById(id); }
+function setText(id, v) { const e = el(id); if (e) e.textContent = v; }
+function show(id) { const e = el(id); if (e) e.classList.remove('hidden'); }
+function hide(id) { const e = el(id); if (e) e.classList.add('hidden'); }
+function fmt2(v) { return v == null ? '—' : v.toFixed(2); }
+function fmtPct(v) { return v == null ? '—' : (v * 100).toFixed(1) + '%'; }
+function fmtInt(v) { return v == null ? '—' : String(v); }
+function fmtCommit(s) { return s ? s.slice(0, 8) : '—'; }
+// esc() escapes untrusted server strings before injection into innerHTML.
+// Branch names, project names, and error messages can contain <>"& in CI.
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ---- SVG trend chart -------------------------------------------------------
+function renderTrend(points) {
+  const svg = el('trend-svg');
+  const W = 800, H = 200, PL = 60, PR = 20, PT = 20, PB = 36;
+  const iW = W - PL - PR, iH = H - PT - PB;
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+
+  const vals = points.map(p => p.value);
+  const nonNull = vals.filter(v => v != null);
+  let minV = nonNull.length ? Math.min(...nonNull) : 0;
+  let maxV = nonNull.length ? Math.max(...nonNull) : 1;
+  if (minV === maxV) { minV -= 1; maxV += 1; }
+
+  const xOf = i => PL + (points.length < 2 ? iW / 2 : (i / (points.length - 1)) * iW);
+  const yOf = v => v == null ? null : PT + iH - ((v - minV) / (maxV - minV)) * iH;
+
+  let html = '<g class="chart-grid">';
+  for (let i = 0; i <= 4; i++) {
+    const y = PT + (i / 4) * iH;
+    html += `<line x1="${PL}" y1="${y}" x2="${W - PR}" y2="${y}"/>`;
+  }
+  html += '</g>';
+
+  // Axis labels
+  html += '<g class="chart-axis">';
+  html += `<text x="${PL - 5}" y="${PT + 4}" text-anchor="end">${fmt2(maxV)}</text>`;
+  html += `<text x="${PL - 5}" y="${PT + iH + 4}" text-anchor="end">${fmt2(minV)}</text>`;
+  if (points.length) {
+    const labStep = Math.max(1, Math.floor(points.length / 6));
+    for (let i = 0; i < points.length; i += labStep) {
+      const x = xOf(i);
+      const label = points[i].ts ? esc(points[i].ts.slice(0, 10)) : '';
+      html += `<text x="${x}" y="${H - 6}" text-anchor="middle">${label}</text>`;
+    }
+  }
+  html += '</g>';
+
+  if (nonNull.length === 0) {
+    html += `<text class="chart-empty" x="${W / 2}" y="${H / 2}">No data for this metric</text>`;
+    svg.innerHTML = html;
+    return;
+  }
+
+  // Line path
+  let pathD = '';
+  for (let i = 0; i < points.length; i++) {
+    const y = yOf(vals[i]);
+    if (y == null) continue;
+    pathD += (pathD ? 'L' : 'M') + xOf(i).toFixed(1) + ',' + y.toFixed(1);
+  }
+  html += `<path class="chart-line" d="${pathD}"/>`;
+
+  // Dots
+  for (let i = 0; i < points.length; i++) {
+    const y = yOf(vals[i]);
+    if (y == null) continue;
+    html += `<circle class="chart-dot" cx="${xOf(i).toFixed(1)}" cy="${y.toFixed(1)}" r="3"/>`;
+  }
+
+  svg.innerHTML = html;
+}
+
+// ---- snapshot cards ---------------------------------------------------------
+function renderSnapshotCards(snap) {
+  if (!snap || snap.message) {
+    setText('card-cost', '—');
+    setText('card-tasks', '—');
+    setText('card-success', '—');
+    setText('card-coverage', '—');
+    setText('card-secrets', '—');
+    setText('card-lint', '—');
+    return;
+  }
+  const m = snap.metrics || {};
+  const eff = m.efficiency || {};
+  const disp = m.dispatch || {};
+  const tst = m.test || {};
+  const sec = m.security || {};
+  const cq = m.code_quality || {};
+  setText('card-cost', fmt2(eff.total_cost_usd));
+  setText('card-tasks', fmtInt(eff.task_count));
+  setText('card-success', fmtPct(disp.first_try_success_rate));
+  setText('card-coverage', tst.coverage_pct != null ? tst.coverage_pct.toFixed(1) + '%' : '—');
+  setText('card-secrets', fmtInt(sec.secret_scan_hits));
+  setText('card-lint', fmtInt(cq.lint_findings));
+  if (snap.commit) {
+    el('project-label').textContent = 'commit: ' + fmtCommit(snap.commit) + (snap.branch ? '  branch: ' + snap.branch : '');
+  }
+}
+
+// ---- history table ----------------------------------------------------------
+function renderHistory(headers) {
+  const tbody = el('history-body');
+  const table = el('history-table');
+  const msg = el('history-msg');
+  if (!headers || !headers.length) {
+    msg.textContent = 'No snapshots yet. Run: yakos metrics collect';
+    table.style.display = 'none';
+    return;
+  }
+  msg.textContent = '';
+  table.style.display = '';
+  tbody.innerHTML = headers.map((h, i) =>
+    `<tr>
+      <td>${headers.length - i}</td>
+      <td>${h.ts ? esc(h.ts.slice(0, 19).replace('T', ' ')) : '—'}</td>
+      <td class="mono">${esc(fmtCommit(h.commit))}</td>
+      <td>${h.branch ? esc(h.branch) : '—'}</td>
+    </tr>`
+  ).reverse().join('');
+}
+
+// ---- compare result ---------------------------------------------------------
+function renderCompare(diff) {
+  const out = el('compare-result');
+  if (!diff || !diff.a || !diff.b) { out.innerHTML = '<p class="err">Not found.</p>'; return; }
+  const a = diff.a, b = diff.b;
+  const am = a.metrics || {}, bm = b.metrics || {};
+  const rows = [
+    ['efficiency.total_cost_usd', fmt2((am.efficiency||{}).total_cost_usd), fmt2((bm.efficiency||{}).total_cost_usd)],
+    ['efficiency.task_count', fmtInt((am.efficiency||{}).task_count), fmtInt((bm.efficiency||{}).task_count)],
+    ['efficiency.median_cost_per_task_usd', fmt2((am.efficiency||{}).median_cost_per_task_usd), fmt2((bm.efficiency||{}).median_cost_per_task_usd)],
+    ['dispatch.first_try_success_rate', fmtPct((am.dispatch||{}).first_try_success_rate), fmtPct((bm.dispatch||{}).first_try_success_rate)],
+    ['test.coverage_pct', fmtPct((am.test||{}).coverage_pct ? (am.test||{}).coverage_pct / 100 : null), fmtPct((bm.test||{}).coverage_pct ? (bm.test||{}).coverage_pct / 100 : null)],
+    ['security.secret_scan_hits', fmtInt((am.security||{}).secret_scan_hits), fmtInt((bm.security||{}).secret_scan_hits)],
+    ['code_quality.lint_findings', fmtInt((am.code_quality||{}).lint_findings), fmtInt((bm.code_quality||{}).lint_findings)],
+  ];
+  out.innerHTML = `<table class="data-table">
+    <thead><tr><th>Metric</th><th>${esc(fmtCommit(a.commit))}</th><th>${esc(fmtCommit(b.commit))}</th></tr></thead>
+    <tbody>${rows.map(([m, av, bv]) => `<tr><td>${esc(m)}</td><td>${esc(av)}</td><td>${esc(bv)}</td></tr>`).join('')}</tbody>
+  </table>`;
+}
+
+// ---- projects rollup --------------------------------------------------------
+function renderProjects(projects) {
+  const tbody = el('projects-body');
+  const table = el('projects-table');
+  const msg = el('projects-msg');
+  if (!projects || !projects.length) {
+    msg.textContent = 'No projects discovered under ~/agent-control/.';
+    table.style.display = 'none';
+    return;
+  }
+  msg.textContent = '';
+  table.style.display = '';
+  tbody.innerHTML = projects.map(p => {
+    const lat = p.latest;
+    const cost = lat ? fmt2((lat.metrics && lat.metrics.efficiency && lat.metrics.efficiency.total_cost_usd)) : '—';
+    const cov = lat ? (lat.metrics && lat.metrics.test && lat.metrics.test.coverage_pct != null ? lat.metrics.test.coverage_pct.toFixed(1) + '%' : '—') : '—';
+    return `<tr>
+      <td>${esc(p.project)}</td>
+      <td>${esc(String(p.snapshot_count))}</td>
+      <td class="mono">${lat ? esc(fmtCommit(lat.commit)) : '—'}</td>
+      <td>${esc(cost)}</td>
+      <td>${esc(cov)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ---- main load --------------------------------------------------------------
+async function loadAll(tok) {
+  const [snap, history, trend] = await Promise.all([
+    apiFetch('/api/metrics/snapshot', tok),
+    apiFetch('/api/metrics/history', tok),
+    apiFetch('/api/metrics/trend?metric=' + el('trend-metric').value + '&last=' + el('trend-last').value, tok),
+  ]);
+  renderSnapshotCards(snap);
+  renderHistory(history);
+  renderTrend(trend);
+
+  // Try projects rollup — only available with --all-projects.
+  try {
+    const projects = await apiFetch('/api/metrics/projects', tok);
+    show('projects-section');
+    renderProjects(projects);
+  } catch (e) {
+    if (!(e instanceof AuthError)) {
+      // Endpoint not available (no --all-projects flag) — just leave section hidden.
+    }
+  }
+
+  setText('last-updated', 'Updated ' + new Date().toLocaleTimeString());
+}
+
+// ---- compare button ---------------------------------------------------------
+async function doCompare(tok) {
+  const a = el('sha-a').value.trim();
+  const b = el('sha-b').value.trim();
+  if (!a || !b) { el('compare-result').innerHTML = '<p class="err">Enter both commit SHAs.</p>'; return; }
+  try {
+    const diff = await apiFetch('/api/metrics/compare?a=' + encodeURIComponent(a) + '&b=' + encodeURIComponent(b), tok);
+    renderCompare(diff);
+  } catch (e) {
+    el('compare-result').innerHTML = '<p class="err">' + esc(e.message) + '</p>';
+  }
+}
+
+// ---- boot -------------------------------------------------------------------
+(async function boot() {
+  const tok = getToken();
+  if (!tok) { show('auth-error'); return; }
+
+  try {
+    await loadAll(tok);
+    show('dashboard');
+
+    el('refresh-btn').addEventListener('click', () => loadAll(tok).catch(err => console.error(err)));
+    el('trend-metric').addEventListener('change', async () => {
+      const trend = await apiFetch('/api/metrics/trend?metric=' + el('trend-metric').value + '&last=' + el('trend-last').value, tok);
+      renderTrend(trend);
+    });
+    el('trend-last').addEventListener('change', async () => {
+      const trend = await apiFetch('/api/metrics/trend?metric=' + el('trend-metric').value + '&last=' + el('trend-last').value, tok);
+      renderTrend(trend);
+    });
+    el('compare-btn').addEventListener('click', () => doCompare(tok));
+
+    // Auto-refresh every 60 seconds.
+    setInterval(() => loadAll(tok).catch(err => console.error(err)), 60_000);
+  } catch (e) {
+    if (e instanceof AuthError) { show('auth-error'); }
+    else { document.body.innerHTML = '<div style="padding:2rem;color:#fc8181;">Failed to load: ' + esc(e.message) + '</div>'; }
+  }
+})();
+</script>
+</body>
+</html>
