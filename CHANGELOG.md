@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0.0] — 2026-06-11
+
+### Added — `yakos metrics` subsystem (Phases 1–3)
+
+A full project-health metrics subsystem ships across three phases in this release.
+
+**Phase 1 — MVP (`collect` / `report` / `trend` / `compare`):** (#126)
+
+- `yakos metrics collect` runs the [E]+[T] Go-backend analyzer set (loc, test-coverage,
+  cyclomatic complexity, dead-code, build-time, binary-size, dispatch-latency percentiles).
+  Results stored as NDJSON snapshots in `work/current/metrics/`.
+- `yakos metrics report` renders the latest snapshot in table or JSON form.
+- `yakos metrics trend [--since <iso>] [--axis <key>]` plots numeric fields over time.
+- `yakos metrics compare <sha-or-tag>` diffs the current snapshot against a historical one,
+  showing delta + direction arrows per field.
+
+**Phase 2 — Multi-language analyzers, gate, and CI recipe:** (#127, #128, #129)
+
+- Node.js ([T] analyzer: `npm audit` severity counts, `depcheck` unused deps, `eslint` error
+  count), Python (`bandit` high-severity, `pylint` score, `pip-audit` CVE count), and Rust
+  (`cargo clippy` error count, `cargo-deny` advisory count) analyzer sets added.
+- `yakos metrics gate [--budget budgets.yaml]` exits nonzero when any tracked metric exceeds
+  its defined budget ceiling. `budgets.yaml` schema: per-key `warn:` + `fail:` thresholds.
+  Integrates with CI via `yakos metrics install-hook` (drops a `pre-push` hook that runs the
+  gate) and `yakos metrics uninstall-hook`. CI recipe documented in `docs/metrics-ci-recipe.md`.
+- `gate` uses `errors.As` for `GateExitError` detection; Windows path skips executable-mode
+  assertion (separate fix, #128 follow-up).
+
+**Phase 3 — `--deep` skill-tally collectors + `serve` dashboard:** (#130, #131)
+
+- `yakos metrics collect --deep` adds [S] (skill-quality) collectors: agent-file line count
+  distribution, skill SKILL.md word count, rule load count, hook count by tier, validate
+  --strict error count.
+- `yakos metrics serve [--port N]` starts an embedded SPA dashboard (loopback-only,
+  `go:embed`, no CDN deps) with summary cards, per-metric time-series charts, and a
+  compare-to-tag selector. Security-reviewed: Host-header allowlist, request-body cap,
+  read-only token for the dashboard endpoint.
+
+### Added — `fable` model tier (#125)
+
+`fable` added as the highest model tier above `opus` in the framework's model-routing
+layer. Resolves in `routing.go` and the `supervise` model gate. Frontmatter `model: fable`
+now dispatches to the fable model class; `model: best` / `model: reasoning` continue to
+resolve to `opus` (fable requires explicit opt-in per Decision Q11).
+
+### Added — Framework infrastructure
+
+- **Opt-in telemetry framework** (#113, Decision B closure): structured NDJSON telemetry
+  sink at `work/current/telemetry.ndjson`; controlled by `.yakos.yml` `telemetry.enabled`
+  (default false). Windows: POSIX mode assertion skipped (#115 fix).
+- **Auto-compact M3.1** (#116): `yakos compact` now triggers a real `/compact` operation
+  when `YAKOS_COMPACT_REAL=1` is set or `.yakos.yml` `compact.auto: true`. Previously
+  advisory-only.
+- **Per-project-type init scaffolding** (#114): `yakos init --type <template>` selects one
+  of 6 project-type templates (go, node, python, rust, generic, framework) and scaffolds the
+  matching `.yakos.yml` + hook wiring.
+- **Hooks moved to `lib/hooks/legacy/`** (#112): all 21 bash hooks relocated to
+  `lib/hooks/legacy/` with backward-compatible symlinks at the original paths. Operators on
+  the default `YAKOS_HOOKS=bash` path see no change.
+- **`docs/getting-started.md`** (#118): operator landing page for v0.37.0.0+ covering
+  install, bootstrap, first session, and common command reference.
+
+### Fixed
+
+- `cycle-counter.sh`: source helpers so `ct_log` is defined before use (#123).
+- `general-agy` agent missing from composed roster (#124).
+- Go CI path filter: `go-ci` workflow now triggers on `lib/hooks/`, `lib/settings/`, and
+  `lib/agents/` changes (#122).
+- `refresh` fixture: regen `proj-in-sync` fixture after hook content changes (#121).
+- Shell scripts: clear ShellCheck SC2097/SC2098/SC2034 warnings across all hooks (#119).
+- Telemetry: skip POSIX mode assertion on Windows (#115).
+
+### Changed
+
+- `chore(repo)`: `.gitignore` updated to exclude Go build artifacts, `work/`, and `.mcp.json` (#120).
+- `chore(ci)`: hook-parity workflow — drop `|| true` guards for cleaner failure reporting (#117).
+
+### Dependencies (Dependabot GitHub Actions bumps)
+
+- `actions/setup-go` 5 → 6 (#55)
+- `actions/checkout` 4 → 6 (#57)
+- `actions/upload-artifact` 4 → 7 (#53)
+- `actions/download-artifact` 4 → 8 (#56)
+- `softprops/action-gh-release` 2 → 3 (#54)
+
 ## [0.37.0.0] — 2026-06-03
 
 ### Added — Go CLI port (Phase 1): 39 native subcommands
