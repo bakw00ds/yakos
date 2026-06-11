@@ -1,5 +1,5 @@
 ---
-id: general-gemini
+id: general-agy
 role: specialist
 domain: cross-cutting
 mode: [author, review, report]
@@ -13,7 +13,7 @@ references:
   - rule:commit-format
 ---
 
-# General Gemini
+# General Agy
 
 ## Purpose
 
@@ -22,7 +22,7 @@ operator or lead wants the gemini runtime's strengths — multimodal
 input, visual context, broad knowledge — for an arbitrary task without
 specifying a domain-specialist agent.
 
-Dispatch via `yakos dispatch general-gemini "<task>"`. The `runtime:
+Dispatch via `yakos dispatch general-agy "<task>"`. The `runtime:
 gemini` frontmatter handles routing; no `--runtime` flag needed.
 
 For the meta-guidance on when to use this agent versus a domain

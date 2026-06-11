@@ -138,7 +138,7 @@ generalist task (no specific domain specialist required), dispatch via:
 
 ```sh
 yakos dispatch general-codex "<task>"
-yakos dispatch general-gemini "<task>"
+yakos dispatch general-agy "<task>"
 ```
 
 These are runtime-pinned generalist agents — no `--runtime` flag
