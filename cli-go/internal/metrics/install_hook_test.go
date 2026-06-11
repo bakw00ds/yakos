@@ -3,6 +3,7 @@ package metrics
 import (
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 )
@@ -81,12 +82,13 @@ func TestInstallHook_NewFile(t *testing.T) {
 	if !strings.Contains(s, "--trigger git-hook") {
 		t.Errorf("hook file missing '--trigger git-hook': %s", s)
 	}
-	// File must be executable.
+	// File must be executable (Unix only — Windows does not honour Unix perm bits;
+	// os.WriteFile(..., 0755) is a no-op there and Mode().Perm() returns 0666).
 	fi, err := os.Stat(hookFile)
 	if err != nil {
 		t.Fatalf("stat hook file: %v", err)
 	}
-	if fi.Mode()&0111 == 0 {
+	if goruntime.GOOS != "windows" && fi.Mode()&0111 == 0 {
 		t.Errorf("hook file should be executable; mode: %v", fi.Mode())
 	}
 }
