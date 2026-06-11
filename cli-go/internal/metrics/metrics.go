@@ -52,6 +52,13 @@ type Config struct {
 	// GateCollect triggers a fresh collect before gating.
 	GateCollect bool
 
+	// HookName is the git hook for install-hook / uninstall-hook.
+	// One of: post-commit (default), pre-push.
+	HookName string
+
+	// HookForce, when true, overwrites an existing hook file entirely (--force).
+	HookForce bool
+
 	// ProjectDir overrides project directory resolution.
 	ProjectDir string
 
@@ -270,8 +277,54 @@ func ParseArgs(args []string, homeDir string) (Config, error) {
 			}
 		}
 
-	case "serve", "install-hook":
-		// Phase-2 stubs — no flags parsed.
+	case "serve":
+		// Phase-3 stub — no flags parsed.
+
+	case "install-hook":
+		// Default hook is post-commit.
+		cfg.HookName = "post-commit"
+		for i := 0; i < len(rest); i++ {
+			switch {
+			case rest[i] == "--post-commit":
+				cfg.HookName = "post-commit"
+			case rest[i] == "--pre-push":
+				cfg.HookName = "pre-push"
+			case rest[i] == "--force":
+				cfg.HookForce = true
+			case rest[i] == "--project":
+				i++
+				if i >= len(rest) {
+					return cfg, fmt.Errorf("metrics install-hook: --project requires a value")
+				}
+				cfg.ProjectDir = rest[i]
+			case hasPrefix(rest[i], "--project="):
+				cfg.ProjectDir = rest[i][len("--project="):]
+			default:
+				return cfg, fmt.Errorf("metrics install-hook: unknown flag %q", rest[i])
+			}
+		}
+
+	case "uninstall-hook":
+		// Default hook is post-commit.
+		cfg.HookName = "post-commit"
+		for i := 0; i < len(rest); i++ {
+			switch {
+			case rest[i] == "--post-commit":
+				cfg.HookName = "post-commit"
+			case rest[i] == "--pre-push":
+				cfg.HookName = "pre-push"
+			case rest[i] == "--project":
+				i++
+				if i >= len(rest) {
+					return cfg, fmt.Errorf("metrics uninstall-hook: --project requires a value")
+				}
+				cfg.ProjectDir = rest[i]
+			case hasPrefix(rest[i], "--project="):
+				cfg.ProjectDir = rest[i][len("--project="):]
+			default:
+				return cfg, fmt.Errorf("metrics uninstall-hook: unknown flag %q", rest[i])
+			}
+		}
 
 	case "help", "--help", "-h":
 		cfg.Subcommand = "help"
@@ -358,9 +411,28 @@ func Run(cfg Config) (*Result, error) {
 		}
 		return res, nil
 
-	case "serve", "install-hook":
-		_, _ = fmt.Fprintf(ew, "metrics %s: not yet implemented (Phase-2)\n", cfg.Subcommand)
+	case "serve":
+		_, _ = fmt.Fprintf(ew, "metrics serve: not yet implemented (Phase-3)\n")
 		return res, nil
+
+	case "install-hook":
+		_, err := RunInstallHook(InstallHookConfig{
+			HookName:   cfg.HookName,
+			Force:      cfg.HookForce,
+			ProjectDir: cfg.ProjectDir,
+			Writer:     w,
+			ErrWriter:  ew,
+		})
+		return res, err
+
+	case "uninstall-hook":
+		_, err := RunUninstallHook(InstallHookConfig{
+			HookName:   cfg.HookName,
+			ProjectDir: cfg.ProjectDir,
+			Writer:     w,
+			ErrWriter:  ew,
+		})
+		return res, err
 
 	case "help", "":
 		PrintHelp(w)
@@ -552,8 +624,22 @@ Subcommands:
                          Default mode is advisory (exit 0). Set mode: enforce in
                          budgets.yaml to gate CI. See docs/metrics-budgets-example.yaml.
 
-  serve                  (Phase-2, not yet implemented)
-  install-hook           (Phase-2, not yet implemented)
+  install-hook [--pre-push|--post-commit] [--force]
+                         Install a git hook that auto-runs a fast metrics collect
+                         after each commit (post-commit, default) or before push
+                         (pre-push). The hook runs only [E] collectors
+                         (--skip-analyzers); it never runs [T] analyzers or
+                         --deep. The hook always exits 0 — it never blocks the
+                         commit/push.  Idempotent: re-running updates the managed
+                         block without disturbing existing hook content. --force
+                         replaces the entire hook file.
+
+  uninstall-hook [--pre-push|--post-commit]
+                         Remove the managed block from the hook file. Existing
+                         user content is preserved. Friendly no-op if not
+                         installed.
+
+  serve                  (Phase-3, not yet implemented)
 
 Storage:
   <project>/.yakos/metrics/history.ndjson  — append-only NDJSON, one line/snapshot.
