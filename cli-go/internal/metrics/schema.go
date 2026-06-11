@@ -155,6 +155,13 @@ type CodeQualityMetrics struct {
 	// across all functions as reported by radon cc (python profile). null when
 	// not measured.
 	CyclomaticComplexityP90 *float64 `json:"cyclomatic_complexity_p90"`
+
+	// ReviewFindingsBySeverity maps severity label → count of code-review
+	// findings as reported by the code-reviewer agent ([S] collector, --deep only).
+	// Severity labels: "P0", "P1", "P2", "P3".
+	// nil = collector not run (--deep off) or dispatch failed / unparseable.
+	// empty map = collector ran and found nothing.
+	ReviewFindingsBySeverity map[string]int `json:"review_findings_by_severity,omitempty"`
 }
 
 // DeadCodeMetrics captures dead-code signals.
@@ -196,6 +203,14 @@ type SecurityMetrics struct {
 	// from VulnCount (which cargo-audit owns) to avoid double-counting the same
 	// RUSTSEC advisory. null when cargo deny was not run or could not be parsed.
 	LicenseRiskCount *int `json:"license_risk_count"`
+
+	// SecurityReviewFindingsBySeverity maps severity label → count of
+	// security-review findings as reported by the security-reviewer agent
+	// ([S] collector, --deep only).
+	// Severity labels: "P0", "P1", "P2", "P3".
+	// nil = collector not run (--deep off) or dispatch failed / unparseable.
+	// empty map = collector ran and found nothing.
+	SecurityReviewFindingsBySeverity map[string]int `json:"security_review_findings_by_severity,omitempty"`
 }
 
 // TestMetrics captures test coverage and results.
