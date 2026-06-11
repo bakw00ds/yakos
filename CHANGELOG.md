@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0.0] — 2026-06-11
+
+### Added
+
+- Binary-only installs are now fully self-contained: the framework library
+  (`lib/agents`, `lib/skills`, `lib/rules`, `lib/hooks`) is embedded into
+  the Go binary via `//go:embed` (staged by `make embed-lib` at build time).
+  `yakos install` materializes the embedded lib to
+  `~/.local/share/yakos/<version>/` and wires `~/.claude` symlinks when no
+  cloned repo is present — a `curl|sh` install works with NO repo clone
+  required (#135).
+- `scripts/install.sh` now auto-runs `yakos install` after placing the
+  binary, persists `export YAKOS_IMPL=go` to the user's shell profile, and
+  ends with next-steps guidance (`yakos doctor`, `yakos init`).
+- `ResolveRoot()` cascade in `install/materialize.go`: prefers `YAKOS_ROOT`
+  env → exe-adjacent cloned repo → embedded (materialized on first use).
+  Dev workflow with a cloned repo + `YAKOS_ROOT` is unchanged; live `lib/`
+  is preferred over embedded content.
+
 ## [0.38.0.1] — 2026-06-11
 
 ### Fixed
