@@ -11,6 +11,7 @@ workflow so that CI is the canonical source of full metric snapshots.
 |---|---|---|---|
 | Fast hook | Developer machine (`post-commit` or `pre-push`) | `[E]` only | Cheap, local, non-blocking |
 | Full CI snapshot | GitHub Actions | `[E]` + `[T]` (all analyzers) | Canonical; uploaded to history |
+| Release snapshot | Release pipeline (manual or tag-triggered) | `[E]` + `[T]` + `[S]` (`--deep`) | Full quality picture incl. LLM review |
 | Gate | GitHub Actions | Reads latest snapshot | Blocks merge on budget breach |
 
 The **git hook** (installed via `yakos metrics install-hook`) runs only
@@ -190,6 +191,77 @@ YAKOS_IMPL=go yakos metrics uninstall-hook
 
 The hook is idempotent: re-running updates the managed block without
 touching any other content in the hook file.
+
+---
+
+---
+
+## Release snapshot (`--deep`)
+
+The `--deep` flag enables `[S]` collectors: LLM-dispatched agents that
+perform subjective code-quality and security review. These collectors
+invoke `yakos dispatch` to call the `code-reviewer` and
+`security-reviewer` agents and parse structured JSON tallies from their
+output.
+
+**Token cost:** approximately 2–8K tokens per collector, depending on
+working tree size. Do not use `--deep` in post-commit hooks or on every
+PR — the cost adds up. Reserve `--deep` for release cadence.
+
+**Example — release snapshot:**
+
+```yaml
+# .github/workflows/release-metrics.yml
+# Triggered on version tags (v*.*.*.*) only.
+name: release-metrics
+on:
+  push:
+    tags: ['v*.*.*.*']
+
+jobs:
+  release-snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: cli-go/go.mod
+      - name: build yakos
+        run: |
+          cd cli-go
+          go build -o ../bin/yakos ./cmd/yakos
+          echo "$(pwd)/../bin" >> "$GITHUB_PATH"
+      - name: release snapshot with [S] collectors
+        env:
+          YAKOS_IMPL: go
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          yakos metrics collect \
+            --trigger release \
+            --deep \
+            --project ${{ github.workspace }}
+```
+
+**Honesty contract:**
+
+`[S]` collectors emit `nil` (JSON `null`) — never 0, never a fabricated
+count — when:
+
+- `yakos dispatch` is not available (no runtime configured)
+- The dispatch call returns a non-zero exit or an error
+- The agent output cannot be parsed into the expected JSON shape
+
+The `tool_status` map records the outcome per collector:
+
+| Status | Meaning |
+|---|---|
+| `ok` | Dispatch succeeded; tally parsed and populated |
+| `dispatch-failed` | Dispatch returned error or non-zero exit |
+| `unparseable` | Output contained no parseable JSON tally |
+
+A `null` `[S]` field never triggers a gate breach (null = not measured).
 
 ---
 

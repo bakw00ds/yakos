@@ -249,7 +249,7 @@ func RunGate(cfg GateConfig) (GateResult, error) {
 			StateDir:   stateDir,
 			HomeDir:    cfg.HomeDir,
 		}
-		if _, err := runCollect(collectCfg, runner, time.Now().UTC(), cfg.HomeDir, ew, ew); err != nil {
+		if _, err := runCollect(collectCfg, runner, nil, time.Now().UTC(), cfg.HomeDir, ew, ew); err != nil {
 			return GateResult{}, fmt.Errorf("metrics gate: collect: %w", err)
 		}
 	}

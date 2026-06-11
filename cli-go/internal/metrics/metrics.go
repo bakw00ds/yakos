@@ -74,6 +74,13 @@ type Config struct {
 	// GitRunner overrides git execution (for tests).
 	GitRunner gitRunner
 
+	// Deep enables [S] collectors (LLM-dispatched, --deep flag).
+	// Default false = no LLM cost, behaviour unchanged.
+	Deep bool
+
+	// DispatchRunner overrides yakos dispatch execution (for tests).
+	DispatchRunner dispatchRunner
+
 	// Writer receives normal output.
 	Writer io.Writer
 
@@ -116,6 +123,8 @@ func ParseArgs(args []string, homeDir string) (Config, error) {
 				cfg.NoWrite = true
 			case rest[i] == "--skip-analyzers":
 				cfg.SkipAnalyzers = true
+			case rest[i] == "--deep":
+				cfg.Deep = true
 			case rest[i] == "--json":
 				cfg.EmitJSON = true
 			case rest[i] == "--since":
@@ -369,11 +378,16 @@ func Run(cfg Config) (*Result, error) {
 		runner = realGitRunner{}
 	}
 
+	dRunner := cfg.DispatchRunner
+	if dRunner == nil {
+		dRunner = realDispatchRunner{}
+	}
+
 	res := &Result{Subcommand: cfg.Subcommand}
 
 	switch cfg.Subcommand {
 	case "collect":
-		snap, err := runCollect(cfg, runner, now, home, w, ew)
+		snap, err := runCollect(cfg, runner, dRunner, now, home, w, ew)
 		if err != nil {
 			return nil, err
 		}
@@ -444,7 +458,7 @@ func Run(cfg Config) (*Result, error) {
 }
 
 // runCollect executes the collect subcommand.
-func runCollect(cfg Config, runner gitRunner, now time.Time, home string, w, ew io.Writer) (*Snapshot, error) {
+func runCollect(cfg Config, runner gitRunner, dRunner dispatchRunner, now time.Time, home string, w, ew io.Writer) (*Snapshot, error) {
 	projectDir := ResolveProjectDir(cfg.ProjectDir)
 	if projectDir == "" {
 		// Fall back to cwd.
@@ -493,6 +507,13 @@ func runCollect(cfg Config, runner gitRunner, now time.Time, home string, w, ew 
 		if len(queue) > 0 {
 			runAnalyzerList(projectDir, queue, &snap.Metrics, snap.ToolStatus)
 		}
+	}
+
+	// [S] collectors (LLM-dispatched; opt-in via --deep).
+	// Each collector is best-effort: on failure it leaves fields nil and
+	// records a status entry. --deep off → no LLM calls, Snapshot.Deep=false.
+	if cfg.Deep {
+		runDeepCollectors(dRunner, &snap)
 	}
 
 	if cfg.EmitJSON {
@@ -600,10 +621,15 @@ func PrintHelp(w io.Writer) {
 Record and view per-project code-quality, effectiveness, and security signals.
 
 Subcommands:
-  collect [--trigger T] [--no-write] [--skip-analyzers] [--json] [--since TS]
+  collect [--trigger T] [--no-write] [--skip-analyzers] [--deep] [--json] [--since TS]
                          Collect a snapshot. Trigger: manual|git-hook|ci|release.
                          --no-write: compute but do not persist the snapshot.
                          --skip-analyzers: skip [T] tool invocations.
+                         --deep: also run [S] LLM-dispatched collectors (code-reviewer,
+                                 security-reviewer). Opt-in; incurs LLM token cost.
+                                 Recommended for release snapshots only.
+                                 Token cost: ~2-8K tokens per collector depending on
+                                 working tree size. Do not use in post-commit hooks.
 
   report [--json]        Print the latest snapshot with Δ vs previous.
 
