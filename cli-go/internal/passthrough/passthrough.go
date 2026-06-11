@@ -22,6 +22,31 @@ func BashYakosPath(yakosRoot string) string {
 	return filepath.Join(yakosRoot, "cli", "yakos")
 }
 
+// ErrNoBashYakos is returned when the bash yakos script is not present at the
+// expected location. This distinguishes a Go-only install (no bash tree) from
+// other exec failures so callers can emit a targeted help message.
+type ErrNoBashYakos struct {
+	Path string
+}
+
+func (e *ErrNoBashYakos) Error() string {
+	return fmt.Sprintf(
+		"yakos: this is a Go-only install (no bash yakos found at %s).\n"+
+			"  Run Go-native commands with 'YAKOS_IMPL=go yakos <cmd>',\n"+
+			"  or install the full yakos tree. See docs/go-shadow-mode.md.",
+		e.Path,
+	)
+}
+
+// checkBashExists returns an ErrNoBashYakos when the bash yakos script is
+// absent, or nil when it is present.
+func checkBashExists(bashPath string) error {
+	if _, err := os.Stat(bashPath); err != nil {
+		return &ErrNoBashYakos{Path: bashPath}
+	}
+	return nil
+}
+
 // Exec replaces the current process with the bash yakos binary, forwarding
 // all args. On platforms that support it (all POSIX targets), this uses
 // syscall.Exec so the bash process inherits the PID and its exit code becomes
@@ -34,14 +59,15 @@ func BashYakosPath(yakosRoot string) string {
 func Exec(yakosRoot string, args []string) error {
 	bashPath := BashYakosPath(yakosRoot)
 
+	if err := checkBashExists(bashPath); err != nil {
+		return err
+	}
+
 	// Resolve to absolute path; also validates the file exists.
 	absPath, err := exec.LookPath(bashPath)
 	if err != nil {
 		// LookPath fails for relative paths not on $PATH; try the path directly.
 		absPath = bashPath
-		if _, statErr := os.Stat(absPath); statErr != nil {
-			return fmt.Errorf("passthrough: bash yakos not found at %s: %w", absPath, statErr)
-		}
 	}
 
 	argv := append([]string{absPath}, args...)
@@ -56,6 +82,10 @@ func Exec(yakosRoot string, args []string) error {
 // code after the call — e.g., in tests or when you need to do post-processing.
 func Run(yakosRoot string, args []string) (int, error) {
 	bashPath := BashYakosPath(yakosRoot)
+
+	if err := checkBashExists(bashPath); err != nil {
+		return 1, err
+	}
 
 	cmd := exec.Command(bashPath, args...) //nolint:gosec // intentional passthrough
 	cmd.Stdin = os.Stdin

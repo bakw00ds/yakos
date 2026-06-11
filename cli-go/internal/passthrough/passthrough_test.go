@@ -1,6 +1,7 @@
 package passthrough_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -91,7 +92,71 @@ func TestRun_NonexistentRoot(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for nonexistent root; got nil")
 	}
-	if !strings.Contains(err.Error(), "passthrough") {
-		t.Errorf("error should mention passthrough package; got %q", err.Error())
+	if !strings.Contains(err.Error(), "passthrough") && !strings.Contains(err.Error(), "yakos") {
+		t.Errorf("error should mention yakos/passthrough; got %q", err.Error())
+	}
+}
+
+// TestRun_NoBashYakos_ActionableError simulates a Go-only install:
+// a root directory exists but contains no cli/yakos file.
+// The error returned must be ErrNoBashYakos and must mention YAKOS_IMPL=go.
+func TestRun_NoBashYakos_ActionableError(t *testing.T) {
+	t.Parallel()
+
+	// Build a temp dir that mimics a Go-only install: has a root dir but
+	// no cli/yakos beneath it.
+	goOnlyRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(goOnlyRoot, "cli"), 0755); err != nil {
+		t.Fatalf("setup mkdir: %v", err)
+	}
+	// Intentionally do NOT create cli/yakos.
+
+	_, err := passthrough.Run(goOnlyRoot, []string{"somethingunported"})
+	if err == nil {
+		t.Fatal("expected error for missing bash yakos; got nil")
+	}
+
+	// Must be the actionable ErrNoBashYakos sentinel.
+	var noYakos *passthrough.ErrNoBashYakos
+	if !errors.As(err, &noYakos) {
+		t.Errorf("expected *passthrough.ErrNoBashYakos; got %T: %v", err, err)
+	}
+
+	// Error text must be actionable: mention YAKOS_IMPL=go so the user
+	// knows how to proceed on a Go-only install.
+	if !strings.Contains(err.Error(), "YAKOS_IMPL=go") {
+		t.Errorf("actionable error should mention YAKOS_IMPL=go; got %q", err.Error())
+	}
+	// Must mention docs/go-shadow-mode.md.
+	if !strings.Contains(err.Error(), "go-shadow-mode") {
+		t.Errorf("actionable error should reference go-shadow-mode.md; got %q", err.Error())
+	}
+	// Must include the path so the user can diagnose.
+	if !strings.Contains(err.Error(), goOnlyRoot) {
+		t.Errorf("actionable error should include the root path; got %q", err.Error())
+	}
+}
+
+// TestExec_NoBashYakos_ActionableError tests the Exec path with the same
+// missing-bash scenario.
+func TestExec_NoBashYakos_ActionableError(t *testing.T) {
+	t.Parallel()
+
+	goOnlyRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(goOnlyRoot, "cli"), 0755); err != nil {
+		t.Fatalf("setup mkdir: %v", err)
+	}
+
+	err := passthrough.Exec(goOnlyRoot, []string{"somethingunported"})
+	if err == nil {
+		t.Fatal("expected error for missing bash yakos; got nil")
+	}
+
+	var noYakos *passthrough.ErrNoBashYakos
+	if !errors.As(err, &noYakos) {
+		t.Errorf("expected *passthrough.ErrNoBashYakos; got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "YAKOS_IMPL=go") {
+		t.Errorf("actionable error should mention YAKOS_IMPL=go; got %q", err.Error())
 	}
 }
