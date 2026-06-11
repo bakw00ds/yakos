@@ -220,7 +220,6 @@ EOF
     # ---- debounce: skip if plan.md mtime changed within last 5 s ------------
     # Uses stat with macOS (-f %m) and Linux (-c %Y) compat
     plan_file="$file_path"
-    mtime_now=0
     mtime1=0
     # Portable mtime
     if stat -f "%m" "$plan_file" >/dev/null 2>&1; then
@@ -290,7 +289,7 @@ EOF
     AGGREGATE="$(printf '%s' "$RECORD" | jq -r '.aggregate_score // 0')"
     DISSENT="$(printf '%s' "$RECORD" | jq -r '.dissent // false')"
     PLAN_ID="$(printf '%s' "$RECORD" | jq -r '.plan_id // "unknown"')"
-    VERDICT="$(printf '%s' "$RECORD" | jq -r '.verdict // "fail"')"
+    # VERDICT extracted but not used in gate logic (aggregate+dissent determine outcome)."
 
     # Also copy the record to the real state log for persistence
     real_log="$HOME/.yakos-state/plan-quality-log.ndjson"

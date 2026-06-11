@@ -107,7 +107,7 @@ jobs:
           sha256sum "${ASSET}" > "${ASSET}.sha256"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
@@ -129,7 +129,7 @@ jobs:
 
     steps:
       - name: Download macOS binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: binary-darwin-*
           path: dist/
@@ -207,7 +207,7 @@ jobs:
 
       - name: Re-upload signed macOS binaries
         if: env.MACOS_SIGNED == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binary-darwin-arm64
           path: dist/yakos-*-darwin-arm64*
@@ -216,7 +216,7 @@ jobs:
 
       - name: Re-upload signed macOS binaries (amd64)
         if: env.MACOS_SIGNED == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binary-darwin-amd64
           path: dist/yakos-*-darwin-amd64*
@@ -237,7 +237,7 @@ jobs:
 
     steps:
       - name: Download Windows binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: binary-windows-amd64
           path: dist/
@@ -289,7 +289,7 @@ jobs:
 
       - name: Re-upload signed Windows binary
         if: env.WINDOWS_SIGNED == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binary-windows-amd64
           path: dist/yakos-*-windows-amd64*
@@ -308,7 +308,7 @@ jobs:
           fetch-depth: 0  # needed for git log since last tag
 
       - name: Download all binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: binary-*
           path: dist/
@@ -408,7 +408,7 @@ jobs:
           echo "| Linux (arm64 + amd64) | unsigned; verify via checksums.txt |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         # Pin: softprops/action-gh-release@e7a8f85ef1a4e586a519bbcf6d9cfe9516e4f4d6
         with:
           tag_name: ${{ steps.version.outputs.tag }}

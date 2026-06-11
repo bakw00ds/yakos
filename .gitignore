@@ -35,3 +35,15 @@
 .claude/worktrees/
 .antigravitycli/
 cli/lib/mcp/.venv/
+
+# Go build outputs
+/cli-go/yakos
+/cli-go/yakos.exe
+/cli-go/*.test.exe
+/bin/yakos
+
+# Agent-control runtime scratchpad (work/current/... tree)
+/work/
+
+# Machine-local MCP config (hardcodes absolute user paths)
+/.mcp.json

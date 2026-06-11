@@ -170,11 +170,13 @@ else
                     [ -n "$glob" ] || continue
                     # Shell glob match against the file path
                     # Use case for portability (no extglob needed for simple globs)
+                    # shellcheck disable=SC2254  # intentional: glob patterns from policy config
                     case "$file_path" in
                         $glob) escalate_reason="sensitive-path:$glob"; break ;;
                     esac
                     # Also strip leading **/ for partial path matching
                     bare_glob="${glob#\*\*/}"
+                    # shellcheck disable=SC2254  # intentional: glob patterns from policy config
                     case "$file_path" in
                         */$bare_glob|$bare_glob) escalate_reason="sensitive-path:$glob"; break ;;
                     esac
