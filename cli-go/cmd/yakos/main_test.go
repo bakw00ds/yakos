@@ -70,9 +70,9 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 // mcp (rank 32), completion (rank 33), git-hooks (rank 38),
 // supervise (rank 34), plan score (rank 35), work close (rank 37),
 // model-routing (rank 36), hooks (rank 39), kanban serve (rank 41),
-// telemetry (ideas rank 10 / Phase 1.5).
+// telemetry (ideas rank 10 / Phase 1.5), metrics (Phase-1 MVP).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 40
+	const want = 41
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
