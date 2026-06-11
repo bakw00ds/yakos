@@ -23,13 +23,18 @@ jobs:
         run: sudo apt-get update -y && sudo apt-get install -y shellcheck
       - name: Lint shell scripts
         run: |
-          # Lint all shell scripts under cli/, lib/hooks/, lib/skills/, scripts/.
+          # Lint hand-authored scripts under cli/, lib/hooks/, lib/skills/,
+          # tests/, and the top-level scripts/ installers.
+          # scripts/hooks/ is excluded: those are generated/deployed copies of
+          # lib/hooks/ (the source of truth); linting generated artifacts would
+          # produce spurious failures on every refresh cycle.
           # Use SC1091 disable for sourced files we don't have on the
           # ubuntu runner's path.
           set -e
           # shellcheck source=/dev/null
           find cli lib/hooks lib/skills tests scripts -type f -name '*.sh' \
             -not -name '*.framework-hash' \
+            -not -path 'scripts/hooks/*' \
             -print0 \
             | xargs -0 shellcheck -S warning -e SC1091 -x
 
