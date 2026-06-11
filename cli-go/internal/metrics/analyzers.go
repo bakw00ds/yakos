@@ -172,18 +172,11 @@ var nodeAnalyzers = []analyzer{
 			warnings, errors := parseESLintCompact(out)
 			total := warnings + errors
 			m.CodeQuality.LintFindings = intPtr(total)
-			// Density = findings per 100 LOC. If LOC is 0 (not yet measured)
-			// we set a raw count at density=0 rather than nil.
-			loc := 0
-			if m.SizeChurn.TotalLOC != nil {
-				loc = *m.SizeChurn.TotalLOC
-			}
-			if loc > 0 {
-				density := float64(total) / float64(loc) * 100.0
+			// Density = findings per 100 LOC. Leave nil when LOC is unknown —
+			// density cannot be computed without a denominator.
+			if m.SizeChurn.TotalLOC != nil && *m.SizeChurn.TotalLOC > 0 {
+				density := float64(total) / float64(*m.SizeChurn.TotalLOC) * 100.0
 				m.CodeQuality.LintWarningDensity = floatPtr(density)
-			} else {
-				// LOC unknown — store density=0 to mark tool-ran.
-				m.CodeQuality.LintWarningDensity = floatPtr(0)
 			}
 			return nil
 		},
@@ -196,11 +189,15 @@ var nodeAnalyzers = []analyzer{
 		Tool: "tsc",
 		Args: []string{"--noEmit"},
 		Apply: func(out string, runErr error, m *Metrics) error {
+			// tsc diagnostic lines: "file.ts(row,col): error TS…"
+			// If out is empty and the tool errored, we cannot distinguish
+			// "no type errors" from "tsc failed to start" — leave nil.
+			if strings.TrimSpace(out) == "" {
+				return nil
+			}
 			count := 0
 			for _, line := range strings.Split(out, "\n") {
-				line = strings.TrimSpace(line)
-				// tsc diagnostic lines: "file.ts(row,col): error TS…"
-				if strings.Contains(line, ": error TS") {
+				if strings.Contains(strings.TrimSpace(line), ": error TS") {
 					count++
 				}
 			}
@@ -225,12 +222,21 @@ var nodeAnalyzers = []analyzer{
 		Tool: "knip",
 		Args: []string{"--reporter", "compact"},
 		Apply: func(out string, runErr error, m *Metrics) error {
-			// Count non-empty output lines as dead-code symbols.
+			// Count non-empty, non-summary output lines as dead-code symbols.
+			// knip may emit a trailing summary line like "✖ 3 files" — skip
+			// lines that start with a known summary prefix.
 			count := 0
 			for _, line := range strings.Split(out, "\n") {
-				if strings.TrimSpace(line) != "" {
-					count++
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
 				}
+				// Skip lines that are purely a count summary (start with a digit
+				// followed by space, or start with "✖").
+				if strings.HasPrefix(line, "✖") {
+					continue
+				}
+				count++
 			}
 			m.DeadCode.DeadCodeSymbols = intPtr(count)
 			return nil
@@ -273,15 +279,11 @@ var pythonAnalyzers = []analyzer{
 				}
 			}
 			m.CodeQuality.LintFindings = intPtr(count)
-			loc := 0
-			if m.SizeChurn.TotalLOC != nil {
-				loc = *m.SizeChurn.TotalLOC
-			}
-			if loc > 0 {
-				density := float64(count) / float64(loc) * 100.0
+			// Density = findings per 100 LOC. Leave nil when LOC is unknown —
+			// density cannot be computed without a denominator.
+			if m.SizeChurn.TotalLOC != nil && *m.SizeChurn.TotalLOC > 0 {
+				density := float64(count) / float64(*m.SizeChurn.TotalLOC) * 100.0
 				m.CodeQuality.LintWarningDensity = floatPtr(density)
-			} else {
-				m.CodeQuality.LintWarningDensity = floatPtr(0)
 			}
 			return nil
 		},
@@ -317,6 +319,8 @@ var pythonAnalyzers = []analyzer{
 	{
 		// vulture detects unused code in Python.
 		// It exits 0 even when findings exist (unlike most linters).
+		// Output format: "file.py:row: unused variable 'x' (60% confidence)"
+		// One finding per line; no summary line is emitted.
 		Name: "vulture",
 		Tool: "vulture",
 		Args: []string{"."},
@@ -395,24 +399,21 @@ var rustAnalyzers = []analyzer{
 	},
 	{
 		// cargo deny check covers licenses, advisories, and bans.
-		// We parse advisory violations into VulnCount.
+		// Violations are routed to LicenseRiskCount — NOT VulnCount — so that
+		// the same RUSTSEC advisory is not double-counted alongside cargo-audit.
+		// cargo deny exits non-zero when any check fails; that is tolerated.
 		Name: "cargo-deny",
 		Tool: "cargo",
 		Args: []string{"deny", "check"},
 		Apply: func(out string, runErr error, m *Metrics) error {
-			// cargo deny outputs lines like "error[…]: advisory …" for violations.
+			// cargo deny emits "error[…]: …" lines for each policy violation.
 			count := 0
 			for _, line := range strings.Split(out, "\n") {
 				if strings.HasPrefix(strings.TrimSpace(line), "error[") {
 					count++
 				}
 			}
-			// Accumulate into VulnCount (cargo-audit may have already set it).
-			existing := 0
-			if m.Security.VulnCount != nil {
-				existing = *m.Security.VulnCount
-			}
-			m.Security.VulnCount = intPtr(existing + count)
+			m.Security.LicenseRiskCount = intPtr(count)
 			return nil
 		},
 	},
@@ -423,14 +424,22 @@ var rustAnalyzers = []analyzer{
 		Tool: "cargo-machete",
 		Args: []string{},
 		Apply: func(out string, runErr error, m *Metrics) error {
-			// cargo-machete output: "crate_name" one per line for unused deps.
+			// cargo-machete output lists one unused crate name per line.
+			// Header/footer lines contain "Analyzing" or "Found" or start with
+			// "Note:" — all stable ASCII tokens, not emoji.
 			count := 0
 			for _, line := range strings.Split(out, "\n") {
 				line = strings.TrimSpace(line)
-				// Skip lines that look like headers or empty.
-				if line != "" && !strings.Contains(line, "🔍") && !strings.Contains(line, "Found") && !strings.HasPrefix(line, "Note:") {
-					count++
+				if line == "" {
+					continue
 				}
+				if strings.HasPrefix(line, "Analyzing") ||
+					strings.HasPrefix(line, "Found") ||
+					strings.HasPrefix(line, "Note:") ||
+					strings.HasPrefix(line, "cargo-machete") {
+					continue
+				}
+				count++
 			}
 			m.DeadCode.UnusedDeps = intPtr(count)
 			return nil
@@ -610,8 +619,7 @@ func parseJSCPDJSON(out string, m *Metrics) error {
 	// jscpd may emit progress lines before the JSON object; find the first '{'.
 	idx := strings.Index(out, "{")
 	if idx < 0 {
-		// No JSON found — jscpd found nothing or output nothing.
-		m.CodeQuality.DuplicationPct = floatPtr(0)
+		// No JSON found — cannot determine duplication percentage; leave nil.
 		return nil
 	}
 	var report jscpdJSON
@@ -633,7 +641,7 @@ type depcheckJSON struct {
 func parseDepcheckJSON(out string, m *Metrics) error {
 	idx := strings.Index(out, "{")
 	if idx < 0 {
-		m.DeadCode.UnusedDeps = intPtr(0)
+		// No JSON found — cannot determine unused deps; leave nil.
 		return nil
 	}
 	var report depcheckJSON
@@ -662,33 +670,30 @@ type npmAuditV7JSON struct {
 }
 
 // parseNPMAuditJSON parses npm audit --json output and sets CVECountBySeverity.
+// nil = could not parse (tool absent or output unparseable).
+// empty map = parsed successfully, zero vulnerabilities found.
 func parseNPMAuditJSON(out string, m *Metrics) error {
 	idx := strings.Index(out, "{")
 	if idx < 0 {
-		m.Security.CVECountBySeverity = map[string]int{}
+		// No JSON found — cannot determine CVE counts; leave nil.
 		return nil
 	}
 	var report npmAuditV7JSON
 	if err := json.Unmarshal([]byte(out[idx:]), &report); err != nil {
-		// Malformed output — mark empty rather than error so a single bad
-		// invocation doesn't void all other analyzers.
-		m.Security.CVECountBySeverity = map[string]int{}
+		// Malformed JSON — leave nil so the caller can distinguish
+		// "ran and found nothing" (empty map) from "couldn't parse" (nil).
 		return nil
 	}
 	v := report.Metadata.Vulnerabilities
-	counts := map[string]int{
-		"info":     v.Info,
-		"low":      v.Low,
-		"moderate": v.Moderate,
-		"high":     v.High,
-		"critical": v.Critical,
-	}
 	// Discard zero-count entries to keep the map tidy while preserving
 	// the non-nil invariant (empty map = ran and found nothing).
 	clean := make(map[string]int)
-	for k, c := range counts {
+	for sev, c := range map[string]int{
+		"info": v.Info, "low": v.Low, "moderate": v.Moderate,
+		"high": v.High, "critical": v.Critical,
+	} {
 		if c > 0 {
-			clean[k] = c
+			clean[sev] = c
 		}
 	}
 	m.Security.CVECountBySeverity = clean
@@ -701,6 +706,8 @@ func parseNPMAuditJSON(out string, m *Metrics) error {
 var radonScoreRe = regexp.MustCompile(`\((\d+)\)\s*$`)
 
 // parseRadonCC parses radon cc -s output and sets CyclomaticComplexityP90.
+// When no function scores are present in the output (empty project or parse
+// failure) the field is left nil — a p90 cannot be computed without data.
 func parseRadonCC(out string, m *Metrics) error {
 	var scores []float64
 	for _, line := range strings.Split(out, "\n") {
@@ -712,7 +719,7 @@ func parseRadonCC(out string, m *Metrics) error {
 		}
 	}
 	if len(scores) == 0 {
-		m.CodeQuality.CyclomaticComplexityP90 = floatPtr(0)
+		// No function scores found — leave nil (not-measured).
 		return nil
 	}
 	if p90, ok := Percentile(scores, 90); ok {
@@ -732,10 +739,12 @@ type banditReport struct {
 }
 
 // parseBanditJSON parses bandit -f json output and populates SASTFindingsBySeverity.
+// nil = could not parse (tool absent or output unparseable).
+// empty map = parsed successfully, zero findings.
 func parseBanditJSON(out string, m *Metrics) error {
 	idx := strings.Index(out, "{")
 	if idx < 0 {
-		m.Security.SASTFindingsBySeverity = map[string]int{}
+		// No JSON found — cannot determine SAST findings; leave nil.
 		return nil
 	}
 	var report banditReport
@@ -763,10 +772,11 @@ type pipAuditDep struct {
 
 // parsePipAuditJSON parses pip-audit --format json output and sets VulnCount.
 // The JSON schema is: [{"name": "pkg", "version": "x", "vulns": [{...}]}, ...]
+// nil = could not parse; 0 = parsed, zero vulnerabilities found.
 func parsePipAuditJSON(out string, m *Metrics) error {
 	idx := strings.Index(out, "[")
 	if idx < 0 {
-		m.Security.VulnCount = intPtr(0)
+		// No JSON array found — cannot determine vuln count; leave nil.
 		return nil
 	}
 	var deps []pipAuditDep
@@ -826,10 +836,12 @@ type cargoAuditJSON struct {
 }
 
 // parseCargoAuditJSON parses cargo audit --json output and sets VulnCount.
+// cargo-audit is the sole owner of VulnCount for the rust profile.
+// nil = could not parse; 0 = parsed, zero vulnerabilities found.
 func parseCargoAuditJSON(out string, m *Metrics) error {
 	idx := strings.Index(out, "{")
 	if idx < 0 {
-		m.Security.VulnCount = intPtr(0)
+		// No JSON found — cannot determine vuln count; leave nil.
 		return nil
 	}
 	var report cargoAuditJSON

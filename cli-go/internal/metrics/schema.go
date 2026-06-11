@@ -179,7 +179,9 @@ type SecurityMetrics struct {
 	SASTFindingsBySeverity map[string]int `json:"sast_findings_by_severity,omitempty"`
 
 	// VulnCount is the count of known vulnerabilities from govulncheck (go),
-	// pip-audit (python), or cargo audit (rust).
+	// pip-audit (python), or cargo audit (rust). cargo-audit is the sole owner
+	// of this field for the rust profile; cargo-deny violations are routed to
+	// LicenseRiskCount to avoid double-counting the same advisory.
 	VulnCount *int `json:"vuln_count"`
 
 	// CVECountBySeverity maps severity label → count of CVEs, as reported by
@@ -188,6 +190,12 @@ type SecurityMetrics struct {
 	// nil means npm audit was not run (tool absent); empty map means it ran
 	// and found no vulnerabilities.
 	CVECountBySeverity map[string]int `json:"cve_count_by_severity,omitempty"`
+
+	// LicenseRiskCount is the count of license-policy and advisory-ban
+	// violations reported by cargo deny check (rust profile). Kept separate
+	// from VulnCount (which cargo-audit owns) to avoid double-counting the same
+	// RUSTSEC advisory. null when cargo deny was not run or could not be parsed.
+	LicenseRiskCount *int `json:"license_risk_count"`
 }
 
 // TestMetrics captures test coverage and results.

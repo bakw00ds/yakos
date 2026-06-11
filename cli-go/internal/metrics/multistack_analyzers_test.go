@@ -108,7 +108,7 @@ func TestNodeAnalyzers_MissingToolsLeaveMetricsNil(t *testing.T) {
 			t.Errorf("node analyzer %s: expected tool-missing; got %q", a.Name, s)
 		}
 	}
-	// All metrics must remain nil.
+	// All metrics must remain nil — Apply was never called.
 	if m.CodeQuality.LintFindings != nil {
 		t.Error("LintFindings should be nil when tool missing")
 	}
@@ -153,6 +153,9 @@ func TestPythonAnalyzers_MissingToolsLeaveMetricsNil(t *testing.T) {
 	if m.CodeQuality.LintFindings != nil {
 		t.Error("LintFindings should be nil")
 	}
+	if m.CodeQuality.LintWarningDensity != nil {
+		t.Error("LintWarningDensity should be nil")
+	}
 	if m.CodeQuality.CyclomaticComplexityP90 != nil {
 		t.Error("CyclomaticComplexityP90 should be nil")
 	}
@@ -193,6 +196,9 @@ func TestRustAnalyzers_MissingToolsLeaveMetricsNil(t *testing.T) {
 	}
 	if m.Security.VulnCount != nil {
 		t.Error("VulnCount should be nil")
+	}
+	if m.Security.LicenseRiskCount != nil {
+		t.Error("LicenseRiskCount should be nil when tool missing")
 	}
 	if m.DeadCode.UnusedDeps != nil {
 		t.Error("UnusedDeps should be nil")
@@ -243,99 +249,169 @@ func TestParseESLintCompact(t *testing.T) {
 	}
 }
 
-func TestParseJSCPDJSON(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		wantPct float64
-	}{
-		{
-			name: "with duplication",
-			input: `{
+// TestESLintApply_LintWarningDensity_NilWhenLOCUnknown verifies that
+// LintWarningDensity stays nil when TotalLOC is not yet populated — density
+// cannot be computed without a denominator.
+func TestESLintApply_LintWarningDensity_NilWhenLOCUnknown(t *testing.T) {
+	m := &Metrics{}       // SizeChurn.TotalLOC is nil
+	a := nodeAnalyzers[0] // eslint is first
+	if a.Name != "eslint" {
+		t.Fatalf("expected eslint as first node analyzer; got %s", a.Name)
+	}
+	input := `/src/app.ts: line 1, col 1, warning - unused var (no-unused-vars)`
+	if err := a.Apply(input, nil, m); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	// LintFindings must be set (the count is known).
+	if m.CodeQuality.LintFindings == nil {
+		t.Fatal("LintFindings should not be nil")
+	}
+	// LintWarningDensity must be nil — LOC unknown, denominator missing.
+	if m.CodeQuality.LintWarningDensity != nil {
+		t.Errorf("LintWarningDensity should be nil when LOC unknown; got %v", *m.CodeQuality.LintWarningDensity)
+	}
+}
+
+// TestESLintApply_LintWarningDensity_SetWhenLOCKnown verifies that density IS
+// populated once TotalLOC is available.
+func TestESLintApply_LintWarningDensity_SetWhenLOCKnown(t *testing.T) {
+	m := &Metrics{}
+	m.SizeChurn.TotalLOC = intPtr(200)
+	a := nodeAnalyzers[0] // eslint
+	input := `/src/app.ts: line 1, col 1, warning - unused var (no-unused-vars)
+/src/app.ts: line 2, col 1, warning - missing semi (semi)`
+	if err := a.Apply(input, nil, m); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if m.CodeQuality.LintWarningDensity == nil {
+		t.Fatal("LintWarningDensity should not be nil when LOC is known")
+	}
+	// 2 findings / 200 LOC * 100 = 1.0
+	if *m.CodeQuality.LintWarningDensity != 1.0 {
+		t.Errorf("LintWarningDensity: got %v, want 1.0", *m.CodeQuality.LintWarningDensity)
+	}
+}
+
+// TestTSCApply_NilOnEmptyOutput verifies that VetFindings stays nil when tsc
+// produces no output (tool startup failure, not a diagnostic result).
+func TestTSCApply_NilOnEmptyOutput(t *testing.T) {
+	m := &Metrics{}
+	// tsc is the second node analyzer.
+	var tscApply func(string, error, *Metrics) error
+	for _, a := range nodeAnalyzers {
+		if a.Name == "tsc" {
+			tscApply = a.Apply
+			break
+		}
+	}
+	if tscApply == nil {
+		t.Fatal("tsc analyzer not found in nodeAnalyzers")
+	}
+	if err := tscApply("", nil, m); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if m.CodeQuality.VetFindings != nil {
+		t.Errorf("VetFindings should be nil for empty tsc output; got %d", *m.CodeQuality.VetFindings)
+	}
+}
+
+func TestParseJSCPDJSON_WithDuplication(t *testing.T) {
+	input := `{
   "statistics": {
     "total": {
       "percentage": 12.5
     }
   }
-}`,
-			wantPct: 12.5,
-		},
-		{
-			name: "no duplication",
-			input: `{
+}`
+	m := &Metrics{}
+	if err := parseJSCPDJSON(input, m); err != nil {
+		t.Fatalf("parseJSCPDJSON: %v", err)
+	}
+	if m.CodeQuality.DuplicationPct == nil {
+		t.Fatal("DuplicationPct should not be nil")
+	}
+	if *m.CodeQuality.DuplicationPct != 12.5 {
+		t.Errorf("DuplicationPct: got %v, want 12.5", *m.CodeQuality.DuplicationPct)
+	}
+}
+
+func TestParseJSCPDJSON_NoDuplication(t *testing.T) {
+	input := `{
   "statistics": {
     "total": {
       "percentage": 0
     }
   }
-}`,
-			wantPct: 0,
-		},
-		{
-			name:    "empty output",
-			input:   "",
-			wantPct: 0,
-		},
+}`
+	m := &Metrics{}
+	if err := parseJSCPDJSON(input, m); err != nil {
+		t.Fatalf("parseJSCPDJSON: %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			m := &Metrics{}
-			if err := parseJSCPDJSON(tc.input, m); err != nil {
-				t.Fatalf("parseJSCPDJSON: %v", err)
-			}
-			if m.CodeQuality.DuplicationPct == nil {
-				t.Fatal("DuplicationPct should not be nil")
-			}
-			if *m.CodeQuality.DuplicationPct != tc.wantPct {
-				t.Errorf("DuplicationPct: got %v, want %v", *m.CodeQuality.DuplicationPct, tc.wantPct)
-			}
-		})
+	if m.CodeQuality.DuplicationPct == nil {
+		t.Fatal("DuplicationPct should not be nil for valid JSON with 0%")
+	}
+	if *m.CodeQuality.DuplicationPct != 0 {
+		t.Errorf("DuplicationPct: got %v, want 0", *m.CodeQuality.DuplicationPct)
 	}
 }
 
-func TestParseDepcheckJSON(t *testing.T) {
-	tests := []struct {
-		name       string
-		input      string
-		wantUnused int
-	}{
-		{
-			name: "two unused prod, one unused dev",
-			input: `{
+// TestParseJSCPDJSON_NoJSON verifies that DuplicationPct stays NIL when jscpd
+// produces no JSON (e.g. crashed or produced only progress text).
+func TestParseJSCPDJSON_NoJSON(t *testing.T) {
+	m := &Metrics{}
+	if err := parseJSCPDJSON("", m); err != nil {
+		t.Fatalf("parseJSCPDJSON: %v", err)
+	}
+	if m.CodeQuality.DuplicationPct != nil {
+		t.Errorf("DuplicationPct should be nil for no-JSON output; got %v", *m.CodeQuality.DuplicationPct)
+	}
+}
+
+func TestParseDepcheckJSON_TwoUnusedProdOneUnusedDev(t *testing.T) {
+	input := `{
   "dependencies": ["lodash", "moment"],
   "devDependencies": ["jest"],
   "missing": {}
-}`,
-			wantUnused: 3,
-		},
-		{
-			name: "no unused",
-			input: `{
+}`
+	m := &Metrics{}
+	if err := parseDepcheckJSON(input, m); err != nil {
+		t.Fatalf("parseDepcheckJSON: %v", err)
+	}
+	if m.DeadCode.UnusedDeps == nil {
+		t.Fatal("UnusedDeps should not be nil")
+	}
+	if *m.DeadCode.UnusedDeps != 3 {
+		t.Errorf("UnusedDeps: got %d, want 3", *m.DeadCode.UnusedDeps)
+	}
+}
+
+func TestParseDepcheckJSON_NoUnused(t *testing.T) {
+	input := `{
   "dependencies": [],
   "devDependencies": [],
   "missing": {}
-}`,
-			wantUnused: 0,
-		},
-		{
-			name:       "empty output",
-			input:      "",
-			wantUnused: 0,
-		},
+}`
+	m := &Metrics{}
+	if err := parseDepcheckJSON(input, m); err != nil {
+		t.Fatalf("parseDepcheckJSON: %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			m := &Metrics{}
-			if err := parseDepcheckJSON(tc.input, m); err != nil {
-				t.Fatalf("parseDepcheckJSON: %v", err)
-			}
-			if m.DeadCode.UnusedDeps == nil {
-				t.Fatal("UnusedDeps should not be nil")
-			}
-			if *m.DeadCode.UnusedDeps != tc.wantUnused {
-				t.Errorf("UnusedDeps: got %d, want %d", *m.DeadCode.UnusedDeps, tc.wantUnused)
-			}
-		})
+	if m.DeadCode.UnusedDeps == nil {
+		t.Fatal("UnusedDeps should not be nil (0 != nil)")
+	}
+	if *m.DeadCode.UnusedDeps != 0 {
+		t.Errorf("UnusedDeps: got %d, want 0", *m.DeadCode.UnusedDeps)
+	}
+}
+
+// TestParseDepcheckJSON_NoJSON verifies that UnusedDeps stays NIL when
+// depcheck produces no JSON output.
+func TestParseDepcheckJSON_NoJSON(t *testing.T) {
+	m := &Metrics{}
+	if err := parseDepcheckJSON("", m); err != nil {
+		t.Fatalf("parseDepcheckJSON: %v", err)
+	}
+	if m.DeadCode.UnusedDeps != nil {
+		t.Errorf("UnusedDeps should be nil for no-JSON output; got %d", *m.DeadCode.UnusedDeps)
 	}
 }
 
@@ -382,14 +458,14 @@ func TestParseNPMAuditJSON(t *testing.T) {
 	if m.Security.CVECountBySeverity["critical"] != 1 {
 		t.Errorf("critical: got %d, want 1", m.Security.CVECountBySeverity["critical"])
 	}
-	// info=0, should not be in the map.
+	// info=0 should not appear in the map.
 	if _, ok := m.Security.CVECountBySeverity["info"]; ok {
 		t.Error("info=0 should not appear in CVECountBySeverity")
 	}
 }
 
 func TestParseNPMAuditJSON_Clean(t *testing.T) {
-	// A clean project: all zeros.
+	// A clean project: all zeros → empty map (not nil).
 	input := `{
   "auditReportVersion": 2,
   "vulnerabilities": {},
@@ -410,6 +486,30 @@ func TestParseNPMAuditJSON_Clean(t *testing.T) {
 	}
 	if len(m.Security.CVECountBySeverity) != 0 {
 		t.Errorf("expected empty map; got %v", m.Security.CVECountBySeverity)
+	}
+}
+
+// TestParseNPMAuditJSON_NoJSON verifies that CVECountBySeverity stays NIL
+// when npm audit produces no JSON (tool failure, not a clean audit).
+func TestParseNPMAuditJSON_NoJSON(t *testing.T) {
+	m := &Metrics{}
+	if err := parseNPMAuditJSON("", m); err != nil {
+		t.Fatalf("parseNPMAuditJSON: %v", err)
+	}
+	if m.Security.CVECountBySeverity != nil {
+		t.Errorf("CVECountBySeverity should be nil for no-JSON output; got %v", m.Security.CVECountBySeverity)
+	}
+}
+
+// TestParseNPMAuditJSON_Unparseable verifies that CVECountBySeverity stays NIL
+// when the JSON is malformed (cannot be parsed).
+func TestParseNPMAuditJSON_Unparseable(t *testing.T) {
+	m := &Metrics{}
+	if err := parseNPMAuditJSON(`{ this is not valid json `, m); err != nil {
+		t.Fatalf("parseNPMAuditJSON: %v", err)
+	}
+	if m.Security.CVECountBySeverity != nil {
+		t.Errorf("CVECountBySeverity should be nil for unparseable JSON; got %v", m.Security.CVECountBySeverity)
 	}
 }
 
@@ -439,16 +539,16 @@ mymodule/utils.py
 	}
 }
 
+// TestParseRadonCC_Empty verifies that CyclomaticComplexityP90 stays NIL when
+// radon produces no function scores — cannot compute a p90 from empty data.
 func TestParseRadonCC_Empty(t *testing.T) {
 	m := &Metrics{}
 	if err := parseRadonCC("", m); err != nil {
 		t.Fatalf("parseRadonCC empty: %v", err)
 	}
-	if m.CodeQuality.CyclomaticComplexityP90 == nil {
-		t.Fatal("CyclomaticComplexityP90 should not be nil for empty output (set to 0)")
-	}
-	if *m.CodeQuality.CyclomaticComplexityP90 != 0 {
-		t.Errorf("expected 0 for empty radon output; got %v", *m.CodeQuality.CyclomaticComplexityP90)
+	if m.CodeQuality.CyclomaticComplexityP90 != nil {
+		t.Errorf("CyclomaticComplexityP90 should be nil for empty radon output; got %v",
+			*m.CodeQuality.CyclomaticComplexityP90)
 	}
 }
 
@@ -479,6 +579,19 @@ func TestParseBanditJSON(t *testing.T) {
 	}
 	if m.Security.SASTFindingsBySeverity["low"] != 1 {
 		t.Errorf("low: got %d, want 1", m.Security.SASTFindingsBySeverity["low"])
+	}
+}
+
+// TestParseBanditJSON_NoJSON verifies that SASTFindingsBySeverity stays NIL
+// when bandit produces no JSON output.
+func TestParseBanditJSON_NoJSON(t *testing.T) {
+	m := &Metrics{}
+	if err := parseBanditJSON("", m); err != nil {
+		t.Fatalf("parseBanditJSON: %v", err)
+	}
+	if m.Security.SASTFindingsBySeverity != nil {
+		t.Errorf("SASTFindingsBySeverity should be nil for no-JSON output; got %v",
+			m.Security.SASTFindingsBySeverity)
 	}
 }
 
@@ -518,6 +631,18 @@ func TestParsePipAuditJSON_Clean(t *testing.T) {
 	}
 }
 
+// TestParsePipAuditJSON_NoJSON verifies that VulnCount stays NIL when
+// pip-audit produces no JSON output (tool failure or startup error).
+func TestParsePipAuditJSON_NoJSON(t *testing.T) {
+	m := &Metrics{}
+	if err := parsePipAuditJSON("", m); err != nil {
+		t.Fatalf("parsePipAuditJSON: %v", err)
+	}
+	if m.Security.VulnCount != nil {
+		t.Errorf("VulnCount should be nil for no-JSON output; got %d", *m.Security.VulnCount)
+	}
+}
+
 func TestParseCargoClippyJSON(t *testing.T) {
 	// Real cargo clippy --message-format=json NDJSON output (abbreviated).
 	input := `{"reason":"compiler-artifact","package_id":"foo 0.1.0","executable":null,"features":[],"filenames":[],"fresh":false}
@@ -539,7 +664,7 @@ func TestParseCargoClippyJSON(t *testing.T) {
 }
 
 func TestParseCargoClippyJSON_Clean(t *testing.T) {
-	// No compiler-message entries.
+	// No compiler-message entries — clean project.
 	input := `{"reason":"compiler-artifact","package_id":"foo 0.1.0","executable":null,"features":[],"filenames":[],"fresh":false}
 {"reason":"build-finished","success":true}`
 	m := &Metrics{}
@@ -600,6 +725,117 @@ func TestParseCargoAuditJSON_Clean(t *testing.T) {
 	}
 }
 
+// TestParseCargoAuditJSON_NoJSON verifies that VulnCount stays NIL when
+// cargo audit produces no JSON (tool startup error or missing Cargo.lock).
+func TestParseCargoAuditJSON_NoJSON(t *testing.T) {
+	m := &Metrics{}
+	if err := parseCargoAuditJSON("", m); err != nil {
+		t.Fatalf("parseCargoAuditJSON: %v", err)
+	}
+	if m.Security.VulnCount != nil {
+		t.Errorf("VulnCount should be nil for no-JSON output; got %d", *m.Security.VulnCount)
+	}
+}
+
+// TestCargoDeny_NoDuplicateVulnCount verifies that cargo-deny does NOT write
+// to VulnCount (which cargo-audit owns), preventing double-counting.
+// Instead it writes to LicenseRiskCount.
+func TestCargoDeny_NoDuplicateVulnCount(t *testing.T) {
+	// Find the cargo-deny Apply.
+	var denyApply func(string, error, *Metrics) error
+	for _, a := range rustAnalyzers {
+		if a.Name == "cargo-deny" {
+			denyApply = a.Apply
+			break
+		}
+	}
+	if denyApply == nil {
+		t.Fatal("cargo-deny analyzer not found in rustAnalyzers")
+	}
+
+	// Simulate cargo-audit having already set VulnCount=2 for two advisories.
+	m := &Metrics{}
+	m.Security.VulnCount = intPtr(2)
+
+	// cargo deny finds 1 license violation.
+	cargodenOutput := `error[L001]: license not allowed
+  --> Cargo.lock:5:1
+   |
+ 5 | some-crate = "1.0.0"
+`
+	if err := denyApply(cargodenOutput, nil, m); err != nil {
+		t.Fatalf("cargo-deny Apply: %v", err)
+	}
+
+	// VulnCount must still be 2 — cargo-deny must NOT touch it.
+	if m.Security.VulnCount == nil || *m.Security.VulnCount != 2 {
+		t.Errorf("VulnCount should still be 2 after cargo-deny; got %v", m.Security.VulnCount)
+	}
+	// LicenseRiskCount must be 1.
+	if m.Security.LicenseRiskCount == nil {
+		t.Fatal("LicenseRiskCount should not be nil after cargo-deny")
+	}
+	if *m.Security.LicenseRiskCount != 1 {
+		t.Errorf("LicenseRiskCount: got %d, want 1", *m.Security.LicenseRiskCount)
+	}
+}
+
+// TestCargoDeny_Clean verifies that LicenseRiskCount=0 when cargo deny
+// reports no violations (parsed successfully, result is zero).
+func TestCargoDeny_Clean(t *testing.T) {
+	var denyApply func(string, error, *Metrics) error
+	for _, a := range rustAnalyzers {
+		if a.Name == "cargo-deny" {
+			denyApply = a.Apply
+			break
+		}
+	}
+	if denyApply == nil {
+		t.Fatal("cargo-deny analyzer not found")
+	}
+
+	m := &Metrics{}
+	// No "error[" lines → zero violations.
+	if err := denyApply("Checking advisories\nChecking licenses\n", nil, m); err != nil {
+		t.Fatalf("cargo-deny Apply: %v", err)
+	}
+	if m.Security.LicenseRiskCount == nil {
+		t.Fatal("LicenseRiskCount should not be nil (0 != nil)")
+	}
+	if *m.Security.LicenseRiskCount != 0 {
+		t.Errorf("LicenseRiskCount: got %d, want 0", *m.Security.LicenseRiskCount)
+	}
+	// VulnCount untouched.
+	if m.Security.VulnCount != nil {
+		t.Errorf("VulnCount should be nil; got %d", *m.Security.VulnCount)
+	}
+}
+
+// TestRuffApply_LintWarningDensity_NilWhenLOCUnknown mirrors the eslint test.
+func TestRuffApply_LintWarningDensity_NilWhenLOCUnknown(t *testing.T) {
+	m := &Metrics{} // TotalLOC nil
+	var ruffApply func(string, error, *Metrics) error
+	for _, a := range pythonAnalyzers {
+		if a.Name == "ruff" {
+			ruffApply = a.Apply
+			break
+		}
+	}
+	if ruffApply == nil {
+		t.Fatal("ruff analyzer not found")
+	}
+	input := "src/app.py:1:1: E501 line too long (120 > 88 characters)"
+	if err := ruffApply(input, nil, m); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if m.CodeQuality.LintFindings == nil {
+		t.Fatal("LintFindings should not be nil")
+	}
+	if m.CodeQuality.LintWarningDensity != nil {
+		t.Errorf("LintWarningDensity should be nil when LOC unknown; got %v", *m.CodeQuality.LintWarningDensity)
+	}
+}
+
 // --- schema field null invariant for new fields ---
 
 func TestNewSchemaFields_NullWhenNotMeasured(t *testing.T) {
@@ -619,6 +855,9 @@ func TestNewSchemaFields_NullWhenNotMeasured(t *testing.T) {
 	}
 	if m.Security.CVECountBySeverity != nil {
 		t.Error("CVECountBySeverity should default to nil")
+	}
+	if m.Security.LicenseRiskCount != nil {
+		t.Error("LicenseRiskCount should default to nil")
 	}
 }
 
