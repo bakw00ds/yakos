@@ -35,7 +35,7 @@ type ComposedAgent struct {
 	// Empty slice means no tool restriction.
 	Tools []string
 
-	// Model is the resolved concrete tier name (haiku|sonnet|opus) or "".
+	// Model is the resolved concrete tier name (haiku|sonnet|opus|fable) or "".
 	// Empty means the runtime picks its default.
 	Model string
 }

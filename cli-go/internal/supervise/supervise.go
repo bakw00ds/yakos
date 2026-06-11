@@ -681,9 +681,9 @@ func runSet(cfg Config, home, acRoot string) (*Result, error) {
 		}
 	case "model":
 		switch cfg.Value {
-		case "haiku", "sonnet", "opus":
+		case "haiku", "sonnet", "opus", "fable":
 		default:
-			return nil, fmt.Errorf("supervise set model: value must be haiku, sonnet, or opus (got %q)", cfg.Value)
+			return nil, fmt.Errorf("supervise set model: value must be haiku, sonnet, opus, or fable (got %q)", cfg.Value)
 		}
 	}
 

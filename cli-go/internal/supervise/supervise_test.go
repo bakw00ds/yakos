@@ -419,7 +419,7 @@ func TestSet_InvalidModelValue_Error(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid model")
 	}
-	if !strings.Contains(err.Error(), "haiku, sonnet, or opus") {
+	if !strings.Contains(err.Error(), "haiku, sonnet, opus, or fable") {
 		t.Errorf("expected model validation message; got: %v", err)
 	}
 }
@@ -470,7 +470,7 @@ func TestSet_MissingYAML_Error(t *testing.T) {
 }
 
 func TestSet_ValidModels(t *testing.T) {
-	for _, model := range []string{"haiku", "sonnet", "opus"} {
+	for _, model := range []string{"haiku", "sonnet", "opus", "fable"} {
 		t.Run(model, func(t *testing.T) {
 			cfg := newCfg(t, "set")
 			cfg, repo := makeProject(t, cfg, "proj")
