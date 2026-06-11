@@ -49,6 +49,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/mcpserver"
 	"github.com/bakw00ds/yakos/internal/memory"
 	"github.com/bakw00ds/yakos/internal/metrics"
+	"github.com/bakw00ds/yakos/internal/metricsdash"
 	"github.com/bakw00ds/yakos/internal/migrate"
 	"github.com/bakw00ds/yakos/internal/passthrough"
 	"github.com/bakw00ds/yakos/internal/peer"
@@ -5759,6 +5760,7 @@ func recordInvocation(home, yakosRoot string, args []string, startNano int64) {
 //	yakos metrics trend [--metric PATH] [--last N] [--since TS]
 //	yakos metrics compare <shaA> <shaB>
 //	yakos metrics gate [--budgets PATH] [--advisory] [--enforce] [--json] [--collect]
+//	yakos metrics serve [--port N] [--host 127.0.0.1] [--project P] [--all-projects]
 //	yakos metrics help
 //
 // Storage: <project>/.yakos/metrics/history.ndjson (append-only NDJSON).
@@ -5777,6 +5779,17 @@ func runMetrics(args []string) {
 	cfg.Writer = os.Stdout
 	cfg.ErrWriter = os.Stderr
 
+	// The serve subcommand starts a long-running HTTP server; it is handled
+	// here (not inside metrics.Run) to avoid an import cycle between the
+	// metrics package and the metricsdash package.
+	if cfg.Subcommand == "serve" {
+		if err := runMetricsDash(cfg, home); err != nil {
+			fmt.Fprintf(os.Stderr, "metrics serve: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if _, err := metrics.Run(cfg); err != nil {
 		// metrics gate in enforce mode returns GateExitError with the intended
 		// exit code.  Use errors.As so detection survives any future wrapping
@@ -5789,6 +5802,68 @@ func runMetrics(args []string) {
 		fmt.Fprintf(os.Stderr, "metrics: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runMetricsDash starts the Phase-3 metrics dashboard HTTP server.
+// It is called from runMetrics when cfg.Subcommand == "serve".
+// Separated to avoid an import cycle (metrics ↔ metricsdash).
+func runMetricsDash(cfg metrics.Config, home string) error {
+	// Resolve project directory.
+	projectDir := metrics.ResolveProjectDir(cfg.ProjectDir)
+	if projectDir == "" {
+		cwd, _ := os.Getwd()
+		projectDir = cwd
+		fmt.Fprintf(os.Stderr, "metrics serve: no project dir resolved; using cwd %s\n", projectDir)
+	}
+
+	// Default host/port when ParseArgs didn't set them (shouldn't happen,
+	// but guard here to be safe).
+	host := cfg.ServeHost
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port := cfg.ServePort
+	if port == 0 {
+		port = 7896
+	}
+	addr := fmt.Sprintf("%s:%d", host, port)
+
+	// Loud early failure for non-loopback bind attempts.
+	if err := metricsdash.ValidateAddr(addr); err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR: "+err.Error())
+		return err
+	}
+
+	// State dir for the auth token.
+	stateDir := cfg.StateDir
+	if stateDir == "" {
+		stateDir = metrics.ResolveStateDir(home)
+	}
+
+	tok, err := metricsdash.LoadOrCreateMetricsToken(stateDir)
+	if err != nil {
+		return fmt.Errorf("load token: %w", err)
+	}
+
+	// Print the dashboard URL with the token in the URL fragment.
+	// The fragment is never sent in HTTP requests so it never appears in
+	// server access logs.
+	fmt.Printf("metrics serve: dashboard ready\n")
+	fmt.Printf("  URL:   http://%s/#token=%s\n", addr, tok)
+	fmt.Printf("  token: %s\n", tok)
+	fmt.Printf("  press Ctrl-C to stop\n")
+
+	srv := metricsdash.New(metricsdash.Config{
+		Addr:        addr,
+		Token:       tok,
+		ProjectDir:  projectDir,
+		AllProjects: cfg.ServeAllProjects,
+		HomeDir:     home,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	return srv.Serve(ctx)
 }
 
 // runTelemetry implements `yakos telemetry` natively in Go.
