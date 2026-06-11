@@ -93,12 +93,28 @@ func PrintReport(w io.Writer, snapshots []Snapshot, emitJSON bool) error {
 		pm = &prev.Metrics
 	}
 
+	// prevInt / prevFloat64 safely dereference a field from the previous
+	// Metrics snapshot.  They return nil when pm is nil (no prior snapshot),
+	// giving "—" deltas rather than a panic.
+	prevInt := func(f func(*Metrics) *int) *int {
+		if pm == nil {
+			return nil
+		}
+		return f(pm)
+	}
+	prevFloat64 := func(f func(*Metrics) *float64) *float64 {
+		if pm == nil {
+			return nil
+		}
+		return f(pm)
+	}
+
 	_, _ = fmt.Fprintln(w, "=== Efficiency ===")
-	printRow(w, "  task_count", fmtInt(m.Efficiency.TaskCount), deltaIntStr(m.Efficiency.TaskCount, nilInt(pm)))
-	printRow(w, "  total_cost_usd", fmtFloat(m.Efficiency.TotalCostUSD), deltaStr(m.Efficiency.TotalCostUSD, nilFloat64(pm)))
-	printRow(w, "  median_cost_per_task", fmtFloat(m.Efficiency.MedianCostPerTaskUSD), deltaStr(m.Efficiency.MedianCostPerTaskUSD, nilFloat64(pm)))
-	printRow(w, "  mean_cost_per_task", fmtFloat(m.Efficiency.MeanCostPerTaskUSD), deltaStr(m.Efficiency.MeanCostPerTaskUSD, nilFloat64(pm)))
-	printRow(w, "  median_tokens_per_task", fmtFloat(m.Efficiency.MedianTokensPerTask), deltaStr(m.Efficiency.MedianTokensPerTask, nilFloat64(pm)))
+	printRow(w, "  task_count", fmtInt(m.Efficiency.TaskCount), deltaIntStr(m.Efficiency.TaskCount, prevInt(func(p *Metrics) *int { return p.Efficiency.TaskCount })))
+	printRow(w, "  total_cost_usd", fmtFloat(m.Efficiency.TotalCostUSD), deltaStr(m.Efficiency.TotalCostUSD, prevFloat64(func(p *Metrics) *float64 { return p.Efficiency.TotalCostUSD })))
+	printRow(w, "  median_cost_per_task", fmtFloat(m.Efficiency.MedianCostPerTaskUSD), deltaStr(m.Efficiency.MedianCostPerTaskUSD, prevFloat64(func(p *Metrics) *float64 { return p.Efficiency.MedianCostPerTaskUSD })))
+	printRow(w, "  mean_cost_per_task", fmtFloat(m.Efficiency.MeanCostPerTaskUSD), deltaStr(m.Efficiency.MeanCostPerTaskUSD, prevFloat64(func(p *Metrics) *float64 { return p.Efficiency.MeanCostPerTaskUSD })))
+	printRow(w, "  median_tokens_per_task", fmtFloat(m.Efficiency.MedianTokensPerTask), deltaStr(m.Efficiency.MedianTokensPerTask, prevFloat64(func(p *Metrics) *float64 { return p.Efficiency.MedianTokensPerTask })))
 
 	_, _ = fmt.Fprintln(w, "\n=== Dispatch ===")
 	printRow(w, "  first_try_success_rate", fmtPct(m.Dispatch.FirstTrySuccessRate), "")
@@ -161,17 +177,6 @@ func short(sha string) string {
 		return sha[:8]
 	}
 	return sha
-}
-
-// nilInt returns the corresponding *int from m, or nil if m is nil.
-// Used for delta computation — the helpers below are intentionally narrow.
-func nilInt(m *Metrics) *int {
-	return nil
-}
-
-// nilFloat64 returns nil — placeholder for delta computation.
-func nilFloat64(m *Metrics) *float64 {
-	return nil
 }
 
 // sparkline returns a Unicode sparkline string for a series of float64 values.

@@ -3,6 +3,7 @@ package metrics
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -462,5 +463,125 @@ func TestCollectHookBypass_ExpiredEntry(t *testing.T) {
 	}
 	if *m.Dispatch.HookBypassCount != 0 {
 		t.Errorf("expected 0 active bypasses (all expired); got %d", *m.Dispatch.HookBypassCount)
+	}
+}
+
+// --- report delta column ---
+
+// TestPrintReport_DeltaRendered asserts that PrintReport emits a non-blank Δ
+// column when two snapshots with differing task_count values exist.
+func TestPrintReport_DeltaRendered(t *testing.T) {
+	older := Snapshot{
+		Schema:  schemaVersion,
+		Ts:      time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC),
+		Commit:  "aaaa0001",
+		Branch:  "main",
+		Trigger: "manual",
+		Metrics: Metrics{
+			Efficiency: EfficiencyMetrics{
+				TaskCount:    intPtr(100),
+				TotalCostUSD: floatPtr(10.00),
+			},
+		},
+		ToolStatus: map[string]string{},
+	}
+	newer := Snapshot{
+		Schema:  schemaVersion,
+		Ts:      time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC),
+		Commit:  "bbbb0002",
+		Branch:  "main",
+		Trigger: "manual",
+		Metrics: Metrics{
+			Efficiency: EfficiencyMetrics{
+				TaskCount:    intPtr(110),
+				TotalCostUSD: floatPtr(12.50),
+			},
+		},
+		ToolStatus: map[string]string{},
+	}
+
+	var buf strings.Builder
+	if err := PrintReport(&buf, []Snapshot{older, newer}, false); err != nil {
+		t.Fatalf("PrintReport: %v", err)
+	}
+	out := buf.String()
+
+	// task_count went 100→110, so delta should be (+10).
+	if !strings.Contains(out, "(+10)") {
+		t.Errorf("expected (+10) delta for task_count; report:\n%s", out)
+	}
+	// total_cost_usd went 10.00→12.50, so delta should be (+2.50).
+	if !strings.Contains(out, "(+2.50)") {
+		t.Errorf("expected (+2.50) delta for total_cost_usd; report:\n%s", out)
+	}
+}
+
+// TestPrintReport_NoDeltaWhenSingleSnapshot asserts no Δ column when only one
+// snapshot exists.
+func TestPrintReport_NoDeltaWhenSingleSnapshot(t *testing.T) {
+	snap := Snapshot{
+		Schema:  schemaVersion,
+		Ts:      time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC),
+		Commit:  "cccc0003",
+		Branch:  "main",
+		Trigger: "manual",
+		Metrics: Metrics{
+			Efficiency: EfficiencyMetrics{TaskCount: intPtr(50)},
+		},
+		ToolStatus: map[string]string{},
+	}
+
+	var buf strings.Builder
+	if err := PrintReport(&buf, []Snapshot{snap}, false); err != nil {
+		t.Fatalf("PrintReport: %v", err)
+	}
+	out := buf.String()
+
+	// With only one snapshot there is no previous to diff against.
+	if strings.Contains(out, "(+") || strings.Contains(out, " (-") {
+		t.Errorf("expected no delta column with single snapshot; report:\n%s", out)
+	}
+}
+
+// --- getChurnLines fallback on shallow repo ---
+
+// TestGetChurnLines_ShallowRepo creates a real git repo with a single commit
+// (fewer than 30 commits) and verifies that getChurnLines returns a non-zero
+// churn count via the root-commit fallback rather than erroring out.
+func TestGetChurnLines_ShallowRepo(t *testing.T) {
+	dir := t.TempDir()
+
+	// Bootstrap a minimal git repo.  Force commit.gpgsign=false because
+	// signing is enabled globally and would break throwaway fixture repos.
+	run := func(args ...string) {
+		t.Helper()
+		cmdArgs := append([]string{"-c", "commit.gpgsign=false"}, args...)
+		cmd := exec.Command("git", cmdArgs...) //nolint:gosec
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	run("init")
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "Test")
+
+	// Write a source file so the diff has something to count.
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "main.go")
+	run("commit", "-m", "initial")
+
+	runner := realGitRunner{}
+	churn, err := getChurnLines(runner, dir, 30) // 30 > 1 commit → triggers fallback
+	if err != nil {
+		t.Fatalf("getChurnLines: %v", err)
+	}
+	// The initial commit added 3 lines; the diff from root to HEAD should
+	// count at least those lines (added only, deleted = 0 for a new file).
+	if churn < 3 {
+		t.Errorf("expected churn >= 3 from shallow repo; got %d", churn)
 	}
 }

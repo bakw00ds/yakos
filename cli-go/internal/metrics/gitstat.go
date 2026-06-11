@@ -73,17 +73,50 @@ func getTagTimestamp(runner gitRunner, projectDir, tag string) (string, error) {
 	return runner.Run(projectDir, "log", "-1", "--format=%aI", tag)
 }
 
+// emptyTreeSHA is the well-known git SHA for an empty tree object.
+// Diffing against it gives the full set of lines introduced since the
+// beginning of history, and is the correct base for a single-commit repo
+// where root == HEAD (so root..HEAD is an empty diff).
+const emptyTreeSHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
 // getChurnLines returns the total lines added+deleted across the last N commits
-// using git numstat.
+// using git numstat.  When the repo has fewer than N commits it falls back to
+// diffing from the beginning of history via the empty-tree object.
+// exec.Command does NOT invoke a shell, so shell substitutions like $(…) must
+// never be passed as arguments — the root SHA is obtained via a separate
+// gitRunner.Run call.
 func getChurnLines(runner gitRunner, projectDir string, nCommits int) (int, error) {
 	out, err := runner.Run(projectDir, "diff", "--numstat",
 		fmt.Sprintf("HEAD~%d", nCommits), "HEAD")
 	if err != nil {
-		// Might fail if fewer than nCommits exist; fall back to full log.
-		out, err = runner.Run(projectDir, "diff", "--numstat",
-			"$(git rev-list --max-parents=0 HEAD)", "HEAD")
+		// Repo has fewer than nCommits.  Resolve the root commit first so we
+		// can detect the single-commit case (root == HEAD → empty diff).
+		rootSHA, revErr := runner.Run(projectDir, "rev-list", "--max-parents=0", "HEAD")
+		if revErr != nil {
+			return 0, fmt.Errorf("getChurnLines: rev-list: %w", revErr)
+		}
+		rootSHA = strings.TrimSpace(rootSHA)
+		if rootSHA == "" {
+			return 0, fmt.Errorf("getChurnLines: empty root SHA")
+		}
+
+		// headSHA is needed to detect root == HEAD.
+		headSHA, headErr := runner.Run(projectDir, "rev-parse", "HEAD")
+		if headErr != nil {
+			return 0, fmt.Errorf("getChurnLines: rev-parse HEAD: %w", headErr)
+		}
+		headSHA = strings.TrimSpace(headSHA)
+
+		base := rootSHA
+		if rootSHA == headSHA {
+			// Single-commit repo: diff from the empty tree to HEAD so we
+			// count all lines introduced by the initial commit.
+			base = emptyTreeSHA
+		}
+
+		out, err = runner.Run(projectDir, "diff", "--numstat", base, "HEAD")
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("getChurnLines: diff from root: %w", err)
 		}
 	}
 	total := 0
