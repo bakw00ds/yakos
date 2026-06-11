@@ -141,11 +141,30 @@ type CodeQualityMetrics struct {
 	LintFindings        *int `json:"lint_findings"`
 	CyclomaticMax       *int `json:"cyclomatic_max"`
 	StaticcheckFindings *int `json:"staticcheck_findings"`
+
+	// LintWarningDensity is the number of lint warnings per 100 lines of source
+	// code. Populated by profile analyzers that distinguish warning-level findings
+	// (eslint, ruff). null when not measured.
+	LintWarningDensity *float64 `json:"lint_warning_density"`
+
+	// DuplicationPct is the percentage of cloned / duplicated code as reported
+	// by jscpd (node profile). null when not measured.
+	DuplicationPct *float64 `json:"duplication_pct"`
+
+	// CyclomaticComplexityP90 is the 90th-percentile cyclomatic complexity score
+	// across all functions as reported by radon cc (python profile). null when
+	// not measured.
+	CyclomaticComplexityP90 *float64 `json:"cyclomatic_complexity_p90"`
 }
 
 // DeadCodeMetrics captures dead-code signals.
 type DeadCodeMetrics struct {
 	DeadCodeSymbols *int `json:"dead_code_symbols"`
+
+	// UnusedDeps is the count of declared dependencies that are not imported /
+	// referenced by any source file. Populated by depcheck (node), deptry
+	// (python), cargo-machete / cargo-udeps (rust). null when not measured.
+	UnusedDeps *int `json:"unused_deps"`
 }
 
 // SecurityMetrics captures security scan results.
@@ -159,8 +178,24 @@ type SecurityMetrics struct {
 	// gosec ran and found nothing.
 	SASTFindingsBySeverity map[string]int `json:"sast_findings_by_severity,omitempty"`
 
-	// VulnCount is the count of known vulnerabilities from govulncheck.
+	// VulnCount is the count of known vulnerabilities from govulncheck (go),
+	// pip-audit (python), or cargo audit (rust). cargo-audit is the sole owner
+	// of this field for the rust profile; cargo-deny violations are routed to
+	// LicenseRiskCount to avoid double-counting the same advisory.
 	VulnCount *int `json:"vuln_count"`
+
+	// CVECountBySeverity maps severity label → count of CVEs, as reported by
+	// npm audit --json (node profile). Severity labels are the npm audit
+	// severity strings: "critical", "high", "moderate", "low", "info".
+	// nil means npm audit was not run (tool absent); empty map means it ran
+	// and found no vulnerabilities.
+	CVECountBySeverity map[string]int `json:"cve_count_by_severity,omitempty"`
+
+	// LicenseRiskCount is the count of license-policy and advisory-ban
+	// violations reported by cargo deny check (rust profile). Kept separate
+	// from VulnCount (which cargo-audit owns) to avoid double-counting the same
+	// RUSTSEC advisory. null when cargo deny was not run or could not be parsed.
+	LicenseRiskCount *int `json:"license_risk_count"`
 }
 
 // TestMetrics captures test coverage and results.
