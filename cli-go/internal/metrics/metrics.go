@@ -313,6 +313,9 @@ func ParseArgs(args []string, homeDir string) (Config, error) {
 					}
 					n = n*10 + int(ch-'0')
 				}
+				if n < 1 || n > 65535 {
+					return cfg, fmt.Errorf("metrics serve: --port %d out of range [1, 65535]", n)
+				}
 				cfg.ServePort = n
 			case hasPrefix(rest[i], "--port="):
 				val := rest[i][len("--port="):]
@@ -322,6 +325,9 @@ func ParseArgs(args []string, homeDir string) (Config, error) {
 						return cfg, fmt.Errorf("metrics serve: --port must be a number")
 					}
 					n = n*10 + int(ch-'0')
+				}
+				if n < 1 || n > 65535 {
+					return cfg, fmt.Errorf("metrics serve: --port %d out of range [1, 65535]", n)
 				}
 				cfg.ServePort = n
 			case rest[i] == "--host":

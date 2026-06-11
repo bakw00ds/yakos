@@ -714,3 +714,120 @@ func TestCompareSnapshots_NotFound(t *testing.T) {
 		t.Error("b should be nil for unknown sha")
 	}
 }
+
+// ---- security nit fixes (post-review) --------------------------------------
+
+// TestAPIReturnsRawBranch verifies that the JSON API returns branch names
+// verbatim (including special characters like <script>). Escaping is the
+// SPA's responsibility; the Go API must not alter the stored data.
+func TestAPIReturnsRawBranch(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	dangerousBranch := `feat/<script>alert(1)</script>`
+	projectDir := writeFixtureHistory(t, []metrics.Snapshot{
+		makeSnap("xss111", dangerousBranch, now, nil),
+	})
+
+	ts, tok := newTestServer(t, projectDir)
+
+	// /api/metrics/snapshot should return the raw branch string.
+	resp := get(t, ts.URL+"/api/metrics/snapshot", tok)
+	var snap struct {
+		Branch string `json:"branch"`
+	}
+	decodeJSON(t, resp, &snap)
+	if snap.Branch != dangerousBranch {
+		t.Errorf("snapshot branch=%q; want raw %q (API must not alter stored data)", snap.Branch, dangerousBranch)
+	}
+
+	// /api/metrics/history should also return it verbatim.
+	resp2 := get(t, ts.URL+"/api/metrics/history", tok)
+	var headers []struct {
+		Branch string `json:"branch"`
+	}
+	decodeJSON(t, resp2, &headers)
+	if len(headers) != 1 || headers[0].Branch != dangerousBranch {
+		t.Errorf("history[0].branch=%q; want raw %q", headers[0].Branch, dangerousBranch)
+	}
+}
+
+// TestPortBound_ZeroRejected verifies that --port 0 is refused with a clear
+// error (port 0 is technically valid for "pick any port" but not appropriate
+// for a user-facing dashboard where the URL must be known up front).
+func TestPortBound_ZeroRejected(t *testing.T) {
+	_, err := metrics.ParseArgs([]string{"serve", "--port", "0"}, "/tmp")
+	if err == nil {
+		t.Error("ParseArgs(serve --port 0) should return error; port 0 out of [1,65535]")
+	}
+}
+
+// TestPortBound_65536Rejected verifies that --port 65536 is refused.
+func TestPortBound_65536Rejected(t *testing.T) {
+	_, err := metrics.ParseArgs([]string{"serve", "--port", "65536"}, "/tmp")
+	if err == nil {
+		t.Error("ParseArgs(serve --port 65536) should return error; out of [1,65535]")
+	}
+}
+
+// TestPortBound_ValidPort verifies that a valid port is accepted.
+func TestPortBound_ValidPort(t *testing.T) {
+	cfg, err := metrics.ParseArgs([]string{"serve", "--port", "8080"}, "/tmp")
+	if err != nil {
+		t.Errorf("ParseArgs(serve --port 8080) unexpected error: %v", err)
+	}
+	if cfg.ServePort != 8080 {
+		t.Errorf("ServePort=%d; want 8080", cfg.ServePort)
+	}
+}
+
+// TestValidateAddr_HostnameRefused verifies that a bare hostname is now
+// refused outright (fix 4: honest early check).
+func TestValidateAddr_HostnameRefused(t *testing.T) {
+	hostnames := []string{"localhost", "localhost:7896", "myhost.local:9000"}
+	for _, h := range hostnames {
+		if err := metricsdash.ValidateAddr(h); err == nil {
+			t.Errorf("ValidateAddr(%q) = nil; want error — hostnames must be refused", h)
+		}
+	}
+}
+
+// TestProjects_NoHistoryPath verifies that history_path is absent from the
+// /api/metrics/projects JSON response (fix 3: info-leak removal).
+func TestProjects_NoHistoryPath(t *testing.T) {
+	homeDir := t.TempDir()
+	projDir := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := metrics.AppendSnapshot(projDir, makeSnap("abc999", "main", now, nil)); err != nil {
+		t.Fatalf("AppendSnapshot: %v", err)
+	}
+	acDir := filepath.Join(homeDir, "agent-control", "test-proj")
+	if err := os.MkdirAll(acDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(acDir, ".project-path"), []byte(projDir+"\n"), 0644); err != nil {
+		t.Fatalf("write .project-path: %v", err)
+	}
+
+	ts, tok := newTestServerAllProjects(t, "", homeDir)
+	resp := get(t, ts.URL+"/api/metrics/projects", tok)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status=%d; want 200", resp.StatusCode)
+		drainClose(resp)
+		return
+	}
+
+	// Decode as a slice of raw JSON objects so we can inspect all keys.
+	var raw []map[string]json.RawMessage
+	decodeJSON(t, resp, &raw)
+	if len(raw) != 1 {
+		t.Fatalf("got %d projects; want 1", len(raw))
+	}
+	if _, present := raw[0]["history_path"]; present {
+		t.Error("history_path must not be present in /api/metrics/projects response (info leak)")
+	}
+	// Confirm expected fields are still there.
+	for _, field := range []string{"project", "snapshot_count"} {
+		if _, present := raw[0][field]; !present {
+			t.Errorf("expected field %q missing from projects response", field)
+		}
+	}
+}

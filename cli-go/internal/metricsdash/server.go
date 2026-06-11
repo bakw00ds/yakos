@@ -122,17 +122,22 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 }
 
-// ValidateAddr returns an error if addr is a non-loopback bind address.
-// Call this before Serve to get an early loud error.
+// ValidateAddr returns an error if addr is not a loopback IP bind address.
+// Only explicit loopback IPs (127.x.x.x, ::1) are accepted; hostnames and
+// non-loopback IPs are both refused with a clear error. Call this before
+// Serve so the operator gets a readable message rather than a confusing
+// net.Listen failure.
 func ValidateAddr(addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		// Might be host-only, try parsing directly.
+		// addr may be a bare host with no port — try parsing it directly.
 		host = addr
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		return nil // hostname — let OS resolve; we check again at Listen time
+		// Non-IP hostname: we refuse outright rather than letting it resolve
+		// to a potentially non-loopback address at Listen time.
+		return fmt.Errorf("metrics serve: --host %q must be a loopback IP address (127.0.0.1 or ::1), not a hostname", host)
 	}
 	if !ip.IsLoopback() {
 		return fmt.Errorf("metrics serve: --host %s is not a loopback address; refusing to expose dashboard publicly (use 127.0.0.1 or ::1)", host)
@@ -345,13 +350,11 @@ func discoverProjects(home string) []ProjectSummary {
 			continue
 		}
 
-		histPath := metrics.HistoryPath(projectPath)
 		snaps, err := metrics.ReadHistory(projectPath)
 		if err != nil {
 			// History unreadable — include entry with zero snapshots.
 			results = append(results, ProjectSummary{
 				Project:       e.Name(),
-				HistoryPath:   histPath,
 				SnapshotCount: 0,
 				Latest:        nil,
 			})
@@ -359,7 +362,6 @@ func discoverProjects(home string) []ProjectSummary {
 		}
 		results = append(results, ProjectSummary{
 			Project:       e.Name(),
-			HistoryPath:   histPath,
 			SnapshotCount: len(snaps),
 			Latest:        LatestSnapshot(snaps),
 		})

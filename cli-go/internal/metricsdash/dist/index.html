@@ -231,6 +231,15 @@ function fmt2(v) { return v == null ? '—' : v.toFixed(2); }
 function fmtPct(v) { return v == null ? '—' : (v * 100).toFixed(1) + '%'; }
 function fmtInt(v) { return v == null ? '—' : String(v); }
 function fmtCommit(s) { return s ? s.slice(0, 8) : '—'; }
+// esc() escapes untrusted server strings before injection into innerHTML.
+// Branch names, project names, and error messages can contain <>"& in CI.
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 
 // ---- SVG trend chart -------------------------------------------------------
 function renderTrend(points) {
@@ -263,7 +272,7 @@ function renderTrend(points) {
     const labStep = Math.max(1, Math.floor(points.length / 6));
     for (let i = 0; i < points.length; i += labStep) {
       const x = xOf(i);
-      const label = points[i].ts ? points[i].ts.slice(0, 10) : '';
+      const label = points[i].ts ? esc(points[i].ts.slice(0, 10)) : '';
       html += `<text x="${x}" y="${H - 6}" text-anchor="middle">${label}</text>`;
     }
   }
@@ -337,9 +346,9 @@ function renderHistory(headers) {
   tbody.innerHTML = headers.map((h, i) =>
     `<tr>
       <td>${headers.length - i}</td>
-      <td>${h.ts ? h.ts.slice(0, 19).replace('T', ' ') : '—'}</td>
-      <td class="mono">${fmtCommit(h.commit)}</td>
-      <td>${h.branch || '—'}</td>
+      <td>${h.ts ? esc(h.ts.slice(0, 19).replace('T', ' ')) : '—'}</td>
+      <td class="mono">${esc(fmtCommit(h.commit))}</td>
+      <td>${h.branch ? esc(h.branch) : '—'}</td>
     </tr>`
   ).reverse().join('');
 }
@@ -360,8 +369,8 @@ function renderCompare(diff) {
     ['code_quality.lint_findings', fmtInt((am.code_quality||{}).lint_findings), fmtInt((bm.code_quality||{}).lint_findings)],
   ];
   out.innerHTML = `<table class="data-table">
-    <thead><tr><th>Metric</th><th>${fmtCommit(a.commit)}</th><th>${fmtCommit(b.commit)}</th></tr></thead>
-    <tbody>${rows.map(([m, av, bv]) => `<tr><td>${m}</td><td>${av}</td><td>${bv}</td></tr>`).join('')}</tbody>
+    <thead><tr><th>Metric</th><th>${esc(fmtCommit(a.commit))}</th><th>${esc(fmtCommit(b.commit))}</th></tr></thead>
+    <tbody>${rows.map(([m, av, bv]) => `<tr><td>${esc(m)}</td><td>${esc(av)}</td><td>${esc(bv)}</td></tr>`).join('')}</tbody>
   </table>`;
 }
 
@@ -382,11 +391,11 @@ function renderProjects(projects) {
     const cost = lat ? fmt2((lat.metrics && lat.metrics.efficiency && lat.metrics.efficiency.total_cost_usd)) : '—';
     const cov = lat ? (lat.metrics && lat.metrics.test && lat.metrics.test.coverage_pct != null ? lat.metrics.test.coverage_pct.toFixed(1) + '%' : '—') : '—';
     return `<tr>
-      <td>${p.project}</td>
-      <td>${p.snapshot_count}</td>
-      <td class="mono">${lat ? fmtCommit(lat.commit) : '—'}</td>
-      <td>${cost}</td>
-      <td>${cov}</td>
+      <td>${esc(p.project)}</td>
+      <td>${esc(String(p.snapshot_count))}</td>
+      <td class="mono">${lat ? esc(fmtCommit(lat.commit)) : '—'}</td>
+      <td>${esc(cost)}</td>
+      <td>${esc(cov)}</td>
     </tr>`;
   }).join('');
 }
@@ -425,7 +434,7 @@ async function doCompare(tok) {
     const diff = await apiFetch('/api/metrics/compare?a=' + encodeURIComponent(a) + '&b=' + encodeURIComponent(b), tok);
     renderCompare(diff);
   } catch (e) {
-    el('compare-result').innerHTML = '<p class="err">' + e.message + '</p>';
+    el('compare-result').innerHTML = '<p class="err">' + esc(e.message) + '</p>';
   }
 }
 
@@ -453,7 +462,7 @@ async function doCompare(tok) {
     setInterval(() => loadAll(tok).catch(err => console.error(err)), 60_000);
   } catch (e) {
     if (e instanceof AuthError) { show('auth-error'); }
-    else { document.body.innerHTML = '<div style="padding:2rem;color:#fc8181;">Failed to load: ' + e.message + '</div>'; }
+    else { document.body.innerHTML = '<div style="padding:2rem;color:#fc8181;">Failed to load: ' + esc(e.message) + '</div>'; }
   }
 })();
 </script>

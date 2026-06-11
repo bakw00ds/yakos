@@ -28,9 +28,10 @@ type CompareDiff struct {
 }
 
 // ProjectSummary is one entry in the cross-project rollup.
+// HistoryPath is intentionally omitted from JSON: exposing full filesystem
+// paths is an unnecessary information leak to browser clients.
 type ProjectSummary struct {
 	Project       string            `json:"project"`
-	HistoryPath   string            `json:"history_path"`
 	SnapshotCount int               `json:"snapshot_count"`
 	Latest        *metrics.Snapshot `json:"latest"` // nil if no snapshots
 }
