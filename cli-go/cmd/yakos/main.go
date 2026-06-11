@@ -16,6 +16,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -5778,30 +5779,16 @@ func runMetrics(args []string) {
 
 	if _, err := metrics.Run(cfg); err != nil {
 		// metrics gate in enforce mode returns GateExitError with the intended
-		// exit code.  Do not print an error message — the gate already printed
-		// its breach table.
+		// exit code.  Use errors.As so detection survives any future wrapping
+		// (e.g. fmt.Errorf("...: %w", gateErr)).  Do not print an error
+		// message — the gate already printed its breach table.
 		var gateErr *metrics.GateExitError
-		if isGateExitErr(err, &gateErr) {
+		if errors.As(err, &gateErr) {
 			os.Exit(gateErr.Code)
 		}
 		fmt.Fprintf(os.Stderr, "metrics: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-// isGateExitErr checks whether err is (or wraps) a *metrics.GateExitError and
-// stores it in target.  This mirrors the pattern of errors.As but avoids
-// importing the errors package at top-level (it is already imported elsewhere
-// in this file — add it to imports if needed).
-func isGateExitErr(err error, target **metrics.GateExitError) bool {
-	if err == nil {
-		return false
-	}
-	if gee, ok := err.(*metrics.GateExitError); ok {
-		*target = gee
-		return true
-	}
-	return false
 }
 
 // runTelemetry implements `yakos telemetry` natively in Go.
