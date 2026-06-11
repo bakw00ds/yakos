@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0.1] — 2026-06-11
+
+### Fixed
+
+- Go-only installs (`curl|sh`, no bash yakos tree): `--version`, `--help`, and
+  `go-port-status` now resolve Go-natively before the passthrough gate (#133).
+  Version string reads the compiled-in ldflags value, not a missing `VERSION`
+  file. Unported commands emit an actionable "set `YAKOS_IMPL=go`" error
+  instead of a raw `fork/exec .../cli/yakos: no such file` failure.
+
 ## [0.38.0.0] — 2026-06-11
 
 ### Added — `yakos metrics` subsystem (Phases 1–3)
