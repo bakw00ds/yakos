@@ -11,13 +11,6 @@
 #
 # Required tools: curl, sha256sum or shasum, uname, mkdir, chmod, mv.
 # No other third-party tools required.
-#
-# YAKOS_IMPL env-var note (from go-port-plan.md §6 decision #2):
-#   Both the bash yakos (at its existing PATH location) and the Go binary
-#   (installed by this script to ~/.local/bin/yakos) can coexist.
-#   The Go binary is named `yakos` at the new path; which one wins is
-#   determined by PATH ordering. Set YAKOS_IMPL=go or YAKOS_IMPL=bash
-#   (or reorder PATH) to select. See docs/go-shadow-mode.md for details.
 
 set -e
 
@@ -25,7 +18,6 @@ REPO_OWNER="bakw00ds"
 REPO_NAME="yakos"
 GITHUB_API="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}"
 GITHUB_RELEASES="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download"
-RAW_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/main"
 
 # ---------- defaults ---------------------------------------------------------
 
@@ -71,7 +63,7 @@ Options:
 
 Environment:
   YAKOS_IMPL      When set to 'go', selects the Go binary over bash.
-                  When unset or 'bash', the bash yakos wins on PATH.
+                  install.sh writes this to your shell profile automatically.
                   See docs/go-shadow-mode.md for full coexistence guide.
 HELP
             exit 0
@@ -196,20 +188,68 @@ fi
 
 ASSET_NAME="yakos-v${RESOLVED_VERSION}-${PLATFORM_OS}-${PLATFORM_ARCH}${BINARY_SUFFIX}"
 CHECKSUMS_NAME="checksums.txt"
+TAG="v${RESOLVED_VERSION}"
+DOWNLOAD_URL="${GITHUB_RELEASES}/${TAG}/${ASSET_NAME}"
+CHECKSUMS_URL="${GITHUB_RELEASES}/${TAG}/${CHECKSUMS_NAME}"
 
-if [ "${DRY_RUN}" -eq 1 ]; then
-    TAG="v${RESOLVED_VERSION}"
-    DOWNLOAD_URL="${GITHUB_RELEASES}/${TAG}/${ASSET_NAME}"
-    CHECKSUMS_URL="${GITHUB_RELEASES}/${TAG}/${CHECKSUMS_NAME}"
-else
-    TAG="v${RESOLVED_VERSION}"
-    DOWNLOAD_URL="${GITHUB_RELEASES}/${TAG}/${ASSET_NAME}"
-    CHECKSUMS_URL="${GITHUB_RELEASES}/${TAG}/${CHECKSUMS_NAME}"
-fi
+# ---------- shell profile helper ---------------------------------------------
+
+# detect_profile — print the path to the user's shell init file.
+# Preference order: SHELL env → common candidates.
+detect_profile() {
+    _shell_name=""
+    if [ -n "${SHELL:-}" ]; then
+        _shell_name="$(basename "${SHELL}")"
+    fi
+    case "${_shell_name}" in
+        zsh)
+            echo "${HOME}/.zshrc"
+            return
+            ;;
+        bash)
+            echo "${HOME}/.bashrc"
+            return
+            ;;
+        *)
+            # Fall through to candidate probing.
+            ;;
+    esac
+    # Check common profiles in order.
+    for _cand in "${HOME}/.zshrc" "${HOME}/.bashrc" "${HOME}/.profile"; do
+        if [ -f "${_cand}" ]; then
+            echo "${_cand}"
+            return
+        fi
+    done
+    # No existing profile found — use .profile as the POSIX fallback.
+    echo "${HOME}/.profile"
+}
+
+# yakos_block_present <profile> — exit 0 if the yakos marker block already
+# exists in the profile, exit 1 otherwise.
+yakos_block_present() {
+    grep -qF '# >>> yakos >>>' "$1" 2>/dev/null
+}
+
+# write_yakos_block <profile> <prefix> — append the YAKOS_IMPL=go export
+# inside a marked block, idempotently.
+write_yakos_block() {
+    _prof="$1"
+    _pfx="$2"
+    cat >> "${_prof}" <<BLOCK
+
+# >>> yakos >>>
+# Added by yakOS installer (scripts/install.sh). Edit or remove if needed.
+export YAKOS_IMPL=go
+export PATH="${_pfx}:\${PATH}"
+# <<< yakos <<<
+BLOCK
+}
 
 # ---------- dry-run summary --------------------------------------------------
 
 if [ "${DRY_RUN}" -eq 1 ]; then
+    _profile="$(detect_profile)"
     echo ""
     echo "yakOS Go binary installer — DRY RUN"
     echo "------------------------------------"
@@ -226,11 +266,13 @@ if [ "${DRY_RUN}" -eq 1 ]; then
     echo "  3. Verify SHA256 of binary against checksums.txt"
     echo "  4. Install to ${INSTALL_PATH}"
     echo "  5. chmod +x ${INSTALL_PATH}"
-    echo ""
-    echo "YAKOS_IMPL note:"
-    echo "  Both the bash yakos (existing) and the Go binary coexist."
-    echo "  PATH ordering determines which one 'yakos' resolves to."
-    echo "  Set YAKOS_IMPL=go in your shell profile to explicitly prefer Go."
+    echo "  6. Run: YAKOS_IMPL=go ${INSTALL_PATH} install"
+    echo "     (materializes embedded framework lib, creates ~/.claude symlinks)"
+    if yakos_block_present "${_profile}"; then
+        echo "  7. Shell profile: yakos block already present in ${_profile} — no change"
+    else
+        echo "  7. Append YAKOS_IMPL=go + PATH export to ${_profile}"
+    fi
     echo ""
     echo "[dry-run] No files were downloaded or modified."
     exit 0
@@ -306,24 +348,41 @@ chmod +x "${TMPBIN}"
 # leave a partial binary at the install path.
 mv "${TMPBIN}" "${INSTALL_PATH}"
 
+# ---------- framework install (materialize embedded lib) ---------------------
+
+echo ""
+echo "Running framework install (materializing embedded lib + ~/.claude symlinks)..."
+if YAKOS_IMPL=go "${INSTALL_PATH}" install; then
+    echo "  Framework install: OK"
+else
+    echo "" >&2
+    echo "WARNING: 'yakos install' exited with an error." >&2
+    echo "  The binary is installed but the framework setup may be incomplete." >&2
+    echo "  Re-run manually to complete setup:" >&2
+    echo "    YAKOS_IMPL=go ${INSTALL_PATH} install" >&2
+fi
+
+# ---------- shell profile — persist YAKOS_IMPL=go ---------------------------
+
+PROFILE_PATH="$(detect_profile)"
+
+if yakos_block_present "${PROFILE_PATH}"; then
+    echo ""
+    echo "Shell profile ${PROFILE_PATH}: yakos block already present — no change."
+else
+    write_yakos_block "${PROFILE_PATH}" "${PREFIX}"
+    echo ""
+    echo "Added YAKOS_IMPL=go + PATH export to ${PROFILE_PATH}."
+    echo "Open a new terminal or run: source ${PROFILE_PATH}"
+fi
+
 # ---------- summary ----------------------------------------------------------
 
 echo ""
-echo "yakOS Go binary installed successfully."
+echo "yakOS ${RESOLVED_VERSION} installed successfully."
 echo ""
-echo "  Version:      ${RESOLVED_VERSION}"
-echo "  Install path: ${INSTALL_PATH}"
+echo "  Binary:  ${INSTALL_PATH}"
 echo ""
-echo "Verify:"
-echo "  ${INSTALL_PATH} --version"
-echo ""
-echo "Coexistence with bash yakos:"
-echo "  Both binaries are named 'yakos'. PATH ordering decides which runs."
-echo "  To prefer the Go binary, prepend its directory to PATH:"
-echo "    export PATH=\"${PREFIX}:\$PATH\""
-echo "  Or set YAKOS_IMPL=go in your shell profile."
-echo "  See docs/go-shadow-mode.md for full details."
-echo ""
-echo "To uninstall the Go binary only:"
-echo "  sh scripts/uninstall-yakos-go.sh"
-echo "  (The bash yakos is NOT removed by uninstall-yakos-go.sh.)"
+echo "Next steps:"
+echo "  1.  yakos doctor                              # verify the install"
+echo "  2.  yakos init <name> --project <path>        # bootstrap a project"

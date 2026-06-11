@@ -67,6 +67,14 @@ jobs:
         working-directory: cli-go
         run: go mod download
 
+      - name: Stage embedded lib
+        # Populate cli-go/internal/framework/embedded/ from repo-root lib/ so
+        # that (a) the drift-guard test runs with real content, and (b) the
+        # built binary is self-contained for the smoke tests below.
+        # On Windows, use the PowerShell-friendly robocopy path.
+        shell: bash
+        run: make embed-lib
+
       - name: go vet
         working-directory: cli-go
         run: go vet ./...

@@ -8,7 +8,7 @@
 //     - Created if absent.
 //     - Refreshed if existing symlink resolves into this or any yakOS-shaped root.
 //     - Left alone (with warning) if existing entry is a real file or points
-//       outside any known yakOS root.
+//     outside any known yakOS root.
 //     - Launcher path recorded in $HOME/.yakos-state/install-manifest.
 //  4. Per-file symlinks from $HOME/.claude/{agents,skills,rules,playbooks}/
 //     into $YAKOS_ROOT/lib/{agents,skills,rules,playbooks}/.
@@ -83,26 +83,26 @@ type Config struct {
 
 // SymlinkReport counts per-file symlink outcomes.
 type SymlinkReport struct {
-	Created    int // new symlinks created
-	Refreshed  int // existing YakOS-owned symlinks updated
-	Skipped    int // files left alone (foreign symlink, real file, already correct + no --force)
+	Created   int // new symlinks created
+	Refreshed int // existing YakOS-owned symlinks updated
+	Skipped   int // files left alone (foreign symlink, real file, already correct + no --force)
 }
 
 // LauncherOutcome describes what happened to the launcher symlink.
 type LauncherOutcome string
 
 const (
-	LauncherCreated  LauncherOutcome = "created"
+	LauncherCreated   LauncherOutcome = "created"
 	LauncherRefreshed LauncherOutcome = "refreshed"
-	LauncherSkipped  LauncherOutcome = "skipped" // foreign or real file
+	LauncherSkipped   LauncherOutcome = "skipped" // foreign or real file
 )
 
 // LauncherReport describes the outcome for the managed launcher.
 type LauncherReport struct {
 	Outcome LauncherOutcome
-	Path    string   // absolute path of the launcher entry
-	Target  string   // symlink target (empty when Outcome==skipped)
-	Warning string   // non-empty when Outcome==skipped and a warning was emitted
+	Path    string // absolute path of the launcher entry
+	Target  string // symlink target (empty when Outcome==skipped)
+	Warning string // non-empty when Outcome==skipped and a warning was emitted
 }
 
 // SettingsReport describes what happened to ~/.claude/settings.json.
@@ -115,11 +115,11 @@ type SettingsReport struct {
 
 // Result is the complete outcome of an install run.
 type Result struct {
-	YakosPointer  string        // path to $HOME/.yakos pointer file
-	Launcher      LauncherReport
-	Symlinks      SymlinkReport
-	Settings      SettingsReport
-	DryRun        bool
+	YakosPointer string // path to $HOME/.yakos pointer file
+	Launcher     LauncherReport
+	Symlinks     SymlinkReport
+	Settings     SettingsReport
+	DryRun       bool
 }
 
 // Run executes the install. Returns a structured Result.
@@ -165,7 +165,24 @@ func Run(cfg Config) (*Result, error) {
 	installManifest := filepath.Join(yakosStateDir, "install-manifest")
 	launcherDir := filepath.Join(home, ".local", "bin")
 	launcherPath := filepath.Join(launcherDir, "yakos")
-	launcherTarget := filepath.Join(yakosRootAbs, "cli", "yakos")
+
+	// Determine launcher target.
+	// For a repo clone (which has cli/yakos), point at the bash launcher.
+	// For a materialized root (binary-only install), point at the running binary.
+	bashLauncher := filepath.Join(yakosRootAbs, "cli", "yakos")
+	launcherTarget := bashLauncher
+	if _, statErr := os.Stat(bashLauncher); os.IsNotExist(statErr) {
+		// No bash launcher present — point the launcher symlink at this binary.
+		if exe, exeErr := os.Executable(); exeErr == nil {
+			if resolved, resolveErr := filepath.EvalSymlinks(exe); resolveErr == nil {
+				launcherTarget = resolved
+			} else {
+				launcherTarget = exe
+			}
+		}
+		// If os.Executable fails, launcherTarget stays as bashLauncher; the
+		// launcher step will warn / skip cleanly since that path doesn't exist.
+	}
 
 	dryTag := ""
 	if cfg.DryRun {

@@ -1,0 +1,14 @@
+# Gitignore for the embedded staging directory.
+#
+# `make embed-lib` copies the canonical lib/ tree from the repo root into
+# this directory before each build.  The copied content is NOT committed —
+# the repo root lib/ is the single source of truth.
+#
+# Only the placeholder .keep files and this README are tracked; everything
+# else is copied at build time and gitignored here.
+
+# Ignore all real lib content (copied by `make embed-lib`)
+*
+!.gitignore
+!*/
+!**/.keep

@@ -86,6 +86,13 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
 
+      - name: Stage embedded lib
+        # Copy repo-root lib/ into cli-go/internal/framework/embedded/ so the
+        # //go:embed directive picks up the real framework files.  Without this
+        # step the binary would carry only placeholder .keep files and binary-
+        # only installs would produce 0 symlinks.
+        run: make embed-lib
+
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
