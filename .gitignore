@@ -42,6 +42,21 @@ cli/lib/mcp/.venv/
 /cli-go/*.test.exe
 /bin/yakos
 
+# Embedded framework lib — staged by `make embed-lib`, NOT committed.
+# The per-subdir .gitignore files also enforce this, but add a root-level
+# safety net covering the entire staged tree.
+# Only .keep placeholder files and the per-dir .gitignore are tracked.
+/cli-go/internal/framework/embedded/agents/*
+!/cli-go/internal/framework/embedded/agents/.keep
+/cli-go/internal/framework/embedded/skills/*
+!/cli-go/internal/framework/embedded/skills/.keep
+/cli-go/internal/framework/embedded/rules/*
+!/cli-go/internal/framework/embedded/rules/.keep
+/cli-go/internal/framework/embedded/hooks/*
+!/cli-go/internal/framework/embedded/hooks/.keep
+/cli-go/internal/framework/embedded/playbooks/*
+!/cli-go/internal/framework/embedded/playbooks/.keep
+
 # Agent-control runtime scratchpad (work/current/... tree)
 /work/
 

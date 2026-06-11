@@ -2212,12 +2212,16 @@ func runInit(args []string) {
 //	yakos install --help
 //
 // Creates per-file symlinks under ~/.claude/{agents,skills,rules,playbooks}/
-// pointing into $YAKOS_ROOT/lib/. Manages a launcher symlink at
-// ~/.local/bin/yakos. Merges CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 into
-// ~/.claude/settings.json.
+// pointing into the YakOS lib/ (repo or materialized embedded copy). Manages
+// a launcher symlink at ~/.local/bin/yakos. Merges
+// CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 into ~/.claude/settings.json.
 //
-// YAKOS_ROOT must be set in the environment (set by the bash entry-point;
-// also resolved from the binary location by main()).
+// Root resolution (see install.ResolveRoot):
+//  1. YAKOS_ROOT env → if it has lib/, use it (dev-with-repo mode).
+//  2. Exe-adjacent root (inferred by main()) → if it has lib/, use it.
+//  3. Embedded lib in binary → materialize to ~/.local/share/yakos/<ver>/
+//     and use that (binary-only / curl|sh install).
+//  4. None → error with actionable message.
 func runInstall(yakosRoot string, args []string) {
 	force := false
 	dryRun := false
@@ -2237,22 +2241,21 @@ func runInstall(yakosRoot string, args []string) {
 		}
 	}
 
-	// Resolve YAKOS_ROOT from env (bash entry-point may set it).
-	if r := os.Getenv("YAKOS_ROOT"); r != "" {
-		yakosRoot = r
-	}
-	if yakosRoot == "" {
-		fmt.Fprintln(os.Stderr, "install: YAKOS_ROOT is not set")
-		os.Exit(1)
-	}
-
 	home := os.Getenv("HOME")
 	if home == "" {
 		home = "/tmp"
 	}
 
+	// Resolve the framework root via the cascade: env → repo → embedded.
+	// This replaces the old "YAKOS_ROOT must be set" hard requirement.
+	resolvedRoot, err := install.ResolveRoot(yakosRoot, home, version.Version, force, dryRun, os.Stdout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
 	cfg := install.Config{
-		YakosRoot: yakosRoot,
+		YakosRoot: resolvedRoot,
 		HomeDir:   home,
 		Force:     force,
 		DryRun:    dryRun,
