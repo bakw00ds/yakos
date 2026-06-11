@@ -162,6 +162,23 @@ func main() {
 		recordInvocation(telemetryHome, yakosRoot, args, telemetryStartNano)
 	}()
 
+	// Always-available built-ins — answered natively regardless of YAKOS_IMPL
+	// and regardless of whether a bash yakos tree is installed.  These must
+	// work on a Go-only install (curl | sh installs only the binary).
+	if len(args) > 0 {
+		switch args[0] {
+		case "--version", "-v":
+			runVersion(yakosRoot)
+			return
+		case "--help", "-h":
+			runHelp(yakosRoot, args)
+			return
+		case "go-port-status":
+			runPortStatus()
+			return
+		}
+	}
+
 	// YAKOS_IMPL selects the active implementation.
 	// Unset or "bash" → proxy every invocation to bash yakos transparently.
 	// "go"            → use Go-native routing for supported commands.
@@ -298,9 +315,38 @@ func runVersion(yakosRoot string) {
 	fmt.Println(v)
 }
 
-// runHelp proxies --help to bash yakos with a transition note prepended so
-// operators know they are running the Go binary.
+// runHelp prints help for the yakos CLI.
+//
+// When bash yakos is available (full install), it proxies --help to bash with
+// a transition note prepended so operators know they are running the Go binary.
+//
+// When bash yakos is NOT available (Go-only install), it prints a brief help
+// message explaining which commands are available natively and how to opt in
+// to Go-native routing via YAKOS_IMPL=go.
 func runHelp(yakosRoot string, args []string) {
+	bashPath := passthrough.BashYakosPath(yakosRoot)
+	if _, err := os.Stat(bashPath); err != nil {
+		// Go-only install: no bash yakos present — print a self-contained message.
+		v, _ := version.Read(yakosRoot)
+		if v == "" {
+			v = "unknown"
+		}
+		_, _ = fmt.Fprintf(os.Stdout, `yakos %s — Go-only install
+
+This binary was installed without the full bash yakos tree.
+Commands available natively (no YAKOS_IMPL required):
+
+  yakos --version          print version
+  yakos --help             print this help
+  yakos go-port-status     list ported subcommands
+
+All other commands require YAKOS_IMPL=go and a full yakos install, or the
+full bash tree at %s.
+
+See docs/go-shadow-mode.md for details.
+`, v, bashPath)
+		return
+	}
 	fmt.Fprintln(os.Stderr, "(yakos Go binary — wrapping bash yakos for unported commands)")
 	fmt.Fprintln(os.Stderr, "")
 	exitWith(passthrough.Run(yakosRoot, args))
