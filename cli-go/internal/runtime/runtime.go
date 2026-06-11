@@ -25,7 +25,7 @@ type DispatchRequest struct {
 	Task string
 
 	// ModelOverride is the post-alias-expansion concrete tier name
-	// (haiku|sonnet|opus) exported as YAKOS_MODEL_OVERRIDE for the adapter.
+	// (haiku|sonnet|opus|fable) exported as YAKOS_MODEL_OVERRIDE for the adapter.
 	// Empty string means the adapter uses the model embedded in AgentJSON.
 	ModelOverride string
 

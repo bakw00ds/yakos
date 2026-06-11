@@ -65,7 +65,7 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	if req.Model != "" {
 		// CLI --model flag: validate (aliases resolved by CLI layer before calling Run).
 		if !runtime.ValidateTier(req.Model) {
-			return nil, Result{}, fmt.Errorf("dispatch: invalid model tier %q (must be haiku|sonnet|opus)", req.Model)
+			return nil, Result{}, fmt.Errorf("dispatch: invalid model tier %q (must be haiku|sonnet|opus|fable)", req.Model)
 		}
 		modelResolved = req.Model
 		modelChosenBy = "override"
@@ -114,7 +114,14 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	agentJSON := ""
 	if runtimeName == "claude" {
 		agentWithModel := *targetAgent
-		agentWithModel.Model = modelResolved
+		// Map yakOS tier names to claude CLI model IDs where the CLI does not
+		// accept the bare tier alias. fable → claude-fable-5 (probed 2026-06-11;
+		// the claude CLI does not resolve "fable" as a bare alias).
+		claudeModelID := modelResolved
+		if claudeModelID == "fable" {
+			claudeModelID = "claude-fable-5"
+		}
+		agentWithModel.Model = claudeModelID
 		agentJSON, err = agentscompose.AgentToJSON(agentWithModel)
 		if err != nil {
 			return nil, Result{}, fmt.Errorf("dispatch: build agent JSON: %w", err)

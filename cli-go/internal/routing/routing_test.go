@@ -211,13 +211,20 @@ func TestTierCheaperThan(t *testing.T) {
 	}{
 		{"haiku", "sonnet", true},
 		{"haiku", "opus", true},
+		{"haiku", "fable", true},
 		{"sonnet", "opus", true},
+		{"sonnet", "fable", true},
+		{"opus", "fable", true},
 		{"sonnet", "haiku", false},
 		{"opus", "haiku", false},
+		{"fable", "haiku", false},
 		{"opus", "sonnet", false},
+		{"fable", "sonnet", false},
+		{"fable", "opus", false},
 		{"haiku", "haiku", false},
 		{"sonnet", "sonnet", false},
 		{"opus", "opus", false},
+		{"fable", "fable", false},
 		{"unknown", "sonnet", false},
 		{"haiku", "unknown", false},
 	}
@@ -541,10 +548,10 @@ func TestEval_EvalCasesWritten(t *testing.T) {
 	}
 	data, _ := os.ReadFile(cfg.EvalLog)
 	content := string(data)
-	// 5 cases × 3 tiers = 15 eval_case records.
+	// 5 cases × 4 tiers (haiku/sonnet/opus/fable) = 20 eval_case records.
 	count := strings.Count(content, `"type":"eval_case"`)
-	if count != 15 {
-		t.Errorf("expected 15 eval_case records; got %d", count)
+	if count != 20 {
+		t.Errorf("expected 20 eval_case records; got %d", count)
 	}
 }
 

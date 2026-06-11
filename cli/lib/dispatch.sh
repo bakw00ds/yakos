@@ -50,7 +50,7 @@ Arguments:
 Flags:
   --runtime <id>    Override the agent's frontmatter `runtime:` field.
   --model <tier>    Override the model tier for this dispatch only.
-                    Accepted values: haiku | sonnet | opus.
+                    Accepted values: haiku | sonnet | opus | fable.
                     Recorded as model_chosen_by:"override" in the
                     dispatch-log. Does not affect the runtime selection.
   --project <path>  Project repo path. Defaults to inferring from cwd
@@ -68,6 +68,7 @@ Examples:
   yakos dispatch backend "implement the /v1/meal-plans GET handler"
   yakos dispatch troubleshooter "diagnose why login_test fails on CI" --runtime codex
   yakos dispatch test-runner "run the suite" --model sonnet
+  yakos dispatch researcher "deep dive" --model fable
 EOF
 }
 
@@ -90,7 +91,7 @@ while [ "$#" -gt 0 ]; do
         --runtime=*) RUNTIME_OVERRIDE="${1#--runtime=}" ;;
         --model)
             shift
-            [ "$#" -gt 0 ] || ct_die "dispatch: --model requires a tier (haiku|sonnet|opus)"
+            [ "$#" -gt 0 ] || ct_die "dispatch: --model requires a tier (haiku|sonnet|opus|fable)"
             MODEL_OVERRIDE="$1"
             ;;
         --model=*) MODEL_OVERRIDE="${1#--model=}" ;;
@@ -204,11 +205,11 @@ AGENT_MODEL_POLICY="$(yk_agents_fm_get "$FM" "model-policy" || true)"
 #   3. model-policy: frontmatter (promoted) → model_chosen_by: "policy"
 #   4. model: frontmatter (default)         → model_chosen_by: "frontmatter"
 #
-# Valid tiers: haiku | sonnet | opus
+# Valid tiers: haiku | sonnet | opus | fable
 _validate_model_tier() {
     case "$1" in
-        haiku|sonnet|opus) return 0 ;;
-        *) ct_die "dispatch: invalid model tier '$1' (must be haiku|sonnet|opus)" ;;
+        haiku|sonnet|opus|fable) return 0 ;;
+        *) ct_die "dispatch: invalid model tier '$1' (must be haiku|sonnet|opus|fable)" ;;
     esac
 }
 
@@ -224,6 +225,7 @@ _resolve_model_alias() {
         cheap)              printf 'haiku'  ;;
         balanced)           printf 'sonnet' ;;
         best|reasoning)     printf 'opus'   ;;
+        frontier)           printf 'fable'  ;;
         *)                  printf '%s' "$1" ;;
     esac
 }

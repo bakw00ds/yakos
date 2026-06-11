@@ -29,7 +29,7 @@ type Request struct {
 	// resolve from agent frontmatter → project config → default.
 	Runtime string
 
-	// Model is the model tier override from --model flag (haiku|sonnet|opus).
+	// Model is the model tier override from --model flag (haiku|sonnet|opus|fable).
 	// Empty means resolve from agent frontmatter.
 	Model string
 

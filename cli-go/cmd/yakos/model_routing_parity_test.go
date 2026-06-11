@@ -293,7 +293,7 @@ func TestMR_Eval_CaseRecordsPerTier(t *testing.T) {
 	cfg.Subcommand = "eval"
 	cfg.AgentID = "backend"
 	cfg.Judge = "code-reviewer"
-	mrSetupAgent(t, cfg, "backend", "opus", 5) // 5 cases × 3 tiers = 15 eval_case records
+	mrSetupAgent(t, cfg, "backend", "opus", 5) // 5 cases × 4 tiers = 20 eval_case records
 	cfg.DispatchFn = alwaysPassDispatch
 	cfg.JudgeFn = alwaysPassJudge
 
@@ -303,8 +303,8 @@ func TestMR_Eval_CaseRecordsPerTier(t *testing.T) {
 	}
 	data, _ := os.ReadFile(cfg.EvalLog)
 	count := strings.Count(string(data), `"type":"eval_case"`)
-	if count != 15 {
-		t.Errorf("expected 15 eval_case records (5 cases × 3 tiers); got %d", count)
+	if count != 20 {
+		t.Errorf("expected 20 eval_case records (5 cases × 4 tiers); got %d", count)
 	}
 }
 
