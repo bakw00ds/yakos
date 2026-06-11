@@ -15,6 +15,14 @@ on:
       - 'scripts/install.sh'
       - 'scripts/uninstall-yakos-go.sh'
       - '.github/workflows/go-ci.yml'
+      # lib/ source paths that the Go refresh tests read at runtime.
+      # Without these, a change to lib/hooks/**,
+      # lib/settings/settings.template.json, or lib/agents/** that
+      # causes fixture drift in cli-go/cmd/yakos/testdata/fixtures/refresh/
+      # will not trigger this workflow — reproducing the #119→#121 incident.
+      - 'lib/hooks/**'
+      - 'lib/settings/**'
+      - 'lib/agents/**'
   pull_request:
     branches: [main]
     paths:
@@ -25,6 +33,14 @@ on:
       - 'scripts/install.sh'
       - 'scripts/uninstall-yakos-go.sh'
       - '.github/workflows/go-ci.yml'
+      # lib/ source paths that the Go refresh tests read at runtime.
+      # Without these, a change to lib/hooks/**,
+      # lib/settings/settings.template.json, or lib/agents/** that
+      # causes fixture drift in cli-go/cmd/yakos/testdata/fixtures/refresh/
+      # will not trigger this workflow — reproducing the #119→#121 incident.
+      - 'lib/hooks/**'
+      - 'lib/settings/**'
+      - 'lib/agents/**'
   workflow_dispatch:
 
 jobs:
