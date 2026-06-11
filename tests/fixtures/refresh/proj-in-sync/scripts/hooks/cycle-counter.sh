@@ -27,9 +27,16 @@ HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 . "$HOOK_DIR/lib/hook-output.sh"
 # shellcheck source=lib/paths.sh
 . "$HOOK_DIR/lib/paths.sh"
-# compat.sh is needed for ct_log; resolve via YAKOS_ROOT
+# compat.sh is needed for ct_log; resolve via YAKOS_ROOT.
+# This file lives at lib/hooks/legacy/; when invoked directly (not via the
+# lib/hooks/<name>.sh symlink) HOOK_DIR resolves to lib/hooks/legacy/ and
+# needs three levels of ".." to reach the project root.  When invoked via
+# the symlink, HOOK_DIR resolves to lib/hooks/ and two levels suffice.
 if [ -z "${YAKOS_ROOT:-}" ]; then
-    YAKOS_ROOT="$(cd "$HOOK_DIR/../.." && pwd -P)"
+    case "$(basename -- "$HOOK_DIR")" in
+        legacy) YAKOS_ROOT="$(cd "$HOOK_DIR/../../.." && pwd -P)" ;;
+        *)       YAKOS_ROOT="$(cd "$HOOK_DIR/../.." && pwd -P)" ;;
+    esac
 fi
 YAKOS_LIB="${YAKOS_LIB:-$YAKOS_ROOT/cli/lib}"
 if [ -f "$YAKOS_LIB/compat.sh" ]; then
