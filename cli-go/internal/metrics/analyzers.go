@@ -567,6 +567,12 @@ func runTool(toolPath string, args []string, dir string, timeout time.Duration) 
 	cmd := exec.CommandContext(ctx, toolPath, args...) //nolint:gosec
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
+	// When the deadline fires the process is killed; the surfaced exec error is
+	// OS-dependent ("signal: killed" on Unix, "exit status 1" on Windows), so
+	// detect the timeout via the context itself — the only OS-independent signal.
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(out), context.DeadlineExceeded
+	}
 	return string(out), err
 }
 
