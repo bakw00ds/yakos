@@ -115,9 +115,16 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, priorRunID, newRunID,
 		)
 	}
 
-	// C2: validate node-id keys from the deserialized run.json before using
-	// them in any path construction. LoadRunState is the trust boundary for
-	// untrusted on-disk data; node IDs that don't match idRe are rejected.
+	// C2: validate deserialized keys from run.json before using them in any
+	// path construction. LoadRunState is the trust boundary for untrusted
+	// on-disk data. This is defense-in-depth: the handler (handleResume) also
+	// validates workflow_name before calling here.
+	//
+	// Validate workflow_name so the engine is safe regardless of caller.
+	if err := ValidateID("workflow_name (from prior run.json)", prior.WorkflowName); err != nil {
+		return nil, fmt.Errorf("workflow: resume: prior run.json contains invalid workflow_name: %w", err)
+	}
+	// Validate node-id keys.
 	for id := range prior.Nodes {
 		if err := ValidateID("node_id (from prior run.json)", id); err != nil {
 			return nil, fmt.Errorf("workflow: resume: prior run.json contains invalid node id: %w", err)
@@ -493,6 +500,15 @@ func (e *Engine) runNode(
 		})
 	}
 
+	// Extract cost from the dispatch result. TotalCostUSD is only present for
+	// claude (streaming) dispatches; non-claude runtimes leave Usage nil.
+	// Emit cost_usd only when we have a real value; absent = "unavailable".
+	var nodeCostUSD *float64
+	if result.Usage != nil && result.Usage.TotalCostUSD > 0 {
+		v := result.Usage.TotalCostUSD
+		nodeCostUSD = &v
+	}
+
 	// Publish node.finished.
 	if e.Bus != nil {
 		e.Bus.Publish(wsbus.TopicWorkflowNodeFinished, wsbus.WorkflowNodeFinishedPayload{
@@ -501,6 +517,7 @@ func (e *Engine) runNode(
 			NodeID:   node.ID,
 			Status:   string(NodeCompleted),
 			ExitCode: 0,
+			CostUSD:  nodeCostUSD,
 			TS:       time.Now().UTC(),
 		})
 	}

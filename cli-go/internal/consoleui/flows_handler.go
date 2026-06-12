@@ -109,7 +109,7 @@ func (h *flowsHandlers) handleListWorkflows(w http.ResponseWriter, r *http.Reque
 	dir := h.workflowsDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if isNotExist(err) {
 			// No workflows directory yet — return empty list.
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
@@ -293,26 +293,49 @@ func (h *flowsHandlers) handleSaveWorkflow(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Optimistic concurrency: check if the on-disk version matches req.Version.
+	//
+	// NOTE: the read-compare-write below is NOT an atomic critical section.
+	// Two concurrent saves with the same version can both win. This is
+	// accepted under the cooperative-attribution model (single-operator
+	// local daemon). Do NOT add a mutex here.
 	path := h.workflowPath(req.Name)
+	existing, readErr := os.ReadFile(path) //nolint:gosec
+	if readErr != nil && !isNotExist(readErr) {
+		slog.Error("flows: save workflow: read existing", "name", req.Name, "err", readErr)
+		writeGenericError(w, http.StatusInternalServerError, "failed to check version")
+		return
+	}
+	fileExists := readErr == nil
+
 	if req.Version != "" {
-		existing, readErr := os.ReadFile(path) //nolint:gosec
-		if readErr != nil && !isNotExist(readErr) {
-			slog.Error("flows: save workflow: read existing", "name", req.Name, "err", readErr)
-			writeGenericError(w, http.StatusInternalServerError, "failed to check version")
-			return
-		}
-		if readErr == nil {
+		if fileExists {
 			diskVersion := contentHash(existing)
 			if diskVersion != req.Version {
 				// Conflict: another operator saved since the client last loaded.
+				// disk_version is reserved for future client-side merge helpers;
+				// clients must reload and re-submit.
 				w.Header().Set("Content-Type", "application/json; charset=utf-8")
 				w.WriteHeader(http.StatusConflict)
 				_ = json.NewEncoder(w).Encode(map[string]string{
-					"error":        "conflict: workflow was modified by another operator; please reload",
-					"disk_version": diskVersion,
+					"error": "conflict: workflow was modified by another operator; please reload",
+					// disk_version intentionally omitted — reserved, not yet used by client
 				})
 				return
 			}
+		}
+		// File does not exist but version supplied: treat as first-time create
+		// (version is stale from a previously-deleted workflow).
+	} else {
+		// version=="" means force-create. Only allowed for NEW files.
+		// If the file already exists, require a real version round-trip so
+		// the caller is aware of the current content before overwriting.
+		if fileExists {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": "conflict: workflow already exists; supply the current version to update",
+			})
+			return
 		}
 	}
 
@@ -491,6 +514,16 @@ func (h *flowsHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeGenericError(w, http.StatusInternalServerError, "failed to load prior run")
+		return
+	}
+
+	// B1: validate workflow_name from the deserialized run.json BEFORE any
+	// path construction. run.json is operator-controlled on-disk data and
+	// must be treated as untrusted (per C2 contract in runstate.go). A
+	// planted run.json with workflow_name="../../../etc/passwd" would
+	// otherwise load/execute an arbitrary file.
+	if err := workflow.ValidateID("workflow_name", priorRS.WorkflowName); err != nil {
+		writeGenericError(w, http.StatusBadRequest, "invalid prior run: bad workflow_name")
 		return
 	}
 

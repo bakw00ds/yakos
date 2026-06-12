@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/workflow"
+	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
 // ---- Test helpers -------------------------------------------------------
@@ -1352,5 +1354,135 @@ func TestSubstitutePrompt_InputsNotBudgeted(t *testing.T) {
 	inputInPrompt := string(inputVal)
 	if !containsStr(prompt, inputInPrompt) {
 		t.Errorf("input value truncated or missing in consumer prompt; input should be passed through intact regardless of output_limit")
+	}
+}
+
+// ---- Cost meter: node-finished event carries cost_usd when available --------
+
+// TestEngine_NodeFinished_CostUSD verifies that when a node's dispatch Result
+// carries Usage.TotalCostUSD, the published workflow.node.finished event
+// includes cost_usd in its payload. When Usage is nil (non-claude runtime),
+// cost_usd is absent from the payload.
+func TestEngine_NodeFinished_CostUSD(t *testing.T) {
+	t.Parallel()
+
+	const wantCost = 0.0042
+
+	// Fake runFn that returns a non-nil Usage with TotalCostUSD.
+	fn := func(_ context.Context, p dispatch.Params) ([]byte, dispatch.Result, error) {
+		return []byte("done"), dispatch.Result{
+			ExitCode: 0,
+			Usage: &cost.Usage{
+				TotalCostUSD: wantCost,
+			},
+		}, nil
+	}
+
+	bus := wsbus.New()
+	defer bus.Stop()
+
+	sub := bus.Subscribe(wsbus.TopicWorkflowNodeFinished)
+	defer sub.Unsubscribe()
+
+	workDir := t.TempDir()
+	eng := &workflow.Engine{
+		YakosRoot: "/yakos",
+		Project:   "/project",
+		WorkDir:   workDir,
+		Bus:       bus,
+	}
+	workflow.SetEngineRunFn(eng, fn)
+
+	wf := &workflow.Workflow{
+		Version: 1,
+		Name:    "cost-test",
+		Nodes: []workflow.Node{
+			{ID: "step1", Agent: "agent-a", Prompt: "do work", OutputLimit: 1000},
+		},
+	}
+
+	rs, err := eng.Run(context.Background(), wf, "run-cost-test", "tester")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rs.Status != workflow.RunCompleted {
+		t.Errorf("run status: got %q, want completed", rs.Status)
+	}
+
+	// Collect the node.finished event.
+	var ev wsbus.Event
+	select {
+	case ev = <-sub.C():
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for workflow.node.finished event")
+	}
+
+	var payload wsbus.WorkflowNodeFinishedPayload
+	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.CostUSD == nil {
+		t.Fatalf("cost_usd is nil in node.finished payload; expected %v", wantCost)
+	}
+	if *payload.CostUSD != wantCost {
+		t.Errorf("cost_usd=%v; want %v", *payload.CostUSD, wantCost)
+	}
+}
+
+// TestEngine_NodeFinished_NoCostUSD_WhenUsageNil verifies that when a node's
+// dispatch Result has no Usage (non-claude runtime), cost_usd is absent from
+// the node.finished payload (not "$0" or NaN).
+func TestEngine_NodeFinished_NoCostUSD_WhenUsageNil(t *testing.T) {
+	t.Parallel()
+
+	// Fake runFn with nil Usage (non-claude runtime).
+	fn := func(_ context.Context, _ dispatch.Params) ([]byte, dispatch.Result, error) {
+		return []byte("done"), dispatch.Result{ExitCode: 0, Usage: nil}, nil
+	}
+
+	bus := wsbus.New()
+	defer bus.Stop()
+
+	sub := bus.Subscribe(wsbus.TopicWorkflowNodeFinished)
+	defer sub.Unsubscribe()
+
+	workDir := t.TempDir()
+	eng := &workflow.Engine{
+		YakosRoot: "/yakos",
+		Project:   "/project",
+		WorkDir:   workDir,
+		Bus:       bus,
+	}
+	workflow.SetEngineRunFn(eng, fn)
+
+	wf := &workflow.Workflow{
+		Version: 1,
+		Name:    "no-cost-test",
+		Nodes: []workflow.Node{
+			{ID: "step1", Agent: "agent-a", Prompt: "do work", OutputLimit: 1000},
+		},
+	}
+
+	rs, err := eng.Run(context.Background(), wf, "run-no-cost-test", "tester")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rs.Status != workflow.RunCompleted {
+		t.Errorf("run status: got %q, want completed", rs.Status)
+	}
+
+	var ev wsbus.Event
+	select {
+	case ev = <-sub.C():
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for workflow.node.finished event")
+	}
+
+	var payload wsbus.WorkflowNodeFinishedPayload
+	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.CostUSD != nil {
+		t.Errorf("cost_usd=%v; want nil (absent) when Usage is nil", *payload.CostUSD)
 	}
 }

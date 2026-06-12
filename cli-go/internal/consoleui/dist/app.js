@@ -238,7 +238,16 @@
       // Jitter: randomise delay to prevent thundering-herd reconnects when
       // many tabs reconnect simultaneously after a daemon restart.
       const jitteredDelay = wsRetryMs * (0.5 + Math.random() * 0.5);
-      setTimeout(connectWS, jitteredDelay);
+      setTimeout(() => {
+        connectWS();
+        // S4: on reconnect, if an active run is being watched, poll once to
+        // reconcile canvas state. The WS is the live path; poll is the
+        // fallback — trigger it on reconnect so the canvas does not freeze
+        // showing stale node states from before the disconnect.
+        if (flowsState.activeRunId) {
+          pollRunState(flowsState.activeRunId);
+        }
+      }, jitteredDelay);
       wsRetryMs = Math.min(wsRetryMs * 2, 30000);
     });
     ws.addEventListener('error', () => {
@@ -1477,9 +1486,16 @@
         snap.nodes[payload.node_id] = snap.nodes[payload.node_id] || {};
         snap.nodes[payload.node_id].status = payload.status || 'completed';
         snap.nodes[payload.node_id].exit_code = payload.exit_code;
+        // Accumulate cost_usd from node-finished events.
+        // cost_usd is absent for non-claude runtimes — treat absent as
+        // "unavailable" (no $0 display). Only accumulate when present.
+        if (typeof payload.cost_usd === 'number' && isFinite(payload.cost_usd)) {
+          snap.cost = (snap.cost || 0) + payload.cost_usd;
+        }
       }
       if (flowsState.activeRunId === runId) {
         renderFlowsCanvas();
+        renderFlowsRunPanel();
         announceFlows('Node ' + payload.node_id + ' ' + (payload.status || 'finished'));
       }
     } else if (topic === 'workflow.node.truncated') {
@@ -2153,6 +2169,14 @@
     const maxColSize = Math.max(...columns.map((c) => c.length));
     const totalH = maxColSize * (SVG_NODE_H + SVG_ROW_GAP) - SVG_ROW_GAP + SVG_PAD * 2;
     const totalW = xCursor - SVG_COL_GAP + SVG_PAD;
+
+    // S2: guard against non-finite dimensions (defensive — cycles are rejected
+    // upstream by Validate, but guard here so a malformed snapshot does not
+    // produce a broken SVG with width="-Infinity" or NaN attributes.
+    if (!isFinite(totalW) || !isFinite(totalH) || totalW <= 0 || totalH <= 0) {
+      canvasEl.innerHTML = '<p class="empty-state" style="padding:24px">Unable to render canvas (invalid graph dimensions)</p>';
+      return;
+    }
 
     for (let c = 0; c <= maxLayer; c++) {
       const colNodes = columns[c];

@@ -126,12 +126,17 @@ type WorkflowNodeStartedPayload struct {
 }
 
 // WorkflowNodeFinishedPayload is the payload for [TopicWorkflowNodeFinished].
+// Invariant: does not carry node content or tokens.
+// CostUSD is the cost of this node's dispatch (from dispatch.Result.Usage.TotalCostUSD).
+// It is omitted when cost is unknown (non-claude runtimes, or claude without usage data).
+// Clients must treat absent cost_usd as "unavailable", not "$0".
 type WorkflowNodeFinishedPayload struct {
 	RunID    string    `json:"run_id"`
 	Workflow string    `json:"workflow"`
 	NodeID   string    `json:"node_id"`
 	Status   string    `json:"status"` // "completed" | "failed" | "skipped"
 	ExitCode int       `json:"exit_code"`
+	CostUSD  *float64  `json:"cost_usd,omitempty"` // nil = cost unavailable for this node
 	TS       time.Time `json:"ts"`
 }
 

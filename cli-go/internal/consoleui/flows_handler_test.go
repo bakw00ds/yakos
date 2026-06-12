@@ -6,14 +6,18 @@ package consoleui_test
 //   - GET /flows/api/workflows        — list, empty dir, non-yaml skipped
 //   - GET /flows/api/workflow         — happy, not found, malformed, traversal
 //   - POST /flows/api/workflow        — save, 409 conflict, invalid name/yaml
+//   - POST /flows/api/workflow        — clobber-409: empty version + existing file → 409
 //   - POST /flows/api/run             — happy (engine nil → 503), invalid name, traversal
+//   - POST /flows/api/run             — happy with fake engine → 202 + run_id (N3)
 //   - GET /flows/api/run              — happy, not found, traversal
 //   - GET /flows/api/run/node         — happy, not found, traversal (id AND node)
 //   - POST /flows/api/resume          — happy (engine nil → 503), traversal
+//   - POST /flows/api/resume          — traversal workflow_name in run.json → 400 (B1)
 //
 // Determinism: no time.Sleep; no subprocess calls; no LLM calls.
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -24,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/bakw00ds/yakos/internal/consoleui"
+	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
@@ -318,16 +323,20 @@ func TestFlows_SaveWorkflow_ConflictOnStaleVersion(t *testing.T) {
 	}
 	v1 := firstResult["version"]
 
-	// Modify the file on disk to simulate another operator saving.
-	// We do this by saving again with an empty version to get a new version.
+	// Simulate another operator saving by doing a valid save with v1 as the
+	// version (the other operator also loaded at v1). This changes the on-disk
+	// content, producing a new version stamp.
 	body2, _ := json.Marshal(map[string]string{
 		"name":    "my-flow",
 		"yaml":    strings.Replace(minimalYAML, "run tests", "run integration tests", 1),
-		"version": "",
+		"version": v1, // other operator also had v1 when they loaded
 	})
 	resp2 := authedPost(t, ts.URL+"/flows/api/workflow", tok, string(body2))
+	if resp2.StatusCode != http.StatusOK {
+		body2Str := bodyStr(t, resp2)
+		t.Fatalf("intermediate save: status=%d; body=%s", resp2.StatusCode, body2Str)
+	}
 	drainClose(resp2)
-	// This succeeds (empty version = force-create).
 
 	// Now try to save with the stale version (v1) — should get 409.
 	body3, _ := json.Marshal(map[string]string{"name": "my-flow", "yaml": minimalYAML, "version": v1})
@@ -573,5 +582,142 @@ func TestFlows_Resume_EngineNil_Returns503(t *testing.T) {
 
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("status=%d; want 503 (engine not configured)", resp.StatusCode)
+	}
+}
+
+// ---- B1: path-traversal in deserialized workflow_name → 400 -----------------
+
+// TestFlows_Resume_TraversalWorkflowNameInRunJSON verifies that a planted
+// run.json with workflow_name containing a path-traversal sequence is rejected
+// with 400 before any file is read outside the workflows directory (B1).
+func TestFlows_Resume_TraversalWorkflowNameInRunJSON(t *testing.T) {
+	ts, tok, workDir := newFlowsTestServer(t)
+
+	// Plant a run.json whose workflow_name contains a traversal sequence.
+	runID := "run-20240101-000000-b1test"
+	runDir := filepath.Join(workDir, "workflows", "runs", runID)
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// workflow_name with path traversal — as an attacker would plant it.
+	maliciousRunJSON := `{"run_id":"run-20240101-000000-b1test","workflow_name":"../../../etc/passwd","status":"failed","nodes":{}}`
+	if err := os.WriteFile(filepath.Join(runDir, "run.json"), []byte(maliciousRunJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"run_id":"run-20240101-000000-b1test"}`
+	resp := authedPost(t, ts.URL+"/flows/api/resume", tok, body)
+	respBody := bodyStr(t, resp)
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status=%d; want 400 (B1 traversal guard on workflow_name); body=%s", resp.StatusCode, respBody)
+	}
+}
+
+// ---- MEDIUM: clobber-409 when version="" and file exists --------------------
+
+// TestFlows_SaveWorkflow_EmptyVersionNewFile verifies that version="" on a NEW
+// file succeeds (force-create is only for new files).
+func TestFlows_SaveWorkflow_EmptyVersionNewFile(t *testing.T) {
+	ts, tok, workDir := newFlowsTestServer(t)
+
+	// No file exists yet — version="" should succeed (new file).
+	body, _ := json.Marshal(map[string]string{"name": "brand-new", "yaml": strings.Replace(minimalYAML, "my-flow", "brand-new", 1), "version": ""})
+	resp := authedPost(t, ts.URL+"/flows/api/workflow", tok, string(body))
+	respBody := bodyStr(t, resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d; want 200 (new file with empty version); body=%s", resp.StatusCode, respBody)
+	}
+	// File should exist on disk.
+	path := filepath.Join(workDir, "workflows", "brand-new.yaml")
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("workflow file not found on disk: %v", err)
+	}
+}
+
+// TestFlows_SaveWorkflow_EmptyVersionExistingFile verifies that version="" on
+// an EXISTING file returns 409 (force-create is not allowed on existing files;
+// the caller must supply the current version).
+func TestFlows_SaveWorkflow_EmptyVersionExistingFile(t *testing.T) {
+	ts, tok, workDir := newFlowsTestServer(t)
+
+	// Create the file first.
+	writeWorkflow(t, workDir, "existing-flow", strings.Replace(minimalYAML, "my-flow", "existing-flow", 1))
+
+	// Try to save with empty version — should get 409.
+	body, _ := json.Marshal(map[string]string{
+		"name":    "existing-flow",
+		"yaml":    strings.Replace(minimalYAML, "my-flow", "existing-flow", 1),
+		"version": "",
+	})
+	resp := authedPost(t, ts.URL+"/flows/api/workflow", tok, string(body))
+	drainClose(resp)
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("status=%d; want 409 (empty version on existing file must require real version round-trip)", resp.StatusCode)
+	}
+}
+
+// ---- N3: happy-path run test with fake engine → 202 + run_id ----------------
+
+// newFlowsHandlerServer creates an httptest server backed by the flows handler
+// with a fake engine injected via the runFn seam. No LLM calls, no real dispatch.
+func newFlowsHandlerServer(t *testing.T, fn func(context.Context, dispatch.Params) ([]byte, dispatch.Result, error)) (*httptest.Server, string) {
+	t.Helper()
+	workDir := t.TempDir()
+	handler, _ := consoleui.NewFlowsHandlerForTest(t, workDir, fn)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+	return ts, workDir
+}
+
+// TestFlows_Run_HappyPath_Returns202_WithRunID verifies that POST /flows/api/run
+// with a valid workflow returns 202 Accepted and a well-formed run_id, using the
+// fake engine seam (no LLM call, no time.Sleep).
+func TestFlows_Run_HappyPath_Returns202_WithRunID(t *testing.T) {
+	// Fake runFn: completes immediately with empty output and exit code 0.
+	fn := func(_ context.Context, _ dispatch.Params) ([]byte, dispatch.Result, error) {
+		return []byte("ok"), dispatch.Result{ExitCode: 0}, nil
+	}
+
+	ts, workDir := newFlowsHandlerServer(t, fn)
+
+	// Write a workflow to disk.
+	dir := filepath.Join(workDir, "workflows")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "my-flow.yaml"), []byte(minimalYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// POST /flows/api/run?name=my-flow (no auth middleware in this handler — direct mux).
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/flows/api/run?name=my-flow", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /flows/api/run: %v", err)
+	}
+	body := bodyStr(t, resp)
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status=%d; want 202; body=%s", resp.StatusCode, body)
+	}
+
+	var result map[string]string
+	if err := json.Unmarshal([]byte(body), &result); err != nil {
+		t.Fatalf("unmarshal response: %v; body=%s", err, body)
+	}
+	runID := result["run_id"]
+	if runID == "" {
+		t.Error("run_id should be non-empty in 202 response")
+	}
+	// run_id should look like "run-<timestamp>-<rand>" — at minimum starts with "run-".
+	if !strings.HasPrefix(runID, "run-") {
+		t.Errorf("run_id=%q; want prefix 'run-'", runID)
 	}
 }
