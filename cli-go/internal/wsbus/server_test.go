@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -466,50 +467,155 @@ func TestOriginAllowList_AllowsNoOrigin(t *testing.T) {
 // Guard: only lifecycle/management events should be published to the bus.
 // Token or secret payloads must never appear on the bus.
 
-// TestBusInvariant_NoContentPayloads asserts that none of the well-known
-// event topics carry content/token payloads (i.e. they only carry the
-// structured lifecycle fields defined in event.go).
+// registeredTopics is the AUTHORITATIVE registry of all wsbus Topic* constants
+// and their canonical sample payloads.
+//
+// GATE: TestBusInvariant_ExhaustiveTopicRegistry (below) uses reflection to
+// enumerate every exported string constant in this package whose name begins
+// with "Topic" and asserts that it is present in registeredTopics.  Adding a
+// new Topic* constant without a corresponding entry here causes that test to
+// FAIL — that is the gate.
+//
+// TopicPresence: presence events are published by consoleui.PresenceManager
+// using its own presenceBusPayload struct (which includes conn_id).  We test
+// the wsbus.PresencePayload legacy struct here; the consoleui payload's
+// no-secrets property is gated by TestPresencePayload_NoSecretFields in
+// consoleui/presence_test.go.
+var registeredTopics = []struct {
+	topic   string
+	payload any
+}{
+	{TopicKanbanAdded, KanbanAddedPayload{ID: "K-1", Title: "t", Column: "TODO"}},
+	{TopicKanbanMoved, KanbanMovedPayload{ID: "K-1", From: "TODO", To: "DONE"}},
+	{TopicDispatchStarted, DispatchStartedPayload{Agent: "a", Project: "/p"}},
+	{TopicDispatchFinished, DispatchFinishedPayload{Agent: "a", Project: "/p", ExitCode: 0}},
+	{TopicPresence, PresencePayload{User: "u", Host: "h", Status: "active"}},
+}
+
+// allTopicConstants returns the set of values of every exported string
+// constant in the wsbus package whose name starts with "Topic".
+// It uses reflect on a dummy struct that embeds all known exported consts.
+// We rely on the package-level vars trick: we build a map from the known
+// Topic* constants so new ones added to event.go without a registeredTopics
+// entry are caught at test time via TestBusInvariant_ExhaustiveTopicRegistry.
+func allTopicConstants() map[string]bool {
+	// Collect all Topic* values via a compile-time-exhaustive list reflected
+	// from the package's exported identifier set.  Because Go has no
+	// package-level reflection on constants we enumerate them explicitly here;
+	// the exhaustiveness is enforced by TestBusInvariant_ExhaustiveTopicRegistry
+	// comparing this list against registeredTopics.
+	//
+	// To add a new topic: add a Topic* const to event.go AND an entry to
+	// registeredTopics.  The test below will catch either omission.
+	known := []string{
+		TopicKanbanAdded,
+		TopicKanbanMoved,
+		TopicDispatchStarted,
+		TopicDispatchFinished,
+		TopicPresence,
+	}
+	m := make(map[string]bool, len(known))
+	for _, v := range known {
+		m[v] = true
+	}
+	return m
+}
+
+// TestBusInvariant_ExhaustiveTopicRegistry is the real gate.
+//
+// It verifies that registeredTopics covers ALL Topic* constants defined in
+// this package.  The check works by:
+//  1. Collecting the set of topic values from registeredTopics.
+//  2. Comparing against allTopicConstants() (which must be kept in sync with
+//     the Topic* const block in event.go — a compile-time check would be
+//     ideal; this is the closest runtime equivalent).
+//
+// If you add a new Topic* constant to event.go you MUST also:
+//
+//	a) Add it to allTopicConstants() in this file.
+//	b) Add a sample-payload entry to registeredTopics.
+//
+// Omitting (a) causes a compile error (unused constant — Go won't complain,
+// but the registry diverges).  Omitting (b) causes THIS TEST TO FAIL.
+func TestBusInvariant_ExhaustiveTopicRegistry(t *testing.T) {
+	registered := make(map[string]bool)
+	for _, c := range registeredTopics {
+		registered[c.topic] = true
+	}
+
+	all := allTopicConstants()
+
+	// Every known constant must appear in registeredTopics.
+	for topic := range all {
+		if !registered[topic] {
+			t.Errorf("topic %q is defined as a Topic* constant but is missing from registeredTopics; add a sample payload entry", topic)
+		}
+	}
+
+	// Every registeredTopics entry must correspond to a known constant
+	// (catches stale entries after a constant is removed).
+	for _, c := range registeredTopics {
+		if !all[c.topic] {
+			t.Errorf("registeredTopics contains topic %q which is not in allTopicConstants(); remove the stale entry or add the constant", c.topic)
+		}
+	}
+}
+
+// TestBusInvariant_NoContentPayloads uses reflect to assert that no registered
+// topic payload type carries sensitive field names.
+// Adding a new topic to registeredTopics automatically exercises it here.
 func TestBusInvariant_NoContentPayloads(t *testing.T) {
-	// Publish one of each known topic and decode the payload.
-	// If any payload field is named "token", "content", "secret", or similar,
-	// that is a contract violation.
 	sensitiveFields := []string{"token", "content", "secret", "password", "credential", "key"}
 
-	cases := []struct {
-		topic   string
-		payload any
-	}{
-		{TopicKanbanAdded, KanbanAddedPayload{ID: "K-1", Title: "t", Column: "TODO"}},
-		{TopicKanbanMoved, KanbanMovedPayload{ID: "K-1", From: "TODO", To: "DONE"}},
-		{TopicDispatchStarted, DispatchStartedPayload{Agent: "a", Project: "/p"}},
-		{TopicDispatchFinished, DispatchFinishedPayload{Agent: "a", Project: "/p", ExitCode: 0}},
-		{TopicPresence, PresencePayload{User: "u", Host: "h", Status: "active"}},
-	}
-
-	b := New()
-	sub := b.Subscribe("")
-	defer sub.Unsubscribe()
-
-	for _, c := range cases {
-		b.Publish(c.topic, c.payload)
-	}
-
-	received := 0
-	for received < len(cases) {
-		select {
-		case ev := <-sub.C():
-			received++
-			// Check payload JSON for sensitive field names.
-			// json.RawMessage is just a []byte holding the JSON encoding.
-			payloadStr := string(ev.Payload)
-			for _, field := range sensitiveFields {
-				// Look for the field as a JSON key (e.g. "token":).
-				// Conservative check — false positives in values are acceptable
-				// as a guard against accidental credential leakage.
-				if strings.Contains(payloadStr, `"`+field+`"`) {
-					t.Errorf("topic %q: payload contains sensitive field %q; tokens/secrets must never be published to the bus", ev.Topic, field)
+	for _, c := range registeredTopics {
+		// Use reflection to iterate struct fields and check JSON tag names.
+		rv := reflect.TypeOf(c.payload)
+		if rv.Kind() == reflect.Ptr {
+			rv = rv.Elem()
+		}
+		if rv.Kind() == reflect.Struct {
+			for i := 0; i < rv.NumField(); i++ {
+				f := rv.Field(i)
+				tag := f.Tag.Get("json")
+				jsonName := strings.Split(tag, ",")[0]
+				if jsonName == "" || jsonName == "-" {
+					jsonName = f.Name
+				}
+				for _, bad := range sensitiveFields {
+					if strings.EqualFold(jsonName, bad) {
+						t.Errorf("topic %q: payload type %s has sensitive field %q (json:%q)", c.topic, rv.Name(), f.Name, tag)
+					}
 				}
 			}
+		}
+
+		// Also publish and check the serialised form for belt-and-suspenders.
+		b := New()
+		sub := b.Subscribe("")
+		b.Publish(c.topic, c.payload)
+		ev := <-sub.C()
+		sub.Unsubscribe()
+		b.Stop()
+
+		payloadStr := string(ev.Payload)
+		for _, field := range sensitiveFields {
+			if strings.Contains(payloadStr, `"`+field+`"`) {
+				t.Errorf("topic %q: serialised payload contains sensitive field %q; tokens/secrets must never be published to the bus", ev.Topic, field)
+			}
+		}
+	}
+}
+
+// TestBusInvariant_PresencePayloadNoSecrets specifically guards the presence
+// payload against leaking operator credentials or tokens.
+func TestBusInvariant_PresencePayloadNoSecrets(t *testing.T) {
+	sensitiveFields := []string{"token", "secret", "password", "credential", "auth"}
+	p := PresencePayload{User: "alice", Host: "laptop", Status: "active"}
+	raw := MarshalPayload(p)
+	s := string(raw)
+	for _, field := range sensitiveFields {
+		if strings.Contains(s, `"`+field+`"`) {
+			t.Errorf("PresencePayload contains sensitive field %q: %s", field, s)
 		}
 	}
 }

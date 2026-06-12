@@ -266,6 +266,13 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 	return stdout, result, err
 }
 
+// ValidateIdentityField is the exported wrapper around validateIdentityField.
+// CLI callers (cmd/yakos) use this to validate YAKOS_CONVERSATION_ID and
+// similar env vars before passing them to Service.Run.
+func ValidateIdentityField(name, value string) error {
+	return validateIdentityField(name, value)
+}
+
 // validateIdentityField checks that a non-empty identity field value matches
 // the allow-list pattern and is not too long.  Returns a generic
 // InvalidArgument-style error on failure (no value echo — avoids leaking

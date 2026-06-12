@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"time"
 
@@ -137,15 +136,15 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 
 	// --- 8. Exec runtime with stderr capture (PR #34) ---
 	// The dispatch layer owns stderr capture; adapters are oblivious.
-	// ConversationID precedence:
-	//   1. req.ConversationID (per-request field; set by transport/facade)
-	//   2. YAKOS_CONVERSATION_ID env var (legacy bash/CLI callers without the field)
-	// The env var is kept as a fallback so existing callers that rely on it
-	// continue to work unmodified.
+	//
+	// ConversationID invariant: req.ConversationID is the ONLY source here.
+	// The YAKOS_CONVERSATION_ID env-var fallback was removed from this path
+	// (LOW-2 remediation, Phase 2.5): env vars read inside the daemon without
+	// validation are a shell-injection vector and bypass the allow-list check
+	// in Service.Run.  The CLI one-shot path (cmd/yakos/main.go) reads
+	// YAKOS_CONVERSATION_ID, validates it via dispatch.ValidateIdentityField,
+	// and passes it as Params.ConversationID before calling Service.Run.
 	convID := req.ConversationID
-	if convID == "" {
-		convID = os.Getenv("YAKOS_CONVERSATION_ID")
-	}
 
 	dispatchReq := runtime.DispatchRequest{
 		Project:        req.Project,

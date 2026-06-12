@@ -1793,16 +1793,29 @@ func runDispatch(yakosRoot string, args []string) {
 	fmt.Fprintf(os.Stderr, "yakos dispatch: agent=%s runtime=%s model=%s (by:%s) project=%s\n",
 		agentName, runtimeDesc, resolvedModel, chosenBy, project)
 
+	// LOW-2 remediation (Phase 2.5): YAKOS_CONVERSATION_ID is read only on the
+	// CLI one-shot path, validated against the identity allow-list, and then
+	// passed explicitly into Request.ConversationID.  The daemon dispatch path
+	// (dispatch.Run via Service.Run) no longer reads this env var; see dispatch.go.
+	cliConvID := os.Getenv("YAKOS_CONVERSATION_ID")
+	if cliConvID != "" {
+		if err := dispatch.ValidateIdentityField("conversation_id", cliConvID); err != nil {
+			fmt.Fprintf(os.Stderr, "dispatch: YAKOS_CONVERSATION_ID: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	req := dispatch.Request{
-		AgentName: agentName,
-		Task:      task,
-		Project:   project,
-		Runtime:   runtimeOverride,
-		Model:     modelOverride,
-		EvalRunID: evalRunID,
-		AllowRoot: allowRoot,
-		Timeout:   timeoutSecs,
-		YakosRoot: yakosRoot,
+		AgentName:      agentName,
+		Task:           task,
+		Project:        project,
+		Runtime:        runtimeOverride,
+		Model:          modelOverride,
+		EvalRunID:      evalRunID,
+		AllowRoot:      allowRoot,
+		Timeout:        timeoutSecs,
+		YakosRoot:      yakosRoot,
+		ConversationID: cliConvID,
 	}
 
 	stdout, _, err := dispatch.Run(context.Background(), req)

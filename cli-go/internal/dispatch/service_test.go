@@ -739,3 +739,79 @@ func TestMCPOperatorIDConvention(t *testing.T) {
 		t.Error("MCPParams should set isMCPStamped=true")
 	}
 }
+
+// ---- LOW-2: YAKOS_CONVERSATION_ID daemon-path isolation -----------------------
+
+// TestDaemonPathIgnoresEnvConversationID verifies that Service.Run does NOT read
+// YAKOS_CONVERSATION_ID from the environment.  The env var is exclusively for the
+// CLI one-shot path (cmd/yakos/main.go runDispatch); the daemon path uses only
+// req.ConversationID.
+//
+// LOW-2 remediation, Phase 2.5: env vars read inside the daemon without
+// validation are a shell-injection vector and bypass the allow-list check.
+func TestDaemonPathIgnoresEnvConversationID(t *testing.T) {
+	const envConvID = "env-conv-from-yakos-env"
+	t.Setenv("YAKOS_CONVERSATION_ID", envConvID)
+
+	var capturedConvID string
+	setRunFn(t, func(ctx context.Context, req Request) ([]byte, Result, error) {
+		capturedConvID = req.ConversationID
+		return nil, Result{}, nil
+	})
+
+	svc := NewService(ServiceConfig{
+		YakosRoot:     "/yakos",
+		WorkspaceRoot: "/p",
+		OperatorID:    "op",
+	})
+
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:   "backend",
+		Task:    "task",
+		Project: "/p",
+		// ConversationID intentionally NOT set in Params — simulates daemon path.
+	})
+	if err != nil {
+		t.Fatalf("Service.Run: unexpected error: %v", err)
+	}
+
+	// The daemon path must NOT pick up the env var.  capturedConvID must be empty.
+	if capturedConvID == envConvID {
+		t.Errorf("Service.Run picked up YAKOS_CONVERSATION_ID from env=%q; daemon path must NOT read this env var", envConvID)
+	}
+	if capturedConvID != "" {
+		t.Errorf("ConversationID: got %q; want empty (daemon path sets nothing when Params.ConversationID is empty)", capturedConvID)
+	}
+}
+
+// TestValidateIdentityField_Exported verifies that the exported
+// ValidateIdentityField function enforces the same allow-list as the internal
+// validateIdentityField used by Service.Run.
+func TestValidateIdentityField_Exported(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{"empty is ok", "", false},
+		{"valid alphanumeric", "conv-abc123", false},
+		{"valid with dots colons", "conv.abc:123", false},
+		{"leading dash rejected", "-bad-id", true},
+		{"too long (129 chars)", "a" + strings.Repeat("b", 128), true},
+		{"at-sign rejected", "user@host", true},
+		{"spaces rejected", "hello world", true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := ValidateIdentityField("conversation_id", c.value)
+			if c.wantErr && err == nil {
+				t.Errorf("ValidateIdentityField(%q) = nil; want error", c.value)
+			}
+			if !c.wantErr && err != nil {
+				t.Errorf("ValidateIdentityField(%q) = %v; want nil", c.value, err)
+			}
+		})
+	}
+}
+
