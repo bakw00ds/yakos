@@ -112,9 +112,14 @@ type sessionEntry struct {
 	shared          bool
 }
 
-// errSessionOwnerConflict is returned by OpenSession when the sessionID is
-// already owned by a different operatorID.  The HTTP handler must return 403.
+// errSessionOwnerConflict is returned by OpenSession and SetShared when the
+// sessionID is already owned by a different operatorID.  The HTTP handler must
+// return 403.
 var errSessionOwnerConflict = errors.New("chathub: session owned by different operator")
+
+// errSessionNotFound is returned by SetShared when the sessionID does not
+// exist in the hub.  The HTTP handler must return 404.
+var errSessionNotFound = errors.New("chathub: session not found")
 
 // errTooManyConns is returned by Register when the per-operator or global
 // connection cap would be exceeded.  The HTTP handler must return 429.
@@ -249,6 +254,34 @@ func (h *ChatHub) CloseSession(sessionID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.sessions, sessionID)
+}
+
+// SetShared atomically updates the shared flag for an existing session.
+//
+// Unlike the SessionOwner+OpenSession pair, this method holds the mutex for
+// the entire check-and-update operation, eliminating the TOCTOU window where
+// the dispatch goroutine's deferred CloseSession could fire between the two
+// calls and cause OpenSession to recreate a session entry that nothing ever
+// closes (permanent leak toward maxTotalSessions=256).
+//
+// Returns:
+//   - errSessionNotFound (→ 404) if the session does not exist.
+//   - errSessionOwnerConflict (→ 403) if the session is owned by a different
+//     operatorID.
+//   - nil on success.
+func (h *ChatHub) SetShared(sessionID, ownerOperatorID string, shared bool) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	entry, ok := h.sessions[sessionID]
+	if !ok {
+		return errSessionNotFound
+	}
+	if entry.ownerOperatorID != ownerOperatorID {
+		return errSessionOwnerConflict
+	}
+	entry.shared = shared
+	h.sessions[sessionID] = entry
+	return nil
 }
 
 // Route delivers ev to the appropriate SSE connections.

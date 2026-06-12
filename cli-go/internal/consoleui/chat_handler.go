@@ -155,13 +155,15 @@ func (ch *chatHandlers) handleChatStream(w http.ResponseWriter, r *http.Request)
 
 	// Validate operatorId from query (SSE — browser uses fetch; SW injects
 	// Authorization header; but operatorId is attribution, not auth).
+	// Empty check before ValidateIdentityField (which returns nil for empty)
+	// to match the validation order used in handleChatShare and handleChatCancel.
 	operatorID := r.URL.Query().Get("operatorId")
-	if err := dispatch.ValidateIdentityField("operator_id", operatorID); err != nil {
-		http.Error(w, "invalid operatorId", http.StatusBadRequest)
-		return
-	}
 	if operatorID == "" {
 		http.Error(w, "operatorId is required", http.StatusBadRequest)
+		return
+	}
+	if err := dispatch.ValidateIdentityField("operator_id", operatorID); err != nil {
+		http.Error(w, "invalid operatorId", http.StatusBadRequest)
 		return
 	}
 
@@ -596,6 +598,76 @@ func (ch *chatHandlers) handleChatTranscript(w http.ResponseWriter, r *http.Requ
 	if err := json.NewEncoder(w).Encode(entries); err != nil {
 		slog.Error("consoleui: transcript encode error", "err", err)
 	}
+}
+
+// ---- POST /api/chat/share --------------------------------------------------
+
+// ShareRequest is the JSON body for POST /api/chat/share.
+//
+// Only the session owner may change the shared flag.  A non-owner attempting
+// this receives 403.  A non-existent session receives 404.
+type ShareRequest struct {
+	SessionID  string `json:"sessionId"`
+	OperatorID string `json:"operatorId"`
+	Shared     bool   `json:"shared"`
+}
+
+// handleChatShare flips the shared flag on a session.
+//
+// Security: only the session owner (identified by operatorId == session owner)
+// may promote or demote a session.  Auth is enforced at the edge
+// (requireTokenForNonStatic); no re-check here.
+func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req ShareRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.SessionID == "" {
+		http.Error(w, "sessionId is required", http.StatusBadRequest)
+		return
+	}
+	if err := dispatch.ValidateIdentityField("session_id", req.SessionID); err != nil {
+		http.Error(w, "invalid sessionId", http.StatusBadRequest)
+		return
+	}
+	if req.OperatorID == "" {
+		http.Error(w, "operatorId is required", http.StatusBadRequest)
+		return
+	}
+	if err := dispatch.ValidateIdentityField("operator_id", req.OperatorID); err != nil {
+		http.Error(w, "invalid operatorId", http.StatusBadRequest)
+		return
+	}
+
+	// Atomic ownership check + shared-flag update via SetShared.
+	//
+	// The previous SessionOwner+OpenSession two-step had a TOCTOU window:
+	// the dispatch goroutine's deferred CloseSession could fire between the two
+	// calls, causing OpenSession to recreate a session entry that nothing ever
+	// closes (permanent leak toward maxTotalSessions=256).  SetShared holds the
+	// hub mutex across the entire check-and-update, closing that window.
+	if err := ch.hub.SetShared(req.SessionID, req.OperatorID, req.Shared); err != nil {
+		if errors.Is(err, errSessionNotFound) {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, errSessionOwnerConflict) {
+			http.Error(w, "forbidden: session owned by different operator", http.StatusForbidden)
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"ok":true}` + "\n"))
 }
 
 // ---- helpers ----------------------------------------------------------------

@@ -427,3 +427,416 @@ html, body {
     animation: none;
   }
 }
+
+/* ===================================================================
+   CHAT TAB (Phase 3c)
+   =================================================================== */
+
+/* ---- Chat panel layout ---- */
+
+#panel-chat {
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#panel-chat.active {
+  display: flex;
+}
+
+.chat-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+/* ---- Chat toolbar ---- */
+
+.chat-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.chat-op-badge {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 2px 6px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: default;
+}
+
+.chat-new-pane-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+
+.chat-new-pane-btn:hover {
+  background: var(--accent-hover);
+}
+
+.chat-total-cost {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Pane rail: grid of panes (1-3 cols, scrollable rail) ---- */
+
+.chat-pane-rail {
+  flex: 1;
+  display: grid;
+  /* Up to 3 panes side-by-side; beyond that they stack into rows */
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  grid-auto-rows: 1fr;
+  gap: 8px;
+  padding: 8px;
+  overflow: auto;
+  min-height: 0;
+}
+
+.chat-empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  grid-column: 1 / -1;
+  height: 100%;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.chat-cap-notice {
+  grid-column: 1 / -1;
+  background: rgba(255, 165, 0, 0.15);
+  border: 1px solid rgba(255, 165, 0, 0.4);
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: #ffa94d;
+}
+
+/* ---- Individual pane ---- */
+
+.chat-pane {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  min-height: 300px;
+}
+
+/* ---- Pane header ---- */
+
+.chat-pane-header {
+  flex-shrink: 0;
+  background: rgba(255,255,255,0.03);
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px;
+}
+
+.pane-header-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.pane-op-badge {
+  font-size: 10px;
+  flex-shrink: 0;
+  /* color applied inline (operator hash-derived) */
+}
+
+.pane-runtime-select,
+.pane-model-select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 11px;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
+.pane-runtime-select:focus,
+.pane-model-select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.pane-agent-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 11px;
+  padding: 2px 6px;
+  width: 80px;
+  min-width: 0;
+}
+
+.pane-agent-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.pane-cost {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.pane-elapsed {
+  font-size: 11px;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 24px;
+}
+
+/* ---- Pane status indicator: icon + visually-hidden label ---- */
+
+.pane-status {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.pane-status-dot {
+  display: inline-block;
+}
+
+.pane-status-dot.idle      { color: var(--text-dim); }
+.pane-status-dot.streaming { color: var(--accent);   }
+.pane-status-dot.done      { color: #51cf66;         }
+.pane-status-dot.error     { color: #ff6b6b;         }
+
+/* ---- Share / cancel / close buttons ---- */
+
+.pane-share-btn,
+.pane-cancel-btn,
+.pane-close-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 5px;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+  flex-shrink: 0;
+}
+
+.pane-share-btn:hover,
+.pane-cancel-btn:hover,
+.pane-close-btn:hover {
+  background: rgba(255,255,255,0.06);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.pane-share-btn.pane-share-active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.pane-cancel-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.pane-cancel-btn:not(:disabled) {
+  color: #ff6b6b;
+}
+
+.pane-close-btn {
+  margin-left: auto;
+}
+
+/* ---- Pane messages ---- */
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+
+.chat-scroll-indicator {
+  position: sticky;
+  top: 0;
+  background: rgba(34, 139, 230, 0.15);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+  text-align: center;
+  z-index: 1;
+}
+
+/* ---- Individual message bubbles ---- */
+
+.chat-msg {
+  display: grid;
+  grid-template-columns: 36px auto 1fr;
+  gap: 4px 6px;
+  align-items: start;
+  font-size: 12px;
+}
+
+.chat-msg-role {
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  padding-top: 2px;
+  text-align: right;
+}
+
+.chat-msg-time {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  padding-top: 2px;
+}
+
+.chat-msg-text {
+  grid-column: 1 / -1;
+  padding: 5px 8px;
+  border-radius: 4px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-msg-user .chat-msg-role  { color: var(--accent); }
+.chat-msg-user .chat-msg-text  { background: rgba(34,139,230,0.12); }
+
+.chat-msg-assistant .chat-msg-role { color: #51cf66; }
+.chat-msg-assistant .chat-msg-text { background: rgba(255,255,255,0.04); }
+
+/* Streaming state: typing shimmer cursor */
+.chat-msg-assistant.streaming .chat-msg-text {
+  border-right: 2px solid var(--accent);
+}
+
+.chat-streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--accent);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: blink 1s step-start infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+/* Summary row */
+.chat-msg-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+}
+
+.chat-summary-icon { font-size: 13px; }
+.chat-summary-cost { font-variant-numeric: tabular-nums; }
+.chat-summary-duration { font-variant-numeric: tabular-nums; }
+
+/* ---- Pane input area ---- */
+
+.chat-input-area {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.chat-input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--font);
+  padding: 6px 8px;
+  resize: vertical;
+  min-height: 48px;
+  max-height: 160px;
+}
+
+.chat-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.chat-send-btn {
+  background: var(--accent);
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: background 0.15s;
+  align-self: flex-end;
+  flex-shrink: 0;
+}
+
+.chat-send-btn:hover { background: var(--accent-hover); }
+.chat-send-btn:active { opacity: 0.85; }
+
+/* ---- Reduced motion: disable chat animations ---- */
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-new-pane-btn,
+  .chat-send-btn,
+  .pane-share-btn,
+  .pane-cancel-btn,
+  .pane-close-btn {
+    transition: none;
+  }
+
+  .chat-streaming-cursor {
+    animation: none;
+    opacity: 1;
+  }
+}
