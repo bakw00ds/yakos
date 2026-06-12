@@ -321,32 +321,43 @@ func (d *dispatchSrv) Stream(req *pb.DispatchRunRequest, stream pb.Dispatch_Stre
 		return status.Errorf(codes.FailedPrecondition, "yakos_root not configured")
 	}
 
-	// Stream chunks: dispatch runs synchronously through the Service; we emit
-	// a summary chunk when done. Full token streaming is Phase 3 (RunStream).
+	// Phase 3: RunStream — unframed chat exec with incremental token streaming.
+	// Each StreamChunk from RunStream maps directly to a DispatchStreamChunk
+	// proto message.
 	// SELF-ASSERTED — attribution/labeling only. NEVER use for an authorization decision.
-	_, result, err := d.cfg.DispatchService.Run(stream.Context(), dispatch.Params{
-		Agent:          req.Agent,
-		Task:           req.Task,
-		Project:        req.Project,
-		Runtime:        req.Runtime,
-		Model:          req.Model,
-		Timeout:        int(req.Timeout),
-		YakosRoot:      req.YakosRoot, // per-request override; empty → Service uses cfg default
-		OperatorID:     req.OperatorID,
-		ConversationID: req.ConversationID,
-		SessionID:      req.SessionID,
-	})
+	_, err := d.cfg.DispatchService.RunStream(
+		stream.Context(),
+		dispatch.Params{
+			Agent:          req.Agent,
+			Task:           req.Task,
+			Project:        req.Project,
+			Runtime:        req.Runtime,
+			Model:          req.Model,
+			Timeout:        int(req.Timeout),
+			YakosRoot:      req.YakosRoot,
+			OperatorID:     req.OperatorID,
+			ConversationID: req.ConversationID,
+			SessionID:      req.SessionID,
+		},
+		func(chunk dispatch.StreamChunk) {
+			_ = stream.Send(&pb.DispatchStreamChunk{
+				Type:          chunk.Type,
+				Text:          chunk.Text,
+				ExitCode:      int32(chunk.ExitCode),
+				DurationS:     chunk.DurationS,
+				OutputBytes:   chunk.OutputBytes,
+				ModelResolved: chunk.ModelResolved,
+			})
+			// stream.Send errors are dropped here: if the client disconnected,
+			// the stream.Context() cancel will propagate and RunStream will
+			// abort on the next read.  Collecting Send errors would require a
+			// mutex-guarded error slot shared with the onChunk callback.
+		},
+	)
 	if err != nil {
 		return status.Errorf(codes.Internal, "dispatch: %v", err)
 	}
-
-	return stream.Send(&pb.DispatchStreamChunk{
-		Type:          "summary",
-		ExitCode:      int32(result.ExitCode),
-		DurationS:     result.DurationS,
-		OutputBytes:   result.OutputBytes,
-		ModelResolved: result.ModelResolved,
-	})
+	return nil
 }
 
 // ---- Kanban service ---------------------------------------------------------

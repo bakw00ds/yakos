@@ -40,6 +40,34 @@ func (a *AgyAdapter) ExecCmd(ctx context.Context, req DispatchRequest) *exec.Cmd
 	return cmd
 }
 
+// ChatExecCmd returns the exec.Cmd for unframed chat dispatch on agy.
+//
+// agy/gemini do not support partial streaming (buffer to completion) and emit
+// plain text (no JSON).  This method exists so the streaming layer can exec
+// them uniformly.  The caller degrades to one "token" chunk (buffered path)
+// and reports "cost unavailable" since agy emits no usage JSON.
+func (a *AgyAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *exec.Cmd {
+	prompt := req.UserText
+	if req.AgentSystemPrompt != "" {
+		// agy has no --system-prompt flag; prepend as a section separator.
+		prompt = req.AgentSystemPrompt + "\n\n---\n\n" + req.UserText
+	}
+
+	args := []string{
+		"--add-dir", req.Project,
+		"--dangerously-skip-permissions",
+		"-p", prompt,
+	}
+
+	cmd := exec.CommandContext(ctx, "agy", args...) //nolint:gosec
+	cmd.Env = buildEnv(DispatchRequest{
+		Project:       req.Project,
+		ModelOverride: req.ModelOverride,
+		AllowRoot:     req.AllowRoot,
+	})
+	return cmd
+}
+
 // Dispatch invokes 'agy -p' and returns captured stdout.
 func (a *AgyAdapter) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchResult, error) {
 	cmd := a.ExecCmd(ctx, req)
