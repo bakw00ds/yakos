@@ -1,0 +1,194 @@
+/* yakOS Unified Console — Phase 1 shell styles */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg: #1a1b1e;
+  --surface: #25262b;
+  --border: #373a40;
+  --text: #c1c2c5;
+  --text-dim: #5c5f66;
+  --accent: #228be6;
+  --accent-hover: #339af0;
+  --tab-active-bg: #2c2e33;
+  --tab-height: 44px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ---- Tab bar ---- */
+
+.tab-bar {
+  display: flex;
+  align-items: center;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  height: var(--tab-height);
+  padding: 0 12px;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.tab-bar-brand {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-dim);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding-right: 20px;
+  border-right: 1px solid var(--border);
+  margin-right: 12px;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  height: var(--tab-height);
+  padding: 0 16px;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 500;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  color: var(--text);
+  background: rgba(255,255,255,0.04);
+}
+
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: var(--tab-active-bg);
+}
+
+.tab.disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* ---- Content area ---- */
+
+.tab-content {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.tab-panel {
+  position: absolute;
+  inset: 0;
+  display: none;
+}
+
+.tab-panel.active {
+  display: block;
+}
+
+/* ---- Iframe panels ---- */
+
+.tab-panel iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: var(--bg);
+}
+
+/* ---- Overview placeholder ---- */
+
+.overview-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 12px;
+  color: var(--text-dim);
+}
+
+.overview-placeholder h2 {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.overview-placeholder p {
+  font-size: 13px;
+  max-width: 400px;
+  text-align: center;
+}
+
+/* ---- Auth error banner ---- */
+
+#auth-error {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.85);
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+}
+
+#auth-error.visible {
+  display: flex;
+}
+
+.auth-error-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 32px 40px;
+  max-width: 420px;
+  text-align: center;
+}
+
+.auth-error-box h2 {
+  font-size: 16px;
+  margin-bottom: 12px;
+  color: #ff6b6b;
+}
+
+.auth-error-box p {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+/* ---- Loading indicator ---- */
+
+.loading-spinner {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

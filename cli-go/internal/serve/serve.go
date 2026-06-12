@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/grpcserver"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/mcpserver"
@@ -98,6 +99,18 @@ type Config struct {
 	// MCPHTTPAddr is the TCP address for the streamable HTTP MCP server (Q3 override).
 	// Defaults to "127.0.0.1:7894".  Set to "-" to disable.
 	MCPHTTPAddr string
+
+	// ConsoleAddr is the TCP address for the unified console HTTP server.
+	// Defaults to "127.0.0.1:7890". Set to "-" to disable (same as --no-console).
+	ConsoleAddr string
+
+	// ConsoleTokenPath overrides the path to the console bearer-token file.
+	// Defaults to ~/.yakos-state/console-token.
+	ConsoleTokenPath string
+
+	// NoConsole disables the unified console server when true.
+	// Equivalent to --no-console CLI flag.
+	NoConsole bool
 
 	// Bus is the in-process event bus shared between the JSON-RPC layer and the
 	// WebSocket layer.  If nil, a new Bus is created by Run.  Inject for tests.
@@ -173,6 +186,20 @@ func (c *Config) mcpHTTPAddr() string {
 		return c.MCPHTTPAddr
 	}
 	return "127.0.0.1:7894"
+}
+
+func (c *Config) consoleAddr() string {
+	if c.ConsoleAddr != "" {
+		return c.ConsoleAddr
+	}
+	return "127.0.0.1:7890"
+}
+
+func (c *Config) consoleStateDir() string {
+	if c.ConsoleTokenPath != "" {
+		return filepath.Dir(c.ConsoleTokenPath)
+	}
+	return c.restStateDir() // same ~/.yakos-state directory
 }
 
 func (c *Config) listen(path string) (net.Listener, error) {
@@ -271,8 +298,12 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	// Load (or generate) the perf dashboard token and start the server unless disabled.
+	// NOTE: when the console is enabled, perfdash is mounted INSIDE the console at
+	// /perf/ and is NOT started as a standalone server to avoid double-binding the
+	// same port. The console block below manages the perfdash Server instance.
 	perfErrCh := make(chan error, 1)
-	if !cfg.NoPerfDash && cfg.perfAddr() != "-" {
+	if !cfg.NoPerfDash && cfg.perfAddr() != "-" && (cfg.NoConsole || cfg.consoleAddr() == "-") {
+		// Standalone perfdash: only started when the console is disabled.
 		perfStateDir := cfg.perfStateDir()
 		perfTok, err := perfdash.LoadOrCreatePerfToken(perfStateDir)
 		if err != nil {
@@ -285,15 +316,41 @@ func Run(ctx context.Context, cfg Config) error {
 			WorkDir: workDir,
 		})
 		perfURL := fmt.Sprintf("http://%s/#token=%s", cfg.perfAddr(), perfTok)
-		// Log the dashboard URL with token so the operator can copy it into a browser.
-		// The token is in the URL fragment (#token=...) which the browser never sends
-		// in HTTP requests or logs.
 		_ = perfURL // caller logs it via the exported URL (see below)
 		go func() {
 			perfErrCh <- perfSrv.Serve(ctx)
 		}()
 	} else {
 		close(perfErrCh)
+	}
+
+	// Load (or generate) the console token and start the unified console server
+	// unless disabled.  The console mounts kanban, metricsdash, and perfdash
+	// Handler()s internally — this is where metricsdash gets instantiated.
+	consoleErrCh := make(chan error, 1)
+	if !cfg.NoConsole && cfg.consoleAddr() != "-" {
+		consoleTok, err := consoleui.LoadOrCreateToken(cfg.consoleStateDir())
+		if err != nil {
+			return fmt.Errorf("serve: console token: %w", err)
+		}
+		workDir := perfdash.DefaultWorkDir(cfg.WorkspaceRoot)
+		kanbanPath := filepath.Join(cfg.WorkspaceRoot, "work", "current", "kanban.md")
+		consoleSrv := consoleui.New(consoleui.Config{
+			Addr:              cfg.consoleAddr(),
+			Token:             consoleTok,
+			KanbanBoardPath:   kanbanPath,
+			KanbanProject:     filepath.Base(cfg.WorkspaceRoot),
+			MetricsProjectDir: cfg.WorkspaceRoot,
+			PerfWorkDir:       workDir,
+			Bus:               bus,
+		})
+		consoleURL := fmt.Sprintf("http://%s/#token=%s", cfg.consoleAddr(), consoleTok)
+		_ = consoleURL // printed by caller in banner
+		go func() {
+			consoleErrCh <- consoleSrv.Serve(ctx)
+		}()
+	} else {
+		close(consoleErrCh)
 	}
 
 	// Start the gRPC API server unless disabled.
@@ -341,7 +398,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// Serve blocks until ctx is done or the listener is closed.
 	rpcErr := srv.Serve(ctx, ln)
 
-	// Wait for WS, REST, and perf-dashboard servers to drain.
+	// Wait for WS, REST, perf-dashboard, console, gRPC, and MCP servers to drain.
 	select {
 	case wsErr := <-wsErrCh:
 		if wsErr != nil && rpcErr == nil {
@@ -360,6 +417,13 @@ func Run(ctx context.Context, cfg Config) error {
 	case perfErr := <-perfErrCh:
 		if perfErr != nil && rpcErr == nil {
 			rpcErr = perfErr
+		}
+	case <-time.After(drainTimeout):
+	}
+	select {
+	case consoleErr := <-consoleErrCh:
+		if consoleErr != nil && rpcErr == nil {
+			rpcErr = consoleErr
 		}
 	case <-time.After(drainTimeout):
 	}

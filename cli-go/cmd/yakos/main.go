@@ -35,6 +35,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/checkpoint"
 	"github.com/bakw00ds/yakos/internal/compact"
 	"github.com/bakw00ds/yakos/internal/completion"
+	internalconsoleui "github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/doctor"
@@ -5189,10 +5190,13 @@ func runServe(yakosRoot string, args []string) {
 	pidFile := ""
 	wsAddr := ""
 	perfAddr := ""
+	consoleAddr := ""
 	detach := false
 	rotateToken := false
 	rotatePerfToken := false
+	rotateConsoleToken := false
 	noPerfDash := false
+	noConsole := false
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -5227,12 +5231,23 @@ func runServe(yakosRoot string, args []string) {
 				os.Exit(1)
 			}
 			perfAddr = args[i]
+		case "--console-addr":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "serve: --console-addr requires an address")
+				os.Exit(1)
+			}
+			consoleAddr = args[i]
 		case "--rotate-ws-token":
 			rotateToken = true
 		case "--rotate-perf-token":
 			rotatePerfToken = true
+		case "--rotate-console-token":
+			rotateConsoleToken = true
 		case "--no-perf":
 			noPerfDash = true
+		case "--no-console":
+			noConsole = true
 		case "--detach":
 			detach = true
 		default:
@@ -5244,6 +5259,8 @@ func runServe(yakosRoot string, args []string) {
 				wsAddr = args[i][10:]
 			} else if len(args[i]) > 12 && args[i][:12] == "--perf-addr=" {
 				perfAddr = args[i][12:]
+			} else if len(args[i]) > 15 && args[i][:15] == "--console-addr=" {
+				consoleAddr = args[i][15:]
 			} else {
 				fmt.Fprintf(os.Stderr, "serve: unknown flag %q (try --help)\n", args[i])
 				os.Exit(1)
@@ -5277,6 +5294,20 @@ func runServe(yakosRoot string, args []string) {
 		os.Exit(0)
 	}
 
+	// --rotate-console-token: generate a new console token and exit.
+	if rotateConsoleToken {
+		home, _ := os.UserHomeDir()
+		stateDir := filepath.Join(home, ".yakos-state")
+		tok, err := internalconsoleui.RotateToken(stateDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "serve: rotate-console-token: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stdout, "console token rotated; new token: %s\n", tok)
+		fmt.Fprintf(os.Stdout, "token file: %s\n", internalconsoleui.TokenFilePath(stateDir))
+		os.Exit(0)
+	}
+
 	if detach {
 		fmt.Fprintln(os.Stderr, "serve: --detach advisory: use 'yakos serve &' to background the daemon in your shell")
 		fmt.Fprintln(os.Stderr, "serve: for persistent startup see docs/integrations/ (systemd / launchd / Task Scheduler)")
@@ -5289,9 +5320,10 @@ func runServe(yakosRoot string, args []string) {
 		os.Exit(1)
 	}
 
-	// Resolve perf token for startup banner (before daemon blocks).
+	// Resolve tokens for startup banner (before daemon blocks).
 	home, _ := os.UserHomeDir()
 	perfStateDir := filepath.Join(home, ".yakos-state")
+	consoleTok, _ := internalconsoleui.LoadOrCreateToken(perfStateDir)
 	perfTok, _ := internalperfdash.LoadOrCreatePerfToken(perfStateDir)
 
 	cfg := internalserve.Config{
@@ -5302,6 +5334,8 @@ func runServe(yakosRoot string, args []string) {
 		WSAddr:        wsAddr,
 		PerfAddr:      perfAddr,
 		NoPerfDash:    noPerfDash,
+		ConsoleAddr:   consoleAddr,
+		NoConsole:     noConsole,
 	}
 
 	wsBindAddr := wsAddr
@@ -5312,12 +5346,26 @@ func runServe(yakosRoot string, args []string) {
 	if perfBindAddr == "" {
 		perfBindAddr = "127.0.0.1:7895"
 	}
+	consoleBindAddr := consoleAddr
+	if consoleBindAddr == "" {
+		consoleBindAddr = "127.0.0.1:7890"
+	}
 
 	fmt.Fprintf(os.Stderr, "yakos serve: starting daemon for workspace %s\n", workspaceRoot)
 	fmt.Fprintf(os.Stderr, "yakos serve: socket at %s\n", jsonrpc.SocketPath(workspaceRoot))
-	fmt.Fprintf(os.Stderr, "yakos serve: ws events at ws://%s/v1/events\n", wsBindAddr)
-	if !noPerfDash {
-		fmt.Fprintf(os.Stderr, "yakos serve: perf dashboard: http://%s/#token=%s\n", perfBindAddr, perfTok)
+	if !noConsole {
+		// When the console is enabled, /v1/events is embedded in it at
+		// consoleBindAddr.  The standalone WS server at wsBindAddr is still
+		// running for direct programmatic access (CLI tools, scripts).
+		fmt.Fprintf(os.Stderr, "yakos serve: console: http://%s/#token=%s\n", consoleBindAddr, consoleTok)
+		fmt.Fprintf(os.Stderr, "yakos serve: ws events (console): ws://%s/v1/events\n", consoleBindAddr)
+		fmt.Fprintf(os.Stderr, "yakos serve: ws events (standalone): ws://%s/v1/events\n", wsBindAddr)
+	} else {
+		fmt.Fprintf(os.Stderr, "yakos serve: ws events at ws://%s/v1/events\n", wsBindAddr)
+		if !noPerfDash {
+			// Console disabled — fall back to standalone perf dashboard banner.
+			fmt.Fprintf(os.Stderr, "yakos serve: perf dashboard: http://%s/#token=%s\n", perfBindAddr, perfTok)
+		}
 	}
 	fmt.Fprintln(os.Stderr, "yakos serve: press Ctrl-C to stop")
 
@@ -5515,6 +5563,7 @@ Example:
 
 func printServeHelp(w io.Writer) {
 	_, _ = fmt.Fprint(w, `yakos serve [--socket <path>] [--pidfile <path>] [--ws-addr <addr>]
+             [--console-addr <addr>] [--no-console]
              [--perf-addr <addr>] [--no-perf] [--detach] [--help]
 
 Start the yakos daemon for the current workspace.
@@ -5522,33 +5571,36 @@ Start the yakos daemon for the current workspace.
 The daemon listens on a JSON-RPC 2.0 socket and routes subcommand calls
 from the CLI (when YAKOS_DAEMON=on|auto) without spawning a new process
 per invocation.  It also starts a WebSocket event server for real-time
-multi-dev coordination (see yakos events) and a performance dashboard
-for dispatch-log analytics.
+multi-dev coordination (see yakos events) and a unified console dashboard
+that mounts kanban, cost (metrics), and performance tabs under one token.
 
 The daemon is OFF by default (YAKOS_DAEMON=off). To opt in:
 
   export YAKOS_DAEMON=auto     # uses daemon if running; falls back otherwise
   yakos serve &                # start in background
 
-The performance dashboard URL (with token) is printed at startup:
-  yakos serve: perf dashboard: http://127.0.0.1:7895/#token=<perf-token>
+The console URL (with token) is printed at startup:
+  yakos serve: console: http://127.0.0.1:7890/#token=<console-token>
 
 For persistent daemon startup, see docs/integrations/ for systemd (Linux),
 launchd (macOS), and Task Scheduler (Windows) unit files.
 
 Flags:
-  --socket <path>       Override the socket/pipe path (default: platform XDG path).
-  --pidfile <path>      Override the PID file path.
-  --ws-addr <addr>      WebSocket bind address (default 127.0.0.1:7891).
-                        Loopback-only; non-loopback connections are rejected.
-                        Cross-machine access requires mTLS (Phase 2, Q2).
-  --perf-addr <addr>    Performance dashboard bind address (default 127.0.0.1:7895).
-                        Loopback-only.
-  --no-perf             Disable the performance dashboard server.
-  --rotate-ws-token     Generate a new WS bearer token and exit.
-  --rotate-perf-token   Generate a new perf dashboard token and exit.
-  --detach              Print a backgrounding advisory (operator must use '&').
-  --help, -h            Print this help.
+  --socket <path>           Override the socket/pipe path (default: platform XDG path).
+  --pidfile <path>          Override the PID file path.
+  --ws-addr <addr>          WebSocket bind address (default 127.0.0.1:7891).
+                            Loopback-only; cross-machine access requires mTLS (Q2).
+  --console-addr <addr>     Unified console bind address (default 127.0.0.1:7890).
+                            Loopback-only. Mounts kanban+cost+perf under one token.
+  --no-console              Disable the unified console server.
+  --perf-addr <addr>        Standalone performance dashboard address (default 127.0.0.1:7895).
+                            Only used when --no-console is set.
+  --no-perf                 Disable the standalone performance dashboard.
+  --rotate-ws-token         Generate a new WS bearer token and exit.
+  --rotate-perf-token       Generate a new perf dashboard token and exit.
+  --rotate-console-token    Generate a new console token and exit.
+  --detach                  Print a backgrounding advisory (operator must use '&').
+  --help, -h                Print this help.
 
 Socket paths (defaults):
   Linux   $XDG_RUNTIME_DIR/yakos/<hash>.sock
@@ -5562,10 +5614,15 @@ WebSocket:
   Token stored at ~/.yakos-state/ws-token (mode 0600).
   Use 'yakos events' to connect a debug client.
 
-Performance dashboard:
+Unified console (Phase 1):
+  http://127.0.0.1:7890/#token=<console-token> (default)
+  Token stored at ~/.yakos-state/console-token (mode 0600).
+  Tabs: Overview | Kanban | Cost | Performance
+  (Chat and Flows land in Phase 3+)
+
+Performance dashboard (standalone, used only with --no-console):
   http://127.0.0.1:7895/#token=<perf-token> (default)
   Token stored at ~/.yakos-state/perf-token (mode 0600).
-  Read-only; separate from WS and REST tokens (Phase 2, Q7).
 
 Exit codes:
   0   Clean shutdown (SIGTERM/SIGINT received).

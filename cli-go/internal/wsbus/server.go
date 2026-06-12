@@ -52,6 +52,24 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return s, nil
 }
 
+// Handler returns an http.Handler that exposes /v1/events on the bus.
+// It applies loopbackOnly + originAllowList middleware (DNS-rebinding
+// defence) but does NOT apply the authenticate middleware — the console
+// edge token (RequireToken on the parent mux) is the auth authority.
+//
+// The Origin allow-list accepts connections only from the loopback console
+// origins (http://127.0.0.1:<port>, http://localhost:<port>,
+// http://[::1]:<port>).  Requests with a mismatched Origin header receive
+// 403 before the WebSocket upgrade.
+//
+// Unlike Serve, Handler does not bind a socket; the parent mux manages
+// the listener.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/v1/events", s.loopbackOnly(s.originAllowList(websocket.Handler(s.handleWS))))
+	return mux
+}
+
 // Serve starts the HTTP listener and blocks until ctx is cancelled.
 // The listener is closed when Serve returns.
 func (s *Server) Serve(ctx context.Context) error {
@@ -102,6 +120,51 @@ func (s *Server) Addr(ctx context.Context) (string, error) {
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
+}
+
+// originAllowList checks the HTTP Origin header before the WebSocket upgrade.
+// It rejects requests whose Origin does not match a loopback console origin
+// (http://127.0.0.1:*, http://localhost:*, http://[::1]:*).
+//
+// This is the DNS-rebinding defence required by the Phase 2.5 security plan:
+// a page served from an attacker-controlled domain cannot open a WebSocket to
+// the console because the browser sends the attacker's origin in the header,
+// which the allow-list rejects with 403.
+//
+// Requests with no Origin header (e.g. curl, direct CLI access) are allowed
+// through — they are already covered by the loopbackOnly RemoteAddr check.
+func (s *Server) originAllowList(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" && !isAllowedConsoleOrigin(origin) {
+			http.Error(w, "wsbus: Origin not in allow-list", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isAllowedConsoleOrigin returns true when origin is one of the loopback
+// console origins: http://127.0.0.1:<port>, http://localhost:<port>,
+// http://[::1]:<port>, or the bare forms without a port.
+func isAllowedConsoleOrigin(origin string) bool {
+	const (
+		pfx4  = "http://127.0.0.1"
+		pfxLH = "http://localhost"
+		pfx6  = "http://[::1]"
+	)
+	// Strip trailing slash if present.
+	o := strings.TrimRight(origin, "/")
+	// Exact match (no port) or prefix + ':' (with port).
+	for _, pfx := range []string{pfx4, pfxLH, pfx6} {
+		if o == pfx {
+			return true
+		}
+		if strings.HasPrefix(o, pfx+":") {
+			return true
+		}
+	}
+	return false
 }
 
 // loopbackOnly rejects connections whose remote address is not 127.0.0.1 or ::1.
@@ -163,8 +226,24 @@ func (s *Server) handleWS(conn *websocket.Conn) {
 	enc := json.NewEncoder(conn)
 
 	// Replay buffered events if ?since=<seq> is present.
+	// Clamp the since value to [0, currentSeq] to prevent unbounded replay
+	// requests (e.g. since=-1 or since=0 when the ring has advanced far).
+	// A since value older than the ring window is treated as the oldest event
+	// retained in the ring, so the client never receives more than ringSize events.
 	if sinceStr := conn.Request().URL.Query().Get("since"); sinceStr != "" {
 		if sinceSeq, err := parseInt64(sinceStr); err == nil {
+			if sinceSeq < 0 {
+				sinceSeq = 0
+			}
+			currentSeq := s.cfg.Bus.seq.Load()
+			ringSize := int64(s.cfg.Bus.replay.cap_())
+			minSince := currentSeq - ringSize
+			if minSince < 0 {
+				minSince = 0
+			}
+			if sinceSeq < minSince {
+				sinceSeq = minSince
+			}
 			for _, ev := range s.cfg.Bus.History(sinceSeq) {
 				conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 				if err := enc.Encode(ev); err != nil {
