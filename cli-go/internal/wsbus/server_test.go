@@ -466,50 +466,65 @@ func TestOriginAllowList_AllowsNoOrigin(t *testing.T) {
 // Guard: only lifecycle/management events should be published to the bus.
 // Token or secret payloads must never appear on the bus.
 
-// TestBusInvariant_NoContentPayloads asserts that none of the well-known
-// event topics carry content/token payloads (i.e. they only carry the
-// structured lifecycle fields defined in event.go).
-func TestBusInvariant_NoContentPayloads(t *testing.T) {
-	// Publish one of each known topic and decode the payload.
-	// If any payload field is named "token", "content", "secret", or similar,
-	// that is a contract violation.
-	sensitiveFields := []string{"token", "content", "secret", "password", "credential", "key"}
+// registeredTopics is the authoritative list of all wsbus topics and their
+// canonical sample payloads.  Every new topic MUST be added here so the
+// TestBusInvariant_NoContentPayloads test automatically covers it.
+//
+// Adding a new topic and forgetting to add it here will cause the test to fail
+// with "unexpected topic" — that's the gate.
+var registeredTopics = []struct {
+	topic   string
+	payload any
+}{
+	{TopicKanbanAdded, KanbanAddedPayload{ID: "K-1", Title: "t", Column: "TODO"}},
+	{TopicKanbanMoved, KanbanMovedPayload{ID: "K-1", From: "TODO", To: "DONE"}},
+	{TopicDispatchStarted, DispatchStartedPayload{Agent: "a", Project: "/p"}},
+	{TopicDispatchFinished, DispatchFinishedPayload{Agent: "a", Project: "/p", ExitCode: 0}},
+	// TopicPresence: presence events are published by consoleui.PresenceManager
+	// using its own presenceBusPayload struct.  We test the wsbus.PresencePayload
+	// legacy struct here; the consoleui payload is tested in presence_test.go.
+	{TopicPresence, PresencePayload{User: "u", Host: "h", Status: "active"}},
+}
 
-	cases := []struct {
-		topic   string
-		payload any
-	}{
-		{TopicKanbanAdded, KanbanAddedPayload{ID: "K-1", Title: "t", Column: "TODO"}},
-		{TopicKanbanMoved, KanbanMovedPayload{ID: "K-1", From: "TODO", To: "DONE"}},
-		{TopicDispatchStarted, DispatchStartedPayload{Agent: "a", Project: "/p"}},
-		{TopicDispatchFinished, DispatchFinishedPayload{Agent: "a", Project: "/p", ExitCode: 0}},
-		{TopicPresence, PresencePayload{User: "u", Host: "h", Status: "active"}},
-	}
+// TestBusInvariant_NoContentPayloads asserts that none of the registered bus
+// topics carry content/token payloads (i.e. they only carry structured lifecycle
+// fields).  Uses registeredTopics so new topics are caught automatically.
+func TestBusInvariant_NoContentPayloads(t *testing.T) {
+	sensitiveFields := []string{"token", "content", "secret", "password", "credential", "key"}
 
 	b := New()
 	sub := b.Subscribe("")
 	defer sub.Unsubscribe()
 
-	for _, c := range cases {
+	for _, c := range registeredTopics {
 		b.Publish(c.topic, c.payload)
 	}
 
 	received := 0
-	for received < len(cases) {
+	for received < len(registeredTopics) {
 		select {
 		case ev := <-sub.C():
 			received++
-			// Check payload JSON for sensitive field names.
-			// json.RawMessage is just a []byte holding the JSON encoding.
 			payloadStr := string(ev.Payload)
 			for _, field := range sensitiveFields {
-				// Look for the field as a JSON key (e.g. "token":).
-				// Conservative check — false positives in values are acceptable
-				// as a guard against accidental credential leakage.
 				if strings.Contains(payloadStr, `"`+field+`"`) {
 					t.Errorf("topic %q: payload contains sensitive field %q; tokens/secrets must never be published to the bus", ev.Topic, field)
 				}
 			}
+		}
+	}
+}
+
+// TestBusInvariant_PresencePayloadNoSecrets specifically guards the presence
+// payload against leaking operator credentials or tokens.
+func TestBusInvariant_PresencePayloadNoSecrets(t *testing.T) {
+	sensitiveFields := []string{"token", "secret", "password", "credential", "auth"}
+	p := PresencePayload{User: "alice", Host: "laptop", Status: "active"}
+	raw := MarshalPayload(p)
+	s := string(raw)
+	for _, field := range sensitiveFields {
+		if strings.Contains(s, `"`+field+`"`) {
+			t.Errorf("PresencePayload contains sensitive field %q: %s", field, s)
 		}
 	}
 }

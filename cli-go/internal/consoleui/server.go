@@ -2,7 +2,9 @@ package consoleui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -78,9 +80,10 @@ func (c *Config) addr() string {
 
 // Server is the unified console HTTP server.
 type Server struct {
-	cfg     Config
-	mux     *http.ServeMux
-	httpSrv *http.Server
+	cfg      Config
+	mux      *http.ServeMux
+	httpSrv  *http.Server
+	presence *PresenceManager
 }
 
 // New constructs a Server and wires all routes.
@@ -100,7 +103,8 @@ type Server struct {
 //   - /v1/events is mounted from wsbus.Server.Handler() which enforces
 //     loopback-only + Origin allow-list (DNS-rebinding defence).
 func New(cfg Config) *Server {
-	s := &Server{cfg: cfg, mux: http.NewServeMux()}
+	pm := NewPresenceManager(cfg.Bus)
+	s := &Server{cfg: cfg, mux: http.NewServeMux(), presence: pm}
 	s.registerRoutes()
 	// Wrap with edge auth: Host check + token (with static-asset exemptions)
 	// + Content-Type gate for mutations.
@@ -198,21 +202,33 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("/perf/", http.StripPrefix("/perf", perfSrv.Handler()))
 
 	// ---- WebSocket event stream at console origin ----------------------------
-	// wsbus.Server.Handler() mounts /v1/events with loopbackOnly + Origin
-	// allow-list middleware (DNS-rebinding defence).  The console edge token
-	// (RequireToken above) is the auth authority; the wsbus Handler() path
-	// does not add a second token check.
+	// Phase 2.5: the console WS uses Sec-WebSocket-Protocol subprotocol auth
+	// ("yakos-bearer, <token>") instead of the Authorization header — browsers
+	// cannot set Authorization on WS upgrade requests.  buildConsoleWSHandler
+	// applies loopbackOnly + Origin allow-list + subprotocol token validation
+	// (constant-time via dashauth.TokenEqual) + presence join/leave lifecycle.
 	if s.cfg.Bus != nil {
-		wsSrv, err := wsbus.NewServer(wsbus.ServerConfig{
-			Token: s.cfg.Token,
-			Bus:   s.cfg.Bus,
-		})
-		if err == nil {
-			// Mount the WS handler. wsbus.Handler() applies loopbackOnly and
-			// Origin allow-list (derived from the console addr) but NOT the
-			// authenticate middleware — auth is at the console edge.
-			s.mux.Handle("/v1/events", wsSrv.Handler())
-		}
+		wsHandler := buildConsoleWSHandler(s.cfg.Token, s.cfg.Bus, s.presence)
+		s.mux.Handle("/v1/events", wsHandler)
+	}
+
+	// ---- Presence snapshot (token-gated via edge middleware) -----------------
+	s.mux.HandleFunc("/api/presence", s.handlePresence)
+}
+
+// handlePresence returns the current online operator presence snapshot as a
+// JSON array of PresenceRecord.  Auth is enforced by the edge middleware
+// (RequireToken) — no re-check here.
+func (s *Server) handlePresence(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	snap := s.presence.Snapshot()
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	if err := json.NewEncoder(w).Encode(snap); err != nil {
+		slog.Error("consoleui: handlePresence encode", "err", err)
 	}
 }
 
