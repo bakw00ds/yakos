@@ -11,7 +11,7 @@ are expected to customize).
 | Hook | Event(s) | Mode | What it does |
 |---|---|---|---|
 | `path-allowlist.sh` | PreToolUse on `Edit\|Write\|MultiEdit` | **BLOCKING** | Refuses tool calls that violate `<project>/.claude/path-allowlist.json` |
-| `secret-scan.sh` | PreToolUse on `Edit\|Write\|MultiEdit` | **BLOCKING** | Refuses writes containing common secret patterns (AWS keys, GitHub tokens, PEM private keys, etc.) |
+| `secret-scan.sh` | PreToolUse on `Edit\|Write\|MultiEdit` | **BLOCKING** | Refuses writes containing common secret patterns (AWS keys, GitHub tokens, Anthropic keys, Google API keys, PEM private keys, etc.). **Best-effort defense-in-depth only — not a security boundary.** The authoritative gate is CI gitleaks. |
 | `path-log.sh` | PreToolUse on `Edit\|Write\|MultiEdit` | LOG | Defense-in-depth audit log; never blocks |
 | `mailbox-mirror.sh` | PreToolUse on `SendMessage` | LOG | Mirrors every team-internal message to `messages.ndjson` (Phase 1.7 confirmed clean) |
 | `team-lifecycle.sh` | PreToolUse on `TeamCreate\|Agent` | LOG | Records team creation and teammate spawns |

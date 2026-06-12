@@ -1,13 +1,56 @@
 # Upgrading yakOS
 
-How to move an existing yakOS install from any older version (v0.1.x →
-v0.8.x) up to the current release, what survives, and how to fully
-uninstall when needed.
+How to move an existing yakOS install from any older version up to the
+current release, what survives, and how to fully uninstall when needed.
 
 This doc is the **upgrade authority** — `yakos --help`, README, and
-CHANGELOG point here. Last updated for v0.9.0.
+CHANGELOG point here. Last updated for v0.39.
 
-## Quick path: any older version → current
+## Binary install upgrade (curl|sh — recommended)
+
+If you installed via `scripts/install.sh`, the simplest upgrade is to
+re-run the installer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bakw00ds/yakos/main/scripts/install.sh | sh
+```
+
+The installer downloads the new binary, verifies the SHA256 checksum,
+runs `yakos install` (which materializes the updated embedded lib to
+`~/.local/share/yakos/<new-version>/` and refreshes `~/.claude`
+symlinks), and updates `export YAKOS_IMPL=go` in your shell profile
+if the line is not already present.
+
+To install a specific version:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bakw00ds/yakos/main/scripts/install.sh | sh -s -- --version 0.39.0
+```
+
+After the installer exits, open a new terminal (or `source` the
+profile it printed) and verify:
+
+```sh
+yakos --version     # should show 0.39.0.0 (go)
+yakos doctor        # environment health check
+```
+
+The framework lib lives at `~/.local/share/yakos/<version>/`. Each
+binary version has its own slot; old versions are left in place until
+you delete them. `YAKOS_IMPL=go` is set by the installer — you do not
+need to export it manually unless you skipped the installer.
+
+For each project that has been bootstrapped:
+
+```sh
+yakos doctor <name> --fix      # auto-remediate gitignore, hashes, dirs
+yakos migrate <name>           # bump .yakos.yml schema if present
+```
+
+## Cloned-repo / dev upgrade
+
+Use this path when you work with a live `lib/` tree — edits to agents,
+hooks, and rules are picked up immediately without reinstalling.
 
 ```sh
 # 1. Pull the new framework code
@@ -35,6 +78,22 @@ sessions keep running on the old framework until you restart them
 (`yakos team restart <project>` archives the work area cleanly).
 
 ## What an upgrade actually does
+
+### Binary install path
+
+The installer re-runs `yakos install`, which performs two operations:
+
+1. **Lib materialization.** The new binary embeds the full `lib/`
+   (agents, skills, rules, hooks) via `go:embed`. `yakos install`
+   extracts it to `~/.local/share/yakos/<version>/` and refreshes
+   `~/.claude/{agents,skills,rules,playbooks}/` symlinks to point at
+   the new version. The old version's slot is left intact — you can
+   roll back by reinstalling the previous binary.
+2. **`~/.claude/settings.json` env merge.** Same as the cloned-repo
+   path: yakOS re-merges its env block, preserving all other keys. A
+   timestamped backup is written first.
+
+### Cloned-repo path
 
 `yakos update` performs three operations:
 
@@ -101,6 +160,7 @@ before applying:
 | (no version) → 0.7 | First release of `.yakos.yml`. Identity migrate; just stamp `yakos: 0.7`. |
 | 0.7 → 0.8 | Added optional `max-cost-per-task` and `max-duration-s` agent frontmatter (v0.8). No `.yakos.yml` change required. Identity migrate. |
 | 0.8 → 0.9 | No schema change. Identity migrate. |
+| 0.9 → 0.39 | No schema change. Binary-install path now available via `curl\|sh`; lib is embedded in the Go binary and materialized to `~/.local/share/yakos/<version>/`. The `YAKOS_IMPL=go` var is persisted by the installer. Identity migrate for `.yakos.yml`. |
 
 Migrations are idempotent and back up the original to
 `<project>/.yakos.yml.yakos-bak-<iso>` before any edit.

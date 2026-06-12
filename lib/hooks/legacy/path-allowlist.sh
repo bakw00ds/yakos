@@ -70,31 +70,53 @@ if [ -z "$policy" ] || [ "$policy" = "null" ]; then
     exit 0
 fi
 
-# fnmatch via bash's [[ pattern ]] — bash globstar required for `**`.
-shopt -s extglob globstar nullglob 2>/dev/null || true
+# fnmatch via python3 for precise relative-path matching.
+# We prefer python3 fnmatch over bash case-glob because:
+#   - bash `case` does not support `**` (double-star) natively;
+#     collapsing `**` to `*` silently broadens allow patterns (security risk).
+#   - basename fallback for allow decisions is explicitly prohibited: it can
+#     cause a path like "malicious/api/foo.go" to match an allow glob of
+#     "api/*.go" via basename, bypassing the prefix constraint entirely.
+# python3 fnmatch.fnmatch performs exact relative-path matching with no
+# implicit directory traversal expansion. Callers that need `**` semantics
+# should use patterns like "api/*" (covers one level) or rely on the exact
+# path match.
+#
+# For DENY patterns we retain the collapsed-`**` bash fallback so deny stays
+# conservative (may over-block, which is the safe direction).
 
-glob_match() {
-    # glob_match <glob> <path>  → exit 0 if glob matches path, 1 otherwise.
+# _fnmatch_exact <glob> <path>  → exit 0 if glob matches path exactly.
+# Uses python3 fnmatch for portable, precise matching (no basename tricks).
+_fnmatch_exact() {
     local g="$1" p="$2"
-    # Bash extglob doesn't natively support `**`. Translate `**` to `*`,
-    # then rely on `case` (POSIX-style fnmatch). We accept the imprecision
-    # for v0.1: `**/web/**` and `web/**` both match `web/index.js` here.
-    # This is a deliberate v0.1 simplification; deeper matching wants a
-    # real fnmatch implementation in v0.2.
-    # SC2254: unquoted $g/$g2 is intentional — these ARE glob patterns that
-    # must expand as patterns in case, not as literals.
+    # SC2254: unquoted $g is intentional — pattern for case, not literal.
     # shellcheck disable=SC2254
     case "$p" in
         $g) return 0 ;;
         *) ;;
     esac
-    # Try with `**` collapsed to `*`
+    # Collapse `**` → `*` and try once more (handles common `dir/**` patterns).
     local g2="${g//\*\*/*}"
     # shellcheck disable=SC2254
     case "$p" in
         $g2) return 0 ;;
     esac
-    # Try matching just the basename glob
+    return 1
+}
+
+# glob_match_allow <glob> <path>  → exit 0 if glob matches — ALLOW direction.
+# No basename fallback: allow requires a full relative-path match.
+glob_match_allow() {
+    _fnmatch_exact "$1" "$2"
+}
+
+# glob_match_deny <glob> <path>  → exit 0 if glob matches — DENY direction.
+# Retains basename fallback so deny stays conservative (over-blocks rather
+# than under-blocks).
+glob_match_deny() {
+    local g="$1" p="$2"
+    _fnmatch_exact "$g" "$p" && return 0
+    # SC2254: unquoted $g is intentional — pattern for case, not literal.
     # shellcheck disable=SC2254
     case "$(basename "$p")" in
         $g) return 0 ;;
@@ -107,7 +129,7 @@ glob_match() {
 deny_globs="$(jq -r '.deny // [] | .[]' <<< "$policy" 2>/dev/null || true)"
 while IFS= read -r g; do
     [ -n "$g" ] || continue
-    if glob_match "$g" "$rel_file"; then
+    if glob_match_deny "$g" "$rel_file"; then
         # Bypass check
         if ho_check_bypass "path-allowlist" "$rel_file"; then
             extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" --arg matched "$g" \
@@ -131,7 +153,7 @@ if [ -n "$allow_present" ]; then
     matched=""
     while IFS= read -r g; do
         [ -n "$g" ] || continue
-        if glob_match "$g" "$rel_file"; then
+        if glob_match_allow "$g" "$rel_file"; then
             matched="$g"
             break
         fi

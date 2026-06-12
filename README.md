@@ -46,7 +46,7 @@ for the full install guide, including the dev/from-source path.
 | `yakos update` | Pull framework updates + refresh symlinks |
 | `yakos refresh` | Detect and repair per-project deployment drift |
 | `yakos uninstall` | Remove yakOS-owned symlinks (never touches your memory) |
-| `yakos metrics collect\|report\|trend\|compare\|gate\|serve` | Project-health metrics time series |
+| `yakos metrics collect\|report\|trend\|compare\|gate\|serve\|install-hook\|uninstall-hook` | Project-health metrics time series |
 | `yakos skill plan-quality-eval <plan.md>` | Score a plan against the 6-dimension rubric |
 | `yakos model-routing eval\|list\|show` | Evaluate an agent's golden-set across model tiers |
 
@@ -71,7 +71,8 @@ Full list: `yakos --help` (41 subcommands ported to Go).
   per-language quality indicators across commits. CI gate via
   `budgets.yaml`; loopback dashboard via `yakos metrics serve`.
 - **Model-tier routing with fable.** Four tiers: `haiku < sonnet < opus < fable`.
-  `model: fable` in agent frontmatter dispatches to the top tier; `frontier`
+  `fable` is the top tier above `opus`; shipped framework agents top out at
+  `opus` and must opt in to `fable` explicitly via agent frontmatter. `frontier`
   is an accepted alias. Override per-dispatch with `--model fable`.
 - **Self-contained binary.** The Go binary embeds the full framework `lib/`
   via `//go:embed`. A `curl|sh` install is fully self-sufficient with no repo
