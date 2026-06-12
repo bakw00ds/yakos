@@ -181,35 +181,25 @@ func handleDispatchRun(cfg Config) jsonrpc.Handler {
 			}
 		}
 
-		yakosRoot := p.YakosRoot
-		if yakosRoot == "" {
-			yakosRoot = cfg.YakosRoot
-		}
-		if yakosRoot == "" {
+		svc := cfg.DispatchService
+		if svc == nil {
+			// The daemon must inject the shared Service via Config.DispatchService.
+			// A nil Service means the server was constructed without the shared
+			// governor — dispatch is unavailable.
 			return nil, &jsonrpc.RPCError{
 				Code:    jsonrpc.CodeDispatchUnavailable,
-				Message: "dispatch.run: yakos_root not configured",
+				Message: "dispatch.run: dispatch service not configured",
 			}
 		}
 
-		svc := cfg.DispatchService
-		if svc == nil {
-			// Fallback: construct an ephemeral Service for callers that did not
-			// inject one (e.g. tests that build Config without Run).
-			svc = dispatch.NewService(dispatch.ServiceConfig{
-				WorkspaceRoot: cfg.WorkspaceRoot,
-				YakosRoot:     yakosRoot,
-				Bus:           cfg.Bus,
-			})
-		}
-
 		_, result, err := svc.Run(ctx, dispatch.Params{
-			Agent:   p.Agent,
-			Task:    p.Task,
-			Project: p.Project, // empty → Service uses WorkspaceRoot
-			Runtime: p.Runtime,
-			Model:   p.Model,
-			Timeout: p.Timeout,
+			Agent:     p.Agent,
+			Task:      p.Task,
+			Project:   p.Project, // empty → Service uses WorkspaceRoot
+			Runtime:   p.Runtime,
+			Model:     p.Model,
+			Timeout:   p.Timeout,
+			YakosRoot: p.YakosRoot, // per-request override; empty → Service uses cfg default
 			// JSON-RPC transport does not yet carry identity fields in the
 			// wire params; OperatorID/ConversationID/SessionID are stamped
 			// by the Service from its daemon-level defaults.

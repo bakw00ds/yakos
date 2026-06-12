@@ -32,8 +32,9 @@ type Config struct {
 	// (typically ~/.yakos-state).
 	StateDir string
 
-	// DispatchService is the pre-constructed dispatch facade. When nil,
-	// handlers construct an ephemeral Service per request (backward-compat).
+	// DispatchService is the shared dispatch facade. Must be non-nil for
+	// POST /v1/dispatches; a nil value causes the handler to return HTTP 500
+	// (no ephemeral fallback — all requests share the global governor).
 	DispatchService *dispatch.Service
 }
 

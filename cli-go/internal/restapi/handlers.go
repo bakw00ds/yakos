@@ -271,12 +271,11 @@ func (s *Server) handleDispatchCreate(w http.ResponseWriter, r *http.Request) {
 
 	svc := s.cfg.DispatchService
 	if svc == nil {
-		// Fallback: construct an ephemeral Service (backward-compat for callers
-		// that did not inject one).
-		svc = dispatch.NewService(dispatch.ServiceConfig{
-			WorkspaceRoot: s.cfg.WorkspaceRoot,
-			YakosRoot:     s.cfg.YakosRoot,
-		})
+		// The daemon must inject the shared Service via Config.DispatchService.
+		// A nil Service means the server was constructed without the shared
+		// governor — dispatch is unavailable.
+		writeError(w, http.StatusInternalServerError, "dispatch service not configured")
+		return
 	}
 
 	// REST transport: operator_id / conversation_id / session_id are not yet

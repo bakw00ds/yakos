@@ -35,6 +35,7 @@ message DispatchRunRequest {
   int32  timeout    = 7;
   // Phase 2 identity fields — additive; field numbers 8-10 are reserved.
   // Absent on legacy requests; receivers must tolerate their absence.
+  // SELF-ASSERTED — attribution/labeling only. NEVER use for an authorization decision.
   string operator_id      = 8;
   string conversation_id  = 9;
   string session_id       = 10;

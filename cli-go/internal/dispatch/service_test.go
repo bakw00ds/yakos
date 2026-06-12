@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -196,54 +197,203 @@ func TestCostReaderToleratesIdentityFields(t *testing.T) {
 	}
 }
 
-// ---- Governor tests ------------------------------------------------------------
+// ---- Governor tests (S1: real concurrency) -------------------------------------
 
-// TestGovernorCap verifies that when K dispatches are already in-flight, a
-// K+1th dispatch blocks until a slot is freed — and that the peak concurrent
-// count never exceeds the cap.
+// withRunFn replaces the package-level runFn for the duration of fn's call,
+// then restores the original before returning.  Unlike setRunFn it does not
+// register a t.Cleanup, so the replacement is guaranteed to be restored before
+// withRunFn returns — safe for tests that launch goroutines that outlive the
+// replacement window.
+func withRunFn(fn func(ctx context.Context, req Request) ([]byte, Result, error), body func()) {
+	orig := runFn
+	runFn = fn
+	defer func() { runFn = orig }()
+	body()
+}
+
+// setRunFn replaces the package-level runFn for the duration of the test.
+// Restores the original on test cleanup.  Use withRunFn instead when goroutines
+// that read runFn may outlive the test body.
+func setRunFn(t *testing.T, fn func(ctx context.Context, req Request) ([]byte, Result, error)) {
+	t.Helper()
+	orig := runFn
+	runFn = fn
+	t.Cleanup(func() { runFn = orig })
+}
+
+// TestGovernorCap proves the concurrency bound under real goroutine concurrency.
 //
-// Implementation note: we can't easily inject a stub Run into Service (Run is
-// a package-level function). Instead we test the semaphore logic directly by
-// constructing a Service with a known cap and verifying that:
-//  1. Exactly `cap` goroutines can acquire the semaphore concurrently.
-//  2. A (cap+1)th goroutine blocks until one is released.
-//  3. Cancelling the (cap+1)th ctx returns an "at capacity" error immediately.
+// Strategy:
+//   - Install a fake runFn (scoped via withRunFn) that blocks per-goroutine
+//     on individual release channels so we can control exactly which goroutine
+//     exits at any point.
+//   - Launch K goroutines through Service.Run; confirm all K slots are acquired.
+//   - Confirm the K+1th goroutine blocks while all K slots are held.
+//   - Release one specific slot; confirm the K+1th unblocks and completes.
+//   - Confirm the slot is released on the ERROR path too.
 func TestGovernorCap(t *testing.T) {
-	const cap = 3
+	const numSlots = 3
 
-	svc := NewService(ServiceConfig{MaxConcurrent: cap})
+	svc := NewService(ServiceConfig{
+		YakosRoot:     "/yakos",
+		WorkspaceRoot: "/p",
+		MaxConcurrent: numSlots,
+	})
 
-	// Hold `cap` semaphore slots.
-	held := make([]struct{}, cap)
-	for i := range held {
-		select {
-		case <-svc.sem:
-			// acquired
-		default:
-			t.Fatalf("could not acquire slot %d/%d", i+1, cap)
+	// Each goroutine gets its own release channel so we release exactly one.
+	type entry struct {
+		release chan struct{}
+		started chan struct{}
+	}
+
+	entries := make([]entry, numSlots)
+	for i := range entries {
+		entries[i] = entry{
+			release: make(chan struct{}),
+			started: make(chan struct{}),
 		}
 	}
 
-	// Verify semaphore is now empty.
-	select {
-	case <-svc.sem:
-		// We should NOT be able to acquire another slot.
-		t.Fatal("acquired slot beyond cap — semaphore miscounted")
-	default:
-		// Correct: no slot available.
-	}
+	var idx int32 // round-robins which entry each runFn call picks up
 
-	// A context-cancelled acquire should return an error immediately.
+	// Phase 1: blocking fake — each goroutine signals started then blocks.
+	type runResult struct{ err error }
+	results := make(chan runResult, numSlots+1)
+
+	allDone := make(chan struct{})
+
+	withRunFn(func(ctx context.Context, req Request) ([]byte, Result, error) {
+		i := int(atomic.AddInt32(&idx, 1)) - 1
+		if i < len(entries) {
+			close(entries[i].started) // signal that we are inside runFn
+			select {
+			case <-entries[i].release:
+				return nil, Result{}, nil
+			case <-ctx.Done():
+				return nil, Result{}, ctx.Err()
+			}
+		}
+		// K+1th and beyond: exit immediately.
+		return nil, Result{}, nil
+	}, func() {
+		// Launch K goroutines that will block inside the fake runFn.
+		for i := 0; i < numSlots; i++ {
+			go func() {
+				_, _, err := svc.Run(context.Background(), Params{
+					Agent:   "backend",
+					Task:    "task",
+					Project: "/p",
+				})
+				results <- runResult{err}
+			}()
+		}
+
+		// Wait for each goroutine to enter runFn (all slots consumed).
+		for i := 0; i < numSlots; i++ {
+			select {
+			case <-entries[i].started:
+			case <-time.After(5 * time.Second):
+				// Release all so goroutines can drain.
+				for j := 0; j < numSlots; j++ {
+					select {
+					case entries[j].release <- struct{}{}:
+					default:
+					}
+				}
+				t.Fatalf("timed out waiting for goroutine %d to enter runFn", i)
+			}
+		}
+
+		// All K slots are held.  The K+1th request must block.
+		blocked := make(chan error, 1)
+		blockCtx, blockCancel := context.WithCancel(context.Background())
+		defer blockCancel()
+		go func() {
+			_, _, err := svc.Run(blockCtx, Params{Agent: "backend", Task: "task", Project: "/p"})
+			blocked <- err
+		}()
+
+		// Give the K+1th a moment and confirm it is still blocked.
+		select {
+		case got := <-blocked:
+			for i := 0; i < numSlots; i++ {
+				entries[i].release <- struct{}{}
+			}
+			t.Fatalf("K+1th goroutine returned before any slot was released (err=%v)", got)
+		case <-time.After(200 * time.Millisecond):
+			// Correct: still blocked.
+		}
+
+		// Release slot 0.  The K+1th goroutine picks it up and, because idx
+		// is now >= len(entries), the fake runFn exits immediately.
+		entries[0].release <- struct{}{}
+		<-results // drain goroutine 0's result
+
+		select {
+		case <-blocked:
+			// K+1th completed — correct.
+		case <-time.After(5 * time.Second):
+			for i := 1; i < numSlots; i++ {
+				entries[i].release <- struct{}{}
+			}
+			close(allDone)
+			t.Fatal("K+1th goroutine did not unblock after slot 0 was released")
+		}
+
+		// Release remaining goroutines.
+		for i := 1; i < numSlots; i++ {
+			entries[i].release <- struct{}{}
+		}
+		for i := 1; i < numSlots; i++ {
+			<-results
+		}
+		close(allDone)
+	})
+
+	// Wait for all phase-1 goroutines to be fully done before reassigning runFn.
+	<-allDone
+
+	// Phase 2: error-path slot release.
+	// Confirm the slot returns to the semaphore even when runFn returns an error.
+	withRunFn(func(ctx context.Context, req Request) ([]byte, Result, error) {
+		return nil, Result{}, fmt.Errorf("injected error")
+	}, func() {
+		_, _, err := svc.Run(context.Background(), Params{Agent: "backend", Task: "task", Project: "/p"})
+		if err == nil {
+			t.Fatal("expected error from error-path runFn, got nil")
+		}
+	})
+	if len(svc.sem) != numSlots {
+		t.Errorf("slot not released on error path: sem len=%d, want %d", len(svc.sem), numSlots)
+	}
+}
+
+// TestGovernorCapCancelledContext verifies that a pre-cancelled context returns
+// an "at capacity" error immediately (without entering runFn).
+func TestGovernorCapCancelledContext(t *testing.T) {
+	const numSlots = 3
+
+	// Hold all slots manually.
+	svc := NewService(ServiceConfig{
+		YakosRoot:     "/yakos",
+		WorkspaceRoot: "/p",
+		MaxConcurrent: numSlots,
+	})
+	for i := 0; i < numSlots; i++ {
+		<-svc.sem
+	}
+	defer func() {
+		for i := 0; i < numSlots; i++ {
+			svc.sem <- struct{}{}
+		}
+	}()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel
 
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := svc.Run(ctx, Params{
-			Agent:   "backend",
-			Task:    "test",
-			Project: "/p",
-		})
+		_, _, err := svc.Run(ctx, Params{Agent: "backend", Task: "task", Project: "/p"})
 		done <- err
 	}()
 
@@ -257,11 +407,6 @@ func TestGovernorCap(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for cancelled dispatch to return")
-	}
-
-	// Release all held slots.
-	for range held {
-		svc.sem <- struct{}{}
 	}
 }
 
@@ -277,39 +422,279 @@ func TestGovernorDefaultCap(t *testing.T) {
 	}
 }
 
-// TestConversationIDPrecedence verifies the precedence rule:
-//  1. Request.ConversationID (per-request) beats
-//  2. YAKOS_CONVERSATION_ID env var (legacy fallback)
-//
-// The test does this by examining what ends up in the dispatch-log NDJSON.
+// TestConversationIDPrecedence verifies that a per-request ConversationID in
+// Params beats the YAKOS_CONVERSATION_ID env var fallback — exercised through
+// the real Service.Run → runFn path (not just writeFinished).
 func TestConversationIDPrecedence(t *testing.T) {
 	logDir := isolatedLogDir(t)
-	logPath := filepath.Join(logDir, "dispatch-log.ndjson")
-
-	// Set the env fallback.
 	t.Setenv("YAKOS_CONVERSATION_ID", "env-conv-id")
 
-	// When Request.ConversationID is set, it should win.
-	req := Request{
-		AgentName:      "backend",
-		Runtime:        "claude",
-		Project:        "/p",
-		Task:           "task",
-		ModelResolved:  "sonnet",
-		ModelChosenBy:  "frontmatter",
-		ConversationID: "request-conv-id",
-	}
-	writeFinished(req, Result{ModelChosenBy: "frontmatter", ModelResolved: "sonnet"}, fixedTime, logPath)
+	// Capture the Request that Service.Run passes to runFn.
+	var capturedConvID string
+	setRunFn(t, func(ctx context.Context, req Request) ([]byte, Result, error) {
+		capturedConvID = req.ConversationID
+		return nil, Result{}, nil
+	})
 
-	events := readDispatchLog(t, logDir)
-	if len(events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(events))
+	svc := NewService(ServiceConfig{
+		YakosRoot:     "/yakos",
+		WorkspaceRoot: "/p",
+		OperatorID:    "test-op",
+	})
+	_ = logDir // isolatedLogDir sets YAKOS_DISPATCH_LOG
+
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:          "backend",
+		Task:           "task",
+		Project:        "/p",
+		ConversationID: "request-conv-id",
+	})
+	if err != nil {
+		t.Fatalf("Service.Run: unexpected error: %v", err)
 	}
-	if events[0]["conversation_id"] != "request-conv-id" {
-		t.Errorf("conversation_id: got %v, want %q — per-request field should win over env var",
-			events[0]["conversation_id"], "request-conv-id")
+
+	// The Request passed to runFn must have the per-request value, not the env.
+	if capturedConvID != "request-conv-id" {
+		t.Errorf("ConversationID in Request: got %q, want %q — per-request field should win over env var",
+			capturedConvID, "request-conv-id")
 	}
 }
+
+// ---- B1: per-request YakosRoot honored -----------------------------------------
+
+// TestPerRequestYakosRootHonored verifies that a non-empty Params.YakosRoot
+// overrides Config.YakosRoot in the Request passed to runFn.
+func TestPerRequestYakosRootHonored(t *testing.T) {
+	var capturedRoot string
+	setRunFn(t, func(ctx context.Context, req Request) ([]byte, Result, error) {
+		capturedRoot = req.YakosRoot
+		return nil, Result{}, nil
+	})
+
+	svc := NewService(ServiceConfig{
+		YakosRoot:     "/cfg/yakos",
+		WorkspaceRoot: "/p",
+		OperatorID:    "op",
+	})
+
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:     "backend",
+		Task:      "task",
+		Project:   "/p",
+		YakosRoot: "/override/yakos",
+	})
+	if err != nil {
+		t.Fatalf("Service.Run: unexpected error: %v", err)
+	}
+	if capturedRoot != "/override/yakos" {
+		t.Errorf("YakosRoot in Request: got %q, want %q — per-request must override cfg", capturedRoot, "/override/yakos")
+	}
+}
+
+// TestYakosRootFallsToCfg verifies that when Params.YakosRoot is empty, the
+// Request gets Config.YakosRoot.
+func TestYakosRootFallsToCfg(t *testing.T) {
+	var capturedRoot string
+	setRunFn(t, func(ctx context.Context, req Request) ([]byte, Result, error) {
+		capturedRoot = req.YakosRoot
+		return nil, Result{}, nil
+	})
+
+	svc := NewService(ServiceConfig{
+		YakosRoot:     "/cfg/yakos",
+		WorkspaceRoot: "/p",
+		OperatorID:    "op",
+	})
+
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:   "backend",
+		Task:    "task",
+		Project: "/p",
+		// YakosRoot empty → should fall through to cfg
+	})
+	if err != nil {
+		t.Fatalf("Service.Run: unexpected error: %v", err)
+	}
+	if capturedRoot != "/cfg/yakos" {
+		t.Errorf("YakosRoot in Request: got %q, want %q — should fall back to cfg", capturedRoot, "/cfg/yakos")
+	}
+}
+
+// TestYakosRootBothEmptyErrors verifies that when both Params.YakosRoot and
+// Config.YakosRoot are empty, Service.Run returns an error before calling runFn.
+func TestYakosRootBothEmptyErrors(t *testing.T) {
+	called := false
+	setRunFn(t, func(ctx context.Context, req Request) ([]byte, Result, error) {
+		called = true
+		return nil, Result{}, nil
+	})
+
+	svc := NewService(ServiceConfig{
+		WorkspaceRoot: "/p",
+		OperatorID:    "op",
+		// YakosRoot intentionally empty
+	})
+
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:   "backend",
+		Task:    "task",
+		Project: "/p",
+		// YakosRoot empty too
+	})
+	if err == nil {
+		t.Fatal("expected error when both YakosRoot values are empty, got nil")
+	}
+	if called {
+		t.Error("runFn should not have been called when YakosRoot is empty")
+	}
+}
+
+// ---- MEDIUM-2: identity allow-list validation ----------------------------------
+
+// TestIdentityFieldRejectsLeadingDash verifies that a dash-prefixed OperatorID
+// is rejected (argv flag-injection vector).
+func TestIdentityFieldRejectsLeadingDash(t *testing.T) {
+	setRunFn(t, func(ctx context.Context, req Request) ([]byte, Result, error) {
+		return nil, Result{}, nil
+	})
+	svc := NewService(ServiceConfig{YakosRoot: "/y", WorkspaceRoot: "/p", OperatorID: "op"})
+
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:      "backend",
+		Task:       "task",
+		Project:    "/p",
+		OperatorID: "--flag-injection",
+	})
+	if err == nil {
+		t.Fatal("expected validation error for dash-prefixed operator_id, got nil")
+	}
+}
+
+// TestIdentityFieldRejectsOver128Chars verifies that an over-128-character
+// ConversationID is rejected.
+func TestIdentityFieldRejectsOver128Chars(t *testing.T) {
+	setRunFn(t, func(ctx context.Context, req Request) ([]byte, Result, error) {
+		return nil, Result{}, nil
+	})
+	svc := NewService(ServiceConfig{YakosRoot: "/y", WorkspaceRoot: "/p", OperatorID: "op"})
+
+	longID := "a" + strings.Repeat("b", 128) // 129 chars total
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:          "backend",
+		Task:           "task",
+		Project:        "/p",
+		ConversationID: longID,
+	})
+	if err == nil {
+		t.Fatal("expected validation error for >128 char conversation_id, got nil")
+	}
+}
+
+// TestIdentityFieldAcceptsValidValue verifies that a valid identity value passes
+// the allow-list check.
+func TestIdentityFieldAcceptsValidValue(t *testing.T) {
+	setRunFn(t, func(ctx context.Context, req Request) ([]byte, Result, error) {
+		return nil, Result{}, nil
+	})
+	svc := NewService(ServiceConfig{YakosRoot: "/y", WorkspaceRoot: "/p", OperatorID: "op"})
+
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:          "backend",
+		Task:           "task",
+		Project:        "/p",
+		ConversationID: "conv-abc123.v2:ok",
+	})
+	if err != nil {
+		t.Fatalf("valid conversation_id was rejected: %v", err)
+	}
+}
+
+// TestIdentityFieldRejectsAt verifies that an @ character in a session_id is
+// rejected (not in the allow-list).
+func TestIdentityFieldRejectsAt(t *testing.T) {
+	setRunFn(t, func(ctx context.Context, req Request) ([]byte, Result, error) {
+		return nil, Result{}, nil
+	})
+	svc := NewService(ServiceConfig{YakosRoot: "/y", WorkspaceRoot: "/p", OperatorID: "op"})
+
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:     "backend",
+		Task:      "task",
+		Project:   "/p",
+		SessionID: "user@host",
+	})
+	if err == nil {
+		t.Fatal("expected validation error for '@' in session_id, got nil")
+	}
+}
+
+// ---- MEDIUM-1: reserved operator-id namespace ----------------------------------
+
+// TestHumanTransportClaimingMCPPrefixIsDropped verifies that a non-MCP caller
+// claiming "mcp:..." as its OperatorID has the claim silently dropped to the
+// daemon default (not forwarded into the Request).
+func TestHumanTransportClaimingMCPPrefixIsDropped(t *testing.T) {
+	var capturedOpID string
+	setRunFn(t, func(ctx context.Context, req Request) ([]byte, Result, error) {
+		capturedOpID = req.OperatorID
+		return nil, Result{}, nil
+	})
+
+	svc := NewService(ServiceConfig{
+		YakosRoot:     "/y",
+		WorkspaceRoot: "/p",
+		OperatorID:    "daemon-op",
+	})
+
+	// Human-transport Params: isMCPStamped is false (the default).
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:      "backend",
+		Task:       "task",
+		Project:    "/p",
+		OperatorID: "mcp:backend", // reserved prefix
+	})
+	if err != nil {
+		t.Fatalf("Service.Run: unexpected error: %v", err)
+	}
+	// Claim must be dropped; daemon default must be used instead.
+	if capturedOpID == "mcp:backend" {
+		t.Error("reserved mcp: prefix was forwarded from a non-MCP transport — should be dropped")
+	}
+	if capturedOpID != "daemon-op" {
+		t.Errorf("OperatorID: got %q, want daemon default %q", capturedOpID, "daemon-op")
+	}
+}
+
+// TestMCPStampedParamsAllowsMCPPrefix verifies that a Params built with
+// MCPParams() does forward the "mcp:" OperatorID into the Request.
+func TestMCPStampedParamsAllowsMCPPrefix(t *testing.T) {
+	var capturedOpID string
+	setRunFn(t, func(ctx context.Context, req Request) ([]byte, Result, error) {
+		capturedOpID = req.OperatorID
+		return nil, Result{}, nil
+	})
+
+	svc := NewService(ServiceConfig{
+		YakosRoot:     "/y",
+		WorkspaceRoot: "/p",
+		OperatorID:    "daemon-op",
+	})
+
+	_, _, err := svc.Run(context.Background(), MCPParams(Params{
+		Agent:      "backend",
+		Task:       "task",
+		Project:    "/p",
+		OperatorID: "mcp:backend",
+	}))
+	if err != nil {
+		t.Fatalf("Service.Run: unexpected error: %v", err)
+	}
+	if capturedOpID != "mcp:backend" {
+		t.Errorf("OperatorID: got %q, want %q — MCP-stamped params should forward mcp: prefix", capturedOpID, "mcp:backend")
+	}
+}
+
+// ---- Other existing tests ------------------------------------------------------
 
 // TestMintOperatorID verifies that mintOperatorID returns a non-empty string
 // on this host (where OS user info should be available).
@@ -338,16 +723,19 @@ func TestServiceStampsOperatorID(t *testing.T) {
 }
 
 // TestMCPOperatorIDConvention verifies the MCP convention: operator_id is
-// "mcp:<agent>" for MCP-originated dispatches. We test via Params construction
-// (not a live dispatch) to keep the test hermetic.
+// "mcp:<agent>" for MCP-originated dispatches.  The MCPParams constructor is
+// the only way to set isMCPStamped=true from outside the package.
 func TestMCPOperatorIDConvention(t *testing.T) {
-	p := Params{
+	p := MCPParams(Params{
 		Agent:      "security-reviewer",
 		Task:       "audit the codebase",
-		OperatorID: fmt.Sprintf("mcp:%s", "security-reviewer"),
-	}
+		OperatorID: "mcp:security-reviewer",
+	})
 	if p.OperatorID != "mcp:security-reviewer" {
 		t.Errorf("MCP operator_id convention: got %q, want %q",
 			p.OperatorID, "mcp:security-reviewer")
+	}
+	if !p.isMCPStamped {
+		t.Error("MCPParams should set isMCPStamped=true")
 	}
 }

@@ -30,10 +30,11 @@ func startTestServer(t *testing.T, workspaceRoot string, bus *wsbus.Bus) *grpc.C
 	t.Helper()
 
 	cfg := grpcserver.Config{
-		ReadToken:     testReadToken,
-		WriteToken:    testWriteToken,
-		WorkspaceRoot: workspaceRoot,
-		Bus:           bus,
+		ReadToken:       testReadToken,
+		WriteToken:      testWriteToken,
+		WorkspaceRoot:   workspaceRoot,
+		Bus:             bus,
+		DispatchService: grpcserver.NewDispatchServiceForTest(workspaceRoot, bus),
 	}
 	srv := grpcserver.New(cfg)
 

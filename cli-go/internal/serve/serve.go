@@ -278,6 +278,19 @@ func Run(ctx context.Context, cfg Config) error {
 		wsErrCh <- wsSrv.Serve(ctx)
 	}()
 
+	// Build the shared dispatch Service once — all transports share this single
+	// instance so the global concurrency governor is enforced across all of them.
+	// Constructed here (immediately after bus is resolved) so it can publish
+	// events and be injected into every transport that follows.
+	dispatchSvc := cfg.DispatchService
+	if dispatchSvc == nil {
+		dispatchSvc = dispatch.NewService(dispatch.ServiceConfig{
+			WorkspaceRoot: cfg.WorkspaceRoot,
+			YakosRoot:     cfg.YakosRoot,
+			Bus:           bus,
+		})
+	}
+
 	// Load (or generate) REST tokens once; reused for gRPC and MCP HTTP auth parity.
 	var restReadToken, restWriteToken string
 	restErrCh := make(chan error, 1)
@@ -289,11 +302,12 @@ func Run(ctx context.Context, cfg Config) error {
 		restReadToken = restToks.Read
 		restWriteToken = restToks.Write
 		restSrv := restapi.New(restapi.Config{
-			Addr:          cfg.restAddr(),
-			Tokens:        restToks,
-			WorkspaceRoot: cfg.WorkspaceRoot,
-			YakosRoot:     cfg.YakosRoot,
-			StateDir:      cfg.restStateDir(),
+			Addr:            cfg.restAddr(),
+			Tokens:          restToks,
+			WorkspaceRoot:   cfg.WorkspaceRoot,
+			YakosRoot:       cfg.YakosRoot,
+			StateDir:        cfg.restStateDir(),
+			DispatchService: dispatchSvc,
 		})
 		go func() {
 			restErrCh <- restSrv.Serve(ctx)
@@ -327,18 +341,6 @@ func Run(ctx context.Context, cfg Config) error {
 		}()
 	} else {
 		close(perfErrCh)
-	}
-
-	// Build the shared dispatch Service once — all transports share this single
-	// instance so the global concurrency governor is enforced across all of them.
-	// Constructed here (after bus is resolved) so it can publish events.
-	dispatchSvc := cfg.DispatchService
-	if dispatchSvc == nil {
-		dispatchSvc = dispatch.NewService(dispatch.ServiceConfig{
-			WorkspaceRoot: cfg.WorkspaceRoot,
-			YakosRoot:     cfg.YakosRoot,
-			Bus:           bus,
-		})
 	}
 
 	// Load (or generate) the console token and start the unified console server

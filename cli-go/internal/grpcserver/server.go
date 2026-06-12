@@ -110,18 +110,14 @@ type Server struct {
 }
 
 // New creates a Server and registers all service implementations.
+// cfg.DispatchService must be non-nil: the server does not construct a private
+// dispatch.Service.  Passing nil panics so the misconfiguration is caught at
+// startup rather than silently at the first dispatch call.
 func New(cfg Config) *Server {
-	s := &Server{cfg: cfg}
-
-	// Ensure the dispatch Service is constructed once — it owns the governor.
 	if cfg.DispatchService == nil {
-		cfg.DispatchService = dispatch.NewService(dispatch.ServiceConfig{
-			WorkspaceRoot: cfg.WorkspaceRoot,
-			YakosRoot:     cfg.YakosRoot,
-			Bus:           cfg.Bus,
-		})
+		panic("grpcserver.New: DispatchService must not be nil — inject the shared daemon Service from serve.Run")
 	}
-	s.cfg = cfg
+	s := &Server{cfg: cfg}
 
 	// Build the gRPC server with the auth interceptor.
 	s.gSrv = grpc.NewServer(
@@ -276,6 +272,9 @@ func (d *dispatchSrv) Run(ctx context.Context, req *pb.DispatchRunRequest) (*pb.
 	if req.Task == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "task is required")
 	}
+	if d.cfg.DispatchService == nil {
+		return nil, status.Errorf(codes.Internal, "dispatch service not configured")
+	}
 	if d.cfg.YakosRoot == "" && req.YakosRoot == "" {
 		return nil, status.Errorf(codes.FailedPrecondition, "yakos_root not configured")
 	}
@@ -283,6 +282,7 @@ func (d *dispatchSrv) Run(ctx context.Context, req *pb.DispatchRunRequest) (*pb.
 	// gRPC transport: identity extracted from the proto request fields.
 	// operator_id, conversation_id, session_id are carried in the new proto
 	// fields (8-10) and passed to the Service for stamping.
+	// SELF-ASSERTED — attribution/labeling only. NEVER use for an authorization decision.
 	_, result, err := d.cfg.DispatchService.Run(ctx, dispatch.Params{
 		Agent:          req.Agent,
 		Task:           req.Task,
@@ -290,6 +290,7 @@ func (d *dispatchSrv) Run(ctx context.Context, req *pb.DispatchRunRequest) (*pb.
 		Runtime:        req.Runtime,
 		Model:          req.Model,
 		Timeout:        int(req.Timeout),
+		YakosRoot:      req.YakosRoot, // per-request override; empty → Service uses cfg default
 		OperatorID:     req.OperatorID,
 		ConversationID: req.ConversationID,
 		SessionID:      req.SessionID,
@@ -313,12 +314,16 @@ func (d *dispatchSrv) Stream(req *pb.DispatchRunRequest, stream pb.Dispatch_Stre
 	if req.Task == "" {
 		return status.Errorf(codes.InvalidArgument, "task is required")
 	}
+	if d.cfg.DispatchService == nil {
+		return status.Errorf(codes.Internal, "dispatch service not configured")
+	}
 	if d.cfg.YakosRoot == "" && req.YakosRoot == "" {
 		return status.Errorf(codes.FailedPrecondition, "yakos_root not configured")
 	}
 
 	// Stream chunks: dispatch runs synchronously through the Service; we emit
 	// a summary chunk when done. Full token streaming is Phase 3 (RunStream).
+	// SELF-ASSERTED — attribution/labeling only. NEVER use for an authorization decision.
 	_, result, err := d.cfg.DispatchService.Run(stream.Context(), dispatch.Params{
 		Agent:          req.Agent,
 		Task:           req.Task,
@@ -326,6 +331,7 @@ func (d *dispatchSrv) Stream(req *pb.DispatchRunRequest, stream pb.Dispatch_Stre
 		Runtime:        req.Runtime,
 		Model:          req.Model,
 		Timeout:        int(req.Timeout),
+		YakosRoot:      req.YakosRoot, // per-request override; empty → Service uses cfg default
 		OperatorID:     req.OperatorID,
 		ConversationID: req.ConversationID,
 		SessionID:      req.SessionID,
