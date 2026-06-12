@@ -390,8 +390,22 @@ func TestRunStream_BoundedReaderToleratesLargeInitLine(t *testing.T) {
 }
 
 // TestRunStream_ContextCancelKillsStream verifies that cancelling the context
-// causes RunStream to return (without deadlocking), even if the fake adapter
-// would otherwise emit more lines.
+// causes RunStream to return promptly (without deadlocking) on all platforms.
+//
+// Design rationale for the fake:
+//
+// The previous approach used exec.CommandContext("sh", "-c", "sleep 30") and
+// relied on exec killing the subprocess to unblock StdoutPipe.Read.  This is
+// inherently platform-dependent: on Linux, exec.CommandContext sends SIGKILL to
+// the direct child (sh), but sh has already forked sleep as a grandchild.  The
+// grandchild holds the write end of the stdout pipe open, so Read never returns.
+// On macOS the process hierarchy or signal propagation differs and the test
+// accidentally passes.
+//
+// Fix: the fake does not spawn a subprocess at all.  It blocks in a select on
+// ctx.Done() — purely in Go scheduler space — which is deterministic on every
+// platform.  Emitting one chunk first proves that the streaming path started
+// before the block.
 //
 // Race-safety discipline: body() must not return until the goroutine that calls
 // svc.RunStream (which reads the package-global streamRunFn) has fully exited.
@@ -403,8 +417,6 @@ func TestRunStream_ContextCancelKillsStream(t *testing.T) {
 	logDir := isolatedLogDir(t)
 	yakosRoot := buildFakeRoster(t, "chat-agent", "System prompt.")
 
-	// Replace streamRunFn with a version that uses a sh -c 'sleep 30' command
-	// so the stream blocks until the context is cancelled.
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
@@ -414,19 +426,12 @@ func TestRunStream_ContextCancelKillsStream(t *testing.T) {
 		OperatorID:    "test-op",
 	})
 
-	withStreamRunFn(func(ctx2 context.Context, req Request, _ runtime.Adapter, chatReq runtime.ChatDispatchRequest, onChunk func(StreamChunk)) (Result, error) {
-		// exec.CommandContext ties the process lifetime to ctx2, so when the
-		// context is cancelled the OS kills "sleep 30" and StdoutPipe.Read
-		// returns with an error, unblocking us.
-		sleepCmd := exec.CommandContext(ctx2, "sh", "-c", "sleep 30") //nolint:gosec
-		stdout, err := sleepCmd.StdoutPipe()
-		if err != nil {
-			return Result{ExitCode: -1}, err
-		}
-		_ = sleepCmd.Start()
-		buf := make([]byte, 1024)
-		_, _ = stdout.Read(buf) // blocks until ctx2 is cancelled
-		_ = sleepCmd.Wait()
+	withStreamRunFn(func(ctx2 context.Context, req Request, _ runtime.Adapter, _ runtime.ChatDispatchRequest, onChunk func(StreamChunk)) (Result, error) {
+		// Emit one chunk to prove streaming started, then block until ctx2 is
+		// cancelled.  No subprocess: avoids all platform-specific pipe/signal
+		// behaviour that caused the Linux CI hang.
+		onChunk(StreamChunk{Type: "token", Text: "started"})
+		<-ctx2.Done()
 		return Result{ExitCode: -1}, ctx2.Err()
 	}, func() {
 		done := make(chan error, 1)
