@@ -52,6 +52,20 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return s, nil
 }
 
+// Handler returns an http.Handler that exposes /v1/events on the bus.
+// It includes the loopbackOnly and authenticate middleware so it is safe
+// to mount under a parent mux at a path prefix (e.g. the console mux).
+//
+// Unlike Serve, Handler does not bind a socket; the parent mux manages
+// the listener.  The caller is still responsible for token authentication
+// at the edge — mounting under a RequireToken wrapper on the console is
+// the intended use.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/v1/events", s.loopbackOnly(websocket.Handler(s.handleWS)))
+	return mux
+}
+
 // Serve starts the HTTP listener and blocks until ctx is cancelled.
 // The listener is closed when Serve returns.
 func (s *Server) Serve(ctx context.Context) error {

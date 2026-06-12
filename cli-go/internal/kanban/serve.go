@@ -100,6 +100,69 @@ type server struct {
 	host         string
 	mu           sync.Mutex // serialises board mutations (mirrors Python _mutate_lock)
 	allowedHosts map[string]struct{}
+	mux          *http.ServeMux
+}
+
+// Handler returns the underlying http.Handler for this server WITHOUT the
+// inner Host-allowlist middleware.  The caller is responsible for supplying
+// appropriate auth at the edge (e.g. the consoleui RequireToken wrapper).
+//
+// This mirrors the pattern in perfdash.Server.Handler() and
+// metricsdash.Server.Handler().
+func (s *server) Handler() http.Handler { return s.mux }
+
+// KanbanServer is the exported handle to an in-process kanban HTTP server.
+// Obtain one via NewKanbanServer; use Handler() to mount it under a parent mux.
+type KanbanServer struct {
+	inner *server
+}
+
+// Handler returns the kanban http.Handler without Host/token middleware.
+// The caller must supply auth at the edge.
+func (k *KanbanServer) Handler() http.Handler { return k.inner.Handler() }
+
+// NewKanbanServer constructs an in-process kanban server for the given board
+// file and project name.  boardPath must be an absolute path; host is used
+// only for the Host-allowlist in standalone Serve mode (pass "" for
+// "127.0.0.1").
+//
+// Callers that mount the handler under a parent mux (e.g. consoleui) should
+// call Handler() on the returned value; callers that want a standalone server
+// should call the package-level Serve function.
+func NewKanbanServer(boardPath, project, host string) *KanbanServer {
+	return &KanbanServer{inner: newServer(boardPath, project, host)}
+}
+
+// newServer constructs a server and wires all routes onto its internal mux.
+func newServer(boardPath, project, host string) *server {
+	allowed := map[string]struct{}{
+		"127.0.0.1": {},
+		"localhost": {},
+		"[::1]":     {},
+		"::1":       {},
+	}
+	if host != "" {
+		allowed[host] = struct{}{}
+	}
+
+	srv := &server{
+		boardPath:    boardPath,
+		project:      project,
+		host:         host,
+		allowedHosts: allowed,
+		mux:          http.NewServeMux(),
+	}
+	srv.mux.HandleFunc("/", srv.handleRoot)
+	srv.mux.HandleFunc("/api/board", srv.handleBoard)
+	srv.mux.HandleFunc("/api/meta", srv.handleMeta)
+	srv.mux.HandleFunc("/api/add", srv.handleAdd)
+	srv.mux.HandleFunc("/api/move", srv.handleMove)
+	srv.mux.HandleFunc("/api/notes", srv.handleNotes)
+	srv.mux.HandleFunc("/api/delete", srv.handleDelete)
+	srv.mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	return srv
 }
 
 // Serve starts the HTTP server and blocks until it is shut down (e.g. by SIGINT).
@@ -136,33 +199,9 @@ func Serve(cfg ServeConfig) (ServeResult, error) {
 		}
 	}
 
-	// Allowed hosts for DNS-rebinding defence.
-	allowed := map[string]struct{}{
-		"127.0.0.1": {},
-		"localhost": {},
-		"[::1]":     {},
-		"::1":       {},
-	}
-	allowed[host] = struct{}{}
+	srv := newServer(cfg.BoardPath, cfg.Project, host)
 
-	srv := &server{
-		boardPath:    cfg.BoardPath,
-		project:      cfg.Project,
-		host:         host,
-		allowedHosts: allowed,
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", srv.handleRoot)
-	mux.HandleFunc("/api/board", srv.handleBoard)
-	mux.HandleFunc("/api/meta", srv.handleMeta)
-	mux.HandleFunc("/api/add", srv.handleAdd)
-	mux.HandleFunc("/api/move", srv.handleMove)
-	mux.HandleFunc("/api/notes", srv.handleNotes)
-	mux.HandleFunc("/api/delete", srv.handleDelete)
-	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	})
+	mux := srv.mux
 
 	var ln net.Listener
 	if cfg.Listener != nil {
