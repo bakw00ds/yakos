@@ -1,11 +1,11 @@
 # yakOS
 
 Multi-agent operating discipline for Claude Code (and codex/agy): a CLI that
-ships a roster of 35 specialist agents, audit-first hooks, kanban +
+ships a roster of specialist agents, audit-first hooks, kanban +
 retrospectives, and per-project audit trails across runtimes.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.35.0.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.39.0.0-orange.svg)](CHANGELOG.md)
 [![Stability: alpha](https://img.shields.io/badge/stability-alpha-red.svg)](#status)
 
 > Not affiliated with Anthropic, OpenAI, or Google.
@@ -16,22 +16,22 @@ Prerequisite: the `claude` CLI installed and authenticated
 ([docs.claude.com](https://docs.claude.com/en/docs/claude-code/overview)).
 
 ```sh
-git clone https://github.com/bakw00ds/yakos.git ~/code/yakos
-cd ~/code/your-project
-~/code/yakos/cli/yakos quickstart
+curl -fsSL https://raw.githubusercontent.com/bakw00ds/yakos/main/scripts/install.sh | sh
 ```
 
-`quickstart` detects state and runs only what's needed: install if missing →
-init if the cwd is a git repo → start a session. After install, `yakos` is on
-your PATH at `~/.local/bin/yakos`.
-
-Or step by step:
+The installer downloads the Go binary for your platform, verifies the SHA256
+checksum, runs `yakos install` (materializes the embedded framework lib and
+wires `~/.claude` symlinks), and persists `export YAKOS_IMPL=go` to your shell
+profile. Open a new terminal (or `source` the profile it printed), then:
 
 ```sh
-~/code/yakos/cli/yakos install          # once; adds ~/.local/bin/yakos
+yakos doctor                            # verify the install
 yakos init myapp --project ~/code/myapp # bootstrap a project
 yakos start myapp                       # launch a session
 ```
+
+No repo clone required. See [docs/getting-started.md](docs/getting-started.md)
+for the full install guide, including the dev/from-source path.
 
 ## Common commands
 
@@ -43,14 +43,14 @@ yakos start myapp                       # launch a session
 | `yakos kanban` | Render the WIP board; `serve` opens a web UI |
 | `yakos supervise enable` | Turn on the live shadow-agent supervisor |
 | `yakos doctor` | Environment + install health check |
-| `yakos update` | `git pull` framework + refresh symlinks |
-| `yakos refresh` | Detect and repair per-project deployment drift (hooks + settings.json + agent symlinks) |
+| `yakos update` | Pull framework updates + refresh symlinks |
+| `yakos refresh` | Detect and repair per-project deployment drift |
 | `yakos uninstall` | Remove yakOS-owned symlinks (never touches your memory) |
+| `yakos metrics collect\|report\|trend\|compare\|gate\|serve` | Project-health metrics time series |
 | `yakos skill plan-quality-eval <plan.md>` | Score a plan against the 6-dimension rubric |
-| `yakos plan score show\|history\|override` | Surface plan-quality-eval log records |
-| `yakos model-routing eval\|list\|show` | Evaluate an agent's golden-set across haiku/sonnet/opus; surface routing candidates |
+| `yakos model-routing eval\|list\|show` | Evaluate an agent's golden-set across model tiers |
 
-Full list: `yakos --help` (32 subcommands).
+Full list: `yakos --help` (41 subcommands ported to Go).
 
 ## What it does
 
@@ -67,6 +67,15 @@ Full list: `yakos --help` (32 subcommands).
 - **10-cycle librarian retrospectives.** Every 10 prompts the librarian agent
   reads the transcript, surfaces lessons and drift, and proposes soul edits.
   Operator-gated; nothing promotes automatically.
+- **Project-health metrics.** `yakos metrics` tracks efficiency, DORA, and
+  per-language quality indicators across commits. CI gate via
+  `budgets.yaml`; loopback dashboard via `yakos metrics serve`.
+- **Model-tier routing with fable.** Four tiers: `haiku < sonnet < opus < fable`.
+  `model: fable` in agent frontmatter dispatches to the top tier; `frontier`
+  is an accepted alias. Override per-dispatch with `--model fable`.
+- **Self-contained binary.** The Go binary embeds the full framework `lib/`
+  via `//go:embed`. A `curl|sh` install is fully self-sufficient with no repo
+  clone.
 - **Cross-runtime portability.** The same workflow runs on Claude Code, codex,
   and agy via runtime adapter shims. `yakos dispatch <agent> "<task>"
   --runtime codex` is the escape hatch.
@@ -75,25 +84,29 @@ Full list: `yakos --help` (32 subcommands).
 
 ```
 yakos/
-  cli/              yakos CLI entry point + subcommand scripts
+  cli-go/           Go binary source (41 ported subcommands)
+  cli/              bash CLI fallback + adapter scripts
   lib/
-    agents/         35 framework specialist agents (lead-template, planner, …)
-    hooks/          17 hook scripts (path-allowlist, secret-scan, supervisor, …)
-    rules/          16 always-loaded + path-scoped behavioral rules
-    skills/         57 skills (plan-quality-eval, version-bump, …)
+    agents/         framework specialist agents (lead-template, planner, …)
+    hooks/          hook scripts (path-allowlist, secret-scan, supervisor, …)
+    rules/          always-loaded + path-scoped behavioral rules
+    skills/         skills (plan-quality-eval, version-bump, …)
+  docs/             operator guides (getting-started, metrics-ci, overview, …)
   tests/            e2e + fixture suites
 ```
 
 ## Where to look next
 
-- [CLAUDE.md](CLAUDE.md) — project-level agent instructions and conventions
+- [docs/getting-started.md](docs/getting-started.md) — install, bootstrap, first session
+- [docs/overview.md](docs/overview.md) — guided architecture walkthrough
+- [docs/metrics-ci.md](docs/metrics-ci.md) — running `yakos metrics` in CI
 - [lib/rules/INDEX.md](lib/rules/INDEX.md) — all cross-cutting rules
 - [lib/agents/README.md](lib/agents/README.md) — full agent roster and frontmatter schema
-- [docs/overview.md](docs/overview.md) — guided architecture walkthrough
+- [CHANGELOG.md](CHANGELOG.md) — complete history
 
 ## Status
 
-**v0.35.0.0** — alpha, pre-1.0. CLI commands and `.yakos.yml` schema are
+**v0.39.0.0** — alpha, pre-1.0. CLI commands and `.yakos.yml` schema are
 stable within minor versions. See [CHANGELOG.md](CHANGELOG.md).
 
 ## License

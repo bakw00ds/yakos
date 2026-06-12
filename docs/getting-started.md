@@ -1,4 +1,4 @@
-# yakOS getting started — v0.37.0.0
+# yakOS getting started — v0.39.0.0
 
 This guide is for a developer who has heard of yakOS but has never run
 it. By the end you will have a working install, a bootstrapped project,
@@ -34,10 +34,10 @@ retrospective reads the transcript, proposes skill improvements, and
 asks the operator to approve before anything changes. The operator stays
 in control; the framework keeps the record.
 
-At v0.37.0.0, yakOS ships 39 natively ported Go subcommands in
-parallel with the original bash implementation. The two coexist via the
-`YAKOS_IMPL` env var. Bash is the default; the Go binary opts in
-explicitly. Both are supported.
+At v0.39.0.0, yakOS ships 41/41 Go subcommands with full parity. The
+two implementations coexist via the `YAKOS_IMPL` env var; binary installs
+via `curl|sh` default to `YAKOS_IMPL=go` automatically. A cloned-repo
+install can use either implementation.
 
 ---
 
@@ -45,29 +45,46 @@ explicitly. Both are supported.
 
 ### Option A — curl installer (recommended)
 
-This downloads the Go binary for your platform, verifies the SHA256
-checksum, and installs it alongside the bash yakOS.
+This is the fully self-contained path. No repo clone is required — the
+binary embeds the full framework `lib/` and materializes it on first use.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/bakw00ds/yakos/main/scripts/install.sh | sh
 ```
 
-The binary lands at `~/.local/bin/yakos` on Mac and Linux, or
-`%USERPROFILE%\bin\yakos.exe` on Windows Git Bash.
+What the installer does, in order:
 
-Verify the install:
+1. Detects your platform (darwin/linux/windows, amd64/arm64) and resolves
+   the latest release from the GitHub API (or a specific version with
+   `--version <X>`).
+2. Downloads the binary and a `checksums.txt` file; verifies the SHA256
+   before writing anything to disk.
+3. Places the binary at `~/.local/bin/yakos` on Mac and Linux, or
+   `%USERPROFILE%\bin\yakos.exe` on Windows Git Bash.
+4. Runs `yakos install` (best-effort, warns and continues on failure).
+   This materializes the embedded `lib/` tree to
+   `~/.local/share/yakos/<version>/` and wires `~/.claude` symlinks —
+   the framework is fully deployed without a repo clone.
+5. Appends an idempotent `# >>> yakos >>>` block to your shell profile
+   (`~/.zshrc` for zsh, `~/.bashrc` for bash, `~/.profile` otherwise)
+   that exports `YAKOS_IMPL=go` and adds the binary directory to `PATH`.
+
+After the installer finishes, open a new terminal (or `source` the profile
+path it printed), then:
 
 ```sh
 yakos --version
-# Prints: 0.37.0.0
-# If you see "(go)" suffix, the Go binary is active.
+# Prints: 0.39.0.0 (go)
+
+yakos doctor              # verify the install end-to-end
+yakos init myapp --project ~/code/myapp
 ```
 
 Install options:
 
 ```sh
 # Install a specific version
-curl -fsSL .../install.sh | sh -s -- --version 0.37.0
+curl -fsSL .../install.sh | sh -s -- --version 0.39.0
 
 # Preview without downloading
 curl -fsSL .../install.sh | sh -s -- --dry-run
@@ -76,39 +93,27 @@ curl -fsSL .../install.sh | sh -s -- --dry-run
 curl -fsSL .../install.sh | sh -s -- --prefix /usr/local/bin
 ```
 
-### Option B — clone and wire bash directly
+### Option B — from source (cloned repo + YAKOS_ROOT)
+
+Use this path if you want to develop yakOS itself or live on
+unreleased changes. The binary prefers a cloned repo over its embedded
+content when `YAKOS_ROOT` is set or an adjacent repo is detected.
 
 ```sh
 git clone https://github.com/bakw00ds/yakos.git ~/code/yakos
+export YAKOS_ROOT=~/code/yakos
+
 cd ~/code/your-project
 ~/code/yakos/cli/yakos install   # adds ~/.local/bin/yakos symlink
 ```
 
-### Opting into the Go binary
-
-After install, the Go binary is invisible by default — every invocation
-proxies to bash. To use Go-native routing:
-
-```sh
-# Session-wide (recommended during evaluation)
-export YAKOS_IMPL=go
-
-# Per-project permanent (add to .envrc or shell rc)
-echo 'export YAKOS_IMPL=go' >> ~/.zshrc
-```
-
-Verify which implementation is active:
-
-```sh
-yakos --version
-# 0.37.0.0        → bash is active
-# 0.37.0.0 (go)  → Go binary is active
-```
+With `YAKOS_ROOT` set (or the binary located inside the cloned tree),
+live `lib/` changes take effect immediately without rebuilding the binary.
 
 ### macOS Gatekeeper note
 
-v0.37.0.0 ships unsigned binaries. On first run macOS will block with
-"unidentified developer." Clear the quarantine flag:
+Release binaries are currently unsigned. On first run macOS may block
+with "unidentified developer." Clear the quarantine flag:
 
 ```sh
 xattr -d com.apple.quarantine ~/.local/bin/yakos
@@ -339,7 +344,8 @@ yakos agent list
 ### What it does
 
 The supervisor is a second agent that runs in parallel to the lead and
-watches recent tool calls. It judges sessions on four axes:
+watches recent tool calls. It judges sessions on four axes (requires
+`YAKOS_IMPL=go` — supervisor is Go-only):
 
 | Axis | What it catches |
 |---|---|
@@ -530,8 +536,8 @@ the full authentication model.
 
 ### The three tiers
 
-yakOS v0.37.0.0 ships the Phase 3 hybrid hook framework. Every hook
-has three layers:
+yakOS ships the Phase 3 hybrid hook framework. Every hook has three
+layers:
 
 | Tier | File location | Editable by operator? | Windows? |
 |---|---|---|---|
@@ -677,12 +683,19 @@ significant chunk of work:
 yakos archive my-app v1.2.0
 ```
 
-**4. Not setting `YAKOS_IMPL=go` when you mean to use the Go binary.**
+**4. `YAKOS_IMPL=go` not set when you mean to use the Go binary.**
 
-The Go binary is invisible without this variable. If you installed via
-`scripts/install.sh` and `yakos --version` does not show `(go)`, you
-are running bash yakOS. Set the variable in your shell profile or per
-project.
+The `curl|sh` installer writes `export YAKOS_IMPL=go` to your shell
+profile automatically. If `yakos --version` does not show `(go)` after
+opening a new terminal, your profile change has not been sourced yet.
+
+```sh
+source ~/.zshrc   # or ~/.bashrc — path printed at install time
+yakos --version   # should now print: 0.39.0.0 (go)
+```
+
+For a from-source install without the profile block, set the variable
+manually:
 
 ```sh
 export YAKOS_IMPL=go    # add to ~/.zshrc or ~/.bashrc
@@ -705,8 +718,8 @@ automation. It does not start an interactive session.
 
 Docs inside this repo:
 
-- [`docs/go-port-plan.md`](go-port-plan.md) — full Phase 1 porting
-  plan, exit criteria, and the list of 39 ported subcommands
+- [`docs/go-port-plan.md`](go-port-plan.md) — full porting plan, exit
+  criteria, and the list of 41 ported subcommands
 - [`docs/go-shadow-mode.md`](go-shadow-mode.md) — `YAKOS_IMPL`
   coexistence, PATH ordering, Gatekeeper workaround, uninstall
 - [`lib/rules/INDEX.md`](../lib/rules/INDEX.md) — all always-loaded
