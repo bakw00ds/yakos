@@ -257,8 +257,9 @@ func PrintTrend(w io.Writer, snapshots []Snapshot, metricPath string, lastN int,
 }
 
 // extractMetricPath extracts the named metric from each snapshot. Returns
-// float values (for sparkline) and string labels (for table). Only the
-// predefined known paths are supported in Phase-1.
+// float values (for sparkline) and string labels (for table).
+// Uses resolveMetricPath (the authoritative resolver from gate.go) so that
+// every consumer resolves paths identically.
 func extractMetricPath(snaps []Snapshot, path string) (vals []float64, labels []string) {
 	for _, s := range snaps {
 		v, label := getMetricByPath(&s.Metrics, path)
@@ -268,32 +269,45 @@ func extractMetricPath(snaps []Snapshot, path string) (vals []float64, labels []
 	return
 }
 
-// getMetricByPath extracts a float64 approximation and display label for the
-// given dot-path metric. Returns 0.0, "" for unknown paths.
+// getMetricByPath extracts a float64 value and a human-readable display label
+// for the given dot-path metric. It delegates to resolveMetricPath (gate.go)
+// as the single authoritative path resolver, ensuring that a path like
+// "code_quality.duplication_pct" resolves consistently across gate, trend,
+// and dashboard trend endpoints.
+//
+// When the metric is not measured (resolveMetricPath returns false) both the
+// value and label are zero/empty.
 func getMetricByPath(m *Metrics, path string) (float64, string) {
-	switch path {
-	case "efficiency.median_cost_per_task_usd":
-		if m.Efficiency.MedianCostPerTaskUSD != nil {
-			return *m.Efficiency.MedianCostPerTaskUSD, fmt.Sprintf("%.4f", *m.Efficiency.MedianCostPerTaskUSD)
-		}
-	case "efficiency.total_cost_usd":
-		if m.Efficiency.TotalCostUSD != nil {
-			return *m.Efficiency.TotalCostUSD, fmt.Sprintf("%.2f", *m.Efficiency.TotalCostUSD)
-		}
-	case "dispatch.first_try_success_rate":
-		if m.Dispatch.FirstTrySuccessRate != nil {
-			return *m.Dispatch.FirstTrySuccessRate, fmt.Sprintf("%.2f%%", *m.Dispatch.FirstTrySuccessRate*100)
-		}
-	case "test.coverage_pct":
-		if m.Test.CoveragePct != nil {
-			return *m.Test.CoveragePct, fmt.Sprintf("%.1f%%", *m.Test.CoveragePct)
-		}
-	case "security.secret_scan_hits":
-		if m.Security.SecretScanHits != nil {
-			return float64(*m.Security.SecretScanHits), fmt.Sprintf("%d", *m.Security.SecretScanHits)
-		}
+	v, ok := resolveMetricPath(m, path)
+	if !ok {
+		return 0, ""
 	}
-	return 0, ""
+	// Format the label with reasonable precision.
+	// Percentage-style paths include "pct" or "rate" in their name.
+	label := formatMetricLabel(path, v)
+	return v, label
+}
+
+// formatMetricLabel produces a display string for v given the metric path.
+// Paths containing "pct" or "rate" are formatted as a percentage; cost paths
+// get 4 decimal places; everything else gets 2.
+func formatMetricLabel(path string, v float64) string {
+	switch {
+	case strings.HasSuffix(path, "_pct") || strings.HasSuffix(path, "_rate"):
+		return fmt.Sprintf("%.1f%%", v*100)
+	case strings.Contains(path, "cost_usd"):
+		return fmt.Sprintf("%.4f", v)
+	case strings.HasSuffix(path, "_hits") ||
+		strings.HasSuffix(path, "_count") ||
+		strings.HasSuffix(path, "_symbols") ||
+		strings.HasSuffix(path, "_loc") ||
+		strings.HasSuffix(path, "task_count") ||
+		strings.HasSuffix(path, "findings") ||
+		strings.HasSuffix(path, "frequency"):
+		return fmt.Sprintf("%d", int(v))
+	default:
+		return fmt.Sprintf("%.2f", v)
+	}
 }
 
 // PrintCompare writes a side-by-side comparison of two snapshots to w.

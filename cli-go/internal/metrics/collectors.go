@@ -147,37 +147,40 @@ func collectModelRouting(stateDir string, m *Metrics) {
 }
 
 // collectDORA computes DORA signals from git tags.
+// A single git for-each-ref call fetches all tag names + timestamps;
+// filtering is done in Go rather than spawning O(tags) git processes.
 func collectDORA(runner gitRunner, projectDir string, since string, m *Metrics) {
-	tags, err := getDeployTags(runner, projectDir)
-	if err != nil || len(tags) == 0 {
+	entries, err := getDeployTagsWithTimestamps(runner, projectDir)
+	if err != nil || len(entries) == 0 {
 		return
 	}
 
-	// Filter tags by since window if provided.
+	// Filter by since window in Go — no additional git spawns needed.
 	if since != "" {
 		sinceTime, parseErr := parseISO(since)
 		if parseErr == nil {
-			var filtered []string
-			for _, tag := range tags {
-				ts, err := getTagTimestamp(runner, projectDir, tag)
-				if err != nil {
-					continue
-				}
-				t, err := parseISO(strings.TrimSpace(ts))
+			var filtered []tagEntry
+			for _, e := range entries {
+				t, err := parseISO(e.TS)
 				if err != nil {
 					continue
 				}
 				if !t.Before(sinceTime) {
-					filtered = append(filtered, tag)
+					filtered = append(filtered, e)
 				}
 			}
-			tags = filtered
+			entries = filtered
 		}
 	}
 
-	m.DORA.DeployFrequency = intPtr(len(tags))
+	m.DORA.DeployFrequency = intPtr(len(entries))
 
-	leadTimes, err := getLeadTimes(runner, projectDir, tags)
+	// Extract tag names for getLeadTimes (which needs per-tag log for ancestry).
+	tagNames := make([]string, len(entries))
+	for i, e := range entries {
+		tagNames[i] = e.Name
+	}
+	leadTimes, err := getLeadTimes(runner, projectDir, tagNames)
 	if err == nil {
 		if med, ok := Median(leadTimes); ok {
 			m.DORA.LeadTimeMedianHours = floatPtr(med)

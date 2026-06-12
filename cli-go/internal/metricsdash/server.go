@@ -11,13 +11,21 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "embed"
 
+	"github.com/bakw00ds/yakos/internal/dashauth"
 	"github.com/bakw00ds/yakos/internal/metrics"
 )
 
+// dist/index.html is a committed build artifact produced by the SPA build step
+// (scripts/build-metricsdash.sh or `make build`).  The file MUST exist before
+// running `go build` or `go test`.  If you see a build error here, run
+// `make build` (which chains embed-lib → build) or commit the placeholder
+// at internal/metricsdash/dist/index.html.
+//
 //go:embed dist/index.html
 var indexHTML []byte
 
@@ -55,21 +63,68 @@ func (c *Config) addr() string {
 	return "127.0.0.1:7896"
 }
 
+// historyCache is an mtime+size-keyed cache for the parsed history.ndjson
+// content. It avoids re-parsing the NDJSON file on every API hit; the cache
+// is invalidated only when the file's mtime or size changes.
+type historyCache struct {
+	mu    sync.Mutex
+	mtime time.Time
+	size  int64
+	snaps []metrics.Snapshot
+}
+
+// load returns cached snapshots if the file at path has not changed since the
+// last load. Otherwise it re-reads the file and updates the cache.
+func (c *historyCache) load(projectDir string) ([]metrics.Snapshot, error) {
+	if projectDir == "" {
+		return nil, nil
+	}
+	path := metrics.HistoryPath(projectDir)
+	fi, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("metrics cache: stat %s: %w", path, err)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Cache hit: file unchanged.
+	if fi.ModTime().Equal(c.mtime) && fi.Size() == c.size {
+		return c.snaps, nil
+	}
+
+	// Cache miss: re-parse.
+	snaps, err := metrics.ReadHistory(projectDir)
+	if err != nil {
+		return nil, err
+	}
+	c.mtime = fi.ModTime()
+	c.size = fi.Size()
+	c.snaps = snaps
+	return snaps, nil
+}
+
 // Server is the metrics dashboard HTTP server.
 // It is strictly read-only: no endpoint may mutate history.ndjson.
 type Server struct {
 	cfg     Config
 	mux     *http.ServeMux
 	httpSrv *http.Server
+	cache   historyCache
 }
 
 // New constructs a Server and wires all routes.
 func New(cfg Config) *Server {
 	s := &Server{cfg: cfg, mux: http.NewServeMux()}
 	s.registerRoutes()
+	// Wrap the mux with Host-header / DNS-rebinding defense.
+	protected := dashauth.RequireLocalHost(cfg.addr(), s.mux)
 	s.httpSrv = &http.Server{
 		Addr:         cfg.addr(),
-		Handler:      s.mux,
+		Handler:      protected,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -78,6 +133,9 @@ func New(cfg Config) *Server {
 }
 
 // Handler returns the underlying http.Handler for use with httptest.NewServer.
+// Note: Host-header middleware is NOT applied here — httptest uses a random
+// port. Tests that specifically exercise Host-header rejection should use
+// dashauth.RequireLocalHost directly.
 func (s *Server) Handler() http.Handler { return s.mux }
 
 // Serve starts the HTTP server and blocks until ctx is cancelled.
@@ -163,47 +221,10 @@ func (s *Server) registerRoutes() {
 
 // ---- auth middleware --------------------------------------------------------
 
-// requireToken enforces Bearer token authentication.
-// The token is compared in constant time to prevent timing attacks.
+// requireToken enforces Bearer token authentication using dashauth.
+// Constant-time comparison via crypto/subtle is handled in dashauth.TokenEqual.
 func (s *Server) requireToken(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		tok := bearerToken(r)
-		if tok == "" || !tokenEqual(tok, s.cfg.Token) {
-			if tok == "" {
-				writeErr(w, http.StatusUnauthorized, "missing Authorization: Bearer token")
-			} else {
-				writeErr(w, http.StatusForbidden, "invalid token")
-			}
-			return
-		}
-		next(w, r)
-	}
-}
-
-// bearerToken extracts the Bearer token from the Authorization header.
-func bearerToken(r *http.Request) string {
-	h := r.Header.Get("Authorization")
-	if h == "" {
-		return ""
-	}
-	const prefix = "bearer "
-	if len(h) > len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
-		return h[len(prefix):]
-	}
-	return ""
-}
-
-// tokenEqual compares two strings with constant-time-like behaviour.
-// Length mismatch exits early which is acceptable for a local dashboard.
-func tokenEqual(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var diff byte
-	for i := 0; i < len(a); i++ {
-		diff |= a[i] ^ b[i]
-	}
-	return diff == 0
+	return dashauth.RequireToken(s.cfg.Token, next)
 }
 
 // ---- static asset handlers --------------------------------------------------
@@ -220,12 +241,11 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 // ---- history loader (READ-ONLY) ---------------------------------------------
 
-// loadHistory reads snapshots for the configured project. It never writes.
+// loadHistory returns snapshots for the configured project, using an
+// mtime+size-keyed cache so that the NDJSON file is only re-parsed when it
+// has changed. It never writes.
 func (s *Server) loadHistory() ([]metrics.Snapshot, error) {
-	if s.cfg.ProjectDir == "" {
-		return nil, nil
-	}
-	return metrics.ReadHistory(s.cfg.ProjectDir)
+	return s.cache.load(s.cfg.ProjectDir)
 }
 
 // ---- GET /api/metrics/snapshot ----------------------------------------------

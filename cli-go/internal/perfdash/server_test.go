@@ -303,7 +303,9 @@ func TestSummary_TopAgentsOrdering(t *testing.T) {
 	ts, tok := newTestServer(t, dir)
 	resp := get(t, ts.URL+"/api/perf/summary?window=24h", tok)
 	var result struct {
-		TopAgents []struct{ Key string `json:"key"` } `json:"top_agents"`
+		TopAgents []struct {
+			Key string `json:"key"`
+		} `json:"top_agents"`
 	}
 	decodeJSON(t, resp, &result)
 	if len(result.TopAgents) < 2 {
@@ -317,7 +319,7 @@ func TestSummary_TopAgentsOrdering(t *testing.T) {
 func TestSummary_WindowFilter(t *testing.T) {
 	dir := t.TempDir()
 	writeDispatchLog(t, dir, []string{
-		sampleEvent(nowISO(), "backend", "claude", 0, 10, 0.01),       // in window
+		sampleEvent(nowISO(), "backend", "claude", 0, 10, 0.01),        // in window
 		sampleEvent(hoursAgoISO(48), "backend", "claude", 0, 10, 0.01), // outside 24h
 	})
 	ts, tok := newTestServer(t, dir)
