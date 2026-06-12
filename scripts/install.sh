@@ -152,6 +152,41 @@ if [ -z "${PREFIX}" ]; then
     fi
 fi
 
+# ---------- validate PREFIX --------------------------------------------------
+# PREFIX will be embedded literally into the user's shell profile via
+# write_yakos_block. Reject values that are not absolute paths or that
+# contain shell metacharacters that could cause arbitrary code execution when
+# the profile is sourced. This applies to both user-supplied (--prefix) and
+# auto-detected values (they come from $HOME which is controlled by the OS,
+# but validate anyway for defense in depth).
+
+validate_prefix() {
+    _vp="$1"
+    # Must be absolute (start with /).
+    case "${_vp}" in
+        /*) ;;
+        *) echo "install.sh: PREFIX must be an absolute path, got: ${_vp}" >&2; exit 1 ;;
+    esac
+    # Reject shell metacharacters: double-quote, dollar, backtick, semicolon,
+    # newline, carriage return. These characters in the profile line would
+    # allow injection when the shell sources the profile.
+    case "${_vp}" in
+        *'"'*) echo "install.sh: PREFIX contains forbidden character '\"': ${_vp}" >&2; exit 1 ;;
+        *'$'*) echo "install.sh: PREFIX contains forbidden character '\$': ${_vp}" >&2; exit 1 ;;
+        *'`'*) echo "install.sh: PREFIX contains forbidden character '\`': ${_vp}" >&2; exit 1 ;;
+        *';'*) echo "install.sh: PREFIX contains forbidden character ';': ${_vp}" >&2; exit 1 ;;
+    esac
+    # Reject newline / carriage return. Use a case match: if the value
+    # differs from itself with newlines stripped, it contains a newline.
+    # This is POSIX-safe (no $'\n' bashism required).
+    _vp_stripped="$(printf '%s' "${_vp}" | tr -d '\012\015')"
+    if [ "${_vp}" != "${_vp_stripped}" ]; then
+        echo "install.sh: PREFIX contains a newline or carriage return" >&2; exit 1
+    fi
+}
+
+validate_prefix "${PREFIX}"
+
 INSTALL_PATH="${PREFIX}/yakos${BINARY_SUFFIX}"
 
 # ---------- resolve version --------------------------------------------------

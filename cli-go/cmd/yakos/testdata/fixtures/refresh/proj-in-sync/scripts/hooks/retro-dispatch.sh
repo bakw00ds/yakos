@@ -151,23 +151,25 @@ dispatch_log="$log_dir/retro-dispatch.ndjson"
 
 LIBRARIAN_TASK="Run 10-cycle retrospective per your agent definition. Read transcript, decisions.md tail, mailbox tail, hook logs. Write findings to work/current/{lessons,mistakes,skill-candidates,drift-report,soul-proposed-edits}.md. Return one-line summary."
 
-# Build dispatch command — add --project flag when we have a project path.
-if [ -n "$project_path" ]; then
-    dispatch_cmd="$YAKOS_BIN dispatch librarian \"$LIBRARIAN_TASK\" --project \"$project_path\""
-else
-    dispatch_cmd="$YAKOS_BIN dispatch librarian \"$LIBRARIAN_TASK\""
-fi
-
 # Write PID placeholder; spawned process will write its own PID.
 # Use a temp file + atomic rename to avoid a race between the PID write and
 # the in-flight check above.
 pid_tmp="$pid_file.tmp.$$"
 
 # Spawn background process: writes its PID, runs dispatch, cleans up.
+# NOTE: Do NOT use eval here — project_path comes from env/pointer files and
+# must not be word-split or interpolated into a shell command string. Pass
+# arguments as a direct vector so no shell injection is possible.
 (
     printf '%s\n' "$$" > "$pid_tmp" 2>/dev/null && mv "$pid_tmp" "$pid_file" 2>/dev/null || true
     dispatch_exit=0
-    eval "$dispatch_cmd" > /dev/null 2>&1 || dispatch_exit=$?
+    if [ -n "$project_path" ]; then
+        "$YAKOS_BIN" dispatch librarian "$LIBRARIAN_TASK" --project "$project_path" \
+            > /dev/null 2>&1 || dispatch_exit=$?
+    else
+        "$YAKOS_BIN" dispatch librarian "$LIBRARIAN_TASK" \
+            > /dev/null 2>&1 || dispatch_exit=$?
+    fi
     rm -f "$pid_file" 2>/dev/null || true
     # Log the completion record (best-effort).
     jq -nc \
