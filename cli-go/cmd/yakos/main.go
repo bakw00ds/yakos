@@ -78,6 +78,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/validate"
 	"github.com/bakw00ds/yakos/internal/version"
 	"github.com/bakw00ds/yakos/internal/workclose"
+	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 	"golang.org/x/net/websocket"
 )
@@ -292,6 +293,8 @@ func main() {
 		runTelemetry(args[1:])
 	case "metrics":
 		runMetrics(args[1:])
+	case "workflow":
+		runWorkflow(yakosRoot, args[1:])
 	default:
 		// YAKOS_DAEMON routing: if the daemon is running and YAKOS_DAEMON=on|auto,
 		// route this subcommand through the JSON-RPC client instead of in-process.
@@ -6035,6 +6038,233 @@ func runTelemetry(args []string) {
 
 	if _, err := telemetry.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "telemetry: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// ---- yakos workflow ----------------------------------------------------------
+
+// runWorkflow implements `yakos workflow <subcommand>`.
+//
+// Subcommands:
+//
+//	yakos workflow run <name> [--run-id <id>] [--operator <id>]
+//	  Load <work>/current/workflows/<name>.yaml and execute it headlessly.
+//	  Blocks until the graph drains (or ctx is cancelled).
+//
+//	yakos workflow resume <name> --prior-run-id <id> --new-run-id <id> [--operator <id>]
+//	  Resume a failed workflow run from a prior runID.
+//	  Fails loudly if the YAML has changed since the prior run.
+//
+//	yakos workflow status <run-id>
+//	  Print the run.json for a given runID.
+func runWorkflow(yakosRoot string, args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "workflow: subcommand required (run | resume | status)")
+		fmt.Fprintln(os.Stderr, "usage: yakos workflow run <name> [--run-id <id>] [--operator <id>]")
+		fmt.Fprintln(os.Stderr, "       yakos workflow resume <name> --prior-run-id <id> --new-run-id <id>")
+		fmt.Fprintln(os.Stderr, "       yakos workflow status <run-id>")
+		os.Exit(1)
+	}
+	sub := args[0]
+	rest := args[1:]
+
+	workspaceRoot, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workflow: resolve cwd: %v\n", err)
+		os.Exit(1)
+	}
+	workDir := filepath.Join(workspaceRoot, "work", "current")
+
+	switch sub {
+	case "run":
+		runWorkflowRun(yakosRoot, workspaceRoot, workDir, rest)
+	case "resume":
+		runWorkflowResume(yakosRoot, workspaceRoot, workDir, rest)
+	case "status":
+		runWorkflowStatus(workDir, rest)
+	default:
+		fmt.Fprintf(os.Stderr, "workflow: unknown subcommand %q (run | resume | status)\n", sub)
+		os.Exit(1)
+	}
+}
+
+func runWorkflowRun(yakosRoot, workspaceRoot, workDir string, args []string) {
+	var name, runID, operatorID string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--run-id":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "workflow run: --run-id requires a value")
+				os.Exit(1)
+			}
+			runID = args[i]
+		case "--operator":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "workflow run: --operator requires a value")
+				os.Exit(1)
+			}
+			operatorID = args[i]
+		default:
+			if name == "" && len(args[i]) > 0 && args[i][0] != '-' {
+				name = args[i]
+			} else {
+				fmt.Fprintf(os.Stderr, "workflow run: unknown argument %q\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+	if name == "" {
+		fmt.Fprintln(os.Stderr, "workflow run: workflow name is required")
+		os.Exit(1)
+	}
+	if runID == "" {
+		// Generate a time-based default runID.
+		runID = fmt.Sprintf("run-%d", time.Now().UnixMilli())
+	}
+
+	// Validate name and runID.
+	if err := workflow.ValidateID("workflow name", name); err != nil {
+		fmt.Fprintf(os.Stderr, "workflow run: %v\n", err)
+		os.Exit(1)
+	}
+	if err := workflow.ValidateID("run_id", runID); err != nil {
+		fmt.Fprintf(os.Stderr, "workflow run: %v\n", err)
+		os.Exit(1)
+	}
+
+	wfPath := filepath.Join(workDir, "workflows", name+".yaml")
+	wf, err := workflow.Load(wfPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workflow run: load %q: %v\n", name, err)
+		os.Exit(1)
+	}
+	if err := workflow.Validate(wf); err != nil {
+		fmt.Fprintf(os.Stderr, "workflow run: validate %q: %v\n", name, err)
+		os.Exit(1)
+	}
+
+	// Build a dispatch.Service for this CLI run.
+	svc := dispatch.NewService(dispatch.ServiceConfig{
+		WorkspaceRoot: workspaceRoot,
+		YakosRoot:     yakosRoot,
+	})
+
+	eng := &workflow.Engine{
+		Svc:       svc,
+		YakosRoot: yakosRoot,
+		Project:   workspaceRoot,
+		WorkDir:   workDir,
+	}
+
+	fmt.Fprintf(os.Stderr, "workflow run: starting %q run %s\n", name, runID)
+	rs, err := eng.Run(context.Background(), wf, runID, operatorID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workflow run: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stdout, "workflow run complete: run_id=%s status=%s\n", rs.RunID, rs.Status)
+	if rs.Status != "completed" {
+		os.Exit(1)
+	}
+}
+
+func runWorkflowResume(yakosRoot, workspaceRoot, workDir string, args []string) {
+	var name, priorRunID, newRunID, operatorID string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--prior-run-id":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "workflow resume: --prior-run-id requires a value")
+				os.Exit(1)
+			}
+			priorRunID = args[i]
+		case "--new-run-id":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "workflow resume: --new-run-id requires a value")
+				os.Exit(1)
+			}
+			newRunID = args[i]
+		case "--operator":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "workflow resume: --operator requires a value")
+				os.Exit(1)
+			}
+			operatorID = args[i]
+		default:
+			if name == "" && len(args[i]) > 0 && args[i][0] != '-' {
+				name = args[i]
+			} else {
+				fmt.Fprintf(os.Stderr, "workflow resume: unknown argument %q\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+	if name == "" || priorRunID == "" || newRunID == "" {
+		fmt.Fprintln(os.Stderr, "workflow resume: name, --prior-run-id, and --new-run-id are required")
+		os.Exit(1)
+	}
+
+	wfPath := filepath.Join(workDir, "workflows", name+".yaml")
+	wf, err := workflow.Load(wfPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workflow resume: load %q: %v\n", name, err)
+		os.Exit(1)
+	}
+	if err := workflow.Validate(wf); err != nil {
+		fmt.Fprintf(os.Stderr, "workflow resume: validate %q: %v\n", name, err)
+		os.Exit(1)
+	}
+
+	svc := dispatch.NewService(dispatch.ServiceConfig{
+		WorkspaceRoot: workspaceRoot,
+		YakosRoot:     yakosRoot,
+	})
+
+	eng := &workflow.Engine{
+		Svc:       svc,
+		YakosRoot: yakosRoot,
+		Project:   workspaceRoot,
+		WorkDir:   workDir,
+	}
+
+	fmt.Fprintf(os.Stderr, "workflow resume: resuming %q from %s → %s\n", name, priorRunID, newRunID)
+	rs, err := eng.Resume(context.Background(), wf, priorRunID, newRunID, operatorID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workflow resume: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stdout, "workflow resume complete: run_id=%s parent_run_id=%s status=%s\n",
+		rs.RunID, rs.ParentRunID, rs.Status)
+	if rs.Status != "completed" {
+		os.Exit(1)
+	}
+}
+
+func runWorkflowStatus(workDir string, args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "workflow status: run_id is required")
+		os.Exit(1)
+	}
+	runID := args[0]
+	runDir := filepath.Join(workDir, "workflows", "runs", runID)
+
+	rs, err := workflow.LoadRunState(runDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workflow status: %v\n", err)
+		os.Exit(1)
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(rs); err != nil {
+		fmt.Fprintf(os.Stderr, "workflow status: encode: %v\n", err)
 		os.Exit(1)
 	}
 }
