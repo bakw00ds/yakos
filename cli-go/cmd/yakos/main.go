@@ -5303,8 +5303,8 @@ func runServe(yakosRoot string, args []string) {
 			fmt.Fprintf(os.Stderr, "serve: rotate-console-token: %v\n", err)
 			os.Exit(1)
 		}
-		_ = tok
-		fmt.Fprintf(os.Stdout, "console token rotated: %s\n", internalconsoleui.TokenFilePath(stateDir))
+		fmt.Fprintf(os.Stdout, "console token rotated; new token: %s\n", tok)
+		fmt.Fprintf(os.Stdout, "token file: %s\n", internalconsoleui.TokenFilePath(stateDir))
 		os.Exit(0)
 	}
 
@@ -5353,12 +5353,19 @@ func runServe(yakosRoot string, args []string) {
 
 	fmt.Fprintf(os.Stderr, "yakos serve: starting daemon for workspace %s\n", workspaceRoot)
 	fmt.Fprintf(os.Stderr, "yakos serve: socket at %s\n", jsonrpc.SocketPath(workspaceRoot))
-	fmt.Fprintf(os.Stderr, "yakos serve: ws events at ws://%s/v1/events\n", wsBindAddr)
 	if !noConsole {
+		// When the console is enabled, /v1/events is embedded in it at
+		// consoleBindAddr.  The standalone WS server at wsBindAddr is still
+		// running for direct programmatic access (CLI tools, scripts).
 		fmt.Fprintf(os.Stderr, "yakos serve: console: http://%s/#token=%s\n", consoleBindAddr, consoleTok)
-	} else if !noPerfDash {
-		// Console disabled — fall back to standalone perf dashboard banner.
-		fmt.Fprintf(os.Stderr, "yakos serve: perf dashboard: http://%s/#token=%s\n", perfBindAddr, perfTok)
+		fmt.Fprintf(os.Stderr, "yakos serve: ws events (console): ws://%s/v1/events\n", consoleBindAddr)
+		fmt.Fprintf(os.Stderr, "yakos serve: ws events (standalone): ws://%s/v1/events\n", wsBindAddr)
+	} else {
+		fmt.Fprintf(os.Stderr, "yakos serve: ws events at ws://%s/v1/events\n", wsBindAddr)
+		if !noPerfDash {
+			// Console disabled — fall back to standalone perf dashboard banner.
+			fmt.Fprintf(os.Stderr, "yakos serve: perf dashboard: http://%s/#token=%s\n", perfBindAddr, perfTok)
+		}
 	}
 	fmt.Fprintln(os.Stderr, "yakos serve: press Ctrl-C to stop")
 

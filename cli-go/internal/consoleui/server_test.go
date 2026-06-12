@@ -42,8 +42,9 @@ func newTestServer(t *testing.T) (*httptest.Server, string) {
 	return ts, tok
 }
 
-// newAuthTestServer builds a server wrapped with RequireLocalHost + RequireToken
-// at the edge, as the production server does, but via httptest (random port).
+// newAuthTestServer builds a server wrapped with RequireToken at the edge
+// (using the production RequireTokenForNonStatic that exempts static assets),
+// as the production server does, but via httptest (random port).
 // We can't use RequireLocalHost because httptest uses a random port and the Host
 // header won't match.  Instead we wrap only the token middleware, which covers
 // the 401 part of the auth matrix.
@@ -66,25 +67,15 @@ func newAuthTestServer(t *testing.T) (*httptest.Server, string) {
 		Bus:               bus,
 	})
 
-	// Wrap inner handler with token middleware (RequireLocalHost is
-	// port-sensitive so we apply it separately in the Host-check tests).
-	wrapped := requireTokenExceptRoot(tok, srv.Handler())
+	// Wrap inner handler with the production edge middleware stack
+	// (Content-Type gate + token, with static-asset exemptions).
+	// RequireLocalHost is port-sensitive so we omit it for httptest
+	// (it is exercised separately below).
+	wrapped := consoleui.RequireTokenForNonStatic(tok,
+		consoleui.RequireJSONForMutations(srv.Handler()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 	return ts, tok
-}
-
-// requireTokenExceptRoot mirrors the production logic from server.go.
-// Exposed here to let test helpers replicate the edge middleware without
-// importing internal details.
-func requireTokenExceptRoot(token string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		dashauth.RequireToken(token, next.ServeHTTP)(w, r)
-	})
 }
 
 // get issues a GET to url with the given bearer token (empty = no header).
@@ -104,7 +95,7 @@ func get(t *testing.T, url, tok string) *http.Response {
 	return resp
 }
 
-// post issues a POST to url with the given bearer token.
+// post issues a POST to url with the given bearer token and content type.
 func post(t *testing.T, url, tok, body string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
@@ -112,6 +103,23 @@ func post(t *testing.T, url, tok, body string) *http.Response {
 		t.Fatalf("new request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	return resp
+}
+
+// postNoContentType issues a POST without a Content-Type header.
+func postNoContentType(t *testing.T, url, tok, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
 	if tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
@@ -170,6 +178,25 @@ func TestConsoleBoot_ServesCSS(t *testing.T) {
 	}
 }
 
+// TestConsoleBoot_ServesSW verifies /sw.js is served.
+func TestConsoleBoot_ServesSW(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/sw.js", "") // no token — sw.js is public
+	defer drainClose(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /sw.js (no token): status=%d; want 200", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "application/javascript") {
+		t.Errorf("GET /sw.js: Content-Type=%q; want application/javascript", ct)
+	}
+	swa := resp.Header.Get("Service-Worker-Allowed")
+	if swa != "/" {
+		t.Errorf("GET /sw.js: Service-Worker-Allowed=%q; want /", swa)
+	}
+}
+
 // TestConsoleBoot_MountsKanbanPrefix verifies /kanban/ is reachable.
 func TestConsoleBoot_MountsKanbanPrefix(t *testing.T) {
 	ts, tok := newAuthTestServer(t)
@@ -201,7 +228,95 @@ func TestConsoleBoot_MountsPerfPrefix(t *testing.T) {
 	}
 }
 
-// ---- 2. Auth matrix tests --------------------------------------------------
+// ---- 2. Static-asset no-token path tests ------------------------------------
+// Verifies that /, /app.js, /styles.css, /sw.js return 200 WITHOUT a token.
+
+func TestStaticAssets_NoTokenRequired_Root(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/", "")
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET / (no token): status=%d; want 200 (root is token-exempt)", resp.StatusCode)
+	}
+}
+
+func TestStaticAssets_NoTokenRequired_AppJS(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/app.js", "")
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /app.js (no token): status=%d; want 200 (app.js is token-exempt)", resp.StatusCode)
+	}
+}
+
+func TestStaticAssets_NoTokenRequired_StylesCSS(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/styles.css", "")
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /styles.css (no token): status=%d; want 200 (styles.css is token-exempt)", resp.StatusCode)
+	}
+}
+
+func TestStaticAssets_NoTokenRequired_SWJS(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/sw.js", "")
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /sw.js (no token): status=%d; want 200 (sw.js is token-exempt)", resp.StatusCode)
+	}
+}
+
+// ---- 3. Content-Type 415 gate -----------------------------------------------
+// Non-GET requests without Content-Type: application/json must receive 415.
+
+func TestContentType_415_OnMissingContentType(t *testing.T) {
+	ts, tok := newAuthTestServer(t)
+	resp := postNoContentType(t, ts.URL+"/kanban/api/delete", tok, `{"id":"K-1"}`)
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Errorf("POST /kanban/api/delete (no Content-Type): status=%d; want 415", resp.StatusCode)
+	}
+}
+
+func TestContentType_415_OnWrongContentType(t *testing.T) {
+	ts, tok := newAuthTestServer(t)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/kanban/api/add", strings.NewReader(`{"title":"t"}`))
+	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Errorf("POST (text/plain Content-Type): status=%d; want 415", resp.StatusCode)
+	}
+}
+
+func TestContentType_OK_OnApplicationJSON(t *testing.T) {
+	ts, tok := newAuthTestServer(t)
+	// POST with correct Content-Type must NOT get 415 (may get auth error or
+	// board error, but not 415).
+	resp := post(t, ts.URL+"/kanban/api/delete", tok, `{"id":"K-1"}`)
+	defer drainClose(resp)
+	if resp.StatusCode == http.StatusUnsupportedMediaType {
+		t.Errorf("POST (application/json): status=415; should not be rejected on Content-Type")
+	}
+}
+
+// TestContentType_GetNotGated verifies GET requests are NOT subject to the
+// Content-Type gate (they never send a body).
+func TestContentType_GetNotGated(t *testing.T) {
+	ts, tok := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/kanban/api/board", tok)
+	defer drainClose(resp)
+	if resp.StatusCode == http.StatusUnsupportedMediaType {
+		t.Errorf("GET /kanban/api/board: got 415; GET should not be subject to Content-Type gate")
+	}
+}
+
+// ---- 4. Auth matrix tests --------------------------------------------------
 //
 // The spec requires:
 //   - POST /kanban/api/delete → 401 without token
@@ -344,7 +459,7 @@ func TestAuthMatrix_HostCheck_AllowsLoopbackHost(t *testing.T) {
 		Bus:             bus,
 	})
 
-	protected := dashauth.RequireLocalHost("127.0.0.1:9999", requireTokenExceptRoot(tok, srv.Handler()))
+	protected := dashauth.RequireLocalHost("127.0.0.1:9999", consoleui.RequireTokenForNonStatic(tok, srv.Handler()))
 
 	req := httptest.NewRequest(http.MethodGet, "/kanban/api/board", nil)
 	req.Host = "127.0.0.1:9999"
@@ -358,7 +473,7 @@ func TestAuthMatrix_HostCheck_AllowsLoopbackHost(t *testing.T) {
 	}
 }
 
-// ---- 3. Token management tests ---------------------------------------------
+// ---- 5. Token management tests ---------------------------------------------
 
 // TestToken_CreatesOnMissing verifies LoadOrCreateToken creates a 64-hex token.
 func TestToken_CreatesOnMissing(t *testing.T) {
@@ -413,7 +528,7 @@ func TestToken_FilePath(t *testing.T) {
 	}
 }
 
-// ---- 4. DefaultAddr --------------------------------------------------------
+// ---- 6. DefaultAddr --------------------------------------------------------
 
 func TestDefaultAddr(t *testing.T) {
 	if consoleui.DefaultAddr() != "127.0.0.1:7890" {

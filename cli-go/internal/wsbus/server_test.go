@@ -361,6 +361,159 @@ func TestLoopbackOnly_Accept_IPv6(t *testing.T) {
 	}
 }
 
+// ---- Origin allow-list tests (DNS-rebinding defence) -------------------------
+
+func TestOriginAllowList_RejectsAttackerOrigin(t *testing.T) {
+	b := New()
+	srv, _ := NewServer(ServerConfig{Bus: b, Token: "tok"})
+
+	handler := srv.originAllowList(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
+	req.Header.Set("Origin", "http://evil.example.com")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("attacker origin: status=%d; want 403", rr.Code)
+	}
+}
+
+func TestOriginAllowList_AllowsLoopbackIPv4(t *testing.T) {
+	b := New()
+	srv, _ := NewServer(ServerConfig{Bus: b, Token: "tok"})
+
+	called := false
+	handler := srv.originAllowList(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
+	req.Header.Set("Origin", "http://127.0.0.1:7890")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if !called {
+		t.Error("handler should be called for loopback IPv4 origin")
+	}
+}
+
+func TestOriginAllowList_AllowsLocalhost(t *testing.T) {
+	b := New()
+	srv, _ := NewServer(ServerConfig{Bus: b, Token: "tok"})
+
+	called := false
+	handler := srv.originAllowList(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
+	req.Header.Set("Origin", "http://localhost:7890")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if !called {
+		t.Error("handler should be called for localhost origin")
+	}
+}
+
+func TestOriginAllowList_AllowsLoopbackIPv6(t *testing.T) {
+	b := New()
+	srv, _ := NewServer(ServerConfig{Bus: b, Token: "tok"})
+
+	called := false
+	handler := srv.originAllowList(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
+	req.Header.Set("Origin", "http://[::1]:7890")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if !called {
+		t.Error("handler should be called for loopback IPv6 origin")
+	}
+}
+
+func TestOriginAllowList_AllowsNoOrigin(t *testing.T) {
+	// Requests without an Origin header (e.g. curl, CLI tools) pass through.
+	b := New()
+	srv, _ := NewServer(ServerConfig{Bus: b, Token: "tok"})
+
+	called := false
+	handler := srv.originAllowList(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
+	// No Origin header.
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if !called {
+		t.Error("handler should be called when no Origin header is present")
+	}
+}
+
+// ---- No-content-on-bus invariant --------------------------------------------
+// Guard: only lifecycle/management events should be published to the bus.
+// Token or secret payloads must never appear on the bus.
+
+// TestBusInvariant_NoContentPayloads asserts that none of the well-known
+// event topics carry content/token payloads (i.e. they only carry the
+// structured lifecycle fields defined in event.go).
+func TestBusInvariant_NoContentPayloads(t *testing.T) {
+	// Publish one of each known topic and decode the payload.
+	// If any payload field is named "token", "content", "secret", or similar,
+	// that is a contract violation.
+	sensitiveFields := []string{"token", "content", "secret", "password", "credential", "key"}
+
+	cases := []struct {
+		topic   string
+		payload any
+	}{
+		{TopicKanbanAdded, KanbanAddedPayload{ID: "K-1", Title: "t", Column: "TODO"}},
+		{TopicKanbanMoved, KanbanMovedPayload{ID: "K-1", From: "TODO", To: "DONE"}},
+		{TopicDispatchStarted, DispatchStartedPayload{Agent: "a", Project: "/p"}},
+		{TopicDispatchFinished, DispatchFinishedPayload{Agent: "a", Project: "/p", ExitCode: 0}},
+		{TopicPresence, PresencePayload{User: "u", Host: "h", Status: "active"}},
+	}
+
+	b := New()
+	sub := b.Subscribe("")
+	defer sub.Unsubscribe()
+
+	for _, c := range cases {
+		b.Publish(c.topic, c.payload)
+	}
+
+	received := 0
+	for received < len(cases) {
+		select {
+		case ev := <-sub.C():
+			received++
+			// Check payload JSON for sensitive field names.
+			// json.RawMessage is just a []byte holding the JSON encoding.
+			payloadStr := string(ev.Payload)
+			for _, field := range sensitiveFields {
+				// Look for the field as a JSON key (e.g. "token":).
+				// Conservative check — false positives in values are acceptable
+				// as a guard against accidental credential leakage.
+				if strings.Contains(payloadStr, `"`+field+`"`) {
+					t.Errorf("topic %q: payload contains sensitive field %q; tokens/secrets must never be published to the bus", ev.Topic, field)
+				}
+			}
+		}
+	}
+}
+
 // ---- Serve lifecycle ---------------------------------------------------------
 
 func TestServer_ServeAndShutdown(t *testing.T) {

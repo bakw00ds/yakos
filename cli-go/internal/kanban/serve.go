@@ -101,6 +101,11 @@ type server struct {
 	mu           sync.Mutex // serialises board mutations (mirrors Python _mutate_lock)
 	allowedHosts map[string]struct{}
 	mux          *http.ServeMux
+	// skipHostCheck, when true, disables the inner hostOK check in all route
+	// handlers.  Set by NewKanbanServer/Handler() when the server is mounted
+	// behind an external edge auth (e.g. the consoleui RequireLocalHost +
+	// RequireToken middleware).  The standalone Serve() path leaves this false.
+	skipHostCheck bool
 }
 
 // Handler returns the underlying http.Handler for this server WITHOUT the
@@ -129,8 +134,13 @@ func (k *KanbanServer) Handler() http.Handler { return k.inner.Handler() }
 // Callers that mount the handler under a parent mux (e.g. consoleui) should
 // call Handler() on the returned value; callers that want a standalone server
 // should call the package-level Serve function.
+//
+// When mounted via Handler(), the inner hostOK check is disabled because
+// the console edge (RequireLocalHost + RequireToken) is the auth authority.
 func NewKanbanServer(boardPath, project, host string) *KanbanServer {
-	return &KanbanServer{inner: newServer(boardPath, project, host)}
+	inner := newServer(boardPath, project, host)
+	inner.skipHostCheck = true
+	return &KanbanServer{inner: inner}
 }
 
 // newServer constructs a server and wires all routes onto its internal mux.
@@ -234,7 +244,13 @@ func Serve(cfg ServeConfig) (ServeResult, error) {
 
 // ---- handler helpers --------------------------------------------------------
 
+// hostOK returns true when the request's Host header is in the allow-list OR
+// when skipHostCheck is set (i.e. the server is mounted behind external edge
+// auth that already validated the host, such as the consoleui middleware).
 func (s *server) hostOK(r *http.Request) bool {
+	if s.skipHostCheck {
+		return true
+	}
 	host := r.Host
 	// Strip port suffix.
 	if h, _, err := net.SplitHostPort(host); err == nil {

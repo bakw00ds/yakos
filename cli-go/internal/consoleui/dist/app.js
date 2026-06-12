@@ -14,24 +14,19 @@
 //
 //   Instead, every iframe sub-request must carry "Authorization: Bearer".
 //   A plain <iframe> cannot inject request headers.  We solve this via a
-//   Service Worker registered at the console origin that intercepts all
-//   sub-resource fetch requests and injects the Authorization header.
+//   Service Worker registered at the console origin (served from /sw.js,
+//   scope /) that intercepts all sub-resource fetch requests and injects
+//   the Authorization header.  The token is delivered to the SW via
+//   postMessage only — it is never stored in cookies or localStorage.
 //
-//   If Service Workers are unavailable (rare: private/incognito mode on some
-//   browsers), the iframes fall back to query-param delivery:
-//   /kanban/?_tok=<token>.  The server's RequireToken middleware accepts
-//   the Authorization header only; the ?_tok fallback is handled by the
-//   console's own proxy endpoint at /api/proxy/* which re-forwards with the
-//   header.  For Phase 1 the fallback degrades gracefully (a 401 in the
-//   iframe plus a visible error message).
+//   If Service Workers are unavailable (e.g. private/incognito mode on some
+//   browsers), the iframes will receive a 401 and the auth-error UI is shown
+//   instead.  There is no query-param fallback — tokens must never appear in
+//   URLs or browser history.
 //
-//   NOTE: since the edge RequireToken middleware applies to EVERY request
-//   (including /, /app.js, /styles.css), the initial page load itself
-//   requires the token.  The operator opens the URL with #token=... which
-//   means the initial GET / is a bare request WITHOUT the token — 401.
-//   To handle this: the server exempts GET / (the SPA shell) from token
-//   auth (SPA is public; all data APIs and sub-paths require the token).
-//   This matches perfdash's pattern where static assets are unauthenticated.
+//   NOTE: /, /app.js, /styles.css, and /sw.js are token-exempt so the
+//   browser can load the shell and register the SW before the token is
+//   available.  All data APIs and sub-dashboard paths require the token.
 //
 // WebSocket:
 //   The /v1/events WS endpoint is also at the console origin.  JS sends
@@ -60,49 +55,25 @@
   extractAndStripToken();
 
   // ---- 2. Service Worker registration ----------------------------------------
-  // The SW intercepts same-origin sub-resource fetches and injects
+  // The SW is served from /sw.js (same-origin, token-exempt) at scope '/'.
+  // It intercepts same-origin sub-resource fetches and injects
   // "Authorization: Bearer <token>" so iframe-loaded dashboards pass auth.
+  // The token is delivered via postMessage only — never stored.
 
   let swReady = false;
 
   function registerServiceWorker() {
     if (!TOKEN) return;
     if (!('serviceWorker' in navigator)) {
-      console.warn('[console] Service Worker unavailable — iframe auth may fail in private mode');
+      console.warn('[console] Service Worker unavailable — iframe auth will fail');
       return;
     }
 
-    // The SW script is inlined as a Blob URL to avoid needing a separate file.
-    const swCode = `
-const TOKEN_KEY = 'yakos-console-token';
-self.addEventListener('message', (e) => {
-  if (e.data && e.data.type === 'SET_TOKEN') {
-    self.token = e.data.token;
-  }
-});
-self.addEventListener('fetch', (e) => {
-  const url = new URL(e.request.url);
-  // Only intercept same-origin requests that don't already have auth.
-  if (url.origin !== self.location.origin) return;
-  if (e.request.headers.get('Authorization')) return;
-  if (!self.token) return;
-  const modified = new Request(e.request, {
-    headers: new Headers({
-      ...Object.fromEntries(e.request.headers.entries()),
-      'Authorization': 'Bearer ' + self.token,
-    }),
-    mode: 'same-origin',
-    credentials: 'omit',
-  });
-  e.respondWith(fetch(modified));
-});
-`;
-    const blob = new Blob([swCode], { type: 'application/javascript' });
-    const swURL = URL.createObjectURL(blob);
-
-    navigator.serviceWorker.register(swURL, { scope: '/' })
+    // Register the SW from its real same-origin path /sw.js.
+    // Blob-URL registration is rejected by Chrome/Firefox at scope '/'.
+    navigator.serviceWorker.register('/sw.js', { scope: '/' })
       .then((reg) => {
-        // Send token to the SW.
+        // Send token to the SW via postMessage (memory-only; never persisted).
         const target = reg.installing || reg.waiting || reg.active;
         if (target) {
           target.postMessage({ type: 'SET_TOKEN', token: TOKEN });
@@ -177,9 +148,15 @@ self.addEventListener('fetch', (e) => {
       const panel = document.getElementById('panel-' + id);
       const iframe = panel && panel.querySelector('iframe');
       if (iframe) {
-        // If SW is ready, the iframe will get the token injected automatically.
-        // If not, we append it as a query param for the server's fallback handler.
-        iframe.src = swReady ? tab.src : (tab.src + (TOKEN ? '?_tok=' + encodeURIComponent(TOKEN) : ''));
+        if (!swReady) {
+          // SW not yet ready or unavailable — show auth error instead of
+          // loading a tab that will receive 401.  The token must never appear
+          // in a URL or query string.
+          document.getElementById('auth-error').classList.add('visible');
+          return;
+        }
+        // SW is registered; it will inject Authorization: Bearer automatically.
+        iframe.src = tab.src;
       }
     }
   }

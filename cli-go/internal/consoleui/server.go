@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	_ "embed"
@@ -24,6 +25,9 @@ var appJS []byte
 
 //go:embed dist/styles.css
 var stylesCSS []byte
+
+//go:embed dist/sw.js
+var swJS []byte
 
 // Config holds all configuration for the unified console HTTP server.
 type Config struct {
@@ -73,20 +77,26 @@ type Server struct {
 // New constructs a Server and wires all routes.
 //
 // Auth model:
-//   - The ENTIRE mux (including static assets at / /app.js /styles.css) is
-//     protected by RequireLocalHost + RequireToken at the edge EXCEPT for
-//     GET / which serves the SPA shell unauthenticated (the browser needs to
-//     load the shell before it can read the fragment token and authenticate).
+//   - The static SPA shell assets (/, /app.js, /styles.css, /sw.js) are
+//     served WITHOUT a token requirement so the browser can load them and
+//     register the Service Worker before the token is available.
+//   - All other paths (sub-dashboards /kanban/, /cost/, /perf/, /v1/events,
+//     and any future API paths) require the edge bearer token.
+//   - Non-GET requests without Content-Type: application/json receive 415
+//     (forces a CORS preflight that a cross-origin attacker cannot satisfy).
+//   - The entire mux is wrapped by RequireLocalHost so only loopback
+//     connections are accepted.
 //   - Sub-dashboard handlers are mounted via Handler() without their inner
 //     per-dashboard Host/token middleware.
-//   - /v1/events is mounted from wsbus.Server.Handler() which retains only
-//     the loopbackOnly middleware (token auth is handled at the edge).
+//   - /v1/events is mounted from wsbus.Server.Handler() which enforces
+//     loopback-only + Origin allow-list (DNS-rebinding defence).
 func New(cfg Config) *Server {
 	s := &Server{cfg: cfg, mux: http.NewServeMux()}
 	s.registerRoutes()
-	// Wrap with edge auth: Host check + single token.
-	// GET / is exempt so the browser can load the SPA shell from the fragment URL.
-	protected := dashauth.RequireLocalHost(cfg.addr(), requireTokenExceptRoot(cfg.Token, s.mux))
+	// Wrap with edge auth: Host check + token (with static-asset exemptions)
+	// + Content-Type gate for mutations.
+	protected := dashauth.RequireLocalHost(cfg.addr(),
+		requireTokenForNonStatic(cfg.Token, requireJSONForMutations(s.mux)))
 	s.httpSrv = &http.Server{
 		Addr:         cfg.addr(),
 		Handler:      protected,
@@ -146,12 +156,17 @@ func (s *Server) Serve(ctx context.Context) error {
 
 // registerRoutes wires all console endpoints.
 func (s *Server) registerRoutes() {
-	// ---- Static SPA shell (unauthenticated — token arrives via fragment) ----
+	// ---- Static SPA shell (token-exempt — token arrives via fragment) ----------
 	// Use method-neutral patterns to avoid the Go 1.22 method-specificity
 	// conflict with the path-prefix handlers below (which are also method-neutral).
 	s.mux.HandleFunc("/", s.handleIndex)
 	s.mux.HandleFunc("/app.js", s.handleAppJS)
 	s.mux.HandleFunc("/styles.css", s.handleCSS)
+	// Service Worker served from a real same-origin path so browsers accept
+	// registration at scope '/'.  Blob-URL registration is rejected by
+	// Chrome/Firefox at scope '/'.  /sw.js is token-exempt (it carries no
+	// secrets; the token is delivered via postMessage only).
+	s.mux.HandleFunc("/sw.js", s.handleSW)
 
 	// ---- Kanban sub-dashboard -----------------------------------------------
 	// Mount kanban.Handler() under /kanban/. The kanban handler's own
@@ -174,29 +189,47 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("/perf/", http.StripPrefix("/perf", perfSrv.Handler()))
 
 	// ---- WebSocket event stream at console origin ----------------------------
-	// wsbus.Server.Handler() mounts /v1/events with loopbackOnly middleware.
-	// The token is validated at the console edge (RequireToken above), so we
-	// build the wsbus.Server without a token requirement for the inner handler.
-	// We create a synthetic wsbus.Server that exposes just the WS handler.
+	// wsbus.Server.Handler() mounts /v1/events with loopbackOnly + Origin
+	// allow-list middleware (DNS-rebinding defence).  The console edge token
+	// (RequireToken above) is the auth authority; the wsbus Handler() path
+	// does not add a second token check.
 	if s.cfg.Bus != nil {
 		wsSrv, err := wsbus.NewServer(wsbus.ServerConfig{
-			// Token is intentionally set to the console token so the wsbus
-			// inner authenticate middleware also enforces it. The edge token
-			// check already validated it, but defence-in-depth is cheap.
 			Token: s.cfg.Token,
 			Bus:   s.cfg.Bus,
 		})
 		if err == nil {
-			// Mount the WS handler. The wsbus Handler() includes loopbackOnly
-			// but NOT the authenticate middleware (that's in Serve's mux).
-			// Here we use the full Handler() which includes authenticate so
-			// that the WS upgrade also validates the token in both directions.
+			// Mount the WS handler. wsbus.Handler() applies loopbackOnly and
+			// Origin allow-list (derived from the console addr) but NOT the
+			// authenticate middleware — auth is at the console edge.
 			s.mux.Handle("/v1/events", wsSrv.Handler())
 		}
 	}
 }
 
 // ---- static handlers --------------------------------------------------------
+
+// cspHeader returns the Content-Security-Policy value for the given bind addr.
+// Serving the CSP as a response header (rather than a <meta> tag) ensures the
+// connect-src ws:// origin is correct for any --console-addr value.
+func cspHeader(addr string) string {
+	// Derive the ws:// origin from the bound address.
+	// addr is "host:port" (e.g. "127.0.0.1:7890").
+	wsOrigin := "ws://" + addr
+	return strings.Join([]string{
+		"default-src 'self'",
+		// app.js and sw.js are same-origin; no blob: needed.
+		"script-src 'self'",
+		"style-src 'self' 'unsafe-inline'",
+		// Allow WS connection to the console itself (for /v1/events).
+		"connect-src 'self' " + wsOrigin,
+		"frame-src 'self'",
+		"base-uri 'none'",
+		"form-action 'none'",
+		"object-src 'none'",
+		"frame-ancestors 'none'",
+	}, "; ")
+}
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	// Only serve the root path; let sub-paths 404 so they're handled by sub-muxes.
@@ -206,6 +239,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
+	// Emit CSP as a response header so the ws:// origin matches --console-addr.
+	w.Header().Set("Content-Security-Policy", cspHeader(s.cfg.addr()))
 	// Cross-Origin-Resource-Policy: same-origin — prevents cross-origin reads.
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	_, _ = w.Write(indexHTML)
@@ -225,21 +260,76 @@ func (s *Server) handleCSS(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(stylesCSS)
 }
 
+func (s *Server) handleSW(w http.ResponseWriter, r *http.Request) {
+	// Service-Worker-Allowed: / is required for a SW at /sw.js to claim scope '/'.
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Service-Worker-Allowed", "/")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	_, _ = w.Write(swJS)
+}
+
 // ---- auth helpers -----------------------------------------------------------
 
-// requireTokenExceptRoot wraps next with RequireToken for every path EXCEPT
-// GET / (the SPA shell).  The SPA shell must be served without a token so the
-// browser can load it and read the #token fragment.
+// isStaticAsset reports whether the request is for a token-exempt static asset.
+// The assets /, /app.js, /styles.css, and /sw.js carry no secrets and must be
+// accessible before the browser can obtain and present the bearer token.
+func isStaticAsset(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	switch r.URL.Path {
+	case "/", "/app.js", "/styles.css", "/sw.js":
+		return true
+	}
+	return false
+}
+
+// RequireTokenForNonStatic wraps next with RequireToken for every path EXCEPT
+// the token-exempt static assets (/, /app.js, /styles.css, /sw.js).
+// All API paths, sub-dashboard paths, and /v1/events require the token.
 //
-// All API paths, sub-dashboard paths, /app.js, /styles.css, and /v1/events
-// require the token.  The SPA itself does not contain sensitive data.
-func requireTokenExceptRoot(token string, next http.Handler) http.Handler {
+// Exported so tests can replicate the production edge middleware without
+// importing internal details.
+func RequireTokenForNonStatic(token string, next http.Handler) http.Handler {
+	return requireTokenForNonStatic(token, next)
+}
+
+func requireTokenForNonStatic(token string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/" {
+		if isStaticAsset(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		dashauth.RequireToken(token, next.ServeHTTP)(w, r)
+	})
+}
+
+// RequireJSONForMutations wraps next with a Content-Type check for non-GET
+// methods.  Any mutating request that does not declare Content-Type:
+// application/json receives 415 Unsupported Media Type.
+//
+// This forces a CORS preflight on cross-origin mutation attempts because
+// "application/json" is not a CORS-simple content type.  A cross-origin
+// attacker whose preflight is rejected cannot replay the mutation.
+// Token-exempt static assets (all GET) are not affected.
+//
+// Exported so tests can replicate the production edge middleware.
+func RequireJSONForMutations(next http.Handler) http.Handler {
+	return requireJSONForMutations(next)
+}
+
+func requireJSONForMutations(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			ct := r.Header.Get("Content-Type")
+			// Accept "application/json" with or without charset suffix.
+			if !strings.HasPrefix(ct, "application/json") {
+				http.Error(w, "415 Unsupported Media Type: Content-Type must be application/json", http.StatusUnsupportedMediaType)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
