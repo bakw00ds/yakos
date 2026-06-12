@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -325,22 +326,37 @@ func TestRunStream_DispatchFinishedParity(t *testing.T) {
 // TestRunStream_BoundedReaderToleratesLargeInitLine verifies that a multi-KB
 // system/init line does not cause the bounded reader to fail.  The line is
 // dropped (system events are ignored) and subsequent deltas still arrive.
+//
+// The fixture is written to a temp file and served via "cat <file>" so the
+// large line never appears in a shell argv — avoiding Linux ARG_MAX limits
+// (~128 KB–2 MB) that caused this test to fail on CI.
 func TestRunStream_BoundedReaderToleratesLargeInitLine(t *testing.T) {
 	logDir := isolatedLogDir(t)
 	yakosRoot := buildFakeRoster(t, "chat-agent", "System prompt.")
 
 	// Build a line that is well above a naive 64KB scanner limit (e.g. 200KB).
+	// The line stays under maxStreamLineBytes (2MB) so the bounded reader keeps
+	// it in lineBuf and parses it — but as a "system" event it is dropped,
+	// and the subsequent text_delta must still arrive.
 	bigTool := strings.Repeat("X", 200*1024)
 	bigInitLine := `{"type":"system","subtype":"init","data":"` + bigTool + `"}`
 
-	lines := []string{
+	rawLines := []string{
 		bigInitLine,
 		`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}`,
 		`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"after big init"}}}`,
-		`{"type":"result","subtype":"success","result":"after big init","is_error":false,"duration_ms":10,"total_cost_usd":0.0001,"usage":{}}`,
+		`{"type":"result","subtype":"success","result":"after big init","is_error":false,"duration_ms":10,"total_cost_usd":0.0001,"usage":{}}` + "\n",
 	}
 
-	fakeAdapter := &fakeClaudeStreamAdapter{lines: lines}
+	// Write fixture to a temp file (avoids passing 200KB via shell argv on Linux).
+	var buf bytes.Buffer
+	for _, l := range rawLines {
+		buf.WriteString(l)
+		buf.WriteByte('\n')
+	}
+	// newLargePipeAdapter writes the bytes to a temp file and returns an adapter
+	// whose ChatExecCmd runs "cat <file>" — tiny argv regardless of content size.
+	fakeAdapter := newLargePipeAdapter(t, "claude", buf.Bytes())
 
 	svc := NewService(ServiceConfig{
 		YakosRoot:     yakosRoot,
@@ -349,7 +365,7 @@ func TestRunStream_BoundedReaderToleratesLargeInitLine(t *testing.T) {
 	})
 
 	var tokenTexts []string
-	withStreamRunFn(func(ctx context.Context, req Request, adapter runtime.Adapter, chatReq runtime.ChatDispatchRequest, onChunk func(StreamChunk)) (Result, error) {
+	withStreamRunFn(func(ctx context.Context, req Request, _ runtime.Adapter, chatReq runtime.ChatDispatchRequest, onChunk func(StreamChunk)) (Result, error) {
 		return execWithStreaming(ctx, req, fakeAdapter, chatReq, func(c StreamChunk) {
 			if c.Type == "token" {
 				tokenTexts = append(tokenTexts, c.Text)
@@ -376,28 +392,19 @@ func TestRunStream_BoundedReaderToleratesLargeInitLine(t *testing.T) {
 // TestRunStream_ContextCancelKillsStream verifies that cancelling the context
 // causes RunStream to return (without deadlocking), even if the fake adapter
 // would otherwise emit more lines.
+//
+// Race-safety discipline: body() must not return until the goroutine that calls
+// svc.RunStream (which reads the package-global streamRunFn) has fully exited.
+// withStreamRunFn restores streamRunFn = orig in a defer that fires when body()
+// returns; if the goroutine is still mid-RunStream at that point, the write of
+// streamRunFn races with the goroutine's read.  A sync.WaitGroup inside body()
+// prevents body() from returning before the goroutine is joined.
 func TestRunStream_ContextCancelKillsStream(t *testing.T) {
 	logDir := isolatedLogDir(t)
 	yakosRoot := buildFakeRoster(t, "chat-agent", "System prompt.")
 
-	// A fake adapter that blocks forever after the first line.
-	// We implement this via a shell script that sleeps.
-	sleepAdapter := &fakeClaudeStreamAdapter{lines: []string{
-		// One initial chunk then silence (the sleep command holds stdout open).
-	}}
-	// Override ChatExecCmd to emit one line then sleep.
-	_ = sleepAdapter
-
-	// Use a custom fake that writes one line then sleeps.
-	type sleepingAdapter struct {
-		fakeClaudeStreamAdapter
-	}
-
-	sad := &sleepingAdapter{}
-	sad.lines = nil
-
-	// Replace streamRunFn with a version that uses execWithStreaming but
-	// with a custom cmd that sleeps.  We cancel the context to kill it.
+	// Replace streamRunFn with a version that uses a sh -c 'sleep 30' command
+	// so the stream blocks until the context is cancelled.
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
@@ -407,22 +414,30 @@ func TestRunStream_ContextCancelKillsStream(t *testing.T) {
 		OperatorID:    "test-op",
 	})
 
-	// Install a streamRunFn that uses a sh -c 'sleep 30' command.
 	withStreamRunFn(func(ctx2 context.Context, req Request, _ runtime.Adapter, chatReq runtime.ChatDispatchRequest, onChunk func(StreamChunk)) (Result, error) {
+		// exec.CommandContext ties the process lifetime to ctx2, so when the
+		// context is cancelled the OS kills "sleep 30" and StdoutPipe.Read
+		// returns with an error, unblocking us.
 		sleepCmd := exec.CommandContext(ctx2, "sh", "-c", "sleep 30") //nolint:gosec
-		// Use execWithStreaming logic manually: attach pipe, start, wait.
 		stdout, err := sleepCmd.StdoutPipe()
 		if err != nil {
 			return Result{ExitCode: -1}, err
 		}
 		_ = sleepCmd.Start()
 		buf := make([]byte, 1024)
-		_, _ = stdout.Read(buf) // will block until ctx2 cancels
+		_, _ = stdout.Read(buf) // blocks until ctx2 is cancelled
 		_ = sleepCmd.Wait()
 		return Result{ExitCode: -1}, ctx2.Err()
 	}, func() {
 		done := make(chan error, 1)
+
+		// wg ensures body() does not return until the goroutine has fully
+		// exited, preventing a concurrent read of streamRunFn after
+		// withStreamRunFn's defer restores it.
+		var wg sync.WaitGroup
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			_, err := svc.RunStream(ctx, Params{
 				Agent:   "chat-agent",
 				Task:    "task",
@@ -431,13 +446,23 @@ func TestRunStream_ContextCancelKillsStream(t *testing.T) {
 			done <- err
 		}()
 
+		timedOut := false
 		select {
 		case err := <-done:
 			// RunStream must return (with or without error — cancellation is expected).
 			t.Logf("RunStream returned with: %v", err)
 		case <-time.After(3 * time.Second):
-			t.Fatal("RunStream did not return after context cancellation")
+			// Report timeout via t.Error (not t.Fatal) so wg.Wait() below can
+			// still run and drain the goroutine before body() returns.
+			t.Error("RunStream did not return after context cancellation")
+			timedOut = true
 		}
+
+		// Always join the goroutine before body() returns.  This is the
+		// critical sync point: withStreamRunFn's defer (streamRunFn = orig)
+		// must not fire while the goroutine is still reading streamRunFn.
+		wg.Wait()
+		_ = timedOut
 	})
 }
 
