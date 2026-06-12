@@ -77,6 +77,15 @@ var ErrTooManyConns = errTooManyConns
 // ErrTooManySessions is exported so external tests can identify the error type.
 var ErrTooManySessions = errTooManySessions
 
+// ErrSessionNotFound is exported so external tests can identify the sentinel
+// returned by SetShared when the session does not exist.
+var ErrSessionNotFound = errSessionNotFound
+
+// ErrSessionOwnerConflict is exported so external tests can identify the
+// sentinel returned by SetShared / OpenSession when the session is owned by a
+// different operator.
+var ErrSessionOwnerConflict = errSessionOwnerConflict
+
 // ---- Transcripts test exports -----------------------------------------------
 
 // NewTranscriptsForTest allocates a Transcripts for use in external tests.

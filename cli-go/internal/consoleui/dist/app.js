@@ -230,7 +230,10 @@
     });
     ws.addEventListener('close', () => {
       ws = null;
-      setTimeout(connectWS, wsRetryMs);
+      // Jitter: randomise delay to prevent thundering-herd reconnects when
+      // many tabs reconnect simultaneously after a daemon restart.
+      const jitteredDelay = wsRetryMs * (0.5 + Math.random() * 0.5);
+      setTimeout(connectWS, jitteredDelay);
       wsRetryMs = Math.min(wsRetryMs * 2, 30000);
     });
     ws.addEventListener('error', () => {
@@ -557,6 +560,12 @@
     }).then((resp) => {
       if (!resp.ok) {
         console.warn('[chat SSE] connect failed:', resp.status);
+        // 401/403 are permanent auth failures (misconfigured SW or expired
+        // token); retrying every 30s would hammer the server pointlessly.
+        if (resp.status === 401 || resp.status === 403) {
+          console.error('[chat SSE] auth failure (' + resp.status + ') — stopping SSE retry');
+          return;
+        }
         scheduleSSERetry();
         return;
       }
@@ -572,20 +581,33 @@
             return;
           }
           buf += decoder.decode(value, { stream: true });
-          // SSE frames end with \n\n.
+          // SSE frames are delimited by a blank line (\n\n or \r\n\r\n).
+          // Normalise \r\n to \n so a single split covers both wire variants.
+          buf = buf.replace(/\r\n/g, '\n');
           const frames = buf.split('\n\n');
           buf = frames.pop(); // keep the incomplete last chunk
           for (const frame of frames) {
-            const line = frame.trim();
-            if (!line || line.startsWith(':')) continue; // heartbeat comment
-            if (line.startsWith('data: ')) {
-              const jsonStr = line.slice(6);
-              try {
-                const ev = JSON.parse(jsonStr);
-                handleSSEEvent(ev);
-              } catch {
-                // ignore malformed JSON
+            if (!frame.trim()) continue;
+            // Per RFC 8895: a frame may contain multiple lines; accumulate all
+            // "data:" lines before parsing (handles multi-line data values).
+            const lines = frame.split('\n');
+            let dataParts = [];
+            let isComment = false;
+            for (const line of lines) {
+              if (line.startsWith(':')) { isComment = true; continue; } // heartbeat / comment
+              if (line.startsWith('data: ')) {
+                dataParts.push(line.slice(6));
+              } else if (line === 'data') {
+                dataParts.push('');
               }
+            }
+            if (dataParts.length === 0) continue; // comment-only frame or no data
+            const jsonStr = dataParts.join('\n');
+            try {
+              const ev = JSON.parse(jsonStr);
+              handleSSEEvent(ev);
+            } catch {
+              // ignore malformed JSON
             }
           }
           pump();
@@ -603,10 +625,13 @@
 
   function scheduleSSERetry() {
     if (chatSSERetryTimer) clearTimeout(chatSSERetryTimer);
+    // Jitter: randomise delay to prevent thundering-herd reconnects when many
+    // tabs retry simultaneously after a daemon restart.
+    const jitteredDelay = chatSSERetryMs * (0.5 + Math.random() * 0.5);
     chatSSERetryTimer = setTimeout(() => {
       chatSSERetryMs = Math.min(chatSSERetryMs * 2, 30000);
       startChatSSE();
-    }, chatSSERetryMs);
+    }, jitteredDelay);
   }
 
   // ---- SSE event demux -------------------------------------------------------
@@ -764,12 +789,15 @@
   function closePane(paneId) {
     const pane = chatPanes.get(paneId);
     if (!pane) return;
-    // If streaming, cancel first.
+    // If streaming, cancel first.  cancelPaneSession nulls activeSessionId, so
+    // any reference to pane.activeSessionId below reflects the post-cancel state.
     if (pane.activeSessionId) {
       cancelPaneSession(paneId);
     }
     stopElapsedTimer(pane);
-    if (pane.activeSessionId) sessionToPaneId.delete(pane.activeSessionId);
+    // Note: pane.activeSessionId is null here — cancelPaneSession (above) always
+    // nulls it, and if there was no active session the guard above skipped it.
+    // The sessionToPaneId entry was already removed inside cancelPaneSession.
     chatPanes.delete(paneId);
     savePaneState();
     const el = document.getElementById('pane-' + paneId);
@@ -1021,11 +1049,18 @@
       const exitOk = msg.exitCode === 0;
       const costStr = msg.costUSD != null ? '$' + msg.costUSD.toFixed(4) : formatCostUnavailable(pane.runtime);
       const durationStr = msg.durationS != null ? msg.durationS.toFixed(1) + 's' : '';
+      // errorText is server-supplied (resp.text() from a failed dispatch).
+      // MUST go through esc() — never raw innerHTML.  Rendered here so the user
+      // sees the dispatch error message rather than a silent failure.
+      const errorHtml = msg.errorText
+        ? '<span class="chat-summary-error">' + esc(msg.errorText) + '</span>'
+        : '';
       el.innerHTML =
         '<span class="chat-summary-icon" aria-hidden="true">' + (exitOk ? '✓' : '✗') + '</span>' +
         '<span class="sr-only">' + esc(exitOk ? 'Completed' : 'Failed') + '</span>' +
         '<span class="chat-summary-cost">' + esc(costStr) + '</span>' +
-        (durationStr ? '<span class="chat-summary-duration">' + esc(durationStr) + '</span>' : '');
+        (durationStr ? '<span class="chat-summary-duration">' + esc(durationStr) + '</span>' : '') +
+        errorHtml;
     }
 
     return el;
@@ -1259,12 +1294,18 @@
   }
 
   function formatCost(cost, runtime) {
+    // cost===null means no turn has completed yet (idle pane or non-cost runtime).
+    // Show '–' for idle panes rather than '$0.0000' which implies a real $0 cost.
+    // Only show a real cost string once a summary event has set it.
     if (cost == null) return formatCostUnavailable(runtime);
     return '$' + cost.toFixed(4);
   }
 
   function formatCostUnavailable(runtime) {
-    if (STREAMING_RUNTIMES.has(runtime)) return '$0.0000';
+    // Non-streaming runtimes report "cost unavailable" (server never sends a cost).
+    // Streaming runtimes (claude) will eventually report a cost; until then show
+    // '–' to distinguish "not yet known" from "$0.0000" (which would be a real cost).
+    if (STREAMING_RUNTIMES.has(runtime)) return '–'; // en-dash
     return 'cost unavailable';
   }
 

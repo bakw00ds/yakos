@@ -155,13 +155,15 @@ func (ch *chatHandlers) handleChatStream(w http.ResponseWriter, r *http.Request)
 
 	// Validate operatorId from query (SSE — browser uses fetch; SW injects
 	// Authorization header; but operatorId is attribution, not auth).
+	// Empty check before ValidateIdentityField (which returns nil for empty)
+	// to match the validation order used in handleChatShare and handleChatCancel.
 	operatorID := r.URL.Query().Get("operatorId")
-	if err := dispatch.ValidateIdentityField("operator_id", operatorID); err != nil {
-		http.Error(w, "invalid operatorId", http.StatusBadRequest)
-		return
-	}
 	if operatorID == "" {
 		http.Error(w, "operatorId is required", http.StatusBadRequest)
+		return
+	}
+	if err := dispatch.ValidateIdentityField("operator_id", operatorID); err != nil {
+		http.Error(w, "invalid operatorId", http.StatusBadRequest)
 		return
 	}
 
@@ -643,21 +645,22 @@ func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Ownership check: only the session owner may change the shared flag.
-	owner, exists := ch.hub.SessionOwner(req.SessionID)
-	if !exists {
-		http.Error(w, "session not found", http.StatusNotFound)
-		return
-	}
-	if owner != req.OperatorID {
-		http.Error(w, "forbidden: session owned by different operator", http.StatusForbidden)
-		return
-	}
-
-	// Re-open session with updated shared flag (idempotent for same owner).
-	if err := ch.hub.OpenSession(req.SessionID, req.OperatorID, req.Shared); err != nil {
-		// errSessionOwnerConflict cannot occur here (we just verified owner == req.OperatorID),
-		// but handle defensively.
+	// Atomic ownership check + shared-flag update via SetShared.
+	//
+	// The previous SessionOwner+OpenSession two-step had a TOCTOU window:
+	// the dispatch goroutine's deferred CloseSession could fire between the two
+	// calls, causing OpenSession to recreate a session entry that nothing ever
+	// closes (permanent leak toward maxTotalSessions=256).  SetShared holds the
+	// hub mutex across the entire check-and-update, closing that window.
+	if err := ch.hub.SetShared(req.SessionID, req.OperatorID, req.Shared); err != nil {
+		if errors.Is(err, errSessionNotFound) {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, errSessionOwnerConflict) {
+			http.Error(w, "forbidden: session owned by different operator", http.StatusForbidden)
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
