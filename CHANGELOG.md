@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0.1] — 2026-06-11
+
+### Security
+
+- Bump `google.golang.org/grpc` v1.64.0 → v1.79.3, resolving
+  **GO-2026-4762** (gRPC-Go authorization bypass reachable via the
+  gRPC server). (#139)
+- Add loopback-dashboard Host-header / DNS-rebinding defense
+  (`internal/dashauth`): allowlist-only Host validation,
+  constant-time token compare, `--show-token` flag. (#138, #139)
+- Harden hooks: remove `eval` of interpolated data in retro-dispatch;
+  add `sk-ant-` / Google secret-scan patterns to the secret scanner;
+  tighten path-allowlist allow/deny logic. (#138)
+- Validate installer `--prefix` before writing the shell profile. (#138)
+
+### Fixed
+
+- Unify metric-path resolver so dashboard trends no longer drop
+  budgeted metrics when the path has mismatched separators. (#139)
+- Per-tool analyzer timeout now uses `ctx.Err()` for cross-platform
+  compatibility (replaces SIGKILL-based approach). (#139)
+- Dashboard history mtime-cache invalidated correctly on concurrent
+  writes. (#139)
+- Single-call DORA tag scan (eliminates duplicate git-log invocations
+  per tag). (#139)
+- `TestStatusParity` fixture and flake resolved. (#139)
+- Remove dead code and unused parameters identified in release audit.
+  (#139)
+
+### Changed
+
+- SHA-pin all GitHub Actions in CI workflows; add `govulncheck` gate;
+  recompute checksums after code-signing; pin Go version in CI; scope
+  `GITHUB_TOKEN` to minimum required permissions; extend go-ci path
+  filters to include `lib/rules` and `lib/playbooks`. (#139)
+
+### Docs
+
+- Refresh README, getting-started, and overview docs to v0.39. (#137)
+- Fix UPGRADING, ADR-0001, CHANGELOG, `fable` references, and counts.
+  (#140)
+- Add **ADR-0002** documenting embed-lib materialization design. (#140)
+- Persist release-audit reports under
+  `docs/audits/2026-06-11-v0.39.0.0/`. (#140)
+
 ## [0.39.0.0] — 2026-06-11
 
 ### Added
