@@ -147,7 +147,7 @@ adapters land at `~/.yakos/plugins/<id>/runtime.sh` and are
 discovered by the resolver after built-ins
 (see [plugin-spec.md](plugin-spec.md)).
 
-## Agent inventory (33 framework templates)
+## Agent inventory (38 framework agents, incl. 5 framework-internal)
 
 **Cross-cutting orchestration:**
 
@@ -222,7 +222,17 @@ discovered by the resolver after built-ins
 | `content-strategist` | UI strings, microcopy, voice & tone. |
 | `i18n-specialist` | Locale, RTL, CLDR plurals, `Intl` formatting. |
 
-## Skill inventory (44 procedural skills)
+**Framework-internal (5 agents not typically overridden per-project):**
+
+| Agent | What it owns |
+|---|---|
+| `supervisor` | Live shadow-agent; judges lead sessions on 4 axes; never edits code. |
+| `librarian` | 10-cycle retrospectives; curates skill candidates; never auto-promotes. |
+| `model-routing-eval` | Evaluates agent golden sets across model tiers for routing decisions. |
+| `general-codex` | Generic specialist dispatched on codex runtime. |
+| `general-agy` | Generic specialist dispatched on agy (Antigravity) runtime. |
+
+## Skill inventory (58 procedural skills)
 
 **Session lifecycle:** `session-recovery`, `session-summary`,
 `split-mega-task`, `iterate-until`, `phase-complete`,
@@ -231,10 +241,12 @@ discovered by the resolver after built-ins
 
 **Release + maintenance:** `version-bump`, `pre-commit`,
 `deploy-check`, `dependency-update`, `release-audit`,
-`release-cut` *(via release-manager)*, `update-config`.
+`release-cut` *(via release-manager)*, `update-config`,
+`promote-branch`.
 
 **Code + tests:** `hashed-edit`, `test-suite`, `flake-quarantine`,
-`contract-handoff`.
+`contract-handoff`, `evidence-based-debugging`,
+`hook-bypass-review`.
 
 **Engineering practice:** `adr-write`, `api-diff`, `license-audit`,
 `sbom-generate`, `cve-triage`, `perf-budget-check`,
@@ -248,7 +260,15 @@ discovered by the resolver after built-ins
 `design-tokens-audit`, `mockup-review`, `usability-review`,
 `a11y-scan`, `ux-writing-review`, `i18n-audit`, `persona-write`.
 
-**Reporting:** `cost-summary`, `gather-feedback`, `project-init`.
+**Reporting:** `cost-summary`, `gather-feedback`, `project-init`,
+`kanban-tend`.
+
+**Multi-dev + co-pilot:** `peer-handoff`, `peer-sync`,
+`supervisor-toggle`.
+
+**Scaffolds:** `about-page-scaffold`, `architecture-viz-scaffold`,
+`changelog-ui-scaffold`, `feedback-scaffold`, `logging-scaffold`,
+`monitor-scaffold`, `plan-quality-eval`.
 
 ## Rule inventory (5 always-loaded rules)
 
@@ -332,6 +352,8 @@ and `yakos session export`.
 - **Per-runtime capability matrix + trade-offs:** [runtime-matrix.md](runtime-matrix.md).
 - **Author a community runtime adapter:** [plugin-spec.md](plugin-spec.md).
 - **Hook authoring contract:** [../lib/hooks/README.md](../lib/hooks/README.md).
+- **Design decisions:** [adr/README.md](adr/README.md) — ADRs covering
+  the metrics store, embedded-lib materialization pattern, and others.
 - **Cookbook patterns** (default-claude with one codex helper,
   reverse dispatch, etc.): [../COOKBOOK.md](../COOKBOOK.md).
 - **Engineering style:** [../STYLE.md](../STYLE.md),
