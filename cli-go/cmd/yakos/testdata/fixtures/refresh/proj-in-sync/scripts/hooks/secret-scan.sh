@@ -3,12 +3,18 @@
 # Purpose: secret-scan.sh — PreToolUse hook on Edit|Write|MultiEdit.
 #
 # Refuses tool calls whose written content matches well-known secret
-# patterns (AWS keys, GitHub tokens, generic API keys, private-key blocks).
+# patterns (AWS keys, GitHub tokens, Anthropic keys, Google API keys,
+# generic API keys, private-key blocks).
 # Exit 2 to BLOCK; surfaces a clear message to the agent.
+#
+# IMPORTANT: This hook is best-effort defense-in-depth for the write-path.
+# It is NOT a security boundary. The authoritative secret-scanning gate is
+# CI gitleaks (or trufflehog). These patterns catch the most common
+# accidental writes; they do not guarantee full coverage.
 #
 # v0.1 patterns are deliberately conservative — false positives are worse
 # than false negatives at this layer because hooks run on every Edit/Write.
-# Specialized scanners (gitleaks, trufflehog) belong in CI, not here.
+# Add patterns only when the signal-to-noise ratio is clearly favorable.
 
 set -eu
 
@@ -49,6 +55,8 @@ PATTERNS=(
     'PEM Private Key|-----BEGIN (RSA |EC |OPENSSH |DSA |)PRIVATE KEY-----'
     'Slack Token|xox[baprs]-[A-Za-z0-9-]{10,}'
     'Stripe Secret Key|sk_live_[A-Za-z0-9]{24,}'
+    'Anthropic API Key|sk-ant-[A-Za-z0-9_-]{93}'
+    'Google API Key|AIza[0-9A-Za-z_-]{35}'
 )
 
 matched_name=""
