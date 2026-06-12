@@ -120,7 +120,7 @@
     { id: 'cost',      label: 'Cost',         src: '/cost/',   phase: null },
     { id: 'perf',      label: 'Performance',  src: '/perf/',   phase: null },
     { id: 'chat',      label: 'Chat',         src: null,       phase: null },
-    { id: 'flows',     label: 'Flows',        src: null,       phase: '4',  disabled: true },
+    { id: 'flows',     label: 'Flows',        src: null,       phase: null },
   ];
 
   let activeTab = 'overview';
@@ -177,6 +177,11 @@
     // On first switch to chat tab, ensure SSE is running.
     if (id === 'chat') {
       initChatTab();
+    }
+
+    // On first switch to flows tab, initialize it.
+    if (id === 'flows') {
+      initFlowsTab();
     }
   }
 
@@ -291,6 +296,10 @@
     } else if (topic === 'ping') {
       // heartbeat — no UI update needed
       return;
+    } else if (topic && topic.startsWith('workflow.')) {
+      // Route workflow lifecycle events to the Flows tab.
+      handleFlowsWsEvent(topic, payload);
+      pushFeed(msg.ts, topic, feedSummary(topic, payload), '');
     } else {
       pushFeed(msg.ts, topic, feedSummary(topic, payload), '');
     }
@@ -1359,6 +1368,953 @@
   }
 
   // =========================================================================
+  // ---- FLOWS TAB (Phase 5) -------------------------------------------------
+  // =========================================================================
+  //
+  // Canvas: minimal vanilla-JS SVG DAG renderer (NOT Mermaid).
+  //
+  // Mermaid requires 'unsafe-eval' in script-src for its Chevrotain parser.
+  // The console CSP is strict: script-src 'self' with no 'unsafe-eval'.
+  // Rather than loosen the CSP, we render the DAG with a hand-rolled SVG
+  // layout: Kahn topo-sort → layered columns → edge lines.
+  //
+  // Accessibility:
+  //   - The YAML textarea is a first-class accessible alternate to the canvas.
+  //   - aria-live regions announce run + node state changes (non-firehose).
+  //   - Node status uses icon + label, NOT color alone.
+  //   - prefers-reduced-motion: animation/transition is gated below.
+  //   - All keyboard-operable controls: Run, Re-run, Save, node-click.
+  //
+  // XSS:
+  //   - esc() is called on all server/workflow/node-output strings before
+  //     DOM insertion.
+  //   - Node IDs, run IDs, stdout, error messages, YAML content in the
+  //     textarea are bound via textContent or textarea.value, never innerHTML
+  //     without esc().
+  //
+  // Idempotency:
+  //   POST /flows/api/run is NOT idempotent (always creates a new run).
+  //   POST /flows/api/resume is idempotent for the same newRunId.
+
+  // ---- Flows state ----------------------------------------------------------
+
+  let flowsTabInitialized = false;
+
+  // Currently loaded workflow state.
+  let flowsState = {
+    workflows: [],          // Array<string> — names from /flows/api/workflows
+    selectedName: null,     // currently selected workflow name
+    yaml: '',               // current YAML text (may be unsaved)
+    version: '',            // last-loaded version stamp
+    workflow: null,         // parsed workflow object (or null if parse failed)
+    dirty: false,           // true if YAML has unsaved edits
+    saveError: null,        // last save validation error string
+    saveConflict: false,    // true if last save got 409
+    // Run tracking: Map<runId, RunSnapshot>
+    // RunSnapshot: {runId, workflowName, ts, status, nodes: {id: {status, ...}}, cost}
+    runs: new Map(),
+    activeRunId: null,      // run currently being watched
+    selectedNodeId: null,   // node whose stdout is shown in the node panel
+    nodeOutput: '',         // stdout text for selectedNodeId
+    nodeOutputTruncated: false,
+    viewMode: 'canvas',     // 'canvas' | 'yaml'
+  };
+
+  // ---- Flows init -----------------------------------------------------------
+
+  function initFlowsTab() {
+    if (flowsTabInitialized) return;
+    flowsTabInitialized = true;
+    renderFlowsLayout();
+    loadFlowsWorkflowList();
+  }
+
+  // ---- Flows WS event handler -----------------------------------------------
+
+  function handleFlowsWsEvent(topic, payload) {
+    if (!flowsTabInitialized) return;
+    const runId = payload.run_id;
+    if (!runId) return;
+
+    if (topic === 'workflow.run.started') {
+      ensureRunSnapshot(runId, payload.workflow || '');
+      const snap = flowsState.runs.get(runId);
+      if (snap) {
+        snap.status = 'running';
+        snap.ts = payload.ts || new Date().toISOString();
+      }
+      if (flowsState.activeRunId === runId) {
+        renderFlowsRunPanel();
+        announceFlows('Run ' + runId + ' started');
+      }
+      renderFlowsRunList();
+    } else if (topic === 'workflow.run.finished') {
+      ensureRunSnapshot(runId, payload.workflow || '');
+      const snap = flowsState.runs.get(runId);
+      if (snap) snap.status = payload.status || 'completed';
+      if (flowsState.activeRunId === runId) {
+        renderFlowsRunPanel();
+        announceFlows('Run ' + runId + ' ' + (payload.status || 'finished'));
+      }
+      renderFlowsRunList();
+    } else if (topic === 'workflow.node.started') {
+      ensureRunSnapshot(runId, payload.workflow || '');
+      const snap = flowsState.runs.get(runId);
+      if (snap && payload.node_id) {
+        if (!snap.nodes) snap.nodes = {};
+        snap.nodes[payload.node_id] = snap.nodes[payload.node_id] || {};
+        snap.nodes[payload.node_id].status = 'running';
+        snap.nodes[payload.node_id].agent = payload.agent || '';
+      }
+      if (flowsState.activeRunId === runId) {
+        renderFlowsCanvas();
+      }
+    } else if (topic === 'workflow.node.finished') {
+      ensureRunSnapshot(runId, payload.workflow || '');
+      const snap = flowsState.runs.get(runId);
+      if (snap && payload.node_id) {
+        if (!snap.nodes) snap.nodes = {};
+        snap.nodes[payload.node_id] = snap.nodes[payload.node_id] || {};
+        snap.nodes[payload.node_id].status = payload.status || 'completed';
+        snap.nodes[payload.node_id].exit_code = payload.exit_code;
+      }
+      if (flowsState.activeRunId === runId) {
+        renderFlowsCanvas();
+        announceFlows('Node ' + payload.node_id + ' ' + (payload.status || 'finished'));
+      }
+    } else if (topic === 'workflow.node.truncated') {
+      ensureRunSnapshot(runId, payload.workflow || '');
+      const snap = flowsState.runs.get(runId);
+      if (snap && payload.node_id) {
+        if (!snap.nodes) snap.nodes = {};
+        snap.nodes[payload.node_id] = snap.nodes[payload.node_id] || {};
+        snap.nodes[payload.node_id].truncated = true;
+      }
+    }
+  }
+
+  function ensureRunSnapshot(runId, workflowName) {
+    if (!flowsState.runs.has(runId)) {
+      flowsState.runs.set(runId, {
+        runId,
+        workflowName,
+        ts: new Date().toISOString(),
+        status: 'running',
+        nodes: {},
+        cost: null,
+      });
+    }
+  }
+
+  // ---- Flows API calls -------------------------------------------------------
+
+  function apiFetch(method, path, body) {
+    const opts = {
+      method,
+      headers: { 'Authorization': 'Bearer ' + TOKEN },
+    };
+    if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    return fetch(path, opts);
+  }
+
+  function loadFlowsWorkflowList() {
+    apiFetch('GET', '/flows/api/workflows').then((r) => {
+      if (!r.ok) return;
+      return r.json();
+    }).then((data) => {
+      if (!data) return;
+      flowsState.workflows = data.workflows || [];
+      renderFlowsWorkflowList();
+    }).catch(() => {});
+  }
+
+  function loadFlowsWorkflow(name) {
+    apiFetch('GET', '/flows/api/workflow?name=' + encodeURIComponent(name)).then((r) => {
+      if (r.status === 404) {
+        showFlowsError('Workflow "' + esc(name) + '" not found');
+        return null;
+      }
+      if (!r.ok) {
+        showFlowsError('Failed to load workflow');
+        return null;
+      }
+      return r.json();
+    }).then((data) => {
+      if (!data) return;
+      flowsState.selectedName = data.name;
+      flowsState.yaml = data.yaml || '';
+      flowsState.version = data.version || '';
+      flowsState.workflow = data.workflow || null;
+      flowsState.dirty = false;
+      flowsState.saveError = null;
+      flowsState.saveConflict = false;
+      renderFlowsEditor();
+      renderFlowsCanvas();
+      renderFlowsRunList();
+    }).catch(() => {
+      showFlowsError('Network error loading workflow');
+    });
+  }
+
+  function saveFlowsWorkflow() {
+    const name = flowsState.selectedName;
+    if (!name) return;
+    const body = {
+      name,
+      yaml: flowsState.yaml,
+      version: flowsState.version,
+    };
+    apiFetch('POST', '/flows/api/workflow', body).then((r) => {
+      if (r.status === 409) {
+        return r.json().then((d) => {
+          flowsState.saveConflict = true;
+          flowsState.saveError = 'Conflict: another operator saved. Reloading…';
+          renderFlowsEditor();
+          // Auto-reload to truth after 2 seconds.
+          setTimeout(() => loadFlowsWorkflow(name), 2000);
+        });
+      }
+      if (r.status === 400) {
+        return r.json().then((d) => {
+          flowsState.saveError = d.error || 'Validation error';
+          flowsState.saveConflict = false;
+          renderFlowsEditor();
+        });
+      }
+      if (!r.ok) {
+        flowsState.saveError = 'Save failed (server error)';
+        renderFlowsEditor();
+        return;
+      }
+      return r.json().then((d) => {
+        flowsState.version = d.version || flowsState.version;
+        flowsState.dirty = false;
+        flowsState.saveError = null;
+        flowsState.saveConflict = false;
+        renderFlowsEditor();
+        // Re-parse to update canvas.
+        loadFlowsWorkflow(name);
+      });
+    }).catch(() => {
+      flowsState.saveError = 'Network error saving workflow';
+      renderFlowsEditor();
+    });
+  }
+
+  function startFlowsRun(rerunFailed) {
+    const name = flowsState.selectedName;
+    if (!name) return;
+
+    if (rerunFailed && flowsState.activeRunId) {
+      // Resume: re-run failed/skipped nodes, reuse completed outputs.
+      apiFetch('POST', '/flows/api/resume', {
+        run_id: flowsState.activeRunId,
+        operator_id: getChatOperatorId(),
+      }).then((r) => {
+        if (!r.ok) {
+          showFlowsRunError('Resume failed');
+          return null;
+        }
+        return r.json();
+      }).then((d) => {
+        if (!d) return;
+        const newRunId = d.new_run_id;
+        flowsState.activeRunId = newRunId;
+        ensureRunSnapshot(newRunId, name);
+        renderFlowsRunList();
+        pollRunState(newRunId);
+        announceFlows('Resuming as run ' + newRunId);
+      }).catch(() => {
+        showFlowsRunError('Network error on resume');
+      });
+      return;
+    }
+
+    apiFetch('POST', '/flows/api/run?name=' + encodeURIComponent(name), {
+      operator_id: getChatOperatorId(),
+    }).then((r) => {
+      if (!r.ok) {
+        return r.json().then((d) => {
+          showFlowsRunError(d.error || 'Failed to start run');
+        }).catch(() => {
+          showFlowsRunError('Failed to start run');
+        });
+      }
+      return r.json().then((d) => {
+        const runId = d.run_id;
+        flowsState.activeRunId = runId;
+        ensureRunSnapshot(runId, name);
+        renderFlowsRunList();
+        // Poll for initial run state (WS events will update live).
+        pollRunState(runId);
+        announceFlows('Run ' + runId + ' started');
+      });
+    }).catch(() => {
+      showFlowsRunError('Network error starting run');
+    });
+  }
+
+  function pollRunState(runId) {
+    apiFetch('GET', '/flows/api/run?id=' + encodeURIComponent(runId)).then((r) => {
+      if (!r.ok) return;
+      return r.json();
+    }).then((data) => {
+      if (!data) return;
+      // Merge into our snapshot map.
+      let snap = flowsState.runs.get(runId);
+      if (!snap) {
+        snap = { runId, workflowName: data.workflow_name || '', ts: data.started_at || '', status: data.status, nodes: {}, cost: null };
+        flowsState.runs.set(runId, snap);
+      }
+      snap.status = data.status || snap.status;
+      snap.workflowName = data.workflow_name || snap.workflowName;
+      snap.ts = data.started_at || snap.ts;
+      // Merge node states.
+      if (data.nodes) {
+        for (const [id, ns] of Object.entries(data.nodes)) {
+          snap.nodes[id] = snap.nodes[id] || {};
+          Object.assign(snap.nodes[id], ns);
+        }
+      }
+      if (flowsState.activeRunId === runId) {
+        renderFlowsCanvas();
+        renderFlowsRunPanel();
+      }
+      renderFlowsRunList();
+    }).catch(() => {});
+  }
+
+  function loadNodeOutput(runId, nodeId) {
+    apiFetch('GET', '/flows/api/run/node?id=' + encodeURIComponent(runId) + '&node=' + encodeURIComponent(nodeId))
+      .then((r) => {
+        if (r.status === 404) {
+          flowsState.nodeOutput = '(no output yet)';
+          flowsState.nodeOutputTruncated = false;
+          renderFlowsNodePanel();
+          return;
+        }
+        if (!r.ok) {
+          flowsState.nodeOutput = '(failed to load output)';
+          renderFlowsNodePanel();
+          return;
+        }
+        return r.text().then((text) => {
+          flowsState.nodeOutput = text;
+          // Check if this node's snapshot says it was truncated.
+          const snap = flowsState.runs.get(runId);
+          flowsState.nodeOutputTruncated = !!(snap && snap.nodes[nodeId] && snap.nodes[nodeId].truncated);
+          renderFlowsNodePanel();
+        });
+      }).catch(() => {
+        flowsState.nodeOutput = '(network error)';
+        renderFlowsNodePanel();
+      });
+  }
+
+  // ---- Flows layout rendering ------------------------------------------------
+
+  function renderFlowsLayout() {
+    const panel = document.getElementById('panel-flows');
+    if (!panel) return;
+
+    panel.innerHTML =
+      '<div class="flows-layout" role="main" aria-label="Flows DAG orchestration">' +
+        // Left sidebar: workflow list + run list
+        '<aside class="flows-sidebar" aria-label="Workflows and runs">' +
+          '<div class="flows-section">' +
+            '<h2 class="subsection-title">Workflows</h2>' +
+            '<div id="flows-workflow-list" class="flows-workflow-list"></div>' +
+          '</div>' +
+          '<div class="flows-section" id="flows-run-list-section" style="display:none">' +
+            '<h2 class="subsection-title">Runs</h2>' +
+            '<div id="flows-run-list" class="flows-run-list" aria-label="Run history"></div>' +
+          '</div>' +
+        '</aside>' +
+        // Main area: toolbar + canvas/yaml view + node panel
+        '<div class="flows-main">' +
+          '<div class="flows-toolbar" role="toolbar" aria-label="Workflow controls">' +
+            '<span id="flows-workflow-name" class="flows-wf-name"></span>' +
+            '<div class="flows-view-toggle" role="group" aria-label="View mode">' +
+              '<button id="flows-view-canvas" class="flows-view-btn active" type="button" ' +
+                'aria-pressed="true" title="DAG canvas view">Canvas</button>' +
+              '<button id="flows-view-yaml" class="flows-view-btn" type="button" ' +
+                'aria-pressed="false" title="YAML editor view">YAML</button>' +
+            '</div>' +
+            '<button id="flows-save-btn" class="flows-btn" type="button" ' +
+              'aria-label="Save workflow YAML">Save</button>' +
+            '<button id="flows-run-btn" class="flows-btn flows-run-btn" type="button" ' +
+              'aria-label="Run this workflow">Run</button>' +
+            '<button id="flows-rerun-btn" class="flows-btn" type="button" ' +
+              'aria-label="Re-run failed and downstream nodes (reuse completed outputs)" ' +
+              'title="Resume: re-run failed/skipped, reuse completed node outputs" ' +
+              'style="display:none">Re-run failed</button>' +
+            '<span id="flows-run-status" class="flows-run-status" aria-live="polite"></span>' +
+          '</div>' +
+          '<div id="flows-save-error" class="flows-save-error" role="alert" style="display:none"></div>' +
+          // Canvas + YAML side by side; only one shown at a time
+          '<div class="flows-content">' +
+            '<div id="flows-canvas-wrap" class="flows-canvas-wrap">' +
+              '<div id="flows-canvas" class="flows-canvas" role="img" aria-label="Workflow DAG canvas"></div>' +
+            '</div>' +
+            '<div id="flows-yaml-wrap" class="flows-yaml-wrap" style="display:none">' +
+              '<label for="flows-yaml-editor" class="sr-only">Workflow YAML editor</label>' +
+              '<textarea id="flows-yaml-editor" class="flows-yaml-editor" ' +
+                'spellcheck="false" autocorrect="off" autocapitalize="off" ' +
+                'aria-label="Workflow YAML — edit here, then click Save"></textarea>' +
+            '</div>' +
+          '</div>' +
+          // Node output panel (shown when a node is selected)
+          '<div id="flows-node-panel" class="flows-node-panel" style="display:none">' +
+            '<div class="flows-node-panel-header">' +
+              '<span id="flows-node-title" class="flows-node-title"></span>' +
+              '<button id="flows-node-close" class="flows-node-close" type="button" ' +
+                'aria-label="Close node output panel">&times;</button>' +
+            '</div>' +
+            '<div id="flows-node-truncation-notice" class="flows-node-truncation" ' +
+              'role="status" style="display:none">' +
+              'Output was tail-truncated to the output_limit declared in the workflow.' +
+            '</div>' +
+            '<pre id="flows-node-output" class="flows-node-output" ' +
+              'aria-label="Node output" tabindex="0"></pre>' +
+          '</div>' +
+        '</div>' +
+        // Accessible status announcer
+        '<div id="flows-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>' +
+        // Opus cost note (shown when opus nodes present)
+        '<div id="flows-opus-note" class="flows-opus-note" role="note" style="display:none">' +
+          'Note: This workflow contains opus-tier nodes. Costs may be significant ' +
+          'and outputs are non-deterministic — runs may produce different results each time.' +
+        '</div>' +
+      '</div>';
+
+    // Wire view toggle buttons.
+    document.getElementById('flows-view-canvas').addEventListener('click', () => {
+      switchFlowsView('canvas');
+    });
+    document.getElementById('flows-view-yaml').addEventListener('click', () => {
+      switchFlowsView('yaml');
+    });
+
+    // Wire YAML editor onChange.
+    const yamlEditor = document.getElementById('flows-yaml-editor');
+    if (yamlEditor) {
+      yamlEditor.addEventListener('input', () => {
+        flowsState.yaml = yamlEditor.value;
+        flowsState.dirty = true;
+        flowsState.saveError = null;
+        flowsState.saveConflict = false;
+        renderFlowsSaveErrorBanner();
+        updateFlowsToolbarState();
+      });
+    }
+
+    // Wire Save button.
+    document.getElementById('flows-save-btn').addEventListener('click', () => {
+      saveFlowsWorkflow();
+    });
+
+    // Wire Run button.
+    document.getElementById('flows-run-btn').addEventListener('click', () => {
+      startFlowsRun(false);
+    });
+
+    // Wire Re-run failed button.
+    document.getElementById('flows-rerun-btn').addEventListener('click', () => {
+      startFlowsRun(true);
+    });
+
+    // Wire node panel close button.
+    document.getElementById('flows-node-close').addEventListener('click', () => {
+      flowsState.selectedNodeId = null;
+      document.getElementById('flows-node-panel').style.display = 'none';
+    });
+
+    renderFlowsWorkflowList();
+  }
+
+  function switchFlowsView(mode) {
+    flowsState.viewMode = mode;
+    const isCanvas = mode === 'canvas';
+
+    document.getElementById('flows-canvas-wrap').style.display = isCanvas ? '' : 'none';
+    document.getElementById('flows-yaml-wrap').style.display = isCanvas ? 'none' : '';
+
+    const btnCanvas = document.getElementById('flows-view-canvas');
+    const btnYaml = document.getElementById('flows-view-yaml');
+    if (btnCanvas) {
+      btnCanvas.classList.toggle('active', isCanvas);
+      btnCanvas.setAttribute('aria-pressed', String(isCanvas));
+    }
+    if (btnYaml) {
+      btnYaml.classList.toggle('active', !isCanvas);
+      btnYaml.setAttribute('aria-pressed', String(!isCanvas));
+    }
+
+    if (!isCanvas) {
+      // Sync YAML editor with current state.
+      const yamlEditor = document.getElementById('flows-yaml-editor');
+      if (yamlEditor) yamlEditor.value = flowsState.yaml;
+    } else {
+      renderFlowsCanvas();
+    }
+  }
+
+  function renderFlowsWorkflowList() {
+    const listEl = document.getElementById('flows-workflow-list');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+    if (flowsState.workflows.length === 0) {
+      listEl.innerHTML = '<p class="empty-state">No workflows found</p>';
+      return;
+    }
+    for (const name of flowsState.workflows) {
+      const btn = document.createElement('button');
+      btn.className = 'flows-wf-item' + (name === flowsState.selectedName ? ' active' : '');
+      btn.type = 'button';
+      btn.setAttribute('aria-current', name === flowsState.selectedName ? 'true' : 'false');
+      btn.textContent = name; // textContent is XSS-safe
+      btn.addEventListener('click', () => {
+        flowsState.selectedName = name;
+        loadFlowsWorkflow(name);
+        // Update the active state immediately.
+        listEl.querySelectorAll('.flows-wf-item').forEach((el) => {
+          const active = el.textContent === name;
+          el.classList.toggle('active', active);
+          el.setAttribute('aria-current', String(active));
+        });
+      });
+      listEl.appendChild(btn);
+    }
+  }
+
+  function renderFlowsEditor() {
+    const nameEl = document.getElementById('flows-workflow-name');
+    if (nameEl) nameEl.textContent = flowsState.selectedName || '(no workflow selected)';
+
+    // Sync YAML editor if in yaml view.
+    if (flowsState.viewMode === 'yaml') {
+      const yamlEditor = document.getElementById('flows-yaml-editor');
+      if (yamlEditor) yamlEditor.value = flowsState.yaml;
+    }
+
+    renderFlowsSaveErrorBanner();
+    updateFlowsToolbarState();
+    renderFlowsOpusNote();
+  }
+
+  function renderFlowsSaveErrorBanner() {
+    const errEl = document.getElementById('flows-save-error');
+    if (!errEl) return;
+    if (flowsState.saveError) {
+      errEl.style.display = '';
+      errEl.textContent = flowsState.saveError; // textContent is XSS-safe
+    } else {
+      errEl.style.display = 'none';
+      errEl.textContent = '';
+    }
+  }
+
+  function updateFlowsToolbarState() {
+    const saveBtn = document.getElementById('flows-save-btn');
+    const runBtn = document.getElementById('flows-run-btn');
+    const rerunBtn = document.getElementById('flows-rerun-btn');
+
+    const hasWorkflow = !!flowsState.selectedName;
+
+    if (saveBtn) saveBtn.disabled = !hasWorkflow;
+    if (runBtn) runBtn.disabled = !hasWorkflow;
+
+    // Show Re-run button only if there's an active run with failures.
+    if (rerunBtn) {
+      const activeSnap = flowsState.activeRunId ? flowsState.runs.get(flowsState.activeRunId) : null;
+      const hasFailed = activeSnap && activeSnap.status === 'failed';
+      rerunBtn.style.display = (hasWorkflow && hasFailed) ? '' : 'none';
+    }
+
+    // Run status indicator.
+    const statusEl = document.getElementById('flows-run-status');
+    if (statusEl) {
+      const activeSnap = flowsState.activeRunId ? flowsState.runs.get(flowsState.activeRunId) : null;
+      if (activeSnap) {
+        statusEl.textContent = runStatusLabel(activeSnap.status);
+        statusEl.className = 'flows-run-status flows-run-status-' + activeSnap.status;
+      } else {
+        statusEl.textContent = '';
+        statusEl.className = 'flows-run-status';
+      }
+    }
+  }
+
+  function renderFlowsOpusNote() {
+    const noteEl = document.getElementById('flows-opus-note');
+    if (!noteEl) return;
+    const wf = flowsState.workflow;
+    if (!wf || !wf.nodes) {
+      noteEl.style.display = 'none';
+      return;
+    }
+    const hasOpus = wf.nodes.some((n) => {
+      const m = (n.model || '').toLowerCase();
+      return m === 'opus';
+    });
+    noteEl.style.display = hasOpus ? '' : 'none';
+  }
+
+  // ---- Flows run list rendering -----------------------------------------------
+
+  function renderFlowsRunList() {
+    const section = document.getElementById('flows-run-list-section');
+    const listEl = document.getElementById('flows-run-list');
+    if (!section || !listEl) return;
+
+    if (flowsState.runs.size === 0) {
+      section.style.display = 'none';
+      return;
+    }
+    section.style.display = '';
+    listEl.innerHTML = '';
+
+    // Show most recent first (Map iteration is insertion order; reverse it).
+    const snaps = [...flowsState.runs.values()].reverse();
+    for (const snap of snaps) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'flows-run-item' + (snap.runId === flowsState.activeRunId ? ' active' : '');
+      item.setAttribute('aria-current', snap.runId === flowsState.activeRunId ? 'true' : 'false');
+
+      const icon = runStatusIcon(snap.status);
+      const label = runStatusLabel(snap.status);
+      const tsStr = snap.ts ? formatTime(snap.ts) : '';
+      const costStr = snap.cost != null ? ' $' + snap.cost.toFixed(4) : '';
+
+      // textContent for each child is XSS-safe; we use createElement.
+      const iconSpan = document.createElement('span');
+      iconSpan.className = 'flows-run-icon';
+      iconSpan.setAttribute('aria-hidden', 'true');
+      iconSpan.textContent = icon;
+
+      const labelSpan = document.createElement('span');
+      labelSpan.className = 'sr-only';
+      labelSpan.textContent = label;
+
+      const infoSpan = document.createElement('span');
+      infoSpan.className = 'flows-run-info';
+      infoSpan.textContent = snap.runId + (tsStr ? ' · ' + tsStr : '') + costStr;
+
+      item.appendChild(iconSpan);
+      item.appendChild(labelSpan);
+      item.appendChild(infoSpan);
+
+      item.addEventListener('click', () => {
+        flowsState.activeRunId = snap.runId;
+        pollRunState(snap.runId);
+        renderFlowsCanvas();
+        renderFlowsRunPanel();
+        renderFlowsRunList();
+        updateFlowsToolbarState();
+      });
+      listEl.appendChild(item);
+    }
+  }
+
+  function renderFlowsRunPanel() {
+    updateFlowsToolbarState();
+  }
+
+  function showFlowsError(msg) {
+    const errEl = document.getElementById('flows-save-error');
+    if (errEl) {
+      errEl.style.display = '';
+      errEl.textContent = msg; // textContent
+    }
+  }
+
+  function showFlowsRunError(msg) {
+    const statusEl = document.getElementById('flows-run-status');
+    if (statusEl) {
+      statusEl.textContent = msg; // textContent
+      statusEl.className = 'flows-run-status flows-run-status-failed';
+    }
+  }
+
+  // ---- Flows node output panel -----------------------------------------------
+
+  function renderFlowsNodePanel() {
+    const panel = document.getElementById('flows-node-panel');
+    const titleEl = document.getElementById('flows-node-title');
+    const outputEl = document.getElementById('flows-node-output');
+    const truncEl = document.getElementById('flows-node-truncation-notice');
+    if (!panel) return;
+
+    panel.style.display = flowsState.selectedNodeId ? '' : 'none';
+    if (!flowsState.selectedNodeId) return;
+
+    if (titleEl) titleEl.textContent = 'Node: ' + flowsState.selectedNodeId;
+    if (outputEl) outputEl.textContent = flowsState.nodeOutput; // textContent is XSS-safe
+    if (truncEl) {
+      truncEl.style.display = flowsState.nodeOutputTruncated ? '' : 'none';
+    }
+  }
+
+  // ---- DAG canvas (minimal SVG) -----------------------------------------------
+  //
+  // Layout algorithm:
+  //   1. Kahn topo-sort → assign each node to a column (layer) = max(layer of needs) + 1
+  //   2. Nodes in the same column are stacked vertically.
+  //   3. Edges are drawn as SVG lines from the right edge of the source node to
+  //      the left edge of the target node.
+  //
+  // Status rendering: icon + text label in each node box. NOT color alone.
+  // Node boxes are <button> elements (keyboard-operable, focusable).
+  // Accessibility: aria-label per node includes status + agent.
+
+  const SVG_NODE_W = 140;
+  const SVG_NODE_H = 56;
+  const SVG_COL_GAP = 80;
+  const SVG_ROW_GAP = 20;
+  const SVG_PAD = 24;
+
+  function renderFlowsCanvas() {
+    const canvasEl = document.getElementById('flows-canvas');
+    if (!canvasEl) return;
+    canvasEl.innerHTML = '';
+
+    const wf = flowsState.workflow;
+    if (!wf || !wf.nodes || wf.nodes.length === 0) {
+      canvasEl.innerHTML = '<p class="empty-state" style="padding:24px">Select a workflow to view its DAG</p>';
+      return;
+    }
+
+    const activeSnap = flowsState.activeRunId ? flowsState.runs.get(flowsState.activeRunId) : null;
+
+    // 1. Build adjacency and in-degree for Kahn.
+    const nodeById = {};
+    const inDegree = {};
+    const successors = {}; // id → [successor ids]
+    for (const n of wf.nodes) {
+      nodeById[n.id] = n;
+      inDegree[n.id] = (inDegree[n.id] || 0);
+      successors[n.id] = successors[n.id] || [];
+    }
+    for (const n of wf.nodes) {
+      for (const dep of (n.needs || [])) {
+        inDegree[n.id] = (inDegree[n.id] || 0) + 1;
+        successors[dep] = successors[dep] || [];
+        successors[dep].push(n.id);
+      }
+    }
+
+    // 2. Assign layers via Kahn BFS: layer[id] = max(layer of needs) + 1, min 0.
+    const layer = {};
+    const queue = [];
+    for (const n of wf.nodes) {
+      if ((inDegree[n.id] || 0) === 0) {
+        layer[n.id] = 0;
+        queue.push(n.id);
+      }
+    }
+    // BFS to assign layers.
+    const remaining = Object.assign({}, inDegree);
+    let qi = 0;
+    while (qi < queue.length) {
+      const cur = queue[qi++];
+      for (const succ of (successors[cur] || [])) {
+        const newLayer = (layer[cur] || 0) + 1;
+        if (layer[succ] === undefined || layer[succ] < newLayer) {
+          layer[succ] = newLayer;
+        }
+        remaining[succ] = (remaining[succ] || 1) - 1;
+        if (remaining[succ] <= 0) {
+          queue.push(succ);
+        }
+      }
+    }
+
+    // 3. Bucket nodes by layer.
+    const maxLayer = Math.max(...Object.values(layer));
+    const columns = [];
+    for (let i = 0; i <= maxLayer; i++) columns.push([]);
+    for (const n of wf.nodes) {
+      const l = layer[n.id] || 0;
+      columns[l].push(n.id);
+    }
+
+    // 4. Compute node positions.
+    const pos = {}; // id → {x, y, cx, cy} (top-left + center)
+    const colX = [];
+    let xCursor = SVG_PAD;
+    for (let c = 0; c <= maxLayer; c++) {
+      colX[c] = xCursor;
+      xCursor += SVG_NODE_W + SVG_COL_GAP;
+    }
+    const maxColSize = Math.max(...columns.map((c) => c.length));
+    const totalH = maxColSize * (SVG_NODE_H + SVG_ROW_GAP) - SVG_ROW_GAP + SVG_PAD * 2;
+    const totalW = xCursor - SVG_COL_GAP + SVG_PAD;
+
+    for (let c = 0; c <= maxLayer; c++) {
+      const colNodes = columns[c];
+      const colTotalH = colNodes.length * (SVG_NODE_H + SVG_ROW_GAP) - SVG_ROW_GAP;
+      const startY = SVG_PAD + (totalH - SVG_PAD * 2 - colTotalH) / 2;
+      for (let r = 0; r < colNodes.length; r++) {
+        const id = colNodes[r];
+        const x = colX[c];
+        const y = startY + r * (SVG_NODE_H + SVG_ROW_GAP);
+        pos[id] = { x, y, cx: x + SVG_NODE_W / 2, cy: y + SVG_NODE_H / 2 };
+      }
+    }
+
+    // 5. Build SVG.
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('width', String(totalW));
+    svg.setAttribute('height', String(totalH));
+    svg.setAttribute('role', 'presentation');
+    svg.setAttribute('aria-hidden', 'true'); // canvas is decorative; nodes have their own buttons
+
+    // Draw edges first (below nodes).
+    for (const n of wf.nodes) {
+      for (const dep of (n.needs || [])) {
+        if (!pos[dep] || !pos[n.id]) continue;
+        const x1 = pos[dep].x + SVG_NODE_W;
+        const y1 = pos[dep].cy;
+        const x2 = pos[n.id].x;
+        const y2 = pos[n.id].cy;
+        const mx = (x1 + x2) / 2;
+        const line = document.createElementNS(svgNS, 'path');
+        const d = 'M ' + x1 + ' ' + y1 + ' C ' + mx + ' ' + y1 + ' ' + mx + ' ' + y2 + ' ' + x2 + ' ' + y2;
+        line.setAttribute('d', d);
+        line.setAttribute('class', 'dag-edge');
+        svg.appendChild(line);
+      }
+    }
+
+    canvasEl.appendChild(svg);
+
+    // Draw node boxes as positioned <button> elements on top of SVG
+    // (using a relative container so buttons can be absolutely positioned).
+    canvasEl.style.position = 'relative';
+    svg.style.position = 'absolute';
+    svg.style.top = '0';
+    svg.style.left = '0';
+    // Set the canvas to be at least svg size.
+    canvasEl.style.minWidth = totalW + 'px';
+    canvasEl.style.minHeight = totalH + 'px';
+
+    for (const n of wf.nodes) {
+      const p = pos[n.id];
+      if (!p) continue;
+      const nodeState = activeSnap && activeSnap.nodes ? activeSnap.nodes[n.id] : null;
+      const status = nodeState ? (nodeState.status || 'pending') : 'pending';
+      const icon = nodeStatusIcon(status);
+      const statusLabel = nodeStatusLabel(status);
+
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'dag-node dag-node-' + status + (n.id === flowsState.selectedNodeId ? ' dag-node-selected' : '');
+      btn.style.position = 'absolute';
+      btn.style.left = p.x + 'px';
+      btn.style.top = p.y + 'px';
+      btn.style.width = SVG_NODE_W + 'px';
+      btn.style.height = SVG_NODE_H + 'px';
+      btn.setAttribute('aria-label', 'Node ' + n.id + ': ' + n.agent + ', status: ' + statusLabel);
+
+      const iconEl = document.createElement('span');
+      iconEl.className = 'dag-node-icon';
+      iconEl.setAttribute('aria-hidden', 'true');
+      iconEl.textContent = icon;
+
+      const labelEl = document.createElement('span');
+      labelEl.className = 'dag-node-label';
+      labelEl.textContent = n.id; // textContent is safe
+
+      const agentEl = document.createElement('span');
+      agentEl.className = 'dag-node-agent';
+      agentEl.textContent = n.agent; // textContent is safe
+
+      const statusEl = document.createElement('span');
+      statusEl.className = 'sr-only';
+      statusEl.textContent = statusLabel;
+
+      btn.appendChild(iconEl);
+      btn.appendChild(labelEl);
+      btn.appendChild(agentEl);
+      btn.appendChild(statusEl);
+
+      // Click: show node output.
+      const nodeId = n.id;
+      const runId = flowsState.activeRunId;
+      btn.addEventListener('click', () => {
+        flowsState.selectedNodeId = nodeId;
+        if (runId) {
+          loadNodeOutput(runId, nodeId);
+        }
+        // Re-render canvas to update selected highlight.
+        renderFlowsCanvas();
+        // Show node panel.
+        renderFlowsNodePanel();
+      });
+
+      canvasEl.appendChild(btn);
+    }
+  }
+
+  // ---- Status helpers -----------------------------------------------------------
+
+  function nodeStatusIcon(status) {
+    switch (status) {
+      case 'pending':   return '○';
+      case 'running':   return '◉';
+      case 'completed': return '●';
+      case 'failed':    return '✗';
+      case 'skipped':   return '–';
+      default:          return '?';
+    }
+  }
+
+  function nodeStatusLabel(status) {
+    switch (status) {
+      case 'pending':   return 'pending';
+      case 'running':   return 'running';
+      case 'completed': return 'completed';
+      case 'failed':    return 'failed';
+      case 'skipped':   return 'skipped';
+      default:          return status || 'unknown';
+    }
+  }
+
+  function runStatusIcon(status) {
+    switch (status) {
+      case 'pending':     return '○';
+      case 'running':     return '◉';
+      case 'completed':   return '●';
+      case 'failed':      return '✗';
+      case 'interrupted': return '!';
+      default:            return '?';
+    }
+  }
+
+  function runStatusLabel(status) {
+    switch (status) {
+      case 'pending':     return 'pending';
+      case 'running':     return 'running';
+      case 'completed':   return 'completed';
+      case 'failed':      return 'failed';
+      case 'interrupted': return 'interrupted';
+      default:            return status || 'unknown';
+    }
+  }
+
+  function announceFlows(msg) {
+    const el = document.getElementById('flows-announcer');
+    if (!el) return;
+    el.textContent = '';
+    requestAnimationFrame(() => { el.textContent = msg; });
+  }
+
+  // =========================================================================
   // ---- 8. Page rendering ------------------------------------------------------
 
   function buildPage() {
@@ -1422,9 +2378,8 @@
           </div>
         </div>
         <div id="panel-flows" class="tab-panel">
-          <div class="overview-placeholder">
-            <h2>Flows</h2>
-            <p>Visual DAG orchestration lands in Phase 4/5.</p>
+          <div class="flows-loading">
+            <p class="empty-state">Initializing Flows…</p>
           </div>
         </div>
       </div>
@@ -1500,6 +2455,16 @@
         return (payload.agent || '?') + ' finished (exit=' + (payload.exit_code !== undefined ? payload.exit_code : '?') + ')';
       case 'presence':
         return (payload.display_name || payload.operator_id || 'anon') + ' is ' + (payload.status || 'unknown');
+      case 'workflow.run.started':
+        return 'run ' + (payload.run_id || '?') + ' started (' + (payload.workflow || '?') + ')';
+      case 'workflow.run.finished':
+        return 'run ' + (payload.run_id || '?') + ' ' + (payload.status || '?') + ' (' + (payload.workflow || '?') + ')';
+      case 'workflow.node.started':
+        return 'node ' + (payload.node_id || '?') + ' started [' + (payload.workflow || '?') + ']';
+      case 'workflow.node.finished':
+        return 'node ' + (payload.node_id || '?') + ' ' + (payload.status || '?') + ' [' + (payload.workflow || '?') + ']';
+      case 'workflow.node.truncated':
+        return 'node ' + (payload.node_id || '?') + ' output truncated';
       default:
         return topic;
     }
