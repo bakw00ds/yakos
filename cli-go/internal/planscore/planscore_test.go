@@ -23,7 +23,7 @@ func newCfg(t *testing.T) Config {
 	}
 }
 
-func out(cfg Config) string { return cfg.Writer.(*bytes.Buffer).String() }
+func out(cfg Config) string    { return cfg.Writer.(*bytes.Buffer).String() }
 func errOut(cfg Config) string { return cfg.ErrWriter.(*bytes.Buffer).String() }
 
 // writeScoredRecord appends a plan_scored record to the log.

@@ -73,10 +73,10 @@ type MigrateAction struct {
 
 // MigrateResult summarises what the migrate run did.
 type MigrateResult struct {
-	Actions  []MigrateAction
-	Written  int
-	Skipped  int
-	DryRun   bool
+	Actions []MigrateAction
+	Written int
+	Skipped int
+	DryRun  bool
 }
 
 // RunMigrate executes `yakos hooks migrate` per cfg.

@@ -146,10 +146,10 @@ type AckRecord struct {
 
 // Finding is a parsed row from supervisor-findings.ndjson.
 type Finding struct {
-	TS                  string `json:"ts"`
-	RecommendedAction   string `json:"recommended_action"`
-	Rationale           string `json:"rationale"`
-	LineNum             int    `json:"-"`
+	TS                string `json:"ts"`
+	RecommendedAction string `json:"recommended_action"`
+	Rationale         string `json:"rationale"`
+	LineNum           int    `json:"-"`
 }
 
 // ---- entry point ------------------------------------------------------------

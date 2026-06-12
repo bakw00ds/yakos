@@ -80,12 +80,12 @@ func axisKey(ev Event, axis Axis) string {
 // limit <= 0 means no limit (all rows returned).
 func Aggregate(ch <-chan Event, axis Axis, limit int) Report {
 	type acc struct {
-		count    int64
-		ok       int64
-		fail     int64
-		durS     float64
-		inTok    int64
-		outTok   int64
+		count  int64
+		ok     int64
+		fail   int64
+		durS   float64
+		inTok  int64
+		outTok int64
 	}
 
 	keys := make([]string, 0, 32)

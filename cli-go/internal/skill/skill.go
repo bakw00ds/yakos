@@ -356,8 +356,8 @@ func runPromote(cfg Config, home, promotionLog, graveyard string) (*Result, erro
 	}
 	byUser := currentUser()
 	if err := appendPromotionLog(promotionLog, "promoted", cfg.Slug, map[string]interface{}{
-		"global":   isGlobal,
-		"by_user":  byUser,
+		"global":  isGlobal,
+		"by_user": byUser,
 	}); err != nil {
 		// Non-fatal: log failure shouldn't roll back a successful promote.
 		_, _ = fmt.Fprintf(cfg.ErrWriter, "skill promote: warn: failed to write promotion log: %v\n", err)

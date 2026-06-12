@@ -12,7 +12,7 @@ const zeroSignal = windowsNoSignal(0)
 
 type windowsNoSignal int
 
-func (windowsNoSignal) Signal() {}
+func (windowsNoSignal) Signal()        {}
 func (windowsNoSignal) String() string { return "no-op signal" }
 
 // Ensure the type satisfies os.Signal at compile time.

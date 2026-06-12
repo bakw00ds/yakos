@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net"
 	"time"
-
 	// winio provides the net.Listener and net.Conn implementations for
 	// named pipes; it is the only well-maintained stdlib-adjacent option.
 	// Phase 2 design §10 cites named pipes as the Windows IPC primitive.

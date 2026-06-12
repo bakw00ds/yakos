@@ -92,9 +92,9 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	if !matched {
 		// Log REPORT-level pass.
 		h.appendLog(&out, "REPORT", "pass", "no secret patterns matched", map[string]any{
-			"tool":     in.Tool,
-			"file":     fileFromPayload(in),
-			"matched":  false,
+			"tool":    in.Tool,
+			"file":    fileFromPayload(in),
+			"matched": false,
 		})
 		return out, nil
 	}

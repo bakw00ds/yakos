@@ -92,19 +92,19 @@ type finishedEvent struct {
 	Ts              string      `json:"ts"`
 	Agent           string      `json:"agent"`
 	Runtime         string      `json:"runtime"`
-	Project         string      `json:"project"`           // PR #40
+	Project         string      `json:"project"` // PR #40
 	ExitCode        int         `json:"exit_code"`
 	DurationS       float64     `json:"duration_s"`
 	OutputBytes     int64       `json:"output_bytes"`
 	TaskBytes       int64       `json:"task_bytes"`
 	EstInputTokens  int64       `json:"est_input_tokens"`
 	EstOutputTokens int64       `json:"est_output_tokens"`
-	ModelChosenBy   string      `json:"model_chosen_by"`   // PR #32
-	ModelResolved   string      `json:"model_resolved"`    // PR #32
-	EvalRunID       interface{} `json:"eval_run_id"`       // string | null
-	StderrTail      interface{} `json:"stderr_tail"`       // string | null — PR #34
-	StderrTruncated bool        `json:"stderr_truncated"`  // PR #34
-	Usage           *cost.Usage `json:"usage,omitempty"`   // PR #31
+	ModelChosenBy   string      `json:"model_chosen_by"`  // PR #32
+	ModelResolved   string      `json:"model_resolved"`   // PR #32
+	EvalRunID       interface{} `json:"eval_run_id"`      // string | null
+	StderrTail      interface{} `json:"stderr_tail"`      // string | null — PR #34
+	StderrTruncated bool        `json:"stderr_truncated"` // PR #34
+	Usage           *cost.Usage `json:"usage,omitempty"`  // PR #31
 }
 
 // writeFinished writes a dispatch_finished event to the dispatch-log.

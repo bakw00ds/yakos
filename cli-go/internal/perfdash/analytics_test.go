@@ -22,8 +22,8 @@ func TestParseWindow_Standard(t *testing.T) {
 		{"48h", 48 * time.Hour},
 		{"7d", 7 * 24 * time.Hour},
 		{"30d", 30 * 24 * time.Hour},
-		{"", 24 * time.Hour},         // default
-		{"bogus", 24 * time.Hour},    // unknown → default
+		{"", 24 * time.Hour},      // default
+		{"bogus", 24 * time.Hour}, // unknown → default
 	}
 	for _, tc := range cases {
 		got := parseWindow(tc.input)

@@ -6,12 +6,12 @@
 //     whether ~/.yakos exists, etc. Parity tests fall into two categories:
 //
 //     a) Deterministic sections (install state against fixture projects, drift
-//        detection against fixture hook dirs): tested with CompareExact after
-//        path normalization.
+//     detection against fixture hook dirs): tested with CompareExact after
+//     path normalization.
 //
 //     b) Host-dependent sections (which CLIs are on PATH, versions, external
-//        API key presence): tested with CompareRegex with tight patterns, or
-//        CompareIgnore when the section is entirely host-specific.
+//     API key presence): tested with CompareRegex with tight patterns, or
+//     CompareIgnore when the section is entirely host-specific.
 //
 //  2. The parity test strategy uses an isolated HOME (tmpHome) so that the
 //     real user's ~/.claude/, ~/.yakos, and ~/.yakos-state do not influence

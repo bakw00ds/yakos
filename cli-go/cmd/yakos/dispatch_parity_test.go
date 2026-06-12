@@ -297,11 +297,11 @@ func TestDispatchParity_HappyPath(t *testing.T) {
 	assertDispatchField(t, finished, "type", "dispatch_finished")
 	assertDispatchField(t, finished, "agent", "backend")
 	assertDispatchField(t, finished, "runtime", "claude")
-	assertDispatchField(t, finished, "project", projectRoot)    // PR #40
+	assertDispatchField(t, finished, "project", projectRoot)     // PR #40
 	assertDispatchField(t, finished, "model_resolved", "sonnet") // PR #32 (from agent frontmatter)
 	assertDispatchField(t, finished, "model_chosen_by", "frontmatter")
-	assertDispatchField(t, finished, "stderr_tail", nil)  // PR #34: null on success
-	assertDispatchField(t, finished, "eval_run_id", nil)  // null when not set
+	assertDispatchField(t, finished, "stderr_tail", nil) // PR #34: null on success
+	assertDispatchField(t, finished, "eval_run_id", nil) // null when not set
 
 	// PR #34: stderr_truncated must be present.
 	if _, ok := finished["stderr_truncated"]; !ok {
@@ -383,7 +383,7 @@ func TestDispatchParity_ModelOverride(t *testing.T) {
 
 	events := readDispatchLogEvents(t, logDir)
 	finished := events[len(events)-1]
-	assertDispatchField(t, finished, "model_resolved", "haiku")   // PR #32
+	assertDispatchField(t, finished, "model_resolved", "haiku")     // PR #32
 	assertDispatchField(t, finished, "model_chosen_by", "override") // PR #32
 	_ = res
 }
@@ -564,7 +564,7 @@ func TestDispatchParity_SchemaCompleteness(t *testing.T) {
 
 	requiredFields := []string{
 		"type", "ts", "agent", "runtime",
-		"project",         // PR #40
+		"project", // PR #40
 		"exit_code", "duration_s",
 		"output_bytes", "task_bytes",
 		"est_input_tokens", "est_output_tokens",

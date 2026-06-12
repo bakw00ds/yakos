@@ -245,7 +245,7 @@ func (h *Hook) runPostToolUse(out hooktype.HookOutput, in hooktype.HookInput) (h
 	if dissent {
 		if currentDir != "" {
 			notesFile := filepath.Join(currentDir, "notes", fmt.Sprintf("plan-quality-%s.md", planID))
-			_ = os.MkdirAll(filepath.Dir(notesFile), 0755)          //nolint:gosec
+			_ = os.MkdirAll(filepath.Dir(notesFile), 0755) //nolint:gosec
 			content := fmt.Sprintf("# Plan Quality Surface — %s\n\n"+
 				"**Reason:** Judge panel dissent\n\n"+
 				"## Score summary\n\nplan_id: %s\naggregate_score: %.4f\n",

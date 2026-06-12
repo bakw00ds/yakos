@@ -523,7 +523,10 @@ func runDeadlock(cfg Config) (*Result, error) {
 	}
 
 	// Build path → owner lookup from active-claims.json.
-	type ownerKey struct{ user, host string; pid int }
+	type ownerKey struct {
+		user, host string
+		pid        int
+	}
 	pathOwner := map[string]ownerKey{}
 	for _, c := range claimsDoc.Claims {
 		if len(c.Owners) > 0 {
@@ -1007,11 +1010,11 @@ func runHandoff(cfg Config) (*Result, error) {
 	handoffID := fmt.Sprintf("%d-%d-%d", now.Unix(), cfg.PID, now.Nanosecond()%100000)
 
 	detail, _ := json.Marshal(map[string]interface{}{
-		"handoff_id":       handoffID,
-		"to":               to,
-		"completed_scope":  completed,
-		"notes":            notes,
-		"next_action":      nextAction,
+		"handoff_id":      handoffID,
+		"to":              to,
+		"completed_scope": completed,
+		"notes":           notes,
+		"next_action":     nextAction,
 	})
 	e := mailbox.Event{
 		Ts:   ts,

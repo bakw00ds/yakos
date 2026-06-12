@@ -82,10 +82,10 @@ func handleVersion(cfg Config) jsonrpc.Handler {
 
 // kanbanSummaryResult is the response shape for yakos.kanban.summary.
 type kanbanSummaryResult struct {
-	Summary     string `json:"summary"`
-	TODO        int    `json:"todo"`
-	InProgress  int    `json:"in_progress"`
-	Done        int    `json:"done"`
+	Summary    string `json:"summary"`
+	TODO       int    `json:"todo"`
+	InProgress int    `json:"in_progress"`
+	Done       int    `json:"done"`
 }
 
 // handleKanbanSummary returns a handler that reads the kanban.md for the

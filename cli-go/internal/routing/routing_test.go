@@ -42,8 +42,8 @@ func newCfg(t *testing.T) Config {
 	}
 }
 
-func cfgOut(cfg Config) string    { return cfg.Writer.(*bytes.Buffer).String() }
-func cfgErr(cfg Config) string    { return cfg.ErrWriter.(*bytes.Buffer).String() }
+func cfgOut(cfg Config) string { return cfg.Writer.(*bytes.Buffer).String() }
+func cfgErr(cfg Config) string { return cfg.ErrWriter.(*bytes.Buffer).String() }
 
 // writeAgentFile creates a minimal agent markdown file with frontmatter.
 func writeAgentFile(t *testing.T, dir, name, model, domain string) string {
@@ -70,8 +70,8 @@ func writeEvalCase(t *testing.T, evalDir, id string) {
 		t.Fatalf("mkdir eval: %v", err)
 	}
 	rec := map[string]interface{}{
-		"case_id":          id,
-		"task":             "test task for " + id,
+		"case_id":           id,
+		"task":              "test task for " + id,
 		"expected_outcomes": []string{"output should contain answer"},
 		"rubric": map[string]interface{}{
 			"criteria": []map[string]interface{}{
@@ -112,12 +112,12 @@ func mockJudge(pass bool) func(judgeID, inputJSON, project string) (JudgeResult,
 func writeCandidateRecord(t *testing.T, path, agentID, current, suggested, generatedAt string) {
 	t.Helper()
 	rec := candidateRecord{
-		Agent:          agentID,
-		CurrentModel:   current,
-		SuggestedModel: suggested,
+		Agent:                      agentID,
+		CurrentModel:               current,
+		SuggestedModel:             suggested,
 		EstimatedMonthlySavingsUSD: 1.50,
-		GeneratedAt:    generatedAt,
-		Evidence: json.RawMessage(`{"n_cases":10,"eval_run_id":"test-run","epsilon_used":0.05,"judge":"code-reviewer","ci_lower":{"haiku":0.8,"sonnet":0.85,"opus":0.9},"mean_costs":{"haiku":0.001,"sonnet":0.003,"opus":0.010},"pass_rates":{"haiku":0.85,"sonnet":0.90,"opus":0.92}}`),
+		GeneratedAt:                generatedAt,
+		Evidence:                   json.RawMessage(`{"n_cases":10,"eval_run_id":"test-run","epsilon_used":0.05,"judge":"code-reviewer","ci_lower":{"haiku":0.8,"sonnet":0.85,"opus":0.9},"mean_costs":{"haiku":0.001,"sonnet":0.003,"opus":0.010},"pass_rates":{"haiku":0.85,"sonnet":0.90,"opus":0.92}}`),
 	}
 	data, _ := json.Marshal(rec)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
@@ -206,8 +206,8 @@ func TestWilsonLower_Monotone(t *testing.T) {
 
 func TestTierCheaperThan(t *testing.T) {
 	cases := []struct {
-		a, b  string
-		want  bool
+		a, b string
+		want bool
 	}{
 		{"haiku", "sonnet", true},
 		{"haiku", "opus", true},
@@ -1213,11 +1213,11 @@ func TestLoadSettings_FromFile(t *testing.T) {
 	tmp := t.TempDir()
 	settings := map[string]interface{}{
 		"model_routing": map[string]interface{}{
-			"epsilon_pass_rate":         0.03,
-			"min_cases_for_eval":        8,
-			"min_cases_for_confidence":  20,
-			"max_eval_run_cost_usd":     10.0,
-			"weekly_max_cost_usd":       100.0,
+			"epsilon_pass_rate":        0.03,
+			"min_cases_for_eval":       8,
+			"min_cases_for_confidence": 20,
+			"max_eval_run_cost_usd":    10.0,
+			"weekly_max_cost_usd":      100.0,
 		},
 	}
 	data, _ := json.Marshal(settings)

@@ -11,13 +11,13 @@ import (
 // Any regular file with one of these extensions (or no extension at all) is considered
 // an executable candidate for hook installation.
 var executableExtensions = map[string]bool{
-	".sh":  true,
+	".sh":   true,
 	".bash": true,
-	".py":  true,
-	".ps1": true,
-	".cmd": true,
-	".bat": true,
-	".exe": true,
+	".py":   true,
+	".ps1":  true,
+	".cmd":  true,
+	".bat":  true,
+	".exe":  true,
 }
 
 // isExecutable reports whether fi represents an executable file on Windows.

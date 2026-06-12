@@ -43,10 +43,10 @@ type yakosYMLContextInject struct {
 }
 
 type contextInjectConfig struct {
-	Enabled         *bool `yaml:"enabled"`
-	InjectDecisions *bool `yaml:"inject_decisions"`
-	InjectBudget    *bool `yaml:"inject_budget"`
-	InjectPeers     *bool `yaml:"inject_peers"`
+	Enabled          *bool `yaml:"enabled"`
+	InjectDecisions  *bool `yaml:"inject_decisions"`
+	InjectBudget     *bool `yaml:"inject_budget"`
+	InjectPeers      *bool `yaml:"inject_peers"`
 	InjectSupervisor *bool `yaml:"inject_supervisor"`
 }
 

@@ -386,8 +386,8 @@ func stripYakosPermissionsBlock(content string) string {
 
 // geminiHookEntry is one matcher entry in the gemini hooks block.
 type geminiHookEntry struct {
-	Matcher string             `json:"matcher"`
-	Hooks   []geminiInnerHook  `json:"hooks"`
+	Matcher string            `json:"matcher"`
+	Hooks   []geminiInnerHook `json:"hooks"`
 }
 
 type geminiInnerHook struct {
@@ -584,13 +584,13 @@ func installAgy(cfg Config) (Result, error) {
 
 // StatusReport describes the hooks status for a project.
 type StatusReport struct {
-	ProjectDir      string
-	ClaudeEntries   int
-	ClaudePresent   bool
-	CodexEntries    int
-	CodexPresent    bool
-	GeminiEntries   int
-	GeminiPresent   bool
+	ProjectDir    string
+	ClaudeEntries int
+	ClaudePresent bool
+	CodexEntries  int
+	CodexPresent  bool
+	GeminiEntries int
+	GeminiPresent bool
 }
 
 func runStatus(cfg Config) (Result, error) {

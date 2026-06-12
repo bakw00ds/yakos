@@ -3,11 +3,11 @@
 // Refresh detects and repairs three classes of per-project deployment drift:
 //
 //  1. Hook script drift   — <project>/scripts/hooks/*.sh out of date vs
-//                           lib/hooks/*.sh (and lib/hooks/lib/)
+//     lib/hooks/*.sh (and lib/hooks/lib/)
 //  2. settings.json drift — hook registrations missing or superseded vs
-//                           lib/settings/settings.template.json
+//     lib/settings/settings.template.json
 //  3. Agent symlink drift — ~/.claude/agents/<id>.md missing or wrong
-//                           vs lib/agents/<id>.md
+//     vs lib/agents/<id>.md
 //
 // The package is intentionally free of any state beyond what is passed in
 // through Config. All writes are atomic (temp-rename). No file locking is

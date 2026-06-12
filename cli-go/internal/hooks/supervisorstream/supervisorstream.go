@@ -545,4 +545,3 @@ func (h *Hook) resolveProjectDir(in hooktype.HookInput) string {
 	}
 	return in.WorkDir
 }
-

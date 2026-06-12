@@ -66,10 +66,10 @@ func Serve(ctx context.Context, cfg Config, in io.Reader, out io.Writer) error {
 
 // server holds per-session state.
 type server struct {
-	cfg       Config
-	out       io.Writer
-	writeMu   sync.Mutex
-	tools     []tool
+	cfg     Config
+	out     io.Writer
+	writeMu sync.Mutex
+	tools   []tool
 }
 
 // run is the main read-dispatch-write loop.

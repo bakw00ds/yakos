@@ -16,11 +16,11 @@ const defaultReplayBufferSize = 1000
 //
 // Thread safety: all methods are guarded by the embedded mutex.
 type replayBuffer struct {
-	mu       sync.RWMutex
-	buf      []Event
-	cap      int
-	head     int // index of next write slot
-	size     int // number of valid entries
+	mu   sync.RWMutex
+	buf  []Event
+	cap  int
+	head int // index of next write slot
+	size int // number of valid entries
 }
 
 // newReplayBuffer creates a replayBuffer with the given capacity.

@@ -762,9 +762,9 @@ func (r *runner) parseProbeFile(probeFile string) {
 	}
 
 	type probeDoc struct {
-		Timestamp          string            `json:"timestamp"`
-		ClaudeCodeVersion  string            `json:"claude_code_version"`
-		Tools              map[string]string `json:"tools"`
+		Timestamp         string            `json:"timestamp"`
+		ClaudeCodeVersion string            `json:"claude_code_version"`
+		Tools             map[string]string `json:"tools"`
 	}
 	var probe probeDoc
 	if err := json.Unmarshal(data, &probe); err != nil {

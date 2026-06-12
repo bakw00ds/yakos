@@ -139,9 +139,9 @@ func Serve(cfg ServeConfig) (ServeResult, error) {
 	// Allowed hosts for DNS-rebinding defence.
 	allowed := map[string]struct{}{
 		"127.0.0.1": {},
-		"localhost":  {},
-		"[::1]":      {},
-		"::1":        {},
+		"localhost": {},
+		"[::1]":     {},
+		"::1":       {},
 	}
 	allowed[host] = struct{}{}
 

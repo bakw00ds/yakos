@@ -31,7 +31,7 @@
 //
 // MEMORY.md index line format (byte-identical is load-bearing):
 //
-//	- [<name>](<slug>.md) — <description>
+//   - [<name>](<slug>.md) — <description>
 //
 // # Schema version
 //
@@ -456,7 +456,7 @@ func ParseIndexBytes(data []byte) []IndexEntry {
 
 // parseIndexLine parses one MEMORY.md line of the form:
 //
-//	- [name](slug.md) — description
+//   - [name](slug.md) — description
 //
 // Returns the parsed entry and true on success.
 func parseIndexLine(line string) (IndexEntry, bool) {

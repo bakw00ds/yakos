@@ -43,21 +43,21 @@ type planScoredRecord struct {
 
 // planOutcomeRecord is the shape written by this hook.
 type planOutcomeRecord struct {
-	Type                   string   `json:"type"`
-	Ts                     string   `json:"ts"`
-	PlanID                 string   `json:"plan_id"`
-	Project                string   `json:"project"`
-	FirstTryPass           *bool    `json:"first_try_pass"`
-	ReworkCycles           *int     `json:"rework_cycles"`
-	FilesTouched           *int     `json:"files_touched"`
-	FilesTouchedEstimated  *bool    `json:"files_touched_estimated"`
-	ScopeCreepRatio        *float64 `json:"scope_creep_ratio"`
-	LinesChanged           *int     `json:"lines_changed"`
-	TokensSpentTotal       *int     `json:"tokens_spent_total"`
-	CostUSDActual          *float64 `json:"cost_usd_actual"`
-	ReworkFailureModes     []string `json:"rework_failure_modes"`
-	HumanSignal            *string  `json:"human_signal"`
-	CaptureMethod          string   `json:"capture_method"`
+	Type                  string   `json:"type"`
+	Ts                    string   `json:"ts"`
+	PlanID                string   `json:"plan_id"`
+	Project               string   `json:"project"`
+	FirstTryPass          *bool    `json:"first_try_pass"`
+	ReworkCycles          *int     `json:"rework_cycles"`
+	FilesTouched          *int     `json:"files_touched"`
+	FilesTouchedEstimated *bool    `json:"files_touched_estimated"`
+	ScopeCreepRatio       *float64 `json:"scope_creep_ratio"`
+	LinesChanged          *int     `json:"lines_changed"`
+	TokensSpentTotal      *int     `json:"tokens_spent_total"`
+	CostUSDActual         *float64 `json:"cost_usd_actual"`
+	ReworkFailureModes    []string `json:"rework_failure_modes"`
+	HumanSignal           *string  `json:"human_signal"`
+	CaptureMethod         string   `json:"capture_method"`
 }
 
 // Hook implements runner.Hook for plan outcome capture.

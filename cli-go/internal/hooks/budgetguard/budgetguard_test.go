@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/hooks/budgetguard"
+	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
 var fixedTime = time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)

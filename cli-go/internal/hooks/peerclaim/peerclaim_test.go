@@ -414,12 +414,12 @@ type fakeFileInfo struct {
 	modTime time.Time
 }
 
-func (f fakeFileInfo) Name() string      { return "active-claims.json" }
-func (f fakeFileInfo) Size() int64       { return 64 }
-func (f fakeFileInfo) Mode() os.FileMode { return 0644 }
+func (f fakeFileInfo) Name() string       { return "active-claims.json" }
+func (f fakeFileInfo) Size() int64        { return 64 }
+func (f fakeFileInfo) Mode() os.FileMode  { return 0644 }
 func (f fakeFileInfo) ModTime() time.Time { return f.modTime }
-func (f fakeFileInfo) IsDir() bool       { return false }
-func (f fakeFileInfo) Sys() any          { return nil }
+func (f fakeFileInfo) IsDir() bool        { return false }
+func (f fakeFileInfo) Sys() any           { return nil }
 
 // makeStaleHook returns a hook with a fixed "now" of fixedTime and a StatFn
 // that reports the claims file's modTime.  The IsProcessRunningFn always
@@ -554,7 +554,7 @@ func TestStaleCoord_EnvOverride(t *testing.T) {
 	h := makeStaleHook(tmp, coord, staleMod)
 
 	in := makeInput("Edit", filepath.Join(tmp, "main.go"), map[string]string{
-		"CLAUDE_PROJECT_DIR":    tmp,
+		"CLAUDE_PROJECT_DIR":     tmp,
 		"YAKOS_PEER_STALE_AFTER": "3600", // 1 hour in seconds
 	})
 	out, err := h.Run(context.Background(), in)

@@ -6,11 +6,11 @@
 //     PromptFn; no real user input or filesystem side-effects beyond temp dirs.
 //
 //  2. The bash standards.sh manages Plan 4 cross-project standards opt-ins:
-//       list    — show all 6 standards + state
-//       enable  — set profile.standards.<name> = true
-//       disable — set profile.standards.<name> = false
-//       check   — preview what active standards catch
-//       init    — interactive profile + standards selection
+//     list    — show all 6 standards + state
+//     enable  — set profile.standards.<name> = true
+//     disable — set profile.standards.<name> = false
+//     check   — preview what active standards catch
+//     init    — interactive profile + standards selection
 //
 //  3. Parity is verified behaviourally (output shape, filesystem effects,
 //     error conditions) rather than byte-for-byte.

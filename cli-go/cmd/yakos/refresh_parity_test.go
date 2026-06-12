@@ -348,13 +348,13 @@ func TestRefresh_GoNative_DryRunNoWrite(t *testing.T) {
 	staleHook := filepath.Join(projPath, "scripts", "hooks", "path-log.sh")
 	settingsFile := filepath.Join(projPath, ".claude", "settings.json")
 
-	hookContentBefore, _ := os.ReadFile(staleHook)     //nolint:gosec
+	hookContentBefore, _ := os.ReadFile(staleHook)        //nolint:gosec
 	settingsContentBefore, _ := os.ReadFile(settingsFile) //nolint:gosec
 
 	out := runRefreshCapture(t, projPath, home, true)
 
 	// Files must be unchanged.
-	hookContentAfter, _ := os.ReadFile(staleHook)     //nolint:gosec
+	hookContentAfter, _ := os.ReadFile(staleHook)        //nolint:gosec
 	settingsContentAfter, _ := os.ReadFile(settingsFile) //nolint:gosec
 
 	if string(hookContentBefore) != string(hookContentAfter) {

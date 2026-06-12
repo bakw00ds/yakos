@@ -58,14 +58,14 @@ func TestDefaultDisabled(t *testing.T) {
 func TestRecordNoOpWhenDisabled(t *testing.T) {
 	home := t.TempDir()
 	ev := Event{
-		TS:          time.Now().UTC(),
+		TS:           time.Now().UTC(),
 		YakosVersion: "0.37.0.0 (go)",
-		OS:          "darwin",
-		Arch:        "arm64",
-		Command:     "validate",
-		ExitCode:    0,
-		DurationMS:  42,
-		SessionHash: "abc123",
+		OS:           "darwin",
+		Arch:         "arm64",
+		Command:      "validate",
+		ExitCode:     0,
+		DurationMS:   42,
+		SessionHash:  "abc123",
 	}
 	Record(home, ev)
 

@@ -92,19 +92,19 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	auditEntry := map[string]any{
-		"ts":                    ts,
-		"hook":                  hookName,
-		"severity":              severity,
-		"action":                "pass",
-		"message":               "session terminal state recorded",
-		"decisions_stale":       decisionsStale,
-		"decisions_age_s":       decisionsAgeS,
-		"expired_bypass_count":  expiredCount,
-		"expired_bypass_ids":    strings.Join(expiredIDs, " "),
-		"hook_blocks":           blockCount,
-		"hook_warns":            warnCount,
-		"hook_reports":          reportCount,
-		"hooks":                 hookSummary,
+		"ts":                   ts,
+		"hook":                 hookName,
+		"severity":             severity,
+		"action":               "pass",
+		"message":              "session terminal state recorded",
+		"decisions_stale":      decisionsStale,
+		"decisions_age_s":      decisionsAgeS,
+		"expired_bypass_count": expiredCount,
+		"expired_bypass_ids":   strings.Join(expiredIDs, " "),
+		"hook_blocks":          blockCount,
+		"hook_warns":           warnCount,
+		"hook_reports":         reportCount,
+		"hooks":                hookSummary,
 	}
 	_ = appendNDJSON(logFile, auditEntry)
 
@@ -135,13 +135,13 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	summaryEntry := map[string]any{
-		"ts_start":             tsStart,
-		"ts_end":               ts,
-		"duration_seconds":     durationSec,
-		"team_name":            "",
-		"session_id":           sessionID,
+		"ts_start":              tsStart,
+		"ts_end":                ts,
+		"duration_seconds":      durationSec,
+		"team_name":             "",
+		"session_id":            sessionID,
 		"scratchpad_size_bytes": 0,
-		"exit_kind":            exitKind,
+		"exit_kind":             exitKind,
 	}
 	if err := appendNDJSON(sessionsLog, summaryEntry); err != nil {
 		out.Stderr = fmt.Appendf(out.Stderr, "%s: sessions log: %v\n", hookName, err)

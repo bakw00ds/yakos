@@ -15,14 +15,14 @@
 //     template if missing.
 //  8. Write ~/agent-control/<name>/work/sessions.ndjson if missing.
 //  9. Write ~/agent-control/<name>/.project-path.
-// 10. Write <project>/.claude/path-allowlist.json from embedded template if
+//  10. Write <project>/.claude/path-allowlist.json from embedded template if
 //     missing.
-// 11. Write <project>/.claude/settings.json from embedded template if missing.
-// 12. Ensure ~/.claude/projects/<encoded>/MEMORY.md exists.
-// 13. Write <project>/AGENTS.md from embedded template if missing.
-// 14. Write <project>/.yakos.yml from embedded template if missing.
-// 15. Append yakOS runtime-agent gitignore patterns to <project>/.gitignore.
-// 16. Apply --template <kind> overlay (rails/go/python/node/rust/static-site).
+//  11. Write <project>/.claude/settings.json from embedded template if missing.
+//  12. Ensure ~/.claude/projects/<encoded>/MEMORY.md exists.
+//  13. Write <project>/AGENTS.md from embedded template if missing.
+//  14. Write <project>/.yakos.yml from embedded template if missing.
+//  15. Append yakOS runtime-agent gitignore patterns to <project>/.gitignore.
+//  16. Apply --template <kind> overlay (rails/go/python/node/rust/static-site).
 //
 // Template files ship inside the binary via //go:embed (Decision D from
 // docs/go-port-decisions-2026-06-02.md). No external file lookup at runtime.

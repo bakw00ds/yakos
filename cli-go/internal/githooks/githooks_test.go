@@ -83,12 +83,12 @@ func newCfg(t *testing.T, sub string) Config {
 		t.Fatalf("mkdir hooks: %v", err)
 	}
 	return Config{
-		Subcommand:  sub,
-		YakosRoot:   buildYakosRoot(t, true, true),
-		RepoRoot:    repoRoot,
-		Writer:      &bytes.Buffer{},
-		ErrWriter:   &bytes.Buffer{},
-		SHA256File:  func(path string) (string, error) {
+		Subcommand: sub,
+		YakosRoot:  buildYakosRoot(t, true, true),
+		RepoRoot:   repoRoot,
+		Writer:     &bytes.Buffer{},
+		ErrWriter:  &bytes.Buffer{},
+		SHA256File: func(path string) (string, error) {
 			data, err := os.ReadFile(path) //nolint:gosec
 			if err != nil {
 				return "", err

@@ -42,8 +42,8 @@ const (
 
 // Server is the REST API HTTP server.
 type Server struct {
-	cfg    Config
-	mux    *http.ServeMux
+	cfg     Config
+	mux     *http.ServeMux
 	httpSrv *http.Server
 }
 

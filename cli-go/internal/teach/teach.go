@@ -243,9 +243,9 @@ Examples:
 //
 // Output shape (no leading newline; the caller provides the separator):
 //
-//	- **YYYY-MM-DD** — <first line>
-//	  <continuation line 1>
-//	  <continuation line 2>
+//   - **YYYY-MM-DD** — <first line>
+//     <continuation line 1>
+//     <continuation line 2>
 func formatLesson(dateStamp, body string) string {
 	lines := strings.Split(body, "\n")
 	if len(lines) == 0 {

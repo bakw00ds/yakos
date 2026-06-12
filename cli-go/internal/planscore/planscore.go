@@ -116,26 +116,26 @@ type Result struct {
 
 // planScoredRecord is a single plan_scored line from the log.
 type planScoredRecord struct {
-	Type            string            `json:"type"`
-	Ts              string            `json:"ts"`
-	PlanID          string            `json:"plan_id"`
-	Project         string            `json:"project"`
-	Verdict         string            `json:"verdict"`
-	AggregateScore  float64           `json:"aggregate_score"`
-	Dissent         bool              `json:"dissent"`
-	CostUSD         float64           `json:"cost_usd"`
+	Type            string             `json:"type"`
+	Ts              string             `json:"ts"`
+	PlanID          string             `json:"plan_id"`
+	Project         string             `json:"project"`
+	Verdict         string             `json:"verdict"`
+	AggregateScore  float64            `json:"aggregate_score"`
+	Dissent         bool               `json:"dissent"`
+	CostUSD         float64            `json:"cost_usd"`
 	PerDimensionMed map[string]float64 `json:"per_dimension_median"`
 }
 
 // planOutcomeRecord is a single plan_outcome line from the log.
 type planOutcomeRecord struct {
-	Type            string  `json:"type"`
-	Ts              string  `json:"ts"`
-	PlanID          string  `json:"plan_id"`
-	Project         string  `json:"project"`
-	FirstTryPass    *bool   `json:"first_try_pass"`
+	Type            string   `json:"type"`
+	Ts              string   `json:"ts"`
+	PlanID          string   `json:"plan_id"`
+	Project         string   `json:"project"`
+	FirstTryPass    *bool    `json:"first_try_pass"`
 	ScopeCreepRatio *float64 `json:"scope_creep_ratio"`
-	ReworkCycles    *int    `json:"rework_cycles"`
+	ReworkCycles    *int     `json:"rework_cycles"`
 }
 
 // planOverrideRecord is written to the log by the override subcommand.
@@ -442,11 +442,11 @@ var dimensionNames = []string{
 
 // joinedRow is one joined (plan_scored + plan_outcome) record.
 type joinedRow struct {
-	planID      string
-	aggregate   float64
-	dims        [6]float64
-	scopeCreep  float64 // -1 means absent
-	firstTryPass int    // 1=true, 0=false, -1=absent
+	planID       string
+	aggregate    float64
+	dims         [6]float64
+	scopeCreep   float64 // -1 means absent
+	firstTryPass int     // 1=true, 0=false, -1=absent
 }
 
 func runCorrelate(cfg Config, logPath string) (*Result, error) {
@@ -490,9 +490,9 @@ func runCorrelate(cfg Config, logPath string) (*Result, error) {
 		}
 
 		row := joinedRow{
-			planID:     o.PlanID,
-			aggregate:  s.AggregateScore,
-			scopeCreep: -1,
+			planID:       o.PlanID,
+			aggregate:    s.AggregateScore,
+			scopeCreep:   -1,
 			firstTryPass: -1,
 		}
 

@@ -44,21 +44,21 @@ import (
 )
 
 const (
-	hookName        = "output-injection-scan"
-	maxScanBytes    = 50_000
+	hookName         = "output-injection-scan"
+	maxScanBytes     = 50_000
 	zwCharsThreshold = 10
 )
 
 // pre-compiled patterns (case-insensitive where applicable)
 var (
-	reIgnorePrev = regexp.MustCompile(`(?i)ignore[\s]+(all|previous|prior|the[\s]+(previous|prior))[\s]+(instructions|prompts|messages|system)`)
-	reIgnoreAll  = regexp.MustCompile(`(?i)ignore[\s]+everything[\s]+(above|before|preceding|prior)`)
-	reDisregard  = regexp.MustCompile(`(?i)disregard[\s]+(the|all|previous|prior)[\s]+(system|user)[\s]+(prompt|instructions|messages|context)`)
+	reIgnorePrev   = regexp.MustCompile(`(?i)ignore[\s]+(all|previous|prior|the[\s]+(previous|prior))[\s]+(instructions|prompts|messages|system)`)
+	reIgnoreAll    = regexp.MustCompile(`(?i)ignore[\s]+everything[\s]+(above|before|preceding|prior)`)
+	reDisregard    = regexp.MustCompile(`(?i)disregard[\s]+(the|all|previous|prior)[\s]+(system|user)[\s]+(prompt|instructions|messages|context)`)
 	reRoleOverride = regexp.MustCompile(`(?i)(you are now|act as|you must now|pretend (to be|you are))[\s]+(a|an|the)[\s]+`)
-	reSystemLine = regexp.MustCompile(`(?m)^\s*(SYSTEM|\[SYSTEM\]|system:|\[system\]):`)
-	rePrivKey    = regexp.MustCompile(`BEGIN[\s]+(RSA|EC|OPENSSH|PRIVATE|DSA)[\s]+(PRIVATE[\s]+)?KEY`)
-	reAPIKey     = regexp.MustCompile(`(sk-ant-[A-Za-z0-9_\-]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|xoxb-[0-9]{10,}-[0-9]{10,})`)
-	reBase64Long = regexp.MustCompile(`[A-Za-z0-9+/]{400,}={0,2}`)
+	reSystemLine   = regexp.MustCompile(`(?m)^\s*(SYSTEM|\[SYSTEM\]|system:|\[system\]):`)
+	rePrivKey      = regexp.MustCompile(`BEGIN[\s]+(RSA|EC|OPENSSH|PRIVATE|DSA)[\s]+(PRIVATE[\s]+)?KEY`)
+	reAPIKey       = regexp.MustCompile(`(sk-ant-[A-Za-z0-9_\-]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|xoxb-[0-9]{10,}-[0-9]{10,})`)
+	reBase64Long   = regexp.MustCompile(`[A-Za-z0-9+/]{400,}={0,2}`)
 )
 
 // model-format tokens checked literally

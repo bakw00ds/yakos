@@ -134,13 +134,13 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 			}
 
 			summaryEntry := map[string]any{
-				"ts_start":            tsStart,
-				"ts_end":              ts,
-				"duration_seconds":    maybeInt64(durationSec),
-				"team_name":           teamName,
-				"session_id":          sessionID,
+				"ts_start":              tsStart,
+				"ts_end":                ts,
+				"duration_seconds":      maybeInt64(durationSec),
+				"team_name":             teamName,
+				"session_id":            sessionID,
 				"scratchpad_size_bytes": 0,
-				"exit_kind":           exitKind,
+				"exit_kind":             exitKind,
 			}
 			_ = appendNDJSON(sessionsLog, summaryEntry)
 		} else {

@@ -6,20 +6,20 @@
 //
 // The bash implementations that this package mirrors:
 //
-//   cmd_add:    inserts a task block immediately after "## TODO"
-//   cmd_notes:  replaces the "  - notes:" line within a task block
-//   cmd_move:   removes a task block from its current column and inserts
-//               it immediately after the target column heading
-//   cmd_done:   alias for Move(id, ColDone)
-//   cmd_delete: removes a task block entirely
+//	cmd_add:    inserts a task block immediately after "## TODO"
+//	cmd_notes:  replaces the "  - notes:" line within a task block
+//	cmd_move:   removes a task block from its current column and inserts
+//	            it immediately after the target column heading
+//	cmd_done:   alias for Move(id, ColDone)
+//	cmd_delete: removes a task block entirely
 //
 // Task block structure (as written by cmd_add):
 //
-//	- [ ] K-N — title
-//	  - category: <c>
-//	  - assigned: unassigned
-//	  - blockers: none
-//	  - notes: <text>
+//   - [ ] K-N — title
+//   - category: <c>
+//   - assigned: unassigned
+//   - blockers: none
+//   - notes: <text>
 //
 // Block detection: a block starts with a line matching "^- [<x>]" that
 // contains " <id> " as a whole-token substring (space-delimited, matching

@@ -84,9 +84,9 @@ func setupCostLogDir(t *testing.T, fixture string) map[string]string {
 
 	root := repoRootForParity(t)
 	return map[string]string{
-		"HOME":                tmpDir,
-		"YAKOS_DISPATCH_LOG":  stateDir,
-		"YAKOS_LIB":           filepath.Join(root, "cli", "lib"),
+		"HOME":               tmpDir,
+		"YAKOS_DISPATCH_LOG": stateDir,
+		"YAKOS_LIB":          filepath.Join(root, "cli", "lib"),
 	}
 }
 

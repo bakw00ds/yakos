@@ -285,15 +285,15 @@ func Run(cfg Config) (*Banner, error) {
 			return nil, fmt.Errorf("start: print-agents: %w", err)
 		}
 		return &Banner{
-			Project:    name,
-			ProjectRepo: projectRepo,
-			ControlDir: controlDir,
-			Runtime:    runtime,
+			Project:      name,
+			ProjectRepo:  projectRepo,
+			ControlDir:   controlDir,
+			Runtime:      runtime,
 			Capabilities: caps,
-			CLIOk:      cliOk,
-			AuthOk:     authOk,
-			PermMode:   permMode,
-			AgentCount: agentCount,
+			CLIOk:        cliOk,
+			AuthOk:       authOk,
+			PermMode:     permMode,
+			AgentCount:   agentCount,
 		}, nil
 	}
 
@@ -333,17 +333,17 @@ func Run(cfg Config) (*Banner, error) {
 		_, _ = fmt.Fprintln(w, "Dry run — would exec via runtime '"+runtime+"':")
 		_, _ = fmt.Fprintln(w, dryRunCmd)
 		return &Banner{
-			Project:     name,
-			ProjectRepo: projectRepo,
-			ControlDir:  controlDir,
-			Runtime:     runtime,
+			Project:      name,
+			ProjectRepo:  projectRepo,
+			ControlDir:   controlDir,
+			Runtime:      runtime,
 			Capabilities: caps,
-			CLIOk:       cliOk,
-			AuthOk:      authOk,
-			PermMode:    permMode,
-			AgentCount:  agentCount,
-			ModeFlags:   modeFlags,
-			DryRunCmd:   dryRunCmd,
+			CLIOk:        cliOk,
+			AuthOk:       authOk,
+			PermMode:     permMode,
+			AgentCount:   agentCount,
+			ModeFlags:    modeFlags,
+			DryRunCmd:    dryRunCmd,
 		}, nil
 	}
 
@@ -936,13 +936,13 @@ func buildExecEnv(env map[string]string, allowRoot bool) []string {
 // buildAuditEvent constructs the session_launched JSON event.
 func buildAuditEvent(ts, name, repo, runtime, permMode string, agentCount int) (string, error) {
 	type auditEvent struct {
-		Type            string `json:"type"`
-		TS              string `json:"ts"`
-		Project         string `json:"project"`
-		Repo            string `json:"repo"`
-		Runtime         string `json:"runtime"`
-		PermissionMode  string `json:"permission_mode"`
-		AgentCount      int    `json:"agent_count"`
+		Type           string `json:"type"`
+		TS             string `json:"ts"`
+		Project        string `json:"project"`
+		Repo           string `json:"repo"`
+		Runtime        string `json:"runtime"`
+		PermissionMode string `json:"permission_mode"`
+		AgentCount     int    `json:"agent_count"`
 	}
 	ev := auditEvent{
 		Type:           "session_launched",

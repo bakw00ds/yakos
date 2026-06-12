@@ -55,9 +55,9 @@ type Event struct {
 	Usage *Usage `json:"usage,omitempty"`
 
 	// Routing metadata (newer events).
-	ModelResolved  string `json:"model_resolved,omitempty"`
-	ModelChosenBy  string `json:"model_chosen_by,omitempty"`
-	EvalRunID      string `json:"eval_run_id,omitempty"`
+	ModelResolved string `json:"model_resolved,omitempty"`
+	ModelChosenBy string `json:"model_chosen_by,omitempty"`
+	EvalRunID     string `json:"eval_run_id,omitempty"`
 
 	// TaskPreview is present on dispatch_started events only.
 	TaskPreview string `json:"task_preview,omitempty"`

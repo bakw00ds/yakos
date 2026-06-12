@@ -293,7 +293,7 @@ func TestAuth_Binary_Logout_Codex(t *testing.T) {
 	home := newAuthTempHome(t)
 	codexDir := filepath.Join(home, ".codex")
 	_, code := runGoAuth(t, goBin, []string{"auth", "logout", "codex"}, map[string]string{
-		"HOME":      home,
+		"HOME":       home,
 		"CODEX_HOME": codexDir,
 	})
 	// codex logout may exit non-zero if codex isn't installed; that is OK.

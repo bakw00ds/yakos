@@ -318,4 +318,3 @@ func assertContains(t *testing.T, s, substr, msg string) {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
-

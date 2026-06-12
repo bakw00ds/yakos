@@ -367,7 +367,7 @@ func TestRun_NoProject_Error(t *testing.T) {
 	cfg := Config{
 		AgentName:  "backend",
 		LessonFile: lessonFile,
-		ProjectDir: "", // no project
+		ProjectDir: "",  // no project
 		HomeDir:    dir, // no agent-control entries
 		Now:        fixedNow,
 		Writer:     &bytes.Buffer{},

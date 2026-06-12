@@ -99,8 +99,8 @@ func TestMethod_KanbanAdd_UnknownFieldRejected(t *testing.T) {
 	client, _ := newTestDaemon(t, cfg)
 
 	_, err := client.Call(context.Background(), "yakos.kanban.add", map[string]string{
-		"title":     "test",
-		"badField":  "x",
+		"title":    "test",
+		"badField": "x",
 	})
 	if err == nil {
 		t.Fatal("expected error for unknown field")

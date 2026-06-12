@@ -96,10 +96,10 @@ func mrWriteEvalCase(t *testing.T, dir, id string) {
 		t.Fatalf("mkdir eval: %v", err)
 	}
 	rec := map[string]interface{}{
-		"case_id":          id,
-		"task":             "solve task " + id,
+		"case_id":           id,
+		"task":              "solve task " + id,
 		"expected_outcomes": []string{"correct"},
-		"rubric":           map[string]interface{}{"criteria": []interface{}{}},
+		"rubric":            map[string]interface{}{"criteria": []interface{}{}},
 	}
 	data, _ := json.Marshal(rec)
 	_ = os.WriteFile(filepath.Join(dir, "case-"+id+".json"), data, 0644)
@@ -118,11 +118,11 @@ func mrSetupAgent(t *testing.T, cfg routing.Config, name, model string, nCases i
 func mrWriteCandidate(t *testing.T, cfg routing.Config, agentID, current, suggested, ts string) {
 	t.Helper()
 	rec := map[string]interface{}{
-		"agent":           agentID,
-		"current_model":   current,
-		"suggested_model": suggested,
+		"agent":                         agentID,
+		"current_model":                 current,
+		"suggested_model":               suggested,
 		"estimated_monthly_savings_usd": 1.0,
-		"generated_at":    ts,
+		"generated_at":                  ts,
 		"evidence": map[string]interface{}{
 			"n_cases":      10,
 			"eval_run_id":  "run-test",
