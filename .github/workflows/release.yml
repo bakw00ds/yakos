@@ -18,23 +18,22 @@ name: Release
 #
 #   Linux: not typically signed; SHA256 checksums are provided instead.
 #
-# Actions pinned:
-#   actions/checkout       v4  (sha: 11bd71901bbe5b1630ceea73d27597364c9af683)
-#   actions/setup-go       v5  (sha: d35c59abb061a4a6fb18e82ac0862c26744d6ab5)
-#   softprops/action-gh-release v2 (sha: e7a8f85ef1a4e586a519bbcf6d9cfe9516e4f4d6)
+# Actions pinned (update via: gh api repos/<owner>/<repo>/git/refs/tags/<tag>):
+#   actions/checkout            v6  (sha: df4cb1c069e1874edd31b4311f1884172cec0e10)
+#   actions/setup-go            v6  (sha: 4a3601121dd01d1626a1e23e37211e3254c1c06c)
+#   actions/upload-artifact     v7  (sha: 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a)
+#   actions/download-artifact   v8  (sha: 3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c)
+#   softprops/action-gh-release v3  (sha: b4309332981a82ec1c5618f44dd2e27cc8bfbfda)
 
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag to release (e.g. v0.37.0) — for manual dry-runs only'
-        required: false
 
+# Narrow default permissions: only the release job needs write.
 permissions:
-  contents: write  # required for creating the GitHub Release + uploading assets
+  contents: read
 
 jobs:
   build:
@@ -62,12 +61,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
-        # Pin: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v6
-        # Pin: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6
         with:
           go-version-file: 'cli-go/go.mod'
           cache-dependency-path: 'cli-go/go.sum'
@@ -114,7 +111,7 @@ jobs:
           sha256sum "${ASSET}" > "${ASSET}.sha256"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
@@ -133,16 +130,19 @@ jobs:
     name: Sign macOS binaries
     needs: build
     runs-on: macos-latest
+    outputs:
+      signed: ${{ steps.sign.outputs.signed }}
 
     steps:
       - name: Download macOS binaries
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           pattern: binary-darwin-*
           path: dist/
           merge-multiple: true
 
       - name: Sign and notarize (secret-gated)
+        id: sign
         env:
           APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
           APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
@@ -153,8 +153,8 @@ jobs:
           APPLE_API_KEY_ISSUER_ID: ${{ secrets.APPLE_API_KEY_ISSUER_ID }}
         run: |
           if [ -z "${APPLE_CERT_BASE64:-}" ]; then
-            echo "ℹ️ skipping macOS code-signing: APPLE_CERT_BASE64 not set"
-            echo "MACOS_SIGNED=false" >> "$GITHUB_ENV"
+            echo "skipping macOS code-signing: APPLE_CERT_BASE64 not set"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -209,12 +209,23 @@ jobs:
           rm -f "$CERT_FILE" "$APIKEY_FILE"
           security delete-keychain "$KEYCHAIN_PATH" || true
 
-          echo "MACOS_SIGNED=true" >> "$GITHUB_ENV"
+          # 5. Recompute SHA256 sidecars AFTER signing so checksums.txt
+          #    reflects the final (signed+notarized) bytes, not the raw build.
+          cd dist
+          for binary in yakos-*-darwin-*; do
+            [ -f "$binary" ] || continue
+            [[ "$binary" == *.sha256 ]] && continue
+            echo "Recomputing checksum for signed $binary"
+            sha256sum "$binary" > "${binary}.sha256"
+          done
+          cd ..
+
+          echo "signed=true" >> "$GITHUB_OUTPUT"
           echo "macOS signing complete"
 
       - name: Re-upload signed macOS binaries
-        if: env.MACOS_SIGNED == 'true'
-        uses: actions/upload-artifact@v7
+        if: steps.sign.outputs.signed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: binary-darwin-arm64
           path: dist/yakos-*-darwin-arm64*
@@ -222,8 +233,8 @@ jobs:
           retention-days: 1
 
       - name: Re-upload signed macOS binaries (amd64)
-        if: env.MACOS_SIGNED == 'true'
-        uses: actions/upload-artifact@v7
+        if: steps.sign.outputs.signed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: binary-darwin-amd64
           path: dist/yakos-*-darwin-amd64*
@@ -241,24 +252,27 @@ jobs:
     name: Sign Windows binary
     needs: build
     runs-on: windows-latest
+    outputs:
+      signed: ${{ steps.sign.outputs.signed }}
 
     steps:
       - name: Download Windows binary
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           pattern: binary-windows-amd64
           path: dist/
           merge-multiple: true
 
       - name: Sign with Authenticode (secret-gated)
+        id: sign
         shell: bash
         env:
           WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         run: |
           if [ -z "${WINDOWS_CERT_BASE64:-}" ]; then
-            echo "ℹ️ skipping Windows code-signing: WINDOWS_CERT_BASE64 not set"
-            echo "WINDOWS_SIGNED=false" >> "$GITHUB_ENV"
+            echo "skipping Windows code-signing: WINDOWS_CERT_BASE64 not set"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -291,12 +305,23 @@ jobs:
           done
 
           rm -f "$CERT_FILE"
-          echo "WINDOWS_SIGNED=true" >> "$GITHUB_ENV"
+
+          # Recompute SHA256 sidecars AFTER signing so checksums.txt reflects
+          # the final (signed) bytes, not the raw build output.
+          cd dist
+          for binary in yakos-*-windows-*.exe; do
+            [ -f "$binary" ] || continue
+            echo "Recomputing checksum for signed $binary"
+            sha256sum "$binary" > "${binary}.sha256"
+          done
+          cd ..
+
+          echo "signed=true" >> "$GITHUB_OUTPUT"
           echo "Windows signing complete"
 
       - name: Re-upload signed Windows binary
-        if: env.WINDOWS_SIGNED == 'true'
-        uses: actions/upload-artifact@v7
+        if: steps.sign.outputs.signed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: binary-windows-amd64
           path: dist/yakos-*-windows-amd64*
@@ -307,15 +332,17 @@ jobs:
     name: Create GitHub Release
     needs: [build, sign-macos, sign-windows]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # required for creating the GitHub Release + uploading assets
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
           fetch-depth: 0  # needed for git log since last tag
 
       - name: Download all binaries
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           pattern: binary-*
           path: dist/
@@ -389,6 +416,9 @@ jobs:
           echo "notes_file=release-notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Emit signing summary
+        env:
+          MACOS_SIGNED: ${{ needs.sign-macos.outputs.signed }}
+          WINDOWS_SIGNED: ${{ needs.sign-windows.outputs.signed }}
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           echo "## Signing summary for ${TAG}" >> "$GITHUB_STEP_SUMMARY"
@@ -396,17 +426,16 @@ jobs:
           echo "| Platform | Signed |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
 
-          # Determine macOS signing status from artifact metadata heuristic:
-          # if codesign ran, the binary carries a code signature. We check
-          # whether the APPLE_CERT_BASE64 secret was non-empty in the signing
-          # job by testing an env var forwarded into this step.
-          if [ -n "${{ secrets.APPLE_CERT_BASE64 }}" ]; then
+          # Read signing status from upstream job outputs rather than
+          # evaluating secrets inline in shell (secrets must not appear in
+          # run: steps where their value is expanded by the template engine).
+          if [ "${MACOS_SIGNED}" = "true" ]; then
             echo "| macOS (arm64 + amd64) | signed + notarized |" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "| macOS (arm64 + amd64) | unsigned (APPLE_CERT_BASE64 not set) |" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          if [ -n "${{ secrets.WINDOWS_CERT_BASE64 }}" ]; then
+          if [ "${WINDOWS_SIGNED}" = "true" ]; then
             echo "| Windows (amd64) | signed (Authenticode) |" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "| Windows (amd64) | unsigned (WINDOWS_CERT_BASE64 not set) |" >> "$GITHUB_STEP_SUMMARY"
@@ -415,8 +444,7 @@ jobs:
           echo "| Linux (arm64 + amd64) | unsigned; verify via checksums.txt |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        # Pin: softprops/action-gh-release@e7a8f85ef1a4e586a519bbcf6d9cfe9516e4f4d6
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: "yakos ${{ steps.version.outputs.tag }} (Go)"

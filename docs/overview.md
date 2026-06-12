@@ -1,6 +1,6 @@
 # YakOS — overview
 
-**Version this overview targets:** v0.39.0.0 (2026-06-11).
+**Version this overview targets:** v0.11.0.0 (2026-05-09).
 **Audience:** operators evaluating yakOS or onboarding to it.
 **Companion docs:** [README.md](../README.md) for install,
 [UPGRADING.md](../UPGRADING.md) for upgrade/uninstall,
@@ -25,14 +25,9 @@ bootstrap projects with `yakos init`, launch sessions with
   (path-allowlist, secret-scan, mailbox-mirror, session-end).
 - **Runtime adapters** — pluggable per-CLI (claude / codex / gemini
   + plugins) so the same agent file can dispatch on any runtime.
-- **CLI** — `yakos` with 41 Go-native subcommands: install, init,
-  start, dispatch, auth, memory, cost, agent, plugin, migrate, doctor,
-  validate, archive, session, metrics, supervise, and more.
-- **Metrics subsystem** — `yakos metrics collect|report|trend|compare|gate|serve`
-  tracks efficiency, DORA, and per-language quality indicators across
-  commits. CI gate via `budgets.yaml`; loopback dashboard via `serve`.
-- **Model tiers** — `haiku < sonnet < opus < fable`; `frontier` aliases
-  to `fable`. Override per-dispatch with `--model fable`.
+- **CLI** — `yakos` with ~20 subcommands for install, init, start,
+  dispatch, auth, memory, cost, agent, plugin, migrate, doctor,
+  validate, archive, session, etc.
 
 The design contract is a hard/soft control taxonomy
 ([PHILOSOPHY.md](../PHILOSOPHY.md)): soft controls (agent prompts,
@@ -107,14 +102,12 @@ cli/yakos ──► cli/lib/start.sh ──► cli/lib/runtime-resolve.sh
 
 ## Architecture (one paragraph per layer)
 
-**The framework library** (`lib/agents/`, `lib/skills/`, `lib/rules/`,
-`lib/hooks/`) is shipped in two ways. Binary installs (`curl|sh`) use
-the copy embedded via `//go:embed` inside the Go binary; `yakos install`
-materializes it to `~/.local/share/yakos/<version>/` and wires
-`~/.claude` symlinks. Cloned-repo installs set `YAKOS_ROOT` to point at
-the live tree, and `yakos update` does `git pull` + symlink refresh.
-`yakos uninstall` removes yakOS-owned symlinks and the launcher; it
-never touches the cloned repo or user memory.
+**The framework repo** (`~/code/yakos`) holds `lib/agents/`,
+`lib/skills/`, `lib/rules/`, `lib/hooks/`, and the `cli/`. Per-file
+symlinks under `~/.claude/{agents,skills,rules,playbooks}/` point
+back at this tree; `yakos update` refreshes the symlinks after
+`git pull`. The repo never gets touched by `yakos uninstall` —
+operators clone, install, uninstall, reinstall freely.
 
 **The user-level state** at `~/.yakos-state/` carries machine-wide
 artifacts: `gate-log.ndjson`, `launch-log.ndjson`,
@@ -272,7 +265,7 @@ Plugin runtimes load from `~/.yakos/plugins/<id>/runtime.sh`; see
 [plugin-spec.md](plugin-spec.md) for the contract. Built-in
 shadowing is protected.
 
-## CLI surface (41 subcommands)
+## CLI surface (~20 subcommands)
 
 **Lifecycle:** `install`, `update`, `uninstall`, `doctor`
 (`--probe-runtime`, `--fix`).
@@ -299,9 +292,6 @@ migrate-from-claude | diff <runtime>`.
 **Hooks:** `hooks install <runtime> | status`.
 
 **Quality:** `validate` (`--strict`), `version-bump`, `git-hooks`.
-
-**Metrics:** `metrics collect|report|trend|compare|gate|serve|install-hook|uninstall-hook`.
-See `docs/metrics-ci.md` + `docs/adr/ADR-0001.md`.
 
 **Other:** `status` *(per-project dashboard)*, `team`,
 `teach <agent> <lesson-file>`.
