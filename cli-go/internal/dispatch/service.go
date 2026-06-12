@@ -180,6 +180,15 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 		return nil, Result{}, fmt.Errorf("dispatch: yakos_root is required (set in ServiceConfig or per-request Params.YakosRoot)")
 	}
 
+	// --- Task size bound (facade chokepoint) ---
+	// Enforced here so all transports inherit the check regardless of their
+	// own frame cap.  1 MB ceiling is generous while keeping the boundary well
+	// below gRPC's 4 MB frame cap; Phase 3b's SSE/REST path has no frame cap
+	// at all, making this check load-bearing for that transport.
+	if len(p.Task) > maxTaskBytes {
+		return nil, Result{}, fmt.Errorf("dispatch: task exceeds maximum size (%d bytes; limit %d)", len(p.Task), maxTaskBytes)
+	}
+
 	// --- Validate and stamp identity ---
 	// All three identity fields flow verbatim into subprocess argv
 	// (claude --resume <id>, agy --conversation <id>, codex resume <id>).

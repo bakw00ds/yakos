@@ -62,6 +62,35 @@ func (a *CodexAdapter) ExecCmd(ctx context.Context, req DispatchRequest) *exec.C
 	return cmd
 }
 
+// ChatExecCmd returns the exec.Cmd for unframed chat dispatch on codex.
+//
+// Codex does not support partial streaming (buffers to completion); this
+// method exists so the streaming layer can exec it uniformly.  The caller
+// degrades to one "token" chunk when the process exits (buffered path).
+//
+// Uses --json so the caller can extract text from the structured output.
+func (a *CodexAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *exec.Cmd {
+	args := []string{
+		"exec", "--json",
+		"--add-dir", req.Project,
+		"--dangerously-bypass-approvals-and-sandbox",
+	}
+	if req.AgentSystemPrompt != "" {
+		args = append(args, "--system-prompt", req.AgentSystemPrompt)
+	}
+	// Insert '--' before the positional user text so that a UserText beginning
+	// with '-' cannot be interpreted as a flag by the codex CLI.
+	args = append(args, "--", req.UserText)
+
+	cmd := exec.CommandContext(ctx, "codex", args...) //nolint:gosec
+	cmd.Env = buildEnv(DispatchRequest{
+		Project:       req.Project,
+		ModelOverride: req.ModelOverride,
+		AllowRoot:     req.AllowRoot,
+	})
+	return cmd
+}
+
 // Dispatch invokes 'codex exec' and returns captured stdout.
 func (a *CodexAdapter) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchResult, error) {
 	cmd := a.ExecCmd(ctx, req)

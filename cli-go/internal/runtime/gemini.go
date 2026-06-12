@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"time"
 )
 
@@ -42,6 +43,18 @@ func (a *GeminiAdapter) Dispatch(ctx context.Context, req DispatchRequest) (*Dis
 	}
 	a.warnOnce()
 	return a.agy.Dispatch(ctx, req)
+}
+
+// ChatExecCmd delegates to the agy adapter (gemini is a deprecation shim).
+// Returns an error-cmd on removal-date expiry.
+func (a *GeminiAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *exec.Cmd {
+	if err := a.checkRemoval(); err != nil {
+		// Return a cmd that immediately fails with the removal message.
+		cmd := exec.CommandContext(ctx, "false") //nolint:gosec
+		return cmd
+	}
+	a.warnOnce()
+	return a.agy.ChatExecCmd(ctx, req)
 }
 
 func (a *GeminiAdapter) checkRemoval() error {

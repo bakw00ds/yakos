@@ -35,6 +35,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -321,32 +322,54 @@ func (d *dispatchSrv) Stream(req *pb.DispatchRunRequest, stream pb.Dispatch_Stre
 		return status.Errorf(codes.FailedPrecondition, "yakos_root not configured")
 	}
 
-	// Stream chunks: dispatch runs synchronously through the Service; we emit
-	// a summary chunk when done. Full token streaming is Phase 3 (RunStream).
+	// Phase 3: RunStream — unframed chat exec with incremental token streaming.
+	// Each StreamChunk from RunStream maps directly to a DispatchStreamChunk
+	// proto message.
 	// SELF-ASSERTED — attribution/labeling only. NEVER use for an authorization decision.
-	_, result, err := d.cfg.DispatchService.Run(stream.Context(), dispatch.Params{
-		Agent:          req.Agent,
-		Task:           req.Task,
-		Project:        req.Project,
-		Runtime:        req.Runtime,
-		Model:          req.Model,
-		Timeout:        int(req.Timeout),
-		YakosRoot:      req.YakosRoot, // per-request override; empty → Service uses cfg default
-		OperatorID:     req.OperatorID,
-		ConversationID: req.ConversationID,
-		SessionID:      req.SessionID,
-	})
+	//
+	// sendDead is set atomically on the first stream.Send error so subsequent
+	// onChunk calls return early without further sends.  This prevents driving
+	// the subprocess into a dead connection indefinitely — once the client is
+	// gone the subprocess continues to completion (context cancel propagates via
+	// stream.Context()) but no further frames are attempted.
+	var sendDead atomic.Bool
+	_, err := d.cfg.DispatchService.RunStream(
+		stream.Context(),
+		dispatch.Params{
+			Agent:          req.Agent,
+			Task:           req.Task,
+			Project:        req.Project,
+			Runtime:        req.Runtime,
+			Model:          req.Model,
+			Timeout:        int(req.Timeout),
+			YakosRoot:      req.YakosRoot,
+			OperatorID:     req.OperatorID,
+			ConversationID: req.ConversationID,
+			SessionID:      req.SessionID,
+		},
+		func(chunk dispatch.StreamChunk) {
+			if sendDead.Load() {
+				return
+			}
+			if err := stream.Send(&pb.DispatchStreamChunk{
+				Type:          chunk.Type,
+				Text:          chunk.Text,
+				ExitCode:      int32(chunk.ExitCode),
+				DurationS:     chunk.DurationS,
+				OutputBytes:   chunk.OutputBytes,
+				ModelResolved: chunk.ModelResolved,
+			}); err != nil {
+				// Mark the connection dead so we stop sending.  The stream
+				// context cancel (via stream.Context()) will cause RunStream
+				// to exit at the next read iteration.
+				sendDead.Store(true)
+			}
+		},
+	)
 	if err != nil {
 		return status.Errorf(codes.Internal, "dispatch: %v", err)
 	}
-
-	return stream.Send(&pb.DispatchStreamChunk{
-		Type:          "summary",
-		ExitCode:      int32(result.ExitCode),
-		DurationS:     result.DurationS,
-		OutputBytes:   result.OutputBytes,
-		ModelResolved: result.ModelResolved,
-	})
+	return nil
 }
 
 // ---- Kanban service ---------------------------------------------------------
