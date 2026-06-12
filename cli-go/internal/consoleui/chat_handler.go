@@ -598,6 +598,75 @@ func (ch *chatHandlers) handleChatTranscript(w http.ResponseWriter, r *http.Requ
 	}
 }
 
+// ---- POST /api/chat/share --------------------------------------------------
+
+// ShareRequest is the JSON body for POST /api/chat/share.
+//
+// Only the session owner may change the shared flag.  A non-owner attempting
+// this receives 403.  A non-existent session receives 404.
+type ShareRequest struct {
+	SessionID  string `json:"sessionId"`
+	OperatorID string `json:"operatorId"`
+	Shared     bool   `json:"shared"`
+}
+
+// handleChatShare flips the shared flag on a session.
+//
+// Security: only the session owner (identified by operatorId == session owner)
+// may promote or demote a session.  Auth is enforced at the edge
+// (requireTokenForNonStatic); no re-check here.
+func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req ShareRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.SessionID == "" {
+		http.Error(w, "sessionId is required", http.StatusBadRequest)
+		return
+	}
+	if err := dispatch.ValidateIdentityField("session_id", req.SessionID); err != nil {
+		http.Error(w, "invalid sessionId", http.StatusBadRequest)
+		return
+	}
+	if req.OperatorID == "" {
+		http.Error(w, "operatorId is required", http.StatusBadRequest)
+		return
+	}
+	if err := dispatch.ValidateIdentityField("operator_id", req.OperatorID); err != nil {
+		http.Error(w, "invalid operatorId", http.StatusBadRequest)
+		return
+	}
+
+	// Ownership check: only the session owner may change the shared flag.
+	owner, exists := ch.hub.SessionOwner(req.SessionID)
+	if !exists {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	if owner != req.OperatorID {
+		http.Error(w, "forbidden: session owned by different operator", http.StatusForbidden)
+		return
+	}
+
+	// Re-open session with updated shared flag (idempotent for same owner).
+	if err := ch.hub.OpenSession(req.SessionID, req.OperatorID, req.Shared); err != nil {
+		// errSessionOwnerConflict cannot occur here (we just verified owner == req.OperatorID),
+		// but handle defensively.
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"ok":true}` + "\n"))
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 // isKnownRuntime reports whether name is a registered runtime.

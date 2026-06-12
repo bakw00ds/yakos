@@ -271,6 +271,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/chat/dispatch", s.chat.handleChatDispatch)
 	s.mux.HandleFunc("/api/chat/cancel", s.chat.handleChatCancel)
 	s.mux.HandleFunc("/api/chat/transcript", s.chat.handleChatTranscript)
+	// POST /api/chat/share — flip shared flag; owner-gated.
+	s.mux.HandleFunc("/api/chat/share", s.chat.handleChatShare)
 }
 
 // handlePresence returns the current online operator presence snapshot as a

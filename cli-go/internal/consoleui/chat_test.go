@@ -1100,7 +1100,148 @@ func TestTranscript_FailClosedWithNoUserTurn(t *testing.T) {
 	}
 }
 
-// ---- 20. 409 duplicate-dispatch guard (existing coverage confirmed) ---------
+// ---- 20. POST /api/chat/share auth + ownership ------------------------------
+
+func TestChatShare_401WithoutToken(t *testing.T) {
+	ts, _ := newChatTestServer(t)
+	body := `{"sessionId":"s1","operatorId":"alice","shared":true}`
+	resp := post(t, ts.URL+"/api/chat/share", "", body)
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("POST /api/chat/share (no token): status=%d; want 401", resp.StatusCode)
+	}
+}
+
+func TestChatShare_400OnMissingSessionId(t *testing.T) {
+	ts, tok := newChatTestServer(t)
+	body := `{"operatorId":"alice","shared":true}`
+	resp := post(t, ts.URL+"/api/chat/share", tok, body)
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST /api/chat/share (missing sessionId): status=%d; want 400", resp.StatusCode)
+	}
+}
+
+func TestChatShare_400OnMissingOperatorId(t *testing.T) {
+	ts, tok := newChatTestServer(t)
+	body := `{"sessionId":"s1","shared":true}`
+	resp := post(t, ts.URL+"/api/chat/share", tok, body)
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST /api/chat/share (missing operatorId): status=%d; want 400", resp.StatusCode)
+	}
+}
+
+func TestChatShare_404OnNonexistentSession(t *testing.T) {
+	ts, tok := newChatTestServer(t)
+	body := `{"sessionId":"no-such-session99","operatorId":"alice","shared":true}`
+	resp := post(t, ts.URL+"/api/chat/share", tok, body)
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("POST /api/chat/share (non-existent session): status=%d; want 404", resp.StatusCode)
+	}
+}
+
+func TestChatShare_403OnNonOwner(t *testing.T) {
+	stateDir := t.TempDir()
+	realTok, _ := consoleui.LoadOrCreateToken(stateDir)
+	bus := wsbus.New()
+	t.Cleanup(bus.Stop)
+	srv := consoleui.New(consoleui.Config{
+		Token:             realTok,
+		KanbanBoardPath:   t.TempDir() + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: t.TempDir(),
+		PerfWorkDir:       t.TempDir(),
+		Bus:               bus,
+		WorkDir:           t.TempDir(),
+	})
+	hub := srv.ChatHub()
+	if err := hub.OpenSession("sess-share-a", "alice", false); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+
+	wrapped := consoleui.RequireTokenForNonStatic(realTok,
+		consoleui.RequireJSONForMutations(srv.Handler()))
+	ts := httptest.NewServer(wrapped)
+	t.Cleanup(ts.Close)
+
+	// bob tries to share alice's session → 403.
+	body := `{"sessionId":"sess-share-a","operatorId":"bob","shared":true}`
+	resp := post(t, ts.URL+"/api/chat/share", realTok, body)
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("POST /api/chat/share (non-owner): status=%d; want 403", resp.StatusCode)
+	}
+}
+
+func TestChatShare_OwnerCanToggle(t *testing.T) {
+	stateDir := t.TempDir()
+	realTok, _ := consoleui.LoadOrCreateToken(stateDir)
+	bus := wsbus.New()
+	t.Cleanup(bus.Stop)
+	srv := consoleui.New(consoleui.Config{
+		Token:             realTok,
+		KanbanBoardPath:   t.TempDir() + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: t.TempDir(),
+		PerfWorkDir:       t.TempDir(),
+		Bus:               bus,
+		WorkDir:           t.TempDir(),
+	})
+	hub := srv.ChatHub()
+	if err := hub.OpenSession("sess-share-owner", "alice", false); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+
+	wrapped := consoleui.RequireTokenForNonStatic(realTok,
+		consoleui.RequireJSONForMutations(srv.Handler()))
+	ts := httptest.NewServer(wrapped)
+	t.Cleanup(ts.Close)
+
+	// alice promotes to shared → 200.
+	body := `{"sessionId":"sess-share-owner","operatorId":"alice","shared":true}`
+	resp := post(t, ts.URL+"/api/chat/share", realTok, body)
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("POST /api/chat/share (owner promote): status=%d; want 200", resp.StatusCode)
+	}
+
+	// Verify hub reflects shared=true: bob's connection now receives events.
+	aliceConn, err := hub.Register("conn-share-alice", "alice")
+	if err != nil {
+		t.Fatalf("Register alice: %v", err)
+	}
+	defer hub.Unregister(aliceConn.ID())
+	bobConn, err := hub.Register("conn-share-bob", "bob")
+	if err != nil {
+		t.Fatalf("Register bob: %v", err)
+	}
+	defer hub.Unregister(bobConn.ID())
+
+	hub.Route(consoleui.SSEEvent{
+		SessionID: "sess-share-owner",
+		Type:      "token",
+		Text:      "shared-text",
+	})
+
+	// Poll for bob to receive the event (bounded, no bare sleep).
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case ev := <-bobConn.Ch():
+			if ev.Text != "shared-text" {
+				t.Errorf("bob got text=%q; want 'shared-text'", ev.Text)
+			}
+			return // success
+		case <-deadline:
+			t.Error("bob did not receive shared event within 500ms after share promotion")
+			return
+		}
+	}
+}
+
+// ---- 22. 409 duplicate-dispatch guard (existing coverage confirmed) ---------
 // This test verifies the 409 duplicate-dispatch property (test #7 in coverage
 // list) so the count is accurate. The newChatTestServer has no DispatchService
 // so we use the hub directly to pre-populate chatState via OpenSession to get
