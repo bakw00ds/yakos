@@ -17,6 +17,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/kanban"
 	"github.com/bakw00ds/yakos/internal/metricsdash"
 	"github.com/bakw00ds/yakos/internal/perfdash"
+	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
@@ -69,8 +70,15 @@ type Config struct {
 	// WorkDir is the <workspace>/work/current directory used for chat transcript
 	// persistence (<WorkDir>/chats/<conversationId>.ndjson).  Required for the
 	// Phase 3b chat endpoints; when empty the transcript handler will return
-	// 503 Service Unavailable.
+	// 503 Service Unavailable.  Also used by the Flows engine for workflow
+	// artifacts (<WorkDir>/workflows/).
 	WorkDir string
+
+	// WorkflowEngine is the Phase 4/5 DAG executor.  When non-nil, the /flows/*
+	// endpoints are fully operational (run + resume launch real goroutines).
+	// When nil, list/get/save still work (YAML authoring), but run/resume
+	// return 503 Service Unavailable.
+	WorkflowEngine *workflow.Engine
 
 	// Listener, when non-nil, is used directly instead of binding a new socket.
 	// Injected in tests to avoid port conflicts.
@@ -92,6 +100,7 @@ type Server struct {
 	presence     *PresenceManager
 	chatHub      *ChatHub
 	chat         *chatHandlers
+	flows        *flowsHandlers
 	serverCtx    context.Context    // cancelled on Serve shutdown; dispatch goroutines use this
 	serverCancel context.CancelFunc // called by Serve when the server shuts down
 }
@@ -128,12 +137,18 @@ func New(cfg Config) *Server {
 	// per-request r.Context() — so they survive the 202 response returning.
 	serverCtx, serverCancel := context.WithCancel(context.Background())
 	chatH := newChatHandlers(hub, transcripts, cfg.DispatchService, serverCtx)
+	flowsH := &flowsHandlers{
+		engine:    cfg.WorkflowEngine,
+		workDir:   cfg.WorkDir,
+		serverCtx: serverCtx,
+	}
 	s := &Server{
 		cfg:          cfg,
 		mux:          http.NewServeMux(),
 		presence:     pm,
 		chatHub:      hub,
 		chat:         chatH,
+		flows:        flowsH,
 		serverCtx:    serverCtx,
 		serverCancel: serverCancel,
 	}
@@ -273,6 +288,20 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/chat/transcript", s.chat.handleChatTranscript)
 	// POST /api/chat/share — flip shared flag; owner-gated.
 	s.mux.HandleFunc("/api/chat/share", s.chat.handleChatShare)
+
+	// ---- Phase 5: Flows UI endpoints (token-gated at edge) ------------------
+	// GET  /flows/api/workflows          — list workflow names
+	// GET  /flows/api/workflow?name=<n>  — get workflow YAML + version stamp
+	// POST /flows/api/workflow           — save workflow (optimistic-concurrency)
+	// POST /flows/api/run?name=<n>       — start a new run; returns {run_id}
+	// POST /flows/api/resume             — resume a prior run; returns {new_run_id}
+	// GET  /flows/api/run?id=<runId>     — poll run state (run.json)
+	// GET  /flows/api/run/node?id=<r>&node=<n> — node stdout
+	s.mux.HandleFunc("/flows/api/workflows", s.flows.handleListWorkflows)
+	s.mux.HandleFunc("/flows/api/workflow", s.flows.handleWorkflowDispatch)
+	s.mux.HandleFunc("/flows/api/run/node", s.flows.handleGetNodeOutput)
+	s.mux.HandleFunc("/flows/api/run", s.flows.handleRunDispatch)
+	s.mux.HandleFunc("/flows/api/resume", s.flows.handleResume)
 }
 
 // handlePresence returns the current online operator presence snapshot as a

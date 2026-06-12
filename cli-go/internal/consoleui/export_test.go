@@ -7,7 +7,14 @@
 // to test concerns.
 package consoleui
 
-import "context"
+import (
+	"context"
+	"net/http"
+	"testing"
+
+	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/workflow"
+)
 
 // ---- ChatHub test exports ---------------------------------------------------
 
@@ -105,4 +112,32 @@ func NewChatHandlersForTest(hub *ChatHub, transcripts *Transcripts, svc interfac
 // use in dispatch-goroutine-lifetime tests.
 func NewChatTestServer(hub *ChatHub, transcripts *Transcripts, serverCtx context.Context) *chatHandlers {
 	return newChatHandlers(hub, transcripts, nil, serverCtx)
+}
+
+// ---- Flows handler test exports ---------------------------------------------
+
+// NewFlowsHandlerForTest builds a flowsHandlers with a fake per-node dispatch
+// function injected at the consoleui handler layer. workDir is the
+// <work>/current root. Returns the handler (as http.Handler).
+//
+// The workflow engine is NOT used — fn is stored on flowsHandlers.nodeRunFn so
+// that handleRun/handleResume call it directly, bypassing both the engine and
+// the governed dispatch.Service. No LLM calls, no live dispatch.
+//
+// This is the handler-level test seam (N3). The workflow package exports no
+// production-reachable governor-bypass symbol as a result of this design.
+func NewFlowsHandlerForTest(t *testing.T, workDir string, fn func(context.Context, dispatch.Params) ([]byte, dispatch.Result, error)) (http.Handler, *workflow.Engine) {
+	t.Helper()
+	h := &flowsHandlers{
+		workDir:   workDir,
+		serverCtx: context.Background(),
+		nodeRunFn: workflow.EngineRunFn(fn),
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/flows/api/workflows", h.handleListWorkflows)
+	mux.HandleFunc("/flows/api/workflow", h.handleWorkflowDispatch)
+	mux.HandleFunc("/flows/api/run", h.handleRunDispatch)
+	mux.HandleFunc("/flows/api/run/node", h.handleGetNodeOutput)
+	mux.HandleFunc("/flows/api/resume", h.handleResume)
+	return mux, nil
 }
