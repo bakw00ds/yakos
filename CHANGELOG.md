@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0.0] — 2026-06-12
+
+### Added
+
+- **Unified Console** — a single-origin loopback web console (`yakos serve`,
+  `http://127.0.0.1:7890`) that brings together, behind one token:
+  - A tabbed shell hosting the Kanban / Cost / Performance dashboards plus
+    an Overview/Activity feed with live operator **presence** (#142, #144).
+  - **Streaming Chat** — per-model REPL panes (claude / codex / agy / gemini
+    × model tiers); claude streams token-by-token via an unframed exec mode,
+    others degrade to buffered. Per-operator SSE, persisted transcripts, and
+    share-pane (#145, #146, #147).
+  - **Flows** — an n8n-style workflow builder over a new headless DAG engine:
+    YAML workflow artifacts, a Kahn topological scheduler with fan-out/fan-in
+    and failure propagation, resume-from-failure (YAML-hash-pinned), and a
+    live SVG DAG canvas with per-run cost (#148, #149).
+- **Operator identity** threaded through dispatch (`operator_id` /
+  `conversation_id` / `session_id`) via a new `dispatch.Service` facade with
+  a global concurrency governor; all transports (gRPC / REST / JSON-RPC / MCP)
+  route through it (#143).
+- Wired the previously-stubbed gRPC `Dispatch.Stream` for token streaming
+  (#145).
+- `yakos workflow run|resume|status` CLI verbs + JSON-RPC methods; new
+  `workflow.*` events on the WS bus (#148).
+- ADR-0003 (Flows DAG engine design) (#148).
+
+### Security
+
+- All console endpoints are loopback-only + header-only Bearer (no token in
+  query strings); per-operator session isolation (cancel/transcript/stream
+  ownership-checked); agent→system-prompt and the dispatch project are pinned
+  server-side; workflow artifact paths are traversal-guarded; browser WS auth
+  via `Sec-WebSocket-Protocol`; CSP stays `script-src 'self'` (no
+  `unsafe-eval` — Mermaid was rejected in favor of a hand-rolled SVG
+  renderer). (#142–#149)
+- Identity is self-asserted attribution for the same-host/loopback trust
+  model (not an authz boundary) — documented in ADR-0003.
+
 ## [0.39.0.1] — 2026-06-11
 
 ### Security
