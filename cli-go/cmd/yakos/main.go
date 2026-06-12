@@ -6210,6 +6210,16 @@ func runWorkflowResume(yakosRoot, workspaceRoot, workDir string, args []string) 
 		fmt.Fprintln(os.Stderr, "workflow resume: name, --prior-run-id, and --new-run-id are required")
 		os.Exit(1)
 	}
+	// C1 (defense-in-depth): validate run IDs at the CLI boundary before any
+	// filesystem access. Engine.Resume validates again internally.
+	if err := workflow.ValidateID("prior_run_id", priorRunID); err != nil {
+		fmt.Fprintf(os.Stderr, "workflow resume: %v\n", err)
+		os.Exit(1)
+	}
+	if err := workflow.ValidateID("new_run_id", newRunID); err != nil {
+		fmt.Fprintf(os.Stderr, "workflow resume: %v\n", err)
+		os.Exit(1)
+	}
 
 	wfPath := filepath.Join(workDir, "workflows", name+".yaml")
 	wf, err := workflow.Load(wfPath)
@@ -6254,6 +6264,11 @@ func runWorkflowStatus(workDir string, args []string) {
 		os.Exit(1)
 	}
 	runID := args[0]
+	// H1: validate run_id before building the filesystem path.
+	if err := workflow.ValidateID("run_id", runID); err != nil {
+		fmt.Fprintf(os.Stderr, "workflow status: %v\n", err)
+		os.Exit(1)
+	}
 	runDir := filepath.Join(workDir, "workflows", "runs", runID)
 
 	rs, err := workflow.LoadRunState(runDir)

@@ -333,17 +333,40 @@ func TestEngine_LinearPipeline(t *testing.T) {
 
 // TestEngine_Diamond verifies that a diamond (root→left,root→right; merge←left,right)
 // runs left and right concurrently, and merge runs after both complete.
+//
+// S4: deterministic barrier replaces the old time.Sleep approach.
+// left and right each signal a "started" WaitGroup and block until both have
+// signalled, guaranteeing they overlap. No timing assumptions.
 func TestEngine_Diamond(t *testing.T) {
 	t.Parallel()
 
-	// Track when each agent runs (wall-clock order doesn't matter; what matters
-	// is that merge runs AFTER both left and right).
+	// Track when each agent finishes (wall-clock order doesn't matter; what
+	// matters is that merge runs AFTER both left and right).
 	var finished []string
 	var mu sync.Mutex
 
+	// Barrier: left and right both signal started; each then blocks until
+	// both have started before completing. This proves they ran concurrently.
+	const numBranches = 2 // left + right
+	var startedWg sync.WaitGroup
+	startedWg.Add(numBranches)
+	startedCh := make(chan struct{})
+	var startedOnce sync.Once
+
 	fn := func(_ context.Context, p dispatch.Params) ([]byte, dispatch.Result, error) {
-		// Small delay to let concurrency show up in timing.
-		time.Sleep(2 * time.Millisecond)
+		if p.Agent == "agent-left" || p.Agent == "agent-right" {
+			// Signal that this branch has started.
+			startedWg.Done()
+			// Block until both branches have started (barrier).
+			// startedOnce closes startedCh when the WaitGroup reaches zero.
+			startedOnce.Do(func() {
+				go func() {
+					startedWg.Wait()
+					close(startedCh)
+				}()
+			})
+			<-startedCh
+		}
 		mu.Lock()
 		finished = append(finished, p.Agent)
 		mu.Unlock()
@@ -381,16 +404,30 @@ func TestEngine_Diamond(t *testing.T) {
 
 // TestEngine_MultiRootFanOut verifies that multiple root nodes run concurrently
 // and the sink fires only after all three roots complete.
+//
+// S3: deterministic barrier replaces the old time.Sleep approach.
+// All three root nodes signal a WaitGroup and block until all three have
+// signalled, making peak active=3 deterministic regardless of GOMAXPROCS.
 func TestEngine_MultiRootFanOut(t *testing.T) {
 	t.Parallel()
 
+	const numRoots = 3
 	var concurrentPeak int32
 	var active int32
 
+	// Barrier channels: each root increments active, signals the WaitGroup,
+	// then blocks on barrierCh until all roots have checked in.
+	var startedWg sync.WaitGroup
+	startedWg.Add(numRoots)
+	barrierCh := make(chan struct{})
+	var barrierOnce sync.Once
+
 	fn := func(_ context.Context, p dispatch.Params) ([]byte, dispatch.Result, error) {
 		if p.Agent != "agent-sink" {
+			// Increment active counter.
 			cur := atomic.AddInt32(&active, 1)
 			defer atomic.AddInt32(&active, -1)
+
 			// Update peak concurrency.
 			for {
 				old := atomic.LoadInt32(&concurrentPeak)
@@ -398,7 +435,17 @@ func TestEngine_MultiRootFanOut(t *testing.T) {
 					break
 				}
 			}
-			time.Sleep(5 * time.Millisecond)
+
+			// Signal that this root has started, then block until all roots
+			// have started. barrierOnce closes barrierCh when the WG hits zero.
+			startedWg.Done()
+			barrierOnce.Do(func() {
+				go func() {
+					startedWg.Wait()
+					close(barrierCh)
+				}()
+			})
+			<-barrierCh // hold until all numRoots goroutines are inside this block
 		}
 		return []byte(p.Agent + "-out"), dispatch.Result{ExitCode: 0}, nil
 	}
@@ -414,11 +461,11 @@ func TestEngine_MultiRootFanOut(t *testing.T) {
 		t.Errorf("run status: got %q, want %q", rs.Status, workflow.RunCompleted)
 	}
 
-	// All three roots should have run concurrently (peak ≥ 2 with 5ms sleep and 4-slot semaphore).
-	// We assert peak ≥ 2 to confirm concurrent execution.
+	// Peak must be exactly numRoots: the barrier guarantees all three were
+	// simultaneously active before any of them completed.
 	peak := atomic.LoadInt32(&concurrentPeak)
-	if peak < 2 {
-		t.Errorf("concurrent peak: got %d, want ≥2 (roots should run concurrently)", peak)
+	if int(peak) < numRoots {
+		t.Errorf("concurrent peak: got %d, want ≥%d (barrier guarantees all roots overlap)", peak, numRoots)
 	}
 }
 
@@ -1072,5 +1119,238 @@ func TestEngine_ConcurrentRuns(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Error(err)
+	}
+}
+
+// ---- Path-traversal regression tests (C1/C2/H1) --------------------------
+
+// TestResume_TraversalPriorRunID verifies that Resume rejects a prior_run_id
+// containing path-traversal characters before any filesystem access (C1).
+func TestResume_TraversalPriorRunID(t *testing.T) {
+	t.Parallel()
+
+	eng, _ := newTestEngine(t, immediateOKFn([]byte("ok")))
+	wf := linearWorkflow()
+
+	_, err := eng.Resume(context.Background(), wf, "../evil", "run-new", "tester")
+	if err == nil {
+		t.Error("expected error for traversal prior_run_id, got nil")
+	}
+	if err != nil && !containsStr(err.Error(), "prior_run_id") {
+		t.Errorf("error should mention prior_run_id: %v", err)
+	}
+}
+
+// TestResume_TraversalNewRunID verifies that Resume rejects a new_run_id
+// containing path-traversal characters before any filesystem access (C1).
+func TestResume_TraversalNewRunID(t *testing.T) {
+	t.Parallel()
+
+	eng, _ := newTestEngine(t, immediateOKFn([]byte("ok")))
+	wf := linearWorkflow()
+
+	_, err := eng.Resume(context.Background(), wf, "run-prior", "../evil", "tester")
+	if err == nil {
+		t.Error("expected error for traversal new_run_id, got nil")
+	}
+	if err != nil && !containsStr(err.Error(), "new_run_id") {
+		t.Errorf("error should mention new_run_id: %v", err)
+	}
+}
+
+// TestResume_TraversalNodeIDInRunJSON verifies that a resume against a run.json
+// whose completed-node id contains "../" is rejected — no file read/write
+// outside the run dir (C2).
+func TestResume_TraversalNodeIDInRunJSON(t *testing.T) {
+	t.Parallel()
+
+	eng, workDir := newTestEngine(t, immediateOKFn([]byte("ok")))
+
+	// Manufacture a run.json with a traversal node id.
+	runsDir := filepath.Join(workDir, "workflows", "runs")
+	priorRunDir := filepath.Join(runsDir, "run-evil-src")
+	if err := os.MkdirAll(priorRunDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a run.json with the traversal node id.
+	// We need the workflow_hash to match, so compute it from the workflow.
+	wf := linearWorkflow()
+	// Manually write a run.json with a bad node id and the correct workflow hash.
+	// The hash check runs before the node-id validation, so we compute it the
+	// same way the engine does (save + SHA-256 the YAML).
+	type nodeStateJSON struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	type runStateJSON struct {
+		RunID        string                   `json:"run_id"`
+		WorkflowName string                   `json:"workflow_name"`
+		WorkflowHash string                   `json:"workflow_hash"`
+		Status       string                   `json:"status"`
+		Nodes        map[string]nodeStateJSON `json:"nodes"`
+	}
+	// Use a placeholder hash — the hash mismatch will fire first if wrong.
+	// We want to test the node-id check, so we need to reach it.
+	// Run a legit first run to get the hash, then inject the bad run.json.
+	rs1, err := eng.Run(context.Background(), wf, "run-hashsrc", "tester")
+	if err != nil {
+		t.Fatalf("setup run: %v", err)
+	}
+	realHash := rs1.WorkflowHash
+
+	malicious := runStateJSON{
+		RunID:        "run-evil-src",
+		WorkflowName: wf.Name,
+		WorkflowHash: realHash,
+		Status:       "failed",
+		Nodes: map[string]nodeStateJSON{
+			"../evil": {ID: "../evil", Status: "completed"},
+			"b":       {ID: "b", Status: "failed"},
+			"c":       {ID: "c", Status: "skipped"},
+		},
+	}
+	data, _ := json.MarshalIndent(malicious, "", "  ")
+	if err := os.WriteFile(filepath.Join(priorRunDir, "run.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = eng.Resume(context.Background(), wf, "run-evil-src", "run-evil-dst", "tester")
+	if err == nil {
+		t.Error("expected error for traversal node id in prior run.json, got nil")
+	}
+}
+
+// TestCtxCancel_RunNotCompleted verifies that a single-root workflow cancelled
+// before the root node starts reports "failed", not "completed" (S1).
+func TestCtxCancel_RunNotCompleted(t *testing.T) {
+	t.Parallel()
+
+	// Single-node workflow. Cancel ctx before the node has a chance to start.
+	wf := &workflow.Workflow{
+		Version: 1,
+		Name:    "cancel-before-start",
+		Nodes: []workflow.Node{
+			{ID: "root", Agent: "agent-root", Prompt: "block", OutputLimit: 100},
+		},
+	}
+
+	started := make(chan struct{})
+	fn := func(ctx context.Context, p dispatch.Params) ([]byte, dispatch.Result, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, dispatch.Result{ExitCode: 1}, ctx.Err()
+	}
+
+	eng, _ := newTestEngine(t, fn)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan *workflow.RunState, 1)
+	go func() {
+		rs, _ := eng.Run(ctx, wf, "run-cancel-root", "tester")
+		done <- rs
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for root to start")
+	}
+	cancel()
+
+	select {
+	case rs := <-done:
+		if rs == nil {
+			t.Fatal("RunState is nil")
+		}
+		if rs.Status == workflow.RunCompleted {
+			t.Errorf("run status after cancel: got %q, must not be completed", rs.Status)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for run to complete after cancel")
+	}
+}
+
+// TestValidateID_NodeCountCap verifies that Validate rejects a workflow with
+// more than maxWorkflowNodes nodes (M2).
+func TestValidateID_NodeCountCap(t *testing.T) {
+	nodes := make([]workflow.Node, 513)
+	for i := range nodes {
+		nodes[i] = workflow.Node{
+			ID:          fmt.Sprintf("n%d", i),
+			Agent:       "agent",
+			Prompt:      "p",
+			OutputLimit: 100,
+		}
+	}
+	wf := &workflow.Workflow{Version: 1, Name: "huge", Nodes: nodes}
+	if err := workflow.Validate(wf); err == nil {
+		t.Error("expected error for workflow exceeding node count cap, got nil")
+	}
+}
+
+// TestSubstitutePrompt_InputsNotBudgeted verifies that input substitutions do
+// not count against the output_limit budget and are never truncated (S6).
+func TestSubstitutePrompt_InputsNotBudgeted(t *testing.T) {
+	t.Parallel()
+
+	// input value is 200 bytes; node output is 10 bytes; output_limit is 50.
+	// Without the S6 fix, inputs would be counted against the budget and
+	// mistakenly truncated. With the fix, the input is passed through intact.
+	bigInput := string(make([]byte, 200))
+	for i := range []byte(bigInput) {
+		bigInput = bigInput[:i] + "i" + bigInput[i+1:]
+	}
+	// simpler: just build a 200-byte string
+	inputVal := make([]byte, 200)
+	for i := range inputVal {
+		inputVal[i] = 'i'
+	}
+
+	wf := &workflow.Workflow{
+		Version: 1,
+		Name:    "input-budget-test",
+		Inputs:  map[string]string{"bigkey": string(inputVal)},
+		Nodes: []workflow.Node{
+			{ID: "producer", Agent: "producer", Prompt: "produce", OutputLimit: 500},
+			{ID: "consumer", Agent: "consumer",
+				Prompt:      "use ${inputs.bigkey} and ${nodes.producer.output}",
+				OutputLimit: 50,
+				Needs:       []string{"producer"},
+			},
+		},
+	}
+
+	var receivedPrompt string
+	var mu sync.Mutex
+	fn := func(_ context.Context, p dispatch.Params) ([]byte, dispatch.Result, error) {
+		if p.Agent == "consumer" {
+			mu.Lock()
+			receivedPrompt = p.Task
+			mu.Unlock()
+		}
+		// producer returns 10 bytes of output
+		return []byte("1234567890"), dispatch.Result{ExitCode: 0}, nil
+	}
+
+	eng, _ := newTestEngine(t, fn)
+	rs, err := eng.Run(context.Background(), wf, "run-input-budget", "tester")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rs.Status != workflow.RunCompleted {
+		t.Errorf("run status: got %q, want completed", rs.Status)
+	}
+
+	mu.Lock()
+	prompt := receivedPrompt
+	mu.Unlock()
+
+	// The input (200 bytes of 'i') must appear intact in the prompt.
+	// If inputs were incorrectly counted against the budget, the input would
+	// be truncated and the full 200 'i' chars would not appear.
+	inputInPrompt := string(inputVal)
+	if !containsStr(prompt, inputInPrompt) {
+		t.Errorf("input value truncated or missing in consumer prompt; input should be passed through intact regardless of output_limit")
 	}
 }

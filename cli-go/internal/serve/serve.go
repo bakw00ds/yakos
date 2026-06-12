@@ -121,6 +121,12 @@ type Config struct {
 	// constructs one from WorkspaceRoot/YakosRoot/Bus. Inject for tests.
 	DispatchService *dispatch.Service
 
+	// ServerCtx is the daemon's root context. Workflow runs launched by
+	// handleWorkflowRun and handleWorkflowResume use this as their parent so
+	// that daemon shutdown cancels all in-flight runs.
+	// S5: set by Run() before registering handlers; callers may inject for tests.
+	ServerCtx context.Context
+
 	// ListenFn is injected in tests to replace the real socket listener.
 	// nil means use jsonrpc.Listen.
 	ListenFn func(path string) (net.Listener, error)
@@ -415,6 +421,8 @@ func Run(ctx context.Context, cfg Config) error {
 	cfgWithBus := cfg
 	cfgWithBus.Bus = bus
 	cfgWithBus.DispatchService = dispatchSvc
+	// S5: propagate the daemon root context so workflow runs are cancelled on shutdown.
+	cfgWithBus.ServerCtx = ctx
 	srv := jsonrpc.NewServer()
 	registerMethods(srv, cfgWithBus)
 

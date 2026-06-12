@@ -31,7 +31,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
@@ -721,9 +720,14 @@ func handleWorkflowRun(cfg Config) jsonrpc.Handler {
 		}
 
 		// Run asynchronously. The caller polls workflow.status or watches bus events.
+		// S5: use the daemon's root context (cfg.ServerCtx) as parent so daemon
+		// shutdown cancels in-flight runs. Fall back to Background if not set
+		// (test injection path).
 		go func() {
-			// Use a background context so the run outlives the RPC call.
-			runCtx := context.Background()
+			runCtx := cfg.ServerCtx
+			if runCtx == nil {
+				runCtx = context.Background()
+			}
 			_, _ = eng.Run(runCtx, wf, p.RunID, p.OperatorID)
 		}()
 
@@ -766,14 +770,29 @@ func handleWorkflowResume(cfg Config) jsonrpc.Handler {
 		if p.NewRunID == "" {
 			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: "workflow.resume: new_run_id is required"}
 		}
+		// C1 (defense-in-depth): validate run IDs at the RPC boundary before any
+		// filesystem access. Engine.Resume validates again; this gives a clear RPC error.
+		if err := workflow.ValidateID("prior_run_id", p.PriorRunID); err != nil {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("workflow.resume: %v", err)}
+		}
+		if err := workflow.ValidateID("new_run_id", p.NewRunID); err != nil {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("workflow.resume: %v", err)}
+		}
 
 		eng, wf, err := buildEngineAndLoad(cfg, p.Name)
 		if err != nil {
 			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("workflow.resume: %v", err)}
 		}
 
+		// S5: same as handleWorkflowRun — use daemon root ctx for cancellation.
 		go func() {
-			runCtx := context.Background()
+			runCtx := cfg.ServerCtx
+			if runCtx == nil {
+				runCtx = context.Background()
+			}
+			// C1 (defense-in-depth): ValidateID on prior/new run IDs at the RPC boundary.
+			// The Engine.Resume call below validates again, but early rejection gives
+			// a clearer RPC error instead of a filesystem error.
 			_, _ = eng.Resume(runCtx, wf, p.PriorRunID, p.NewRunID, p.OperatorID)
 		}()
 
@@ -802,6 +821,10 @@ func handleWorkflowStatus(cfg Config) jsonrpc.Handler {
 		}
 		if p.RunID == "" {
 			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: "workflow.status: run_id is required"}
+		}
+		// H1: validate run_id before building the filesystem path.
+		if err := workflow.ValidateID("run_id", p.RunID); err != nil {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("workflow.status: %v", err)}
 		}
 
 		workDir := workflowWorkDir(cfg.WorkspaceRoot)
@@ -866,6 +889,3 @@ func workflowStartupReconcile(workspaceRoot string) (int, error) {
 	interrupted, err := workflow.ReconcileInterrupted(runsDir)
 	return len(interrupted), err
 }
-
-// ensure time import is used (workflowRunParams may not use it directly).
-var _ = time.Now

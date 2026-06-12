@@ -22,6 +22,7 @@ package workflow
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 
@@ -97,13 +98,30 @@ type Workflow struct {
 	Nodes []Node `yaml:"nodes"`
 }
 
+// maxWorkflowYAMLBytes caps how much of a workflow YAML file we read.
+// M2: prevents unbounded memory allocation from a large/crafted YAML.
+const maxWorkflowYAMLBytes = 1 << 20 // 1 MiB
+
+// maxWorkflowNodes caps the number of nodes allowed in a workflow definition.
+// M2: prevents the scheduler from being flooded with an adversarially large graph.
+const maxWorkflowNodes = 512
+
 // Load reads a Workflow from a YAML file at path.
 // Returns a parsed and structurally valid Workflow (but NOT semantically
 // validated — call Validate separately to check acyclicity, refs, etc.).
+// M2: read is capped at maxWorkflowYAMLBytes to prevent OOM on large files.
 func Load(path string) (*Workflow, error) {
-	data, err := os.ReadFile(path) //nolint:gosec
+	f, err := os.Open(path) //nolint:gosec
 	if err != nil {
 		return nil, fmt.Errorf("workflow: load %s: %w", path, err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxWorkflowYAMLBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("workflow: read %s: %w", path, err)
+	}
+	if len(data) > maxWorkflowYAMLBytes {
+		return nil, fmt.Errorf("workflow: %s exceeds size limit (%d bytes)", path, maxWorkflowYAMLBytes)
 	}
 	var wf Workflow
 	if err := yaml.Unmarshal(data, &wf); err != nil {

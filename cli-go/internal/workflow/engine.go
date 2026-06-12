@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/runtime"
@@ -84,6 +86,14 @@ func (e *Engine) Run(ctx context.Context, wf *Workflow, runID, ownerOperatorID s
 // Resume fails loudly if the current workflow YAML hash differs from the
 // recorded hash — resuming against an edited graph is undefined.
 func (e *Engine) Resume(ctx context.Context, wf *Workflow, priorRunID, newRunID, ownerOperatorID string) (*RunState, error) {
+	// C1: validate both IDs before ANY filesystem path construction.
+	if err := ValidateID("prior_run_id", priorRunID); err != nil {
+		return nil, err
+	}
+	if err := ValidateID("new_run_id", newRunID); err != nil {
+		return nil, err
+	}
+
 	// Load the prior run state.
 	priorDir := e.runDir(priorRunID)
 	prior, err := LoadRunState(priorDir)
@@ -103,6 +113,15 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, priorRunID, newRunID,
 			"workflow: resume %s → %s: workflow YAML has changed (recorded hash %s, current %s); resuming against an edited graph is undefined — edit the workflow and start a new run instead",
 			priorRunID, newRunID, prior.WorkflowHash, currentHash,
 		)
+	}
+
+	// C2: validate node-id keys from the deserialized run.json before using
+	// them in any path construction. LoadRunState is the trust boundary for
+	// untrusted on-disk data; node IDs that don't match idRe are rejected.
+	for id := range prior.Nodes {
+		if err := ValidateID("node_id (from prior run.json)", id); err != nil {
+			return nil, fmt.Errorf("workflow: resume: prior run.json contains invalid node id: %w", err)
+		}
 	}
 
 	// Build pinned outputs map for completed nodes.
@@ -151,19 +170,24 @@ func (e *Engine) run(
 	rs.ParentRunID = parentRunID
 
 	// For resumed runs, pre-mark completed nodes as completed and seed outputs.
+	// B2: perform all blocking file I/O (MkdirAll/WriteFile/Rename) OUTSIDE rs.mu.
+	// We split this into two passes: write files first (no lock held), then update
+	// in-memory status under the lock (no I/O under lock).
 	if pinnedOutputs != nil {
-		rs.mu.Lock()
+		// Pass 1: write pinned outputs to disk — no lock held.
 		for id, out := range pinnedOutputs {
-			if n, ok := rs.Nodes[id]; ok {
-				n.Status = NodeCompleted
-			}
-			// Write pinned output to the new run's directory so the engine can
-			// read it uniformly via rs.readNodeOutput.
 			if err := rs.writeNodeOutput(id, out); err != nil {
-				rs.mu.Unlock()
 				return nil, fmt.Errorf("workflow: resume: seed pinned output for node %s: %w", id, err)
 			}
 		}
+		// Pass 2: update in-memory status — brief lock, no I/O.
+		rs.mu.Lock()
+		for id := range pinnedOutputs {
+			if n, ok := rs.Nodes[id]; ok {
+				n.Status = NodeCompleted
+			}
+		}
+		rs.dirty = true
 		rs.mu.Unlock()
 	}
 
@@ -251,8 +275,10 @@ func (e *Engine) executeGraph(ctx context.Context, wf *Workflow, rs *RunState, o
 		completedCh = make(chan string, len(wf.Nodes))
 		// failedSet tracks nodes that have failed, protected by queueMu.
 		failedSet = make(map[string]bool)
-		// runFailed is set true when any node fails.
-		runFailed bool
+		// runFailed is set true when any node fails or the ctx is cancelled.
+		// B1: use atomic.Bool so the read after wg.Wait() is race-free without
+		// requiring an additional queueMu.Lock().
+		runFailed atomic.Bool
 	)
 
 	// Collect initially-ready nodes (in-degree 0, not already completed).
@@ -286,7 +312,8 @@ func (e *Engine) executeGraph(ctx context.Context, wf *Workflow, rs *RunState, o
 			// Check ctx before acquiring semaphore.
 			select {
 			case <-ctx.Done():
-				// Signal each node as skipped.
+				// S1: mark runFailed so a cancelled run does not report "completed".
+				runFailed.Store(true)
 				queueMu.Lock()
 				failedSet[nodeID] = true
 				queueMu.Unlock()
@@ -323,6 +350,8 @@ func (e *Engine) executeGraph(ctx context.Context, wf *Workflow, rs *RunState, o
 			case <-sem:
 				// Got slot.
 			case <-ctx.Done():
+				// S1: mark runFailed so a cancelled run does not report "completed".
+				runFailed.Store(true)
 				rs.markNodeSkipped(nodeID)
 				queueMu.Lock()
 				failedSet[nodeID] = true
@@ -339,6 +368,7 @@ func (e *Engine) executeGraph(ctx context.Context, wf *Workflow, rs *RunState, o
 
 				e.runNode(ctx, wf, rs, node, ownerOpID, &runFailed, failedSet, &queueMu)
 			}()
+
 		}
 	}
 
@@ -369,7 +399,8 @@ func (e *Engine) executeGraph(ctx context.Context, wf *Workflow, rs *RunState, o
 	// Wait for any in-flight goroutines (should all be done by now but be safe).
 	wg.Wait()
 
-	return !runFailed
+	// B1: atomic read after wg.Wait() — race-free without holding queueMu.
+	return !runFailed.Load()
 }
 
 // runNode executes a single node: substitutes prompts, calls dispatch.Service,
@@ -381,7 +412,7 @@ func (e *Engine) runNode(
 	rs *RunState,
 	node Node,
 	ownerOpID string,
-	runFailed *bool,
+	runFailed *atomic.Bool,
 	failedSet map[string]bool,
 	queueMu *sync.Mutex,
 ) {
@@ -482,15 +513,16 @@ func (e *Engine) nodeFailure(
 	nodeID string,
 	exitCode int,
 	errMsg string,
-	runFailed *bool,
+	runFailed *atomic.Bool,
 	failedSet map[string]bool,
 	queueMu *sync.Mutex,
 	workflowName string,
 ) {
 	rs.markNodeFailed(nodeID, exitCode, errMsg)
 
+	// B1: atomic store; failedSet update still guarded by queueMu.
+	runFailed.Store(true)
 	queueMu.Lock()
-	*runFailed = true
 	failedSet[nodeID] = true
 	queueMu.Unlock()
 
@@ -511,10 +543,13 @@ func (e *Engine) nodeFailure(
 // output was tail-truncated (within the node's OutputLimit budget), and any error.
 func substitutePrompt(node Node, inputs map[string]string, rs *RunState) (string, bool, error) {
 	// Collect all upstream outputs referenced in this prompt.
-	// The OutputLimit is a TOTAL budget across ALL upstream substitutions.
+	// The OutputLimit is a TOTAL budget across node outputs ONLY (inputs are not
+	// truncated — they are operator-supplied and not subject to the output cap).
+	// S6: tag each substitution with its kind so the budget loop skips inputs.
 	type subst struct {
 		placeholder string
 		value       []byte
+		isNodeOut   bool // true for nodes.*.output refs; false for inputs.*
 	}
 
 	var substitutions []subst
@@ -533,8 +568,8 @@ func substitutePrompt(node Node, inputs map[string]string, rs *RunState) (string
 			if !ok {
 				return "", false, fmt.Errorf("workflow: node %q: substitute: input key %q not found", node.ID, key)
 			}
-			substitutions = append(substitutions, subst{placeholder: placeholder, value: []byte(val)})
-			// input values are not counted against the OutputLimit budget
+			// S6: inputs are NOT counted against the OutputLimit budget.
+			substitutions = append(substitutions, subst{placeholder: placeholder, value: []byte(val), isNodeOut: false})
 		case "nodes":
 			if suffix != "output" {
 				return "", false, fmt.Errorf("workflow: node %q: invalid ref %s — must end in .output", node.ID, placeholder)
@@ -543,39 +578,30 @@ func substitutePrompt(node Node, inputs map[string]string, rs *RunState) (string
 			if err != nil {
 				return "", false, fmt.Errorf("workflow: node %q: read output of node %q: %w", node.ID, key, err)
 			}
-			substitutions = append(substitutions, subst{placeholder: placeholder, value: out})
+			substitutions = append(substitutions, subst{placeholder: placeholder, value: out, isNodeOut: true})
 			totalUpstreamBytes += len(out)
 		}
 	}
 
-	// Apply tail-truncation budget across upstream outputs collectively.
-	// Strategy: if the total exceeds OutputLimit, truncate the largest contributor
-	// proportionally. Simple approach: tail-truncate concatenated budget.
+	// Apply tail-truncation budget across node outputs collectively.
+	// S6: only node outputs (isNodeOut=true) are counted and truncated.
+	// Input substitutions are excluded from the budget and never truncated.
 	truncated := false
 	if totalUpstreamBytes > node.OutputLimit {
 		truncated = true
-		// Distribute the budget proportionally across all node outputs.
 		budget := node.OutputLimit
 		for i, s := range substitutions {
-			if len(s.value) == 0 {
+			if !s.isNodeOut || len(s.value) == 0 {
 				continue
 			}
-			// Only node outputs count against the budget; check kind again.
-			// All entries in substitutions from "nodes" references get truncated.
-			// Input substitutions are not byte-counted.
-			// We re-detect by checking if the value came from a node output.
-			// Simple heuristic: truncate each node output proportionally.
+			// Distribute the budget proportionally among node outputs by byte-share.
 			proportion := float64(len(s.value)) / float64(totalUpstreamBytes)
 			allot := int(float64(budget) * proportion)
 			if allot < 0 {
 				allot = 0
 			}
-			if len(s.value) > allot {
-				_, trunced := tailTruncate(s.value, allot)
-				if trunced {
-					substitutions[i].value, _ = tailTruncate(s.value, allot)
-				}
-			}
+			// S6: single tailTruncate call (was duplicated); assign directly.
+			substitutions[i].value, _ = tailTruncate(s.value, allot)
 		}
 	}
 
@@ -600,11 +626,20 @@ func replaceAll(s, old, new string) string {
 
 // tailTruncate returns the last limit bytes of data. If data is within limit,
 // returns data unchanged and false. If truncated, returns the tail and true.
+// N3: the cut point is advanced forward to the nearest valid UTF-8 rune
+// boundary so we never return a slice beginning mid-rune.
 func tailTruncate(data []byte, limit int) ([]byte, bool) {
 	if limit <= 0 || len(data) <= limit {
 		return data, false
 	}
-	return data[len(data)-limit:], true
+	cut := len(data) - limit
+	// Advance cut to the start of the next valid rune so we don't split a
+	// multi-byte sequence. utf8.RuneStart returns true when the byte is the
+	// first byte of a rune (high bit clear, or high two bits are 11).
+	for cut < len(data) && !utf8.RuneStart(data[cut]) {
+		cut++
+	}
+	return data[cut:], true
 }
 
 // yamlHash returns a hex SHA-256 of the canonical marshalled workflow YAML.

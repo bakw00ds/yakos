@@ -33,6 +33,11 @@ func Validate(wf *Workflow) error {
 		return err
 	}
 
+	// --- M2. Node count cap ---
+	if len(wf.Nodes) > maxWorkflowNodes {
+		return fmt.Errorf("workflow: %q has %d nodes, exceeds limit of %d", wf.Name, len(wf.Nodes), maxWorkflowNodes)
+	}
+
 	// --- 2. Unique node IDs ---
 	nodeSet := make(map[string]struct{}, len(wf.Nodes))
 	for _, n := range wf.Nodes {

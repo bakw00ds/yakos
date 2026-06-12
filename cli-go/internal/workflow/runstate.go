@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -218,8 +219,14 @@ func (rs *RunState) nodeStatus(id string) NodeStatus {
 }
 
 // stdoutPath returns the path for a node's stdout file.
-func (rs *RunState) stdoutPath(nodeID string) string {
-	return filepath.Join(rs.runDir, "nodes", nodeID+".stdout")
+// C2: this is the single chokepoint for all node output path construction.
+// It validates nodeID against idRe and returns an error for any value that
+// does not match — preventing path traversal via deserialized run.json keys.
+func (rs *RunState) stdoutPath(nodeID string) (string, error) {
+	if err := ValidateID("node_id", nodeID); err != nil {
+		return "", fmt.Errorf("workflow: stdoutPath: %w", err)
+	}
+	return filepath.Join(rs.runDir, "nodes", nodeID+".stdout"), nil
 }
 
 // runJSONPath returns the path for run.json.
@@ -229,8 +236,12 @@ func (rs *RunState) runJSONPath() string {
 
 // writeNodeOutput writes a node's output to its dedicated stdout file.
 // The node's stdout file keeps run.json small.
+// C2: propagates the stdoutPath validation error if nodeID is unsafe.
 func (rs *RunState) writeNodeOutput(nodeID string, output []byte) error {
-	path := rs.stdoutPath(nodeID)
+	path, err := rs.stdoutPath(nodeID)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("workflow: mkdir nodes dir: %w", err)
 	}
@@ -247,8 +258,12 @@ func (rs *RunState) writeNodeOutput(nodeID string, output []byte) error {
 
 // readNodeOutput reads a node's pinned output from disk. Used on resume
 // to reuse the previous run's output without re-rolling.
+// C2: propagates the stdoutPath validation error if nodeID is unsafe.
 func (rs *RunState) readNodeOutput(nodeID string) ([]byte, error) {
-	path := rs.stdoutPath(nodeID)
+	path, err := rs.stdoutPath(nodeID)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
 		return nil, fmt.Errorf("workflow: read node stdout %s: %w", path, err)
@@ -282,17 +297,40 @@ func (rs *RunState) persistNow() error {
 	return nil
 }
 
+// maxRunJSONBytes caps how much of run.json we read.
+// M2: prevents unbounded memory allocation from a large/corrupted run.json.
+const maxRunJSONBytes = 1 << 20 // 1 MiB
+
+// maxRunJSONNodes caps the number of nodes allowed in a loaded RunState.
+// M2: belt-and-suspenders against adversarially large serialised runs.
+const maxRunJSONNodes = 512
+
 // LoadRunState loads a RunState from disk (run.json) for a given runDir.
 // Used by crash reconciliation and resume.
+// M2: read is capped at maxRunJSONBytes; node count is capped at maxRunJSONNodes.
+// C2: node-id keys are NOT validated here (deserialized data is untrusted);
+// callers that use node IDs for path construction (Resume) must validate keys
+// themselves via ValidateID before calling readNodeOutput/writeNodeOutput.
 func LoadRunState(runDir string) (*RunState, error) {
 	path := filepath.Join(runDir, "run.json")
-	data, err := os.ReadFile(path) //nolint:gosec
+	f, err := os.Open(path) //nolint:gosec
 	if err != nil {
 		return nil, fmt.Errorf("workflow: load run.json %s: %w", path, err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxRunJSONBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("workflow: read run.json %s: %w", path, err)
+	}
+	if len(data) > maxRunJSONBytes {
+		return nil, fmt.Errorf("workflow: run.json %s exceeds size limit (%d bytes)", path, maxRunJSONBytes)
 	}
 	var rs RunState
 	if err := json.Unmarshal(data, &rs); err != nil {
 		return nil, fmt.Errorf("workflow: parse run.json %s: %w", path, err)
+	}
+	if len(rs.Nodes) > maxRunJSONNodes {
+		return nil, fmt.Errorf("workflow: run.json %s contains %d nodes, exceeds limit of %d", path, len(rs.Nodes), maxRunJSONNodes)
 	}
 	rs.runDir = runDir
 	rs.stopFlush = make(chan struct{})
