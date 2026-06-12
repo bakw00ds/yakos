@@ -33,6 +33,11 @@ message DispatchRunRequest {
   string model      = 5;
   string yakos_root = 6;
   int32  timeout    = 7;
+  // Phase 2 identity fields — additive; field numbers 8-10 are reserved.
+  // Absent on legacy requests; receivers must tolerate their absence.
+  string operator_id      = 8;
+  string conversation_id  = 9;
+  string session_id       = 10;
 }
 
 message DispatchRunResponse {

@@ -269,17 +269,27 @@ func (s *Server) handleDispatchCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dr := dispatch.Request{
-		AgentName: req.Agent,
-		Task:      req.Task,
-		Project:   s.cfg.WorkspaceRoot,
-		YakosRoot: s.cfg.YakosRoot,
-		Runtime:   req.Runtime,
-		Model:     req.Model,
-		Timeout:   req.Timeout,
+	svc := s.cfg.DispatchService
+	if svc == nil {
+		// Fallback: construct an ephemeral Service (backward-compat for callers
+		// that did not inject one).
+		svc = dispatch.NewService(dispatch.ServiceConfig{
+			WorkspaceRoot: s.cfg.WorkspaceRoot,
+			YakosRoot:     s.cfg.YakosRoot,
+		})
 	}
 
-	_, result, err := dispatch.Run(r.Context(), dr)
+	// REST transport: operator_id / conversation_id / session_id are not yet
+	// surfaced as request fields in the REST wire schema (Phase 2 scope). The
+	// Service stamps the daemon-level operator ID (OS user). When the REST
+	// schema adds these fields, they slot in here with no Service change needed.
+	_, result, err := svc.Run(r.Context(), dispatch.Params{
+		Agent:   req.Agent,
+		Task:    req.Task,
+		Runtime: req.Runtime,
+		Model:   req.Model,
+		Timeout: req.Timeout,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "dispatch: "+err.Error())
 		return

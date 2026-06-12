@@ -95,6 +95,10 @@ type Config struct {
 	// Bus is the in-process event bus used by Kanban.Watch.
 	Bus *wsbus.Bus
 
+	// DispatchService is the pre-constructed dispatch facade. When nil, the
+	// server constructs one from WorkspaceRoot/YakosRoot/Bus at first use.
+	DispatchService *dispatch.Service
+
 	// ListenFn replaces net.Listen in tests.
 	ListenFn func(network, addr string) (net.Listener, error)
 }
@@ -108,6 +112,16 @@ type Server struct {
 // New creates a Server and registers all service implementations.
 func New(cfg Config) *Server {
 	s := &Server{cfg: cfg}
+
+	// Ensure the dispatch Service is constructed once — it owns the governor.
+	if cfg.DispatchService == nil {
+		cfg.DispatchService = dispatch.NewService(dispatch.ServiceConfig{
+			WorkspaceRoot: cfg.WorkspaceRoot,
+			YakosRoot:     cfg.YakosRoot,
+			Bus:           cfg.Bus,
+		})
+	}
+	s.cfg = cfg
 
 	// Build the gRPC server with the auth interceptor.
 	s.gSrv = grpc.NewServer(
@@ -262,42 +276,26 @@ func (d *dispatchSrv) Run(ctx context.Context, req *pb.DispatchRunRequest) (*pb.
 	if req.Task == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "task is required")
 	}
-	yakosRoot := req.YakosRoot
-	if yakosRoot == "" {
-		yakosRoot = d.cfg.YakosRoot
-	}
-	if yakosRoot == "" {
+	if d.cfg.YakosRoot == "" && req.YakosRoot == "" {
 		return nil, status.Errorf(codes.FailedPrecondition, "yakos_root not configured")
 	}
-	project := req.Project
-	if project == "" {
-		project = d.cfg.WorkspaceRoot
-	}
 
-	dr := dispatch.Request{
-		AgentName: req.Agent,
-		Task:      req.Task,
-		Project:   project,
-		Runtime:   req.Runtime,
-		Model:     req.Model,
-		YakosRoot: yakosRoot,
-		Timeout:   int(req.Timeout),
-	}
-
-	if d.cfg.Bus != nil {
-		d.cfg.Bus.Publish(wsbus.TopicDispatchStarted, wsbus.DispatchStartedPayload{Agent: req.Agent, Project: project})
-	}
-
-	_, result, err := dispatch.Run(ctx, dr)
+	// gRPC transport: identity extracted from the proto request fields.
+	// operator_id, conversation_id, session_id are carried in the new proto
+	// fields (8-10) and passed to the Service for stamping.
+	_, result, err := d.cfg.DispatchService.Run(ctx, dispatch.Params{
+		Agent:          req.Agent,
+		Task:           req.Task,
+		Project:        req.Project, // empty → Service uses WorkspaceRoot
+		Runtime:        req.Runtime,
+		Model:          req.Model,
+		Timeout:        int(req.Timeout),
+		OperatorID:     req.OperatorID,
+		ConversationID: req.ConversationID,
+		SessionID:      req.SessionID,
+	})
 	if err != nil {
-		if d.cfg.Bus != nil {
-			d.cfg.Bus.Publish(wsbus.TopicDispatchFinished, wsbus.DispatchFinishedPayload{Agent: req.Agent, Project: project, ExitCode: -1})
-		}
 		return nil, status.Errorf(codes.Internal, "dispatch: %v", err)
-	}
-
-	if d.cfg.Bus != nil {
-		d.cfg.Bus.Publish(wsbus.TopicDispatchFinished, wsbus.DispatchFinishedPayload{Agent: req.Agent, Project: project, ExitCode: result.ExitCode})
 	}
 
 	return &pb.DispatchRunResponse{
@@ -315,45 +313,25 @@ func (d *dispatchSrv) Stream(req *pb.DispatchRunRequest, stream pb.Dispatch_Stre
 	if req.Task == "" {
 		return status.Errorf(codes.InvalidArgument, "task is required")
 	}
-	yakosRoot := req.YakosRoot
-	if yakosRoot == "" {
-		yakosRoot = d.cfg.YakosRoot
-	}
-	if yakosRoot == "" {
+	if d.cfg.YakosRoot == "" && req.YakosRoot == "" {
 		return status.Errorf(codes.FailedPrecondition, "yakos_root not configured")
 	}
-	project := req.Project
-	if project == "" {
-		project = d.cfg.WorkspaceRoot
-	}
 
-	// Stream chunks: dispatch runs synchronously; we emit a summary chunk when done.
-	// Full token streaming would require dispatch.Stream which is not wired yet;
-	// for Phase 2 we run synchronously and send a single "summary" chunk.
-	dr := dispatch.Request{
-		AgentName: req.Agent,
-		Task:      req.Task,
-		Project:   project,
-		Runtime:   req.Runtime,
-		Model:     req.Model,
-		YakosRoot: yakosRoot,
-		Timeout:   int(req.Timeout),
-	}
-
-	if d.cfg.Bus != nil {
-		d.cfg.Bus.Publish(wsbus.TopicDispatchStarted, wsbus.DispatchStartedPayload{Agent: req.Agent, Project: project})
-	}
-
-	_, result, err := dispatch.Run(stream.Context(), dr)
+	// Stream chunks: dispatch runs synchronously through the Service; we emit
+	// a summary chunk when done. Full token streaming is Phase 3 (RunStream).
+	_, result, err := d.cfg.DispatchService.Run(stream.Context(), dispatch.Params{
+		Agent:          req.Agent,
+		Task:           req.Task,
+		Project:        req.Project,
+		Runtime:        req.Runtime,
+		Model:          req.Model,
+		Timeout:        int(req.Timeout),
+		OperatorID:     req.OperatorID,
+		ConversationID: req.ConversationID,
+		SessionID:      req.SessionID,
+	})
 	if err != nil {
-		if d.cfg.Bus != nil {
-			d.cfg.Bus.Publish(wsbus.TopicDispatchFinished, wsbus.DispatchFinishedPayload{Agent: req.Agent, Project: project, ExitCode: -1})
-		}
 		return status.Errorf(codes.Internal, "dispatch: %v", err)
-	}
-
-	if d.cfg.Bus != nil {
-		d.cfg.Bus.Publish(wsbus.TopicDispatchFinished, wsbus.DispatchFinishedPayload{Agent: req.Agent, Project: project, ExitCode: result.ExitCode})
 	}
 
 	return stream.Send(&pb.DispatchStreamChunk{

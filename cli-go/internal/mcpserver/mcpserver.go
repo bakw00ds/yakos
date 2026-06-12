@@ -31,6 +31,8 @@ import (
 	"fmt"
 	"io"
 	"sync"
+
+	"github.com/bakw00ds/yakos/internal/dispatch"
 )
 
 // Config holds all configuration for the MCP server session.
@@ -44,6 +46,12 @@ type Config struct {
 
 	// Version is the yakOS binary version string (included in ServerInfo).
 	Version string
+
+	// DispatchService is the pre-constructed dispatch facade. When nil,
+	// tools construct an ephemeral Service per invocation (backward-compat).
+	// MCP-originated dispatches are attributed as operator_id="mcp:<agent>"
+	// by the tool layer when it builds dispatch.Params.
+	DispatchService *dispatch.Service
 }
 
 // Serve runs a single MCP stdio session, reading from in and writing to out.

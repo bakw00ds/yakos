@@ -61,6 +61,12 @@ type Event struct {
 
 	// TaskPreview is present on dispatch_started events only.
 	TaskPreview string `json:"task_preview,omitempty"`
+
+	// Phase 2 identity fields — additive-optional; absent on legacy/bash-written
+	// lines. Readers must tolerate their absence (zero value = unset).
+	OperatorID     string `json:"operator_id,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	SessionID      string `json:"session_id,omitempty"`
 }
 
 // LogFiles returns the sorted list of dispatch-log NDJSON files in dir.

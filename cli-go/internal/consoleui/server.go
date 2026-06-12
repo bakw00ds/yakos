@@ -11,6 +11,7 @@ import (
 	_ "embed"
 
 	"github.com/bakw00ds/yakos/internal/dashauth"
+	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/kanban"
 	"github.com/bakw00ds/yakos/internal/metricsdash"
 	"github.com/bakw00ds/yakos/internal/perfdash"
@@ -54,6 +55,14 @@ type Config struct {
 
 	// Bus is the shared WebSocket event bus (required for /v1/events).
 	Bus *wsbus.Bus
+
+	// DispatchService is the shared dispatch facade. When set, console-originated
+	// dispatches (Phase 3+) go through it with identity stamping and governor
+	// enforcement. The console mints operatorIDs from connected browser sessions;
+	// for Phase 2 the server-level OS-user-derived ID is used as a fallback.
+	// This field is wired here so the Phase 3 chat handler can use it without
+	// further config changes.
+	DispatchService *dispatch.Service
 
 	// Listener, when non-nil, is used directly instead of binding a new socket.
 	// Injected in tests to avoid port conflicts.

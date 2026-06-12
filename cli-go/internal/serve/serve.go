@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/consoleui"
+	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/grpcserver"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/mcpserver"
@@ -115,6 +116,10 @@ type Config struct {
 	// Bus is the in-process event bus shared between the JSON-RPC layer and the
 	// WebSocket layer.  If nil, a new Bus is created by Run.  Inject for tests.
 	Bus *wsbus.Bus
+
+	// DispatchService is the pre-constructed dispatch facade. When nil, Run
+	// constructs one from WorkspaceRoot/YakosRoot/Bus. Inject for tests.
+	DispatchService *dispatch.Service
 
 	// ListenFn is injected in tests to replace the real socket listener.
 	// nil means use jsonrpc.Listen.
@@ -324,6 +329,18 @@ func Run(ctx context.Context, cfg Config) error {
 		close(perfErrCh)
 	}
 
+	// Build the shared dispatch Service once — all transports share this single
+	// instance so the global concurrency governor is enforced across all of them.
+	// Constructed here (after bus is resolved) so it can publish events.
+	dispatchSvc := cfg.DispatchService
+	if dispatchSvc == nil {
+		dispatchSvc = dispatch.NewService(dispatch.ServiceConfig{
+			WorkspaceRoot: cfg.WorkspaceRoot,
+			YakosRoot:     cfg.YakosRoot,
+			Bus:           bus,
+		})
+	}
+
 	// Load (or generate) the console token and start the unified console server
 	// unless disabled.  The console mounts kanban, metricsdash, and perfdash
 	// Handler()s internally — this is where metricsdash gets instantiated.
@@ -343,6 +360,7 @@ func Run(ctx context.Context, cfg Config) error {
 			MetricsProjectDir: cfg.WorkspaceRoot,
 			PerfWorkDir:       workDir,
 			Bus:               bus,
+			DispatchService:   dispatchSvc,
 		})
 		consoleURL := fmt.Sprintf("http://%s/#token=%s", cfg.consoleAddr(), consoleTok)
 		_ = consoleURL // printed by caller in banner
@@ -357,12 +375,13 @@ func Run(ctx context.Context, cfg Config) error {
 	grpcErrCh := make(chan error, 1)
 	if cfg.grpcAddr() != "-" {
 		grpcSrv := grpcserver.New(grpcserver.Config{
-			Addr:          cfg.grpcAddr(),
-			ReadToken:     restReadToken,
-			WriteToken:    restWriteToken,
-			WorkspaceRoot: cfg.WorkspaceRoot,
-			YakosRoot:     cfg.YakosRoot,
-			Bus:           bus,
+			Addr:            cfg.grpcAddr(),
+			ReadToken:       restReadToken,
+			WriteToken:      restWriteToken,
+			WorkspaceRoot:   cfg.WorkspaceRoot,
+			YakosRoot:       cfg.YakosRoot,
+			Bus:             bus,
+			DispatchService: dispatchSvc,
 		})
 		go func() {
 			grpcErrCh <- grpcSrv.Serve(ctx)
@@ -378,8 +397,9 @@ func Run(ctx context.Context, cfg Config) error {
 			Addr:       cfg.mcpHTTPAddr(),
 			WriteToken: restWriteToken,
 			MCPConfig: mcpserver.Config{
-				WorkspaceRoot: cfg.WorkspaceRoot,
-				YakosRoot:     cfg.YakosRoot,
+				WorkspaceRoot:   cfg.WorkspaceRoot,
+				YakosRoot:       cfg.YakosRoot,
+				DispatchService: dispatchSvc,
 			},
 		})
 		go func() {
@@ -392,6 +412,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// Build the JSON-RPC server and register handlers (bus is passed via cfg).
 	cfgWithBus := cfg
 	cfgWithBus.Bus = bus
+	cfgWithBus.DispatchService = dispatchSvc
 	srv := jsonrpc.NewServer()
 	registerMethods(srv, cfgWithBus)
 

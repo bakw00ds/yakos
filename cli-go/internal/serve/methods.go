@@ -25,7 +25,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
@@ -157,7 +156,8 @@ type dispatchRunResult struct {
 }
 
 // handleDispatchRun returns a handler that runs an agent dispatch and returns
-// the outcome.  The handler wraps internal/dispatch.Run directly.
+// the outcome. It delegates to dispatch.Service for identity stamping,
+// concurrency governance, and bus publishing.
 func handleDispatchRun(cfg Config) jsonrpc.Handler {
 	return func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		var p dispatchRunParams
@@ -181,12 +181,6 @@ func handleDispatchRun(cfg Config) jsonrpc.Handler {
 			}
 		}
 
-		// Use workspace root as project default if not specified.
-		project := p.Project
-		if project == "" {
-			project = cfg.WorkspaceRoot
-		}
-
 		yakosRoot := p.YakosRoot
 		if yakosRoot == "" {
 			yakosRoot = cfg.YakosRoot
@@ -198,48 +192,33 @@ func handleDispatchRun(cfg Config) jsonrpc.Handler {
 			}
 		}
 
-		req := dispatch.Request{
-			AgentName: p.Agent,
-			Task:      p.Task,
-			Project:   project,
-			Runtime:   p.Runtime,
-			Model:     p.Model,
-			YakosRoot: yakosRoot,
-			Timeout:   p.Timeout,
-		}
-
-		if cfg.Bus != nil {
-			cfg.Bus.Publish(wsbus.TopicDispatchStarted, wsbus.DispatchStartedPayload{
-				Agent:   p.Agent,
-				Project: project,
-				TS:      time.Now().UTC(),
+		svc := cfg.DispatchService
+		if svc == nil {
+			// Fallback: construct an ephemeral Service for callers that did not
+			// inject one (e.g. tests that build Config without Run).
+			svc = dispatch.NewService(dispatch.ServiceConfig{
+				WorkspaceRoot: cfg.WorkspaceRoot,
+				YakosRoot:     yakosRoot,
+				Bus:           cfg.Bus,
 			})
 		}
 
-		stdout, result, err := dispatch.Run(ctx, req)
+		_, result, err := svc.Run(ctx, dispatch.Params{
+			Agent:   p.Agent,
+			Task:    p.Task,
+			Project: p.Project, // empty → Service uses WorkspaceRoot
+			Runtime: p.Runtime,
+			Model:   p.Model,
+			Timeout: p.Timeout,
+			// JSON-RPC transport does not yet carry identity fields in the
+			// wire params; OperatorID/ConversationID/SessionID are stamped
+			// by the Service from its daemon-level defaults.
+		})
 		if err != nil {
-			if cfg.Bus != nil {
-				cfg.Bus.Publish(wsbus.TopicDispatchFinished, wsbus.DispatchFinishedPayload{
-					Agent:    p.Agent,
-					Project:  project,
-					ExitCode: -1,
-					TS:       time.Now().UTC(),
-				})
-			}
 			return nil, &jsonrpc.RPCError{
 				Code:    jsonrpc.CodeDispatchUnavailable,
 				Message: fmt.Sprintf("dispatch.run: %v", err),
 			}
-		}
-		_ = stdout // stdout is captured in the dispatch log; not returned via RPC
-
-		if cfg.Bus != nil {
-			cfg.Bus.Publish(wsbus.TopicDispatchFinished, wsbus.DispatchFinishedPayload{
-				Agent:    p.Agent,
-				Project:  project,
-				ExitCode: result.ExitCode,
-				TS:       time.Now().UTC(),
-			})
 		}
 
 		return dispatchRunResult{

@@ -109,27 +109,32 @@ func handleDispatch(ctx context.Context, cfg Config, args json.RawMessage) Tools
 	if p.Task == "" {
 		return errorContent("yakos.dispatch: task is required")
 	}
-
-	project := p.Project
-	if project == "" {
-		project = cfg.WorkspaceRoot
-	}
-	yakosRoot := cfg.YakosRoot
-	if yakosRoot == "" {
+	if cfg.YakosRoot == "" {
 		return errorContent("yakos.dispatch: yakos_root not configured (daemon Config.YakosRoot empty)")
 	}
 
-	req := dispatch.Request{
-		AgentName: p.Agent,
-		Task:      p.Task,
-		Project:   project,
-		Runtime:   p.Runtime,
-		Model:     p.Model,
-		YakosRoot: yakosRoot,
-		Timeout:   p.Timeout,
+	svc := cfg.DispatchService
+	if svc == nil {
+		// Fallback: construct an ephemeral Service (backward-compat for
+		// callers that did not inject one, e.g. stdio MCP sessions).
+		svc = dispatch.NewService(dispatch.ServiceConfig{
+			WorkspaceRoot: cfg.WorkspaceRoot,
+			YakosRoot:     cfg.YakosRoot,
+		})
 	}
 
-	_, result, err := dispatch.Run(ctx, req)
+	// MCP-originated dispatches are attributed as operator_id="mcp:<agent>"
+	// per the unified-console-plan.md §"Ideas to add" convention. This lets
+	// the attribution appear in the dispatch-log NDJSON and the WS event feed.
+	_, result, err := svc.Run(ctx, dispatch.Params{
+		Agent:      p.Agent,
+		Task:       p.Task,
+		Project:    p.Project, // empty → Service uses WorkspaceRoot
+		Runtime:    p.Runtime,
+		Model:      p.Model,
+		Timeout:    p.Timeout,
+		OperatorID: "mcp:" + p.Agent,
+	})
 	if err != nil {
 		return errorContent(fmt.Sprintf("yakos.dispatch: %v", err))
 	}

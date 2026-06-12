@@ -10,14 +10,19 @@ package yakosv1
 // ---- Dispatch ---------------------------------------------------------------
 
 // DispatchRunRequest is the request for Dispatch.Run and Dispatch.Stream.
+// Proto field numbers 1-7 are stable; identity fields use 8-10 (never renumber).
 type DispatchRunRequest struct {
-	Agent     string `json:"agent,omitempty"`
-	Task      string `json:"task,omitempty"`
-	Project   string `json:"project,omitempty"`
-	Runtime   string `json:"runtime,omitempty"`
-	Model     string `json:"model,omitempty"`
-	YakosRoot string `json:"yakos_root,omitempty"`
-	Timeout   int32  `json:"timeout,omitempty"`
+	Agent     string `json:"agent,omitempty"`      // field 1
+	Task      string `json:"task,omitempty"`       // field 2
+	Project   string `json:"project,omitempty"`    // field 3
+	Runtime   string `json:"runtime,omitempty"`    // field 4
+	Model     string `json:"model,omitempty"`      // field 5
+	YakosRoot string `json:"yakos_root,omitempty"` // field 6
+	Timeout   int32  `json:"timeout,omitempty"`    // field 7
+	// Phase 2 identity fields (fields 8-10 — additive, never renumber).
+	OperatorID     string `json:"operator_id,omitempty"`     // field 8
+	ConversationID string `json:"conversation_id,omitempty"` // field 9
+	SessionID      string `json:"session_id,omitempty"`      // field 10
 }
 
 // DispatchRunResponse is the result of Dispatch.Run.

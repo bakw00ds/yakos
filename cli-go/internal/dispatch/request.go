@@ -56,4 +56,29 @@ type Request struct {
 	// YakosRoot is the absolute path to the yakOS framework root. Required for
 	// agent composition (lib/agents/ lookup).
 	YakosRoot string
+
+	// ---- Identity fields (Phase 2 / unified console) -------------------------
+	//
+	// These three fields are additive-optional: they are omitted (empty string)
+	// in legacy callers that do not supply them, and their absence is tolerated
+	// by all NDJSON readers (cost, finops, metrics). Bash-written lines never
+	// carry them; Go-written lines carry them when the transport supplies them.
+	//
+	// OperatorID identifies the human operator who triggered this dispatch.
+	// For same-host console sessions this is self-asserted (cooperative
+	// labeling for uid-equivalent teammates), not an authentication boundary.
+	// For MCP-originated dispatches, the convention is "mcp:<agent-name>".
+	OperatorID string
+
+	// ConversationID is the multi-turn conversation session identifier.
+	// Precedence (highest to lowest):
+	//   1. This field, when non-empty (set by the caller / transport layer).
+	//   2. YAKOS_CONVERSATION_ID environment variable (legacy bash / CLI callers).
+	// This replaces the previous process-global os.Getenv call in dispatch.go.
+	ConversationID string
+
+	// SessionID is the console UI session identifier (one per browser tab /
+	// terminal pane). Empty for non-console dispatches. Used for routing
+	// SSE streams and presence attribution.
+	SessionID string
 }
