@@ -16,6 +16,12 @@
 //   - yakos.cost.aggregate       — aggregate dispatch-log costs by axis
 //   - yakos.status.read          — read project status report
 //   - yakos.supervise.pending    — list unacknowledged supervisor findings
+//
+// Phase 4 workflow methods (3):
+//
+//   - yakos.workflow.run         — run a named workflow (headless DAG engine)
+//   - yakos.workflow.resume      — resume a failed workflow run from a prior runID
+//   - yakos.workflow.status      — return the RunState for a given runID
 package serve
 
 import (
@@ -30,10 +36,12 @@ import (
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/kanban"
+	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/refresh"
 	"github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/supervise"
 	"github.com/bakw00ds/yakos/internal/version"
+	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
@@ -53,6 +61,11 @@ func registerMethods(srv *jsonrpc.Server, cfg Config) {
 	srv.Register("yakos.cost.aggregate", handleCostAggregate(cfg))
 	srv.Register("yakos.status.read", handleStatusRead(cfg))
 	srv.Register("yakos.supervise.pending", handleSupervisePending(cfg))
+
+	// Phase 4 — headless Flows DAG engine (3)
+	srv.Register("yakos.workflow.run", handleWorkflowRun(cfg))
+	srv.Register("yakos.workflow.resume", handleWorkflowResume(cfg))
+	srv.Register("yakos.workflow.status", handleWorkflowStatus(cfg))
 }
 
 // ---- yakos.version ----------------------------------------------------------
@@ -665,4 +678,214 @@ func handleSupervisePending(cfg Config) jsonrpc.Handler {
 			Output:       out.String(),
 		}, nil
 	}
+}
+
+// ---- yakos.workflow.run -------------------------------------------------------
+
+// workflowRunParams is the request shape for yakos.workflow.run.
+// Idempotency: callers must supply a unique runID per attempt.
+// Retrying with the same runID against an existing run dir is not safe;
+// use yakos.workflow.resume for failed runs.
+type workflowRunParams struct {
+	Name       string `json:"name"`                  // workflow file name (without .yaml)
+	RunID      string `json:"run_id"`                // caller-supplied unique run ID
+	OperatorID string `json:"operator_id,omitempty"` // self-asserted attribution
+}
+
+// workflowRunResult is the response shape for yakos.workflow.run.
+type workflowRunResult struct {
+	RunID  string `json:"run_id"`
+	Status string `json:"status"`
+}
+
+// handleWorkflowRun returns a handler that loads a workflow by name and runs it.
+// The run executes asynchronously; the method returns immediately with the runID.
+// Clients poll yakos.workflow.status or subscribe to workflow.* bus events.
+func handleWorkflowRun(cfg Config) jsonrpc.Handler {
+	return func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		var p workflowRunParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("workflow.run: invalid params: %v", err)}
+		}
+		if p.Name == "" {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: "workflow.run: name is required"}
+		}
+		if p.RunID == "" {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: "workflow.run: run_id is required"}
+		}
+
+		eng, wf, err := buildEngineAndLoad(cfg, p.Name)
+		if err != nil {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("workflow.run: %v", err)}
+		}
+
+		// Run asynchronously. The caller polls workflow.status or watches bus events.
+		// S5: use the daemon's root context (cfg.ServerCtx) as parent so daemon
+		// shutdown cancels in-flight runs. Fall back to Background if not set
+		// (test injection path).
+		go func() {
+			runCtx := cfg.ServerCtx
+			if runCtx == nil {
+				runCtx = context.Background()
+			}
+			_, _ = eng.Run(runCtx, wf, p.RunID, p.OperatorID)
+		}()
+
+		return workflowRunResult{RunID: p.RunID, Status: "started"}, nil
+	}
+}
+
+// ---- yakos.workflow.resume ----------------------------------------------------
+
+// workflowResumeParams is the request shape for yakos.workflow.resume.
+type workflowResumeParams struct {
+	Name       string `json:"name"`                  // workflow name (to load current YAML)
+	PriorRunID string `json:"prior_run_id"`          // the run to resume from
+	NewRunID   string `json:"new_run_id"`            // new run ID for the forked run
+	OperatorID string `json:"operator_id,omitempty"` // self-asserted attribution
+}
+
+// workflowResumeResult is the response shape for yakos.workflow.resume.
+type workflowResumeResult struct {
+	RunID       string `json:"run_id"`
+	ParentRunID string `json:"parent_run_id"`
+	Status      string `json:"status"`
+}
+
+// handleWorkflowResume returns a handler that resumes a failed workflow run.
+// Resume forks a new runID (parent_run_id points to the original).
+// The method returns immediately; the resumed run executes asynchronously.
+func handleWorkflowResume(cfg Config) jsonrpc.Handler {
+	return func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		var p workflowResumeParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("workflow.resume: invalid params: %v", err)}
+		}
+		if p.Name == "" {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: "workflow.resume: name is required"}
+		}
+		if p.PriorRunID == "" {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: "workflow.resume: prior_run_id is required"}
+		}
+		if p.NewRunID == "" {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: "workflow.resume: new_run_id is required"}
+		}
+		// C1 (defense-in-depth): validate run IDs at the RPC boundary before any
+		// filesystem access. Engine.Resume validates again; this gives a clear RPC error.
+		if err := workflow.ValidateID("prior_run_id", p.PriorRunID); err != nil {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("workflow.resume: %v", err)}
+		}
+		if err := workflow.ValidateID("new_run_id", p.NewRunID); err != nil {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("workflow.resume: %v", err)}
+		}
+
+		eng, wf, err := buildEngineAndLoad(cfg, p.Name)
+		if err != nil {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("workflow.resume: %v", err)}
+		}
+
+		// S5: same as handleWorkflowRun — use daemon root ctx for cancellation.
+		go func() {
+			runCtx := cfg.ServerCtx
+			if runCtx == nil {
+				runCtx = context.Background()
+			}
+			// C1 (defense-in-depth): ValidateID on prior/new run IDs at the RPC boundary.
+			// The Engine.Resume call below validates again, but early rejection gives
+			// a clearer RPC error instead of a filesystem error.
+			_, _ = eng.Resume(runCtx, wf, p.PriorRunID, p.NewRunID, p.OperatorID)
+		}()
+
+		return workflowResumeResult{
+			RunID:       p.NewRunID,
+			ParentRunID: p.PriorRunID,
+			Status:      "started",
+		}, nil
+	}
+}
+
+// ---- yakos.workflow.status ----------------------------------------------------
+
+// workflowStatusParams is the request shape for yakos.workflow.status.
+type workflowStatusParams struct {
+	RunID string `json:"run_id"`
+}
+
+// handleWorkflowStatus returns a handler that reads the persisted RunState
+// for a given runID and returns it as JSON.
+func handleWorkflowStatus(cfg Config) jsonrpc.Handler {
+	return func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		var p workflowStatusParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("workflow.status: invalid params: %v", err)}
+		}
+		if p.RunID == "" {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: "workflow.status: run_id is required"}
+		}
+		// H1: validate run_id before building the filesystem path.
+		if err := workflow.ValidateID("run_id", p.RunID); err != nil {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("workflow.status: %v", err)}
+		}
+
+		workDir := workflowWorkDir(cfg.WorkspaceRoot)
+		runDir := filepath.Join(workDir, "workflows", "runs", p.RunID)
+
+		rs, err := workflow.LoadRunState(runDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("workflow.status: run %q not found", p.RunID)}
+			}
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("workflow.status: %v", err)}
+		}
+		return rs, nil
+	}
+}
+
+// buildEngineAndLoad constructs a workflow.Engine from the serve Config and
+// loads the named workflow YAML from the workflows directory.
+// This is the shared setup for workflow.run and workflow.resume.
+func buildEngineAndLoad(cfg Config, name string) (*workflow.Engine, *workflow.Workflow, error) {
+	if cfg.DispatchService == nil {
+		return nil, nil, fmt.Errorf("dispatch service not configured")
+	}
+
+	workDir := workflowWorkDir(cfg.WorkspaceRoot)
+	eng := &workflow.Engine{
+		Svc:       cfg.DispatchService,
+		Bus:       cfg.Bus,
+		YakosRoot: cfg.YakosRoot,
+		Project:   cfg.WorkspaceRoot,
+		WorkDir:   workDir,
+	}
+
+	// Validate the workflow name before any filesystem access.
+	if err := workflow.ValidateID("workflow name", name); err != nil {
+		return nil, nil, err
+	}
+
+	wfPath := filepath.Join(workDir, "workflows", name+".yaml")
+	wf, err := workflow.Load(wfPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load workflow %q: %w", name, err)
+	}
+	if err := workflow.Validate(wf); err != nil {
+		return nil, nil, fmt.Errorf("validate workflow %q: %w", name, err)
+	}
+	return eng, wf, nil
+}
+
+// workflowWorkDir returns the work/current directory for workflow artifacts.
+// Mirrors perfdash.DefaultWorkDir.
+func workflowWorkDir(workspaceRoot string) string {
+	return perfdash.DefaultWorkDir(workspaceRoot)
+}
+
+// workflowStartupReconcile runs crash-reconciliation for any interrupted workflow
+// runs at daemon startup. Non-fatal: errors are logged but do not prevent startup.
+// Returns the number of runs marked interrupted.
+func workflowStartupReconcile(workspaceRoot string) (int, error) {
+	workDir := workflowWorkDir(workspaceRoot)
+	runsDir := filepath.Join(workDir, "workflows", "runs")
+	interrupted, err := workflow.ReconcileInterrupted(runsDir)
+	return len(interrupted), err
 }

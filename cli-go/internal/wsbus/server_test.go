@@ -490,6 +490,12 @@ var registeredTopics = []struct {
 	{TopicDispatchStarted, DispatchStartedPayload{Agent: "a", Project: "/p"}},
 	{TopicDispatchFinished, DispatchFinishedPayload{Agent: "a", Project: "/p", ExitCode: 0}},
 	{TopicPresence, PresencePayload{User: "u", Host: "h", Status: "active"}},
+	// Phase-4 workflow topics: carry only run/node lifecycle metadata (no content/tokens).
+	{TopicWorkflowRunStarted, WorkflowRunStartedPayload{RunID: "run-1", Workflow: "my-flow"}},
+	{TopicWorkflowRunFinished, WorkflowRunFinishedPayload{RunID: "run-1", Workflow: "my-flow", Status: "completed"}},
+	{TopicWorkflowNodeStarted, WorkflowNodeStartedPayload{RunID: "run-1", Workflow: "my-flow", NodeID: "node-a", Agent: "backend"}},
+	{TopicWorkflowNodeFinished, WorkflowNodeFinishedPayload{RunID: "run-1", Workflow: "my-flow", NodeID: "node-a", Status: "completed", ExitCode: 0}},
+	{TopicWorkflowNodeTruncated, WorkflowNodeTruncatedPayload{RunID: "run-1", Workflow: "my-flow", NodeID: "node-a", OriginalLen: 10000, TruncatedTo: 8000}},
 }
 
 // allTopicConstants returns the set of values of every exported string
@@ -513,6 +519,12 @@ func allTopicConstants() map[string]bool {
 		TopicDispatchStarted,
 		TopicDispatchFinished,
 		TopicPresence,
+		// Phase-4 workflow topics.
+		TopicWorkflowRunStarted,
+		TopicWorkflowRunFinished,
+		TopicWorkflowNodeStarted,
+		TopicWorkflowNodeFinished,
+		TopicWorkflowNodeTruncated,
 	}
 	m := make(map[string]bool, len(known))
 	for _, v := range known {
