@@ -36,6 +36,17 @@ const (
 	TopicPresence         = "presence"
 )
 
+// Topic constants for Phase-4 workflow events.
+// Invariant: no token or node content is published on these topics.
+// Only run/node lifecycle metadata is carried (IDs, status, timestamps).
+const (
+	TopicWorkflowRunStarted    = "workflow.run.started"
+	TopicWorkflowRunFinished   = "workflow.run.finished"
+	TopicWorkflowNodeStarted   = "workflow.node.started"
+	TopicWorkflowNodeFinished  = "workflow.node.finished"
+	TopicWorkflowNodeTruncated = "workflow.node.truncated"
+)
+
 // Event is an envelope for every message published on the bus.
 // Clients receive exactly this structure (JSON-encoded) over the WebSocket.
 type Event struct {
@@ -87,6 +98,53 @@ type PresencePayload struct {
 	User   string `json:"user"`
 	Host   string `json:"host"`
 	Status string `json:"status"` // "active" | "idle" | "gone"
+}
+
+// WorkflowRunStartedPayload is the payload for [TopicWorkflowRunStarted].
+// Invariant: does not carry node content or tokens.
+type WorkflowRunStartedPayload struct {
+	RunID    string    `json:"run_id"`
+	Workflow string    `json:"workflow"`
+	TS       time.Time `json:"ts"`
+}
+
+// WorkflowRunFinishedPayload is the payload for [TopicWorkflowRunFinished].
+type WorkflowRunFinishedPayload struct {
+	RunID    string    `json:"run_id"`
+	Workflow string    `json:"workflow"`
+	Status   string    `json:"status"` // "completed" | "failed"
+	TS       time.Time `json:"ts"`
+}
+
+// WorkflowNodeStartedPayload is the payload for [TopicWorkflowNodeStarted].
+type WorkflowNodeStartedPayload struct {
+	RunID    string    `json:"run_id"`
+	Workflow string    `json:"workflow"`
+	NodeID   string    `json:"node_id"`
+	Agent    string    `json:"agent"`
+	TS       time.Time `json:"ts"`
+}
+
+// WorkflowNodeFinishedPayload is the payload for [TopicWorkflowNodeFinished].
+type WorkflowNodeFinishedPayload struct {
+	RunID    string    `json:"run_id"`
+	Workflow string    `json:"workflow"`
+	NodeID   string    `json:"node_id"`
+	Status   string    `json:"status"` // "completed" | "failed" | "skipped"
+	ExitCode int       `json:"exit_code"`
+	TS       time.Time `json:"ts"`
+}
+
+// WorkflowNodeTruncatedPayload is the payload for [TopicWorkflowNodeTruncated].
+// Published when a node's output is tail-truncated before being substituted
+// into downstream prompts. Carries only byte counts, never content.
+type WorkflowNodeTruncatedPayload struct {
+	RunID       string    `json:"run_id"`
+	Workflow    string    `json:"workflow"`
+	NodeID      string    `json:"node_id"`
+	OriginalLen int       `json:"original_len"`
+	TruncatedTo int       `json:"truncated_to"`
+	TS          time.Time `json:"ts"`
 }
 
 // MarshalPayload JSON-encodes v and returns the raw message.

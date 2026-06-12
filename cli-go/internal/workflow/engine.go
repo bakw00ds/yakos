@@ -1,0 +1,685 @@
+package workflow
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/runtime"
+	"github.com/bakw00ds/yakos/internal/wsbus"
+)
+
+// defaultMaxParallel is the default per-run concurrency limit.
+// This cap is applied INSIDE the global dispatch.Service governor, so the
+// effective concurrency is bounded by BOTH limits.
+const defaultMaxParallel = 4
+
+// EngineRunFn is the function signature for the per-node dispatch call.
+// Tests inject a fake via Engine.runFn to avoid live LLM calls.
+// Production code leaves runFn nil, which defaults to svcRun.
+type EngineRunFn func(ctx context.Context, p dispatch.Params) (stdout []byte, result dispatch.Result, err error)
+
+// Engine is the DAG executor for workflow runs. It dispatches each node
+// through dispatch.Service (governed + identity-stamped) and publishes
+// lifecycle events onto the WS bus.
+//
+// Each Engine instance is shared across multiple concurrent workflow runs.
+// All state is per-run (RunState); the Engine itself is stateless.
+type Engine struct {
+	Svc       *dispatch.Service
+	Bus       *wsbus.Bus
+	YakosRoot string
+	Project   string // pinned project path for all workflow node dispatches
+	WorkDir   string // <work>/current/ root
+
+	// runFn is the dispatch function used per node. Nil means use Svc.Run.
+	// Tests inject a deterministic fake here to avoid live LLM calls.
+	// Must NOT be set in production; setting it bypasses the governed Service.
+	runFn EngineRunFn
+}
+
+// dispatchNode calls either the injected runFn (tests) or Svc.Run (production).
+func (e *Engine) dispatchNode(ctx context.Context, p dispatch.Params) ([]byte, dispatch.Result, error) {
+	if e.runFn != nil {
+		return e.runFn(ctx, p)
+	}
+	return e.Svc.Run(ctx, p)
+}
+
+// workflowsDir returns the workflows root directory.
+func (e *Engine) workflowsDir() string {
+	return filepath.Join(e.WorkDir, "workflows")
+}
+
+// runsDir returns the runs root directory.
+func (e *Engine) runsDir() string {
+	return filepath.Join(e.WorkDir, "workflows", "runs")
+}
+
+// runDir returns the directory for a specific run.
+func (e *Engine) runDir(runID string) string {
+	return filepath.Join(e.runsDir(), runID)
+}
+
+// Run executes a workflow as a new run. runID must be a valid path-safe ID.
+// ownerOperatorID is the operator who triggered this run; it is stamped onto
+// every node dispatch via dispatch.Params.OperatorID.
+//
+// Run blocks until the graph drains or ctx is cancelled.
+// Returns the final RunState; the run is persisted to disk on completion.
+func (e *Engine) Run(ctx context.Context, wf *Workflow, runID, ownerOperatorID string) (*RunState, error) {
+	return e.run(ctx, wf, runID, ownerOperatorID, "", nil)
+}
+
+// Resume reloads a prior run and re-runs failed/skipped nodes, reusing
+// pinned outputs from completed nodes. It forks a new runID and records
+// parent_run_id for audit-trail preservation.
+//
+// Resume fails loudly if the current workflow YAML hash differs from the
+// recorded hash — resuming against an edited graph is undefined.
+func (e *Engine) Resume(ctx context.Context, wf *Workflow, priorRunID, newRunID, ownerOperatorID string) (*RunState, error) {
+	// Load the prior run state.
+	priorDir := e.runDir(priorRunID)
+	prior, err := LoadRunState(priorDir)
+	if err != nil {
+		return nil, fmt.Errorf("workflow: resume: load prior run %s: %w", priorRunID, err)
+	}
+
+	// Compute current YAML hash.
+	currentHash, err := yamlHash(wf)
+	if err != nil {
+		return nil, fmt.Errorf("workflow: resume: hash workflow: %w", err)
+	}
+
+	// Strict YAML-hash pin: reject if the graph has been edited.
+	if prior.WorkflowHash != currentHash {
+		return nil, fmt.Errorf(
+			"workflow: resume %s → %s: workflow YAML has changed (recorded hash %s, current %s); resuming against an edited graph is undefined — edit the workflow and start a new run instead",
+			priorRunID, newRunID, prior.WorkflowHash, currentHash,
+		)
+	}
+
+	// Build pinned outputs map for completed nodes.
+	pinnedOutputs := make(map[string][]byte)
+	for id, ns := range prior.Nodes {
+		if ns.Status == NodeCompleted {
+			out, err := prior.readNodeOutput(id)
+			if err != nil {
+				return nil, fmt.Errorf("workflow: resume: read pinned output for node %s: %w", id, err)
+			}
+			pinnedOutputs[id] = out
+		}
+	}
+
+	return e.run(ctx, wf, newRunID, ownerOperatorID, priorRunID, pinnedOutputs)
+}
+
+// run is the shared implementation for Run and Resume.
+// pinnedOutputs maps node IDs to pre-computed outputs (for resumed runs).
+// parentRunID is non-empty only on resumed runs.
+func (e *Engine) run(
+	ctx context.Context,
+	wf *Workflow,
+	runID, ownerOperatorID, parentRunID string,
+	pinnedOutputs map[string][]byte,
+) (*RunState, error) {
+	// Validate the runID.
+	if err := ValidateID("runID", runID); err != nil {
+		return nil, err
+	}
+
+	// Compute YAML hash for this run.
+	hash, err := yamlHash(wf)
+	if err != nil {
+		return nil, fmt.Errorf("workflow: run: hash workflow: %w", err)
+	}
+
+	// Set up the run directory.
+	runDir := e.runDir(runID)
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		return nil, fmt.Errorf("workflow: run: mkdir run dir: %w", err)
+	}
+
+	// Initialise RunState.
+	rs := newRunState(runID, wf.Name, hash, ownerOperatorID, runDir, wf.Nodes)
+	rs.ParentRunID = parentRunID
+
+	// For resumed runs, pre-mark completed nodes as completed and seed outputs.
+	if pinnedOutputs != nil {
+		rs.mu.Lock()
+		for id, out := range pinnedOutputs {
+			if n, ok := rs.Nodes[id]; ok {
+				n.Status = NodeCompleted
+			}
+			// Write pinned output to the new run's directory so the engine can
+			// read it uniformly via rs.readNodeOutput.
+			if err := rs.writeNodeOutput(id, out); err != nil {
+				rs.mu.Unlock()
+				return nil, fmt.Errorf("workflow: resume: seed pinned output for node %s: %w", id, err)
+			}
+		}
+		rs.mu.Unlock()
+	}
+
+	// Initial persist.
+	if err := rs.persistNow(); err != nil {
+		return nil, fmt.Errorf("workflow: run: initial persist: %w", err)
+	}
+
+	// Start debounce writer.
+	rs.startDebounce(ctx)
+
+	// Publish run.started.
+	if e.Bus != nil {
+		e.Bus.Publish(wsbus.TopicWorkflowRunStarted, wsbus.WorkflowRunStartedPayload{
+			RunID:    runID,
+			Workflow: wf.Name,
+			TS:       time.Now().UTC(),
+		})
+	}
+
+	rs.markRunStarted()
+
+	// Execute the DAG.
+	success := e.executeGraph(ctx, wf, rs, ownerOperatorID)
+
+	rs.markRunDone(success)
+
+	// Stop debounce (final flush included).
+	rs.stopDebounce()
+
+	// Publish run.finished.
+	if e.Bus != nil {
+		e.Bus.Publish(wsbus.TopicWorkflowRunFinished, wsbus.WorkflowRunFinishedPayload{
+			RunID:    runID,
+			Workflow: wf.Name,
+			Status:   string(rs.Status),
+			TS:       time.Now().UTC(),
+		})
+	}
+
+	return rs, nil
+}
+
+// executeGraph runs the Kahn-ordered DAG concurrently under a per-run semaphore.
+// Returns true if all nodes completed successfully, false if any node failed.
+func (e *Engine) executeGraph(ctx context.Context, wf *Workflow, rs *RunState, ownerOpID string) bool {
+	// Build in-degree map and dependents map.
+	inDegree := make(map[string]int, len(wf.Nodes))
+	dependents := make(map[string][]string, len(wf.Nodes))
+	nodeByID := make(map[string]Node, len(wf.Nodes))
+
+	for _, n := range wf.Nodes {
+		nodeByID[n.ID] = n
+		if _, ok := inDegree[n.ID]; !ok {
+			inDegree[n.ID] = 0
+		}
+		for _, dep := range n.Needs {
+			inDegree[n.ID]++
+			dependents[dep] = append(dependents[dep], n.ID)
+		}
+	}
+
+	// Pre-decrement in-degree for nodes already completed (resumed runs).
+	// This mirrors the "a node has finished" signal for completed pinned nodes.
+	for _, n := range wf.Nodes {
+		if rs.nodeStatus(n.ID) == NodeCompleted {
+			for _, successor := range dependents[n.ID] {
+				inDegree[successor]--
+			}
+		}
+	}
+
+	// Per-run semaphore (sits inside the global Service governor).
+	maxP := defaultMaxParallel
+	sem := make(chan struct{}, maxP)
+	for i := 0; i < maxP; i++ {
+		sem <- struct{}{}
+	}
+
+	// readyQueue holds node IDs that are ready to run (in-degree 0, not yet started).
+	var (
+		queueMu    sync.Mutex
+		readyQueue []string
+		// completedCh receives node IDs as they finish (successfully or not).
+		completedCh = make(chan string, len(wf.Nodes))
+		// failedSet tracks nodes that have failed, protected by queueMu.
+		failedSet = make(map[string]bool)
+		// runFailed is set true when any node fails.
+		runFailed bool
+	)
+
+	// Collect initially-ready nodes (in-degree 0, not already completed).
+	for _, n := range wf.Nodes {
+		status := rs.nodeStatus(n.ID)
+		if inDegree[n.ID] == 0 && status != NodeCompleted && status != NodeSkipped {
+			readyQueue = append(readyQueue, n.ID)
+		}
+	}
+
+	// Track how many nodes are "in flight" or still need to run.
+	// We are done when this reaches 0.
+	pending := 0
+	for _, n := range wf.Nodes {
+		st := rs.nodeStatus(n.ID)
+		if st != NodeCompleted && st != NodeSkipped {
+			pending++
+		}
+	}
+
+	var wg sync.WaitGroup
+
+	// launchReady launches all nodes currently in the readyQueue.
+	launchReady := func() {
+		queueMu.Lock()
+		toRun := readyQueue
+		readyQueue = nil
+		queueMu.Unlock()
+
+		for _, nodeID := range toRun {
+			// Check ctx before acquiring semaphore.
+			select {
+			case <-ctx.Done():
+				// Signal each node as skipped.
+				queueMu.Lock()
+				failedSet[nodeID] = true
+				queueMu.Unlock()
+				completedCh <- nodeID
+				continue
+			default:
+			}
+
+			nodeID := nodeID
+			node := nodeByID[nodeID]
+
+			// Skip nodes whose upstream has failed (propagated via skipping).
+			queueMu.Lock()
+			skip := false
+			for _, dep := range node.Needs {
+				if failedSet[dep] {
+					skip = true
+					break
+				}
+			}
+			queueMu.Unlock()
+
+			if skip {
+				rs.markNodeSkipped(nodeID)
+				queueMu.Lock()
+				failedSet[nodeID] = true // propagate to dependents
+				queueMu.Unlock()
+				completedCh <- nodeID
+				continue
+			}
+
+			// Acquire per-run semaphore slot.
+			select {
+			case <-sem:
+				// Got slot.
+			case <-ctx.Done():
+				rs.markNodeSkipped(nodeID)
+				queueMu.Lock()
+				failedSet[nodeID] = true
+				queueMu.Unlock()
+				completedCh <- nodeID
+				continue
+			}
+
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() { sem <- struct{}{} }()
+				defer func() { completedCh <- nodeID }()
+
+				e.runNode(ctx, wf, rs, node, ownerOpID, &runFailed, failedSet, &queueMu)
+			}()
+		}
+	}
+
+	// Main scheduling loop.
+	launchReady()
+
+	for pending > 0 {
+		finishedID := <-completedCh
+		pending--
+
+		// Decrement successors' in-degree; enqueue newly-ready ones.
+		queueMu.Lock()
+		for _, successor := range dependents[finishedID] {
+			inDegree[successor]--
+			if inDegree[successor] == 0 {
+				// Only enqueue if not already done.
+				st := rs.nodeStatus(successor)
+				if st != NodeCompleted && st != NodeSkipped {
+					readyQueue = append(readyQueue, successor)
+				}
+			}
+		}
+		queueMu.Unlock()
+
+		launchReady()
+	}
+
+	// Wait for any in-flight goroutines (should all be done by now but be safe).
+	wg.Wait()
+
+	return !runFailed
+}
+
+// runNode executes a single node: substitutes prompts, calls dispatch.Service,
+// stores output, and publishes events. It modifies runFailed and failedSet
+// under queueMu when the node fails.
+func (e *Engine) runNode(
+	ctx context.Context,
+	wf *Workflow,
+	rs *RunState,
+	node Node,
+	ownerOpID string,
+	runFailed *bool,
+	failedSet map[string]bool,
+	queueMu *sync.Mutex,
+) {
+	// Mark running.
+	rs.markNodeRunning(node.ID)
+
+	// Publish node.started.
+	if e.Bus != nil {
+		e.Bus.Publish(wsbus.TopicWorkflowNodeStarted, wsbus.WorkflowNodeStartedPayload{
+			RunID:    rs.RunID,
+			Workflow: wf.Name,
+			NodeID:   node.ID,
+			Agent:    node.Agent,
+			TS:       time.Now().UTC(),
+		})
+	}
+
+	// Substitute ${inputs.<k>} and ${nodes.<id>.output} in the prompt.
+	prompt, truncated, err := substitutePrompt(node, wf.Inputs, rs)
+	if err != nil {
+		e.nodeFailure(rs, node.ID, 0, err.Error(), runFailed, failedSet, queueMu, wf.Name)
+		return
+	}
+
+	// Resolve model alias.
+	model := node.Model
+	if model != "" {
+		model = runtime.ResolveAlias(model)
+	}
+
+	// Build dispatch.Params with Project pinned to Engine.Project.
+	params := dispatch.Params{
+		Agent:      node.Agent,
+		Task:       prompt,
+		Project:    e.Project,
+		Runtime:    node.Runtime,
+		Model:      model,
+		Timeout:    node.Timeout,
+		YakosRoot:  e.YakosRoot,
+		OperatorID: ownerOpID,
+	}
+
+	// Dispatch through the governed Service (or injected test fake).
+	stdout, result, err := e.dispatchNode(ctx, params)
+
+	// Truncate output to OutputLimit (tail-truncate: keep the last N bytes).
+	output, wasTruncated := tailTruncate(stdout, node.OutputLimit)
+	outputTruncated := truncated || wasTruncated
+
+	// Store node output (even on failure — partial output is useful for debugging).
+	_ = rs.writeNodeOutput(node.ID, output)
+
+	// Check dispatch errors.
+	if err != nil {
+		e.nodeFailure(rs, node.ID, -1, err.Error(), runFailed, failedSet, queueMu, wf.Name)
+		return
+	}
+
+	// Check ExitCode separately from err (per dispatch contract).
+	if result.ExitCode != 0 {
+		errMsg := fmt.Sprintf("exit code %d", result.ExitCode)
+		e.nodeFailure(rs, node.ID, result.ExitCode, errMsg, runFailed, failedSet, queueMu, wf.Name)
+		return
+	}
+
+	// Node succeeded.
+	rs.markNodeCompleted(node.ID, 0, outputTruncated)
+
+	// Publish truncation event if output was truncated.
+	if outputTruncated && e.Bus != nil {
+		e.Bus.Publish(wsbus.TopicWorkflowNodeTruncated, wsbus.WorkflowNodeTruncatedPayload{
+			RunID:       rs.RunID,
+			Workflow:    wf.Name,
+			NodeID:      node.ID,
+			OriginalLen: len(stdout),
+			TruncatedTo: len(output),
+			TS:          time.Now().UTC(),
+		})
+	}
+
+	// Publish node.finished.
+	if e.Bus != nil {
+		e.Bus.Publish(wsbus.TopicWorkflowNodeFinished, wsbus.WorkflowNodeFinishedPayload{
+			RunID:    rs.RunID,
+			Workflow: wf.Name,
+			NodeID:   node.ID,
+			Status:   string(NodeCompleted),
+			ExitCode: 0,
+			TS:       time.Now().UTC(),
+		})
+	}
+}
+
+// nodeFailure marks a node as failed, updates the run-failed flag, propagates
+// to the failed set (so dependents get skipped), and publishes the event.
+func (e *Engine) nodeFailure(
+	rs *RunState,
+	nodeID string,
+	exitCode int,
+	errMsg string,
+	runFailed *bool,
+	failedSet map[string]bool,
+	queueMu *sync.Mutex,
+	workflowName string,
+) {
+	rs.markNodeFailed(nodeID, exitCode, errMsg)
+
+	queueMu.Lock()
+	*runFailed = true
+	failedSet[nodeID] = true
+	queueMu.Unlock()
+
+	if e.Bus != nil {
+		e.Bus.Publish(wsbus.TopicWorkflowNodeFinished, wsbus.WorkflowNodeFinishedPayload{
+			RunID:    rs.RunID,
+			Workflow: workflowName,
+			NodeID:   nodeID,
+			Status:   string(NodeFailed),
+			ExitCode: exitCode,
+			TS:       time.Now().UTC(),
+		})
+	}
+}
+
+// substitutePrompt replaces ${inputs.<k>} and ${nodes.<id>.output} references
+// in the node's prompt. Returns the substituted prompt, whether any upstream
+// output was tail-truncated (within the node's OutputLimit budget), and any error.
+func substitutePrompt(node Node, inputs map[string]string, rs *RunState) (string, bool, error) {
+	// Collect all upstream outputs referenced in this prompt.
+	// The OutputLimit is a TOTAL budget across ALL upstream substitutions.
+	type subst struct {
+		placeholder string
+		value       []byte
+	}
+
+	var substitutions []subst
+	totalUpstreamBytes := 0
+
+	matches := varRefRe.FindAllStringSubmatch(node.Prompt, -1)
+	for _, m := range matches {
+		kind := m[1]
+		key := m[2]
+		suffix := m[3]
+		placeholder := m[0]
+
+		switch kind {
+		case "inputs":
+			val, ok := inputs[key]
+			if !ok {
+				return "", false, fmt.Errorf("workflow: node %q: substitute: input key %q not found", node.ID, key)
+			}
+			substitutions = append(substitutions, subst{placeholder: placeholder, value: []byte(val)})
+			// input values are not counted against the OutputLimit budget
+		case "nodes":
+			if suffix != "output" {
+				return "", false, fmt.Errorf("workflow: node %q: invalid ref %s — must end in .output", node.ID, placeholder)
+			}
+			out, err := rs.readNodeOutput(key)
+			if err != nil {
+				return "", false, fmt.Errorf("workflow: node %q: read output of node %q: %w", node.ID, key, err)
+			}
+			substitutions = append(substitutions, subst{placeholder: placeholder, value: out})
+			totalUpstreamBytes += len(out)
+		}
+	}
+
+	// Apply tail-truncation budget across upstream outputs collectively.
+	// Strategy: if the total exceeds OutputLimit, truncate the largest contributor
+	// proportionally. Simple approach: tail-truncate concatenated budget.
+	truncated := false
+	if totalUpstreamBytes > node.OutputLimit {
+		truncated = true
+		// Distribute the budget proportionally across all node outputs.
+		budget := node.OutputLimit
+		for i, s := range substitutions {
+			if len(s.value) == 0 {
+				continue
+			}
+			// Only node outputs count against the budget; check kind again.
+			// All entries in substitutions from "nodes" references get truncated.
+			// Input substitutions are not byte-counted.
+			// We re-detect by checking if the value came from a node output.
+			// Simple heuristic: truncate each node output proportionally.
+			proportion := float64(len(s.value)) / float64(totalUpstreamBytes)
+			allot := int(float64(budget) * proportion)
+			if allot < 0 {
+				allot = 0
+			}
+			if len(s.value) > allot {
+				_, trunced := tailTruncate(s.value, allot)
+				if trunced {
+					substitutions[i].value, _ = tailTruncate(s.value, allot)
+				}
+			}
+		}
+	}
+
+	// Apply all substitutions to the prompt.
+	result := node.Prompt
+	seen := make(map[string]bool)
+	for _, s := range substitutions {
+		if seen[s.placeholder] {
+			continue
+		}
+		seen[s.placeholder] = true
+		result = replaceAll(result, s.placeholder, string(s.value))
+	}
+
+	return result, truncated, nil
+}
+
+// replaceAll is a simple string replacement that handles the placeholder correctly.
+func replaceAll(s, old, new string) string {
+	return string(bytes.ReplaceAll([]byte(s), []byte(old), []byte(new)))
+}
+
+// tailTruncate returns the last limit bytes of data. If data is within limit,
+// returns data unchanged and false. If truncated, returns the tail and true.
+func tailTruncate(data []byte, limit int) ([]byte, bool) {
+	if limit <= 0 || len(data) <= limit {
+		return data, false
+	}
+	return data[len(data)-limit:], true
+}
+
+// yamlHash returns a hex SHA-256 of the canonical marshalled workflow YAML.
+// This is the YAML-hash pin used by Resume to detect graph edits.
+func yamlHash(wf *Workflow) (string, error) {
+	data, err := marshalWorkflow(wf)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(data)
+	return fmt.Sprintf("%x", h), nil
+}
+
+// marshalWorkflow marshals a Workflow to canonical YAML bytes via a temp file
+// (reuses the atomic-write path to guarantee byte-stable output).
+func marshalWorkflow(wf *Workflow) ([]byte, error) {
+	tmp, err := os.CreateTemp("", "yakos-workflow-hash-*.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("workflow: yamlHash: create temp: %w", err)
+	}
+	name := tmp.Name()
+	tmp.Close()
+	defer os.Remove(name)
+
+	if err := wf.Save(name); err != nil {
+		return nil, fmt.Errorf("workflow: yamlHash: save: %w", err)
+	}
+	return os.ReadFile(name) //nolint:gosec
+}
+
+// ReconcileInterrupted scans the runs directory for any runs left in "running"
+// state (indicating a daemon crash mid-run) and marks them "interrupted".
+// This should be called at daemon startup before accepting new workflow requests.
+//
+// Limitation: node-level in-flight state is reconciled at the run level only.
+// Detecting orphaned dispatch_started entries in the NDJSON log requires
+// correlating log entries with node IDs, which is deferred (see ADR-0003).
+func ReconcileInterrupted(runsDir string) ([]string, error) {
+	entries, err := os.ReadDir(runsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("workflow: reconcile: readdir %s: %w", runsDir, err)
+	}
+
+	var interrupted []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		runDir := filepath.Join(runsDir, entry.Name())
+		rs, err := LoadRunState(runDir)
+		if err != nil {
+			// Non-fatal: skip corrupt or partial run dirs.
+			continue
+		}
+		if rs.Status == RunRunning {
+			// Mark as interrupted.
+			rs.mu.Lock()
+			rs.Status = RunInterrupted
+			// Also mark any running nodes as interrupted/failed.
+			for _, n := range rs.Nodes {
+				if n.Status == NodeRunning {
+					n.Status = NodeFailed
+					n.ErrorMsg = "daemon interrupted (crash reconciliation)"
+				}
+			}
+			rs.mu.Unlock()
+			if err := rs.persistNow(); err != nil {
+				// Non-fatal: log and continue.
+				continue
+			}
+			interrupted = append(interrupted, rs.RunID)
+		}
+	}
+	return interrupted, nil
+}
