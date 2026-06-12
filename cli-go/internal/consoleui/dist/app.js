@@ -186,11 +186,15 @@
 
   let ws = null;
   let wsRetryMs = 1000;
+  let wsLastSeq = 0; // last received event sequence number; used for ?since= replay
 
   function connectWS() {
     if (!TOKEN) return;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = proto + '//' + location.host + '/v1/events';
+    // Append ?since=<seq> so the server replays missed events on reconnect,
+    // preventing ghost in-flight dispatches after a disconnect.
+    const since = wsLastSeq > 0 ? '?since=' + wsLastSeq : '';
+    const url = proto + '//' + location.host + '/v1/events' + since;
 
     // Phase 2.5: Sec-WebSocket-Protocol bearer auth.
     // The token is sent as the second protocol value; the server echoes
@@ -234,6 +238,11 @@
     }
 
     // Bus event envelope: {seq, topic, ts, payload}
+    // Track the highest seq we've seen so reconnects can use ?since=<seq>.
+    if (msg.seq && msg.seq > wsLastSeq) {
+      wsLastSeq = msg.seq;
+    }
+
     const topic = msg.topic;
     const payload = msg.payload || {};
 
@@ -253,12 +262,12 @@
       renderNow();
     } else if (topic === 'presence') {
       const opID = payload.operator_id || '';
+      // Key on conn_id (present since B1 fix) for per-connection discrimination.
+      // Fall back to opID only for legacy payloads that lack conn_id.
       const connId = payload.conn_id || opID;
       if (payload.status === 'offline') {
-        // Remove by operatorId since we don't have connId in the payload.
-        for (const [k, v] of presence.entries()) {
-          if (v.operator_id === opID) { presence.delete(k); break; }
-        }
+        // Remove by conn_id — precise even when multiple "anon" clients exist.
+        presence.delete(connId);
       } else {
         presence.set(connId, payload);
       }
@@ -497,6 +506,9 @@
     } catch { return String(ts); }
   }
 
+  // feedSummary returns a plain-text summary string for a bus event.
+  // IMPORTANT: output MUST be escaped by the caller before inserting into HTML.
+  // Current sinks (renderFeed) escape via esc(); do not add an unescaped sink.
   function feedSummary(topic, payload) {
     switch (topic) {
       case 'dispatch.started':

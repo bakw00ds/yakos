@@ -180,9 +180,11 @@ func TestPresenceManager_PublishesLeaveEvent(t *testing.T) {
 
 // TestPresencePayload_NoSecretFields verifies that the presenceBusPayload
 // (published to the bus) contains no sensitive fields.
-// This is a static check: the struct type itself must not have secret fields.
+// This is the gate-of-record for the consoleui presence payload no-secrets
+// property (referenced in presence.go package doc).
 func TestPresencePayload_NoSecretFields(t *testing.T) {
 	p := presenceBusPayload{
+		ConnID:      "abc123def456",
 		OperatorID:  "alice",
 		DisplayName: "Alice",
 		Color:       "#a1b2c3",
@@ -190,10 +192,14 @@ func TestPresencePayload_NoSecretFields(t *testing.T) {
 	}
 	raw, _ := json.Marshal(p)
 	s := string(raw)
-	for _, field := range []string{"token", "secret", "password", "credential", "key"} {
+	for _, field := range []string{"token", "secret", "password", "credential", "key", "auth"} {
 		if strings.Contains(s, `"`+field+`"`) {
 			t.Errorf("presenceBusPayload contains sensitive field %q: %s", field, s)
 		}
+	}
+	// Confirm conn_id IS present (it's a random discriminator, not a secret).
+	if !strings.Contains(s, `"conn_id"`) {
+		t.Errorf("presenceBusPayload missing conn_id field: %s", s)
 	}
 }
 

@@ -23,7 +23,7 @@
 //  2. consoleAuthSubprotocol validates token; sets a request-scoped flag.
 //  3. websocket.Server{Handshake} selects protocol = ["yakos-bearer"].
 //  4. Server enters makeConsoleWSFunc.
-//  5. Server reads the first JSON frame (hello) — 5s deadline.
+//  5. Server reads the first JSON frame (hello) — 500ms deadline.
 //  6. PresenceManager.Join() records the operator, publishes join event.
 //  7. Bus events streamed to client until disconnect/context cancel.
 //  8. PresenceManager.Leave() publishes leave event on defer.
@@ -126,6 +126,9 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager) websocket.Handler {
 			}
 		}()
 
+		helloTimer := time.NewTimer(500 * time.Millisecond)
+		defer helloTimer.Stop()
+
 		var hello HelloMessage
 		select {
 		case h := <-helloCh:
@@ -133,7 +136,7 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager) websocket.Handler {
 		case <-disconnCh:
 			// Client disconnected before sending hello — handler will exit below.
 			hello = HelloMessage{Type: "hello"}
-		case <-time.After(500 * time.Millisecond):
+		case <-helloTimer.C:
 			slog.Debug("consoleui: no hello frame within 500ms; using anon")
 			hello = HelloMessage{Type: "hello"}
 		}
@@ -153,9 +156,26 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager) websocket.Handler {
 		}
 		_ = websocket.JSON.Send(conn, welcomeMsg) // best-effort
 
-		// ---- 4. Subscribe to bus and stream events --------------------------
+		// ---- 4. Subscribe to bus, replay missed events, then stream live ----
+		//
+		// Subscribe FIRST so we don't miss events published between replay
+		// completion and subscription setup (same pattern as wsbus.Server).
 		sub := bus.Subscribe("")
 		defer sub.Unsubscribe()
+
+		// Replay: if ?since=<seq> is present, send buffered events the client
+		// missed during a disconnect before joining the live stream.
+		if sinceStr := conn.Request().URL.Query().Get("since"); sinceStr != "" {
+			if sinceSeq, err := parseSinceSeq(sinceStr); err == nil {
+				for _, ev := range bus.History(sinceSeq) {
+					conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
+					if err := websocket.JSON.Send(conn, ev); err != nil {
+						slog.Debug("consoleui: replay write error; dropping client", "err", err)
+						return
+					}
+				}
+			}
+		}
 
 		pingTicker := time.NewTicker(15 * time.Second)
 		defer pingTicker.Stop()
@@ -261,6 +281,18 @@ func newConnID() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
+}
+
+// parseSinceSeq parses a ?since= query value as a non-negative int64.
+func parseSinceSeq(s string) (int64, error) {
+	var n int64
+	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+		return 0, err
+	}
+	if n < 0 {
+		n = 0
+	}
+	return n, nil
 }
 
 // splitHostAddr splits "host:port" (with IPv6 bracket support).

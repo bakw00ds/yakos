@@ -7,16 +7,16 @@
 //
 // Each WebSocket connection is identified by a random connID.  On connect the
 // client sends a "hello" frame with self-asserted identity fields (operatorId,
-// displayName).  The server validates those fields with the same allow-list used
-// by dispatch.Service (^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$).  Invalid values
-// fall back to "anon".
+// displayName).  The server validates operatorId via dispatch.ValidateIdentityField
+// (^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$).  Invalid values fall back to "anon".
 //
 // Color is ALWAYS server-derived from a SHA-256 hash of the operator ID —
 // client-supplied color is ignored.  This prevents one operator from
 // impersonating another's color.
 //
 // Presence data published to the bus (presenceBusPayload) intentionally omits
-// all secret/credential fields.
+// all secret/credential fields.  The no-secrets property is gated by
+// TestPresencePayload_NoSecretFields in presence_test.go.
 package consoleui
 
 import (
@@ -26,25 +26,21 @@ import (
 	"regexp"
 	"sync"
 
+	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
-// identityRe is the allow-list for self-asserted identity fields
-// (operatorId, displayName shared with dispatch.Service.identityFieldRe).
-// Exported for reuse — intentionally the same pattern.
-var identityRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:\-]{0,127}$`)
-
-// displayNameRe is a slightly more permissive allow-list for display names:
+// displayNameRe is the allow-list for display names:
 // allows letters, digits, spaces, hyphens, underscores, dots — max 64 chars.
 var displayNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._\-]{0,63}$`)
 
 // HelloMessage is the first frame a browser client sends after WS open.
 // All fields are self-asserted (attribution-only; never used for auth).
 type HelloMessage struct {
-	Type        string `json:"type"`         // must be "hello"
-	OperatorID  string `json:"operatorId"`   // attribution label; validated
-	DisplayName string `json:"displayName"`  // human-readable name; validated
-	Color       string `json:"color"`        // IGNORED — server derives color
+	Type        string `json:"type"`        // must be "hello"
+	OperatorID  string `json:"operatorId"`  // attribution label; validated
+	DisplayName string `json:"displayName"` // human-readable name; validated
+	Color       string `json:"color"`       // IGNORED — server derives color
 }
 
 // PresenceRecord is the server-resolved record for one connected operator.
@@ -53,13 +49,20 @@ type PresenceRecord struct {
 	ConnID      string `json:"connId"`
 	OperatorID  string `json:"operator_id"`
 	DisplayName string `json:"display_name"`
-	Color       string `json:"color"`   // server-derived #rrggbb
-	Status      string `json:"status"`  // "online" | "offline"
+	Color       string `json:"color"`  // server-derived #rrggbb
+	Status      string `json:"status"` // "online" | "offline"
 }
 
 // presenceBusPayload is the payload published to wsbus.TopicPresence.
 // It intentionally excludes all secret/credential fields.
+// No-secrets property is gated by TestPresencePayload_NoSecretFields in presence_test.go.
+//
+// ConnID is included so the SPA can key the presence map per-connection rather
+// than per-operatorId, preventing multiple unauthenticated clients (all keyed
+// "anon") from overwriting each other in the browser's presence map.
+// ConnID is a random per-connection discriminator and carries no sensitive data.
 type presenceBusPayload struct {
+	ConnID      string `json:"conn_id"`
 	OperatorID  string `json:"operator_id"`
 	DisplayName string `json:"display_name"`
 	Color       string `json:"color"`
@@ -152,6 +155,7 @@ func (pm *PresenceManager) publish(rec PresenceRecord) {
 		return
 	}
 	payload := presenceBusPayload{
+		ConnID:      rec.ConnID,
 		OperatorID:  rec.OperatorID,
 		DisplayName: rec.DisplayName,
 		Color:       rec.Color,
@@ -160,10 +164,11 @@ func (pm *PresenceManager) publish(rec PresenceRecord) {
 	pm.bus.Publish(wsbus.TopicPresence, payload)
 }
 
-// sanitiseIdentity validates an operator ID against the allow-list.
+// sanitiseIdentity validates an operator ID using dispatch.ValidateIdentityField
+// (the same allow-list used by dispatch.Service — single source of truth).
 // Returns "anon" for empty or invalid values.
 func sanitiseIdentity(v string) string {
-	if v == "" || !identityRe.MatchString(v) {
+	if v == "" || dispatch.ValidateIdentityField("operator_id", v) != nil {
 		return "anon"
 	}
 	return v
@@ -191,7 +196,7 @@ func colorFromOperatorID(operatorID string) string {
 	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
 }
 
-// MarshalPresencePayload is a test helper that JSON-encodes a presenceBusPayload.
+// marshalPresencePayload is a test helper that JSON-encodes a presenceBusPayload.
 // Not exported — used only within this package's tests.
 func marshalPresencePayload(p presenceBusPayload) []byte {
 	b, _ := json.Marshal(p)

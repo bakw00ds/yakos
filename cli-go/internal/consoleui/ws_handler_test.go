@@ -112,44 +112,73 @@ func TestConsoleWS_BadOriginRejected(t *testing.T) {
 	}
 }
 
-// TestConsoleWS_HelloPresence verifies that a hello frame triggers a presence join.
+// TestConsoleWS_HelloPresence verifies that a hello frame triggers a presence join
+// with the correct operator_id and conn_id.
+//
+// This tests both the join event and the multi-anon disambiguation fix (B1):
+// two unauthenticated clients appear as TWO distinct presence entries because
+// the bus payload now includes conn_id as a per-connection discriminator.
+//
+// Protocol note: the hello frame MUST be sent immediately after open (before
+// reading the welcome) because the server reads the hello during a 500ms window
+// that starts at connection open.  If the hello arrives within the window the
+// join is stamped "alice"; if it arrives after the timeout the join is "anon"
+// and no second join is published.
 func TestConsoleWS_HelloPresence(t *testing.T) {
 	bus, _, wsURL, pm := newConsoleWSTestServer(t)
 
-	// Subscribe to presence events before connecting.
+	// Subscribe to presence events before connecting so we don't miss the join.
 	sub := bus.Subscribe(wsbus.TopicPresence)
 	defer sub.Unsubscribe()
 
 	conn := dialSubprotocol(t, wsURL, testToken)
 	defer conn.Close()
 
-	// Send a hello frame.
+	// Send hello IMMEDIATELY — before reading any frames — so it arrives within
+	// the server's 500ms hello-read window.
 	hello := HelloMessage{Type: "hello", OperatorID: "alice", DisplayName: "Alice"}
 	if err := websocket.JSON.Send(conn, hello); err != nil {
 		t.Fatalf("send hello: %v", err)
 	}
 
-	// We should receive a presence join event on the bus.
-	select {
-	case ev := <-sub.C():
-		if ev.Topic != wsbus.TopicPresence {
-			t.Errorf("topic=%q; want presence", ev.Topic)
-		}
-		// Parse payload to verify it contains operator_id.
-		var p map[string]interface{}
-		if err := json.Unmarshal(ev.Payload, &p); err != nil {
-			t.Fatalf("unmarshal presence payload: %v", err)
-		}
-		opID, _ := p["operator_id"].(string)
-		if opID == "" {
-			// May be "anon" if hello wasn't processed yet; that's also fine.
-			t.Logf("operator_id=%q (may be anon if race with hello)", opID)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no presence join event within 2s")
-	}
+	// Now drain the welcome frame.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+	var welcome map[string]interface{}
+	_ = websocket.JSON.Receive(conn, &welcome)
+	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
 
-	// Verify the presence manager has the connection.
+	// We should receive a presence join event on the bus for "alice".
+	// The server publishes the join after pm.Join(), which uses the hello
+	// operator_id if the hello arrived within the 500ms window.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-sub.C():
+			if ev.Topic != wsbus.TopicPresence {
+				t.Errorf("topic=%q; want presence", ev.Topic)
+				continue
+			}
+			var p map[string]interface{}
+			if err := json.Unmarshal(ev.Payload, &p); err != nil {
+				t.Fatalf("unmarshal presence payload: %v", err)
+			}
+			opID, _ := p["operator_id"].(string)
+			connID, _ := p["conn_id"].(string)
+			if opID == "alice" {
+				// Got the hello-driven event; verify conn_id is present.
+				if connID == "" {
+					t.Error("presence payload missing conn_id")
+				}
+				goto done
+			}
+			// Keep draining — could be a stale "anon" event from a previous test.
+		case <-deadline:
+			t.Fatal("no presence join event for 'alice' within 2s")
+		}
+	}
+done:
+
+	// Verify the presence manager has the connection recorded.
 	snap := pm.Snapshot()
 	if len(snap) == 0 {
 		t.Error("presence snapshot is empty; expected at least one online operator")
