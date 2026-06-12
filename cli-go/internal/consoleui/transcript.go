@@ -218,15 +218,28 @@ func (tr *Transcripts) Read(conversationID, ownerOperatorID string) ([]Transcrip
 		entries = append(entries, entry)
 	}
 
-	// Ownership check: the first user-turn entry establishes the owner.
+	// Ownership check: the first user-turn entry with a non-empty operatorID
+	// establishes the conversation owner.
+	//
+	// M1 fail-closed: when an operatorId is supplied and the file is non-empty
+	// but contains no user turn with an operatorID, we deny access (403) rather
+	// than granting it.  This prevents an existence oracle (seeing content when
+	// no ownership is established) and is forward-compatible with future
+	// explicit owner persistence.
 	if ownerOperatorID != "" && len(entries) > 0 {
+		ownerEstablished := false
 		for _, e := range entries {
 			if e.Role == RoleUser && e.OperatorID != "" {
+				ownerEstablished = true
 				if e.OperatorID != ownerOperatorID {
 					return nil, errTranscriptForbidden
 				}
 				break
 			}
+		}
+		if !ownerEstablished {
+			// Non-empty file with no user turn → fail closed (403).
+			return nil, errTranscriptForbidden
 		}
 	}
 

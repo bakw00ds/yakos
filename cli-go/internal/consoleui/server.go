@@ -86,12 +86,14 @@ func (c *Config) addr() string {
 
 // Server is the unified console HTTP server.
 type Server struct {
-	cfg      Config
-	mux      *http.ServeMux
-	httpSrv  *http.Server
-	presence *PresenceManager
-	chatHub  *ChatHub
-	chat     *chatHandlers
+	cfg          Config
+	mux          *http.ServeMux
+	httpSrv      *http.Server
+	presence     *PresenceManager
+	chatHub      *ChatHub
+	chat         *chatHandlers
+	serverCtx    context.Context    // cancelled on Serve shutdown; dispatch goroutines use this
+	serverCancel context.CancelFunc // called by Serve when the server shuts down
 }
 
 // New constructs a Server and wires all routes.
@@ -121,18 +123,35 @@ func New(cfg Config) *Server {
 		// gracefully via the Transcripts nil-safety check in registerChatRoutes.
 		transcripts = NewTranscripts("")
 	}
-	chatH := newChatHandlers(hub, transcripts, cfg.DispatchService)
-	s := &Server{cfg: cfg, mux: http.NewServeMux(), presence: pm, chatHub: hub, chat: chatH}
+	// serverCtx is cancelled when Serve returns (i.e. on server shutdown).
+	// Dispatch goroutines derive their context from serverCtx — NOT from the
+	// per-request r.Context() — so they survive the 202 response returning.
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	chatH := newChatHandlers(hub, transcripts, cfg.DispatchService, serverCtx)
+	s := &Server{
+		cfg:          cfg,
+		mux:          http.NewServeMux(),
+		presence:     pm,
+		chatHub:      hub,
+		chat:         chatH,
+		serverCtx:    serverCtx,
+		serverCancel: serverCancel,
+	}
 	s.registerRoutes()
 	// Wrap with edge auth: Host check + token (with static-asset exemptions)
 	// + Content-Type gate for mutations.
 	protected := dashauth.RequireLocalHost(cfg.addr(),
 		requireTokenForNonStatic(cfg.Token, requireJSONForMutations(s.mux)))
 	s.httpSrv = &http.Server{
-		Addr:         cfg.addr(),
-		Handler:      protected,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		Addr:        cfg.addr(),
+		Handler:     protected,
+		ReadTimeout: 30 * time.Second,
+		// WriteTimeout intentionally 0: the SSE /api/chat/stream endpoint holds
+		// long-lived streaming responses that never complete.  A non-zero
+		// WriteTimeout would force-close them after the deadline.  The server
+		// is loopback-only (no external exposure), matching the pattern used in
+		// wsbus/server.go and mcpserver/streamhttp.go.
+		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
 	}
 	return s
@@ -182,8 +201,12 @@ func (s *Server) Serve(ctx context.Context) error {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = s.httpSrv.Shutdown(shutCtx)
+		// Cancel the server-lifetime context so all dispatch goroutines
+		// that are still running receive their cancellation signal.
+		s.serverCancel()
 		return <-errCh
 	case err := <-errCh:
+		s.serverCancel()
 		return err
 	}
 }

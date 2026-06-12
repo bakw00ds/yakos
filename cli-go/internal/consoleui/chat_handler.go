@@ -117,15 +117,19 @@ type chatHandlers struct {
 	state       *chatState
 	svc         *dispatch.Service // may be nil (console without dispatch)
 	workDir     string            // used by NewTranscripts
+	serverCtx   context.Context   // server-lifetime context; dispatch goroutines derive from this (NOT r.Context())
 }
 
 // newChatHandlers is called from registerChatRoutes.
-func newChatHandlers(hub *ChatHub, transcripts *Transcripts, svc *dispatch.Service) *chatHandlers {
+// serverCtx must be a context cancelled when the Server shuts down; it is the
+// parent for all dispatch goroutine contexts so they survive the 202 response.
+func newChatHandlers(hub *ChatHub, transcripts *Transcripts, svc *dispatch.Service, serverCtx context.Context) *chatHandlers {
 	return &chatHandlers{
 		hub:         hub,
 		transcripts: transcripts,
 		state:       newChatState(),
 		svc:         svc,
+		serverCtx:   serverCtx,
 	}
 }
 
@@ -184,7 +188,7 @@ func (ch *chatHandlers) handleChatStream(w http.ResponseWriter, r *http.Request)
 
 	// Set SSE headers.
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-store") // L2: match other streaming handlers
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // nginx/reverse proxy: disable buffering
 	w.WriteHeader(http.StatusOK)
@@ -334,29 +338,43 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	// --- Hub: open session (ownership check, must happen before svc check) ---
+	// --- Hub: open session (ownership check + global session cap) ---
+	// Security priority: ownership 403 must fire even when svc is nil.
 	// This enforces per-operator isolation: 403 if session already owned by
-	// a different operator.  This check runs regardless of whether the dispatch
-	// service is configured.
+	// a different operator.  429 if the global session cap is reached (M3).
 	if err := ch.hub.OpenSession(req.SessionID, req.OperatorID, false); err != nil {
 		if errors.Is(err, errSessionOwnerConflict) {
 			http.Error(w, "session owned by different operator", http.StatusForbidden)
+			return
+		}
+		if errors.Is(err, errTooManySessions) {
+			http.Error(w, "global session cap reached", http.StatusTooManyRequests)
 			return
 		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	// --- Service availability check ---
+	// --- Service availability check (AFTER OpenSession ownership check) ---
+	// H1 fix: any early-return after a successful OpenSession must call
+	// hub.CloseSession to avoid permanently squatting the sessionId.
 	if ch.svc == nil {
+		ch.hub.CloseSession(req.SessionID)
 		http.Error(w, "dispatch service not configured", http.StatusServiceUnavailable)
 		return
 	}
 
 	// --- Guard: one active dispatch per session at a time ---
-	ctx, cancel := context.WithCancel(r.Context())
+	// B1 fix: derive ctx from the server-lifetime context, NOT r.Context().
+	// r.Context() is cancelled when the 202 response returns, which would
+	// immediately kill the dispatch goroutine.  The server-lifetime context is
+	// only cancelled on Server.Shutdown, keeping the goroutine alive as intended.
+	ctx, cancel := context.WithCancel(ch.serverCtx)
 	if !ch.state.add(req.SessionID, cancel) {
 		cancel()
+		// Session already has an active dispatch — close the hub entry we just
+		// opened so the sessionId is not permanently squatted (H1 fix).
+		ch.hub.CloseSession(req.SessionID)
 		// Session already has an active dispatch.
 		http.Error(w, "session already has an active dispatch", http.StatusConflict)
 		return
@@ -384,10 +402,19 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 
 	// Launch RunStream in a goroutine.  The goroutine owns the cancel function
 	// and the hub session for its lifetime.
+	//
+	// Defer ordering (LIFO — last defer runs first):
+	//   1. cancel() — runs first (last registered), kills the ctx so any
+	//      in-flight RunStream call exits promptly.
+	//   2. state.remove — frees the sessionId slot so a new dispatch can
+	//      claim it without racing hub.CloseSession.
+	//   3. hub.CloseSession — removes the hub ownership entry last so that
+	//      chunks already in flight can still be routed before the entry
+	//      disappears.  This order shrinks the re-dispatch race window.
 	go func() {
-		defer cancel()
-		defer ch.state.remove(dispReq.SessionID)
-		defer ch.hub.CloseSession(dispReq.SessionID)
+		defer cancel()                               // 1. stop any pending RunStream
+		defer ch.state.remove(dispReq.SessionID)     // 2. release slot
+		defer ch.hub.CloseSession(dispReq.SessionID) // 3. remove hub entry
 
 		// Accumulate assistant text for a single coalesced assistant turn.
 		var assistantBuf strings.Builder
@@ -400,9 +427,14 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				TS:        time.Now().UTC().Format(time.RFC3339Nano),
 			}
 			if chunk.Type == "summary" {
-				ev.ExitCode = chunk.ExitCode
-				ev.DurationS = chunk.DurationS
-				ev.TotalCostUSD = chunk.TotalCostUSD
+				// Use pointers so exit_code:0 (success) serialises correctly
+				// (omitempty on int zero-value would suppress it).
+				exitCode := chunk.ExitCode
+				durationS := chunk.DurationS
+				totalCostUSD := chunk.TotalCostUSD
+				ev.ExitCode = &exitCode
+				ev.DurationS = &durationS
+				ev.TotalCostUSD = &totalCostUSD
 				ev.ModelResolved = chunk.ModelResolved
 
 				// Append coalesced assistant turn, then summary turn.
@@ -464,11 +496,16 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 
 // CancelRequest is the JSON body for POST /api/chat/cancel.
 type CancelRequest struct {
-	SessionID string `json:"sessionId"`
+	SessionID  string `json:"sessionId"`
+	OperatorID string `json:"operatorId"` // C1: required for ownership check
 }
 
 // handleChatCancel cancels an in-flight dispatch.
-// Idempotent: cancelling a non-existent or already-finished session is a no-op.
+//
+// Ownership: the caller must supply the same operatorId that owns the session.
+// A different operator attempting to cancel another operator's session receives
+// 403.  Cancelling a non-existent or already-finished session is a no-op
+// returning 200 (idempotency for the legitimate owner).
 func (ch *chatHandlers) handleChatCancel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -486,6 +523,23 @@ func (ch *chatHandlers) handleChatCancel(w http.ResponseWriter, r *http.Request)
 	}
 	if err := dispatch.ValidateIdentityField("session_id", req.SessionID); err != nil {
 		http.Error(w, "invalid sessionId", http.StatusBadRequest)
+		return
+	}
+	if req.OperatorID == "" {
+		http.Error(w, "operatorId is required", http.StatusBadRequest)
+		return
+	}
+	if err := dispatch.ValidateIdentityField("operator_id", req.OperatorID); err != nil {
+		http.Error(w, "invalid operatorId", http.StatusBadRequest)
+		return
+	}
+
+	// C1: ownership check — only the session owner may cancel.
+	// An unknown session is a no-op (200) for any caller (idempotent).
+	// A known session owned by a different operator is 403.
+	owner, exists := ch.hub.SessionOwner(req.SessionID)
+	if exists && owner != req.OperatorID {
+		http.Error(w, "forbidden: session owned by different operator", http.StatusForbidden)
 		return
 	}
 

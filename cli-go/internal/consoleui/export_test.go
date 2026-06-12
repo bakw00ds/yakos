@@ -7,11 +7,21 @@
 // to test concerns.
 package consoleui
 
+import "context"
+
 // ---- ChatHub test exports ---------------------------------------------------
 
 // MaxSSEConnsPerOperator is exported for tests so the cap can be referenced
 // without hardcoding magic numbers.
 const MaxSSEConnsPerOperator = maxSSEConnsPerOperator
+
+// MaxTotalSSEConns is exported for tests so the global conn cap can be
+// referenced without hardcoding magic numbers.
+const MaxTotalSSEConns = maxTotalSSEConns
+
+// MaxTotalSessions is exported for tests so the global session cap can be
+// referenced without hardcoding magic numbers.
+const MaxTotalSessions = maxTotalSessions
 
 // TestSSEConn is the exported view of sseConn used by external tests.
 // It provides read-only access to the connection's channel, ID, and closed
@@ -53,7 +63,37 @@ func (h *ChatHub) ConnCount(operatorID string) int {
 	return h.connCount(operatorID)
 }
 
+// TotalConns returns the global total SSE connection count.
+// Used in tests to verify the global cap.
+func (h *ChatHub) TotalConns() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.totalConns
+}
+
+// ErrTooManyConns is exported so external tests can identify the error type.
+var ErrTooManyConns = errTooManyConns
+
+// ErrTooManySessions is exported so external tests can identify the error type.
+var ErrTooManySessions = errTooManySessions
+
 // ---- Transcripts test exports -----------------------------------------------
 
 // NewTranscriptsForTest allocates a Transcripts for use in external tests.
 func NewTranscriptsForTest(workDir string) *Transcripts { return NewTranscripts(workDir) }
+
+// ---- Chat handlers test exports ---------------------------------------------
+
+// NewChatHandlersForTest allocates chatHandlers with a background server ctx.
+// Used in tests that need to directly exercise handler logic.
+func NewChatHandlersForTest(hub *ChatHub, transcripts *Transcripts, svc interface {
+	RunStream(context.Context, interface{}, interface{}) (interface{}, error)
+}) *chatHandlers {
+	return newChatHandlers(hub, transcripts, nil, context.Background())
+}
+
+// NewChatTestServer builds chatHandlers with an explicit server context for
+// use in dispatch-goroutine-lifetime tests.
+func NewChatTestServer(hub *ChatHub, transcripts *Transcripts, serverCtx context.Context) *chatHandlers {
+	return newChatHandlers(hub, transcripts, nil, serverCtx)
+}

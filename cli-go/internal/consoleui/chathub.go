@@ -52,6 +52,17 @@ import (
 // errTooManyConns and the HTTP handler sends 429 Too Many Requests.
 const maxSSEConnsPerOperator = 8
 
+// maxTotalSSEConns is the global cap on total live SSE connections across ALL
+// operators.  An operator can self-assert any operatorId, so per-operator caps
+// alone do not bound the total goroutine count (unlimited operatorIds × 8 conns
+// = unbounded).  This global cap closes that gap.
+const maxTotalSSEConns = 128
+
+// maxTotalSessions is the global cap on total open sessions across ALL
+// operators.  Sessions are cheap but unbounded sessions allow memory exhaustion
+// via session squatting.
+const maxTotalSessions = 256
+
 // sseChBuf is the per-connection channel buffer depth.  A slow client that
 // cannot drain faster than this will drop chunks (never blocks the hub mutex
 // or other clients).
@@ -69,14 +80,16 @@ type SSEEvent struct {
 	// Text is the token text (Type=="token") or full text (Type=="summary").
 	Text string `json:"text,omitempty"`
 
-	// ExitCode is set on summary events.
-	ExitCode int `json:"exit_code,omitempty"`
+	// ExitCode is set on summary events.  Pointer so exit_code:0 (success) is
+	// serialized on summary turns and absent on token/other turns (omitempty on
+	// an int zero-value would suppress a legitimate exit code of 0).
+	ExitCode *int `json:"exit_code,omitempty"`
 
-	// DurationS is set on summary events.
-	DurationS float64 `json:"duration_s,omitempty"`
+	// DurationS is set on summary events.  Pointer for the same reason as ExitCode.
+	DurationS *float64 `json:"duration_s,omitempty"`
 
-	// TotalCostUSD is set on summary events.
-	TotalCostUSD float64 `json:"total_cost_usd,omitempty"`
+	// TotalCostUSD is set on summary events.  Pointer for the same reason.
+	TotalCostUSD *float64 `json:"total_cost_usd,omitempty"`
 
 	// ModelResolved is set on summary events.
 	ModelResolved string `json:"model_resolved,omitempty"`
@@ -103,17 +116,22 @@ type sessionEntry struct {
 // already owned by a different operatorID.  The HTTP handler must return 403.
 var errSessionOwnerConflict = errors.New("chathub: session owned by different operator")
 
-// errTooManyConns is returned by Register when the per-operator connection cap
-// would be exceeded.  The HTTP handler must return 429.
+// errTooManyConns is returned by Register when the per-operator or global
+// connection cap would be exceeded.  The HTTP handler must return 429.
 var errTooManyConns = errors.New("chathub: too many SSE connections for this operator")
+
+// errTooManySessions is returned by OpenSession when the global session cap
+// would be exceeded.  The HTTP handler must return 429.
+var errTooManySessions = errors.New("chathub: global session cap reached")
 
 // ChatHub is the authoritative router for chat SSE events.
 // All exported methods are safe for concurrent use.
 type ChatHub struct {
-	mu       sync.Mutex
-	conns    map[string][]*sseConn   // operatorID → list of connections
-	connByID map[string]*sseConn     // connID → conn (for Unregister)
-	sessions map[string]sessionEntry // sessionID → entry
+	mu         sync.Mutex
+	conns      map[string][]*sseConn   // operatorID → list of connections
+	connByID   map[string]*sseConn     // connID → conn (for Unregister)
+	sessions   map[string]sessionEntry // sessionID → entry
+	totalConns int                     // M3: global SSE connection count across all operators
 }
 
 // NewChatHub allocates an empty hub.
@@ -127,7 +145,11 @@ func NewChatHub() *ChatHub {
 
 // register adds an SSE connection for operatorID.  Returns the connection
 // handle (use its ch field for reads; call Unregister with conn.id on
-// disconnect).  Returns errTooManyConns when the per-operator cap is exceeded.
+// disconnect).
+//
+// Returns errTooManyConns when the per-operator cap or the global cap is
+// exceeded (M3: operatorId is self-asserted, so unlimited operators × 8 conns
+// = unbounded goroutines without the global cap).
 //
 // Called from the HTTP handler (handleChatStream) and from the test-export
 // wrapper (export_test.go).
@@ -135,7 +157,13 @@ func (h *ChatHub) register(connID, operatorID string) (*sseConn, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	// Per-operator cap.
 	if len(h.conns[operatorID]) >= maxSSEConnsPerOperator {
+		return nil, errTooManyConns
+	}
+	// M3: global cap — prevents unlimited operatorIds × 8 conns from exhausting
+	// goroutines and map memory.
+	if h.totalConns >= maxTotalSSEConns {
 		return nil, errTooManyConns
 	}
 
@@ -147,6 +175,7 @@ func (h *ChatHub) register(connID, operatorID string) (*sseConn, error) {
 	}
 	h.conns[operatorID] = append(h.conns[operatorID], conn)
 	h.connByID[connID] = conn
+	h.totalConns++
 	return conn, nil
 }
 
@@ -173,6 +202,9 @@ func (h *ChatHub) Unregister(connID string) {
 	if len(h.conns[conn.operatorID]) == 0 {
 		delete(h.conns, conn.operatorID)
 	}
+	if h.totalConns > 0 {
+		h.totalConns--
+	}
 	close(conn.closed)
 }
 
@@ -181,6 +213,8 @@ func (h *ChatHub) Unregister(connID string) {
 // If the sessionID already exists:
 //   - Same owner: idempotent (returns nil); updates shared flag.
 //   - Different owner: returns errSessionOwnerConflict (caller returns 403).
+//
+// Returns errTooManySessions when the global session cap is reached (M3).
 //
 // shared controls whether non-owner operators' SSE connections also receive
 // chunks from this session.
@@ -196,6 +230,10 @@ func (h *ChatHub) OpenSession(sessionID, ownerOperatorID string, shared bool) er
 		entry.shared = shared
 		h.sessions[sessionID] = entry
 		return nil
+	}
+	// M3: global session cap.
+	if len(h.sessions) >= maxTotalSessions {
+		return errTooManySessions
 	}
 	h.sessions[sessionID] = sessionEntry{
 		ownerOperatorID: ownerOperatorID,
