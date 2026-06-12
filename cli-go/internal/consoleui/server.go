@@ -66,6 +66,12 @@ type Config struct {
 	// further config changes.
 	DispatchService *dispatch.Service
 
+	// WorkDir is the <workspace>/work/current directory used for chat transcript
+	// persistence (<WorkDir>/chats/<conversationId>.ndjson).  Required for the
+	// Phase 3b chat endpoints; when empty the transcript handler will return
+	// 503 Service Unavailable.
+	WorkDir string
+
 	// Listener, when non-nil, is used directly instead of binding a new socket.
 	// Injected in tests to avoid port conflicts.
 	Listener net.Listener
@@ -80,10 +86,14 @@ func (c *Config) addr() string {
 
 // Server is the unified console HTTP server.
 type Server struct {
-	cfg      Config
-	mux      *http.ServeMux
-	httpSrv  *http.Server
-	presence *PresenceManager
+	cfg          Config
+	mux          *http.ServeMux
+	httpSrv      *http.Server
+	presence     *PresenceManager
+	chatHub      *ChatHub
+	chat         *chatHandlers
+	serverCtx    context.Context    // cancelled on Serve shutdown; dispatch goroutines use this
+	serverCancel context.CancelFunc // called by Serve when the server shuts down
 }
 
 // New constructs a Server and wires all routes.
@@ -104,17 +114,44 @@ type Server struct {
 //     loopback-only + Origin allow-list (DNS-rebinding defence).
 func New(cfg Config) *Server {
 	pm := NewPresenceManager(cfg.Bus)
-	s := &Server{cfg: cfg, mux: http.NewServeMux(), presence: pm}
+	hub := NewChatHub()
+	var transcripts *Transcripts
+	if cfg.WorkDir != "" {
+		transcripts = NewTranscripts(cfg.WorkDir)
+	} else {
+		// Fallback: use a temp-like path; the handler will reject reads/writes
+		// gracefully via the Transcripts nil-safety check in registerChatRoutes.
+		transcripts = NewTranscripts("")
+	}
+	// serverCtx is cancelled when Serve returns (i.e. on server shutdown).
+	// Dispatch goroutines derive their context from serverCtx — NOT from the
+	// per-request r.Context() — so they survive the 202 response returning.
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	chatH := newChatHandlers(hub, transcripts, cfg.DispatchService, serverCtx)
+	s := &Server{
+		cfg:          cfg,
+		mux:          http.NewServeMux(),
+		presence:     pm,
+		chatHub:      hub,
+		chat:         chatH,
+		serverCtx:    serverCtx,
+		serverCancel: serverCancel,
+	}
 	s.registerRoutes()
 	// Wrap with edge auth: Host check + token (with static-asset exemptions)
 	// + Content-Type gate for mutations.
 	protected := dashauth.RequireLocalHost(cfg.addr(),
 		requireTokenForNonStatic(cfg.Token, requireJSONForMutations(s.mux)))
 	s.httpSrv = &http.Server{
-		Addr:         cfg.addr(),
-		Handler:      protected,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		Addr:        cfg.addr(),
+		Handler:     protected,
+		ReadTimeout: 30 * time.Second,
+		// WriteTimeout intentionally 0: the SSE /api/chat/stream endpoint holds
+		// long-lived streaming responses that never complete.  A non-zero
+		// WriteTimeout would force-close them after the deadline.  The server
+		// is loopback-only (no external exposure), matching the pattern used in
+		// wsbus/server.go and mcpserver/streamhttp.go.
+		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
 	}
 	return s
@@ -124,6 +161,9 @@ func New(cfg Config) *Server {
 // Neither the Host-header middleware nor the token middleware is applied here —
 // the caller supplies them.
 func (s *Server) Handler() http.Handler { return s.mux }
+
+// ChatHub returns the chat routing hub, exposed for testing.
+func (s *Server) ChatHub() *ChatHub { return s.chatHub }
 
 // Serve starts the HTTP server and blocks until ctx is cancelled.
 // Returns nil on clean shutdown (http.ErrServerClosed treated as nil).
@@ -161,8 +201,12 @@ func (s *Server) Serve(ctx context.Context) error {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = s.httpSrv.Shutdown(shutCtx)
+		// Cancel the server-lifetime context so all dispatch goroutines
+		// that are still running receive their cancellation signal.
+		s.serverCancel()
 		return <-errCh
 	case err := <-errCh:
+		s.serverCancel()
 		return err
 	}
 }
@@ -214,6 +258,19 @@ func (s *Server) registerRoutes() {
 
 	// ---- Presence snapshot (token-gated via edge middleware) -----------------
 	s.mux.HandleFunc("/api/presence", s.handlePresence)
+
+	// ---- Phase 3b: Chat SSE + dispatch + transcript (token-gated at edge) ---
+	// GET  /api/chat/stream      — per-operator SSE stream (multiplexed by sessionID)
+	// POST /api/chat/dispatch    — start a streaming dispatch; returns {sessionId}
+	// POST /api/chat/cancel      — cancel an in-flight dispatch (idempotent)
+	// GET  /api/chat/transcript  — fetch persisted transcript for a conversationId
+	//
+	// These paths are NOT static assets, so the edge requireTokenForNonStatic
+	// middleware enforces Authorization: Bearer on all of them.
+	s.mux.HandleFunc("/api/chat/stream", s.chat.handleChatStream)
+	s.mux.HandleFunc("/api/chat/dispatch", s.chat.handleChatDispatch)
+	s.mux.HandleFunc("/api/chat/cancel", s.chat.handleChatCancel)
+	s.mux.HandleFunc("/api/chat/transcript", s.chat.handleChatTranscript)
 }
 
 // handlePresence returns the current online operator presence snapshot as a
