@@ -6,10 +6,15 @@ package dispatch
 //   - Mirrors Run's setup (roster compose, model resolution, identity validation,
 //     governor) by going through the Service facade.
 //   - Step 8 uses execWithStreaming instead of execWithStderrCapture.
-//   - execWithStreaming attaches cmd.StdoutPipe() and reads with a bounded
-//     bufio.Reader (~2MB cap per line to tolerate the multi-KB system/init event).
-//   - Stderr is captured in a parallel goroutine (preserves dispatch_finished
-//     stderr_tail contract identical to Run).
+//   - execWithStreaming attaches cmd.StdoutPipe() and reads stdout with a
+//     fixed-size read buffer and a manual per-line byte counter.  Any single
+//     line that exceeds maxStreamLineBytes is truncated: the accumulated bytes
+//     are discarded, a warning is logged once, and reading continues until the
+//     next '\n' is found.  This is the REAL per-line cap — bufio.NewReaderSize
+//     alone does NOT cap ReadBytes (it accumulates a growing slice regardless of
+//     the buffer hint).
+//   - Stderr is attached as cmd.Stderr = &bytes.Buffer and drained after
+//     cmd.Wait() returns.  It is NOT read in a parallel goroutine.
 //   - Writes dispatch_started and dispatch_finished events via the same
 //     writeStarted/writeFinished functions as Run (parity).
 //   - Emits StreamChunk{Type:"token"} for each incremental text delta.
@@ -23,24 +28,40 @@ package dispatch
 // Test seam: streamRunFn (parallel to runFn) can be swapped in tests.
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
+	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
-// maxStreamLineBytes is the read cap for a single NDJSON line in the streaming
-// reader. Must be large enough for the claude system/init event (~50KB in
-// practice with a full skill roster).  2MB is generous and bounded.
+// maxStreamLineBytes is the hard per-line byte cap for the streaming reader.
+// Any line whose length exceeds this value is truncated: bytes accumulated so
+// far are discarded, a debug log is emitted once per truncation, and reading
+// resumes at the next '\n'.  2MB is generous enough for the claude system/init
+// event (~50KB with a full skill roster) while remaining well within normal
+// heap budgets.
 const maxStreamLineBytes = 2 * 1024 * 1024
+
+// maxBufferedOutputBytes is the ceiling for the total accumulated output on the
+// buffered (codex/agy) path.  A runtime that emits more than this will have its
+// output silently truncated at this limit.  The truncation marker
+// "[...output truncated...]" is appended so callers know data was dropped.
+const maxBufferedOutputBytes = 32 * 1024 * 1024 // 32 MB
+
+// maxTaskBytes is the facade-level limit on Task / UserText size.  Enforced in
+// RunStream (and separately in Run) before any subprocess is forked.  1 MB is
+// generous for an LLM prompt while keeping the boundary well below the 4 MB
+// gRPC frame cap so Phase 3b's SSE/REST path (no gRPC framing) stays safe.
+const maxTaskBytes = 1 * 1024 * 1024 // 1 MB
 
 // StreamChunk is one incremental unit of streaming output.
 type StreamChunk struct {
@@ -106,6 +127,13 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 	}
 	if yakosRoot == "" {
 		return Result{}, fmt.Errorf("dispatch: yakos_root is required (set in ServiceConfig or per-request Params.YakosRoot)")
+	}
+
+	// --- Task / UserText size bound (facade chokepoint) ---
+	// Enforced here before any subprocess is forked so all transports inherit
+	// the check regardless of whether they impose their own frame cap.
+	if len(p.Task) > maxTaskBytes {
+		return Result{}, fmt.Errorf("dispatch: task exceeds maximum size (%d bytes; limit %d)", len(p.Task), maxTaskBytes)
 	}
 
 	// --- Validate and stamp identity (mirrors Service.Run) ---
@@ -246,9 +274,11 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 
 // execWithStreaming is the real streaming executor.  It:
 //  1. Selects the unframed chat exec cmd from the adapter.
-//  2. Captures stderr in a parallel goroutine.
+//  2. Attaches stderr as cmd.Stderr = &bytes.Buffer (drained after cmd.Wait).
 //  3. Writes dispatch_started before exec and dispatch_finished after.
-//  4. Reads stdout line-by-line with a bounded reader.
+//  4. Reads stdout line-by-line with a fixed-size read buffer and a manual
+//     per-line length guard.  Lines exceeding maxStreamLineBytes are truncated
+//     (remaining bytes skipped to next '\n'); the guard is the REAL cap.
 //  5. Calls onChunk for each token; emits a summary chunk at the end.
 func execWithStreaming(
 	ctx context.Context,
@@ -269,6 +299,7 @@ func execWithStreaming(
 		execErr    error
 		stderrBuf  bytes.Buffer
 		costUSD    float64
+		usageCost  *cost.Usage
 		textBlocks = make(map[int]struct{})
 	)
 
@@ -287,6 +318,9 @@ func execWithStreaming(
 			}, tsEnd, logPath)
 			return Result{ExitCode: -1}, fmt.Errorf("dispatch: stream: stdout pipe: %w", pipeErr)
 		}
+		// Stderr is attached as a plain buffer and drained by the OS write path.
+		// It is NOT read in a parallel goroutine — cmd.Wait() ensures all stderr
+		// bytes have landed before we inspect stderrBuf.
 		cmd.Stderr = &stderrBuf
 
 		if startErr := cmd.Start(); startErr != nil {
@@ -300,47 +334,127 @@ func execWithStreaming(
 			return Result{ExitCode: -1}, fmt.Errorf("dispatch: stream: start: %w", startErr)
 		}
 
-		// Read stdout line-by-line with a bounded reader.
-		// bufio.Reader.ReadBytes('\n') is line-oriented; we set a generous buffer
-		// to tolerate the multi-KB system/init event without allocating per call.
-		reader := bufio.NewReaderSize(stdoutPipe, maxStreamLineBytes)
+		// Read stdout with a fixed-size read buffer and a manual per-line byte
+		// counter.  This is the REAL per-line cap:
+		//   - readBuf is the I/O buffer; bytes are never accumulated beyond it
+		//     before we process and classify them.
+		//   - lineLen tracks bytes accumulated in lineBuf since the last '\n'.
+		//   - When lineLen would exceed maxStreamLineBytes, we set overlong=true,
+		//     discard further bytes for that line, log once, and resume on '\n'.
+		//   - When a '\n' is found (or EOF), we process the accumulated lineBuf
+		//     (if not overlong) and reset.
+		//
+		// NOTE: Phase 4 will add process-group kill on context cancel to reap
+		// grandchild processes spawned by the runtime.  For now, exec.CommandContext
+		// only kills the direct child; orphan grandchildren are a pre-existing
+		// limitation tracked for Phase 4.
+		const readBufSize = 64 * 1024 // 64 KB I/O read granule
+		readBuf := make([]byte, readBufSize)
+		var lineBuf []byte
+		overlong := false
+		bufferedOutputTruncated := false
 
 		isClaudeRuntime := adapter.Name() == "claude"
 
+	readLoop:
 		for {
-			line, readErr := reader.ReadBytes('\n')
-			line = bytes.TrimRight(line, "\r\n")
+			n, readErr := stdoutPipe.Read(readBuf)
+			if n > 0 {
+				chunk := readBuf[:n]
+				for len(chunk) > 0 {
+					// Find the next '\n' in the remaining chunk.
+					nlIdx := bytes.IndexByte(chunk, '\n')
+					var segment []byte
+					var haveNewline bool
+					if nlIdx >= 0 {
+						segment = chunk[:nlIdx]
+						chunk = chunk[nlIdx+1:]
+						haveNewline = true
+					} else {
+						segment = chunk
+						chunk = nil
+					}
 
+					if overlong {
+						// Already discarding this line; skip until newline.
+						if haveNewline {
+							overlong = false
+							lineBuf = lineBuf[:0]
+						}
+					} else {
+						if len(lineBuf)+len(segment) > maxStreamLineBytes {
+							// This line would exceed the cap.  Discard what we have.
+							slog.Debug("dispatch: stream: line exceeds maxStreamLineBytes; truncating",
+								"agent", req.AgentName,
+								"accumulated_bytes", len(lineBuf)+len(segment),
+								"limit", maxStreamLineBytes,
+							)
+							lineBuf = lineBuf[:0]
+							overlong = !haveNewline // if newline present, already done
+						} else {
+							lineBuf = append(lineBuf, segment...)
+							if haveNewline {
+								// Complete line ready: process it.
+								line := bytes.TrimRight(lineBuf, "\r")
+								if len(line) > 0 {
+									if isClaudeRuntime {
+										tok, isResult, lineCost, lineUsage := runtime.ParseStreamLineWithUsage(line, textBlocks)
+										if tok != "" {
+											allText = append(allText, tok...)
+											onChunk(StreamChunk{Type: "token", Text: tok})
+										}
+										if isResult {
+											costUSD = lineCost
+											usageCost = lineUsage
+										}
+									} else {
+										// Buffered path: accumulate with ceiling check.
+										if !bufferedOutputTruncated {
+											if len(allText)+len(line)+1 > maxBufferedOutputBytes {
+												allText = append(allText, []byte("\n[...output truncated...]")...)
+												bufferedOutputTruncated = true
+											} else {
+												allText = append(allText, line...)
+												allText = append(allText, '\n')
+											}
+										}
+									}
+								}
+								lineBuf = lineBuf[:0]
+							}
+						}
+					}
+				}
+			}
+
+			if readErr != nil {
+				if readErr != io.EOF {
+					// Non-EOF read error: log at debug; don't abort — the subprocess
+					// may still have exited cleanly.  cmd.Wait() below captures the
+					// real exit status.
+					slog.Debug("dispatch: stream: stdout read error", "agent", req.AgentName, "err", readErr)
+				}
+				break readLoop
+			}
+		}
+
+		// Process any remaining bytes in lineBuf (line without trailing newline).
+		if !overlong && len(lineBuf) > 0 {
+			line := bytes.TrimRight(lineBuf, "\r")
 			if len(line) > 0 {
 				if isClaudeRuntime {
-					// Incremental streaming path: parse each NDJSON line.
-					tok, isResult, lineCost := runtime.ParseStreamLine(line, textBlocks)
+					tok, isResult, lineCost, lineUsage := runtime.ParseStreamLineWithUsage(line, textBlocks)
 					if tok != "" {
 						allText = append(allText, tok...)
 						onChunk(StreamChunk{Type: "token", Text: tok})
 					}
 					if isResult {
 						costUSD = lineCost
+						usageCost = lineUsage
 					}
-					// Lines exceeding maxStreamLineBytes will arrive as a partial
-					// line (ReadBytes returns ErrBufferFull in bufio.Scanner but
-					// bufio.Reader.ReadBytes returns a long slice).
-					// We parse what we have; oversized lines are likely system/init
-					// events that ParseStreamLine drops anyway.
-				} else {
-					// Buffered path (codex/agy/gemini): accumulate all text.
+				} else if !bufferedOutputTruncated {
 					allText = append(allText, line...)
-					allText = append(allText, '\n')
 				}
-			}
-
-			if readErr != nil {
-				if readErr != io.EOF {
-					// Non-EOF read error: surface but don't abort — the subprocess
-					// may still have exited cleanly.
-					_ = readErr // log at debug level in future
-				}
-				break
 			}
 		}
 
@@ -400,6 +514,7 @@ func execWithStreaming(
 		TaskBytes:     int64(len(req.Task)),
 		StderrTail:    stderrTail,
 		StderrTrunc:   stderrTrunc,
+		Usage:         usageCost,
 		ModelChosenBy: req.ModelChosenBy,
 		ModelResolved: req.ModelResolved,
 	}

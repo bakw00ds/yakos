@@ -35,6 +35,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -325,6 +326,13 @@ func (d *dispatchSrv) Stream(req *pb.DispatchRunRequest, stream pb.Dispatch_Stre
 	// Each StreamChunk from RunStream maps directly to a DispatchStreamChunk
 	// proto message.
 	// SELF-ASSERTED — attribution/labeling only. NEVER use for an authorization decision.
+	//
+	// sendDead is set atomically on the first stream.Send error so subsequent
+	// onChunk calls return early without further sends.  This prevents driving
+	// the subprocess into a dead connection indefinitely — once the client is
+	// gone the subprocess continues to completion (context cancel propagates via
+	// stream.Context()) but no further frames are attempted.
+	var sendDead atomic.Bool
 	_, err := d.cfg.DispatchService.RunStream(
 		stream.Context(),
 		dispatch.Params{
@@ -340,18 +348,22 @@ func (d *dispatchSrv) Stream(req *pb.DispatchRunRequest, stream pb.Dispatch_Stre
 			SessionID:      req.SessionID,
 		},
 		func(chunk dispatch.StreamChunk) {
-			_ = stream.Send(&pb.DispatchStreamChunk{
+			if sendDead.Load() {
+				return
+			}
+			if err := stream.Send(&pb.DispatchStreamChunk{
 				Type:          chunk.Type,
 				Text:          chunk.Text,
 				ExitCode:      int32(chunk.ExitCode),
 				DurationS:     chunk.DurationS,
 				OutputBytes:   chunk.OutputBytes,
 				ModelResolved: chunk.ModelResolved,
-			})
-			// stream.Send errors are dropped here: if the client disconnected,
-			// the stream.Context() cancel will propagate and RunStream will
-			// abort on the next read.  Collecting Send errors would require a
-			// mutex-guarded error slot shared with the onChunk callback.
+			}); err != nil {
+				// Mark the connection dead so we stop sending.  The stream
+				// context cancel (via stream.Context()) will cause RunStream
+				// to exit at the next read iteration.
+				sendDead.Store(true)
+			}
 		},
 	)
 	if err != nil {

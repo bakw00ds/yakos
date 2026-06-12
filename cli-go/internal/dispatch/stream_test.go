@@ -9,11 +9,16 @@ package dispatch
 // Tests cover:
 //  1. Claude-style incremental deltas → multiple "token" chunks + "summary".
 //  2. Codex-style buffered → one "token" chunk + "summary".
-//  3. dispatch_finished NDJSON identical to a non-streaming Run (parity).
+//  3. dispatch_finished NDJSON schema keys present (field parseability).
 //  4. Bounded reader tolerates a multi-KB line (system/init event size).
 //  5. Context cancellation kills the stream cleanly.
+//  6. Over-long line (>2 MB, no newline) is truncated without buffering whole.
+//  7. Buffered path output ceiling: runtime emitting >32 MB is truncated.
+//  8. Streaming usage is populated (not null) in dispatch_finished for claude.
+//  9. Facade task-length bound rejects over-limit tasks.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -478,6 +483,301 @@ func TestRunStream_GovernorEnforcedForStreaming(t *testing.T) {
 			t.Errorf("expected 'at capacity' in error, got: %v", err)
 		}
 	})
+}
+
+// largePipeAdapter is a test adapter that writes its content from a file
+// (to avoid ARG_MAX limits when the content is many megabytes).
+type largePipeAdapter struct {
+	name     string // "claude" or "codex"
+	dataFile string // temp file path; content is written to stdout as-is
+}
+
+func (a *largePipeAdapter) Name() string                     { return a.name }
+func (a *largePipeAdapter) Available(_ context.Context) bool { return true }
+func (a *largePipeAdapter) Dispatch(_ context.Context, _ runtime.DispatchRequest) (*runtime.DispatchResult, error) {
+	return &runtime.DispatchResult{Stdout: []byte("fake")}, nil
+}
+func (a *largePipeAdapter) ChatExecCmd(ctx context.Context, _ runtime.ChatDispatchRequest) *exec.Cmd {
+	// cat the pre-written data file to stdout.
+	cmd := exec.CommandContext(ctx, "cat", a.dataFile) //nolint:gosec
+	return cmd
+}
+
+// newLargePipeAdapter writes data to a temp file and returns an adapter that
+// cats that file on ChatExecCmd.
+func newLargePipeAdapter(t *testing.T, name string, data []byte) *largePipeAdapter {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "large-*.dat")
+	if err != nil {
+		t.Fatalf("newLargePipeAdapter: create temp: %v", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		t.Fatalf("newLargePipeAdapter: write: %v", err)
+	}
+	_ = f.Close()
+	return &largePipeAdapter{name: name, dataFile: f.Name()}
+}
+
+var _ chatCmdProvider = (*largePipeAdapter)(nil)
+
+// TestRunStream_OverlongLineIsTruncated verifies that a single line larger than
+// maxStreamLineBytes (with no newline) is discarded without being buffered in
+// its entirety.  Subsequent valid lines still arrive.
+func TestRunStream_OverlongLineIsTruncated(t *testing.T) {
+	logDir := isolatedLogDir(t)
+	yakosRoot := buildFakeRoster(t, "chat-agent", "System prompt.")
+
+	// Construct a data blob: 3 MB of 'X' (no newline) + newline + result line.
+	const overlongBytes = 3 * 1024 * 1024
+	resultLine := `{"type":"result","subtype":"success","result":"after overlong","is_error":false,"duration_ms":1,"total_cost_usd":0.001,"usage":{"input_tokens":5,"output_tokens":2}}`
+	var buf []byte
+	buf = append(buf, bytes.Repeat([]byte("X"), overlongBytes)...)
+	buf = append(buf, '\n')
+	buf = append(buf, []byte(resultLine)...)
+	buf = append(buf, '\n')
+
+	// Write to a temp file so we avoid ARG_MAX shell limits.
+	fakeAdapter := newLargePipeAdapter(t, "claude", buf)
+
+	svc := NewService(ServiceConfig{
+		YakosRoot:     yakosRoot,
+		WorkspaceRoot: logDir,
+		OperatorID:    "test-op",
+	})
+
+	var tokenTexts []string
+	var summaryChunk *StreamChunk
+	withStreamRunFn(func(ctx context.Context, req Request, _ runtime.Adapter, chatReq runtime.ChatDispatchRequest, onChunk func(StreamChunk)) (Result, error) {
+		return execWithStreaming(ctx, req, fakeAdapter, chatReq, func(c StreamChunk) {
+			if c.Type == "token" {
+				tokenTexts = append(tokenTexts, c.Text)
+			}
+			if c.Type == "summary" {
+				cp := c
+				summaryChunk = &cp
+			}
+			onChunk(c)
+		})
+	}, func() {
+		_, err := svc.RunStream(context.Background(), Params{
+			Agent:   "chat-agent",
+			Task:    "task",
+			Project: logDir,
+		}, func(_ StreamChunk) {})
+		if err != nil {
+			t.Fatalf("RunStream: unexpected error: %v", err)
+		}
+	})
+
+	// The overlong line is pure 'X's — not valid NDJSON for a text_delta, so
+	// even if it leaked through ParseStreamLine would emit no token.  But the
+	// guard must not have returned an error or hung — confirmed by reaching here.
+	// The result line after the overlong line must have been processed.
+	if summaryChunk == nil {
+		t.Fatal("expected a summary chunk; reader may have stopped after overlong line")
+	}
+	if summaryChunk.TotalCostUSD != 0.001 {
+		t.Errorf("summary.TotalCostUSD: got %f, want 0.001", summaryChunk.TotalCostUSD)
+	}
+	// No token chunks expected (overlong line is not a text_delta; result is not a token).
+	if len(tokenTexts) != 0 {
+		t.Errorf("expected no token chunks from overlong+result lines, got %v", tokenTexts)
+	}
+}
+
+// TestRunStream_BufferedOutputCeiling verifies that a buffered (non-claude)
+// runtime emitting more than maxBufferedOutputBytes does not cause the entire
+// output to be held in memory.  The accumulated allText is capped and a
+// truncation marker is appended.
+func TestRunStream_BufferedOutputCeiling(t *testing.T) {
+	logDir := isolatedLogDir(t)
+	yakosRoot := buildFakeRoster(t, "chat-agent", "System prompt.")
+
+	// Build a payload slightly larger than the 32 MB ceiling, structured as
+	// many short lines (1 KB each) so no individual line triggers the per-line
+	// overlong guard (which would discard them rather than accumulate them).
+	// We need total bytes > maxBufferedOutputBytes to exercise the ceiling.
+	const lineSize = 1024 // 1 KB per line — well under the 2 MB per-line cap
+	const numLines = (maxBufferedOutputBytes / lineSize) + 2
+	var hugeData []byte
+	lineContent := bytes.Repeat([]byte("A"), lineSize)
+	for i := 0; i < numLines; i++ {
+		hugeData = append(hugeData, lineContent...)
+		hugeData = append(hugeData, '\n')
+	}
+	fakeAdapter := newLargePipeAdapter(t, "codex", hugeData)
+
+	svc := NewService(ServiceConfig{
+		YakosRoot:     yakosRoot,
+		WorkspaceRoot: logDir,
+		OperatorID:    "test-op",
+	})
+
+	var tokenChunks []StreamChunk
+	withStreamRunFn(func(ctx context.Context, req Request, _ runtime.Adapter, chatReq runtime.ChatDispatchRequest, onChunk func(StreamChunk)) (Result, error) {
+		return execWithStreaming(ctx, req, fakeAdapter, chatReq, func(c StreamChunk) {
+			if c.Type == "token" {
+				tokenChunks = append(tokenChunks, c)
+			}
+			onChunk(c)
+		})
+	}, func() {
+		_, err := svc.RunStream(context.Background(), Params{
+			Agent:   "chat-agent",
+			Task:    "task",
+			Project: logDir,
+		}, func(_ StreamChunk) {})
+		if err != nil {
+			t.Fatalf("RunStream: unexpected error: %v", err)
+		}
+	})
+
+	if len(tokenChunks) != 1 {
+		t.Fatalf("expected 1 token chunk, got %d", len(tokenChunks))
+	}
+	text := tokenChunks[0].Text
+	// The text must be shorter than the total input (ceiling enforced).
+	totalInput := numLines * (lineSize + 1) // +1 for the newline
+	if len(text) >= totalInput {
+		t.Errorf("buffered output not capped: got %d bytes, expected < %d", len(text), totalInput)
+	}
+	// The truncation marker must be present.
+	if !strings.Contains(text, "[...output truncated...]") {
+		t.Errorf("expected truncation marker in capped output, got text len=%d", len(text))
+	}
+}
+
+// TestRunStream_StreamingUsagePopulated verifies that the dispatch_finished
+// event written by a claude streaming dispatch contains a non-null "usage"
+// field with input_tokens and output_tokens populated from the result event.
+func TestRunStream_StreamingUsagePopulated(t *testing.T) {
+	logDir := isolatedLogDir(t)
+	yakosRoot := buildFakeRoster(t, "chat-agent", "System prompt.")
+
+	svc := NewService(ServiceConfig{
+		YakosRoot:     yakosRoot,
+		WorkspaceRoot: logDir,
+		OperatorID:    "test-op",
+	})
+
+	fakeAdapter := &fakeClaudeStreamAdapter{lines: claudeStreamLines()}
+	// claudeStreamLines includes:
+	//   "usage":{"input_tokens":42,"output_tokens":3}
+	// in the result event, so we expect those values in the log.
+
+	withStreamRunFn(func(ctx context.Context, req Request, _ runtime.Adapter, chatReq runtime.ChatDispatchRequest, onChunk func(StreamChunk)) (Result, error) {
+		return execWithStreaming(ctx, req, fakeAdapter, chatReq, onChunk)
+	}, func() {
+		_, err := svc.RunStream(context.Background(), Params{
+			Agent:   "chat-agent",
+			Task:    "usage test",
+			Project: logDir,
+		}, func(_ StreamChunk) {})
+		if err != nil {
+			t.Fatalf("RunStream: %v", err)
+		}
+	})
+
+	// Read the dispatch log and find the dispatch_finished line.
+	logPath := filepath.Join(logDir, "dispatch-log.ndjson")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	var finishedLine string
+	for _, l := range lines {
+		if strings.Contains(l, `"dispatch_finished"`) {
+			finishedLine = l
+		}
+	}
+	if finishedLine == "" {
+		t.Fatal("no dispatch_finished line in log")
+	}
+
+	var ev map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(finishedLine), &ev); err != nil {
+		t.Fatalf("dispatch_finished parse error: %v", err)
+	}
+
+	usageRaw, ok := ev["usage"]
+	if !ok {
+		t.Fatal("dispatch_finished: missing 'usage' field (expected non-null for claude streaming)")
+	}
+	if string(usageRaw) == "null" {
+		t.Fatal("dispatch_finished: 'usage' is null; expected token counts from result event")
+	}
+
+	var usage struct {
+		InputTokens  int64 `json:"input_tokens"`
+		OutputTokens int64 `json:"output_tokens"`
+	}
+	if err := json.Unmarshal(usageRaw, &usage); err != nil {
+		t.Fatalf("usage unmarshal: %v", err)
+	}
+	if usage.InputTokens != 42 {
+		t.Errorf("usage.input_tokens: got %d, want 42", usage.InputTokens)
+	}
+	if usage.OutputTokens != 3 {
+		t.Errorf("usage.output_tokens: got %d, want 3", usage.OutputTokens)
+	}
+}
+
+// TestRunStream_FacadeTaskLengthBound verifies that RunStream rejects a task
+// that exceeds maxTaskBytes with a clear error before forking any subprocess.
+func TestRunStream_FacadeTaskLengthBound(t *testing.T) {
+	logDir := isolatedLogDir(t)
+	yakosRoot := buildFakeRoster(t, "chat-agent", "System prompt.")
+
+	svc := NewService(ServiceConfig{
+		YakosRoot:     yakosRoot,
+		WorkspaceRoot: logDir,
+		OperatorID:    "test-op",
+	})
+
+	// Construct a task that is exactly 1 byte over the limit.
+	overLimitTask := strings.Repeat("T", maxTaskBytes+1)
+
+	_, err := svc.RunStream(context.Background(), Params{
+		Agent:   "chat-agent",
+		Task:    overLimitTask,
+		Project: logDir,
+	}, func(_ StreamChunk) {})
+
+	if err == nil {
+		t.Fatal("expected error for over-limit task, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Errorf("expected 'exceeds maximum size' in error, got: %v", err)
+	}
+}
+
+// TestService_Run_FacadeTaskLengthBound verifies that Service.Run also rejects
+// an over-limit task at the facade level (same chokepoint, non-streaming path).
+func TestService_Run_FacadeTaskLengthBound(t *testing.T) {
+	logDir := isolatedLogDir(t)
+	yakosRoot := buildFakeRoster(t, "chat-agent", "System prompt.")
+
+	svc := NewService(ServiceConfig{
+		YakosRoot:     yakosRoot,
+		WorkspaceRoot: logDir,
+		OperatorID:    "test-op",
+	})
+
+	overLimitTask := strings.Repeat("T", maxTaskBytes+1)
+
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:   "chat-agent",
+		Task:    overLimitTask,
+		Project: logDir,
+	})
+
+	if err == nil {
+		t.Fatal("expected error for over-limit task on Run path, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Errorf("expected 'exceeds maximum size' in error, got: %v", err)
+	}
 }
 
 // ---- helpers -------------------------------------------------------------------

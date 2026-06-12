@@ -53,6 +53,10 @@ func (a *AgyAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *
 		prompt = req.AgentSystemPrompt + "\n\n---\n\n" + req.UserText
 	}
 
+	// No '--' sentinel is required here: the user text is passed as the value
+	// to the '-p' flag (two separate argv elements), not as a bare positional.
+	// exec.Command does not invoke a shell; a value beginning with '-' cannot
+	// be reinterpreted as a flag by the agy process when passed this way.
 	args := []string{
 		"--add-dir", req.Project,
 		"--dangerously-skip-permissions",

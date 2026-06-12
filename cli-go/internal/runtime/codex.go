@@ -78,7 +78,9 @@ func (a *CodexAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest)
 	if req.AgentSystemPrompt != "" {
 		args = append(args, "--system-prompt", req.AgentSystemPrompt)
 	}
-	args = append(args, req.UserText)
+	// Insert '--' before the positional user text so that a UserText beginning
+	// with '-' cannot be interpreted as a flag by the codex CLI.
+	args = append(args, "--", req.UserText)
 
 	cmd := exec.CommandContext(ctx, "codex", args...) //nolint:gosec
 	cmd.Env = buildEnv(DispatchRequest{

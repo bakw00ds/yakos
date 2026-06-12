@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/bakw00ds/yakos/internal/cost"
 )
 
 // ClaudeAdapter implements Adapter for the Claude Code CLI.
@@ -173,9 +175,21 @@ func (a *ClaudeAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest
 //
 // The textBlocks set (passed by the caller) records which block indices are
 // confirmed "text" blocks via preceding content_block_start events.
+//
+// Deprecated: prefer ParseStreamLineWithUsage which also returns token counts.
 func ParseStreamLine(line []byte, textBlocks map[int]struct{}) (text string, isResult bool, totalCostUSD float64) {
+	tok, isRes, usd, _ := ParseStreamLineWithUsage(line, textBlocks)
+	return tok, isRes, usd
+}
+
+// ParseStreamLineWithUsage is the extended variant of ParseStreamLine that also
+// returns the token usage from the terminal "result" event.  The returned
+// *cost.Usage is non-nil only when isResult is true and the line contained a
+// parseable usage field.  Callers should use this in preference to
+// ParseStreamLine wherever they need to populate Result.Usage.
+func ParseStreamLineWithUsage(line []byte, textBlocks map[int]struct{}) (text string, isResult bool, totalCostUSD float64, usage *cost.Usage) {
 	if len(line) == 0 {
-		return "", false, 0
+		return "", false, 0, nil
 	}
 
 	// Fast-path: extract the top-level type field without full unmarshal.
@@ -184,16 +198,25 @@ func ParseStreamLine(line []byte, textBlocks map[int]struct{}) (text string, isR
 	switch topType {
 	case "system", "init":
 		// Multi-KB noise + mildly sensitive (full tool/skill roster). Drop.
-		return "", false, 0
+		return "", false, 0, nil
 
 	case "result":
 		// Terminal event: {"type":"result","subtype":"success","result":"…",
-		// "total_cost_usd":…,"usage":…,"duration_ms":…}
+		// "total_cost_usd":…,"usage":{"input_tokens":N,"output_tokens":M},"duration_ms":…}
 		var res struct {
 			TotalCostUSD float64 `json:"total_cost_usd"`
+			Usage        struct {
+				InputTokens  int64 `json:"input_tokens"`
+				OutputTokens int64 `json:"output_tokens"`
+			} `json:"usage"`
 		}
 		_ = json.Unmarshal(line, &res)
-		return "", true, res.TotalCostUSD
+		u := &cost.Usage{
+			InputTokens:  res.Usage.InputTokens,
+			OutputTokens: res.Usage.OutputTokens,
+			TotalCostUSD: res.TotalCostUSD,
+		}
+		return "", true, res.TotalCostUSD, u
 
 	case "stream_event":
 		// Inner event envelope: {"type":"stream_event","event":{…}}
@@ -201,12 +224,13 @@ func ParseStreamLine(line []byte, textBlocks map[int]struct{}) (text string, isR
 			Event json.RawMessage `json:"event"`
 		}
 		if err := json.Unmarshal(line, &envelope); err != nil || len(envelope.Event) == 0 {
-			return "", false, 0
+			return "", false, 0, nil
 		}
-		return parseStreamEvent(envelope.Event, textBlocks)
+		tok, isRes, usd := parseStreamEvent(envelope.Event, textBlocks)
+		return tok, isRes, usd, nil
 
 	default:
-		return "", false, 0
+		return "", false, 0, nil
 	}
 }
 
