@@ -326,10 +326,12 @@ worktree isolation will collide.
 
 ### Available specialists
 
-The framework ships 35 agent templates covering: lead orchestration,
+The framework ships 38 agents covering: lead orchestration,
 planning, architecture, code review, security, testing, documentation,
 release management, incident response, API design, database, frontend,
-backend, mobile, devops, SRE, AI/LLM, design, and accessibility.
+backend, mobile, devops, SRE, AI/LLM, design, and accessibility (33
+specialist templates, plus 5 framework-internal agents: supervisor,
+librarian, model-routing-eval, general-codex, general-agy).
 
 List what is available:
 

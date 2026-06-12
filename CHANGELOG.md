@@ -46,7 +46,8 @@ A full project-health metrics subsystem ships across three phases in this releas
 
 - `yakos metrics collect` runs the [E]+[T] Go-backend analyzer set (loc, test-coverage,
   cyclomatic complexity, dead-code, build-time, binary-size, dispatch-latency percentiles).
-  Results stored as NDJSON snapshots in `work/current/metrics/`.
+  Results stored as append-only NDJSON at `<project>/.yakos/metrics/history.ndjson`
+  (one line per snapshot, committed to the project repo — see ADR-0001).
 - `yakos metrics report` renders the latest snapshot in table or JSON form.
 - `yakos metrics trend [--since <iso>] [--axis <key>]` plots numeric fields over time.
 - `yakos metrics compare <sha-or-tag>` diffs the current snapshot against a historical one,
@@ -60,7 +61,7 @@ A full project-health metrics subsystem ships across three phases in this releas
 - `yakos metrics gate [--budget budgets.yaml]` exits nonzero when any tracked metric exceeds
   its defined budget ceiling. `budgets.yaml` schema: per-key `warn:` + `fail:` thresholds.
   Integrates with CI via `yakos metrics install-hook` (drops a `pre-push` hook that runs the
-  gate) and `yakos metrics uninstall-hook`. CI recipe documented in `docs/metrics-ci-recipe.md`.
+  gate) and `yakos metrics uninstall-hook`. CI recipe documented in `docs/metrics-ci.md`.
 - `gate` uses `errors.As` for `GateExitError` detection; Windows path skips executable-mode
   assertion (separate fix, #128 follow-up).
 
