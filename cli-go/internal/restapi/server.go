@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/bakw00ds/yakos/internal/dispatch"
 )
 
 // Config holds all REST server configuration.
@@ -29,6 +31,11 @@ type Config struct {
 	// StateDir is the directory used for token persistence
 	// (typically ~/.yakos-state).
 	StateDir string
+
+	// DispatchService is the shared dispatch facade. Must be non-nil for
+	// POST /v1/dispatches; a nil value causes the handler to return HTTP 500
+	// (no ephemeral fallback — all requests share the global governor).
+	DispatchService *dispatch.Service
 }
 
 // authLevel describes what level of access a token grants.

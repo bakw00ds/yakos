@@ -53,15 +53,21 @@ func appendEvent(path string, line []byte) error {
 
 // writeStarted writes a dispatch_started event to the dispatch-log.
 // Schema matches PR #40: includes the project field.
+// Identity fields (operator_id, conversation_id, session_id) are emitted
+// when non-empty; they are omitted on legacy dispatches so legacy readers
+// continue to parse the line without error.
 func writeStarted(req Request, ts time.Time, logPath string) {
 	// Use the canonical Event struct from internal/cost to ensure schema parity.
 	ev := cost.Event{
-		Type:        "dispatch_started",
-		Ts:          ts.UTC().Format(time.RFC3339),
-		Agent:       req.AgentName,
-		Runtime:     req.Runtime,
-		Project:     req.Project,
-		TaskPreview: truncate(req.Task, 200),
+		Type:           "dispatch_started",
+		Ts:             ts.UTC().Format(time.RFC3339),
+		Agent:          req.AgentName,
+		Runtime:        req.Runtime,
+		Project:        req.Project,
+		TaskPreview:    truncate(req.Task, 200),
+		OperatorID:     req.OperatorID,
+		ConversationID: req.ConversationID,
+		SessionID:      req.SessionID,
 	}
 	line, err := json.Marshal(ev)
 	if err != nil {
@@ -84,9 +90,13 @@ type Result struct {
 	EvalRunID     string
 }
 
-// finishedEvent is the full dispatch_finished schema (PR #40 + #31 + #34 + #32).
+// finishedEvent is the full dispatch_finished schema (PR #40 + #31 + #34 + #32 + Phase 2).
 // Named fields are serialized exactly — downstream tools (cost, supervise,
 // model-routing, finops-review) parse this; no drift allowed.
+//
+// Identity fields (operator_id, conversation_id, session_id) are
+// additive-optional: omitempty means they are absent from legacy/bash-written
+// lines. All readers of this schema MUST tolerate their absence.
 type finishedEvent struct {
 	Type            string      `json:"type"`
 	Ts              string      `json:"ts"`
@@ -105,6 +115,10 @@ type finishedEvent struct {
 	StderrTail      interface{} `json:"stderr_tail"`      // string | null — PR #34
 	StderrTruncated bool        `json:"stderr_truncated"` // PR #34
 	Usage           *cost.Usage `json:"usage,omitempty"`  // PR #31
+	// Phase 2 identity fields — additive-optional; absent on legacy lines.
+	OperatorID     string `json:"operator_id,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	SessionID      string `json:"session_id,omitempty"`
 }
 
 // writeFinished writes a dispatch_finished event to the dispatch-log.
@@ -125,6 +139,10 @@ func writeFinished(req Request, res Result, ts time.Time, logPath string) {
 		ModelResolved:   res.ModelResolved,
 		StderrTruncated: res.StderrTrunc,
 		Usage:           res.Usage,
+		// Identity fields: omitempty so legacy readers see no new keys.
+		OperatorID:     req.OperatorID,
+		ConversationID: req.ConversationID,
+		SessionID:      req.SessionID,
 	}
 
 	// eval_run_id: null when empty, string when set.

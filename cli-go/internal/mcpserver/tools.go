@@ -109,27 +109,32 @@ func handleDispatch(ctx context.Context, cfg Config, args json.RawMessage) Tools
 	if p.Task == "" {
 		return errorContent("yakos.dispatch: task is required")
 	}
-
-	project := p.Project
-	if project == "" {
-		project = cfg.WorkspaceRoot
-	}
-	yakosRoot := cfg.YakosRoot
-	if yakosRoot == "" {
+	if cfg.YakosRoot == "" {
 		return errorContent("yakos.dispatch: yakos_root not configured (daemon Config.YakosRoot empty)")
 	}
 
-	req := dispatch.Request{
-		AgentName: p.Agent,
-		Task:      p.Task,
-		Project:   project,
-		Runtime:   p.Runtime,
-		Model:     p.Model,
-		YakosRoot: yakosRoot,
-		Timeout:   p.Timeout,
+	svc := cfg.DispatchService
+	if svc == nil {
+		// The daemon must inject the shared Service via Config.DispatchService.
+		// A nil Service means this MCP session was started without the shared
+		// governor — dispatch is unavailable.
+		return errorContent("yakos.dispatch: dispatch service not configured (daemon DispatchService is nil)")
 	}
 
-	_, result, err := dispatch.Run(ctx, req)
+	// MCP-originated dispatches are attributed as operator_id="mcp:<agent>"
+	// per the unified-console-plan.md §"Ideas to add" convention. This lets
+	// the attribution appear in the dispatch-log NDJSON and the WS event feed.
+	// MCPParams sets the internal isMCPStamped flag so the "mcp:" prefix is
+	// accepted by the Service (it is a reserved namespace for non-MCP transports).
+	_, result, err := svc.Run(ctx, dispatch.MCPParams(dispatch.Params{
+		Agent:      p.Agent,
+		Task:       p.Task,
+		Project:    p.Project, // empty → Service uses WorkspaceRoot
+		Runtime:    p.Runtime,
+		Model:      p.Model,
+		Timeout:    p.Timeout,
+		OperatorID: "mcp:" + p.Agent,
+	}))
 	if err != nil {
 		return errorContent(fmt.Sprintf("yakos.dispatch: %v", err))
 	}

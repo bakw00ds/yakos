@@ -137,6 +137,16 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 
 	// --- 8. Exec runtime with stderr capture (PR #34) ---
 	// The dispatch layer owns stderr capture; adapters are oblivious.
+	// ConversationID precedence:
+	//   1. req.ConversationID (per-request field; set by transport/facade)
+	//   2. YAKOS_CONVERSATION_ID env var (legacy bash/CLI callers without the field)
+	// The env var is kept as a fallback so existing callers that rely on it
+	// continue to work unmodified.
+	convID := req.ConversationID
+	if convID == "" {
+		convID = os.Getenv("YAKOS_CONVERSATION_ID")
+	}
+
 	dispatchReq := runtime.DispatchRequest{
 		Project:        req.Project,
 		AgentName:      req.AgentName,
@@ -144,7 +154,7 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 		Task:           req.Task,
 		ModelOverride:  modelResolved,
 		AllowRoot:      req.AllowRoot,
-		ConversationID: os.Getenv("YAKOS_CONVERSATION_ID"),
+		ConversationID: convID,
 		Timeout:        timeout,
 	}
 

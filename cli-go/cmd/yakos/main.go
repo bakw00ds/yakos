@@ -4342,10 +4342,20 @@ Transport: JSON-RPC 2.0 over stdin/stdout (NDJSON).
 		ver = v
 	}
 
-	cfg := mcpserver.Config{
+	// Construct a session-scoped dispatch.Service for this stdio MCP session.
+	// Each `yakos mcp serve` process is a single session (one Claude Code
+	// connection), so one Service per process is the correct scope — this is
+	// not an ephemeral per-call Service.  The session ends when stdin closes.
+	dispatchSvc := dispatch.NewService(dispatch.ServiceConfig{
 		WorkspaceRoot: workspaceRoot,
 		YakosRoot:     yakosRoot,
-		Version:       ver,
+	})
+
+	cfg := mcpserver.Config{
+		WorkspaceRoot:   workspaceRoot,
+		YakosRoot:       yakosRoot,
+		Version:         ver,
+		DispatchService: dispatchSvc,
 	}
 
 	ctx := context.Background()
