@@ -114,51 +114,20 @@ func CompareSnapshots(snaps []metrics.Snapshot, shaA, shaB string) (*metrics.Sna
 }
 
 // getMetricByPath extracts a *float64 for the given dot-path.
-// Returns nil when the metric was not measured.
+// Delegates to metrics.ResolveMetricPath (the authoritative resolver from
+// gate.go) to ensure consistent path resolution across gate, trend, and
+// dashboard endpoints. Returns nil when the metric was not measured.
 func getMetricByPath(m *metrics.Metrics, path string) *float64 {
-	switch path {
-	case "efficiency.total_cost_usd":
-		return m.Efficiency.TotalCostUSD
-	case "efficiency.median_cost_per_task_usd":
-		return m.Efficiency.MedianCostPerTaskUSD
-	case "efficiency.mean_cost_per_task_usd":
-		return m.Efficiency.MeanCostPerTaskUSD
-	case "efficiency.median_tokens_per_task":
-		return m.Efficiency.MedianTokensPerTask
-	case "dispatch.first_try_success_rate":
-		return m.Dispatch.FirstTrySuccessRate
-	case "model_routing.right_sized_pct":
-		return m.ModelRouting.RightSizedPct
-	case "model_routing.total_suggested_monthly_savings_usd":
-		return m.ModelRouting.TotalSuggestedMonthlySavingsUSD
-	case "dora.lead_time_median_hours":
-		return m.DORA.LeadTimeMedianHours
-	case "test.coverage_pct":
-		return m.Test.CoveragePct
-	case "test.test_pass_rate":
-		return m.Test.TestPassRate
+	v, ok := metrics.ResolveMetricPath(m, path)
+	if !ok {
+		return nil
 	}
-	return nil
+	return &v
 }
 
-// parseISO is a local copy matching metrics.parseISO to avoid cross-package
-// unexported access.
+// parseISO delegates to metrics.ParseISO for consistent timestamp parsing.
+// The local copy is removed — cross-package unexported access is no longer
+// needed now that metrics.ParseISO is exported.
 func parseISO(s string) (time.Time, error) {
-	formats := []string{
-		time.RFC3339,
-		time.RFC3339Nano,
-		"2006-01-02T15:04:05-0700",
-		"2006-01-02T15:04:05Z07:00",
-		"2006-01-02",
-	}
-	for _, f := range formats {
-		if t, err := time.Parse(f, s); err == nil {
-			return t, nil
-		}
-	}
-	return time.Time{}, errBadTime("cannot parse time: " + s)
+	return metrics.ParseISO(s)
 }
-
-type errBadTime string
-
-func (e errBadTime) Error() string { return string(e) }

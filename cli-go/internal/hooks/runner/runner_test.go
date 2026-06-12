@@ -18,8 +18,8 @@ import (
 // ---- mock Hook ---------------------------------------------------------------
 
 type mockHook struct {
-	name    string
-	runFn   func(ctx context.Context, in hooktype.HookInput) (hooktype.HookOutput, error)
+	name  string
+	runFn func(ctx context.Context, in hooktype.HookInput) (hooktype.HookOutput, error)
 }
 
 func (m *mockHook) Name() string { return m.name }

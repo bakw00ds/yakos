@@ -33,9 +33,9 @@ type Level int
 
 const (
 	LevelOK   Level = iota
-	LevelInfo        // purely informational, not counted
-	LevelWarn        // counted; in --strict becomes an error
-	LevelErr         // always an error
+	LevelInfo       // purely informational, not counted
+	LevelWarn       // counted; in --strict becomes an error
+	LevelErr        // always an error
 )
 
 // Finding is one validation result for a single check.
@@ -672,35 +672,35 @@ func checkDarkCode(cfg Config, r *Result, w io.Writer) {
 	// Always-exempt basenames — framework helpers, dispatched CLI scripts,
 	// and runtime adapters (mirrors the bash case statements).
 	alwaysExempt := map[string]bool{
-		"hook-input.sh":        true,
-		"hook-output.sh":       true,
-		"paths.sh":             true,
-		"compat.sh":            true,
-		"agents-compose.sh":    true,
-		"runtime-resolve.sh":   true,
-		"hooks-install.sh":     true,
-		"README.md":            true,
-		"agent.sh":             true,
-		"cost.sh":              true,
-		"memory.sh":            true,
-		"session.sh":           true,
-		"project-config.sh":    true,
-		"migrate.sh":           true,
-		"plugin.sh":            true,
-		"teach.sh":             true,
-		"soul.sh":              true,
-		"retro.sh":             true,
-		"skill.sh":             true,
-		"compact.sh":           true,
-		"checkpoint.sh":        true,
-		"kanban.sh":            true,
-		"env.sh":               true,
-		"standards.sh":         true,
-		"peer.sh":              true,
-		"quickstart.sh":        true,
-		"mcp.sh":               true,
-		"completion.sh":        true,
-		"supervise.sh":         true,
+		"hook-input.sh":      true,
+		"hook-output.sh":     true,
+		"paths.sh":           true,
+		"compat.sh":          true,
+		"agents-compose.sh":  true,
+		"runtime-resolve.sh": true,
+		"hooks-install.sh":   true,
+		"README.md":          true,
+		"agent.sh":           true,
+		"cost.sh":            true,
+		"memory.sh":          true,
+		"session.sh":         true,
+		"project-config.sh":  true,
+		"migrate.sh":         true,
+		"plugin.sh":          true,
+		"teach.sh":           true,
+		"soul.sh":            true,
+		"retro.sh":           true,
+		"skill.sh":           true,
+		"compact.sh":         true,
+		"checkpoint.sh":      true,
+		"kanban.sh":          true,
+		"env.sh":             true,
+		"standards.sh":       true,
+		"peer.sh":            true,
+		"quickstart.sh":      true,
+		"mcp.sh":             true,
+		"completion.sh":      true,
+		"supervise.sh":       true,
 	}
 
 	searchRoots := []string{
@@ -794,14 +794,14 @@ func checkAgentMDSections(cfg Config, r *Result, w io.Writer) {
 // goldenCaseSchema describes the required fields in a case-*.json eval file.
 // This mirrors the jq validation in validate.sh:_validate_eval_case_file.
 type goldenCase struct {
-	CaseID           *string          `json:"case_id"`
-	Task             *string          `json:"task"`
-	Rubric           *goldenRubric    `json:"rubric"`
-	ExpectedOutcomes []any            `json:"expected_outcomes"`
-	ContextFiles     []any            `json:"context_files"`
-	MaxDurationS     *float64         `json:"max_duration_s"`
-	MaxCostUSD       *float64         `json:"max_cost_usd"`
-	Tags             []any            `json:"tags"`
+	CaseID           *string       `json:"case_id"`
+	Task             *string       `json:"task"`
+	Rubric           *goldenRubric `json:"rubric"`
+	ExpectedOutcomes []any         `json:"expected_outcomes"`
+	ContextFiles     []any         `json:"context_files"`
+	MaxDurationS     *float64      `json:"max_duration_s"`
+	MaxCostUSD       *float64      `json:"max_cost_usd"`
+	Tags             []any         `json:"tags"`
 }
 
 type goldenRubric struct {

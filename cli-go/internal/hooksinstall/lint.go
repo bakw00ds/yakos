@@ -49,9 +49,9 @@ type LintConfig struct {
 
 // LintResults is the set of per-file lint results.
 type LintResults struct {
-	Files    []LintResult
-	Total    int
-	ErrCount int
+	Files     []LintResult
+	Total     int
+	ErrCount  int
 	WarnCount int
 }
 

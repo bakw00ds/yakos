@@ -9,12 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	_ "embed"
 
 	"github.com/bakw00ds/yakos/internal/cost"
+	"github.com/bakw00ds/yakos/internal/dashauth"
 )
 
 //go:embed dist/index.html
@@ -64,9 +64,13 @@ type Server struct {
 func New(cfg Config) *Server {
 	s := &Server{cfg: cfg, mux: http.NewServeMux()}
 	s.registerRoutes()
+	// Wrap the mux with Host-header / DNS-rebinding defense.
+	// The middleware rejects any request whose Host is not one of the
+	// loopback addresses for the configured port.
+	protected := dashauth.RequireLocalHost(cfg.addr(), s.mux)
 	s.httpSrv = &http.Server{
 		Addr:         cfg.addr(),
-		Handler:      s.mux,
+		Handler:      protected,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -75,6 +79,10 @@ func New(cfg Config) *Server {
 }
 
 // Handler returns the underlying http.Handler for use with httptest.NewServer.
+// Note: the Host-header middleware is NOT applied here because httptest uses
+// a random port and the Host header would not match the configured addr.
+// Tests that specifically exercise Host-header rejection should build a
+// request with req.Host set and use RequireLocalHost directly.
 func (s *Server) Handler() http.Handler { return s.mux }
 
 // Serve starts the HTTP server and blocks until ctx is cancelled.
@@ -136,48 +144,10 @@ func (s *Server) registerRoutes() {
 
 // ---- auth middleware --------------------------------------------------------
 
-// requireToken enforces Bearer token authentication.
-// The token is compared in constant time to prevent timing attacks.
+// requireToken enforces Bearer token authentication using dashauth.
+// Constant-time comparison via crypto/subtle is handled in dashauth.TokenEqual.
 func (s *Server) requireToken(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		tok := bearerToken(r)
-		if tok == "" || !tokenEqual(tok, s.cfg.Token) {
-			if tok == "" {
-				writeErr(w, http.StatusUnauthorized, "missing Authorization: Bearer token")
-			} else {
-				writeErr(w, http.StatusForbidden, "invalid token")
-			}
-			return
-		}
-		next(w, r)
-	}
-}
-
-// bearerToken extracts the Bearer token from the Authorization header.
-func bearerToken(r *http.Request) string {
-	h := r.Header.Get("Authorization")
-	if h == "" {
-		return ""
-	}
-	const prefix = "bearer "
-	if len(h) > len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
-		return h[len(prefix):]
-	}
-	return ""
-}
-
-// tokenEqual compares two strings in O(n) with early-exit only on length
-// mismatch.  This is not constant-time for all compilers, but acceptable for a
-// local dashboard token (no remote adversaries in the threat model).
-func tokenEqual(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var diff byte
-	for i := 0; i < len(a); i++ {
-		diff |= a[i] ^ b[i]
-	}
-	return diff == 0
+	return dashauth.RequireToken(s.cfg.Token, next)
 }
 
 // ---- static asset handlers --------------------------------------------------

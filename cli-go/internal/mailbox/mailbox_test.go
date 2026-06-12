@@ -86,7 +86,7 @@ func TestEvent_Marshal_FieldOrder(t *testing.T) {
 
 func TestEvent_Marshal_RoundTrip(t *testing.T) {
 	detail, _ := json.Marshal(map[string]interface{}{
-		"path":       "src/foo.go",
+		"path":        "src/foo.go",
 		"ttl_seconds": 1800,
 	})
 	e := mailbox.Event{
@@ -286,7 +286,9 @@ func TestFilterSince_FiltersOldLines(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("FilterSince: expected 2; got %d", len(got))
 	}
-	var obj struct{ Kind string `json:"kind"` }
+	var obj struct {
+		Kind string `json:"kind"`
+	}
 	_ = json.Unmarshal(got[0], &obj)
 	if obj.Kind != "new" {
 		t.Errorf("FilterSince[0]: expected new; got %q", obj.Kind)

@@ -11,9 +11,9 @@
 //     root or is a dangling symlink. Foreign binaries are left alone.
 //  4. Handles settings.json:
 //     - If $HOME/.claude/.yakos-created-settings exists, removes settings.json
-//       (we created it during install) and the marker.
+//     (we created it during install) and the marker.
 //     - If --restore-settings and a yakos backup exists, restores the most
-//       recent backup to settings.json.
+//     recent backup to settings.json.
 //     - Otherwise, lists available backups for the operator.
 //  5. Removes $HOME/.yakos and $HOME/.yakos-state/install-manifest.
 //     Removes $HOME/.yakos-state if it is now empty.
@@ -75,10 +75,10 @@ type SymlinkReport struct {
 type LauncherOutcome string
 
 const (
-	LauncherRemoved LauncherOutcome = "removed"  // removed (dangling or YakOS-owned)
-	LauncherKept    LauncherOutcome = "kept"     // foreign or real file; left alone
-	LauncherAbsent  LauncherOutcome = "absent"   // not found at recorded path
-	LauncherUnknown LauncherOutcome = "unknown"  // no manifest entry
+	LauncherRemoved LauncherOutcome = "removed" // removed (dangling or YakOS-owned)
+	LauncherKept    LauncherOutcome = "kept"    // foreign or real file; left alone
+	LauncherAbsent  LauncherOutcome = "absent"  // not found at recorded path
+	LauncherUnknown LauncherOutcome = "unknown" // no manifest entry
 )
 
 // LauncherReport describes the outcome for the managed launcher.
@@ -100,18 +100,18 @@ const (
 
 // SettingsReport describes what happened to settings.json.
 type SettingsReport struct {
-	Outcome        SettingsOutcome
-	SettingsFile   string   // absolute path to settings.json
-	RestoredFrom   string   // non-empty when Outcome==restored
+	Outcome          SettingsOutcome
+	SettingsFile     string   // absolute path to settings.json
+	RestoredFrom     string   // non-empty when Outcome==restored
 	AvailableBackups []string // sorted list of backup files when Kept
 }
 
 // Result is the complete outcome of an uninstall run.
 type Result struct {
-	YakosRoot       string        // resolved root (may be empty on stale pointer)
-	PointerRemoved  bool          // true when ~/.yakos was removed
-	ManifestRemoved bool          // true when ~/.yakos-state/install-manifest was removed
-	StateDirRemoved bool          // true when ~/.yakos-state was rmdir'd (empty)
+	YakosRoot       string // resolved root (may be empty on stale pointer)
+	PointerRemoved  bool   // true when ~/.yakos was removed
+	ManifestRemoved bool   // true when ~/.yakos-state/install-manifest was removed
+	StateDirRemoved bool   // true when ~/.yakos-state was rmdir'd (empty)
 	Symlinks        SymlinkReport
 	Launcher        LauncherReport
 	Settings        SettingsReport

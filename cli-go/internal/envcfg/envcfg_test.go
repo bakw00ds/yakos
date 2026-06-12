@@ -347,9 +347,9 @@ func TestEnvParity_Promote_LocalDivergence_Error(t *testing.T) {
 	cfg.PromoteTo = "test"
 	writeYML(t, cfg.ProjectDir, envYML)
 	cfg.GitFn = stubGit(map[string]string{
-		"fetch origin main":        "",
-		"rev-parse main":           "aaaa\n",
-		"rev-parse origin/main":    "bbbb\n",
+		"fetch origin main":           "",
+		"rev-parse main":              "aaaa\n",
+		"rev-parse origin/main":       "bbbb\n",
 		"log --oneline staging..main": "",
 	})
 	_, err := envcfg.Run(cfg)

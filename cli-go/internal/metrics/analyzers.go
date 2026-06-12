@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -8,9 +9,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bakw00ds/yakos/internal/stackdetect"
 )
+
+// DefaultToolTimeout is the per-tool execution deadline. A tool that does not
+// complete within this window is killed and its status is set to "timeout".
+// The value is intentionally generous to accommodate slow test suites
+// (go test -race) while still bounding a stuck tool.
+const DefaultToolTimeout = 120 * time.Second
 
 // analyzer describes a single tool invocation that populates metric fields.
 type analyzer struct {
@@ -525,10 +533,17 @@ func runAnalyzerList(projectDir string, queue []analyzer, m *Metrics, status map
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			out, runErr := runTool(toolPath, a.Args, projectDir)
+			out, runErr := runTool(toolPath, a.Args, projectDir, DefaultToolTimeout)
 
 			mu.Lock()
 			defer mu.Unlock()
+
+			// Detect timeout: exec.CommandContext kills the process and
+			// returns context.DeadlineExceeded when the deadline fires.
+			if runErr != nil && isDeadlineErr(runErr) {
+				status[a.Name] = "timeout"
+				return
+			}
 
 			applyErr := a.Apply(out, runErr, m)
 			if applyErr != nil {
@@ -541,14 +556,41 @@ func runAnalyzerList(projectDir string, queue []analyzer, m *Metrics, status map
 	wg.Wait()
 }
 
-// runTool executes the tool at toolPath with args in dir, returning combined
-// output and the error. Non-zero exit is not treated as a hard error here —
-// linters legitimately exit non-zero.
-func runTool(toolPath string, args []string, dir string) (string, error) {
-	cmd := exec.Command(toolPath, args...) //nolint:gosec
+// runTool executes the tool at toolPath with args in dir within the given
+// timeout, returning combined output and the error. Non-zero exit is not
+// treated as a hard error — linters legitimately exit non-zero.
+// When the deadline fires the process is killed and context.DeadlineExceeded
+// is returned; callers should check with isDeadlineErr.
+func runTool(toolPath string, args []string, dir string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, toolPath, args...) //nolint:gosec
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
+	// When the deadline fires the process is killed; the surfaced exec error is
+	// OS-dependent ("signal: killed" on Unix, "exit status 1" on Windows), so
+	// detect the timeout via the context itself — the only OS-independent signal.
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(out), context.DeadlineExceeded
+	}
 	return string(out), err
+}
+
+// isDeadlineErr returns true when err is (or wraps) a context deadline /
+// cancellation error — the signal that runTool timed out.
+func isDeadlineErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == context.DeadlineExceeded || err == context.Canceled {
+		return true
+	}
+	// exec.CommandContext wraps the context error inside ExitError when the
+	// process is killed; we also check the unwrapped string as a fallback.
+	s := err.Error()
+	return strings.Contains(s, "deadline exceeded") ||
+		strings.Contains(s, "context canceled") ||
+		strings.Contains(s, "signal: killed")
 }
 
 // parseGoTestOutput parses `go test -cover` output.

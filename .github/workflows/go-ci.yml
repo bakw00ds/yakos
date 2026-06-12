@@ -15,14 +15,14 @@ on:
       - 'scripts/install.sh'
       - 'scripts/uninstall-yakos-go.sh'
       - '.github/workflows/go-ci.yml'
-      # lib/ source paths that the Go refresh tests read at runtime.
-      # Without these, a change to lib/hooks/**,
-      # lib/settings/settings.template.json, or lib/agents/** that
-      # causes fixture drift in cli-go/cmd/yakos/testdata/fixtures/refresh/
-      # will not trigger this workflow — reproducing the #119→#121 incident.
+      # lib/ source paths that the Go embed + drift-guard tests read.
+      # Without these, changes to embedded lib content will not trigger
+      # this workflow — reproducing the #119→#122 incident class.
       - 'lib/hooks/**'
       - 'lib/settings/**'
       - 'lib/agents/**'
+      - 'lib/rules/**'
+      - 'lib/playbooks/**'
   pull_request:
     branches: [main]
     paths:
@@ -33,14 +33,14 @@ on:
       - 'scripts/install.sh'
       - 'scripts/uninstall-yakos-go.sh'
       - '.github/workflows/go-ci.yml'
-      # lib/ source paths that the Go refresh tests read at runtime.
-      # Without these, a change to lib/hooks/**,
-      # lib/settings/settings.template.json, or lib/agents/** that
-      # causes fixture drift in cli-go/cmd/yakos/testdata/fixtures/refresh/
-      # will not trigger this workflow — reproducing the #119→#121 incident.
+      # lib/ source paths that the Go embed + drift-guard tests read.
+      # Without these, changes to embedded lib content will not trigger
+      # this workflow — reproducing the #119→#122 incident class.
       - 'lib/hooks/**'
       - 'lib/settings/**'
       - 'lib/agents/**'
+      - 'lib/rules/**'
+      - 'lib/playbooks/**'
   workflow_dispatch:
 
 jobs:
@@ -51,14 +51,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        go: [stable]
+        go: ['1.25']
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
 
       - name: Set up Go ${{ matrix.go }}
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6
         with:
           go-version: ${{ matrix.go }}
           cache-dependency-path: cli-go/go.sum
@@ -171,7 +171,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
 
       - name: install.sh --dry-run (native platform)
         shell: sh
@@ -219,3 +219,30 @@ jobs:
           # dash rejects bashisms. If install.sh has any, this fails.
           dash scripts/install.sh --help
           dash scripts/uninstall-yakos-go.sh --help
+
+  govulncheck:
+    # Advisory vulnerability scan for Go dependencies (cli-go/).
+    # Uses govulncheck from the Go vuln DB; catches known CVEs and
+    # advisories including pseudo-version packages (go.starlark.net etc.).
+    # Run on Linux only (single platform is sufficient; vuln DB is universal).
+    # This is a required gate: a newly-reported vuln in a dep should block
+    # merge so the dep can be updated before shipping.
+    name: govulncheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6
+        with:
+          go-version: '1.25'
+          cache-dependency-path: cli-go/go.sum
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        working-directory: cli-go
+        run: govulncheck ./...

@@ -7,15 +7,15 @@
 //
 //  2. The bash peer.sh manages multi-developer coordination via shared
 //     NDJSON event logs in a coord directory:
-//       status        — list active peer sessions
-//       log           — tail activity.ndjson
-//       claim         — emit claim_confirmed event
-//       release       — emit claim_released event
-//       claims        — parse and display active-claims.json
-//       deadlock      — wait-for graph from activity log vs. active-claims
-//       propose-mode  — emit mode_proposal and poll for mode_response
-//       respond-mode  — emit mode_response
-//       handoff       — emit peer_handoff or peer_handoff_response
+//     status        — list active peer sessions
+//     log           — tail activity.ndjson
+//     claim         — emit claim_confirmed event
+//     release       — emit claim_released event
+//     claims        — parse and display active-claims.json
+//     deadlock      — wait-for graph from activity log vs. active-claims
+//     propose-mode  — emit mode_proposal and poll for mode_response
+//     respond-mode  — emit mode_response
+//     handoff       — emit peer_handoff or peer_handoff_response
 //
 //  3. Parity is verified behaviourally (output shape, NDJSON content,
 //     error conditions) rather than byte-for-byte.

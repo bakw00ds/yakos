@@ -50,25 +50,64 @@ func getGitInfo(runner gitRunner, projectDir string) gitInfo {
 // deployTagRe matches semver tags like v1.2.3.4.
 var deployTagRe = regexp.MustCompile(`^v\d+\.\d+\.\d+\.\d+$`)
 
-// getDeployTags returns all git tags matching the deploy-tag pattern,
-// along with their commit timestamps (RFC3339).
-// Returns nil, nil when no tags match or git is unavailable.
-func getDeployTags(runner gitRunner, projectDir string) ([]string, error) {
-	out, err := runner.Run(projectDir, "tag", "--list")
+// tagEntry holds a deploy tag name and its ISO creation timestamp.
+type tagEntry struct {
+	Name string
+	TS   string
+}
+
+// getDeployTagsWithTimestamps returns all deploy tags and their timestamps in a
+// single git for-each-ref call — O(1) git spawns regardless of tag count,
+// replacing the previous O(tags) loop of per-tag "git log -1" calls.
+//
+// Format per line: "<refname:short> <creatordate:iso-strict>"
+// e.g.: "v1.2.3.4 2026-01-15T10:30:00+00:00"
+func getDeployTagsWithTimestamps(runner gitRunner, projectDir string) ([]tagEntry, error) {
+	out, err := runner.Run(projectDir,
+		"for-each-ref",
+		"--format=%(refname:short) %(creatordate:iso-strict)",
+		"refs/tags",
+	)
 	if err != nil {
-		return nil, fmt.Errorf("git tag: %w", err)
+		return nil, fmt.Errorf("git for-each-ref: %w", err)
 	}
-	var tags []string
-	for _, t := range strings.Split(out, "\n") {
-		t = strings.TrimSpace(t)
-		if deployTagRe.MatchString(t) {
-			tags = append(tags, t)
+	var entries []tagEntry
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
 		}
+		// Split into at most two parts: tag name and timestamp.
+		idx := strings.Index(line, " ")
+		if idx < 0 {
+			continue
+		}
+		name := line[:idx]
+		ts := strings.TrimSpace(line[idx+1:])
+		if deployTagRe.MatchString(name) && ts != "" {
+			entries = append(entries, tagEntry{Name: name, TS: ts})
+		}
+	}
+	return entries, nil
+}
+
+// getDeployTags returns all git tags matching the deploy-tag pattern.
+// It uses getDeployTagsWithTimestamps internally and discards the timestamps.
+// Callers that need timestamps should call getDeployTagsWithTimestamps directly.
+func getDeployTags(runner gitRunner, projectDir string) ([]string, error) {
+	entries, err := getDeployTagsWithTimestamps(runner, projectDir)
+	if err != nil {
+		return nil, err
+	}
+	tags := make([]string, len(entries))
+	for i, e := range entries {
+		tags[i] = e.Name
 	}
 	return tags, nil
 }
 
 // getTagTimestamp returns the author timestamp of the commit a tag points at.
+// Kept for backward-compat with getLeadTimes which still needs per-tag log.
 func getTagTimestamp(runner gitRunner, projectDir, tag string) (string, error) {
 	return runner.Run(projectDir, "log", "-1", "--format=%aI", tag)
 }

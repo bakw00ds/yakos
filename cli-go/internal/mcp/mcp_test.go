@@ -50,7 +50,7 @@ import (
 
 var fixedNow = time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
-func pythonOK() error  { return nil }
+func pythonOK() error   { return nil }
 func pythonFail() error { return errors.New("python not found") }
 
 func newCfg(t *testing.T, sub string) Config {

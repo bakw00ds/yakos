@@ -100,7 +100,7 @@ func TestContextThreshold_ProbeUnavailableLogsReport(t *testing.T) {
 	h.NowFn = fixedNow
 	in := hooktype.HookInput{
 		Env: map[string]string{
-			"YAKOS_RUNTIME":    "claude",
+			"YAKOS_RUNTIME":     "claude",
 			"CLAUDE_SESSION_ID": "sess-nope",
 			// No CLAUDE_PROJECT_DIR → probe fails.
 		},

@@ -31,14 +31,14 @@ func buildHook(t *testing.T) (*secretscan.Hook, string) {
 
 // Secret constructors are split to avoid the hook matching THIS source file.
 
-func awsKey() string { return "AK" + "IA" + strings.Repeat("B", 16) }
-func ghToken() string { return "gh" + "p_" + strings.Repeat("a", 36) }
+func awsKey() string        { return "AK" + "IA" + strings.Repeat("B", 16) }
+func ghToken() string       { return "gh" + "p_" + strings.Repeat("a", 36) }
 func ghFineGrained() string { return "github" + "_pat_" + strings.Repeat("a", 82) }
-func pemKeyHeader() string { return "-----BEGIN" + " RSA PRIVATE KEY-----" }
-func slackToken() string { return "xo" + "xb-" + strings.Repeat("1", 10) }
-func stripeKey() string { return "sk" + "_live_" + strings.Repeat("x", 24) }
+func pemKeyHeader() string  { return "-----BEGIN" + " RSA PRIVATE KEY-----" }
+func slackToken() string    { return "xo" + "xb-" + strings.Repeat("1", 10) }
+func stripeKey() string     { return "sk" + "_live_" + strings.Repeat("x", 24) }
 func opensshHeader() string { return "-----BEGIN" + " OPENSSH PRIVATE KEY-----" }
-func ecKeyHeader() string { return "-----BEGIN" + " EC PRIVATE KEY-----" }
+func ecKeyHeader() string   { return "-----BEGIN" + " EC PRIVATE KEY-----" }
 
 func writeInput(tool, content, filePath string) hooktype.HookInput {
 	payload := map[string]any{"content": content, "path": filePath}

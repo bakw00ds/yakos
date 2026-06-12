@@ -101,8 +101,8 @@ type Config struct {
 
 // Server is the gRPC API server.
 type Server struct {
-	cfg    Config
-	gSrv   *grpc.Server
+	cfg  Config
+	gSrv *grpc.Server
 }
 
 // New creates a Server and registers all service implementations.
@@ -704,4 +704,3 @@ func columnOfID(board *iKanban.Board, id string) string {
 	}
 	return ""
 }
-

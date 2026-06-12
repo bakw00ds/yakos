@@ -212,9 +212,9 @@ func countMarkdownFiles(dir string, excludeNames ...string) int {
 // It is a best-effort grep; it does not replace a proper secret scanner.
 func hasObviousSecrets(projectPath string) bool {
 	patterns := []string{
-		"sk-ant-",          // Anthropic API key
-		"AKIA",             // AWS access key
-		"ghp_",             // GitHub personal access token
+		"sk-ant-", // Anthropic API key
+		"AKIA",    // AWS access key
+		"ghp_",    // GitHub personal access token
 		"BEGIN RSA PRIVATE KEY",
 		"BEGIN EC PRIVATE KEY",
 	}

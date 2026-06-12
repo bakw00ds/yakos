@@ -171,9 +171,9 @@ type DispatchResult struct {
 
 // JudgeResult holds the parsed scoring output from a judge dispatch.
 type JudgeResult struct {
-	Pass            bool
-	CriteriaScores  []json.RawMessage
-	Notes           string
+	Pass           bool
+	CriteriaScores []json.RawMessage
+	Notes          string
 }
 
 // Result summarises what Run did.
@@ -201,7 +201,7 @@ type Result struct {
 	PromoteTo   string
 
 	// RejectedAgent / RejectedSuggestedModel for reject.
-	RejectedAgent         string
+	RejectedAgent          string
 	RejectedSuggestedModel string
 
 	// HistoryCount is the number of records shown in history.
@@ -357,11 +357,11 @@ Logs written to:
 // ---- settings ---------------------------------------------------------------
 
 type mrSettings struct {
-	EpsilonPassRate      float64
-	MinCasesForEval      int
-	MinCasesForConf      int
-	MaxEvalRunCostUSD    float64
-	WeeklyMaxCostUSD     float64
+	EpsilonPassRate   float64
+	MinCasesForEval   int
+	MinCasesForConf   int
+	MaxEvalRunCostUSD float64
+	WeeklyMaxCostUSD  float64
 }
 
 func loadSettings(cfg Config) mrSettings {
@@ -700,10 +700,10 @@ func checkWeeklyBudget(cfg Config, settings mrSettings) error {
 // ---- eval case struct -------------------------------------------------------
 
 type evalCase struct {
-	CaseID          string          `json:"case_id"`
-	Task            string          `json:"task"`
+	CaseID           string          `json:"case_id"`
+	Task             string          `json:"task"`
 	ExpectedOutcomes json.RawMessage `json:"expected_outcomes"`
-	Rubric          json.RawMessage `json:"rubric"`
+	Rubric           json.RawMessage `json:"rubric"`
 }
 
 func loadEvalCase(path string) (evalCase, error) {
@@ -976,13 +976,13 @@ outerLoop:
 
 			// Build judge input.
 			judgeInput := mustJSON(map[string]interface{}{
-				"case_id":          ec.CaseID,
-				"task":             ec.Task,
+				"case_id":           ec.CaseID,
+				"task":              ec.Task,
 				"expected_outcomes": ec.ExpectedOutcomes,
-				"rubric":           ec.Rubric,
-				"agent_response":   dr.Stdout,
-				"duration_s":       dr.DurationS,
-				"actual_cost_usd":  dr.Cost,
+				"rubric":            ec.Rubric,
+				"agent_response":    dr.Stdout,
+				"duration_s":        dr.DurationS,
+				"actual_cost_usd":   dr.Cost,
 			})
 
 			// Dispatch judge.
@@ -1034,12 +1034,12 @@ outerLoop:
 			// Cost cap check.
 			if totalSpent > maxCost {
 				budgetRec := mustJSON(map[string]interface{}{
-					"type":       "budget_exceeded",
-					"ts":         isoNow(cfg.Now),
-					"run_id":     runID,
-					"agent":      cfg.AgentID,
-					"spent_usd":  totalSpent,
-					"cap_usd":    maxCost,
+					"type":      "budget_exceeded",
+					"ts":        isoNow(cfg.Now),
+					"run_id":    runID,
+					"agent":     cfg.AgentID,
+					"spent_usd": totalSpent,
+					"cap_usd":   maxCost,
 				})
 				logWrite(cfg.EvalLog, budgetRec)
 				fmt.Fprintf(cfg.Writer, "  WARN: budget cap $%.2f exceeded after $%.6f spent; aborting run\n", maxCost, totalSpent)
@@ -1221,8 +1221,8 @@ outerLoop:
 		savingsPerMo := savings * 1000 // matches bash: diff*1000
 
 		candRec := mustJSON(map[string]interface{}{
-			"agent":          cfg.AgentID,
-			"current_model":  currentModel,
+			"agent":           cfg.AgentID,
+			"current_model":   currentModel,
 			"suggested_model": candidateTier,
 			"evidence": map[string]interface{}{
 				"pass_rates":   map[string]float64{"haiku": haikuRate, "sonnet": sonnetRate, "opus": opusRate, "fable": fableRate},
@@ -1295,12 +1295,12 @@ func nilOrString(s string) interface{} {
 
 // candidateRecord is the top-level shape of a candidates.ndjson line.
 type candidateRecord struct {
-	Agent                       string          `json:"agent"`
-	CurrentModel                string          `json:"current_model"`
-	SuggestedModel              string          `json:"suggested_model"`
-	EstimatedMonthlySavingsUSD  float64         `json:"estimated_monthly_savings_usd"`
-	GeneratedAt                 string          `json:"generated_at"`
-	Evidence                    json.RawMessage `json:"evidence"`
+	Agent                      string          `json:"agent"`
+	CurrentModel               string          `json:"current_model"`
+	SuggestedModel             string          `json:"suggested_model"`
+	EstimatedMonthlySavingsUSD float64         `json:"estimated_monthly_savings_usd"`
+	GeneratedAt                string          `json:"generated_at"`
+	Evidence                   json.RawMessage `json:"evidence"`
 }
 
 func (c candidateRecord) nCases() int {
@@ -1847,14 +1847,14 @@ func graveyardCount(graveyardFile, agentID, suggestedModel string) int {
 // ---- subcommand: history ----------------------------------------------------
 
 type historyRecord struct {
-	TS          string `json:"ts"`
-	Action      string `json:"action"`
-	Agent       string `json:"agent"`
-	FromModel   string `json:"from_model"`
-	ToModel     string `json:"to_model"`
-	Reason      string `json:"reason"`
-	ByUser      string `json:"by_user"`
-	EvalRunID   string `json:"eval_run_id"`
+	TS        string `json:"ts"`
+	Action    string `json:"action"`
+	Agent     string `json:"agent"`
+	FromModel string `json:"from_model"`
+	ToModel   string `json:"to_model"`
+	Reason    string `json:"reason"`
+	ByUser    string `json:"by_user"`
+	EvalRunID string `json:"eval_run_id"`
 }
 
 func runHistory(cfg Config) (Result, error) {

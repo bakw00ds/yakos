@@ -15,10 +15,10 @@
 //
 // # Security model
 //
-// - Loopback-only binding (127.0.0.1) in this dispatch; cross-machine access
-//   requires mTLS (Phase 2 parallel scope, not included here).
-// - Dashboard is strictly read-only: no state mutation paths exist.
-// - Host header validated against an allowlist (DNS-rebinding defence).
+//   - Loopback-only binding (127.0.0.1) in this dispatch; cross-machine access
+//     requires mTLS (Phase 2 parallel scope, not included here).
+//   - Dashboard is strictly read-only: no state mutation paths exist.
+//   - Host header validated against an allowlist (DNS-rebinding defence).
 //
 // # Stability: experimental
 package perfdash

@@ -61,21 +61,21 @@ type HookEntry struct {
 // Report is the structured result returned by Status.
 // The Format function turns it into the human-readable dashboard.
 type Report struct {
-	Project      string
-	ControlDir   string
-	SessionAge   string // e.g. "started 2026-06-01T10:00:00Z (2h 5m ago)"
-	SessionWarn  string // non-empty when age > 4h
-	ScratchSize  string // e.g. "4.2M"
-	ScratchWarn  string // non-empty when > 100 MB
-	ArchiveSize  string // e.g. "12M" or "(empty)"
-	PlanAge      string // e.g. "3h ago" or "absent"
-	ContractsAge string
-	DecisionsAge string
+	Project       string
+	ControlDir    string
+	SessionAge    string // e.g. "started 2026-06-01T10:00:00Z (2h 5m ago)"
+	SessionWarn   string // non-empty when age > 4h
+	ScratchSize   string // e.g. "4.2M"
+	ScratchWarn   string // non-empty when > 100 MB
+	ArchiveSize   string // e.g. "12M" or "(empty)"
+	PlanAge       string // e.g. "3h ago" or "absent"
+	ContractsAge  string
+	DecisionsAge  string
 	DecisionsWarn string // "⚠" when decisions.md > 2h old
-	Hooks        []HookEntry
-	BypassCount  int
-	MailboxCount int
-	MemoryLabel  string // e.g. "3 MEMORY.md file(s) under ~/.claude/projects/"
+	Hooks         []HookEntry
+	BypassCount   int
+	MailboxCount  int
+	MemoryLabel   string // e.g. "3 MEMORY.md file(s) under ~/.claude/projects/"
 }
 
 // Status runs the full status query against the project's work directory.

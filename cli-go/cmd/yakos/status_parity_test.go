@@ -133,6 +133,8 @@ func copyDir(t *testing.T, src, dst string) error {
 //  1. "Control:" line: replaces the home-dir prefix with a fixed token.
 //  2. "Scratchpad:" size fields → "<size>".
 //  3. "Last team:" age parenthetical → "<age>".
+//  4. "Plan:" age token → "<age>" — fixes TestStatusParity_InProgressMixed
+//     flake where "1s ago" vs "0s ago" differ between bash and Go runs.
 func normalizeStatusOutput(b []byte) []byte {
 	lines := strings.Split(string(b), "\n")
 	for i, line := range lines {
@@ -153,6 +155,12 @@ func normalizeStatusOutput(b []byte) []byte {
 			// "  Last team:   started 2026-… (2h 5m ago)"
 			// → "  Last team:   started 2026-… (<age>)"
 			lines[i] = ageParenNormRE.ReplaceAllString(line, "(<age>)")
+
+		case strings.Contains(line, "  Plan:") && ageTokenRE.MatchString(line):
+			// "  Plan:        3h ago" → "  Plan:        <age>"
+			// Fixes the ~30% flake where fixture mtime produces "0s ago" vs
+			// "1s ago" depending on scheduling jitter between bash and Go runs.
+			lines[i] = ageTokenRE.ReplaceAllString(line, "<age>")
 		}
 	}
 	return []byte(strings.Join(lines, "\n"))
@@ -166,6 +174,10 @@ var (
 
 	// ageParenNormRE matches a parenthetical age like "(30s ago)" or "(2h 5m ago)".
 	ageParenNormRE = regexp.MustCompile(`\(\d+[smhd].*?\)`)
+
+	// ageTokenRE matches a bare age token like "3d ago", "2h ago", "45m ago",
+	// "30s ago" as it appears in Plan: / Contracts: / Decisions: lines.
+	ageTokenRE = regexp.MustCompile(`\d+[smhd]\s+ago`)
 )
 
 // ---- (a) empty work-tree ----------------------------------------------------
@@ -350,7 +362,7 @@ func TestStatus_GoNative_EmptyWorkdir(t *testing.T) {
 	}
 
 	extraEnv := map[string]string{
-		"HOME":          tmpHome,
+		"HOME":           tmpHome,
 		"YAKOS_WORK_DIR": workDir,
 	}
 	out, exitCode := runGoStatus(t, goBin, []string{"status", "myproj"}, extraEnv)
@@ -404,7 +416,7 @@ func TestStatus_GoNative_MemoryDetection(t *testing.T) {
 	}
 
 	extraEnv := map[string]string{
-		"HOME":          tmpHome,
+		"HOME":           tmpHome,
 		"YAKOS_WORK_DIR": workDir,
 	}
 	out, exitCode := runGoStatus(t, goBin, []string{"status", "myproj"}, extraEnv)

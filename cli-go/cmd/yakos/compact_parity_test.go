@@ -6,9 +6,9 @@
 //     or real ~/.yakos-state directory is required.
 //
 //  2. The bash compact.sh manages context-compaction advisories:
-//       now        — print the slash command to paste into the session
-//       threshold  — show or set notice threshold (default 75%)
-//       history    — display the last 50 compaction log entries
+//     now        — print the slash command to paste into the session
+//     threshold  — show or set notice threshold (default 75%)
+//     history    — display the last 50 compaction log entries
 //
 //  3. Parity is verified behaviourally (output shape, filesystem effects,
 //     error conditions) rather than byte-for-byte.

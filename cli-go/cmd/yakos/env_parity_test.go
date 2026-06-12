@@ -6,10 +6,10 @@
 //     GitFn/ExecFn; no real git repo or gh/glab binary required.
 //
 //  2. The bash env.sh manages dev/test/prod environment promotion:
-//       status    — show current branch → env mapping
-//       promote   — open a PR from one env's branch to another's
-//       validate  — check .yakos.yml environments section
-//       list      — list configured envs
+//     status    — show current branch → env mapping
+//     promote   — open a PR from one env's branch to another's
+//     validate  — check .yakos.yml environments section
+//     list      — list configured envs
 //
 //  3. Parity is verified behaviourally (output shape, filesystem effects,
 //     error conditions) rather than byte-for-byte.

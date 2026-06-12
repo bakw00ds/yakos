@@ -50,16 +50,16 @@ const hookName = "peer-claim"
 
 // claimOwner is the owner block stored per path in active-claims.json.
 type claimOwner struct {
-	User      string `json:"user"`
-	Host      string `json:"host"`
-	PID       int    `json:"pid"`
-	SessionID string `json:"session_id"`
-	Agent     string `json:"agent"`
-	Status    string `json:"status"` // "intent" or "confirmed"
-	ClaimedAt string `json:"claimed_at"`
-	RenewedAt string `json:"renewed_at"`
-	ExpiresAt string `json:"expires_at"`
-	TTLSeconds int   `json:"ttl_seconds"`
+	User       string `json:"user"`
+	Host       string `json:"host"`
+	PID        int    `json:"pid"`
+	SessionID  string `json:"session_id"`
+	Agent      string `json:"agent"`
+	Status     string `json:"status"` // "intent" or "confirmed"
+	ClaimedAt  string `json:"claimed_at"`
+	RenewedAt  string `json:"renewed_at"`
+	ExpiresAt  string `json:"expires_at"`
+	TTLSeconds int    `json:"ttl_seconds"`
 }
 
 // claimEntry is a single entry in active-claims.json.

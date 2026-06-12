@@ -242,14 +242,19 @@ func RunGate(cfg GateConfig) (GateResult, error) {
 		if runner == nil {
 			runner = realGitRunner{}
 		}
+		// Pass a no-op dispatchRunner: gate --collect never uses --deep, so
+		// the dispatch runner is never invoked. Passing nil would nil-panic if
+		// cfg.Deep were ever accidentally set, so we guard explicitly.
+		gateDispatchRunner := dispatchRunner(realDispatchRunner{})
 		collectCfg := Config{
 			Subcommand: "collect",
 			Trigger:    "gate",
 			ProjectDir: projectDir,
 			StateDir:   stateDir,
 			HomeDir:    cfg.HomeDir,
+			// Deep intentionally NOT set: gate --collect is a fast collect.
 		}
-		if _, err := runCollect(collectCfg, runner, nil, time.Now().UTC(), cfg.HomeDir, ew, ew); err != nil {
+		if _, err := runCollect(collectCfg, runner, gateDispatchRunner, time.Now().UTC(), cfg.HomeDir, ew, ew); err != nil {
 			return GateResult{}, fmt.Errorf("metrics gate: collect: %w", err)
 		}
 	}
@@ -499,7 +504,9 @@ func formatGateFloat(f float64) string {
 	return fmt.Sprintf("%.4g", f)
 }
 
-// resolveMetricPath resolves a dot-path into the Metrics struct.
+// ResolveMetricPath is the exported form of resolveMetricPath. It is the
+// single authoritative dot-path resolver for Metrics structs, shared across
+// gate.go, format.go, and metricsdash analytics.
 //
 // Supported paths:
 //
@@ -519,6 +526,12 @@ func formatGateFloat(f float64) string {
 //	security.sast_findings_by_severity.<severity>
 //
 // Returns (value, true) when measured; (0, false) when nil (not measured).
+func ResolveMetricPath(m *Metrics, path string) (float64, bool) {
+	return resolveMetricPath(m, path)
+}
+
+// resolveMetricPath is the internal implementation; callers within the metrics
+// package use this directly to avoid an extra indirection.
 func resolveMetricPath(m *Metrics, path string) (float64, bool) {
 	parts := splitDotPath(path)
 	if len(parts) < 2 {

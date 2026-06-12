@@ -93,15 +93,15 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	bypassActive := h.isBypassed(domain)
 
 	entry := map[string]any{
-		"ts":           h.NowFn().UTC().Format(time.RFC3339),
-		"hook":         hookName,
-		"severity":     "REPORT",
-		"action":       "pass",
-		"message":      "report-only in v0.1 (UNCLEAR — see hook source)",
-		"mode":         "report-only",
-		"agent_type":   agentRole,
+		"ts":            h.NowFn().UTC().Format(time.RFC3339),
+		"hook":          hookName,
+		"severity":      "REPORT",
+		"action":        "pass",
+		"message":       "report-only in v0.1 (UNCLEAR — see hook source)",
+		"mode":          "report-only",
+		"agent_type":    agentRole,
 		"routed_domain": domain,
-		"would_run":    wouldRun,
+		"would_run":     wouldRun,
 		"bypass_active": bypassActive,
 	}
 

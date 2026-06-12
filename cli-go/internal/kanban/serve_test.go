@@ -78,9 +78,9 @@ func newTestServer(t *testing.T, boardPath, project string) (*httptest.Server, s
 	host := "127.0.0.1"
 	allowed := map[string]struct{}{
 		"127.0.0.1": {},
-		"localhost":  {},
-		"[::1]":      {},
-		"::1":        {},
+		"localhost": {},
+		"[::1]":     {},
+		"::1":       {},
 	}
 	allowed[host] = struct{}{}
 

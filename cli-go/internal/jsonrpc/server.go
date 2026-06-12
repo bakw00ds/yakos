@@ -86,8 +86,8 @@ type Handler func(ctx context.Context, params json.RawMessage) (interface{}, err
 // Server is a JSON-RPC 2.0 server backed by a net.Listener.
 // Register methods before calling Serve.
 type Server struct {
-	mu       sync.RWMutex
-	methods  map[string]Handler
+	mu      sync.RWMutex
+	methods map[string]Handler
 }
 
 // NewServer creates an empty Server.
@@ -244,11 +244,11 @@ type pipeConn struct {
 	rw io.ReadWriter
 }
 
-func (p *pipeConn) Read(b []byte) (int, error)  { return p.rw.Read(b) }
-func (p *pipeConn) Write(b []byte) (int, error) { return p.rw.Write(b) }
-func (p *pipeConn) Close() error                { return nil }
-func (p *pipeConn) LocalAddr() net.Addr         { return dummyAddr{} }
-func (p *pipeConn) RemoteAddr() net.Addr        { return dummyAddr{} }
+func (p *pipeConn) Read(b []byte) (int, error)         { return p.rw.Read(b) }
+func (p *pipeConn) Write(b []byte) (int, error)        { return p.rw.Write(b) }
+func (p *pipeConn) Close() error                       { return nil }
+func (p *pipeConn) LocalAddr() net.Addr                { return dummyAddr{} }
+func (p *pipeConn) RemoteAddr() net.Addr               { return dummyAddr{} }
 func (p *pipeConn) SetDeadline(t time.Time) error      { return nil }
 func (p *pipeConn) SetReadDeadline(t time.Time) error  { return nil }
 func (p *pipeConn) SetWriteDeadline(t time.Time) error { return nil }

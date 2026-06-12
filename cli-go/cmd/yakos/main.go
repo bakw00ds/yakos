@@ -5762,6 +5762,14 @@ func currentGOARCH() string { return goruntime.GOARCH }
 // It is fail-silent: any error is swallowed.
 // startNano is the result of time.Now().UnixNano() captured before dispatch.
 func recordInvocation(home, yakosRoot string, args []string, startNano int64) {
+	// Short-circuit before any I/O when telemetry is disabled — avoids the
+	// version.Read file access on every invocation when the user has not
+	// opted in. telemetry.Record already checks this, but that requires
+	// building the full Event first (including version.Read).
+	if cfg, err := telemetry.LoadConfig(home); err != nil || !cfg.Enabled {
+		return
+	}
+
 	endTime := time.Now()
 	durationMS := (endTime.UnixNano() - startNano) / 1e6
 	if durationMS < 0 {
@@ -5896,10 +5904,13 @@ func runMetricsDash(cfg metrics.Config, home string) error {
 
 	// Print the dashboard URL with the token in the URL fragment.
 	// The fragment is never sent in HTTP requests so it never appears in
-	// server access logs.
+	// server access logs. The raw token is only printed when --show-token is
+	// set; the #token= URL is sufficient for normal browser use.
 	fmt.Printf("metrics serve: dashboard ready\n")
 	fmt.Printf("  URL:   http://%s/#token=%s\n", addr, tok)
-	fmt.Printf("  token: %s\n", tok)
+	if cfg.ServeShowToken {
+		fmt.Printf("  token: %s\n", tok)
+	}
 	fmt.Printf("  press Ctrl-C to stop\n")
 
 	srv := metricsdash.New(metricsdash.Config{

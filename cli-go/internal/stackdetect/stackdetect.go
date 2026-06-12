@@ -110,13 +110,13 @@ func detectFile(name, dir string, found map[Profile]bool) {
 		found[ProfileRuby] = true
 	case "pom.xml", "build.gradle", "build.gradle.kts":
 		found[ProfileJava] = true
-	case "*.csproj", "*.fsproj", "*.vbproj":
-		found[ProfileDotNet] = true
 	case "pubspec.yaml":
 		found[ProfileFlutter] = true
 	}
 
-	// .csproj / .fsproj / .vbproj matched by suffix since glob doesn't apply.
+	// .csproj / .fsproj / .vbproj matched by suffix: os.ReadDir returns real
+	// file names, never glob patterns, so suffix matching is the correct
+	// approach. The old "*.csproj" case arm was dead code.
 	if strings.HasSuffix(name, ".csproj") ||
 		strings.HasSuffix(name, ".fsproj") ||
 		strings.HasSuffix(name, ".vbproj") {

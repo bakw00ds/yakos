@@ -9,7 +9,7 @@
 //
 //     - Summary line (last line): CompareExact — always deterministic.
 //     - Per-file ok/warn/err lines: sort both outputs and compare as sets
-//       using a StdoutTransformBash/Go that sorts lines before compare.
+//     using a StdoutTransformBash/Go that sorts lines before compare.
 //
 //  2. Framework-level tests (fixtures a, d) use the real repo lib/ as YAKOS_ROOT.
 //     This exercises the full validate logic on actual content and ensures the
@@ -25,11 +25,12 @@
 //     CompareExact.
 //
 // Fixture matrix:
-//   (a) validate-clean-framework    — real repo, no errors expected
-//   (b) validate-broken-agent       — temp fixture, one agent missing frontmatter
-//   (c) validate-stale-playbook-ref — temp fixture, broken playbook: reference
-//   (d) validate-strict-mode        — real repo --strict, 6 warnings → 6 errors
-//   (e) validate-project-mode       — project path with .claude/ containing one agent
+//
+//	(a) validate-clean-framework    — real repo, no errors expected
+//	(b) validate-broken-agent       — temp fixture, one agent missing frontmatter
+//	(c) validate-stale-playbook-ref — temp fixture, broken playbook: reference
+//	(d) validate-strict-mode        — real repo --strict, 6 warnings → 6 errors
+//	(e) validate-project-mode       — project path with .claude/ containing one agent
 package main
 
 import (

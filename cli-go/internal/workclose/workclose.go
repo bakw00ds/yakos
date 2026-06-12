@@ -129,20 +129,20 @@ type humanSignal struct {
 
 // outcomeRecord is the JSON schema for a plan_outcome log line.
 type outcomeRecord struct {
-	Type                 string       `json:"type"`
-	Ts                   string       `json:"ts"`
-	PlanID               string       `json:"plan_id"`
-	Project              string       `json:"project"`
-	FirstTryPass         interface{}  `json:"first_try_pass"`          // bool or null
-	ReworkCycles         interface{}  `json:"rework_cycles"`           // int or null
-	FilesTouched         interface{}  `json:"files_touched"`           // int or null
+	Type                  string      `json:"type"`
+	Ts                    string      `json:"ts"`
+	PlanID                string      `json:"plan_id"`
+	Project               string      `json:"project"`
+	FirstTryPass          interface{} `json:"first_try_pass"`          // bool or null
+	ReworkCycles          interface{} `json:"rework_cycles"`           // int or null
+	FilesTouched          interface{} `json:"files_touched"`           // int or null
 	FilesTouchedEstimated interface{} `json:"files_touched_estimated"` // int or null
-	ScopeCreepRatio      interface{}  `json:"scope_creep_ratio"`       // float or null
-	LinesChanged         interface{}  `json:"lines_changed"`           // int or null
-	TokensSpentTotal     interface{}  `json:"tokens_spent_total"`      // int or null
-	CostUSDActual        interface{}  `json:"cost_usd_actual"`         // float or null
-	ReworkFailureModes   []string     `json:"rework_failure_modes"`
-	HumanSignal          interface{}  `json:"human_signal"` // humanSignal or null
+	ScopeCreepRatio       interface{} `json:"scope_creep_ratio"`       // float or null
+	LinesChanged          interface{} `json:"lines_changed"`           // int or null
+	TokensSpentTotal      interface{} `json:"tokens_spent_total"`      // int or null
+	CostUSDActual         interface{} `json:"cost_usd_actual"`         // float or null
+	ReworkFailureModes    []string    `json:"rework_failure_modes"`
+	HumanSignal           interface{} `json:"human_signal"` // humanSignal or null
 }
 
 // ---- entry point ------------------------------------------------------------

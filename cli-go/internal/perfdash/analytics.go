@@ -76,25 +76,25 @@ func sinceISO(window time.Duration) string {
 
 // DispatchRow represents a single dispatch_finished event for the recent list.
 type DispatchRow struct {
-	Ts         string  `json:"ts"`
-	Agent      string  `json:"agent"`
-	Runtime    string  `json:"runtime"`
-	Project    string  `json:"project"`
-	ExitCode   int     `json:"exit_code"`
-	DurationS  float64 `json:"duration_s"`
-	CostUSD    float64 `json:"cost_usd"`
-	LatencyMs  int64   `json:"latency_ms"`
+	Ts        string  `json:"ts"`
+	Agent     string  `json:"agent"`
+	Runtime   string  `json:"runtime"`
+	Project   string  `json:"project"`
+	ExitCode  int     `json:"exit_code"`
+	DurationS float64 `json:"duration_s"`
+	CostUSD   float64 `json:"cost_usd"`
+	LatencyMs int64   `json:"latency_ms"`
 }
 
 // SummaryResponse is the response shape for GET /api/perf/summary.
 type SummaryResponse struct {
-	TotalDispatches int64          `json:"total_dispatches"`
-	TotalCostUSD    float64        `json:"total_cost_usd"`
-	AvgLatencyMs    int64          `json:"avg_latency_ms"`
-	P50LatencyMs    int64          `json:"p50_latency_ms"`
-	P95LatencyMs    int64          `json:"p95_latency_ms"`
-	TopAgents       []TopAxisItem  `json:"top_agents"`
-	TopRuntimes     []TopAxisItem  `json:"top_runtimes"`
+	TotalDispatches int64         `json:"total_dispatches"`
+	TotalCostUSD    float64       `json:"total_cost_usd"`
+	AvgLatencyMs    int64         `json:"avg_latency_ms"`
+	P50LatencyMs    int64         `json:"p50_latency_ms"`
+	P95LatencyMs    int64         `json:"p95_latency_ms"`
+	TopAgents       []TopAxisItem `json:"top_agents"`
+	TopRuntimes     []TopAxisItem `json:"top_runtimes"`
 }
 
 // TopAxisItem is an entry in top-N lists.
@@ -106,7 +106,7 @@ type TopAxisItem struct {
 
 // TimeseriesPoint is one bucket in a timeseries response.
 type TimeseriesPoint struct {
-	Ts    string  `json:"ts"`   // bucket start, ISO-8601
+	Ts    string  `json:"ts"` // bucket start, ISO-8601
 	Value float64 `json:"value"`
 }
 
@@ -287,8 +287,8 @@ func ComputeTimeseries(events []cost.Event, window, bucket time.Duration, metric
 	}
 
 	// Build bucket map: bucket-start → accumulated value.
-	buckets := make(map[int64]float64)      // unix seconds of bucket start → value
-	bucketCounts := make(map[int64]int64)  // for latency averaging
+	buckets := make(map[int64]float64)    // unix seconds of bucket start → value
+	bucketCounts := make(map[int64]int64) // for latency averaging
 
 	for _, ev := range events {
 		ts, err := time.Parse(time.RFC3339, ev.Ts)

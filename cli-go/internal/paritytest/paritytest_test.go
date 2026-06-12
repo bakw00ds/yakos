@@ -346,13 +346,13 @@ type captureT struct {
 	lastMsg  string
 }
 
-func (c *captureT) Helper()                           {}
-func (c *captureT) Log(args ...any)                   {}
-func (c *captureT) Logf(format string, args ...any)   {}
-func (c *captureT) TempDir() string                   { return os.TempDir() }
-func (c *captureT) Skipf(format string, args ...any)  {}
-func (c *captureT) SkipNow()                          {}
-func (c *captureT) Skip(args ...any)                  {}
+func (c *captureT) Helper()                          {}
+func (c *captureT) Log(args ...any)                  {}
+func (c *captureT) Logf(format string, args ...any)  {}
+func (c *captureT) TempDir() string                  { return os.TempDir() }
+func (c *captureT) Skipf(format string, args ...any) {}
+func (c *captureT) SkipNow()                         {}
+func (c *captureT) Skip(args ...any)                 {}
 
 func (c *captureT) Errorf(format string, args ...any) {
 	c.hadError = true

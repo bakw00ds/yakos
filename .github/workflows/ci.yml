@@ -18,7 +18,7 @@ jobs:
     name: shellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
       - name: Install shellcheck
         run: sudo apt-get update -y && sudo apt-get install -y shellcheck
       - name: Lint shell scripts
@@ -42,7 +42,7 @@ jobs:
     name: yakos validate (framework)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
       - name: Install jq + python3
         run: sudo apt-get update -y && sudo apt-get install -y jq python3
       - name: Run yakos validate
@@ -55,7 +55,7 @@ jobs:
     name: pre-push gate fixtures
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
       - name: Run version-gate fixture runner
         run: |
           ./tests/run-version-gate-fixtures.sh
@@ -64,7 +64,7 @@ jobs:
     name: runtime adapter fixtures
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
       - name: Install jq + python3
         run: sudo apt-get update -y && sudo apt-get install -y jq python3
       - name: Run runtime fixture suite
@@ -75,22 +75,18 @@ jobs:
     name: hook fixtures
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
       - name: Install jq
         run: sudo apt-get update -y && sudo apt-get install -y jq
       - name: Run hook fixture suite
         run: |
-          if [ -x ./tests/run-hook-fixtures.sh ]; then
-            ./tests/run-hook-fixtures.sh
-          else
-            echo "tests/run-hook-fixtures.sh not present or not executable; skipping"
-          fi
+          ./tests/run-hook-fixtures.sh
 
   e2e:
     name: end-to-end smoke (every subcommand)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
       - name: Install jq + python3
         run: sudo apt-get update -y && sudo apt-get install -y jq python3
       - name: Run e2e
@@ -103,7 +99,7 @@ jobs:
     name: multi-dev coord e2e (concurrent processes)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
       - name: Install jq + python3
         run: sudo apt-get update -y && sudo apt-get install -y jq python3
       - name: Run multi-dev e2e (Plan 1)
@@ -114,7 +110,7 @@ jobs:
     name: supervisor live-shadow agent e2e
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
       - name: Install jq + python3
         run: sudo apt-get update -y && sudo apt-get install -y jq python3
       - name: Run supervisor e2e (Plan v0.33)
@@ -125,7 +121,7 @@ jobs:
     name: install / init / doctor / uninstall (smoke)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
       - name: Install jq + python3
         run: sudo apt-get update -y && sudo apt-get install -y jq python3
       - name: yakos install (against the runner's $HOME)

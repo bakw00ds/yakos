@@ -57,7 +57,7 @@ func newTestConfig(t *testing.T) Config {
 	}
 }
 
-func out(cfg Config) string { return cfg.Writer.(*bytes.Buffer).String() }
+func out(cfg Config) string    { return cfg.Writer.(*bytes.Buffer).String() }
 func errOut(cfg Config) string { return cfg.ErrWriter.(*bytes.Buffer).String() }
 
 // sampleCandidatesFile writes a well-formed candidates.md with two entries.

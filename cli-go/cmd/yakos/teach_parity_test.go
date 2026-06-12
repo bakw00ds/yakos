@@ -313,8 +313,8 @@ func TestTeachParity_NoProject_CannotInfer_Error(t *testing.T) {
 	cfg := teach.Config{
 		AgentName:  "backend",
 		LessonFile: lesson,
-		ProjectDir: "",   // not supplied
-		HomeDir:    dir,  // no agent-control entries → inference fails
+		ProjectDir: "",  // not supplied
+		HomeDir:    dir, // no agent-control entries → inference fails
 		Now:        teachFixedNow,
 		Writer:     &bytes.Buffer{},
 		ErrWriter:  &bytes.Buffer{},

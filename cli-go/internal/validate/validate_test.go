@@ -64,9 +64,9 @@ func TestParseFrontmatter_InvalidYAML(t *testing.T) {
 
 func TestHasFrontmatter(t *testing.T) {
 	cases := []struct {
-		name    string
-		input   string
-		wantOK  bool
+		name   string
+		input  string
+		wantOK bool
 	}{
 		{"valid", "---\nid: x\n---\n# body", true},
 		{"no opening", "# no fm\n", false},

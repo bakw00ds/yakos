@@ -62,6 +62,12 @@ type Config struct {
 	// ServeAllProjects enables the GET /api/metrics/projects rollup endpoint.
 	ServeAllProjects bool
 
+	// ServeShowToken, when true, prints the raw token string to stdout in
+	// addition to the #token= URL fragment.  Omitted by default because the
+	// URL line is sufficient for normal use; the raw token is useful for
+	// scripting or when the URL cannot be copy-pasted.
+	ServeShowToken bool
+
 	// HookName is the git hook for install-hook / uninstall-hook.
 	// One of: post-commit (default), pre-push.
 	HookName string
@@ -340,6 +346,8 @@ func ParseArgs(args []string, homeDir string) (Config, error) {
 				cfg.ServeHost = rest[i][len("--host="):]
 			case rest[i] == "--all-projects":
 				cfg.ServeAllProjects = true
+			case rest[i] == "--show-token":
+				cfg.ServeShowToken = true
 			case rest[i] == "--project":
 				i++
 				if i >= len(rest) {
@@ -434,7 +442,13 @@ func Run(cfg Config) (*Result, error) {
 		home = os.Getenv("HOME")
 	}
 	if home == "" {
-		home = "/tmp"
+		// Prefer os.UserHomeDir for cross-platform correctness; /tmp is only
+		// used as a last resort (Windows does not have /tmp by default).
+		if h, err := os.UserHomeDir(); err == nil {
+			home = h
+		} else {
+			home = os.TempDir()
+		}
 	}
 
 	runner := cfg.GitRunner
@@ -459,13 +473,13 @@ func Run(cfg Config) (*Result, error) {
 		return res, nil
 
 	case "report":
-		return res, runReport(cfg, home, w)
+		return res, runReport(cfg, w)
 
 	case "trend":
-		return res, runTrend(cfg, home, w)
+		return res, runTrend(cfg, w)
 
 	case "compare":
-		return res, runCompare(cfg, home, w)
+		return res, runCompare(cfg, w)
 
 	case "gate":
 		gateResult, err := RunGate(GateConfig{
@@ -633,7 +647,7 @@ func findAgentControlWorkDir(home, projectDir string) string {
 }
 
 // runReport executes the report subcommand.
-func runReport(cfg Config, home string, w io.Writer) error {
+func runReport(cfg Config, w io.Writer) error {
 	projectDir := ResolveProjectDir(cfg.ProjectDir)
 	if projectDir == "" {
 		cwd, _ := os.Getwd()
@@ -649,7 +663,7 @@ func runReport(cfg Config, home string, w io.Writer) error {
 }
 
 // runTrend executes the trend subcommand.
-func runTrend(cfg Config, home string, w io.Writer) error {
+func runTrend(cfg Config, w io.Writer) error {
 	projectDir := ResolveProjectDir(cfg.ProjectDir)
 	if projectDir == "" {
 		cwd, _ := os.Getwd()
@@ -665,7 +679,7 @@ func runTrend(cfg Config, home string, w io.Writer) error {
 }
 
 // runCompare executes the compare subcommand.
-func runCompare(cfg Config, home string, w io.Writer) error {
+func runCompare(cfg Config, w io.Writer) error {
 	projectDir := ResolveProjectDir(cfg.ProjectDir)
 	if projectDir == "" {
 		cwd, _ := os.Getwd()

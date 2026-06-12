@@ -30,10 +30,10 @@ type ServerConfig struct {
 // Server is a WebSocket HTTP server that streams bus events to authenticated
 // loopback-only clients.
 type Server struct {
-	cfg      ServerConfig
-	ln       net.Listener
-	httpSrv  *http.Server
-	addrCh   chan struct{} // closed once ln is bound
+	cfg     ServerConfig
+	ln      net.Listener
+	httpSrv *http.Server
+	addrCh  chan struct{} // closed once ln is bound
 }
 
 // NewServer creates a Server from cfg but does not start it.

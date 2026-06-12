@@ -294,14 +294,14 @@ func TestWrite_NewFile(t *testing.T) {
 	now := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
 	out, _, err := captureRun(t, Config{
-		MemoryDir:  dir,
-		Subcommand: "write",
-		Slug:       "my-note",
-		Type:       "feedback",
-		Body:       "Always delegate.\n",
-		Name:       "My Note",
+		MemoryDir:   dir,
+		Subcommand:  "write",
+		Slug:        "my-note",
+		Type:        "feedback",
+		Body:        "Always delegate.\n",
+		Name:        "My Note",
 		Description: "delegate always",
-		Now:        now,
+		Now:         now,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -760,4 +760,3 @@ func TestRemoveIndexEntry_AbsentFile(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
-

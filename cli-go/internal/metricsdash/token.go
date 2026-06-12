@@ -66,6 +66,19 @@ func MetricsTokenFilePath(stateDir string) string {
 	return filepath.Join(stateDir, metricsTokenFile)
 }
 
+// RotateMetricsToken generates and stores a new token, overwriting any
+// existing token file. Returns the new token string.
+//
+// Call this when a token may have been compromised or when a fresh session
+// is desired.  The old token is immediately invalidated; any browser tabs
+// holding the old token must be reloaded.
+func RotateMetricsToken(stateDir string) (string, error) {
+	if err := os.MkdirAll(stateDir, 0700); err != nil { //nolint:gosec
+		return "", fmt.Errorf("metrics serve: mkdir %s: %w", stateDir, err)
+	}
+	return generateToken(filepath.Join(stateDir, metricsTokenFile))
+}
+
 // generateToken creates a fresh 256-bit random token, writes it atomically to
 // path at mode 0600, and returns the hex-encoded value.
 func generateToken(path string) (string, error) {

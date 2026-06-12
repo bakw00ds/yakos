@@ -296,8 +296,8 @@ func (s *Server) handleDispatchCreate(w http.ResponseWriter, r *http.Request) {
 
 // costResponse is the response shape for GET /v1/cost.
 type costResponse struct {
-	By   string        `json:"by"`
-	Rows []cost.Row    `json:"rows"`
+	By   string     `json:"by"`
+	Rows []cost.Row `json:"rows"`
 }
 
 func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {

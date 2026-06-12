@@ -4,9 +4,9 @@ package serve
 
 import (
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
-	"os/exec"
 )
 
 // isProcessRunning returns true if the process with the given PID is running.
