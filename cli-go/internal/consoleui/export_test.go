@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/workflow"
 )
 
@@ -115,25 +116,22 @@ func NewChatTestServer(hub *ChatHub, transcripts *Transcripts, serverCtx context
 
 // ---- Flows handler test exports ---------------------------------------------
 
-// NewFlowsHandlerForTest builds a flowsHandlers wired with a fake engine
-// whose per-node dispatch function is fn. workDir is the <work>/current root.
-// Returns the handler (as http.Handler) and the engine for further
-// configuration if needed.
+// NewFlowsHandlerForTest builds a flowsHandlers with a fake per-node dispatch
+// function injected at the consoleui handler layer. workDir is the
+// <work>/current root. Returns the handler (as http.Handler).
 //
-// The engine has no Svc/Bus/YakosRoot/Project set — fn bypasses all of those.
-// This is the handler-level test seam (N3).
-func NewFlowsHandlerForTest(t *testing.T, workDir string, fn workflow.EngineRunFn) (http.Handler, *workflow.Engine) {
+// The workflow engine is NOT used — fn is stored on flowsHandlers.nodeRunFn so
+// that handleRun/handleResume call it directly, bypassing both the engine and
+// the governed dispatch.Service. No LLM calls, no live dispatch.
+//
+// This is the handler-level test seam (N3). The workflow package exports no
+// production-reachable governor-bypass symbol as a result of this design.
+func NewFlowsHandlerForTest(t *testing.T, workDir string, fn func(context.Context, dispatch.Params) ([]byte, dispatch.Result, error)) (http.Handler, *workflow.Engine) {
 	t.Helper()
-	eng := &workflow.Engine{
-		YakosRoot: "/yakos-test",
-		Project:   "/project-test",
-		WorkDir:   workDir,
-	}
-	workflow.SetEngineRunFn(eng, fn)
 	h := &flowsHandlers{
-		engine:    eng,
 		workDir:   workDir,
 		serverCtx: context.Background(),
+		nodeRunFn: workflow.EngineRunFn(fn),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/flows/api/workflows", h.handleListWorkflows)
@@ -141,5 +139,5 @@ func NewFlowsHandlerForTest(t *testing.T, workDir string, fn workflow.EngineRunF
 	mux.HandleFunc("/flows/api/run", h.handleRunDispatch)
 	mux.HandleFunc("/flows/api/run/node", h.handleGetNodeOutput)
 	mux.HandleFunc("/flows/api/resume", h.handleResume)
-	return mux, eng
+	return mux, nil
 }

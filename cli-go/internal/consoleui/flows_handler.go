@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/workflow"
 )
 
@@ -54,6 +55,19 @@ type flowsHandlers struct {
 	// serverCtx is cancelled on server shutdown; background run goroutines
 	// derive their context from this so they are cancelled on daemon exit.
 	serverCtx context.Context
+
+	// nodeRunFn, when non-nil, is used by the consoleui test suite to inject a
+	// fake per-node dispatch function so tests exercise the handler code path
+	// without making live LLM calls or depending on the workflow package's
+	// internal seams.
+	//
+	// Production code never sets this field. It is only set by
+	// NewFlowsHandlerForTest in consoleui/export_test.go.
+	//
+	// When set: handleRun/handleResume bypass the governed dispatch.Service and
+	// use nodeRunFn directly. This is intentional for testing — the handler
+	// layer is what is under test, not the engine or governor.
+	nodeRunFn workflow.EngineRunFn
 }
 
 // workflowsDir returns <workDir>/workflows/.
@@ -421,6 +435,26 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := workflow.Validate(wf); err != nil {
 		writeGenericError(w, http.StatusBadRequest, "workflow validation failed")
+		return
+	}
+
+	// nodeRunFn is set only by consoleui tests (via NewFlowsHandlerForTest).
+	// When present, skip the engine and run the fake directly so tests can
+	// exercise the handler path without live LLM calls.
+	if h.nodeRunFn != nil {
+		runID := mintRunID()
+		fn := h.nodeRunFn
+		ctx := h.serverCtx
+		go func() {
+			for _, node := range wf.Nodes {
+				if _, _, err := fn(ctx, dispatch.Params{Agent: node.Agent, Task: node.Prompt}); err != nil {
+					slog.Error("flows: test nodeRunFn failed", "run_id", runID, "node", node.ID, "err", err)
+				}
+			}
+		}()
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(flowsRunResponse{RunID: runID})
 		return
 	}
 
