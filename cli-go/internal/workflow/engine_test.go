@@ -1,6 +1,7 @@
 package workflow_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -831,6 +832,394 @@ func TestEngine_CrashReconciliation(t *testing.T) {
 	}
 	if updated["status"] != "interrupted" {
 		t.Errorf("status after reconcile: got %v, want interrupted", updated["status"])
+	}
+}
+
+// ---- Engine: node-level orphan reconciliation tests (race-enabled) ----------
+
+// writeNDJSON is a test helper that writes newline-delimited JSON objects to a
+// file.  Each map is marshalled as one line; the file is created or truncated.
+func writeNDJSON(t *testing.T, path string, lines []map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("writeNDJSON mkdir: %v", err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("writeNDJSON create %s: %v", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	for _, m := range lines {
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("writeNDJSON marshal: %v", err)
+		}
+		f.Write(append(b, '\n')) //nolint:errcheck
+	}
+}
+
+// makeRunDir is a test helper that creates a run directory with run.json and
+// optionally a node-dispatch.ndjson.
+func makeRunDir(t *testing.T, runsDir, runID, runStatus string, nodes map[string]string) string {
+	t.Helper()
+	runDir := filepath.Join(runsDir, runID)
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		t.Fatalf("makeRunDir mkdir: %v", err)
+	}
+	nodeMap := make(map[string]interface{}, len(nodes))
+	for id, status := range nodes {
+		nodeMap[id] = map[string]interface{}{"id": id, "status": status}
+	}
+	rs := map[string]interface{}{
+		"run_id":        runID,
+		"workflow_name": "test-flow",
+		"workflow_hash": "abc123",
+		"status":        runStatus,
+		"nodes":         nodeMap,
+	}
+	data, _ := json.MarshalIndent(rs, "", "  ")
+	if err := os.WriteFile(filepath.Join(runDir, "run.json"), data, 0644); err != nil {
+		t.Fatalf("makeRunDir write run.json: %v", err)
+	}
+	return runDir
+}
+
+// TestNodeOrphanReconciliation is a -race table test covering the four core
+// scenarios for node-level orphan detection:
+//
+//  1. Orphaned dispatch_started (no dispatch_finished) + NodePending in run.json
+//     → node must be marked NodeFailed after reconciliation.
+//  2. Clean dispatch_started + dispatch_finished → node stays as-is.
+//  3. Run with no orphans → untouched (no change to node statuses).
+//  4. Malformed / legacy NDJSON lines → tolerated, no panic.
+func TestNodeOrphanReconciliation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// ndJSON is the content of node-dispatch.ndjson (nil = file absent).
+		ndJSON []map[string]string
+		// nodes maps node ID → initial status in run.json.
+		nodes map[string]string
+		// wantStatuses maps node ID → expected status after reconciliation.
+		wantStatuses map[string]string
+	}{
+		{
+			name: "orphaned_dispatch_started_marks_node_failed",
+			ndJSON: []map[string]string{
+				{"type": "dispatch_started", "run_id": "run-orphan", "node_id": "a", "agent": "agent-a", "ts": "2026-01-01T00:00:00Z"},
+				// No dispatch_finished for "a".
+			},
+			nodes: map[string]string{
+				"a": "pending", // debounce never flushed NodeRunning
+				"b": "pending",
+			},
+			wantStatuses: map[string]string{
+				"a": "failed",  // orphaned — must become failed
+				"b": "pending", // no dispatch_started → untouched
+			},
+		},
+		{
+			// Node has dispatch_started + dispatch_finished (not an orphan) but
+			// run.json shows NodeRunning — the existing run-level reconciliation
+			// path catches it and marks it NodeFailed.  The NDJSON-backed orphan
+			// path does not interfere: the node IS in the finished set.
+			name: "noderunning_caught_by_existing_path",
+			ndJSON: []map[string]string{
+				{"type": "dispatch_started", "run_id": "run-clean", "node_id": "x", "agent": "agent-x", "ts": "2026-01-01T00:00:00Z"},
+				{"type": "dispatch_finished", "run_id": "run-clean", "node_id": "x", "agent": "agent-x", "ts": "2026-01-01T00:01:00Z"},
+			},
+			nodes: map[string]string{
+				"x": "running", // run.json shows running — run-level path handles it
+			},
+			wantStatuses: map[string]string{
+				"x": "failed", // run-level path (NodeRunning → NodeFailed) fires
+			},
+		},
+		{
+			name: "no_orphans_untouched",
+			ndJSON: []map[string]string{
+				{"type": "dispatch_started", "run_id": "run-noop", "node_id": "z", "agent": "agent-z", "ts": "2026-01-01T00:00:00Z"},
+				{"type": "dispatch_finished", "run_id": "run-noop", "node_id": "z", "agent": "agent-z", "ts": "2026-01-01T00:01:00Z"},
+			},
+			nodes: map[string]string{
+				"z": "completed",
+			},
+			wantStatuses: map[string]string{
+				"z": "completed", // completed nodes are never reclassified
+			},
+		},
+		{
+			name: "malformed_lines_tolerated",
+			ndJSON: []map[string]string{
+				// Malformed: missing type, empty node_id, garbage line (we write via raw bytes below).
+				{"type": "dispatch_started", "run_id": "run-malformed", "node_id": "m", "agent": "agent-m", "ts": "2026-01-01T00:00:00Z"},
+				// dispatch_finished for "m" is present → not an orphan.
+				{"type": "dispatch_finished", "run_id": "run-malformed", "node_id": "m", "agent": "agent-m", "ts": "2026-01-01T00:01:00Z"},
+				// Extra legacy-style line with no node_id — should be skipped.
+				{"type": "dispatch_started", "agent": "old-agent", "ts": "2026-01-01T00:00:30Z"},
+			},
+			nodes: map[string]string{
+				"m": "pending",
+			},
+			wantStatuses: map[string]string{
+				"m": "pending", // not orphaned (has dispatch_finished); legacy line ignored
+			},
+		},
+		{
+			name:   "ndjson_absent_tolerated",
+			ndJSON: nil, // file does not exist
+			nodes: map[string]string{
+				"q": "running",
+			},
+			wantStatuses: map[string]string{
+				"q": "failed", // run-level path (NodeRunning → NodeFailed) catches it
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			runsDir := t.TempDir()
+			runID := "run-" + tc.name
+			runDir := makeRunDir(t, runsDir, runID, "running", tc.nodes)
+
+			if tc.ndJSON != nil {
+				logPath := filepath.Join(runDir, "node-dispatch.ndjson")
+				writeNDJSON(t, logPath, tc.ndJSON)
+
+				// Append a raw malformed line for the "malformed_lines_tolerated" case.
+				if tc.name == "malformed_lines_tolerated" {
+					f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0644)
+					if err != nil {
+						t.Fatalf("open log for append: %v", err)
+					}
+					_, _ = f.Write([]byte("not-json-at-all\n"))
+					_ = f.Close()
+				}
+			}
+
+			interrupted, err := workflow.ReconcileInterrupted(runsDir)
+			if err != nil {
+				t.Fatalf("ReconcileInterrupted: %v", err)
+			}
+			if len(interrupted) != 1 {
+				t.Fatalf("interrupted count: got %d, want 1", len(interrupted))
+			}
+
+			// Re-load run.json to check node statuses.
+			newData, err := os.ReadFile(filepath.Join(runDir, "run.json"))
+			if err != nil {
+				t.Fatalf("read run.json: %v", err)
+			}
+			var updated struct {
+				Status string                     `json:"status"`
+				Nodes  map[string]json.RawMessage `json:"nodes"`
+			}
+			if err := json.Unmarshal(newData, &updated); err != nil {
+				t.Fatalf("parse run.json: %v", err)
+			}
+			if updated.Status != "interrupted" {
+				t.Errorf("run status: got %q, want interrupted", updated.Status)
+			}
+			for nodeID, wantStatus := range tc.wantStatuses {
+				raw, ok := updated.Nodes[nodeID]
+				if !ok {
+					t.Errorf("node %q missing from run.json", nodeID)
+					continue
+				}
+				var ns struct {
+					Status string `json:"status"`
+				}
+				if err := json.Unmarshal(raw, &ns); err != nil {
+					t.Errorf("node %q: parse status: %v", nodeID, err)
+					continue
+				}
+				if ns.Status != wantStatus {
+					t.Errorf("node %q status: got %q, want %q", nodeID, ns.Status, wantStatus)
+				}
+			}
+		})
+	}
+}
+
+// TestAppendNodeDispatchEvent_ConcurrentAppend verifies that concurrent calls
+// to appendNodeDispatchEvent on the SAME file path — the real scenario during a
+// parallel DAG run (multiple runNode goroutines writing to one per-run log) —
+// produce a file where every line is valid JSON and no two writes have
+// interleaved bytes.  This is the race the -race detector actually cares about.
+//
+// Approach: N goroutines each write M started+finished pairs for their own
+// node ID to a single shared logPath.  After all goroutines complete we read
+// the file back, assert every line parses, and assert the started/finished
+// counts per node_id match exactly what was written.
+func TestAppendNodeDispatchEvent_ConcurrentAppend(t *testing.T) {
+	t.Parallel()
+
+	const numWorkers = 8
+	const eventsPerWorker = 20 // started+finished pairs per goroutine
+
+	logPath := filepath.Join(t.TempDir(), workflow.NodeDispatchLogName)
+
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			nodeID := fmt.Sprintf("node-%d", i)
+			for j := 0; j < eventsPerWorker; j++ {
+				workflow.AppendNodeDispatchEvent(logPath, workflow.NodeDispatchEvent{
+					Type:   "dispatch_started",
+					RunID:  "run-concurrent",
+					NodeID: nodeID,
+					Agent:  fmt.Sprintf("agent-%d", i),
+					Ts:     time.Now().UTC().Format(time.RFC3339),
+				})
+				workflow.AppendNodeDispatchEvent(logPath, workflow.NodeDispatchEvent{
+					Type:   "dispatch_finished",
+					RunID:  "run-concurrent",
+					NodeID: nodeID,
+					Agent:  fmt.Sprintf("agent-%d", i),
+					Ts:     time.Now().UTC().Format(time.RFC3339),
+				})
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Read back every line and assert no corruption.
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+
+	startedCounts := make(map[string]int)
+	finishedCounts := make(map[string]int)
+	lineNum := 0
+
+	for _, rawLine := range bytes.Split(data, []byte("\n")) {
+		line := bytes.TrimSpace(rawLine)
+		if len(line) == 0 {
+			continue
+		}
+		lineNum++
+		var ev workflow.NodeDispatchEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			t.Errorf("line %d: invalid JSON (possible interleaved write): %v\nraw: %q", lineNum, err, line)
+			continue
+		}
+		if ev.NodeID == "" {
+			t.Errorf("line %d: empty node_id", lineNum)
+		}
+		switch ev.Type {
+		case "dispatch_started":
+			startedCounts[ev.NodeID]++
+		case "dispatch_finished":
+			finishedCounts[ev.NodeID]++
+		default:
+			t.Errorf("line %d: unexpected type %q", lineNum, ev.Type)
+		}
+	}
+
+	// Each worker wrote eventsPerWorker started and eventsPerWorker finished.
+	wantTotal := numWorkers * eventsPerWorker * 2 // started + finished
+	if lineNum != wantTotal {
+		t.Errorf("total lines: got %d, want %d", lineNum, wantTotal)
+	}
+	for i := 0; i < numWorkers; i++ {
+		nodeID := fmt.Sprintf("node-%d", i)
+		if startedCounts[nodeID] != eventsPerWorker {
+			t.Errorf("node %s: started count %d, want %d", nodeID, startedCounts[nodeID], eventsPerWorker)
+		}
+		if finishedCounts[nodeID] != eventsPerWorker {
+			t.Errorf("node %s: finished count %d, want %d", nodeID, finishedCounts[nodeID], eventsPerWorker)
+		}
+	}
+}
+
+// TestEngine_NodeDispatchLog_LiveRun drives a real Engine over a multi-node
+// parallel workflow and verifies that the resulting node-dispatch.ndjson has:
+//   - one dispatch_started + one dispatch_finished per node (no duplicates),
+//   - all lines valid JSON,
+//   - no orphans (every started has a matching finished).
+//
+// This exercises the full write path under -race with max_parallel > 1.
+func TestEngine_NodeDispatchLog_LiveRun(t *testing.T) {
+	t.Parallel()
+
+	// Fan-out: root → left, right → merge (4 nodes, left+right run concurrently).
+	wf := diamondWorkflow()
+
+	fn := func(_ context.Context, p dispatch.Params) ([]byte, dispatch.Result, error) {
+		return []byte(p.Agent + "-out"), dispatch.Result{ExitCode: 0}, nil
+	}
+
+	eng, workDir := newTestEngine(t, fn)
+	runID := "live-dispatch-log"
+
+	rs, err := eng.Run(context.Background(), wf, runID, "tester")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rs.Status != workflow.RunCompleted {
+		t.Errorf("run status: got %q, want completed", rs.Status)
+	}
+
+	// Locate and read the per-run node dispatch log.
+	logPath := filepath.Join(workDir, "workflows", "runs", runID, workflow.NodeDispatchLogName)
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read node-dispatch.ndjson: %v", err)
+	}
+
+	startedFor := make(map[string]int)
+	finishedFor := make(map[string]int)
+	lineNum := 0
+
+	for _, rawLine := range bytes.Split(data, []byte("\n")) {
+		line := bytes.TrimSpace(rawLine)
+		if len(line) == 0 {
+			continue
+		}
+		lineNum++
+		var ev workflow.NodeDispatchEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			t.Errorf("line %d: invalid JSON: %v\nraw: %q", lineNum, err, line)
+			continue
+		}
+		if ev.RunID != runID {
+			t.Errorf("line %d: run_id %q, want %q", lineNum, ev.RunID, runID)
+		}
+		switch ev.Type {
+		case "dispatch_started":
+			startedFor[ev.NodeID]++
+		case "dispatch_finished":
+			finishedFor[ev.NodeID]++
+		default:
+			t.Errorf("line %d: unexpected type %q", lineNum, ev.Type)
+		}
+	}
+
+	// Diamond has 4 nodes; each must have exactly one started and one finished.
+	nodeIDs := []string{"root", "left", "right", "merge"}
+	for _, id := range nodeIDs {
+		if startedFor[id] != 1 {
+			t.Errorf("node %q: dispatch_started count %d, want 1", id, startedFor[id])
+		}
+		if finishedFor[id] != 1 {
+			t.Errorf("node %q: dispatch_finished count %d, want 1", id, finishedFor[id])
+		}
+	}
+
+	// No orphans: every started must have a matching finished.
+	for id, sc := range startedFor {
+		if finishedFor[id] != sc {
+			t.Errorf("node %q: started=%d finished=%d — orphan detected", id, sc, finishedFor[id])
+		}
 	}
 }
 
