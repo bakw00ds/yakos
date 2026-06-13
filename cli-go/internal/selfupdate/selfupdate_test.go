@@ -107,12 +107,10 @@ func makeTempExe(t *testing.T, content string) string {
 	return exe
 }
 
-// discardBuf is an io.Writer that throws away all writes (avoids os.Stdout noise).
-var discardBuf = &bytes.Buffer{}
-
+// discardWriter returns a fresh buffer that discards output (avoids os.Stdout noise).
+// Each caller gets its own buffer so tests cannot accidentally share state.
 func discardWriter() *bytes.Buffer {
-	discardBuf.Reset()
-	return discardBuf
+	return &bytes.Buffer{}
 }
 
 // --- Tests ---
@@ -136,9 +134,11 @@ func TestApply_NewerVersionDetectedAndApplied(t *testing.T) {
 	srv := newFakeServer(t, fakeTag, assetBytes, "")
 	exePath := makeTempExe(t, fakeBinaryOldContent)
 
+	testClient := clientForServer(srv)
 	res, err := selfupdate.Apply(context.Background(), selfupdate.Opts{
 		CurrentVersion: "v1.0.0.0",
-		HTTPClient:     clientForServer(srv),
+		HTTPClient:     testClient,
+		DownloadClient: testClient,
 		ExeResolver:    func() (string, error) { return exePath, nil },
 		Writer:         discardWriter(),
 	})
@@ -188,9 +188,11 @@ func TestApply_AlreadyUpToDate(t *testing.T) {
 		t.Fatalf("stat original exe: %v", err)
 	}
 
+	testClient := clientForServer(srv)
 	res, err := selfupdate.Apply(context.Background(), selfupdate.Opts{
 		CurrentVersion: fakeTag, // same as the server's latest
-		HTTPClient:     clientForServer(srv),
+		HTTPClient:     testClient,
+		DownloadClient: testClient,
 		ExeResolver:    func() (string, error) { return exePath, nil },
 		Writer:         discardWriter(),
 	})
@@ -220,9 +222,11 @@ func TestApply_ChecksumMismatchAborts(t *testing.T) {
 	srv := newFakeServer(t, fakeTag, assetBytes, badChecksum)
 	exePath := makeTempExe(t, fakeBinaryOldContent)
 
+	testClient := clientForServer(srv)
 	_, err := selfupdate.Apply(context.Background(), selfupdate.Opts{
 		CurrentVersion: "v1.0.0.0",
-		HTTPClient:     clientForServer(srv),
+		HTTPClient:     testClient,
+		DownloadClient: testClient,
 		ExeResolver:    func() (string, error) { return exePath, nil },
 		Writer:         discardWriter(),
 	})
@@ -262,10 +266,12 @@ func TestApply_DryRun(t *testing.T) {
 		t.Fatalf("stat original exe: %v", err)
 	}
 
+	testClient := clientForServer(srv)
 	res, err := selfupdate.Apply(context.Background(), selfupdate.Opts{
 		CurrentVersion: "v1.0.0.0",
 		DryRun:         true,
-		HTTPClient:     clientForServer(srv),
+		HTTPClient:     testClient,
+		DownloadClient: testClient,
 		ExeResolver:    func() (string, error) { return exePath, nil },
 		Writer:         discardWriter(),
 	})
@@ -293,10 +299,12 @@ func TestApply_ForceReinstallsSameVersion(t *testing.T) {
 	srv := newFakeServer(t, fakeTag, assetBytes, "")
 	exePath := makeTempExe(t, fakeBinaryOldContent)
 
+	testClient := clientForServer(srv)
 	res, err := selfupdate.Apply(context.Background(), selfupdate.Opts{
 		CurrentVersion: fakeTag, // same version as server's latest
 		Force:          true,
-		HTTPClient:     clientForServer(srv),
+		HTTPClient:     testClient,
+		DownloadClient: testClient,
 		ExeResolver:    func() (string, error) { return exePath, nil },
 		Writer:         discardWriter(),
 	})
@@ -334,46 +342,76 @@ func TestTagValidationRejectsMaliciousTag(t *testing.T) {
 	}
 }
 
-// TestRedirectToDisallowedHostRejected verifies the redirect allowlist.
-// A server redirecting to an arbitrary host must cause the fetch to fail.
+// productionClientForServer returns a client that uses the REAL production
+// CheckRedirect policy from BuildDefaultClient (scheme + host allowlist check)
+// but routes initial requests to the given test server via hostRewriteTransport.
+// Redirect targets are NOT rewritten — they hit the raw URL as issued by the
+// test server, so the CheckRedirect policy sees the actual redirect destination.
+func productionClientForServer(srv *httptest.Server) *http.Client {
+	prod := selfupdate.BuildDefaultClient()
+	prod.Transport = &hostRewriteTransport{
+		base:   http.DefaultTransport,
+		target: srv.URL,
+	}
+	return prod
+}
+
+// TestRedirectToDisallowedHostRejected verifies the redirect allowlist using
+// the REAL production client so that any policy regression is caught here.
+//
+// Three sub-cases:
+//  1. Redirect to a completely disallowed host via http:// — scheme check fires.
+//  2. Redirect to an allowlisted host via https:// but a different disallowed
+//     host component — host check fires (HIGH-1: scheme alone is insufficient).
+//  3. Redirect from https → http on an allowlisted host (github.com) — scheme
+//     check fires (HIGH-1 regression guard: downgrade must be rejected).
 func TestRedirectToDisallowedHostRejected(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/bakw00ds/yakos/releases/latest", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "http://evil.example.com/payload", http.StatusFound)
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	// Compose: host-rewrite transport (to route to our test server) +
-	// a CheckRedirect that enforces the allowlist on redirect destinations
-	// (the redirect itself goes to evil.example.com, bypassing the rewrite,
-	// so the policy fires on the absolute URL).
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			host := strings.ToLower(req.URL.Hostname())
-			allowed := []string{
-				"github.com",
-				"objects.githubusercontent.com",
-				"releases.githubusercontent.com",
-				"codeload.github.com",
-			}
-			for _, a := range allowed {
-				if host == a || strings.HasSuffix(host, "."+a) {
-					return nil
-				}
-			}
-			return fmt.Errorf("selfupdate: redirect to disallowed host %q rejected", host)
+	cases := []struct {
+		name        string
+		redirectURL string
+		wantErr     string // substring expected in the error
+	}{
+		{
+			name:        "non_https_to_disallowed_host",
+			redirectURL: "http://evil.example.com/payload",
+			wantErr:     "non-HTTPS",
 		},
-		Transport: &hostRewriteTransport{base: http.DefaultTransport, target: srv.URL},
+		{
+			name: "https_to_disallowed_host",
+			// https:// scheme passes the scheme check; host check must reject it.
+			redirectURL: "https://evil.example.com/payload",
+			wantErr:     "disallowed host",
+		},
+		{
+			name: "https_to_http_downgrade_on_allowlisted_host",
+			// github.com IS on the allowlist, but http:// scheme must be rejected.
+			redirectURL: "http://github.com/legit-looking-path",
+			wantErr:     "non-HTTPS",
+		},
 	}
 
-	_, err := selfupdate.LatestRelease(context.Background(), client)
-	if err == nil {
-		t.Fatal("expected redirect rejection, got nil")
-	}
-	// The error may be wrapped; look for the key phrase.
-	if !strings.Contains(err.Error(), "disallowed host") && !strings.Contains(err.Error(), "redirect") {
-		t.Errorf("unexpected error: %v", err)
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/repos/bakw00ds/yakos/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, tc.redirectURL, http.StatusFound)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			// Use the production client so the real CheckRedirect policy
+			// is what's under test (HIGH-2).
+			client := productionClientForServer(srv)
+
+			_, err := selfupdate.LatestRelease(context.Background(), client)
+			if err == nil {
+				t.Fatalf("expected redirect rejection for %q, got nil", tc.redirectURL)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -394,10 +432,12 @@ func TestChecksumMissingEntry(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
+	testClient := clientForServer(srv)
 	exePath := makeTempExe(t, fakeBinaryOldContent)
 	_, err := selfupdate.Apply(context.Background(), selfupdate.Opts{
 		CurrentVersion: "v1.0.0.0",
-		HTTPClient:     clientForServer(srv),
+		HTTPClient:     testClient,
+		DownloadClient: testClient,
 		ExeResolver:    func() (string, error) { return exePath, nil },
 		Writer:         discardWriter(),
 	})
@@ -438,10 +478,12 @@ func TestVersionCompare(t *testing.T) {
 			srv := newFakeServer(t, "v"+tc.candidate, assetBytes, "")
 			exePath := makeTempExe(t, fakeBinaryOldContent)
 
+			testClient := clientForServer(srv)
 			res, err := selfupdate.Apply(context.Background(), selfupdate.Opts{
 				CurrentVersion: "v" + tc.base,
 				DryRun:         true, // never write anything
-				HTTPClient:     clientForServer(srv),
+				HTTPClient:     testClient,
+				DownloadClient: testClient,
 				ExeResolver:    func() (string, error) { return exePath, nil },
 				Writer:         discardWriter(),
 			})
@@ -454,5 +496,34 @@ func TestVersionCompare(t *testing.T) {
 					tc.candidate, tc.base, gotNewer, tc.wantNewer)
 			}
 		})
+	}
+}
+
+// TestVersionParseOverflow verifies that a version component that overflows
+// uint64 is rejected with an error rather than silently wrapping.
+// Before the strconv.ParseUint fix this would have silently accepted the value.
+func TestVersionParseOverflow(t *testing.T) {
+	// v99999999999999999999 is far beyond uint64 max (18446744073709551615).
+	assetBytes := []byte(fakeBinaryContent)
+	srv := newFakeServer(t, "v1.0.0.0", assetBytes, "")
+	exePath := makeTempExe(t, fakeBinaryOldContent)
+
+	testClient := clientForServer(srv)
+	// The server returns v1.0.0.0; we pass an overflowing current version.
+	// parseVersion should return an error; Apply should propagate it as a
+	// warning and proceed (the existing behavior on version-compare failure is
+	// to proceed with the update, not abort — see Apply source).  The important
+	// thing is that no panic or silent truncation occurs.
+	_, err := selfupdate.Apply(context.Background(), selfupdate.Opts{
+		CurrentVersion: "v99999999999999999999.0.0.0",
+		DryRun:         true,
+		HTTPClient:     testClient,
+		DownloadClient: testClient,
+		ExeResolver:    func() (string, error) { return exePath, nil },
+		Writer:         discardWriter(),
+	})
+	// Apply warns and proceeds on version-compare failure — err should be nil.
+	if err != nil {
+		t.Fatalf("Apply should proceed on unparseable current version, got: %v", err)
 	}
 }

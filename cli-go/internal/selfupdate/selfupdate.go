@@ -5,9 +5,10 @@
 //   - HTTPS only; TLS verification on by default.
 //   - GitHub repo is pinned in the code (repoOwner/repoName constants) and
 //     never taken from user input.
-//   - HTTP redirects are followed only to github.com and
-//     objects.githubusercontent.com hosts; any redirect to a third host
-//     causes the download to abort.
+//   - HTTP redirects are followed only when the destination uses HTTPS and
+//     its host is on the allowlist (github.com, objects.githubusercontent.com,
+//     releases.githubusercontent.com, codeload.github.com); any non-HTTPS
+//     redirect or redirect to an unlisted host causes the download to abort.
 //   - The release tag is validated against a strict regex before use in
 //     any URL or filename, preventing path traversal.
 //   - Every downloaded binary is SHA-256 verified against the release's
@@ -30,6 +31,7 @@ package selfupdate
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -41,6 +43,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -53,6 +56,13 @@ const (
 	githubRawBase   = "https://github.com"
 	maxAssetBytes   = 256 << 20 // 256 MiB safety cap
 	maxChecksumSize = 4 << 20   // 4 MiB
+
+	// downloadTimeout is used for the binary asset download client only.
+	// It is set to 0 (no overall timeout) because a 256 MiB binary on a
+	// slow link can easily exceed the 15 s metadata timeout.  The context
+	// passed to Apply still applies; callers should set an appropriate
+	// deadline on the context rather than relying on client.Timeout.
+	downloadTimeout = 0
 )
 
 // allowedRedirectHosts is the allowlist for HTTP redirect destinations.
@@ -105,9 +115,16 @@ type Opts struct {
 	// download or write anything.
 	DryRun bool
 
-	// HTTPClient is injected in tests.  If nil, a default client with the
-	// redirect allowlist policy is used.
+	// HTTPClient is used for metadata fetches (GitHub API, checksums.txt).
+	// If nil, a default client with the redirect allowlist policy and a
+	// 15 s timeout is used.  Injected in tests.
 	HTTPClient *http.Client
+
+	// DownloadClient is used for the binary asset download only.
+	// If nil, a client with no overall timeout is used (the caller's
+	// context deadline governs instead; large binaries need the headroom).
+	// Injected in tests so requests reach the test server.
+	DownloadClient *http.Client
 
 	// ExeResolver returns the absolute path to the running binary.
 	// Defaults to os.Executable + filepath.EvalSymlinks.  Injected in tests.
@@ -121,7 +138,7 @@ type Opts struct {
 // tag (e.g. "v1.2.3.4").
 func LatestRelease(ctx context.Context, client *http.Client) (string, error) {
 	if client == nil {
-		client = buildDefaultClient()
+		client = BuildDefaultClient()
 	}
 
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/releases/latest", githubAPIBase, repoOwner, repoName)
@@ -166,7 +183,7 @@ func Apply(ctx context.Context, opts Opts) (*Result, error) {
 		opts.Writer = os.Stdout
 	}
 	if opts.HTTPClient == nil {
-		opts.HTTPClient = buildDefaultClient()
+		opts.HTTPClient = BuildDefaultClient()
 	}
 	if opts.ExeResolver == nil {
 		opts.ExeResolver = defaultExeResolver
@@ -234,16 +251,31 @@ func Apply(ctx context.Context, opts Opts) (*Result, error) {
 	}
 
 	// 7. Download binary.
+	// Use a dedicated long-timeout client for the binary asset fetch.
+	// The 15 s timeout on the metadata client is appropriate for small
+	// JSON/checksum fetches but would cut off a large binary on a slow link.
+	// When HTTPClient is injected (tests) we use it for the download too so
+	// test servers remain reachable; in production HTTPClient is nil here and
+	// we fall through to buildDownloadClient().
 	assetURL := fmt.Sprintf(
 		"%s/%s/%s/releases/download/%s/%s",
 		githubRawBase, repoOwner, repoName, tag, assetName,
 	)
-	assetBytes, err := fetchBinaryAsset(ctx, opts.HTTPClient, assetURL)
+	dlClient := opts.DownloadClient
+	if dlClient == nil {
+		// Production path: no overall timeout; context deadline governs.
+		dlClient = buildDownloadClient()
+	}
+	assetBytes, err := fetchBinaryAsset(ctx, dlClient, assetURL)
 	if err != nil {
 		return nil, fmt.Errorf("selfupdate: download binary: %w", err)
 	}
 
 	// 8. Verify SHA-256.
+	// TODO(security): detached signature verification — tracked as follow-up.
+	// The checksums.txt file itself is not signed; a future release should
+	// verify a detached GPG/cosign signature over checksums.txt before
+	// trusting the hashes within it.
 	if err := verifySHA256(assetBytes, expectedHash); err != nil {
 		return nil, err // already prefixed
 	}
@@ -419,7 +451,9 @@ func atomicReplace(exePath string, newBytes []byte) error {
 		if err := os.Rename(tmpPath, exePath); err != nil {
 			// Attempt to restore the old binary; best effort.
 			_ = os.Rename(oldPath, exePath)
-			return fmt.Errorf("rename new binary on Windows: %w", err)
+			// Include oldPath in the error so the operator can recover
+			// manually if the restore also fails.
+			return fmt.Errorf("rename new binary on Windows (old binary is at %s): %w", oldPath, err)
 		}
 		// Best-effort remove the .old; may fail if something holds the file.
 		_ = os.Remove(oldPath)
@@ -445,20 +479,54 @@ func defaultExeResolver() (string, error) {
 	return filepath.EvalSymlinks(exe)
 }
 
-// buildDefaultClient returns an *http.Client that enforces the redirect
-// allowlist and sets a conservative timeout.
-func buildDefaultClient() *http.Client {
+// tlsTransport returns an *http.Transport with TLS 1.2 as the minimum
+// accepted version.  This is shared by both the metadata and download clients.
+func tlsTransport() *http.Transport {
+	return &http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+}
+
+// BuildDefaultClient returns an *http.Client that enforces the redirect
+// allowlist (HTTPS scheme + host), pins TLS 1.2 minimum, and sets a
+// conservative 15 s timeout suitable for small metadata fetches
+// (API responses, checksums.txt).  It is exported so tests can compose
+// the real policy with a test-server transport.
+func BuildDefaultClient() *http.Client {
 	return &http.Client{
-		Timeout: defaultTimeout,
+		Timeout:   defaultTimeout,
+		Transport: tlsTransport(),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return checkRedirectHost(req.URL)
 		},
 	}
 }
 
-// checkRedirectHost returns an error when the redirect destination host is not
-// on the github.com / githubusercontent.com allowlist.
+// buildDownloadClient returns an *http.Client for the binary asset download.
+// The overall Timeout is 0 (unlimited) because large binaries on slow links
+// can far exceed the 15 s metadata budget.  The caller's context deadline
+// governs cancellation instead.  The same redirect policy and TLS minimum
+// version apply.
+func buildDownloadClient() *http.Client {
+	return &http.Client{
+		Timeout:   downloadTimeout,
+		Transport: tlsTransport(),
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return checkRedirectHost(req.URL)
+		},
+	}
+}
+
+// checkRedirectHost returns an error when the redirect destination uses a
+// non-HTTPS scheme or when the host is not on the allowlist.
+// Both checks are required: an https→http downgrade to an allowlisted host
+// would otherwise slip through.
 func checkRedirectHost(u *url.URL) error {
+	if strings.ToLower(u.Scheme) != "https" {
+		return fmt.Errorf("selfupdate: redirect to non-HTTPS URL %q rejected", u.String())
+	}
 	host := strings.ToLower(u.Hostname())
 	for _, allowed := range allowedRedirectHosts {
 		if host == allowed || strings.HasSuffix(host, "."+allowed) {
@@ -496,7 +564,7 @@ func isNewer(candidate, base string) (bool, error) {
 func parseVersion(s string) ([4]uint64, error) {
 	s = strings.TrimPrefix(s, "v")
 	parts := strings.SplitN(s, ".", 5)
-	if len(parts) > 4 || len(parts) == 0 {
+	if len(parts) > 4 {
 		return [4]uint64{}, fmt.Errorf("version %q: too many components (max 4)", s)
 	}
 	var v [4]uint64
@@ -513,17 +581,12 @@ func parseVersion(s string) ([4]uint64, error) {
 	return v, nil
 }
 
-// parseUint64 parses a decimal string as uint64 without strconv import noise.
+// parseUint64 parses a decimal string as uint64.
+// strconv.ParseUint is used to avoid silent overflow on large values.
 func parseUint64(s string) (uint64, error) {
-	var n uint64
-	if len(s) == 0 {
-		return 0, errors.New("empty string")
-	}
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return 0, fmt.Errorf("non-digit %q", c)
-		}
-		n = n*10 + uint64(c-'0')
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, err
 	}
 	return n, nil
 }

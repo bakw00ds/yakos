@@ -2767,6 +2767,13 @@ func runUpdate(yakosRoot string, args []string) {
 		os.Exit(1)
 	}
 
+	// --binary and --source are mutually exclusive; silently resolving them
+	// would be confusing and could apply the wrong update path.
+	if forceBinary && forceSource {
+		fmt.Fprintln(os.Stderr, "update: --binary and --source are mutually exclusive; specify at most one")
+		os.Exit(1)
+	}
+
 	// Determine install type.
 	isBinaryInstall := !passthrough.BashYakosExists(yakosRoot)
 	if forceBinary {
@@ -2835,6 +2842,16 @@ func runUpdateBinary(yakosRoot string, dryRun, force bool) {
 		}
 	}
 
+	// Resolve the executable path upfront so the operator can see what will
+	// be replaced before any network activity begins (MEDIUM-2).
+	exePath, exeErr := os.Executable()
+	if exeErr == nil {
+		exePath, exeErr = filepath.EvalSymlinks(exePath)
+	}
+	fmt.Fprintf(os.Stdout, "update mode: binary\n")
+	if exeErr == nil {
+		fmt.Fprintf(os.Stdout, "target binary: %s\n", exePath)
+	}
 	if currentVersion != "" {
 		fmt.Fprintf(os.Stdout, "current version: %s\n", currentVersion)
 	}
@@ -2850,9 +2867,8 @@ func runUpdateBinary(yakosRoot string, dryRun, force bool) {
 		os.Exit(1)
 	}
 
-	if !res.AlreadyUpToDate && !dryRun {
-		fmt.Fprintf(os.Stdout, "latest version: %s\n", res.NewVersion)
-	} else if dryRun && !res.AlreadyUpToDate {
+	// NIT-6: both branches printed the same line; collapse to a single check.
+	if !res.AlreadyUpToDate {
 		fmt.Fprintf(os.Stdout, "latest version: %s\n", res.NewVersion)
 	}
 }
@@ -2866,11 +2882,14 @@ Auto-detects install type:
                     + atomically replaces the running binary
   source install  → git pull --ff-only in $YAKOS_ROOT + optional refresh
 
+Mode override (mutually exclusive):
+  --binary         Force binary-update path (even if bash tree is present).
+  --source         Force git-pull path (even if bash tree is absent).
+
 Binary-install options:
   --check          Report whether an update is available; apply nothing.
   --force          Reinstall latest even when already up to date.
   --dry-run        Print what WOULD happen; write nothing.
-  --binary         Force binary-update path (even if bash tree is present).
 
 Source-install options:
   --allow-non-ff   Allow non-fast-forward git pull.
@@ -2878,10 +2897,8 @@ Source-install options:
                    project and run yakos refresh on each.
   --dry-run        Print what WOULD happen without running git pull or
                    project refresh.
-  --source         Force git-pull path (even if bash tree is absent).
 
 Common options:
-  --check          (binary mode) report latest version; no write.
   --help, -h       Print this help.
 `)
 }
