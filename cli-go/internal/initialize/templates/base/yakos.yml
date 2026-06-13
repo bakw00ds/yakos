@@ -23,10 +23,19 @@ profile:
 #   max_repeat_same_tool: 8
 
 # ---- supervisor mode (v0.34+) -----------------------------------------------
-# supervisor:
-#   enabled: true
-#   runtime: claude
-#   agent: supervisor
-#   score_every_n_calls: 10
-#   block_on_critical: true
-#   model: haiku
+# Enabled by default for new projects (surface-only mode). The supervisor
+# scores recent dispatch activity every N tool calls and surfaces CRITICAL /
+# escalation findings to the operator, but does NOT hard-block the lead.
+#
+# To block on CRITICAL: `yakos supervise set block_on_critical true`
+#   (or set block_on_critical: true below).
+# To turn off entirely: `yakos supervise disable`
+#   (or set enabled: false below).
+# Emergency session bypass (no config change): YAKOS_SUPERVISOR_DISABLE=1
+supervisor:
+  enabled: true
+  runtime: claude
+  agent: supervisor
+  score_every_n_calls: 10
+  block_on_critical: false   # surface-only by default; see note above
+  model: haiku

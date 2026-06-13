@@ -85,14 +85,26 @@ Each batch is scored on four axes (PASS / WARN / CRITICAL):
 
 ## Setup
 
-The supervisor is **disabled by default**. Opt in per-project:
+The supervisor is **enabled by default for new projects** (surface-only mode:
+`block_on_critical: false`). A `yakos init`-ed project ships with the supervisor
+on; it scores activity every 10 tool calls and surfaces findings but never
+hard-blocks the lead.
+
+Projects that existed before v0.43 and have no `supervisor:` block in
+`.yakos.yml` default to **off** — the absent-block-equals-off behavior is
+preserved for existing projects so there is no surprise cost for them.
+
+To confirm status or turn things on/off manually:
 
 ```sh
 cd /path/to/your/project
-yakos supervise enable
+yakos supervise status          # shows current enabled state
+yakos supervise enable          # explicitly enable (adds block to .yakos.yml)
+yakos supervise disable         # turn off
 # Or, manually edit .yakos.yml:
 #   supervisor:
 #     enabled: true
+#     block_on_critical: false  # surface-only (default for new projects)
 ```
 
 Then start a session normally — `yakos start <name>`. The
@@ -109,7 +121,8 @@ supervisor:
   runtime: claude              # which runtime to dispatch supervisor on
   agent: supervisor            # agent file id (rarely overridden)
   score_every_n_calls: 10      # cost vs latency tradeoff
-  block_on_critical: true      # active mode (default); false = surface-only
+  block_on_critical: false     # surface-only (default for new projects);
+                               # set true for active mode (hard block on CRITICAL)
 ```
 
 - **`runtime`** — separate from the lead's runtime. Default `claude`.

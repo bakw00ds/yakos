@@ -361,12 +361,20 @@ On a CRITICAL finding (active mode), the lead's next tool call is
 blocked with an explanation and bypass options. In passive mode the
 finding surfaces as a warning; the lead continues.
 
-### The supervisor is off by default
+### The supervisor is on by default for new projects (surface-only)
 
-Enable per-project:
+`yakos init` enables the supervisor in surface-only mode
+(`block_on_critical: false`): it scores recent dispatch activity every
+10 tool calls and surfaces CRITICAL findings as warnings, but does not
+hard-block the lead.
+
+Projects that existed before v0.43 and have no `supervisor:` block in
+`.yakos.yml` continue to default to **off** — no surprise API cost.
+
+To opt into active (blocking) mode:
 
 ```sh
-yakos supervise enable
+yakos supervise set block_on_critical true
 ```
 
 Or set in `.yakos.yml`:
@@ -374,7 +382,20 @@ Or set in `.yakos.yml`:
 ```yaml
 supervisor:
   enabled: true
-  block_on_critical: true   # active mode (hard block on CRITICAL)
+  block_on_critical: true   # active mode: hard block the lead on CRITICAL
+```
+
+To turn off entirely:
+
+```sh
+yakos supervise disable
+# or set enabled: false in .yakos.yml
+```
+
+Emergency session bypass (no config change):
+
+```sh
+export YAKOS_SUPERVISOR_DISABLE=1
 ```
 
 ### Commands
