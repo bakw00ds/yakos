@@ -728,7 +728,8 @@ func handleWorkflowRun(cfg Config) jsonrpc.Handler {
 			if runCtx == nil {
 				runCtx = context.Background()
 			}
-			_, _ = eng.Run(runCtx, wf, p.RunID, p.OperatorID)
+			// CLI/RPC callers pass zero IdentityCarrier: loopback path, no RBAC enforcement.
+			_, _ = eng.Run(runCtx, wf, p.RunID, p.OperatorID, dispatch.IdentityCarrier{})
 		}()
 
 		return workflowRunResult{RunID: p.RunID, Status: "started"}, nil
@@ -793,7 +794,8 @@ func handleWorkflowResume(cfg Config) jsonrpc.Handler {
 			// C1 (defense-in-depth): ValidateID on prior/new run IDs at the RPC boundary.
 			// The Engine.Resume call below validates again, but early rejection gives
 			// a clearer RPC error instead of a filesystem error.
-			_, _ = eng.Resume(runCtx, wf, p.PriorRunID, p.NewRunID, p.OperatorID)
+			// CLI/RPC callers pass zero IdentityCarrier: loopback path, no RBAC enforcement.
+			_, _ = eng.Resume(runCtx, wf, p.PriorRunID, p.NewRunID, p.OperatorID, dispatch.IdentityCarrier{})
 		}()
 
 		return workflowResumeResult{

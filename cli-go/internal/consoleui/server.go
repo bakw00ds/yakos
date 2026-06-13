@@ -2,6 +2,7 @@ package consoleui
 
 import (
 	"context"
+	"crypto/tls"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -43,8 +44,41 @@ var vendorFS embed.FS
 // Config holds all configuration for the unified console HTTP server.
 type Config struct {
 	// Addr is the TCP listen address. Defaults to "127.0.0.1:7890".
-	// Must be a loopback address.
+	// When NetworkedMode is false (default), must be a loopback address.
+	// When NetworkedMode is true, this is the non-loopback address to bind.
 	Addr string
+
+	// TLSConfig, when non-nil, causes the server to serve TLS on Listener /
+	// Addr instead of plain HTTP.  Required when NetworkedMode is true (the
+	// caller sets this to the mTLS config from mtls.BuildServerTLSConfig).
+	// MUST be nil when NetworkedMode is false (loopback path unchanged).
+	TLSConfig *tls.Config
+
+	// NetworkedMode, when true, signals that this server is bound to a
+	// non-loopback address.  This triggers:
+	//   - wss:// origin in CSP and WS Origin allow-list (instead of ws://)
+	//   - loopbackTrusted=false in the identity Resolver (certless → RoleRead)
+	//   - Removal of the loopback-only assertion in Serve()
+	//   - Admission of the external origin in the WS Origin allow-list
+	// When false (default), all loopback-path behaviour is completely
+	// unchanged.
+	NetworkedMode bool
+
+	// ExternalHost is the host[:port] that browsers use to reach this
+	// non-loopback server.  Derived from Addr when empty.  Used to build
+	// the wss:// allowed Origin in the WS allow-list.
+	// Ignored when NetworkedMode is false.
+	//
+	// Deprecated: use ExternalHosts (slice) for multi-host support.
+	// When both are set, ExternalHosts takes precedence.
+	ExternalHost string
+
+	// ExternalHosts is the list of host[:port] values that browsers may use to
+	// reach this non-loopback server.  Each entry becomes an allowed Origin in
+	// the WS allow-list and a SAN in the server cert.  The first entry is used
+	// for the CSP wss:// directive and the startup banner URL.
+	// Ignored when NetworkedMode is false.
+	ExternalHosts []string
 
 	// Token is the console bearer token.
 	// Use LoadOrCreateToken to obtain it before constructing the server.
@@ -104,6 +138,23 @@ func (c *Config) addr() string {
 		return c.Addr
 	}
 	return "127.0.0.1:7890"
+}
+
+// externalHosts returns the effective list of external host:port values.
+// ExternalHosts takes precedence over ExternalHost (single string).
+// When neither is set, falls back to the bind address.
+// Returns nil when NetworkedMode is false.
+func (c *Config) externalHosts() []string {
+	if !c.NetworkedMode {
+		return nil
+	}
+	if len(c.ExternalHosts) > 0 {
+		return c.ExternalHosts
+	}
+	if c.ExternalHost != "" {
+		return []string{c.ExternalHost}
+	}
+	return []string{c.addr()}
 }
 
 // Server is the unified console HTTP server.
@@ -167,50 +218,66 @@ func New(cfg Config) *Server {
 		serverCancel: serverCancel,
 	}
 	s.registerRoutes()
-	// Build the identity resolver.  It is purely additive in this PR:
-	// it stamps an Identity onto each request's context but does not gate or
-	// reject anything.  Enforcement (role checks, operator_id override) is the
-	// responsibility of later middleware and the dispatch facade (next PR per
-	// ADR-0004).
+	// Build the identity resolver.
 	//
-	// callerLabelFn extracts the cooperative OperatorID from a request.  For
-	// loopback bearer sessions the operatorID comes from dispatch.Service's
-	// daemon-level mintOperatorID; we have no per-request handle to it here,
-	// so we return "" (empty) and let the dispatch facade stamp it as usual.
-	// This is intentional: no behaviour change on the loopback path.
-	// loopbackTrusted=true: this console always binds loopback-only (enforced
-	// in Serve()).  Certless requests on the loopback path continue to resolve
-	// to RoleAdmin/Authenticated=false, preserving today's bearer-token
-	// cooperative-labeling behavior.  When the non-loopback listener is
-	// introduced (next PR), it constructs a separate Resolver with
-	// loopbackTrusted=false so certless networked requests fail closed to
-	// RoleRead, never admin.
+	// loopbackTrusted controls the no-cert fallback:
+	//   - true  (loopback path): certless requests → RoleAdmin / Authenticated=false.
+	//             Preserves today's cooperative-labeling bearer-token behaviour exactly.
+	//   - false (networked path): certless requests → RoleRead / Authenticated=false.
+	//             Defence-in-depth alongside RequireAndVerifyClientCert in the TLS
+	//             layer — even if TLS config were somehow misconfigured, certless
+	//             requests NEVER receive admin on the networked listener.
+	//
+	// callerLabelFn extracts the cooperative OperatorID for loopback bearer sessions.
+	// The dispatch facade stamps operator_id from its daemon-level opID on the
+	// loopback path; we return "" here and let the facade do it.
+	loopbackTrusted := !cfg.NetworkedMode
 	mapper := netid.NewRoleMapper(cfg.StateDir)
 	resolver := netid.NewResolver(mapper, func(r *http.Request) string {
 		// No per-request cooperative label is available at the edge; the
 		// dispatch facade stamps operator_id from its daemon-level opID.
 		return ""
-	}, true /* loopbackTrusted */)
+	}, loopbackTrusted)
 
-	// Wrap with edge auth: Host check + token (with static-asset exemptions)
-	// + Content-Type gate for mutations + identity resolution (additive only).
+	// Build the inner handler chain (shared between loopback and networked paths).
 	//
 	// Order (outer → inner):
-	//   1. RequireLocalHost      — DNS-rebinding defence; loopback-only assertion
-	//   2. requireTokenForNonStatic — bearer-token gate for non-static assets
 	//   3. requireJSONForMutations  — Content-Type gate; CSRF defence
 	//   4. resolver.Middleware      — identity stamping (no enforcement, just context)
 	//   5. s.mux                   — route handlers
-	protected := dashauth.RequireLocalHost(cfg.addr(),
-		requireTokenForNonStatic(cfg.Token, requireJSONForMutations(resolver.Middleware(s.mux))))
+	inner := requireJSONForMutations(resolver.Middleware(s.mux))
+
+	var protected http.Handler
+	if cfg.NetworkedMode {
+		// Networked path: the mTLS TLS layer replaces the loopback-only Host check.
+		// We still apply the token middleware for the bearer-token subprotocol on WS
+		// (browser WS connections still use Sec-WebSocket-Protocol token auth),
+		// and the Content-Type gate for CSRF defence.
+		//
+		// The RequireLocalHost guard is intentionally NOT applied here — it would
+		// reject all legitimate non-loopback traffic.  Instead, TLS
+		// RequireAndVerifyClientCert provides the equivalent network-layer guard.
+		protected = requireTokenForNonStatic(cfg.Token, inner)
+	} else {
+		// Loopback path (default): wrap with edge auth unchanged.
+		//   1. RequireLocalHost      — DNS-rebinding defence; loopback-only assertion
+		//   2. requireTokenForNonStatic — bearer-token gate for non-static assets
+		protected = dashauth.RequireLocalHost(cfg.addr(),
+			requireTokenForNonStatic(cfg.Token, inner))
+	}
+
 	s.httpSrv = &http.Server{
-		Addr:        cfg.addr(),
-		Handler:     protected,
+		Addr:    cfg.addr(),
+		Handler: protected,
+		// TLSConfig is set here only for the networked path; Serve() uses
+		// tls.NewListener so http.Server.ServeTLS is not needed.
+		TLSConfig:   cfg.TLSConfig,
 		ReadTimeout: 30 * time.Second,
 		// WriteTimeout intentionally 0: the SSE /api/chat/stream endpoint holds
 		// long-lived streaming responses that never complete.  A non-zero
 		// WriteTimeout would force-close them after the deadline.  The server
-		// is loopback-only (no external exposure), matching the pattern used in
+		// is loopback-only (no external exposure) on the default path; the
+		// networked path is guarded by mTLS, matching the pattern used in
 		// wsbus/server.go and mcpserver/streamhttp.go.
 		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
@@ -228,22 +295,58 @@ func (s *Server) ChatHub() *ChatHub { return s.chatHub }
 
 // Serve starts the HTTP server and blocks until ctx is cancelled.
 // Returns nil on clean shutdown (http.ErrServerClosed treated as nil).
+//
+// Loopback path (NetworkedMode=false): unchanged from prior phases.
+//   - Binds a plain TCP listener; enforces loopback-only via IsLoopback check.
+//   - Any non-loopback address returns an error before opening the listener.
+//
+// Networked path (NetworkedMode=true): mTLS TLS listener.
+//   - The caller MUST have set cfg.TLSConfig (via mtls.BuildServerTLSConfig) and
+//     must have verified mTLS material is available before calling Serve.
+//   - The plain TCP listener is wrapped with tls.NewListener before Serve.
+//   - The loopback-only assertion is NOT applied (intentional: the mTLS layer
+//     is the network-boundary guard for the networked path).
 func (s *Server) Serve(ctx context.Context) error {
 	var ln net.Listener
 	if s.cfg.Listener != nil {
+		// Fail-closed: even with an injected listener, the networked path
+		// requires TLSConfig.  Without it we would silently serve plain HTTP
+		// on a listener the caller intended to be TLS-protected.
+		if s.cfg.NetworkedMode && s.cfg.TLSConfig == nil {
+			_ = s.cfg.Listener.Close()
+			return fmt.Errorf("consoleui: NetworkedMode requires TLSConfig (mTLS material not provided)")
+		}
 		ln = s.cfg.Listener
+		// For the networked path with an injected listener (e.g. tests), wrap
+		// with TLS when TLSConfig is set.  Callers that pre-wrap with TLS
+		// should set TLSConfig=nil to skip the double-wrap.
+		if s.cfg.TLSConfig != nil {
+			ln = tls.NewListener(ln, s.cfg.TLSConfig)
+		}
 	} else {
 		var err error
-		ln, err = net.Listen("tcp", s.cfg.addr())
+		tcpLn, err := net.Listen("tcp", s.cfg.addr())
 		if err != nil {
 			return fmt.Errorf("consoleui: listen %s: %w", s.cfg.addr(), err)
 		}
-		// Enforce loopback-only.
-		host, _, _ := net.SplitHostPort(ln.Addr().String())
-		ip := net.ParseIP(host)
-		if ip != nil && !ip.IsLoopback() {
-			_ = ln.Close()
-			return fmt.Errorf("consoleui: addr %s is not a loopback address", s.cfg.addr())
+
+		if !s.cfg.NetworkedMode {
+			// Enforce loopback-only on the plain HTTP (loopback) path.
+			host, _, _ := net.SplitHostPort(tcpLn.Addr().String())
+			ip := net.ParseIP(host)
+			if ip != nil && !ip.IsLoopback() {
+				_ = tcpLn.Close()
+				return fmt.Errorf("consoleui: addr %s is not a loopback address; use --console-bind with mTLS for non-loopback", s.cfg.addr())
+			}
+			ln = tcpLn
+		} else {
+			// Networked path: wrap with TLS.  TLSConfig must be non-nil (caller
+			// validates this before calling Serve).
+			if s.cfg.TLSConfig == nil {
+				_ = tcpLn.Close()
+				return fmt.Errorf("consoleui: NetworkedMode requires TLSConfig (mTLS material not provided)")
+			}
+			ln = tls.NewListener(tcpLn, s.cfg.TLSConfig)
 		}
 	}
 
@@ -322,11 +425,20 @@ func (s *Server) registerRoutes() {
 	// ---- WebSocket event stream at console origin ----------------------------
 	// Phase 2.5: the console WS uses Sec-WebSocket-Protocol subprotocol auth
 	// ("yakos-bearer, <token>") instead of the Authorization header — browsers
-	// cannot set Authorization on WS upgrade requests.  buildConsoleWSHandler
-	// applies loopbackOnly + Origin allow-list + subprotocol token validation
-	// (constant-time via dashauth.TokenEqual) + presence join/leave lifecycle.
+	// cannot set Authorization on WS upgrade requests.
+	//
+	// Phase 6c: when NetworkedMode is true, the WS handler skips the loopback
+	// RemoteAddr guard (TLS RequireAndVerifyClientCert handles that) and
+	// extends the Origin allow-list to include the configured external host.
+	// The WS scheme switches from ws:// to wss:// in CSP and Origin matching.
 	if s.cfg.Bus != nil {
-		wsHandler := buildConsoleWSHandler(s.cfg.Token, s.cfg.Bus, s.presence)
+		var wsHandler http.Handler
+		if s.cfg.NetworkedMode {
+			externalHosts := s.cfg.externalHosts()
+			wsHandler = buildConsoleWSHandlerNetworked(s.cfg.Token, s.cfg.Bus, s.presence, externalHosts)
+		} else {
+			wsHandler = buildConsoleWSHandler(s.cfg.Token, s.cfg.Bus, s.presence)
+		}
 		s.mux.Handle("/v1/events", requireRole(netid.RoleRead, wsHandler))
 	}
 
@@ -399,17 +511,25 @@ func (s *Server) handlePresence(w http.ResponseWriter, r *http.Request) {
 
 // cspHeader returns the Content-Security-Policy value for the given bind addr.
 // Serving the CSP as a response header (rather than a <meta> tag) ensures the
-// connect-src ws:// origin is correct for any --console-addr value.
-func cspHeader(addr string) string {
-	// Derive the ws:// origin from the bound address.
-	// addr is "host:port" (e.g. "127.0.0.1:7890").
-	wsOrigin := "ws://" + addr
+// connect-src origin is correct for any --console-addr / --console-bind value.
+//
+// networked: when true, uses wss:// (mandatory for non-loopback mTLS listeners).
+// When false, uses ws:// (loopback path; unchanged).
+func cspHeader(addr string, networked bool) string {
+	// Derive the ws:// or wss:// origin from the bound address.
+	// addr is "host:port" (e.g. "127.0.0.1:7890" or "10.0.0.1:7890").
+	scheme := "ws"
+	if networked {
+		scheme = "wss"
+	}
+	wsOrigin := scheme + "://" + addr
 	return strings.Join([]string{
 		"default-src 'self'",
 		// app.js and sw.js are same-origin; no blob: needed.
 		"script-src 'self'",
 		"style-src 'self' 'unsafe-inline'",
 		// Allow WS connection to the console itself (for /v1/events).
+		// For the networked path this is wss:// (TLS WebSocket).
 		"connect-src 'self' " + wsOrigin,
 		"frame-src 'self'",
 		"base-uri 'none'",
@@ -427,8 +547,17 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
-	// Emit CSP as a response header so the ws:// origin matches --console-addr.
-	w.Header().Set("Content-Security-Policy", cspHeader(s.cfg.addr()))
+	// Emit CSP as a response header so the ws:// / wss:// origin matches the
+	// actual bind address and protocol (loopback → ws://; networked → wss://).
+	// For the networked path, use the first external host for the wss:// directive
+	// (the browser connects to a specific host, not the wildcard bind address).
+	wsAddr := s.cfg.addr()
+	if s.cfg.NetworkedMode {
+		if hosts := s.cfg.externalHosts(); len(hosts) > 0 {
+			wsAddr = hosts[0]
+		}
+	}
+	w.Header().Set("Content-Security-Policy", cspHeader(wsAddr, s.cfg.NetworkedMode))
 	// Cross-Origin-Resource-Policy: same-origin — prevents cross-origin reads.
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	_, _ = w.Write(indexHTML)

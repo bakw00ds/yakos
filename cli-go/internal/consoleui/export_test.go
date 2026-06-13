@@ -14,6 +14,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/workflow"
+	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
 // ---- ChatHub test exports ---------------------------------------------------
@@ -140,4 +141,38 @@ func NewFlowsHandlerForTest(t *testing.T, workDir string, fn func(context.Contex
 	mux.HandleFunc("/flows/api/run/node", h.handleGetNodeOutput)
 	mux.HandleFunc("/flows/api/resume", h.handleResume)
 	return mux, nil
+}
+
+// ---- Phase 6c: console-bind test exports ------------------------------------
+
+// NewPresenceManagerForTest creates a PresenceManager for use in external tests.
+func NewPresenceManagerForTest(bus *wsbus.Bus) *PresenceManager {
+	return NewPresenceManager(bus)
+}
+
+// BuildConsoleWSHandlerNetworkedForTest exposes buildConsoleWSHandlerNetworked
+// for external test packages.  The token parameter is used for subprotocol auth.
+// externalHosts is the list of host[:port] values used by browsers.
+func BuildConsoleWSHandlerNetworkedForTest(token string, bus *wsbus.Bus, pm *PresenceManager, externalHosts []string) http.Handler {
+	return buildConsoleWSHandlerNetworked(token, bus, pm, externalHosts)
+}
+
+// IsExternalOriginForTest exposes isExternalOrigin for external tests so
+// the Origin allow-list predicate can be unit-tested without triggering a
+// real WS upgrade (which requires http.Hijacker).
+func IsExternalOriginForTest(origin, externalHost string) bool {
+	return isExternalOrigin(origin, externalHost)
+}
+
+// IsLoopbackOriginForTest exposes isLoopbackOrigin for external tests.
+func IsLoopbackOriginForTest(origin string) bool {
+	return isLoopbackOrigin(origin)
+}
+
+// BuildOriginAllowListNetworkedForTest exposes consoleOriginAllowListNetworked
+// directly so tests can exercise the middleware with a simple next handler
+// (without triggering the WS upgrade that requires http.Hijacker).
+// externalHosts is the list of host[:port] values used by browsers.
+func BuildOriginAllowListNetworkedForTest(externalHosts []string, next http.Handler) http.Handler {
+	return consoleOriginAllowListNetworked(externalHosts, next)
 }

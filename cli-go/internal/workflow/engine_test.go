@@ -14,6 +14,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
@@ -287,7 +288,7 @@ func TestEngine_LinearPipeline(t *testing.T) {
 	eng, workDir := newTestEngine(t, fn)
 	wf := linearWorkflow()
 
-	rs, err := eng.Run(context.Background(), wf, "run-linear", "tester")
+	rs, err := eng.Run(context.Background(), wf, "run-linear", "tester", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -379,7 +380,7 @@ func TestEngine_Diamond(t *testing.T) {
 	eng, _ := newTestEngine(t, fn)
 	wf := diamondWorkflow()
 
-	rs, err := eng.Run(context.Background(), wf, "run-diamond", "tester")
+	rs, err := eng.Run(context.Background(), wf, "run-diamond", "tester", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -456,7 +457,7 @@ func TestEngine_MultiRootFanOut(t *testing.T) {
 	eng, _ := newTestEngine(t, fn)
 	wf := fanOutWorkflow()
 
-	rs, err := eng.Run(context.Background(), wf, "run-fanout", "tester")
+	rs, err := eng.Run(context.Background(), wf, "run-fanout", "tester", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -510,7 +511,7 @@ func TestEngine_FailurePropagation(t *testing.T) {
 
 	eng, _ := newTestEngine(t, fn)
 
-	rs, err := eng.Run(context.Background(), wf, "run-failprop", "tester")
+	rs, err := eng.Run(context.Background(), wf, "run-failprop", "tester", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -594,7 +595,7 @@ func TestEngine_CtxCancel(t *testing.T) {
 
 	done := make(chan *workflow.RunState, 1)
 	go func() {
-		rs, _ := eng.Run(ctx, wf, "run-cancel", "tester")
+		rs, _ := eng.Run(ctx, wf, "run-cancel", "tester", dispatch.IdentityCarrier{})
 		done <- rs
 	}()
 
@@ -657,7 +658,7 @@ func TestEngine_ResumeFromFailure(t *testing.T) {
 	}
 
 	eng, workDir := newTestEngine(t, firstFn)
-	rs1, err := eng.Run(context.Background(), wf, "run-001", "tester")
+	rs1, err := eng.Run(context.Background(), wf, "run-001", "tester", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
@@ -690,7 +691,7 @@ func TestEngine_ResumeFromFailure(t *testing.T) {
 	}
 	workflow.SetEngineRunFn(eng2, secondFn)
 
-	rs2, err := eng2.Resume(context.Background(), wf, "run-001", "run-002", "tester")
+	rs2, err := eng2.Resume(context.Background(), wf, "run-001", "run-002", "tester", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
@@ -747,7 +748,7 @@ func TestEngine_Resume_RejectsEditedYAML(t *testing.T) {
 		return nil, dispatch.Result{ExitCode: 1}, nil
 	}
 	eng, workDir := newTestEngine(t, fn)
-	_, err := eng.Run(context.Background(), wf, "run-hashpin-1", "tester")
+	_, err := eng.Run(context.Background(), wf, "run-hashpin-1", "tester", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
@@ -769,7 +770,7 @@ func TestEngine_Resume_RejectsEditedYAML(t *testing.T) {
 	}
 	workflow.SetEngineRunFn(eng2, fn)
 
-	_, err = eng2.Resume(context.Background(), wfEdited, "run-hashpin-1", "run-hashpin-2", "tester")
+	_, err = eng2.Resume(context.Background(), wfEdited, "run-hashpin-1", "run-hashpin-2", "tester", dispatch.IdentityCarrier{})
 	if err == nil {
 		t.Error("expected Resume to fail when YAML has changed, got nil")
 	}
@@ -1161,7 +1162,7 @@ func TestEngine_NodeDispatchLog_LiveRun(t *testing.T) {
 	eng, workDir := newTestEngine(t, fn)
 	runID := "live-dispatch-log"
 
-	rs, err := eng.Run(context.Background(), wf, runID, "tester")
+	rs, err := eng.Run(context.Background(), wf, runID, "tester", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -1289,7 +1290,7 @@ func TestEngine_OutputTruncation(t *testing.T) {
 	}
 
 	eng, _ := newTestEngine(t, fn)
-	rs, err := eng.Run(context.Background(), wf, "run-trunc", "tester")
+	rs, err := eng.Run(context.Background(), wf, "run-trunc", "tester", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -1337,7 +1338,7 @@ func TestEngine_FanIn(t *testing.T) {
 	}
 
 	eng, _ := newTestEngine(t, fn)
-	rs, err := eng.Run(context.Background(), wf, "run-fanin", "tester")
+	rs, err := eng.Run(context.Background(), wf, "run-fanin", "tester", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -1382,7 +1383,7 @@ func TestRunState_Persist(t *testing.T) {
 	}
 	workflow.SetEngineRunFn(eng, immediateOKFn([]byte("hello")))
 
-	rs, err := eng.Run(context.Background(), wf, "test-run", "test-op")
+	rs, err := eng.Run(context.Background(), wf, "test-run", "test-op", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -1495,7 +1496,7 @@ func TestEngine_ConcurrentRuns(t *testing.T) {
 			workflow.SetEngineRunFn(eng, fn)
 			wf := linearWorkflow()
 			wf.Name = fmt.Sprintf("linear-%d", time.Now().UnixNano())
-			rs, err := eng.Run(context.Background(), wf, id, "test-op")
+			rs, err := eng.Run(context.Background(), wf, id, "test-op", dispatch.IdentityCarrier{})
 			if err != nil {
 				errs <- fmt.Errorf("run %s: %w", id, err)
 				return
@@ -1523,7 +1524,7 @@ func TestResume_TraversalPriorRunID(t *testing.T) {
 	eng, _ := newTestEngine(t, immediateOKFn([]byte("ok")))
 	wf := linearWorkflow()
 
-	_, err := eng.Resume(context.Background(), wf, "../evil", "run-new", "tester")
+	_, err := eng.Resume(context.Background(), wf, "../evil", "run-new", "tester", dispatch.IdentityCarrier{})
 	if err == nil {
 		t.Error("expected error for traversal prior_run_id, got nil")
 	}
@@ -1540,7 +1541,7 @@ func TestResume_TraversalNewRunID(t *testing.T) {
 	eng, _ := newTestEngine(t, immediateOKFn([]byte("ok")))
 	wf := linearWorkflow()
 
-	_, err := eng.Resume(context.Background(), wf, "run-prior", "../evil", "tester")
+	_, err := eng.Resume(context.Background(), wf, "run-prior", "../evil", "tester", dispatch.IdentityCarrier{})
 	if err == nil {
 		t.Error("expected error for traversal new_run_id, got nil")
 	}
@@ -1584,7 +1585,7 @@ func TestResume_TraversalNodeIDInRunJSON(t *testing.T) {
 	// Use a placeholder hash — the hash mismatch will fire first if wrong.
 	// We want to test the node-id check, so we need to reach it.
 	// Run a legit first run to get the hash, then inject the bad run.json.
-	rs1, err := eng.Run(context.Background(), wf, "run-hashsrc", "tester")
+	rs1, err := eng.Run(context.Background(), wf, "run-hashsrc", "tester", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("setup run: %v", err)
 	}
@@ -1606,7 +1607,7 @@ func TestResume_TraversalNodeIDInRunJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = eng.Resume(context.Background(), wf, "run-evil-src", "run-evil-dst", "tester")
+	_, err = eng.Resume(context.Background(), wf, "run-evil-src", "run-evil-dst", "tester", dispatch.IdentityCarrier{})
 	if err == nil {
 		t.Error("expected error for traversal node id in prior run.json, got nil")
 	}
@@ -1638,7 +1639,7 @@ func TestCtxCancel_RunNotCompleted(t *testing.T) {
 
 	done := make(chan *workflow.RunState, 1)
 	go func() {
-		rs, _ := eng.Run(ctx, wf, "run-cancel-root", "tester")
+		rs, _ := eng.Run(ctx, wf, "run-cancel-root", "tester", dispatch.IdentityCarrier{})
 		done <- rs
 	}()
 
@@ -1725,7 +1726,7 @@ func TestSubstitutePrompt_InputsNotBudgeted(t *testing.T) {
 	}
 
 	eng, _ := newTestEngine(t, fn)
-	rs, err := eng.Run(context.Background(), wf, "run-input-budget", "tester")
+	rs, err := eng.Run(context.Background(), wf, "run-input-budget", "tester", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -1790,7 +1791,7 @@ func TestEngine_NodeFinished_CostUSD(t *testing.T) {
 		},
 	}
 
-	rs, err := eng.Run(context.Background(), wf, "run-cost-test", "tester")
+	rs, err := eng.Run(context.Background(), wf, "run-cost-test", "tester", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -1852,7 +1853,7 @@ func TestEngine_NodeFinished_NoCostUSD_WhenUsageNil(t *testing.T) {
 		},
 	}
 
-	rs, err := eng.Run(context.Background(), wf, "run-no-cost-test", "tester")
+	rs, err := eng.Run(context.Background(), wf, "run-no-cost-test", "tester", dispatch.IdentityCarrier{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -1873,5 +1874,100 @@ func TestEngine_NodeFinished_NoCostUSD_WhenUsageNil(t *testing.T) {
 	}
 	if payload.CostUSD != nil {
 		t.Errorf("cost_usd=%v; want nil (absent) when Usage is nil", *payload.CostUSD)
+	}
+}
+
+// ---- Finding #1: IdentityCarrier threading -----------------------------------
+
+// TestEngine_IdentityCarrier_ThreadedToDispatch verifies that a populated
+// IdentityCarrier passed to Engine.Run is forwarded to each node's
+// dispatch.Params.ResolvedIdentity.  This closes the MEDIUM finding: without
+// this threading, node dispatches had ResolvedIdentity.Populated=false,
+// bypassing the dispatch facade's RBAC enforcement on the networked path.
+func TestEngine_IdentityCarrier_ThreadedToDispatch(t *testing.T) {
+	t.Parallel()
+	eng, _ := newTestEngine(t, nil) // fake runFn to be set below; workDir not needed here
+
+	// Capture the dispatch.Params passed to the fake runFn.
+	var capturedParams dispatch.Params
+	fakeFn := func(ctx context.Context, p dispatch.Params) ([]byte, dispatch.Result, error) {
+		capturedParams = p
+		return []byte("ok"), dispatch.Result{ExitCode: 0}, nil
+	}
+	workflow.SetEngineRunFn(eng, fakeFn)
+
+	wf := &workflow.Workflow{
+		Name: "id-carrier-test",
+		Nodes: []workflow.Node{
+			{ID: "node1", Agent: "test-agent", Prompt: "do work", OutputLimit: 1000},
+		},
+	}
+
+	// Build a populated IdentityCarrier simulating the networked mTLS path.
+	carrier := dispatch.IdentityCarrier{
+		Populated: true,
+		Identity: netid.Identity{
+			Resolved:      true,
+			Authenticated: true,
+			OperatorID:    "cert-cn-operator",
+			Role:          netid.RoleDispatch,
+		},
+	}
+
+	rs, err := eng.Run(context.Background(), wf, "run-id-carrier", "owner-op", carrier)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rs.Status != workflow.RunCompleted {
+		t.Errorf("run status: got %q, want completed", rs.Status)
+	}
+
+	// Verify the carrier was threaded through to the node dispatch.
+	if !capturedParams.ResolvedIdentity.Populated {
+		t.Error("dispatch.Params.ResolvedIdentity.Populated should be true (carrier threaded through)")
+	}
+	if capturedParams.ResolvedIdentity.Identity.OperatorID != "cert-cn-operator" {
+		t.Errorf("dispatch.Params.ResolvedIdentity.Identity.OperatorID=%q; want cert-cn-operator",
+			capturedParams.ResolvedIdentity.Identity.OperatorID)
+	}
+	if !capturedParams.ResolvedIdentity.Identity.Authenticated {
+		t.Error("dispatch.Params.ResolvedIdentity.Identity.Authenticated should be true")
+	}
+}
+
+// TestEngine_IdentityCarrier_ZeroValue_NoEnforcement verifies that the zero
+// IdentityCarrier (loopback/legacy callers) results in Populated=false so
+// dispatch.Service.Run does not enforce RBAC.  This is the back-compat
+// invariant for all CLI and JSON-RPC callers.
+func TestEngine_IdentityCarrier_ZeroValue_NoEnforcement(t *testing.T) {
+	t.Parallel()
+	eng, _ := newTestEngine(t, nil)
+
+	var capturedParams dispatch.Params
+	fakeFn := func(ctx context.Context, p dispatch.Params) ([]byte, dispatch.Result, error) {
+		capturedParams = p
+		return []byte("ok"), dispatch.Result{ExitCode: 0}, nil
+	}
+	workflow.SetEngineRunFn(eng, fakeFn)
+
+	wf := &workflow.Workflow{
+		Name: "zero-carrier-test",
+		Nodes: []workflow.Node{
+			{ID: "nodeA", Agent: "agent-a", Prompt: "run it", OutputLimit: 1000},
+		},
+	}
+
+	// Zero value — loopback/legacy path.
+	rs, err := eng.Run(context.Background(), wf, "run-zero-carrier", "legacy-op", dispatch.IdentityCarrier{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rs.Status != workflow.RunCompleted {
+		t.Errorf("run status: got %q, want completed", rs.Status)
+	}
+
+	// Zero carrier must produce Populated=false — no RBAC enforcement.
+	if capturedParams.ResolvedIdentity.Populated {
+		t.Error("dispatch.Params.ResolvedIdentity.Populated should be false for zero-value carrier (loopback invariant)")
 	}
 }

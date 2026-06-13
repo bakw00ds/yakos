@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/dashauth"
+	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 	"golang.org/x/net/websocket"
 )
@@ -58,7 +59,33 @@ const authedKey contextKey = 1
 
 // buildConsoleWSHandler returns an http.Handler mounted at /v1/events that
 // implements the full console WebSocket stack described in the package doc.
+//
+// This variant is for the loopback path.  It applies:
+//   - consoleLoopbackOnly (rejects non-loopback RemoteAddr)
+//   - consoleOriginAllowList (loopback origins only; DNS-rebinding defence)
+//   - consoleAuthSubprotocol (bearer token validation)
 func buildConsoleWSHandler(token string, bus *wsbus.Bus, pm *PresenceManager) http.Handler {
+	return buildConsoleWSHandlerFull(token, bus, pm, false, nil)
+}
+
+// buildConsoleWSHandlerNetworked returns an http.Handler mounted at /v1/events
+// for the non-loopback mTLS path.  Differences from the loopback variant:
+//   - No consoleLoopbackOnly guard (TLS RequireAndVerifyClientCert is the guard)
+//   - consoleOriginAllowListNetworked: loopback + all configured external origins
+//   - consoleAuthSubprotocol still applies (bearer token for WS subprotocol)
+//
+// externalHosts is the list of host[:port] values used by browsers
+// (e.g. ["10.0.0.1:7890", "myhost.example.com:7890"]).
+// Each entry is used to build an allowed wss:// Origin.
+func buildConsoleWSHandlerNetworked(token string, bus *wsbus.Bus, pm *PresenceManager, externalHosts []string) http.Handler {
+	return buildConsoleWSHandlerFull(token, bus, pm, true, externalHosts)
+}
+
+// buildConsoleWSHandlerFull is the shared implementation.
+// networked=true: skip loopback RemoteAddr check; extend Origin allow-list;
+// override presence OperatorID with cert CN.
+// networked=false: enforce loopback; loopback-only Origin allow-list; cooperative hello OperatorID unchanged.
+func buildConsoleWSHandlerFull(token string, bus *wsbus.Bus, pm *PresenceManager, networked bool, externalHosts []string) http.Handler {
 	// The websocket.Server selects the "yakos-bearer" protocol from the list,
 	// dropping the token slot.  Token validity was already checked by the
 	// middleware layer (consoleAuthSubprotocol) before the upgrade happens.
@@ -73,23 +100,44 @@ func buildConsoleWSHandler(token string, bus *wsbus.Bus, pm *PresenceManager) ht
 			config.Protocol = []string{consoleSubprotocol}
 			return nil
 		},
-		Handler: makeConsoleWSFunc(bus, pm),
+		Handler: makeConsoleWSFunc(bus, pm, networked),
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/v1/events",
-		consoleLoopbackOnly(
-			consoleOriginAllowList(
+	if networked {
+		// Non-loopback (mTLS) path:
+		//   - Skip consoleLoopbackOnly: TLS RequireAndVerifyClientCert enforces
+		//     the network boundary.  The loopback RemoteAddr check would reject
+		//     all legitimate networked traffic.
+		//   - Use extended Origin allow-list that includes all external hosts.
+		mux.Handle("/v1/events",
+			consoleOriginAllowListNetworked(externalHosts,
 				consoleAuthSubprotocol(token, wsSrv),
 			),
-		),
-	)
+		)
+	} else {
+		// Loopback path (unchanged):
+		mux.Handle("/v1/events",
+			consoleLoopbackOnly(
+				consoleOriginAllowList(
+					consoleAuthSubprotocol(token, wsSrv),
+				),
+			),
+		)
+	}
 	return mux
 }
 
 // makeConsoleWSFunc returns the websocket.Handler func that drives the full
 // hello → presence → bus-streaming lifecycle for one browser connection.
-func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager) websocket.Handler {
+//
+// When networked is true (mTLS path), the cert CN extracted from the verified
+// TLS chain overrides hello.OperatorID before the presence join.  This closes
+// the forgeable-OperatorID finding: a client cannot claim someone else's
+// operator identity by crafting the hello frame's operator_id field.
+// On the loopback path (networked=false) hello.OperatorID is used as-is
+// (cooperative attribution — unchanged from previous behaviour).
+func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) websocket.Handler {
 	return func(conn *websocket.Conn) {
 		defer func() { _ = conn.Close() }()
 
@@ -142,6 +190,29 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager) websocket.Handler {
 		}
 		if hello.Type != "hello" {
 			hello = HelloMessage{Type: "hello"}
+		}
+
+		// ---- 1b. Cert CN override (networked / mTLS path only) ---------------
+		// On the networked path the client presents an mTLS cert whose CN is the
+		// authoritative operator identity.  Override hello.OperatorID with the
+		// cert CN so a client cannot forge another operator's identity by crafting
+		// the hello frame.
+		//
+		// The cert is on conn.Request().TLS.VerifiedChains (set by Go's TLS stack
+		// after RequireAndVerifyClientCert verification).  We use netid.CNFromTLS
+		// to extract it; if extraction fails (cert absent or chain empty) we fall
+		// through to the claimed hello.OperatorID — the TLS handshake already
+		// rejected any connection without a valid client cert, so a missing CN
+		// here is unexpected but not a security regression.
+		//
+		// On the loopback path (networked=false) hello.OperatorID is used as-is
+		// (cooperative attribution; loopback = trusted network boundary).
+		if networked {
+			if tlsState := conn.Request().TLS; tlsState != nil {
+				if cn, ok := netid.CNFromTLS(tlsState); ok && cn != "" {
+					hello.OperatorID = cn
+				}
+			}
 		}
 
 		// ---- 2. Presence join -----------------------------------------------
@@ -272,6 +343,65 @@ func consoleOriginAllowList(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// consoleOriginAllowListNetworked is the Origin allow-list for the non-loopback
+// mTLS path.  It accepts:
+//   - Requests with no Origin header (e.g. CLI tools, non-browser clients).
+//   - Loopback origins (ws://127.0.0.1:..., http://127.0.0.1:...) — unchanged.
+//   - Any external wss:// origin matching one of the configured externalHosts.
+//
+// All other origins are rejected (DNS-rebinding / cross-origin defence).
+// Each externalHost entry must be "host:port" (e.g. "10.0.0.1:7890").
+func consoleOriginAllowListNetworked(externalHosts []string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if isLoopbackOrigin(origin) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		for _, host := range externalHosts {
+			if isExternalOrigin(origin, host) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		http.Error(w, "consoleui: Origin not in allow-list", http.StatusForbidden)
+	})
+}
+
+// isExternalOrigin returns true when origin is an exact match for the external
+// host used by browsers reaching the non-loopback console.
+//
+// externalHost MUST be "host:port" (e.g. "10.0.0.1:7890").  An externalHost
+// without a port is rejected (returns false) to prevent the prefix-match
+// attack where "10.0.0.1" would erroneously accept "10.0.0.1.attacker.com".
+//
+// The comparison is exact: scheme + externalHost must equal the trimmed origin.
+// Both https:// and wss:// are accepted because browsers send the page origin
+// (https://) but the WS Origin header can carry either scheme.
+func isExternalOrigin(origin, externalHost string) bool {
+	if externalHost == "" {
+		return false
+	}
+	// Require host:port — a bare host without a port is too broad.
+	// strings.LastIndex returns -1 if ":" is absent; for IPv6 "[::1]:port"
+	// the bracket-colon form also satisfies the port requirement.
+	if !strings.Contains(externalHost, ":") {
+		return false
+	}
+	o := strings.TrimRight(origin, "/")
+	for _, scheme := range []string{"https://", "wss://", "http://", "ws://"} {
+		candidate := scheme + externalHost
+		if o == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 // newConnID generates a random 8-byte hex connection identifier.

@@ -491,10 +491,18 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 		operatorID = req.OperatorID
 	}
 
+	// Build the identity carrier from the resolved HTTP identity so the engine
+	// forwards it to each node dispatch.  On the loopback path resolvedID.Resolved
+	// is false → Populated=false → no RBAC enforcement (back-compat).
+	identityCarrier := dispatch.IdentityCarrier{
+		Populated: resolvedID.Resolved,
+		Identity:  resolvedID,
+	}
+
 	// Launch in a background goroutine parented to serverCtx.
 	// This preserves the server shutdown cancellation signal.
 	go func() {
-		if _, err := h.engine.Run(h.serverCtx, wf, runID, operatorID); err != nil {
+		if _, err := h.engine.Run(h.serverCtx, wf, runID, operatorID, identityCarrier); err != nil {
 			slog.Error("flows: engine.Run failed", "run_id", runID, "workflow", name, "err", err)
 		}
 	}()
@@ -608,9 +616,16 @@ func (h *flowsHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	} else {
 		operatorID = req.OperatorID
 	}
+
+	// Build identity carrier (same semantics as handleRun).
+	resumeCarrier := dispatch.IdentityCarrier{
+		Populated: resumeID.Resolved,
+		Identity:  resumeID,
+	}
+
 	finalNewRunID := newRunID
 	go func() {
-		if _, err := h.engine.Resume(h.serverCtx, wf, req.RunID, finalNewRunID, operatorID); err != nil {
+		if _, err := h.engine.Resume(h.serverCtx, wf, req.RunID, finalNewRunID, operatorID, resumeCarrier); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				slog.Warn("flows: engine.Resume: prior run not found", "run_id", req.RunID)
 				return
