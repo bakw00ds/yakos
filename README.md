@@ -5,7 +5,7 @@ ships a roster of specialist agents, audit-first hooks, kanban +
 retrospectives, and per-project audit trails across runtimes.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.39.0.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.40.0.0-orange.svg)](CHANGELOG.md)
 [![Stability: alpha](https://img.shields.io/badge/stability-alpha-red.svg)](#status)
 
 > Not affiliated with Anthropic, OpenAI, or Google.
@@ -40,6 +40,8 @@ for the full install guide, including the dev/from-source path.
 | `yakos quickstart` | Install + init + start (idempotent, one command) |
 | `yakos start <name>` | Launch a session for a bootstrapped project |
 | `yakos dispatch <agent> "<task>"` | One-shot dispatch to any specialist |
+| `yakos serve` | Start the daemon + open the unified console at `http://127.0.0.1:7890` |
+| `yakos workflow run <name>` | Run a Flows DAG workflow headlessly |
 | `yakos kanban` | Render the WIP board; `serve` opens a web UI |
 | `yakos supervise enable` | Turn on the live shadow-agent supervisor |
 | `yakos doctor` | Environment + install health check |
@@ -70,6 +72,16 @@ Full list: `yakos --help` (41 subcommands ported to Go).
 - **Project-health metrics.** `yakos metrics` tracks efficiency, DORA, and
   per-language quality indicators across commits. CI gate via
   `budgets.yaml`; loopback dashboard via `yakos metrics serve`.
+- **Unified web console.** `yakos serve` opens a single loopback console at
+  `http://127.0.0.1:7890` behind one bearer token. Tabs: Overview (live
+  activity feed + operator presence), Chat (per-model REPL panes across
+  claude/codex/agy/gemini × model tiers; claude streams token-by-token),
+  Kanban, Cost, and Performance — plus the Flows workflow builder. See
+  [docs/unified-console.md](docs/unified-console.md).
+- **Flows DAG orchestration.** Define multi-agent workflows as YAML files;
+  the headless DAG engine runs them with Kahn topological scheduling,
+  fan-out/fan-in, resume-from-failure, and per-run cost tracking. Author
+  in the console Flows tab or run headlessly with `yakos workflow run <name>`.
 - **Model-tier routing with fable.** Four tiers: `haiku < sonnet < opus < fable`.
   `fable` is the top tier above `opus`; shipped framework agents top out at
   `opus` and must opt in to `fable` explicitly via agent frontmatter. `frontier`
@@ -99,6 +111,7 @@ yakos/
 ## Where to look next
 
 - [docs/getting-started.md](docs/getting-started.md) — install, bootstrap, first session
+- [docs/unified-console.md](docs/unified-console.md) — unified console guide (Chat REPLs, Flows orchestration)
 - [docs/overview.md](docs/overview.md) — guided architecture walkthrough
 - [docs/metrics-ci.md](docs/metrics-ci.md) — running `yakos metrics` in CI
 - [lib/rules/INDEX.md](lib/rules/INDEX.md) — all cross-cutting rules
@@ -107,7 +120,7 @@ yakos/
 
 ## Status
 
-**v0.39.0.0** — alpha, pre-1.0. CLI commands and `.yakos.yml` schema are
+**v0.40.0.0** — alpha, pre-1.0. CLI commands and `.yakos.yml` schema are
 stable within minor versions. See [CHANGELOG.md](CHANGELOG.md).
 
 ## License

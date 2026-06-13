@@ -5640,11 +5640,13 @@ WebSocket:
   Token stored at ~/.yakos-state/ws-token (mode 0600).
   Use 'yakos events' to connect a debug client.
 
-Unified console (Phase 1):
+Unified console:
   http://127.0.0.1:7890/#token=<console-token> (default)
   Token stored at ~/.yakos-state/console-token (mode 0600).
-  Tabs: Overview | Kanban | Cost | Performance
-  (Chat and Flows land in Phase 3+)
+  Tabs: Overview | Chat | Flows | Kanban | Cost | Performance
+  Chat: per-model REPL panes (claude/codex/agy/gemini × haiku/sonnet/opus/fable);
+        claude streams token-by-token, others arrive buffered.
+  Flows: YAML DAG workflow builder and live SVG canvas with per-run cost.
 
 Performance dashboard (standalone, used only with --no-console):
   http://127.0.0.1:7895/#token=<perf-token> (default)

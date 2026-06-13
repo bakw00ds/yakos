@@ -1,4 +1,4 @@
-# yakOS getting started — v0.39.0.0
+# yakOS getting started — v0.40.0.0
 
 This guide is for a developer who has heard of yakOS but has never run
 it. By the end you will have a working install, a bootstrapped project,
@@ -34,10 +34,11 @@ retrospective reads the transcript, proposes skill improvements, and
 asks the operator to approve before anything changes. The operator stays
 in control; the framework keeps the record.
 
-At v0.39.0.0, yakOS ships 41/41 Go subcommands with full parity. The
-two implementations coexist via the `YAKOS_IMPL` env var; binary installs
-via `curl|sh` default to `YAKOS_IMPL=go` automatically. A cloned-repo
-install can use either implementation.
+At v0.40.0.0, yakOS ships 41/41 Go subcommands with full parity, plus the
+unified console and Flows DAG engine. The two implementations coexist via
+the `YAKOS_IMPL` env var; binary installs via `curl|sh` default to
+`YAKOS_IMPL=go` automatically. A cloned-repo install can use either
+implementation.
 
 ---
 
@@ -74,7 +75,7 @@ path it printed), then:
 
 ```sh
 yakos --version
-# Prints: 0.39.0.0 (go)
+# Prints: 0.40.0.0 (go)
 
 yakos doctor              # verify the install end-to-end
 yakos init myapp --project ~/code/myapp
@@ -84,7 +85,7 @@ Install options:
 
 ```sh
 # Install a specific version
-curl -fsSL .../install.sh | sh -s -- --version 0.39.0
+curl -fsSL .../install.sh | sh -s -- --version 0.40.0
 
 # Preview without downloading
 curl -fsSL .../install.sh | sh -s -- --dry-run
@@ -458,9 +459,95 @@ every step; the librarian curates but never promotes.
 
 ---
 
-## 8. The Phase 2 daemon (opt-in)
+## 8. The unified console
 
-### What `yakos serve` is
+### Opening the console
+
+```sh
+yakos serve
+# Prints: yakos serve: console: http://127.0.0.1:7890/#token=<token>
+# Open that URL in a browser.
+```
+
+`yakos serve` starts the daemon and the unified loopback console on
+`http://127.0.0.1:7890`. The URL includes a bearer token in the fragment;
+your browser stores it in memory (the fragment is never sent to the server).
+The console is loopback-only — it cannot be reached from another machine.
+
+### Console tabs
+
+| Tab | What it shows |
+|---|---|
+| **Overview** | Live activity feed of dispatches, workflow events, and operator presence. |
+| **Chat** | Per-model REPL panes — pick runtime (claude/codex/agy/gemini) and model tier (haiku/sonnet/opus/fable) per pane. Claude streams token-by-token; others arrive buffered. Multi-turn with persisted transcripts. |
+| **Flows** | YAML workflow builder. Author, run, and watch a live SVG DAG canvas with per-run cost. |
+| **Kanban** | The project kanban board with the same drag-and-drop UI as `yakos kanban serve`. |
+| **Cost** | Token spending over time (same data as `yakos metrics report`). |
+| **Performance** | Dispatch latency and per-agent time-series. |
+
+### Your first workflow (five minutes)
+
+Workflows are YAML files at `<work>/current/workflows/<name>.yaml`. Here is
+a minimal parallel-review + synthesize example. Save it, then run it.
+
+```yaml
+version: 1
+name: pr-review
+inputs:
+  branch: main
+nodes:
+  - id: security
+    agent: security-reviewer
+    model: sonnet
+    output_limit: 8000
+    prompt: "Review branch ${inputs.branch} for security and data-handling issues."
+  - id: quality
+    agent: code-reviewer
+    output_limit: 8000
+    prompt: "Review branch ${inputs.branch} for correctness and code quality."
+  - id: synthesize
+    agent: release-manager
+    timeout: 900
+    needs: [security, quality]
+    output_limit: 16000
+    prompt: |
+      Combine these into one prioritized report.
+      Security: ${nodes.security.output}
+      Quality:  ${nodes.quality.output}
+```
+
+```sh
+# Save to the right path
+mkdir -p ~/agent-control/myapp/work/current/workflows
+cp pr-review.yaml ~/agent-control/myapp/work/current/workflows/
+
+# Run headlessly (blocks until the graph drains)
+yakos workflow run pr-review
+
+# Or open the console Flows tab to author + run interactively:
+yakos serve
+```
+
+What happens: `security` and `quality` run in parallel (no `needs`). When
+both finish, their stdout is substituted into `synthesize`'s prompt and that
+node runs. Results land at:
+
+```
+<work>/current/workflows/runs/<runId>/
+  run.json               # final status + timing
+  nodes/security.stdout
+  nodes/quality.stdout
+  nodes/synthesize.stdout
+```
+
+See [docs/unified-console.md](unified-console.md) for the full Flows reference
+including schema, resume-from-failure, and caveats.
+
+---
+
+## 9. The Phase 2 daemon (opt-in)
+
+### What `yakos serve` is (transports)
 
 `yakos serve` runs a long-lived daemon with five concurrent transports.
 It is OFF by default (`YAKOS_DAEMON=off`). Phase 1 operators who do
@@ -534,7 +621,7 @@ the full authentication model.
 
 ---
 
-## 9. Hook customization (Phase 3 hybrid)
+## 10. Hook customization (Phase 3 hybrid)
 
 ### The three tiers
 
@@ -609,7 +696,7 @@ picks up the change.
 
 ---
 
-## 10. Telemetry
+## 11. Telemetry
 
 Telemetry is **off by default**. yakOS does not collect anything
 unless you explicitly enable it.
@@ -647,7 +734,7 @@ command.
 
 ---
 
-## 11. Common pitfalls
+## 12. Common pitfalls
 
 New operators hit the same five issues. Save yourself the debugging:
 
@@ -693,7 +780,7 @@ opening a new terminal, your profile change has not been sourced yet.
 
 ```sh
 source ~/.zshrc   # or ~/.bashrc — path printed at install time
-yakos --version   # should now print: 0.39.0.0 (go)
+yakos --version   # should now print: 0.40.0.0 (go)
 ```
 
 For a from-source install without the profile block, set the variable
@@ -716,10 +803,12 @@ automation. It does not start an interactive session.
 
 ---
 
-## 12. Where to read next
+## 13. Where to read next
 
 Docs inside this repo:
 
+- [`docs/unified-console.md`](unified-console.md) — full guide to the
+  console tabs, Chat REPL, and Flows orchestration
 - [`docs/go-port-plan.md`](go-port-plan.md) — full porting plan, exit
   criteria, and the list of 41 ported subcommands
 - [`docs/go-shadow-mode.md`](go-shadow-mode.md) — `YAKOS_IMPL`
