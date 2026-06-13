@@ -77,19 +77,28 @@ func (e *Engine) runDir(runID string) string {
 // ownerOperatorID is the operator who triggered this run; it is stamped onto
 // every node dispatch via dispatch.Params.OperatorID.
 //
+// identity carries the resolved caller identity from the HTTP edge (networked
+// path).  CLI callers pass the zero value (dispatch.IdentityCarrier{}) so
+// existing loopback behaviour is completely unchanged.  When Populated is true,
+// each node dispatch will have ResolvedIdentity set, causing dispatch.Service
+// to enforce RoleDispatch and override OperatorID with the cert CN.
+//
 // Run blocks until the graph drains or ctx is cancelled.
 // Returns the final RunState; the run is persisted to disk on completion.
-func (e *Engine) Run(ctx context.Context, wf *Workflow, runID, ownerOperatorID string) (*RunState, error) {
-	return e.run(ctx, wf, runID, ownerOperatorID, "", nil)
+func (e *Engine) Run(ctx context.Context, wf *Workflow, runID, ownerOperatorID string, identity dispatch.IdentityCarrier) (*RunState, error) {
+	return e.run(ctx, wf, runID, ownerOperatorID, "", nil, identity)
 }
 
 // Resume reloads a prior run and re-runs failed/skipped nodes, reusing
 // pinned outputs from completed nodes. It forks a new runID and records
 // parent_run_id for audit-trail preservation.
 //
+// identity carries the resolved caller identity (same semantics as in Run).
+// CLI callers pass the zero value (dispatch.IdentityCarrier{}).
+//
 // Resume fails loudly if the current workflow YAML hash differs from the
 // recorded hash — resuming against an edited graph is undefined.
-func (e *Engine) Resume(ctx context.Context, wf *Workflow, priorRunID, newRunID, ownerOperatorID string) (*RunState, error) {
+func (e *Engine) Resume(ctx context.Context, wf *Workflow, priorRunID, newRunID, ownerOperatorID string, identity dispatch.IdentityCarrier) (*RunState, error) {
 	// C1: validate both IDs before ANY filesystem path construction.
 	if err := ValidateID("prior_run_id", priorRunID); err != nil {
 		return nil, err
@@ -147,17 +156,19 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, priorRunID, newRunID,
 		}
 	}
 
-	return e.run(ctx, wf, newRunID, ownerOperatorID, priorRunID, pinnedOutputs)
+	return e.run(ctx, wf, newRunID, ownerOperatorID, priorRunID, pinnedOutputs, identity)
 }
 
 // run is the shared implementation for Run and Resume.
 // pinnedOutputs maps node IDs to pre-computed outputs (for resumed runs).
 // parentRunID is non-empty only on resumed runs.
+// identity is threaded to every node dispatch; zero value = loopback/legacy.
 func (e *Engine) run(
 	ctx context.Context,
 	wf *Workflow,
 	runID, ownerOperatorID, parentRunID string,
 	pinnedOutputs map[string][]byte,
+	identity dispatch.IdentityCarrier,
 ) (*RunState, error) {
 	// Validate the runID.
 	if err := ValidateID("runID", runID); err != nil {
@@ -222,7 +233,7 @@ func (e *Engine) run(
 	rs.markRunStarted()
 
 	// Execute the DAG.
-	success := e.executeGraph(ctx, wf, rs, ownerOperatorID)
+	success := e.executeGraph(ctx, wf, rs, ownerOperatorID, identity)
 
 	rs.markRunDone(success)
 
@@ -244,7 +255,8 @@ func (e *Engine) run(
 
 // executeGraph runs the Kahn-ordered DAG concurrently under a per-run semaphore.
 // Returns true if all nodes completed successfully, false if any node failed.
-func (e *Engine) executeGraph(ctx context.Context, wf *Workflow, rs *RunState, ownerOpID string) bool {
+// identity is forwarded to every node dispatch.
+func (e *Engine) executeGraph(ctx context.Context, wf *Workflow, rs *RunState, ownerOpID string, identity dispatch.IdentityCarrier) bool {
 	// Build in-degree map and dependents map.
 	inDegree := make(map[string]int, len(wf.Nodes))
 	dependents := make(map[string][]string, len(wf.Nodes))
@@ -377,7 +389,7 @@ func (e *Engine) executeGraph(ctx context.Context, wf *Workflow, rs *RunState, o
 				defer func() { sem <- struct{}{} }()
 				defer func() { completedCh <- nodeID }()
 
-				e.runNode(ctx, wf, rs, node, ownerOpID, &runFailed, failedSet, &queueMu)
+				e.runNode(ctx, wf, rs, node, ownerOpID, identity, &runFailed, failedSet, &queueMu)
 			}()
 
 		}
@@ -530,12 +542,15 @@ func orphanedNodeIDs(logPath string) map[string]struct{} {
 // runNode executes a single node: substitutes prompts, calls dispatch.Service,
 // stores output, and publishes events. It modifies runFailed and failedSet
 // under queueMu when the node fails.
+// identity is forwarded to dispatch.Params.ResolvedIdentity so the dispatch
+// facade enforces RBAC when Populated is true (networked/mTLS path).
 func (e *Engine) runNode(
 	ctx context.Context,
 	wf *Workflow,
 	rs *RunState,
 	node Node,
 	ownerOpID string,
+	identity dispatch.IdentityCarrier,
 	runFailed *atomic.Bool,
 	failedSet map[string]bool,
 	queueMu *sync.Mutex,
@@ -568,15 +583,19 @@ func (e *Engine) runNode(
 	}
 
 	// Build dispatch.Params with Project pinned to Engine.Project.
+	// ResolvedIdentity is forwarded from the triggering HTTP request so the
+	// dispatch facade enforces RBAC and cert-CN operator_id override on the
+	// networked (mTLS) path.  Zero value = loopback/legacy (no enforcement).
 	params := dispatch.Params{
-		Agent:      node.Agent,
-		Task:       prompt,
-		Project:    e.Project,
-		Runtime:    node.Runtime,
-		Model:      model,
-		Timeout:    node.Timeout,
-		YakosRoot:  e.YakosRoot,
-		OperatorID: ownerOpID,
+		Agent:            node.Agent,
+		Task:             prompt,
+		Project:          e.Project,
+		Runtime:          node.Runtime,
+		Model:            model,
+		Timeout:          node.Timeout,
+		YakosRoot:        e.YakosRoot,
+		OperatorID:       ownerOpID,
+		ResolvedIdentity: identity,
 	}
 
 	// Write dispatch_started to the per-run node dispatch log.

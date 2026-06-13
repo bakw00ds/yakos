@@ -6532,7 +6532,8 @@ func runWorkflowRun(yakosRoot, workspaceRoot, workDir string, args []string) {
 	}
 
 	fmt.Fprintf(os.Stderr, "workflow run: starting %q run %s\n", name, runID)
-	rs, err := eng.Run(context.Background(), wf, runID, operatorID)
+	// CLI callers pass zero IdentityCarrier: loopback path, no RBAC enforcement.
+	rs, err := eng.Run(context.Background(), wf, runID, operatorID, dispatch.IdentityCarrier{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "workflow run: %v\n", err)
 		os.Exit(1)
@@ -6617,7 +6618,8 @@ func runWorkflowResume(yakosRoot, workspaceRoot, workDir string, args []string) 
 	}
 
 	fmt.Fprintf(os.Stderr, "workflow resume: resuming %q from %s → %s\n", name, priorRunID, newRunID)
-	rs, err := eng.Resume(context.Background(), wf, priorRunID, newRunID, operatorID)
+	// CLI callers pass zero IdentityCarrier: loopback path, no RBAC enforcement.
+	rs, err := eng.Resume(context.Background(), wf, priorRunID, newRunID, operatorID, dispatch.IdentityCarrier{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "workflow resume: %v\n", err)
 		os.Exit(1)
