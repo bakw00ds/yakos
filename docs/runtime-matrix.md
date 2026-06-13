@@ -5,8 +5,8 @@ sessions on multiple agentic CLIs. This document tracks which features
 each adapter supports, what gets soft-degraded, and the operator-facing
 trade-offs.
 
-Last updated: 2026-05-08 (v0.4.0 — codex adapter shipped; gemini in
-v0.4.1; mixed-runtime dispatch in v0.4.2).
+Last updated: 2026-06-12 (v0.40.0.0 — unified console + Flows; fable tier
+added in v0.38; codex adapter shipped in v0.4.0; gemini in v0.4.1).
 
 ## Capability matrix
 
@@ -119,6 +119,37 @@ right CLI in non-interactive mode, captures the output, and returns
 to the caller. The lead (in any runtime) calls this via Bash. This
 lets a project mix runtimes per-agent — e.g., orchestration on
 claude, code-review on codex, doc-writing on gemini.
+
+## Model tiers
+
+yakOS routes dispatches through four tiers, lowest to highest:
+
+| Tier | Aliases |
+|---|---|
+| `haiku` | `cheap` |
+| `sonnet` | `balanced` |
+| `opus` | `best`, `reasoning` |
+| `fable` | `frontier` |
+
+Framework agents declare a maximum tier in their frontmatter. `fable` requires
+explicit opt-in (agents cap at `opus` by default). Override per-dispatch with
+`--model <tier>` or per-pane in the console Chat tab.
+
+## Console Chat streaming behavior (v0.40.0.0+)
+
+The unified console Chat tab uses an unframed execution mode (agent definition
+as system prompt, direct `-p`, `--include-partial-messages`):
+
+| Runtime | Streaming behavior |
+|---|---|
+| `claude` | Token-by-token streaming via SSE. First token latency governed by `--include-partial-messages` mode. |
+| `codex` | Buffered — full response arrives as one chunk + summary. |
+| `agy` | Buffered — full response arrives as one chunk + summary. |
+| `gemini` | Buffered — full response arrives as one chunk + summary. |
+
+Partial streaming is a claude-specific capability. The Chat UI labels buffered
+runtimes clearly so operators know to expect a single response rather than a
+live stream.
 
 ## Adding a new runtime
 

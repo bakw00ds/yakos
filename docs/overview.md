@@ -1,6 +1,6 @@
 # YakOS — overview
 
-**Version this overview targets:** v0.39.0.0 (2026-06-11).
+**Version this overview targets:** v0.40.0.0 (2026-06-12).
 **Audience:** operators evaluating yakOS or onboarding to it.
 **Companion docs:** [README.md](../README.md) for install,
 [UPGRADING.md](../UPGRADING.md) for upgrade/uninstall,
@@ -28,6 +28,18 @@ bootstrap projects with `yakos init`, launch sessions with
 - **CLI** — `yakos` with 41 Go-native subcommands: install, init,
   start, dispatch, auth, memory, cost, agent, plugin, migrate, doctor,
   validate, archive, session, metrics, supervise, and more.
+- **Unified console** — `yakos serve` starts the daemon and opens a
+  single-origin loopback console at `127.0.0.1:7890` behind one bearer
+  token. Tabs: Overview, Chat (per-model REPL panes across
+  claude/codex/agy/gemini × model tiers; claude streams token-by-token),
+  Flows, Kanban, Cost, Performance. Closed the prior kanban no-token
+  mutational gap. See [unified-console.md](unified-console.md).
+- **Flows DAG engine** — headless multi-agent workflow executor. Author
+  YAML workflows with `needs:` edges for fan-out/fan-in; the Kahn
+  scheduler runs independent nodes in parallel and threads upstream stdout
+  into downstream prompts via `${nodes.<id>.output}`. Resume-from-failure
+  forks a new run reusing completed outputs. Author/run from the console
+  Flows tab or with `yakos workflow run|resume|status`.
 - **Metrics subsystem** — `yakos metrics collect|report|trend|compare|gate|serve`
   tracks efficiency, DORA, and per-language quality indicators across
   commits. CI gate via `budgets.yaml`; loopback dashboard via `serve`.
@@ -323,6 +335,11 @@ migrate-from-claude | diff <runtime>`.
 **Metrics:** `metrics collect|report|trend|compare|gate|serve|install-hook|uninstall-hook`.
 See `docs/metrics-ci.md` + `docs/adr/ADR-0001.md`.
 
+**Flows:** `workflow run <name> [--run-id <id>] [--operator <id>]`,
+`workflow resume <name> --prior-run-id <id> --new-run-id <id>`,
+`workflow status <run-id>`.
+See `docs/unified-console.md` + `docs/adr/ADR-0003.md`.
+
 **Other:** `status` *(per-project dashboard)*, `team`,
 `teach <agent> <lesson-file>`.
 
@@ -348,6 +365,7 @@ and `yakos session export`.
 ## Where to go next
 
 - **First-time install + project bootstrap:** [README.md](../README.md).
+- **Unified console + Flows orchestration:** [unified-console.md](unified-console.md).
 - **Upgrade an existing yakOS install:** [UPGRADING.md](../UPGRADING.md).
 - **Per-runtime capability matrix + trade-offs:** [runtime-matrix.md](runtime-matrix.md).
 - **Author a community runtime adapter:** [plugin-spec.md](plugin-spec.md).
