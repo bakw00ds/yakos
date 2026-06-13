@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.0.0] — 2026-06-13
+
+### Added
+
+- **Go-only installs are now first-class.** When `YAKOS_IMPL` is unset and no bash `yakos` is present, the binary defaults to **Go-native** routing instead of erroring — `yakos <cmd>` just works on a binary-only (`curl | sh`) install without needing `YAKOS_IMPL=go`. Shadow-mode is preserved where a bash tree exists (unset + bash present → passthrough, as before); explicit `YAKOS_IMPL=bash` unchanged. (#159)
+- **`yakos help` lists all ported commands.** `help` / `--help` / `-h` now print a self-contained, grouped list of all 41 ported commands with one-line descriptions on every install (parity is 41/41), with a `go-port-status`/per-command-help pointer. On installs where a bash tree is also present, a footer notes bash still handles any unlisted command. (#159)
+
 ## [0.41.0.0] — 2026-06-13
 
 ### Added
