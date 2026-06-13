@@ -20,6 +20,8 @@ package serve
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -36,6 +38,8 @@ import (
 	"github.com/bakw00ds/yakos/internal/grpcserver"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/mcpserver"
+	"github.com/bakw00ds/yakos/internal/mtls"
+	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/restapi"
 	"github.com/bakw00ds/yakos/internal/workflow"
@@ -105,6 +109,18 @@ type Config struct {
 	// ConsoleAddr is the TCP address for the unified console HTTP server.
 	// Defaults to "127.0.0.1:7890". Set to "-" to disable (same as --no-console).
 	ConsoleAddr string
+
+	// ConsoleBind, when non-empty, overrides the console bind address and
+	// activates the non-loopback networked path (Phase 6c).
+	//
+	// FAIL-CLOSED: if ConsoleBind is a non-loopback address, Run() REFUSES
+	// to start the console listener unless mTLS material can be loaded or
+	// generated.  There is no --insecure escape hatch.
+	//
+	// When ConsoleBind is a loopback address, it behaves identically to
+	// ConsoleAddr (plain HTTP, bearer token) and the networked path is not
+	// activated.
+	ConsoleBind string
 
 	// ConsoleTokenPath overrides the path to the console bearer-token file.
 	// Defaults to ~/.yakos-state/console-token.
@@ -205,6 +221,15 @@ func (c *Config) consoleAddr() string {
 		return c.ConsoleAddr
 	}
 	return "127.0.0.1:7890"
+}
+
+// consoleBind returns the effective bind address for the console.
+// When ConsoleBind is set it takes precedence over ConsoleAddr.
+func (c *Config) consoleBind() string {
+	if c.ConsoleBind != "" {
+		return c.ConsoleBind
+	}
+	return c.consoleAddr()
 }
 
 func (c *Config) consoleStateDir() string {
@@ -353,6 +378,17 @@ func Run(ctx context.Context, cfg Config) error {
 	// Load (or generate) the console token and start the unified console server
 	// unless disabled.  The console mounts kanban, metricsdash, and perfdash
 	// Handler()s internally — this is where metricsdash gets instantiated.
+	//
+	// Phase 6c: when ConsoleBind is a non-loopback address, the FAIL-CLOSED
+	// networked path is activated:
+	//   1. mTLS material (CA + server cert) is loaded or generated via internal/mtls.
+	//      If generation fails the daemon refuses to start.
+	//   2. The consoleui.Config is built with TLSConfig + NetworkedMode=true,
+	//      causing Serve() to wrap the listener with tls.NewListener.
+	//   3. The identity Resolver is constructed with loopbackTrusted=false so
+	//      certless requests never receive admin — defence-in-depth.
+	//   4. A loud startup banner is printed (see below).
+	// There is NO --insecure escape hatch.
 	consoleErrCh := make(chan error, 1)
 	if !cfg.NoConsole && cfg.consoleAddr() != "-" {
 		consoleTok, err := consoleui.LoadOrCreateToken(cfg.consoleStateDir())
@@ -368,8 +404,13 @@ func Run(ctx context.Context, cfg Config) error {
 			Project:   cfg.WorkspaceRoot,
 			WorkDir:   workDir,
 		}
-		consoleSrv := consoleui.New(consoleui.Config{
-			Addr:              cfg.consoleAddr(),
+
+		bindAddr := cfg.consoleBind()
+		networked := isNonLoopbackBind(bindAddr)
+
+		// Build the consoleui config (common fields).
+		consoleCfg := consoleui.Config{
+			Addr:              bindAddr,
 			Token:             consoleTok,
 			KanbanBoardPath:   kanbanPath,
 			KanbanProject:     filepath.Base(cfg.WorkspaceRoot),
@@ -380,10 +421,43 @@ func Run(ctx context.Context, cfg Config) error {
 			WorkDir:           workDir,
 			WorkflowEngine:    workflowEngine,
 			StateDir:          cfg.consoleStateDir(),
-		})
-		// consoleURL is built by start.go's banner; this local string was a
-		// no-op dead-code assignment.  Kept as documentation only.
-		// consoleURL := fmt.Sprintf("http://%s/#token=%s", cfg.consoleAddr(), consoleTok)
+		}
+
+		if networked {
+			// FAIL-CLOSED: load or generate mTLS material.  Refuse to bind if it
+			// cannot be established — no listener is opened before this check passes.
+			stateDir := cfg.consoleStateDir()
+			caCert, caKey, err := mtls.LoadOrGenerateCA(stateDir)
+			if err != nil {
+				return fmt.Errorf("serve: console --console-bind: mTLS CA unavailable (non-loopback bind requires mTLS): %w", err)
+			}
+			// Extract the bind hostname for the server cert SAN.
+			bindHost, _, _ := net.SplitHostPort(bindAddr)
+			if bindHost == "" {
+				bindHost = bindAddr
+			}
+			serverCert, err := mtls.IssueServerCert(caCert, caKey, []string{bindHost})
+			if err != nil {
+				return fmt.Errorf("serve: console --console-bind: issue server cert: %w", err)
+			}
+			caPool := mtls.CertPoolFromCert(caCert)
+			tlsCfg := mtls.BuildServerTLSConfig(serverCert, caPool)
+
+			// Wire the networked path:
+			//   - TLSConfig: mTLS (RequireAndVerifyClientCert + ClientCAs + TLS1.2+)
+			//   - NetworkedMode: true → loopbackTrusted=false in Resolver
+			//   - ExternalHost: derived from bindAddr for the WS Origin allow-list
+			consoleCfg.TLSConfig = tlsCfg
+			consoleCfg.NetworkedMode = true
+			consoleCfg.ExternalHost = bindAddr
+
+			// Print startup banner — LOUD — because we are exposing an RCE-capable
+			// surface to the network.
+			certFP := serverCertFingerprint(serverCert)
+			printNetworkedConsoleBanner(bindAddr, certFP, stateDir)
+		}
+
+		consoleSrv := consoleui.New(consoleCfg)
 		go func() {
 			consoleErrCh <- consoleSrv.Serve(ctx)
 		}()
@@ -542,3 +616,67 @@ func writePIDFile(path string) error {
 
 // drainTimeout is the maximum time to wait for in-flight requests after shutdown.
 const drainTimeout = 5 * time.Second
+
+// ---- networked console helpers -----------------------------------------------
+
+// isNonLoopbackBind returns true when addr is a non-loopback address that
+// requires the mTLS networked path.  It delegates to mtls.IsNonLoopback so
+// the single-source-of-truth predicate is always used.
+func isNonLoopbackBind(addr string) bool {
+	return mtls.IsNonLoopback(addr)
+}
+
+// serverCertFingerprint returns the SHA-256 fingerprint of the first DER block
+// in serverCert, formatted as colon-separated hex bytes (same format as
+// openssl x509 -fingerprint).  Used in the startup banner so operators can
+// pin-verify the server cert out of band.
+func serverCertFingerprint(serverCert *tls.Certificate) string {
+	if len(serverCert.Certificate) == 0 {
+		return "(fingerprint unavailable)"
+	}
+	sum := sha256.Sum256(serverCert.Certificate[0])
+	parts := make([]string, len(sum))
+	for i, b := range sum {
+		parts[i] = fmt.Sprintf("%02X", b)
+	}
+	return strings.Join(parts, ":")
+}
+
+// printNetworkedConsoleBanner prints a prominent banner when the console is
+// bound to a non-loopback address.  The banner conveys:
+//   - The active URL (wss://)
+//   - The server cert fingerprint (operators should verify this out of band)
+//   - The authz model (mTLS client certs; roles from roles.json; default=read)
+//   - How to obtain a client cert (out-of-band distribution; no enrollment
+//     endpoint exists yet — ADR-0004 §C2)
+//
+// The banner is printed to stderr (same as all other serve: messages).
+// It is intentionally verbose and hard to miss.
+func printNetworkedConsoleBanner(bindAddr, certFingerprint, stateDir string) {
+	rolesPath := filepath.Join(stateDir, "mtls", "roles.json")
+	sep := strings.Repeat("=", 72)
+	fmt.Fprintln(os.Stderr, sep)
+	fmt.Fprintln(os.Stderr, "  YAKOS CONSOLE: NETWORKED MODE ACTIVE")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintf(os.Stderr, "  URL:             wss://%s\n", bindAddr)
+	fmt.Fprintf(os.Stderr, "  Server cert SHA-256: %s\n", certFingerprint)
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  Auth model:      mutual TLS (mTLS) — client certs required")
+	fmt.Fprintf(os.Stderr, "  Role mapping:    %s\n", rolesPath)
+	fmt.Fprintln(os.Stderr, "  Default role:    read (fail-closed; no roles.json = everyone reads)")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  Client cert:     distribute out of band (no enrollment endpoint yet).")
+	fmt.Fprintln(os.Stderr, "                   Use 'mtls.IssueClientCert' + 'mtls.PersistClientCert'")
+	fmt.Fprintln(os.Stderr, "                   to generate and distribute client certs.")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  WARNING: This surface is functionally RCE-equivalent for operators")
+	fmt.Fprintln(os.Stderr, "           with 'dispatch' or higher roles.  Verify the fingerprint")
+	fmt.Fprintln(os.Stderr, "           above before connecting client certificates.")
+	fmt.Fprintln(os.Stderr, sep)
+}
+
+// rolesFromIdentity extracts the role string from an identity, used for
+// logging.  Exported for use by the consoleui package audit-log path.
+func rolesFromIdentity(id netid.Identity) string {
+	return id.Role.String()
+}

@@ -5563,6 +5563,7 @@ func runServe(yakosRoot string, args []string) {
 	wsAddr := ""
 	perfAddr := ""
 	consoleAddr := ""
+	consoleBind := ""
 	detach := false
 	rotateToken := false
 	rotatePerfToken := false
@@ -5610,6 +5611,13 @@ func runServe(yakosRoot string, args []string) {
 				os.Exit(1)
 			}
 			consoleAddr = args[i]
+		case "--console-bind":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "serve: --console-bind requires an address")
+				os.Exit(1)
+			}
+			consoleBind = args[i]
 		case "--rotate-ws-token":
 			rotateToken = true
 		case "--rotate-perf-token":
@@ -5633,6 +5641,8 @@ func runServe(yakosRoot string, args []string) {
 				perfAddr = args[i][12:]
 			} else if len(args[i]) > 15 && args[i][:15] == "--console-addr=" {
 				consoleAddr = args[i][15:]
+			} else if len(args[i]) > 15 && args[i][:15] == "--console-bind=" {
+				consoleBind = args[i][15:]
 			} else {
 				fmt.Fprintf(os.Stderr, "serve: unknown flag %q (try --help)\n", args[i])
 				os.Exit(1)
@@ -5707,6 +5717,7 @@ func runServe(yakosRoot string, args []string) {
 		PerfAddr:      perfAddr,
 		NoPerfDash:    noPerfDash,
 		ConsoleAddr:   consoleAddr,
+		ConsoleBind:   consoleBind,
 		NoConsole:     noConsole,
 	}
 
@@ -5718,19 +5729,27 @@ func runServe(yakosRoot string, args []string) {
 	if perfBindAddr == "" {
 		perfBindAddr = "127.0.0.1:7895"
 	}
-	consoleBindAddr := consoleAddr
-	if consoleBindAddr == "" {
-		consoleBindAddr = "127.0.0.1:7890"
+	// Effective console bind address for the startup banner.
+	// --console-bind takes precedence over --console-addr.
+	consoleEffectiveBind := consoleBind
+	if consoleEffectiveBind == "" {
+		consoleEffectiveBind = consoleAddr
+	}
+	if consoleEffectiveBind == "" {
+		consoleEffectiveBind = "127.0.0.1:7890"
 	}
 
 	fmt.Fprintf(os.Stderr, "yakos serve: starting daemon for workspace %s\n", workspaceRoot)
 	fmt.Fprintf(os.Stderr, "yakos serve: socket at %s\n", jsonrpc.SocketPath(workspaceRoot))
 	if !noConsole {
 		// When the console is enabled, /v1/events is embedded in it at
-		// consoleBindAddr.  The standalone WS server at wsBindAddr is still
+		// consoleEffectiveBind.  The standalone WS server at wsBindAddr is still
 		// running for direct programmatic access (CLI tools, scripts).
-		fmt.Fprintf(os.Stderr, "yakos serve: console: http://%s/#token=%s\n", consoleBindAddr, consoleTok)
-		fmt.Fprintf(os.Stderr, "yakos serve: ws events (console): ws://%s/v1/events\n", consoleBindAddr)
+		// Note: for the networked path (--console-bind non-loopback), the
+		// full banner is printed by printNetworkedConsoleBanner in serve.Run();
+		// this line covers the brief pre-Run startup line only.
+		fmt.Fprintf(os.Stderr, "yakos serve: console: http://%s/#token=%s\n", consoleEffectiveBind, consoleTok)
+		fmt.Fprintf(os.Stderr, "yakos serve: ws events (console): ws://%s/v1/events\n", consoleEffectiveBind)
 		fmt.Fprintf(os.Stderr, "yakos serve: ws events (standalone): ws://%s/v1/events\n", wsBindAddr)
 	} else {
 		fmt.Fprintf(os.Stderr, "yakos serve: ws events at ws://%s/v1/events\n", wsBindAddr)
@@ -5935,7 +5954,7 @@ Example:
 
 func printServeHelp(w io.Writer) {
 	_, _ = fmt.Fprint(w, `yakos serve [--socket <path>] [--pidfile <path>] [--ws-addr <addr>]
-             [--console-addr <addr>] [--no-console]
+             [--console-addr <addr>] [--console-bind <addr>] [--no-console]
              [--perf-addr <addr>] [--no-perf] [--detach] [--help]
 
 Start the yakos daemon for the current workspace.
@@ -5964,6 +5983,11 @@ Flags:
                             Loopback-only; cross-machine access requires mTLS (Q2).
   --console-addr <addr>     Unified console bind address (default 127.0.0.1:7890).
                             Loopback-only. Mounts kanban+cost+perf under one token.
+  --console-bind <addr>     Bind the console to a non-loopback address with mTLS.
+                            FAIL-CLOSED: daemon refuses if mTLS material is unavailable.
+                            No plain-HTTP escape hatch. See ADR-0004.
+                            When set to a loopback address, behaves like --console-addr.
+                            Example: --console-bind 0.0.0.0:7890
   --no-console              Disable the unified console server.
   --perf-addr <addr>        Standalone performance dashboard address (default 127.0.0.1:7895).
                             Only used when --no-console is set.

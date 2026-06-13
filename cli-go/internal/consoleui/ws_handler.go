@@ -58,7 +58,31 @@ const authedKey contextKey = 1
 
 // buildConsoleWSHandler returns an http.Handler mounted at /v1/events that
 // implements the full console WebSocket stack described in the package doc.
+//
+// This variant is for the loopback path.  It applies:
+//   - consoleLoopbackOnly (rejects non-loopback RemoteAddr)
+//   - consoleOriginAllowList (loopback origins only; DNS-rebinding defence)
+//   - consoleAuthSubprotocol (bearer token validation)
 func buildConsoleWSHandler(token string, bus *wsbus.Bus, pm *PresenceManager) http.Handler {
+	return buildConsoleWSHandlerFull(token, bus, pm, false, "")
+}
+
+// buildConsoleWSHandlerNetworked returns an http.Handler mounted at /v1/events
+// for the non-loopback mTLS path.  Differences from the loopback variant:
+//   - No consoleLoopbackOnly guard (TLS RequireAndVerifyClientCert is the guard)
+//   - consoleOriginAllowListNetworked: loopback + the configured external origin
+//   - consoleAuthSubprotocol still applies (bearer token for WS subprotocol)
+//
+// externalHost is the host[:port] used by browsers (e.g. "10.0.0.1:7890").
+// It is used to build the wss:// allowed Origin.
+func buildConsoleWSHandlerNetworked(token string, bus *wsbus.Bus, pm *PresenceManager, externalHost string) http.Handler {
+	return buildConsoleWSHandlerFull(token, bus, pm, true, externalHost)
+}
+
+// buildConsoleWSHandlerFull is the shared implementation.
+// networked=true: skip loopback RemoteAddr check; extend Origin allow-list.
+// networked=false: enforce loopback; loopback-only Origin allow-list.
+func buildConsoleWSHandlerFull(token string, bus *wsbus.Bus, pm *PresenceManager, networked bool, externalHost string) http.Handler {
 	// The websocket.Server selects the "yakos-bearer" protocol from the list,
 	// dropping the token slot.  Token validity was already checked by the
 	// middleware layer (consoleAuthSubprotocol) before the upgrade happens.
@@ -77,13 +101,27 @@ func buildConsoleWSHandler(token string, bus *wsbus.Bus, pm *PresenceManager) ht
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/v1/events",
-		consoleLoopbackOnly(
-			consoleOriginAllowList(
+	if networked {
+		// Non-loopback (mTLS) path:
+		//   - Skip consoleLoopbackOnly: TLS RequireAndVerifyClientCert enforces
+		//     the network boundary.  The loopback RemoteAddr check would reject
+		//     all legitimate networked traffic.
+		//   - Use extended Origin allow-list that includes the external host.
+		mux.Handle("/v1/events",
+			consoleOriginAllowListNetworked(externalHost,
 				consoleAuthSubprotocol(token, wsSrv),
 			),
-		),
-	)
+		)
+	} else {
+		// Loopback path (unchanged):
+		mux.Handle("/v1/events",
+			consoleLoopbackOnly(
+				consoleOriginAllowList(
+					consoleAuthSubprotocol(token, wsSrv),
+				),
+			),
+		)
+	}
 	return mux
 }
 
@@ -272,6 +310,50 @@ func consoleOriginAllowList(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// consoleOriginAllowListNetworked is the Origin allow-list for the non-loopback
+// mTLS path.  It accepts:
+//   - Requests with no Origin header (e.g. CLI tools, non-browser clients).
+//   - Loopback origins (ws://127.0.0.1:..., http://127.0.0.1:...) — unchanged.
+//   - The external wss:// origin derived from externalHost (the configured
+//     bind address visible to browsers connecting from the network).
+//
+// All other origins are rejected (DNS-rebinding / cross-origin defence).
+// externalHost is "host:port" (e.g. "10.0.0.1:7890").
+func consoleOriginAllowListNetworked(externalHost string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if isLoopbackOrigin(origin) || isExternalOrigin(origin, externalHost) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "consoleui: Origin not in allow-list", http.StatusForbidden)
+	})
+}
+
+// isExternalOrigin returns true when origin matches the external host used by
+// browsers reaching the non-loopback console.  It accepts both https:// and
+// wss:// (browsers send the page origin, not the WS scheme, in the Origin
+// header, but we accept both for robustness).
+//
+// externalHost is "host:port" or "host" (when standard port is implied).
+func isExternalOrigin(origin, externalHost string) bool {
+	if externalHost == "" {
+		return false
+	}
+	o := strings.TrimRight(origin, "/")
+	for _, scheme := range []string{"https://", "wss://", "http://", "ws://"} {
+		candidate := scheme + externalHost
+		if o == candidate || strings.HasPrefix(o, candidate+":") || strings.HasPrefix(o, candidate+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // newConnID generates a random 8-byte hex connection identifier.
