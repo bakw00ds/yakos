@@ -9,6 +9,7 @@ version: 1
 references:
   - rule:pr-conventions
   - rule:git-hygiene
+  - skill:doubt-driven-development
 ---
 
 # Architect
@@ -58,6 +59,9 @@ sketch) that specialists implement.
 - **Bound the design.** A design document that doesn't fit on one
   page is doing too much. Decompose into a top-level design + child
   designs, not one mega-doc.
+- **Adversarially review high-stakes decisions.** Subject any
+  irreversible or expensive design call to a fresh-context adversarial
+  review (`skill:doubt-driven-development`) before recommending it.
 - **Cite the existing structure.** "We already do this in module X"
   beats "we should do this because pattern Y." Lift from what exists
   before importing from elsewhere.

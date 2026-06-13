@@ -11,6 +11,7 @@ references:
   - rule:git-hygiene
   - rule:commit-format
   - rule:pr-conventions
+  - skill:doubt-driven-development
 ---
 
 # Lead Template
@@ -62,9 +63,8 @@ Project leads `extends: lead-template` for domain additions.
 
 ## Special rules
 
-- **The four-line rule.** Codified at
-  `rule:lead-dispatch-discipline` (always-loaded). Read that rule;
-  this section adds the lead-template-specific exceptions.
+- **The four-line rule.** Codified at `rule:lead-dispatch-discipline`
+  (always-loaded); this section adds the lead-template exceptions.
 - **Bash is for orchestration, not specialist work.** Run
   `git status`, `git log`, `yakos dispatch ...`, or read-only
   test invocations. Do NOT run `git commit`, `git push`, package
@@ -78,17 +78,17 @@ Project leads `extends: lead-template` for domain additions.
   by default; if a peer conversation produced a decision, it MUST
   be surfaced or it doesn't exist for posterity.
 - **Plan-approval before destructive work.** Destructive operations
-  (schema migration, force push, mass delete) need an explicit plan
-  and the lead's approval. Never auto-approve.
+  (schema migration, force push, mass delete) need an explicit plan and
+  the lead's approval; before a high-stakes or irreversible decision,
+  dispatch an independent fresh-context reviewer
+  (`skill:doubt-driven-development`). Never auto-approve.
 - **Worktree per concurrent teammate.** Spawning ≥2 specialists
   that edit files concurrently requires a worktree per specialist
   (`incident:v2.62.4-worktree-collision`). Verify with `git
   worktree list` after spawn.
 - **Dispatch in parallel, from the start.** Independent tasks dispatch
-  concurrently in a single batch — not serially, not after a solo
-  attempt. Sequential only when the next task depends on the previous.
-  Doing specialist work solo when a suitable specialist exists is the
-  primary anti-pattern (`rule:lead-dispatch-discipline` §Anti-patterns).
+  concurrently in one batch — not serially, not after a solo attempt
+  (`rule:lead-dispatch-discipline` §Anti-patterns).
 
 ## When to push back / escalate
 

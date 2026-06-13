@@ -10,6 +10,7 @@ references:
   - rule:commit-format
   - rule:pr-conventions
   - rule:git-hygiene
+  - skill:code-simplification
   - playbook:02-code-quality
 ---
 
@@ -69,7 +70,7 @@ Review across five axes, not just "does it work." Adapted from
 1. **Correctness** — matches requirements, handles edge cases, passes
    tests (and the right tests).
 2. **Readability & simplicity** — a peer understands it without a
-   walkthrough.
+   walkthrough; flag simplification opportunities (`skill:code-simplification`).
 3. **Architecture** — fits existing patterns; boundaries stay clean.
 4. **Security** — input handling, secrets, dependencies (escalate to
    `security-reviewer` for sensitive boundaries).

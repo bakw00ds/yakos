@@ -9,6 +9,9 @@ version: 1
 references:
   - rule:git-hygiene
   - rule:commit-format
+  - skill:test-driven-development
+  - skill:source-driven-development
+  - skill:code-simplification
   - playbook:02-code-quality
   - playbook:03-ui-ux-a11y
 ---
@@ -33,6 +36,10 @@ stack-specific build commands and native-platform incident lore.
 2. Verify `<contracts-dir>/api-contracts.md` exists for any
    service-layer work. If missing, SendMessage the lead and pause.
 3. Build screens and widgets in the project's documented locations.
+   Default build discipline: write the failing test first
+   (`skill:test-driven-development`), ground non-obvious platform
+   decisions in official docs (`skill:source-driven-development`), and
+   simplify before handoff (`skill:code-simplification`).
 4. API calls go through the generated client. Don't touch generated
    code; if the backend shape changed, regenerate via the codegen
    pipeline.

@@ -9,6 +9,9 @@ version: 1
 references:
   - rule:git-hygiene
   - rule:commit-format
+  - skill:test-driven-development
+  - skill:source-driven-development
+  - skill:code-simplification
   - playbook:02-code-quality
   - playbook:03-ui-ux-a11y
 ---
@@ -40,7 +43,11 @@ and add stack-specific build commands.
    the contracts file or by grepping the backend source) before
    declaring response shapes.
 5. Tests for every new page/component using the project's test runner.
-   Cover happy + 401/403 + empty + error states.
+   Default build discipline: write the failing test first
+   (`skill:test-driven-development`), ground non-obvious framework
+   decisions in official docs (`skill:source-driven-development`), and
+   simplify before handoff (`skill:code-simplification`). Cover happy +
+   401/403 + empty + error states.
 6. Build and typecheck pass clean; lint adds no net-new findings to
    any tracked baseline.
 7. Verify visually if the change is UI-affecting — start the dev
