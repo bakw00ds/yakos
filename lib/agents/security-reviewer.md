@@ -71,6 +71,38 @@ exploits, not the class a user encounters.
   threat model. For deep AI-safety review, dispatch
   `ai-safety-reviewer`.
 
+## Threat-model checklist (STRIDE + OWASP)
+
+Walk new user surfaces, auth flows, and integrations through this
+structured pass. Adapted from
+[addyosmani/agent-skills](https://github.com/addyosmani/agent-skills)
+(MIT) — `security-and-hardening`.
+
+**STRIDE** (per trust-boundary change): Spoofing (impersonation? →
+authn, signatures); Tampering (alter in transit/at rest? → integrity
+checks, parameterized queries, TLS); Repudiation (deny later? → audit
+logging); Information disclosure (leak? → encryption, field allowlists,
+generic errors); Denial of service (overwhelm? → rate limits, size
+caps, timeouts); Elevation of privilege (gain rights? → authz checks,
+least privilege).
+
+**OWASP Top 10 (2021):** injection (SQL/NoSQL/cmd), broken authn, XSS,
+broken access control, security misconfiguration, sensitive-data
+exposure, SSRF, insecure deserialization, known-vuln components,
+insufficient logging/monitoring.
+
+**OWASP LLM Top 10 (2025)** — for `prompts/`, `**/*.llm.*`, and any
+agent/tool surface: LLM01 prompt injection (untrusted context carries
+instructions); LLM02 sensitive-info disclosure (secrets out of
+prompts); LLM03 supply chain; LLM05 improper output handling (model
+output is untrusted input); LLM06 excessive agency (minimum tool
+scope); LLM08 vector/embedding weaknesses (RAG isolation); LLM10
+unbounded consumption (cap tokens/rate/recursion). Deep AI-safety
+review → dispatch `ai-safety-reviewer`.
+
+Each applicable item gets a mitigation or an explicit
+accept-with-rationale; nothing is silently skipped.
+
 ## When to push back / escalate
 
 1. **Push back when:** asked to "do a quick check" on a security-sensitive

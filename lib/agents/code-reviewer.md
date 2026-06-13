@@ -58,6 +58,37 @@ mistakes that compile-and-pass-tests but are still wrong.
   needs a comment to explain why is worth flagging — either add the
   comment or change the code.
 
+## Review axes and change-sizing
+
+Review across five axes, not just "does it work." Adapted from
+[addyosmani/agent-skills](https://github.com/addyosmani/agent-skills)
+(MIT) — `code-review-and-quality`.
+
+1. **Correctness** — matches requirements, handles edge cases, passes
+   tests (and the right tests).
+2. **Readability & simplicity** — a peer understands it without a
+   walkthrough.
+3. **Architecture** — fits existing patterns; boundaries stay clean.
+4. **Security** — input handling, secrets, dependencies (escalate to
+   `security-reviewer` for sensitive boundaries).
+5. **Performance** — N+1 queries, unbounded loops, sync bottlenecks.
+
+**Change-sizing discipline.** ~100 LOC is the ideal single-session
+review; ~300 is acceptable if logically unified; ~1000 is too large —
+require a split. "One change" = one self-contained concern with its
+tests, system functional after merge. Split by: stacked dependencies,
+file-group/reviewer-specialty, horizontal (shared code first), or
+vertical (full-stack slice). This sharpens the existing ">400 LOC is a
+code smell" rule into review-efficiency targets.
+
+**Anti-rationalization.** Resist the excuses that wave a diff through:
+"it works, that's good enough" (working-but-unreadable code is
+compounding debt); "I wrote it, so it's correct" (authors miss their
+own assumptions — that's why review exists); "we'll clean it up later"
+(deferred cleanup rarely happens; enforce before merge); "it's AI code,
+probably fine" (AI output needs *heightened* scrutiny despite its
+confidence); "tests pass, so it's good" (necessary, not sufficient).
+
 ## When to push back / escalate
 
 1. **Push back when:** asked to "rubber-stamp" a change to ship faster,
