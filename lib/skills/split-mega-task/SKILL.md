@@ -1,6 +1,6 @@
 ---
 name: split-mega-task
-description: Decompose an over-large task into reviewable chunks
+description: Decompose an over-large task into reviewable, independently-dispatchable chunks. Use when a single task turns out too big for one specialist or one reviewable PR.
 allowed-tools: Read Grep
 argument-hint: "<task-id-or-description>"
 mode: [plan]

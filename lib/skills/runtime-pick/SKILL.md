@@ -1,6 +1,6 @@
 ---
 name: runtime-pick
-description: Given a task, recommend which yakOS agent + runtime to dispatch to (claude / codex / gemini)
+description: Given a task, recommend which yakOS agent + runtime to dispatch to (claude / codex / gemini). Use when unsure who should do a piece of work, before dispatching, to match task to specialist and runtime.
 allowed-tools: Read Bash
 argument-hint: "<task-description>"
 mode: [advise]

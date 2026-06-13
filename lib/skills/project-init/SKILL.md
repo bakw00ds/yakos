@@ -1,6 +1,6 @@
 ---
 name: project-init
-description: Bootstrap a new project's .claude/ config; complement to `yakos init`
+description: Bootstrap a new project's .claude/ config, complementing `yakos init`. Use when setting up a fresh project that needs its agent/skill/rule scaffolding in place.
 allowed-tools: Read Edit Write Bash Grep
 argument-hint: "<project-path>"
 mode: [implement]

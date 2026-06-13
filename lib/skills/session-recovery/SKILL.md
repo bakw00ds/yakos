@@ -1,6 +1,6 @@
 ---
 name: session-recovery
-description: Reconstruct working context after a session interrupt or fresh shell
+description: Reconstruct working context after a session interrupt or fresh shell from on-disk artifacts. Use when resuming work and you've lost in-memory context — figure out where things stood.
 allowed-tools: Read Bash Grep
 argument-hint: "[--full]"
 mode: [recover]

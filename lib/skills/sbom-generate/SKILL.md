@@ -1,6 +1,6 @@
 ---
 name: sbom-generate
-description: Emit a CycloneDX 1.6 or SPDX 3.0 SBOM for the project's locked dependency set, suitable for EO 14028 / enterprise procurement
+description: Emit a CycloneDX 1.6 or SPDX 3.0 SBOM for the project's locked dependency set, suitable for EO 14028 / enterprise procurement. Use when a customer, auditor, or compliance gate requires a software bill of materials.
 allowed-tools: Bash Read
 argument-hint: "[--format cyclonedx|spdx] [--output <path>] [--include-vex]"
 mode: [report]

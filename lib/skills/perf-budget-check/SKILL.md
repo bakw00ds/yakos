@@ -1,6 +1,6 @@
 ---
 name: perf-budget-check
-description: Compare Core Web Vitals (LCP/INP/CLS) and bundle size against the project's perf budget; fail the PR if regressed
+description: Compare Core Web Vitals (LCP/INP/CLS) and bundle size against the project's perf budget, failing the PR if regressed. Use when reviewing a frontend change for performance impact or gating a release on perf.
 allowed-tools: Bash Read
 argument-hint: "[--base <ref>] [--budget <path>] [--report <path>]"
 mode: [gate]

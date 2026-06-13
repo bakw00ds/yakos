@@ -1,6 +1,6 @@
 ---
 name: postmortem-write
-description: Produce a blameless postmortem — UTC timeline, impact, root cause, what worked / didn't, action items with owners and due dates
+description: Produce a blameless postmortem — UTC timeline, impact, root cause, what worked / didn't, action items with owners and due dates. Use after an incident or outage is resolved, to capture root cause and follow-ups.
 allowed-tools: Read Bash
 argument-hint: "[--incident <id>] [--out <path>]"
 mode: [author]

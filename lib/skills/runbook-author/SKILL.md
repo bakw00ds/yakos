@@ -1,6 +1,6 @@
 ---
 name: runbook-author
-description: Given an alert definition (or a postmortem), produce a runbook entry — symptom, first 5 actions, escalation
+description: Given an alert definition (or a postmortem), produce a runbook entry — symptom, first 5 actions, escalation. Use when an alert lacks a response procedure or a postmortem action item calls for one.
 allowed-tools: Read Bash
 argument-hint: "[--alert <path>] [--postmortem <path>] [--out <path>]"
 mode: [author]

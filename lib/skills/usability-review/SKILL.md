@@ -1,6 +1,6 @@
 ---
 name: usability-review
-description: Heuristic evaluation against a working prototype or live feature with Nielsen's severity scale (cosmetic / minor / major / catastrophic)
+description: Heuristic evaluation against a working prototype or live feature, rating issues on Nielsen's severity scale (cosmetic / minor / major / catastrophic). Use when assessing the usability of something already built and interactive.
 allowed-tools: Read Bash
 argument-hint: "[--target <url>] [--persona <id>] [--tasks <path>]"
 mode: [audit]

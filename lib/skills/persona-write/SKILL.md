@@ -1,6 +1,6 @@
 ---
 name: persona-write
-description: Scaffold a user persona document with required fields — demographics, goals, frustrations, behaviors, JTBD, devices, accessibility considerations
+description: Scaffold a user persona document with required fields — demographics, goals, frustrations, behaviors, JTBD, devices, accessibility considerations. Use when grounding product or UX work in a concrete target user.
 allowed-tools: Read Write
 argument-hint: "[--name <persona-name>] [--out <path>]"
 mode: [scaffold]

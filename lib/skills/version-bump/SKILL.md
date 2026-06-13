@@ -1,6 +1,6 @@
 ---
 name: version-bump
-description: Bump the project's VERSION file and prepend a CHANGELOG entry for the new version
+description: Bump the project's VERSION file and prepend a CHANGELOG entry for the new version. Use when cutting a release or preparing one, to advance the version and record the changes.
 allowed-tools: Bash Read Write
 argument-hint: "--component {major|minor|patch|hotfix} [--message <text>] [--no-commit]"
 mode: [release]

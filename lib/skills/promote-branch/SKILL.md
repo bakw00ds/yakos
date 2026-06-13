@@ -1,6 +1,6 @@
 ---
 name: promote-branch
-description: Promote code between environments (dev → test → prod) via PR with structured changelog and gated by the promotion-aware pre-push hook
+description: Promote code between environments (dev → test → prod) via PR with a structured changelog, gated by the promotion-aware pre-push hook. Use when moving a tested change up the environment ladder toward production.
 allowed-tools: Read Bash Grep
 argument-hint: "<from-env> <to-env> [--draft]"
 mode: [release]

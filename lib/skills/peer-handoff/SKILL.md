@@ -1,6 +1,6 @@
 ---
 name: peer-handoff
-description: Hand work to another developer cleanly in multi-dev co-pilot mode
+description: Hand work to another developer cleanly in multi-dev co-pilot mode, packaging state, context, and next steps. Use when transferring an in-progress task to a peer so they can pick it up without losing context.
 tier: sonnet
 invocable_by: lead
 domains: [coordination, multi-dev]
