@@ -267,6 +267,45 @@ func TestStaticAssets_NoTokenRequired_SWJS(t *testing.T) {
 	}
 }
 
+// TestVendorRoute_MermaidServedNoToken verifies /vendor/mermaid.min.js is
+// served as application/javascript without a token (same-origin static asset).
+func TestVendorRoute_MermaidServedNoToken(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/vendor/mermaid.min.js", "")
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /vendor/mermaid.min.js (no token): status=%d; want 200", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "application/javascript") && !strings.HasPrefix(ct, "text/javascript") {
+		t.Errorf("GET /vendor/mermaid.min.js: Content-Type=%q; want application/javascript", ct)
+	}
+}
+
+// TestVendorRoute_404ForUnknownFile verifies /vendor/nonexistent.js returns
+// 404 and not a server error.
+func TestVendorRoute_404ForUnknownFile(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/vendor/nonexistent.js", "")
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /vendor/nonexistent.js: status=%d; want 404", resp.StatusCode)
+	}
+}
+
+// TestVendorRoute_CORP verifies /vendor/mermaid.min.js carries the
+// Cross-Origin-Resource-Policy: same-origin header, consistent with all
+// other static asset handlers.
+func TestVendorRoute_CORP(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/vendor/mermaid.min.js", "")
+	defer drainClose(resp)
+	corp := resp.Header.Get("Cross-Origin-Resource-Policy")
+	if corp != "same-origin" {
+		t.Errorf("GET /vendor/mermaid.min.js: Cross-Origin-Resource-Policy=%q; want same-origin", corp)
+	}
+}
+
 // ---- 3. Content-Type 415 gate -----------------------------------------------
 // Non-GET requests without Content-Type: application/json must receive 415.
 

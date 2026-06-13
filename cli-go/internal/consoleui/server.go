@@ -2,15 +2,15 @@ package consoleui
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 	"time"
-
-	_ "embed"
 
 	"github.com/bakw00ds/yakos/internal/dashauth"
 	"github.com/bakw00ds/yakos/internal/dispatch"
@@ -32,6 +32,12 @@ var stylesCSS []byte
 
 //go:embed dist/sw.js
 var swJS []byte
+
+// vendorFS embeds the pinned, checksum-verified third-party JS blobs.
+// Served at /vendor/<filename> (same-origin 'self'; no CDN dependency).
+//
+//go:embed dist/vendor/mermaid.min.js
+var vendorFS embed.FS
 
 // Config holds all configuration for the unified console HTTP server.
 type Config struct {
@@ -240,6 +246,19 @@ func (s *Server) registerRoutes() {
 	// secrets; the token is delivered via postMessage only).
 	s.mux.HandleFunc("/sw.js", s.handleSW)
 
+	// Vendored JS blobs — pinned, checksum-verified, served same-origin.
+	// Token-exempt: static assets that carry no secrets.
+	// The files live under dist/vendor/ in the embed.FS; strip the
+	// /vendor/ prefix so the FS path is dist/vendor/<filename>.
+	// Wrapped to set Cross-Origin-Resource-Policy: same-origin, consistent
+	// with the other static asset handlers (handleIndex, handleAppJS, etc.).
+	vendorSub, _ := fs.Sub(vendorFS, "dist/vendor")
+	vendorHandler := http.StripPrefix("/vendor/", http.FileServer(http.FS(vendorSub)))
+	s.mux.Handle("/vendor/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		vendorHandler.ServeHTTP(w, r)
+	}))
+
 	// ---- Kanban sub-dashboard -----------------------------------------------
 	// Mount kanban.Handler() under /kanban/. The kanban handler's own
 	// Host-allowlist is NOT invoked (we used Handler() not Serve()).
@@ -385,14 +404,19 @@ func (s *Server) handleSW(w http.ResponseWriter, r *http.Request) {
 // ---- auth helpers -----------------------------------------------------------
 
 // isStaticAsset reports whether the request is for a token-exempt static asset.
-// The assets /, /app.js, /styles.css, and /sw.js carry no secrets and must be
-// accessible before the browser can obtain and present the bearer token.
+// The assets /, /app.js, /styles.css, /sw.js, and vendored blobs under /vendor/
+// carry no secrets and must be accessible before the browser can obtain and
+// present the bearer token.
 func isStaticAsset(r *http.Request) bool {
 	if r.Method != http.MethodGet {
 		return false
 	}
 	switch r.URL.Path {
 	case "/", "/app.js", "/styles.css", "/sw.js":
+		return true
+	}
+	// Vendored pinned blobs are same-origin static assets; no token required.
+	if strings.HasPrefix(r.URL.Path, "/vendor/") {
 		return true
 	}
 	return false
