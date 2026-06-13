@@ -149,6 +149,13 @@ type Identity struct {
 	// Authenticated is true when OperatorID is bound to a verified client
 	// certificate.  False for loopback bearer sessions.
 	Authenticated bool
+
+	// Resolved is true when this Identity was stamped by Resolver.Middleware.
+	// A zero-value Identity (e.g. in tests that bypass the middleware chain via
+	// srv.Handler()) has Resolved=false.  Enforcement middleware MUST check
+	// Resolved before applying role gates so that test paths using bare
+	// srv.Handler() remain unaffected — preserving the loopback-safe invariant.
+	Resolved bool
 }
 
 // ---- Context key ------------------------------------------------------------
@@ -170,6 +177,18 @@ func IdentityFrom(ctx context.Context) Identity {
 // withIdentity returns a new context carrying id.
 func withIdentity(ctx context.Context, id Identity) context.Context {
 	return context.WithValue(ctx, contextKey{}, id)
+}
+
+// WithIdentityForTest returns a new context carrying id.
+// This is intended for use in external test packages that need to simulate
+// Resolver.Middleware having stamped a specific Identity onto the request
+// context (e.g. consoleui enforcement tests).  It is the exported wrapper for
+// the unexported withIdentity.
+//
+// Safe to call from production code but intended only for tests — the name
+// makes the test-only intent clear.
+func WithIdentityForTest(ctx context.Context, id Identity) context.Context {
+	return withIdentity(ctx, id)
 }
 
 // ---- Role mapper ------------------------------------------------------------
@@ -209,14 +228,35 @@ func NewRoleMapper(stateDir string) *RoleMapper {
 //
 // When the mapper was constructed with an empty stateDir, Lookup always
 // returns RoleRead without any file I/O.
+//
+// LOW-1 file-trust hardening: before reading the file, Lookup calls
+// os.Lstat to check:
+//   - Symlinks: if the path is a symlink it is treated as missing (RoleRead).
+//     This prevents a symlink-redirect attack where the file is replaced with
+//     a symlink to an attacker-controlled path.
+//   - Group/other-writable: if perm & 0o022 != 0 the file is treated as
+//     missing (RoleRead).  Only the owner should be able to write roles.json.
 func (m *RoleMapper) Lookup(cn string) Role {
 	if m.path == "" {
 		// No stateDir configured; fail-closed.
 		return RoleRead
 	}
-	data, err := os.ReadFile(m.path) //nolint:gosec
+	// LOW-1: use Lstat so we see the symlink itself, not its target.
+	fi, err := os.Lstat(m.path)
 	if err != nil {
 		// Missing file is expected before the operator configures roles.
+		return RoleRead
+	}
+	// Reject symlinks.
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return RoleRead
+	}
+	// Reject group-writable or other-writable.
+	if fi.Mode().Perm()&0o022 != 0 {
+		return RoleRead
+	}
+	data, err := os.ReadFile(m.path) //nolint:gosec
+	if err != nil {
 		return RoleRead
 	}
 	var mapping map[string]string
@@ -306,12 +346,15 @@ func NewResolver(mapper *RoleMapper, callerLabelFn func(*http.Request) string, l
 }
 
 // Resolve returns the Identity for r.
+// Every returned Identity has Resolved=true; callers that need to distinguish
+// "middleware ran" from "zero-value / no middleware" can check this field.
 func (res *Resolver) Resolve(r *http.Request) Identity {
 	if cn, ok := CNFromRequest(r); ok {
 		return Identity{
 			OperatorID:    cn,
 			Role:          res.mapper.Lookup(cn),
 			Authenticated: true,
+			Resolved:      true,
 		}
 	}
 	// No verified client certificate present.
@@ -322,6 +365,7 @@ func (res *Resolver) Resolve(r *http.Request) Identity {
 			OperatorID:    "",
 			Role:          RoleRead,
 			Authenticated: false,
+			Resolved:      true,
 		}
 	}
 	// Loopback bearer path: cooperative label, full admin access (unchanged
@@ -334,6 +378,7 @@ func (res *Resolver) Resolve(r *http.Request) Identity {
 		OperatorID:    label,
 		Role:          RoleAdmin,
 		Authenticated: false,
+		Resolved:      true,
 	}
 }
 

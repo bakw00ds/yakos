@@ -62,6 +62,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
@@ -153,18 +154,25 @@ func (ch *chatHandlers) handleChatStream(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Validate operatorId from query (SSE — browser uses fetch; SW injects
-	// Authorization header; but operatorId is attribution, not auth).
-	// Empty check before ValidateIdentityField (which returns nil for empty)
-	// to match the validation order used in handleChatShare and handleChatCancel.
-	operatorID := r.URL.Query().Get("operatorId")
-	if operatorID == "" {
-		http.Error(w, "operatorId is required", http.StatusBadRequest)
-		return
-	}
-	if err := dispatch.ValidateIdentityField("operator_id", operatorID); err != nil {
-		http.Error(w, "invalid operatorId", http.StatusBadRequest)
-		return
+	// C1 dual-regime operator_id:
+	// Authenticated (mTLS cert): cert CN is authoritative; query param silently ignored.
+	// Unauthenticated (loopback bearer): cooperative label from query param (unchanged).
+	resolvedID := netid.IdentityFrom(r.Context())
+	var operatorID string
+	if resolvedID.Authenticated {
+		// Cert CN wins; no need to validate the query param (it is ignored).
+		operatorID = resolvedID.OperatorID
+	} else {
+		// Cooperative-label path: require operatorId from query param.
+		operatorID = r.URL.Query().Get("operatorId")
+		if operatorID == "" {
+			http.Error(w, "operatorId is required", http.StatusBadRequest)
+			return
+		}
+		if err := dispatch.ValidateIdentityField("operator_id", operatorID); err != nil {
+			http.Error(w, "invalid operatorId", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Require http.Flusher.
@@ -318,19 +326,31 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "sessionId is required", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.OperatorID) == "" {
-		http.Error(w, "operatorId is required", http.StatusBadRequest)
-		return
+	// C1 dual-regime operator_id:
+	// Authenticated (mTLS cert): cert CN is authoritative; body operatorId silently ignored.
+	// Unauthenticated (loopback bearer): require and validate operatorId from body.
+	capturedIdentity := netid.IdentityFrom(r.Context())
+	var effectiveOperatorID string
+	if capturedIdentity.Authenticated {
+		// Cert CN wins; body operatorId is ignored.
+		effectiveOperatorID = capturedIdentity.OperatorID
+	} else {
+		// Require and validate from body.
+		if strings.TrimSpace(req.OperatorID) == "" {
+			http.Error(w, "operatorId is required", http.StatusBadRequest)
+			return
+		}
+		if err := dispatch.ValidateIdentityField("operator_id", req.OperatorID); err != nil {
+			http.Error(w, "invalid operatorId", http.StatusBadRequest)
+			return
+		}
+		effectiveOperatorID = req.OperatorID
 	}
 
 	// --- Validate identity fields (format; not auth) ---
 	// These flow into subprocess argv; validate before any hub or service call.
 	if err := dispatch.ValidateIdentityField("session_id", req.SessionID); err != nil {
 		http.Error(w, "invalid sessionId", http.StatusBadRequest)
-		return
-	}
-	if err := dispatch.ValidateIdentityField("operator_id", req.OperatorID); err != nil {
-		http.Error(w, "invalid operatorId", http.StatusBadRequest)
 		return
 	}
 	if req.ConversationID != "" {
@@ -344,7 +364,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	// Security priority: ownership 403 must fire even when svc is nil.
 	// This enforces per-operator isolation: 403 if session already owned by
 	// a different operator.  429 if the global session cap is reached (M3).
-	if err := ch.hub.OpenSession(req.SessionID, req.OperatorID, false); err != nil {
+	if err := ch.hub.OpenSession(req.SessionID, effectiveOperatorID, false); err != nil {
 		if errors.Is(err, errSessionOwnerConflict) {
 			http.Error(w, "session owned by different operator", http.StatusForbidden)
 			return
@@ -383,6 +403,9 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Use a stable copy for the goroutine.
+	// capturedOperatorID is the effective operator ID for this dispatch:
+	// cert CN when authenticated; validated body operatorId otherwise.
+	capturedOperatorID := effectiveOperatorID
 	dispReq := req
 	conversationID := dispReq.ConversationID
 	if conversationID == "" {
@@ -395,12 +418,15 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	_ = ch.transcripts.Append(TranscriptEntry{
 		SessionID:      dispReq.SessionID,
 		ConversationID: conversationID,
-		OperatorID:     dispReq.OperatorID,
+		OperatorID:     capturedOperatorID,
 		Role:           RoleUser,
 		Text:           dispReq.Task,
 		Runtime:        runtimeName,
 		Model:          modelName,
 	})
+
+	// Capture the resolved identity for the goroutine.
+	capturedIdentityForGoroutine := capturedIdentity
 
 	// Launch RunStream in a goroutine.  The goroutine owns the cancel function
 	// and the hub session for its lifetime.
@@ -444,7 +470,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 					_ = ch.transcripts.Append(TranscriptEntry{
 						SessionID:      dispReq.SessionID,
 						ConversationID: conversationID,
-						OperatorID:     dispReq.OperatorID,
+						OperatorID:     capturedOperatorID,
 						Role:           RoleAssistant,
 						Text:           text,
 					})
@@ -452,7 +478,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				_ = ch.transcripts.Append(TranscriptEntry{
 					SessionID:      dispReq.SessionID,
 					ConversationID: conversationID,
-					OperatorID:     dispReq.OperatorID,
+					OperatorID:     capturedOperatorID,
 					Role:           RoleSummary,
 					ExitCode:       chunk.ExitCode,
 					DurationS:      chunk.DurationS,
@@ -470,11 +496,16 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			Task:           dispReq.Task,
 			Runtime:        runtimeName,
 			Model:          modelName,
-			OperatorID:     dispReq.OperatorID,
+			OperatorID:     capturedOperatorID,
 			ConversationID: conversationID,
 			SessionID:      dispReq.SessionID,
 			// Project is intentionally omitted: Service.RunStream pins it to
 			// cfg.WorkspaceRoot when empty.  This is the server-side project pin.
+			// Pass the resolved identity so dispatch can enforce roles and use cert CN.
+			ResolvedIdentity: dispatch.IdentityCarrier{
+				Populated: capturedIdentityForGoroutine.Resolved,
+				Identity:  capturedIdentityForGoroutine,
+			},
 		}
 
 		if _, err := ch.svc.RunStream(ctx, params, onChunk); err != nil {
@@ -527,20 +558,31 @@ func (ch *chatHandlers) handleChatCancel(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid sessionId", http.StatusBadRequest)
 		return
 	}
-	if req.OperatorID == "" {
-		http.Error(w, "operatorId is required", http.StatusBadRequest)
-		return
-	}
-	if err := dispatch.ValidateIdentityField("operator_id", req.OperatorID); err != nil {
-		http.Error(w, "invalid operatorId", http.StatusBadRequest)
-		return
+
+	// C1 dual-regime operator_id for cancel ownership check:
+	// Authenticated (mTLS cert): cert CN is the identity; body operatorId silently ignored.
+	// Unauthenticated (loopback): require and validate operatorId from body.
+	cancelID := netid.IdentityFrom(r.Context())
+	var effectiveOperatorID string
+	if cancelID.Authenticated {
+		effectiveOperatorID = cancelID.OperatorID
+	} else {
+		if req.OperatorID == "" {
+			http.Error(w, "operatorId is required", http.StatusBadRequest)
+			return
+		}
+		if err := dispatch.ValidateIdentityField("operator_id", req.OperatorID); err != nil {
+			http.Error(w, "invalid operatorId", http.StatusBadRequest)
+			return
+		}
+		effectiveOperatorID = req.OperatorID
 	}
 
 	// C1: ownership check — only the session owner may cancel.
 	// An unknown session is a no-op (200) for any caller (idempotent).
 	// A known session owned by a different operator is 403.
 	owner, exists := ch.hub.SessionOwner(req.SessionID)
-	if exists && owner != req.OperatorID {
+	if exists && owner != effectiveOperatorID {
 		http.Error(w, "forbidden: session owned by different operator", http.StatusForbidden)
 		return
 	}
@@ -560,8 +602,6 @@ func (ch *chatHandlers) handleChatTranscript(w http.ResponseWriter, r *http.Requ
 	}
 
 	conversationID := r.URL.Query().Get("conversationId")
-	operatorID := r.URL.Query().Get("operatorId")
-
 	if conversationID == "" {
 		http.Error(w, "conversationId is required", http.StatusBadRequest)
 		return
@@ -570,13 +610,24 @@ func (ch *chatHandlers) handleChatTranscript(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "invalid conversationId", http.StatusBadRequest)
 		return
 	}
-	if operatorID == "" {
-		http.Error(w, "operatorId is required", http.StatusBadRequest)
-		return
-	}
-	if err := dispatch.ValidateIdentityField("operator_id", operatorID); err != nil {
-		http.Error(w, "invalid operatorId", http.StatusBadRequest)
-		return
+
+	// C1 dual-regime operator_id for transcript scoping:
+	// Authenticated (mTLS cert): cert CN scopes the transcript; query param ignored.
+	// Unauthenticated (loopback): require and validate operatorId from query param.
+	transcriptID := netid.IdentityFrom(r.Context())
+	var operatorID string
+	if transcriptID.Authenticated {
+		operatorID = transcriptID.OperatorID
+	} else {
+		operatorID = r.URL.Query().Get("operatorId")
+		if operatorID == "" {
+			http.Error(w, "operatorId is required", http.StatusBadRequest)
+			return
+		}
+		if err := dispatch.ValidateIdentityField("operator_id", operatorID); err != nil {
+			http.Error(w, "invalid operatorId", http.StatusBadRequest)
+			return
+		}
 	}
 
 	entries, err := ch.transcripts.Read(conversationID, operatorID)
@@ -636,13 +687,28 @@ func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid sessionId", http.StatusBadRequest)
 		return
 	}
-	if req.OperatorID == "" {
-		http.Error(w, "operatorId is required", http.StatusBadRequest)
-		return
-	}
-	if err := dispatch.ValidateIdentityField("operator_id", req.OperatorID); err != nil {
-		http.Error(w, "invalid operatorId", http.StatusBadRequest)
-		return
+
+	// C1 Share-pane confidentiality fix (core of Phase 6b):
+	// Authenticated (mTLS cert): cert CN is used for the ownership check;
+	// body operatorId is silently ignored.  This closes the C1 vulnerability
+	// where operator B could supply operator A's operatorId in the body and
+	// flip the shared flag on A's session.
+	// Unauthenticated (loopback bearer): require and validate operatorId from body.
+	shareID := netid.IdentityFrom(r.Context())
+	var effectiveOperatorID string
+	if shareID.Authenticated {
+		// Cert CN wins; body operatorId cannot override it.
+		effectiveOperatorID = shareID.OperatorID
+	} else {
+		if req.OperatorID == "" {
+			http.Error(w, "operatorId is required", http.StatusBadRequest)
+			return
+		}
+		if err := dispatch.ValidateIdentityField("operator_id", req.OperatorID); err != nil {
+			http.Error(w, "invalid operatorId", http.StatusBadRequest)
+			return
+		}
+		effectiveOperatorID = req.OperatorID
 	}
 
 	// Atomic ownership check + shared-flag update via SetShared.
@@ -652,7 +718,7 @@ func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) 
 	// calls, causing OpenSession to recreate a session entry that nothing ever
 	// closes (permanent leak toward maxTotalSessions=256).  SetShared holds the
 	// hub mutex across the entire check-and-update, closing that window.
-	if err := ch.hub.SetShared(req.SessionID, req.OperatorID, req.Shared); err != nil {
+	if err := ch.hub.SetShared(req.SessionID, effectiveOperatorID, req.Shared); err != nil {
 		if errors.Is(err, errSessionNotFound) {
 			http.Error(w, "session not found", http.StatusNotFound)
 			return

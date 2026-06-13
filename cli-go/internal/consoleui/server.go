@@ -303,21 +303,21 @@ func (s *Server) registerRoutes() {
 	// Mount kanban.Handler() under /kanban/. The kanban handler's own
 	// Host-allowlist is NOT invoked (we used Handler() not Serve()).
 	kanbanSrv := kanban.NewKanbanServer(s.cfg.KanbanBoardPath, s.cfg.KanbanProject, "")
-	s.mux.Handle("/kanban/", http.StripPrefix("/kanban", kanbanSrv.Handler()))
+	s.mux.Handle("/kanban/", requireRole(netid.RoleRead, http.StripPrefix("/kanban", kanbanSrv.Handler())))
 
 	// ---- Metrics (cost) sub-dashboard ---------------------------------------
 	metricsSrv := metricsdash.New(metricsdash.Config{
 		Token:      s.cfg.Token, // same token; auth is at edge
 		ProjectDir: s.cfg.MetricsProjectDir,
 	})
-	s.mux.Handle("/cost/", http.StripPrefix("/cost", metricsSrv.Handler()))
+	s.mux.Handle("/cost/", requireRole(netid.RoleRead, http.StripPrefix("/cost", metricsSrv.Handler())))
 
 	// ---- Performance sub-dashboard ------------------------------------------
 	perfSrv := perfdash.New(perfdash.Config{
 		Token:   s.cfg.Token, // same token; auth is at edge
 		WorkDir: s.cfg.PerfWorkDir,
 	})
-	s.mux.Handle("/perf/", http.StripPrefix("/perf", perfSrv.Handler()))
+	s.mux.Handle("/perf/", requireRole(netid.RoleRead, http.StripPrefix("/perf", perfSrv.Handler())))
 
 	// ---- WebSocket event stream at console origin ----------------------------
 	// Phase 2.5: the console WS uses Sec-WebSocket-Protocol subprotocol auth
@@ -327,11 +327,12 @@ func (s *Server) registerRoutes() {
 	// (constant-time via dashauth.TokenEqual) + presence join/leave lifecycle.
 	if s.cfg.Bus != nil {
 		wsHandler := buildConsoleWSHandler(s.cfg.Token, s.cfg.Bus, s.presence)
-		s.mux.Handle("/v1/events", wsHandler)
+		s.mux.Handle("/v1/events", requireRole(netid.RoleRead, wsHandler))
 	}
 
 	// ---- Presence snapshot (token-gated via edge middleware) -----------------
-	s.mux.HandleFunc("/api/presence", s.handlePresence)
+	// RoleRead: presence is read-only (who's online).
+	s.mux.HandleFunc("/api/presence", requireRoleFunc(netid.RoleRead, s.handlePresence))
 
 	// ---- Phase 3b: Chat SSE + dispatch + transcript (token-gated at edge) ---
 	// GET  /api/chat/stream      — per-operator SSE stream (multiplexed by sessionID)
@@ -341,26 +342,35 @@ func (s *Server) registerRoutes() {
 	//
 	// These paths are NOT static assets, so the edge requireTokenForNonStatic
 	// middleware enforces Authorization: Bearer on all of them.
-	s.mux.HandleFunc("/api/chat/stream", s.chat.handleChatStream)
-	s.mux.HandleFunc("/api/chat/dispatch", s.chat.handleChatDispatch)
-	s.mux.HandleFunc("/api/chat/cancel", s.chat.handleChatCancel)
-	s.mux.HandleFunc("/api/chat/transcript", s.chat.handleChatTranscript)
+	//
+	// Role policy (Phase 6b):
+	//   - /api/chat/stream, /api/chat/dispatch, /api/chat/cancel, /api/chat/share
+	//     require RoleDispatch (start/cancel dispatches; flip share ownership).
+	//   - /api/chat/transcript requires RoleRead (read-only; public-ish for shared).
+	s.mux.HandleFunc("/api/chat/stream", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatStream))
+	s.mux.HandleFunc("/api/chat/dispatch", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatDispatch))
+	s.mux.HandleFunc("/api/chat/cancel", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatCancel))
+	s.mux.HandleFunc("/api/chat/transcript", requireRoleFunc(netid.RoleRead, s.chat.handleChatTranscript))
 	// POST /api/chat/share — flip shared flag; owner-gated.
-	s.mux.HandleFunc("/api/chat/share", s.chat.handleChatShare)
+	s.mux.HandleFunc("/api/chat/share", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatShare))
 
 	// ---- Phase 5: Flows UI endpoints (token-gated at edge) ------------------
-	// GET  /flows/api/workflows          — list workflow names
-	// GET  /flows/api/workflow?name=<n>  — get workflow YAML + version stamp
-	// POST /flows/api/workflow           — save workflow (optimistic-concurrency)
-	// POST /flows/api/run?name=<n>       — start a new run; returns {run_id}
-	// POST /flows/api/resume             — resume a prior run; returns {new_run_id}
-	// GET  /flows/api/run?id=<runId>     — poll run state (run.json)
-	// GET  /flows/api/run/node?id=<r>&node=<n> — node stdout
-	s.mux.HandleFunc("/flows/api/workflows", s.flows.handleListWorkflows)
-	s.mux.HandleFunc("/flows/api/workflow", s.flows.handleWorkflowDispatch)
-	s.mux.HandleFunc("/flows/api/run/node", s.flows.handleGetNodeOutput)
-	s.mux.HandleFunc("/flows/api/run", s.flows.handleRunDispatch)
-	s.mux.HandleFunc("/flows/api/resume", s.flows.handleResume)
+	// GET  /flows/api/workflows          — list workflow names (RoleRead)
+	// GET  /flows/api/workflow?name=<n>  — get workflow YAML + version stamp (RoleRead)
+	// POST /flows/api/workflow           — save workflow (RoleFlowsRun; per-method in handler)
+	// POST /flows/api/run?name=<n>       — start a new run (RoleFlowsRun; per-method in handler)
+	// POST /flows/api/resume             — resume a prior run (RoleFlowsRun)
+	// GET  /flows/api/run?id=<runId>     — poll run state (RoleRead; per-method in handler)
+	// GET  /flows/api/run/node?id=<r>&node=<n> — node stdout (RoleRead)
+	//
+	// Outer route wrapping uses RoleRead for GET-only paths.  Mixed GET/POST
+	// paths (workflow, run) are wrapped at RoleRead here; the individual POST
+	// handler functions add a per-method RoleFlowsRun check internally.
+	s.mux.HandleFunc("/flows/api/workflows", requireRoleFunc(netid.RoleRead, s.flows.handleListWorkflows))
+	s.mux.HandleFunc("/flows/api/workflow", requireRoleFunc(netid.RoleRead, s.flows.handleWorkflowDispatch))
+	s.mux.HandleFunc("/flows/api/run/node", requireRoleFunc(netid.RoleRead, s.flows.handleGetNodeOutput))
+	s.mux.HandleFunc("/flows/api/run", requireRoleFunc(netid.RoleRead, s.flows.handleRunDispatch))
+	s.mux.HandleFunc("/flows/api/resume", requireRoleFunc(netid.RoleFlowsRun, s.flows.handleResume))
 }
 
 // handlePresence returns the current online operator presence snapshot as a
@@ -512,3 +522,30 @@ func requireJSONForMutations(next http.Handler) http.Handler {
 
 // DefaultAddr returns the default console listen address.
 func DefaultAddr() string { return "127.0.0.1:7890" }
+
+// requireRole returns an http.Handler that enforces minimum role when the
+// identity has been resolved (Identity.Resolved==true).
+//
+// The Resolved gate is critical: tests that bypass the resolver middleware by
+// calling srv.Handler() directly receive the zero-value Identity
+// (Resolved=false).  Without the gate, those tests would receive spurious 403s
+// on any route that needs more than RoleRead — breaking the loopback invariant.
+//
+// Production paths always run through resolver.Middleware (set up in New()),
+// which stamps Resolved=true on every identity; enforcement fires normally.
+func requireRole(required netid.Role, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := netid.IdentityFrom(r.Context())
+		// Only enforce when the resolver has explicitly resolved the identity.
+		if id.Resolved && !id.Role.Allows(required) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireRoleFunc wraps an http.HandlerFunc with requireRole.
+func requireRoleFunc(required netid.Role, fn http.HandlerFunc) http.HandlerFunc {
+	return requireRole(required, fn).ServeHTTP
+}

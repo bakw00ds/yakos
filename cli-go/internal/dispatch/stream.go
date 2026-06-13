@@ -39,6 +39,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/cost"
+	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
@@ -116,6 +117,15 @@ var streamRunFn = func(
 // subprocess and causes RunStream to return; any partial chunks already
 // delivered to onChunk are kept.
 func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamChunk)) (Result, error) {
+	// --- Phase 6b: role enforcement (mTLS / Resolved path only) ---
+	// Mirrors Service.Run enforcement — see service.go for rationale.
+	if p.ResolvedIdentity.Populated {
+		if !p.ResolvedIdentity.Identity.Role.Allows(netid.RoleDispatch) {
+			return Result{}, fmt.Errorf("dispatch: forbidden: role %s does not allow dispatch (need %s)",
+				p.ResolvedIdentity.Identity.Role, netid.RoleDispatch)
+		}
+	}
+
 	// --- Resolve project and yakos root (mirrors Service.Run) ---
 	project := p.Project
 	if project == "" {
@@ -147,17 +157,25 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		return Result{}, err
 	}
 
-	operatorID := p.OperatorID
-	if operatorID != "" && !p.isMCPStamped {
-		for _, prefix := range reservedOperatorPrefixes {
-			if strings.HasPrefix(operatorID, prefix) {
-				operatorID = ""
-				break
+	// --- Dual-regime operator_id (mirrors Service.Run) ---
+	var operatorID string
+	if p.ResolvedIdentity.Populated && p.ResolvedIdentity.Identity.Authenticated {
+		// Cert CN wins; never use caller-supplied OperatorID.
+		operatorID = p.ResolvedIdentity.Identity.OperatorID
+	} else {
+		// Cooperative-label path (loopback or unresolved): existing logic preserved.
+		operatorID = p.OperatorID
+		if operatorID != "" && !p.isMCPStamped {
+			for _, prefix := range reservedOperatorPrefixes {
+				if strings.HasPrefix(operatorID, prefix) {
+					operatorID = ""
+					break
+				}
 			}
 		}
-	}
-	if operatorID == "" {
-		operatorID = s.opID
+		if operatorID == "" {
+			operatorID = s.opID
+		}
 	}
 
 	// --- Validate inputs ---

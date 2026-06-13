@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
@@ -57,6 +58,16 @@ type ServiceConfig struct {
 	OperatorID string
 }
 
+// IdentityCarrier wraps a netid.Identity with a Populated flag.
+// When Populated is false, the Identity field is the zero value and
+// Service.Run/RunStream use the cooperative-label (loopback) path unchanged.
+// When Populated is true, the identity was resolved by Resolver.Middleware and
+// role enforcement and dual-regime operator_id logic apply.
+type IdentityCarrier struct {
+	Populated bool
+	Identity  netid.Identity
+}
+
 // Params is the transport-agnostic input to Service.Run.
 // Each transport (gRPC, REST, JSON-RPC, MCP) maps its own request shape
 // onto this struct before calling the facade.
@@ -83,6 +94,16 @@ type Params struct {
 	OperatorID     string
 	ConversationID string
 	SessionID      string
+
+	// ResolvedIdentity carries the cryptographically resolved identity from the
+	// console edge resolver (mTLS path) or remains zero (loopback path).
+	// When Populated is true:
+	//   - Role enforcement fires (RoleDispatch required).
+	//   - If Authenticated is true, the cert CN overrides OperatorID.
+	// When Populated is false (loopback / legacy callers), no enforcement runs
+	// and cooperative-label OperatorID is used unchanged — preserving
+	// today's loopback behavior as an explicit NO-OP.
+	ResolvedIdentity IdentityCarrier
 
 	// isMCPStamped signals that this Params was built by the MCP transport
 	// layer, not by a human-facing transport (gRPC/REST/JSON-RPC/console).
@@ -167,6 +188,18 @@ func NewService(cfg ServiceConfig) *Service {
 // This is the ONLY place that builds a dispatch.Request and calls runFn.
 // All transports must go through here.
 func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Result, err error) {
+	// --- Phase 6b: role enforcement (mTLS / Resolved path only) ---
+	// When ResolvedIdentity.Populated is true the request came through the
+	// console edge resolver; enforce RoleDispatch as the minimum privilege.
+	// When Populated is false (loopback / legacy callers), skip enforcement
+	// entirely — this preserves the loopback NO-OP invariant.
+	if p.ResolvedIdentity.Populated {
+		if !p.ResolvedIdentity.Identity.Role.Allows(netid.RoleDispatch) {
+			return nil, Result{}, fmt.Errorf("dispatch: forbidden: role %s does not allow dispatch (need %s)",
+				p.ResolvedIdentity.Identity.Role, netid.RoleDispatch)
+		}
+	}
+
 	// --- Resolve project and yakos root ---
 	project := p.Project
 	if project == "" {
@@ -203,23 +236,29 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 		return nil, Result{}, err
 	}
 
-	// Enforce the reserved-prefix policy: only the MCP transport (signalled by
-	// isMCPStamped) may stamp an OperatorID with the "mcp:" or "system:" prefix.
-	// A human-transport caller claiming one of these prefixes is dropped to the
-	// daemon default (not rejected outright) to avoid breaking edge-case tools
-	// while still preventing cross-transport forgery.
-	operatorID := p.OperatorID
-	if operatorID != "" && !p.isMCPStamped {
-		for _, prefix := range reservedOperatorPrefixes {
-			if strings.HasPrefix(operatorID, prefix) {
-				// Drop to daemon default — not an error, but the claim is ignored.
-				operatorID = ""
-				break
+	// --- Dual-regime operator_id ---
+	// Authenticated (mTLS cert) path: cert CN is authoritative; caller-supplied
+	// OperatorID is silently ignored to prevent cross-operator forgery.
+	// Unauthenticated (loopback bearer) path: cooperative-label path unchanged.
+	var operatorID string
+	if p.ResolvedIdentity.Populated && p.ResolvedIdentity.Identity.Authenticated {
+		// Cert CN wins; never use caller-supplied OperatorID.
+		operatorID = p.ResolvedIdentity.Identity.OperatorID
+	} else {
+		// Cooperative-label path (loopback or unresolved): existing logic preserved.
+		operatorID = p.OperatorID
+		if operatorID != "" && !p.isMCPStamped {
+			for _, prefix := range reservedOperatorPrefixes {
+				if strings.HasPrefix(operatorID, prefix) {
+					// Drop to daemon default — not an error, but the claim is ignored.
+					operatorID = ""
+					break
+				}
 			}
 		}
-	}
-	if operatorID == "" {
-		operatorID = s.opID
+		if operatorID == "" {
+			operatorID = s.opID
+		}
 	}
 	// ConversationID and SessionID are pass-through; env-var fallback for
 	// ConversationID happens inside dispatch.Run (preserved for legacy callers).
