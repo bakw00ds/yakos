@@ -87,35 +87,27 @@ failure mode.
 
 ## Authoring promoted candidates
 
-When you write a skill candidate to
-`<work>/current/skill-candidates.md`, draft it so the operator can
-promote it with minimal rework. Three authoring conventions are
-load-bearing (they mirror `lib/settings/skill.template.md`):
+Draft each candidate so the operator can promote it with minimal
+rework. Three conventions are load-bearing (they mirror
+`lib/settings/skill.template.md`):
 
-1. **Description-as-router.** Write the candidate's `description` as a
-   ROUTER, not a label. It must state BOTH what the skill does AND
-   when to fire it ("Use when …"), phrased the way the triggering
-   situation actually appears — because the description is the only
-   thing a future model sees when deciding whether to invoke the
-   skill. A description without a "Use when …" trigger clause is
-   rejected at promotion. Example of the bar:
-   - BAD: `description: Debugging workflow`
-   - GOOD: `description: Constrain debugging to cite runtime evidence
-     before proposing a fix. Use when a test fails, an incident
-     fires, or a regression is reported.`
+1. **Description-as-router.** Write the `description` as a ROUTER, not a
+   label: it must state BOTH what the skill does AND when to fire it
+   ("Use when …"), because the description is the only thing a future
+   model sees when deciding whether to invoke the skill. No "Use when …"
+   clause → rejected at promotion. BAD: `Debugging workflow`. GOOD:
+   `Constrain debugging to cite runtime evidence before a fix. Use when
+   a test fails, an incident fires, or a regression is reported.`
 
 2. **Anti-rationalization table for behavioral candidates.** If the
-   candidate is a behavioral/discipline skill (it asks an agent to do
-   something it will be tempted to skip — write a test, cite a
-   source, gate a decision), the candidate MUST include a short
-   excuse→rebuttal table drawn from the ACTUAL excuses you saw in the
-   transcript. Cite the cycle where the excuse appeared. Procedural
-   scaffold/audit candidates don't need one.
+   candidate asks an agent to do something it'll be tempted to skip
+   (write a test, cite a source, gate a decision), include a short
+   excuse→rebuttal table drawn from the ACTUAL transcript excuses, with
+   the cycle cited. Procedural scaffold/audit candidates don't need one.
 
-3. **Progressive disclosure.** Propose SKILL.md as the entry point.
-   Only suggest a supporting file when a section would exceed ~100
-   lines or needs runnable scripts. Never propose empty dirs or stub
-   files.
+3. **Progressive disclosure.** SKILL.md is the entry point; propose a
+   supporting file only past ~100 lines or for runnable scripts. Never
+   propose empty dirs or stubs.
 
 ## Special rules
 
