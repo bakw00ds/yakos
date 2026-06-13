@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/dashauth"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 )
 
@@ -176,9 +177,9 @@ func (s *Server) requireAuth(level authLevel, next http.HandlerFunc) http.Handle
 		}
 
 		granted := authNone
-		if tok == toks.Write {
+		if dashauth.TokenEqual(tok, toks.Write) {
 			granted = authWrite
-		} else if tok == toks.Read {
+		} else if dashauth.TokenEqual(tok, toks.Read) {
 			granted = authRead
 		}
 

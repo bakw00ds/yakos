@@ -194,8 +194,10 @@ func TestWS_Replay_AfterReconnect(t *testing.T) {
 	b.Publish(TopicKanbanAdded, KanbanAddedPayload{ID: "K-3"})
 
 	// Connect with since=ev1.Seq — should receive ev2 and ev3.
-	sinceURL := fmt.Sprintf("%s?since=%d&token=%s", wsURL, ev1.Seq, token)
+	// Token is sent as Authorization: Bearer (not ?token=; see security commit).
+	sinceURL := fmt.Sprintf("%s?since=%d", wsURL, ev1.Seq)
 	cfg, _ := websocket.NewConfig(sinceURL, "http://127.0.0.1/")
+	cfg.Header = http.Header{"Authorization": {"Bearer " + token}}
 	conn, err := websocket.DialConfig(cfg)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -218,8 +220,9 @@ func TestWS_Replay_Since0_GetsAll(t *testing.T) {
 	b.Publish(TopicKanbanAdded, KanbanAddedPayload{ID: "K-1"})
 	b.Publish(TopicKanbanAdded, KanbanAddedPayload{ID: "K-2"})
 
-	sinceURL := fmt.Sprintf("%s?since=0&token=%s", wsURL, token)
+	sinceURL := fmt.Sprintf("%s?since=0", wsURL)
 	cfg, _ := websocket.NewConfig(sinceURL, "http://127.0.0.1/")
+	cfg.Header = http.Header{"Authorization": {"Bearer " + token}}
 	conn, err := websocket.DialConfig(cfg)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -236,7 +239,8 @@ func TestWS_Replay_NoSince_NoCrash(t *testing.T) {
 	// No ?since= parameter; normal streaming should work.
 	b, _, wsURL, token := newReplayTestServer(t, 10)
 
-	cfg, _ := websocket.NewConfig(wsURL+"?token="+token, "http://127.0.0.1/")
+	cfg, _ := websocket.NewConfig(wsURL, "http://127.0.0.1/")
+	cfg.Header = http.Header{"Authorization": {"Bearer " + token}}
 	conn, err := websocket.DialConfig(cfg)
 	if err != nil {
 		t.Fatalf("dial: %v", err)

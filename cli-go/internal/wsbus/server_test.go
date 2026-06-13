@@ -47,17 +47,23 @@ func wsDialToken(t *testing.T, rawURL, token string) *websocket.Conn {
 	return conn
 }
 
-// wsDialQueryToken dials the given ws:// URL passing the token as a query param.
-func wsDialQueryToken(t *testing.T, rawURL, token string) *websocket.Conn {
+// wsDialWithParams dials the given ws:// URL with an Authorization header,
+// appending any additional query parameters (e.g. "since=42") to the URL.
+// This replaces the removed wsDialQueryToken: ?token= is no longer accepted.
+func wsDialWithParams(t *testing.T, rawURL, token, extraQuery string) *websocket.Conn {
 	t.Helper()
-	urlWithToken := rawURL + "?token=" + token
-	cfg, err := websocket.NewConfig(urlWithToken, "http://127.0.0.1/")
-	if err != nil {
-		t.Fatalf("wsDialQueryToken: new config: %v", err)
+	u := rawURL
+	if extraQuery != "" {
+		u = rawURL + "?" + extraQuery
 	}
+	cfg, err := websocket.NewConfig(u, "http://127.0.0.1/")
+	if err != nil {
+		t.Fatalf("wsDialWithParams: new config: %v", err)
+	}
+	cfg.Header = http.Header{"Authorization": {"Bearer " + token}}
 	conn, err := websocket.DialConfig(cfg)
 	if err != nil {
-		t.Fatalf("wsDialQueryToken: dial %s: %v", urlWithToken, err)
+		t.Fatalf("wsDialWithParams: dial %s: %v", u, err)
 	}
 	return conn
 }
@@ -143,18 +149,22 @@ func TestServer_AcceptsBearerHeader(t *testing.T) {
 	}
 }
 
-func TestServer_AcceptsQueryParamToken(t *testing.T) {
-	b, _, wsURL, token := newTestServer(t)
+// TestServer_RejectsQueryParamToken verifies that ?token= is no longer accepted.
+// Tokens in query strings appear in server access logs and proxy logs, so the
+// wsbus standalone path requires Authorization: Bearer only.
+func TestServer_RejectsQueryParamToken(t *testing.T) {
+	_, ts, _, token := newTestServer(t)
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/v1/events"
 
-	conn := wsDialQueryToken(t, wsURL, token)
-	defer conn.Close()
-
-	waitForSubscribers(t, b, 1)
-	b.Publish(TopicPresence, PresencePayload{User: "alice", Host: "laptop", Status: "active"})
-
-	ev := readEvent(t, conn)
-	if ev.Topic != TopicPresence {
-		t.Errorf("topic=%q; want %q", ev.Topic, TopicPresence)
+	urlWithToken := wsURL + "?token=" + token
+	cfg, err := websocket.NewConfig(urlWithToken, "http://127.0.0.1/")
+	if err != nil {
+		t.Fatalf("websocket.NewConfig: %v", err)
+	}
+	// No Authorization header — only the query-param path.
+	_, err = websocket.DialConfig(cfg)
+	if err == nil {
+		t.Fatal("expected dial error for ?token= auth; got nil (query-param tokens must be rejected)")
 	}
 }
 
