@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.0.0] — 2026-06-13
+
+### Added
+
+- **Supervisor enabled by default for new projects.** `yakos start` now activates the supervisor agent on first project init (surface-only: no behavior change for existing projects). Removes the need to opt-in manually after setup. (#161)
+- **Launch UX: web console URL in banner + `--no-repl` web-only mode.** `yakos start` prints the web console URL in the startup banner; `--no-repl` skips the interactive REPL and opens the web console only, suitable for browser-first workflows. (#162)
+- **`yakos update` — binary self-update from GitHub releases.** New `update` command fetches the latest signed binary from GitHub releases, verifies the checksum, replaces the running binary, and reports the version delta. Works on all supported platforms. (#163)
+
 ## [0.42.0.0] — 2026-06-13
 
 ### Added
