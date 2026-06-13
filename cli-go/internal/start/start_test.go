@@ -54,15 +54,16 @@ func TestRun_DryRun_Claude(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	cfg := Config{
-		Name:      "myapp",
-		HomeDir:   home,
-		Runtime:   "claude",
-		DryRun:    true,
-		NoAgents:  true, // skip agent compose
-		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
-		Writer:    &stdout,
-		ErrWriter: &stderr,
-		Env:       map[string]string{"HOME": home},
+		Name:           "myapp",
+		HomeDir:        home,
+		Runtime:        "claude",
+		DryRun:         true,
+		NoAgents:       true, // skip agent compose
+		Now:            time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:         &stdout,
+		ErrWriter:      &stderr,
+		Env:            map[string]string{"HOME": home},
+		ConsoleProbeFn: func(string) bool { return false },
 	}
 
 	banner, err := Run(cfg)
@@ -98,15 +99,16 @@ func TestRun_DryRun_Codex(t *testing.T) {
 
 	var stdout bytes.Buffer
 	cfg := Config{
-		Name:      "codexapp",
-		HomeDir:   home,
-		Runtime:   "codex",
-		DryRun:    true,
-		NoAgents:  true,
-		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
-		Writer:    &stdout,
-		ErrWriter: &bytes.Buffer{},
-		Env:       map[string]string{"HOME": home},
+		Name:           "codexapp",
+		HomeDir:        home,
+		Runtime:        "codex",
+		DryRun:         true,
+		NoAgents:       true,
+		Now:            time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:         &stdout,
+		ErrWriter:      &bytes.Buffer{},
+		Env:            map[string]string{"HOME": home},
+		ConsoleProbeFn: func(string) bool { return false },
 	}
 
 	banner, err := Run(cfg)
@@ -128,16 +130,17 @@ func TestRun_DryRun_Codex_Safe(t *testing.T) {
 
 	var stdout bytes.Buffer
 	cfg := Config{
-		Name:      "safeapp",
-		HomeDir:   home,
-		Runtime:   "codex",
-		DryRun:    true,
-		NoAgents:  true,
-		Safe:      true,
-		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
-		Writer:    &stdout,
-		ErrWriter: &bytes.Buffer{},
-		Env:       map[string]string{"HOME": home},
+		Name:           "safeapp",
+		HomeDir:        home,
+		Runtime:        "codex",
+		DryRun:         true,
+		NoAgents:       true,
+		Safe:           true,
+		Now:            time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:         &stdout,
+		ErrWriter:      &bytes.Buffer{},
+		Env:            map[string]string{"HOME": home},
+		ConsoleProbeFn: func(string) bool { return false },
 	}
 
 	banner, err := Run(cfg)
@@ -156,15 +159,16 @@ func TestRun_Exec_ClaudeArgv(t *testing.T) {
 
 	var called []string
 	cfg := Config{
-		Name:      "execapp",
-		HomeDir:   home,
-		Runtime:   "claude",
-		NoAgents:  true,
-		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
-		Writer:    &bytes.Buffer{},
-		ErrWriter: &bytes.Buffer{},
-		Env:       map[string]string{"HOME": home, "PATH": os.Getenv("PATH")},
-		ExecFn:    execCapture(&called),
+		Name:           "execapp",
+		HomeDir:        home,
+		Runtime:        "claude",
+		NoAgents:       true,
+		Now:            time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:         &bytes.Buffer{},
+		ErrWriter:      &bytes.Buffer{},
+		Env:            map[string]string{"HOME": home, "PATH": os.Getenv("PATH")},
+		ExecFn:         execCapture(&called),
+		ConsoleProbeFn: func(string) bool { return false },
 	}
 
 	// Skip if claude is not on PATH (CI may not have it, including Windows runners).
@@ -202,15 +206,16 @@ func TestRun_AuditLog_Written(t *testing.T) {
 
 	var execCalled []string
 	cfg := Config{
-		Name:      "auditapp",
-		HomeDir:   home,
-		Runtime:   "claude",
-		NoAgents:  true,
-		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
-		Writer:    &bytes.Buffer{},
-		ErrWriter: &bytes.Buffer{},
-		Env:       map[string]string{"HOME": home, "PATH": os.Getenv("PATH")},
-		ExecFn:    execCapture(&execCalled),
+		Name:           "auditapp",
+		HomeDir:        home,
+		Runtime:        "claude",
+		NoAgents:       true,
+		Now:            time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:         &bytes.Buffer{},
+		ErrWriter:      &bytes.Buffer{},
+		Env:            map[string]string{"HOME": home, "PATH": os.Getenv("PATH")},
+		ExecFn:         execCapture(&execCalled),
+		ConsoleProbeFn: func(string) bool { return false },
 	}
 
 	if _, err := findInPATH("claude"); err != nil {
@@ -309,15 +314,16 @@ func TestRun_BannerFields(t *testing.T) {
 
 	var stdout bytes.Buffer
 	cfg := Config{
-		Name:      "bannerapp",
-		HomeDir:   home,
-		Runtime:   "claude",
-		DryRun:    true,
-		NoAgents:  true,
-		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
-		Writer:    &stdout,
-		ErrWriter: &bytes.Buffer{},
-		Env:       map[string]string{"HOME": home},
+		Name:           "bannerapp",
+		HomeDir:        home,
+		Runtime:        "claude",
+		DryRun:         true,
+		NoAgents:       true,
+		Now:            time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:         &stdout,
+		ErrWriter:      &bytes.Buffer{},
+		Env:            map[string]string{"HOME": home},
+		ConsoleProbeFn: func(string) bool { return false },
 	}
 
 	_, err := Run(cfg)
@@ -359,6 +365,8 @@ func TestBuildModeFlags(t *testing.T) {
 		{Config{Resume: "abc123"}, "resume=abc123"},
 		{Config{Fork: true}, "fork"},
 		{Config{Model: "haiku"}, "model=haiku"},
+		{Config{NoREPL: true}, "no-repl"},
+		{Config{Model: "haiku", NoREPL: true}, "model=haiku no-repl"},
 		{Config{Bare: true, IDE: true, Continue: true}, "bare ide continue"},
 	}
 
@@ -524,16 +532,17 @@ func TestRun_DryRun_AllowRoot(t *testing.T) {
 
 	var stdout bytes.Buffer
 	cfg := Config{
-		Name:      "rootapp",
-		HomeDir:   home,
-		Runtime:   "claude",
-		DryRun:    true,
-		NoAgents:  true,
-		AllowRoot: true,
-		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
-		Writer:    &stdout,
-		ErrWriter: &bytes.Buffer{},
-		Env:       map[string]string{"HOME": home},
+		Name:           "rootapp",
+		HomeDir:        home,
+		Runtime:        "claude",
+		DryRun:         true,
+		NoAgents:       true,
+		AllowRoot:      true,
+		Now:            time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:         &stdout,
+		ErrWriter:      &bytes.Buffer{},
+		Env:            map[string]string{"HOME": home},
+		ConsoleProbeFn: func(string) bool { return false },
 	}
 
 	banner, err := Run(cfg)
@@ -557,16 +566,17 @@ func TestRun_DryRun_IDEWarnNonClaude(t *testing.T) {
 
 	var stderr bytes.Buffer
 	cfg := Config{
-		Name:      "ideapp",
-		HomeDir:   home,
-		Runtime:   "codex",
-		DryRun:    true,
-		NoAgents:  true,
-		IDE:       true,
-		Now:       time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
-		Writer:    &bytes.Buffer{},
-		ErrWriter: &stderr,
-		Env:       map[string]string{"HOME": home},
+		Name:           "ideapp",
+		HomeDir:        home,
+		Runtime:        "codex",
+		DryRun:         true,
+		NoAgents:       true,
+		IDE:            true,
+		Now:            time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:         &bytes.Buffer{},
+		ErrWriter:      &stderr,
+		Env:            map[string]string{"HOME": home},
+		ConsoleProbeFn: func(string) bool { return false },
 	}
 
 	_, err := Run(cfg)

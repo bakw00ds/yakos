@@ -2635,8 +2635,13 @@ func runStart(yakosRoot string, args []string) {
 	}
 
 	// Resolve the console token so the banner URL is accurate.
+	// Skip token I/O on --dry-run / --print-agents: those paths must be
+	// read-only and must not create ~/.yakos-state/ or write a token file.
 	stateDir := filepath.Join(home, ".yakos-state")
-	consoleTok, _ := internalconsoleui.LoadOrCreateToken(stateDir)
+	var consoleTok string
+	if !dryRun && !printAgents {
+		consoleTok, _ = internalconsoleui.LoadOrCreateToken(stateDir)
+	}
 
 	cfg := start.Config{
 		Name:         name,

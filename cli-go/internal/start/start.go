@@ -840,6 +840,9 @@ func buildModeFlags(cfg Config) string {
 	if cfg.Model != "" {
 		parts = append(parts, "model="+cfg.Model)
 	}
+	if cfg.NoREPL {
+		parts = append(parts, "no-repl")
+	}
 	return strings.Join(parts, " ")
 }
 
