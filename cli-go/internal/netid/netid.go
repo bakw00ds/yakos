@@ -234,8 +234,13 @@ func NewRoleMapper(stateDir string) *RoleMapper {
 //   - Symlinks: if the path is a symlink it is treated as missing (RoleRead).
 //     This prevents a symlink-redirect attack where the file is replaced with
 //     a symlink to an attacker-controlled path.
-//   - Group/other-writable: if perm & 0o022 != 0 the file is treated as
-//     missing (RoleRead).  Only the owner should be able to write roles.json.
+//   - Permission bits (Unix only): see roles_perm_unix.go / roles_perm_windows.go.
+//     On Unix, group/other-writable files are treated as missing (RoleRead).
+//     On Windows, Unix permission bits are not meaningful (Go reports synthetic
+//     values); the check is skipped — Windows ACL trust is established by the
+//     0700 parent directory created by the mtls package, which prevents writes
+//     by non-owners via NTFS inherited permissions.  Windows is not the primary
+//     networked-server target for yakOS.
 func (m *RoleMapper) Lookup(cn string) Role {
 	if m.path == "" {
 		// No stateDir configured; fail-closed.
@@ -247,12 +252,12 @@ func (m *RoleMapper) Lookup(cn string) Role {
 		// Missing file is expected before the operator configures roles.
 		return RoleRead
 	}
-	// Reject symlinks.
+	// Reject symlinks (cross-platform: ModeSymlink is meaningful on all Go targets).
 	if fi.Mode()&os.ModeSymlink != 0 {
 		return RoleRead
 	}
-	// Reject group-writable or other-writable.
-	if fi.Mode().Perm()&0o022 != 0 {
+	// Reject files with unsafe permissions (Unix only; see roles_perm_unix.go).
+	if !rolesFilePermOK(fi) {
 		return RoleRead
 	}
 	data, err := os.ReadFile(m.path) //nolint:gosec

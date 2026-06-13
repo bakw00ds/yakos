@@ -63,6 +63,13 @@ type ServiceConfig struct {
 // Service.Run/RunStream use the cooperative-label (loopback) path unchanged.
 // When Populated is true, the identity was resolved by Resolver.Middleware and
 // role enforcement and dual-regime operator_id logic apply.
+//
+// Invariant: Populated MUST equal Identity.Resolved.  Both fields mean "an
+// identity was resolved by the edge middleware."  Populated exists here as a
+// convenience flag at the dispatch boundary; callers MUST set it to
+// Identity.Resolved (never hardcode true or false independently).  A future
+// refactor may collapse these into just netid.Identity + checking .Resolved
+// directly — the Populated flag is a compatibility shim, not a separate concept.
 type IdentityCarrier struct {
 	Populated bool
 	Identity  netid.Identity
@@ -195,8 +202,10 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 	// entirely — this preserves the loopback NO-OP invariant.
 	if p.ResolvedIdentity.Populated {
 		if !p.ResolvedIdentity.Identity.Role.Allows(netid.RoleDispatch) {
-			return nil, Result{}, fmt.Errorf("dispatch: forbidden: role %s does not allow dispatch (need %s)",
-				p.ResolvedIdentity.Identity.Role, netid.RoleDispatch)
+			// Generic error returned to caller — role details stay server-side.
+			// Logging the specifics here would be useful for incident investigation
+			// but is deferred until the audit-log path lands (Phase 6c+).
+			return nil, Result{}, fmt.Errorf("dispatch: forbidden: insufficient role")
 		}
 	}
 

@@ -121,8 +121,8 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 	// Mirrors Service.Run enforcement — see service.go for rationale.
 	if p.ResolvedIdentity.Populated {
 		if !p.ResolvedIdentity.Identity.Role.Allows(netid.RoleDispatch) {
-			return Result{}, fmt.Errorf("dispatch: forbidden: role %s does not allow dispatch (need %s)",
-				p.ResolvedIdentity.Identity.Role, netid.RoleDispatch)
+			// Generic error returned to caller — role details stay server-side.
+			return Result{}, fmt.Errorf("dispatch: forbidden: insufficient role")
 		}
 	}
 

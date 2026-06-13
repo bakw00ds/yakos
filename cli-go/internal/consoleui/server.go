@@ -347,6 +347,12 @@ func (s *Server) registerRoutes() {
 	//   - /api/chat/stream, /api/chat/dispatch, /api/chat/cancel, /api/chat/share
 	//     require RoleDispatch (start/cancel dispatches; flip share ownership).
 	//   - /api/chat/transcript requires RoleRead (read-only; public-ish for shared).
+	//
+	// Note: /api/chat/stream requires RoleDispatch, so a RoleRead operator cannot
+	// receive live SSE for a shared session.  This is intentional — RoleRead operators
+	// view shared sessions via the transcript GET (RoleRead) endpoint, not live SSE.
+	// Requiring RoleDispatch for SSE is the more restrictive, safer default; relaxing
+	// to RoleRead for shared-session SSE is deferred to a future PR.
 	s.mux.HandleFunc("/api/chat/stream", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatStream))
 	s.mux.HandleFunc("/api/chat/dispatch", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatDispatch))
 	s.mux.HandleFunc("/api/chat/cancel", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatCancel))
