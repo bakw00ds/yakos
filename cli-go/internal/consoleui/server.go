@@ -16,6 +16,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/kanban"
 	"github.com/bakw00ds/yakos/internal/metricsdash"
+	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/wsbus"
@@ -89,6 +90,13 @@ type Config struct {
 	// Listener, when non-nil, is used directly instead of binding a new socket.
 	// Injected in tests to avoid port conflicts.
 	Listener net.Listener
+
+	// StateDir is the yakOS state directory (e.g. ~/.yakos-state) used to
+	// locate the mTLS role-mapping file (mtls/roles.json) for the identity
+	// resolver.  When empty, the identity resolver uses an empty stateDir and
+	// all authenticated certs default to RoleRead (missing-file-tolerant).
+	// Loopback bearer sessions always resolve to admin regardless of StateDir.
+	StateDir string
 }
 
 func (c *Config) addr() string {
@@ -159,10 +167,42 @@ func New(cfg Config) *Server {
 		serverCancel: serverCancel,
 	}
 	s.registerRoutes()
+	// Build the identity resolver.  It is purely additive in this PR:
+	// it stamps an Identity onto each request's context but does not gate or
+	// reject anything.  Enforcement (role checks, operator_id override) is the
+	// responsibility of later middleware and the dispatch facade (next PR per
+	// ADR-0004).
+	//
+	// callerLabelFn extracts the cooperative OperatorID from a request.  For
+	// loopback bearer sessions the operatorID comes from dispatch.Service's
+	// daemon-level mintOperatorID; we have no per-request handle to it here,
+	// so we return "" (empty) and let the dispatch facade stamp it as usual.
+	// This is intentional: no behaviour change on the loopback path.
+	// loopbackTrusted=true: this console always binds loopback-only (enforced
+	// in Serve()).  Certless requests on the loopback path continue to resolve
+	// to RoleAdmin/Authenticated=false, preserving today's bearer-token
+	// cooperative-labeling behavior.  When the non-loopback listener is
+	// introduced (next PR), it constructs a separate Resolver with
+	// loopbackTrusted=false so certless networked requests fail closed to
+	// RoleRead, never admin.
+	mapper := netid.NewRoleMapper(cfg.StateDir)
+	resolver := netid.NewResolver(mapper, func(r *http.Request) string {
+		// No per-request cooperative label is available at the edge; the
+		// dispatch facade stamps operator_id from its daemon-level opID.
+		return ""
+	}, true /* loopbackTrusted */)
+
 	// Wrap with edge auth: Host check + token (with static-asset exemptions)
-	// + Content-Type gate for mutations.
+	// + Content-Type gate for mutations + identity resolution (additive only).
+	//
+	// Order (outer → inner):
+	//   1. RequireLocalHost      — DNS-rebinding defence; loopback-only assertion
+	//   2. requireTokenForNonStatic — bearer-token gate for non-static assets
+	//   3. requireJSONForMutations  — Content-Type gate; CSRF defence
+	//   4. resolver.Middleware      — identity stamping (no enforcement, just context)
+	//   5. s.mux                   — route handlers
 	protected := dashauth.RequireLocalHost(cfg.addr(),
-		requireTokenForNonStatic(cfg.Token, requireJSONForMutations(s.mux)))
+		requireTokenForNonStatic(cfg.Token, requireJSONForMutations(resolver.Middleware(s.mux))))
 	s.httpSrv = &http.Server{
 		Addr:        cfg.addr(),
 		Handler:     protected,
