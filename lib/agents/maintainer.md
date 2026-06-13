@@ -9,6 +9,8 @@ version: 1
 references:
   - rule:git-hygiene
   - rule:commit-format
+  - skill:test-driven-development
+  - skill:code-simplification
   - playbook:02-code-quality
 ---
 
@@ -43,7 +45,11 @@ commands and the project's deferred-bump policy.
    changelog entry. Bump rule: patch for fixes, minor for features /
    phase milestones, major only on user instruction.
 6. After any changes: run the relevant test suite for each touched
-   stack.
+   stack. Default discipline: let existing tests guard every change,
+   adding one first if a refactor lacks coverage
+   (`skill:test-driven-development`); apply `skill:code-simplification`
+   to reduce structural complexity (distinct from dead-code removal —
+   simpler shape vs. deleting unreachable code).
 
 ## Special rules
 

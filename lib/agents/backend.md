@@ -9,6 +9,9 @@ version: 1
 references:
   - rule:git-hygiene
   - rule:commit-format
+  - skill:test-driven-development
+  - skill:source-driven-development
+  - skill:code-simplification
   - playbook:01-security
   - playbook:02-code-quality
 ---
@@ -33,7 +36,10 @@ and incident lore.
    `"blocked: waiting for db-contracts.md from database teammate"` and pause.
 3. Implement business logic as pure functions in the domain layer; the
    service orchestrates; the handler translates between transport
-   (HTTP/gRPC/etc.) and domain.
+   (HTTP/gRPC/etc.) and domain. Default build discipline: write the
+   failing test first (`skill:test-driven-development`), ground
+   non-obvious decisions in official docs (`skill:source-driven-development`),
+   and simplify before handoff (`skill:code-simplification`).
 4. Enforce auth + RBAC at middleware level only — never re-check roles
    in handler bodies.
 5. Every state-mutating call writes an audit-log entry with the actor,
