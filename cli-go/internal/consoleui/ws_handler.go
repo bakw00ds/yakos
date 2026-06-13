@@ -65,26 +65,27 @@ const authedKey contextKey = 1
 //   - consoleOriginAllowList (loopback origins only; DNS-rebinding defence)
 //   - consoleAuthSubprotocol (bearer token validation)
 func buildConsoleWSHandler(token string, bus *wsbus.Bus, pm *PresenceManager) http.Handler {
-	return buildConsoleWSHandlerFull(token, bus, pm, false, "")
+	return buildConsoleWSHandlerFull(token, bus, pm, false, nil)
 }
 
 // buildConsoleWSHandlerNetworked returns an http.Handler mounted at /v1/events
 // for the non-loopback mTLS path.  Differences from the loopback variant:
 //   - No consoleLoopbackOnly guard (TLS RequireAndVerifyClientCert is the guard)
-//   - consoleOriginAllowListNetworked: loopback + the configured external origin
+//   - consoleOriginAllowListNetworked: loopback + all configured external origins
 //   - consoleAuthSubprotocol still applies (bearer token for WS subprotocol)
 //
-// externalHost is the host[:port] used by browsers (e.g. "10.0.0.1:7890").
-// It is used to build the wss:// allowed Origin.
-func buildConsoleWSHandlerNetworked(token string, bus *wsbus.Bus, pm *PresenceManager, externalHost string) http.Handler {
-	return buildConsoleWSHandlerFull(token, bus, pm, true, externalHost)
+// externalHosts is the list of host[:port] values used by browsers
+// (e.g. ["10.0.0.1:7890", "myhost.example.com:7890"]).
+// Each entry is used to build an allowed wss:// Origin.
+func buildConsoleWSHandlerNetworked(token string, bus *wsbus.Bus, pm *PresenceManager, externalHosts []string) http.Handler {
+	return buildConsoleWSHandlerFull(token, bus, pm, true, externalHosts)
 }
 
 // buildConsoleWSHandlerFull is the shared implementation.
 // networked=true: skip loopback RemoteAddr check; extend Origin allow-list;
 // override presence OperatorID with cert CN.
 // networked=false: enforce loopback; loopback-only Origin allow-list; cooperative hello OperatorID unchanged.
-func buildConsoleWSHandlerFull(token string, bus *wsbus.Bus, pm *PresenceManager, networked bool, externalHost string) http.Handler {
+func buildConsoleWSHandlerFull(token string, bus *wsbus.Bus, pm *PresenceManager, networked bool, externalHosts []string) http.Handler {
 	// The websocket.Server selects the "yakos-bearer" protocol from the list,
 	// dropping the token slot.  Token validity was already checked by the
 	// middleware layer (consoleAuthSubprotocol) before the upgrade happens.
@@ -108,9 +109,9 @@ func buildConsoleWSHandlerFull(token string, bus *wsbus.Bus, pm *PresenceManager
 		//   - Skip consoleLoopbackOnly: TLS RequireAndVerifyClientCert enforces
 		//     the network boundary.  The loopback RemoteAddr check would reject
 		//     all legitimate networked traffic.
-		//   - Use extended Origin allow-list that includes the external host.
+		//   - Use extended Origin allow-list that includes all external hosts.
 		mux.Handle("/v1/events",
-			consoleOriginAllowListNetworked(externalHost,
+			consoleOriginAllowListNetworked(externalHosts,
 				consoleAuthSubprotocol(token, wsSrv),
 			),
 		)
@@ -348,21 +349,26 @@ func consoleOriginAllowList(next http.Handler) http.Handler {
 // mTLS path.  It accepts:
 //   - Requests with no Origin header (e.g. CLI tools, non-browser clients).
 //   - Loopback origins (ws://127.0.0.1:..., http://127.0.0.1:...) — unchanged.
-//   - The external wss:// origin derived from externalHost (the configured
-//     bind address visible to browsers connecting from the network).
+//   - Any external wss:// origin matching one of the configured externalHosts.
 //
 // All other origins are rejected (DNS-rebinding / cross-origin defence).
-// externalHost is "host:port" (e.g. "10.0.0.1:7890").
-func consoleOriginAllowListNetworked(externalHost string, next http.Handler) http.Handler {
+// Each externalHost entry must be "host:port" (e.g. "10.0.0.1:7890").
+func consoleOriginAllowListNetworked(externalHosts []string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if isLoopbackOrigin(origin) || isExternalOrigin(origin, externalHost) {
+		if isLoopbackOrigin(origin) {
 			next.ServeHTTP(w, r)
 			return
+		}
+		for _, host := range externalHosts {
+			if isExternalOrigin(origin, host) {
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
 		http.Error(w, "consoleui: Origin not in allow-list", http.StatusForbidden)
 	})

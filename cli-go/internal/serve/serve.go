@@ -121,6 +121,19 @@ type Config struct {
 	// activated.
 	ConsoleBind string
 
+	// ConsoleExternalHosts is the list of host[:port] values that browsers use to
+	// reach the console when ConsoleBind is a wildcard or non-loopback address.
+	//
+	// Required when ConsoleBind is a wildcard address (0.0.0.0, ::, [::]).
+	// Each entry becomes a SAN in the server cert (IP→IPAddresses, hostname→DNSNames)
+	// and an allowed Origin in the WS allow-list.
+	//
+	// When ConsoleBind is a specific non-loopback IP and ConsoleExternalHosts is
+	// empty, the bind address itself is used as the sole external host (back-compat).
+	//
+	// Port defaults: if an entry omits a port, the ConsoleBind port is appended.
+	ConsoleExternalHosts []string
+
 	// ConsoleTokenPath overrides the path to the console bearer-token file.
 	// Defaults to ~/.yakos-state/console-token.
 	ConsoleTokenPath string
@@ -423,6 +436,18 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 
 		if networked {
+			// FAIL-CLOSED: wildcard bind requires --console-external-host so the
+			// server cert has real SANs and the Origin allow-list is unambiguous.
+			// A wildcard bind (0.0.0.0 / :: / [::]) means browsers connect to a
+			// real IP/hostname, not the wildcard — cert SANs and Origin checks
+			// must target those real addresses.
+			if isWildcardBind(bindAddr) && len(cfg.ConsoleExternalHosts) == 0 {
+				return fmt.Errorf(
+					"serve: console --console-bind %s: wildcard bind requires --console-external-host "+
+						"(browsers connect to a real address, not %s; the cert SAN and Origin allow-list "+
+						"cannot be derived from a wildcard)", bindAddr, bindAddr)
+			}
+
 			// FAIL-CLOSED: load or generate mTLS material.  Refuse to bind if it
 			// cannot be established — no listener is opened before this check passes.
 			stateDir := cfg.consoleStateDir()
@@ -430,12 +455,29 @@ func Run(ctx context.Context, cfg Config) error {
 			if err != nil {
 				return fmt.Errorf("serve: console --console-bind: mTLS CA unavailable (non-loopback bind requires mTLS): %w", err)
 			}
-			// Extract the bind hostname for the server cert SAN.
-			bindHost, _, _ := net.SplitHostPort(bindAddr)
-			if bindHost == "" {
-				bindHost = bindAddr
+
+			// Resolve the external hosts list:
+			//   - If ConsoleExternalHosts is set, use it (with port defaulting).
+			//   - Otherwise fall back to the bind address (specific non-loopback IP).
+			externalHosts := normalizeExternalHosts(cfg.ConsoleExternalHosts, bindAddr)
+			if len(externalHosts) == 0 {
+				// Back-compat: specific non-loopback IP with no --console-external-host.
+				externalHosts = []string{bindAddr}
 			}
-			serverCert, err := mtls.IssueServerCert(caCert, caKey, []string{bindHost})
+
+			// Build the SAN list for the server cert from the external hosts.
+			// IPs → IPAddresses; hostnames → DNSNames.
+			// (mtls.IssueServerCert already handles this classification internally.)
+			sanHosts := make([]string, 0, len(externalHosts))
+			for _, eh := range externalHosts {
+				host, _, _ := net.SplitHostPort(eh)
+				if host == "" {
+					host = eh
+				}
+				sanHosts = append(sanHosts, host)
+			}
+
+			serverCert, err := mtls.IssueServerCert(caCert, caKey, sanHosts)
 			if err != nil {
 				return fmt.Errorf("serve: console --console-bind: issue server cert: %w", err)
 			}
@@ -445,15 +487,15 @@ func Run(ctx context.Context, cfg Config) error {
 			// Wire the networked path:
 			//   - TLSConfig: mTLS (RequireAndVerifyClientCert + ClientCAs + TLS1.2+)
 			//   - NetworkedMode: true → loopbackTrusted=false in Resolver
-			//   - ExternalHost: derived from bindAddr for the WS Origin allow-list
+			//   - ExternalHosts: full list for WS Origin allow-list
 			consoleCfg.TLSConfig = tlsCfg
 			consoleCfg.NetworkedMode = true
-			consoleCfg.ExternalHost = bindAddr
+			consoleCfg.ExternalHosts = externalHosts
 
 			// Print startup banner — LOUD — because we are exposing an RCE-capable
 			// surface to the network.
 			certFP := serverCertFingerprint(serverCert)
-			printNetworkedConsoleBanner(bindAddr, certFP, stateDir)
+			printNetworkedConsoleBanner(bindAddr, externalHosts, certFP, stateDir)
 		}
 
 		consoleSrv := consoleui.New(consoleCfg)
@@ -625,6 +667,57 @@ func isNonLoopbackBind(addr string) bool {
 	return mtls.IsNonLoopback(addr)
 }
 
+// isWildcardBind returns true when the host part of addr is a wildcard
+// (0.0.0.0, ::, or [::]).  Wildcard binds require --console-external-host
+// because browsers connect to a real IP/hostname, not the wildcard itself.
+func isWildcardBind(addr string) bool {
+	host, _, _ := net.SplitHostPort(addr)
+	if host == "" {
+		host = addr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsUnspecified()
+}
+
+// normalizeExternalHosts returns the list of external host:port values with
+// the bind port applied to any entry that omits a port.
+// bindAddr is the console bind address (host:port); its port is used as the
+// default when an external host entry lacks a port.
+func normalizeExternalHosts(hosts []string, bindAddr string) []string {
+	_, bindPort, _ := net.SplitHostPort(bindAddr)
+	if bindPort == "" {
+		bindPort = "7890"
+	}
+	result := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		// Split into subentries for comma-separated values in a single flag.
+		for _, sub := range strings.Split(h, ",") {
+			sub = strings.TrimSpace(sub)
+			if sub == "" {
+				continue
+			}
+			// If the entry has no port (no colon or IPv6 bracket without port),
+			// append the bind port.
+			if !strings.Contains(sub, ":") {
+				sub = sub + ":" + bindPort
+			} else if sub[0] == '[' {
+				// IPv6 with bracket: check if port follows the closing bracket.
+				end := strings.LastIndex(sub, "]")
+				if end >= 0 && end == len(sub)-1 {
+					// "[::1]" with no port after "]" — append port.
+					sub = sub + ":" + bindPort
+				}
+			}
+			result = append(result, sub)
+		}
+	}
+	return result
+}
+
 // serverCertFingerprint returns the SHA-256 fingerprint of the first DER block
 // in serverCert, formatted as colon-separated hex bytes (same format as
 // openssl x509 -fingerprint).  Used in the startup banner so operators can
@@ -643,7 +736,7 @@ func serverCertFingerprint(serverCert *tls.Certificate) string {
 
 // printNetworkedConsoleBanner prints a prominent banner when the console is
 // bound to a non-loopback address.  The banner conveys:
-//   - The active URL (wss://)
+//   - The active URL(s) (wss://) — one per externalHost
 //   - The server cert fingerprint (operators should verify this out of band)
 //   - The authz model (mTLS client certs; roles from roles.json; default=read)
 //   - How to obtain a client cert (out-of-band distribution; no enrollment
@@ -651,13 +744,21 @@ func serverCertFingerprint(serverCert *tls.Certificate) string {
 //
 // The banner is printed to stderr (same as all other serve: messages).
 // It is intentionally verbose and hard to miss.
-func printNetworkedConsoleBanner(bindAddr, certFingerprint, stateDir string) {
+func printNetworkedConsoleBanner(bindAddr string, externalHosts []string, certFingerprint, stateDir string) {
 	rolesPath := filepath.Join(stateDir, "mtls", "roles.json")
 	sep := strings.Repeat("=", 72)
 	fmt.Fprintln(os.Stderr, sep)
 	fmt.Fprintln(os.Stderr, "  YAKOS CONSOLE: NETWORKED MODE ACTIVE")
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintf(os.Stderr, "  URL:             wss://%s\n", bindAddr)
+	fmt.Fprintf(os.Stderr, "  Bind address:    %s\n", bindAddr)
+	if len(externalHosts) == 1 {
+		fmt.Fprintf(os.Stderr, "  URL:             wss://%s\n", externalHosts[0])
+	} else {
+		fmt.Fprintln(os.Stderr, "  URLs:")
+		for _, eh := range externalHosts {
+			fmt.Fprintf(os.Stderr, "    wss://%s\n", eh)
+		}
+	}
 	fmt.Fprintf(os.Stderr, "  Server cert SHA-256: %s\n", certFingerprint)
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  Auth model:      mutual TLS (mTLS) — client certs required")

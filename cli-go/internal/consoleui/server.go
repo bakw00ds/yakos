@@ -68,7 +68,17 @@ type Config struct {
 	// non-loopback server.  Derived from Addr when empty.  Used to build
 	// the wss:// allowed Origin in the WS allow-list.
 	// Ignored when NetworkedMode is false.
+	//
+	// Deprecated: use ExternalHosts (slice) for multi-host support.
+	// When both are set, ExternalHosts takes precedence.
 	ExternalHost string
+
+	// ExternalHosts is the list of host[:port] values that browsers may use to
+	// reach this non-loopback server.  Each entry becomes an allowed Origin in
+	// the WS allow-list and a SAN in the server cert.  The first entry is used
+	// for the CSP wss:// directive and the startup banner URL.
+	// Ignored when NetworkedMode is false.
+	ExternalHosts []string
 
 	// Token is the console bearer token.
 	// Use LoadOrCreateToken to obtain it before constructing the server.
@@ -128,6 +138,23 @@ func (c *Config) addr() string {
 		return c.Addr
 	}
 	return "127.0.0.1:7890"
+}
+
+// externalHosts returns the effective list of external host:port values.
+// ExternalHosts takes precedence over ExternalHost (single string).
+// When neither is set, falls back to the bind address.
+// Returns nil when NetworkedMode is false.
+func (c *Config) externalHosts() []string {
+	if !c.NetworkedMode {
+		return nil
+	}
+	if len(c.ExternalHosts) > 0 {
+		return c.ExternalHosts
+	}
+	if c.ExternalHost != "" {
+		return []string{c.ExternalHost}
+	}
+	return []string{c.addr()}
 }
 
 // Server is the unified console HTTP server.
@@ -407,11 +434,8 @@ func (s *Server) registerRoutes() {
 	if s.cfg.Bus != nil {
 		var wsHandler http.Handler
 		if s.cfg.NetworkedMode {
-			externalHost := s.cfg.ExternalHost
-			if externalHost == "" {
-				externalHost = s.cfg.addr()
-			}
-			wsHandler = buildConsoleWSHandlerNetworked(s.cfg.Token, s.cfg.Bus, s.presence, externalHost)
+			externalHosts := s.cfg.externalHosts()
+			wsHandler = buildConsoleWSHandlerNetworked(s.cfg.Token, s.cfg.Bus, s.presence, externalHosts)
 		} else {
 			wsHandler = buildConsoleWSHandler(s.cfg.Token, s.cfg.Bus, s.presence)
 		}
@@ -525,7 +549,15 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	// Emit CSP as a response header so the ws:// / wss:// origin matches the
 	// actual bind address and protocol (loopback → ws://; networked → wss://).
-	w.Header().Set("Content-Security-Policy", cspHeader(s.cfg.addr(), s.cfg.NetworkedMode))
+	// For the networked path, use the first external host for the wss:// directive
+	// (the browser connects to a specific host, not the wildcard bind address).
+	wsAddr := s.cfg.addr()
+	if s.cfg.NetworkedMode {
+		if hosts := s.cfg.externalHosts(); len(hosts) > 0 {
+			wsAddr = hosts[0]
+		}
+	}
+	w.Header().Set("Content-Security-Policy", cspHeader(wsAddr, s.cfg.NetworkedMode))
 	// Cross-Origin-Resource-Policy: same-origin — prevents cross-origin reads.
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	_, _ = w.Write(indexHTML)

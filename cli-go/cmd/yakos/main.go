@@ -5564,6 +5564,7 @@ func runServe(yakosRoot string, args []string) {
 	perfAddr := ""
 	consoleAddr := ""
 	consoleBind := ""
+	var consoleExternalHosts []string
 	detach := false
 	rotateToken := false
 	rotatePerfToken := false
@@ -5618,6 +5619,14 @@ func runServe(yakosRoot string, args []string) {
 				os.Exit(1)
 			}
 			consoleBind = args[i]
+		case "--console-external-host":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "serve: --console-external-host requires a host[:port] value")
+				os.Exit(1)
+			}
+			// Repeatable; also accepts comma-separated values in a single flag.
+			consoleExternalHosts = append(consoleExternalHosts, args[i])
 		case "--rotate-ws-token":
 			rotateToken = true
 		case "--rotate-perf-token":
@@ -5643,6 +5652,8 @@ func runServe(yakosRoot string, args []string) {
 				consoleAddr = args[i][15:]
 			} else if len(args[i]) > 15 && args[i][:15] == "--console-bind=" {
 				consoleBind = args[i][15:]
+			} else if len(args[i]) > 24 && args[i][:24] == "--console-external-host=" {
+				consoleExternalHosts = append(consoleExternalHosts, args[i][24:])
 			} else {
 				fmt.Fprintf(os.Stderr, "serve: unknown flag %q (try --help)\n", args[i])
 				os.Exit(1)
@@ -5709,16 +5720,17 @@ func runServe(yakosRoot string, args []string) {
 	perfTok, _ := internalperfdash.LoadOrCreatePerfToken(perfStateDir)
 
 	cfg := internalserve.Config{
-		WorkspaceRoot: workspaceRoot,
-		SocketPath:    socketPath,
-		PIDFile:       pidFile,
-		YakosRoot:     yakosRoot,
-		WSAddr:        wsAddr,
-		PerfAddr:      perfAddr,
-		NoPerfDash:    noPerfDash,
-		ConsoleAddr:   consoleAddr,
-		ConsoleBind:   consoleBind,
-		NoConsole:     noConsole,
+		WorkspaceRoot:        workspaceRoot,
+		SocketPath:           socketPath,
+		PIDFile:              pidFile,
+		YakosRoot:            yakosRoot,
+		WSAddr:               wsAddr,
+		PerfAddr:             perfAddr,
+		NoPerfDash:           noPerfDash,
+		ConsoleAddr:          consoleAddr,
+		ConsoleBind:          consoleBind,
+		ConsoleExternalHosts: consoleExternalHosts,
+		NoConsole:            noConsole,
 	}
 
 	wsBindAddr := wsAddr
@@ -5954,7 +5966,8 @@ Example:
 
 func printServeHelp(w io.Writer) {
 	_, _ = fmt.Fprint(w, `yakos serve [--socket <path>] [--pidfile <path>] [--ws-addr <addr>]
-             [--console-addr <addr>] [--console-bind <addr>] [--no-console]
+             [--console-addr <addr>] [--console-bind <addr>]
+             [--console-external-host <host[:port]>] [--no-console]
              [--perf-addr <addr>] [--no-perf] [--detach] [--help]
 
 Start the yakos daemon for the current workspace.
@@ -5988,6 +6001,17 @@ Flags:
                             No plain-HTTP escape hatch. See ADR-0004.
                             When set to a loopback address, behaves like --console-addr.
                             Example: --console-bind 0.0.0.0:7890
+  --console-external-host <host[:port]>
+                            The host (and optional port) that browsers use to reach the
+                            console when --console-bind is a wildcard or non-loopback
+                            address. REQUIRED when --console-bind is 0.0.0.0 or ::.
+                            Repeatable; each value adds a SAN to the server cert and an
+                            allowed Origin to the WS allow-list.
+                            Also accepts comma-separated values: host1:port,host2:port.
+                            If port is omitted, the --console-bind port is used.
+                            Example: --console-bind 0.0.0.0:7890 \
+                                     --console-external-host 192.168.1.50:7890 \
+                                     --console-external-host myhost.local:7890
   --no-console              Disable the unified console server.
   --perf-addr <addr>        Standalone performance dashboard address (default 127.0.0.1:7895).
                             Only used when --no-console is set.

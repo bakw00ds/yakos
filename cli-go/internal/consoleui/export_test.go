@@ -152,8 +152,9 @@ func NewPresenceManagerForTest(bus *wsbus.Bus) *PresenceManager {
 
 // BuildConsoleWSHandlerNetworkedForTest exposes buildConsoleWSHandlerNetworked
 // for external test packages.  The token parameter is used for subprotocol auth.
-func BuildConsoleWSHandlerNetworkedForTest(token string, bus *wsbus.Bus, pm *PresenceManager, externalHost string) http.Handler {
-	return buildConsoleWSHandlerNetworked(token, bus, pm, externalHost)
+// externalHosts is the list of host[:port] values used by browsers.
+func BuildConsoleWSHandlerNetworkedForTest(token string, bus *wsbus.Bus, pm *PresenceManager, externalHosts []string) http.Handler {
+	return buildConsoleWSHandlerNetworked(token, bus, pm, externalHosts)
 }
 
 // IsExternalOriginForTest exposes isExternalOrigin for external tests so
@@ -171,6 +172,7 @@ func IsLoopbackOriginForTest(origin string) bool {
 // BuildOriginAllowListNetworkedForTest exposes consoleOriginAllowListNetworked
 // directly so tests can exercise the middleware with a simple next handler
 // (without triggering the WS upgrade that requires http.Hijacker).
-func BuildOriginAllowListNetworkedForTest(externalHost string, next http.Handler) http.Handler {
-	return consoleOriginAllowListNetworked(externalHost, next)
+// externalHosts is the list of host[:port] values used by browsers.
+func BuildOriginAllowListNetworkedForTest(externalHosts []string, next http.Handler) http.Handler {
+	return consoleOriginAllowListNetworked(externalHosts, next)
 }

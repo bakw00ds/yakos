@@ -472,14 +472,14 @@ func TestConsoleBind_WSOrigin_LoopbackStillAcceptedOnNetworked(t *testing.T) {
 // 403 WITHOUT triggering the WS upgrade (using a simple next handler).
 func TestConsoleBind_WSOrigin_NetworkedHandler_ForeignRejected(t *testing.T) {
 	t.Parallel()
-	externalHost := "10.0.0.1:7890"
+	externalHosts := []string{"10.0.0.1:7890"}
 
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := consoleui.BuildOriginAllowListNetworkedForTest(externalHost, next)
+	handler := consoleui.BuildOriginAllowListNetworkedForTest(externalHosts, next)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
 	req.Header.Set("Origin", "https://evil.attacker.example.com")
@@ -498,14 +498,14 @@ func TestConsoleBind_WSOrigin_NetworkedHandler_ForeignRejected(t *testing.T) {
 // the external host origin passes the allow-list and next is called.
 func TestConsoleBind_WSOrigin_NetworkedHandler_ExternalAccepted(t *testing.T) {
 	t.Parallel()
-	externalHost := "10.0.0.1:7890"
+	externalHosts := []string{"10.0.0.1:7890"}
 
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := consoleui.BuildOriginAllowListNetworkedForTest(externalHost, next)
+	handler := consoleui.BuildOriginAllowListNetworkedForTest(externalHosts, next)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
 	req.Header.Set("Origin", "https://10.0.0.1:7890")
@@ -628,6 +628,130 @@ func TestConsoleBind_Presence_CertCN_Integration(t *testing.T) {
 	}
 	if gotOperatorID != clientCN {
 		t.Errorf("presence.operator_id=%q; want cert CN %q", gotOperatorID, clientCN)
+	}
+}
+
+// ---- --console-external-host: multi-host origin allow-list ------------------
+
+// TestConsoleBind_MultipleExternalHosts_AllAccepted verifies that when
+// ExternalHosts has multiple entries, each entry's origin is accepted.
+func TestConsoleBind_MultipleExternalHosts_AllAccepted(t *testing.T) {
+	t.Parallel()
+	hosts := []string{"10.0.0.1:7890", "myhost.example.com:7890", "192.168.1.50:7890"}
+
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := consoleui.BuildOriginAllowListNetworkedForTest(hosts, next)
+
+	for _, host := range hosts {
+		origin := "https://" + host
+		t.Run(origin, func(t *testing.T) {
+			called = false
+			req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
+			req.Header.Set("Origin", origin)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if !called {
+				t.Errorf("origin %q should be accepted with ExternalHosts=%v", origin, hosts)
+			}
+			if w.Code == http.StatusForbidden {
+				t.Errorf("origin %q returned 403; want 200", origin)
+			}
+		})
+	}
+}
+
+// TestConsoleBind_MultipleExternalHosts_ForeignRejected verifies that a foreign
+// origin is still rejected even when multiple external hosts are configured.
+func TestConsoleBind_MultipleExternalHosts_ForeignRejected(t *testing.T) {
+	t.Parallel()
+	hosts := []string{"10.0.0.1:7890", "myhost.example.com:7890"}
+
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := consoleui.BuildOriginAllowListNetworkedForTest(hosts, next)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
+	req.Header.Set("Origin", "https://evil.attacker.example.com")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if called {
+		t.Error("foreign origin should not reach next handler even with multiple external hosts")
+	}
+	if w.Code != http.StatusForbidden {
+		t.Errorf("foreign origin should return 403; got %d", w.Code)
+	}
+}
+
+// TestConsoleBind_ExternalHosts_CSP_UsesFirstHost verifies that the CSP header
+// uses the first external host's wss:// origin (not the wildcard bind addr).
+func TestConsoleBind_ExternalHosts_CSP_UsesFirstHost(t *testing.T) {
+	t.Parallel()
+	_, serverTLSCfg, clientTLSCfg, _ := newMTLSFixture(t)
+
+	stateDir := t.TempDir()
+	tok, err := consoleui.LoadOrCreateToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	bus := wsbus.New()
+	defer bus.Stop()
+
+	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	addr := tcpLn.Addr().String()
+
+	// Configure with multiple ExternalHosts — CSP should use the first.
+	primaryHost := "192.168.1.50:7890"
+	secondaryHost := "myhost.example.com:7890"
+
+	cfg := consoleui.Config{
+		Addr:              addr,
+		Token:             tok,
+		KanbanBoardPath:   stateDir + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: stateDir,
+		PerfWorkDir:       stateDir,
+		Bus:               bus,
+		StateDir:          stateDir,
+		Listener:          tcpLn,
+		TLSConfig:         serverTLSCfg,
+		NetworkedMode:     true,
+		ExternalHosts:     []string{primaryHost, secondaryHost},
+	}
+
+	srv := consoleui.New(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Serve(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+
+	resp, err := doTLSGet(t, "https://"+addr+"/", clientTLSCfg)
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+
+	csp := resp.Header.Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy header missing")
+	}
+	// CSP connect-src should reference the first external host.
+	if !strings.Contains(csp, "wss://"+primaryHost) {
+		t.Errorf("CSP should contain wss://%s (first external host); got: %s", primaryHost, csp)
+	}
+	// The wildcard bind addr should NOT appear in the CSP (browser can't connect to 0.0.0.0).
+	if strings.Contains(csp, "0.0.0.0") {
+		t.Errorf("CSP should not contain wildcard bind addr; got: %s", csp)
 	}
 }
 

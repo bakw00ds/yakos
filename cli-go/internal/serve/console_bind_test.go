@@ -7,6 +7,9 @@
 //     no error, loopback-safe path).
 //  3. consoleBind() helper returns ConsoleBind when set, ConsoleAddr fallback,
 //     and default when both are empty.
+//  4. isWildcardBind predicate.
+//  5. normalizeExternalHosts port defaulting.
+//  6. Wildcard bind without --console-external-host → Run() refuses.
 package serve_test
 
 import (
@@ -15,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/bakw00ds/yakos/internal/serve"
@@ -183,6 +187,148 @@ func TestConsoleBind_Priority(t *testing.T) {
 			got := serve.ConsoleBind(tc.consoleAddr, tc.consoleBind)
 			if got != tc.want {
 				t.Errorf("consoleBind(%q, %q) = %q; want %q", tc.consoleAddr, tc.consoleBind, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---- 4. isWildcardBind predicate --------------------------------------------
+
+// TestIsWildcardBind verifies that isWildcardBind correctly identifies wildcard
+// addresses (0.0.0.0, ::, [::]) and returns false for specific addresses.
+func TestIsWildcardBind(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{"0.0.0.0:7890", true},
+		{"0.0.0.0:0", true},
+		{"[::]:7890", true},   // IPv6 any-address (canonical bracket form)
+		{"[::]:0", true},      // IPv6 any-address with OS-assigned port
+		{"[::1]:7890", false}, // IPv6 loopback — not a wildcard
+		{"127.0.0.1:7890", false},
+		{"10.0.0.1:7890", false},
+		{"192.168.1.50:7890", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.addr, func(t *testing.T) {
+			t.Parallel()
+			got := serve.IsWildcardBindForTest(tc.addr)
+			if got != tc.want {
+				t.Errorf("IsWildcardBind(%q) = %v; want %v", tc.addr, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---- 5. normalizeExternalHosts port defaulting --------------------------------
+
+// TestNormalizeExternalHosts verifies port defaulting and comma-separated parsing.
+func TestNormalizeExternalHosts(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		hosts    []string
+		bindAddr string
+		want     []string
+	}{
+		{
+			name:     "port_already_present",
+			hosts:    []string{"192.168.1.50:7890"},
+			bindAddr: "0.0.0.0:7890",
+			want:     []string{"192.168.1.50:7890"},
+		},
+		{
+			name:     "port_omitted_uses_bind_port",
+			hosts:    []string{"192.168.1.50"},
+			bindAddr: "0.0.0.0:7890",
+			want:     []string{"192.168.1.50:7890"},
+		},
+		{
+			name:     "comma_separated_values",
+			hosts:    []string{"192.168.1.50:7890,myhost.example.com:7890"},
+			bindAddr: "0.0.0.0:7890",
+			want:     []string{"192.168.1.50:7890", "myhost.example.com:7890"},
+		},
+		{
+			name:     "multiple_flags_plus_comma",
+			hosts:    []string{"192.168.1.50:7890", "host2,host3"},
+			bindAddr: "0.0.0.0:8443",
+			want:     []string{"192.168.1.50:7890", "host2:8443", "host3:8443"},
+		},
+		{
+			name:     "empty_entries_skipped",
+			hosts:    []string{"", "  ", "192.168.1.50:7890"},
+			bindAddr: "0.0.0.0:7890",
+			want:     []string{"192.168.1.50:7890"},
+		},
+		{
+			name:     "nil_input_returns_empty",
+			hosts:    nil,
+			bindAddr: "0.0.0.0:7890",
+			want:     []string{},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := serve.NormalizeExternalHostsForTest(tc.hosts, tc.bindAddr)
+			if len(got) != len(tc.want) {
+				t.Fatalf("NormalizeExternalHosts(%v, %q) = %v; want %v", tc.hosts, tc.bindAddr, got, tc.want)
+			}
+			for i, g := range got {
+				if g != tc.want[i] {
+					t.Errorf("result[%d] = %q; want %q", i, g, tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// ---- 6. Wildcard bind without --console-external-host → Run() refuses --------
+
+// TestConsoleBind_WildcardWithoutExternalHost_Refuses verifies that Run()
+// returns a clear error when ConsoleBind is a wildcard address and
+// ConsoleExternalHosts is empty.  This is the fail-closed requirement: a
+// wildcard bind has no usable SAN for browser cert verification, so we refuse
+// rather than issue a cert with no DNS/IP SANs.
+func TestConsoleBind_WildcardWithoutExternalHost_Refuses(t *testing.T) {
+	t.Parallel()
+
+	wildcardAddrs := []struct {
+		name string
+		addr string
+	}{
+		{"ipv4-any", "0.0.0.0:7890"},
+		{"ipv6-any", "[::]:7890"},
+	}
+
+	for _, tc := range wildcardAddrs {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			workspaceRoot := t.TempDir()
+			cfg := serve.Config{
+				WorkspaceRoot:        workspaceRoot,
+				ConsoleBind:          tc.addr,
+				ConsoleExternalHosts: nil, // intentionally absent
+				ListenFn: func(path string) (net.Listener, error) {
+					return net.Listen("tcp", "127.0.0.1:0")
+				},
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			err := serve.Run(ctx, cfg)
+			if err == nil {
+				t.Error("Run() with wildcard ConsoleBind and no ConsoleExternalHosts should return error; got nil")
+			}
+			if err != nil && !strings.Contains(err.Error(), "console-external-host") {
+				t.Errorf("error should mention --console-external-host; got: %v", err)
 			}
 		})
 	}
