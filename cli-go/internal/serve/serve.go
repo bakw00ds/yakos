@@ -38,6 +38,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/mcpserver"
 	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/restapi"
+	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
@@ -360,6 +361,13 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		workDir := perfdash.DefaultWorkDir(cfg.WorkspaceRoot)
 		kanbanPath := filepath.Join(cfg.WorkspaceRoot, "work", "current", "kanban.md")
+		workflowEngine := &workflow.Engine{
+			Svc:       dispatchSvc,
+			Bus:       bus,
+			YakosRoot: cfg.YakosRoot,
+			Project:   cfg.WorkspaceRoot,
+			WorkDir:   workDir,
+		}
 		consoleSrv := consoleui.New(consoleui.Config{
 			Addr:              cfg.consoleAddr(),
 			Token:             consoleTok,
@@ -369,9 +377,12 @@ func Run(ctx context.Context, cfg Config) error {
 			PerfWorkDir:       workDir,
 			Bus:               bus,
 			DispatchService:   dispatchSvc,
+			WorkDir:           workDir,
+			WorkflowEngine:    workflowEngine,
 		})
-		consoleURL := fmt.Sprintf("http://%s/#token=%s", cfg.consoleAddr(), consoleTok)
-		_ = consoleURL // printed by caller in banner
+		// consoleURL is built by start.go's banner; this local string was a
+		// no-op dead-code assignment.  Kept as documentation only.
+		// consoleURL := fmt.Sprintf("http://%s/#token=%s", cfg.consoleAddr(), consoleTok)
 		go func() {
 			consoleErrCh <- consoleSrv.Serve(ctx)
 		}()

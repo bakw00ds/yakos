@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	_ "embed"
@@ -52,12 +53,69 @@ func (c *Config) addr() string {
 	return "127.0.0.1:7895"
 }
 
+// eventsCache is an mtime+size-keyed cache for parsed dispatch-log events.
+// It avoids re-parsing all log files on every API request; the cache is
+// invalidated when any log file's mtime, size, or the since filter changes.
+// This mirrors the historyCache pattern in internal/metricsdash/server.go.
+type eventsCache struct {
+	mu        sync.Mutex
+	since     string    // ISO-8601 lower-bound filter at time of last load
+	maxMtime  time.Time // latest mtime across all log files
+	totalSize int64     // sum of sizes of all log files
+	events    []cost.Event
+}
+
+// load returns cached events when the log files and since filter are unchanged;
+// otherwise it re-reads and re-parses all matching log files.
+func (c *eventsCache) load(workDir, since string) ([]cost.Event, error) {
+	if workDir == "" {
+		return nil, nil
+	}
+	paths, err := cost.LogFiles(workDir)
+	if err != nil {
+		return nil, fmt.Errorf("perfdash: log files: %w", err)
+	}
+
+	// Compute aggregate mtime and size across all log files.
+	var maxMtime time.Time
+	var totalSize int64
+	for _, p := range paths {
+		fi, err := os.Stat(p)
+		if err != nil {
+			// Non-fatal: a file may have been rotated away between LogFiles and Stat.
+			continue
+		}
+		if fi.ModTime().After(maxMtime) {
+			maxMtime = fi.ModTime()
+		}
+		totalSize += fi.Size()
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Cache hit: files unchanged and same since filter.
+	if since == c.since && maxMtime.Equal(c.maxMtime) && totalSize == c.totalSize {
+		return c.events, nil
+	}
+
+	// Cache miss: re-parse.
+	ch := cost.StreamFiles(paths, since)
+	evs := collectEvents(ch)
+	c.since = since
+	c.maxMtime = maxMtime
+	c.totalSize = totalSize
+	c.events = evs
+	return evs, nil
+}
+
 // Server is the performance dashboard HTTP server.
 // It is read-only: no state mutation paths exist.
 type Server struct {
 	cfg     Config
 	mux     *http.ServeMux
 	httpSrv *http.Server
+	cache   eventsCache
 }
 
 // New constructs a Server and wires all routes.
@@ -176,15 +234,12 @@ func (s *Server) handleCSS(w http.ResponseWriter, r *http.Request) {
 
 // ---- dispatch log helpers ---------------------------------------------------
 
-// loadEvents reads all dispatch_finished events from WorkDir matching the
-// since filter.  Empty since means all events.
+// loadEvents returns dispatch_finished events from WorkDir matching since.
+// Results are served from the mtime+size cache when the log files are unchanged
+// and the since filter is the same as the last request; otherwise re-parsed.
+// Empty since means all events.
 func (s *Server) loadEvents(since string) ([]cost.Event, error) {
-	paths, err := cost.LogFiles(s.cfg.WorkDir)
-	if err != nil {
-		return nil, fmt.Errorf("perfdash: log files: %w", err)
-	}
-	ch := cost.StreamFiles(paths, since)
-	return collectEvents(ch), nil
+	return s.cache.load(s.cfg.WorkDir, since)
 }
 
 // queryWindow extracts and parses the ?window= query parameter.

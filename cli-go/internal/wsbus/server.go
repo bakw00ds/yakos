@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/dashauth"
 	"golang.org/x/net/websocket"
 )
 
@@ -184,11 +185,15 @@ func (s *Server) loopbackOnly(next http.Handler) http.Handler {
 	})
 }
 
-// authenticate checks the Authorization: Bearer <token> header or ?token= query param.
+// authenticate checks the Authorization: Bearer <token> header only.
+// The ?token= query parameter is NOT accepted: query-string tokens appear in
+// server access logs and are explicitly forbidden by the security plan.
+// For WebSocket clients that cannot set headers, use the Sec-WebSocket-Protocol
+// subprotocol auth on the console path (consoleui.buildConsoleWSHandler).
 func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tok := extractToken(r)
-		if tok == "" || tok != s.cfg.Token {
+		if tok == "" || !dashauth.TokenEqual(tok, s.cfg.Token) {
 			http.Error(w, "wsbus: unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -196,8 +201,9 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 	})
 }
 
-// extractToken extracts the bearer token from the Authorization header or
-// the ?token= query parameter.
+// extractToken extracts the bearer token from the Authorization header only.
+// Query-parameter auth (?token=) has been removed: tokens in query strings
+// appear in server access logs and proxy logs — a security leak risk.
 func extractToken(r *http.Request) string {
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		const prefix = "Bearer "
@@ -205,7 +211,7 @@ func extractToken(r *http.Request) string {
 			return strings.TrimSpace(auth[len(prefix):])
 		}
 	}
-	return r.URL.Query().Get("token")
+	return ""
 }
 
 // handleWS is the core WebSocket handler.  It subscribes to all topics on the
