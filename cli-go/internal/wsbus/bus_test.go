@@ -7,6 +7,102 @@ import (
 	"time"
 )
 
+// TestBus_PublishUnsubscribeRace is a targeted race regression test for the
+// send-on-closed-channel panic caught by Windows -race CI.
+//
+// The panic scenario: Publish snapshots the subscriber slice under RLock,
+// releases the lock, then sends to each subscriber's channel outside the
+// lock.  Unsubscribe (or Stop) can close s.ch between the snapshot and the
+// send, causing "send on closed channel".
+//
+// The fix wraps each channel send in s.mu.Lock so it cannot interleave with
+// the close.  This test reliably panics on the old code and passes on the
+// fixed code.  Run with -race and -count≥50.
+func TestBus_PublishUnsubscribeRace(t *testing.T) {
+	const (
+		publishers   = 8
+		cyclers      = 8   // goroutines that repeatedly sub/unsub
+		publishRound = 200 // events per publisher
+	)
+
+	b := New()
+
+	// ready is closed to make all goroutines start as simultaneously as
+	// possible (barrier-style), maximising the interleave window.
+	ready := make(chan struct{})
+
+	var wg sync.WaitGroup
+
+	// Publishers hammer Publish until done.
+	wg.Add(publishers)
+	for i := 0; i < publishers; i++ {
+		go func() {
+			defer wg.Done()
+			<-ready
+			for j := 0; j < publishRound; j++ {
+				b.Publish(TopicKanbanAdded, KanbanAddedPayload{ID: "K-race"})
+			}
+		}()
+	}
+
+	// Cyclers Subscribe then immediately Unsubscribe, repeatedly.
+	// This is exactly the pattern that races with an in-flight Publish.
+	wg.Add(cyclers)
+	for i := 0; i < cyclers; i++ {
+		go func() {
+			defer wg.Done()
+			<-ready
+			for j := 0; j < publishRound; j++ {
+				sub := b.Subscribe("")
+				// Drain whatever arrived so the channel never overflows
+				// (overflow-drop would itself call Unsubscribe and add
+				// contention, but we want to isolate the primary race).
+				go func(s *Subscription) {
+					for range s.C() { //nolint:revive
+					}
+				}(sub)
+				sub.Unsubscribe()
+			}
+		}()
+	}
+
+	// One goroutine also calls Stop partway through so we exercise the
+	// Stop→close path racing against Publish.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-ready
+		// Let some work accumulate before stopping.
+		runtime_yield()
+		b.Stop()
+		// Re-open the bus with fresh subscriptions so remaining publishers
+		// have live subs to race against.
+		for j := 0; j < cyclers*2; j++ {
+			sub := b.Subscribe("")
+			go func(s *Subscription) {
+				for range s.C() { //nolint:revive
+				}
+			}(sub)
+		}
+	}()
+
+	// Fire the barrier.
+	close(ready)
+	wg.Wait()
+
+	// Drain any remaining subs so goroutines started above can exit.
+	b.Stop()
+}
+
+// runtime_yield is a no-sleep scheduling hint that lets other goroutines run.
+// It is implemented as a tiny channel round-trip so the race detector sees
+// a real happens-before edge (time.Sleep alone does not provide one).
+func runtime_yield() {
+	ch := make(chan struct{}, 1)
+	ch <- struct{}{}
+	<-ch
+}
+
 // ---- Bus tests ---------------------------------------------------------------
 
 func TestBus_PublishDelivered(t *testing.T) {
