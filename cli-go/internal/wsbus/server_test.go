@@ -17,6 +17,21 @@ import (
 
 // ---- test helpers ------------------------------------------------------------
 
+// waitForSubscribers blocks until the bus has at least n active subscribers
+// or the deadline expires (deterministic replacement for time.Sleep — the WS
+// handler subscribes asynchronously after Dial returns).
+func waitForSubscribers(t *testing.T, b *Bus, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if b.SubscriberCount() >= n {
+			return
+		}
+		time.Sleep(time.Millisecond) // poll interval, not a correctness assertion
+	}
+	t.Fatalf("waitForSubscribers: bus had %d subscribers; want >= %d", b.SubscriberCount(), n)
+}
+
 // wsDialToken dials the given ws:// URL with a Bearer token.
 func wsDialToken(t *testing.T, rawURL, token string) *websocket.Conn {
 	t.Helper()
@@ -116,10 +131,9 @@ func TestServer_AcceptsBearerHeader(t *testing.T) {
 	defer conn.Close()
 
 	// Wait for the server-side goroutine to register the subscription before
-	// publishing. On Windows, goroutine scheduling is slower and the Publish
-	// can fire before handleWS has called bus.Subscribe, causing the event to
-	// be missed and the 2s read deadline to expire.
-	time.Sleep(20 * time.Millisecond)
+	// publishing. The WS handler subscribes asynchronously after Dial returns;
+	// waitForSubscribers converges as soon as the subscription is registered.
+	waitForSubscribers(t, b, 1)
 
 	b.Publish(TopicKanbanAdded, KanbanAddedPayload{ID: "K-1", Title: "test", Column: "TODO"})
 
@@ -135,6 +149,7 @@ func TestServer_AcceptsQueryParamToken(t *testing.T) {
 	conn := wsDialQueryToken(t, wsURL, token)
 	defer conn.Close()
 
+	waitForSubscribers(t, b, 1)
 	b.Publish(TopicPresence, PresencePayload{User: "alice", Host: "laptop", Status: "active"})
 
 	ev := readEvent(t, conn)
@@ -151,7 +166,7 @@ func TestServer_EventDeliveredToClient(t *testing.T) {
 	defer conn.Close()
 
 	want := KanbanAddedPayload{ID: "K-42", Title: "event delivery test", Column: "TODO"}
-	time.Sleep(10 * time.Millisecond) // ensure subscription is registered
+	waitForSubscribers(t, b, 1)
 	b.Publish(TopicKanbanAdded, want)
 
 	ev := readEvent(t, conn)
@@ -178,7 +193,7 @@ func TestServer_MultipleClientsReceiveEvent(t *testing.T) {
 		defer conns[i].Close()
 	}
 
-	time.Sleep(20 * time.Millisecond) // let subscriptions register
+	waitForSubscribers(t, b, n)
 
 	b.Publish(TopicKanbanMoved, KanbanMovedPayload{ID: "K-1", From: "TODO", To: "IN PROGRESS"})
 
@@ -217,7 +232,7 @@ func TestServer_SequenceIncreasesAcrossEvents(t *testing.T) {
 	conn := wsDialToken(t, wsURL, token)
 	defer conn.Close()
 
-	time.Sleep(10 * time.Millisecond)
+	waitForSubscribers(t, b, 1)
 	const n = 3
 	for i := 0; i < n; i++ {
 		b.Publish(TopicKanbanAdded, KanbanAddedPayload{ID: fmt.Sprintf("K-%d", i)})
@@ -238,8 +253,9 @@ func TestServer_TSFieldPopulated(t *testing.T) {
 	conn := wsDialToken(t, wsURL, token)
 	defer conn.Close()
 
+	waitForSubscribers(t, b, 1)
 	before := time.Now()
-	time.Sleep(5 * time.Millisecond)
+	time.Sleep(5 * time.Millisecond) // ensure ev.TS is strictly after before
 	b.Publish(TopicPresence, PresencePayload{User: "bob", Host: "m1", Status: "active"})
 
 	ev := readEvent(t, conn)
@@ -256,7 +272,7 @@ func TestServer_AllEventTopicsDelivered(t *testing.T) {
 	conn := wsDialToken(t, wsURL, token)
 	defer conn.Close()
 
-	time.Sleep(10 * time.Millisecond)
+	waitForSubscribers(t, b, 1)
 
 	payloads := []struct {
 		topic   string
