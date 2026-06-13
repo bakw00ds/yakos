@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/dashauth"
+	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 	"golang.org/x/net/websocket"
 )
@@ -80,8 +81,9 @@ func buildConsoleWSHandlerNetworked(token string, bus *wsbus.Bus, pm *PresenceMa
 }
 
 // buildConsoleWSHandlerFull is the shared implementation.
-// networked=true: skip loopback RemoteAddr check; extend Origin allow-list.
-// networked=false: enforce loopback; loopback-only Origin allow-list.
+// networked=true: skip loopback RemoteAddr check; extend Origin allow-list;
+// override presence OperatorID with cert CN.
+// networked=false: enforce loopback; loopback-only Origin allow-list; cooperative hello OperatorID unchanged.
 func buildConsoleWSHandlerFull(token string, bus *wsbus.Bus, pm *PresenceManager, networked bool, externalHost string) http.Handler {
 	// The websocket.Server selects the "yakos-bearer" protocol from the list,
 	// dropping the token slot.  Token validity was already checked by the
@@ -97,7 +99,7 @@ func buildConsoleWSHandlerFull(token string, bus *wsbus.Bus, pm *PresenceManager
 			config.Protocol = []string{consoleSubprotocol}
 			return nil
 		},
-		Handler: makeConsoleWSFunc(bus, pm),
+		Handler: makeConsoleWSFunc(bus, pm, networked),
 	}
 
 	mux := http.NewServeMux()
@@ -127,7 +129,14 @@ func buildConsoleWSHandlerFull(token string, bus *wsbus.Bus, pm *PresenceManager
 
 // makeConsoleWSFunc returns the websocket.Handler func that drives the full
 // hello → presence → bus-streaming lifecycle for one browser connection.
-func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager) websocket.Handler {
+//
+// When networked is true (mTLS path), the cert CN extracted from the verified
+// TLS chain overrides hello.OperatorID before the presence join.  This closes
+// the forgeable-OperatorID finding: a client cannot claim someone else's
+// operator identity by crafting the hello frame's operator_id field.
+// On the loopback path (networked=false) hello.OperatorID is used as-is
+// (cooperative attribution — unchanged from previous behaviour).
+func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) websocket.Handler {
 	return func(conn *websocket.Conn) {
 		defer func() { _ = conn.Close() }()
 
@@ -180,6 +189,29 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager) websocket.Handler {
 		}
 		if hello.Type != "hello" {
 			hello = HelloMessage{Type: "hello"}
+		}
+
+		// ---- 1b. Cert CN override (networked / mTLS path only) ---------------
+		// On the networked path the client presents an mTLS cert whose CN is the
+		// authoritative operator identity.  Override hello.OperatorID with the
+		// cert CN so a client cannot forge another operator's identity by crafting
+		// the hello frame.
+		//
+		// The cert is on conn.Request().TLS.VerifiedChains (set by Go's TLS stack
+		// after RequireAndVerifyClientCert verification).  We use netid.CNFromTLS
+		// to extract it; if extraction fails (cert absent or chain empty) we fall
+		// through to the claimed hello.OperatorID — the TLS handshake already
+		// rejected any connection without a valid client cert, so a missing CN
+		// here is unexpected but not a security regression.
+		//
+		// On the loopback path (networked=false) hello.OperatorID is used as-is
+		// (cooperative attribution; loopback = trusted network boundary).
+		if networked {
+			if tlsState := conn.Request().TLS; tlsState != nil {
+				if cn, ok := netid.CNFromTLS(tlsState); ok && cn != "" {
+					hello.OperatorID = cn
+				}
+			}
 		}
 
 		// ---- 2. Presence join -----------------------------------------------
@@ -336,20 +368,30 @@ func consoleOriginAllowListNetworked(externalHost string, next http.Handler) htt
 	})
 }
 
-// isExternalOrigin returns true when origin matches the external host used by
-// browsers reaching the non-loopback console.  It accepts both https:// and
-// wss:// (browsers send the page origin, not the WS scheme, in the Origin
-// header, but we accept both for robustness).
+// isExternalOrigin returns true when origin is an exact match for the external
+// host used by browsers reaching the non-loopback console.
 //
-// externalHost is "host:port" or "host" (when standard port is implied).
+// externalHost MUST be "host:port" (e.g. "10.0.0.1:7890").  An externalHost
+// without a port is rejected (returns false) to prevent the prefix-match
+// attack where "10.0.0.1" would erroneously accept "10.0.0.1.attacker.com".
+//
+// The comparison is exact: scheme + externalHost must equal the trimmed origin.
+// Both https:// and wss:// are accepted because browsers send the page origin
+// (https://) but the WS Origin header can carry either scheme.
 func isExternalOrigin(origin, externalHost string) bool {
 	if externalHost == "" {
+		return false
+	}
+	// Require host:port — a bare host without a port is too broad.
+	// strings.LastIndex returns -1 if ":" is absent; for IPv6 "[::1]:port"
+	// the bracket-colon form also satisfies the port requirement.
+	if !strings.Contains(externalHost, ":") {
 		return false
 	}
 	o := strings.TrimRight(origin, "/")
 	for _, scheme := range []string{"https://", "wss://", "http://", "ws://"} {
 		candidate := scheme + externalHost
-		if o == candidate || strings.HasPrefix(o, candidate+":") || strings.HasPrefix(o, candidate+"/") {
+		if o == candidate {
 			return true
 		}
 	}

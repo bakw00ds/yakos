@@ -33,6 +33,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/mtls"
 	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/wsbus"
+	"golang.org/x/net/websocket"
 )
 
 // ---- helpers -----------------------------------------------------------------
@@ -378,6 +379,51 @@ func TestConsoleBind_WSOrigin_ExternalOriginAccepted(t *testing.T) {
 	}
 }
 
+// TestConsoleBind_WSOrigin_ExactMatchOnly verifies that isExternalOrigin uses
+// exact match only — no prefix matching that could accept "10.0.0.1.evil.com".
+// This covers the LOW-1 security finding (Finding #3 in the audit).
+func TestConsoleBind_WSOrigin_ExactMatchOnly(t *testing.T) {
+	t.Parallel()
+	externalHost := "10.0.0.1:7890"
+
+	// These must all be REJECTED despite starting with or containing the host.
+	// Note: trailing "/" is accepted (TrimRight removes it), which is safe.
+	rejected := []struct {
+		name   string
+		origin string
+	}{
+		{"subdomain-prefix-attack", "https://10.0.0.1:7890.evil.com"},
+		{"port-appended-again", "https://10.0.0.1:7890:extra"},
+		{"host-without-port", "https://10.0.0.1"},
+		{"empty-origin", ""},
+		{"different-port", "https://10.0.0.1:7891"},
+		{"different-host", "https://10.0.0.2:7890"},
+	}
+	for _, tc := range rejected {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if consoleui.IsExternalOriginForTest(tc.origin, externalHost) {
+				t.Errorf("IsExternalOrigin(%q, %q) = true; want false (must be exact match)", tc.origin, externalHost)
+			}
+		})
+	}
+}
+
+// TestConsoleBind_WSOrigin_BareHostRejected verifies that isExternalOrigin
+// returns false when externalHost has no port — a bare host is too broad and
+// must be rejected to prevent "host" matching "host.evil.com".
+func TestConsoleBind_WSOrigin_BareHostRejected(t *testing.T) {
+	t.Parallel()
+	// externalHost without a port: must be rejected.
+	if consoleui.IsExternalOriginForTest("https://10.0.0.1", "10.0.0.1") {
+		t.Error("IsExternalOrigin with bare host (no port) should return false; port is required")
+	}
+	if consoleui.IsExternalOriginForTest("https://example.com", "example.com") {
+		t.Error("IsExternalOrigin with bare hostname (no port) should return false; port is required")
+	}
+}
+
 // TestConsoleBind_WSOrigin_ForeignOriginRejected verifies that a completely
 // foreign origin is NOT accepted by isExternalOrigin for the configured host.
 func TestConsoleBind_WSOrigin_ForeignOriginRejected(t *testing.T) {
@@ -471,6 +517,117 @@ func TestConsoleBind_WSOrigin_NetworkedHandler_ExternalAccepted(t *testing.T) {
 	}
 	if w.Code == http.StatusForbidden {
 		t.Errorf("external host origin should not be rejected; got 403")
+	}
+}
+
+// ---- Finding #2: Presence CN override on networked path --------------------
+
+// TestConsoleBind_Presence_CertCN_Integration verifies the full cert CN override
+// path end-to-end: mTLS WS connection → cert CN overrides hello.OperatorID →
+// welcome frame carries cert CN as the operator identity.
+func TestConsoleBind_Presence_CertCN_Integration(t *testing.T) {
+	t.Parallel()
+	_, serverTLSCfg, clientTLSCfg, clientCN := newMTLSFixture(t)
+
+	stateDir := t.TempDir()
+	tok, err := consoleui.LoadOrCreateToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	bus := wsbus.New()
+	defer bus.Stop()
+
+	// Open a TCP listener on a random port.
+	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	addr := tcpLn.Addr().String()
+
+	cfg := consoleui.Config{
+		Addr:              addr,
+		Token:             tok,
+		KanbanBoardPath:   stateDir + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: stateDir,
+		PerfWorkDir:       stateDir,
+		Bus:               bus,
+		StateDir:          stateDir,
+		Listener:          tcpLn,
+		TLSConfig:         serverTLSCfg,
+		NetworkedMode:     true,
+		ExternalHost:      addr,
+	}
+
+	srv := consoleui.New(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ctx) }()
+	time.Sleep(80 * time.Millisecond) // wait for server to accept
+
+	// Dial WS over TLS using the client cert.
+	// Use a custom dial function so we can pass the mTLS clientTLSCfg to the
+	// TLS handshake (golang.org/x/net/websocket does not reliably propagate
+	// TlsConfig through DialConfig for all Go versions).
+	wsURL := "wss://" + addr + "/v1/events"
+	wsCfg, err := websocket.NewConfig(wsURL, "https://"+addr)
+	if err != nil {
+		t.Fatalf("websocket.NewConfig: %v", err)
+	}
+	// The outer requireTokenForNonStatic checks Authorization: Bearer.
+	// The inner consoleAuthSubprotocol checks Sec-WebSocket-Protocol: yakos-bearer, <tok>.
+	// Provide both so the request passes both layers.
+	wsCfg.Protocol = []string{"yakos-bearer", tok}
+	if wsCfg.Header == nil {
+		wsCfg.Header = make(http.Header)
+	}
+	wsCfg.Header.Set("Authorization", "Bearer "+tok)
+	// Establish the TLS connection manually with the mTLS client cert config,
+	// then hand the net.Conn to websocket.NewClient.
+	tlsConn, err := tls.Dial("tcp", addr, clientTLSCfg)
+	if err != nil {
+		t.Fatalf("tls.Dial: %v", err)
+	}
+	conn, err := websocket.NewClient(wsCfg, tlsConn)
+	if err != nil {
+		_ = tlsConn.Close()
+		t.Fatalf("websocket.NewClient: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Send a hello with a FORGED operatorId — the server must override it with cert CN.
+	// Note: HelloMessage uses camelCase "operatorId" (not snake_case "operator_id").
+	hello := map[string]interface{}{
+		"type":       "hello",
+		"operatorId": "forged-id", // attacker tries to forge another operator
+	}
+	conn.SetWriteDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+	if err := websocket.JSON.Send(conn, hello); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+
+	// Read the welcome frame.
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second)) //nolint:errcheck
+	var welcome map[string]interface{}
+	if err := websocket.JSON.Receive(conn, &welcome); err != nil {
+		t.Fatalf("receive welcome: %v", err)
+	}
+	if welcome["type"] != "welcome" {
+		t.Fatalf("expected welcome frame, got type=%v", welcome["type"])
+	}
+
+	// The presence record in the welcome must carry the cert CN, not "forged-id".
+	presence, ok := welcome["presence"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("welcome.presence: expected map, got %T: %v", welcome["presence"], welcome["presence"])
+	}
+	gotOperatorID, _ := presence["operator_id"].(string)
+	if gotOperatorID == "forged-id" {
+		t.Errorf("presence.operator_id=%q: cert CN was NOT used to override hello.operator_id (MEDIUM finding not fixed)", gotOperatorID)
+	}
+	if gotOperatorID != clientCN {
+		t.Errorf("presence.operator_id=%q; want cert CN %q", gotOperatorID, clientCN)
 	}
 }
 

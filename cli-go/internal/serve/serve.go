@@ -39,7 +39,6 @@ import (
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/mcpserver"
 	"github.com/bakw00ds/yakos/internal/mtls"
-	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/restapi"
 	"github.com/bakw00ds/yakos/internal/workflow"
@@ -673,10 +672,4 @@ func printNetworkedConsoleBanner(bindAddr, certFingerprint, stateDir string) {
 	fmt.Fprintln(os.Stderr, "           with 'dispatch' or higher roles.  Verify the fingerprint")
 	fmt.Fprintln(os.Stderr, "           above before connecting client certificates.")
 	fmt.Fprintln(os.Stderr, sep)
-}
-
-// rolesFromIdentity extracts the role string from an identity, used for
-// logging.  Exported for use by the consoleui package audit-log path.
-func rolesFromIdentity(id netid.Identity) string {
-	return id.Role.String()
 }
