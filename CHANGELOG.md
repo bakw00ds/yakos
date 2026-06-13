@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.0.0] — 2026-06-13
+
+### Added
+
+- **Agent-skills integration** — imported and adapted 7 build-discipline
+  skills from [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills)
+  (MIT): `test-driven-development`, `source-driven-development`,
+  `interview-me`, `code-simplification`, `browser-testing-with-devtools`,
+  `deprecation-and-migration`, `doubt-driven-development`. Wired into
+  implementer (`backend`/`frontend`/`mobile`/`maintainer`) and planning
+  (`planner`/`lead-template`/`architect`/`code-reviewer`) agents' default
+  flows. (#153, #156)
+- **`description-as-router` skill-authoring convention** — skill
+  `description`s now state *what* + *"Use when…"* triggers for reliable
+  model selection; codified in the skill template + librarian and
+  retrofitted across all existing skills. (#153, #154)
+- **`tool-output-compact` skill** — deterministic typed compaction
+  (dedup, array-collapse, head+tail elision) of large tool/command
+  outputs; complements `local-llm` and the Flows `output_limit`. (#155)
+- **`cache-stability` rule** — prompt-cache prefix-stability discipline
+  (keep the cached prefix byte-stable to preserve provider prompt-cache
+  hits); informed by chopratejas/headroom's cache analysis. yakOS's
+  roster compose audited and confirmed already deterministic. (#155)
+- Enriched the `security-reviewer` (STRIDE + OWASP Top 10 + OWASP LLM
+  Top 10, aligned to `ai-safety-reviewer`), `code-reviewer` (multi-axis
+  + change-sizing), and `evidence-based-debugging` (root-cause triage)
+  agents/skills. (#153)
+- **Unified console user guide** (`docs/unified-console.md`) covering
+  the Chat REPLs and Flows orchestration with worked example workflows.
+  (#152)
+
+### Fixed
+
+- **wsbus:** fixed a send-on-closed-channel panic — `Publish` now guards
+  each delivery against a concurrent `Unsubscribe`/`Stop` via a
+  per-subscription lock. (#157)
+- **wsbus tests:** replaced subscription-timing `time.Sleep`s with a
+  deterministic subscriber-count barrier, eliminating a Windows CI
+  flake. (#151)
+
 ## [0.40.0.0] — 2026-06-12
 
 ### Added
