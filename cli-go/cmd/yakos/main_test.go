@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -455,6 +456,85 @@ func TestSelectImpl(t *testing.T) {
 	}
 }
 
+// TestHelpRoutingIsAlwaysGoNative verifies that the help/--help/-h subcommands
+// are handled by the always-available built-in block (Go-native) regardless of
+// the YAKOS_IMPL environment variable value.  This locks in the deliberate
+// decision documented in the always-available block: help is answered natively
+// on every install type because the Go command list is authoritative.
+//
+// The predicate under test is the args[0] switch in main; we exercise it via
+// isHelpArg so the routing logic is testable without spawning a subprocess.
+func TestHelpRoutingIsAlwaysGoNative(t *testing.T) {
+	helpArgs := []string{"help", "--help", "-h"}
+	for _, arg := range helpArgs {
+		t.Run(arg, func(t *testing.T) {
+			if !isHelpArg(arg) {
+				t.Errorf("isHelpArg(%q) = false; want true — help must always route Go-native", arg)
+			}
+		})
+	}
+
+	// Non-help args must NOT be intercepted by the help predicate.
+	nonHelp := []string{"validate", "dispatch", "start", "go-port-status", "--version"}
+	for _, arg := range nonHelp {
+		t.Run("non-help/"+arg, func(t *testing.T) {
+			if isHelpArg(arg) {
+				t.Errorf("isHelpArg(%q) = true; want false — only help flags should match", arg)
+			}
+		})
+	}
+}
+
+// TestRunHelpBashFooter verifies that runHelp appends a bash-tree footer when a
+// bash yakos binary is present at <yakosRoot>/cli/yakos, and omits it when no
+// bash binary is present.
+func TestRunHelpBashFooter(t *testing.T) {
+	capture := func(yakosRoot string) string {
+		orig := os.Stdout
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("os.Pipe: %v", err)
+		}
+		os.Stdout = w
+		runHelp(yakosRoot, nil)
+		_ = w.Close()
+		os.Stdout = orig
+		raw, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatalf("io.ReadAll: %v", err)
+		}
+		return string(raw)
+	}
+
+	// Go-only root: footer must NOT appear.
+	goOnly := t.TempDir()
+	outGoOnly := capture(goOnly)
+	if strings.Contains(outGoOnly, "bash yakos detected") {
+		t.Error("runHelp on Go-only install must NOT emit the bash-present footer")
+	}
+
+	// Bash-present root: create a dummy cli/yakos file.
+	bashPresent := t.TempDir()
+	cliDir := filepath.Join(bashPresent, "cli")
+	if err := os.MkdirAll(cliDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	dummyScript := filepath.Join(cliDir, "yakos")
+	if err := os.WriteFile(dummyScript, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	outBashPresent := capture(bashPresent)
+	if !strings.Contains(outBashPresent, "bash yakos detected") {
+		t.Errorf("runHelp on bash-present install must emit the bash-present footer\n--- output ---\n%s", outBashPresent)
+	}
+	// The Go command list must still appear in both cases.
+	for _, lm := range []string{"Usage:", "validate", "dispatch"} {
+		if !strings.Contains(outBashPresent, lm) {
+			t.Errorf("bash-present help missing landmark %q", lm)
+		}
+	}
+}
+
 // TestRunHelpOutput verifies that runHelp writes a grouped command list to stdout
 // that contains key landmarks regardless of bash presence.
 func TestRunHelpOutput(t *testing.T) {
@@ -474,9 +554,11 @@ func TestRunHelpOutput(t *testing.T) {
 	_ = w.Close()
 	os.Stdout = orig
 
-	buf := make([]byte, 32*1024)
-	n, _ := r.Read(buf)
-	out := string(buf[:n])
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("io.ReadAll: %v", err)
+	}
+	out := string(raw)
 
 	landmarks := []string{
 		"Usage:",

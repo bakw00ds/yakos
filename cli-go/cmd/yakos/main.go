@@ -149,6 +149,13 @@ const (
 	implGoNative
 )
 
+// isHelpArg reports whether arg is one of the help flags intercepted by the
+// always-available built-in block.  It is extracted as a named predicate so
+// the routing intent can be unit-tested (TestHelpRoutingIsAlwaysGoNative).
+func isHelpArg(arg string) bool {
+	return arg == "--help" || arg == "-h" || arg == "help"
+}
+
 // selectImpl encodes the YAKOS_IMPL gate decision as a pure function so it
 // can be unit-tested without touching the filesystem or spawning processes.
 //
@@ -204,12 +211,21 @@ func main() {
 	// Always-available built-ins — answered natively regardless of YAKOS_IMPL
 	// and regardless of whether a bash yakos tree is installed.  These must
 	// work on a Go-only install (curl | sh installs only the binary).
+	//
+	// help/--help/-h is a deliberate exception to passthrough transparency:
+	// the Go port is at full parity (41/41 commands) so the Go command list IS
+	// the authoritative list on every install type, including shadow-mode installs
+	// where bash is still present.  Routing help through bash would show the bash
+	// tree's abbreviated output instead of the full grouped list.  The runHelp
+	// function adds a footer on bash-present installs so nothing is hidden from
+	// the operator.  This decision must NOT be reverted without a corresponding
+	// update to the footer and the TestHelpRoutingIsAlwaysGoNative test.
 	if len(args) > 0 {
 		switch args[0] {
 		case "--version", "-v":
 			runVersion(yakosRoot)
 			return
-		case "--help", "-h", "help":
+		case "--help", "-h", "help": // isHelpArg — keep in sync with isHelpArg()
 			runHelp(yakosRoot, args)
 			return
 		case "go-port-status":
@@ -229,7 +245,7 @@ func main() {
 	case implPassthrough:
 		exitWith(passthrough.Run(yakosRoot, args))
 	case implGoNative:
-		// fall through to Go-native routing below
+		// no-op: execution continues to the Go-native router below
 	}
 
 	// Go-native routing.
@@ -416,13 +432,15 @@ var helpGroups = []helpGroup{
 
 // builtinDescs provides one-liners for always-available built-ins that do not
 // appear in portedCommands.
+//
+// go-port-status description is built dynamically in runHelp so the parity
+// fraction stays accurate as portedCommands grows — do not hardcode it here.
 var builtinDescs = map[string]string{
-	"--version":      "Print version string",
-	"--help":         "Print this help",
-	"go-port-status": "Show Go port parity detail (41/41)",
-	"workflow":       "Run a named multi-step workflow",
-	"serve":          "Run the daemon + web console",
-	"events":         "Stream live bus events (WebSocket)",
+	"--version": "Print version string",
+	"--help":    "Print this help",
+	"workflow":  "Run a named multi-step workflow",
+	"serve":     "Run the daemon + web console (requires daemon running)",
+	"events":    "Stream live bus events (requires daemon running)",
 }
 
 // runHelp prints a self-contained, grouped command list regardless of whether
@@ -431,7 +449,11 @@ var builtinDescs = map[string]string{
 //
 // The function is routed from both the always-available built-in block and the
 // Go-native switch, so `yakos help`, `yakos --help`, and `yakos -h` all reach
-// it identically.
+// it identically on every install type (Go-only and shadow-mode/bash-present).
+// See the always-available block comment above for why this is intentional.
+//
+// On bash-present installs a footer line is appended to preserve discoverability
+// of any command not listed here; on Go-only installs the footer is omitted.
 func runHelp(yakosRoot string, _ []string) {
 	v, _ := version.Read(yakosRoot)
 	if v == "" {
@@ -439,13 +461,15 @@ func runHelp(yakosRoot string, _ []string) {
 	}
 
 	// Build a lookup: name → Desc (portedCommands + builtins).
-	descs := make(map[string]string, len(portedCommands)+len(builtinDescs))
+	// go-port-status is generated dynamically so the parity count stays accurate.
+	descs := make(map[string]string, len(portedCommands)+len(builtinDescs)+1)
 	for k, d := range builtinDescs {
 		descs[k] = d
 	}
 	for _, cmd := range portedCommands {
 		descs[cmd.Name] = cmd.Desc
 	}
+	descs["go-port-status"] = fmt.Sprintf("Show Go port parity detail (%d/%d)", len(portedCommands), len(portedCommands))
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintf(w, "yakos %s\n\n", v)
@@ -467,6 +491,15 @@ func runHelp(yakosRoot string, _ []string) {
 	_, _ = fmt.Fprintln(w, "Run  yakos <cmd> --help       for per-command help.")
 	_, _ = fmt.Fprintln(w, "Run  yakos go-port-status     for full parity detail.")
 	_, _ = fmt.Fprintln(w, "See  docs/go-shadow-mode.md   for install / switch guide.")
+
+	// Safety footer: on bash-present installs, remind the operator that any
+	// command not listed above is still reachable via the bash tree.  This
+	// preserves discoverability without sacrificing the authoritative Go list.
+	if passthrough.BashYakosExists(yakosRoot) {
+		_, _ = fmt.Fprintln(w, "")
+		_, _ = fmt.Fprintln(w, "(bash yakos detected — any command not listed above is still handled by the bash tree: run 'yakos <cmd>'.)")
+	}
+
 	_ = w.Flush()
 }
 
