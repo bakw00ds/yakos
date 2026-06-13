@@ -18,6 +18,12 @@ type Subscription struct {
 	ch     chan Event
 	once   sync.Once
 	parent *Bus
+
+	// mu guards closed and the channel send in Publish.
+	// Lock ordering: b.mu is always released before any s.mu is taken,
+	// so b.mu → s.mu is the only direction and deadlock is impossible.
+	mu     sync.Mutex
+	closed bool
 }
 
 // C returns the channel on which events are delivered.
@@ -28,8 +34,19 @@ func (s *Subscription) C() <-chan Event { return s.ch }
 // Safe to call multiple times; subsequent calls are no-ops.
 func (s *Subscription) Unsubscribe() {
 	s.once.Do(func() {
+		// Remove from the bus subscriber list first (acquires/releases b.mu).
+		// We must NOT hold s.mu here; b.unsubscribe takes b.mu, and Publish
+		// releases b.mu before taking s.mu, so the ordering b.mu→s.mu is
+		// consistent across all paths.
 		s.parent.unsubscribe(s)
+
+		// Now mark closed and close the channel under s.mu so that a
+		// concurrent Publish that already snapshotted this sub sees the
+		// closed flag and skips the send.
+		s.mu.Lock()
+		s.closed = true
 		close(s.ch)
+		s.mu.Unlock()
 	})
 }
 
@@ -95,12 +112,24 @@ func (b *Bus) Publish(topic string, payload any) Event {
 		if s.topic != "" && s.topic != topic {
 			continue
 		}
+		// Guard the send under s.mu so it cannot race with Unsubscribe or
+		// Stop closing s.ch.  b.mu has already been released above; taking
+		// s.mu here is safe (lock order: b.mu always precedes s.mu and is
+		// always released before s.mu is acquired).
+		s.mu.Lock()
+		if s.closed {
+			// Already unsubscribed between snapshot and send; skip silently
+			// (not an overflow — the subscriber chose to leave).
+			s.mu.Unlock()
+			continue
+		}
 		select {
 		case s.ch <- ev:
 		default:
 			// Subscriber's buffer is full; mark for removal.
 			overflow = append(overflow, s)
 		}
+		s.mu.Unlock()
 	}
 
 	// Clean up overflowed subscribers outside the hot path.
