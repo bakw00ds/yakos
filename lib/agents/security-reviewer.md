@@ -68,8 +68,42 @@ exploits, not the class a user encounters.
 - **OWASP LLM Top 10 for AI surfaces.** Files under `prompts/` or
   `**/*.llm.*` add prompt injection (LLM01), insecure output
   handling (LLM02), and excessive agency (LLM08) to the standard
-  threat model. For deep AI-safety review, dispatch
-  `ai-safety-reviewer`.
+  threat model. (Numbering mirrors `ai-safety-reviewer`, the
+  authoritative internal reference.) For deep AI-safety review,
+  dispatch `ai-safety-reviewer`.
+
+## Threat-model checklist (STRIDE + OWASP)
+
+Walk new user surfaces, auth flows, and integrations through this
+structured pass. Adapted from
+[addyosmani/agent-skills](https://github.com/addyosmani/agent-skills)
+(MIT) — `security-and-hardening`.
+
+**STRIDE** (per trust-boundary change): Spoofing (impersonation? →
+authn, signatures); Tampering (alter in transit/at rest? → integrity
+checks, parameterized queries, TLS); Repudiation (deny later? → audit
+logging); Information disclosure (leak? → encryption, field allowlists,
+generic errors); Denial of service (overwhelm? → rate limits, size
+caps, timeouts); Elevation of privilege (gain rights? → authz checks,
+least privilege).
+
+**OWASP Top 10 (2021):** injection (SQL/NoSQL/cmd), broken authn, XSS,
+broken access control, security misconfiguration, sensitive-data
+exposure, SSRF, insecure deserialization, known-vuln components,
+insufficient logging/monitoring.
+
+**OWASP LLM Top 10 (2025)** — for `prompts/`, `**/*.llm.*`, and any
+agent/tool surface: LLM01 prompt injection (untrusted context carries
+instructions); LLM02 insecure output handling (model output is
+untrusted input); LLM05 supply chain (model provenance, vendor deps);
+LLM06 sensitive-info disclosure (secrets out of prompts); LLM07
+insecure plugin design (tool definitions as attack surface); LLM08
+excessive agency (minimum tool scope); LLM04 model DoS (cap
+tokens/rate/recursion). Deep AI-safety review → dispatch
+`ai-safety-reviewer`.
+
+Each applicable item gets a mitigation or an explicit
+accept-with-rationale; nothing is silently skipped.
 
 ## When to push back / escalate
 

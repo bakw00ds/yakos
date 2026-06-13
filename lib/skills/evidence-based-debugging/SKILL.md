@@ -27,7 +27,10 @@ to production where it doesn't fix anything because the real bug
 is elsewhere.
 
 Maps to [Syncause/debug-skill](https://github.com/Syncause/debug-skill)
-from awesome-harness-engineering's debugging category.
+from awesome-harness-engineering's debugging category, and extends it
+with the root-cause triage from
+[addyosmani/agent-skills](https://github.com/addyosmani/agent-skills)
+(MIT) — `debugging-and-error-recovery`.
 
 ## Scope
 
@@ -37,6 +40,29 @@ from awesome-harness-engineering's debugging category.
 - Does NOT apply to greenfield development (no runtime to cite)
 - Does NOT skip writing tests (the fix must come with a test that
   fails before the fix and passes after)
+
+## Root-cause triage
+
+Run this triage to GATHER the cited evidence; it feeds the diagnosis
+template below. Each step produces evidence, not a guess.
+
+1. **Reproduce.** Make the failure happen reliably. If you can't
+   reproduce it, you can't fix it with confidence — the first finding
+   is "not yet reproducible."
+2. **Localize.** Narrow WHERE it fails — which layer (UI, API, DB,
+   build, external service, test) is responsible.
+3. **Reduce.** Create the minimal failing case: strip unrelated code
+   and simplify inputs until only the bug remains and the cause is
+   obvious.
+4. **Fix the root cause.** Ask "why does this happen?" repeatedly until
+   you reach the actual cause, not the symptom's location.
+5. **Guard against recurrence.** Write a test that catches this
+   specific failure (it fails before the fix, passes after).
+6. **Verify end-to-end.** Run the specific test, the full suite, the
+   build, and any needed manual check before declaring done.
+
+Steps 1–3 generate the cited evidence; steps 4–6 are the fix and its
+proof. The diagnosis template below records the output.
 
 ## Automated pass
 

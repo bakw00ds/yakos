@@ -64,7 +64,10 @@ failure mode.
      §4.1 of the plan. Confidence < 0.7 → drop silently.
      Similarity > 0.6 to existing skill → propose as "extend X"
      not "new skill". ≥3 transcript references with cycle numbers
-     and quoted prompts MANDATORY — no speculation.
+     and quoted prompts MANDATORY — no speculation. Draft each
+     candidate per "Authoring promoted candidates" below
+     (description-as-router; anti-rationalization table for
+     behavioral candidates; progressive disclosure).
 
    - **Drift** (lead wandering from goals or contradicting prior
      decisions): write `<work>/current/drift-report.md` ONLY if
@@ -81,6 +84,30 @@ failure mode.
 
    On the rare empty retro: "Retro complete: no findings. Cycle 10
    was routine."
+
+## Authoring promoted candidates
+
+Draft each candidate so the operator can promote it with minimal
+rework. Three conventions are load-bearing (they mirror
+`lib/settings/skill.template.md`):
+
+1. **Description-as-router.** Write the `description` as a ROUTER, not a
+   label: it must state BOTH what the skill does AND when to fire it
+   ("Use when …"), because the description is the only thing a future
+   model sees when deciding whether to invoke the skill. No "Use when …"
+   clause → rejected at promotion. BAD: `Debugging workflow`. GOOD:
+   `Constrain debugging to cite runtime evidence before a fix. Use when
+   a test fails, an incident fires, or a regression is reported.`
+
+2. **Anti-rationalization table for behavioral candidates.** If the
+   candidate asks an agent to do something it'll be tempted to skip
+   (write a test, cite a source, gate a decision), include a short
+   excuse→rebuttal table drawn from the ACTUAL transcript excuses, with
+   the cycle cited. Procedural scaffold/audit candidates don't need one.
+
+3. **Progressive disclosure.** SKILL.md is the entry point; propose a
+   supporting file only past ~100 lines or for runnable scripts. Never
+   propose empty dirs or stubs.
 
 ## Special rules
 
