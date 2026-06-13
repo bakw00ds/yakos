@@ -47,6 +47,16 @@ func checkBashExists(bashPath string) error {
 	return nil
 }
 
+// BashYakosExists reports whether the bash yakos script is present at the
+// expected location under yakosRoot. It returns true iff the file exists and
+// is stat-able.
+//
+// Call sites use this to decide whether to enter shadow-mode (passthrough) or
+// fall through to Go-native routing when YAKOS_IMPL is unset.
+func BashYakosExists(yakosRoot string) bool {
+	return checkBashExists(BashYakosPath(yakosRoot)) == nil
+}
+
 // Exec replaces the current process with the bash yakos binary, forwarding
 // all args. On platforms that support it (all POSIX targets), this uses
 // syscall.Exec so the bash process inherits the PID and its exit code becomes
