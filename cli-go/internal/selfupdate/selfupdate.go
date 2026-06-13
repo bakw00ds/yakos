@@ -57,11 +57,14 @@ const (
 	maxAssetBytes   = 256 << 20 // 256 MiB safety cap
 	maxChecksumSize = 4 << 20   // 4 MiB
 
-	// downloadTimeout is used for the binary asset download client only.
-	// It is set to 0 (no overall timeout) because a 256 MiB binary on a
-	// slow link can easily exceed the 15 s metadata timeout.  The context
-	// passed to Apply still applies; callers should set an appropriate
-	// deadline on the context rather than relying on client.Timeout.
+	// downloadTimeout is the http.Client.Timeout for the binary asset download
+	// client.  It is deliberately 0 (no per-client timeout) so that a large
+	// binary on a slow link is not killed by the client timeout.
+	// The effective bound on a download is:
+	//   (a) the caller's context deadline — runUpdateBinary sets 10 minutes, and
+	//   (b) the 256 MiB maxAssetBytes LimitReader cap.
+	// Metadata fetches (API, checksums.txt) use BuildDefaultClient whose
+	// client.Timeout is 15 s, so widening the context does not make those hang.
 	downloadTimeout = 0
 )
 
@@ -505,10 +508,10 @@ func BuildDefaultClient() *http.Client {
 }
 
 // buildDownloadClient returns an *http.Client for the binary asset download.
-// The overall Timeout is 0 (unlimited) because large binaries on slow links
-// can far exceed the 15 s metadata budget.  The caller's context deadline
-// governs cancellation instead.  The same redirect policy and TLS minimum
-// version apply.
+// client.Timeout is 0 (no per-client timeout); the effective download bound is
+// the caller's context deadline (10 min in runUpdateBinary) plus the 256 MiB
+// LimitReader in fetchBinaryAsset.  The same redirect policy and TLS 1.2
+// minimum apply as the metadata client.
 func buildDownloadClient() *http.Client {
 	return &http.Client{
 		Timeout:   downloadTimeout,

@@ -510,20 +510,25 @@ func TestVersionParseOverflow(t *testing.T) {
 
 	testClient := clientForServer(srv)
 	// The server returns v1.0.0.0; we pass an overflowing current version.
-	// parseVersion should return an error; Apply should propagate it as a
-	// warning and proceed (the existing behavior on version-compare failure is
-	// to proceed with the update, not abort — see Apply source).  The important
-	// thing is that no panic or silent truncation occurs.
+	// parseVersion should return an error; Apply should emit a warning and
+	// proceed (the existing behavior on version-compare failure is to proceed
+	// with the update, not abort — see Apply source).  The important thing is
+	// that no panic or silent truncation occurs, and the warning is emitted so
+	// a future silent-skip regression is caught here.
+	buf := &bytes.Buffer{}
 	_, err := selfupdate.Apply(context.Background(), selfupdate.Opts{
 		CurrentVersion: "v99999999999999999999.0.0.0",
 		DryRun:         true,
 		HTTPClient:     testClient,
 		DownloadClient: testClient,
 		ExeResolver:    func() (string, error) { return exePath, nil },
-		Writer:         discardWriter(),
+		Writer:         buf,
 	})
 	// Apply warns and proceeds on version-compare failure — err should be nil.
 	if err != nil {
 		t.Fatalf("Apply should proceed on unparseable current version, got: %v", err)
+	}
+	if !strings.Contains(buf.String(), "warning") {
+		t.Errorf("expected a warning line in output on overflow, got: %q", buf.String())
 	}
 }

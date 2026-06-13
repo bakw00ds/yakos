@@ -2827,7 +2827,15 @@ func runUpdate(yakosRoot string, args []string) {
 // runUpdateBinary runs the self-update path for binary-only installs.
 // dryRun covers both --dry-run and --check (no write; just report).
 func runUpdateBinary(yakosRoot string, dryRun, force bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Two independent timeout bounds govern this operation:
+	//   - metadata fetches (GitHub API, checksums.txt): bounded by the metadata
+	//     client's own 15 s client.Timeout (BuildDefaultClient), independent of
+	//     this context deadline.
+	//   - binary download: client.Timeout is 0 on the download client, so this
+	//     context deadline is the effective cancellation mechanism.  10 minutes
+	//     gives a 256 MiB binary room on a slow link (~3 Mbit/s) while still
+	//     providing a DoS bound.  The 256 MiB LimitReader is the size cap.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	// Determine the running version.  For binary-only installs the ldflags
