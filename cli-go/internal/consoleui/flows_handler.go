@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/workflow"
 )
 
@@ -256,6 +257,14 @@ func (h *flowsHandlers) handleSaveWorkflow(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Per-method role check: POST (save) requires RoleFlowsRun.
+	// Only fires when the resolver middleware has run (id.Resolved==true).
+	// Loopback tests using srv.Handler() bypass this (Resolved=false → no-op).
+	if id := netid.IdentityFrom(r.Context()); id.Resolved && !id.Role.Allows(netid.RoleFlowsRun) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxFlowsRequestBodyBytes+1))
 	if err != nil {
 		writeGenericError(w, http.StatusBadRequest, "failed to read request body")
@@ -404,6 +413,14 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-method role check: POST (run) requires RoleFlowsRun.
+	// Fires only when resolver middleware has run (Resolved==true).
+	resolvedID := netid.IdentityFrom(r.Context())
+	if resolvedID.Resolved && !resolvedID.Role.Allows(netid.RoleFlowsRun) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	name := r.URL.Query().Get("name")
 	if err := workflow.ValidateID("name", name); err != nil {
 		writeGenericError(w, http.StatusBadRequest, "invalid workflow name")
@@ -466,9 +483,16 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Mint a run ID: timestamp + random suffix, path-safe.
 	runID := mintRunID()
 
+	// Dual-regime operator_id: cert CN overrides body operator_id when authenticated.
+	var operatorID string
+	if resolvedID.Authenticated {
+		operatorID = resolvedID.OperatorID
+	} else {
+		operatorID = req.OperatorID
+	}
+
 	// Launch in a background goroutine parented to serverCtx.
 	// This preserves the server shutdown cancellation signal.
-	operatorID := req.OperatorID
 	go func() {
 		if _, err := h.engine.Run(h.serverCtx, wf, runID, operatorID); err != nil {
 			slog.Error("flows: engine.Run failed", "run_id", runID, "workflow", name, "err", err)
@@ -576,7 +600,14 @@ func (h *flowsHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	operatorID := req.OperatorID
+	// Dual-regime operator_id: cert CN overrides body operator_id when authenticated.
+	resumeID := netid.IdentityFrom(r.Context())
+	var operatorID string
+	if resumeID.Authenticated {
+		operatorID = resumeID.OperatorID
+	} else {
+		operatorID = req.OperatorID
+	}
 	finalNewRunID := newRunID
 	go func() {
 		if _, err := h.engine.Resume(h.serverCtx, wf, req.RunID, finalNewRunID, operatorID); err != nil {
