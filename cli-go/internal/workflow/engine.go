@@ -446,6 +446,15 @@ func (e *Engine) nodeDispatchLogPath(runID string) string {
 // appendNodeDispatchEvent appends a single nodeDispatchEvent line to the
 // per-run node dispatch log.  Errors are non-fatal (matching the global
 // dispatch log's "log errors are non-fatal" convention).
+//
+// Concurrency / atomicity: the file is opened with O_APPEND on every call.
+// POSIX guarantees that a write(2) to an O_APPEND file whose size does not
+// exceed PIPE_BUF (≥512 bytes on all targets; typically 4096) is atomic with
+// respect to other concurrent writers on the SAME local filesystem.  A
+// marshalled nodeDispatchEvent line is well under 300 bytes, so concurrent
+// calls from multiple runNode goroutines within one Engine will never
+// interleave partial writes.  This guarantee does NOT extend to network
+// filesystems (NFS, SMB), but workflow runs are always local.
 func appendNodeDispatchEvent(logPath string, ev nodeDispatchEvent) {
 	line, err := json.Marshal(ev)
 	if err != nil {

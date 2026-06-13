@@ -16,3 +16,17 @@ package workflow
 func SetEngineRunFn(e *Engine, fn EngineRunFn) {
 	e.runFn = fn
 }
+
+// NodeDispatchLogName exposes the per-run node dispatch log filename for tests.
+const NodeDispatchLogName = nodeDispatchLogName
+
+// NodeDispatchEvent is the exported alias of the internal nodeDispatchEvent type
+// so that tests in package workflow_test can construct and pass event values to
+// AppendNodeDispatchEvent without importing an internal type directly.
+type NodeDispatchEvent = nodeDispatchEvent
+
+// AppendNodeDispatchEvent is the exported test shim for appendNodeDispatchEvent.
+// Tests use this to write events concurrently and assert no line corruption.
+func AppendNodeDispatchEvent(logPath string, ev NodeDispatchEvent) {
+	appendNodeDispatchEvent(logPath, ev)
+}
