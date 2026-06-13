@@ -1088,3 +1088,77 @@ func TestRun_AllTemplates(t *testing.T) {
 		})
 	}
 }
+
+// TestRun_BaseYakosYMLSupervisorEnabledSurfaceOnly verifies that the base
+// template's yakos.yml ships with the supervisor block uncommented, enabled:
+// true, and block_on_critical: false (surface-only mode).
+func TestRun_BaseYakosYMLSupervisorEnabledSurfaceOnly(t *testing.T) {
+	proj := newGitRepo(t)
+	cfg := baseConfig(t, "supertest", proj)
+	// base template (no --template flag)
+
+	if _, err := Run(cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(proj, ".yakos.yml"))
+	if err != nil {
+		t.Fatalf("ReadFile .yakos.yml: %v", err)
+	}
+	content := string(data)
+
+	// supervisor: block must be present and uncommented.
+	if !strings.Contains(content, "supervisor:") {
+		t.Errorf("base .yakos.yml should contain an uncommented 'supervisor:' block; got:\n%s", content)
+	}
+
+	// enabled: true must appear inside the supervisor block (not commented).
+	// We look for the uncommented form, not "# enabled: true".
+	inBlock := false
+	foundEnabled := false
+	foundBlockOnCritical := false
+	for _, line := range strings.Split(content, "\n") {
+		// Detect top-level supervisor: key (uncommented).
+		if strings.TrimRight(line, " \t\r") == "supervisor:" {
+			inBlock = true
+			continue
+		}
+		if inBlock {
+			// Exit block on next uncommented top-level key.
+			if len(line) > 0 && line[0] != ' ' && line[0] != '\t' && line[0] != '#' {
+				inBlock = false
+				continue
+			}
+			trimmed := strings.TrimLeft(line, " \t")
+			// Skip comment lines inside the block.
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.HasPrefix(trimmed, "enabled:") {
+				val := strings.TrimSpace(trimmed[len("enabled:"):])
+				if val != "true" {
+					t.Errorf("base .yakos.yml supervisor.enabled should be 'true'; got %q", val)
+				}
+				foundEnabled = true
+			}
+			if strings.HasPrefix(trimmed, "block_on_critical:") {
+				val := strings.TrimSpace(trimmed[len("block_on_critical:"):])
+				// Strip inline comment if any.
+				if idx := strings.IndexByte(val, '#'); idx >= 0 {
+					val = strings.TrimSpace(val[:idx])
+				}
+				if val != "false" {
+					t.Errorf("base .yakos.yml supervisor.block_on_critical should be 'false' (surface-only); got %q", val)
+				}
+				foundBlockOnCritical = true
+			}
+		}
+	}
+
+	if !foundEnabled {
+		t.Errorf("base .yakos.yml supervisor block missing 'enabled:' key (should be enabled: true)")
+	}
+	if !foundBlockOnCritical {
+		t.Errorf("base .yakos.yml supervisor block missing 'block_on_critical:' key (should be block_on_critical: false)")
+	}
+}
