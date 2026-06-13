@@ -1,6 +1,6 @@
 ---
 name: session-summary
-description: End-of-session markdown report — agents dispatched, total cost, key decisions, time-to-completion
+description: End-of-session markdown report — agents dispatched, total cost, key decisions, time-to-completion. Use when wrapping a session, to produce a shareable record of what was done.
 allowed-tools: Read Bash
 argument-hint: "[<project>]"
 mode: [report]

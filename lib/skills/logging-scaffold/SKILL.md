@@ -1,6 +1,6 @@
 ---
 name: logging-scaffold
-description: One-shot scaffold dropping in a structured logger for the project's primary backend language; wires JSON output, sensible defaults, example call sites
+description: One-shot scaffold dropping in a structured logger for the project's primary backend language, wiring JSON output, sensible defaults, and example call sites. Use when a backend lacks structured logging and needs it set up.
 allowed-tools: Read Edit Write Bash Grep
 argument-hint: "[--lang go|node|python|rust]"
 mode: [scaffold]

@@ -1,6 +1,6 @@
 ---
 name: pre-commit
-description: Pre-commit verification — lint, secret scan, fast tests
+description: Pre-commit verification — lint, secret scan, fast tests. Use right before committing, to catch lint errors, leaked secrets, and broken tests before they enter history.
 allowed-tools: Read Bash Grep
 argument-hint: "[<path-or-glob>...]"
 mode: [review]

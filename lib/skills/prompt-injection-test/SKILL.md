@@ -1,6 +1,6 @@
 ---
 name: prompt-injection-test
-description: Run an OWASP LLM01 injection corpus against the system prompt + tool surface and report which payloads succeeded
+description: Run an OWASP LLM01 injection corpus against the system prompt + tool surface and report which payloads succeeded. Use when hardening an LLM agent's prompt/tools or auditing it for prompt-injection resistance.
 allowed-tools: Bash Read
 argument-hint: "<agent-id> [--corpus <name>] [--severity high|medium|low]"
 mode: [review]

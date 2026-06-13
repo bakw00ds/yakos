@@ -1,6 +1,6 @@
 ---
 name: finops-review
-description: Analyze the dispatch-log for per-feature spend, cache hit rate, and model routing — surface optimization opportunities
+description: Analyze the dispatch-log for per-feature spend, cache hit rate, and model routing, surfacing optimization opportunities. Use when costs look high, before a budget review, or when hunting for ways to cut LLM spend.
 allowed-tools: Bash Read
 argument-hint: "[--since <ISO>] [--feature <tag>] [--top N]"
 mode: [report]

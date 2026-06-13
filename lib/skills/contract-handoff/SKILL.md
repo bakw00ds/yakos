@@ -1,6 +1,6 @@
 ---
 name: contract-handoff
-description: Publish a contract (API, DB schema, UI) for downstream teammates to consume
+description: Publish a contract (API, DB schema, UI) for downstream teammates to consume. Use when one specialist's output is another's input and the interface must be fixed before dependent work starts.
 allowed-tools: Read Edit Write Grep SendMessage
 argument-hint: "<contract-type> <description>"
 mode: [implement]

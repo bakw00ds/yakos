@@ -1,6 +1,6 @@
 ---
 name: hashed-edit
-description: Hash-anchored line edits — refuse the edit if the target line content changed since the read
+description: Hash-anchored line edits — refuse the edit if the target line content changed since the read. Use when editing a file that may have shifted between read and write, to avoid stale-line corruption.
 allowed-tools: Read Bash Write
 argument-hint: "<file-path> [--start N] [--end N]"
 mode: [implement, fix]

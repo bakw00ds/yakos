@@ -1,6 +1,6 @@
 ---
 name: kanban-tend
-description: Maintain the project kanban — add tasks at dispatch, move on lifecycle events, archive completed work at release time
+description: Maintain the project kanban — add tasks at dispatch, move on lifecycle events, archive completed work at release time. Use when dispatching work, on a blocker/completion, or when the board needs tidying.
 allowed-tools: Read Edit Bash Grep
 argument-hint: "[--archive | --add \"<title>\" | --move <id> <col>]"
 mode: [orchestrate]

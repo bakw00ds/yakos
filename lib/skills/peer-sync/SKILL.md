@@ -1,6 +1,6 @@
 ---
 name: peer-sync
-description: Read recent peer activity for a yakOS multi-dev session; summarize for the lead at session-start time
+description: Read recent peer activity for a yakOS multi-dev session and summarize it for the lead. Use at session start in multi-dev mode, to catch up on what peers changed while you were away.
 tier: sonnet
 invocable_by: lead
 domains: [coordination, multi-dev]

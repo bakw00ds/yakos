@@ -1,6 +1,6 @@
 ---
 name: architecture-viz-scaffold
-description: Generate a static architecture page that reads ADRs, Mermaid diagrams, CHANGELOG, SBOM, tech-debt log into one navigable UI; per frontend stack
+description: Generate a static architecture page that pulls ADRs, Mermaid diagrams, CHANGELOG, SBOM, and tech-debt log into one navigable UI, per frontend stack. Use when a project needs a single browsable view of its architecture artifacts.
 allowed-tools: Read Edit Write Bash Grep
 argument-hint: "[--framework next|react-vite|vue|svelte|static] [--include-about] [--regenerate]"
 mode: [scaffold]

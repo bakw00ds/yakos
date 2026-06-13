@@ -1,6 +1,6 @@
 ---
 name: deploy-check
-description: Pre-deploy verification — build, smoke, env-var sanity
+description: Pre-deploy verification — build, smoke test, env-var sanity. Use immediately before deploying or promoting to prod, to catch a broken build or missing config before it ships.
 allowed-tools: Read Bash Grep
 argument-hint: "[--target <env>]"
 mode: [review]

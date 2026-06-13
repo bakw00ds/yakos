@@ -1,6 +1,6 @@
 ---
 name: about-page-scaffold
-description: Drop in a 3-paragraph "what is this?" page for new users, per frontend framework; optionally collapses into the architecture page when both standards are enabled
+description: Drop in a 3-paragraph "what is this?" page for new users, per frontend framework. Use when a project lacks an onboarding/about page and you want to orient first-time users.
 allowed-tools: Read Edit Write Bash Grep
 argument-hint: "[--framework react|vue|svelte|static] [--merge-into-arch]"
 mode: [scaffold]

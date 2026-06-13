@@ -1,6 +1,6 @@
 ---
 name: agent-audit
-description: Scan dispatch-log for misuse patterns — lead-did-specialist-work, wrong-runtime, budget-violations, repeated-failures
+description: Scan dispatch-log for misuse patterns — lead-did-specialist-work, wrong-runtime, budget-violations, repeated-failures. Use when reviewing how a session dispatched work, or auditing for dispatch-discipline drift.
 allowed-tools: Read Bash
 argument-hint: "[--since <ISO>] [--project <name>]"
 mode: [audit]

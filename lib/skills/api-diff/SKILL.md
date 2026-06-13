@@ -1,6 +1,6 @@
 ---
 name: api-diff
-description: Diff an OpenAPI spec across commits and classify each change as major/minor/patch per SemVer-for-APIs
+description: Diff an OpenAPI spec across commits and classify each change as major/minor/patch per SemVer-for-APIs. Use before bumping an API version or releasing, or when checking whether a spec edit is breaking.
 allowed-tools: Bash Read
 argument-hint: "[--base <ref>] [--head <ref>] [--spec <path>]"
 mode: [report]

@@ -1,6 +1,6 @@
 ---
 name: a11y-scan
-description: Run axe-core / Pa11y / Lighthouse against changed pages and classify findings by WCAG level (A / AA / AAA)
+description: Run axe-core / Pa11y / Lighthouse against changed pages and classify findings by WCAG level (A / AA / AAA). Use when shipping or reviewing UI changes, before a release accessibility gate, or when asked for an a11y audit.
 allowed-tools: Bash Read
 argument-hint: "[--pages <glob>] [--level A|AA|AAA] [--baseline <file>]"
 mode: [audit]

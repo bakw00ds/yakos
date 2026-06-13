@@ -1,6 +1,6 @@
 ---
 name: llm-output-gate
-description: CI hook that refuses to ship if prompt-eval golden set regresses past threshold or prompt-injection-test fails on HIGH severity
+description: CI gate that refuses to ship if the prompt-eval golden set regresses past threshold or prompt-injection-test fails at HIGH severity. Use when wiring CI protection for prompt changes, so a worse or unsafe prompt can't merge.
 allowed-tools: Bash Read Edit
 argument-hint: "[--threshold <pct>] [--injection-severity high|medium|low] [--report <path>]"
 mode: [gate]

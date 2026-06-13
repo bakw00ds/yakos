@@ -1,6 +1,6 @@
 ---
 name: supervisor-toggle
-description: Flip the supervisor's block_on_critical setting (active ↔ passive) for the current project without leaving the session
+description: Flip the supervisor's block_on_critical setting (active ↔ passive) for the current project from the session. Use when the supervisor fires too aggressively (go passive) or the session enters higher-stakes work (go active).
 tier: haiku
 invocable_by: lead
 domains: [coordination, operations]

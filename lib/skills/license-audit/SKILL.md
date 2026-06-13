@@ -1,6 +1,6 @@
 ---
 name: license-audit
-description: Scan the dependency tree for license-policy violations — copyleft in proprietary, unknown licenses, license downgrades
+description: Scan the dependency tree for license-policy violations — copyleft in proprietary, unknown licenses, license downgrades. Use before release, during a compliance review, or when adding a new dependency.
 allowed-tools: Bash Read
 argument-hint: "[--policy <file>] [--baseline <file>] [--ecosystem npm|pip|cargo|go|maven]"
 mode: [audit]

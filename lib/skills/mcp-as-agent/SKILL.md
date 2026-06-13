@@ -1,6 +1,6 @@
 ---
 name: mcp-as-agent
-description: Wrap an MCP server as a yakOS agent so tool-side and LLM-side specialists share the same dispatch surface
+description: Wrap an MCP server as a yakOS agent so it shares the same dispatch surface as LLM specialists. Use when an MCP server takes structured input and returns structured output like a specialist you want to dispatch to.
 allowed-tools: Read Edit
 argument-hint: "<mcp-name> <project-path>"
 mode: [design]

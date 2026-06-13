@@ -1,6 +1,6 @@
 ---
 name: plan-quality-eval
-description: Score work/current/plan.md against a 6-dimension rubric using a 3-judge cross-vendor LLM panel; write a structured record to ~/.yakos-state/plan-quality-log.ndjson
+description: Score work/current/plan.md against a 6-dimension rubric using a 3-judge cross-vendor LLM panel and log a structured record. Use before specialists start work, to catch a vague or badly-decomposed plan while fixing it is cheap.
 allowed-tools: Bash Read
 argument-hint: "<plan.md> [--rubric <path>] [--planner-model <id>] [--dry-run]"
 mode: [report]

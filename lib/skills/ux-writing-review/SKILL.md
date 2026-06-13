@@ -1,6 +1,6 @@
 ---
 name: ux-writing-review
-description: Voice / tone / clarity audit of UI strings — action-oriented buttons, helpful errors, no jargon, consistent terminology, localization-friendly
+description: Voice / tone / clarity audit of UI strings — action-oriented buttons, helpful errors, no jargon, consistent terminology, localization-friendly. Use when reviewing or polishing user-facing copy.
 allowed-tools: Bash Read
 argument-hint: "[--paths <glob>] [--voice-doc <path>]"
 mode: [audit]

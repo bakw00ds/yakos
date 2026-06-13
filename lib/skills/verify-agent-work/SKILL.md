@@ -1,6 +1,6 @@
 ---
 name: verify-agent-work
-description: Spot-check a teammate's claimed work before accepting it
+description: Spot-check a teammate's claimed work before accepting it, against the actual artifacts. Use when a specialist returns a result and you need to confirm it's real before integrating or reporting it done.
 allowed-tools: Read Grep Bash
 argument-hint: "<teammate-name> [--task <id>]"
 mode: [review]

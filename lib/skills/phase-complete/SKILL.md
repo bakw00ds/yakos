@@ -1,6 +1,6 @@
 ---
 name: phase-complete
-description: Verify a phase's exit criteria before declaring it done
+description: Verify a phase's exit criteria are met before declaring it done. Use at the boundary of a project phase, before moving on or claiming completion, to catch unmet criteria.
 allowed-tools: Read Bash Grep TaskList
 argument-hint: "<phase-name>"
 mode: [review]

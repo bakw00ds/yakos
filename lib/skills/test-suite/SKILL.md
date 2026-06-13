@@ -1,6 +1,6 @@
 ---
 name: test-suite
-description: Run the full test suite with race detection and flake handling
+description: Run the full test suite with race detection and flake handling. Use when verifying a change broadly, before a PR or release, or when asked to run all the tests.
 allowed-tools: Read Bash Grep
 argument-hint: "[--race] [--package <path>]"
 mode: [review]

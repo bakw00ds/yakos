@@ -1,6 +1,6 @@
 ---
 name: changelog-ui-scaffold
-description: Drop in a UI component / page that surfaces the project's CHANGELOG.md and current version, per frontend framework
+description: Drop in a UI component / page that surfaces the project's CHANGELOG.md and current version, per frontend framework. Use when you want users to see release history and the running version in-app.
 allowed-tools: Read Edit Write Bash Grep
 argument-hint: "[--framework next|react-vite|vue|svelte|static] [--merge-with-about]"
 mode: [scaffold]

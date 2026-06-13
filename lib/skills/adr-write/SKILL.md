@@ -1,6 +1,6 @@
 ---
 name: adr-write
-description: Scaffold a new Architecture Decision Record in Michael Nygard format (Context / Decision / Consequences) and update the ADR index
+description: Scaffold a new Architecture Decision Record in Michael Nygard format (Context / Decision / Consequences) and update the ADR index. Use when a non-trivial or hard-to-reverse architectural choice is made and needs a durable record.
 allowed-tools: Bash Read Write
 argument-hint: "<title> [--supersedes <NNNN>] [--dir <path>]"
 mode: [scaffold]

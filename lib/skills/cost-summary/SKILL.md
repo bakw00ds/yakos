@@ -1,6 +1,6 @@
 ---
 name: cost-summary
-description: Roll up yakos dispatch-log into a per-runtime / per-agent / per-day cost summary, optionally posting to a webhook
+description: Roll up the yakos dispatch-log into a per-runtime / per-agent / per-day cost summary, optionally posting to a webhook. Use when reviewing spend, before a budget check, or when asked "what did this cost?".
 allowed-tools: Bash Read
 argument-hint: "[--since <ISO>] [--by agent|runtime|day] [--post]"
 mode: [report]

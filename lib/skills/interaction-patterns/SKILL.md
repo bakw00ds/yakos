@@ -1,6 +1,6 @@
 ---
 name: interaction-patterns
-description: Heuristic eval against Nielsen's 10 plus a WCAG 2.2 first-pass for keyboard, focus, contrast, and motion
+description: Heuristic eval against Nielsen's 10 usability heuristics plus a WCAG 2.2 first-pass for keyboard, focus, contrast, and motion. Use when reviewing a UI's interaction design and baseline accessibility together.
 allowed-tools: Read Bash
 argument-hint: "[--target <url-or-path>] [--scope <component|page|flow>]"
 mode: [audit]

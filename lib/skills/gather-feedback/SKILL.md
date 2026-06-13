@@ -1,6 +1,6 @@
 ---
 name: gather-feedback
-description: Pull and triage user feedback from configured sources
+description: Pull and triage user feedback from configured sources into actionable buckets. Use when prioritizing work from user input, before a planning cycle, or when asked "what are users saying?".
 allowed-tools: Read Bash Grep
 argument-hint: "[--since <date>] [--source <name>] [--include-resolved] [--stale] [--output-format markdown|json]"
 mode: [gather]

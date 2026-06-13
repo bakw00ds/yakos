@@ -1,6 +1,6 @@
 ---
 name: mockup-review
-description: Structured review of a mockup — info hierarchy, interaction states, responsive behavior, copy slots, design-token usage
+description: Structured review of a mockup — info hierarchy, interaction states, responsive behavior, copy slots, design-token usage. Use when evaluating a static design/mockup before implementation begins.
 allowed-tools: Read Bash
 argument-hint: "[--mockup <path-or-url>] [--lens designer|a11y|content|all]"
 mode: [audit]

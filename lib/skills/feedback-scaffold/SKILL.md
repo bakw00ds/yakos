@@ -1,6 +1,6 @@
 ---
 name: feedback-scaffold
-description: Drop in the user-feedback subsystem (DB migration + API handlers + UI submit widget + view-my-feedback page + CHANGELOG citation wiring) per project stack
+description: Drop in the full user-feedback subsystem (DB migration, API handlers, UI submit widget, view-my-feedback page, CHANGELOG citation wiring) per stack. Use when a project needs to collect and surface user feedback end-to-end.
 allowed-tools: Read Edit Write Bash Grep
 argument-hint: "[--db postgres|mysql|sqlite] [--backend go-echo|node-express|node-nest|python-fastapi] [--frontend react|vue|svelte] [--with-screenshot] [--with-admin-page]"
 mode: [scaffold]

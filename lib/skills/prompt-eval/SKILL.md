@@ -1,6 +1,6 @@
 ---
 name: prompt-eval
-description: Run a prompt against a golden dataset and report per-rubric regression vs the prior pinned version, not just an aggregate score
+description: Run a prompt against a golden dataset and report per-rubric regression vs the prior pinned version, not just an aggregate score. Use when changing a prompt, to confirm it didn't regress quality on known cases.
 allowed-tools: Bash Read Edit
 argument-hint: "<prompt-id> [--dataset <name>] [--baseline <git-ref>] [--model <alias>]"
 mode: [report]
