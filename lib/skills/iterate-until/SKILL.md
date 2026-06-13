@@ -1,6 +1,6 @@
 ---
 name: iterate-until
-description: Loop a work-then-verify cycle until a human-checkable verifier passes, with a hard iteration cap and an audit trail
+description: Loop a work-then-verify cycle until a human-checkable verifier passes, with a hard iteration cap and an audit trail. Use when a task has a concrete pass/fail check and should be retried automatically until it succeeds.
 allowed-tools: Read Edit Write Bash Agent SendMessage TaskUpdate
 argument-hint: "<verifier-command> [--max-iter N] [--escalate-to <role>]"
 mode: [implement, fix, recovery]

@@ -1,6 +1,6 @@
 ---
 name: flake-quarantine
-description: Auto-tag tests that flaked >N times in M runs, move them to a quarantine suite, and cap how long they stay there
+description: Auto-tag tests that flaked >N times in M runs, move them to a quarantine suite, and cap how long they stay there. Use when flaky tests are destabilizing CI and you need to isolate them without deleting coverage.
 allowed-tools: Bash Read
 argument-hint: "[--threshold <N/M>] [--max-quarantine-days <D>] [--dry-run]"
 mode: [maintain]

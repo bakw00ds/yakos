@@ -1,6 +1,6 @@
 ---
 name: hallucination-check
-description: Citation-grounding verifier — for each claim in an LLM response, confirm support in the retrieved context, report ungrounded claims
+description: Citation-grounding verifier — for each claim in an LLM response, confirm support in the retrieved context and report ungrounded claims. Use when validating a RAG/LLM answer for factual grounding before trusting or shipping it.
 allowed-tools: Bash Read
 argument-hint: "<response-file> <context-file> [--strict] [--threshold <0..1>]"
 mode: [review]

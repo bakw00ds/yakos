@@ -1,6 +1,6 @@
 ---
 name: local-llm
-description: Hand off bulk transformation work to a local LLM via Ollama
+description: Hand off bulk transformation work (summarize, classify, extract, first-pass) to a local LLM via Ollama. Use when the task is high-volume and doesn't need Claude-grade reasoning, to save cost and latency.
 allowed-tools: Bash Read Write
 argument-hint: "--template <n> --input <path> --output <path> [--model <model>] [--max-bytes <N>] [--force]"
 mode: [transform]

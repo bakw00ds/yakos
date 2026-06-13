@@ -1,6 +1,6 @@
 ---
 name: hook-bypass-review
-description: Audit work/current/hook-bypass.md for stale entries, expired bypasses, and patterns suggesting a hook needs tuning
+description: Audit work/current/hook-bypass.md for stale entries, expired bypasses, and patterns suggesting a hook needs tuning. Use before archive, periodically during long projects, or when hook bypasses are accumulating.
 tier: haiku
 invocable_by: lead
 domains: [operations, quality]

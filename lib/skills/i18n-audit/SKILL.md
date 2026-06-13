@@ -1,6 +1,6 @@
 ---
 name: i18n-audit
-description: Scan for hardcoded UI strings, missing translation keys, RTL layout breakages, untested locales, and date/number/currency hardcoding
+description: Scan for hardcoded UI strings, missing translation keys, RTL layout breakages, untested locales, and date/number/currency hardcoding. Use when localizing a UI, adding a locale, or auditing internationalization readiness.
 allowed-tools: Bash Read
 argument-hint: "[--paths <glob>] [--locales <list>] [--strict]"
 mode: [audit]
