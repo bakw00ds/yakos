@@ -1,6 +1,6 @@
 ---
 name: monitor-scaffold
-description: Drop in supervisor config + /healthz endpoint + restart runbook for each service in profile.monitors.targets, per supervisor (systemd / pm2 / k8s / docker-compose). Use when services need health checks and process supervision set up.
+description: Drop in supervisor config + /healthz endpoint + restart runbook per service, per supervisor (systemd / pm2 / k8s / docker-compose). Use when services need health checks and process supervision set up.
 allowed-tools: Read Edit Write Bash Grep
 argument-hint: "[--supervisor systemd|pm2|k8s|docker-compose] [--service <name>]"
 mode: [scaffold]
