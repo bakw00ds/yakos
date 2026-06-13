@@ -400,6 +400,7 @@ func TestPortedCommandStruct(t *testing.T) {
 	pc := portedCommand{
 		Name:  "example",
 		Since: "1.0.0",
+		Desc:  "Do the example thing",
 		Notes: "test",
 	}
 	if pc.Name != "example" {
@@ -408,7 +409,94 @@ func TestPortedCommandStruct(t *testing.T) {
 	if pc.Since != "1.0.0" {
 		t.Errorf("Since field broken; got %q", pc.Since)
 	}
+	if pc.Desc != "Do the example thing" {
+		t.Errorf("Desc field broken; got %q", pc.Desc)
+	}
 	if pc.Notes != "test" {
 		t.Errorf("Notes field broken; got %q", pc.Notes)
+	}
+}
+
+// TestPortedCommandsHaveDesc verifies every portedCommand entry has a non-empty Desc.
+// This catches entries added to portedCommands without a help one-liner.
+func TestPortedCommandsHaveDesc(t *testing.T) {
+	for i, cmd := range portedCommands {
+		if cmd.Desc == "" {
+			t.Errorf("portedCommands[%d] (%q) has empty Desc — add a one-liner for yakos help", i, cmd.Name)
+		}
+	}
+}
+
+// TestSelectImpl verifies the gate decision function for all three inputs.
+func TestSelectImpl(t *testing.T) {
+	tests := []struct {
+		impl       string
+		bashExists bool
+		want       implChoice
+		desc       string
+	}{
+		// YAKOS_IMPL=go always → Go-native, regardless of bash presence.
+		{"go", true, implGoNative, "YAKOS_IMPL=go + bash present → go-native"},
+		{"go", false, implGoNative, "YAKOS_IMPL=go + no bash → go-native"},
+		// YAKOS_IMPL=bash always → passthrough (even if bash is absent — Run surfaces the error).
+		{"bash", true, implPassthrough, "YAKOS_IMPL=bash + bash present → passthrough"},
+		{"bash", false, implPassthrough, "YAKOS_IMPL=bash + no bash → passthrough (Run will error)"},
+		// Unset: shadow-mode when bash present, Go-native when not.
+		{"", true, implPassthrough, "unset + bash present → shadow-mode (passthrough)"},
+		{"", false, implGoNative, "unset + no bash → go-native (the Go-only fix)"},
+	}
+
+	for _, tc := range tests {
+		got := selectImpl(tc.impl, tc.bashExists)
+		if got != tc.want {
+			t.Errorf("selectImpl(%q, %v): got %v, want %v (%s)",
+				tc.impl, tc.bashExists, got, tc.want, tc.desc)
+		}
+	}
+}
+
+// TestRunHelpOutput verifies that runHelp writes a grouped command list to stdout
+// that contains key landmarks regardless of bash presence.
+func TestRunHelpOutput(t *testing.T) {
+	// Use a temp dir as the yakosRoot — no bash yakos present there.
+	tmp := t.TempDir()
+
+	// Capture stdout by redirecting os.Stdout temporarily.
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+
+	runHelp(tmp, nil)
+
+	_ = w.Close()
+	os.Stdout = orig
+
+	buf := make([]byte, 32*1024)
+	n, _ := r.Read(buf)
+	out := string(buf[:n])
+
+	landmarks := []string{
+		"Usage:",
+		"Core / Project",
+		"Dispatch & Orchestration",
+		"Console & Web",
+		"Release & Maintenance",
+		"LLM Ops & Metrics",
+		"Supervision & Retro",
+		"validate",
+		"dispatch",
+		"kanban",
+		"go-port-status",
+		"yakos go-port-status",
+		"yakos <cmd> --help",
+		"go-shadow-mode.md",
+	}
+	for _, lm := range landmarks {
+		if !strings.Contains(out, lm) {
+			t.Errorf("runHelp output missing %q\n--- output ---\n%s", lm, out)
+		}
 	}
 }

@@ -15,19 +15,25 @@ until Phase 1 exit criteria are met.
 
 ## The `YAKOS_IMPL` env var
 
-`YAKOS_IMPL` is the explicit selector. It is read by the bash `yakos`
-wrapper (`cli/yakos`) and by any shell aliases or PATH-ordering logic you
-set up.
+`YAKOS_IMPL` is the explicit selector. It is read by the Go binary and by
+any shell aliases or PATH-ordering logic you set up.
 
 | Value | Effect |
 |---|---|
-| unset (default in Phase 1) | bash `yakos` is active |
-| `bash` | bash `yakos` is active (explicit) |
-| `go` | Go binary is preferred |
+| unset | **auto**: shadow-mode when `cli/yakos` is present; Go-native otherwise. Go-only installs (binary only, no bash tree) work without any configuration. |
+| `bash` | Proxy every invocation to bash yakos (errors with a clear message if the bash script is absent — use this only when you know bash is installed). |
+| `go` | Always use Go-native routing, regardless of whether bash is present. |
 
 Setting `YAKOS_IMPL` in your shell profile is the recommended way to switch
 for an entire session. PATH ordering (described below) is the alternative
 for persistent per-machine preference.
+
+### Go-only installs
+
+If you installed only the Go binary (no `cli/yakos` bash tree), leave
+`YAKOS_IMPL` unset. The binary auto-detects the absence of the bash tree
+and routes every command natively in Go. All 41 ported subcommands are
+available without any extra configuration.
 
 ## How install.sh sets things up
 
