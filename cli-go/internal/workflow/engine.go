@@ -1,12 +1,16 @@
 package workflow
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -410,6 +414,110 @@ func (e *Engine) executeGraph(ctx context.Context, wf *Workflow, rs *RunState, o
 	return !runFailed.Load()
 }
 
+// nodeDispatchLogName is the filename for the per-run node dispatch log.
+// It lives alongside run.json inside runs/<runID>/ and records one NDJSON
+// line per node dispatch start/finish so that ReconcileInterrupted can detect
+// orphans (dispatch_started with no dispatch_finished) after a hard crash.
+const nodeDispatchLogName = "node-dispatch.ndjson"
+
+// maxNodeDispatchLogBytes caps how much of node-dispatch.ndjson we read during
+// reconciliation.  Prevents unbounded allocation from a large/corrupted log.
+const maxNodeDispatchLogBytes = 1 << 20 // 1 MiB
+
+// nodeDispatchEvent is a single entry in the per-run node dispatch NDJSON log.
+// It is written by the engine (not the global dispatch layer) so it can carry
+// run_id and node_id — fields absent from the global dispatch-log.ndjson.
+//
+// Fields are additive-optional: readers must tolerate missing fields (legacy /
+// partial writes) and must never panic on a malformed line.
+type nodeDispatchEvent struct {
+	Type   string `json:"type"`    // "dispatch_started" | "dispatch_finished"
+	RunID  string `json:"run_id"`  // workflow run identifier
+	NodeID string `json:"node_id"` // workflow node identifier
+	Agent  string `json:"agent"`   // agent name (informational)
+	Ts     string `json:"ts"`      // RFC3339 UTC timestamp
+}
+
+// nodeDispatchLogPath returns the path to the per-run node dispatch log.
+func (e *Engine) nodeDispatchLogPath(runID string) string {
+	return filepath.Join(e.runDir(runID), nodeDispatchLogName)
+}
+
+// appendNodeDispatchEvent appends a single nodeDispatchEvent line to the
+// per-run node dispatch log.  Errors are non-fatal (matching the global
+// dispatch log's "log errors are non-fatal" convention).
+func appendNodeDispatchEvent(logPath string, ev nodeDispatchEvent) {
+	line, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil { //nolint:gosec
+		return
+	}
+	f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644) //nolint:gosec
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	line = append(line, '\n')
+	_, _ = f.Write(line)
+}
+
+// orphanedNodeIDs reads a per-run node-dispatch.ndjson and returns the set of
+// node IDs that have a dispatch_started entry with no matching
+// dispatch_finished entry.  These are nodes whose dispatch was in-flight when
+// the daemon crashed.
+//
+// Defensive: tolerates missing files (returns empty set), truncated files,
+// malformed/legacy JSON lines (skipped), and empty/blank lines.  Never panics.
+func orphanedNodeIDs(logPath string) map[string]struct{} {
+	f, err := os.Open(logPath) //nolint:gosec
+	if err != nil {
+		// File absent → no in-flight dispatches were recorded.
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+
+	// Cap read to prevent unbounded allocation.
+	limited := io.LimitReader(f, maxNodeDispatchLogBytes)
+	scanner := bufio.NewScanner(limited)
+	// Allow up to 1 MiB per line (generous; typical line is <300 bytes).
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+
+	started := make(map[string]struct{})
+	finished := make(map[string]struct{})
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var ev nodeDispatchEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue // tolerate malformed/legacy lines
+		}
+		// Require non-empty node_id and a recognised type; skip otherwise.
+		if ev.NodeID == "" {
+			continue
+		}
+		switch ev.Type {
+		case "dispatch_started":
+			started[ev.NodeID] = struct{}{}
+		case "dispatch_finished":
+			finished[ev.NodeID] = struct{}{}
+		}
+	}
+	// Ignore scanner errors: partial reads are treated as "no more entries".
+
+	orphans := make(map[string]struct{})
+	for id := range started {
+		if _, done := finished[id]; !done {
+			orphans[id] = struct{}{}
+		}
+	}
+	return orphans
+}
+
 // runNode executes a single node: substitutes prompts, calls dispatch.Service,
 // stores output, and publishes events. It modifies runFailed and failedSet
 // under queueMu when the node fails.
@@ -462,8 +570,30 @@ func (e *Engine) runNode(
 		OperatorID: ownerOpID,
 	}
 
+	// Write dispatch_started to the per-run node dispatch log.
+	// This must happen BEFORE the actual dispatch so that a hard crash between
+	// this point and writeNodeDispatchFinished leaves a detectable orphan.
+	nodeLogPath := e.nodeDispatchLogPath(rs.RunID)
+	appendNodeDispatchEvent(nodeLogPath, nodeDispatchEvent{
+		Type:   "dispatch_started",
+		RunID:  rs.RunID,
+		NodeID: node.ID,
+		Agent:  node.Agent,
+		Ts:     time.Now().UTC().Format(time.RFC3339),
+	})
+
 	// Dispatch through the governed Service (or injected test fake).
 	stdout, result, err := e.dispatchNode(ctx, params)
+
+	// Write dispatch_finished to the per-run node dispatch log.
+	// Non-fatal: even if this fails, run.json still captures the node outcome.
+	appendNodeDispatchEvent(nodeLogPath, nodeDispatchEvent{
+		Type:   "dispatch_finished",
+		RunID:  rs.RunID,
+		NodeID: node.ID,
+		Agent:  node.Agent,
+		Ts:     time.Now().UTC().Format(time.RFC3339),
+	})
 
 	// Truncate output to OutputLimit (tail-truncate: keep the last N bytes).
 	output, wasTruncated := tailTruncate(stdout, node.OutputLimit)
@@ -691,9 +821,13 @@ func marshalWorkflow(wf *Workflow) ([]byte, error) {
 // state (indicating a daemon crash mid-run) and marks them "interrupted".
 // This should be called at daemon startup before accepting new workflow requests.
 //
-// Limitation: node-level in-flight state is reconciled at the run level only.
-// Detecting orphaned dispatch_started entries in the NDJSON log requires
-// correlating log entries with node IDs, which is deferred (see ADR-0003).
+// Node-level orphan detection: for each interrupted run, the per-run
+// node-dispatch.ndjson log is scanned for dispatch_started entries without a
+// matching dispatch_finished.  Any such orphaned node is marked NodeFailed
+// regardless of its current status in run.json (which may still show
+// NodePending if the debounce writer never flushed the NodeRunning transition).
+// This is consistent with run-level resume-from-failure semantics: interrupted
+// nodes become resumable on the next Resume call.
 func ReconcileInterrupted(runsDir string) ([]string, error) {
 	entries, err := os.ReadDir(runsDir)
 	if err != nil {
@@ -715,14 +849,31 @@ func ReconcileInterrupted(runsDir string) ([]string, error) {
 			continue
 		}
 		if rs.Status == RunRunning {
+			// Scan the per-run node dispatch log for orphaned dispatches.
+			// An orphaned dispatch is a dispatch_started with no matching
+			// dispatch_finished — the node was in-flight when the daemon crashed.
+			// The run.json may show NodePending (debounce never flushed) or
+			// NodeRunning; both are treated as interrupted.
+			nodeLogPath := filepath.Join(runDir, nodeDispatchLogName)
+			orphans := orphanedNodeIDs(nodeLogPath)
+
 			// Mark as interrupted.
 			rs.mu.Lock()
 			rs.Status = RunInterrupted
-			// Also mark any running nodes as interrupted/failed.
 			for _, n := range rs.Nodes {
+				// Mark nodes that were running (captured by run.json).
 				if n.Status == NodeRunning {
 					n.Status = NodeFailed
 					n.ErrorMsg = "daemon interrupted (crash reconciliation)"
+					continue
+				}
+				// Mark nodes that were orphaned per the NDJSON log but whose
+				// NodeRunning status wasn't flushed to run.json before the crash.
+				if n.Status == NodePending {
+					if _, isOrphan := orphans[n.ID]; isOrphan {
+						n.Status = NodeFailed
+						n.ErrorMsg = "daemon interrupted (crash reconciliation)"
+					}
 				}
 			}
 			rs.mu.Unlock()

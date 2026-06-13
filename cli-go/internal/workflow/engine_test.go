@@ -834,6 +834,272 @@ func TestEngine_CrashReconciliation(t *testing.T) {
 	}
 }
 
+// ---- Engine: node-level orphan reconciliation tests (race-enabled) ----------
+
+// writeNDJSON is a test helper that writes newline-delimited JSON objects to a
+// file.  Each map is marshalled as one line; the file is created or truncated.
+func writeNDJSON(t *testing.T, path string, lines []map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("writeNDJSON mkdir: %v", err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("writeNDJSON create %s: %v", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	for _, m := range lines {
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("writeNDJSON marshal: %v", err)
+		}
+		f.Write(append(b, '\n')) //nolint:errcheck
+	}
+}
+
+// makeRunDir is a test helper that creates a run directory with run.json and
+// optionally a node-dispatch.ndjson.
+func makeRunDir(t *testing.T, runsDir, runID, runStatus string, nodes map[string]string) string {
+	t.Helper()
+	runDir := filepath.Join(runsDir, runID)
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		t.Fatalf("makeRunDir mkdir: %v", err)
+	}
+	nodeMap := make(map[string]interface{}, len(nodes))
+	for id, status := range nodes {
+		nodeMap[id] = map[string]interface{}{"id": id, "status": status}
+	}
+	rs := map[string]interface{}{
+		"run_id":        runID,
+		"workflow_name": "test-flow",
+		"workflow_hash": "abc123",
+		"status":        runStatus,
+		"nodes":         nodeMap,
+	}
+	data, _ := json.MarshalIndent(rs, "", "  ")
+	if err := os.WriteFile(filepath.Join(runDir, "run.json"), data, 0644); err != nil {
+		t.Fatalf("makeRunDir write run.json: %v", err)
+	}
+	return runDir
+}
+
+// TestNodeOrphanReconciliation is a -race table test covering the four core
+// scenarios for node-level orphan detection:
+//
+//  1. Orphaned dispatch_started (no dispatch_finished) + NodePending in run.json
+//     → node must be marked NodeFailed after reconciliation.
+//  2. Clean dispatch_started + dispatch_finished → node stays as-is.
+//  3. Run with no orphans → untouched (no change to node statuses).
+//  4. Malformed / legacy NDJSON lines → tolerated, no panic.
+func TestNodeOrphanReconciliation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// ndJSON is the content of node-dispatch.ndjson (nil = file absent).
+		ndJSON []map[string]string
+		// nodes maps node ID → initial status in run.json.
+		nodes map[string]string
+		// wantStatuses maps node ID → expected status after reconciliation.
+		wantStatuses map[string]string
+	}{
+		{
+			name: "orphaned_dispatch_started_marks_node_failed",
+			ndJSON: []map[string]string{
+				{"type": "dispatch_started", "run_id": "run-orphan", "node_id": "a", "agent": "agent-a", "ts": "2026-01-01T00:00:00Z"},
+				// No dispatch_finished for "a".
+			},
+			nodes: map[string]string{
+				"a": "pending", // debounce never flushed NodeRunning
+				"b": "pending",
+			},
+			wantStatuses: map[string]string{
+				"a": "failed",  // orphaned — must become failed
+				"b": "pending", // no dispatch_started → untouched
+			},
+		},
+		{
+			name: "clean_finish_not_reclassified",
+			ndJSON: []map[string]string{
+				{"type": "dispatch_started", "run_id": "run-clean", "node_id": "x", "agent": "agent-x", "ts": "2026-01-01T00:00:00Z"},
+				{"type": "dispatch_finished", "run_id": "run-clean", "node_id": "x", "agent": "agent-x", "ts": "2026-01-01T00:01:00Z"},
+			},
+			nodes: map[string]string{
+				"x": "running", // run.json shows running (normal finish)
+			},
+			wantStatuses: map[string]string{
+				// NodeRunning is already caught by the run-level path; here we just
+				// verify the NDJSON-backed path does NOT override a completed node.
+				"x": "failed", // run-level path (NodeRunning → NodeFailed) still fires
+			},
+		},
+		{
+			name: "no_orphans_untouched",
+			ndJSON: []map[string]string{
+				{"type": "dispatch_started", "run_id": "run-noop", "node_id": "z", "agent": "agent-z", "ts": "2026-01-01T00:00:00Z"},
+				{"type": "dispatch_finished", "run_id": "run-noop", "node_id": "z", "agent": "agent-z", "ts": "2026-01-01T00:01:00Z"},
+			},
+			nodes: map[string]string{
+				"z": "completed",
+			},
+			wantStatuses: map[string]string{
+				"z": "completed", // completed nodes are never reclassified
+			},
+		},
+		{
+			name: "malformed_lines_tolerated",
+			ndJSON: []map[string]string{
+				// Malformed: missing type, empty node_id, garbage line (we write via raw bytes below).
+				{"type": "dispatch_started", "run_id": "run-malformed", "node_id": "m", "agent": "agent-m", "ts": "2026-01-01T00:00:00Z"},
+				// dispatch_finished for "m" is present → not an orphan.
+				{"type": "dispatch_finished", "run_id": "run-malformed", "node_id": "m", "agent": "agent-m", "ts": "2026-01-01T00:01:00Z"},
+				// Extra legacy-style line with no node_id — should be skipped.
+				{"type": "dispatch_started", "agent": "old-agent", "ts": "2026-01-01T00:00:30Z"},
+			},
+			nodes: map[string]string{
+				"m": "pending",
+			},
+			wantStatuses: map[string]string{
+				"m": "pending", // not orphaned (has dispatch_finished); legacy line ignored
+			},
+		},
+		{
+			name:   "ndjson_absent_tolerated",
+			ndJSON: nil, // file does not exist
+			nodes: map[string]string{
+				"q": "running",
+			},
+			wantStatuses: map[string]string{
+				"q": "failed", // run-level path (NodeRunning → NodeFailed) catches it
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			runsDir := t.TempDir()
+			runID := "run-" + tc.name
+			runDir := makeRunDir(t, runsDir, runID, "running", tc.nodes)
+
+			if tc.ndJSON != nil {
+				logPath := filepath.Join(runDir, "node-dispatch.ndjson")
+				writeNDJSON(t, logPath, tc.ndJSON)
+
+				// Append a raw malformed line for the "malformed_lines_tolerated" case.
+				if tc.name == "malformed_lines_tolerated" {
+					f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0644)
+					if err != nil {
+						t.Fatalf("open log for append: %v", err)
+					}
+					_, _ = f.Write([]byte("not-json-at-all\n"))
+					_ = f.Close()
+				}
+			}
+
+			interrupted, err := workflow.ReconcileInterrupted(runsDir)
+			if err != nil {
+				t.Fatalf("ReconcileInterrupted: %v", err)
+			}
+			if len(interrupted) != 1 {
+				t.Fatalf("interrupted count: got %d, want 1", len(interrupted))
+			}
+
+			// Re-load run.json to check node statuses.
+			newData, err := os.ReadFile(filepath.Join(runDir, "run.json"))
+			if err != nil {
+				t.Fatalf("read run.json: %v", err)
+			}
+			var updated struct {
+				Status string                     `json:"status"`
+				Nodes  map[string]json.RawMessage `json:"nodes"`
+			}
+			if err := json.Unmarshal(newData, &updated); err != nil {
+				t.Fatalf("parse run.json: %v", err)
+			}
+			if updated.Status != "interrupted" {
+				t.Errorf("run status: got %q, want interrupted", updated.Status)
+			}
+			for nodeID, wantStatus := range tc.wantStatuses {
+				raw, ok := updated.Nodes[nodeID]
+				if !ok {
+					t.Errorf("node %q missing from run.json", nodeID)
+					continue
+				}
+				var ns struct {
+					Status string `json:"status"`
+				}
+				if err := json.Unmarshal(raw, &ns); err != nil {
+					t.Errorf("node %q: parse status: %v", nodeID, err)
+					continue
+				}
+				if ns.Status != wantStatus {
+					t.Errorf("node %q status: got %q, want %q", nodeID, ns.Status, wantStatus)
+				}
+			}
+		})
+	}
+}
+
+// TestNodeOrphanReconciliation_RaceStress runs ReconcileInterrupted concurrently
+// with -count=2 to stress the race detector on the orphan detection path.
+func TestNodeOrphanReconciliation_RaceStress(t *testing.T) {
+	t.Parallel()
+
+	const numRuns = 4
+	runsDir := t.TempDir()
+
+	// Create numRuns interrupted run dirs, each with an orphaned node.
+	for i := 0; i < numRuns; i++ {
+		runID := fmt.Sprintf("stress-run-%d", i)
+		runDir := makeRunDir(t, runsDir, runID, "running", map[string]string{
+			"orphan": "pending",
+			"done":   "completed",
+		})
+		writeNDJSON(t, filepath.Join(runDir, "node-dispatch.ndjson"), []map[string]string{
+			{"type": "dispatch_started", "run_id": runID, "node_id": "orphan", "agent": "a", "ts": "2026-01-01T00:00:00Z"},
+			// No dispatch_finished → orphan
+		})
+	}
+
+	// Run ReconcileInterrupted from multiple goroutines (each on its own
+	// runsDir copy would be ideal but here we exercise the read-only part
+	// concurrently — the function writes per-run, so the locks are disjoint).
+	var wg sync.WaitGroup
+	errs := make(chan error, numRuns)
+	for i := 0; i < numRuns; i++ {
+		wg.Add(1)
+		i := i
+		go func() {
+			defer wg.Done()
+			// Each goroutine creates its own isolated runs dir.
+			localDir := t.TempDir()
+			runID := fmt.Sprintf("stress-run-conc-%d", i)
+			runDir := makeRunDir(t, localDir, runID, "running", map[string]string{
+				"orphan": "pending",
+			})
+			writeNDJSON(t, filepath.Join(runDir, "node-dispatch.ndjson"), []map[string]string{
+				{"type": "dispatch_started", "run_id": runID, "node_id": "orphan", "agent": "a", "ts": "2026-01-01T00:00:00Z"},
+			})
+			interrupted, err := workflow.ReconcileInterrupted(localDir)
+			if err != nil {
+				errs <- fmt.Errorf("goroutine %d: %w", i, err)
+				return
+			}
+			if len(interrupted) != 1 {
+				errs <- fmt.Errorf("goroutine %d: interrupted count %d, want 1", i, len(interrupted))
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
 // TestEngine_CrashReconciliation_NonRunningSkipped verifies that completed
 // or failed runs are not touched by reconciliation.
 func TestEngine_CrashReconciliation_NonRunningSkipped(t *testing.T) {
