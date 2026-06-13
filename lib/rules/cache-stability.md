@@ -79,21 +79,26 @@ the single largest input-token saving available. Track the win on the
 existing cost surface — cache hit rate surfaces via `skill:finops-review`
 and the `usage` fields in the dispatch-log.
 
-## Known cache-busters to fix
+## Audit findings (2026-06-13)
 
-Spotted while reading `cli-go/internal/runtime/claude.go` for this rule.
-These are notes for the maintainer — fix in a follow-up PR, not here:
+Checked the dispatch prefix construction against this rule — no
+cache-buster found in the parts yakOS controls:
 
-- **No confirmed cache-buster in `claude.go` itself.** `ExecCmd` and
-  `ChatExecCmd` build args deterministically from request fields; no
-  timestamps or run-ids are injected into the prefix at this layer. The
-  framed preamble is a fixed string. Good.
-- **Audit the roster compose (follow-up).** The roster serialization that
-  feeds `AgentJSON` / `AgentSystemPrompt` was not read in full for this
-  rule. If it serializes from a Go map without sorting, iteration order
-  is randomized and will silently bust the cache turn-to-turn. The
-  maintainer should confirm the compose sorts by a stable key (e.g. agent
-  name) before serializing.
+- **`claude.go` is clean.** `ExecCmd` and `ChatExecCmd` build args
+  deterministically from request fields; no timestamps, run-ids, or
+  conversation-ids are injected into the prefix (the conversation id rides
+  `--resume` / `--conversation`, i.e. the tail). The framed preamble is a
+  fixed string.
+- **Roster compose is deterministic.** `agentscompose.Compose` walks
+  `os.ReadDir` (filename-sorted) into an explicit insertion-order list
+  (framework agents, then project overrides) — not map-iteration order.
+  `AgentToJSON` builds the `--agents` payload with `json.Marshal` (which
+  sorts map keys) from only stable agent fields (description, prompt,
+  tools, model): same agent in, same bytes out.
+
+This rule therefore stands as **preventive discipline** — keep it in mind
+before adding any volatile data (timestamps, run-ids) or map-derived
+ordering into a cached prefix in future work.
 
 ## Scope
 
