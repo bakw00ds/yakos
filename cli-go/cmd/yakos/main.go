@@ -2526,6 +2526,8 @@ func runStart(yakosRoot string, args []string) {
 	bare := false
 	strictMCP := false
 	model := ""
+	noREPL := false
+	consoleAddr := ""
 	var passthrough []string
 
 	// Honor YAKOS_ALLOW_ROOT env as equivalent to --allow-root.
@@ -2570,6 +2572,18 @@ func runStart(yakosRoot string, args []string) {
 			bare = true
 		case arg == "--strict-mcp":
 			strictMCP = true
+		case arg == "--no-repl" || arg == "--web":
+			noREPL = true
+
+		case arg == "--console-addr":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "start: --console-addr requires an address")
+				os.Exit(1)
+			}
+			consoleAddr = args[i]
+		case len(arg) > 15 && arg[:15] == "--console-addr=":
+			consoleAddr = arg[15:]
 
 		case arg == "--resume":
 			i++
@@ -2620,31 +2634,58 @@ func runStart(yakosRoot string, args []string) {
 		home = "/tmp"
 	}
 
+	// Resolve the console token so the banner URL is accurate.
+	// Skip token I/O on --dry-run / --print-agents: those paths must be
+	// read-only and must not create ~/.yakos-state/ or write a token file.
+	stateDir := filepath.Join(home, ".yakos-state")
+	var consoleTok string
+	if !dryRun && !printAgents {
+		consoleTok, _ = internalconsoleui.LoadOrCreateToken(stateDir)
+	}
+
 	cfg := start.Config{
-		Name:        name,
-		YakosRoot:   yakosRoot,
-		HomeDir:     home,
-		Runtime:     runtime,
-		Safe:        safe,
-		AllowRoot:   allowRoot,
-		NoAgents:    noAgents,
-		DryRun:      dryRun,
-		PrintAgents: printAgents,
-		Continue:    continueSession,
-		Resume:      resume,
-		Fork:        fork,
-		IDE:         ide,
-		Bare:        bare,
-		StrictMCP:   strictMCP,
-		Model:       model,
-		Passthrough: passthrough,
-		Writer:      os.Stdout,
-		ErrWriter:   os.Stderr,
+		Name:         name,
+		YakosRoot:    yakosRoot,
+		HomeDir:      home,
+		Runtime:      runtime,
+		Safe:         safe,
+		AllowRoot:    allowRoot,
+		NoAgents:     noAgents,
+		DryRun:       dryRun,
+		PrintAgents:  printAgents,
+		Continue:     continueSession,
+		Resume:       resume,
+		Fork:         fork,
+		IDE:          ide,
+		Bare:         bare,
+		StrictMCP:    strictMCP,
+		Model:        model,
+		Passthrough:  passthrough,
+		NoREPL:       noREPL,
+		ConsoleAddr:  consoleAddr,
+		ConsoleToken: consoleTok,
+		Writer:       os.Stdout,
+		ErrWriter:    os.Stderr,
 	}
 
 	if _, err := start.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "start: %v\n", err)
 		os.Exit(1)
+	}
+
+	// When --no-repl is set, start.Run returns after the banner (no exec).
+	// Hand off to runServe to bring up the daemon + console.
+	if noREPL {
+		serveArgs := []string{}
+		if consoleAddr != "" {
+			serveArgs = append(serveArgs, "--console-addr", consoleAddr)
+		}
+		if dryRun {
+			// --no-repl --dry-run: serve path already printed its intent in
+			// the banner; exit cleanly without binding.
+			os.Exit(0)
+		}
+		runServe(yakosRoot, serveArgs)
 	}
 }
 

@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -104,6 +105,27 @@ type Config struct {
 	// Passthrough holds extra flags forwarded verbatim to the runtime CLI.
 	Passthrough []string
 
+	// NoREPL, when true, skips the syscall.Exec step (the REPL launch)
+	// after printing the preflight banner.  The caller is responsible for
+	// starting the web console (typically via runServe).  Alias: --web.
+	NoREPL bool
+
+	// ConsoleAddr is the address where the unified console is (or will be)
+	// bound.  Defaults to "127.0.0.1:7890" when empty.  Used to compose
+	// the Web console URL shown in the preflight banner.
+	ConsoleAddr string
+
+	// ConsoleProbeFn, if non-nil, is called to detect whether a console
+	// daemon is already listening on addr.  Returns true when reachable.
+	// When nil, net.DialTimeout is used with a 200 ms timeout.
+	// Tests inject a stub to keep the suite hermetic (no real listener).
+	ConsoleProbeFn func(addr string) bool
+
+	// ConsoleToken is the bearer token for the web console URL.  When
+	// empty the banner shows the URL without a token fragment (useful in
+	// dry-run mode before a state dir exists).
+	ConsoleToken string
+
 	// --- I/O ---
 
 	// Writer is where banner output is written.  Defaults to os.Stdout.
@@ -169,6 +191,14 @@ type Banner struct {
 
 	// AuditEvent is the JSON-serialised session_launched event.
 	AuditEvent string
+
+	// WebConsoleURL is the fully-composed URL for the unified web console,
+	// including the token fragment.  Empty when no token was available.
+	WebConsoleURL string
+
+	// WebConsoleRunning is true when the probe detected an active console
+	// daemon on the console address at banner time.
+	WebConsoleRunning bool
 }
 
 // Run executes the start command and returns the composed banner.
@@ -258,9 +288,9 @@ func Run(cfg Config) (*Banner, error) {
 		_, _ = fmt.Fprintf(ew, "WARN: %q auth not detected; the runtime may prompt or fail. Run 'yakos auth login %s' to fix.\n", runtime, runtime)
 	}
 
-	// Skip PATH check when a test has injected ExecFn — the test is mocking the
-	// runtime entirely, so a real binary on PATH is not required.
-	if !cfg.DryRun && !cfg.PrintAgents && cfg.ExecFn == nil {
+	// Skip PATH check when a test has injected ExecFn, when --no-repl is set
+	// (no REPL will be exec'd), or when in dry-run / print-agents mode.
+	if !cfg.DryRun && !cfg.PrintAgents && !cfg.NoREPL && cfg.ExecFn == nil {
 		if !cliOk {
 			return nil, fmt.Errorf("start: %q CLI not on PATH. Install it, then retry. (--dry-run works without the CLI installed.)", runtime)
 		}
@@ -301,9 +331,22 @@ func Run(cfg Config) (*Banner, error) {
 
 	modeFlags := buildModeFlags(cfg)
 
+	// ---- web console URL (best-effort probe) -----------------------------------
+
+	consoleAddr := cfg.ConsoleAddr
+	if consoleAddr == "" {
+		consoleAddr = "127.0.0.1:7890"
+	}
+	probeFn := cfg.ConsoleProbeFn
+	if probeFn == nil {
+		probeFn = defaultConsoleProbe
+	}
+	consoleRunning := probeFn(consoleAddr)
+	consoleURL := buildConsoleURL(consoleAddr, cfg.ConsoleToken)
+
 	// ---- preflight banner ------------------------------------------------------
 
-	printBanner(w, name, projectRepo, controlDir, runtime, caps, cliOk, authOk, permMode, cfg.AllowRoot, agentCount, cfg.NoAgents, modeFlags)
+	printBanner(w, name, projectRepo, controlDir, runtime, caps, cliOk, authOk, permMode, cfg.AllowRoot, agentCount, cfg.NoAgents, modeFlags, consoleURL, consoleRunning, cfg.NoREPL)
 
 	// ---- soft-degrade warnings --------------------------------------------------
 
@@ -328,22 +371,30 @@ func Run(cfg Config) (*Banner, error) {
 
 	var dryRunCmd string
 	if cfg.DryRun {
-		dryRunCmd = formatDryRunCmd(runtime, projectRepo, permMode, agentCount, cfg, extraFlags)
-		_, _ = fmt.Fprintln(w)
-		_, _ = fmt.Fprintln(w, "Dry run — would exec via runtime '"+runtime+"':")
-		_, _ = fmt.Fprintln(w, dryRunCmd)
+		if cfg.NoREPL {
+			_, _ = fmt.Fprintln(w)
+			_, _ = fmt.Fprintln(w, "Dry run — --no-repl: would start web console daemon (yakos serve) at "+consoleAddr)
+			_, _ = fmt.Fprintln(w, "  No REPL will be launched.")
+		} else {
+			dryRunCmd = formatDryRunCmd(runtime, projectRepo, permMode, agentCount, cfg, extraFlags)
+			_, _ = fmt.Fprintln(w)
+			_, _ = fmt.Fprintln(w, "Dry run — would exec via runtime '"+runtime+"':")
+			_, _ = fmt.Fprintln(w, dryRunCmd)
+		}
 		return &Banner{
-			Project:      name,
-			ProjectRepo:  projectRepo,
-			ControlDir:   controlDir,
-			Runtime:      runtime,
-			Capabilities: caps,
-			CLIOk:        cliOk,
-			AuthOk:       authOk,
-			PermMode:     permMode,
-			AgentCount:   agentCount,
-			ModeFlags:    modeFlags,
-			DryRunCmd:    dryRunCmd,
+			Project:           name,
+			ProjectRepo:       projectRepo,
+			ControlDir:        controlDir,
+			Runtime:           runtime,
+			Capabilities:      caps,
+			CLIOk:             cliOk,
+			AuthOk:            authOk,
+			PermMode:          permMode,
+			AgentCount:        agentCount,
+			ModeFlags:         modeFlags,
+			DryRunCmd:         dryRunCmd,
+			WebConsoleURL:     consoleURL,
+			WebConsoleRunning: consoleRunning,
 		}, nil
 	}
 
@@ -377,18 +428,26 @@ func Run(cfg Config) (*Banner, error) {
 	}
 
 	banner := &Banner{
-		Project:      name,
-		ProjectRepo:  projectRepo,
-		ControlDir:   controlDir,
-		Runtime:      runtime,
-		Capabilities: caps,
-		CLIOk:        cliOk,
-		AuthOk:       authOk,
-		PermMode:     permMode,
-		AgentCount:   agentCount,
-		ModeFlags:    modeFlags,
-		DryRunCmd:    dryRunCmd,
-		AuditEvent:   auditEvent,
+		Project:           name,
+		ProjectRepo:       projectRepo,
+		ControlDir:        controlDir,
+		Runtime:           runtime,
+		Capabilities:      caps,
+		CLIOk:             cliOk,
+		AuthOk:            authOk,
+		PermMode:          permMode,
+		AgentCount:        agentCount,
+		ModeFlags:         modeFlags,
+		DryRunCmd:         dryRunCmd,
+		AuditEvent:        auditEvent,
+		WebConsoleURL:     consoleURL,
+		WebConsoleRunning: consoleRunning,
+	}
+
+	// ---- no-repl mode: skip exec, return for caller to start serve ----------
+
+	if cfg.NoREPL {
+		return banner, nil
 	}
 
 	execFn := cfg.ExecFn
@@ -668,7 +727,8 @@ func materializeAgents(yakosRoot, projectRepo, runtime string, ew io.Writer) err
 // printBanner writes the preflight banner to w.  The output is structurally
 // identical to bash start.sh's print_banner() function.
 func printBanner(w io.Writer, name, projectRepo, controlDir, runtime, caps string,
-	cliOk, authOk bool, permMode string, allowRoot bool, agentCount int, noAgents bool, modeFlags string) {
+	cliOk, authOk bool, permMode string, allowRoot bool, agentCount int, noAgents bool,
+	modeFlags, consoleURL string, consoleRunning, noREPL bool) {
 
 	cliStr := "OK"
 	if !cliOk {
@@ -693,6 +753,20 @@ func printBanner(w io.Writer, name, projectRepo, controlDir, runtime, caps strin
 		agentStr += " (--no-agents: suppressed)"
 	}
 
+	// Compose the web console line.  When the daemon is already listening we
+	// say "(running)"; when it isn't, we give the operator a hint.
+	var consoleLine string
+	if consoleURL != "" {
+		if consoleRunning {
+			consoleLine = "  web console:    (running) " + consoleURL
+		} else if noREPL {
+			// --no-repl: serve will start momentarily — hint is not needed.
+			consoleLine = "  web console:    " + consoleURL + "  (starting...)"
+		} else {
+			consoleLine = "  web console:    " + consoleURL + "  (run 'yakos serve' or 'yakos start --no-repl' to start)"
+		}
+	}
+
 	lines := []string{
 		"yakos start — preflight",
 		"  project:        " + name,
@@ -704,15 +778,44 @@ func printBanner(w io.Writer, name, projectRepo, controlDir, runtime, caps strin
 		"  permission:     " + permStr,
 		"  agents:         " + agentStr,
 		"  mode flags:     " + modeFlags,
+	}
+	if consoleLine != "" {
+		lines = append(lines, consoleLine)
+	}
+	lines = append(lines,
 		"",
 		"  Lead discipline (rule:lead-dispatch-discipline):",
 		"    lead = decompose / integrate / supervise. specialists = parallel.",
 		"    sequential only when the next task depends on the previous.",
-	}
+	)
 
 	for _, l := range lines {
 		_, _ = fmt.Fprintln(w, l)
 	}
+}
+
+// buildConsoleURL returns the http URL for the unified console.
+// If token is empty, the fragment is omitted.
+func buildConsoleURL(addr, token string) string {
+	if addr == "" {
+		addr = "127.0.0.1:7890"
+	}
+	u := "http://" + addr + "/"
+	if token != "" {
+		u += "#token=" + token
+	}
+	return u
+}
+
+// defaultConsoleProbe returns true when a TCP connection to addr succeeds
+// within 200 ms, indicating the console daemon is already running.
+func defaultConsoleProbe(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // buildModeFlags assembles the mode-flags label shown in the banner.
@@ -736,6 +839,9 @@ func buildModeFlags(cfg Config) string {
 	}
 	if cfg.Model != "" {
 		parts = append(parts, "model="+cfg.Model)
+	}
+	if cfg.NoREPL {
+		parts = append(parts, "no-repl")
 	}
 	return strings.Join(parts, " ")
 }
@@ -1022,6 +1128,14 @@ Session passthroughs (forwarded to the runtime CLI when supported):
     --strict-mcp          claude only — pass --strict-mcp-config.
     --model <alias>       Forward to runtime if it supports a model flag.
 
+Web console:
+    --no-repl, --web      Skip the REPL; run preflight then bring up the web
+                          console daemon (yakos serve) instead. Blocks in the
+                          foreground like 'yakos serve'. Combines preflight +
+                          web UI without launching an interactive session.
+                          --no-repl --dry-run prints the serve intent without
+                          binding.
+
 Inspection:
     --dry-run             Print what would be exec'd; exit 0.
     --print-agents        Print the composed agent JSON; exit 0.
@@ -1034,6 +1148,8 @@ Examples:
     yakos start myapp --runtime gemini --safe
     yakos start myapp --dry-run
     yakos start myapp --allow-root    # container/root bypass mode
+    yakos start myapp --no-repl       # web console only, no REPL
+    yakos start myapp --web           # same as --no-repl
 `)
 }
 

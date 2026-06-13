@@ -12,6 +12,39 @@ Companion docs: [overview.md](overview.md) for architecture context,
 
 ## Starting the console
 
+### See the URL before starting
+
+`yakos start` prints the web console URL in its preflight banner on every
+launch, regardless of whether the daemon is running:
+
+```
+yakos start — preflight
+  ...
+  web console:    http://127.0.0.1:7890/#token=<token>  (run 'yakos serve' or 'yakos start --no-repl' to start)
+```
+
+If the daemon is already listening, the banner shows `(running)` next to
+the URL instead of the hint.
+
+### Web-only mode (`--no-repl`)
+
+To skip the REPL entirely and bring up the console in the foreground:
+
+```sh
+yakos start myapp --no-repl    # preflight + daemon + console, no REPL
+yakos start myapp --web        # same flag, shorter alias
+```
+
+`--no-repl` runs the full preflight (project resolution, banner, agents),
+then hands off to `yakos serve` internally. It blocks in the foreground
+like `yakos serve`. Use this when you want the browser-based console
+without an interactive terminal session.
+
+`--no-repl --dry-run` prints what would happen (preflight + serve intent)
+without binding any port.
+
+### Starting with the full daemon
+
 ```sh
 yakos serve
 # Prints: yakos serve: console: http://127.0.0.1:7890/#token=<token>
