@@ -1,6 +1,9 @@
 ---
 name: test-driven-development
 description: Drive implementation and bug fixes test-first (RED→GREEN→REFACTOR), proving behavior with a failing test before the code that satisfies it. Use when implementing new logic, changing existing behavior, fixing a reported bug, or adding edge-case handling — write the failing test first; a passing test is the evidence, "looks right" is not.
+allowed-tools: Read Edit Bash Grep
+argument-hint: "[<path-or-test-target>]"
+mode: [implement, review]
 tier: sonnet
 invocable_by: [lead, backend, frontend, mobile, maintainer]
 domains: [testing, quality, implementation]

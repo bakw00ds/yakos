@@ -1,12 +1,16 @@
 ---
 name: interview-me
 description: Close the gap between what was asked and what is actually needed via one-question-at-a-time interviewing, each question carrying your guessed answer, until intent is ~95% clear. Use when a request is underspecified on who/why/success-criteria/constraints, when you're tempted to fill in unstated assumptions, or when the user says "interview me" / "stress-test my thinking" before any building begins.
+allowed-tools: Read
+argument-hint: "[<topic-or-request>]"
+mode: [plan]
 tier: sonnet
 invocable_by: [lead, planner, architect]
 domains: [planning, requirements]
 version: 1
 references:
   - rule:lead-dispatch-discipline
+  - skill:hallucination-check
   - playbook:04-docs-architecture
 ---
 

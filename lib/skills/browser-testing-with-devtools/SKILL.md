@@ -1,6 +1,9 @@
 ---
 name: browser-testing-with-devtools
 description: Verify front-end behavior in a live browser — DOM, console, network, computed styles, performance, accessibility tree — via the chrome-devtools MCP server, instead of trusting static code review or unit tests alone. Use when shipping a UI change, diagnosing a rendering/network/perf bug, or confirming a fix in the running app; requires the chrome-devtools MCP server to be configured.
+allowed-tools: Read Bash
+argument-hint: "[<url-or-page>]"
+mode: [review]
 tier: sonnet
 invocable_by: [lead, frontend, mobile]
 domains: [frontend, testing, quality]

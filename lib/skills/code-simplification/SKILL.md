@@ -1,6 +1,9 @@
 ---
 name: code-simplification
 description: Simplify code for clarity while preserving exact behavior, understanding why code exists (Chesterton's Fence) before changing it. Use when recently-changed code is hard to read — deep nesting, long functions, nested ternaries, generic names, duplicated logic — and you want a behavior-preserving cleanup, NOT a feature change or a dead-code sweep.
+allowed-tools: Read Edit Bash Grep
+argument-hint: "[<path-or-glob>]"
+mode: [implement]
 tier: sonnet
 invocable_by: [lead, backend, frontend, mobile, maintainer]
 domains: [quality, refactoring, readability]

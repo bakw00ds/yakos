@@ -1,6 +1,9 @@
 ---
 name: deprecation-and-migration
 description: Manage the sunset of an old system, API, or feature — decide maintain-vs-sunset, build a proven replacement, migrate consumers incrementally, and remove only after verifying zero usage. Use when proposing to deprecate or remove anything with consumers, when an old code path has become a maintenance liability, or when planning a migration off a legacy interface.
+allowed-tools: Read Edit Bash Grep SendMessage
+argument-hint: "[<system-or-api>]"
+mode: [plan, implement]
 tier: sonnet
 invocable_by: [lead, architect, api-designer, maintainer, backend]
 domains: [architecture, maintenance, api]

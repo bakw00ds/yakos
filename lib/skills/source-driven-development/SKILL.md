@@ -1,6 +1,9 @@
 ---
 name: source-driven-development
 description: Ground framework- and library-specific implementation decisions in official documentation for the exact installed version, citing the source URL, instead of writing from memory. Use when implementing framework features (routing, forms, auth, state), writing reusable boilerplate, or any version-sensitive API call where an outdated or hallucinated pattern would be costly.
+allowed-tools: Read Edit Bash Grep WebFetch
+argument-hint: "[<framework-or-feature>]"
+mode: [implement]
 tier: sonnet
 invocable_by: [lead, backend, frontend, mobile, architect]
 domains: [implementation, quality, correctness]

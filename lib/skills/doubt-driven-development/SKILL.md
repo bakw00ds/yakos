@@ -1,6 +1,9 @@
 ---
 name: doubt-driven-development
 description: Subject a high-stakes or irreversible decision to a fresh-context adversarial review BEFORE it stands, by dispatching an independent reviewer who only sees the artifact and contract — not your reasoning. Use when a decision crosses module boundaries, asserts an unverifiable property (thread-safety, ordering, idempotence), or has irreversible blast radius (prod deploy, data migration, public API change).
+allowed-tools: Read SendMessage
+argument-hint: "[<decision-or-artifact>]"
+mode: [review, plan]
 tier: opus
 invocable_by: [lead, architect]
 domains: [quality, architecture, risk]

@@ -27,7 +27,10 @@ to production where it doesn't fix anything because the real bug
 is elsewhere.
 
 Maps to [Syncause/debug-skill](https://github.com/Syncause/debug-skill)
-from awesome-harness-engineering's debugging category.
+from awesome-harness-engineering's debugging category, and extends it
+with the root-cause triage from
+[addyosmani/agent-skills](https://github.com/addyosmani/agent-skills)
+(MIT) — `debugging-and-error-recovery`.
 
 ## Scope
 
@@ -60,9 +63,6 @@ template below. Each step produces evidence, not a guess.
 
 Steps 1–3 generate the cited evidence; steps 4–6 are the fix and its
 proof. The diagnosis template below records the output.
-
-Adapted from [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills)
-(MIT) — `debugging-and-error-recovery`.
 
 ## Automated pass
 
