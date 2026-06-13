@@ -293,6 +293,19 @@ func TestVendorRoute_404ForUnknownFile(t *testing.T) {
 	}
 }
 
+// TestVendorRoute_CORP verifies /vendor/mermaid.min.js carries the
+// Cross-Origin-Resource-Policy: same-origin header, consistent with all
+// other static asset handlers.
+func TestVendorRoute_CORP(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/vendor/mermaid.min.js", "")
+	defer drainClose(resp)
+	corp := resp.Header.Get("Cross-Origin-Resource-Policy")
+	if corp != "same-origin" {
+		t.Errorf("GET /vendor/mermaid.min.js: Cross-Origin-Resource-Policy=%q; want same-origin", corp)
+	}
+}
+
 // ---- 3. Content-Type 415 gate -----------------------------------------------
 // Non-GET requests without Content-Type: application/json must receive 415.
 

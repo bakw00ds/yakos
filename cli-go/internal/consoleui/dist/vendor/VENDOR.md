@@ -13,6 +13,7 @@ file and the corresponding constant in `vendor_checksum_test.go`.
 | Version | 11.15.0 |
 | Source  | https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js |
 | npm     | https://www.npmjs.com/package/mermaid/v/11.15.0 |
+| License | MIT — https://github.com/mermaid-js/mermaid/blob/v11.15.0/LICENSE |
 | SHA-256 | 70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de |
 
 Purpose: read-only DAG canvas renderer for the Flows UI (Phase 5).

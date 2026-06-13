@@ -250,8 +250,14 @@ func (s *Server) registerRoutes() {
 	// Token-exempt: static assets that carry no secrets.
 	// The files live under dist/vendor/ in the embed.FS; strip the
 	// /vendor/ prefix so the FS path is dist/vendor/<filename>.
+	// Wrapped to set Cross-Origin-Resource-Policy: same-origin, consistent
+	// with the other static asset handlers (handleIndex, handleAppJS, etc.).
 	vendorSub, _ := fs.Sub(vendorFS, "dist/vendor")
-	s.mux.Handle("/vendor/", http.StripPrefix("/vendor/", http.FileServer(http.FS(vendorSub))))
+	vendorHandler := http.StripPrefix("/vendor/", http.FileServer(http.FS(vendorSub)))
+	s.mux.Handle("/vendor/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		vendorHandler.ServeHTTP(w, r)
+	}))
 
 	// ---- Kanban sub-dashboard -----------------------------------------------
 	// Mount kanban.Handler() under /kanban/. The kanban handler's own

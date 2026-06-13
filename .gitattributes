@@ -1,0 +1,6 @@
+# Treat vendored JS blobs as binary so git never applies EOL normalization
+# or diff text-heuristics to them.  The SHA-256 pinned in
+# cli-go/internal/consoleui/vendor_checksum_test.go is over the exact raw
+# bytes; any EOL conversion (e.g. autocrlf on Windows) would corrupt the
+# hash and fail TestVendorChecksums on windows-latest CI.
+cli-go/internal/consoleui/dist/vendor/*.min.js binary
