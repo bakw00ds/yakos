@@ -64,6 +64,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/retro"
 	"github.com/bakw00ds/yakos/internal/routing"
 	"github.com/bakw00ds/yakos/internal/runtime"
+	"github.com/bakw00ds/yakos/internal/selfupdate"
 	internalserve "github.com/bakw00ds/yakos/internal/serve"
 	"github.com/bakw00ds/yakos/internal/session"
 	"github.com/bakw00ds/yakos/internal/skill"
@@ -2691,32 +2692,66 @@ func runStart(yakosRoot string, args []string) {
 
 // runUpdate implements `yakos update` natively in Go.
 //
-// Usage mirrors cli/lib/update.sh exactly:
+// Install-type detection:
+//   - Source / dev install (bash tree present at <yakosRoot>/cli/yakos):
+//     Runs git pull --ff-only + optional per-project refresh.
+//     Flags: --allow-non-ff, --all, --dry-run.
+//   - Binary-only install (no bash tree, common curl|sh case):
+//     Downloads the latest release from GitHub, verifies SHA-256, and
+//     atomically replaces the running binary.
+//     Flags: --check, --force, --dry-run.
 //
-//	yakos update                 — git pull --ff-only in YAKOS_ROOT
-//	yakos update --allow-non-ff  — allow non-fast-forward pulls
-//	yakos update --all           — pull + refresh all deployed projects
-//	yakos update --dry-run       — report what would happen without pulling
-//	yakos update --help          — print help and exit 0
+// Mode override flags:
 //
-// YAKOS_ROOT must be set in the environment (set by the bash entry-point;
-// also resolved from the binary location by main()).
+//	--binary   Force binary-update path regardless of bash tree presence.
+//	--source   Force git-pull path regardless of bash tree presence.
+//
+// Common to both modes:
+//
+//	yakos update --check   — report latest version; apply nothing
+//	yakos update --help    — print help and exit 0
+//
+// YAKOS_ROOT must be set in the environment (resolved from the binary
+// location by main() when unset).
 func runUpdate(yakosRoot string, args []string) {
+	// Source-path flags.
 	allowNonFF := false
 	allProjects := false
+
+	// Binary-path flags.
+	checkOnly := false
+	force := false
+
+	// Common flags.
 	dryRun := false
+
+	// Mode override.
+	forceBinary := false
+	forceSource := false
 
 	for _, arg := range args {
 		switch arg {
 		case "-h", "--help":
-			update.PrintHelp(os.Stdout)
+			printUpdateHelp(os.Stdout)
 			os.Exit(0)
+		// Source-path flags.
 		case "--allow-non-ff":
 			allowNonFF = true
 		case "--all":
 			allProjects = true
+		// Binary-path flags.
+		case "--check":
+			checkOnly = true
+		case "--force":
+			force = true
+		// Common.
 		case "--dry-run":
 			dryRun = true
+		// Mode override.
+		case "--binary":
+			forceBinary = true
+		case "--source":
+			forceSource = true
 		default:
 			fmt.Fprintf(os.Stderr, "update: unknown argument %q (try --help)\n", arg)
 			os.Exit(1)
@@ -2732,9 +2767,38 @@ func runUpdate(yakosRoot string, args []string) {
 		os.Exit(1)
 	}
 
+	// Determine install type.
+	isBinaryInstall := !passthrough.BashYakosExists(yakosRoot)
+	if forceBinary {
+		isBinaryInstall = true
+	}
+	if forceSource {
+		isBinaryInstall = false
+	}
+
+	if isBinaryInstall {
+		runUpdateBinary(yakosRoot, checkOnly || dryRun, force)
+		return
+	}
+
+	// Source / dev install: git pull path.
 	home := os.Getenv("HOME")
 	if home == "" {
 		home = "/tmp"
+	}
+
+	// --check on source path: just print current + latest and exit.
+	if checkOnly {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		latest, err := selfupdate.LatestRelease(ctx, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "update: %v\n", err)
+			os.Exit(1)
+		}
+		cur, _ := version.Read(yakosRoot)
+		fmt.Fprintf(os.Stdout, "current: %s\nlatest:  %s\n", cur, latest)
+		return
 	}
 
 	cfg := update.Config{
@@ -2751,6 +2815,75 @@ func runUpdate(yakosRoot string, args []string) {
 		fmt.Fprintf(os.Stderr, "update: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runUpdateBinary runs the self-update path for binary-only installs.
+// dryRun covers both --dry-run and --check (no write; just report).
+func runUpdateBinary(yakosRoot string, dryRun, force bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Determine the running version.  For binary-only installs the ldflags
+	// variable is the authoritative source; fall back to the VERSION file
+	// if present (dev build without ldflags).
+	currentVersion := strings.TrimSpace(version.Version)
+	if currentVersion == "" {
+		if v, err := version.Read(yakosRoot); err == nil {
+			// Strip the " (go)" suffix that Read appends.
+			currentVersion = strings.TrimSuffix(strings.TrimSpace(v), " (go)")
+			currentVersion = strings.TrimSpace(currentVersion)
+		}
+	}
+
+	if currentVersion != "" {
+		fmt.Fprintf(os.Stdout, "current version: %s\n", currentVersion)
+	}
+
+	res, err := selfupdate.Apply(ctx, selfupdate.Opts{
+		CurrentVersion: currentVersion,
+		Force:          force,
+		DryRun:         dryRun,
+		Writer:         os.Stdout,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "update: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !res.AlreadyUpToDate && !dryRun {
+		fmt.Fprintf(os.Stdout, "latest version: %s\n", res.NewVersion)
+	} else if dryRun && !res.AlreadyUpToDate {
+		fmt.Fprintf(os.Stdout, "latest version: %s\n", res.NewVersion)
+	}
+}
+
+// printUpdateHelp writes the combined help text for `yakos update`.
+func printUpdateHelp(w io.Writer) {
+	_, _ = fmt.Fprint(w, `yakos update — update yakOS to the latest release
+
+Auto-detects install type:
+  binary install  → downloads latest GitHub release + verifies SHA-256
+                    + atomically replaces the running binary
+  source install  → git pull --ff-only in $YAKOS_ROOT + optional refresh
+
+Binary-install options:
+  --check          Report whether an update is available; apply nothing.
+  --force          Reinstall latest even when already up to date.
+  --dry-run        Print what WOULD happen; write nothing.
+  --binary         Force binary-update path (even if bash tree is present).
+
+Source-install options:
+  --allow-non-ff   Allow non-fast-forward git pull.
+  --all            After the framework update, discover every deployed
+                   project and run yakos refresh on each.
+  --dry-run        Print what WOULD happen without running git pull or
+                   project refresh.
+  --source         Force git-pull path (even if bash tree is absent).
+
+Common options:
+  --check          (binary mode) report latest version; no write.
+  --help, -h       Print this help.
+`)
 }
 
 // runQuickstart implements `yakos quickstart` natively in Go.
