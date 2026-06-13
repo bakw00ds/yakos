@@ -178,12 +178,19 @@ func New(cfg Config) *Server {
 	// daemon-level mintOperatorID; we have no per-request handle to it here,
 	// so we return "" (empty) and let the dispatch facade stamp it as usual.
 	// This is intentional: no behaviour change on the loopback path.
+	// loopbackTrusted=true: this console always binds loopback-only (enforced
+	// in Serve()).  Certless requests on the loopback path continue to resolve
+	// to RoleAdmin/Authenticated=false, preserving today's bearer-token
+	// cooperative-labeling behavior.  When the non-loopback listener is
+	// introduced (next PR), it constructs a separate Resolver with
+	// loopbackTrusted=false so certless networked requests fail closed to
+	// RoleRead, never admin.
 	mapper := netid.NewRoleMapper(cfg.StateDir)
 	resolver := netid.NewResolver(mapper, func(r *http.Request) string {
 		// No per-request cooperative label is available at the edge; the
 		// dispatch facade stamps operator_id from its daemon-level opID.
 		return ""
-	})
+	}, true /* loopbackTrusted */)
 
 	// Wrap with edge auth: Host check + token (with static-asset exemptions)
 	// + Content-Type gate for mutations + identity resolution (additive only).

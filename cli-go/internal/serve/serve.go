@@ -379,6 +379,7 @@ func Run(ctx context.Context, cfg Config) error {
 			DispatchService:   dispatchSvc,
 			WorkDir:           workDir,
 			WorkflowEngine:    workflowEngine,
+			StateDir:          cfg.consoleStateDir(),
 		})
 		// consoleURL is built by start.go's banner; this local string was a
 		// no-op dead-code assignment.  Kept as documentation only.

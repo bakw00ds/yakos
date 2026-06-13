@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -122,9 +123,36 @@ func TestRoleMapper_MissingFile_DefaultsToRead(t *testing.T) {
 	}
 }
 
+func TestRoleMapper_EmptyStateDir_AlwaysRead_NoFileAccess(t *testing.T) {
+	t.Parallel()
+	// NewRoleMapper("") must never touch the filesystem (no CWD-relative read)
+	// and must always return RoleRead regardless of CN.
+	m := netid.NewRoleMapper("")
+	for _, cn := range []string{"alice", "admin", "root", "", "anything"} {
+		if got := m.Lookup(cn); got != netid.RoleRead {
+			t.Errorf("NewRoleMapper(\"\").Lookup(%q)=%v; want RoleRead (empty stateDir → fail-closed, no file I/O)", cn, got)
+		}
+	}
+}
+
+func TestRoleMapper_PathIsAbsoluteUnderStateDir(t *testing.T) {
+	t.Parallel()
+	// When stateDir is set, the resolved roles file path must be absolute and
+	// contain the stateDir prefix, preventing CWD-relative resolution.
+	stateDir := t.TempDir()
+	// Write a roles file so Lookup actually finds it and exercises the path.
+	writeRolesFile(t, stateDir, map[string]string{"alice": "admin"})
+	m := netid.NewRoleMapper(stateDir)
+	// The mapper returns a real role from the file → path is absolute and correct.
+	if got := m.Lookup("alice"); got != netid.RoleAdmin {
+		t.Errorf("Lookup after writeRolesFile: got %v; want RoleAdmin (path must be absolute under stateDir)", got)
+	}
+}
+
 func TestRoleMapper_KnownCN_MapsRole(t *testing.T) {
 	t.Parallel()
-	stateDir := writeRolesFile(t, map[string]string{
+	stateDir := t.TempDir()
+	writeRolesFile(t, stateDir, map[string]string{
 		"alice": "admin",
 		"bob":   "dispatch",
 		"ci":    "flows-run",
@@ -143,9 +171,8 @@ func TestRoleMapper_KnownCN_MapsRole(t *testing.T) {
 
 func TestRoleMapper_UnknownCN_DefaultsToRead(t *testing.T) {
 	t.Parallel()
-	stateDir := writeRolesFile(t, map[string]string{
-		"alice": "admin",
-	})
+	stateDir := t.TempDir()
+	writeRolesFile(t, stateDir, map[string]string{"alice": "admin"})
 	m := netid.NewRoleMapper(stateDir)
 	if got := m.Lookup("unknown-operator"); got != netid.RoleRead {
 		t.Errorf("unknown CN: got %v; want RoleRead", got)
@@ -170,7 +197,8 @@ func TestRoleMapper_CorruptFile_DefaultsToRead(t *testing.T) {
 
 func TestRoleMapper_UnknownRoleString_DefaultsToRead(t *testing.T) {
 	t.Parallel()
-	stateDir := writeRolesFile(t, map[string]string{
+	stateDir := t.TempDir()
+	writeRolesFile(t, stateDir, map[string]string{
 		"dan": "superuser", // not a valid role
 	})
 	m := netid.NewRoleMapper(stateDir)
@@ -180,9 +208,10 @@ func TestRoleMapper_UnknownRoleString_DefaultsToRead(t *testing.T) {
 }
 
 func TestRoleMapper_ConcurrentReads_Race(t *testing.T) {
-	// Run without t.Parallel() at the outer level so -race can observe this
-	// goroutine pattern; inner goroutines do concurrent Lookups.
-	stateDir := writeRolesFile(t, map[string]string{
+	// Not t.Parallel() at outer level so the -race detector observes the
+	// goroutine fan-out clearly; inner goroutines do concurrent Lookups.
+	stateDir := t.TempDir()
+	writeRolesFile(t, stateDir, map[string]string{
 		"alice": "admin",
 		"bob":   "dispatch",
 	})
@@ -262,39 +291,77 @@ func TestIdentityFrom_NoMiddleware_ReturnsZero(t *testing.T) {
 
 // ---- Resolver ---------------------------------------------------------------
 
-func TestResolver_LoopbackBearer_AdminUnauthenticated(t *testing.T) {
+// TestResolver_LoopbackTrusted_NoCert_AdminUnauthenticated verifies that when
+// loopbackTrusted=true and no client cert is present (the current loopback
+// bearer path), the resolver returns RoleAdmin/Authenticated=false —
+// preserving today's full-access loopback behavior unchanged.
+func TestResolver_LoopbackTrusted_NoCert_AdminUnauthenticated(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
 	m := netid.NewRoleMapper(stateDir)
 	res := netid.NewResolver(m, func(r *http.Request) string {
 		return "local-operator"
-	})
+	}, true /* loopbackTrusted */)
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	// No TLS → loopback/bearer path
+	// No TLS → certless, loopback bearer path
 	id := res.Resolve(r)
 
 	if id.Authenticated {
-		t.Error("loopback bearer: Authenticated=true; want false")
+		t.Error("loopbackTrusted + no cert: Authenticated=true; want false")
 	}
 	if id.Role != netid.RoleAdmin {
-		t.Errorf("loopback bearer: Role=%v; want RoleAdmin", id.Role)
+		t.Errorf("loopbackTrusted + no cert: Role=%v; want RoleAdmin (today's loopback behavior)", id.Role)
 	}
 	if id.OperatorID != "local-operator" {
-		t.Errorf("loopback bearer: OperatorID=%q; want local-operator", id.OperatorID)
+		t.Errorf("loopbackTrusted + no cert: OperatorID=%q; want local-operator", id.OperatorID)
+	}
+}
+
+// TestResolver_NotLoopbackTrusted_NoCert_FailClosed verifies that when
+// loopbackTrusted=false (non-loopback listener) and no client cert is present,
+// the resolver returns RoleRead/Authenticated=false — NEVER admin.
+// This is the defense-in-depth property: even if a future TLS config is wrong
+// and a certless request arrives, it cannot obtain admin access.
+func TestResolver_NotLoopbackTrusted_NoCert_FailClosed(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	m := netid.NewRoleMapper(stateDir)
+	res := netid.NewResolver(m, func(r *http.Request) string {
+		return "attacker-label" // even if a label is supplied, no elevation
+	}, false /* loopbackTrusted=false: non-loopback listener */)
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	// No TLS client cert — certless request to a non-loopback resolver
+	id := res.Resolve(r)
+
+	if id.Role == netid.RoleAdmin {
+		t.Error("loopbackTrusted=false + no cert: Role=admin; want RoleRead (fail-closed, NEVER admin)")
+	}
+	if id.Authenticated {
+		t.Error("loopbackTrusted=false + no cert: Authenticated=true; want false")
+	}
+	if id.OperatorID != "" {
+		t.Errorf("loopbackTrusted=false + no cert: OperatorID=%q; want empty (no cooperative label off-loopback)", id.OperatorID)
+	}
+	if id.Role != netid.RoleRead {
+		t.Errorf("loopbackTrusted=false + no cert: Role=%v; want RoleRead", id.Role)
 	}
 }
 
 func TestResolver_VerifiedClientCert_AuthenticatedWithMappedRole(t *testing.T) {
 	t.Parallel()
 	// Set up role mapping for the CN we will use.
-	stateDir := writeRolesFile(t, map[string]string{
+	stateDir := t.TempDir()
+	writeRolesFile(t, stateDir, map[string]string{
 		"alice-workstation": "dispatch",
 	})
 	m := netid.NewRoleMapper(stateDir)
+	// loopbackTrusted value doesn't matter when a verified cert is present;
+	// use false to confirm certs work regardless.
 	res := netid.NewResolver(m, func(r *http.Request) string {
 		return "fallback-label"
-	})
+	}, false)
 
 	cs := performMTLSHandshake(t, "alice-workstation")
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -317,7 +384,7 @@ func TestResolver_VerifiedClientCert_UnmappedCN_DefaultsToRead(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir() // no roles.json → all default to RoleRead
 	m := netid.NewRoleMapper(stateDir)
-	res := netid.NewResolver(m, nil)
+	res := netid.NewResolver(m, nil, false)
 
 	cs := performMTLSHandshake(t, "new-operator")
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -339,7 +406,7 @@ func TestResolver_Middleware_StoresIdentityInContext(t *testing.T) {
 	m := netid.NewRoleMapper(stateDir)
 	res := netid.NewResolver(m, func(r *http.Request) string {
 		return "middleware-operator"
-	})
+	}, true /* loopbackTrusted */)
 
 	var capturedID netid.Identity
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -355,20 +422,20 @@ func TestResolver_Middleware_StoresIdentityInContext(t *testing.T) {
 		t.Errorf("middleware: OperatorID=%q; want middleware-operator", capturedID.OperatorID)
 	}
 	if capturedID.Role != netid.RoleAdmin {
-		t.Errorf("middleware (loopback): Role=%v; want RoleAdmin", capturedID.Role)
+		t.Errorf("middleware (loopback trusted): Role=%v; want RoleAdmin", capturedID.Role)
 	}
 	if capturedID.Authenticated {
-		t.Error("middleware (loopback): Authenticated=true; want false")
+		t.Error("middleware (loopback trusted): Authenticated=true; want false")
 	}
 }
 
 func TestResolver_Middleware_DoesNotGateRequests(t *testing.T) {
 	t.Parallel()
 	// Verify the middleware is purely additive: a request with no auth still
-	// reaches the downstream handler.  Nothing is rejected.
+	// reaches the downstream handler.  Nothing is rejected in this PR.
 	stateDir := t.TempDir()
 	m := netid.NewRoleMapper(stateDir)
-	res := netid.NewResolver(m, nil)
+	res := netid.NewResolver(m, nil, true)
 
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -391,11 +458,11 @@ func TestResolver_Middleware_DoesNotGateRequests(t *testing.T) {
 
 // ---- helpers ----------------------------------------------------------------
 
-// writeRolesFile creates <stateDir>/mtls/roles.json with the given mapping and
-// returns stateDir.
-func writeRolesFile(t *testing.T, mapping map[string]string) string {
+// writeRolesFile creates <stateDir>/mtls/roles.json with the given mapping.
+// Unlike the old version that allocated its own TempDir, this takes an existing
+// stateDir so callers can pair it with NewRoleMapper(stateDir).
+func writeRolesFile(t *testing.T, stateDir string, mapping map[string]string) {
 	t.Helper()
-	stateDir := t.TempDir()
 	dir := filepath.Join(stateDir, "mtls")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -407,7 +474,14 @@ func writeRolesFile(t *testing.T, mapping map[string]string) string {
 	if err := os.WriteFile(filepath.Join(dir, "roles.json"), data, 0600); err != nil {
 		t.Fatalf("write roles.json: %v", err)
 	}
-	return stateDir
+	// Sanity: the path must be absolute and under stateDir.
+	rolesPath := filepath.Join(dir, "roles.json")
+	if !filepath.IsAbs(rolesPath) {
+		t.Fatalf("roles.json path %q is not absolute", rolesPath)
+	}
+	if !strings.HasPrefix(rolesPath, stateDir) {
+		t.Fatalf("roles.json path %q is not under stateDir %q", rolesPath, stateDir)
+	}
 }
 
 // performMTLSHandshake performs a real mTLS handshake via loopback using fresh
@@ -443,6 +517,8 @@ func performMTLSHandshake(t *testing.T, clientCN string) *tls.ConnectionState {
 	if err != nil {
 		t.Fatalf("tls.Listen: %v", err)
 	}
+	// Register Close before any subsequent Fatalf so the server goroutine
+	// can unblock on ln.Accept() even if the client-side dial fails.
 	t.Cleanup(func() { _ = ln.Close() })
 
 	stateCh := make(chan *tls.ConnectionState, 1)
@@ -462,8 +538,11 @@ func performMTLSHandshake(t *testing.T, clientCN string) *tls.ConnectionState {
 		stateCh <- &cs
 	}()
 
+	// Close the listener before calling t.Fatalf so the server goroutine
+	// can return from ln.Accept() without blocking forever.
 	clientConn, err := tls.Dial("tcp", ln.Addr().String(), clientTLSCfg)
 	if err != nil {
+		_ = ln.Close() // unblock server goroutine before fatal
 		t.Fatalf("tls.Dial: %v", err)
 	}
 	t.Cleanup(func() { _ = clientConn.Close() })
@@ -482,7 +561,7 @@ func performMTLSHandshake(t *testing.T, clientCN string) *tls.ConnectionState {
 		t.Fatalf("server ConnectionState: CN=%q; want %q", leaf.Subject.CommonName, clientCN)
 	}
 
-	// Also confirm that CertPoolFromCert works as expected (belt-and-suspenders).
+	// Belt-and-suspenders: confirm CertPoolFromCert verifies the leaf.
 	opts := x509.VerifyOptions{
 		Roots:     caPool,
 		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},

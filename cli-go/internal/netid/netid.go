@@ -30,6 +30,9 @@
 // mtls/roles.json).  The file is optional; a missing file is tolerated
 // (all authenticated certs default to RoleRead).
 //
+// When NewRoleMapper is called with an empty stateDir, file I/O is skipped
+// entirely and all lookups return RoleRead (fail-closed for misconfiguration).
+//
 // Format (JSON):
 //
 //	{
@@ -45,7 +48,7 @@
 //
 // # Identity context
 //
-// ResolveMiddleware inserts an Identity into each request's context.  Use
+// Resolver.Middleware inserts an Identity into each request's context.  Use
 // IdentityFrom(ctx) to retrieve it.  If no middleware has run, IdentityFrom
 // returns the zero Identity (Authenticated=false, empty OperatorID, RoleRead).
 // Handlers must not panic on the zero value.
@@ -60,7 +63,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sync"
 )
 
 // ---- Role -------------------------------------------------------------------
@@ -155,7 +157,7 @@ type Identity struct {
 // Using a private type prevents collisions with other packages' context keys.
 type contextKey struct{}
 
-// IdentityFrom retrieves the Identity stored in ctx by ResolveMiddleware.
+// IdentityFrom retrieves the Identity stored in ctx by Resolver.Middleware.
 // If no middleware has run, it returns a zero Identity (unauthenticated,
 // empty OperatorID, RoleRead).
 func IdentityFrom(ctx context.Context) Identity {
@@ -177,15 +179,25 @@ func withIdentity(ctx context.Context, id Identity) context.Context {
 //
 // The file is re-read on every call to Lookup; since it is small the OS
 // page cache makes repeated reads cheap and no signal-based reload is needed.
-// Concurrent reads are safe (no mutable shared state beyond the path string).
+// Concurrent reads are safe: path is immutable after construction and
+// ReadFile + Unmarshal operate on local variables only.
+//
+// When stateDir is empty (NewRoleMapper("")) all Lookups return RoleRead
+// with no file I/O, preventing CWD-relative path resolution as a footgun.
 type RoleMapper struct {
-	path string     // absolute path to roles.json
-	mu   sync.Mutex // guards the file path; reads use their own local copy
+	path string // absolute path to roles.json; empty when stateDir was ""
 }
 
 // NewRoleMapper returns a RoleMapper that reads from
 // <stateDir>/mtls/roles.json.
+//
+// If stateDir is empty, no file is ever read and all Lookups return RoleRead.
+// Callers should always pass the actual state directory (e.g. ~/.yakos-state)
+// to avoid an empty path being silently resolved against the process CWD.
 func NewRoleMapper(stateDir string) *RoleMapper {
+	if stateDir == "" {
+		return &RoleMapper{path: ""}
+	}
 	return &RoleMapper{
 		path: filepath.Join(stateDir, "mtls", "roles.json"),
 	}
@@ -194,12 +206,15 @@ func NewRoleMapper(stateDir string) *RoleMapper {
 // Lookup returns the Role for the given certificate CN.
 // If the CN is not in the mapping, or the file is absent or unparseable,
 // Lookup returns RoleRead (least privilege; fail-closed).
+//
+// When the mapper was constructed with an empty stateDir, Lookup always
+// returns RoleRead without any file I/O.
 func (m *RoleMapper) Lookup(cn string) Role {
-	m.mu.Lock()
-	path := m.path
-	m.mu.Unlock()
-
-	data, err := os.ReadFile(path) //nolint:gosec
+	if m.path == "" {
+		// No stateDir configured; fail-closed.
+		return RoleRead
+	}
+	data, err := os.ReadFile(m.path) //nolint:gosec
 	if err != nil {
 		// Missing file is expected before the operator configures roles.
 		return RoleRead
@@ -253,27 +268,40 @@ func CNFromTLS(cs *tls.ConnectionState) (cn string, ok bool) {
 //   - If the request has a verified TLS client cert (r.TLS.VerifiedChains
 //     non-empty) → Identity{OperatorID: CN, Role: mapped-or-RoleRead,
 //     Authenticated: true}.
-//   - Otherwise (loopback bearer path, today's only path) →
-//     Identity{OperatorID: cooperativeLabel, Role: RoleAdmin,
-//     Authenticated: false}.
+//   - Otherwise (no verified cert): if loopbackTrusted is true →
+//     Identity{OperatorID: cooperativeLabel, Role: RoleAdmin, Authenticated: false}
+//     (today's loopback bearer behavior, unchanged). If loopbackTrusted is false →
+//     Identity{OperatorID: "", Role: RoleRead, Authenticated: false}
+//     (fail-closed for any future non-loopback listener).
 //
-// The cooperativeLabel is the OperatorID extracted by the callerLabel function,
-// which today comes from the daemon-level mintOperatorID.  It is supplied by
-// the caller to avoid a circular import between netid and dispatch.
+// The loopbackTrusted flag is a per-resolver trust decision made at construction
+// time by the caller who knows which listener this resolver serves.  It is
+// defense-in-depth alongside RequireAndVerifyClientCert: the resolver fails
+// closed even if a future TLS config were misconfigured.
+//
+// The cooperativeLabel is the OperatorID extracted by callerLabelFn, which
+// today comes from the daemon-level mintOperatorID.  It is supplied by the
+// caller to avoid a circular import between netid and dispatch.
 type Resolver struct {
-	mapper        *RoleMapper
-	callerLabelFn func(*http.Request) string
+	mapper          *RoleMapper
+	callerLabelFn   func(*http.Request) string
+	loopbackTrusted bool
 }
 
 // NewResolver constructs an identity Resolver.
 //
 //   - mapper resolves CN→Role for authenticated (mTLS) requests.
 //   - callerLabelFn extracts the cooperative OperatorID label from a request
-//     for unauthenticated (loopback bearer) requests.  May return "".
-func NewResolver(mapper *RoleMapper, callerLabelFn func(*http.Request) string) *Resolver {
+//     for unauthenticated (loopback bearer) requests.  May be nil or return "".
+//   - loopbackTrusted controls the no-cert fallback.  Set to true for the
+//     loopback listener (certless → RoleAdmin, Authenticated=false, preserving
+//     today's behavior).  Set to false for any non-loopback listener (certless
+//     → RoleRead, Authenticated=false; fail-closed).
+func NewResolver(mapper *RoleMapper, callerLabelFn func(*http.Request) string, loopbackTrusted bool) *Resolver {
 	return &Resolver{
-		mapper:        mapper,
-		callerLabelFn: callerLabelFn,
+		mapper:          mapper,
+		callerLabelFn:   callerLabelFn,
+		loopbackTrusted: loopbackTrusted,
 	}
 }
 
@@ -286,7 +314,18 @@ func (res *Resolver) Resolve(r *http.Request) Identity {
 			Authenticated: true,
 		}
 	}
-	// Loopback / bearer path: cooperative label, full admin access.
+	// No verified client certificate present.
+	if !res.loopbackTrusted {
+		// Non-loopback listener (or unconfigured): fail-closed to RoleRead.
+		// Never grant admin on a certless request to a networked listener.
+		return Identity{
+			OperatorID:    "",
+			Role:          RoleRead,
+			Authenticated: false,
+		}
+	}
+	// Loopback bearer path: cooperative label, full admin access (unchanged
+	// from pre-networked behavior; preserved by loopbackTrusted=true).
 	label := ""
 	if res.callerLabelFn != nil {
 		label = res.callerLabelFn(r)
