@@ -1,6 +1,6 @@
 ---
 name: evidence-based-debugging
-description: Constrain debugging to cite runtime evidence before proposing fixes
+description: Constrain debugging to cite runtime evidence (logs, stack traces, repro output) before proposing fixes. Use when investigating a bug, an outage, or unexpected behavior — observe before you theorize, never guess-and-patch.
 tier: sonnet
 invocable_by: lead
 domains: [debugging, quality]

@@ -1,6 +1,6 @@
 ---
 name: dispatch-as-project-agent
-description: Spawn a generic Agent wearing a project-specific agent's discipline (workaround for v0.1 runtime not discovering project agents)
+description: Spawn a generic Agent wearing a project-specific agent's discipline. Use when you need to dispatch a project-level agent that the v0.1 runtime can't natively resolve as a subagent_type.
 allowed-tools: Read Agent SendMessage
 argument-hint: "<project-agent-name> <task-description>"
 mode: [orchestrate]

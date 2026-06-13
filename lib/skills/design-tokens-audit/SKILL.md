@@ -1,6 +1,6 @@
 ---
 name: design-tokens-audit
-description: Scan codebase for hardcoded values that should be design tokens (colors, spacing, font-size, radius) and surface drift against the registry
+description: Scan the codebase for hardcoded values that should be design tokens (colors, spacing, font-size, radius) and surface drift against the registry. Use when reviewing UI styling or enforcing a design system.
 allowed-tools: Bash Read
 argument-hint: "[--registry <path>] [--paths <glob>] [--strict]"
 mode: [audit]

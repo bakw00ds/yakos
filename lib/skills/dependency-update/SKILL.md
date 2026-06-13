@@ -1,6 +1,6 @@
 ---
 name: dependency-update
-description: Survey and apply dependency updates safely
+description: Survey and apply dependency updates safely, verifying each before adopting it. Use when dependencies are stale, a security update is needed, or during scheduled maintenance.
 allowed-tools: Read Edit Bash Grep
 argument-hint: "[--ecosystem <go|npm|pub|pip>] [--security-only]"
 mode: [maintain]
