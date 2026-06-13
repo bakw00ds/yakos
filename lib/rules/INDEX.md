@@ -13,6 +13,7 @@ Rules shared across projects. Path-scoped or always-loaded; per Phase 1.5
 | `secret-handling` | `**/.env*`, credential patterns | Cross-project: never commit secrets. |
 | `pr-conventions` | always-loaded | Branch naming, PR template, review requirements. |
 | `retrospective-discipline` | always-loaded | 10-cycle retro cadence: hook auto-dispatches librarian on `.retro-due` marker; operator gates promotion via `yakos skill promote` / `yakos soul approve`. |
+| `cache-stability` | always-loaded | Keep the cached request prefix byte-stable across turns so the Anthropic prompt cache keeps hitting; append new content at the tail, never mutate/reorder the prefix or inject volatile data. |
 
 ## How rules load
 
