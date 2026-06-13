@@ -484,16 +484,39 @@ every step; the librarian curates but never promotes.
 
 ### Opening the console
 
+`yakos start` prints the web console URL in its preflight banner, so you
+always know where the console is — even before starting a session:
+
+```
+yakos start — preflight
+  project:        myapp
+  ...
+  web console:    http://127.0.0.1:7890/#token=<token>  (run 'yakos serve' or 'yakos start --no-repl' to start)
+```
+
+If the daemon is already running when `yakos start` is called, the banner
+shows `(running)` next to the URL instead of the hint.
+
+To bring up the console without an interactive REPL:
+
 ```sh
+# Web-only mode: run preflight, then start the daemon + console.
+# Blocks in the foreground like 'yakos serve'.
+yakos start myapp --no-repl
+# alias:
+yakos start myapp --web
+
+# Or start the daemon directly:
 yakos serve
 # Prints: yakos serve: console: http://127.0.0.1:7890/#token=<token>
 # Open that URL in a browser.
 ```
 
-`yakos serve` starts the daemon and the unified loopback console on
-`http://127.0.0.1:7890`. The URL includes a bearer token in the fragment;
-your browser stores it in memory (the fragment is never sent to the server).
-The console is loopback-only — it cannot be reached from another machine.
+`yakos serve` (and `yakos start --no-repl`) start the daemon and the unified
+loopback console on `http://127.0.0.1:7890`. The URL includes a bearer token
+in the fragment; your browser stores it in memory (the fragment is never sent
+to the server). The console is loopback-only — it cannot be reached from
+another machine.
 
 ### Console tabs
 
