@@ -2902,11 +2902,12 @@
           '</div>' +
           '<div class="ide-editor-wrap">' +
             '<div id="ide-editor-notice" class="ide-editor-notice" style="display:none" role="status"></div>' +
+            // First-party same-origin content; isolation boundary is the
+            // scoped per-route CSP on /ide/editor, not an escapable sandbox.
             '<iframe id="ide-editor-frame" class="ide-editor-frame" ' +
               'src="/ide/editor" ' +
               'title="Code editor" ' +
-              'aria-label="Monaco code editor" ' +
-              'sandbox="allow-scripts allow-same-origin">' +
+              'aria-label="Monaco code editor">' +
             '</iframe>' +
           '</div>' +
         '</div>' +
@@ -3396,13 +3397,16 @@
           </div>
         </div>
         <div id="panel-kanban" class="tab-panel">
-          <iframe title="Kanban board" sandbox="allow-scripts allow-same-origin"></iframe>
+          <!-- First-party same-origin content; isolation boundary is the auth edge, not an escapable sandbox. -->
+          <iframe title="Kanban board"></iframe>
         </div>
         <div id="panel-cost" class="tab-panel">
-          <iframe title="Cost dashboard" sandbox="allow-scripts allow-same-origin"></iframe>
+          <!-- First-party same-origin content; isolation boundary is the auth edge, not an escapable sandbox. -->
+          <iframe title="Cost dashboard"></iframe>
         </div>
         <div id="panel-perf" class="tab-panel">
-          <iframe title="Performance dashboard" sandbox="allow-scripts allow-same-origin"></iframe>
+          <!-- First-party same-origin content; isolation boundary is the auth edge, not an escapable sandbox. -->
+          <iframe title="Performance dashboard"></iframe>
         </div>
         <div id="panel-chat" class="tab-panel">
           <div class="chat-loading">
