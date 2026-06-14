@@ -12,7 +12,10 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/bakw00ds/yakos/internal/authsession"
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/netid"
+	"github.com/bakw00ds/yakos/internal/userstore"
 	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
@@ -177,6 +180,16 @@ func IsLoopbackOriginForTest(origin string) bool {
 // externalHosts is the list of host[:port] values used by browsers.
 func BuildOriginAllowListNetworkedForTest(externalHosts []string, next http.Handler) http.Handler {
 	return consoleOriginAllowListNetworked(externalHosts, next)
+}
+
+// ---- Phase 3a: session auth glue test exports --------------------------------
+
+// BuildSessionLookupFnForTest exposes buildSessionLookupFn for external tests
+// so the session lookup glue can be unit-tested directly without going through
+// a full HTTP server stack.  Callers can exercise the (operatorID, role, ok)
+// return values and verify that spoofed headers/params are ignored.
+func BuildSessionLookupFnForTest(authStore *authsession.Store, uStore *userstore.Store) netid.SessionLookupFn {
+	return buildSessionLookupFn(authStore, uStore)
 }
 
 // ---- File API test exports ---------------------------------------------------

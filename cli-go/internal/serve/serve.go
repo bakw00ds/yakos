@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/authsession"
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/grpcserver"
@@ -42,6 +43,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/mtlscmd"
 	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/restapi"
+	"github.com/bakw00ds/yakos/internal/userstore"
 	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
@@ -432,6 +434,43 @@ func Run(ctx context.Context, cfg Config) error {
 		bindAddr := cfg.consoleBind()
 		networked := isNonLoopbackBind(bindAddr)
 
+		// Open the user store and create the session store (ADR-0005 Phase 3a).
+		//
+		// Both stores are constructed unconditionally regardless of NetworkedMode
+		// so they are available when the server is started in networked mode.
+		// The session lookup function is only wired into the resolver on the
+		// networked path (inside consoleui.New); the loopback path is unchanged.
+		//
+		// userstore.Open tolerates a missing users.json (creates an empty one) so
+		// this never causes a daemon startup failure on first run.  Count()==0
+		// means the setup flow hasn't run yet; all session lookups return false.
+		stateDir := cfg.consoleStateDir()
+		usersPath := filepath.Join(stateDir, "users", "users.json")
+		uStore, err := userstore.Open(usersPath)
+		if err != nil {
+			return fmt.Errorf("serve: open user store: %w", err)
+		}
+		authStore := authsession.NewStore(authsession.Config{
+			// Idle: 2h, Absolute: 12h, MaxSessions: 10 000 (all ADR-0005 defaults).
+			// Zero values in Config trigger the defaults inside NewStore.
+		})
+		// Start a sweep goroutine owned by the daemon (not the authsession package).
+		// The goroutine is stopped on ctx cancellation.  The ticker is created here
+		// so sweep scheduling is a daemon-lifecycle concern, not a store concern
+		// (the store's Sweep docstring explicitly requires the caller to do this).
+		go func() {
+			ticker := time.NewTicker(10 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					authStore.Sweep()
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+
 		// Build the consoleui config (common fields).
 		consoleCfg := consoleui.Config{
 			Addr:              bindAddr,
@@ -444,8 +483,10 @@ func Run(ctx context.Context, cfg Config) error {
 			DispatchService:   dispatchSvc,
 			WorkDir:           workDir,
 			WorkflowEngine:    workflowEngine,
-			StateDir:          cfg.consoleStateDir(),
+			StateDir:          stateDir,
 			WorkspaceRoot:     cfg.WorkspaceRoot,
+			AuthSessionStore:  authStore,
+			UserStore:         uStore,
 		}
 
 		if networked {
@@ -463,7 +504,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 			// FAIL-CLOSED: load or generate mTLS material.  Refuse to bind if it
 			// cannot be established — no listener is opened before this check passes.
-			stateDir := cfg.consoleStateDir()
+			// stateDir is already set above (used for userstore and the consoleCfg).
 			caCert, caKey, err := mtls.LoadOrGenerateCA(stateDir)
 			if err != nil {
 				return fmt.Errorf("serve: console --console-bind: mTLS CA unavailable (non-loopback bind requires mTLS): %w", err)

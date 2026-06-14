@@ -13,12 +13,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/authsession"
 	"github.com/bakw00ds/yakos/internal/dashauth"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/kanban"
 	"github.com/bakw00ds/yakos/internal/metricsdash"
 	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/perfdash"
+	"github.com/bakw00ds/yakos/internal/userstore"
 	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
@@ -165,6 +167,27 @@ type Config struct {
 	// Loopback bearer sessions always resolve to admin regardless of StateDir.
 	StateDir string
 
+	// AuthSessionStore is the server-side session store used for the
+	// password+session-cookie auth regime (ADR-0005 Phase 3).  When non-nil and
+	// NetworkedMode is true, it is wired into NewResolverWithSession so that
+	// requests carrying a valid session cookie resolve to an authenticated
+	// Identity (AuthMethodSession).
+	//
+	// When nil the session path is not activated — the resolver behaves exactly
+	// as before (Phase 3a dormant wiring: no sessions exist, behavior unchanged).
+	// serve.go constructs the store and passes it here; callers may inject a
+	// custom store for tests.
+	AuthSessionStore *authsession.Store
+
+	// UserStore is the user account store used alongside AuthSessionStore to
+	// validate session epoch, disabled state, and role.  When nil the session
+	// path is not activated regardless of AuthSessionStore.
+	//
+	// serve.go opens the store from <StateDir>/users/users.json.  An empty or
+	// missing file (Count()==0, zero users) is tolerated — all lookups return
+	// false so the session path fails closed until Phase 3b wires login.
+	UserStore *userstore.Store
+
 	// WorkspaceRoot is the absolute path to the workspace root served by the
 	// IDE file API (/api/files/tree and /api/files/content).  When empty,
 	// both endpoints return 503 Service Unavailable.  The path is jailed:
@@ -213,16 +236,28 @@ type Server struct {
 
 // New constructs a Server and wires all routes.
 //
-// Auth model:
-//   - The static SPA shell assets (/, /app.js, /styles.css, /sw.js) are
-//     served WITHOUT a token requirement so the browser can load them and
-//     register the Service Worker before the token is available.
-//   - All other paths (sub-dashboards /kanban/, /cost/, /perf/, /v1/events,
-//     and any future API paths) require the edge bearer token.
+// Auth model (three regimes per ADR-0005):
+//   - Loopback (NetworkedMode=false): bearer-token cooperative labeling.
+//     The identity is Authenticated=false; Role is admin (preserving existing
+//     full-access loopback behavior).  The resolver is NewResolver with
+//     loopbackTrusted=true.
+//   - Networked machines (NetworkedMode=true, mTLS cert present): cert CN →
+//     role lookup via RoleMapper.  Identity is Authenticated=true, AuthMethodCert.
+//   - Networked humans (NetworkedMode=true, session cookie present):
+//     resolved via buildSessionLookupFn from Config.AuthSessionStore +
+//     Config.UserStore.  Identity is Authenticated=true, AuthMethodSession.
+//     This path is dormant until Phase 3b wires login — no sessions exist yet
+//     so the lookup always returns false today.
+//
+// Edge middleware stack (outer → inner for all three regimes):
+//   - Static SPA shell assets (/, /app.js, /styles.css, /sw.js) are served
+//     WITHOUT a token requirement so the browser can load them before the
+//     token is available.
+//   - All other paths require the edge bearer token (or are gated by mTLS on
+//     the networked path).
 //   - Non-GET requests without Content-Type: application/json receive 415
 //     (forces a CORS preflight that a cross-origin attacker cannot satisfy).
-//   - The entire mux is wrapped by RequireLocalHost so only loopback
-//     connections are accepted.
+//   - The loopback path is additionally wrapped by RequireLocalHost.
 //   - Sub-dashboard handlers are mounted via Handler() without their inner
 //     per-dashboard Host/token middleware.
 //   - /v1/events is mounted from wsbus.Server.Handler() which enforces
@@ -275,13 +310,34 @@ func New(cfg Config) *Server {
 	// callerLabelFn extracts the cooperative OperatorID for loopback bearer sessions.
 	// The dispatch facade stamps operator_id from its daemon-level opID on the
 	// loopback path; we return "" here and let the facade do it.
+	//
+	// Session regime (ADR-0005 Phase 3a — dormant wiring):
+	//   - Networked path + AuthSessionStore + UserStore set → use
+	//     NewResolverWithSession so that requests carrying a valid session cookie
+	//     resolve to Identity{AuthMethodSession}.  No sessions exist yet (Phase 3b
+	//     wires login), so the lookup always returns false today — behavior is
+	//     unchanged.
+	//   - Loopback path → always NewResolver (no session path on loopback).
 	loopbackTrusted := !cfg.NetworkedMode
 	mapper := netid.NewRoleMapper(cfg.StateDir)
-	resolver := netid.NewResolver(mapper, func(r *http.Request) string {
+	callerLabelFn := func(r *http.Request) string {
 		// No per-request cooperative label is available at the edge; the
 		// dispatch facade stamps operator_id from its daemon-level opID.
 		return ""
-	}, loopbackTrusted)
+	}
+	var resolver *netid.Resolver
+	if !loopbackTrusted && cfg.AuthSessionStore != nil && cfg.UserStore != nil {
+		// Networked path with session stores: wire the session lookup function.
+		// The session fn is guarded by !loopbackTrusted inside the resolver, so
+		// even if this branch were somehow reached on loopback, the session path
+		// would be skipped (defense-in-depth).
+		sessionFn := buildSessionLookupFn(cfg.AuthSessionStore, cfg.UserStore)
+		resolver = netid.NewResolverWithSession(mapper, callerLabelFn, loopbackTrusted, sessionFn)
+	} else {
+		// Loopback path, or networked path without session stores (zero-users /
+		// first-run): keep existing NewResolver behavior unchanged.
+		resolver = netid.NewResolver(mapper, callerLabelFn, loopbackTrusted)
+	}
 
 	// Build the inner handler chain (shared between loopback and networked paths).
 	//

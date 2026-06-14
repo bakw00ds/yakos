@@ -541,7 +541,7 @@ func (res *Resolver) Resolve(r *http.Request) Identity {
 // Downstream handlers retrieve the identity with IdentityFrom(r.Context()).
 // Nothing is gated or rejected — this middleware is purely additive.
 // Enforcement (role checks, operator_id override) is the responsibility of
-// later middleware and the dispatch facade (next PR per ADR-0004).
+// later middleware and the dispatch facade (next PR per ADR-0005).
 func (res *Resolver) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := res.Resolve(r)
