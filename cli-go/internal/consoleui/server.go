@@ -550,12 +550,13 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/flows/api/run", requireRoleFunc(netid.RoleRead, s.flows.handleRunDispatch))
 	s.mux.HandleFunc("/flows/api/resume", requireRoleFunc(netid.RoleFlowsRun, s.flows.handleResume))
 
-	// ---- Phase 7 (IDE): File API (RoleRead, jailed to WorkspaceRoot) -----------
-	// GET /api/files/tree?dir=<relpath>     — JSON directory tree
-	// GET /api/files/content?path=<relpath> — file content (UTF-8 or base64)
+	// ---- Phase 7 (IDE): File API (read: RoleRead, write: RoleDispatch) ---------
+	// GET  /api/files/tree?dir=<relpath>     — JSON directory tree (RoleRead)
+	// GET  /api/files/content?path=<relpath> — file content + version (RoleRead)
+	// POST /api/files/write                  — atomic write with OCC (RoleDispatch)
 	//
-	// Both require RoleRead.  Both are jailed to Config.WorkspaceRoot.
-	// Secret files are omitted from tree and refused with 403 at content.
+	// All routes are jailed to Config.WorkspaceRoot.
+	// Secret files are omitted from tree, refused at content, and refused at write.
 	// See files_handler.go for the full security model.
 	//
 	// NOTE: PR #175 (feat/ide-monaco-spike) is still open and also edits
@@ -564,6 +565,12 @@ func (s *Server) registerRoutes() {
 	// is to include both sets of route registrations.
 	s.mux.HandleFunc("/api/files/tree", requireRoleFunc(netid.RoleRead, s.files.handleFilesTree))
 	s.mux.HandleFunc("/api/files/content", requireRoleFunc(netid.RoleRead, s.files.handleFilesContent))
+	// POST /api/files/write requires RoleDispatch at the route level.
+	// The handler also enforces RoleDispatch internally (per-handler check mirrors
+	// flows_handler.go handleSaveWorkflow pattern), providing defence in depth.
+	// requireJSONForMutations (applied globally in New()) enforces Content-Type:
+	// application/json for this POST, providing CSRF defence.
+	s.mux.HandleFunc("/api/files/write", requireRoleFunc(netid.RoleDispatch, s.files.handleFilesWrite))
 }
 
 // handlePresence returns the current online operator presence snapshot as a
