@@ -120,6 +120,7 @@
     { id: 'cost',      label: 'Cost',         src: '/cost/',   phase: null },
     { id: 'perf',      label: 'Performance',  src: '/perf/',   phase: null },
     { id: 'chat',      label: 'Chat',         src: null,       phase: null },
+    { id: 'ide',       label: 'IDE',          src: null,       phase: null },
     { id: 'flows',     label: 'Flows',        src: null,       phase: null },
   ];
 
@@ -177,6 +178,11 @@
     // On first switch to chat tab, ensure SSE is running.
     if (id === 'chat') {
       initChatTab();
+    }
+
+    // On first switch to IDE tab, initialize it.
+    if (id === 'ide') {
+      initIdeTab();
     }
 
     // On first switch to flows tab, initialize it.
@@ -2339,6 +2345,384 @@
   }
 
   // =========================================================================
+  // ---- IDE TAB (Phase 7 shell) ---------------------------------------------
+  // =========================================================================
+  //
+  // Layout: 3-pane CSS grid:
+  //   LEFT  — file tree (collapsible dirs; lazy-load via ?dir= on expand OR
+  //            render the nested children returned by the API)
+  //   CENTER — Monaco editor in an <iframe src="/ide/editor"> (read-only)
+  //   RIGHT  — one chat pane (reuses the existing per-pane chat machinery)
+  //
+  // File-open flow:
+  //   click file → GET /api/files/content?path= (SW injects token)
+  //              → decode base64 if encoding==='base64'
+  //              → postMessage({type:'openFile', path, content, language})
+  //                to the Monaco iframe (origin-checked)
+  //
+  // Monaco handshake:
+  //   - Hold a ref to the iframe's contentWindow.
+  //   - Queue any openFile before {type:'ready'} arrives from the iframe.
+  //   - On {type:'ready'}: flush the queued open (if any).
+  //   - On {type:'error'}: surface a small inline error notice.
+  //
+  // Chat reuse:
+  //   The IDE panel instantiates a single chat pane inside its layout by
+  //   calling makePane() + buildPaneElement() — the same per-pane construction
+  //   used by the Chat tab.  The SSE reader (startChatSSE) is shared; no second
+  //   SSE connection is opened.  initChatTab() is called first to ensure the
+  //   shared SSE + operator-ID are ready.
+  //
+  // Phase 1 is read-only. Edit/save/diff are out of scope.
+
+  let ideTabInitialized = false;
+
+  // Ref to Monaco iframe's contentWindow (set once the iframe loads).
+  let ideEditorWindow = null;
+
+  // True once the Monaco {type:'ready'} postMessage arrives.
+  let ideEditorReady = false;
+
+  // Queued openFile to send once the editor is ready.
+  let ideQueuedOpen = null;
+
+  // The paneId used for the IDE's embedded chat pane.
+  let ideChatPaneId = null;
+
+  function initIdeTab() {
+    if (ideTabInitialized) return;
+    ideTabInitialized = true;
+
+    // Ensure chat infrastructure (SSE, operator ID) is running — we share it.
+    if (!chatTabInitialized) {
+      // Initialize without rendering into the chat panel.
+      getChatOperatorId();
+      if (chatPanes.size === 0) {
+        loadPaneStateFromStorage();
+        if (chatPanes.size === 0) {
+          const p = makePane(newPaneId(), newConversationId());
+          chatPanes.set(p.id, p);
+          savePaneState();
+        }
+      }
+      if (!chatSSEAbort) {
+        startChatSSE();
+      }
+      chatTabInitialized = true;
+    }
+
+    renderIdeLayout();
+  }
+
+  function renderIdeLayout() {
+    const panel = document.getElementById('panel-ide');
+    if (!panel) return;
+
+    panel.innerHTML =
+      '<div class="ide-layout" role="main" aria-label="IDE">' +
+        // Left: file tree
+        '<aside class="ide-tree-pane" aria-label="File tree">' +
+          '<div class="ide-tree-header">' +
+            '<span class="subsection-title" id="ide-tree-title">Files</span>' +
+          '</div>' +
+          '<div id="ide-tree-root" class="ide-tree-root" role="tree" aria-label="Workspace files"></div>' +
+        '</aside>' +
+        // Center: editor
+        '<div class="ide-editor-pane">' +
+          '<div class="ide-editor-header" id="ide-editor-header">' +
+            '<span id="ide-open-path" class="ide-open-path" aria-live="polite"></span>' +
+          '</div>' +
+          '<div class="ide-editor-wrap">' +
+            '<div id="ide-editor-notice" class="ide-editor-notice" style="display:none" role="status"></div>' +
+            '<iframe id="ide-editor-frame" class="ide-editor-frame" ' +
+              'src="/ide/editor" ' +
+              'title="Code editor" ' +
+              'aria-label="Monaco code editor" ' +
+              'sandbox="allow-scripts allow-same-origin">' +
+            '</iframe>' +
+          '</div>' +
+        '</div>' +
+        // Right: embedded chat
+        '<div class="ide-chat-pane" aria-label="Chat" id="ide-chat-col">' +
+          '<div class="ide-chat-header">' +
+            '<span class="subsection-title">Chat</span>' +
+          '</div>' +
+          '<div id="ide-chat-slot"></div>' +
+        '</div>' +
+      '</div>';
+
+    // Wire Monaco iframe postMessage listener.
+    window.addEventListener('message', handleIdeEditorMessage);
+
+    // Wire the iframe load event to grab its contentWindow.
+    const frame = document.getElementById('ide-editor-frame');
+    if (frame) {
+      frame.addEventListener('load', () => {
+        ideEditorWindow = frame.contentWindow;
+        // The 'ready' message comes from the iframe after Monaco mounts.
+      });
+    }
+
+    // Mount the embedded chat pane.
+    mountIdeChatPane();
+
+    // Load file tree.
+    loadIdeTree('');
+  }
+
+  function handleIdeEditorMessage(e) {
+    // Only accept messages from the same origin.
+    if (e.origin !== window.location.origin) return;
+    const msg = e.data;
+    if (!msg || typeof msg !== 'object') return;
+
+    if (msg.type === 'ready') {
+      ideEditorReady = true;
+      // Flush any queued openFile.
+      if (ideQueuedOpen) {
+        sendOpenFile(ideQueuedOpen);
+        ideQueuedOpen = null;
+      }
+    } else if (msg.type === 'error') {
+      const notice = document.getElementById('ide-editor-notice');
+      if (notice) {
+        notice.textContent = 'Editor error: ' + (msg.message || 'unknown error');
+        notice.style.display = '';
+      }
+    }
+  }
+
+  function sendOpenFile(payload) {
+    if (!ideEditorWindow) return;
+    ideEditorWindow.postMessage(payload, window.location.origin);
+  }
+
+  function openFileInEditor(path, content, language) {
+    // Update the path header.
+    const pathEl = document.getElementById('ide-open-path');
+    if (pathEl) pathEl.textContent = path;
+
+    // Clear any previous error notice.
+    const notice = document.getElementById('ide-editor-notice');
+    if (notice) notice.style.display = 'none';
+
+    const payload = { type: 'openFile', path, content, language: language || 'plaintext' };
+
+    if (ideEditorReady && ideEditorWindow) {
+      sendOpenFile(payload);
+    } else {
+      // Queue: will be sent once {type:'ready'} arrives.
+      ideQueuedOpen = payload;
+    }
+  }
+
+  // ---- File tree ---------------------------------------------------------------
+
+  function loadIdeTree(reldir) {
+    const treeEl = document.getElementById('ide-tree-root');
+    if (!treeEl) return;
+
+    const dir = reldir || '';
+    const url = '/api/files/tree' + (dir ? '?dir=' + encodeURIComponent(dir) : '');
+
+    fetch(url).then((r) => {
+      if (r.status === 403) {
+        treeEl.innerHTML = '<p class="ide-tree-error">Access denied (403). Check your token.</p>';
+        return null;
+      }
+      if (r.status === 503) {
+        treeEl.innerHTML = '<p class="ide-tree-error">Workspace not configured.</p>';
+        return null;
+      }
+      if (!r.ok) {
+        treeEl.innerHTML = '<p class="ide-tree-error">Failed to load tree (' + esc(String(r.status)) + ').</p>';
+        return null;
+      }
+      return r.json();
+    }).then((data) => {
+      if (!data) return;
+      treeEl.innerHTML = '';
+
+      if (!data.entries || data.entries.length === 0) {
+        treeEl.innerHTML = '<p class="empty-state" style="padding:8px">Workspace is empty</p>';
+        return;
+      }
+
+      const ul = buildTreeList(data.entries, 0);
+      treeEl.appendChild(ul);
+
+      if (data.truncated) {
+        const note = document.createElement('p');
+        note.className = 'ide-tree-truncated';
+        note.textContent = 'Tree truncated — workspace is large.';
+        treeEl.appendChild(note);
+      }
+    }).catch(() => {
+      if (treeEl) {
+        treeEl.innerHTML = '<p class="ide-tree-error">Network error loading file tree.</p>';
+      }
+    });
+  }
+
+  function buildTreeList(entries, depth) {
+    const ul = document.createElement('ul');
+    ul.className = 'ide-tree-list';
+    ul.setAttribute('role', 'group');
+
+    for (const entry of entries) {
+      const li = document.createElement('li');
+      li.className = 'ide-tree-item';
+      li.setAttribute('role', 'treeitem');
+      li.style.paddingLeft = (depth * 12) + 'px';
+
+      if (entry.type === 'dir') {
+        li.setAttribute('aria-expanded', 'true');
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'ide-tree-dir';
+        toggle.setAttribute('aria-label', 'Directory ' + entry.name);
+        toggle.innerHTML =
+          '<span class="ide-tree-icon ide-tree-dir-icon" aria-hidden="true">&#x25BC;</span>' +
+          '<span class="ide-tree-name">' + esc(entry.name) + '</span>';
+
+        li.appendChild(toggle);
+
+        // Children are nested inside the li.
+        let childUl = null;
+        if (entry.children && entry.children.length > 0) {
+          childUl = buildTreeList(entry.children, depth + 1);
+          li.appendChild(childUl);
+        } else if (entry.children && entry.children.length === 0) {
+          // Empty dir — no child list needed.
+        } else {
+          // Children not yet loaded (API returned null — lazy-load on expand).
+          childUl = null;
+        }
+
+        // Toggle expand/collapse.
+        let expanded = true;
+        toggle.addEventListener('click', () => {
+          expanded = !expanded;
+          li.setAttribute('aria-expanded', String(expanded));
+          const icon = toggle.querySelector('.ide-tree-dir-icon');
+          if (icon) icon.innerHTML = expanded ? '&#x25BC;' : '&#x25B6;';
+
+          if (expanded) {
+            if (childUl) {
+              childUl.style.display = '';
+            } else {
+              // Lazy-load subdirectory.
+              fetch('/api/files/tree?dir=' + encodeURIComponent(entry.path))
+                .then((r) => r.ok ? r.json() : null)
+                .then((data) => {
+                  if (!data) return;
+                  childUl = buildTreeList(data.entries || [], depth + 1);
+                  li.appendChild(childUl);
+                })
+                .catch(() => {});
+            }
+          } else {
+            if (childUl) childUl.style.display = 'none';
+          }
+        });
+      } else {
+        // File entry.
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'ide-tree-file';
+        btn.setAttribute('aria-label', 'File ' + entry.name);
+        btn.innerHTML =
+          '<span class="ide-tree-icon" aria-hidden="true">&#x1F4C4;</span>' +
+          '<span class="ide-tree-name">' + esc(entry.name) + '</span>';
+
+        btn.addEventListener('click', () => {
+          // Mark as selected.
+          const treeEl = document.getElementById('ide-tree-root');
+          if (treeEl) {
+            treeEl.querySelectorAll('.ide-tree-file.selected').forEach((el) => el.classList.remove('selected'));
+          }
+          btn.classList.add('selected');
+
+          openIdeFile(entry.path, entry.name);
+        });
+
+        li.appendChild(btn);
+      }
+
+      ul.appendChild(li);
+    }
+
+    return ul;
+  }
+
+  function openIdeFile(relpath, name) {
+    fetch('/api/files/content?path=' + encodeURIComponent(relpath))
+      .then((r) => {
+        if (r.status === 413) {
+          showIdeEditorNotice('File too large to display (max 2 MiB): ' + esc(name));
+          return null;
+        }
+        if (r.status === 403) {
+          showIdeEditorNotice('Access denied for: ' + esc(name));
+          return null;
+        }
+        if (!r.ok) {
+          showIdeEditorNotice('Failed to load file (' + esc(String(r.status)) + '): ' + esc(name));
+          return null;
+        }
+        return r.json();
+      })
+      .then((data) => {
+        if (!data) return;
+
+        if (data.encoding === 'base64') {
+          // Binary file: show placeholder instead of dumping raw bytes.
+          showIdeEditorNotice('Binary file — preview not available: ' + esc(data.path || name));
+          return;
+        }
+
+        openFileInEditor(data.path || relpath, data.content || '', data.language || 'plaintext');
+      })
+      .catch(() => {
+        showIdeEditorNotice('Network error loading: ' + esc(name));
+      });
+  }
+
+  function showIdeEditorNotice(htmlMsg) {
+    const notice = document.getElementById('ide-editor-notice');
+    if (!notice) return;
+    // htmlMsg already uses esc() on any server-supplied strings;
+    // static strings here are literal.
+    notice.innerHTML = htmlMsg;
+    notice.style.display = '';
+    // Clear the open path header to avoid stale filename showing.
+    const pathEl = document.getElementById('ide-open-path');
+    if (pathEl) pathEl.textContent = '';
+  }
+
+  // ---- Embedded chat pane for IDE --------------------------------------------
+  //
+  // Reuses buildPaneElement() + wirePaneEvents() exactly as the Chat tab does.
+  // No second SSE reader: the shared startChatSSE() instance handles demux.
+
+  function mountIdeChatPane() {
+    const slot = document.getElementById('ide-chat-slot');
+    if (!slot) return;
+
+    // Create one pane to embed in the IDE.
+    const p = makePane(newPaneId(), newConversationId());
+    chatPanes.set(p.id, p);
+    ideChatPaneId = p.id;
+    savePaneState();
+
+    const paneEl = buildPaneElement(p.id);
+    slot.appendChild(paneEl);
+
+    // Load transcript for this pane.
+    loadTranscriptForPane(p.id);
+  }
+
+  // =========================================================================
   // ---- 8. Page rendering ------------------------------------------------------
 
   function buildPage() {
@@ -2399,6 +2783,11 @@
         <div id="panel-chat" class="tab-panel">
           <div class="chat-loading">
             <p class="empty-state">Initializing Chat…</p>
+          </div>
+        </div>
+        <div id="panel-ide" class="tab-panel">
+          <div class="ide-loading">
+            <p class="empty-state">Initializing IDE…</p>
           </div>
         </div>
         <div id="panel-flows" class="tab-panel">

@@ -8,6 +8,9 @@ cli-go/internal/consoleui/dist/vendor/*.min.js binary
 # binary assets as binary to avoid checksum corruption on Windows.
 # The glob covers the full min/vs tree (basic-languages/*, language/*, etc.).
 cli-go/internal/consoleui/dist/vendor/monaco/min/vs/**/*.js binary
+# Files directly under min/vs/ (e.g. loader.js, nls.messages.*.js) are not
+# matched by the **/*.js glob above; enumerate the shallow level explicitly.
+cli-go/internal/consoleui/dist/vendor/monaco/min/vs/*.js binary
 cli-go/internal/consoleui/dist/vendor/monaco/min/vs/**/*.css binary
 cli-go/internal/consoleui/dist/vendor/monaco/min/vs/**/*.ttf binary
 # CHECKSUMS.sha256 manifest — treat as binary so line endings cannot
