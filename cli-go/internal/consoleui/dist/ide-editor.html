@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<!--
+  ide-editor.html — Monaco editor isolated host document.
+
+  Served at /ide/editor under a SCOPED Content-Security-Policy that allows:
+    - script-src 'self' 'wasm-unsafe-eval'  (Monaco AMD loader + JIT)
+    - worker-src blob: 'self'               (Monaco web worker blob-wrapper)
+    - style-src 'self' 'unsafe-inline'      (Monaco theme injection)
+    - connect-src 'self'                    (lazy module fetches, same-origin)
+    - img-src 'self' data:                  (codicon font embedded in CSS)
+    - frame-ancestors 'self'                (only embeddable by same-origin)
+
+  The MAIN console CSP (applied to / and all other routes) is UNCHANGED:
+  it retains script-src 'self' with no wasm-unsafe-eval and no blob: worker-src.
+
+  Worker loading strategy (CSP-safe blob-wrapper pattern):
+  =========================================================
+  Monaco's web workers cannot be loaded as classic same-origin <script> tags
+  under worker-src 'self' when the worker URL is a cross-directory path, because
+  the AMD loader resolves them relative to vs/base/worker/workerMain.js and the
+  browser's worker-src 'self' checks the origin, not the path.  The universally
+  supported CSP-safe approach is:
+
+    1. Fetch workerMain.js from the same-origin URL.
+    2. Create a Blob from the script text with type "application/javascript".
+    3. Create a blob: URL from that Blob.
+    4. Pass the blob: URL to new Worker(url).
+
+  This satisfies "worker-src blob: 'self'" because: the blob: URL is allowed by
+  worker-src blob:, and the content was fetched from 'self' before being wrapped.
+
+  Communication protocol (postMessage):
+  ======================================
+  This document listens for messages from its parent window:
+    { type: 'openFile', path: string, content: string, language: string }
+      — opens the given content in the editor with the specified language.
+
+  This document posts to its parent window:
+    { type: 'ready' }    — editor has mounted and is ready for content.
+    { type: 'error', message: string } — fatal initialisation error.
+
+  Demo mode:
+  ==========
+  When ?demo=1 is present in the URL, a hardcoded Go source file is loaded
+  automatically so the route can be opened directly to verify Monaco renders
+  without requiring a parent frame.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-Content-Type-Options" content="nosniff">
+  <!-- CSP is set via response header by the server (ideEditorCSP()).         -->
+  <!-- No inline CSP meta tag needed; header takes precedence in all browsers. -->
+  <title>yakOS IDE — Editor</title>
+  <link rel="stylesheet" href="/vendor/monaco/min/vs/editor/editor.main.css">
+  <style>
+    /* Reset: fill the viewport so Monaco owns the whole iframe/window. */
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #1e1e1e; /* VS Code Dark default; avoids white flash */
+    }
+    #container {
+      width: 100%;
+      height: 100%;
+    }
+    /* Shown while Monaco loads; hidden once ready. */
+    #loading {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #808080;
+      font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+      background: #1e1e1e;
+      z-index: 10;
+    }
+    #error-banner {
+      display: none;
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      padding: 8px 16px;
+      background: #5a1d1d;
+      color: #f14c4c;
+      font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+      z-index: 20;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">Loading editor…</div>
+  <div id="error-banner" role="alert" aria-live="assertive"></div>
+  <div id="container" aria-label="Code editor" tabindex="-1"></div>
+
+  <script>
+    'use strict';
+
+    // ── Utilities ────────────────────────────────────────────────────────────
+
+    function showError(msg) {
+      var banner = document.getElementById('error-banner');
+      if (banner) {
+        banner.textContent = 'Editor error: ' + msg;
+        banner.style.display = 'block';
+      }
+      document.getElementById('loading').style.display = 'none';
+      try {
+        window.parent.postMessage({ type: 'error', message: msg }, '*');
+      } catch (_) {}
+      console.error('[ide-editor] fatal:', msg);
+    }
+
+    // ── CSP-safe worker factory (blob-wrapper pattern) ────────────────────────
+    //
+    // Monaco resolves workerMain.js relative to vs/base/worker/workerMain.js.
+    // We intercept getWorkerUrl and return a blob: URL whose content was fetched
+    // from same-origin — satisfying "worker-src blob: 'self'" in the CSP.
+    //
+    // Synchronous XHR is used intentionally: MonacoEnvironment.getWorkerUrl is
+    // called synchronously by the AMD loader; async alternatives (fetch + await)
+    // cannot be used here without significant architectural complexity.  The XHR
+    // is to a local same-origin URL so latency is negligible.
+    //
+    // Blob URL lifetime: the blob: URL is revoked after the Worker is constructed
+    // to avoid a memory leak (the Worker holds a reference to the script content
+    // independently of the blob URL once it starts).
+    function makeBlobWorker(workerUrl) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', workerUrl, false); // synchronous
+      xhr.send();
+      if (xhr.status !== 200) {
+        throw new Error('Failed to fetch worker script: ' + workerUrl + ' (HTTP ' + xhr.status + ')');
+      }
+      var blob = new Blob([xhr.responseText], { type: 'application/javascript' });
+      var blobUrl = URL.createObjectURL(blob);
+      var worker = new Worker(blobUrl);
+      URL.revokeObjectURL(blobUrl);
+      return worker;
+    }
+
+    // ── MonacoEnvironment: must be set BEFORE require() is called ─────────────
+    window.MonacoEnvironment = {
+      getWorkerUrl: function(_moduleId, _label) {
+        // Return a blob: URL wrapping the same-origin workerMain.js.
+        // The actual Worker construction happens inside makeBlobWorker.
+        // We return the same-origin path; the AMD loader passes it here
+        // but we override by building the worker ourselves in getWorker.
+        return '/vendor/monaco/min/vs/base/worker/workerMain.js';
+      },
+      getWorker: function(_moduleId, _label) {
+        return makeBlobWorker('/vendor/monaco/min/vs/base/worker/workerMain.js');
+      }
+    };
+
+    // ── AMD loader bootstrap ──────────────────────────────────────────────────
+    var loaderScript = document.createElement('script');
+    loaderScript.src = '/vendor/monaco/min/vs/loader.js';
+    loaderScript.onerror = function() {
+      showError('Failed to load Monaco AMD loader from /vendor/monaco/min/vs/loader.js');
+    };
+    loaderScript.onload = function() {
+      // Configure require.js base path so Monaco can locate its modules.
+      require.config({
+        paths: { vs: '/vendor/monaco/min/vs' }
+      });
+
+      require(['vs/editor/editor.main'], function() {
+        try {
+          initEditor();
+        } catch (e) {
+          showError(e && e.message ? e.message : String(e));
+        }
+      }, function(err) {
+        showError('Monaco module load failed: ' + (err && err.message ? err.message : String(err)));
+      });
+    };
+    document.head.appendChild(loaderScript);
+
+    // ── Editor initialisation ─────────────────────────────────────────────────
+    var editor = null;
+
+    function initEditor() {
+      var container = document.getElementById('container');
+      editor = monaco.editor.create(container, {
+        value: '',
+        language: 'plaintext',
+        theme: 'vs-dark',
+        readOnly: true,
+        automaticLayout: true, // resizes with container
+        scrollBeyondLastLine: false,
+        minimap: { enabled: false },
+        fontSize: 13,
+        fontFamily: '"Cascadia Code", "Fira Code", "Consolas", monospace',
+        renderLineHighlight: 'all',
+        renderWhitespace: 'selection',
+        // Accessibility: show line numbers, cursor blinking so it's clearly
+        // a read-only view (not a dead text block).
+        lineNumbers: 'on',
+        cursorBlinking: 'smooth',
+        accessibilitySupport: 'auto',
+      });
+
+      // Hide loading overlay.
+      document.getElementById('loading').style.display = 'none';
+
+      // Notify parent that editor is ready.
+      try {
+        window.parent.postMessage({ type: 'ready' }, '*');
+      } catch (_) {}
+
+      // Demo mode: load a hardcoded sample when ?demo=1 is in the URL.
+      var params = new URLSearchParams(window.location.search);
+      if (params.get('demo') === '1') {
+        loadDemo();
+      }
+    }
+
+    // ── Demo payload ──────────────────────────────────────────────────────────
+    function loadDemo() {
+      if (!editor) return;
+      var demoContent = [
+        '// yakOS IDE spike — Monaco editor demo',
+        '//',
+        '// This file is loaded automatically when ?demo=1 is present.',
+        '// It proves Monaco renders, syntax-highlighting is active, and',
+        '// no CSP violations appear in the browser console.',
+        '',
+        'package main',
+        '',
+        'import (',
+        '\t"context"',
+        '\t"fmt"',
+        '\t"log/slog"',
+        '\t"net/http"',
+        ')',
+        '',
+        '// Server is the unified console HTTP server.',
+        'type Server struct {',
+        '\tcfg    Config',
+        '\thttpSrv *http.Server',
+        '}',
+        '',
+        '// Serve starts the HTTP server and blocks until ctx is cancelled.',
+        'func (s *Server) Serve(ctx context.Context) error {',
+        '\tslog.Info("consoleui: starting", "addr", s.cfg.Addr)',
+        '\terrCh := make(chan error, 1)',
+        '\tgo func() {',
+        '\t\terrCh <- s.httpSrv.ListenAndServe()',
+        '\t}()',
+        '\tselect {',
+        '\tcase <-ctx.Done():',
+        '\t\treturn s.httpSrv.Shutdown(context.Background())',
+        '\tcase err := <-errCh:',
+        '\t\tif err == http.ErrServerClosed {',
+        '\t\t\treturn nil',
+        '\t\t}',
+        '\t\treturn fmt.Errorf("consoleui: serve: %w", err)',
+        '\t}',
+        '}',
+      ].join('\n');
+
+      monaco.editor.setModelLanguage(editor.getModel(), 'go');
+      editor.setValue(demoContent);
+    }
+
+    // ── postMessage API ───────────────────────────────────────────────────────
+    window.addEventListener('message', function(e) {
+      // Only accept messages from the same origin (parent console frame).
+      if (e.origin !== window.location.origin) return;
+      var msg = e.data;
+      if (!msg || typeof msg !== 'object') return;
+
+      if (msg.type === 'openFile') {
+        if (!editor) {
+          showError('Received openFile before editor was ready');
+          return;
+        }
+        var lang = msg.language || 'plaintext';
+        var content = typeof msg.content === 'string' ? msg.content : '';
+        monaco.editor.setModelLanguage(editor.getModel(), lang);
+        editor.setValue(content);
+      }
+    });
+  </script>
+</body>
+</html>

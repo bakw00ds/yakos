@@ -574,3 +574,163 @@ func TestDefaultAddr(t *testing.T) {
 		t.Errorf("DefaultAddr=%q; want 127.0.0.1:7890", consoleui.DefaultAddr())
 	}
 }
+
+// ---- 7. IDE editor spike: CSP isolation tests ------------------------------
+//
+// These tests are the gating proof for the Monaco IDE spike (Phase 1):
+//   (a) GET /ide/editor returns the scoped CSP containing wasm-unsafe-eval
+//       and worker-src blob:.  This CSP is set only by ideEditorCSP().
+//   (b) GET / (index) CSP is UNCHANGED — still script-src 'self' with NO
+//       wasm-unsafe-eval and NO blob: in worker-src.
+//
+// Together they prove the relaxation is SCOPED to /ide/editor and that the
+// main console CSP has not been widened.
+
+// TestIDEEditor_ScopedCSP_ContainsWasmUnsafeEvalAndBlobWorker verifies that
+// GET /ide/editor responds with a CSP header containing both 'wasm-unsafe-eval'
+// (required by the Monaco AMD loader) and 'worker-src blob:' (required by the
+// Monaco web worker blob-wrapper pattern).
+func TestIDEEditor_ScopedCSP_ContainsWasmUnsafeEvalAndBlobWorker(t *testing.T) {
+	ts, tok := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide/editor", tok)
+	defer drainClose(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /ide/editor: status=%d; want 200", resp.StatusCode)
+	}
+	csp := resp.Header.Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("GET /ide/editor: missing Content-Security-Policy header")
+	}
+	if !strings.Contains(csp, "'wasm-unsafe-eval'") {
+		t.Errorf("GET /ide/editor CSP: missing 'wasm-unsafe-eval'\n  CSP: %s", csp)
+	}
+	if !strings.Contains(csp, "worker-src") || !strings.Contains(csp, "blob:") {
+		t.Errorf("GET /ide/editor CSP: missing 'worker-src blob:'\n  CSP: %s", csp)
+	}
+}
+
+// TestIDEEditor_ScopedCSP_HasFrameAncestorsSelf verifies that the /ide/editor
+// CSP restricts framing to same-origin only (frame-ancestors 'self'), preventing
+// the editor host document from being embedded by a cross-origin page.
+func TestIDEEditor_ScopedCSP_HasFrameAncestorsSelf(t *testing.T) {
+	ts, tok := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide/editor", tok)
+	defer drainClose(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /ide/editor: status=%d; want 200", resp.StatusCode)
+	}
+	csp := resp.Header.Get("Content-Security-Policy")
+	if !strings.Contains(csp, "frame-ancestors 'self'") {
+		t.Errorf("GET /ide/editor CSP: missing frame-ancestors 'self'\n  CSP: %s", csp)
+	}
+}
+
+// TestIDEEditor_MainIndexCSP_Unchanged verifies that GET / (the main console
+// index) still returns the original CSP — specifically that:
+//   - script-src 'self' is present (no relaxation)
+//   - 'wasm-unsafe-eval' is NOT present (not widened)
+//   - 'blob:' is NOT present in worker-src (not widened)
+//
+// This is the critical invariant: the scoped CSP for /ide/editor must NOT
+// have leaked into the shared cspHeader() used by the main console.
+func TestIDEEditor_MainIndexCSP_Unchanged(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/", "") // / is token-exempt
+	defer drainClose(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /: status=%d; want 200", resp.StatusCode)
+	}
+	csp := resp.Header.Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("GET /: missing Content-Security-Policy header")
+	}
+	// Main CSP must still have script-src 'self'.
+	if !strings.Contains(csp, "script-src 'self'") {
+		t.Errorf("GET / CSP: missing script-src 'self'\n  CSP: %s", csp)
+	}
+	// Main CSP must NOT have wasm-unsafe-eval (would widen the attack surface).
+	if strings.Contains(csp, "wasm-unsafe-eval") {
+		t.Errorf("GET / CSP: unexpectedly contains 'wasm-unsafe-eval' — main CSP must not be widened\n  CSP: %s", csp)
+	}
+	// Main CSP must NOT have blob: in worker-src.
+	if strings.Contains(csp, "blob:") {
+		t.Errorf("GET / CSP: unexpectedly contains 'blob:' — main CSP must not be widened\n  CSP: %s", csp)
+	}
+}
+
+// TestIDEEditor_RequiresToken verifies that /ide/editor returns 401 without
+// a bearer token (it is NOT a token-exempt static asset like /).
+func TestIDEEditor_RequiresToken(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide/editor", "") // no token
+	defer drainClose(resp)
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET /ide/editor (no token): status=%d; want 401", resp.StatusCode)
+	}
+}
+
+// TestIDEEditor_ServesHTMLContent verifies that /ide/editor returns an HTML
+// document with the expected Content-Type.
+func TestIDEEditor_ServesHTMLContent(t *testing.T) {
+	ts, tok := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide/editor", tok)
+	defer drainClose(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /ide/editor: status=%d; want 200", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("GET /ide/editor: Content-Type=%q; want text/html", ct)
+	}
+}
+
+// TestIDEEditor_CORP verifies /ide/editor carries the Cross-Origin-Resource-Policy:
+// same-origin header, consistent with other static asset handlers.
+func TestIDEEditor_CORP(t *testing.T) {
+	ts, tok := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide/editor", tok)
+	defer drainClose(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /ide/editor: status=%d; want 200", resp.StatusCode)
+	}
+	corp := resp.Header.Get("Cross-Origin-Resource-Policy")
+	if corp != "same-origin" {
+		t.Errorf("GET /ide/editor: Cross-Origin-Resource-Policy=%q; want same-origin", corp)
+	}
+}
+
+// TestVendorRoute_MonacoLoaderServedNoToken verifies that the Monaco AMD
+// loader (/vendor/monaco/min/vs/loader.js) is served without a token
+// (vendor paths are token-exempt static assets) and carries CORP: same-origin.
+func TestVendorRoute_MonacoLoaderServedNoToken(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/vendor/monaco/min/vs/loader.js", "")
+	defer drainClose(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /vendor/monaco/min/vs/loader.js (no token): status=%d; want 200", resp.StatusCode)
+	}
+	corp := resp.Header.Get("Cross-Origin-Resource-Policy")
+	if corp != "same-origin" {
+		t.Errorf("GET /vendor/monaco/min/vs/loader.js: Cross-Origin-Resource-Policy=%q; want same-origin", corp)
+	}
+}
+
+// TestVendorRoute_MonacoWorkerMainServedNoToken verifies that the Monaco worker
+// script (/vendor/monaco/min/vs/base/worker/workerMain.js) is accessible
+// without a token so that the blob-wrapper pattern can XHR-fetch it.
+func TestVendorRoute_MonacoWorkerMainServedNoToken(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/vendor/monaco/min/vs/base/worker/workerMain.js", "")
+	defer drainClose(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /vendor/monaco/.../workerMain.js (no token): status=%d; want 200", resp.StatusCode)
+	}
+}

@@ -36,10 +36,21 @@ var stylesCSS []byte
 var swJS []byte
 
 // vendorFS embeds the pinned, checksum-verified third-party JS blobs.
-// Served at /vendor/<filename> (same-origin 'self'; no CDN dependency).
+// Served at /vendor/<path> (same-origin 'self'; no CDN dependency).
+//
+// Mermaid: dist/vendor/mermaid.min.js — Flows UI DAG renderer.
+// Monaco:  dist/vendor/monaco/min/vs/* — IDE spike AMD editor host.
 //
 //go:embed dist/vendor/mermaid.min.js
+//go:embed dist/vendor/monaco/min/vs/loader.js
+//go:embed dist/vendor/monaco/min/vs/editor/editor.main.js
+//go:embed dist/vendor/monaco/min/vs/editor/editor.main.css
+//go:embed dist/vendor/monaco/min/vs/base/worker/workerMain.js
+//go:embed dist/vendor/monaco/min/vs/base/browser/ui/codicons/codicon/codicon.ttf
 var vendorFS embed.FS
+
+//go:embed dist/ide-editor.html
+var ideEditorHTML []byte
 
 // Config holds all configuration for the unified console HTTP server.
 type Config struct {
@@ -402,6 +413,14 @@ func (s *Server) registerRoutes() {
 		vendorHandler.ServeHTTP(w, r)
 	}))
 
+	// ---- IDE editor spike: isolated host document ----------------------------
+	// GET /ide/editor — serves dist/ide-editor.html with a SCOPED CSP that
+	// permits wasm-unsafe-eval (Monaco JIT) and blob: workers (Monaco web
+	// workers wrapped per CSP-safe pattern).  This route is behind the same
+	// edge auth as the rest of the console (requireTokenForNonStatic in New()).
+	// The MAIN console CSP (cspHeader, applied in handleIndex) is NOT modified.
+	s.mux.HandleFunc("/ide/editor", s.handleIDEEditor)
+
 	// ---- Kanban sub-dashboard -----------------------------------------------
 	// Mount kanban.Handler() under /kanban/. The kanban handler's own
 	// Host-allowlist is NOT invoked (we used Handler() not Serve()).
@@ -584,6 +603,54 @@ func (s *Server) handleSW(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	_, _ = w.Write(swJS)
+}
+
+// ideEditorCSP returns the Content-Security-Policy value for the /ide/editor
+// route ONLY.  This is a deliberately scoped relaxation to allow Monaco editor
+// to run: the AMD loader requires wasm-unsafe-eval (for its regex-engine
+// internals) and Monaco workers are loaded via the standard blob: URL wrapper
+// pattern (see dist/ide-editor.html MonacoEnvironment.getWorkerUrl).
+//
+// IMPORTANT: This function is entirely separate from cspHeader.  The main
+// console CSP (cspHeader) must remain unchanged — no wasm-unsafe-eval, no blob:
+// worker-src.  ideEditorCSP is only applied on /ide/editor.
+func ideEditorCSP() string {
+	return strings.Join([]string{
+		"default-src 'self'",
+		// Monaco AMD loader requires wasm-unsafe-eval for its regex engine.
+		// 'self' covers loader.js, editor.main.js, workerMain.js.
+		"script-src 'self' 'wasm-unsafe-eval'",
+		// Monaco web workers use the standard blob:-wrapper pattern:
+		// the host creates a Blob URL pointing to the same-origin workerMain.js.
+		// blob: is required here; 'self' covers same-origin worker scripts directly.
+		"worker-src blob: 'self'",
+		// Monaco injects inline styles for theming and decorations.
+		"style-src 'self' 'unsafe-inline'",
+		// No external connections; only same-origin (loader may use fetch for
+		// lazy module loading in future, but all assets are same-origin here).
+		"connect-src 'self'",
+		// Font loaded from same-origin /vendor/monaco/.../codicon.ttf (via CSS).
+		// data: is needed because Monaco editor.main.css embeds the font inline.
+		"img-src 'self' data:",
+		// Prevent this document from being framed by anything other than 'self'
+		// (parent console page).
+		"frame-ancestors 'self'",
+		"base-uri 'none'",
+		"object-src 'none'",
+	}, "; ")
+}
+
+func (s *Server) handleIDEEditor(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	// Scoped CSP: only applies to this route.  The main cspHeader is untouched.
+	w.Header().Set("Content-Security-Policy", ideEditorCSP())
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	_, _ = w.Write(ideEditorHTML)
 }
 
 // ---- auth helpers -----------------------------------------------------------

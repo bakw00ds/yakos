@@ -4,3 +4,8 @@
 # bytes; any EOL conversion (e.g. autocrlf on Windows) would corrupt the
 # hash and fail TestVendorChecksums on windows-latest CI.
 cli-go/internal/consoleui/dist/vendor/*.min.js binary
+# Monaco editor vendored blobs — same rationale; treat all Monaco JS and
+# binary assets as binary to avoid checksum corruption on Windows.
+cli-go/internal/consoleui/dist/vendor/monaco/min/vs/**/*.js binary
+cli-go/internal/consoleui/dist/vendor/monaco/min/vs/**/*.css binary
+cli-go/internal/consoleui/dist/vendor/monaco/min/vs/**/*.ttf binary
