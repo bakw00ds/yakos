@@ -244,9 +244,10 @@ func New(cfg Config) *Server {
 	serverCtx, serverCancel := context.WithCancel(context.Background())
 	chatH := newChatHandlers(hub, transcripts, cfg.DispatchService, serverCtx)
 	flowsH := &flowsHandlers{
-		engine:    cfg.WorkflowEngine,
-		workDir:   cfg.WorkDir,
-		serverCtx: serverCtx,
+		engine:     cfg.WorkflowEngine,
+		workDir:    cfg.WorkDir,
+		serverCtx:  serverCtx,
+		activeRuns: make(map[string]context.CancelFunc),
 	}
 	filesH := newFilesHandlers(cfg.WorkspaceRoot)
 	s := &Server{
@@ -557,6 +558,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/flows/api/run/node", requireRoleFunc(netid.RoleRead, s.flows.handleGetNodeOutput))
 	s.mux.HandleFunc("/flows/api/run", requireRoleFunc(netid.RoleRead, s.flows.handleRunDispatch))
 	s.mux.HandleFunc("/flows/api/resume", requireRoleFunc(netid.RoleFlowsRun, s.flows.handleResume))
+	// POST /flows/api/cancel?id=<runId> — cancel an in-flight run (RoleFlowsRun).
+	// Cancel is always a mutation so it is gated at RoleFlowsRun at the route
+	// level (unlike /flows/api/run which uses RoleRead-at-edge + per-method check
+	// because GET is also routed there).
+	s.mux.HandleFunc("/flows/api/cancel", requireRoleFunc(netid.RoleFlowsRun, s.flows.handleCancel))
 
 	// ---- Phase 7 (IDE): File API (read: RoleRead, write: RoleDispatch) ---------
 	// GET  /api/files/tree?dir=<relpath>     — JSON directory tree (RoleRead)

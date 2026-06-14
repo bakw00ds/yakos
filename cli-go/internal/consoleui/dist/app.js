@@ -1578,6 +1578,11 @@
     // Drawflow canvas editor state
     drawflowEditor: null,   // Drawflow editor instance (initialized once per session)
     canvasEditMode: false,  // false = View (locked), true = Edit (drag/CRUD)
+    // Cancel tracking: Set<runId> for runs where a cancel is in-flight (double-click guard).
+    _cancellingRuns: new Set(),
+    // Cancelled tracking: Set<runId> for runs where operator requested cancellation
+    // (used to annotate the eventual "failed" status as "failed (cancelled)").
+    _cancelledRuns: new Set(),
   };
 
   // ---- Flows init -----------------------------------------------------------
@@ -1644,9 +1649,11 @@
       ensureRunSnapshot(runId, payload.workflow || '');
       const snap = flowsState.runs.get(runId);
       if (snap) snap.status = payload.status || 'completed';
+      // Run finished — clear any in-flight cancel guard.
+      flowsState._cancellingRuns.delete(runId);
       if (flowsState.activeRunId === runId) {
         renderFlowsRunPanel();
-        announceFlows('Run ' + runId + ' ' + (payload.status || 'finished'));
+        announceFlows('Run ' + runId + ' ' + runStatusLabel(payload.status || 'finished', runId));
       }
       renderFlowsRunList();
     } else if (topic === 'workflow.node.started') {
@@ -1872,6 +1879,54 @@
     });
   }
 
+  function cancelFlowsRun(runId) {
+    if (!runId) return;
+    // Double-click guard: if a cancel is already in-flight for this run, do nothing.
+    if (flowsState._cancellingRuns.has(runId)) return;
+    flowsState._cancellingRuns.add(runId);
+
+    // Immediately reflect "Stopping…" state in the UI.
+    updateFlowsToolbarState();
+    renderFlowsRunList();
+
+    apiFetch('POST', '/flows/api/cancel?id=' + encodeURIComponent(runId)).then((r) => {
+      if (r.status === 202) {
+        // Cancel signal sent. Mark this run as operator-cancelled so the eventual
+        // "failed" status can be displayed as "failed (cancelled)".
+        flowsState._cancelledRuns.add(runId);
+        announceFlows('Cancelling run ' + runId);
+        // Leave the button in "Stopping…" (disabled) state.
+        // The existing poll loop will pick up the eventual status change.
+        updateFlowsToolbarState();
+        renderFlowsRunList();
+        return;
+      }
+      if (r.status === 404) {
+        // Run already finished by the time we sent the cancel — refresh state.
+        flowsState._cancellingRuns.delete(runId);
+        pollRunState(runId);
+        return;
+      }
+      // 4xx / 5xx: surface error in the status area, clear the guard so retry is possible.
+      return r.json().then((d) => {
+        flowsState._cancellingRuns.delete(runId);
+        showFlowsRunError(d.error || 'Cancel failed (' + r.status + ')');
+        updateFlowsToolbarState();
+        renderFlowsRunList();
+      }).catch(() => {
+        flowsState._cancellingRuns.delete(runId);
+        showFlowsRunError('Cancel failed (' + r.status + ')');
+        updateFlowsToolbarState();
+        renderFlowsRunList();
+      });
+    }).catch(() => {
+      flowsState._cancellingRuns.delete(runId);
+      showFlowsRunError('Network error cancelling run');
+      updateFlowsToolbarState();
+      renderFlowsRunList();
+    });
+  }
+
   function pollRunState(runId) {
     apiFetch('GET', '/flows/api/run?id=' + encodeURIComponent(runId)).then((r) => {
       if (!r.ok) return;
@@ -1893,6 +1948,12 @@
           snap.nodes[id] = snap.nodes[id] || {};
           Object.assign(snap.nodes[id], ns);
         }
+      }
+      // If the run has reached a terminal status, clear the cancelling guard so
+      // the Stop button is no longer shown in the "Stopping…" state.
+      const terminalStatuses = ['completed', 'failed', 'interrupted'];
+      if (terminalStatuses.indexOf(snap.status) !== -1) {
+        flowsState._cancellingRuns.delete(runId);
       }
       if (flowsState.activeRunId === runId) {
         renderFlowsCanvas();
@@ -1980,6 +2041,9 @@
               'aria-label="Re-run failed and downstream nodes (reuse completed outputs)" ' +
               'title="Resume: re-run failed/skipped, reuse completed node outputs" ' +
               'style="display:none">Re-run failed</button>' +
+            '<button id="flows-stop-btn" class="flows-btn flows-stop-btn" type="button" ' +
+              'aria-label="Stop current run" ' +
+              'style="display:none">Stop</button>' +
             '<span id="flows-run-status" class="flows-run-status" aria-live="polite"></span>' +
           '</div>' +
           '<div id="flows-save-error" class="flows-save-error" role="alert" style="display:none"></div>' +
@@ -2129,6 +2193,13 @@
     // Wire Re-run failed button.
     document.getElementById('flows-rerun-btn').addEventListener('click', () => {
       startFlowsRun(true);
+    });
+
+    // Wire Stop button.
+    document.getElementById('flows-stop-btn').addEventListener('click', () => {
+      if (flowsState.activeRunId) {
+        cancelFlowsRun(flowsState.activeRunId);
+      }
     });
 
     // Wire node output panel close button.
@@ -2600,9 +2671,12 @@
     const saveBtn = document.getElementById('flows-save-btn');
     const runBtn = document.getElementById('flows-run-btn');
     const rerunBtn = document.getElementById('flows-rerun-btn');
+    const stopBtn = document.getElementById('flows-stop-btn');
     const editBtn = document.getElementById('flows-canvas-edit-btn');
 
     const hasWorkflow = !!flowsState.selectedName;
+    const activeSnap = flowsState.activeRunId ? flowsState.runs.get(flowsState.activeRunId) : null;
+    const isRunning = activeSnap && (activeSnap.status === 'running' || activeSnap.status === 'pending');
 
     if (saveBtn) saveBtn.disabled = !hasWorkflow;
     if (runBtn) runBtn.disabled = !hasWorkflow;
@@ -2610,17 +2684,34 @@
 
     // Show Re-run button only if there's an active run with failures.
     if (rerunBtn) {
-      const activeSnap = flowsState.activeRunId ? flowsState.runs.get(flowsState.activeRunId) : null;
       const hasFailed = activeSnap && activeSnap.status === 'failed';
       rerunBtn.style.display = (hasWorkflow && hasFailed) ? '' : 'none';
+    }
+
+    // Show Stop button only if the active run is in-progress (running or pending).
+    // Disable it (and label it "Stopping…") if a cancel request is already in-flight.
+    if (stopBtn) {
+      if (hasWorkflow && isRunning) {
+        stopBtn.style.display = '';
+        const isCancelling = flowsState.activeRunId &&
+          flowsState._cancellingRuns.has(flowsState.activeRunId);
+        stopBtn.disabled = !!isCancelling;
+        stopBtn.textContent = isCancelling ? 'Stopping…' : 'Stop';
+        stopBtn.setAttribute('aria-label',
+          isCancelling
+            ? 'Cancellation requested for run ' + flowsState.activeRunId
+            : 'Stop run ' + flowsState.activeRunId
+        );
+      } else {
+        stopBtn.style.display = 'none';
+      }
     }
 
     // Run status indicator.
     const statusEl = document.getElementById('flows-run-status');
     if (statusEl) {
-      const activeSnap = flowsState.activeRunId ? flowsState.runs.get(flowsState.activeRunId) : null;
       if (activeSnap) {
-        statusEl.textContent = runStatusLabel(activeSnap.status);
+        statusEl.textContent = runStatusLabel(activeSnap.status, flowsState.activeRunId);
         statusEl.className = 'flows-run-status flows-run-status-' + activeSnap.status;
       } else {
         statusEl.textContent = '';
@@ -2661,13 +2752,17 @@
     // Show most recent first (Map iteration is insertion order; reverse it).
     const snaps = [...flowsState.runs.values()].reverse();
     for (const snap of snaps) {
+      // Wrap each run in a row so we can place a stop button alongside it.
+      const row = document.createElement('div');
+      row.className = 'flows-run-row';
+
       const item = document.createElement('button');
       item.type = 'button';
       item.className = 'flows-run-item' + (snap.runId === flowsState.activeRunId ? ' active' : '');
       item.setAttribute('aria-current', snap.runId === flowsState.activeRunId ? 'true' : 'false');
 
       const icon = runStatusIcon(snap.status);
-      const label = runStatusLabel(snap.status);
+      const label = runStatusLabel(snap.status, snap.runId);
       const tsStr = snap.ts ? formatTime(snap.ts) : '';
       const costStr = snap.cost != null ? ' $' + snap.cost.toFixed(4) : '';
 
@@ -2697,7 +2792,30 @@
         renderFlowsRunList();
         updateFlowsToolbarState();
       });
-      listEl.appendChild(item);
+      row.appendChild(item);
+
+      // Per-run Stop button: shown only for in-progress (running/pending) runs.
+      const snapIsRunning = snap.status === 'running' || snap.status === 'pending';
+      if (snapIsRunning) {
+        const isCancelling = flowsState._cancellingRuns.has(snap.runId);
+        const stopBtn = document.createElement('button');
+        stopBtn.type = 'button';
+        stopBtn.className = 'flows-run-stop-btn';
+        stopBtn.disabled = isCancelling;
+        stopBtn.textContent = isCancelling ? '…' : '■';
+        stopBtn.setAttribute(
+          'aria-label',
+          isCancelling ? 'Cancellation requested for run ' + snap.runId : 'Stop run ' + snap.runId
+        );
+        stopBtn.setAttribute('title', isCancelling ? 'Stopping…' : 'Stop');
+        stopBtn.addEventListener('click', (e) => {
+          e.stopPropagation(); // don't also select the run
+          cancelFlowsRun(snap.runId);
+        });
+        row.appendChild(stopBtn);
+      }
+
+      listEl.appendChild(row);
     }
   }
 
@@ -3445,12 +3563,17 @@
     }
   }
 
-  function runStatusLabel(status) {
+  // runStatusLabel(status, runId) — runId is optional; when provided, a "failed"
+  // status for a run where the operator requested cancellation is annotated as
+  // "failed (cancelled)" so the UI reflects intent without inventing a backend status.
+  function runStatusLabel(status, runId) {
     switch (status) {
       case 'pending':     return 'pending';
       case 'running':     return 'running';
       case 'completed':   return 'completed';
-      case 'failed':      return 'failed';
+      case 'failed':
+        if (runId && flowsState._cancelledRuns.has(runId)) return 'failed (cancelled)';
+        return 'failed';
       case 'interrupted': return 'interrupted';
       default:            return status || 'unknown';
     }

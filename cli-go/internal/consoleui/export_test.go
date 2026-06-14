@@ -130,9 +130,10 @@ func NewChatTestServer(hub *ChatHub, transcripts *Transcripts, serverCtx context
 func NewFlowsHandlerForTest(t *testing.T, workDir string, fn func(context.Context, dispatch.Params) ([]byte, dispatch.Result, error)) (http.Handler, *workflow.Engine) {
 	t.Helper()
 	h := &flowsHandlers{
-		workDir:   workDir,
-		serverCtx: context.Background(),
-		nodeRunFn: workflow.EngineRunFn(fn),
+		workDir:    workDir,
+		serverCtx:  context.Background(),
+		nodeRunFn:  workflow.EngineRunFn(fn),
+		activeRuns: make(map[string]context.CancelFunc),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/flows/api/workflows", h.handleListWorkflows)
@@ -140,6 +141,7 @@ func NewFlowsHandlerForTest(t *testing.T, workDir string, fn func(context.Contex
 	mux.HandleFunc("/flows/api/run", h.handleRunDispatch)
 	mux.HandleFunc("/flows/api/run/node", h.handleGetNodeOutput)
 	mux.HandleFunc("/flows/api/resume", h.handleResume)
+	mux.HandleFunc("/flows/api/cancel", h.handleCancel)
 	return mux, nil
 }
 

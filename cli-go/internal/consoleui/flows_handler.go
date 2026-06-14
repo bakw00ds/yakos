@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
@@ -56,6 +57,17 @@ type flowsHandlers struct {
 	// serverCtx is cancelled on server shutdown; background run goroutines
 	// derive their context from this so they are cancelled on daemon exit.
 	serverCtx context.Context
+
+	// cancelMu guards activeRuns.
+	cancelMu sync.Mutex
+	// activeRuns maps runID → cancel function for in-flight runs.
+	// Entries are inserted by handleRun when a run goroutine is launched and
+	// deleted (under cancelMu) when the goroutine exits.  handleCancel looks up
+	// and calls the cancel func to stop a running engine.Run.
+	//
+	// Memory bound: one entry per concurrent in-flight run.  Entries are always
+	// deleted on goroutine exit (via deferred cleanup) so there is no leak.
+	activeRuns map[string]context.CancelFunc
 
 	// nodeRunFn, when non-nil, is used by the consoleui test suite to inject a
 	// fake per-node dispatch function so tests exercise the handler code path
@@ -458,13 +470,29 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 	// nodeRunFn is set only by consoleui tests (via NewFlowsHandlerForTest).
 	// When present, skip the engine and run the fake directly so tests can
 	// exercise the handler path without live LLM calls.
+	// The per-run context is still created and registered in activeRuns so that
+	// cancel tests can exercise handleCancel even with the fake node runner.
 	if h.nodeRunFn != nil {
 		runID := mintRunID()
 		fn := h.nodeRunFn
-		ctx := h.serverCtx
+		nodeRunCtx, nodeRunCancel := context.WithCancel(h.serverCtx)
+
+		h.cancelMu.Lock()
+		if h.activeRuns == nil {
+			h.activeRuns = make(map[string]context.CancelFunc)
+		}
+		h.activeRuns[runID] = nodeRunCancel
+		h.cancelMu.Unlock()
+
 		go func() {
+			defer func() {
+				nodeRunCancel()
+				h.cancelMu.Lock()
+				delete(h.activeRuns, runID)
+				h.cancelMu.Unlock()
+			}()
 			for _, node := range wf.Nodes {
-				if _, _, err := fn(ctx, dispatch.Params{Agent: node.Agent, Task: node.Prompt}); err != nil {
+				if _, _, err := fn(nodeRunCtx, dispatch.Params{Agent: node.Agent, Task: node.Prompt}); err != nil {
 					slog.Error("flows: test nodeRunFn failed", "run_id", runID, "node", node.ID, "err", err)
 				}
 			}
@@ -499,10 +527,34 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 		Identity:  resolvedID,
 	}
 
-	// Launch in a background goroutine parented to serverCtx.
-	// This preserves the server shutdown cancellation signal.
+	// Create a per-run context derived from serverCtx so that:
+	//   a) the run is cancelled when the daemon shuts down (serverCtx), AND
+	//   b) the run can be cancelled individually via POST /flows/api/cancel.
+	runCtx, runCancel := context.WithCancel(h.serverCtx)
+
+	// Register the cancel func under cancelMu so handleCancel can find it.
+	// The goroutine below defers the delete so the entry is always cleaned up.
+	h.cancelMu.Lock()
+	if h.activeRuns == nil {
+		h.activeRuns = make(map[string]context.CancelFunc)
+	}
+	h.activeRuns[runID] = runCancel
+	h.cancelMu.Unlock()
+
+	// Launch in a background goroutine parented to runCtx.
+	// The deferred cleanup removes the activeRuns entry and releases runCancel
+	// regardless of whether the run completed normally or was cancelled.
 	go func() {
-		if _, err := h.engine.Run(h.serverCtx, wf, runID, operatorID, identityCarrier); err != nil {
+		defer func() {
+			// Always call runCancel to release the context resources.
+			runCancel()
+			// Remove from the active-runs map so handleCancel returns 404
+			// for this runID once the goroutine exits.
+			h.cancelMu.Lock()
+			delete(h.activeRuns, runID)
+			h.cancelMu.Unlock()
+		}()
+		if _, err := h.engine.Run(runCtx, wf, runID, operatorID, identityCarrier); err != nil {
 			slog.Error("flows: engine.Run failed", "run_id", runID, "workflow", name, "err", err)
 		}
 	}()
@@ -780,6 +832,74 @@ func (h *flowsHandlers) handleDeleteWorkflow(w http.ResponseWriter, r *http.Requ
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- POST /flows/api/cancel?id=<runId> ----------------------------------------
+
+// handleCancel cancels a running workflow by calling its per-run context cancel
+// function.  The engine already honours context cancellation (it marks the run
+// failed and stops launching new nodes); this handler simply triggers that path.
+//
+// POST /flows/api/cancel?id=<runId>
+// Returns 202 Accepted when the cancel signal is sent (async; the run winds down).
+// Returns 404 if the runId is not in-flight (unknown or already finished).
+// Returns 405 for non-POST methods.
+// Returns 400 for a malformed runId.
+// Returns 403 for insufficient role (requires RoleFlowsRun).
+//
+// Idempotency note: a second call for the same runId returns 404 (the entry is
+// removed from activeRuns when the goroutine exits), which is safe for callers
+// to treat as "already stopped".
+//
+// Status after cancellation: the persisted run state ends up with status "failed"
+// (RunFailed), which is the value the engine writes on ctx-cancel termination
+// (see TestEngine_CtxCancel in engine_test.go).  A "cancelled" status distinct
+// from "failed" is not surfaced in v1 because the engine's markRunDone path does
+// not distinguish cancellation from a node error; adding that distinction would
+// require engine changes.  Frontend polling via GET /flows/api/run?id= will see
+// status "failed" after cancellation.  A future engine change may introduce
+// "cancelled"; this handler's 202 response is stable regardless.
+func (h *flowsHandlers) handleCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Per-method role check: cancelling a run requires RoleFlowsRun.
+	// Fires only when resolver middleware has run (Resolved==true).
+	if id := netid.IdentityFrom(r.Context()); id.Resolved && !id.Role.Allows(netid.RoleFlowsRun) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	runID := r.URL.Query().Get("id")
+	if err := workflow.ValidateID("id", runID); err != nil {
+		writeGenericError(w, http.StatusBadRequest, "invalid run id")
+		return
+	}
+
+	h.cancelMu.Lock()
+	cancelFn, ok := h.activeRuns[runID]
+	h.cancelMu.Unlock()
+
+	if !ok {
+		// Run is not currently in-flight: either it never existed or it has
+		// already finished.  Return 404; the caller should treat this as
+		// "not running" (safe to ignore for idempotent stop-button UX).
+		writeGenericError(w, http.StatusNotFound, "run not found or already finished")
+		return
+	}
+
+	// Signal cancellation.  The engine goroutine will wind down asynchronously;
+	// we do not block waiting for it.  The defer in handleRun's goroutine
+	// removes the entry from activeRuns and calls runCancel when done.
+	cancelFn()
+
+	slog.Info("flows: cancel requested", "run_id", runID)
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"run_id": runID, "status": "cancellation_requested"})
 }
 
 // handleWorkflowDispatch routes GET/POST/DELETE /flows/api/workflow to the
