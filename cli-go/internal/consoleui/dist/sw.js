@@ -13,16 +13,16 @@
 //      /kanban/, /cost/, /perf/, /ide/editor, etc., without those frames
 //      needing to know the token themselves.
 //
-// Navigation requests (e.g. top-level or iframe document navigations) are
-// passed through unmodified.  Reconstructing a navigate-mode request with
-// mode:'same-origin' and credentials:'omit' is rejected by the browser before
-// it reaches the network.  Navigation to any gated route is handled by the
-// edge requireTokenForNonStatic middleware, not the Service Worker, because the
-// browser does not send Authorization headers on navigations — the SW injects
-// the header only for sub-resource (XHR/fetch) requests inside a loaded page.
-// The /ide/editor route is accessed as an iframe sub-resource by the console
-// (the normal path); direct top-level navigations to gated routes are not the
-// primary pattern and cannot use SW-injected headers.
+// Navigation requests are split by destination:
+//   destination === 'document'  — top-level page load (e.g. navigating to '/').
+//     These are passed through unmodified: (a) a navigate-mode Request cannot
+//     be reconstructed with mode:'same-origin' + credentials:'omit' without the
+//     browser rejecting it, and (b) '/' and '/ide/editor' are token-exempt.
+//   destination === 'iframe' | 'frame' — iframe document loads (kanban, cost,
+//     perf sub-dashboards). These DO need the Authorization header injected
+//     because they hit requireTokenForNonStatic middleware.  They fall through
+//     to the injection path below.
+// Sub-resources (XHR, fetch, scripts, styles) always reach the injection path.
 //
 // Security notes:
 //   - self.token is an in-memory variable in the SW's global scope.  It is
@@ -50,13 +50,19 @@ self.addEventListener('fetch', (e) => {
   if (e.request.headers.get('Authorization')) return;
   // If we don't have a token yet, let the request proceed unmodified.
   if (!token) return;
-  // Navigation requests (mode === 'navigate') cannot be reconstructed with
-  // mode:'same-origin' + credentials:'omit' — the browser rejects such a
-  // Request() constructor call for navigations.  Pass navigate requests
-  // through unmodified; token injection for navigations is not needed
-  // (the edge middleware gates non-static routes; browsers do not send
-  // Authorization on navigation requests regardless).
-  if (e.request.mode === 'navigate') return;
+  // Top-level document navigations (destination === 'document') cannot be
+  // reconstructed with mode:'same-origin' + credentials:'omit' — the
+  // browser rejects such a Request() for navigations.  The '/' and
+  // '/ide/editor' routes are token-exempt anyway; top-level nav is not
+  // the injection target.
+  //
+  // Iframe and frame navigations (destination === 'iframe' | 'frame') are
+  // different: the kanban/cost/perf sub-dashboards load as iframes and need
+  // the Authorization header injected, because their document requests go
+  // through the same requireTokenForNonStatic middleware.  Checking
+  // destination lets us skip only top-level page navigations while still
+  // injecting for iframes.
+  if (e.request.mode === 'navigate' && e.request.destination === 'document') return;
 
   // Clone the request, injecting the Authorization header.
   const headers = new Headers(e.request.headers);

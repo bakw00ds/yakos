@@ -1546,6 +1546,7 @@
     nodeOutput: '',         // stdout text for selectedNodeId
     nodeOutputTruncated: false,
     viewMode: 'canvas',     // 'canvas' | 'yaml'
+    _pendingCreate: null,   // non-null when a new workflow is staged but not yet saved
   };
 
   // ---- Flows init -----------------------------------------------------------
@@ -1686,6 +1687,7 @@
       flowsState.dirty = false;
       flowsState.saveError = null;
       flowsState.saveConflict = false;
+      flowsState._pendingCreate = null; // clear any pending-create state
       renderFlowsEditor();
       renderFlowsCanvas();
       renderFlowsRunList();
@@ -1697,6 +1699,7 @@
   function saveFlowsWorkflow() {
     const name = flowsState.selectedName;
     if (!name) return;
+    const isPendingCreate = flowsState._pendingCreate === name;
     const body = {
       name,
       yaml: flowsState.yaml,
@@ -1706,10 +1709,18 @@
       if (r.status === 409) {
         return r.json().then((d) => {
           flowsState.saveConflict = true;
-          flowsState.saveError = 'Conflict: another operator saved. Reloading…';
+          if (isPendingCreate) {
+            // Create conflict: a workflow with this name already exists on disk.
+            flowsState._pendingCreate = null;
+            flowsState.saveError = 'A workflow named "' + name + '" already exists. ' +
+              'Choose a different name (+ New) or load and edit the existing one.';
+          } else {
+            // Edit conflict: concurrent save by another operator.
+            flowsState.saveError = 'Conflict: another operator saved. Reloading…';
+            // Auto-reload to truth after 2 seconds.
+            setTimeout(() => loadFlowsWorkflow(name), 2000);
+          }
           renderFlowsEditor();
-          // Auto-reload to truth after 2 seconds.
-          setTimeout(() => loadFlowsWorkflow(name), 2000);
         });
       }
       if (r.status === 400) {
@@ -1725,11 +1736,17 @@
         return;
       }
       return r.json().then((d) => {
+        const wasCreate = isPendingCreate;
+        flowsState._pendingCreate = null;
         flowsState.version = d.version || flowsState.version;
         flowsState.dirty = false;
         flowsState.saveError = null;
         flowsState.saveConflict = false;
         renderFlowsEditor();
+        if (wasCreate) {
+          // Refresh list from server so the new workflow appears in canonical order.
+          loadFlowsWorkflowList();
+        }
         // Re-parse to update canvas.
         loadFlowsWorkflow(name);
       });
@@ -1860,7 +1877,14 @@
         // Left sidebar: workflow list + run list
         '<aside class="flows-sidebar" aria-label="Workflows and runs">' +
           '<div class="flows-section">' +
-            '<h2 class="subsection-title">Workflows</h2>' +
+            '<div class="flows-section-header">' +
+              '<h2 class="subsection-title">Workflows</h2>' +
+              '<button id="flows-new-btn" class="flows-new-btn" type="button" ' +
+                'aria-label="Create a new workflow" title="New workflow">' +
+                '+ New' +
+              '</button>' +
+            '</div>' +
+            '<div id="flows-new-error" class="flows-new-error" role="alert" style="display:none"></div>' +
             '<div id="flows-workflow-list" class="flows-workflow-list"></div>' +
           '</div>' +
           '<div class="flows-section" id="flows-run-list-section" style="display:none">' +
@@ -1892,6 +1916,10 @@
           // Canvas + YAML side by side; only one shown at a time
           '<div class="flows-content">' +
             '<div id="flows-canvas-wrap" class="flows-canvas-wrap">' +
+              '<div class="flows-canvas-readonly-note" role="note" aria-label="Canvas note">' +
+                'Canvas is read-only — click a node to view output. ' +
+                'To author or edit a workflow, switch to YAML view.' +
+              '</div>' +
               '<div id="flows-canvas" class="flows-canvas" role="img" aria-label="Workflow DAG canvas"></div>' +
             '</div>' +
             '<div id="flows-yaml-wrap" class="flows-yaml-wrap" style="display:none">' +
@@ -1967,7 +1995,97 @@
       document.getElementById('flows-node-panel').style.display = 'none';
     });
 
+    // Wire New workflow button.
+    document.getElementById('flows-new-btn').addEventListener('click', () => {
+      createNewFlowsWorkflow();
+    });
+
     renderFlowsWorkflowList();
+  }
+
+  // idRe mirrors workflow.ValidateID — ^[a-z0-9][a-z0-9-]{0,63}$
+  var WORKFLOW_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+  function showFlowsNewError(msg) {
+    var el = document.getElementById('flows-new-error');
+    if (!el) return;
+    if (msg) {
+      el.textContent = msg;
+      el.style.display = '';
+    } else {
+      el.textContent = '';
+      el.style.display = 'none';
+    }
+  }
+
+  function createNewFlowsWorkflow() {
+    // Prompt for workflow name.
+    var name = (window.prompt('New workflow name (lowercase letters, digits, hyphens; e.g. my-flow):') || '').trim();
+    if (!name) return; // cancelled or empty
+
+    showFlowsNewError(null);
+
+    // Client-side validation mirrors workflow.ValidateID.
+    if (!WORKFLOW_ID_RE.test(name)) {
+      showFlowsNewError(
+        'Invalid name “' + name + '”. Use lowercase letters, digits, and hyphens ' +
+        'only; must start with a letter or digit; max 64 characters.'
+      );
+      return;
+    }
+
+    // Minimal starter YAML that passes workflow.Validate:
+    //   version: 1               — required schema version
+    //   name: <name>             — must match ValidateID (we already validated above)
+    //   nodes[].id               — must match ValidateID
+    //   nodes[].agent            — required non-empty string
+    //   nodes[].prompt           — required non-empty string
+    //   nodes[].output_limit     — required > 0 (safety: prevents unbounded prompt inflation)
+    var starterYAML = [
+      'version: 1',
+      'name: ' + name,
+      'nodes:',
+      '  - id: step1',
+      '    agent: claude',
+      '    prompt: "Describe the first step."',
+      '    output_limit: 8000',
+    ].join('\n') + '\n';
+
+    // Load the new workflow into the editor state.
+    // version: '' signals force-create (POST /flows/api/workflow with empty version
+    // and a non-existent name will create the file; if the name already exists the
+    // server returns 409 — handled by saveFlowsWorkflow's existing 409 path).
+    flowsState.selectedName = name;
+    flowsState.yaml = starterYAML;
+    flowsState.version = '';
+    flowsState.workflow = null;
+    flowsState.dirty = true;
+    flowsState.saveError = null;
+    flowsState.saveConflict = false;
+
+    // Add to workflows list for display (will be refreshed after first save).
+    if (flowsState.workflows.indexOf(name) === -1) {
+      flowsState.workflows = flowsState.workflows.concat([name]);
+    }
+
+    // Switch to YAML view so the operator can review/edit before saving.
+    switchFlowsView('yaml');
+
+    // Sync editor content.
+    var yamlEditor = document.getElementById('flows-yaml-editor');
+    if (yamlEditor) yamlEditor.value = starterYAML;
+
+    renderFlowsWorkflowList();
+    renderFlowsEditor();
+    updateFlowsToolbarState();
+
+    // Hook post-save to refresh list and handle 409 ("already exists").
+    // We monkey-patch saveFlowsWorkflow to intercept the next save for this
+    // new workflow and show a friendly message on 409 rather than the generic
+    // "Conflict: another operator saved." message.  This is scoped to the
+    // pending-create lifecycle only (cleared once save succeeds or the
+    // operator selects a different workflow).
+    flowsState._pendingCreate = name;
   }
 
   function switchFlowsView(mode) {
