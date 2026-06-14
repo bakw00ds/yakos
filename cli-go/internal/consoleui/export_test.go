@@ -190,3 +190,11 @@ const MaxTreeDepth = maxTreeDepth
 // MaxTreeTotalNodes is exported so tests can exercise the global node budget
 // truncated=true branch.
 const MaxTreeTotalNodes = maxTreeTotalNodes
+
+// MaxFileContentBytes is exported so write tests can exercise the content size
+// cap (413 Request Entity Too Large) without hardcoding the limit.
+const MaxFileContentBytes = maxFileContentBytes
+
+// FileContentHash is exported so tests can compute expected version stamps
+// and verify round-trip consistency between read and write endpoints.
+var FileContentHash = fileContentHash

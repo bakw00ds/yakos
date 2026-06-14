@@ -2,11 +2,18 @@ package consoleui
 
 // files_handler.go — Phase 7 (IDE): /api/files/* endpoints.
 //
-// Two read-only endpoints, both requiring RoleRead, both jailed to
-// Config.WorkspaceRoot:
+// Read endpoints (RoleRead), both jailed to Config.WorkspaceRoot:
 //
-//	GET /api/files/tree?dir=<relpath>    — JSON file tree for a directory
-//	GET /api/files/content?path=<relpath> — file content (UTF-8 or base64)
+//	GET /api/files/tree?dir=<relpath>     — JSON file tree for a directory
+//	GET /api/files/content?path=<relpath> — file content (UTF-8 or base64);
+//	                                        returns "version" field (SHA-256 of
+//	                                        raw bytes) for optimistic concurrency
+//	                                        on subsequent writes.
+//
+// Write endpoint (RoleDispatch), jailed to Config.WorkspaceRoot:
+//
+//	POST /api/files/write                 — atomic write; optimistic concurrency
+//	                                        via version echo.
 //
 // # Path jail
 //
@@ -21,9 +28,11 @@ package consoleui
 //
 // # Secret filtering
 //
-// Both endpoints omit / refuse files matching the secret deny-set.
+// All endpoints refuse secret-matched files.
 // The tree endpoint omits secret-matched files entirely (they do not appear
 // in entries). The content endpoint refuses with 403.
+// The write endpoint refuses with 403 — operators must not persist secrets
+// through the IDE write surface.
 //
 // Deny-set layers (evaluated against lowercased basename):
 //
@@ -39,12 +48,36 @@ package consoleui
 // - Tree: 2000 entries per directory, max depth 10, and a global total-node
 //   budget of 10 000 across the entire recursive traversal.  A `truncated`
 //   flag is set when any cap fires.
-// - Content: 2 MiB hard cap → 413 with a clear message.
+// - Content: 5 MiB hard cap → 413 with a clear message.
+// - Write: 5 MiB hard cap on content → 413; request body LimitReader.
+//
+// # Write semantics (optimistic concurrency)
+//
+// POST /api/files/write accepts {path, content, version}:
+//   - version = "" : create-new / force-write. Allowed whether or not the
+//     file exists. Use this to create a new file or to force-overwrite when
+//     the caller intentionally does not track version state.
+//   - version != "": must match the SHA-256 hex of the current on-disk
+//     content. Mismatch → 409 (no clobber; caller must reload).
+//
+// The write is atomic: content is written to a temp file in the same directory
+// then renamed over the target. On rename failure the temp file is cleaned up.
+//
+// Parent directory creation: for v1, the parent directory must already exist.
+// Writing to a non-existent parent directory path returns 400.  This prevents
+// surprise directory creation from the IDE surface.
+//
+// File mode: 0644 on create; existing file mode is preserved on update.
 //
 // # Idempotency
 //
-// Both endpoints are GET (read-only); idempotency is guaranteed by HTTP
-// semantics and the absence of any state mutation.
+// GET endpoints are idempotent by HTTP semantics.
+// POST /api/files/write: callers MUST supply an Idempotency-Key header to
+// make retries safe when the version is "". When version is non-empty and
+// the write succeeds, a retry with the same version will 409 (the new
+// on-disk hash won't match), which is safe — the data is already written.
+// The caller should treat a 409 on retry as a successful first write and
+// re-read the version.
 //
 // # Rate limiting
 //
@@ -52,8 +85,11 @@ package consoleui
 // /api/* routes via the edge middleware in server.go).  No override.
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -62,10 +98,25 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/bakw00ds/yakos/internal/netid"
 )
 
-// maxFileContentBytes is the hard size cap for /api/files/content.
+// maxFileContentBytes is the hard size cap for /api/files/content and
+// the content field of /api/files/write requests.
 const maxFileContentBytes = 5 << 20 // 5 MiB
+
+// maxWriteRequestBodyBytes caps the raw HTTP request body for POST /api/files/write.
+// Slightly larger than maxFileContentBytes to account for JSON framing overhead.
+const maxWriteRequestBodyBytes = maxFileContentBytes + 4096
+
+// fileContentHash returns the SHA-256 hex digest of data.
+// Used as the version stamp for optimistic concurrency on file writes
+// (mirrors contentHash in flows_handler.go but operates on raw file bytes).
+func fileContentHash(data []byte) string {
+	h := sha256.Sum256(data)
+	return fmt.Sprintf("%x", h)
+}
 
 // maxTreeEntriesPerDir is the maximum number of entries returned per directory
 // in /api/files/tree.  When exceeded, the response carries truncated=true.
@@ -230,6 +281,15 @@ func (h *filesHandlers) jailPath(relpath string) (string, bool) {
 		return "", false
 	}
 
+	// Reject .git internals on the candidate (pre-symlink) path.
+	// This check runs before EvalSymlinks so that non-existent paths inside
+	// .git/ (e.g. a new file the caller wants to create) are also rejected.
+	// The post-symlink check below covers the case where a symlink resolves
+	// to a .git path.
+	if isGitPath(candidate, h.workspaceRoot) {
+		return "", false
+	}
+
 	// Resolve symlinks: reject if the real path escapes the workspace.
 	real, err := filepath.EvalSymlinks(candidate)
 	if err != nil {
@@ -246,7 +306,8 @@ func (h *filesHandlers) jailPath(relpath string) (string, bool) {
 		return "", false
 	}
 
-	// Reject .git internals.
+	// Reject .git internals on the symlink-resolved path (belt-and-suspenders:
+	// a symlink inside the jail could resolve to a .git path).
 	if isGitPath(real, h.workspaceRoot) {
 		return "", false
 	}
@@ -508,6 +569,11 @@ type fileContentResponse struct {
 	// Language is a Monaco language ID derived from the file extension.
 	// Empty string means "plaintext".
 	Language string `json:"language,omitempty"`
+	// Version is the SHA-256 hex digest of the raw file bytes.
+	// Clients MUST echo this value in the "version" field of POST /api/files/write
+	// to enable optimistic concurrency (stale-write protection).
+	// The hash is computed over raw bytes regardless of encoding (UTF-8 or base64).
+	Version string `json:"version"`
 }
 
 // handleFilesContent serves GET /api/files/content?path=<relpath>.
@@ -601,6 +667,7 @@ func (h *filesHandlers) handleFilesContent(w http.ResponseWriter, r *http.Reques
 		Content:  content,
 		Size:     fi.Size(),
 		Language: languageFromExt(filepath.Ext(absPath)),
+		Version:  fileContentHash(data), // hash over raw bytes, not the encoded form
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -617,6 +684,203 @@ func isBinary(data []byte) bool {
 		return true
 	}
 	return !utf8.Valid(data)
+}
+
+// ---- /api/files/write -------------------------------------------------------
+
+// fileWriteRequest is the DTO for POST /api/files/write.
+// Bound from the request body; never bound directly to a domain struct.
+type fileWriteRequest struct {
+	// Path is the workspace-relative path to write.
+	Path string `json:"path"`
+	// Content is the UTF-8 text content to write.
+	Content string `json:"content"`
+	// Version is the last-seen version stamp (SHA-256 hex of previous content).
+	// If empty, the write is treated as a create/force-write (no stale check).
+	// If non-empty, must match the current on-disk SHA-256 or a 409 is returned.
+	Version string `json:"version"`
+}
+
+// fileWriteResponse is the wire response for a successful POST /api/files/write.
+type fileWriteResponse struct {
+	// Path is the workspace-relative path that was written.
+	Path string `json:"path"`
+	// Version is the SHA-256 hex digest of the newly written content.
+	// The client must use this value on the next write to avoid 409 Conflict.
+	Version string `json:"version"`
+	// Size is the number of bytes written.
+	Size int64 `json:"size"`
+}
+
+// handleFilesWrite serves POST /api/files/write.
+//
+// Security model:
+//   - Role: RoleDispatch (checked here in addition to the route wrapper).
+//   - Jail: path goes through the same jailPath as the read endpoints.
+//   - Secrets: isSecretFile → 403.
+//   - .git internals: rejected by jailPath → 400/403.
+//   - WorkspaceRoot unset → 503.
+//   - Content > 5 MiB → 413.
+//   - Optimistic concurrency: version != "" → compare with on-disk SHA-256.
+//     Mismatch → 409. version == "" → force-write (create or overwrite).
+//   - Parent dir must exist (v1: no mkdir). Non-existent parent → 400.
+//   - Atomic: temp file in same dir + rename.
+//   - File mode: 0644 on create; preserve existing mode on update.
+//
+// Idempotency: POST /api/files/write is NOT idempotent by default. Callers
+// should supply an Idempotency-Key header when using version="" to avoid
+// double-creation. When version is echoed from a prior read, the 409-on-retry
+// semantics guarantee that a duplicate write is safe (data already persisted).
+func (h *filesHandlers) handleFilesWrite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Per-handler role check: write requires RoleDispatch.
+	// Fires only when resolver middleware has run (Resolved==true).
+	// Loopback tests using srv.Handler() bypass this (Resolved=false → no-op).
+	if id := netid.IdentityFrom(r.Context()); id.Resolved && !id.Role.Allows(netid.RoleDispatch) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	if h.workspaceRoot == "" {
+		writeGenericError(w, http.StatusServiceUnavailable, "workspace root not configured")
+		return
+	}
+
+	// Cap and read the request body.
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(maxWriteRequestBodyBytes)+1))
+	if err != nil {
+		writeGenericError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	if len(body) > maxWriteRequestBodyBytes {
+		writeGenericError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
+
+	var req fileWriteRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeGenericError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	if req.Path == "" {
+		writeGenericError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	// Reject secret patterns by filename before the jail (fast path; no info leak).
+	baseName := filepath.Base(req.Path)
+	if isSecretFile(baseName) {
+		writeGenericError(w, http.StatusForbidden, "writing this file type is not permitted")
+		return
+	}
+
+	// Content size cap (over the raw UTF-8 string bytes).
+	contentBytes := []byte(req.Content)
+	if len(contentBytes) > maxFileContentBytes {
+		writeGenericError(w, http.StatusRequestEntityTooLarge, "content too large (max 5 MiB)")
+		return
+	}
+
+	// Jail the path. For write we use the unresolved candidate path because
+	// the target file may not exist yet. jailPath returns (candidate, true)
+	// for not-exist paths, allowing us to create new files within the jail.
+	absPath, ok := h.jailPath(req.Path)
+	if !ok {
+		writeGenericError(w, http.StatusBadRequest, "invalid file path")
+		return
+	}
+
+	// Re-check secret on the real/candidate basename after resolution
+	// (symlink could rename).
+	if isSecretFile(filepath.Base(absPath)) {
+		writeGenericError(w, http.StatusForbidden, "writing this file type is not permitted")
+		return
+	}
+
+	// v1: parent directory must exist — no surprise mkdir from the IDE.
+	parentDir := filepath.Dir(absPath)
+	parentFi, err := os.Stat(parentDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeGenericError(w, http.StatusBadRequest, "parent directory does not exist")
+			return
+		}
+		slog.Error("consoleui/files: write stat parent", "err", err)
+		writeGenericError(w, http.StatusInternalServerError, "failed to stat parent directory")
+		return
+	}
+	if !parentFi.IsDir() {
+		writeGenericError(w, http.StatusBadRequest, "parent path is not a directory")
+		return
+	}
+
+	// Optimistic concurrency: read existing content and compare versions.
+	existingData, readErr := os.ReadFile(absPath) //nolint:gosec
+	fileExists := readErr == nil
+	if readErr != nil && !os.IsNotExist(readErr) {
+		slog.Error("consoleui/files: write read existing", "err", readErr)
+		writeGenericError(w, http.StatusInternalServerError, "failed to check existing version")
+		return
+	}
+
+	if req.Version != "" && fileExists {
+		diskVersion := fileContentHash(existingData)
+		if diskVersion != req.Version {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": "file changed on disk; reload before saving",
+			})
+			return
+		}
+	}
+	// If version == "": force-write — no stale check, allowed for both new and existing files.
+	// If version != "" and !fileExists: file was deleted since last read; treat as version mismatch.
+	if req.Version != "" && !fileExists {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "file changed on disk; reload before saving",
+		})
+		return
+	}
+
+	// Determine file mode: preserve existing mode on update, use 0644 for new files.
+	fileMode := os.FileMode(0644)
+	if fileExists {
+		if fi, err := os.Stat(absPath); err == nil {
+			fileMode = fi.Mode().Perm()
+		}
+	}
+
+	// Atomic write via temp-rename (same pattern as flows handleSaveWorkflow).
+	tmpPath := absPath + ".yakos-write-tmp"
+	if err := os.WriteFile(tmpPath, contentBytes, fileMode); err != nil { //nolint:gosec
+		slog.Error("consoleui/files: write tmp", "err", err)
+		writeGenericError(w, http.StatusInternalServerError, "failed to write file")
+		return
+	}
+	if err := os.Rename(tmpPath, absPath); err != nil {
+		_ = os.Remove(tmpPath)
+		slog.Error("consoleui/files: write rename", "err", err)
+		writeGenericError(w, http.StatusInternalServerError, "failed to save file")
+		return
+	}
+
+	newVersion := fileContentHash(contentBytes)
+	relForResponse := h.toRelPath(absPath)
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(fileWriteResponse{
+		Path:    relForResponse,
+		Version: newVersion,
+		Size:    int64(len(contentBytes)),
+	})
 }
 
 // languageFromExt maps a file extension (including the leading dot) to a
