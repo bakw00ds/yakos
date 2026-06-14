@@ -2340,8 +2340,11 @@ html[data-theme="light"] .modal-btn-cancel:hover {
 }
 
 .ide-splitter:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  /* N-3: when the bar fills with --accent, a same-color outline is invisible.
+     Use a double-ring box-shadow: inner ring matches the page background for
+     contrast, outer ring is the accent. Works across all 4 themes. */
+  box-shadow: 0 0 0 2px var(--bg, var(--color-bg-base, #1a1a1a)),
+              0 0 0 4px var(--accent);
 }
 
 /* ---- Pane collapse/expand toggle buttons ---- */
@@ -2356,6 +2359,9 @@ html[data-theme="light"] .modal-btn-cancel:hover {
   line-height: 1;
   padding: 2px 4px;
   flex-shrink: 0;
+  /* M-1 (WCAG 2.5.8): minimum 24×24px target size */
+  min-height: 24px;
+  min-width: 24px;
   transition: background var(--dur, 0.1s) var(--ease, ease),
               color var(--dur, 0.1s) var(--ease, ease);
 }
@@ -2617,6 +2623,9 @@ html[data-theme="light"] .ide-tab:hover {
   opacity: 0;
   padding: 0 2px;
   flex-shrink: 0;
+  /* M-1 (WCAG 2.5.8): minimum 24×24px target size */
+  min-height: 24px;
+  min-width: 24px;
   transition: opacity var(--dur, 0.1s) var(--ease, ease),
               color   var(--dur, 0.1s) var(--ease, ease);
 }
@@ -2906,7 +2915,11 @@ html.perf-low-end[data-theme="og"]  .tline::after {
 
 @media (prefers-reduced-motion: reduce) {
   .ide-tree-file,
-  .ide-tree-dir {
+  .ide-tree-dir,
+  .ide-tab,
+  .ide-tab-close,
+  .ide-splitter,
+  .ide-pane-toggle {
     transition: none;
   }
 }

@@ -86,7 +86,7 @@
   var ideTabInitialized = false;
   var ideEditorWindow = null;
   var ideEditorReady = false;
-  var ideQueuedOpen = null;
+  var ideQueuedOpen = null; // re-assigned to [] in IDE section init (B2: array queue)
   var ideMessageHandlerRegistered = false;
   // Multi-file tab state (hoisted for TDZ safety):
   //   ideOpenFiles: Map<path, {version, dirty, editable, saving, saveStatusTimer}>
@@ -2885,7 +2885,7 @@
   ideTabInitialized = false;
   ideEditorWindow   = null;
   ideEditorReady    = false;
-  ideQueuedOpen     = null;
+  ideQueuedOpen     = [];    // B2 fix: array queue so rapid pre-ready opens all land
   ideMessageHandlerRegistered = false;
   ideOpenFiles      = new Map(); // path → {version, dirty, editable, saving, saveStatusTimer}
   ideActiveTabPath  = '';
@@ -2954,7 +2954,9 @@
       closeBtn.type = 'button';
       closeBtn.className = 'ide-tab-close';
       closeBtn.setAttribute('aria-label', 'Close ' + basename);
-      closeBtn.setAttribute('tabindex', '-1'); // tab row handles focus; close is mouse/click
+      // tabindex="-1": close button is reachable via Delete/Backspace on the tab
+      // (S-1 / APG tab pattern) and by mouse click. Focus stays on the tab itself.
+      closeBtn.setAttribute('tabindex', '-1');
       closeBtn.textContent = '×';
 
       tab.appendChild(dot);
@@ -2977,7 +2979,7 @@
       i++;
     }
 
-    // Arrow-key navigation within the tablist (ARIA pattern).
+    // Arrow-key navigation + Delete/Backspace close within the tablist (ARIA pattern).
     strip.addEventListener('keydown', function(e) {
       var tabs = strip.querySelectorAll('[role="tab"]');
       var arr = Array.prototype.slice.call(tabs);
@@ -2997,6 +2999,14 @@
         e.preventDefault();
         var last = arr[arr.length - 1];
         if (last) { last.focus(); last.click(); }
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        // S-1 (2.1.1): keyboard close of the focused tab.
+        // APG tab pattern: Delete closes the focused tab; focus moves to
+        // the right neighbor, or left if the closed tab was last.
+        if (idx === -1) return;
+        e.preventDefault();
+        var closingPath = arr[idx] && arr[idx].getAttribute('data-ide-tab-path');
+        if (closingPath) ideCloseTab(closingPath);
       }
     });
   }
@@ -3030,7 +3040,7 @@
     if (ideEditorReady && ideEditorWindow) {
       sendOpenFile(payload);
     } else {
-      ideQueuedOpen = payload;
+      ideQueuedOpen.push(payload);
     }
 
     // Sync UI.
@@ -3039,6 +3049,16 @@
     // Clear any lingering editor notice from a previous tab.
     var notice = document.getElementById('ide-editor-notice');
     if (notice) notice.style.display = 'none';
+    // M-2 (4.1.3): announce tab activation to screen readers via the
+    // already-present aria-live="polite" path element.
+    var pathEl = document.getElementById('ide-open-path');
+    if (pathEl) {
+      // Force a re-announcement even if the text didn't change (same path
+      // re-activated after closing another): clear then set on next frame.
+      var basename = path.split('/').pop() || path;
+      pathEl.textContent = '';
+      requestAnimationFrame(function() { pathEl.textContent = path; });
+    }
   }
 
   function ideCloseTab(path) {
@@ -3046,7 +3066,45 @@
     if (!fileState) return;
 
     function doClose() {
-      // Tell Monaco to dispose the model for this path.
+      // B1 fix: determine neighbor BEFORE deleting from the map, and BEFORE
+      // telling Monaco to switch away.  Activate the neighbor first so Monaco
+      // has already set a different active model before closeFile arrives in
+      // the iframe.  That way the iframe's `closeFile` guard
+      //   if (editor.getModel() !== closeEntry.model) dispose()
+      // evaluates correctly (the active model is already the neighbor's).
+      var neighborPath = null;
+      var neighborTabEl = null;
+      if (ideActiveTabPath === path) {
+        // Collect ordered keys from the map (insertion order).
+        var keys = Array.from(ideOpenFiles.keys());
+        var closingIdx = keys.indexOf(path);
+        if (keys.length > 1) {
+          // M-4: prefer the right neighbor; fall back to left if closing is last.
+          neighborPath = (closingIdx < keys.length - 1)
+            ? keys[closingIdx + 1]
+            : keys[closingIdx - 1];
+        }
+      }
+
+      // Switch editor to the neighbor now (before deleting or sending closeFile).
+      if (neighborPath) {
+        ideActivateTab(neighborPath);
+        // M-4: restore keyboard focus to the newly active tab button.
+        requestAnimationFrame(function() {
+          var strip = document.getElementById('ide-tab-strip');
+          if (strip) {
+            var newActive = strip.querySelector('[data-ide-tab-path="' + neighborPath + '"]');
+            if (newActive) newActive.focus();
+          }
+        });
+      }
+
+      // Now remove the closing path from the parent's map.
+      ideOpenFiles.delete(path);
+
+      // B1 fix: send closeFile AFTER switching the editor.  Monaco's iframe
+      // handler can now unconditionally dispose the model (the active model has
+      // already changed to the neighbor's model).
       if (ideEditorWindow) {
         try {
           ideEditorWindow.postMessage(
@@ -3055,14 +3113,9 @@
           );
         } catch (_) {}
       }
-      ideOpenFiles.delete(path);
 
-      if (ideActiveTabPath === path) {
-        // Activate a neighbor (prefer right, then left).
-        var keys = Array.from(ideOpenFiles.keys());
-        if (keys.length > 0) {
-          ideActivateTab(keys[0]);
-        } else {
+      if (!neighborPath) {
+        if (ideActiveTabPath === path) {
           // All tabs closed — reset state.
           ideActiveTabPath = '';
           ideCurrentPath   = '';
@@ -3070,13 +3123,16 @@
           ideEditable       = false;
           ideIsDirty        = false;
           ideIsSaving       = false;
-          // Show empty state in editor header.
           ideRenderTabStrip();
           ideUpdateEditorHeader();
+          // M-2 (4.1.3): announce "all closed" to screen readers.
+          var pathEl = document.getElementById('ide-open-path');
+          if (pathEl) pathEl.textContent = 'All files closed';
+        } else {
+          ideRenderTabStrip();
         }
-      } else {
-        ideRenderTabStrip();
       }
+      // (If neighborPath was set, ideActivateTab already re-rendered the strip.)
     }
 
     if (fileState.dirty) {
@@ -3177,7 +3233,7 @@
     if (ideEditorReady && ideEditorWindow) {
       sendOpenFile(payload);
     } else {
-      ideQueuedOpen = payload;
+      ideQueuedOpen.push(payload);
     }
 
     ideRenderTabStrip();
@@ -3221,6 +3277,7 @@
               'type="button" ' +
               'aria-expanded="' + (layout.treeCollapsed ? 'false' : 'true') + '" ' +
               'aria-controls="ide-tree-root" ' +
+              'aria-label="' + (layout.treeCollapsed ? 'Expand file tree' : 'Collapse file tree') + '" ' +
               'title="' + (layout.treeCollapsed ? 'Expand file tree' : 'Collapse file tree') + '">' +
               (layout.treeCollapsed ? '&#x276F;' : '&#x276E;') +
             '</button>' +
@@ -3233,6 +3290,9 @@
         '<div class="ide-splitter" id="ide-splitter-left" ' +
           'role="separator" aria-orientation="vertical" ' +
           'aria-label="Resize file tree" tabindex="0" ' +
+          'aria-valuemin="80" aria-valuemax="600" ' +
+          'aria-valuenow="' + layout.treeW + '" ' +
+          'aria-valuetext="' + layout.treeW + ' pixels" ' +
           'style="' + (layout.treeCollapsed ? 'display:none' : '') + '"></div>' +
 
         // ── Center: Monaco editor pane ────────────────────────────────────
@@ -3268,6 +3328,9 @@
         '<div class="ide-splitter" id="ide-splitter-right" ' +
           'role="separator" aria-orientation="vertical" ' +
           'aria-label="Resize chat panel" tabindex="0" ' +
+          'aria-valuemin="80" aria-valuemax="600" ' +
+          'aria-valuenow="' + layout.chatW + '" ' +
+          'aria-valuetext="' + layout.chatW + ' pixels" ' +
           'style="' + (layout.chatCollapsed ? 'display:none' : '') + '"></div>' +
 
         // ── Right: embedded chat pane ────────────────────────────────────
@@ -3279,6 +3342,7 @@
               'type="button" ' +
               'aria-expanded="' + (layout.chatCollapsed ? 'false' : 'true') + '" ' +
               'aria-controls="ide-chat-slot" ' +
+              'aria-label="' + (layout.chatCollapsed ? 'Expand chat' : 'Collapse chat') + '" ' +
               'title="' + (layout.chatCollapsed ? 'Expand chat' : 'Collapse chat') + '">' +
               (layout.chatCollapsed ? '&#x276E;' : '&#x276F;') +
             '</button>' +
@@ -3324,6 +3388,8 @@
         if (!ideEditable) {
           fileState.dirty = false;
           ideIsDirty = false;
+          // Code-review S1: re-render tab strip so the ● dirty dot clears.
+          ideRenderTabStrip();
         }
         ideUpdateEditorHeader();
       });
@@ -3393,6 +3459,7 @@
         toggle.innerHTML = collapsed ? '&#x276F;' : '&#x276E;';
         toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
         toggle.title = collapsed ? 'Expand file tree' : 'Collapse file tree';
+        toggle.setAttribute('aria-label', collapsed ? 'Expand file tree' : 'Collapse file tree');
       }
       if (treeCol) treeCol.style.minWidth = (collapsed ? COLLAPSED_W : 120) + 'px';
       // Update grid.
@@ -3422,6 +3489,7 @@
         chatTog.innerHTML = collapsed2 ? '&#x276E;' : '&#x276F;';
         chatTog.setAttribute('aria-expanded', collapsed2 ? 'false' : 'true');
         chatTog.title = collapsed2 ? 'Expand chat' : 'Collapse chat';
+        chatTog.setAttribute('aria-label', collapsed2 ? 'Expand chat' : 'Collapse chat');
       }
       if (chatCol) chatCol.style.minWidth = (collapsed2 ? COLLAPSED_W : 160) + 'px';
       if (layoutEl2) {
@@ -3478,6 +3546,8 @@
         layoutEl.style.gridTemplateColumns = newW + 'px 8px 1fr 8px ' + chatW + 'px';
         var treeCol = document.getElementById('ide-tree-col');
         if (treeCol) treeCol.style.minWidth = MIN + 'px';
+        splitter.setAttribute('aria-valuenow', newW);
+        splitter.setAttribute('aria-valuetext', newW + ' pixels');
       } else {
         var newW2 = Math.max(MIN, Math.min(MAX, startSize - dx));
         layout.chatW = newW2;
@@ -3485,6 +3555,8 @@
         layoutEl.style.gridTemplateColumns = treeW + 'px 8px 1fr 8px ' + newW2 + 'px';
         var chatCol = document.getElementById('ide-chat-col');
         if (chatCol) chatCol.style.minWidth = MIN + 'px';
+        splitter.setAttribute('aria-valuenow', newW2);
+        splitter.setAttribute('aria-valuetext', newW2 + ' pixels');
       }
       ideSaveLayout(layout);
     });
@@ -3499,6 +3571,7 @@
 
     splitter.addEventListener('pointercancel', function(e) {
       dragging = false;
+      splitter.releasePointerCapture(e.pointerId);
       var overlay = document.getElementById('ide-drag-overlay');
       if (overlay) overlay.style.display = 'none';
     });
@@ -3523,12 +3596,16 @@
         layout.treeW = Math.max(MIN, Math.min(MAX, layout.treeW + delta));
         var chatW = layout.chatCollapsed ? COLLAPSED_W : layout.chatW;
         layoutEl.style.gridTemplateColumns = layout.treeW + 'px 8px 1fr 8px ' + chatW + 'px';
+        splitter.setAttribute('aria-valuenow', layout.treeW);
+        splitter.setAttribute('aria-valuetext', layout.treeW + ' pixels');
       } else {
         if (layout.chatCollapsed) return;
         var delta2 = e.key === 'ArrowLeft' ? STEP : -STEP;
         layout.chatW = Math.max(MIN, Math.min(MAX, layout.chatW + delta2));
         var treeW = layout.treeCollapsed ? COLLAPSED_W : layout.treeW;
         layoutEl.style.gridTemplateColumns = treeW + 'px 8px 1fr 8px ' + layout.chatW + 'px';
+        splitter.setAttribute('aria-valuenow', layout.chatW);
+        splitter.setAttribute('aria-valuetext', layout.chatW + ' pixels');
       }
       ideSaveLayout(layout);
     });
@@ -3673,9 +3750,12 @@
     if (msg.type === 'ready') {
       ideEditorReady = true;
       syncMonacoTheme(document.documentElement.getAttribute('data-theme') || 'og');
-      if (ideQueuedOpen) {
-        sendOpenFile(ideQueuedOpen);
-        ideQueuedOpen = null;
+      // B2 fix: drain the array queue in order so rapid pre-ready opens all land.
+      if (ideQueuedOpen.length > 0) {
+        var queued = ideQueuedOpen.splice(0);
+        for (var qi = 0; qi < queued.length; qi++) {
+          sendOpenFile(queued[qi]);
+        }
       }
     } else if (msg.type === 'error') {
       const notice = document.getElementById('ide-editor-notice');
@@ -3695,11 +3775,6 @@
           ideRenderTabStrip();
           ideUpdateEditorHeader();
         }
-      } else if (dirtyPath && ideOpenFiles.has(dirtyPath)) {
-        // Background model that's still tracked but not active — update its state.
-        var bgState = ideOpenFiles.get(dirtyPath);
-        if (bgState) bgState.dirty = !!msg.dirty;
-        ideRenderTabStrip();
       }
     } else if (msg.type === 'save') {
       // ⌘S / Ctrl-S from Monaco.

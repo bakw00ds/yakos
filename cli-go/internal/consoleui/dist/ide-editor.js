@@ -419,12 +419,10 @@ window.addEventListener('message', function(e) {
         clearTimeout(closeEntry.dirtyTimer);
         closeEntry.dirtyTimer = null;
       }
-      // Don't dispose the model that's currently displayed (should not happen
-      // in normal flow since parent activates another tab before closing, but
-      // be defensive).
-      if (editor.getModel() !== closeEntry.model) {
-        closeEntry.model.dispose();
-      }
+      // Parent always activates a neighbor tab before sending closeFile, so
+      // the model being closed is never the currently displayed one. Dispose
+      // unconditionally so we don't leak Monaco models.
+      closeEntry.model.dispose();
       delete modelMap[closePath];
     }
   }
