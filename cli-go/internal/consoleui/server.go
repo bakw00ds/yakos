@@ -39,15 +39,17 @@ var swJS []byte
 // Served at /vendor/<path> (same-origin 'self'; no CDN dependency).
 //
 // Mermaid: dist/vendor/mermaid.min.js — Flows UI DAG renderer.
-// Monaco:  dist/vendor/monaco/min/vs/* — IDE spike AMD editor host.
+// Monaco:  dist/vendor/monaco/ — full min/vs tree + CHECKSUMS.sha256 manifest.
+//
+//	Includes loader.js, editor/*, basic-languages/* (all language grammars),
+//	language/* (TypeScript/JSON/CSS/HTML language services), base/*.
+//	The "all:" prefix ensures subdirectories are included by go:embed.
+//	The integrity manifest (monaco/CHECKSUMS.sha256) is verified by
+//	TestVendorChecksums in vendor_checksum_test.go.
 //
 //go:embed dist/vendor/mermaid.min.js
-//go:embed dist/vendor/monaco/min/vs/loader.js
-//go:embed dist/vendor/monaco/min/vs/editor/editor.main.js
-//go:embed dist/vendor/monaco/min/vs/editor/editor.main.nls.js
-//go:embed dist/vendor/monaco/min/vs/editor/editor.main.css
-//go:embed dist/vendor/monaco/min/vs/base/worker/workerMain.js
-//go:embed dist/vendor/monaco/min/vs/base/browser/ui/codicons/codicon/codicon.ttf
+//go:embed dist/vendor/VENDOR.md
+//go:embed all:dist/vendor/monaco
 var vendorFS embed.FS
 
 //go:embed dist/ide-editor.html

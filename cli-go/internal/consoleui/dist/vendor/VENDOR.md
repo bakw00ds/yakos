@@ -2,8 +2,9 @@
 
 These files are pinned, checksum-verified blobs embedded via `//go:embed`
 in `internal/consoleui/server.go`.  Do not edit by hand.  To update a
-library: download the new release, recompute the SHA-256, update this
-file and the corresponding constant in `vendor_checksum_test.go`.
+library: download the new release, recompute the checksums, update this
+file and the corresponding entries in `vendor_checksum_test.go` and/or
+`monaco/CHECKSUMS.sha256`.
 
 ## mermaid.min.js
 
@@ -20,6 +21,13 @@ Purpose: read-only DAG canvas renderer for the Flows UI (Phase 5).
 The Drawflow drag-edit editor is a deferred stretch goal and is NOT
 vendored here.
 
+To update: download the new `mermaid.min.js`, recompute SHA-256:
+
+    shasum -a 256 dist/vendor/mermaid.min.js
+
+Update the constant in `vendor_checksum_test.go` (pinnedMermaidChecksums)
+and the SHA-256 row above.
+
 ---
 
 ## Monaco Editor (IDE spike — Phase 1)
@@ -28,35 +36,78 @@ vendored here.
 |---------|-------|
 | Library | Monaco Editor |
 | Version | 0.52.2 |
-| Source (loader)           | https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js |
-| Source (editor.main.js)   | https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/editor/editor.main.js |
-| Source (editor.main.nls.js) | *(stub — see note below; not in upstream 0.52.2 package)* |
-| Source (editor.main.css)  | https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/editor/editor.main.css |
-| Source (workerMain.js)    | https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/base/worker/workerMain.js |
-| Source (codicon.ttf)      | https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/base/browser/ui/codicons/codicon/codicon.ttf |
-| npm     | https://www.npmjs.com/package/monaco-editor/v/0.52.2 |
+| Source  | https://www.npmjs.com/package/monaco-editor/v/0.52.2 |
 | License | MIT — https://github.com/microsoft/monaco-editor/blob/v0.52.2/LICENSE.md |
 | Copyright | Copyright (c) 2016 - present Microsoft Corporation |
+| Files vendored | 104 (full `min/vs` tree from npm tarball + 1 hand-authored NLS stub) |
+| Approx size | ~13 MB (includes all language grammars and language services) |
 
-### SHA-256 checksums (pinned in vendor_checksum_test.go)
+### What is vendored
 
-| File (relative to dist/vendor/) | SHA-256 |
-|---|---|
-| `monaco/min/vs/loader.js` | `28f3584fd04b182dfce15a9a1ce35b25bea22b31464aee500372bed18b7fee1a` |
-| `monaco/min/vs/editor/editor.main.js` | `90b588bc0b624e24052a576e1bcab2eaffec7bc666895188862eebd9c9745782` |
-| `monaco/min/vs/editor/editor.main.nls.js` | `13ef5bd19b9cb61808c9550a5ab11092cc77ec1c8520b17e235237c39cfb31c2` |
-| `monaco/min/vs/editor/editor.main.css` | `857bc0beafefbcc83ab5cf3510e929391c0314add43ee1a4cb8ecaf4726abbac` |
-| `monaco/min/vs/base/worker/workerMain.js` | `dbe4aa4f2874f5768e8d98e94281667c0bc493e02dd9760adca930699ff3279b` |
-| `monaco/min/vs/base/browser/ui/codicons/codicon/codicon.ttf` | `0f1d5219934e96e83b8db162d60b4d8c09b5de1e7d38031cbafe4a3c0f2889c9` |
+The entire `min/vs` tree from the npm tarball is vendored under
+`dist/vendor/monaco/min/vs/`:
 
-**Note on editor.main.nls.js**: Monaco 0.52.2 removed this file from its npm package
-(NLS data moved to the `_VSCODE_NLS_MESSAGES` global in the new localization system).
-However, some AMD environments request it as a companion to `editor.main.js` at
-runtime, causing a 404 that silently aborts the `require(['vs/editor/editor.main'])`
-call. The vendored file is a hand-authored compatibility stub that registers an empty
-`define("vs/editor/editor.main.nls", {})` AMD module, satisfying the require() without
-affecting Monaco's actual localization (which works correctly without the file in modern
-browsers). SHA-256 pins the stub bytes; rotate if the stub content ever changes.
+- `loader.js` — AMD module loader
+- `editor/editor.main.js` — bundled editor core
+- `editor/editor.main.css` — editor styles
+- `editor/editor.main.nls.js` — **hand-authored compatibility stub** (see note)
+- `base/worker/workerMain.js` — web worker script
+- `base/browser/ui/codicons/codicon/codicon.ttf` — icon font
+- `basic-languages/*/` — Monarch syntax grammar for every supported language
+  (abap, apex, go, python, typescript, rust, yaml, …, 80+ languages)
+- `language/css/`, `language/html/`, `language/json/`, `language/typescript/` —
+  full language service workers (completions, validation, formatting)
+- `nls.messages.*.js` — NLS message bundles for supported locales
+
+### Integrity verification (CHECKSUMS.sha256 manifest)
+
+Unlike single-file dependencies (Mermaid), the Monaco tree spans ~100 files.
+Per-file inline pins in Go source would be unmaintainable.  Instead, a
+manifest file `monaco/CHECKSUMS.sha256` records the SHA-256 of every vendored
+Monaco file (one line per file: `<sha256hex>  <path-relative-to-dist/vendor/monaco>`).
+
+`TestVendorChecksums` in `vendor_checksum_test.go` reads this manifest from
+the embed at test time and:
+
+1. Verifies every manifest entry matches the embedded file's actual hash.
+2. Verifies every embedded Monaco file appears in the manifest (no unaudited extras).
+
+### How to upgrade Monaco to a new version
+
+    # 1. Fetch the new tarball.
+    cd /tmp && npm pack monaco-editor@<NEW_VERSION>
+    tar xzf monaco-editor-<NEW_VERSION>.tgz
+
+    # 2. Overwrite the vendor tree (preserves the hand-authored NLS stub).
+    rsync -a --checksum package/min/vs/ \
+        cli-go/internal/consoleui/dist/vendor/monaco/min/vs/
+
+    # 3. Regenerate the manifest.
+    cd cli-go/internal/consoleui/dist/vendor/monaco
+    find min -type f | sort | while read f; do
+        sha=$(shasum -a 256 "$f" | awk '{print $1}')
+        echo "$sha  $f"
+    done > CHECKSUMS.sha256
+
+    # 4. Run the checksum test.
+    cd cli-go && go test ./internal/consoleui/... -run TestVendorChecksums
+
+    # 5. Update the version row in this VENDOR.md file.
+
+### Note on editor.main.nls.js
+
+Monaco 0.52.2 removed this file from its npm package (NLS data moved to the
+`_VSCODE_NLS_MESSAGES` global in the new localization system).  However, some
+AMD environments request it as a companion to `editor.main.js` at runtime,
+causing a 404 that silently aborts the `require(['vs/editor/editor.main'])`
+call.  The vendored file is a hand-authored compatibility stub that registers
+an empty `define("vs/editor/editor.main.nls", {})` AMD module, satisfying the
+require() without affecting Monaco's actual localization.
+
+This stub is NOT in the npm tarball.  It is preserved by `rsync --checksum`
+during upgrades because the source file exists in the vendor tree but not in
+the tarball source.  Its SHA-256 is included in `CHECKSUMS.sha256` like any
+other Monaco file.
 
 Purpose: AMD-loaded editor host for the IDE spike (`/ide/editor`).
 Served same-origin under a scoped CSP that allows `wasm-unsafe-eval`

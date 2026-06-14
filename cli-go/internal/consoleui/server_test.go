@@ -854,3 +854,44 @@ func TestVendorRoute_MonacoWorkerMainServedNoToken(t *testing.T) {
 		t.Errorf("GET /vendor/monaco/.../workerMain.js (no token): status=%d; want 200", resp.StatusCode)
 	}
 }
+
+// TestVendorRoute_MonacoLanguageGrammarsServed verifies that representative
+// Monaco language grammar files (basic-languages) and language service workers
+// (language/) serve 200 with application/javascript and no token required.
+// These files are lazy-loaded by Monaco at runtime and were previously 404ing
+// because only the core editor files had been vendored.
+func TestVendorRoute_MonacoLanguageGrammarsServed(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+
+	files := []string{
+		// Monarch syntax grammars (basic-languages)
+		"/vendor/monaco/min/vs/basic-languages/go/go.js",
+		"/vendor/monaco/min/vs/basic-languages/python/python.js",
+		"/vendor/monaco/min/vs/basic-languages/typescript/typescript.js",
+		"/vendor/monaco/min/vs/basic-languages/yaml/yaml.js",
+		"/vendor/monaco/min/vs/basic-languages/rust/rust.js",
+		"/vendor/monaco/min/vs/basic-languages/shell/shell.js",
+		// Language service workers (language/)
+		"/vendor/monaco/min/vs/language/typescript/tsMode.js",
+		"/vendor/monaco/min/vs/language/json/jsonMode.js",
+		"/vendor/monaco/min/vs/language/css/cssMode.js",
+		"/vendor/monaco/min/vs/language/html/htmlMode.js",
+	}
+
+	for _, path := range files {
+		path := path
+		t.Run(path, func(t *testing.T) {
+			resp := get(t, ts.URL+path, "") // no token — vendor paths are exempt
+			defer drainClose(resp)
+
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("GET %s (no token): status=%d; want 200", path, resp.StatusCode)
+				return
+			}
+			ct := resp.Header.Get("Content-Type")
+			if !strings.Contains(ct, "javascript") {
+				t.Errorf("GET %s: Content-Type=%q; want application/javascript", path, ct)
+			}
+		})
+	}
+}
