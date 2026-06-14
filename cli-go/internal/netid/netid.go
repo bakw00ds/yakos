@@ -3,13 +3,17 @@
 //
 // # Overview
 //
-// yakOS supports two bind regimes (per ADR-0004):
+// yakOS supports three bind regimes (per ADR-0005):
 //
 //   - Loopback: bearer-token cooperative labeling.  The Identity is
 //     Authenticated=false; Role is admin (preserving today's full access).
-//   - Non-loopback (future): mTLS client certificates.  The Identity is
+//     AuthMethod is AuthMethodNone.
+//   - Networked machines: mTLS client certificates.  The Identity is
 //     Authenticated=true; OperatorID is the cert CN; Role is resolved from
-//     the CN→Role mapping file.
+//     the CN→Role mapping file.  AuthMethod is AuthMethodCert.
+//   - Networked humans: password + session cookie.  The Identity is
+//     Authenticated=true; OperatorID and Role are resolved by a caller-
+//     supplied SessionLookupFn.  AuthMethod is AuthMethodSession.
 //
 // This package provides the Role type, the Identity struct, and the resolver
 // used by the console edge middleware.  It does NOT attach a listener or start
@@ -126,28 +130,71 @@ func (r Role) Allows(needed Role) bool {
 	return r >= needed
 }
 
+// ---- AuthMethod -------------------------------------------------------------
+
+// AuthMethod identifies which authentication mechanism produced a given
+// Identity.  The zero value AuthMethodNone correctly describes both today's
+// loopback cooperative-label identities and unauthenticated fail-closed
+// identities, so existing struct-literal tests that do not set this field
+// continue to compile and pass without change.
+type AuthMethod int
+
+const (
+	// AuthMethodNone is the zero value.  Used for loopback cooperative-label
+	// identities (Authenticated=false) and unauthenticated/fail-closed
+	// identities.  Existing callers that do not set this field default to None.
+	AuthMethodNone AuthMethod = iota
+
+	// AuthMethodCert indicates the identity was established by a verified mTLS
+	// client certificate (VerifiedChains non-empty in r.TLS).
+	AuthMethodCert
+
+	// AuthMethodSession indicates the identity was established by a valid
+	// server-side session cookie resolved through the injected SessionLookupFn.
+	AuthMethodSession
+)
+
+// String returns the canonical auth-method string used in audit logs.
+func (a AuthMethod) String() string {
+	switch a {
+	case AuthMethodCert:
+		return "cert"
+	case AuthMethodSession:
+		return "session"
+	default:
+		return "none"
+	}
+}
+
 // ---- Identity ---------------------------------------------------------------
 
 // Identity represents a resolved operator identity attached to a request.
 //
 // Authenticated is true only when the identity was established by a verified
-// mTLS client certificate.  When false (loopback bearer path), the OperatorID
-// is a cooperative label, not a cryptographic guarantee.
+// mTLS client certificate or a valid session cookie.  When false (loopback
+// bearer path), the OperatorID is a cooperative label, not a cryptographic
+// guarantee.
 //
-// This distinction is load-bearing for the dual-regime audit trail described in
-// ADR-0004 §Consequences C3: code that reads dispatch logs must not treat
+// AuthMethod records which mechanism produced this identity and is written to
+// audit logs so the dispatch NDJSON log can distinguish the three regimes.
+//
+// This distinction is load-bearing for the audit trail described in
+// ADR-0005 §Consequences C3: code that reads dispatch logs must not treat
 // loopback entries as cryptographically authenticated.
 type Identity struct {
-	// OperatorID is the operator identifier.  For authenticated identities
-	// this is the client certificate CN.  For loopback/bearer identities
-	// this is the cooperative label supplied by the caller.
+	// OperatorID is the operator identifier.  For cert-authenticated identities
+	// this is the client certificate CN.  For session-authenticated identities
+	// this is the username resolved from the session store.  For
+	// loopback/bearer identities this is the cooperative label supplied by the
+	// caller.
 	OperatorID string
 
 	// Role is the resolved privilege level for this identity.
 	Role Role
 
 	// Authenticated is true when OperatorID is bound to a verified client
-	// certificate.  False for loopback bearer sessions.
+	// certificate or a valid server-side session.  False for loopback bearer
+	// sessions.
 	Authenticated bool
 
 	// Resolved is true when this Identity was stamped by Resolver.Middleware.
@@ -156,6 +203,12 @@ type Identity struct {
 	// Resolved before applying role gates so that test paths using bare
 	// srv.Handler() remain unaffected — preserving the loopback-safe invariant.
 	Resolved bool
+
+	// AuthMethod records which authentication mechanism produced this identity.
+	// The zero value AuthMethodNone correctly describes loopback and
+	// unauthenticated identities, so existing callers that do not set this
+	// field default to None without any source change.
+	AuthMethod AuthMethod
 }
 
 // ---- Context key ------------------------------------------------------------
@@ -305,24 +358,48 @@ func CNFromTLS(cs *tls.ConnectionState) (cn string, ok bool) {
 	return cs.VerifiedChains[0][0].Subject.CommonName, true
 }
 
+// ---- Session lookup injection -----------------------------------------------
+
+// SessionLookupFn is an optional function injected into a Resolver that
+// resolves a request to an (operatorID, role) pair using a server-side
+// session store.  It is called only when no verified mTLS client certificate
+// is present and the resolver is not in loopback-trusted mode.
+//
+// Implementations must be safe for concurrent use from multiple goroutines.
+// If the session is absent, expired, or invalid, ok must be false.
+//
+// The netid package does not import any session or user-store package.
+// Decoupling is maintained by injection: the caller (the auth edge layer)
+// supplies the concrete lookup and netid remains a leaf package.
+type SessionLookupFn func(r *http.Request) (operatorID string, role Role, ok bool)
+
 // ---- Identity resolution middleware ----------------------------------------
 
 // Resolver resolves an Identity for each request and stores it in the context.
 //
-// Resolution rules (per ADR-0004):
-//   - If the request has a verified TLS client cert (r.TLS.VerifiedChains
-//     non-empty) → Identity{OperatorID: CN, Role: mapped-or-RoleRead,
-//     Authenticated: true}.
-//   - Otherwise (no verified cert): if loopbackTrusted is true →
-//     Identity{OperatorID: cooperativeLabel, Role: RoleAdmin, Authenticated: false}
-//     (today's loopback bearer behavior, unchanged). If loopbackTrusted is false →
-//     Identity{OperatorID: "", Role: RoleRead, Authenticated: false}
-//     (fail-closed for any future non-loopback listener).
+// Resolution rules (per ADR-0005) — single decision point, evaluated in order:
+//  1. Verified mTLS client cert (r.TLS.VerifiedChains non-empty) →
+//     Identity{OperatorID: CN, Role: mapped-or-RoleRead, Authenticated: true,
+//     AuthMethod: AuthMethodCert}.
+//     Cert beats session deliberately: a machine presenting a cert must never
+//     be silently downgraded to a stray browser session.
+//  2. No cert + sessionLookupFn != nil + !loopbackTrusted → call the fn; on
+//     ok: Identity{OperatorID: operatorID, Role: role, Authenticated: true,
+//     AuthMethod: AuthMethodSession}.
+//  3. No cert + loopbackTrusted → today's cooperative bearer-token behavior
+//     (unchanged): Identity{OperatorID: cooperativeLabel, Role: RoleAdmin,
+//     Authenticated: false, AuthMethod: AuthMethodNone}.
+//  4. Else (networked, no cert, no valid session) → fail-closed:
+//     Identity{OperatorID: "", Role: RoleRead, Authenticated: false,
+//     AuthMethod: AuthMethodNone}.
 //
-// The loopbackTrusted flag is a per-resolver trust decision made at construction
-// time by the caller who knows which listener this resolver serves.  It is
-// defense-in-depth alongside RequireAndVerifyClientCert: the resolver fails
-// closed even if a future TLS config were misconfigured.
+// The loopbackTrusted flag is a per-resolver trust decision made at
+// construction time by the caller who knows which listener this resolver
+// serves.  It is defense-in-depth alongside RequireAndVerifyClientCert: the
+// resolver fails closed even if a future TLS config were misconfigured.
+//
+// The session branch is guarded by !loopbackTrusted so the loopback regime
+// is byte-for-byte unchanged regardless of whether a sessionLookupFn is set.
 //
 // The cooperativeLabel is the OperatorID extracted by callerLabelFn, which
 // today comes from the daemon-level mintOperatorID.  It is supplied by the
@@ -331,9 +408,14 @@ type Resolver struct {
 	mapper          *RoleMapper
 	callerLabelFn   func(*http.Request) string
 	loopbackTrusted bool
+	sessionLookupFn SessionLookupFn // nil means no session path (today's default)
 }
 
-// NewResolver constructs an identity Resolver.
+// NewResolver constructs an identity Resolver without a session lookup
+// function.  This is the existing constructor; all existing call sites
+// continue to work unchanged.  The resolver behaves identically to before:
+// cert path uses AuthMethodCert, loopback and unauthenticated paths use
+// AuthMethodNone.
 //
 //   - mapper resolves CN→Role for authenticated (mTLS) requests.
 //   - callerLabelFn extracts the cooperative OperatorID label from a request
@@ -350,40 +432,106 @@ func NewResolver(mapper *RoleMapper, callerLabelFn func(*http.Request) string, l
 	}
 }
 
+// NewResolverWithSession constructs an identity Resolver with an injected
+// session lookup function for the password+session-cookie auth regime
+// (ADR-0005 Phase 2).
+//
+// The sessionLookupFn is called only when:
+//   - no verified mTLS client certificate is present, AND
+//   - loopbackTrusted is false (the loopback path bypasses session lookup).
+//
+// If sessionLookupFn is nil this constructor is identical to NewResolver.
+// Callers that do not yet have a session store should use NewResolver instead.
+//
+// Parameters are the same as NewResolver with the addition of sessionLookupFn.
+func NewResolverWithSession(
+	mapper *RoleMapper,
+	callerLabelFn func(*http.Request) string,
+	loopbackTrusted bool,
+	sessionLookupFn SessionLookupFn,
+) *Resolver {
+	return &Resolver{
+		mapper:          mapper,
+		callerLabelFn:   callerLabelFn,
+		loopbackTrusted: loopbackTrusted,
+		sessionLookupFn: sessionLookupFn,
+	}
+}
+
 // Resolve returns the Identity for r.
 // Every returned Identity has Resolved=true; callers that need to distinguish
 // "middleware ran" from "zero-value / no middleware" can check this field.
+//
+// Resolution order (ADR-0005 — single decision point):
+//  1. Verified client cert → AuthMethodCert.  Cert beats session.
+//  2. Valid session + !loopbackTrusted → AuthMethodSession.
+//  3. loopbackTrusted, no credential → loopback cooperative bearer (AuthMethodNone).
+//  4. Networked, no cert, no valid session → fail-closed (AuthMethodNone).
 func (res *Resolver) Resolve(r *http.Request) Identity {
+	// Step 1: verified mTLS client certificate — highest precedence.
+	// A machine presenting a cert must never be silently downgraded to a
+	// stray browser session, so cert is checked before session unconditionally.
 	if cn, ok := CNFromRequest(r); ok {
 		return Identity{
 			OperatorID:    cn,
 			Role:          res.mapper.Lookup(cn),
 			Authenticated: true,
 			Resolved:      true,
+			AuthMethod:    AuthMethodCert,
 		}
 	}
+
 	// No verified client certificate present.
-	if !res.loopbackTrusted {
-		// Non-loopback listener (or unconfigured): fail-closed to RoleRead.
-		// Never grant admin on a certless request to a networked listener.
+
+	// Step 2: session cookie — only for non-loopback resolvers.
+	// The !loopbackTrusted guard ensures the loopback path is byte-for-byte
+	// unchanged regardless of whether a sessionLookupFn is injected.
+	if res.sessionLookupFn != nil && !res.loopbackTrusted {
+		if operatorID, role, ok := res.sessionLookupFn(r); ok {
+			return Identity{
+				OperatorID:    operatorID,
+				Role:          role,
+				Authenticated: true,
+				Resolved:      true,
+				AuthMethod:    AuthMethodSession,
+			}
+		}
+		// Session lookup returned ok=false: fall through to fail-closed (step 4).
+		// We do NOT fall through to the loopback path because loopbackTrusted
+		// is false; the loopback path is never reached in this branch.
 		return Identity{
 			OperatorID:    "",
 			Role:          RoleRead,
 			Authenticated: false,
 			Resolved:      true,
+			AuthMethod:    AuthMethodNone,
 		}
 	}
-	// Loopback bearer path: cooperative label, full admin access (unchanged
-	// from pre-networked behavior; preserved by loopbackTrusted=true).
-	label := ""
-	if res.callerLabelFn != nil {
-		label = res.callerLabelFn(r)
+
+	// Step 3: loopback-trusted, no credential.
+	// Preserves today's full-access loopback bearer behavior unchanged.
+	if res.loopbackTrusted {
+		label := ""
+		if res.callerLabelFn != nil {
+			label = res.callerLabelFn(r)
+		}
+		return Identity{
+			OperatorID:    label,
+			Role:          RoleAdmin,
+			Authenticated: false,
+			Resolved:      true,
+			AuthMethod:    AuthMethodNone,
+		}
 	}
+
+	// Step 4: networked listener, no cert, no session → fail-closed.
+	// Never grant admin on a certless request to a non-loopback listener.
 	return Identity{
-		OperatorID:    label,
-		Role:          RoleAdmin,
+		OperatorID:    "",
+		Role:          RoleRead,
 		Authenticated: false,
 		Resolved:      true,
+		AuthMethod:    AuthMethodNone,
 	}
 }
 
