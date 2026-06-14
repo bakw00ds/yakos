@@ -13,6 +13,7 @@ package consoleui_test
 //   - GET /flows/api/run/node         — happy, not found, traversal (id AND node)
 //   - POST /flows/api/resume          — happy (engine nil → 503), traversal
 //   - POST /flows/api/resume          — traversal workflow_name in run.json → 400 (B1)
+//   - POST /flows/api/cancel          — 202 on active run, 404 on unknown, 405 on GET, 403 on RoleRead
 //
 // Determinism: no time.Sleep; no subprocess calls; no LLM calls.
 
@@ -25,10 +26,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
@@ -824,5 +828,224 @@ func TestFlows_DeleteWorkflow_ListUpdated(t *testing.T) {
 	wfs := result["workflows"]
 	if len(wfs) != 1 || wfs[0] != "flow-b" {
 		t.Errorf("workflows=%v; want [flow-b]", wfs)
+	}
+}
+
+// ---- POST /flows/api/cancel tests -------------------------------------------
+
+// newCancelTestServer builds a handler backed by a fake nodeRunFn that blocks
+// until its context is cancelled, allowing cancel tests to exercise handleCancel.
+// It returns the httptest.Server, the workDir, a "started" channel (closed when
+// the fake node fn starts executing), and a "unblock" channel (close it to let
+// the fn complete without waiting for ctx cancel).
+func newCancelTestServer(t *testing.T) (ts *httptest.Server, workDir string, started <-chan struct{}, unblock chan<- struct{}) {
+	t.Helper()
+	wDir := t.TempDir()
+
+	startedCh := make(chan struct{})
+	unblockCh := make(chan struct{})
+
+	var startOnce sync.Once
+	fn := func(ctx context.Context, _ dispatch.Params) ([]byte, dispatch.Result, error) {
+		startOnce.Do(func() { close(startedCh) })
+		select {
+		case <-ctx.Done():
+			return nil, dispatch.Result{ExitCode: 1}, ctx.Err()
+		case <-unblockCh:
+			return []byte("ok"), dispatch.Result{ExitCode: 0}, nil
+		}
+	}
+
+	handler, _ := consoleui.NewFlowsHandlerForTest(t, wDir, fn)
+	testSrv := httptest.NewServer(handler)
+	t.Cleanup(testSrv.Close)
+	return testSrv, wDir, startedCh, unblockCh
+}
+
+// postCancel sends POST /flows/api/cancel?id=<runID> to the test server.
+func postCancel(t *testing.T, url, runID string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url+"/flows/api/cancel?id="+runID, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST cancel: %v", err)
+	}
+	return resp
+}
+
+// TestFlows_Cancel_HappyPath verifies that POST /flows/api/cancel?id=<runID>
+// returns 202 for an in-flight run, and that the goroutine eventually exits
+// (the run finishes).
+func TestFlows_Cancel_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	ts, workDir, started, _ := newCancelTestServer(t)
+
+	// Write a workflow so handleRun can load it.
+	dir := filepath.Join(workDir, "workflows")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "my-flow.yaml"), []byte(minimalYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start the run.
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/flows/api/run?name=my-flow", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	runResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /flows/api/run: %v", err)
+	}
+	body := bodyStr(t, runResp)
+	if runResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("run status=%d; want 202; body=%s", runResp.StatusCode, body)
+	}
+	var runResult map[string]string
+	if err := json.Unmarshal([]byte(body), &runResult); err != nil {
+		t.Fatalf("unmarshal run response: %v", err)
+	}
+	runID := runResult["run_id"]
+	if runID == "" {
+		t.Fatal("empty run_id in run response")
+	}
+
+	// Wait for the fake node fn to start so we know the run is in-flight.
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for run to start")
+	}
+
+	// Cancel the run.
+	cancelResp := postCancel(t, ts.URL, runID)
+	cancelBody := bodyStr(t, cancelResp)
+	if cancelResp.StatusCode != http.StatusAccepted {
+		t.Errorf("cancel status=%d; want 202; body=%s", cancelResp.StatusCode, cancelBody)
+	}
+
+	// The cancel response should include the run_id.
+	var cancelResult map[string]string
+	if err := json.Unmarshal([]byte(cancelBody), &cancelResult); err != nil {
+		t.Fatalf("unmarshal cancel response: %v; body=%s", err, cancelBody)
+	}
+	if cancelResult["run_id"] != runID {
+		t.Errorf("cancel response run_id=%q; want %q", cancelResult["run_id"], runID)
+	}
+
+	// After cancellation the run goroutine should exit and remove the entry from
+	// activeRuns.  Poll for 404 on a second cancel call (entry removed on exit).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp2 := postCancel(t, ts.URL, runID)
+		body2 := bodyStr(t, resp2)
+		if resp2.StatusCode == http.StatusNotFound {
+			// Goroutine exited and cleaned up the entry — correct behaviour.
+			return
+		}
+		// Still 202 (goroutine hasn't exited yet) — retry.
+		_ = body2
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Error("timed out waiting for run goroutine to exit after cancel")
+}
+
+// TestFlows_Cancel_UnknownRunID verifies that POST /flows/api/cancel with an
+// unknown or finished run ID returns 404.
+func TestFlows_Cancel_UnknownRunID(t *testing.T) {
+	t.Parallel()
+
+	ts, _, _, _ := newCancelTestServer(t)
+
+	resp := postCancel(t, ts.URL, "run-20240101-000000-aabbcc")
+	drainClose(resp)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("cancel unknown run: status=%d; want 404", resp.StatusCode)
+	}
+}
+
+// TestFlows_Cancel_InvalidRunID verifies that a malformed run ID returns 400.
+func TestFlows_Cancel_InvalidRunID(t *testing.T) {
+	t.Parallel()
+
+	ts, _, _, _ := newCancelTestServer(t)
+
+	for _, bad := range []string{"../etc/passwd", "foo/bar", "..", ""} {
+		resp := postCancel(t, ts.URL, bad)
+		drainClose(resp)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("cancel id=%q: status=%d; want 400 (invalid id)", bad, resp.StatusCode)
+		}
+	}
+}
+
+// TestFlows_Cancel_MethodNotAllowed verifies that GET /flows/api/cancel returns 405.
+func TestFlows_Cancel_MethodNotAllowed(t *testing.T) {
+	t.Parallel()
+
+	ts, _, _, _ := newCancelTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/flows/api/cancel?id=run-20240101-000000-aabbcc", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET cancel: %v", err)
+	}
+	drainClose(resp)
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("GET /flows/api/cancel: status=%d; want 405", resp.StatusCode)
+	}
+}
+
+// TestFlows_Cancel_RoleReadForbidden verifies that a resolved RoleRead identity
+// gets 403 on POST /flows/api/cancel (requires RoleFlowsRun).
+func TestFlows_Cancel_RoleReadForbidden(t *testing.T) {
+	t.Parallel()
+
+	stateDir := t.TempDir()
+	workDir := t.TempDir()
+	tok, err := consoleui.LoadOrCreateToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	bus := wsbus.New()
+	t.Cleanup(bus.Stop)
+
+	srv := consoleui.New(consoleui.Config{
+		Token:             tok,
+		KanbanBoardPath:   t.TempDir() + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: t.TempDir(),
+		PerfWorkDir:       t.TempDir(),
+		Bus:               bus,
+		WorkDir:           workDir,
+	})
+
+	readOnly := netid.Identity{
+		OperatorID:    "viewer",
+		Role:          netid.RoleRead,
+		Authenticated: true,
+		Resolved:      true,
+	}
+	// Inject a RoleRead identity so the per-endpoint role check fires.
+	handler := consoleui.RequireTokenForNonStatic(tok,
+		consoleui.RequireJSONForMutations(
+			injectIdentityMiddleware(readOnly, srv.Handler())))
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/flows/api/cancel?id=run-20240101-000000-aabbcc", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST cancel: %v", err)
+	}
+	drainClose(resp)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("RoleRead on /flows/api/cancel: status=%d; want 403", resp.StatusCode)
 	}
 }
