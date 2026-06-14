@@ -39,6 +39,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/mcpserver"
 	"github.com/bakw00ds/yakos/internal/mtls"
+	"github.com/bakw00ds/yakos/internal/mtlscmd"
 	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/restapi"
 	"github.com/bakw00ds/yakos/internal/workflow"
@@ -141,6 +142,17 @@ type Config struct {
 	// NoConsole disables the unified console server when true.
 	// Equivalent to --no-console CLI flag.
 	NoConsole bool
+
+	// ConsoleBootstrapCertName is the CN for the auto-issued bootstrap client
+	// cert when the console starts in networked mode with no existing client
+	// certs.  Defaults to the OS username (or "admin" if unavailable).
+	// Only used when ConsoleBind is a non-loopback address.
+	ConsoleBootstrapCertName string
+
+	// NoBootstrapCert disables the auto-issue of a bootstrap client cert on
+	// first networked start.  Equivalent to --no-bootstrap-cert CLI flag.
+	// Only applies when ConsoleBind is a non-loopback address.
+	NoBootstrapCert bool
 
 	// Bus is the in-process event bus shared between the JSON-RPC layer and the
 	// WebSocket layer.  If nil, a new Bus is created by Run.  Inject for tests.
@@ -492,10 +504,30 @@ func Run(ctx context.Context, cfg Config) error {
 			consoleCfg.NetworkedMode = true
 			consoleCfg.ExternalHosts = externalHosts
 
+			// AUTO-ISSUE bootstrap client cert — if no client cert exists yet,
+			// issue one for the OS user so the networked console is usable
+			// out-of-the-box.  This is idempotent: a second start with existing
+			// certs is a no-op.  The --no-bootstrap-cert flag disables it.
+			//
+			// Security note: the auto-issued key lives at 0600 under stateDir/mtls/bootstrap/.
+			// Anyone with read access to stateDir already holds the CA key and can
+			// issue arbitrary client certs, so the bootstrap cert adds no marginal
+			// exposure.
+			bootstrapResult, bootstrapErr := mtlscmd.AutoIssueBootstrap(
+				stateDir,
+				cfg.ConsoleBootstrapCertName,
+				cfg.NoBootstrapCert,
+			)
+			if bootstrapErr != nil {
+				// Non-fatal: log the error and continue.  The operator can use
+				// 'yakos mtls issue-client' manually.
+				fmt.Fprintf(os.Stderr, "serve: auto-issue bootstrap cert: %v (use 'yakos mtls issue-client' manually)\n", bootstrapErr)
+			}
+
 			// Print startup banner — LOUD — because we are exposing an RCE-capable
 			// surface to the network.
 			certFP := serverCertFingerprint(serverCert)
-			printNetworkedConsoleBanner(bindAddr, externalHosts, certFP, stateDir)
+			printNetworkedConsoleBanner(bindAddr, externalHosts, certFP, stateDir, bootstrapResult)
 		}
 
 		consoleSrv := consoleui.New(consoleCfg)
@@ -739,12 +771,12 @@ func serverCertFingerprint(serverCert *tls.Certificate) string {
 //   - The active URL(s) (wss://) — one per externalHost
 //   - The server cert fingerprint (operators should verify this out of band)
 //   - The authz model (mTLS client certs; roles from roles.json; default=read)
-//   - How to obtain a client cert (out-of-band distribution; no enrollment
-//     endpoint exists yet — ADR-0004 §C2)
+//   - Bootstrap client cert status (auto-issued or pre-existing)
+//   - How to obtain additional client certs via `yakos mtls issue-client`
 //
 // The banner is printed to stderr (same as all other serve: messages).
 // It is intentionally verbose and hard to miss.
-func printNetworkedConsoleBanner(bindAddr string, externalHosts []string, certFingerprint, stateDir string) {
+func printNetworkedConsoleBanner(bindAddr string, externalHosts []string, certFingerprint, stateDir string, bootstrap mtlscmd.BootstrapResult) {
 	rolesPath := filepath.Join(stateDir, "mtls", "roles.json")
 	sep := strings.Repeat("=", 72)
 	fmt.Fprintln(os.Stderr, sep)
@@ -765,9 +797,34 @@ func printNetworkedConsoleBanner(bindAddr string, externalHosts []string, certFi
 	fmt.Fprintf(os.Stderr, "  Role mapping:    %s\n", rolesPath)
 	fmt.Fprintln(os.Stderr, "  Default role:    read (fail-closed; no roles.json = everyone reads)")
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "  Client cert:     distribute out of band (no enrollment endpoint yet).")
-	fmt.Fprintln(os.Stderr, "                   Use 'mtls.IssueClientCert' + 'mtls.PersistClientCert'")
-	fmt.Fprintln(os.Stderr, "                   to generate and distribute client certs.")
+
+	// Bootstrap cert section.
+	switch {
+	case bootstrap.Skipped:
+		fmt.Fprintln(os.Stderr, "  Bootstrap cert:  disabled (--no-bootstrap-cert)")
+		clientsDir := filepath.Join(stateDir, "mtls", "clients")
+		fmt.Fprintf(os.Stderr, "  Existing certs:  %s\n", clientsDir)
+		fmt.Fprintln(os.Stderr, "  Issue a cert:    yakos mtls issue-client <name> --role admin")
+	case bootstrap.Issued:
+		fmt.Fprintf(os.Stderr, "  Bootstrap cert:  auto-issued for %s (role: admin)\n", bootstrap.CN)
+		fmt.Fprintf(os.Stderr, "  Bundle path:     %s\n", bootstrap.BundleDir)
+		fmt.Fprintln(os.Stderr, "  PKCS#12 hint:    openssl pkcs12 -export \\")
+		certFile := filepath.Join(bootstrap.BundleDir, "client-"+bootstrap.CN+".crt")
+		keyFile := filepath.Join(bootstrap.BundleDir, "client-"+bootstrap.CN+".key")
+		caFile := filepath.Join(bootstrap.BundleDir, "ca.crt")
+		fmt.Fprintf(os.Stderr, "    -inkey %s \\\n", keyFile)
+		fmt.Fprintf(os.Stderr, "    -in %s \\\n", certFile)
+		fmt.Fprintf(os.Stderr, "    -certfile %s \\\n", caFile)
+		fmt.Fprintf(os.Stderr, "    -out client-%s.p12\n", bootstrap.CN)
+		fmt.Fprintln(os.Stderr, "  SECURITY: transmit the key / .p12 only over a secure channel.")
+	default:
+		// Issued=false, Skipped=false: existing certs already present.
+		clientsDir := filepath.Join(stateDir, "mtls", "clients")
+		fmt.Fprintf(os.Stderr, "  Client certs:    existing certs present at %s\n", clientsDir)
+		fmt.Fprintln(os.Stderr, "                   (auto-issue skipped — certs already exist)")
+	}
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  Manage certs:    yakos mtls --help")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  WARNING: This surface is functionally RCE-equivalent for operators")
 	fmt.Fprintln(os.Stderr, "           with 'dispatch' or higher roles.  Verify the fingerprint")
