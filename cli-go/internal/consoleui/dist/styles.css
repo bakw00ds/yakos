@@ -1827,6 +1827,67 @@ html[data-theme="og"] .flows-run-btn {
   border-color: var(--accent-hover);
 }
 
+/* ---- Stop button (toolbar) ---- */
+
+.flows-stop-btn {
+  background: transparent;
+  border-color: var(--color-error, #ff6b6b);
+  color: var(--color-error, #ff6b6b);
+}
+
+.flows-stop-btn:hover:not(:disabled) {
+  background: rgba(255, 92, 92, 0.12);
+}
+
+html[data-theme="light"] .flows-stop-btn:hover:not(:disabled) {
+  background: rgba(220, 38, 38, 0.08);
+}
+
+/* ---- Per-run stop button in the run list ---- */
+
+.flows-run-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.flows-run-row .flows-run-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.flows-run-stop-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--color-error, #ff6b6b);
+  border-radius: var(--radius-control, 4px);
+  color: var(--color-error, #ff6b6b);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 2px 5px;
+  line-height: 1;
+  font-family: var(--font);
+  transition: background var(--dur, 0.1s) var(--ease, ease);
+}
+
+.flows-run-stop-btn:hover:not(:disabled) {
+  background: rgba(255, 92, 92, 0.12);
+}
+
+html[data-theme="light"] .flows-run-stop-btn:hover:not(:disabled) {
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.flows-run-stop-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.flows-run-stop-btn:focus-visible {
+  outline: 2px solid var(--color-error, #ff6b6b);
+  outline-offset: 1px;
+}
+
 .flows-run-status {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
