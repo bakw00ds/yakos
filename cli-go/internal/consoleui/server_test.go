@@ -10,6 +10,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/dashauth"
 	"github.com/bakw00ds/yakos/internal/wsbus"
+	"golang.org/x/net/websocket"
 )
 
 // ---- test infrastructure ---------------------------------------------------
@@ -855,6 +856,77 @@ func TestVendorRoute_MonacoWorkerMainServedNoToken(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("GET /vendor/monaco/.../workerMain.js (no token): status=%d; want 200", resp.StatusCode)
+	}
+}
+
+// ---- 5. WebSocket edge bypass tests -----------------------------------------
+// The edge middleware (requireTokenForNonStatic) must not apply the
+// Authorization-header token check to WebSocket upgrade requests — browsers
+// cannot set Authorization on WS upgrades.  The WS handler enforces its own
+// subprotocol token auth.
+
+// TestWSEdge_UpgradePassesThroughEdge verifies that a WS upgrade request
+// is NOT rejected 401 by the edge token check.  The edge must forward it
+// to the downstream handler so the WS subprotocol auth can run.
+func TestWSEdge_UpgradePassesThroughEdge(t *testing.T) {
+	tok := strings.Repeat("a", 64)
+	reached := false
+	downstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusSwitchingProtocols) // 101
+	})
+	wrapped := consoleui.RequireTokenForNonStatic(tok, downstream)
+
+	// Simulate a WS upgrade: no Authorization header, Upgrade: websocket.
+	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	rr := httptest.NewRecorder()
+	wrapped.ServeHTTP(rr, req)
+
+	if !reached {
+		t.Error("downstream handler was not reached for WS upgrade — edge blocked it (401 regression)")
+	}
+	if rr.Code == http.StatusUnauthorized {
+		t.Error("WS upgrade got 401 at edge; Authorization check must be skipped for WS upgrades")
+	}
+}
+
+// TestWSEdge_WrongTokenNonWSStillGets401 verifies that non-WS requests without
+// a valid token are still rejected 401 at the edge (regression guard).
+func TestWSEdge_WrongTokenNonWSStillGets401(t *testing.T) {
+	tok := strings.Repeat("a", 64)
+	downstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	wrapped := consoleui.RequireTokenForNonStatic(tok, downstream)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
+	// No Upgrade header, no Authorization header.
+	rr := httptest.NewRecorder()
+	wrapped.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("non-WS request without token: status=%d; want 401", rr.Code)
+	}
+}
+
+// TestWSEdge_WSHandlerRejectsBadSubprotocol verifies that a WS upgrade that
+// passes the edge but carries a wrong subprotocol token is rejected by the
+// WS handler's own auth (not the edge).  End-to-end via newAuthTestServer.
+func TestWSEdge_WSHandlerRejectsBadSubprotocol(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/v1/events"
+
+	cfg, err := websocket.NewConfig(wsURL, "http://127.0.0.1/")
+	if err != nil {
+		t.Fatalf("NewConfig: %v", err)
+	}
+	// Wrong token in subprotocol — should be rejected by the WS handler.
+	cfg.Protocol = []string{"yakos-bearer", strings.Repeat("z", 64)}
+	_, err = websocket.DialConfig(cfg)
+	if err == nil {
+		t.Fatal("expected dial error for bad subprotocol token; got nil (WS handler failed to reject)")
 	}
 }
 

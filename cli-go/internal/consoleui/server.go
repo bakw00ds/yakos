@@ -771,6 +771,16 @@ func requireTokenForNonStatic(token string, next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// WebSocket upgrade requests cannot carry an Authorization header —
+		// browsers forbid setting it on the WS upgrade.  The console WS
+		// handler (/v1/events) authenticates via the Sec-WebSocket-Protocol
+		// subprotocol token ("yakos-bearer, <token>") checked by
+		// consoleAuthSubprotocol.  Skip the header-token check here and let
+		// the downstream WS handler enforce its own auth.
+		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		dashauth.RequireToken(token, next.ServeHTTP)(w, r)
 	})
 }
