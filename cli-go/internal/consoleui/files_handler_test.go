@@ -613,14 +613,14 @@ func TestFilesContent_Binary(t *testing.T) {
 	}
 }
 
-// TestFilesContent_TooLarge verifies that a file over the 2 MiB cap returns
+// TestFilesContent_TooLarge verifies that a file over the 5 MiB cap returns
 // 413 Request Entity Too Large.
 func TestFilesContent_TooLarge(t *testing.T) {
 	t.Parallel()
 
 	ws := t.TempDir()
-	// Write a file slightly over 2 MiB.
-	big := make([]byte, 2<<20+1) // 2 MiB + 1 byte
+	// Write a file slightly over 5 MiB.
+	big := make([]byte, 5<<20+1) // 5 MiB + 1 byte
 	for i := range big {
 		big[i] = 'A'
 	}

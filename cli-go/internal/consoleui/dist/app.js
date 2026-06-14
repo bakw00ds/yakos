@@ -2729,14 +2729,14 @@
         btn.appendChild(nameSpan);
 
         btn.addEventListener('click', () => {
-          // Mark as selected.
+          // Tentatively mark selected; openIdeFile will revert on error.
           const treeEl = document.getElementById('ide-tree-root');
           if (treeEl) {
             treeEl.querySelectorAll('.ide-tree-file.selected').forEach((el) => el.classList.remove('selected'));
           }
           btn.classList.add('selected');
 
-          openIdeFile(entry.path, entry.name);
+          openIdeFile(entry.path, entry.name, btn);
         });
 
         li.appendChild(btn);
@@ -2748,19 +2748,44 @@
     return ul;
   }
 
-  function openIdeFile(relpath, name) {
+  // openIdeFile fetches a file's content and either opens it in Monaco or
+  // shows an inline editor notice on any error condition.
+  //
+  // selectedBtn (optional) is the tree button that triggered this open.  On any
+  // error path the .selected class is removed so the tree selection does not
+  // falsely imply the file is open in the editor.
+  //
+  // Error cases handled:
+  //   413 — file exceeds the 5 MiB content cap
+  //   403 — secret / access-denied
+  //   404 — file disappeared between tree render and click
+  //   5xx / other — generic server error with status code
+  //   network  — fetch() rejection (offline, CORS, etc.)
+  //   base64   — binary file; preview not available
+  // All cases call showIdeEditorNotice (never throw, never blank the pane).
+  function openIdeFile(relpath, name, selectedBtn) {
+    function onError(msg) {
+      showIdeEditorNotice(msg);
+      // Revert the tentative tree selection so it doesn't misrepresent state.
+      if (selectedBtn) selectedBtn.classList.remove('selected');
+    }
+
     fetch('/api/files/content?path=' + encodeURIComponent(relpath))
       .then((r) => {
         if (r.status === 413) {
-          showIdeEditorNotice('File too large to display (max 2 MiB): ' + name);
+          onError('File too large to preview (max 5 MiB): ' + name);
           return null;
         }
         if (r.status === 403) {
-          showIdeEditorNotice('Access denied for: ' + name);
+          onError('Access denied for: ' + name);
+          return null;
+        }
+        if (r.status === 404) {
+          onError('File not found: ' + name);
           return null;
         }
         if (!r.ok) {
-          showIdeEditorNotice('Failed to load file (' + String(r.status) + '): ' + name);
+          onError('Failed to load file (' + String(r.status) + '): ' + name);
           return null;
         }
         return r.json();
@@ -2769,15 +2794,15 @@
         if (!data) return;
 
         if (data.encoding === 'base64') {
-          // Binary file: show placeholder instead of dumping raw bytes.
-          showIdeEditorNotice('Binary file — preview not available: ' + (data.path || name));
+          // Binary file: show notice but do not clear the editor content.
+          onError('Binary file — preview not available: ' + (data.path || name));
           return;
         }
 
         openFileInEditor(data.path || relpath, data.content || '', data.language || 'plaintext');
       })
       .catch(() => {
-        showIdeEditorNotice('Network error loading: ' + name);
+        onError('Network error loading: ' + name);
       });
   }
 

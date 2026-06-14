@@ -65,7 +65,7 @@ import (
 )
 
 // maxFileContentBytes is the hard size cap for /api/files/content.
-const maxFileContentBytes = 2 << 20 // 2 MiB
+const maxFileContentBytes = 5 << 20 // 5 MiB
 
 // maxTreeEntriesPerDir is the maximum number of entries returned per directory
 // in /api/files/tree.  When exceeded, the response carries truncated=true.
@@ -512,7 +512,7 @@ type fileContentResponse struct {
 
 // handleFilesContent serves GET /api/files/content?path=<relpath>.
 //
-// - Hard size cap: 2 MiB → 413.
+// - Hard size cap: 5 MiB → 413.
 // - Binary detection: NUL byte or invalid UTF-8 → base64 encoding.
 // - Secret patterns: refused with a generic 403.
 func (h *filesHandlers) handleFilesContent(w http.ResponseWriter, r *http.Request) {
@@ -568,7 +568,7 @@ func (h *filesHandlers) handleFilesContent(w http.ResponseWriter, r *http.Reques
 
 	// Hard size cap.
 	if fi.Size() > maxFileContentBytes {
-		writeGenericError(w, http.StatusRequestEntityTooLarge, "file too large (max 2 MiB)")
+		writeGenericError(w, http.StatusRequestEntityTooLarge, "file too large (max 5 MiB)")
 		return
 	}
 
