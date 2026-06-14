@@ -21,3 +21,7 @@ cli-go/internal/consoleui/dist/vendor/monaco/CHECKSUMS.sha256 binary
 # The files live under dist/vendor/fonts/ (populated at font-vendoring time;
 # see VENDOR.md §Fonts for the download + hash recipe).
 cli-go/internal/consoleui/dist/vendor/fonts/*.woff2 binary
+# Drawflow drag/connect visual node editor — same binary treatment as Mermaid.
+# SHA-256 pinned in vendor_checksum_test.go + VENDOR.md.
+cli-go/internal/consoleui/dist/vendor/drawflow/drawflow.min.js binary
+cli-go/internal/consoleui/dist/vendor/drawflow/drawflow.min.css binary

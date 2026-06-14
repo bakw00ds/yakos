@@ -38,7 +38,7 @@ var swJS []byte
 // vendorFS embeds the pinned, checksum-verified third-party JS blobs.
 // Served at /vendor/<path> (same-origin 'self'; no CDN dependency).
 //
-// Mermaid: dist/vendor/mermaid.min.js — Flows UI DAG renderer.
+// Mermaid: dist/vendor/mermaid.min.js — retained; no longer loaded by Flows canvas.
 // Monaco:  dist/vendor/monaco/ — full min/vs tree + CHECKSUMS.sha256 manifest.
 //
 //	Includes loader.js, editor/*, basic-languages/* (all language grammars),
@@ -54,10 +54,18 @@ var swJS []byte
 //	pinnedFontChecksums in vendor_checksum_test.go. Source + OFL license
 //	documented in VENDOR.md §Fonts.  font-src 'self' in cspHeader().
 //
+// Drawflow: dist/vendor/drawflow/ — vanilla JS drag/connect node editor.
+//
+//	drawflow.min.js + drawflow.min.css; MIT license; no eval(); no workers.
+//	Loads under script-src 'self' with no CSP changes.
+//	SHA-256 pinned in pinnedDrawflowChecksums in vendor_checksum_test.go.
+//	Documented in VENDOR.md §Drawflow.
+//
 //go:embed all:dist/vendor/fonts
 //go:embed dist/vendor/mermaid.min.js
 //go:embed dist/vendor/VENDOR.md
 //go:embed all:dist/vendor/monaco
+//go:embed all:dist/vendor/drawflow
 var vendorFS embed.FS
 
 //go:embed dist/ide-editor.html
