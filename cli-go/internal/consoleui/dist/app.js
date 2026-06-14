@@ -2522,12 +2522,14 @@
 
   // ---- File tree ---------------------------------------------------------------
 
+  // loadIdeTree fetches the root workspace listing at depth=1 (shallow) and
+  // renders a collapsed tree. Individual dirs are lazy-loaded on expand.
   function loadIdeTree(reldir) {
     const treeEl = document.getElementById('ide-tree-root');
     if (!treeEl) return;
 
-    const dir = reldir || '';
-    const url = '/api/files/tree' + (dir ? '?dir=' + encodeURIComponent(dir) : '');
+    const dir = reldir || '.';
+    const url = '/api/files/tree?dir=' + encodeURIComponent(dir) + '&depth=1';
 
     fetch(url).then((r) => {
       if (r.status === 403) {
@@ -2574,7 +2576,7 @@
       if (data.truncated) {
         const note = document.createElement('p');
         note.className = 'ide-tree-truncated';
-        note.textContent = 'Tree truncated — workspace is large.';
+        note.textContent = 'Root directory truncated — too many entries.';
         treeEl.appendChild(note);
       }
     }).catch(() => {
@@ -2588,6 +2590,10 @@
     });
   }
 
+  // buildTreeList renders a list of file/dir entries at the given indent depth.
+  // Dirs start COLLAPSED (aria-expanded='false'). Expanding a dir that has no
+  // pre-fetched children fires a depth=1 lazy-load fetch and caches the result.
+  // A per-dir truncation notice is appended when data.truncated is true.
   function buildTreeList(entries, depth) {
     const ul = document.createElement('ul');
     ul.className = 'ide-tree-list';
@@ -2600,51 +2606,74 @@
       li.style.paddingLeft = (depth * 12) + 'px';
 
       if (entry.type === 'dir') {
-        li.setAttribute('aria-expanded', 'true');
+        // Start collapsed.
+        li.setAttribute('aria-expanded', 'false');
         const toggle = document.createElement('button');
         toggle.type = 'button';
         toggle.className = 'ide-tree-dir';
         // B2: esc() on server-supplied entry.name in aria-label.
         toggle.setAttribute('aria-label', 'Directory ' + esc(entry.name));
-        toggle.innerHTML =
-          '<span class="ide-tree-icon ide-tree-dir-icon" aria-hidden="true">&#x25BC;</span>' +
-          '<span class="ide-tree-name">' + esc(entry.name) + '</span>';
+        toggle.title = entry.name; // tooltip for truncated names
 
+        const iconSpan = document.createElement('span');
+        iconSpan.className = 'ide-tree-icon ide-tree-dir-icon';
+        iconSpan.setAttribute('aria-hidden', 'true');
+        iconSpan.textContent = '▶'; // ▶ right-pointing (collapsed)
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'ide-tree-name';
+        nameSpan.textContent = entry.name;
+
+        toggle.appendChild(iconSpan);
+        toggle.appendChild(nameSpan);
         li.appendChild(toggle);
 
-        // Children are nested inside the li.
+        // childUl is null until the first expand (lazy sentinel).
+        // If the server already returned children (depth > 1 request), pre-build.
         let childUl = null;
         if (entry.children && entry.children.length > 0) {
           childUl = buildTreeList(entry.children, depth + 1);
+          childUl.style.display = 'none'; // still start collapsed
           li.appendChild(childUl);
-        } else if (entry.children && entry.children.length === 0) {
-          // Empty dir — no child list needed.
-        } else {
-          // Children not yet loaded (API returned null — lazy-load on expand).
-          childUl = null;
         }
+        // entry.children === [] means explicitly empty dir (pre-loaded but empty).
+        // entry.children == null means depth cap — lazy-load on expand.
 
-        // Toggle expand/collapse.
-        let expanded = true;
+        // Track whether a fetch is in-flight to prevent double-clicks.
+        let loading = false;
+        let expanded = false;
+
         toggle.addEventListener('click', () => {
+          if (loading) return; // ignore clicks while fetching
           expanded = !expanded;
           li.setAttribute('aria-expanded', String(expanded));
-          const icon = toggle.querySelector('.ide-tree-dir-icon');
-          if (icon) icon.innerHTML = expanded ? '&#x25BC;' : '&#x25B6;';
+          iconSpan.textContent = expanded ? '▼' : '▶'; // ▼ / ▶
 
           if (expanded) {
-            if (childUl) {
+            if (childUl !== null) {
+              // Already fetched — just show.
               childUl.style.display = '';
+            } else if (entry.children && entry.children.length === 0) {
+              // Explicitly empty dir — nothing to show.
             } else {
-              // Lazy-load subdirectory.
-              fetch('/api/files/tree?dir=' + encodeURIComponent(entry.path))
+              // Lazy-load: depth=1 for this subdirectory.
+              loading = true;
+              const spinner = document.createElement('div');
+              spinner.className = 'ide-tree-loading';
+              spinner.setAttribute('aria-label', 'Loading');
+              spinner.textContent = 'Loading…';
+              li.appendChild(spinner);
+
+              fetch('/api/files/tree?dir=' + encodeURIComponent(entry.path) + '&depth=1')
                 .then((r) => r.ok ? r.json() : null)
                 .then((data) => {
+                  li.removeChild(spinner);
+                  loading = false;
                   if (!data) {
                     // S3: surface fetch error — revert toggle and show inline note.
                     expanded = false;
                     li.setAttribute('aria-expanded', 'false');
-                    if (icon) icon.innerHTML = '&#x25B6;';
+                    iconSpan.textContent = '▶';
                     const errNote = document.createElement('div');
                     errNote.className = 'ide-tree-error';
                     errNote.textContent = 'Failed to load ' + entry.name;
@@ -2653,12 +2682,21 @@
                   }
                   childUl = buildTreeList(data.entries || [], depth + 1);
                   li.appendChild(childUl);
+                  if (data.truncated) {
+                    const truncNote = document.createElement('div');
+                    truncNote.className = 'ide-tree-truncated';
+                    truncNote.style.paddingLeft = ((depth + 1) * 12) + 'px';
+                    truncNote.textContent = '… (truncated)';
+                    li.appendChild(truncNote);
+                  }
                 })
                 .catch(() => {
+                  if (li.contains(spinner)) li.removeChild(spinner);
+                  loading = false;
                   // S3: network error — revert toggle and show inline note.
                   expanded = false;
                   li.setAttribute('aria-expanded', 'false');
-                  if (icon) icon.innerHTML = '&#x25B6;';
+                  iconSpan.textContent = '▶';
                   const errNote = document.createElement('div');
                   errNote.className = 'ide-tree-error';
                   errNote.textContent = 'Network error loading ' + entry.name;
@@ -2676,9 +2714,19 @@
         btn.className = 'ide-tree-file';
         // B2: esc() on server-supplied entry.name in aria-label.
         btn.setAttribute('aria-label', 'File ' + esc(entry.name));
-        btn.innerHTML =
-          '<span class="ide-tree-icon" aria-hidden="true">&#x1F4C4;</span>' +
-          '<span class="ide-tree-name">' + esc(entry.name) + '</span>';
+        btn.title = entry.name; // tooltip for truncated names
+
+        const iconSpan = document.createElement('span');
+        iconSpan.className = 'ide-tree-icon';
+        iconSpan.setAttribute('aria-hidden', 'true');
+        iconSpan.textContent = '📄'; // 📄
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'ide-tree-name';
+        nameSpan.textContent = entry.name;
+
+        btn.appendChild(iconSpan);
+        btn.appendChild(nameSpan);
 
         btn.addEventListener('click', () => {
           // Mark as selected.

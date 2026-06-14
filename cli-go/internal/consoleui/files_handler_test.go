@@ -286,42 +286,176 @@ func TestFilesTree_TruncatedByEntryCap(t *testing.T) {
 	}
 }
 
-// TestFilesTree_TruncatedByDepthCap verifies that truncated=true is set when
-// a directory tree is deeper than MaxTreeDepth.
-// We nest MaxTreeDepth+1 directories so the deepest level cannot be expanded.
-func TestFilesTree_TruncatedByDepthCap(t *testing.T) {
+// TestFilesTree_DepthClampedAtMaxTreeDepth verifies that requesting depth >
+// MaxTreeDepth is clamped and does not panic or return an error. The key
+// invariant: the response is 200 and dirs beyond MaxTreeDepth appear as leaf
+// nodes with no children (the lazy-load sentinel), not as a traversal error.
+func TestFilesTree_DepthClampedAtMaxTreeDepth(t *testing.T) {
 	t.Parallel()
 
 	ws := t.TempDir()
-	// Build a chain of directories: ws/d0/d1/.../d(maxDepth).
-	depth := consoleui.MaxTreeDepth + 1
-	path := ws
-	for i := 0; i < depth; i++ {
-		path = filepath.Join(path, fmt.Sprintf("d%02d", i))
-		if err := os.Mkdir(path, 0755); err != nil {
-			t.Fatalf("mkdir depth %d: %v", i, err)
-		}
+	// Build a chain: ws/d0/ so there is at least one dir to check.
+	d0 := filepath.Join(ws, "d00")
+	if err := os.Mkdir(d0, 0755); err != nil {
+		t.Fatalf("mkdir d00: %v", err)
 	}
-	// Put a file at the very bottom so the deepest dir is non-empty.
-	mustWriteFile(t, filepath.Join(path, "deep.go"), []byte("package main"))
+	// Nest a file inside so the dir is non-empty.
+	mustWriteFile(t, filepath.Join(d0, "leaf.go"), []byte("package leaf"))
 
 	ts, tok := newFilesTestServer(t, ws)
+	// Request an absurd depth — handler must clamp to MaxTreeDepth.
+	url := fmt.Sprintf("/api/files/tree?depth=%d", consoleui.MaxTreeDepth+999)
+	resp := filesGet(t, ts, tok, url)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("depth clamped: got %d; want 200", resp.StatusCode)
+	}
+
+	// Decode just enough to verify the response is valid JSON and we got the
+	// root entry back.
+	var got struct {
+		Entries []struct {
+			Name string `json:"name"`
+		} `json:"entries"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Entries) == 0 {
+		t.Error("depth clamped: no entries returned; want at least d00")
+	}
+}
+
+// TestFilesTree_DepthParam_ShallowDefault verifies that the default depth=1
+// means subdirectory entries are returned without pre-populated children.
+// The frontend lazy-loads children on expand; a nil Children field is the
+// signal that the dir has not been expanded yet.
+func TestFilesTree_DepthParam_ShallowDefault(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	// Create ws/sub/ with a file inside.
+	mustWriteFile(t, filepath.Join(ws, "sub", "child.go"), []byte("package sub"))
+	mustWriteFile(t, filepath.Join(ws, "root.go"), []byte("package main"))
+
+	ts, tok := newFilesTestServer(t, ws)
+	// No depth param → defaults to 1.
 	resp := filesGet(t, ts, tok, "/api/files/tree")
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("depth cap: got %d; want 200", resp.StatusCode)
+		t.Fatalf("shallow default: got %d; want 200", resp.StatusCode)
 	}
 
 	var got struct {
+		Truncated bool `json:"truncated"`
+		Entries   []struct {
+			Name     string          `json:"name"`
+			Type     string          `json:"type"`
+			Children json.RawMessage `json:"children"`
+		} `json:"entries"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if got.Truncated {
+		t.Error("shallow default: truncated=true for small workspace; want false")
+	}
+
+	// Find the "sub" dir entry.
+	var subEntry *struct {
+		Name     string          `json:"name"`
+		Type     string          `json:"type"`
+		Children json.RawMessage `json:"children"`
+	}
+	for i := range got.Entries {
+		if got.Entries[i].Name == "sub" {
+			subEntry = &got.Entries[i]
+			break
+		}
+	}
+	if subEntry == nil {
+		t.Fatalf("shallow default: 'sub' dir not found in entries: %v", got.Entries)
+	}
+	if subEntry.Type != "dir" {
+		t.Errorf("shallow default: 'sub' type=%q; want dir", subEntry.Type)
+	}
+	// With default depth=1, dir children must be nil (omitempty in JSON).
+	if len(subEntry.Children) > 0 && string(subEntry.Children) != "null" {
+		t.Errorf("shallow default: 'sub' has pre-populated children=%s; want nil (lazy-load sentinel)", subEntry.Children)
+	}
+}
+
+// TestFilesTree_DepthParam_SubdirLazyLoad verifies that requesting
+// ?dir=<subdir>&depth=1 returns that subdir's immediate children (the
+// lazy-load call the frontend makes on expand).
+func TestFilesTree_DepthParam_SubdirLazyLoad(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	mustWriteFile(t, filepath.Join(ws, "root.go"), []byte("package main"))
+	mustWriteFile(t, filepath.Join(ws, "sub", "a.go"), []byte("package sub"))
+	mustWriteFile(t, filepath.Join(ws, "sub", "b.go"), []byte("package sub"))
+	// nested/deep should NOT appear (depth=1 stops at sub's immediate children).
+	mustWriteFile(t, filepath.Join(ws, "sub", "nested", "deep.go"), []byte("package nested"))
+
+	ts, tok := newFilesTestServer(t, ws)
+	resp := filesGet(t, ts, tok, "/api/files/tree?dir=sub&depth=1")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("subdir lazy-load: got %d; want 200", resp.StatusCode)
+	}
+
+	var got struct {
+		Dir     string `json:"dir"`
+		Entries []struct {
+			Name     string          `json:"name"`
+			Type     string          `json:"type"`
+			Children json.RawMessage `json:"children"`
+		} `json:"entries"`
 		Truncated bool `json:"truncated"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !got.Truncated {
-		t.Errorf("tree: truncated=false for depth %d (> MaxTreeDepth %d); want true",
-			depth, consoleui.MaxTreeDepth)
+
+	if got.Dir != "sub" {
+		t.Errorf("subdir lazy-load: dir=%q; want sub", got.Dir)
+	}
+
+	names := make(map[string]string) // name → type
+	for _, e := range got.Entries {
+		names[e.Name] = e.Type
+	}
+
+	// a.go and b.go must appear.
+	if names["a.go"] != "file" {
+		t.Errorf("subdir lazy-load: a.go not found as file; entries=%v", got.Entries)
+	}
+	if names["b.go"] != "file" {
+		t.Errorf("subdir lazy-load: b.go not found as file; entries=%v", got.Entries)
+	}
+	// nested/ must appear as dir entry but without pre-populated children.
+	if names["nested"] != "dir" {
+		t.Errorf("subdir lazy-load: nested dir not found; entries=%v", got.Entries)
+	}
+	// Find nested entry and assert no children.
+	for _, e := range got.Entries {
+		if e.Name == "nested" {
+			if len(e.Children) > 0 && string(e.Children) != "null" {
+				t.Errorf("subdir lazy-load: nested has children=%s; want nil", e.Children)
+			}
+		}
+	}
+	// root.go must NOT appear (not in sub/).
+	if names["root.go"] != "" {
+		t.Errorf("subdir lazy-load: root.go appeared in sub listing; should not")
+	}
+	if got.Truncated {
+		t.Error("subdir lazy-load: truncated=true; want false for small dir")
 	}
 }
 

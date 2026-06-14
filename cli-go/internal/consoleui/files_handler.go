@@ -59,6 +59,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -299,9 +300,12 @@ type fileTreeResponse struct {
 	Truncated bool `json:"truncated"`
 }
 
-// handleFilesTree serves GET /api/files/tree?dir=<relpath>.
+// handleFilesTree serves GET /api/files/tree?dir=<relpath>&depth=<n>.
 //
 //   - Default dir is "." (workspace root).
+//   - Default depth is 1 (immediate children only; dirs have no pre-populated
+//     children in the response — the frontend lazy-loads on expand).
+//   - depth is clamped to [1, maxTreeDepth].
 //   - Skips .git/ and node_modules/.
 //   - Omits secret-matched files entirely (same deny-set as content endpoint).
 //   - Caps at maxTreeEntriesPerDir entries per dir, maxTreeDepth depth, and
@@ -320,6 +324,20 @@ func (h *filesHandlers) handleFilesTree(w http.ResponseWriter, r *http.Request) 
 	reldir := r.URL.Query().Get("dir")
 	if reldir == "" {
 		reldir = "."
+	}
+
+	// Parse optional depth param; default 1, clamp to [1, maxTreeDepth].
+	maxDepth := 1
+	if depthStr := r.URL.Query().Get("depth"); depthStr != "" {
+		if n, err := strconv.Atoi(depthStr); err == nil {
+			maxDepth = n
+		}
+	}
+	if maxDepth < 1 {
+		maxDepth = 1
+	}
+	if maxDepth > maxTreeDepth {
+		maxDepth = maxTreeDepth
 	}
 
 	absDir, ok := h.jailPath(reldir)
@@ -347,7 +365,7 @@ func (h *filesHandlers) handleFilesTree(w http.ResponseWriter, r *http.Request) 
 	// totalNodes is a shared counter across the recursive traversal.
 	// Passed by pointer so every readDirEntries call deducts from the same budget.
 	totalNodes := maxTreeTotalNodes
-	entries, truncated := h.readDirEntries(absDir, 0, &totalNodes)
+	entries, truncated := h.readDirEntries(absDir, 0, maxDepth, &totalNodes)
 
 	// Build workspace-relative path for the response "dir" field.
 	dirRel := h.toRelPath(absDir)
@@ -365,9 +383,11 @@ func (h *filesHandlers) handleFilesTree(w http.ResponseWriter, r *http.Request) 
 
 // readDirEntries reads one directory level and builds the entry list.
 // depth is the current recursion depth (0 = top-level called from handler).
+// maxDepth is the maximum depth to recurse; when depth >= maxDepth the function
+// emits dir entries without expanding their children (lazy-load sentinel).
 // totalNodes is a pointer to the global node budget; each file/dir consumes 1.
 // Returns entries and a truncated flag.
-func (h *filesHandlers) readDirEntries(absDir string, depth int, totalNodes *int) ([]fileTreeEntry, bool) {
+func (h *filesHandlers) readDirEntries(absDir string, depth int, maxDepth int, totalNodes *int) ([]fileTreeEntry, bool) {
 	rawEntries, err := os.ReadDir(absDir)
 	if err != nil {
 		slog.Error("consoleui/files: readdir", "err", err)
@@ -408,14 +428,19 @@ func (h *filesHandlers) readDirEntries(absDir string, depth int, totalNodes *int
 				Type: "dir",
 			}
 			// Recurse if not at max depth and budget remains.
-			if depth+1 < maxTreeDepth && *totalNodes > 0 {
-				children, childTrunc := h.readDirEntries(filepath.Join(absDir, name), depth+1, totalNodes)
+			// When depth >= maxDepth, emit a dir entry without children so the
+			// frontend can lazy-load on expand.
+			if depth+1 < maxDepth && *totalNodes > 0 {
+				children, childTrunc := h.readDirEntries(filepath.Join(absDir, name), depth+1, maxDepth, totalNodes)
 				entry.Children = children
 				if childTrunc {
 					truncated = true
 				}
-			} else if depth+1 >= maxTreeDepth || *totalNodes <= 0 {
-				// Cannot expand further: mark truncated.
+			} else if depth+1 >= maxDepth {
+				// Reached requested depth cap — children omitted for lazy loading.
+				// Do NOT mark the response truncated: this is expected, not an error.
+			} else if *totalNodes <= 0 {
+				// Global budget exhausted.
 				truncated = true
 			}
 			dirs = append(dirs, entry)

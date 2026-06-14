@@ -1386,13 +1386,18 @@ html, body {
   padding: 8px 12px;
 }
 
+.ide-tree-loading {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: italic;
+  padding: 3px 12px;
+}
+
 .ide-tree-truncated {
   color: var(--text-dim);
   font-size: 11px;
   font-style: italic;
-  padding: 6px 12px;
-  border-top: 1px solid var(--border);
-  margin-top: 4px;
+  padding: 3px 12px;
 }
 
 /* ---- Center: Monaco editor pane ---- */
