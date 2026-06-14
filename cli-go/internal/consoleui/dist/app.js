@@ -2018,25 +2018,196 @@
     }
   }
 
-  function createNewFlowsWorkflow() {
-    // Prompt for workflow name.
-    var name = (window.prompt('New workflow name (lowercase letters, digits, hyphens; e.g. my-flow):') || '').trim();
-    if (!name) return; // cancelled or empty
+  // ── Themed modal system ───────────────────────────────────────────────────
+  //
+  // openModal(opts) shows an in-page modal styled with CSS-var tokens.
+  // opts = {
+  //   title:       string       — modal heading (escaped)
+  //   body:        string       — inner HTML for the body area (caller-controlled)
+  //   confirmText: string       — label for the primary action button
+  //   cancelText:  string       — label for the cancel button (default 'Cancel')
+  //   onConfirm:   fn(modal)    — called with the modal root on confirm click
+  //   onCancel:    fn()         — optional; called on cancel/Esc/overlay-click
+  //   dangerous:   bool         — if true, confirm button uses --color-error styling
+  // }
+  // Returns the modal DOM element (already in the document).
+  // Call closeModal(el) to programmatically remove it.
 
-    showFlowsNewError(null);
+  function openModal(opts) {
+    var title       = opts.title       || '';
+    var confirmText = opts.confirmText || 'OK';
+    var cancelText  = opts.cancelText  || 'Cancel';
+    var dangerous   = !!opts.dangerous;
 
-    // Client-side validation mirrors workflow.ValidateID.
-    if (!WORKFLOW_ID_RE.test(name)) {
-      showFlowsNewError(
-        'Invalid name “' + name + '”. Use lowercase letters, digits, and hyphens ' +
-        'only; must start with a letter or digit; max 64 characters.'
-      );
-      return;
+    // Build modal DOM.
+    var overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', title);
+
+    var box = document.createElement('div');
+    box.className = 'modal-box';
+
+    var heading = document.createElement('h2');
+    heading.className = 'modal-title';
+    heading.textContent = title;
+    box.appendChild(heading);
+
+    var bodyDiv = document.createElement('div');
+    bodyDiv.className = 'modal-body';
+    bodyDiv.innerHTML = opts.body || '';
+    box.appendChild(bodyDiv);
+
+    var footer = document.createElement('div');
+    footer.className = 'modal-footer';
+
+    var cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'modal-btn modal-btn-cancel';
+    cancelBtn.textContent = cancelText;
+
+    var confirmBtn = document.createElement('button');
+    confirmBtn.type = 'button';
+    confirmBtn.className = 'modal-btn modal-btn-confirm' + (dangerous ? ' modal-btn-danger' : '');
+    confirmBtn.textContent = confirmText;
+
+    footer.appendChild(cancelBtn);
+    footer.appendChild(confirmBtn);
+    box.appendChild(footer);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    // Save the element that had focus before the modal opened.
+    var previousFocus = document.activeElement;
+
+    // Focus trap: collect focusable elements inside the modal.
+    function getFocusable() {
+      return Array.prototype.slice.call(
+        box.querySelectorAll(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex=”-1”])'
+        )
+      ).filter(function(el) { return !el.disabled; });
     }
 
+    // Move focus into modal.
+    function focusFirst() {
+      var els = getFocusable();
+      if (els.length) els[0].focus();
+    }
+    setTimeout(focusFirst, 0);
+
+    function closeModal(el) {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+      // Restore focus to the element that had it before the modal.
+      if (previousFocus && previousFocus.focus) {
+        try { previousFocus.focus(); } catch (_) {}
+      }
+    }
+
+    function onCancel() {
+      closeModal(overlay);
+      if (opts.onCancel) opts.onCancel();
+    }
+
+    cancelBtn.addEventListener('click', onCancel);
+    confirmBtn.addEventListener('click', function() {
+      if (opts.onConfirm) opts.onConfirm(overlay);
+    });
+
+    // Close on overlay background click (not on box itself).
+    overlay.addEventListener('click', function(e) {
+      if (e.target === overlay) onCancel();
+    });
+
+    // Keyboard: Esc → cancel; Tab/Shift-Tab → trap focus inside modal.
+    overlay.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') { onCancel(); return; }
+      if (e.key === 'Tab') {
+        var els = getFocusable();
+        if (!els.length) { e.preventDefault(); return; }
+        var first = els[0], last = els[els.length - 1];
+        if (e.shiftKey) {
+          if (document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      }
+    });
+
+    overlay._closeModal = function() { closeModal(overlay); };
+    return overlay;
+  }
+
+  function createNewFlowsWorkflow() {
+    // Build modal body: name input + inline validation error.
+    var bodyHTML =
+      '<label for=”modal-wf-name” class=”modal-field-label”>' +
+        'Workflow name' +
+      '</label>' +
+      '<input id=”modal-wf-name” class=”modal-input” type=”text” ' +
+        'placeholder=”e.g. my-flow” autocomplete=”off” spellcheck=”false” ' +
+        'aria-describedby=”modal-wf-name-hint modal-wf-name-err”>' +
+      '<p id=”modal-wf-name-hint” class=”modal-field-hint”>' +
+        'Lowercase letters, digits, hyphens. Starts with a letter or digit. Max 64 chars.' +
+      '</p>' +
+      '<p id=”modal-wf-name-err” class=”modal-field-error” role=”alert” style=”display:none”></p>';
+
+    var modal = openModal({
+      title:       'New workflow',
+      body:        bodyHTML,
+      confirmText: 'Create',
+      cancelText:  'Cancel',
+      onConfirm: function(overlay) {
+        var input = overlay.querySelector('#modal-wf-name');
+        var errEl = overlay.querySelector('#modal-wf-name-err');
+        var name = (input ? input.value : '').trim();
+
+        function showErr(msg) {
+          if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+          if (input) input.focus();
+        }
+
+        if (!name) { showErr('Name is required.'); return; }
+        if (!WORKFLOW_ID_RE.test(name)) {
+          showErr(
+            'Invalid name. Use lowercase letters, digits, and hyphens only; ' +
+            'must start with a letter or digit; max 64 characters.'
+          );
+          return;
+        }
+
+        // Validation passed — close modal and load starter template.
+        overlay._closeModal();
+        showFlowsNewError(null);
+        _applyNewWorkflow(name);
+      },
+    });
+
+    // Focus the name input immediately (setTimeout in openModal handles initial
+    // focus on first focusable; input is first, so this is already covered).
+    // Also allow Enter key in the input to trigger Create.
+    var input = modal.querySelector('#modal-wf-name');
+    if (input) {
+      input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          modal.querySelector('.modal-btn-confirm').click();
+        }
+      });
+    }
+  }
+
+  function _applyNewWorkflow(name) {
     // Minimal starter YAML that passes workflow.Validate:
     //   version: 1               — required schema version
-    //   name: <name>             — must match ValidateID (we already validated above)
+    //   name: <name>             — must match ValidateID (pre-validated)
     //   nodes[].id               — must match ValidateID
     //   nodes[].agent            — required non-empty string
     //   nodes[].prompt           — required non-empty string
@@ -2047,13 +2218,13 @@
       'nodes:',
       '  - id: step1',
       '    agent: claude',
-      '    prompt: "Describe the first step."',
+      '    prompt: “Describe the first step.”',
       '    output_limit: 8000',
     ].join('\n') + '\n';
 
     // Load the new workflow into the editor state.
     // version: '' signals force-create (POST /flows/api/workflow with empty version
-    // and a non-existent name will create the file; if the name already exists the
+    // and a non-existent name creates the file; if the name already exists the
     // server returns 409 — handled by saveFlowsWorkflow's existing 409 path).
     flowsState.selectedName = name;
     flowsState.yaml = starterYAML;
@@ -2062,8 +2233,9 @@
     flowsState.dirty = true;
     flowsState.saveError = null;
     flowsState.saveConflict = false;
+    flowsState._pendingCreate = name;
 
-    // Add to workflows list for display (will be refreshed after first save).
+    // Add to workflows list for display (refreshed from server after first save).
     if (flowsState.workflows.indexOf(name) === -1) {
       flowsState.workflows = flowsState.workflows.concat([name]);
     }
@@ -2071,21 +2243,65 @@
     // Switch to YAML view so the operator can review/edit before saving.
     switchFlowsView('yaml');
 
-    // Sync editor content.
     var yamlEditor = document.getElementById('flows-yaml-editor');
     if (yamlEditor) yamlEditor.value = starterYAML;
 
     renderFlowsWorkflowList();
     renderFlowsEditor();
     updateFlowsToolbarState();
+  }
 
-    // Hook post-save to refresh list and handle 409 ("already exists").
-    // We monkey-patch saveFlowsWorkflow to intercept the next save for this
-    // new workflow and show a friendly message on 409 rather than the generic
-    // "Conflict: another operator saved." message.  This is scoped to the
-    // pending-create lifecycle only (cleared once save succeeds or the
-    // operator selects a different workflow).
-    flowsState._pendingCreate = name;
+  function deleteFlowsWorkflow(name) {
+    openModal({
+      title:       'Delete workflow',
+      body:        '<p>Delete <strong>' + esc(name) + '</strong>?</p>' +
+                   '<p class=”modal-field-hint” style=”margin-top:8px”>' +
+                     'This removes the workflow definition. ' +
+                     'Existing run history is not deleted.' +
+                   '</p>' +
+                   '<p id=”modal-del-err” class=”modal-field-error” role=”alert” style=”display:none”></p>',
+      confirmText: 'Delete',
+      cancelText:  'Cancel',
+      dangerous:   true,
+      onConfirm: function(overlay) {
+        var errEl = overlay.querySelector('#modal-del-err');
+        function showErr(msg) {
+          if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+        }
+        apiFetch('DELETE', '/flows/api/workflow?name=' + encodeURIComponent(name)).then(function(r) {
+          if (r.status === 404) {
+            overlay._closeModal();
+            loadFlowsWorkflowList();
+            return;
+          }
+          if (!r.ok) {
+            return r.json().then(function(d) {
+              showErr(d.error || 'Delete failed');
+            }).catch(function() {
+              showErr('Delete failed (server error)');
+            });
+          }
+          overlay._closeModal();
+          // Clear selection if we just deleted the selected workflow.
+          if (flowsState.selectedName === name) {
+            flowsState.selectedName = null;
+            flowsState.yaml = '';
+            flowsState.version = '';
+            flowsState.workflow = null;
+            flowsState.dirty = false;
+            flowsState.saveError = null;
+            flowsState.saveConflict = false;
+            flowsState._pendingCreate = null;
+            renderFlowsEditor();
+            renderFlowsCanvas();
+          }
+          loadFlowsWorkflowList();
+          announceFlows('Workflow “' + name + '” deleted');
+        }).catch(function() {
+          showErr('Network error deleting workflow');
+        });
+      },
+    });
   }
 
   function switchFlowsView(mode) {
@@ -2124,6 +2340,10 @@
       return;
     }
     for (const name of flowsState.workflows) {
+      // Wrap each workflow entry in a row: [name button] [delete button]
+      const row = document.createElement('div');
+      row.className = 'flows-wf-row';
+
       const btn = document.createElement('button');
       btn.className = 'flows-wf-item' + (name === flowsState.selectedName ? ' active' : '');
       btn.type = 'button';
@@ -2132,14 +2352,28 @@
       btn.addEventListener('click', () => {
         flowsState.selectedName = name;
         loadFlowsWorkflow(name);
-        // Update the active state immediately.
+        // Update active state immediately.
         listEl.querySelectorAll('.flows-wf-item').forEach((el) => {
-          const active = el.textContent === name;
-          el.classList.toggle('active', active);
-          el.setAttribute('aria-current', String(active));
+          const isActive = el.textContent === name;
+          el.classList.toggle('active', isActive);
+          el.setAttribute('aria-current', String(isActive));
         });
       });
-      listEl.appendChild(btn);
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'flows-wf-delete';
+      delBtn.setAttribute('aria-label', 'Delete workflow ' + name);
+      delBtn.setAttribute('title', 'Delete');
+      delBtn.textContent = '×';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation(); // don't also select the workflow
+        deleteFlowsWorkflow(name);
+      });
+
+      row.appendChild(btn);
+      row.appendChild(delBtn);
+      listEl.appendChild(row);
     }
   }
 

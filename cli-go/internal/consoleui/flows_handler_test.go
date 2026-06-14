@@ -721,3 +721,108 @@ func TestFlows_Run_HappyPath_Returns202_WithRunID(t *testing.T) {
 		t.Errorf("run_id=%q; want prefix 'run-'", runID)
 	}
 }
+
+// ---- DELETE /flows/api/workflow tests ----------------------------------------
+
+// authedDelete issues a DELETE with the token.
+func authedDelete(t *testing.T, url, tok string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		t.Fatalf("new delete request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE %s: %v", url, err)
+	}
+	return resp
+}
+
+func TestFlows_DeleteWorkflow_Happy(t *testing.T) {
+	ts, tok, workDir := newFlowsTestServer(t)
+	writeWorkflow(t, workDir, "my-flow", minimalYAML)
+
+	resp := authedDelete(t, ts.URL+"/flows/api/workflow?name=my-flow", tok)
+	drainClose(resp)
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status=%d; want 204", resp.StatusCode)
+	}
+
+	// Verify the file is gone.
+	path := filepath.Join(workDir, "workflows", "my-flow.yaml")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected file to be deleted; stat err=%v", err)
+	}
+}
+
+func TestFlows_DeleteWorkflow_NotFound(t *testing.T) {
+	ts, tok, _ := newFlowsTestServer(t)
+
+	resp := authedDelete(t, ts.URL+"/flows/api/workflow?name=nonexistent", tok)
+	drainClose(resp)
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status=%d; want 404", resp.StatusCode)
+	}
+}
+
+func TestFlows_DeleteWorkflow_InvalidName(t *testing.T) {
+	ts, tok, _ := newFlowsTestServer(t)
+
+	resp := authedDelete(t, ts.URL+"/flows/api/workflow?name=../etc/passwd", tok)
+	drainClose(resp)
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status=%d; want 400 (invalid name)", resp.StatusCode)
+	}
+}
+
+func TestFlows_DeleteWorkflow_MethodNotAllowed(t *testing.T) {
+	ts, tok, _ := newFlowsTestServer(t)
+
+	// PATCH is not supported on /flows/api/workflow.
+	req, err := http.NewRequest(http.MethodPatch, ts.URL+"/flows/api/workflow?name=my-flow", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH: %v", err)
+	}
+	drainClose(resp)
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("status=%d; want 405", resp.StatusCode)
+	}
+}
+
+func TestFlows_DeleteWorkflow_ListUpdated(t *testing.T) {
+	ts, tok, workDir := newFlowsTestServer(t)
+	writeWorkflow(t, workDir, "flow-a", strings.Replace(minimalYAML, "my-flow", "flow-a", 1))
+	writeWorkflow(t, workDir, "flow-b", strings.Replace(minimalYAML, "my-flow", "flow-b", 1))
+
+	// Delete flow-a.
+	resp := authedDelete(t, ts.URL+"/flows/api/workflow?name=flow-a", tok)
+	drainClose(resp)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status=%d; want 204", resp.StatusCode)
+	}
+
+	// List should now return only flow-b.
+	listResp := authedGet(t, ts.URL+"/flows/api/workflows", tok)
+	body := bodyStr(t, listResp)
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list status=%d; body=%s", listResp.StatusCode, body)
+	}
+	var result map[string][]string
+	if err := json.Unmarshal([]byte(body), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	wfs := result["workflows"]
+	if len(wfs) != 1 || wfs[0] != "flow-b" {
+		t.Errorf("workflows=%v; want [flow-b]", wfs)
+	}
+}
