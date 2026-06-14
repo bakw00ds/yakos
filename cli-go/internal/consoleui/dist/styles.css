@@ -16,7 +16,7 @@
  *   ops   — terminal HUD, near-black, mint accent, JetBrains Mono, scanline
  *   fluid — Apple-glass, deep navy, sky-blue accent, Inter+Mono, aurora
  *   og    — raw brand, true black, hot-pink accent, JetBrains Mono, flat
- *   light — clean light palette, off-white bg, teal accent, Inter+Mono
+ *   light — clean light palette, off-white bg, WCAG-AA teal accent (#007a5a), Inter+Mono
  */
 
 /* ── Global reset ──────────────────────────────────────────────── */
@@ -316,9 +316,19 @@ html[data-theme="og"] {
 
 /* ── LIGHT — clean light palette ────────────────────────────────── */
 /*
- * Off-white #f5f5f5 bg, text #1a1a1a, teal accent #00c48c.
+ * Off-white #f5f5f5 bg, text #1a1a1a, teal accent.
  * 8px card radius, 6px control radius, standard ease 200ms.
  * Inter for prose, JetBrains Mono for data.
+ *
+ * WCAG AA compliance (verified ratios — all on #ffffff / #f5f5f5):
+ *   accent   #007a5a on white:  5.34:1  ✓  (body text ≥4.5, UI ≥3)
+ *   accent   #007a5a on bg:     4.90:1  ✓
+ *   text-dim #4b5563 on white:  7.56:1  ✓  (body text ≥4.5)
+ *   text-dim #4b5563 on bg:     6.93:1  ✓
+ *   border   #767d89 on white:  4.15:1  ✓  (UI ≥3)
+ *   border   #767d89 on elev:   3.61:1  ✓
+ *   focus-ring is --accent (#007a5a): 5.34:1 on white ✓
+ *   text-primary #1a1a1a: 17.40:1 (unchanged)
  */
 html[data-theme="light"] {
   --color-bg-base:     #f5f5f5;
@@ -326,26 +336,31 @@ html[data-theme="light"] {
   --color-bg-elevated: #efefef;
   --color-bg-banner:   #e8e8e8;
 
-  --color-accent:       #00c48c;
-  --color-accent-dim:   rgba(0, 196, 140, 0.15);
-  --color-accent-hover: #00a876;
+  /* B-1 fix: #00c48c (2.26:1 on white) → #007a5a (5.34:1 on white) */
+  --color-accent:       #007a5a;
+  --color-accent-dim:   rgba(0, 122, 90, 0.12);
+  --color-accent-hover: #005e45;
 
   --color-text-primary:   #1a1a1a;
   --color-text-secondary: #3a3a3a;
-  --color-text-muted:     #6b7280;
+  /* B-2 fix: #6b7280 (4.43:1 on bg-base) → #4b5563 (6.93:1) — clears 4.5:1 */
+  --color-text-muted:     #4b5563;
 
-  --color-positive: #00c48c;
+  /* B-3 fix: #00c48c → #007a5a */
+  --color-positive: #007a5a;
   --color-warning:  #d97706;
   --color-alarm:    #ea580c;
   --color-error:    #dc2626;
 
-  --color-border:        #d1d5db;
-  --color-border-strong: #9ca3af;
-  --color-border-active: #00c48c;
+  /* B-4 fix: #d1d5db (1.47:1 on white) → #767d89 (4.15:1) — clears 3:1 UI */
+  --color-border:        #767d89;
+  --color-border-strong: #4b5563;
+  /* B-5 fix: border-active was #00c48c → #007a5a */
+  --color-border-active: #007a5a;
 
   --color-scrollbar-track:       #e5e7eb;
-  --color-scrollbar-thumb:       #9ca3af;
-  --color-scrollbar-thumb-hover: #6b7280;
+  --color-scrollbar-thumb:       #767d89;
+  --color-scrollbar-thumb-hover: #4b5563;
 
   /* Structural */
   --radius-card:    8px;
@@ -485,7 +500,7 @@ html[data-theme="light"] body::before {
   pointer-events: none;
   background: radial-gradient(
     ellipse 80% 30% at 50% 0%,
-    rgba(0, 196, 140, 0.06),
+    rgba(0, 122, 90, 0.07),
     transparent 70%
   );
   opacity: 1;
