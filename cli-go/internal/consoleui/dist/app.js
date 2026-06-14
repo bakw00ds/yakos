@@ -88,6 +88,11 @@
   var ideEditorReady = false;
   var ideQueuedOpen = null;
   var ideMessageHandlerRegistered = false;
+  // Edit/save state (hoisted for TDZ safety).
+  var ideCurrentPath = '';
+  var ideCurrentVersion = '';
+  var ideEditable = false;
+  var ideIsDirty = false;
 
   function defaultTheme() {
     try {
@@ -2848,7 +2853,8 @@
   //   savePaneState() so it does not consume from MAX_PANES (6) budget or
   //   reappear in the Chat tab's pane rail on reload.
   //
-  // Phase 1 is read-only. Edit/save/diff are out of scope.
+  // Phase 2 adds: Edit/View toggle, dirty tracking, ⌘S / Save button,
+  // POST /api/files/write with optimistic concurrency (version echo).
 
   // IDE editor state variables.
   // Declared as var (not let) so they are hoisted to the top of the IIFE and
@@ -2871,6 +2877,23 @@
   // Stored handler ref so we can removeEventListener if needed in the future.
   // Guard prevents double-registration if renderIdeLayout were ever called twice.
   ideMessageHandlerRegistered = false;
+
+  // The workspace-relative path of the file currently open in Monaco.
+  // Updated on every openFileInEditor call.
+  ideCurrentPath = '';
+
+  // The version stamp (SHA-256 hex) returned by GET /api/files/content and
+  // updated after every successful POST /api/files/write.  Sent back on the
+  // next write for optimistic concurrency.  Empty string = force-write.
+  ideCurrentVersion = '';
+
+  // Whether the editor is in editable mode (Edit toggle is pressed).
+  // Default: false (view-only, readOnly:true).
+  ideEditable = false;
+
+  // Whether the editor's model has unsaved changes since the last openFile
+  // or successful save.
+  ideIsDirty = false;
 
   function initIdeTab() {
     if (ideTabInitialized) return;
@@ -2898,7 +2921,21 @@
         // Center: editor
         '<div class="ide-editor-pane">' +
           '<div class="ide-editor-header" id="ide-editor-header">' +
+            // Dirty marker (● before path) shown when editor has unsaved changes.
+            '<span id="ide-dirty-marker" class="ide-dirty-marker" aria-hidden="true" style="display:none">●</span>' +
             '<span id="ide-open-path" class="ide-open-path" aria-live="polite"></span>' +
+            // Edit/View toggle: pressing Edit enables Monaco editing.
+            '<button id="ide-edit-toggle" type="button" class="ide-header-btn" ' +
+              'aria-pressed="false" title="Toggle edit mode">' +
+              'Edit' +
+            '</button>' +
+            // Save button: enabled when dirty + editable; triggers POST /api/files/write.
+            '<button id="ide-save-btn" type="button" class="ide-header-btn ide-save-btn" ' +
+              'disabled aria-disabled="true" title="Save file (⌘S / Ctrl-S)">' +
+              'Save' +
+            '</button>' +
+            // Save status: transient "Saved" / error text (aria-live polite).
+            '<span id="ide-save-status" class="ide-save-status" aria-live="polite" role="status"></span>' +
           '</div>' +
           '<div class="ide-editor-wrap">' +
             '<div id="ide-editor-notice" class="ide-editor-notice" style="display:none" role="status"></div>' +
@@ -2936,11 +2973,178 @@
       });
     }
 
+    // Wire Edit/View toggle button.
+    const editToggle = document.getElementById('ide-edit-toggle');
+    if (editToggle) {
+      editToggle.addEventListener('click', () => {
+        ideEditable = !ideEditable;
+        editToggle.textContent = ideEditable ? 'View' : 'Edit';
+        editToggle.setAttribute('aria-pressed', ideEditable ? 'true' : 'false');
+        editToggle.classList.toggle('ide-header-btn-active', ideEditable);
+        // Inform Monaco iframe.
+        if (ideEditorWindow) {
+          ideEditorWindow.postMessage(
+            { type: 'setEditable', editable: ideEditable },
+            window.location.origin
+          );
+        }
+        // When switching to View, clear dirty state in the parent too.
+        if (!ideEditable) {
+          ideSetDirty(false);
+        }
+      });
+    }
+
+    // Wire Save button.
+    const saveBtn = document.getElementById('ide-save-btn');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', () => {
+        triggerSave();
+      });
+    }
+
     // Mount the embedded chat pane.
     mountIdeChatPane();
 
     // Load file tree.
     loadIdeTree('');
+  }
+
+  // ideSetDirty updates the dirty state + UI (marker, Save button enabled/disabled).
+  function ideSetDirty(dirty) {
+    ideIsDirty = dirty;
+    const marker = document.getElementById('ide-dirty-marker');
+    if (marker) marker.style.display = dirty ? '' : 'none';
+    const saveBtn = document.getElementById('ide-save-btn');
+    if (saveBtn) {
+      const canSave = dirty && ideEditable;
+      saveBtn.disabled = !canSave;
+      saveBtn.setAttribute('aria-disabled', canSave ? 'false' : 'true');
+    }
+  }
+
+  // ideShowSaveStatus shows a transient status message (success or error) in
+  // the editor header's aria-live region.  It auto-clears after `durationMs`.
+  // Clears immediately if called again before the previous timeout fires.
+  let ideSaveStatusTimer = null;
+  function ideShowSaveStatus(msg, isError, durationMs) {
+    const el = document.getElementById('ide-save-status');
+    if (!el) return;
+    if (ideSaveStatusTimer !== null) {
+      clearTimeout(ideSaveStatusTimer);
+      ideSaveStatusTimer = null;
+    }
+    el.textContent = msg;
+    el.className = 'ide-save-status' + (isError ? ' ide-save-status-error' : ' ide-save-status-ok');
+    if (durationMs) {
+      ideSaveStatusTimer = setTimeout(() => {
+        el.textContent = '';
+        el.className = 'ide-save-status';
+        ideSaveStatusTimer = null;
+      }, durationMs);
+    }
+  }
+
+  // triggerSave asks the Monaco iframe for its current content, then POSTs it
+  // to /api/files/write.  Content is obtained by posting {type:'save'} — Monaco
+  // replies with {type:'content', path, content} in handleIdeEditorMessage.
+  //
+  // Called from: Save button click, and from handleIdeEditorMessage when Monaco
+  // signals {type:'save'} (⌘S / Ctrl-S).
+  //
+  // The actual fetch runs in performSave(path, content) once content arrives.
+  function triggerSave() {
+    if (!ideEditable || !ideIsDirty) return;
+    if (!ideEditorWindow || !ideCurrentPath) return;
+    // Ask the iframe for the current content.  The reply fires handleIdeEditorMessage
+    // with {type:'content', path, content}, which calls performSave().
+    ideEditorWindow.postMessage({ type: 'requestContent' }, window.location.origin);
+  }
+
+  // performSave POSTs content to /api/files/write with the stored version stamp.
+  // Handles 200, 409, 403, 413, and generic errors inline.
+  function performSave(path, content) {
+    const saveBtn = document.getElementById('ide-save-btn');
+    if (saveBtn) {
+      saveBtn.disabled = true;
+      saveBtn.setAttribute('aria-disabled', 'true');
+      saveBtn.textContent = 'Saving…';
+    }
+    ideShowSaveStatus('', false, 0);
+
+    fetch('/api/files/write', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: path, content: content, version: ideCurrentVersion }),
+    })
+      .then((r) => {
+        if (r.status === 200) {
+          return r.json().then((data) => {
+            // Update stored version to the new hash from the response.
+            ideCurrentVersion = data.version || '';
+            ideSetDirty(false);
+            ideShowSaveStatus('Saved', false, 2500);
+          });
+        }
+        if (r.status === 409) {
+          // File changed on disk since we read it — show reload option.
+          ideShowSaveStatus('File changed on disk — Reload to get the latest', true, 0);
+          // Inject a Reload action into the notice area (not a native dialog).
+          showIdeReloadConflictNotice(path);
+          return;
+        }
+        if (r.status === 403) {
+          ideShowSaveStatus('Permission denied (requires dispatch role)', true, 6000);
+          return;
+        }
+        if (r.status === 413) {
+          ideShowSaveStatus('File too large to save (max 5 MiB)', true, 6000);
+          return;
+        }
+        // Generic error: keep editor content intact, show status.
+        return r.text().then((body) => {
+          ideShowSaveStatus('Save failed (' + String(r.status) + ') — your edits are preserved', true, 8000);
+        });
+      })
+      .catch(() => {
+        ideShowSaveStatus('Network error — your edits are preserved', true, 8000);
+      })
+      .finally(() => {
+        if (saveBtn) {
+          saveBtn.textContent = 'Save';
+          // Re-enable only if still dirty + editable (may have been cleared on success).
+          const canSave = ideIsDirty && ideEditable;
+          saveBtn.disabled = !canSave;
+          saveBtn.setAttribute('aria-disabled', canSave ? 'false' : 'true');
+        }
+      });
+  }
+
+  // showIdeReloadConflictNotice shows a 409-conflict inline notice with a
+  // Reload button.  The editor's existing content is preserved; the operator
+  // must explicitly confirm before local edits are discarded.
+  function showIdeReloadConflictNotice(path) {
+    const notice = document.getElementById('ide-editor-notice');
+    if (!notice) return;
+
+    // Clear any previous content.
+    notice.textContent = '';
+    notice.style.display = '';
+
+    const msg = document.createTextNode('File changed on disk — ');
+    notice.appendChild(msg);
+
+    const reloadBtn = document.createElement('button');
+    reloadBtn.type = 'button';
+    reloadBtn.className = 'ide-notice-reload-btn';
+    reloadBtn.textContent = 'Reload (discards local edits)';
+    reloadBtn.addEventListener('click', () => {
+      // Confirm before discarding unsaved local edits.
+      if (!window.confirm('Reload file from disk? Your unsaved edits will be lost.')) return;
+      notice.style.display = 'none';
+      openIdeFile(path, path.split('/').pop(), null);
+    });
+    notice.appendChild(reloadBtn);
   }
 
   function handleIdeEditorMessage(e) {
@@ -2964,6 +3168,22 @@
         notice.textContent = 'Editor error: ' + (msg.message || 'unknown error');
         notice.style.display = '';
       }
+    } else if (msg.type === 'dirty') {
+      // Monaco reports dirty state change (debounced).
+      if (ideEditable) {
+        ideSetDirty(!!msg.dirty);
+      }
+    } else if (msg.type === 'save') {
+      // Monaco signals ⌘S / Ctrl-S: content is provided directly.
+      // msg.path is echoed for integrity; we trust ideCurrentPath.
+      if (ideEditable && ideIsDirty && typeof msg.content === 'string') {
+        performSave(ideCurrentPath, msg.content);
+      }
+    } else if (msg.type === 'content') {
+      // Reply to {type:'requestContent'} — triggered by triggerSave().
+      if (typeof msg.content === 'string') {
+        performSave(ideCurrentPath, msg.content);
+      }
     }
   }
 
@@ -2986,7 +3206,10 @@
     } catch (_) {}
   }
 
-  function openFileInEditor(path, content, language) {
+  // openFileInEditor sends the file content to Monaco and updates IDE state.
+  // `version` is the SHA-256 hex stamp returned by GET /api/files/content;
+  // it is stored for optimistic concurrency on the next write.
+  function openFileInEditor(path, content, language, version) {
     // Update the path header.
     const pathEl = document.getElementById('ide-open-path');
     if (pathEl) pathEl.textContent = path;
@@ -2994,6 +3217,30 @@
     // Clear any previous error notice.
     const notice = document.getElementById('ide-editor-notice');
     if (notice) notice.style.display = 'none';
+
+    // Store current-file state for save operations.
+    ideCurrentPath = path;
+    ideCurrentVersion = version || '';
+
+    // Opening a new file resets dirty state and the Edit toggle back to View.
+    ideEditable = false;
+    ideSetDirty(false);
+    ideShowSaveStatus('', false, 0);
+
+    const editToggle = document.getElementById('ide-edit-toggle');
+    if (editToggle) {
+      editToggle.textContent = 'Edit';
+      editToggle.setAttribute('aria-pressed', 'false');
+      editToggle.classList.remove('ide-header-btn-active');
+    }
+
+    // Tell Monaco to switch back to read-only when opening a new file.
+    if (ideEditorWindow) {
+      ideEditorWindow.postMessage(
+        { type: 'setEditable', editable: false },
+        window.location.origin
+      );
+    }
 
     const payload = { type: 'openFile', path, content, language: language || 'plaintext' };
 
@@ -3284,7 +3531,7 @@
           return;
         }
 
-        openFileInEditor(data.path || relpath, data.content || '', data.language || 'plaintext');
+        openFileInEditor(data.path || relpath, data.content || '', data.language || 'plaintext', data.version || '');
       })
       .catch(() => {
         onError('Network error loading: ' + name);

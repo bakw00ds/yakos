@@ -2485,6 +2485,111 @@ html[data-theme="light"] .ide-editor-frame {
   font-size: 12px;
   padding: 8px 12px;
   z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Dirty marker: ● before filename when unsaved edits exist. */
+.ide-dirty-marker {
+  color: var(--accent);
+  font-size: 12px;
+  flex-shrink: 0;
+  line-height: 1;
+  margin-right: 2px;
+  user-select: none;
+}
+
+/* Header buttons: Edit/View toggle + Save. */
+.ide-header-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 3px);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  font-family: var(--font-ui);
+  padding: 2px 8px;
+  flex-shrink: 0;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease),
+              border-color var(--dur, 0.1s) var(--ease, ease);
+  white-space: nowrap;
+}
+
+.ide-header-btn:hover:not(:disabled) {
+  background: rgba(255,255,255,0.07);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+html[data-theme="light"] .ide-header-btn:hover:not(:disabled) {
+  background: rgba(0,0,0,0.06);
+}
+
+.ide-header-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.ide-header-btn:disabled,
+.ide-header-btn[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Active state for the Edit/View toggle when in edit mode. */
+.ide-header-btn-active {
+  background: var(--color-accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Save button: slightly distinct from the Edit toggle. */
+.ide-save-btn {
+  min-width: 44px;
+}
+
+/* Save status text: transient "Saved" or error. */
+.ide-save-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.ide-save-status-ok {
+  color: var(--color-ok, #6bcf7f);
+}
+
+.ide-save-status-error {
+  color: var(--color-error, #ff6b6b);
+}
+
+/* Reload button inside the conflict notice. */
+.ide-notice-reload-btn {
+  background: none;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-control, 3px);
+  color: inherit;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: var(--font-ui);
+  padding: 1px 6px;
+  flex-shrink: 0;
+}
+
+.ide-notice-reload-btn:hover {
+  background: rgba(255,107,107,0.15);
+}
+
+.ide-notice-reload-btn:focus-visible {
+  outline: 2px solid var(--color-error, #ff6b6b);
+  outline-offset: 1px;
 }
 
 /* ---- Right: embedded chat pane ---- */
