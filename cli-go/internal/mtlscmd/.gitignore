@@ -1,0 +1,4 @@
+# Test artifacts — stray cert files from tests that leak the package dir as stateDir.
+ca.crt
+client-*.crt
+client-*.key

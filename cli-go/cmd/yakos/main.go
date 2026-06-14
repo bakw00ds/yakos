@@ -5551,12 +5551,16 @@ func exitWith(code int, err error) {
 //
 // Flags:
 //
-//	--socket <path>       Override the default Unix socket / named pipe path.
-//	--pidfile <path>      Override the default PID file path.
-//	--ws-addr <addr>      WebSocket bind address (default 127.0.0.1:7891).
-//	--rotate-ws-token     Rotate the WS bearer token and exit.
-//	--detach              Print advisory (actual backgrounding is the operator's job).
-//	--help                Print help and exit 0.
+//	--socket <path>                    Override the default Unix socket / named pipe path.
+//	--pidfile <path>                   Override the default PID file path.
+//	--ws-addr <addr>                   WebSocket bind address (default 127.0.0.1:7891).
+//	--rotate-ws-token                  Rotate the WS bearer token and exit.
+//	--detach                           Print advisory (actual backgrounding is the operator's job).
+//	--console-bootstrap-cert <name>    Override the CN used for the auto-issued bootstrap
+//	                                   client cert on first networked start (default: OS username).
+//	                                   Only used with --console-bind on a non-loopback address.
+//	--no-bootstrap-cert                Disable auto-issue of the bootstrap client cert.
+//	--help                             Print help and exit 0.
 //
 // YAKOS_DAEMON mode is NOT changed by running this command; the operator sets
 // YAKOS_DAEMON=on or YAKOS_DAEMON=auto in their shell rc to route CLI calls
@@ -5671,8 +5675,6 @@ func runServe(yakosRoot string, args []string) {
 				consoleExternalHosts = append(consoleExternalHosts, args[i][24:])
 			} else if len(args[i]) > 25 && args[i][:25] == "--console-bootstrap-cert=" {
 				consoleBootstrapCertName = args[i][25:]
-			} else if args[i] == "--no-bootstrap-cert" {
-				noBootstrapCert = true
 			} else {
 				fmt.Fprintf(os.Stderr, "serve: unknown flag %q (try --help)\n", args[i])
 				os.Exit(1)

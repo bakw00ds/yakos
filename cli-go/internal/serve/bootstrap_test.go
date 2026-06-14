@@ -12,6 +12,7 @@ package serve_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -48,9 +49,9 @@ func TestBootstrap_NetworkedStart_IssuesBootstrapCert(t *testing.T) {
 		t.Fatalf("LoadOrGenerateCA: %v", err)
 	}
 
-	result, err := mtlscmd.AutoIssueBootstrap(dir, "testop", false)
-	if err != nil {
-		t.Fatalf("AutoIssueBootstrap: %v", err)
+	result := mtlscmd.AutoIssueBootstrap(dir, "testop", false)
+	if result.Err != nil {
+		t.Fatalf("AutoIssueBootstrap: %v", result.Err)
 	}
 
 	if !result.Issued {
@@ -95,9 +96,9 @@ func TestBootstrap_NoBootstrapCert_NoIssue(t *testing.T) {
 		t.Fatalf("LoadOrGenerateCA: %v", err)
 	}
 
-	result, err := mtlscmd.AutoIssueBootstrap(dir, "op", true /* noBootstrap */)
-	if err != nil {
-		t.Fatalf("AutoIssueBootstrap with noBootstrap: %v", err)
+	result := mtlscmd.AutoIssueBootstrap(dir, "op", true /* noBootstrap */)
+	if result.Err != nil {
+		t.Fatalf("AutoIssueBootstrap with noBootstrap: %v", result.Err)
 	}
 	if !result.Skipped {
 		t.Error("expected Skipped=true")
@@ -124,9 +125,9 @@ func TestBootstrap_Idempotent_SecondStart(t *testing.T) {
 	}
 
 	// First start — issues bootstrap cert.
-	r1, err := mtlscmd.AutoIssueBootstrap(dir, "admin", false)
-	if err != nil {
-		t.Fatalf("first AutoIssueBootstrap: %v", err)
+	r1 := mtlscmd.AutoIssueBootstrap(dir, "admin", false)
+	if r1.Err != nil {
+		t.Fatalf("first AutoIssueBootstrap: %v", r1.Err)
 	}
 	if !r1.Issued {
 		t.Fatal("first call: expected Issued=true")
@@ -143,9 +144,9 @@ func TestBootstrap_Idempotent_SecondStart(t *testing.T) {
 	}()
 
 	// Second start — should be a no-op.
-	r2, err := mtlscmd.AutoIssueBootstrap(dir, "admin", false)
-	if err != nil {
-		t.Fatalf("second AutoIssueBootstrap: %v", err)
+	r2 := mtlscmd.AutoIssueBootstrap(dir, "admin", false)
+	if r2.Err != nil {
+		t.Fatalf("second AutoIssueBootstrap: %v", r2.Err)
 	}
 	if r2.Issued {
 		t.Error("second call: expected Issued=false (cert already exists)")
@@ -193,9 +194,9 @@ func TestBootstrap_ExistingCert_NoAutoIssue(t *testing.T) {
 
 	// Auto-issue for a different name — should be no-op because clientDir is
 	// non-empty.
-	result, err := mtlscmd.AutoIssueBootstrap(dir, "new-op", false)
-	if err != nil {
-		t.Fatalf("AutoIssueBootstrap: %v", err)
+	result := mtlscmd.AutoIssueBootstrap(dir, "new-op", false)
+	if result.Err != nil {
+		t.Fatalf("AutoIssueBootstrap: %v", result.Err)
 	}
 	if result.Issued {
 		t.Error("expected Issued=false when clientDir already has a cert")
@@ -208,6 +209,35 @@ func TestBootstrap_ExistingCert_NoAutoIssue(t *testing.T) {
 	}
 	if loaded == nil {
 		t.Fatal("prior cert is nil")
+	}
+}
+
+// TestBootstrap_AutoIssueFailure_ErrFieldSet verifies that when AutoIssueBootstrap
+// encounters an error (e.g. read-only stateDir prevents CA load), it sets
+// BootstrapResult.Err instead of returning an error, and sets Issued=false.
+// This ensures the serve banner arm "case bootstrap.Err != nil" can fire.
+func TestBootstrap_AutoIssueFailure_ErrFieldSet(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("read-only dir permission test is Unix-only")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+
+	dir := t.TempDir()
+	// Make the stateDir unreadable so LoadOrGenerateCA fails inside AutoIssueBootstrap.
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	result := mtlscmd.AutoIssueBootstrap(dir, "op", false)
+	if result.Err == nil {
+		t.Error("expected Err != nil when stateDir is inaccessible; got nil")
+	}
+	if result.Issued {
+		t.Error("expected Issued=false when AutoIssueBootstrap errors")
 	}
 }
 

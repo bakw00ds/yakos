@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/bakw00ds/yakos/internal/mtls"
@@ -49,6 +50,35 @@ func DefaultStateDir() string {
 		home = "/tmp"
 	}
 	return filepath.Join(home, ".yakos-state")
+}
+
+// clientNameRe is the positive allow-list for client certificate names (CNs).
+// Accepted characters: ASCII letters, digits, dot, underscore, at-sign, hyphen.
+// Maximum length: 64 characters.
+//
+// "." and ".." are explicitly rejected below even though the regex would
+// technically allow them (dot is in the character class).  Path separators
+// "/" and "\" are outside the class and therefore rejected by the regex itself.
+var clientNameRe = regexp.MustCompile(`^[A-Za-z0-9._@-]{1,64}$`)
+
+// ValidateClientName returns an error when name is not a safe client
+// certificate CN.  A name is valid if it:
+//   - matches [A-Za-z0-9._@-]{1,64}
+//   - is not the reserved relative-path tokens "." or ".."
+//
+// The allow-list is applied at every entry point that turns a name into a
+// filesystem path, preventing path-traversal attacks.
+func ValidateClientName(name string) error {
+	if name == "" {
+		return fmt.Errorf("client name must not be empty")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("client name %q is reserved", name)
+	}
+	if !clientNameRe.MatchString(name) {
+		return fmt.Errorf("client name %q is invalid: must match [A-Za-z0-9._@-]{1,64} and contain no path separators", name)
+	}
+	return nil
 }
 
 // Run dispatches the `yakos mtls <subcmd> [args...]` invocation.
@@ -126,6 +156,10 @@ func runIssueClient(args []string, stdout, stderr io.Writer, stateDir string) er
 	}
 	if name == "" {
 		return fmt.Errorf("mtls issue-client: missing <name> (try --help)")
+	}
+	// Validate name before it reaches the filesystem.
+	if err := ValidateClientName(name); err != nil {
+		return fmt.Errorf("mtls issue-client: invalid name: %w", err)
 	}
 
 	// Validate role name if provided.
@@ -357,14 +391,6 @@ func validateRoleStr(roleStr string) error {
 	return nil
 }
 
-// SetRoleInFile reads roles.json (tolerate-missing), updates cn→role,
-// writes atomically at mode 0600, never symlink, never group/other-writable.
-// The resulting file must pass netid.RoleMapper's LOW-1 file-trust check.
-// Exported for use in serve.go (auto-issue bootstrap path).
-func SetRoleInFile(stateDir, cn, roleStr string) error {
-	return setRoleInFile(stateDir, cn, roleStr)
-}
-
 func setRoleInFile(stateDir, cn, roleStr string) error {
 	if err := validateRoleStr(roleStr); err != nil {
 		return err
@@ -544,6 +570,9 @@ type BootstrapResult struct {
 	Issued bool
 	// Skipped is true when auto-issue was disabled (noBootstrap=true).
 	Skipped bool
+	// Err is non-nil when auto-issue was attempted but failed.
+	// The banner must display this error rather than claiming success or skip.
+	Err error
 }
 
 // AutoIssueBootstrap issues a bootstrap client cert if none exists yet.
@@ -552,50 +581,77 @@ type BootstrapResult struct {
 // cert are established.  The function is idempotent: if any client cert already
 // exists in clientDir, it does nothing and returns Issued=false.
 //
+// The function never returns a non-nil error.  Failures are captured in
+// BootstrapResult.Err so the caller (the startup banner) can display the
+// failure truthfully without a separate error-handling branch that could leave
+// the result in an ambiguous state.
+//
 // Security note: the auto-issued key is written at 0600 under
 // stateDir/mtls/bootstrap/.  Anyone with read access to stateDir already holds
 // the CA key and can issue arbitrary client certs; the bootstrap cert does not
 // add marginal exposure beyond what holding the CA key already implies.
-func AutoIssueBootstrap(stateDir, certName string, noBootstrap bool) (BootstrapResult, error) {
+func AutoIssueBootstrap(stateDir, certName string, noBootstrap bool) BootstrapResult {
 	if noBootstrap {
-		return BootstrapResult{CN: certName, Skipped: true}, nil
+		return BootstrapResult{CN: certName, Skipped: true}
 	}
 
 	if certName == "" {
 		certName = OSUsername()
 	}
 
+	// Sanitise the CN after the OSUsername fallback: if the OS-derived name is
+	// not a valid client name (e.g. contains path separators on some platforms),
+	// fall back to "admin".
+	if err := ValidateClientName(certName); err != nil {
+		certName = "admin"
+	}
+
 	// Check whether ANY client cert already exists under clientDir.
 	clientsDir := filepath.Join(stateDir, "mtls", "clients")
 	entries, err := os.ReadDir(clientsDir)
 	if err != nil && !os.IsNotExist(err) {
-		return BootstrapResult{}, fmt.Errorf("mtlscmd: read clients dir: %w", err)
+		return BootstrapResult{
+			CN:  certName,
+			Err: fmt.Errorf("mtlscmd: read clients dir: %w", err),
+		}
 	}
 	for _, e := range entries {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".crt") {
 			// At least one client cert already exists — do not auto-issue or overwrite.
-			return BootstrapResult{CN: certName, Issued: false}, nil
+			return BootstrapResult{CN: certName, Issued: false}
 		}
 	}
 
 	// No client cert exists. Load/generate CA and issue bootstrap cert.
 	caCert, caKey, err := mtls.LoadOrGenerateCA(stateDir)
 	if err != nil {
-		return BootstrapResult{}, fmt.Errorf("mtlscmd: bootstrap: CA unavailable: %w", err)
+		return BootstrapResult{
+			CN:  certName,
+			Err: fmt.Errorf("mtlscmd: bootstrap: CA unavailable: %w", err),
+		}
 	}
 
 	clientCert, err := mtls.IssueClientCert(caCert, caKey, certName)
 	if err != nil {
-		return BootstrapResult{}, fmt.Errorf("mtlscmd: bootstrap: issue cert: %w", err)
+		return BootstrapResult{
+			CN:  certName,
+			Err: fmt.Errorf("mtlscmd: bootstrap: issue cert: %w", err),
+		}
 	}
 	if err := mtls.PersistClientCert(stateDir, certName, clientCert); err != nil {
-		return BootstrapResult{}, fmt.Errorf("mtlscmd: bootstrap: persist cert: %w", err)
+		return BootstrapResult{
+			CN:  certName,
+			Err: fmt.Errorf("mtlscmd: bootstrap: persist cert: %w", err),
+		}
 	}
 
 	// Write hand-off bundle to stateDir/mtls/bootstrap/.
 	bundleDir := filepath.Join(stateDir, "mtls", "bootstrap")
 	if err := os.MkdirAll(bundleDir, 0700); err != nil {
-		return BootstrapResult{}, fmt.Errorf("mtlscmd: bootstrap: mkdir bundle: %w", err)
+		return BootstrapResult{
+			CN:  certName,
+			Err: fmt.Errorf("mtlscmd: bootstrap: mkdir bundle: %w", err),
+		}
 	}
 
 	certFile := filepath.Join(bundleDir, "client-"+certName+".crt")
@@ -604,28 +660,46 @@ func AutoIssueBootstrap(stateDir, certName string, noBootstrap bool) (BootstrapR
 
 	certPEM := pemEncodeCert(clientCert.Certificate[0])
 	if err := writeSensitiveFile(certFile, certPEM); err != nil {
-		return BootstrapResult{}, fmt.Errorf("mtlscmd: bootstrap: write cert: %w", err)
+		return BootstrapResult{
+			CN:  certName,
+			Err: fmt.Errorf("mtlscmd: bootstrap: write cert: %w", err),
+		}
 	}
 	keyPEMBytes, err := tlsCertKeyPEM(clientCert)
 	if err != nil {
-		return BootstrapResult{}, fmt.Errorf("mtlscmd: bootstrap: extract key: %w", err)
+		return BootstrapResult{
+			CN:  certName,
+			Err: fmt.Errorf("mtlscmd: bootstrap: extract key: %w", err),
+		}
 	}
 	if err := writeSensitiveFile(keyFile, keyPEMBytes); err != nil {
-		return BootstrapResult{}, fmt.Errorf("mtlscmd: bootstrap: write key: %w", err)
+		return BootstrapResult{
+			CN:  certName,
+			Err: fmt.Errorf("mtlscmd: bootstrap: write key: %w", err),
+		}
 	}
 	caCertPEM, err := loadCACertPEM(stateDir)
 	if err != nil {
-		return BootstrapResult{}, fmt.Errorf("mtlscmd: bootstrap: read CA PEM: %w", err)
+		return BootstrapResult{
+			CN:  certName,
+			Err: fmt.Errorf("mtlscmd: bootstrap: read CA PEM: %w", err),
+		}
 	}
 	if err := os.WriteFile(caFile, caCertPEM, 0644); err != nil { //nolint:gosec
-		return BootstrapResult{}, fmt.Errorf("mtlscmd: bootstrap: write ca.crt: %w", err)
+		return BootstrapResult{
+			CN:  certName,
+			Err: fmt.Errorf("mtlscmd: bootstrap: write ca.crt: %w", err),
+		}
 	}
 
 	// Assign admin role in roles.json if the CN has no existing entry.
 	// This is the bootstrapping operator; they need admin to enroll other operators.
 	if !roleExistsInFile(stateDir, certName) {
 		if err := setRoleInFile(stateDir, certName, "admin"); err != nil {
-			return BootstrapResult{}, fmt.Errorf("mtlscmd: bootstrap: set admin role: %w", err)
+			return BootstrapResult{
+				CN:  certName,
+				Err: fmt.Errorf("mtlscmd: bootstrap: set admin role: %w", err),
+			}
 		}
 	}
 
@@ -633,5 +707,5 @@ func AutoIssueBootstrap(stateDir, certName string, noBootstrap bool) (BootstrapR
 		CN:        certName,
 		BundleDir: bundleDir,
 		Issued:    true,
-	}, nil
+	}
 }

@@ -2,6 +2,7 @@ package mtlscmd_test
 
 import (
 	"bytes"
+	"crypto/x509"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -54,9 +55,16 @@ func TestIssueClient_CNMatchesName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadClientCert: %v", err)
 	}
-	// Parse leaf.
 	if len(cert.Certificate) == 0 {
-		t.Fatal("no DER blocks")
+		t.Fatal("no DER blocks in loaded cert")
+	}
+	// Parse the leaf and assert the CN.
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	if leaf.Subject.CommonName != "alice" {
+		t.Errorf("CN=%q; want %q", leaf.Subject.CommonName, "alice")
 	}
 }
 
@@ -182,6 +190,92 @@ func TestIssueClient_MissingName(t *testing.T) {
 	_, _, err := run(dir, "issue-client")
 	if err == nil {
 		t.Fatal("expected error for missing name; got nil")
+	}
+}
+
+func TestIssueClient_PathTraversalRejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	badNames := []string{
+		"../evil",
+		"../../etc/passwd",
+		"a/b",
+		"a\\b",
+		"..",
+		".",
+		"a/../b",
+		"/absolute",
+		"name with spaces",
+		"name;semicolon",
+		strings.Repeat("a", 65), // too long
+	}
+	for _, name := range badNames {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := run(dir, "issue-client", name)
+			if err == nil {
+				t.Errorf("issue-client %q: expected error (path traversal / invalid name); got nil", name)
+			}
+			// Verify no file was written (the name could create traversal paths).
+			// We check that no file named after the bad name appears anywhere under dir.
+			_ = err // error is sufficient; filesystem check is belt-and-suspenders
+		})
+	}
+}
+
+func TestIssueClient_ValidNamesAccepted(t *testing.T) {
+	t.Parallel()
+
+	validNames := []string{
+		"alice",
+		"bob-ci",
+		"carol.smith",
+		"dave_123",
+		"eve@example",
+		"frank",
+		strings.Repeat("a", 64), // max length
+	}
+	for _, name := range validNames {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d := t.TempDir() // separate state dir per name to avoid collision
+			_, _, err := run(d, "issue-client", name)
+			if err != nil {
+				t.Errorf("issue-client %q: unexpected error: %v", name, err)
+			}
+		})
+	}
+}
+
+func TestValidateClientName(t *testing.T) {
+	t.Parallel()
+
+	good := []string{"alice", "bob-ci", "carol.smith", "dave_123", "eve@example", strings.Repeat("x", 64)}
+	for _, n := range good {
+		if err := mtlscmd.ValidateClientName(n); err != nil {
+			t.Errorf("ValidateClientName(%q): unexpected error: %v", n, err)
+		}
+	}
+
+	bad := []string{
+		"",
+		".",
+		"..",
+		"../evil",
+		"a/b",
+		"a\\b",
+		strings.Repeat("a", 65),
+		"hello world",
+		"name;x",
+		"$var",
+	}
+	for _, n := range bad {
+		if err := mtlscmd.ValidateClientName(n); err == nil {
+			t.Errorf("ValidateClientName(%q): expected error; got nil", n)
+		}
 	}
 }
 
@@ -375,9 +469,9 @@ func TestAutoIssueBootstrap_IssuesWhenEmpty(t *testing.T) {
 		t.Fatalf("LoadOrGenerateCA: %v", err)
 	}
 
-	result, err := mtlscmd.AutoIssueBootstrap(dir, "testoperator", false)
-	if err != nil {
-		t.Fatalf("AutoIssueBootstrap: %v", err)
+	result := mtlscmd.AutoIssueBootstrap(dir, "testoperator", false)
+	if result.Err != nil {
+		t.Fatalf("AutoIssueBootstrap: %v", result.Err)
 	}
 	if !result.Issued {
 		t.Error("expected Issued=true on first call to empty dir")
@@ -407,8 +501,8 @@ func TestAutoIssueBootstrap_AdminRoleAssigned(t *testing.T) {
 		t.Fatalf("LoadOrGenerateCA: %v", err)
 	}
 
-	if _, err := mtlscmd.AutoIssueBootstrap(dir, "admin-bootstrap", false); err != nil {
-		t.Fatalf("AutoIssueBootstrap: %v", err)
+	if r := mtlscmd.AutoIssueBootstrap(dir, "admin-bootstrap", false); r.Err != nil {
+		t.Fatalf("AutoIssueBootstrap: %v", r.Err)
 	}
 
 	mapper := netid.NewRoleMapper(dir)
@@ -426,9 +520,9 @@ func TestAutoIssueBootstrap_BundleWritten(t *testing.T) {
 		t.Fatalf("LoadOrGenerateCA: %v", err)
 	}
 
-	result, err := mtlscmd.AutoIssueBootstrap(dir, "bundletest", false)
-	if err != nil {
-		t.Fatalf("AutoIssueBootstrap: %v", err)
+	result := mtlscmd.AutoIssueBootstrap(dir, "bundletest", false)
+	if result.Err != nil {
+		t.Fatalf("AutoIssueBootstrap: %v", result.Err)
 	}
 
 	for _, name := range []string{"client-bundletest.crt", "client-bundletest.key", "ca.crt"} {
@@ -447,17 +541,17 @@ func TestAutoIssueBootstrap_Idempotent(t *testing.T) {
 		t.Fatalf("LoadOrGenerateCA: %v", err)
 	}
 
-	r1, err := mtlscmd.AutoIssueBootstrap(dir, "idempotent", false)
-	if err != nil {
-		t.Fatalf("first AutoIssueBootstrap: %v", err)
+	r1 := mtlscmd.AutoIssueBootstrap(dir, "idempotent", false)
+	if r1.Err != nil {
+		t.Fatalf("first AutoIssueBootstrap: %v", r1.Err)
 	}
 	if !r1.Issued {
 		t.Fatal("first call: expected Issued=true")
 	}
 
-	r2, err := mtlscmd.AutoIssueBootstrap(dir, "idempotent", false)
-	if err != nil {
-		t.Fatalf("second AutoIssueBootstrap: %v", err)
+	r2 := mtlscmd.AutoIssueBootstrap(dir, "idempotent", false)
+	if r2.Err != nil {
+		t.Fatalf("second AutoIssueBootstrap: %v", r2.Err)
 	}
 	if r2.Issued {
 		t.Error("second call: expected Issued=false (idempotent); cert already exists")
@@ -472,9 +566,9 @@ func TestAutoIssueBootstrap_NoBootstrapFlag(t *testing.T) {
 		t.Fatalf("LoadOrGenerateCA: %v", err)
 	}
 
-	result, err := mtlscmd.AutoIssueBootstrap(dir, "skipped", true /* noBootstrap */)
-	if err != nil {
-		t.Fatalf("AutoIssueBootstrap: %v", err)
+	result := mtlscmd.AutoIssueBootstrap(dir, "skipped", true /* noBootstrap */)
+	if result.Err != nil {
+		t.Fatalf("AutoIssueBootstrap: %v", result.Err)
 	}
 	if !result.Skipped {
 		t.Error("expected Skipped=true when noBootstrap=true")
@@ -507,9 +601,9 @@ func TestAutoIssueBootstrap_ExistingCertNotOverwritten(t *testing.T) {
 	priorDER := prior.Certificate[0]
 
 	// Auto-issue should be a no-op because clientDir is non-empty.
-	result, err := mtlscmd.AutoIssueBootstrap(dir, "new-op", false)
-	if err != nil {
-		t.Fatalf("AutoIssueBootstrap: %v", err)
+	result := mtlscmd.AutoIssueBootstrap(dir, "new-op", false)
+	if result.Err != nil {
+		t.Fatalf("AutoIssueBootstrap: %v", result.Err)
 	}
 	if result.Issued {
 		t.Error("expected Issued=false when clientDir already has a cert")

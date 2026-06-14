@@ -513,16 +513,14 @@ func Run(ctx context.Context, cfg Config) error {
 			// Anyone with read access to stateDir already holds the CA key and can
 			// issue arbitrary client certs, so the bootstrap cert adds no marginal
 			// exposure.
-			bootstrapResult, bootstrapErr := mtlscmd.AutoIssueBootstrap(
+			//
+			// Failures are captured in BootstrapResult.Err (not returned) so the
+			// banner can display the error truthfully rather than claiming success.
+			bootstrapResult := mtlscmd.AutoIssueBootstrap(
 				stateDir,
 				cfg.ConsoleBootstrapCertName,
 				cfg.NoBootstrapCert,
 			)
-			if bootstrapErr != nil {
-				// Non-fatal: log the error and continue.  The operator can use
-				// 'yakos mtls issue-client' manually.
-				fmt.Fprintf(os.Stderr, "serve: auto-issue bootstrap cert: %v (use 'yakos mtls issue-client' manually)\n", bootstrapErr)
-			}
 
 			// Print startup banner — LOUD — because we are exposing an RCE-capable
 			// surface to the network.
@@ -800,6 +798,13 @@ func printNetworkedConsoleBanner(bindAddr string, externalHosts []string, certFi
 
 	// Bootstrap cert section.
 	switch {
+	case bootstrap.Err != nil:
+		// Auto-issue was attempted but failed.  Show the error explicitly so the
+		// operator is not misled into thinking certs are present or issue was skipped.
+		fmt.Fprintln(os.Stderr, "  Bootstrap cert:  AUTO-ISSUE FAILED (see error below)")
+		fmt.Fprintf(os.Stderr, "  Error:           %v\n", bootstrap.Err)
+		fmt.Fprintln(os.Stderr, "  Action required: run 'yakos mtls issue-client <name> --role admin'")
+		fmt.Fprintln(os.Stderr, "                   and distribute the bundle before connecting clients.")
 	case bootstrap.Skipped:
 		fmt.Fprintln(os.Stderr, "  Bootstrap cert:  disabled (--no-bootstrap-cert)")
 		clientsDir := filepath.Join(stateDir, "mtls", "clients")
@@ -818,7 +823,7 @@ func printNetworkedConsoleBanner(bindAddr string, externalHosts []string, certFi
 		fmt.Fprintf(os.Stderr, "    -out client-%s.p12\n", bootstrap.CN)
 		fmt.Fprintln(os.Stderr, "  SECURITY: transmit the key / .p12 only over a secure channel.")
 	default:
-		// Issued=false, Skipped=false: existing certs already present.
+		// Issued=false, Skipped=false, Err=nil: existing certs already present.
 		clientsDir := filepath.Join(stateDir, "mtls", "clients")
 		fmt.Fprintf(os.Stderr, "  Client certs:    existing certs present at %s\n", clientsDir)
 		fmt.Fprintln(os.Stderr, "                   (auto-issue skipped — certs already exist)")
