@@ -418,8 +418,10 @@ func (s *Server) registerRoutes() {
 	// permits wasm-unsafe-eval (Monaco JIT) and blob: workers (Monaco web
 	// workers wrapped per CSP-safe pattern).  This route is behind the same
 	// edge auth as the rest of the console (requireTokenForNonStatic in New()).
-	// The MAIN console CSP (cspHeader, applied in handleIndex) is NOT modified.
-	s.mux.HandleFunc("/ide/editor", s.handleIDEEditor)
+	// RoleRead required — matches the sibling sub-dashboard pattern
+	// (/kanban/, /cost/, /perf/) exactly.  The MAIN console CSP (cspHeader,
+	// applied in handleIndex) is NOT modified.
+	s.mux.Handle("/ide/editor", requireRole(netid.RoleRead, http.HandlerFunc(s.handleIDEEditor)))
 
 	// ---- Kanban sub-dashboard -----------------------------------------------
 	// Mount kanban.Handler() under /kanban/. The kanban handler's own
@@ -629,8 +631,11 @@ func ideEditorCSP() string {
 		// No external connections; only same-origin (loader may use fetch for
 		// lazy module loading in future, but all assets are same-origin here).
 		"connect-src 'self'",
-		// Font loaded from same-origin /vendor/monaco/.../codicon.ttf (via CSS).
-		// data: is needed because Monaco editor.main.css embeds the font inline.
+		// Explicit font-src so codicon.ttf is served from same-origin rather
+		// than relying on the default-src fallback.  data: covers any inline
+		// base64 font data Monaco may embed in editor.main.css.
+		"font-src 'self' data:",
+		// img-src: Monaco uses data: URIs for some inline images in its UI.
 		"img-src 'self' data:",
 		// Prevent this document from being framed by anything other than 'self'
 		// (parent console page).
@@ -650,6 +655,7 @@ func (s *Server) handleIDEEditor(w http.ResponseWriter, r *http.Request) {
 	// Scoped CSP: only applies to this route.  The main cspHeader is untouched.
 	w.Header().Set("Content-Security-Policy", ideEditorCSP())
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_, _ = w.Write(ideEditorHTML)
 }
 

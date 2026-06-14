@@ -35,6 +35,7 @@ vendored here.
 | Source (codicon.ttf)      | https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/base/browser/ui/codicons/codicon/codicon.ttf |
 | npm     | https://www.npmjs.com/package/monaco-editor/v/0.52.2 |
 | License | MIT — https://github.com/microsoft/monaco-editor/blob/v0.52.2/LICENSE.md |
+| Copyright | Copyright (c) 2016 - present Microsoft Corporation |
 
 ### SHA-256 checksums (pinned in vendor_checksum_test.go)
 

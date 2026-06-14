@@ -705,6 +705,39 @@ func TestIDEEditor_CORP(t *testing.T) {
 	}
 }
 
+// TestIDEEditor_XContentTypeOptions verifies /ide/editor sets
+// X-Content-Type-Options: nosniff (security-review followup item 3).
+func TestIDEEditor_XContentTypeOptions(t *testing.T) {
+	ts, tok := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide/editor", tok)
+	defer drainClose(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /ide/editor: status=%d; want 200", resp.StatusCode)
+	}
+	xcto := resp.Header.Get("X-Content-Type-Options")
+	if xcto != "nosniff" {
+		t.Errorf("GET /ide/editor: X-Content-Type-Options=%q; want nosniff", xcto)
+	}
+}
+
+// TestIDEEditor_ScopedCSP_HasExplicitFontSrc verifies that the /ide/editor CSP
+// contains an explicit font-src directive (security-review followup item 2).
+// codicon.ttf must be covered by font-src 'self', not the default-src fallback.
+func TestIDEEditor_ScopedCSP_HasExplicitFontSrc(t *testing.T) {
+	ts, tok := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide/editor", tok)
+	defer drainClose(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /ide/editor: status=%d; want 200", resp.StatusCode)
+	}
+	csp := resp.Header.Get("Content-Security-Policy")
+	if !strings.Contains(csp, "font-src 'self'") {
+		t.Errorf("GET /ide/editor CSP: missing explicit font-src 'self' directive\n  CSP: %s", csp)
+	}
+}
+
 // TestVendorRoute_MonacoLoaderServedNoToken verifies that the Monaco AMD
 // loader (/vendor/monaco/min/vs/loader.js) is served without a token
 // (vendor paths are token-exempt static assets) and carries CORP: same-origin.

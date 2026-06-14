@@ -35,7 +35,8 @@
     { type: 'openFile', path: string, content: string, language: string }
       — opens the given content in the editor with the specified language.
 
-  This document posts to its parent window:
+  This document posts to its parent window (targetOrigin = window.location.origin,
+  NOT '*' — parent is same-origin so scoping the target is safe and preferred):
     { type: 'ready' }    — editor has mounted and is ready for content.
     { type: 'error', message: string } — fatal initialisation error.
 
@@ -110,7 +111,7 @@
       }
       document.getElementById('loading').style.display = 'none';
       try {
-        window.parent.postMessage({ type: 'error', message: msg }, '*');
+        window.parent.postMessage({ type: 'error', message: msg }, window.location.origin);
       } catch (_) {}
       console.error('[ide-editor] fatal:', msg);
     }
@@ -210,7 +211,7 @@
 
       // Notify parent that editor is ready.
       try {
-        window.parent.postMessage({ type: 'ready' }, '*');
+        window.parent.postMessage({ type: 'ready' }, window.location.origin);
       } catch (_) {}
 
       // Demo mode: load a hardcoded sample when ?demo=1 is in the URL.
