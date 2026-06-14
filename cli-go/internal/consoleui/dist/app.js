@@ -2234,7 +2234,7 @@
     function getFocusable() {
       return Array.prototype.slice.call(
         box.querySelectorAll(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex=”-1”])'
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
         )
       ).filter(function(el) { return !el.disabled; });
     }
@@ -2297,16 +2297,16 @@
   function createNewFlowsWorkflow() {
     // Build modal body: name input + inline validation error.
     var bodyHTML =
-      '<label for=”modal-wf-name” class=”modal-field-label”>' +
+      '<label for="modal-wf-name" class="modal-field-label">' +
         'Workflow name' +
       '</label>' +
-      '<input id=”modal-wf-name” class=”modal-input” type=”text” ' +
-        'placeholder=”e.g. my-flow” autocomplete=”off” spellcheck=”false” ' +
-        'aria-describedby=”modal-wf-name-hint modal-wf-name-err”>' +
-      '<p id=”modal-wf-name-hint” class=”modal-field-hint”>' +
+      '<input id="modal-wf-name" class="modal-input" type="text" ' +
+        'placeholder="e.g. my-flow" autocomplete="off" spellcheck="false" ' +
+        'aria-describedby="modal-wf-name-hint modal-wf-name-err">' +
+      '<p id="modal-wf-name-hint" class="modal-field-hint">' +
         'Lowercase letters, digits, hyphens. Starts with a letter or digit. Max 64 chars.' +
       '</p>' +
-      '<p id=”modal-wf-name-err” class=”modal-field-error” role=”alert” style=”display:none”></p>';
+      '<p id="modal-wf-name-err" class="modal-field-error" role="alert" style="display:none"></p>';
 
     var modal = openModal({
       title:       'New workflow',
@@ -2367,7 +2367,7 @@
       'nodes:',
       '  - id: step1',
       '    agent: claude',
-      '    prompt: “Describe the first step.”',
+      '    prompt: "Describe the first step."',
       '    output_limit: 8000',
     ].join('\n') + '\n';
 
@@ -2412,11 +2412,11 @@
     openModal({
       title:       'Delete workflow',
       body:        '<p>Delete <strong>' + esc(name) + '</strong>?</p>' +
-                   '<p class=”modal-field-hint” style=”margin-top:8px”>' +
+                   '<p class="modal-field-hint" style="margin-top:8px">' +
                      'This removes the workflow definition. ' +
                      'Existing run history is not deleted.' +
                    '</p>' +
-                   '<p id=”modal-del-err” class=”modal-field-error” role=”alert” style=”display:none”></p>',
+                   '<p id="modal-del-err" class="modal-field-error" role="alert" style="display:none"></p>',
       confirmText: 'Delete',
       cancelText:  'Cancel',
       dangerous:   true,
@@ -2453,7 +2453,7 @@
             renderFlowsCanvas();
           }
           loadFlowsWorkflowList();
-          announceFlows('Workflow “' + name + '” deleted');
+          announceFlows('Workflow "' + name + '" deleted');
         }).catch(function() {
           showErr('Network error deleting workflow');
         });
