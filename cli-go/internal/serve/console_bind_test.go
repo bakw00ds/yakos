@@ -290,6 +290,29 @@ func TestNormalizeExternalHosts(t *testing.T) {
 
 // ---- 6. Wildcard bind without --console-external-host → Run() refuses --------
 
+// ---- 7. WorkspaceRoot is wired from serve.Config into consoleui.Config -------
+
+// TestConsoleConfig_WorkspaceRootWired is a regression guard for the silent
+// misconfiguration where serve.go built the consoleui.Config literal without
+// setting WorkspaceRoot, causing newFilesHandlers("") to fail-safe and return
+// 503 for every /api/files/* request (the IDE file tree was empty).
+//
+// It asserts that BuildConsoleCfgForTest — which mirrors the exact literal in
+// Run() — propagates WorkspaceRoot from the daemon config to the console config.
+// If a future edit to the consoleCfg literal drops the WorkspaceRoot field, this
+// test will catch it without requiring a full daemon start or a live HTTP request.
+func TestConsoleConfig_WorkspaceRootWired(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfg := serve.Config{
+		WorkspaceRoot: tmp,
+	}
+	got := serve.BuildConsoleCfgForTest(cfg)
+	if got.WorkspaceRoot != tmp {
+		t.Errorf("consoleui.Config.WorkspaceRoot = %q; want %q (WorkspaceRoot not wired from serve.Config)", got.WorkspaceRoot, tmp)
+	}
+}
+
 // TestConsoleBind_WildcardWithoutExternalHost_Refuses verifies that Run()
 // returns a clear error when ConsoleBind is a wildcard address and
 // ConsoleExternalHosts is empty.  This is the fail-closed requirement: a
