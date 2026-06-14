@@ -263,6 +263,18 @@ func newFilesHandlers(workspaceRoot string) *filesHandlers {
 //   - relpath contains ".." after filepath.Clean (traversal attempt).
 //   - filepath.EvalSymlinks resolves to a path outside workspaceRoot.
 //   - The resolved path is ".git" or inside ".git/".
+//
+// IMPORTANT: for paths that do not yet exist (new-file writes), EvalSymlinks
+// on the full candidate fails with not-exist and this function returns the
+// UNRESOLVED lexical candidate.  That is safe for READ paths (the subsequent
+// os.Stat/os.ReadFile will 404), but is NOT safe for WRITE paths — a
+// symlinked parent directory whose EvalSymlinks-resolved real location is
+// outside the jail would pass the lexical isUnderRoot check.
+//
+// Use jailPathForCreate for write operations on new files.  It separately
+// resolves the parent directory (which must already exist) and verifies the
+// real parent is inside the jail, then returns realParent+base so all
+// filesystem operations use the resolved path.
 func (h *filesHandlers) jailPath(relpath string) (string, bool) {
 	if h.workspaceRoot == "" {
 		return "", false
@@ -313,6 +325,101 @@ func (h *filesHandlers) jailPath(relpath string) (string, bool) {
 	}
 
 	return real, true
+}
+
+// jailPathForCreate is the write-safe variant of jailPath for paths that may
+// not yet exist.  It separately resolves the parent directory via
+// filepath.EvalSymlinks (the parent MUST already exist per the v1 no-mkdir
+// rule) and verifies that the real parent is inside the workspace jail.  The
+// returned absPath is realParent+base — fully symlink-resolved — so all
+// subsequent filesystem operations (WriteFile, Rename) act on the real
+// location, never on an unresolved lexical candidate.
+//
+// This closes the symlinked-parent escape: a dir inside the workspace that
+// is itself a symlink to an outside location would pass jailPath's lexical
+// isUnderRoot check on the candidate but its EvalSymlinks-resolved real path
+// would fail isUnderRoot here.
+//
+// Returns the real absolute path on success (parent resolved + basename appended).
+// Returns ("", errJailParentNotExist) when the parent directory does not exist.
+// Returns ("", errJailEscape) on any jail/secret/.git violation.
+// Returns ("", other error) on unexpected OS errors.
+//
+// Secret and .git checks are performed against both the lexical candidate
+// (fast rejection of obvious names) and the resolved real path (defence
+// against symlink rename tricks — e.g. a symlink that makes "safe.txt"
+// resolve into ".git/config" can't bypass the per-name checks because we
+// check basename of the final resolved path too).
+var errJailEscape = fmt.Errorf("path outside workspace jail")
+var errJailParentNotExist = fmt.Errorf("parent directory does not exist")
+
+func (h *filesHandlers) jailPathForCreate(relpath string) (string, error) {
+	if h.workspaceRoot == "" {
+		return "", errJailEscape
+	}
+	if filepath.IsAbs(relpath) {
+		return "", errJailEscape
+	}
+
+	// Lexical candidate — used for early-reject checks only.
+	candidate := filepath.Clean(filepath.Join(h.workspaceRoot, relpath))
+	if !isUnderRoot(candidate, h.workspaceRoot) {
+		return "", errJailEscape
+	}
+	if isGitPath(candidate, h.workspaceRoot) {
+		return "", errJailEscape
+	}
+
+	// Secret check on the candidate basename (fast path, no symlink follow).
+	baseName := filepath.Base(candidate)
+	if isSecretFile(baseName) {
+		return "", errJailEscape
+	}
+
+	// Resolve the PARENT directory through EvalSymlinks.
+	// The parent must already exist (v1: no mkdir), so EvalSymlinks must succeed.
+	candidateParent := filepath.Dir(candidate)
+	realParent, err := filepath.EvalSymlinks(candidateParent)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", errJailParentNotExist
+		}
+		// Permission denied or other error: refuse.
+		return "", errJailEscape
+	}
+
+	// Assert the real parent is inside the workspace.
+	// This is the critical check: if candidateParent was a symlink pointing
+	// outside the workspace, realParent will not share the workspaceRoot prefix.
+	if !isUnderRoot(realParent, h.workspaceRoot) {
+		return "", errJailEscape
+	}
+
+	// Reject real parent inside .git (belt-and-suspenders against symlink tricks).
+	if isGitPath(realParent, h.workspaceRoot) {
+		return "", errJailEscape
+	}
+
+	// Build the fully-resolved target path: realParent + basename.
+	// All filesystem ops (WriteFile, Rename) must use this path.
+	realTarget := filepath.Join(realParent, baseName)
+
+	// Secret check on the resolved basename (symlink rename defence: a symlink
+	// named "safe.go" could resolve to ".env" if the parent dir has been
+	// manipulated; baseName here is the name component of the original request
+	// which is already validated, but we re-check for defence in depth).
+	if isSecretFile(filepath.Base(realTarget)) {
+		return "", errJailEscape
+	}
+
+	// Re-verify the assembled resolved path is still inside the workspace
+	// (realParent+baseName should trivially be inside since realParent is
+	// inside and baseName contains no separators, but be explicit).
+	if !isUnderRoot(realTarget, h.workspaceRoot) {
+		return "", errJailEscape
+	}
+
+	return realTarget, nil
 }
 
 // isUnderRoot reports whether absPath is equal to root or is strictly inside
@@ -694,6 +801,11 @@ type fileWriteRequest struct {
 	// Path is the workspace-relative path to write.
 	Path string `json:"path"`
 	// Content is the UTF-8 text content to write.
+	// NOTE: this endpoint only accepts UTF-8 text.  Binary files read via
+	// GET /api/files/content are returned with encoding="base64"; the client
+	// must decode the base64 back to raw bytes and re-encode as UTF-8 text
+	// before POSTing, or use a different mechanism.  Submitting raw base64
+	// strings as content will save the base64 text literally on disk.
 	Content string `json:"content"`
 	// Version is the last-seen version stamp (SHA-256 hex of previous content).
 	// If empty, the write is treated as a create/force-write (no stale check).
@@ -716,15 +828,22 @@ type fileWriteResponse struct {
 //
 // Security model:
 //   - Role: RoleDispatch (checked here in addition to the route wrapper).
-//   - Jail: path goes through the same jailPath as the read endpoints.
+//   - Jail: existing files go through jailPath (full EvalSymlinks on target).
+//     New files go through jailPathForCreate (EvalSymlinks on parent dir,
+//     which closes the symlinked-parent escape described below).
+//   - Symlinked-parent escape closed: a directory inside the workspace that
+//     is itself a symlink to an outside location passes jailPath's lexical
+//     isUnderRoot check on the unresolved candidate, but jailPathForCreate
+//     resolves the parent with EvalSymlinks and asserts the real parent is
+//     inside the jail before any write touches the filesystem.
 //   - Secrets: isSecretFile → 403.
-//   - .git internals: rejected by jailPath → 400/403.
+//   - .git internals: rejected by both jail functions.
 //   - WorkspaceRoot unset → 503.
 //   - Content > 5 MiB → 413.
 //   - Optimistic concurrency: version != "" → compare with on-disk SHA-256.
 //     Mismatch → 409. version == "" → force-write (create or overwrite).
 //   - Parent dir must exist (v1: no mkdir). Non-existent parent → 400.
-//   - Atomic: temp file in same dir + rename.
+//   - Atomic temp-rename write in the real (symlink-resolved) parent directory.
 //   - File mode: 0644 on create; preserve existing mode on update.
 //
 // Idempotency: POST /api/files/write is NOT idempotent by default. Callers
@@ -786,46 +905,83 @@ func (h *filesHandlers) handleFilesWrite(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Jail the path. For write we use the unresolved candidate path because
-	// the target file may not exist yet. jailPath returns (candidate, true)
-	// for not-exist paths, allowing us to create new files within the jail.
-	absPath, ok := h.jailPath(req.Path)
+	// --- Phase 1: determine whether the target file already exists.
+	//
+	// We use jailPath first; if the target exists it returns the fully
+	// EvalSymlinks-resolved real path.  If the target does not exist,
+	// jailPath returns an unresolved lexical candidate — which is NOT safe
+	// for writes (symlinked parent dirs would pass the lexical jail check but
+	// land outside the workspace).  For the not-exist case we switch to
+	// jailPathForCreate which resolves the parent directory independently.
+	jailedPath, ok := h.jailPath(req.Path)
 	if !ok {
 		writeGenericError(w, http.StatusBadRequest, "invalid file path")
 		return
 	}
 
-	// Re-check secret on the real/candidate basename after resolution
-	// (symlink could rename).
+	// Attempt to stat the jailed path to decide which branch we're on.
+	fi, statErr := os.Stat(jailedPath)
+	fileExists := statErr == nil && !fi.IsDir()
+
+	var absPath string // the fully-resolved path all filesystem ops will use
+
+	if fileExists {
+		// Target exists: jailPath already returned the EvalSymlinks-resolved
+		// path (EvalSymlinks succeeded).  Use it directly.
+		absPath = jailedPath
+	} else if statErr != nil && !os.IsNotExist(statErr) {
+		// Unexpected stat error (e.g. permission denied).
+		slog.Error("consoleui/files: write stat target", "err", statErr)
+		writeGenericError(w, http.StatusInternalServerError, "failed to stat target path")
+		return
+	} else if fi != nil && fi.IsDir() {
+		writeGenericError(w, http.StatusBadRequest, "path is a directory")
+		return
+	} else {
+		// Target does not exist: use jailPathForCreate to resolve the parent
+		// directory via EvalSymlinks and verify the real parent is inside the
+		// workspace jail.  This closes the symlinked-parent escape.
+		realTarget, createErr := h.jailPathForCreate(req.Path)
+		switch createErr {
+		case nil:
+			absPath = realTarget
+		case errJailParentNotExist:
+			writeGenericError(w, http.StatusBadRequest, "parent directory does not exist")
+			return
+		default:
+			writeGenericError(w, http.StatusBadRequest, "invalid file path")
+			return
+		}
+	}
+
+	// Re-check secret on the resolved basename after jail (defence against
+	// symlink rename tricks where a link name looks safe but resolves to a
+	// secret name — e.g. parent/.env_link → secret.
 	if isSecretFile(filepath.Base(absPath)) {
 		writeGenericError(w, http.StatusForbidden, "writing this file type is not permitted")
 		return
 	}
 
-	// v1: parent directory must exist — no surprise mkdir from the IDE.
-	parentDir := filepath.Dir(absPath)
-	parentFi, err := os.Stat(parentDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			writeGenericError(w, http.StatusBadRequest, "parent directory does not exist")
+	// Optimistic concurrency: read existing content and compare versions.
+	var existingData []byte
+	if fileExists {
+		var readErr error
+		existingData, readErr = os.ReadFile(absPath) //nolint:gosec
+		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				// File disappeared between stat and read (TOCTOU): treat as
+				// version conflict so the caller reloads.
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error": "file changed on disk; reload before saving",
+				})
+				return
+			}
+			slog.Error("consoleui/files: write read existing", "err", readErr)
+			writeGenericError(w, http.StatusInternalServerError, "failed to check existing version")
 			return
 		}
-		slog.Error("consoleui/files: write stat parent", "err", err)
-		writeGenericError(w, http.StatusInternalServerError, "failed to stat parent directory")
-		return
-	}
-	if !parentFi.IsDir() {
-		writeGenericError(w, http.StatusBadRequest, "parent path is not a directory")
-		return
-	}
-
-	// Optimistic concurrency: read existing content and compare versions.
-	existingData, readErr := os.ReadFile(absPath) //nolint:gosec
-	fileExists := readErr == nil
-	if readErr != nil && !os.IsNotExist(readErr) {
-		slog.Error("consoleui/files: write read existing", "err", readErr)
-		writeGenericError(w, http.StatusInternalServerError, "failed to check existing version")
-		return
 	}
 
 	if req.Version != "" && fileExists {
@@ -853,12 +1009,14 @@ func (h *filesHandlers) handleFilesWrite(w http.ResponseWriter, r *http.Request)
 	// Determine file mode: preserve existing mode on update, use 0644 for new files.
 	fileMode := os.FileMode(0644)
 	if fileExists {
-		if fi, err := os.Stat(absPath); err == nil {
-			fileMode = fi.Mode().Perm()
+		if fstat, err := os.Stat(absPath); err == nil {
+			fileMode = fstat.Mode().Perm()
 		}
 	}
 
-	// Atomic write via temp-rename (same pattern as flows handleSaveWorkflow).
+	// Atomic write: temp file in the RESOLVED parent dir + rename.
+	// Using the resolved parent (not the lexical candidate) ensures the temp
+	// file and the final rename both land in the validated real directory.
 	tmpPath := absPath + ".yakos-write-tmp"
 	if err := os.WriteFile(tmpPath, contentBytes, fileMode); err != nil { //nolint:gosec
 		slog.Error("consoleui/files: write tmp", "err", err)

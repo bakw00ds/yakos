@@ -1707,10 +1707,12 @@ func TestFilesWrite_ReadVersionRoundTrip(t *testing.T) {
 	}
 }
 
-// TestFilesWrite_Atomic_NoCorruptionOnFailure verifies that the existing file
-// is not corrupted if an issue occurs during write. We simulate this by
-// verifying the existing file is untouched when a stale-version 409 fires.
-func TestFilesWrite_Atomic_NoCorruptionOnFailure(t *testing.T) {
+// TestFilesWrite_StaleVersion_OriginalIntact verifies that a 409 from a
+// stale-version conflict leaves the original file completely untouched and
+// does not leave a temp file on disk.  (Previously misnamed
+// TestFilesWrite_Atomic_NoCorruptionOnFailure — that name implied an
+// atomicity test but the function actually tested OCC conflict behaviour.)
+func TestFilesWrite_StaleVersion_OriginalIntact(t *testing.T) {
 	t.Parallel()
 
 	ws := t.TempDir()
@@ -1793,5 +1795,86 @@ func TestFilesWrite_RouteRegistered(t *testing.T) {
 
 	if resp.StatusCode == http.StatusNotFound {
 		t.Error("POST /api/files/write: got 404; route must be registered")
+	}
+}
+
+// TestFilesWrite_Jail_SymlinkParentOutside is the regression test for the
+// critical jail escape: a DIRECTORY inside the workspace that is itself a
+// symlink pointing to an outside location must not allow writes to new files
+// under it.
+//
+// Attack scenario: ws/link -> /outside/dir; POST path:"link/authorized_keys"
+// The lexical candidate <ws>/link/authorized_keys passes isUnderRoot, but the
+// real filesystem path is /outside/dir/authorized_keys — outside the jail.
+// jailPathForCreate resolves link's real location via EvalSymlinks and rejects
+// it because the real parent is not under WorkspaceRoot.
+//
+// This test FAILS against the pre-fix code (the file is created outside the
+// workspace) and PASSES after the fix (request rejected, no file created).
+func TestFilesWrite_Jail_SymlinkParentOutside(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	outside := t.TempDir() // directory completely outside the workspace
+
+	// Create a symlink inside the workspace pointing to the outside directory.
+	symlinkedDir := filepath.Join(ws, "link")
+	if err := os.Symlink(outside, symlinkedDir); err != nil {
+		t.Skip("symlink creation not supported:", err)
+	}
+
+	ts, tok := newFilesTestServer(t, ws)
+
+	// Attempt to write a new file through the symlinked directory.
+	// This is the escape: without the fix, "link/escape.go" resolves to
+	// <outside>/escape.go which is outside the workspace.
+	resp := filesPost(t, ts, tok, writeBody(t, "link/escape.go", "package evil", ""))
+	filesBodyStr(t, resp)
+
+	// The request MUST be rejected (any non-2xx status).
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		t.Errorf("symlinked-parent escape: got %d; want non-2xx (jail must block)", resp.StatusCode)
+	}
+
+	// The file must NOT have been created at the outside location.
+	escapedPath := filepath.Join(outside, "escape.go")
+	if _, err := os.Stat(escapedPath); err == nil {
+		t.Errorf("CRITICAL: file was created outside workspace at %s; jail escape not blocked", escapedPath)
+	}
+
+	// Also verify no file was created at the lexical (inside-workspace) path.
+	lexicalPath := filepath.Join(ws, "link", "escape.go")
+	if _, err := os.Stat(lexicalPath); err == nil {
+		// This would also be a problem — the symlink resolved write happened.
+		t.Errorf("file created at symlinked path %s; jail escape not blocked", lexicalPath)
+	}
+}
+
+// TestFilesWrite_ContentAtExactSizeCap verifies that content exactly at the
+// 5 MiB cap (not over) is accepted with 200 OK.  This is the boundary case
+// that complements TestFilesWrite_OversizedContent_413.
+func TestFilesWrite_ContentAtExactSizeCap(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	ts, tok := newFilesTestServer(t, ws)
+
+	// Content exactly at the cap: should be allowed.
+	exact := strings.Repeat("A", consoleui.MaxFileContentBytes)
+	resp := filesPost(t, ts, tok, writeBody(t, "exact.txt", exact, ""))
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("content at exact cap: got %d; want 200. body: %s", resp.StatusCode, b)
+	}
+
+	// Verify the file was actually written with the correct size.
+	diskContent, err := os.ReadFile(filepath.Join(ws, "exact.txt"))
+	if err != nil {
+		t.Fatalf("read exact cap file: %v", err)
+	}
+	if len(diskContent) != consoleui.MaxFileContentBytes {
+		t.Errorf("disk size: got %d; want %d", len(diskContent), consoleui.MaxFileContentBytes)
 	}
 }
