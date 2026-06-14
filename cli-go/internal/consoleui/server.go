@@ -44,6 +44,7 @@ var swJS []byte
 //go:embed dist/vendor/mermaid.min.js
 //go:embed dist/vendor/monaco/min/vs/loader.js
 //go:embed dist/vendor/monaco/min/vs/editor/editor.main.js
+//go:embed dist/vendor/monaco/min/vs/editor/editor.main.nls.js
 //go:embed dist/vendor/monaco/min/vs/editor/editor.main.css
 //go:embed dist/vendor/monaco/min/vs/base/worker/workerMain.js
 //go:embed dist/vendor/monaco/min/vs/base/browser/ui/codicons/codicon/codicon.ttf

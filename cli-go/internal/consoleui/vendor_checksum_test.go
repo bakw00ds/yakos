@@ -29,8 +29,13 @@ var pinnedVendorChecksums = map[string]string{
 
 	// Monaco Editor 0.52.2 — IDE spike AMD editor host (/ide/editor route).
 	// Source: https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/...
-	"monaco/min/vs/loader.js":                                    "28f3584fd04b182dfce15a9a1ce35b25bea22b31464aee500372bed18b7fee1a",
-	"monaco/min/vs/editor/editor.main.js":                        "90b588bc0b624e24052a576e1bcab2eaffec7bc666895188862eebd9c9745782",
+	"monaco/min/vs/loader.js":             "28f3584fd04b182dfce15a9a1ce35b25bea22b31464aee500372bed18b7fee1a",
+	"monaco/min/vs/editor/editor.main.js": "90b588bc0b624e24052a576e1bcab2eaffec7bc666895188862eebd9c9745782",
+	// editor.main.nls.js: not in upstream Monaco 0.52.2 package (NLS moved to
+	// _VSCODE_NLS_MESSAGES global); this is a hand-authored compatibility stub that
+	// registers an empty AMD module to satisfy AMD loaders that still request it.
+	// Pinned here so any accidental modification is caught immediately.
+	"monaco/min/vs/editor/editor.main.nls.js":                    "13ef5bd19b9cb61808c9550a5ab11092cc77ec1c8520b17e235237c39cfb31c2",
 	"monaco/min/vs/editor/editor.main.css":                       "857bc0beafefbcc83ab5cf3510e929391c0314add43ee1a4cb8ecaf4726abbac",
 	"monaco/min/vs/base/worker/workerMain.js":                    "dbe4aa4f2874f5768e8d98e94281667c0bc493e02dd9760adca930699ff3279b",
 	"monaco/min/vs/base/browser/ui/codicons/codicon/codicon.ttf": "0f1d5219934e96e83b8db162d60b4d8c09b5de1e7d38031cbafe4a3c0f2889c9",
