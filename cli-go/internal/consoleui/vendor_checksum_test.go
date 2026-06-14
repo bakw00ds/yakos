@@ -41,6 +41,28 @@ var pinnedMermaidChecksums = map[string]string{
 	"mermaid.min.js": "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de",
 }
 
+// pinnedDrawflowChecksums maps the filename (relative to dist/vendor/drawflow/) to its
+// expected SHA-256 hex digest. Computed at vendor time; locked here.
+//
+// Drawflow 0.0.59 — vanilla JS drag/connect node editor for the Flows UI canvas.
+// Source: https://unpkg.com/drawflow@0.0.59/dist/
+// License: MIT — https://github.com/jerosoler/Drawflow/blob/master/LICENSE
+// Supply-chain: verified zero eval() / new Function() calls before vendoring.
+//
+// To update:
+//
+//	curl -fsSL https://unpkg.com/drawflow@<VERSION>/dist/drawflow.min.js -o /tmp/drawflow.min.js
+//	curl -fsSL https://unpkg.com/drawflow@<VERSION>/dist/drawflow.min.css -o /tmp/drawflow.min.css
+//	grep -c "eval(" /tmp/drawflow.min.js   # must be 0
+//	grep -c "new Function" /tmp/drawflow.min.js  # must be 0
+//	shasum -a 256 /tmp/drawflow.min.{js,css}
+//	# Update pinnedDrawflowChecksums below and VENDOR.md §Drawflow.
+var pinnedDrawflowChecksums = map[string]string{
+	// Drawflow 0.0.59 — fetched from https://unpkg.com/drawflow@0.0.59/dist/
+	"drawflow.min.js":  "b2f63a87ecdcceb9294ff287d2b29b1029aa263d4ed795785766c2894ef55c81",
+	"drawflow.min.css": "57e5b37f72d95f97597263f17ef0ae9f0a0cd7b966e039b9f43508040d5dedf2",
+}
+
 // pinnedFontChecksums maps font filename (relative to dist/vendor/fonts/) to
 // its expected SHA-256 hex digest.  Populated when the font woff2 files are
 // vendored (see VENDOR.md §Fonts for the download + hash recipe).
@@ -239,9 +261,34 @@ func TestVendorChecksums(t *testing.T) {
 			}
 			return nil
 		}
+		// Drawflow files (dist/vendor/drawflow/) use per-file pins in pinnedDrawflowChecksums.
+		if strings.HasPrefix(path, "drawflow/") {
+			name := strings.TrimPrefix(path, "drawflow/")
+			wantHash, ok := pinnedDrawflowChecksums[name]
+			if !ok {
+				t.Errorf("vendored Drawflow file %q has no pinned checksum — "+
+					"add it to pinnedDrawflowChecksums in vendor_checksum_test.go and VENDOR.md", path)
+				return nil
+			}
+			data, err := fs.ReadFile(sub, path)
+			if err != nil {
+				t.Errorf("read drawflow file %q: %v", path, err)
+				return nil
+			}
+			sum := sha256.Sum256(data)
+			got := hex.EncodeToString(sum[:])
+			if got != wantHash {
+				t.Errorf("SHA-256 mismatch for %s\n  got:  %s\n  want: %s\n\n"+
+					"If this is an intentional update, recompute with:\n"+
+					"  shasum -a 256 cli-go/internal/consoleui/dist/vendor/drawflow/%s\n"+
+					"and update pinnedDrawflowChecksums and dist/vendor/VENDOR.md",
+					path, got, wantHash, name)
+			}
+			return nil
+		}
 		// Everything else must have an inline pin.
 		if _, ok := pinnedMermaidChecksums[path]; !ok {
-			t.Errorf("vendored file %q has no pinned checksum and is not a Monaco file — "+
+			t.Errorf("vendored file %q has no pinned checksum and is not a Monaco/Drawflow/font file — "+
 				"add it to pinnedMermaidChecksums or the appropriate manifest", path)
 		}
 		return nil

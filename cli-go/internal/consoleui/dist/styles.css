@@ -1864,11 +1864,13 @@ html[data-theme="og"] .flows-run-btn {
 
 .flows-canvas-wrap {
   flex: 1;
-  overflow: auto;
+  overflow: hidden;
   position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
-/* Read-only notice at the top of the canvas view */
+/* Canvas mode note (view vs edit notification bar) */
 .flows-canvas-readonly-note {
   font-size: 11px;
   color: var(--text-dim);
@@ -1882,10 +1884,10 @@ html[data-theme="light"] .flows-canvas-readonly-note {
   background: rgba(0,0,0,0.02);
 }
 
-
 .flows-canvas {
   position: relative;
-  min-height: 200px;
+  min-height: 300px;
+  flex: 1;
 }
 
 /* ---- DAG SVG edges ---- */
@@ -2932,6 +2934,313 @@ html.perf-low-end[data-theme="og"]  .tline::after {
   .flows-wf-item,
   .flows-run-item,
   .dag-node {
+    transition: none;
+  }
+}
+
+/* ==========================================================================
+   Drawflow canvas overrides — theme the vanilla Drawflow default styles.
+   The vendored drawflow.min.css uses hardcoded colors (cyan/black/yellow).
+   These rules replace those defaults with PandaOS design-token values.
+   All selectors are scoped under .drawflow-host to avoid leaking globally.
+   ========================================================================== */
+
+/* Host container: fills the canvas-wrap flex cell. */
+.drawflow-host {
+  width: 100%;
+  height: 100%;
+  min-height: 300px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* Drawflow's own .drawflow root element */
+.drawflow-host .parent-drawflow {
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* ---- Node boxes ---- */
+.drawflow-host .drawflow-node {
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-card, 6px);
+  color: var(--text);
+  min-width: 160px;
+  min-height: 0;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  transition: border-color var(--dur, 0.15s) var(--ease, ease),
+              box-shadow var(--dur, 0.15s) var(--ease, ease);
+}
+
+.drawflow-host .drawflow-node:hover {
+  cursor: move;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--color-accent-dim);
+}
+
+.drawflow-host .drawflow-node.selected {
+  background: var(--color-accent-dim);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--color-accent-dim);
+}
+
+/* FLUID: glass nodes */
+html[data-theme="fluid"] .drawflow-host .drawflow-node {
+  backdrop-filter: blur(var(--glass-blur, 24px)) saturate(var(--glass-sat, 1.6));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 24px)) saturate(var(--glass-sat, 1.6));
+  background: rgba(20, 22, 29, 0.72);
+}
+
+/* Node inner content */
+.drawflow-host .df-node-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.drawflow-host .df-node-id {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawflow-host .df-node-agent {
+  font-size: 10px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Run-state status classes on nodes ---- */
+.drawflow-host .df-status-running {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 6px var(--color-accent-dim) !important;
+}
+.drawflow-host .df-status-completed {
+  border-color: var(--color-positive, #51cf66) !important;
+}
+.drawflow-host .df-status-failed {
+  border-color: var(--color-error, #ff6b6b) !important;
+}
+.drawflow-host .df-status-skipped {
+  opacity: 0.5;
+}
+
+/* ---- Connection ports (input/output dots) ---- */
+.drawflow-host .drawflow-node .input,
+.drawflow-host .drawflow-node .output {
+  background: var(--surface);
+  border: 2px solid var(--border);
+  width: 14px;
+  height: 14px;
+}
+
+.drawflow-host .drawflow-node .input:hover,
+.drawflow-host .drawflow-node .output:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  cursor: crosshair;
+}
+
+/* ---- SVG connection paths ---- */
+.drawflow-host .connection .main-path {
+  stroke: var(--border);
+  stroke-width: 2px;
+}
+
+.drawflow-host .connection .main-path:hover {
+  stroke: var(--accent);
+  cursor: pointer;
+}
+
+.drawflow-host .connection .main-path.selected {
+  stroke: var(--accent);
+}
+
+/* ---- Delete button (appears on selected connection) ---- */
+.drawflow-host .drawflow-delete {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--color-error, #ff6b6b);
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  line-height: 18px;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  cursor: pointer;
+  font-family: var(--font-mono);
+}
+
+.drawflow-host .drawflow-delete:hover {
+  background: var(--color-error, #ff6b6b);
+  color: #fff;
+  border-color: var(--color-error, #ff6b6b);
+}
+
+/* ---- Active (Edit) mode indicator on canvas ---- */
+.drawflow-host.edit-active {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* ---- flows-canvas-edit-btn active state ---- */
+.flows-btn.active {
+  background: var(--color-accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---- Danger variant for delete in node edit panel ---- */
+.flows-btn-danger {
+  border-color: var(--color-error, #ff6b6b);
+  color: var(--color-error, #ff6b6b);
+}
+.flows-btn-danger:hover:not(:disabled) {
+  background: rgba(255, 107, 107, 0.12);
+}
+
+/* ---- Primary variant for Apply button ---- */
+.flows-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+html[data-theme="og"] .flows-btn-primary {
+  color: #000;
+}
+.flows-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* ==========================================================================
+   Node edit panel — slides up from below the canvas (inline, not modal).
+   ========================================================================== */
+
+.flows-node-edit-panel {
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  max-height: 360px;
+  overflow: hidden;
+}
+
+.flows-node-edit-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.flows-node-edit-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+
+.flows-node-edit-body {
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+
+.flows-node-edit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.flows-node-edit-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.flows-node-edit-input,
+.flows-node-edit-textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 4px);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 4px 8px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.flows-node-edit-input:focus,
+.flows-node-edit-textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: var(--accent);
+}
+
+.flows-node-edit-textarea {
+  resize: vertical;
+  min-height: 60px;
+  line-height: 1.5;
+}
+
+.flows-node-edit-hint {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.flows-node-edit-error {
+  font-size: 11px;
+  color: var(--color-error, #ff6b6b);
+  background: rgba(255, 107, 107, 0.1);
+  border: 1px solid rgba(255, 107, 107, 0.3);
+  border-radius: var(--radius-control, 4px);
+  padding: 4px 8px;
+  margin: 0;
+}
+
+.flows-node-edit-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.flows-node-edit-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* ---- Reduced-motion override for Drawflow ---- */
+@media (prefers-reduced-motion: reduce) {
+  .drawflow-host .drawflow-node {
     transition: none;
   }
 }

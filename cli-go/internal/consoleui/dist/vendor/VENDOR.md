@@ -17,9 +17,8 @@ file and the corresponding entries in `vendor_checksum_test.go` and/or
 | License | MIT — https://github.com/mermaid-js/mermaid/blob/v11.15.0/LICENSE |
 | SHA-256 | 70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de |
 
-Purpose: read-only DAG canvas renderer for the Flows UI (Phase 5).
-The Drawflow drag-edit editor is a deferred stretch goal and is NOT
-vendored here.
+Purpose: retained for potential future use; the Flows UI no longer loads
+Mermaid (replaced by Drawflow for the interactive canvas editor, see §Drawflow).
 
 To update: download the new `mermaid.min.js`, recompute SHA-256:
 
@@ -27,6 +26,51 @@ To update: download the new `mermaid.min.js`, recompute SHA-256:
 
 Update the constant in `vendor_checksum_test.go` (pinnedMermaidChecksums)
 and the SHA-256 row above.
+
+---
+
+## Drawflow (Flows canvas editor)
+
+| Field   | Value |
+|---------|-------|
+| Library | Drawflow |
+| Version | 0.0.59 |
+| Source JS  | https://unpkg.com/drawflow@0.0.59/dist/drawflow.min.js |
+| Source CSS | https://unpkg.com/drawflow@0.0.59/dist/drawflow.min.css |
+| npm     | https://www.npmjs.com/package/drawflow/v/0.0.59 |
+| License | MIT — https://github.com/jerosoler/Drawflow/blob/master/LICENSE |
+| Copyright | Copyright (c) 2020 Jero Soler |
+| SHA-256 (JS)  | b2f63a87ecdcceb9294ff287d2b29b1029aa263d4ed795785766c2894ef55c81 |
+| SHA-256 (CSS) | 57e5b37f72d95f97597263f17ef0ae9f0a0cd7b966e039b9f43508040d5dedf2 |
+
+Purpose: interactive drag-drop visual node editor for the Flows UI canvas.
+Replaces the read-only SVG DAG renderer for canvas editing.
+
+Supply-chain note: Drawflow 0.0.59 is vanilla JS with no dependencies,
+no `eval()`, no `new Function()` calls — confirmed via grep before vendoring.
+Loads under `script-src 'self'` with no CSP relaxation required.
+
+Files vendored under `dist/vendor/drawflow/`:
+- `drawflow.min.js` — editor core (drag, connect, export/import, pan/zoom)
+- `drawflow.min.css` — default visual styles (overridden by `styles.css` via
+  theming tokens to match the PandaOS design system)
+
+Serve path: `/vendor/drawflow/drawflow.min.js` and `drawflow.min.css`
+Embed: via `//go:embed all:dist/vendor/drawflow` in `server.go`
+Checksum: per-file SHA-256 in `pinnedDrawflowChecksums` in `vendor_checksum_test.go`
+
+`.gitattributes` marks `drawflow.min.js` and `drawflow.min.css` as `binary` —
+no EOL conversion on Windows, preserving the pinned SHA-256.
+
+To update:
+    curl -fsSL https://unpkg.com/drawflow@<VERSION>/dist/drawflow.min.js -o /tmp/drawflow.min.js
+    curl -fsSL https://unpkg.com/drawflow@<VERSION>/dist/drawflow.min.css -o /tmp/drawflow.min.css
+    grep -c "eval(" /tmp/drawflow.min.js   # must be 0
+    grep -c "new Function" /tmp/drawflow.min.js  # must be 0
+    shasum -a 256 /tmp/drawflow.min.js
+    shasum -a 256 /tmp/drawflow.min.css
+    cp /tmp/drawflow.min.{js,css} cli-go/internal/consoleui/dist/vendor/drawflow/
+    # Update pinnedDrawflowChecksums in vendor_checksum_test.go and this table.
 
 ---
 

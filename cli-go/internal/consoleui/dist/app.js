@@ -1575,6 +1575,9 @@
     nodeOutputTruncated: false,
     viewMode: 'canvas',     // 'canvas' | 'yaml'
     _pendingCreate: null,   // non-null when a new workflow is staged but not yet saved
+    // Drawflow canvas editor state
+    drawflowEditor: null,   // Drawflow editor instance (initialized once per session)
+    canvasEditMode: false,  // false = View (locked), true = Edit (drag/CRUD)
   };
 
   // ---- Flows init -----------------------------------------------------------
@@ -1582,8 +1585,40 @@
   function initFlowsTab() {
     if (flowsTabInitialized) return;
     flowsTabInitialized = true;
-    renderFlowsLayout();
-    loadFlowsWorkflowList();
+    // Load Drawflow assets dynamically (lazy: only when Flows tab is first opened).
+    // Drawflow is vanilla JS with no eval/new Function; loads under script-src 'self'.
+    _loadDrawflow(function() {
+      renderFlowsLayout();
+      loadFlowsWorkflowList();
+    });
+  }
+
+  // _loadDrawflow injects Drawflow CSS + JS if not already present,
+  // then calls onReady() once the script has executed.
+  function _loadDrawflow(onReady) {
+    if (typeof Drawflow !== 'undefined') {
+      onReady();
+      return;
+    }
+    // Inject CSS.
+    if (!document.getElementById('drawflow-css')) {
+      var link = document.createElement('link');
+      link.id = 'drawflow-css';
+      link.rel = 'stylesheet';
+      link.href = '/vendor/drawflow/drawflow.min.css';
+      document.head.appendChild(link);
+    }
+    // Inject JS.
+    var script = document.createElement('script');
+    script.src = '/vendor/drawflow/drawflow.min.js';
+    script.onload = function() { onReady(); };
+    script.onerror = function() {
+      // Drawflow failed to load — render layout without editor (graceful degrade).
+      renderFlowsLayout();
+      loadFlowsWorkflowList();
+      announceFlows('Canvas editor unavailable (script load failed) — use YAML view');
+    };
+    document.head.appendChild(script);
   }
 
   // ---- Flows WS event handler -----------------------------------------------
@@ -1930,6 +1965,13 @@
               '<button id="flows-view-yaml" class="flows-view-btn" type="button" ' +
                 'aria-pressed="false" title="YAML editor view">YAML</button>' +
             '</div>' +
+            // Edit mode toggle — only shown in canvas view
+            '<button id="flows-canvas-edit-btn" class="flows-btn" type="button" ' +
+              'aria-pressed="false" title="Toggle canvas edit mode (drag nodes, add/delete/connect)">' +
+              'Edit</button>' +
+            // Add node button — only shown in Edit mode
+            '<button id="flows-add-node-btn" class="flows-btn" type="button" ' +
+              'style="display:none" aria-label="Add a new node to the canvas">+ Node</button>' +
             '<button id="flows-save-btn" class="flows-btn" type="button" ' +
               'aria-label="Save workflow YAML">Save</button>' +
             '<button id="flows-run-btn" class="flows-btn flows-run-btn" type="button" ' +
@@ -1944,20 +1986,82 @@
           // Canvas + YAML side by side; only one shown at a time
           '<div class="flows-content">' +
             '<div id="flows-canvas-wrap" class="flows-canvas-wrap">' +
-              '<div class="flows-canvas-readonly-note" role="note" aria-label="Canvas note">' +
-                'Canvas is read-only — click a node to view output. ' +
-                'To author or edit a workflow, switch to YAML view.' +
+              // Canvas mode note: changes based on view/edit mode
+              '<div id="flows-canvas-mode-note" class="flows-canvas-readonly-note" role="note" aria-label="Canvas note">' +
+                'View mode — click a node to view output. Toggle Edit to add, connect, and edit nodes.' +
               '</div>' +
-              '<div id="flows-canvas" class="flows-canvas" role="img" aria-label="Workflow DAG canvas"></div>' +
+              // Drawflow container — Drawflow mounts inside this element
+              '<div id="flows-canvas" class="flows-canvas drawflow-host" ' +
+                'role="region" aria-label="Workflow DAG canvas" ' +
+                'aria-describedby="flows-canvas-mode-note">' +
+              '</div>' +
             '</div>' +
             '<div id="flows-yaml-wrap" class="flows-yaml-wrap" style="display:none">' +
               '<label for="flows-yaml-editor" class="sr-only">Workflow YAML editor</label>' +
               '<textarea id="flows-yaml-editor" class="flows-yaml-editor" ' +
                 'spellcheck="false" autocorrect="off" autocapitalize="off" ' +
-                'aria-label="Workflow YAML — edit here, then click Save"></textarea>' +
+                'aria-label="Workflow YAML — accessible alternate to canvas. Edit here, then click Save"></textarea>' +
             '</div>' +
           '</div>' +
-          // Node output panel (shown when a node is selected)
+          // Node edit panel (shown when editing a node's properties)
+          '<div id="flows-node-edit-panel" class="flows-node-edit-panel" style="display:none" ' +
+            'role="dialog" aria-label="Edit node properties" aria-modal="false">' +
+            '<div class="flows-node-edit-header">' +
+              '<span class="flows-node-edit-title">Edit Node</span>' +
+              '<button id="flows-node-edit-close" class="flows-node-close" type="button" ' +
+                'aria-label="Close node editor">&times;</button>' +
+            '</div>' +
+            '<div class="flows-node-edit-body">' +
+              '<div class="flows-node-edit-row">' +
+                '<label class="flows-node-edit-label" for="fne-id">ID</label>' +
+                '<input id="fne-id" class="flows-node-edit-input" type="text" ' +
+                  'autocomplete="off" spellcheck="false" ' +
+                  'placeholder="e.g. step1" aria-describedby="fne-id-hint">' +
+                '<p id="fne-id-hint" class="flows-node-edit-hint">Lowercase letters, digits, hyphens. Max 64 chars.</p>' +
+              '</div>' +
+              '<div class="flows-node-edit-row">' +
+                '<label class="flows-node-edit-label" for="fne-agent">Agent</label>' +
+                '<input id="fne-agent" class="flows-node-edit-input" type="text" ' +
+                  'autocomplete="off" spellcheck="false" placeholder="e.g. claude">' +
+              '</div>' +
+              '<div class="flows-node-edit-row">' +
+                '<label class="flows-node-edit-label" for="fne-prompt">Prompt</label>' +
+                '<textarea id="fne-prompt" class="flows-node-edit-textarea" ' +
+                  'rows="4" placeholder="Describe the task…" spellcheck="false"></textarea>' +
+              '</div>' +
+              '<div class="flows-node-edit-row">' +
+                '<label class="flows-node-edit-label" for="fne-output-limit">output_limit</label>' +
+                '<input id="fne-output-limit" class="flows-node-edit-input" type="number" ' +
+                  'min="1" placeholder="8000" aria-describedby="fne-ol-hint">' +
+                '<p id="fne-ol-hint" class="flows-node-edit-hint">Required. Bytes budget for upstream output substitution.</p>' +
+              '</div>' +
+              '<div class="flows-node-edit-row">' +
+                '<label class="flows-node-edit-label" for="fne-model">Model (optional)</label>' +
+                '<input id="fne-model" class="flows-node-edit-input" type="text" ' +
+                  'autocomplete="off" spellcheck="false" placeholder="haiku | sonnet | opus">' +
+              '</div>' +
+              '<div class="flows-node-edit-row">' +
+                '<label class="flows-node-edit-label" for="fne-runtime">Runtime (optional)</label>' +
+                '<input id="fne-runtime" class="flows-node-edit-input" type="text" ' +
+                  'autocomplete="off" spellcheck="false" placeholder="claude | codex | gemini">' +
+              '</div>' +
+              '<div class="flows-node-edit-row">' +
+                '<label class="flows-node-edit-label" for="fne-timeout">Timeout s (optional)</label>' +
+                '<input id="fne-timeout" class="flows-node-edit-input" type="number" ' +
+                  'min="0" placeholder="0 (default)">' +
+              '</div>' +
+              '<p id="fne-error" class="flows-node-edit-error" role="alert" style="display:none"></p>' +
+            '</div>' +
+            '<div class="flows-node-edit-footer">' +
+              '<button id="fne-delete-btn" class="flows-btn flows-btn-danger" type="button" ' +
+                'style="display:none" aria-label="Delete this node">Delete node</button>' +
+              '<div class="flows-node-edit-actions">' +
+                '<button id="fne-cancel-btn" class="flows-btn" type="button">Cancel</button>' +
+                '<button id="fne-save-btn" class="flows-btn flows-btn-primary" type="button">Apply</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+          // Node output panel (shown when a node is selected in View mode)
           '<div id="flows-node-panel" class="flows-node-panel" style="display:none">' +
             '<div class="flows-node-panel-header">' +
               '<span id="flows-node-title" class="flows-node-title"></span>' +
@@ -1989,6 +2093,16 @@
       switchFlowsView('yaml');
     });
 
+    // Wire canvas Edit mode toggle.
+    document.getElementById('flows-canvas-edit-btn').addEventListener('click', () => {
+      toggleCanvasEditMode();
+    });
+
+    // Wire Add Node button.
+    document.getElementById('flows-add-node-btn').addEventListener('click', () => {
+      addNewNodeToCanvas();
+    });
+
     // Wire YAML editor onChange.
     const yamlEditor = document.getElementById('flows-yaml-editor');
     if (yamlEditor) {
@@ -2017,10 +2131,24 @@
       startFlowsRun(true);
     });
 
-    // Wire node panel close button.
+    // Wire node output panel close button.
     document.getElementById('flows-node-close').addEventListener('click', () => {
       flowsState.selectedNodeId = null;
       document.getElementById('flows-node-panel').style.display = 'none';
+    });
+
+    // Wire node edit panel buttons.
+    document.getElementById('flows-node-edit-close').addEventListener('click', () => {
+      closeNodeEditPanel();
+    });
+    document.getElementById('fne-cancel-btn').addEventListener('click', () => {
+      closeNodeEditPanel();
+    });
+    document.getElementById('fne-save-btn').addEventListener('click', () => {
+      applyNodeEditPanel();
+    });
+    document.getElementById('fne-delete-btn').addEventListener('click', () => {
+      deleteNodeFromEditPanel();
     });
 
     // Wire New workflow button.
@@ -2029,6 +2157,8 @@
     });
 
     renderFlowsWorkflowList();
+    // Initialize Drawflow after layout is mounted.
+    initDrawflowEditor();
   }
 
   // idRe mirrors workflow.ValidateID — ^[a-z0-9][a-z0-9-]{0,63}$
@@ -2113,7 +2243,7 @@
     function getFocusable() {
       return Array.prototype.slice.call(
         box.querySelectorAll(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex=”-1”])'
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
         )
       ).filter(function(el) { return !el.disabled; });
     }
@@ -2176,16 +2306,16 @@
   function createNewFlowsWorkflow() {
     // Build modal body: name input + inline validation error.
     var bodyHTML =
-      '<label for=”modal-wf-name” class=”modal-field-label”>' +
+      '<label for="modal-wf-name" class="modal-field-label">' +
         'Workflow name' +
       '</label>' +
-      '<input id=”modal-wf-name” class=”modal-input” type=”text” ' +
-        'placeholder=”e.g. my-flow” autocomplete=”off” spellcheck=”false” ' +
-        'aria-describedby=”modal-wf-name-hint modal-wf-name-err”>' +
-      '<p id=”modal-wf-name-hint” class=”modal-field-hint”>' +
+      '<input id="modal-wf-name" class="modal-input" type="text" ' +
+        'placeholder="e.g. my-flow" autocomplete="off" spellcheck="false" ' +
+        'aria-describedby="modal-wf-name-hint modal-wf-name-err">' +
+      '<p id="modal-wf-name-hint" class="modal-field-hint">' +
         'Lowercase letters, digits, hyphens. Starts with a letter or digit. Max 64 chars.' +
       '</p>' +
-      '<p id=”modal-wf-name-err” class=”modal-field-error” role=”alert” style=”display:none”></p>';
+      '<p id="modal-wf-name-err" class="modal-field-error" role="alert" style="display:none"></p>';
 
     var modal = openModal({
       title:       'New workflow',
@@ -2246,7 +2376,7 @@
       'nodes:',
       '  - id: step1',
       '    agent: claude',
-      '    prompt: “Describe the first step.”',
+      '    prompt: "Describe the first step."',
       '    output_limit: 8000',
     ].join('\n') + '\n';
 
@@ -2268,8 +2398,15 @@
       flowsState.workflows = flowsState.workflows.concat([name]);
     }
 
-    // Switch to YAML view so the operator can review/edit before saving.
-    switchFlowsView('yaml');
+    // Switch to Canvas view and render the starter node graph.
+    // Set a minimal workflow object so renderFlowsCanvas can draw it.
+    flowsState.workflow = {
+      version: 1,
+      name: name,
+      nodes: [{ id: 'step1', agent: 'claude', prompt: 'Describe the first step.', output_limit: 8000 }],
+    };
+
+    switchFlowsView('canvas');
 
     var yamlEditor = document.getElementById('flows-yaml-editor');
     if (yamlEditor) yamlEditor.value = starterYAML;
@@ -2277,17 +2414,18 @@
     renderFlowsWorkflowList();
     renderFlowsEditor();
     updateFlowsToolbarState();
+    announceFlows('New workflow "' + name + '" created — canvas showing starter node');
   }
 
   function deleteFlowsWorkflow(name) {
     openModal({
       title:       'Delete workflow',
       body:        '<p>Delete <strong>' + esc(name) + '</strong>?</p>' +
-                   '<p class=”modal-field-hint” style=”margin-top:8px”>' +
+                   '<p class="modal-field-hint" style="margin-top:8px">' +
                      'This removes the workflow definition. ' +
                      'Existing run history is not deleted.' +
                    '</p>' +
-                   '<p id=”modal-del-err” class=”modal-field-error” role=”alert” style=”display:none”></p>',
+                   '<p id="modal-del-err" class="modal-field-error" role="alert" style="display:none"></p>',
       confirmText: 'Delete',
       cancelText:  'Cancel',
       dangerous:   true,
@@ -2298,8 +2436,25 @@
         }
         apiFetch('DELETE', '/flows/api/workflow?name=' + encodeURIComponent(name)).then(function(r) {
           if (r.status === 404) {
+            // 404: workflow was never saved (pending-create) or already deleted
+            // externally. Clear local state if it was the selected workflow so
+            // the canvas and editor don't show a stale/phantom workflow.
             overlay._closeModal();
+            if (flowsState.selectedName === name) {
+              flowsState.selectedName = null;
+              flowsState.yaml = '';
+              flowsState.version = '';
+              flowsState.workflow = null;
+              flowsState.dirty = false;
+              flowsState.saveError = null;
+              flowsState.saveConflict = false;
+              flowsState._pendingCreate = null;
+              closeNodeEditPanel();
+              renderFlowsEditor();
+              renderFlowsCanvas();
+            }
             loadFlowsWorkflowList();
+            announceFlows('Workflow "' + name + '" removed');
             return;
           }
           if (!r.ok) {
@@ -2320,11 +2475,12 @@
             flowsState.saveError = null;
             flowsState.saveConflict = false;
             flowsState._pendingCreate = null;
+            closeNodeEditPanel();
             renderFlowsEditor();
             renderFlowsCanvas();
           }
           loadFlowsWorkflowList();
-          announceFlows('Workflow “' + name + '” deleted');
+          announceFlows('Workflow "' + name + '" deleted');
         }).catch(function() {
           showErr('Network error deleting workflow');
         });
@@ -2350,10 +2506,18 @@
       btnYaml.setAttribute('aria-pressed', String(!isCanvas));
     }
 
+    // Show/hide canvas-only controls (Edit mode toggle, Add Node button).
+    const editBtn = document.getElementById('flows-canvas-edit-btn');
+    if (editBtn) editBtn.style.display = isCanvas ? '' : 'none';
+    const addBtn = document.getElementById('flows-add-node-btn');
+    if (addBtn) addBtn.style.display = (isCanvas && flowsState.canvasEditMode) ? '' : 'none';
+
     if (!isCanvas) {
       // Sync YAML editor with current state.
       const yamlEditor = document.getElementById('flows-yaml-editor');
       if (yamlEditor) yamlEditor.value = flowsState.yaml;
+      // Force View mode on canvas when switching away (no accidental edits in background).
+      if (flowsState.canvasEditMode) toggleCanvasEditMode();
     } else {
       renderFlowsCanvas();
     }
@@ -2436,11 +2600,13 @@
     const saveBtn = document.getElementById('flows-save-btn');
     const runBtn = document.getElementById('flows-run-btn');
     const rerunBtn = document.getElementById('flows-rerun-btn');
+    const editBtn = document.getElementById('flows-canvas-edit-btn');
 
     const hasWorkflow = !!flowsState.selectedName;
 
     if (saveBtn) saveBtn.disabled = !hasWorkflow;
     if (runBtn) runBtn.disabled = !hasWorkflow;
+    if (editBtn) editBtn.disabled = !hasWorkflow;
 
     // Show Re-run button only if there's an active run with failures.
     if (rerunBtn) {
@@ -2574,214 +2740,674 @@
     }
   }
 
-  // ---- DAG canvas (minimal SVG) -----------------------------------------------
+  // =========================================================================
+  // ---- DAG canvas (Drawflow interactive editor) ----------------------------
+  // =========================================================================
   //
-  // Layout algorithm:
-  //   1. Kahn topo-sort → assign each node to a column (layer) = max(layer of needs) + 1
-  //   2. Nodes in the same column are stacked vertically.
-  //   3. Edges are drawn as SVG lines from the right edge of the source node to
-  //      the left edge of the target node.
+  // Drawflow replaces the read-only SVG renderer with a full node editor.
   //
-  // Status rendering: icon + text label in each node box. NOT color alone.
-  // Node boxes are <button> elements (keyboard-operable, focusable).
-  // Accessibility: aria-label per node includes status + agent.
+  // Architecture:
+  //   - One Drawflow instance is created per Flows panel init (initDrawflowEditor).
+  //   - View mode: editor_mode='fixed' (locked — no drag, no edit).
+  //   - Edit mode: editor_mode='edit' (drag nodes, draw connections, CRUD).
+  //   - YAML → canvas (load): parse nodes + needs[] → Drawflow import
+  //     with layered auto-layout (Kahn topo-sort, same as old SVG renderer).
+  //     Positions are ephemeral — NOT written back to YAML schema.
+  //   - Canvas → YAML (edit): on any Drawflow change event, re-export the
+  //     graph and regenerate engine-valid YAML (preserving name/version).
+  //   - Double-click on canvas background → add node dialog.
+  //   - Click on node (View mode) → show node run output panel.
+  //   - Click on node (Edit mode) → open node edit panel.
+  //   - Delete key (Edit mode) with selected node → remove node.
+  //   - Connections are validated: self-loops blocked, client-side cycle warning.
+  //
+  // CSP: Drawflow is vanilla JS with no eval/new Function. Confirmed at vendor
+  // time via grep. Loads under script-src 'self' with no relaxation.
+  //
+  // Accessibility:
+  //   - YAML view is the accessible alternate (full keyboard editing).
+  //   - Canvas has aria-label + aria-describedby pointing to the mode note.
+  //   - Node edit panel is keyboard-operable (Tab/Shift-Tab, Enter).
+  //   - aria-live status announcer for structural changes.
 
-  const SVG_NODE_W = 140;
-  const SVG_NODE_H = 56;
-  const SVG_COL_GAP = 80;
-  const SVG_ROW_GAP = 20;
-  const SVG_PAD = 24;
+  // Auto-layout constants (same proportions as old SVG renderer).
+  const DF_NODE_W = 160;
+  const DF_NODE_H = 70;
+  const DF_COL_GAP = 100;
+  const DF_ROW_GAP = 30;
+  const DF_PAD = 40;
 
-  function renderFlowsCanvas() {
+  // --- Drawflow initialization -----------------------------------------------
+
+  function initDrawflowEditor() {
+    if (flowsState.drawflowEditor) return; // already initialized; guard against re-init
     const canvasEl = document.getElementById('flows-canvas');
     if (!canvasEl) return;
-    canvasEl.innerHTML = '';
+    if (typeof Drawflow === 'undefined') return; // Drawflow not loaded yet
+
+    // Create the Drawflow editor instance.
+    const editor = new Drawflow(canvasEl);
+    editor.reroute = false;
+    editor.editor_mode = 'fixed'; // start in View mode
+    editor.start();
+
+    flowsState.drawflowEditor = editor;
+    flowsState.canvasEditMode = false;
+
+    // ---- Drawflow event listeners ----
+
+    // Node clicked: in View mode show output panel; in Edit mode open edit panel.
+    editor.on('nodeSelected', function(id) {
+      if (flowsState.canvasEditMode) {
+        openNodeEditPanel(id);
+      } else {
+        const data = getDrawflowNodeData(id);
+        if (!data) return;
+        const nodeId = data.yakosId;
+        flowsState.selectedNodeId = nodeId;
+        const runId = flowsState.activeRunId;
+        if (runId) loadNodeOutput(runId, nodeId);
+        renderFlowsNodePanel();
+      }
+    });
+
+    // Connection created: validate + regenerate YAML.
+    editor.on('connectionCreated', function(info) {
+      // Block self-loops.
+      if (info.output_id === info.input_id) {
+        editor.removeSingleConnection(
+          info.output_id, info.input_id,
+          info.output_class, info.input_class
+        );
+        announceFlows('Self-loop blocked: a node cannot connect to itself');
+        return;
+      }
+      // Client-side cycle detection: warn (server validates definitively on save).
+      if (dfGraphHasCycle()) {
+        announceFlows('Warning: this connection may create a cycle — Save will validate');
+      }
+      syncCanvasToYaml();
+    });
+
+    // Connection removed: regenerate YAML.
+    editor.on('connectionRemoved', function() {
+      syncCanvasToYaml();
+    });
+
+    // Node moved (drag): no YAML schema change (positions are ephemeral).
+    // We don't regenerate YAML here to avoid noisy dirty flags on pan/drag.
+
+    // Double-click on canvas background → add node.
+    canvasEl.addEventListener('dblclick', function(e) {
+      if (!flowsState.canvasEditMode) return;
+      // Only respond to dblclick on the canvas background (not on nodes).
+      if (e.target.closest('.drawflow-node')) return;
+      if (!flowsState.selectedName) return;
+      addNewNodeToCanvas();
+    });
+
+    // Delete key → delete selected node (Edit mode only).
+    document.addEventListener('keydown', function(e) {
+      if (!flowsState.canvasEditMode) return;
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+      // Only fire when focus is on the canvas area (not in an input/textarea).
+      const tag = document.activeElement ? document.activeElement.tagName : '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const canvasWrap = document.getElementById('flows-canvas-wrap');
+      if (!canvasWrap || !canvasWrap.contains(document.activeElement)) return;
+      if (editor.node_selected) {
+        const selId = editor.node_selected.id
+          ? editor.node_selected.id.replace('node-', '')
+          : null;
+        if (selId) {
+          editor.removeNodeId('node-' + selId);
+          syncCanvasToYaml();
+          announceFlows('Node deleted');
+        }
+      }
+    });
+  }
+
+  // --- Canvas ↔ YAML sync -------------------------------------------------------
+
+  // renderFlowsCanvas: load flowsState.workflow into Drawflow with auto-layout.
+  // Called whenever the workflow changes (load, after save, etc.).
+  function renderFlowsCanvas() {
+    if (!flowsState.drawflowEditor) return;
+    const editor = flowsState.drawflowEditor;
+
+    // Clear the editor.
+    editor.clearModuleSelected();
+    editor.import({ drawflow: { Home: { data: {} } } });
 
     const wf = flowsState.workflow;
     if (!wf || !wf.nodes || wf.nodes.length === 0) {
-      canvasEl.innerHTML = '<p class="empty-state" style="padding:24px">Select a workflow to view its DAG</p>';
       return;
     }
 
-    const activeSnap = flowsState.activeRunId ? flowsState.runs.get(flowsState.activeRunId) : null;
+    // 1. Compute layered auto-layout via Kahn topo-sort.
+    const positions = computeLayeredPositions(wf.nodes);
 
-    // 1. Build adjacency and in-degree for Kahn.
-    const nodeById = {};
-    const inDegree = {};
-    const successors = {}; // id → [successor ids]
+    // 2. Build a map from yakosId → Drawflow internal id.
+    const dfIdByYakos = {};
+
+    // 3. Add nodes.
     for (const n of wf.nodes) {
-      nodeById[n.id] = n;
-      inDegree[n.id] = (inDegree[n.id] || 0);
-      successors[n.id] = successors[n.id] || [];
+      const pos = positions[n.id] || { x: DF_PAD, y: DF_PAD };
+      const dfId = addDrawflowNode(editor, n, pos.x, pos.y);
+      dfIdByYakos[n.id] = dfId;
     }
+
+    // 4. Add connections from needs[].
     for (const n of wf.nodes) {
       for (const dep of (n.needs || [])) {
+        if (dfIdByYakos[dep] && dfIdByYakos[n.id]) {
+          try {
+            editor.addConnection(
+              dfIdByYakos[dep], dfIdByYakos[n.id],
+              'output_1', 'input_1'
+            );
+          } catch (_) { /* defensive: skip bad connections */ }
+        }
+      }
+    }
+
+    // Update node status overlays (run state coloring).
+    updateDrawflowNodeStatuses();
+  }
+
+  // syncCanvasToYaml: export Drawflow graph → engine-valid YAML → update state.
+  function syncCanvasToYaml() {
+    if (!flowsState.drawflowEditor) return;
+    const exported = flowsState.drawflowEditor.export();
+    const data = exported && exported.drawflow && exported.drawflow.Home
+      ? exported.drawflow.Home.data
+      : {};
+
+    // Build id → yakosId mapping and collect nodes.
+    const dfNodes = Object.values(data);
+    const nodes = [];
+    const idMap = {}; // dfId → yakosId
+
+    for (const dfNode of dfNodes) {
+      const d = dfNode.data || {};
+      const yakosId = d.yakosId || '';
+      if (yakosId) idMap[String(dfNode.id)] = yakosId;
+    }
+
+    for (const dfNode of dfNodes) {
+      const d = dfNode.data || {};
+      const yakosId = d.yakosId || '';
+      if (!yakosId) continue;
+
+      // Collect needs[] from input connections.
+      const needs = [];
+      const inputs = dfNode.inputs || {};
+      for (const inputKey of Object.keys(inputs)) {
+        const conns = (inputs[inputKey].connections || []);
+        for (const conn of conns) {
+          const depYakosId = idMap[String(conn.node)];
+          if (depYakosId && needs.indexOf(depYakosId) === -1) {
+            needs.push(depYakosId);
+          }
+        }
+      }
+
+      const node = {
+        id: yakosId,
+        agent: d.agent || 'claude',
+        prompt: d.prompt || 'Describe the task.',
+        output_limit: parseInt(d.output_limit, 10) || 8000,
+      };
+      if (needs.length > 0) node.needs = needs;
+      if (d.model) node.model = d.model;
+      if (d.runtime) node.runtime = d.runtime;
+      if (d.timeout && parseInt(d.timeout, 10) > 0) node.timeout = parseInt(d.timeout, 10);
+
+      nodes.push(node);
+    }
+
+    // Reconstruct YAML preserving version and name.
+    const name = flowsState.selectedName || 'workflow';
+    const version = (flowsState.workflow && flowsState.workflow.version) || 1;
+    const yamlLines = ['version: ' + version, 'name: ' + name, 'nodes:'];
+    for (const n of nodes) {
+      yamlLines.push('  - id: ' + n.id);
+      yamlLines.push('    agent: ' + yamlQuoteString(n.agent));
+      yamlLines.push('    prompt: ' + yamlQuoteString(n.prompt));
+      yamlLines.push('    output_limit: ' + n.output_limit);
+      if (n.needs && n.needs.length > 0) {
+        yamlLines.push('    needs:');
+        for (const dep of n.needs) {
+          yamlLines.push('      - ' + dep);
+        }
+      }
+      if (n.model) yamlLines.push('    model: ' + yamlQuoteString(n.model));
+      if (n.runtime) yamlLines.push('    runtime: ' + yamlQuoteString(n.runtime));
+      if (n.timeout) yamlLines.push('    timeout: ' + n.timeout);
+    }
+    const newYaml = yamlLines.join('\n') + '\n';
+
+    flowsState.yaml = newYaml;
+    flowsState.dirty = true;
+    flowsState.saveError = null;
+    flowsState.saveConflict = false;
+
+    // Keep YAML editor in sync (it may be hidden but stays valid).
+    const yamlEditor = document.getElementById('flows-yaml-editor');
+    if (yamlEditor) yamlEditor.value = newYaml;
+
+    renderFlowsSaveErrorBanner();
+    updateFlowsToolbarState();
+  }
+
+  // --- Drawflow node helpers ---------------------------------------------------
+
+  function addDrawflowNode(editor, nodeData, x, y) {
+    const html = buildNodeHTML(nodeData);
+    // Capture editor.nodeId before the call; Drawflow assigns it as the new node's id
+    // and then increments it. This is more reliable than scanning by name+position.
+    const assignedId = String(editor.nodeId);
+    // Drawflow addNode(name, inputs, outputs, posX, posY, class, data, html, typenode)
+    editor.addNode(
+      nodeData.id,    // name (used internally by Drawflow)
+      1,              // inputs count
+      1,              // outputs count
+      x, y,
+      'df-yakos-node',
+      {
+        yakosId:      nodeData.id,
+        agent:        nodeData.agent || '',
+        prompt:       nodeData.prompt || '',
+        output_limit: String(nodeData.output_limit || 8000),
+        model:        nodeData.model || '',
+        runtime:      nodeData.runtime || '',
+        timeout:      String(nodeData.timeout || 0),
+      },
+      html,
+      false           // not a Vue component
+    );
+    return assignedId;
+  }
+
+  function buildNodeHTML(nodeData) {
+    // XSS note: esc() is used for all user-controlled strings rendered into HTML.
+    return '<div class="df-node-body">' +
+      '<div class="df-node-id">' + esc(nodeData.id || '') + '</div>' +
+      '<div class="df-node-agent">' + esc(nodeData.agent || '') + '</div>' +
+    '</div>';
+  }
+
+  function getDrawflowNodeData(dfId) {
+    if (!flowsState.drawflowEditor) return null;
+    try {
+      return flowsState.drawflowEditor.getNodeFromId(dfId);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function updateDrawflowNodeStatuses() {
+    if (!flowsState.drawflowEditor) return;
+    const activeSnap = flowsState.activeRunId
+      ? flowsState.runs.get(flowsState.activeRunId)
+      : null;
+    const exported = flowsState.drawflowEditor.export();
+    const home = exported && exported.drawflow && exported.drawflow.Home
+      ? exported.drawflow.Home.data
+      : {};
+
+    for (const dfId of Object.keys(home)) {
+      const d = (home[dfId].data || {});
+      const yakosId = d.yakosId;
+      if (!yakosId) continue;
+      const nodeState = activeSnap && activeSnap.nodes ? activeSnap.nodes[yakosId] : null;
+      const status = nodeState ? (nodeState.status || 'pending') : 'pending';
+      const el = document.querySelector('#node-' + dfId);
+      if (!el) continue;
+      // Remove old status classes and add new.
+      el.classList.remove(
+        'df-status-pending', 'df-status-running',
+        'df-status-completed', 'df-status-failed', 'df-status-skipped'
+      );
+      el.classList.add('df-status-' + status);
+    }
+  }
+
+  // --- Auto-layout (layered) --------------------------------------------------
+
+  function computeLayeredPositions(nodes) {
+    // Kahn topo-sort → assign layers.
+    const inDegree = {};
+    const successors = {};
+    for (const n of nodes) {
+      inDegree[n.id] = inDegree[n.id] || 0;
+      successors[n.id] = successors[n.id] || [];
+    }
+    for (const n of nodes) {
+      for (const dep of (n.needs || [])) {
         inDegree[n.id] = (inDegree[n.id] || 0) + 1;
-        successors[dep] = successors[dep] || [];
+        if (!successors[dep]) successors[dep] = [];
         successors[dep].push(n.id);
       }
     }
 
-    // 2. Assign layers via Kahn BFS: layer[id] = max(layer of needs) + 1, min 0.
     const layer = {};
     const queue = [];
-    for (const n of wf.nodes) {
+    for (const n of nodes) {
       if ((inDegree[n.id] || 0) === 0) {
         layer[n.id] = 0;
         queue.push(n.id);
       }
     }
-    // BFS to assign layers.
     const remaining = Object.assign({}, inDegree);
     let qi = 0;
     while (qi < queue.length) {
       const cur = queue[qi++];
       for (const succ of (successors[cur] || [])) {
         const newLayer = (layer[cur] || 0) + 1;
-        if (layer[succ] === undefined || layer[succ] < newLayer) {
-          layer[succ] = newLayer;
-        }
+        if (layer[succ] === undefined || layer[succ] < newLayer) layer[succ] = newLayer;
         remaining[succ] = (remaining[succ] || 1) - 1;
-        if (remaining[succ] <= 0) {
-          queue.push(succ);
-        }
+        if (remaining[succ] <= 0) queue.push(succ);
       }
     }
 
-    // 3. Bucket nodes by layer.
-    const maxLayer = Math.max(...Object.values(layer));
+    // Bucket by layer.
+    const maxLayer = Math.max(0, ...Object.values(layer));
     const columns = [];
     for (let i = 0; i <= maxLayer; i++) columns.push([]);
-    for (const n of wf.nodes) {
-      const l = layer[n.id] || 0;
-      columns[l].push(n.id);
-    }
+    for (const n of nodes) columns[layer[n.id] || 0].push(n.id);
 
-    // 4. Compute node positions.
-    const pos = {}; // id → {x, y, cx, cy} (top-left + center)
-    const colX = [];
-    let xCursor = SVG_PAD;
+    // Assign positions.
+    const positions = {};
+    const maxColSize = Math.max(1, ...columns.map((c) => c.length));
+    const totalH = maxColSize * (DF_NODE_H + DF_ROW_GAP) - DF_ROW_GAP + DF_PAD * 2;
+    let x = DF_PAD;
     for (let c = 0; c <= maxLayer; c++) {
-      colX[c] = xCursor;
-      xCursor += SVG_NODE_W + SVG_COL_GAP;
+      const col = columns[c];
+      const colTotalH = col.length * (DF_NODE_H + DF_ROW_GAP) - DF_ROW_GAP;
+      const startY = DF_PAD + (totalH - DF_PAD * 2 - colTotalH) / 2;
+      for (let r = 0; r < col.length; r++) {
+        positions[col[r]] = { x, y: startY + r * (DF_NODE_H + DF_ROW_GAP) };
+      }
+      x += DF_NODE_W + DF_COL_GAP;
     }
-    const maxColSize = Math.max(...columns.map((c) => c.length));
-    const totalH = maxColSize * (SVG_NODE_H + SVG_ROW_GAP) - SVG_ROW_GAP + SVG_PAD * 2;
-    const totalW = xCursor - SVG_COL_GAP + SVG_PAD;
+    return positions;
+  }
 
-    // S2: guard against non-finite dimensions (defensive — cycles are rejected
-    // upstream by Validate, but guard here so a malformed snapshot does not
-    // produce a broken SVG with width="-Infinity" or NaN attributes.
-    if (!isFinite(totalW) || !isFinite(totalH) || totalW <= 0 || totalH <= 0) {
-      canvasEl.innerHTML = '<p class="empty-state" style="padding:24px">Unable to render canvas (invalid graph dimensions)</p>';
+  // --- Cycle detection (client-side) ------------------------------------------
+
+  function dfGraphHasCycle() {
+    if (!flowsState.drawflowEditor) return false;
+    const exported = flowsState.drawflowEditor.export();
+    const home = exported && exported.drawflow && exported.drawflow.Home
+      ? exported.drawflow.Home.data
+      : {};
+
+    // Build adjacency list.
+    const adj = {};
+    for (const dfId of Object.keys(home)) {
+      adj[dfId] = [];
+      const outputs = home[dfId].outputs || {};
+      for (const outKey of Object.keys(outputs)) {
+        for (const conn of (outputs[outKey].connections || [])) {
+          adj[dfId].push(String(conn.node));
+        }
+      }
+    }
+
+    // DFS cycle detection.
+    const visited = {};
+    const recStack = {};
+    function hasCycleDFS(v) {
+      visited[v] = true;
+      recStack[v] = true;
+      for (const w of (adj[v] || [])) {
+        if (!visited[w] && hasCycleDFS(w)) return true;
+        if (recStack[w]) return true;
+      }
+      recStack[v] = false;
+      return false;
+    }
+    for (const v of Object.keys(adj)) {
+      if (!visited[v] && hasCycleDFS(v)) return true;
+    }
+    return false;
+  }
+
+  // --- Canvas Edit mode -------------------------------------------------------
+
+  function toggleCanvasEditMode() {
+    flowsState.canvasEditMode = !flowsState.canvasEditMode;
+    if (flowsState.drawflowEditor) {
+      flowsState.drawflowEditor.editor_mode = flowsState.canvasEditMode ? 'edit' : 'fixed';
+    }
+
+    const editBtn = document.getElementById('flows-canvas-edit-btn');
+    const addBtn = document.getElementById('flows-add-node-btn');
+    const noteEl = document.getElementById('flows-canvas-mode-note');
+
+    if (editBtn) {
+      editBtn.classList.toggle('active', flowsState.canvasEditMode);
+      editBtn.setAttribute('aria-pressed', String(flowsState.canvasEditMode));
+      editBtn.textContent = flowsState.canvasEditMode ? 'View' : 'Edit';
+    }
+    if (addBtn) {
+      addBtn.style.display = flowsState.canvasEditMode ? '' : 'none';
+    }
+    if (noteEl) {
+      noteEl.textContent = flowsState.canvasEditMode
+        ? 'Edit mode — drag nodes, draw connections. Double-click background to add a node. Select a node and press Delete to remove it.'
+        : 'View mode — click a node to view output. Toggle Edit to add, connect, and edit nodes.';
+    }
+
+    // Close any open edit panel when leaving Edit mode.
+    if (!flowsState.canvasEditMode) closeNodeEditPanel();
+
+    announceFlows(flowsState.canvasEditMode ? 'Canvas edit mode enabled' : 'Canvas view mode enabled');
+  }
+
+  // --- Add new node -----------------------------------------------------------
+
+  function addNewNodeToCanvas() {
+    if (!flowsState.drawflowEditor || !flowsState.canvasEditMode) return;
+    if (!flowsState.selectedName) return;
+
+    // Generate a unique default ID.
+    const existingIds = getExistingNodeIds();
+    let candidate = 'node1';
+    let counter = 1;
+    while (existingIds.indexOf(candidate) !== -1) {
+      counter++;
+      candidate = 'node' + counter;
+    }
+
+    const newNodeData = {
+      id: candidate,
+      agent: 'claude',
+      prompt: 'Describe the task.',
+      output_limit: 8000,
+      model: '',
+      runtime: '',
+      timeout: 0,
+    };
+
+    // Open edit panel for the new node (not yet added to graph).
+    openNodeEditPanelForNew(newNodeData);
+  }
+
+  function getExistingNodeIds() {
+    if (!flowsState.drawflowEditor) return [];
+    const exported = flowsState.drawflowEditor.export();
+    const home = exported && exported.drawflow && exported.drawflow.Home
+      ? exported.drawflow.Home.data
+      : {};
+    return Object.values(home).map((n) => (n.data || {}).yakosId || '').filter(Boolean);
+  }
+
+  // --- Node edit panel (CRUD) -------------------------------------------------
+
+  var _editingDfNodeId = null; // Drawflow internal node id currently being edited
+  var _editingIsNew = false;   // true when adding a new node (not yet in graph)
+  var _editingNewData = null;  // pending new node data
+
+  function openNodeEditPanel(dfId) {
+    const nodeInfo = getDrawflowNodeData(dfId);
+    if (!nodeInfo) return;
+    const d = nodeInfo.data || {};
+
+    _editingDfNodeId = dfId;
+    _editingIsNew = false;
+    _editingNewData = null;
+
+    _populateNodeEditPanel(d, true);
+  }
+
+  function openNodeEditPanelForNew(nodeData) {
+    _editingDfNodeId = null;
+    _editingIsNew = true;
+    _editingNewData = nodeData;
+
+    _populateNodeEditPanel({
+      yakosId: nodeData.id,
+      agent: nodeData.agent,
+      prompt: nodeData.prompt,
+      output_limit: String(nodeData.output_limit),
+      model: '',
+      runtime: '',
+      timeout: '0',
+    }, false);
+  }
+
+  function _populateNodeEditPanel(d, showDelete) {
+    const panel = document.getElementById('flows-node-edit-panel');
+    if (!panel) return;
+
+    document.getElementById('fne-id').value = d.yakosId || '';
+    document.getElementById('fne-agent').value = d.agent || '';
+    document.getElementById('fne-prompt').value = d.prompt || '';
+    document.getElementById('fne-output-limit').value = d.output_limit || '8000';
+    document.getElementById('fne-model').value = d.model || '';
+    document.getElementById('fne-runtime').value = d.runtime || '';
+    document.getElementById('fne-timeout').value = d.timeout || '0';
+
+    const errEl = document.getElementById('fne-error');
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+
+    const delBtn = document.getElementById('fne-delete-btn');
+    if (delBtn) delBtn.style.display = showDelete ? '' : 'none';
+
+    panel.style.display = '';
+    // Focus the ID field.
+    setTimeout(function() {
+      var inp = document.getElementById('fne-id');
+      if (inp) inp.focus();
+    }, 0);
+  }
+
+  function closeNodeEditPanel() {
+    const panel = document.getElementById('flows-node-edit-panel');
+    if (panel) panel.style.display = 'none';
+    _editingDfNodeId = null;
+    _editingIsNew = false;
+    _editingNewData = null;
+  }
+
+  function applyNodeEditPanel() {
+    const newId = (document.getElementById('fne-id').value || '').trim();
+    const agent = (document.getElementById('fne-agent').value || '').trim();
+    const prompt = (document.getElementById('fne-prompt').value || '').trim();
+    const outputLimit = parseInt(document.getElementById('fne-output-limit').value, 10);
+    const model = (document.getElementById('fne-model').value || '').trim();
+    const runtime = (document.getElementById('fne-runtime').value || '').trim();
+    const timeout = parseInt(document.getElementById('fne-timeout').value, 10) || 0;
+
+    const errEl = document.getElementById('fne-error');
+    function showFneErr(msg) {
+      if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+    }
+
+    // Validate ID.
+    if (!WORKFLOW_ID_RE.test(newId)) {
+      showFneErr('ID must match ^[a-z0-9][a-z0-9-]{0,63}$ (lowercase, digits, hyphens, max 64)');
       return;
     }
+    if (!agent) { showFneErr('Agent is required'); return; }
+    if (!prompt) { showFneErr('Prompt is required'); return; }
+    if (!outputLimit || outputLimit <= 0) { showFneErr('output_limit must be > 0'); return; }
 
-    for (let c = 0; c <= maxLayer; c++) {
-      const colNodes = columns[c];
-      const colTotalH = colNodes.length * (SVG_NODE_H + SVG_ROW_GAP) - SVG_ROW_GAP;
-      const startY = SVG_PAD + (totalH - SVG_PAD * 2 - colTotalH) / 2;
-      for (let r = 0; r < colNodes.length; r++) {
-        const id = colNodes[r];
-        const x = colX[c];
-        const y = startY + r * (SVG_NODE_H + SVG_ROW_GAP);
-        pos[id] = { x, y, cx: x + SVG_NODE_W / 2, cy: y + SVG_NODE_H / 2 };
-      }
+    // Check uniqueness (skip if editing same node).
+    const existingIds = getExistingNodeIds();
+    const oldId = _editingIsNew ? null : (
+      _editingDfNodeId
+        ? ((getDrawflowNodeData(_editingDfNodeId) || {}).data || {}).yakosId
+        : null
+    );
+    const isDupe = existingIds.filter((id) => id !== oldId).indexOf(newId) !== -1;
+    if (isDupe) { showFneErr('Node ID "' + newId + '" is already used in this workflow'); return; }
+
+    const newData = {
+      yakosId: newId,
+      agent: agent,
+      prompt: prompt,
+      output_limit: String(outputLimit),
+      model: model,
+      runtime: runtime,
+      timeout: String(timeout),
+    };
+
+    if (_editingIsNew) {
+      // Add new node to canvas at a sensible position.
+      const canvasEl = document.getElementById('flows-canvas');
+      const cx = canvasEl ? canvasEl.scrollLeft + 200 : 200;
+      const cy = canvasEl ? canvasEl.scrollTop + 100 : 100;
+      addDrawflowNode(flowsState.drawflowEditor, {
+        id: newId,
+        agent: agent,
+        prompt: prompt,
+        output_limit: outputLimit,
+        model: model,
+        runtime: runtime,
+        timeout: timeout,
+      }, cx, cy);
+      announceFlows('Node "' + newId + '" added');
+    } else if (_editingDfNodeId) {
+      // Update existing node data.
+      try {
+        flowsState.drawflowEditor.updateNodeDataFromId(_editingDfNodeId, newData);
+        // Update the node HTML label.
+        const el = document.querySelector('#node-' + _editingDfNodeId + ' .df-node-id');
+        if (el) el.textContent = newId;
+        const agentEl = document.querySelector('#node-' + _editingDfNodeId + ' .df-node-agent');
+        if (agentEl) agentEl.textContent = agent;
+      } catch (_) { /* defensive */ }
+      announceFlows('Node "' + newId + '" updated');
     }
 
-    // 5. Build SVG.
-    const svgNS = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(svgNS, 'svg');
-    svg.setAttribute('width', String(totalW));
-    svg.setAttribute('height', String(totalH));
-    svg.setAttribute('role', 'presentation');
-    svg.setAttribute('aria-hidden', 'true'); // canvas is decorative; nodes have their own buttons
+    closeNodeEditPanel();
+    syncCanvasToYaml();
+  }
 
-    // Draw edges first (below nodes).
-    for (const n of wf.nodes) {
-      for (const dep of (n.needs || [])) {
-        if (!pos[dep] || !pos[n.id]) continue;
-        const x1 = pos[dep].x + SVG_NODE_W;
-        const y1 = pos[dep].cy;
-        const x2 = pos[n.id].x;
-        const y2 = pos[n.id].cy;
-        const mx = (x1 + x2) / 2;
-        const line = document.createElementNS(svgNS, 'path');
-        const d = 'M ' + x1 + ' ' + y1 + ' C ' + mx + ' ' + y1 + ' ' + mx + ' ' + y2 + ' ' + x2 + ' ' + y2;
-        line.setAttribute('d', d);
-        line.setAttribute('class', 'dag-edge');
-        svg.appendChild(line);
-      }
+  function deleteNodeFromEditPanel() {
+    if (!_editingDfNodeId || !flowsState.drawflowEditor) return;
+    try {
+      flowsState.drawflowEditor.removeNodeId('node-' + _editingDfNodeId);
+      announceFlows('Node deleted');
+    } catch (_) { /* defensive */ }
+    closeNodeEditPanel();
+    syncCanvasToYaml();
+  }
+
+  // --- YAML string quoting helper ---------------------------------------------
+
+  function yamlQuoteString(s) {
+    // Safely quote a string for YAML emission. Use double-quote form when needed.
+    if (!s) return '""';
+    // If string contains special chars that need quoting in YAML, double-quote it.
+    if (/[:#\[\]{},|>&*!'"\\%@`\n\r\t]/.test(s) || /^\s|\s$/.test(s)) {
+      return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r') + '"';
     }
-
-    canvasEl.appendChild(svg);
-
-    // Draw node boxes as positioned <button> elements on top of SVG
-    // (using a relative container so buttons can be absolutely positioned).
-    canvasEl.style.position = 'relative';
-    svg.style.position = 'absolute';
-    svg.style.top = '0';
-    svg.style.left = '0';
-    // Set the canvas to be at least svg size.
-    canvasEl.style.minWidth = totalW + 'px';
-    canvasEl.style.minHeight = totalH + 'px';
-
-    for (const n of wf.nodes) {
-      const p = pos[n.id];
-      if (!p) continue;
-      const nodeState = activeSnap && activeSnap.nodes ? activeSnap.nodes[n.id] : null;
-      const status = nodeState ? (nodeState.status || 'pending') : 'pending';
-      const icon = nodeStatusIcon(status);
-      const statusLabel = nodeStatusLabel(status);
-
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'dag-node dag-node-' + status + (n.id === flowsState.selectedNodeId ? ' dag-node-selected' : '');
-      btn.style.position = 'absolute';
-      btn.style.left = p.x + 'px';
-      btn.style.top = p.y + 'px';
-      btn.style.width = SVG_NODE_W + 'px';
-      btn.style.height = SVG_NODE_H + 'px';
-      btn.setAttribute('aria-label', 'Node ' + n.id + ': ' + n.agent + ', status: ' + statusLabel);
-
-      const iconEl = document.createElement('span');
-      iconEl.className = 'dag-node-icon';
-      iconEl.setAttribute('aria-hidden', 'true');
-      iconEl.textContent = icon;
-
-      const labelEl = document.createElement('span');
-      labelEl.className = 'dag-node-label';
-      labelEl.textContent = n.id; // textContent is safe
-
-      const agentEl = document.createElement('span');
-      agentEl.className = 'dag-node-agent';
-      agentEl.textContent = n.agent; // textContent is safe
-
-      const statusEl = document.createElement('span');
-      statusEl.className = 'sr-only';
-      statusEl.textContent = statusLabel;
-
-      btn.appendChild(iconEl);
-      btn.appendChild(labelEl);
-      btn.appendChild(agentEl);
-      btn.appendChild(statusEl);
-
-      // Click: show node output.
-      const nodeId = n.id;
-      const runId = flowsState.activeRunId;
-      btn.addEventListener('click', () => {
-        flowsState.selectedNodeId = nodeId;
-        if (runId) {
-          loadNodeOutput(runId, nodeId);
-        }
-        // Re-render canvas to update selected highlight.
-        renderFlowsCanvas();
-        // Show node panel.
-        renderFlowsNodePanel();
-      });
-
-      canvasEl.appendChild(btn);
-    }
+    return s;
   }
 
   // ---- Status helpers -----------------------------------------------------------
