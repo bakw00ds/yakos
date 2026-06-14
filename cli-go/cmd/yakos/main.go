@@ -51,6 +51,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/mcp"
 	"github.com/bakw00ds/yakos/internal/mcpserver"
 	"github.com/bakw00ds/yakos/internal/memory"
+	"github.com/bakw00ds/yakos/internal/mtlscmd"
 	"github.com/bakw00ds/yakos/internal/metrics"
 	"github.com/bakw00ds/yakos/internal/metricsdash"
 	"github.com/bakw00ds/yakos/internal/migrate"
@@ -131,6 +132,7 @@ var portedCommands = []portedCommand{
 	{Name: "kanban serve", Since: "0.73.0", Desc: "Run live kanban web UI (serve/status/stop)", Notes: "kanban serve/status/stop (rank 41 complete); net/http stdlib server; //go:embed serve_ui.html; mutex-serialised mutations; DNS-rebinding Host header check; 127.0.0.1 default bind; no python3 dependency"},
 	{Name: "telemetry", Since: "0.74.0", Desc: "Opt-in anonymised CLI telemetry", Notes: "opt-in anonymised telemetry (ideas rank 10); enable/disable/status/set-endpoint/purge/show sub-subcommands; default off; no PII; local NDJSON log at ~/.yakos-state/telemetry.ndjson; operator-configured endpoint only; fail-silent shipper"},
 	{Name: "metrics", Since: "0.75.0", Desc: "Collect and report per-project quality metrics", Notes: "per-project commit-keyed metrics time series (Phase-1 MVP); collect/report/trend/compare verbs; [E] collectors from dispatch log + git + state; [T] analyzers for go-backend (go test/vet, golangci-lint, staticcheck, gocyclo, deadcode, gosec, govulncheck) + gitleaks cross-cutting; null≠0 invariant; append-only NDJSON at <project>/.yakos/metrics/history.ndjson; ADR-0001"},
+	{Name: "mtls", Since: "0.76.0", Desc: "Manage mTLS client certs for the networked console", Notes: "issue-client/list-clients/show-ca/set-role subcommands; hand-off bundle (crt+key+ca.crt); atomic roles.json writes at 0600 (LOW-1 compatible); auto-issue bootstrap cert on first networked start; --no-bootstrap-cert to disable; ADR-0004"},
 }
 
 type portedCommand struct {
@@ -347,6 +349,8 @@ func main() {
 		runHooks(args[1:])
 	case "serve":
 		runServe(yakosRoot, args[1:])
+	case "mtls":
+		runMTLS(args[1:])
 	case "events":
 		runEvents(args[1:])
 	case "telemetry":
@@ -405,7 +409,7 @@ var helpGroups = []helpGroup{
 	{
 		Title: "Console & Web",
 		Commands: []string{
-			"serve", "kanban", "status", "session", "events",
+			"serve", "kanban", "status", "session", "events", "mtls",
 		},
 	},
 	{
@@ -5547,12 +5551,16 @@ func exitWith(code int, err error) {
 //
 // Flags:
 //
-//	--socket <path>       Override the default Unix socket / named pipe path.
-//	--pidfile <path>      Override the default PID file path.
-//	--ws-addr <addr>      WebSocket bind address (default 127.0.0.1:7891).
-//	--rotate-ws-token     Rotate the WS bearer token and exit.
-//	--detach              Print advisory (actual backgrounding is the operator's job).
-//	--help                Print help and exit 0.
+//	--socket <path>                    Override the default Unix socket / named pipe path.
+//	--pidfile <path>                   Override the default PID file path.
+//	--ws-addr <addr>                   WebSocket bind address (default 127.0.0.1:7891).
+//	--rotate-ws-token                  Rotate the WS bearer token and exit.
+//	--detach                           Print advisory (actual backgrounding is the operator's job).
+//	--console-bootstrap-cert <name>    Override the CN used for the auto-issued bootstrap
+//	                                   client cert on first networked start (default: OS username).
+//	                                   Only used with --console-bind on a non-loopback address.
+//	--no-bootstrap-cert                Disable auto-issue of the bootstrap client cert.
+//	--help                             Print help and exit 0.
 //
 // YAKOS_DAEMON mode is NOT changed by running this command; the operator sets
 // YAKOS_DAEMON=on or YAKOS_DAEMON=auto in their shell rc to route CLI calls
@@ -5571,6 +5579,8 @@ func runServe(yakosRoot string, args []string) {
 	rotateConsoleToken := false
 	noPerfDash := false
 	noConsole := false
+	consoleBootstrapCertName := ""
+	noBootstrapCert := false
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -5637,6 +5647,15 @@ func runServe(yakosRoot string, args []string) {
 			noPerfDash = true
 		case "--no-console":
 			noConsole = true
+		case "--console-bootstrap-cert":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "serve: --console-bootstrap-cert requires a name")
+				os.Exit(1)
+			}
+			consoleBootstrapCertName = args[i]
+		case "--no-bootstrap-cert":
+			noBootstrapCert = true
 		case "--detach":
 			detach = true
 		default:
@@ -5654,6 +5673,8 @@ func runServe(yakosRoot string, args []string) {
 				consoleBind = args[i][15:]
 			} else if len(args[i]) > 24 && args[i][:24] == "--console-external-host=" {
 				consoleExternalHosts = append(consoleExternalHosts, args[i][24:])
+			} else if len(args[i]) > 25 && args[i][:25] == "--console-bootstrap-cert=" {
+				consoleBootstrapCertName = args[i][25:]
 			} else {
 				fmt.Fprintf(os.Stderr, "serve: unknown flag %q (try --help)\n", args[i])
 				os.Exit(1)
@@ -5720,17 +5741,19 @@ func runServe(yakosRoot string, args []string) {
 	perfTok, _ := internalperfdash.LoadOrCreatePerfToken(perfStateDir)
 
 	cfg := internalserve.Config{
-		WorkspaceRoot:        workspaceRoot,
-		SocketPath:           socketPath,
-		PIDFile:              pidFile,
-		YakosRoot:            yakosRoot,
-		WSAddr:               wsAddr,
-		PerfAddr:             perfAddr,
-		NoPerfDash:           noPerfDash,
-		ConsoleAddr:          consoleAddr,
-		ConsoleBind:          consoleBind,
-		ConsoleExternalHosts: consoleExternalHosts,
-		NoConsole:            noConsole,
+		WorkspaceRoot:            workspaceRoot,
+		SocketPath:               socketPath,
+		PIDFile:                  pidFile,
+		YakosRoot:                yakosRoot,
+		WSAddr:                   wsAddr,
+		PerfAddr:                 perfAddr,
+		NoPerfDash:               noPerfDash,
+		ConsoleAddr:              consoleAddr,
+		ConsoleBind:              consoleBind,
+		ConsoleExternalHosts:     consoleExternalHosts,
+		NoConsole:                noConsole,
+		ConsoleBootstrapCertName: consoleBootstrapCertName,
+		NoBootstrapCert:          noBootstrapCert,
 	}
 
 	wsBindAddr := wsAddr
@@ -6051,6 +6074,18 @@ Exit codes:
   75  Another daemon is already running for this workspace (EX_TEMPFAIL).
   1   Error.
 `)
+}
+
+// ---- mtls command -----------------------------------------------------------
+
+// runMTLS implements `yakos mtls <subcommand> [flags]`.
+// It delegates to internal/mtlscmd and uses the same error/exit style as all
+// other yakos subcommands (stderr + os.Exit(1)).
+func runMTLS(args []string) {
+	if err := mtlscmd.Run(args, os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "mtls: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // ---- YAKOS_DAEMON routing ---------------------------------------------------

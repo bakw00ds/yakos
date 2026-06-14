@@ -144,9 +144,16 @@ func IssueClientCert(caCert *x509.Certificate, caKey *rsa.PrivateKey, clientName
 // PersistClientCert writes a client cert and key to stateDir/mtls/clients/<name>.{crt,key}.
 // Files are created at mode 0600.
 //
+// clientName must not be empty, must not be "." or "..", and must not contain
+// "/" or "\" (path separators).  These checks are defense-in-depth: callers
+// (internal/mtlscmd) apply the full positive allow-list before reaching here.
+//
 // Errors:
-//   - returns wrapped error on I/O failure
+//   - returns wrapped error on invalid name or I/O failure
 func PersistClientCert(stateDir, clientName string, cert *tls.Certificate) error {
+	if err := validateClientNameBasic(clientName); err != nil {
+		return fmt.Errorf("mtls: PersistClientCert: %w", err)
+	}
 	dir := clientDir(stateDir)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("mtls: mkdir clients: %w", err)
@@ -154,6 +161,28 @@ func PersistClientCert(stateDir, clientName string, cert *tls.Certificate) error
 	certPath := filepath.Join(dir, clientName+".crt")
 	keyPath := filepath.Join(dir, clientName+".key")
 	return writeTLSCertKey(cert, certPath, keyPath)
+}
+
+// validateClientNameBasic is a defense-in-depth path-traversal guard inside
+// the mtls package.  It rejects the most dangerous inputs: empty name, ".",
+// "..", and names containing "/" or "\" (path separators on any OS).
+//
+// The full positive allow-list (^[A-Za-z0-9._@-]{1,64}$) is enforced by the
+// mtlscmd layer before this function is reached; this check catches any caller
+// that bypasses mtlscmd.ValidateClientName.
+func validateClientNameBasic(name string) error {
+	if name == "" {
+		return fmt.Errorf("client name must not be empty")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("client name %q is a reserved path component", name)
+	}
+	for _, ch := range name {
+		if ch == '/' || ch == '\\' {
+			return fmt.Errorf("client name %q contains a path separator", name)
+		}
+	}
+	return nil
 }
 
 // LoadClientCert loads a previously-persisted client cert from stateDir.
