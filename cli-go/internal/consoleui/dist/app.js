@@ -2427,8 +2427,25 @@
         }
         apiFetch('DELETE', '/flows/api/workflow?name=' + encodeURIComponent(name)).then(function(r) {
           if (r.status === 404) {
+            // 404: workflow was never saved (pending-create) or already deleted
+            // externally. Clear local state if it was the selected workflow so
+            // the canvas and editor don't show a stale/phantom workflow.
             overlay._closeModal();
+            if (flowsState.selectedName === name) {
+              flowsState.selectedName = null;
+              flowsState.yaml = '';
+              flowsState.version = '';
+              flowsState.workflow = null;
+              flowsState.dirty = false;
+              flowsState.saveError = null;
+              flowsState.saveConflict = false;
+              flowsState._pendingCreate = null;
+              closeNodeEditPanel();
+              renderFlowsEditor();
+              renderFlowsCanvas();
+            }
             loadFlowsWorkflowList();
+            announceFlows('Workflow "' + name + '" removed');
             return;
           }
           if (!r.ok) {
@@ -2449,6 +2466,7 @@
             flowsState.saveError = null;
             flowsState.saveConflict = false;
             flowsState._pendingCreate = null;
+            closeNodeEditPanel();
             renderFlowsEditor();
             renderFlowsCanvas();
           }
