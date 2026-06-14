@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Networked multi-operator console** — `yakos serve --console-bind
+  <addr>` binds the console to a routable address for multi-machine
+  operator access. Specific-IP bind works directly; wildcard bind
+  (`0.0.0.0` / `[::]`) requires `--console-external-host <host[:port]>`
+  (drives TLS cert SANs and WS Origin allow-list) — startup refuses
+  without it (fail-closed).
+- **mTLS enforcement on all non-loopback binds** — daemon auto-generates
+  a CA + server cert under `~/.yakos-state/mtls/` on first networked
+  start; RequireAndVerifyClientCert, TLS 1.2+. No plain-HTTP-over-
+  network path exists.
+- **Bootstrap admin client cert** — daemon auto-issues a CA-signed client
+  cert (CN = OS username or `admin`) on first networked start and prints
+  the bundle path + CA SHA-256 fingerprint in the startup banner.
+  Suppress with `--no-bootstrap-cert`; override CN with
+  `--console-bootstrap-cert <name>`.
+- **`yakos mtls` command** — manage operator client certs:
+  `issue-client <name> [--role <role>] [--out <dir>] [--force]`,
+  `list-clients`, `show-ca [--pem]`, `set-role <cn> <role>`.
+- **RBAC for console access** — four roles (`read`, `dispatch`,
+  `flows-run`, `admin`) mapped per CN in `~/.yakos-state/mtls/roles.json`.
+  CNs with no entry default to `read` (fail-closed). Enforced at the
+  console edge and the dispatch facade. See
+  [docs/adr/ADR-0004.md](docs/adr/ADR-0004.md) for design rationale.
+- **Flows DAG engine** reachable in the daemon (`WorkDir` + workflow
+  engine activated in the daemon process); node-level crash reconciliation
+  on daemon restart.
+- **Chat transcript persistence** wired into the daemon; transcripts
+  survive daemon restarts and are restored on browser reconnect.
+- **Workflow engine wired into the console** — Flows tab triggers and
+  resumes runs against the daemon-resident engine; run state streams via
+  the WS bus.
+- **Vendored Mermaid read-only Flows canvas** — the Flows DAG canvas now
+  uses a vendored Mermaid build (read-only render path only; no
+  `unsafe-eval` required; CSP `script-src 'self'` preserved).
+
+### Changed
+
+- Console wiring: `WorkDir` and the workflow engine are now activated in
+  the daemon process (previously stubbed); all console transports route
+  through the daemon-resident engine.
+
+### Security
+
+- Constant-time token comparison on all console bearer-token checks;
+  `?token=` query-parameter authentication dropped from all legacy
+  console paths (header-only Bearer enforced).
+- Non-loopback console bind requires mTLS (RequireAndVerifyClientCert,
+  TLS 1.2+); startup refuses a wildcard bind without
+  `--console-external-host` (fail-closed).
+- Authenticated, non-forgeable `operator_id` off-loopback — CN from the
+  verified client certificate; not operator-supplied.
+- Share-pane ownership bound to authenticated identity (CN) in networked
+  mode; cross-operator access to unshared panes returns 403.
+- Client-name path-traversal validation in `yakos mtls issue-client`
+  rejects names containing `/`, `..`, or non-printable characters.
+
 ## [0.43.0.0] — 2026-06-13
 
 ### Added
