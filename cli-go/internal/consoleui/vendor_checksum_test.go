@@ -41,6 +41,26 @@ var pinnedMermaidChecksums = map[string]string{
 	"mermaid.min.js": "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de",
 }
 
+// pinnedFontChecksums maps font filename (relative to dist/vendor/fonts/) to
+// its expected SHA-256 hex digest.  Populated when the font woff2 files are
+// vendored (see VENDOR.md §Fonts for the download + hash recipe).
+// Until fonts are vendored the dist/vendor/fonts/ directory does not exist,
+// the //go:embed directive in server.go is inactive, and this map is empty.
+//
+// To vendor fonts and add entries here:
+//
+//	cd cli-go/internal/consoleui/dist/vendor/fonts
+//	# Download Inter + JetBrains Mono woff2 subsets (see VENDOR.md for URLs)
+//	for f in *.woff2; do
+//	  sha=$(shasum -a 256 "$f" | awk '{print $1}')
+//	  echo "\"$f\": \"$sha\","
+//	done
+//	# Add the lines above to pinnedFontChecksums below.
+//	# Then uncomment the //go:embed all:dist/vendor/fonts line in server.go.
+var pinnedFontChecksums = map[string]string{
+	// Entries added when fonts are vendored. See VENDOR.md §Fonts.
+}
+
 func TestVendorChecksums(t *testing.T) {
 	sub, err := fs.Sub(vendorFS, "dist/vendor")
 	if err != nil {
@@ -195,6 +215,17 @@ func TestVendorChecksums(t *testing.T) {
 		}
 		// Monaco files are covered by the manifest check above.
 		if strings.HasPrefix(path, "monaco/") {
+			return nil
+		}
+		// Font woff2 files (dist/vendor/fonts/) use a per-file pin in
+		// pinnedFontChecksums below.  The directory is populated at font-vendoring
+		// time (see VENDOR.md §Fonts); until then it is absent from the embed and
+		// this path is never reached.
+		if strings.HasPrefix(path, "fonts/") {
+			if _, ok := pinnedFontChecksums[strings.TrimPrefix(path, "fonts/")]; !ok {
+				t.Errorf("vendored font file %q has no pinned checksum — "+
+					"add it to pinnedFontChecksums in vendor_checksum_test.go and VENDOR.md", path)
+			}
 			return nil
 		}
 		// Everything else must have an inline pin.

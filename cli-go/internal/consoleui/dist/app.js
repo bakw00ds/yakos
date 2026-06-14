@@ -54,6 +54,75 @@
 (function () {
   'use strict';
 
+  // ---- 0. Theme system -------------------------------------------------------
+  //
+  // Theme persistence: localStorage key 'yakos_theme'.
+  // Valid values: 'ops', 'fluid', 'og', 'light'.
+  // Default: derived from prefers-color-scheme (dark → 'og', light → 'light').
+  //
+  // The data-theme attribute is set on <html> as early as possible here — at
+  // the top of the IIFE before DOMContentLoaded — so it fires before first
+  // paint. The server-side index.html already sets data-theme="og" as a
+  // no-inline-script FOUC hedge; this code overrides it immediately if the
+  // user has a different preference stored.
+  //
+  // The console CSP forbids inline scripts (script-src 'self'), so we cannot
+  // use a <script> block in <head>. app.js loads via <script src="/app.js">
+  // which the browser executes before rendering the body, giving us an early
+  // enough execution point to avoid visible FOUC in most cases.
+  //
+  // perf-low-end probe: if deviceMemory <= 2 GB or hardwareConcurrency <= 2,
+  // we set html.perf-low-end which CSS uses to kill FLUID aurora animations.
+  // This mirrors the PandaOS field-decorations-init.ts probe logic.
+
+  var THEME_LS_KEY = 'yakos_theme';
+  var VALID_THEMES = ['ops', 'fluid', 'og', 'light'];
+
+  function defaultTheme() {
+    try {
+      if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+        return 'light';
+      }
+    } catch (_) {}
+    return 'og';
+  }
+
+  function readStoredTheme() {
+    try {
+      var v = localStorage.getItem(THEME_LS_KEY);
+      if (v && VALID_THEMES.indexOf(v) !== -1) return v;
+    } catch (_) {}
+    return null;
+  }
+
+  function applyTheme(theme) {
+    if (VALID_THEMES.indexOf(theme) === -1) theme = 'og';
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem(THEME_LS_KEY, theme); } catch (_) {}
+    // Update picker button states (may be called before picker DOM exists).
+    var btns = document.querySelectorAll('.theme-btn');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].setAttribute('aria-pressed', btns[i].getAttribute('data-theme-value') === theme ? 'true' : 'false');
+    }
+    // Sync Monaco editor theme if the iframe is loaded.
+    syncMonacoTheme(theme);
+  }
+
+  // Set theme before first paint.
+  (function () {
+    var stored = readStoredTheme();
+    applyTheme(stored || defaultTheme());
+
+    // perf-low-end probe: gate FLUID aurora animations on low-end devices.
+    try {
+      var mem = navigator.deviceMemory;
+      var cores = navigator.hardwareConcurrency;
+      if ((mem && mem <= 2) || (cores && cores <= 2)) {
+        document.documentElement.classList.add('perf-low-end');
+      }
+    } catch (_) {}
+  }());
+
   // ---- 1. Token extraction ---------------------------------------------------
 
   let TOKEN = '';
@@ -2482,6 +2551,8 @@
 
     if (msg.type === 'ready') {
       ideEditorReady = true;
+      // Sync Monaco theme to the current console theme.
+      syncMonacoTheme(document.documentElement.getAttribute('data-theme') || 'og');
       // Flush any queued openFile.
       if (ideQueuedOpen) {
         sendOpenFile(ideQueuedOpen);
@@ -2499,6 +2570,20 @@
   function sendOpenFile(payload) {
     if (!ideEditorWindow) return;
     ideEditorWindow.postMessage(payload, window.location.origin);
+  }
+
+  // syncMonacoTheme sends a {type:'setTheme', theme} postMessage to the Monaco
+  // iframe. The iframe maps yakOS theme names to Monaco theme strings:
+  //   ops, fluid, og → 'vs-dark'  (all dark themes use Monaco dark)
+  //   light          → 'vs'       (Monaco's built-in light theme)
+  // This is called by applyTheme() on every theme switch, and by
+  // handleIdeEditorMessage on {type:'ready'} to sync the initial theme.
+  // CSP-safe: same-origin postMessage requires no CSP changes.
+  function syncMonacoTheme(theme) {
+    if (!ideEditorWindow) return;
+    try {
+      ideEditorWindow.postMessage({ type: 'setTheme', theme: theme }, window.location.origin);
+    } catch (_) {}
   }
 
   function openFileInEditor(path, content, language) {
@@ -2859,7 +2944,18 @@
     app.innerHTML = `
       <div class="tab-bar">
         <span class="tab-bar-brand">yakOS</span>
-        <div id="tab-bar-tabs" style="display:flex;"></div>
+        <div id="tab-bar-tabs"></div>
+        <nav class="theme-picker" aria-label="Console theme">
+          <span class="theme-picker-label" aria-hidden="true">Theme</span>
+          <button class="theme-btn" type="button" data-theme-value="ops"
+            aria-pressed="false" aria-label="OPS theme — terminal HUD">OPS</button>
+          <button class="theme-btn" type="button" data-theme-value="fluid"
+            aria-pressed="false" aria-label="FLUID theme — glass interface">FLUID</button>
+          <button class="theme-btn" type="button" data-theme-value="og"
+            aria-pressed="false" aria-label="OG theme — raw brand">OG</button>
+          <button class="theme-btn" type="button" data-theme-value="light"
+            aria-pressed="false" aria-label="LIGHT theme — light mode">LIGHT</button>
+        </nav>
       </div>
       <div class="tab-content">
         <div id="panel-overview" class="tab-panel active">
@@ -2936,6 +3032,21 @@
     `;
 
     renderTabs();
+
+    // Wire theme picker buttons.
+    // applyTheme() updates aria-pressed states and persists to localStorage.
+    // We also immediately sync aria-pressed to reflect current theme.
+    (function () {
+      var currentTheme = document.documentElement.getAttribute('data-theme') || 'og';
+      var btns = document.querySelectorAll('.theme-btn');
+      for (var i = 0; i < btns.length; i++) {
+        (function (btn) {
+          var v = btn.getAttribute('data-theme-value');
+          btn.setAttribute('aria-pressed', v === currentTheme ? 'true' : 'false');
+          btn.addEventListener('click', function () { applyTheme(v); });
+        }(btns[i]));
+      }
+    }());
 
     if (!TOKEN) {
       document.getElementById('auth-error').classList.add('visible');

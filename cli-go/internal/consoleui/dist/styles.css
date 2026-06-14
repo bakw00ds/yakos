@@ -1,4 +1,25 @@
-/* yakOS Unified Console — Phase 2.5 shell styles */
+/* yakOS Unified Console — PandaOS theme system (OPS / FLUID / OG / LIGHT)
+ *
+ * Token architecture
+ * ──────────────────
+ * 1. :root defines the shared PandaOS base tokens (fonts, shared-dc, etc.)
+ *    and the four theme blocks set per-theme semantic tokens.
+ *
+ * 2. Each theme block maps to the console's canonical alias variables
+ *    (--bg, --surface, --accent, etc.) so every existing component style
+ *    re-themes automatically without any component-level edits.
+ *
+ * 3. The default theme (OG) is set via data-theme="og" on <html>; the
+ *    JS picker reads localStorage and sets the attribute before first paint.
+ *
+ * Themes:
+ *   ops   — terminal HUD, near-black, mint accent, JetBrains Mono, scanline
+ *   fluid — Apple-glass, deep navy, sky-blue accent, Inter+Mono, aurora
+ *   og    — raw brand, true black, hot-pink accent, JetBrains Mono, flat
+ *   light — clean light palette, off-white bg, teal accent, Inter+Mono
+ */
+
+/* ── Global reset ──────────────────────────────────────────────── */
 
 *, *::before, *::after {
   box-sizing: border-box;
@@ -6,18 +27,494 @@
   padding: 0;
 }
 
+/* ── Shared base tokens ────────────────────────────────────────── */
+/*
+ * Font stacks: Inter (UI prose) + JetBrains Mono (data/code).
+ * When the vendored woff2 files are present under /vendor/fonts/,
+ * the @font-face rules below activate them. Until then, system fonts
+ * are the immediate fallback and the UI renders cleanly.
+ *
+ * Shared accent tokens referenced by all theme blocks:
+ *   --shared-dc           DefCon green #00ff41 (OPS/FLUID/OG)
+ *   --shared-og-positive  OG teal #19E3C4
+ */
 :root {
-  --bg: #1a1b1e;
-  --surface: #25262b;
-  --border: #373a40;
-  --text: #c1c2c5;
-  --text-dim: #5c5f66;
-  --accent: #228be6;
-  --accent-hover: #339af0;
-  --tab-active-bg: #2c2e33;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-sans: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --shared-dc: #00ff41;
+  --shared-og-positive: #19E3C4;
+
+  /* Tab layout constant — consumed by all themes */
   --tab-height: 44px;
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
+
+/* ── @font-face — vendored Inter + JetBrains Mono woff2 ─────────
+ * Self-hosted under /vendor/fonts/. font-src 'self' in the CSP
+ * covers same-origin font requests. The src descriptors fall back
+ * to system fonts if the files are not yet vendored; no CSP changes
+ * are needed for the system-font path.
+ *
+ * Weight coverage: 400 Regular, 500 Medium, 600 SemiBold, 700 Bold.
+ * (Subset choice mirrors PandaOS field-decorations-init.ts weight list.)
+ *
+ * NOTE: The woff2 binary files are placed at vendoring time:
+ *   dist/vendor/fonts/inter-v4-latin-{400,500,600,700}.woff2
+ *   dist/vendor/fonts/jetbrains-mono-v13-latin-{400,500,600,700}.woff2
+ * Their SHA-256 hashes are pinned in vendor_checksum_test.go under
+ * pinnedFontChecksums. See VENDOR.md for the download + hash recipe.
+ * ─────────────────────────────────────────────────────────────── */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/vendor/fonts/inter-v4-latin-400.woff2') format('woff2'),
+       local('Inter');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/vendor/fonts/inter-v4-latin-500.woff2') format('woff2'),
+       local('Inter Medium');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/vendor/fonts/inter-v4-latin-600.woff2') format('woff2'),
+       local('Inter SemiBold');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/vendor/fonts/inter-v4-latin-700.woff2') format('woff2'),
+       local('Inter Bold');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/vendor/fonts/jetbrains-mono-v13-latin-400.woff2') format('woff2'),
+       local('JetBrains Mono');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/vendor/fonts/jetbrains-mono-v13-latin-500.woff2') format('woff2'),
+       local('JetBrains Mono Medium');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/vendor/fonts/jetbrains-mono-v13-latin-600.woff2') format('woff2'),
+       local('JetBrains Mono SemiBold');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/vendor/fonts/jetbrains-mono-v13-latin-700.woff2') format('woff2'),
+       local('JetBrains Mono Bold');
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * THEME BLOCKS
+ *
+ * Each block sets:
+ *   a) PandaOS canonical per-theme tokens (--color-bg-*, --color-accent, etc.)
+ *   b) Console alias variables (--bg, --surface, --accent, --text, …)
+ *      so every existing component CSS re-themes without edits.
+ *   c) Structural tokens (--radius-card, --radius-control, --glass-blur,
+ *      --ease, --dur, --spring) per PandaOS spec.
+ *   d) Font assignment: OPS/OG use mono; FLUID uses sans prose + mono data;
+ *      LIGHT uses sans prose + mono data (same as FLUID).
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* ── OPS — terminal HUD ─────────────────────────────────────────── */
+/*
+ * Near-black #060807, mint accent #2BD98A, 6px radius, steps(4,end) 120ms.
+ * JetBrains Mono for both prose and data.
+ * Body decoration: scanline grid (::before) + corner glow (::after).
+ */
+html[data-theme="ops"] {
+  /* PandaOS canonical tokens */
+  --color-bg-base:     #060807;
+  --color-bg-surface:  #0D100E;
+  --color-bg-elevated: #131A14;
+  --color-bg-banner:   #192016;
+
+  --color-accent:       #2BD98A;
+  --color-accent-dim:   rgba(43, 217, 138, 0.15);
+  --color-accent-hover: #21C27A;
+
+  --color-text-primary:   #f0f0f0;
+  --color-text-secondary: #d1d5db;
+  --color-text-muted:     #9ca3af;
+
+  --color-positive: #2BD98A;
+  --color-warning:  #F7C843;
+  --color-alarm:    #FF9D4D;
+  --color-error:    #FF5C5C;
+
+  --color-border:        rgba(43, 217, 138, 0.20);
+  --color-border-strong: rgba(43, 217, 138, 0.35);
+  --color-border-active: #2BD98A;
+
+  --color-scrollbar-track:       #060807;
+  --color-scrollbar-thumb:       #1a2a1e;
+  --color-scrollbar-thumb-hover: #2a3a2c;
+
+  /* Structural */
+  --radius-card:    6px;
+  --radius-control: 6px;
+  --glass-blur:     14px;
+  --glass-sat:      1.1;
+  --ease:           steps(4, end);
+  --dur:            120ms;
+  --spring:         steps(4, end);
+
+  /* Console alias variables — wire existing component CSS to PandaOS tokens */
+  --bg:            var(--color-bg-base);
+  --surface:       var(--color-bg-surface);
+  --tab-active-bg: var(--color-bg-elevated);
+  --border:        var(--color-border);
+  --text:          var(--color-text-primary);
+  --text-dim:      var(--color-text-muted);
+  --accent:        var(--color-accent);
+  --accent-hover:  var(--color-accent-hover);
+
+  /* Typeface: mono-first for OPS */
+  --font: var(--font-mono);
+}
+
+/* ── FLUID — Apple glass ─────────────────────────────────────────── */
+/*
+ * Deep #0D0E12, sky-blue accent #7CB8FF, 24px radius (100px controls),
+ * spring cubic-bezier(.22,1.18,.36,1) 450ms.
+ * Inter for prose, JetBrains Mono for data.
+ * Body decoration: animated aurora blobs (drift / drift-b keyframes).
+ */
+html[data-theme="fluid"] {
+  --color-bg-base:     #0D0E12;
+  --color-bg-surface:  #14161D;
+  --color-bg-elevated: #1C1F2A;
+  --color-bg-banner:   #222535;
+
+  --color-accent:       #7CB8FF;
+  --color-accent-dim:   rgba(124, 184, 255, 0.15);
+  --color-accent-hover: #5EA6F5;
+
+  --color-text-primary:   #f0f0f0;
+  --color-text-secondary: #d1d5db;
+  --color-text-muted:     #9ca3af;
+
+  --color-positive: #5CE0A1;
+  --color-warning:  #FFDA6B;
+  --color-alarm:    #FFB45C;
+  --color-error:    #FF6B6B;
+
+  --color-border:        rgba(124, 184, 255, 0.20);
+  --color-border-strong: rgba(124, 184, 255, 0.35);
+  --color-border-active: #7CB8FF;
+
+  --color-scrollbar-track:       #0D0E12;
+  --color-scrollbar-thumb:       #2a2d40;
+  --color-scrollbar-thumb-hover: #3a3f58;
+
+  /* Structural */
+  --radius-card:    24px;
+  --radius-control: 100px;
+  --glass-blur:     24px;
+  --glass-sat:      1.6;
+  --ease:           cubic-bezier(.22, 1.18, .36, 1);
+  --dur:            450ms;
+  --spring:         cubic-bezier(.22, 1.18, .36, 1);
+
+  /* Console alias variables */
+  --bg:            var(--color-bg-base);
+  --surface:       var(--color-bg-surface);
+  --tab-active-bg: var(--color-bg-elevated);
+  --border:        var(--color-border);
+  --text:          var(--color-text-primary);
+  --text-dim:      var(--color-text-muted);
+  --accent:        var(--color-accent);
+  --accent-hover:  var(--color-accent-hover);
+
+  /* Typeface: sans prose for FLUID */
+  --font: var(--font-sans);
+}
+
+/* ── OG — raw brand (default) ───────────────────────────────────── */
+/*
+ * True black #000000, hot-pink accent #FF1FA9, 0px radius (brutalist),
+ * steps(3,end) 100ms, NO ambient decoration.
+ * JetBrains Mono for both prose and data.
+ */
+html[data-theme="og"] {
+  --color-bg-base:     #000000;
+  --color-bg-surface:  #0A0A0A;
+  --color-bg-elevated: #111111;
+  --color-bg-banner:   #161616;
+
+  --color-accent:       #FF1FA9;
+  --color-accent-dim:   rgba(255, 31, 169, 0.15);
+  --color-accent-hover: #E61897;
+
+  --color-text-primary:   #f0f0f0;
+  --color-text-secondary: #d1d5db;
+  --color-text-muted:     #9ca3af;
+
+  --og-positive:    var(--shared-og-positive); /* #19E3C4 */
+  --color-positive: var(--og-positive);
+  --color-warning:  #F7C843;
+  --color-alarm:    #FFAA4D;
+  --color-error:    #FF5C5C;
+
+  --color-border:        rgba(255, 31, 169, 0.24);
+  --color-border-strong: rgba(255, 31, 169, 0.40);
+  --color-border-active: #FF1FA9;
+
+  --color-scrollbar-track:       #000000;
+  --color-scrollbar-thumb:       #1a1a1a;
+  --color-scrollbar-thumb-hover: #2a2a2a;
+
+  /* Structural: square / flat / stepped */
+  --radius-card:    0px;
+  --radius-control: 0px;
+  --glass-blur:     0px;
+  --glass-sat:      1.0;
+  --ease:           steps(3, end);
+  --dur:            100ms;
+  --spring:         steps(3, end);
+
+  /* Console alias variables */
+  --bg:            var(--color-bg-base);
+  --surface:       var(--color-bg-surface);
+  --tab-active-bg: var(--color-bg-elevated);
+  --border:        var(--color-border);
+  --text:          var(--color-text-primary);
+  --text-dim:      var(--color-text-muted);
+  --accent:        var(--color-accent);
+  --accent-hover:  var(--color-accent-hover);
+
+  /* Typeface: mono-first for OG */
+  --font: var(--font-mono);
+}
+
+/* ── LIGHT — clean light palette ────────────────────────────────── */
+/*
+ * Off-white #f5f5f5 bg, text #1a1a1a, teal accent #00c48c.
+ * 8px card radius, 6px control radius, standard ease 200ms.
+ * Inter for prose, JetBrains Mono for data.
+ */
+html[data-theme="light"] {
+  --color-bg-base:     #f5f5f5;
+  --color-bg-surface:  #ffffff;
+  --color-bg-elevated: #efefef;
+  --color-bg-banner:   #e8e8e8;
+
+  --color-accent:       #00c48c;
+  --color-accent-dim:   rgba(0, 196, 140, 0.15);
+  --color-accent-hover: #00a876;
+
+  --color-text-primary:   #1a1a1a;
+  --color-text-secondary: #3a3a3a;
+  --color-text-muted:     #6b7280;
+
+  --color-positive: #00c48c;
+  --color-warning:  #d97706;
+  --color-alarm:    #ea580c;
+  --color-error:    #dc2626;
+
+  --color-border:        #d1d5db;
+  --color-border-strong: #9ca3af;
+  --color-border-active: #00c48c;
+
+  --color-scrollbar-track:       #e5e7eb;
+  --color-scrollbar-thumb:       #9ca3af;
+  --color-scrollbar-thumb-hover: #6b7280;
+
+  /* Structural */
+  --radius-card:    8px;
+  --radius-control: 6px;
+  --glass-blur:     0px;
+  --glass-sat:      1.0;
+  --ease:           ease;
+  --dur:            200ms;
+  --spring:         ease;
+
+  /* Console alias variables */
+  --bg:            var(--color-bg-base);
+  --surface:       var(--color-bg-surface);
+  --tab-active-bg: var(--color-bg-elevated);
+  --border:        var(--color-border);
+  --text:          var(--color-text-primary);
+  --text-dim:      var(--color-text-muted);
+  --accent:        var(--color-accent);
+  --accent-hover:  var(--color-accent-hover);
+
+  /* Typeface: sans prose for LIGHT */
+  --font: var(--font-sans);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * AMBIENT DECORATIONS (scoped per theme)
+ * Faithfully reproduced from PandaOS field-decorations.css.
+ * All layers: pointer-events:none; z-index:-1; behind all content.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* ── OPS: scanline grid + radial corner glow ───────────────────── */
+
+html[data-theme="ops"] body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.35) 2px,
+    rgba(0, 0, 0, 0.35) 3px
+  );
+  mix-blend-mode: multiply;
+  opacity: 0.07;
+}
+
+html[data-theme="ops"] body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse 60% 40% at 10% 5%,
+    var(--color-accent-dim),
+    transparent 70%
+  );
+  opacity: 0.18;
+}
+
+/* ── FLUID: aurora blob animation ──────────────────────────────── */
+
+@keyframes drift {
+  0%   { transform: translate(0%,   0%)    scale(1);    }
+  25%  { transform: translate(4%,  -3%)   scale(1.06); }
+  50%  { transform: translate(2%,  -6%)   scale(0.97); }
+  75%  { transform: translate(-3%, -2%)   scale(1.04); }
+  100% { transform: translate(0%,   0%)    scale(1);    }
+}
+
+@keyframes drift-b {
+  0%   { transform: translate(0%,  0%)    scale(1);    }
+  33%  { transform: translate(-4%, 3%)   scale(1.05); }
+  66%  { transform: translate(-2%, 7%)   scale(0.96); }
+  100% { transform: translate(0%,  0%)    scale(1);    }
+}
+
+html[data-theme="fluid"] body {
+  position: relative;
+}
+
+html[data-theme="fluid"] body::before {
+  content: "";
+  position: fixed;
+  top: -20%;
+  left: -20%;
+  width: 70%;
+  height: 70%;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse at center,
+    var(--color-accent-dim),
+    transparent 65%
+  );
+  filter: blur(var(--glass-blur, 24px));
+  opacity: 0.55;
+  will-change: transform;
+  animation: drift 18s var(--spring, cubic-bezier(.22, 1.18, .36, 1)) infinite;
+}
+
+html[data-theme="fluid"] body::after {
+  content: "";
+  position: fixed;
+  bottom: -20%;
+  right: -20%;
+  width: 60%;
+  height: 60%;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse at center,
+    var(--color-accent-dim),
+    transparent 65%
+  );
+  filter: blur(var(--glass-blur, 24px));
+  opacity: 0.40;
+  will-change: transform;
+  animation: drift-b 22s var(--spring, cubic-bezier(.22, 1.18, .36, 1)) infinite;
+  animation-delay: -6s;
+}
+
+/* ── OG: zero decoration (intentionally empty) ─────────────────── */
+/* OG is flat/brutalist: no body pseudo-element decoration. */
+
+/* ── LIGHT: subtle top glow ────────────────────────────────────── */
+html[data-theme="light"] body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse 80% 30% at 50% 0%,
+    rgba(0, 196, 140, 0.06),
+    transparent 70%
+  );
+  opacity: 1;
+}
+
+/* ── Reduced-motion + perf-low-end gates ────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme="fluid"] body::before,
+  html[data-theme="fluid"] body::after {
+    animation: none !important;
+    will-change: auto;
+    filter: none;
+    opacity: 0.25;
+  }
+}
+
+html.perf-low-end[data-theme="fluid"] body::before,
+html.perf-low-end[data-theme="fluid"] body::after {
+  animation: none !important;
+  will-change: auto;
+  filter: none;
+  opacity: 0.20;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * GLOBAL STYLES — consume var(--bg), var(--surface), etc.
+ * These re-theme via the alias variables set per theme block above.
+ * ═══════════════════════════════════════════════════════════════════ */
 
 html, body {
   height: 100%;
@@ -34,7 +531,28 @@ html, body {
   height: 100vh;
 }
 
-/* ---- Tab bar ---- */
+/* ═══════════════════════════════════════════════════════════════════
+ * SCROLLBARS (webkit + standard)
+ * ═══════════════════════════════════════════════════════════════════ */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-scrollbar-track, var(--bg));
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-scrollbar-thumb, var(--border));
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-scrollbar-thumb-hover, var(--text-dim));
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * TAB BAR — includes the theme picker
+ * ═══════════════════════════════════════════════════════════════════ */
 
 .tab-bar {
   display: flex;
@@ -45,17 +563,29 @@ html, body {
   padding: 0 12px;
   flex-shrink: 0;
   user-select: none;
+  gap: 0;
 }
 
 .tab-bar-brand {
-  font-weight: 600;
+  font-weight: 700;
   font-size: 13px;
-  color: var(--text-dim);
-  letter-spacing: 0.05em;
+  color: var(--accent);
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   padding-right: 20px;
   border-right: 1px solid var(--border);
   margin-right: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+}
+
+#tab-bar-tabs {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .tab {
@@ -68,13 +598,26 @@ html, body {
   font-size: 13px;
   font-weight: 500;
   border-bottom: 2px solid transparent;
-  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  transition: color var(--dur, 0.15s) var(--ease, ease),
+              border-color var(--dur, 0.15s) var(--ease, ease),
+              background var(--dur, 0.15s) var(--ease, ease);
   white-space: nowrap;
+  background: none;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  border-radius: var(--radius-control, 0px) var(--radius-control, 0px) 0 0;
+  font-family: var(--font);
 }
 
 .tab:hover {
   color: var(--text);
   background: rgba(255,255,255,0.04);
+}
+
+/* LIGHT theme hover needs to be dark-on-light */
+html[data-theme="light"] .tab:hover {
+  background: rgba(0,0,0,0.04);
 }
 
 .tab.active {
@@ -87,6 +630,65 @@ html, body {
   opacity: 0.35;
   cursor: not-allowed;
   pointer-events: none;
+}
+
+/* ── Theme picker ───────────────────────────────────────────────── */
+/*
+ * Compact segmented control in the tab bar right side.
+ * keyboard: focusable buttons, visible focus ring, aria-pressed for state.
+ */
+
+.theme-picker {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+}
+
+.theme-picker-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-right: 4px;
+  font-family: var(--font-mono);
+}
+
+.theme-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 4px);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 8px;
+  transition: background var(--dur, 0.15s) var(--ease, ease),
+              color var(--dur, 0.15s) var(--ease, ease),
+              border-color var(--dur, 0.15s) var(--ease, ease);
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+}
+
+.theme-btn:hover {
+  color: var(--text);
+  border-color: var(--color-border-active, var(--accent));
+}
+
+.theme-btn[aria-pressed="true"] {
+  background: var(--color-accent-dim, rgba(0,0,0,0.1));
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.theme-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* ---- Content area ---- */
@@ -159,7 +761,7 @@ html, body {
 .auth-error-box {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-card, 8px);
   padding: 32px 40px;
   max-width: 420px;
   text-align: center;
@@ -168,7 +770,7 @@ html, body {
 .auth-error-box h2 {
   font-size: 16px;
   margin-bottom: 12px;
-  color: #ff6b6b;
+  color: var(--color-error, #ff6b6b);
 }
 
 .auth-error-box p {
@@ -227,6 +829,7 @@ html, body {
   color: var(--text-dim);
   padding-bottom: 4px;
   border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
 }
 
 /* ---- Dispatch items ---- */
@@ -237,8 +840,17 @@ html, body {
   gap: 8px;
   padding: 6px 8px;
   background: var(--surface);
-  border-radius: 4px;
+  border-radius: var(--radius-card, 4px);
+  border: 1px solid var(--border);
   font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+/* FLUID: glass panel effect */
+html[data-theme="fluid"] .dispatch-item {
+  backdrop-filter: blur(var(--glass-blur, 24px)) saturate(var(--glass-sat, 1.6));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 24px)) saturate(var(--glass-sat, 1.6));
+  background: rgba(28, 31, 42, 0.65);
 }
 
 .dispatch-agent {
@@ -274,14 +886,13 @@ html, body {
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-control, 4px);
   font-size: 12px;
 }
 
 .presence-icon {
   font-size: 10px;
   flex-shrink: 0;
-  /* Color applied inline from server-derived hash */
 }
 
 .presence-name {
@@ -291,7 +902,7 @@ html, body {
   white-space: nowrap;
 }
 
-/* Screen-reader-only class for status labels (accessible without color). */
+/* Screen-reader-only class */
 .sr-only {
   position: absolute;
   width: 1px;
@@ -324,12 +935,13 @@ html, body {
 .filter-input {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-control, 4px);
   color: var(--text);
   font-size: 12px;
   padding: 4px 8px;
   flex: 1;
   min-width: 0;
+  font-family: var(--font-mono);
 }
 
 .filter-input:focus {
@@ -340,18 +952,29 @@ html, body {
 .filter-btn {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-control, 4px);
   color: var(--text-dim);
   cursor: pointer;
   font-size: 12px;
   padding: 4px 10px;
   flex-shrink: 0;
-  transition: background 0.1s, color 0.1s;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease);
+  font-family: var(--font);
 }
 
 .filter-btn:hover {
   background: rgba(255,255,255,0.06);
   color: var(--text);
+}
+
+html[data-theme="light"] .filter-btn:hover {
+  background: rgba(0,0,0,0.06);
+}
+
+.filter-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .feed-cap-notice {
@@ -375,19 +998,23 @@ html, body {
   align-items: center;
   gap: 8px;
   padding: 4px 8px;
-  border-radius: 3px;
+  border-radius: var(--radius-control, 3px);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
 }
 
 .feed-item:hover {
   background: rgba(255,255,255,0.03);
 }
 
+html[data-theme="light"] .feed-item:hover {
+  background: rgba(0,0,0,0.03);
+}
+
 .feed-dot {
   font-size: 8px;
   line-height: 1;
-  /* Color applied inline from operator's server-derived color */
 }
 
 .feed-time {
@@ -417,9 +1044,17 @@ html, body {
   padding: 8px 0;
 }
 
-/* ---- Reduced-motion override ---- */
+/* ---- Global reduced-motion override ---- */
 
 @media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
   .tab,
   .filter-btn,
   .loading-spinner {
@@ -431,8 +1066,6 @@ html, body {
 /* ===================================================================
    CHAT TAB (Phase 3c)
    =================================================================== */
-
-/* ---- Chat panel layout ---- */
 
 #panel-chat {
   display: none;
@@ -472,25 +1105,40 @@ html, body {
   padding: 2px 6px;
   background: rgba(255,255,255,0.04);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-control, 4px);
   cursor: default;
+  font-family: var(--font-mono);
+}
+
+html[data-theme="light"] .chat-op-badge {
+  background: rgba(0,0,0,0.04);
 }
 
 .chat-new-pane-btn {
   background: var(--accent);
   color: #fff;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-control, 4px);
   padding: 4px 12px;
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background var(--dur, 0.15s) var(--ease, ease);
   flex-shrink: 0;
+  font-family: var(--font);
+}
+
+html[data-theme="og"] .chat-new-pane-btn {
+  color: #000;
 }
 
 .chat-new-pane-btn:hover {
   background: var(--accent-hover);
+}
+
+.chat-new-pane-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .chat-total-cost {
@@ -498,14 +1146,14 @@ html, body {
   font-size: 12px;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
 }
 
-/* ---- Pane rail: grid of panes (1-3 cols, scrollable rail) ---- */
+/* ---- Pane rail ---- */
 
 .chat-pane-rail {
   flex: 1;
   display: grid;
-  /* Up to 3 panes side-by-side; beyond that they stack into rows */
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   grid-auto-rows: 1fr;
   gap: 8px;
@@ -528,10 +1176,10 @@ html, body {
   grid-column: 1 / -1;
   background: rgba(255, 165, 0, 0.15);
   border: 1px solid rgba(255, 165, 0, 0.4);
-  border-radius: 4px;
+  border-radius: var(--radius-card, 4px);
   padding: 6px 12px;
   font-size: 12px;
-  color: #ffa94d;
+  color: var(--color-alarm, #ffa94d);
 }
 
 /* ---- Individual pane ---- */
@@ -541,9 +1189,21 @@ html, body {
   flex-direction: column;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-card, 6px);
   overflow: hidden;
   min-height: 300px;
+}
+
+/* FLUID: glass cards */
+html[data-theme="fluid"] .chat-pane {
+  backdrop-filter: blur(var(--glass-blur, 24px)) saturate(var(--glass-sat, 1.6));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 24px)) saturate(var(--glass-sat, 1.6));
+  background: rgba(20, 22, 29, 0.72);
+}
+
+/* OG: distinct accent border */
+html[data-theme="og"] .chat-pane {
+  border-color: var(--color-border-active);
 }
 
 /* ---- Pane header ---- */
@@ -553,6 +1213,10 @@ html, body {
   background: rgba(255,255,255,0.03);
   border-bottom: 1px solid var(--border);
   padding: 6px 8px;
+}
+
+html[data-theme="light"] .chat-pane-header {
+  background: rgba(0,0,0,0.03);
 }
 
 .pane-header-row {
@@ -565,18 +1229,18 @@ html, body {
 .pane-op-badge {
   font-size: 10px;
   flex-shrink: 0;
-  /* color applied inline (operator hash-derived) */
 }
 
 .pane-runtime-select,
 .pane-model-select {
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: var(--radius-control, 3px);
   color: var(--text);
   font-size: 11px;
   padding: 2px 4px;
   cursor: pointer;
+  font-family: var(--font-mono);
 }
 
 .pane-runtime-select:focus,
@@ -588,12 +1252,13 @@ html, body {
 .pane-agent-input {
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: var(--radius-control, 3px);
   color: var(--text);
   font-size: 11px;
   padding: 2px 6px;
   width: 80px;
   min-width: 0;
+  font-family: var(--font-mono);
 }
 
 .pane-agent-input:focus {
@@ -606,6 +1271,7 @@ html, body {
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  font-family: var(--font-mono);
 }
 
 .pane-elapsed {
@@ -614,9 +1280,10 @@ html, body {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   min-width: 24px;
+  font-family: var(--font-mono);
 }
 
-/* ---- Pane status indicator: icon + visually-hidden label ---- */
+/* ---- Pane status indicator ---- */
 
 .pane-status {
   font-size: 14px;
@@ -629,8 +1296,8 @@ html, body {
 
 .pane-status-dot.idle      { color: var(--text-dim); }
 .pane-status-dot.streaming { color: var(--accent);   }
-.pane-status-dot.done      { color: #51cf66;         }
-.pane-status-dot.error     { color: #ff6b6b;         }
+.pane-status-dot.done      { color: var(--color-positive, #51cf66); }
+.pane-status-dot.error     { color: var(--color-error, #ff6b6b);    }
 
 /* ---- Share / cancel / close buttons ---- */
 
@@ -639,12 +1306,14 @@ html, body {
 .pane-close-btn {
   background: none;
   border: 1px solid transparent;
-  border-radius: 3px;
+  border-radius: var(--radius-control, 3px);
   color: var(--text-dim);
   cursor: pointer;
   font-size: 13px;
   padding: 2px 5px;
-  transition: background 0.1s, color 0.1s, border-color 0.1s;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease),
+              border-color var(--dur, 0.1s) var(--ease, ease);
   flex-shrink: 0;
 }
 
@@ -654,6 +1323,19 @@ html, body {
   background: rgba(255,255,255,0.06);
   color: var(--text);
   border-color: var(--border);
+}
+
+html[data-theme="light"] .pane-share-btn:hover,
+html[data-theme="light"] .pane-cancel-btn:hover,
+html[data-theme="light"] .pane-close-btn:hover {
+  background: rgba(0,0,0,0.06);
+}
+
+.pane-share-btn:focus-visible,
+.pane-cancel-btn:focus-visible,
+.pane-close-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .pane-share-btn.pane-share-active {
@@ -667,7 +1349,7 @@ html, body {
 }
 
 .pane-cancel-btn:not(:disabled) {
-  color: #ff6b6b;
+  color: var(--color-error, #ff6b6b);
 }
 
 .pane-close-btn {
@@ -689,9 +1371,9 @@ html, body {
 .chat-scroll-indicator {
   position: sticky;
   top: 0;
-  background: rgba(34, 139, 230, 0.15);
+  background: var(--color-accent-dim, rgba(34, 139, 230, 0.15));
   border: 1px solid var(--accent);
-  border-radius: 4px;
+  border-radius: var(--radius-control, 4px);
   padding: 4px 8px;
   font-size: 11px;
   color: var(--accent);
@@ -708,6 +1390,7 @@ html, body {
   gap: 4px 6px;
   align-items: start;
   font-size: 12px;
+  font-family: var(--font);
 }
 
 .chat-msg-role {
@@ -718,6 +1401,7 @@ html, body {
   color: var(--text-dim);
   padding-top: 2px;
   text-align: right;
+  font-family: var(--font-mono);
 }
 
 .chat-msg-time {
@@ -726,24 +1410,28 @@ html, body {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   padding-top: 2px;
+  font-family: var(--font-mono);
 }
 
 .chat-msg-text {
   grid-column: 1 / -1;
   padding: 5px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-card, 4px);
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .chat-msg-user .chat-msg-role  { color: var(--accent); }
-.chat-msg-user .chat-msg-text  { background: rgba(34,139,230,0.12); }
+.chat-msg-user .chat-msg-text  { background: var(--color-accent-dim); }
 
-.chat-msg-assistant .chat-msg-role { color: #51cf66; }
+.chat-msg-assistant .chat-msg-role { color: var(--color-positive, #51cf66); }
 .chat-msg-assistant .chat-msg-text { background: rgba(255,255,255,0.04); }
 
-/* Streaming state: typing shimmer cursor */
+html[data-theme="light"] .chat-msg-assistant .chat-msg-text {
+  background: rgba(0,0,0,0.04);
+}
+
 .chat-msg-assistant.streaming .chat-msg-text {
   border-right: 2px solid var(--accent);
 }
@@ -763,7 +1451,6 @@ html, body {
   50%       { opacity: 0; }
 }
 
-/* Summary row */
 .chat-msg-summary {
   display: flex;
   align-items: center;
@@ -772,6 +1459,7 @@ html, body {
   font-size: 11px;
   color: var(--text-dim);
   border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
 }
 
 .chat-summary-icon { font-size: 13px; }
@@ -792,7 +1480,7 @@ html, body {
   flex: 1;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-control, 4px);
   color: var(--text);
   font-size: 13px;
   font-family: var(--font);
@@ -810,19 +1498,29 @@ html, body {
 .chat-send-btn {
   background: var(--accent);
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-control, 4px);
   color: #fff;
   font-size: 12px;
   font-weight: 500;
   padding: 6px 14px;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background var(--dur, 0.15s) var(--ease, ease);
   align-self: flex-end;
   flex-shrink: 0;
+  font-family: var(--font);
+}
+
+html[data-theme="og"] .chat-send-btn {
+  color: #000;
 }
 
 .chat-send-btn:hover { background: var(--accent-hover); }
 .chat-send-btn:active { opacity: 0.85; }
+
+.chat-send-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 /* ---- Reduced motion: disable chat animations ---- */
 
@@ -845,7 +1543,6 @@ html, body {
    FLOWS TAB (Phase 5)
    =================================================================== */
 
-/* Flows panel: flex column to fill the tab content area */
 #panel-flows {
   display: none;
   flex-direction: column;
@@ -897,13 +1594,15 @@ html, body {
   cursor: pointer;
   font-size: 12px;
   padding: 5px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-control, 4px);
   text-align: left;
   width: 100%;
-  transition: background 0.1s, color 0.1s;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-family: var(--font-mono);
 }
 
 .flows-wf-item:hover,
@@ -912,10 +1611,21 @@ html, body {
   color: var(--text);
 }
 
+html[data-theme="light"] .flows-wf-item:hover,
+html[data-theme="light"] .flows-run-item:hover {
+  background: rgba(0,0,0,0.05);
+}
+
 .flows-wf-item.active,
 .flows-run-item.active {
   background: var(--tab-active-bg);
   color: var(--accent);
+}
+
+.flows-wf-item:focus-visible,
+.flows-run-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .flows-run-item {
@@ -967,13 +1677,14 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-family: var(--font-mono);
 }
 
 .flows-view-toggle {
   display: flex;
   gap: 0;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-control, 4px);
   overflow: hidden;
 }
 
@@ -984,7 +1695,9 @@ html, body {
   cursor: pointer;
   font-size: 12px;
   padding: 4px 10px;
-  transition: background 0.1s, color 0.1s;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease);
+  font-family: var(--font);
 }
 
 .flows-view-btn:hover {
@@ -992,25 +1705,44 @@ html, body {
   color: var(--text);
 }
 
+html[data-theme="light"] .flows-view-btn:hover {
+  background: rgba(0,0,0,0.05);
+}
+
 .flows-view-btn.active {
   background: var(--accent);
   color: #fff;
 }
 
+html[data-theme="og"] .flows-view-btn.active {
+  color: #000;
+}
+
+.flows-view-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .flows-btn {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-control, 4px);
   color: var(--text);
   cursor: pointer;
   font-size: 12px;
   padding: 4px 12px;
-  transition: background 0.1s, color 0.1s;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease);
   white-space: nowrap;
+  font-family: var(--font);
 }
 
 .flows-btn:hover:not(:disabled) {
   background: rgba(255,255,255,0.07);
+}
+
+html[data-theme="light"] .flows-btn:hover:not(:disabled) {
+  background: rgba(0,0,0,0.07);
 }
 
 .flows-btn:disabled {
@@ -1018,10 +1750,19 @@ html, body {
   cursor: not-allowed;
 }
 
+.flows-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .flows-run-btn {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+}
+
+html[data-theme="og"] .flows-run-btn {
+  color: #000;
 }
 
 .flows-run-btn:hover:not(:disabled) {
@@ -1033,21 +1774,22 @@ html, body {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   padding: 2px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-control, 4px);
   border: 1px solid transparent;
+  font-family: var(--font-mono);
 }
 
 .flows-run-status-running   { color: var(--accent); border-color: var(--accent); }
-.flows-run-status-completed { color: #51cf66; border-color: #51cf66; }
-.flows-run-status-failed    { color: #ff6b6b; border-color: #ff6b6b; }
-.flows-run-status-interrupted { color: #ffa94d; border-color: #ffa94d; }
+.flows-run-status-completed { color: var(--color-positive, #51cf66); border-color: var(--color-positive, #51cf66); }
+.flows-run-status-failed    { color: var(--color-error, #ff6b6b); border-color: var(--color-error, #ff6b6b); }
+.flows-run-status-interrupted { color: var(--color-alarm, #ffa94d); border-color: var(--color-alarm, #ffa94d); }
 
 /* ---- Save error banner ---- */
 
 .flows-save-error {
   background: rgba(255, 107, 107, 0.1);
   border-bottom: 1px solid rgba(255, 107, 107, 0.3);
-  color: #ff6b6b;
+  color: var(--color-error, #ff6b6b);
   font-size: 12px;
   padding: 6px 12px;
   flex-shrink: 0;
@@ -1069,7 +1811,6 @@ html, body {
   position: relative;
 }
 
-/* The canvas div holds absolutely-positioned SVG + node buttons */
 .flows-canvas {
   position: relative;
   min-height: 200px;
@@ -1089,7 +1830,7 @@ html, body {
   position: absolute;
   background: var(--surface);
   border: 1.5px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-card, 6px);
   color: var(--text);
   cursor: pointer;
   display: flex;
@@ -1099,26 +1840,33 @@ html, body {
   gap: 2px;
   font-size: 11px;
   padding: 6px 8px;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition: border-color var(--dur, 0.15s) var(--ease, ease),
+              box-shadow var(--dur, 0.15s) var(--ease, ease);
   overflow: hidden;
+}
+
+/* FLUID: glass DAG nodes */
+html[data-theme="fluid"] .dag-node {
+  backdrop-filter: blur(var(--glass-blur, 24px)) saturate(var(--glass-sat, 1.6));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 24px)) saturate(var(--glass-sat, 1.6));
+  background: rgba(20, 22, 29, 0.72);
 }
 
 .dag-node:hover,
 .dag-node:focus-visible {
   border-color: var(--accent);
   outline: none;
-  box-shadow: 0 0 0 2px rgba(34, 139, 230, 0.3);
+  box-shadow: 0 0 0 2px var(--color-accent-dim);
 }
 
 .dag-node-selected {
   border-color: var(--accent);
-  background: rgba(34, 139, 230, 0.08);
+  background: var(--color-accent-dim);
 }
 
-/* Node status color (accent only — NOT the sole indicator; icon+label used too) */
 .dag-node-running   { border-color: var(--accent); }
-.dag-node-completed { border-color: #51cf66; }
-.dag-node-failed    { border-color: #ff6b6b; }
+.dag-node-completed { border-color: var(--color-positive, #51cf66); }
+.dag-node-failed    { border-color: var(--color-error, #ff6b6b); }
 .dag-node-skipped   { opacity: 0.5; }
 
 .dag-node-icon {
@@ -1133,6 +1881,7 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-family: var(--font-mono);
 }
 
 .dag-node-agent {
@@ -1142,6 +1891,7 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-family: var(--font-mono);
 }
 
 /* ---- YAML editor ---- */
@@ -1158,7 +1908,7 @@ html, body {
   background: var(--bg);
   border: none;
   color: var(--text);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;
   overflow-y: auto;
@@ -1198,6 +1948,7 @@ html, body {
   font-weight: 600;
   color: var(--text);
   flex: 1;
+  font-family: var(--font-mono);
 }
 
 .flows-node-close {
@@ -1208,7 +1959,7 @@ html, body {
   font-size: 16px;
   padding: 0 4px;
   line-height: 1;
-  border-radius: 3px;
+  border-radius: var(--radius-control, 3px);
 }
 
 .flows-node-close:hover {
@@ -1216,10 +1967,19 @@ html, body {
   background: rgba(255,255,255,0.07);
 }
 
+html[data-theme="light"] .flows-node-close:hover {
+  background: rgba(0,0,0,0.07);
+}
+
+.flows-node-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .flows-node-truncation {
   background: rgba(255, 169, 77, 0.1);
   border-bottom: 1px solid rgba(255, 169, 77, 0.3);
-  color: #ffa94d;
+  color: var(--color-alarm, #ffa94d);
   font-size: 11px;
   padding: 4px 12px;
   flex-shrink: 0;
@@ -1227,7 +1987,7 @@ html, body {
 
 .flows-node-output {
   flex: 1;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.5;
   margin: 0;
@@ -1242,7 +2002,7 @@ html, body {
 .flows-opus-note {
   background: rgba(255, 169, 77, 0.08);
   border-top: 1px solid rgba(255, 169, 77, 0.2);
-  color: #ffa94d;
+  color: var(--color-alarm, #ffa94d);
   font-size: 11px;
   padding: 6px 12px;
   flex-shrink: 0;
@@ -1261,7 +2021,6 @@ html, body {
    IDE TAB (Phase 7 shell — read-only view)
    =================================================================== */
 
-/* IDE panel: flex column filling the tab content area */
 #panel-ide {
   display: none;
   flex-direction: column;
@@ -1283,7 +2042,6 @@ html, body {
 
 .ide-layout {
   display: grid;
-  /* 220px file tree | 1fr Monaco editor | 280px chat REPL */
   grid-template-columns: 220px 1fr 280px;
   height: 100%;
   overflow: hidden;
@@ -1321,7 +2079,6 @@ html, body {
   /* padding-left is set inline (per-depth) */
 }
 
-/* File and dir buttons share base style */
 .ide-tree-file,
 .ide-tree-dir {
   background: none;
@@ -1335,15 +2092,22 @@ html, body {
   padding: 3px 8px;
   text-align: left;
   width: 100%;
-  border-radius: 3px;
+  border-radius: var(--radius-control, 3px);
   white-space: nowrap;
   overflow: hidden;
-  transition: background 0.1s, color 0.1s;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease);
+  font-family: var(--font-mono);
 }
 
 .ide-tree-file:hover,
 .ide-tree-dir:hover {
   background: rgba(255,255,255,0.05);
+}
+
+html[data-theme="light"] .ide-tree-file:hover,
+html[data-theme="light"] .ide-tree-dir:hover {
+  background: rgba(0,0,0,0.05);
 }
 
 .ide-tree-file:focus-visible,
@@ -1353,7 +2117,7 @@ html, body {
 }
 
 .ide-tree-file.selected {
-  background: rgba(34, 139, 230, 0.15);
+  background: var(--color-accent-dim);
   color: var(--accent);
 }
 
@@ -1381,9 +2145,10 @@ html, body {
 }
 
 .ide-tree-error {
-  color: #ff6b6b;
+  color: var(--color-error, #ff6b6b);
   font-size: 12px;
   padding: 8px 12px;
+  font-family: var(--font-mono);
 }
 
 .ide-tree-loading {
@@ -1391,6 +2156,7 @@ html, body {
   font-size: 11px;
   font-style: italic;
   padding: 3px 12px;
+  font-family: var(--font-mono);
 }
 
 .ide-tree-truncated {
@@ -1398,6 +2164,7 @@ html, body {
   font-size: 11px;
   font-style: italic;
   padding: 3px 12px;
+  font-family: var(--font-mono);
 }
 
 /* ---- Center: Monaco editor pane ---- */
@@ -1422,7 +2189,7 @@ html, body {
 }
 
 .ide-open-path {
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-dim);
   overflow: hidden;
@@ -1437,12 +2204,18 @@ html, body {
   overflow: hidden;
 }
 
+/* Monaco dark-default bg — avoids flash before load.
+ * LIGHT theme overrides to neutral light bg. */
 .ide-editor-frame {
   width: 100%;
   height: 100%;
   border: none;
-  background: #1e1e1e; /* Monaco dark default — avoids white flash before load */
+  background: #1e1e1e;
   display: block;
+}
+
+html[data-theme="light"] .ide-editor-frame {
+  background: #fffffe;
 }
 
 .ide-editor-notice {
@@ -1452,7 +2225,7 @@ html, body {
   right: 0;
   background: rgba(255, 107, 107, 0.12);
   border-bottom: 1px solid rgba(255, 107, 107, 0.3);
-  color: #ff6b6b;
+  color: var(--color-error, #ff6b6b);
   font-size: 12px;
   padding: 8px 12px;
   z-index: 10;
@@ -1479,15 +2252,74 @@ html, body {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  /* Override the rail grid so the single pane fills the slot */
 }
 
-/* The embedded pane fills the IDE chat slot rather than being grid-sized */
 #ide-chat-slot .chat-pane {
   flex: 1;
   min-height: 0;
   border: none;
   border-radius: 0;
+}
+
+/* ── Telemetry line typography (.tline) — from PandaOS visual-grammar ── */
+
+.tline {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin-top: 8px;
+  letter-spacing: 0.04em;
+  line-height: 1.7;
+  word-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.tline b {
+  color: var(--accent);
+}
+
+html[data-theme="ops"] .tline b   { font-weight: 700; }
+html[data-theme="fluid"] .tline   { font-size: 10.5px; }
+html[data-theme="fluid"] .tline b { font-weight: 600; }
+html[data-theme="og"] .tline b    { font-weight: 700; }
+
+.tline .tl-warn {
+  color: var(--color-alarm, #ffa94d);
+}
+
+/* ── Cursor-blink caret (OPS + OG) from PandaOS field-decorations ── */
+
+@keyframes cursor-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+html[data-theme="ops"] .tline::after,
+html[data-theme="og"]  .tline::after {
+  content: "▋";
+  display: inline-block;
+  font-size: 0.85em;
+  line-height: 1;
+  vertical-align: baseline;
+  margin-left: 0.1em;
+  color: var(--accent);
+  animation: cursor-blink 900ms steps(2, end) infinite;
+  speak: none;
+  user-select: none;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme="ops"] .tline::after,
+  html[data-theme="og"]  .tline::after {
+    animation: none !important;
+    opacity: 1;
+  }
+}
+
+html.perf-low-end[data-theme="ops"] .tline::after,
+html.perf-low-end[data-theme="og"]  .tline::after {
+  animation: none !important;
+  opacity: 1;
 }
 
 /* ---- Reduced-motion override for IDE ---- */

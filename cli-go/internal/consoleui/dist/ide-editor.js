@@ -184,5 +184,12 @@ window.addEventListener('message', function(e) {
     var content = typeof msg.content === 'string' ? msg.content : '';
     monaco.editor.setModelLanguage(editor.getModel(), lang);
     editor.setValue(content);
+  } else if (msg.type === 'setTheme') {
+    // Map yakOS console theme names to Monaco built-in theme identifiers.
+    // Dark themes (ops, fluid, og) → 'vs-dark'; light → 'vs'.
+    // CSP-safe: monaco.editor.setTheme is a runtime API call, not an
+    // inline script — no CSP changes required.
+    var monacoTheme = (msg.theme === 'light') ? 'vs' : 'vs-dark';
+    monaco.editor.setTheme(monacoTheme);
   }
 });
