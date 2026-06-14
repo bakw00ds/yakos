@@ -176,3 +176,17 @@ func IsLoopbackOriginForTest(origin string) bool {
 func BuildOriginAllowListNetworkedForTest(externalHosts []string, next http.Handler) http.Handler {
 	return consoleOriginAllowListNetworked(externalHosts, next)
 }
+
+// ---- File API test exports ---------------------------------------------------
+
+// MaxTreeEntriesPerDir is exported so tests can exercise the per-directory
+// entry-cap and verify the truncated=true branch without hardcoding the limit.
+const MaxTreeEntriesPerDir = maxTreeEntriesPerDir
+
+// MaxTreeDepth is exported so tests can exercise the depth-cap truncated=true
+// branch (nest MaxTreeDepth+1 directories).
+const MaxTreeDepth = maxTreeDepth
+
+// MaxTreeTotalNodes is exported so tests can exercise the global node budget
+// truncated=true branch.
+const MaxTreeTotalNodes = maxTreeTotalNodes
