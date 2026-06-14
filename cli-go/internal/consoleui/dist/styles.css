@@ -16,7 +16,7 @@
  *   ops   — terminal HUD, near-black, mint accent, JetBrains Mono, scanline
  *   fluid — Apple-glass, deep navy, sky-blue accent, Inter+Mono, aurora
  *   og    — raw brand, true black, hot-pink accent, JetBrains Mono, flat
- *   light — clean light palette, off-white bg, teal accent, Inter+Mono
+ *   light — clean light palette, off-white bg, WCAG-AA teal accent (#007a5a), Inter+Mono
  */
 
 /* ── Global reset ──────────────────────────────────────────────── */
@@ -316,9 +316,19 @@ html[data-theme="og"] {
 
 /* ── LIGHT — clean light palette ────────────────────────────────── */
 /*
- * Off-white #f5f5f5 bg, text #1a1a1a, teal accent #00c48c.
+ * Off-white #f5f5f5 bg, text #1a1a1a, teal accent.
  * 8px card radius, 6px control radius, standard ease 200ms.
  * Inter for prose, JetBrains Mono for data.
+ *
+ * WCAG AA compliance (verified ratios — all on #ffffff / #f5f5f5):
+ *   accent   #007a5a on white:  5.34:1  ✓  (body text ≥4.5, UI ≥3)
+ *   accent   #007a5a on bg:     4.90:1  ✓
+ *   text-dim #4b5563 on white:  7.56:1  ✓  (body text ≥4.5)
+ *   text-dim #4b5563 on bg:     6.93:1  ✓
+ *   border   #767d89 on white:  4.15:1  ✓  (UI ≥3)
+ *   border   #767d89 on elev:   3.61:1  ✓
+ *   focus-ring is --accent (#007a5a): 5.34:1 on white ✓
+ *   text-primary #1a1a1a: 17.40:1 (unchanged)
  */
 html[data-theme="light"] {
   --color-bg-base:     #f5f5f5;
@@ -326,26 +336,31 @@ html[data-theme="light"] {
   --color-bg-elevated: #efefef;
   --color-bg-banner:   #e8e8e8;
 
-  --color-accent:       #00c48c;
-  --color-accent-dim:   rgba(0, 196, 140, 0.15);
-  --color-accent-hover: #00a876;
+  /* B-1 fix: #00c48c (2.26:1 on white) → #007a5a (5.34:1 on white) */
+  --color-accent:       #007a5a;
+  --color-accent-dim:   rgba(0, 122, 90, 0.12);
+  --color-accent-hover: #005e45;
 
   --color-text-primary:   #1a1a1a;
   --color-text-secondary: #3a3a3a;
-  --color-text-muted:     #6b7280;
+  /* B-2 fix: #6b7280 (4.43:1 on bg-base) → #4b5563 (6.93:1) — clears 4.5:1 */
+  --color-text-muted:     #4b5563;
 
-  --color-positive: #00c48c;
+  /* B-3 fix: #00c48c → #007a5a */
+  --color-positive: #007a5a;
   --color-warning:  #d97706;
   --color-alarm:    #ea580c;
   --color-error:    #dc2626;
 
-  --color-border:        #d1d5db;
-  --color-border-strong: #9ca3af;
-  --color-border-active: #00c48c;
+  /* B-4 fix: #d1d5db (1.47:1 on white) → #767d89 (4.15:1) — clears 3:1 UI */
+  --color-border:        #767d89;
+  --color-border-strong: #4b5563;
+  /* B-5 fix: border-active was #00c48c → #007a5a */
+  --color-border-active: #007a5a;
 
   --color-scrollbar-track:       #e5e7eb;
-  --color-scrollbar-thumb:       #9ca3af;
-  --color-scrollbar-thumb-hover: #6b7280;
+  --color-scrollbar-thumb:       #767d89;
+  --color-scrollbar-thumb-hover: #4b5563;
 
   /* Structural */
   --radius-card:    8px;
@@ -485,7 +500,7 @@ html[data-theme="light"] body::before {
   pointer-events: none;
   background: radial-gradient(
     ellipse 80% 30% at 50% 0%,
-    rgba(0, 196, 140, 0.06),
+    rgba(0, 122, 90, 0.07),
     transparent 70%
   );
   opacity: 1;
@@ -1578,6 +1593,48 @@ html[data-theme="og"] .chat-send-btn {
   border-bottom: 1px solid var(--border);
 }
 
+/* Section header: title + New button on the same row */
+.flows-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+/* "+ New workflow" button in sidebar header */
+.flows-new-btn {
+  background: none;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-control, 4px);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 7px;
+  flex-shrink: 0;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease);
+}
+.flows-new-btn:hover {
+  background: var(--accent);
+  color: var(--color-bg-base, var(--bg));
+}
+.flows-new-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Inline error for new-workflow create failures (name invalid, 409, etc.) */
+.flows-new-error {
+  background: rgba(255, 107, 107, 0.1);
+  border: 1px solid rgba(255, 107, 107, 0.3);
+  border-radius: var(--radius-control, 4px);
+  color: var(--color-error, #ff6b6b);
+  font-size: 11px;
+  margin-top: 6px;
+  padding: 5px 8px;
+}
+
 .flows-workflow-list,
 .flows-run-list {
   display: flex;
@@ -1811,6 +1868,21 @@ html[data-theme="og"] .flows-run-btn {
   position: relative;
 }
 
+/* Read-only notice at the top of the canvas view */
+.flows-canvas-readonly-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255,255,255,0.02);
+  flex-shrink: 0;
+}
+
+html[data-theme="light"] .flows-canvas-readonly-note {
+  background: rgba(0,0,0,0.02);
+}
+
+
 .flows-canvas {
   position: relative;
   min-height: 200px;
@@ -2015,6 +2087,190 @@ html[data-theme="light"] .flows-node-close:hover {
   align-items: center;
   justify-content: center;
   height: 100%;
+}
+
+/* ── Workflow list row with delete affordance ───────────────────── */
+
+.flows-wf-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.flows-wf-row .flows-wf-item {
+  flex: 1;
+  min-width: 0; /* allow text-overflow on the name */
+}
+
+/* Per-row delete (×) button */
+.flows-wf-delete {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0;
+  padding: 3px 5px;
+  border-radius: var(--radius-control, 4px);
+  flex-shrink: 0;
+  transition: opacity var(--dur, 0.1s) var(--ease, ease),
+              color   var(--dur, 0.1s) var(--ease, ease);
+}
+.flows-wf-row:hover .flows-wf-delete,
+.flows-wf-delete:focus-visible {
+  opacity: 1;
+}
+.flows-wf-delete:hover {
+  color: var(--color-error, #ef4444);
+}
+.flows-wf-delete:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ── Themed modal system ─────────────────────────────────────────── */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  /* Backdrop blur for FLUID/LIGHT where glass is natural */
+  backdrop-filter: blur(2px);
+}
+
+html[data-theme="og"] .modal-overlay,
+html[data-theme="ops"] .modal-overlay {
+  backdrop-filter: none; /* flat for pixel-precise themes */
+}
+
+.modal-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card, 8px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  max-width: 420px;
+  width: 100%;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+html[data-theme="light"] .modal-box {
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+}
+
+.modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.modal-body p {
+  margin: 0;
+}
+
+.modal-field-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.modal-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 4px);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 7px 10px;
+  width: 100%;
+  outline: none;
+  transition: border-color var(--dur, 0.1s) var(--ease, ease);
+}
+.modal-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--color-accent-dim, rgba(0,122,90,0.12));
+}
+
+.modal-field-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.modal-field-error {
+  font-size: 12px;
+  color: var(--color-error, #ef4444);
+  margin: 0;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.modal-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 4px);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 7px 16px;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color     var(--dur, 0.1s) var(--ease, ease),
+              border-color var(--dur, 0.1s) var(--ease, ease);
+}
+.modal-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.modal-btn-cancel:hover {
+  background: rgba(255,255,255,0.06);
+}
+html[data-theme="light"] .modal-btn-cancel:hover {
+  background: rgba(0,0,0,0.05);
+}
+
+.modal-btn-confirm {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--color-bg-base, var(--bg));
+  font-weight: 600;
+}
+.modal-btn-confirm:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.modal-btn-danger {
+  background: var(--color-error, #ef4444);
+  border-color: var(--color-error, #ef4444);
+  color: #fff;
+}
+.modal-btn-danger:hover {
+  background: #dc2626;
+  border-color: #dc2626;
 }
 
 /* ===================================================================

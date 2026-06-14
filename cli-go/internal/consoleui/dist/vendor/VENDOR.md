@@ -116,53 +116,38 @@ console CSP is unchanged.
 
 ---
 
-## Fonts — Inter + JetBrains Mono (FOLLOW-UP: not yet vendored)
+## Fonts — Inter + JetBrains Mono
 
 Self-hosted woff2 subsets for the PandaOS theme system (OPS/FLUID/OG/LIGHT).
 `@font-face` declarations in `styles.css` reference `/vendor/fonts/...`.
-Until the files are vendored, system fonts serve as immediate fallback
-(`font-display: swap; local()` fallback in each `@font-face` rule).
+Served at `/vendor/fonts/*.woff2` (token-exempt same-origin static; `font-src 'self'` in CSP).
 
 | Field   | Value |
 |---------|-------|
 | Inter   | v4 Latin subset — 400/500/600/700 weights |
 | JetBrains Mono | v13 Latin subset — 400/500/600/700 weights |
+| Source  | fontsource/inter + fontsource/jetbrains-mono via jsdelivr |
 | License | Inter: SIL OFL 1.1 (https://rsms.me/inter/); JetBrains Mono: SIL OFL 1.1 (https://www.jetbrains.com/lp/mono/) |
-| Serve path | `/vendor/fonts/*.woff2` (same-origin, CSP-safe: `font-src 'self'`) |
-| Embed | `//go:embed all:dist/vendor/fonts` in `server.go` (uncomment after downloading) |
+| Serve path | `/vendor/fonts/*.woff2` |
+| Embed | `//go:embed all:dist/vendor/fonts` in `server.go` |
 | Checksum | Per-file SHA-256 in `pinnedFontChecksums` in `vendor_checksum_test.go` |
 
-### How to vendor fonts
+### SHA-256 checksums
 
-    # 1. Create the fonts directory.
-    mkdir -p cli-go/internal/consoleui/dist/vendor/fonts
+| File | SHA-256 |
+|------|---------|
+| inter-v4-latin-400.woff2 | 8909904ab6c872eb994093482a88a28eca2cd95912d7b6fecd72103b0dc07edc |
+| inter-v4-latin-500.woff2 | f3779f1efccc4bdcdf9c0a02ab95bf6bd092ed09c48c08cedc725889edd1d19f |
+| inter-v4-latin-600.woff2 | f9a06e79cd3a2a20951c0f0e28f66dd0e6d3fda73911d640a2125c8fcb78f21a |
+| inter-v4-latin-700.woff2 | 6f56409fd3d64bb85f7d070bce20749db2d66b6d63cec586cc22d1c761be2491 |
+| jetbrains-mono-v13-latin-400.woff2 | 14425ba9c695763c1547f48a206b7aa60350a33ae23de09f0407877f3fcd89eb |
+| jetbrains-mono-v13-latin-500.woff2 | cb182feeed4d798ff6961d3c79f7026279448fca0676438aaecb21f3fc39553a |
+| jetbrains-mono-v13-latin-600.woff2 | 400c6bfda18d5d14acad1c15d6dcb9f8e13c015e7286317e0b9a482539bef147 |
+| jetbrains-mono-v13-latin-700.woff2 | d0d4e818808f2a0ba39b2b09d1989366f63494e295f003c7ef436697378507e8 |
 
-    # 2. Download Inter v4 Latin woff2 (400/500/600/700 weights).
-    #    Source: https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuLyfAZ9hiJ-Ek-_EeA.woff2
-    #    (adjust URL to the specific weight subset from Google Fonts or rsms.me/inter)
-    #    Recommended source: https://github.com/rsms/inter/releases (download InterVariable or subset)
-    cd cli-go/internal/consoleui/dist/vendor/fonts
-    # Download each weight:
-    # curl -L <url-for-inter-400.woff2> -o inter-v4-latin-400.woff2
-    # curl -L <url-for-inter-500.woff2> -o inter-v4-latin-500.woff2
-    # curl -L <url-for-inter-600.woff2> -o inter-v4-latin-600.woff2
-    # curl -L <url-for-inter-700.woff2> -o inter-v4-latin-700.woff2
-    # Similar for JetBrains Mono (source: https://github.com/JetBrains/JetBrainsMono/releases):
-    # curl -L <url> -o jetbrains-mono-v13-latin-400.woff2  (etc.)
+To update: download the new woff2 files, recompute SHA-256:
 
-    # 3. Compute SHA-256 for each file and add to pinnedFontChecksums:
-    for f in *.woff2; do
-        sha=$(shasum -a 256 "$f" | awk '{print $1}')
-        echo "\"$f\": \"$sha\","
-    done
-    # Add the above lines to pinnedFontChecksums in vendor_checksum_test.go.
+    for f in *.woff2; do shasum -a 256 "$f"; done
 
-    # 4. Uncomment in server.go:
-    #   //go:embed all:dist/vendor/fonts
-
-    # 5. Update the SHA-256 entries in this VENDOR.md §Fonts table above.
-
-    # 6. Run the checksum test.
-    cd cli-go && go test ./internal/consoleui/... -run TestVendorChecksums
-
-    # 7. .gitattributes already marks *.woff2 binary — no edit needed.
+Update `pinnedFontChecksums` in `vendor_checksum_test.go` and the table above.
+`.gitattributes` marks `*.woff2 binary` — no EOL conversion on Windows.

@@ -237,7 +237,7 @@ async function loadAll() {
 
   try {
     // Summary
-    const summary = await apiFetch('/api/perf/summary?window=' + win, tok);
+    const summary = await apiFetch('api/perf/summary?window=' + win, tok);
     setText('card-dispatches', summary.total_dispatches.toLocaleString());
     setText('card-cost', fmtCost(summary.total_cost_usd));
     setText('card-avg-latency', fmtMs(summary.avg_latency_ms));
@@ -255,12 +255,12 @@ async function loadAll() {
 
     // Timeseries
     const ts = await apiFetch(
-      '/api/perf/timeseries?window=' + win + '&bucket=' + bucket + '&metric=' + metric, tok
+      'api/perf/timeseries?window=' + win + '&bucket=' + bucket + '&metric=' + metric, tok
     );
     renderChart(el('timeseries-svg'), ts, metric);
 
     // By axis
-    const byAxis = await apiFetch('/api/perf/by_axis?axis=' + axis + '&window=' + win, tok);
+    const byAxis = await apiFetch('api/perf/by_axis?axis=' + axis + '&window=' + win, tok);
     buildRows(el('breakdown-body'), (byAxis || []).map(row =>
       td(row.key) +
       td(row.dispatches) +
@@ -270,7 +270,7 @@ async function loadAll() {
     ));
 
     // Recent
-    const recent = await apiFetch('/api/perf/recent?limit=50', tok);
+    const recent = await apiFetch('api/perf/recent?limit=50', tok);
     const rows = (recent || []).slice().reverse(); // most recent first
     buildRows(el('recent-body'), rows.map(r =>
       td(fmtTs(r.ts)) +

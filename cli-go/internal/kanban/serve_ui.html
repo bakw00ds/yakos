@@ -711,7 +711,7 @@ function initTheme() {
 async function loadMeta() {
   let res, m;
   try {
-    res = await fetch("/api/meta");
+    res = await fetch("api/meta");
   } catch (e) {
     // Network-level failure: fetch itself threw (e.g. TypeError from a
     // browser extension blocking loopback requests, or the server stopped).
@@ -1026,7 +1026,7 @@ function buildNotes(id, rawNotes) {
   });
   save.addEventListener("click", async () => {
     save.disabled = true;
-    const data = await post("/api/notes", { id, notes: ta.value });
+    const data = await post("api/notes", { id, notes: ta.value });
     save.disabled = false;
     openEditors.delete(id);
     wrap.classList.remove("editing");
@@ -1053,7 +1053,7 @@ function buildMoveActions(id, col) {
     });
     btn.addEventListener("click", async () => {
       btn.disabled = true;
-      const data = await post("/api/move", { id, col: target });
+      const data = await post("api/move", { id, col: target });
       if (data) renderBoard(data); else btn.disabled = false;
     });
     wrap.appendChild(btn);
@@ -1128,7 +1128,7 @@ function buildDeleteButton(id, title) {
     e.stopPropagation();
     if (autoResetTimer) { clearTimeout(autoResetTimer); autoResetTimer = null; }
     yesBtn.disabled = true;
-    const data = await post("/api/delete", { id });
+    const data = await post("api/delete", { id });
     // If the POST failed, data is null and toast() was already called.
     // Re-enable so the operator can try again.
     if (!data) { yesBtn.disabled = false; return; }
@@ -1163,7 +1163,7 @@ function wireDropTarget(section, col) {
     section.classList.remove("drop-over");
     const id = e.dataTransfer.getData("text/plain") || dragId;
     if (!id) return;
-    const data = await post("/api/move", { id, col });
+    const data = await post("api/move", { id, col });
     if (data) renderBoard(data);
   });
 }
@@ -1177,7 +1177,7 @@ function initAddForm() {
     e.preventDefault();                       // Enter in the input submits here
     const title = input.value.trim();
     if (!title) return;
-    const data = await post("/api/add", { title, category: sel.value });
+    const data = await post("api/add", { title, category: sel.value });
     if (data) {
       input.value = "";
       input.focus();
@@ -1190,7 +1190,7 @@ function initAddForm() {
 async function refresh() {
   let res, board;
   try {
-    res = await fetch("/api/board");
+    res = await fetch("api/board");
   } catch (e) {
     // Network-level failure (fetch threw). Show one toast per consecutive run
     // of failures so the retry loop doesn't spam.

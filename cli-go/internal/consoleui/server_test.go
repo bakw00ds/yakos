@@ -10,6 +10,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/dashauth"
 	"github.com/bakw00ds/yakos/internal/wsbus"
+	"golang.org/x/net/websocket"
 )
 
 // ---- test infrastructure ---------------------------------------------------
@@ -858,6 +859,112 @@ func TestVendorRoute_MonacoWorkerMainServedNoToken(t *testing.T) {
 	}
 }
 
+// ---- 5. WebSocket edge bypass tests -----------------------------------------
+// The edge middleware (requireTokenForNonStatic) must not apply the
+// Authorization-header token check to WebSocket upgrade requests — browsers
+// cannot set Authorization on WS upgrades.  The WS handler enforces its own
+// subprotocol token auth.
+
+// TestWSEdge_UpgradePassesThroughEdge verifies that a WS upgrade request
+// is NOT rejected 401 by the edge token check.  The edge must forward it
+// to the downstream handler so the WS subprotocol auth can run.
+func TestWSEdge_UpgradePassesThroughEdge(t *testing.T) {
+	tok := strings.Repeat("a", 64)
+	reached := false
+	downstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusSwitchingProtocols) // 101
+	})
+	wrapped := consoleui.RequireTokenForNonStatic(tok, downstream)
+
+	// Simulate a WS upgrade: no Authorization header, Upgrade: websocket.
+	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	rr := httptest.NewRecorder()
+	wrapped.ServeHTTP(rr, req)
+
+	if !reached {
+		t.Error("downstream handler was not reached for WS upgrade — edge blocked it (401 regression)")
+	}
+	if rr.Code == http.StatusUnauthorized {
+		t.Error("WS upgrade got 401 at edge; Authorization check must be skipped for WS upgrades")
+	}
+}
+
+// TestWSEdge_WrongTokenNonWSStillGets401 verifies that non-WS requests without
+// a valid token are still rejected 401 at the edge (regression guard).
+func TestWSEdge_WrongTokenNonWSStillGets401(t *testing.T) {
+	tok := strings.Repeat("a", 64)
+	downstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	wrapped := consoleui.RequireTokenForNonStatic(tok, downstream)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
+	// No Upgrade header, no Authorization header.
+	rr := httptest.NewRecorder()
+	wrapped.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("non-WS request without token: status=%d; want 401", rr.Code)
+	}
+}
+
+// TestWSEdge_WSHandlerRejectsBadSubprotocol verifies that a WS upgrade that
+// passes the edge but carries a wrong subprotocol token is rejected by the
+// WS handler's own auth (not the edge).  End-to-end via newAuthTestServer.
+func TestWSEdge_WSHandlerRejectsBadSubprotocol(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/v1/events"
+
+	cfg, err := websocket.NewConfig(wsURL, "http://127.0.0.1/")
+	if err != nil {
+		t.Fatalf("NewConfig: %v", err)
+	}
+	// Wrong token in subprotocol — should be rejected by the WS handler.
+	cfg.Protocol = []string{"yakos-bearer", strings.Repeat("z", 64)}
+	_, err = websocket.DialConfig(cfg)
+	if err == nil {
+		t.Fatal("expected dial error for bad subprotocol token; got nil (WS handler failed to reject)")
+	}
+}
+
+// TestWSEdge_SpoofedUpgradeOnNonWSRouteStill401 is a security regression test.
+// A request to a gated non-WS route (e.g. /api/files/content) carrying a
+// spoofed "Upgrade: websocket" header must NOT bypass the token check.
+// The bypass in requireTokenForNonStatic is scoped to /v1/events only.
+func TestWSEdge_SpoofedUpgradeOnNonWSRouteStill401(t *testing.T) {
+	tok := strings.Repeat("a", 64)
+	downstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	wrapped := consoleui.RequireTokenForNonStatic(tok, downstream)
+
+	gatedPaths := []string{
+		"/api/files/content",
+		"/api/files/tree",
+		"/api/chat/dispatch",
+		"/flows/api/workflows",
+		"/api/presence",
+	}
+	for _, path := range gatedPaths {
+		path := path
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			// Spoofed Upgrade header — no token.
+			req.Header.Set("Upgrade", "websocket")
+			req.Header.Set("Connection", "Upgrade")
+			rr := httptest.NewRecorder()
+			wrapped.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusUnauthorized {
+				t.Errorf("GET %s with spoofed Upgrade: websocket (no token): status=%d; want 401 — bypass must be scoped to /v1/events", path, rr.Code)
+			}
+		})
+	}
+}
+
 // TestVendorRoute_MonacoLanguageGrammarsServed verifies that representative
 // Monaco language grammar files (basic-languages) and language service workers
 // (language/) serve 200 with application/javascript and no token required.
@@ -894,6 +1001,37 @@ func TestVendorRoute_MonacoLanguageGrammarsServed(t *testing.T) {
 			ct := resp.Header.Get("Content-Type")
 			if !strings.Contains(ct, "javascript") {
 				t.Errorf("GET %s: Content-Type=%q; want application/javascript", path, ct)
+			}
+		})
+	}
+}
+
+// ---- 6. Vendored font serve tests -------------------------------------------
+// Verifies all 8 woff2 font files are served at /vendor/fonts/... without a
+// token (same-origin static; token-exempt like all /vendor/* paths).
+
+func TestVendorRoute_FontsServedNoToken(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+
+	fonts := []string{
+		"/vendor/fonts/inter-v4-latin-400.woff2",
+		"/vendor/fonts/inter-v4-latin-500.woff2",
+		"/vendor/fonts/inter-v4-latin-600.woff2",
+		"/vendor/fonts/inter-v4-latin-700.woff2",
+		"/vendor/fonts/jetbrains-mono-v13-latin-400.woff2",
+		"/vendor/fonts/jetbrains-mono-v13-latin-500.woff2",
+		"/vendor/fonts/jetbrains-mono-v13-latin-600.woff2",
+		"/vendor/fonts/jetbrains-mono-v13-latin-700.woff2",
+	}
+
+	for _, path := range fonts {
+		path := path
+		t.Run(path, func(t *testing.T) {
+			resp := get(t, ts.URL+path, "") // no token — /vendor/* is exempt
+			defer drainClose(resp)
+
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("GET %s (no token): status=%d; want 200 (font 404 regression)", path, resp.StatusCode)
 			}
 		})
 	}

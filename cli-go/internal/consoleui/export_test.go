@@ -136,7 +136,7 @@ func NewFlowsHandlerForTest(t *testing.T, workDir string, fn func(context.Contex
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/flows/api/workflows", h.handleListWorkflows)
-	mux.HandleFunc("/flows/api/workflow", h.handleWorkflowDispatch)
+	mux.HandleFunc("/flows/api/workflow", h.handleWorkflowDispatch) // GET/POST/DELETE
 	mux.HandleFunc("/flows/api/run", h.handleRunDispatch)
 	mux.HandleFunc("/flows/api/run/node", h.handleGetNodeOutput)
 	mux.HandleFunc("/flows/api/resume", h.handleResume)

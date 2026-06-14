@@ -732,14 +732,66 @@ func (h *flowsHandlers) handleGetNodeOutput(w http.ResponseWriter, r *http.Reque
 
 // ---- Method dispatchers --------------------------------------------------------
 
-// handleWorkflowDispatch routes GET/POST /flows/api/workflow to the appropriate
-// handler based on the HTTP method.
+// ---- DELETE /flows/api/workflow?name=<name> -----------------------------------
+
+// handleDeleteWorkflow removes a workflow YAML file from the workflows directory.
+//
+// DELETE /flows/api/workflow?name=<name>
+// Returns 204 No Content on success, 404 if not found.
+// Requires RoleFlowsRun (checked by the per-method guard below).
+func (h *flowsHandlers) handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Per-method role check: DELETE requires RoleFlowsRun.
+	if id := netid.IdentityFrom(r.Context()); id.Resolved && !id.Role.Allows(netid.RoleFlowsRun) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	name := r.URL.Query().Get("name")
+	if err := workflow.ValidateID("name", name); err != nil {
+		writeGenericError(w, http.StatusBadRequest, "invalid workflow name")
+		return
+	}
+
+	path := h.workflowPath(name)
+
+	// Path-jail: ensure the resolved path is under workflowsDir.
+	// ValidateID already rejects traversal characters, but we double-check
+	// with a prefix assertion for defence-in-depth.
+	cleanPath := filepath.Clean(path)
+	wfDir := filepath.Clean(h.workflowsDir())
+	if !strings.HasPrefix(cleanPath, wfDir+string(filepath.Separator)) {
+		writeGenericError(w, http.StatusBadRequest, "invalid workflow name")
+		return
+	}
+
+	if err := os.Remove(cleanPath); err != nil {
+		if isNotExist(err) {
+			writeGenericError(w, http.StatusNotFound, "workflow not found")
+			return
+		}
+		slog.Error("flows: delete workflow: remove", "name", name, "err", err)
+		writeGenericError(w, http.StatusInternalServerError, "failed to delete workflow")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleWorkflowDispatch routes GET/POST/DELETE /flows/api/workflow to the
+// appropriate handler based on the HTTP method.
 func (h *flowsHandlers) handleWorkflowDispatch(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		h.handleGetWorkflow(w, r)
 	case http.MethodPost:
 		h.handleSaveWorkflow(w, r)
+	case http.MethodDelete:
+		h.handleDeleteWorkflow(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

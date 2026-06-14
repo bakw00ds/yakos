@@ -403,9 +403,9 @@ function renderProjects(projects) {
 // ---- main load --------------------------------------------------------------
 async function loadAll(tok) {
   const [snap, history, trend] = await Promise.all([
-    apiFetch('/api/metrics/snapshot', tok),
-    apiFetch('/api/metrics/history', tok),
-    apiFetch('/api/metrics/trend?metric=' + el('trend-metric').value + '&last=' + el('trend-last').value, tok),
+    apiFetch('api/metrics/snapshot', tok),
+    apiFetch('api/metrics/history', tok),
+    apiFetch('api/metrics/trend?metric=' + el('trend-metric').value + '&last=' + el('trend-last').value, tok),
   ]);
   renderSnapshotCards(snap);
   renderHistory(history);
@@ -413,7 +413,7 @@ async function loadAll(tok) {
 
   // Try projects rollup — only available with --all-projects.
   try {
-    const projects = await apiFetch('/api/metrics/projects', tok);
+    const projects = await apiFetch('api/metrics/projects', tok);
     show('projects-section');
     renderProjects(projects);
   } catch (e) {
@@ -431,7 +431,7 @@ async function doCompare(tok) {
   const b = el('sha-b').value.trim();
   if (!a || !b) { el('compare-result').innerHTML = '<p class="err">Enter both commit SHAs.</p>'; return; }
   try {
-    const diff = await apiFetch('/api/metrics/compare?a=' + encodeURIComponent(a) + '&b=' + encodeURIComponent(b), tok);
+    const diff = await apiFetch('api/metrics/compare?a=' + encodeURIComponent(a) + '&b=' + encodeURIComponent(b), tok);
     renderCompare(diff);
   } catch (e) {
     el('compare-result').innerHTML = '<p class="err">' + esc(e.message) + '</p>';
@@ -449,11 +449,11 @@ async function doCompare(tok) {
 
     el('refresh-btn').addEventListener('click', () => loadAll(tok).catch(err => console.error(err)));
     el('trend-metric').addEventListener('change', async () => {
-      const trend = await apiFetch('/api/metrics/trend?metric=' + el('trend-metric').value + '&last=' + el('trend-last').value, tok);
+      const trend = await apiFetch('api/metrics/trend?metric=' + el('trend-metric').value + '&last=' + el('trend-last').value, tok);
       renderTrend(trend);
     });
     el('trend-last').addEventListener('change', async () => {
-      const trend = await apiFetch('/api/metrics/trend?metric=' + el('trend-metric').value + '&last=' + el('trend-last').value, tok);
+      const trend = await apiFetch('api/metrics/trend?metric=' + el('trend-metric').value + '&last=' + el('trend-last').value, tok);
       renderTrend(trend);
     });
     el('compare-btn').addEventListener('click', () => doCompare(tok));

@@ -273,7 +273,13 @@
             document.getElementById('auth-error').classList.add('visible');
             return;
           }
-          iframe.src = tab.src;
+          // Append the bearer token as a URL fragment so the dashboard's
+          // client-side getToken() (metricsdash/perfdash read #token=<hex>)
+          // authenticates without an extra round-trip.  Fragments are
+          // NEVER sent to the server — they exist only in the browser and
+          // cannot appear in server logs — so this is safe.  Kanban does
+          // not use a fragment gate and ignores the extra fragment harmlessly.
+          iframe.src = tab.src + '#token=' + TOKEN;
         });
       }
     }
@@ -1546,6 +1552,7 @@
     nodeOutput: '',         // stdout text for selectedNodeId
     nodeOutputTruncated: false,
     viewMode: 'canvas',     // 'canvas' | 'yaml'
+    _pendingCreate: null,   // non-null when a new workflow is staged but not yet saved
   };
 
   // ---- Flows init -----------------------------------------------------------
@@ -1686,6 +1693,7 @@
       flowsState.dirty = false;
       flowsState.saveError = null;
       flowsState.saveConflict = false;
+      flowsState._pendingCreate = null; // clear any pending-create state
       renderFlowsEditor();
       renderFlowsCanvas();
       renderFlowsRunList();
@@ -1697,6 +1705,7 @@
   function saveFlowsWorkflow() {
     const name = flowsState.selectedName;
     if (!name) return;
+    const isPendingCreate = flowsState._pendingCreate === name;
     const body = {
       name,
       yaml: flowsState.yaml,
@@ -1706,10 +1715,18 @@
       if (r.status === 409) {
         return r.json().then((d) => {
           flowsState.saveConflict = true;
-          flowsState.saveError = 'Conflict: another operator saved. Reloading…';
+          if (isPendingCreate) {
+            // Create conflict: a workflow with this name already exists on disk.
+            flowsState._pendingCreate = null;
+            flowsState.saveError = 'A workflow named "' + name + '" already exists. ' +
+              'Choose a different name (+ New) or load and edit the existing one.';
+          } else {
+            // Edit conflict: concurrent save by another operator.
+            flowsState.saveError = 'Conflict: another operator saved. Reloading…';
+            // Auto-reload to truth after 2 seconds.
+            setTimeout(() => loadFlowsWorkflow(name), 2000);
+          }
           renderFlowsEditor();
-          // Auto-reload to truth after 2 seconds.
-          setTimeout(() => loadFlowsWorkflow(name), 2000);
         });
       }
       if (r.status === 400) {
@@ -1725,11 +1742,17 @@
         return;
       }
       return r.json().then((d) => {
+        const wasCreate = isPendingCreate;
+        flowsState._pendingCreate = null;
         flowsState.version = d.version || flowsState.version;
         flowsState.dirty = false;
         flowsState.saveError = null;
         flowsState.saveConflict = false;
         renderFlowsEditor();
+        if (wasCreate) {
+          // Refresh list from server so the new workflow appears in canonical order.
+          loadFlowsWorkflowList();
+        }
         // Re-parse to update canvas.
         loadFlowsWorkflow(name);
       });
@@ -1860,7 +1883,14 @@
         // Left sidebar: workflow list + run list
         '<aside class="flows-sidebar" aria-label="Workflows and runs">' +
           '<div class="flows-section">' +
-            '<h2 class="subsection-title">Workflows</h2>' +
+            '<div class="flows-section-header">' +
+              '<h2 class="subsection-title">Workflows</h2>' +
+              '<button id="flows-new-btn" class="flows-new-btn" type="button" ' +
+                'aria-label="Create a new workflow" title="New workflow">' +
+                '+ New' +
+              '</button>' +
+            '</div>' +
+            '<div id="flows-new-error" class="flows-new-error" role="alert" style="display:none"></div>' +
             '<div id="flows-workflow-list" class="flows-workflow-list"></div>' +
           '</div>' +
           '<div class="flows-section" id="flows-run-list-section" style="display:none">' +
@@ -1892,6 +1922,10 @@
           // Canvas + YAML side by side; only one shown at a time
           '<div class="flows-content">' +
             '<div id="flows-canvas-wrap" class="flows-canvas-wrap">' +
+              '<div class="flows-canvas-readonly-note" role="note" aria-label="Canvas note">' +
+                'Canvas is read-only — click a node to view output. ' +
+                'To author or edit a workflow, switch to YAML view.' +
+              '</div>' +
               '<div id="flows-canvas" class="flows-canvas" role="img" aria-label="Workflow DAG canvas"></div>' +
             '</div>' +
             '<div id="flows-yaml-wrap" class="flows-yaml-wrap" style="display:none">' +
@@ -1967,7 +2001,313 @@
       document.getElementById('flows-node-panel').style.display = 'none';
     });
 
+    // Wire New workflow button.
+    document.getElementById('flows-new-btn').addEventListener('click', () => {
+      createNewFlowsWorkflow();
+    });
+
     renderFlowsWorkflowList();
+  }
+
+  // idRe mirrors workflow.ValidateID — ^[a-z0-9][a-z0-9-]{0,63}$
+  var WORKFLOW_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+  function showFlowsNewError(msg) {
+    var el = document.getElementById('flows-new-error');
+    if (!el) return;
+    if (msg) {
+      el.textContent = msg;
+      el.style.display = '';
+    } else {
+      el.textContent = '';
+      el.style.display = 'none';
+    }
+  }
+
+  // ── Themed modal system ───────────────────────────────────────────────────
+  //
+  // openModal(opts) shows an in-page modal styled with CSS-var tokens.
+  // opts = {
+  //   title:       string       — modal heading (escaped)
+  //   body:        string       — inner HTML for the body area (caller-controlled)
+  //   confirmText: string       — label for the primary action button
+  //   cancelText:  string       — label for the cancel button (default 'Cancel')
+  //   onConfirm:   fn(modal)    — called with the modal root on confirm click
+  //   onCancel:    fn()         — optional; called on cancel/Esc/overlay-click
+  //   dangerous:   bool         — if true, confirm button uses --color-error styling
+  // }
+  // Returns the modal DOM element (already in the document).
+  // Call closeModal(el) to programmatically remove it.
+
+  function openModal(opts) {
+    var title       = opts.title       || '';
+    var confirmText = opts.confirmText || 'OK';
+    var cancelText  = opts.cancelText  || 'Cancel';
+    var dangerous   = !!opts.dangerous;
+
+    // Build modal DOM.
+    var overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', title);
+
+    var box = document.createElement('div');
+    box.className = 'modal-box';
+
+    var heading = document.createElement('h2');
+    heading.className = 'modal-title';
+    heading.textContent = title;
+    box.appendChild(heading);
+
+    var bodyDiv = document.createElement('div');
+    bodyDiv.className = 'modal-body';
+    bodyDiv.innerHTML = opts.body || '';
+    box.appendChild(bodyDiv);
+
+    var footer = document.createElement('div');
+    footer.className = 'modal-footer';
+
+    var cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'modal-btn modal-btn-cancel';
+    cancelBtn.textContent = cancelText;
+
+    var confirmBtn = document.createElement('button');
+    confirmBtn.type = 'button';
+    confirmBtn.className = 'modal-btn modal-btn-confirm' + (dangerous ? ' modal-btn-danger' : '');
+    confirmBtn.textContent = confirmText;
+
+    footer.appendChild(cancelBtn);
+    footer.appendChild(confirmBtn);
+    box.appendChild(footer);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    // Save the element that had focus before the modal opened.
+    var previousFocus = document.activeElement;
+
+    // Focus trap: collect focusable elements inside the modal.
+    function getFocusable() {
+      return Array.prototype.slice.call(
+        box.querySelectorAll(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex=”-1”])'
+        )
+      ).filter(function(el) { return !el.disabled; });
+    }
+
+    // Move focus into modal.
+    function focusFirst() {
+      var els = getFocusable();
+      if (els.length) els[0].focus();
+    }
+    setTimeout(focusFirst, 0);
+
+    function closeModal(el) {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+      // Restore focus to the element that had it before the modal.
+      if (previousFocus && previousFocus.focus) {
+        try { previousFocus.focus(); } catch (_) {}
+      }
+    }
+
+    function onCancel() {
+      closeModal(overlay);
+      if (opts.onCancel) opts.onCancel();
+    }
+
+    cancelBtn.addEventListener('click', onCancel);
+    confirmBtn.addEventListener('click', function() {
+      if (opts.onConfirm) opts.onConfirm(overlay);
+    });
+
+    // Close on overlay background click (not on box itself).
+    overlay.addEventListener('click', function(e) {
+      if (e.target === overlay) onCancel();
+    });
+
+    // Keyboard: Esc → cancel; Tab/Shift-Tab → trap focus inside modal.
+    overlay.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') { onCancel(); return; }
+      if (e.key === 'Tab') {
+        var els = getFocusable();
+        if (!els.length) { e.preventDefault(); return; }
+        var first = els[0], last = els[els.length - 1];
+        if (e.shiftKey) {
+          if (document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      }
+    });
+
+    overlay._closeModal = function() { closeModal(overlay); };
+    return overlay;
+  }
+
+  function createNewFlowsWorkflow() {
+    // Build modal body: name input + inline validation error.
+    var bodyHTML =
+      '<label for=”modal-wf-name” class=”modal-field-label”>' +
+        'Workflow name' +
+      '</label>' +
+      '<input id=”modal-wf-name” class=”modal-input” type=”text” ' +
+        'placeholder=”e.g. my-flow” autocomplete=”off” spellcheck=”false” ' +
+        'aria-describedby=”modal-wf-name-hint modal-wf-name-err”>' +
+      '<p id=”modal-wf-name-hint” class=”modal-field-hint”>' +
+        'Lowercase letters, digits, hyphens. Starts with a letter or digit. Max 64 chars.' +
+      '</p>' +
+      '<p id=”modal-wf-name-err” class=”modal-field-error” role=”alert” style=”display:none”></p>';
+
+    var modal = openModal({
+      title:       'New workflow',
+      body:        bodyHTML,
+      confirmText: 'Create',
+      cancelText:  'Cancel',
+      onConfirm: function(overlay) {
+        var input = overlay.querySelector('#modal-wf-name');
+        var errEl = overlay.querySelector('#modal-wf-name-err');
+        var name = (input ? input.value : '').trim();
+
+        function showErr(msg) {
+          if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+          if (input) input.focus();
+        }
+
+        if (!name) { showErr('Name is required.'); return; }
+        if (!WORKFLOW_ID_RE.test(name)) {
+          showErr(
+            'Invalid name. Use lowercase letters, digits, and hyphens only; ' +
+            'must start with a letter or digit; max 64 characters.'
+          );
+          return;
+        }
+
+        // Validation passed — close modal and load starter template.
+        overlay._closeModal();
+        showFlowsNewError(null);
+        _applyNewWorkflow(name);
+      },
+    });
+
+    // Focus the name input immediately (setTimeout in openModal handles initial
+    // focus on first focusable; input is first, so this is already covered).
+    // Also allow Enter key in the input to trigger Create.
+    var input = modal.querySelector('#modal-wf-name');
+    if (input) {
+      input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          modal.querySelector('.modal-btn-confirm').click();
+        }
+      });
+    }
+  }
+
+  function _applyNewWorkflow(name) {
+    // Minimal starter YAML that passes workflow.Validate:
+    //   version: 1               — required schema version
+    //   name: <name>             — must match ValidateID (pre-validated)
+    //   nodes[].id               — must match ValidateID
+    //   nodes[].agent            — required non-empty string
+    //   nodes[].prompt           — required non-empty string
+    //   nodes[].output_limit     — required > 0 (safety: prevents unbounded prompt inflation)
+    var starterYAML = [
+      'version: 1',
+      'name: ' + name,
+      'nodes:',
+      '  - id: step1',
+      '    agent: claude',
+      '    prompt: “Describe the first step.”',
+      '    output_limit: 8000',
+    ].join('\n') + '\n';
+
+    // Load the new workflow into the editor state.
+    // version: '' signals force-create (POST /flows/api/workflow with empty version
+    // and a non-existent name creates the file; if the name already exists the
+    // server returns 409 — handled by saveFlowsWorkflow's existing 409 path).
+    flowsState.selectedName = name;
+    flowsState.yaml = starterYAML;
+    flowsState.version = '';
+    flowsState.workflow = null;
+    flowsState.dirty = true;
+    flowsState.saveError = null;
+    flowsState.saveConflict = false;
+    flowsState._pendingCreate = name;
+
+    // Add to workflows list for display (refreshed from server after first save).
+    if (flowsState.workflows.indexOf(name) === -1) {
+      flowsState.workflows = flowsState.workflows.concat([name]);
+    }
+
+    // Switch to YAML view so the operator can review/edit before saving.
+    switchFlowsView('yaml');
+
+    var yamlEditor = document.getElementById('flows-yaml-editor');
+    if (yamlEditor) yamlEditor.value = starterYAML;
+
+    renderFlowsWorkflowList();
+    renderFlowsEditor();
+    updateFlowsToolbarState();
+  }
+
+  function deleteFlowsWorkflow(name) {
+    openModal({
+      title:       'Delete workflow',
+      body:        '<p>Delete <strong>' + esc(name) + '</strong>?</p>' +
+                   '<p class=”modal-field-hint” style=”margin-top:8px”>' +
+                     'This removes the workflow definition. ' +
+                     'Existing run history is not deleted.' +
+                   '</p>' +
+                   '<p id=”modal-del-err” class=”modal-field-error” role=”alert” style=”display:none”></p>',
+      confirmText: 'Delete',
+      cancelText:  'Cancel',
+      dangerous:   true,
+      onConfirm: function(overlay) {
+        var errEl = overlay.querySelector('#modal-del-err');
+        function showErr(msg) {
+          if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+        }
+        apiFetch('DELETE', '/flows/api/workflow?name=' + encodeURIComponent(name)).then(function(r) {
+          if (r.status === 404) {
+            overlay._closeModal();
+            loadFlowsWorkflowList();
+            return;
+          }
+          if (!r.ok) {
+            return r.json().then(function(d) {
+              showErr(d.error || 'Delete failed');
+            }).catch(function() {
+              showErr('Delete failed (server error)');
+            });
+          }
+          overlay._closeModal();
+          // Clear selection if we just deleted the selected workflow.
+          if (flowsState.selectedName === name) {
+            flowsState.selectedName = null;
+            flowsState.yaml = '';
+            flowsState.version = '';
+            flowsState.workflow = null;
+            flowsState.dirty = false;
+            flowsState.saveError = null;
+            flowsState.saveConflict = false;
+            flowsState._pendingCreate = null;
+            renderFlowsEditor();
+            renderFlowsCanvas();
+          }
+          loadFlowsWorkflowList();
+          announceFlows('Workflow “' + name + '” deleted');
+        }).catch(function() {
+          showErr('Network error deleting workflow');
+        });
+      },
+    });
   }
 
   function switchFlowsView(mode) {
@@ -2006,6 +2346,10 @@
       return;
     }
     for (const name of flowsState.workflows) {
+      // Wrap each workflow entry in a row: [name button] [delete button]
+      const row = document.createElement('div');
+      row.className = 'flows-wf-row';
+
       const btn = document.createElement('button');
       btn.className = 'flows-wf-item' + (name === flowsState.selectedName ? ' active' : '');
       btn.type = 'button';
@@ -2014,14 +2358,28 @@
       btn.addEventListener('click', () => {
         flowsState.selectedName = name;
         loadFlowsWorkflow(name);
-        // Update the active state immediately.
+        // Update active state immediately.
         listEl.querySelectorAll('.flows-wf-item').forEach((el) => {
-          const active = el.textContent === name;
-          el.classList.toggle('active', active);
-          el.setAttribute('aria-current', String(active));
+          const isActive = el.textContent === name;
+          el.classList.toggle('active', isActive);
+          el.setAttribute('aria-current', String(isActive));
         });
       });
-      listEl.appendChild(btn);
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'flows-wf-delete';
+      delBtn.setAttribute('aria-label', 'Delete workflow ' + name);
+      delBtn.setAttribute('title', 'Delete');
+      delBtn.textContent = '×';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation(); // don't also select the workflow
+        deleteFlowsWorkflow(name);
+      });
+
+      row.appendChild(btn);
+      row.appendChild(delBtn);
+      listEl.appendChild(row);
     }
   }
 
@@ -2544,11 +2902,12 @@
           '</div>' +
           '<div class="ide-editor-wrap">' +
             '<div id="ide-editor-notice" class="ide-editor-notice" style="display:none" role="status"></div>' +
+            // First-party same-origin content; isolation boundary is the
+            // scoped per-route CSP on /ide/editor, not an escapable sandbox.
             '<iframe id="ide-editor-frame" class="ide-editor-frame" ' +
               'src="/ide/editor" ' +
               'title="Code editor" ' +
-              'aria-label="Monaco code editor" ' +
-              'sandbox="allow-scripts allow-same-origin">' +
+              'aria-label="Monaco code editor">' +
             '</iframe>' +
           '</div>' +
         '</div>' +
@@ -3038,13 +3397,16 @@
           </div>
         </div>
         <div id="panel-kanban" class="tab-panel">
-          <iframe title="Kanban board" allow="same-origin"></iframe>
+          <!-- First-party same-origin content; isolation boundary is the auth edge, not an escapable sandbox. -->
+          <iframe title="Kanban board"></iframe>
         </div>
         <div id="panel-cost" class="tab-panel">
-          <iframe title="Cost dashboard" allow="same-origin"></iframe>
+          <!-- First-party same-origin content; isolation boundary is the auth edge, not an escapable sandbox. -->
+          <iframe title="Cost dashboard"></iframe>
         </div>
         <div id="panel-perf" class="tab-panel">
-          <iframe title="Performance dashboard" allow="same-origin"></iframe>
+          <!-- First-party same-origin content; isolation boundary is the auth edge, not an escapable sandbox. -->
+          <iframe title="Performance dashboard"></iframe>
         </div>
         <div id="panel-chat" class="tab-panel">
           <div class="chat-loading">
