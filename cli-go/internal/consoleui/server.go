@@ -131,6 +131,13 @@ type Config struct {
 	// all authenticated certs default to RoleRead (missing-file-tolerant).
 	// Loopback bearer sessions always resolve to admin regardless of StateDir.
 	StateDir string
+
+	// WorkspaceRoot is the absolute path to the workspace root served by the
+	// IDE file API (/api/files/tree and /api/files/content).  When empty,
+	// both endpoints return 503 Service Unavailable.  The path is jailed:
+	// all requested paths are resolved against WorkspaceRoot and symlink-
+	// escaped or traversal attempts are rejected with a generic 400/403.
+	WorkspaceRoot string
 }
 
 func (c *Config) addr() string {
@@ -166,6 +173,7 @@ type Server struct {
 	chatHub      *ChatHub
 	chat         *chatHandlers
 	flows        *flowsHandlers
+	files        *filesHandlers
 	serverCtx    context.Context    // cancelled on Serve shutdown; dispatch goroutines use this
 	serverCancel context.CancelFunc // called by Serve when the server shuts down
 }
@@ -207,6 +215,7 @@ func New(cfg Config) *Server {
 		workDir:   cfg.WorkDir,
 		serverCtx: serverCtx,
 	}
+	filesH := newFilesHandlers(cfg.WorkspaceRoot)
 	s := &Server{
 		cfg:          cfg,
 		mux:          http.NewServeMux(),
@@ -214,6 +223,7 @@ func New(cfg Config) *Server {
 		chatHub:      hub,
 		chat:         chatH,
 		flows:        flowsH,
+		files:        filesH,
 		serverCtx:    serverCtx,
 		serverCancel: serverCancel,
 	}
@@ -489,6 +499,20 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/flows/api/run/node", requireRoleFunc(netid.RoleRead, s.flows.handleGetNodeOutput))
 	s.mux.HandleFunc("/flows/api/run", requireRoleFunc(netid.RoleRead, s.flows.handleRunDispatch))
 	s.mux.HandleFunc("/flows/api/resume", requireRoleFunc(netid.RoleFlowsRun, s.flows.handleResume))
+
+	// ---- Phase 7 (IDE): File API (RoleRead, jailed to WorkspaceRoot) -----------
+	// GET /api/files/tree?dir=<relpath>     — JSON directory tree
+	// GET /api/files/content?path=<relpath> — file content (UTF-8 or base64)
+	//
+	// Both require RoleRead.  Both are jailed to Config.WorkspaceRoot.
+	// Secret files (*.pem, *.key, *credentials*, *.env*) are refused at
+	// the content endpoint.  See files_handler.go for the full security model.
+	//
+	// NOTE: these routes also register under the mux used by the Monaco IDE
+	// spike (feat/ide-monaco-spike).  If that branch is merged first, a trivial
+	// rebase conflict on registerRoutes may need resolution.
+	s.mux.HandleFunc("/api/files/tree", requireRoleFunc(netid.RoleRead, s.files.handleFilesTree))
+	s.mux.HandleFunc("/api/files/content", requireRoleFunc(netid.RoleRead, s.files.handleFilesContent))
 }
 
 // handlePresence returns the current online operator presence snapshot as a
