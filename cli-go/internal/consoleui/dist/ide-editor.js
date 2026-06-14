@@ -84,6 +84,29 @@ document.head.appendChild(loaderScript);
 // ── Editor initialisation ─────────────────────────────────────────────────
 var editor = null;
 
+// Track the path currently open so we can include it in save/dirty messages.
+var currentPath = '';
+
+// Dirty tracking: true when the model has been changed since the last openFile
+// or successful save.  The parent uses this to decide whether to enable Save.
+var isDirty = false;
+
+// Debounce timer for dirty postMessage to parent.
+var dirtyDebounceTimer = null;
+
+function postDirty(dirty) {
+  // Debounced: coalesce rapid keystrokes into a single message every 300 ms.
+  if (dirtyDebounceTimer !== null) {
+    clearTimeout(dirtyDebounceTimer);
+  }
+  dirtyDebounceTimer = setTimeout(function() {
+    dirtyDebounceTimer = null;
+    try {
+      window.parent.postMessage({ type: 'dirty', dirty: dirty }, window.location.origin);
+    } catch (_) {}
+  }, 300);
+}
+
 function initEditor() {
   var container = document.getElementById('container');
   editor = monaco.editor.create(container, {
@@ -104,6 +127,30 @@ function initEditor() {
     cursorBlinking: 'smooth',
     accessibilitySupport: 'auto',
   });
+
+  // Dirty-tracking: fire when editable and model content changes.
+  editor.onDidChangeModelContent(function() {
+    if (!editor.getRawOptions().readOnly) {
+      isDirty = true;
+      postDirty(true);
+    }
+  });
+
+  // ⌘S / Ctrl-S inside Monaco: prevent browser save dialog, post save request.
+  editor.addCommand(
+    monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
+    function() {
+      if (!editor.getRawOptions().readOnly) {
+        var content = editor.getValue();
+        try {
+          window.parent.postMessage(
+            { type: 'save', path: currentPath, content: content },
+            window.location.origin
+          );
+        } catch (_) {}
+      }
+    }
+  );
 
   // Hide loading overlay.
   document.getElementById('loading').style.display = 'none';
@@ -169,6 +216,23 @@ function loadDemo() {
 }
 
 // ── postMessage API ───────────────────────────────────────────────────────
+//
+// Messages received from parent:
+//   { type: 'openFile', path, content, language }
+//     — Load content into editor; reset dirty state; keep current readOnly setting.
+//   { type: 'setTheme', theme }
+//     — Switch Monaco theme (dark/light).
+//   { type: 'setEditable', editable }
+//     — Toggle readOnly on the editor.  When switching to read-only, resets dirty.
+//   { type: 'requestContent' }
+//     — Reply immediately with { type: 'content', path, content }.
+//
+// Messages posted to parent:
+//   { type: 'ready' }        — editor mounted.
+//   { type: 'error', message } — fatal init error.
+//   { type: 'dirty', dirty }  — dirty state changed (debounced 300 ms).
+//   { type: 'save', path, content } — ⌘S / Ctrl-S triggered (parent does the fetch).
+//   { type: 'content', path, content } — reply to 'requestContent'.
 window.addEventListener('message', function(e) {
   // Only accept messages from the same origin (parent console frame).
   if (e.origin !== window.location.origin) return;
@@ -182,8 +246,24 @@ window.addEventListener('message', function(e) {
     }
     var lang = msg.language || 'plaintext';
     var content = typeof msg.content === 'string' ? msg.content : '';
+    currentPath = typeof msg.path === 'string' ? msg.path : '';
     monaco.editor.setModelLanguage(editor.getModel(), lang);
+    // Suppress dirty events while loading: temporarily mark as not editable
+    // so the onDidChangeModelContent guard does not fire during setValue.
+    var wasReadOnly = editor.getRawOptions().readOnly;
+    editor.updateOptions({ readOnly: true });
     editor.setValue(content);
+    // Restore original readOnly setting.
+    editor.updateOptions({ readOnly: wasReadOnly });
+    // Clear dirty state — opening a file always starts clean.
+    isDirty = false;
+    if (dirtyDebounceTimer !== null) {
+      clearTimeout(dirtyDebounceTimer);
+      dirtyDebounceTimer = null;
+    }
+    try {
+      window.parent.postMessage({ type: 'dirty', dirty: false }, window.location.origin);
+    } catch (_) {}
   } else if (msg.type === 'setTheme') {
     // Map yakOS console theme names to Monaco built-in theme identifiers.
     // Dark themes (ops, fluid, og) → 'vs-dark'; light → 'vs'.
@@ -191,5 +271,33 @@ window.addEventListener('message', function(e) {
     // inline script — no CSP changes required.
     var monacoTheme = (msg.theme === 'light') ? 'vs' : 'vs-dark';
     monaco.editor.setTheme(monacoTheme);
+  } else if (msg.type === 'setEditable') {
+    if (!editor) return;
+    var editable = !!msg.editable;
+    editor.updateOptions({ readOnly: !editable });
+    // Switching to read-only resets dirty (user cancelled edit).
+    if (!editable && isDirty) {
+      isDirty = false;
+      if (dirtyDebounceTimer !== null) {
+        clearTimeout(dirtyDebounceTimer);
+        dirtyDebounceTimer = null;
+      }
+      try {
+        window.parent.postMessage({ type: 'dirty', dirty: false }, window.location.origin);
+      } catch (_) {}
+    }
+    if (editable) {
+      // Focus the editor so the operator can type immediately.
+      editor.focus();
+    }
+  } else if (msg.type === 'requestContent') {
+    // Parent is about to save; reply with current content.
+    if (!editor) return;
+    try {
+      window.parent.postMessage(
+        { type: 'content', path: currentPath, content: editor.getValue() },
+        window.location.origin
+      );
+    } catch (_) {}
   }
 });
