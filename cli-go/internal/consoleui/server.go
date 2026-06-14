@@ -767,12 +767,12 @@ func requireTokenForNonStatic(token string, next http.Handler) http.Handler {
 			return
 		}
 		// WebSocket upgrade requests cannot carry an Authorization header —
-		// browsers forbid setting it on the WS upgrade.  The console WS
-		// handler (/v1/events) authenticates via the Sec-WebSocket-Protocol
-		// subprotocol token ("yakos-bearer, <token>") checked by
-		// consoleAuthSubprotocol.  Skip the header-token check here and let
-		// the downstream WS handler enforce its own auth.
-		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		// browsers forbid setting it on the WS upgrade.  Scope the bypass
+		// strictly to /v1/events: a spoofed Upgrade: websocket header on any
+		// other path (e.g. /api/files/content) must NOT skip the token check.
+		// The downstream consoleAuthSubprotocol middleware gates /v1/events
+		// itself via the Sec-WebSocket-Protocol subprotocol token.
+		if r.URL.Path == "/v1/events" && strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			next.ServeHTTP(w, r)
 			return
 		}

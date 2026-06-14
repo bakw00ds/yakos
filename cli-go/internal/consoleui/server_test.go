@@ -930,6 +930,41 @@ func TestWSEdge_WSHandlerRejectsBadSubprotocol(t *testing.T) {
 	}
 }
 
+// TestWSEdge_SpoofedUpgradeOnNonWSRouteStill401 is a security regression test.
+// A request to a gated non-WS route (e.g. /api/files/content) carrying a
+// spoofed "Upgrade: websocket" header must NOT bypass the token check.
+// The bypass in requireTokenForNonStatic is scoped to /v1/events only.
+func TestWSEdge_SpoofedUpgradeOnNonWSRouteStill401(t *testing.T) {
+	tok := strings.Repeat("a", 64)
+	downstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	wrapped := consoleui.RequireTokenForNonStatic(tok, downstream)
+
+	gatedPaths := []string{
+		"/api/files/content",
+		"/api/files/tree",
+		"/api/chat/dispatch",
+		"/flows/api/workflows",
+		"/api/presence",
+	}
+	for _, path := range gatedPaths {
+		path := path
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			// Spoofed Upgrade header — no token.
+			req.Header.Set("Upgrade", "websocket")
+			req.Header.Set("Connection", "Upgrade")
+			rr := httptest.NewRecorder()
+			wrapped.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusUnauthorized {
+				t.Errorf("GET %s with spoofed Upgrade: websocket (no token): status=%d; want 401 — bypass must be scoped to /v1/events", path, rr.Code)
+			}
+		})
+	}
+}
+
 // TestVendorRoute_MonacoLanguageGrammarsServed verifies that representative
 // Monaco language grammar files (basic-languages) and language service workers
 // (language/) serve 200 with application/javascript and no token required.
