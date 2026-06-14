@@ -1,12 +1,39 @@
 // export_test.go exposes internal functions for the _test package.
 package serve
 
-import "github.com/bakw00ds/yakos/internal/jsonrpc"
+import (
+	"github.com/bakw00ds/yakos/internal/consoleui"
+	"github.com/bakw00ds/yakos/internal/jsonrpc"
+	"github.com/bakw00ds/yakos/internal/perfdash"
+	"path/filepath"
+)
 
 // RegisterMethodsForTest exposes registerMethods for test packages that
 // need to build a server inline (using net.Pipe) rather than a real socket.
 func RegisterMethodsForTest(srv *jsonrpc.Server, cfg Config) {
 	registerMethods(srv, cfg)
+}
+
+// BuildConsoleCfgForTest constructs the consoleui.Config that Run() would pass
+// to consoleui.New, using the same field assignments as the real path.
+// This lets tests assert that all required fields — especially WorkspaceRoot —
+// are wired from serve.Config to consoleui.Config without starting a full daemon.
+func BuildConsoleCfgForTest(cfg Config) consoleui.Config {
+	workDir := perfdash.DefaultWorkDir(cfg.WorkspaceRoot)
+	kanbanPath := filepath.Join(cfg.WorkspaceRoot, "work", "current", "kanban.md")
+	return consoleui.Config{
+		Addr:              cfg.consoleBind(),
+		KanbanBoardPath:   kanbanPath,
+		KanbanProject:     filepath.Base(cfg.WorkspaceRoot),
+		MetricsProjectDir: cfg.WorkspaceRoot,
+		PerfWorkDir:       workDir,
+		WorkDir:           workDir,
+		StateDir:          cfg.consoleStateDir(),
+		WorkspaceRoot:     cfg.WorkspaceRoot,
+		// Bus, DispatchService, WorkflowEngine, Token omitted — not
+		// constructed by this helper (requires live services); the fields
+		// under test here are the static config derivations.
+	}
 }
 
 // ---- Phase 6c: console-bind test exports ------------------------------------

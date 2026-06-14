@@ -445,6 +445,7 @@ func Run(ctx context.Context, cfg Config) error {
 			WorkDir:           workDir,
 			WorkflowEngine:    workflowEngine,
 			StateDir:          cfg.consoleStateDir(),
+			WorkspaceRoot:     cfg.WorkspaceRoot,
 		}
 
 		if networked {
