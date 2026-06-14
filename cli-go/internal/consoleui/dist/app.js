@@ -3390,13 +3390,13 @@
           </div>
         </div>
         <div id="panel-kanban" class="tab-panel">
-          <iframe title="Kanban board" allow="same-origin"></iframe>
+          <iframe title="Kanban board" sandbox="allow-scripts allow-same-origin"></iframe>
         </div>
         <div id="panel-cost" class="tab-panel">
-          <iframe title="Cost dashboard" allow="same-origin"></iframe>
+          <iframe title="Cost dashboard" sandbox="allow-scripts allow-same-origin"></iframe>
         </div>
         <div id="panel-perf" class="tab-panel">
-          <iframe title="Performance dashboard" allow="same-origin"></iframe>
+          <iframe title="Performance dashboard" sandbox="allow-scripts allow-same-origin"></iframe>
         </div>
         <div id="panel-chat" class="tab-panel">
           <div class="chat-loading">
