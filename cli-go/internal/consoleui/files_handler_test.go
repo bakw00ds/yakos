@@ -3,17 +3,18 @@ package consoleui_test
 // files_handler_test.go — unit + integration tests for /api/files/* endpoints.
 //
 // Coverage:
-//   - GET /api/files/tree: lists temp workspace, skips .git, respects cap
-//     (truncated flag), sorts dirs-first.
+//   - GET /api/files/tree: lists temp workspace, skips .git, respects caps
+//     (per-dir entry cap → truncated=true, depth cap → truncated=true), sorts
+//     dirs-first, OMITS secret-matched files.
 //   - GET /api/files/content: UTF-8 text (correct language ID), base64 for
 //     binary file, 413 over the size cap, 503 when WorkspaceRoot is empty.
 //   - Path jail: ../etc/passwd, absolute path, and a symlink pointing outside
 //     the workspace are ALL rejected; a symlink pointing inside is allowed.
-//   - Secret-pattern content read refused; tree still lists the file.
-//   - Role gate: RoleRead identity passes both endpoints (200/normal); a
-//     resolved identity below RoleRead (impossible with current constants but
-//     exercised via injectIdentityMiddleware) gets 403.  The zero-value
-//     Identity (Resolved=false, loopback invariant) is never blocked.
+//   - Secret deny-set: expanded patterns (.envrc, id_rsa, server.p12,
+//     creds.json via "credentials" substring) refused by content AND omitted
+//     from tree.
+//   - Role gate: RoleRead identity passes both endpoints; zero-value Identity
+//     (Resolved=false, loopback invariant) is never blocked.
 //
 // Determinism: no time.Sleep, no subprocess calls, no LLM calls.
 // All OS operations are scoped to os.MkdirTemp directories; the real FS is
@@ -21,6 +22,7 @@ package consoleui_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -37,8 +39,7 @@ import (
 // ---- helpers ----------------------------------------------------------------
 
 // newFilesTestServer builds a consoleui.Server with WorkspaceRoot set to
-// workspaceDir and returns the httptest.Server, the bearer token, and the
-// workspace dir path.
+// workspaceDir and returns the httptest.Server and the bearer token.
 func newFilesTestServer(t *testing.T, workspaceDir string) (*httptest.Server, string) {
 	t.Helper()
 	stateDir := t.TempDir()
@@ -220,20 +221,7 @@ func TestFilesTree_SkipsGit(t *testing.T) {
 	}
 }
 
-// TestFilesTree_TruncatedFlag verifies that when a directory has more entries
-// than the per-directory cap, truncated=true is returned.
-//
-// We use a small inline cap by creating enough files to exceed the real cap
-// would be impractical, so this test directly exercises the truncation via
-// an injected workspace with exactly maxTreeEntriesPerDir+1 files.
-// Since maxTreeEntriesPerDir=2000 is too many to create in a test, we instead
-// test that the cap is applied by checking the response for a workspace that
-// has exactly 1 file — truncated must be false — and trust the handler code
-// for the truncation path. We separately test the flag directly against the
-// unexported constant by creating a subdir test.
-//
-// A lighter approach: we verify that requesting a non-existent dir returns 404
-// and that the truncated flag is false for a normal small workspace.
+// TestFilesTree_TruncatedFlagSmall verifies truncated=false for a small workspace.
 func TestFilesTree_TruncatedFlagSmall(t *testing.T) {
 	t.Parallel()
 
@@ -256,6 +244,84 @@ func TestFilesTree_TruncatedFlagSmall(t *testing.T) {
 	}
 	if len(got.Entries) != 1 || got.Entries[0].Name != "only.go" {
 		t.Errorf("tree: expected [only.go]; got %v", got.Entries)
+	}
+}
+
+// TestFilesTree_TruncatedByEntryCap verifies that truncated=true is set when
+// a directory contains more than MaxTreeEntriesPerDir entries.
+// We create MaxTreeEntriesPerDir+1 files using the exported constant so the
+// test stays in sync with the actual cap value.
+func TestFilesTree_TruncatedByEntryCap(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	// Create cap+1 files so the cap is exceeded.
+	cap := consoleui.MaxTreeEntriesPerDir
+	for i := 0; i <= cap; i++ {
+		name := fmt.Sprintf("f%05d.txt", i)
+		mustWriteFile(t, filepath.Join(ws, name), []byte("x"))
+	}
+
+	ts, tok := newFilesTestServer(t, ws)
+	resp := filesGet(t, ts, tok, "/api/files/tree")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("entry cap: got %d; want 200", resp.StatusCode)
+	}
+
+	var got struct {
+		Truncated bool                    `json:"truncated"`
+		Entries   []struct{ Name string } `json:"entries"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Truncated {
+		t.Error("tree: truncated=false when entry cap exceeded; want true")
+	}
+	// Must return exactly cap entries (the cap+1th was dropped).
+	if len(got.Entries) > cap {
+		t.Errorf("tree: entry count %d exceeds cap %d", len(got.Entries), cap)
+	}
+}
+
+// TestFilesTree_TruncatedByDepthCap verifies that truncated=true is set when
+// a directory tree is deeper than MaxTreeDepth.
+// We nest MaxTreeDepth+1 directories so the deepest level cannot be expanded.
+func TestFilesTree_TruncatedByDepthCap(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	// Build a chain of directories: ws/d0/d1/.../d(maxDepth).
+	depth := consoleui.MaxTreeDepth + 1
+	path := ws
+	for i := 0; i < depth; i++ {
+		path = filepath.Join(path, fmt.Sprintf("d%02d", i))
+		if err := os.Mkdir(path, 0755); err != nil {
+			t.Fatalf("mkdir depth %d: %v", i, err)
+		}
+	}
+	// Put a file at the very bottom so the deepest dir is non-empty.
+	mustWriteFile(t, filepath.Join(path, "deep.go"), []byte("package main"))
+
+	ts, tok := newFilesTestServer(t, ws)
+	resp := filesGet(t, ts, tok, "/api/files/tree")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("depth cap: got %d; want 200", resp.StatusCode)
+	}
+
+	var got struct {
+		Truncated bool `json:"truncated"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Truncated {
+		t.Errorf("tree: truncated=false for depth %d (> MaxTreeDepth %d); want true",
+			depth, consoleui.MaxTreeDepth)
 	}
 }
 
@@ -633,33 +699,49 @@ func TestFilesJail_GitPath(t *testing.T) {
 	}
 }
 
-// ---- Secret pattern tests ---------------------------------------------------
+// ---- Secret deny-set tests --------------------------------------------------
 
-// TestFilesSecret_ContentRefused verifies that secret-pattern files cannot be
-// read via the content endpoint.
+// TestFilesSecret_ContentRefused verifies that the expanded secret deny-set
+// refuses all covered patterns at the content endpoint with 403.
+//
+// Patterns exercised:
+//   - .pem extension (server.pem)
+//   - .key extension (server.key)
+//   - .env exact basename (.env)
+//   - .env substring (.env.local, .envrc — direnv, holds tokens)
+//   - extensionless exact basename (id_rsa)
+//   - .p12 extension (server.p12)
+//   - "credentials" substring (creds.json contains "cred" NOT "credentials";
+//     credentials.json DOES match; creds_db.json does NOT match)
 func TestFilesSecret_ContentRefused(t *testing.T) {
 	t.Parallel()
 
 	ws := t.TempDir()
-	secrets := []string{
+	// All of these must be refused.
+	refusedFiles := []string{
 		"server.pem",
 		"server.key",
 		".env",
 		".env.local",
-		"credentials.json",
+		".envrc", // direnv; contains ".env"
+		"id_rsa", // extensionless SSH private key
+		"server.p12",
+		"credentials.json", // "credentials" substring
+		"id_ed25519",       // extensionless SSH key
+		".npmrc",           // exact basename
+		".netrc",           // exact basename
 	}
-	for _, name := range secrets {
+	for _, name := range refusedFiles {
 		mustWriteFile(t, filepath.Join(ws, name), []byte("secret content"))
 	}
 
 	ts, tok := newFilesTestServer(t, ws)
 
-	for _, name := range secrets {
+	for _, name := range refusedFiles {
 		t.Run(name, func(t *testing.T) {
 			resp := filesGet(t, ts, tok, "/api/files/content?path="+name)
 			filesBodyStr(t, resp)
 
-			// Must be 403 (not 200).
 			if resp.StatusCode == http.StatusOK {
 				t.Errorf("secret file %q: got 200; content must be refused", name)
 			}
@@ -670,13 +752,52 @@ func TestFilesSecret_ContentRefused(t *testing.T) {
 	}
 }
 
-// TestFilesSecret_TreeListsSecrets verifies that the tree endpoint still lists
-// secret files (the editor can show them as unreadable; content is refused).
-func TestFilesSecret_TreeListsSecrets(t *testing.T) {
+// TestFilesSecret_NonSecretNotRefused verifies that files that superficially
+// resemble secrets but don't match the deny-set ARE served normally.
+func TestFilesSecret_NonSecretNotRefused(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	// These must NOT be refused (no match in deny-set).
+	allowedFiles := []string{
+		"monkey.go",      // .go extension, no sensitive substring
+		"README.md",      // plain doc
+		"creds_db.go",    // contains "creds" but not "credentials"
+		"deploy_key.pub", // .pub extension (not in deny-set)
+	}
+	for _, name := range allowedFiles {
+		mustWriteFile(t, filepath.Join(ws, name), []byte("safe content"))
+	}
+
+	ts, tok := newFilesTestServer(t, ws)
+
+	for _, name := range allowedFiles {
+		t.Run(name, func(t *testing.T) {
+			resp := filesGet(t, ts, tok, "/api/files/content?path="+name)
+			defer resp.Body.Close()
+
+			if resp.StatusCode == http.StatusForbidden {
+				t.Errorf("non-secret file %q: got 403; should be served", name)
+			}
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("non-secret file %q: got %d; want 200", name, resp.StatusCode)
+			}
+		})
+	}
+}
+
+// TestFilesSecret_TreeOmitsSecrets verifies that the tree endpoint OMITS
+// secret-matched files entirely (they do not appear in entries at all).
+// This replaces the previous TestFilesSecret_TreeListsSecrets test which
+// verified the opposite (now-incorrect) behaviour.
+func TestFilesSecret_TreeOmitsSecrets(t *testing.T) {
 	t.Parallel()
 
 	ws := t.TempDir()
 	mustWriteFile(t, filepath.Join(ws, "server.key"), []byte("private key content"))
+	mustWriteFile(t, filepath.Join(ws, ".env"), []byte("SECRET=hunter2"))
+	mustWriteFile(t, filepath.Join(ws, ".envrc"), []byte("export TOKEN=abc"))
+	mustWriteFile(t, filepath.Join(ws, "id_rsa"), []byte("ssh-rsa key"))
 	mustWriteFile(t, filepath.Join(ws, "app.go"), []byte("package main"))
 
 	ts, tok := newFilesTestServer(t, ws)
@@ -699,9 +820,16 @@ func TestFilesSecret_TreeListsSecrets(t *testing.T) {
 		names[e.Name] = true
 	}
 
-	// server.key MUST appear in tree (tree does not filter secrets).
-	if !names["server.key"] {
-		t.Error("tree: server.key should appear in tree listing even though content is refused")
+	// app.go must appear (non-secret file).
+	if !names["app.go"] {
+		t.Error("tree: app.go should appear in tree listing")
+	}
+
+	// Secret files must NOT appear.
+	for _, secret := range []string{"server.key", ".env", ".envrc", "id_rsa"} {
+		if names[secret] {
+			t.Errorf("tree: secret file %q must be omitted from tree; it appeared", secret)
+		}
 	}
 }
 
@@ -784,19 +912,9 @@ func TestFilesRoleGate_ZeroValueNotBlocked(t *testing.T) {
 	}
 }
 
-// TestFilesRoleGate_RoutesWrappedWithRoleRead verifies that the routes are
-// registered with requireRoleFunc(RoleRead, ...) by injecting a Resolved
-// identity with a role below RoleRead.
-//
-// Note: since RoleRead is the lowest role constant (iota=0), we cannot
-// construct a Role value below it without unsafe tricks.  Instead we verify
-// the positive case (RoleRead passes) and document that the enforcement
-// middleware itself is exercised by existing enforcement tests for other routes
-// (the requireRoleFunc wrapper is the same function for all routes).
-//
-// The presence of the route registration with requireRoleFunc(RoleRead, ...)
-// in server.go is the authoritative record; this test asserts the happy path
-// as a smoke test that the routes are actually registered.
+// TestFilesRoleGate_RoutesRegistered verifies that both file API routes are
+// registered by asserting they return non-404 and non-403 for a RoleAdmin
+// identity (smoke test for route + role registration).
 func TestFilesRoleGate_RoutesRegistered(t *testing.T) {
 	t.Parallel()
 

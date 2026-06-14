@@ -505,12 +505,13 @@ func (s *Server) registerRoutes() {
 	// GET /api/files/content?path=<relpath> — file content (UTF-8 or base64)
 	//
 	// Both require RoleRead.  Both are jailed to Config.WorkspaceRoot.
-	// Secret files (*.pem, *.key, *credentials*, *.env*) are refused at
-	// the content endpoint.  See files_handler.go for the full security model.
+	// Secret files are omitted from tree and refused with 403 at content.
+	// See files_handler.go for the full security model.
 	//
-	// NOTE: these routes also register under the mux used by the Monaco IDE
-	// spike (feat/ide-monaco-spike).  If that branch is merged first, a trivial
-	// rebase conflict on registerRoutes may need resolution.
+	// NOTE: PR #175 (feat/ide-monaco-spike) is still open and also edits
+	// registerRoutes.  Whichever of #175 / #176 merges second will have a
+	// trivial rebase conflict on this section of registerRoutes; the resolution
+	// is to include both sets of route registrations.
 	s.mux.HandleFunc("/api/files/tree", requireRoleFunc(netid.RoleRead, s.files.handleFilesTree))
 	s.mux.HandleFunc("/api/files/content", requireRoleFunc(netid.RoleRead, s.files.handleFilesContent))
 }
