@@ -273,7 +273,13 @@
             document.getElementById('auth-error').classList.add('visible');
             return;
           }
-          iframe.src = tab.src;
+          // Append the bearer token as a URL fragment so the dashboard's
+          // client-side getToken() (metricsdash/perfdash read #token=<hex>)
+          // authenticates without an extra round-trip.  Fragments are
+          // NEVER sent to the server — they exist only in the browser and
+          // cannot appear in server logs — so this is safe.  Kanban does
+          // not use a fragment gate and ignores the extra fragment harmlessly.
+          iframe.src = tab.src + '#token=' + TOKEN;
         });
       }
     }
