@@ -82,19 +82,32 @@ self.addEventListener('fetch', (e) => {
   // throws TypeError when you pass {mode:'same-origin'} to new Request() for
   // a navigate-mode request (which is what iframe document loads use).
   //
-  // We copy method and headers from the original request, then add the
-  // Authorization header.  Body is omitted — iframe document loads and
-  // virtually all sub-resource GETs have no body; POST API calls already
-  // carry their own Authorization header (checked above) and are not
-  // modified here.
-  const headers = new Headers(e.request.headers);
-  headers.set('Authorization', 'Bearer ' + token);
-  const modified = new Request(e.request.url, {
-    method:      e.request.method,
-    headers:     headers,
-    mode:        'same-origin',
-    credentials: 'omit',
-    redirect:    'follow',
-  });
-  e.respondWith(fetch(modified));
+  // We copy method and headers from the original request, then inject the
+  // Authorization header.  For non-GET/HEAD requests (POST, PUT, PATCH,
+  // DELETE, etc.) we also copy the body — otherwise mutations from the
+  // kanban iframe (api/add, api/move, api/notes, api/delete) arrive at the
+  // server with an empty body, causing a 400 "title required" error.
+  //
+  // The kanban iframe's post() sets only Content-Type, not Authorization, so
+  // its POSTs reach this SW branch and must have their body preserved.
+  // Navigate-mode requests (iframe document loads) are always GET and have no
+  // body; only non-GET/HEAD requests need the body clone.
+  e.respondWith((async () => {
+    const headers = new Headers(e.request.headers);
+    headers.set('Authorization', 'Bearer ' + token);
+    const init = {
+      method:      e.request.method,
+      headers:     headers,
+      mode:        'same-origin',
+      credentials: 'omit',
+      redirect:    'follow',
+    };
+    // Copy the body for methods that carry one.  arrayBuffer() preserves the
+    // exact bytes (JSON payload); Content-Type is already in the headers clone
+    // so the server parses it correctly.
+    if (e.request.method !== 'GET' && e.request.method !== 'HEAD') {
+      init.body = await e.request.clone().arrayBuffer();
+    }
+    return fetch(new Request(e.request.url, init));
+  })());
 });
