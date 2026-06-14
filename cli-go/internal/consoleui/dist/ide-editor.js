@@ -81,30 +81,94 @@ loaderScript.onload = function() {
 };
 document.head.appendChild(loaderScript);
 
-// ── Editor initialisation ─────────────────────────────────────────────────
+// ── Editor state ──────────────────────────────────────────────────────────
 var editor = null;
 
-// Track the path currently open so we can include it in save/dirty messages.
+// Multi-model support: Map<path, {model, isDirty, dirtyDebounceTimer}>
+// Each open file gets its own Monaco ITextModel so switching files does not
+// reload the iframe — editor.setModel(entry.model) is instant.
+var modelMap = {}; // plain object: path → {model, isDirty, dirtyTimer}
+
+// The workspace-relative path currently displayed in the editor.
 var currentPath = '';
 
-// Dirty tracking: true when the model has been changed since the last openFile
-// or successful save.  The parent uses this to decide whether to enable Save.
+// Dirty tracking: true when the active model has unsaved changes.
+// Kept as a module-level var for backward compatibility with the single-file
+// save/⌘S path; the per-model isDirty inside modelMap is the authoritative
+// per-file state.
 var isDirty = false;
 
 // Debounce timer for dirty postMessage to parent.
 var dirtyDebounceTimer = null;
 
-function postDirty(dirty) {
+function postDirty(path, dirty) {
   // Debounced: coalesce rapid keystrokes into a single message every 300 ms.
-  if (dirtyDebounceTimer !== null) {
-    clearTimeout(dirtyDebounceTimer);
+  // Always include path so the parent can associate the event to the right tab.
+  var entry = modelMap[path];
+  if (entry) {
+    if (entry.dirtyTimer !== null) {
+      clearTimeout(entry.dirtyTimer);
+    }
+    entry.dirtyTimer = setTimeout(function() {
+      entry.dirtyTimer = null;
+      try {
+        window.parent.postMessage(
+          { type: 'dirty', path: path, dirty: dirty },
+          window.location.origin
+        );
+      } catch (_) {}
+    }, 300);
+  } else {
+    // Fallback: no model entry yet (should not happen), send immediately.
+    if (dirtyDebounceTimer !== null) {
+      clearTimeout(dirtyDebounceTimer);
+    }
+    dirtyDebounceTimer = setTimeout(function() {
+      dirtyDebounceTimer = null;
+      try {
+        window.parent.postMessage({ type: 'dirty', path: path, dirty: dirty }, window.location.origin);
+      } catch (_) {}
+    }, 300);
   }
-  dirtyDebounceTimer = setTimeout(function() {
-    dirtyDebounceTimer = null;
-    try {
-      window.parent.postMessage({ type: 'dirty', dirty: dirty }, window.location.origin);
-    } catch (_) {}
-  }, 300);
+}
+
+// getOrCreateModel returns (and caches) a Monaco ITextModel for the given path.
+// If content/language are supplied (on first open), the model is created with
+// that initial content.  On subsequent calls with the same path (tab switch),
+// content/language may be null — the existing model is reused as-is.
+function getOrCreateModel(path, content, language) {
+  if (modelMap[path]) {
+    return modelMap[path];
+  }
+  var uri = monaco.Uri.file(path);
+  // Check if Monaco already has a model for this URI (defensive — should not
+  // happen given we track by path, but guards against double-init races).
+  var existing = monaco.editor.getModel(uri);
+  var model;
+  if (existing) {
+    model = existing;
+  } else {
+    model = monaco.editor.createModel(
+      typeof content === 'string' ? content : '',
+      language || 'plaintext',
+      uri
+    );
+  }
+  var entry = { model: model, isDirty: false, dirtyTimer: null };
+
+  // Wire per-model dirty tracking.
+  model.onDidChangeContent(function() {
+    if (!editor) return;
+    // Only mark dirty when this model is currently active and editor is editable.
+    if (editor.getModel() === model && !editor.getRawOptions().readOnly) {
+      entry.isDirty = true;
+      isDirty = true;
+      postDirty(path, true);
+    }
+  });
+
+  modelMap[path] = entry;
+  return entry;
 }
 
 function initEditor() {
@@ -128,19 +192,13 @@ function initEditor() {
     accessibilitySupport: 'auto',
   });
 
-  // Dirty-tracking: fire when editable and model content changes.
-  editor.onDidChangeModelContent(function() {
-    if (!editor.getRawOptions().readOnly) {
-      isDirty = true;
-      postDirty(true);
-    }
-  });
-
   // ⌘S / Ctrl-S inside Monaco: prevent browser save dialog, post save request.
+  // The save message now includes path so the parent can guard against stale
+  // path/content pairs (B1 parallel from the multi-tab context).
   editor.addCommand(
     monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
     function() {
-      if (!editor.getRawOptions().readOnly) {
+      if (!editor.getRawOptions().readOnly && currentPath) {
         var content = editor.getValue();
         try {
           window.parent.postMessage(
@@ -211,26 +269,34 @@ function loadDemo() {
     '}',
   ].join('\n');
 
-  monaco.editor.setModelLanguage(editor.getModel(), 'go');
-  editor.setValue(demoContent);
+  var demoPath = '/demo/main.go';
+  var entry = getOrCreateModel(demoPath, demoContent, 'go');
+  currentPath = demoPath;
+  editor.setModel(entry.model);
 }
 
 // ── postMessage API ───────────────────────────────────────────────────────
 //
 // Messages received from parent:
-//   { type: 'openFile', path, content, language }
-//     — Load content into editor; reset dirty state; keep current readOnly setting.
+//   { type: 'openFile', path, content, language, version, editable }
+//     — Load content into a per-path model; switch editor to that model.
+//       Re-opening an already-open path reuses the cached model (no content
+//       reset) — the parent sends content only on first open for a given path.
+//       When `content` is explicitly provided (non-null string), the model
+//       content is replaced (used on reload after conflict or explicit re-read).
 //   { type: 'setTheme', theme }
 //     — Switch Monaco theme (dark/light).
 //   { type: 'setEditable', editable }
 //     — Toggle readOnly on the editor.  When switching to read-only, resets dirty.
 //   { type: 'requestContent' }
 //     — Reply immediately with { type: 'content', path, content }.
+//   { type: 'closeFile', path }
+//     — Dispose the model for the given path (called when a tab is closed).
 //
 // Messages posted to parent:
-//   { type: 'ready' }        — editor mounted.
-//   { type: 'error', message } — fatal init error.
-//   { type: 'dirty', dirty }  — dirty state changed (debounced 300 ms).
+//   { type: 'ready' }            — editor mounted.
+//   { type: 'error', message }   — fatal init error.
+//   { type: 'dirty', path, dirty } — dirty state changed (debounced 300 ms).
 //   { type: 'save', path, content } — ⌘S / Ctrl-S triggered (parent does the fetch).
 //   { type: 'content', path, content } — reply to 'requestContent'.
 window.addEventListener('message', function(e) {
@@ -244,26 +310,60 @@ window.addEventListener('message', function(e) {
       showError('Received openFile before editor was ready');
       return;
     }
-    var lang = msg.language || 'plaintext';
-    var content = typeof msg.content === 'string' ? msg.content : '';
-    currentPath = typeof msg.path === 'string' ? msg.path : '';
-    monaco.editor.setModelLanguage(editor.getModel(), lang);
-    // Suppress dirty events while loading: temporarily mark as not editable
-    // so the onDidChangeModelContent guard does not fire during setValue.
-    var wasReadOnly = editor.getRawOptions().readOnly;
-    editor.updateOptions({ readOnly: true });
-    editor.setValue(content);
-    // Restore original readOnly setting.
-    editor.updateOptions({ readOnly: wasReadOnly });
-    // Clear dirty state — opening a file always starts clean.
-    isDirty = false;
-    if (dirtyDebounceTimer !== null) {
-      clearTimeout(dirtyDebounceTimer);
-      dirtyDebounceTimer = null;
+    var path = typeof msg.path === 'string' ? msg.path : '';
+    var language = msg.language || 'plaintext';
+
+    // Look up or create the model for this path.
+    var entry = modelMap[path];
+    var isFirstOpen = !entry;
+
+    if (isFirstOpen) {
+      // First time opening this file: create model with provided content.
+      var content = typeof msg.content === 'string' ? msg.content : '';
+      entry = getOrCreateModel(path, content, language);
+    } else if (typeof msg.content === 'string') {
+      // Re-open with explicit content (e.g. reload after conflict):
+      // update the existing model content without triggering dirty.
+      var wasReadOnly = editor.getRawOptions().readOnly;
+      editor.updateOptions({ readOnly: true });
+      entry.model.setValue(msg.content);
+      editor.updateOptions({ readOnly: wasReadOnly });
+      // Reset dirty for this model after an explicit reload.
+      entry.isDirty = false;
+      if (entry.dirtyTimer !== null) {
+        clearTimeout(entry.dirtyTimer);
+        entry.dirtyTimer = null;
+      }
+      // Update language if provided.
+      monaco.editor.setModelLanguage(entry.model, language);
+      try {
+        window.parent.postMessage({ type: 'dirty', path: path, dirty: false }, window.location.origin);
+      } catch (_) {}
     }
-    try {
-      window.parent.postMessage({ type: 'dirty', dirty: false }, window.location.origin);
-    } catch (_) {}
+
+    // Switch editor to this model.
+    currentPath = path;
+    editor.setModel(entry.model);
+    isDirty = entry.isDirty;
+
+    // Apply editable state if explicitly set in the message.
+    if (typeof msg.editable === 'boolean') {
+      editor.updateOptions({ readOnly: !msg.editable });
+    }
+
+    // Clear dirty state on first open (model was just created clean).
+    if (isFirstOpen) {
+      entry.isDirty = false;
+      isDirty = false;
+      if (entry.dirtyTimer !== null) {
+        clearTimeout(entry.dirtyTimer);
+        entry.dirtyTimer = null;
+      }
+      try {
+        window.parent.postMessage({ type: 'dirty', path: path, dirty: false }, window.location.origin);
+      } catch (_) {}
+    }
+
   } else if (msg.type === 'setTheme') {
     // Map yakOS console theme names to Monaco built-in theme identifiers.
     // Dark themes (ops, fluid, og) → 'vs-dark'; light → 'vs'.
@@ -271,25 +371,34 @@ window.addEventListener('message', function(e) {
     // inline script — no CSP changes required.
     var monacoTheme = (msg.theme === 'light') ? 'vs' : 'vs-dark';
     monaco.editor.setTheme(monacoTheme);
+
   } else if (msg.type === 'setEditable') {
     if (!editor) return;
     var editable = !!msg.editable;
     editor.updateOptions({ readOnly: !editable });
-    // Switching to read-only resets dirty (user cancelled edit).
-    if (!editable && isDirty) {
-      isDirty = false;
-      if (dirtyDebounceTimer !== null) {
-        clearTimeout(dirtyDebounceTimer);
-        dirtyDebounceTimer = null;
+    // Switching to read-only resets dirty for the active model.
+    if (!editable) {
+      var activeEntry = currentPath ? modelMap[currentPath] : null;
+      if (activeEntry && activeEntry.isDirty) {
+        activeEntry.isDirty = false;
+        isDirty = false;
+        if (activeEntry.dirtyTimer !== null) {
+          clearTimeout(activeEntry.dirtyTimer);
+          activeEntry.dirtyTimer = null;
+        }
+        try {
+          window.parent.postMessage(
+            { type: 'dirty', path: currentPath, dirty: false },
+            window.location.origin
+          );
+        } catch (_) {}
       }
-      try {
-        window.parent.postMessage({ type: 'dirty', dirty: false }, window.location.origin);
-      } catch (_) {}
     }
-    if (editable) {
+    if (editable && editor) {
       // Focus the editor so the operator can type immediately.
       editor.focus();
     }
+
   } else if (msg.type === 'requestContent') {
     // Parent is about to save; reply with current content.
     if (!editor) return;
@@ -299,5 +408,24 @@ window.addEventListener('message', function(e) {
         window.location.origin
       );
     } catch (_) {}
+
+  } else if (msg.type === 'closeFile') {
+    // Dispose the model for the given path when its tab is closed.
+    var closePath = typeof msg.path === 'string' ? msg.path : '';
+    if (closePath && modelMap[closePath]) {
+      var closeEntry = modelMap[closePath];
+      // Cancel any pending dirty timer.
+      if (closeEntry.dirtyTimer !== null) {
+        clearTimeout(closeEntry.dirtyTimer);
+        closeEntry.dirtyTimer = null;
+      }
+      // Don't dispose the model that's currently displayed (should not happen
+      // in normal flow since parent activates another tab before closing, but
+      // be defensive).
+      if (editor.getModel() !== closeEntry.model) {
+        closeEntry.model.dispose();
+      }
+      delete modelMap[closePath];
+    }
   }
 });

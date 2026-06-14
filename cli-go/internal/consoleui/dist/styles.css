@@ -2294,13 +2294,106 @@ html[data-theme="light"] .modal-btn-cancel:hover {
   height: 100%;
 }
 
-/* ---- Top-level 3-pane layout: tree | editor | chat ---- */
+/* ---- Top-level 3-pane layout: tree | splitter | editor | splitter | chat ---- */
+/*
+ * grid-template-columns is set inline by JS (renderIdeLayout + splitter drag)
+ * so widths + collapsed state are fully dynamic.  The default below is used
+ * when JS has not yet rendered (e.g. layout flash before DOMContentLoaded):
+ *   220px  8px  1fr  8px  280px
+ */
 
 .ide-layout {
   display: grid;
-  grid-template-columns: 220px 1fr 280px;
+  grid-template-columns: 220px 8px 1fr 8px 280px;
   height: 100%;
   overflow: hidden;
+}
+
+/* ---- Splitter (drag handle between panes) ---- */
+
+.ide-splitter {
+  width: 8px;
+  cursor: col-resize;
+  background: var(--border);
+  flex-shrink: 0;
+  position: relative;
+  z-index: 5;
+  transition: background var(--dur, 0.1s) var(--ease, ease);
+  user-select: none;
+  /* Widen the hit area with a transparent pseudo-element */
+}
+
+.ide-splitter::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -4px;
+  right: -4px;
+  bottom: 0;
+  cursor: col-resize;
+}
+
+.ide-splitter:hover,
+.ide-splitter:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+
+.ide-splitter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---- Pane collapse/expand toggle buttons ---- */
+
+.ide-pane-toggle {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 3px);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 4px;
+  flex-shrink: 0;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease);
+}
+
+.ide-pane-toggle:hover {
+  background: rgba(255,255,255,0.07);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+html[data-theme="light"] .ide-pane-toggle:hover {
+  background: rgba(0,0,0,0.06);
+}
+
+.ide-pane-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Collapsed pane: hide overflow, show only the toggle button header */
+
+.ide-pane-collapsed {
+  overflow: hidden;
+}
+
+.ide-pane-collapsed .ide-tree-root,
+.ide-pane-collapsed #ide-chat-slot {
+  display: none;
+}
+
+/* ---- Drag overlay (covers Monaco iframe during splitter drag) ---- */
+
+.ide-drag-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  cursor: col-resize;
+  background: transparent;
 }
 
 /* ---- Left: file tree pane ---- */
@@ -2314,9 +2407,13 @@ html[data-theme="light"] .modal-btn-cancel:hover {
 }
 
 .ide-tree-header {
-  padding: 10px 12px 6px;
+  padding: 6px 8px 6px 12px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
 }
 
 .ide-tree-root {
@@ -2421,6 +2518,124 @@ html[data-theme="light"] .ide-tree-dir:hover {
   font-style: italic;
   padding: 3px 12px;
   font-family: var(--font-mono);
+}
+
+/* ---- Multi-file tab strip (above Monaco editor) ---- */
+
+.ide-tab-strip {
+  display: flex;
+  align-items: stretch;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-height: 30px;
+  /* Hide scrollbar; tabs remain scrollable */
+  scrollbar-width: none;
+}
+
+.ide-tab-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.ide-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px 4px 8px;
+  background: none;
+  border: none;
+  border-right: 1px solid var(--border);
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 180px;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease);
+}
+
+.ide-tab:hover {
+  background: rgba(255,255,255,0.05);
+  color: var(--text);
+}
+
+html[data-theme="light"] .ide-tab:hover {
+  background: rgba(0,0,0,0.04);
+}
+
+.ide-tab-active {
+  background: var(--tab-active-bg);
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.ide-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Dirty dot inside a tab (hidden when file is clean) */
+
+.ide-tab-dirty {
+  font-size: 8px;
+  color: var(--accent);
+  flex-shrink: 0;
+  line-height: 1;
+  margin-right: 1px;
+}
+
+.ide-tab-dirty-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Basename label */
+
+.ide-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Close (×) button inside a tab */
+
+.ide-tab-close {
+  background: none;
+  border: none;
+  border-radius: var(--radius-control, 2px);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0;
+  padding: 0 2px;
+  flex-shrink: 0;
+  transition: opacity var(--dur, 0.1s) var(--ease, ease),
+              color   var(--dur, 0.1s) var(--ease, ease);
+}
+
+.ide-tab:hover .ide-tab-close,
+.ide-tab-active .ide-tab-close,
+.ide-tab-close:focus-visible {
+  opacity: 1;
+}
+
+.ide-tab-close:hover {
+  color: var(--color-error, #ff6b6b);
+  background: rgba(255,107,107,0.15);
+}
+
+.ide-tab-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  opacity: 1;
 }
 
 /* ---- Center: Monaco editor pane ---- */
@@ -2602,10 +2817,14 @@ html[data-theme="light"] .ide-header-btn:hover:not(:disabled) {
 }
 
 .ide-chat-header {
-  padding: 10px 12px 6px;
+  padding: 6px 8px 6px 8px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
 }
 
 #ide-chat-slot {
