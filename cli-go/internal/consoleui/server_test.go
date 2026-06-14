@@ -738,6 +738,93 @@ func TestIDEEditor_ScopedCSP_HasExplicitFontSrc(t *testing.T) {
 	}
 }
 
+// TestIDEEditorJS_ServedNoToken verifies that /ide-editor.js is served without
+// a bearer token (it is a token-exempt static asset, like /app.js) and is
+// delivered with Content-Type: application/javascript and CORP: same-origin.
+// This is required because the /ide/editor iframe must load the bootstrap script
+// before the Service Worker has injected an Authorization header.
+func TestIDEEditorJS_ServedNoToken(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide-editor.js", "") // no token
+	defer drainClose(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /ide-editor.js (no token): status=%d; want 200", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "application/javascript") {
+		t.Errorf("GET /ide-editor.js: Content-Type=%q; want application/javascript", ct)
+	}
+	corp := resp.Header.Get("Cross-Origin-Resource-Policy")
+	if corp != "same-origin" {
+		t.Errorf("GET /ide-editor.js: Cross-Origin-Resource-Policy=%q; want same-origin", corp)
+	}
+}
+
+// TestIDEEditor_NoInlineScript verifies that ide-editor.html contains no inline
+// JavaScript — only an external <script src=...> reference is allowed.
+// This ensures the document can be served under script-src 'self' (no
+// 'unsafe-inline') without triggering a CSP violation.
+func TestIDEEditor_NoInlineScript(t *testing.T) {
+	ts, tok := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide/editor", tok)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /ide/editor: status=%d; want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading /ide/editor body: %v", err)
+	}
+	html := string(body)
+
+	// The only permitted <script> element is the external loader:
+	// <script src="/ide-editor.js"></script>
+	// Any <script> element with content (even whitespace beyond the tag)
+	// would violate script-src 'self' (no 'unsafe-inline').
+	if !strings.Contains(html, `<script src="/ide-editor.js">`) {
+		t.Errorf("ide-editor.html: missing <script src=\"/ide-editor.js\"> reference")
+	}
+
+	// Scan for any <script> element that contains inline code.
+	// Strip HTML comments first so that mentions of <script> inside comments
+	// (e.g. documentation prose in the file header) are not flagged.
+	stripped := html
+	for {
+		start := strings.Index(stripped, "<!--")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(stripped[start:], "-->")
+		if end < 0 {
+			break
+		}
+		stripped = stripped[:start] + stripped[start+end+3:]
+	}
+
+	lower := strings.ToLower(stripped)
+	searchFrom := 0
+	for {
+		idx := strings.Index(lower[searchFrom:], "<script")
+		if idx < 0 {
+			break
+		}
+		absIdx := searchFrom + idx
+		// Find the end of the opening tag.
+		closeIdx := strings.Index(lower[absIdx:], ">")
+		if closeIdx < 0 {
+			break
+		}
+		openTag := lower[absIdx : absIdx+closeIdx+1]
+		// If the opening tag has no src= attribute, it is an inline script.
+		if !strings.Contains(openTag, "src=") {
+			t.Errorf("ide-editor.html: found inline <script> element (no src= attribute): %q — violates script-src 'self'", openTag)
+		}
+		searchFrom = absIdx + closeIdx + 1
+	}
+}
+
 // TestVendorRoute_MonacoLoaderServedNoToken verifies that the Monaco AMD
 // loader (/vendor/monaco/min/vs/loader.js) is served without a token
 // (vendor paths are token-exempt static assets) and carries CORP: same-origin.

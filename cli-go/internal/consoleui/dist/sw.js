@@ -47,5 +47,9 @@ self.addEventListener('fetch', (e) => {
     mode: 'same-origin',
     credentials: 'omit',
   });
-  e.respondWith(fetch(modified));
+  // Fall back to the original unmodified request if the modified fetch fails
+  // (e.g. navigation requests with mode:'same-origin' + credentials:'omit' can
+  // be rejected by the browser before hitting the network).  Without the catch,
+  // a rejected Promise here becomes an uncaught rejection and the navigation fails.
+  e.respondWith(fetch(modified).catch(function() { return fetch(e.request); }));
 });

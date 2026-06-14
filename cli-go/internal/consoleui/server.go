@@ -53,6 +53,9 @@ var vendorFS embed.FS
 //go:embed dist/ide-editor.html
 var ideEditorHTML []byte
 
+//go:embed dist/ide-editor.js
+var ideEditorJS []byte
+
 // Config holds all configuration for the unified console HTTP server.
 type Config struct {
 	// Addr is the TCP listen address. Defaults to "127.0.0.1:7890".
@@ -401,6 +404,12 @@ func (s *Server) registerRoutes() {
 	// secrets; the token is delivered via postMessage only).
 	s.mux.HandleFunc("/sw.js", s.handleSW)
 
+	// IDE editor bootstrap script — token-exempt so the /ide/editor iframe
+	// can load it before the SW has injected the Authorization header.
+	// All Monaco initialisation code lives here; ide-editor.html contains
+	// only the DOM skeleton and a <script src="/ide-editor.js">.
+	s.mux.HandleFunc("/ide-editor.js", s.handleIDEEditorJS)
+
 	// Vendored JS blobs — pinned, checksum-verified, served same-origin.
 	// Token-exempt: static assets that carry no secrets.
 	// The files live under dist/vendor/ in the embed.FS; strip the
@@ -608,6 +617,17 @@ func (s *Server) handleSW(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(swJS)
 }
 
+// handleIDEEditorJS serves the Monaco bootstrap script (/ide-editor.js).
+// Token-exempt (listed in isStaticAsset) so the /ide/editor iframe can load
+// it before the Service Worker has injected the Authorization header.
+// script-src 'self' covers this same-origin path; no 'unsafe-inline' needed.
+func (s *Server) handleIDEEditorJS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	_, _ = w.Write(ideEditorJS)
+}
+
 // ideEditorCSP returns the Content-Security-Policy value for the /ide/editor
 // route ONLY.  This is a deliberately scoped relaxation to allow Monaco editor
 // to run: the AMD loader requires wasm-unsafe-eval (for its regex-engine
@@ -671,7 +691,7 @@ func isStaticAsset(r *http.Request) bool {
 		return false
 	}
 	switch r.URL.Path {
-	case "/", "/app.js", "/styles.css", "/sw.js":
+	case "/", "/app.js", "/styles.css", "/sw.js", "/ide-editor.js":
 		return true
 	}
 	// Vendored pinned blobs are same-origin static assets; no token required.
