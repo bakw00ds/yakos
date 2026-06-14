@@ -78,6 +78,17 @@
   var THEME_LS_KEY = 'yakos_theme';
   var VALID_THEMES = ['ops', 'fluid', 'og', 'light'];
 
+  // Belt-and-suspenders TDZ guard: hoist IDE editor state vars to var so that
+  // even if any pre-paint code path ever reaches syncMonacoTheme(), it sees
+  // `undefined` (falsy) rather than a TDZ ReferenceError that aborts the IIFE.
+  // The authoritative declarations (with comments) remain near the IDE section
+  // below; these var hoists shadow nothing — they produce the same initial value.
+  var ideTabInitialized = false;
+  var ideEditorWindow = null;
+  var ideEditorReady = false;
+  var ideQueuedOpen = null;
+  var ideMessageHandlerRegistered = false;
+
   function defaultTheme() {
     try {
       if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
@@ -95,23 +106,46 @@
     return null;
   }
 
-  function applyTheme(theme) {
+  // setThemeCoreOnly: the safe pre-paint subset of theme application.
+  //
+  // ONLY sets data-theme on <html>, persists to localStorage, and updates
+  // aria-pressed states on .theme-btn elements. Does NOT call syncMonacoTheme.
+  //
+  // Why the split: syncMonacoTheme() reads ideEditorWindow, which is declared
+  // with `let` later in the IIFE. Calling it from the pre-paint init block
+  // (which runs at IIFE top, before those `let` bindings are initialised)
+  // triggers a TDZ ReferenceError that aborts the entire IIFE and produces a
+  // black screen. The Monaco iframe does not exist at pre-paint time anyway;
+  // theme sync to Monaco is handled correctly by:
+  //   a) handleIdeEditorMessage {type:'ready'} — on first IDE tab open, and
+  //   b) applyTheme() (the full version below) — on every picker-button click.
+  function setThemeCoreOnly(theme) {
     if (VALID_THEMES.indexOf(theme) === -1) theme = 'og';
     document.documentElement.setAttribute('data-theme', theme);
     try { localStorage.setItem(THEME_LS_KEY, theme); } catch (_) {}
-    // Update picker button states (may be called before picker DOM exists).
+    // Update picker button states (may not exist yet at pre-paint time; safe).
     var btns = document.querySelectorAll('.theme-btn');
     for (var i = 0; i < btns.length; i++) {
       btns[i].setAttribute('aria-pressed', btns[i].getAttribute('data-theme-value') === theme ? 'true' : 'false');
     }
-    // Sync Monaco editor theme if the iframe is loaded.
+  }
+
+  // applyTheme: the full theme-switch path used by the picker at runtime.
+  // Calls setThemeCoreOnly first, then syncMonacoTheme. Safe to call only
+  // AFTER the IIFE body has fully initialised (i.e. from picker click handlers
+  // wired in buildPage, never from the pre-paint init block).
+  function applyTheme(theme) {
+    setThemeCoreOnly(theme);
+    // syncMonacoTheme is defined later in the IIFE; ideEditorWindow is
+    // initialised by that point whenever applyTheme is called at runtime.
     syncMonacoTheme(theme);
   }
 
-  // Set theme before first paint.
+  // Set theme before first paint — uses setThemeCoreOnly (NOT applyTheme)
+  // to avoid the TDZ crash on ideEditorWindow described above.
   (function () {
     var stored = readStoredTheme();
-    applyTheme(stored || defaultTheme());
+    setThemeCoreOnly(stored || defaultTheme());
 
     // perf-low-end probe: gate FLUID aurora animations on low-end devices.
     try {
@@ -2458,20 +2492,27 @@
   //
   // Phase 1 is read-only. Edit/save/diff are out of scope.
 
-  let ideTabInitialized = false;
+  // IDE editor state variables.
+  // Declared as var (not let) so they are hoisted to the top of the IIFE and
+  // initialised to undefined/false/null before any code runs — including the
+  // pre-paint theme init block. The matching var declarations at the top of the
+  // IIFE (in the TDZ-guard block) ensure no TDZ window exists for these names.
+  // Using var here avoids a duplicate-declaration SyntaxError; var re-declarations
+  // of var are a no-op in sloppy mode and silently ignored in strict mode.
+  ideTabInitialized = false; // already var-declared above; reset to canonical initial value
 
   // Ref to Monaco iframe's contentWindow (set once the iframe loads).
-  let ideEditorWindow = null;
+  ideEditorWindow = null;
 
   // True once the Monaco {type:'ready'} postMessage arrives.
-  let ideEditorReady = false;
+  ideEditorReady = false;
 
   // Queued openFile to send once the editor is ready.
-  let ideQueuedOpen = null;
+  ideQueuedOpen = null;
 
   // Stored handler ref so we can removeEventListener if needed in the future.
   // Guard prevents double-registration if renderIdeLayout were ever called twice.
-  let ideMessageHandlerRegistered = false;
+  ideMessageHandlerRegistered = false;
 
   function initIdeTab() {
     if (ideTabInitialized) return;
