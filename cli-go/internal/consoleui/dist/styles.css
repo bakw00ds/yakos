@@ -2508,7 +2508,7 @@ html[data-theme="light"] .ide-editor-frame {
   color: var(--text-dim);
   cursor: pointer;
   font-size: 11px;
-  font-family: var(--font-ui);
+  font-family: var(--font);
   padding: 2px 8px;
   flex-shrink: 0;
   transition: background var(--dur, 0.1s) var(--ease, ease),
@@ -2563,7 +2563,7 @@ html[data-theme="light"] .ide-header-btn:hover:not(:disabled) {
 }
 
 .ide-save-status-ok {
-  color: var(--color-ok, #6bcf7f);
+  color: var(--color-positive, #6bcf7f);
 }
 
 .ide-save-status-error {
@@ -2578,7 +2578,7 @@ html[data-theme="light"] .ide-header-btn:hover:not(:disabled) {
   color: inherit;
   cursor: pointer;
   font-size: 11px;
-  font-family: var(--font-ui);
+  font-family: var(--font);
   padding: 1px 6px;
   flex-shrink: 0;
 }

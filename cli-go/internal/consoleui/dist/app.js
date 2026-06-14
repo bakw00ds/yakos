@@ -93,6 +93,14 @@
   var ideCurrentVersion = '';
   var ideEditable = false;
   var ideIsDirty = false;
+  // ideIsSaving: true while a POST /api/files/write fetch is in-flight.
+  // Guards both triggerSave() and the 'save' message handler to prevent a
+  // double-POST race where two concurrent ⌘S presses race their success
+  // handlers and corrupt ideCurrentVersion.
+  var ideIsSaving = false;
+  // Timer handle for the transient save-status message auto-clear.
+  // Hoisted (var) to match the TDZ-safety pattern for all IDE state.
+  var ideSaveStatusTimer = null;
 
   function defaultTheme() {
     try {
@@ -2895,6 +2903,13 @@
   // or successful save.
   ideIsDirty = false;
 
+  // True while a POST /api/files/write fetch is in-flight.  Prevents double-POST
+  // when the operator presses ⌘S twice before the first response arrives.
+  ideIsSaving = false;
+
+  // Timer for the transient save-status message.  Reset to canonical initial value.
+  ideSaveStatusTimer = null;
+
   function initIdeTab() {
     if (ideTabInitialized) return;
     ideTabInitialized = true;
@@ -3026,7 +3041,7 @@
   // ideShowSaveStatus shows a transient status message (success or error) in
   // the editor header's aria-live region.  It auto-clears after `durationMs`.
   // Clears immediately if called again before the previous timeout fires.
-  let ideSaveStatusTimer = null;
+  // ideSaveStatusTimer is var-declared in the hoisted TDZ-guard block above.
   function ideShowSaveStatus(msg, isError, durationMs) {
     const el = document.getElementById('ide-save-status');
     if (!el) return;
@@ -3054,7 +3069,7 @@
   //
   // The actual fetch runs in performSave(path, content) once content arrives.
   function triggerSave() {
-    if (!ideEditable || !ideIsDirty) return;
+    if (!ideEditable || !ideIsDirty || ideIsSaving) return;
     if (!ideEditorWindow || !ideCurrentPath) return;
     // Ask the iframe for the current content.  The reply fires handleIdeEditorMessage
     // with {type:'content', path, content}, which calls performSave().
@@ -3063,7 +3078,10 @@
 
   // performSave POSTs content to /api/files/write with the stored version stamp.
   // Handles 200, 409, 403, 413, and generic errors inline.
+  // ideIsSaving is set true at entry and reset in .finally() to prevent a
+  // double-POST race when ⌘S fires twice before the first response arrives.
   function performSave(path, content) {
+    ideIsSaving = true;
     const saveBtn = document.getElementById('ide-save-btn');
     if (saveBtn) {
       saveBtn.disabled = true;
@@ -3087,9 +3105,10 @@
           });
         }
         if (r.status === 409) {
-          // File changed on disk since we read it — show reload option.
-          ideShowSaveStatus('File changed on disk — Reload to get the latest', true, 0);
-          // Inject a Reload action into the notice area (not a native dialog).
+          // File changed on disk since we read it.  The inline conflict notice
+          // (showIdeReloadConflictNotice) carries the full message + Reload action.
+          // Clear the status bar so the same message isn't duplicated in two places.
+          ideShowSaveStatus('', false, 0);
           showIdeReloadConflictNotice(path);
           return;
         }
@@ -3110,6 +3129,8 @@
         ideShowSaveStatus('Network error — your edits are preserved', true, 8000);
       })
       .finally(() => {
+        // Always reset the in-flight guard, regardless of outcome.
+        ideIsSaving = false;
         if (saveBtn) {
           saveBtn.textContent = 'Save';
           // Re-enable only if still dirty + editable (may have been cleared on success).
@@ -3175,13 +3196,23 @@
       }
     } else if (msg.type === 'save') {
       // Monaco signals ⌘S / Ctrl-S: content is provided directly.
-      // msg.path is echoed for integrity; we trust ideCurrentPath.
-      if (ideEditable && ideIsDirty && typeof msg.content === 'string') {
+      // Guard on !ideIsSaving to prevent a double-POST when two ⌘S fire before
+      // the first response arrives (B2).  msg.path echo is also checked for
+      // stale-path safety (B1 parallel: if the file switched mid-keypress).
+      if (ideEditable && ideIsDirty && !ideIsSaving &&
+          typeof msg.content === 'string' && msg.path === ideCurrentPath) {
         performSave(ideCurrentPath, msg.content);
       }
     } else if (msg.type === 'content') {
       // Reply to {type:'requestContent'} — triggered by triggerSave().
-      if (typeof msg.content === 'string') {
+      // B1: guard on echoed msg.path matching ideCurrentPath.  If the operator
+      // switched files between triggerSave() posting requestContent and this reply
+      // arriving, the echoed path will differ from ideCurrentPath — drop the reply
+      // rather than writing old content to the new file's path/version.
+      // Also gate on ideEditable + ideIsDirty + !ideIsSaving so a stale reply
+      // from a previous session cannot trigger an unexpected write.
+      if (typeof msg.content === 'string' && msg.path === ideCurrentPath &&
+          ideEditable && ideIsDirty && !ideIsSaving) {
         performSave(ideCurrentPath, msg.content);
       }
     }
