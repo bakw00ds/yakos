@@ -13,11 +13,6 @@ import (
 
 // ---- test helpers -----------------------------------------------------------
 
-// fixedNow returns a now-seam that always returns t.
-func fixedNow(t time.Time) func() time.Time {
-	return func() time.Time { return t }
-}
-
 // advancingNow returns a now-seam backed by a pointer that the test can advance.
 func advancingNow(start time.Time) (*time.Time, func() time.Time) {
 	cur := start
@@ -93,6 +88,43 @@ func isBase64URL(c rune) bool {
 		(c >= 'a' && c <= 'z') ||
 		(c >= '0' && c <= '9') ||
 		c == '-' || c == '_'
+}
+
+// ---- Lookup: copy-on-return -------------------------------------------------
+
+// TestLookup_ReturnedCopyNotMutatedBySubsequentLookup asserts that a caller
+// retaining a *Session from Lookup is not subject to races when the store
+// later slides LastSeen on the same underlying entry.
+func TestLookup_ReturnedCopyNotMutatedBySubsequentLookup(t *testing.T) {
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cur, nowFn := advancingNow(base)
+	s := testStore(nowFn)
+
+	sess, err := s.Create("alice", netid.RoleAdmin, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First lookup at T+10m.
+	*cur = base.Add(10 * time.Minute)
+	snap1, ok := s.Lookup(sess.ID)
+	if !ok {
+		t.Fatal("first Lookup: expected hit")
+	}
+	lastSeen1 := snap1.LastSeen // capture the snapshot value
+
+	// Second lookup at T+20m — this slides LastSeen on the stored entry.
+	*cur = base.Add(20 * time.Minute)
+	_, ok = s.Lookup(sess.ID)
+	if !ok {
+		t.Fatal("second Lookup: expected hit")
+	}
+
+	// snap1.LastSeen must still reflect the first lookup time, not the second.
+	if !snap1.LastSeen.Equal(lastSeen1) {
+		t.Errorf("retained snapshot was mutated: LastSeen changed from %v to %v",
+			lastSeen1, snap1.LastSeen)
+	}
 }
 
 // ---- Lookup: timeout behavior -----------------------------------------------
@@ -446,13 +478,16 @@ func TestValidateEpoch_StaleEpochInvalid(t *testing.T) {
 }
 
 func TestValidateEpoch_HigherSnapshotValid(t *testing.T) {
-	// If the session snapshot epoch is somehow higher than current
-	// (shouldn't happen in practice but must not cause issues).
+	// The >= check in ValidateEpoch is intentional: a session is stale only
+	// when its snapshot epoch is *behind* the current epoch. A snapshot ahead
+	// of the current epoch can't happen in practice (epochs are monotonically
+	// forward), but the check is benign — it treats the session as valid,
+	// which is the safe/conservative direction.
 	s := testStore(time.Now)
 	sess, _ := s.Create("alice", netid.RoleAdmin, 10)
 
 	if !s.ValidateEpoch(sess, 5) {
-		t.Error("ValidateEpoch: snapshot epoch 10 >= current 5 should be valid")
+		t.Error("ValidateEpoch: snapshot epoch 10 >= current 5 should be valid (benign non-normative case)")
 	}
 }
 
@@ -555,7 +590,9 @@ func TestCSRFCookie_NotHttpOnly(t *testing.T) {
 }
 
 func TestClearSessionCookie_Expires(t *testing.T) {
-	cookie := authsession.ClearSessionCookie()
+	s := testStore(time.Now)
+	cookie := s.ClearSessionCookie(true)
+
 	if cookie.Name != "yakos_session" {
 		t.Errorf("ClearSessionCookie: Name: got %q", cookie.Name)
 	}
@@ -565,16 +602,199 @@ func TestClearSessionCookie_Expires(t *testing.T) {
 	if cookie.Value != "" {
 		t.Errorf("ClearSessionCookie: Value should be empty; got %q", cookie.Value)
 	}
+	// Clear cookie must mirror SessionCookie's security attributes so the
+	// browser matches the correct cookie for deletion.
+	if !cookie.HttpOnly {
+		t.Error("ClearSessionCookie: HttpOnly must be true")
+	}
+	if !cookie.Secure {
+		t.Error("ClearSessionCookie: Secure must be true when secure=true")
+	}
+	if cookie.SameSite != http.SameSiteStrictMode {
+		t.Errorf("ClearSessionCookie: SameSite: got %v, want Strict", cookie.SameSite)
+	}
+	if cookie.Path != "/" {
+		t.Errorf("ClearSessionCookie: Path: got %q, want /", cookie.Path)
+	}
+}
+
+func TestClearSessionCookie_InsecureLoopback(t *testing.T) {
+	s := testStore(time.Now)
+	cookie := s.ClearSessionCookie(false)
+	if cookie.Secure {
+		t.Error("ClearSessionCookie: Secure should be false when secure=false")
+	}
 }
 
 func TestClearCSRFCookie_Expires(t *testing.T) {
-	cookie := authsession.ClearCSRFCookie()
+	s := testStore(time.Now)
+	cookie := s.ClearCSRFCookie(true)
+
 	if cookie.Name != "yakos_csrf" {
 		t.Errorf("ClearCSRFCookie: Name: got %q", cookie.Name)
 	}
 	if cookie.MaxAge != -1 {
 		t.Errorf("ClearCSRFCookie: MaxAge: got %d, want -1", cookie.MaxAge)
 	}
+	// Must mirror CSRFCookie attributes.
+	if cookie.HttpOnly {
+		t.Error("ClearCSRFCookie: HttpOnly must be false to match live CSRFCookie")
+	}
+	if !cookie.Secure {
+		t.Error("ClearCSRFCookie: Secure must be true when secure=true")
+	}
+	if cookie.SameSite != http.SameSiteStrictMode {
+		t.Errorf("ClearCSRFCookie: SameSite: got %v, want Strict", cookie.SameSite)
+	}
+	if cookie.Path != "/" {
+		t.Errorf("ClearCSRFCookie: Path: got %q, want /", cookie.Path)
+	}
+}
+
+// ---- MaxSessions cap --------------------------------------------------------
+
+func TestMaxSessions_CapEnforced(t *testing.T) {
+	s := authsession.NewStore(authsession.Config{
+		IdleTimeout:     2 * time.Hour,
+		AbsoluteTimeout: 12 * time.Hour,
+		MaxSessions:     3,
+		NowFn:           time.Now,
+	})
+
+	// Fill to the cap.
+	for i := 0; i < 3; i++ {
+		if _, err := s.Create("alice", netid.RoleRead, 0); err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+	}
+
+	// One more must be rejected.
+	_, err := s.Create("alice", netid.RoleRead, 0)
+	if err == nil {
+		t.Error("MaxSessions: expected error when cap is reached")
+	}
+	if !strings.Contains(err.Error(), "cap") {
+		t.Errorf("MaxSessions: error should mention 'cap'; got %q", err.Error())
+	}
+}
+
+func TestMaxSessions_ExpiredSessionsSweptBeforeCapCheck(t *testing.T) {
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cur, nowFn := advancingNow(base)
+
+	s := authsession.NewStore(authsession.Config{
+		IdleTimeout:     2 * time.Hour,
+		AbsoluteTimeout: 12 * time.Hour,
+		MaxSessions:     3,
+		NowFn:           nowFn,
+	})
+
+	// Fill to the cap.
+	for i := 0; i < 3; i++ {
+		if _, err := s.Create("alice", netid.RoleRead, 0); err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+	}
+
+	// Advance time past idle timeout — all 3 are now expired.
+	*cur = base.Add(3 * time.Hour)
+
+	// Create should sweep expired entries and then succeed.
+	_, err := s.Create("alice", netid.RoleRead, 0)
+	if err != nil {
+		t.Errorf("MaxSessions: expected Create to succeed after expired sessions swept; got %v", err)
+	}
+}
+
+func TestMaxSessions_UnlimitedWhenNegative(t *testing.T) {
+	s := authsession.NewStore(authsession.Config{
+		MaxSessions: -1, // unlimited
+		NowFn:       time.Now,
+	})
+	// Create more than the default cap — should all succeed.
+	for i := 0; i < 50; i++ {
+		if _, err := s.Create("user", netid.RoleRead, 0); err != nil {
+			t.Fatalf("Create %d with unlimited cap: %v", i, err)
+		}
+	}
+}
+
+// ---- Count and ActiveForUser ------------------------------------------------
+
+func TestCount_ReflectsLiveMap(t *testing.T) {
+	s := testStore(time.Now)
+	if n := s.Count(); n != 0 {
+		t.Errorf("Count: want 0 on empty store, got %d", n)
+	}
+
+	sess1, _ := s.Create("alice", netid.RoleRead, 0)
+	sess2, _ := s.Create("bob", netid.RoleRead, 0)
+	if n := s.Count(); n != 2 {
+		t.Errorf("Count: want 2, got %d", n)
+	}
+
+	s.Revoke(sess1.ID)
+	if n := s.Count(); n != 1 {
+		t.Errorf("Count: want 1 after revoke, got %d", n)
+	}
+
+	s.Revoke(sess2.ID)
+	if n := s.Count(); n != 0 {
+		t.Errorf("Count: want 0 after all revoked, got %d", n)
+	}
+}
+
+func TestActiveForUser_CountsOnlyLiveSessions(t *testing.T) {
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cur, nowFn := advancingNow(base)
+	s := testStore(nowFn)
+
+	// Two sessions for alice, one for bob.
+	_, _ = s.Create("alice", netid.RoleRead, 0)
+	_, _ = s.Create("alice", netid.RoleAdmin, 0)
+	_, _ = s.Create("bob", netid.RoleRead, 0)
+
+	if n := s.ActiveForUser("alice"); n != 2 {
+		t.Errorf("ActiveForUser(alice): want 2, got %d", n)
+	}
+	if n := s.ActiveForUser("bob"); n != 1 {
+		t.Errorf("ActiveForUser(bob): want 1, got %d", n)
+	}
+	if n := s.ActiveForUser("nobody"); n != 0 {
+		t.Errorf("ActiveForUser(nobody): want 0, got %d", n)
+	}
+
+	// Expire alice's sessions.
+	*cur = base.Add(3 * time.Hour) // past 2h idle timeout
+
+	if n := s.ActiveForUser("alice"); n != 0 {
+		t.Errorf("ActiveForUser(alice) after expiry: want 0, got %d", n)
+	}
+	// Bob's sessions are also expired but we don't check them here.
+}
+
+func TestActiveForUser_DoesNotRemoveExpiredSessions(t *testing.T) {
+	// ActiveForUser must not be a side-effecting sweep.
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cur, nowFn := advancingNow(base)
+	s := testStore(nowFn)
+
+	sess, _ := s.Create("alice", netid.RoleRead, 0)
+	*cur = base.Add(3 * time.Hour)
+
+	_ = s.ActiveForUser("alice") // should NOT remove the expired session from the map
+
+	// Count still includes the expired (but un-swept) entry.
+	if n := s.Count(); n != 1 {
+		t.Errorf("Count after ActiveForUser: want 1 (un-swept), got %d", n)
+	}
+
+	// Sweep removes it.
+	s.Sweep()
+	if n := s.Count(); n != 0 {
+		t.Errorf("Count after Sweep: want 0, got %d", n)
+	}
+	_ = sess
 }
 
 // ---- Sweep ------------------------------------------------------------------
@@ -631,7 +851,7 @@ func TestConcurrency_ParallelCreateLookupRotateRevoke(t *testing.T) {
 			for i := 0; i < ops; i++ {
 				sess, err := s.Create("user", netid.RoleRead, 0)
 				if err != nil {
-					// race-safe: just skip
+					// Cap reached under concurrent load — acceptable.
 					continue
 				}
 				if _, ok := s.Lookup(sess.ID); !ok {
@@ -656,7 +876,7 @@ func TestConcurrency_ParallelSweep(t *testing.T) {
 
 	// Populate the store.
 	for i := 0; i < 100; i++ {
-		s.Create("user", netid.RoleRead, 0) //nolint:errcheck
+		_, _ = s.Create("user", netid.RoleRead, 0)
 	}
 
 	// Advance time and sweep concurrently.
@@ -683,7 +903,7 @@ func TestConcurrency_RevokeAllForUserParallel(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 50; i++ {
-			s.Create("alice", netid.RoleAdmin, 0) //nolint:errcheck
+			_, _ = s.Create("alice", netid.RoleAdmin, 0)
 		}
 	}()
 	go func() {
@@ -736,7 +956,7 @@ func TestLookup_IdleWindowSlides(t *testing.T) {
 	}
 
 	// Now go idle for 31 minutes — should expire.
-	*cur = cur.Add(31 * time.Minute)
+	*cur = (*cur).Add(31 * time.Minute)
 	_, ok := s.Lookup(sess.ID)
 	if ok {
 		t.Error("Session should be expired after 31 minutes of inactivity")
@@ -768,9 +988,9 @@ func TestCreate_FieldsPreserved(t *testing.T) {
 	}
 }
 
-// ---- No wildcard imports in the public surface ------------------------------
+// ---- Token distinctness -----------------------------------------------------
 
-// TestNoCSRFTokenInSessionID confirms that the CSRF token is separate from the
+// TestTokensAreDistinct confirms that the CSRF token is separate from the
 // session ID. (Belt-and-suspenders: they are different random values.)
 func TestTokensAreDistinct(t *testing.T) {
 	s := testStore(time.Now)
@@ -780,8 +1000,8 @@ func TestTokensAreDistinct(t *testing.T) {
 	}
 }
 
-// TestCSRFTokenLeak confirms that the session cookie does NOT contain the
-// CSRF token — they are separate cookies.
+// TestCSRFCookie_ValueIsCSRFToken confirms that the session cookie does NOT
+// contain the CSRF token — they are separate cookies.
 func TestCSRFCookie_ValueIsCSRFToken(t *testing.T) {
 	s := testStore(time.Now)
 	sess, _ := s.Create("alice", netid.RoleAdmin, 0)

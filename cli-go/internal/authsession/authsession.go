@@ -27,8 +27,11 @@
 //
 // SessionCookie and CSRFCookie are cookie-attribute builders only; they do
 // not write anything to an http.ResponseWriter. The caller decides when to
-// set/clear cookies. When the server is bound off-loopback, secure MUST be
-// true; the caller decides based on the bind address.
+// set/clear cookies.
+//
+// NOTE (Phase-3 wiring): the handler layer must derive the secure bool from
+// the actual bind/TLS state rather than accepting it as a free parameter.
+// That enforcement lives in the middleware, not here.
 //
 // # Epoch-based revocation
 //
@@ -37,6 +40,17 @@
 // Lookup does NOT validate the epoch automatically — the caller must call
 // ValidateEpoch after a successful Lookup if epoch invalidation is required.
 // This keeps the package dependency-free and testable in isolation.
+//
+// NOTE (Phase-3 wiring): the middleware must call ValidateEpoch
+// unconditionally after every successful Lookup. Missing this call means
+// disabled users can reuse stale sessions until they expire naturally.
+//
+// # Session cap
+//
+// Config.MaxSessions limits the number of concurrent live sessions to defend
+// against store exhaustion once the HTTP surface is wired. Create performs a
+// lazy Sweep of expired sessions before enforcing the cap, so expired sessions
+// do not count against it.
 //
 // # Background goroutines
 //
@@ -65,9 +79,13 @@ const cookieNameCSRF = "yakos_csrf"
 // tokenBytes is the number of random bytes for IDs and CSRF tokens (32 bytes → 43 chars base64url).
 const tokenBytes = 32
 
+// defaultMaxSessions is the default cap on concurrent live sessions.
+// 0 in Config means unlimited; the default applied by NewStore is this value.
+const defaultMaxSessions = 10_000
+
 // Session holds the server-side state for one authenticated browser session.
-// Callers must treat returned *Session values as read-only; mutation is
-// only valid through Store methods.
+// Values returned by Lookup and Create are copies — mutating a returned
+// *Session has no effect on the store.
 type Session struct {
 	// ID is the opaque session identifier stored in the session cookie.
 	// It is never accepted as input from the caller — the store generates it.
@@ -97,6 +115,14 @@ type Session struct {
 	SessionEpoch int
 }
 
+// copyOf returns a shallow copy of sess as a new heap-allocated Session.
+// Used by Lookup and other methods so callers never hold a pointer into
+// the live map entry.
+func copyOf(sess *Session) *Session {
+	cp := *sess
+	return &cp
+}
+
 // Config controls Store behavior.
 type Config struct {
 	// IdleTimeout is how long a session may go without activity before it
@@ -106,6 +132,13 @@ type Config struct {
 	// AbsoluteTimeout is the hard maximum lifetime for any session regardless
 	// of activity. Defaults to 12 hours when zero.
 	AbsoluteTimeout time.Duration
+
+	// MaxSessions is the maximum number of concurrent live (non-expired)
+	// sessions. When Create would exceed this limit it first sweeps expired
+	// sessions; if the count still exceeds the cap after the sweep, Create
+	// returns an error. 0 means use the default (10 000). Set to -1 to
+	// disable the cap (not recommended in production).
+	MaxSessions int
 
 	// NowFn is the time source used throughout the store. Defaults to
 	// time.Now when nil. Override in tests to control time without sleeping.
@@ -124,6 +157,17 @@ func (c *Config) absoluteTimeout() time.Duration {
 		return c.AbsoluteTimeout
 	}
 	return 12 * time.Hour
+}
+
+func (c *Config) maxSessions() int {
+	switch {
+	case c.MaxSessions < 0:
+		return 0 // unlimited
+	case c.MaxSessions == 0:
+		return defaultMaxSessions
+	default:
+		return c.MaxSessions
+	}
 }
 
 func (c *Config) nowFn() func() time.Time {
@@ -159,7 +203,11 @@ func NewStore(cfg Config) *Store {
 //
 // The caller must never supply the session ID — fixation defense is built
 // into the store by making ID generation internal-only.
+//
+// If Config.MaxSessions is positive and the live session count (after
+// sweeping expired entries) would exceed the cap, Create returns an error.
 func (s *Store) Create(username string, role netid.Role, epoch int) (*Session, error) {
+	// Generate tokens outside the lock — crypto/rand may briefly block.
 	id, err := generateToken()
 	if err != nil {
 		return nil, fmt.Errorf("authsession: generate session ID: %w", err)
@@ -168,6 +216,7 @@ func (s *Store) Create(username string, role netid.Role, epoch int) (*Session, e
 	if err != nil {
 		return nil, fmt.Errorf("authsession: generate CSRF token: %w", err)
 	}
+
 	now := s.now()
 	sess := &Session{
 		ID:           id,
@@ -178,19 +227,36 @@ func (s *Store) Create(username string, role netid.Role, epoch int) (*Session, e
 		LastSeen:     now,
 		SessionEpoch: epoch,
 	}
+
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Enforce the session cap. Sweep expired entries first so they don't
+	// count against the limit — a session that has already expired is free
+	// capacity even if Sweep hasn't been called recently.
+	cap := s.cfg.maxSessions()
+	if cap > 0 {
+		s.sweepLocked(now)
+		if len(s.sessions) >= cap {
+			return nil, fmt.Errorf("authsession: session cap (%d) reached", cap)
+		}
+	}
+
 	s.sessions[id] = sess
-	s.mu.Unlock()
-	return sess, nil
+	return copyOf(sess), nil
 }
 
-// Lookup returns the session for id if it exists and has not expired.
+// Lookup returns a copy of the session for id if it exists and has not expired.
 //
-// On a valid lookup, LastSeen is updated (sliding idle window).
-// Expired sessions are removed from the store.
+// On a valid lookup, LastSeen is updated on the stored entry (sliding idle
+// window). The returned *Session is a snapshot copy; retaining it does not
+// race with subsequent store mutations.
 //
-// The caller is responsible for epoch validation via ValidateEpoch after
-// a successful Lookup if the user store's epoch may have advanced.
+// Expired sessions are removed from the store on Lookup.
+//
+// NOTE (Phase-3 wiring): the auth edge middleware MUST call ValidateEpoch
+// unconditionally after every successful Lookup to guard against stale
+// sessions from disabled or role-changed users.
 func (s *Store) Lookup(id string) (*Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -206,9 +272,11 @@ func (s *Store) Lookup(id string) (*Session, bool) {
 		return nil, false
 	}
 
-	// Slide the idle window.
+	// Slide the idle window on the stored entry.
 	sess.LastSeen = now
-	return sess, true
+
+	// Return a copy so the caller's snapshot is stable under future mutations.
+	return copyOf(sess), true
 }
 
 // Rotate issues a new session ID and CSRF token for the session identified by
@@ -217,6 +285,12 @@ func (s *Store) Lookup(id string) (*Session, bool) {
 //
 // Used on login (session-fixation defense) and on privilege change.
 // Returns an error when oldID is not found or has expired.
+//
+// Transient-miss window: the lock is intentionally dropped between
+// delete(oldID) and insert(newID) so that crypto/rand runs outside the lock.
+// During this brief window both IDs are absent from the store. Callers must
+// handle a 401 on rotation and retry using the new ID returned in the login
+// response. Do not rely on the old ID remaining valid after Rotate returns.
 func (s *Store) Rotate(oldID string) (*Session, error) {
 	s.mu.Lock()
 
@@ -233,7 +307,7 @@ func (s *Store) Rotate(oldID string) (*Session, error) {
 		return nil, fmt.Errorf("authsession: rotate: session expired")
 	}
 
-	// Capture fields before unlock.
+	// Capture identity fields before releasing the lock.
 	username := old.Username
 	role := old.Role
 	epoch := old.SessionEpoch
@@ -266,7 +340,7 @@ func (s *Store) Rotate(oldID string) (*Session, error) {
 	s.sessions[newID] = sess
 	s.mu.Unlock()
 
-	return sess, nil
+	return copyOf(sess), nil
 }
 
 // Revoke removes the session identified by id from the store.
@@ -305,6 +379,13 @@ func (s *Store) InvalidateByEpoch(username string, currentEpoch int) {
 // ValidateEpoch reports whether sess is still valid given the user store's
 // currentEpoch. Returns false when sess.SessionEpoch < currentEpoch.
 //
+// The >= direction is intentional: epochs advance monotonically forward.
+// A session is stale only when its snapshot (sess.SessionEpoch) is behind
+// the current epoch, meaning the user store has been modified since the
+// session was issued. Equal epochs (sess.SessionEpoch == currentEpoch) are
+// valid; a snapshot ahead of the current epoch can't happen in practice but
+// is benign (treated as valid).
+//
 // This is a pure helper — it does not mutate the store. The caller is
 // responsible for revoking the session if ValidateEpoch returns false.
 //
@@ -328,6 +409,35 @@ func (s *Store) ValidateCSRF(sess *Session, presented string) bool {
 	return dashauth.TokenEqual(sess.CSRFToken, presented)
 }
 
+// Count returns the number of sessions currently in the store, including
+// sessions that have expired but not yet been swept. For a live (non-expired)
+// count, call Sweep first.
+func (s *Store) Count() int {
+	s.mu.Lock()
+	n := len(s.sessions)
+	s.mu.Unlock()
+	return n
+}
+
+// ActiveForUser returns the number of live (non-expired) sessions for the
+// given username. Expired sessions are not counted but are not removed from
+// the store as a side effect — call Sweep separately if reclamation is needed.
+//
+// The admin Users panel uses this to show how many active sessions exist
+// before disabling a user account.
+func (s *Store) ActiveForUser(username string) int {
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	for _, sess := range s.sessions {
+		if sess.Username == username && !s.isExpiredLocked(sess, now) {
+			count++
+		}
+	}
+	return count
+}
+
 // Sweep removes all expired sessions from the store. It is designed to be
 // called from a periodic maintenance goroutine in the daemon — the store
 // itself never spawns goroutines.
@@ -343,6 +453,11 @@ func (s *Store) Sweep() {
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sweepLocked(now)
+}
+
+// sweepLocked removes expired sessions. Must be called with s.mu held.
+func (s *Store) sweepLocked(now time.Time) {
 	for id, sess := range s.sessions {
 		if s.isExpiredLocked(sess, now) {
 			delete(s.sessions, id)
@@ -360,12 +475,16 @@ func (s *Store) isExpiredLocked(sess *Session, now time.Time) bool {
 
 // ---- Cookie helpers ---------------------------------------------------------
 //
-// These functions return *http.Cookie values with the correct attributes per
-// ADR-0005. They do not write to any ResponseWriter — that is the handler's
-// responsibility.
+// These methods return *http.Cookie values with the correct security attributes
+// per ADR-0005. They do not write to any ResponseWriter — that is the
+// handler's responsibility.
 //
-// secure MUST be true when the server is bound to a non-loopback address
-// (HTTPS). Pass secure=false only for loopback development servers.
+// The secure parameter must be true when the server is bound to a non-loopback
+// address (HTTPS). Pass false only for loopback development servers.
+//
+// NOTE (Phase-3 wiring): the handler layer must derive secure from the actual
+// bind/TLS state (Config.NetworkedMode or similar), not accept it as a free
+// caller parameter. That enforcement belongs in the middleware, not here.
 
 // SessionCookie returns an HttpOnly session cookie with the correct security
 // attributes. MaxAge is set to the store's AbsoluteTimeout.
@@ -396,26 +515,34 @@ func (s *Store) CSRFCookie(token string, secure bool) *http.Cookie {
 	}
 }
 
-// ClearSessionCookie returns an expired Set-Cookie header that instructs the
-// browser to delete the session cookie. Used on logout.
-func ClearSessionCookie() *http.Cookie {
+// ClearSessionCookie returns an expired Set-Cookie that instructs the browser
+// to delete the session cookie. Mirrors SessionCookie's security attributes
+// (HttpOnly, Secure, SameSite=Strict, Path=/) so the browser matches the
+// correct cookie for deletion. Used on logout.
+func (s *Store) ClearSessionCookie(secure bool) *http.Cookie {
 	return &http.Cookie{
 		Name:     cookieNameSession,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 	}
 }
 
-// ClearCSRFCookie returns an expired Set-Cookie header that instructs the
-// browser to delete the CSRF cookie. Used on logout alongside ClearSessionCookie.
-func ClearCSRFCookie() *http.Cookie {
+// ClearCSRFCookie returns an expired Set-Cookie that instructs the browser
+// to delete the CSRF cookie. Mirrors CSRFCookie's security attributes
+// (HttpOnly=false, Secure, SameSite=Strict, Path=/) so the browser matches
+// the correct cookie for deletion. Used on logout alongside ClearSessionCookie.
+func (s *Store) ClearCSRFCookie(secure bool) *http.Cookie {
 	return &http.Cookie{
 		Name:     cookieNameCSRF,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: false,
+		Secure:   secure,
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 	}
 }
