@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<!--
+  ide-editor.html — Monaco editor isolated host document.
+
+  Served at /ide/editor under a SCOPED Content-Security-Policy that allows:
+    - script-src 'self' 'wasm-unsafe-eval'  (Monaco AMD loader + JIT)
+    - worker-src blob: 'self'               (Monaco web worker blob-wrapper)
+    - style-src 'self' 'unsafe-inline'      (Monaco theme injection)
+    - connect-src 'self'                    (lazy module fetches, same-origin)
+    - img-src 'self' data:                  (codicon font embedded in CSS)
+    - frame-ancestors 'self'                (only embeddable by same-origin)
+
+  The MAIN console CSP (applied to / and all other routes) is UNCHANGED:
+  it retains script-src 'self' with no wasm-unsafe-eval and no blob: worker-src.
+
+  Worker loading strategy (CSP-safe blob-wrapper pattern):
+  =========================================================
+  Monaco's web workers cannot be loaded as classic same-origin <script> tags
+  under worker-src 'self' when the worker URL is a cross-directory path, because
+  the AMD loader resolves them relative to vs/base/worker/workerMain.js and the
+  browser's worker-src 'self' checks the origin, not the path.  The universally
+  supported CSP-safe approach is:
+
+    1. Fetch workerMain.js from the same-origin URL.
+    2. Create a Blob from the script text with type "application/javascript".
+    3. Create a blob: URL from that Blob.
+    4. Pass the blob: URL to new Worker(url).
+
+  This satisfies "worker-src blob: 'self'" because: the blob: URL is allowed by
+  worker-src blob:, and the content was fetched from 'self' before being wrapped.
+
+  Communication protocol (postMessage):
+  ======================================
+  This document listens for messages from its parent window:
+    { type: 'openFile', path: string, content: string, language: string }
+      — opens the given content in the editor with the specified language.
+
+  This document posts to its parent window (targetOrigin = window.location.origin,
+  NOT '*' — parent is same-origin so scoping the target is safe and preferred):
+    { type: 'ready' }    — editor has mounted and is ready for content.
+    { type: 'error', message: string } — fatal initialisation error.
+
+  Demo mode:
+  ==========
+  When ?demo=1 is present in the URL, a hardcoded Go source file is loaded
+  automatically so the route can be opened directly to verify Monaco renders
+  without requiring a parent frame.
+
+  Script loading:
+  ===============
+  All JavaScript is in /ide-editor.js (same-origin external file), satisfying
+  script-src 'self' without requiring 'unsafe-inline'.  No inline scripts or
+  inline event-handler attributes are used in this document.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-Content-Type-Options" content="nosniff">
+  <!-- CSP is set via response header by the server (ideEditorCSP()).         -->
+  <!-- No inline CSP meta tag needed; header takes precedence in all browsers. -->
+  <title>yakOS IDE — Editor</title>
+  <link rel="stylesheet" href="/vendor/monaco/min/vs/editor/editor.main.css">
+  <style>
+    /* Reset: fill the viewport so Monaco owns the whole iframe/window. */
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #1e1e1e; /* VS Code Dark default; avoids white flash */
+    }
+    #container {
+      width: 100%;
+      height: 100%;
+    }
+    /* Shown while Monaco loads; hidden once ready. */
+    #loading {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #808080;
+      font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+      background: #1e1e1e;
+      z-index: 10;
+    }
+    #error-banner {
+      display: none;
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      padding: 8px 16px;
+      background: #5a1d1d;
+      color: #f14c4c;
+      font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+      z-index: 20;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">Loading editor…</div>
+  <div id="error-banner" role="alert" aria-live="assertive"></div>
+  <div id="container" aria-label="Code editor" tabindex="-1"></div>
+
+  <!-- All bootstrap logic lives in the same-origin /ide-editor.js.
+       script-src 'self' covers this; 'unsafe-inline' is NOT required. -->
+  <script src="/ide-editor.js"></script>
+</body>
+</html>

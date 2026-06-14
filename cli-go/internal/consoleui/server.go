@@ -36,10 +36,27 @@ var stylesCSS []byte
 var swJS []byte
 
 // vendorFS embeds the pinned, checksum-verified third-party JS blobs.
-// Served at /vendor/<filename> (same-origin 'self'; no CDN dependency).
+// Served at /vendor/<path> (same-origin 'self'; no CDN dependency).
+//
+// Mermaid: dist/vendor/mermaid.min.js — Flows UI DAG renderer.
+// Monaco:  dist/vendor/monaco/ — full min/vs tree + CHECKSUMS.sha256 manifest.
+//
+//	Includes loader.js, editor/*, basic-languages/* (all language grammars),
+//	language/* (TypeScript/JSON/CSS/HTML language services), base/*.
+//	The "all:" prefix ensures subdirectories are included by go:embed.
+//	The integrity manifest (monaco/CHECKSUMS.sha256) is verified by
+//	TestVendorChecksums in vendor_checksum_test.go.
 //
 //go:embed dist/vendor/mermaid.min.js
+//go:embed dist/vendor/VENDOR.md
+//go:embed all:dist/vendor/monaco
 var vendorFS embed.FS
+
+//go:embed dist/ide-editor.html
+var ideEditorHTML []byte
+
+//go:embed dist/ide-editor.js
+var ideEditorJS []byte
 
 // Config holds all configuration for the unified console HTTP server.
 type Config struct {
@@ -399,6 +416,12 @@ func (s *Server) registerRoutes() {
 	// secrets; the token is delivered via postMessage only).
 	s.mux.HandleFunc("/sw.js", s.handleSW)
 
+	// IDE editor bootstrap script — token-exempt so the /ide/editor iframe
+	// can load it before the SW has injected the Authorization header.
+	// All Monaco initialisation code lives here; ide-editor.html contains
+	// only the DOM skeleton and a <script src="/ide-editor.js">.
+	s.mux.HandleFunc("/ide-editor.js", s.handleIDEEditorJS)
+
 	// Vendored JS blobs — pinned, checksum-verified, served same-origin.
 	// Token-exempt: static assets that carry no secrets.
 	// The files live under dist/vendor/ in the embed.FS; strip the
@@ -411,6 +434,25 @@ func (s *Server) registerRoutes() {
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		vendorHandler.ServeHTTP(w, r)
 	}))
+
+	// ---- IDE editor spike: isolated host document ----------------------------
+	// GET /ide/editor — serves dist/ide-editor.html as a TOKEN-EXEMPT static
+	// shell, consistent with / (index.html) and /app.js.
+	//
+	// Security rationale: the shell itself carries NO workspace content.
+	// File content is served only by the RoleRead-gated /api/files/* endpoints
+	// and delivered into the editor via postMessage from the authenticated parent
+	// frame.  On the networked path, access is still gated at the transport layer
+	// (mTLS RequireAndVerifyClientCert).  On the loopback path the server is
+	// loopback-only by construction.  Putting a RoleRead gate here conflicted
+	// with navigation reality: browser top-level navigations cannot carry an
+	// Authorization header, so a gated shell always returns 401 on direct open
+	// (the same reason / is exempt — it is a shell, not a data endpoint).
+	//
+	// The scoped ideEditorCSP() is preserved: wasm-unsafe-eval and worker-src
+	// blob: apply ONLY to this route.  The MAIN console CSP (cspHeader) is
+	// unchanged.
+	s.mux.HandleFunc("/ide/editor", s.handleIDEEditor)
 
 	// ---- Kanban sub-dashboard -----------------------------------------------
 	// Mount kanban.Handler() under /kanban/. The kanban handler's own
@@ -611,6 +653,69 @@ func (s *Server) handleSW(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(swJS)
 }
 
+// handleIDEEditorJS serves the Monaco bootstrap script (/ide-editor.js).
+// Token-exempt (listed in isStaticAsset) so the /ide/editor iframe can load
+// it before the Service Worker has injected the Authorization header.
+// script-src 'self' covers this same-origin path; no 'unsafe-inline' needed.
+func (s *Server) handleIDEEditorJS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	_, _ = w.Write(ideEditorJS)
+}
+
+// ideEditorCSP returns the Content-Security-Policy value for the /ide/editor
+// route ONLY.  This is a deliberately scoped relaxation to allow Monaco editor
+// to run: the AMD loader requires wasm-unsafe-eval (for its regex-engine
+// internals) and Monaco workers are loaded via the standard blob: URL wrapper
+// pattern (see dist/ide-editor.html MonacoEnvironment.getWorkerUrl).
+//
+// IMPORTANT: This function is entirely separate from cspHeader.  The main
+// console CSP (cspHeader) must remain unchanged — no wasm-unsafe-eval, no blob:
+// worker-src.  ideEditorCSP is only applied on /ide/editor.
+func ideEditorCSP() string {
+	return strings.Join([]string{
+		"default-src 'self'",
+		// Monaco AMD loader requires wasm-unsafe-eval for its regex engine.
+		// 'self' covers loader.js, editor.main.js, workerMain.js.
+		"script-src 'self' 'wasm-unsafe-eval'",
+		// Monaco web workers use the standard blob:-wrapper pattern:
+		// the host creates a Blob URL pointing to the same-origin workerMain.js.
+		// blob: is required here; 'self' covers same-origin worker scripts directly.
+		"worker-src blob: 'self'",
+		// Monaco injects inline styles for theming and decorations.
+		"style-src 'self' 'unsafe-inline'",
+		// No external connections; only same-origin (loader may use fetch for
+		// lazy module loading in future, but all assets are same-origin here).
+		"connect-src 'self'",
+		// Explicit font-src so codicon.ttf is served from same-origin rather
+		// than relying on the default-src fallback.  data: covers any inline
+		// base64 font data Monaco may embed in editor.main.css.
+		"font-src 'self' data:",
+		// img-src: Monaco uses data: URIs for some inline images in its UI.
+		"img-src 'self' data:",
+		// Prevent this document from being framed by anything other than 'self'
+		// (parent console page).
+		"frame-ancestors 'self'",
+		"base-uri 'none'",
+		"object-src 'none'",
+	}, "; ")
+}
+
+func (s *Server) handleIDEEditor(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	// Scoped CSP: only applies to this route.  The main cspHeader is untouched.
+	w.Header().Set("Content-Security-Policy", ideEditorCSP())
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(ideEditorHTML)
+}
+
 // ---- auth helpers -----------------------------------------------------------
 
 // isStaticAsset reports whether the request is for a token-exempt static asset.
@@ -622,7 +727,7 @@ func isStaticAsset(r *http.Request) bool {
 		return false
 	}
 	switch r.URL.Path {
-	case "/", "/app.js", "/styles.css", "/sw.js":
+	case "/", "/app.js", "/styles.css", "/sw.js", "/ide-editor.js", "/ide/editor":
 		return true
 	}
 	// Vendored pinned blobs are same-origin static assets; no token required.
