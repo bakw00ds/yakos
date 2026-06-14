@@ -47,6 +47,19 @@ var swJS []byte
 //	The integrity manifest (monaco/CHECKSUMS.sha256) is verified by
 //	TestVendorChecksums in vendor_checksum_test.go.
 //
+// Fonts (follow-up): dist/vendor/fonts/ — Inter + JetBrains Mono woff2 subsets.
+//
+//	@font-face declarations in styles.css reference /vendor/fonts/... paths.
+//	Until the font binaries are downloaded and vendored, system fonts render
+//	as the immediate fallback (font-display:swap; local() fallback in @font-face).
+//	To activate: download woff2 files, compute SHA-256, add to pinnedFontChecksums
+//	in vendor_checksum_test.go, add entries to VENDOR.md, and uncomment the
+//	embed directive below. See VENDOR.md §Fonts for the full recipe.
+//	font-src 'self' is already present in cspHeader() for when this lands.
+//
+//	TODO(follow-up): uncomment after fonts are vendored:
+//	//go:embed all:dist/vendor/fonts
+//
 //go:embed dist/vendor/mermaid.min.js
 //go:embed dist/vendor/VENDOR.md
 //go:embed all:dist/vendor/monaco
@@ -542,12 +555,13 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/flows/api/run", requireRoleFunc(netid.RoleRead, s.flows.handleRunDispatch))
 	s.mux.HandleFunc("/flows/api/resume", requireRoleFunc(netid.RoleFlowsRun, s.flows.handleResume))
 
-	// ---- Phase 7 (IDE): File API (RoleRead, jailed to WorkspaceRoot) -----------
-	// GET /api/files/tree?dir=<relpath>     — JSON directory tree
-	// GET /api/files/content?path=<relpath> — file content (UTF-8 or base64)
+	// ---- Phase 7 (IDE): File API (read: RoleRead, write: RoleDispatch) ---------
+	// GET  /api/files/tree?dir=<relpath>     — JSON directory tree (RoleRead)
+	// GET  /api/files/content?path=<relpath> — file content + version (RoleRead)
+	// POST /api/files/write                  — atomic write with OCC (RoleDispatch)
 	//
-	// Both require RoleRead.  Both are jailed to Config.WorkspaceRoot.
-	// Secret files are omitted from tree and refused with 403 at content.
+	// All routes are jailed to Config.WorkspaceRoot.
+	// Secret files are omitted from tree, refused at content, and refused at write.
 	// See files_handler.go for the full security model.
 	//
 	// NOTE: PR #175 (feat/ide-monaco-spike) is still open and also edits
@@ -556,6 +570,12 @@ func (s *Server) registerRoutes() {
 	// is to include both sets of route registrations.
 	s.mux.HandleFunc("/api/files/tree", requireRoleFunc(netid.RoleRead, s.files.handleFilesTree))
 	s.mux.HandleFunc("/api/files/content", requireRoleFunc(netid.RoleRead, s.files.handleFilesContent))
+	// POST /api/files/write requires RoleDispatch at the route level.
+	// The handler also enforces RoleDispatch internally (per-handler check mirrors
+	// flows_handler.go handleSaveWorkflow pattern), providing defence in depth.
+	// requireJSONForMutations (applied globally in New()) enforces Content-Type:
+	// application/json for this POST, providing CSRF defence.
+	s.mux.HandleFunc("/api/files/write", requireRoleFunc(netid.RoleDispatch, s.files.handleFilesWrite))
 }
 
 // handlePresence returns the current online operator presence snapshot as a
@@ -595,6 +615,11 @@ func cspHeader(addr string, networked bool) string {
 		// app.js and sw.js are same-origin; no blob: needed.
 		"script-src 'self'",
 		"style-src 'self' 'unsafe-inline'",
+		// Vendored fonts served same-origin under /vendor/fonts/.
+		// 'self' is already covered by default-src but listed explicitly
+		// here so the intent is auditable and the directive is present
+		// even when browser fallback handling differs by UA.
+		"font-src 'self'",
 		// Allow WS connection to the console itself (for /v1/events).
 		// For the networked path this is wss:// (TLS WebSocket).
 		"connect-src 'self' " + wsOrigin,

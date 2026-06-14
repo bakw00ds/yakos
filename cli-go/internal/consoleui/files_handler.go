@@ -2,11 +2,18 @@ package consoleui
 
 // files_handler.go — Phase 7 (IDE): /api/files/* endpoints.
 //
-// Two read-only endpoints, both requiring RoleRead, both jailed to
-// Config.WorkspaceRoot:
+// Read endpoints (RoleRead), both jailed to Config.WorkspaceRoot:
 //
-//	GET /api/files/tree?dir=<relpath>    — JSON file tree for a directory
-//	GET /api/files/content?path=<relpath> — file content (UTF-8 or base64)
+//	GET /api/files/tree?dir=<relpath>     — JSON file tree for a directory
+//	GET /api/files/content?path=<relpath> — file content (UTF-8 or base64);
+//	                                        returns "version" field (SHA-256 of
+//	                                        raw bytes) for optimistic concurrency
+//	                                        on subsequent writes.
+//
+// Write endpoint (RoleDispatch), jailed to Config.WorkspaceRoot:
+//
+//	POST /api/files/write                 — atomic write; optimistic concurrency
+//	                                        via version echo.
 //
 // # Path jail
 //
@@ -21,9 +28,11 @@ package consoleui
 //
 // # Secret filtering
 //
-// Both endpoints omit / refuse files matching the secret deny-set.
+// All endpoints refuse secret-matched files.
 // The tree endpoint omits secret-matched files entirely (they do not appear
 // in entries). The content endpoint refuses with 403.
+// The write endpoint refuses with 403 — operators must not persist secrets
+// through the IDE write surface.
 //
 // Deny-set layers (evaluated against lowercased basename):
 //
@@ -39,12 +48,36 @@ package consoleui
 // - Tree: 2000 entries per directory, max depth 10, and a global total-node
 //   budget of 10 000 across the entire recursive traversal.  A `truncated`
 //   flag is set when any cap fires.
-// - Content: 2 MiB hard cap → 413 with a clear message.
+// - Content: 5 MiB hard cap → 413 with a clear message.
+// - Write: 5 MiB hard cap on content → 413; request body LimitReader.
+//
+// # Write semantics (optimistic concurrency)
+//
+// POST /api/files/write accepts {path, content, version}:
+//   - version = "" : create-new / force-write. Allowed whether or not the
+//     file exists. Use this to create a new file or to force-overwrite when
+//     the caller intentionally does not track version state.
+//   - version != "": must match the SHA-256 hex of the current on-disk
+//     content. Mismatch → 409 (no clobber; caller must reload).
+//
+// The write is atomic: content is written to a temp file in the same directory
+// then renamed over the target. On rename failure the temp file is cleaned up.
+//
+// Parent directory creation: for v1, the parent directory must already exist.
+// Writing to a non-existent parent directory path returns 400.  This prevents
+// surprise directory creation from the IDE surface.
+//
+// File mode: 0644 on create; existing file mode is preserved on update.
 //
 // # Idempotency
 //
-// Both endpoints are GET (read-only); idempotency is guaranteed by HTTP
-// semantics and the absence of any state mutation.
+// GET endpoints are idempotent by HTTP semantics.
+// POST /api/files/write: callers MUST supply an Idempotency-Key header to
+// make retries safe when the version is "". When version is non-empty and
+// the write succeeds, a retry with the same version will 409 (the new
+// on-disk hash won't match), which is safe — the data is already written.
+// The caller should treat a 409 on retry as a successful first write and
+// re-read the version.
 //
 // # Rate limiting
 //
@@ -52,8 +85,11 @@ package consoleui
 // /api/* routes via the edge middleware in server.go).  No override.
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -62,10 +98,25 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/bakw00ds/yakos/internal/netid"
 )
 
-// maxFileContentBytes is the hard size cap for /api/files/content.
+// maxFileContentBytes is the hard size cap for /api/files/content and
+// the content field of /api/files/write requests.
 const maxFileContentBytes = 5 << 20 // 5 MiB
+
+// maxWriteRequestBodyBytes caps the raw HTTP request body for POST /api/files/write.
+// Slightly larger than maxFileContentBytes to account for JSON framing overhead.
+const maxWriteRequestBodyBytes = maxFileContentBytes + 4096
+
+// fileContentHash returns the SHA-256 hex digest of data.
+// Used as the version stamp for optimistic concurrency on file writes
+// (mirrors contentHash in flows_handler.go but operates on raw file bytes).
+func fileContentHash(data []byte) string {
+	h := sha256.Sum256(data)
+	return fmt.Sprintf("%x", h)
+}
 
 // maxTreeEntriesPerDir is the maximum number of entries returned per directory
 // in /api/files/tree.  When exceeded, the response carries truncated=true.
@@ -212,6 +263,18 @@ func newFilesHandlers(workspaceRoot string) *filesHandlers {
 //   - relpath contains ".." after filepath.Clean (traversal attempt).
 //   - filepath.EvalSymlinks resolves to a path outside workspaceRoot.
 //   - The resolved path is ".git" or inside ".git/".
+//
+// IMPORTANT: for paths that do not yet exist (new-file writes), EvalSymlinks
+// on the full candidate fails with not-exist and this function returns the
+// UNRESOLVED lexical candidate.  That is safe for READ paths (the subsequent
+// os.Stat/os.ReadFile will 404), but is NOT safe for WRITE paths — a
+// symlinked parent directory whose EvalSymlinks-resolved real location is
+// outside the jail would pass the lexical isUnderRoot check.
+//
+// Use jailPathForCreate for write operations on new files.  It separately
+// resolves the parent directory (which must already exist) and verifies the
+// real parent is inside the jail, then returns realParent+base so all
+// filesystem operations use the resolved path.
 func (h *filesHandlers) jailPath(relpath string) (string, bool) {
 	if h.workspaceRoot == "" {
 		return "", false
@@ -227,6 +290,15 @@ func (h *filesHandlers) jailPath(relpath string) (string, bool) {
 
 	// Prefix-check before symlink resolution (fast rejection).
 	if !isUnderRoot(candidate, h.workspaceRoot) {
+		return "", false
+	}
+
+	// Reject .git internals on the candidate (pre-symlink) path.
+	// This check runs before EvalSymlinks so that non-existent paths inside
+	// .git/ (e.g. a new file the caller wants to create) are also rejected.
+	// The post-symlink check below covers the case where a symlink resolves
+	// to a .git path.
+	if isGitPath(candidate, h.workspaceRoot) {
 		return "", false
 	}
 
@@ -246,12 +318,108 @@ func (h *filesHandlers) jailPath(relpath string) (string, bool) {
 		return "", false
 	}
 
-	// Reject .git internals.
+	// Reject .git internals on the symlink-resolved path (belt-and-suspenders:
+	// a symlink inside the jail could resolve to a .git path).
 	if isGitPath(real, h.workspaceRoot) {
 		return "", false
 	}
 
 	return real, true
+}
+
+// jailPathForCreate is the write-safe variant of jailPath for paths that may
+// not yet exist.  It separately resolves the parent directory via
+// filepath.EvalSymlinks (the parent MUST already exist per the v1 no-mkdir
+// rule) and verifies that the real parent is inside the workspace jail.  The
+// returned absPath is realParent+base — fully symlink-resolved — so all
+// subsequent filesystem operations (WriteFile, Rename) act on the real
+// location, never on an unresolved lexical candidate.
+//
+// This closes the symlinked-parent escape: a dir inside the workspace that
+// is itself a symlink to an outside location would pass jailPath's lexical
+// isUnderRoot check on the candidate but its EvalSymlinks-resolved real path
+// would fail isUnderRoot here.
+//
+// Returns the real absolute path on success (parent resolved + basename appended).
+// Returns ("", errJailParentNotExist) when the parent directory does not exist.
+// Returns ("", errJailEscape) on any jail/secret/.git violation.
+// Returns ("", other error) on unexpected OS errors.
+//
+// Secret and .git checks are performed against both the lexical candidate
+// (fast rejection of obvious names) and the resolved real path (defence
+// against symlink rename tricks — e.g. a symlink that makes "safe.txt"
+// resolve into ".git/config" can't bypass the per-name checks because we
+// check basename of the final resolved path too).
+var errJailEscape = fmt.Errorf("path outside workspace jail")
+var errJailParentNotExist = fmt.Errorf("parent directory does not exist")
+
+func (h *filesHandlers) jailPathForCreate(relpath string) (string, error) {
+	if h.workspaceRoot == "" {
+		return "", errJailEscape
+	}
+	if filepath.IsAbs(relpath) {
+		return "", errJailEscape
+	}
+
+	// Lexical candidate — used for early-reject checks only.
+	candidate := filepath.Clean(filepath.Join(h.workspaceRoot, relpath))
+	if !isUnderRoot(candidate, h.workspaceRoot) {
+		return "", errJailEscape
+	}
+	if isGitPath(candidate, h.workspaceRoot) {
+		return "", errJailEscape
+	}
+
+	// Secret check on the candidate basename (fast path, no symlink follow).
+	baseName := filepath.Base(candidate)
+	if isSecretFile(baseName) {
+		return "", errJailEscape
+	}
+
+	// Resolve the PARENT directory through EvalSymlinks.
+	// The parent must already exist (v1: no mkdir), so EvalSymlinks must succeed.
+	candidateParent := filepath.Dir(candidate)
+	realParent, err := filepath.EvalSymlinks(candidateParent)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", errJailParentNotExist
+		}
+		// Permission denied or other error: refuse.
+		return "", errJailEscape
+	}
+
+	// Assert the real parent is inside the workspace.
+	// This is the critical check: if candidateParent was a symlink pointing
+	// outside the workspace, realParent will not share the workspaceRoot prefix.
+	if !isUnderRoot(realParent, h.workspaceRoot) {
+		return "", errJailEscape
+	}
+
+	// Reject real parent inside .git (belt-and-suspenders against symlink tricks).
+	if isGitPath(realParent, h.workspaceRoot) {
+		return "", errJailEscape
+	}
+
+	// Build the fully-resolved target path: realParent + basename.
+	// All filesystem ops (WriteFile, Rename) must use this path.
+	realTarget := filepath.Join(realParent, baseName)
+
+	// Secret check on the resolved basename (symlink rename defence: a symlink
+	// named "safe.go" could resolve to ".env" if the parent dir has been
+	// manipulated; baseName here is the name component of the original request
+	// which is already validated, but we re-check for defence in depth).
+	if isSecretFile(filepath.Base(realTarget)) {
+		return "", errJailEscape
+	}
+
+	// Re-verify the assembled resolved path is still inside the workspace
+	// (realParent+baseName should trivially be inside since realParent is
+	// inside and baseName contains no separators, but be explicit).
+	if !isUnderRoot(realTarget, h.workspaceRoot) {
+		return "", errJailEscape
+	}
+
+	return realTarget, nil
 }
 
 // isUnderRoot reports whether absPath is equal to root or is strictly inside
@@ -508,6 +676,11 @@ type fileContentResponse struct {
 	// Language is a Monaco language ID derived from the file extension.
 	// Empty string means "plaintext".
 	Language string `json:"language,omitempty"`
+	// Version is the SHA-256 hex digest of the raw file bytes.
+	// Clients MUST echo this value in the "version" field of POST /api/files/write
+	// to enable optimistic concurrency (stale-write protection).
+	// The hash is computed over raw bytes regardless of encoding (UTF-8 or base64).
+	Version string `json:"version"`
 }
 
 // handleFilesContent serves GET /api/files/content?path=<relpath>.
@@ -601,6 +774,7 @@ func (h *filesHandlers) handleFilesContent(w http.ResponseWriter, r *http.Reques
 		Content:  content,
 		Size:     fi.Size(),
 		Language: languageFromExt(filepath.Ext(absPath)),
+		Version:  fileContentHash(data), // hash over raw bytes, not the encoded form
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -617,6 +791,254 @@ func isBinary(data []byte) bool {
 		return true
 	}
 	return !utf8.Valid(data)
+}
+
+// ---- /api/files/write -------------------------------------------------------
+
+// fileWriteRequest is the DTO for POST /api/files/write.
+// Bound from the request body; never bound directly to a domain struct.
+type fileWriteRequest struct {
+	// Path is the workspace-relative path to write.
+	Path string `json:"path"`
+	// Content is the UTF-8 text content to write.
+	// NOTE: this endpoint only accepts UTF-8 text.  Binary files read via
+	// GET /api/files/content are returned with encoding="base64"; the client
+	// must decode the base64 back to raw bytes and re-encode as UTF-8 text
+	// before POSTing, or use a different mechanism.  Submitting raw base64
+	// strings as content will save the base64 text literally on disk.
+	Content string `json:"content"`
+	// Version is the last-seen version stamp (SHA-256 hex of previous content).
+	// If empty, the write is treated as a create/force-write (no stale check).
+	// If non-empty, must match the current on-disk SHA-256 or a 409 is returned.
+	Version string `json:"version"`
+}
+
+// fileWriteResponse is the wire response for a successful POST /api/files/write.
+type fileWriteResponse struct {
+	// Path is the workspace-relative path that was written.
+	Path string `json:"path"`
+	// Version is the SHA-256 hex digest of the newly written content.
+	// The client must use this value on the next write to avoid 409 Conflict.
+	Version string `json:"version"`
+	// Size is the number of bytes written.
+	Size int64 `json:"size"`
+}
+
+// handleFilesWrite serves POST /api/files/write.
+//
+// Security model:
+//   - Role: RoleDispatch (checked here in addition to the route wrapper).
+//   - Jail: existing files go through jailPath (full EvalSymlinks on target).
+//     New files go through jailPathForCreate (EvalSymlinks on parent dir,
+//     which closes the symlinked-parent escape described below).
+//   - Symlinked-parent escape closed: a directory inside the workspace that
+//     is itself a symlink to an outside location passes jailPath's lexical
+//     isUnderRoot check on the unresolved candidate, but jailPathForCreate
+//     resolves the parent with EvalSymlinks and asserts the real parent is
+//     inside the jail before any write touches the filesystem.
+//   - Secrets: isSecretFile → 403.
+//   - .git internals: rejected by both jail functions.
+//   - WorkspaceRoot unset → 503.
+//   - Content > 5 MiB → 413.
+//   - Optimistic concurrency: version != "" → compare with on-disk SHA-256.
+//     Mismatch → 409. version == "" → force-write (create or overwrite).
+//   - Parent dir must exist (v1: no mkdir). Non-existent parent → 400.
+//   - Atomic temp-rename write in the real (symlink-resolved) parent directory.
+//   - File mode: 0644 on create; preserve existing mode on update.
+//
+// Idempotency: POST /api/files/write is NOT idempotent by default. Callers
+// should supply an Idempotency-Key header when using version="" to avoid
+// double-creation. When version is echoed from a prior read, the 409-on-retry
+// semantics guarantee that a duplicate write is safe (data already persisted).
+func (h *filesHandlers) handleFilesWrite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Per-handler role check: write requires RoleDispatch.
+	// Fires only when resolver middleware has run (Resolved==true).
+	// Loopback tests using srv.Handler() bypass this (Resolved=false → no-op).
+	if id := netid.IdentityFrom(r.Context()); id.Resolved && !id.Role.Allows(netid.RoleDispatch) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	if h.workspaceRoot == "" {
+		writeGenericError(w, http.StatusServiceUnavailable, "workspace root not configured")
+		return
+	}
+
+	// Cap and read the request body.
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(maxWriteRequestBodyBytes)+1))
+	if err != nil {
+		writeGenericError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	if len(body) > maxWriteRequestBodyBytes {
+		writeGenericError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
+
+	var req fileWriteRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeGenericError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	if req.Path == "" {
+		writeGenericError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	// Reject secret patterns by filename before the jail (fast path; no info leak).
+	baseName := filepath.Base(req.Path)
+	if isSecretFile(baseName) {
+		writeGenericError(w, http.StatusForbidden, "writing this file type is not permitted")
+		return
+	}
+
+	// Content size cap (over the raw UTF-8 string bytes).
+	contentBytes := []byte(req.Content)
+	if len(contentBytes) > maxFileContentBytes {
+		writeGenericError(w, http.StatusRequestEntityTooLarge, "content too large (max 5 MiB)")
+		return
+	}
+
+	// --- Phase 1: determine whether the target file already exists.
+	//
+	// We use jailPath first; if the target exists it returns the fully
+	// EvalSymlinks-resolved real path.  If the target does not exist,
+	// jailPath returns an unresolved lexical candidate — which is NOT safe
+	// for writes (symlinked parent dirs would pass the lexical jail check but
+	// land outside the workspace).  For the not-exist case we switch to
+	// jailPathForCreate which resolves the parent directory independently.
+	jailedPath, ok := h.jailPath(req.Path)
+	if !ok {
+		writeGenericError(w, http.StatusBadRequest, "invalid file path")
+		return
+	}
+
+	// Attempt to stat the jailed path to decide which branch we're on.
+	fi, statErr := os.Stat(jailedPath)
+	fileExists := statErr == nil && !fi.IsDir()
+
+	var absPath string // the fully-resolved path all filesystem ops will use
+
+	if fileExists {
+		// Target exists: jailPath already returned the EvalSymlinks-resolved
+		// path (EvalSymlinks succeeded).  Use it directly.
+		absPath = jailedPath
+	} else if statErr != nil && !os.IsNotExist(statErr) {
+		// Unexpected stat error (e.g. permission denied).
+		slog.Error("consoleui/files: write stat target", "err", statErr)
+		writeGenericError(w, http.StatusInternalServerError, "failed to stat target path")
+		return
+	} else if fi != nil && fi.IsDir() {
+		writeGenericError(w, http.StatusBadRequest, "path is a directory")
+		return
+	} else {
+		// Target does not exist: use jailPathForCreate to resolve the parent
+		// directory via EvalSymlinks and verify the real parent is inside the
+		// workspace jail.  This closes the symlinked-parent escape.
+		realTarget, createErr := h.jailPathForCreate(req.Path)
+		switch createErr {
+		case nil:
+			absPath = realTarget
+		case errJailParentNotExist:
+			writeGenericError(w, http.StatusBadRequest, "parent directory does not exist")
+			return
+		default:
+			writeGenericError(w, http.StatusBadRequest, "invalid file path")
+			return
+		}
+	}
+
+	// Re-check secret on the resolved basename after jail (defence against
+	// symlink rename tricks where a link name looks safe but resolves to a
+	// secret name — e.g. parent/.env_link → secret.
+	if isSecretFile(filepath.Base(absPath)) {
+		writeGenericError(w, http.StatusForbidden, "writing this file type is not permitted")
+		return
+	}
+
+	// Optimistic concurrency: read existing content and compare versions.
+	var existingData []byte
+	if fileExists {
+		var readErr error
+		existingData, readErr = os.ReadFile(absPath) //nolint:gosec
+		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				// File disappeared between stat and read (TOCTOU): treat as
+				// version conflict so the caller reloads.
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error": "file changed on disk; reload before saving",
+				})
+				return
+			}
+			slog.Error("consoleui/files: write read existing", "err", readErr)
+			writeGenericError(w, http.StatusInternalServerError, "failed to check existing version")
+			return
+		}
+	}
+
+	if req.Version != "" && fileExists {
+		diskVersion := fileContentHash(existingData)
+		if diskVersion != req.Version {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": "file changed on disk; reload before saving",
+			})
+			return
+		}
+	}
+	// If version == "": force-write — no stale check, allowed for both new and existing files.
+	// If version != "" and !fileExists: file was deleted since last read; treat as version mismatch.
+	if req.Version != "" && !fileExists {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "file changed on disk; reload before saving",
+		})
+		return
+	}
+
+	// Determine file mode: preserve existing mode on update, use 0644 for new files.
+	fileMode := os.FileMode(0644)
+	if fileExists {
+		if fstat, err := os.Stat(absPath); err == nil {
+			fileMode = fstat.Mode().Perm()
+		}
+	}
+
+	// Atomic write: temp file in the RESOLVED parent dir + rename.
+	// Using the resolved parent (not the lexical candidate) ensures the temp
+	// file and the final rename both land in the validated real directory.
+	tmpPath := absPath + ".yakos-write-tmp"
+	if err := os.WriteFile(tmpPath, contentBytes, fileMode); err != nil { //nolint:gosec
+		slog.Error("consoleui/files: write tmp", "err", err)
+		writeGenericError(w, http.StatusInternalServerError, "failed to write file")
+		return
+	}
+	if err := os.Rename(tmpPath, absPath); err != nil {
+		_ = os.Remove(tmpPath)
+		slog.Error("consoleui/files: write rename", "err", err)
+		writeGenericError(w, http.StatusInternalServerError, "failed to save file")
+		return
+	}
+
+	newVersion := fileContentHash(contentBytes)
+	relForResponse := h.toRelPath(absPath)
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(fileWriteResponse{
+		Path:    relForResponse,
+		Version: newVersion,
+		Size:    int64(len(contentBytes)),
+	})
 }
 
 // languageFromExt maps a file extension (including the leading dot) to a

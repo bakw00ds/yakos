@@ -54,6 +54,109 @@
 (function () {
   'use strict';
 
+  // ---- 0. Theme system -------------------------------------------------------
+  //
+  // Theme persistence: localStorage key 'yakos_theme'.
+  // Valid values: 'ops', 'fluid', 'og', 'light'.
+  // Default: derived from prefers-color-scheme (dark → 'og', light → 'light').
+  //
+  // The data-theme attribute is set on <html> as early as possible here — at
+  // the top of the IIFE before DOMContentLoaded — so it fires before first
+  // paint. The server-side index.html already sets data-theme="og" as a
+  // no-inline-script FOUC hedge; this code overrides it immediately if the
+  // user has a different preference stored.
+  //
+  // The console CSP forbids inline scripts (script-src 'self'), so we cannot
+  // use a <script> block in <head>. app.js loads via <script src="/app.js">
+  // which the browser executes before rendering the body, giving us an early
+  // enough execution point to avoid visible FOUC in most cases.
+  //
+  // perf-low-end probe: if deviceMemory <= 2 GB or hardwareConcurrency <= 2,
+  // we set html.perf-low-end which CSS uses to kill FLUID aurora animations.
+  // This mirrors the PandaOS field-decorations-init.ts probe logic.
+
+  var THEME_LS_KEY = 'yakos_theme';
+  var VALID_THEMES = ['ops', 'fluid', 'og', 'light'];
+
+  // Belt-and-suspenders TDZ guard: hoist IDE editor state vars to var so that
+  // even if any pre-paint code path ever reaches syncMonacoTheme(), it sees
+  // `undefined` (falsy) rather than a TDZ ReferenceError that aborts the IIFE.
+  // The authoritative declarations (with comments) remain near the IDE section
+  // below; these var hoists shadow nothing — they produce the same initial value.
+  var ideTabInitialized = false;
+  var ideEditorWindow = null;
+  var ideEditorReady = false;
+  var ideQueuedOpen = null;
+  var ideMessageHandlerRegistered = false;
+
+  function defaultTheme() {
+    try {
+      if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+        return 'light';
+      }
+    } catch (_) {}
+    return 'og';
+  }
+
+  function readStoredTheme() {
+    try {
+      var v = localStorage.getItem(THEME_LS_KEY);
+      if (v && VALID_THEMES.indexOf(v) !== -1) return v;
+    } catch (_) {}
+    return null;
+  }
+
+  // setThemeCoreOnly: the safe pre-paint subset of theme application.
+  //
+  // ONLY sets data-theme on <html>, persists to localStorage, and updates
+  // aria-pressed states on .theme-btn elements. Does NOT call syncMonacoTheme.
+  //
+  // Why the split: syncMonacoTheme() reads ideEditorWindow, which is declared
+  // with `let` later in the IIFE. Calling it from the pre-paint init block
+  // (which runs at IIFE top, before those `let` bindings are initialised)
+  // triggers a TDZ ReferenceError that aborts the entire IIFE and produces a
+  // black screen. The Monaco iframe does not exist at pre-paint time anyway;
+  // theme sync to Monaco is handled correctly by:
+  //   a) handleIdeEditorMessage {type:'ready'} — on first IDE tab open, and
+  //   b) applyTheme() (the full version below) — on every picker-button click.
+  function setThemeCoreOnly(theme) {
+    if (VALID_THEMES.indexOf(theme) === -1) theme = 'og';
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem(THEME_LS_KEY, theme); } catch (_) {}
+    // Update picker button states (may not exist yet at pre-paint time; safe).
+    var btns = document.querySelectorAll('.theme-btn');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].setAttribute('aria-pressed', btns[i].getAttribute('data-theme-value') === theme ? 'true' : 'false');
+    }
+  }
+
+  // applyTheme: the full theme-switch path used by the picker at runtime.
+  // Calls setThemeCoreOnly first, then syncMonacoTheme. Safe to call only
+  // AFTER the IIFE body has fully initialised (i.e. from picker click handlers
+  // wired in buildPage, never from the pre-paint init block).
+  function applyTheme(theme) {
+    setThemeCoreOnly(theme);
+    // syncMonacoTheme is defined later in the IIFE; ideEditorWindow is
+    // initialised by that point whenever applyTheme is called at runtime.
+    syncMonacoTheme(theme);
+  }
+
+  // Set theme before first paint — uses setThemeCoreOnly (NOT applyTheme)
+  // to avoid the TDZ crash on ideEditorWindow described above.
+  (function () {
+    var stored = readStoredTheme();
+    setThemeCoreOnly(stored || defaultTheme());
+
+    // perf-low-end probe: gate FLUID aurora animations on low-end devices.
+    try {
+      var mem = navigator.deviceMemory;
+      var cores = navigator.hardwareConcurrency;
+      if ((mem && mem <= 2) || (cores && cores <= 2)) {
+        document.documentElement.classList.add('perf-low-end');
+      }
+    } catch (_) {}
+  }());
+
   // ---- 1. Token extraction ---------------------------------------------------
 
   let TOKEN = '';
@@ -2389,20 +2492,27 @@
   //
   // Phase 1 is read-only. Edit/save/diff are out of scope.
 
-  let ideTabInitialized = false;
+  // IDE editor state variables.
+  // Declared as var (not let) so they are hoisted to the top of the IIFE and
+  // initialised to undefined/false/null before any code runs — including the
+  // pre-paint theme init block. The matching var declarations at the top of the
+  // IIFE (in the TDZ-guard block) ensure no TDZ window exists for these names.
+  // Using var here avoids a duplicate-declaration SyntaxError; var re-declarations
+  // of var are a no-op in sloppy mode and silently ignored in strict mode.
+  ideTabInitialized = false; // already var-declared above; reset to canonical initial value
 
   // Ref to Monaco iframe's contentWindow (set once the iframe loads).
-  let ideEditorWindow = null;
+  ideEditorWindow = null;
 
   // True once the Monaco {type:'ready'} postMessage arrives.
-  let ideEditorReady = false;
+  ideEditorReady = false;
 
   // Queued openFile to send once the editor is ready.
-  let ideQueuedOpen = null;
+  ideQueuedOpen = null;
 
   // Stored handler ref so we can removeEventListener if needed in the future.
   // Guard prevents double-registration if renderIdeLayout were ever called twice.
-  let ideMessageHandlerRegistered = false;
+  ideMessageHandlerRegistered = false;
 
   function initIdeTab() {
     if (ideTabInitialized) return;
@@ -2482,6 +2592,8 @@
 
     if (msg.type === 'ready') {
       ideEditorReady = true;
+      // Sync Monaco theme to the current console theme.
+      syncMonacoTheme(document.documentElement.getAttribute('data-theme') || 'og');
       // Flush any queued openFile.
       if (ideQueuedOpen) {
         sendOpenFile(ideQueuedOpen);
@@ -2499,6 +2611,20 @@
   function sendOpenFile(payload) {
     if (!ideEditorWindow) return;
     ideEditorWindow.postMessage(payload, window.location.origin);
+  }
+
+  // syncMonacoTheme sends a {type:'setTheme', theme} postMessage to the Monaco
+  // iframe. The iframe maps yakOS theme names to Monaco theme strings:
+  //   ops, fluid, og → 'vs-dark'  (all dark themes use Monaco dark)
+  //   light          → 'vs'       (Monaco's built-in light theme)
+  // This is called by applyTheme() on every theme switch, and by
+  // handleIdeEditorMessage on {type:'ready'} to sync the initial theme.
+  // CSP-safe: same-origin postMessage requires no CSP changes.
+  function syncMonacoTheme(theme) {
+    if (!ideEditorWindow) return;
+    try {
+      ideEditorWindow.postMessage({ type: 'setTheme', theme: theme }, window.location.origin);
+    } catch (_) {}
   }
 
   function openFileInEditor(path, content, language) {
@@ -2859,7 +2985,18 @@
     app.innerHTML = `
       <div class="tab-bar">
         <span class="tab-bar-brand">yakOS</span>
-        <div id="tab-bar-tabs" style="display:flex;"></div>
+        <div id="tab-bar-tabs"></div>
+        <nav class="theme-picker" aria-label="Console theme">
+          <span class="theme-picker-label" aria-hidden="true">Theme</span>
+          <button class="theme-btn" type="button" data-theme-value="ops"
+            aria-pressed="false" aria-label="OPS theme — terminal HUD">OPS</button>
+          <button class="theme-btn" type="button" data-theme-value="fluid"
+            aria-pressed="false" aria-label="FLUID theme — glass interface">FLUID</button>
+          <button class="theme-btn" type="button" data-theme-value="og"
+            aria-pressed="false" aria-label="OG theme — raw brand">OG</button>
+          <button class="theme-btn" type="button" data-theme-value="light"
+            aria-pressed="false" aria-label="LIGHT theme — light mode">LIGHT</button>
+        </nav>
       </div>
       <div class="tab-content">
         <div id="panel-overview" class="tab-panel active">
@@ -2936,6 +3073,21 @@
     `;
 
     renderTabs();
+
+    // Wire theme picker buttons.
+    // applyTheme() updates aria-pressed states and persists to localStorage.
+    // We also immediately sync aria-pressed to reflect current theme.
+    (function () {
+      var currentTheme = document.documentElement.getAttribute('data-theme') || 'og';
+      var btns = document.querySelectorAll('.theme-btn');
+      for (var i = 0; i < btns.length; i++) {
+        (function (btn) {
+          var v = btn.getAttribute('data-theme-value');
+          btn.setAttribute('aria-pressed', v === currentTheme ? 'true' : 'false');
+          btn.addEventListener('click', function () { applyTheme(v); });
+        }(btns[i]));
+      }
+    }());
 
     if (!TOKEN) {
       document.getElementById('auth-error').classList.add('visible');

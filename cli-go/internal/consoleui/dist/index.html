@@ -1,5 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<!-- data-theme default: "og" (dark default). app.js overrides from localStorage
+     before paint; this value prevents FOUC on first load. The server CSP forbids
+     inline scripts so we cannot use a synchronous script tag here — instead we
+     set a sensible default and accept a minimal one-frame flicker on theme change
+     only when the stored preference differs from the default. See app.js §theme. -->
+<html lang="en" data-theme="og">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">

@@ -16,3 +16,8 @@ cli-go/internal/consoleui/dist/vendor/monaco/min/vs/**/*.ttf binary
 # CHECKSUMS.sha256 manifest — treat as binary so line endings cannot
 # corrupt the hex digests on Windows (sha256sum expects LF).
 cli-go/internal/consoleui/dist/vendor/monaco/CHECKSUMS.sha256 binary
+# PandaOS-ported vendored fonts (Inter + JetBrains Mono woff2) — binary
+# to avoid EOL conversion corrupting woff2 binary content and SHA-256 pins.
+# The files live under dist/vendor/fonts/ (populated at font-vendoring time;
+# see VENDOR.md §Fonts for the download + hash recipe).
+cli-go/internal/consoleui/dist/vendor/fonts/*.woff2 binary
