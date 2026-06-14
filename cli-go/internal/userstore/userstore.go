@@ -40,6 +40,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +53,13 @@ import (
 // Accepted characters: ASCII letters, digits, dot, underscore, at-sign, hyphen.
 // Maximum length: 64 characters.  "." and ".." are rejected separately below.
 var usernameRe = regexp.MustCompile(`^[A-Za-z0-9._@-]{1,64}$`)
+
+// ---- Password policy --------------------------------------------------------
+
+// MinPasswordLen is the minimum acceptable password length enforced by Create,
+// SetPassword, and ResetPassword.  12 characters is the documented operator-
+// account floor; adjust the constant and call a config layer in a later phase.
+const MinPasswordLen = 12
 
 // ---- Lockout params ---------------------------------------------------------
 
@@ -115,8 +123,12 @@ func SetArgon2ParamsForTest(time, memory uint32, threads uint8) func() {
 		activeArgon2Time = oldTime
 		activeArgon2Memory = oldMem
 		activeArgon2Threads = oldThreads
-		// Restore original dummy PHC.
-		dummyPHC, _ = HashPassword("yakos-dummy-password-for-unknown-user-timing")
+		// Restore original dummy PHC; panic on failure (same posture as init).
+		var restoreErr error
+		dummyPHC, restoreErr = HashPassword("yakos-dummy-password-for-unknown-user-timing")
+		if restoreErr != nil {
+			panic(fmt.Sprintf("userstore: SetArgon2ParamsForTest restore: regenerate dummy PHC: %v", restoreErr))
+		}
 	}
 }
 
@@ -237,9 +249,10 @@ type storeFile struct {
 // Store is a file-backed user store.  Obtain one with Open.
 // All methods are safe for concurrent use.
 type Store struct {
-	path string
-	mu   sync.Mutex
-	data storeFile
+	path   string
+	mu     sync.Mutex
+	data   storeFile
+	logger func(msg string) // optional; called on non-fatal internal errors
 }
 
 // Open loads (or initialises) the user store at path.
@@ -263,7 +276,7 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("userstore: lstat %q: %w", path, err)
 		}
 		// File does not exist — create an empty store and persist it.
-		s := &Store{path: path, data: storeFile{Users: []user{}}}
+		s := &Store{path: path, data: storeFile{Users: []user{}}, logger: func(string) {}}
 		if err := s.persist(); err != nil {
 			return nil, fmt.Errorf("userstore: create %q: %w", path, err)
 		}
@@ -293,7 +306,26 @@ func Open(path string) (*Store, error) {
 		sf.Users = []user{}
 	}
 
-	return &Store{path: path, data: sf}, nil
+	return &Store{path: path, data: sf, logger: func(string) {}}, nil
+}
+
+// SetLogger attaches a log function to the store.  It is called with a
+// diagnostic message when a non-fatal internal error occurs — specifically
+// when persist() fails after an in-memory mutation (lockout state, success
+// counter reset).  The in-memory state is always updated; the logger makes
+// the durability gap observable so operators can act on it.
+//
+// Phase 3 will inject the daemon's structured logger here.  Until then the
+// default no-op keeps existing callers unchanged.
+//
+// fn must be safe for concurrent use; it is called while s.mu is held.
+func (s *Store) SetLogger(fn func(msg string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if fn == nil {
+		fn = func(string) {}
+	}
+	s.logger = fn
 }
 
 // Count returns the number of users in the store.
@@ -323,9 +355,13 @@ func (s *Store) adminCountLocked() int {
 }
 
 // Create creates a new user with the given username, password, and role.
-// Returns an error when the username already exists or is invalid.
+// Returns an error when the username already exists, is invalid, or the
+// password is shorter than MinPasswordLen.
 func (s *Store) Create(username, password string, role netid.Role) error {
 	if err := validateUsername(username); err != nil {
+		return fmt.Errorf("userstore: create: %w", err)
+	}
+	if err := validatePassword(password); err != nil {
 		return fmt.Errorf("userstore: create: %w", err)
 	}
 
@@ -413,7 +449,11 @@ func (s *Store) Verify(username, password string) (PublicUser, error) {
 
 	ok, err := VerifyPassword(u.PasswordHash, password)
 	if err != nil {
-		return PublicUser{}, fmt.Errorf("userstore: verify: %w", err)
+		// Corrupt or unparseable stored PHC.  This is an infrastructure failure,
+		// not a user-facing auth reason, so AuthFailureReason returns "".
+		// Wrapping ErrAuthFailed ensures the caller still gets a consistent
+		// error type and cannot accidentally expose the raw internal message.
+		return PublicUser{}, fmt.Errorf("%w: internal error verifying password: %w", ErrAuthFailed, err)
 	}
 	if !ok {
 		// Increment failure counter; lock if threshold reached.
@@ -423,9 +463,11 @@ func (s *Store) Verify(username, password string) (PublicUser, error) {
 		}
 		u.UpdatedAt = time.Now().UTC()
 		s.updateLocked(u)
-		if err := s.persist(); err != nil {
-			// Best-effort — log but don't hide the auth failure.
-			_ = err
+		if persistErr := s.persist(); persistErr != nil {
+			// In-memory state is updated (live process stays protected).
+			// Log so operators can detect the durability gap; do not hide
+			// the auth failure from the caller.
+			s.logger(fmt.Sprintf("userstore: failed to persist lockout state for %q: %v", u.Username, persistErr))
 		}
 		return PublicUser{}, fmt.Errorf("%w: %w", ErrAuthFailed, errWrongPassword)
 	}
@@ -435,15 +477,20 @@ func (s *Store) Verify(username, password string) (PublicUser, error) {
 	u.LockedUntil = time.Time{}
 	u.UpdatedAt = time.Now().UTC()
 	s.updateLocked(u)
-	if err := s.persist(); err != nil {
-		// Best-effort on success path — return the user anyway.
-		_ = err
+	if persistErr := s.persist(); persistErr != nil {
+		// In-memory reset is applied; the live session is valid.
+		// Log the durability gap so it is observable.
+		s.logger(fmt.Sprintf("userstore: failed to persist login-success state for %q: %v", u.Username, persistErr))
 	}
 
 	return toPublic(u), nil
 }
 
-// SetRole sets the role for username.  Returns an error if the user does not exist.
+// SetRole sets the role for username and bumps SessionEpoch, atomically
+// invalidating all live sessions for this user (per ADR-0005: a role change
+// must take effect immediately; sessions must re-resolve the new role).
+//
+// Returns an error if the user does not exist.
 func (s *Store) SetRole(username string, role netid.Role) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -453,6 +500,7 @@ func (s *Store) SetRole(username string, role netid.Role) error {
 		return fmt.Errorf("userstore: set-role: user %q not found", username)
 	}
 	u.Role = role.String()
+	u.SessionEpoch++
 	u.UpdatedAt = time.Now().UTC()
 	s.updateLocked(u)
 	return s.persist()
@@ -460,7 +508,11 @@ func (s *Store) SetRole(username string, role netid.Role) error {
 
 // SetPassword sets a new password for username, clears PasswordResetReq, and
 // bumps SessionEpoch (invalidating all live sessions for this user).
+// Returns an error when the new password is shorter than MinPasswordLen.
 func (s *Store) SetPassword(username, newPassword string) error {
+	if err := validatePassword(newPassword); err != nil {
+		return fmt.Errorf("userstore: set-password: %w", err)
+	}
 	hash, err := HashPassword(newPassword)
 	if err != nil {
 		return fmt.Errorf("userstore: set-password: %w", err)
@@ -483,7 +535,11 @@ func (s *Store) SetPassword(username, newPassword string) error {
 
 // ResetPassword sets a new (typically admin-generated) password and marks the
 // account as requiring a password change on next login.  Bumps SessionEpoch.
+// Returns an error when the new password is shorter than MinPasswordLen.
 func (s *Store) ResetPassword(username, tempPassword string) error {
+	if err := validatePassword(tempPassword); err != nil {
+		return fmt.Errorf("userstore: reset-password: %w", err)
+	}
 	hash, err := HashPassword(tempPassword)
 	if err != nil {
 		return fmt.Errorf("userstore: reset-password: %w", err)
@@ -678,19 +734,21 @@ func VerifyPassword(phc, pw string) (bool, error) {
 
 // parsePHC parses an argon2id PHC string and returns its components.
 // Expected format: $argon2id$v=19$m=<m>,t=<t>,p=<p>$<b64salt>$<b64key>
+//
+// Security: cost parameters are bounds-checked before being passed to argon2.
+// A corrupt stored value with m=-1 would otherwise be cast to ~4 TiB and
+// OOM-kill the process on the next login attempt for that account.
 func parsePHC(phc string) (m, t uint32, p uint8, salt, key []byte, err error) {
-	var version int
-	var mI, tI, pI int
-
-	// We need to extract the salt and key sections by splitting on '$'.
-	// Format segments (split by '$', first element is empty because phc starts with '$'):
+	// base64.RawStdEncoding never emits '$', so strings.Split is safe here.
+	// Format (6 segments when split on '$', first is empty due to leading '$'):
 	// [0]="" [1]="argon2id" [2]="v=19" [3]="m=65536,t=3,p=4" [4]="<salt>" [5]="<key>"
-	parts := splitPHC(phc)
+	parts := strings.Split(phc, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" {
 		err = fmt.Errorf("not a valid argon2id PHC string")
 		return
 	}
 
+	var version int
 	if _, scanErr := fmt.Sscanf(parts[2], "v=%d", &version); scanErr != nil {
 		err = fmt.Errorf("parse version: %w", scanErr)
 		return
@@ -700,8 +758,22 @@ func parsePHC(phc string) (m, t uint32, p uint8, salt, key []byte, err error) {
 		return
 	}
 
+	var mI, tI, pI int
 	if _, scanErr := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &mI, &tI, &pI); scanErr != nil {
 		err = fmt.Errorf("parse params: %w", scanErr)
+		return
+	}
+	// Bounds-check before converting to unsigned types.  Negative values
+	// from a corrupt file would wrap to enormous uint32/uint8 values and
+	// either OOM-kill the process (memory) or silently reduce cost (time/threads).
+	// Upper bound on memory: 4 GiB (1<<22 KiB) is a sane operational ceiling.
+	if mI <= 0 || tI <= 0 || pI <= 0 || pI > 255 {
+		err = fmt.Errorf("PHC params out of range: m=%d, t=%d, p=%d (all must be positive; p ≤ 255)", mI, tI, pI)
+		return
+	}
+	const maxMemoryKiB = 1 << 22 // 4 GiB
+	if mI > maxMemoryKiB {
+		err = fmt.Errorf("PHC memory param %d KiB exceeds maximum %d KiB (4 GiB)", mI, maxMemoryKiB)
 		return
 	}
 	m = uint32(mI)
@@ -721,22 +793,6 @@ func parsePHC(phc string) (m, t uint32, p uint8, salt, key []byte, err error) {
 	return
 }
 
-// splitPHC splits a PHC string on '$', preserving the leading empty segment
-// that results from the leading '$' character.
-func splitPHC(s string) []string {
-	// Walk the string and split on '$'.
-	out := make([]string, 0, 7)
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '$' {
-			out = append(out, s[start:i])
-			start = i + 1
-		}
-	}
-	out = append(out, s[start:])
-	return out
-}
-
 // ---- username validation ----------------------------------------------------
 
 // validateUsername reuses the same allow-list as mtlscmd.ValidateClientName:
@@ -750,6 +806,17 @@ func validateUsername(name string) error {
 	}
 	if !usernameRe.MatchString(name) {
 		return fmt.Errorf("username %q is invalid: must match [A-Za-z0-9._@-]{1,64} and contain no path separators", name)
+	}
+	return nil
+}
+
+// ---- password validation ----------------------------------------------------
+
+// validatePassword rejects passwords shorter than MinPasswordLen.
+// Called by Create, SetPassword, and ResetPassword before hashing.
+func validatePassword(pw string) error {
+	if len(pw) < MinPasswordLen {
+		return fmt.Errorf("password too short: minimum %d characters", MinPasswordLen)
 	}
 	return nil
 }

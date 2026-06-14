@@ -16,7 +16,7 @@ import (
 )
 
 // TestMain reduces argon2id cost parameters for the whole test binary so that
-// the 30+ argon2 invocations across the test suite complete in seconds rather
+// the many argon2 invocations across the test suite complete in seconds rather
 // than minutes.  The reduced params are (t=1, m=64KiB, p=1) — still a valid
 // argon2id derivation, just not production-strength.
 //
@@ -51,12 +51,12 @@ func TestHashPassword_RoundTrip(t *testing.T) {
 
 func TestHashPassword_WrongPassword_ReturnsFalse(t *testing.T) {
 	t.Parallel()
-	hash, err := userstore.HashPassword("correct-password")
+	hash, err := userstore.HashPassword("correct-password-long-enough")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
 
-	ok, err := userstore.VerifyPassword(hash, "wrong-password")
+	ok, err := userstore.VerifyPassword(hash, "wrong-password-long-enough")
 	if err != nil {
 		t.Fatalf("VerifyPassword: %v", err)
 	}
@@ -68,11 +68,11 @@ func TestHashPassword_WrongPassword_ReturnsFalse(t *testing.T) {
 func TestHashPassword_UniqueSalts(t *testing.T) {
 	t.Parallel()
 	// Two hashes of the same password must differ (unique salts).
-	h1, err := userstore.HashPassword("same-password")
+	h1, err := userstore.HashPassword("same-password-long")
 	if err != nil {
 		t.Fatalf("HashPassword (1): %v", err)
 	}
-	h2, err := userstore.HashPassword("same-password")
+	h2, err := userstore.HashPassword("same-password-long")
 	if err != nil {
 		t.Fatalf("HashPassword (2): %v", err)
 	}
@@ -83,11 +83,10 @@ func TestHashPassword_UniqueSalts(t *testing.T) {
 
 func TestHashPassword_PHCFormat(t *testing.T) {
 	t.Parallel()
-	hash, err := userstore.HashPassword("test-password")
+	hash, err := userstore.HashPassword("test-password-xyz")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
-	// Must start with $argon2id$
 	if !strings.HasPrefix(hash, "$argon2id$") {
 		t.Errorf("HashPassword: PHC string does not start with $argon2id$; got %q", hash)
 	}
@@ -98,11 +97,10 @@ func TestHashPassword_EmbeddsParams(t *testing.T) {
 	// PHC must embed m, t, p params so VerifyPassword can parse them.
 	// (Tests run with reduced params via TestMain; we check the format is present,
 	// not the specific values.)
-	hash, err := userstore.HashPassword("param-test-pw")
+	hash, err := userstore.HashPassword("param-test-password")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
-	// All three params must be present in the form "m=N,t=N,p=N".
 	for _, field := range []string{"m=", "t=", "p="} {
 		if !strings.Contains(hash, field) {
 			t.Errorf("HashPassword: PHC does not contain %q; got %q", field, hash)
@@ -113,13 +111,12 @@ func TestHashPassword_EmbeddsParams(t *testing.T) {
 func TestVerifyPassword_ParsesStoredParams_RoundTrip(t *testing.T) {
 	t.Parallel()
 	// VerifyPassword must parse the stored params from the PHC string (not use
-	// hardcoded constants).  Verify by confirming hash/verify round-trips
-	// for the current param set, which is stored inside the PHC.
-	hash, err := userstore.HashPassword("param-parse-test")
+	// hardcoded constants).
+	hash, err := userstore.HashPassword("param-parse-test-pw")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
-	ok, err := userstore.VerifyPassword(hash, "param-parse-test")
+	ok, err := userstore.VerifyPassword(hash, "param-parse-test-pw")
 	if err != nil {
 		t.Fatalf("VerifyPassword: %v", err)
 	}
@@ -130,16 +127,12 @@ func TestVerifyPassword_ParsesStoredParams_RoundTrip(t *testing.T) {
 
 func TestVerifyPassword_TamperedHash_ReturnsFalse(t *testing.T) {
 	t.Parallel()
-	hash, err := userstore.HashPassword("my-password")
+	hash, err := userstore.HashPassword("my-long-password-xyz")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
 	// Corrupt a character in the middle of the key segment of the PHC string.
-	// We cannot reliably corrupt the last character because trailing base64 bits
-	// may be ignored, yielding the same decoded value.
-	//
-	// Strategy: find the last '$' (start of key field) and flip a char in the
-	// middle of that field.
+	// Avoid the last character — trailing base64 bits may be absorbed silently.
 	lastDollar := strings.LastIndex(hash, "$")
 	if lastDollar < 0 || lastDollar+4 >= len(hash) {
 		t.Fatalf("unexpected PHC format: %q", hash)
@@ -157,7 +150,7 @@ func TestVerifyPassword_TamperedHash_ReturnsFalse(t *testing.T) {
 		t.Fatalf("tamper produced identical string; test is invalid")
 	}
 
-	ok, err := userstore.VerifyPassword(tampered, "my-password")
+	ok, err := userstore.VerifyPassword(tampered, "my-long-password-xyz")
 	if err != nil {
 		// A parse error (e.g. invalid base64 after tamper) is also a valid rejection.
 		return
@@ -183,6 +176,96 @@ func TestVerifyPassword_InvalidPHC_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestVerifyPassword_CorruptCostParams verifies that a PHC string with negative
+// or out-of-range cost parameters is rejected before argon2 is called, preventing
+// an OOM-kill from a corrupt m=-1 (which would cast to ~4 TiB).
+func TestVerifyPassword_CorruptCostParams(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		phc  string
+	}{
+		{
+			name: "negative_m",
+			// m=-1 would cast to 4294967295 KiB ≈ 4 TiB
+			phc: "$argon2id$v=19$m=-1,t=3,p=4$c29tZXNhbHRYWA$aGFzaGtleVhYWFhYWFhYWFhYWFhYWFhYWA",
+		},
+		{
+			name: "zero_t",
+			phc:  "$argon2id$v=19$m=65536,t=0,p=4$c29tZXNhbHRYWA$aGFzaGtleVhYWFhYWFhYWFhYWFhYWFhYWA",
+		},
+		{
+			name: "zero_p",
+			phc:  "$argon2id$v=19$m=65536,t=3,p=0$c29tZXNhbHRYWA$aGFzaGtleVhYWFhYWFhYWFhYWFhYWFhYWA",
+		},
+		{
+			name: "memory_exceeds_4gib",
+			// 1<<22 + 1 KiB exceeds the 4 GiB ceiling
+			phc: fmt.Sprintf("$argon2id$v=19$m=%d,t=3,p=4$c29tZXNhbHRYWA$aGFzaGtleVhYWFhYWFhYWFhYWFhYWFhYWA", (1<<22)+1),
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := userstore.VerifyPassword(tc.phc, "any-password")
+			if err == nil {
+				t.Errorf("VerifyPassword with %s: expected error; got nil", tc.name)
+			}
+		})
+	}
+}
+
+// TestVerify_CorruptPHC_WrapsErrAuthFailed verifies that when a stored
+// password hash is corrupt (unparseable), Verify wraps ErrAuthFailed so that
+// callers get a consistent error type, and AuthFailureReason returns "" (this
+// is an infrastructure failure, not a user-facing auth reason).
+func TestVerify_CorruptPHC_WrapsErrAuthFailed(t *testing.T) {
+	t.Parallel()
+	// Open a store and inject a corrupt hash directly into users.json, then
+	// re-open so the store loads it, then call Verify.
+	base := t.TempDir()
+	path := filepath.Join(base, "users.json")
+
+	// Write a users.json with a corrupt passwordHash for "alice".
+	corruptJSON := `{
+  "users": [
+    {
+      "username": "alice",
+      "passwordHash": "not-a-valid-phc-string",
+      "role": "read",
+      "disabled": false,
+      "passwordResetReq": false,
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-01-01T00:00:00Z",
+      "failedAttempts": 0,
+      "sessionEpoch": 0
+    }
+  ]
+}`
+	if err := os.WriteFile(path, []byte(corruptJSON), 0600); err != nil {
+		t.Fatalf("write corrupt users.json: %v", err)
+	}
+
+	s, err := userstore.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	_, verifyErr := s.Verify("alice", "any-password-here")
+	if verifyErr == nil {
+		t.Fatal("Verify with corrupt PHC: expected error; got nil")
+	}
+	if !errors.Is(verifyErr, userstore.ErrAuthFailed) {
+		t.Errorf("Verify with corrupt PHC: error does not wrap ErrAuthFailed; got %v", verifyErr)
+	}
+	// Infrastructure failure must NOT be attributed to a user action.
+	reason := userstore.AuthFailureReason(verifyErr)
+	if reason != "" {
+		t.Errorf("AuthFailureReason for corrupt PHC: got %q; want \"\" (infra failure, not user action)", reason)
+	}
+}
+
 // ---- unknown-username timing guard ------------------------------------------
 
 // TestVerify_UnknownUser_StillRunsArgon2 verifies that Verify does not return
@@ -194,14 +277,12 @@ func TestVerifyPassword_InvalidPHC_ReturnsError(t *testing.T) {
 //     the internal sentinel is set correctly for audit logging.
 //
 // Note: we do not assert timing here because tests run with reduced argon2
-// params (via TestMain) that may complete in sub-millisecond time.  The
-// no-early-exit behavior is guaranteed by the code path (dummyPHC is always
-// passed to VerifyPassword for unknown users), not by a timing check.
+// params (via TestMain) that may complete in sub-millisecond time.
 func TestVerify_UnknownUser_StillRunsArgon2(t *testing.T) {
 	t.Parallel()
 	s := openEmpty(t)
 
-	_, err := s.Verify("no-such-user", "some-password")
+	_, err := s.Verify("no-such-user", "some-long-password")
 	if err == nil {
 		t.Fatal("Verify unknown user: expected error; got nil")
 	}
@@ -219,18 +300,18 @@ func TestVerify_UnknownUser_StillRunsArgon2(t *testing.T) {
 func TestVerify_Lockout_AfterThreshold(t *testing.T) {
 	t.Parallel()
 	s := openEmpty(t)
-	mustCreate(t, s, "locked-user", "correct-pass", netid.RoleRead)
+	mustCreate(t, s, "locked-user", "correct-long-pass!", netid.RoleRead)
 
 	// Burn through the threshold with wrong passwords.
 	for i := 0; i < userstore.LockoutThreshold; i++ {
-		_, err := s.Verify("locked-user", "wrong-pass")
+		_, err := s.Verify("locked-user", "wrong-long-password")
 		if err == nil {
 			t.Fatalf("attempt %d: expected error; got nil", i+1)
 		}
 	}
 
 	// Now the account should be locked — correct password must be rejected.
-	_, err := s.Verify("locked-user", "correct-pass")
+	_, err := s.Verify("locked-user", "correct-long-pass!")
 	if err == nil {
 		t.Fatal("locked account: expected error with correct password; got nil")
 	}
@@ -246,15 +327,15 @@ func TestVerify_Lockout_AfterThreshold(t *testing.T) {
 func TestVerify_Lockout_SuccessResetsCounter(t *testing.T) {
 	t.Parallel()
 	s := openEmpty(t)
-	mustCreate(t, s, "alice", "correct-pass", netid.RoleRead)
+	mustCreate(t, s, "alice", "correct-long-pass!", netid.RoleRead)
 
 	// Fail threshold-1 times.
 	for i := 0; i < userstore.LockoutThreshold-1; i++ {
-		_, _ = s.Verify("alice", "wrong-pass")
+		_, _ = s.Verify("alice", "wrong-long-password!")
 	}
 
 	// One success must reset the counter.
-	pub, err := s.Verify("alice", "correct-pass")
+	pub, err := s.Verify("alice", "correct-long-pass!")
 	if err != nil {
 		t.Fatalf("verify success after partial failures: %v", err)
 	}
@@ -268,10 +349,10 @@ func TestVerify_Lockout_CooldownExpiry(t *testing.T) {
 	// LockedUntil is set to a future time and is visible via Get.
 	t.Parallel()
 	s := openEmpty(t)
-	mustCreate(t, s, "bob", "correct-pass", netid.RoleRead)
+	mustCreate(t, s, "bob", "correct-long-pass!", netid.RoleRead)
 
 	for i := 0; i < userstore.LockoutThreshold; i++ {
-		_, _ = s.Verify("bob", "wrong-pass")
+		_, _ = s.Verify("bob", "wrong-long-password!")
 	}
 
 	pub, ok := s.Get("bob")
@@ -291,9 +372,9 @@ func TestVerify_Lockout_CooldownExpiry(t *testing.T) {
 func TestCreate_Duplicate_ReturnsError(t *testing.T) {
 	t.Parallel()
 	s := openEmpty(t)
-	mustCreate(t, s, "alice", "pass1", netid.RoleRead)
+	mustCreate(t, s, "alice", "pass1-long-enough", netid.RoleRead)
 
-	err := s.Create("alice", "pass2", netid.RoleAdmin)
+	err := s.Create("alice", "pass2-long-enough", netid.RoleAdmin)
 	if err == nil {
 		t.Fatal("Create duplicate: expected error; got nil")
 	}
@@ -312,12 +393,63 @@ func TestCreate_InvalidUsername_ReturnsError(t *testing.T) {
 		"alice bob", // space not in allow-list
 	}
 	for _, name := range cases {
-		err := s.Create(name, "pass", netid.RoleRead)
+		err := s.Create(name, "password-long-enough", netid.RoleRead)
 		if err == nil {
 			t.Errorf("Create(%q): expected error for invalid username; got nil", name)
 		}
 	}
 }
+
+// ---- password length floor --------------------------------------------------
+
+func TestCreate_ShortPassword_ReturnsError(t *testing.T) {
+	t.Parallel()
+	s := openEmpty(t)
+	// Passwords shorter than MinPasswordLen must be rejected.
+	short := strings.Repeat("x", userstore.MinPasswordLen-1)
+	err := s.Create("alice", short, netid.RoleRead)
+	if err == nil {
+		t.Errorf("Create with %d-char password: expected error (min=%d); got nil",
+			len(short), userstore.MinPasswordLen)
+	}
+}
+
+func TestCreate_MinLengthPassword_Accepted(t *testing.T) {
+	t.Parallel()
+	s := openEmpty(t)
+	exactly := strings.Repeat("x", userstore.MinPasswordLen)
+	if err := s.Create("alice", exactly, netid.RoleRead); err != nil {
+		t.Errorf("Create with exactly MinPasswordLen chars: unexpected error: %v", err)
+	}
+}
+
+func TestSetPassword_ShortPassword_ReturnsError(t *testing.T) {
+	t.Parallel()
+	s := openEmpty(t)
+	mustCreate(t, s, "alice", "long-enough-pass!", netid.RoleRead)
+
+	short := strings.Repeat("y", userstore.MinPasswordLen-1)
+	err := s.SetPassword("alice", short)
+	if err == nil {
+		t.Errorf("SetPassword with %d-char password: expected error (min=%d); got nil",
+			len(short), userstore.MinPasswordLen)
+	}
+}
+
+func TestResetPassword_ShortPassword_ReturnsError(t *testing.T) {
+	t.Parallel()
+	s := openEmpty(t)
+	mustCreate(t, s, "alice", "long-enough-pass!", netid.RoleRead)
+
+	short := strings.Repeat("z", userstore.MinPasswordLen-1)
+	err := s.ResetPassword("alice", short)
+	if err == nil {
+		t.Errorf("ResetPassword with %d-char password: expected error (min=%d); got nil",
+			len(short), userstore.MinPasswordLen)
+	}
+}
+
+// ---- continued CRUD ---------------------------------------------------------
 
 func TestGet_NotFound(t *testing.T) {
 	t.Parallel()
@@ -331,8 +463,8 @@ func TestGet_NotFound(t *testing.T) {
 func TestList_NoHashInPublicUser(t *testing.T) {
 	t.Parallel()
 	s := openEmpty(t)
-	mustCreate(t, s, "alice", "secret", netid.RoleAdmin)
-	mustCreate(t, s, "bob", "also-secret", netid.RoleRead)
+	mustCreate(t, s, "alice", "alice-secret-pass!", netid.RoleAdmin)
+	mustCreate(t, s, "bob", "bob-also-secret-pw", netid.RoleRead)
 
 	users := s.List()
 	if len(users) != 2 {
@@ -359,20 +491,21 @@ func TestList_NoHashInPublicUser(t *testing.T) {
 	}
 }
 
-func TestSetRole(t *testing.T) {
+func TestSetRole_BumpsEpoch(t *testing.T) {
 	t.Parallel()
 	s := openEmpty(t)
-	mustCreate(t, s, "alice", "pass", netid.RoleRead)
+	mustCreate(t, s, "alice", "alice-pass-long!!", netid.RoleRead)
+	epochBefore := getPubOrFail(t, s, "alice").SessionEpoch
 
 	if err := s.SetRole("alice", netid.RoleAdmin); err != nil {
 		t.Fatalf("SetRole: %v", err)
 	}
-	pub, ok := s.Get("alice")
-	if !ok {
-		t.Fatal("Get alice: not found")
-	}
+	pub := getPubOrFail(t, s, "alice")
 	if pub.Role != netid.RoleAdmin {
-		t.Errorf("SetRole: got %v; want %v", pub.Role, netid.RoleAdmin)
+		t.Errorf("SetRole: role got %v; want %v", pub.Role, netid.RoleAdmin)
+	}
+	if pub.SessionEpoch <= epochBefore {
+		t.Errorf("SetRole: SessionEpoch not bumped: before=%d after=%d (role change must invalidate sessions)", epochBefore, pub.SessionEpoch)
 	}
 }
 
@@ -388,10 +521,10 @@ func TestSetRole_NotFound_ReturnsError(t *testing.T) {
 func TestSetPassword_ClearsResetReq_BumpsEpoch(t *testing.T) {
 	t.Parallel()
 	s := openEmpty(t)
-	mustCreate(t, s, "alice", "old-pass", netid.RoleRead)
+	mustCreate(t, s, "alice", "old-pass-is-fine!", netid.RoleRead)
 
 	// Force a reset req via ResetPassword.
-	if err := s.ResetPassword("alice", "temp-pass"); err != nil {
+	if err := s.ResetPassword("alice", "temp-pass-is-ok!"); err != nil {
 		t.Fatalf("ResetPassword: %v", err)
 	}
 	pub, _ := s.Get("alice")
@@ -401,7 +534,7 @@ func TestSetPassword_ClearsResetReq_BumpsEpoch(t *testing.T) {
 	epochBefore := pub.SessionEpoch
 
 	// SetPassword must clear the flag and bump epoch again.
-	if err := s.SetPassword("alice", "new-pass"); err != nil {
+	if err := s.SetPassword("alice", "new-pass-is-fine!"); err != nil {
 		t.Fatalf("SetPassword: %v", err)
 	}
 	pub, _ = s.Get("alice")
@@ -413,7 +546,7 @@ func TestSetPassword_ClearsResetReq_BumpsEpoch(t *testing.T) {
 	}
 
 	// New password must work for login.
-	_, err := s.Verify("alice", "new-pass")
+	_, err := s.Verify("alice", "new-pass-is-fine!")
 	if err != nil {
 		t.Errorf("Verify after SetPassword: %v", err)
 	}
@@ -422,11 +555,11 @@ func TestSetPassword_ClearsResetReq_BumpsEpoch(t *testing.T) {
 func TestResetPassword_SetsResetReq(t *testing.T) {
 	t.Parallel()
 	s := openEmpty(t)
-	mustCreate(t, s, "alice", "original", netid.RoleRead)
+	mustCreate(t, s, "alice", "original-password!", netid.RoleRead)
 
 	epochBefore := getPubOrFail(t, s, "alice").SessionEpoch
 
-	if err := s.ResetPassword("alice", "temp"); err != nil {
+	if err := s.ResetPassword("alice", "temp-password-ok!"); err != nil {
 		t.Fatalf("ResetPassword: %v", err)
 	}
 	pub := getPubOrFail(t, s, "alice")
@@ -441,7 +574,7 @@ func TestResetPassword_SetsResetReq(t *testing.T) {
 func TestDisable_BumpsEpoch(t *testing.T) {
 	t.Parallel()
 	s := openEmpty(t)
-	mustCreate(t, s, "alice", "pass", netid.RoleRead)
+	mustCreate(t, s, "alice", "alice-pass-long!!", netid.RoleRead)
 	epochBefore := getPubOrFail(t, s, "alice").SessionEpoch
 
 	if err := s.Disable("alice"); err != nil {
@@ -459,10 +592,10 @@ func TestDisable_BumpsEpoch(t *testing.T) {
 func TestDisable_VerifyRejectsDisabledUser(t *testing.T) {
 	t.Parallel()
 	s := openEmpty(t)
-	mustCreate(t, s, "alice", "pass", netid.RoleRead)
+	mustCreate(t, s, "alice", "alice-pass-long!!", netid.RoleRead)
 	mustDisable(t, s, "alice")
 
-	_, err := s.Verify("alice", "pass")
+	_, err := s.Verify("alice", "alice-pass-long!!")
 	if err == nil {
 		t.Fatal("Verify disabled user: expected error; got nil")
 	}
@@ -478,7 +611,7 @@ func TestDisable_VerifyRejectsDisabledUser(t *testing.T) {
 func TestEnable_ReenablesAccount(t *testing.T) {
 	t.Parallel()
 	s := openEmpty(t)
-	mustCreate(t, s, "alice", "pass", netid.RoleRead)
+	mustCreate(t, s, "alice", "alice-pass-long!!", netid.RoleRead)
 	mustDisable(t, s, "alice")
 	if err := s.Enable("alice"); err != nil {
 		t.Fatalf("Enable: %v", err)
@@ -487,7 +620,7 @@ func TestEnable_ReenablesAccount(t *testing.T) {
 	if pub.Disabled {
 		t.Error("Disabled still set after Enable")
 	}
-	_, err := s.Verify("alice", "pass")
+	_, err := s.Verify("alice", "alice-pass-long!!")
 	if err != nil {
 		t.Errorf("Verify after Enable: %v", err)
 	}
@@ -496,8 +629,8 @@ func TestEnable_ReenablesAccount(t *testing.T) {
 func TestDelete_RemovesUser(t *testing.T) {
 	t.Parallel()
 	s := openEmpty(t)
-	mustCreate(t, s, "alice", "pass", netid.RoleRead)
-	mustCreate(t, s, "bob", "pass", netid.RoleRead)
+	mustCreate(t, s, "alice", "alice-pass-long!!", netid.RoleRead)
+	mustCreate(t, s, "bob", "bob-pass-long-ok!", netid.RoleRead)
 
 	if err := s.Delete("alice"); err != nil {
 		t.Fatalf("Delete: %v", err)
@@ -509,7 +642,6 @@ func TestDelete_RemovesUser(t *testing.T) {
 	if s.Count() != 1 {
 		t.Errorf("Count after delete: got %d; want 1", s.Count())
 	}
-	// bob should still be there
 	_, ok = s.Get("bob")
 	if !ok {
 		t.Error("Get bob after alice deleted: expected true; got false")
@@ -532,13 +664,13 @@ func TestAdminCount(t *testing.T) {
 		t.Errorf("AdminCount empty store: got %d; want 0", s.AdminCount())
 	}
 
-	mustCreate(t, s, "alice", "pass", netid.RoleAdmin)
-	mustCreate(t, s, "bob", "pass", netid.RoleRead)
+	mustCreate(t, s, "alice", "alice-pass-long!!", netid.RoleAdmin)
+	mustCreate(t, s, "bob", "bob-pass-long-ok!", netid.RoleRead)
 	if s.AdminCount() != 1 {
 		t.Errorf("AdminCount with one admin: got %d; want 1", s.AdminCount())
 	}
 
-	mustCreate(t, s, "carol", "pass", netid.RoleAdmin)
+	mustCreate(t, s, "carol", "carol-pass-long!!", netid.RoleAdmin)
 	if s.AdminCount() != 2 {
 		t.Errorf("AdminCount with two admins: got %d; want 2", s.AdminCount())
 	}
@@ -552,7 +684,7 @@ func TestAdminCount(t *testing.T) {
 func TestBumpSessionEpoch(t *testing.T) {
 	t.Parallel()
 	s := openEmpty(t)
-	mustCreate(t, s, "alice", "pass", netid.RoleRead)
+	mustCreate(t, s, "alice", "alice-pass-long!!", netid.RoleRead)
 	epochBefore := getPubOrFail(t, s, "alice").SessionEpoch
 
 	if err := s.BumpSessionEpoch("alice"); err != nil {
@@ -570,9 +702,47 @@ func TestCount_Empty(t *testing.T) {
 	if s.Count() != 0 {
 		t.Errorf("Count empty store: got %d; want 0", s.Count())
 	}
-	mustCreate(t, s, "alice", "pass", netid.RoleAdmin)
+	mustCreate(t, s, "alice", "alice-pass-long!!", netid.RoleAdmin)
 	if s.Count() != 1 {
 		t.Errorf("Count after create: got %d; want 1", s.Count())
+	}
+}
+
+// ---- SetLogger --------------------------------------------------------------
+
+func TestSetLogger_CalledOnPersistFailure(t *testing.T) {
+	t.Parallel()
+	// This test exercises the logger path by setting up a store on a read-only
+	// directory so persist fails, then checking the logger is called with a
+	// non-empty message during Verify (lockout state persistence).
+	if runtime.GOOS == "windows" {
+		t.Skip("read-only directory chmod not reliable on Windows")
+	}
+
+	base := t.TempDir()
+	path := filepath.Join(base, "users.json")
+	s, err := userstore.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	mustCreate(t, s, "alice", "alice-pass-long!!", netid.RoleRead)
+
+	var logged []string
+	s.SetLogger(func(msg string) {
+		logged = append(logged, msg)
+	})
+
+	// Make the parent directory read-only so persist() will fail.
+	if err := os.Chmod(base, 0500); err != nil {
+		t.Fatalf("chmod base dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(base, 0700) })
+
+	// A wrong-password attempt should trigger a persist failure for lockout state.
+	_, _ = s.Verify("alice", "wrong-password-here!")
+
+	if len(logged) == 0 {
+		t.Error("SetLogger: expected logger to be called on persist failure; got no messages")
 	}
 }
 
@@ -581,7 +751,6 @@ func TestCount_Empty(t *testing.T) {
 func TestOpen_CreatesParentDir(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	// Use a nested path that doesn't exist yet.
 	path := filepath.Join(base, "users", "users.json")
 
 	s, err := userstore.Open(path)
@@ -602,14 +771,12 @@ func TestOpen_SymlinkRejected(t *testing.T) {
 	}
 	t.Parallel()
 
-	// Create a real users.json in one location.
 	realDir := t.TempDir()
 	realPath := filepath.Join(realDir, "users.json")
 	if err := os.WriteFile(realPath, []byte(`{"users":[]}`), 0600); err != nil {
 		t.Fatalf("write real file: %v", err)
 	}
 
-	// Create a symlink in another location pointing to the real file.
 	linkDir := t.TempDir()
 	linkPath := filepath.Join(linkDir, "users.json")
 	if err := os.Symlink(realPath, linkPath); err != nil {
@@ -633,8 +800,6 @@ func TestOpen_GroupWritable_Rejected(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"users":[]}`), 0600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	// Use explicit Chmod — WriteFile mode is subject to umask, which would
-	// strip the group-write bit before it reaches the filesystem.
 	if err := os.Chmod(path, 0620); err != nil {
 		t.Fatalf("chmod 0620: %v", err)
 	}
@@ -656,7 +821,6 @@ func TestOpen_OtherWritable_Rejected(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"users":[]}`), 0600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	// Use explicit Chmod — WriteFile mode is subject to umask.
 	if err := os.Chmod(path, 0602); err != nil {
 		t.Fatalf("chmod 0602: %v", err)
 	}
@@ -698,9 +862,8 @@ func TestPersist_NoTmpLeftover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	mustCreate(t, s, "alice", "pass", netid.RoleAdmin)
+	mustCreate(t, s, "alice", "alice-pass-long!!", netid.RoleAdmin)
 
-	// After a successful write, no .tmp file should remain.
 	tmp := path + ".tmp"
 	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
 		t.Errorf("tmp file still exists at %q after persist; want removed", tmp)
@@ -716,10 +879,9 @@ func TestPersist_Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open (1): %v", err)
 	}
-	mustCreate(t, s, "alice", "pass", netid.RoleAdmin)
-	mustCreate(t, s, "bob", "pass", netid.RoleDispatch)
+	mustCreate(t, s, "alice", "alice-pass-long!!", netid.RoleAdmin)
+	mustCreate(t, s, "bob", "bob-pass-long-ok!", netid.RoleDispatch)
 
-	// Re-open and verify data survived.
 	s2, err := userstore.Open(path)
 	if err != nil {
 		t.Fatalf("Open (2): %v", err)
@@ -735,11 +897,6 @@ func TestPersist_Roundtrip(t *testing.T) {
 func TestConcurrentMutations_Race(t *testing.T) {
 	// Not t.Parallel() at the outer level so -race clearly covers the goroutine
 	// fan-out within this test.
-	//
-	// We use non-argon2 mutations (SetRole, BumpSessionEpoch, List, Get, Disable,
-	// Enable) to keep the test fast under -race; the mutex that protects these
-	// also covers HashPassword callers, but verifying mutex correctness does not
-	// require exercising every method.
 	base := t.TempDir()
 	path := filepath.Join(base, "users.json")
 
@@ -748,20 +905,17 @@ func TestConcurrentMutations_Race(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	// Create 5 users sequentially (each Create calls HashPassword; 5 × ~5s is
-	// acceptable in the test suite even without -short).
 	for i := 0; i < 5; i++ {
 		name := fmt.Sprintf("user%02d", i)
-		if err := s.Create(name, "pass", netid.RoleRead); err != nil {
+		if err := s.Create(name, "password-long-enough!", netid.RoleRead); err != nil {
 			t.Fatalf("Create %s: %v", name, err)
 		}
 	}
 
-	// Fan out 20 goroutines doing concurrent non-argon2 mutations.
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
-		name := fmt.Sprintf("user%02d", i%5) // round-robin across 5 users
+		name := fmt.Sprintf("user%02d", i%5)
 		go func(n string) {
 			defer wg.Done()
 			_ = s.SetRole(n, netid.RoleDispatch)
@@ -774,7 +928,6 @@ func TestConcurrentMutations_Race(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Store must still be consistent after concurrent mutations.
 	if s.Count() != 5 {
 		t.Errorf("Count after concurrent mutations: got %d; want 5", s.Count())
 	}
@@ -792,8 +945,12 @@ func openEmpty(t *testing.T) *userstore.Store {
 	return s
 }
 
+// mustCreate uses a password that is guaranteed to meet MinPasswordLen.
 func mustCreate(t *testing.T, s *userstore.Store, username, password string, role netid.Role) {
 	t.Helper()
+	if len(password) < userstore.MinPasswordLen {
+		t.Fatalf("mustCreate: password %q is shorter than MinPasswordLen=%d; fix the test", password, userstore.MinPasswordLen)
+	}
 	if err := s.Create(username, password, role); err != nil {
 		t.Fatalf("Create %q: %v", username, err)
 	}
