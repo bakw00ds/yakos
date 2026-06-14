@@ -725,19 +725,32 @@
 
   let chatTabInitialized = false;
 
-  function initChatTab() {
+  // bootChatInfrastructure mints the operator ID, loads persisted pane state,
+  // seeds a default pane if none exist, and starts the SSE reader.  It is
+  // idempotent (no-op once chatTabInitialized is true) and called by BOTH
+  // initChatTab and initIdeTab so the boot sequence is defined exactly once.
+  function bootChatInfrastructure() {
     if (chatTabInitialized) return;
-    chatTabInitialized = true;
-
-    getChatOperatorId(); // ensure operator ID is minted
+    getChatOperatorId();
     loadPaneStateFromStorage();
-
-    // If no panes, add a default one.
     if (chatPanes.size === 0) {
       const p = makePane(newPaneId(), newConversationId());
       chatPanes.set(p.id, p);
       savePaneState();
     }
+    if (!chatSSEAbort) {
+      startChatSSE();
+    }
+    chatTabInitialized = true;
+  }
+
+  function initChatTab() {
+    if (chatTabInitialized) return;
+
+    // S4: use the shared boot helper so the sequence is defined once and both
+    // initChatTab + initIdeTab stay in sync.  bootChatInfrastructure() is
+    // idempotent; calling it here sets chatTabInitialized = true.
+    bootChatInfrastructure();
 
     renderChatLayout();
 
@@ -745,9 +758,6 @@
     for (const [paneId] of chatPanes) {
       loadTranscriptForPane(paneId);
     }
-
-    // Start SSE reader.
-    startChatSSE();
   }
 
   // ---- Chat layout rendering -------------------------------------------------
@@ -2370,8 +2380,12 @@
   //   The IDE panel instantiates a single chat pane inside its layout by
   //   calling makePane() + buildPaneElement() — the same per-pane construction
   //   used by the Chat tab.  The SSE reader (startChatSSE) is shared; no second
-  //   SSE connection is opened.  initChatTab() is called first to ensure the
-  //   shared SSE + operator-ID are ready.
+  //   SSE connection is opened.  bootChatInfrastructure() is called to ensure
+  //   the shared SSE + operator-ID are ready before mounting the pane.
+  //
+  //   The IDE's embedded pane is kept OUT of the persisted chatPanes map and
+  //   savePaneState() so it does not consume from MAX_PANES (6) budget or
+  //   reappear in the Chat tab's pane rail on reload.
   //
   // Phase 1 is read-only. Edit/save/diff are out of scope.
 
@@ -2386,30 +2400,16 @@
   // Queued openFile to send once the editor is ready.
   let ideQueuedOpen = null;
 
-  // The paneId used for the IDE's embedded chat pane.
-  let ideChatPaneId = null;
+  // Stored handler ref so we can removeEventListener if needed in the future.
+  // Guard prevents double-registration if renderIdeLayout were ever called twice.
+  let ideMessageHandlerRegistered = false;
 
   function initIdeTab() {
     if (ideTabInitialized) return;
     ideTabInitialized = true;
 
     // Ensure chat infrastructure (SSE, operator ID) is running — we share it.
-    if (!chatTabInitialized) {
-      // Initialize without rendering into the chat panel.
-      getChatOperatorId();
-      if (chatPanes.size === 0) {
-        loadPaneStateFromStorage();
-        if (chatPanes.size === 0) {
-          const p = makePane(newPaneId(), newConversationId());
-          chatPanes.set(p.id, p);
-          savePaneState();
-        }
-      }
-      if (!chatSSEAbort) {
-        startChatSSE();
-      }
-      chatTabInitialized = true;
-    }
+    bootChatInfrastructure();
 
     renderIdeLayout();
   }
@@ -2451,8 +2451,12 @@
         '</div>' +
       '</div>';
 
-    // Wire Monaco iframe postMessage listener.
-    window.addEventListener('message', handleIdeEditorMessage);
+    // Wire Monaco iframe postMessage listener — guard prevents double-registration
+    // if this function is ever re-entered (e.g. a future teardown+reinit path).
+    if (!ideMessageHandlerRegistered) {
+      window.addEventListener('message', handleIdeEditorMessage);
+      ideMessageHandlerRegistered = true;
+    }
 
     // Wire the iframe load event to grab its contentWindow.
     const frame = document.getElementById('ide-editor-frame');
@@ -2527,15 +2531,27 @@
 
     fetch(url).then((r) => {
       if (r.status === 403) {
-        treeEl.innerHTML = '<p class="ide-tree-error">Access denied (403). Check your token.</p>';
+        const p = document.createElement('p');
+        p.className = 'ide-tree-error';
+        p.textContent = 'Access denied (403). Check your token.';
+        treeEl.innerHTML = '';
+        treeEl.appendChild(p);
         return null;
       }
       if (r.status === 503) {
-        treeEl.innerHTML = '<p class="ide-tree-error">Workspace not configured.</p>';
+        const p = document.createElement('p');
+        p.className = 'ide-tree-error';
+        p.textContent = 'Workspace not configured.';
+        treeEl.innerHTML = '';
+        treeEl.appendChild(p);
         return null;
       }
       if (!r.ok) {
-        treeEl.innerHTML = '<p class="ide-tree-error">Failed to load tree (' + esc(String(r.status)) + ').</p>';
+        const p = document.createElement('p');
+        p.className = 'ide-tree-error';
+        p.textContent = 'Failed to load tree (' + String(r.status) + ').';
+        treeEl.innerHTML = '';
+        treeEl.appendChild(p);
         return null;
       }
       return r.json();
@@ -2544,7 +2560,11 @@
       treeEl.innerHTML = '';
 
       if (!data.entries || data.entries.length === 0) {
-        treeEl.innerHTML = '<p class="empty-state" style="padding:8px">Workspace is empty</p>';
+        const p = document.createElement('p');
+        p.className = 'empty-state';
+        p.style.padding = '8px';
+        p.textContent = 'Workspace is empty';
+        treeEl.appendChild(p);
         return;
       }
 
@@ -2559,7 +2579,11 @@
       }
     }).catch(() => {
       if (treeEl) {
-        treeEl.innerHTML = '<p class="ide-tree-error">Network error loading file tree.</p>';
+        treeEl.innerHTML = '';
+        const p = document.createElement('p');
+        p.className = 'ide-tree-error';
+        p.textContent = 'Network error loading file tree.';
+        treeEl.appendChild(p);
       }
     });
   }
@@ -2580,7 +2604,8 @@
         const toggle = document.createElement('button');
         toggle.type = 'button';
         toggle.className = 'ide-tree-dir';
-        toggle.setAttribute('aria-label', 'Directory ' + entry.name);
+        // B2: esc() on server-supplied entry.name in aria-label.
+        toggle.setAttribute('aria-label', 'Directory ' + esc(entry.name));
         toggle.innerHTML =
           '<span class="ide-tree-icon ide-tree-dir-icon" aria-hidden="true">&#x25BC;</span>' +
           '<span class="ide-tree-name">' + esc(entry.name) + '</span>';
@@ -2615,11 +2640,30 @@
               fetch('/api/files/tree?dir=' + encodeURIComponent(entry.path))
                 .then((r) => r.ok ? r.json() : null)
                 .then((data) => {
-                  if (!data) return;
+                  if (!data) {
+                    // S3: surface fetch error — revert toggle and show inline note.
+                    expanded = false;
+                    li.setAttribute('aria-expanded', 'false');
+                    if (icon) icon.innerHTML = '&#x25B6;';
+                    const errNote = document.createElement('div');
+                    errNote.className = 'ide-tree-error';
+                    errNote.textContent = 'Failed to load ' + entry.name;
+                    li.appendChild(errNote);
+                    return;
+                  }
                   childUl = buildTreeList(data.entries || [], depth + 1);
                   li.appendChild(childUl);
                 })
-                .catch(() => {});
+                .catch(() => {
+                  // S3: network error — revert toggle and show inline note.
+                  expanded = false;
+                  li.setAttribute('aria-expanded', 'false');
+                  if (icon) icon.innerHTML = '&#x25B6;';
+                  const errNote = document.createElement('div');
+                  errNote.className = 'ide-tree-error';
+                  errNote.textContent = 'Network error loading ' + entry.name;
+                  li.appendChild(errNote);
+                });
             }
           } else {
             if (childUl) childUl.style.display = 'none';
@@ -2630,7 +2674,8 @@
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'ide-tree-file';
-        btn.setAttribute('aria-label', 'File ' + entry.name);
+        // B2: esc() on server-supplied entry.name in aria-label.
+        btn.setAttribute('aria-label', 'File ' + esc(entry.name));
         btn.innerHTML =
           '<span class="ide-tree-icon" aria-hidden="true">&#x1F4C4;</span>' +
           '<span class="ide-tree-name">' + esc(entry.name) + '</span>';
@@ -2659,15 +2704,15 @@
     fetch('/api/files/content?path=' + encodeURIComponent(relpath))
       .then((r) => {
         if (r.status === 413) {
-          showIdeEditorNotice('File too large to display (max 2 MiB): ' + esc(name));
+          showIdeEditorNotice('File too large to display (max 2 MiB): ' + name);
           return null;
         }
         if (r.status === 403) {
-          showIdeEditorNotice('Access denied for: ' + esc(name));
+          showIdeEditorNotice('Access denied for: ' + name);
           return null;
         }
         if (!r.ok) {
-          showIdeEditorNotice('Failed to load file (' + esc(String(r.status)) + '): ' + esc(name));
+          showIdeEditorNotice('Failed to load file (' + String(r.status) + '): ' + name);
           return null;
         }
         return r.json();
@@ -2677,25 +2722,26 @@
 
         if (data.encoding === 'base64') {
           // Binary file: show placeholder instead of dumping raw bytes.
-          showIdeEditorNotice('Binary file — preview not available: ' + esc(data.path || name));
+          showIdeEditorNotice('Binary file — preview not available: ' + (data.path || name));
           return;
         }
 
         openFileInEditor(data.path || relpath, data.content || '', data.language || 'plaintext');
       })
       .catch(() => {
-        showIdeEditorNotice('Network error loading: ' + esc(name));
+        showIdeEditorNotice('Network error loading: ' + name);
       });
   }
 
-  function showIdeEditorNotice(htmlMsg) {
+  // B1: showIdeEditorNotice uses textContent — no innerHTML, no caller-escape
+  // convention.  msg is plain text; all strings at call sites are either static
+  // literals or field values that do NOT contain markup (path, name, status).
+  function showIdeEditorNotice(msg) {
     const notice = document.getElementById('ide-editor-notice');
     if (!notice) return;
-    // htmlMsg already uses esc() on any server-supplied strings;
-    // static strings here are literal.
-    notice.innerHTML = htmlMsg;
+    notice.textContent = msg;
     notice.style.display = '';
-    // Clear the open path header to avoid stale filename showing.
+    // Clear the open path header to avoid a stale filename beside the error.
     const pathEl = document.getElementById('ide-open-path');
     if (pathEl) pathEl.textContent = '';
   }
@@ -2704,16 +2750,26 @@
   //
   // Reuses buildPaneElement() + wirePaneEvents() exactly as the Chat tab does.
   // No second SSE reader: the shared startChatSSE() instance handles demux.
+  //
+  // The IDE pane is intentionally kept OUT of the shared chatPanes map and
+  // savePaneState():
+  //   - It does not consume from the MAX_PANES (6) budget.
+  //   - It does not persist to localStorage, so it never reappears as a
+  //     ghost pane in the Chat tab's pane rail on next page load.
+  //   - Event wiring (send, cancel, close, share) is still fully functional;
+  //     the SSE demux routes by sessionId, not by chatPanes membership.
 
   function mountIdeChatPane() {
     const slot = document.getElementById('ide-chat-slot');
     if (!slot) return;
 
-    // Create one pane to embed in the IDE.
+    // Create one pane — NOT added to chatPanes or savePaneState.
     const p = makePane(newPaneId(), newConversationId());
+
+    // Register in chatPanes only for the duration of this page load so the
+    // SSE demux (sessionToPaneId → chatPanes.get()) can find the pane.
+    // We do NOT call savePaneState() — the pane is session-only.
     chatPanes.set(p.id, p);
-    ideChatPaneId = p.id;
-    savePaneState();
 
     const paneEl = buildPaneElement(p.id);
     slot.appendChild(paneEl);
