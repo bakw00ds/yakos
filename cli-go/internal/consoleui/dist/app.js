@@ -1569,7 +1569,6 @@
     // Drawflow canvas editor state
     drawflowEditor: null,   // Drawflow editor instance (initialized once per session)
     canvasEditMode: false,  // false = View (locked), true = Edit (drag/CRUD)
-    _dfNextNodeId: 1,       // counter for auto-generated Drawflow internal node IDs
   };
 
   // ---- Flows init -----------------------------------------------------------
@@ -2754,6 +2753,7 @@
   // --- Drawflow initialization -----------------------------------------------
 
   function initDrawflowEditor() {
+    if (flowsState.drawflowEditor) return; // already initialized; guard against re-init
     const canvasEl = document.getElementById('flows-canvas');
     if (!canvasEl) return;
     if (typeof Drawflow === 'undefined') return; // Drawflow not loaded yet
@@ -2852,7 +2852,6 @@
     // Clear the editor.
     editor.clearModuleSelected();
     editor.import({ drawflow: { Home: { data: {} } } });
-    flowsState._dfNextNodeId = 1;
 
     const wf = flowsState.workflow;
     if (!wf || !wf.nodes || wf.nodes.length === 0) {
@@ -2943,11 +2942,11 @@
 
     // Reconstruct YAML preserving version and name.
     const name = flowsState.selectedName || 'workflow';
-    const version = 1;
+    const version = (flowsState.workflow && flowsState.workflow.version) || 1;
     const yamlLines = ['version: ' + version, 'name: ' + name, 'nodes:'];
     for (const n of nodes) {
       yamlLines.push('  - id: ' + n.id);
-      yamlLines.push('    agent: ' + n.agent);
+      yamlLines.push('    agent: ' + yamlQuoteString(n.agent));
       yamlLines.push('    prompt: ' + yamlQuoteString(n.prompt));
       yamlLines.push('    output_limit: ' + n.output_limit);
       if (n.needs && n.needs.length > 0) {
@@ -2956,8 +2955,8 @@
           yamlLines.push('      - ' + dep);
         }
       }
-      if (n.model) yamlLines.push('    model: ' + n.model);
-      if (n.runtime) yamlLines.push('    runtime: ' + n.runtime);
+      if (n.model) yamlLines.push('    model: ' + yamlQuoteString(n.model));
+      if (n.runtime) yamlLines.push('    runtime: ' + yamlQuoteString(n.runtime));
       if (n.timeout) yamlLines.push('    timeout: ' + n.timeout);
     }
     const newYaml = yamlLines.join('\n') + '\n';
@@ -2978,8 +2977,10 @@
   // --- Drawflow node helpers ---------------------------------------------------
 
   function addDrawflowNode(editor, nodeData, x, y) {
-    const id = String(flowsState._dfNextNodeId++);
     const html = buildNodeHTML(nodeData);
+    // Capture editor.nodeId before the call; Drawflow assigns it as the new node's id
+    // and then increments it. This is more reliable than scanning by name+position.
+    const assignedId = String(editor.nodeId);
     // Drawflow addNode(name, inputs, outputs, posX, posY, class, data, html, typenode)
     editor.addNode(
       nodeData.id,    // name (used internally by Drawflow)
@@ -2999,17 +3000,7 @@
       html,
       false           // not a Vue component
     );
-    // Return the Drawflow-assigned id (auto-incremented internally).
-    // Drawflow uses its own counter; get last assigned id via export.
-    const exported = editor.export();
-    const home = exported.drawflow.Home.data;
-    let lastId = null;
-    for (const k of Object.keys(home)) {
-      if (home[k].name === nodeData.id && home[k].pos_x === x && home[k].pos_y === y) {
-        lastId = k;
-      }
-    }
-    return lastId;
+    return assignedId;
   }
 
   function buildNodeHTML(nodeData) {
@@ -3387,7 +3378,7 @@
     if (!s) return '""';
     // If string contains special chars that need quoting in YAML, double-quote it.
     if (/[:#\[\]{},|>&*!'"\\%@`\n\r\t]/.test(s) || /^\s|\s$/.test(s)) {
-      return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n') + '"';
+      return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r') + '"';
     }
     return s;
   }
