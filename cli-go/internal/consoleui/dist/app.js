@@ -86,9 +86,16 @@
   var ideTabInitialized = false;
   var ideEditorWindow = null;
   var ideEditorReady = false;
-  var ideQueuedOpen = null;
+  var ideQueuedOpen = null; // re-assigned to [] in IDE section init (B2: array queue)
   var ideMessageHandlerRegistered = false;
-  // Edit/save state (hoisted for TDZ safety).
+  // Multi-file tab state (hoisted for TDZ safety):
+  //   ideOpenFiles: Map<path, {version, dirty, editable, saving, saveStatusTimer}>
+  //   ideActiveTabPath: workspace-relative path of the currently active tab
+  var ideOpenFiles = null;   // set to new Map() in the IDE section init
+  var ideActiveTabPath = '';
+  // Legacy single-file save state vars — hoisted for TDZ / syncMonacoTheme safety.
+  // Still used as mirrors of the active-tab state so existing callers
+  // (triggerSave, handleIdeEditorMessage save/content handlers) work unchanged.
   var ideCurrentPath = '';
   var ideCurrentVersion = '';
   var ideEditable = false;
@@ -101,6 +108,8 @@
   // Timer handle for the transient save-status message auto-clear.
   // Hoisted (var) to match the TDZ-safety pattern for all IDE state.
   var ideSaveStatusTimer = null;
+  // Layout persistence (resizable/collapsible panels).
+  var IDE_LAYOUT_LS_KEY = 'yakos_ide_layout';
 
   function defaultTheme() {
     try {
@@ -1566,6 +1575,9 @@
     nodeOutputTruncated: false,
     viewMode: 'canvas',     // 'canvas' | 'yaml'
     _pendingCreate: null,   // non-null when a new workflow is staged but not yet saved
+    // Drawflow canvas editor state
+    drawflowEditor: null,   // Drawflow editor instance (initialized once per session)
+    canvasEditMode: false,  // false = View (locked), true = Edit (drag/CRUD)
     // Cancel tracking: Set<runId> for runs where a cancel is in-flight (double-click guard).
     _cancellingRuns: new Set(),
     // Cancelled tracking: Set<runId> for runs where operator requested cancellation
@@ -1578,8 +1590,40 @@
   function initFlowsTab() {
     if (flowsTabInitialized) return;
     flowsTabInitialized = true;
-    renderFlowsLayout();
-    loadFlowsWorkflowList();
+    // Load Drawflow assets dynamically (lazy: only when Flows tab is first opened).
+    // Drawflow is vanilla JS with no eval/new Function; loads under script-src 'self'.
+    _loadDrawflow(function() {
+      renderFlowsLayout();
+      loadFlowsWorkflowList();
+    });
+  }
+
+  // _loadDrawflow injects Drawflow CSS + JS if not already present,
+  // then calls onReady() once the script has executed.
+  function _loadDrawflow(onReady) {
+    if (typeof Drawflow !== 'undefined') {
+      onReady();
+      return;
+    }
+    // Inject CSS.
+    if (!document.getElementById('drawflow-css')) {
+      var link = document.createElement('link');
+      link.id = 'drawflow-css';
+      link.rel = 'stylesheet';
+      link.href = '/vendor/drawflow/drawflow.min.css';
+      document.head.appendChild(link);
+    }
+    // Inject JS.
+    var script = document.createElement('script');
+    script.src = '/vendor/drawflow/drawflow.min.js';
+    script.onload = function() { onReady(); };
+    script.onerror = function() {
+      // Drawflow failed to load — render layout without editor (graceful degrade).
+      renderFlowsLayout();
+      loadFlowsWorkflowList();
+      announceFlows('Canvas editor unavailable (script load failed) — use YAML view');
+    };
+    document.head.appendChild(script);
   }
 
   // ---- Flows WS event handler -----------------------------------------------
@@ -1982,6 +2026,13 @@
               '<button id="flows-view-yaml" class="flows-view-btn" type="button" ' +
                 'aria-pressed="false" title="YAML editor view">YAML</button>' +
             '</div>' +
+            // Edit mode toggle — only shown in canvas view
+            '<button id="flows-canvas-edit-btn" class="flows-btn" type="button" ' +
+              'aria-pressed="false" title="Toggle canvas edit mode (drag nodes, add/delete/connect)">' +
+              'Edit</button>' +
+            // Add node button — only shown in Edit mode
+            '<button id="flows-add-node-btn" class="flows-btn" type="button" ' +
+              'style="display:none" aria-label="Add a new node to the canvas">+ Node</button>' +
             '<button id="flows-save-btn" class="flows-btn" type="button" ' +
               'aria-label="Save workflow YAML">Save</button>' +
             '<button id="flows-run-btn" class="flows-btn flows-run-btn" type="button" ' +
@@ -1999,20 +2050,82 @@
           // Canvas + YAML side by side; only one shown at a time
           '<div class="flows-content">' +
             '<div id="flows-canvas-wrap" class="flows-canvas-wrap">' +
-              '<div class="flows-canvas-readonly-note" role="note" aria-label="Canvas note">' +
-                'Canvas is read-only — click a node to view output. ' +
-                'To author or edit a workflow, switch to YAML view.' +
+              // Canvas mode note: changes based on view/edit mode
+              '<div id="flows-canvas-mode-note" class="flows-canvas-readonly-note" role="note" aria-label="Canvas note">' +
+                'View mode — click a node to view output. Toggle Edit to add, connect, and edit nodes.' +
               '</div>' +
-              '<div id="flows-canvas" class="flows-canvas" role="img" aria-label="Workflow DAG canvas"></div>' +
+              // Drawflow container — Drawflow mounts inside this element
+              '<div id="flows-canvas" class="flows-canvas drawflow-host" ' +
+                'role="region" aria-label="Workflow DAG canvas" ' +
+                'aria-describedby="flows-canvas-mode-note">' +
+              '</div>' +
             '</div>' +
             '<div id="flows-yaml-wrap" class="flows-yaml-wrap" style="display:none">' +
               '<label for="flows-yaml-editor" class="sr-only">Workflow YAML editor</label>' +
               '<textarea id="flows-yaml-editor" class="flows-yaml-editor" ' +
                 'spellcheck="false" autocorrect="off" autocapitalize="off" ' +
-                'aria-label="Workflow YAML — edit here, then click Save"></textarea>' +
+                'aria-label="Workflow YAML — accessible alternate to canvas. Edit here, then click Save"></textarea>' +
             '</div>' +
           '</div>' +
-          // Node output panel (shown when a node is selected)
+          // Node edit panel (shown when editing a node's properties)
+          '<div id="flows-node-edit-panel" class="flows-node-edit-panel" style="display:none" ' +
+            'role="dialog" aria-label="Edit node properties" aria-modal="false">' +
+            '<div class="flows-node-edit-header">' +
+              '<span class="flows-node-edit-title">Edit Node</span>' +
+              '<button id="flows-node-edit-close" class="flows-node-close" type="button" ' +
+                'aria-label="Close node editor">&times;</button>' +
+            '</div>' +
+            '<div class="flows-node-edit-body">' +
+              '<div class="flows-node-edit-row">' +
+                '<label class="flows-node-edit-label" for="fne-id">ID</label>' +
+                '<input id="fne-id" class="flows-node-edit-input" type="text" ' +
+                  'autocomplete="off" spellcheck="false" ' +
+                  'placeholder="e.g. step1" aria-describedby="fne-id-hint">' +
+                '<p id="fne-id-hint" class="flows-node-edit-hint">Lowercase letters, digits, hyphens. Max 64 chars.</p>' +
+              '</div>' +
+              '<div class="flows-node-edit-row">' +
+                '<label class="flows-node-edit-label" for="fne-agent">Agent</label>' +
+                '<input id="fne-agent" class="flows-node-edit-input" type="text" ' +
+                  'autocomplete="off" spellcheck="false" placeholder="e.g. claude">' +
+              '</div>' +
+              '<div class="flows-node-edit-row">' +
+                '<label class="flows-node-edit-label" for="fne-prompt">Prompt</label>' +
+                '<textarea id="fne-prompt" class="flows-node-edit-textarea" ' +
+                  'rows="4" placeholder="Describe the task…" spellcheck="false"></textarea>' +
+              '</div>' +
+              '<div class="flows-node-edit-row">' +
+                '<label class="flows-node-edit-label" for="fne-output-limit">output_limit</label>' +
+                '<input id="fne-output-limit" class="flows-node-edit-input" type="number" ' +
+                  'min="1" placeholder="8000" aria-describedby="fne-ol-hint">' +
+                '<p id="fne-ol-hint" class="flows-node-edit-hint">Required. Bytes budget for upstream output substitution.</p>' +
+              '</div>' +
+              '<div class="flows-node-edit-row">' +
+                '<label class="flows-node-edit-label" for="fne-model">Model (optional)</label>' +
+                '<input id="fne-model" class="flows-node-edit-input" type="text" ' +
+                  'autocomplete="off" spellcheck="false" placeholder="haiku | sonnet | opus">' +
+              '</div>' +
+              '<div class="flows-node-edit-row">' +
+                '<label class="flows-node-edit-label" for="fne-runtime">Runtime (optional)</label>' +
+                '<input id="fne-runtime" class="flows-node-edit-input" type="text" ' +
+                  'autocomplete="off" spellcheck="false" placeholder="claude | codex | gemini">' +
+              '</div>' +
+              '<div class="flows-node-edit-row">' +
+                '<label class="flows-node-edit-label" for="fne-timeout">Timeout s (optional)</label>' +
+                '<input id="fne-timeout" class="flows-node-edit-input" type="number" ' +
+                  'min="0" placeholder="0 (default)">' +
+              '</div>' +
+              '<p id="fne-error" class="flows-node-edit-error" role="alert" style="display:none"></p>' +
+            '</div>' +
+            '<div class="flows-node-edit-footer">' +
+              '<button id="fne-delete-btn" class="flows-btn flows-btn-danger" type="button" ' +
+                'style="display:none" aria-label="Delete this node">Delete node</button>' +
+              '<div class="flows-node-edit-actions">' +
+                '<button id="fne-cancel-btn" class="flows-btn" type="button">Cancel</button>' +
+                '<button id="fne-save-btn" class="flows-btn flows-btn-primary" type="button">Apply</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+          // Node output panel (shown when a node is selected in View mode)
           '<div id="flows-node-panel" class="flows-node-panel" style="display:none">' +
             '<div class="flows-node-panel-header">' +
               '<span id="flows-node-title" class="flows-node-title"></span>' +
@@ -2042,6 +2155,16 @@
     });
     document.getElementById('flows-view-yaml').addEventListener('click', () => {
       switchFlowsView('yaml');
+    });
+
+    // Wire canvas Edit mode toggle.
+    document.getElementById('flows-canvas-edit-btn').addEventListener('click', () => {
+      toggleCanvasEditMode();
+    });
+
+    // Wire Add Node button.
+    document.getElementById('flows-add-node-btn').addEventListener('click', () => {
+      addNewNodeToCanvas();
     });
 
     // Wire YAML editor onChange.
@@ -2079,10 +2202,24 @@
       }
     });
 
-    // Wire node panel close button.
+    // Wire node output panel close button.
     document.getElementById('flows-node-close').addEventListener('click', () => {
       flowsState.selectedNodeId = null;
       document.getElementById('flows-node-panel').style.display = 'none';
+    });
+
+    // Wire node edit panel buttons.
+    document.getElementById('flows-node-edit-close').addEventListener('click', () => {
+      closeNodeEditPanel();
+    });
+    document.getElementById('fne-cancel-btn').addEventListener('click', () => {
+      closeNodeEditPanel();
+    });
+    document.getElementById('fne-save-btn').addEventListener('click', () => {
+      applyNodeEditPanel();
+    });
+    document.getElementById('fne-delete-btn').addEventListener('click', () => {
+      deleteNodeFromEditPanel();
     });
 
     // Wire New workflow button.
@@ -2091,6 +2228,8 @@
     });
 
     renderFlowsWorkflowList();
+    // Initialize Drawflow after layout is mounted.
+    initDrawflowEditor();
   }
 
   // idRe mirrors workflow.ValidateID — ^[a-z0-9][a-z0-9-]{0,63}$
@@ -2175,7 +2314,7 @@
     function getFocusable() {
       return Array.prototype.slice.call(
         box.querySelectorAll(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex=”-1”])'
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
         )
       ).filter(function(el) { return !el.disabled; });
     }
@@ -2238,16 +2377,16 @@
   function createNewFlowsWorkflow() {
     // Build modal body: name input + inline validation error.
     var bodyHTML =
-      '<label for=”modal-wf-name” class=”modal-field-label”>' +
+      '<label for="modal-wf-name" class="modal-field-label">' +
         'Workflow name' +
       '</label>' +
-      '<input id=”modal-wf-name” class=”modal-input” type=”text” ' +
-        'placeholder=”e.g. my-flow” autocomplete=”off” spellcheck=”false” ' +
-        'aria-describedby=”modal-wf-name-hint modal-wf-name-err”>' +
-      '<p id=”modal-wf-name-hint” class=”modal-field-hint”>' +
+      '<input id="modal-wf-name" class="modal-input" type="text" ' +
+        'placeholder="e.g. my-flow" autocomplete="off" spellcheck="false" ' +
+        'aria-describedby="modal-wf-name-hint modal-wf-name-err">' +
+      '<p id="modal-wf-name-hint" class="modal-field-hint">' +
         'Lowercase letters, digits, hyphens. Starts with a letter or digit. Max 64 chars.' +
       '</p>' +
-      '<p id=”modal-wf-name-err” class=”modal-field-error” role=”alert” style=”display:none”></p>';
+      '<p id="modal-wf-name-err" class="modal-field-error" role="alert" style="display:none"></p>';
 
     var modal = openModal({
       title:       'New workflow',
@@ -2308,7 +2447,7 @@
       'nodes:',
       '  - id: step1',
       '    agent: claude',
-      '    prompt: “Describe the first step.”',
+      '    prompt: "Describe the first step."',
       '    output_limit: 8000',
     ].join('\n') + '\n';
 
@@ -2330,8 +2469,15 @@
       flowsState.workflows = flowsState.workflows.concat([name]);
     }
 
-    // Switch to YAML view so the operator can review/edit before saving.
-    switchFlowsView('yaml');
+    // Switch to Canvas view and render the starter node graph.
+    // Set a minimal workflow object so renderFlowsCanvas can draw it.
+    flowsState.workflow = {
+      version: 1,
+      name: name,
+      nodes: [{ id: 'step1', agent: 'claude', prompt: 'Describe the first step.', output_limit: 8000 }],
+    };
+
+    switchFlowsView('canvas');
 
     var yamlEditor = document.getElementById('flows-yaml-editor');
     if (yamlEditor) yamlEditor.value = starterYAML;
@@ -2339,17 +2485,18 @@
     renderFlowsWorkflowList();
     renderFlowsEditor();
     updateFlowsToolbarState();
+    announceFlows('New workflow "' + name + '" created — canvas showing starter node');
   }
 
   function deleteFlowsWorkflow(name) {
     openModal({
       title:       'Delete workflow',
       body:        '<p>Delete <strong>' + esc(name) + '</strong>?</p>' +
-                   '<p class=”modal-field-hint” style=”margin-top:8px”>' +
+                   '<p class="modal-field-hint" style="margin-top:8px">' +
                      'This removes the workflow definition. ' +
                      'Existing run history is not deleted.' +
                    '</p>' +
-                   '<p id=”modal-del-err” class=”modal-field-error” role=”alert” style=”display:none”></p>',
+                   '<p id="modal-del-err" class="modal-field-error" role="alert" style="display:none"></p>',
       confirmText: 'Delete',
       cancelText:  'Cancel',
       dangerous:   true,
@@ -2360,8 +2507,25 @@
         }
         apiFetch('DELETE', '/flows/api/workflow?name=' + encodeURIComponent(name)).then(function(r) {
           if (r.status === 404) {
+            // 404: workflow was never saved (pending-create) or already deleted
+            // externally. Clear local state if it was the selected workflow so
+            // the canvas and editor don't show a stale/phantom workflow.
             overlay._closeModal();
+            if (flowsState.selectedName === name) {
+              flowsState.selectedName = null;
+              flowsState.yaml = '';
+              flowsState.version = '';
+              flowsState.workflow = null;
+              flowsState.dirty = false;
+              flowsState.saveError = null;
+              flowsState.saveConflict = false;
+              flowsState._pendingCreate = null;
+              closeNodeEditPanel();
+              renderFlowsEditor();
+              renderFlowsCanvas();
+            }
             loadFlowsWorkflowList();
+            announceFlows('Workflow "' + name + '" removed');
             return;
           }
           if (!r.ok) {
@@ -2382,11 +2546,12 @@
             flowsState.saveError = null;
             flowsState.saveConflict = false;
             flowsState._pendingCreate = null;
+            closeNodeEditPanel();
             renderFlowsEditor();
             renderFlowsCanvas();
           }
           loadFlowsWorkflowList();
-          announceFlows('Workflow “' + name + '” deleted');
+          announceFlows('Workflow "' + name + '" deleted');
         }).catch(function() {
           showErr('Network error deleting workflow');
         });
@@ -2412,10 +2577,18 @@
       btnYaml.setAttribute('aria-pressed', String(!isCanvas));
     }
 
+    // Show/hide canvas-only controls (Edit mode toggle, Add Node button).
+    const editBtn = document.getElementById('flows-canvas-edit-btn');
+    if (editBtn) editBtn.style.display = isCanvas ? '' : 'none';
+    const addBtn = document.getElementById('flows-add-node-btn');
+    if (addBtn) addBtn.style.display = (isCanvas && flowsState.canvasEditMode) ? '' : 'none';
+
     if (!isCanvas) {
       // Sync YAML editor with current state.
       const yamlEditor = document.getElementById('flows-yaml-editor');
       if (yamlEditor) yamlEditor.value = flowsState.yaml;
+      // Force View mode on canvas when switching away (no accidental edits in background).
+      if (flowsState.canvasEditMode) toggleCanvasEditMode();
     } else {
       renderFlowsCanvas();
     }
@@ -2499,6 +2672,7 @@
     const runBtn = document.getElementById('flows-run-btn');
     const rerunBtn = document.getElementById('flows-rerun-btn');
     const stopBtn = document.getElementById('flows-stop-btn');
+    const editBtn = document.getElementById('flows-canvas-edit-btn');
 
     const hasWorkflow = !!flowsState.selectedName;
     const activeSnap = flowsState.activeRunId ? flowsState.runs.get(flowsState.activeRunId) : null;
@@ -2506,6 +2680,7 @@
 
     if (saveBtn) saveBtn.disabled = !hasWorkflow;
     if (runBtn) runBtn.disabled = !hasWorkflow;
+    if (editBtn) editBtn.disabled = !hasWorkflow;
 
     // Show Re-run button only if there's an active run with failures.
     if (rerunBtn) {
@@ -2683,214 +2858,674 @@
     }
   }
 
-  // ---- DAG canvas (minimal SVG) -----------------------------------------------
+  // =========================================================================
+  // ---- DAG canvas (Drawflow interactive editor) ----------------------------
+  // =========================================================================
   //
-  // Layout algorithm:
-  //   1. Kahn topo-sort → assign each node to a column (layer) = max(layer of needs) + 1
-  //   2. Nodes in the same column are stacked vertically.
-  //   3. Edges are drawn as SVG lines from the right edge of the source node to
-  //      the left edge of the target node.
+  // Drawflow replaces the read-only SVG renderer with a full node editor.
   //
-  // Status rendering: icon + text label in each node box. NOT color alone.
-  // Node boxes are <button> elements (keyboard-operable, focusable).
-  // Accessibility: aria-label per node includes status + agent.
+  // Architecture:
+  //   - One Drawflow instance is created per Flows panel init (initDrawflowEditor).
+  //   - View mode: editor_mode='fixed' (locked — no drag, no edit).
+  //   - Edit mode: editor_mode='edit' (drag nodes, draw connections, CRUD).
+  //   - YAML → canvas (load): parse nodes + needs[] → Drawflow import
+  //     with layered auto-layout (Kahn topo-sort, same as old SVG renderer).
+  //     Positions are ephemeral — NOT written back to YAML schema.
+  //   - Canvas → YAML (edit): on any Drawflow change event, re-export the
+  //     graph and regenerate engine-valid YAML (preserving name/version).
+  //   - Double-click on canvas background → add node dialog.
+  //   - Click on node (View mode) → show node run output panel.
+  //   - Click on node (Edit mode) → open node edit panel.
+  //   - Delete key (Edit mode) with selected node → remove node.
+  //   - Connections are validated: self-loops blocked, client-side cycle warning.
+  //
+  // CSP: Drawflow is vanilla JS with no eval/new Function. Confirmed at vendor
+  // time via grep. Loads under script-src 'self' with no relaxation.
+  //
+  // Accessibility:
+  //   - YAML view is the accessible alternate (full keyboard editing).
+  //   - Canvas has aria-label + aria-describedby pointing to the mode note.
+  //   - Node edit panel is keyboard-operable (Tab/Shift-Tab, Enter).
+  //   - aria-live status announcer for structural changes.
 
-  const SVG_NODE_W = 140;
-  const SVG_NODE_H = 56;
-  const SVG_COL_GAP = 80;
-  const SVG_ROW_GAP = 20;
-  const SVG_PAD = 24;
+  // Auto-layout constants (same proportions as old SVG renderer).
+  const DF_NODE_W = 160;
+  const DF_NODE_H = 70;
+  const DF_COL_GAP = 100;
+  const DF_ROW_GAP = 30;
+  const DF_PAD = 40;
 
-  function renderFlowsCanvas() {
+  // --- Drawflow initialization -----------------------------------------------
+
+  function initDrawflowEditor() {
+    if (flowsState.drawflowEditor) return; // already initialized; guard against re-init
     const canvasEl = document.getElementById('flows-canvas');
     if (!canvasEl) return;
-    canvasEl.innerHTML = '';
+    if (typeof Drawflow === 'undefined') return; // Drawflow not loaded yet
+
+    // Create the Drawflow editor instance.
+    const editor = new Drawflow(canvasEl);
+    editor.reroute = false;
+    editor.editor_mode = 'fixed'; // start in View mode
+    editor.start();
+
+    flowsState.drawflowEditor = editor;
+    flowsState.canvasEditMode = false;
+
+    // ---- Drawflow event listeners ----
+
+    // Node clicked: in View mode show output panel; in Edit mode open edit panel.
+    editor.on('nodeSelected', function(id) {
+      if (flowsState.canvasEditMode) {
+        openNodeEditPanel(id);
+      } else {
+        const data = getDrawflowNodeData(id);
+        if (!data) return;
+        const nodeId = data.yakosId;
+        flowsState.selectedNodeId = nodeId;
+        const runId = flowsState.activeRunId;
+        if (runId) loadNodeOutput(runId, nodeId);
+        renderFlowsNodePanel();
+      }
+    });
+
+    // Connection created: validate + regenerate YAML.
+    editor.on('connectionCreated', function(info) {
+      // Block self-loops.
+      if (info.output_id === info.input_id) {
+        editor.removeSingleConnection(
+          info.output_id, info.input_id,
+          info.output_class, info.input_class
+        );
+        announceFlows('Self-loop blocked: a node cannot connect to itself');
+        return;
+      }
+      // Client-side cycle detection: warn (server validates definitively on save).
+      if (dfGraphHasCycle()) {
+        announceFlows('Warning: this connection may create a cycle — Save will validate');
+      }
+      syncCanvasToYaml();
+    });
+
+    // Connection removed: regenerate YAML.
+    editor.on('connectionRemoved', function() {
+      syncCanvasToYaml();
+    });
+
+    // Node moved (drag): no YAML schema change (positions are ephemeral).
+    // We don't regenerate YAML here to avoid noisy dirty flags on pan/drag.
+
+    // Double-click on canvas background → add node.
+    canvasEl.addEventListener('dblclick', function(e) {
+      if (!flowsState.canvasEditMode) return;
+      // Only respond to dblclick on the canvas background (not on nodes).
+      if (e.target.closest('.drawflow-node')) return;
+      if (!flowsState.selectedName) return;
+      addNewNodeToCanvas();
+    });
+
+    // Delete key → delete selected node (Edit mode only).
+    document.addEventListener('keydown', function(e) {
+      if (!flowsState.canvasEditMode) return;
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+      // Only fire when focus is on the canvas area (not in an input/textarea).
+      const tag = document.activeElement ? document.activeElement.tagName : '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const canvasWrap = document.getElementById('flows-canvas-wrap');
+      if (!canvasWrap || !canvasWrap.contains(document.activeElement)) return;
+      if (editor.node_selected) {
+        const selId = editor.node_selected.id
+          ? editor.node_selected.id.replace('node-', '')
+          : null;
+        if (selId) {
+          editor.removeNodeId('node-' + selId);
+          syncCanvasToYaml();
+          announceFlows('Node deleted');
+        }
+      }
+    });
+  }
+
+  // --- Canvas ↔ YAML sync -------------------------------------------------------
+
+  // renderFlowsCanvas: load flowsState.workflow into Drawflow with auto-layout.
+  // Called whenever the workflow changes (load, after save, etc.).
+  function renderFlowsCanvas() {
+    if (!flowsState.drawflowEditor) return;
+    const editor = flowsState.drawflowEditor;
+
+    // Clear the editor.
+    editor.clearModuleSelected();
+    editor.import({ drawflow: { Home: { data: {} } } });
 
     const wf = flowsState.workflow;
     if (!wf || !wf.nodes || wf.nodes.length === 0) {
-      canvasEl.innerHTML = '<p class="empty-state" style="padding:24px">Select a workflow to view its DAG</p>';
       return;
     }
 
-    const activeSnap = flowsState.activeRunId ? flowsState.runs.get(flowsState.activeRunId) : null;
+    // 1. Compute layered auto-layout via Kahn topo-sort.
+    const positions = computeLayeredPositions(wf.nodes);
 
-    // 1. Build adjacency and in-degree for Kahn.
-    const nodeById = {};
-    const inDegree = {};
-    const successors = {}; // id → [successor ids]
+    // 2. Build a map from yakosId → Drawflow internal id.
+    const dfIdByYakos = {};
+
+    // 3. Add nodes.
     for (const n of wf.nodes) {
-      nodeById[n.id] = n;
-      inDegree[n.id] = (inDegree[n.id] || 0);
-      successors[n.id] = successors[n.id] || [];
+      const pos = positions[n.id] || { x: DF_PAD, y: DF_PAD };
+      const dfId = addDrawflowNode(editor, n, pos.x, pos.y);
+      dfIdByYakos[n.id] = dfId;
     }
+
+    // 4. Add connections from needs[].
     for (const n of wf.nodes) {
       for (const dep of (n.needs || [])) {
+        if (dfIdByYakos[dep] && dfIdByYakos[n.id]) {
+          try {
+            editor.addConnection(
+              dfIdByYakos[dep], dfIdByYakos[n.id],
+              'output_1', 'input_1'
+            );
+          } catch (_) { /* defensive: skip bad connections */ }
+        }
+      }
+    }
+
+    // Update node status overlays (run state coloring).
+    updateDrawflowNodeStatuses();
+  }
+
+  // syncCanvasToYaml: export Drawflow graph → engine-valid YAML → update state.
+  function syncCanvasToYaml() {
+    if (!flowsState.drawflowEditor) return;
+    const exported = flowsState.drawflowEditor.export();
+    const data = exported && exported.drawflow && exported.drawflow.Home
+      ? exported.drawflow.Home.data
+      : {};
+
+    // Build id → yakosId mapping and collect nodes.
+    const dfNodes = Object.values(data);
+    const nodes = [];
+    const idMap = {}; // dfId → yakosId
+
+    for (const dfNode of dfNodes) {
+      const d = dfNode.data || {};
+      const yakosId = d.yakosId || '';
+      if (yakosId) idMap[String(dfNode.id)] = yakosId;
+    }
+
+    for (const dfNode of dfNodes) {
+      const d = dfNode.data || {};
+      const yakosId = d.yakosId || '';
+      if (!yakosId) continue;
+
+      // Collect needs[] from input connections.
+      const needs = [];
+      const inputs = dfNode.inputs || {};
+      for (const inputKey of Object.keys(inputs)) {
+        const conns = (inputs[inputKey].connections || []);
+        for (const conn of conns) {
+          const depYakosId = idMap[String(conn.node)];
+          if (depYakosId && needs.indexOf(depYakosId) === -1) {
+            needs.push(depYakosId);
+          }
+        }
+      }
+
+      const node = {
+        id: yakosId,
+        agent: d.agent || 'claude',
+        prompt: d.prompt || 'Describe the task.',
+        output_limit: parseInt(d.output_limit, 10) || 8000,
+      };
+      if (needs.length > 0) node.needs = needs;
+      if (d.model) node.model = d.model;
+      if (d.runtime) node.runtime = d.runtime;
+      if (d.timeout && parseInt(d.timeout, 10) > 0) node.timeout = parseInt(d.timeout, 10);
+
+      nodes.push(node);
+    }
+
+    // Reconstruct YAML preserving version and name.
+    const name = flowsState.selectedName || 'workflow';
+    const version = (flowsState.workflow && flowsState.workflow.version) || 1;
+    const yamlLines = ['version: ' + version, 'name: ' + name, 'nodes:'];
+    for (const n of nodes) {
+      yamlLines.push('  - id: ' + n.id);
+      yamlLines.push('    agent: ' + yamlQuoteString(n.agent));
+      yamlLines.push('    prompt: ' + yamlQuoteString(n.prompt));
+      yamlLines.push('    output_limit: ' + n.output_limit);
+      if (n.needs && n.needs.length > 0) {
+        yamlLines.push('    needs:');
+        for (const dep of n.needs) {
+          yamlLines.push('      - ' + dep);
+        }
+      }
+      if (n.model) yamlLines.push('    model: ' + yamlQuoteString(n.model));
+      if (n.runtime) yamlLines.push('    runtime: ' + yamlQuoteString(n.runtime));
+      if (n.timeout) yamlLines.push('    timeout: ' + n.timeout);
+    }
+    const newYaml = yamlLines.join('\n') + '\n';
+
+    flowsState.yaml = newYaml;
+    flowsState.dirty = true;
+    flowsState.saveError = null;
+    flowsState.saveConflict = false;
+
+    // Keep YAML editor in sync (it may be hidden but stays valid).
+    const yamlEditor = document.getElementById('flows-yaml-editor');
+    if (yamlEditor) yamlEditor.value = newYaml;
+
+    renderFlowsSaveErrorBanner();
+    updateFlowsToolbarState();
+  }
+
+  // --- Drawflow node helpers ---------------------------------------------------
+
+  function addDrawflowNode(editor, nodeData, x, y) {
+    const html = buildNodeHTML(nodeData);
+    // Capture editor.nodeId before the call; Drawflow assigns it as the new node's id
+    // and then increments it. This is more reliable than scanning by name+position.
+    const assignedId = String(editor.nodeId);
+    // Drawflow addNode(name, inputs, outputs, posX, posY, class, data, html, typenode)
+    editor.addNode(
+      nodeData.id,    // name (used internally by Drawflow)
+      1,              // inputs count
+      1,              // outputs count
+      x, y,
+      'df-yakos-node',
+      {
+        yakosId:      nodeData.id,
+        agent:        nodeData.agent || '',
+        prompt:       nodeData.prompt || '',
+        output_limit: String(nodeData.output_limit || 8000),
+        model:        nodeData.model || '',
+        runtime:      nodeData.runtime || '',
+        timeout:      String(nodeData.timeout || 0),
+      },
+      html,
+      false           // not a Vue component
+    );
+    return assignedId;
+  }
+
+  function buildNodeHTML(nodeData) {
+    // XSS note: esc() is used for all user-controlled strings rendered into HTML.
+    return '<div class="df-node-body">' +
+      '<div class="df-node-id">' + esc(nodeData.id || '') + '</div>' +
+      '<div class="df-node-agent">' + esc(nodeData.agent || '') + '</div>' +
+    '</div>';
+  }
+
+  function getDrawflowNodeData(dfId) {
+    if (!flowsState.drawflowEditor) return null;
+    try {
+      return flowsState.drawflowEditor.getNodeFromId(dfId);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function updateDrawflowNodeStatuses() {
+    if (!flowsState.drawflowEditor) return;
+    const activeSnap = flowsState.activeRunId
+      ? flowsState.runs.get(flowsState.activeRunId)
+      : null;
+    const exported = flowsState.drawflowEditor.export();
+    const home = exported && exported.drawflow && exported.drawflow.Home
+      ? exported.drawflow.Home.data
+      : {};
+
+    for (const dfId of Object.keys(home)) {
+      const d = (home[dfId].data || {});
+      const yakosId = d.yakosId;
+      if (!yakosId) continue;
+      const nodeState = activeSnap && activeSnap.nodes ? activeSnap.nodes[yakosId] : null;
+      const status = nodeState ? (nodeState.status || 'pending') : 'pending';
+      const el = document.querySelector('#node-' + dfId);
+      if (!el) continue;
+      // Remove old status classes and add new.
+      el.classList.remove(
+        'df-status-pending', 'df-status-running',
+        'df-status-completed', 'df-status-failed', 'df-status-skipped'
+      );
+      el.classList.add('df-status-' + status);
+    }
+  }
+
+  // --- Auto-layout (layered) --------------------------------------------------
+
+  function computeLayeredPositions(nodes) {
+    // Kahn topo-sort → assign layers.
+    const inDegree = {};
+    const successors = {};
+    for (const n of nodes) {
+      inDegree[n.id] = inDegree[n.id] || 0;
+      successors[n.id] = successors[n.id] || [];
+    }
+    for (const n of nodes) {
+      for (const dep of (n.needs || [])) {
         inDegree[n.id] = (inDegree[n.id] || 0) + 1;
-        successors[dep] = successors[dep] || [];
+        if (!successors[dep]) successors[dep] = [];
         successors[dep].push(n.id);
       }
     }
 
-    // 2. Assign layers via Kahn BFS: layer[id] = max(layer of needs) + 1, min 0.
     const layer = {};
     const queue = [];
-    for (const n of wf.nodes) {
+    for (const n of nodes) {
       if ((inDegree[n.id] || 0) === 0) {
         layer[n.id] = 0;
         queue.push(n.id);
       }
     }
-    // BFS to assign layers.
     const remaining = Object.assign({}, inDegree);
     let qi = 0;
     while (qi < queue.length) {
       const cur = queue[qi++];
       for (const succ of (successors[cur] || [])) {
         const newLayer = (layer[cur] || 0) + 1;
-        if (layer[succ] === undefined || layer[succ] < newLayer) {
-          layer[succ] = newLayer;
-        }
+        if (layer[succ] === undefined || layer[succ] < newLayer) layer[succ] = newLayer;
         remaining[succ] = (remaining[succ] || 1) - 1;
-        if (remaining[succ] <= 0) {
-          queue.push(succ);
-        }
+        if (remaining[succ] <= 0) queue.push(succ);
       }
     }
 
-    // 3. Bucket nodes by layer.
-    const maxLayer = Math.max(...Object.values(layer));
+    // Bucket by layer.
+    const maxLayer = Math.max(0, ...Object.values(layer));
     const columns = [];
     for (let i = 0; i <= maxLayer; i++) columns.push([]);
-    for (const n of wf.nodes) {
-      const l = layer[n.id] || 0;
-      columns[l].push(n.id);
-    }
+    for (const n of nodes) columns[layer[n.id] || 0].push(n.id);
 
-    // 4. Compute node positions.
-    const pos = {}; // id → {x, y, cx, cy} (top-left + center)
-    const colX = [];
-    let xCursor = SVG_PAD;
+    // Assign positions.
+    const positions = {};
+    const maxColSize = Math.max(1, ...columns.map((c) => c.length));
+    const totalH = maxColSize * (DF_NODE_H + DF_ROW_GAP) - DF_ROW_GAP + DF_PAD * 2;
+    let x = DF_PAD;
     for (let c = 0; c <= maxLayer; c++) {
-      colX[c] = xCursor;
-      xCursor += SVG_NODE_W + SVG_COL_GAP;
+      const col = columns[c];
+      const colTotalH = col.length * (DF_NODE_H + DF_ROW_GAP) - DF_ROW_GAP;
+      const startY = DF_PAD + (totalH - DF_PAD * 2 - colTotalH) / 2;
+      for (let r = 0; r < col.length; r++) {
+        positions[col[r]] = { x, y: startY + r * (DF_NODE_H + DF_ROW_GAP) };
+      }
+      x += DF_NODE_W + DF_COL_GAP;
     }
-    const maxColSize = Math.max(...columns.map((c) => c.length));
-    const totalH = maxColSize * (SVG_NODE_H + SVG_ROW_GAP) - SVG_ROW_GAP + SVG_PAD * 2;
-    const totalW = xCursor - SVG_COL_GAP + SVG_PAD;
+    return positions;
+  }
 
-    // S2: guard against non-finite dimensions (defensive — cycles are rejected
-    // upstream by Validate, but guard here so a malformed snapshot does not
-    // produce a broken SVG with width="-Infinity" or NaN attributes.
-    if (!isFinite(totalW) || !isFinite(totalH) || totalW <= 0 || totalH <= 0) {
-      canvasEl.innerHTML = '<p class="empty-state" style="padding:24px">Unable to render canvas (invalid graph dimensions)</p>';
+  // --- Cycle detection (client-side) ------------------------------------------
+
+  function dfGraphHasCycle() {
+    if (!flowsState.drawflowEditor) return false;
+    const exported = flowsState.drawflowEditor.export();
+    const home = exported && exported.drawflow && exported.drawflow.Home
+      ? exported.drawflow.Home.data
+      : {};
+
+    // Build adjacency list.
+    const adj = {};
+    for (const dfId of Object.keys(home)) {
+      adj[dfId] = [];
+      const outputs = home[dfId].outputs || {};
+      for (const outKey of Object.keys(outputs)) {
+        for (const conn of (outputs[outKey].connections || [])) {
+          adj[dfId].push(String(conn.node));
+        }
+      }
+    }
+
+    // DFS cycle detection.
+    const visited = {};
+    const recStack = {};
+    function hasCycleDFS(v) {
+      visited[v] = true;
+      recStack[v] = true;
+      for (const w of (adj[v] || [])) {
+        if (!visited[w] && hasCycleDFS(w)) return true;
+        if (recStack[w]) return true;
+      }
+      recStack[v] = false;
+      return false;
+    }
+    for (const v of Object.keys(adj)) {
+      if (!visited[v] && hasCycleDFS(v)) return true;
+    }
+    return false;
+  }
+
+  // --- Canvas Edit mode -------------------------------------------------------
+
+  function toggleCanvasEditMode() {
+    flowsState.canvasEditMode = !flowsState.canvasEditMode;
+    if (flowsState.drawflowEditor) {
+      flowsState.drawflowEditor.editor_mode = flowsState.canvasEditMode ? 'edit' : 'fixed';
+    }
+
+    const editBtn = document.getElementById('flows-canvas-edit-btn');
+    const addBtn = document.getElementById('flows-add-node-btn');
+    const noteEl = document.getElementById('flows-canvas-mode-note');
+
+    if (editBtn) {
+      editBtn.classList.toggle('active', flowsState.canvasEditMode);
+      editBtn.setAttribute('aria-pressed', String(flowsState.canvasEditMode));
+      editBtn.textContent = flowsState.canvasEditMode ? 'View' : 'Edit';
+    }
+    if (addBtn) {
+      addBtn.style.display = flowsState.canvasEditMode ? '' : 'none';
+    }
+    if (noteEl) {
+      noteEl.textContent = flowsState.canvasEditMode
+        ? 'Edit mode — drag nodes, draw connections. Double-click background to add a node. Select a node and press Delete to remove it.'
+        : 'View mode — click a node to view output. Toggle Edit to add, connect, and edit nodes.';
+    }
+
+    // Close any open edit panel when leaving Edit mode.
+    if (!flowsState.canvasEditMode) closeNodeEditPanel();
+
+    announceFlows(flowsState.canvasEditMode ? 'Canvas edit mode enabled' : 'Canvas view mode enabled');
+  }
+
+  // --- Add new node -----------------------------------------------------------
+
+  function addNewNodeToCanvas() {
+    if (!flowsState.drawflowEditor || !flowsState.canvasEditMode) return;
+    if (!flowsState.selectedName) return;
+
+    // Generate a unique default ID.
+    const existingIds = getExistingNodeIds();
+    let candidate = 'node1';
+    let counter = 1;
+    while (existingIds.indexOf(candidate) !== -1) {
+      counter++;
+      candidate = 'node' + counter;
+    }
+
+    const newNodeData = {
+      id: candidate,
+      agent: 'claude',
+      prompt: 'Describe the task.',
+      output_limit: 8000,
+      model: '',
+      runtime: '',
+      timeout: 0,
+    };
+
+    // Open edit panel for the new node (not yet added to graph).
+    openNodeEditPanelForNew(newNodeData);
+  }
+
+  function getExistingNodeIds() {
+    if (!flowsState.drawflowEditor) return [];
+    const exported = flowsState.drawflowEditor.export();
+    const home = exported && exported.drawflow && exported.drawflow.Home
+      ? exported.drawflow.Home.data
+      : {};
+    return Object.values(home).map((n) => (n.data || {}).yakosId || '').filter(Boolean);
+  }
+
+  // --- Node edit panel (CRUD) -------------------------------------------------
+
+  var _editingDfNodeId = null; // Drawflow internal node id currently being edited
+  var _editingIsNew = false;   // true when adding a new node (not yet in graph)
+  var _editingNewData = null;  // pending new node data
+
+  function openNodeEditPanel(dfId) {
+    const nodeInfo = getDrawflowNodeData(dfId);
+    if (!nodeInfo) return;
+    const d = nodeInfo.data || {};
+
+    _editingDfNodeId = dfId;
+    _editingIsNew = false;
+    _editingNewData = null;
+
+    _populateNodeEditPanel(d, true);
+  }
+
+  function openNodeEditPanelForNew(nodeData) {
+    _editingDfNodeId = null;
+    _editingIsNew = true;
+    _editingNewData = nodeData;
+
+    _populateNodeEditPanel({
+      yakosId: nodeData.id,
+      agent: nodeData.agent,
+      prompt: nodeData.prompt,
+      output_limit: String(nodeData.output_limit),
+      model: '',
+      runtime: '',
+      timeout: '0',
+    }, false);
+  }
+
+  function _populateNodeEditPanel(d, showDelete) {
+    const panel = document.getElementById('flows-node-edit-panel');
+    if (!panel) return;
+
+    document.getElementById('fne-id').value = d.yakosId || '';
+    document.getElementById('fne-agent').value = d.agent || '';
+    document.getElementById('fne-prompt').value = d.prompt || '';
+    document.getElementById('fne-output-limit').value = d.output_limit || '8000';
+    document.getElementById('fne-model').value = d.model || '';
+    document.getElementById('fne-runtime').value = d.runtime || '';
+    document.getElementById('fne-timeout').value = d.timeout || '0';
+
+    const errEl = document.getElementById('fne-error');
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+
+    const delBtn = document.getElementById('fne-delete-btn');
+    if (delBtn) delBtn.style.display = showDelete ? '' : 'none';
+
+    panel.style.display = '';
+    // Focus the ID field.
+    setTimeout(function() {
+      var inp = document.getElementById('fne-id');
+      if (inp) inp.focus();
+    }, 0);
+  }
+
+  function closeNodeEditPanel() {
+    const panel = document.getElementById('flows-node-edit-panel');
+    if (panel) panel.style.display = 'none';
+    _editingDfNodeId = null;
+    _editingIsNew = false;
+    _editingNewData = null;
+  }
+
+  function applyNodeEditPanel() {
+    const newId = (document.getElementById('fne-id').value || '').trim();
+    const agent = (document.getElementById('fne-agent').value || '').trim();
+    const prompt = (document.getElementById('fne-prompt').value || '').trim();
+    const outputLimit = parseInt(document.getElementById('fne-output-limit').value, 10);
+    const model = (document.getElementById('fne-model').value || '').trim();
+    const runtime = (document.getElementById('fne-runtime').value || '').trim();
+    const timeout = parseInt(document.getElementById('fne-timeout').value, 10) || 0;
+
+    const errEl = document.getElementById('fne-error');
+    function showFneErr(msg) {
+      if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+    }
+
+    // Validate ID.
+    if (!WORKFLOW_ID_RE.test(newId)) {
+      showFneErr('ID must match ^[a-z0-9][a-z0-9-]{0,63}$ (lowercase, digits, hyphens, max 64)');
       return;
     }
+    if (!agent) { showFneErr('Agent is required'); return; }
+    if (!prompt) { showFneErr('Prompt is required'); return; }
+    if (!outputLimit || outputLimit <= 0) { showFneErr('output_limit must be > 0'); return; }
 
-    for (let c = 0; c <= maxLayer; c++) {
-      const colNodes = columns[c];
-      const colTotalH = colNodes.length * (SVG_NODE_H + SVG_ROW_GAP) - SVG_ROW_GAP;
-      const startY = SVG_PAD + (totalH - SVG_PAD * 2 - colTotalH) / 2;
-      for (let r = 0; r < colNodes.length; r++) {
-        const id = colNodes[r];
-        const x = colX[c];
-        const y = startY + r * (SVG_NODE_H + SVG_ROW_GAP);
-        pos[id] = { x, y, cx: x + SVG_NODE_W / 2, cy: y + SVG_NODE_H / 2 };
-      }
+    // Check uniqueness (skip if editing same node).
+    const existingIds = getExistingNodeIds();
+    const oldId = _editingIsNew ? null : (
+      _editingDfNodeId
+        ? ((getDrawflowNodeData(_editingDfNodeId) || {}).data || {}).yakosId
+        : null
+    );
+    const isDupe = existingIds.filter((id) => id !== oldId).indexOf(newId) !== -1;
+    if (isDupe) { showFneErr('Node ID "' + newId + '" is already used in this workflow'); return; }
+
+    const newData = {
+      yakosId: newId,
+      agent: agent,
+      prompt: prompt,
+      output_limit: String(outputLimit),
+      model: model,
+      runtime: runtime,
+      timeout: String(timeout),
+    };
+
+    if (_editingIsNew) {
+      // Add new node to canvas at a sensible position.
+      const canvasEl = document.getElementById('flows-canvas');
+      const cx = canvasEl ? canvasEl.scrollLeft + 200 : 200;
+      const cy = canvasEl ? canvasEl.scrollTop + 100 : 100;
+      addDrawflowNode(flowsState.drawflowEditor, {
+        id: newId,
+        agent: agent,
+        prompt: prompt,
+        output_limit: outputLimit,
+        model: model,
+        runtime: runtime,
+        timeout: timeout,
+      }, cx, cy);
+      announceFlows('Node "' + newId + '" added');
+    } else if (_editingDfNodeId) {
+      // Update existing node data.
+      try {
+        flowsState.drawflowEditor.updateNodeDataFromId(_editingDfNodeId, newData);
+        // Update the node HTML label.
+        const el = document.querySelector('#node-' + _editingDfNodeId + ' .df-node-id');
+        if (el) el.textContent = newId;
+        const agentEl = document.querySelector('#node-' + _editingDfNodeId + ' .df-node-agent');
+        if (agentEl) agentEl.textContent = agent;
+      } catch (_) { /* defensive */ }
+      announceFlows('Node "' + newId + '" updated');
     }
 
-    // 5. Build SVG.
-    const svgNS = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(svgNS, 'svg');
-    svg.setAttribute('width', String(totalW));
-    svg.setAttribute('height', String(totalH));
-    svg.setAttribute('role', 'presentation');
-    svg.setAttribute('aria-hidden', 'true'); // canvas is decorative; nodes have their own buttons
+    closeNodeEditPanel();
+    syncCanvasToYaml();
+  }
 
-    // Draw edges first (below nodes).
-    for (const n of wf.nodes) {
-      for (const dep of (n.needs || [])) {
-        if (!pos[dep] || !pos[n.id]) continue;
-        const x1 = pos[dep].x + SVG_NODE_W;
-        const y1 = pos[dep].cy;
-        const x2 = pos[n.id].x;
-        const y2 = pos[n.id].cy;
-        const mx = (x1 + x2) / 2;
-        const line = document.createElementNS(svgNS, 'path');
-        const d = 'M ' + x1 + ' ' + y1 + ' C ' + mx + ' ' + y1 + ' ' + mx + ' ' + y2 + ' ' + x2 + ' ' + y2;
-        line.setAttribute('d', d);
-        line.setAttribute('class', 'dag-edge');
-        svg.appendChild(line);
-      }
+  function deleteNodeFromEditPanel() {
+    if (!_editingDfNodeId || !flowsState.drawflowEditor) return;
+    try {
+      flowsState.drawflowEditor.removeNodeId('node-' + _editingDfNodeId);
+      announceFlows('Node deleted');
+    } catch (_) { /* defensive */ }
+    closeNodeEditPanel();
+    syncCanvasToYaml();
+  }
+
+  // --- YAML string quoting helper ---------------------------------------------
+
+  function yamlQuoteString(s) {
+    // Safely quote a string for YAML emission. Use double-quote form when needed.
+    if (!s) return '""';
+    // If string contains special chars that need quoting in YAML, double-quote it.
+    if (/[:#\[\]{},|>&*!'"\\%@`\n\r\t]/.test(s) || /^\s|\s$/.test(s)) {
+      return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r') + '"';
     }
-
-    canvasEl.appendChild(svg);
-
-    // Draw node boxes as positioned <button> elements on top of SVG
-    // (using a relative container so buttons can be absolutely positioned).
-    canvasEl.style.position = 'relative';
-    svg.style.position = 'absolute';
-    svg.style.top = '0';
-    svg.style.left = '0';
-    // Set the canvas to be at least svg size.
-    canvasEl.style.minWidth = totalW + 'px';
-    canvasEl.style.minHeight = totalH + 'px';
-
-    for (const n of wf.nodes) {
-      const p = pos[n.id];
-      if (!p) continue;
-      const nodeState = activeSnap && activeSnap.nodes ? activeSnap.nodes[n.id] : null;
-      const status = nodeState ? (nodeState.status || 'pending') : 'pending';
-      const icon = nodeStatusIcon(status);
-      const statusLabel = nodeStatusLabel(status);
-
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'dag-node dag-node-' + status + (n.id === flowsState.selectedNodeId ? ' dag-node-selected' : '');
-      btn.style.position = 'absolute';
-      btn.style.left = p.x + 'px';
-      btn.style.top = p.y + 'px';
-      btn.style.width = SVG_NODE_W + 'px';
-      btn.style.height = SVG_NODE_H + 'px';
-      btn.setAttribute('aria-label', 'Node ' + n.id + ': ' + n.agent + ', status: ' + statusLabel);
-
-      const iconEl = document.createElement('span');
-      iconEl.className = 'dag-node-icon';
-      iconEl.setAttribute('aria-hidden', 'true');
-      iconEl.textContent = icon;
-
-      const labelEl = document.createElement('span');
-      labelEl.className = 'dag-node-label';
-      labelEl.textContent = n.id; // textContent is safe
-
-      const agentEl = document.createElement('span');
-      agentEl.className = 'dag-node-agent';
-      agentEl.textContent = n.agent; // textContent is safe
-
-      const statusEl = document.createElement('span');
-      statusEl.className = 'sr-only';
-      statusEl.textContent = statusLabel;
-
-      btn.appendChild(iconEl);
-      btn.appendChild(labelEl);
-      btn.appendChild(agentEl);
-      btn.appendChild(statusEl);
-
-      // Click: show node output.
-      const nodeId = n.id;
-      const runId = flowsState.activeRunId;
-      btn.addEventListener('click', () => {
-        flowsState.selectedNodeId = nodeId;
-        if (runId) {
-          loadNodeOutput(runId, nodeId);
-        }
-        // Re-render canvas to update selected highlight.
-        renderFlowsCanvas();
-        // Show node panel.
-        renderFlowsNodePanel();
-      });
-
-      canvasEl.appendChild(btn);
-    }
+    return s;
   }
 
   // ---- Status helpers -----------------------------------------------------------
@@ -2987,51 +3622,372 @@
   // Phase 2 adds: Edit/View toggle, dirty tracking, ⌘S / Save button,
   // POST /api/files/write with optimistic concurrency (version echo).
 
-  // IDE editor state variables.
-  // Declared as var (not let) so they are hoisted to the top of the IIFE and
-  // initialised to undefined/false/null before any code runs — including the
-  // pre-paint theme init block. The matching var declarations at the top of the
-  // IIFE (in the TDZ-guard block) ensure no TDZ window exists for these names.
-  // Using var here avoids a duplicate-declaration SyntaxError; var re-declarations
-  // of var are a no-op in sloppy mode and silently ignored in strict mode.
-  ideTabInitialized = false; // already var-declared above; reset to canonical initial value
+  // =========================================================================
+  // ── IDE TAB STATE INITIALISATION ─────────────────────────────────────────
+  // =========================================================================
+  //
+  // These are var re-assignments (the vars were already hoisted at the top of
+  // the IIFE for TDZ safety). Setting them here to their canonical initial
+  // values right before the first IDE function definitions keeps the
+  // authoritative defaults co-located with the code that uses them.
 
-  // Ref to Monaco iframe's contentWindow (set once the iframe loads).
-  ideEditorWindow = null;
-
-  // True once the Monaco {type:'ready'} postMessage arrives.
-  ideEditorReady = false;
-
-  // Queued openFile to send once the editor is ready.
-  ideQueuedOpen = null;
-
-  // Stored handler ref so we can removeEventListener if needed in the future.
-  // Guard prevents double-registration if renderIdeLayout were ever called twice.
+  ideTabInitialized = false;
+  ideEditorWindow   = null;
+  ideEditorReady    = false;
+  ideQueuedOpen     = [];    // B2 fix: array queue so rapid pre-ready opens all land
   ideMessageHandlerRegistered = false;
-
-  // The workspace-relative path of the file currently open in Monaco.
-  // Updated on every openFileInEditor call.
-  ideCurrentPath = '';
-
-  // The version stamp (SHA-256 hex) returned by GET /api/files/content and
-  // updated after every successful POST /api/files/write.  Sent back on the
-  // next write for optimistic concurrency.  Empty string = force-write.
+  ideOpenFiles      = new Map(); // path → {version, dirty, editable, saving, saveStatusTimer}
+  ideActiveTabPath  = '';
+  ideCurrentPath    = '';
   ideCurrentVersion = '';
-
-  // Whether the editor is in editable mode (Edit toggle is pressed).
-  // Default: false (view-only, readOnly:true).
-  ideEditable = false;
-
-  // Whether the editor's model has unsaved changes since the last openFile
-  // or successful save.
-  ideIsDirty = false;
-
-  // True while a POST /api/files/write fetch is in-flight.  Prevents double-POST
-  // when the operator presses ⌘S twice before the first response arrives.
-  ideIsSaving = false;
-
-  // Timer for the transient save-status message.  Reset to canonical initial value.
+  ideEditable       = false;
+  ideIsDirty        = false;
+  ideIsSaving       = false;
   ideSaveStatusTimer = null;
+
+  // ── Layout persistence helpers ────────────────────────────────────────────
+
+  function ideLoadLayout() {
+    var defaults = { treeW: 220, chatW: 280, treeCollapsed: false, chatCollapsed: false };
+    try {
+      var raw = localStorage.getItem(IDE_LAYOUT_LS_KEY);
+      if (!raw) return defaults;
+      var parsed = JSON.parse(raw);
+      // Validate — tolerate corrupt/partial values gracefully.
+      return {
+        treeW:          (typeof parsed.treeW === 'number' && parsed.treeW > 0)  ? parsed.treeW  : defaults.treeW,
+        chatW:          (typeof parsed.chatW === 'number' && parsed.chatW > 0)  ? parsed.chatW  : defaults.chatW,
+        treeCollapsed:  !!parsed.treeCollapsed,
+        chatCollapsed:  !!parsed.chatCollapsed,
+      };
+    } catch (_) { return defaults; }
+  }
+
+  function ideSaveLayout(layout) {
+    try { localStorage.setItem(IDE_LAYOUT_LS_KEY, JSON.stringify(layout)); } catch (_) {}
+  }
+
+  // ── Tab strip helpers ─────────────────────────────────────────────────────
+  //
+  // One <button role="tab"> per open file; the close × is a nested <button>.
+  // The entire strip is in a <div role="tablist">.
+
+  function ideRenderTabStrip() {
+    const strip = document.getElementById('ide-tab-strip');
+    if (!strip) return;
+    strip.innerHTML = '';
+    var i = 0;
+    for (const [path, fileState] of ideOpenFiles) {
+      const basename = path.split('/').pop() || path;
+      const isActive = path === ideActiveTabPath;
+      const tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'ide-tab' + (isActive ? ' ide-tab-active' : '');
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-selected', isActive ? 'true' : 'false');
+      tab.setAttribute('title', path);
+      tab.setAttribute('data-ide-tab-path', path);
+      tab.setAttribute('tabindex', isActive ? '0' : '-1');
+      tab.setAttribute('id', 'ide-tab-' + i);
+
+      const dot = document.createElement('span');
+      dot.className = 'ide-tab-dirty' + (fileState.dirty ? '' : ' ide-tab-dirty-hidden');
+      dot.setAttribute('aria-hidden', 'true');
+      dot.textContent = '●';
+
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'ide-tab-name';
+      nameSpan.textContent = basename;
+
+      const closeBtn = document.createElement('button');
+      closeBtn.type = 'button';
+      closeBtn.className = 'ide-tab-close';
+      closeBtn.setAttribute('aria-label', 'Close ' + basename);
+      // tabindex="-1": close button is reachable via Delete/Backspace on the tab
+      // (S-1 / APG tab pattern) and by mouse click. Focus stays on the tab itself.
+      closeBtn.setAttribute('tabindex', '-1');
+      closeBtn.textContent = '×';
+
+      tab.appendChild(dot);
+      tab.appendChild(nameSpan);
+      tab.appendChild(closeBtn);
+      strip.appendChild(tab);
+
+      // Capture path for closures.
+      (function(p) {
+        tab.addEventListener('click', function(e) {
+          if (e.target === closeBtn || closeBtn.contains(e.target)) return;
+          ideActivateTab(p);
+        });
+        closeBtn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          ideCloseTab(p);
+        });
+      }(path));
+
+      i++;
+    }
+
+    // Arrow-key navigation + Delete/Backspace close within the tablist (ARIA pattern).
+    strip.addEventListener('keydown', function(e) {
+      var tabs = strip.querySelectorAll('[role="tab"]');
+      var arr = Array.prototype.slice.call(tabs);
+      var idx = arr.indexOf(document.activeElement);
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        var next = arr[(idx + 1) % arr.length];
+        if (next) { next.focus(); next.click(); }
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        var prev = arr[(idx - 1 + arr.length) % arr.length];
+        if (prev) { prev.focus(); prev.click(); }
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        if (arr[0]) { arr[0].focus(); arr[0].click(); }
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        var last = arr[arr.length - 1];
+        if (last) { last.focus(); last.click(); }
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        // S-1 (2.1.1): keyboard close of the focused tab.
+        // APG tab pattern: Delete closes the focused tab; focus moves to
+        // the right neighbor, or left if the closed tab was last.
+        if (idx === -1) return;
+        e.preventDefault();
+        var closingPath = arr[idx] && arr[idx].getAttribute('data-ide-tab-path');
+        if (closingPath) ideCloseTab(closingPath);
+      }
+    });
+  }
+
+  function ideActivateTab(path) {
+    if (path === ideActiveTabPath) return;
+    const fileState = ideOpenFiles.get(path);
+    if (!fileState) return;
+
+    ideActiveTabPath = path;
+    // Sync legacy single-file vars to the newly active tab.
+    ideCurrentPath   = path;
+    ideCurrentVersion = fileState.version;
+    ideEditable      = fileState.editable;
+    ideIsDirty       = fileState.dirty;
+    // Per-file saving state: treat switching away from a saving tab as cancelling
+    // the UI lock (the in-flight fetch will still complete; its finally() resets
+    // the per-file saving flag).
+    ideIsSaving      = fileState.saving || false;
+
+    // Tell Monaco to switch to this file's model.
+    // The iframe already has the model from when the file was first opened —
+    // we just send openFile with no content to switch model without re-loading.
+    var payload = {
+      type: 'openFile',
+      path: path,
+      content: null,   // null = reuse existing model; don't reset content
+      language: null,
+      editable: fileState.editable,
+    };
+    if (ideEditorReady && ideEditorWindow) {
+      sendOpenFile(payload);
+    } else {
+      ideQueuedOpen.push(payload);
+    }
+
+    // Sync UI.
+    ideRenderTabStrip();
+    ideUpdateEditorHeader();
+    // Clear any lingering editor notice from a previous tab.
+    var notice = document.getElementById('ide-editor-notice');
+    if (notice) notice.style.display = 'none';
+    // M-2 (4.1.3): announce tab activation to screen readers via the
+    // already-present aria-live="polite" path element.
+    var pathEl = document.getElementById('ide-open-path');
+    if (pathEl) {
+      // Force a re-announcement even if the text didn't change (same path
+      // re-activated after closing another): clear then set on next frame.
+      var basename = path.split('/').pop() || path;
+      pathEl.textContent = '';
+      requestAnimationFrame(function() { pathEl.textContent = path; });
+    }
+  }
+
+  function ideCloseTab(path) {
+    const fileState = ideOpenFiles.get(path);
+    if (!fileState) return;
+
+    function doClose() {
+      // B1 fix: determine neighbor BEFORE deleting from the map, and BEFORE
+      // telling Monaco to switch away.  Activate the neighbor first so Monaco
+      // has already set a different active model before closeFile arrives in
+      // the iframe.  That way the iframe's `closeFile` guard
+      //   if (editor.getModel() !== closeEntry.model) dispose()
+      // evaluates correctly (the active model is already the neighbor's).
+      var neighborPath = null;
+      var neighborTabEl = null;
+      if (ideActiveTabPath === path) {
+        // Collect ordered keys from the map (insertion order).
+        var keys = Array.from(ideOpenFiles.keys());
+        var closingIdx = keys.indexOf(path);
+        if (keys.length > 1) {
+          // M-4: prefer the right neighbor; fall back to left if closing is last.
+          neighborPath = (closingIdx < keys.length - 1)
+            ? keys[closingIdx + 1]
+            : keys[closingIdx - 1];
+        }
+      }
+
+      // Switch editor to the neighbor now (before deleting or sending closeFile).
+      if (neighborPath) {
+        ideActivateTab(neighborPath);
+        // M-4: restore keyboard focus to the newly active tab button.
+        requestAnimationFrame(function() {
+          var strip = document.getElementById('ide-tab-strip');
+          if (strip) {
+            var newActive = strip.querySelector('[data-ide-tab-path="' + neighborPath + '"]');
+            if (newActive) newActive.focus();
+          }
+        });
+      }
+
+      // Now remove the closing path from the parent's map.
+      ideOpenFiles.delete(path);
+
+      // B1 fix: send closeFile AFTER switching the editor.  Monaco's iframe
+      // handler can now unconditionally dispose the model (the active model has
+      // already changed to the neighbor's model).
+      if (ideEditorWindow) {
+        try {
+          ideEditorWindow.postMessage(
+            { type: 'closeFile', path: path },
+            window.location.origin
+          );
+        } catch (_) {}
+      }
+
+      if (!neighborPath) {
+        if (ideActiveTabPath === path) {
+          // All tabs closed — reset state.
+          ideActiveTabPath = '';
+          ideCurrentPath   = '';
+          ideCurrentVersion = '';
+          ideEditable       = false;
+          ideIsDirty        = false;
+          ideIsSaving       = false;
+          ideRenderTabStrip();
+          ideUpdateEditorHeader();
+          // M-2 (4.1.3): announce "all closed" to screen readers.
+          var pathEl = document.getElementById('ide-open-path');
+          if (pathEl) pathEl.textContent = 'All files closed';
+        } else {
+          ideRenderTabStrip();
+        }
+      }
+      // (If neighborPath was set, ideActivateTab already re-rendered the strip.)
+    }
+
+    if (fileState.dirty) {
+      openModal({
+        title:       'Unsaved changes',
+        body:        '<p>Close <strong>' + esc(path.split('/').pop() || path) + '</strong>?</p>' +
+                     '<p class="modal-field-hint" style="margin-top:8px">' +
+                       'Your unsaved changes will be lost.' +
+                     '</p>',
+        confirmText: 'Close without saving',
+        cancelText:  'Keep editing',
+        dangerous:   true,
+        onConfirm:   function(overlay) { overlay._closeModal(); doClose(); },
+      });
+    } else {
+      doClose();
+    }
+  }
+
+  // ideUpdateEditorHeader refreshes the path, dirty marker, Edit/Save buttons
+  // in the editor header to reflect ideActiveTabPath's state.
+  function ideUpdateEditorHeader() {
+    const pathEl = document.getElementById('ide-open-path');
+    if (pathEl) pathEl.textContent = ideActiveTabPath;
+
+    const fileState = ideActiveTabPath ? ideOpenFiles.get(ideActiveTabPath) : null;
+
+    const marker = document.getElementById('ide-dirty-marker');
+    const dirty  = !!(fileState && fileState.dirty);
+    if (marker) marker.style.display = dirty ? '' : 'none';
+
+    const saveBtn = document.getElementById('ide-save-btn');
+    if (saveBtn) {
+      const canSave = dirty && !!(fileState && fileState.editable);
+      saveBtn.disabled = !canSave;
+      saveBtn.setAttribute('aria-disabled', canSave ? 'false' : 'true');
+    }
+
+    const editToggle = document.getElementById('ide-edit-toggle');
+    if (editToggle) {
+      const editable = !!(fileState && fileState.editable);
+      editToggle.textContent = editable ? 'View' : 'Edit';
+      editToggle.setAttribute('aria-pressed', editable ? 'true' : 'false');
+      editToggle.classList.toggle('ide-header-btn-active', editable);
+    }
+  }
+
+  // ── Tab-aware openFileInEditor ─────────────────────────────────────────────
+  //
+  // If the path is already open in a tab, activate it (no re-fetch).
+  // Otherwise add it as a new tab and send the file to Monaco.
+  function openFileInEditor(path, content, language, version) {
+    if (ideOpenFiles.has(path)) {
+      // Already open: just activate the tab. Update version in case it changed
+      // (e.g. reloaded after conflict).
+      var existing = ideOpenFiles.get(path);
+      if (version !== undefined && version !== null) {
+        existing.version = version || '';
+      }
+      ideActivateTab(path);
+      // Close any stale editor notice.
+      var notice = document.getElementById('ide-editor-notice');
+      if (notice) notice.style.display = 'none';
+      return;
+    }
+
+    // New tab.
+    ideOpenFiles.set(path, {
+      version:          version || '',
+      dirty:            false,
+      editable:         false,  // always start in View mode
+      saving:           false,
+      saveStatusTimer:  null,
+    });
+
+    ideActiveTabPath  = path;
+    ideCurrentPath    = path;
+    ideCurrentVersion = version || '';
+    ideEditable       = false;
+    ideIsDirty        = false;
+    ideIsSaving       = false;
+
+    // Clear any stale editor notice.
+    var newTabNotice = document.getElementById('ide-editor-notice');
+    if (newTabNotice) newTabNotice.style.display = 'none';
+
+    // Clear save status.
+    ideShowSaveStatus('', false, 0);
+
+    var payload = {
+      type:     'openFile',
+      path:     path,
+      content:  content,
+      language: language || 'plaintext',
+      editable: false,
+    };
+
+    if (ideEditorReady && ideEditorWindow) {
+      sendOpenFile(payload);
+    } else {
+      ideQueuedOpen.push(payload);
+    }
+
+    ideRenderTabStrip();
+    ideUpdateEditorHeader();
+  }
 
   function initIdeTab() {
     if (ideTabInitialized) return;
@@ -3047,38 +4003,68 @@
     const panel = document.getElementById('panel-ide');
     if (!panel) return;
 
+    // Load persisted layout.
+    var layout = ideLoadLayout();
+
+    // Build column widths. Collapsed panes get a thin re-expand affordance (28px).
+    var COLLAPSED_W = 28;
+    var treeW = layout.treeCollapsed ? COLLAPSED_W : layout.treeW;
+    var chatW = layout.chatCollapsed ? COLLAPSED_W : layout.chatW;
+
     panel.innerHTML =
-      '<div class="ide-layout" role="main" aria-label="IDE">' +
-        // Left: file tree
-        '<aside class="ide-tree-pane" aria-label="File tree">' +
+      '<div class="ide-layout" id="ide-layout-root" role="main" aria-label="IDE" ' +
+        'style="grid-template-columns:' + treeW + 'px 8px 1fr 8px ' + chatW + 'px">' +
+
+        // ── Left: file tree pane ──────────────────────────────────────────
+        '<aside class="ide-tree-pane' + (layout.treeCollapsed ? ' ide-pane-collapsed' : '') + '" ' +
+          'id="ide-tree-col" aria-label="File tree" ' +
+          'style="min-width:' + (layout.treeCollapsed ? COLLAPSED_W : 120) + 'px">' +
           '<div class="ide-tree-header">' +
-            '<span class="subsection-title" id="ide-tree-title">Files</span>' +
+            '<span class="subsection-title" id="ide-tree-title"' +
+              (layout.treeCollapsed ? ' style="display:none"' : '') + '>Files</span>' +
+            '<button class="ide-pane-toggle ide-tree-toggle" id="ide-tree-toggle" ' +
+              'type="button" ' +
+              'aria-expanded="' + (layout.treeCollapsed ? 'false' : 'true') + '" ' +
+              'aria-controls="ide-tree-root" ' +
+              'aria-label="' + (layout.treeCollapsed ? 'Expand file tree' : 'Collapse file tree') + '" ' +
+              'title="' + (layout.treeCollapsed ? 'Expand file tree' : 'Collapse file tree') + '">' +
+              (layout.treeCollapsed ? '&#x276F;' : '&#x276E;') +
+            '</button>' +
           '</div>' +
-          '<div id="ide-tree-root" class="ide-tree-root" role="tree" aria-label="Workspace files"></div>' +
+          '<div id="ide-tree-root" class="ide-tree-root" role="tree" aria-label="Workspace files"' +
+            (layout.treeCollapsed ? ' style="display:none"' : '') + '></div>' +
         '</aside>' +
-        // Center: editor
-        '<div class="ide-editor-pane">' +
+
+        // ── Splitter: tree | editor ──────────────────────────────────────
+        '<div class="ide-splitter" id="ide-splitter-left" ' +
+          'role="separator" aria-orientation="vertical" ' +
+          'aria-label="Resize file tree" tabindex="0" ' +
+          'aria-valuemin="80" aria-valuemax="600" ' +
+          'aria-valuenow="' + layout.treeW + '" ' +
+          'aria-valuetext="' + layout.treeW + ' pixels" ' +
+          'style="' + (layout.treeCollapsed ? 'display:none' : '') + '"></div>' +
+
+        // ── Center: Monaco editor pane ────────────────────────────────────
+        '<div class="ide-editor-pane" id="ide-editor-col">' +
+          // Tab strip above editor (multi-file tabs).
+          '<div class="ide-tab-strip" id="ide-tab-strip" ' +
+            'role="tablist" aria-label="Open files">' +
+          '</div>' +
+          // Editor header: dirty marker, path, Edit, Save, status.
           '<div class="ide-editor-header" id="ide-editor-header">' +
-            // Dirty marker (● before path) shown when editor has unsaved changes.
             '<span id="ide-dirty-marker" class="ide-dirty-marker" aria-hidden="true" style="display:none">●</span>' +
             '<span id="ide-open-path" class="ide-open-path" aria-live="polite"></span>' +
-            // Edit/View toggle: pressing Edit enables Monaco editing.
             '<button id="ide-edit-toggle" type="button" class="ide-header-btn" ' +
-              'aria-pressed="false" title="Toggle edit mode">' +
-              'Edit' +
-            '</button>' +
-            // Save button: enabled when dirty + editable; triggers POST /api/files/write.
+              'aria-pressed="false" title="Toggle edit mode">Edit</button>' +
             '<button id="ide-save-btn" type="button" class="ide-header-btn ide-save-btn" ' +
-              'disabled aria-disabled="true" title="Save file (⌘S / Ctrl-S)">' +
-              'Save' +
-            '</button>' +
-            // Save status: transient "Saved" / error text (aria-live polite).
+              'disabled aria-disabled="true" title="Save file (⌘S / Ctrl-S)">Save</button>' +
             '<span id="ide-save-status" class="ide-save-status" aria-live="polite" role="status"></span>' +
           '</div>' +
           '<div class="ide-editor-wrap">' +
             '<div id="ide-editor-notice" class="ide-editor-notice" style="display:none" role="status"></div>' +
-            // First-party same-origin content; isolation boundary is the
-            // scoped per-route CSP on /ide/editor, not an escapable sandbox.
+            // Transparent drag overlay — covers iframe during column resize so
+            // pointer events don't get swallowed by the Monaco iframe.
+            '<div id="ide-drag-overlay" class="ide-drag-overlay" style="display:none"></div>' +
             '<iframe id="ide-editor-frame" class="ide-editor-frame" ' +
               'src="/ide/editor" ' +
               'title="Code editor" ' +
@@ -3086,85 +4072,309 @@
             '</iframe>' +
           '</div>' +
         '</div>' +
-        // Right: embedded chat
-        '<div class="ide-chat-pane" aria-label="Chat" id="ide-chat-col">' +
+
+        // ── Splitter: editor | chat ──────────────────────────────────────
+        '<div class="ide-splitter" id="ide-splitter-right" ' +
+          'role="separator" aria-orientation="vertical" ' +
+          'aria-label="Resize chat panel" tabindex="0" ' +
+          'aria-valuemin="80" aria-valuemax="600" ' +
+          'aria-valuenow="' + layout.chatW + '" ' +
+          'aria-valuetext="' + layout.chatW + ' pixels" ' +
+          'style="' + (layout.chatCollapsed ? 'display:none' : '') + '"></div>' +
+
+        // ── Right: embedded chat pane ────────────────────────────────────
+        '<div class="ide-chat-pane' + (layout.chatCollapsed ? ' ide-pane-collapsed' : '') + '" ' +
+          'aria-label="Chat" id="ide-chat-col" ' +
+          'style="min-width:' + (layout.chatCollapsed ? COLLAPSED_W : 160) + 'px">' +
           '<div class="ide-chat-header">' +
-            '<span class="subsection-title">Chat</span>' +
+            '<button class="ide-pane-toggle ide-chat-toggle" id="ide-chat-toggle" ' +
+              'type="button" ' +
+              'aria-expanded="' + (layout.chatCollapsed ? 'false' : 'true') + '" ' +
+              'aria-controls="ide-chat-slot" ' +
+              'aria-label="' + (layout.chatCollapsed ? 'Expand chat' : 'Collapse chat') + '" ' +
+              'title="' + (layout.chatCollapsed ? 'Expand chat' : 'Collapse chat') + '">' +
+              (layout.chatCollapsed ? '&#x276E;' : '&#x276F;') +
+            '</button>' +
+            '<span class="subsection-title"' +
+              (layout.chatCollapsed ? ' style="display:none"' : '') + '>Chat</span>' +
           '</div>' +
-          '<div id="ide-chat-slot"></div>' +
+          '<div id="ide-chat-slot"' +
+            (layout.chatCollapsed ? ' style="display:none"' : '') + '></div>' +
         '</div>' +
+
       '</div>';
 
-    // Wire Monaco iframe postMessage listener — guard prevents double-registration
-    // if this function is ever re-entered (e.g. a future teardown+reinit path).
+    // Wire Monaco iframe postMessage listener.
     if (!ideMessageHandlerRegistered) {
       window.addEventListener('message', handleIdeEditorMessage);
       ideMessageHandlerRegistered = true;
     }
 
-    // Wire the iframe load event to grab its contentWindow.
+    // Grab iframe contentWindow once it loads.
     const frame = document.getElementById('ide-editor-frame');
     if (frame) {
       frame.addEventListener('load', () => {
         ideEditorWindow = frame.contentWindow;
-        // The 'ready' message comes from the iframe after Monaco mounts.
       });
     }
 
-    // Wire Edit/View toggle button.
+    // ── Edit/View toggle ──────────────────────────────────────────────────
     const editToggle = document.getElementById('ide-edit-toggle');
     if (editToggle) {
       editToggle.addEventListener('click', () => {
-        ideEditable = !ideEditable;
-        editToggle.textContent = ideEditable ? 'View' : 'Edit';
-        editToggle.setAttribute('aria-pressed', ideEditable ? 'true' : 'false');
-        editToggle.classList.toggle('ide-header-btn-active', ideEditable);
-        // Inform Monaco iframe.
+        if (!ideActiveTabPath) return;
+        const fileState = ideOpenFiles.get(ideActiveTabPath);
+        if (!fileState) return;
+        fileState.editable = !fileState.editable;
+        ideEditable = fileState.editable;
         if (ideEditorWindow) {
           ideEditorWindow.postMessage(
             { type: 'setEditable', editable: ideEditable },
             window.location.origin
           );
         }
-        // When switching to View, clear dirty state in the parent too.
+        // When switching to View, clear dirty state.
         if (!ideEditable) {
-          ideSetDirty(false);
+          fileState.dirty = false;
+          ideIsDirty = false;
+          // Code-review S1: re-render tab strip so the ● dirty dot clears.
+          ideRenderTabStrip();
         }
+        ideUpdateEditorHeader();
       });
     }
 
-    // Wire Save button.
+    // ── Save button ───────────────────────────────────────────────────────
     const saveBtn = document.getElementById('ide-save-btn');
     if (saveBtn) {
-      saveBtn.addEventListener('click', () => {
-        triggerSave();
+      saveBtn.addEventListener('click', () => { triggerSave(); });
+    }
+
+    // ── Tree pane toggle ──────────────────────────────────────────────────
+    const treeToggle = document.getElementById('ide-tree-toggle');
+    if (treeToggle) {
+      treeToggle.addEventListener('click', () => {
+        ideTogglePane('tree');
       });
     }
 
-    // Mount the embedded chat pane.
+    // ── Chat pane toggle ──────────────────────────────────────────────────
+    const chatToggle = document.getElementById('ide-chat-toggle');
+    if (chatToggle) {
+      chatToggle.addEventListener('click', () => {
+        ideTogglePane('chat');
+      });
+    }
+
+    // ── Splitter drag (left: tree|editor) ────────────────────────────────
+    ideWireSplitter('ide-splitter-left', 'left');
+
+    // ── Splitter drag (right: editor|chat) ───────────────────────────────
+    ideWireSplitter('ide-splitter-right', 'right');
+
+    // ── Keyboard resize for splitters ────────────────────────────────────
+    ideWireSplitterKeyboard('ide-splitter-left', 'left');
+    ideWireSplitterKeyboard('ide-splitter-right', 'right');
+
+    // ── Mount embedded chat pane ─────────────────────────────────────────
     mountIdeChatPane();
 
-    // Load file tree.
+    // ── Load file tree ────────────────────────────────────────────────────
     loadIdeTree('');
   }
 
-  // ideSetDirty updates the dirty state + UI (marker, Save button enabled/disabled).
-  function ideSetDirty(dirty) {
-    ideIsDirty = dirty;
-    const marker = document.getElementById('ide-dirty-marker');
-    if (marker) marker.style.display = dirty ? '' : 'none';
-    const saveBtn = document.getElementById('ide-save-btn');
-    if (saveBtn) {
-      const canSave = dirty && ideEditable;
-      saveBtn.disabled = !canSave;
-      saveBtn.setAttribute('aria-disabled', canSave ? 'false' : 'true');
+  // ── Pane collapse/expand ──────────────────────────────────────────────────
+
+  function ideTogglePane(side) {
+    const layout = ideLoadLayout();
+    const COLLAPSED_W = 28;
+
+    if (side === 'tree') {
+      layout.treeCollapsed = !layout.treeCollapsed;
+      ideSaveLayout(layout);
+      var treeCol   = document.getElementById('ide-tree-col');
+      var treeRoot  = document.getElementById('ide-tree-root');
+      var treeTitle = document.getElementById('ide-tree-title');
+      var toggle    = document.getElementById('ide-tree-toggle');
+      var splitter  = document.getElementById('ide-splitter-left');
+      var layoutEl  = document.getElementById('ide-layout-root');
+      var collapsed = layout.treeCollapsed;
+
+      if (treeCol)   treeCol.classList.toggle('ide-pane-collapsed', collapsed);
+      if (treeRoot)  treeRoot.style.display = collapsed ? 'none' : '';
+      if (treeTitle) treeTitle.style.display = collapsed ? 'none' : '';
+      if (splitter)  splitter.style.display = collapsed ? 'none' : '';
+      if (toggle) {
+        toggle.innerHTML = collapsed ? '&#x276F;' : '&#x276E;';
+        toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        toggle.title = collapsed ? 'Expand file tree' : 'Collapse file tree';
+        toggle.setAttribute('aria-label', collapsed ? 'Expand file tree' : 'Collapse file tree');
+      }
+      if (treeCol) treeCol.style.minWidth = (collapsed ? COLLAPSED_W : 120) + 'px';
+      // Update grid.
+      if (layoutEl) {
+        var chatW = layout.chatCollapsed ? COLLAPSED_W : layout.chatW;
+        var tW    = collapsed ? COLLAPSED_W : layout.treeW;
+        layoutEl.style.gridTemplateColumns =
+          tW + 'px ' + (collapsed ? '0' : '8') + 'px 1fr 8px ' + chatW + 'px';
+      }
+
+    } else { // chat
+      layout.chatCollapsed = !layout.chatCollapsed;
+      ideSaveLayout(layout);
+      var chatCol   = document.getElementById('ide-chat-col');
+      var chatSlot  = document.getElementById('ide-chat-slot');
+      var chatTitle = chatCol ? chatCol.querySelector('.subsection-title') : null;
+      var chatTog   = document.getElementById('ide-chat-toggle');
+      var rSplitter = document.getElementById('ide-splitter-right');
+      var layoutEl2 = document.getElementById('ide-layout-root');
+      var collapsed2 = layout.chatCollapsed;
+
+      if (chatCol)   chatCol.classList.toggle('ide-pane-collapsed', collapsed2);
+      if (chatSlot)  chatSlot.style.display = collapsed2 ? 'none' : '';
+      if (chatTitle) chatTitle.style.display = collapsed2 ? 'none' : '';
+      if (rSplitter) rSplitter.style.display = collapsed2 ? 'none' : '';
+      if (chatTog) {
+        chatTog.innerHTML = collapsed2 ? '&#x276E;' : '&#x276F;';
+        chatTog.setAttribute('aria-expanded', collapsed2 ? 'false' : 'true');
+        chatTog.title = collapsed2 ? 'Expand chat' : 'Collapse chat';
+        chatTog.setAttribute('aria-label', collapsed2 ? 'Expand chat' : 'Collapse chat');
+      }
+      if (chatCol) chatCol.style.minWidth = (collapsed2 ? COLLAPSED_W : 160) + 'px';
+      if (layoutEl2) {
+        var treeW2 = layout.treeCollapsed ? COLLAPSED_W : layout.treeW;
+        var cW     = collapsed2 ? COLLAPSED_W : layout.chatW;
+        layoutEl2.style.gridTemplateColumns =
+          treeW2 + 'px 8px 1fr ' + (collapsed2 ? '0' : '8') + 'px ' + cW + 'px';
+      }
     }
   }
 
-  // ideShowSaveStatus shows a transient status message (success or error) in
-  // the editor header's aria-live region.  It auto-clears after `durationMs`.
-  // Clears immediately if called again before the previous timeout fires.
-  // ideSaveStatusTimer is var-declared in the hoisted TDZ-guard block above.
+  // ── Splitter drag ──────────────────────────────────────────────────────────
+
+  function ideWireSplitter(splitterId, side) {
+    var splitter = document.getElementById(splitterId);
+    if (!splitter) return;
+
+    var dragging  = false;
+    var startX    = 0;
+    var startSize = 0;
+
+    splitter.addEventListener('pointerdown', function(e) {
+      var layout = ideLoadLayout();
+      var COLLAPSED_W = 28;
+      if (side === 'left' && layout.treeCollapsed) return;
+      if (side === 'right' && layout.chatCollapsed) return;
+
+      dragging  = true;
+      startX    = e.clientX;
+      startSize = (side === 'left') ? layout.treeW : layout.chatW;
+      splitter.setPointerCapture(e.pointerId);
+
+      // Show the drag overlay to prevent Monaco iframe from swallowing events.
+      var overlay = document.getElementById('ide-drag-overlay');
+      if (overlay) overlay.style.display = 'block';
+
+      e.preventDefault();
+    });
+
+    splitter.addEventListener('pointermove', function(e) {
+      if (!dragging) return;
+      var dx      = e.clientX - startX;
+      var layout  = ideLoadLayout();
+      var MIN     = 80;
+      var MAX     = 600;
+      var COLLAPSED_W = 28;
+      var layoutEl = document.getElementById('ide-layout-root');
+      if (!layoutEl) return;
+
+      if (side === 'left') {
+        var newW = Math.max(MIN, Math.min(MAX, startSize + dx));
+        layout.treeW = newW;
+        var chatW = layout.chatCollapsed ? COLLAPSED_W : layout.chatW;
+        layoutEl.style.gridTemplateColumns = newW + 'px 8px 1fr 8px ' + chatW + 'px';
+        var treeCol = document.getElementById('ide-tree-col');
+        if (treeCol) treeCol.style.minWidth = MIN + 'px';
+        splitter.setAttribute('aria-valuenow', newW);
+        splitter.setAttribute('aria-valuetext', newW + ' pixels');
+      } else {
+        var newW2 = Math.max(MIN, Math.min(MAX, startSize - dx));
+        layout.chatW = newW2;
+        var treeW = layout.treeCollapsed ? COLLAPSED_W : layout.treeW;
+        layoutEl.style.gridTemplateColumns = treeW + 'px 8px 1fr 8px ' + newW2 + 'px';
+        var chatCol = document.getElementById('ide-chat-col');
+        if (chatCol) chatCol.style.minWidth = MIN + 'px';
+        splitter.setAttribute('aria-valuenow', newW2);
+        splitter.setAttribute('aria-valuetext', newW2 + ' pixels');
+      }
+      ideSaveLayout(layout);
+    });
+
+    splitter.addEventListener('pointerup', function(e) {
+      if (!dragging) return;
+      dragging = false;
+      splitter.releasePointerCapture(e.pointerId);
+      var overlay = document.getElementById('ide-drag-overlay');
+      if (overlay) overlay.style.display = 'none';
+    });
+
+    splitter.addEventListener('pointercancel', function(e) {
+      dragging = false;
+      splitter.releasePointerCapture(e.pointerId);
+      var overlay = document.getElementById('ide-drag-overlay');
+      if (overlay) overlay.style.display = 'none';
+    });
+  }
+
+  function ideWireSplitterKeyboard(splitterId, side) {
+    var splitter = document.getElementById(splitterId);
+    if (!splitter) return;
+    var STEP = 20;
+    splitter.addEventListener('keydown', function(e) {
+      var layout  = ideLoadLayout();
+      var MIN     = 80;
+      var MAX     = 600;
+      var COLLAPSED_W = 28;
+      var layoutEl = document.getElementById('ide-layout-root');
+      if (!layoutEl) return;
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      if (side === 'left') {
+        if (layout.treeCollapsed) return;
+        var delta = e.key === 'ArrowRight' ? STEP : -STEP;
+        layout.treeW = Math.max(MIN, Math.min(MAX, layout.treeW + delta));
+        var chatW = layout.chatCollapsed ? COLLAPSED_W : layout.chatW;
+        layoutEl.style.gridTemplateColumns = layout.treeW + 'px 8px 1fr 8px ' + chatW + 'px';
+        splitter.setAttribute('aria-valuenow', layout.treeW);
+        splitter.setAttribute('aria-valuetext', layout.treeW + ' pixels');
+      } else {
+        if (layout.chatCollapsed) return;
+        var delta2 = e.key === 'ArrowLeft' ? STEP : -STEP;
+        layout.chatW = Math.max(MIN, Math.min(MAX, layout.chatW + delta2));
+        var treeW = layout.treeCollapsed ? COLLAPSED_W : layout.treeW;
+        layoutEl.style.gridTemplateColumns = treeW + 'px 8px 1fr 8px ' + layout.chatW + 'px';
+        splitter.setAttribute('aria-valuenow', layout.chatW);
+        splitter.setAttribute('aria-valuetext', layout.chatW + ' pixels');
+      }
+      ideSaveLayout(layout);
+    });
+  }
+
+  // ── ideSetDirty — update dirty state for the active tab ──────────────────
+
+  function ideSetDirty(dirty) {
+    ideIsDirty = dirty;
+    if (ideActiveTabPath) {
+      var fileState = ideOpenFiles.get(ideActiveTabPath);
+      if (fileState) fileState.dirty = dirty;
+    }
+    // Update the tab strip dot.
+    ideRenderTabStrip();
+    ideUpdateEditorHeader();
+  }
+
+  // ── ideShowSaveStatus — transient status message in editor header ─────────
+
   function ideShowSaveStatus(msg, isError, durationMs) {
     const el = document.getElementById('ide-save-status');
     if (!el) return;
@@ -3173,7 +4383,7 @@
       ideSaveStatusTimer = null;
     }
     el.textContent = msg;
-    el.className = 'ide-save-status' + (isError ? ' ide-save-status-error' : ' ide-save-status-ok');
+    el.className = 'ide-save-status' + (isError ? ' ide-save-status-error' : (msg ? ' ide-save-status-ok' : ''));
     if (durationMs) {
       ideSaveStatusTimer = setTimeout(() => {
         el.textContent = '';
@@ -3183,28 +4393,22 @@
     }
   }
 
-  // triggerSave asks the Monaco iframe for its current content, then POSTs it
-  // to /api/files/write.  Content is obtained by posting {type:'save'} — Monaco
-  // replies with {type:'content', path, content} in handleIdeEditorMessage.
-  //
-  // Called from: Save button click, and from handleIdeEditorMessage when Monaco
-  // signals {type:'save'} (⌘S / Ctrl-S).
-  //
-  // The actual fetch runs in performSave(path, content) once content arrives.
+  // ── triggerSave ───────────────────────────────────────────────────────────
+
   function triggerSave() {
     if (!ideEditable || !ideIsDirty || ideIsSaving) return;
     if (!ideEditorWindow || !ideCurrentPath) return;
-    // Ask the iframe for the current content.  The reply fires handleIdeEditorMessage
-    // with {type:'content', path, content}, which calls performSave().
     ideEditorWindow.postMessage({ type: 'requestContent' }, window.location.origin);
   }
 
-  // performSave POSTs content to /api/files/write with the stored version stamp.
-  // Handles 200, 409, 403, 413, and generic errors inline.
-  // ideIsSaving is set true at entry and reset in .finally() to prevent a
-  // double-POST race when ⌘S fires twice before the first response arrives.
+  // ── performSave ───────────────────────────────────────────────────────────
+
   function performSave(path, content) {
+    // Per-file saving state guard.
+    var fileState = ideOpenFiles.get(path);
+    if (fileState) fileState.saving = true;
     ideIsSaving = true;
+
     const saveBtn = document.getElementById('ide-save-btn');
     if (saveBtn) {
       saveBtn.disabled = true;
@@ -3213,24 +4417,24 @@
     }
     ideShowSaveStatus('', false, 0);
 
+    var version = fileState ? fileState.version : ideCurrentVersion;
+
     fetch('/api/files/write', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: path, content: content, version: ideCurrentVersion }),
+      body: JSON.stringify({ path: path, content: content, version: version }),
     })
       .then((r) => {
         if (r.status === 200) {
           return r.json().then((data) => {
-            // Update stored version to the new hash from the response.
-            ideCurrentVersion = data.version || '';
+            var newVersion = data.version || '';
+            if (fileState) fileState.version = newVersion;
+            if (path === ideActiveTabPath) ideCurrentVersion = newVersion;
             ideSetDirty(false);
             ideShowSaveStatus('Saved', false, 2500);
           });
         }
         if (r.status === 409) {
-          // File changed on disk since we read it.  The inline conflict notice
-          // (showIdeReloadConflictNotice) carries the full message + Reload action.
-          // Clear the status bar so the same message isn't duplicated in two places.
           ideShowSaveStatus('', false, 0);
           showIdeReloadConflictNotice(path);
           return;
@@ -3243,8 +4447,7 @@
           ideShowSaveStatus('File too large to save (max 5 MiB)', true, 6000);
           return;
         }
-        // Generic error: keep editor content intact, show status.
-        return r.text().then((body) => {
+        return r.text().then(() => {
           ideShowSaveStatus('Save failed (' + String(r.status) + ') — your edits are preserved', true, 8000);
         });
       })
@@ -3252,11 +4455,10 @@
         ideShowSaveStatus('Network error — your edits are preserved', true, 8000);
       })
       .finally(() => {
-        // Always reset the in-flight guard, regardless of outcome.
+        if (fileState) fileState.saving = false;
         ideIsSaving = false;
         if (saveBtn) {
           saveBtn.textContent = 'Save';
-          // Re-enable only if still dirty + editable (may have been cleared on success).
           const canSave = ideIsDirty && ideEditable;
           saveBtn.disabled = !canSave;
           saveBtn.setAttribute('aria-disabled', canSave ? 'false' : 'true');
@@ -3264,47 +4466,45 @@
       });
   }
 
-  // showIdeReloadConflictNotice shows a 409-conflict inline notice with a
-  // Reload button.  The editor's existing content is preserved; the operator
-  // must explicitly confirm before local edits are discarded.
+  // ── showIdeReloadConflictNotice ───────────────────────────────────────────
+
   function showIdeReloadConflictNotice(path) {
     const notice = document.getElementById('ide-editor-notice');
     if (!notice) return;
-
-    // Clear any previous content.
     notice.textContent = '';
     notice.style.display = '';
-
     const msg = document.createTextNode('File changed on disk — ');
     notice.appendChild(msg);
-
     const reloadBtn = document.createElement('button');
     reloadBtn.type = 'button';
     reloadBtn.className = 'ide-notice-reload-btn';
     reloadBtn.textContent = 'Reload (discards local edits)';
     reloadBtn.addEventListener('click', () => {
-      // Confirm before discarding unsaved local edits.
       if (!window.confirm('Reload file from disk? Your unsaved edits will be lost.')) return;
       notice.style.display = 'none';
+      // Remove from open-files map so it gets re-fetched and a new model is created.
+      ideOpenFiles.delete(path);
       openIdeFile(path, path.split('/').pop(), null);
     });
     notice.appendChild(reloadBtn);
   }
 
+  // ── handleIdeEditorMessage ────────────────────────────────────────────────
+
   function handleIdeEditorMessage(e) {
-    // Only accept messages from the same origin.
     if (e.origin !== window.location.origin) return;
     const msg = e.data;
     if (!msg || typeof msg !== 'object') return;
 
     if (msg.type === 'ready') {
       ideEditorReady = true;
-      // Sync Monaco theme to the current console theme.
       syncMonacoTheme(document.documentElement.getAttribute('data-theme') || 'og');
-      // Flush any queued openFile.
-      if (ideQueuedOpen) {
-        sendOpenFile(ideQueuedOpen);
-        ideQueuedOpen = null;
+      // B2 fix: drain the array queue in order so rapid pre-ready opens all land.
+      if (ideQueuedOpen.length > 0) {
+        var queued = ideQueuedOpen.splice(0);
+        for (var qi = 0; qi < queued.length; qi++) {
+          sendOpenFile(queued[qi]);
+        }
       }
     } else if (msg.type === 'error') {
       const notice = document.getElementById('ide-editor-notice');
@@ -3313,27 +4513,29 @@
         notice.style.display = '';
       }
     } else if (msg.type === 'dirty') {
-      // Monaco reports dirty state change (debounced).
-      if (ideEditable) {
-        ideSetDirty(!!msg.dirty);
+      // msg.path is now included in the dirty message from ide-editor.js.
+      // Only apply if it concerns the active tab (guard against stale messages).
+      var dirtyPath = (typeof msg.path === 'string') ? msg.path : ideCurrentPath;
+      if (dirtyPath === ideActiveTabPath) {
+        var fileState = ideOpenFiles.get(dirtyPath);
+        if (fileState && fileState.editable) {
+          fileState.dirty = !!msg.dirty;
+          ideIsDirty = !!msg.dirty;
+          ideRenderTabStrip();
+          ideUpdateEditorHeader();
+        }
       }
     } else if (msg.type === 'save') {
-      // Monaco signals ⌘S / Ctrl-S: content is provided directly.
-      // Guard on !ideIsSaving to prevent a double-POST when two ⌘S fire before
-      // the first response arrives (B2).  msg.path echo is also checked for
-      // stale-path safety (B1 parallel: if the file switched mid-keypress).
+      // ⌘S / Ctrl-S from Monaco.
+      // B1: path echo guard — the echoed path must match the active tab path.
+      // B2: !ideIsSaving — prevents double-POST when ⌘S fires twice quickly.
       if (ideEditable && ideIsDirty && !ideIsSaving &&
           typeof msg.content === 'string' && msg.path === ideCurrentPath) {
         performSave(ideCurrentPath, msg.content);
       }
     } else if (msg.type === 'content') {
-      // Reply to {type:'requestContent'} — triggered by triggerSave().
-      // B1: guard on echoed msg.path matching ideCurrentPath.  If the operator
-      // switched files between triggerSave() posting requestContent and this reply
-      // arriving, the echoed path will differ from ideCurrentPath — drop the reply
-      // rather than writing old content to the new file's path/version.
-      // Also gate on ideEditable + ideIsDirty + !ideIsSaving so a stale reply
-      // from a previous session cannot trigger an unexpected write.
+      // Reply to requestContent from triggerSave().
+      // B1: echoed path must match the current active path.
       if (typeof msg.content === 'string' && msg.path === ideCurrentPath &&
           ideEditable && ideIsDirty && !ideIsSaving) {
         performSave(ideCurrentPath, msg.content);
@@ -3358,52 +4560,6 @@
     try {
       ideEditorWindow.postMessage({ type: 'setTheme', theme: theme }, window.location.origin);
     } catch (_) {}
-  }
-
-  // openFileInEditor sends the file content to Monaco and updates IDE state.
-  // `version` is the SHA-256 hex stamp returned by GET /api/files/content;
-  // it is stored for optimistic concurrency on the next write.
-  function openFileInEditor(path, content, language, version) {
-    // Update the path header.
-    const pathEl = document.getElementById('ide-open-path');
-    if (pathEl) pathEl.textContent = path;
-
-    // Clear any previous error notice.
-    const notice = document.getElementById('ide-editor-notice');
-    if (notice) notice.style.display = 'none';
-
-    // Store current-file state for save operations.
-    ideCurrentPath = path;
-    ideCurrentVersion = version || '';
-
-    // Opening a new file resets dirty state and the Edit toggle back to View.
-    ideEditable = false;
-    ideSetDirty(false);
-    ideShowSaveStatus('', false, 0);
-
-    const editToggle = document.getElementById('ide-edit-toggle');
-    if (editToggle) {
-      editToggle.textContent = 'Edit';
-      editToggle.setAttribute('aria-pressed', 'false');
-      editToggle.classList.remove('ide-header-btn-active');
-    }
-
-    // Tell Monaco to switch back to read-only when opening a new file.
-    if (ideEditorWindow) {
-      ideEditorWindow.postMessage(
-        { type: 'setEditable', editable: false },
-        window.location.origin
-      );
-    }
-
-    const payload = { type: 'openFile', path, content, language: language || 'plaintext' };
-
-    if (ideEditorReady && ideEditorWindow) {
-      sendOpenFile(payload);
-    } else {
-      // Queue: will be sent once {type:'ready'} arrives.
-      ideQueuedOpen = payload;
-    }
   }
 
   // ---- File tree ---------------------------------------------------------------

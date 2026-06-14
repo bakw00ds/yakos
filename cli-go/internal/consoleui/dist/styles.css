@@ -1925,11 +1925,13 @@ html[data-theme="light"] .flows-run-stop-btn:hover:not(:disabled) {
 
 .flows-canvas-wrap {
   flex: 1;
-  overflow: auto;
+  overflow: hidden;
   position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
-/* Read-only notice at the top of the canvas view */
+/* Canvas mode note (view vs edit notification bar) */
 .flows-canvas-readonly-note {
   font-size: 11px;
   color: var(--text-dim);
@@ -1943,10 +1945,10 @@ html[data-theme="light"] .flows-canvas-readonly-note {
   background: rgba(0,0,0,0.02);
 }
 
-
 .flows-canvas {
   position: relative;
-  min-height: 200px;
+  min-height: 300px;
+  flex: 1;
 }
 
 /* ---- DAG SVG edges ---- */
@@ -2355,13 +2357,112 @@ html[data-theme="light"] .modal-btn-cancel:hover {
   height: 100%;
 }
 
-/* ---- Top-level 3-pane layout: tree | editor | chat ---- */
+/* ---- Top-level 3-pane layout: tree | splitter | editor | splitter | chat ---- */
+/*
+ * grid-template-columns is set inline by JS (renderIdeLayout + splitter drag)
+ * so widths + collapsed state are fully dynamic.  The default below is used
+ * when JS has not yet rendered (e.g. layout flash before DOMContentLoaded):
+ *   220px  8px  1fr  8px  280px
+ */
 
 .ide-layout {
   display: grid;
-  grid-template-columns: 220px 1fr 280px;
+  grid-template-columns: 220px 8px 1fr 8px 280px;
   height: 100%;
   overflow: hidden;
+}
+
+/* ---- Splitter (drag handle between panes) ---- */
+
+.ide-splitter {
+  width: 8px;
+  cursor: col-resize;
+  background: var(--border);
+  flex-shrink: 0;
+  position: relative;
+  z-index: 5;
+  transition: background var(--dur, 0.1s) var(--ease, ease);
+  user-select: none;
+  /* Widen the hit area with a transparent pseudo-element */
+}
+
+.ide-splitter::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -4px;
+  right: -4px;
+  bottom: 0;
+  cursor: col-resize;
+}
+
+.ide-splitter:hover,
+.ide-splitter:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+
+.ide-splitter:focus-visible {
+  /* N-3: when the bar fills with --accent, a same-color outline is invisible.
+     Use a double-ring box-shadow: inner ring matches the page background for
+     contrast, outer ring is the accent. Works across all 4 themes. */
+  box-shadow: 0 0 0 2px var(--bg, var(--color-bg-base, #1a1a1a)),
+              0 0 0 4px var(--accent);
+}
+
+/* ---- Pane collapse/expand toggle buttons ---- */
+
+.ide-pane-toggle {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 3px);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 4px;
+  flex-shrink: 0;
+  /* M-1 (WCAG 2.5.8): minimum 24×24px target size */
+  min-height: 24px;
+  min-width: 24px;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease);
+}
+
+.ide-pane-toggle:hover {
+  background: rgba(255,255,255,0.07);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+html[data-theme="light"] .ide-pane-toggle:hover {
+  background: rgba(0,0,0,0.06);
+}
+
+.ide-pane-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Collapsed pane: hide overflow, show only the toggle button header */
+
+.ide-pane-collapsed {
+  overflow: hidden;
+}
+
+.ide-pane-collapsed .ide-tree-root,
+.ide-pane-collapsed #ide-chat-slot {
+  display: none;
+}
+
+/* ---- Drag overlay (covers Monaco iframe during splitter drag) ---- */
+
+.ide-drag-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  cursor: col-resize;
+  background: transparent;
 }
 
 /* ---- Left: file tree pane ---- */
@@ -2375,9 +2476,13 @@ html[data-theme="light"] .modal-btn-cancel:hover {
 }
 
 .ide-tree-header {
-  padding: 10px 12px 6px;
+  padding: 6px 8px 6px 12px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
 }
 
 .ide-tree-root {
@@ -2482,6 +2587,127 @@ html[data-theme="light"] .ide-tree-dir:hover {
   font-style: italic;
   padding: 3px 12px;
   font-family: var(--font-mono);
+}
+
+/* ---- Multi-file tab strip (above Monaco editor) ---- */
+
+.ide-tab-strip {
+  display: flex;
+  align-items: stretch;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-height: 30px;
+  /* Hide scrollbar; tabs remain scrollable */
+  scrollbar-width: none;
+}
+
+.ide-tab-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.ide-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px 4px 8px;
+  background: none;
+  border: none;
+  border-right: 1px solid var(--border);
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 180px;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease);
+}
+
+.ide-tab:hover {
+  background: rgba(255,255,255,0.05);
+  color: var(--text);
+}
+
+html[data-theme="light"] .ide-tab:hover {
+  background: rgba(0,0,0,0.04);
+}
+
+.ide-tab-active {
+  background: var(--tab-active-bg);
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.ide-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Dirty dot inside a tab (hidden when file is clean) */
+
+.ide-tab-dirty {
+  font-size: 8px;
+  color: var(--accent);
+  flex-shrink: 0;
+  line-height: 1;
+  margin-right: 1px;
+}
+
+.ide-tab-dirty-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Basename label */
+
+.ide-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Close (×) button inside a tab */
+
+.ide-tab-close {
+  background: none;
+  border: none;
+  border-radius: var(--radius-control, 2px);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0;
+  padding: 0 2px;
+  flex-shrink: 0;
+  /* M-1 (WCAG 2.5.8): minimum 24×24px target size */
+  min-height: 24px;
+  min-width: 24px;
+  transition: opacity var(--dur, 0.1s) var(--ease, ease),
+              color   var(--dur, 0.1s) var(--ease, ease);
+}
+
+.ide-tab:hover .ide-tab-close,
+.ide-tab-active .ide-tab-close,
+.ide-tab-close:focus-visible {
+  opacity: 1;
+}
+
+.ide-tab-close:hover {
+  color: var(--color-error, #ff6b6b);
+  background: rgba(255,107,107,0.15);
+}
+
+.ide-tab-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  opacity: 1;
 }
 
 /* ---- Center: Monaco editor pane ---- */
@@ -2663,10 +2889,14 @@ html[data-theme="light"] .ide-header-btn:hover:not(:disabled) {
 }
 
 .ide-chat-header {
-  padding: 10px 12px 6px;
+  padding: 6px 8px 6px 8px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
 }
 
 #ide-chat-slot {
@@ -2748,7 +2978,11 @@ html.perf-low-end[data-theme="og"]  .tline::after {
 
 @media (prefers-reduced-motion: reduce) {
   .ide-tree-file,
-  .ide-tree-dir {
+  .ide-tree-dir,
+  .ide-tab,
+  .ide-tab-close,
+  .ide-splitter,
+  .ide-pane-toggle {
     transition: none;
   }
 }
@@ -2761,6 +2995,313 @@ html.perf-low-end[data-theme="og"]  .tline::after {
   .flows-wf-item,
   .flows-run-item,
   .dag-node {
+    transition: none;
+  }
+}
+
+/* ==========================================================================
+   Drawflow canvas overrides — theme the vanilla Drawflow default styles.
+   The vendored drawflow.min.css uses hardcoded colors (cyan/black/yellow).
+   These rules replace those defaults with PandaOS design-token values.
+   All selectors are scoped under .drawflow-host to avoid leaking globally.
+   ========================================================================== */
+
+/* Host container: fills the canvas-wrap flex cell. */
+.drawflow-host {
+  width: 100%;
+  height: 100%;
+  min-height: 300px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* Drawflow's own .drawflow root element */
+.drawflow-host .parent-drawflow {
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* ---- Node boxes ---- */
+.drawflow-host .drawflow-node {
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-card, 6px);
+  color: var(--text);
+  min-width: 160px;
+  min-height: 0;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  transition: border-color var(--dur, 0.15s) var(--ease, ease),
+              box-shadow var(--dur, 0.15s) var(--ease, ease);
+}
+
+.drawflow-host .drawflow-node:hover {
+  cursor: move;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--color-accent-dim);
+}
+
+.drawflow-host .drawflow-node.selected {
+  background: var(--color-accent-dim);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--color-accent-dim);
+}
+
+/* FLUID: glass nodes */
+html[data-theme="fluid"] .drawflow-host .drawflow-node {
+  backdrop-filter: blur(var(--glass-blur, 24px)) saturate(var(--glass-sat, 1.6));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 24px)) saturate(var(--glass-sat, 1.6));
+  background: rgba(20, 22, 29, 0.72);
+}
+
+/* Node inner content */
+.drawflow-host .df-node-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.drawflow-host .df-node-id {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawflow-host .df-node-agent {
+  font-size: 10px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Run-state status classes on nodes ---- */
+.drawflow-host .df-status-running {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 6px var(--color-accent-dim) !important;
+}
+.drawflow-host .df-status-completed {
+  border-color: var(--color-positive, #51cf66) !important;
+}
+.drawflow-host .df-status-failed {
+  border-color: var(--color-error, #ff6b6b) !important;
+}
+.drawflow-host .df-status-skipped {
+  opacity: 0.5;
+}
+
+/* ---- Connection ports (input/output dots) ---- */
+.drawflow-host .drawflow-node .input,
+.drawflow-host .drawflow-node .output {
+  background: var(--surface);
+  border: 2px solid var(--border);
+  width: 14px;
+  height: 14px;
+}
+
+.drawflow-host .drawflow-node .input:hover,
+.drawflow-host .drawflow-node .output:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  cursor: crosshair;
+}
+
+/* ---- SVG connection paths ---- */
+.drawflow-host .connection .main-path {
+  stroke: var(--border);
+  stroke-width: 2px;
+}
+
+.drawflow-host .connection .main-path:hover {
+  stroke: var(--accent);
+  cursor: pointer;
+}
+
+.drawflow-host .connection .main-path.selected {
+  stroke: var(--accent);
+}
+
+/* ---- Delete button (appears on selected connection) ---- */
+.drawflow-host .drawflow-delete {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--color-error, #ff6b6b);
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  line-height: 18px;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  cursor: pointer;
+  font-family: var(--font-mono);
+}
+
+.drawflow-host .drawflow-delete:hover {
+  background: var(--color-error, #ff6b6b);
+  color: #fff;
+  border-color: var(--color-error, #ff6b6b);
+}
+
+/* ---- Active (Edit) mode indicator on canvas ---- */
+.drawflow-host.edit-active {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* ---- flows-canvas-edit-btn active state ---- */
+.flows-btn.active {
+  background: var(--color-accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---- Danger variant for delete in node edit panel ---- */
+.flows-btn-danger {
+  border-color: var(--color-error, #ff6b6b);
+  color: var(--color-error, #ff6b6b);
+}
+.flows-btn-danger:hover:not(:disabled) {
+  background: rgba(255, 107, 107, 0.12);
+}
+
+/* ---- Primary variant for Apply button ---- */
+.flows-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+html[data-theme="og"] .flows-btn-primary {
+  color: #000;
+}
+.flows-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* ==========================================================================
+   Node edit panel — slides up from below the canvas (inline, not modal).
+   ========================================================================== */
+
+.flows-node-edit-panel {
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  max-height: 360px;
+  overflow: hidden;
+}
+
+.flows-node-edit-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.flows-node-edit-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+
+.flows-node-edit-body {
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+
+.flows-node-edit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.flows-node-edit-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.flows-node-edit-input,
+.flows-node-edit-textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 4px);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 4px 8px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.flows-node-edit-input:focus,
+.flows-node-edit-textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: var(--accent);
+}
+
+.flows-node-edit-textarea {
+  resize: vertical;
+  min-height: 60px;
+  line-height: 1.5;
+}
+
+.flows-node-edit-hint {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.flows-node-edit-error {
+  font-size: 11px;
+  color: var(--color-error, #ff6b6b);
+  background: rgba(255, 107, 107, 0.1);
+  border: 1px solid rgba(255, 107, 107, 0.3);
+  border-radius: var(--radius-control, 4px);
+  padding: 4px 8px;
+  margin: 0;
+}
+
+.flows-node-edit-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.flows-node-edit-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* ---- Reduced-motion override for Drawflow ---- */
+@media (prefers-reduced-motion: reduce) {
+  .drawflow-host .drawflow-node {
     transition: none;
   }
 }
