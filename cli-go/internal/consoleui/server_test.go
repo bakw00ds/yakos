@@ -590,9 +590,10 @@ func TestDefaultAddr(t *testing.T) {
 // GET /ide/editor responds with a CSP header containing both 'wasm-unsafe-eval'
 // (required by the Monaco AMD loader) and 'worker-src blob:' (required by the
 // Monaco web worker blob-wrapper pattern).
+// No token is required — /ide/editor is a token-exempt shell (see isStaticAsset).
 func TestIDEEditor_ScopedCSP_ContainsWasmUnsafeEvalAndBlobWorker(t *testing.T) {
-	ts, tok := newAuthTestServer(t)
-	resp := get(t, ts.URL+"/ide/editor", tok)
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide/editor", "") // no token — shell is exempt
 	defer drainClose(resp)
 
 	if resp.StatusCode != http.StatusOK {
@@ -614,8 +615,8 @@ func TestIDEEditor_ScopedCSP_ContainsWasmUnsafeEvalAndBlobWorker(t *testing.T) {
 // CSP restricts framing to same-origin only (frame-ancestors 'self'), preventing
 // the editor host document from being embedded by a cross-origin page.
 func TestIDEEditor_ScopedCSP_HasFrameAncestorsSelf(t *testing.T) {
-	ts, tok := newAuthTestServer(t)
-	resp := get(t, ts.URL+"/ide/editor", tok)
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide/editor", "") // no token — shell is exempt
 	defer drainClose(resp)
 
 	if resp.StatusCode != http.StatusOK {
@@ -661,23 +662,25 @@ func TestIDEEditor_MainIndexCSP_Unchanged(t *testing.T) {
 	}
 }
 
-// TestIDEEditor_RequiresToken verifies that /ide/editor returns 401 without
-// a bearer token (it is NOT a token-exempt static asset like /).
-func TestIDEEditor_RequiresToken(t *testing.T) {
+// TestIDEEditor_ServedNoToken verifies that GET /ide/editor returns 200 WITHOUT
+// a bearer token — the shell is token-exempt, exactly like index.html.
+// The shell serves no workspace content; file content is gated separately by
+// the RoleRead-gated /api/files/* endpoints and postMessage from the parent.
+func TestIDEEditor_ServedNoToken(t *testing.T) {
 	ts, _ := newAuthTestServer(t)
 	resp := get(t, ts.URL+"/ide/editor", "") // no token
 	defer drainClose(resp)
 
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("GET /ide/editor (no token): status=%d; want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /ide/editor (no token): status=%d; want 200 (shell is token-exempt)", resp.StatusCode)
 	}
 }
 
 // TestIDEEditor_ServesHTMLContent verifies that /ide/editor returns an HTML
-// document with the expected Content-Type.
+// document with the expected Content-Type. No token required.
 func TestIDEEditor_ServesHTMLContent(t *testing.T) {
-	ts, tok := newAuthTestServer(t)
-	resp := get(t, ts.URL+"/ide/editor", tok)
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide/editor", "") // no token — shell is exempt
 	defer drainClose(resp)
 
 	if resp.StatusCode != http.StatusOK {
@@ -692,8 +695,8 @@ func TestIDEEditor_ServesHTMLContent(t *testing.T) {
 // TestIDEEditor_CORP verifies /ide/editor carries the Cross-Origin-Resource-Policy:
 // same-origin header, consistent with other static asset handlers.
 func TestIDEEditor_CORP(t *testing.T) {
-	ts, tok := newAuthTestServer(t)
-	resp := get(t, ts.URL+"/ide/editor", tok)
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide/editor", "") // no token — shell is exempt
 	defer drainClose(resp)
 
 	if resp.StatusCode != http.StatusOK {
@@ -708,8 +711,8 @@ func TestIDEEditor_CORP(t *testing.T) {
 // TestIDEEditor_XContentTypeOptions verifies /ide/editor sets
 // X-Content-Type-Options: nosniff (security-review followup item 3).
 func TestIDEEditor_XContentTypeOptions(t *testing.T) {
-	ts, tok := newAuthTestServer(t)
-	resp := get(t, ts.URL+"/ide/editor", tok)
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide/editor", "") // no token — shell is exempt
 	defer drainClose(resp)
 
 	if resp.StatusCode != http.StatusOK {
@@ -725,8 +728,8 @@ func TestIDEEditor_XContentTypeOptions(t *testing.T) {
 // contains an explicit font-src directive (security-review followup item 2).
 // codicon.ttf must be covered by font-src 'self', not the default-src fallback.
 func TestIDEEditor_ScopedCSP_HasExplicitFontSrc(t *testing.T) {
-	ts, tok := newAuthTestServer(t)
-	resp := get(t, ts.URL+"/ide/editor", tok)
+	ts, _ := newAuthTestServer(t)
+	resp := get(t, ts.URL+"/ide/editor", "") // no token — shell is exempt
 	defer drainClose(resp)
 
 	if resp.StatusCode != http.StatusOK {

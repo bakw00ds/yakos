@@ -426,14 +426,23 @@ func (s *Server) registerRoutes() {
 	}))
 
 	// ---- IDE editor spike: isolated host document ----------------------------
-	// GET /ide/editor — serves dist/ide-editor.html with a SCOPED CSP that
-	// permits wasm-unsafe-eval (Monaco JIT) and blob: workers (Monaco web
-	// workers wrapped per CSP-safe pattern).  This route is behind the same
-	// edge auth as the rest of the console (requireTokenForNonStatic in New()).
-	// RoleRead required — matches the sibling sub-dashboard pattern
-	// (/kanban/, /cost/, /perf/) exactly.  The MAIN console CSP (cspHeader,
-	// applied in handleIndex) is NOT modified.
-	s.mux.Handle("/ide/editor", requireRole(netid.RoleRead, http.HandlerFunc(s.handleIDEEditor)))
+	// GET /ide/editor — serves dist/ide-editor.html as a TOKEN-EXEMPT static
+	// shell, consistent with / (index.html) and /app.js.
+	//
+	// Security rationale: the shell itself carries NO workspace content.
+	// File content is served only by the RoleRead-gated /api/files/* endpoints
+	// and delivered into the editor via postMessage from the authenticated parent
+	// frame.  On the networked path, access is still gated at the transport layer
+	// (mTLS RequireAndVerifyClientCert).  On the loopback path the server is
+	// loopback-only by construction.  Putting a RoleRead gate here conflicted
+	// with navigation reality: browser top-level navigations cannot carry an
+	// Authorization header, so a gated shell always returns 401 on direct open
+	// (the same reason / is exempt — it is a shell, not a data endpoint).
+	//
+	// The scoped ideEditorCSP() is preserved: wasm-unsafe-eval and worker-src
+	// blob: apply ONLY to this route.  The MAIN console CSP (cspHeader) is
+	// unchanged.
+	s.mux.HandleFunc("/ide/editor", s.handleIDEEditor)
 
 	// ---- Kanban sub-dashboard -----------------------------------------------
 	// Mount kanban.Handler() under /kanban/. The kanban handler's own
@@ -693,7 +702,7 @@ func isStaticAsset(r *http.Request) bool {
 		return false
 	}
 	switch r.URL.Path {
-	case "/", "/app.js", "/styles.css", "/sw.js", "/ide-editor.js":
+	case "/", "/app.js", "/styles.css", "/sw.js", "/ide-editor.js", "/ide/editor":
 		return true
 	}
 	// Vendored pinned blobs are same-origin static assets; no token required.

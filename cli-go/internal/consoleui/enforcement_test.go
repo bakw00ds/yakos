@@ -253,50 +253,6 @@ func TestRoleEnforcement_RoleRead_PassesPresence(t *testing.T) {
 	}
 }
 
-// ---- IDE editor RBAC enforcement -------------------------------------------
-
-// TestIDEEditor_RoleRead_Passes verifies that a resolved RoleRead identity can
-// reach GET /ide/editor (minimum required role matches sibling sub-dashboards).
-func TestIDEEditor_RoleRead_Passes(t *testing.T) {
-	t.Parallel()
-
-	readOnly := netid.Identity{
-		OperatorID:    "viewer",
-		Role:          netid.RoleRead,
-		Authenticated: true,
-		Resolved:      true,
-	}
-	ts, tok, _ := newEnforcementTestServer(t, readOnly)
-
-	resp := authGet(t, ts, tok, "/ide/editor")
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusForbidden {
-		t.Errorf("RoleRead on GET /ide/editor: got 403; want non-403 (RoleRead is sufficient)")
-	}
-}
-
-// TestIDEEditor_RoleDispatch_Passes verifies that a resolved RoleDispatch identity
-// can reach GET /ide/editor (RoleDispatch > RoleRead satisfies the gate).
-func TestIDEEditor_RoleDispatch_Passes(t *testing.T) {
-	t.Parallel()
-
-	dispatcher := netid.Identity{
-		OperatorID:    "dispatcher",
-		Role:          netid.RoleDispatch,
-		Authenticated: true,
-		Resolved:      true,
-	}
-	ts, tok, _ := newEnforcementTestServer(t, dispatcher)
-
-	resp := authGet(t, ts, tok, "/ide/editor")
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusForbidden {
-		t.Errorf("RoleDispatch on GET /ide/editor: got 403; want non-403 (RoleDispatch satisfies RoleRead gate)")
-	}
-}
-
 // ---- Loopback invariant -----------------------------------------------------
 
 // TestLoopbackInvariant_ZeroValueIdentity_NotBlocked verifies that when the
