@@ -86,9 +86,16 @@
   var ideTabInitialized = false;
   var ideEditorWindow = null;
   var ideEditorReady = false;
-  var ideQueuedOpen = null;
+  var ideQueuedOpen = null; // re-assigned to [] in IDE section init (B2: array queue)
   var ideMessageHandlerRegistered = false;
-  // Edit/save state (hoisted for TDZ safety).
+  // Multi-file tab state (hoisted for TDZ safety):
+  //   ideOpenFiles: Map<path, {version, dirty, editable, saving, saveStatusTimer}>
+  //   ideActiveTabPath: workspace-relative path of the currently active tab
+  var ideOpenFiles = null;   // set to new Map() in the IDE section init
+  var ideActiveTabPath = '';
+  // Legacy single-file save state vars — hoisted for TDZ / syncMonacoTheme safety.
+  // Still used as mirrors of the active-tab state so existing callers
+  // (triggerSave, handleIdeEditorMessage save/content handlers) work unchanged.
   var ideCurrentPath = '';
   var ideCurrentVersion = '';
   var ideEditable = false;
@@ -101,6 +108,8 @@
   // Timer handle for the transient save-status message auto-clear.
   // Hoisted (var) to match the TDZ-safety pattern for all IDE state.
   var ideSaveStatusTimer = null;
+  // Layout persistence (resizable/collapsible panels).
+  var IDE_LAYOUT_LS_KEY = 'yakos_ide_layout';
 
   function defaultTheme() {
     try {
@@ -2864,51 +2873,372 @@
   // Phase 2 adds: Edit/View toggle, dirty tracking, ⌘S / Save button,
   // POST /api/files/write with optimistic concurrency (version echo).
 
-  // IDE editor state variables.
-  // Declared as var (not let) so they are hoisted to the top of the IIFE and
-  // initialised to undefined/false/null before any code runs — including the
-  // pre-paint theme init block. The matching var declarations at the top of the
-  // IIFE (in the TDZ-guard block) ensure no TDZ window exists for these names.
-  // Using var here avoids a duplicate-declaration SyntaxError; var re-declarations
-  // of var are a no-op in sloppy mode and silently ignored in strict mode.
-  ideTabInitialized = false; // already var-declared above; reset to canonical initial value
+  // =========================================================================
+  // ── IDE TAB STATE INITIALISATION ─────────────────────────────────────────
+  // =========================================================================
+  //
+  // These are var re-assignments (the vars were already hoisted at the top of
+  // the IIFE for TDZ safety). Setting them here to their canonical initial
+  // values right before the first IDE function definitions keeps the
+  // authoritative defaults co-located with the code that uses them.
 
-  // Ref to Monaco iframe's contentWindow (set once the iframe loads).
-  ideEditorWindow = null;
-
-  // True once the Monaco {type:'ready'} postMessage arrives.
-  ideEditorReady = false;
-
-  // Queued openFile to send once the editor is ready.
-  ideQueuedOpen = null;
-
-  // Stored handler ref so we can removeEventListener if needed in the future.
-  // Guard prevents double-registration if renderIdeLayout were ever called twice.
+  ideTabInitialized = false;
+  ideEditorWindow   = null;
+  ideEditorReady    = false;
+  ideQueuedOpen     = [];    // B2 fix: array queue so rapid pre-ready opens all land
   ideMessageHandlerRegistered = false;
-
-  // The workspace-relative path of the file currently open in Monaco.
-  // Updated on every openFileInEditor call.
-  ideCurrentPath = '';
-
-  // The version stamp (SHA-256 hex) returned by GET /api/files/content and
-  // updated after every successful POST /api/files/write.  Sent back on the
-  // next write for optimistic concurrency.  Empty string = force-write.
+  ideOpenFiles      = new Map(); // path → {version, dirty, editable, saving, saveStatusTimer}
+  ideActiveTabPath  = '';
+  ideCurrentPath    = '';
   ideCurrentVersion = '';
-
-  // Whether the editor is in editable mode (Edit toggle is pressed).
-  // Default: false (view-only, readOnly:true).
-  ideEditable = false;
-
-  // Whether the editor's model has unsaved changes since the last openFile
-  // or successful save.
-  ideIsDirty = false;
-
-  // True while a POST /api/files/write fetch is in-flight.  Prevents double-POST
-  // when the operator presses ⌘S twice before the first response arrives.
-  ideIsSaving = false;
-
-  // Timer for the transient save-status message.  Reset to canonical initial value.
+  ideEditable       = false;
+  ideIsDirty        = false;
+  ideIsSaving       = false;
   ideSaveStatusTimer = null;
+
+  // ── Layout persistence helpers ────────────────────────────────────────────
+
+  function ideLoadLayout() {
+    var defaults = { treeW: 220, chatW: 280, treeCollapsed: false, chatCollapsed: false };
+    try {
+      var raw = localStorage.getItem(IDE_LAYOUT_LS_KEY);
+      if (!raw) return defaults;
+      var parsed = JSON.parse(raw);
+      // Validate — tolerate corrupt/partial values gracefully.
+      return {
+        treeW:          (typeof parsed.treeW === 'number' && parsed.treeW > 0)  ? parsed.treeW  : defaults.treeW,
+        chatW:          (typeof parsed.chatW === 'number' && parsed.chatW > 0)  ? parsed.chatW  : defaults.chatW,
+        treeCollapsed:  !!parsed.treeCollapsed,
+        chatCollapsed:  !!parsed.chatCollapsed,
+      };
+    } catch (_) { return defaults; }
+  }
+
+  function ideSaveLayout(layout) {
+    try { localStorage.setItem(IDE_LAYOUT_LS_KEY, JSON.stringify(layout)); } catch (_) {}
+  }
+
+  // ── Tab strip helpers ─────────────────────────────────────────────────────
+  //
+  // One <button role="tab"> per open file; the close × is a nested <button>.
+  // The entire strip is in a <div role="tablist">.
+
+  function ideRenderTabStrip() {
+    const strip = document.getElementById('ide-tab-strip');
+    if (!strip) return;
+    strip.innerHTML = '';
+    var i = 0;
+    for (const [path, fileState] of ideOpenFiles) {
+      const basename = path.split('/').pop() || path;
+      const isActive = path === ideActiveTabPath;
+      const tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'ide-tab' + (isActive ? ' ide-tab-active' : '');
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-selected', isActive ? 'true' : 'false');
+      tab.setAttribute('title', path);
+      tab.setAttribute('data-ide-tab-path', path);
+      tab.setAttribute('tabindex', isActive ? '0' : '-1');
+      tab.setAttribute('id', 'ide-tab-' + i);
+
+      const dot = document.createElement('span');
+      dot.className = 'ide-tab-dirty' + (fileState.dirty ? '' : ' ide-tab-dirty-hidden');
+      dot.setAttribute('aria-hidden', 'true');
+      dot.textContent = '●';
+
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'ide-tab-name';
+      nameSpan.textContent = basename;
+
+      const closeBtn = document.createElement('button');
+      closeBtn.type = 'button';
+      closeBtn.className = 'ide-tab-close';
+      closeBtn.setAttribute('aria-label', 'Close ' + basename);
+      // tabindex="-1": close button is reachable via Delete/Backspace on the tab
+      // (S-1 / APG tab pattern) and by mouse click. Focus stays on the tab itself.
+      closeBtn.setAttribute('tabindex', '-1');
+      closeBtn.textContent = '×';
+
+      tab.appendChild(dot);
+      tab.appendChild(nameSpan);
+      tab.appendChild(closeBtn);
+      strip.appendChild(tab);
+
+      // Capture path for closures.
+      (function(p) {
+        tab.addEventListener('click', function(e) {
+          if (e.target === closeBtn || closeBtn.contains(e.target)) return;
+          ideActivateTab(p);
+        });
+        closeBtn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          ideCloseTab(p);
+        });
+      }(path));
+
+      i++;
+    }
+
+    // Arrow-key navigation + Delete/Backspace close within the tablist (ARIA pattern).
+    strip.addEventListener('keydown', function(e) {
+      var tabs = strip.querySelectorAll('[role="tab"]');
+      var arr = Array.prototype.slice.call(tabs);
+      var idx = arr.indexOf(document.activeElement);
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        var next = arr[(idx + 1) % arr.length];
+        if (next) { next.focus(); next.click(); }
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        var prev = arr[(idx - 1 + arr.length) % arr.length];
+        if (prev) { prev.focus(); prev.click(); }
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        if (arr[0]) { arr[0].focus(); arr[0].click(); }
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        var last = arr[arr.length - 1];
+        if (last) { last.focus(); last.click(); }
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        // S-1 (2.1.1): keyboard close of the focused tab.
+        // APG tab pattern: Delete closes the focused tab; focus moves to
+        // the right neighbor, or left if the closed tab was last.
+        if (idx === -1) return;
+        e.preventDefault();
+        var closingPath = arr[idx] && arr[idx].getAttribute('data-ide-tab-path');
+        if (closingPath) ideCloseTab(closingPath);
+      }
+    });
+  }
+
+  function ideActivateTab(path) {
+    if (path === ideActiveTabPath) return;
+    const fileState = ideOpenFiles.get(path);
+    if (!fileState) return;
+
+    ideActiveTabPath = path;
+    // Sync legacy single-file vars to the newly active tab.
+    ideCurrentPath   = path;
+    ideCurrentVersion = fileState.version;
+    ideEditable      = fileState.editable;
+    ideIsDirty       = fileState.dirty;
+    // Per-file saving state: treat switching away from a saving tab as cancelling
+    // the UI lock (the in-flight fetch will still complete; its finally() resets
+    // the per-file saving flag).
+    ideIsSaving      = fileState.saving || false;
+
+    // Tell Monaco to switch to this file's model.
+    // The iframe already has the model from when the file was first opened —
+    // we just send openFile with no content to switch model without re-loading.
+    var payload = {
+      type: 'openFile',
+      path: path,
+      content: null,   // null = reuse existing model; don't reset content
+      language: null,
+      editable: fileState.editable,
+    };
+    if (ideEditorReady && ideEditorWindow) {
+      sendOpenFile(payload);
+    } else {
+      ideQueuedOpen.push(payload);
+    }
+
+    // Sync UI.
+    ideRenderTabStrip();
+    ideUpdateEditorHeader();
+    // Clear any lingering editor notice from a previous tab.
+    var notice = document.getElementById('ide-editor-notice');
+    if (notice) notice.style.display = 'none';
+    // M-2 (4.1.3): announce tab activation to screen readers via the
+    // already-present aria-live="polite" path element.
+    var pathEl = document.getElementById('ide-open-path');
+    if (pathEl) {
+      // Force a re-announcement even if the text didn't change (same path
+      // re-activated after closing another): clear then set on next frame.
+      var basename = path.split('/').pop() || path;
+      pathEl.textContent = '';
+      requestAnimationFrame(function() { pathEl.textContent = path; });
+    }
+  }
+
+  function ideCloseTab(path) {
+    const fileState = ideOpenFiles.get(path);
+    if (!fileState) return;
+
+    function doClose() {
+      // B1 fix: determine neighbor BEFORE deleting from the map, and BEFORE
+      // telling Monaco to switch away.  Activate the neighbor first so Monaco
+      // has already set a different active model before closeFile arrives in
+      // the iframe.  That way the iframe's `closeFile` guard
+      //   if (editor.getModel() !== closeEntry.model) dispose()
+      // evaluates correctly (the active model is already the neighbor's).
+      var neighborPath = null;
+      var neighborTabEl = null;
+      if (ideActiveTabPath === path) {
+        // Collect ordered keys from the map (insertion order).
+        var keys = Array.from(ideOpenFiles.keys());
+        var closingIdx = keys.indexOf(path);
+        if (keys.length > 1) {
+          // M-4: prefer the right neighbor; fall back to left if closing is last.
+          neighborPath = (closingIdx < keys.length - 1)
+            ? keys[closingIdx + 1]
+            : keys[closingIdx - 1];
+        }
+      }
+
+      // Switch editor to the neighbor now (before deleting or sending closeFile).
+      if (neighborPath) {
+        ideActivateTab(neighborPath);
+        // M-4: restore keyboard focus to the newly active tab button.
+        requestAnimationFrame(function() {
+          var strip = document.getElementById('ide-tab-strip');
+          if (strip) {
+            var newActive = strip.querySelector('[data-ide-tab-path="' + neighborPath + '"]');
+            if (newActive) newActive.focus();
+          }
+        });
+      }
+
+      // Now remove the closing path from the parent's map.
+      ideOpenFiles.delete(path);
+
+      // B1 fix: send closeFile AFTER switching the editor.  Monaco's iframe
+      // handler can now unconditionally dispose the model (the active model has
+      // already changed to the neighbor's model).
+      if (ideEditorWindow) {
+        try {
+          ideEditorWindow.postMessage(
+            { type: 'closeFile', path: path },
+            window.location.origin
+          );
+        } catch (_) {}
+      }
+
+      if (!neighborPath) {
+        if (ideActiveTabPath === path) {
+          // All tabs closed — reset state.
+          ideActiveTabPath = '';
+          ideCurrentPath   = '';
+          ideCurrentVersion = '';
+          ideEditable       = false;
+          ideIsDirty        = false;
+          ideIsSaving       = false;
+          ideRenderTabStrip();
+          ideUpdateEditorHeader();
+          // M-2 (4.1.3): announce "all closed" to screen readers.
+          var pathEl = document.getElementById('ide-open-path');
+          if (pathEl) pathEl.textContent = 'All files closed';
+        } else {
+          ideRenderTabStrip();
+        }
+      }
+      // (If neighborPath was set, ideActivateTab already re-rendered the strip.)
+    }
+
+    if (fileState.dirty) {
+      openModal({
+        title:       'Unsaved changes',
+        body:        '<p>Close <strong>' + esc(path.split('/').pop() || path) + '</strong>?</p>' +
+                     '<p class="modal-field-hint" style="margin-top:8px">' +
+                       'Your unsaved changes will be lost.' +
+                     '</p>',
+        confirmText: 'Close without saving',
+        cancelText:  'Keep editing',
+        dangerous:   true,
+        onConfirm:   function(overlay) { overlay._closeModal(); doClose(); },
+      });
+    } else {
+      doClose();
+    }
+  }
+
+  // ideUpdateEditorHeader refreshes the path, dirty marker, Edit/Save buttons
+  // in the editor header to reflect ideActiveTabPath's state.
+  function ideUpdateEditorHeader() {
+    const pathEl = document.getElementById('ide-open-path');
+    if (pathEl) pathEl.textContent = ideActiveTabPath;
+
+    const fileState = ideActiveTabPath ? ideOpenFiles.get(ideActiveTabPath) : null;
+
+    const marker = document.getElementById('ide-dirty-marker');
+    const dirty  = !!(fileState && fileState.dirty);
+    if (marker) marker.style.display = dirty ? '' : 'none';
+
+    const saveBtn = document.getElementById('ide-save-btn');
+    if (saveBtn) {
+      const canSave = dirty && !!(fileState && fileState.editable);
+      saveBtn.disabled = !canSave;
+      saveBtn.setAttribute('aria-disabled', canSave ? 'false' : 'true');
+    }
+
+    const editToggle = document.getElementById('ide-edit-toggle');
+    if (editToggle) {
+      const editable = !!(fileState && fileState.editable);
+      editToggle.textContent = editable ? 'View' : 'Edit';
+      editToggle.setAttribute('aria-pressed', editable ? 'true' : 'false');
+      editToggle.classList.toggle('ide-header-btn-active', editable);
+    }
+  }
+
+  // ── Tab-aware openFileInEditor ─────────────────────────────────────────────
+  //
+  // If the path is already open in a tab, activate it (no re-fetch).
+  // Otherwise add it as a new tab and send the file to Monaco.
+  function openFileInEditor(path, content, language, version) {
+    if (ideOpenFiles.has(path)) {
+      // Already open: just activate the tab. Update version in case it changed
+      // (e.g. reloaded after conflict).
+      var existing = ideOpenFiles.get(path);
+      if (version !== undefined && version !== null) {
+        existing.version = version || '';
+      }
+      ideActivateTab(path);
+      // Close any stale editor notice.
+      var notice = document.getElementById('ide-editor-notice');
+      if (notice) notice.style.display = 'none';
+      return;
+    }
+
+    // New tab.
+    ideOpenFiles.set(path, {
+      version:          version || '',
+      dirty:            false,
+      editable:         false,  // always start in View mode
+      saving:           false,
+      saveStatusTimer:  null,
+    });
+
+    ideActiveTabPath  = path;
+    ideCurrentPath    = path;
+    ideCurrentVersion = version || '';
+    ideEditable       = false;
+    ideIsDirty        = false;
+    ideIsSaving       = false;
+
+    // Clear any stale editor notice.
+    var newTabNotice = document.getElementById('ide-editor-notice');
+    if (newTabNotice) newTabNotice.style.display = 'none';
+
+    // Clear save status.
+    ideShowSaveStatus('', false, 0);
+
+    var payload = {
+      type:     'openFile',
+      path:     path,
+      content:  content,
+      language: language || 'plaintext',
+      editable: false,
+    };
+
+    if (ideEditorReady && ideEditorWindow) {
+      sendOpenFile(payload);
+    } else {
+      ideQueuedOpen.push(payload);
+    }
+
+    ideRenderTabStrip();
+    ideUpdateEditorHeader();
+  }
 
   function initIdeTab() {
     if (ideTabInitialized) return;
@@ -2924,38 +3254,68 @@
     const panel = document.getElementById('panel-ide');
     if (!panel) return;
 
+    // Load persisted layout.
+    var layout = ideLoadLayout();
+
+    // Build column widths. Collapsed panes get a thin re-expand affordance (28px).
+    var COLLAPSED_W = 28;
+    var treeW = layout.treeCollapsed ? COLLAPSED_W : layout.treeW;
+    var chatW = layout.chatCollapsed ? COLLAPSED_W : layout.chatW;
+
     panel.innerHTML =
-      '<div class="ide-layout" role="main" aria-label="IDE">' +
-        // Left: file tree
-        '<aside class="ide-tree-pane" aria-label="File tree">' +
+      '<div class="ide-layout" id="ide-layout-root" role="main" aria-label="IDE" ' +
+        'style="grid-template-columns:' + treeW + 'px 8px 1fr 8px ' + chatW + 'px">' +
+
+        // ── Left: file tree pane ──────────────────────────────────────────
+        '<aside class="ide-tree-pane' + (layout.treeCollapsed ? ' ide-pane-collapsed' : '') + '" ' +
+          'id="ide-tree-col" aria-label="File tree" ' +
+          'style="min-width:' + (layout.treeCollapsed ? COLLAPSED_W : 120) + 'px">' +
           '<div class="ide-tree-header">' +
-            '<span class="subsection-title" id="ide-tree-title">Files</span>' +
+            '<span class="subsection-title" id="ide-tree-title"' +
+              (layout.treeCollapsed ? ' style="display:none"' : '') + '>Files</span>' +
+            '<button class="ide-pane-toggle ide-tree-toggle" id="ide-tree-toggle" ' +
+              'type="button" ' +
+              'aria-expanded="' + (layout.treeCollapsed ? 'false' : 'true') + '" ' +
+              'aria-controls="ide-tree-root" ' +
+              'aria-label="' + (layout.treeCollapsed ? 'Expand file tree' : 'Collapse file tree') + '" ' +
+              'title="' + (layout.treeCollapsed ? 'Expand file tree' : 'Collapse file tree') + '">' +
+              (layout.treeCollapsed ? '&#x276F;' : '&#x276E;') +
+            '</button>' +
           '</div>' +
-          '<div id="ide-tree-root" class="ide-tree-root" role="tree" aria-label="Workspace files"></div>' +
+          '<div id="ide-tree-root" class="ide-tree-root" role="tree" aria-label="Workspace files"' +
+            (layout.treeCollapsed ? ' style="display:none"' : '') + '></div>' +
         '</aside>' +
-        // Center: editor
-        '<div class="ide-editor-pane">' +
+
+        // ── Splitter: tree | editor ──────────────────────────────────────
+        '<div class="ide-splitter" id="ide-splitter-left" ' +
+          'role="separator" aria-orientation="vertical" ' +
+          'aria-label="Resize file tree" tabindex="0" ' +
+          'aria-valuemin="80" aria-valuemax="600" ' +
+          'aria-valuenow="' + layout.treeW + '" ' +
+          'aria-valuetext="' + layout.treeW + ' pixels" ' +
+          'style="' + (layout.treeCollapsed ? 'display:none' : '') + '"></div>' +
+
+        // ── Center: Monaco editor pane ────────────────────────────────────
+        '<div class="ide-editor-pane" id="ide-editor-col">' +
+          // Tab strip above editor (multi-file tabs).
+          '<div class="ide-tab-strip" id="ide-tab-strip" ' +
+            'role="tablist" aria-label="Open files">' +
+          '</div>' +
+          // Editor header: dirty marker, path, Edit, Save, status.
           '<div class="ide-editor-header" id="ide-editor-header">' +
-            // Dirty marker (● before path) shown when editor has unsaved changes.
             '<span id="ide-dirty-marker" class="ide-dirty-marker" aria-hidden="true" style="display:none">●</span>' +
             '<span id="ide-open-path" class="ide-open-path" aria-live="polite"></span>' +
-            // Edit/View toggle: pressing Edit enables Monaco editing.
             '<button id="ide-edit-toggle" type="button" class="ide-header-btn" ' +
-              'aria-pressed="false" title="Toggle edit mode">' +
-              'Edit' +
-            '</button>' +
-            // Save button: enabled when dirty + editable; triggers POST /api/files/write.
+              'aria-pressed="false" title="Toggle edit mode">Edit</button>' +
             '<button id="ide-save-btn" type="button" class="ide-header-btn ide-save-btn" ' +
-              'disabled aria-disabled="true" title="Save file (⌘S / Ctrl-S)">' +
-              'Save' +
-            '</button>' +
-            // Save status: transient "Saved" / error text (aria-live polite).
+              'disabled aria-disabled="true" title="Save file (⌘S / Ctrl-S)">Save</button>' +
             '<span id="ide-save-status" class="ide-save-status" aria-live="polite" role="status"></span>' +
           '</div>' +
           '<div class="ide-editor-wrap">' +
             '<div id="ide-editor-notice" class="ide-editor-notice" style="display:none" role="status"></div>' +
-            // First-party same-origin content; isolation boundary is the
-            // scoped per-route CSP on /ide/editor, not an escapable sandbox.
+            // Transparent drag overlay — covers iframe during column resize so
+            // pointer events don't get swallowed by the Monaco iframe.
+            '<div id="ide-drag-overlay" class="ide-drag-overlay" style="display:none"></div>' +
             '<iframe id="ide-editor-frame" class="ide-editor-frame" ' +
               'src="/ide/editor" ' +
               'title="Code editor" ' +
@@ -2963,85 +3323,309 @@
             '</iframe>' +
           '</div>' +
         '</div>' +
-        // Right: embedded chat
-        '<div class="ide-chat-pane" aria-label="Chat" id="ide-chat-col">' +
+
+        // ── Splitter: editor | chat ──────────────────────────────────────
+        '<div class="ide-splitter" id="ide-splitter-right" ' +
+          'role="separator" aria-orientation="vertical" ' +
+          'aria-label="Resize chat panel" tabindex="0" ' +
+          'aria-valuemin="80" aria-valuemax="600" ' +
+          'aria-valuenow="' + layout.chatW + '" ' +
+          'aria-valuetext="' + layout.chatW + ' pixels" ' +
+          'style="' + (layout.chatCollapsed ? 'display:none' : '') + '"></div>' +
+
+        // ── Right: embedded chat pane ────────────────────────────────────
+        '<div class="ide-chat-pane' + (layout.chatCollapsed ? ' ide-pane-collapsed' : '') + '" ' +
+          'aria-label="Chat" id="ide-chat-col" ' +
+          'style="min-width:' + (layout.chatCollapsed ? COLLAPSED_W : 160) + 'px">' +
           '<div class="ide-chat-header">' +
-            '<span class="subsection-title">Chat</span>' +
+            '<button class="ide-pane-toggle ide-chat-toggle" id="ide-chat-toggle" ' +
+              'type="button" ' +
+              'aria-expanded="' + (layout.chatCollapsed ? 'false' : 'true') + '" ' +
+              'aria-controls="ide-chat-slot" ' +
+              'aria-label="' + (layout.chatCollapsed ? 'Expand chat' : 'Collapse chat') + '" ' +
+              'title="' + (layout.chatCollapsed ? 'Expand chat' : 'Collapse chat') + '">' +
+              (layout.chatCollapsed ? '&#x276E;' : '&#x276F;') +
+            '</button>' +
+            '<span class="subsection-title"' +
+              (layout.chatCollapsed ? ' style="display:none"' : '') + '>Chat</span>' +
           '</div>' +
-          '<div id="ide-chat-slot"></div>' +
+          '<div id="ide-chat-slot"' +
+            (layout.chatCollapsed ? ' style="display:none"' : '') + '></div>' +
         '</div>' +
+
       '</div>';
 
-    // Wire Monaco iframe postMessage listener — guard prevents double-registration
-    // if this function is ever re-entered (e.g. a future teardown+reinit path).
+    // Wire Monaco iframe postMessage listener.
     if (!ideMessageHandlerRegistered) {
       window.addEventListener('message', handleIdeEditorMessage);
       ideMessageHandlerRegistered = true;
     }
 
-    // Wire the iframe load event to grab its contentWindow.
+    // Grab iframe contentWindow once it loads.
     const frame = document.getElementById('ide-editor-frame');
     if (frame) {
       frame.addEventListener('load', () => {
         ideEditorWindow = frame.contentWindow;
-        // The 'ready' message comes from the iframe after Monaco mounts.
       });
     }
 
-    // Wire Edit/View toggle button.
+    // ── Edit/View toggle ──────────────────────────────────────────────────
     const editToggle = document.getElementById('ide-edit-toggle');
     if (editToggle) {
       editToggle.addEventListener('click', () => {
-        ideEditable = !ideEditable;
-        editToggle.textContent = ideEditable ? 'View' : 'Edit';
-        editToggle.setAttribute('aria-pressed', ideEditable ? 'true' : 'false');
-        editToggle.classList.toggle('ide-header-btn-active', ideEditable);
-        // Inform Monaco iframe.
+        if (!ideActiveTabPath) return;
+        const fileState = ideOpenFiles.get(ideActiveTabPath);
+        if (!fileState) return;
+        fileState.editable = !fileState.editable;
+        ideEditable = fileState.editable;
         if (ideEditorWindow) {
           ideEditorWindow.postMessage(
             { type: 'setEditable', editable: ideEditable },
             window.location.origin
           );
         }
-        // When switching to View, clear dirty state in the parent too.
+        // When switching to View, clear dirty state.
         if (!ideEditable) {
-          ideSetDirty(false);
+          fileState.dirty = false;
+          ideIsDirty = false;
+          // Code-review S1: re-render tab strip so the ● dirty dot clears.
+          ideRenderTabStrip();
         }
+        ideUpdateEditorHeader();
       });
     }
 
-    // Wire Save button.
+    // ── Save button ───────────────────────────────────────────────────────
     const saveBtn = document.getElementById('ide-save-btn');
     if (saveBtn) {
-      saveBtn.addEventListener('click', () => {
-        triggerSave();
+      saveBtn.addEventListener('click', () => { triggerSave(); });
+    }
+
+    // ── Tree pane toggle ──────────────────────────────────────────────────
+    const treeToggle = document.getElementById('ide-tree-toggle');
+    if (treeToggle) {
+      treeToggle.addEventListener('click', () => {
+        ideTogglePane('tree');
       });
     }
 
-    // Mount the embedded chat pane.
+    // ── Chat pane toggle ──────────────────────────────────────────────────
+    const chatToggle = document.getElementById('ide-chat-toggle');
+    if (chatToggle) {
+      chatToggle.addEventListener('click', () => {
+        ideTogglePane('chat');
+      });
+    }
+
+    // ── Splitter drag (left: tree|editor) ────────────────────────────────
+    ideWireSplitter('ide-splitter-left', 'left');
+
+    // ── Splitter drag (right: editor|chat) ───────────────────────────────
+    ideWireSplitter('ide-splitter-right', 'right');
+
+    // ── Keyboard resize for splitters ────────────────────────────────────
+    ideWireSplitterKeyboard('ide-splitter-left', 'left');
+    ideWireSplitterKeyboard('ide-splitter-right', 'right');
+
+    // ── Mount embedded chat pane ─────────────────────────────────────────
     mountIdeChatPane();
 
-    // Load file tree.
+    // ── Load file tree ────────────────────────────────────────────────────
     loadIdeTree('');
   }
 
-  // ideSetDirty updates the dirty state + UI (marker, Save button enabled/disabled).
-  function ideSetDirty(dirty) {
-    ideIsDirty = dirty;
-    const marker = document.getElementById('ide-dirty-marker');
-    if (marker) marker.style.display = dirty ? '' : 'none';
-    const saveBtn = document.getElementById('ide-save-btn');
-    if (saveBtn) {
-      const canSave = dirty && ideEditable;
-      saveBtn.disabled = !canSave;
-      saveBtn.setAttribute('aria-disabled', canSave ? 'false' : 'true');
+  // ── Pane collapse/expand ──────────────────────────────────────────────────
+
+  function ideTogglePane(side) {
+    const layout = ideLoadLayout();
+    const COLLAPSED_W = 28;
+
+    if (side === 'tree') {
+      layout.treeCollapsed = !layout.treeCollapsed;
+      ideSaveLayout(layout);
+      var treeCol   = document.getElementById('ide-tree-col');
+      var treeRoot  = document.getElementById('ide-tree-root');
+      var treeTitle = document.getElementById('ide-tree-title');
+      var toggle    = document.getElementById('ide-tree-toggle');
+      var splitter  = document.getElementById('ide-splitter-left');
+      var layoutEl  = document.getElementById('ide-layout-root');
+      var collapsed = layout.treeCollapsed;
+
+      if (treeCol)   treeCol.classList.toggle('ide-pane-collapsed', collapsed);
+      if (treeRoot)  treeRoot.style.display = collapsed ? 'none' : '';
+      if (treeTitle) treeTitle.style.display = collapsed ? 'none' : '';
+      if (splitter)  splitter.style.display = collapsed ? 'none' : '';
+      if (toggle) {
+        toggle.innerHTML = collapsed ? '&#x276F;' : '&#x276E;';
+        toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        toggle.title = collapsed ? 'Expand file tree' : 'Collapse file tree';
+        toggle.setAttribute('aria-label', collapsed ? 'Expand file tree' : 'Collapse file tree');
+      }
+      if (treeCol) treeCol.style.minWidth = (collapsed ? COLLAPSED_W : 120) + 'px';
+      // Update grid.
+      if (layoutEl) {
+        var chatW = layout.chatCollapsed ? COLLAPSED_W : layout.chatW;
+        var tW    = collapsed ? COLLAPSED_W : layout.treeW;
+        layoutEl.style.gridTemplateColumns =
+          tW + 'px ' + (collapsed ? '0' : '8') + 'px 1fr 8px ' + chatW + 'px';
+      }
+
+    } else { // chat
+      layout.chatCollapsed = !layout.chatCollapsed;
+      ideSaveLayout(layout);
+      var chatCol   = document.getElementById('ide-chat-col');
+      var chatSlot  = document.getElementById('ide-chat-slot');
+      var chatTitle = chatCol ? chatCol.querySelector('.subsection-title') : null;
+      var chatTog   = document.getElementById('ide-chat-toggle');
+      var rSplitter = document.getElementById('ide-splitter-right');
+      var layoutEl2 = document.getElementById('ide-layout-root');
+      var collapsed2 = layout.chatCollapsed;
+
+      if (chatCol)   chatCol.classList.toggle('ide-pane-collapsed', collapsed2);
+      if (chatSlot)  chatSlot.style.display = collapsed2 ? 'none' : '';
+      if (chatTitle) chatTitle.style.display = collapsed2 ? 'none' : '';
+      if (rSplitter) rSplitter.style.display = collapsed2 ? 'none' : '';
+      if (chatTog) {
+        chatTog.innerHTML = collapsed2 ? '&#x276E;' : '&#x276F;';
+        chatTog.setAttribute('aria-expanded', collapsed2 ? 'false' : 'true');
+        chatTog.title = collapsed2 ? 'Expand chat' : 'Collapse chat';
+        chatTog.setAttribute('aria-label', collapsed2 ? 'Expand chat' : 'Collapse chat');
+      }
+      if (chatCol) chatCol.style.minWidth = (collapsed2 ? COLLAPSED_W : 160) + 'px';
+      if (layoutEl2) {
+        var treeW2 = layout.treeCollapsed ? COLLAPSED_W : layout.treeW;
+        var cW     = collapsed2 ? COLLAPSED_W : layout.chatW;
+        layoutEl2.style.gridTemplateColumns =
+          treeW2 + 'px 8px 1fr ' + (collapsed2 ? '0' : '8') + 'px ' + cW + 'px';
+      }
     }
   }
 
-  // ideShowSaveStatus shows a transient status message (success or error) in
-  // the editor header's aria-live region.  It auto-clears after `durationMs`.
-  // Clears immediately if called again before the previous timeout fires.
-  // ideSaveStatusTimer is var-declared in the hoisted TDZ-guard block above.
+  // ── Splitter drag ──────────────────────────────────────────────────────────
+
+  function ideWireSplitter(splitterId, side) {
+    var splitter = document.getElementById(splitterId);
+    if (!splitter) return;
+
+    var dragging  = false;
+    var startX    = 0;
+    var startSize = 0;
+
+    splitter.addEventListener('pointerdown', function(e) {
+      var layout = ideLoadLayout();
+      var COLLAPSED_W = 28;
+      if (side === 'left' && layout.treeCollapsed) return;
+      if (side === 'right' && layout.chatCollapsed) return;
+
+      dragging  = true;
+      startX    = e.clientX;
+      startSize = (side === 'left') ? layout.treeW : layout.chatW;
+      splitter.setPointerCapture(e.pointerId);
+
+      // Show the drag overlay to prevent Monaco iframe from swallowing events.
+      var overlay = document.getElementById('ide-drag-overlay');
+      if (overlay) overlay.style.display = 'block';
+
+      e.preventDefault();
+    });
+
+    splitter.addEventListener('pointermove', function(e) {
+      if (!dragging) return;
+      var dx      = e.clientX - startX;
+      var layout  = ideLoadLayout();
+      var MIN     = 80;
+      var MAX     = 600;
+      var COLLAPSED_W = 28;
+      var layoutEl = document.getElementById('ide-layout-root');
+      if (!layoutEl) return;
+
+      if (side === 'left') {
+        var newW = Math.max(MIN, Math.min(MAX, startSize + dx));
+        layout.treeW = newW;
+        var chatW = layout.chatCollapsed ? COLLAPSED_W : layout.chatW;
+        layoutEl.style.gridTemplateColumns = newW + 'px 8px 1fr 8px ' + chatW + 'px';
+        var treeCol = document.getElementById('ide-tree-col');
+        if (treeCol) treeCol.style.minWidth = MIN + 'px';
+        splitter.setAttribute('aria-valuenow', newW);
+        splitter.setAttribute('aria-valuetext', newW + ' pixels');
+      } else {
+        var newW2 = Math.max(MIN, Math.min(MAX, startSize - dx));
+        layout.chatW = newW2;
+        var treeW = layout.treeCollapsed ? COLLAPSED_W : layout.treeW;
+        layoutEl.style.gridTemplateColumns = treeW + 'px 8px 1fr 8px ' + newW2 + 'px';
+        var chatCol = document.getElementById('ide-chat-col');
+        if (chatCol) chatCol.style.minWidth = MIN + 'px';
+        splitter.setAttribute('aria-valuenow', newW2);
+        splitter.setAttribute('aria-valuetext', newW2 + ' pixels');
+      }
+      ideSaveLayout(layout);
+    });
+
+    splitter.addEventListener('pointerup', function(e) {
+      if (!dragging) return;
+      dragging = false;
+      splitter.releasePointerCapture(e.pointerId);
+      var overlay = document.getElementById('ide-drag-overlay');
+      if (overlay) overlay.style.display = 'none';
+    });
+
+    splitter.addEventListener('pointercancel', function(e) {
+      dragging = false;
+      splitter.releasePointerCapture(e.pointerId);
+      var overlay = document.getElementById('ide-drag-overlay');
+      if (overlay) overlay.style.display = 'none';
+    });
+  }
+
+  function ideWireSplitterKeyboard(splitterId, side) {
+    var splitter = document.getElementById(splitterId);
+    if (!splitter) return;
+    var STEP = 20;
+    splitter.addEventListener('keydown', function(e) {
+      var layout  = ideLoadLayout();
+      var MIN     = 80;
+      var MAX     = 600;
+      var COLLAPSED_W = 28;
+      var layoutEl = document.getElementById('ide-layout-root');
+      if (!layoutEl) return;
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      if (side === 'left') {
+        if (layout.treeCollapsed) return;
+        var delta = e.key === 'ArrowRight' ? STEP : -STEP;
+        layout.treeW = Math.max(MIN, Math.min(MAX, layout.treeW + delta));
+        var chatW = layout.chatCollapsed ? COLLAPSED_W : layout.chatW;
+        layoutEl.style.gridTemplateColumns = layout.treeW + 'px 8px 1fr 8px ' + chatW + 'px';
+        splitter.setAttribute('aria-valuenow', layout.treeW);
+        splitter.setAttribute('aria-valuetext', layout.treeW + ' pixels');
+      } else {
+        if (layout.chatCollapsed) return;
+        var delta2 = e.key === 'ArrowLeft' ? STEP : -STEP;
+        layout.chatW = Math.max(MIN, Math.min(MAX, layout.chatW + delta2));
+        var treeW = layout.treeCollapsed ? COLLAPSED_W : layout.treeW;
+        layoutEl.style.gridTemplateColumns = treeW + 'px 8px 1fr 8px ' + layout.chatW + 'px';
+        splitter.setAttribute('aria-valuenow', layout.chatW);
+        splitter.setAttribute('aria-valuetext', layout.chatW + ' pixels');
+      }
+      ideSaveLayout(layout);
+    });
+  }
+
+  // ── ideSetDirty — update dirty state for the active tab ──────────────────
+
+  function ideSetDirty(dirty) {
+    ideIsDirty = dirty;
+    if (ideActiveTabPath) {
+      var fileState = ideOpenFiles.get(ideActiveTabPath);
+      if (fileState) fileState.dirty = dirty;
+    }
+    // Update the tab strip dot.
+    ideRenderTabStrip();
+    ideUpdateEditorHeader();
+  }
+
+  // ── ideShowSaveStatus — transient status message in editor header ─────────
+
   function ideShowSaveStatus(msg, isError, durationMs) {
     const el = document.getElementById('ide-save-status');
     if (!el) return;
@@ -3050,7 +3634,7 @@
       ideSaveStatusTimer = null;
     }
     el.textContent = msg;
-    el.className = 'ide-save-status' + (isError ? ' ide-save-status-error' : ' ide-save-status-ok');
+    el.className = 'ide-save-status' + (isError ? ' ide-save-status-error' : (msg ? ' ide-save-status-ok' : ''));
     if (durationMs) {
       ideSaveStatusTimer = setTimeout(() => {
         el.textContent = '';
@@ -3060,28 +3644,22 @@
     }
   }
 
-  // triggerSave asks the Monaco iframe for its current content, then POSTs it
-  // to /api/files/write.  Content is obtained by posting {type:'save'} — Monaco
-  // replies with {type:'content', path, content} in handleIdeEditorMessage.
-  //
-  // Called from: Save button click, and from handleIdeEditorMessage when Monaco
-  // signals {type:'save'} (⌘S / Ctrl-S).
-  //
-  // The actual fetch runs in performSave(path, content) once content arrives.
+  // ── triggerSave ───────────────────────────────────────────────────────────
+
   function triggerSave() {
     if (!ideEditable || !ideIsDirty || ideIsSaving) return;
     if (!ideEditorWindow || !ideCurrentPath) return;
-    // Ask the iframe for the current content.  The reply fires handleIdeEditorMessage
-    // with {type:'content', path, content}, which calls performSave().
     ideEditorWindow.postMessage({ type: 'requestContent' }, window.location.origin);
   }
 
-  // performSave POSTs content to /api/files/write with the stored version stamp.
-  // Handles 200, 409, 403, 413, and generic errors inline.
-  // ideIsSaving is set true at entry and reset in .finally() to prevent a
-  // double-POST race when ⌘S fires twice before the first response arrives.
+  // ── performSave ───────────────────────────────────────────────────────────
+
   function performSave(path, content) {
+    // Per-file saving state guard.
+    var fileState = ideOpenFiles.get(path);
+    if (fileState) fileState.saving = true;
     ideIsSaving = true;
+
     const saveBtn = document.getElementById('ide-save-btn');
     if (saveBtn) {
       saveBtn.disabled = true;
@@ -3090,24 +3668,24 @@
     }
     ideShowSaveStatus('', false, 0);
 
+    var version = fileState ? fileState.version : ideCurrentVersion;
+
     fetch('/api/files/write', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: path, content: content, version: ideCurrentVersion }),
+      body: JSON.stringify({ path: path, content: content, version: version }),
     })
       .then((r) => {
         if (r.status === 200) {
           return r.json().then((data) => {
-            // Update stored version to the new hash from the response.
-            ideCurrentVersion = data.version || '';
+            var newVersion = data.version || '';
+            if (fileState) fileState.version = newVersion;
+            if (path === ideActiveTabPath) ideCurrentVersion = newVersion;
             ideSetDirty(false);
             ideShowSaveStatus('Saved', false, 2500);
           });
         }
         if (r.status === 409) {
-          // File changed on disk since we read it.  The inline conflict notice
-          // (showIdeReloadConflictNotice) carries the full message + Reload action.
-          // Clear the status bar so the same message isn't duplicated in two places.
           ideShowSaveStatus('', false, 0);
           showIdeReloadConflictNotice(path);
           return;
@@ -3120,8 +3698,7 @@
           ideShowSaveStatus('File too large to save (max 5 MiB)', true, 6000);
           return;
         }
-        // Generic error: keep editor content intact, show status.
-        return r.text().then((body) => {
+        return r.text().then(() => {
           ideShowSaveStatus('Save failed (' + String(r.status) + ') — your edits are preserved', true, 8000);
         });
       })
@@ -3129,11 +3706,10 @@
         ideShowSaveStatus('Network error — your edits are preserved', true, 8000);
       })
       .finally(() => {
-        // Always reset the in-flight guard, regardless of outcome.
+        if (fileState) fileState.saving = false;
         ideIsSaving = false;
         if (saveBtn) {
           saveBtn.textContent = 'Save';
-          // Re-enable only if still dirty + editable (may have been cleared on success).
           const canSave = ideIsDirty && ideEditable;
           saveBtn.disabled = !canSave;
           saveBtn.setAttribute('aria-disabled', canSave ? 'false' : 'true');
@@ -3141,47 +3717,45 @@
       });
   }
 
-  // showIdeReloadConflictNotice shows a 409-conflict inline notice with a
-  // Reload button.  The editor's existing content is preserved; the operator
-  // must explicitly confirm before local edits are discarded.
+  // ── showIdeReloadConflictNotice ───────────────────────────────────────────
+
   function showIdeReloadConflictNotice(path) {
     const notice = document.getElementById('ide-editor-notice');
     if (!notice) return;
-
-    // Clear any previous content.
     notice.textContent = '';
     notice.style.display = '';
-
     const msg = document.createTextNode('File changed on disk — ');
     notice.appendChild(msg);
-
     const reloadBtn = document.createElement('button');
     reloadBtn.type = 'button';
     reloadBtn.className = 'ide-notice-reload-btn';
     reloadBtn.textContent = 'Reload (discards local edits)';
     reloadBtn.addEventListener('click', () => {
-      // Confirm before discarding unsaved local edits.
       if (!window.confirm('Reload file from disk? Your unsaved edits will be lost.')) return;
       notice.style.display = 'none';
+      // Remove from open-files map so it gets re-fetched and a new model is created.
+      ideOpenFiles.delete(path);
       openIdeFile(path, path.split('/').pop(), null);
     });
     notice.appendChild(reloadBtn);
   }
 
+  // ── handleIdeEditorMessage ────────────────────────────────────────────────
+
   function handleIdeEditorMessage(e) {
-    // Only accept messages from the same origin.
     if (e.origin !== window.location.origin) return;
     const msg = e.data;
     if (!msg || typeof msg !== 'object') return;
 
     if (msg.type === 'ready') {
       ideEditorReady = true;
-      // Sync Monaco theme to the current console theme.
       syncMonacoTheme(document.documentElement.getAttribute('data-theme') || 'og');
-      // Flush any queued openFile.
-      if (ideQueuedOpen) {
-        sendOpenFile(ideQueuedOpen);
-        ideQueuedOpen = null;
+      // B2 fix: drain the array queue in order so rapid pre-ready opens all land.
+      if (ideQueuedOpen.length > 0) {
+        var queued = ideQueuedOpen.splice(0);
+        for (var qi = 0; qi < queued.length; qi++) {
+          sendOpenFile(queued[qi]);
+        }
       }
     } else if (msg.type === 'error') {
       const notice = document.getElementById('ide-editor-notice');
@@ -3190,27 +3764,29 @@
         notice.style.display = '';
       }
     } else if (msg.type === 'dirty') {
-      // Monaco reports dirty state change (debounced).
-      if (ideEditable) {
-        ideSetDirty(!!msg.dirty);
+      // msg.path is now included in the dirty message from ide-editor.js.
+      // Only apply if it concerns the active tab (guard against stale messages).
+      var dirtyPath = (typeof msg.path === 'string') ? msg.path : ideCurrentPath;
+      if (dirtyPath === ideActiveTabPath) {
+        var fileState = ideOpenFiles.get(dirtyPath);
+        if (fileState && fileState.editable) {
+          fileState.dirty = !!msg.dirty;
+          ideIsDirty = !!msg.dirty;
+          ideRenderTabStrip();
+          ideUpdateEditorHeader();
+        }
       }
     } else if (msg.type === 'save') {
-      // Monaco signals ⌘S / Ctrl-S: content is provided directly.
-      // Guard on !ideIsSaving to prevent a double-POST when two ⌘S fire before
-      // the first response arrives (B2).  msg.path echo is also checked for
-      // stale-path safety (B1 parallel: if the file switched mid-keypress).
+      // ⌘S / Ctrl-S from Monaco.
+      // B1: path echo guard — the echoed path must match the active tab path.
+      // B2: !ideIsSaving — prevents double-POST when ⌘S fires twice quickly.
       if (ideEditable && ideIsDirty && !ideIsSaving &&
           typeof msg.content === 'string' && msg.path === ideCurrentPath) {
         performSave(ideCurrentPath, msg.content);
       }
     } else if (msg.type === 'content') {
-      // Reply to {type:'requestContent'} — triggered by triggerSave().
-      // B1: guard on echoed msg.path matching ideCurrentPath.  If the operator
-      // switched files between triggerSave() posting requestContent and this reply
-      // arriving, the echoed path will differ from ideCurrentPath — drop the reply
-      // rather than writing old content to the new file's path/version.
-      // Also gate on ideEditable + ideIsDirty + !ideIsSaving so a stale reply
-      // from a previous session cannot trigger an unexpected write.
+      // Reply to requestContent from triggerSave().
+      // B1: echoed path must match the current active path.
       if (typeof msg.content === 'string' && msg.path === ideCurrentPath &&
           ideEditable && ideIsDirty && !ideIsSaving) {
         performSave(ideCurrentPath, msg.content);
@@ -3235,52 +3811,6 @@
     try {
       ideEditorWindow.postMessage({ type: 'setTheme', theme: theme }, window.location.origin);
     } catch (_) {}
-  }
-
-  // openFileInEditor sends the file content to Monaco and updates IDE state.
-  // `version` is the SHA-256 hex stamp returned by GET /api/files/content;
-  // it is stored for optimistic concurrency on the next write.
-  function openFileInEditor(path, content, language, version) {
-    // Update the path header.
-    const pathEl = document.getElementById('ide-open-path');
-    if (pathEl) pathEl.textContent = path;
-
-    // Clear any previous error notice.
-    const notice = document.getElementById('ide-editor-notice');
-    if (notice) notice.style.display = 'none';
-
-    // Store current-file state for save operations.
-    ideCurrentPath = path;
-    ideCurrentVersion = version || '';
-
-    // Opening a new file resets dirty state and the Edit toggle back to View.
-    ideEditable = false;
-    ideSetDirty(false);
-    ideShowSaveStatus('', false, 0);
-
-    const editToggle = document.getElementById('ide-edit-toggle');
-    if (editToggle) {
-      editToggle.textContent = 'Edit';
-      editToggle.setAttribute('aria-pressed', 'false');
-      editToggle.classList.remove('ide-header-btn-active');
-    }
-
-    // Tell Monaco to switch back to read-only when opening a new file.
-    if (ideEditorWindow) {
-      ideEditorWindow.postMessage(
-        { type: 'setEditable', editable: false },
-        window.location.origin
-      );
-    }
-
-    const payload = { type: 'openFile', path, content, language: language || 'plaintext' };
-
-    if (ideEditorReady && ideEditorWindow) {
-      sendOpenFile(payload);
-    } else {
-      // Queue: will be sent once {type:'ready'} arrives.
-      ideQueuedOpen = payload;
-    }
   }
 
   // ---- File tree ---------------------------------------------------------------
