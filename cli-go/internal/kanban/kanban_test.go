@@ -909,6 +909,48 @@ func TestSave_AtomicRename_NoTmpLeftover(t *testing.T) {
 	}
 }
 
+// TestSave_CreatesParentDir verifies that Save succeeds when the board's
+// parent directory does not yet exist (fresh workspace / first-card scenario).
+// This exercises the MkdirAll path added to fix the ENOENT bug.
+func TestSave_CreatesParentDir(t *testing.T) {
+	b, _ := Parse(strings.NewReader(fixtureEmpty))
+	b.Add("first card on fresh workspace", "feature", "")
+
+	// Use a deeply nested path whose parent directories do not exist.
+	base := t.TempDir()
+	path := filepath.Join(base, "work", "current", "kanban.md")
+
+	// Confirm the parent does NOT exist yet.
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Fatal("precondition: parent dir should not exist before Save")
+	}
+
+	if err := b.Save(path); err != nil {
+		t.Fatalf("Save with missing parent dir: %v", err)
+	}
+
+	// The file must exist with the correct content.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile after Save: %v", err)
+	}
+	if !strings.Contains(string(data), "first card on fresh workspace") {
+		t.Errorf("saved content missing task title: %q", string(data))
+	}
+
+	// Atomicity: no .tmp leftover.
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Error("tmp file should not exist after successful save")
+	}
+
+	// Schema sidecar must also exist (Save calls SaveSchema, which also writes
+	// into the now-created parent dir).
+	sidecar := filepath.Join(filepath.Dir(path), ".kanban.schema-version")
+	if _, err := os.Stat(sidecar); err != nil {
+		t.Errorf("schema sidecar not created alongside board: %v", err)
+	}
+}
+
 // ---- RebuildTyped tests ------------------------------------------------------
 
 func TestRebuildTyped_AfterMutations(t *testing.T) {

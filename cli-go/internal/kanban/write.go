@@ -16,13 +16,14 @@ package kanban
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 // Save writes the board to path using an atomic temp-rename.
 // The .schema-version sidecar is also written/updated by SaveSchema.
-// If path does not exist, Save creates it (including any needed parent
-// directories that already exist — it does not mkdir -p).
+// If path's parent directory does not exist, Save creates it (and any
+// missing ancestors) with mode 0o755 before writing.
 //
 // After Save returns nil, the caller can be certain that:
 //   - path contains exactly the lines in b.RawLines, joined by "\n",
@@ -30,6 +31,10 @@ import (
 //   - A .kanban.schema-version sidecar exists next to path.
 func (b *Board) Save(path string) error {
 	content := strings.Join(b.RawLines, "\n") + "\n"
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("kanban: mkdir %s: %w", filepath.Dir(path), err)
+	}
 
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0644); err != nil { //nolint:gosec
