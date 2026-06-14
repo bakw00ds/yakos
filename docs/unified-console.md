@@ -1,11 +1,13 @@
 # Unified console — operator guide
 
 **Introduced in:** v0.40.0.0
+**Networked multi-operator mode:** v0.44.0.0+
 **Audience:** operators who want to use the browser-based console for
 interactive Chat, workflow orchestration, or unified dashboard access.
 
 Companion docs: [overview.md](overview.md) for architecture context,
 [docs/adr/ADR-0003.md](adr/ADR-0003.md) for the Flows engine design,
+[docs/adr/ADR-0004.md](adr/ADR-0004.md) for the networked-identity design,
 [runtime-matrix.md](runtime-matrix.md) for per-runtime streaming behavior.
 
 ---
@@ -70,19 +72,290 @@ yakos serve --no-console
 
 ---
 
+## Networked multi-operator mode
+
+By default the console is loopback-only. If your team needs multiple
+operators on different machines to share one daemon, bind to a routable
+address. The daemon enforces mutual TLS and role-based access
+automatically — there is no plain-HTTP-over-network path.
+
+### When to use this vs the multi-instance model
+
+Use **networked console** when you want a single shared daemon: one
+Kanban board, one Activity feed, one cost ledger, operators joining from
+different machines in real time.
+
+Use the **multi-instance model** (independent daemons, git + `work/`
+coordination) when operators need independent project checkouts, air-gap
+constraints, or latency-tolerant async collaboration. Both remain
+supported; this section covers the networked-console path only.
+
+### Binding to a specific IP
+
+```sh
+yakos serve --console-bind 192.168.1.50:7890
+```
+
+The daemon binds on that address and port. The auto-generated CA and
+server cert's SAN list is set to `192.168.1.50`. Connecting clients
+must present a valid client certificate signed by the daemon's CA.
+
+### Binding to a wildcard address (requires `--console-external-host`)
+
+```sh
+yakos serve --console-bind 0.0.0.0:7890 \
+            --console-external-host console.example.internal:7890
+```
+
+Wildcard binds (`0.0.0.0:7890` or `[::]:7890`) require
+`--console-external-host` — one or more routable hostnames or
+IP:port pairs, comma-separated or via repeated flags. This value
+drives two things:
+
+1. The TLS server certificate's Subject Alternative Names.
+2. The WebSocket `Origin` allow-list (requests from unlisted origins are
+   rejected).
+
+Without `--console-external-host` on a wildcard bind, the daemon **refuses
+to start** (fail-closed). This is intentional: a wildcard bind with no
+declared external host cannot issue a useful TLS cert or validate origins.
+
+Multiple external hosts (e.g., both a hostname and a bare IP fallback):
+
+```sh
+yakos serve --console-bind 0.0.0.0:7890 \
+            --console-external-host console.example.internal:7890 \
+            --console-external-host 10.0.1.20:7890
+```
+
+### Auto-generated CA and server certificate
+
+On the first networked start, the daemon generates and persists:
+
+```
+~/.yakos-state/mtls/
+  ca.crt          # self-signed CA certificate (PEM)
+  ca.key          # CA private key (mode 0600)
+  server.crt      # server certificate signed by the CA
+  server.key      # server private key (mode 0600)
+  roles.json      # CN → role mapping
+```
+
+The startup banner prints the CA's SHA-256 fingerprint:
+
+```
+yakos serve: console (mTLS): https://192.168.1.50:7890
+  CA fingerprint: SHA256:AB:12:...
+  bootstrap cert: ~/.yakos-state/mtls/client-admin.p12
+```
+
+**Verify this fingerprint** out of band before installing client certs on
+any operator machine. The fingerprint is also available any time via:
+
+```sh
+yakos mtls show-ca
+```
+
+Or in PEM form:
+
+```sh
+yakos mtls show-ca --pem
+```
+
+### Bootstrap admin client certificate
+
+By default, the daemon auto-issues one **admin** client cert on the first
+networked start. The Common Name defaults to the OS username, or `admin`
+if that is unavailable. The cert and key are written to:
+
+```
+~/.yakos-state/mtls/client-<name>.crt   (PEM, mode 0600)
+~/.yakos-state/mtls/client-<name>.key   (PEM, mode 0600)
+~/.yakos-state/mtls/ca.crt              (PEM)
+```
+
+The startup banner prints the path to the bundle. To suppress bootstrap
+cert issuance:
+
+```sh
+yakos serve --console-bind 192.168.1.50:7890 --no-bootstrap-cert
+```
+
+To override the CN used for the bootstrap cert:
+
+```sh
+yakos serve --console-bind 192.168.1.50:7890 --console-bootstrap-cert alice
+```
+
+### `yakos mtls` — managing operator certs
+
+#### Issue a client certificate
+
+```sh
+yakos mtls issue-client alice --role dispatch --out ./certs
+```
+
+Writes `client-alice.crt`, `client-alice.key` (mode 0600), and `ca.crt`
+to `./certs/`. Also prints an openssl one-liner to bundle them as a `.p12`
+for browser import:
+
+```
+To create a .p12 for browser import:
+  openssl pkcs12 -export -in ./certs/client-alice.crt \
+    -infile ./certs/client-alice.key -certfile ./certs/ca.crt \
+    -out client-alice.p12
+```
+
+Use `--force` to re-issue a cert for a CN that already exists.
+
+**Transmit the key file securely.** The key is written to disk in the
+`--out` directory; transfer it to the operator via an encrypted channel,
+then delete the copy on the issuing machine.
+
+#### List issued clients
+
+```sh
+yakos mtls list-clients
+```
+
+Prints each issued CN and its current role:
+
+```
+alice    dispatch
+bob      read
+carol    admin
+```
+
+#### Show CA fingerprint
+
+```sh
+yakos mtls show-ca
+```
+
+```
+CA path:        ~/.yakos-state/mtls/ca.crt
+SHA-256:        AB:12:CD:34:...
+```
+
+#### Set or change a role
+
+```sh
+yakos mtls set-role alice flows-run
+```
+
+Updates `roles.json`. The change takes effect on the operator's next
+request (no daemon restart required).
+
+### Roles and what they allow
+
+| Role | Access |
+|---|---|
+| `read` | Overview, Cost, Perf, Kanban; own and shared transcripts (view only). Default for any CN not in `roles.json`. |
+| `dispatch` | All `read` access, plus: open Chat panes, run dispatches. |
+| `flows-run` | All `dispatch` access, plus: trigger and resume Flows workflows. |
+| `admin` | All `flows-run` access, plus: cert and role management via `yakos mtls`. |
+
+Roles are enforced at the console edge and at the dispatch facade. A
+`dispatch`+ role is required to issue any agent command — the networked
+surface is RCE-capable for those roles, which is why the whole path
+requires mTLS.
+
+### Installing a client cert on an operator machine
+
+1. Receive `client-<name>.crt`, `client-<name>.key`, and `ca.crt` from
+   the daemon operator via a secure channel.
+2. Verify the CA fingerprint matches the one printed in the daemon's
+   startup banner (or from `yakos mtls show-ca` on the server):
+
+   ```sh
+   openssl x509 -in ca.crt -noout -fingerprint -sha256
+   ```
+
+3. Bundle as `.p12` for browser import (Chrome, Firefox, Safari all
+   support PKCS#12):
+
+   ```sh
+   openssl pkcs12 -export \
+     -in client-<name>.crt \
+     -infile client-<name>.key \
+     -certfile ca.crt \
+     -out client-<name>.p12
+   ```
+
+4. Import `client-<name>.p12` into your browser's certificate store
+   (Keychain on macOS / Certificate Manager on Windows / `certutil` on
+   Linux for Firefox).
+
+5. Navigate to `https://<console-external-host>`. Your browser will
+   prompt you to select the client certificate for this site. Select the
+   one you just imported.
+
+### Residual limits
+
+- **Out-of-band cert distribution.** There is no enrollment endpoint.
+  Operators receive certs from the daemon operator via secure file
+  transfer.
+- **No CRL / OCSP.** Revocation is accomplished by removing the CN from
+  `roles.json` (which degrades access to `read`) or by re-generating
+  the CA (`--no-bootstrap-cert` + manual reissue for all operators).
+  A full CA rotation is the nuclear option for a compromised key.
+- **Single CA per daemon.** The CA is scoped to the daemon instance at
+  `~/.yakos-state/mtls/`. Multi-daemon federations each have their own
+  CA.
+
+See [docs/adr/ADR-0004.md](adr/ADR-0004.md) for the design decisions
+behind this identity model.
+
+---
+
 ## Trust model and honest limits
 
-The console is a **same-host, loopback-only, single shared token** server.
+The console operates in one of two modes, with meaningfully different
+identity and access guarantees. The mode is determined at startup by
+whether `--console-bind` is set to a non-loopback address.
 
-- All operators opening the console in browsers on the same machine are
-  uid-equivalent — they share the same bearer token and have equal access
-  to all tabs including Flows runs and Chat transcripts.
-- `operator_id` is **self-asserted attribution**, not an authentication
-  boundary. It labels dispatch log entries and presence chips so uid-
-  equivalent teammates can see who did what. It does not restrict access.
-- Do not expose the daemon port to a network (via port forwarding, proxy,
-  or non-loopback bind). Doing so would expose browser-driven, unsandboxed
-  `bypassPermissions` dispatch with no real authentication boundary.
+### Loopback mode (default)
+
+Without `--console-bind`, the console binds `127.0.0.1` only and uses a
+**single shared bearer token**.
+
+- All operators on the same machine share the token and are uid-equivalent
+  — they have equal access to all tabs, Flows runs, and Chat transcripts.
+- `operator_id` is **self-asserted attribution**, not a cryptographic
+  identity. It labels dispatch log entries and presence chips so
+  uid-equivalent teammates can see who did what. It does not restrict
+  access.
+- The residual security assumption is same-machine trust. Do not expose
+  this mode to a network via port forwarding or reverse proxy — doing so
+  would expose RCE-capable dispatch with no real authentication boundary.
+
+### Networked mode (mTLS, multi-operator)
+
+With `--console-bind <addr>`, the console binds to a routable address and
+upgrades to **mutual TLS with per-cert identity and RBAC**. See
+[Networked multi-operator mode](#networked-multi-operator-mode) below for
+full setup instructions.
+
+In networked mode:
+
+- Identity is **cryptographically bound** to the client certificate's
+  Common Name. `operator_id` is non-forgeable off-loopback.
+- Access is governed by four roles (`read`, `dispatch`, `flows-run`,
+  `admin`). A CN with no role entry defaults to `read` (fail-closed).
+- There is **no plain-HTTP-over-network option**. Non-loopback bind always
+  requires mTLS (RequireAndVerifyClientCert, TLS 1.2+).
+
+### Honest limits (both modes)
+
+- Client certificates are distributed **out of band** — there is no
+  enrollment endpoint. The auto-issued bootstrap admin cert is the
+  recommended on-ramp for the first operator; subsequent certs are issued
+  via `yakos mtls issue-client` and transmitted by the operator (e.g.,
+  secure file transfer, encrypted email).
+- The alternative to networked-console collaboration is the
+  **multi-instance model** (independent daemons coordinating via git and
+  `work/` artifacts). That model remains fully supported and is not
+  replaced by this feature — choose based on your team's topology.
 
 ---
 
@@ -388,8 +661,15 @@ for both, then synthesizes a pick with rationale.
 
 ## Caveats and known limits
 
-- **Loopback-only, single shared token.** Do not expose the daemon port to
-  a network. operator_id is self-asserted attribution, not an auth boundary.
+- **Loopback mode: single shared token, self-asserted identity.**
+  In default loopback mode, `operator_id` is self-asserted attribution, not
+  an auth boundary. Do not expose the loopback console to a network via port
+  forwarding or reverse proxy. For multi-machine access, use networked mode
+  with mTLS (see [Networked multi-operator mode](#networked-multi-operator-mode)).
+- **Networked mode: out-of-band cert distribution.** There is no enrollment
+  endpoint. Client certs must be issued via `yakos mtls issue-client` and
+  transmitted to operators via secure file transfer. No CRL or OCSP — to
+  revoke, remove the CN from `roles.json` or rotate the CA.
 - **Transitive prompt injection.** `${nodes.<id>.output}` is substituted
   verbatim. If an upstream node processes external content, treat downstream
   prompts as potentially influenced by untrusted data.
@@ -416,6 +696,9 @@ for both, then synthesizes a pick with rationale.
 - [docs/adr/ADR-0003.md](adr/ADR-0003.md) — design decisions for the
   Flows engine (concurrency model, resume semantics, YAML-hash pin, bus
   invariants).
+- [docs/adr/ADR-0004.md](adr/ADR-0004.md) — design decisions for the
+  networked-console identity model (mTLS, RBAC, dual identity regime,
+  fail-closed bind).
 - [runtime-matrix.md](runtime-matrix.md) — per-runtime streaming behavior
   and model tier reference.
 - [overview.md](overview.md) — architecture overview including operator
