@@ -95,17 +95,26 @@ self.addEventListener('fetch', (e) => {
   e.respondWith((async () => {
     const headers = new Headers(e.request.headers);
     headers.set('Authorization', 'Bearer ' + token);
+    const isBodyMethod = e.request.method !== 'GET' && e.request.method !== 'HEAD';
     const init = {
       method:      e.request.method,
       headers:     headers,
       mode:        'same-origin',
       credentials: 'omit',
-      redirect:    'follow',
+      // Mutation POSTs (api/add, api/move, api/notes, api/delete, etc.) never
+      // legitimately return a 3xx; fail loudly on an unexpected redirect so
+      // the body + injected bearer token are never silently replayed to a
+      // different origin.  GET/HEAD iframe and sub-resource loads must still
+      // follow same-origin redirects (e.g. /kanban → /kanban/ trailing-slash
+      // from the Go mux), so those keep 'follow'.
+      redirect:    isBodyMethod ? 'error' : 'follow',
     };
     // Copy the body for methods that carry one.  arrayBuffer() preserves the
     // exact bytes (JSON payload); Content-Type is already in the headers clone
-    // so the server parses it correctly.
-    if (e.request.method !== 'GET' && e.request.method !== 'HEAD') {
+    // so the server parses it correctly.  Bodies on this path originate
+    // exclusively from the first-party console UI (small JSON mutations), so
+    // unbounded buffering is not a concern.
+    if (isBodyMethod) {
       init.body = await e.request.clone().arrayBuffer();
     }
     return fetch(new Request(e.request.url, init));

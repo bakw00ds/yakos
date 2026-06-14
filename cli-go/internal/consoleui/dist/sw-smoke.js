@@ -14,6 +14,9 @@
 // the reconstructed Request received by fetch() carries both the Bearer
 // header and the original body bytes.
 //
+// Early-return detection: the FetchEvent stub tracks whether respondWith
+// was called via an explicit boolean flag — no timing-dependent heuristic.
+//
 // This file is invoked by TestSWJSSmokeTest in app_smoke_test.go via:
 //   node dist/sw-smoke.js
 // Must exit 0 on success, non-zero (+ stderr message) on any failure.
@@ -74,7 +77,7 @@ Headers.prototype.set = function(name, value) {
 // Track the last Request constructed by sw.js when calling fetch().
 var lastFetchedRequest = null;
 
-// Request: records url, method, headers, body for assertions.
+// Request: records url, method, headers, body, redirect for assertions.
 global.Request = function(url, init) {
   this.url = url;
   this.method = (init && init.method) || 'GET';
@@ -124,12 +127,15 @@ assert(typeof listeners['activate'] === 'function', 'activate listener registere
 assert(typeof listeners['message']  === 'function', 'message listener registered');
 assert(typeof listeners['fetch']    === 'function', 'fetch listener registered');
 
-// ── Inject a token ───────────────────────────────────────────────────────────
-
-listeners['message']({ data: { type: 'SET_TOKEN', token: 'tok-abc123' } });
-
-// ── Helper: dispatch a synthetic FetchEvent and return a Promise that
-//    resolves once the respondWith callback settles. ─────────────────────────
+// ── Helper: dispatch a synthetic FetchEvent.
+//
+//    Returns a Promise that resolves to { fetched, respondWithCalled } where:
+//      fetched           — the Request passed to fetch(), or null if not called
+//      respondWithCalled — true iff the SW called event.respondWith()
+//
+//    Early-return detection uses an explicit boolean flag set inside
+//    event.respondWith rather than a timing-dependent setTimeout heuristic.
+// ─────────────────────────────────────────────────────────────────────────────
 
 function dispatchFetch(requestOpts) {
   return new Promise(function(resolve, reject) {
@@ -137,34 +143,38 @@ function dispatchFetch(requestOpts) {
       requestOpts.url || 'http://127.0.0.1:7890/api/test',
       requestOpts
     );
-    // Reset captured request before each dispatch.
+    // Reset captured fetch target before each dispatch.
     lastFetchedRequest = null;
+
+    var respondWithCalled = false;
 
     var event = {
       request: req,
       respondWith: function(promiseOrValue) {
+        respondWithCalled = true;
         Promise.resolve(promiseOrValue).then(function() {
-          resolve(lastFetchedRequest);
+          resolve({ fetched: lastFetchedRequest, respondWithCalled: true });
         }).catch(reject);
       },
-      // SW may return early (no respondWith call) — treat as pass-through.
     };
 
-    var result = listeners['fetch'](event);
+    listeners['fetch'](event);
 
-    // If respondWith was never called (early-return path), resolve with null.
-    if (lastFetchedRequest === null && result === undefined) {
-      // Give async paths (like the body-cloning IIFE) a tick to settle.
-      setTimeout(function() {
-        resolve(lastFetchedRequest);
-      }, 50);
+    // If respondWith was NOT called the SW took an early-return path.
+    // Resolve synchronously — no timing assumption needed.
+    if (!respondWithCalled) {
+      resolve({ fetched: null, respondWithCalled: false });
     }
   });
 }
 
-// ── Test 1: POST with JSON body — body AND Authorization must be preserved ───
+// ── Inject a token (used by all tests except the !token test below) ──────────
 
-var jsonBody = new TextEncoder
+listeners['message']({ data: { type: 'SET_TOKEN', token: 'tok-abc123' } });
+
+// ── Test 1: POST with JSON body — body, Authorization, redirect:'error' ───────
+
+var jsonBody = typeof TextEncoder !== 'undefined'
   ? new TextEncoder().encode(JSON.stringify({ title: 'my task' })).buffer
   : Buffer.from(JSON.stringify({ title: 'my task' }));
 
@@ -177,19 +187,22 @@ dispatchFetch({
   mode:        'cors',
   destination: '',
   body:        jsonBody,
-}).then(function(fetched) {
-  assert(fetched !== null, 'POST /api/add: SW called fetch() (not passed through)');
-  if (fetched) {
-    var auth = fetched.headers.get('Authorization');
+}).then(function(result) {
+  assert(result.respondWithCalled,
+    'POST /api/add: SW must call respondWith()');
+  assert(result.fetched !== null,
+    'POST /api/add: SW must call fetch()');
+  if (result.fetched) {
+    var auth = result.fetched.headers.get('Authorization');
     assert(auth === 'Bearer tok-abc123',
-      'POST /api/add: Authorization header is "Bearer tok-abc123" (got "' + auth + '")');
-
-    // The body must be the same ArrayBuffer we supplied.
-    assert(fetched._body === jsonBody,
-      'POST /api/add: body is preserved (got ' + fetched._body + ')');
+      'POST /api/add: Authorization is "Bearer tok-abc123" (got "' + auth + '")');
+    assert(result.fetched._body === jsonBody,
+      'POST /api/add: body is preserved (got ' + result.fetched._body + ')');
+    assert(result.fetched.redirect === 'error',
+      'POST /api/add: redirect is "error" (got "' + result.fetched.redirect + '")');
   }
 
-// ── Test 2: GET (navigate iframe) — body must NOT be set, header injected ───
+// ── Test 2: GET iframe navigate — auth injected, no body, redirect:'follow' ──
 
   return dispatchFetch({
     url:         'http://127.0.0.1:7890/kanban/',
@@ -199,18 +212,22 @@ dispatchFetch({
     destination: 'iframe',
     body:        null,
   });
-}).then(function(fetched) {
-  assert(fetched !== null, 'GET /kanban/ (iframe navigate): SW called fetch()');
-  if (fetched) {
-    var auth = fetched.headers.get('Authorization');
+}).then(function(result) {
+  assert(result.respondWithCalled,
+    'GET /kanban/ (iframe navigate): SW must call respondWith()');
+  assert(result.fetched !== null,
+    'GET /kanban/ (iframe navigate): SW must call fetch()');
+  if (result.fetched) {
+    var auth = result.fetched.headers.get('Authorization');
     assert(auth === 'Bearer tok-abc123',
-      'GET /kanban/: Authorization header is "Bearer tok-abc123" (got "' + auth + '")');
-
-    assert(fetched._body === null || fetched._body === undefined,
-      'GET /kanban/: no body on GET (got ' + fetched._body + ')');
+      'GET /kanban/: Authorization is "Bearer tok-abc123" (got "' + auth + '")');
+    assert(result.fetched._body === null || result.fetched._body === undefined,
+      'GET /kanban/: no body on GET (got ' + result.fetched._body + ')');
+    assert(result.fetched.redirect === 'follow',
+      'GET /kanban/: redirect is "follow" (got "' + result.fetched.redirect + '")');
   }
 
-// ── Test 3: Top-level document navigation — SW must pass through unmodified ──
+// ── Test 3: Top-level document navigation — SW must NOT intercept ─────────────
 
   return dispatchFetch({
     url:         'http://127.0.0.1:7890/',
@@ -220,12 +237,13 @@ dispatchFetch({
     destination: 'document',
     body:        null,
   });
-}).then(function(fetched) {
-  // Early-return path: no respondWith, SW lets the browser handle it.
-  assert(fetched === null,
-    'GET / (top-level navigate): SW must NOT intercept (fetched=' + fetched + ')');
+}).then(function(result) {
+  assert(!result.respondWithCalled,
+    'GET / (top-level navigate): SW must NOT call respondWith() (early-return)');
+  assert(result.fetched === null,
+    'GET / (top-level navigate): SW must NOT call fetch()');
 
-// ── Test 4: Request already carrying Authorization — passed through ───────────
+// ── Test 4: Request already carrying Authorization — passed through ────────────
 
   var authedHeaders = new global.Headers({
     'Authorization': 'Bearer already-set',
@@ -239,11 +257,13 @@ dispatchFetch({
     destination: '',
     body:        jsonBody,
   });
-}).then(function(fetched) {
-  assert(fetched === null,
-    'POST with existing Authorization: SW must NOT re-wrap (fetched=' + fetched + ')');
+}).then(function(result) {
+  assert(!result.respondWithCalled,
+    'POST with existing Authorization: SW must NOT call respondWith() (early-return)');
+  assert(result.fetched === null,
+    'POST with existing Authorization: SW must NOT call fetch()');
 
-// ── Test 5: Cross-origin request — SW must pass through ──────────────────────
+// ── Test 5: Cross-origin request — SW must pass through ───────────────────────
 
   return dispatchFetch({
     url:         'https://example.com/api',
@@ -253,19 +273,45 @@ dispatchFetch({
     destination: '',
     body:        jsonBody,
   });
-}).then(function(fetched) {
-  assert(fetched === null,
-    'Cross-origin POST: SW must NOT intercept (fetched=' + fetched + ')');
+}).then(function(result) {
+  assert(!result.respondWithCalled,
+    'Cross-origin POST: SW must NOT call respondWith() (early-return)');
+  assert(result.fetched === null,
+    'Cross-origin POST: SW must NOT call fetch()');
 
-// ── Results ──────────────────────────────────────────────────────────────────
+// ── Test 6: No token — SW must pass through unmodified ────────────────────────
+//
+//    Simulate the pre-SET_TOKEN state by clearing the token via a fake message
+//    that sets it to null, dispatching, then restoring for any later tests.
+
+  listeners['message']({ data: { type: 'SET_TOKEN', token: null } });
+
+  return dispatchFetch({
+    url:         'http://127.0.0.1:7890/api/board',
+    method:      'GET',
+    headers:     new global.Headers({}),
+    mode:        'cors',
+    destination: '',
+    body:        null,
+  });
+}).then(function(result) {
+  // Restore the token before assertions so any accidental further use is safe.
+  listeners['message']({ data: { type: 'SET_TOKEN', token: 'tok-abc123' } });
+
+  assert(!result.respondWithCalled,
+    'GET /api/board (no token): SW must NOT call respondWith() (early-return)');
+  assert(result.fetched === null,
+    'GET /api/board (no token): SW must NOT call fetch(); no Authorization injected');
+
+// ── Results ───────────────────────────────────────────────────────────────────
 
   if (failures.length > 0) {
     process.stderr.write(failures.length + ' assertion(s) failed.\n');
     process.exit(1);
   }
   process.stdout.write(
-    'PASS: sw.js smoke tests passed (POST body preserved, GET passthrough, ' +
-    'early-returns intact).\n'
+    'PASS: sw.js smoke tests passed (POST body+redirect preserved, ' +
+    'GET redirect:follow, early-returns intact, !token pass-through).\n'
   );
   process.exit(0);
 }).catch(function(err) {
