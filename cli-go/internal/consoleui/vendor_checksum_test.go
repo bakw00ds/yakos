@@ -58,7 +58,18 @@ var pinnedMermaidChecksums = map[string]string{
 //	# Add the lines above to pinnedFontChecksums below.
 //	# Then uncomment the //go:embed all:dist/vendor/fonts line in server.go.
 var pinnedFontChecksums = map[string]string{
-	// Entries added when fonts are vendored. See VENDOR.md §Fonts.
+	// Inter v4 Latin subset — 400/500/600/700 weights.
+	// Source: fontsource/inter via jsdelivr (SIL OFL 1.1).
+	"inter-v4-latin-400.woff2": "8909904ab6c872eb994093482a88a28eca2cd95912d7b6fecd72103b0dc07edc",
+	"inter-v4-latin-500.woff2": "f3779f1efccc4bdcdf9c0a02ab95bf6bd092ed09c48c08cedc725889edd1d19f",
+	"inter-v4-latin-600.woff2": "f9a06e79cd3a2a20951c0f0e28f66dd0e6d3fda73911d640a2125c8fcb78f21a",
+	"inter-v4-latin-700.woff2": "6f56409fd3d64bb85f7d070bce20749db2d66b6d63cec586cc22d1c761be2491",
+	// JetBrains Mono v13 Latin subset — 400/500/600/700 weights.
+	// Source: fontsource/jetbrains-mono via jsdelivr (SIL OFL 1.1).
+	"jetbrains-mono-v13-latin-400.woff2": "14425ba9c695763c1547f48a206b7aa60350a33ae23de09f0407877f3fcd89eb",
+	"jetbrains-mono-v13-latin-500.woff2": "cb182feeed4d798ff6961d3c79f7026279448fca0676438aaecb21f3fc39553a",
+	"jetbrains-mono-v13-latin-600.woff2": "400c6bfda18d5d14acad1c15d6dcb9f8e13c015e7286317e0b9a482539bef147",
+	"jetbrains-mono-v13-latin-700.woff2": "d0d4e818808f2a0ba39b2b09d1989366f63494e295f003c7ef436697378507e8",
 }
 
 func TestVendorChecksums(t *testing.T) {

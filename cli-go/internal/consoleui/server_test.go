@@ -970,3 +970,34 @@ func TestVendorRoute_MonacoLanguageGrammarsServed(t *testing.T) {
 		})
 	}
 }
+
+// ---- 6. Vendored font serve tests -------------------------------------------
+// Verifies all 8 woff2 font files are served at /vendor/fonts/... without a
+// token (same-origin static; token-exempt like all /vendor/* paths).
+
+func TestVendorRoute_FontsServedNoToken(t *testing.T) {
+	ts, _ := newAuthTestServer(t)
+
+	fonts := []string{
+		"/vendor/fonts/inter-v4-latin-400.woff2",
+		"/vendor/fonts/inter-v4-latin-500.woff2",
+		"/vendor/fonts/inter-v4-latin-600.woff2",
+		"/vendor/fonts/inter-v4-latin-700.woff2",
+		"/vendor/fonts/jetbrains-mono-v13-latin-400.woff2",
+		"/vendor/fonts/jetbrains-mono-v13-latin-500.woff2",
+		"/vendor/fonts/jetbrains-mono-v13-latin-600.woff2",
+		"/vendor/fonts/jetbrains-mono-v13-latin-700.woff2",
+	}
+
+	for _, path := range fonts {
+		path := path
+		t.Run(path, func(t *testing.T) {
+			resp := get(t, ts.URL+path, "") // no token — /vendor/* is exempt
+			defer drainClose(resp)
+
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("GET %s (no token): status=%d; want 200 (font 404 regression)", path, resp.StatusCode)
+			}
+		})
+	}
+}

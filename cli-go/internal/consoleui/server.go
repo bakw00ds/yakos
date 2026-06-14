@@ -47,19 +47,14 @@ var swJS []byte
 //	The integrity manifest (monaco/CHECKSUMS.sha256) is verified by
 //	TestVendorChecksums in vendor_checksum_test.go.
 //
-// Fonts (follow-up): dist/vendor/fonts/ — Inter + JetBrains Mono woff2 subsets.
+// Fonts: dist/vendor/fonts/ — Inter v4 + JetBrains Mono v13 woff2 subsets.
 //
 //	@font-face declarations in styles.css reference /vendor/fonts/... paths.
-//	Until the font binaries are downloaded and vendored, system fonts render
-//	as the immediate fallback (font-display:swap; local() fallback in @font-face).
-//	To activate: download woff2 files, compute SHA-256, add to pinnedFontChecksums
-//	in vendor_checksum_test.go, add entries to VENDOR.md, and uncomment the
-//	embed directive below. See VENDOR.md §Fonts for the full recipe.
-//	font-src 'self' is already present in cspHeader() for when this lands.
+//	8 files (latin, 400/500/600/700 for each family); SHA-256 pinned in
+//	pinnedFontChecksums in vendor_checksum_test.go. Source + OFL license
+//	documented in VENDOR.md §Fonts.  font-src 'self' in cspHeader().
 //
-//	TODO(follow-up): uncomment after fonts are vendored:
-//	//go:embed all:dist/vendor/fonts
-//
+//go:embed all:dist/vendor/fonts
 //go:embed dist/vendor/mermaid.min.js
 //go:embed dist/vendor/VENDOR.md
 //go:embed all:dist/vendor/monaco
