@@ -60,7 +60,8 @@ type FleetSession struct {
 	Status      string    `json:"status"`
 	StartedAt   time.Time `json:"started_at"`
 	TaskPreview string    `json:"task_preview"` // <=120 chars; REST-only
-	Attachable  bool      `json:"attachable"`   // true = caller may re-attach
+	Attachable  bool      `json:"attachable"`   // true = caller may re-attach (owned || shared)
+	Owned       bool      `json:"owned"`        // true = caller is the session owner (can interject)
 }
 
 // FleetResponse is the JSON body returned by GET /api/fleet.
@@ -133,6 +134,7 @@ func (fh *fleetHandlers) handleFleet(w http.ResponseWriter, r *http.Request) {
 			StartedAt:   e.StartedAt,
 			TaskPreview: e.TaskPreview,
 			Attachable:  owned || shared,
+			Owned:       owned,
 		})
 	}
 

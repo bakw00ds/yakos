@@ -190,7 +190,29 @@ func (tr *Transcripts) Append(entry TranscriptEntry) error {
 // Read returns errTranscriptForbidden (caller returns 403).
 //
 // Empty ownerOperatorID skips the ownership check (daemon-internal calls).
+//
+// This calls ReadShared with sharedAccess=false.  Use ReadShared directly
+// when the caller has been verified to have shared access.
 func (tr *Transcripts) Read(conversationID, ownerOperatorID string) ([]TranscriptEntry, error) {
+	return tr.ReadShared(conversationID, ownerOperatorID, false)
+}
+
+// ReadShared returns all TranscriptEntries for the given conversationID,
+// with optional shared-access bypass.
+//
+// When sharedAccess is true, the ownership check is bypassed — the session
+// has been verified to be shared (via ChatHub.IsShared) before this call.
+// This mirrors the ChatHub.Route shared-session visibility rule: if the hub
+// delivers SSE frames to all operators for a shared session, the transcript
+// backfill must also be readable by those operators.
+//
+// When sharedAccess is false, the standard owner-only check applies.
+// errTranscriptForbidden is returned when the ownerOperatorID does not match
+// the conversation owner.
+//
+// Empty ownerOperatorID AND sharedAccess=false skips the ownership check
+// entirely (daemon-internal calls).
+func (tr *Transcripts) ReadShared(conversationID, ownerOperatorID string, sharedAccess bool) ([]TranscriptEntry, error) {
 	path, err := tr.transcriptPath(conversationID)
 	if err != nil {
 		return nil, err
@@ -226,7 +248,14 @@ func (tr *Transcripts) Read(conversationID, ownerOperatorID string) ([]Transcrip
 	// than granting it.  This prevents an existence oracle (seeing content when
 	// no ownership is established) and is forward-compatible with future
 	// explicit owner persistence.
-	if ownerOperatorID != "" && len(entries) > 0 {
+	//
+	// Shared-access bypass: when sharedAccess is true, the hub has already
+	// verified the session is shared (ChatHub.IsShared).  The ownership check is
+	// still performed to locate the first user turn (to prove the file has a
+	// real owner), but a mismatch is NOT treated as forbidden — the caller is an
+	// authorised watcher, not the owner.  errTranscriptForbidden is only returned
+	// when the file is non-empty but has NO user turn (M1 fail-closed invariant).
+	if !sharedAccess && ownerOperatorID != "" && len(entries) > 0 {
 		ownerEstablished := false
 		for _, e := range entries {
 			if e.Role == RoleUser && e.OperatorID != "" {
@@ -239,6 +268,25 @@ func (tr *Transcripts) Read(conversationID, ownerOperatorID string) ([]Transcrip
 		}
 		if !ownerEstablished {
 			// Non-empty file with no user turn → fail closed (403).
+			return nil, errTranscriptForbidden
+		}
+	}
+
+	// Shared-access path: M1 fail-closed still applies when the file is
+	// non-empty but has no established user-turn owner.  A watcher of a shared
+	// session must not read orphaned transcripts (no-owner = undefined provenance).
+	// Ownership mismatch on its own is NOT forbidden (the watcher is not the owner
+	// by design — that is the whole point of watch mode).
+	if sharedAccess && ownerOperatorID != "" && len(entries) > 0 {
+		ownerEstablished := false
+		for _, e := range entries {
+			if e.Role == RoleUser && e.OperatorID != "" {
+				ownerEstablished = true
+				break
+			}
+		}
+		if !ownerEstablished {
+			// Non-empty file with no user turn → fail closed even for watchers.
 			return nil, errTranscriptForbidden
 		}
 	}

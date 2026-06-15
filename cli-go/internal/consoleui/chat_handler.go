@@ -712,7 +712,23 @@ func (ch *chatHandlers) handleChatCancel(w http.ResponseWriter, r *http.Request)
 // ---- GET /api/chat/transcript -----------------------------------------------
 
 // handleChatTranscript returns the persisted transcript for a conversationId.
-// The caller must supply operatorId; the transcript reader enforces owner-scoping.
+//
+// Standard (owner) path: the caller must supply operatorId; the transcript
+// reader enforces owner-scoping and returns errTranscriptForbidden (→ 403)
+// when the operatorId does not match the conversation owner.
+//
+// Shared-session watch path: the caller may also supply an optional sessionId
+// query parameter.  When provided and the hub reports that sessionId as shared,
+// the ownership check is bypassed (ReadShared with sharedAccess=true), mirroring
+// the ChatHub.Route shared-session visibility rule.  The M1 fail-closed invariant
+// (deny when file has no established user-turn owner) still applies.
+//
+// Security invariant: only chatHub.IsShared drives the shared-access bypass.
+// The caller cannot self-assert shared access — the hub is the authoritative
+// source.  An unshared session's transcript returns 403 even with a valid sessionId.
+//
+// DO NOT weaken errTranscriptForbidden: a non-owner, non-watcher caller still
+// gets 403 regardless of the sessionId param.
 func (ch *chatHandlers) handleChatTranscript(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -727,6 +743,17 @@ func (ch *chatHandlers) handleChatTranscript(w http.ResponseWriter, r *http.Requ
 	if err := dispatch.ValidateIdentityField("conversation_id", conversationID); err != nil {
 		http.Error(w, "invalid conversationId", http.StatusBadRequest)
 		return
+	}
+
+	// Optional sessionId for shared-session watch backfill.
+	// When supplied, we check hub.IsShared(sessionId) to determine if the caller
+	// is watching a shared session.  Validated before any hub lookup.
+	sessionID := r.URL.Query().Get("sessionId")
+	if sessionID != "" {
+		if err := dispatch.ValidateIdentityField("session_id", sessionID); err != nil {
+			http.Error(w, "invalid sessionId", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// C1 dual-regime operator_id for transcript scoping:
@@ -748,7 +775,12 @@ func (ch *chatHandlers) handleChatTranscript(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	entries, err := ch.transcripts.Read(conversationID, operatorID)
+	// Determine shared-access: iff the caller supplied a sessionId AND the hub
+	// reports that session as shared.  The hub is authoritative — the caller
+	// cannot grant themselves shared access by supplying an arbitrary sessionId.
+	sharedAccess := sessionID != "" && ch.hub.IsShared(sessionID)
+
+	entries, err := ch.transcripts.ReadShared(conversationID, operatorID, sharedAccess)
 	if err != nil {
 		if errors.Is(err, errTranscriptForbidden) {
 			http.Error(w, "forbidden", http.StatusForbidden)

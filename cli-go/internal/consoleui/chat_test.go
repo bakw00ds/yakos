@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/consoleui"
+	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
@@ -1447,5 +1448,217 @@ func TestChatHub_DuplicateSessionConflict(t *testing.T) {
 	// Different owner: conflict.
 	if err := hub.OpenSession("sess-dup", "bob", false); err == nil {
 		t.Error("OpenSession by different owner: expected errSessionOwnerConflict; got nil")
+	}
+}
+
+// =========================================================================
+// ---- Phase 3 session-attach security tests --------------------------------
+// =========================================================================
+//
+// Three required security properties:
+//
+//   (a) A RoleRead operator CAN watch a SHARED session's stream + read its
+//       transcript (SSE delivers frames; transcript returns 200 with entries).
+//   (b) A RoleRead operator CANNOT read an UNSHARED session's transcript
+//       (403 forbidden; errTranscriptForbidden).
+//   (c) A non-owner CANNOT interject (POST dispatch → 403 owner-conflict).
+//       Already covered by TestChatDispatch_403OnSessionOwnerConflict; the
+//       third test here confirms the same property via the transcript pathway
+//       to close the watch/interject boundary explicitly.
+
+// TestAttach_RoleReadCanWatchSharedSession verifies that a RoleRead operator
+// can subscribe to the SSE stream (GET /api/chat/stream) and read the
+// transcript (GET /api/chat/transcript?sessionId=…) for a SHARED session.
+//
+// Security requirement (a): watch = subscribe SSE + backfill transcript.
+func TestAttach_RoleReadCanWatchSharedSession(t *testing.T) {
+	// Build a server with bob's identity injected as RoleRead (the watcher).
+	bobID := netid.Identity{
+		Resolved:      true,
+		Authenticated: true,
+		AuthMethod:    netid.AuthMethodCert,
+		OperatorID:    "bob",
+		Role:          netid.RoleRead,
+	}
+	stateDir := t.TempDir()
+	workDir := t.TempDir()
+	realTok, _ := consoleui.LoadOrCreateToken(stateDir)
+	bus := wsbus.New()
+	t.Cleanup(bus.Stop)
+	srv := consoleui.MustNew(t, consoleui.Config{
+		Token:             realTok,
+		KanbanBoardPath:   t.TempDir() + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: t.TempDir(),
+		PerfWorkDir:       t.TempDir(),
+		Bus:               bus,
+		WorkDir:           workDir,
+	})
+	hub := srv.ChatHub()
+
+	// Alice opens a SHARED session.
+	const sharedSessionID = "sess-attach-shared"
+	const sharedConvID = "conv-attach-shared"
+	if err := hub.OpenSession(sharedSessionID, "alice", true /*shared=true*/); err != nil {
+		t.Fatalf("OpenSession (shared): %v", err)
+	}
+	t.Cleanup(func() { hub.CloseSession(sharedSessionID) })
+
+	// Write alice's transcript so the backfill has content to return.
+	tr := consoleui.NewTranscriptsForTest(workDir)
+	_ = tr.Append(consoleui.TranscriptEntry{
+		SessionID:      sharedSessionID,
+		ConversationID: sharedConvID,
+		OperatorID:     "alice",
+		Role:           consoleui.RoleUser,
+		Text:           "shared task",
+	})
+
+	// Build the handler with bob's identity injected.
+	handler := consoleui.RequireTokenForNonStatic(realTok,
+		consoleui.RequireJSONForMutations(
+			injectIdentityMiddleware(bobID, srv.Handler())))
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	// (a1) Bob (RoleRead) can connect to the SSE stream.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	sseResp, err := sseGetWithCancel(ctx, ts.URL+"/api/chat/stream?operatorId=bob", realTok)
+	if err != nil && sseResp == nil {
+		t.Skip("SSE connect failed (context deadline)")
+	}
+	if sseResp != nil {
+		if sseResp.StatusCode != http.StatusOK {
+			drainClose(sseResp)
+			t.Fatalf("RoleRead bob connecting to SSE stream: status=%d; want 200", sseResp.StatusCode)
+		}
+		drainClose(sseResp)
+	}
+
+	// (a2) Bob (RoleRead) can read the shared session's transcript by supplying
+	// sessionId=<sharedSessionID> so the handler checks IsShared(sessionId).
+	transcriptURL := ts.URL + "/api/chat/transcript" +
+		"?conversationId=" + sharedConvID +
+		"&operatorId=bob" +
+		"&sessionId=" + sharedSessionID
+	tResp := get(t, transcriptURL, realTok)
+	defer drainClose(tResp)
+	if tResp.StatusCode != http.StatusOK {
+		t.Errorf("RoleRead bob reading shared transcript: status=%d; want 200", tResp.StatusCode)
+	}
+}
+
+// TestAttach_RoleReadCannotReadUnsharedTranscript verifies that a RoleRead
+// operator cannot read an UNSHARED session's transcript.
+//
+// Security requirement (b): the transcript endpoint must return 403 when the
+// session is not shared and the caller is not the owner.
+func TestAttach_RoleReadCannotReadUnsharedTranscript(t *testing.T) {
+	// Build a server with bob's identity injected as RoleRead (the watcher).
+	bobID := netid.Identity{
+		Resolved:      true,
+		Authenticated: true,
+		AuthMethod:    netid.AuthMethodCert,
+		OperatorID:    "bob",
+		Role:          netid.RoleRead,
+	}
+	stateDir := t.TempDir()
+	workDir := t.TempDir()
+	realTok, _ := consoleui.LoadOrCreateToken(stateDir)
+	bus := wsbus.New()
+	t.Cleanup(bus.Stop)
+	srv := consoleui.MustNew(t, consoleui.Config{
+		Token:             realTok,
+		KanbanBoardPath:   t.TempDir() + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: t.TempDir(),
+		PerfWorkDir:       t.TempDir(),
+		Bus:               bus,
+		WorkDir:           workDir,
+	})
+	hub := srv.ChatHub()
+
+	// Alice opens an UNSHARED session.
+	const privSessionID = "sess-attach-priv"
+	const privConvID = "conv-attach-priv"
+	if err := hub.OpenSession(privSessionID, "alice", false /*shared=false*/); err != nil {
+		t.Fatalf("OpenSession (unshared): %v", err)
+	}
+	t.Cleanup(func() { hub.CloseSession(privSessionID) })
+
+	// Write alice's transcript.
+	tr := consoleui.NewTranscriptsForTest(workDir)
+	_ = tr.Append(consoleui.TranscriptEntry{
+		SessionID:      privSessionID,
+		ConversationID: privConvID,
+		OperatorID:     "alice",
+		Role:           consoleui.RoleUser,
+		Text:           "private task",
+	})
+
+	// Build the handler with bob's identity injected.
+	handler := consoleui.RequireTokenForNonStatic(realTok,
+		consoleui.RequireJSONForMutations(
+			injectIdentityMiddleware(bobID, srv.Handler())))
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	// Bob supplies sessionId=privSessionID — but the session is NOT shared.
+	// The handler must return 403 (IsShared returns false → owner check fires → 403).
+	transcriptURL := ts.URL + "/api/chat/transcript" +
+		"?conversationId=" + privConvID +
+		"&operatorId=bob" +
+		"&sessionId=" + privSessionID
+	tResp := get(t, transcriptURL, realTok)
+	defer drainClose(tResp)
+	if tResp.StatusCode != http.StatusForbidden {
+		t.Errorf("(b) RoleRead bob reading UNSHARED transcript: status=%d; want 403", tResp.StatusCode)
+	}
+}
+
+// TestAttach_NonOwnerCannotInterject verifies that a non-owner cannot interject
+// (POST /api/chat/dispatch) into a session they do not own.
+//
+// Security requirement (c): the dispatch endpoint must return 403 when the
+// sessionId is already owned by a different operator.
+// (This mirrors TestChatDispatch_403OnSessionOwnerConflict; we re-verify here
+// to close the watch/interject boundary in the Phase 3 security test suite.)
+func TestAttach_NonOwnerCannotInterject(t *testing.T) {
+	stateDir := t.TempDir()
+	realTok, _ := consoleui.LoadOrCreateToken(stateDir)
+	bus := wsbus.New()
+	t.Cleanup(bus.Stop)
+	srv := consoleui.MustNew(t, consoleui.Config{
+		Token:             realTok,
+		KanbanBoardPath:   t.TempDir() + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: t.TempDir(),
+		PerfWorkDir:       t.TempDir(),
+		Bus:               bus,
+		WorkDir:           t.TempDir(),
+	})
+	hub := srv.ChatHub()
+
+	// Alice's session is SHARED (watcher bob can see it) but still alice-owned.
+	const sharedSessionID = "sess-interject-shared"
+	if err := hub.OpenSession(sharedSessionID, "alice", true /*shared=true*/); err != nil {
+		t.Fatalf("OpenSession (shared): %v", err)
+	}
+	t.Cleanup(func() { hub.CloseSession(sharedSessionID) })
+
+	wrapped := consoleui.RequireTokenForNonStatic(realTok,
+		consoleui.RequireJSONForMutations(srv.Handler()))
+	ts := httptest.NewServer(wrapped)
+	t.Cleanup(ts.Close)
+
+	// Bob (watcher) attempts to dispatch into alice's session — must get 403.
+	// The loopback path uses cooperative operatorId in the body; bob claims "bob".
+	body := `{"runtime":"claude","model":"sonnet","agent":"x","task":"hi",` +
+		`"sessionId":"` + sharedSessionID + `","operatorId":"bob"}`
+	resp := post(t, ts.URL+"/api/chat/dispatch", realTok, body)
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("(c) non-owner bob interjecting into alice's session: status=%d; want 403", resp.StatusCode)
 	}
 }
