@@ -65,6 +65,8 @@ func RunWithStateDir(args []string, stdout, stderr io.Writer, stateDir string) e
 	switch sub {
 	case "bootstrap-token":
 		return runBootstrapToken(rest, stdout, stderr, stateDir)
+	case "user":
+		return runUserCmd(rest, stdout, stderr, stateDir)
 	default:
 		return fmt.Errorf("console: unknown subcommand %q (try --help)", sub)
 	}
@@ -124,6 +126,7 @@ func printConsoleHelp(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Subcommands:")
 	fmt.Fprintln(w, "  bootstrap-token   Regenerate the first-admin setup token (zero-users only)")
+	fmt.Fprintln(w, "  user              Manage users (add, list, set-role, disable, enable, delete)")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Run  yakos console <subcommand> --help  for per-subcommand help.")
 }
