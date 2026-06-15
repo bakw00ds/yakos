@@ -14,10 +14,14 @@ package consolecmd
 //
 // # Security notes
 //
-//   - Password prompts use no-echo input (terminal echo is disabled via
-//     readPasswordNoEcho so the password is never visible in the terminal).
-//   - Self-protection: operations that would leave zero non-disabled admins
-//     are refused with a clear error before touching the store.
+//   - Password prompts use readPasswordNoEcho (readpassword.go), which uses
+//     golang.org/x/term.ReadPassword for signal-safe no-echo TTY input.
+//     Falls back to plain stdin read for non-TTY environments.
+//   - Self-protection: SetRoleGuarded, DisableGuarded, DeleteGuarded hold the
+//     store mutex across the last-admin check AND the mutation, preventing the
+//     TOCTOU race that would exist with separate AdminCount + mutate calls.
+//     These methods return userstore.ErrLastAdmin; the CLI surfaces a clear
+//     error message and exits non-zero.
 //   - All state-mutating operations write an audit-log entry (slog) with actor
 //     "cli" + target username + action.  Passwords are NEVER logged.
 //
@@ -27,8 +31,16 @@ package consolecmd
 // `yakos mtls`/`yakos console bootstrap-token`).  It manipulates the users.json
 // file directly, bypassing HTTP.  It is NOT an authenticated HTTP client — it
 // operates as the process owner, which is implicitly trusted.
+//
+// Cross-process note: the in-process mutex in userstore.Store prevents races
+// within a single process.  It does NOT protect against concurrent CLI + daemon
+// mutations (two separate processes, two separate Store instances, two separate
+// mutexes).  Avoid running `yakos console user` commands while the daemon is
+// actively serving admin API requests.  A future enhancement may add file-level
+// locking to close this gap.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -117,7 +129,7 @@ func runUserAdd(args []string, stdout, stderr io.Writer, uStore *userstore.Store
 		return fmt.Errorf("console user add: invalid role %q (valid: read, dispatch, flows-run, admin)", roleStr)
 	}
 
-	// Prompt for password (no echo).
+	// Prompt for password (signal-safe, no echo via golang.org/x/term).
 	fmt.Fprintf(stdout, "Password for %s: ", username)
 	password, err := readPasswordNoEcho(stderr)
 	fmt.Fprintln(stdout) // newline after prompt
@@ -140,6 +152,9 @@ func runUserAdd(args []string, stdout, stderr io.Writer, uStore *userstore.Store
 	}
 
 	if err := uStore.Create(username, password, role); err != nil {
+		if errors.Is(err, userstore.ErrDuplicate) {
+			return fmt.Errorf("console user add: username %q already exists", username)
+		}
 		return fmt.Errorf("console user add: %w", err)
 	}
 
@@ -217,17 +232,14 @@ func runUserSetRole(args []string, stdout, stderr io.Writer, uStore *userstore.S
 		return fmt.Errorf("console user set-role: invalid role %q (valid: read, dispatch, flows-run, admin)", roleStr)
 	}
 
-	// Self-protection: refuse if this would leave zero admins.
-	if role != netid.RoleAdmin {
-		pu, found := uStore.Get(username)
-		if found && pu.Role == netid.RoleAdmin && !pu.Disabled {
-			if uStore.AdminCount() <= 1 {
-				return fmt.Errorf("console user set-role: cannot demote the last admin; promote another user to admin first")
-			}
+	// SetRoleGuarded: atomic last-admin check + mutation under store mutex.
+	if err := uStore.SetRoleGuarded(username, role); err != nil {
+		if errors.Is(err, userstore.ErrLastAdmin) {
+			return fmt.Errorf("console user set-role: cannot demote the last admin; promote another user to admin first")
 		}
-	}
-
-	if err := uStore.SetRole(username, role); err != nil {
+		if errors.Is(err, userstore.ErrUserNotFound) {
+			return fmt.Errorf("console user set-role: user %q not found", username)
+		}
 		return fmt.Errorf("console user set-role: %w", err)
 	}
 
@@ -271,6 +283,9 @@ func runUserResetPassword(args []string, stdout, stderr io.Writer, uStore *users
 	}
 
 	if err := uStore.ResetPassword(username, password); err != nil {
+		if errors.Is(err, userstore.ErrUserNotFound) {
+			return fmt.Errorf("console user reset-password: user %q not found", username)
+		}
 		return fmt.Errorf("console user reset-password: %w", err)
 	}
 
@@ -304,15 +319,14 @@ func runUserDisable(args []string, stdout, stderr io.Writer, uStore *userstore.S
 
 	username := args[0]
 
-	// Self-protection.
-	pu, found := uStore.Get(username)
-	if found && pu.Role == netid.RoleAdmin && !pu.Disabled {
-		if uStore.AdminCount() <= 1 {
+	// DisableGuarded: atomic last-admin check + mutation under store mutex.
+	if err := uStore.DisableGuarded(username); err != nil {
+		if errors.Is(err, userstore.ErrLastAdmin) {
 			return fmt.Errorf("console user disable: cannot disable the last admin; promote another user to admin first")
 		}
-	}
-
-	if err := uStore.Disable(username); err != nil {
+		if errors.Is(err, userstore.ErrUserNotFound) {
+			return fmt.Errorf("console user disable: user %q not found", username)
+		}
 		return fmt.Errorf("console user disable: %w", err)
 	}
 
@@ -347,6 +361,9 @@ func runUserEnable(args []string, stdout, stderr io.Writer, uStore *userstore.St
 	username := args[0]
 
 	if err := uStore.Enable(username); err != nil {
+		if errors.Is(err, userstore.ErrUserNotFound) {
+			return fmt.Errorf("console user enable: user %q not found", username)
+		}
 		return fmt.Errorf("console user enable: %w", err)
 	}
 
@@ -380,15 +397,14 @@ func runUserDelete(args []string, stdout, stderr io.Writer, uStore *userstore.St
 
 	username := args[0]
 
-	// Self-protection.
-	pu, found := uStore.Get(username)
-	if found && pu.Role == netid.RoleAdmin && !pu.Disabled {
-		if uStore.AdminCount() <= 1 {
+	// DeleteGuarded: atomic last-admin check + deletion under store mutex.
+	if err := uStore.DeleteGuarded(username); err != nil {
+		if errors.Is(err, userstore.ErrLastAdmin) {
 			return fmt.Errorf("console user delete: cannot delete the last admin; promote another user to admin first")
 		}
-	}
-
-	if err := uStore.Delete(username); err != nil {
+		if errors.Is(err, userstore.ErrUserNotFound) {
+			return fmt.Errorf("console user delete: user %q not found", username)
+		}
 		return fmt.Errorf("console user delete: %w", err)
 	}
 
@@ -419,14 +435,14 @@ func printUserHelp(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Valid roles: read, dispatch, flows-run, admin")
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "SECURITY: self-protection guards refuse to remove the last admin.")
+	fmt.Fprintln(w, "SECURITY: atomic last-admin guard — cannot remove the last admin.")
 	fmt.Fprintln(w, "Run  yakos console user <subcommand> --help  for per-subcommand help.")
 }
 
 func printUserAddHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage: yakos console user add <username> [--role <role>]")
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "Create a new user. Prompts for a password (no echo).")
+	fmt.Fprintln(w, "Create a new user. Prompts for a password (no echo via term.ReadPassword).")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  --role <role>   Role to assign (default: read)")

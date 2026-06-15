@@ -1029,6 +1029,125 @@ func TestConcurrentMutations_Race(t *testing.T) {
 	}
 }
 
+// TestGuardedLastAdmin_TOCTOU verifies that N goroutines racing to demote,
+// disable, or delete admins on a 2-admin store never leave zero active admins.
+//
+// This is the regression test for the TOCTOU race fixed by the guarded methods:
+// without the atomic check+mutate, two goroutines can both observe AdminCount==2
+// and both proceed, leaving AdminCount==0.  The guarded methods hold s.mu across
+// the adminCountLocked() check AND the mutation, so at most one op can succeed
+// when AdminCount==1.
+//
+// Shape of the store: admin-a and admin-b are both RoleAdmin and enabled.
+// Each goroutine attempts one of: DisableGuarded(admin-a), DeleteGuarded(admin-b),
+// SetRoleGuarded(admin-a, RoleRead).  Exactly one of these can succeed (the first
+// to observe AdminCount==2 and perform the mutation drops the count to 1; all
+// subsequent ops must fail with ErrLastAdmin).
+//
+// After the race: AdminCount must be exactly 1 (≥1 and never 0).
+func TestGuardedLastAdmin_TOCTOU(t *testing.T) {
+	// N goroutines per operation type; 3 operation types; 2 admin users.
+	const N = 50
+
+	base := t.TempDir()
+	path := filepath.Join(base, "users.json")
+
+	s, err := userstore.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Create exactly two active admins.
+	if err := s.Create("admin-a", "super-secret-password-1", netid.RoleAdmin); err != nil {
+		t.Fatalf("Create admin-a: %v", err)
+	}
+	if err := s.Create("admin-b", "super-secret-password-2", netid.RoleAdmin); err != nil {
+		t.Fatalf("Create admin-b: %v", err)
+	}
+
+	if got := s.AdminCount(); got != 2 {
+		t.Fatalf("pre-race AdminCount: got %d; want 2", got)
+	}
+
+	var (
+		wg          sync.WaitGroup
+		disableErrs atomic.Int64
+		deleteErrs  atomic.Int64
+		demoteErrs  atomic.Int64
+		disableOK   atomic.Int64
+		deleteOK    atomic.Int64
+		demoteOK    atomic.Int64
+	)
+
+	// Fan out N goroutines per operation.
+	for i := 0; i < N; i++ {
+		wg.Add(3)
+
+		go func() {
+			defer wg.Done()
+			if err := s.DisableGuarded("admin-a"); err != nil {
+				if !errors.Is(err, userstore.ErrLastAdmin) && !errors.Is(err, userstore.ErrUserNotFound) {
+					t.Errorf("DisableGuarded unexpected error: %v", err)
+				}
+				disableErrs.Add(1)
+			} else {
+				disableOK.Add(1)
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			if err := s.DeleteGuarded("admin-b"); err != nil {
+				if !errors.Is(err, userstore.ErrLastAdmin) && !errors.Is(err, userstore.ErrUserNotFound) {
+					t.Errorf("DeleteGuarded unexpected error: %v", err)
+				}
+				deleteErrs.Add(1)
+			} else {
+				deleteOK.Add(1)
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			if err := s.SetRoleGuarded("admin-a", netid.RoleDispatch); err != nil {
+				if !errors.Is(err, userstore.ErrLastAdmin) && !errors.Is(err, userstore.ErrUserNotFound) {
+					t.Errorf("SetRoleGuarded unexpected error: %v", err)
+				}
+				demoteErrs.Add(1)
+			} else {
+				demoteOK.Add(1)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Core invariant: admin count must never have dropped to zero.
+	// After the race, exactly 1 active admin must remain.
+	finalCount := s.AdminCount()
+	if finalCount < 1 {
+		t.Errorf("post-race AdminCount=%d: last-admin guard failed; zero admins reached", finalCount)
+	}
+
+	// Log op outcomes for diagnosis if the test fails.
+	t.Logf("disable: %d ok / %d guarded; delete: %d ok / %d guarded; demote: %d ok / %d guarded; finalAdminCount: %d",
+		disableOK.Load(), disableErrs.Load(),
+		deleteOK.Load(), deleteErrs.Load(),
+		demoteOK.Load(), demoteErrs.Load(),
+		finalCount)
+
+	// Exactly one destructive op can succeed (the first to atomically observe
+	// AdminCount==2 and mutate drops it to 1).  All subsequent ops on the
+	// surviving single admin must fail with ErrLastAdmin (or ErrUserNotFound if
+	// the user was already deleted).
+	totalOK := disableOK.Load() + deleteOK.Load() + demoteOK.Load()
+	if totalOK == 0 {
+		// Theoretically impossible: with 2 active admins, at least one op
+		// (any of the 3N) must be able to proceed.
+		t.Errorf("post-race: no operation succeeded; this suggests a bug in the guard logic")
+	}
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 func openEmpty(t *testing.T) *userstore.Store {

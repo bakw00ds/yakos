@@ -7,7 +7,7 @@ package consoleui
 //	GET  /api/users                — list all users (RoleAdmin, no password hash)
 //	POST /api/users                — create user {username,password,role}
 //	POST /api/users/role           — set role {username,role}
-//	POST /api/users/reset-password — admin password reset {username,newPassword?}
+//	POST /api/users/reset-password — admin password reset {username,newPassword}
 //	POST /api/users/disable        — disable user {username}
 //	POST /api/users/enable         — enable user {username}
 //	POST /api/users/delete         — delete user {username}
@@ -17,12 +17,11 @@ package consoleui
 // # Auth
 //
 // All /api/users/* endpoints require RoleAdmin.  Routes are mounted via
-// requireRoleFunc(RoleAdmin, …) in registerRoutes; no re-check is needed inside
-// the handler body (enforced at middleware level only).
+// requireRoleFunc(RoleAdmin, …) in registerRoutes; role enforcement is at the
+// middleware level only — never re-checked in handler bodies.
 //
 // /api/account/password and /api/account are available to ANY authenticated
-// user (not admin-only).  They use requireRoleFunc(RoleRead, …) at the route
-// level.
+// user (RoleRead minimum).
 //
 // # CSRF
 //
@@ -35,28 +34,29 @@ package consoleui
 // Every state-mutating call writes a slog entry with actor (operatorID),
 // target (username), and action.  Passwords are NEVER logged.
 //
-// # Self-protection
+// # Self-protection (atomic last-admin guard)
 //
-// Any operation that would leave zero non-disabled admins is rejected with 409.
-// The check uses userstore.AdminCount and is applied BEFORE mutating state.
+// SetRoleGuarded, DisableGuarded, and DeleteGuarded in userstore hold the
+// store mutex across the last-admin check AND the mutation.  This closes the
+// TOCTOU race that would exist if the check (AdminCount) and the mutation were
+// separate locking steps.  Handlers map ErrLastAdmin → 409; ErrUserNotFound → 404.
 //
 // # Idempotency
 //
-// GET endpoints are safe. POST endpoints carry explicit note on idempotency:
+// GET endpoints are safe. POST endpoints:
 // - POST /api/users        — not idempotent (second create → 409 duplicate).
-//   Callers wanting idempotency should GET first; no Idempotency-Key header
-//   is defined because usernames are the natural idempotency key.
+//   Username is the natural idempotency key; GET first if needed.
 // - POST /api/users/role   — idempotent (setting same role twice is a no-op).
 // - POST /api/users/reset-password — idempotent (second reset just re-hashes).
-// - POST /api/users/disable / enable — idempotent (double-disable is fine).
-// - POST /api/users/delete — idempotent (second delete returns 404).
+// - POST /api/users/disable / enable — idempotent at the store level.
+// - POST /api/users/delete — second delete → 404.
 // - POST /api/account/password — not idempotent; each call bumps session epoch.
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/bakw00ds/yakos/internal/authsession"
 	"github.com/bakw00ds/yakos/internal/netid"
@@ -68,6 +68,9 @@ import (
 // All request bodies are bound through a DTO that explicitly omits privileged
 // fields. Privileged fields (session epoch, disabled state, password hash) are
 // never bound from caller input — they are set by the store's own logic.
+//
+// Every decoder uses DisallowUnknownFields() so that client-side typos in field
+// names are caught immediately (consistent with other handlers in this package).
 
 // createUserDTO is the wire shape for POST /api/users.
 type createUserDTO struct {
@@ -89,9 +92,6 @@ type setRoleDTO struct {
 }
 
 // resetPasswordDTO is the wire shape for POST /api/users/reset-password.
-// NewPassword is optional: when empty, only the passwordResetReq flag is set
-// (the store requires a password, so we generate an error if both are missing).
-// In practice callers always provide a temporary password.
 type resetPasswordDTO struct {
 	Username    string `json:"username"`
 	NewPassword string `json:"newPassword"`
@@ -141,9 +141,20 @@ func newUsersHandlers(uStore *userstore.Store, aStore *authsession.Store) *users
 	}
 }
 
+// decodeJSON decodes r.Body into v, disallowing unknown fields.
+// Returns an error message suitable for a 400 response, or "" on success.
+func decodeJSON(r *http.Request, v interface{}) string {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return "invalid request body"
+	}
+	return ""
+}
+
 // ---- GET /api/users + POST /api/users (root dispatcher) --------------------
 
-// handleUsersRoot dispatches GET /api/users → handleListUsers and
+// handleUsersRoot dispatches GET/HEAD /api/users → handleListUsers and
 // POST /api/users → handleCreateUser.  A single mux pattern is used to avoid
 // duplicate-registration panics in Go's ServeMux.
 func (uh *usersHandlers) handleUsersRoot(w http.ResponseWriter, r *http.Request) {
@@ -173,16 +184,11 @@ func (uh *usersHandlers) handleListUsers(w http.ResponseWriter, r *http.Request)
 // Creates a new user with the given username, password, and role.
 // Requires RoleAdmin (enforced by route middleware).
 func (uh *usersHandlers) handleCreateUser(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	actor := netid.IdentityFrom(r.Context()).OperatorID
 
 	var dto createUserDTO
-	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
-		writeAuthJSON(w, http.StatusBadRequest, `{"error":"invalid request body"}`)
+	if msg := decodeJSON(r, &dto); msg != "" {
+		writeAuthJSON(w, http.StatusBadRequest, `{"error":"`+jsonEscapeString(msg)+`"}`)
 		return
 	}
 
@@ -208,7 +214,7 @@ func (uh *usersHandlers) handleCreateUser(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := uh.userStore.Create(dto.Username, dto.Password, role); err != nil {
-		if strings.Contains(err.Error(), "already exists") {
+		if errors.Is(err, userstore.ErrDuplicate) {
 			writeAuthJSON(w, http.StatusConflict, `{"error":"username already exists"}`)
 			return
 		}
@@ -231,7 +237,9 @@ func (uh *usersHandlers) handleCreateUser(w http.ResponseWriter, r *http.Request
 // ---- POST /api/users/role ---------------------------------------------------
 
 // handleSetRole handles POST /api/users/role.
-// Sets the role for a user and bumps sessionEpoch to invalidate live sessions.
+// Sets the role for a user. Uses SetRoleGuarded to atomically enforce the
+// last-admin guard (count check + mutation under a single lock).
+// Bumps sessionEpoch, then invalidates live sessions.
 // Requires RoleAdmin (enforced by route middleware).
 func (uh *usersHandlers) handleSetRole(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -242,8 +250,8 @@ func (uh *usersHandlers) handleSetRole(w http.ResponseWriter, r *http.Request) {
 	actor := netid.IdentityFrom(r.Context()).OperatorID
 
 	var dto setRoleDTO
-	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
-		writeAuthJSON(w, http.StatusBadRequest, `{"error":"invalid request body"}`)
+	if msg := decodeJSON(r, &dto); msg != "" {
+		writeAuthJSON(w, http.StatusBadRequest, `{"error":"`+jsonEscapeString(msg)+`"}`)
 		return
 	}
 
@@ -259,22 +267,14 @@ func (uh *usersHandlers) handleSetRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Self-protection: refuse if this would remove the last admin.
-	// Check: if the target is currently admin and the new role is not admin,
-	// and there is only one non-disabled admin, refuse.
-	if newRole != netid.RoleAdmin {
-		pu, found := uh.userStore.Get(dto.Username)
-		if found && pu.Role == netid.RoleAdmin && !pu.Disabled {
-			if uh.userStore.AdminCount() <= 1 {
-				writeAuthJSON(w, http.StatusConflict,
-					`{"error":"cannot demote the last admin; promote another user to admin first"}`)
-				return
-			}
+	// SetRoleGuarded: atomic last-admin check + mutation under store mutex.
+	if err := uh.userStore.SetRoleGuarded(dto.Username, newRole); err != nil {
+		if errors.Is(err, userstore.ErrLastAdmin) {
+			writeAuthJSON(w, http.StatusConflict,
+				`{"error":"cannot demote the last admin; promote another user to admin first"}`)
+			return
 		}
-	}
-
-	if err := uh.userStore.SetRole(dto.Username, newRole); err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, userstore.ErrUserNotFound) {
 			writeAuthJSON(w, http.StatusNotFound, `{"error":"user not found"}`)
 			return
 		}
@@ -284,7 +284,7 @@ func (uh *usersHandlers) handleSetRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bump epoch → invalidate live sessions for the target.
+	// Invalidate live sessions (epoch bumped by SetRoleGuarded).
 	if uh.authStore != nil {
 		pu, found := uh.userStore.Get(dto.Username)
 		if found {
@@ -316,8 +316,8 @@ func (uh *usersHandlers) handleResetPassword(w http.ResponseWriter, r *http.Requ
 	actor := netid.IdentityFrom(r.Context()).OperatorID
 
 	var dto resetPasswordDTO
-	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
-		writeAuthJSON(w, http.StatusBadRequest, `{"error":"invalid request body"}`)
+	if msg := decodeJSON(r, &dto); msg != "" {
+		writeAuthJSON(w, http.StatusBadRequest, `{"error":"`+jsonEscapeString(msg)+`"}`)
 		return
 	}
 
@@ -338,12 +338,8 @@ func (uh *usersHandlers) handleResetPassword(w http.ResponseWriter, r *http.Requ
 	}
 
 	if err := uh.userStore.ResetPassword(dto.Username, dto.NewPassword); err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, userstore.ErrUserNotFound) {
 			writeAuthJSON(w, http.StatusNotFound, `{"error":"user not found"}`)
-			return
-		}
-		if strings.Contains(err.Error(), "too short") {
-			writeAuthJSON(w, http.StatusBadRequest, `{"error":"`+jsonEscapeString(err.Error())+`"}`)
 			return
 		}
 		slog.Error("consoleui: reset password: store error",
@@ -373,7 +369,8 @@ func (uh *usersHandlers) handleResetPassword(w http.ResponseWriter, r *http.Requ
 // ---- POST /api/users/disable ------------------------------------------------
 
 // handleDisableUser handles POST /api/users/disable.
-// Disables a user, bumps epoch, and revokes all live sessions.
+// Uses DisableGuarded to atomically enforce the last-admin guard.
+// Bumps epoch and revokes all live sessions.
 // Requires RoleAdmin (enforced by route middleware).
 func (uh *usersHandlers) handleDisableUser(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -384,8 +381,8 @@ func (uh *usersHandlers) handleDisableUser(w http.ResponseWriter, r *http.Reques
 	actor := netid.IdentityFrom(r.Context()).OperatorID
 
 	var dto usernameDTO
-	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
-		writeAuthJSON(w, http.StatusBadRequest, `{"error":"invalid request body"}`)
+	if msg := decodeJSON(r, &dto); msg != "" {
+		writeAuthJSON(w, http.StatusBadRequest, `{"error":"`+jsonEscapeString(msg)+`"}`)
 		return
 	}
 
@@ -394,18 +391,14 @@ func (uh *usersHandlers) handleDisableUser(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Self-protection: refuse if this would leave zero active admins.
-	pu, found := uh.userStore.Get(dto.Username)
-	if found && pu.Role == netid.RoleAdmin && !pu.Disabled {
-		if uh.userStore.AdminCount() <= 1 {
+	// DisableGuarded: atomic last-admin check + mutation under store mutex.
+	if err := uh.userStore.DisableGuarded(dto.Username); err != nil {
+		if errors.Is(err, userstore.ErrLastAdmin) {
 			writeAuthJSON(w, http.StatusConflict,
 				`{"error":"cannot disable the last admin; promote another user to admin first"}`)
 			return
 		}
-	}
-
-	if err := uh.userStore.Disable(dto.Username); err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, userstore.ErrUserNotFound) {
 			writeAuthJSON(w, http.StatusNotFound, `{"error":"user not found"}`)
 			return
 		}
@@ -443,8 +436,8 @@ func (uh *usersHandlers) handleEnableUser(w http.ResponseWriter, r *http.Request
 	actor := netid.IdentityFrom(r.Context()).OperatorID
 
 	var dto usernameDTO
-	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
-		writeAuthJSON(w, http.StatusBadRequest, `{"error":"invalid request body"}`)
+	if msg := decodeJSON(r, &dto); msg != "" {
+		writeAuthJSON(w, http.StatusBadRequest, `{"error":"`+jsonEscapeString(msg)+`"}`)
 		return
 	}
 
@@ -454,7 +447,7 @@ func (uh *usersHandlers) handleEnableUser(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := uh.userStore.Enable(dto.Username); err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, userstore.ErrUserNotFound) {
 			writeAuthJSON(w, http.StatusNotFound, `{"error":"user not found"}`)
 			return
 		}
@@ -476,7 +469,8 @@ func (uh *usersHandlers) handleEnableUser(w http.ResponseWriter, r *http.Request
 // ---- POST /api/users/delete -------------------------------------------------
 
 // handleDeleteUser handles POST /api/users/delete.
-// Deletes a user and revokes all live sessions.
+// Uses DeleteGuarded to atomically enforce the last-admin guard.
+// Purges live sessions before deletion.
 // Requires RoleAdmin (enforced by route middleware).
 func (uh *usersHandlers) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -487,8 +481,8 @@ func (uh *usersHandlers) handleDeleteUser(w http.ResponseWriter, r *http.Request
 	actor := netid.IdentityFrom(r.Context()).OperatorID
 
 	var dto usernameDTO
-	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
-		writeAuthJSON(w, http.StatusBadRequest, `{"error":"invalid request body"}`)
+	if msg := decodeJSON(r, &dto); msg != "" {
+		writeAuthJSON(w, http.StatusBadRequest, `{"error":"`+jsonEscapeString(msg)+`"}`)
 		return
 	}
 
@@ -497,24 +491,21 @@ func (uh *usersHandlers) handleDeleteUser(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Self-protection: refuse if this would leave zero active admins.
-	pu, found := uh.userStore.Get(dto.Username)
-	if found && pu.Role == netid.RoleAdmin && !pu.Disabled {
-		if uh.userStore.AdminCount() <= 1 {
-			writeAuthJSON(w, http.StatusConflict,
-				`{"error":"cannot delete the last admin; promote another user to admin first"}`)
-			return
-		}
-	}
-
-	// Revoke live sessions before deleting (deletion makes future lookups fail,
-	// but sessions already in-flight would otherwise survive until expiry).
+	// Revoke live sessions before deleting (deletion makes future store lookups
+	// return not-found, but sessions already in-flight would otherwise survive
+	// until their idle/absolute timeout).
 	if uh.authStore != nil {
 		uh.authStore.RevokeAllForUser(dto.Username)
 	}
 
-	if err := uh.userStore.Delete(dto.Username); err != nil {
-		if strings.Contains(err.Error(), "not found") {
+	// DeleteGuarded: atomic last-admin check + deletion under store mutex.
+	if err := uh.userStore.DeleteGuarded(dto.Username); err != nil {
+		if errors.Is(err, userstore.ErrLastAdmin) {
+			writeAuthJSON(w, http.StatusConflict,
+				`{"error":"cannot delete the last admin; promote another user to admin first"}`)
+			return
+		}
+		if errors.Is(err, userstore.ErrUserNotFound) {
 			writeAuthJSON(w, http.StatusNotFound, `{"error":"user not found"}`)
 			return
 		}
@@ -555,8 +546,8 @@ func (uh *usersHandlers) handleChangePassword(w http.ResponseWriter, r *http.Req
 	username := id.OperatorID
 
 	var dto changePasswordDTO
-	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
-		writeAuthJSON(w, http.StatusBadRequest, `{"error":"invalid request body"}`)
+	if msg := decodeJSON(r, &dto); msg != "" {
+		writeAuthJSON(w, http.StatusBadRequest, `{"error":"`+jsonEscapeString(msg)+`"}`)
 		return
 	}
 
@@ -585,19 +576,14 @@ func (uh *usersHandlers) handleChangePassword(w http.ResponseWriter, r *http.Req
 
 	// SetPassword hashes new password, clears passwordResetReq, bumps epoch.
 	if err := uh.userStore.SetPassword(username, dto.NewPassword); err != nil {
-		if strings.Contains(err.Error(), "too short") {
-			writeAuthJSON(w, http.StatusBadRequest, `{"error":"`+jsonEscapeString(err.Error())+`"}`)
-			return
-		}
 		slog.Error("consoleui: account/password: set password error",
 			"username", username, "err", err)
 		writeAuthJSON(w, http.StatusInternalServerError, `{"error":"internal error"}`)
 		return
 	}
 
-	// Invalidate all sessions except the current one would require knowing the
-	// current session ID.  Per ADR-0005, epoch bump invalidates ALL sessions
-	// including the current; the user is expected to re-authenticate.
+	// Per ADR-0005, epoch bump invalidates ALL sessions including the current;
+	// the user is expected to re-authenticate after a password change.
 	if uh.authStore != nil {
 		pu, found := uh.userStore.Get(username)
 		if found {

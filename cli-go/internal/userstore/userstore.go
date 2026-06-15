@@ -169,13 +169,32 @@ var ErrAuthFailed = errors.New("invalid username or password")
 // does Count()==0 and Create in separate calls.
 var ErrNotFirstUser = errors.New("userstore: admin already exists; use CreateFirstAdmin only on a zero-users store")
 
+// ErrLastAdmin is returned by the guarded mutation methods (SetRoleGuarded,
+// DisableGuarded, DeleteGuarded) when the operation would leave zero
+// non-disabled admins.  Callers map this to 409 Conflict (HTTP) or a clear
+// error message (CLI).
+//
+// Using errors.Is(err, ErrLastAdmin) is the canonical check; do NOT use
+// strings.Contains on the error message.
+var ErrLastAdmin = errors.New("userstore: operation would remove the last admin")
+
+// ErrUserNotFound is returned by the guarded mutation methods when the target
+// username does not exist in the store.  Callers map this to 404 Not Found
+// (HTTP) or a clear error message (CLI).
+//
+// Using errors.Is(err, ErrUserNotFound) is the canonical check.
+var ErrUserNotFound = errors.New("userstore: user not found")
+
+// ErrDuplicate is returned by Create when the username already exists.
+// Exported so callers can use errors.Is instead of string matching.
+var ErrDuplicate = errors.New("userstore: username already exists")
+
 // internal sentinel errors (not exported — used only for structured audit logging)
 var (
 	errUnknownUser   = errors.New("userstore: unknown username")
 	errWrongPassword = errors.New("userstore: wrong password")
 	errUserDisabled  = errors.New("userstore: account disabled")
 	errUserLocked    = errors.New("userstore: account locked")
-	errDuplicate     = errors.New("userstore: username already exists")
 )
 
 // AuthFailureReason extracts an internal reason code from a Verify error for
@@ -383,7 +402,7 @@ func (s *Store) Create(username, password string, role netid.Role) error {
 	defer s.mu.Unlock()
 
 	if _, ok := s.findLocked(username); ok {
-		return fmt.Errorf("userstore: create %q: %w", username, errDuplicate)
+		return fmt.Errorf("userstore: create %q: %w", username, ErrDuplicate)
 	}
 
 	now := time.Now().UTC()
@@ -599,7 +618,7 @@ func (s *Store) ResetPassword(username, tempPassword string) error {
 
 	u, ok := s.findLocked(username)
 	if !ok {
-		return fmt.Errorf("userstore: reset-password: user %q not found", username)
+		return fmt.Errorf("userstore: reset-password: user %q: %w", username, ErrUserNotFound)
 	}
 	u.PasswordHash = hash
 	u.PasswordResetReq = true
@@ -633,7 +652,7 @@ func (s *Store) Enable(username string) error {
 
 	u, ok := s.findLocked(username)
 	if !ok {
-		return fmt.Errorf("userstore: enable: user %q not found", username)
+		return fmt.Errorf("userstore: enable: user %q: %w", username, ErrUserNotFound)
 	}
 	u.Disabled = false
 	u.UpdatedAt = time.Now().UTC()
@@ -667,6 +686,111 @@ func (s *Store) BumpSessionEpoch(username string) error {
 	u.SessionEpoch++
 	u.UpdatedAt = time.Now().UTC()
 	s.updateLocked(u)
+	return s.persist()
+}
+
+// ---- Guarded admin-safe mutation methods ------------------------------------
+//
+// SetRoleGuarded, DisableGuarded, and DeleteGuarded are atomic alternatives to
+// SetRole, Disable, and Delete that incorporate the last-admin self-protection
+// check under the SAME mutex lock as the mutation.  This closes the TOCTOU
+// race that exists when callers call AdminCount() and then mutate in separate
+// locking steps: two concurrent goroutines can both observe AdminCount()==2,
+// both proceed, and together reduce the admin count to zero.
+//
+// Each guarded method:
+//  1. Acquires s.mu.
+//  2. Looks up the target user (returns ErrUserNotFound if absent).
+//  3. Evaluates whether the op would drop admin count to zero via adminCountLocked.
+//     Returns ErrLastAdmin (without mutating) if so.
+//  4. Performs the mutation under the same lock.
+//  5. Persists and returns.
+//
+// Callers MUST use errors.Is(err, ErrLastAdmin) and errors.Is(err, ErrUserNotFound)
+// to distinguish these sentinels from other errors.
+//
+// Cross-process note: these guards are in-process only (single sync.Mutex).
+// `yakos console user` CLI accesses users.json directly with its own Store
+// instance — a separate OS process from the daemon.  The in-process guard
+// prevents races within a single process but does not protect against
+// concurrent CLI + daemon mutations.  Operators should avoid running CLI
+// user-management commands while the daemon is serving admin API requests.
+// A future enhancement could use file-locking across processes.
+
+// SetRoleGuarded sets the role for username, bumps SessionEpoch, and returns
+// ErrLastAdmin if the operation would demote the last non-disabled admin.
+// Atomic: the last-admin check and the mutation share a single lock.
+func (s *Store) SetRoleGuarded(username string, role netid.Role) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	u, ok := s.findLocked(username)
+	if !ok {
+		return fmt.Errorf("userstore: set-role: user %q: %w", username, ErrUserNotFound)
+	}
+
+	// Self-protection: if demoting an active admin and they are the last one.
+	if role != netid.RoleAdmin && u.Role == netid.RoleAdmin.String() && !u.Disabled {
+		if s.adminCountLocked() <= 1 {
+			return fmt.Errorf("userstore: set-role: user %q: %w", username, ErrLastAdmin)
+		}
+	}
+
+	u.Role = role.String()
+	u.SessionEpoch++
+	u.UpdatedAt = time.Now().UTC()
+	s.updateLocked(u)
+	return s.persist()
+}
+
+// DisableGuarded disables a user account, bumps SessionEpoch, and returns
+// ErrLastAdmin if the operation would disable the last non-disabled admin.
+// Atomic: the last-admin check and the mutation share a single lock.
+func (s *Store) DisableGuarded(username string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	u, ok := s.findLocked(username)
+	if !ok {
+		return fmt.Errorf("userstore: disable: user %q: %w", username, ErrUserNotFound)
+	}
+
+	// Self-protection: if disabling an active admin and they are the last one.
+	if u.Role == netid.RoleAdmin.String() && !u.Disabled {
+		if s.adminCountLocked() <= 1 {
+			return fmt.Errorf("userstore: disable: user %q: %w", username, ErrLastAdmin)
+		}
+	}
+
+	u.Disabled = true
+	u.SessionEpoch++
+	u.UpdatedAt = time.Now().UTC()
+	s.updateLocked(u)
+	return s.persist()
+}
+
+// DeleteGuarded deletes a user and returns ErrLastAdmin if the operation would
+// remove the last non-disabled admin.
+// Atomic: the last-admin check and the deletion share a single lock.
+func (s *Store) DeleteGuarded(username string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.indexLocked(username)
+	if idx < 0 {
+		return fmt.Errorf("userstore: delete: user %q: %w", username, ErrUserNotFound)
+	}
+
+	u := s.data.Users[idx]
+
+	// Self-protection: if deleting an active admin and they are the last one.
+	if u.Role == netid.RoleAdmin.String() && !u.Disabled {
+		if s.adminCountLocked() <= 1 {
+			return fmt.Errorf("userstore: delete: user %q: %w", username, ErrLastAdmin)
+		}
+	}
+
+	s.data.Users = append(s.data.Users[:idx], s.data.Users[idx+1:]...)
 	return s.persist()
 }
 
