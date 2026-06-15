@@ -2934,6 +2934,50 @@ html[data-theme="light"] .ide-header-btn:hover:not(:disabled) {
   min-height: 32px;
 }
 
+/* ── IDE chat session picker (Phase 5) ────────────────────────────────────── */
+/* Compact <select> inside .ide-chat-header that lets the operator mirror any  */
+/* live/attachable session into the IDE chat slot.  Uses --surface / --border   */
+/* design tokens so all four themes re-theme automatically.                     */
+
+.ide-chat-picker {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 4px;
+  height: 22px;
+  cursor: pointer;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  /* Show a minimal chevron via background-image so the element still looks
+     like a picker in all themes without relying on UA default styling. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%23888'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 5px center;
+  padding-right: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ide-chat-picker:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.ide-chat-picker:hover {
+  border-color: var(--accent);
+}
+
+html[data-theme="light"] .ide-chat-picker {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%23555'/%3E%3C/svg%3E");
+}
+
 #ide-chat-slot {
   flex: 1;
   overflow: hidden;

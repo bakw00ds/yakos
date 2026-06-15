@@ -88,6 +88,10 @@
   var ideEditorReady = false;
   var ideQueuedOpen = null; // re-assigned to [] in IDE section init (B2: array queue)
   var ideMessageHandlerRegistered = false;
+  // IDE embedded chat pane tracking (Phase 5 session picker).
+  // ideEmbeddedPaneId: the paneId currently mounted in #ide-chat-slot, or null.
+  // Needed so replaceIdeChatPane() can tear down the old pane cleanly.
+  var ideEmbeddedPaneId = null;
   // Multi-file tab state (hoisted for TDZ safety):
   //   ideOpenFiles: Map<path, {version, dirty, editable, saving, saveStatusTimer}>
   //   ideActiveTabPath: workspace-relative path of the currently active tab
@@ -660,6 +664,8 @@
           attachable:   false,
         });
         renderReplFleet();
+        // Phase 5: keep the IDE session picker in sync with live fleet state.
+        renderIdeChatPicker();
       }
       pushFeed(msg.ts, topic, feedSummary(topic, payload), '');
     } else if (topic === 'fleet.finished') {
@@ -684,6 +690,8 @@
           });
         }
         renderReplFleet();
+        // Phase 5: keep the IDE session picker in sync with live fleet state.
+        renderIdeChatPicker();
       }
       pushFeed(msg.ts, topic, feedSummary(topic, payload), '');
     } else if (topic === 'presence') {
@@ -5533,8 +5541,14 @@
               'title="' + (layout.chatCollapsed ? 'Expand chat' : 'Collapse chat') + '">' +
               (layout.chatCollapsed ? '&#x276E;' : '&#x276F;') +
             '</button>' +
-            '<span class="subsection-title"' +
-              (layout.chatCollapsed ? ' style="display:none"' : '') + '>Chat</span>' +
+            // Phase 5: session picker — lets the operator bind the IDE chat slot to
+            // any of their live/attachable sessions (mirroring the Chat tab) instead
+            // of the default ephemeral IDE pane.  Hidden when chat is collapsed.
+            '<select id="ide-chat-picker" class="ide-chat-picker" ' +
+              'aria-label="Switch IDE chat to an open session"' +
+              (layout.chatCollapsed ? ' style="display:none"' : '') + '>' +
+              '<option value="">new session</option>' +
+            '</select>' +
           '</div>' +
           '<div id="ide-chat-slot"' +
             (layout.chatCollapsed ? ' style="display:none"' : '') + '></div>' +
@@ -5604,6 +5618,30 @@
       });
     }
 
+    // ── Session picker (Phase 5) ──────────────────────────────────────────
+    // Wire the picker's change handler once.  The picker options are populated
+    // by renderIdeChatPicker(), called here on first open and on every
+    // fleet.started / fleet.finished WS event thereafter.
+    const picker = document.getElementById('ide-chat-picker');
+    if (picker) {
+      picker.addEventListener('change', function() {
+        var val = picker.value; // '' = new session; else = sessionId
+        if (val === '') {
+          // Operator chose "new session": replace with a fresh ephemeral pane.
+          mountIdeChatPane();
+        } else {
+          // Operator chose an existing session: attach to it.
+          var fleetRow = fleetSessions.get(val);
+          var watchOnly = !(fleetRow && fleetRow.owned);
+          ideBindChatToSession(val, val, watchOnly);
+        }
+      });
+    }
+
+    // Seed picker with current fleet state (may already be populated if the
+    // REPL tab was opened first; safe to call before fleet fetch completes).
+    renderIdeChatPicker();
+
     // ── Splitter drag (left: tree|editor) ────────────────────────────────
     ideWireSplitter('ide-splitter-left', 'left');
 
@@ -5660,18 +5698,18 @@
     } else { // chat
       layout.chatCollapsed = !layout.chatCollapsed;
       ideSaveLayout(layout);
-      var chatCol   = document.getElementById('ide-chat-col');
-      var chatSlot  = document.getElementById('ide-chat-slot');
-      var chatTitle = chatCol ? chatCol.querySelector('.subsection-title') : null;
-      var chatTog   = document.getElementById('ide-chat-toggle');
-      var rSplitter = document.getElementById('ide-splitter-right');
-      var layoutEl2 = document.getElementById('ide-layout-root');
-      var collapsed2 = layout.chatCollapsed;
+      var chatCol     = document.getElementById('ide-chat-col');
+      var chatSlot    = document.getElementById('ide-chat-slot');
+      var chatPicker  = document.getElementById('ide-chat-picker');
+      var chatTog     = document.getElementById('ide-chat-toggle');
+      var rSplitter   = document.getElementById('ide-splitter-right');
+      var layoutEl2   = document.getElementById('ide-layout-root');
+      var collapsed2  = layout.chatCollapsed;
 
-      if (chatCol)   chatCol.classList.toggle('ide-pane-collapsed', collapsed2);
-      if (chatSlot)  chatSlot.style.display = collapsed2 ? 'none' : '';
-      if (chatTitle) chatTitle.style.display = collapsed2 ? 'none' : '';
-      if (rSplitter) rSplitter.style.display = collapsed2 ? 'none' : '';
+      if (chatCol)    chatCol.classList.toggle('ide-pane-collapsed', collapsed2);
+      if (chatSlot)   chatSlot.style.display = collapsed2 ? 'none' : '';
+      if (chatPicker) chatPicker.style.display = collapsed2 ? 'none' : '';
+      if (rSplitter)  rSplitter.style.display = collapsed2 ? 'none' : '';
       if (chatTog) {
         chatTog.innerHTML = collapsed2 ? '&#x276E;' : '&#x276F;';
         chatTog.setAttribute('aria-expanded', collapsed2 ? 'false' : 'true');
@@ -6316,11 +6354,58 @@
   //   - Event wiring (send, cancel, close, share) is still fully functional;
   //     the SSE demux routes by sessionId, not by chatPanes membership.
 
+  // ---- Phase 5: IDE chat slot teardown ----------------------------------------
+  //
+  // teardownIdeChatPane removes the pane currently occupying #ide-chat-slot from
+  // chatPanes and sessionToPaneId, stops its elapsed timer, and removes the DOM
+  // element.  Call before mounting a replacement pane so that chatPanes never
+  // accumulates stale ideEmbedded entries and sessionToPaneId never has a leaked
+  // mapping that shadows the new pane's SSE routing.
+  //
+  // Only operates on the pane tracked in ideEmbeddedPaneId.  If the pane has an
+  // active session it is NOT cancelled server-side (attaching via the picker is a
+  // watch operation, not ownership — cancelling would terminate the session).
+  // The SSE demux entry for that sessionId is removed so the slot stops receiving
+  // events for the detached session.
+
+  function teardownIdeChatPane() {
+    if (!ideEmbeddedPaneId) return;
+    var paneId = ideEmbeddedPaneId;
+    ideEmbeddedPaneId = null;
+
+    var pane = chatPanes.get(paneId);
+    if (pane) {
+      // Remove the SSE demux mapping so the old session's events stop routing here.
+      // We do NOT cancel the session server-side — the operator may still have it
+      // open in a Chat-tab pane; we are merely un-mirroring it from the IDE slot.
+      if (pane.activeSessionId) {
+        sessionToPaneId.delete(pane.activeSessionId);
+      }
+      // Also clean up any attachedSessionId mapping (attach path).
+      if (pane.attachedSessionId && pane.attachedSessionId !== pane.activeSessionId) {
+        sessionToPaneId.delete(pane.attachedSessionId);
+      }
+      stopElapsedTimer(pane);
+      chatPanes.delete(paneId);
+      // Do NOT call savePaneState() — ideEmbedded panes are never persisted.
+    }
+
+    // Remove the DOM element.
+    var el = document.getElementById('pane-' + paneId);
+    if (el) el.remove();
+  }
+
+  // mountIdeChatPane tears down any existing IDE-slot pane and mounts a fresh
+  // ephemeral pane (the default "new session" behaviour).  Sets ideEmbeddedPaneId.
+
   function mountIdeChatPane() {
+    // Tear down the previous IDE-slot pane cleanly before mounting a new one.
+    teardownIdeChatPane();
+
     const slot = document.getElementById('ide-chat-slot');
     if (!slot) return;
 
-    // Create one pane — NOT added to chatPanes or savePaneState.
+    // Create one pane — NOT added to savePaneState (session-only; not persisted).
     const p = makePane(newPaneId(), newConversationId());
 
     // Mark as IDE-embedded so Chat-tab rendering skips this pane.  It stays
@@ -6330,11 +6415,108 @@
     p.ideEmbedded = true;
     chatPanes.set(p.id, p);
 
+    // Track so teardownIdeChatPane() knows what to remove.
+    ideEmbeddedPaneId = p.id;
+
     const paneEl = buildPaneElement(p.id);
     slot.appendChild(paneEl);
 
     // Load transcript for this pane.
     loadTranscriptForPane(p.id);
+  }
+
+  // ideBindChatToSession tears down the current IDE-slot pane and opens an
+  // attached view of an existing session in the IDE chat slot.
+  //
+  // sessionId      — the session to mirror (must be in fleetSessions as attachable).
+  // conversationId — usually the same as sessionId (single-session convention).
+  // watchOnly      — true when the operator does not own the session (read-only);
+  //                  false when the operator owns it (composer enabled).
+  //
+  // Security: watchOnly is derived from the server-supplied fleetSessions.owned
+  // field.  A non-owned session MUST open watch-only; the composer is disabled
+  // and sending is blocked client-side.  The server also enforces ownership on
+  // POST /api/chat/dispatch and POST /api/chat/cancel, so a circumvented client
+  // cannot interject into a session it does not own.
+
+  function ideBindChatToSession(sessionId, conversationId, watchOnly) {
+    if (!sessionId) return;
+
+    // Tear down the previous IDE-slot pane cleanly.
+    teardownIdeChatPane();
+
+    const slot = document.getElementById('ide-chat-slot');
+    if (!slot) return;
+
+    // If the session is already open in a Chat-tab pane, we still mount a
+    // separate ideEmbedded view.  Two panes can watch the same sessionId because
+    // sessionToPaneId maps one sessionId → one paneId; the second watcher gets
+    // its transcript from the backfill path only, not from live SSE (the demux
+    // routes to the first registered paneId).  This is the same trade-off as
+    // having two Chat-tab panes open for the same session — acceptable for the
+    // IDE mirror use-case.
+    //
+    // If the session is already in sessionToPaneId (Chat-tab pane), we skip
+    // re-registering to avoid clobbering the Chat-tab routing.
+    var convId = conversationId || sessionId;
+    var p = makePane(newPaneId(), convId);
+    p.ideEmbedded = true;
+    p.attachedSessionId = sessionId;
+    p.watchOnly = !!watchOnly;
+    p.status = 'idle';
+    chatPanes.set(p.id, p);
+    ideEmbeddedPaneId = p.id;
+
+    // Only register SSE routing if no Chat-tab pane is already watching this
+    // session.  This prevents silently re-routing a Chat-tab pane's events to
+    // the IDE slot.
+    if (!sessionToPaneId.has(sessionId)) {
+      sessionToPaneId.set(sessionId, p.id);
+    }
+
+    const paneEl = buildPaneElement(p.id);
+    slot.appendChild(paneEl);
+
+    // Backfill transcript; sessionId param triggers the IsShared check server-side.
+    loadTranscriptForPane(p.id);
+  }
+
+  // renderIdeChatPicker rebuilds the options in #ide-chat-picker from the current
+  // fleetSessions map.  Called on IDE tab open and on fleet.started / fleet.finished
+  // WS events.  Preserves the current selection when possible so a live refresh
+  // doesn't jump the picker back to "new session" mid-conversation.
+  //
+  // Only sessions where attachable=true are shown (server-enforced visibility).
+  // Label: "[agent] [status] [task_preview_truncated]" + "(shared)" badge for
+  // non-owned sessions.  All interpolated values go through esc().
+
+  function renderIdeChatPicker() {
+    var picker = document.getElementById('ide-chat-picker');
+    if (!picker) return; // IDE tab not yet rendered.
+
+    // Preserve current selection so a live fleet update doesn't reset the picker.
+    var currentVal = picker.value;
+
+    // Rebuild option list.
+    var html = '<option value="">new session</option>';
+    for (var entry of fleetSessions.values()) {
+      if (!entry.attachable) continue;
+      var isOwned = !!(entry.owned);
+      var label = esc(entry.agent || '?');
+      if (entry.task_preview) {
+        // Truncate preview to 40 chars in the picker label (display budget).
+        var preview = entry.task_preview.length > 40
+          ? entry.task_preview.slice(0, 40) + '…'
+          : entry.task_preview;
+        label += ' — ' + esc(preview);
+      }
+      var badge = isOwned ? '' : ' (shared)';
+      var selected = (entry.session_id === currentVal) ? ' selected' : '';
+      html += '<option value="' + esc(entry.session_id) + '"' + selected + '>' +
+        label + esc(badge) +
+        '</option>';
+    }
+    picker.innerHTML = html;
   }
 
   // =========================================================================
