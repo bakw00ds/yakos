@@ -20,16 +20,20 @@ func RegisterMethodsForTest(srv *jsonrpc.Server, cfg Config) {
 // are wired from serve.Config to consoleui.Config without starting a full daemon.
 func BuildConsoleCfgForTest(cfg Config) consoleui.Config {
 	workDir := perfdash.DefaultWorkDir(cfg.WorkspaceRoot)
+	perfStateDir := perfdash.DefaultStateDir()
 	kanbanPath := filepath.Join(cfg.WorkspaceRoot, "work", "current", "kanban.md")
 	return consoleui.Config{
-		Addr:              cfg.consoleBind(),
-		KanbanBoardPath:   kanbanPath,
-		KanbanProject:     filepath.Base(cfg.WorkspaceRoot),
+		Addr:            cfg.consoleBind(),
+		KanbanBoardPath: kanbanPath,
+		KanbanProject:   filepath.Base(cfg.WorkspaceRoot),
 		MetricsProjectDir: cfg.WorkspaceRoot,
-		PerfWorkDir:       workDir,
-		WorkDir:           workDir,
-		StateDir:          cfg.consoleStateDir(),
-		WorkspaceRoot:     cfg.WorkspaceRoot,
+		// PerfWorkDir mirrors the fix in Run(): points at the dispatch state dir
+		// (~/.yakos-state / $YAKOS_DISPATCH_LOG) so the Performance tab reads
+		// from the same location the daemon writes dispatch-log.ndjson.
+		PerfWorkDir:   perfStateDir,
+		WorkDir:       workDir,
+		StateDir:      cfg.consoleStateDir(),
+		WorkspaceRoot: cfg.WorkspaceRoot,
 		// Bus, DispatchService, WorkflowEngine, Token omitted — not
 		// constructed by this helper (requires live services); the fields
 		// under test here are the static config derivations.

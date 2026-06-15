@@ -386,8 +386,18 @@ func DefaultWorkDir(workspaceRoot string) string {
 	return filepath.Join(workspaceRoot, "work", "current")
 }
 
-// DefaultStateDir returns the default ~/.yakos-state directory.
+// DefaultStateDir returns the yakOS state directory that the dispatch daemon
+// writes to.  Resolution order (matches dispatch/events.go dispatchLogPath):
+//
+//  1. YAKOS_DISPATCH_LOG env var — the writer uses this as an override directory.
+//  2. ~/.yakos-state — the default.
+//
+// Using the same precedence as the writer ensures the dashboard reads from
+// exactly the same location the daemon writes to.
 func DefaultStateDir() string {
+	if v := os.Getenv("YAKOS_DISPATCH_LOG"); v != "" {
+		return v
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(os.TempDir(), ".yakos-state")
