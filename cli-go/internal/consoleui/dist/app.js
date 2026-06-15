@@ -522,6 +522,7 @@
 
   let fleetSessions = new Map(); // Map<sessionId, FleetSession>
   let fleetInitialized = false;  // true after first GET /api/fleet completes
+  let fleetReseedTimer = null;   // debounce handle for seedFleet() calls from fleet.started
 
   // ---- 5. WebSocket (Phase 2.5 subprotocol auth) ------------------------------
 
@@ -651,7 +652,11 @@
       renderNow();
     } else if (topic === 'fleet.started') {
       // fleet.started: metadata-only payload — no task text or token content.
-      // Patch fleetSessions live; task_preview is absent (not on WS events by design).
+      // Patch fleetSessions with a stub so the REPL fleet panel updates immediately.
+      // The stub has attachable:false (the WS payload carries no ownership/scoping
+      // data), so it will NOT appear in the IDE picker yet.  A debounced seedFleet()
+      // call follows to fetch the authoritative REST snapshot (with attachable:true,
+      // owned, and task_preview) so the picker reflects the new session.
       const sid = payload.session_id || '';
       if (sid) {
         fleetSessions.set(sid, {
@@ -664,8 +669,25 @@
           attachable:   false,
         });
         renderReplFleet();
-        // Phase 5: keep the IDE session picker in sync with live fleet state.
-        renderIdeChatPicker();
+        // Phase 5 (fix): debounced re-seed so the IDE picker shows the new session
+        // with correct attachable/owned/task_preview from /api/fleet.  Debounce
+        // (300 ms) collapses bursts when several sessions start simultaneously.
+        if (fleetReseedTimer) clearTimeout(fleetReseedTimer);
+        fleetReseedTimer = setTimeout(function() {
+          fleetReseedTimer = null;
+          // Preserve the IDE picker's current selection across the async re-seed
+          // so switching away / back doesn't reset the operator's choice.
+          var picker = document.getElementById('ide-chat-picker');
+          var savedVal = picker ? picker.value : '';
+          seedFleet(function() {
+            // Restore selection after seedFleet rebuilds the picker.
+            if (savedVal && picker) {
+              picker.value = savedVal;
+              // If the saved option no longer exists (session ended), the select
+              // will silently fall back to the first option — acceptable.
+            }
+          });
+        }, 300);
       }
       pushFeed(msg.ts, topic, feedSummary(topic, payload), '');
     } else if (topic === 'fleet.finished') {
@@ -2421,30 +2443,53 @@
   //     the session_id alone reveals no private content).
   //   - All interpolated strings go through esc() before innerHTML insertion.
 
+  // seedFleet fetches GET /api/fleet, merges the response into fleetSessions
+  // (replacing the map), and calls both renderReplFleet() and
+  // renderIdeChatPicker() on completion.  It is the single canonical path for
+  // populating fleetSessions from the REST snapshot.
+  //
+  // onDone is an optional callback invoked after a successful merge so callers
+  // can chain behaviour (e.g. restoring a picker selection).
+  //
+  // Design note: WS fleet.started events carry attachable:false and no
+  // task_preview (metadata-only invariant), so newly-started sessions cannot
+  // appear in the IDE picker until a fresh REST seed supplies the correct
+  // attachable:true + owned fields.  seedFleet() is therefore called (debounced)
+  // on every fleet.started WS event so the picker reflects new sessions
+  // without requiring a manual tab re-open.
+
+  function seedFleet(onDone) {
+    apiFetch('GET', '/api/fleet').then(function(resp) {
+      if (!resp || !resp.ok) return;
+      return resp.json();
+    }).then(function(data) {
+      if (!data || !Array.isArray(data.sessions)) return;
+      fleetInitialized = true;
+      fleetSessions = new Map();
+      for (var s of data.sessions) {
+        if (s.session_id) {
+          fleetSessions.set(s.session_id, s);
+        }
+      }
+      renderReplFleet();
+      renderIdeChatPicker();
+      if (typeof onDone === 'function') onDone();
+    }).catch(function() {
+      // /api/fleet unavailable — keep existing state; mark initialised so
+      // callers don't retry on every subsequent event.
+      fleetInitialized = true;
+      renderReplFleet();
+      renderIdeChatPicker();
+    });
+  }
+
   function initReplTab() {
     // Fetch kanban action items (once per page load; changes are infrequent).
     loadReplKanban();
 
     // Seed fleet from REST; subsequent live updates arrive via fleet.* WS events.
     if (!fleetInitialized) {
-      apiFetch('GET', '/api/fleet').then(function(resp) {
-        if (!resp || !resp.ok) return;
-        return resp.json();
-      }).then(function(data) {
-        if (!data || !Array.isArray(data.sessions)) return;
-        fleetInitialized = true;
-        fleetSessions = new Map();
-        for (const s of data.sessions) {
-          if (s.session_id) {
-            fleetSessions.set(s.session_id, s);
-          }
-        }
-        renderReplFleet();
-      }).catch(function() {
-        // /api/fleet unavailable — fleet panel shows empty state.
-        fleetInitialized = true;
-        renderReplFleet();
-      });
+      seedFleet();
     } else {
       // Already seeded; just re-render in case tab was re-opened.
       renderReplFleet();
@@ -6375,14 +6420,18 @@
 
     var pane = chatPanes.get(paneId);
     if (pane) {
-      // Remove the SSE demux mapping so the old session's events stop routing here.
-      // We do NOT cancel the session server-side — the operator may still have it
-      // open in a Chat-tab pane; we are merely un-mirroring it from the IDE slot.
-      if (pane.activeSessionId) {
+      // Guard: only remove the SSE demux mapping when it points TO THIS pane.
+      // If ideBindChatToSession skipped registration because a Chat-tab pane
+      // already owned sessionToPaneId[S], then that entry belongs to the Chat-tab
+      // pane — deleting it unconditionally would cut that pane's live SSE feed.
+      if (pane.activeSessionId &&
+          sessionToPaneId.get(pane.activeSessionId) === paneId) {
         sessionToPaneId.delete(pane.activeSessionId);
       }
-      // Also clean up any attachedSessionId mapping (attach path).
-      if (pane.attachedSessionId && pane.attachedSessionId !== pane.activeSessionId) {
+      // Same guard for the attachedSessionId path (attach/watch mode).
+      if (pane.attachedSessionId &&
+          pane.attachedSessionId !== pane.activeSessionId &&
+          sessionToPaneId.get(pane.attachedSessionId) === paneId) {
         sessionToPaneId.delete(pane.attachedSessionId);
       }
       stopElapsedTimer(pane);
