@@ -488,26 +488,43 @@
     const since = wsLastSeq > 0 ? '?since=' + wsLastSeq : '';
     const url = proto + '//' + location.host + '/v1/events' + since;
 
-    // Phase 2.5: Sec-WebSocket-Protocol bearer auth.
+    // Phase 2.5 / Phase 3e: Sec-WebSocket-Protocol bearer auth (bearer mode)
+    //   and cookie auth (session mode).
     //
-    // The WS upgrade path is handled by consoleAuthSubprotocol in
+    // Bearer mode: The WS upgrade path is handled by consoleAuthSubprotocol in
     // cli-go/internal/consoleui/ws_handler.go.  That middleware requires
     // exactly two comma-separated protocol values — "yakos-bearer, <token>" —
     // and validates the token with constant-time comparison before the upgrade.
     // Browsers cannot set Authorization headers on WS upgrades, so the
     // subprotocol is the only delivery mechanism.
     //
-    // Session-mode gap (ADR-0005 Phase 3d): the backend WS handler has no
-    // session-cookie auth path for WS upgrades.  Until the backend adds that,
-    // the WS requires the bearer token in BOTH auth modes.  In session mode
-    // TOKEN is '' so the WS upgrade will be rejected with 403 — the /v1/events
-    // handler needs a backend fix to accept session-cookie-authenticated WS
-    // connections.  Tracked as a follow-on to Phase 3d.
+    // Session mode (Phase 3e): In session mode, TOKEN is empty and we must NOT
+    // send ['yakos-bearer', ''] — an empty token causes the server's
+    // consoleAuthSubprotocol to reject the upgrade with 403 (the red "✗"
+    // disconnected indicator).  Instead we open the WebSocket with NO
+    // subprotocol so the browser sends the session cookie on the upgrade
+    // request automatically (same-origin, credentials included by default for
+    // WS).  The Phase 3e backend change to ws_handler.go / consoleAuth adds a
+    // session-cookie check path that runs when no "yakos-bearer" subprotocol
+    // is present.
     //
-    // DO NOT change this to ['yakos-bearer'] (one part, no token) — the server
-    // consoleAuthSubprotocol middleware does SplitN(protos, ",", 2) and rejects
-    // any header with fewer than two parts.
-    ws = new WebSocket(url, ['yakos-bearer', TOKEN]);
+    // WS session contract (Phase 3e):
+    //   - No Sec-WebSocket-Protocol header → server tries session cookie auth.
+    //   - Sec-WebSocket-Protocol: yakos-bearer, <token> → server does bearer auth.
+    //   The backend MUST NOT reject a no-subprotocol upgrade with 401/403 once
+    //   Phase 3e lands; it should validate the session cookie instead.
+    //
+    // DO NOT change bearer mode to ['yakos-bearer'] (one part, no token) — the
+    // server consoleAuthSubprotocol middleware does SplitN(protos, ",", 2) and
+    // rejects any header with fewer than two parts.
+    if (AUTH_MODE === 'session') {
+      // Session mode: no subprotocol; browser sends session cookie automatically.
+      // Requires Phase 3e backend: ws_handler.go must accept cookie auth when
+      // no "yakos-bearer" subprotocol is present.
+      ws = new WebSocket(url);
+    } else {
+      ws = new WebSocket(url, ['yakos-bearer', TOKEN]);
+    }
     ws.addEventListener('open', () => {
       wsRetryMs = 1000; // reset backoff
       // Send hello frame with self-asserted identity (attribution-only).
@@ -1406,7 +1423,12 @@
     const url = '/api/chat/transcript?conversationId=' + encodeURIComponent(pane.conversationId) +
                 '&operatorId=' + encodeURIComponent(opId);
 
-    fetch(url).then((resp) => {
+    const transcriptOpts = {};
+    if (AUTH_MODE === 'session') {
+      // Session mode: send cookie so the server can auth the request.
+      transcriptOpts.credentials = 'same-origin';
+    }
+    fetch(url, transcriptOpts).then((resp) => {
       if (resp.status === 403) return []; // not owner; pane may belong to another op
       if (!resp.ok) return [];
       return resp.json();
@@ -1471,7 +1493,7 @@
 
     startElapsedTimer(pane, paneId);
 
-    const body = JSON.stringify({
+    const dispatchBody = {
       runtime: pane.runtime,
       model: pane.model,
       agent: pane.agent,
@@ -1479,13 +1501,10 @@
       sessionId: sessionId,
       operatorId: getChatOperatorId(),
       conversationId: pane.conversationId,
-    });
+    };
 
-    fetch('/api/chat/dispatch', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: body,
-    }).then((resp) => {
+    // Route through apiFetch so session mode sends X-CSRF-Token + credentials.
+    apiFetch('POST', '/api/chat/dispatch', dispatchBody).then((resp) => {
       if (resp.ok) return; // 202 Accepted — streaming will arrive on SSE
       // Error path: clean up.
       return resp.text().then((errText) => {
@@ -1528,11 +1547,8 @@
     const sessionId = pane.activeSessionId;
     const opId = getChatOperatorId();
 
-    fetch('/api/chat/cancel', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId, operatorId: opId }),
-    }).catch(() => {
+    // Route through apiFetch so session mode sends X-CSRF-Token + credentials.
+    apiFetch('POST', '/api/chat/cancel', { sessionId, operatorId: opId }).catch(() => {
       // Silent: cancel is best-effort.
     });
 
@@ -1558,14 +1574,11 @@
     const newShared = !isShared;
     const opId = getChatOperatorId();
 
-    fetch('/api/chat/share', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sessionId: pane.activeSessionId,
-        operatorId: opId,
-        shared: newShared,
-      }),
+    // Route through apiFetch so session mode sends X-CSRF-Token + credentials.
+    apiFetch('POST', '/api/chat/share', {
+      sessionId: pane.activeSessionId,
+      operatorId: opId,
+      shared: newShared,
     }).then((resp) => {
       if (!resp.ok) return;
       if (shareBtn) {
@@ -4578,11 +4591,8 @@
 
     var version = fileState ? fileState.version : ideCurrentVersion;
 
-    fetch('/api/files/write', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: path, content: content, version: version }),
-    })
+    // Route through apiFetch so session mode sends X-CSRF-Token + credentials.
+    apiFetch('POST', '/api/files/write', { path: path, content: content, version: version })
       .then((r) => {
         if (r.status === 200) {
           return r.json().then((data) => {
@@ -4732,7 +4742,10 @@
     const dir = reldir || '.';
     const url = '/api/files/tree?dir=' + encodeURIComponent(dir) + '&depth=1';
 
-    fetch(url).then((r) => {
+    // In session mode, send the session cookie (SW does not run inside
+    // the IDE iframe context for these direct fetch calls).
+    const treeRootOpts = AUTH_MODE === 'session' ? { credentials: 'same-origin' } : {};
+    fetch(url, treeRootOpts).then((r) => {
       if (r.status === 403) {
         const p = document.createElement('p');
         p.className = 'ide-tree-error';
@@ -4865,7 +4878,9 @@
               spinner.textContent = 'Loading…';
               li.appendChild(spinner);
 
-              fetch('/api/files/tree?dir=' + encodeURIComponent(entry.path) + '&depth=1')
+              // Session mode: send cookie; SW handles bearer mode automatically.
+              const lazyTreeOpts = AUTH_MODE === 'session' ? { credentials: 'same-origin' } : {};
+              fetch('/api/files/tree?dir=' + encodeURIComponent(entry.path) + '&depth=1', lazyTreeOpts)
                 .then((r) => r.ok ? r.json() : null)
                 .then((data) => {
                   li.removeChild(spinner);
@@ -4971,7 +4986,9 @@
       if (selectedBtn) selectedBtn.classList.remove('selected');
     }
 
-    fetch('/api/files/content?path=' + encodeURIComponent(relpath))
+    // Session mode: send cookie so the server can authenticate the request.
+    const contentOpts = AUTH_MODE === 'session' ? { credentials: 'same-origin' } : {};
+    fetch('/api/files/content?path=' + encodeURIComponent(relpath), contentOpts)
       .then((r) => {
         if (r.status === 413) {
           onError('File too large to preview (max 5 MiB): ' + name);
