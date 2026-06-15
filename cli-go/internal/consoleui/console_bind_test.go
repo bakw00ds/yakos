@@ -1012,10 +1012,11 @@ func TestPhase3f_CertlessHandshakeSucceeds(t *testing.T) {
 		t.Fatalf("certless GET /login should not fail at TLS; got: %v", err)
 	}
 	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
-	// /login is exempt from requireAuthOrRedirect; any 2xx or even 4xx is fine
-	// as long as the error is not a TLS handshake failure.
-	if resp.StatusCode == 0 {
-		t.Error("expected a valid HTTP status code from certless login; got 0 (TLS failure?)")
+	// /login is exempt from requireAuthOrRedirect; it must respond with 200 (GET
+	// login page).  A TLS failure would have been caught by the t.Fatalf above —
+	// a received *http.Response always has a non-zero StatusCode.
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("certless GET /login: status=%d; want 200 (login page must be reachable without a cert)", resp.StatusCode)
 	}
 }
 
@@ -1197,9 +1198,12 @@ func TestPhase3f_WS_CertlessNoSession_Rejected(t *testing.T) {
 	if resp.StatusCode == http.StatusSwitchingProtocols {
 		t.Error("certless+no-session WS upgrade should be rejected; got 101 Switching Protocols (auth bypass)")
 	}
-	// Expected: 401 (API path /v1/ → requireAuthOrRedirect returns 401).
+	// Expected: 401 — /v1/ prefix is an API path; requireAuthOrRedirect returns
+	// 401 JSON for unauthenticated requests on API paths.  403 is also acceptable
+	// (subprotocol token invalid, though requireAuthOrRedirect fires first).
+	// Any status other than 101 is a regression gate.
 	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
-		t.Logf("certless WS upgrade: status=%d (expected 401 or 403; any non-101 is acceptable)", resp.StatusCode)
+		t.Errorf("certless+no-session WS upgrade: status=%d; want 401 (requireAuthOrRedirect gate) or 403", resp.StatusCode)
 	}
 }
 

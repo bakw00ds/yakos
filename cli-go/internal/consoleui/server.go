@@ -100,8 +100,15 @@ type Config struct {
 	Addr string
 
 	// TLSConfig, when non-nil, causes the server to serve TLS on Listener /
-	// Addr instead of plain HTTP.  Required when NetworkedMode is true (the
-	// caller sets this to the mTLS config from mtls.BuildServerTLSConfig).
+	// Addr instead of plain HTTP.  Required when NetworkedMode is true.
+	//
+	// The console networked listener passes mtls.BuildServerTLSConfigHybrid
+	// (VerifyClientCertIfGiven) so that password+session users can complete
+	// the TLS handshake without a client certificate.  A presented cert is
+	// still verified against ClientCAs; an untrusted cert still fails the
+	// handshake.  For strict cert-required M2M surfaces use
+	// mtls.BuildServerTLSConfig (RequireAndVerifyClientCert) instead.
+	//
 	// MUST be nil when NetworkedMode is false (loopback path unchanged).
 	TLSConfig *tls.Config
 
@@ -510,8 +517,9 @@ func New(cfg Config) (*Server, error) {
 		// long-lived streaming responses that never complete.  A non-zero
 		// WriteTimeout would force-close them after the deadline.  The server
 		// is loopback-only (no external exposure) on the default path; the
-		// networked path is guarded by mTLS, matching the pattern used in
-		// wsbus/server.go and mcpserver/streamhttp.go.
+		// networked path (ADR-0005 Phase 3f) uses hybrid TLS + HTTP-edge auth
+		// (requireAuthOrRedirect), matching the pattern used in wsbus/server.go
+		// and mcpserver/streamhttp.go.
 		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
 	}
