@@ -143,6 +143,27 @@ func New(cfg Config) *Server {
 // request with req.Host set and use RequireLocalHost directly.
 func (s *Server) Handler() http.Handler { return s.mux }
 
+// HandlerNoToken returns a handler that serves the same routes as Handler but
+// without the inner per-endpoint Bearer-token check.  Use this when mounting
+// the performance dashboard inside a host server that already enforces
+// authentication at the edge (e.g. the session console, where the session
+// cookie is the auth credential and no #token= fragment is present in the
+// iframe URL).
+//
+// The host server is responsible for ensuring that only authenticated requests
+// reach this handler.
+func (s *Server) HandlerNoToken() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", s.handleIndex)
+	mux.HandleFunc("GET /app.js", s.handleAppJS)
+	mux.HandleFunc("GET /styles.css", s.handleCSS)
+	mux.HandleFunc("GET /api/perf/summary", s.handleSummary)
+	mux.HandleFunc("GET /api/perf/timeseries", s.handleTimeseries)
+	mux.HandleFunc("GET /api/perf/by_axis", s.handleByAxis)
+	mux.HandleFunc("GET /api/perf/recent", s.handleRecent)
+	return mux
+}
+
 // Serve starts the HTTP server and blocks until ctx is cancelled.
 // Returns nil on clean shutdown (http.ErrServerClosed treated as nil).
 func (s *Server) Serve(ctx context.Context) error {

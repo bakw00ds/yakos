@@ -138,6 +138,27 @@ func New(cfg Config) *Server {
 // dashauth.RequireLocalHost directly.
 func (s *Server) Handler() http.Handler { return s.mux }
 
+// HandlerNoToken returns a handler that serves the same routes as Handler but
+// without the inner per-endpoint Bearer-token check.  Use this when mounting
+// the metrics dashboard inside a host server that already enforces authentication
+// at the edge (e.g. the session console, where the session cookie is the auth
+// credential and no #token= fragment is present in the iframe URL).
+//
+// The host server is responsible for ensuring that only authenticated requests
+// reach this handler.
+func (s *Server) HandlerNoToken() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", s.handleIndex)
+	mux.HandleFunc("GET /api/metrics/snapshot", s.handleSnapshot)
+	mux.HandleFunc("GET /api/metrics/trend", s.handleTrend)
+	mux.HandleFunc("GET /api/metrics/compare", s.handleCompare)
+	mux.HandleFunc("GET /api/metrics/history", s.handleHistory)
+	if s.cfg.AllProjects {
+		mux.HandleFunc("GET /api/metrics/projects", s.handleProjects)
+	}
+	return mux
+}
+
 // Serve starts the HTTP server and blocks until ctx is cancelled.
 // Returns nil on clean shutdown (http.ErrServerClosed treated as nil).
 func (s *Server) Serve(ctx context.Context) error {

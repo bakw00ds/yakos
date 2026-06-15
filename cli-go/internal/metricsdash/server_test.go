@@ -790,6 +790,78 @@ func TestValidateAddr_HostnameRefused(t *testing.T) {
 	}
 }
 
+// ---- HandlerNoToken (session-console mount) ---------------------------------
+// These tests verify the session-mode path: mounted via HandlerNoToken() the
+// API endpoints respond 200 without any Authorization header, mirroring what
+// the networked session console does (auth is enforced at the outer edge).
+
+func newTestServerNoToken(t *testing.T, projectDir string) *httptest.Server {
+	t.Helper()
+	stateDir := t.TempDir()
+	tok, err := metricsdash.LoadOrCreateMetricsToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateMetricsToken: %v", err)
+	}
+	srv := metricsdash.New(metricsdash.Config{
+		Token:      tok,
+		ProjectDir: projectDir,
+	})
+	ts := httptest.NewServer(srv.HandlerNoToken())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func TestHandlerNoToken_SnapshotServedWithoutBearer(t *testing.T) {
+	ts := newTestServerNoToken(t, "")
+	resp := get(t, ts.URL+"/api/metrics/snapshot", "") // no token
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("HandlerNoToken snapshot: status=%d; want 200 (no bearer required)", resp.StatusCode)
+	}
+}
+
+func TestHandlerNoToken_AllEndpointsReachable(t *testing.T) {
+	ts := newTestServerNoToken(t, "")
+	endpoints := []string{
+		"/api/metrics/snapshot",
+		"/api/metrics/history",
+		"/api/metrics/trend",
+	}
+	for _, ep := range endpoints {
+		t.Run(ep, func(t *testing.T) {
+			resp := get(t, ts.URL+ep, "") // no token
+			defer drainClose(resp)
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("HandlerNoToken %s: status=%d; want 200", ep, resp.StatusCode)
+			}
+		})
+	}
+}
+
+func TestHandlerNoToken_IndexServed(t *testing.T) {
+	ts := newTestServerNoToken(t, "")
+	resp := get(t, ts.URL+"/", "")
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("HandlerNoToken /: status=%d; want 200", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type=%q; want text/html", ct)
+	}
+}
+
+// TestHandlerNoToken_CompareReturns400OnMissingParams verifies that the
+// compare endpoint still validates its required query params even without auth.
+func TestHandlerNoToken_CompareReturns400OnMissingParams(t *testing.T) {
+	ts := newTestServerNoToken(t, "")
+	resp := get(t, ts.URL+"/api/metrics/compare", "") // no token, no a/b params
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("HandlerNoToken compare: status=%d; want 400 (missing params)", resp.StatusCode)
+	}
+}
+
 // TestProjects_NoHistoryPath verifies that history_path is absent from the
 // /api/metrics/projects JSON response (fix 3: info-leak removal).
 func TestProjects_NoHistoryPath(t *testing.T) {
