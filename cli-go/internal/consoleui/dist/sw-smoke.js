@@ -2,17 +2,29 @@
 //
 // Purpose: verify that the service worker's fetch handler correctly
 // injects the Authorization header and — crucially — preserves the
-// request body for non-GET/HEAD methods (POST, etc.).
+// request body for non-GET/HEAD methods (POST, etc.) in bearer mode;
+// AND that in session mode the SW passes through GET/HEAD requests
+// untouched and injects X-CSRF-Token on mutations without rebuilding
+// the request (so the session cookie is not stripped).
 //
-// The bug this test guards against: when the SW reconstructed a request
-// to inject the auth header it omitted the body, so kanban iframe POSTs
-// (api/add, api/move, api/notes, api/delete) arrived at the server with
-// an empty body, causing a 400 "title required" error.
+// Tests:
+//   bearer mode (unchanged from Phase 3c):
+//     1. POST with JSON body — Authorization + body + redirect:'error'
+//     2. GET iframe navigate — Authorization + no body + redirect:'follow'
+//     3. Top-level document navigation — SW must NOT intercept
+//     4. Request already carrying Authorization — passed through
+//     5. Cross-origin request — passed through
+//     6. No token — passed through unmodified
 //
-// Strategy: stub the ServiceWorker globals (self, Headers, Request,
-// fetch), load sw.js, then dispatch synthetic FetchEvents and assert
-// the reconstructed Request received by fetch() carries both the Bearer
-// header and the original body bytes.
+//   session mode (new in Phase 3d):
+//     7. GET in session mode — SW must NOT intercept (pass through)
+//     8. GET navigate (iframe) in session mode — SW must NOT intercept
+//     9. POST mutation in session mode — SW injects X-CSRF-Token;
+//        does NOT set Authorization; credentials:'same-origin';
+//        redirect:'error'; body preserved
+//    10. POST mutation in session mode, no CSRF token yet — passed through
+//        (server will 403; better than mangling credentials)
+//    11. Top-level navigate in session mode — SW must NOT intercept
 //
 // Early-return detection: the FetchEvent stub tracks whether respondWith
 // was called via an explicit boolean flag — no timing-dependent heuristic.
@@ -172,13 +184,20 @@ function dispatchFetch(requestOpts) {
 
 listeners['message']({ data: { type: 'SET_TOKEN', token: 'tok-abc123' } });
 
-// ── Test 1: POST with JSON body — body, Authorization, redirect:'error' ───────
+// ── Test body buffers (module-scope so they're accessible across all .then()) ──
 
 var jsonBody = typeof TextEncoder !== 'undefined'
   ? new TextEncoder().encode(JSON.stringify({ title: 'my task' })).buffer
   : Buffer.from(JSON.stringify({ title: 'my task' }));
 
+// sessionBody is used in session-mode tests (tests 9 and 10).
+var sessionBody = typeof TextEncoder !== 'undefined'
+  ? new TextEncoder().encode(JSON.stringify({ title: 'task' })).buffer
+  : Buffer.from(JSON.stringify({ title: 'task' }));
+
 var postHeaders = new global.Headers({ 'Content-Type': 'application/json' });
+
+// ── Test 1: POST with JSON body — body, Authorization, redirect:'error' ───────
 
 dispatchFetch({
   url:         'http://127.0.0.1:7890/api/add',
@@ -303,6 +322,115 @@ dispatchFetch({
   assert(result.fetched === null,
     'GET /api/board (no token): SW must NOT call fetch(); no Authorization injected');
 
+// ── Switch to session mode for tests 7–11 ────────────────────────────────────
+
+  listeners['message']({ data: { type: 'SET_AUTH_MODE', mode: 'session' } });
+  listeners['message']({ data: { type: 'SET_CSRF_TOKEN', token: 'csrf-xyz789' } });
+
+// ── Test 7: Session mode — GET request must pass through (no intercept) ───────
+
+  return dispatchFetch({
+    url:         'http://127.0.0.1:7890/api/presence',
+    method:      'GET',
+    headers:     new global.Headers({}),
+    mode:        'cors',
+    destination: '',
+    body:        null,
+  });
+}).then(function(result) {
+  assert(!result.respondWithCalled,
+    'session GET /api/presence: SW must NOT call respondWith() — pass through for cookie');
+  assert(result.fetched === null,
+    'session GET /api/presence: SW must NOT call fetch() — let browser send cookie');
+
+// ── Test 8: Session mode — GET iframe navigate must pass through ──────────────
+
+  return dispatchFetch({
+    url:         'http://127.0.0.1:7890/kanban/',
+    method:      'GET',
+    headers:     new global.Headers({}),
+    mode:        'navigate',
+    destination: 'iframe',
+    body:        null,
+  });
+}).then(function(result) {
+  assert(!result.respondWithCalled,
+    'session GET /kanban/ (iframe navigate): SW must NOT call respondWith()');
+  assert(result.fetched === null,
+    'session GET /kanban/ (iframe navigate): SW must NOT call fetch() — cookie rides automatically');
+
+// ── Test 9: Session mode — POST mutation gets X-CSRF-Token + same-origin creds ─
+//    sessionBody is declared at module scope (above) so test 10 can reuse it.
+
+  return dispatchFetch({
+    url:         'http://127.0.0.1:7890/api/add',
+    method:      'POST',
+    headers:     new global.Headers({ 'Content-Type': 'application/json' }),
+    mode:        'cors',
+    destination: '',
+    body:        sessionBody,
+  });
+}).then(function(result) {
+  assert(result.respondWithCalled,
+    'session POST /api/add: SW must call respondWith()');
+  assert(result.fetched !== null,
+    'session POST /api/add: SW must call fetch()');
+  if (result.fetched) {
+    var csrf = result.fetched.headers.get('X-CSRF-Token');
+    assert(csrf === 'csrf-xyz789',
+      'session POST /api/add: X-CSRF-Token is "csrf-xyz789" (got "' + csrf + '")');
+    var auth = result.fetched.headers.get('Authorization');
+    assert(auth === null || auth === undefined || auth === '',
+      'session POST /api/add: Authorization must NOT be set in session mode (got "' + auth + '")');
+    assert(result.fetched.credentials === 'same-origin',
+      'session POST /api/add: credentials must be "same-origin" (got "' + result.fetched.credentials + '")');
+    assert(result.fetched.redirect === 'error',
+      'session POST /api/add: redirect must be "error" (got "' + result.fetched.redirect + '")');
+    assert(result.fetched._body === sessionBody,
+      'session POST /api/add: body must be preserved');
+  }
+
+// ── Test 10: Session mode — POST with no CSRF token must pass through ─────────
+
+  listeners['message']({ data: { type: 'SET_CSRF_TOKEN', token: null } });
+
+  return dispatchFetch({
+    url:         'http://127.0.0.1:7890/api/add',
+    method:      'POST',
+    headers:     new global.Headers({ 'Content-Type': 'application/json' }),
+    mode:        'cors',
+    destination: '',
+    body:        sessionBody,
+  });
+}).then(function(result) {
+  // Restore CSRF token.
+  listeners['message']({ data: { type: 'SET_CSRF_TOKEN', token: 'csrf-xyz789' } });
+
+  assert(!result.respondWithCalled,
+    'session POST (no CSRF token): SW must NOT call respondWith() — pass through (server will 403)');
+  assert(result.fetched === null,
+    'session POST (no CSRF token): SW must NOT call fetch()');
+
+// ── Test 11: Session mode — top-level document navigate must NOT be intercepted ─
+
+  return dispatchFetch({
+    url:         'http://127.0.0.1:7890/',
+    method:      'GET',
+    headers:     new global.Headers({}),
+    mode:        'navigate',
+    destination: 'document',
+    body:        null,
+  });
+}).then(function(result) {
+  assert(!result.respondWithCalled,
+    'session GET / (top-level navigate): SW must NOT call respondWith() (early-return)');
+  assert(result.fetched === null,
+    'session GET / (top-level navigate): SW must NOT call fetch()');
+
+// ── Restore bearer mode for clean-up ─────────────────────────────────────────
+
+  listeners['message']({ data: { type: 'SET_AUTH_MODE', mode: 'bearer' } });
+
 // ── Results ───────────────────────────────────────────────────────────────────
 
   if (failures.length > 0) {
@@ -310,8 +438,9 @@ dispatchFetch({
     process.exit(1);
   }
   process.stdout.write(
-    'PASS: sw.js smoke tests passed (POST body+redirect preserved, ' +
-    'GET redirect:follow, early-returns intact, !token pass-through).\n'
+    'PASS: sw.js smoke tests passed (bearer: POST body+redirect preserved, ' +
+    'GET redirect:follow, early-returns intact, !token pass-through; ' +
+    'session: GET pass-through, POST CSRF injection, no-CSRF pass-through).\n'
   );
   process.exit(0);
 }).catch(function(err) {

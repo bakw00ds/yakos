@@ -43,6 +43,10 @@ var _htmlEl = {
 // Minimal document stub — enough for the IIFE's top-level side effects.
 global.document = {
   documentElement: _htmlEl,
+  // cookie: empty string → readCookie() returns '' → AUTH_MODE='session',
+  // CSRF_TOKEN=''. This is the safe default for the smoke test (no cookie
+  // access in Node, so we stub it as an empty string).
+  cookie: '',
   getElementById: function() { return null; },
   querySelector: function() { return null; },
   querySelectorAll: function() { return []; },
