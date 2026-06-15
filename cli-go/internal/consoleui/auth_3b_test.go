@@ -762,13 +762,14 @@ func TestEdge_UnauthenticatedAPIRequest_Returns401(t *testing.T) {
 
 func TestEdge_UnauthenticatedNavigation_Redirects302ToLogin(t *testing.T) {
 	t.Parallel()
-	ts, _ := newNetworkedNoSessionServer(t)
 
-	// GET /ide/editor is a static asset (in isStaticAsset) — let's use /kanban/
-	// which is a protected route under a non-/api/ path prefix.
-	// A browser navigation to /kanban/ without a session cookie should → 302.
-	// Note: /kanban/ does not match any isAPIRequest prefix, so the redirect fires.
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/kanban/", nil)
+	// Phase 3c: when zero users exist, navigation redirects to /setup (not /login).
+	// This test uses a server WITH an existing user (alice) so Count()>0 and
+	// the redirect goes to /login — verifying the post-setup behavior.
+	s := newAuth3bServer(t)
+
+	// GET /kanban/ without a session cookie — alice exists, so → /login.
+	req, _ := http.NewRequest(http.MethodGet, s.ts.URL+"/kanban/", nil)
 	// No Authorization header, no session cookie.
 	// No Accept: application/json — simulates a browser navigation (not XHR).
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -785,11 +786,11 @@ func TestEdge_UnauthenticatedNavigation_Redirects302ToLogin(t *testing.T) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusFound {
-		t.Errorf("unauthenticated navigation: expected 302; got %d", resp.StatusCode)
+		t.Errorf("unauthenticated navigation (users exist): expected 302; got %d", resp.StatusCode)
 	}
 	loc := resp.Header.Get("Location")
 	if loc != "/login" {
-		t.Errorf("unauthenticated navigation: expected redirect to /login; got %q", loc)
+		t.Errorf("unauthenticated navigation (users exist): expected redirect to /login; got %q", loc)
 	}
 }
 

@@ -43,6 +43,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/mtlscmd"
 	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/restapi"
+	"github.com/bakw00ds/yakos/internal/setuptoken"
 	"github.com/bakw00ds/yakos/internal/userstore"
 	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/wsbus"
@@ -563,6 +564,39 @@ func Run(ctx context.Context, cfg Config) error {
 				cfg.ConsoleBootstrapCertName,
 				cfg.NoBootstrapCert,
 			)
+
+			// ADR-0005 Phase 3c: one-time setup token.
+			//
+			// When zero users exist, generate (or reload from disk) a setup token
+			// and wire it into the consoleui.Config so the /setup handler can
+			// validate and consume it.  The token URL is printed to daemon stdout
+			// (NOT stderr, NOT the structured log).
+			//
+			// When users already exist, setupSt is nil — the /setup handler will
+			// refuse all requests (409 or 404).
+			var setupSt *setuptoken.State
+			if uStore.Count() == 0 {
+				tokenFilePath := filepath.Join(stateDir, "setup-token")
+				setupSt = setuptoken.New(tokenFilePath, nil)
+				tok, tokErr := setupSt.LoadOrGenerate()
+				if tokErr != nil {
+					// Non-fatal: the daemon still starts; setup must use the CLI
+					// bootstrap-token command instead.
+					fmt.Fprintf(os.Stderr, "serve: warning: could not generate setup token: %v\n", tokErr)
+					setupSt = nil
+				} else {
+					// Print to daemon's OWN stdout (not stderr, not audit log).
+					// First external host is used for the URL.
+					setupHost := externalHosts[0]
+					fmt.Printf("\n")
+					fmt.Printf("  YAKOS CONSOLE: FIRST-TIME SETUP\n")
+					fmt.Printf("  No admin account exists. Create the first admin at:\n")
+					fmt.Printf("  https://%s/setup?token=%s\n", setupHost, tok)
+					fmt.Printf("  Token expires in 30 minutes. To regenerate: yakos console bootstrap-token\n")
+					fmt.Printf("  SECURITY: do not share this token.\n\n")
+				}
+			}
+			consoleCfg.SetupToken = setupSt
 
 			// Print startup banner — LOUD — because we are exposing an RCE-capable
 			// surface to the network.

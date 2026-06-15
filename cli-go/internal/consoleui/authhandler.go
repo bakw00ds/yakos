@@ -54,6 +54,16 @@ import (
 	"github.com/bakw00ds/yakos/internal/userstore"
 )
 
+// zeroUsersLoginTarget returns the redirect target for unauthenticated
+// navigations: /setup when no users exist yet, /login otherwise.
+// uStore may be nil (conservative: returns /login).
+func zeroUsersLoginTarget(uStore *userstore.Store) string {
+	if uStore != nil && uStore.Count() == 0 {
+		return "/setup"
+	}
+	return "/login"
+}
+
 // ---- Rate limiter -----------------------------------------------------------
 
 // loginRateLimitRequests is the maximum number of POST /login attempts allowed
@@ -310,11 +320,11 @@ func requireCSRFForSession(authStore *authsession.Store, next http.Handler) http
 			return
 		}
 
-		// POST /login is the unauthenticated auth endpoint; exempt from CSRF.
-		// (requireAuthOrRedirect lets /login through before this middleware,
-		// but the resolver may still set an unauthenticated identity, so we
-		// guard here too for defense-in-depth.)
-		if r.URL.Path == "/login" {
+		// POST /login and POST /setup are unauthenticated auth endpoints;
+		// exempt from CSRF.  (requireAuthOrRedirect lets them through before
+		// this middleware, but the resolver may still set an unauthenticated
+		// identity, so we guard here too for defense-in-depth.)
+		if r.URL.Path == "/login" || r.URL.Path == "/setup" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -366,26 +376,24 @@ func requireCSRFForSession(authStore *authsession.Store, next http.Handler) http
 
 // requireAuthOrRedirect wraps next with networked-edge auth enforcement:
 //   - Authenticated identities pass through unchanged.
-//   - Static assets and the login page pass through (exempt via isStaticAsset /
-//     isLoginPath — login must be reachable unauthenticated).
+//   - Static assets and the login/setup pages pass through (exempt via
+//     isStaticAsset — those pages must be reachable unauthenticated).
 //   - API/XHR paths (Accept: application/json or /api/ /flows/api/ /v1/ prefixes)
 //     → 401 JSON.
-//   - Top-level navigations → 302 redirect to /login.
+//   - Top-level navigations → 302 redirect to /setup (when zero users) or
+//     /login (after first admin is created).
 //
 // Only wired on the networked bind (NetworkedMode=true).
 // Loopback path is unchanged.
-func requireAuthOrRedirect(next http.Handler) http.Handler {
+//
+// uStore is used to determine the redirect target: /setup when Count()==0,
+// /login otherwise.  May be nil (conservative: redirects to /login).
+func requireAuthOrRedirect(uStore *userstore.Store, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// /login (all methods: GET page, POST auth endpoint) and /login.js are
-		// always accessible without authentication.  /logout is intentionally
-		// NOT exempt: it requires an authenticated session cookie (the session
-		// lookup in handleLogout handles the no-session case gracefully).
-		if isLoginPath(r) {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Static SPA shell is exempt (token-exempt per isStaticAsset).
+		// /login, /login.js, /login.css, /setup, /setup.js and other static
+		// assets are always accessible without authentication.  /logout is
+		// intentionally NOT exempt: it requires an authenticated session cookie
+		// (the session lookup in handleLogout handles the no-session case gracefully).
 		if isStaticAsset(r) {
 			next.ServeHTTP(w, r)
 			return
@@ -414,26 +422,30 @@ func requireAuthOrRedirect(next http.Handler) http.Handler {
 			return
 		}
 
-		// Top-level navigation: redirect to /login.
-		http.Redirect(w, r, "/login", http.StatusFound)
+		// Top-level navigation: redirect to /setup (zero users) or /login.
+		http.Redirect(w, r, zeroUsersLoginTarget(uStore), http.StatusFound)
 	})
 }
 
 // isLoginPath reports whether the request is for /login (any method),
-// /login.js (GET/HEAD), or /login.css (GET/HEAD).  These paths are always
-// accessible without authentication:
+// /login.js (GET/HEAD), /login.css (GET/HEAD), /setup (any method), or
+// /setup.js (GET/HEAD).  These paths are always accessible without
+// authentication:
 //   - GET /login: serves the login form page.
 //   - POST /login: the authentication endpoint itself.
 //   - GET /login.js: the login form script.
-//   - GET /login.css: the login form stylesheet (external CSS; no 'unsafe-inline').
+//   - GET /login.css: the login form stylesheet.
+//   - GET /setup: serves the first-admin setup page.
+//   - POST /setup: the first-admin creation endpoint.
+//   - GET /setup.js: the setup form script.
 //
 // /logout is intentionally excluded: it is a session-auth endpoint and the
 // handler deals gracefully with a missing session (idempotent 200 + clear cookies).
 func isLoginPath(r *http.Request) bool {
-	if r.URL.Path == "/login" {
+	if r.URL.Path == "/login" || r.URL.Path == "/setup" {
 		return true // any method (GET page, POST auth)
 	}
-	if (r.URL.Path == "/login.js" || r.URL.Path == "/login.css") &&
+	if (r.URL.Path == "/login.js" || r.URL.Path == "/login.css" || r.URL.Path == "/setup.js") &&
 		(r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		return true
 	}

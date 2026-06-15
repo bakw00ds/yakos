@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yakOS — First-time setup</title>
+<link rel="stylesheet" href="/login.css">
+</head>
+<body>
+<div class="card">
+  <h1>yakOS — Create admin account</h1>
+  <p style="font-size:.875rem;color:#6b7280;margin:0 0 1.25rem">
+    This is a one-time setup. Enter the setup token printed to the daemon
+    stdout, then choose a username and password for the first admin account.
+  </p>
+  <div class="error" id="err"></div>
+  <form id="setupForm">
+    <label for="token">Setup token</label>
+    <input type="password" id="token" name="token" autocomplete="off" required>
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" autocomplete="username" required>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autocomplete="new-password" required>
+    <label for="confirm">Confirm password</label>
+    <input type="password" id="confirm" name="confirm" autocomplete="new-password" required>
+    <button type="submit" id="btn">Create admin account</button>
+  </form>
+  <div class="reset-note" id="successNote">
+    Admin account created. Redirecting to sign in…
+  </div>
+</div>
+<script src="/setup.js"></script>
+</body>
+</html>

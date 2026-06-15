@@ -20,6 +20,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/metricsdash"
 	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/perfdash"
+	"github.com/bakw00ds/yakos/internal/setuptoken"
 	"github.com/bakw00ds/yakos/internal/userstore"
 	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/wsbus"
@@ -84,6 +85,12 @@ var loginJS []byte
 
 //go:embed dist/login.css
 var loginCSS []byte
+
+//go:embed dist/setup.html
+var setupHTML []byte
+
+//go:embed dist/setup.js
+var setupJS []byte
 
 // Config holds all configuration for the unified console HTTP server.
 type Config struct {
@@ -203,6 +210,18 @@ type Config struct {
 	// all requested paths are resolved against WorkspaceRoot and symlink-
 	// escaped or traversal attempts are rejected with a generic 400/403.
 	WorkspaceRoot string
+
+	// SetupToken is the one-time first-admin setup token state (ADR-0005 Phase 3c).
+	// When non-nil and NetworkedMode is true, /setup is wired and the
+	// unauthenticated edge redirect sends zero-user navigations to /setup
+	// instead of /login.
+	//
+	// When nil (loopback path, or Count()>0 at startup), /setup returns 404/409
+	// and all redirects go to /login (Phase 3b behavior unchanged).
+	//
+	// serve.go constructs the State from <StateDir>/setup-token and passes it
+	// here; callers may inject a test State.
+	SetupToken *setuptoken.State
 }
 
 func (c *Config) addr() string {
@@ -382,6 +401,22 @@ func New(cfg Config) (*Server, error) {
 			}
 		})
 		s.mux.HandleFunc("/logout", authH.handleLogout)
+
+		// Wire /setup (GET page + POST handler) and /setup.js on the networked path.
+		// /setup is auth-exempt (users can't be authenticated yet when setting up).
+		// The setupHandlers guard Count()==0 internally.
+		setupH := newSetupHandlers(cfg.SetupToken, cfg.UserStore)
+		s.mux.HandleFunc("/setup", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodPost:
+				setupH.handleSetup(w, r)
+			case http.MethodGet, http.MethodHead:
+				setupH.handleSetupPage(w, r)
+			default:
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
+		})
+		s.mux.HandleFunc("/setup.js", s.handleSetupJS)
 	} else {
 		// Loopback path: login page accessible at GET /login for debugging;
 		// POST /login is not wired (loopback uses bearer token, not sessions).
@@ -422,8 +457,10 @@ func New(cfg Config) (*Server, error) {
 		// Wire CSRF middleware and edge redirect on the networked path.
 		// Stores are guaranteed non-nil here: New() fails closed if they are nil.
 		// Resolver runs first so its output is available to all downstream middleware.
+		// requireAuthOrRedirect receives the UserStore so it can redirect to /setup
+		// when zero users exist (Phase 3c) vs /login when an admin is already present.
 		inner = resolver.Middleware(
-			requireAuthOrRedirect(
+			requireAuthOrRedirect(cfg.UserStore,
 				requireCSRFForSession(cfg.AuthSessionStore,
 					requireJSONForMutations(s.mux))))
 	} else {
@@ -1004,6 +1041,11 @@ func isStaticAsset(r *http.Request) bool {
 		// bearer token.  GET/POST for /login; GET/HEAD for /login.js and /login.css.
 		// The handler enforces its own method check; the token gate is not the right
 		// place to restrict these.
+		return true
+	case "/setup", "/setup.js":
+		// Setup page and its script: auth-exempt (unauthenticated operators must
+		// reach /setup to create the first admin; by definition they have no token).
+		// GET/POST for /setup; GET/HEAD for /setup.js.
 		return true
 	}
 	if r.Method != http.MethodGet {
