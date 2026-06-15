@@ -3,6 +3,7 @@ package setuptoken_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -36,6 +37,9 @@ func TestGenerate_WritesMarkerFile(t *testing.T) {
 	fi, err := os.Stat(filePath)
 	if err != nil {
 		t.Fatalf("marker file missing: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode bits not enforced on Windows; parent-dir 0700 ACL applies")
 	}
 	if fi.Mode().Perm() != 0600 {
 		t.Errorf("marker file perms = %o, want 0600", fi.Mode().Perm())
