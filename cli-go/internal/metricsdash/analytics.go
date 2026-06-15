@@ -1,9 +1,13 @@
 package metricsdash
 
 import (
+	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/metrics"
 )
 
@@ -130,4 +134,91 @@ func getMetricByPath(m *metrics.Metrics, path string) *float64 {
 // needed now that metrics.ParseISO is exported.
 func parseISO(s string) (time.Time, error) {
 	return metrics.ParseISO(s)
+}
+
+// ---- Live cost from dispatch-log --------------------------------------------
+
+// LiveCostResult is returned by LiveTotalCostUSD.
+type LiveCostResult struct {
+	TotalCostUSD float64 `json:"total_cost_usd"`
+	EventCount   int     `json:"event_count"`
+}
+
+// liveCostCache is an mtime+size-keyed cache for the aggregated dispatch-log
+// cost total.  It mirrors the eventsCache pattern in perfdash/server.go:
+// re-reads only when a log file changes.
+type liveCostCache struct {
+	mu        sync.Mutex
+	maxMtime  time.Time
+	totalSize int64
+	result    *LiveCostResult
+}
+
+// load returns the cached result when log files are unchanged; otherwise
+// re-aggregates from the dispatch-log directory and updates the cache.
+// Returns (nil, nil) when dispatchLogDir is empty (feature disabled).
+func (c *liveCostCache) load(dispatchLogDir string) (*LiveCostResult, error) {
+	if dispatchLogDir == "" {
+		return nil, nil
+	}
+
+	paths, err := cost.LogFiles(dispatchLogDir)
+	if err != nil {
+		return nil, fmt.Errorf("metricsdash: live cost log files: %w", err)
+	}
+
+	// Stat all files to compute aggregate mtime + size.
+	var maxMtime time.Time
+	var totalSize int64
+	for _, p := range paths {
+		fi, err := statFile(p)
+		if err != nil {
+			continue // file may have been rotated away
+		}
+		if fi.mtime.After(maxMtime) {
+			maxMtime = fi.mtime
+		}
+		totalSize += fi.size
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Cache hit: files unchanged.
+	if maxMtime.Equal(c.maxMtime) && totalSize == c.totalSize && c.result != nil {
+		return c.result, nil
+	}
+
+	// Cache miss: re-aggregate.
+	ch := cost.StreamFiles(paths, "")
+	var total float64
+	var n int
+	for ev := range ch {
+		if ev.Usage != nil {
+			total += ev.Usage.TotalCostUSD
+		}
+		n++
+	}
+
+	r := &LiveCostResult{TotalCostUSD: total, EventCount: n}
+	c.maxMtime = maxMtime
+	c.totalSize = totalSize
+	c.result = r
+	return r, nil
+}
+
+// fileStat holds the mtime and size of a file.
+type fileStat struct {
+	mtime time.Time
+	size  int64
+}
+
+// statFile returns mtime+size for path, or an error when the file is
+// inaccessible (rotated away, permissions, etc.).
+func statFile(path string) (fileStat, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fileStat{}, err
+	}
+	return fileStat{mtime: fi.ModTime(), size: fi.Size()}, nil
 }

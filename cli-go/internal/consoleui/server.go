@@ -715,9 +715,15 @@ func (s *Server) registerRoutes() {
 	// blocked by the sub-dashboard's inner Bearer-token check.  Auth is
 	// enforced at the console edge: requireRole(RoleRead) + the outer
 	// requireAuthOrRedirect / requireTokenForNonStatic middleware.
+	//
+	// DispatchLogDir is set to PerfWorkDir (the yakOS state dir) so the Cost
+	// tab shows live LLM spend from the dispatch-log without requiring a manual
+	// `yakos metrics collect`.  The same directory is used by perfdash so
+	// both dashboards read from the same canonical location.
 	metricsSrv := metricsdash.New(metricsdash.Config{
-		Token:      s.cfg.Token, // retained for standalone Serve(); unused when mounted here
-		ProjectDir: s.cfg.MetricsProjectDir,
+		Token:          s.cfg.Token, // retained for standalone Serve(); unused when mounted here
+		ProjectDir:     s.cfg.MetricsProjectDir,
+		DispatchLogDir: s.cfg.PerfWorkDir,
 	})
 	s.mux.Handle("/cost/", requireRole(netid.RoleRead, http.StripPrefix("/cost", metricsSrv.HandlerNoToken())))
 
