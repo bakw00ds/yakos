@@ -235,8 +235,14 @@ html[data-theme="fluid"] {
   --color-scrollbar-thumb-hover: #3a3f58;
 
   /* Structural */
-  --radius-card:    24px;
-  --radius-control: 100px;
+  --radius-card:     24px;
+  --radius-control:  100px;
+  /* --radius-textarea caps border-radius for multi-row fields.
+   * --radius-control (100px pill) applied to a textarea whose height
+   * grows beyond one line causes the large corner arcs to overlap the
+   * first and last lines of text, visually clipping them.  16px keeps
+   * the rounded aesthetic while staying clear of the text area. */
+  --radius-textarea: 16px;
   --glass-blur:     24px;
   --glass-sat:      1.6;
   --ease:           cubic-bezier(.22, 1.18, .36, 1);
@@ -1219,6 +1225,32 @@ html[data-theme="fluid"] .chat-pane {
 /* OG: distinct accent border */
 html[data-theme="og"] .chat-pane {
   border-color: var(--color-border-active);
+}
+
+/* FLUID: multi-row textarea clipping fix.
+ *
+ * --radius-control is 100px (pill) in the fluid theme.  When that radius is
+ * applied to a <textarea> or any input whose height spans more than one text
+ * row, the large rounded corner arcs intrude into the text area and clip the
+ * first / last visible lines.  Fix: use --radius-textarea (16px) on all
+ * growable multi-row elements so the corners stay well outside the text
+ * bounding box, and add enough vertical padding to clear the arc.
+ *
+ * Single-line controls (buttons, dropdowns, the send-btn, filter-input) keep
+ * --radius-control (100px) — they look correct as pills at fixed height.
+ */
+html[data-theme="fluid"] .chat-input {
+  border-radius: var(--radius-textarea, 16px);
+  padding: 10px 14px;
+}
+
+html[data-theme="fluid"] .flows-node-edit-textarea {
+  border-radius: var(--radius-textarea, 16px);
+  padding: 8px 10px;
+}
+
+html[data-theme="fluid"] .flows-yaml-editor {
+  border-radius: var(--radius-textarea, 16px);
 }
 
 /* ---- Pane header ---- */
