@@ -276,6 +276,9 @@
         // Session expired — redirect to login.
         window.top.location.href = '/login';
         // Return a never-resolving promise so callers don't handle stale data.
+        // NOTE: callers using .finally() will NOT have their finally-callback run
+        // because the page navigates before the promise settles (#198 / ideIsSaving
+        // latent note: isSaving flags relying on .finally() stay true on 401).
         return new Promise(function() {});
       }
       return resp;

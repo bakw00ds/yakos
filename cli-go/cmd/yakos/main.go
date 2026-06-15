@@ -5585,6 +5585,14 @@ func runServe(yakosRoot string, args []string) {
 	consoleBootstrapCertName := ""
 	noBootstrapCert := false
 
+	// YAKOS_ROOT env override mirrors runValidate / runRefresh behavior:
+	// when the binary is not installed at <root>/bin/yakos (e.g. in tests or
+	// when run from a custom path), the env variable takes precedence so that
+	// serve can compose the full agent roster and find lib/ correctly.
+	if envRoot := os.Getenv("YAKOS_ROOT"); envRoot != "" {
+		yakosRoot = envRoot
+	}
+
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-h", "--help":

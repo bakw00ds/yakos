@@ -442,10 +442,10 @@ type SessionLookupFn func(r *http.Request) (operatorID string, role Role, ok boo
 // The loopbackTrusted flag is a per-resolver trust decision made at
 // construction time by the caller who knows which listener this resolver
 // serves.  It is defense-in-depth at the HTTP layer: the resolver fails closed
-// (certless+sessionless → RoleRead / Authenticated=false) regardless of the
-// TLS configuration.  After ADR-0005 Phase 3f the console networked listener
-// uses VerifyClientCertIfGiven; the resolver's fail-closed behavior is the
-// gate that prevents an unauthenticated certless request from gaining access.
+// (certless+sessionless → RoleNone / Authenticated=false, Phase 3g) regardless
+// of the TLS configuration.  After ADR-0005 Phase 3f the console networked
+// listener uses VerifyClientCertIfGiven; the resolver's fail-closed behavior is
+// the gate that prevents an unauthenticated certless request from gaining access.
 //
 // The session branch is guarded by !loopbackTrusted so the loopback regime
 // is byte-for-byte unchanged regardless of whether a sessionLookupFn is set.
@@ -472,7 +472,7 @@ type Resolver struct {
 //   - loopbackTrusted controls the no-cert fallback.  Set to true for the
 //     loopback listener (certless → RoleAdmin, Authenticated=false, preserving
 //     today's behavior).  Set to false for any non-loopback listener (certless
-//     → RoleRead, Authenticated=false; fail-closed).
+//     → RoleNone, Authenticated=false; fail-closed, Phase 3g).
 func NewResolver(mapper *RoleMapper, callerLabelFn func(*http.Request) string, loopbackTrusted bool) *Resolver {
 	return &Resolver{
 		mapper:          mapper,

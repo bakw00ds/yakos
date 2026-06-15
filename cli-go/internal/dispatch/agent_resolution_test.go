@@ -10,6 +10,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -158,7 +159,7 @@ func TestUnknownAgent_StillErrors(t *testing.T) {
 		t.Fatal("Service.Run with unknown agent: expected error, got nil")
 	}
 	const wantSub = "not found in composed set"
-	if !containsAny(err.Error(), wantSub) {
+	if !strings.Contains(err.Error(), wantSub) {
 		t.Errorf("unexpected error message (want %q in): %v", wantSub, err)
 	}
 }
@@ -187,17 +188,4 @@ func TestSpecialistAgent_StillResolves(t *testing.T) {
 	if capturedReq.AgentName != "backend" {
 		t.Errorf("AgentName = %q, want %q", capturedReq.AgentName, "backend")
 	}
-}
-
-// containsAny is a simple substring check used for error message assertions.
-func containsAny(s, sub string) bool {
-	if len(sub) == 0 {
-		return true
-	}
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

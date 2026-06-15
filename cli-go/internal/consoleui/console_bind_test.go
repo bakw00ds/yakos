@@ -378,6 +378,8 @@ func TestConsoleBind_CSP_LoopbackUsesWs(t *testing.T) {
 
 // TestConsoleBind_WSOrigin_ExternalOriginAccepted verifies that the external
 // (non-loopback) wss:// and https:// origins are accepted for the external host.
+// http:// and ws:// are intentionally NOT accepted for external hosts (#199):
+// the non-loopback console is always TLS-backed (ADR-0005 Phase 3f).
 func TestConsoleBind_WSOrigin_ExternalOriginAccepted(t *testing.T) {
 	t.Parallel()
 	externalHost := "10.0.0.1:7890"
@@ -385,7 +387,6 @@ func TestConsoleBind_WSOrigin_ExternalOriginAccepted(t *testing.T) {
 	cases := []string{
 		"https://10.0.0.1:7890",
 		"wss://10.0.0.1:7890",
-		"http://10.0.0.1:7890", // http fallback also accepted
 	}
 	for _, origin := range cases {
 		origin := origin
@@ -407,6 +408,8 @@ func TestConsoleBind_WSOrigin_ExactMatchOnly(t *testing.T) {
 
 	// These must all be REJECTED despite starting with or containing the host.
 	// Note: trailing "/" is accepted (TrimRight removes it), which is safe.
+	// http:// and ws:// are also rejected for external hosts since Phase 3f
+	// mandates TLS for non-loopback connections (#199).
 	rejected := []struct {
 		name   string
 		origin string
@@ -417,6 +420,8 @@ func TestConsoleBind_WSOrigin_ExactMatchOnly(t *testing.T) {
 		{"empty-origin", ""},
 		{"different-port", "https://10.0.0.1:7891"},
 		{"different-host", "https://10.0.0.2:7890"},
+		{"plaintext-http", "http://10.0.0.1:7890"},
+		{"plaintext-ws", "ws://10.0.0.1:7890"},
 	}
 	for _, tc := range rejected {
 		tc := tc

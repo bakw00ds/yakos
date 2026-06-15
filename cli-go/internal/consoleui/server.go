@@ -115,7 +115,7 @@ type Config struct {
 	// NetworkedMode, when true, signals that this server is bound to a
 	// non-loopback address.  This triggers:
 	//   - wss:// origin in CSP and WS Origin allow-list (instead of ws://)
-	//   - loopbackTrusted=false in the identity Resolver (certless → RoleRead)
+	//   - loopbackTrusted=false in the identity Resolver (certless → RoleNone, Phase 3g)
 	//   - Removal of the loopback-only assertion in Serve()
 	//   - Admission of the external origin in the WS Origin allow-list
 	// When false (default), all loopback-path behaviour is completely
