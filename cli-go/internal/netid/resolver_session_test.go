@@ -109,7 +109,8 @@ func TestResolver_NewResolver_Loopback_StampsAuthMethodNone(t *testing.T) {
 }
 
 // TestResolver_NewResolver_NetworkedNoCert_StampsAuthMethodNone verifies that
-// the fail-closed path (networked, no cert, no session fn) produces AuthMethodNone.
+// the fail-closed path (networked, no cert, no session fn) produces AuthMethodNone
+// and Phase 3g: RoleNone (not RoleRead) so requireRole(RoleRead) also rejects it.
 func TestResolver_NewResolver_NetworkedNoCert_StampsAuthMethodNone(t *testing.T) {
 	t.Parallel()
 	m := netid.NewRoleMapper("")
@@ -124,8 +125,9 @@ func TestResolver_NewResolver_NetworkedNoCert_StampsAuthMethodNone(t *testing.T)
 	if id.Authenticated {
 		t.Error("networked no-cert: Authenticated=true; want false")
 	}
-	if id.Role != netid.RoleRead {
-		t.Errorf("networked no-cert: Role=%v; want RoleRead (fail-closed)", id.Role)
+	// Phase 3g: fail-closed carries RoleNone so requireRole(RoleRead) also rejects it.
+	if id.Role != netid.RoleNone {
+		t.Errorf("networked no-cert: Role=%v; want RoleNone (Phase 3g fail-closed sentinel)", id.Role)
 	}
 }
 
@@ -210,7 +212,8 @@ func TestResolver_SessionPath_ValidSession_AuthMethodSession(t *testing.T) {
 
 // TestResolver_SessionPath_InvalidSession_FailClosed verifies that when the
 // session fn returns ok=false, the resolver falls through to the fail-closed
-// identity (RoleRead, Authenticated=false, AuthMethodNone).
+// identity (RoleNone, Authenticated=false, AuthMethodNone).
+// Phase 3g: RoleNone (not RoleRead) so requireRole(RoleRead) also rejects it.
 func TestResolver_SessionPath_InvalidSession_FailClosed(t *testing.T) {
 	t.Parallel()
 	m := netid.NewRoleMapper("")
@@ -225,8 +228,13 @@ func TestResolver_SessionPath_InvalidSession_FailClosed(t *testing.T) {
 	if id.Authenticated {
 		t.Error("invalid session: Authenticated=true; want false (fail-closed)")
 	}
-	if id.Role != netid.RoleRead {
-		t.Errorf("invalid session: Role=%v; want RoleRead (fail-closed)", id.Role)
+	// Phase 3g: unauthenticated networked identity now carries RoleNone.
+	if id.Role != netid.RoleNone {
+		t.Errorf("invalid session: Role=%v; want RoleNone (Phase 3g fail-closed sentinel)", id.Role)
+	}
+	// The critical property: RoleNone must not satisfy any requireRole check.
+	if id.Role.Allows(netid.RoleRead) {
+		t.Error("invalid session: RoleNone.Allows(RoleRead) must be false (defense-in-depth)")
 	}
 	if id.AuthMethod != netid.AuthMethodNone {
 		t.Errorf("invalid session: AuthMethod=%v; want AuthMethodNone", id.AuthMethod)
@@ -322,7 +330,7 @@ func TestResolver_NewResolverWithSession_NilFn_EqualsNewResolver(t *testing.T) {
 		}
 	})
 
-	// fail-closed path
+	// fail-closed path — Phase 3g: RoleNone, not RoleRead
 	t.Run("fail-closed", func(t *testing.T) {
 		t.Parallel()
 		res := netid.NewResolverWithSession(m, nil, false, nil)
@@ -331,8 +339,8 @@ func TestResolver_NewResolverWithSession_NilFn_EqualsNewResolver(t *testing.T) {
 		if id.AuthMethod != netid.AuthMethodNone {
 			t.Errorf("fail-closed: AuthMethod=%v; want AuthMethodNone", id.AuthMethod)
 		}
-		if id.Authenticated || id.Role != netid.RoleRead || id.OperatorID != "" {
-			t.Errorf("fail-closed: unexpected identity %+v", id)
+		if id.Authenticated || id.Role != netid.RoleNone || id.OperatorID != "" {
+			t.Errorf("fail-closed: unexpected identity %+v (Phase 3g: want RoleNone)", id)
 		}
 	})
 }

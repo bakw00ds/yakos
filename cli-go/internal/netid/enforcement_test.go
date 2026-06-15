@@ -137,6 +137,9 @@ func TestRoleMapper_CorrectPerms_WorksNormally(t *testing.T) {
 
 // TestIdentityFrom_ZeroValue_ResolvedFalse verifies that the zero-value Identity
 // returned when no middleware has run has Resolved==false.
+// Phase 3g: zero-value Role is now RoleNone (the unauthenticated sentinel).
+// requireRole is safe because it gates on Resolved=false — zero-value identities
+// are never blocked by role enforcement.
 func TestIdentityFrom_ZeroValue_ResolvedFalse(t *testing.T) {
 	t.Parallel()
 	// Use a plain request with no identity in context (no middleware ran).
@@ -145,8 +148,9 @@ func TestIdentityFrom_ZeroValue_ResolvedFalse(t *testing.T) {
 	if id.Resolved {
 		t.Error("zero-value Identity.Resolved=true; want false (no middleware ran)")
 	}
-	if id.Role != netid.RoleRead {
-		t.Errorf("zero-value Identity.Role=%v; want RoleRead", id.Role)
+	// Zero-value Role is RoleNone since Phase 3g (iota=0 is now RoleNone, not RoleRead).
+	if id.Role != netid.RoleNone {
+		t.Errorf("zero-value Identity.Role=%v; want RoleNone (Phase 3g sentinel, safe because Resolved=false)", id.Role)
 	}
 }
 
@@ -185,7 +189,8 @@ func TestResolver_Middleware_SetsResolved(t *testing.T) {
 }
 
 // TestResolver_NonLoopback_NoCert_SetsResolved verifies that even a fail-closed
-// (RoleRead) resolution from a non-loopback resolver sets Resolved==true.
+// (RoleNone) resolution from a non-loopback resolver sets Resolved==true.
+// Phase 3g: fail-closed identity now carries RoleNone, not RoleRead.
 func TestResolver_NonLoopback_NoCert_SetsResolved(t *testing.T) {
 	t.Parallel()
 
@@ -204,8 +209,9 @@ func TestResolver_NonLoopback_NoCert_SetsResolved(t *testing.T) {
 	if !capturedID.Resolved {
 		t.Error("non-loopback fail-closed Identity.Resolved=false; want true")
 	}
-	if capturedID.Role != netid.RoleRead {
-		t.Errorf("non-loopback fail-closed Role=%v; want RoleRead", capturedID.Role)
+	// Phase 3g: unauthenticated networked identities now carry RoleNone.
+	if capturedID.Role != netid.RoleNone {
+		t.Errorf("non-loopback fail-closed Role=%v; want RoleNone (Phase 3g sentinel)", capturedID.Role)
 	}
 }
 

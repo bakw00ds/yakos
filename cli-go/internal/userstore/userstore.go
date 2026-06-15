@@ -364,14 +364,18 @@ func (s *Store) adminCountLocked() int {
 }
 
 // Create creates a new user with the given username, password, and role.
-// Returns an error when the username already exists, is invalid, or the
-// password is shorter than MinPasswordLen.
+// Returns an error when the username already exists, is invalid, the
+// password is shorter than MinPasswordLen, or role is not an assignable
+// user role (RoleNone is rejected — it is an internal sentinel only).
 func (s *Store) Create(username, password string, role netid.Role) error {
 	if err := validateUsername(username); err != nil {
 		return fmt.Errorf("userstore: create: %w", err)
 	}
 	if err := validatePassword(password); err != nil {
 		return fmt.Errorf("userstore: create: %w", err)
+	}
+	if !netid.IsAssignableRole(role) {
+		return fmt.Errorf("userstore: create: role %q is not a valid user role (must be read, dispatch, flows-run, or admin)", role)
 	}
 
 	hash, err := HashPassword(password)
@@ -539,8 +543,13 @@ func (s *Store) Verify(username, password string) (PublicUser, error) {
 // invalidating all live sessions for this user (per ADR-0005: a role change
 // must take effect immediately; sessions must re-resolve the new role).
 //
-// Returns an error if the user does not exist.
+// Returns an error if the user does not exist or role is not an assignable
+// user role (RoleNone is rejected — it is an internal sentinel only).
 func (s *Store) SetRole(username string, role netid.Role) error {
+	if !netid.IsAssignableRole(role) {
+		return fmt.Errorf("userstore: set-role: role %q is not a valid user role (must be read, dispatch, flows-run, or admin)", role)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

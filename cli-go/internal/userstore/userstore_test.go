@@ -1067,3 +1067,77 @@ func getPubOrFail(t *testing.T, s *userstore.Store, username string) userstore.P
 	}
 	return pub
 }
+
+// ---- Phase 3g: RoleNone must be rejected as a user-assignable role ----------
+
+// TestCreate_RoleNone_Rejected verifies that Create returns an error when
+// RoleNone is supplied as the role argument.  RoleNone is an internal sentinel
+// for unauthenticated networked identities and must never be persisted as a
+// user's role (ADR-0005 Phase 3g).
+func TestCreate_RoleNone_Rejected(t *testing.T) {
+	t.Parallel()
+	s := openEmpty(t)
+	err := s.Create("alice", "correct-horse-battery-staple", netid.RoleNone)
+	if err == nil {
+		t.Fatal("Create with RoleNone: want error; got nil (RoleNone must be rejected)")
+	}
+	// The user must not have been created.
+	_, ok := s.Get("alice")
+	if ok {
+		t.Error("Create with RoleNone: user was created despite error; want no user")
+	}
+}
+
+// TestCreate_AllAssignableRoles_Accepted verifies that Create succeeds for all
+// four real user-assignable roles.  Phase 3g must not accidentally break
+// legitimate user creation.
+func TestCreate_AllAssignableRoles_Accepted(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		role netid.Role
+	}{
+		{"read", netid.RoleRead},
+		{"dispatch", netid.RoleDispatch},
+		{"flows-run", netid.RoleFlowsRun},
+		{"admin", netid.RoleAdmin},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := openEmpty(t)
+			err := s.Create("user-"+tc.name, "correct-horse-battery-staple", tc.role)
+			if err != nil {
+				t.Errorf("Create with role %q: unexpected error: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+// TestSetRole_RoleNone_Rejected verifies that SetRole returns an error when
+// RoleNone is supplied.  Even a privileged admin must not be able to degrade
+// a user to the internal unauthenticated sentinel.
+func TestSetRole_RoleNone_Rejected(t *testing.T) {
+	t.Parallel()
+	s := openEmpty(t)
+	// Create a legitimate user first.
+	if err := s.Create("bob", "correct-horse-battery-staple", netid.RoleRead); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	err := s.SetRole("bob", netid.RoleNone)
+	if err == nil {
+		t.Fatal("SetRole with RoleNone: want error; got nil (RoleNone must be rejected)")
+	}
+	// The user's role must not have changed.
+	pub, ok := s.Get("bob")
+	if !ok {
+		t.Fatal("Get after SetRole(RoleNone): user not found")
+	}
+	if pub.Role == netid.RoleNone {
+		t.Error("SetRole with RoleNone: user role was updated to RoleNone despite error")
+	}
+	if pub.Role != netid.RoleRead {
+		t.Errorf("SetRole with RoleNone: user role changed to %v; want RoleRead (original)", pub.Role)
+	}
+}
