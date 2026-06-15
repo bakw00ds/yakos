@@ -3591,7 +3591,7 @@ html[data-theme="light"] .users-table tr:hover td {
  *
  * Light theme token failures on white (#ffffff) at 11px/700:
  *   --color-positive #007a5a:  5.34:1  ✓  (already passes; no change needed)
- *   --color-alarm    #ea580c:  3.99:1  ✗  → use #b84500 (5.33:1 on white)
+ *   --color-alarm    #ea580c:  3.56:1  ✗  → use #b84500 (5.33:1 on white)
  *   --color-warning  #d97706:  3.55:1  ✗  → use #92530a (5.04:1 on white)
  *
  * Ratios verified via WCAG 2.1 relative-luminance formula.
@@ -3626,6 +3626,7 @@ html[data-theme="light"] .users-badge-reset {
    * 11px/1.5 line-height ≈ ~19px height; min-height: 24px lifts it to
    * the minimum and also gives a larger click/touch target in dense rows. */
   min-height: 24px;
+  min-width: 24px;
   padding: 3px 8px;
   transition: background var(--dur, 0.1s) var(--ease, ease),
               color var(--dur, 0.1s) var(--ease, ease),
