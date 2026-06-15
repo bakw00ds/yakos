@@ -1037,7 +1037,8 @@
 
   // ---- Chat tab init ---------------------------------------------------------
 
-  let chatTabInitialized = false;
+  let chatTabInitialized = false;  // true once chat infra (SSE, panes) is booted
+  let chatLayoutRendered = false;  // true once the Chat tab's DOM layout is rendered
 
   // bootChatInfrastructure mints the operator ID, loads persisted pane state,
   // seeds a default pane if none exist, and starts the SSE reader.  It is
@@ -1059,17 +1060,22 @@
   }
 
   function initChatTab() {
-    if (chatTabInitialized) return;
-
-    // S4: use the shared boot helper so the sequence is defined once and both
-    // initChatTab + initIdeTab stay in sync.  bootChatInfrastructure() is
-    // idempotent; calling it here sets chatTabInitialized = true.
+    // Always boot infra (idempotent — safe if IDE tab already ran it).
     bootChatInfrastructure();
+
+    // Render the Chat tab layout exactly once: on first open it builds the
+    // DOM; on repeat tab switches it is a no-op so panes aren't duplicated.
+    // chatLayoutRendered is separate from chatTabInitialized so that infra
+    // pre-booted by initIdeTab does not prevent the layout from rendering.
+    if (chatLayoutRendered) return;
+    chatLayoutRendered = true;
 
     renderChatLayout();
 
-    // Load transcripts for each pane asynchronously.
-    for (const [paneId] of chatPanes) {
+    // Load transcripts for real chat panes only — skip ideEmbedded panes,
+    // which are managed by mountIdeChatPane and must not appear in the Chat rail.
+    for (const [paneId, pane] of chatPanes) {
+      if (pane.ideEmbedded) continue;
       loadTranscriptForPane(paneId);
     }
   }
@@ -1105,7 +1111,8 @@
     const rail = document.getElementById('chat-pane-rail');
     if (!rail) return;
     rail.innerHTML = '';
-    for (const [paneId] of chatPanes) {
+    for (const [paneId, pane] of chatPanes) {
+      if (pane.ideEmbedded) continue; // IDE-embedded pane lives in the IDE slot, not the Chat rail
       rail.appendChild(buildPaneElement(paneId));
     }
   }
@@ -5057,9 +5064,11 @@
     // Create one pane — NOT added to chatPanes or savePaneState.
     const p = makePane(newPaneId(), newConversationId());
 
-    // Register in chatPanes only for the duration of this page load so the
-    // SSE demux (sessionToPaneId → chatPanes.get()) can find the pane.
+    // Mark as IDE-embedded so Chat-tab rendering skips this pane.  It stays
+    // in chatPanes for the duration of this page load so the SSE demux
+    // (sessionToPaneId → chatPanes.get()) can route events to it correctly.
     // We do NOT call savePaneState() — the pane is session-only.
+    p.ideEmbedded = true;
     chatPanes.set(p.id, p);
 
     const paneEl = buildPaneElement(p.id);
