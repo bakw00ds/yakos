@@ -438,9 +438,9 @@
         swReadyPromise.then((ready) => {
           if (!ready && AUTH_MODE === 'bearer') {
             // In bearer mode, SW is required for iframe auth injection.
-            // In session mode, the browser sends the cookie automatically —
-            // SW failure is recoverable (the CSRF header is just not injected
-            // on iframe sub-resource mutations, which is acceptable for reads).
+            // In session mode, the kanban iframe self-injects X-CSRF-Token by
+            // reading the yakos_csrf cookie directly (same-origin, non-HttpOnly),
+            // so SW failure is fully recoverable for both reads and mutations.
             document.getElementById('auth-error').classList.add('visible');
             return;
           }
