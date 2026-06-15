@@ -947,7 +947,80 @@
       elapsedTimer: null,
       autoScroll: true,
       messages: [],
+      // Phase 3 session-attach fields.
+      // attachedSessionId: non-null when this pane is watching/interjecting into
+      //   an existing session (not a pane that originated the session itself).
+      // watchOnly: true when the operator does not own the attached session
+      //   (shared watcher — composer disabled, read-only affordance shown).
+      attachedSessionId: null,
+      watchOnly: false,
     };
+  }
+
+  // ---- Phase 3: openAttachPane ------------------------------------------------
+  //
+  // Opens a new pane bound to an existing session (attach / watch mode).
+  //
+  // sessionId   — the session to attach to (from /api/fleet row or /attach cmd).
+  // conversationId — the conversation to backfill; defaults to sessionId when
+  //                  not supplied (single-session pane convention).
+  // watchOnly   — true when the caller does NOT own the session (shared watcher);
+  //               false when the caller is the owner (can interject).
+  //
+  // The pane is registered in chatPanes and sessionToPaneId so that incoming SSE
+  // frames for sessionId are routed to it by the existing SSE demux.
+  // loadTranscriptForPane is called with the sessionId param so the transcript
+  // handler's IsShared path applies for shared-session backfill.
+  // _pushSystemMsg appends a system message into the active (focused) pane, or
+  // the first pane if none is focused.  Used to surface client-side notices
+  // (e.g. pane-cap errors) without a modal or alert().
+  function _pushSystemMsg(text) {
+    // Find the first pane in chatPanes (iteration order = insertion order).
+    var firstPaneId = null;
+    for (var pid of chatPanes.keys()) { firstPaneId = pid; break; }
+    if (!firstPaneId) return;
+    var pane = chatPanes.get(firstPaneId);
+    if (!pane) return;
+    pane.messages.push({ role: 'system', text: text, ts: new Date().toISOString(), sessionId: null });
+    renderPaneMessages(firstPaneId);
+    if (pane.autoScroll) scrollPaneToBottom(firstPaneId);
+  }
+
+  function openAttachPane(sessionId, conversationId, watchOnly) {
+    if (!sessionId) return;
+    // Normalise: conversationId defaults to sessionId (single-session convention).
+    var convId = conversationId || sessionId;
+
+    // Reuse existing pane if we are already watching this session.
+    if (sessionToPaneId.has(sessionId)) {
+      // Already attached — nothing to do; pane is already visible.
+      return;
+    }
+
+    if (chatPanes.size >= MAX_PANES) {
+      // S2: surface a visible notice rather than silently failing.
+      _pushSystemMsg('Pane limit reached (' + MAX_PANES + ') — close a pane to attach to ' + sessionId + '.');
+      return;
+    }
+
+    var p = makePane(newPaneId(), convId);
+    p.attachedSessionId = sessionId;
+    p.watchOnly = !!watchOnly;
+    p.status = 'idle';
+
+    chatPanes.set(p.id, p);
+    sessionToPaneId.set(sessionId, p.id);
+
+    // Rebuild the pane rail to include the new pane.
+    var rail = document.getElementById('chat-pane-rail');
+    if (rail) {
+      rail.appendChild(buildPaneElement(p.id));
+    }
+
+    // Backfill transcript: pass sessionId so the server's IsShared check fires.
+    loadTranscriptForPane(p.id);
+
+    savePaneState();
   }
 
   // ---- SSE: single fetch-based reader for this operator ----------------------
@@ -1362,6 +1435,19 @@
     el.className = 'chat-pane';
     el.id = 'pane-' + paneId;
 
+    // Phase 3: watch-only attach panes disable the composer so the operator
+    // cannot accidentally submit a task into a session they do not own.
+    // The textarea is rendered with disabled + aria-disabled so screen readers
+    // also announce the restriction.  Owner attach panes (watchOnly=false) keep
+    // the composer enabled (interject path).
+    const composerDisabled = pane.watchOnly ? ' disabled' : '';
+    const composerAriaLabel = pane.watchOnly
+      ? 'Read-only: watching another operator\'s session'
+      : 'Task prompt for this pane';
+    const composerPlaceholder = pane.watchOnly
+      ? 'Watching — read only'
+      : 'Task prompt…';
+
     el.innerHTML =
       // Header
       '<div class="chat-pane-header" id="pane-header-' + esc(paneId) + '">' +
@@ -1375,10 +1461,11 @@
       // Input area
       '<div class="chat-input-area">' +
         '<textarea class="chat-input" id="pane-input-' + esc(paneId) + '" ' +
-          'rows="3" placeholder="Task prompt…" ' +
-          'aria-label="Task prompt for this pane"></textarea>' +
+          'rows="3" placeholder="' + esc(composerPlaceholder) + '" ' +
+          'aria-label="' + esc(composerAriaLabel) + '"' +
+          composerDisabled + '></textarea>' +
         '<button class="chat-send-btn" id="pane-send-' + esc(paneId) + '" type="button" ' +
-          'aria-label="Send task">Send</button>' +
+          'aria-label="Send task"' + composerDisabled + '>Send</button>' +
       '</div>';
 
     // Wire events after inserting.
@@ -1390,6 +1477,29 @@
   function buildPaneHeaderHTML(paneId) {
     const pane = chatPanes.get(paneId);
     if (!pane) return '';
+
+    // Phase 3: attached (watch/interject) panes show a simplified header.
+    // Watch-only panes suppress the runtime/model/agent controls (read-only)
+    // and display a "watching — read only" badge instead.
+    if (pane.attachedSessionId) {
+      const statusClass = 'pane-status-' + esc(pane.status);
+      const statusLabel = paneStatusLabel(pane.status);
+      const attachBadge = pane.watchOnly
+        ? '<span class="pane-watch-badge" aria-label="Read-only watch mode">watching — read only</span>'
+        : '<span class="pane-watch-badge pane-watch-badge-owner" aria-label="Interject mode">interjecting</span>';
+      return '<div class="pane-header-row">' +
+          attachBadge +
+          '<span class="pane-attach-session" title="' + esc(pane.attachedSessionId) + '">' +
+            esc(pane.attachedSessionId) +
+          '</span>' +
+          '<span class="pane-status ' + statusClass + '" id="pane-status-' + esc(paneId) + '" ' +
+            'aria-label="Status: ' + esc(statusLabel) + '">' +
+            paneStatusIcon(pane.status) + '<span class="sr-only">' + esc(statusLabel) + '</span>' +
+          '</span>' +
+          '<button class="pane-close-btn" id="pane-close-' + esc(paneId) + '" type="button" ' +
+            'aria-label="Close this pane">&times;</button>' +
+        '</div>';
+    }
 
     const runtimeOpts = RUNTIMES.map((r) =>
       '<option value="' + esc(r) + '"' + (r === pane.runtime ? ' selected' : '') + '>' + esc(r) + '</option>'
@@ -1779,7 +1889,25 @@
           if (pane.autoScroll) scrollPaneToBottom(paneId);
         }
       }
-      // 'attach' is reserved for a future phase — no-op for now.
+      // Phase 3: /attach <sessionId> — open an attach pane for the given session.
+      // The sessionId comes from the text the operator typed after "/attach ".
+      // Ownership is determined by checking fleetSessions: if the session is in the
+      // fleet map, the server-supplied "owned" field is authoritative.
+      // If the sessionId is not in fleetSessions (typed manually), we open in
+      // watchOnly mode as the conservative default.
+      if (name === 'attach') {
+        // Extract the sessionId from the textarea text following "/attach ".
+        var rawText = textarea ? textarea.value.trim() : '';
+        // rawText may be "/attach <sessionId>" or just the sessionId remainder.
+        var attachSessionId = rawText.replace(/^\/attach\s*/i, '').trim();
+        if (textarea) textarea.value = '';
+        if (attachSessionId) {
+          // Determine watchOnly via server-supplied owned field.
+          var fleetRow = fleetSessions.get(attachSessionId);
+          var isOwned = !!(fleetRow && fleetRow.owned);
+          openAttachPane(attachSessionId, attachSessionId, !isOwned);
+        }
+      }
     }
   }
 
@@ -1919,6 +2047,13 @@
         '<span class="chat-summary-cost">' + esc(costStr) + '</span>' +
         (durationStr ? '<span class="chat-summary-duration">' + esc(durationStr) + '</span>' : '') +
         errorHtml;
+    } else if (msg.role === 'system') {
+      // System messages are client-generated (e.g. /help output, attach notices).
+      // esc() via escLines ensures no XSS from text content.
+      el.className = 'chat-msg chat-msg-system';
+      el.innerHTML =
+        '<span class="chat-msg-role" aria-hidden="true">system</span>' +
+        '<div class="chat-msg-text">' + escLines(msg.text) + '</div>';
     }
 
     return el;
@@ -1930,8 +2065,16 @@
     const pane = chatPanes.get(paneId);
     if (!pane || !pane.conversationId) return;
     const opId = getChatOperatorId();
-    const url = '/api/chat/transcript?conversationId=' + encodeURIComponent(pane.conversationId) +
-                '&operatorId=' + encodeURIComponent(opId);
+    // Phase 3: when this pane is attached to another session (watch or interject),
+    // include sessionId so the server's handleChatTranscript can call
+    // hub.IsShared(sessionId) and grant shared-access transcript reads.
+    // The server never allows the client to self-assert shared access — the hub
+    // IsShared check is authoritative.
+    var url = '/api/chat/transcript?conversationId=' + encodeURIComponent(pane.conversationId) +
+              '&operatorId=' + encodeURIComponent(opId);
+    if (pane.attachedSessionId) {
+      url += '&sessionId=' + encodeURIComponent(pane.attachedSessionId);
+    }
 
     const transcriptOpts = {};
     if (AUTH_MODE === 'session') {
@@ -2350,6 +2493,10 @@
 
   // renderReplFleet updates the fleet panel DOM from the current fleetSessions map.
   // Called on initial seed (initReplTab) and on each fleet.* WS event.
+  //
+  // Phase 3: rows where attachable=true show an "attach" button.  Clicking the
+  // row (or its attach button) calls openAttachPane with watchOnly derived from
+  // the server-supplied owned field.  esc() is applied to all interpolated strings.
   function renderReplFleet() {
     const el = document.getElementById('repl-fleet-list');
     if (!el) return;
@@ -2365,18 +2512,56 @@
     ul.setAttribute('aria-label', 'Active dispatch sessions');
     for (const [, s] of fleetSessions) {
       const li = document.createElement('li');
-      li.className = 'repl-fleet-item repl-fleet-status-' + esc(s.status || 'running');
+      const isAttachable = !!(s.attachable);
+      const isOwned = !!(s.owned);
+      li.className = 'repl-fleet-item repl-fleet-status-' + esc(s.status || 'running') +
+        (isAttachable ? ' repl-fleet-attachable' : '');
       // Format started_at as a locale time string.
       let startedStr = '';
       if (s.started_at) {
         try { startedStr = new Date(s.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); } catch (_) {}
       }
       const preview = s.task_preview ? esc(s.task_preview) : '';
+      // Phase 3: attach button — only rendered when attachable.
+      // The button text signals ownership: "watch" for non-owners, "attach" for owners.
+      const attachBtnHtml = isAttachable
+        ? '<button class="repl-fleet-attach-btn" type="button" ' +
+            'aria-label="' + esc(isOwned ? 'Attach to session' : 'Watch session') + '">' +
+            esc(isOwned ? 'attach' : 'watch') +
+          '</button>'
+        : '';
       li.innerHTML =
         '<span class="repl-fleet-agent" aria-label="agent">' + esc(s.agent || '?') + '</span>' +
         '<span class="repl-fleet-status" aria-label="status">' + esc(s.status || 'running') + '</span>' +
         (startedStr ? '<span class="repl-fleet-time" aria-label="started at">' + esc(startedStr) + '</span>' : '') +
-        (preview ? '<span class="repl-fleet-preview" aria-label="task preview">' + preview + '</span>' : '');
+        (preview ? '<span class="repl-fleet-preview" aria-label="task preview">' + preview + '</span>' : '') +
+        attachBtnHtml;
+
+      // Wire click: the native attach <button> is the primary keyboard target.
+      // S3: do NOT set role="button" on the <li> — the nested <button> already
+      // provides the correct ARIA semantics, and a redundant role on the <li>
+      // would create a double-fire hazard on Enter (keydown fires on both).
+      // The row click handler is kept as a pointer-only convenience (no tabindex).
+      if (isAttachable) {
+        // Capture loop variables for closure.
+        (function(sessionId, watchOnly) {
+          var attachBtn = li.querySelector('.repl-fleet-attach-btn');
+          if (attachBtn) {
+            // Native button handles both click and keyboard (Enter/Space natively).
+            attachBtn.addEventListener('click', function(e) {
+              e.stopPropagation();
+              openAttachPane(sessionId, sessionId, watchOnly);
+            });
+          }
+          // Row click: pointer-only convenience (no tabindex / role=button on li).
+          li.addEventListener('click', function(e) {
+            // Only fire when the click target is not the button itself
+            // (the button's own handler fires in that case via stopPropagation).
+            openAttachPane(sessionId, sessionId, watchOnly);
+          });
+        })(s.session_id, !isOwned);
+      }
+
       ul.appendChild(li);
     }
     el.appendChild(ul);

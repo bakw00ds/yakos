@@ -128,12 +128,21 @@ type sseConn struct {
 type sessionEntry struct {
 	ownerOperatorID string
 	shared          bool
+	conversationID  string // the conversation this session writes to; set by SetConversationID
 }
 
 // errSessionOwnerConflict is returned by OpenSession and SetShared when the
 // sessionID is already owned by a different operatorID.  The HTTP handler must
 // return 403.
 var errSessionOwnerConflict = errors.New("chathub: session owned by different operator")
+
+// errConversationOwnerConflict is returned by SetConversationID when the
+// conversationID is already bound to a session owned by a DIFFERENT operator.
+// The HTTP handler must return 403.  This prevents conversation-binding
+// poisoning: an attacker cannot bind their own session to a victim's
+// conversationID to manufacture a shared-session entry that bypasses the
+// transcript owner check.
+var errConversationOwnerConflict = errors.New("chathub: conversationID already bound to another operator's session")
 
 // errSessionNotFound is returned by SetShared when the sessionID does not
 // exist in the hub.  The HTTP handler must return 404.
@@ -369,6 +378,90 @@ func (h *ChatHub) IsShared(sessionID string) bool {
 		return false
 	}
 	return e.shared
+}
+
+// SetConversationID records which conversationID a session is writing to.
+// Called by the dispatch handler immediately after conversationID is resolved
+// (defaulting to sessionID when the caller supplies none).
+//
+// Security invariant: returns errConversationOwnerConflict (→ 403) when
+// conversationID is already bound to an OPEN session owned by a DIFFERENT
+// operator.  This prevents conversation-binding poisoning: an attacker cannot
+// bind their own session to a victim's conversationID, share their own session,
+// and then have IsConversationShared return true for the victim's conversation.
+//
+// Same-operator re-binding (e.g. a second dispatch for the same conversation
+// under a new sessionID) is allowed.
+//
+// No-op (returns nil) when sessionID does not exist in the hub (race with
+// CloseSession at teardown is benign — the session is already gone).
+func (h *ChatHub) SetConversationID(sessionID, conversationID string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	e, ok := h.sessions[sessionID]
+	if !ok {
+		return nil // session already closed — no-op
+	}
+
+	// Check whether conversationID is already bound to a different operator's
+	// session.  We scan ALL sessions so we detect even sessions that have
+	// already written to the conversation from a different sessionID.
+	for sid, existing := range h.sessions {
+		if sid == sessionID {
+			continue // skip the session we are about to update
+		}
+		if existing.conversationID == conversationID &&
+			existing.ownerOperatorID != e.ownerOperatorID {
+			return errConversationOwnerConflict
+		}
+	}
+
+	e.conversationID = conversationID
+	h.sessions[sessionID] = e
+	return nil
+}
+
+// ConversationForSession returns the conversationID bound to sessionID, or ""
+// when the session does not exist or has no conversation bound yet.
+// Used by the transcript handler for defense-in-depth: if a caller supplies a
+// sessionId that is bound to a different conversationID than the one being
+// requested, the request is rejected (403) before reaching the owner check.
+func (h *ChatHub) ConversationForSession(sessionID string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.sessions[sessionID].conversationID
+}
+
+// IsConversationShared returns true iff a currently-open, SHARED session that
+// owns conversationID is also owned by expectedOwnerOperatorID.
+//
+// Owner-anchoring: the lookup matches on BOTH conversationID and session owner.
+// An attacker who bound their own session to the same conversationID will have
+// a different ownerOperatorID, so their shared session cannot satisfy this
+// check.  Combined with SetConversationID's cross-operator rejection, this
+// provides two independent layers of defence.
+//
+// expectedOwnerOperatorID is the operator established by the transcript file's
+// first user turn (M1 logic).  Passing "" disables the owner check (internal
+// daemon calls where no operatorID is known).
+//
+// Returns false when no matching session is found or it is not shared.
+func (h *ChatHub) IsConversationShared(conversationID, expectedOwnerOperatorID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, e := range h.sessions {
+		if e.conversationID != conversationID {
+			continue
+		}
+		// Owner-anchored: the session owner must match the transcript's
+		// established owner.  "" disables this check (internal calls).
+		if expectedOwnerOperatorID != "" && e.ownerOperatorID != expectedOwnerOperatorID {
+			continue
+		}
+		return e.shared
+	}
+	return false
 }
 
 // connCount returns the number of live SSE connections for operatorID.

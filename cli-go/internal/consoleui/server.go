@@ -796,17 +796,22 @@ func (s *Server) registerRoutes() {
 	// These paths are NOT static assets, so the edge requireTokenForNonStatic
 	// middleware enforces Authorization: Bearer on all of them.
 	//
-	// Role policy (Phase 6b):
-	//   - /api/chat/stream, /api/chat/dispatch, /api/chat/cancel, /api/chat/share
+	// Role policy (Phase 3 session-attach):
+	//   - /api/chat/stream requires RoleRead (Phase 3 watch mode: a RoleRead
+	//     operator may subscribe to a shared session's live SSE frames; the hub
+	//     already enforces per-session ownership/shared scoping in Route).
+	//   - /api/chat/dispatch, /api/chat/cancel, /api/chat/share
 	//     require RoleDispatch (start/cancel dispatches; flip share ownership).
-	//   - /api/chat/transcript requires RoleRead (read-only; public-ish for shared).
+	//   - /api/chat/transcript requires RoleRead (read-only; owner + shared watchers).
 	//
-	// Note: /api/chat/stream requires RoleDispatch, so a RoleRead operator cannot
-	// receive live SSE for a shared session.  This is intentional — RoleRead operators
-	// view shared sessions via the transcript GET (RoleRead) endpoint, not live SSE.
-	// Requiring RoleDispatch for SSE is the more restrictive, safer default; relaxing
-	// to RoleRead for shared-session SSE is deferred to a future PR.
-	s.mux.HandleFunc("/api/chat/stream", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatStream))
+	// Security note: lowering /api/chat/stream to RoleRead does NOT weaken
+	// dispatch isolation — the hub's Route method only delivers frames to a
+	// connection when (a) it is the session owner, OR (b) the session is shared.
+	// A RoleRead watcher connecting to the SSE stream will only ever see frames
+	// for sessions that have been explicitly shared by their owner.  Dispatch
+	// (POST /api/chat/dispatch) remains gated at RoleDispatch, so a RoleRead
+	// operator can watch but not start new dispatches.
+	s.mux.HandleFunc("/api/chat/stream", requireRoleFunc(netid.RoleRead, s.chat.handleChatStream))
 	s.mux.HandleFunc("/api/chat/dispatch", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatDispatch))
 	s.mux.HandleFunc("/api/chat/cancel", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatCancel))
 	s.mux.HandleFunc("/api/chat/transcript", requireRoleFunc(netid.RoleRead, s.chat.handleChatTranscript))

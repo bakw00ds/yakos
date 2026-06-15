@@ -97,6 +97,11 @@ var ErrSessionNotFound = errSessionNotFound
 // different operator.
 var ErrSessionOwnerConflict = errSessionOwnerConflict
 
+// ErrConversationOwnerConflict is exported so external tests can identify the
+// sentinel returned by SetConversationID when the conversationID is already
+// bound to a different operator's session.
+var ErrConversationOwnerConflict = errConversationOwnerConflict
+
 // ---- Transcripts test exports -----------------------------------------------
 
 // NewTranscriptsForTest allocates a Transcripts for use in external tests.
