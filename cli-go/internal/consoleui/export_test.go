@@ -192,6 +192,24 @@ func BuildSessionLookupFnForTest(authStore *authsession.Store, uStore *userstore
 	return buildSessionLookupFn(authStore, uStore)
 }
 
+// ---- Phase 3b: auth handler test exports ------------------------------------
+
+// LoginRateLimitRequests is the per-IP login attempt cap, exported for tests
+// so they can exhaust it without hardcoding the magic number.
+const LoginRateLimitRequests = loginRateLimitRequests
+
+// SessionCookieName is the session cookie name constant, exported for tests
+// so the cross-package invariant test can compare it to
+// authsession.CookieNameSession without reaching into the unexported symbol.
+const SessionCookieName = sessionCookieName
+
+// RequireCSRFForSessionForTest exposes requireCSRFForSession for direct
+// unit tests that want to exercise CSRF middleware behavior with injected
+// identities, without going through the full production server stack.
+func RequireCSRFForSessionForTest(authStore *authsession.Store, next http.Handler) http.Handler {
+	return requireCSRFForSession(authStore, next)
+}
+
 // ---- File API test exports ---------------------------------------------------
 
 // MaxTreeEntriesPerDir is exported so tests can exercise the per-directory

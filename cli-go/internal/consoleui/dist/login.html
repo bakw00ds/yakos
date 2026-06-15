@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yakOS — Sign in</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#f5f5f5;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{background:#fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.12);padding:2rem;width:100%;max-width:360px}
+h1{margin:0 0 1.5rem;font-size:1.25rem;font-weight:600}
+label{display:block;margin-bottom:.25rem;font-size:.875rem;font-weight:500}
+input{display:block;width:100%;box-sizing:border-box;padding:.5rem .75rem;border:1px solid #d1d5db;border-radius:4px;font-size:1rem;margin-bottom:1rem}
+input:focus{outline:none;border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
+button{width:100%;padding:.625rem;background:#2563eb;color:#fff;border:none;border-radius:4px;font-size:1rem;font-weight:500;cursor:pointer}
+button:hover{background:#1d4ed8}
+button:disabled{background:#93c5fd;cursor:not-allowed}
+.error{display:none;color:#dc2626;font-size:.875rem;margin-bottom:1rem;padding:.5rem;background:#fef2f2;border-radius:4px}
+.reset-note{display:none;color:#92400e;font-size:.875rem;margin-top:1rem;padding:.5rem;background:#fffbeb;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>yakOS — Sign in</h1>
+  <div class="error" id="err"></div>
+  <form id="loginForm">
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" autocomplete="username" required>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" required>
+    <button type="submit" id="btn">Sign in</button>
+  </form>
+  <div class="reset-note" id="resetNote">
+    Password reset required. Please change your password before continuing.
+  </div>
+</div>
+<script src="/login.js"></script>
+</body>
+</html>
