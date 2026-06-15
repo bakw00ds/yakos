@@ -655,13 +655,47 @@ function toast(msg) {
   }, 4000);
 }
 
+/* ── CSRF cookie helper ───────────────────────────────────────────────────── */
+// getCookie reads a cookie value by name from document.cookie.
+// Returns the value string, or "" if the cookie is absent.
+// Used to self-inject X-CSRF-Token for session-mode kanban mutations
+// without depending on the Service Worker controlling this iframe client.
+function getCookie(name) {
+  const prefix = name + "=";
+  for (const part of document.cookie.split(";")) {
+    const c = part.trim();
+    if (c.startsWith(prefix)) {
+      return decodeURIComponent(c.slice(prefix.length));
+    }
+  }
+  return "";
+}
+
 /* ── API: mutations surface errors; reads on the poll path stay silent ────── */
 async function post(path, body) {
+  // In session mode the server requires X-CSRF-Token == yakos_csrf cookie.
+  // The Service Worker normally injects this header, but the kanban iframe is
+  // a separate SW client and there is a race: if the iframe's mutation fires
+  // before the SW controls this client AND has received the CSRF token via
+  // SET_CSRF_TOKEN postMessage, the SW's fail-open (no token → pass through
+  // tokenless) causes the server to respond 403.
+  //
+  // Fix: because the iframe is same-origin and yakos_csrf is a non-HttpOnly
+  // cookie, read it directly and set the header ourselves.  This is
+  // idempotent with the SW also setting the header — the last writer wins
+  // (both write the same value).  In bearer/loopback mode the cookie is
+  // absent → getCookie returns "" → no header set → server does not check
+  // CSRF for bearer auth → no regression.
+  const headers = { "Content-Type": "application/json" };
+  const csrfCookie = getCookie("yakos_csrf");
+  if (csrfCookie) {
+    headers["X-CSRF-Token"] = csrfCookie;
+  }
   let res;
   try {
     res = await fetch(path, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: headers,
       body: JSON.stringify(body)
     });
   } catch (e) {
