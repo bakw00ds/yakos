@@ -203,16 +203,10 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		return Result{}, fmt.Errorf("dispatch: compose agents: %w", err)
 	}
 
-	var targetAgent *agentscompose.ComposedAgent
-	for i := range roster {
-		if roster[i].ID == p.Agent {
-			targetAgent = &roster[i]
-			break
-		}
-	}
-	if targetAgent == nil {
-		return Result{}, fmt.Errorf("dispatch: agent %q not found in composed set (yakosRoot=%s, project=%s)",
-			p.Agent, yakosRoot, project)
+	// See resolve.go for resolution order (specialist → generic runtime → error).
+	targetAgent, err := resolveAgent(roster, p.Agent, yakosRoot, project)
+	if err != nil {
+		return Result{}, err
 	}
 
 	if p.Model == "" && targetAgent.Model != "" {
@@ -220,10 +214,8 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		_ = modelChosenBy // keep "frontmatter"
 	}
 
-	runtimeName := p.Runtime
-	if runtimeName == "" {
-		runtimeName = "claude"
-	}
+	// See resolve.go for precedence (override → known-runtime name → "claude").
+	runtimeName := resolveRuntime(p.Agent, p.Runtime)
 	adapter, err := runtime.Resolve(runtimeName)
 	if err != nil {
 		return Result{}, fmt.Errorf("dispatch: %w", err)
