@@ -803,6 +803,34 @@ func (s *Server) registerRoutes() {
 	// because GET is also routed there).
 	s.mux.HandleFunc("/flows/api/cancel", requireRoleFunc(netid.RoleFlowsRun, s.flows.handleCancel))
 
+	// ---- Phase 5 (ADR-0005 §D6): Users management API -------------------------
+	// All /api/users/* require RoleAdmin; /api/account/* require RoleRead.
+	// CSRF and JSON-mutation gating are applied globally via the middleware stack
+	// in New(); no re-check is needed in handler bodies.
+	// AuthSessionStore may be nil on the loopback path (no session mutations).
+	usersH := newUsersHandlers(s.cfg.UserStore, s.cfg.AuthSessionStore)
+	// GET /api/users — list users; POST /api/users — create user.
+	// Both methods are dispatched from a single pattern to avoid duplicate
+	// registration. Method-specific sub-paths are registered separately and take
+	// precedence over the bare /api/users pattern in Go's ServeMux (longer
+	// patterns win).
+	s.mux.HandleFunc("/api/users", requireRoleFunc(netid.RoleAdmin, usersH.handleUsersRoot))
+	// POST /api/users/role — set role (bumps epoch → invalidates sessions)
+	s.mux.HandleFunc("/api/users/role", requireRoleFunc(netid.RoleAdmin, usersH.handleSetRole))
+	// POST /api/users/reset-password — admin reset (sets passwordResetReq)
+	s.mux.HandleFunc("/api/users/reset-password", requireRoleFunc(netid.RoleAdmin, usersH.handleResetPassword))
+	// POST /api/users/disable — disable user (purges sessions)
+	s.mux.HandleFunc("/api/users/disable", requireRoleFunc(netid.RoleAdmin, usersH.handleDisableUser))
+	// POST /api/users/enable — re-enable user
+	s.mux.HandleFunc("/api/users/enable", requireRoleFunc(netid.RoleAdmin, usersH.handleEnableUser))
+	// POST /api/users/delete — delete user (purges sessions first)
+	s.mux.HandleFunc("/api/users/delete", requireRoleFunc(netid.RoleAdmin, usersH.handleDeleteUser))
+	// GET /api/account — whoami (any authenticated user)
+	// POST /api/account/password — self-service password change (any authenticated user)
+	// Both require RoleRead (any authenticated user; lower bound enforced here).
+	s.mux.HandleFunc("/api/account", requireRoleFunc(netid.RoleRead, usersH.handleAccount))
+	s.mux.HandleFunc("/api/account/password", requireRoleFunc(netid.RoleRead, usersH.handleChangePassword))
+
 	// ---- Phase 7 (IDE): File API (read: RoleRead, write: RoleDispatch) ---------
 	// GET  /api/files/tree?dir=<relpath>     — JSON directory tree (RoleRead)
 	// GET  /api/files/content?path=<relpath> — file content + version (RoleRead)

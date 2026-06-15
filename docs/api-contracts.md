@@ -537,3 +537,274 @@ The setup form JS, served same-origin under `script-src 'self'`.
 **Output (stderr):** Human-readable status message and security reminder.
 
 **Security note:** The token is the recovery path if the original daemon-startup token is lost or expired. Transmit only over a secure channel (e.g., SSH session to the daemon host).
+
+---
+
+## Console Users Management API (ADR-0005 §D6, Phase 5)
+
+**Implemented in:** `cli-go/internal/consoleui/users_handler.go`
+**Available on:** networked console bind (`NetworkedMode=true`) and loopback
+**ADR reference:** ADR-0005 §Admin Users panel and CLI mirror
+
+### Auth requirements
+
+All `/api/users/*` endpoints require `RoleAdmin`.
+`/api/account` and `/api/account/password` require any authenticated user (`RoleRead` minimum).
+Session-authenticated mutations require `X-CSRF-Token` (double-submit pattern, ADR-0005 §CSRF).
+mTLS-authenticated mutations are CSRF-exempt (client certs are not browser-auto-attached).
+
+### Self-protection invariant
+
+Any operation that would leave **zero non-disabled admins** is rejected with `409 Conflict`.
+Guard checked atomically before any mutation via `userstore.AdminCount()`.
+
+---
+
+### GET /api/users
+
+List all users. **No password hashes are ever returned.**
+
+**Auth:** RoleAdmin
+**CSRF:** N/A (GET)
+
+**Response 200:**
+```json
+{
+  "users": [
+    {
+      "username": "alice",
+      "role": "admin",
+      "disabled": false,
+      "passwordResetReq": false,
+      "createdAt": "2026-06-15T10:00:00Z",
+      "updatedAt": "2026-06-15T10:00:00Z",
+      "failedAttempts": 0,
+      "lockedUntil": "0001-01-01T00:00:00Z",
+      "sessionEpoch": 0
+    }
+  ]
+}
+```
+
+---
+
+### POST /api/users
+
+Create a new user.
+
+**Auth:** RoleAdmin
+**CSRF:** Required for session-auth callers
+**Idempotency:** Not idempotent. Second create with same username → 409. Username is the natural idempotency key; GET first if needed.
+
+**Request body:**
+```json
+{
+  "username": "charlie",
+  "password": "securelongpassword1",
+  "role": "read"
+}
+```
+Valid roles: `read`, `dispatch`, `flows-run`, `admin`
+Password minimum: `userstore.MinPasswordLen` (12) characters.
+Username rules: `[A-Za-z0-9._@-]{1,64}`; `.` and `..` rejected.
+
+**Response 201:**
+```json
+{ "ok": true, "message": "user created" }
+```
+
+**Error responses:**
+- `400` — invalid username, password too short, invalid role
+- `409` — username already exists
+
+---
+
+### POST /api/users/role
+
+Change a user's role. Bumps `sessionEpoch`, immediately invalidating all live sessions for the target user.
+
+**Auth:** RoleAdmin
+**CSRF:** Required for session-auth callers
+**Idempotency:** Idempotent (setting the same role twice is a no-op).
+**Self-protection:** Demoting the last admin → 409.
+
+**Request body:**
+```json
+{ "username": "bob", "role": "dispatch" }
+```
+
+**Response 200:**
+```json
+{ "ok": true, "message": "role updated" }
+```
+
+**Error responses:**
+- `400` — invalid role
+- `404` — user not found
+- `409` — would demote the last admin
+
+---
+
+### POST /api/users/reset-password
+
+Admin-initiated password reset. Sets a temporary password and marks `passwordResetReq=true`. Bumps `sessionEpoch`, invalidating live sessions.
+
+**Auth:** RoleAdmin
+**CSRF:** Required for session-auth callers
+**Idempotency:** Idempotent (second reset just re-hashes; `passwordResetReq` stays true).
+
+**Request body:**
+```json
+{ "username": "bob", "newPassword": "temporarypassword1" }
+```
+
+**Response 200:**
+```json
+{ "ok": true, "message": "password reset; user must change on next login" }
+```
+
+**Error responses:**
+- `400` — password too short, `newPassword` missing
+- `404` — user not found
+
+---
+
+### POST /api/users/disable
+
+Disable a user account. Bumps `sessionEpoch` and revokes all live sessions via `RevokeAllForUser`.
+
+**Auth:** RoleAdmin
+**CSRF:** Required for session-auth callers
+**Idempotency:** Idempotent (disabling an already-disabled user is a no-op store-side).
+**Self-protection:** Disabling the last active admin → 409.
+
+**Request body:**
+```json
+{ "username": "bob" }
+```
+
+**Response 200:**
+```json
+{ "ok": true, "message": "user disabled" }
+```
+
+**Error responses:**
+- `404` — user not found
+- `409` — would disable the last admin
+
+---
+
+### POST /api/users/enable
+
+Re-enable a disabled user account.
+
+**Auth:** RoleAdmin
+**CSRF:** Required for session-auth callers
+**Idempotency:** Idempotent (enabling an already-enabled user is a no-op store-side).
+
+**Request body:**
+```json
+{ "username": "bob" }
+```
+
+**Response 200:**
+```json
+{ "ok": true, "message": "user enabled" }
+```
+
+**Error responses:**
+- `404` — user not found
+
+---
+
+### POST /api/users/delete
+
+Permanently delete a user. Revokes all live sessions **before** deletion. Irreversible.
+
+**Auth:** RoleAdmin
+**CSRF:** Required for session-auth callers
+**Idempotency:** Second delete → 404 (user already gone).
+**Self-protection:** Deleting the last active admin → 409.
+
+**Request body:**
+```json
+{ "username": "bob" }
+```
+
+**Response 200:**
+```json
+{ "ok": true, "message": "user deleted" }
+```
+
+**Error responses:**
+- `404` — user not found
+- `409` — would delete the last admin
+
+---
+
+### POST /api/account/password
+
+Self-service password change. The requesting user changes their **own** password only. Verifies the old password before setting the new one. Bumps `sessionEpoch` (all sessions for this user are invalidated; re-login required).
+
+**Auth:** Any authenticated user (RoleRead minimum)
+**CSRF:** Required for session-auth callers
+**Idempotency:** Not idempotent (each call bumps epoch and produces a new hash).
+**Scope:** Operates on the **authenticated user's own account** (identity from resolved `netid.Identity`). No target-username field; cannot be used to change another user's password.
+
+**Request body:**
+```json
+{ "oldPassword": "correcthorsebattery1", "newPassword": "mynewpassword456" }
+```
+
+**Response 200:**
+```json
+{ "ok": true, "message": "password changed" }
+```
+
+**Error responses:**
+- `400` — `oldPassword` or `newPassword` missing; `newPassword` too short
+- `401` — old password incorrect (generic; no distinguishing detail)
+- `401` — user not authenticated
+
+---
+
+### GET /api/account
+
+Whoami: returns the authenticated user's operatorId, role, and authMethod.
+
+**Auth:** Any authenticated user (RoleRead minimum)
+**CSRF:** N/A (GET)
+
+**Response 200:**
+```json
+{
+  "operatorId": "alice",
+  "role": "admin",
+  "authMethod": "session"
+}
+```
+`authMethod` values: `session` (password+cookie), `cert` (mTLS), `loopback` (loopback bearer).
+
+**Error responses:**
+- `401` — not authenticated
+
+---
+
+### CLI mirror: `yakos console user`
+
+All admin operations above are available as CLI subcommands. The CLI operates directly on the user store file (no HTTP); it is trusted (daemon-host only).
+
+```
+yakos console user add <name> [--role <role>]   Create user (prompts for password, no echo)
+yakos console user list                          List all users (tabular; no password hashes)
+yakos console user set-role <name> <role>        Change role
+yakos console user reset-password <name>         Set temporary password
+yakos console user disable <name>                Disable account
+yakos console user enable <name>                 Re-enable account
+yakos console user delete <name>                 Delete user
+```
+
+All CLI commands enforce the same self-protection guard (cannot remove last admin).
+Audit entries written to slog with `actor=cli`.
+
+**Source:** `cli-go/internal/consolecmd/usercmd.go`
