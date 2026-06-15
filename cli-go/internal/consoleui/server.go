@@ -272,6 +272,7 @@ type Server struct {
 	flows        *flowsHandlers
 	files        *filesHandlers
 	skills       *skillsHandlers
+	fleet        *fleetHandlers
 	serverCtx    context.Context    // cancelled on Serve shutdown; dispatch goroutines use this
 	serverCancel context.CancelFunc // called by Serve when the server shuts down
 }
@@ -336,6 +337,12 @@ func New(cfg Config) (*Server, error) {
 	}
 	filesH := newFilesHandlers(cfg.WorkspaceRoot)
 	skillsH := newSkillsHandlers(cfg.YakosRoot, cfg.WorkspaceRoot)
+	// Fleet handler: registry is allocated here and shared with chatHandlers
+	// via chatH so the dispatch goroutine can call Add/UpdateStatus/Remove.
+	registry := dispatch.NewSessionRegistry()
+	chatH.registry = registry
+	chatH.bus = cfg.Bus
+	fleetH := newFleetHandlers(registry, hub)
 	s := &Server{
 		cfg:          cfg,
 		mux:          http.NewServeMux(),
@@ -345,6 +352,7 @@ func New(cfg Config) (*Server, error) {
 		flows:        flowsH,
 		files:        filesH,
 		skills:       skillsH,
+		fleet:        fleetH,
 		serverCtx:    serverCtx,
 		serverCancel: serverCancel,
 	}
@@ -768,6 +776,16 @@ func (s *Server) registerRoutes() {
 	// ---- Presence snapshot (token-gated via edge middleware) -----------------
 	// RoleRead: presence is read-only (who's online).
 	s.mux.HandleFunc("/api/presence", requireRoleFunc(netid.RoleRead, s.handlePresence))
+
+	// ---- Phase 2 fleet panel: active dispatch session snapshot ----------------
+	// GET /api/fleet — returns the caller-scoped snapshot of active dispatch
+	// sessions: owned sessions + shared sessions.  Live updates arrive via the
+	// fleet.started / fleet.finished topics on /v1/events.
+	// RoleRead: read-only; no state mutation.
+	// Cache-Control: no-store (enforced inside handleFleet).
+	if s.fleet != nil {
+		s.mux.HandleFunc("/api/fleet", requireRoleFunc(netid.RoleRead, s.fleet.handleFleet))
+	}
 
 	// ---- Phase 3b: Chat SSE + dispatch + transcript (token-gated at edge) ---
 	// GET  /api/chat/stream      — per-operator SSE stream (multiplexed by sessionID)

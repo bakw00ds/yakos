@@ -339,6 +339,20 @@ func (h *ChatHub) SessionOwner(sessionID string) (ownerOperatorID string, exists
 	return e.ownerOperatorID, ok
 }
 
+// IsShared returns whether the session with the given sessionID has been
+// promoted to shared (visible to all operators).  Returns false if the session
+// does not exist.  Used by the fleet handler to apply the same scoping rules
+// as ChatHub.Route without exposing the unexported sessionEntry type.
+func (h *ChatHub) IsShared(sessionID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	e, ok := h.sessions[sessionID]
+	if !ok {
+		return false
+	}
+	return e.shared
+}
+
 // connCount returns the number of live SSE connections for operatorID.
 // Used in tests and diagnostics.
 func (h *ChatHub) connCount(operatorID string) int {

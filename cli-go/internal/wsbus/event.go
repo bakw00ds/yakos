@@ -47,6 +47,57 @@ const (
 	TopicWorkflowNodeTruncated = "workflow.node.truncated"
 )
 
+// Topic constants for Phase-2 fleet (REPL session panel) events.
+//
+// Invariant: these topics carry ONLY session metadata — session_id, agent name,
+// status, exit_code, and timestamp.  Task text, token content, and transcript
+// data MUST NEVER be included in fleet.* payloads.  This mirrors the workflow
+// topic content invariant above.
+const (
+	// TopicFleetStarted is emitted when a new console dispatch goroutine starts.
+	// Payload: FleetStartedPayload.
+	TopicFleetStarted = "fleet.started"
+
+	// TopicFleetFinished is emitted when a console dispatch goroutine exits.
+	// Payload: FleetFinishedPayload.
+	TopicFleetFinished = "fleet.finished"
+)
+
+// FleetStartedPayload is the payload for [TopicFleetStarted].
+// Invariant: carries NO task text, tokens, or transcript content.
+// Only session metadata is included so the WS bus never leaks task content.
+type FleetStartedPayload struct {
+	SessionID string    `json:"session_id"`
+	Agent     string    `json:"agent"`
+	TS        time.Time `json:"ts"`
+}
+
+// FleetFinishedPayload is the payload for [TopicFleetFinished].
+// Invariant: carries NO task text, tokens, or transcript content.
+// Only session metadata is included so the WS bus never leaks task content.
+type FleetFinishedPayload struct {
+	SessionID string    `json:"session_id"`
+	Agent     string    `json:"agent"`
+	Status    string    `json:"status"`    // "finished" | "failed"
+	ExitCode  int       `json:"exit_code"` // 0 = success
+	TS        time.Time `json:"ts"`
+}
+
+// EventMeta carries server-side-only routing metadata for events that require
+// per-operator fan-out filtering.  It is NEVER serialized to clients (json:"-").
+//
+// Currently used exclusively by fleet.* topics to enforce per-operator WS
+// isolation: the WS handler in consoleui/ws_handler.go reads Meta before
+// sending and drops events whose owner does not match the connection's operator.
+type EventMeta struct {
+	// OwnerOperatorID is the operator that owns the session associated with
+	// this event.  Empty string means "visible to all" (loopback / broadcast).
+	OwnerOperatorID string
+	// Shared, when true, means the session is shared — any authenticated
+	// operator may receive the event regardless of ownership.
+	Shared bool
+}
+
 // Event is an envelope for every message published on the bus.
 // Clients receive exactly this structure (JSON-encoded) over the WebSocket.
 type Event struct {
@@ -62,6 +113,11 @@ type Event struct {
 
 	// Payload is the topic-specific data, encoded as a JSON object.
 	Payload json.RawMessage `json:"payload"`
+
+	// Meta carries server-side routing metadata (e.g. per-operator fleet
+	// filtering).  It is intentionally excluded from the wire encoding so
+	// clients never see owner information.
+	Meta *EventMeta `json:"-"`
 }
 
 // KanbanAddedPayload is the payload for [TopicKanbanAdded].

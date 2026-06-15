@@ -64,6 +64,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/runtime"
+	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
 // chatState is the in-process registry of active RunStream goroutines.
@@ -116,9 +117,11 @@ type chatHandlers struct {
 	hub         *ChatHub
 	transcripts *Transcripts
 	state       *chatState
-	svc         *dispatch.Service // may be nil (console without dispatch)
-	workDir     string            // used by NewTranscripts
-	serverCtx   context.Context   // server-lifetime context; dispatch goroutines derive from this (NOT r.Context())
+	svc         *dispatch.Service          // may be nil (console without dispatch)
+	registry    *dispatch.SessionRegistry  // fleet registry; wired by New() after construction
+	bus         *wsbus.Bus                 // event bus for fleet.* WS events; wired by New()
+	workDir     string                     // used by NewTranscripts
+	serverCtx   context.Context            // server-lifetime context; dispatch goroutines derive from this (NOT r.Context())
 }
 
 // newChatHandlers is called from registerChatRoutes.
@@ -428,6 +431,41 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	// Capture the resolved identity for the goroutine.
 	capturedIdentityForGoroutine := capturedIdentity
 
+	// Fleet registry: record this session before launching the goroutine so
+	// the /api/fleet snapshot is immediately accurate.  The entry is removed
+	// in the goroutine's deferred cleanup (see defer fleetRemove below).
+	//
+	// Invariant: TaskPreview is truncated to <=120 chars inside registry.Add.
+	// It must NEVER be published in WS fleet.* payloads — only the REST
+	// snapshot exposes it, scoped to the caller.
+	startedAt := time.Now().UTC()
+	if ch.registry != nil {
+		ch.registry.Add(dispatch.SessionEntry{
+			SessionID:   dispReq.SessionID,
+			Agent:       dispReq.Agent,
+			Runtime:     runtimeName,
+			OperatorID:  capturedOperatorID,
+			TaskPreview: dispReq.Task, // truncated inside Add to <=120 runes
+			StartedAt:   startedAt,
+			Status:      dispatch.StatusRunning,
+		})
+	}
+
+	// Publish fleet.started on the WS bus (metadata-only: no task text).
+	// PublishMeta carries OwnerOperatorID + Shared=false in the server-side
+	// EventMeta; the WS fan-out filter uses this to deliver the event only to
+	// the owning operator's connection.  The meta is NEVER sent to clients.
+	if ch.bus != nil {
+		ch.bus.PublishMeta(wsbus.TopicFleetStarted, wsbus.FleetStartedPayload{
+			SessionID: dispReq.SessionID,
+			Agent:     dispReq.Agent,
+			TS:        startedAt,
+		}, wsbus.EventMeta{
+			OwnerOperatorID: capturedOperatorID,
+			Shared:          false, // new sessions start unshared
+		})
+	}
+
 	// Launch RunStream in a goroutine.  The goroutine owns the cancel function
 	// and the hub session for its lifetime.
 	//
@@ -439,7 +477,49 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	//   3. hub.CloseSession — removes the hub ownership entry last so that
 	//      chunks already in flight can still be routed before the entry
 	//      disappears.  This order shrinks the re-dispatch race window.
+	//   4. fleetRemove — cleanup fleet registry and publish fleet.finished.
+	//      registered first; runs last (LIFO) so fleet state outlives the hub
+	//      entry, preserving consistency during the short window between hub
+	//      close and fleet remove.
 	go func() {
+		// exitCode captures the RunStream result for fleet.finished.
+		// Default 0; overridden to -1 on non-cancel error path.
+		exitCode := 0
+		exitStatus := dispatch.StatusFinished
+
+		// sharedAtFinish is updated to the session's final shared flag just before
+		// RunStream returns (while the hub entry is still open).  The fleet.finished
+		// defer reads it so the WS fan-out filter uses the correct visibility.
+		sharedAtFinish := ch.hub.IsShared(dispReq.SessionID)
+
+		defer func() {
+			// 4. Fleet registry remove + fleet.finished WS event.
+			// registered first; runs last (LIFO)
+			//
+			// hub.CloseSession (defer 3) has already run; sharedAtFinish was
+			// captured while the hub entry was open (set immediately after
+			// OpenSession and refreshed after RunStream returns below).
+			if ch.registry != nil {
+				ch.registry.Remove(dispReq.SessionID)
+			}
+			if ch.bus != nil {
+				finishedAt := time.Now().UTC()
+				finishedStatus := "finished"
+				if exitStatus == dispatch.StatusFailed {
+					finishedStatus = "failed"
+				}
+				ch.bus.PublishMeta(wsbus.TopicFleetFinished, wsbus.FleetFinishedPayload{
+					SessionID: dispReq.SessionID,
+					Agent:     dispReq.Agent,
+					Status:    finishedStatus,
+					ExitCode:  exitCode,
+					TS:        finishedAt,
+				}, wsbus.EventMeta{
+					OwnerOperatorID: capturedOperatorID,
+					Shared:          sharedAtFinish,
+				})
+			}
+		}()
 		defer cancel()                               // 1. stop any pending RunStream
 		defer ch.state.remove(dispReq.SessionID)     // 2. release slot
 		defer ch.hub.CloseSession(dispReq.SessionID) // 3. remove hub entry
@@ -457,13 +537,26 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			if chunk.Type == "summary" {
 				// Use pointers so exit_code:0 (success) serialises correctly
 				// (omitempty on int zero-value would suppress it).
-				exitCode := chunk.ExitCode
+				code := chunk.ExitCode
 				durationS := chunk.DurationS
 				totalCostUSD := chunk.TotalCostUSD
-				ev.ExitCode = &exitCode
+				ev.ExitCode = &code
 				ev.DurationS = &durationS
 				ev.TotalCostUSD = &totalCostUSD
 				ev.ModelResolved = chunk.ModelResolved
+
+				// Update fleet registry status from summary exit_code.
+				if ch.registry != nil {
+					if code == 0 {
+						ch.registry.UpdateStatus(dispReq.SessionID, dispatch.StatusFinished)
+					} else {
+						ch.registry.UpdateStatus(dispReq.SessionID, dispatch.StatusFailed)
+					}
+				}
+				exitCode = code
+				if code != 0 {
+					exitStatus = dispatch.StatusFailed
+				}
 
 				// Append coalesced assistant turn, then summary turn.
 				if text := assistantBuf.String(); text != "" {
@@ -515,8 +608,15 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 					"agent", dispReq.Agent,
 					"err", err,
 				)
+				exitStatus = dispatch.StatusFailed
+				exitCode = -1
 			}
 		}
+
+		// Refresh the shared flag with the final state of the hub entry (before
+		// hub.CloseSession fires in defer 3).  This captures any share/unshare
+		// that happened during the dispatch lifetime.
+		sharedAtFinish = ch.hub.IsShared(dispReq.SessionID)
 	}()
 
 	// Respond immediately with the session ID.

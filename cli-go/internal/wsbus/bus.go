@@ -93,6 +93,18 @@ func (b *Bus) Subscribe(topic string) *Subscription {
 //
 // Publish is non-blocking: it never blocks on a slow subscriber.
 func (b *Bus) Publish(topic string, payload any) Event {
+	return b.PublishMeta(topic, payload, EventMeta{})
+}
+
+// PublishMeta is like [Publish] but attaches server-side routing metadata to
+// the event.  The metadata is carried in-memory through the fan-out and replay
+// paths; it is NEVER included in the JSON sent to clients (EventMeta has no
+// json tags).
+//
+// Use this for fleet.* topics where per-operator WS delivery filtering is
+// required.  The WS handler reads ev.Meta to decide whether to forward the
+// event to a given connection.
+func (b *Bus) PublishMeta(topic string, payload any, meta EventMeta) Event {
 	seq := b.seq.Add(1)
 	raw := MarshalPayload(payload)
 	ev := Event{
@@ -100,6 +112,7 @@ func (b *Bus) Publish(topic string, payload any) Event {
 		Topic:   topic,
 		TS:      time.Now().UTC(),
 		Payload: raw,
+		Meta:    &meta,
 	}
 
 	b.mu.RLock()

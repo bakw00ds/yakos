@@ -368,6 +368,7 @@
 
   const TABS = [
     { id: 'overview',  label: 'Overview',    src: null,       phase: null },
+    { id: 'repl',      label: 'REPL',        src: null,       phase: null },
     { id: 'kanban',    label: 'Kanban',       src: '/kanban/', phase: null },
     { id: 'cost',      label: 'Cost',         src: '/cost/',   phase: null },
     { id: 'perf',      label: 'Performance',  src: '/perf/',   phase: null },
@@ -461,6 +462,12 @@
       }
     }
 
+    // On first switch to REPL tab, seed the fleet panel from GET /api/fleet
+    // and load kanban action items.
+    if (id === 'repl') {
+      initReplTab();
+    }
+
     // On first switch to chat tab, ensure SSE is running.
     if (id === 'chat') {
       initChatTab();
@@ -495,6 +502,22 @@
   let myPresence = null;
   let feedFilterTopic = '';
   let feedFilterOp = '';
+
+  // ---- 4b. REPL fleet state --------------------------------------------------
+  //
+  // fleetSessions: Map<sessionId, FleetSession> where FleetSession =
+  //   { session_id, agent, runtime, status, started_at, task_preview, attachable }
+  //
+  // Seeded from GET /api/fleet on first REPL tab open, then patched live:
+  //   fleet.started  → add entry (metadata only; no task text)
+  //   fleet.finished → update status/exit_code on existing entry
+  //
+  // Security note: fleet.* WS events intentionally carry NO task text or tokens.
+  // task_preview is only present in the REST seed response; it is stored here
+  // from the initial fetch but is never populated from WS events.
+
+  let fleetSessions = new Map(); // Map<sessionId, FleetSession>
+  let fleetInitialized = false;  // true after first GET /api/fleet completes
 
   // ---- 5. WebSocket (Phase 2.5 subprotocol auth) ------------------------------
 
@@ -622,6 +645,47 @@
       inFlight.delete(key);
       pushFeed(msg.ts, topic, feedSummary(topic, payload), '');
       renderNow();
+    } else if (topic === 'fleet.started') {
+      // fleet.started: metadata-only payload — no task text or token content.
+      // Patch fleetSessions live; task_preview is absent (not on WS events by design).
+      const sid = payload.session_id || '';
+      if (sid) {
+        fleetSessions.set(sid, {
+          session_id: sid,
+          agent:       payload.agent || '?',
+          runtime:     '', // not in fleet.started WS payload; populated by REST seed
+          status:      'running',
+          started_at:  payload.ts || msg.ts || '',
+          task_preview: '', // intentionally empty: not available on WS events
+          attachable:   false,
+        });
+        renderReplFleet();
+      }
+      pushFeed(msg.ts, topic, feedSummary(topic, payload), '');
+    } else if (topic === 'fleet.finished') {
+      // fleet.finished: update status; keep task_preview from seed if present.
+      const sid = payload.session_id || '';
+      if (sid) {
+        const existing = fleetSessions.get(sid);
+        if (existing) {
+          existing.status = payload.status || 'finished';
+          fleetSessions.set(sid, existing);
+        } else {
+          // We may have missed the started event (reconnect race).
+          // Add a stub entry so the panel shows the finished state.
+          fleetSessions.set(sid, {
+            session_id:   sid,
+            agent:        payload.agent || '?',
+            runtime:      '',
+            status:       payload.status || 'finished',
+            started_at:   '',
+            task_preview: '',
+            attachable:   false,
+          });
+        }
+        renderReplFleet();
+      }
+      pushFeed(msg.ts, topic, feedSummary(topic, payload), '');
     } else if (topic === 'presence') {
       const opID = payload.operator_id || '';
       // Key on conn_id (present since B1 fix) for per-connection discrimination.
@@ -2036,6 +2100,138 @@
     for (let i = 0; i < opId.length; i++) h = (h * 31 + opId.charCodeAt(i)) >>> 0;
     const hue = h % 360;
     return 'hsl(' + hue + ', 60%, 65%)';
+  }
+
+  // =========================================================================
+  // ---- REPL TAB (Phase 2 fleet panel) -------------------------------------
+  // =========================================================================
+  //
+  // The REPL tab contains two sections:
+  //   (a) Action items — read-only kanban tasks fetched from /kanban/api/board.
+  //       Shows TODO and IN PROGRESS columns.  Mirrors the existing Kanban tab
+  //       data source without duplicating the parser.
+  //   (b) Fleet panel — live in-flight dispatches seeded from GET /api/fleet,
+  //       then patched live via fleet.started / fleet.finished WS events.
+  //
+  // Security notes:
+  //   - fleet.* WS events carry NO task text/tokens (metadata-only invariant).
+  //   - task_preview (<=120 chars) comes only from the REST seed; it is absent
+  //     from WS events by design.
+  //   - The panel shows only sessions the caller is allowed to see (server-side
+  //     owner/shared scoping on /api/fleet; WS is global to the connection but
+  //     the session_id alone reveals no private content).
+  //   - All interpolated strings go through esc() before innerHTML insertion.
+
+  function initReplTab() {
+    // Fetch kanban action items (once per page load; changes are infrequent).
+    loadReplKanban();
+
+    // Seed fleet from REST; subsequent live updates arrive via fleet.* WS events.
+    if (!fleetInitialized) {
+      apiFetch('GET', '/api/fleet').then(function(resp) {
+        if (!resp || !resp.ok) return;
+        return resp.json();
+      }).then(function(data) {
+        if (!data || !Array.isArray(data.sessions)) return;
+        fleetInitialized = true;
+        fleetSessions = new Map();
+        for (const s of data.sessions) {
+          if (s.session_id) {
+            fleetSessions.set(s.session_id, s);
+          }
+        }
+        renderReplFleet();
+      }).catch(function() {
+        // /api/fleet unavailable — fleet panel shows empty state.
+        fleetInitialized = true;
+        renderReplFleet();
+      });
+    } else {
+      // Already seeded; just re-render in case tab was re-opened.
+      renderReplFleet();
+    }
+  }
+
+  // loadReplKanban fetches /kanban/api/board and renders the action-items list.
+  // Reuses the same endpoint the Kanban iframe uses — no new parser needed.
+  function loadReplKanban() {
+    const el = document.getElementById('repl-action-items');
+    if (!el) return;
+    el.innerHTML = '<p class="empty-state">Loading…</p>';
+
+    apiFetch('GET', '/kanban/api/board').then(function(resp) {
+      if (!resp || !resp.ok) {
+        el.innerHTML = '<p class="empty-state">Kanban unavailable</p>';
+        return null;
+      }
+      return resp.json();
+    }).then(function(board) {
+      if (!board) return;
+      // Board shape: { "TODO": [{id, title, ...}], "IN PROGRESS": [...], "DONE": [...] }
+      const cols = ['TODO', 'IN PROGRESS'];
+      const items = [];
+      for (const col of cols) {
+        const tasks = board[col];
+        if (Array.isArray(tasks)) {
+          for (const task of tasks) {
+            items.push({ col: col, title: task.title || task.id || '(untitled)' });
+          }
+        }
+      }
+      if (items.length === 0) {
+        el.innerHTML = '<p class="empty-state">No action items</p>';
+        return;
+      }
+      el.innerHTML = '';
+      const ul = document.createElement('ul');
+      ul.className = 'repl-action-list';
+      ul.setAttribute('aria-label', 'Action items from kanban');
+      for (const item of items) {
+        const li = document.createElement('li');
+        li.className = 'repl-action-item';
+        li.innerHTML =
+          '<span class="repl-action-col repl-action-col-' + esc(item.col.toLowerCase().replace(' ', '-')) + '" aria-label="column">' + esc(item.col) + '</span>' +
+          '<span class="repl-action-title">' + esc(item.title) + '</span>';
+        ul.appendChild(li);
+      }
+      el.appendChild(ul);
+    }).catch(function() {
+      el.innerHTML = '<p class="empty-state">Kanban unavailable</p>';
+    });
+  }
+
+  // renderReplFleet updates the fleet panel DOM from the current fleetSessions map.
+  // Called on initial seed (initReplTab) and on each fleet.* WS event.
+  function renderReplFleet() {
+    const el = document.getElementById('repl-fleet-list');
+    if (!el) return;
+
+    if (fleetSessions.size === 0) {
+      el.innerHTML = '<p class="empty-state">No active dispatches</p>';
+      return;
+    }
+
+    el.innerHTML = '';
+    const ul = document.createElement('ul');
+    ul.className = 'repl-fleet-list';
+    ul.setAttribute('aria-label', 'Active dispatch sessions');
+    for (const [, s] of fleetSessions) {
+      const li = document.createElement('li');
+      li.className = 'repl-fleet-item repl-fleet-status-' + esc(s.status || 'running');
+      // Format started_at as a locale time string.
+      let startedStr = '';
+      if (s.started_at) {
+        try { startedStr = new Date(s.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); } catch (_) {}
+      }
+      const preview = s.task_preview ? esc(s.task_preview) : '';
+      li.innerHTML =
+        '<span class="repl-fleet-agent" aria-label="agent">' + esc(s.agent || '?') + '</span>' +
+        '<span class="repl-fleet-status" aria-label="status">' + esc(s.status || 'running') + '</span>' +
+        (startedStr ? '<span class="repl-fleet-time" aria-label="started at">' + esc(startedStr) + '</span>' : '') +
+        (preview ? '<span class="repl-fleet-preview" aria-label="task preview">' + preview + '</span>' : '');
+      ul.appendChild(li);
+    }
+    el.appendChild(ul);
   }
 
   // =========================================================================
@@ -5904,6 +6100,23 @@
             </section>
           </div>
         </div>
+        <div id="panel-repl" class="tab-panel">
+          <div class="repl-layout">
+            <aside class="repl-sidebar" aria-label="Action items">
+              <h2 class="subsection-title">Action items</h2>
+              <p class="repl-sidebar-hint">Read-only mirror of TODO + IN PROGRESS from Kanban</p>
+              <div id="repl-action-items" aria-live="polite">
+                <p class="empty-state">Switch to this tab to load</p>
+              </div>
+            </aside>
+            <section class="repl-main" aria-label="Fleet — active dispatches">
+              <h2 class="subsection-title">In-flight dispatches</h2>
+              <div id="repl-fleet-list" aria-live="polite">
+                <p class="empty-state">No active dispatches</p>
+              </div>
+            </section>
+          </div>
+        </div>
         <div id="panel-kanban" class="tab-panel">
           <!-- First-party same-origin content; isolation boundary is the auth edge, not an escapable sandbox. -->
           <iframe title="Kanban board"></iframe>
@@ -6091,6 +6304,10 @@
         return (payload.agent || '?') + ' started on ' + shortPath(payload.project || '?');
       case 'dispatch.finished':
         return (payload.agent || '?') + ' finished (exit=' + (payload.exit_code !== undefined ? payload.exit_code : '?') + ')';
+      case 'fleet.started':
+        return 'fleet: ' + (payload.agent || '?') + ' started [' + (payload.session_id || '?').slice(0, 8) + ']';
+      case 'fleet.finished':
+        return 'fleet: ' + (payload.agent || '?') + ' ' + (payload.status || 'finished') + ' (exit=' + (payload.exit_code !== undefined ? payload.exit_code : '?') + ')';
       case 'presence':
         return (payload.display_name || payload.operator_id || 'anon') + ' is ' + (payload.status || 'unknown');
       case 'workflow.run.started':
