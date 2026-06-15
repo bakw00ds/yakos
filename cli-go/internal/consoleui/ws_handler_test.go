@@ -1011,9 +1011,72 @@ func TestIsExternalOrigin_ExactMatchInvariant(t *testing.T) {
 // cooperative hello.operator_id attribution without needing real TLS.
 // connOperatorID = hello.OperatorID on the loopback path.
 
-// waitForHello sends a hello frame and drains the welcome frame, then waits for
-// the server-side subscription to be registered.  This ensures the connection is
-// ready to receive events before the test publishes.
+// isFleetTopic reports whether topic is a fleet.* event topic.
+func isFleetTopic(topic string) bool {
+	return topic == wsbus.TopicFleetStarted || topic == wsbus.TopicFleetFinished
+}
+
+// receiveFleetEvent reads from conn in a loop until a fleet.* frame arrives or
+// the absolute deadline passes.  Non-fleet frames (presence, ping, etc.) are
+// silently skipped so test-ordering races on slower runners (e.g. macOS CI)
+// do not cause false negatives.
+//
+// Returns (event, true) when a fleet frame is received; (zero, false) on
+// deadline expiry or read error.
+func receiveFleetEvent(t *testing.T, conn *websocket.Conn, deadline time.Time) (wsbus.Event, bool) {
+	t.Helper()
+	for time.Now().Before(deadline) {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		conn.SetReadDeadline(time.Now().Add(remaining)) //nolint:errcheck
+		var ev wsbus.Event
+		if err := websocket.JSON.Receive(conn, &ev); err != nil {
+			// Deadline expiry or connection close — no fleet event arrived.
+			conn.SetReadDeadline(time.Time{}) //nolint:errcheck
+			return wsbus.Event{}, false
+		}
+		if isFleetTopic(ev.Topic) {
+			conn.SetReadDeadline(time.Time{}) //nolint:errcheck
+			return ev, true
+		}
+		// Non-fleet frame (presence join/leave, ping, etc.) — skip and continue.
+	}
+	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
+	return wsbus.Event{}, false
+}
+
+// assertNoFleetEvent reads from conn for the entire window duration and calls
+// t.Errorf if any fleet.* frame arrives.  Non-fleet frames are silently ignored.
+// This is the correct negative assertion: "bob received nothing fleet-related"
+// even if presence or ping frames arrive on bob's connection.
+func assertNoFleetEvent(t *testing.T, conn *websocket.Conn, label string, window time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		conn.SetReadDeadline(time.Now().Add(remaining)) //nolint:errcheck
+		var ev wsbus.Event
+		if err := websocket.JSON.Receive(conn, &ev); err != nil {
+			// Deadline expiry or read error — no fleet event arrived; pass.
+			conn.SetReadDeadline(time.Time{}) //nolint:errcheck
+			return
+		}
+		if isFleetTopic(ev.Topic) {
+			conn.SetReadDeadline(time.Time{}) //nolint:errcheck
+			t.Errorf("SECURITY: %s received unexpected fleet event topic=%q", label, ev.Topic)
+			return
+		}
+		// Non-fleet frame — keep draining until the window closes.
+	}
+	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
+}
+
+// waitForHello sends a hello frame and drains the welcome frame.
 func waitForHello(t *testing.T, conn *websocket.Conn, bus *wsbus.Bus, opID string) {
 	t.Helper()
 	hello := HelloMessage{Type: "hello", OperatorID: opID, DisplayName: opID}
@@ -1028,26 +1091,49 @@ func waitForHello(t *testing.T, conn *websocket.Conn, bus *wsbus.Bus, opID strin
 	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
 }
 
+// dialAndHandshake opens a WS connection, sends hello, drains the welcome frame,
+// and returns the ready connection.  Both hello frames for two-connection tests
+// should be sent before reading welcomes so both arrive in the server's 500ms
+// hello-read window; use dialSubprotocol + the paired send/drain pattern below
+// when ordering matters.
+func dialAndHandshake(t *testing.T, wsURL, token, opID string) *websocket.Conn {
+	t.Helper()
+	conn := dialSubprotocol(t, wsURL, token)
+	waitForHello(t, conn, nil, opID)
+	return conn
+}
+
+// waitForNSubscribers polls until bus.SubscriberCount() >= n or 2s elapses.
+func waitForNSubscribers(t *testing.T, bus *wsbus.Bus, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if bus.SubscriberCount() >= n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("waitForNSubscribers: bus had %d subscribers after 2s; want >= %d", bus.SubscriberCount(), n)
+}
+
 // TestFleetWS_CrossOperatorIsolation is the SECURITY acceptance gate for
 // BLOCKING-1: operator B must NOT receive fleet.started events owned by A.
 //
 // Test flow:
 //  1. Open two WS connections: alice and bob.
 //  2. Publish fleet.started with OwnerOperatorID="alice", Shared=false.
-//  3. Assert alice receives the event.
-//  4. Assert bob does NOT receive the event within the check window.
+//  3. Assert alice receives the fleet event (skipping any interleaved presence frames).
+//  4. Assert bob receives NO fleet event within the check window (presence frames ignored).
 func TestFleetWS_CrossOperatorIsolation(t *testing.T) {
 	bus, _, wsURL, _ := newConsoleWSTestServer(t)
 
-	// Open two WS connections.
+	// Open two WS connections.  Send both hello frames before reading any
+	// welcome frames so both arrive within the server's 500ms hello-read window.
 	connA := dialSubprotocol(t, wsURL, testToken)
 	defer connA.Close()
 	connB := dialSubprotocol(t, wsURL, testToken)
 	defer connB.Close()
 
-	// Send hello frames (must arrive before the server's 500ms hello-read window
-	// expires).  Send both hello frames before reading any welcome frames so that
-	// both are delivered into the server's 500ms window.
 	helloA := HelloMessage{Type: "hello", OperatorID: "alice", DisplayName: "Alice"}
 	helloB := HelloMessage{Type: "hello", OperatorID: "bob", DisplayName: "Bob"}
 	if err := websocket.JSON.Send(connA, helloA); err != nil {
@@ -1072,19 +1158,7 @@ func TestFleetWS_CrossOperatorIsolation(t *testing.T) {
 	}
 	connB.SetReadDeadline(time.Time{}) //nolint:errcheck
 
-	// Wait for both subscriptions to be registered (2 clients + the server's own
-	// presence subscription if any).  The loopback handler has no server-side bus
-	// subscriber; wait for at least 2.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if bus.SubscriberCount() >= 2 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if bus.SubscriberCount() < 2 {
-		t.Fatalf("expected >=2 subscribers; got %d", bus.SubscriberCount())
-	}
+	waitForNSubscribers(t, bus, 2)
 
 	// Publish a fleet.started event owned by alice (unshared).
 	bus.PublishMeta(wsbus.TopicFleetStarted, wsbus.FleetStartedPayload{
@@ -1096,15 +1170,16 @@ func TestFleetWS_CrossOperatorIsolation(t *testing.T) {
 		Shared:          false,
 	})
 
-	// alice MUST receive the event.
-	connA.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	var evA wsbus.Event
-	if err := websocket.JSON.Receive(connA, &evA); err != nil {
-		t.Fatalf("SECURITY: alice did not receive her own fleet.started event: %v", err)
+	// alice MUST receive the fleet event.  Skip any interleaved presence/ping
+	// frames that may arrive on slower CI runners.
+	evA, ok := receiveFleetEvent(t, connA, time.Now().Add(2*time.Second))
+	if !ok {
+		t.Fatal("SECURITY: alice did not receive her own fleet.started event within 2s")
 	}
 	if evA.Topic != wsbus.TopicFleetStarted {
-		t.Errorf("alice received topic=%q; want %q", evA.Topic, wsbus.TopicFleetStarted)
+		t.Errorf("alice received fleet topic=%q; want %q", evA.Topic, wsbus.TopicFleetStarted)
 	}
+
 	// Verify client payload has no owner/meta fields.
 	var alicePayload map[string]interface{}
 	if err := json.Unmarshal(evA.Payload, &alicePayload); err != nil {
@@ -1116,21 +1191,15 @@ func TestFleetWS_CrossOperatorIsolation(t *testing.T) {
 	if _, hasMeta := alicePayload["meta"]; hasMeta {
 		t.Error("SECURITY: client payload contains meta; must be stripped from wire")
 	}
-	connA.SetReadDeadline(time.Time{}) //nolint:errcheck
 
-	// bob must NOT receive the event within 200ms.
-	connB.SetReadDeadline(time.Now().Add(200 * time.Millisecond)) //nolint:errcheck
-	var evB wsbus.Event
-	err := websocket.JSON.Receive(connB, &evB)
-	connB.SetReadDeadline(time.Time{}) //nolint:errcheck
-	if err == nil && evB.Topic == wsbus.TopicFleetStarted {
-		t.Errorf("SECURITY: cross-operator WS isolation violated — bob received alice's fleet.started for sess-alice-001")
-	}
-	// Any read error (timeout/EOF) is the expected outcome — bob receives nothing.
+	// bob must NOT receive any fleet event within 300ms.
+	// Non-fleet frames (presence, ping) are ignored by assertNoFleetEvent.
+	assertNoFleetEvent(t, connB, "bob", 300*time.Millisecond)
 }
 
 // TestFleetWS_SharedSessionVisibleToBoth verifies that when a session is shared,
 // both the owner (alice) and a different operator (bob) receive fleet events.
+// Non-fleet interleaved frames are skipped so frame-ordering races don't flake.
 func TestFleetWS_SharedSessionVisibleToBoth(t *testing.T) {
 	bus, _, wsURL, _ := newConsoleWSTestServer(t)
 
@@ -1139,7 +1208,7 @@ func TestFleetWS_SharedSessionVisibleToBoth(t *testing.T) {
 	connB := dialSubprotocol(t, wsURL, testToken)
 	defer connB.Close()
 
-	// Send hello frames.
+	// Send both hello frames before reading welcomes (same ordering discipline).
 	helloA := HelloMessage{Type: "hello", OperatorID: "alice", DisplayName: "Alice"}
 	helloB := HelloMessage{Type: "hello", OperatorID: "bob", DisplayName: "Bob"}
 	if err := websocket.JSON.Send(connA, helloA); err != nil {
@@ -1149,7 +1218,6 @@ func TestFleetWS_SharedSessionVisibleToBoth(t *testing.T) {
 		t.Fatalf("send hello bob: %v", err)
 	}
 
-	// Drain welcome frames.
 	connA.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
 	var welcomeA map[string]interface{}
 	if err := websocket.JSON.Receive(connA, &welcomeA); err != nil {
@@ -1164,14 +1232,7 @@ func TestFleetWS_SharedSessionVisibleToBoth(t *testing.T) {
 	}
 	connB.SetReadDeadline(time.Time{}) //nolint:errcheck
 
-	// Wait for both subscriptions.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if bus.SubscriberCount() >= 2 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitForNSubscribers(t, bus, 2)
 
 	// Publish a fleet.started event owned by alice, SHARED.
 	bus.PublishMeta(wsbus.TopicFleetStarted, wsbus.FleetStartedPayload{
@@ -1180,29 +1241,26 @@ func TestFleetWS_SharedSessionVisibleToBoth(t *testing.T) {
 		TS:        time.Now().UTC(),
 	}, wsbus.EventMeta{
 		OwnerOperatorID: "alice",
-		Shared:          true, // shared — bob should see it
+		Shared:          true, // shared — bob should see it too
 	})
 
-	// Both alice and bob must receive the event.
-	connA.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	var evA wsbus.Event
-	if err := websocket.JSON.Receive(connA, &evA); err != nil {
-		t.Fatalf("alice did not receive shared fleet.started: %v", err)
+	// Both alice and bob must receive the fleet event.
+	// receiveFleetEvent skips presence/ping frames so slow runners don't flake.
+	evA, okA := receiveFleetEvent(t, connA, time.Now().Add(2*time.Second))
+	if !okA {
+		t.Fatal("alice did not receive shared fleet.started within 2s")
 	}
 	if evA.Topic != wsbus.TopicFleetStarted {
-		t.Errorf("alice received topic=%q; want %q", evA.Topic, wsbus.TopicFleetStarted)
+		t.Errorf("alice fleet topic=%q; want %q", evA.Topic, wsbus.TopicFleetStarted)
 	}
-	connA.SetReadDeadline(time.Time{}) //nolint:errcheck
 
-	connB.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	var evB wsbus.Event
-	if err := websocket.JSON.Receive(connB, &evB); err != nil {
-		t.Fatalf("bob did not receive shared fleet.started (shared=true): %v", err)
+	evB, okB := receiveFleetEvent(t, connB, time.Now().Add(2*time.Second))
+	if !okB {
+		t.Fatal("bob did not receive shared fleet.started within 2s (shared=true)")
 	}
 	if evB.Topic != wsbus.TopicFleetStarted {
-		t.Errorf("bob received topic=%q; want %q", evB.Topic, wsbus.TopicFleetStarted)
+		t.Errorf("bob fleet topic=%q; want %q", evB.Topic, wsbus.TopicFleetStarted)
 	}
-	connB.SetReadDeadline(time.Time{}) //nolint:errcheck
 }
 
 // TestFleetWS_NilMetaFailsClosed is the regression test for the fail-closed
@@ -1242,6 +1300,8 @@ func TestFleetWS_NilMetaFailsClosed(t *testing.T) {
 
 // TestFleetWS_NonFleetTopicsUnaffected verifies that the fleet filter does not
 // accidentally drop non-fleet topics (kanban, presence, etc.).
+// Reads in a loop until the expected kanban.added frame arrives, skipping any
+// interleaved frames (presence join, ping) that may precede it on slow runners.
 func TestFleetWS_NonFleetTopicsUnaffected(t *testing.T) {
 	bus, _, wsURL, _ := newConsoleWSTestServer(t)
 
@@ -1249,27 +1309,27 @@ func TestFleetWS_NonFleetTopicsUnaffected(t *testing.T) {
 	defer conn.Close()
 
 	waitForHello(t, conn, bus, "alice")
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if bus.SubscriberCount() >= 1 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitForNSubscribers(t, bus, 1)
 
 	// Publish a non-fleet event with no meta.
 	bus.Publish(wsbus.TopicKanbanAdded, wsbus.KanbanAddedPayload{ID: "K-99", Title: "unfiltered", Column: "TODO"})
 
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	var ev wsbus.Event
-	if err := websocket.JSON.Receive(conn, &ev); err != nil {
-		t.Fatalf("non-fleet event was not delivered (fleet filter is too broad): %v", err)
-	}
-	if ev.Topic != wsbus.TopicKanbanAdded {
-		t.Errorf("topic=%q; want %q", ev.Topic, wsbus.TopicKanbanAdded)
+	// Read until kanban.added arrives, skipping any interleaved frames.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		conn.SetReadDeadline(time.Now().Add(time.Until(deadline))) //nolint:errcheck
+		var ev wsbus.Event
+		if err := websocket.JSON.Receive(conn, &ev); err != nil {
+			t.Fatalf("non-fleet event was not delivered (fleet filter is too broad): %v", err)
+		}
+		if ev.Topic == wsbus.TopicKanbanAdded {
+			conn.SetReadDeadline(time.Time{}) //nolint:errcheck
+			return // expected frame received — pass
+		}
+		// Any other frame (presence, ping): skip and keep reading.
 	}
 	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
+	t.Errorf("kanban.added frame not received within 2s")
 }
 
 // TestSessionWSOrigin_ExactMatchInvariant exercises the same cases through the
