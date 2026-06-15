@@ -182,6 +182,15 @@ func BuildOriginAllowListNetworkedForTest(externalHosts []string, next http.Hand
 	return consoleOriginAllowListNetworked(externalHosts, next)
 }
 
+// ---- Phase 3e: session-cookie WS auth test exports ---------------------------
+
+// ConsoleAuthSubprotocolOrSessionForTest exposes consoleAuthSubprotocolOrSession
+// for external test packages.  externalHosts is the list of host[:port] values
+// that the session-path Origin check allows (same as buildConsoleWSHandlerNetworked).
+func ConsoleAuthSubprotocolOrSessionForTest(token string, externalHosts []string, next http.Handler) http.Handler {
+	return consoleAuthSubprotocolOrSession(token, externalHosts, next)
+}
+
 // ---- Phase 3a: session auth glue test exports --------------------------------
 
 // BuildSessionLookupFnForTest exposes buildSessionLookupFn for external tests

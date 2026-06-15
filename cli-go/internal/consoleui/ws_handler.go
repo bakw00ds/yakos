@@ -17,13 +17,39 @@
 // handshake response, a Handshake func reduces config.Protocol to
 // ["yakos-bearer"] (dropping the token slot) before AcceptHandshake runs.
 //
+// # Session-cookie auth (ADR-0005 Phase 3e)
+//
+// Logged-in human operators (networked path, no bearer token) authenticate
+// the WS upgrade via the session cookie that the browser sends automatically
+// on a same-origin request.  The resolver middleware (resolver.Middleware)
+// runs before the WS handler and stamps an Identity{AuthMethodSession} on
+// the request context; the requireAuthOrRedirect middleware passes the
+// request through when the identity is authenticated.
+//
+// consoleAuthSubprotocolOrSession (networked path only) accepts the upgrade if:
+//  1. The bearer subprotocol is present and valid (existing path), OR
+//  2. No bearer subprotocol is present AND the resolved identity on the context
+//     is AuthMethodSession+Authenticated=true AND the Origin header is present
+//     and in the configured allow-list (CSWSH defense).
+//
+// CSWSH defense: a WebSocket upgrade carries the session cookie automatically.
+// Without an Origin check, any page on any origin could open a WS connection
+// to the console using the user's cookie.  SameSite=Strict on the session
+// cookie is the primary defense; the Origin check here is defense-in-depth.
+// For cookie-auth upgrades, a missing or foreign Origin header is rejected.
+//
 // WebSocket connection lifecycle:
 //
-//  1. Client: new WebSocket(url, ['yakos-bearer', '<token>'])
-//  2. consoleAuthSubprotocol validates token; sets a request-scoped flag.
-//  3. websocket.Server{Handshake} selects protocol = ["yakos-bearer"].
+//  1. Client: new WebSocket(url)          — session auth, no subprotocol.
+//     OR: new WebSocket(url, ['yakos-bearer', '<token>'])  — bearer auth.
+//  2. consoleAuthSubprotocolOrSession checks: bearer subprotocol OR session.
+//     Sets authedKey=true in context on success.
+//  3. websocket.Server{Handshake} selects protocol = ["yakos-bearer"] if
+//     bearer was presented; leaves protocol empty for session-auth clients.
 //  4. Server enters makeConsoleWSFunc.
 //  5. Server reads the first JSON frame (hello) — 500ms deadline.
+//     For session auth, hello.OperatorID is overridden with the server-side
+//     Identity.OperatorID (untrusted client claim is ignored).
 //  6. PresenceManager.Join() records the operator, publishes join event.
 //  7. Bus events streamed to client until disconnect/context cancel.
 //  8. PresenceManager.Leave() publishes leave event on defer.
@@ -57,6 +83,12 @@ type contextKey int
 // authedKey marks a request as having passed subprotocol token auth.
 const authedKey contextKey = 1
 
+// sessionAuthedKey marks a request as having passed session-cookie WS auth
+// (ADR-0005 Phase 3e).  When true, the Handshake func skips the
+// "yakos-bearer" subprotocol echo and the OperatorID is taken from the
+// server-side netid.Identity (not from the hello frame).
+const sessionAuthedKey contextKey = 2
+
 // buildConsoleWSHandler returns an http.Handler mounted at /v1/events that
 // implements the full console WebSocket stack described in the package doc.
 //
@@ -69,14 +101,15 @@ func buildConsoleWSHandler(token string, bus *wsbus.Bus, pm *PresenceManager) ht
 }
 
 // buildConsoleWSHandlerNetworked returns an http.Handler mounted at /v1/events
-// for the non-loopback hybrid-TLS path (ADR-0005 Phase 3f).
+// for the non-loopback hybrid-TLS path (ADR-0005 Phase 3e/3f).
 // Differences from the loopback variant:
 //   - No consoleLoopbackOnly guard (certless connections reach the HTTP layer
 //     after Phase 3f; the HTTP-layer gate is requireAuthOrRedirect — a certless
 //     and sessionless WS upgrade is rejected at /v1/ with 401 before this
 //     handler is reached).
 //   - consoleOriginAllowListNetworked: loopback + all configured external origins
-//   - consoleAuthSubprotocol still applies (bearer token for WS subprotocol)
+//   - consoleAuthSubprotocolOrSession (Phase 3e): accepts bearer subprotocol OR
+//     a session-cookie-authenticated identity already on the request context.
 //
 // externalHosts is the list of host[:port] values used by browsers
 // (e.g. ["10.0.0.1:7890", "myhost.example.com:7890"]).
@@ -87,19 +120,31 @@ func buildConsoleWSHandlerNetworked(token string, bus *wsbus.Bus, pm *PresenceMa
 
 // buildConsoleWSHandlerFull is the shared implementation.
 // networked=true: skip loopback RemoteAddr check; extend Origin allow-list;
-// override presence OperatorID with cert CN.
+// override presence OperatorID with cert CN or session identity.
 // networked=false: enforce loopback; loopback-only Origin allow-list; cooperative hello OperatorID unchanged.
 func buildConsoleWSHandlerFull(token string, bus *wsbus.Bus, pm *PresenceManager, networked bool, externalHosts []string) http.Handler {
 	// The websocket.Server selects the "yakos-bearer" protocol from the list,
 	// dropping the token slot.  Token validity was already checked by the
-	// middleware layer (consoleAuthSubprotocol) before the upgrade happens.
+	// middleware layer (consoleAuthSubprotocol / consoleAuthSubprotocolOrSession)
+	// before the upgrade happens.
+	//
+	// Session-auth clients (ADR-0005 Phase 3e) send NO subprotocol; for those
+	// we leave config.Protocol empty (no Sec-WebSocket-Protocol echo).  The
+	// sessionAuthedKey flag distinguishes the two paths.
 	wsSrv := &websocket.Server{
 		Handshake: func(config *websocket.Config, r *http.Request) error {
 			// Verify the auth middleware ran and succeeded.
 			if r.Context().Value(authedKey) != true {
 				return fmt.Errorf("consoleui: unauthenticated WebSocket connection")
 			}
-			// Reduce protocol list to exactly ["yakos-bearer"].
+			// Session-auth path: the client sent no subprotocol.  Leave
+			// config.Protocol empty — the server must not echo a subprotocol
+			// the client did not advertise.
+			if r.Context().Value(sessionAuthedKey) == true {
+				config.Protocol = nil
+				return nil
+			}
+			// Bearer-subprotocol path: reduce to exactly ["yakos-bearer"].
 			// AcceptHandshake requires exactly 0 or 1 protocol.
 			config.Protocol = []string{consoleSubprotocol}
 			return nil
@@ -109,15 +154,17 @@ func buildConsoleWSHandlerFull(token string, bus *wsbus.Bus, pm *PresenceManager
 
 	mux := http.NewServeMux()
 	if networked {
-		// Non-loopback (hybrid-TLS) path (ADR-0005 Phase 3f):
+		// Non-loopback (hybrid-TLS) path (ADR-0005 Phase 3e/3f):
 		//   - Skip consoleLoopbackOnly: the loopback RemoteAddr check would
 		//     reject all legitimate networked traffic.  Certless+sessionless
 		//     connections are rejected upstream by requireAuthOrRedirect (returns
 		//     401 for /v1/ paths) before reaching this handler.
 		//   - Use extended Origin allow-list that includes all external hosts.
+		//   - Use consoleAuthSubprotocolOrSession (Phase 3e): accepts bearer
+		//     subprotocol OR a session-authenticated identity from context.
 		mux.Handle("/v1/events",
 			consoleOriginAllowListNetworked(externalHosts,
-				consoleAuthSubprotocol(token, wsSrv),
+				consoleAuthSubprotocolOrSession(token, externalHosts, wsSrv),
 			),
 		)
 	} else {
@@ -197,29 +244,47 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) webs
 			hello = HelloMessage{Type: "hello"}
 		}
 
-		// ---- 1b. Cert CN override (networked / mTLS path only) ---------------
-		// On the networked path the client presents an mTLS cert whose CN is the
-		// authoritative operator identity.  Override hello.OperatorID with the
-		// cert CN so a client cannot forge another operator's identity by crafting
-		// the hello frame.
+		// ---- 1b. Identity override (networked path only) ----------------------
+		// On the networked path the authoritative operator identity comes from
+		// the verified credential (cert or session), not from the hello frame
+		// which an attacker could craft.  Override order (highest priority first):
 		//
-		// The cert is on conn.Request().TLS.VerifiedChains (set by Go's TLS stack
-		// after cert verification).  We use netid.CNFromTLS to extract it; if
-		// extraction fails (cert absent or chain empty — e.g. a session-auth user
-		// with no client cert) we fall through to the claimed hello.OperatorID.
-		// Phase 3f: with VerifyClientCertIfGiven, a session-auth user reaches
-		// this point with VerifiedChains empty; the CN extraction returns ("", false)
-		// and hello.OperatorID (resolved by the resolver from the session) is used.
-		// Cert-auth users still have VerifiedChains populated; CN wins over hello.
+		// (a) Cert CN: extracted from VerifiedChains in the TLS state.  Applies
+		//     to machine clients that present an mTLS certificate.  Phase 3f:
+		//     VerifyClientCertIfGiven means session-auth users have empty
+		//     VerifiedChains; the CN extraction returns ("", false) for them.
+		//
+		// (b) Session identity: if no cert is present but the request was
+		//     session-authenticated (sessionAuthedKey set by
+		//     consoleAuthSubprotocolOrSession), use the OperatorID from the
+		//     netid.Identity on the context — the server-side authoritative value
+		//     resolved from the session store before the upgrade.  This closes
+		//     the same forgeable-OperatorID finding as the cert path.
+		//
+		// (c) Fallthrough to hello.OperatorID: on the loopback path (networked=false)
+		//     or when neither cert nor session is present (should not reach here
+		//     in production — requireAuthOrRedirect rejects unauthenticated
+		//     requests upstream).
 		//
 		// On the loopback path (networked=false) hello.OperatorID is used as-is
 		// (cooperative attribution; loopback = trusted network boundary).
 		if networked {
+			// (a) Cert CN — highest priority.
 			if tlsState := conn.Request().TLS; tlsState != nil {
 				if cn, ok := netid.CNFromTLS(tlsState); ok && cn != "" {
 					hello.OperatorID = cn
+					goto identityResolved
 				}
 			}
+			// (b) Session identity — server-side authoritative OperatorID.
+			// sessionAuthedKey is set by consoleAuthSubprotocolOrSession only when
+			// the session lookup succeeded; IdentityFrom returns AuthMethodSession.
+			if conn.Request().Context().Value(sessionAuthedKey) == true {
+				if id := netid.IdentityFrom(conn.Request().Context()); id.Authenticated && id.OperatorID != "" {
+					hello.OperatorID = id.OperatorID
+				}
+			}
+		identityResolved:
 		}
 
 		// ---- 2. Presence join -----------------------------------------------
@@ -319,6 +384,79 @@ func consoleAuthSubprotocol(token string, next http.Handler) http.Handler {
 		}
 		// Mark request as authenticated; pass to the websocket.Server.
 		ctx := context.WithValue(r.Context(), authedKey, true)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// consoleAuthSubprotocolOrSession is the networked-path WS auth middleware
+// (ADR-0005 Phase 3e).  It extends consoleAuthSubprotocol to accept
+// session-cookie-authenticated upgrades from logged-in human operators.
+//
+// Authentication precedence:
+//  1. Bearer subprotocol ("yakos-bearer, <token>"): validated the same way as
+//     consoleAuthSubprotocol; authedKey=true is set in context.  Used by
+//     loopback forwarders, CLI tools, and any client holding the bearer token.
+//  2. Session cookie: the request context carries a netid.Identity with
+//     AuthMethodSession and Authenticated=true (stamped by resolver.Middleware
+//     upstream) AND the Origin header is present and in the allow-list.
+//     Sets both authedKey=true and sessionAuthedKey=true in context.
+//
+// CSWSH defense: for the session-cookie path, a missing or foreign Origin
+// header causes a 403.  The Origin check is already performed upstream by
+// consoleOriginAllowListNetworked; here we additionally REQUIRE that Origin
+// is present (browsers always send it on WS upgrades; its absence is a
+// non-browser or cross-site attempt).  This is defense-in-depth alongside
+// SameSite=Strict on the session cookie.
+//
+// When neither auth path succeeds, the request is rejected with 403.
+func consoleAuthSubprotocolOrSession(token string, externalHosts []string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		protos := r.Header.Get("Sec-WebSocket-Protocol")
+
+		// ---- Path 1: bearer subprotocol ----------------------------------------
+		if protos != "" {
+			// Delegate fully to the existing bearer-subprotocol logic.
+			consoleAuthSubprotocol(token, next).ServeHTTP(w, r)
+			return
+		}
+
+		// ---- Path 2: session-cookie auth ---------------------------------------
+		// The bearer subprotocol is absent; try the session path.
+		id := netid.IdentityFrom(r.Context())
+		if !id.Resolved || !id.Authenticated || id.AuthMethod != netid.AuthMethodSession {
+			http.Error(w, "consoleui: WebSocket authentication required (session or yakos-bearer subprotocol)", http.StatusForbidden)
+			return
+		}
+
+		// CSWSH defense: require a valid, allowlisted Origin for cookie-auth.
+		// consoleOriginAllowListNetworked (upstream) already rejects foreign
+		// origins; here we additionally reject a MISSING Origin so that
+		// non-browser tools cannot accidentally ride a session cookie.
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			http.Error(w, "consoleui: Origin header required for session-authenticated WebSocket", http.StatusForbidden)
+			return
+		}
+		// Double-check the origin is in the allow-list (defense-in-depth: the
+		// upstream middleware may have been bypassed in unusual routing paths).
+		if !isLoopbackOrigin(origin) {
+			allowed := false
+			for _, host := range externalHosts {
+				if isExternalOrigin(origin, host) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				http.Error(w, "consoleui: Origin not in allow-list", http.StatusForbidden)
+				return
+			}
+		}
+
+		// Session auth accepted.  Mark both keys so the Handshake func and
+		// makeConsoleWSFunc can distinguish this path from bearer auth.
+		ctx := context.WithValue(r.Context(), authedKey, true)
+		ctx = context.WithValue(ctx, sessionAuthedKey, true)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
