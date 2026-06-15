@@ -1065,6 +1065,34 @@
   let chatTabInitialized = false;  // true once chat infra (SSE, panes) is booted
   let chatLayoutRendered = false;  // true once the Chat tab's DOM layout is rendered
 
+  // ---- Slash-command popover state -------------------------------------------
+  //
+  // skillsCache holds the last successful /api/skills response.
+  // Fetched once per chat-tab init (no polling — the roster changes only on
+  // restart; a manual refresh is not needed for Phase 1).
+  //
+  // skillsFetched guards the single fetch so bootChatInfrastructure re-entries
+  // (IDE tab boot) do not issue duplicate requests.
+  var skillsCache = { agents: [], commands: [] };
+  var skillsFetched = false;
+
+  // fetchSkills fetches GET /api/skills and caches the result in skillsCache.
+  // Silent on failure: the popover simply shows the partial list.
+  function fetchSkills() {
+    if (skillsFetched) return;
+    skillsFetched = true;
+    apiFetch('GET', '/api/skills').then(function(resp) {
+      if (!resp.ok) return;
+      return resp.json();
+    }).then(function(data) {
+      if (data && Array.isArray(data.agents) && Array.isArray(data.commands)) {
+        skillsCache = data;
+      }
+    }).catch(function() {
+      // Silent: popover still shows static client commands from initial empty cache.
+    });
+  }
+
   // bootChatInfrastructure mints the operator ID, loads persisted pane state,
   // seeds a default pane if none exist, and starts the SSE reader.  It is
   // idempotent (no-op once chatTabInitialized is true) and called by BOTH
@@ -1081,6 +1109,8 @@
     if (!chatSSEAbort) {
       startChatSSE();
     }
+    // Prefetch the agent/command catalog for the "/" popover.
+    fetchSkills();
     chatTabInitialized = true;
   }
 
@@ -1329,6 +1359,39 @@
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
           e.preventDefault();
           sendPaneMessage(paneId);
+          return;
+        }
+        // Slash-command popover navigation keys.
+        const pop = document.getElementById('slash-popover-' + paneId);
+        if (pop) {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            hideSlashPopover(paneId);
+            return;
+          }
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            moveSlashPopoverCursor(paneId, 1);
+            return;
+          }
+          if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            moveSlashPopoverCursor(paneId, -1);
+            return;
+          }
+          if (e.key === 'Enter' || e.key === 'Tab') {
+            e.preventDefault();
+            commitSlashPopoverSelection(paneId);
+            return;
+          }
+        }
+      });
+      textarea.addEventListener('input', function() {
+        const val = textarea.value;
+        if (val.startsWith('/')) {
+          showSlashPopover(paneId, val.slice(1));
+        } else {
+          hideSlashPopover(paneId);
         }
       });
     }
@@ -1348,6 +1411,226 @@
 
     // Render initial messages.
     renderPaneMessages(paneId);
+  }
+
+  // ---- Slash-command popover -------------------------------------------------
+  //
+  // showSlashPopover(paneId, filter) renders a filterable listbox above the
+  // chat textarea showing matching agents (sets dispatch target) and client
+  // commands (clear/help/attach).
+  //
+  // DOM structure (appended to the .chat-input-area of the pane):
+  //   <div id="slash-popover-<paneId>" class="slash-popover" role="listbox"
+  //        aria-label="Slash commands">
+  //     <div class="slash-popover-section-label">Agents</div>
+  //     <div class="slash-popover-item" role="option" aria-selected="false"
+  //          data-slash-type="agent" data-slash-name="backend">
+  //       <span class="slash-item-name">backend</span>
+  //       <span class="slash-item-desc">…</span>
+  //       <span class="slash-item-meta">claude</span>
+  //     </div>
+  //     … client command entries …
+  //   </div>
+  //
+  // Navigation: ArrowUp/Down move cursor; Enter/Tab commit; Esc dismiss.
+  // All three key handlers are registered in wirePaneEvents.
+  //
+  // Accessibility: role=listbox + role=option + aria-selected mirrors the
+  // Users-tab table-row pattern and aligns with ARIA authoring practices for
+  // combo-box widgets.
+
+  // _slashCursor[paneId] tracks the 0-based index of the focused item.
+  var _slashCursor = {};
+
+  function _slashItems(paneId) {
+    var pop = document.getElementById('slash-popover-' + paneId);
+    if (!pop) return [];
+    return Array.prototype.slice.call(pop.querySelectorAll('[role="option"]'));
+  }
+
+  function showSlashPopover(paneId, filter) {
+    var f = (filter || '').toLowerCase();
+
+    // Build filtered lists.
+    var agents = (skillsCache.agents || []).filter(function(a) {
+      return !f || a.name.toLowerCase().indexOf(f) !== -1 ||
+             (a.description || '').toLowerCase().indexOf(f) !== -1;
+    });
+    var commands = (skillsCache.commands || []).filter(function(c) {
+      return !f || c.name.toLowerCase().indexOf(f) !== -1 ||
+             (c.summary || '').toLowerCase().indexOf(f) !== -1;
+    });
+
+    // Nothing matches — hide and return.
+    if (agents.length === 0 && commands.length === 0) {
+      hideSlashPopover(paneId);
+      return;
+    }
+
+    // Find or create the popover element.
+    var inputArea = null;
+    var textarea = document.getElementById('pane-input-' + paneId);
+    if (textarea) inputArea = textarea.parentElement;
+    if (!inputArea) return;
+
+    var pop = document.getElementById('slash-popover-' + paneId);
+    if (!pop) {
+      pop = document.createElement('div');
+      pop.id = 'slash-popover-' + paneId;
+      pop.className = 'slash-popover';
+      pop.setAttribute('role', 'listbox');
+      pop.setAttribute('aria-label', 'Slash commands — agents and client actions');
+      inputArea.appendChild(pop);
+
+      // Dismiss on click outside.
+      document.addEventListener('click', function onDocClick(e) {
+        var p = document.getElementById('slash-popover-' + paneId);
+        if (p && !p.contains(e.target) && e.target !== textarea) {
+          hideSlashPopover(paneId);
+          document.removeEventListener('click', onDocClick);
+        }
+      });
+    }
+
+    // Reset cursor on every re-render.
+    _slashCursor[paneId] = 0;
+
+    // Build inner HTML.
+    var html = '';
+
+    if (agents.length > 0) {
+      html += '<div class="slash-popover-section-label" aria-hidden="true">Agents</div>';
+      agents.forEach(function(a) {
+        html +=
+          '<div class="slash-popover-item" role="option" aria-selected="false" ' +
+               'data-slash-type="agent" data-slash-name="' + esc(a.name) + '">' +
+            '<span class="slash-item-name">' + esc(a.name) + '</span>' +
+            '<span class="slash-item-desc">' + esc(a.description || '') + '</span>' +
+            '<span class="slash-item-meta">' + esc(a.runtime || '') + '</span>' +
+          '</div>';
+      });
+    }
+
+    if (commands.length > 0) {
+      html += '<div class="slash-popover-section-label" aria-hidden="true">Commands</div>';
+      commands.forEach(function(c) {
+        html +=
+          '<div class="slash-popover-item" role="option" aria-selected="false" ' +
+               'data-slash-type="command" data-slash-name="' + esc(c.name) + '">' +
+            '<span class="slash-item-name">/' + esc(c.name) + '</span>' +
+            '<span class="slash-item-desc">' + esc(c.summary || '') + '</span>' +
+          '</div>';
+      });
+    }
+
+    pop.innerHTML = html;
+
+    // Wire click handlers on each option.
+    Array.prototype.forEach.call(pop.querySelectorAll('[role="option"]'), function(item) {
+      item.addEventListener('mousedown', function(e) {
+        // mousedown fires before textarea blur; preventDefault keeps focus in textarea.
+        e.preventDefault();
+        _applySlashItem(paneId, item);
+      });
+    });
+
+    // Highlight first item.
+    _updateSlashCursor(paneId, 0);
+  }
+
+  function hideSlashPopover(paneId) {
+    var pop = document.getElementById('slash-popover-' + paneId);
+    if (pop && pop.parentNode) pop.parentNode.removeChild(pop);
+    delete _slashCursor[paneId];
+  }
+
+  function _updateSlashCursor(paneId, idx) {
+    var items = _slashItems(paneId);
+    if (!items.length) return;
+    // Clamp index.
+    idx = Math.max(0, Math.min(idx, items.length - 1));
+    _slashCursor[paneId] = idx;
+    items.forEach(function(item, i) {
+      var active = i === idx;
+      item.setAttribute('aria-selected', active ? 'true' : 'false');
+      if (active) {
+        item.classList.add('slash-popover-item--active');
+        // Scroll into view within the popover.
+        if (item.scrollIntoView) item.scrollIntoView({ block: 'nearest' });
+      } else {
+        item.classList.remove('slash-popover-item--active');
+      }
+    });
+  }
+
+  function moveSlashPopoverCursor(paneId, delta) {
+    var cur = _slashCursor[paneId] || 0;
+    _updateSlashCursor(paneId, cur + delta);
+  }
+
+  function commitSlashPopoverSelection(paneId) {
+    var items = _slashItems(paneId);
+    var cur = _slashCursor[paneId] || 0;
+    var item = items[cur];
+    if (item) _applySlashItem(paneId, item);
+  }
+
+  function _applySlashItem(paneId, item) {
+    var type = item.getAttribute('data-slash-type');
+    var name = item.getAttribute('data-slash-name');
+    hideSlashPopover(paneId);
+
+    var textarea = document.getElementById('pane-input-' + paneId);
+    var pane = chatPanes.get(paneId);
+
+    if (type === 'agent') {
+      // Set the dispatch target and clear the "/" prefix from the textarea.
+      if (pane) {
+        pane.agent = name;
+        savePaneState();
+        renderPaneHeader(paneId);
+      }
+      if (textarea) {
+        // Replace the slash-filter text (everything from the "/" onward)
+        // with an empty string so the user can type their task.
+        textarea.value = '';
+        textarea.focus();
+      }
+    } else if (type === 'command') {
+      if (textarea) {
+        textarea.value = '';
+        textarea.focus();
+      }
+      if (name === 'clear') {
+        // Clear the pane's messages.
+        if (pane) {
+          pane.messages = [];
+          renderPaneMessages(paneId);
+        }
+      } else if (name === 'help') {
+        // Show a brief help message as a system message in the pane.
+        if (pane) {
+          var helpLines = ['Available commands:'];
+          (skillsCache.commands || []).forEach(function(c) {
+            helpLines.push('  /' + c.name + ' — ' + (c.summary || ''));
+          });
+          helpLines.push('');
+          helpLines.push('Available agents:');
+          (skillsCache.agents || []).forEach(function(a) {
+            helpLines.push('  ' + a.name + ' — ' + (a.description || ''));
+          });
+          pane.messages.push({
+            role: 'system',
+            text: helpLines.join('\n'),
+            ts: new Date().toISOString(),
+            sessionId: null,
+          });
+          renderPaneMessages(paneId);
+          if (pane.autoScroll) scrollPaneToBottom(paneId);
+        }
+      }
+      // 'attach' is reserved for a future phase — no-op for now.
+    }
   }
 
   // ---- Pane header re-render (cheaper than full rebuild) --------------------

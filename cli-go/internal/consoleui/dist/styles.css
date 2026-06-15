@@ -3591,7 +3591,7 @@ html[data-theme="light"] .users-table tr:hover td {
  *
  * Light theme token failures on white (#ffffff) at 11px/700:
  *   --color-positive #007a5a:  5.34:1  ✓  (already passes; no change needed)
- *   --color-alarm    #ea580c:  3.56:1  ✗  → use #b84500 (5.33:1 on white)
+ *   --color-alarm    #ea580c:  3.99:1  ✗  → use #b84500 (5.33:1 on white)
  *   --color-warning  #d97706:  3.55:1  ✗  → use #92530a (5.04:1 on white)
  *
  * Ratios verified via WCAG 2.1 relative-luminance formula.
@@ -3626,7 +3626,6 @@ html[data-theme="light"] .users-badge-reset {
    * 11px/1.5 line-height ≈ ~19px height; min-height: 24px lifts it to
    * the minimum and also gives a larger click/touch target in dense rows. */
   min-height: 24px;
-  min-width: 24px;
   padding: 3px 8px;
   transition: background var(--dur, 0.1s) var(--ease, ease),
               color var(--dur, 0.1s) var(--ease, ease),
@@ -3702,6 +3701,88 @@ html[data-theme="light"] .users-action-btn.danger:hover:not(:disabled) {
   .users-add-btn,
   .users-change-pw-btn,
   .users-action-btn {
+    transition: none;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Slash-command popover (Phase 1: REPL slash-skills)
+   Rendered above the chat textarea when the input starts with "/".
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+.chat-input-area {
+  position: relative; /* anchor for the slash popover */
+}
+
+.slash-popover {
+  position: absolute;
+  bottom: calc(100% + 4px); /* float above the input area */
+  left: 0;
+  right: 0;
+  z-index: 200;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border, rgba(255,255,255,0.12));
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  font-size: 13px;
+  /* Scroll position preserved across re-renders by the browser */
+}
+
+.slash-popover-section-label {
+  padding: 4px 10px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  pointer-events: none;
+  user-select: none;
+}
+
+.slash-popover-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-radius: 0;
+  transition: background 0.08s;
+}
+
+.slash-popover-item:hover,
+.slash-popover-item--active {
+  background: var(--accent-dim, rgba(255,255,255,0.08));
+  outline: none;
+}
+
+.slash-item-name {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--accent);
+  min-width: 80px;
+}
+
+.slash-item-desc {
+  flex: 1 1 auto;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-item-meta {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+
+/* Reduced-motion: disable the hover transition */
+@media (prefers-reduced-motion: reduce) {
+  .slash-popover-item {
     transition: none;
   }
 }

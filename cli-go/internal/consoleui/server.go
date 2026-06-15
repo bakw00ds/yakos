@@ -218,6 +218,12 @@ type Config struct {
 	// escaped or traversal attempts are rejected with a generic 400/403.
 	WorkspaceRoot string
 
+	// YakosRoot is the yakOS framework root directory (e.g. the yakOS repo root).
+	// Required for GET /api/skills to compose the agent roster via
+	// agentscompose.Compose.  When empty, /api/skills returns an empty agent
+	// list but still serves the static client commands (graceful degradation).
+	YakosRoot string
+
 	// SetupToken is the one-time first-admin setup token state (ADR-0005 Phase 3c).
 	// When non-nil and NetworkedMode is true, /setup is wired and the
 	// unauthenticated edge redirect sends zero-user navigations to /setup
@@ -265,6 +271,7 @@ type Server struct {
 	chat         *chatHandlers
 	flows        *flowsHandlers
 	files        *filesHandlers
+	skills       *skillsHandlers
 	serverCtx    context.Context    // cancelled on Serve shutdown; dispatch goroutines use this
 	serverCancel context.CancelFunc // called by Serve when the server shuts down
 }
@@ -328,6 +335,7 @@ func New(cfg Config) (*Server, error) {
 		activeRuns: make(map[string]context.CancelFunc),
 	}
 	filesH := newFilesHandlers(cfg.WorkspaceRoot)
+	skillsH := newSkillsHandlers(cfg.YakosRoot, cfg.WorkspaceRoot)
 	s := &Server{
 		cfg:          cfg,
 		mux:          http.NewServeMux(),
@@ -336,6 +344,7 @@ func New(cfg Config) (*Server, error) {
 		chat:         chatH,
 		flows:        flowsH,
 		files:        filesH,
+		skills:       skillsH,
 		serverCtx:    serverCtx,
 		serverCancel: serverCancel,
 	}
@@ -858,6 +867,12 @@ func (s *Server) registerRoutes() {
 	// requireJSONForMutations (applied globally in New()) enforces Content-Type:
 	// application/json for this POST, providing CSRF defence.
 	s.mux.HandleFunc("/api/files/write", requireRoleFunc(netid.RoleDispatch, s.files.handleFilesWrite))
+
+	// ---- Phase 1 (REPL slash-skills): agent + command catalog ------------------
+	// GET /api/skills — read-only roster of composed agents + static client commands.
+	// Used by the chat REPL "/" popover to present a filterable agent/command list.
+	// RoleRead: reading the catalog requires no elevated privilege.
+	s.mux.HandleFunc("/api/skills", requireRoleFunc(netid.RoleRead, s.skills.handleSkills))
 }
 
 // handlePresence returns the current online operator presence snapshot as a

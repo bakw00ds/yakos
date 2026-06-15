@@ -509,6 +509,7 @@ func Run(ctx context.Context, cfg Config) error {
 			WorkflowEngine:   workflowEngine,
 			StateDir:         stateDir,
 			WorkspaceRoot:    cfg.WorkspaceRoot,
+			YakosRoot:        cfg.YakosRoot,
 			AuthSessionStore: authStore,
 			UserStore:        uStore,
 		}
