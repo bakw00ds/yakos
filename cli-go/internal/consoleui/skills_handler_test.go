@@ -268,3 +268,54 @@ func TestSkillsHandler_MethodNotAllowed(t *testing.T) {
 		t.Errorf("want 405, got %d", resp.StatusCode)
 	}
 }
+
+// TestSkillsHandler_NoToken_Returns401 verifies that GET /api/skills is gated
+// at the edge: an unauthenticated request (no Authorization header) receives 401.
+//
+// Uses the RequireTokenForNonStatic + RequireJSONForMutations stack — the same
+// wrapper used by newChatTestServer in chat_test.go — so the test exercises the
+// real production middleware chain, not just the handler directly.
+func TestSkillsHandler_NoToken_Returns401(t *testing.T) {
+	root := buildFakeYakosRoot(t)
+
+	stateDir := t.TempDir()
+	tok, err := consoleui.LoadOrCreateToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	bus := wsbus.New()
+	t.Cleanup(bus.Stop)
+
+	srv := consoleui.MustNew(t, consoleui.Config{
+		Token:             tok,
+		KanbanBoardPath:   filepath.Join(t.TempDir(), "kanban.md"),
+		KanbanProject:     "test",
+		MetricsProjectDir: t.TempDir(),
+		PerfWorkDir:       t.TempDir(),
+		Bus:               bus,
+		WorkDir:           t.TempDir(),
+		WorkspaceRoot:     t.TempDir(),
+		YakosRoot:         root,
+	})
+
+	// Wrap with the production edge middleware so the auth gate fires.
+	handler := consoleui.RequireTokenForNonStatic(tok,
+		consoleui.RequireJSONForMutations(srv.Handler()))
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	// Request with NO Authorization header.
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/skills", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/skills (no token): %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET /api/skills (no token): got %d, want 401", resp.StatusCode)
+	}
+}

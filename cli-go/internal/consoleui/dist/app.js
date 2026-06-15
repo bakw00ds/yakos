@@ -1442,6 +1442,13 @@
   // _slashCursor[paneId] tracks the 0-based index of the focused item.
   var _slashCursor = {};
 
+  // _slashDocClickHandlers[paneId] holds the document 'click' handler registered
+  // when the popover opens.  Storing the reference here lets hideSlashPopover
+  // call removeEventListener unconditionally — whether the popover was dismissed
+  // via Esc, Enter/Tab, mousedown, or an outside click — so no dead listener
+  // accumulates across repeated open → close cycles.
+  var _slashDocClickHandlers = {};
+
   function _slashItems(paneId) {
     var pop = document.getElementById('slash-popover-' + paneId);
     if (!pop) return [];
@@ -1482,14 +1489,19 @@
       pop.setAttribute('aria-label', 'Slash commands — agents and client actions');
       inputArea.appendChild(pop);
 
-      // Dismiss on click outside.
-      document.addEventListener('click', function onDocClick(e) {
+      // Dismiss on click outside.  Store the handler reference in
+      // _slashDocClickHandlers so hideSlashPopover can remove it
+      // unconditionally regardless of how the popover is dismissed
+      // (Esc, Enter/Tab, mousedown, or outside click).  Without this
+      // a dead listener accumulates on every open → non-click-dismiss cycle.
+      var docClickHandler = function(e) {
         var p = document.getElementById('slash-popover-' + paneId);
         if (p && !p.contains(e.target) && e.target !== textarea) {
           hideSlashPopover(paneId);
-          document.removeEventListener('click', onDocClick);
         }
-      });
+      };
+      _slashDocClickHandlers[paneId] = docClickHandler;
+      document.addEventListener('click', docClickHandler);
     }
 
     // Reset cursor on every re-render.
@@ -1539,6 +1551,15 @@
   }
 
   function hideSlashPopover(paneId) {
+    // Always remove the document click listener first — regardless of dismissal
+    // path (Esc, Enter/Tab, mousedown, or outside click).  This is the fix for
+    // the listener leak: without this, every Esc/Enter/Tab dismissal left one
+    // dead listener behind and the next open registered another.
+    var handler = _slashDocClickHandlers[paneId];
+    if (handler) {
+      document.removeEventListener('click', handler);
+      delete _slashDocClickHandlers[paneId];
+    }
     var pop = document.getElementById('slash-popover-' + paneId);
     if (pop && pop.parentNode) pop.parentNode.removeChild(pop);
     delete _slashCursor[paneId];
