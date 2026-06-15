@@ -1037,7 +1037,8 @@
 
   // ---- Chat tab init ---------------------------------------------------------
 
-  let chatTabInitialized = false;
+  let chatTabInitialized = false;  // true once chat infra (SSE, panes) is booted
+  let chatLayoutRendered = false;  // true once the Chat tab's DOM layout is rendered
 
   // bootChatInfrastructure mints the operator ID, loads persisted pane state,
   // seeds a default pane if none exist, and starts the SSE reader.  It is
@@ -1059,12 +1060,15 @@
   }
 
   function initChatTab() {
-    if (chatTabInitialized) return;
-
-    // S4: use the shared boot helper so the sequence is defined once and both
-    // initChatTab + initIdeTab stay in sync.  bootChatInfrastructure() is
-    // idempotent; calling it here sets chatTabInitialized = true.
+    // Always boot infra (idempotent — safe if IDE tab already ran it).
     bootChatInfrastructure();
+
+    // Render the Chat tab layout exactly once, regardless of whether infra
+    // was pre-booted by initIdeTab.  Without this guard the layout renders
+    // on every tab switch; with only chatTabInitialized as the guard the
+    // layout was never rendered when the IDE tab opened first (the bug).
+    if (chatLayoutRendered) return;
+    chatLayoutRendered = true;
 
     renderChatLayout();
 
