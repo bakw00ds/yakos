@@ -340,9 +340,12 @@ func New(cfg Config) (*Server, error) {
 	//   - true  (loopback path): certless requests → RoleAdmin / Authenticated=false.
 	//             Preserves today's cooperative-labeling bearer-token behaviour exactly.
 	//   - false (networked path): certless requests → RoleRead / Authenticated=false.
-	//             Defence-in-depth alongside RequireAndVerifyClientCert in the TLS
-	//             layer — even if TLS config were somehow misconfigured, certless
-	//             requests NEVER receive admin on the networked listener.
+	//             Defence-in-depth alongside the TLS layer — even if TLS config
+	//             were somehow misconfigured, certless requests NEVER receive admin
+	//             on the networked listener.  After Phase 3f, the TLS layer uses
+	//             VerifyClientCertIfGiven (not RequireAndVerifyClientCert) so
+	//             certless connections reach the HTTP layer; the resolver is the
+	//             fail-closed gate for unauthenticated certless requests.
 	//
 	// callerLabelFn extracts the cooperative OperatorID for loopback bearer sessions.
 	// The dispatch facade stamps operator_id from its daemon-level opID on the
@@ -482,8 +485,11 @@ func New(cfg Config) (*Server, error) {
 		// all other routes: session or cert auth via the inner chain.
 		//
 		// The RequireLocalHost guard is intentionally NOT applied here — it would
-		// reject all legitimate non-loopback traffic.  Instead, TLS
-		// RequireAndVerifyClientCert provides the equivalent network-layer guard.
+		// reject all legitimate non-loopback traffic.  The HTTP-layer guard is
+		// requireAuthOrRedirect (inside inner), which blocks certless+sessionless
+		// requests.  After Phase 3f, the TLS layer uses VerifyClientCertIfGiven
+		// so certless connections reach the HTTP layer; requireAuthOrRedirect is
+		// the fail-closed gate that returns 401/302 for unauthenticated requests.
 		protected = requireTokenForNonStaticNetworked(inner)
 	} else {
 		// Loopback path (default): wrap with edge auth unchanged.
@@ -542,12 +548,14 @@ func (s *Server) ChatHub() *ChatHub { return s.chatHub }
 //   - Binds a plain TCP listener; enforces loopback-only via IsLoopback check.
 //   - Any non-loopback address returns an error before opening the listener.
 //
-// Networked path (NetworkedMode=true): mTLS TLS listener.
-//   - The caller MUST have set cfg.TLSConfig (via mtls.BuildServerTLSConfig) and
-//     must have verified mTLS material is available before calling Serve.
+// Networked path (NetworkedMode=true): hybrid TLS listener (ADR-0005 Phase 3f).
+//   - The caller MUST have set cfg.TLSConfig (via mtls.BuildServerTLSConfigHybrid)
+//     and must have verified mTLS material is available before calling Serve.
 //   - The plain TCP listener is wrapped with tls.NewListener before Serve.
-//   - The loopback-only assertion is NOT applied (intentional: the mTLS layer
-//     is the network-boundary guard for the networked path).
+//   - The loopback-only assertion is NOT applied (intentional: the HTTP-layer
+//     requireAuthOrRedirect is the fail-closed gate for certless+sessionless
+//     requests; the TLS layer uses VerifyClientCertIfGiven so password+session
+//     users can complete the handshake without a client cert).
 func (s *Server) Serve(ctx context.Context) error {
 	var ln net.Listener
 	if s.cfg.Listener != nil {
@@ -641,6 +649,11 @@ func (s *Server) registerRoutes() {
 	// GET /login.js — login form JS (script-src 'self'; no inline scripts).
 	// GET /login.css — login form CSS (style-src 'self'; no unsafe-inline).
 	//
+	// After Phase 3f, certless connections can reach /login (TLS uses
+	// VerifyClientCertIfGiven).  The requireAuthOrRedirect middleware exempts
+	// /login and /setup via isStaticAsset so unauthenticated users can reach
+	// the login form without being redirect-looped.
+	//
 	// Note: /login is registered in New() (after the auth handlers are built)
 	// so that GET and POST can share a single mux pattern with method dispatch.
 	// This avoids a duplicate-pattern panic when both registerRoutes and New()
@@ -668,12 +681,14 @@ func (s *Server) registerRoutes() {
 	// Security rationale: the shell itself carries NO workspace content.
 	// File content is served only by the RoleRead-gated /api/files/* endpoints
 	// and delivered into the editor via postMessage from the authenticated parent
-	// frame.  On the networked path, access is still gated at the transport layer
-	// (mTLS RequireAndVerifyClientCert).  On the loopback path the server is
-	// loopback-only by construction.  Putting a RoleRead gate here conflicted
-	// with navigation reality: browser top-level navigations cannot carry an
-	// Authorization header, so a gated shell always returns 401 on direct open
-	// (the same reason / is exempt — it is a shell, not a data endpoint).
+	// frame.  On the networked path, the shell is reachable by certless browsers
+	// (Phase 3f: TLS uses VerifyClientCertIfGiven); authentication is required
+	// to reach file-content endpoints (requireAuthOrRedirect).  On the loopback
+	// path the server is loopback-only by construction.  Putting a RoleRead gate
+	// on the shell itself conflicted with navigation reality: browser top-level
+	// navigations cannot carry an Authorization header, so a gated shell always
+	// returns 401 on direct open (the same reason / is exempt — it is a shell,
+	// not a data endpoint).
 	//
 	// The scoped ideEditorCSP() is preserved: wasm-unsafe-eval and worker-src
 	// blob: apply ONLY to this route.  The MAIN console CSP (cspHeader) is

@@ -377,6 +377,248 @@ func TestMutualTLS_UntrustedClient_Rejected(t *testing.T) {
 	}
 }
 
+// ---- BuildServerTLSConfigHybrid tests (ADR-0005 Phase 3f) -------------------
+
+// TestHybridTLS_NoCert_HandshakeSucceeds verifies that a client presenting NO
+// client certificate completes the TLS handshake against the hybrid config
+// (VerifyClientCertIfGiven).  This is the core Phase 3f requirement: certless
+// password+session users must be able to reach the HTTP layer.
+func TestHybridTLS_NoCert_HandshakeSucceeds(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	caCert, caKey, err := mtls.LoadOrGenerateCA(dir)
+	if err != nil {
+		t.Fatalf("LoadOrGenerateCA: %v", err)
+	}
+	serverCert, err := mtls.IssueServerCert(caCert, caKey, []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatalf("IssueServerCert: %v", err)
+	}
+	caPool := mtls.CertPoolFromCert(caCert)
+	serverTLSCfg := mtls.BuildServerTLSConfigHybrid(serverCert, caPool)
+
+	// Client: no client cert; trusts server cert via caPool.
+	noCertClientCfg := &tls.Config{
+		RootCAs:    caPool,
+		MinVersion: tls.VersionTLS12,
+		// No Certificates field → no client cert presented.
+	}
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverTLSCfg)
+	if err != nil {
+		t.Fatalf("tls.Listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		done <- conn.(*tls.Conn).Handshake()
+	}()
+
+	conn, err := tls.Dial("tcp", ln.Addr().String(), noCertClientCfg)
+	if err != nil {
+		t.Fatalf("certless client Dial against hybrid config should succeed; got: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("server handshake against certless client should succeed; got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server handshake timeout")
+	}
+}
+
+// TestHybridTLS_NoCert_VerifiedChainsEmpty verifies that when a client
+// presents no cert, the server-side TLS state has VerifiedChains empty.
+// This is the contract CNFromTLS relies on to return ("", false) for certless
+// connections, allowing the HTTP identity resolver to fall through to the
+// session/fail-closed path.
+func TestHybridTLS_NoCert_VerifiedChainsEmpty(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	caCert, caKey, err := mtls.LoadOrGenerateCA(dir)
+	if err != nil {
+		t.Fatalf("LoadOrGenerateCA: %v", err)
+	}
+	serverCert, err := mtls.IssueServerCert(caCert, caKey, []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatalf("IssueServerCert: %v", err)
+	}
+	caPool := mtls.CertPoolFromCert(caCert)
+	serverTLSCfg := mtls.BuildServerTLSConfigHybrid(serverCert, caPool)
+
+	noCertClientCfg := &tls.Config{
+		RootCAs:    caPool,
+		MinVersion: tls.VersionTLS12,
+	}
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverTLSCfg)
+	if err != nil {
+		t.Fatalf("tls.Listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	// Server: capture connection state.
+	verifiedChainsCh := make(chan [][]*x509.Certificate, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			verifiedChainsCh <- nil
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		tlsConn := conn.(*tls.Conn)
+		if err := tlsConn.Handshake(); err != nil {
+			verifiedChainsCh <- nil
+			return
+		}
+		verifiedChainsCh <- tlsConn.ConnectionState().VerifiedChains
+	}()
+
+	conn, err := tls.Dial("tcp", ln.Addr().String(), noCertClientCfg)
+	if err != nil {
+		t.Fatalf("certless Dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	select {
+	case chains := <-verifiedChainsCh:
+		if len(chains) != 0 {
+			t.Errorf("VerifiedChains should be empty for certless connection; got %d chain(s)", len(chains))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server handshake timeout")
+	}
+}
+
+// TestHybridTLS_ValidCert_HandshakeSucceedsAndVerifies verifies that a client
+// presenting a VALID client cert against the hybrid config both completes the
+// handshake AND has VerifiedChains populated — i.e., the cert regime still
+// works correctly after Phase 3f.
+func TestHybridTLS_ValidCert_HandshakeSucceedsAndVerifies(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	caCert, caKey, err := mtls.LoadOrGenerateCA(dir)
+	if err != nil {
+		t.Fatalf("LoadOrGenerateCA: %v", err)
+	}
+	serverCert, err := mtls.IssueServerCert(caCert, caKey, []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatalf("IssueServerCert: %v", err)
+	}
+	clientCert, err := mtls.IssueClientCert(caCert, caKey, "hybrid-cert-user")
+	if err != nil {
+		t.Fatalf("IssueClientCert: %v", err)
+	}
+	caPool := mtls.CertPoolFromCert(caCert)
+	serverTLSCfg := mtls.BuildServerTLSConfigHybrid(serverCert, caPool)
+	clientTLSCfg := mtls.BuildClientTLSConfig(clientCert, caPool)
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverTLSCfg)
+	if err != nil {
+		t.Fatalf("tls.Listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	verifiedChainsCh := make(chan [][]*x509.Certificate, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			verifiedChainsCh <- nil
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		tlsConn := conn.(*tls.Conn)
+		if err := tlsConn.Handshake(); err != nil {
+			verifiedChainsCh <- nil
+			return
+		}
+		verifiedChainsCh <- tlsConn.ConnectionState().VerifiedChains
+	}()
+
+	conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLSCfg)
+	if err != nil {
+		t.Fatalf("cert-bearing client Dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	select {
+	case chains := <-verifiedChainsCh:
+		if len(chains) == 0 {
+			t.Error("VerifiedChains should be non-empty for a valid client cert on hybrid config")
+		} else if len(chains[0]) == 0 {
+			t.Error("VerifiedChains[0] should contain at least one cert")
+		} else {
+			cn := chains[0][0].Subject.CommonName
+			if cn != "hybrid-cert-user" {
+				t.Errorf("VerifiedChains[0][0].CN = %q; want hybrid-cert-user", cn)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server handshake timeout")
+	}
+}
+
+// TestHybridTLS_UntrustedCert_Rejected verifies that a client presenting a
+// certificate from an UNTRUSTED CA is rejected at the TLS handshake against
+// the hybrid config — VerifyClientCertIfGiven verifies if given; an untrusted
+// cert must not sneak through.
+func TestHybridTLS_UntrustedCert_Rejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	caCert, caKey, _ := mtls.LoadOrGenerateCA(dir)
+
+	// Second CA — not trusted by the server.
+	dir2 := t.TempDir()
+	caCert2, caKey2, _ := mtls.LoadOrGenerateCA(dir2)
+	untrustedClientCert, _ := mtls.IssueClientCert(caCert2, caKey2, "untrusted-hybrid")
+
+	serverCert, _ := mtls.IssueServerCert(caCert, caKey, []string{"127.0.0.1"})
+	caPool := mtls.CertPoolFromCert(caCert)
+	serverTLSCfg := mtls.BuildServerTLSConfigHybrid(serverCert, caPool)
+
+	// Client trusts the server cert but presents an untrusted client cert.
+	clientTLSCfg := mtls.BuildClientTLSConfig(untrustedClientCert, mtls.CertPoolFromCert(caCert))
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverTLSCfg)
+	if err != nil {
+		t.Fatalf("tls.Listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	// Server: accept and handshake.
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_ = conn.(*tls.Conn).Handshake()
+	}()
+
+	conn, dialErr := tls.Dial("tcp", ln.Addr().String(), clientTLSCfg)
+	if dialErr != nil {
+		// Rejection visible at Dial — expected.
+		return
+	}
+	// TLS 1.3: rejection may surface on first Read.
+	buf := make([]byte, 1)
+	_, readErr := conn.Read(buf)
+	_ = conn.Close()
+	if readErr == nil {
+		t.Error("hybrid config should reject an untrusted client cert; got nil error on Dial and Read")
+	}
+}
+
 // ---- IsNonLoopback tests ----------------------------------------------------
 
 func TestIsNonLoopback_Loopback127(t *testing.T) {

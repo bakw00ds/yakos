@@ -338,10 +338,12 @@ func (m *RoleMapper) Lookup(cn string) Role {
 //   - no client certificate was presented, or
 //   - the certificate chain is empty.
 //
-// Note: by the time a request reaches an HTTP handler over a TLS listener
-// configured with tls.RequireAndVerifyClientCert, the client cert has already
-// been cryptographically verified by the TLS stack.  This function only
-// extracts the CN; it does not re-verify.
+// Note: by the time a request reaches an HTTP handler over a TLS listener,
+// any client cert that was presented has already been cryptographically
+// verified by the TLS stack (VerifyClientCertIfGiven verifies if given;
+// RequireAndVerifyClientCert verifies and requires one).  This function only
+// extracts the CN from VerifiedChains; it does not re-verify.  When no
+// client cert was presented, VerifiedChains is empty and this returns ("", false).
 func CNFromRequest(r *http.Request) (cn string, ok bool) {
 	return CNFromTLS(r.TLS)
 }
@@ -395,8 +397,11 @@ type SessionLookupFn func(r *http.Request) (operatorID string, role Role, ok boo
 //
 // The loopbackTrusted flag is a per-resolver trust decision made at
 // construction time by the caller who knows which listener this resolver
-// serves.  It is defense-in-depth alongside RequireAndVerifyClientCert: the
-// resolver fails closed even if a future TLS config were misconfigured.
+// serves.  It is defense-in-depth at the HTTP layer: the resolver fails closed
+// (certless+sessionless → RoleRead / Authenticated=false) regardless of the
+// TLS configuration.  After ADR-0005 Phase 3f the console networked listener
+// uses VerifyClientCertIfGiven; the resolver's fail-closed behavior is the
+// gate that prevents an unauthenticated certless request from gaining access.
 //
 // The session branch is guarded by !loopbackTrusted so the loopback regime
 // is byte-for-byte unchanged regardless of whether a sessionLookupFn is set.

@@ -205,8 +205,13 @@ func LoadClientCert(stateDir, clientName string) (*tls.Certificate, error) {
 	return &tlsCert, nil
 }
 
-// BuildServerTLSConfig builds a *tls.Config for the daemon's mTLS listeners.
-// It requires and verifies client certificates signed by caPool.
+// BuildServerTLSConfig builds a *tls.Config for the daemon's strict mTLS
+// listeners (machine-to-machine paths).  It REQUIRES and verifies client
+// certificates signed by caPool — a connection without a client certificate
+// is rejected at the TLS handshake.
+//
+// Use BuildServerTLSConfigHybrid for the console networked listener where
+// password+session users (who present no client cert) must also be admitted.
 //
 // The serverCert is presented to connecting clients.
 func BuildServerTLSConfig(serverCert *tls.Certificate, caPool *x509.CertPool) *tls.Config {
@@ -214,6 +219,33 @@ func BuildServerTLSConfig(serverCert *tls.Certificate, caPool *x509.CertPool) *t
 		Certificates: []tls.Certificate{*serverCert},
 		ClientCAs:    caPool,
 		ClientAuth:   tls.RequireAndVerifyClientCert,
+		MinVersion:   tls.VersionTLS12,
+	}
+}
+
+// BuildServerTLSConfigHybrid builds a *tls.Config for the console networked
+// listener under ADR-0005 hybrid auth.  It uses VerifyClientCertIfGiven
+// instead of RequireAndVerifyClientCert so that:
+//
+//   - A client that presents a certificate MUST have it verified against
+//     caPool — an untrusted cert still causes a handshake failure.
+//   - A client that presents NO certificate completes the handshake; the
+//     TLS stack leaves r.TLS.VerifiedChains empty, and the HTTP-layer
+//     identity resolver falls through to the session-cookie or fail-closed
+//     path (ADR-0005 §Resolution precedence).
+//
+// All other parameters (ClientCAs, MinVersion, ciphers) are identical to
+// BuildServerTLSConfig — only the REQUIREMENT to present a cert is relaxed.
+//
+// This function is deliberately separate from BuildServerTLSConfig so that
+// strict machine-to-machine callers are not silently changed.  Call sites
+// that must keep the strict requirement (e.g. future gRPC mTLS) continue to
+// use BuildServerTLSConfig.
+func BuildServerTLSConfigHybrid(serverCert *tls.Certificate, caPool *x509.CertPool) *tls.Config {
+	return &tls.Config{
+		Certificates: []tls.Certificate{*serverCert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
 		MinVersion:   tls.VersionTLS12,
 	}
 }

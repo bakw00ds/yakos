@@ -786,6 +786,423 @@ func TestConsoleBind_ExternalHosts_CSP_UsesFirstHost(t *testing.T) {
 	}
 }
 
+// ---- Phase 3f: hybrid TLS (VerifyClientCertIfGiven) HTTP-layer tests ---------
+//
+// These tests verify the ADR-0005 Phase 3f contract:
+//   - Certless connections complete the TLS handshake against the hybrid config.
+//   - Certless + no session → protected routes return 401 (fail-closed HTTP gate).
+//   - Certless + valid session cookie → session identity, route passes.
+//   - Cert-bearing connections → cert identity still works.
+//   - WS upgrade: certless + no session → rejected with 401 (not allowed through).
+//
+// Architecture note: all tests use BuildServerTLSConfigHybrid (not the strict
+// BuildServerTLSConfig) to mirror the production serve.go call site after 3f.
+
+// newHybridFixture is like newMTLSFixture but uses BuildServerTLSConfigHybrid.
+// Returns the CA pool (for certless client configs), server TLS config
+// (hybrid), a cert-bearing client TLS config, and the client cert CN.
+func newHybridFixture(t *testing.T) (caPool *x509.CertPool, serverTLSCfg *tls.Config, clientTLSCfg *tls.Config, clientCN string) {
+	t.Helper()
+	dir := t.TempDir()
+	ca, caKey, err := mtls.LoadOrGenerateCA(dir)
+	if err != nil {
+		t.Fatalf("LoadOrGenerateCA: %v", err)
+	}
+	serverCert, err := mtls.IssueServerCert(ca, caKey, []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatalf("IssueServerCert: %v", err)
+	}
+	clientCN = "test-hybrid-operator"
+	clientCert, err := mtls.IssueClientCert(ca, caKey, clientCN)
+	if err != nil {
+		t.Fatalf("IssueClientCert: %v", err)
+	}
+	caPool = mtls.CertPoolFromCert(ca)
+	serverTLSCfg = mtls.BuildServerTLSConfigHybrid(serverCert, caPool)
+	clientTLSCfg = mtls.BuildClientTLSConfig(clientCert, caPool)
+	return caPool, serverTLSCfg, clientTLSCfg, clientCN
+}
+
+// hybridServerConfig holds the components needed for a Phase 3f hybrid TLS
+// server for tests.
+type hybridServerConfig struct {
+	baseURL   string
+	addr      string
+	caPool    *x509.CertPool
+	tok       string
+	authStore *authsession.Store
+	uStore    *userstore.Store
+	teardown  func()
+}
+
+// startHybridServer starts a consoleui.Server using BuildServerTLSConfigHybrid
+// and pre-creates "alice" (admin) in the user store for session auth tests.
+// Returns a hybridServerConfig and the cert-bearing client TLS config.
+func startHybridServer(t *testing.T) (*hybridServerConfig, *tls.Config) {
+	t.Helper()
+	caPool, serverTLSCfg, certClientTLSCfg, _ := newHybridFixture(t)
+
+	stateDir := t.TempDir()
+	tok, err := consoleui.LoadOrCreateToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	bus := wsbus.New()
+
+	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	addr := tcpLn.Addr().String()
+
+	uStore, err := userstore.Open(t.TempDir() + "/users.json")
+	if err != nil {
+		t.Fatalf("userstore.Open: %v", err)
+	}
+	// Pre-create alice so session-auth tests can log in.
+	if err := uStore.Create("alice", "correcthorsebattery1", netid.RoleAdmin); err != nil {
+		t.Fatalf("userstore.Create alice: %v", err)
+	}
+	aStore := authsession.NewStore(authsession.Config{})
+
+	cfg := consoleui.Config{
+		Addr:              addr,
+		Token:             tok,
+		KanbanBoardPath:   t.TempDir() + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: t.TempDir(),
+		PerfWorkDir:       t.TempDir(),
+		Bus:               bus,
+		StateDir:          stateDir,
+		Listener:          tcpLn,
+		TLSConfig:         serverTLSCfg,
+		NetworkedMode:     true,
+		ExternalHost:      addr,
+		AuthSessionStore:  aStore,
+		UserStore:         uStore,
+		WorkDir:           t.TempDir(),
+	}
+
+	srv, err := consoleui.New(cfg)
+	if err != nil {
+		t.Fatalf("consoleui.New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Serve(ctx)
+	}()
+	time.Sleep(60 * time.Millisecond)
+
+	teardown := func() {
+		cancel()
+		bus.Stop()
+		select {
+		case <-errCh:
+		case <-time.After(3 * time.Second):
+		}
+	}
+	return &hybridServerConfig{
+		baseURL:   "https://" + addr,
+		addr:      addr,
+		caPool:    caPool,
+		tok:       tok,
+		authStore: aStore,
+		uStore:    uStore,
+		teardown:  teardown,
+	}, certClientTLSCfg
+}
+
+// certlessTLSConfig returns a *tls.Config with NO client certificate but
+// trusting the given CA pool — suitable for a certless (password-user) client.
+func certlessTLSConfig(caPool *x509.CertPool) *tls.Config {
+	return &tls.Config{
+		RootCAs:    caPool,
+		MinVersion: tls.VersionTLS12,
+		// No Certificates field → no client cert presented.
+	}
+}
+
+// doTLSPost sends a POST with a JSON body using the given TLS config.
+// Cookies (if any) are attached to the request.
+func doTLSPost(t *testing.T, url string, tlsCfg *tls.Config, body []byte, cookies []*http.Cookie) (*http.Response, error) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	tr := &http.Transport{TLSClientConfig: tlsCfg}
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   5 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	return client.Do(req) //nolint:noctx
+}
+
+// ---- Phase 3f test: certless + no session → 401 ----
+
+// TestPhase3f_CertlessNoSession_ReturnsUnauthorized verifies that after Phase
+// 3f (hybrid TLS), a certless connection with no session cookie is rejected at
+// the HTTP layer with 401 for API paths and 302 for navigation paths.
+// This is the critical fail-closed test: the TLS handshake succeeds (certless
+// is now allowed) but the HTTP gate must block unauthenticated access.
+func TestPhase3f_CertlessNoSession_ReturnsUnauthorized(t *testing.T) {
+	t.Parallel()
+	hcfg, _ := startHybridServer(t)
+	defer hcfg.teardown()
+
+	noCertCfg := certlessTLSConfig(hcfg.caPool)
+	tr := &http.Transport{TLSClientConfig: noCertCfg}
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   5 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse // don't follow redirects — inspect them
+		},
+	}
+
+	// API path: must return 401 (not 200, not 403).
+	apiURL := hcfg.baseURL + "/api/presence"
+	resp, err := client.Get(apiURL) //nolint:noctx
+	if err != nil {
+		t.Fatalf("certless GET /api/presence: %v", err)
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("certless+no-session GET /api/presence: status=%d; want 401 (fail-closed)", resp.StatusCode)
+	}
+
+	// Navigation path: must return 302 to /setup or /login (not 200).
+	navURL := hcfg.baseURL + "/kanban/"
+	navResp, navErr := client.Get(navURL) //nolint:noctx
+	if navErr != nil {
+		t.Fatalf("certless GET /kanban/: %v", navErr)
+	}
+	defer func() { _, _ = io.Copy(io.Discard, navResp.Body); _ = navResp.Body.Close() }()
+	if navResp.StatusCode != http.StatusFound {
+		t.Errorf("certless+no-session GET /kanban/: status=%d; want 302 to /login or /setup", navResp.StatusCode)
+	}
+}
+
+// ---- Phase 3f test: certless handshake succeeds ----
+
+// TestPhase3f_CertlessHandshakeSucceeds verifies that a client with no client
+// cert can complete the TLS handshake against the hybrid server config and
+// reach the HTTP layer (even if it gets 401 for authenticated routes).
+// This is the core Phase 3f enablement: previously the TLS handshake would
+// fail for certless clients; after 3f it succeeds.
+func TestPhase3f_CertlessHandshakeSucceeds(t *testing.T) {
+	t.Parallel()
+	hcfg, _ := startHybridServer(t)
+	defer hcfg.teardown()
+
+	noCertCfg := certlessTLSConfig(hcfg.caPool)
+	// /login is token-exempt and auth-exempt — a certless client with no session
+	// must be able to reach it (the login page is the entry point for password auth).
+	resp, err := doTLSGet(t, hcfg.baseURL+"/login", noCertCfg)
+	if err != nil {
+		t.Fatalf("certless GET /login should not fail at TLS; got: %v", err)
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	// /login is exempt from requireAuthOrRedirect; any 2xx or even 4xx is fine
+	// as long as the error is not a TLS handshake failure.
+	if resp.StatusCode == 0 {
+		t.Error("expected a valid HTTP status code from certless login; got 0 (TLS failure?)")
+	}
+}
+
+// ---- Phase 3f test: certless + valid session → authenticated ----
+
+// TestPhase3f_CertlessWithSession_Authenticated verifies the full password+session
+// flow over the hybrid TLS listener:
+//  1. POST /login with no client cert → receives session cookie (200).
+//  2. GET protected route with session cookie → authenticated (200), not 401.
+//
+// This confirms that certless connections are not silently blocked after
+// handshake — the HTTP-layer resolver correctly resolves session identity.
+func TestPhase3f_CertlessWithSession_Authenticated(t *testing.T) {
+	t.Parallel()
+	hcfg, _ := startHybridServer(t)
+	defer hcfg.teardown()
+
+	noCertCfg := certlessTLSConfig(hcfg.caPool)
+
+	// Step 1: Login with no client cert.
+	loginBody := `{"username":"alice","password":"correcthorsebattery1"}`
+	loginResp, err := doTLSPost(t, hcfg.baseURL+"/login", noCertCfg, []byte(loginBody), nil)
+	if err != nil {
+		t.Fatalf("certless POST /login: %v", err)
+	}
+	defer func() { _, _ = io.Copy(io.Discard, loginResp.Body); _ = loginResp.Body.Close() }()
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /login certless: status=%d; want 200", loginResp.StatusCode)
+	}
+
+	// Extract session and CSRF cookies.
+	var sessionCookie, csrfCookie *http.Cookie
+	for _, c := range loginResp.Cookies() {
+		switch c.Name {
+		case consoleui.SessionCookieName:
+			sessionCookie = c
+		case "yakos_csrf":
+			csrfCookie = c
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("POST /login: expected session cookie, got none")
+	}
+
+	// Step 2: GET /api/presence with session cookie — must succeed (200), not 401.
+	tr := &http.Transport{TLSClientConfig: noCertCfg}
+	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+	req, _ := http.NewRequest(http.MethodGet, hcfg.baseURL+"/api/presence", nil)
+	req.AddCookie(sessionCookie)
+	if csrfCookie != nil {
+		req.AddCookie(csrfCookie)
+	}
+	presResp, err := client.Do(req) //nolint:noctx
+	if err != nil {
+		t.Fatalf("certless GET /api/presence with session: %v", err)
+	}
+	defer func() { _, _ = io.Copy(io.Discard, presResp.Body); _ = presResp.Body.Close() }()
+	if presResp.StatusCode != http.StatusOK {
+		t.Errorf("certless+session GET /api/presence: status=%d; want 200 (session auth should work)", presResp.StatusCode)
+	}
+}
+
+// ---- Phase 3f test: cert-bearing client → cert identity still works ----
+
+// TestPhase3f_CertBearingClient_StillAuthenticated verifies that the hybrid
+// TLS change does not break the existing cert-auth regime: a client presenting
+// a valid mTLS client cert against the hybrid config still completes the
+// handshake, still populates VerifiedChains, and still resolves to the cert
+// identity (AuthMethodCert) at the HTTP layer.
+func TestPhase3f_CertBearingClient_StillAuthenticated(t *testing.T) {
+	t.Parallel()
+	hcfg, certClientTLSCfg := startHybridServer(t)
+	defer hcfg.teardown()
+
+	// Static asset (/) is accessible even without auth; use it to confirm
+	// the TLS handshake succeeds with a client cert on the hybrid server.
+	resp, err := doTLSGet(t, hcfg.baseURL+"/", certClientTLSCfg)
+	if err != nil {
+		t.Fatalf("cert-bearing GET / against hybrid config: %v", err)
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("cert-bearing GET /: status=%d; want 200", resp.StatusCode)
+	}
+
+	// Verify the cert-authenticated client can also reach a protected route
+	// (resolver must have set AuthMethodCert and authenticated=true).
+	presResp, err := doTLSGet(t, hcfg.baseURL+"/api/presence", certClientTLSCfg)
+	if err != nil {
+		t.Fatalf("cert-bearing GET /api/presence: %v", err)
+	}
+	defer func() { _, _ = io.Copy(io.Discard, presResp.Body); _ = presResp.Body.Close() }()
+	if presResp.StatusCode != http.StatusOK {
+		t.Errorf("cert-bearing GET /api/presence: status=%d; want 200 (cert auth must still work)", presResp.StatusCode)
+	}
+}
+
+// ---- Phase 3f test: untrusted cert → rejected at handshake ----
+
+// TestPhase3f_UntrustedCert_RejectedAtHandshake verifies that a client
+// presenting a cert signed by a DIFFERENT (untrusted) CA is still rejected
+// at the TLS handshake against the hybrid config.
+// VerifyClientCertIfGiven means: if given, verify; untrusted = reject.
+func TestPhase3f_UntrustedCert_RejectedAtHandshake(t *testing.T) {
+	t.Parallel()
+	hcfg, certClientTLSCfg := startHybridServer(t)
+	defer hcfg.teardown()
+
+	// Issue a client cert from a second (untrusted) CA.
+	dir2 := t.TempDir()
+	ca2, caKey2, err := mtls.LoadOrGenerateCA(dir2)
+	if err != nil {
+		t.Fatalf("second CA: %v", err)
+	}
+	untrustedClient, err := mtls.IssueClientCert(ca2, caKey2, "untrusted-3f")
+	if err != nil {
+		t.Fatalf("IssueClientCert (untrusted): %v", err)
+	}
+	badTLSCfg := &tls.Config{
+		Certificates: []tls.Certificate{*untrustedClient},
+		RootCAs:      certClientTLSCfg.RootCAs, // trusts server cert
+		MinVersion:   tls.VersionTLS12,
+	}
+
+	_, err = doTLSGet(t, hcfg.baseURL+"/", badTLSCfg)
+	if err == nil {
+		t.Error("hybrid config should reject an untrusted client cert; got nil error")
+	}
+}
+
+// ---- Phase 3f test: WS upgrade certless + no session → rejected ----
+
+// TestPhase3f_WS_CertlessNoSession_Rejected verifies that a WebSocket upgrade
+// attempt by a certless client with no valid session cookie is rejected with
+// 401 before reaching the WS handler.
+// This is the WS-specific fail-closed test: the HTTP-layer requireAuthOrRedirect
+// must gate the WS upgrade path (/v1/ prefix → 401 JSON) even after Phase 3f
+// allows certless TLS connections.
+func TestPhase3f_WS_CertlessNoSession_Rejected(t *testing.T) {
+	t.Parallel()
+	hcfg, _ := startHybridServer(t)
+	defer hcfg.teardown()
+
+	noCertCfg := certlessTLSConfig(hcfg.caPool)
+
+	// Attempt a WS upgrade with no session and no bearer token.
+	// We can't use golang.org/x/net/websocket.Dial because it doesn't let us
+	// inspect non-101 responses.  Use a raw HTTP request with Upgrade headers
+	// instead so we can check the status code.
+	req, err := http.NewRequest(http.MethodGet, hcfg.baseURL+"/v1/events", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "upgrade")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("Sec-WebSocket-Protocol", "yakos-bearer, invalidtoken")
+
+	tr := &http.Transport{TLSClientConfig: noCertCfg}
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   5 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Do(req) //nolint:noctx
+	if err != nil {
+		// A transport-level error here indicates the TLS handshake or HTTP layer
+		// rejected the connection before a response was sent — also acceptable.
+		t.Logf("certless WS upgrade (no session): transport error (acceptable): %v", err)
+		return
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+
+	// The response MUST NOT be 101 Switching Protocols — the request is
+	// unauthenticated (no cert, no session) and must be rejected.
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		t.Error("certless+no-session WS upgrade should be rejected; got 101 Switching Protocols (auth bypass)")
+	}
+	// Expected: 401 (API path /v1/ → requireAuthOrRedirect returns 401).
+	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
+		t.Logf("certless WS upgrade: status=%d (expected 401 or 403; any non-101 is acceptable)", resp.StatusCode)
+	}
+}
+
 // ---- 6. Loopback default: unchanged -----------------------------------------
 
 // TestConsoleBind_LoopbackDefault_Unchanged verifies that the default loopback
