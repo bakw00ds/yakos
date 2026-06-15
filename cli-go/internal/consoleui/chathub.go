@@ -74,7 +74,7 @@ type SSEEvent struct {
 	// SessionID identifies which chat pane this event belongs to.
 	SessionID string `json:"session_id"`
 
-	// Type is "token" | "summary" | "ping".
+	// Type is "token" | "summary" | "ping" | "tool_use" | "tool_result".
 	Type string `json:"type"`
 
 	// Text is the token text (Type=="token") or full text (Type=="summary").
@@ -93,6 +93,24 @@ type SSEEvent struct {
 
 	// ModelResolved is set on summary events.
 	ModelResolved string `json:"model_resolved,omitempty"`
+
+	// ToolName is the human-readable tool name (Type=="tool_use" or "tool_result").
+	// Examples: "Bash", "Read", "Write".
+	ToolName string `json:"tool_name,omitempty"`
+
+	// ToolInput is the JSON-encoded tool arguments (Type=="tool_use").
+	// For a Bash invocation this is typically {"command":"ls -la"}.
+	// Absent on "tool_result" events.
+	ToolInput string `json:"tool_input,omitempty"`
+
+	// ToolOutput is the truncated tool result content (Type=="tool_result").
+	// Always <= maxToolOutputBytes + len(truncation marker).
+	// Absent on "tool_use" events.
+	ToolOutput string `json:"tool_output,omitempty"`
+
+	// IsError is true when the tool_result represents a tool-level error
+	// (Type=="tool_result" only).
+	IsError bool `json:"is_error,omitempty"`
 
 	// TS is the hub-stamped delivery time (RFC3339Nano).
 	TS string `json:"ts"`

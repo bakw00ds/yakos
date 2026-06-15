@@ -1,0 +1,19 @@
+{"type":"system","subtype":"init","cwd":"/project","tools":[{"name":"Bash"},{"name":"Read"}],"mcp_servers":[]}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_01abc","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-5","stop_reason":null,"usage":{"input_tokens":50}}}}
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I'll run a command."}}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":0}}
+{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01abc123","name":"Bash"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"ls"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":" -la\"}"}}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":1}}
+{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":12}}}
+{"type":"stream_event","event":{"type":"message_stop"}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01abc123","content":"total 8\ndrwxr-xr-x 2 user group 64 Jun 10 10:00 .\ndrwxr-xr-x 5 user group 160 Jun 10 09:00 ..","is_error":false}]}}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_02def","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-5","stop_reason":null,"usage":{"input_tokens":80}}}}
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Done."}}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":0}}
+{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}}
+{"type":"stream_event","event":{"type":"message_stop"}}
+{"type":"result","subtype":"success","result":"Done.","is_error":false,"duration_ms":2500,"total_cost_usd":0.00125,"usage":{"input_tokens":80,"output_tokens":14}}

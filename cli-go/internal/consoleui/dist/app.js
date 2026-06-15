@@ -1064,7 +1064,8 @@
   // ---- SSE event demux -------------------------------------------------------
 
   function handleSSEEvent(ev) {
-    // ev: {session_id, type, text?, exit_code?, duration_s?, total_cost_usd?, model_resolved?, ts}
+    // ev: {session_id, type, text?, exit_code?, duration_s?, total_cost_usd?,
+    //       model_resolved?, tool_name?, tool_input?, tool_output?, is_error?, ts}
     const sessionId = ev.session_id;
     if (!sessionId) return;
 
@@ -1082,6 +1083,50 @@
         last.text += ev.text || '';
       } else {
         msgs.push({ role: 'assistant', text: ev.text || '', ts: ev.ts, sessionId, streaming: true });
+      }
+      renderPaneMessages(paneId);
+      if (pane.autoScroll) scrollPaneToBottom(paneId);
+    } else if (ev.type === 'tool_use') {
+      // Phase 4: collapsible tool-invocation block.
+      // XSS discipline: esc() applied to all server-supplied strings before DOM insertion.
+      // ToolName and ToolInput arrive from the runtime (untrusted text).
+      pane.messages.push({
+        role: 'tool_use',
+        toolName: ev.tool_name || '',
+        toolInput: ev.tool_input || '',
+        ts: ev.ts,
+        sessionId,
+      });
+      renderPaneMessages(paneId);
+      if (pane.autoScroll) scrollPaneToBottom(paneId);
+    } else if (ev.type === 'tool_result') {
+      // Phase 4: tool result block, rendered inside the tool_use collapsible.
+      // Correlate with the most recent tool_use for the same session by appending
+      // the output to that message.  If no prior tool_use is found, render standalone.
+      // XSS discipline: esc() on toolName + toolOutput.
+      const msgs = pane.messages;
+      // Walk backwards to find the most recent tool_use for this session without output yet.
+      let matched = false;
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i];
+        if (m.role === 'tool_use' && m.sessionId === sessionId && !m.hasResult) {
+          m.toolOutput = ev.tool_output || '';
+          m.isError = !!ev.is_error;
+          m.hasResult = true;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) {
+        // No prior tool_use found — render as standalone tool_result.
+        msgs.push({
+          role: 'tool_result',
+          toolName: ev.tool_name || '',
+          toolOutput: ev.tool_output || '',
+          isError: !!ev.is_error,
+          ts: ev.ts,
+          sessionId,
+        });
       }
       renderPaneMessages(paneId);
       if (pane.autoScroll) scrollPaneToBottom(paneId);
@@ -1122,6 +1167,26 @@
       announcePaneStatus(paneId, pane.status === 'done' ? 'completed' : 'finished with error');
       if (pane.autoScroll) scrollPaneToBottom(paneId);
     }
+  }
+
+  // ---- Phase 4: tool block label helpers -------------------------------------
+
+  // toolLabel returns a short human-readable label for a tool invocation,
+  // suitable for the collapsible summary line.
+  // XSS discipline: caller is responsible for esc()-wrapping the return value
+  // before inserting into innerHTML.
+  function toolLabel(toolName, toolInput) {
+    // For Bash, extract the command string from JSON args for a concise label.
+    // Falls back to the raw input if unparseable or empty.
+    if (toolName === 'Bash' && toolInput) {
+      try {
+        var parsed = JSON.parse(toolInput);
+        var cmd = parsed.command || parsed.cmd || '';
+        if (cmd) return 'ran Bash: ' + cmd;
+      } catch (_) { /* fall through */ }
+    }
+    if (toolName) return toolName + (toolInput ? ': ' + toolInput.slice(0, 60) : '');
+    return toolInput ? toolInput.slice(0, 80) : '(tool)';
   }
 
   // ---- Chat tab init ---------------------------------------------------------
@@ -1792,6 +1857,51 @@
         '<span class="chat-msg-role" aria-hidden="true">agent</span>' +
         '<span class="chat-msg-time">' + esc(formatTime(msg.ts)) + '</span>' +
         '<div class="chat-msg-text">' + escLines(msg.text) + '</div>';
+    } else if (msg.role === 'tool_use') {
+      // Phase 4: collapsible tool-invocation block.
+      // XSS discipline: all server-supplied strings go through esc() before innerHTML.
+      // tool_name and tool_input arrive from the runtime — treat as untrusted.
+      el.className = 'chat-msg chat-msg-tool';
+      var label = toolLabel(msg.toolName, msg.toolInput);
+      // Render as a <details> collapsible so the operator can expand to see args.
+      var outputHtml = '';
+      if (msg.hasResult) {
+        // If this tool_use has its result merged in, render the output inside the block.
+        var outputClass = msg.isError ? 'chat-tool-output chat-tool-output-error' : 'chat-tool-output';
+        outputHtml = '<div class="' + esc(outputClass) + '">' +
+          '<span class="chat-tool-output-label" aria-hidden="true">' + (msg.isError ? 'error' : 'output') + '</span>' +
+          '<pre class="chat-tool-output-pre">' + escLines(msg.toolOutput || '') + '</pre>' +
+          '</div>';
+      }
+      el.innerHTML =
+        '<details class="chat-tool-details">' +
+          '<summary class="chat-tool-summary">' +
+            '<span class="chat-tool-icon" aria-hidden="true">⚙</span>' +
+            '<span class="chat-tool-label">' + esc(label) + '</span>' +
+            '<span class="chat-msg-time">' + esc(formatTime(msg.ts)) + '</span>' +
+          '</summary>' +
+          (msg.toolInput
+            ? '<pre class="chat-tool-input">' + escLines(msg.toolInput) + '</pre>'
+            : '') +
+          outputHtml +
+        '</details>';
+    } else if (msg.role === 'tool_result') {
+      // Phase 4: standalone tool_result (no prior tool_use matched in the pane).
+      // XSS discipline: esc() on all server-supplied strings.
+      el.className = 'chat-msg chat-msg-tool';
+      var resLabel = msg.toolName ? msg.toolName + ' result' : 'tool result';
+      var resOutputClass = msg.isError ? 'chat-tool-output chat-tool-output-error' : 'chat-tool-output';
+      el.innerHTML =
+        '<details class="chat-tool-details">' +
+          '<summary class="chat-tool-summary">' +
+            '<span class="chat-tool-icon" aria-hidden="true">⚙</span>' +
+            '<span class="chat-tool-label">' + esc(resLabel) + '</span>' +
+            '<span class="chat-msg-time">' + esc(formatTime(msg.ts)) + '</span>' +
+          '</summary>' +
+          '<div class="' + esc(resOutputClass) + '">' +
+            '<pre class="chat-tool-output-pre">' + escLines(msg.toolOutput || '') + '</pre>' +
+          '</div>' +
+        '</details>';
     } else if (msg.role === 'summary') {
       el.className = 'chat-msg chat-msg-summary';
       const exitOk = msg.exitCode === 0;
@@ -1903,6 +2013,24 @@
       conversationId: pane.conversationId,
     };
 
+    // Phase 4: for non-claude runtimes (buffered path), tool events are never
+    // emitted by the server.  Show a one-time static affordance so the operator
+    // understands tool output is unavailable.  Do NOT fabricate tool events.
+    if (!STREAMING_RUNTIMES.has(pane.runtime)) {
+      pane.messages.push({
+        role: 'tool_use',
+        toolName: '',
+        toolInput: '',
+        toolOutput: 'Tool output is not available for runtime: ' + (pane.runtime || 'unknown') + '. Only claude emits incremental tool events.',
+        hasResult: true,
+        isError: false,
+        ts: new Date().toISOString(),
+        sessionId,
+        _isRuntimeAffordance: true,
+      });
+      renderPaneMessages(paneId);
+    }
+
     // Route through apiFetch so session mode sends X-CSRF-Token + credentials.
     apiFetch('POST', '/api/chat/dispatch', dispatchBody).then((resp) => {
       if (resp.ok) return; // 202 Accepted — streaming will arrive on SSE
@@ -1986,6 +2114,26 @@
         shareBtn.title = newShared ? 'Stop sharing pane' : 'Share pane';
         shareBtn.classList.toggle('pane-share-active', newShared);
       }
+      // Phase 4: surface the server-supplied tool-output visibility warning
+      // when the session is promoted to shared.  This is a safety mechanic —
+      // not optional.  The warning arrives in the JSON response body as
+      // {"ok":true,"warning":"..."}.
+      return resp.json().then(function(body) {
+        if (newShared && body && body.warning) {
+          // Show as an inline notification inside the pane so the operator
+          // sees it in context without a disruptive alert().
+          var paneEl = document.getElementById('pane-' + paneId);
+          if (paneEl) {
+            var warnEl = document.createElement('div');
+            warnEl.className = 'chat-share-warning';
+            warnEl.setAttribute('role', 'alert');
+            warnEl.textContent = 'Share warning: ' + body.warning;
+            paneEl.insertBefore(warnEl, paneEl.firstChild);
+            // Auto-dismiss after 10 s.
+            setTimeout(function() { if (warnEl.parentNode) warnEl.parentNode.removeChild(warnEl); }, 10000);
+          }
+        }
+      }).catch(function() { /* ignore JSON parse failure */ });
     }).catch(() => { /* silent */ });
   }
 
