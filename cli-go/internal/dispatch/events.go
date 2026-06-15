@@ -8,22 +8,14 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/cost"
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
-const dispatchLogName = "dispatch-log.ndjson"
-
 // dispatchLogPath returns the path to the active dispatch-log file.
-// YAKOS_DISPATCH_LOG env var overrides the directory (matches cost.go).
+// Delegates to statepath.DispatchLog() — the single canonical resolver
+// shared with perfdash and metricsdash so reader and writer always agree.
 func dispatchLogPath() string {
-	dir := os.Getenv("YAKOS_DISPATCH_LOG")
-	if dir == "" {
-		home := os.Getenv("HOME")
-		if home == "" {
-			home = "/tmp"
-		}
-		dir = filepath.Join(home, ".yakos-state")
-	}
-	return filepath.Join(dir, dispatchLogName)
+	return statepath.DispatchLog()
 }
 
 // appendEvent appends a single JSON line to the dispatch-log using O_APPEND +

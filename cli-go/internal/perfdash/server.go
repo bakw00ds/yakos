@@ -16,6 +16,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dashauth"
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 //go:embed dist/index.html
@@ -38,7 +39,7 @@ type Config struct {
 	Token string
 
 	// WorkDir is the directory containing dispatch-log*.ndjson files.
-	// Typically <workspace>/work/current.
+	// Typically ~/.yakos-state (or $YAKOS_DISPATCH_LOG).
 	WorkDir string
 
 	// Listener, when non-nil, is used directly instead of binding a new socket.
@@ -387,20 +388,14 @@ func DefaultWorkDir(workspaceRoot string) string {
 }
 
 // DefaultStateDir returns the yakOS state directory that the dispatch daemon
-// writes to.  Resolution order (matches dispatch/events.go dispatchLogPath):
+// writes to.  Delegates to statepath.Dir() — the single canonical resolver
+// shared with dispatch/events.go so reader and writer always use the same path.
 //
-//  1. YAKOS_DISPATCH_LOG env var — the writer uses this as an override directory.
-//  2. ~/.yakos-state — the default.
+// Resolution order:
 //
-// Using the same precedence as the writer ensures the dashboard reads from
-// exactly the same location the daemon writes to.
+//  1. YAKOS_DISPATCH_LOG env var — override directory.
+//  2. $HOME/.yakos-state         — default.
+//  3. os.TempDir()/.yakos-state  — last-resort fallback when $HOME is unset.
 func DefaultStateDir() string {
-	if v := os.Getenv("YAKOS_DISPATCH_LOG"); v != "" {
-		return v
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), ".yakos-state")
-	}
-	return filepath.Join(home, ".yakos-state")
+	return statepath.Dir()
 }
