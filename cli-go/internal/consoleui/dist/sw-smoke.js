@@ -182,7 +182,10 @@ function dispatchFetch(requestOpts) {
 
 // ── Inject a token (used by all tests except the !token test below) ──────────
 
-listeners['message']({ data: { type: 'SET_TOKEN', token: 'tok-abc123' } });
+// source: {} simulates a WindowClient — truthy, satisfying the origin guard
+// that requires e.source to be non-null.  e.origin is omitted so the
+// "e.origin && e.origin !== self.location.origin" check is falsy (passes).
+listeners['message']({ data: { type: 'SET_TOKEN', token: 'tok-abc123' }, source: {} });
 
 // ── Test body buffers (module-scope so they're accessible across all .then()) ──
 
@@ -303,7 +306,7 @@ dispatchFetch({
 //    Simulate the pre-SET_TOKEN state by clearing the token via a fake message
 //    that sets it to null, dispatching, then restoring for any later tests.
 
-  listeners['message']({ data: { type: 'SET_TOKEN', token: null } });
+  listeners['message']({ data: { type: 'SET_TOKEN', token: null }, source: {} });
 
   return dispatchFetch({
     url:         'http://127.0.0.1:7890/api/board',
@@ -315,7 +318,8 @@ dispatchFetch({
   });
 }).then(function(result) {
   // Restore the token before assertions so any accidental further use is safe.
-  listeners['message']({ data: { type: 'SET_TOKEN', token: 'tok-abc123' } });
+  // source:{} satisfies the origin guard in sw.js (e.source must be truthy).
+  listeners['message']({ data: { type: 'SET_TOKEN', token: 'tok-abc123' }, source: {} });
 
   assert(!result.respondWithCalled,
     'GET /api/board (no token): SW must NOT call respondWith() (early-return)');
@@ -324,8 +328,8 @@ dispatchFetch({
 
 // ── Switch to session mode for tests 7–11 ────────────────────────────────────
 
-  listeners['message']({ data: { type: 'SET_AUTH_MODE', mode: 'session' } });
-  listeners['message']({ data: { type: 'SET_CSRF_TOKEN', token: 'csrf-xyz789' } });
+  listeners['message']({ data: { type: 'SET_AUTH_MODE', mode: 'session' }, source: {} });
+  listeners['message']({ data: { type: 'SET_CSRF_TOKEN', token: 'csrf-xyz789' }, source: {} });
 
 // ── Test 7: Session mode — GET request must pass through (no intercept) ───────
 
@@ -392,7 +396,7 @@ dispatchFetch({
 
 // ── Test 10: Session mode — POST with no CSRF token must pass through ─────────
 
-  listeners['message']({ data: { type: 'SET_CSRF_TOKEN', token: null } });
+  listeners['message']({ data: { type: 'SET_CSRF_TOKEN', token: null }, source: {} });
 
   return dispatchFetch({
     url:         'http://127.0.0.1:7890/api/add',
@@ -404,7 +408,7 @@ dispatchFetch({
   });
 }).then(function(result) {
   // Restore CSRF token.
-  listeners['message']({ data: { type: 'SET_CSRF_TOKEN', token: 'csrf-xyz789' } });
+  listeners['message']({ data: { type: 'SET_CSRF_TOKEN', token: 'csrf-xyz789' }, source: {} });
 
   assert(!result.respondWithCalled,
     'session POST (no CSRF token): SW must NOT call respondWith() — pass through (server will 403)');
@@ -429,7 +433,72 @@ dispatchFetch({
 
 // ── Restore bearer mode for clean-up ─────────────────────────────────────────
 
-  listeners['message']({ data: { type: 'SET_AUTH_MODE', mode: 'bearer' } });
+  listeners['message']({ data: { type: 'SET_AUTH_MODE', mode: 'bearer' }, source: {} });
+  listeners['message']({ data: { type: 'SET_TOKEN', token: 'tok-abc123' }, source: {} });
+
+// ── Test 12: Origin guard — cross-origin message must be ignored ───────────────
+// Send SET_AUTH_MODE from a different origin; authMode must stay 'bearer'.
+// We verify by checking that a GET request in the supposed 'session' mode
+// would not pass-through (because the mode never changed) — but since bearer
+// mode also passes GETs through (token is set), we instead verify that a
+// cross-origin SET_CSRF_TOKEN + SET_AUTH_MODE combination doesn't flip state
+// by attempting a session-mode mutation (which should use bearer, not CSRF).
+
+  listeners['message']({
+    data: { type: 'SET_AUTH_MODE', mode: 'session' },
+    origin: 'https://attacker.example.com',
+    source: {},
+  });
+  listeners['message']({
+    data: { type: 'SET_CSRF_TOKEN', token: 'evil-csrf' },
+    origin: 'https://attacker.example.com',
+    source: {},
+  });
+
+  // Verify authMode was NOT changed by dispatching a POST; in bearer mode the
+  // SW should reconstruct with Authorization: Bearer (not CSRF injection).
+  return dispatchFetch({
+    url:         'http://127.0.0.1:7890/api/add',
+    method:      'POST',
+    headers:     new global.Headers({ 'Content-Type': 'application/json' }),
+    mode:        'cors',
+    destination: '',
+    body:        jsonBody,
+  });
+}).then(function(result) {
+  assert(result.respondWithCalled,
+    'origin guard: cross-origin SET_AUTH_MODE must be ignored; bearer POST should still call respondWith()');
+  if (result.fetched) {
+    var auth = result.fetched.headers.get('Authorization');
+    assert(auth === 'Bearer tok-abc123',
+      'origin guard: authMode must still be bearer; Authorization should be set (got "' + auth + '")');
+    var csrf = result.fetched.headers.get('X-CSRF-Token');
+    assert(!csrf,
+      'origin guard: X-CSRF-Token must NOT be set in bearer mode after cross-origin message (got "' + csrf + '")');
+  }
+
+  // Also verify that a message with no source is rejected (defense-in-depth).
+  listeners['message']({ data: { type: 'SET_AUTH_MODE', mode: 'session' } }); // no source — should be ignored
+
+  // If the no-source message was rejected, authMode is still bearer;
+  // a GET should use the normal bearer path (respondWith called for bearer+token).
+  return dispatchFetch({
+    url:         'http://127.0.0.1:7890/api/presence',
+    method:      'GET',
+    headers:     new global.Headers({}),
+    mode:        'cors',
+    destination: '',
+    body:        null,
+  });
+}).then(function(result) {
+  // In bearer mode with a token, GET is intercepted and Authorization injected.
+  assert(result.respondWithCalled,
+    'origin guard (no-source): authMode must still be bearer after sourceless message; GET should call respondWith()');
+  if (result.fetched) {
+    var auth = result.fetched.headers.get('Authorization');
+    assert(auth === 'Bearer tok-abc123',
+      'origin guard (no-source): Authorization header present confirms bearer mode unchanged (got "' + auth + '")');
+  }
 
 // ── Results ───────────────────────────────────────────────────────────────────
 
@@ -440,7 +509,8 @@ dispatchFetch({
   process.stdout.write(
     'PASS: sw.js smoke tests passed (bearer: POST body+redirect preserved, ' +
     'GET redirect:follow, early-returns intact, !token pass-through; ' +
-    'session: GET pass-through, POST CSRF injection, no-CSRF pass-through).\n'
+    'session: GET pass-through, POST CSRF injection, no-CSRF pass-through; ' +
+    'origin guard: cross-origin + no-source messages ignored).\n'
   );
   process.exit(0);
 }).catch(function(err) {

@@ -248,8 +248,11 @@
   //   requests (non-GET/HEAD), sets X-CSRF-Token from CSRF_TOKEN.
   //   If a 401 is received, redirects top to /login (session expired).
   //
-  // NOTE: The Flows section has its own `apiFetch` defined further below that
-  // must stay in sync.  Search for "function apiFetch" to find both.
+  // This is the single top-scope definition used by ALL callers, including
+  // the Flows section.  The Flows section previously redefined apiFetch locally
+  // (which shadowed this one), creating a duplicate that was a regression
+  // time-bomb on the CSRF path.  That duplicate has been removed; all callers
+  // now bind to this definition.
 
   function apiFetch(method, path, body) {
     const opts = { method };
@@ -485,11 +488,26 @@
     const since = wsLastSeq > 0 ? '?since=' + wsLastSeq : '';
     const url = proto + '//' + location.host + '/v1/events' + since;
 
-    // Phase 2.5: Sec-WebSocket-Protocol bearer auth (bearer mode only).
-    // In session mode the server authenticates via the session cookie on the
-    // upgrade request; we still send the protocol list so the server echoes
-    // 'yakos-bearer' (the server ignores the token in session mode).
-    ws = new WebSocket(url, AUTH_MODE === 'bearer' ? ['yakos-bearer', TOKEN] : ['yakos-bearer']);
+    // Phase 2.5: Sec-WebSocket-Protocol bearer auth.
+    //
+    // The WS upgrade path is handled by consoleAuthSubprotocol in
+    // cli-go/internal/consoleui/ws_handler.go.  That middleware requires
+    // exactly two comma-separated protocol values — "yakos-bearer, <token>" —
+    // and validates the token with constant-time comparison before the upgrade.
+    // Browsers cannot set Authorization headers on WS upgrades, so the
+    // subprotocol is the only delivery mechanism.
+    //
+    // Session-mode gap (ADR-0005 Phase 3d): the backend WS handler has no
+    // session-cookie auth path for WS upgrades.  Until the backend adds that,
+    // the WS requires the bearer token in BOTH auth modes.  In session mode
+    // TOKEN is '' so the WS upgrade will be rejected with 403 — the /v1/events
+    // handler needs a backend fix to accept session-cookie-authenticated WS
+    // connections.  Tracked as a follow-on to Phase 3d.
+    //
+    // DO NOT change this to ['yakos-bearer'] (one part, no token) — the server
+    // consoleAuthSubprotocol middleware does SplitN(protos, ",", 2) and rejects
+    // any header with fewer than two parts.
+    ws = new WebSocket(url, ['yakos-bearer', TOKEN]);
     ws.addEventListener('open', () => {
       wsRetryMs = 1000; // reset backoff
       // Send hello frame with self-asserted identity (attribution-only).
@@ -1861,36 +1879,11 @@
   }
 
   // ---- Flows API calls -------------------------------------------------------
-  // NOTE: apiFetch is also defined in section 1 for non-Flows API calls.
-  // Both definitions use the same session-aware logic.  If you change one,
-  // change the other.  The Flows section redefines apiFetch here because it
-  // was originally a standalone helper; both now delegate to the same logic.
-
-  function apiFetch(method, path, body) {
-    const isBodyMethod = method !== 'GET' && method !== 'HEAD';
-    const opts = { method };
-    if (AUTH_MODE === 'bearer') {
-      opts.headers = { 'Authorization': 'Bearer ' + TOKEN };
-    } else {
-      // session mode: browser sends session cookie; inject CSRF on mutations.
-      opts.credentials = 'same-origin';
-      opts.headers = {};
-      if (isBodyMethod && CSRF_TOKEN) {
-        opts.headers['X-CSRF-Token'] = CSRF_TOKEN;
-      }
-    }
-    if (body !== undefined) {
-      opts.headers['Content-Type'] = 'application/json';
-      opts.body = JSON.stringify(body);
-    }
-    return fetch(path, opts).then(function(resp) {
-      if (resp.status === 401 && AUTH_MODE === 'session') {
-        window.top.location.href = '/login';
-        return new Promise(function() {});
-      }
-      return resp;
-    });
-  }
+  // All Flows fetch calls go through the top-scope apiFetch defined in
+  // section 1 (the auth-mode detection block).  That single definition handles
+  // both bearer mode (Authorization: Bearer) and session mode (credentials:
+  // 'same-origin' + X-CSRF-Token on mutations) with 401→/login redirect.
+  // There is intentionally no local redefinition here.
 
   function loadFlowsWorkflowList() {
     apiFetch('GET', '/flows/api/workflows').then((r) => {

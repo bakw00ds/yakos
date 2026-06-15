@@ -86,6 +86,21 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('message', (e) => {
   if (!e.data) return;
+
+  // Origin guard: only accept messages from controlled same-origin clients.
+  //
+  // e.origin is the origin of the page that posted the message.  For messages
+  // from the page script this is always the same origin as the SW itself
+  // (same-origin policy).  Cross-origin iframes cannot postMessage to the SW
+  // because the SW scope is same-origin.
+  //
+  // We additionally check e.source is truthy (null for non-client senders such
+  // as other SWs) as defense-in-depth.  Both checks together ensure SET_TOKEN,
+  // SET_AUTH_MODE, and SET_CSRF_TOKEN can only be delivered by a page/client
+  // that shares our origin.
+  if (e.origin && e.origin !== self.location.origin) return;
+  if (!e.source) return;
+
   if (e.data.type === 'SET_TOKEN') {
     token = e.data.token;
   } else if (e.data.type === 'SET_AUTH_MODE') {
@@ -145,7 +160,13 @@ self.addEventListener('fetch', (e) => {
         // credentials:'same-origin' is the browser default — explicitly set so
         // the cloned request carries the session cookie.
         credentials: 'same-origin',
-        mode:        'same-origin',
+        // mode:'same-origin' is intentional: all console APIs are same-origin
+        // endpoints (the server and the browser page share the same host:port).
+        // Clamping to same-origin prevents the browser from issuing a CORS
+        // preflight on the cloned request and keeps the session cookie in scope.
+        // Cross-origin mutations cannot reach here because the fetch handler
+        // already returns early for non-same-origin requests (top of handler).
+        mode: 'same-origin',
         // Mutation POSTs must not follow redirects — same rationale as bearer mode.
         redirect: 'error',
         body: await e.request.clone().arrayBuffer(),

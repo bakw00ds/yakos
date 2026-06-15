@@ -14,8 +14,8 @@
     </div>
     <h1 class="login-heading">Sign in</h1>
 
-    <!-- aria-live region: error messages announced to screen readers -->
-    <div id="login-err" class="login-error" role="alert" aria-live="assertive" aria-atomic="true"></div>
+    <!-- role="alert" implies aria-live="assertive" + aria-atomic="true"; no redundant attrs needed -->
+    <div id="login-err" class="login-error" role="alert"></div>
 
     <form id="loginForm" novalidate>
       <div class="login-field">
