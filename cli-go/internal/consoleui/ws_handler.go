@@ -527,8 +527,12 @@ func consoleOriginAllowListNetworked(externalHosts []string, next http.Handler) 
 // attack where "10.0.0.1" would erroneously accept "10.0.0.1.attacker.com".
 //
 // The comparison is exact: scheme + externalHost must equal the trimmed origin.
-// Both https:// and wss:// are accepted because browsers send the page origin
-// (https://) but the WS Origin header can carry either scheme.
+// Only https:// and wss:// are accepted for external (non-loopback) hosts.
+// http:// and ws:// are intentionally excluded: the non-loopback console is
+// always TLS-backed (ADR-0005 Phase 3f) so plaintext external origins should
+// never reach this path in production.  Excluding them is defense-in-depth (#199).
+// Loopback origins (http://127.0.0.1/…) are handled separately by isLoopbackOrigin
+// and are not affected by this restriction.
 func isExternalOrigin(origin, externalHost string) bool {
 	if externalHost == "" {
 		return false
@@ -540,7 +544,7 @@ func isExternalOrigin(origin, externalHost string) bool {
 		return false
 	}
 	o := strings.TrimRight(origin, "/")
-	for _, scheme := range []string{"https://", "wss://", "http://", "ws://"} {
+	for _, scheme := range []string{"https://", "wss://"} {
 		candidate := scheme + externalHost
 		if o == candidate {
 			return true

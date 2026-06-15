@@ -42,8 +42,10 @@ func IsKnownRuntime(name string) bool {
 // requests a bare runtime name ("claude", "codex", etc.) that has no
 // corresponding agent .md file in the composed roster.
 //
-// The returned agent's ID and runtime both equal name.  Model is left empty so
-// the runtime picks its default.
+// The returned agent's ID equals name.  ComposedAgent has no Runtime field;
+// the runtime is inferred from the agent ID by the dispatch layer (dispatch.go
+// step 5: IsKnownRuntime check).  Model is left empty so the runtime picks its
+// default.
 //
 // Callers must verify IsKnownRuntime(name) before calling this function; it
 // panics on an unknown name to surface programming errors early.

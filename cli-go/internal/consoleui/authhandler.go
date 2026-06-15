@@ -444,7 +444,10 @@ func requireAuthOrRedirect(uStore *userstore.Store, next http.Handler) http.Hand
 //
 // Heuristics (in order):
 //  1. Accept header contains "application/json".
-//  2. Path is under /api/, /flows/api/, /v1/ (API paths per registerRoutes).
+//  2. Path is under /api/, /flows/api/, /v1/, /cost/api/, /perf/api/
+//     (API paths per registerRoutes; sub-dashboard API mounts use HandlerNoToken
+//     so their /api/ sub-paths are reachable but must return 401 JSON, not a
+//     302 redirect, when unauthenticated — #200).
 func isAPIRequest(r *http.Request) bool {
 	accept := r.Header.Get("Accept")
 	if strings.Contains(accept, "application/json") {
@@ -453,7 +456,9 @@ func isAPIRequest(r *http.Request) bool {
 	p := r.URL.Path
 	return strings.HasPrefix(p, "/api/") ||
 		strings.HasPrefix(p, "/flows/api/") ||
-		strings.HasPrefix(p, "/v1/")
+		strings.HasPrefix(p, "/v1/") ||
+		strings.HasPrefix(p, "/cost/api/") ||
+		strings.HasPrefix(p, "/perf/api/")
 }
 
 // ---- helpers ----------------------------------------------------------------

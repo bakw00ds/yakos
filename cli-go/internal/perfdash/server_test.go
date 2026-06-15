@@ -804,8 +804,8 @@ func TestHandlerNoToken_AllEndpointsReachable(t *testing.T) {
 func TestHandlerNoToken_IndexAndStaticsServed(t *testing.T) {
 	ts := newTestServerNoToken(t, "")
 	paths := []struct {
-		path    string
-		ctPfx   string
+		path  string
+		ctPfx string
 	}{
 		{"/", "text/html"},
 		{"/app.js", "application/javascript"},
