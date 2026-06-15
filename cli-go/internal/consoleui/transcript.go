@@ -51,6 +51,11 @@ const (
 	RoleUser      TranscriptRole = "user"
 	RoleAssistant TranscriptRole = "assistant"
 	RoleSummary   TranscriptRole = "summary"
+	// RoleError records a server-side dispatch failure.  The Text field carries
+	// a terse error message (no internal paths or stack traces) suitable for
+	// display in the chat UI.  Persisted so the conversation record reflects the
+	// failure rather than ending with only a user turn.
+	RoleError TranscriptRole = "error"
 )
 
 // TranscriptEntry is one NDJSON line in a chat transcript file.

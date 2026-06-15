@@ -220,6 +220,15 @@ func MustNew(t *testing.T, cfg Config) *Server {
 	return srv
 }
 
+// SetChatHandlersAgentValidation wires yakosRoot and workspaceRoot onto the
+// Server's chatHandlers after construction.  Used in tests that need to
+// exercise up-front agent validation without going through the full serve.go
+// startup path.
+func SetChatHandlersAgentValidation(srv *Server, yakosRoot, workspaceRoot string) {
+	srv.chat.yakosRoot = yakosRoot
+	srv.chat.workspaceRoot = workspaceRoot
+}
+
 // ---- Phase 3b: auth handler test exports ------------------------------------
 
 // LoginRateLimitRequests is the per-IP login attempt cap, exported for tests

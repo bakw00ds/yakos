@@ -42,6 +42,51 @@ func resolveAgent(roster []agentscompose.ComposedAgent, name, yakosRoot, project
 		name, yakosRoot, project)
 }
 
+// ValidateAgentName checks whether name resolves to a known agent or a bare
+// runtime catch-all (claude/codex/agy/gemini).  It is the pre-flight check
+// used by the chat dispatch handler to return 400 before the 202 when the
+// caller supplies an agent name that will never succeed.
+//
+// Resolution order mirrors resolveAgent:
+//
+//  a) Exact match in the composed roster.
+//  b) Bare known-runtime name (catch-all).
+//  c) Neither → returns a non-nil error with a message safe to surface to the
+//     caller (no roster path leakage).
+//
+// When yakosRoot is empty the roster cannot be composed; in that case only
+// the known-runtime catch-all (b) is checked.  If the name is also not a
+// known runtime, nil is returned (validation is skipped rather than failing
+// closed) so that callers without a yakosRoot configured do not break.
+// This matches the behaviour of RunStream itself: with no yakosRoot, Compose
+// returns an empty roster and only known-runtime names succeed.
+func ValidateAgentName(name, yakosRoot, project string) error {
+	if yakosRoot != "" {
+		roster, err := agentscompose.Compose(yakosRoot, project)
+		if err != nil {
+			// Compose failure (e.g. unreadable agents dir): fall through to the
+			// known-runtime check so a bare "claude" still works when the roster
+			// directory is absent.  A genuinely unknown name will still fail below.
+			roster = nil
+		}
+		if roster != nil {
+			_, resolveErr := resolveAgent(roster, name, yakosRoot, project)
+			if resolveErr == nil {
+				return nil // found in roster or known-runtime catch-all
+			}
+			// resolveAgent only errors on case (c): name unknown.
+			return fmt.Errorf("unknown agent %q; not in roster and not a known runtime", name)
+		}
+	}
+	// yakosRoot empty or roster compose failed: known-runtime is always valid;
+	// anything else passes through (cannot validate without a roster).
+	if agentscompose.IsKnownRuntime(name) {
+		return nil
+	}
+	// No roster available: skip validation (cannot determine validity).
+	return nil
+}
+
 // resolveRuntime returns the runtime name to use for the given agent name and
 // optional override.  Precedence:
 //
