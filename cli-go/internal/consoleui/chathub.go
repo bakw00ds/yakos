@@ -128,6 +128,7 @@ type sseConn struct {
 type sessionEntry struct {
 	ownerOperatorID string
 	shared          bool
+	conversationID  string // the conversation this session writes to; set by SetConversationID
 }
 
 // errSessionOwnerConflict is returned by OpenSession and SetShared when the
@@ -369,6 +370,58 @@ func (h *ChatHub) IsShared(sessionID string) bool {
 		return false
 	}
 	return e.shared
+}
+
+// SetConversationID records which conversationID a session is writing to.
+// Called by the dispatch handler immediately after conversationID is resolved
+// (defaulting to sessionID when the caller supplies none).
+//
+// This binding is what makes IsConversationShared authoritative: the hub knows
+// which conversation belongs to which session, so the transcript handler can
+// derive shared-ness from the conversation being read rather than from a
+// free-floating sessionId parameter supplied by the caller.
+//
+// No-op when the session does not exist (race with CloseSession at teardown).
+func (h *ChatHub) SetConversationID(sessionID, conversationID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	e, ok := h.sessions[sessionID]
+	if !ok {
+		return
+	}
+	e.conversationID = conversationID
+	h.sessions[sessionID] = e
+}
+
+// ConversationForSession returns the conversationID bound to sessionID, or ""
+// when the session does not exist or has no conversation bound yet.
+// Used by the transcript handler for defense-in-depth: if a caller supplies a
+// sessionId that is bound to a different conversationID than the one being
+// requested, the request is rejected (403) before reaching the owner check.
+func (h *ChatHub) ConversationForSession(sessionID string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.sessions[sessionID].conversationID
+}
+
+// IsConversationShared returns true iff a currently-open session that owns
+// conversationID is shared.
+//
+// This is the correct predicate for transcript shared-access: it derives
+// shared-ness from the conversation being read, not from a caller-supplied
+// sessionId.  Prevents the confused-deputy IDOR where an attacker pairs a
+// shared sessionId with an unrelated victim conversationId.
+//
+// Returns false when no session owns conversationID (unknown or already closed).
+func (h *ChatHub) IsConversationShared(conversationID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, e := range h.sessions {
+		if e.conversationID == conversationID {
+			return e.shared
+		}
+	}
+	return false
 }
 
 // connCount returns the number of live SSE connections for operatorID.

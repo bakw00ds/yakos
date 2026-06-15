@@ -240,58 +240,43 @@ func (tr *Transcripts) ReadShared(conversationID, ownerOperatorID string, shared
 		entries = append(entries, entry)
 	}
 
-	// Ownership check: the first user-turn entry with a non-empty operatorID
-	// establishes the conversation owner.
+	// Ownership check and M1 fail-closed guard.
 	//
-	// M1 fail-closed: when an operatorId is supplied and the file is non-empty
-	// but contains no user turn with an operatorID, we deny access (403) rather
-	// than granting it.  This prevents an existence oracle (seeing content when
-	// no ownership is established) and is forward-compatible with future
+	// findFirstUserOwner scans entries for the first user turn with a non-empty
+	// operatorID and returns (ownerID, true) when found, or ("", false) when the
+	// file is non-empty but has no such turn.
+	//
+	// M1 fail-closed: if ownerOperatorID is supplied and the file is non-empty
+	// but contains no user turn with an operatorID, we deny access (403) to
+	// prevent an existence oracle and preserve forward-compatibility with future
 	// explicit owner persistence.
-	//
-	// Shared-access bypass: when sharedAccess is true, the hub has already
-	// verified the session is shared (ChatHub.IsShared).  The ownership check is
-	// still performed to locate the first user turn (to prove the file has a
-	// real owner), but a mismatch is NOT treated as forbidden — the caller is an
-	// authorised watcher, not the owner.  errTranscriptForbidden is only returned
-	// when the file is non-empty but has NO user turn (M1 fail-closed invariant).
-	if !sharedAccess && ownerOperatorID != "" && len(entries) > 0 {
-		ownerEstablished := false
-		for _, e := range entries {
-			if e.Role == RoleUser && e.OperatorID != "" {
-				ownerEstablished = true
-				if e.OperatorID != ownerOperatorID {
-					return nil, errTranscriptForbidden
-				}
-				break
-			}
-		}
-		if !ownerEstablished {
-			// Non-empty file with no user turn → fail closed (403).
+	if ownerOperatorID != "" && len(entries) > 0 {
+		firstOwner, established := findFirstUserOwner(entries)
+		if !established {
+			// Non-empty file with no user turn → fail closed (403) for all callers.
 			return nil, errTranscriptForbidden
 		}
-	}
-
-	// Shared-access path: M1 fail-closed still applies when the file is
-	// non-empty but has no established user-turn owner.  A watcher of a shared
-	// session must not read orphaned transcripts (no-owner = undefined provenance).
-	// Ownership mismatch on its own is NOT forbidden (the watcher is not the owner
-	// by design — that is the whole point of watch mode).
-	if sharedAccess && ownerOperatorID != "" && len(entries) > 0 {
-		ownerEstablished := false
-		for _, e := range entries {
-			if e.Role == RoleUser && e.OperatorID != "" {
-				ownerEstablished = true
-				break
-			}
-		}
-		if !ownerEstablished {
-			// Non-empty file with no user turn → fail closed even for watchers.
+		// For non-shared (owner-only) reads: the caller must be the owner.
+		if !sharedAccess && firstOwner != ownerOperatorID {
 			return nil, errTranscriptForbidden
 		}
+		// For shared reads: ownership mismatch is allowed (the caller is an
+		// authorised watcher); only the "no owner established" case above is denied.
 	}
 
 	return entries, nil
+}
+
+// findFirstUserOwner scans entries for the first user-role turn with a
+// non-empty operatorID.  Returns (ownerID, true) when found; ("", false)
+// when no such entry exists.
+func findFirstUserOwner(entries []TranscriptEntry) (string, bool) {
+	for _, e := range entries {
+		if e.Role == RoleUser && e.OperatorID != "" {
+			return e.OperatorID, true
+		}
+	}
+	return "", false
 }
 
 // errTranscriptForbidden is returned by Read when the caller's operatorID does

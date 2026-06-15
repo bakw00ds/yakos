@@ -1455,22 +1455,28 @@ func TestChatHub_DuplicateSessionConflict(t *testing.T) {
 // ---- Phase 3 session-attach security tests --------------------------------
 // =========================================================================
 //
-// Three required security properties:
+// Security properties covered:
 //
 //   (a) A RoleRead operator CAN watch a SHARED session's stream + read its
 //       transcript (SSE delivers frames; transcript returns 200 with entries).
 //   (b) A RoleRead operator CANNOT read an UNSHARED session's transcript
 //       (403 forbidden; errTranscriptForbidden).
+//   (b2) IDOR: a shared sessionId paired with a DIFFERENT operator's UNSHARED
+//       conversationId must return 403.  (The confused-deputy IDOR described in
+//       the review — shared session + victim's conversation → 403.)
 //   (c) A non-owner CANNOT interject (POST dispatch → 403 owner-conflict).
-//       Already covered by TestChatDispatch_403OnSessionOwnerConflict; the
-//       third test here confirms the same property via the transcript pathway
-//       to close the watch/interject boundary explicitly.
+//   (d) SSE stream role gate (deterministic): RoleRead → 200; unauthenticated → 403.
 
 // TestAttach_RoleReadCanWatchSharedSession verifies that a RoleRead operator
 // can subscribe to the SSE stream (GET /api/chat/stream) and read the
-// transcript (GET /api/chat/transcript?sessionId=…) for a SHARED session.
+// transcript for a SHARED session.
 //
 // Security requirement (a): watch = subscribe SSE + backfill transcript.
+// After the BLOCKING 1 fix, shared-access is derived from
+// hub.IsConversationShared(conversationID) — not from a caller-supplied
+// sessionId.  We bind the conversationID to the session via
+// hub.SetConversationID so the hub lookup works correctly without going
+// through the full dispatch handler.
 func TestAttach_RoleReadCanWatchSharedSession(t *testing.T) {
 	// Build a server with bob's identity injected as RoleRead (the watcher).
 	bobID := netid.Identity{
@@ -1496,12 +1502,16 @@ func TestAttach_RoleReadCanWatchSharedSession(t *testing.T) {
 	})
 	hub := srv.ChatHub()
 
-	// Alice opens a SHARED session.
+	// Alice opens a SHARED session and binds a conversationID.
+	// In production the dispatch handler calls hub.SetConversationID; in this
+	// test we call it directly so the hub knows which conversation belongs to
+	// which session (required by hub.IsConversationShared).
 	const sharedSessionID = "sess-attach-shared"
 	const sharedConvID = "conv-attach-shared"
 	if err := hub.OpenSession(sharedSessionID, "alice", true /*shared=true*/); err != nil {
 		t.Fatalf("OpenSession (shared): %v", err)
 	}
+	hub.SetConversationID(sharedSessionID, sharedConvID)
 	t.Cleanup(func() { hub.CloseSession(sharedSessionID) })
 
 	// Write alice's transcript so the backfill has content to return.
@@ -1522,30 +1532,31 @@ func TestAttach_RoleReadCanWatchSharedSession(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	// (a1) Bob (RoleRead) can connect to the SSE stream.
+	// Use a short context; the point is that the HTTP status is 200, not 403.
+	// If the server closes the SSE immediately (no sessions for bob), that is
+	// fine — the status header is still 200 before the body closes.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	sseResp, err := sseGetWithCancel(ctx, ts.URL+"/api/chat/stream?operatorId=bob", realTok)
-	if err != nil && sseResp == nil {
-		t.Skip("SSE connect failed (context deadline)")
+	sseResp, _ := sseGetWithCancel(ctx, ts.URL+"/api/chat/stream?operatorId=bob", realTok)
+	if sseResp == nil {
+		t.Fatal("RoleRead bob connecting to SSE stream: got nil response (connection failed)")
 	}
-	if sseResp != nil {
-		if sseResp.StatusCode != http.StatusOK {
-			drainClose(sseResp)
-			t.Fatalf("RoleRead bob connecting to SSE stream: status=%d; want 200", sseResp.StatusCode)
-		}
+	if sseResp.StatusCode != http.StatusOK {
 		drainClose(sseResp)
+		t.Fatalf("RoleRead bob connecting to SSE stream: status=%d; want 200", sseResp.StatusCode)
 	}
+	drainClose(sseResp)
 
-	// (a2) Bob (RoleRead) can read the shared session's transcript by supplying
-	// sessionId=<sharedSessionID> so the handler checks IsShared(sessionId).
+	// (a2) Bob (RoleRead) can read the shared session's transcript.
+	// No sessionId param needed now — shared-access is derived from
+	// hub.IsConversationShared(conversationID) on the server side.
 	transcriptURL := ts.URL + "/api/chat/transcript" +
 		"?conversationId=" + sharedConvID +
-		"&operatorId=bob" +
-		"&sessionId=" + sharedSessionID
+		"&operatorId=bob"
 	tResp := get(t, transcriptURL, realTok)
 	defer drainClose(tResp)
 	if tResp.StatusCode != http.StatusOK {
-		t.Errorf("RoleRead bob reading shared transcript: status=%d; want 200", tResp.StatusCode)
+		t.Errorf("(a2) RoleRead bob reading shared transcript: status=%d; want 200", tResp.StatusCode)
 	}
 }
 
@@ -1553,7 +1564,13 @@ func TestAttach_RoleReadCanWatchSharedSession(t *testing.T) {
 // operator cannot read an UNSHARED session's transcript.
 //
 // Security requirement (b): the transcript endpoint must return 403 when the
-// session is not shared and the caller is not the owner.
+// conversation's session is not shared and the caller is not the owner.
+//
+// Security requirement (b2) IDOR: an attacker who supplies a SHARED sessionId
+// paired with a DIFFERENT operator's UNSHARED conversationId must also get 403.
+// This is the confused-deputy IDOR described in the Phase 3 review (BLOCKING 1).
+// After the fix, sharedAccess is derived from IsConversationShared(conversationID)
+// not from IsShared(sessionID), so the mismatch is blocked.
 func TestAttach_RoleReadCannotReadUnsharedTranscript(t *testing.T) {
 	// Build a server with bob's identity injected as RoleRead (the watcher).
 	bobID := netid.Identity{
@@ -1579,12 +1596,13 @@ func TestAttach_RoleReadCannotReadUnsharedTranscript(t *testing.T) {
 	})
 	hub := srv.ChatHub()
 
-	// Alice opens an UNSHARED session.
+	// Alice opens an UNSHARED session and binds a conversationID.
 	const privSessionID = "sess-attach-priv"
 	const privConvID = "conv-attach-priv"
 	if err := hub.OpenSession(privSessionID, "alice", false /*shared=false*/); err != nil {
 		t.Fatalf("OpenSession (unshared): %v", err)
 	}
+	hub.SetConversationID(privSessionID, privConvID)
 	t.Cleanup(func() { hub.CloseSession(privSessionID) })
 
 	// Write alice's transcript.
@@ -1597,6 +1615,26 @@ func TestAttach_RoleReadCannotReadUnsharedTranscript(t *testing.T) {
 		Text:           "private task",
 	})
 
+	// Also set up a SHARED session so we can exercise the IDOR mismatch (b2).
+	// The attacker will pair sharedSessionID (IsShared=true) with the victim's
+	// privConvID to try to bypass the owner check.
+	const sharedSessionID = "sess-attach-shared-idor"
+	const sharedConvID = "conv-attach-shared-idor" // DIFFERENT from privConvID
+	if err := hub.OpenSession(sharedSessionID, "carol", true /*shared=true*/); err != nil {
+		t.Fatalf("OpenSession (shared for IDOR test): %v", err)
+	}
+	hub.SetConversationID(sharedSessionID, sharedConvID)
+	t.Cleanup(func() { hub.CloseSession(sharedSessionID) })
+
+	// Write carol's (innocuous) shared transcript.
+	_ = tr.Append(consoleui.TranscriptEntry{
+		SessionID:      sharedSessionID,
+		ConversationID: sharedConvID,
+		OperatorID:     "carol",
+		Role:           consoleui.RoleUser,
+		Text:           "shared task",
+	})
+
 	// Build the handler with bob's identity injected.
 	handler := consoleui.RequireTokenForNonStatic(realTok,
 		consoleui.RequireJSONForMutations(
@@ -1604,16 +1642,29 @@ func TestAttach_RoleReadCannotReadUnsharedTranscript(t *testing.T) {
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
-	// Bob supplies sessionId=privSessionID — but the session is NOT shared.
-	// The handler must return 403 (IsShared returns false → owner check fires → 403).
+	// (b) Bob reads alice's UNSHARED conversationId with no sessionId.
+	// IsConversationShared(privConvID) = false → owner check → 403.
 	transcriptURL := ts.URL + "/api/chat/transcript" +
 		"?conversationId=" + privConvID +
-		"&operatorId=bob" +
-		"&sessionId=" + privSessionID
+		"&operatorId=bob"
 	tResp := get(t, transcriptURL, realTok)
-	defer drainClose(tResp)
+	drainClose(tResp)
 	if tResp.StatusCode != http.StatusForbidden {
-		t.Errorf("(b) RoleRead bob reading UNSHARED transcript: status=%d; want 403", tResp.StatusCode)
+		t.Errorf("(b) RoleRead bob reading UNSHARED transcript (no sessionId): status=%d; want 403", tResp.StatusCode)
+	}
+
+	// (b2) IDOR: Bob supplies a SHARED sessionId (sharedSessionID) paired with
+	// alice's UNSHARED conversationId (privConvID).
+	// Defense-in-depth: hub.ConversationForSession(sharedSessionID)=sharedConvID ≠ privConvID → 403.
+	// Even without defense-in-depth: IsConversationShared(privConvID)=false → 403.
+	idorURL := ts.URL + "/api/chat/transcript" +
+		"?conversationId=" + privConvID +
+		"&operatorId=bob" +
+		"&sessionId=" + sharedSessionID
+	idorResp := get(t, idorURL, realTok)
+	drainClose(idorResp)
+	if idorResp.StatusCode != http.StatusForbidden {
+		t.Errorf("(b2) IDOR: shared sessionId + victim unshared convId: status=%d; want 403", idorResp.StatusCode)
 	}
 }
 
@@ -1661,4 +1712,87 @@ func TestAttach_NonOwnerCannotInterject(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("(c) non-owner bob interjecting into alice's session: status=%d; want 403", resp.StatusCode)
 	}
+}
+
+// TestAttach_SSEStream_RoleEnforcement verifies the /api/chat/stream role gate
+// deterministically using injected identities (no t.Skip paths).
+//
+// Security requirement (d): this is the most security-sensitive route change
+// in Phase 3 (stream gate lowered from RoleDispatch to RoleRead).  The test
+// must fire the role-enforcement middleware and assert status codes without
+// blocking on SSE body drain (SSE streams never EOF on their own).
+//
+// We use a context-cancelled request so we can force-close the connection
+// immediately after the status header is received, then assert the code.
+//
+// Two sub-cases:
+//   (d1) Resolved RoleRead identity → 200 (stream accepted).
+//   (d2) Resolved RoleNone (below RoleRead) → 403.
+func TestAttach_SSEStream_RoleEnforcement(t *testing.T) {
+	t.Parallel()
+
+	// sseStatus sends a GET /api/chat/stream with the given bearer token and
+	// returns the HTTP status code without draining the body.  The request is
+	// made with a short-lived context that is cancelled as soon as the headers
+	// arrive so the SSE body goroutine is never spawned in a blocking way.
+	sseStatus := func(t *testing.T, rawURL, tok string) int {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		if err != nil {
+			t.Fatalf("NewRequestWithContext: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		// DisableKeepAlives ensures the connection is not reused, so closing the
+		// body on our side also tears down the server-side SSE goroutine promptly.
+		client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", rawURL, err)
+		}
+		status := resp.StatusCode
+		// Don't drain — just close the body directly.  The context cancellation
+		// (and DisableKeepAlives) ensures the server's SSE goroutine exits.
+		_ = resp.Body.Close()
+		return status
+	}
+
+	// ---- (d1) RoleRead → 200 ---------------------------------------------------
+	t.Run("RoleRead_gets_200", func(t *testing.T) {
+		t.Parallel()
+		readID := netid.Identity{
+			Resolved:      true,
+			Authenticated: true,
+			AuthMethod:    netid.AuthMethodCert,
+			OperatorID:    "reader",
+			Role:          netid.RoleRead,
+		}
+		ts, tok, _ := newEnforcementTestServer(t, readID)
+
+		got := sseStatus(t, ts.URL+"/api/chat/stream?operatorId=reader", tok)
+		if got != http.StatusOK {
+			t.Errorf("(d1) RoleRead on /api/chat/stream: got %d; want 200", got)
+		}
+	})
+
+	// ---- (d2) RoleNone (below RoleRead) → 403 ----------------------------------
+	t.Run("RoleNone_gets_403", func(t *testing.T) {
+		t.Parallel()
+		// RoleNone is the zero-value sentinel (iota 0), strictly below RoleRead.
+		// requireRole(RoleRead) must block it.
+		noneID := netid.Identity{
+			Resolved:      true,
+			Authenticated: true,
+			AuthMethod:    netid.AuthMethodCert,
+			OperatorID:    "nobody",
+			Role:          netid.RoleNone,
+		}
+		ts, tok, _ := newEnforcementTestServer(t, noneID)
+
+		got := sseStatus(t, ts.URL+"/api/chat/stream?operatorId=nobody", tok)
+		if got != http.StatusForbidden {
+			t.Errorf("(d2) RoleNone on /api/chat/stream: got %d; want 403", got)
+		}
+	})
 }

@@ -971,6 +971,21 @@
   // frames for sessionId are routed to it by the existing SSE demux.
   // loadTranscriptForPane is called with the sessionId param so the transcript
   // handler's IsShared path applies for shared-session backfill.
+  // _pushSystemMsg appends a system message into the active (focused) pane, or
+  // the first pane if none is focused.  Used to surface client-side notices
+  // (e.g. pane-cap errors) without a modal or alert().
+  function _pushSystemMsg(text) {
+    // Find the first pane in chatPanes (iteration order = insertion order).
+    var firstPaneId = null;
+    for (var pid of chatPanes.keys()) { firstPaneId = pid; break; }
+    if (!firstPaneId) return;
+    var pane = chatPanes.get(firstPaneId);
+    if (!pane) return;
+    pane.messages.push({ role: 'system', text: text, ts: new Date().toISOString(), sessionId: null });
+    renderPaneMessages(firstPaneId);
+    if (pane.autoScroll) scrollPaneToBottom(firstPaneId);
+  }
+
   function openAttachPane(sessionId, conversationId, watchOnly) {
     if (!sessionId) return;
     // Normalise: conversationId defaults to sessionId (single-session convention).
@@ -983,7 +998,8 @@
     }
 
     if (chatPanes.size >= MAX_PANES) {
-      // Silently refuse: pane cap reached.
+      // S2: surface a visible notice rather than silently failing.
+      _pushSystemMsg('Pane limit reached (' + MAX_PANES + ') — close a pane to attach to ' + sessionId + '.');
       return;
     }
 
@@ -2521,28 +2537,27 @@
         (preview ? '<span class="repl-fleet-preview" aria-label="task preview">' + preview + '</span>' : '') +
         attachBtnHtml;
 
-      // Wire click: attach button (or whole row for attachable sessions) → openAttachPane.
+      // Wire click: the native attach <button> is the primary keyboard target.
+      // S3: do NOT set role="button" on the <li> — the nested <button> already
+      // provides the correct ARIA semantics, and a redundant role on the <li>
+      // would create a double-fire hazard on Enter (keydown fires on both).
+      // The row click handler is kept as a pointer-only convenience (no tabindex).
       if (isAttachable) {
         // Capture loop variables for closure.
         (function(sessionId, watchOnly) {
           var attachBtn = li.querySelector('.repl-fleet-attach-btn');
           if (attachBtn) {
+            // Native button handles both click and keyboard (Enter/Space natively).
             attachBtn.addEventListener('click', function(e) {
               e.stopPropagation();
               openAttachPane(sessionId, sessionId, watchOnly);
             });
           }
-          // Also wire the row itself (convenience — keyboard/mouse).
-          li.setAttribute('tabindex', '0');
-          li.setAttribute('role', 'button');
-          li.addEventListener('click', function() {
+          // Row click: pointer-only convenience (no tabindex / role=button on li).
+          li.addEventListener('click', function(e) {
+            // Only fire when the click target is not the button itself
+            // (the button's own handler fires in that case via stopPropagation).
             openAttachPane(sessionId, sessionId, watchOnly);
-          });
-          li.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              openAttachPane(sessionId, sessionId, watchOnly);
-            }
           });
         })(s.session_id, !isOwned);
       }
