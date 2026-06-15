@@ -909,3 +909,118 @@ func TestLoopback_BearerToken_Unchanged(t *testing.T) {
 		t.Errorf("loopback bearer: unexpected 401 (edge redirect must not fire on loopback)")
 	}
 }
+
+// ---- Test 16: New() fail-closed guard — all three nil-store permutations ----
+
+// TestNew_FailsClosed_NetworkedWithoutStores asserts the HIGH red-team finding:
+// consoleui.New must refuse to construct a networked server when either or both
+// session stores are nil.  Without this guard a misconfigured server would run
+// with no requireAuthOrRedirect and no requireCSRFForSession middleware.
+//
+// Three permutations are tested:
+//  1. Both stores nil       — the most obvious misconfiguration.
+//  2. AuthSessionStore nil  — UserStore present but session store missing.
+//  3. UserStore nil         — AuthSessionStore present but user store missing.
+//
+// A positive case (both stores present) is also asserted to ensure the guard
+// does not over-reject valid configurations.
+//
+// This test calls consoleui.New directly (not MustNew) because it explicitly
+// exercises the error-return path that MustNew would t.Fatal on.
+func TestNew_FailsClosed_NetworkedWithoutStores(t *testing.T) {
+	t.Parallel()
+
+	stateDir := t.TempDir()
+	tok, err := consoleui.LoadOrCreateToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	bus := wsbus.New()
+	t.Cleanup(bus.Stop)
+
+	// Minimal base config that reaches the guard; the guard fires before any
+	// other field is inspected, so only NetworkedMode matters here.
+	base := consoleui.Config{
+		NetworkedMode:     true,
+		Token:             tok,
+		KanbanBoardPath:   t.TempDir() + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: t.TempDir(),
+		PerfWorkDir:       t.TempDir(),
+		Bus:               bus,
+		WorkDir:           t.TempDir(),
+	}
+
+	// Helper to open a fresh userstore for permutations that need one.
+	openUserStore := func() *userstore.Store {
+		t.Helper()
+		us, err := userstore.Open(t.TempDir() + "/users.json")
+		if err != nil {
+			t.Fatalf("userstore.Open: %v", err)
+		}
+		return us
+	}
+
+	// --- Permutation 1: both stores nil ---
+	t.Run("both_stores_nil", func(t *testing.T) {
+		t.Parallel()
+		cfg := base
+		cfg.AuthSessionStore = nil
+		cfg.UserStore = nil
+		srv, err := consoleui.New(cfg)
+		if err == nil {
+			t.Fatal("New must fail closed when NetworkedMode=true and both stores are nil")
+		}
+		if srv != nil {
+			t.Error("New must return nil server on error")
+		}
+		if !strings.Contains(err.Error(), "NetworkedMode") {
+			t.Errorf("error message should mention NetworkedMode; got: %v", err)
+		}
+	})
+
+	// --- Permutation 2: AuthSessionStore nil, UserStore present ---
+	t.Run("auth_store_nil", func(t *testing.T) {
+		t.Parallel()
+		cfg := base
+		cfg.AuthSessionStore = nil
+		cfg.UserStore = openUserStore()
+		srv, err := consoleui.New(cfg)
+		if err == nil {
+			t.Fatal("New must fail closed when NetworkedMode=true and AuthSessionStore is nil")
+		}
+		if srv != nil {
+			t.Error("New must return nil server on error")
+		}
+	})
+
+	// --- Permutation 3: UserStore nil, AuthSessionStore present ---
+	t.Run("user_store_nil", func(t *testing.T) {
+		t.Parallel()
+		cfg := base
+		cfg.AuthSessionStore = authsession.NewStore(authsession.Config{})
+		cfg.UserStore = nil
+		srv, err := consoleui.New(cfg)
+		if err == nil {
+			t.Fatal("New must fail closed when NetworkedMode=true and UserStore is nil")
+		}
+		if srv != nil {
+			t.Error("New must return nil server on error")
+		}
+	})
+
+	// --- Positive case: both stores present → New succeeds ---
+	t.Run("both_stores_present", func(t *testing.T) {
+		t.Parallel()
+		cfg := base
+		cfg.AuthSessionStore = authsession.NewStore(authsession.Config{})
+		cfg.UserStore = openUserStore()
+		srv, err := consoleui.New(cfg)
+		if err != nil {
+			t.Fatalf("New must succeed when NetworkedMode=true and both stores are non-nil; got: %v", err)
+		}
+		if srv == nil {
+			t.Fatal("New must return a non-nil server on success")
+		}
+	})
+}
