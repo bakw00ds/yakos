@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/authsession"
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/dispatch"
@@ -348,6 +349,15 @@ func Run(ctx context.Context, cfg Config) error {
 			YakosRoot:     cfg.YakosRoot,
 			Bus:           bus,
 		})
+
+		// Warn loudly when the composed agent roster is empty — the most common
+		// cause is YAKOS_ROOT being unset or pointing to the wrong directory so
+		// lib/agents/ is not found.  Chat and dispatch will still work for bare
+		// runtime names (claude/codex/gemini) via the generic agent fallback, but
+		// specialist agents won't be addressable.  Non-fatal: the server starts.
+		if roster, composeErr := agentscompose.Compose(cfg.YakosRoot, cfg.WorkspaceRoot); composeErr == nil && len(roster) == 0 {
+			fmt.Printf("yakos serve: WARNING: no agents composed (YAKOS_ROOT=%q) — specialist dispatch will fail; check YAKOS_ROOT points to the yakOS framework root\n", cfg.YakosRoot)
+		}
 	}
 
 	// Load (or generate) REST tokens once; reused for gRPC and MCP HTTP auth parity.
