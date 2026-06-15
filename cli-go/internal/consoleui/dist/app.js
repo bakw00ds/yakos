@@ -371,15 +371,32 @@
     { id: 'chat',      label: 'Chat',         src: null,       phase: null },
     { id: 'ide',       label: 'IDE',          src: null,       phase: null },
     { id: 'flows',     label: 'Flows',        src: null,       phase: null },
+    // users tab: only shown when account role === 'admin'; hidden by default
+    // via adminOnly flag checked in renderTabs().  Server enforces RoleAdmin —
+    // client-side hiding is convenience UX only, not a security gate.
+    { id: 'users',     label: 'Users',        src: null,       phase: null, adminOnly: true },
   ];
 
   let activeTab = 'overview';
   const loadedTabs = new Set();
 
+  // accountIdentity: populated from GET /api/account on boot.
+  // Used to gate admin-only tabs (Users).  Null until the fetch resolves.
+  // Shape: { operatorId: string, role: string, authMethod: string }
+  let accountIdentity = null;
+
+  function isAdmin() {
+    return accountIdentity && accountIdentity.role === 'admin';
+  }
+
   function renderTabs() {
     const bar = document.getElementById('tab-bar-tabs');
     bar.innerHTML = '';
     for (const tab of TABS) {
+      // Admin-only tabs are omitted entirely from the DOM for non-admins.
+      // They are only hidden here for UX; the server enforces role at the API layer.
+      if (tab.adminOnly && !isAdmin()) continue;
+
       const el = document.createElement('button');
       el.className = 'tab' + (tab.id === activeTab ? ' active' : '') + (tab.disabled ? ' disabled' : '');
       el.setAttribute('data-tab', tab.id);
@@ -454,6 +471,11 @@
     // On first switch to flows tab, initialize it.
     if (id === 'flows') {
       initFlowsTab();
+    }
+
+    // On every switch to users tab, refresh the table (data may have changed).
+    if (id === 'users') {
+      initUsersTab();
     }
   }
 
@@ -4168,6 +4190,392 @@
     ideUpdateEditorHeader();
   }
 
+  // ---- Users tab (Phase 5) -------------------------------------------------------
+  //
+  // initUsersTab() is called on every switch to the Users tab so the table
+  // stays fresh.  All mutations (add, role, reset-password, disable/enable,
+  // delete, change-my-password) go through apiFetch so they carry the CSRF
+  // header automatically in session mode and the Bearer token in loopback mode.
+  //
+  // Self-protection: 409 "ErrLastAdmin" responses are surfaced inline so the
+  // admin always knows why an action was blocked.
+
+  function initUsersTab() {
+    const panel = document.getElementById('panel-users');
+    if (!panel) return;
+
+    // Show loading state while fetching.
+    const tableWrap = panel.querySelector('.users-table-wrap');
+    if (tableWrap) {
+      tableWrap.innerHTML = '<p class="users-loading">Loading users…</p>';
+    }
+
+    apiFetch('GET', '/api/users').then(function(resp) {
+      if (!resp || !resp.ok) {
+        if (tableWrap) {
+          tableWrap.innerHTML =
+            '<p class="users-empty">Failed to load users (status ' +
+            (resp ? resp.status : 'unknown') + ').</p>';
+        }
+        return;
+      }
+      return resp.json();
+    }).then(function(data) {
+      if (!data) return;
+      renderUsersTable(data.users || []);
+    }).catch(function(err) {
+      if (tableWrap) {
+        tableWrap.innerHTML =
+          '<p class="users-empty">Error loading users: ' + esc(String(err)) + '</p>';
+      }
+    });
+  }
+
+  // renderUsersTable builds the users table from the users array returned by
+  // GET /api/users.  Each row has inline role select, reset-password, disable/
+  // enable, and delete actions.
+  function renderUsersTable(users) {
+    const panel = document.getElementById('panel-users');
+    if (!panel) return;
+    const tableWrap = panel.querySelector('.users-table-wrap');
+    if (!tableWrap) return;
+
+    const statusEl = panel.querySelector('.users-status');
+
+    if (!users.length) {
+      tableWrap.innerHTML = '<p class="users-empty">No users found.</p>';
+      return;
+    }
+
+    var html =
+      '<table class="users-table" role="grid" aria-label="User accounts">' +
+        '<thead>' +
+          '<tr>' +
+            '<th scope="col">Username</th>' +
+            '<th scope="col">Role</th>' +
+            '<th scope="col">Status</th>' +
+            '<th scope="col">Pw Reset</th>' +
+            '<th scope="col">Created</th>' +
+            '<th scope="col">Actions</th>' +
+          '</tr>' +
+        '</thead>' +
+        '<tbody>';
+
+    var ROLES = ['read', 'dispatch', 'flows-run', 'admin'];
+
+    for (var i = 0; i < users.length; i++) {
+      var u = users[i];
+      var username = esc(u.username || '');
+      var role = esc(u.role || 'read');
+      var disabled = !!u.disabled;
+      var pwReset = !!u.passwordResetReq;
+      var created = u.createdAt ? new Date(u.createdAt).toLocaleDateString() : '';
+
+      // Role select
+      var roleSelectHtml = '<select class="users-role-select" aria-label="Role for ' + username + '" data-username="' + username + '">';
+      for (var r = 0; r < ROLES.length; r++) {
+        var rEsc = esc(ROLES[r]);
+        roleSelectHtml += '<option value="' + rEsc + '"' + (ROLES[r] === u.role ? ' selected' : '') + '>' + rEsc + '</option>';
+      }
+      roleSelectHtml += '</select>';
+
+      // Status badge
+      var statusBadge = disabled
+        ? '<span class="users-badge users-badge-disabled">Disabled</span>'
+        : '<span class="users-badge users-badge-active">Active</span>';
+
+      // Pw reset badge
+      var pwBadge = pwReset
+        ? '<span class="users-badge users-badge-reset">Required</span>'
+        : '<span class="users-badge users-badge-active">No</span>';
+
+      // Actions
+      var toggleAction = disabled
+        ? '<button class="users-action-btn" type="button" data-action="enable" data-username="' + username + '" aria-label="Enable ' + username + '">Enable</button>'
+        : '<button class="users-action-btn" type="button" data-action="disable" data-username="' + username + '" aria-label="Disable ' + username + '">Disable</button>';
+
+      html +=
+        '<tr>' +
+          '<td>' + username + '</td>' +
+          '<td>' + roleSelectHtml + '</td>' +
+          '<td>' + statusBadge + '</td>' +
+          '<td>' + pwBadge + '</td>' +
+          '<td style="white-space:nowrap;color:var(--text-dim)">' + esc(created) + '</td>' +
+          '<td class="users-row-actions">' +
+            '<button class="users-action-btn" type="button" data-action="reset-password" data-username="' + username + '" aria-label="Reset password for ' + username + '">Reset pw</button>' +
+            toggleAction +
+            '<button class="users-action-btn danger" type="button" data-action="delete" data-username="' + username + '" aria-label="Delete user ' + username + '">Delete</button>' +
+          '</td>' +
+        '</tr>';
+    }
+
+    html += '</tbody></table>';
+    tableWrap.innerHTML = html;
+
+    // Wire role select changes.
+    var roleSelects = tableWrap.querySelectorAll('.users-role-select');
+    for (var si = 0; si < roleSelects.length; si++) {
+      (function(sel) {
+        sel.addEventListener('change', function() {
+          var uname = sel.getAttribute('data-username');
+          var newRole = sel.value;
+          usersApiAction('/api/users/role', { username: uname, role: newRole }, function(ok, msg) {
+            showUsersStatus(statusEl, ok, ok ? ('Role updated for ' + uname) : msg);
+            if (ok) initUsersTab();
+          });
+        });
+      }(roleSelects[si]));
+    }
+
+    // Wire action buttons.
+    var actionBtns = tableWrap.querySelectorAll('.users-action-btn');
+    for (var bi = 0; bi < actionBtns.length; bi++) {
+      (function(btn) {
+        btn.addEventListener('click', function() {
+          var action = btn.getAttribute('data-action');
+          var uname = btn.getAttribute('data-username');
+          if (action === 'reset-password') {
+            openResetPasswordModal(uname);
+          } else if (action === 'disable') {
+            usersApiAction('/api/users/disable', { username: uname }, function(ok, msg) {
+              showUsersStatus(statusEl, ok, ok ? (uname + ' disabled') : msg);
+              if (ok) initUsersTab();
+            });
+          } else if (action === 'enable') {
+            usersApiAction('/api/users/enable', { username: uname }, function(ok, msg) {
+              showUsersStatus(statusEl, ok, ok ? (uname + ' enabled') : msg);
+              if (ok) initUsersTab();
+            });
+          } else if (action === 'delete') {
+            openDeleteUserModal(uname);
+          }
+        });
+      }(actionBtns[bi]));
+    }
+  }
+
+  // usersApiAction calls apiFetch POST to a /api/users/* endpoint and calls
+  // cb(ok, message) with the result.  409 ErrLastAdmin is surfaced explicitly.
+  function usersApiAction(endpoint, body, cb) {
+    apiFetch('POST', endpoint, body)
+      .then(function(resp) {
+        if (!resp) { cb(false, 'No response from server'); return; }
+        return resp.json().then(function(data) {
+          if (resp.ok) {
+            cb(true, (data && data.message) || 'OK');
+          } else if (resp.status === 409) {
+            // Last-admin guard — surface clearly.
+            cb(false, (data && data.error) || 'Cannot remove the last admin');
+          } else {
+            cb(false, (data && data.error) || ('Error ' + resp.status));
+          }
+        });
+      })
+      .catch(function(err) {
+        cb(false, 'Network error: ' + String(err));
+      });
+  }
+
+  // showUsersStatus updates the status live region in the Users panel.
+  // Clears after 4 seconds.
+  var _usersStatusTimer = null;
+  function showUsersStatus(el, ok, msg) {
+    if (!el) return;
+    el.textContent = msg || '';
+    el.className = 'users-status' + (ok ? '' : ' error');
+    el.setAttribute('aria-live', 'polite');
+    clearTimeout(_usersStatusTimer);
+    _usersStatusTimer = setTimeout(function() {
+      if (el) el.textContent = '';
+    }, 4000);
+  }
+
+  // openResetPasswordModal prompts for a new password and calls
+  // POST /api/users/reset-password.
+  function openResetPasswordModal(username) {
+    var panel = document.getElementById('panel-users');
+    var statusEl = panel ? panel.querySelector('.users-status') : null;
+
+    var bodyHTML =
+      '<label for="modal-reset-pw" class="modal-field-label">New temporary password for <strong>' + esc(username) + '</strong></label>' +
+      '<input id="modal-reset-pw" class="modal-input" type="password" autocomplete="new-password" ' +
+        'placeholder="Min 12 characters" aria-describedby="modal-reset-pw-err">' +
+      '<p id="modal-reset-pw-err" class="modal-field-error" role="alert" style="display:none"></p>';
+
+    openModal({
+      title: 'Reset password',
+      body: bodyHTML,
+      confirmText: 'Reset',
+      onConfirm: function(overlay) {
+        var input = overlay.querySelector('#modal-reset-pw');
+        var errEl = overlay.querySelector('#modal-reset-pw-err');
+        var newPw = input ? input.value : '';
+        if (!newPw) {
+          if (errEl) { errEl.textContent = 'Password is required.'; errEl.style.display = ''; }
+          return;
+        }
+        usersApiAction('/api/users/reset-password', { username: username, newPassword: newPw }, function(ok, msg) {
+          if (ok) {
+            overlay._closeModal();
+            showUsersStatus(statusEl, true, 'Password reset for ' + username);
+            initUsersTab();
+          } else {
+            if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+          }
+        });
+      },
+    });
+  }
+
+  // openDeleteUserModal asks for confirmation before calling
+  // POST /api/users/delete.
+  function openDeleteUserModal(username) {
+    var panel = document.getElementById('panel-users');
+    var statusEl = panel ? panel.querySelector('.users-status') : null;
+
+    openModal({
+      title: 'Delete user',
+      body: '<p>Permanently delete <strong>' + esc(username) + '</strong>? This cannot be undone.</p>',
+      confirmText: 'Delete',
+      cancelText: 'Cancel',
+      dangerous: true,
+      onConfirm: function(overlay) {
+        usersApiAction('/api/users/delete', { username: username }, function(ok, msg) {
+          if (ok) {
+            overlay._closeModal();
+            showUsersStatus(statusEl, true, username + ' deleted');
+            initUsersTab();
+          } else {
+            // Surface 409 last-admin guard inline.
+            var errArea = overlay.querySelector('.modal-body');
+            if (errArea) {
+              var existing = errArea.querySelector('.modal-field-error');
+              if (!existing) {
+                existing = document.createElement('p');
+                existing.className = 'modal-field-error';
+                existing.setAttribute('role', 'alert');
+                errArea.appendChild(existing);
+              }
+              existing.textContent = msg;
+              existing.style.display = '';
+            }
+          }
+        });
+      },
+    });
+  }
+
+  // openAddUserModal shows the "Add user" form → POST /api/users.
+  function openAddUserModal() {
+    var panel = document.getElementById('panel-users');
+    var statusEl = panel ? panel.querySelector('.users-status') : null;
+
+    var bodyHTML =
+      '<label for="modal-add-username" class="modal-field-label">Username</label>' +
+      '<input id="modal-add-username" class="modal-input" type="text" autocomplete="off" ' +
+        'spellcheck="false" placeholder="e.g. alice" aria-describedby="modal-add-err">' +
+      '<label for="modal-add-password" class="modal-field-label" style="margin-top:10px">Password</label>' +
+      '<input id="modal-add-password" class="modal-input" type="password" autocomplete="new-password" ' +
+        'placeholder="Min 12 characters" aria-describedby="modal-add-err">' +
+      '<label for="modal-add-role" class="modal-field-label" style="margin-top:10px">Role</label>' +
+      '<select id="modal-add-role" class="users-role-select" style="width:100%;font-size:13px;padding:5px 8px" aria-describedby="modal-add-err">' +
+        '<option value="read">read</option>' +
+        '<option value="dispatch">dispatch</option>' +
+        '<option value="flows-run">flows-run</option>' +
+        '<option value="admin">admin</option>' +
+      '</select>' +
+      '<p id="modal-add-err" class="modal-field-error" role="alert" style="display:none"></p>';
+
+    openModal({
+      title: 'Add user',
+      body: bodyHTML,
+      confirmText: 'Create',
+      onConfirm: function(overlay) {
+        var unameInput = overlay.querySelector('#modal-add-username');
+        var pwInput    = overlay.querySelector('#modal-add-password');
+        var roleInput  = overlay.querySelector('#modal-add-role');
+        var errEl      = overlay.querySelector('#modal-add-err');
+
+        var uname = (unameInput ? unameInput.value : '').trim();
+        var pw    = pwInput ? pwInput.value : '';
+        var role  = roleInput ? roleInput.value : 'read';
+
+        function showErr(msg) {
+          if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+        }
+
+        if (!uname) { showErr('Username is required.'); return; }
+        if (!pw)    { showErr('Password is required.'); return; }
+
+        usersApiAction('/api/users', { username: uname, password: pw, role: role }, function(ok, msg) {
+          if (ok) {
+            overlay._closeModal();
+            showUsersStatus(statusEl, true, 'User ' + uname + ' created');
+            initUsersTab();
+          } else {
+            showErr(msg);
+          }
+        });
+      },
+    });
+  }
+
+  // openChangePasswordModal shows the self-service "Change my password" form
+  // → POST /api/account/password.
+  function openChangePasswordModal() {
+    var panel = document.getElementById('panel-users');
+    var statusEl = panel ? panel.querySelector('.users-status') : null;
+
+    var bodyHTML =
+      '<label for="modal-chpw-old" class="modal-field-label">Current password</label>' +
+      '<input id="modal-chpw-old" class="modal-input" type="password" autocomplete="current-password" aria-describedby="modal-chpw-err">' +
+      '<label for="modal-chpw-new" class="modal-field-label" style="margin-top:10px">New password</label>' +
+      '<input id="modal-chpw-new" class="modal-input" type="password" autocomplete="new-password" ' +
+        'placeholder="Min 12 characters" aria-describedby="modal-chpw-err">' +
+      '<p id="modal-chpw-err" class="modal-field-error" role="alert" style="display:none"></p>';
+
+    openModal({
+      title: 'Change my password',
+      body: bodyHTML,
+      confirmText: 'Change',
+      onConfirm: function(overlay) {
+        var oldPwInput = overlay.querySelector('#modal-chpw-old');
+        var newPwInput = overlay.querySelector('#modal-chpw-new');
+        var errEl      = overlay.querySelector('#modal-chpw-err');
+
+        var oldPw = oldPwInput ? oldPwInput.value : '';
+        var newPw = newPwInput ? newPwInput.value : '';
+
+        function showErr(msg) {
+          if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+        }
+
+        if (!oldPw) { showErr('Current password is required.'); return; }
+        if (!newPw) { showErr('New password is required.'); return; }
+
+        apiFetch('POST', '/api/account/password', { oldPassword: oldPw, newPassword: newPw })
+          .then(function(resp) {
+            if (!resp) { showErr('No response from server.'); return; }
+            return resp.json().then(function(data) {
+              if (resp.ok) {
+                overlay._closeModal();
+                showUsersStatus(statusEl, true, 'Password changed. Please sign in again.');
+                // Session invalidated server-side — redirect to login after short delay.
+                setTimeout(function() { window.top.location.href = '/login'; }, 2000);
+              } else if (resp.status === 401) {
+                showErr('Current password is incorrect.');
+              } else {
+                showErr((data && data.error) || ('Error ' + resp.status));
+              }
+            });
+          })
+          .catch(function(err) {
+            showErr('Network error: ' + String(err));
+          });
+      },
+    });
+  }
+
   function initIdeTab() {
     if (ideTabInitialized) return;
     ideTabInitialized = true;
@@ -5106,6 +5514,16 @@
     });
   }
 
+  // wireUsersPanelButtons connects the "Add user" and "Change my password"
+  // toolbar buttons in the Users panel.  Called after the DOM is built and
+  // after /api/account resolves (so accountIdentity is populated).
+  function wireUsersPanelButtons() {
+    const addBtn = document.getElementById('users-add-btn');
+    if (addBtn) addBtn.addEventListener('click', openAddUserModal);
+    const chPwBtn = document.getElementById('users-change-pw-btn');
+    if (chPwBtn) chPwBtn.addEventListener('click', openChangePasswordModal);
+  }
+
   function buildPage() {
     const app = document.getElementById('app');
     app.innerHTML = `
@@ -5191,6 +5609,19 @@
             <p class="empty-state">Initializing Flows…</p>
           </div>
         </div>
+        <div id="panel-users" class="tab-panel">
+          <div class="users-toolbar">
+            <h1 class="users-toolbar-title">Users</h1>
+            <span class="users-status" role="status" aria-live="polite"></span>
+            <button class="users-change-pw-btn" type="button" id="users-change-pw-btn"
+              aria-label="Change my password">Change my password</button>
+            <button class="users-add-btn" type="button" id="users-add-btn"
+              aria-label="Add a new user">+ Add user</button>
+          </div>
+          <div class="users-table-wrap" role="region" aria-label="User accounts table">
+            <p class="users-loading">Loading users…</p>
+          </div>
+        </div>
       </div>
       <div id="auth-error">
         <div class="auth-error-box">
@@ -5227,39 +5658,64 @@
       return;
     }
 
-    // Operator chrome: in session mode, show the logged-in operator and a
-    // Logout button.  In bearer mode, the chrome div stays empty (loopback
-    // sessions don't need a logout affordance — closing the terminal stops
-    // the daemon).
-    if (AUTH_MODE === 'session') {
-      // Fetch the current operator identity from /api/account (if available)
-      // or fall back to showing a generic "Signed in" label.
-      const chromeEl = document.getElementById('console-operator-chrome');
-      if (chromeEl) {
-        fetch('/api/account', { credentials: 'same-origin' })
-          .then(function(r) { return r.ok ? r.json() : null; })
-          .then(function(data) {
-            const displayName = (data && (data.username || data.display_name || data.operator_id)) || '';
-            const labelText = displayName ? esc(displayName) : 'Signed in';
-            chromeEl.innerHTML =
-              '<span class="console-op-label" aria-label="Signed in as ' + esc(displayName || 'operator') + '">' +
-                labelText +
-              '</span>' +
-              '<button id="console-logout-btn" class="console-logout-btn" type="button" ' +
-                'aria-label="Sign out">Sign out</button>';
-            const logoutBtn = document.getElementById('console-logout-btn');
-            if (logoutBtn) logoutBtn.addEventListener('click', doLogout);
-          })
-          .catch(function() {
-            // /api/account not available; show a minimal logout button.
-            chromeEl.innerHTML =
-              '<button id="console-logout-btn" class="console-logout-btn" type="button" ' +
-                'aria-label="Sign out">Sign out</button>';
-            const logoutBtn = document.getElementById('console-logout-btn');
-            if (logoutBtn) logoutBtn.addEventListener('click', doLogout);
-          });
+    // Fetch /api/account on boot to populate accountIdentity.
+    // Used for:
+    //   1. Operator chrome display (session mode: username + logout button)
+    //   2. Admin-only tab gating: Users tab is only rendered when role==='admin'
+    //   3. Loopback bearer users are also RoleAdmin → Users tab shows there too
+    //
+    // apiFetch handles auth mode transparently (Bearer in loopback, cookie in
+    // session).  On failure we fall back gracefully: no Users tab shown.
+    apiFetch('GET', '/api/account').then(function(r) {
+      return (r && r.ok) ? r.json() : null;
+    }).then(function(data) {
+      // Populate accountIdentity — used by isAdmin() / renderTabs().
+      if (data) {
+        accountIdentity = {
+          operatorId: data.operatorId || '',
+          role:       data.role       || '',
+          authMethod: data.authMethod || '',
+        };
       }
-    }
+
+      // Session-mode operator chrome: show display name + logout button.
+      if (AUTH_MODE === 'session') {
+        const chromeEl = document.getElementById('console-operator-chrome');
+        if (chromeEl) {
+          const displayName = (data && data.operatorId) || '';
+          const labelText = displayName ? esc(displayName) : 'Signed in';
+          chromeEl.innerHTML =
+            '<span class="console-op-label" aria-label="Signed in as ' + esc(displayName || 'operator') + '">' +
+              labelText +
+            '</span>' +
+            '<button id="console-logout-btn" class="console-logout-btn" type="button" ' +
+              'aria-label="Sign out">Sign out</button>';
+          const logoutBtn = document.getElementById('console-logout-btn');
+          if (logoutBtn) logoutBtn.addEventListener('click', doLogout);
+        }
+      }
+
+      // Re-render tabs now that accountIdentity is known — this makes the
+      // Users tab appear for admins without requiring a page reload.
+      renderTabs();
+
+      // Wire Users panel action buttons now that the panel is in the DOM.
+      wireUsersPanelButtons();
+    }).catch(function() {
+      // /api/account unavailable (e.g. daemon not started with user store).
+      // Session mode: show a minimal logout button.
+      if (AUTH_MODE === 'session') {
+        const chromeEl = document.getElementById('console-operator-chrome');
+        if (chromeEl) {
+          chromeEl.innerHTML =
+            '<button id="console-logout-btn" class="console-logout-btn" type="button" ' +
+              'aria-label="Sign out">Sign out</button>';
+          const logoutBtn = document.getElementById('console-logout-btn');
+          if (logoutBtn) logoutBtn.addEventListener('click', doLogout);
+        }
+      }
+      // Tab bar already rendered without Users tab (accountIdentity is null).
+    });
 
     // Wire filter inputs.
     const topicIn = document.getElementById('filter-topic');

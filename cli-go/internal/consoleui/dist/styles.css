@@ -3388,3 +3388,287 @@ html[data-theme="og"] .flows-btn-primary {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+ * USERS TAB (Phase 5 — admin user management)
+ * ═══════════════════════════════════════════════════════════════════ */
+
+#panel-users {
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 20px;
+  gap: 16px;
+}
+
+#panel-users.active {
+  display: flex;
+}
+
+/* ---- Users toolbar ---- */
+
+.users-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.users-toolbar-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+}
+
+.users-add-btn {
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-control, 4px);
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 14px;
+  transition: background var(--dur, 0.15s) var(--ease, ease);
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-family: var(--font);
+}
+
+html[data-theme="og"] .users-add-btn {
+  color: #000;
+}
+
+.users-add-btn:hover {
+  background: var(--accent-hover);
+}
+
+.users-add-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.users-change-pw-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 4px);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 12px;
+  transition: background var(--dur, 0.15s) var(--ease, ease),
+              color var(--dur, 0.15s) var(--ease, ease),
+              border-color var(--dur, 0.15s) var(--ease, ease);
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-family: var(--font);
+}
+
+.users-change-pw-btn:hover {
+  color: var(--text);
+  border-color: var(--color-border-strong, var(--border));
+}
+
+.users-change-pw-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---- Status live region ---- */
+
+.users-status {
+  font-size: 12px;
+  color: var(--color-positive, #51cf66);
+  flex-shrink: 0;
+  min-height: 1.4em;
+  font-family: var(--font-mono);
+}
+
+.users-status.error {
+  color: var(--color-error, #ff6b6b);
+}
+
+/* ---- Users table wrapper ---- */
+
+.users-table-wrap {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card, 4px);
+  background: var(--surface);
+}
+
+/* FLUID glass panel */
+html[data-theme="fluid"] .users-table-wrap {
+  backdrop-filter: blur(var(--glass-blur, 24px)) saturate(var(--glass-sat, 1.6));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 24px)) saturate(var(--glass-sat, 1.6));
+  background: rgba(20, 22, 29, 0.65);
+}
+
+.users-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.users-table th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  background: rgba(255,255,255,0.02);
+  white-space: nowrap;
+}
+
+html[data-theme="light"] .users-table th {
+  background: rgba(0,0,0,0.02);
+}
+
+.users-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  color: var(--text);
+}
+
+.users-table tr:last-child td {
+  border-bottom: none;
+}
+
+.users-table tr:hover td {
+  background: rgba(255,255,255,0.025);
+}
+
+html[data-theme="light"] .users-table tr:hover td {
+  background: rgba(0,0,0,0.025);
+}
+
+/* ---- Status badge ---- */
+
+.users-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: var(--radius-control, 4px);
+  border: 1px solid transparent;
+}
+
+.users-badge-active {
+  color: var(--color-positive, #51cf66);
+  border-color: var(--color-positive, #51cf66);
+}
+
+.users-badge-disabled {
+  color: var(--color-alarm, #ffa94d);
+  border-color: var(--color-alarm, #ffa94d);
+}
+
+.users-badge-reset {
+  color: var(--color-warning, #F7C843);
+  border-color: var(--color-warning, #F7C843);
+}
+
+/* ---- Row action buttons ---- */
+
+.users-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+}
+
+.users-action-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 4px);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 8px;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease),
+              border-color var(--dur, 0.1s) var(--ease, ease);
+  white-space: nowrap;
+  font-family: var(--font);
+}
+
+.users-action-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--color-border-strong, var(--border));
+  background: rgba(255,255,255,0.05);
+}
+
+html[data-theme="light"] .users-action-btn:hover:not(:disabled) {
+  background: rgba(0,0,0,0.05);
+}
+
+.users-action-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.users-action-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.users-action-btn.danger:hover:not(:disabled) {
+  color: var(--color-error, #ff6b6b);
+  border-color: var(--color-error, #ff6b6b);
+  background: rgba(255, 92, 92, 0.08);
+}
+
+html[data-theme="light"] .users-action-btn.danger:hover:not(:disabled) {
+  background: rgba(220, 38, 38, 0.06);
+}
+
+/* ---- Role select in table ---- */
+
+.users-role-select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 4px);
+  color: var(--text);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  padding: 3px 6px;
+  cursor: pointer;
+}
+
+.users-role-select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---- Loading / empty states ---- */
+
+.users-loading,
+.users-empty {
+  padding: 32px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* ---- Reduced-motion ---- */
+
+@media (prefers-reduced-motion: reduce) {
+  .users-add-btn,
+  .users-change-pw-btn,
+  .users-action-btn {
+    transition: none;
+  }
+}
