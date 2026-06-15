@@ -25,6 +25,7 @@ func TestRole_String(t *testing.T) {
 		role netid.Role
 		want string
 	}{
+		{netid.RoleNone, "none"},
 		{netid.RoleRead, "read"},
 		{netid.RoleDispatch, "dispatch"},
 		{netid.RoleFlowsRun, "flows-run"},
@@ -66,6 +67,9 @@ func TestParseRole_Unknown_DefaultsToRead(t *testing.T) {
 
 func TestRole_Allows_SameRole(t *testing.T) {
 	t.Parallel()
+	// RoleNone.Allows(RoleNone) is technically true (same iota value), but since
+	// RoleNone is purely an internal sentinel and never a "required" role, this is
+	// not a real use case.  We test the four real user-assignable roles here.
 	roles := []netid.Role{netid.RoleRead, netid.RoleDispatch, netid.RoleFlowsRun, netid.RoleAdmin}
 	for _, r := range roles {
 		if !r.Allows(r) {
@@ -109,6 +113,19 @@ func TestRole_Allows_Ordering(t *testing.T) {
 	// read allows nothing higher
 	if netid.RoleRead.Allows(netid.RoleDispatch) {
 		t.Error("read should NOT allow dispatch")
+	}
+	// Phase 3g: RoleNone is below RoleRead — it must not allow any real role.
+	if netid.RoleNone.Allows(netid.RoleRead) {
+		t.Error("RoleNone should NOT allow read (Phase 3g: unauthenticated networked identity must fail all requireRole checks)")
+	}
+	if netid.RoleNone.Allows(netid.RoleDispatch) {
+		t.Error("RoleNone should NOT allow dispatch")
+	}
+	if netid.RoleNone.Allows(netid.RoleFlowsRun) {
+		t.Error("RoleNone should NOT allow flows-run")
+	}
+	if netid.RoleNone.Allows(netid.RoleAdmin) {
+		t.Error("RoleNone should NOT allow admin")
 	}
 }
 
@@ -284,8 +301,11 @@ func TestIdentityFrom_NoMiddleware_ReturnsZero(t *testing.T) {
 	if id.OperatorID != "" {
 		t.Errorf("zero Identity OperatorID=%q; want empty", id.OperatorID)
 	}
-	if id.Role != netid.RoleRead {
-		t.Errorf("zero Identity Role=%v; want RoleRead", id.Role)
+	// Zero-value Role is now RoleNone (the pre-RoleRead sentinel introduced in
+	// Phase 3g hardening).  requireRole gates on Resolved=false, so the zero
+	// Identity is never blocked by role checks even though its Role is RoleNone.
+	if id.Role != netid.RoleNone {
+		t.Errorf("zero Identity Role=%v; want RoleNone (zero-value sentinel)", id.Role)
 	}
 }
 
@@ -320,9 +340,9 @@ func TestResolver_LoopbackTrusted_NoCert_AdminUnauthenticated(t *testing.T) {
 
 // TestResolver_NotLoopbackTrusted_NoCert_FailClosed verifies that when
 // loopbackTrusted=false (non-loopback listener) and no client cert is present,
-// the resolver returns RoleRead/Authenticated=false — NEVER admin.
-// This is the defense-in-depth property: even if a future TLS config is wrong
-// and a certless request arrives, it cannot obtain admin access.
+// the resolver returns RoleNone/Authenticated=false — NEVER admin or read.
+// Phase 3g hardening: RoleNone ensures requireRole(RoleRead) rejects this
+// identity even if requireAuthOrRedirect is somehow bypassed.
 func TestResolver_NotLoopbackTrusted_NoCert_FailClosed(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
@@ -336,7 +356,7 @@ func TestResolver_NotLoopbackTrusted_NoCert_FailClosed(t *testing.T) {
 	id := res.Resolve(r)
 
 	if id.Role == netid.RoleAdmin {
-		t.Error("loopbackTrusted=false + no cert: Role=admin; want RoleRead (fail-closed, NEVER admin)")
+		t.Error("loopbackTrusted=false + no cert: Role=admin; want RoleNone (fail-closed, NEVER admin)")
 	}
 	if id.Authenticated {
 		t.Error("loopbackTrusted=false + no cert: Authenticated=true; want false")
@@ -344,8 +364,14 @@ func TestResolver_NotLoopbackTrusted_NoCert_FailClosed(t *testing.T) {
 	if id.OperatorID != "" {
 		t.Errorf("loopbackTrusted=false + no cert: OperatorID=%q; want empty (no cooperative label off-loopback)", id.OperatorID)
 	}
-	if id.Role != netid.RoleRead {
-		t.Errorf("loopbackTrusted=false + no cert: Role=%v; want RoleRead", id.Role)
+	// Phase 3g: fail-closed now returns RoleNone (< RoleRead) so that requireRole(RoleRead)
+	// also rejects unauthenticated networked identities, providing defense-in-depth.
+	if id.Role != netid.RoleNone {
+		t.Errorf("loopbackTrusted=false + no cert: Role=%v; want RoleNone (Phase 3g fail-closed sentinel)", id.Role)
+	}
+	// RoleNone must not allow RoleRead (the critical property).
+	if id.Role.Allows(netid.RoleRead) {
+		t.Error("loopbackTrusted=false + no cert: RoleNone.Allows(RoleRead) must be false (defense-in-depth)")
 	}
 }
 

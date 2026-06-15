@@ -76,9 +76,24 @@ import (
 type Role int
 
 const (
+	// RoleNone is the zero-value sentinel assigned to unauthenticated networked
+	// identities (certless + sessionless on a non-loopback resolver).  It is
+	// strictly below RoleRead: RoleNone.Allows(x) is false for every real role,
+	// including RoleRead.
+	//
+	// RoleNone is intentionally NOT parseable from any config string and must
+	// never be stored in roles.json or users.json as a user's role.  It is an
+	// internal sentinel for fail-closed, unauthenticated networked identities
+	// only — a defense-in-depth property that makes requireRole(RoleRead) reject
+	// an unauthenticated identity even if requireAuthOrRedirect is somehow skipped.
+	//
+	// Loopback behavior is UNCHANGED: the loopback cooperative-bearer path
+	// produces RoleAdmin (not RoleNone), preserving full local access.
+	RoleNone Role = iota
+
 	// RoleRead permits read-only access (Overview, Cost, Perf, Kanban,
 	// shared transcripts).
-	RoleRead Role = iota
+	RoleRead
 
 	// RoleDispatch permits opening chat panes and running agent dispatches.
 	RoleDispatch
@@ -92,8 +107,12 @@ const (
 )
 
 // String returns the canonical role string used in config files and logs.
+// RoleNone is an internal sentinel; its string representation is "none" and is
+// not accepted by ParseRole (it maps to RoleRead, the least assignable privilege).
 func (r Role) String() string {
 	switch r {
+	case RoleNone:
+		return "none"
 	case RoleRead:
 		return "read"
 	case RoleDispatch:
@@ -103,12 +122,14 @@ func (r Role) String() string {
 	case RoleAdmin:
 		return "admin"
 	default:
-		return "read"
+		return "none"
 	}
 }
 
 // ParseRole converts a role string to a Role constant.
-// Unknown strings return RoleRead (least privilege).
+// Unknown strings return RoleRead (least assignable privilege).
+// "none" is explicitly NOT parseable to RoleNone — RoleNone is an internal
+// sentinel for unauthenticated identities and must not be assignable to users.
 func ParseRole(s string) Role {
 	switch s {
 	case "read":
@@ -124,8 +145,24 @@ func ParseRole(s string) Role {
 	}
 }
 
+// IsAssignableRole reports whether r is a role that may be assigned to a user
+// account.  RoleNone is excluded — it is an internal sentinel for unauthenticated
+// networked identities and must never appear in roles.json or users.json.
+//
+// Callers that accept a netid.Role as user input (Create, SetRole, etc.) should
+// call IsAssignableRole before persisting the value.
+func IsAssignableRole(r Role) bool {
+	switch r {
+	case RoleRead, RoleDispatch, RoleFlowsRun, RoleAdmin:
+		return true
+	default:
+		return false
+	}
+}
+
 // Allows reports whether r has at least the privilege level of needed.
-// Example: RoleAdmin.Allows(RoleDispatch) == true.
+// RoleNone.Allows(any real role) is always false because RoleNone < RoleRead.
+// Example: RoleAdmin.Allows(RoleDispatch) == true; RoleNone.Allows(RoleRead) == false.
 func (r Role) Allows(needed Role) bool {
 	return r >= needed
 }
@@ -219,7 +256,11 @@ type contextKey struct{}
 
 // IdentityFrom retrieves the Identity stored in ctx by Resolver.Middleware.
 // If no middleware has run, it returns a zero Identity (unauthenticated,
-// empty OperatorID, RoleRead).
+// empty OperatorID, RoleNone, Resolved=false).
+//
+// Enforcement middleware (requireRole) checks Identity.Resolved before applying
+// role gates; a zero Identity with Resolved=false is never blocked by role
+// checks, preserving the loopback-via-srv.Handler() test invariant.
 func IdentityFrom(ctx context.Context) Identity {
 	if id, ok := ctx.Value(contextKey{}).(Identity); ok {
 		return id
@@ -392,8 +433,11 @@ type SessionLookupFn func(r *http.Request) (operatorID string, role Role, ok boo
 //     (unchanged): Identity{OperatorID: cooperativeLabel, Role: RoleAdmin,
 //     Authenticated: false, AuthMethod: AuthMethodNone}.
 //  4. Else (networked, no cert, no valid session) → fail-closed:
-//     Identity{OperatorID: "", Role: RoleRead, Authenticated: false,
+//     Identity{OperatorID: "", Role: RoleNone, Authenticated: false,
 //     AuthMethod: AuthMethodNone}.
+//     RoleNone (< RoleRead) ensures requireRole(RoleRead) rejects this
+//     identity even if requireAuthOrRedirect is somehow bypassed (Phase 3g
+//     defense-in-depth).  The primary gate is still requireAuthOrRedirect.
 //
 // The loopbackTrusted flag is a per-resolver trust decision made at
 // construction time by the caller who knows which listener this resolver
@@ -471,7 +515,9 @@ func NewResolverWithSession(
 //  1. Verified client cert → AuthMethodCert.  Cert beats session.
 //  2. Valid session + !loopbackTrusted → AuthMethodSession.
 //  3. loopbackTrusted, no credential → loopback cooperative bearer (AuthMethodNone).
-//  4. Networked, no cert, no valid session → fail-closed (AuthMethodNone).
+//  4. Networked, no cert, no valid session → fail-closed (RoleNone, AuthMethodNone).
+//     Phase 3g: RoleNone ensures requireRole(RoleRead) rejects this identity
+//     even if requireAuthOrRedirect is somehow bypassed.
 func (res *Resolver) Resolve(r *http.Request) Identity {
 	// Step 1: verified mTLS client certificate — highest precedence.
 	// A machine presenting a cert must never be silently downgraded to a
@@ -501,12 +547,17 @@ func (res *Resolver) Resolve(r *http.Request) Identity {
 				AuthMethod:    AuthMethodSession,
 			}
 		}
-		// Session lookup returned ok=false: fall through to fail-closed (step 4).
+		// Session lookup returned ok=false: fail-closed with RoleNone.
+		// RoleNone.Allows(RoleRead) == false so requireRole(RoleRead) rejects
+		// this identity even if requireAuthOrRedirect is somehow skipped (defense-
+		// in-depth; ADR-0005 Phase 3g).  RoleRead is NOT used here because
+		// RoleRead.Allows(RoleRead) == true, which would silently grant read
+		// access to unauthenticated networked requests that bypass the edge.
 		// We do NOT fall through to the loopback path because loopbackTrusted
 		// is false; the loopback path is never reached in this branch.
 		return Identity{
 			OperatorID:    "",
-			Role:          RoleRead,
+			Role:          RoleNone,
 			Authenticated: false,
 			Resolved:      true,
 			AuthMethod:    AuthMethodNone,
@@ -531,9 +582,13 @@ func (res *Resolver) Resolve(r *http.Request) Identity {
 
 	// Step 4: networked listener, no cert, no session → fail-closed.
 	// Never grant admin on a certless request to a non-loopback listener.
+	//
+	// RoleNone is used here (not RoleRead) so that requireRole(RoleRead)
+	// REJECTS this identity even if requireAuthOrRedirect is somehow bypassed
+	// (ADR-0005 Phase 3g defense-in-depth).  RoleNone.Allows(RoleRead) == false.
 	return Identity{
 		OperatorID:    "",
-		Role:          RoleRead,
+		Role:          RoleNone,
 		Authenticated: false,
 		Resolved:      true,
 		AuthMethod:    AuthMethodNone,
