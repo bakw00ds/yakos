@@ -427,31 +427,6 @@ func requireAuthOrRedirect(uStore *userstore.Store, next http.Handler) http.Hand
 	})
 }
 
-// isLoginPath reports whether the request is for /login (any method),
-// /login.js (GET/HEAD), /login.css (GET/HEAD), /setup (any method), or
-// /setup.js (GET/HEAD).  These paths are always accessible without
-// authentication:
-//   - GET /login: serves the login form page.
-//   - POST /login: the authentication endpoint itself.
-//   - GET /login.js: the login form script.
-//   - GET /login.css: the login form stylesheet.
-//   - GET /setup: serves the first-admin setup page.
-//   - POST /setup: the first-admin creation endpoint.
-//   - GET /setup.js: the setup form script.
-//
-// /logout is intentionally excluded: it is a session-auth endpoint and the
-// handler deals gracefully with a missing session (idempotent 200 + clear cookies).
-func isLoginPath(r *http.Request) bool {
-	if r.URL.Path == "/login" || r.URL.Path == "/setup" {
-		return true // any method (GET page, POST auth)
-	}
-	if (r.URL.Path == "/login.js" || r.URL.Path == "/login.css" || r.URL.Path == "/setup.js") &&
-		(r.Method == http.MethodGet || r.Method == http.MethodHead) {
-		return true
-	}
-	return false
-}
-
 // isAPIRequest reports whether r looks like an API/XHR request that should
 // receive a 401 JSON response rather than an HTML redirect.
 //

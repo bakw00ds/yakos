@@ -10,18 +10,22 @@
 // can survive without re-printing (Regenerate restores it from the file or
 // generates fresh if the file is absent).
 //
-// On a successful POST /setup the caller invokes Consume: the in-memory token
-// is zeroed and the marker file is deleted.  A consumed or expired token always
-// returns false from Validate.
+// On a successful POST /setup the caller invokes ValidateAndConsume, which
+// holds the lock across the entire check-and-zero so only one concurrent
+// request can win the token.  A consumed or expired token always returns false.
 //
 // # Security properties
 //
-//   - Single-use: Consume zeros the in-memory token and deletes the file.
-//   - 30-minute expiry: Validate rejects tokens older than TokenTTL.
-//   - Zero-users guard: enforced by the caller (/setup handler) not here.
+//   - Single-use: ValidateAndConsume zeroes the in-memory token and deletes the
+//     file atomically under the mutex — exactly one concurrent winner.
+//   - 30-minute expiry: ValidateAndConsume rejects tokens older than TokenTTL.
+//   - Zero-users guard: enforced by the caller (/setup handler) via
+//     userstore.CreateFirstAdmin which also holds its own lock.
 //   - Constant-time compare via dashauth.TokenEqual.
 //   - Never logged: callers MUST NOT pass the token to any structured logger.
 //   - File at 0600 under 0700 stateDir: reuses userstore/netid file-trust posture.
+//   - File-trust on reload: Lstat rejects symlinks and group/world-writable modes
+//     (Unix; Windows uses parent-dir ACL trust from the 0700 parent directory).
 package setuptoken
 
 import (
@@ -147,6 +151,41 @@ func (s *State) Validate(presented string) bool {
 	return dashauth.TokenEqual(s.token, presented)
 }
 
+// ValidateAndConsume atomically validates presented and, on success, zeroes the
+// in-memory token and deletes the marker file — all under a single lock
+// acquisition.  This is the correct method to call from a request handler:
+// it ensures exactly one concurrent caller wins even if many goroutines present
+// the same valid token simultaneously (TOCTOU defence).
+//
+// Returns true when presented matches the active, unexpired token AND the token
+// has not already been consumed.  Returns false in all other cases, including
+// when presented is empty, the token is expired, or the token was already used.
+//
+// Callers MUST call ValidateAndConsume (not Validate + Consume) from mutation
+// handlers.  Validate remains available for read-only inspection (e.g. IsActive).
+func (s *State) ValidateAndConsume(presented string) bool {
+	if presented == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.token == "" {
+		return false // already consumed
+	}
+	if s.nowFn().After(s.issuedAt.Add(TokenTTL)) {
+		return false // expired
+	}
+	if !dashauth.TokenEqual(s.token, presented) {
+		return false
+	}
+	// Token is valid: consume it atomically under the same lock.
+	s.token = ""
+	s.issuedAt = time.Time{}
+	_ = os.Remove(s.filePath)
+	return true
+}
+
 // Consume invalidates the token: zeroes it in memory and deletes the marker
 // file.  Idempotent: safe to call when no token is active.
 func (s *State) Consume() {
@@ -199,9 +238,35 @@ func (s *State) writeFileLocked(token string, issuedAt time.Time) error {
 	return nil
 }
 
-// readFile reads the marker file and returns the token and issuedAt.
-// Returns an error when the file is absent, unreadable, or malformed.
+// readFile reads the marker file with file-trust hardening and returns the
+// token and issuedAt.
+//
+// Trust model (mirrors userstore.Open):
+//   - Symlinks are rejected: a symlink swap could point the read at an
+//     attacker-controlled file containing a known token value.
+//   - Non-regular files (devices, pipes) are rejected.
+//   - Group- or world-writable permission bits are rejected on Unix
+//     (markerPermOK from perm_unix.go / perm_windows.go).
+//
+// Returns an error when the file is absent, unreadable, untrusted, or malformed.
 func readFile(filePath string) (string, time.Time, error) {
+	fi, err := os.Lstat(filePath) //nolint:gosec
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	// Reject symlinks.
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return "", time.Time{}, fmt.Errorf("setuptoken: %q is a symlink; refusing to use it", filePath)
+	}
+	// Reject non-regular files (devices, named pipes, sockets, etc.).
+	if !fi.Mode().IsRegular() {
+		return "", time.Time{}, fmt.Errorf("setuptoken: %q is not a regular file", filePath)
+	}
+	// Reject unsafe permissions (Unix only; Windows stub always returns true).
+	if !markerPermOK(fi) {
+		return "", time.Time{}, fmt.Errorf("setuptoken: %q has unsafe permissions (must not be group- or world-writable)", filePath)
+	}
+
 	data, err := os.ReadFile(filePath) //nolint:gosec
 	if err != nil {
 		return "", time.Time{}, err

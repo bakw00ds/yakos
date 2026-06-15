@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -889,6 +890,101 @@ func TestPersist_Roundtrip(t *testing.T) {
 	users := s2.List()
 	if len(users) != 2 {
 		t.Fatalf("Roundtrip: got %d users; want 2", len(users))
+	}
+}
+
+// ---- CreateFirstAdmin -------------------------------------------------------
+
+func TestCreateFirstAdmin_ZeroUsers_CreatesAdmin(t *testing.T) {
+	t.Parallel()
+	s := openEmpty(t)
+	if err := s.CreateFirstAdmin("admin", "securepassword1!"); err != nil {
+		t.Fatalf("CreateFirstAdmin: %v", err)
+	}
+	if s.Count() != 1 {
+		t.Errorf("Count after CreateFirstAdmin: got %d; want 1", s.Count())
+	}
+	pub, ok := s.Get("admin")
+	if !ok {
+		t.Fatal("Get('admin'): not found after CreateFirstAdmin")
+	}
+	if pub.Role != netid.RoleAdmin {
+		t.Errorf("first user role = %q; want admin", pub.Role)
+	}
+}
+
+func TestCreateFirstAdmin_UsersExist_ReturnsErrNotFirstUser(t *testing.T) {
+	t.Parallel()
+	s := openEmpty(t)
+	mustCreate(t, s, "existing", "existing-pass-1!", netid.RoleAdmin)
+
+	err := s.CreateFirstAdmin("second", "securepassword1!")
+	if err == nil {
+		t.Fatal("CreateFirstAdmin with existing user: expected error; got nil")
+	}
+	if !errors.Is(err, userstore.ErrNotFirstUser) {
+		t.Errorf("CreateFirstAdmin error = %v; want ErrNotFirstUser", err)
+	}
+	// Original user must still be the only one.
+	if s.Count() != 1 {
+		t.Errorf("Count after rejected CreateFirstAdmin: got %d; want 1", s.Count())
+	}
+}
+
+func TestCreateFirstAdmin_InvalidUsername_ReturnsError(t *testing.T) {
+	t.Parallel()
+	s := openEmpty(t)
+	err := s.CreateFirstAdmin("invalid/user!", "securepassword1!")
+	if err == nil {
+		t.Fatal("CreateFirstAdmin invalid username: expected error; got nil")
+	}
+	if s.Count() != 0 {
+		t.Error("Count should remain 0 after validation failure")
+	}
+}
+
+func TestCreateFirstAdmin_ShortPassword_ReturnsError(t *testing.T) {
+	t.Parallel()
+	s := openEmpty(t)
+	err := s.CreateFirstAdmin("admin", "short")
+	if err == nil {
+		t.Fatal("CreateFirstAdmin short password: expected error; got nil")
+	}
+	if s.Count() != 0 {
+		t.Error("Count should remain 0 after password validation failure")
+	}
+}
+
+func TestCreateFirstAdmin_ConcurrentRace_ExactlyOneSucceeds(t *testing.T) {
+	// Not Parallel: goroutine fan-out test; isolated for -race clarity.
+	const goroutines = 32
+	s := openEmpty(t)
+
+	var (
+		successes int32
+		start     = make(chan struct{})
+	)
+	done := make(chan struct{}, goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(idx int) {
+			<-start
+			username := fmt.Sprintf("admin%d", idx)
+			err := s.CreateFirstAdmin(username, "securepassword1!")
+			if err == nil {
+				atomic.AddInt32(&successes, 1)
+			}
+			done <- struct{}{}
+		}(i)
+	}
+	close(start)
+	for i := 0; i < goroutines; i++ {
+		<-done
+	}
+	if got := atomic.LoadInt32(&successes); got != 1 {
+		t.Errorf("concurrent CreateFirstAdmin: want exactly 1 success, got %d", got)
+	}
+	if s.Count() != 1 {
+		t.Errorf("Count after concurrent CreateFirstAdmin: got %d; want 1", s.Count())
 	}
 }
 

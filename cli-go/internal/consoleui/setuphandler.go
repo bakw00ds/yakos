@@ -11,12 +11,13 @@ package consoleui
 //   - Returns 404 (redirects to /login) when userStore.Count() > 0: setup is over.
 //
 // POST /setup:
+//   - Per-IP rate limit (same limiter as /login) applied before any credential work.
 //   - Accepts {token, username, password} JSON.
-//   - Validates: (a) Count()==0; (b) token present, unexpired, correct
-//     (constant-time); (c) valid username + password >= MinPasswordLen.
-//   - On success: creates first admin, CONSUMES the setup token (zeroes memory
-//     + deletes marker file), audit-logs "first admin created" (username +
-//     remote_ip, never the token).
+//   - Token is validated and consumed atomically via setupToken.ValidateAndConsume:
+//     exactly one concurrent winner; losers get 403 even with the same token.
+//   - On success: creates first admin via userStore.CreateFirstAdmin, which asserts
+//     len(users)==0 atomically with the insert (second defence-in-depth layer).
+//   - Audit-logs "first admin created" (username + remote_ip, never the token).
 //   - Returns 409 when Count()>0 (setup already complete), 403 on bad token,
 //     400 on invalid username/password.
 //
@@ -26,11 +27,11 @@ package consoleui
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
 
-	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/setuptoken"
 	"github.com/bakw00ds/yakos/internal/userstore"
 )
@@ -49,14 +50,29 @@ type setupResponseDTO struct {
 	Message string `json:"message"`
 }
 
+// setupRateLimitRequests / setupRateLimitWindow match the /login rate-limit
+// configuration.  The /setup endpoint triggers argon2 and must not be an
+// unbounded surface even though it is single-use: a malicious operator could
+// race it with many goroutines before the token is consumed, and argon2 is
+// expensive even when every attempt 403s after ValidateAndConsume.
+const (
+	setupRateLimitRequests = loginRateLimitRequests
+	setupRateLimitWindow   = loginRateLimitWindow
+)
+
 // setupHandlers holds the dependencies for the /setup HTTP handlers.
 type setupHandlers struct {
-	setupState *setuptoken.State
-	userStore  *userstore.Store
+	setupState  *setuptoken.State
+	userStore   *userstore.Store
+	rateLimiter *ipRateLimiter
 }
 
 func newSetupHandlers(st *setuptoken.State, uStore *userstore.Store) *setupHandlers {
-	return &setupHandlers{setupState: st, userStore: uStore}
+	return &setupHandlers{
+		setupState:  st,
+		userStore:   uStore,
+		rateLimiter: newIPRateLimiter(setupRateLimitRequests, setupRateLimitWindow),
+	}
 }
 
 // handleSetupPage serves GET /setup — the first-admin creation page.
@@ -88,12 +104,24 @@ func (sh *setupHandlers) handleSetupPage(w http.ResponseWriter, r *http.Request)
 		"object-src 'none'",
 		"form-action 'self'",
 	}, "; "))
+	// Referrer-Policy: no-referrer prevents the browser from leaking the
+	// setup URL (which may still contain ?token= in some operator flows)
+	// to third-party origins via the Referer request header.
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	_, _ = w.Write(setupHTML)
 }
 
 // handleSetup serves POST /setup — creates the first admin user.
+//
+// Defence-in-depth against TOCTOU (concurrent multi-admin amplification):
+//
+//  1. setupState.ValidateAndConsume holds setupToken.mu for the entire
+//     check-and-zero: exactly one goroutine wins; losers get 403.
+//  2. userStore.CreateFirstAdmin asserts len(users)==0 under userStore.mu
+//     atomically with the insert: even if two callers somehow both passed
+//     ValidateAndConsume (which is impossible), only one create succeeds.
 func (sh *setupHandlers) handleSetup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -102,11 +130,10 @@ func (sh *setupHandlers) handleSetup(w http.ResponseWriter, r *http.Request) {
 
 	ip := clientIP(r)
 
-	// Zero-users guard: setup is only valid when no users exist.
-	if sh.userStore == nil || sh.userStore.Count() > 0 {
-		slog.Warn("consoleui: POST /setup rejected: setup already complete",
-			"remote_ip", ip)
-		writeAuthJSON(w, http.StatusConflict, `{"error":"setup already complete"}`)
+	// Per-IP rate limit — applied before any credential work (argon2 is expensive).
+	if !sh.rateLimiter.Allow(ip) {
+		slog.Warn("consoleui: setup rate limit exceeded", "remote_ip", ip)
+		writeAuthJSON(w, http.StatusTooManyRequests, `{"error":"too many requests"}`)
 		return
 	}
 
@@ -117,6 +144,15 @@ func (sh *setupHandlers) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Quick count check before expensive decoding (not a security gate —
+	// CreateFirstAdmin re-checks atomically below).
+	if sh.userStore == nil || sh.userStore.Count() > 0 {
+		slog.Warn("consoleui: POST /setup rejected: setup already complete",
+			"remote_ip", ip)
+		writeAuthJSON(w, http.StatusConflict, `{"error":"setup already complete"}`)
+		return
+	}
+
 	// Decode DTO — requireJSONForMutations has already checked Content-Type.
 	var dto setupRequestDTO
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
@@ -124,39 +160,44 @@ func (sh *setupHandlers) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate token first (constant-time, expiry, single-use guard).
-	if dto.Token == "" || !sh.setupState.Validate(dto.Token) {
-		slog.Warn("consoleui: POST /setup: invalid or expired setup token",
-			"remote_ip", ip)
-		writeAuthJSON(w, http.StatusForbidden, `{"error":"invalid or expired setup token"}`)
-		return
-	}
-
-	// Validate username.
+	// Validate username and password length BEFORE consuming the token so that
+	// a typo doesn't silently burn the one-time token.
 	if dto.Username == "" {
 		writeAuthJSON(w, http.StatusBadRequest, `{"error":"username required"}`)
 		return
 	}
-
-	// Validate password length (before hashing).
 	if len(dto.Password) < userstore.MinPasswordLen {
 		msg := `{"error":"password too short: minimum ` + intToString(userstore.MinPasswordLen) + ` characters"}`
 		writeAuthJSON(w, http.StatusBadRequest, msg)
 		return
 	}
 
-	// Create the first admin user.
-	if err := sh.userStore.Create(dto.Username, dto.Password, netid.RoleAdmin); err != nil {
-		// Check if it's a duplicate-username error (shouldn't happen since
-		// Count()==0 at the top, but defend against a very narrow race).
-		slog.Error("consoleui: POST /setup: create user failed",
+	// Atomically validate AND consume the token under a single lock.
+	// This is the primary TOCTOU defence: exactly one concurrent caller wins.
+	// Losers (wrong token, expired token, already-consumed token) all get 403.
+	if dto.Token == "" || !sh.setupState.ValidateAndConsume(dto.Token) {
+		slog.Warn("consoleui: POST /setup: invalid or expired setup token",
+			"remote_ip", ip)
+		writeAuthJSON(w, http.StatusForbidden, `{"error":"invalid or expired setup token"}`)
+		return
+	}
+
+	// Create the first admin user.  CreateFirstAdmin asserts len(users)==0
+	// under the userStore mutex atomically with the insert (second defence layer).
+	if err := sh.userStore.CreateFirstAdmin(dto.Username, dto.Password); err != nil {
+		slog.Error("consoleui: POST /setup: create first admin failed",
 			"remote_ip", ip,
 			"username", dto.Username,
 			"err", err,
 		)
-		// Distinguish validation errors (400) from other errors (500).
-		// userstore.Create returns validation errors with messages like
-		// "userstore: create: username ... is invalid" or "password too short".
+		// ErrNotFirstUser → 409 (setup already complete, even though we passed the
+		// quick Count() check above — this means a race completed between the check
+		// and the lock).
+		if errors.Is(err, userstore.ErrNotFirstUser) {
+			writeAuthJSON(w, http.StatusConflict, `{"error":"setup already complete"}`)
+			return
+		}
+		// Validation errors (invalid username, password too short) → 400.
 		errMsg := err.Error()
 		if containsValidationKeyword(errMsg) {
 			writeAuthJSON(w, http.StatusBadRequest, `{"error":"`+jsonEscapeString(errMsg)+`"}`)
@@ -165,9 +206,6 @@ func (sh *setupHandlers) handleSetup(w http.ResponseWriter, r *http.Request) {
 		writeAuthJSON(w, http.StatusInternalServerError, `{"error":"internal error"}`)
 		return
 	}
-
-	// Consume the token: single-use guarantee.
-	sh.setupState.Consume()
 
 	// Audit log: username + remote_ip ONLY. Never log the token.
 	slog.Info("consoleui: first admin created via setup token",

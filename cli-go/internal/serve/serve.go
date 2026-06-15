@@ -586,14 +586,19 @@ func Run(ctx context.Context, cfg Config) error {
 					setupSt = nil
 				} else {
 					// Print to daemon's OWN stdout (not stderr, not audit log).
-					// First external host is used for the URL.
+					// Token is printed on a SEPARATE line from the URL so the
+					// operator pastes it into the form field rather than embedding
+					// it in the URL (avoids the token appearing in browser history,
+					// Referer headers, and server access logs).
 					setupHost := externalHosts[0]
 					fmt.Printf("\n")
 					fmt.Printf("  YAKOS CONSOLE: FIRST-TIME SETUP\n")
-					fmt.Printf("  No admin account exists. Create the first admin at:\n")
-					fmt.Printf("  https://%s/setup?token=%s\n", setupHost, tok)
+					fmt.Printf("  No admin account exists.\n")
+					fmt.Printf("  1. Open:        https://%s/setup\n", setupHost)
+					fmt.Printf("  2. Setup token: %s\n", tok)
+					fmt.Printf("     (copy and paste this token into the setup form)\n")
 					fmt.Printf("  Token expires in 30 minutes. To regenerate: yakos console bootstrap-token\n")
-					fmt.Printf("  SECURITY: do not share this token.\n\n")
+					fmt.Printf("  SECURITY: do not share this token. Do not embed it in the URL.\n\n")
 				}
 			}
 			consoleCfg.SetupToken = setupSt

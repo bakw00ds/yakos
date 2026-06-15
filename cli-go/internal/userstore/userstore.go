@@ -160,6 +160,15 @@ func init() {
 // qualification.
 var ErrAuthFailed = errors.New("invalid username or password")
 
+// ErrNotFirstUser is returned by CreateFirstAdmin when the store already
+// contains at least one user.  The caller (POST /setup handler) translates
+// this to a 409 Conflict response so the client knows setup is already done.
+//
+// The check is performed under the store mutex, making the zero-users assertion
+// atomic with the insert — closing the TOCTOU window that exists when a caller
+// does Count()==0 and Create in separate calls.
+var ErrNotFirstUser = errors.New("userstore: admin already exists; use CreateFirstAdmin only on a zero-users store")
+
 // internal sentinel errors (not exported — used only for structured audit logging)
 var (
 	errUnknownUser   = errors.New("userstore: unknown username")
@@ -382,6 +391,46 @@ func (s *Store) Create(username, password string, role netid.Role) error {
 		Username:     username,
 		PasswordHash: hash,
 		Role:         role.String(),
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	})
+	return s.persist()
+}
+
+// CreateFirstAdmin creates the first admin user atomically.  Under the store
+// mutex it asserts len(users)==0 first — returning ErrNotFirstUser if any
+// user already exists — then creates the admin.  This makes the zero-users
+// invariant atomic with the insert, closing the TOCTOU window that would exist
+// if a caller did Count()==0 and Create in separate locking steps.
+//
+// Callers MUST use CreateFirstAdmin (not Create) for the /setup flow.
+// Subsequent user creation uses the ordinary Create method.
+func (s *Store) CreateFirstAdmin(username, password string) error {
+	if err := validateUsername(username); err != nil {
+		return fmt.Errorf("userstore: create-first-admin: %w", err)
+	}
+	if err := validatePassword(password); err != nil {
+		return fmt.Errorf("userstore: create-first-admin: %w", err)
+	}
+
+	hash, err := HashPassword(password)
+	if err != nil {
+		return fmt.Errorf("userstore: create-first-admin: hash password: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Atomically assert zero users under the same lock as the insert.
+	if len(s.data.Users) > 0 {
+		return ErrNotFirstUser
+	}
+
+	now := time.Now().UTC()
+	s.data.Users = append(s.data.Users, user{
+		Username:     username,
+		PasswordHash: hash,
+		Role:         netid.RoleAdmin.String(),
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	})

@@ -78,7 +78,7 @@ func runBootstrapToken(args []string, stdout, stderr io.Writer, stateDir string)
 			printBootstrapTokenHelp(stdout)
 			return nil
 		}
-		if a[0] == '-' {
+		if len(a) > 0 && a[0] == '-' {
 			return fmt.Errorf("console bootstrap-token: unknown flag %q (try --help)", a)
 		}
 	}
@@ -107,8 +107,10 @@ func runBootstrapToken(args []string, stdout, stderr io.Writer, stateDir string)
 
 	fmt.Fprintln(stdout, tok)
 	fmt.Fprintln(stderr, "Setup token generated (expires in 30 minutes).")
-	fmt.Fprintln(stderr, "Use it at: https://<your-console-host>/setup?token=<token>")
+	fmt.Fprintln(stderr, "Navigate to: https://<your-console-host>/setup")
+	fmt.Fprintln(stderr, "Then paste the token above into the setup form.")
 	fmt.Fprintln(stderr, "SECURITY: transmit this token only over a secure channel (e.g. SSH).")
+	fmt.Fprintln(stderr, "  Do NOT embed it in the URL (?token=...) — that would expose it in browser history.")
 
 	return nil
 }
@@ -133,8 +135,10 @@ func printBootstrapTokenHelp(w io.Writer) {
 	fmt.Fprintln(w, "Only available when no admin account exists yet (zero-users state).")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "The token is printed to stdout. It expires in 30 minutes and is single-use.")
-	fmt.Fprintln(w, "Use it at: https://<your-console-host>/setup?token=<token>")
+	fmt.Fprintln(w, "Navigate to: https://<your-console-host>/setup")
+	fmt.Fprintln(w, "Then paste the token into the setup form.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "SECURITY: transmit this token only over a secure channel (e.g. SSH).")
+	fmt.Fprintln(w, "  Do NOT embed it in the URL (?token=...) — that exposes it in browser history.")
 	fmt.Fprintln(w, "  Never share via unencrypted HTTP, Slack, or email attachment.")
 }

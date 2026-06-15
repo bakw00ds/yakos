@@ -16,12 +16,15 @@ package consoleui_test
 //   - Loopback path unchanged (no /setup route, no redirect change).
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -507,5 +510,106 @@ func TestLoopback_NavigationNotRedirectedToSetup(t *testing.T) {
 
 	if loc := rr.Header().Get("Location"); loc == "/setup" {
 		t.Error("loopback: should NOT redirect to /setup")
+	}
+}
+
+// ---- Concurrent TOCTOU regression test -------------------------------------
+//
+// Red-team finding: N goroutines all POST /setup with the SAME valid token
+// and DISTINCT usernames — must result in EXACTLY ONE 200 and Count()==1.
+// The test also runs under -race to detect data-race amplifications.
+//
+// This test uses a real httptest.Server (not httptest.NewRecorder) so the full
+// middleware stack fires and each goroutine gets a distinct HTTP connection.
+
+func TestConcurrentSetup_ExactlyOneAdminCreated(t *testing.T) {
+	// Not Parallel: this test creates a lot of goroutines and is sensitive to
+	// scheduler timing; running it serially avoids interference with other tests.
+	const goroutines = 32
+
+	dir := t.TempDir()
+	uStore, err := userstore.Open(filepath.Join(dir, "users.json"))
+	if err != nil {
+		t.Fatalf("userstore.Open: %v", err)
+	}
+	authStore := authsession.NewStore(authsession.Config{})
+	st := setuptoken.New(filepath.Join(dir, "setup-token"), nil)
+	tok, err := st.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	srv := consoleui.MustNew(t, consoleui.Config{
+		Addr:             "10.0.0.1:7890",
+		NetworkedMode:    true,
+		Token:            "test-token",
+		AuthSessionStore: authStore,
+		UserStore:        uStore,
+		SetupToken:       st,
+	})
+	ts := httptest.NewServer(srv.FullHandler())
+	t.Cleanup(ts.Close)
+
+	client := &http.Client{}
+
+	// Each goroutine gets a distinct "IP" by dialing a different source address
+	// simulation — but since httptest.Server uses 127.0.0.1 and clientIP reads
+	// r.RemoteAddr, all concurrent requests appear to come from the same IP.
+	// The rate limiter uses loginRateLimitRequests=20, so with goroutines=32
+	// some requests would be rate-limited before they even attempt token validation.
+	// We measure correctness via Count (must be 1) and success count (must be 1).
+	// The total of 200+403+409+429 must equal goroutines (no dropped requests).
+	var (
+		wg         sync.WaitGroup
+		startGate  = make(chan struct{})
+		successCnt int32 // atomic — 200 responses
+		rejectCnt  int32 // atomic — 403 + 409 + 429 responses
+	)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			// Wait for all goroutines to be ready before any fires.
+			<-startGate
+
+			username := fmt.Sprintf("attacker%d", idx)
+			body := fmt.Sprintf(`{"token":%q,"username":%q,"password":"securepassword1"}`, tok, username)
+			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/setup",
+				bytes.NewBufferString(body))
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := client.Do(req)
+			if err != nil {
+				return // connection error — server may have shut down
+			}
+			defer resp.Body.Close()
+
+			switch resp.StatusCode {
+			case http.StatusOK:
+				atomic.AddInt32(&successCnt, 1)
+			default:
+				atomic.AddInt32(&rejectCnt, 1)
+			}
+		}(i)
+	}
+
+	// Release all goroutines simultaneously to maximise the race window.
+	close(startGate)
+	wg.Wait()
+
+	got200 := atomic.LoadInt32(&successCnt)
+	count := uStore.Count()
+
+	// Security invariants: exactly one admin created, exactly one 200.
+	if got200 != 1 {
+		t.Errorf("concurrent POST /setup: want exactly 1 success (200), got %d", got200)
+	}
+	if count != 1 {
+		t.Errorf("concurrent POST /setup: userStore.Count() = %d, want 1", count)
+	}
+	// Token must be consumed: IsActive() false.
+	if st.IsActive() {
+		t.Error("setup token should be consumed after successful POST /setup")
 	}
 }

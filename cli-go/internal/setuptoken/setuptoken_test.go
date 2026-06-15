@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -266,6 +267,98 @@ func TestLoadOrGenerate_WhenNoFile(t *testing.T) {
 	}
 	if tok == "" {
 		t.Error("LoadOrGenerate: expected non-empty token")
+	}
+}
+
+// ---- ValidateAndConsume (atomic single-use) ----------------------------------
+
+func TestValidateAndConsume_ValidToken_ReturnsTrue(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st := setuptoken.New(filepath.Join(dir, "setup-token"), nil)
+	tok, _ := st.Generate()
+	if !st.ValidateAndConsume(tok) {
+		t.Error("ValidateAndConsume: valid token should return true")
+	}
+}
+
+func TestValidateAndConsume_ConsumesOnSuccess(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st := setuptoken.New(filepath.Join(dir, "setup-token"), nil)
+	tok, _ := st.Generate()
+	st.ValidateAndConsume(tok)
+	if st.IsActive() {
+		t.Error("ValidateAndConsume: token should be consumed (IsActive false) after success")
+	}
+}
+
+func TestValidateAndConsume_Replay_ReturnsFalse(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st := setuptoken.New(filepath.Join(dir, "setup-token"), nil)
+	tok, _ := st.Generate()
+	if !st.ValidateAndConsume(tok) {
+		t.Fatal("first ValidateAndConsume: should succeed")
+	}
+	// Replay the same token: must fail (already consumed).
+	if st.ValidateAndConsume(tok) {
+		t.Error("replay ValidateAndConsume: should return false after consumption")
+	}
+}
+
+func TestValidateAndConsume_WrongToken_ReturnsFalse(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st := setuptoken.New(filepath.Join(dir, "setup-token"), nil)
+	st.Generate() //nolint:errcheck
+	if st.ValidateAndConsume("wrong-token") {
+		t.Error("ValidateAndConsume: wrong token should return false")
+	}
+	// Token must NOT be consumed on failure.
+	if !st.IsActive() {
+		t.Error("ValidateAndConsume: token should remain active after failed validation")
+	}
+}
+
+func TestValidateAndConsume_EmptyToken_ReturnsFalse(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st := setuptoken.New(filepath.Join(dir, "setup-token"), nil)
+	st.Generate() //nolint:errcheck
+	if st.ValidateAndConsume("") {
+		t.Error("ValidateAndConsume: empty token should return false")
+	}
+}
+
+func TestValidateAndConsume_ConcurrentRace_ExactlyOneWins(t *testing.T) {
+	// Not Parallel: spawns many goroutines; isolated to avoid goroutine noise.
+	const goroutines = 64
+	dir := t.TempDir()
+	st := setuptoken.New(filepath.Join(dir, "setup-token"), nil)
+	tok, err := st.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	var wins int32
+	start := make(chan struct{})
+	done := make(chan struct{}, goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			<-start
+			if st.ValidateAndConsume(tok) {
+				atomic.AddInt32(&wins, 1)
+			}
+			done <- struct{}{}
+		}()
+	}
+	close(start)
+	for i := 0; i < goroutines; i++ {
+		<-done
+	}
+	if got := atomic.LoadInt32(&wins); got != 1 {
+		t.Errorf("concurrent ValidateAndConsume: want exactly 1 win, got %d", got)
 	}
 }
 
