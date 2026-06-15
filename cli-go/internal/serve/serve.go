@@ -537,10 +537,17 @@ func Run(ctx context.Context, cfg Config) error {
 				return fmt.Errorf("serve: console --console-bind: issue server cert: %w", err)
 			}
 			caPool := mtls.CertPoolFromCert(caCert)
-			tlsCfg := mtls.BuildServerTLSConfig(serverCert, caPool)
+			// ADR-0005 Phase 3f: use the hybrid TLS config (VerifyClientCertIfGiven)
+			// instead of RequireAndVerifyClientCert.  Certless connections (password+
+			// session users) can complete the TLS handshake and are authenticated at
+			// the HTTP layer by the resolver + requireAuthOrRedirect middleware.
+			// A presented cert is still verified against caPool — an untrusted cert
+			// still fails the handshake.  Strict machine-to-machine listeners should
+			// continue to use mtls.BuildServerTLSConfig (RequireAndVerifyClientCert).
+			tlsCfg := mtls.BuildServerTLSConfigHybrid(serverCert, caPool)
 
 			// Wire the networked path:
-			//   - TLSConfig: mTLS (RequireAndVerifyClientCert + ClientCAs + TLS1.2+)
+			//   - TLSConfig: hybrid (VerifyClientCertIfGiven + ClientCAs + TLS1.2+)
 			//   - NetworkedMode: true → loopbackTrusted=false in Resolver
 			//   - ExternalHosts: full list for WS Origin allow-list
 			consoleCfg.TLSConfig = tlsCfg
@@ -875,7 +882,8 @@ func printNetworkedConsoleBanner(bindAddr string, externalHosts []string, certFi
 	}
 	fmt.Fprintf(os.Stderr, "  Server cert SHA-256: %s\n", certFingerprint)
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "  Auth model:      mutual TLS (mTLS) — client certs required")
+	fmt.Fprintln(os.Stderr, "  Auth model:      hybrid — mTLS client certs OR password+session")
+	fmt.Fprintln(os.Stderr, "                   (client cert verified if presented; certless users login at /login)")
 	fmt.Fprintf(os.Stderr, "  Role mapping:    %s\n", rolesPath)
 	fmt.Fprintln(os.Stderr, "  Default role:    read (fail-closed; no roles.json = everyone reads)")
 	fmt.Fprintln(os.Stderr, "")

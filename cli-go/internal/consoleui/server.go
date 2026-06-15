@@ -100,8 +100,15 @@ type Config struct {
 	Addr string
 
 	// TLSConfig, when non-nil, causes the server to serve TLS on Listener /
-	// Addr instead of plain HTTP.  Required when NetworkedMode is true (the
-	// caller sets this to the mTLS config from mtls.BuildServerTLSConfig).
+	// Addr instead of plain HTTP.  Required when NetworkedMode is true.
+	//
+	// The console networked listener passes mtls.BuildServerTLSConfigHybrid
+	// (VerifyClientCertIfGiven) so that password+session users can complete
+	// the TLS handshake without a client certificate.  A presented cert is
+	// still verified against ClientCAs; an untrusted cert still fails the
+	// handshake.  For strict cert-required M2M surfaces use
+	// mtls.BuildServerTLSConfig (RequireAndVerifyClientCert) instead.
+	//
 	// MUST be nil when NetworkedMode is false (loopback path unchanged).
 	TLSConfig *tls.Config
 
@@ -340,9 +347,12 @@ func New(cfg Config) (*Server, error) {
 	//   - true  (loopback path): certless requests → RoleAdmin / Authenticated=false.
 	//             Preserves today's cooperative-labeling bearer-token behaviour exactly.
 	//   - false (networked path): certless requests → RoleRead / Authenticated=false.
-	//             Defence-in-depth alongside RequireAndVerifyClientCert in the TLS
-	//             layer — even if TLS config were somehow misconfigured, certless
-	//             requests NEVER receive admin on the networked listener.
+	//             Defence-in-depth alongside the TLS layer — even if TLS config
+	//             were somehow misconfigured, certless requests NEVER receive admin
+	//             on the networked listener.  After Phase 3f, the TLS layer uses
+	//             VerifyClientCertIfGiven (not RequireAndVerifyClientCert) so
+	//             certless connections reach the HTTP layer; the resolver is the
+	//             fail-closed gate for unauthenticated certless requests.
 	//
 	// callerLabelFn extracts the cooperative OperatorID for loopback bearer sessions.
 	// The dispatch facade stamps operator_id from its daemon-level opID on the
@@ -482,8 +492,11 @@ func New(cfg Config) (*Server, error) {
 		// all other routes: session or cert auth via the inner chain.
 		//
 		// The RequireLocalHost guard is intentionally NOT applied here — it would
-		// reject all legitimate non-loopback traffic.  Instead, TLS
-		// RequireAndVerifyClientCert provides the equivalent network-layer guard.
+		// reject all legitimate non-loopback traffic.  The HTTP-layer guard is
+		// requireAuthOrRedirect (inside inner), which blocks certless+sessionless
+		// requests.  After Phase 3f, the TLS layer uses VerifyClientCertIfGiven
+		// so certless connections reach the HTTP layer; requireAuthOrRedirect is
+		// the fail-closed gate that returns 401/302 for unauthenticated requests.
 		protected = requireTokenForNonStaticNetworked(inner)
 	} else {
 		// Loopback path (default): wrap with edge auth unchanged.
@@ -504,8 +517,9 @@ func New(cfg Config) (*Server, error) {
 		// long-lived streaming responses that never complete.  A non-zero
 		// WriteTimeout would force-close them after the deadline.  The server
 		// is loopback-only (no external exposure) on the default path; the
-		// networked path is guarded by mTLS, matching the pattern used in
-		// wsbus/server.go and mcpserver/streamhttp.go.
+		// networked path (ADR-0005 Phase 3f) uses hybrid TLS + HTTP-edge auth
+		// (requireAuthOrRedirect), matching the pattern used in wsbus/server.go
+		// and mcpserver/streamhttp.go.
 		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
 	}
@@ -542,12 +556,14 @@ func (s *Server) ChatHub() *ChatHub { return s.chatHub }
 //   - Binds a plain TCP listener; enforces loopback-only via IsLoopback check.
 //   - Any non-loopback address returns an error before opening the listener.
 //
-// Networked path (NetworkedMode=true): mTLS TLS listener.
-//   - The caller MUST have set cfg.TLSConfig (via mtls.BuildServerTLSConfig) and
-//     must have verified mTLS material is available before calling Serve.
+// Networked path (NetworkedMode=true): hybrid TLS listener (ADR-0005 Phase 3f).
+//   - The caller MUST have set cfg.TLSConfig (via mtls.BuildServerTLSConfigHybrid)
+//     and must have verified mTLS material is available before calling Serve.
 //   - The plain TCP listener is wrapped with tls.NewListener before Serve.
-//   - The loopback-only assertion is NOT applied (intentional: the mTLS layer
-//     is the network-boundary guard for the networked path).
+//   - The loopback-only assertion is NOT applied (intentional: the HTTP-layer
+//     requireAuthOrRedirect is the fail-closed gate for certless+sessionless
+//     requests; the TLS layer uses VerifyClientCertIfGiven so password+session
+//     users can complete the handshake without a client cert).
 func (s *Server) Serve(ctx context.Context) error {
 	var ln net.Listener
 	if s.cfg.Listener != nil {
@@ -641,6 +657,11 @@ func (s *Server) registerRoutes() {
 	// GET /login.js — login form JS (script-src 'self'; no inline scripts).
 	// GET /login.css — login form CSS (style-src 'self'; no unsafe-inline).
 	//
+	// After Phase 3f, certless connections can reach /login (TLS uses
+	// VerifyClientCertIfGiven).  The requireAuthOrRedirect middleware exempts
+	// /login and /setup via isStaticAsset so unauthenticated users can reach
+	// the login form without being redirect-looped.
+	//
 	// Note: /login is registered in New() (after the auth handlers are built)
 	// so that GET and POST can share a single mux pattern with method dispatch.
 	// This avoids a duplicate-pattern panic when both registerRoutes and New()
@@ -668,12 +689,14 @@ func (s *Server) registerRoutes() {
 	// Security rationale: the shell itself carries NO workspace content.
 	// File content is served only by the RoleRead-gated /api/files/* endpoints
 	// and delivered into the editor via postMessage from the authenticated parent
-	// frame.  On the networked path, access is still gated at the transport layer
-	// (mTLS RequireAndVerifyClientCert).  On the loopback path the server is
-	// loopback-only by construction.  Putting a RoleRead gate here conflicted
-	// with navigation reality: browser top-level navigations cannot carry an
-	// Authorization header, so a gated shell always returns 401 on direct open
-	// (the same reason / is exempt — it is a shell, not a data endpoint).
+	// frame.  On the networked path, the shell is reachable by certless browsers
+	// (Phase 3f: TLS uses VerifyClientCertIfGiven); authentication is required
+	// to reach file-content endpoints (requireAuthOrRedirect).  On the loopback
+	// path the server is loopback-only by construction.  Putting a RoleRead gate
+	// on the shell itself conflicted with navigation reality: browser top-level
+	// navigations cannot carry an Authorization header, so a gated shell always
+	// returns 401 on direct open (the same reason / is exempt — it is a shell,
+	// not a data endpoint).
 	//
 	// The scoped ideEditorCSP() is preserved: wasm-unsafe-eval and worker-src
 	// blob: apply ONLY to this route.  The MAIN console CSP (cspHeader) is

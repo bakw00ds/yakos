@@ -69,8 +69,12 @@ func buildConsoleWSHandler(token string, bus *wsbus.Bus, pm *PresenceManager) ht
 }
 
 // buildConsoleWSHandlerNetworked returns an http.Handler mounted at /v1/events
-// for the non-loopback mTLS path.  Differences from the loopback variant:
-//   - No consoleLoopbackOnly guard (TLS RequireAndVerifyClientCert is the guard)
+// for the non-loopback hybrid-TLS path (ADR-0005 Phase 3f).
+// Differences from the loopback variant:
+//   - No consoleLoopbackOnly guard (certless connections reach the HTTP layer
+//     after Phase 3f; the HTTP-layer gate is requireAuthOrRedirect — a certless
+//     and sessionless WS upgrade is rejected at /v1/ with 401 before this
+//     handler is reached).
 //   - consoleOriginAllowListNetworked: loopback + all configured external origins
 //   - consoleAuthSubprotocol still applies (bearer token for WS subprotocol)
 //
@@ -105,10 +109,11 @@ func buildConsoleWSHandlerFull(token string, bus *wsbus.Bus, pm *PresenceManager
 
 	mux := http.NewServeMux()
 	if networked {
-		// Non-loopback (mTLS) path:
-		//   - Skip consoleLoopbackOnly: TLS RequireAndVerifyClientCert enforces
-		//     the network boundary.  The loopback RemoteAddr check would reject
-		//     all legitimate networked traffic.
+		// Non-loopback (hybrid-TLS) path (ADR-0005 Phase 3f):
+		//   - Skip consoleLoopbackOnly: the loopback RemoteAddr check would
+		//     reject all legitimate networked traffic.  Certless+sessionless
+		//     connections are rejected upstream by requireAuthOrRedirect (returns
+		//     401 for /v1/ paths) before reaching this handler.
 		//   - Use extended Origin allow-list that includes all external hosts.
 		mux.Handle("/v1/events",
 			consoleOriginAllowListNetworked(externalHosts,
@@ -199,11 +204,13 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) webs
 		// the hello frame.
 		//
 		// The cert is on conn.Request().TLS.VerifiedChains (set by Go's TLS stack
-		// after RequireAndVerifyClientCert verification).  We use netid.CNFromTLS
-		// to extract it; if extraction fails (cert absent or chain empty) we fall
-		// through to the claimed hello.OperatorID — the TLS handshake already
-		// rejected any connection without a valid client cert, so a missing CN
-		// here is unexpected but not a security regression.
+		// after cert verification).  We use netid.CNFromTLS to extract it; if
+		// extraction fails (cert absent or chain empty — e.g. a session-auth user
+		// with no client cert) we fall through to the claimed hello.OperatorID.
+		// Phase 3f: with VerifyClientCertIfGiven, a session-auth user reaches
+		// this point with VerifiedChains empty; the CN extraction returns ("", false)
+		// and hello.OperatorID (resolved by the resolver from the session) is used.
+		// Cert-auth users still have VerifiedChains populated; CN wins over hello.
 		//
 		// On the loopback path (networked=false) hello.OperatorID is used as-is
 		// (cooperative attribution; loopback = trusted network boundary).
