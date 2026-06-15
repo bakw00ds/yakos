@@ -1205,6 +1205,41 @@ func TestFleetWS_SharedSessionVisibleToBoth(t *testing.T) {
 	connB.SetReadDeadline(time.Time{}) //nolint:errcheck
 }
 
+// TestFleetWS_NilMetaFailsClosed is the regression test for the fail-closed
+// hardening: a hand-built fleet.* Event{} with Meta == nil must be withheld
+// from any connection whose connOperatorID is non-empty.
+//
+// This guards against a future code path that constructs a fleet event without
+// going through Bus.PublishMeta — such an event must not leak to other operators.
+func TestFleetWS_NilMetaFailsClosed(t *testing.T) {
+	// Unit-test fleetEventVisible directly: it is unexported but accessible from
+	// the same package (consoleui internal test file).
+	nilMetaEv := wsbus.Event{
+		Topic:   wsbus.TopicFleetStarted,
+		Payload: json.RawMessage(`{"session_id":"sess-x","agent":"backend"}`),
+		Meta:    nil, // hand-built without PublishMeta — Meta is nil
+	}
+
+	// An authenticated connection (non-empty connOperatorID) must NOT receive it.
+	if fleetEventVisible(nilMetaEv, "alice") {
+		t.Error("SECURITY: fleetEventVisible returned true for fleet event with nil Meta and non-empty connOperatorID; must fail closed")
+	}
+	if fleetEventVisible(nilMetaEv, "bob") {
+		t.Error("SECURITY: fleetEventVisible returned true for fleet event with nil Meta and non-empty connOperatorID; must fail closed")
+	}
+
+	// Loopback path (empty connOperatorID) still delivers — single-operator, no isolation needed.
+	if !fleetEventVisible(nilMetaEv, "") {
+		t.Error("fleetEventVisible returned false for fleet event with nil Meta on loopback path (connOperatorID=''); want true")
+	}
+
+	// Non-fleet topics with nil Meta must still pass through.
+	kanbanEv := wsbus.Event{Topic: wsbus.TopicKanbanAdded, Meta: nil}
+	if !fleetEventVisible(kanbanEv, "alice") {
+		t.Error("fleetEventVisible returned false for non-fleet topic with nil Meta; must pass through")
+	}
+}
+
 // TestFleetWS_NonFleetTopicsUnaffected verifies that the fleet filter does not
 // accidentally drop non-fleet topics (kanban, presence, etc.).
 func TestFleetWS_NonFleetTopicsUnaffected(t *testing.T) {

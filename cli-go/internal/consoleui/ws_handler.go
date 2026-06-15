@@ -371,10 +371,14 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) webs
 // For fleet.* topics, the event's EventMeta carries OwnerOperatorID and Shared.
 // The event is visible when:
 //   - connOperatorID is empty (loopback / single-operator path — no isolation needed)
-//   - ev.Meta is nil (non-fleet topic — all subscribers receive it)
 //   - ev.Meta.OwnerOperatorID is empty (broadcast event)
 //   - ev.Meta.OwnerOperatorID == connOperatorID (the connection owns the session)
 //   - ev.Meta.Shared is true (the session is shared; all operators may see it)
+//
+// Fail-closed: a fleet.* event with nil Meta is WITHHELD from any authenticated
+// connection (connOperatorID != "").  Any future code path that hand-builds a
+// fleet Event{} without going through Bus.PublishMeta must not leak to other
+// operators — withholding is the safe default.
 //
 // All non-fleet topics pass through unchanged (Meta is nil for those events).
 // The client payload is NEVER modified; Meta is server-side-only (json:"-").
@@ -387,10 +391,10 @@ func fleetEventVisible(ev wsbus.Event, connOperatorID string) bool {
 	if connOperatorID == "" {
 		return true
 	}
-	// No meta means this event predates the filter (or was published without
-	// PublishMeta — should not happen in production but handle defensively).
+	// Fail-closed: fleet event with no meta must be withheld from authenticated
+	// connections.  PublishMeta is the only correct publish path for fleet topics.
 	if ev.Meta == nil {
-		return true
+		return false
 	}
 	// Broadcast fleet event (OwnerOperatorID empty): deliver to all.
 	if ev.Meta.OwnerOperatorID == "" {
