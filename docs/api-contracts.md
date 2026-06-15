@@ -442,11 +442,98 @@ CSP: `script-src 'self'; form-action 'self'`. No inline scripts.
 
 | File | Purpose |
 |---|---|
-| `cli-go/internal/consoleui/authhandler.go` | POST /login, POST /logout, CSRF middleware, edge redirect/401, per-IP rate limiter |
-| `cli-go/internal/consoleui/server.go` | Middleware chain wiring, `/login` and `/logout` route registration, `FullHandler()` |
+| `cli-go/internal/consoleui/authhandler.go` | POST /login, POST /logout, CSRF middleware, edge redirect/401, per-IP rate limiter, zero-users redirect target |
+| `cli-go/internal/consoleui/server.go` | Middleware chain wiring, `/login`, `/logout`, `/setup`, `/setup.js` route registration, `FullHandler()` |
+| `cli-go/internal/consoleui/setuphandler.go` | GET /setup (page), POST /setup (create first admin), GET /setup.js |
 | `cli-go/internal/consoleui/sessionauth.go` | `buildSessionLookupFn` glue (Phase 3a, updated to use `sessionCookieName`) |
 | `cli-go/internal/consoleui/export_test.go` | Test exports: `LoginRateLimitRequests`, `SessionCookieName`, `RequireCSRFForSessionForTest` |
-| `cli-go/internal/consoleui/auth_3b_test.go` | 15 test cases covering the full Phase 3b surface (race-enabled) |
+| `cli-go/internal/consoleui/auth_3b_test.go` | Phase 3b test cases (race-enabled) |
+| `cli-go/internal/consoleui/setup_test.go` | Phase 3c test cases: /setup route, edge redirect, loopback invariant (race-enabled) |
 | `cli-go/internal/consoleui/dist/login.html` | Minimal login page HTML (CSP-compliant, no inline scripts) |
 | `cli-go/internal/consoleui/dist/login.js` | Login form JS (`script-src 'self'`) |
+| `cli-go/internal/consoleui/dist/setup.html` | First-admin setup page HTML (CSP-compliant, no inline scripts) |
+| `cli-go/internal/consoleui/dist/setup.js` | Setup form JS (`script-src 'self'`) |
+| `cli-go/internal/setuptoken/setuptoken.go` | One-time setup token: generate, validate (constant-time), consume, file persistence |
+| `cli-go/internal/consolecmd/consolecmd.go` | `yakos console bootstrap-token` CLI: regenerate setup token when Count()==0 |
 | `cli-go/internal/authsession/export_test.go` | `CookieNameSession` export for authsession invariant tests |
+
+---
+
+## Console setup endpoints (ADR-0005 Phase 3c) — port 7890
+
+These endpoints are on the networked console server (port 7890, not the REST API at 7892). They are active only when `ConsoleBind` is a non-loopback address (`NetworkedMode=true`).
+
+### GET /setup
+
+**Auth:** None (exempt — must be reachable before any user exists)
+
+**Behavior:**
+- When `Count()==0`: serves the first-admin setup page HTML.
+- When `Count()>0`: 302 redirect to `/login` (setup is complete).
+
+**Security notes:** CSP `form-action 'self'`, no inline scripts, `X-Content-Type-Options: nosniff`.
+
+---
+
+### POST /setup
+
+**Auth:** None (setup token in request body)
+
+**Content-Type:** `application/json` (enforced by `requireJSONForMutations`)
+
+**Request body:**
+```json
+{
+  "token": "<setup-token-from-daemon-stdout>",
+  "username": "firstadmin",
+  "password": "securepassword123"
+}
+```
+
+- `token`: required; must match the in-memory setup token (constant-time), unexpired (30-min TTL), not yet consumed.
+- `username`: required; must match `[A-Za-z0-9._@-]{1,64}`, not "." or "..".
+- `password`: required; minimum `userstore.MinPasswordLen` (12) characters.
+
+**Response 200:**
+```json
+{"ok": true, "message": "admin account created; please sign in"}
+```
+
+Token is consumed on 200. User is created with `RoleAdmin`.
+
+**Response 400:** Invalid username or password too short.
+
+**Response 403:** Token missing, wrong, expired, or already consumed.
+
+**Response 409:** `Count()>0` at time of request (setup already complete).
+
+**Idempotency:** NOT idempotent — POST /setup is intentionally single-use. A second request after success returns 409.
+
+**Audit log entry (server-side):** `"first admin created via setup token"` — fields: `username`, `remote_ip`. Token value is NEVER logged.
+
+**Post-setup behavior:** The /setup endpoint refuses all further requests (409). The only path to additional users is the admin Users panel or `yakos console user add` (future phases).
+
+---
+
+### GET /setup.js
+
+**Auth:** None (token-exempt static asset)
+
+The setup form JS, served same-origin under `script-src 'self'`.
+
+---
+
+## CLI: yakos console bootstrap-token
+
+**Auth:** Local host trust (must run on the daemon host; file-system trust via stateDir 0700)
+
+**Command:** `yakos console bootstrap-token`
+
+**Behavior:**
+- When `Count()==0`: generates a fresh 30-minute setup token, writes marker file at `<stateDir>/setup-token` (0600), prints token to stdout. Previous token (if any) is replaced.
+- When `Count()>0`: error; directs operator to Users panel or `yakos console user add`.
+
+**Output (stdout):** Raw base64url token only (no surrounding text).
+**Output (stderr):** Human-readable status message and security reminder.
+
+**Security note:** The token is the recovery path if the original daemon-startup token is lost or expired. Transmit only over a secure channel (e.g., SSH session to the daemon host).

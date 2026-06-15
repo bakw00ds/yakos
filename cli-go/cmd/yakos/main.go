@@ -37,6 +37,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/checkpoint"
 	"github.com/bakw00ds/yakos/internal/compact"
 	"github.com/bakw00ds/yakos/internal/completion"
+	"github.com/bakw00ds/yakos/internal/consolecmd"
 	internalconsoleui "github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
@@ -349,6 +350,8 @@ func main() {
 		runHooks(args[1:])
 	case "serve":
 		runServe(yakosRoot, args[1:])
+	case "console":
+		runConsole(args[1:])
 	case "mtls":
 		runMTLS(args[1:])
 	case "events":
@@ -6084,6 +6087,18 @@ Exit codes:
 func runMTLS(args []string) {
 	if err := mtlscmd.Run(args, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "mtls: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// ---- console command --------------------------------------------------------
+
+// runConsole implements `yakos console <subcommand> [flags]`.
+// It delegates to internal/consolecmd and uses the same error/exit style as
+// other yakos subcommands (stderr + os.Exit(1)).
+func runConsole(args []string) {
+	if err := consolecmd.Run(args, os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "console: %v\n", err)
 		os.Exit(1)
 	}
 }
