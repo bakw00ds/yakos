@@ -19,6 +19,45 @@ import (
 	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
+// genericAgentPrompt is the minimal system prompt used when dispatching to a
+// bare runtime name (e.g. "claude", "codex", "gemini") that has no specialist
+// .md file in the composed roster. It provides a functional but intentionally
+// minimal persona — no specialist constraints, no yakOS-specific lore.
+const genericAgentPrompt = "You are a helpful AI assistant. Answer the user's request clearly and concisely."
+
+// IsKnownRuntime reports whether name equals a known yakOS runtime identifier
+// (claude, codex, agy, gemini). Used by the dispatch layer to decide whether a
+// missing agent name should resolve to a generic catch-all rather than error.
+func IsKnownRuntime(name string) bool {
+	for _, r := range runtime.Known {
+		if r == name {
+			return true
+		}
+	}
+	return false
+}
+
+// GenericAgentForRuntime returns a minimal ComposedAgent that runs on the
+// named runtime with no specialist system prompt. It is used when the caller
+// requests a bare runtime name ("claude", "codex", etc.) that has no
+// corresponding agent .md file in the composed roster.
+//
+// The returned agent's ID and runtime both equal name.  Model is left empty so
+// the runtime picks its default.
+//
+// Callers must verify IsKnownRuntime(name) before calling this function; it
+// panics on an unknown name to surface programming errors early.
+func GenericAgentForRuntime(name string) ComposedAgent {
+	if !IsKnownRuntime(name) {
+		panic("agentscompose: GenericAgentForRuntime called with unknown runtime: " + name)
+	}
+	return ComposedAgent{
+		ID:          name,
+		Description: "Generic " + name + " agent (no specialist persona)",
+		Prompt:      genericAgentPrompt,
+	}
+}
+
 // ComposedAgent is a single resolved agent ready for materialization.
 type ComposedAgent struct {
 	// ID is the canonical agent identifier (filename stem, e.g. "backend").

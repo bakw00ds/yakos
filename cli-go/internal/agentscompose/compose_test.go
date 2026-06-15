@@ -398,3 +398,56 @@ func TestAgentToJSON_NoTools(t *testing.T) {
 		t.Errorf("JSON should not contain tools when nil; got %s", jsonStr)
 	}
 }
+
+// ---- IsKnownRuntime + GenericAgentForRuntime ---------------------------------
+
+func TestIsKnownRuntime_KnownNames(t *testing.T) {
+	for _, name := range []string{"claude", "codex", "agy", "gemini"} {
+		if !IsKnownRuntime(name) {
+			t.Errorf("IsKnownRuntime(%q) = false, want true", name)
+		}
+	}
+}
+
+func TestIsKnownRuntime_UnknownName(t *testing.T) {
+	if IsKnownRuntime("nope") {
+		t.Error("IsKnownRuntime(\"nope\") = true, want false")
+	}
+	if IsKnownRuntime("") {
+		t.Error("IsKnownRuntime(\"\") = true, want false")
+	}
+	if IsKnownRuntime("backend") {
+		t.Error("IsKnownRuntime(\"backend\") = true, want false; specialist names are not runtimes")
+	}
+}
+
+func TestGenericAgentForRuntime_Fields(t *testing.T) {
+	for _, name := range []string{"claude", "codex", "agy", "gemini"} {
+		agent := GenericAgentForRuntime(name)
+		if agent.ID != name {
+			t.Errorf("GenericAgentForRuntime(%q).ID = %q, want %q", name, agent.ID, name)
+		}
+		if agent.Prompt == "" {
+			t.Errorf("GenericAgentForRuntime(%q).Prompt is empty", name)
+		}
+		if agent.Description == "" {
+			t.Errorf("GenericAgentForRuntime(%q).Description is empty", name)
+		}
+		// Generic agent has no specialist tools or model restriction.
+		if len(agent.Tools) != 0 {
+			t.Errorf("GenericAgentForRuntime(%q).Tools should be empty; got %v", name, agent.Tools)
+		}
+		if agent.Model != "" {
+			t.Errorf("GenericAgentForRuntime(%q).Model should be empty (runtime picks default); got %q", name, agent.Model)
+		}
+	}
+}
+
+func TestGenericAgentForRuntime_PanicsOnUnknown(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("GenericAgentForRuntime(\"nope\") should panic")
+		}
+	}()
+	GenericAgentForRuntime("nope")
+}
