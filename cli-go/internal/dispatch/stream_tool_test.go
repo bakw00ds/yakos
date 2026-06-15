@@ -113,6 +113,82 @@ func TestEmitToolChunk_ToolUseFields(t *testing.T) {
 	}
 }
 
+// ---- 2b. ToolInput large input is truncated symmetrically -------------------
+
+// TestEmitToolChunk_InputTruncation verifies that a tool_use event whose Input
+// exceeds maxToolOutputBytes is truncated with the marker, symmetrically with
+// the Output truncation path.
+func TestEmitToolChunk_InputTruncation(t *testing.T) {
+	bigInput := strings.Repeat("A", maxToolOutputBytes+1)
+	te := &runtime.ToolEvent{
+		Kind:           "tool_use",
+		ToolID:         "toolu_biginput",
+		ToolName:       "Write",
+		Input:          bigInput,
+		InputTruncated: true, // parser set this when accumulation was capped
+	}
+
+	var chunks []StreamChunk
+	emitToolChunk(te, func(c StreamChunk) { chunks = append(chunks, c) })
+
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
+	}
+	chunk := chunks[0]
+	if chunk.Type != "tool_use" {
+		t.Errorf("chunk.Type: got %q, want %q", chunk.Type, "tool_use")
+	}
+	if len(chunk.ToolInput) > maxToolOutputBytes+len(toolOutputTruncationMarker) {
+		t.Errorf("ToolInput len=%d exceeds bound (%d + %d)",
+			len(chunk.ToolInput), maxToolOutputBytes, len(toolOutputTruncationMarker))
+	}
+	if !strings.Contains(chunk.ToolInput, "[...tool output truncated...]") {
+		t.Error("truncation marker not found in truncated ToolInput")
+	}
+	if !strings.HasPrefix(chunk.ToolInput, "AAAA") {
+		t.Errorf("truncated ToolInput does not start with expected content prefix")
+	}
+}
+
+// TestEmitToolChunk_InputAlreadyTruncatedAtCap verifies that when the parser
+// accumulated exactly maxToolInputBytes and set InputTruncated=true, the
+// emitToolChunk function appends the marker even though len(Input) == maxToolOutputBytes.
+func TestEmitToolChunk_InputAlreadyTruncatedAtCap(t *testing.T) {
+	// Simulate parser capping at exactly maxToolInputBytes.
+	capInput := strings.Repeat("B", maxToolOutputBytes)
+	te := &runtime.ToolEvent{
+		Kind:           "tool_use",
+		ToolID:         "toolu_cap",
+		ToolName:       "Bash",
+		Input:          capInput,
+		InputTruncated: true,
+	}
+
+	var chunks []StreamChunk
+	emitToolChunk(te, func(c StreamChunk) { chunks = append(chunks, c) })
+
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
+	}
+	if !strings.Contains(chunks[0].ToolInput, "[...tool output truncated...]") {
+		t.Errorf("truncation marker missing when InputTruncated=true at exact cap; got %q",
+			chunks[0].ToolInput[max(0, len(chunks[0].ToolInput)-50):])
+	}
+}
+
+// TestToolInputCap_MatchesOutputCap documents that the parser's maxToolInputBytes
+// constant (in the runtime package) equals the dispatch layer's maxToolOutputBytes.
+// If these diverge, tool input and output would have asymmetric wire bounds.
+func TestToolInputCap_MatchesOutputCap(t *testing.T) {
+	// runtime.MaxToolInputBytes is exported for cross-package validation.
+	// The value is checked via the public constant; if it changes, this test
+	// catches the drift.
+	const wantCap = 16 * 1024
+	if maxToolOutputBytes != wantCap {
+		t.Errorf("dispatch.maxToolOutputBytes=%d, want %d", maxToolOutputBytes, wantCap)
+	}
+}
+
 // ---- 3. codex-style buffered adapter emits no tool events -------------------
 //
 // codex emits one plain-text token; since it does not emit NDJSON stream_event

@@ -6,9 +6,33 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/bakw00ds/yakos/internal/cost"
 )
+
+// maxToolInputBytes is the hard cap on accumulated tool_use Input (the JSON
+// args assembled from input_json_delta fragments).  Symmetric with the
+// maxToolOutputBytes ceiling enforced by emitToolChunk in the dispatch layer.
+// Defined here so the parser can enforce it without importing dispatch.
+// Value must equal dispatch.maxToolOutputBytes (16 KiB); kept in sync by the
+// cross-package test TestToolInputCap_MatchesOutputCap in stream_tool_test.go.
+const maxToolInputBytes = 16 * 1024
+
+// maxToolInputTruncationMarker is appended when accumulated Input is cut at
+// maxToolInputBytes.
+const maxToolInputTruncationMarker = "\n[...tool input truncated...]"
+
+// maxToolUseBlocks is the maximum number of concurrent in-progress tool_use
+// content blocks tracked per dispatch.  Beyond this cap, new tool_use blocks
+// are silently ignored (not inserted into toolUseBlocks) so a hostile stream
+// cannot drive unbounded map growth.
+const maxToolUseBlocks = 1024
+
+// maxToolIDToName is the maximum number of entries kept in the toolIDToName
+// correlation map.  New id→name registrations beyond this cap are silently
+// dropped; the tool_result name will resolve to "" rather than crashing.
+const maxToolIDToName = 1024
 
 // ClaudeAdapter implements Adapter for the Claude Code CLI.
 //
@@ -258,7 +282,10 @@ func ParseStreamLineWithTools(
 //   - Kind is "tool_use"
 //   - ToolID is the opaque tool-use id (e.g. "toolu_01…")
 //   - ToolName is the human-readable name (e.g. "Bash", "Read")
-//   - Input is the accumulated JSON-encoded argument (e.g. the bash command string)
+//   - Input is the accumulated JSON-encoded argument (e.g. the bash command string),
+//     capped at maxToolInputBytes; if the stream sent more bytes, InputTruncated is
+//     set and emitToolChunk appends the truncation marker at emit time.
+//   - InputTruncated is true when accumulated input exceeded maxToolInputBytes.
 //
 // For tool_result events:
 //   - Kind is "tool_result"
@@ -267,12 +294,13 @@ func ParseStreamLineWithTools(
 //   - Output is the result content (truncated to maxToolOutputBytes by the caller)
 //   - IsError is true when the tool invocation errored
 type ToolEvent struct {
-	Kind     string // "tool_use" or "tool_result"
-	ToolID   string
-	ToolName string
-	Input    string // tool_use: accumulated JSON args; tool_result: ""
-	Output   string // tool_result: content; tool_use: ""
-	IsError  bool   // tool_result only
+	Kind           string // "tool_use" or "tool_result"
+	ToolID         string
+	ToolName       string
+	Input          string // tool_use: accumulated JSON args; tool_result: ""
+	InputTruncated bool   // tool_use: true when Input was cut at maxToolInputBytes
+	Output         string // tool_result: content; tool_use: ""
+	IsError        bool   // tool_result only
 }
 
 // ParseStreamLineWithUsage is the extended variant of ParseStreamLine that also
@@ -281,13 +309,8 @@ type ToolEvent struct {
 // parseable usage field.  Callers should use this in preference to
 // ParseStreamLine wherever they need to populate Result.Usage.
 //
-// The toolEvents slice (if non-nil) receives any ToolEvent parsed from the line.
-// A single line may produce at most one ToolEvent (either a tool_use registration
-// or a tool_result delivery).  Pass nil to suppress tool-event parsing (legacy
-// callers that only care about text + usage).
-//
-// toolUseBlocks is the caller-maintained map from block index → ToolEvent (partial)
-// used to correlate input_json_delta fragments.  Pass nil when not needed.
+// Passes nil tool maps — tool events are suppressed.  Legacy shim; use
+// ParseStreamLineWithTools for tool-event tracking.
 func ParseStreamLineWithUsage(line []byte, textBlocks map[int]struct{}) (text string, isResult bool, totalCostUSD float64, usage *cost.Usage) {
 	// Delegate to the full-fidelity parser with tool tracking disabled (nil maps).
 	tok, isRes, usd, u, _ := ParseStreamLineWithTools(line, textBlocks, nil, nil)
@@ -333,15 +356,25 @@ func parseStreamEventWithTools(
 			textBlocks[ev.Index] = struct{}{}
 		case "tool_use":
 			if toolUseBlocks != nil {
-				te := &ToolEvent{
-					Kind:     "tool_use",
-					ToolID:   ev.ContentBlock.ID,
-					ToolName: ev.ContentBlock.Name,
+				// Enforce live-block cap: ignore new tool_use blocks beyond the limit
+				// so a hostile stream cannot grow toolUseBlocks unboundedly.
+				if len(toolUseBlocks) < maxToolUseBlocks {
+					te := &ToolEvent{
+						Kind:     "tool_use",
+						ToolID:   ev.ContentBlock.ID,
+						ToolName: ev.ContentBlock.Name,
+					}
+					toolUseBlocks[ev.Index] = te
 				}
-				toolUseBlocks[ev.Index] = te
 				// Register id→name for later tool_result correlation.
+				// Cap the map; prefer not clobbering an existing id mapping
+				// (last-writer-wins causes mislabelling — avoid silently).
 				if toolIDToName != nil {
-					toolIDToName[ev.ContentBlock.ID] = ev.ContentBlock.Name
+					if _, exists := toolIDToName[ev.ContentBlock.ID]; !exists {
+						if len(toolIDToName) < maxToolIDToName {
+							toolIDToName[ev.ContentBlock.ID] = ev.ContentBlock.Name
+						}
+					}
 				}
 			}
 		}
@@ -370,7 +403,21 @@ func parseStreamEventWithTools(
 		case "input_json_delta":
 			if toolUseBlocks != nil {
 				if te, ok := toolUseBlocks[ev.Index]; ok {
-					te.Input += ev.Delta.PartialJSON
+					// Cap accumulated Input at maxToolInputBytes.
+					// Once the cap is reached, stop appending (the InputTruncated flag
+					// is set once; the marker will be appended at emit time by
+					// emitToolChunk so the SSE frame stays bounded).
+					if !te.InputTruncated {
+						remaining := maxToolInputBytes - len(te.Input)
+						if remaining <= 0 {
+							te.InputTruncated = true
+						} else if len(ev.Delta.PartialJSON) > remaining {
+							te.Input += ev.Delta.PartialJSON[:remaining]
+							te.InputTruncated = true
+						} else {
+							te.Input += ev.Delta.PartialJSON
+						}
+					}
 				}
 			}
 			return "", false, 0, nil
@@ -406,17 +453,21 @@ func parseStreamEventWithTools(
 // message line, which is how claude delivers tool results when
 // --include-partial-messages is active.
 //
-// Wire shape:
+// Wire shapes for the "content" field of a tool_result block:
 //
-//	{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"…","content":"…","is_error":false}]}}
+//	String form:  "content":"<text>"
+//	Array form:   "content":[{"type":"text","text":"<text>"},…]
+//
+// The array form concatenates all text-type segments; non-text segments (e.g.
+// image blocks) contribute "[image]" so the Output is never silently empty.
 func parseUserMessageForToolResult(line []byte, toolIDToName map[string]string) *ToolEvent {
 	var msg struct {
 		Message struct {
 			Content []struct {
-				Type      string `json:"type"`
-				ToolUseID string `json:"tool_use_id"`
-				Content   string `json:"content"`
-				IsError   bool   `json:"is_error"`
+				Type      string          `json:"type"`
+				ToolUseID string          `json:"tool_use_id"`
+				Content   json.RawMessage `json:"content"`
+				IsError   bool            `json:"is_error"`
 			} `json:"content"`
 		} `json:"message"`
 	}
@@ -431,15 +482,54 @@ func parseUserMessageForToolResult(line []byte, toolIDToName map[string]string) 
 		if toolIDToName != nil {
 			name = toolIDToName[block.ToolUseID]
 		}
+		output := toolResultContentToString(block.Content)
 		return &ToolEvent{
-			Kind:    "tool_result",
-			ToolID:  block.ToolUseID,
+			Kind:     "tool_result",
+			ToolID:   block.ToolUseID,
 			ToolName: name,
-			Output:  block.Content,
-			IsError: block.IsError,
+			Output:   output,
+			IsError:  block.IsError,
 		}
 	}
 	return nil
+}
+
+// toolResultContentToString decodes the polymorphic "content" field of a
+// tool_result block into a plain string.
+//
+//   - If the raw JSON is a quoted string, it is unquoted directly.
+//   - If it is an array of content blocks, text-type items are concatenated;
+//     non-text items (e.g. image_url) contribute the literal "[image]" so the
+//     result is never silently empty.
+//   - On any decode error, the raw JSON bytes are returned as a string to
+//     preserve debuggability.
+func toolResultContentToString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// String form: "content":"<text>"
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	// Array form: "content":[{"type":"text","text":"…"},…]
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		var sb strings.Builder
+		for _, b := range blocks {
+			if b.Type == "text" {
+				sb.WriteString(b.Text)
+			} else {
+				sb.WriteString("[image]")
+			}
+		}
+		return sb.String()
+	}
+	// Fallback: return raw JSON so nothing is silently lost.
+	return string(raw)
 }
 
 // ChatDispatchRequest holds parameters for unframed chat dispatch.

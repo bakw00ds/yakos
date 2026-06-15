@@ -317,3 +317,167 @@ func TestParseStreamLineWithTools_NilMaps_NoPanic(t *testing.T) {
 		t.Errorf("tool_use with nil maps: unexpected non-zero return: (%q,%v,%f,%v,%v)", tok, isResult, costUSD, usage, toolEv)
 	}
 }
+
+// ---- 8. Map bounding: >maxToolUseBlocks starts without stops ----------------
+
+// TestParseStreamLineWithTools_MapBoundingNoPanic sends more than maxToolUseBlocks
+// content_block_start tool_use events without any stops and verifies that:
+//   - toolUseBlocks never grows beyond maxToolUseBlocks.
+//   - No panic occurs.
+//
+// This defends against hostile streams that flood the parser with tool_use
+// starts to exhaust memory.
+func TestParseStreamLineWithTools_MapBoundingNoPanic(t *testing.T) {
+	textBlocks := make(map[int]struct{})
+	toolUseBlocks := make(map[int]*ToolEvent)
+	toolIDToName := make(map[string]string)
+
+	overCount := maxToolUseBlocks + 100
+	for i := range overCount {
+		line := []byte(`{"type":"stream_event","event":{"type":"content_block_start","index":` +
+			string(rune('0'+i%10)) + // cheap single-digit cycle — index uniqueness not required for this test
+			`,"content_block":{"type":"tool_use","id":"toolu_` + strings.Repeat("x", 8) + `","name":"Bash"}}}`)
+		// Use a proper index value via fmt to handle multi-digit indices.
+		line = []byte(`{"type":"stream_event","event":{"type":"content_block_start","index":` +
+			itoa(i) + `,"content_block":{"type":"tool_use","id":"toolu_` + itoa(i) + `","name":"Bash"}}}`)
+		_, _, _, _, _ = ParseStreamLineWithTools(line, textBlocks, toolUseBlocks, toolIDToName)
+	}
+
+	if len(toolUseBlocks) > maxToolUseBlocks {
+		t.Errorf("toolUseBlocks grew to %d, want <= %d", len(toolUseBlocks), maxToolUseBlocks)
+	}
+}
+
+// itoa is a minimal int-to-ASCII helper used in test line generation,
+// avoiding an import of fmt or strconv in the test body above.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	buf := [20]byte{}
+	pos := len(buf)
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	for n > 0 {
+		pos--
+		buf[pos] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
+}
+
+// ---- 9. Input accumulation cap at maxToolInputBytes -------------------------
+
+// TestParseStreamLineWithTools_InputLargeCapped sends many input_json_delta
+// fragments totalling >maxToolInputBytes and verifies that the accumulated
+// Input is bounded and InputTruncated is set on the resulting ToolEvent.
+func TestParseStreamLineWithTools_InputLargeCapped(t *testing.T) {
+	textBlocks := make(map[int]struct{})
+	toolUseBlocks := make(map[int]*ToolEvent)
+	toolIDToName := make(map[string]string)
+
+	// Start a tool_use block at index 0.
+	startLine := []byte(`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_large","name":"Bash"}}}`)
+	_, _, _, _, _ = ParseStreamLineWithTools(startLine, textBlocks, toolUseBlocks, toolIDToName)
+
+	// Send fragments totalling maxToolInputBytes + 512 bytes.
+	chunkSize := 4096
+	totalBytes := maxToolInputBytes + 512
+	sent := 0
+	for sent < totalBytes {
+		n := chunkSize
+		if sent+n > totalBytes {
+			n = totalBytes - sent
+		}
+		fragment := strings.Repeat("Z", n)
+		line := []byte(`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"` + fragment + `"}}}`)
+		_, _, _, _, _ = ParseStreamLineWithTools(line, textBlocks, toolUseBlocks, toolIDToName)
+		sent += n
+	}
+
+	// Stop the block.
+	stopLine := []byte(`{"type":"stream_event","event":{"type":"content_block_stop","index":0}}`)
+	_, _, _, _, toolEv := ParseStreamLineWithTools(stopLine, textBlocks, toolUseBlocks, toolIDToName)
+
+	if toolEv == nil {
+		t.Fatal("expected a ToolEvent on content_block_stop, got nil")
+	}
+	if toolEv.Kind != "tool_use" {
+		t.Errorf("Kind: got %q, want %q", toolEv.Kind, "tool_use")
+	}
+	if len(toolEv.Input) > maxToolInputBytes {
+		t.Errorf("Input len=%d exceeds maxToolInputBytes=%d", len(toolEv.Input), maxToolInputBytes)
+	}
+	if !toolEv.InputTruncated {
+		t.Error("InputTruncated: got false, want true (input exceeded cap)")
+	}
+}
+
+// ---- 10. IDToName map bounded at maxToolIDToName ---------------------------
+
+// TestParseStreamLineWithTools_IDToNameMapBounded sends more than maxToolIDToName
+// distinct tool_use ids and verifies the toolIDToName map stays bounded.
+func TestParseStreamLineWithTools_IDToNameMapBounded(t *testing.T) {
+	textBlocks := make(map[int]struct{})
+	toolUseBlocks := make(map[int]*ToolEvent)
+	toolIDToName := make(map[string]string)
+
+	overCount := maxToolIDToName + 50
+	for i := range overCount {
+		id := "toolu_" + itoa(i)
+		line := []byte(`{"type":"stream_event","event":{"type":"content_block_start","index":` + itoa(i) + `,"content_block":{"type":"tool_use","id":"` + id + `","name":"Bash"}}}`)
+		_, _, _, _, _ = ParseStreamLineWithTools(line, textBlocks, toolUseBlocks, toolIDToName)
+	}
+
+	if len(toolIDToName) > maxToolIDToName {
+		t.Errorf("toolIDToName grew to %d, want <= %d", len(toolIDToName), maxToolIDToName)
+	}
+}
+
+// ---- 11. parseUserMessageForToolResult: array-form content ------------------
+
+// TestParseUserMessage_ArrayFormContent feeds a tool_result where "content" is
+// a JSON array of text blocks (not a plain string) and verifies the Output is
+// the concatenation of all text segments.
+func TestParseUserMessage_ArrayFormContent(t *testing.T) {
+	textBlocks := make(map[int]struct{})
+	toolUseBlocks := make(map[int]*ToolEvent)
+	toolIDToName := map[string]string{"toolu_arr": "Bash"}
+
+	// Array-form content: two text blocks.
+	line := []byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_arr","content":[{"type":"text","text":"hello"},{"type":"text","text":" world"}],"is_error":false}]}}`)
+	_, _, _, _, toolEv := ParseStreamLineWithTools(line, textBlocks, toolUseBlocks, toolIDToName)
+
+	if toolEv == nil {
+		t.Fatal("expected a ToolEvent, got nil")
+	}
+	if toolEv.Output != "hello world" {
+		t.Errorf("Output: got %q, want %q", toolEv.Output, "hello world")
+	}
+}
+
+// TestParseUserMessage_ArrayFormContent_WithImage feeds a tool_result whose
+// content array mixes text and image blocks; the image block must contribute
+// "[image]" and not be silently dropped.
+func TestParseUserMessage_ArrayFormContent_WithImage(t *testing.T) {
+	textBlocks := make(map[int]struct{})
+	toolUseBlocks := make(map[int]*ToolEvent)
+	toolIDToName := map[string]string{"toolu_img": "Read"}
+
+	line := []byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_img","content":[{"type":"text","text":"prefix"},{"type":"image_url","url":"http://x"},{"type":"text","text":"suffix"}],"is_error":false}]}}`)
+	_, _, _, _, toolEv := ParseStreamLineWithTools(line, textBlocks, toolUseBlocks, toolIDToName)
+
+	if toolEv == nil {
+		t.Fatal("expected a ToolEvent, got nil")
+	}
+	wantOutput := "prefix[image]suffix"
+	if toolEv.Output != wantOutput {
+		t.Errorf("Output: got %q, want %q", toolEv.Output, wantOutput)
+	}
+}

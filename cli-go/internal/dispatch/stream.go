@@ -36,6 +36,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/cost"
@@ -588,24 +589,29 @@ func execWithStreaming(
 }
 
 // emitToolChunk translates a runtime.ToolEvent into a StreamChunk and calls
-// onChunk.  Tool output is hard-truncated at maxToolOutputBytes before emit.
+// onChunk.  Both tool input and tool output are hard-truncated at
+// maxToolOutputBytes before emit, on rune boundaries to avoid splitting
+// multi-byte UTF-8 sequences.
+//
+// Truncation policy (symmetric for input and output):
+//   - If len(s) <= maxToolOutputBytes: pass through verbatim.
+//   - Otherwise: truncate to a rune boundary at or below the cap, then append
+//     toolOutputTruncationMarker.
 //
 // Truncation is applied here (at the dispatch layer) so every downstream
 // consumer (SSE hub, transcript, tests) inherits the same bound automatically.
 func emitToolChunk(te *runtime.ToolEvent, onChunk func(StreamChunk)) {
 	switch te.Kind {
 	case "tool_use":
+		input := truncateAtRuneBoundary(te.Input, maxToolOutputBytes, toolOutputTruncationMarker, te.InputTruncated)
 		onChunk(StreamChunk{
 			Type:      "tool_use",
 			ToolName:  te.ToolName,
-			ToolInput: te.Input,
+			ToolInput: input,
 		})
 
 	case "tool_result":
-		output := te.Output
-		if len(output) > maxToolOutputBytes {
-			output = output[:maxToolOutputBytes] + toolOutputTruncationMarker
-		}
+		output := truncateAtRuneBoundary(te.Output, maxToolOutputBytes, toolOutputTruncationMarker, false)
 		onChunk(StreamChunk{
 			Type:       "tool_result",
 			ToolName:   te.ToolName,
@@ -613,4 +619,27 @@ func emitToolChunk(te *runtime.ToolEvent, onChunk func(StreamChunk)) {
 			IsError:    te.IsError,
 		})
 	}
+}
+
+// truncateAtRuneBoundary truncates s to at most maxBytes bytes, finding the
+// nearest rune boundary at or below the cap, then appends marker.
+//
+// If alreadyTruncated is true the marker is always appended even when len(s)
+// is within maxBytes — this covers the case where the parser already stopped
+// accumulating at the cap but the string has not yet had the marker appended.
+//
+// If len(s) <= maxBytes and !alreadyTruncated the string is returned verbatim.
+func truncateAtRuneBoundary(s string, maxBytes int, marker string, alreadyTruncated bool) string {
+	if len(s) <= maxBytes && !alreadyTruncated {
+		return s
+	}
+	if len(s) > maxBytes {
+		// Walk back from maxBytes until we find a valid rune boundary.
+		end := maxBytes
+		for end > 0 && !utf8.RuneStart(s[end]) {
+			end--
+		}
+		s = s[:end]
+	}
+	return s + marker
 }
