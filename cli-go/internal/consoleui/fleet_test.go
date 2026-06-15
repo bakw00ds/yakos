@@ -382,13 +382,8 @@ func TestFleet_TaskPreviewCappedAt120Runes(t *testing.T) {
 	}
 	t.Cleanup(func() { hub.CloseSession("sess-tp") })
 
-	// 200 characters — well above the 120-rune cap.
-	longTask := "Task: " + string(make([]rune, 194))
-	for i := range longTask {
-		_ = i
-	}
-	// Use a deterministic string.
-	longTask = ""
+	// 200 'x' characters — well above the 120-rune cap.
+	longTask := ""
 	for i := 0; i < 200; i++ {
 		longTask += "x"
 	}

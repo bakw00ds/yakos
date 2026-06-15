@@ -306,11 +306,21 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) webs
 		sub := bus.Subscribe("")
 		defer sub.Unsubscribe()
 
+		// connOperatorID is the authoritative operator ID for this WS connection.
+		// On the networked path it was resolved from the cert CN or session identity
+		// above (identity override section).  On the loopback path it comes from
+		// the hello frame (cooperative attribution).  An empty string means the
+		// loopback trusted path — all events are delivered.
+		connOperatorID := hello.OperatorID
+
 		// Replay: if ?since=<seq> is present, send buffered events the client
 		// missed during a disconnect before joining the live stream.
 		if sinceStr := conn.Request().URL.Query().Get("since"); sinceStr != "" {
 			if sinceSeq, err := parseSinceSeq(sinceStr); err == nil {
 				for _, ev := range bus.History(sinceSeq) {
+					if !fleetEventVisible(ev, connOperatorID) {
+						continue
+					}
 					conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 					if err := websocket.JSON.Send(conn, ev); err != nil {
 						slog.Debug("consoleui: replay write error; dropping client", "err", err)
@@ -333,6 +343,9 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) webs
 				if !ok {
 					return
 				}
+				if !fleetEventVisible(ev, connOperatorID) {
+					continue
+				}
 				conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 				if err := websocket.JSON.Send(conn, ev); err != nil {
 					slog.Debug("consoleui: WS write error; dropping client", "err", err)
@@ -350,6 +363,41 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) webs
 			}
 		}
 	}
+}
+
+// fleetEventVisible reports whether ev should be delivered to a WS connection
+// whose authoritative operator ID is connOperatorID.
+//
+// For fleet.* topics, the event's EventMeta carries OwnerOperatorID and Shared.
+// The event is visible when:
+//   - connOperatorID is empty (loopback / single-operator path — no isolation needed)
+//   - ev.Meta is nil (non-fleet topic — all subscribers receive it)
+//   - ev.Meta.OwnerOperatorID is empty (broadcast event)
+//   - ev.Meta.OwnerOperatorID == connOperatorID (the connection owns the session)
+//   - ev.Meta.Shared is true (the session is shared; all operators may see it)
+//
+// All non-fleet topics pass through unchanged (Meta is nil for those events).
+// The client payload is NEVER modified; Meta is server-side-only (json:"-").
+func fleetEventVisible(ev wsbus.Event, connOperatorID string) bool {
+	// Non-fleet topics: always deliver.
+	if ev.Topic != wsbus.TopicFleetStarted && ev.Topic != wsbus.TopicFleetFinished {
+		return true
+	}
+	// Loopback / single-operator path: empty connOperatorID means deliver all.
+	if connOperatorID == "" {
+		return true
+	}
+	// No meta means this event predates the filter (or was published without
+	// PublishMeta — should not happen in production but handle defensively).
+	if ev.Meta == nil {
+		return true
+	}
+	// Broadcast fleet event (OwnerOperatorID empty): deliver to all.
+	if ev.Meta.OwnerOperatorID == "" {
+		return true
+	}
+	// Owned by this connection's operator, or session is shared.
+	return ev.Meta.OwnerOperatorID == connOperatorID || ev.Meta.Shared
 }
 
 // consoleAuthSubprotocol validates the bearer token from the

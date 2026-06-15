@@ -111,14 +111,13 @@ func (fh *fleetHandlers) handleFleet(w http.ResponseWriter, r *http.Request) {
 	rows := make([]FleetSession, 0, len(snapshot))
 
 	for _, e := range snapshot {
-		// Determine visibility: owned, shared, or foreign.
-		ownerID, hubExists := fh.hub.SessionOwner(e.SessionID)
-		var shared bool
-		if hubExists {
-			// Ask hub whether the session is shared.
-			shared = fh.hub.IsShared(e.SessionID)
-		}
-
+		// Determine visibility using a single atomic hub lock acquisition.
+		// e.OperatorID (from the registry) is the authoritative owner; IsShared
+		// is a single lock acquisition that returns false for unknown sessions.
+		// This avoids the TOCTOU window from the previous SessionOwner+IsShared
+		// two-step where a CloseSession racing between the two calls could yield
+		// asymmetric visibility.
+		shared := fh.hub.IsShared(e.SessionID)
 		owned := (e.OperatorID == callerOperatorID) || loopbackPath
 
 		// Exclude foreign unshared sessions.
@@ -135,10 +134,6 @@ func (fh *fleetHandlers) handleFleet(w http.ResponseWriter, r *http.Request) {
 			TaskPreview: e.TaskPreview,
 			Attachable:  owned || shared,
 		})
-
-		// Silence unused-variable warning for ownerID (it's used indirectly via
-		// hubExists to determine whether to call IsShared).
-		_ = ownerID
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

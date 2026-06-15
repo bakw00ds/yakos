@@ -653,7 +653,7 @@
         fleetSessions.set(sid, {
           session_id: sid,
           agent:       payload.agent || '?',
-          runtime:     payload.runtime || '',
+          runtime:     '', // not in fleet.started WS payload; populated by REST seed
           status:      'running',
           started_at:  payload.ts || msg.ts || '',
           task_preview: '', // intentionally empty: not available on WS events

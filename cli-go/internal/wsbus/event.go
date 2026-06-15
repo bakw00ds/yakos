@@ -83,6 +83,21 @@ type FleetFinishedPayload struct {
 	TS        time.Time `json:"ts"`
 }
 
+// EventMeta carries server-side-only routing metadata for events that require
+// per-operator fan-out filtering.  It is NEVER serialized to clients (json:"-").
+//
+// Currently used exclusively by fleet.* topics to enforce per-operator WS
+// isolation: the WS handler in consoleui/ws_handler.go reads Meta before
+// sending and drops events whose owner does not match the connection's operator.
+type EventMeta struct {
+	// OwnerOperatorID is the operator that owns the session associated with
+	// this event.  Empty string means "visible to all" (loopback / broadcast).
+	OwnerOperatorID string
+	// Shared, when true, means the session is shared — any authenticated
+	// operator may receive the event regardless of ownership.
+	Shared bool
+}
+
 // Event is an envelope for every message published on the bus.
 // Clients receive exactly this structure (JSON-encoded) over the WebSocket.
 type Event struct {
@@ -98,6 +113,11 @@ type Event struct {
 
 	// Payload is the topic-specific data, encoded as a JSON object.
 	Payload json.RawMessage `json:"payload"`
+
+	// Meta carries server-side routing metadata (e.g. per-operator fleet
+	// filtering).  It is intentionally excluded from the wire encoding so
+	// clients never see owner information.
+	Meta *EventMeta `json:"-"`
 }
 
 // KanbanAddedPayload is the payload for [TopicKanbanAdded].

@@ -452,12 +452,17 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Publish fleet.started on the WS bus (metadata-only: no task text).
-	// The event flows through the existing /v1/events fan-out unchanged.
+	// PublishMeta carries OwnerOperatorID + Shared=false in the server-side
+	// EventMeta; the WS fan-out filter uses this to deliver the event only to
+	// the owning operator's connection.  The meta is NEVER sent to clients.
 	if ch.bus != nil {
-		ch.bus.Publish(wsbus.TopicFleetStarted, wsbus.FleetStartedPayload{
+		ch.bus.PublishMeta(wsbus.TopicFleetStarted, wsbus.FleetStartedPayload{
 			SessionID: dispReq.SessionID,
 			Agent:     dispReq.Agent,
 			TS:        startedAt,
+		}, wsbus.EventMeta{
+			OwnerOperatorID: capturedOperatorID,
+			Shared:          false, // new sessions start unshared
 		})
 	}
 
@@ -473,18 +478,27 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	//      chunks already in flight can still be routed before the entry
 	//      disappears.  This order shrinks the re-dispatch race window.
 	//   4. fleetRemove — cleanup fleet registry and publish fleet.finished.
-	//      Runs last (registered first) so fleet state outlives the hub entry,
-	//      preserving consistency during the short window between hub close and
-	//      fleet remove.
+	//      registered first; runs last (LIFO) so fleet state outlives the hub
+	//      entry, preserving consistency during the short window between hub
+	//      close and fleet remove.
 	go func() {
 		// exitCode captures the RunStream result for fleet.finished.
 		// Default 0; overridden to -1 on non-cancel error path.
 		exitCode := 0
 		exitStatus := dispatch.StatusFinished
 
+		// sharedAtFinish is updated to the session's final shared flag just before
+		// RunStream returns (while the hub entry is still open).  The fleet.finished
+		// defer reads it so the WS fan-out filter uses the correct visibility.
+		sharedAtFinish := ch.hub.IsShared(dispReq.SessionID)
+
 		defer func() {
 			// 4. Fleet registry remove + fleet.finished WS event.
-			// Preserve the request context (serverCtx) for audit-log lineage.
+			// registered first; runs last (LIFO)
+			//
+			// hub.CloseSession (defer 3) has already run; sharedAtFinish was
+			// captured while the hub entry was open (set immediately after
+			// OpenSession and refreshed after RunStream returns below).
 			if ch.registry != nil {
 				ch.registry.Remove(dispReq.SessionID)
 			}
@@ -494,12 +508,15 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				if exitStatus == dispatch.StatusFailed {
 					finishedStatus = "failed"
 				}
-				ch.bus.Publish(wsbus.TopicFleetFinished, wsbus.FleetFinishedPayload{
+				ch.bus.PublishMeta(wsbus.TopicFleetFinished, wsbus.FleetFinishedPayload{
 					SessionID: dispReq.SessionID,
 					Agent:     dispReq.Agent,
 					Status:    finishedStatus,
 					ExitCode:  exitCode,
 					TS:        finishedAt,
+				}, wsbus.EventMeta{
+					OwnerOperatorID: capturedOperatorID,
+					Shared:          sharedAtFinish,
 				})
 			}
 		}()
@@ -595,6 +612,11 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				exitCode = -1
 			}
 		}
+
+		// Refresh the shared flag with the final state of the hub entry (before
+		// hub.CloseSession fires in defer 3).  This captures any share/unshare
+		// that happened during the dispatch lifetime.
+		sharedAtFinish = ch.hub.IsShared(dispReq.SessionID)
 	}()
 
 	// Respond immediately with the session ID.
