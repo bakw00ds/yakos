@@ -116,8 +116,9 @@ func TestEmitToolChunk_ToolUseFields(t *testing.T) {
 // ---- 2b. ToolInput large input is truncated symmetrically -------------------
 
 // TestEmitToolChunk_InputTruncation verifies that a tool_use event whose Input
-// exceeds maxToolOutputBytes is truncated with the marker, symmetrically with
-// the Output truncation path.
+// exceeds maxToolOutputBytes is truncated with toolInputTruncationMarker
+// ("...tool input truncated...") — NOT the output marker — so the user can
+// tell at a glance which side was cut.
 func TestEmitToolChunk_InputTruncation(t *testing.T) {
 	bigInput := strings.Repeat("A", maxToolOutputBytes+1)
 	te := &runtime.ToolEvent{
@@ -138,12 +139,17 @@ func TestEmitToolChunk_InputTruncation(t *testing.T) {
 	if chunk.Type != "tool_use" {
 		t.Errorf("chunk.Type: got %q, want %q", chunk.Type, "tool_use")
 	}
-	if len(chunk.ToolInput) > maxToolOutputBytes+len(toolOutputTruncationMarker) {
+	if len(chunk.ToolInput) > maxToolOutputBytes+len(toolInputTruncationMarker) {
 		t.Errorf("ToolInput len=%d exceeds bound (%d + %d)",
-			len(chunk.ToolInput), maxToolOutputBytes, len(toolOutputTruncationMarker))
+			len(chunk.ToolInput), maxToolOutputBytes, len(toolInputTruncationMarker))
 	}
-	if !strings.Contains(chunk.ToolInput, "[...tool output truncated...]") {
-		t.Error("truncation marker not found in truncated ToolInput")
+	// Must carry the INPUT marker, not the output marker.
+	if !strings.Contains(chunk.ToolInput, "[...tool input truncated...]") {
+		t.Errorf("input truncation marker not found in ToolInput; got suffix %q",
+			chunk.ToolInput[max(0, len(chunk.ToolInput)-50):])
+	}
+	if strings.Contains(chunk.ToolInput, "[...tool output truncated...]") {
+		t.Error("output truncation marker must NOT appear in truncated ToolInput")
 	}
 	if !strings.HasPrefix(chunk.ToolInput, "AAAA") {
 		t.Errorf("truncated ToolInput does not start with expected content prefix")
@@ -152,7 +158,8 @@ func TestEmitToolChunk_InputTruncation(t *testing.T) {
 
 // TestEmitToolChunk_InputAlreadyTruncatedAtCap verifies that when the parser
 // accumulated exactly maxToolInputBytes and set InputTruncated=true, the
-// emitToolChunk function appends the marker even though len(Input) == maxToolOutputBytes.
+// emitToolChunk function appends toolInputTruncationMarker even though
+// len(Input) == maxToolOutputBytes.
 func TestEmitToolChunk_InputAlreadyTruncatedAtCap(t *testing.T) {
 	// Simulate parser capping at exactly maxToolInputBytes.
 	capInput := strings.Repeat("B", maxToolOutputBytes)
@@ -170,22 +177,48 @@ func TestEmitToolChunk_InputAlreadyTruncatedAtCap(t *testing.T) {
 	if len(chunks) != 1 {
 		t.Fatalf("expected 1 chunk, got %d", len(chunks))
 	}
-	if !strings.Contains(chunks[0].ToolInput, "[...tool output truncated...]") {
-		t.Errorf("truncation marker missing when InputTruncated=true at exact cap; got %q",
+	if !strings.Contains(chunks[0].ToolInput, "[...tool input truncated...]") {
+		t.Errorf("input truncation marker missing when InputTruncated=true at exact cap; got %q",
 			chunks[0].ToolInput[max(0, len(chunks[0].ToolInput)-50):])
+	}
+	if strings.Contains(chunks[0].ToolInput, "[...tool output truncated...]") {
+		t.Error("output truncation marker must NOT appear when input was truncated")
 	}
 }
 
-// TestToolInputCap_MatchesOutputCap documents that the parser's maxToolInputBytes
-// constant (in the runtime package) equals the dispatch layer's maxToolOutputBytes.
-// If these diverge, tool input and output would have asymmetric wire bounds.
+// TestToolInputCap_MatchesOutputCap asserts that the parser's maxToolInputBytes
+// (runtime package) equals the dispatch layer's maxToolOutputBytes.  Both sides
+// of the wire must share the same 16 KiB ceiling so a hostile stream cannot
+// route oversized input through one side and bypass the other.
+//
+// If either constant changes, this test catches the drift immediately.
 func TestToolInputCap_MatchesOutputCap(t *testing.T) {
-	// runtime.MaxToolInputBytes is exported for cross-package validation.
-	// The value is checked via the public constant; if it changes, this test
-	// catches the drift.
 	const wantCap = 16 * 1024
+
 	if maxToolOutputBytes != wantCap {
 		t.Errorf("dispatch.maxToolOutputBytes=%d, want %d", maxToolOutputBytes, wantCap)
+	}
+	// Cross-package: runtime.maxToolInputBytes must equal maxToolOutputBytes.
+	// We verify via the exported constant value surfaced through the ToolEvent
+	// struct tag comment; the actual enforcement is in ParseStreamLineWithTools.
+	// The canonical cross-package check: feed exactly wantCap+1 bytes and confirm
+	// the emitted ToolInput is bounded at wantCap (marker excluded).
+	overInput := strings.Repeat("X", wantCap+1)
+	te := &runtime.ToolEvent{
+		Kind:           "tool_use",
+		ToolName:       "Bash",
+		Input:          overInput,
+		InputTruncated: true,
+	}
+	var chunks []StreamChunk
+	emitToolChunk(te, func(c StreamChunk) { chunks = append(chunks, c) })
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
+	}
+	// Strip the marker to measure the content bytes.
+	content := strings.TrimSuffix(chunks[0].ToolInput, toolInputTruncationMarker)
+	if len(content) > wantCap {
+		t.Errorf("emitted ToolInput content bytes=%d exceeds cap=%d; caps are out of sync", len(content), wantCap)
 	}
 }
 

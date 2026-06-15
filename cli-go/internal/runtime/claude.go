@@ -19,10 +19,6 @@ import (
 // cross-package test TestToolInputCap_MatchesOutputCap in stream_tool_test.go.
 const maxToolInputBytes = 16 * 1024
 
-// maxToolInputTruncationMarker is appended when accumulated Input is cut at
-// maxToolInputBytes.
-const maxToolInputTruncationMarker = "\n[...tool input truncated...]"
-
 // maxToolUseBlocks is the maximum number of concurrent in-progress tool_use
 // content blocks tracked per dispatch.  Beyond this cap, new tool_use blocks
 // are silently ignored (not inserted into toolUseBlocks) so a hostile stream

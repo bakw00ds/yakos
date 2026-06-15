@@ -78,6 +78,12 @@ const maxToolOutputBytes = 16 * 1024
 // maxToolOutputBytes.  Chosen to be unmistakable in context.
 const toolOutputTruncationMarker = "\n[...tool output truncated...]"
 
+// toolInputTruncationMarker is appended to a tool input (the JSON args
+// accumulated from input_json_delta fragments) that was cut at maxToolOutputBytes.
+// Kept distinct from toolOutputTruncationMarker so the user can tell at a
+// glance whether it was the input or the output that was truncated.
+const toolInputTruncationMarker = "\n[...tool input truncated...]"
+
 // StreamChunk is one incremental unit of streaming output.
 type StreamChunk struct {
 	// Type is "token" for incremental text, "summary" for the terminal record,
@@ -593,17 +599,19 @@ func execWithStreaming(
 // maxToolOutputBytes before emit, on rune boundaries to avoid splitting
 // multi-byte UTF-8 sequences.
 //
-// Truncation policy (symmetric for input and output):
-//   - If len(s) <= maxToolOutputBytes: pass through verbatim.
-//   - Otherwise: truncate to a rune boundary at or below the cap, then append
-//     toolOutputTruncationMarker.
+// Truncation policy:
+//   - tool_use  ToolInput:  capped at maxToolOutputBytes; marker is
+//     toolInputTruncationMarker  ("...tool input truncated...").
+//   - tool_result ToolOutput: capped at maxToolOutputBytes; marker is
+//     toolOutputTruncationMarker ("...tool output truncated...").
 //
+// Using distinct markers lets the user tell at a glance which side was cut.
 // Truncation is applied here (at the dispatch layer) so every downstream
 // consumer (SSE hub, transcript, tests) inherits the same bound automatically.
 func emitToolChunk(te *runtime.ToolEvent, onChunk func(StreamChunk)) {
 	switch te.Kind {
 	case "tool_use":
-		input := truncateAtRuneBoundary(te.Input, maxToolOutputBytes, toolOutputTruncationMarker, te.InputTruncated)
+		input := truncateAtRuneBoundary(te.Input, maxToolOutputBytes, toolInputTruncationMarker, te.InputTruncated)
 		onChunk(StreamChunk{
 			Type:      "tool_use",
 			ToolName:  te.ToolName,
