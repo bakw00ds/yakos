@@ -749,6 +749,18 @@ func TestDefaultStateDir(t *testing.T) {
 	}
 }
 
+// TestDefaultStateDir_EnvOverride verifies that YAKOS_DISPATCH_LOG overrides
+// the default ~/.yakos-state, matching the precedence used by the dispatch
+// writer (dispatch/events.go dispatchLogPath) so read and write agree.
+func TestDefaultStateDir_EnvOverride(t *testing.T) {
+	want := t.TempDir()
+	t.Setenv("YAKOS_DISPATCH_LOG", want)
+	got := perfdash.DefaultStateDir()
+	if got != want {
+		t.Errorf("DefaultStateDir with YAKOS_DISPATCH_LOG=%q: got %q; want %q", want, got, want)
+	}
+}
+
 // ---- HandlerNoToken (session-console mount) ---------------------------------
 // These tests verify the session-mode path: mounted via HandlerNoToken() the
 // API endpoints respond 200 without any Authorization header, mirroring what

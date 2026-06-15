@@ -43,6 +43,16 @@ type Config struct {
 	// The single-project API uses ReadHistory(ProjectDir).
 	ProjectDir string
 
+	// DispatchLogDir is the directory containing dispatch-log*.ndjson files.
+	// When set, the Cost tab sources live LLM spend directly from the
+	// dispatch-log (via the cost package) so the tab updates in real time
+	// without requiring a manual `yakos metrics collect`.
+	//
+	// Typically statepath.Dir() (e.g. ~/.yakos-state or $YAKOS_DISPATCH_LOG).
+	// When empty, live-cost sourcing is disabled and only history.ndjson cost
+	// data is shown (the pre-fix behaviour, where the tab was empty by default).
+	DispatchLogDir string
+
 	// AllProjects, when true, enables GET /api/metrics/projects rollup.
 	// The server discovers projects via ~/agent-control/*/.project-path.
 	AllProjects bool
@@ -110,10 +120,11 @@ func (c *historyCache) load(projectDir string) ([]metrics.Snapshot, error) {
 // Server is the metrics dashboard HTTP server.
 // It is strictly read-only: no endpoint may mutate history.ndjson.
 type Server struct {
-	cfg     Config
-	mux     *http.ServeMux
-	httpSrv *http.Server
-	cache   historyCache
+	cfg       Config
+	mux       *http.ServeMux
+	httpSrv   *http.Server
+	cache     historyCache
+	costCache liveCostCache
 }
 
 // New constructs a Server and wires all routes.
@@ -153,6 +164,7 @@ func (s *Server) HandlerNoToken() http.Handler {
 	mux.HandleFunc("GET /api/metrics/trend", s.handleTrend)
 	mux.HandleFunc("GET /api/metrics/compare", s.handleCompare)
 	mux.HandleFunc("GET /api/metrics/history", s.handleHistory)
+	mux.HandleFunc("GET /api/metrics/live_cost", s.handleLiveCost)
 	if s.cfg.AllProjects {
 		mux.HandleFunc("GET /api/metrics/projects", s.handleProjects)
 	}
@@ -235,6 +247,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/metrics/trend", s.requireToken(s.handleTrend))
 	s.mux.HandleFunc("GET /api/metrics/compare", s.requireToken(s.handleCompare))
 	s.mux.HandleFunc("GET /api/metrics/history", s.requireToken(s.handleHistory))
+	s.mux.HandleFunc("GET /api/metrics/live_cost", s.requireToken(s.handleLiveCost))
 	if s.cfg.AllProjects {
 		s.mux.HandleFunc("GET /api/metrics/projects", s.requireToken(s.handleProjects))
 	}
@@ -269,6 +282,15 @@ func (s *Server) loadHistory() ([]metrics.Snapshot, error) {
 	return s.cache.load(s.cfg.ProjectDir)
 }
 
+// ---- live cost loader -------------------------------------------------------
+
+// loadLiveCost returns the aggregated total_cost_usd from the dispatch-log.
+// Returns (nil, nil) when DispatchLogDir is not configured (feature disabled).
+// Uses an mtime+size cache so the log is re-parsed only when it changes.
+func (s *Server) loadLiveCost() (*LiveCostResult, error) {
+	return s.costCache.load(s.cfg.DispatchLogDir)
+}
+
 // ---- GET /api/metrics/snapshot ----------------------------------------------
 
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -279,10 +301,66 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	latest := LatestSnapshot(snaps)
 	if latest == nil {
-		writeJSON(w, http.StatusOK, map[string]string{"message": "no snapshots yet — run: yakos metrics collect"})
+		// No history.ndjson snapshots yet.  Fall back to live dispatch-log cost
+		// when DispatchLogDir is configured, so the Cost tab is not empty.
+		live, err := s.loadLiveCost()
+		if err != nil || live == nil {
+			writeJSON(w, http.StatusOK, map[string]string{"message": "no snapshots yet — run: yakos metrics collect"})
+			return
+		}
+		// Return a minimal synthetic snapshot carrying only the live cost.
+		// Trigger "dispatch" signals this is auto-sourced from the dispatch-log,
+		// not from a full metrics collect run.
+		writeJSON(w, http.StatusOK, liveCostSnapshot(live))
 		return
 	}
+	// When the latest snapshot has no cost data (nil total_cost_usd), overlay
+	// the live dispatch-log cost so the Cost tab is never empty.
+	if latest.Metrics.Efficiency.TotalCostUSD == nil {
+		live, liveErr := s.loadLiveCost()
+		if liveErr == nil && live != nil {
+			// Clone the snapshot to avoid mutating the cached copy.
+			copy := *latest
+			v := live.TotalCostUSD
+			copy.Metrics.Efficiency.TotalCostUSD = &v
+			writeJSON(w, http.StatusOK, &copy)
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, latest)
+}
+
+// ---- GET /api/metrics/live_cost ---------------------------------------------
+
+// handleLiveCost returns the current total_cost_usd aggregated from the
+// dispatch-log.  It does not require a `yakos metrics collect` run.
+// Returns {"total_cost_usd": 0, "event_count": 0} when no dispatch-log exists.
+// Returns {"message": "..."} when DispatchLogDir is not configured.
+func (s *Server) handleLiveCost(w http.ResponseWriter, r *http.Request) {
+	live, err := s.loadLiveCost()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "live cost: "+err.Error())
+		return
+	}
+	if live == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"message": "dispatch log directory not configured"})
+		return
+	}
+	writeJSON(w, http.StatusOK, live)
+}
+
+// liveCostSnapshot builds a minimal metrics.Snapshot carrying only the live
+// dispatch-log cost.  All other metric fields remain nil (not measured).
+// Trigger "dispatch" distinguishes these auto-sourced snapshots from full
+// `yakos metrics collect` snapshots (trigger "manual" / "ci").
+func liveCostSnapshot(live *LiveCostResult) *metrics.Snapshot {
+	v := live.TotalCostUSD
+	s := &metrics.Snapshot{
+		Schema:  "yakos.metrics/v1",
+		Trigger: "dispatch",
+	}
+	s.Metrics.Efficiency.TotalCostUSD = &v
+	return s
 }
 
 // ---- GET /api/metrics/history -----------------------------------------------

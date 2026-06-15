@@ -313,6 +313,41 @@ func TestConsoleConfig_WorkspaceRootWired(t *testing.T) {
 	}
 }
 
+// TestConsoleConfig_PerfWorkDirIsStateDir is a regression guard for the
+// datapath bug where PerfWorkDir was set to work/current (workspace-relative)
+// instead of the yakOS state dir where dispatch-log.ndjson is actually written.
+//
+// The Performance tab in the console was always empty because it read from
+// <workspace>/work/current/dispatch-log*.ndjson, but the daemon writes to
+// ~/.yakos-state/dispatch-log.ndjson.
+//
+// This test verifies that PerfWorkDir and WorkDir are distinct after the fix:
+// - PerfWorkDir must NOT contain the workspaceRoot (it is state-dir-based).
+// - WorkDir must still be workspace-relative (work/current).
+func TestConsoleConfig_PerfWorkDirIsStateDir(t *testing.T) {
+	// NOTE: cannot call t.Parallel() — t.Setenv requires sequential execution.
+	// Override the state dir via the env var that the writer also honours.
+	fakeStateDir := t.TempDir()
+	t.Setenv("YAKOS_DISPATCH_LOG", fakeStateDir)
+
+	tmp := t.TempDir()
+	cfg := serve.Config{
+		WorkspaceRoot: tmp,
+	}
+	got := serve.BuildConsoleCfgForTest(cfg)
+
+	// PerfWorkDir must equal the state dir, not a subdirectory of WorkspaceRoot.
+	if got.PerfWorkDir != fakeStateDir {
+		t.Errorf("consoleui.Config.PerfWorkDir = %q; want %q (state dir, not work/current)", got.PerfWorkDir, fakeStateDir)
+	}
+
+	// WorkDir must still be the workspace-relative work/current path.
+	wantWorkDir := filepath.Join(tmp, "work", "current")
+	if got.WorkDir != wantWorkDir {
+		t.Errorf("consoleui.Config.WorkDir = %q; want %q (workspace-relative work/current)", got.WorkDir, wantWorkDir)
+	}
+}
+
 // TestConsoleBind_WildcardWithoutExternalHost_Refuses verifies that Run()
 // returns a clear error when ConsoleBind is a wildcard address and
 // ConsoleExternalHosts is empty.  This is the fail-closed requirement: a

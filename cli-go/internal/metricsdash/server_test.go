@@ -2,6 +2,7 @@ package metricsdash_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -776,6 +777,214 @@ func TestPortBound_ValidPort(t *testing.T) {
 	}
 	if cfg.ServePort != 8080 {
 		t.Errorf("ServePort=%d; want 8080", cfg.ServePort)
+	}
+}
+
+// ---- Cost tab: live dispatch-log sourcing (Task A) -------------------------
+//
+// These tests verify that the Cost tab shows real LLM spend from the dispatch-
+// log without requiring a manual `yakos metrics collect`.
+
+// writeDispatchLog writes dispatch_finished NDJSON lines with usage.total_cost_usd
+// into a temp directory and returns that directory path.
+func writeDispatchLog(t *testing.T, costs ...float64) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dispatch-log.ndjson")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create dispatch-log: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	for i, c := range costs {
+		line := fmt.Sprintf(
+			`{"type":"dispatch_finished","ts":"2026-06-01T00:00:0%dZ","agent":"agent-%d","runtime":"claude","exit_code":0,"duration_s":1,"output_bytes":100,"task_bytes":50,"est_input_tokens":200,"est_output_tokens":50,"usage":{"input_tokens":200,"output_tokens":50,"cache_read":0,"cache_creation":0,"duration_ms":1000,"total_cost_usd":%f}}`,
+			i, i, c,
+		)
+		if _, err := fmt.Fprintln(f, line); err != nil {
+			t.Fatalf("write dispatch-log line: %v", err)
+		}
+	}
+	return dir
+}
+
+// newTestServerWithDispatchLog builds a metricsdash.Server with a dispatch-log
+// directory wired as DispatchLogDir (the live-cost source).
+func newTestServerWithDispatchLog(t *testing.T, projectDir, dispatchLogDir string) (*httptest.Server, string) {
+	t.Helper()
+	stateDir := t.TempDir()
+	tok, err := metricsdash.LoadOrCreateMetricsToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateMetricsToken: %v", err)
+	}
+	srv := metricsdash.New(metricsdash.Config{
+		Token:          tok,
+		ProjectDir:     projectDir,
+		DispatchLogDir: dispatchLogDir,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return ts, tok
+}
+
+// TestLiveCost_EndpointReturnsDispatchLogTotal verifies that /api/metrics/live_cost
+// sums total_cost_usd from the dispatch-log and returns the correct total.
+func TestLiveCost_EndpointReturnsDispatchLogTotal(t *testing.T) {
+	// Write two dispatch_finished events: $0.10 + $0.25 = $0.35 total.
+	dispatchDir := writeDispatchLog(t, 0.10, 0.25)
+	ts, tok := newTestServerWithDispatchLog(t, "", dispatchDir)
+
+	resp := get(t, ts.URL+"/api/metrics/live_cost", tok)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("live_cost status=%d; want 200", resp.StatusCode)
+	}
+
+	var result struct {
+		TotalCostUSD float64 `json:"total_cost_usd"`
+		EventCount   int     `json:"event_count"`
+	}
+	decodeJSON(t, resp, &result)
+
+	const wantCost = 0.35
+	const wantEvents = 2
+	if result.EventCount != wantEvents {
+		t.Errorf("event_count=%d; want %d", result.EventCount, wantEvents)
+	}
+	if result.TotalCostUSD < wantCost-0.0001 || result.TotalCostUSD > wantCost+0.0001 {
+		t.Errorf("total_cost_usd=%.4f; want %.4f", result.TotalCostUSD, wantCost)
+	}
+}
+
+// TestLiveCost_SnapshotOverlaysLiveCostWhenHistoryIsEmpty verifies that
+// GET /api/metrics/snapshot returns a synthetic snapshot with live cost data
+// when history.ndjson does not exist (no manual collect has been run).
+// This is the primary regression: before the fix, the Cost tab was always empty.
+func TestLiveCost_SnapshotOverlaysLiveCostWhenHistoryIsEmpty(t *testing.T) {
+	// No history (projectDir=""), dispatch-log with known cost.
+	dispatchDir := writeDispatchLog(t, 0.50, 0.75) // $1.25 total
+	ts, tok := newTestServerWithDispatchLog(t, "", dispatchDir)
+
+	resp := get(t, ts.URL+"/api/metrics/snapshot", tok)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("snapshot status=%d; want 200", resp.StatusCode)
+	}
+
+	var snap struct {
+		Trigger string `json:"trigger"`
+		Metrics struct {
+			Efficiency struct {
+				TotalCostUSD *float64 `json:"total_cost_usd"`
+			} `json:"efficiency"`
+		} `json:"metrics"`
+	}
+	decodeJSON(t, resp, &snap)
+
+	if snap.Metrics.Efficiency.TotalCostUSD == nil {
+		t.Fatal("total_cost_usd is nil; Cost tab would be empty (regression)")
+	}
+	const wantCost = 1.25
+	got := *snap.Metrics.Efficiency.TotalCostUSD
+	if got < wantCost-0.0001 || got > wantCost+0.0001 {
+		t.Errorf("total_cost_usd=%.4f; want %.4f", got, wantCost)
+	}
+	// Trigger must be "dispatch" to distinguish from a full metrics collect.
+	if snap.Trigger != "dispatch" {
+		t.Errorf("trigger=%q; want \"dispatch\" for live-cost synthetic snapshot", snap.Trigger)
+	}
+}
+
+// TestLiveCost_SnapshotOverlaysLiveCostWhenHistoryCostIsNil verifies that
+// GET /api/metrics/snapshot overlays live cost onto a real snapshot that has
+// nil total_cost_usd (quality metrics collected but cost not populated).
+func TestLiveCost_SnapshotOverlaysLiveCostWhenHistoryCostIsNil(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	// Snapshot with nil cost (as would be written by a basic metrics collect
+	// that doesn't read the dispatch-log).
+	projectDir := writeFixtureHistory(t, []metrics.Snapshot{
+		makeSnap("abc123", "main", now, nil), // nil cost
+	})
+	dispatchDir := writeDispatchLog(t, 2.00) // $2.00 in dispatch-log
+	ts, tok := newTestServerWithDispatchLog(t, projectDir, dispatchDir)
+
+	resp := get(t, ts.URL+"/api/metrics/snapshot", tok)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("snapshot status=%d; want 200", resp.StatusCode)
+	}
+
+	var snap struct {
+		Commit  string `json:"commit"`
+		Metrics struct {
+			Efficiency struct {
+				TotalCostUSD *float64 `json:"total_cost_usd"`
+			} `json:"efficiency"`
+		} `json:"metrics"`
+	}
+	decodeJSON(t, resp, &snap)
+
+	// Commit must still be from the real snapshot (not a synthetic one).
+	if !strings.HasPrefix(snap.Commit, "abc123") {
+		t.Errorf("commit=%q; want abc123 (real snapshot identity preserved)", snap.Commit)
+	}
+	if snap.Metrics.Efficiency.TotalCostUSD == nil {
+		t.Fatal("total_cost_usd is nil; Cost tab would be empty despite dispatch-log data (regression)")
+	}
+	const wantCost = 2.00
+	got := *snap.Metrics.Efficiency.TotalCostUSD
+	if got < wantCost-0.0001 || got > wantCost+0.0001 {
+		t.Errorf("total_cost_usd=%.4f; want %.4f", got, wantCost)
+	}
+}
+
+// TestLiveCost_SnapshotPreservesRealCostWhenPresent verifies that when
+// history already has a non-nil total_cost_usd, the live dispatch-log cost
+// does NOT override it (history.ndjson cost wins, as it comes from a full
+// quality-metrics collect run which is more authoritative).
+func TestLiveCost_SnapshotPreservesRealCostWhenPresent(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	projectDir := writeFixtureHistory(t, []metrics.Snapshot{
+		makeSnap("def456", "main", now, floatPtr(3.00)), // non-nil cost from collect
+	})
+	dispatchDir := writeDispatchLog(t, 9.99) // dispatch-log has different (higher) value
+	ts, tok := newTestServerWithDispatchLog(t, projectDir, dispatchDir)
+
+	resp := get(t, ts.URL+"/api/metrics/snapshot", tok)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("snapshot status=%d; want 200", resp.StatusCode)
+	}
+
+	var snap struct {
+		Commit  string `json:"commit"`
+		Metrics struct {
+			Efficiency struct {
+				TotalCostUSD *float64 `json:"total_cost_usd"`
+			} `json:"efficiency"`
+		} `json:"metrics"`
+	}
+	decodeJSON(t, resp, &snap)
+
+	if snap.Metrics.Efficiency.TotalCostUSD == nil {
+		t.Fatal("total_cost_usd is nil; want the history.ndjson value")
+	}
+	// Must keep history.ndjson value (3.00), not dispatch-log value (9.99).
+	const wantCost = 3.00
+	got := *snap.Metrics.Efficiency.TotalCostUSD
+	if got < wantCost-0.0001 || got > wantCost+0.0001 {
+		t.Errorf("total_cost_usd=%.4f; want %.4f (history.ndjson value preserved)", got, wantCost)
+	}
+}
+
+// TestLiveCost_NoDispatchLogDir verifies that without DispatchLogDir configured,
+// the server falls back to the prior behaviour (empty/no-dispatch-log-sourcing).
+func TestLiveCost_NoDispatchLogDir(t *testing.T) {
+	ts, tok := newTestServer(t, "") // no dispatchLogDir
+	resp := get(t, ts.URL+"/api/metrics/live_cost", tok)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("live_cost status=%d; want 200 (graceful empty response)", resp.StatusCode)
+	}
+	var result map[string]interface{}
+	decodeJSON(t, resp, &result)
+	if _, ok := result["message"]; !ok {
+		t.Error("live_cost without DispatchLogDir should return {message: ...}, not an error")
 	}
 }
 

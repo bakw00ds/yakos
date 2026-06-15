@@ -397,11 +397,15 @@ func Run(ctx context.Context, cfg Config) error {
 		if err != nil {
 			return fmt.Errorf("serve: perf token: %w", err)
 		}
-		workDir := perfdash.DefaultWorkDir(cfg.WorkspaceRoot)
+		// The dispatch daemon writes dispatch-log.ndjson to the yakOS state dir
+		// (~/.yakos-state, or $YAKOS_DISPATCH_LOG), NOT to work/current.
+		// DefaultStateDir() uses the same resolution order as the writer so
+		// the dashboard reads from the same location the daemon writes to.
+		dispatchStateDir := perfdash.DefaultStateDir()
 		perfSrv := perfdash.New(perfdash.Config{
 			Addr:    cfg.perfAddr(),
 			Token:   perfTok,
-			WorkDir: workDir,
+			WorkDir: dispatchStateDir,
 		})
 		perfURL := fmt.Sprintf("http://%s/#token=%s", cfg.perfAddr(), perfTok)
 		_ = perfURL // caller logs it via the exported URL (see below)
@@ -432,7 +436,13 @@ func Run(ctx context.Context, cfg Config) error {
 		if err != nil {
 			return fmt.Errorf("serve: console token: %w", err)
 		}
+		// workDir: workspace-relative artifacts (chat transcripts, workflow DAGs,
+		// kanban board). Stays at <workspace>/work/current — not the state dir.
 		workDir := perfdash.DefaultWorkDir(cfg.WorkspaceRoot)
+		// perfStateDir: where dispatch-log.ndjson is written by the daemon.
+		// Must match the writer's resolution order (YAKOS_DISPATCH_LOG → ~/.yakos-state).
+		// This is the read path for the Performance dashboard embedded in the console.
+		perfStateDir := perfdash.DefaultStateDir()
 		kanbanPath := filepath.Join(cfg.WorkspaceRoot, "work", "current", "kanban.md")
 		workflowEngine := &workflow.Engine{
 			Svc:       dispatchSvc,
@@ -489,15 +499,18 @@ func Run(ctx context.Context, cfg Config) error {
 			KanbanBoardPath:   kanbanPath,
 			KanbanProject:     filepath.Base(cfg.WorkspaceRoot),
 			MetricsProjectDir: cfg.WorkspaceRoot,
-			PerfWorkDir:       workDir,
-			Bus:               bus,
-			DispatchService:   dispatchSvc,
-			WorkDir:           workDir,
-			WorkflowEngine:    workflowEngine,
-			StateDir:          stateDir,
-			WorkspaceRoot:     cfg.WorkspaceRoot,
-			AuthSessionStore:  authStore,
-			UserStore:         uStore,
+			// PerfWorkDir points at the yakOS state dir (where dispatch-log.ndjson
+			// is written), not at work/current. The writer (dispatch/events.go)
+			// uses YAKOS_DISPATCH_LOG → ~/.yakos-state; DefaultStateDir() matches.
+			PerfWorkDir:      perfStateDir,
+			Bus:              bus,
+			DispatchService:  dispatchSvc,
+			WorkDir:          workDir, // chat transcripts + workflow artifacts
+			WorkflowEngine:   workflowEngine,
+			StateDir:         stateDir,
+			WorkspaceRoot:    cfg.WorkspaceRoot,
+			AuthSessionStore: authStore,
+			UserStore:        uStore,
 		}
 
 		if networked {
