@@ -65,8 +65,9 @@ func ValidateAgentName(name, yakosRoot, project string) error {
 		roster, err := agentscompose.Compose(yakosRoot, project)
 		if err != nil {
 			// Compose failure (e.g. unreadable agents dir): fall through to the
-			// known-runtime check so a bare "claude" still works when the roster
-			// directory is absent.  A genuinely unknown name will still fail below.
+			// pass-through path below so a bare "claude" still works when the
+			// roster directory is absent.  A genuinely unknown name passes through
+			// — validation cannot proceed without a roster.
 			roster = nil
 		}
 		if roster != nil {

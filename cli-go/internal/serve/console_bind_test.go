@@ -313,6 +313,27 @@ func TestConsoleConfig_WorkspaceRootWired(t *testing.T) {
 	}
 }
 
+// TestConsoleConfig_YakosRootWired is a regression guard ensuring YakosRoot is
+// propagated from serve.Config into consoleui.Config.  If a future edit to the
+// consoleCfg literal in Run() drops the YakosRoot field, ValidateAgentName in
+// the dispatch handler will silently no-op (yakosRoot=="" path) and the
+// unknown-agent 400 fix will regress to the original silent-hang behaviour.
+func TestConsoleConfig_YakosRootWired(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfg := serve.Config{
+		WorkspaceRoot: tmp,
+		YakosRoot:     tmp,
+	}
+	got := serve.BuildConsoleCfgForTest(cfg)
+	if got.YakosRoot == "" {
+		t.Errorf("consoleui.Config.YakosRoot is empty; want non-empty (YakosRoot not wired from serve.Config — ValidateAgentName will silently no-op)")
+	}
+	if got.YakosRoot != tmp {
+		t.Errorf("consoleui.Config.YakosRoot = %q; want %q", got.YakosRoot, tmp)
+	}
+}
+
 // TestConsoleConfig_PerfWorkDirIsStateDir is a regression guard for the
 // datapath bug where PerfWorkDir was set to work/current (workspace-relative)
 // instead of the yakOS state dir where dispatch-log.ndjson is actually written.

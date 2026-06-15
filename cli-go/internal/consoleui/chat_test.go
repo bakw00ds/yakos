@@ -2054,13 +2054,15 @@ func TestChatDispatch_202OnBareRuntimeName(t *testing.T) {
 		sessID := "s-runtime-" + rt
 		body := `{"runtime":"` + rt + `","model":"sonnet","agent":"` + rt + `","task":"hi","sessionId":"` + sessID + `","operatorId":"alice"}`
 		resp := post(t, ts.URL+"/api/chat/dispatch", tok, body)
-		defer drainClose(resp)
 
 		// The server has no DispatchService configured → 503 after the agent check.
 		// 400 would indicate the bare runtime was wrongly rejected as unknown.
 		if resp.StatusCode == http.StatusBadRequest {
+			drainClose(resp)
 			t.Errorf("POST /api/chat/dispatch (bare runtime=%s): got 400 (wrongly rejected); want non-400", rt)
+			continue
 		}
+		drainClose(resp)
 	}
 }
 

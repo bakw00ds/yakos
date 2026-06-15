@@ -34,6 +34,7 @@ func BuildConsoleCfgForTest(cfg Config) consoleui.Config {
 		WorkDir:       workDir,
 		StateDir:      cfg.consoleStateDir(),
 		WorkspaceRoot: cfg.WorkspaceRoot,
+		YakosRoot:     cfg.YakosRoot,
 		// Bus, DispatchService, WorkflowEngine, Token omitted — not
 		// constructed by this helper (requires live services); the fields
 		// under test here are the static config derivations.
