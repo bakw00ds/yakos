@@ -279,6 +279,43 @@ func findFirstUserOwner(entries []TranscriptEntry) (string, bool) {
 	return "", false
 }
 
+// FirstUserOwner returns the operatorID established by the first user-turn
+// entry in the transcript file for conversationID, without performing any
+// ownership check.  Returns ("", nil) when the file does not exist or is
+// empty.  Returns ("", nil) when the file is non-empty but has no user turn
+// with an operatorID (M1 case — caller must treat as unowned).
+//
+// This is used by handleChatTranscript to anchor the hub's IsConversationShared
+// lookup to the transcript's established owner, preventing an attacker from
+// registering a shared session under a victim's conversationID.
+func (tr *Transcripts) FirstUserOwner(conversationID string) (string, error) {
+	path, err := tr.transcriptPath(conversationID)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("transcript: read: %w", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		var entry TranscriptEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Role == RoleUser && entry.OperatorID != "" {
+			return entry.OperatorID, nil
+		}
+	}
+	return "", nil
+}
+
 // errTranscriptForbidden is returned by Read when the caller's operatorID does
 // not match the conversation owner.  HTTP handler must return 403.
 var errTranscriptForbidden = errors.New("transcript: access denied (operator mismatch)")

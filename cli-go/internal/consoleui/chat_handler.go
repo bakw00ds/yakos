@@ -418,11 +418,20 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Bind the conversationID to the session in the hub.
-	// This is what makes IsConversationShared authoritative for transcript reads:
-	// the hub knows which conversation belongs to which session so the transcript
-	// handler can derive shared-ness from the conversation being read rather than
-	// from a caller-supplied sessionId param.
-	ch.hub.SetConversationID(dispReq.SessionID, conversationID)
+	// SetConversationID rejects binding when conversationID is already claimed
+	// by a DIFFERENT operator's session (errConversationOwnerConflict → 403).
+	// This closes the binding-poisoning vector: an attacker cannot steal a
+	// victim's conversationID by dispatching with it as their own conversationId.
+	if err := ch.hub.SetConversationID(dispReq.SessionID, conversationID); err != nil {
+		ch.hub.CloseSession(dispReq.SessionID)
+		if errors.Is(err, errConversationOwnerConflict) {
+			http.Error(w, "conversationId already owned by another operator", http.StatusForbidden)
+			return
+		}
+		slog.Error("consoleui: SetConversationID", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 
 	// Append the user turn to the transcript.
 	_ = ch.transcripts.Append(TranscriptEntry{
@@ -795,11 +804,23 @@ func (ch *chatHandlers) handleChatTranscript(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// Determine shared-access from the CONVERSATION being read.
-	// hub.IsConversationShared(conversationID) returns true only when a
-	// currently-open session that owns conversationID is shared.
-	// This is authoritative — the caller-supplied sessionId plays no role here.
-	sharedAccess := ch.hub.IsConversationShared(conversationID)
+	// Determine shared-access from the CONVERSATION being read, owner-anchored.
+	//
+	// Step 1: resolve the transcript's established owner (first user-turn
+	// operatorID) WITHOUT performing any auth check.  This is the owner the
+	// hub entry must match for shared-access to be granted.
+	//
+	// Step 2: ask the hub whether a SHARED session that owns conversationID AND
+	// is recorded under transcriptOwner is currently open.  The owner-anchor
+	// prevents an attacker who poisoned the hub binding (bound their own session
+	// to the victim's conversationID) from having their shared session satisfy
+	// the lookup: their ownerOperatorID will differ from transcriptOwner.
+	//
+	// If FirstUserOwner fails (e.g. malformed file) we proceed with "" which
+	// disables the owner-anchor in the hub lookup.  That is safe: ReadShared
+	// below will apply M1 fail-closed and deny access anyway.
+	transcriptOwner, _ := ch.transcripts.FirstUserOwner(conversationID)
+	sharedAccess := ch.hub.IsConversationShared(conversationID, transcriptOwner)
 
 	entries, err := ch.transcripts.ReadShared(conversationID, operatorID, sharedAccess)
 	if err != nil {

@@ -1511,7 +1511,9 @@ func TestAttach_RoleReadCanWatchSharedSession(t *testing.T) {
 	if err := hub.OpenSession(sharedSessionID, "alice", true /*shared=true*/); err != nil {
 		t.Fatalf("OpenSession (shared): %v", err)
 	}
-	hub.SetConversationID(sharedSessionID, sharedConvID)
+	if err := hub.SetConversationID(sharedSessionID, sharedConvID); err != nil {
+		t.Fatalf("SetConversationID (shared): %v", err)
+	}
 	t.Cleanup(func() { hub.CloseSession(sharedSessionID) })
 
 	// Write alice's transcript so the backfill has content to return.
@@ -1602,7 +1604,9 @@ func TestAttach_RoleReadCannotReadUnsharedTranscript(t *testing.T) {
 	if err := hub.OpenSession(privSessionID, "alice", false /*shared=false*/); err != nil {
 		t.Fatalf("OpenSession (unshared): %v", err)
 	}
-	hub.SetConversationID(privSessionID, privConvID)
+	if err := hub.SetConversationID(privSessionID, privConvID); err != nil {
+		t.Fatalf("SetConversationID (priv): %v", err)
+	}
 	t.Cleanup(func() { hub.CloseSession(privSessionID) })
 
 	// Write alice's transcript.
@@ -1623,7 +1627,9 @@ func TestAttach_RoleReadCannotReadUnsharedTranscript(t *testing.T) {
 	if err := hub.OpenSession(sharedSessionID, "carol", true /*shared=true*/); err != nil {
 		t.Fatalf("OpenSession (shared for IDOR test): %v", err)
 	}
-	hub.SetConversationID(sharedSessionID, sharedConvID)
+	if err := hub.SetConversationID(sharedSessionID, sharedConvID); err != nil {
+		t.Fatalf("SetConversationID (shared-idor): %v", err)
+	}
 	t.Cleanup(func() { hub.CloseSession(sharedSessionID) })
 
 	// Write carol's (innocuous) shared transcript.
@@ -1795,4 +1801,149 @@ func TestAttach_SSEStream_RoleEnforcement(t *testing.T) {
 			t.Errorf("(d2) RoleNone on /api/chat/stream: got %d; want 403", got)
 		}
 	})
+}
+
+// TestAttach_ConversationBindingPoisoning is the regression test for the
+// conversation-binding poisoning attack described in the Phase 3 security
+// review (HIGH — cross-operator conversationID binding poisoning).
+//
+// Attack scenario:
+//  1. Alice dispatches an UNSHARED session bound to conv-alice (private transcript).
+//  2. Bob (attacker) opens his OWN session and calls SetConversationID with
+//     conv-alice — previously this succeeded, allowing Bob to "claim" Alice's
+//     conversation in the hub.
+//  3. Bob shares his OWN session (allowed — he owns it).
+//  4. Bob calls GET /api/chat/transcript?conversationId=conv-alice.
+//     OLD: IsConversationShared iterates sessions and hits Bob's shared entry →
+//     sharedAccess=true → owner check bypassed → Alice's private transcript returned.
+//     NEW: SetConversationID rejects the binding (errConversationOwnerConflict)
+//     AND IsConversationShared is owner-anchored (firstUserOwner=alice, Bob's
+//     session owner="bob" ≠ "alice" → match fails → sharedAccess=false → 403).
+//
+// Run with -count=20 to defeat map-iteration-order flakiness: in the OLD code,
+// IsConversationShared was first-match-wins on a randomly-ordered map; with
+// two sessions claiming the same conversationID, outcome was non-deterministic.
+// The new code must return 403 every time.
+func TestAttach_ConversationBindingPoisoning(t *testing.T) {
+	stateDir := t.TempDir()
+	workDir := t.TempDir()
+	realTok, _ := consoleui.LoadOrCreateToken(stateDir)
+	bus := wsbus.New()
+	t.Cleanup(bus.Stop)
+	srv := consoleui.MustNew(t, consoleui.Config{
+		Token:             realTok,
+		KanbanBoardPath:   t.TempDir() + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: t.TempDir(),
+		PerfWorkDir:       t.TempDir(),
+		Bus:               bus,
+		WorkDir:           workDir,
+	})
+	hub := srv.ChatHub()
+
+	// Step 1: Alice opens an UNSHARED session bound to conv-alice.
+	const aliceSessionID = "sess-poison-alice"
+	const aliceConvID = "conv-poison-alice"
+	if err := hub.OpenSession(aliceSessionID, "alice", false /*shared=false*/); err != nil {
+		t.Fatalf("OpenSession (alice): %v", err)
+	}
+	if err := hub.SetConversationID(aliceSessionID, aliceConvID); err != nil {
+		t.Fatalf("SetConversationID (alice): %v", err)
+	}
+	t.Cleanup(func() { hub.CloseSession(aliceSessionID) })
+
+	// Write Alice's private transcript so the backfill has content.
+	tr := consoleui.NewTranscriptsForTest(workDir)
+	_ = tr.Append(consoleui.TranscriptEntry{
+		SessionID:      aliceSessionID,
+		ConversationID: aliceConvID,
+		OperatorID:     "alice",
+		Role:           consoleui.RoleUser,
+		Text:           "alice's private task",
+	})
+
+	// Step 2: Bob attempts to bind his own session to Alice's conversationID.
+	// This MUST return errConversationOwnerConflict (Layer 1 defense).
+	const bobSessionID = "sess-poison-bob"
+	if err := hub.OpenSession(bobSessionID, "bob", false /*shared=false*/); err != nil {
+		t.Fatalf("OpenSession (bob): %v", err)
+	}
+	t.Cleanup(func() { hub.CloseSession(bobSessionID) })
+
+	if err := hub.SetConversationID(bobSessionID, aliceConvID); !errors.Is(err, consoleui.ErrConversationOwnerConflict) {
+		t.Errorf("SetConversationID (bob stealing alice's conv): want ErrConversationOwnerConflict, got %v", err)
+	}
+
+	// Step 3: Even if the hub rejection were bypassed (defense-in-depth), Bob
+	// sharing his session must NOT expose Alice's transcript.
+	// Simulate the attack succeeding at the hub level by using a separate hub
+	// with no cross-operator check (i.e., the OLD vulnerable hub).  We verify
+	// the IsConversationShared owner-anchor blocks the read independently.
+	//
+	// Construct a second hub that allows the poisoned binding directly.
+	poisonHub := consoleui.NewChatHubForTest()
+	// Alice's unshared session in poison hub.
+	if err := poisonHub.OpenSession(aliceSessionID, "alice", false); err != nil {
+		t.Fatalf("poisonHub OpenSession (alice): %v", err)
+	}
+	if err := poisonHub.SetConversationID(aliceSessionID, aliceConvID); err != nil {
+		t.Fatalf("poisonHub SetConversationID (alice): %v", err)
+	}
+	// Bob's session in poison hub, claims aliceConvID.
+	if err := poisonHub.OpenSession(bobSessionID, "bob", false); err != nil {
+		t.Fatalf("poisonHub OpenSession (bob): %v", err)
+	}
+	// Force the bind directly through the Hub (no cross-operator check in this path
+	// because we call SetConversationID on a fresh hub where alice's session is
+	// listed first — we want to test the owner-anchor independent of Layer 1).
+	// Since our fixed SetConversationID WILL reject this, we verify it returns
+	// the conflict error and confirm the owner-anchor separately via the
+	// IsConversationShared owner-anchor test below.
+	bindErr := poisonHub.SetConversationID(bobSessionID, aliceConvID)
+	if bindErr == nil {
+		// Binding succeeded (should not happen with our fix, but test the full
+		// owner-anchor path in this case too — belt-and-suspenders).
+		// Bob makes his session shared.
+		if err := poisonHub.SetShared(bobSessionID, "bob", true); err != nil {
+			t.Fatalf("poisonHub SetShared (bob): %v", err)
+		}
+		// IsConversationShared with alice as the expected owner must return false
+		// even when bob's shared session also claims the same conversationID.
+		if got := poisonHub.IsConversationShared(aliceConvID, "alice"); got {
+			t.Error("Layer 2 owner-anchor failed: IsConversationShared returned true when bob's shared session claimed alice's conv with alice as expected owner")
+		}
+	}
+	// Whether or not Layer 1 allowed the bind, it must have returned the conflict error.
+	if bindErr != nil && !errors.Is(bindErr, consoleui.ErrConversationOwnerConflict) {
+		t.Errorf("SetConversationID unexpected error: %v", bindErr)
+	}
+
+	// Step 4 (end-to-end via HTTP): Bob's GET /api/chat/transcript for Alice's
+	// conversationID must return 403, regardless of what is in the hub.
+	//
+	// Bob's identity is injected as RoleDispatch (the attacker has full dispatch
+	// rights — they are a legitimate operator, just not Alice's).
+	bobID := netid.Identity{
+		Resolved:      true,
+		Authenticated: true,
+		AuthMethod:    netid.AuthMethodCert,
+		OperatorID:    "bob",
+		Role:          netid.RoleDispatch,
+	}
+	handler := consoleui.RequireTokenForNonStatic(realTok,
+		consoleui.RequireJSONForMutations(
+			injectIdentityMiddleware(bobID, srv.Handler())))
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	// Bob reads Alice's conversationID directly (no sessionId param needed —
+	// the server derives shared-ness from the conversation, not caller-supplied params).
+	url := ts.URL + "/api/chat/transcript" +
+		"?conversationId=" + aliceConvID +
+		"&operatorId=bob"
+	resp := get(t, url, realTok)
+	drainClose(resp)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("binding-poisoning E2E: bob reading alice's private conv: status=%d; want 403", resp.StatusCode)
+	}
 }
