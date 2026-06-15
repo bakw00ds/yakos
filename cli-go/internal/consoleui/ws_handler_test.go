@@ -883,3 +883,182 @@ func TestConsoleWSNetworked_CSWSH_ForeignOrigin_Rejected(t *testing.T) {
 		t.Fatal("expected dial error for foreign Origin on session-auth WS; CSWSH defense failed")
 	}
 }
+
+// ---- Exact-match Origin allowlist regression tests (CSWSH guard) -------------
+//
+// These tests pin the exact-match invariant in isExternalOrigin and the session
+// WS auth path.  They exist so that a future refactor toward prefix, substring,
+// or case-insensitive matching fails loudly rather than silently opening a CSWSH
+// vector.
+//
+// Configured externalHost for all cases below: "console.example.com:7890".
+// The only Origin that should be accepted is "https://console.example.com:7890"
+// (and its trailing-slash form, which isExternalOrigin strips).
+
+// TestIsExternalOrigin_ExactMatchInvariant is a table-driven unit test of
+// isExternalOrigin directly.  It covers the allowlist predicate in isolation
+// so failures point clearly at the matching logic rather than the middleware.
+func TestIsExternalOrigin_ExactMatchInvariant(t *testing.T) {
+	const host = "console.example.com:7890"
+
+	cases := []struct {
+		name   string
+		origin string
+		wantOK bool
+	}{
+		// ---- Accepted cases -------------------------------------------------------
+		{
+			name:   "exact https match",
+			origin: "https://console.example.com:7890",
+			wantOK: true,
+		},
+		{
+			name:   "exact https match with trailing slash",
+			origin: "https://console.example.com:7890/",
+			wantOK: true,
+		},
+		// ---- Rejected: prefix / no-port attack -----------------------------------
+		// An attacker registers console.example.com and relies on no-port matching
+		// or a prefix check to bypass.
+		{
+			name:   "no port — prefix/no-port attack",
+			origin: "https://console.example.com",
+			wantOK: false,
+		},
+		// ---- Rejected: suffix attack ---------------------------------------------
+		// attacker registers console.example.com.evil.com
+		{
+			name:   "suffix attack",
+			origin: "https://console.example.com.evil.com:7890",
+			wantOK: false,
+		},
+		// ---- Rejected: prefix attack ---------------------------------------------
+		// attacker registers evil-console.example.com
+		{
+			name:   "prefix attack",
+			origin: "https://evil-console.example.com:7890",
+			wantOK: false,
+		},
+		// ---- Rejected: port mismatch --------------------------------------------
+		{
+			name:   "port mismatch — 443 instead of 7890",
+			origin: "https://console.example.com:443",
+			wantOK: false,
+		},
+		{
+			name:   "port mismatch — 7891 off-by-one",
+			origin: "https://console.example.com:7891",
+			wantOK: false,
+		},
+		// ---- Rejected: userinfo embedding ---------------------------------------
+		// Browsers do not send userinfo in Origin, but the parser must not match it.
+		{
+			name:   "userinfo embedding",
+			origin: "https://console.example.com@evil.com:7890",
+			wantOK: false,
+		},
+		// ---- Rejected: case variant ---------------------------------------------
+		// Origin comparison must be case-sensitive (RFC 6454 §6.1 normalises scheme
+		// and host to lowercase; a case-variant Origin is therefore never a
+		// legitimate browser Origin, but a mitm or script might send one).
+		{
+			name:   "uppercase host",
+			origin: "https://CONSOLE.EXAMPLE.COM:7890",
+			wantOK: false,
+		},
+		{
+			name:   "mixed-case host",
+			origin: "https://Console.Example.Com:7890",
+			wantOK: false,
+		},
+		// ---- Rejected: special values -------------------------------------------
+		{
+			name:   "null origin",
+			origin: "null",
+			wantOK: false,
+		},
+		{
+			name:   "empty origin",
+			origin: "",
+			wantOK: false,
+		},
+		// ---- Rejected: wrong scheme ---------------------------------------------
+		{
+			name:   "ftp scheme",
+			origin: "ftp://console.example.com:7890",
+			wantOK: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isExternalOrigin(tc.origin, host)
+			if got != tc.wantOK {
+				t.Errorf("isExternalOrigin(%q, %q) = %v; want %v", tc.origin, host, got, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestSessionWSOrigin_ExactMatchInvariant exercises the same cases through the
+// consoleAuthSubprotocolOrSession middleware so that a future refactor that
+// moves the Origin check out of isExternalOrigin (e.g. into the middleware
+// directly) also fails loudly.
+func TestSessionWSOrigin_ExactMatchInvariant(t *testing.T) {
+	const externalHost = "console.example.com:7890"
+
+	type originCase struct {
+		name       string
+		origin     string
+		wantCalled bool // true = next handler reached (accepted); false = 403
+	}
+
+	cases := []originCase{
+		// Accepted
+		{name: "exact match", origin: "https://console.example.com:7890", wantCalled: true},
+		{name: "trailing slash", origin: "https://console.example.com:7890/", wantCalled: true},
+		// Rejected
+		{name: "no port", origin: "https://console.example.com", wantCalled: false},
+		{name: "suffix attack", origin: "https://console.example.com.evil.com:7890", wantCalled: false},
+		{name: "prefix attack", origin: "https://evil-console.example.com:7890", wantCalled: false},
+		{name: "port mismatch 443", origin: "https://console.example.com:443", wantCalled: false},
+		{name: "port mismatch off-by-one", origin: "https://console.example.com:7891", wantCalled: false},
+		{name: "userinfo embedding", origin: "https://console.example.com@evil.com:7890", wantCalled: false},
+		{name: "uppercase host", origin: "https://CONSOLE.EXAMPLE.COM:7890", wantCalled: false},
+		{name: "null origin", origin: "null", wantCalled: false},
+		{name: "missing origin", origin: "", wantCalled: false},
+	}
+
+	id := makeSessionIdentity("alice")
+	externalHosts := []string{externalHost}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			})
+			h := consoleAuthSubprotocolOrSession(testToken, externalHosts, next)
+
+			req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
+			req = injectIdentity(req, id)
+			// No Sec-WebSocket-Protocol → session path.
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+
+			if called != tc.wantCalled {
+				t.Errorf("next called=%v; want %v (origin=%q)", called, tc.wantCalled, tc.origin)
+			}
+			if tc.wantCalled && rr.Code != http.StatusOK {
+				t.Errorf("status=%d; want 200 (origin=%q)", rr.Code, tc.origin)
+			}
+			if !tc.wantCalled && rr.Code != http.StatusForbidden {
+				t.Errorf("status=%d; want 403 (origin=%q)", rr.Code, tc.origin)
+			}
+		})
+	}
+}
