@@ -327,3 +327,126 @@ packages: `experimental`, pre-1.0, breaking changes allowed at minor bumps.
 | `cli-go/pkg/refresh/refresh.go` | Public refresh API |
 | `cli-go/pkg/supervise/supervise.go` | Public supervise API |
 | `cli-go/pkg/agent/agent.go` | Public agent API |
+
+---
+
+## Console Session Auth — ADR-0005 Phase 3b
+
+The endpoints below are on the **networked console bind** (not the REST API port).
+All console endpoints are at `https://<console-host>:<console-port>/`.
+
+### Auth model for the networked console
+
+| Regime | Clients | Mechanism |
+|---|---|---|
+| Networked humans | Browser operators | Password + session cookie (these endpoints) |
+| Networked machines | CLI, CI, mTLS clients | Client certificate (existing) |
+| Loopback | Localhost callers | Bearer token `#token=` (unchanged) |
+
+### POST /login
+
+**Auth:** None (unauthenticated endpoint; no bearer token required)
+**Content-Type:** `application/json` (required; enforced by `requireJSONForMutations`)
+**Idempotency-Key:** Not applicable (each call creates a new session; prior session for the same user is revoked — session fixation defense)
+
+**Rate limit:** 20 requests per IP per 5 minutes (independent of per-user lockout in userstore)
+
+**Request body:**
+```json
+{"username": "alice", "password": "correct-horse-battery"}
+```
+- Both fields required; any missing field → 400.
+- Field names are the only accepted fields; no privilege fields (role, epoch) are bound.
+
+**Response 200:**
+```json
+{"ok": true, "passwordResetRequired": false}
+```
+Sets two `Set-Cookie` headers:
+- `yakos_session=<id>; HttpOnly; Secure; SameSite=Strict; Path=/` — session ID (never readable by JS)
+- `yakos_csrf=<token>; Secure; SameSite=Strict; Path=/` — CSRF token (JS-readable for double-submit)
+
+**Response 400:** Missing / invalid body.
+
+**Response 401:**
+```json
+{"error": "invalid username or password"}
+```
+IDENTICAL body for all failure modes (unknown user, wrong password, disabled, locked). The specific reason is audit-logged server-side with `slog.Warn` and a `reason` field; it is NEVER sent to the client.
+
+**Response 429:** Per-IP rate limit exceeded.
+```json
+{"error": "too many requests"}
+```
+
+---
+
+### POST /logout
+
+**Auth:** Session cookie (`yakos_session`). Idempotent: no session → 200 + clear cookies.
+**CSRF:** `X-CSRF-Token` header required when authenticated (double-submit pattern).
+**Content-Type:** `application/json` (required)
+
+**Response 200:**
+```json
+{"ok": true}
+```
+Sets two `Set-Cookie` headers with `MaxAge=-1` to clear both cookies:
+- `yakos_session=; HttpOnly; Secure; SameSite=Strict; Path=/; MaxAge=-1`
+- `yakos_csrf=; Secure; SameSite=Strict; Path=/; MaxAge=-1`
+
+---
+
+### CSRF protocol for session-authenticated mutations
+
+All state-mutating requests (POST/PUT/PATCH/DELETE) from session-authenticated browsers
+MUST include:
+
+```
+X-CSRF-Token: <value-from-yakos_csrf-cookie>
+```
+
+The `yakos_csrf` cookie is non-HttpOnly so JS can read it. The Service Worker reads it
+and injects `X-CSRF-Token` on all same-origin mutations in session mode (Phase 3c).
+
+Violations:
+- Missing header → `403 {"error":"invalid CSRF token"}`
+- Wrong value → `403 {"error":"invalid CSRF token"}`
+
+**Exempt from CSRF:**
+- mTLS cert-authenticated requests (`AuthMethodCert`)
+- Loopback bearer requests (`AuthMethodNone`)
+- GET/HEAD/OPTIONS requests
+
+---
+
+### Edge behavior for unauthenticated networked requests
+
+| Request type | Response |
+|---|---|
+| API/XHR path (`/api/*`, `/flows/api/*`, `/v1/*`) or `Accept: application/json` | `401 {"error":"authentication required"}` |
+| Top-level navigation (other paths, no `Accept: application/json`) | `302 Location: /login` |
+| `/login`, `/login.js`, static SPA shell | Pass through (no auth required) |
+
+---
+
+### GET /login
+
+**Auth:** None
+Serves the minimal server-rendered login form (Phase 3b placeholder).
+CSP: `script-src 'self'; form-action 'self'`. No inline scripts.
+
+---
+
+### Console auth implementation files
+
+| File | Purpose |
+|---|---|
+| `cli-go/internal/consoleui/authhandler.go` | POST /login, POST /logout, CSRF middleware, edge redirect/401, per-IP rate limiter |
+| `cli-go/internal/consoleui/server.go` | Middleware chain wiring, `/login` and `/logout` route registration, `FullHandler()` |
+| `cli-go/internal/consoleui/sessionauth.go` | `buildSessionLookupFn` glue (Phase 3a, updated to use `sessionCookieName`) |
+| `cli-go/internal/consoleui/export_test.go` | Test exports: `LoginRateLimitRequests`, `SessionCookieName`, `RequireCSRFForSessionForTest` |
+| `cli-go/internal/consoleui/auth_3b_test.go` | 15 test cases covering the full Phase 3b surface (race-enabled) |
+| `cli-go/internal/consoleui/dist/login.html` | Minimal login page HTML (CSP-compliant, no inline scripts) |
+| `cli-go/internal/consoleui/dist/login.js` | Login form JS (`script-src 'self'`) |
+| `cli-go/internal/authsession/export_test.go` | `CookieNameSession` export for authsession invariant tests |

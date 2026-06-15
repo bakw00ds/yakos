@@ -57,7 +57,7 @@ func newFilesTestServer(t *testing.T, workspaceDir string) (*httptest.Server, st
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",
@@ -85,7 +85,7 @@ func newFilesEnforcementServer(t *testing.T, workspaceDir string, id netid.Ident
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",
@@ -1019,7 +1019,7 @@ func TestFilesRoleGate_ZeroValueNotBlocked(t *testing.T) {
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yakOS — Sign in</title>
+<link rel="stylesheet" href="/login.css">
+</head>
+<body>
+<div class="card">
+  <h1>yakOS — Sign in</h1>
+  <div class="error" id="err"></div>
+  <form id="loginForm">
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" autocomplete="username" required>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" required>
+    <button type="submit" id="btn">Sign in</button>
+  </form>
+  <div class="reset-note" id="resetNote">
+    Password reset required. Please change your password before continuing.
+  </div>
+</div>
+<script src="/login.js"></script>
+</body>
+</html>

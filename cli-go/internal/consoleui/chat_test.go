@@ -58,7 +58,7 @@ func newChatTestServer(t *testing.T) (*httptest.Server, string) {
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",
@@ -293,7 +293,7 @@ func TestChatDispatch_403OnSessionOwnerConflict(t *testing.T) {
 	realTok, _ := consoleui.LoadOrCreateToken(stateDir)
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             realTok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",
@@ -922,7 +922,7 @@ func TestChatCancel_403OnNonOwnerCancel(t *testing.T) {
 	realTok, _ := consoleui.LoadOrCreateToken(stateDir)
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             realTok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",
@@ -971,7 +971,7 @@ func TestChatDispatch_NoResidualSessionOn503(t *testing.T) {
 	realTok, _ := consoleui.LoadOrCreateToken(stateDir)
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             realTok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",
@@ -1148,7 +1148,7 @@ func TestChatShare_403OnNonOwner(t *testing.T) {
 	realTok, _ := consoleui.LoadOrCreateToken(stateDir)
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             realTok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",
@@ -1181,7 +1181,7 @@ func TestChatShare_OwnerCanToggle(t *testing.T) {
 	realTok, _ := consoleui.LoadOrCreateToken(stateDir)
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             realTok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",
@@ -1391,7 +1391,7 @@ func TestChatShare_HTTPSetShared_404OnClosed(t *testing.T) {
 	realTok, _ := consoleui.LoadOrCreateToken(stateDir)
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             realTok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",

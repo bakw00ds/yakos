@@ -46,12 +46,11 @@ import (
 func buildSessionLookupFn(authStore *authsession.Store, userStore *userstore.Store) netid.SessionLookupFn {
 	return func(r *http.Request) (operatorID string, role netid.Role, ok bool) {
 		// Step 1: read the session cookie.
-		// The cookie name "yakos_session" is the ADR-0005-locked constant defined
-		// in authsession.cookieNameSession (unexported).  We use the string literal
-		// here to avoid adding an exported accessor to authsession; if the name
-		// ever changes, authsession.SessionCookie / ClearSessionCookie and this
-		// constant must all move together (they are the only three sites).
-		cookie, err := r.Cookie("yakos_session")
+		// sessionCookieName is the package-level constant defined in authhandler.go
+		// (same package).  A cross-package test asserts that this constant matches
+		// authsession.CookieNameSession (the authoritative value in the authsession
+		// package, exported for tests only via authsession/export_test.go).
+		cookie, err := r.Cookie(sessionCookieName)
 		if err != nil {
 			// http.ErrNoCookie or any parse error — not authenticated.
 			return "", 0, false

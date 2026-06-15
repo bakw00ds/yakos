@@ -76,6 +76,15 @@ var ideEditorHTML []byte
 //go:embed dist/ide-editor.js
 var ideEditorJS []byte
 
+//go:embed dist/login.html
+var loginHTML []byte
+
+//go:embed dist/login.js
+var loginJS []byte
+
+//go:embed dist/login.css
+var loginCSS []byte
+
 // Config holds all configuration for the unified console HTTP server.
 type Config struct {
 	// Addr is the TCP listen address. Defaults to "127.0.0.1:7890".
@@ -234,7 +243,12 @@ type Server struct {
 	serverCancel context.CancelFunc // called by Serve when the server shuts down
 }
 
-// New constructs a Server and wires all routes.
+// New constructs a Server and wires all routes.  It returns an error if the
+// configuration is invalid.  Specifically, if NetworkedMode is true and either
+// AuthSessionStore or UserStore is nil, New fails closed with an error — a
+// networked console without the session+user stores would silently skip the
+// requireAuthOrRedirect and requireCSRFForSession middleware, leaving the
+// surface unauthenticated.
 //
 // Auth model (three regimes per ADR-0005):
 //   - Loopback (NetworkedMode=false): bearer-token cooperative labeling.
@@ -246,8 +260,6 @@ type Server struct {
 //   - Networked humans (NetworkedMode=true, session cookie present):
 //     resolved via buildSessionLookupFn from Config.AuthSessionStore +
 //     Config.UserStore.  Identity is Authenticated=true, AuthMethodSession.
-//     This path is dormant until Phase 3b wires login — no sessions exist yet
-//     so the lookup always returns false today.
 //
 // Edge middleware stack (outer → inner for all three regimes):
 //   - Static SPA shell assets (/, /app.js, /styles.css, /sw.js) are served
@@ -262,7 +274,12 @@ type Server struct {
 //     per-dashboard Host/token middleware.
 //   - /v1/events is mounted from wsbus.Server.Handler() which enforces
 //     loopback-only + Origin allow-list (DNS-rebinding defence).
-func New(cfg Config) *Server {
+func New(cfg Config) (*Server, error) {
+	if cfg.NetworkedMode && (cfg.AuthSessionStore == nil || cfg.UserStore == nil) {
+		return nil, fmt.Errorf(
+			"consoleui: NetworkedMode requires both AuthSessionStore and UserStore to be non-nil; " +
+				"a networked console without stores has no auth middleware")
+	}
 	pm := NewPresenceManager(cfg.Bus)
 	hub := NewChatHub()
 	var transcripts *Transcripts
@@ -297,6 +314,7 @@ func New(cfg Config) *Server {
 		serverCancel: serverCancel,
 	}
 	s.registerRoutes()
+
 	// Build the identity resolver.
 	//
 	// loopbackTrusted controls the no-cert fallback:
@@ -311,12 +329,10 @@ func New(cfg Config) *Server {
 	// The dispatch facade stamps operator_id from its daemon-level opID on the
 	// loopback path; we return "" here and let the facade do it.
 	//
-	// Session regime (ADR-0005 Phase 3a — dormant wiring):
+	// Session regime (ADR-0005 Phase 3a + Phase 3b):
 	//   - Networked path + AuthSessionStore + UserStore set → use
 	//     NewResolverWithSession so that requests carrying a valid session cookie
-	//     resolve to Identity{AuthMethodSession}.  No sessions exist yet (Phase 3b
-	//     wires login), so the lookup always returns false today — behavior is
-	//     unchanged.
+	//     resolve to Identity{AuthMethodSession}.
 	//   - Loopback path → always NewResolver (no session path on loopback).
 	loopbackTrusted := !cfg.NetworkedMode
 	mapper := netid.NewRoleMapper(cfg.StateDir)
@@ -326,38 +342,112 @@ func New(cfg Config) *Server {
 		return ""
 	}
 	var resolver *netid.Resolver
-	if !loopbackTrusted && cfg.AuthSessionStore != nil && cfg.UserStore != nil {
-		// Networked path with session stores: wire the session lookup function.
+	if !loopbackTrusted {
+		// Networked path: wire the session lookup function.
+		// Stores are guaranteed non-nil here: New() fails closed if they are nil.
 		// The session fn is guarded by !loopbackTrusted inside the resolver, so
 		// even if this branch were somehow reached on loopback, the session path
 		// would be skipped (defense-in-depth).
 		sessionFn := buildSessionLookupFn(cfg.AuthSessionStore, cfg.UserStore)
 		resolver = netid.NewResolverWithSession(mapper, callerLabelFn, loopbackTrusted, sessionFn)
 	} else {
-		// Loopback path, or networked path without session stores (zero-users /
-		// first-run): keep existing NewResolver behavior unchanged.
+		// Loopback path: keep existing NewResolver behavior unchanged.
 		resolver = netid.NewResolver(mapper, callerLabelFn, loopbackTrusted)
+	}
+
+	// Wire /login (GET page + POST handler) and /logout.
+	//
+	// /login is registered here (not in registerRoutes) so that a single mux
+	// pattern can dispatch on method, avoiding a duplicate-registration panic.
+	//
+	// On the networked path with stores: GET serves the login page, POST runs
+	// the login handler, /logout runs the logout handler.
+	//
+	// Without stores (loopback path or zero-users first-run): GET /login still
+	// serves the placeholder page (useful for debugging); POST /login returns
+	// 503 Service Unavailable.
+	if cfg.NetworkedMode {
+		// secure=true because NetworkedMode uses TLS; the cookie Secure flag must
+		// match (ADR-0005 LOW-2 / §Session management).
+		// Stores are guaranteed non-nil here: New() fails closed if they are nil.
+		authH := newAuthHandlers(cfg.AuthSessionStore, cfg.UserStore, true)
+		s.mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodPost:
+				authH.handleLogin(w, r)
+			case http.MethodGet, http.MethodHead:
+				s.handleLoginPage(w, r)
+			default:
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
+		})
+		s.mux.HandleFunc("/logout", authH.handleLogout)
+	} else {
+		// Loopback path: login page accessible at GET /login for debugging;
+		// POST /login is not wired (loopback uses bearer token, not sessions).
+		s.mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet, http.MethodHead:
+				s.handleLoginPage(w, r)
+			default:
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
+		})
 	}
 
 	// Build the inner handler chain (shared between loopback and networked paths).
 	//
-	// Order (outer → inner):
-	//   3. requireJSONForMutations  — Content-Type gate; CSRF defence
-	//   4. resolver.Middleware      — identity stamping (no enforcement, just context)
-	//   5. s.mux                   — route handlers
-	inner := requireJSONForMutations(resolver.Middleware(s.mux))
+	// Networked-path layer order (outer → inner, matching request processing order):
+	//   1. resolver.Middleware        — identity stamping: reads cert/session, sets context
+	//   2. requireAuthOrRedirect      — unauthenticated edge: 401 JSON or 302 /login
+	//   3. requireCSRFForSession      — double-submit CSRF check for session mutations
+	//   4. requireJSONForMutations    — Content-Type gate (second CSRF layer; CORS preflight)
+	//   5. s.mux                     — route handlers
+	//
+	// The resolver MUST run before CSRF and edge-auth checks because both
+	// requireAuthOrRedirect and requireCSRFForSession read the resolved
+	// netid.Identity from the request context.
+	//
+	// Loopback-path layer order (unchanged):
+	//   1. requireJSONForMutations
+	//   2. resolver.Middleware
+	//   3. s.mux
+	//
+	// NOTE: On the loopback path the resolver still runs (inside inner), and
+	// the existing loopback tests rely on the resolver.Middleware being between
+	// requireJSONForMutations and the mux. Keeping the two paths diverged here
+	// avoids any regression on the loopback path.
+	var inner http.Handler
+	if cfg.NetworkedMode {
+		// Wire CSRF middleware and edge redirect on the networked path.
+		// Stores are guaranteed non-nil here: New() fails closed if they are nil.
+		// Resolver runs first so its output is available to all downstream middleware.
+		inner = resolver.Middleware(
+			requireAuthOrRedirect(
+				requireCSRFForSession(cfg.AuthSessionStore,
+					requireJSONForMutations(s.mux))))
+	} else {
+		inner = requireJSONForMutations(resolver.Middleware(s.mux))
+	}
 
 	var protected http.Handler
 	if cfg.NetworkedMode {
 		// Networked path: the mTLS TLS layer replaces the loopback-only Host check.
-		// We still apply the token middleware for the bearer-token subprotocol on WS
-		// (browser WS connections still use Sec-WebSocket-Protocol token auth),
-		// and the Content-Type gate for CSRF defence.
+		//
+		// Auth for regular HTTP requests comes from cert or session cookie — the
+		// bearer token is NOT used for regular HTTP on the networked path.  The
+		// bearer token is only used for the WS subprotocol on /v1/events (browsers
+		// cannot set Authorization headers on WS upgrade requests).
+		//
+		// For /v1/events WS upgrades: requireTokenForNonStatic still applies (the
+		// WS handler itself enforces the subprotocol token; the outer skip lets it
+		// reach the handler).  For static assets + login page: token-exempt.  For
+		// all other routes: session or cert auth via the inner chain.
 		//
 		// The RequireLocalHost guard is intentionally NOT applied here — it would
 		// reject all legitimate non-loopback traffic.  Instead, TLS
 		// RequireAndVerifyClientCert provides the equivalent network-layer guard.
-		protected = requireTokenForNonStatic(cfg.Token, inner)
+		protected = requireTokenForNonStaticNetworked(inner)
 	} else {
 		// Loopback path (default): wrap with edge auth unchanged.
 		//   1. RequireLocalHost      — DNS-rebinding defence; loopback-only assertion
@@ -382,13 +472,28 @@ func New(cfg Config) *Server {
 		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
 	}
-	return s
+	return s, nil
 }
 
 // Handler returns the underlying http.Handler for mounting in tests.
 // Neither the Host-header middleware nor the token middleware is applied here —
 // the caller supplies them.
 func (s *Server) Handler() http.Handler { return s.mux }
+
+// FullHandler returns the full protected handler chain (identical to what
+// Serve would use internally), including:
+//   - requireTokenForNonStatic
+//   - requireAuthOrRedirect (networked path with session store)
+//   - requireCSRFForSession (networked path with session store)
+//   - requireJSONForMutations
+//   - resolver.Middleware
+//   - the route mux
+//
+// Use this in tests that need to exercise the complete middleware stack
+// (CSRF, edge auth redirect/401) without spinning up a real TLS listener.
+// The Host-header / RequireLocalHost guard is NOT applied (tests use
+// httptest and don't need that constraint).
+func (s *Server) FullHandler() http.Handler { return s.httpSrv.Handler }
 
 // ChatHub returns the chat routing hub, exposed for testing.
 func (s *Server) ChatHub() *ChatHub { return s.chatHub }
@@ -494,6 +599,17 @@ func (s *Server) registerRoutes() {
 	// All Monaco initialisation code lives here; ide-editor.html contains
 	// only the DOM skeleton and a <script src="/ide-editor.js">.
 	s.mux.HandleFunc("/ide-editor.js", s.handleIDEEditorJS)
+
+	// ---- Auth pages (login) — token-gated on loopback; auth-or-redirect on networked.
+	// GET /login.js — login form JS (script-src 'self'; no inline scripts).
+	// GET /login.css — login form CSS (style-src 'self'; no unsafe-inline).
+	//
+	// Note: /login is registered in New() (after the auth handlers are built)
+	// so that GET and POST can share a single mux pattern with method dispatch.
+	// This avoids a duplicate-pattern panic when both registerRoutes and New()
+	// would otherwise register "/login".
+	s.mux.HandleFunc("/login.js", s.handleLoginJS)
+	s.mux.HandleFunc("/login.css", s.handleLoginCSS)
 
 	// Vendored JS blobs — pinned, checksum-verified, served same-origin.
 	// Token-exempt: static assets that carry no secrets.
@@ -806,13 +922,90 @@ func (s *Server) handleIDEEditor(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(ideEditorHTML)
 }
 
+// handleLoginPage serves GET /login — the minimal server-rendered login page.
+// CSP: script-src 'self' (login.js is a same-origin file, no inline scripts).
+// This is the Phase 3b placeholder; the polished UI lands in the next PR.
+func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		// POST /login is handled by authHandlers.handleLogin (wired in New).
+		// Any other method is not allowed.
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	// CSP: script-src 'self' covers /login.js (same-origin).  No inline scripts.
+	// style-src 'self' covers /login.css (external CSS; no 'unsafe-inline').
+	// form-action 'self' allows the form POST to /login.
+	w.Header().Set("Content-Security-Policy", strings.Join([]string{
+		"default-src 'self'",
+		"script-src 'self'",
+		"style-src 'self'",
+		"connect-src 'self'",
+		"font-src 'self'",
+		"img-src 'self'",
+		"frame-ancestors 'none'",
+		"base-uri 'none'",
+		"object-src 'none'",
+		"form-action 'self'",
+	}, "; "))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	_, _ = w.Write(loginHTML)
+}
+
+// handleLoginJS serves GET /login.js — the minimal login form JS.
+// Token-exempt on the networked path (exempted by isStaticAsset).
+func (s *Server) handleLoginJS(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	_, _ = w.Write(loginJS)
+}
+
+// handleLoginCSS serves GET /login.css — the external stylesheet for the login page.
+// Token-exempt on the networked path (exempted by isStaticAsset).
+// Serving CSS as an external file eliminates the need for 'unsafe-inline' in the
+// login page's style-src CSP directive (ADR-0005 Phase 3b followup #4).
+func (s *Server) handleLoginCSS(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	_, _ = w.Write(loginCSS)
+}
+
 // ---- auth helpers -----------------------------------------------------------
 
 // isStaticAsset reports whether the request is for a token-exempt static asset.
 // The assets /, /app.js, /styles.css, /sw.js, and vendored blobs under /vendor/
 // carry no secrets and must be accessible before the browser can obtain and
 // present the bearer token.
+//
+// /login and /login.js are ALSO token-exempt because:
+//   - On the networked path, browsers must reach /login (POST and GET) without
+//     a bearer token — the user is authenticating, so by definition they don't
+//     yet hold a token.  The TLS layer (mTLS on networked) is the network-level
+//     gate; the bearer token is a loopback-path cooperative label.
+//   - On the loopback path, the login flow is not used (bearer token is always
+//     available).  /login is reachable token-free but is useless on loopback —
+//     harmless, and consistent with the networked behavior.
 func isStaticAsset(r *http.Request) bool {
+	switch r.URL.Path {
+	case "/login", "/login.js", "/login.css":
+		// Login page, its script, and its stylesheet: always accessible without a
+		// bearer token.  GET/POST for /login; GET/HEAD for /login.js and /login.css.
+		// The handler enforces its own method check; the token gate is not the right
+		// place to restrict these.
+		return true
+	}
 	if r.Method != http.MethodGet {
 		return false
 	}
@@ -835,6 +1028,37 @@ func isStaticAsset(r *http.Request) bool {
 // importing internal details.
 func RequireTokenForNonStatic(token string, next http.Handler) http.Handler {
 	return requireTokenForNonStatic(token, next)
+}
+
+// requireTokenForNonStaticNetworked is the networked-path variant of
+// requireTokenForNonStatic.  On the networked path, regular HTTP requests
+// (API calls, page loads) are authenticated via session cookie or cert —
+// NOT via the bearer token.  The bearer token is only required for the
+// /v1/events WebSocket subprotocol (browsers cannot set Authorization headers
+// on WS upgrade requests, so the subprotocol carries the token instead;
+// the WS handler itself validates it via consoleAuthSubprotocol middleware).
+//
+// This function lets ALL non-WS, non-static requests through without a bearer
+// token check; auth is enforced downstream by the resolver + requireAuthOrRedirect.
+// Static assets (/, /app.js, /login, etc.) bypass the bearer check as before.
+func requireTokenForNonStaticNetworked(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Static assets (including login page): pass through.
+		if isStaticAsset(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// /v1/events WebSocket upgrade: require bearer token via subprotocol.
+		// The downstream consoleAuthSubprotocol middleware validates the token;
+		// we must let the request through the outer gate so it can reach that.
+		if r.URL.Path == "/v1/events" && strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// All other requests on the networked path: no bearer token required.
+		// Auth is session cookie or cert — enforced downstream.
+		next.ServeHTTP(w, r)
+	})
 }
 
 func requireTokenForNonStatic(token string, next http.Handler) http.Handler {
