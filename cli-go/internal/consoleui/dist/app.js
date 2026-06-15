@@ -2463,24 +2463,33 @@
   // Returns the modal DOM element (already in the document).
   // Call closeModal(el) to programmatically remove it.
 
+  // Monotonic counter for unique modal heading IDs (B-1 fix).
+  var _modalUidCounter = 0;
+
   function openModal(opts) {
     var title       = opts.title       || '';
     var confirmText = opts.confirmText || 'OK';
     var cancelText  = opts.cancelText  || 'Cancel';
     var dangerous   = !!opts.dangerous;
 
+    // B-1 fix: give the heading a stable id and reference it with
+    // aria-labelledby instead of aria-label.  This satisfies WCAG 4.1.2 by
+    // deriving the accessible name from the visible <h2> element.
+    var headingId = 'modal-title-' + (++_modalUidCounter);
+
     // Build modal DOM.
     var overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.setAttribute('role', 'dialog');
     overlay.setAttribute('aria-modal', 'true');
-    overlay.setAttribute('aria-label', title);
+    overlay.setAttribute('aria-labelledby', headingId);
 
     var box = document.createElement('div');
     box.className = 'modal-box';
 
     var heading = document.createElement('h2');
     heading.className = 'modal-title';
+    heading.id = headingId;
     heading.textContent = title;
     box.appendChild(heading);
 
@@ -4248,7 +4257,7 @@
     }
 
     var html =
-      '<table class="users-table" role="grid" aria-label="User accounts">' +
+      '<table class="users-table" aria-label="User accounts">' +
         '<thead>' +
           '<tr>' +
             '<th scope="col">Username</th>' +
@@ -4383,7 +4392,9 @@
     if (!el) return;
     el.textContent = msg || '';
     el.className = 'users-status' + (ok ? '' : ' error');
-    el.setAttribute('aria-live', 'polite');
+    // S-2: do NOT re-set aria-live here — the static markup already declares
+    // role="status" aria-live="polite" on this element.  Redundant setAttribute
+    // calls can interrupt live-region announcements in some AT implementations.
     clearTimeout(_usersStatusTimer);
     _usersStatusTimer = setTimeout(function() {
       if (el) el.textContent = '';
@@ -4414,6 +4425,11 @@
           if (errEl) { errEl.textContent = 'Password is required.'; errEl.style.display = ''; }
           return;
         }
+        // cr S2: client-side length guard.
+        if (newPw.length < 12) {
+          if (errEl) { errEl.textContent = 'Password must be at least 12 characters.'; errEl.style.display = ''; }
+          return;
+        }
         usersApiAction('/api/users/reset-password', { username: username, newPassword: newPw }, function(ok, msg) {
           if (ok) {
             overlay._closeModal();
@@ -4433,13 +4449,19 @@
     var panel = document.getElementById('panel-users');
     var statusEl = panel ? panel.querySelector('.users-status') : null;
 
+    // S-3: pre-render the error element in the body string (same pattern as
+    // the other three modals) instead of injecting it dynamically in the
+    // confirm handler.  AT implementations see the live region in the initial
+    // DOM and announce it immediately when textContent is populated.
     openModal({
       title: 'Delete user',
-      body: '<p>Permanently delete <strong>' + esc(username) + '</strong>? This cannot be undone.</p>',
+      body: '<p>Permanently delete <strong>' + esc(username) + '</strong>? This cannot be undone.</p>' +
+            '<p id="modal-del-err" class="modal-field-error" role="alert" style="display:none"></p>',
       confirmText: 'Delete',
       cancelText: 'Cancel',
       dangerous: true,
       onConfirm: function(overlay) {
+        var errEl = overlay.querySelector('#modal-del-err');
         usersApiAction('/api/users/delete', { username: username }, function(ok, msg) {
           if (ok) {
             overlay._closeModal();
@@ -4447,18 +4469,7 @@
             initUsersTab();
           } else {
             // Surface 409 last-admin guard inline.
-            var errArea = overlay.querySelector('.modal-body');
-            if (errArea) {
-              var existing = errArea.querySelector('.modal-field-error');
-              if (!existing) {
-                existing = document.createElement('p');
-                existing.className = 'modal-field-error';
-                existing.setAttribute('role', 'alert');
-                errArea.appendChild(existing);
-              }
-              existing.textContent = msg;
-              existing.style.display = '';
-            }
+            if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
           }
         });
       },
@@ -4506,6 +4517,8 @@
 
         if (!uname) { showErr('Username is required.'); return; }
         if (!pw)    { showErr('Password is required.'); return; }
+        // cr S2: client-side length guard avoids an unnecessary round-trip.
+        if (pw.length < 12) { showErr('Password must be at least 12 characters.'); return; }
 
         usersApiAction('/api/users', { username: uname, password: pw, role: role }, function(ok, msg) {
           if (ok) {
@@ -4552,6 +4565,8 @@
 
         if (!oldPw) { showErr('Current password is required.'); return; }
         if (!newPw) { showErr('New password is required.'); return; }
+        // cr S2: client-side length guard avoids an unnecessary round-trip.
+        if (newPw.length < 12) { showErr('New password must be at least 12 characters.'); return; }
 
         apiFetch('POST', '/api/account/password', { oldPassword: oldPw, newPassword: newPw })
           .then(function(resp) {
@@ -5611,12 +5626,11 @@
         </div>
         <div id="panel-users" class="tab-panel">
           <div class="users-toolbar">
-            <h1 class="users-toolbar-title">Users</h1>
+            <h2 class="users-toolbar-title">Users</h2>
             <span class="users-status" role="status" aria-live="polite"></span>
             <button class="users-change-pw-btn" type="button" id="users-change-pw-btn"
               aria-label="Change my password">Change my password</button>
-            <button class="users-add-btn" type="button" id="users-add-btn"
-              aria-label="Add a new user">+ Add user</button>
+            <button class="users-add-btn" type="button" id="users-add-btn">+ Add user</button>
           </div>
           <div class="users-table-wrap" role="region" aria-label="User accounts table">
             <p class="users-loading">Loading users…</p>

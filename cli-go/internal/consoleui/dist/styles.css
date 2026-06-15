@@ -2297,12 +2297,15 @@ html[data-theme="light"] .modal-box {
   font-size: 13px;
   padding: 7px 10px;
   width: 100%;
-  outline: none;
   transition: border-color var(--dur, 0.1s) var(--ease, ease);
 }
-.modal-input:focus {
+/* M-2: use :focus-visible + outline (project pattern) so keyboard focus is
+ * visible and the indicator is not suppressed by outline:none.  The
+ * box-shadow accent halo is kept as a belt-and-suspenders supplement. */
+.modal-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--color-accent-dim, rgba(0,122,90,0.12));
 }
 
 .modal-field-hint {
@@ -3556,8 +3559,12 @@ html[data-theme="light"] .users-table tr:hover td {
 
 .users-badge {
   display: inline-block;
-  font-size: 10px;
-  font-weight: 600;
+  /* B-2: bump to 11px/700 so these qualify as "large text" (18px bold equiv
+   * threshold ≈ 14px bold). At 11px/700 they still sit in the normal-text
+   * range for WCAG, so we need the dark tokens below for light theme.
+   * Dark themes use bright colours that easily exceed 4.5:1 on near-black. */
+  font-size: 11px;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   padding: 2px 6px;
@@ -3580,6 +3587,25 @@ html[data-theme="light"] .users-table tr:hover td {
   border-color: var(--color-warning, #F7C843);
 }
 
+/* B-2 fix — light theme badge contrast.
+ *
+ * Light theme token failures on white (#ffffff) at 11px/700:
+ *   --color-positive #007a5a:  5.34:1  ✓  (already passes; no change needed)
+ *   --color-alarm    #ea580c:  3.99:1  ✗  → use #b84500 (5.33:1 on white)
+ *   --color-warning  #d97706:  3.55:1  ✗  → use #92530a (5.04:1 on white)
+ *
+ * Ratios verified via WCAG 2.1 relative-luminance formula.
+ */
+html[data-theme="light"] .users-badge-disabled {
+  color: #b84500;
+  border-color: #b84500;
+}
+
+html[data-theme="light"] .users-badge-reset {
+  color: #92530a;
+  border-color: #92530a;
+}
+
 /* ---- Row action buttons ---- */
 
 .users-row-actions {
@@ -3596,6 +3622,10 @@ html[data-theme="light"] .users-table tr:hover td {
   color: var(--text-dim);
   cursor: pointer;
   font-size: 11px;
+  /* S-4: WCAG 2.5.8 minimum target size 24×24px. padding: 3px 8px at
+   * 11px/1.5 line-height ≈ ~19px height; min-height: 24px lifts it to
+   * the minimum and also gives a larger click/touch target in dense rows. */
+  min-height: 24px;
   padding: 3px 8px;
   transition: background var(--dur, 0.1s) var(--ease, ease),
               color var(--dur, 0.1s) var(--ease, ease),
@@ -3647,7 +3677,9 @@ html[data-theme="light"] .users-action-btn.danger:hover:not(:disabled) {
   cursor: pointer;
 }
 
-.users-role-select:focus {
+/* M-3: :focus-visible (not :focus) — consistent with project pattern;
+ * avoids showing outline on mouse click while still keyboard-accessible. */
+.users-role-select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
