@@ -45,9 +45,9 @@ import (
 )
 
 // authsession is imported for authsession.NewStore and authsession.Config in tests.
-// authsession.CookieNameSession is in authsession/export_test.go which is only
-// accessible within the authsession package test binary; we use the string literal
-// "yakos_session" in this cross-package test instead.
+// The session cookie name is referenced via consoleui.SessionCookieName (exported
+// from export_test.go).  authsession.CookieNameSession is only accessible within
+// the authsession package test binary (export_test.go with package authsession).
 
 // ---- test infrastructure ----------------------------------------------------
 
@@ -89,7 +89,7 @@ func newAuth3bServer(t *testing.T) *auth3bServer {
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		NetworkedMode:     true,
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
@@ -154,7 +154,7 @@ func (s *auth3bServer) doAuthedMutation(t *testing.T, path, sid, csrf string, js
 	req.Header.Set("Content-Type", "application/json")
 	// No Authorization bearer token — networked session-auth uses cookies only.
 	if sid != "" {
-		req.AddCookie(&http.Cookie{Name: "yakos_session", Value: sid})
+		req.AddCookie(&http.Cookie{Name: consoleui.SessionCookieName, Value: sid})
 	}
 	if csrf != "" {
 		req.Header.Set("X-CSRF-Token", csrf)
@@ -249,7 +249,7 @@ func TestLoginSuccess_Cookies(t *testing.T) {
 	cookies := cookieMap(resp)
 
 	// Session cookie: HttpOnly, Secure=true on networked path, SameSite=Strict.
-	sessCookie, ok := cookies["yakos_session"]
+	sessCookie, ok := cookies[consoleui.SessionCookieName]
 	if !ok {
 		t.Fatal("yakos_session cookie not set")
 	}
@@ -342,7 +342,7 @@ func TestLoginFailure_GenericResponse(t *testing.T) {
 
 			// Assert no cookies set on failure.
 			for _, c := range resp.Cookies() {
-				if c.Name == "yakos_session" || c.Name == "yakos_csrf" {
+				if c.Name == consoleui.SessionCookieName || c.Name == "yakos_csrf" {
 					t.Errorf("failure mode %s: auth cookies must not be set on 401; got %q", tc.name, c.Name)
 				}
 			}
@@ -371,7 +371,7 @@ func TestLoginSessionFixation(t *testing.T) {
 	}
 
 	// Log in with the old session cookie present.
-	oldCookie := &http.Cookie{Name: "yakos_session", Value: oldID}
+	oldCookie := &http.Cookie{Name: consoleui.SessionCookieName, Value: oldID}
 	resp := s.loginReq(t, "alice", "correcthorsebattery1", oldCookie)
 	defer resp.Body.Close()
 
@@ -386,7 +386,7 @@ func TestLoginSessionFixation(t *testing.T) {
 
 	// New session must have a different ID.
 	cookies := cookieMap(resp)
-	newSessCookie, ok := cookies["yakos_session"]
+	newSessCookie, ok := cookies[consoleui.SessionCookieName]
 	if !ok {
 		t.Fatal("no yakos_session cookie in login response")
 	}
@@ -436,13 +436,13 @@ func TestLogout(t *testing.T) {
 		t.Fatalf("login: expected 200; got %d", loginResp.StatusCode)
 	}
 	loginCookies := cookieMap(loginResp)
-	sessID := loginCookies["yakos_session"].Value
+	sessID := loginCookies[consoleui.SessionCookieName].Value
 
 	// Send POST /logout with the session cookie and CSRF token.
 	// No bearer token — networked session-auth uses cookies only.
 	logoutReq, _ := http.NewRequest(http.MethodPost, s.ts.URL+"/logout", bytes.NewReader([]byte("{}")))
 	logoutReq.Header.Set("Content-Type", "application/json")
-	logoutReq.AddCookie(&http.Cookie{Name: "yakos_session", Value: sessID})
+	logoutReq.AddCookie(&http.Cookie{Name: consoleui.SessionCookieName, Value: sessID})
 	// Look up the session's CSRF token to send it.
 	if loginSess, found := s.authStore.Lookup(sessID); found {
 		logoutReq.Header.Set("X-CSRF-Token", loginSess.CSRFToken)
@@ -464,27 +464,40 @@ func TestLogout(t *testing.T) {
 
 	// Set-Cookie headers must clear both cookies (MaxAge=-1).
 	logoutCookies := cookieMap(logoutResp)
-	if c, ok := logoutCookies["yakos_session"]; !ok || c.MaxAge >= 0 {
+	if c, ok := logoutCookies[consoleui.SessionCookieName]; !ok || c.MaxAge >= 0 {
 		t.Errorf("logout: yakos_session should be cleared (MaxAge=-1); got %v", c)
 	}
 	if c, ok := logoutCookies["yakos_csrf"]; !ok || c.MaxAge >= 0 {
 		t.Errorf("logout: yakos_csrf should be cleared (MaxAge=-1); got %v", c)
 	}
 
-	// Idempotent: a second logout with the same (now-revoked) session cookie
-	// must still return 200 and clear cookies.  The session is revoked so
-	// Lookup returns false; CSRF check sees no resolved session-auth identity
-	// (resolver returns unauthenticated) → CSRF is exempt → 200 (idempotent).
+	// Idempotent: a second logout with the same (now-revoked) session cookie.
+	// The session is revoked so the resolver returns unauthenticated; the edge
+	// middleware (requireAuthOrRedirect) fires before the logout handler is
+	// reached.  Send Accept: application/json to get a 401 JSON response (the
+	// API path) rather than a 302 redirect (the navigation path).
+	// This asserts the real behavior: an already-logged-out client receives 401
+	// rather than silently following a redirect to /login.
+	noRedirectClient := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	logoutReq2, _ := http.NewRequest(http.MethodPost, s.ts.URL+"/logout", bytes.NewReader([]byte("{}")))
 	logoutReq2.Header.Set("Content-Type", "application/json")
-	logoutReq2.AddCookie(&http.Cookie{Name: "yakos_session", Value: sessID})
-	logoutResp2, err := s.ts.Client().Do(logoutReq2)
+	logoutReq2.Header.Set("Accept", "application/json") // ensure 401 (not 302) for API path
+	logoutReq2.AddCookie(&http.Cookie{Name: consoleui.SessionCookieName, Value: sessID})
+	logoutResp2, err := noRedirectClient.Do(logoutReq2)
 	if err != nil {
 		t.Fatalf("POST /logout (idempotent): %v", err)
 	}
 	defer logoutResp2.Body.Close()
-	if logoutResp2.StatusCode != http.StatusOK {
-		t.Errorf("logout (idempotent): expected 200; got %d", logoutResp2.StatusCode)
+	// After logout, the session is revoked; the edge middleware returns 401 for
+	// an unauthenticated API request (correct and expected behavior).
+	if logoutResp2.StatusCode != http.StatusUnauthorized {
+		b, _ := io.ReadAll(logoutResp2.Body)
+		t.Errorf("idempotent logout: expected 401 (unauthenticated); got %d (body: %s)",
+			logoutResp2.StatusCode, b)
 	}
 }
 
@@ -499,7 +512,7 @@ func setupSessionAuth(t *testing.T, s *auth3bServer) (sessID, csrfToken string) 
 		t.Fatalf("login: expected 200; got %d", resp.StatusCode)
 	}
 	cookies := cookieMap(resp)
-	return cookies["yakos_session"].Value, cookies["yakos_csrf"].Value
+	return cookies[consoleui.SessionCookieName].Value, cookies["yakos_csrf"].Value
 }
 
 func TestCSRF_SessionAuth_NoToken_Returns403(t *testing.T) {
@@ -638,7 +651,7 @@ func TestCSRF_LoopbackBearer_Unchanged(t *testing.T) {
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",
@@ -697,7 +710,7 @@ func newNetworkedNoSessionServer(t *testing.T) (*httptest.Server, string) {
 	}
 	aStore := authsession.NewStore(authsession.Config{})
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		NetworkedMode:     true,
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
@@ -793,7 +806,7 @@ func TestFullHappyPath_LoginMutateLogout(t *testing.T) {
 		t.Fatalf("login: expected 200; got %d", loginResp.StatusCode)
 	}
 	loginCookies := cookieMap(loginResp)
-	sessID := loginCookies["yakos_session"].Value
+	sessID := loginCookies[consoleui.SessionCookieName].Value
 	csrfToken := loginCookies["yakos_csrf"].Value
 
 	// Step 2: Perform a session-authenticated mutation (with correct CSRF token).
@@ -808,7 +821,7 @@ func TestFullHappyPath_LoginMutateLogout(t *testing.T) {
 	// Step 3: Logout (no bearer token — session-auth only; include CSRF token).
 	logoutReq, _ := http.NewRequest(http.MethodPost, s.ts.URL+"/logout", bytes.NewReader([]byte("{}")))
 	logoutReq.Header.Set("Content-Type", "application/json")
-	logoutReq.AddCookie(&http.Cookie{Name: "yakos_session", Value: sessID})
+	logoutReq.AddCookie(&http.Cookie{Name: consoleui.SessionCookieName, Value: sessID})
 	logoutReq.Header.Set("X-CSRF-Token", csrfToken)
 	logoutResp, err := s.ts.Client().Do(logoutReq)
 	if err != nil {
@@ -846,7 +859,7 @@ func TestLoopback_BearerToken_Unchanged(t *testing.T) {
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",

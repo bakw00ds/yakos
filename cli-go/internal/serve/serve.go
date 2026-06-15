@@ -570,7 +570,10 @@ func Run(ctx context.Context, cfg Config) error {
 			printNetworkedConsoleBanner(bindAddr, externalHosts, certFP, stateDir, bootstrapResult)
 		}
 
-		consoleSrv := consoleui.New(consoleCfg)
+		consoleSrv, err := consoleui.New(consoleCfg)
+		if err != nil {
+			return fmt.Errorf("serve: console: %w", err)
+		}
 		go func() {
 			consoleErrCh <- consoleSrv.Serve(ctx)
 		}()

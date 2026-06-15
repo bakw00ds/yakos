@@ -29,7 +29,7 @@ func newTestServer(t *testing.T) (*httptest.Server, string) {
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",
@@ -59,7 +59,7 @@ func newAuthTestServer(t *testing.T) (*httptest.Server, string) {
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",
@@ -461,7 +461,7 @@ func TestAuthMatrix_HostCheck_403OnBadHost(t *testing.T) {
 	bus := wsbus.New()
 	defer bus.Stop()
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:           tok,
 		KanbanBoardPath: t.TempDir() + "/kanban.md",
 		KanbanProject:   "test",
@@ -492,7 +492,7 @@ func TestAuthMatrix_HostCheck_AllowsLoopbackHost(t *testing.T) {
 	bus := wsbus.New()
 	defer bus.Stop()
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:           tok,
 		KanbanBoardPath: t.TempDir() + "/kanban.md",
 		KanbanProject:   "test",

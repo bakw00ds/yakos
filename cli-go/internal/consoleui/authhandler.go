@@ -419,11 +419,13 @@ func requireAuthOrRedirect(next http.Handler) http.Handler {
 	})
 }
 
-// isLoginPath reports whether the request is for /login (any method) or
-// /login.js (GET/HEAD).  These paths are always accessible without authentication:
+// isLoginPath reports whether the request is for /login (any method),
+// /login.js (GET/HEAD), or /login.css (GET/HEAD).  These paths are always
+// accessible without authentication:
 //   - GET /login: serves the login form page.
 //   - POST /login: the authentication endpoint itself.
 //   - GET /login.js: the login form script.
+//   - GET /login.css: the login form stylesheet (external CSS; no 'unsafe-inline').
 //
 // /logout is intentionally excluded: it is a session-auth endpoint and the
 // handler deals gracefully with a missing session (idempotent 200 + clear cookies).
@@ -431,7 +433,8 @@ func isLoginPath(r *http.Request) bool {
 	if r.URL.Path == "/login" {
 		return true // any method (GET page, POST auth)
 	}
-	if r.URL.Path == "/login.js" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+	if (r.URL.Path == "/login.js" || r.URL.Path == "/login.css") &&
+		(r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		return true
 	}
 	return false

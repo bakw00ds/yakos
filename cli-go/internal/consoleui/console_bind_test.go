@@ -29,9 +29,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/authsession"
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/mtls"
 	"github.com/bakw00ds/yakos/internal/netid"
+	"github.com/bakw00ds/yakos/internal/userstore"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 	"golang.org/x/net/websocket"
 )
@@ -84,6 +86,12 @@ func startNetworkedServer(t *testing.T, tlsCfg *tls.Config) (baseURL string, srv
 	}
 	addr := tcpLn.Addr().String()
 
+	uStore, err := userstore.Open(t.TempDir() + "/users.json")
+	if err != nil {
+		t.Fatalf("userstore.Open: %v", err)
+	}
+	aStore := authsession.NewStore(authsession.Config{})
+
 	cfg := consoleui.Config{
 		Addr:              addr,
 		Token:             tok,
@@ -97,9 +105,14 @@ func startNetworkedServer(t *testing.T, tlsCfg *tls.Config) (baseURL string, srv
 		TLSConfig:         tlsCfg,
 		NetworkedMode:     true,
 		ExternalHost:      addr,
+		AuthSessionStore:  aStore,
+		UserStore:         uStore,
 	}
 
-	srv = consoleui.New(cfg)
+	srv, err = consoleui.New(cfg)
+	if err != nil {
+		t.Fatalf("consoleui.New: %v", err)
+	}
 	baseURL = "https://" + addr
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -152,13 +165,19 @@ func TestConsoleBind_FailClosed_NoTLSConfig(t *testing.T) {
 		t.Fatalf("net.Listen: %v", err)
 	}
 
-	srv := consoleui.New(consoleui.Config{
-		Addr:          tcpLn.Addr().String(),
-		Token:         tok,
-		Bus:           bus,
-		Listener:      tcpLn,
-		TLSConfig:     nil,  // intentionally nil — simulates mTLS generation failure
-		NetworkedMode: true, // non-loopback mode
+	uStoreFailClosed, err := userstore.Open(t.TempDir() + "/users.json")
+	if err != nil {
+		t.Fatalf("userstore.Open: %v", err)
+	}
+	srv := consoleui.MustNew(t, consoleui.Config{
+		Addr:             tcpLn.Addr().String(),
+		Token:            tok,
+		Bus:              bus,
+		Listener:         tcpLn,
+		TLSConfig:        nil,  // intentionally nil — simulates mTLS generation failure
+		NetworkedMode:    true, // non-loopback mode
+		AuthSessionStore: authsession.NewStore(authsession.Config{}),
+		UserStore:        uStoreFailClosed,
 	})
 
 	// Serve should return an error immediately because TLSConfig is nil
@@ -544,6 +563,10 @@ func TestConsoleBind_Presence_CertCN_Integration(t *testing.T) {
 	}
 	addr := tcpLn.Addr().String()
 
+	uStoreCN, err := userstore.Open(t.TempDir() + "/users.json")
+	if err != nil {
+		t.Fatalf("userstore.Open: %v", err)
+	}
 	cfg := consoleui.Config{
 		Addr:              addr,
 		Token:             tok,
@@ -557,9 +580,11 @@ func TestConsoleBind_Presence_CertCN_Integration(t *testing.T) {
 		TLSConfig:         serverTLSCfg,
 		NetworkedMode:     true,
 		ExternalHost:      addr,
+		AuthSessionStore:  authsession.NewStore(authsession.Config{}),
+		UserStore:         uStoreCN,
 	}
 
-	srv := consoleui.New(cfg)
+	srv := consoleui.MustNew(t, cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
@@ -714,6 +739,10 @@ func TestConsoleBind_ExternalHosts_CSP_UsesFirstHost(t *testing.T) {
 	primaryHost := "192.168.1.50:7890"
 	secondaryHost := "myhost.example.com:7890"
 
+	uStoreCSP, err := userstore.Open(t.TempDir() + "/users.json")
+	if err != nil {
+		t.Fatalf("userstore.Open: %v", err)
+	}
 	cfg := consoleui.Config{
 		Addr:              addr,
 		Token:             tok,
@@ -727,9 +756,11 @@ func TestConsoleBind_ExternalHosts_CSP_UsesFirstHost(t *testing.T) {
 		TLSConfig:         serverTLSCfg,
 		NetworkedMode:     true,
 		ExternalHosts:     []string{primaryHost, secondaryHost},
+		AuthSessionStore:  authsession.NewStore(authsession.Config{}),
+		UserStore:         uStoreCSP,
 	}
 
-	srv := consoleui.New(cfg)
+	srv := consoleui.MustNew(t, cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = srv.Serve(ctx) }()
@@ -778,7 +809,7 @@ func TestConsoleBind_LoopbackDefault_Unchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("net.Listen: %v", err)
 	}
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Addr:          tcpLn.Addr().String(),
 		Token:         tok,
 		Bus:           bus,

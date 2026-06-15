@@ -51,7 +51,7 @@ func newEnforcementTestServer(t *testing.T, id netid.Identity) (*httptest.Server
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",
@@ -273,7 +273,7 @@ func TestLoopbackInvariant_ZeroValueIdentity_NotBlocked(t *testing.T) {
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",

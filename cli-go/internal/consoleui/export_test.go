@@ -192,6 +192,20 @@ func BuildSessionLookupFnForTest(authStore *authsession.Store, uStore *userstore
 	return buildSessionLookupFn(authStore, uStore)
 }
 
+// ---- New / MustNew test helpers ----------------------------------------------
+
+// MustNew calls New(cfg) and calls t.Fatal if it returns an error.
+// Use this in tests instead of calling New directly so that the two-return-value
+// signature is handled cleanly without a t.Fatal boilerplate at every call site.
+func MustNew(t *testing.T, cfg Config) *Server {
+	t.Helper()
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("consoleui.New: %v", err)
+	}
+	return srv
+}
+
 // ---- Phase 3b: auth handler test exports ------------------------------------
 
 // LoginRateLimitRequests is the per-IP login attempt cap, exported for tests

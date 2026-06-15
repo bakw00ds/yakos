@@ -89,7 +89,7 @@ func newNetworkedTestServer(t *testing.T, uStore *userstore.Store, aStore *auths
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		NetworkedMode:     true,
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",

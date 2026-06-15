@@ -51,7 +51,7 @@ func newFlowsTestServer(t *testing.T) (*httptest.Server, string, string) {
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",
@@ -1014,7 +1014,7 @@ func TestFlows_Cancel_RoleReadForbidden(t *testing.T) {
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 
-	srv := consoleui.New(consoleui.Config{
+	srv := consoleui.MustNew(t, consoleui.Config{
 		Token:             tok,
 		KanbanBoardPath:   t.TempDir() + "/kanban.md",
 		KanbanProject:     "test",
