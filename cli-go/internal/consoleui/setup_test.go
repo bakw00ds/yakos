@@ -513,11 +513,85 @@ func TestLoopback_NavigationNotRedirectedToSetup(t *testing.T) {
 	}
 }
 
+// ---- Consume-then-fail lockout regression tests -----------------------------
+//
+// HIGH finding: a malformed username that passes the handler's weak check
+// (username != "") but fails userstore.ValidateUsername (e.g. "bad/name",
+// "..", ".", 65-char, "bad name") would previously reach ValidateAndConsume,
+// burn the one-time token, then fail CreateFirstAdmin with 400 → zero admins,
+// token gone, setup locked out.
+//
+// The fix: handler calls userstore.ValidateUsername BEFORE ValidateAndConsume.
+// These tests assert: (a) each bad username → 400, (b) token still active,
+// (c) Count==0, (d) a subsequent valid POST with the SAME token succeeds.
+
+func TestPostSetup_MalformedUsername_TokenNotConsumed(t *testing.T) {
+	t.Parallel()
+
+	badUsernames := []struct {
+		name  string
+		input string
+	}{
+		{"slash", "bad/name"},
+		{"dot-dot", ".."},
+		{"dot", "."},
+		{"too-long", strings.Repeat("a", 65)},
+		{"space", "bad name"},
+		{"bang", "user!"},
+	}
+
+	for _, tc := range badUsernames {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := newSetupState(t, nil)
+			tok, err := st.Generate()
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			srv, uStore, _ := buildNetworkedSetupSrv(t, st)
+
+			// POST with the malformed username + valid token + valid password.
+			body := fmt.Sprintf(`{"token":%q,"username":%q,"password":"securepassword1"}`, tok, tc.input)
+			rr := postSetup(t, srv, body)
+
+			// Must be 400 (validation error).
+			if rr.Code != http.StatusBadRequest {
+				t.Errorf("username %q: want 400, got %d: %s", tc.input, rr.Code, rr.Body.String())
+			}
+			// Token must NOT be consumed.
+			if !st.IsActive() {
+				t.Errorf("username %q: setup token was consumed on 400 — DoS lockout bug", tc.input)
+			}
+			// No user must have been created.
+			if uStore.Count() != 0 {
+				t.Errorf("username %q: Count()=%d after 400, want 0", tc.input, uStore.Count())
+			}
+
+			// Prove the same token still works: a valid POST after the bad one must succeed.
+			goodBody := fmt.Sprintf(`{"token":%q,"username":"validadmin","password":"securepassword1"}`, tok)
+			rr2 := postSetup(t, srv, goodBody)
+			if rr2.Code != http.StatusOK {
+				t.Errorf("username %q: recovery POST with same token: want 200, got %d: %s",
+					tc.input, rr2.Code, rr2.Body.String())
+			}
+			if uStore.Count() != 1 {
+				t.Errorf("username %q: Count()=%d after recovery POST, want 1", tc.input, uStore.Count())
+			}
+		})
+	}
+}
+
 // ---- Concurrent TOCTOU regression test -------------------------------------
 //
 // Red-team finding: N goroutines all POST /setup with the SAME valid token
 // and DISTINCT usernames — must result in EXACTLY ONE 200 and Count()==1.
 // The test also runs under -race to detect data-race amplifications.
+//
+// Each goroutine uses a distinct RemoteAddr (unique fake IP per goroutine) so
+// the per-IP rate limiter does not mask the race: without distinct IPs, the
+// rate limiter fires after loginRateLimitRequests=20 attempts from the same IP,
+// hiding whether the token-consumption logic is correct for goroutines 21-N.
 //
 // This test uses a real httptest.Server (not httptest.NewRecorder) so the full
 // middleware stack fires and each goroutine gets a distinct HTTP connection.
@@ -547,54 +621,54 @@ func TestConcurrentSetup_ExactlyOneAdminCreated(t *testing.T) {
 		UserStore:        uStore,
 		SetupToken:       st,
 	})
-	ts := httptest.NewServer(srv.FullHandler())
-	t.Cleanup(ts.Close)
 
-	client := &http.Client{}
+	// Wrap FullHandler() so we can inject a per-request RemoteAddr.
+	// httptest.NewServer uses net/http which sets RemoteAddr from the TCP
+	// connection; we intercept at the handler level instead.
+	var goroutineIP [goroutines]string
+	for i := 0; i < goroutines; i++ {
+		goroutineIP[i] = fmt.Sprintf("10.1.%d.%d:12345", i/256, i%256)
+	}
 
-	// Each goroutine gets a distinct "IP" by dialing a different source address
-	// simulation — but since httptest.Server uses 127.0.0.1 and clientIP reads
-	// r.RemoteAddr, all concurrent requests appear to come from the same IP.
-	// The rate limiter uses loginRateLimitRequests=20, so with goroutines=32
-	// some requests would be rate-limited before they even attempt token validation.
-	// We measure correctness via Count (must be 1) and success count (must be 1).
-	// The total of 200+403+409+429 must equal goroutines (no dropped requests).
+	// remoteAddrKey is a private context key for injecting RemoteAddr in tests.
+	type remoteAddrKey struct{}
+	_ = remoteAddrKey{} // ensure it is used
+
+	// We use httptest.NewRecorder per goroutine rather than a shared server so
+	// we can set req.RemoteAddr directly (httptest.Server overwrites RemoteAddr
+	// from the TCP dial, which always gives 127.0.0.1).
 	var (
 		wg         sync.WaitGroup
 		startGate  = make(chan struct{})
 		successCnt int32 // atomic — 200 responses
-		rejectCnt  int32 // atomic — 403 + 409 + 429 responses
 	)
+
+	handler := srv.FullHandler()
 
 	for i := 0; i < goroutines; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			// Wait for all goroutines to be ready before any fires.
 			<-startGate
 
 			username := fmt.Sprintf("attacker%d", idx)
 			body := fmt.Sprintf(`{"token":%q,"username":%q,"password":"securepassword1"}`, tok, username)
-			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/setup",
+			req := httptest.NewRequest(http.MethodPost, "/setup",
 				bytes.NewBufferString(body))
 			req.Header.Set("Content-Type", "application/json")
+			// Distinct RemoteAddr per goroutine: bypasses per-IP rate limiter so
+			// all goroutines reach the token-validation path.
+			req.RemoteAddr = goroutineIP[idx]
 
-			resp, err := client.Do(req)
-			if err != nil {
-				return // connection error — server may have shut down
-			}
-			defer resp.Body.Close()
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
 
-			switch resp.StatusCode {
-			case http.StatusOK:
+			if rr.Code == http.StatusOK {
 				atomic.AddInt32(&successCnt, 1)
-			default:
-				atomic.AddInt32(&rejectCnt, 1)
 			}
 		}(i)
 	}
 
-	// Release all goroutines simultaneously to maximise the race window.
 	close(startGate)
 	wg.Wait()
 

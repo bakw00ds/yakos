@@ -844,8 +844,20 @@ func parsePHC(phc string) (m, t uint32, p uint8, salt, key []byte, err error) {
 
 // ---- username validation ----------------------------------------------------
 
-// validateUsername reuses the same allow-list as mtlscmd.ValidateClientName:
-// [A-Za-z0-9._@-]{1,64}, with "." and ".." explicitly rejected.
+// ValidateUsername is the exported username validator.  It enforces the same
+// allow-list as mtlscmd.ValidateClientName: [A-Za-z0-9._@-]{1,64}, with "."
+// and ".." explicitly rejected.
+//
+// Exported so that callers outside the package (e.g. the /setup handler) can
+// pre-validate a username before performing irreversible operations (such as
+// consuming a one-time setup token).  This ensures both layers enforce exactly
+// the same rule with no drift.
+func ValidateUsername(name string) error {
+	return validateUsername(name)
+}
+
+// validateUsername is the internal implementation shared by Create,
+// CreateFirstAdmin, and the exported ValidateUsername.
 func validateUsername(name string) error {
 	if name == "" {
 		return fmt.Errorf("username must not be empty")

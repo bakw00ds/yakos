@@ -160,10 +160,20 @@ func (sh *setupHandlers) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate username and password length BEFORE consuming the token so that
-	// a typo doesn't silently burn the one-time token.
-	if dto.Username == "" {
-		writeAuthJSON(w, http.StatusBadRequest, `{"error":"username required"}`)
+	// Validate username and password length BEFORE consuming the token.
+	//
+	// Security requirement: any input that would cause CreateFirstAdmin to fail
+	// with a validation error MUST be rejected here, before the one-time token
+	// is consumed.  If we consumed first and then discovered a bad username, the
+	// token would be burned with zero admins created — a remote attacker could
+	// POST malformed-username requests to repeatedly lock out setup.
+	//
+	// userstore.ValidateUsername is the single source of truth for username
+	// rules (same function called by CreateFirstAdmin → validateUsername inside
+	// the store).  Using the exported wrapper here prevents the two layers from
+	// drifting.
+	if err := userstore.ValidateUsername(dto.Username); err != nil {
+		writeAuthJSON(w, http.StatusBadRequest, `{"error":"`+jsonEscapeString(err.Error())+`"}`)
 		return
 	}
 	if len(dto.Password) < userstore.MinPasswordLen {

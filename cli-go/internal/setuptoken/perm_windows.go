@@ -15,7 +15,7 @@ import "os"
 // (restricted NTFS ACLs via MkdirAll), which prevents writes by non-owners
 // through inherited permissions — the same rationale as internal/userstore/perm_windows.go.
 // Symlink rejection (os.ModeSymlink) remains active cross-platform via the Lstat
-// check in readFileTrusted; only the permission-bit check is skipped here.
+// check in readFile; only the permission-bit check is skipped here.
 func markerPermOK(_ os.FileInfo) bool {
 	return true // no-op on Windows; ACL trust comes from parent directory
 }
