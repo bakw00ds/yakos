@@ -47,6 +47,42 @@ const (
 	TopicWorkflowNodeTruncated = "workflow.node.truncated"
 )
 
+// Topic constants for Phase-2 fleet (REPL session panel) events.
+//
+// Invariant: these topics carry ONLY session metadata — session_id, agent name,
+// status, exit_code, and timestamp.  Task text, token content, and transcript
+// data MUST NEVER be included in fleet.* payloads.  This mirrors the workflow
+// topic content invariant above.
+const (
+	// TopicFleetStarted is emitted when a new console dispatch goroutine starts.
+	// Payload: FleetStartedPayload.
+	TopicFleetStarted = "fleet.started"
+
+	// TopicFleetFinished is emitted when a console dispatch goroutine exits.
+	// Payload: FleetFinishedPayload.
+	TopicFleetFinished = "fleet.finished"
+)
+
+// FleetStartedPayload is the payload for [TopicFleetStarted].
+// Invariant: carries NO task text, tokens, or transcript content.
+// Only session metadata is included so the WS bus never leaks task content.
+type FleetStartedPayload struct {
+	SessionID string    `json:"session_id"`
+	Agent     string    `json:"agent"`
+	TS        time.Time `json:"ts"`
+}
+
+// FleetFinishedPayload is the payload for [TopicFleetFinished].
+// Invariant: carries NO task text, tokens, or transcript content.
+// Only session metadata is included so the WS bus never leaks task content.
+type FleetFinishedPayload struct {
+	SessionID string    `json:"session_id"`
+	Agent     string    `json:"agent"`
+	Status    string    `json:"status"`    // "finished" | "failed"
+	ExitCode  int       `json:"exit_code"` // 0 = success
+	TS        time.Time `json:"ts"`
+}
+
 // Event is an envelope for every message published on the bus.
 // Clients receive exactly this structure (JSON-encoded) over the WebSocket.
 type Event struct {

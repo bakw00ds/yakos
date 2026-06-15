@@ -254,3 +254,12 @@ const MaxFileContentBytes = maxFileContentBytes
 // FileContentHash is exported so tests can compute expected version stamps
 // and verify round-trip consistency between read and write endpoints.
 var FileContentHash = fileContentHash
+
+// ---- Fleet handler test exports ---------------------------------------------
+
+// RegistryForTest returns the SessionRegistry wired into the Server.
+// Used by fleet tests to pre-populate sessions without going through the
+// full dispatch goroutine.
+func RegistryForTest(s *Server) *dispatch.SessionRegistry {
+	return s.fleet.registry
+}
