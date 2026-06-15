@@ -749,6 +749,92 @@ func TestDefaultStateDir(t *testing.T) {
 	}
 }
 
+// ---- HandlerNoToken (session-console mount) ---------------------------------
+// These tests verify the session-mode path: mounted via HandlerNoToken() the
+// API endpoints respond 200 without any Authorization header, mirroring what
+// the networked session console does (auth is enforced at the outer edge).
+
+func newTestServerNoToken(t *testing.T, workDir string) *httptest.Server {
+	t.Helper()
+	stateDir := t.TempDir()
+	tok, err := perfdash.LoadOrCreatePerfToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreatePerfToken: %v", err)
+	}
+	if workDir == "" {
+		workDir = t.TempDir()
+	}
+	srv := perfdash.New(perfdash.Config{
+		Token:   tok,
+		WorkDir: workDir,
+	})
+	ts := httptest.NewServer(srv.HandlerNoToken())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func TestHandlerNoToken_SummaryServedWithoutBearer(t *testing.T) {
+	ts := newTestServerNoToken(t, "")
+	resp := get(t, ts.URL+"/api/perf/summary", "") // no token
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("HandlerNoToken summary: status=%d; want 200 (no bearer required)", resp.StatusCode)
+	}
+}
+
+func TestHandlerNoToken_AllEndpointsReachable(t *testing.T) {
+	ts := newTestServerNoToken(t, "")
+	endpoints := []string{
+		"/api/perf/summary",
+		"/api/perf/timeseries?window=24h&bucket=hour&metric=dispatches",
+		"/api/perf/by_axis?axis=agent",
+		"/api/perf/recent",
+	}
+	for _, ep := range endpoints {
+		t.Run(ep, func(t *testing.T) {
+			resp := get(t, ts.URL+ep, "") // no token
+			defer drainClose(resp)
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("HandlerNoToken %s: status=%d; want 200", ep, resp.StatusCode)
+			}
+		})
+	}
+}
+
+func TestHandlerNoToken_IndexAndStaticsServed(t *testing.T) {
+	ts := newTestServerNoToken(t, "")
+	paths := []struct {
+		path    string
+		ctPfx   string
+	}{
+		{"/", "text/html"},
+		{"/app.js", "application/javascript"},
+		{"/styles.css", "text/css"},
+	}
+	for _, tc := range paths {
+		t.Run(tc.path, func(t *testing.T) {
+			resp := get(t, ts.URL+tc.path, "")
+			defer drainClose(resp)
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("HandlerNoToken %s: status=%d; want 200", tc.path, resp.StatusCode)
+			}
+			ct := resp.Header.Get("Content-Type")
+			if !strings.HasPrefix(ct, tc.ctPfx) {
+				t.Errorf("Content-Type=%q; want prefix %q", ct, tc.ctPfx)
+			}
+		})
+	}
+}
+
+func TestHandlerNoToken_InvalidAxisReturns400(t *testing.T) {
+	ts := newTestServerNoToken(t, "")
+	resp := get(t, ts.URL+"/api/perf/by_axis?axis=bogus", "")
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("HandlerNoToken by_axis bogus: status=%d; want 400", resp.StatusCode)
+	}
+}
+
 // ---- concurrent access -----------------------------------------------------
 
 func TestSummary_ConcurrentRequests(t *testing.T) {

@@ -710,18 +710,25 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("/kanban/", requireRole(netid.RoleRead, http.StripPrefix("/kanban", kanbanSrv.Handler())))
 
 	// ---- Metrics (cost) sub-dashboard ---------------------------------------
+	// HandlerNoToken() is used instead of Handler() so that session-cookie-
+	// authenticated requests (networked console, no #token= fragment) are not
+	// blocked by the sub-dashboard's inner Bearer-token check.  Auth is
+	// enforced at the console edge: requireRole(RoleRead) + the outer
+	// requireAuthOrRedirect / requireTokenForNonStatic middleware.
 	metricsSrv := metricsdash.New(metricsdash.Config{
-		Token:      s.cfg.Token, // same token; auth is at edge
+		Token:      s.cfg.Token, // retained for standalone Serve(); unused when mounted here
 		ProjectDir: s.cfg.MetricsProjectDir,
 	})
-	s.mux.Handle("/cost/", requireRole(netid.RoleRead, http.StripPrefix("/cost", metricsSrv.Handler())))
+	s.mux.Handle("/cost/", requireRole(netid.RoleRead, http.StripPrefix("/cost", metricsSrv.HandlerNoToken())))
 
 	// ---- Performance sub-dashboard ------------------------------------------
+	// Same rationale as /cost/: use HandlerNoToken() so session-cookie auth
+	// works when the iframe is served without a #token= fragment.
 	perfSrv := perfdash.New(perfdash.Config{
-		Token:   s.cfg.Token, // same token; auth is at edge
+		Token:   s.cfg.Token, // retained for standalone Serve(); unused when mounted here
 		WorkDir: s.cfg.PerfWorkDir,
 	})
-	s.mux.Handle("/perf/", requireRole(netid.RoleRead, http.StripPrefix("/perf", perfSrv.Handler())))
+	s.mux.Handle("/perf/", requireRole(netid.RoleRead, http.StripPrefix("/perf", perfSrv.HandlerNoToken())))
 
 	// ---- WebSocket event stream at console origin ----------------------------
 	// Phase 2.5: the console WS uses Sec-WebSocket-Protocol subprotocol auth

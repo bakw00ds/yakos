@@ -9,6 +9,9 @@
 'use strict';
 
 // ---- auth -------------------------------------------------------------------
+// Returns the bearer token when one is available (loopback / standalone mode),
+// or null when running embedded in the session console (networked mode).
+// In session mode the browser's session cookie authenticates API calls instead.
 
 function getToken() {
   // Try sessionStorage first (so fragment isn't needed on every page load).
@@ -28,14 +31,22 @@ function getToken() {
   return null;
 }
 
-function authHeader(tok) {
-  return tok ? { 'Authorization': 'Bearer ' + tok } : {};
+// buildFetchOpts returns fetch init options for an API call.
+// Bearer mode (token present):  Authorization header, default credentials.
+// Session mode (no token):      credentials:'same-origin', no Authorization
+//   header — the browser sends the session cookie so the console auth edge
+//   authenticates the request.
+function buildFetchOpts(tok) {
+  if (tok) {
+    return { headers: { 'Authorization': 'Bearer ' + tok } };
+  }
+  return { credentials: 'same-origin' };
 }
 
 // ---- fetch helpers ----------------------------------------------------------
 
 async function apiFetch(path, tok) {
-  const resp = await fetch(path, { headers: authHeader(tok) });
+  const resp = await fetch(path, buildFetchOpts(tok));
   if (!resp.ok) {
     const text = await resp.text();
     throw new Error('API ' + resp.status + ': ' + text);
@@ -297,10 +308,11 @@ function init() {
   const tok = getToken();
   currentToken = tok;
 
-  if (!tok) {
-    el('auth-error').classList.remove('hidden');
-    return;
-  }
+  // Session mode: no token in fragment or sessionStorage.  The browser sends
+  // the session cookie and the console auth edge authenticates the request.
+  // We proceed without a token; if the session is invalid the loadAll() error
+  // handler will surface it via the last-updated status text.
+  // Bearer mode: token present — existing standalone / loopback behaviour.
 
   el('dashboard').classList.remove('hidden');
 

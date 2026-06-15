@@ -80,9 +80,10 @@ svg.chart { display: block; }
 
   <div id="auth-error" class="auth-error hidden">
     <p style="margin-bottom:.5rem;font-weight:600;">Authentication required.</p>
-    <p>Open this page as:</p>
+    <p>When running standalone, open this page as:</p>
     <code>http://127.0.0.1:7896/#token=&lt;metrics-token&gt;</code>
     <p style="margin-top:.5rem;">The token is printed by <code>yakos metrics serve</code> at startup.</p>
+    <p style="margin-top:.5rem;">When embedded in the session console, log in via the console first.</p>
   </div>
 
   <div id="dashboard" class="hidden">
@@ -189,6 +190,9 @@ svg.chart { display: block; }
 'use strict';
 
 // ---- auth -------------------------------------------------------------------
+// Returns the bearer token when one is available (loopback / standalone mode),
+// or null when running embedded in the session console (networked mode).
+// In session mode the browser's session cookie authenticates API calls instead.
 function getToken() {
   let tok = sessionStorage.getItem('metrics_token');
   if (tok) return tok;
@@ -203,13 +207,21 @@ function getToken() {
   return null;
 }
 
-function authHeader(tok) {
-  return tok ? { 'Authorization': 'Bearer ' + tok } : {};
+// buildFetchOpts returns fetch init options for an API call.
+// Bearer mode (token present):  Authorization header, default credentials.
+// Session mode (no token):      credentials:'same-origin', no Authorization
+//   header — the browser sends the session cookie so the console auth edge
+//   authenticates the request.
+function buildFetchOpts(tok) {
+  if (tok) {
+    return { headers: { 'Authorization': 'Bearer ' + tok } };
+  }
+  return { credentials: 'same-origin' };
 }
 
 // ---- fetch ------------------------------------------------------------------
 async function apiFetch(path, tok) {
-  const resp = await fetch(path, { headers: authHeader(tok) });
+  const resp = await fetch(path, buildFetchOpts(tok));
   if (resp.status === 401 || resp.status === 403) throw new AuthError(resp.status);
   if (!resp.ok) {
     const t = await resp.text().catch(() => resp.statusText);
@@ -441,7 +453,11 @@ async function doCompare(tok) {
 // ---- boot -------------------------------------------------------------------
 (async function boot() {
   const tok = getToken();
-  if (!tok) { show('auth-error'); return; }
+  // Session mode: no token in fragment or sessionStorage.  The browser sends
+  // the session cookie and the console auth edge authenticates the request.
+  // We proceed without a token; if the session is invalid the first API call
+  // will throw an AuthError and we surface the auth-error banner then.
+  // Bearer mode: token present — existing standalone / loopback behaviour.
 
   try {
     await loadAll(tok);
