@@ -77,31 +77,10 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	}
 
 	// --- 4. Find target agent ---
-	//
-	// Resolution order:
-	//   a) Exact match in the composed roster (specialist agent from lib/agents/*.md
-	//      or <project>/.claude/agents/*.md).
-	//   b) If the name equals a known runtime identifier (claude/codex/agy/gemini)
-	//      and is absent from the roster, synthesize a generic catch-all agent for
-	//      that runtime.  This allows `dispatch claude "..."` and the console chat
-	//      pane's default agent="claude" to work without requiring a claude.md file
-	//      in lib/agents/.
-	//   c) Genuinely unknown name → error (unchanged behaviour).
-	var targetAgent *agentscompose.ComposedAgent
-	for i := range roster {
-		if roster[i].ID == req.AgentName {
-			targetAgent = &roster[i]
-			break
-		}
-	}
-	if targetAgent == nil {
-		if agentscompose.IsKnownRuntime(req.AgentName) {
-			generic := agentscompose.GenericAgentForRuntime(req.AgentName)
-			targetAgent = &generic
-		} else {
-			return nil, Result{}, fmt.Errorf("dispatch: agent %q not found in composed set (yakosRoot=%s, project=%s)",
-				req.AgentName, req.YakosRoot, req.Project)
-		}
+	// See resolve.go for resolution order (specialist → generic runtime → error).
+	targetAgent, err := resolveAgent(roster, req.AgentName, req.YakosRoot, req.Project)
+	if err != nil {
+		return nil, Result{}, err
 	}
 
 	// Apply agent's model: frontmatter if no override was given.
@@ -110,18 +89,8 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	}
 
 	// --- 5. Resolve runtime ---
-	// For a generic runtime-native agent (agent name == runtime name, e.g.
-	// "claude"/"codex"/"gemini"), use the agent name as the runtime when no
-	// explicit override was given.  This makes `dispatch claude "..."` use the
-	// claude runtime without a --runtime flag, matching the chat pane default.
-	runtimeName := req.Runtime
-	if runtimeName == "" {
-		if agentscompose.IsKnownRuntime(req.AgentName) {
-			runtimeName = req.AgentName
-		} else {
-			runtimeName = "claude" // default matches dispatch.sh
-		}
-	}
+	// See resolve.go for precedence (override → known-runtime name → "claude").
+	runtimeName := resolveRuntime(req.AgentName, req.Runtime)
 	adapter, err := runtime.Resolve(runtimeName)
 	if err != nil {
 		return nil, Result{}, fmt.Errorf("dispatch: %w", err)
