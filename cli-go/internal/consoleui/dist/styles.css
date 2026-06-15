@@ -2297,12 +2297,15 @@ html[data-theme="light"] .modal-box {
   font-size: 13px;
   padding: 7px 10px;
   width: 100%;
-  outline: none;
   transition: border-color var(--dur, 0.1s) var(--ease, ease);
 }
-.modal-input:focus {
+/* M-2: use :focus-visible + outline (project pattern) so keyboard focus is
+ * visible and the indicator is not suppressed by outline:none.  The
+ * box-shadow accent halo is kept as a belt-and-suspenders supplement. */
+.modal-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--color-accent-dim, rgba(0,122,90,0.12));
 }
 
 .modal-field-hint {
@@ -3387,4 +3390,317 @@ html[data-theme="og"] .flows-btn-primary {
 .console-logout-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * USERS TAB (Phase 5 — admin user management)
+ * ═══════════════════════════════════════════════════════════════════ */
+
+#panel-users {
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 20px;
+  gap: 16px;
+}
+
+#panel-users.active {
+  display: flex;
+}
+
+/* ---- Users toolbar ---- */
+
+.users-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.users-toolbar-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+}
+
+.users-add-btn {
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-control, 4px);
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 14px;
+  transition: background var(--dur, 0.15s) var(--ease, ease);
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-family: var(--font);
+}
+
+html[data-theme="og"] .users-add-btn {
+  color: #000;
+}
+
+.users-add-btn:hover {
+  background: var(--accent-hover);
+}
+
+.users-add-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.users-change-pw-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 4px);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 12px;
+  transition: background var(--dur, 0.15s) var(--ease, ease),
+              color var(--dur, 0.15s) var(--ease, ease),
+              border-color var(--dur, 0.15s) var(--ease, ease);
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-family: var(--font);
+}
+
+.users-change-pw-btn:hover {
+  color: var(--text);
+  border-color: var(--color-border-strong, var(--border));
+}
+
+.users-change-pw-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---- Status live region ---- */
+
+.users-status {
+  font-size: 12px;
+  color: var(--color-positive, #51cf66);
+  flex-shrink: 0;
+  min-height: 1.4em;
+  font-family: var(--font-mono);
+}
+
+.users-status.error {
+  color: var(--color-error, #ff6b6b);
+}
+
+/* ---- Users table wrapper ---- */
+
+.users-table-wrap {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card, 4px);
+  background: var(--surface);
+}
+
+/* FLUID glass panel */
+html[data-theme="fluid"] .users-table-wrap {
+  backdrop-filter: blur(var(--glass-blur, 24px)) saturate(var(--glass-sat, 1.6));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 24px)) saturate(var(--glass-sat, 1.6));
+  background: rgba(20, 22, 29, 0.65);
+}
+
+.users-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.users-table th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  background: rgba(255,255,255,0.02);
+  white-space: nowrap;
+}
+
+html[data-theme="light"] .users-table th {
+  background: rgba(0,0,0,0.02);
+}
+
+.users-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  color: var(--text);
+}
+
+.users-table tr:last-child td {
+  border-bottom: none;
+}
+
+.users-table tr:hover td {
+  background: rgba(255,255,255,0.025);
+}
+
+html[data-theme="light"] .users-table tr:hover td {
+  background: rgba(0,0,0,0.025);
+}
+
+/* ---- Status badge ---- */
+
+.users-badge {
+  display: inline-block;
+  /* B-2: bump to 11px/700 so these qualify as "large text" (18px bold equiv
+   * threshold ≈ 14px bold). At 11px/700 they still sit in the normal-text
+   * range for WCAG, so we need the dark tokens below for light theme.
+   * Dark themes use bright colours that easily exceed 4.5:1 on near-black. */
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: var(--radius-control, 4px);
+  border: 1px solid transparent;
+}
+
+.users-badge-active {
+  color: var(--color-positive, #51cf66);
+  border-color: var(--color-positive, #51cf66);
+}
+
+.users-badge-disabled {
+  color: var(--color-alarm, #ffa94d);
+  border-color: var(--color-alarm, #ffa94d);
+}
+
+.users-badge-reset {
+  color: var(--color-warning, #F7C843);
+  border-color: var(--color-warning, #F7C843);
+}
+
+/* B-2 fix — light theme badge contrast.
+ *
+ * Light theme token failures on white (#ffffff) at 11px/700:
+ *   --color-positive #007a5a:  5.34:1  ✓  (already passes; no change needed)
+ *   --color-alarm    #ea580c:  3.99:1  ✗  → use #b84500 (5.33:1 on white)
+ *   --color-warning  #d97706:  3.55:1  ✗  → use #92530a (5.04:1 on white)
+ *
+ * Ratios verified via WCAG 2.1 relative-luminance formula.
+ */
+html[data-theme="light"] .users-badge-disabled {
+  color: #b84500;
+  border-color: #b84500;
+}
+
+html[data-theme="light"] .users-badge-reset {
+  color: #92530a;
+  border-color: #92530a;
+}
+
+/* ---- Row action buttons ---- */
+
+.users-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+}
+
+.users-action-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 4px);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  /* S-4: WCAG 2.5.8 minimum target size 24×24px. padding: 3px 8px at
+   * 11px/1.5 line-height ≈ ~19px height; min-height: 24px lifts it to
+   * the minimum and also gives a larger click/touch target in dense rows. */
+  min-height: 24px;
+  padding: 3px 8px;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease),
+              border-color var(--dur, 0.1s) var(--ease, ease);
+  white-space: nowrap;
+  font-family: var(--font);
+}
+
+.users-action-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--color-border-strong, var(--border));
+  background: rgba(255,255,255,0.05);
+}
+
+html[data-theme="light"] .users-action-btn:hover:not(:disabled) {
+  background: rgba(0,0,0,0.05);
+}
+
+.users-action-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.users-action-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.users-action-btn.danger:hover:not(:disabled) {
+  color: var(--color-error, #ff6b6b);
+  border-color: var(--color-error, #ff6b6b);
+  background: rgba(255, 92, 92, 0.08);
+}
+
+html[data-theme="light"] .users-action-btn.danger:hover:not(:disabled) {
+  background: rgba(220, 38, 38, 0.06);
+}
+
+/* ---- Role select in table ---- */
+
+.users-role-select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 4px);
+  color: var(--text);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  padding: 3px 6px;
+  cursor: pointer;
+}
+
+/* M-3: :focus-visible (not :focus) — consistent with project pattern;
+ * avoids showing outline on mouse click while still keyboard-accessible. */
+.users-role-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---- Loading / empty states ---- */
+
+.users-loading,
+.users-empty {
+  padding: 32px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* ---- Reduced-motion ---- */
+
+@media (prefers-reduced-motion: reduce) {
+  .users-add-btn,
+  .users-change-pw-btn,
+  .users-action-btn {
+    transition: none;
+  }
 }
