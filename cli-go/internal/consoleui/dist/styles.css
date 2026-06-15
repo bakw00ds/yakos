@@ -3305,3 +3305,54 @@ html[data-theme="og"] .flows-btn-primary {
     transition: none;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Console operator chrome (session mode: signed-in label + logout)
+ * ═══════════════════════════════════════════════════════════════════ */
+
+.console-operator-chrome {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+
+.console-op-label {
+  font-size: 0.8125rem;
+  color: var(--text-dim, var(--color-text-muted, #9ca3af));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+
+.console-logout-btn {
+  font-size: 0.8125rem;
+  font-family: var(--font, var(--font-sans));
+  padding: 3px 10px;
+  background: transparent;
+  color: var(--text-dim, var(--color-text-muted, #9ca3af));
+  border: 1px solid var(--border, rgba(255,255,255,0.15));
+  border-radius: var(--radius-control, 4px);
+  cursor: pointer;
+  transition: color var(--dur, 120ms) var(--ease, ease),
+              border-color var(--dur, 120ms) var(--ease, ease);
+  white-space: nowrap;
+}
+
+.console-logout-btn:hover {
+  color: var(--text, #f0f0f0);
+  border-color: var(--accent, #FF1FA9);
+}
+
+.console-logout-btn:focus-visible {
+  outline: 2px solid var(--accent, #FF1FA9);
+  outline-offset: 2px;
+}
+
+.console-logout-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

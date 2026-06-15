@@ -179,9 +179,28 @@
     } catch (_) {}
   }());
 
-  // ---- 1. Token extraction ---------------------------------------------------
+  // ---- 1. Token extraction + auth mode detection -----------------------------
+  //
+  // Two authentication modes:
+  //
+  //   bearer (loopback):
+  //     The console URL is opened as http://127.0.0.1:7890/#token=<hex>.
+  //     TOKEN is extracted from the URL fragment, stripped from history.
+  //     All API calls use Authorization: Bearer <TOKEN>; the SW reconstructs
+  //     requests with credentials:'omit' + injects the header.
+  //
+  //   session (networked human):
+  //     No bearer token in the URL.  The browser holds an HttpOnly session
+  //     cookie (yakos_session) set by POST /login.  The server also sets a
+  //     non-HttpOnly CSRF cookie (yakos_csrf) that JS can read.  Mutating
+  //     requests must carry X-CSRF-Token matching that cookie value.
+  //     The SW is told not to reconstruct requests so the session cookie
+  //     survives; the SW injects X-CSRF-Token on mutations.
+  //     On any 401 response, we redirect the top window to /login.
 
   let TOKEN = '';
+  let AUTH_MODE = 'bearer'; // 'bearer' | 'session'
+  let CSRF_TOKEN = '';      // session mode: value of yakos_csrf cookie
 
   function extractAndStripToken() {
     const hash = location.hash;
@@ -191,7 +210,77 @@
     }
   }
 
+  // readCookie reads a named cookie from document.cookie.
+  // Returns '' if not found or if cookie access throws.
+  function readCookie(name) {
+    try {
+      const prefix = name + '=';
+      const parts = document.cookie.split(';');
+      for (var i = 0; i < parts.length; i++) {
+        var part = parts[i].trim();
+        if (part.indexOf(prefix) === 0) {
+          return decodeURIComponent(part.slice(prefix.length));
+        }
+      }
+    } catch (_) {}
+    return '';
+  }
+
   extractAndStripToken();
+
+  if (TOKEN) {
+    // Bearer token present in the URL fragment — loopback mode.
+    AUTH_MODE = 'bearer';
+  } else {
+    // No bearer token — networked session mode.
+    AUTH_MODE = 'session';
+    CSRF_TOKEN = readCookie('yakos_csrf');
+  }
+
+  // apiFetch: mode-aware fetch wrapper for all console API calls.
+  //
+  // bearer mode: sets Authorization: Bearer <TOKEN>.  The SW also injects
+  //   this header for iframe/sub-resource requests, but apiFetch handles
+  //   direct fetch() calls in the main window context.
+  //
+  // session mode: does NOT set Authorization.  The browser sends the HttpOnly
+  //   session cookie automatically via credentials:'same-origin'.  For mutating
+  //   requests (non-GET/HEAD), sets X-CSRF-Token from CSRF_TOKEN.
+  //   If a 401 is received, redirects top to /login (session expired).
+  //
+  // This is the single top-scope definition used by ALL callers, including
+  // the Flows section.  The Flows section previously redefined apiFetch locally
+  // (which shadowed this one), creating a duplicate that was a regression
+  // time-bomb on the CSRF path.  That duplicate has been removed; all callers
+  // now bind to this definition.
+
+  function apiFetch(method, path, body) {
+    const opts = { method };
+    const isBodyMethod = method !== 'GET' && method !== 'HEAD';
+    if (AUTH_MODE === 'bearer') {
+      opts.headers = { 'Authorization': 'Bearer ' + TOKEN };
+    } else {
+      // session mode: rely on browser cookie (credentials:'same-origin').
+      opts.credentials = 'same-origin';
+      opts.headers = {};
+      if (isBodyMethod && CSRF_TOKEN) {
+        opts.headers['X-CSRF-Token'] = CSRF_TOKEN;
+      }
+    }
+    if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    return fetch(path, opts).then(function(resp) {
+      if (resp.status === 401 && AUTH_MODE === 'session') {
+        // Session expired — redirect to login.
+        window.top.location.href = '/login';
+        // Return a never-resolving promise so callers don't handle stale data.
+        return new Promise(function() {});
+      }
+      return resp;
+    });
+  }
 
   // ---- 2. Service Worker registration + ready promise ------------------------
   // Gate iframe loading on navigator.serviceWorker.ready (not a boolean flag)
@@ -200,33 +289,68 @@
 
   let swReadyPromise = Promise.resolve(false); // resolves to true when SW ready
 
+  // postToSW delivers a message to the SW regardless of its current lifecycle
+  // state (installing / waiting / active).  Used to deliver SET_TOKEN,
+  // SET_AUTH_MODE, and SET_CSRF_TOKEN messages.
+  function postToSW(msg) {
+    if (!navigator.serviceWorker) return;
+    if (navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage(msg);
+    }
+  }
+
+  // deliverAuthToSW sends the appropriate auth messages to the SW based on
+  // the current AUTH_MODE.  Called after registration and after each
+  // controllerchange event so a freshly-activated SW gets the correct state.
+  function deliverAuthToSW() {
+    postToSW({ type: 'SET_AUTH_MODE', mode: AUTH_MODE });
+    if (AUTH_MODE === 'bearer') {
+      postToSW({ type: 'SET_TOKEN', token: TOKEN });
+    } else {
+      // session mode: deliver the CSRF token; no bearer token.
+      postToSW({ type: 'SET_CSRF_TOKEN', token: CSRF_TOKEN });
+    }
+  }
+
   function registerServiceWorker() {
-    if (!TOKEN) return;
-    if (!('serviceWorker' in navigator)) {
-      console.warn('[console] Service Worker unavailable — iframe auth will fail');
+    // Register the SW in both modes.
+    // bearer: SW needs the token for iframe auth injection.
+    // session: SW needs CSRF_TOKEN for same-origin mutation injection.
+    //
+    // Guard: check navigator.serviceWorker is truthy, not just that the key
+    // exists.  Some environments (Node stubs, old private-mode browsers) expose
+    // navigator.serviceWorker as undefined even though 'serviceWorker' in
+    // navigator evaluates to true (because the stub key exists).
+    if (!navigator.serviceWorker) {
+      if (AUTH_MODE === 'bearer') {
+        console.warn('[console] Service Worker unavailable — iframe auth will fail');
+      } else {
+        console.warn('[console] Service Worker unavailable — CSRF injection unavailable');
+      }
       return;
     }
 
     swReadyPromise = navigator.serviceWorker.register('/sw.js', { scope: '/' })
       .then((reg) => {
-        // Deliver token to whatever state the SW is in.
+        // Deliver auth state to whatever state the SW is in.
         const target = reg.installing || reg.waiting || reg.active;
         if (target) {
-          target.postMessage({ type: 'SET_TOKEN', token: TOKEN });
+          target.postMessage({ type: 'SET_AUTH_MODE', mode: AUTH_MODE });
+          if (AUTH_MODE === 'bearer') {
+            target.postMessage({ type: 'SET_TOKEN', token: TOKEN });
+          } else {
+            target.postMessage({ type: 'SET_CSRF_TOKEN', token: CSRF_TOKEN });
+          }
         }
         navigator.serviceWorker.addEventListener('controllerchange', () => {
-          if (navigator.serviceWorker.controller) {
-            navigator.serviceWorker.controller.postMessage({ type: 'SET_TOKEN', token: TOKEN });
-          }
+          deliverAuthToSW();
         });
         // Wait for the SW to actually control this page.
         return navigator.serviceWorker.ready;
       })
       .then(() => {
-        // Deliver token to the now-active controller.
-        if (navigator.serviceWorker.controller) {
-          navigator.serviceWorker.controller.postMessage({ type: 'SET_TOKEN', token: TOKEN });
-        }
+        // Deliver auth state to the now-active controller.
+        deliverAuthToSW();
         return true;
       })
       .catch((err) => {
@@ -291,17 +415,28 @@
       if (iframe) {
         // Gate on SW ready promise — fixes the activation-race (Phase 2.5).
         swReadyPromise.then((ready) => {
-          if (!ready) {
+          if (!ready && AUTH_MODE === 'bearer') {
+            // In bearer mode, SW is required for iframe auth injection.
+            // In session mode, the browser sends the cookie automatically —
+            // SW failure is recoverable (the CSRF header is just not injected
+            // on iframe sub-resource mutations, which is acceptable for reads).
             document.getElementById('auth-error').classList.add('visible');
             return;
           }
-          // Append the bearer token as a URL fragment so the dashboard's
-          // client-side getToken() (metricsdash/perfdash read #token=<hex>)
-          // authenticates without an extra round-trip.  Fragments are
-          // NEVER sent to the server — they exist only in the browser and
-          // cannot appear in server logs — so this is safe.  Kanban does
-          // not use a fragment gate and ignores the extra fragment harmlessly.
-          iframe.src = tab.src + '#token=' + TOKEN;
+          if (AUTH_MODE === 'bearer') {
+            // Bearer mode: append token as URL fragment so the dashboard's
+            // client-side getToken() (metricsdash/perfdash read #token=<hex>)
+            // authenticates without an extra round-trip.  Fragments are
+            // NEVER sent to the server — they exist only in the browser and
+            // cannot appear in server logs — so this is safe.  Kanban does
+            // not use a fragment gate and ignores the extra fragment harmlessly.
+            iframe.src = tab.src + '#token=' + TOKEN;
+          } else {
+            // Session mode: the session cookie rides same-origin automatically.
+            // Do NOT append a bearer token (TOKEN is '' and the server does not
+            // use it; appending it would produce a confusing #token= fragment).
+            iframe.src = tab.src;
+          }
         });
       }
     }
@@ -343,7 +478,10 @@
   let wsLastSeq = 0; // last received event sequence number; used for ?since= replay
 
   function connectWS() {
-    if (!TOKEN) return;
+    // In bearer mode, require a token.  In session mode, the browser sends
+    // the session cookie on the WS upgrade request automatically — no token
+    // is needed.
+    if (AUTH_MODE === 'bearer' && !TOKEN) return;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     // Append ?since=<seq> so the server replays missed events on reconnect,
     // preventing ghost in-flight dispatches after a disconnect.
@@ -351,8 +489,24 @@
     const url = proto + '//' + location.host + '/v1/events' + since;
 
     // Phase 2.5: Sec-WebSocket-Protocol bearer auth.
-    // The token is sent as the second protocol value; the server echoes
-    // "yakos-bearer" as the accepted protocol.
+    //
+    // The WS upgrade path is handled by consoleAuthSubprotocol in
+    // cli-go/internal/consoleui/ws_handler.go.  That middleware requires
+    // exactly two comma-separated protocol values — "yakos-bearer, <token>" —
+    // and validates the token with constant-time comparison before the upgrade.
+    // Browsers cannot set Authorization headers on WS upgrades, so the
+    // subprotocol is the only delivery mechanism.
+    //
+    // Session-mode gap (ADR-0005 Phase 3d): the backend WS handler has no
+    // session-cookie auth path for WS upgrades.  Until the backend adds that,
+    // the WS requires the bearer token in BOTH auth modes.  In session mode
+    // TOKEN is '' so the WS upgrade will be rejected with 403 — the /v1/events
+    // handler needs a backend fix to accept session-cookie-authenticated WS
+    // connections.  Tracked as a follow-on to Phase 3d.
+    //
+    // DO NOT change this to ['yakos-bearer'] (one part, no token) — the server
+    // consoleAuthSubprotocol middleware does SplitN(protos, ",", 2) and rejects
+    // any header with fewer than two parts.
     ws = new WebSocket(url, ['yakos-bearer', TOKEN]);
     ws.addEventListener('open', () => {
       wsRetryMs = 1000; // reset backoff
@@ -700,23 +854,35 @@
   let chatSSERetryTimer = null;
 
   function startChatSSE() {
-    if (!TOKEN) return;
+    // In bearer mode, require a token.  In session mode, the browser sends
+    // the session cookie automatically — no bearer token needed.
+    if (AUTH_MODE === 'bearer' && !TOKEN) return;
     if (chatSSEAbort) chatSSEAbort.abort();
     chatSSEAbort = new AbortController();
     const opId = getChatOperatorId();
     // operatorId goes in the query string (attribution, not auth).
     const url = '/api/chat/stream?operatorId=' + encodeURIComponent(opId);
 
-    fetch(url, {
+    const fetchOpts = {
       method: 'GET',
       signal: chatSSEAbort.signal,
-      // The SW will inject Authorization: Bearer <token> automatically.
-      // No credentials: 'include' — we rely on the SW, not cookies.
-    }).then((resp) => {
+    };
+    if (AUTH_MODE === 'session') {
+      // Session mode: browser sends session cookie; SW injects CSRF on mutations.
+      // SSE is a GET — no CSRF header needed.
+      fetchOpts.credentials = 'same-origin';
+    }
+    // bearer mode: SW injects Authorization: Bearer automatically.
+
+    fetch(url, fetchOpts).then((resp) => {
       if (!resp.ok) {
         console.warn('[chat SSE] connect failed:', resp.status);
-        // 401/403 are permanent auth failures (misconfigured SW or expired
-        // token); retrying every 30s would hammer the server pointlessly.
+        // 401 in session mode: session expired — redirect to login.
+        if (resp.status === 401 && AUTH_MODE === 'session') {
+          window.top.location.href = '/login';
+          return;
+        }
+        // 401/403 in bearer mode: permanent auth failure — stop retrying.
         if (resp.status === 401 || resp.status === 403) {
           console.error('[chat SSE] auth failure (' + resp.status + ') — stopping SSE retry');
           return;
@@ -1713,18 +1879,11 @@
   }
 
   // ---- Flows API calls -------------------------------------------------------
-
-  function apiFetch(method, path, body) {
-    const opts = {
-      method,
-      headers: { 'Authorization': 'Bearer ' + TOKEN },
-    };
-    if (body !== undefined) {
-      opts.headers['Content-Type'] = 'application/json';
-      opts.body = JSON.stringify(body);
-    }
-    return fetch(path, opts);
-  }
+  // All Flows fetch calls go through the top-scope apiFetch defined in
+  // section 1 (the auth-mode detection block).  That single definition handles
+  // both bearer mode (Authorization: Bearer) and session mode (credentials:
+  // 'same-origin' + X-CSRF-Token on mutations) with 401→/login redirect.
+  // There is intentionally no local redefinition here.
 
   function loadFlowsWorkflowList() {
     apiFetch('GET', '/flows/api/workflows').then((r) => {
@@ -4896,6 +5055,31 @@
   // =========================================================================
   // ---- 8. Page rendering ------------------------------------------------------
 
+  // ---- Logout (session mode) -------------------------------------------------
+  //
+  // Sends POST /logout with the CSRF token, then redirects to /login.
+  // No-op in bearer mode (loopback sessions don't use cookie-based logout).
+
+  function doLogout() {
+    if (AUTH_MODE !== 'session') return;
+    const btn = document.getElementById('console-logout-btn');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Signing out…';
+    }
+    const headers = { 'Content-Type': 'application/json' };
+    if (CSRF_TOKEN) headers['X-CSRF-Token'] = CSRF_TOKEN;
+    fetch('/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: headers,
+      body: '{}',
+    }).finally(function() {
+      // Redirect regardless of response status.
+      window.location.href = '/login';
+    });
+  }
+
   function buildPage() {
     const app = document.getElementById('app');
     app.innerHTML = `
@@ -4913,6 +5097,7 @@
           <button class="theme-btn" type="button" data-theme-value="light"
             aria-pressed="false" aria-label="LIGHT theme — light mode">LIGHT</button>
         </nav>
+        <div id="console-operator-chrome" class="console-operator-chrome" aria-label="Signed-in operator"></div>
       </div>
       <div class="tab-content">
         <div id="panel-overview" class="tab-panel active">
@@ -5008,9 +5193,46 @@
       }
     }());
 
-    if (!TOKEN) {
+    // In bearer mode, TOKEN is required; show auth-error if missing.
+    // In session mode, we always proceed (auth is via cookie — if it expired
+    // the first API call will return 401 and redirect to /login).
+    if (AUTH_MODE === 'bearer' && !TOKEN) {
       document.getElementById('auth-error').classList.add('visible');
       return;
+    }
+
+    // Operator chrome: in session mode, show the logged-in operator and a
+    // Logout button.  In bearer mode, the chrome div stays empty (loopback
+    // sessions don't need a logout affordance — closing the terminal stops
+    // the daemon).
+    if (AUTH_MODE === 'session') {
+      // Fetch the current operator identity from /api/account (if available)
+      // or fall back to showing a generic "Signed in" label.
+      const chromeEl = document.getElementById('console-operator-chrome');
+      if (chromeEl) {
+        fetch('/api/account', { credentials: 'same-origin' })
+          .then(function(r) { return r.ok ? r.json() : null; })
+          .then(function(data) {
+            const displayName = (data && (data.username || data.display_name || data.operator_id)) || '';
+            const labelText = displayName ? esc(displayName) : 'Signed in';
+            chromeEl.innerHTML =
+              '<span class="console-op-label" aria-label="Signed in as ' + esc(displayName || 'operator') + '">' +
+                labelText +
+              '</span>' +
+              '<button id="console-logout-btn" class="console-logout-btn" type="button" ' +
+                'aria-label="Sign out">Sign out</button>';
+            const logoutBtn = document.getElementById('console-logout-btn');
+            if (logoutBtn) logoutBtn.addEventListener('click', doLogout);
+          })
+          .catch(function() {
+            // /api/account not available; show a minimal logout button.
+            chromeEl.innerHTML =
+              '<button id="console-logout-btn" class="console-logout-btn" type="button" ' +
+                'aria-label="Sign out">Sign out</button>';
+            const logoutBtn = document.getElementById('console-logout-btn');
+            if (logoutBtn) logoutBtn.addEventListener('click', doLogout);
+          });
+      }
     }
 
     // Wire filter inputs.

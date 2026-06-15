@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="og">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,20 +7,38 @@
 <link rel="stylesheet" href="/login.css">
 </head>
 <body>
-<div class="card">
-  <h1>yakOS — Sign in</h1>
-  <div class="error" id="err"></div>
-  <form id="loginForm">
-    <label for="username">Username</label>
-    <input type="text" id="username" name="username" autocomplete="username" required>
-    <label for="password">Password</label>
-    <input type="password" id="password" name="password" autocomplete="current-password" required>
-    <button type="submit" id="btn">Sign in</button>
-  </form>
-  <div class="reset-note" id="resetNote">
-    Password reset required. Please change your password before continuing.
+<main class="login-root" aria-label="Sign in to yakOS">
+  <div class="login-card" role="region" aria-label="Sign in form">
+    <div class="login-brand" aria-hidden="true">
+      <span class="login-brand-mark">Y</span>yakOS
+    </div>
+    <h1 class="login-heading">Sign in</h1>
+
+    <!-- role="alert" implies aria-live="assertive" + aria-atomic="true"; no redundant attrs needed -->
+    <div id="login-err" class="login-error" role="alert"></div>
+
+    <form id="loginForm" novalidate>
+      <div class="login-field">
+        <label class="login-label" for="username">Username</label>
+        <input class="login-input" type="text" id="username" name="username"
+               autocomplete="username" autocapitalize="none" spellcheck="false"
+               required aria-required="true"
+               aria-describedby="login-err">
+      </div>
+      <div class="login-field">
+        <label class="login-label" for="password">Password</label>
+        <input class="login-input" type="password" id="password" name="password"
+               autocomplete="current-password" required aria-required="true"
+               aria-describedby="login-err">
+      </div>
+      <button class="login-btn" type="submit" id="btn">Sign in</button>
+    </form>
+
+    <div id="resetNote" class="login-reset-note" role="status" aria-live="polite">
+      Password reset required. An administrator must reset your password before you can continue.
+    </div>
   </div>
-</div>
+</main>
 <script src="/login.js"></script>
 </body>
 </html>

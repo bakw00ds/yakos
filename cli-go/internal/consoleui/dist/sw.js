@@ -1,16 +1,27 @@
 // yakOS Console Service Worker
 //
 // Served from /sw.js (same-origin, token-exempt) at scope '/'.
-// Receives the bearer token via postMessage only — it is never stored in
-// cookies, localStorage, IndexedDB, or any persistent storage.
 //
-// Lifecycle:
-//   1. app.js registers this SW at scope '/'.
-//   2. app.js posts { type: 'SET_TOKEN', token: '<hex>' } after registration.
-//   3. On every same-origin sub-resource fetch that lacks an Authorization
-//      header, the SW injects 'Authorization: Bearer <token>' before the
-//      request goes to the network.  This covers iframe document loads for
-//      /kanban/, /cost/, /perf/ sub-dashboards, and all other sub-resources.
+// authMode: 'bearer' (default / loopback) or 'session' (networked human).
+// Delivered via postMessage by app.js at registration time.
+//
+// bearer mode (loopback, today — unchanged):
+//   Receives the bearer token via { type: 'SET_TOKEN', token: '<hex>' }.
+//   On every same-origin sub-resource fetch that lacks an Authorization header,
+//   the SW reconstructs the request with credentials:'omit' and injects
+//   'Authorization: Bearer <token>'.  This covers iframe document loads for
+//   /kanban/, /cost/, /perf/ sub-dashboards and all other sub-resources.
+//
+// session mode (networked human):
+//   Receives { type: 'SET_AUTH_MODE', mode: 'session' } and
+//   { type: 'SET_CSRF_TOKEN', token: '<hex>' } from app.js.
+//   The SW does NOT reconstruct/rebuild the request — doing so forces
+//   credentials:'omit' and strips the session cookie.  Instead:
+//     - GET/HEAD: pass the original request through untouched so the browser
+//       sends the HttpOnly session cookie via credentials:'same-origin'.
+//     - POST/PUT/PATCH/DELETE: clone and inject the X-CSRF-Token header;
+//       do NOT change credentials or URL; pass to fetch().
+//   No Authorization header is ever injected in session mode.
 //
 // Navigation request handling:
 //   destination === 'document'  — top-level page load.  Skipped: we cannot
@@ -27,6 +38,9 @@
 //     mode and can be reconstructed normally; we use the URL-build path for
 //     all of them too (simpler, uniform, no edge-case).
 //
+//   In session mode: iframe loads are GETs — they pass through untouched and
+//   the browser sends the HttpOnly session cookie automatically.
+//
 // Auto-activation:
 //   skipWaiting() in the install handler + clients.claim() in activate mean
 //   a new SW version takes control on the very next page reload, without
@@ -34,17 +48,29 @@
 //   is sufficient.
 //
 // Security notes:
-//   - self.token is an in-memory variable in the SW's global scope.  It is
-//     cleared when the SW is terminated and not persisted anywhere.
-//   - Requests that already carry Authorization are passed through unmodified.
-//   - Only same-origin requests are intercepted.
-//   - The URL-built request explicitly sets mode:'same-origin' and
-//     credentials:'omit'.  No cookies are sent.
+//   bearer mode:
+//     - token is an in-memory variable in the SW's global scope.  It is
+//       cleared when the SW is terminated and not persisted anywhere.
+//     - The URL-built request explicitly sets credentials:'omit'.  No cookies
+//       are sent on the bearer path.
+//   session mode:
+//     - csrfToken is in-memory in the SW scope.  It is the value of the
+//       non-HttpOnly yakos_csrf cookie, delivered via postMessage so the SW
+//       can inject it as X-CSRF-Token on mutations without reading cookies
+//       (SWs have no access to document.cookie).
+//     - The session cookie (yakos_session, HttpOnly) is never accessible in
+//       JS; it rides on requests via the browser's own credentials:'same-origin'
+//       default.  We never touch it in the SW.
+//   both modes:
+//     - Requests that already carry Authorization are passed through unmodified.
+//     - Only same-origin requests are intercepted.
 
 'use strict';
 
-// In-memory token storage — cleared on SW termination.
-let token = null;
+// In-memory auth state — cleared on SW termination.
+let token = null;        // bearer token (loopback mode only)
+let authMode = 'bearer'; // 'bearer' | 'session'
+let csrfToken = null;    // CSRF token for session mode (from non-HttpOnly cookie)
 
 // Auto-activate: take control immediately on install so a single reload after
 // a SW update is sufficient to pick up the new version.
@@ -59,8 +85,28 @@ self.addEventListener('activate', (e) => {
 });
 
 self.addEventListener('message', (e) => {
-  if (e.data && e.data.type === 'SET_TOKEN') {
+  if (!e.data) return;
+
+  // Origin guard: only accept messages from controlled same-origin clients.
+  //
+  // e.origin is the origin of the page that posted the message.  For messages
+  // from the page script this is always the same origin as the SW itself
+  // (same-origin policy).  Cross-origin iframes cannot postMessage to the SW
+  // because the SW scope is same-origin.
+  //
+  // We additionally check e.source is truthy (null for non-client senders such
+  // as other SWs) as defense-in-depth.  Both checks together ensure SET_TOKEN,
+  // SET_AUTH_MODE, and SET_CSRF_TOKEN can only be delivered by a page/client
+  // that shares our origin.
+  if (e.origin && e.origin !== self.location.origin) return;
+  if (!e.source) return;
+
+  if (e.data.type === 'SET_TOKEN') {
     token = e.data.token;
+  } else if (e.data.type === 'SET_AUTH_MODE') {
+    authMode = e.data.mode === 'session' ? 'session' : 'bearer';
+  } else if (e.data.type === 'SET_CSRF_TOKEN') {
+    csrfToken = e.data.token;
   }
 });
 
@@ -70,12 +116,70 @@ self.addEventListener('fetch', (e) => {
   if (url.origin !== self.location.origin) return;
   // Pass through requests that already carry Authorization.
   if (e.request.headers.get('Authorization')) return;
-  // If we don't have a token yet, let the request proceed unmodified.
-  if (!token) return;
-  // Top-level page navigations: skip injection.  These are token-exempt routes
+  // Top-level page navigations: skip in all modes.  These are token-exempt routes
   // ('/' serves the console shell; '/ide/editor' serves the Monaco iframe host).
   // We cannot reconstruct navigate-mode Requests with new headers anyway.
   if (e.request.mode === 'navigate' && e.request.destination === 'document') return;
+
+  // ---- session mode -----------------------------------------------------------
+  //
+  // In session mode we do NOT reconstruct the request because reconstructing it
+  // forces credentials:'omit' which strips the HttpOnly session cookie.  Instead:
+  //
+  //   - GET/HEAD: pass through untouched — the browser sends the session cookie
+  //     automatically via its default credentials:'same-origin' behaviour.
+  //
+  //   - Mutations (POST/PUT/PATCH/DELETE): clone the request with the
+  //     X-CSRF-Token header added; do NOT alter credentials or any other field.
+  //     The browser will still attach the session cookie.
+  //
+  // If no CSRF token is available, mutations pass through without the header —
+  // the server will reject them with 403, which is the correct fail-safe
+  // (better to surface a CSRF error than to strip the mutation body or silently
+  // change credentials behaviour).
+  //
+  // No Authorization header is ever injected in session mode.
+
+  if (authMode === 'session') {
+    const isBodyMethod = e.request.method !== 'GET' && e.request.method !== 'HEAD';
+    if (!isBodyMethod) {
+      // GET/HEAD — pass through; browser attaches session cookie.
+      return;
+    }
+    // Mutation: inject X-CSRF-Token if we have it.
+    if (!csrfToken) {
+      // No token yet — pass through; server will 403.
+      return;
+    }
+    e.respondWith((async () => {
+      const headers = new Headers(e.request.headers);
+      headers.set('X-CSRF-Token', csrfToken);
+      const init = {
+        method:  e.request.method,
+        headers: headers,
+        // credentials:'same-origin' is the browser default — explicitly set so
+        // the cloned request carries the session cookie.
+        credentials: 'same-origin',
+        // mode:'same-origin' is intentional: all console APIs are same-origin
+        // endpoints (the server and the browser page share the same host:port).
+        // Clamping to same-origin prevents the browser from issuing a CORS
+        // preflight on the cloned request and keeps the session cookie in scope.
+        // Cross-origin mutations cannot reach here because the fetch handler
+        // already returns early for non-same-origin requests (top of handler).
+        mode: 'same-origin',
+        // Mutation POSTs must not follow redirects — same rationale as bearer mode.
+        redirect: 'error',
+        body: await e.request.clone().arrayBuffer(),
+      };
+      return fetch(new Request(e.request.url, init));
+    })());
+    return;
+  }
+
+  // ---- bearer mode (loopback/default — unchanged) ----------------------------
+  //
+  // If we don't have a token yet, let the request proceed unmodified.
+  if (!token) return;
 
   // URL-built request: construct a fresh Request from the URL string rather
   // than cloning e.request.  This sidesteps the browser restriction that
