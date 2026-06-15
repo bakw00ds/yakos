@@ -45,17 +45,6 @@ func newStreamResolutionSvc(t *testing.T, yakosRoot string) *Service {
 	})
 }
 
-// captureStreamAgent installs a fake streamRunFn that records the Request
-// it receives and immediately returns a zero Result.  The captured Request
-// is written to *out.
-func captureStreamAgent(t *testing.T, out *Request) {
-	t.Helper()
-	withStreamRunFn(func(_ context.Context, req Request, _ runtime.Adapter, _ runtime.ChatDispatchRequest, _ func(StreamChunk)) (Result, error) {
-		*out = req
-		return Result{ExitCode: 0, ModelChosenBy: "frontmatter", ModelResolved: "sonnet"}, nil
-	}, func() {}) // body is a no-op; caller drives RunStream separately
-}
-
 // runStreamCapture is a helper that installs a capturing fake, calls RunStream,
 // and returns the captured Request plus the RunStream error.
 func runStreamCapture(ctx context.Context, svc *Service, p Params) (Request, error) {
