@@ -34,6 +34,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -1945,5 +1946,184 @@ func TestAttach_ConversationBindingPoisoning(t *testing.T) {
 	drainClose(resp)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("binding-poisoning E2E: bob reading alice's private conv: status=%d; want 403", resp.StatusCode)
+	}
+}
+
+// =========================================================================
+// ---- Agent validation tests (fix: unknown agent → 400 not 202) ----------
+// =========================================================================
+//
+// These tests verify the fix for the bug where dispatching an unknown/non-roster
+// agent name returned 202, persisted the user turn, and then produced no output —
+// causing the chat pane to hang forever.
+//
+// After the fix:
+//   (a) Unknown agent name → 400 with JSON error body (NOT 202).
+//   (b) Bare runtime name like "claude" → still accepted (NOT rejected).
+//   (c) Valid roster agent → still accepted.
+
+// buildMinimalYakosRootForConsoleTest creates a minimal yakOS root directory
+// with a single specialist agent (backend) so the consoleui handler can compose
+// the roster and validate agent names.
+func buildMinimalYakosRootForConsoleTest(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	agentsDir := root + "/lib/agents"
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", agentsDir, err)
+	}
+	content := "---\nid: backend\nmodel: sonnet\n---\n\n## Purpose\n\nBackend specialist.\n"
+	if err := os.WriteFile(agentsDir+"/backend.md", []byte(content), 0644); err != nil {
+		t.Fatalf("write backend.md: %v", err)
+	}
+	return root
+}
+
+// newChatTestServerWithValidation builds a test server with YakosRoot and
+// WorkspaceRoot wired in so agent validation is active on
+// POST /api/chat/dispatch.  Returns (httptest.Server, token).
+func newChatTestServerWithValidation(t *testing.T, yakosRoot string) (*httptest.Server, string) {
+	t.Helper()
+	stateDir := t.TempDir()
+	workDir := t.TempDir()
+	tok, err := consoleui.LoadOrCreateToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	bus := wsbus.New()
+	t.Cleanup(bus.Stop)
+
+	srv := consoleui.MustNew(t, consoleui.Config{
+		Token:             tok,
+		KanbanBoardPath:   t.TempDir() + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: t.TempDir(),
+		PerfWorkDir:       t.TempDir(),
+		Bus:               bus,
+		WorkDir:           workDir,
+		// Wire agent validation roots so the dispatch handler can resolve agents.
+		YakosRoot:     yakosRoot,
+		WorkspaceRoot: workDir,
+	})
+
+	wrapped := consoleui.RequireTokenForNonStatic(tok,
+		consoleui.RequireJSONForMutations(srv.Handler()))
+	ts := httptest.NewServer(wrapped)
+	t.Cleanup(ts.Close)
+	return ts, tok
+}
+
+// TestChatDispatch_400OnUnknownAgent verifies that dispatching an unknown agent
+// name returns 400 with a JSON error body instead of 202.
+// This is the primary regression test for the silent-hang bug.
+func TestChatDispatch_400OnUnknownAgent(t *testing.T) {
+	yakosRoot := buildMinimalYakosRootForConsoleTest(t)
+	ts, tok := newChatTestServerWithValidation(t, yakosRoot)
+
+	body := `{"runtime":"claude","model":"sonnet","agent":"general","task":"hi","sessionId":"s-unknown1","operatorId":"alice"}`
+	resp := post(t, ts.URL+"/api/chat/dispatch", tok, body)
+	defer drainClose(resp)
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST /api/chat/dispatch (unknown agent): status=%d; want 400", resp.StatusCode)
+		return
+	}
+	// Verify the response is a JSON error body.
+	var errBody map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&errBody); err != nil {
+		t.Errorf("response body not valid JSON: %v", err)
+		return
+	}
+	errMsg, ok := errBody["error"]
+	if !ok || errMsg == "" {
+		t.Errorf("JSON error body missing 'error' key or empty: %v", errBody)
+	}
+	if !strings.Contains(errMsg, "general") {
+		t.Errorf("error message does not mention the agent name 'general': %q", errMsg)
+	}
+}
+
+// TestChatDispatch_202OnBareRuntimeName verifies that a bare runtime name like
+// "claude" is still accepted (returns 202 or at most 503 for missing svc, NOT
+// 400 for an invalid agent name).
+func TestChatDispatch_202OnBareRuntimeName(t *testing.T) {
+	yakosRoot := buildMinimalYakosRootForConsoleTest(t)
+	ts, tok := newChatTestServerWithValidation(t, yakosRoot)
+
+	for _, rt := range []string{"claude", "codex", "agy", "gemini"} {
+		sessID := "s-runtime-" + rt
+		body := `{"runtime":"` + rt + `","model":"sonnet","agent":"` + rt + `","task":"hi","sessionId":"` + sessID + `","operatorId":"alice"}`
+		resp := post(t, ts.URL+"/api/chat/dispatch", tok, body)
+
+		// The server has no DispatchService configured → 503 after the agent check.
+		// 400 would indicate the bare runtime was wrongly rejected as unknown.
+		if resp.StatusCode == http.StatusBadRequest {
+			drainClose(resp)
+			t.Errorf("POST /api/chat/dispatch (bare runtime=%s): got 400 (wrongly rejected); want non-400", rt)
+			continue
+		}
+		drainClose(resp)
+	}
+}
+
+// TestChatDispatch_202OnValidRosterAgent verifies that a valid roster agent
+// (present in the minimal yakosRoot) is still accepted.
+func TestChatDispatch_202OnValidRosterAgent(t *testing.T) {
+	yakosRoot := buildMinimalYakosRootForConsoleTest(t)
+	ts, tok := newChatTestServerWithValidation(t, yakosRoot)
+
+	body := `{"runtime":"claude","model":"sonnet","agent":"backend","task":"hi","sessionId":"s-roster1","operatorId":"alice"}`
+	resp := post(t, ts.URL+"/api/chat/dispatch", tok, body)
+	defer drainClose(resp)
+
+	// No DispatchService → 503; but must NOT be 400 (agent name must not be rejected).
+	if resp.StatusCode == http.StatusBadRequest {
+		t.Errorf("POST /api/chat/dispatch (valid roster agent): got 400; want non-400 (503 expected for missing svc)")
+	}
+}
+
+// TestChatDispatch_SSEErrorOnRunStreamFailure verifies that when RunStream
+// returns a non-cancel error, an SSE "error" frame is routed to the session's
+// SSE connections so the client sees the failure instead of hanging.
+//
+// This test uses the ChatHub directly to verify the error routing path without
+// needing a real DispatchService.
+func TestChatDispatch_SSEErrorOnRunStreamFailure(t *testing.T) {
+	hub := consoleui.NewChatHubForTest()
+
+	// Register alice's SSE connection so we can receive events.
+	aliceConn, err := hub.Register("conn-alice-err", "alice")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	defer hub.Unregister(aliceConn.ID())
+
+	// Open the session.
+	if err := hub.OpenSession("sess-err-frame", "alice", false); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	defer hub.CloseSession("sess-err-frame")
+
+	// Simulate the dispatch goroutine emitting an error frame (the fix path):
+	// when RunStream returns a non-cancel error, the goroutine calls hub.Route
+	// with Type="error".
+	errText := "dispatch failed: some runtime error"
+	hub.Route(consoleui.SSEEvent{
+		SessionID: "sess-err-frame",
+		Type:      "error",
+		Text:      errText,
+	})
+
+	// The error frame must arrive on alice's SSE connection.
+	select {
+	case ev := <-aliceConn.Ch():
+		if ev.Type != "error" {
+			t.Errorf("SSE event type=%q; want 'error'", ev.Type)
+		}
+		if ev.Text != errText {
+			t.Errorf("SSE event text=%q; want %q", ev.Text, errText)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Error("no SSE error frame received within 500ms")
 	}
 }

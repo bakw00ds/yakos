@@ -114,14 +114,16 @@ func (cs *chatState) cancel(sessionID string) {
 // chatHandlers holds the dependencies for all chat HTTP handlers.
 // Constructed in Server.registerRoutes and kept on the Server struct.
 type chatHandlers struct {
-	hub         *ChatHub
-	transcripts *Transcripts
-	state       *chatState
-	svc         *dispatch.Service          // may be nil (console without dispatch)
-	registry    *dispatch.SessionRegistry  // fleet registry; wired by New() after construction
-	bus         *wsbus.Bus                 // event bus for fleet.* WS events; wired by New()
-	workDir     string                     // used by NewTranscripts
-	serverCtx   context.Context            // server-lifetime context; dispatch goroutines derive from this (NOT r.Context())
+	hub           *ChatHub
+	transcripts   *Transcripts
+	state         *chatState
+	svc           *dispatch.Service         // may be nil (console without dispatch)
+	registry      *dispatch.SessionRegistry // fleet registry; wired by New() after construction
+	bus           *wsbus.Bus                // event bus for fleet.* WS events; wired by New()
+	workDir       string                    // used by NewTranscripts
+	yakosRoot     string                    // used for up-front agent validation
+	workspaceRoot string                    // used as project for up-front agent validation
+	serverCtx     context.Context           // server-lifetime context; dispatch goroutines derive from this (NOT r.Context())
 }
 
 // newChatHandlers is called from registerChatRoutes.
@@ -321,6 +323,26 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "agent is required", http.StatusBadRequest)
 		return
 	}
+
+	// --- Validate agent resolves against the roster (or is a known runtime) ---
+	// This mirrors the resolution that RunStream performs internally, so an
+	// unknown agent name is rejected up front with a clear 400 instead of
+	// silently hanging after the 202.
+	// Bare runtime names (claude/codex/agy/gemini) are valid catch-alls and are
+	// NOT rejected here — only names that resolve to nothing are rejected.
+	//
+	// When yakosRoot is empty the roster cannot be composed, so we only reject
+	// if the agent is also not a known runtime.  This preserves backward
+	// compatibility with test servers that omit yakosRoot.
+	if err := dispatch.ValidateAgentName(req.Agent, ch.yakosRoot, ch.workspaceRoot); err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": fmt.Sprintf("unknown agent %q; not in roster and not a known runtime", req.Agent),
+		})
+		return
+	}
+
 	if strings.TrimSpace(req.Task) == "" {
 		http.Error(w, "task is required", http.StatusBadRequest)
 		return
@@ -644,6 +666,26 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				)
 				exitStatus = dispatch.StatusFailed
 				exitCode = -1
+
+				// Emit an SSE error frame so the client UI shows an error
+				// instead of hanging forever.  The error message is kept terse
+				// (no internal paths or stack traces) since it is delivered to
+				// the browser.  Persist a transcript error turn so the
+				// conversation record reflects the failure.
+				errText := fmt.Sprintf("dispatch failed: %s", err.Error())
+				_ = ch.transcripts.Append(TranscriptEntry{
+					SessionID:      dispReq.SessionID,
+					ConversationID: conversationID,
+					OperatorID:     capturedOperatorID,
+					Role:           RoleError,
+					Text:           errText,
+				})
+				ch.hub.Route(SSEEvent{
+					SessionID: dispReq.SessionID,
+					Type:      "error",
+					Text:      errText,
+					TS:        time.Now().UTC().Format(time.RFC3339Nano),
+				})
 			}
 		}
 

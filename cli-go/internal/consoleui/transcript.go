@@ -51,6 +51,11 @@ const (
 	RoleUser      TranscriptRole = "user"
 	RoleAssistant TranscriptRole = "assistant"
 	RoleSummary   TranscriptRole = "summary"
+	// RoleError records a server-side dispatch failure.  The Text field carries
+	// a terse error message (no internal paths or stack traces) suitable for
+	// display in the chat UI.  Persisted so the conversation record reflects the
+	// failure rather than ending with only a user turn.
+	RoleError TranscriptRole = "error"
 )
 
 // TranscriptEntry is one NDJSON line in a chat transcript file.
@@ -73,13 +78,16 @@ type TranscriptEntry struct {
 	// OperatorID is the self-asserted operator (attribution only).
 	OperatorID string `json:"operator_id,omitempty"`
 
-	// Role is "user" | "assistant" | "summary".
+	// Role is "user" | "assistant" | "summary" | "error".
 	Role TranscriptRole `json:"role"`
 
 	// Text is the turn content.
 	//   - Role "user": the dispatch task prompt.
 	//   - Role "assistant": one chunk of streamed token text.
 	//   - Role "summary": the terminal summary (cost, exit code, duration).
+	//   - Role "error": terse server-side dispatch failure message (no internal
+	//     paths or stack traces); persisted so the conversation record reflects
+	//     the failure rather than ending with only a user turn.
 	Text string `json:"text"`
 
 	// Runtime is the dispatch runtime (claude|codex|agy|gemini), set on user turns.

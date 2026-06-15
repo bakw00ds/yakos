@@ -74,7 +74,9 @@ type SSEEvent struct {
 	// SessionID identifies which chat pane this event belongs to.
 	SessionID string `json:"session_id"`
 
-	// Type is "token" | "summary" | "ping" | "tool_use" | "tool_result".
+	// Type is "token" | "summary" | "ping" | "tool_use" | "tool_result" | "error".
+	// "error" is emitted by the dispatch goroutine when RunStream returns a
+	// non-cancel error, so the client UI can show an error instead of hanging.
 	Type string `json:"type"`
 
 	// Text is the token text (Type=="token") or full text (Type=="summary").

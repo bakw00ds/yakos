@@ -329,6 +329,11 @@ func New(cfg Config) (*Server, error) {
 	// per-request r.Context() — so they survive the 202 response returning.
 	serverCtx, serverCancel := context.WithCancel(context.Background())
 	chatH := newChatHandlers(hub, transcripts, cfg.DispatchService, serverCtx)
+	// Wire yakosRoot + workspaceRoot so the dispatch handler can validate the
+	// agent name before returning 202.  These are set after construction to keep
+	// newChatHandlers signature stable (it is also called from export_test.go).
+	chatH.yakosRoot = cfg.YakosRoot
+	chatH.workspaceRoot = cfg.WorkspaceRoot
 	flowsH := &flowsHandlers{
 		engine:     cfg.WorkflowEngine,
 		workDir:    cfg.WorkDir,
