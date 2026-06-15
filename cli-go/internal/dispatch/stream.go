@@ -64,13 +64,44 @@ const maxBufferedOutputBytes = 32 * 1024 * 1024 // 32 MB
 // gRPC frame cap so Phase 3b's SSE/REST path (no gRPC framing) stays safe.
 const maxTaskBytes = 1 * 1024 * 1024 // 1 MB
 
+// maxToolOutputBytes is the hard truncation ceiling for a single tool_result
+// output before it is emitted as a StreamChunk.  Tool output is untrusted text
+// from the runtime (bash stdout, file contents, etc.); bounding it prevents
+// large outputs from bloating SSE frames and transcript entries.
+//
+// 16 KB is generous for a code snippet or command output while keeping each
+// SSE frame well under typical reverse-proxy buffer limits.
+const maxToolOutputBytes = 16 * 1024
+
+// toolOutputTruncationMarker is appended to a tool output that was cut at
+// maxToolOutputBytes.  Chosen to be unmistakable in context.
+const toolOutputTruncationMarker = "\n[...tool output truncated...]"
+
 // StreamChunk is one incremental unit of streaming output.
 type StreamChunk struct {
-	// Type is "token" for incremental text or "summary" for the terminal record.
+	// Type is "token" for incremental text, "summary" for the terminal record,
+	// "tool_use" when the agent invoked a tool, or "tool_result" when the tool
+	// returned a result.
 	Type string
 
 	// Text holds the token text (Type=="token") or the full result text (Type=="summary").
 	Text string
+
+	// ToolName is the human-readable tool name (Type=="tool_use" or "tool_result").
+	// Examples: "Bash", "Read", "Write".
+	ToolName string
+
+	// ToolInput is the JSON-encoded tool arguments (Type=="tool_use").
+	// For a Bash invocation this is typically {"command":"ls -la"}.
+	ToolInput string
+
+	// ToolOutput is the truncated tool result content (Type=="tool_result").
+	// Always <= maxToolOutputBytes + len(toolOutputTruncationMarker).
+	ToolOutput string
+
+	// IsError is true when the tool_result represents a tool-level error
+	// (Type=="tool_result" only).
+	IsError bool
 
 	// The following fields are populated only on Type=="summary".
 	ExitCode      int
@@ -304,13 +335,15 @@ func execWithStreaming(
 	cp, hasChatCmd := adapter.(chatCmdProvider)
 
 	var (
-		allText    []byte
-		exitCode   int
-		execErr    error
-		stderrBuf  bytes.Buffer
-		costUSD    float64
-		usageCost  *cost.Usage
-		textBlocks = make(map[int]struct{})
+		allText       []byte
+		exitCode      int
+		execErr       error
+		stderrBuf     bytes.Buffer
+		costUSD       float64
+		usageCost     *cost.Usage
+		textBlocks    = make(map[int]struct{})
+		toolUseBlocks = make(map[int]*runtime.ToolEvent) // index → in-progress tool_use
+		toolIDToName  = make(map[string]string)           // tool-use id → name for tool_result correlation
 	)
 
 	if hasChatCmd {
@@ -408,7 +441,7 @@ func execWithStreaming(
 								line := bytes.TrimRight(lineBuf, "\r")
 								if len(line) > 0 {
 									if isClaudeRuntime {
-										tok, isResult, lineCost, lineUsage := runtime.ParseStreamLineWithUsage(line, textBlocks)
+										tok, isResult, lineCost, lineUsage, toolEv := runtime.ParseStreamLineWithTools(line, textBlocks, toolUseBlocks, toolIDToName)
 										if tok != "" {
 											allText = append(allText, tok...)
 											onChunk(StreamChunk{Type: "token", Text: tok})
@@ -416,6 +449,9 @@ func execWithStreaming(
 										if isResult {
 											costUSD = lineCost
 											usageCost = lineUsage
+										}
+										if toolEv != nil {
+											emitToolChunk(toolEv, onChunk)
 										}
 									} else {
 										// Buffered path: accumulate with ceiling check.
@@ -453,7 +489,7 @@ func execWithStreaming(
 			line := bytes.TrimRight(lineBuf, "\r")
 			if len(line) > 0 {
 				if isClaudeRuntime {
-					tok, isResult, lineCost, lineUsage := runtime.ParseStreamLineWithUsage(line, textBlocks)
+					tok, isResult, lineCost, lineUsage, toolEv := runtime.ParseStreamLineWithTools(line, textBlocks, toolUseBlocks, toolIDToName)
 					if tok != "" {
 						allText = append(allText, tok...)
 						onChunk(StreamChunk{Type: "token", Text: tok})
@@ -461,6 +497,9 @@ func execWithStreaming(
 					if isResult {
 						costUSD = lineCost
 						usageCost = lineUsage
+					}
+					if toolEv != nil {
+						emitToolChunk(toolEv, onChunk)
 					}
 				} else if !bufferedOutputTruncated {
 					allText = append(allText, line...)
@@ -546,4 +585,32 @@ func execWithStreaming(
 		return result, fmt.Errorf("dispatch: stream: runtime error: %w", execErr)
 	}
 	return result, nil
+}
+
+// emitToolChunk translates a runtime.ToolEvent into a StreamChunk and calls
+// onChunk.  Tool output is hard-truncated at maxToolOutputBytes before emit.
+//
+// Truncation is applied here (at the dispatch layer) so every downstream
+// consumer (SSE hub, transcript, tests) inherits the same bound automatically.
+func emitToolChunk(te *runtime.ToolEvent, onChunk func(StreamChunk)) {
+	switch te.Kind {
+	case "tool_use":
+		onChunk(StreamChunk{
+			Type:      "tool_use",
+			ToolName:  te.ToolName,
+			ToolInput: te.Input,
+		})
+
+	case "tool_result":
+		output := te.Output
+		if len(output) > maxToolOutputBytes {
+			output = output[:maxToolOutputBytes] + toolOutputTruncationMarker
+		}
+		onChunk(StreamChunk{
+			Type:       "tool_result",
+			ToolName:   te.ToolName,
+			ToolOutput: output,
+			IsError:    te.IsError,
+		})
+	}
 }

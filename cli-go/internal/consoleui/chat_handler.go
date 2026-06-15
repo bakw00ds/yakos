@@ -534,7 +534,8 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				Text:      chunk.Text,
 				TS:        time.Now().UTC().Format(time.RFC3339Nano),
 			}
-			if chunk.Type == "summary" {
+			switch chunk.Type {
+			case "summary":
 				// Use pointers so exit_code:0 (success) serialises correctly
 				// (omitempty on int zero-value would suppress it).
 				code := chunk.ExitCode
@@ -578,8 +579,25 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 					TotalCostUSD:   chunk.TotalCostUSD,
 					Model:          chunk.ModelResolved,
 				})
-			} else if chunk.Type == "token" {
+
+			case "token":
 				assistantBuf.WriteString(chunk.Text)
+
+			case "tool_use":
+				// Populate the tool_use SSE fields; transcript persistence is
+				// intentionally skipped (tool events are transient UI state, not
+				// conversation history — they are already implicitly reflected in
+				// the subsequent assistant text).
+				ev.ToolName = chunk.ToolName
+				ev.ToolInput = chunk.ToolInput
+
+			case "tool_result":
+				// ToolOutput is already hard-truncated by emitToolChunk at the
+				// dispatch layer (≤ maxToolOutputBytes).  Not persisted to transcript
+				// to bound transcript growth; the tool result content is ephemeral UI.
+				ev.ToolName = chunk.ToolName
+				ev.ToolOutput = chunk.ToolOutput
+				ev.IsError = chunk.IsError
 			}
 			ch.hub.Route(ev)
 		}
@@ -831,9 +849,20 @@ func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Phase 4: when promoting to shared, include a safety warning that tool
+	// output (bash stdout, file contents) will be visible to ALL watchers.
+	// This is a contractual safety mechanic — not optional.
+	type shareResponse struct {
+		OK      bool   `json:"ok"`
+		Warning string `json:"warning,omitempty"`
+	}
+	resp := shareResponse{OK: true}
+	if req.Shared {
+		resp.Warning = "Tool output (bash stdout, file contents) will be visible to all session watchers."
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"ok":true}` + "\n"))
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // ---- helpers ----------------------------------------------------------------
