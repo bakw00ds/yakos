@@ -258,6 +258,14 @@ html, body {
   display: block;
 }
 
+/* ── Setup-page hint text (replaces former inline style) ──────────── */
+
+.setup-hint {
+  font-size: 0.875rem;
+  color: var(--text-dim);
+  margin: 0 0 1.25rem;
+}
+
 /* ── Reduced motion ────────────────────────────────────────────────── */
 
 @media (prefers-reduced-motion: reduce) {

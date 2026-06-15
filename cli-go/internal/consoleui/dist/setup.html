@@ -9,23 +9,29 @@
 <body>
 <div class="card">
   <h1>yakOS — Create admin account</h1>
-  <p style="font-size:.875rem;color:#6b7280;margin:0 0 1.25rem">
+  <p class="setup-hint">
     This is a one-time setup. Enter the setup token printed to the daemon
     stdout, then choose a username and password for the first admin account.
   </p>
-  <div class="error" id="err"></div>
-  <form id="setupForm">
+  <!-- role="alert" implies aria-live="assertive" + aria-atomic="true";
+       screen readers announce errors immediately without redundant attrs. -->
+  <div class="error" id="err" role="alert"></div>
+  <form id="setupForm" novalidate>
     <label for="token">Setup token</label>
-    <input type="password" id="token" name="token" autocomplete="off" required>
+    <input type="password" id="token" name="token" autocomplete="off" required
+           aria-required="true" aria-describedby="err">
     <label for="username">Username</label>
-    <input type="text" id="username" name="username" autocomplete="username" required>
+    <input type="text" id="username" name="username" autocomplete="username" required
+           aria-required="true" aria-describedby="err">
     <label for="password">Password</label>
-    <input type="password" id="password" name="password" autocomplete="new-password" required>
+    <input type="password" id="password" name="password" autocomplete="new-password" required
+           aria-required="true" aria-describedby="err">
     <label for="confirm">Confirm password</label>
-    <input type="password" id="confirm" name="confirm" autocomplete="new-password" required>
+    <input type="password" id="confirm" name="confirm" autocomplete="new-password" required
+           aria-required="true" aria-describedby="err">
     <button type="submit" id="btn">Create admin account</button>
   </form>
-  <div class="reset-note" id="successNote">
+  <div class="reset-note" id="successNote" role="status" aria-live="polite">
     Admin account created. Redirecting to sign in…
   </div>
 </div>

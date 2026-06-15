@@ -376,12 +376,17 @@ func requireCSRFForSession(authStore *authsession.Store, next http.Handler) http
 
 // requireAuthOrRedirect wraps next with networked-edge auth enforcement:
 //   - Authenticated identities pass through unchanged.
-//   - Static assets and the login/setup pages pass through (exempt via
-//     isStaticAsset — those pages must be reachable unauthenticated).
+//   - The SPA shell at "/" is gated: unauthenticated requests receive a 302
+//     redirect to /setup (zero users) or /login (users exist).  This prevents
+//     an unauthenticated operator from seeing the console chrome even though
+//     every API call inside it would 401.
+//   - Sub-resources (/app.js, /styles.css, /sw.js, /vendor/*, etc.) and the
+//     login/setup pages always pass through — they carry no workspace data and
+//     must be reachable before the user has a session.
 //   - API/XHR paths (Accept: application/json or /api/ /flows/api/ /v1/ prefixes)
 //     → 401 JSON.
-//   - Top-level navigations → 302 redirect to /setup (when zero users) or
-//     /login (after first admin is created).
+//   - All other top-level navigations (e.g. /kanban/, /perf/) → 302 redirect
+//     to /setup (zero users) or /login (users exist).
 //
 // Only wired on the networked bind (NetworkedMode=true).
 // Loopback path is unchanged.
@@ -390,11 +395,17 @@ func requireCSRFForSession(authStore *authsession.Store, next http.Handler) http
 // /login otherwise.  May be nil (conservative: redirects to /login).
 func requireAuthOrRedirect(uStore *userstore.Store, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// /login, /login.js, /login.css, /setup, /setup.js and other static
-		// assets are always accessible without authentication.  /logout is
-		// intentionally NOT exempt: it requires an authenticated session cookie
-		// (the session lookup in handleLogout handles the no-session case gracefully).
-		if isStaticAsset(r) {
+		// The SPA shell at "/" is treated like a navigation endpoint on the
+		// networked bind: unauthenticated requests must be redirected, not served.
+		// Sub-resources (/app.js, /styles.css, /sw.js, /vendor/*, /ide-editor.js)
+		// and auth pages (/login, /login.js, /login.css, /setup, /setup.js) pass
+		// through regardless of auth state — they carry no workspace data.
+		//
+		// Implementation: isStaticAsset returns true for "/", but the "/" route is
+		// explicitly re-checked after the isStaticAsset early-return so that the
+		// auth gate applies on the networked path.  All other isStaticAsset paths
+		// are genuinely exempt (code + markup only; no workspace data).
+		if isStaticAsset(r) && r.URL.Path != "/" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -422,7 +433,8 @@ func requireAuthOrRedirect(uStore *userstore.Store, next http.Handler) http.Hand
 			return
 		}
 
-		// Top-level navigation: redirect to /setup (zero users) or /login.
+		// Top-level navigation (including "/"): redirect to /setup (zero users)
+		// or /login (users exist).
 		http.Redirect(w, r, zeroUsersLoginTarget(uStore), http.StatusFound)
 	})
 }
