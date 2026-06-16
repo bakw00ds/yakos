@@ -156,6 +156,24 @@ func (h *bashHandlers) handleBash(w http.ResponseWriter, r *http.Request) {
 		shCmd.Dir = h.workspaceRoot
 	}
 
+	// Place the child in its own process group (no-op on Windows) so that
+	// backgrounded grandchildren ("sleep 60 &") are included in the kill
+	// when the context deadline fires.
+	configureProcAttr(shCmd)
+
+	// Cmd.Cancel is called by exec.Cmd when ctx is cancelled/timed-out.
+	// Killing the whole process group ensures grandchildren do not hold
+	// stdout/stderr open, which would cause Run() to block indefinitely.
+	shCmd.Cancel = func() error {
+		killProcessGroup(shCmd)
+		return nil
+	}
+
+	// WaitDelay gives the process group 2 seconds to flush output after
+	// Cancel fires before Run() forcibly unblocks.  This bounds the
+	// worst-case handler duration to bashExecTimeout + WaitDelay.
+	shCmd.WaitDelay = 2 * time.Second
+
 	var stdoutBuf, stderrBuf strings.Builder
 	shCmd.Stdout = &stdoutBuf
 	shCmd.Stderr = &stderrBuf
@@ -188,11 +206,13 @@ func (h *bashHandlers) handleBash(w http.ResponseWriter, r *http.Request) {
 
 	// Audit — every call, regardless of exit code.
 	// Use slog.Warn so bash executions are visually prominent in structured logs.
-	operatorID := netid.IdentityFrom(r.Context()).OperatorID
+	identity := netid.IdentityFrom(r.Context())
 	slog.Warn("consoleui: audit: bash exec",
-		"operator_id", operatorID,
+		"operator_id", identity.OperatorID,
 		"command", cmd,
 		"exit_code", exitCode,
+		"remote_addr", r.RemoteAddr,
+		"auth_method", identity.AuthMethod,
 	)
 
 	resp := bashResponseDTO{

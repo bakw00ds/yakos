@@ -174,6 +174,13 @@ func IsExternalOriginForTest(origin, externalHost string) bool {
 	return isExternalOrigin(origin, externalHost)
 }
 
+// IsLoopbackHostForTest exposes isLoopbackHost for external tests so the
+// canonical loopback predicate can be unit-tested without going through a
+// full HTTP server round-trip.
+func IsLoopbackHostForTest(host string) bool {
+	return isLoopbackHost(host)
+}
+
 // IsLoopbackOriginForTest exposes isLoopbackOrigin for external tests.
 func IsLoopbackOriginForTest(origin string) bool {
 	return isLoopbackOrigin(origin)

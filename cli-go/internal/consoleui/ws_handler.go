@@ -62,6 +62,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -652,12 +653,29 @@ func splitHostAddr(addr string) (string, string, error) {
 }
 
 // isLoopbackHost returns true when host is a loopback address.
+//
+// Canonical check: net.ParseIP + IP.IsLoopback() so that the
+// predicate is exact and cannot be fooled by prefix tricks such as
+// "127.0.0.1.evil.com", "127.000.000.001", or "127.0.0.1 " (trailing
+// space).  IPv4-mapped IPv6 loopback (::ffff:127.0.0.1) is correctly
+// handled by Go's net.IP.IsLoopback.
+//
+// IPv6 zone IDs (e.g. "::1%eth0") are stripped before parsing because
+// net.ParseIP rejects zoned forms.
+//
+// The bare hostname "localhost" is accepted explicitly because
+// net.ParseIP("localhost") returns nil; callers (including WS-upgrade
+// and bash-handler) rely on this case.
 func isLoopbackHost(host string) bool {
-	switch host {
-	case "::1", "localhost", "127.0.0.1":
+	if host == "localhost" {
 		return true
 	}
-	return strings.HasPrefix(host, "127.")
+	// Strip IPv6 zone ID ("::1%eth0" → "::1") before parsing.
+	if idx := strings.IndexByte(host, '%'); idx >= 0 {
+		host = host[:idx]
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // isLoopbackOrigin returns true when origin is a loopback console HTTP origin.
