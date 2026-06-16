@@ -424,14 +424,20 @@ async function loadAll(tok) {
   renderTrend(trend);
 
   // Try projects rollup — only available with --all-projects.
-  try {
-    const projects = await apiFetch('api/metrics/projects', tok);
-    show('projects-section');
-    renderProjects(projects);
-  } catch (e) {
-    if (!(e instanceof AuthError)) {
-      // Endpoint not available (no --all-projects flag) — just leave section hidden.
+  // Fetch directly so a 404 (route not registered in single-project mode) is
+  // treated as "feature absent" rather than an error.  apiFetch() throws on any
+  // non-ok status, which causes the browser to log a console error; this inline
+  // path returns null on 404 and keeps the projects-section hidden silently.
+  {
+    const projResp = await fetch('api/metrics/projects', buildFetchOpts(tok));
+    if (projResp.status === 401 || projResp.status === 403) {
+      show('auth-error');
+    } else if (projResp.ok) {
+      const projects = await projResp.json();
+      show('projects-section');
+      renderProjects(projects);
     }
+    // 404 → route absent (no --all-projects); leave section hidden, no error logged.
   }
 
   setText('last-updated', 'Updated ' + new Date().toLocaleTimeString());

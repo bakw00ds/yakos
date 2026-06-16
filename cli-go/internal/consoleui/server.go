@@ -940,6 +940,9 @@ func cspHeader(addr string, networked bool) string {
 		// app.js and sw.js are same-origin; no blob: needed.
 		"script-src 'self'",
 		"style-src 'self' 'unsafe-inline'",
+		// data: needed for inline SVG used as CSS background-image (e.g. the
+		// <select> dropdown-arrow glyph); background-images fall under img-src.
+		"img-src 'self' data:",
 		// Vendored fonts served same-origin under /vendor/fonts/.
 		// 'self' is already covered by default-src but listed explicitly
 		// here so the intent is auditable and the directive is present
