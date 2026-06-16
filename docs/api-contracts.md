@@ -808,3 +808,99 @@ All CLI commands enforce the same self-protection guard (cannot remove last admi
 Audit entries written to slog with `actor=cli`.
 
 **Source:** `cli-go/internal/consolecmd/usercmd.go`
+
+---
+
+## Console Bash Pass-Through (feat/console-bash-backend)
+
+**Implemented in:** `cli-go/internal/consoleui/bash_handler.go`
+**Available on:** console bind (both loopback and networked)
+**Flag:** `yakos serve --console-allow-bash` (required to enable over the network)
+
+### Security model
+
+| Connection | AllowNetworkedBash | Behaviour |
+|---|---|---|
+| Loopback (`127.x`, `::1`, `localhost`) | any | Always permitted |
+| Non-loopback (networked) | `false` (default) | 403 |
+| Non-loopback (networked) | `true` | Permitted |
+
+Role gate: **RoleAdmin only**. RoleRead / RoleDispatch / RoleFlowsRun → 403.
+CSRF + JSON-content-type gates: applied by the global middleware stack (same as all other console mutations). mTLS cert clients are CSRF-exempt.
+
+Audit: every call writes `slog.Warn "consoleui: audit: bash exec"` with `operator_id`, `command`, and `exit_code`.
+
+### POST /api/console/bash
+
+**Auth:** RoleAdmin (session cookie + CSRF, or mTLS cert with admin role, or loopback bearer)
+**Content-Type:** `application/json` (required; enforced globally)
+**CSRF:** `X-CSRF-Token` header required for session-auth callers; exempt for mTLS and loopback
+**Idempotency-Key:** Not declared — shell commands are side-effecting by nature. Do NOT retry without human review.
+**Rate limit:** Inherits project default rate-limit class (no override).
+
+**Request body:**
+```json
+{ "command": "ls -la" }
+```
+- `command`: required; empty or whitespace-only → 400.
+- No other fields accepted (DisallowUnknownFields).
+
+**Response 200:**
+```json
+{
+  "stdout": "total 48\ndrwxr-xr-x  ...",
+  "stderr": "",
+  "exit_code": 0,
+  "truncated": false
+}
+```
+- `stdout`: captured standard output. Hard-truncated at 16384 bytes; truncation marker appended.
+- `stderr`: captured standard error. Hard-truncated at 16384 bytes; truncation marker appended.
+- `exit_code`: shell process exit code. `-1` means timeout or process-start failure.
+- `truncated`: `true` if either stdout or stderr was truncated.
+
+Execution: `sh -c <command>` with `Dir=WorkspaceRoot`. Timeout: 30 seconds.
+
+**Response 400:**
+```json
+{ "error": "command is required" }
+```
+
+**Response 403 (non-loopback, flag off):**
+```json
+{ "error": "bash is loopback-only; start with --console-allow-bash to enable over the network" }
+```
+
+**Response 403 (wrong role):**
+```json
+{ "error": "forbidden" }
+```
+
+### Daemon flag
+
+```
+yakos serve --console-allow-bash
+```
+
+When set alongside `--console-bind <non-loopback-addr>`, a WARNING banner is printed to stderr at startup:
+
+```
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  WARNING: --console-allow-bash is active on a networked console.
+  POST /api/console/bash executes arbitrary shell commands on this host.
+  Any operator with RoleAdmin can run arbitrary code via this endpoint.
+  Only enable this flag if you understand and accept the risk.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+```
+
+### Implementation files
+
+| File | Purpose |
+|---|---|
+| `cli-go/internal/consoleui/bash_handler.go` | Handler, loopback check, exec, truncation, audit |
+| `cli-go/internal/consoleui/server.go` | `AllowNetworkedBash` field in `Config`; route registration |
+| `cli-go/internal/serve/serve.go` | `ConsoleAllowBash` field in `Config`; WARNING banner |
+| `cli-go/cmd/yakos/main.go` | `--console-allow-bash` CLI flag in `runServe` |
+| `cli-go/internal/serve/export_test.go` | `BuildConsoleCfgForTest` wiring of `AllowNetworkedBash` |
+| `cli-go/internal/consoleui/bash_handler_test.go` | 10 tests covering all gate conditions |
+| `cli-go/internal/serve/bash_wiring_test.go` | 2 tests: wiring guard + default-false guard |

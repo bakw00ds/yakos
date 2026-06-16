@@ -235,6 +235,18 @@ type Config struct {
 	// serve.go constructs the State from <StateDir>/setup-token and passes it
 	// here; callers may inject a test State.
 	SetupToken *setuptoken.State
+
+	// AllowNetworkedBash, when true, permits POST /api/console/bash from
+	// non-loopback connections.  When false (default), that endpoint returns
+	// 403 for any request that does not originate from a loopback address.
+	//
+	// This flag is off by default because the bash endpoint is an intentional
+	// RCE surface.  Loopback connections are always permitted regardless of this
+	// flag (the loopback network boundary is already trusted).
+	//
+	// Activated by --console-allow-bash in runServe; serve.go prints a WARNING
+	// banner when this flag is set and the console is in networked mode.
+	AllowNetworkedBash bool
 }
 
 func (c *Config) addr() string {
@@ -901,6 +913,24 @@ func (s *Server) registerRoutes() {
 	// Used by the chat REPL "/" popover to present a filterable agent/command list.
 	// RoleRead: reading the catalog requires no elevated privilege.
 	s.mux.HandleFunc("/api/skills", requireRoleFunc(netid.RoleRead, s.skills.handleSkills))
+
+	// ---- Console bash pass-through (RoleAdmin; loopback or --console-allow-bash) -
+	// POST /api/console/bash — executes an arbitrary shell command (sh -c) and
+	// returns {stdout, stderr, exit_code, truncated}.
+	//
+	// Gating (in addition to requireRoleFunc(RoleAdmin)):
+	//   - Loopback connections: always permitted.
+	//   - Non-loopback connections: require Config.AllowNetworkedBash; else 403.
+	//
+	// CSRF + JSON-mutation gates are applied by the global middleware stack in
+	// New() (requireCSRFForSession + requireJSONForMutations). mTLS M2M clients
+	// (AuthMethodCert) are CSRF-exempt because they do not use session cookies;
+	// the CSRF middleware already handles this — no special case is needed here.
+	//
+	// Idempotency-Key: not declared — shell commands are inherently side-effecting
+	// and cannot be made retry-safe. Callers must not retry without human review.
+	bashH := newBashHandlers(s.cfg)
+	s.mux.HandleFunc("/api/console/bash", requireRoleFunc(netid.RoleAdmin, bashH.handleBash))
 }
 
 // handlePresence returns the current online operator presence snapshot as a

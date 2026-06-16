@@ -5584,6 +5584,7 @@ func runServe(yakosRoot string, args []string) {
 	noConsole := false
 	consoleBootstrapCertName := ""
 	noBootstrapCert := false
+	consoleAllowBash := false
 
 	// YAKOS_ROOT env override mirrors runValidate / runRefresh behavior:
 	// when the binary is not installed at <root>/bin/yakos (e.g. in tests or
@@ -5667,6 +5668,8 @@ func runServe(yakosRoot string, args []string) {
 			consoleBootstrapCertName = args[i]
 		case "--no-bootstrap-cert":
 			noBootstrapCert = true
+		case "--console-allow-bash":
+			consoleAllowBash = true
 		case "--detach":
 			detach = true
 		default:
@@ -5765,6 +5768,7 @@ func runServe(yakosRoot string, args []string) {
 		NoConsole:                noConsole,
 		ConsoleBootstrapCertName: consoleBootstrapCertName,
 		NoBootstrapCert:          noBootstrapCert,
+		ConsoleAllowBash:         consoleAllowBash,
 	}
 
 	wsBindAddr := wsAddr

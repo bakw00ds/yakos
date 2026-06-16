@@ -30,11 +30,12 @@ func BuildConsoleCfgForTest(cfg Config) consoleui.Config {
 		// PerfWorkDir mirrors the fix in Run(): points at the dispatch state dir
 		// (~/.yakos-state / $YAKOS_DISPATCH_LOG) so the Performance tab reads
 		// from the same location the daemon writes dispatch-log.ndjson.
-		PerfWorkDir:   perfStateDir,
-		WorkDir:       workDir,
-		StateDir:      cfg.consoleStateDir(),
-		WorkspaceRoot: cfg.WorkspaceRoot,
-		YakosRoot:     cfg.YakosRoot,
+		PerfWorkDir:        perfStateDir,
+		WorkDir:            workDir,
+		StateDir:           cfg.consoleStateDir(),
+		WorkspaceRoot:      cfg.WorkspaceRoot,
+		YakosRoot:          cfg.YakosRoot,
+		AllowNetworkedBash: cfg.ConsoleAllowBash,
 		// Bus, DispatchService, WorkflowEngine, Token omitted — not
 		// constructed by this helper (requires live services); the fields
 		// under test here are the static config derivations.
