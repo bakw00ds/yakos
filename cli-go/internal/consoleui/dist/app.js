@@ -385,6 +385,9 @@
     { id: 'users',     label: 'Users',        src: null,       phase: null, adminOnly: true },
   ];
 
+  // localStorage key for active-tab persistence across page refreshes.
+  var ACTIVE_TAB_LS_KEY = 'yakos_active_tab';
+
   let activeTab = 'overview';
   const loadedTabs = new Set();
 
@@ -424,6 +427,9 @@
   function switchTab(id) {
     if (id === activeTab) return;
     activeTab = id;
+
+    // Persist the selected tab so a page refresh restores the same view.
+    try { localStorage.setItem(ACTIVE_TAB_LS_KEY, id); } catch (_) {}
 
     document.querySelectorAll('.tab').forEach((el) => {
       el.classList.toggle('active', el.getAttribute('data-tab') === id);
@@ -491,6 +497,36 @@
     if (id === 'users') {
       initUsersTab();
     }
+  }
+
+  // restorePersistedTab — called once after /api/account resolves so that
+  // accountIdentity is populated before adminOnly tab visibility is checked.
+  //
+  // Validation rules (strict — user-controlled storage, keep it tight):
+  //   1. The stored id must be an exact-match entry in the TABS list.
+  //   2. If the tab has adminOnly:true, the user must currently be admin.
+  //      A stale 'users' id for a non-admin must fall back to 'overview'.
+  //   3. The tab must not be disabled.
+  // If any check fails the stored value is silently discarded and 'overview'
+  // remains active (already the default — no switchTab call needed).
+  function restorePersistedTab() {
+    var stored;
+    try { stored = localStorage.getItem(ACTIVE_TAB_LS_KEY); } catch (_) { return; }
+    if (!stored) return;
+
+    // Exact-match lookup — guards against arbitrary strings in localStorage.
+    var tab = null;
+    for (var i = 0; i < TABS.length; i++) {
+      if (TABS[i].id === stored) { tab = TABS[i]; break; }
+    }
+    if (!tab) return;                        // unknown / removed tab id
+    if (tab.disabled) return;                // tab not yet available
+    if (tab.adminOnly && !isAdmin()) return; // gated: user lacks admin role
+
+    // The stored tab is valid and accessible — restore it.
+    // switchTab is a no-op when id === activeTab, but activeTab starts as
+    // 'overview' so any non-overview stored value will trigger a real switch.
+    switchTab(stored);
   }
 
   // ---- 4. Overview state ------------------------------------------------------
@@ -6797,6 +6833,11 @@
       // Users tab appear for admins without requiring a page reload.
       renderTabs();
 
+      // Restore the previously active tab (persisted in localStorage).
+      // Called here — after accountIdentity is set and renderTabs() has run —
+      // so that adminOnly tab visibility is known before the restore check.
+      restorePersistedTab();
+
       // Wire Users panel action buttons now that the panel is in the DOM.
       wireUsersPanelButtons();
     }).catch(function() {
@@ -6813,6 +6854,9 @@
         }
       }
       // Tab bar already rendered without Users tab (accountIdentity is null).
+      // Still attempt to restore a non-adminOnly tab — restorePersistedTab
+      // guards against adminOnly tabs when isAdmin() returns false.
+      restorePersistedTab();
     });
 
     // Wire filter inputs.
