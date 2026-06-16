@@ -105,8 +105,13 @@ func newBashHandlers(cfg Config) *bashHandlers {
 //     requires h.allowNetworkedBash, else 403.
 //  3. Body decode — empty or missing command → 400.
 //  4. Exec — sh -c <command> with 30-second timeout, Dir=workspaceRoot.
+//     Uses Start + defer killProcessGroup + Wait (not Run) so that the
+//     entire process group is unconditionally reaped on return, covering
+//     grandchildren backgrounded by sh ("cmd &") that exit sh before the
+//     30 s context fires.
 //  5. Truncate — stdout and stderr each capped at bashOutputMaxBytes.
-//  6. Audit — slog.Warn with operatorID, command, exit_code.
+//  6. Audit — slog.Warn with operatorID, command, exit_code, remote_addr,
+//     auth_method.
 //  7. Respond — 200 with bashResponseDTO.
 //
 // Role gating (RoleAdmin) is applied via requireRoleFunc in registerRoutes;
@@ -157,28 +162,46 @@ func (h *bashHandlers) handleBash(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Place the child in its own process group (no-op on Windows) so that
-	// backgrounded grandchildren ("sleep 60 &") are included in the kill
-	// when the context deadline fires.
+	// the whole group can be reaped atomically — both the sh wrapper and
+	// any grandchildren it backgrounds ("sleep 60 &").
 	configureProcAttr(shCmd)
 
-	// Cmd.Cancel is called by exec.Cmd when ctx is cancelled/timed-out.
-	// Killing the whole process group ensures grandchildren do not hold
-	// stdout/stderr open, which would cause Run() to block indefinitely.
-	shCmd.Cancel = func() error {
-		killProcessGroup(shCmd)
-		return nil
-	}
-
-	// WaitDelay gives the process group 2 seconds to flush output after
-	// Cancel fires before Run() forcibly unblocks.  This bounds the
-	// worst-case handler duration to bashExecTimeout + WaitDelay.
+	// WaitDelay bounds the post-exit pipe-drain wait: if any fd-holder
+	// (grandchild) is still open when ctx fires, exec.Cmd unblocks after
+	// WaitDelay rather than hanging forever.
 	shCmd.WaitDelay = 2 * time.Second
 
 	var stdoutBuf, stderrBuf strings.Builder
 	shCmd.Stdout = &stdoutBuf
 	shCmd.Stderr = &stderrBuf
 
-	runErr := shCmd.Run()
+	// Use Start + defer killProcessGroup + Wait instead of Run() so that
+	// the entire process group is unconditionally reaped when the handler
+	// returns — regardless of whether ctx was ever cancelled.
+	//
+	// Why not Cmd.Cancel alone? For "sleep 60 &", sh backgrounds the child
+	// and exits 0 immediately (in < 1 s). The 30 s ctx is never cancelled,
+	// so Cmd.Cancel never fires and the grandchild leaks as a live orphan
+	// on every request. The defer here closes that gap.
+	//
+	// The combination:
+	//   • foreground commands: killed at the 30 s deadline by
+	//     exec.CommandContext + the WaitDelay drain.
+	//   • backgrounded grandchildren: reaped unconditionally by the defer
+	//     once Wait returns (sh already exited; grandchild is still alive).
+	//
+	// On Windows killProcessGroup is best-effort (kills the direct child
+	// only; no pgid primitive); the Windows limitation is documented in
+	// bash_exec_windows.go.
+	if startErr := shCmd.Start(); startErr != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"failed to start command"}`))
+		return
+	}
+	defer killProcessGroup(shCmd)
+
+	runErr := shCmd.Wait()
 
 	exitCode := 0
 	if runErr != nil {

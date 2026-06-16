@@ -18,12 +18,12 @@ func configureProcAttr(_ *exec.Cmd) {}
 
 // killProcessGroup kills the direct child process on Windows.
 //
-// There is no cross-process-group kill primitive in the standard library
-// that is safe to use here without a Job Object; using a Job Object would
-// require elevated privileges and a significant increase in platform-split
-// complexity that is out of scope.  The direct-child kill covers the
-// common case (the sh wrapper itself) and is sufficient for correctness
-// on Windows.
+// Called unconditionally via defer in handleBash after shCmd.Wait() returns.
+// On Windows there is no POSIX-style process-group kill; backgrounded
+// grandchildren ("cmd &") may survive as orphans after this call. Proper
+// group reaping would require a Windows Job Object (elevated privileges,
+// significantly more complexity) — that is out of scope. This best-effort
+// kill covers the common case: the sh wrapper itself.
 func killProcessGroup(cmd *exec.Cmd) {
 	if cmd.Process == nil {
 		return

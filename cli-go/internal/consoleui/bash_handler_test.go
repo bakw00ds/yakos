@@ -557,20 +557,14 @@ func TestBashHandler_ExitCode_NonZero(t *testing.T) {
 
 // ---- Test 11: backgrounded grandchild does not cause handler to hang --------
 //
-// Regression test for CRITICAL-2: without process-group kill, a command that
-// backgrounds a grandchild ("sleep 60 &") would cause exec.Cmd.Run() to
-// block until the grandchild closed stdout/stderr, defeating the 30-second
-// bashExecTimeout.
+// Timing guard for CRITICAL-2: "sleep 60 &" must not block the handler past
+// a short wall-clock budget. The authoritative no-survivor assertion (checking
+// the process group is dead via syscall.Kill) lives in
+// bash_orphan_unix_test.go (POSIX-only). This test is cross-platform and
+// verifies only liveness (handler returns promptly).
 //
-// Strategy: run a 2-second timeout (via a short-lived context) and issue
-// "sleep 60 &" as the command. The handler must return well before 60 seconds.
-// We use a test timeout of 15 seconds — generous enough to absorb CI jitter
-// but tight enough to catch a hang.
-//
-// NOTE: On Windows, the no-op configureProcAttr means grandchildren may
-// survive; this test is not expected to exercise the group-kill path there.
-// The test still passes on Windows because "sleep" is not a built-in sh
-// command and the command itself may fail; exit_code -1 or 127 is acceptable.
+// NOTE: On Windows, configureProcAttr is a no-op and "sleep" may not exist;
+// the test accepts any 200 or error response as long as it arrives quickly.
 
 func TestBashHandler_BackgroundedGrandchild_DoesNotHang(t *testing.T) {
 	t.Parallel()
@@ -587,38 +581,34 @@ func TestBashHandler_BackgroundedGrandchild_DoesNotHang(t *testing.T) {
 	bus := wsbus.New()
 	t.Cleanup(bus.Stop)
 	srv := consoleui.MustNew(t, consoleui.Config{
-		Token:           tok,
-		KanbanBoardPath: t.TempDir() + "/kanban.md",
-		KanbanProject:   "test",
+		Token:             tok,
+		KanbanBoardPath:   t.TempDir() + "/kanban.md",
+		KanbanProject:     "test",
 		MetricsProjectDir: t.TempDir(),
-		PerfWorkDir:     t.TempDir(),
-		Bus:             bus,
+		PerfWorkDir:       t.TempDir(),
+		Bus:               bus,
 	})
 
 	handler := consoleui.RequireTokenForNonStatic(tok,
 		consoleui.RequireJSONForMutations(
 			injectIdentityMiddleware(adminID, srv.Handler())))
 
-	// "sleep 60 &" backgrounds a grandchild that would keep stdout/stderr
-	// open without process-group kill, blocking Run() past bashExecTimeout.
-	// We verify the handler completes well within 15 seconds.
+	// "sleep 60 &": sh backgrounds the grandchild and exits 0 immediately.
+	// Without defer killProcessGroup the grandchild keeps stdout/stderr open
+	// and Wait() would block indefinitely. The handler must return promptly.
 	start := time.Now()
 	rr := bashPost(t, handler, tok, "sleep 60 &", "127.0.0.1:1234")
 	elapsed := time.Since(start)
 
-	// 200 or a timeout response (exit_code -1) are both acceptable outcomes;
-	// what matters is that the handler did NOT block for 60 seconds.
 	const maxAllowedDuration = 15 * time.Second
 	if elapsed >= maxAllowedDuration {
 		t.Errorf("handler took %v; want < %v — likely blocked on grandchild stdout/stderr", elapsed, maxAllowedDuration)
 	}
 
-	// If we got a 200, decode and accept any exit code (0 or -1 for timeout).
 	if rr.Code == http.StatusOK {
 		_, _, exitCode, _ := decodeBashResp(t, rr.Body.String())
 		if exitCode != 0 && exitCode != -1 {
-			// exit code from the sh wrapper itself (not the grandchild) — valid
-			t.Logf("exit_code=%d (non-zero but acceptable; grandchild may have been reaped)", exitCode)
+			t.Logf("exit_code=%d (acceptable; sh may have exited non-zero after group kill)", exitCode)
 		}
 	}
 }
