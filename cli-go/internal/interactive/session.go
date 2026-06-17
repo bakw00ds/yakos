@@ -286,10 +286,17 @@ func (s *Session) SendUserTurn(frame []byte) error {
 	}
 }
 
+// AnswerQuestion is not supported by the CLI engine.  It always returns
+// ErrAnswerUnsupported.  The SDK engine (P2b) will override this to deliver
+// operator answers back to the model for AskUserQuestion tool calls.
+func (s *Session) AnswerQuestion(_ string, _ QuestionAnswer) error {
+	return ErrAnswerUnsupported
+}
+
 // Close shuts down the session: closes stdin (clean exit signal to the claude
 // CLI), kills the process group (to reap any grandchildren), and waits for the
-// process to exit.  Idempotent — safe to call multiple times.
-func (s *Session) Close() {
+// process to exit.  Idempotent — safe to call multiple times.  Returns nil.
+func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		stdin := s.stdin
@@ -312,6 +319,7 @@ func (s *Session) Close() {
 		close(s.closed)
 		slog.Debug("interactive: session closed", "conversationID", s.conversationID)
 	})
+	return nil
 }
 
 // ErrTurnInFlight is returned by SendUserTurn when another turn is already in

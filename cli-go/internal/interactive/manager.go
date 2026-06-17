@@ -66,9 +66,9 @@ var ErrNoSession = errors.New("interactive: no live session for this conversatio
 // The caller must return 429.
 var ErrCapExceeded = errors.New("interactive: session cap exceeded")
 
-// managerEntry holds one live session and its associated metadata.
+// managerEntry holds one live engine (session) and its associated metadata.
 type managerEntry struct {
-	session *Session
+	session Engine
 }
 
 // Manager manages the lifecycle of persistent interactive sessions.
@@ -146,30 +146,31 @@ func (m *Manager) Stop() {
 	m.stopOnce.Do(func() { close(m.stop) })
 }
 
-// Ensure returns (or creates) the live session for conversationID.
+// Ensure returns (or creates) the live engine for conversationID.
 //
-// If no session exists, a new Session is created and started.
-// If a session exists and ownerOperatorID matches, the existing session is
-// returned.  If a session exists but is owned by a different operator, returns
+// If no engine exists, a new Session (CLI engine) is created and started.
+// If an engine exists and ownerOperatorID matches, the existing engine is
+// returned.  If an engine exists but is owned by a different operator, returns
 // ErrOwnerConflict.
 //
-// params.CmdProvider is used to build the exec.Cmd.  For production callers,
-// pass a closure over runtime.InteractiveExecCmd.  For tests, inject a fake.
+// params.CmdProvider is used to build the exec.Cmd for the CLI engine.  For
+// production callers, pass a closure over runtime.InteractiveExecCmd.  For
+// tests, inject a fake.
 //
 // Note: params.ConversationID and params.OwnerOperatorID are always overwritten
 // by the conversationID and ownerOperatorID arguments; values set in params for
 // those fields are ignored.
-func (m *Manager) Ensure(conversationID, ownerOperatorID string, params SessionParams) (*Session, error) {
+func (m *Manager) Ensure(conversationID, ownerOperatorID string, params SessionParams) (Engine, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if entry, ok := m.entries[conversationID]; ok {
-		// Session exists.
-		if entry.session.ownerOperatorID != ownerOperatorID {
+		// Engine exists.
+		if entry.session.OwnerOperatorID() != ownerOperatorID {
 			return nil, ErrOwnerConflict
 		}
 		if entry.session.IsClosed() {
-			// Session was closed (crash or idle timeout): remove and recreate below.
+			// Engine was closed (crash or idle timeout): remove and recreate below.
 			delete(m.entries, conversationID)
 		} else {
 			return entry.session, nil
@@ -185,14 +186,13 @@ func (m *Manager) Ensure(conversationID, ownerOperatorID string, params SessionP
 	params.ConversationID = conversationID
 	params.OwnerOperatorID = ownerOperatorID
 
-	// Wrap onChunk to detect readLoop exit via a crash-detection goroutine.
-	// We will start the session below; the crash-detection goroutine waits for
-	// the session's closed channel and then calls markDead.
+	// Construct the CLI engine.  The crash-detection goroutine below waits for
+	// the engine's Closed() channel and calls the OnError callback.
 	sess := NewSession(params)
 
 	// Start the process in a background goroutine-compatible context.
-	// We pass context.Background() here because the session outlives the HTTP
-	// request context.  The session's own closed channel and Close() handle
+	// We pass context.Background() here because the engine outlives the HTTP
+	// request context.  The engine's own Closed() channel and Close() handle
 	// lifetime management.
 	if err := sess.Start(context.Background()); err != nil {
 		return nil, fmt.Errorf("interactive: start session: %w", err)
@@ -200,10 +200,10 @@ func (m *Manager) Ensure(conversationID, ownerOperatorID string, params SessionP
 
 	m.entries[conversationID] = &managerEntry{session: sess}
 
-	// Crash-detection goroutine: waits for the session's closed channel.
+	// Crash-detection goroutine: waits for the engine's Closed() channel.
 	// When it fires, removes the entry and emits an error SSE event.
 	go func() {
-		<-sess.closed
+		<-sess.Closed()
 
 		m.mu.Lock()
 		_, stillPresent := m.entries[conversationID]
@@ -244,7 +244,7 @@ func (m *Manager) Send(conversationID, ownerOperatorID string, frame []byte) err
 		return ErrNoSession
 	}
 
-	if entry.session.ownerOperatorID != ownerOperatorID {
+	if entry.session.OwnerOperatorID() != ownerOperatorID {
 		return ErrOwnerConflict
 	}
 
@@ -269,7 +269,7 @@ func (m *Manager) Close(conversationID string) {
 	m.mu.Unlock()
 
 	if ok {
-		entry.session.Close()
+		_ = entry.session.Close()
 	}
 }
 
@@ -304,13 +304,13 @@ func (m *Manager) reapOnce() {
 	m.mu.Lock()
 	var stale []struct {
 		convID string
-		sess   *Session
+		sess   Engine
 	}
 	for convID, e := range m.entries {
 		if e.session.LastActivity().Before(cutoff) {
 			stale = append(stale, struct {
 				convID string
-				sess   *Session
+				sess   Engine
 			}{convID, e.session})
 			delete(m.entries, convID)
 		}
@@ -322,6 +322,6 @@ func (m *Manager) reapOnce() {
 			"conversationID", s.convID,
 			"idle_since", s.sess.LastActivity(),
 		)
-		s.sess.Close()
+		_ = s.sess.Close()
 	}
 }
