@@ -7,9 +7,13 @@
 //	POST /api/chat/cancel    — cancel an in-flight dispatch
 //	GET  /api/chat/transcript — fetch persisted transcript for a conversationId
 //
+// Interactive-P1 additions:
+//
+//	POST /api/chat/send      — deliver a follow-up turn into a running interactive session
+//
 // # Auth
 //
-// All four endpoints are mounted under the console edge auth
+// All endpoints are mounted under the console edge auth
 // (requireTokenForNonStatic + RequireLocalHost).  The edge layer enforces the
 // Authorization: Bearer <token> header before these handlers are reached.
 // No re-check inside handlers — that is middleware's job.
@@ -48,6 +52,13 @@
 //
 // POST /api/chat/cancel is idempotent (cancelling an already-cancelled or
 // non-existent session is a no-op returning 200).
+//
+// POST /api/chat/send (interactive path):
+//   - Non-idempotent (each call delivers a new turn).
+//   - No Idempotency-Key declared: same reasoning as /api/chat/dispatch.
+//   - Rate-limit class: inherits the project default.
+//   - Owner-scoped: only the session owner may send turns; watchers (RoleRead)
+//     may subscribe to the SSE stream but cannot drive the session.
 package consoleui
 
 import (
@@ -57,11 +68,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/interactive"
 	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/worktreemgr"
@@ -128,6 +142,25 @@ type chatHandlers struct {
 	// worktreeMgr is wired by New() when Config.WorktreeManager is non-nil.
 	// Used to provision per-session worktrees when WorktreeMode is true in a dispatch request.
 	worktreeMgr *worktreemgr.Manager
+	// interactiveMgr manages persistent multi-turn claude sessions (Interactive-P1).
+	// Nil when interactive mode is not enabled (feature gate).
+	// Wired by New() from Config.InteractiveManager.
+	interactiveMgr *interactive.Manager
+
+	// interactiveSend is the narrower interface used by handleChatSend for the
+	// Send operation.  Normally wired to interactiveMgr (same pointer); tests may
+	// substitute a stub to inject specific error returns (e.g. ErrTurnInFlight)
+	// without needing a real subprocess.
+	// Nil check guards are NOT required here: handleChatSend guards on
+	// interactiveMgr != nil first and only reaches interactiveSend when that
+	// guard passes, so interactiveSend is always non-nil when used.
+	interactiveSend interactiveSender
+}
+
+// interactiveSender is the minimal interface covering the Send method consumed
+// by handleChatSend.  *interactive.Manager satisfies it; tests can stub it.
+type interactiveSender interface {
+	Send(conversationID, ownerOperatorID string, frame []byte) error
 }
 
 // newChatHandlers is called from registerChatRoutes.
@@ -292,6 +325,16 @@ type DispatchRequest struct {
 	// SERVER-SIDE ONLY: the resulting WorkDirOverride is set from the manager
 	// path, never from the client body.
 	WorktreeMode bool `json:"worktreeMode"`
+	// Interactive opts into the persistent multi-turn session regime (Interactive-P1).
+	// When true, the first turn starts a long-running claude process keyed by
+	// conversationId; subsequent turns are delivered via POST /api/chat/send.
+	// When false (default), the existing one-shot RunStream path is used — zero
+	// regression on existing clients.
+	//
+	// Security note: Interactive mode does not accept project/cwd from the client.
+	// The project is pinned server-side identically to the one-shot path.
+	// --permission-mode bypassPermissions matches the existing chat dispatch posture.
+	Interactive bool `json:"interactive"`
 }
 
 // DispatchResponse is the JSON body returned by POST /api/chat/dispatch.
@@ -731,6 +774,97 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			ch.hub.Route(ev)
 		}
 
+		// Interactive-P1: when interactive=true and an interactiveMgr is configured,
+		// route through the persistent session instead of RunStream.
+		//
+		// This goroutine stays alive (blocking on sess.Closed()) so that the
+		// deferred hub.CloseSession only fires when the interactive session itself
+		// exits.  This keeps the hub session entry live for the duration, allowing
+		// subsequent turns (via /api/chat/send) and SSE routing to work correctly.
+		if dispReq.Interactive && ch.interactiveMgr != nil {
+			// Resolve the project pin server-side (mirrors the one-shot path).
+			project := ch.workspaceRoot
+			if capturedWorktreeOverride != "" {
+				project = capturedWorktreeOverride
+			}
+
+			// Resolve the agent system prompt from the roster (same as RunStream).
+			capturedModel := modelName
+			capturedEffort := dispReq.Effort
+			capturedPrompt := resolveAgentSystemPrompt(ch.yakosRoot, project, dispReq.Agent)
+
+			// onChunk fans out to the hub and accumulates transcript text.
+			// Same contract as the one-shot onChunk (called from readLoop goroutine).
+			sessParams := interactive.SessionParams{
+				ConversationID:  conversationID,
+				OwnerOperatorID: capturedOperatorID,
+				OnChunk:         onChunk,
+				CmdProvider: func() *exec.Cmd {
+					return runtime.InteractiveExecCmd(project, capturedPrompt, capturedModel, capturedEffort)
+				},
+			}
+
+			// Ensure the session exists (create if new, return existing if same owner).
+			sess, ensureErr := ch.interactiveMgr.Ensure(conversationID, capturedOperatorID, sessParams)
+			if ensureErr != nil {
+				exitStatus = dispatch.StatusFailed
+				exitCode = -1
+				errText := fmt.Sprintf("interactive: start failed: %s", ensureErr.Error())
+				_ = ch.transcripts.Append(TranscriptEntry{
+					SessionID:      dispReq.SessionID,
+					ConversationID: conversationID,
+					OperatorID:     capturedOperatorID,
+					Role:           RoleError,
+					Text:           errText,
+				})
+				ch.hub.Route(SSEEvent{
+					SessionID:      dispReq.SessionID,
+					ConversationID: conversationID,
+					Type:           "error",
+					Text:           errText,
+					TS:             time.Now().UTC().Format(time.RFC3339Nano),
+				})
+				sharedAtFinish = ch.hub.IsShared(dispReq.SessionID)
+				return
+			}
+
+			// Deliver the first turn.
+			frame := runtime.EncodeUserTurn(dispReq.Task)
+			if sendErr := ch.interactiveMgr.Send(conversationID, capturedOperatorID, frame); sendErr != nil {
+				exitStatus = dispatch.StatusFailed
+				exitCode = -1
+				errText := fmt.Sprintf("interactive: send failed: %s", sendErr.Error())
+				_ = ch.transcripts.Append(TranscriptEntry{
+					SessionID:      dispReq.SessionID,
+					ConversationID: conversationID,
+					OperatorID:     capturedOperatorID,
+					Role:           RoleError,
+					Text:           errText,
+				})
+				ch.hub.Route(SSEEvent{
+					SessionID:      dispReq.SessionID,
+					ConversationID: conversationID,
+					Type:           "error",
+					Text:           errText,
+					TS:             time.Now().UTC().Format(time.RFC3339Nano),
+				})
+				// Don't return: the session is alive; let it run until closed.
+			}
+
+			// Wait for the interactive session to close (crash, idle reap, or cancel).
+			// The deferred hub.CloseSession fires when we return, keeping the hub
+			// entry live for the entire interactive session lifetime.
+			select {
+			case <-sess.Closed():
+			case <-ctx.Done():
+				// Server shutdown or cancel: close the session gracefully.
+				ch.interactiveMgr.Close(conversationID)
+			}
+
+			sharedAtFinish = ch.hub.IsShared(dispReq.SessionID)
+			return
+		}
+
 		params := dispatch.Params{
 			Agent:          dispReq.Agent,
 			Task:           dispReq.Task,
@@ -1078,6 +1212,130 @@ func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// ---- POST /api/chat/send ---------------------------------------------------
+
+// SendRequest is the JSON body for POST /api/chat/send.
+//
+// Delivers a follow-up user turn into an existing interactive session.
+// The session must have been started with interactive:true in
+// POST /api/chat/dispatch.
+//
+// Security:
+//   - operatorId is resolved from the cert CN (mTLS) or from the body
+//     (cooperative-label path), same as /api/chat/dispatch.
+//   - Only the session owner may send turns.  Non-owners receive 403.
+//   - sessionId and conversationId are validated by ValidateIdentityField.
+//   - text is validated for size (dispatch.MaxTaskBytes; 1 MB); oversized
+//     text is rejected with 400 before any stdin write is attempted.
+//     Content is not otherwise validated — the claude process handles it.
+type SendRequest struct {
+	ConversationID string `json:"conversationId"`
+	OperatorID     string `json:"operatorId"`
+	SessionID      string `json:"sessionId"`
+	Text           string `json:"text"`
+}
+
+// handleChatSend delivers a follow-up turn to an existing interactive session.
+//
+// Response codes:
+//   - 202 Accepted: turn delivered.
+//   - 400 Bad Request: missing/invalid fields.
+//   - 403 Forbidden: caller is not the session owner.
+//   - 404 Not Found: no live interactive session for this conversationId.
+//   - 409 Conflict: a turn is already in flight on this session.
+//   - 503 Service Unavailable: interactive mode not configured.
+func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if ch.interactiveMgr == nil {
+		http.Error(w, "interactive mode not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req SendRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if strings.TrimSpace(req.ConversationID) == "" {
+		http.Error(w, "conversationId is required", http.StatusBadRequest)
+		return
+	}
+	if err := dispatch.ValidateIdentityField("conversation_id", req.ConversationID); err != nil {
+		http.Error(w, "invalid conversationId", http.StatusBadRequest)
+		return
+	}
+
+	if strings.TrimSpace(req.Text) == "" {
+		http.Error(w, "text is required", http.StatusBadRequest)
+		return
+	}
+	if len(req.Text) > dispatch.MaxTaskBytes {
+		http.Error(w, fmt.Sprintf("text exceeds maximum size (%d bytes; limit %d)", len(req.Text), dispatch.MaxTaskBytes), http.StatusBadRequest)
+		return
+	}
+
+	// sessionId is optional but validated when present.
+	if req.SessionID != "" {
+		if err := dispatch.ValidateIdentityField("session_id", req.SessionID); err != nil {
+			http.Error(w, "invalid sessionId", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// C1 dual-regime operator_id (identical to dispatch handler).
+	capturedIdentity := netid.IdentityFrom(r.Context())
+	var effectiveOperatorID string
+	if capturedIdentity.Authenticated {
+		effectiveOperatorID = capturedIdentity.OperatorID
+	} else {
+		if strings.TrimSpace(req.OperatorID) == "" {
+			http.Error(w, "operatorId is required", http.StatusBadRequest)
+			return
+		}
+		if err := dispatch.ValidateIdentityField("operator_id", req.OperatorID); err != nil {
+			http.Error(w, "invalid operatorId", http.StatusBadRequest)
+			return
+		}
+		effectiveOperatorID = req.OperatorID
+	}
+
+	frame := runtime.EncodeUserTurn(req.Text)
+	err := ch.interactiveSend.Send(req.ConversationID, effectiveOperatorID, frame)
+	if err != nil {
+		switch {
+		case errors.Is(err, interactive.ErrNoSession):
+			http.Error(w, "no live session for this conversationId", http.StatusNotFound)
+		case errors.Is(err, interactive.ErrOwnerConflict):
+			http.Error(w, "forbidden: session owned by different operator", http.StatusForbidden)
+		case errors.Is(err, interactive.ErrTurnInFlight):
+			http.Error(w, "turn already in flight on this session", http.StatusConflict)
+		default:
+			slog.Error("consoleui: interactive send error", "conversationID", req.ConversationID, "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Append the user turn to the transcript only after successful delivery —
+	// orphaned entries (from failed sends) would have no corresponding response.
+	_ = ch.transcripts.Append(TranscriptEntry{
+		SessionID:      req.SessionID,
+		ConversationID: req.ConversationID,
+		OperatorID:     effectiveOperatorID,
+		Role:           RoleUser,
+		Text:           req.Text,
+	})
+
+	w.WriteHeader(http.StatusAccepted)
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 // isKnownRuntime reports whether name is a registered runtime.
@@ -1088,4 +1346,26 @@ func isKnownRuntime(name string) bool {
 		}
 	}
 	return false
+}
+
+// resolveAgentSystemPrompt resolves the agent's system prompt body by composing
+// the roster.  Returns "" on any error (graceful degradation: the session
+// starts without an agent persona rather than failing hard).
+//
+// Mirrors the agent resolution done inside Service.RunStream.
+func resolveAgentSystemPrompt(yakosRoot, project, agentName string) string {
+	if yakosRoot == "" || project == "" || agentName == "" {
+		return ""
+	}
+	roster, err := agentscompose.Compose(yakosRoot, project)
+	if err != nil {
+		slog.Warn("consoleui: interactive: compose roster failed", "err", err)
+		return ""
+	}
+	for _, a := range roster {
+		if a.ID == agentName {
+			return a.Prompt
+		}
+	}
+	return ""
 }
