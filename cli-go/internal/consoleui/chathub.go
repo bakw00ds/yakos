@@ -147,7 +147,9 @@ type SSEEvent struct {
 
 	// AskQuestionsJSON is the JSON-encoded questions array from an
 	// ask_user_question event (Type=="ask_user_question" only).
-	// Shape: [{"text":"...","options":[...],"multiSelect":bool}].
+	// Shape: [{"question":"...","header":"...","options":[{"label":"...","description":"..."}],"multiSelect":bool}].
+	// This is the verbatim native Claude AskUserQuestion tool input shape passed
+	// through unchanged by the sidecar and sdk_engine.
 	// Delivered OWNER-PRIVATE (same rule as AskToolUseID).
 	AskQuestionsJSON string `json:"ask_questions_json,omitempty"`
 
