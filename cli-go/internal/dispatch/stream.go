@@ -87,12 +87,24 @@ const toolInputTruncationMarker = "\n[...tool input truncated...]"
 // StreamChunk is one incremental unit of streaming output.
 type StreamChunk struct {
 	// Type is "token" for incremental text, "summary" for the terminal record,
-	// "tool_use" when the agent invoked a tool, or "tool_result" when the tool
-	// returned a result.
+	// "tool_use" when the agent invoked a tool, "tool_result" when the tool
+	// returned a result, or "thinking" for an incremental extended-thinking delta.
 	Type string
 
 	// Text holds the token text (Type=="token") or the full result text (Type=="summary").
 	Text string
+
+	// Thinking holds an incremental thinking delta (Type=="thinking").
+	// It is bounded at maxThinkingChunkBytes per chunk.
+	Thinking string
+
+	// ThinkingTruncated is true when the Thinking text was cut at the cap
+	// (Type=="thinking" only).
+	ThinkingTruncated bool
+
+	// ThinkingRedacted is true when this chunk represents a redacted_thinking
+	// block whose content cannot be surfaced (Type=="thinking" only).
+	ThinkingRedacted bool
 
 	// ToolName is the human-readable tool name (Type=="tool_use" or "tool_result").
 	// Examples: "Bash", "Read", "Write".
@@ -344,15 +356,16 @@ func execWithStreaming(
 	cp, hasChatCmd := adapter.(chatCmdProvider)
 
 	var (
-		allText       []byte
-		exitCode      int
-		execErr       error
-		stderrBuf     bytes.Buffer
-		costUSD       float64
-		usageCost     *cost.Usage
-		textBlocks    = make(map[int]struct{})
-		toolUseBlocks = make(map[int]*runtime.ToolEvent) // index → in-progress tool_use
-		toolIDToName  = make(map[string]string)           // tool-use id → name for tool_result correlation
+		allText        []byte
+		exitCode       int
+		execErr        error
+		stderrBuf      bytes.Buffer
+		costUSD        float64
+		usageCost      *cost.Usage
+		textBlocks     = make(map[int]struct{})
+		toolUseBlocks  = make(map[int]*runtime.ToolEvent)          // index → in-progress tool_use
+		toolIDToName   = make(map[string]string)                    // tool-use id → name for tool_result correlation
+		thinkingBlocks = make(map[int]*runtime.ThinkingBlockEntry) // index → in-progress thinking block
 	)
 
 	if hasChatCmd {
@@ -450,7 +463,7 @@ func execWithStreaming(
 								line := bytes.TrimRight(lineBuf, "\r")
 								if len(line) > 0 {
 									if isClaudeRuntime {
-										tok, isResult, lineCost, lineUsage, toolEv := runtime.ParseStreamLineWithTools(line, textBlocks, toolUseBlocks, toolIDToName)
+										tok, isResult, lineCost, lineUsage, toolEv, thinkEv := runtime.ParseStreamLineWithThinking(line, textBlocks, toolUseBlocks, toolIDToName, thinkingBlocks)
 										if tok != "" {
 											allText = append(allText, tok...)
 											onChunk(StreamChunk{Type: "token", Text: tok})
@@ -461,6 +474,9 @@ func execWithStreaming(
 										}
 										if toolEv != nil {
 											emitToolChunk(toolEv, onChunk)
+										}
+										if thinkEv != nil {
+											emitThinkingChunk(thinkEv, onChunk)
 										}
 									} else {
 										// Buffered path: accumulate with ceiling check.
@@ -498,7 +514,7 @@ func execWithStreaming(
 			line := bytes.TrimRight(lineBuf, "\r")
 			if len(line) > 0 {
 				if isClaudeRuntime {
-					tok, isResult, lineCost, lineUsage, toolEv := runtime.ParseStreamLineWithTools(line, textBlocks, toolUseBlocks, toolIDToName)
+					tok, isResult, lineCost, lineUsage, toolEv, thinkEv := runtime.ParseStreamLineWithThinking(line, textBlocks, toolUseBlocks, toolIDToName, thinkingBlocks)
 					if tok != "" {
 						allText = append(allText, tok...)
 						onChunk(StreamChunk{Type: "token", Text: tok})
@@ -509,6 +525,9 @@ func execWithStreaming(
 					}
 					if toolEv != nil {
 						emitToolChunk(toolEv, onChunk)
+					}
+					if thinkEv != nil {
+						emitThinkingChunk(thinkEv, onChunk)
 					}
 				} else if !bufferedOutputTruncated {
 					allText = append(allText, line...)
@@ -629,6 +648,22 @@ func emitToolChunk(te *runtime.ToolEvent, onChunk func(StreamChunk)) {
 			IsError:    te.IsError,
 		})
 	}
+}
+
+// emitThinkingChunk translates a runtime.ThinkingEvent into a StreamChunk and
+// calls onChunk.  The thinking text is bounded at maxThinkingChunkBytes per
+// chunk on a rune boundary; ThinkingTruncated is set on the emitted chunk when
+// the delta itself was capped by the parser (runtime.ThinkingEvent.Truncated).
+//
+// redacted_thinking blocks have ThinkingRedacted=true and a fixed placeholder
+// text — no rune-boundary truncation is needed.
+func emitThinkingChunk(te *runtime.ThinkingEvent, onChunk func(StreamChunk)) {
+	onChunk(StreamChunk{
+		Type:              "thinking",
+		Thinking:          te.Text,
+		ThinkingTruncated: te.Truncated,
+		ThinkingRedacted:  te.Redacted,
+	})
 }
 
 // truncateAtRuneBoundary truncates s to at most maxBytes bytes, finding the

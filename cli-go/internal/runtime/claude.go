@@ -25,6 +25,22 @@ const maxToolInputBytes = 16 * 1024
 // cannot drive unbounded map growth.
 const maxToolUseBlocks = 1024
 
+// maxThinkingBytes is the hard cap on accumulated thinking text per block.
+// Extended thinking content can be very large; bounding it keeps SSE frames
+// manageable and prevents a hostile (or runaway) stream from exhausting heap.
+// 64 KiB is generous for a visible thinking snippet while staying well under
+// typical reverse-proxy SSE frame limits.
+const maxThinkingBytes = 64 * 1024
+
+// thinkingTruncationMarker is appended when accumulated thinking text is cut at
+// maxThinkingBytes.
+const thinkingTruncationMarker = "\n[...thinking truncated...]"
+
+// redactedThinkingPlaceholder is emitted in place of a redacted_thinking block.
+// The block carries no readable text; the placeholder lets the UI show that
+// thinking occurred without silently discarding the block.
+const redactedThinkingPlaceholder = "[redacted thinking]"
+
 // maxToolIDToName is the maximum number of entries kept in the toolIDToName
 // correlation map.  New id→name registrations beyond this cap are silently
 // dropped; the tool_result name will resolve to "" rather than crashing.
@@ -213,8 +229,35 @@ func ParseStreamLine(line []byte, textBlocks map[int]struct{}) (text string, isR
 	return tok, isRes, usd
 }
 
+// ThinkingEvent carries an incremental thinking delta or a redacted-thinking
+// placeholder from the claude stream.
+//
+// For a "thinking" content block:
+//   - Text holds the accumulated thinking delta text (non-empty, may be capped
+//     at maxThinkingBytes; Truncated is set if so).
+//   - Redacted is false.
+//
+// For a "redacted_thinking" content block:
+//   - Text is redactedThinkingPlaceholder.
+//   - Redacted is true.
+type ThinkingEvent struct {
+	Text      string // delta text or placeholder
+	Truncated bool   // true when Text was capped at maxThinkingBytes
+	Redacted  bool   // true for redacted_thinking blocks
+}
+
+// ThinkingBlockEntry tracks state for one in-progress thinking content block.
+// It is allocated by the caller and passed to ParseStreamLineWithThinking across
+// calls for the same stream (parallel to toolUseBlocks and textBlocks).
+// Callers should treat the fields as opaque; the runtime package manages them.
+type ThinkingBlockEntry struct {
+	accumulated string
+	truncated   bool
+	redacted    bool
+}
+
 // ParseStreamLineWithTools is the full-fidelity variant of ParseStreamLineWithUsage
-// that additionally surfaces tool_use and tool_result events.
+// that additionally surfaces tool_use, tool_result, and thinking events.
 //
 // The toolUseBlocks map tracks in-progress tool_use content blocks by index,
 // accumulating input_json_delta fragments until the block is complete.  It must
@@ -225,25 +268,64 @@ func ParseStreamLine(line []byte, textBlocks map[int]struct{}) (text string, isR
 // only the id) can be correlated back to the originating tool name.  It must
 // also be allocated by the caller.
 //
+// thinkingBlocks tracks in-progress thinking/redacted_thinking blocks by index,
+// accumulating thinking_delta text.  It must be allocated by the caller and is
+// parallel to toolUseBlocks.  Passing nil disables thinking tracking (legacy
+// compat — text/tool output is unaffected).
+//
 // Returns:
 //   - text, isResult, totalCostUSD, usage: identical semantics to ParseStreamLineWithUsage.
 //   - toolEvent: non-nil when a complete tool_use or tool_result was decoded from
 //     this line; nil otherwise.
+//   - thinkingEvent: non-nil when a thinking delta was decoded; nil otherwise.
 func ParseStreamLineWithTools(
 	line []byte,
 	textBlocks map[int]struct{},
 	toolUseBlocks map[int]*ToolEvent,
 	toolIDToName map[string]string,
 ) (text string, isResult bool, totalCostUSD float64, usage *cost.Usage, toolEvent *ToolEvent) {
+	tok, isRes, usd, u, te, _ := parseStreamLineWithThinking(line, textBlocks, toolUseBlocks, toolIDToName, nil)
+	return tok, isRes, usd, u, te
+}
+
+// ParseStreamLineWithThinking is the full-fidelity variant that additionally
+// surfaces thinking events alongside tool_use, tool_result, and text events.
+//
+// thinkingBlocks must be allocated by the caller and passed across calls for the
+// same stream.  Passing nil disables thinking tracking (legacy compat path).
+//
+// All other parameters and return semantics are identical to ParseStreamLineWithTools.
+// thinkingEvent is non-nil only when a thinking_delta was processed; one event
+// is emitted per thinking_delta fragment (not per-block) so the caller can stream
+// deltas incrementally.
+func ParseStreamLineWithThinking(
+	line []byte,
+	textBlocks map[int]struct{},
+	toolUseBlocks map[int]*ToolEvent,
+	toolIDToName map[string]string,
+	thinkingBlocks map[int]*ThinkingBlockEntry,
+) (text string, isResult bool, totalCostUSD float64, usage *cost.Usage, toolEvent *ToolEvent, thinkingEvent *ThinkingEvent) {
+	return parseStreamLineWithThinking(line, textBlocks, toolUseBlocks, toolIDToName, thinkingBlocks)
+}
+
+// parseStreamLineWithThinking is the internal implementation shared by
+// ParseStreamLineWithTools and ParseStreamLineWithThinking.
+func parseStreamLineWithThinking(
+	line []byte,
+	textBlocks map[int]struct{},
+	toolUseBlocks map[int]*ToolEvent,
+	toolIDToName map[string]string,
+	thinkingBlocks map[int]*ThinkingBlockEntry,
+) (text string, isResult bool, totalCostUSD float64, usage *cost.Usage, toolEvent *ToolEvent, thinkingEvent *ThinkingEvent) {
 	if len(line) == 0 {
-		return "", false, 0, nil, nil
+		return "", false, 0, nil, nil, nil
 	}
 
 	topType := extractJSONStringField(line, "type")
 
 	switch topType {
 	case "system", "init":
-		return "", false, 0, nil, nil
+		return "", false, 0, nil, nil, nil
 
 	case "result":
 		var res struct {
@@ -259,27 +341,27 @@ func ParseStreamLineWithTools(
 			OutputTokens: res.Usage.OutputTokens,
 			TotalCostUSD: res.TotalCostUSD,
 		}
-		return "", true, res.TotalCostUSD, u, nil
+		return "", true, res.TotalCostUSD, u, nil, nil
 
 	case "stream_event":
 		var envelope struct {
 			Event json.RawMessage `json:"event"`
 		}
 		if err := json.Unmarshal(line, &envelope); err != nil || len(envelope.Event) == 0 {
-			return "", false, 0, nil, nil
+			return "", false, 0, nil, nil, nil
 		}
-		tok, isRes, usd, te := parseStreamEventWithTools(envelope.Event, textBlocks, toolUseBlocks, toolIDToName)
-		return tok, isRes, usd, nil, te
+		tok, isRes, usd, te, thEv := parseStreamEventWithThinking(envelope.Event, textBlocks, toolUseBlocks, toolIDToName, thinkingBlocks)
+		return tok, isRes, usd, nil, te, thEv
 
 	case "user":
 		// tool_result blocks arrive wrapped in a "user"-role message when
 		// --include-partial-messages is active.  Parse the content array for
 		// tool_result entries.
 		te := parseUserMessageForToolResult(line, toolIDToName)
-		return "", false, 0, nil, te
+		return "", false, 0, nil, te, nil
 
 	default:
-		return "", false, 0, nil, nil
+		return "", false, 0, nil, nil, nil
 	}
 }
 
@@ -320,33 +402,37 @@ type ToolEvent struct {
 // ParseStreamLineWithTools for tool-event tracking.
 func ParseStreamLineWithUsage(line []byte, textBlocks map[int]struct{}) (text string, isResult bool, totalCostUSD float64, usage *cost.Usage) {
 	// Delegate to the full-fidelity parser with tool tracking disabled (nil maps).
-	tok, isRes, usd, u, _ := ParseStreamLineWithTools(line, textBlocks, nil, nil)
+	// thinking is also nil here — legacy shim must remain byte-identical to
+	// pre-thinking behaviour.
+	tok, isRes, usd, u, _, _ := parseStreamLineWithThinking(line, textBlocks, nil, nil, nil)
 	return tok, isRes, usd, u
 }
 
 // parseStreamEvent handles the inner .event object from a stream_event line.
-// It is the legacy entry point (no tool tracking); used by ParseStreamLineWithUsage.
+// It is the legacy entry point (no tool or thinking tracking); used by ParseStreamLineWithUsage.
 func parseStreamEvent(event json.RawMessage, textBlocks map[int]struct{}) (text string, isResult bool, totalCostUSD float64) {
-	tok, isRes, usd, _ := parseStreamEventWithTools(event, textBlocks, nil, nil)
+	tok, isRes, usd, _, _ := parseStreamEventWithThinking(event, textBlocks, nil, nil, nil)
 	return tok, isRes, usd
 }
 
-// parseStreamEventWithTools is the full-fidelity event parser that handles
-// text blocks, tool_use blocks, and input_json_delta accumulation.
+// parseStreamEventWithThinking is the full-fidelity event parser that handles
+// text blocks, tool_use blocks, input_json_delta accumulation, and thinking blocks.
 //
 //   - toolUseBlocks nil → tool_use tracking disabled (text-only mode, legacy compat).
 //   - toolIDToName nil → tool_result correlation disabled.
-func parseStreamEventWithTools(
+//   - thinkingBlocks nil → thinking tracking disabled (legacy compat).
+func parseStreamEventWithThinking(
 	event json.RawMessage,
 	textBlocks map[int]struct{},
 	toolUseBlocks map[int]*ToolEvent,
 	toolIDToName map[string]string,
-) (text string, isResult bool, totalCostUSD float64, toolEvent *ToolEvent) {
+	thinkingBlocks map[int]*ThinkingBlockEntry,
+) (text string, isResult bool, totalCostUSD float64, toolEvent *ToolEvent, thinkingEvent *ThinkingEvent) {
 	evType := extractJSONStringField(event, "type")
 
 	switch evType {
 	case "content_block_start":
-		// {"type":"content_block_start","index":N,"content_block":{"type":"text"|"tool_use","id":"…","name":"…"}}
+		// {"type":"content_block_start","index":N,"content_block":{"type":"text"|"tool_use"|"thinking"|"redacted_thinking","id":"…","name":"…"}}
 		var ev struct {
 			Index        int `json:"index"`
 			ContentBlock struct {
@@ -356,7 +442,7 @@ func parseStreamEventWithTools(
 			} `json:"content_block"`
 		}
 		if err := json.Unmarshal(event, &ev); err != nil {
-			return "", false, 0, nil
+			return "", false, 0, nil, nil
 		}
 		switch ev.ContentBlock.Type {
 		case "text":
@@ -384,29 +470,49 @@ func parseStreamEventWithTools(
 					}
 				}
 			}
+		case "thinking":
+			// Register as an in-progress thinking block so thinking_delta events
+			// accumulate into it.
+			if thinkingBlocks != nil {
+				thinkingBlocks[ev.Index] = &ThinkingBlockEntry{redacted: false}
+			}
+		case "redacted_thinking":
+			// redacted_thinking carries no readable text.  Register so the
+			// content_block_stop case can emit the placeholder; we emit the
+			// placeholder immediately here so the UI knows thinking occurred.
+			if thinkingBlocks != nil {
+				thinkingBlocks[ev.Index] = &ThinkingBlockEntry{redacted: true}
+				// Emit the placeholder right at block-start (no delta follows for
+				// redacted blocks — the content is opaque).
+				return "", false, 0, nil, &ThinkingEvent{
+					Text:     redactedThinkingPlaceholder,
+					Redacted: true,
+				}
+			}
 		}
-		return "", false, 0, nil
+		return "", false, 0, nil, nil
 
 	case "content_block_delta":
-		// {"type":"content_block_delta","index":N,"delta":{"type":"text_delta"|"input_json_delta","text"|"partial_json":"…"}}
+		// {"type":"content_block_delta","index":N,"delta":{"type":"text_delta"|"input_json_delta"|"thinking_delta","text"|"partial_json"|"thinking":"…"}}
 		var ev struct {
 			Index int `json:"index"`
 			Delta struct {
 				Type        string `json:"type"`
 				Text        string `json:"text"`
 				PartialJSON string `json:"partial_json"`
+				Thinking    string `json:"thinking"`
 			} `json:"delta"`
 		}
 		if err := json.Unmarshal(event, &ev); err != nil {
-			return "", false, 0, nil
+			return "", false, 0, nil, nil
 		}
 		switch ev.Delta.Type {
 		case "text_delta":
 			// Guard: only emit deltas for confirmed text blocks.
 			if _, ok := textBlocks[ev.Index]; !ok {
-				return "", false, 0, nil
+				return "", false, 0, nil, nil
 			}
-			return ev.Delta.Text, false, 0, nil
+			return ev.Delta.Text, false, 0, nil, nil
 		case "input_json_delta":
 			if toolUseBlocks != nil {
 				if te, ok := toolUseBlocks[ev.Index]; ok {
@@ -427,32 +533,89 @@ func parseStreamEventWithTools(
 					}
 				}
 			}
-			return "", false, 0, nil
+			return "", false, 0, nil, nil
+		case "thinking_delta":
+			// Accumulate thinking text into the registered block (if any).
+			// Emit the delta text as a ThinkingEvent so the caller can stream
+			// it incrementally — one ThinkingEvent per delta fragment.
+			//
+			// Cap policy:
+			//   - Deltas that fit entirely within the remaining capacity are
+			//     accumulated and emitted with Truncated==false.
+			//   - When a delta would push the total past maxThinkingBytes, it is
+			//     cut to whatever bytes remain, emitted with Truncated==true, and
+			//     entry.truncated is set so subsequent deltas are discarded silently.
+			//   - When remaining==0 at the start of a new delta (cap exactly hit
+			//     by previous delta), the entry.truncated flag is already set so
+			//     we fall through to the "already truncated" discard branch.
+			if thinkingBlocks != nil {
+				if entry, ok := thinkingBlocks[ev.Index]; ok && !entry.redacted {
+					if entry.truncated {
+						// Already at cap: discard incoming delta, emit nothing.
+						return "", false, 0, nil, nil
+					}
+					delta := ev.Delta.Thinking
+					if delta == "" {
+						return "", false, 0, nil, nil
+					}
+					remaining := maxThinkingBytes - len(entry.accumulated)
+					if remaining <= 0 {
+						// Shouldn't normally reach here (entry.truncated should be
+						// set already), but guard defensively.
+						entry.truncated = true
+						return "", false, 0, nil, nil
+					}
+					truncated := false
+					if len(delta) >= remaining {
+						// This delta reaches or exceeds the cap.
+						delta = delta[:remaining]
+						entry.accumulated += delta
+						entry.truncated = true
+						truncated = true
+					} else {
+						entry.accumulated += delta
+					}
+					return "", false, 0, nil, &ThinkingEvent{
+						Text:      delta,
+						Truncated: truncated,
+					}
+				}
+			}
+			return "", false, 0, nil, nil
 		}
-		return "", false, 0, nil
+		return "", false, 0, nil, nil
 
 	case "content_block_stop":
 		// {"type":"content_block_stop","index":N}
 		// When a tool_use block stops, it is complete — emit the ToolEvent.
+		// For thinking blocks, the accumulated text was already streamed
+		// incrementally; just clean up the entry.
+		var ev struct {
+			Index int `json:"index"`
+		}
+		if err := json.Unmarshal(event, &ev); err != nil {
+			return "", false, 0, nil, nil
+		}
 		if toolUseBlocks != nil {
-			var ev struct {
-				Index int `json:"index"`
-			}
-			if err := json.Unmarshal(event, &ev); err != nil {
-				return "", false, 0, nil
-			}
 			if te, ok := toolUseBlocks[ev.Index]; ok {
 				delete(toolUseBlocks, ev.Index)
 				// Return a copy so the caller owns it.
 				teCopy := *te
-				return "", false, 0, &teCopy
+				return "", false, 0, &teCopy, nil
 			}
 		}
-		return "", false, 0, nil
+		if thinkingBlocks != nil {
+			if _, ok := thinkingBlocks[ev.Index]; ok {
+				delete(thinkingBlocks, ev.Index)
+				// Thinking deltas were emitted incrementally; no additional
+				// ThinkingEvent is needed on stop.
+			}
+		}
+		return "", false, 0, nil, nil
 
 	default:
 		// message_start, message_delta, message_stop, ping, etc.
-		return "", false, 0, nil
+		return "", false, 0, nil, nil
 	}
 }
 

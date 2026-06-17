@@ -697,6 +697,13 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				ev.ToolName = chunk.ToolName
 				ev.ToolOutput = chunk.ToolOutput
 				ev.IsError = chunk.IsError
+
+			case "thinking":
+				// Extended thinking delta.  Owner-scoped (same as token/tool events):
+				// ChatHub.Route delivers only to the session owner's connections when
+				// the session is not shared.  Not persisted to the transcript —
+				// thinking is ephemeral UI state.
+				ev.Thinking = chunk.Thinking
 			}
 			ch.hub.Route(ev)
 		}
