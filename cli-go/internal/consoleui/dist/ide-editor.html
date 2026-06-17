@@ -97,6 +97,24 @@
       font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
       z-index: 20;
     }
+    /* Phase 2: decaying line-highlight decoration for externally applied changes.
+       Monaco injects the className onto the line's overlay div; this block must
+       live in the iframe document's stylesheet (not the parent's styles.css).
+       The animation fades from a warm yellow tint to transparent over 2 s and
+       is removed by JS after 2.5 s so it cannot accumulate. */
+    @keyframes ide-external-change-fade {
+      from { background: rgba(255, 200, 0, 0.18); }
+      to   { background: transparent; }
+    }
+    .ide-external-change-line {
+      animation: ide-external-change-fade 2s ease-out forwards;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ide-external-change-line {
+        animation: none;
+        background: rgba(255, 200, 0, 0.10);
+      }
+    }
   </style>
 </head>
 <body>

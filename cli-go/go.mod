@@ -3,6 +3,7 @@ module github.com/bakw00ds/yakos
 go 1.25.0
 
 require (
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/zalando/go-keyring v0.2.8
 	go.starlark.net v0.0.0-20240520160348-046347dcd104
 	golang.org/x/crypto v0.53.0

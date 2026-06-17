@@ -210,6 +210,34 @@ function initEditor() {
     }
   );
 
+  // ── "Ask agent about selection" editor action ─────────────────────────
+  //
+  // Appears in the Monaco context menu (right-click) and can be triggered
+  // via the keyboard shortcut Alt+A.  Posts an askAgent message to the parent
+  // so the parent can inject context into the IDE chat input.
+  editor.addAction({
+    id:    'yakos.ask-agent-about-selection',
+    label: 'Ask agent about this selection',
+    keybindings: [monaco.KeyMod.Alt | monaco.KeyCode.KeyA],
+    contextMenuGroupId: 'navigation',
+    contextMenuOrder: 1.5,
+    run: function(ed) {
+      var sel = ed.getSelection();
+      if (!sel) return;
+      var text = ed.getModel() ? ed.getModel().getValueInRange(sel) : '';
+      if (!text) return;
+      try {
+        window.parent.postMessage({
+          type:      'askAgent',
+          path:      currentPath,
+          startLine: sel.startLineNumber,
+          endLine:   sel.endLineNumber,
+          text:      text,
+        }, window.location.origin);
+      } catch (_) {}
+    },
+  });
+
   // Hide loading overlay.
   document.getElementById('loading').style.display = 'none';
 
@@ -275,6 +303,17 @@ function loadDemo() {
   editor.setModel(entry.model);
 }
 
+// ── Decaying "changed on disk" decoration ─────────────────────────────────
+//
+// applyExternalContent uses Monaco's decorations API to highlight the lines
+// that changed when an external file modification is applied.  The decoration
+// class fades over ~2 s via a CSS keyframe animation; it is removed entirely
+// after 2.5 s so it cannot accumulate across rapid successive file-writes.
+//
+// Decoration state is stored per-model so concurrent models don't share it.
+var externalChangeDecorIds = {}; // path → decorationCollection or []
+var externalChangeDecorTimers = {}; // path → clearTimeout handle
+
 // ── postMessage API ───────────────────────────────────────────────────────
 //
 // Messages received from parent:
@@ -292,6 +331,14 @@ function loadDemo() {
 //     — Reply immediately with { type: 'content', path, content }.
 //   { type: 'closeFile', path }
 //     — Dispose the model for the given path (called when a tab is closed).
+//   { type: 'applyExternalContent', path, content, version }
+//     — Live-apply external file change into the model for `path`.
+//       Saves cursor/scroll view-state, replaces model content, restores
+//       view-state, and applies a decaying highlight decoration on changed lines.
+//       Only applies when the target path's model exists; no-op otherwise.
+//   { type: 'revealLine', path, line }
+//     — Scroll the editor to `line` (1-based) and place the cursor there.
+//       No-op when path does not match the currently active model.
 //
 // Messages posted to parent:
 //   { type: 'ready' }            — editor mounted.
@@ -299,6 +346,13 @@ function loadDemo() {
 //   { type: 'dirty', path, dirty } — dirty state changed (debounced 300 ms).
 //   { type: 'save', path, content } — ⌘S / Ctrl-S triggered (parent does the fetch).
 //   { type: 'content', path, content } — reply to 'requestContent'.
+//   { type: 'externalChangeBlocked', path }
+//     — applyExternalContent was rejected because the target model has unsaved
+//       changes (isDirty is true).  Parent should show the "changed on disk —
+//       reload" affordance for this path via ideShowExternalChangeNotice.
+//   { type: 'askAgent', path, startLine, endLine, text }
+//     — Operator invoked "Ask agent about selection"; text is the raw selected
+//       text; parent injects a context-prefixed message into the IDE chat input.
 window.addEventListener('message', function(e) {
   // Only accept messages from the same origin (parent console frame).
   if (e.origin !== window.location.origin) return;
@@ -419,11 +473,168 @@ window.addEventListener('message', function(e) {
         clearTimeout(closeEntry.dirtyTimer);
         closeEntry.dirtyTimer = null;
       }
+      // Cancel any pending decor timer.
+      if (externalChangeDecorTimers[closePath]) {
+        clearTimeout(externalChangeDecorTimers[closePath]);
+        delete externalChangeDecorTimers[closePath];
+      }
+      delete externalChangeDecorIds[closePath];
       // Parent always activates a neighbor tab before sending closeFile, so
       // the model being closed is never the currently displayed one. Dispose
       // unconditionally so we don't leak Monaco models.
       closeEntry.model.dispose();
       delete modelMap[closePath];
     }
+
+  } else if (msg.type === 'applyExternalContent') {
+    // Live-apply an external file change into the cached Monaco model.
+    //
+    // Strategy:
+    //   0. Dirty guard — check the authoritative per-model isDirty flag FIRST.
+    //      If the target model has unsaved changes, do NOT apply the external
+    //      content (it would clobber an in-progress keystroke).  Instead post
+    //      externalChangeBlocked so the parent can show the "changed on disk"
+    //      affordance.  This check uses the iframe's own isDirty flag, which is
+    //      updated synchronously on every keystroke — there is no 300 ms lag
+    //      unlike the debounced dirty postMessage sent to the parent.
+    //   1. Save the editor view-state (cursor + scroll) if this model is active.
+    //   2. Temporarily mark model read-only (active model only), replace content,
+    //      restore read-only.  Using setValue on the model directly avoids
+    //      triggering the dirty listener (the listener is guarded by
+    //      editor.getRawOptions().readOnly, and only fires for the active model).
+    //   3. Restore the view-state.
+    //   4. Apply a decaying line-highlight decoration on all changed lines.
+    //
+    // The dirty guard (readOnly wrapper) is identical to the 'openFile' reload
+    // path already in this file — no new patterns introduced.
+    if (!editor) return;
+    var applyPath = typeof msg.path === 'string' ? msg.path : '';
+    var applyContent = typeof msg.content === 'string' ? msg.content : '';
+    if (!applyPath) return;
+    var applyEntry = modelMap[applyPath];
+    if (!applyEntry) return; // model not open; nothing to do
+
+    // 0. Dirty guard: consult the iframe's authoritative per-model dirty flag.
+    //    This is set synchronously on every onDidChangeContent event — it has
+    //    no debounce lag, so it correctly reflects in-progress keystrokes even
+    //    within the 300 ms window before the parent's own dirty state is updated.
+    if (applyEntry.isDirty) {
+      try {
+        window.parent.postMessage(
+          { type: 'externalChangeBlocked', path: applyPath },
+          window.location.origin
+        );
+      } catch (_) {}
+      return;
+    }
+
+    var isActive = (currentPath === applyPath) && (editor.getModel() === applyEntry.model);
+
+    // 1. Save view-state (cursor + scroll) for the active model.
+    var savedViewState = isActive ? editor.saveViewState() : null;
+
+    // 2. Compute changed-line ranges for decoration BEFORE replacing content.
+    //    We do a simple line-by-line diff between old and new content.
+    var oldLines = applyEntry.model.getValue().split('\n');
+    var newLines = applyContent.split('\n');
+    var changedRanges = [];
+    var maxLines = Math.max(oldLines.length, newLines.length);
+    var inChanged = false;
+    var changedStart = -1;
+    for (var li = 0; li < maxLines; li++) {
+      var same = (li < oldLines.length && li < newLines.length && oldLines[li] === newLines[li]);
+      if (!same && !inChanged) {
+        inChanged = true;
+        changedStart = li + 1; // Monaco lines are 1-based
+      } else if (same && inChanged) {
+        inChanged = false;
+        changedRanges.push({ startLineNumber: changedStart, endLineNumber: li, startColumn: 1, endColumn: 1 });
+      }
+    }
+    if (inChanged) {
+      changedRanges.push({ startLineNumber: changedStart, endLineNumber: maxLines, startColumn: 1, endColumn: 1 });
+    }
+
+    // 3. Replace model content without triggering dirty.
+    //    Only toggle the editor's readOnly option when this model is active —
+    //    toggling readOnly is global to the editor widget and would briefly
+    //    freeze the currently visible model when updating a background one.
+    if (isActive) {
+      var wasReadOnly = editor.getRawOptions().readOnly;
+      editor.updateOptions({ readOnly: true });
+      applyEntry.model.setValue(applyContent);
+      editor.updateOptions({ readOnly: wasReadOnly });
+    } else {
+      // Inactive model: setValue directly. The dirty listener's guard
+      // (editor.getModel() === model) is false for inactive models, so no
+      // dirty event is triggered.
+      applyEntry.model.setValue(applyContent);
+    }
+    // External content is by definition clean (not a user edit).
+    applyEntry.isDirty = false;
+    if (applyEntry.dirtyTimer !== null) {
+      clearTimeout(applyEntry.dirtyTimer);
+      applyEntry.dirtyTimer = null;
+    }
+    // Tell parent: this path is now clean (matches disk).
+    try {
+      window.parent.postMessage({ type: 'dirty', path: applyPath, dirty: false }, window.location.origin);
+    } catch (_) {}
+
+    // 4. Restore view-state for the active model.
+    if (isActive && savedViewState) {
+      editor.restoreViewState(savedViewState);
+    }
+
+    // 5. Apply decaying decoration on changed lines (active model only).
+    if (isActive && changedRanges.length > 0) {
+      // Clear any previous decor for this path.
+      if (externalChangeDecorTimers[applyPath]) {
+        clearTimeout(externalChangeDecorTimers[applyPath]);
+        delete externalChangeDecorTimers[applyPath];
+      }
+      var decorations = changedRanges.map(function(r) {
+        return {
+          range: new monaco.Range(r.startLineNumber, 1, r.endLineNumber, 1),
+          options: {
+            isWholeLine: true,
+            className: 'ide-external-change-line',
+            overviewRuler: { color: 'rgba(255, 200, 0, 0.6)', position: monaco.editor.OverviewRulerLane.Right },
+          },
+        };
+      });
+      // Remove previous decoration set before adding new one.
+      if (externalChangeDecorIds[applyPath] &&
+          typeof externalChangeDecorIds[applyPath].clear === 'function') {
+        externalChangeDecorIds[applyPath].clear();
+      }
+      externalChangeDecorIds[applyPath] = editor.createDecorationsCollection(decorations);
+      // Auto-clear after 2.5 s (the CSS animation runs for 2 s).
+      externalChangeDecorTimers[applyPath] = setTimeout(function() {
+        if (externalChangeDecorIds[applyPath] &&
+            typeof externalChangeDecorIds[applyPath].clear === 'function') {
+          externalChangeDecorIds[applyPath].clear();
+        }
+        delete externalChangeDecorIds[applyPath];
+        delete externalChangeDecorTimers[applyPath];
+      }, 2500);
+    }
+
+  } else if (msg.type === 'revealLine') {
+    // Scroll the editor to the requested line and place the cursor there.
+    // Only applies when the message path matches the currently active model.
+    if (!editor) return;
+    var revPath = typeof msg.path === 'string' ? msg.path : '';
+    var revLine = typeof msg.line === 'number' ? msg.line : parseInt(msg.line, 10);
+    if (!revPath || isNaN(revLine) || revLine < 1) return;
+    if (currentPath !== revPath) return;
+    // Clamp line to model line count.
+    var revModel = editor.getModel();
+    if (!revModel) return;
+    var lineCount = revModel.getLineCount();
+    var targetLine = Math.min(revLine, lineCount);
+    editor.revealLineInCenter(targetLine);
+    editor.setPosition({ lineNumber: targetLine, column: 1 });
+    editor.focus();
   }
 });

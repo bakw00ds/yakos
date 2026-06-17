@@ -115,6 +115,18 @@
   // Layout persistence (resizable/collapsible panels).
   var IDE_LAYOUT_LS_KEY = 'yakos_ide_layout';
 
+  // ── Phase 2 IDE live-coupling state (hoisted for TDZ safety) ─────────────
+  //
+  // ideFollowToggle: when true, files.changed WS events auto-open/switch the
+  //   editor to the affected file.  Persisted in localStorage.
+  // IDE_FOLLOW_LS_KEY: localStorage key for the follow toggle.
+  // ideTreeModified: Set<path> — workspace-relative paths that received a
+  //   files.changed WS event since they were last opened in the editor.
+  //   Cleared when a file is opened (tab activated or newly opened).
+  var ideFollowToggle = false;
+  var IDE_FOLLOW_LS_KEY = 'yakos_ide_follow';
+  var ideTreeModified = null; // set to new Set() in IDE section init
+
   function defaultTheme() {
     try {
       if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
@@ -768,6 +780,20 @@
     } else if (topic === 'ping') {
       // heartbeat — no UI update needed
       return;
+    } else if (topic === 'files.changed') {
+      // files.changed: a file in the workspace was created, modified, or deleted
+      // by an external agent.  Payload: {path, action, ts}.
+      //
+      // Handling strategy:
+      //   - Mark the file as modified in the tree (ideTreeModified) and re-render
+      //     any visible tree node for it.
+      //   - If the file is open in an IDE tab and NOT dirty: fetch its new content
+      //     and send applyExternalContent to Monaco (preserving cursor/scroll).
+      //   - If the file is open and IS dirty: show the "changed on disk" notice
+      //     (the same non-destructive 409/reload affordance used by performSave).
+      //   - If follow-toggle is ON and action is created/modified: open or switch
+      //     to the file automatically.
+      handleFilesChangedEvent(payload);
     } else if (topic && topic.startsWith('workflow.')) {
       // Route workflow lifecycle events to the Flows tab.
       handleFlowsWsEvent(topic, payload);
@@ -2047,10 +2073,31 @@
         '<div class="chat-msg-text">' + escLines(msg.text) + '</div>';
     } else if (msg.role === 'assistant') {
       el.className = 'chat-msg chat-msg-assistant' + (msg.streaming ? ' streaming' : '');
+      // linkifyFilePaths runs AFTER escLines so the input is already safe HTML;
+      // the linkify function only inserts <a> tags with esc()d attributes.
+      var assistantHtml = linkifyFilePaths(escLines(msg.text));
       el.innerHTML =
         '<span class="chat-msg-role" aria-hidden="true">agent</span>' +
         '<span class="chat-msg-time">' + esc(formatTime(msg.ts)) + '</span>' +
-        '<div class="chat-msg-text">' + escLines(msg.text) + '</div>';
+        '<div class="chat-msg-text">' + assistantHtml + '</div>';
+      // Wire file-ref link clicks and keyboard activation after innerHTML is set.
+      var fileRefLinks = el.querySelectorAll('.ide-file-ref-link');
+      for (var fli = 0; fli < fileRefLinks.length; fli++) {
+        (function(link) {
+          var fp = link.getAttribute('data-file-path');
+          var fl = parseInt(link.getAttribute('data-file-line'), 10);
+          link.addEventListener('click', function(ev) {
+            ev.preventDefault();
+            ideOpenFileAtLine(fp, fl);
+          });
+          link.addEventListener('keydown', function(ev) {
+            if (ev.key === 'Enter' || ev.key === ' ') {
+              ev.preventDefault();
+              ideOpenFileAtLine(fp, fl);
+            }
+          });
+        }(fileRefLinks[fli]));
+      }
     } else if (msg.role === 'tool_use') {
       // Phase 4: collapsible tool-invocation block.
       // XSS discipline: all server-supplied strings go through esc() before innerHTML.
@@ -4961,6 +5008,9 @@
   ideIsDirty        = false;
   ideIsSaving       = false;
   ideSaveStatusTimer = null;
+  // Phase 2 live-coupling state.
+  try { ideFollowToggle = !!JSON.parse(localStorage.getItem(IDE_FOLLOW_LS_KEY)); } catch (_) { ideFollowToggle = false; }
+  ideTreeModified   = new Set();
 
   // ── Layout persistence helpers ────────────────────────────────────────────
 
@@ -5081,6 +5131,12 @@
     if (path === ideActiveTabPath) return;
     const fileState = ideOpenFiles.get(path);
     if (!fileState) return;
+
+    // Clear tree modified indicator when a file's tab is activated.
+    if (ideTreeModified) {
+      ideTreeModified.delete(path);
+      ideRefreshTreeModifiedDot(path);
+    }
 
     ideActiveTabPath = path;
     // Sync legacy single-file vars to the newly active tab.
@@ -5759,7 +5815,7 @@
           '<div class="ide-tab-strip" id="ide-tab-strip" ' +
             'role="tablist" aria-label="Open files">' +
           '</div>' +
-          // Editor header: dirty marker, path, Edit, Save, status.
+          // Editor header: dirty marker, path, Edit, Save, Follow, status.
           '<div class="ide-editor-header" id="ide-editor-header">' +
             '<span id="ide-dirty-marker" class="ide-dirty-marker" aria-hidden="true" style="display:none">●</span>' +
             '<span id="ide-open-path" class="ide-open-path" aria-live="polite"></span>' +
@@ -5767,6 +5823,9 @@
               'aria-pressed="false" title="Toggle edit mode">Edit</button>' +
             '<button id="ide-save-btn" type="button" class="ide-header-btn ide-save-btn" ' +
               'disabled aria-disabled="true" title="Save file (⌘S / Ctrl-S)">Save</button>' +
+            // Follow toggle: when ON, files.changed WS events auto-switch the editor.
+            '<button id="ide-follow-toggle" type="button" class="ide-header-btn ide-follow-btn" ' +
+              'aria-pressed="false" title="Follow agent: auto-open files changed by the agent">Follow agent</button>' +
             '<span id="ide-save-status" class="ide-save-status" aria-live="polite" role="status"></span>' +
           '</div>' +
           '<div class="ide-editor-wrap">' +
@@ -5863,6 +5922,21 @@
     const saveBtn = document.getElementById('ide-save-btn');
     if (saveBtn) {
       saveBtn.addEventListener('click', () => { triggerSave(); });
+    }
+
+    // ── Follow toggle ─────────────────────────────────────────────────────
+    // Sync the button state to the persisted ideFollowToggle on render, then
+    // wire the click handler.
+    const followBtn = document.getElementById('ide-follow-toggle');
+    if (followBtn) {
+      followBtn.setAttribute('aria-pressed', ideFollowToggle ? 'true' : 'false');
+      followBtn.classList.toggle('ide-header-btn-active', ideFollowToggle);
+      followBtn.addEventListener('click', function() {
+        ideFollowToggle = !ideFollowToggle;
+        followBtn.setAttribute('aria-pressed', ideFollowToggle ? 'true' : 'false');
+        followBtn.classList.toggle('ide-header-btn-active', ideFollowToggle);
+        try { localStorage.setItem(IDE_FOLLOW_LS_KEY, JSON.stringify(ideFollowToggle)); } catch (_) {}
+      });
     }
 
     // ── Tree pane toggle ──────────────────────────────────────────────────
@@ -6225,6 +6299,152 @@
     notice.appendChild(reloadBtn);
   }
 
+  // ── handleFilesChangedEvent ───────────────────────────────────────────────
+  //
+  // Called from handleWsMessage when topic === 'files.changed'.
+  // payload: { path: string (workspace-relative), action: 'created'|'modified'|'deleted', ts }
+
+  function handleFilesChangedEvent(payload) {
+    var fPath   = typeof payload.path   === 'string' ? payload.path   : '';
+    var fAction = typeof payload.action === 'string' ? payload.action : '';
+    if (!fPath) return;
+
+    // 1. Tree modified indicator: mark & re-render relevant tree node.
+    if (fAction === 'created' || fAction === 'modified') {
+      ideTreeModified.add(fPath);
+    } else if (fAction === 'deleted') {
+      ideTreeModified.delete(fPath);
+    }
+    // Re-render tree nodes that match this path so the M dot appears/clears.
+    ideRefreshTreeModifiedDot(fPath);
+
+    // 2. Live-apply or dirty-notice for open tabs.
+    var fileState = ideOpenFiles.get(fPath);
+    if (fileState) {
+      if (fAction === 'deleted') {
+        // File deleted while open: show a non-destructive notice. Don't close
+        // the tab (operator may still want the in-memory content).
+        ideShowExternalChangeNotice(fPath, 'deleted');
+      } else if (fileState.dirty) {
+        // Tab is dirty: show "changed on disk — reload" but do NOT overwrite.
+        ideShowExternalChangeNotice(fPath, 'modified');
+      } else {
+        // Tab is clean: fetch fresh content and live-apply into Monaco.
+        ideApplyExternalFileChange(fPath, fileState);
+      }
+    }
+
+    // 3. Follow toggle: auto-open/switch on create/modify when enabled.
+    if (ideFollowToggle && (fAction === 'created' || fAction === 'modified')) {
+      // If already open, just activate the tab.
+      if (ideOpenFiles.has(fPath)) {
+        ideActivateTab(fPath);
+      } else {
+        // Fetch and open. Use the basename as the display name.
+        var followName = fPath.split('/').pop() || fPath;
+        openIdeFile(fPath, followName, null);
+      }
+    }
+  }
+
+  // ideApplyExternalFileChange fetches fresh content for an open, non-dirty
+  // tab and sends applyExternalContent to the Monaco iframe.
+  function ideApplyExternalFileChange(path, fileState) {
+    var fetchOpts = AUTH_MODE === 'session' ? { credentials: 'same-origin' } : {};
+    fetch('/api/files/content?path=' + encodeURIComponent(path), fetchOpts)
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(data) {
+        if (!data || data.encoding === 'base64') return; // binary; skip
+        var newContent = data.content || '';
+        var newVersion = data.version || '';
+        // Update version in the open-files map.
+        fileState.version = newVersion;
+        if (path === ideActiveTabPath) ideCurrentVersion = newVersion;
+        // Send to Monaco iframe.
+        if (ideEditorReady && ideEditorWindow) {
+          try {
+            ideEditorWindow.postMessage({
+              type:    'applyExternalContent',
+              path:    path,
+              content: newContent,
+              version: newVersion,
+            }, window.location.origin);
+          } catch (_) {}
+        }
+      })
+      .catch(function() {
+        // Network failure: surface a non-destructive notice.
+        ideShowExternalChangeNotice(path, 'modified');
+      });
+  }
+
+  // ideShowExternalChangeNotice shows a non-destructive "changed on disk — reload"
+  // affordance.  Only shows when the affected path is the currently active tab
+  // (the dirty guard already keeps dirty tabs from auto-reloading; inactive-tab
+  // changes are silently queued as "modified" and applied on next tab activation
+  // via the re-fetch path in openFileInEditor/ideActivateTab).
+  function ideShowExternalChangeNotice(path, action) {
+    if (path !== ideActiveTabPath) return;
+    var notice = document.getElementById('ide-editor-notice');
+    if (!notice) return;
+    notice.textContent = '';
+    notice.style.display = '';
+    var label = action === 'deleted'
+      ? 'File deleted on disk — '
+      : 'File changed on disk — ';
+    notice.appendChild(document.createTextNode(label));
+    var reloadBtn = document.createElement('button');
+    reloadBtn.type = 'button';
+    reloadBtn.className = 'ide-notice-reload-btn';
+    reloadBtn.textContent = 'Reload (discards local edits)';
+    reloadBtn.addEventListener('click', function() {
+      if (!window.confirm('Reload file from disk? Your unsaved edits will be lost.')) return;
+      notice.style.display = 'none';
+      if (action === 'deleted') {
+        // File gone: just close the tab.
+        ideCloseTab(path);
+      } else {
+        ideOpenFiles.delete(path);
+        openIdeFile(path, path.split('/').pop(), null);
+      }
+    });
+    notice.appendChild(reloadBtn);
+  }
+
+  // ideRefreshTreeModifiedDot updates the visual M dot on tree buttons for the
+  // given workspace-relative path.  Called after ideTreeModified changes so
+  // the tree stays in sync without a full re-render.
+  function ideRefreshTreeModifiedDot(path) {
+    var treeRoot = document.getElementById('ide-tree-root');
+    if (!treeRoot) return;
+    // File tree buttons store the full path in data-ide-tree-path.
+    var btns = treeRoot.querySelectorAll('[data-ide-tree-path]');
+    for (var bi = 0; bi < btns.length; bi++) {
+      var btn = btns[bi];
+      if (btn.getAttribute('data-ide-tree-path') === path) {
+        ideUpdateTreeModifiedDot(btn, path);
+        break;
+      }
+    }
+  }
+
+  // ideUpdateTreeModifiedDot adds or removes the M indicator span on a tree
+  // file button.  Idempotent: safe to call multiple times.
+  function ideUpdateTreeModifiedDot(btn, path) {
+    var existing = btn.querySelector('.ide-tree-modified-dot');
+    var isModified = ideTreeModified && ideTreeModified.has(path);
+    if (isModified && !existing) {
+      var dot = document.createElement('span');
+      dot.className = 'ide-tree-modified-dot';
+      dot.setAttribute('aria-label', 'modified externally');
+      dot.setAttribute('title', 'Modified externally');
+      dot.textContent = 'M';
+      btn.appendChild(dot);
+    } else if (!isModified && existing) {
+      existing.remove();
+    }
+  }
+
   // ── handleIdeEditorMessage ────────────────────────────────────────────────
 
   function handleIdeEditorMessage(e) {
@@ -6276,12 +6496,78 @@
           ideEditable && ideIsDirty && !ideIsSaving) {
         performSave(ideCurrentPath, msg.content);
       }
+    } else if (msg.type === 'externalChangeBlocked') {
+      // ide-editor.js rejected an applyExternalContent because the target model
+      // has unsaved changes (its iframe-side isDirty flag is true).  Show the
+      // "changed on disk — reload" affordance so the operator knows the file
+      // was modified externally while they were editing.
+      var blockedPath = typeof msg.path === 'string' ? msg.path : '';
+      if (blockedPath) {
+        ideShowExternalChangeNotice(blockedPath, 'modified');
+        // Also ensure the parent-side dirty flag is consistent: if the blocked
+        // path's fileState does not yet reflect dirty (the 300 ms debounce
+        // hasn't fired yet), mark it dirty now so subsequent handleFilesChanged
+        // calls don't attempt another auto-apply.
+        var blockedState = ideOpenFiles.get(blockedPath);
+        if (blockedState && !blockedState.dirty) {
+          blockedState.dirty = true;
+          if (blockedPath === ideActiveTabPath) {
+            ideIsDirty = true;
+            ideRenderTabStrip();
+            ideUpdateEditorHeader();
+          }
+        }
+      }
+    } else if (msg.type === 'askAgent') {
+      // "Ask agent about selection" Monaco action posted from ide-editor.js.
+      // Inject a context-prefixed message into the IDE chat input (the slot
+      // currently mounted in #ide-chat-slot) so the operator can append a
+      // question and send.
+      //
+      // msg: { path, startLine, endLine, text }
+      // All values are escaped before insertion into HTML; the chat input
+      // receives plain text (via .value), never innerHTML.
+      var askPath      = typeof msg.path      === 'string' ? msg.path      : '';
+      var askStartLine = typeof msg.startLine === 'number' ? msg.startLine : 0;
+      var askEndLine   = typeof msg.endLine   === 'number' ? msg.endLine   : 0;
+      var askText      = typeof msg.text      === 'string' ? msg.text      : '';
+      if (!askPath || !askText) return;
+
+      // Build the context prefix.  Uses template literal syntax for
+      // readability; no DOM/innerHTML involved — this goes into an <input>.
+      var lineRef = (askStartLine > 0 && askEndLine > 0 && askStartLine !== askEndLine)
+        ? askStartLine + '-' + askEndLine
+        : (askStartLine > 0 ? String(askStartLine) : '');
+      var pathRef = lineRef ? (askPath + ':' + lineRef) : askPath;
+      var prefix = 'Regarding `' + pathRef + '`:\n```\n' + askText + '\n```\n';
+
+      // Inject into the currently visible IDE chat input.
+      var chatInput = ideGetChatInput();
+      if (chatInput) {
+        chatInput.value = prefix;
+        chatInput.focus();
+        // Dispatch an input event so any wired input handlers update state.
+        try { chatInput.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
+      }
     }
   }
 
   function sendOpenFile(payload) {
     if (!ideEditorWindow) return;
     ideEditorWindow.postMessage(payload, window.location.origin);
+  }
+
+  // ideGetChatInput finds the composer <textarea> or <input> inside the IDE
+  // chat slot (#ide-chat-slot).  Returns null when the slot is absent or
+  // collapsed (no input present).
+  function ideGetChatInput() {
+    var slot = document.getElementById('ide-chat-slot');
+    if (!slot) return null;
+    // The chat composer uses a textarea (buildPaneElement wires it as .chat-input).
+    var textarea = slot.querySelector('textarea.chat-input');
+    if (textarea) return textarea;
+    var input = slot.querySelector('input.chat-input');
+    return input || null;
   }
 
   // syncMonacoTheme sends a {type:'setTheme', theme} postMessage to the Monaco
@@ -6498,6 +6784,9 @@
         // B2: esc() on server-supplied entry.name in aria-label.
         btn.setAttribute('aria-label', 'File ' + esc(entry.name));
         btn.title = entry.name; // tooltip for truncated names
+        // data-ide-tree-path: used by ideRefreshTreeModifiedDot() to find this
+        // button when a files.changed WS event arrives.
+        btn.setAttribute('data-ide-tree-path', entry.path);
 
         const iconSpan = document.createElement('span');
         iconSpan.className = 'ide-tree-icon';
@@ -6511,6 +6800,9 @@
         btn.appendChild(iconSpan);
         btn.appendChild(nameSpan);
 
+        // Show modified dot if this file was changed externally since last opened.
+        ideUpdateTreeModifiedDot(btn, entry.path);
+
         btn.addEventListener('click', () => {
           // Tentatively mark selected; openIdeFile will revert on error.
           const treeEl = document.getElementById('ide-tree-root');
@@ -6518,6 +6810,10 @@
             treeEl.querySelectorAll('.ide-tree-file.selected').forEach((el) => el.classList.remove('selected'));
           }
           btn.classList.add('selected');
+
+          // Clear the modified indicator when the file is opened.
+          if (ideTreeModified) ideTreeModified.delete(entry.path);
+          ideUpdateTreeModifiedDot(btn, entry.path);
 
           openIdeFile(entry.path, entry.name, btn);
         });
@@ -7075,6 +7371,92 @@
   // Safe for use in innerHTML — every character is escaped first.
   function escLines(s) {
     return esc(s).replace(/\n/g, '<br>');
+  }
+
+  // linkifyFilePaths takes an already-esc()d HTML string and converts
+  // workspace file:line (and file:line:col) references into clickable links
+  // that open the file in the IDE editor and reveal the line.
+  //
+  // Pattern (conservative — only tokens that look like real workspace paths):
+  //   <word-chars + slash + extension chars>:<digits>[:<digits>]
+  //   e.g.  internal/foo/bar.go:42  or  cmd/main.go:12:3
+  //
+  // Constraints to avoid over-linkifying:
+  //   - Path must contain a dot (bare names without an extension don't fire);
+  //     the regex also accepts paths with a slash prefix, so bare filenames
+  //     like "README.md:42" are linkified when they have a recognisable extension.
+  //   - Path must not start with "http" (URLs).
+  //   - Column is captured but only the line is used for revealLine.
+  //
+  // The replacement produces a <a> with role="button" that calls
+  // ideOpenFileAtLine() which is defined below.  No href is emitted (avoids
+  // navigation side-effects); keyboard activation uses keydown handler on the
+  // same element class (ide-file-ref-link).
+  //
+  // XSS: the input string is already escaped; the only interpolation here is
+  // the literal regex match (which consists of path chars, colon, digits only —
+  // no HTML metacharacters) and a data-* attribute which we esc() for safety.
+  //
+  // Called only for assistant messages in IDE chat context to avoid cluttering
+  // the standalone chat with potentially unwanted links.
+  var _FILE_REF_RE = /((?:[A-Za-z0-9_.\-]+\/)+[A-Za-z0-9_.\-]+\.[A-Za-z0-9]{1,6}|[A-Za-z0-9_.\-]+\.[A-Za-z0-9]{2,6}):(\d+)(?::(\d+))?/g;
+
+  function linkifyFilePaths(escapedHtml) {
+    return escapedHtml.replace(_FILE_REF_RE, function(match, filePath, line, col) {
+      // Reject URLs and overly short/generic tokens.
+      if (filePath.indexOf('http') === 0) return match;
+      // Require the path to contain a slash OR a dot-extension that looks like
+      // source code (2+ char extension).  The regex already requires a dot, but
+      // this guard prevents single-char "extensions" like "x.y" without a slash.
+      var hasDot = filePath.indexOf('.') !== -1;
+      if (!hasDot) return match;
+      var lineNum = parseInt(line, 10);
+      if (isNaN(lineNum) || lineNum < 1) return match;
+      // Build the link.  esc() on filePath is defensive (path chars are safe
+      // but belt-and-suspenders for any future regex expansion).
+      var safePathAttr = esc(filePath);
+      return '<a class="ide-file-ref-link" role="button" tabindex="0" ' +
+        'data-file-path="' + safePathAttr + '" data-file-line="' + lineNum + '" ' +
+        'title="Open ' + safePathAttr + ':' + lineNum + ' in editor" ' +
+        'aria-label="Open ' + safePathAttr + ' at line ' + lineNum + '">' +
+        match +
+        '</a>';
+    });
+  }
+
+  // ideOpenFileAtLine opens a file in the IDE editor and reveals the given line.
+  // If the file is already open, activates its tab + sends revealLine.
+  // If the file is not open, fetches it first then reveals the line.
+  function ideOpenFileAtLine(filePath, lineNum) {
+    if (!filePath) return;
+    // Navigate to the IDE tab first.
+    var tabBtn = document.querySelector('[data-tab="ide"]');
+    if (tabBtn) tabBtn.click();
+
+    function revealAfterOpen() {
+      if (ideEditorReady && ideEditorWindow) {
+        try {
+          ideEditorWindow.postMessage(
+            { type: 'revealLine', path: filePath, line: lineNum },
+            window.location.origin
+          );
+        } catch (_) {}
+      }
+    }
+
+    if (ideOpenFiles && ideOpenFiles.has(filePath)) {
+      ideActivateTab(filePath);
+      revealAfterOpen();
+    } else {
+      var name = filePath.split('/').pop() || filePath;
+      // openIdeFile is async (fetch-based); we send revealLine via a short
+      // timeout after it completes.  This is pragmatic — the Monaco ready
+      // event and iframe postMessage queue ordering make a callback approach
+      // significantly more complex.  A 400 ms window is enough for the fetch
+      // + model creation to complete on a local server.
+      openIdeFile(filePath, name, null);
+      setTimeout(revealAfterOpen, 400);
+    }
   }
 
   function formatTime(ts) {

@@ -525,6 +525,8 @@ var registeredTopics = []struct {
 	// Phase-2 fleet topics: metadata-only; no task text or tokens in payload.
 	{TopicFleetStarted, FleetStartedPayload{SessionID: "sess-1", Agent: "backend"}},
 	{TopicFleetFinished, FleetFinishedPayload{SessionID: "sess-1", Agent: "backend", Status: "finished", ExitCode: 0}},
+	// Phase-2 IDE file-watcher: paths/action/ts only — no file content ever.
+	{TopicFilesChanged, FilesChangedPayload{Path: "src/main.go", Action: "modified"}},
 }
 
 // allTopicConstants returns the set of values of every exported string
@@ -557,6 +559,8 @@ func allTopicConstants() map[string]bool {
 		// Phase-2 fleet topics.
 		TopicFleetStarted,
 		TopicFleetFinished,
+		// Phase-2 IDE file-watcher topic.
+		TopicFilesChanged,
 	}
 	m := make(map[string]bool, len(known))
 	for _, v := range known {

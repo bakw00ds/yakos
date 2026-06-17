@@ -33,10 +33,13 @@ import (
 	"syscall"
 	"time"
 
+	"log/slog"
+
 	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/authsession"
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/filewatch"
 	"github.com/bakw00ds/yakos/internal/grpcserver"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/mcpserver"
@@ -346,6 +349,40 @@ func Run(ctx context.Context, cfg Config) error {
 	go func() {
 		wsErrCh <- wsSrv.Serve(ctx)
 	}()
+
+	// Start the file watcher (IDE Phase 2).
+	// Publishes wsbus.TopicFilesChanged events for workspace file changes.
+	// WorkspaceRoot is guaranteed non-empty at this point (validated above).
+	// The watcher is stopped when ctx is cancelled (via a dedicated goroutine)
+	// so shutdown is clean.
+	if cfg.WorkspaceRoot != "" {
+		fw, fwErr := filewatch.New(cfg.WorkspaceRoot)
+		if fwErr != nil {
+			slog.Warn("serve: file watcher unavailable; IDE file-change events disabled",
+				"workspace_root", cfg.WorkspaceRoot, "err", fwErr)
+		} else {
+			fw.Start()
+			// Forward file-change events to the bus until ctx is cancelled.
+			go func() {
+				defer fw.Close()
+				for {
+					select {
+					case ev, ok := <-fw.Events():
+						if !ok {
+							return
+						}
+						bus.Publish(wsbus.TopicFilesChanged, wsbus.FilesChangedPayload{
+							Path:   ev.Path,
+							Action: string(ev.Action),
+							TS:     ev.TS,
+						})
+					case <-ctx.Done():
+						return
+					}
+				}
+			}()
+		}
+	}
 
 	// Build the shared dispatch Service once — all transports share this single
 	// instance so the global concurrency governor is enforced across all of them.
