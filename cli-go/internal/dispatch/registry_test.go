@@ -186,6 +186,55 @@ func TestRegistry_TaskPreviewExactly120Runes(t *testing.T) {
 	}
 }
 
+// TestRegistry_ConversationIDStoredAndRetrieved verifies that ConversationID
+// is preserved through Add / Get / Snapshot so the fleet handler can include it
+// in /api/fleet rows without a second lookup.
+func TestRegistry_ConversationIDStoredAndRetrieved(t *testing.T) {
+	r := dispatch.NewSessionRegistry()
+	e := dispatch.SessionEntry{
+		SessionID:      "sess-conv",
+		ConversationID: "conv-abc123",
+		Agent:          "backend",
+		Runtime:        "claude",
+		OperatorID:     "alice",
+		StartedAt:      time.Now(),
+		Status:         dispatch.StatusRunning,
+	}
+	r.Add(e)
+
+	got, ok := r.Get("sess-conv")
+	if !ok {
+		t.Fatal("Get: expected entry to exist after Add")
+	}
+	if got.ConversationID != "conv-abc123" {
+		t.Errorf("ConversationID=%q; want 'conv-abc123'", got.ConversationID)
+	}
+
+	// Snapshot must also carry the ConversationID.
+	snap := r.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("Snapshot len=%d; want 1", len(snap))
+	}
+	if snap[0].ConversationID != "conv-abc123" {
+		t.Errorf("Snapshot[0].ConversationID=%q; want 'conv-abc123'", snap[0].ConversationID)
+	}
+}
+
+// TestRegistry_ConversationIDEmptyWhenNotSet verifies that zero-value ConversationID
+// is handled without panic and is returned as empty string.
+func TestRegistry_ConversationIDEmptyWhenNotSet(t *testing.T) {
+	r := dispatch.NewSessionRegistry()
+	r.Add(makeEntry("sess-no-conv", "backend", "alice"))
+
+	got, ok := r.Get("sess-no-conv")
+	if !ok {
+		t.Fatal("Get: expected entry to exist after Add")
+	}
+	if got.ConversationID != "" {
+		t.Errorf("ConversationID=%q; want empty string when not set", got.ConversationID)
+	}
+}
+
 func TestRegistry_ConcurrentRaceSafety(t *testing.T) {
 	// This test is meaningful only with -race but is correct without it too.
 	r := dispatch.NewSessionRegistry()

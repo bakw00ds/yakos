@@ -515,13 +515,14 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	startedAt := time.Now().UTC()
 	if ch.registry != nil {
 		ch.registry.Add(dispatch.SessionEntry{
-			SessionID:   dispReq.SessionID,
-			Agent:       dispReq.Agent,
-			Runtime:     runtimeName,
-			OperatorID:  capturedOperatorID,
-			TaskPreview: dispReq.Task, // truncated inside Add to <=120 runes
-			StartedAt:   startedAt,
-			Status:      dispatch.StatusRunning,
+			SessionID:      dispReq.SessionID,
+			ConversationID: conversationID,
+			Agent:          dispReq.Agent,
+			Runtime:        runtimeName,
+			OperatorID:     capturedOperatorID,
+			TaskPreview:    dispReq.Task, // truncated inside Add to <=120 runes
+			StartedAt:      startedAt,
+			Status:         dispatch.StatusRunning,
 		})
 	}
 
@@ -647,10 +648,11 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 
 		onChunk := func(chunk dispatch.StreamChunk) {
 			ev := SSEEvent{
-				SessionID: dispReq.SessionID,
-				Type:      chunk.Type,
-				Text:      chunk.Text,
-				TS:        time.Now().UTC().Format(time.RFC3339Nano),
+				SessionID:      dispReq.SessionID,
+				ConversationID: conversationID,
+				Type:           chunk.Type,
+				Text:           chunk.Text,
+				TS:             time.Now().UTC().Format(time.RFC3339Nano),
 			}
 			switch chunk.Type {
 			case "summary":
@@ -775,10 +777,11 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 					Text:           errText,
 				})
 				ch.hub.Route(SSEEvent{
-					SessionID: dispReq.SessionID,
-					Type:      "error",
-					Text:      errText,
-					TS:        time.Now().UTC().Format(time.RFC3339Nano),
+					SessionID:      dispReq.SessionID,
+					ConversationID: conversationID,
+					Type:           "error",
+					Text:           errText,
+					TS:             time.Now().UTC().Format(time.RFC3339Nano),
 				})
 			}
 		}

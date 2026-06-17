@@ -35,13 +35,14 @@ type fleetResponseResult struct {
 }
 
 type fleetSessionResult struct {
-	SessionID   string    `json:"session_id"`
-	Agent       string    `json:"agent"`
-	Runtime     string    `json:"runtime"`
-	Status      string    `json:"status"`
-	StartedAt   time.Time `json:"started_at"`
-	TaskPreview string    `json:"task_preview"`
-	Attachable  bool      `json:"attachable"`
+	SessionID      string    `json:"session_id"`
+	ConversationID string    `json:"conversation_id"`
+	Agent          string    `json:"agent"`
+	Runtime        string    `json:"runtime"`
+	Status         string    `json:"status"`
+	StartedAt      time.Time `json:"started_at"`
+	TaskPreview    string    `json:"task_preview"`
+	Attachable     bool      `json:"attachable"`
 }
 
 // decodeFleetResponse decodes a JSON fleet response body.
@@ -424,4 +425,88 @@ func TestFleet_MethodNotAllowed(t *testing.T) {
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("POST /api/fleet: status=%d; want 405", resp.StatusCode)
 	}
+}
+
+// ---- 11. Fleet rows include conversation_id ---------------------------------
+//
+// Regression test for the IDE↔Chat mirroring fix: fleet rows must expose
+// conversation_id so the IDE picker can bind panes by conversation (the stable
+// key) rather than by the ephemeral session_id.
+
+func TestFleet_ConversationIDPresentInRow(t *testing.T) {
+	ts, tok, reg, srv := newFleetTestServer(t)
+
+	hub := srv.ChatHub()
+	if err := hub.OpenSession("sess-convid-1", "alice", false); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	t.Cleanup(func() { hub.CloseSession("sess-convid-1") })
+
+	reg.Add(dispatch.SessionEntry{
+		SessionID:      "sess-convid-1",
+		ConversationID: "conv-fixed-id-abc",
+		Agent:          "backend",
+		Runtime:        "claude",
+		OperatorID:     "alice",
+		TaskPreview:    "implement feature x",
+		StartedAt:      time.Now(),
+		Status:         dispatch.StatusRunning,
+	})
+
+	resp := get(t, ts.URL+"/api/fleet", tok)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/fleet: status=%d; want 200", resp.StatusCode)
+	}
+	fr := decodeFleetResponse(t, resp)
+
+	for _, s := range fr.Sessions {
+		if s.SessionID == "sess-convid-1" {
+			if s.ConversationID != "conv-fixed-id-abc" {
+				t.Errorf("fleet row conversation_id=%q; want 'conv-fixed-id-abc'", s.ConversationID)
+			}
+			return
+		}
+	}
+	t.Error("session 'sess-convid-1' not found in fleet snapshot")
+}
+
+// TestFleet_ConversationIDEmptyWhenNotSet verifies that rows with no
+// ConversationID do not error and return an empty/omitted conversation_id field.
+func TestFleet_ConversationIDEmptyWhenNotSet(t *testing.T) {
+	ts, tok, reg, srv := newFleetTestServer(t)
+
+	hub := srv.ChatHub()
+	if err := hub.OpenSession("sess-noconvid", "alice", false); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	t.Cleanup(func() { hub.CloseSession("sess-noconvid") })
+
+	// SessionEntry without ConversationID set (zero value).
+	reg.Add(dispatch.SessionEntry{
+		SessionID:   "sess-noconvid",
+		Agent:       "backend",
+		Runtime:     "claude",
+		OperatorID:  "alice",
+		TaskPreview: "some task",
+		StartedAt:   time.Now(),
+		Status:      dispatch.StatusRunning,
+	})
+
+	resp := get(t, ts.URL+"/api/fleet", tok)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/fleet: status=%d; want 200", resp.StatusCode)
+	}
+	fr := decodeFleetResponse(t, resp)
+
+	for _, s := range fr.Sessions {
+		if s.SessionID == "sess-noconvid" {
+			// ConversationID may be empty string (omitted from JSON → zero value in struct).
+			// This is valid — not every entry must have a ConversationID.
+			if s.ConversationID != "" {
+				t.Errorf("fleet row conversation_id=%q; want empty string when not set", s.ConversationID)
+			}
+			return
+		}
+	}
+	t.Error("session 'sess-noconvid' not found in fleet snapshot")
 }
