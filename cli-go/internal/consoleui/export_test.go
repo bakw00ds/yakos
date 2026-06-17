@@ -14,6 +14,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/authsession"
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/interactive"
 	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/userstore"
 	"github.com/bakw00ds/yakos/internal/workflow"
@@ -309,4 +310,15 @@ var FileContentHash = fileContentHash
 // full dispatch goroutine.
 func RegistryForTest(s *Server) *dispatch.SessionRegistry {
 	return s.fleet.registry
+}
+
+// ---- Interactive-P1 wiring test exports -------------------------------------
+
+// InteractiveMgrForTest returns the interactive.Manager wired into the
+// Server's chat handler.  Used by regression-guard tests to assert that
+// New() always constructs and wires a non-nil Manager so that
+// POST /api/chat/send never returns 503 "interactive mode not configured"
+// due to a missing wiring step.
+func InteractiveMgrForTest(s *Server) *interactive.Manager {
+	return s.chat.interactiveMgr
 }

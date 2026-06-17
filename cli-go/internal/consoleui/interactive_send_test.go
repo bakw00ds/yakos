@@ -86,9 +86,17 @@ func sendTurnHTTP(t *testing.T, s sendTestServer, body interface{}) *http.Respon
 	return resp
 }
 
-// TestChatSend_NoManager_503 verifies that /api/chat/send returns 503 when
-// no InteractiveManager is configured.
-func TestChatSend_NoManager_503(t *testing.T) {
+// TestChatSend_AutoConstructedManager_NoSession_404 verifies that when
+// Config.InteractiveManager is nil (the caller omits it), consoleui.New()
+// auto-constructs a Manager so that /api/chat/send never returns 503.
+//
+// Before the fix, nil Config.InteractiveManager propagated directly to
+// chatH.interactiveMgr, and /api/chat/send returned 503 "interactive mode
+// not configured" unconditionally.  After the fix, New() always constructs
+// the Manager internally, so the caller gets 404 (no live session) for a
+// valid conversationId that hasn't been started yet — NOT 503.
+func TestChatSend_AutoConstructedManager_NoSession_404(t *testing.T) {
+	// Pass nil — New() must auto-construct the Manager (fix regression).
 	s := newInteractiveSendTestServer(t, nil)
 	resp := sendTurnHTTP(t, s, map[string]string{
 		"conversationId": "conv-test",
@@ -96,8 +104,14 @@ func TestChatSend_NoManager_503(t *testing.T) {
 		"text":           "hello",
 	})
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("expected 503, got %d", resp.StatusCode)
+	// Must NOT be 503 (the pre-fix bug).  The auto-constructed Manager has no
+	// live session for "conv-test", so we expect 404 Not Found.
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		t.Error("got 503 'interactive mode not configured'; " +
+			"consoleui.New() must auto-construct the interactive.Manager when Config.InteractiveManager is nil")
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 (no live session), got %d", resp.StatusCode)
 	}
 }
 
@@ -239,9 +253,9 @@ func TestChatSend_TurnInFlight_409(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// A real Manager is needed so the `interactiveMgr != nil` guard in
-	// handleChatSend passes (returning 503 otherwise).  The Send path is
-	// replaced with the stub below, so no session or subprocess is created.
+	// Inject an explicit Manager so we can replace its Send path with the stub.
+	// (consoleui.New() would auto-construct one if mgr were nil, but we need
+	// to call SetInteractiveSender on the stub afterwards.)
 	mgr := interactive.NewManager(ctx, interactive.ManagerConfig{Cap: 4})
 	defer mgr.Stop()
 

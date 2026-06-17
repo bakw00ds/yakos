@@ -13,15 +13,21 @@
 package serve_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/serve"
+	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
 // ---- helper -----------------------------------------------------------------
@@ -410,5 +416,92 @@ func TestConsoleBind_WildcardWithoutExternalHost_Refuses(t *testing.T) {
 				t.Errorf("error should mention --console-external-host; got: %v", err)
 			}
 		})
+	}
+}
+
+// TestConsoleConfig_InteractiveManagerWired_ServeLayer is a regression guard at
+// the serve layer.  It verifies that the consoleui.Config produced by
+// BuildConsoleCfgForTest — which mirrors what serve.Run() passes to
+// consoleui.New() — never causes POST /api/chat/send to return 503
+// "interactive mode not configured".
+//
+// This closes the bug where serve.go never set Config.InteractiveManager, and
+// consoleui.New() did not auto-construct one, leaving POST /api/chat/send to
+// always return 503.
+//
+// The test is behavioral: it constructs a Server via the serve-derived Config
+// and sends a POST /api/chat/send request, asserting that the response is NOT
+// 503 (the pre-fix regression status).  A 404 (no live session) is the correct
+// response when the manager is wired but no session has been started.
+func TestConsoleConfig_InteractiveManagerWired_ServeLayer(t *testing.T) {
+	t.Parallel()
+
+	yakosRoot := repoRootForConsoleBind(t)
+	workspaceRoot := t.TempDir()
+
+	// Build the consoleCfg the same way serve.Run() does.
+	// InteractiveManager is intentionally not set by BuildConsoleCfgForTest —
+	// serve.go does not set it; consoleui.New() must auto-construct it.
+	serveCfg := serve.Config{
+		WorkspaceRoot: workspaceRoot,
+		YakosRoot:     yakosRoot,
+	}
+	consoleCfg := serve.BuildConsoleCfgForTest(serveCfg)
+
+	// Add a Bus and token (required by consoleui.New for the wsbus handler).
+	stateDir := t.TempDir()
+	tok, err := consoleui.LoadOrCreateToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	bus := wsbus.New()
+	t.Cleanup(bus.Stop)
+	consoleCfg.Token = tok
+	consoleCfg.Bus = bus
+	consoleCfg.KanbanBoardPath = t.TempDir() + "/kanban.md"
+	consoleCfg.PerfWorkDir = t.TempDir()
+	consoleCfg.MetricsProjectDir = t.TempDir()
+
+	// consoleui.New() must wire the interactive Manager internally.
+	srv, err := consoleui.New(consoleCfg)
+	if err != nil {
+		t.Fatalf("consoleui.New: %v", err)
+	}
+
+	// Wrap with token middleware and use httptest so we can issue real requests.
+	wrapped := consoleui.RequireTokenForNonStatic(tok,
+		consoleui.RequireJSONForMutations(srv.Handler()))
+	ts := httptest.NewServer(wrapped)
+	t.Cleanup(ts.Close)
+
+	// POST /api/chat/send with a valid (but non-existent) conversationId.
+	// Expected: 404 (no live session) — NOT 503 (feature not configured).
+	// 503 is the pre-fix regression; if we see it, the Manager was not wired.
+	body, _ := json.Marshal(map[string]string{
+		"conversationId": "conv-serve-layer-test",
+		"operatorId":     "alice",
+		"text":           "hello",
+	})
+	req, err := http.NewRequestWithContext(context.Background(),
+		http.MethodPost, ts.URL+"/api/chat/send", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/chat/send: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		t.Error("POST /api/chat/send returned 503 'interactive mode not configured'; " +
+			"consoleui.New() must auto-construct the interactive.Manager when " +
+			"serve.Config does not set Config.InteractiveManager")
+	}
+	// The expected non-error response for a valid request with no live session is 404.
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("POST /api/chat/send: got %d; want 404 (no live session for conversationId)", resp.StatusCode)
 	}
 }
