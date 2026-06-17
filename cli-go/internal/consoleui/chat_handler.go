@@ -66,6 +66,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os/exec"
@@ -155,6 +156,15 @@ type chatHandlers struct {
 	// interactiveMgr != nil first and only reaches interactiveSend when that
 	// guard passes, so interactiveSend is always non-nil when used.
 	interactiveSend interactiveSender
+
+	// sdkEngineFactory is the factory for SDKEngine instances (P2c).
+	// Non-nil only when --console-structured-questions is passed AND node+bundle
+	// are available.  Nil → 503 for structuredQuestions:true requests.
+	sdkEngineFactory *interactive.SDKEngineFactory
+
+	// pendingQuestions holds the per-conversation pending AskUserQuestion state
+	// for forged-answer prevention.  Always non-nil after New().
+	pendingQuestions *pendingQuestionStore
 }
 
 // interactiveSender is the minimal interface covering the Send method consumed
@@ -335,6 +345,18 @@ type DispatchRequest struct {
 	// The project is pinned server-side identically to the one-shot path.
 	// --permission-mode bypassPermissions matches the existing chat dispatch posture.
 	Interactive bool `json:"interactive"`
+
+	// StructuredQuestions opts into the SDK engine (P2c) instead of the CLI
+	// engine for this interactive session.  Requires interactive:true; ignored
+	// when interactive is false.
+	//
+	// When true: routes through Manager.EnsureSDK using the SDKEngineFactory.
+	// The factory must be non-nil (requires --console-structured-questions +
+	// node ≥18 + sidecar bundle); otherwise returns 503.
+	//
+	// When false (default): uses the existing CLI engine (Session) path.  Zero
+	// regression on all existing clients.
+	StructuredQuestions bool `json:"structuredQuestions"`
 }
 
 // DispatchResponse is the JSON body returned by POST /api/chat/dispatch.
@@ -770,12 +792,125 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				ev.Thinking = chunk.Thinking
 				ev.ThinkingTruncated = chunk.ThinkingTruncated
 				ev.ThinkingRedacted = chunk.ThinkingRedacted
+
+			case "ask_user_question":
+				// Record the pending question server-side for forged-answer prevention
+				// (P2c).  The pending-question store is keyed by conversationID so the
+				// /api/chat/answer handler can validate toolUseID and option labels before
+				// forwarding the answer to the engine.
+				//
+				// ask_user_question SSE is OWNER-PRIVATE: ChatHub.Route already enforces
+				// this via the ev.Type == "ask_user_question" carve-out, even on shared
+				// sessions.  We set the SSE fields here for the SSE delivery.
+				ev.AskToolUseID = chunk.AskToolUseID
+				ev.AskQuestionsJSON = chunk.AskQuestionsJSON
+				if ch.pendingQuestions != nil && chunk.AskToolUseID != "" {
+					ch.pendingQuestions.Set(conversationID, chunk.AskToolUseID, chunk.AskQuestionsJSON)
+				}
 			}
 			ch.hub.Route(ev)
 		}
 
-		// Interactive-P1: when interactive=true and an interactiveMgr is configured,
-		// route through the persistent session instead of RunStream.
+		// Interactive-P2c: when interactive=true AND structuredQuestions=true,
+		// route through the SDK engine (EnsureSDK).
+		//
+		// Gate: sdkEngineFactory must be non-nil (--console-structured-questions +
+		// node + bundle present).  If nil → 503 immediately.
+		if dispReq.Interactive && dispReq.StructuredQuestions {
+			if ch.sdkEngineFactory == nil {
+				exitStatus = dispatch.StatusFailed
+				exitCode = -1
+				errText := "structured questions require --console-structured-questions (and node ≥18 + sidecar bundle)"
+				_ = ch.transcripts.Append(TranscriptEntry{
+					SessionID:      dispReq.SessionID,
+					ConversationID: conversationID,
+					OperatorID:     capturedOperatorID,
+					Role:           RoleError,
+					Text:           errText,
+				})
+				ch.hub.Route(SSEEvent{
+					SessionID:      dispReq.SessionID,
+					ConversationID: conversationID,
+					Type:           "error",
+					Text:           errText,
+					TS:             time.Now().UTC().Format(time.RFC3339Nano),
+				})
+				sharedAtFinish = ch.hub.IsShared(dispReq.SessionID)
+				return
+			}
+
+			sdkParams := interactive.SDKEngineParams{
+				ConversationID:  conversationID,
+				OwnerOperatorID: capturedOperatorID,
+				OnChunk:         onChunk,
+				YakosRoot:       ch.yakosRoot,
+			}
+
+			// Ensure the SDK session exists (create if new, return existing if same owner).
+			sess, ensureErr := ch.interactiveMgr.EnsureSDK(conversationID, capturedOperatorID, sdkParams, *ch.sdkEngineFactory)
+			if ensureErr != nil {
+				exitStatus = dispatch.StatusFailed
+				exitCode = -1
+				errText := fmt.Sprintf("interactive: SDK start failed: %s", ensureErr.Error())
+				_ = ch.transcripts.Append(TranscriptEntry{
+					SessionID:      dispReq.SessionID,
+					ConversationID: conversationID,
+					OperatorID:     capturedOperatorID,
+					Role:           RoleError,
+					Text:           errText,
+				})
+				ch.hub.Route(SSEEvent{
+					SessionID:      dispReq.SessionID,
+					ConversationID: conversationID,
+					Type:           "error",
+					Text:           errText,
+					TS:             time.Now().UTC().Format(time.RFC3339Nano),
+				})
+				sharedAtFinish = ch.hub.IsShared(dispReq.SessionID)
+				return
+			}
+
+			// Deliver the first turn.
+			frame := runtime.EncodeUserTurn(dispReq.Task)
+			if sendErr := ch.interactiveMgr.Send(conversationID, capturedOperatorID, frame); sendErr != nil {
+				exitStatus = dispatch.StatusFailed
+				exitCode = -1
+				errText := fmt.Sprintf("interactive: SDK send failed: %s", sendErr.Error())
+				_ = ch.transcripts.Append(TranscriptEntry{
+					SessionID:      dispReq.SessionID,
+					ConversationID: conversationID,
+					OperatorID:     capturedOperatorID,
+					Role:           RoleError,
+					Text:           errText,
+				})
+				ch.hub.Route(SSEEvent{
+					SessionID:      dispReq.SessionID,
+					ConversationID: conversationID,
+					Type:           "error",
+					Text:           errText,
+					TS:             time.Now().UTC().Format(time.RFC3339Nano),
+				})
+				// Don't return: the session is alive; let it run until closed.
+			}
+
+			// Wait for the SDK session to close (crash, idle reap, or cancel).
+			select {
+			case <-sess.Closed():
+			case <-ctx.Done():
+				ch.interactiveMgr.Close(conversationID)
+			}
+
+			// Clear any stale pending question on session close.
+			if ch.pendingQuestions != nil {
+				ch.pendingQuestions.Clear(conversationID)
+			}
+			sharedAtFinish = ch.hub.IsShared(dispReq.SessionID)
+			return
+		}
+
+		// Interactive-P1: when interactive=true (without structuredQuestions) and an
+		// interactiveMgr is configured, route through the persistent CLI session
+		// instead of RunStream.
 		//
 		// This goroutine stays alive (blocking on sess.Closed()) so that the
 		// deferred hub.CloseSession only fires when the interactive session itself
@@ -1331,6 +1466,219 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		OperatorID:     effectiveOperatorID,
 		Role:           RoleUser,
 		Text:           req.Text,
+	})
+
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// ---- POST /api/chat/answer -------------------------------------------------
+
+// AnswerRequest is the JSON body for POST /api/chat/answer.
+//
+// Delivers the operator's answer to an AskUserQuestion tool call (P2c).
+// The caller must be the conversation OWNER (403 for non-owners).
+//
+// Security notes:
+//   - operatorId is resolved from the cert CN (mTLS) or from the body
+//     (cooperative-label path), identical to /api/chat/send.
+//   - toolUseId MUST match the session's currently-pending question (404 on
+//     mismatch; single-use: a second answer returns 409).
+//   - answers keys must be declared option labels/keys from the original
+//     ask_user_question (unknown options → 400).
+//   - multiSelect is enforced: at most 1 answer for single-select questions.
+//   - response and answers are size-bounded to dispatch.MaxTaskBytes.
+//   - questionsJSON is NOT accepted from the client; the server-recorded value
+//     from pendingQuestionStore is always used (forged-answer prevention).
+//
+// Idempotency-Key: not declared — each answer is one-time-use by construction
+// (the pending entry is cleared on acceptance; retrying returns 409).
+type AnswerRequest struct {
+	ConversationID  string            `json:"conversationId"`
+	OperatorID      string            `json:"operatorId"`
+	SessionID       string            `json:"sessionId,omitempty"`
+	ToolUseID       string            `json:"toolUseId"`
+	Answers         map[string]string `json:"answers"` // question text → chosen option label
+	Response        string            `json:"response,omitempty"`
+	AnnotationsJSON string            `json:"annotations,omitempty"`
+	// QuestionsJSON is intentionally absent: the server always uses the value
+	// recorded by pendingQuestionStore when the ask_user_question SSE was emitted.
+	// Clients cannot substitute this value.
+}
+
+// handleChatAnswer delivers the operator's answer to an AskUserQuestion tool call.
+//
+// Response codes:
+//   - 202 Accepted: answer delivered.
+//   - 400 Bad Request: missing/invalid fields, unknown option, multiSelect violation.
+//   - 403 Forbidden: caller is not the conversation owner.
+//   - 404 Not Found: no live session OR toolUseId does not match pending question
+//     (404 for mismatch so we don't leak pending state).
+//   - 409 Conflict: question already answered (single-use enforcement).
+//   - 501 Not Implemented: engine does not support AnswerQuestion (CLI engine).
+//   - 503 Service Unavailable: interactive mode not configured.
+func (ch *chatHandlers) handleChatAnswer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if ch.interactiveMgr == nil {
+		http.Error(w, "interactive mode not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	// R2: cap request body before decoding to prevent memory exhaustion.
+	var req AnswerRequest
+	dec := json.NewDecoder(io.LimitReader(r.Body, int64(dispatch.MaxTaskBytes)+1))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// --- Required field validation ---
+	if strings.TrimSpace(req.ConversationID) == "" {
+		http.Error(w, "conversationId is required", http.StatusBadRequest)
+		return
+	}
+	if err := dispatch.ValidateIdentityField("conversation_id", req.ConversationID); err != nil {
+		http.Error(w, "invalid conversationId", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.ToolUseID) == "" {
+		http.Error(w, "toolUseId is required", http.StatusBadRequest)
+		return
+	}
+
+	// sessionId is optional but validated when present.
+	if req.SessionID != "" {
+		if err := dispatch.ValidateIdentityField("session_id", req.SessionID); err != nil {
+			http.Error(w, "invalid sessionId", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// R2: Size-bound all client-supplied answer fields forwarded to the sidecar.
+	if len(req.Response) > dispatch.MaxTaskBytes {
+		http.Error(w, "request body too large", http.StatusBadRequest)
+		return
+	}
+	if len(req.AnnotationsJSON) > dispatch.MaxTaskBytes {
+		http.Error(w, "request body too large", http.StatusBadRequest)
+		return
+	}
+	var answersTotal int
+	for _, v := range req.Answers {
+		answersTotal += len(v)
+	}
+	if answersTotal > dispatch.MaxTaskBytes {
+		http.Error(w, "request body too large", http.StatusBadRequest)
+		return
+	}
+
+	// C1 dual-regime operator_id (identical to dispatch handler).
+	capturedIdentity := netid.IdentityFrom(r.Context())
+	var effectiveOperatorID string
+	if capturedIdentity.Authenticated {
+		effectiveOperatorID = capturedIdentity.OperatorID
+	} else {
+		if strings.TrimSpace(req.OperatorID) == "" {
+			http.Error(w, "operatorId is required", http.StatusBadRequest)
+			return
+		}
+		if err := dispatch.ValidateIdentityField("operator_id", req.OperatorID); err != nil {
+			http.Error(w, "invalid operatorId", http.StatusBadRequest)
+			return
+		}
+		effectiveOperatorID = req.OperatorID
+	}
+
+	// R3: Ownership check BEFORE consuming the pending entry.
+	//
+	// A non-owner attempt must not burn the legitimate owner's pending question.
+	// Check that a live session exists and that effectiveOperatorID is its owner
+	// before calling ValidateAndConsume (which marks the question consumed).
+	exists, owned := ch.interactiveMgr.IsOwner(req.ConversationID, effectiveOperatorID)
+	if !exists {
+		http.Error(w, "no live session for this conversationId", http.StatusNotFound)
+		return
+	}
+	if !owned {
+		http.Error(w, "forbidden: session owned by different operator", http.StatusForbidden)
+		return
+	}
+
+	// --- Forged-answer prevention: validate toolUseID + option labels ---
+	// ValidateAndConsume checks:
+	//   1. A pending question exists for this conversationID.
+	//   2. toolUseID matches exactly (mismatch → errPendingNoPendingQuestion → 404).
+	//   3. Chosen option labels/keys are among those declared (unknown → 400).
+	//   4. multiSelect enforcement (>1 answer on single-select → 400).
+	// On success it clears the pending entry (single-use) and returns questionsJSON.
+	// questionsJSON is ALWAYS from server-recorded state; the client cannot supply it.
+	if ch.pendingQuestions == nil {
+		// Safety: pendingQuestions is always set by New(); this guard is defensive.
+		http.Error(w, "answer service not configured", http.StatusServiceUnavailable)
+		return
+	}
+	questionsJSON, pqErr := ch.pendingQuestions.ValidateAndConsume(req.ConversationID, req.ToolUseID, req.Answers)
+	if pqErr != nil {
+		switch {
+		case errors.Is(pqErr, errPendingNoPendingQuestion):
+			// 404: no matching pending question.  We intentionally do not distinguish
+			// "no question at all" from "wrong toolUseId" to avoid leaking state.
+			http.Error(w, "not found", http.StatusNotFound)
+		case errors.Is(pqErr, errPendingAlreadyConsumed):
+			http.Error(w, "question already answered", http.StatusConflict)
+		case errors.Is(pqErr, errPendingUnknownOption):
+			http.Error(w, pqErr.Error(), http.StatusBadRequest)
+		case errors.Is(pqErr, errPendingMultiSelectViolation):
+			http.Error(w, pqErr.Error(), http.StatusBadRequest)
+		default:
+			slog.Error("consoleui: pending question validate", "err", pqErr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// --- Forward answer to engine ---
+	// questionsJSON is the server-recorded value from pendingQuestionStore; never
+	// overridden by anything from the client request (R1).
+	answer := interactive.QuestionAnswer{
+		Answers:         req.Answers,
+		Response:        req.Response,
+		AnnotationsJSON: req.AnnotationsJSON,
+		QuestionsJSON:   questionsJSON,
+	}
+
+	if err := ch.interactiveMgr.AnswerQuestion(req.ConversationID, effectiveOperatorID, req.ToolUseID, answer); err != nil {
+		switch {
+		case errors.Is(err, interactive.ErrNoSession):
+			http.Error(w, "no live session for this conversationId", http.StatusNotFound)
+		case errors.Is(err, interactive.ErrOwnerConflict):
+			http.Error(w, "forbidden: session owned by different operator", http.StatusForbidden)
+		case errors.Is(err, interactive.ErrAnswerUnsupported):
+			http.Error(w, "engine does not support structured questions (CLI engine; use structuredQuestions:true)", http.StatusNotImplemented)
+		default:
+			slog.Error("consoleui: chat answer error",
+				"conversationID", req.ConversationID,
+				"toolUseID", req.ToolUseID,
+				"err", err,
+			)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Append the question + answer to the transcript so the conversation record
+	// reflects it.  The answer is recorded as a "question_answer" role entry.
+	answerJSON, _ := json.Marshal(req.Answers)
+	_ = ch.transcripts.Append(TranscriptEntry{
+		SessionID:      req.SessionID,
+		ConversationID: req.ConversationID,
+		OperatorID:     effectiveOperatorID,
+		Role:           RoleQuestionAnswer,
+		Text:           string(answerJSON),
 	})
 
 	w.WriteHeader(http.StatusAccepted)

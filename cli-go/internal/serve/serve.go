@@ -40,6 +40,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/filewatch"
+	"github.com/bakw00ds/yakos/internal/interactive"
 	"github.com/bakw00ds/yakos/internal/grpcserver"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/mcpserver"
@@ -171,6 +172,18 @@ type Config struct {
 	// Activated by --console-allow-bash in runServe.  A loud WARNING banner is
 	// printed when this flag is set and the console is in networked mode.
 	ConsoleAllowBash bool
+
+	// ConsoleStructuredQuestions, when true, activates the SDK engine (P2c) for
+	// interactive sessions with structuredQuestions:true.  Requires node ≥18 in
+	// PATH and the sidecar bundle to be available.
+	//
+	// When true: Run() calls interactive.NewSDKEngineFactory(yakosRoot) and
+	// passes the result as consoleui.Config.SDKEngineFactory.  If node/bundle
+	// are missing, a WARNING is logged and the factory is left nil (→ 503 for
+	// structuredQuestions requests); the daemon still starts.
+	//
+	// Activated by --console-structured-questions in runServe.  Off by default.
+	ConsoleStructuredQuestions bool
 
 	// Bus is the in-process event bus shared between the JSON-RPC layer and the
 	// WebSocket layer.  If nil, a new Bus is created by Run.  Inject for tests.
@@ -574,6 +587,23 @@ func Run(ctx context.Context, cfg Config) error {
 			UserStore:          uStore,
 			AllowNetworkedBash: cfg.ConsoleAllowBash,
 			WorktreeManager:    wtMgr,
+		}
+
+		// Wire the SDK engine factory when --console-structured-questions is set.
+		// Build the factory once at startup so node/bundle resolution is done
+		// eagerly.  If either is missing, log a WARNING and leave the factory nil
+		// (→ 503 for structuredQuestions requests); do NOT fail the daemon startup.
+		if cfg.ConsoleStructuredQuestions {
+			sdkFactory, sdkErr := interactive.NewSDKEngineFactory(cfg.YakosRoot)
+			if sdkErr != nil {
+				slog.Warn("serve: --console-structured-questions: SDK engine unavailable; "+
+					"structuredQuestions requests will return 503",
+					"err", sdkErr)
+				// factory remains nil → 503 path
+			} else {
+				consoleCfg.SDKEngineFactory = &sdkFactory
+				slog.Info("serve: --console-structured-questions: SDK engine factory ready")
+			}
 		}
 
 		if networked {

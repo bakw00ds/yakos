@@ -56,6 +56,11 @@ const (
 	// display in the chat UI.  Persisted so the conversation record reflects the
 	// failure rather than ending with only a user turn.
 	RoleError TranscriptRole = "error"
+	// RoleQuestionAnswer records the operator's answer to an AskUserQuestion
+	// tool call (P2c).  The Text field carries a JSON-encoded map[string]string
+	// of {questionText: chosenOptionLabel}.  Persisted after successful delivery
+	// to the engine so the conversation record reflects the answer.
+	RoleQuestionAnswer TranscriptRole = "question_answer"
 )
 
 // TranscriptEntry is one NDJSON line in a chat transcript file.

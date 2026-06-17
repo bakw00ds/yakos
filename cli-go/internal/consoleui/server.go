@@ -265,6 +265,16 @@ type Config struct {
 	// serve.go constructs this from interactive.NewManager(serverCtx, cfg).
 	// Tests may inject a fake manager.
 	InteractiveManager *interactive.Manager
+
+	// SDKEngineFactory, when non-nil, enables the structured-questions
+	// (Interactive-P2c) path.  When nil, POST /api/chat/dispatch with
+	// interactive:true AND structuredQuestions:true returns 503.
+	//
+	// serve.go constructs this via interactive.NewSDKEngineFactory(yakosRoot)
+	// when --console-structured-questions is passed.  If node/bundle are
+	// missing, the factory is nil (→ 503); no hard fail at startup.
+	// Tests may inject a factory built with interactive.NewSDKEngineWithProvider.
+	SDKEngineFactory *interactive.SDKEngineFactory
 }
 
 func (c *Config) addr() string {
@@ -399,6 +409,13 @@ func New(cfg Config) (*Server, error) {
 	}
 	chatH.interactiveMgr = interactiveMgr
 	chatH.interactiveSend = interactiveMgr
+	// Wire the SDK engine factory (P2c) — nil when --console-structured-questions
+	// is not passed (or node/bundle are missing).  The 503 path in handleChatDispatch
+	// handles the nil case gracefully.
+	chatH.sdkEngineFactory = cfg.SDKEngineFactory
+	// Allocate the pending-question store (P2c forged-answer prevention).
+	// Always allocated; the store is a no-op map until an ask_user_question fires.
+	chatH.pendingQuestions = newPendingQuestionStore()
 	flowsH := &flowsHandlers{
 		engine:     cfg.WorkflowEngine,
 		workDir:    cfg.WorkDir,
@@ -895,6 +912,22 @@ func (s *Server) registerRoutes() {
 	// may subscribe to the SSE stream but cannot send turns.
 	// CSRF + JSON-mutation gates applied by the global middleware in New().
 	s.mux.HandleFunc("/api/chat/send", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatSend))
+	// POST /api/chat/answer — deliver the operator's answer to an AskUserQuestion
+	// tool call (P2c structured-questions path).
+	//
+	// Security:
+	//   - RoleDispatch: same as /api/chat/send (only session owner may answer).
+	//   - Owner-scoped via authenticated identity (cert CN or loopback label).
+	//   - CSRF + JSON-mutation gates applied by the global middleware in New().
+	//   - Forged-answer prevention: toolUseId must match the server-side pending
+	//     question; single-use; option-key validation; multiSelect enforcement.
+	//   - Non-owner → 403; toolUseId mismatch → 404; replay → 409; unknown option → 400.
+	//
+	// Rate-limit class: inherits the project default (same as /api/chat/send).
+	//
+	// Idempotency-Key: not declared — single-use by construction (pending entry
+	// cleared on acceptance; retrying returns 409).
+	s.mux.HandleFunc("/api/chat/answer", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatAnswer))
 
 	// ---- Phase 5: Flows UI endpoints (token-gated at edge) ------------------
 	// GET  /flows/api/workflows          — list workflow names (RoleRead)

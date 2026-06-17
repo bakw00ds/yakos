@@ -66,6 +66,16 @@ var ErrNoSession = errors.New("interactive: no live session for this conversatio
 // The caller must return 429.
 var ErrCapExceeded = errors.New("interactive: session cap exceeded")
 
+// ErrNoPendingQuestion is returned by the answer handler when the supplied
+// toolUseID does not match the session's currently-pending question.
+// The caller must return 404 (do not leak existence).
+var ErrNoPendingQuestion = errors.New("interactive: no pending question matching this toolUseID")
+
+// ErrAnswerAlreadyConsumed is returned by the answer handler when a pending
+// question was already answered (single-use enforcement).
+// The caller must return 409.
+var ErrAnswerAlreadyConsumed = errors.New("interactive: question already answered")
+
 // managerEntry holds one live engine (session) and its associated metadata.
 type managerEntry struct {
 	session Engine
@@ -144,6 +154,77 @@ func NewManager(ctx context.Context, cfg ManagerConfig) *Manager {
 // close each session individually via Close(conversationID).
 func (m *Manager) Stop() {
 	m.stopOnce.Do(func() { close(m.stop) })
+}
+
+// EnsureSDK returns (or creates) the live SDK engine for conversationID.
+//
+// If no engine exists, a new SDKEngine is created via factory and started.
+// If an engine exists and ownerOperatorID matches, the existing engine is
+// returned.  If an engine exists but is owned by a different operator, returns
+// ErrOwnerConflict.
+//
+// All lifecycle semantics (cap, idle-reap, owner-conflict, turn-in-flight,
+// crash-detection/OnError, group-kill) are identical to Ensure — the only
+// difference is the engine type: SDKEngine instead of the CLI Session.
+//
+// factory must not be nil.  params.ConversationID and params.OwnerOperatorID
+// are always overwritten by the conversationID and ownerOperatorID arguments.
+func (m *Manager) EnsureSDK(conversationID, ownerOperatorID string, params SDKEngineParams, factory SDKEngineFactory) (Engine, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if entry, ok := m.entries[conversationID]; ok {
+		if entry.session.OwnerOperatorID() != ownerOperatorID {
+			return nil, ErrOwnerConflict
+		}
+		if entry.session.IsClosed() {
+			delete(m.entries, conversationID)
+		} else {
+			return entry.session, nil
+		}
+	}
+
+	if len(m.entries) >= m.cap {
+		return nil, ErrCapExceeded
+	}
+
+	params.ConversationID = conversationID
+	params.OwnerOperatorID = ownerOperatorID
+
+	eng, err := factory(params)
+	if err != nil {
+		return nil, fmt.Errorf("interactive: EnsureSDK factory: %w", err)
+	}
+
+	if err := eng.Start(context.Background()); err != nil {
+		return nil, fmt.Errorf("interactive: EnsureSDK start: %w", err)
+	}
+
+	m.entries[conversationID] = &managerEntry{session: eng}
+
+	go func() {
+		<-eng.Closed()
+
+		m.mu.Lock()
+		_, stillPresent := m.entries[conversationID]
+		if stillPresent {
+			delete(m.entries, conversationID)
+		}
+		m.mu.Unlock()
+
+		if stillPresent {
+			slog.Warn("interactive: SDK engine exited unexpectedly",
+				"conversationID", conversationID,
+				"owner", ownerOperatorID,
+			)
+			if m.onError != nil {
+				m.onError(conversationID, conversationID, ownerOperatorID,
+					"interactive SDK session exited unexpectedly")
+			}
+		}
+	}()
+
+	return eng, nil
 }
 
 // Ensure returns (or creates) the live engine for conversationID.
@@ -229,12 +310,82 @@ func (m *Manager) Ensure(conversationID, ownerOperatorID string, params SessionP
 	return sess, nil
 }
 
+// IsOwner reports whether a live session exists for conversationID and, if so,
+// whether ownerOperatorID is its owner.
+//
+// This is a non-consuming read-only check intended for pre-flight ownership
+// validation BEFORE calling ValidateAndConsume on the pending-question store.
+// By checking ownership first, a non-owner attempt cannot consume (burn) the
+// legitimate owner's pending-question entry.
+//
+// # Lock-free field read safety
+//
+// IsOwner takes the manager lock to look up the entry pointer, then drops it
+// before reading entry.session fields.  This is safe because managerEntry.session
+// is write-once: it is set at construction time and never mutated; only the map
+// entry itself is replaced (by reaper or crash-detection goroutine removing it).
+// Once IsOwner holds a stable pointer to *managerEntry, OwnerOperatorID() and
+// IsClosed() read immutable / goroutine-safe fields on the Engine interface.
+//
+// The same stable-pointer reasoning applies to Send and AnswerQuestion; this
+// comment documents the invariant for all three callers.
+func (m *Manager) IsOwner(conversationID, operatorID string) (exists bool, owned bool) {
+	m.mu.Lock()
+	entry, ok := m.entries[conversationID]
+	m.mu.Unlock()
+
+	if !ok {
+		return false, false
+	}
+	if entry.session.IsClosed() {
+		return false, false
+	}
+	return true, entry.session.OwnerOperatorID() == operatorID
+}
+
+// AnswerQuestion delivers the operator's answer to an AskUserQuestion tool call
+// on the session identified by conversationID.
+//
+// Returns ErrNoSession (→ 404) when no live session exists.
+// Returns ErrOwnerConflict (→ 403) when the conversationID is owned by a
+// different operator.
+// Returns interactive.ErrAnswerUnsupported (→ 501) when the engine does not
+// support answering (CLI engine).
+// Returns ErrNoPendingQuestion (→ 404) when toolUseID does not match the
+// session's currently pending question.
+// Returns ErrAnswerAlreadyConsumed (→ 409) when the pending question was
+// already answered.
+// R4 invariant: the ownership check below reads entry.session fields after
+// dropping the lock.  This is safe because managerEntry.session is write-once
+// (set at construction, never mutated; only the map entry is replaced).
+// See IsOwner for the full stable-pointer explanation.
+func (m *Manager) AnswerQuestion(conversationID, ownerOperatorID, toolUseID string, answer QuestionAnswer) error {
+	m.mu.Lock()
+	entry, ok := m.entries[conversationID]
+	m.mu.Unlock()
+
+	if !ok {
+		return ErrNoSession
+	}
+	if entry.session.OwnerOperatorID() != ownerOperatorID {
+		return ErrOwnerConflict
+	}
+	if entry.session.IsClosed() {
+		return ErrNoSession
+	}
+	return entry.session.AnswerQuestion(toolUseID, answer)
+}
+
 // Send delivers a user-turn frame to the session identified by conversationID.
 //
 // Returns ErrNoSession (→ 404) when no live session exists.
 // Returns ErrOwnerConflict (→ 403) when the conversationID is owned by a
 // different operator.
 // Returns ErrTurnInFlight (→ 409) when a turn is already in progress.
+// R4 invariant: the ownership check below reads entry.session fields after
+// dropping the lock.  managerEntry.session is write-once (set at construction,
+// never mutated); reading OwnerOperatorID() / IsClosed() off the stable pointer
+// is safe without holding the lock.  See IsOwner for the full explanation.
 func (m *Manager) Send(conversationID, ownerOperatorID string, frame []byte) error {
 	m.mu.Lock()
 	entry, ok := m.entries[conversationID]
