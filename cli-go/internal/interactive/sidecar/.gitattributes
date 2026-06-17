@@ -1,0 +1,5 @@
+# Ensure LF line endings for JS files across platforms.
+# The bundle is text (not binary) so eol=lf is correct.
+# Adding -crlf -text as binary would break git diff; LF enforcement is sufficient.
+*.js  eol=lf
+*.mjs eol=lf
