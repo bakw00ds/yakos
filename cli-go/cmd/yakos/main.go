@@ -5585,6 +5585,7 @@ func runServe(yakosRoot string, args []string) {
 	consoleBootstrapCertName := ""
 	noBootstrapCert := false
 	consoleAllowBash := false
+	consoleStructuredQuestions := false
 
 	// YAKOS_ROOT env override mirrors runValidate / runRefresh behavior:
 	// when the binary is not installed at <root>/bin/yakos (e.g. in tests or
@@ -5670,6 +5671,8 @@ func runServe(yakosRoot string, args []string) {
 			noBootstrapCert = true
 		case "--console-allow-bash":
 			consoleAllowBash = true
+		case "--console-structured-questions":
+			consoleStructuredQuestions = true
 		case "--detach":
 			detach = true
 		default:
@@ -5755,20 +5758,21 @@ func runServe(yakosRoot string, args []string) {
 	perfTok, _ := internalperfdash.LoadOrCreatePerfToken(perfStateDir)
 
 	cfg := internalserve.Config{
-		WorkspaceRoot:            workspaceRoot,
-		SocketPath:               socketPath,
-		PIDFile:                  pidFile,
-		YakosRoot:                yakosRoot,
-		WSAddr:                   wsAddr,
-		PerfAddr:                 perfAddr,
-		NoPerfDash:               noPerfDash,
-		ConsoleAddr:              consoleAddr,
-		ConsoleBind:              consoleBind,
-		ConsoleExternalHosts:     consoleExternalHosts,
-		NoConsole:                noConsole,
-		ConsoleBootstrapCertName: consoleBootstrapCertName,
-		NoBootstrapCert:          noBootstrapCert,
-		ConsoleAllowBash:         consoleAllowBash,
+		WorkspaceRoot:                workspaceRoot,
+		SocketPath:                   socketPath,
+		PIDFile:                      pidFile,
+		YakosRoot:                    yakosRoot,
+		WSAddr:                       wsAddr,
+		PerfAddr:                     perfAddr,
+		NoPerfDash:                   noPerfDash,
+		ConsoleAddr:                  consoleAddr,
+		ConsoleBind:                  consoleBind,
+		ConsoleExternalHosts:         consoleExternalHosts,
+		NoConsole:                    noConsole,
+		ConsoleBootstrapCertName:     consoleBootstrapCertName,
+		NoBootstrapCert:              noBootstrapCert,
+		ConsoleAllowBash:             consoleAllowBash,
+		ConsoleStructuredQuestions:   consoleStructuredQuestions,
 	}
 
 	wsBindAddr := wsAddr

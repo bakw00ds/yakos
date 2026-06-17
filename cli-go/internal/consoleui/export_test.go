@@ -322,3 +322,66 @@ func RegistryForTest(s *Server) *dispatch.SessionRegistry {
 func InteractiveMgrForTest(s *Server) *interactive.Manager {
 	return s.chat.interactiveMgr
 }
+
+// ---- P2c: answer-handler test exports ----------------------------------------
+
+// PendingQuestionStore is a test-visible wrapper around pendingQuestionStore.
+// Tests in consoleui_test can call Set and ValidateAndConsume via this wrapper.
+type PendingQuestionStore struct{ inner *pendingQuestionStore }
+
+// Set records a pending question for conversationID.
+func (p *PendingQuestionStore) Set(conversationID, toolUseID, questionsJSON string) {
+	p.inner.Set(conversationID, toolUseID, questionsJSON)
+}
+
+// ValidateAndConsume validates and consumes the pending question.
+func (p *PendingQuestionStore) ValidateAndConsume(conversationID, toolUseID string, answers map[string]string) (string, error) {
+	return p.inner.ValidateAndConsume(conversationID, toolUseID, answers)
+}
+
+// NewPendingQuestionStoreForTest allocates a fresh pendingQuestionStore wrapped
+// in a test-visible PendingQuestionStore.
+func NewPendingQuestionStoreForTest() *PendingQuestionStore {
+	return &PendingQuestionStore{inner: newPendingQuestionStore()}
+}
+
+// SetPendingQuestionForTest sets a pending question for conversationID on the
+// given server.  Used by tests to pre-seed the pending-question state without
+// going through the dispatch goroutine.
+func SetPendingQuestionForTest(s *Server, conversationID, toolUseID, questionsJSON string) {
+	s.chat.pendingQuestions.Set(conversationID, toolUseID, questionsJSON)
+}
+
+// SetInteractiveMgrNilForTest forces the server's interactiveMgr to nil.
+// Used by the 503 test to exercise the "interactive mode not configured" guard
+// in handleChatAnswer without needing to reconstruct the server.
+func SetInteractiveMgrNilForTest(s *Server) {
+	s.chat.interactiveMgr = nil
+}
+
+// FakeSDKEngineFactoryForTest returns a non-nil *interactive.SDKEngineFactory.
+// The factory always returns an error (no real node process is started) but is
+// non-nil, making it suitable for testing that the factory pointer is wired
+// into chatHandlers by Config.SDKEngineFactory.
+func FakeSDKEngineFactoryForTest() *interactive.SDKEngineFactory {
+	f := interactive.FakeSDKEngineFactory()
+	return &f
+}
+
+// SDKEngineFactoryForTest returns the sdkEngineFactory wired into the Server's
+// chat handler, or nil if not configured.
+func SDKEngineFactoryForTest(s *Server) *interactive.SDKEngineFactory {
+	return s.chat.sdkEngineFactory
+}
+
+// ErrPendingNoPendingQuestion is the exported sentinel for the "no pending
+// question" error from the pending-question store.
+var ErrPendingNoPendingQuestion = errPendingNoPendingQuestion
+
+// ErrPendingAlreadyConsumed is the exported sentinel for the "question already
+// answered" error from the pending-question store (replay → 409).
+var ErrPendingAlreadyConsumed = errPendingAlreadyConsumed
+
+// ErrPendingUnknownOption is the exported sentinel for the "unknown option"
+// error from the pending-question store.
+var ErrPendingUnknownOption = errPendingUnknownOption

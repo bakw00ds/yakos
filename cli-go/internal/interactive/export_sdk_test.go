@@ -9,3 +9,4 @@ package interactive
 func ParseNodeMajorExported(version string) int {
 	return parseNodeMajor(version)
 }
+

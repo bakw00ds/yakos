@@ -138,6 +138,19 @@ type SSEEvent struct {
 	// (Type=="tool_result" only).
 	IsError bool `json:"is_error,omitempty"`
 
+	// AskToolUseID is the tool_use_id from an ask_user_question event
+	// (Type=="ask_user_question" only).  Delivered OWNER-PRIVATE: only the
+	// session owner's SSE connections receive this event type, even on shared
+	// sessions.  Watchers must not see or answer the owner's questions
+	// (confused-deputy defence).
+	AskToolUseID string `json:"ask_tool_use_id,omitempty"`
+
+	// AskQuestionsJSON is the JSON-encoded questions array from an
+	// ask_user_question event (Type=="ask_user_question" only).
+	// Shape: [{"text":"...","options":[...],"multiSelect":bool}].
+	// Delivered OWNER-PRIVATE (same rule as AskToolUseID).
+	AskQuestionsJSON string `json:"ask_questions_json,omitempty"`
+
 	// TS is the hub-stamped delivery time (RFC3339Nano).
 	TS string `json:"ts"`
 }
@@ -365,6 +378,16 @@ func (h *ChatHub) Route(ev SSEEvent) {
 		case conn.ch <- ev:
 		default: // channel full — drop for this connection only
 		}
+	}
+
+	// ask_user_question is ALWAYS owner-private, even on shared sessions.
+	// A watcher on a shared session must not receive (or answer) the owner's
+	// question — confused-deputy defence.
+	if ev.Type == "ask_user_question" {
+		for _, conn := range h.conns[entry.ownerOperatorID] {
+			deliver(conn)
+		}
+		return
 	}
 
 	if entry.shared {
