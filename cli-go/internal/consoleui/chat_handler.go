@@ -1255,19 +1255,40 @@ func (ch *chatHandlers) handleChatTranscript(w http.ResponseWriter, r *http.Requ
 
 // ShareRequest is the JSON body for POST /api/chat/share.
 //
-// Only the session owner may change the shared flag.  A non-owner attempting
-// this receives 403.  A non-existent session receives 404.
+// conversationId (primary key, required): the stable conversation identifier.
+// shared (required): the desired shared state — explicit set rather than
+//   blind toggle avoids races when the client retries.
+// operatorId: required on the loopback bearer path; ignored when cert CN is
+//   available (C1 dual-regime, same as /api/chat/send and /api/chat/answer).
+//
+// The share state is keyed on conversationId and persists across session
+// boundaries: a pane may be shared or unshared whether or not a live session
+// is currently active.
+//
+// Idempotency: the endpoint is idempotent — POSTing the same {conversationId,
+// shared} twice returns 200 both times with no side-effect on the second call.
 type ShareRequest struct {
-	SessionID  string `json:"sessionId"`
-	OperatorID string `json:"operatorId"`
-	Shared     bool   `json:"shared"`
+	ConversationID string `json:"conversationId"`
+	OperatorID     string `json:"operatorId"`
+	Shared         bool   `json:"shared"`
 }
 
-// handleChatShare flips the shared flag on a session.
+// handleChatShare sets the shared flag on a conversation.
 //
-// Security: only the session owner (identified by operatorId == session owner)
-// may promote or demote a session.  Auth is enforced at the edge
-// (requireTokenForNonStatic); no re-check here.
+// Unlike the old session-keyed SetShared, this endpoint operates on the stable
+// conversationId so it works whether or not a live session is currently active.
+//
+// Response codes:
+//   - 200 OK:      {"shared": bool, "warning": string (omitempty)}
+//   - 400 Bad Request: missing/invalid fields or unknown JSON fields.
+//   - 403 Forbidden:  caller is not the conversation owner.
+//   - 405 Method Not Allowed: non-POST request.
+//
+// Note: 404 is NOT returned for "no live session" — the whole point of this
+// endpoint is that sharing works when idle.  403 is returned when the caller
+// is not the owner (consistent with /api/chat/answer's non-owner response,
+// using 403 rather than 404 because conversationId existence is not secret for
+// the authenticated caller who owns the conversation).
 func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1275,24 +1296,24 @@ func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req ShareRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if req.SessionID == "" {
-		http.Error(w, "sessionId is required", http.StatusBadRequest)
+	if strings.TrimSpace(req.ConversationID) == "" {
+		http.Error(w, "conversationId is required", http.StatusBadRequest)
 		return
 	}
-	if err := dispatch.ValidateIdentityField("session_id", req.SessionID); err != nil {
-		http.Error(w, "invalid sessionId", http.StatusBadRequest)
+	if err := dispatch.ValidateIdentityField("conversation_id", req.ConversationID); err != nil {
+		http.Error(w, "invalid conversationId", http.StatusBadRequest)
 		return
 	}
 
-	// C1 Share-pane confidentiality fix (core of Phase 6b):
+	// C1 Share-pane confidentiality fix:
 	// Authenticated (mTLS cert): cert CN is used for the ownership check;
-	// body operatorId is silently ignored.  This closes the C1 vulnerability
-	// where operator B could supply operator A's operatorId in the body and
-	// flip the shared flag on A's session.
+	// body operatorId is silently ignored.
 	// Unauthenticated (loopback bearer): require and validate operatorId from body.
 	shareID := netid.IdentityFrom(r.Context())
 	var effectiveOperatorID string
@@ -1300,7 +1321,7 @@ func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) 
 		// Cert CN wins; body operatorId cannot override it.
 		effectiveOperatorID = shareID.OperatorID
 	} else {
-		if req.OperatorID == "" {
+		if strings.TrimSpace(req.OperatorID) == "" {
 			http.Error(w, "operatorId is required", http.StatusBadRequest)
 			return
 		}
@@ -1311,34 +1332,52 @@ func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) 
 		effectiveOperatorID = req.OperatorID
 	}
 
-	// Atomic ownership check + shared-flag update via SetShared.
-	//
-	// The previous SessionOwner+OpenSession two-step had a TOCTOU window:
-	// the dispatch goroutine's deferred CloseSession could fire between the two
-	// calls, causing OpenSession to recreate a session entry that nothing ever
-	// closes (permanent leak toward maxTotalSessions=256).  SetShared holds the
-	// hub mutex across the entire check-and-update, closing that window.
-	if err := ch.hub.SetShared(req.SessionID, effectiveOperatorID, req.Shared); err != nil {
-		if errors.Is(err, errSessionNotFound) {
-			http.Error(w, "session not found", http.StatusNotFound)
+	// Ownership verification for conversations with no hub-established entry
+	// (hub restarted, or this is the very first share call for this conversation):
+	// consult the transcript's first user-turn to determine the true owner.
+	// If the transcript exists and its owner does not match effectiveOperatorID,
+	// reject 403 before writing to the hub.  If the transcript is empty or
+	// unreadable (new conversation not yet dispatched), we allow the call —
+	// SetConversationShared will record effectiveOperatorID as the owner and
+	// subsequent calls will enforce it.
+	if _, _, hasEntry := ch.hub.GetConversationShared(req.ConversationID); !hasEntry {
+		if transcriptOwner, err := ch.transcripts.FirstUserOwner(req.ConversationID); err == nil && transcriptOwner != "" {
+			if transcriptOwner != effectiveOperatorID {
+				http.Error(w, "forbidden: conversation owned by different operator", http.StatusForbidden)
+				return
+			}
+		}
+	}
+
+	// Atomic ownership check + conversation-level shared-flag update.
+	// SetConversationShared:
+	//   - Establishes ownership on first call (shared=true only; unshare is a no-op
+	//     when no entry exists, since the entry was already deleted or never created).
+	//   - Rejects errConversationNotOwned (→ 403) on operator mismatch.
+	//   - Rejects errTooManySharedConversations (→ 429) when the map cap is full.
+	//   - Propagates the flag into any currently-open sessions for this conversation.
+	if err := ch.hub.SetConversationShared(req.ConversationID, effectiveOperatorID, req.Shared); err != nil {
+		if errors.Is(err, errConversationNotOwned) {
+			http.Error(w, "forbidden: conversation owned by different operator", http.StatusForbidden)
 			return
 		}
-		if errors.Is(err, errSessionOwnerConflict) {
-			http.Error(w, "forbidden: session owned by different operator", http.StatusForbidden)
+		if errors.Is(err, errTooManySharedConversations) {
+			http.Error(w, "too many shared conversations", http.StatusTooManyRequests)
 			return
 		}
+		slog.Error("consoleui: SetConversationShared", "conversationID", req.ConversationID, "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	// Phase 4: when promoting to shared, include a safety warning that tool
-	// output (bash stdout, file contents) will be visible to ALL watchers.
+	// When promoting to shared, include a safety warning that tool output (bash
+	// stdout, file contents) and model thinking will be visible to ALL watchers.
 	// This is a contractual safety mechanic — not optional.
 	type shareResponse struct {
-		OK      bool   `json:"ok"`
+		Shared  bool   `json:"shared"`
 		Warning string `json:"warning,omitempty"`
 	}
-	resp := shareResponse{OK: true}
+	resp := shareResponse{Shared: req.Shared}
 	if req.Shared {
 		resp.Warning = "Tool output (bash stdout, file contents) and model thinking will be visible to all session watchers."
 	}

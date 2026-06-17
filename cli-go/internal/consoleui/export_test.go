@@ -104,6 +104,20 @@ var ErrSessionOwnerConflict = errSessionOwnerConflict
 // bound to a different operator's session.
 var ErrConversationOwnerConflict = errConversationOwnerConflict
 
+// ErrConversationNotOwned is exported so external tests can identify the
+// sentinel returned by SetConversationShared when the caller is not the
+// conversation owner.
+var ErrConversationNotOwned = errConversationNotOwned
+
+// ErrTooManySharedConversations is exported so external tests can identify the
+// sentinel returned by SetConversationShared when the shared-conversation cap
+// would be exceeded.
+var ErrTooManySharedConversations = errTooManySharedConversations
+
+// MaxSharedConversations is exported for tests so the cap can be referenced
+// without hardcoding magic numbers.
+const MaxSharedConversations = maxSharedConversations
+
 // ---- Transcripts test exports -----------------------------------------------
 
 // NewTranscriptsForTest allocates a Transcripts for use in external tests.

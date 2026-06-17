@@ -1087,6 +1087,10 @@
       //   (shared watcher — composer disabled, read-only affordance shown).
       attachedSessionId: null,
       watchOnly: false,
+      // Share state: tracks whether this conversation is currently shared.
+      // In-memory only (not persisted to localStorage) — server is the source
+      // of truth; a page reload resets to unshared on the client side.
+      shared: false,
     };
   }
 
@@ -2114,8 +2118,8 @@
         '<button class="pane-interactive-btn' + interactiveActiveClass + '" id="pane-interactive-' + esc(paneId) + '" type="button" ' +
           'title="' + esc(interactiveTitle) + '" ' +
           'aria-label="Toggle interactive multi-turn mode" aria-pressed="' + interactivePressed + '">&#x1F501;</button>' +
-        '<button class="pane-share-btn" id="pane-share-' + esc(paneId) + '" type="button" ' +
-          'title="Share pane" aria-label="Share or unshare pane" aria-pressed="false">&#x1F517;</button>' +
+        '<button class="pane-share-btn' + (pane.shared ? ' pane-share-active' : '') + '" id="pane-share-' + esc(paneId) + '" type="button" ' +
+          'title="' + (pane.shared ? 'Stop sharing pane' : 'Share pane') + '" aria-label="Share or unshare pane" aria-pressed="' + (pane.shared ? 'true' : 'false') + '">&#x1F517;</button>' +
         '<button class="pane-cancel-btn" id="pane-cancel-' + esc(paneId) + '" type="button" ' +
           'aria-label="Stop streaming" ' +
           (pane.status === 'streaming' ? '' : 'disabled ') + '>&#x23F9;</button>' +
@@ -3572,37 +3576,109 @@
   }
 
   // ---- Share pane toggle -----------------------------------------------------
+  //
+  // Works whether or not the agent is mid-turn.  Keyed on pane.conversationId
+  // (stable, generated at pane creation) rather than pane.activeSessionId
+  // (ephemeral, only set during an in-flight turn).
+  //
+  // pane.shared tracks the client-side known state.  It is in-memory only
+  // (not persisted to localStorage) because the server is the source of truth;
+  // a page reload resets to unshared on the client and the server retains its
+  // state independently.
+  //
+  // Mirror: if multiple panes share the same conversationId (e.g. an IDE
+  // embedded pane watching the same conversation as the Chat pane), the shared
+  // state is fanned out to all of them via conversationToPaneIds so every pane
+  // reflects the new state without requiring a separate API call.
 
   function togglePaneShare(paneId) {
     const pane = chatPanes.get(paneId);
-    if (!pane || !pane.activeSessionId) {
-      // Can only share an active session (one with a session in the hub).
+    if (!pane || !pane.conversationId) {
+      // No conversationId means the pane was never properly initialised — skip.
       return;
     }
 
-    const shareBtn = document.getElementById('pane-share-' + paneId);
-    const isShared = shareBtn && shareBtn.getAttribute('aria-pressed') === 'true';
-    const newShared = !isShared;
+    const newShared = !pane.shared;
     const opId = getChatOperatorId();
+
+    // Disable the share button optimistically while the request is in-flight
+    // to prevent double-submission.
+    const shareBtn = document.getElementById('pane-share-' + paneId);
+    if (shareBtn) shareBtn.disabled = true;
 
     // Route through apiFetch so session mode sends X-CSRF-Token + credentials.
     apiFetch('POST', '/api/chat/share', {
-      sessionId: pane.activeSessionId,
+      conversationId: pane.conversationId,
       operatorId: opId,
       shared: newShared,
-    }).then((resp) => {
-      if (!resp.ok) return;
-      if (shareBtn) {
-        shareBtn.setAttribute('aria-pressed', String(newShared));
-        shareBtn.title = newShared ? 'Stop sharing pane' : 'Share pane';
-        shareBtn.classList.toggle('pane-share-active', newShared);
+    }).then(function(resp) {
+      // Re-enable regardless of outcome.
+      if (shareBtn) shareBtn.disabled = false;
+
+      if (!resp.ok) {
+        // Parse error body for a human-readable message when available.
+        return resp.json().then(function(body) {
+          var msg;
+          if (resp.status === 403) {
+            msg = 'Only the conversation owner can share this pane.';
+          } else if (resp.status === 401) {
+            msg = 'Not authenticated — please reload and log in again.';
+          } else {
+            msg = (body && body.error) ? String(body.error) : 'Failed to update share state (' + resp.status + ').';
+          }
+          // Surface error via the pane's existing inline notice element.
+          var notice = document.getElementById('pane-notice-' + paneId);
+          if (notice) {
+            notice.textContent = msg;
+            notice.style.display = '';
+            setTimeout(function() { if (notice) notice.style.display = 'none'; }, 5000);
+          }
+        }).catch(function() {
+          // JSON parse failed — show a generic message.
+          // pane.shared is NOT flipped on error — the original state is preserved.
+          var notice = document.getElementById('pane-notice-' + paneId);
+          if (notice) {
+            notice.textContent = resp.status === 403
+              ? 'Only the conversation owner can share this pane.'
+              : 'Failed to update share state (' + resp.status + ').';
+            notice.style.display = '';
+            setTimeout(function() { if (notice) notice.style.display = 'none'; }, 5000);
+          }
+        });
+        return;
       }
-      // Phase 4: surface the server-supplied tool-output visibility warning
-      // when the session is promoted to shared.  This is a safety mechanic —
-      // not optional.  The warning arrives in the JSON response body as
-      // {"ok":true,"warning":"..."}.
+
+      // Success: parse the response body to get the confirmed state + optional warning.
       return resp.json().then(function(body) {
-        if (newShared && body && body.warning) {
+        const confirmedShared = !!(body && body.shared);
+
+        // Fan out the confirmed shared state to all panes with this conversationId.
+        // This covers the mirroring case (IDE chat pane + Chat tab share the same
+        // conversationId).  At minimum the clicked pane is in the set.
+        var convPaneIds = conversationToPaneIds.get(pane.conversationId);
+        var paneIdsToUpdate = convPaneIds ? Array.from(convPaneIds) : [paneId];
+        // Always include the clicked pane even if it is not in conversationToPaneIds
+        // (idle panes may not be registered in that map).
+        if (!paneIdsToUpdate.includes(paneId)) paneIdsToUpdate.push(paneId);
+
+        for (var i = 0; i < paneIdsToUpdate.length; i++) {
+          var pid = paneIdsToUpdate[i];
+          var p = chatPanes.get(pid);
+          if (!p || p.conversationId !== pane.conversationId) continue;
+          p.shared = confirmedShared;
+          // Update the DOM button for this pane.
+          var btn = document.getElementById('pane-share-' + pid);
+          if (btn) {
+            btn.setAttribute('aria-pressed', String(confirmedShared));
+            btn.title = confirmedShared ? 'Stop sharing pane' : 'Share pane';
+            btn.classList.toggle('pane-share-active', confirmedShared);
+          }
+        }
+
+        // Surface the server-supplied tool-output visibility warning when
+        // the conversation is promoted to shared.  This is a safety mechanic —
+        // the warning arrives in the JSON response body as {"shared":true,"warning":"..."}.
+        if (confirmedShared && body && body.warning) {
           // Show as an inline notification inside the pane so the operator
           // sees it in context without a disruptive alert().
           var paneEl = document.getElementById('pane-' + paneId);
@@ -3610,14 +3686,33 @@
             var warnEl = document.createElement('div');
             warnEl.className = 'chat-share-warning';
             warnEl.setAttribute('role', 'alert');
-            warnEl.textContent = 'Share warning: ' + body.warning;
+            // Server strings are escaped before display.
+            warnEl.textContent = 'Share warning: ' + String(body.warning);
             paneEl.insertBefore(warnEl, paneEl.firstChild);
             // Auto-dismiss after 10 s.
             setTimeout(function() { if (warnEl.parentNode) warnEl.parentNode.removeChild(warnEl); }, 10000);
           }
         }
-      }).catch(function() { /* ignore JSON parse failure */ });
-    }).catch(() => { /* silent */ });
+      }).catch(function() {
+        // JSON parse failure on a 200 — treat as success with unknown state.
+        // Fall back to the optimistic value so the button isn't stuck.
+        pane.shared = newShared;
+        if (shareBtn) {
+          shareBtn.setAttribute('aria-pressed', String(newShared));
+          shareBtn.title = newShared ? 'Stop sharing pane' : 'Share pane';
+          shareBtn.classList.toggle('pane-share-active', newShared);
+        }
+      });
+    }).catch(function() {
+      // Network error — re-enable the button, leave pane.shared unchanged.
+      if (shareBtn) shareBtn.disabled = false;
+      var notice = document.getElementById('pane-notice-' + paneId);
+      if (notice) {
+        notice.textContent = 'Network error — could not update share state.';
+        notice.style.display = '';
+        setTimeout(function() { if (notice) notice.style.display = 'none'; }, 5000);
+      }
+    });
   }
 
   // ---- Interactive mode toggle -----------------------------------------------

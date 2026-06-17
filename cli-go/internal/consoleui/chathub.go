@@ -63,6 +63,24 @@ const maxTotalSSEConns = 128
 // via session squatting.
 const maxTotalSessions = 256
 
+// maxSharedConversations is the global cap on the number of ACTIVELY-shared
+// conversations recorded in the conversationShare map.  Only shared=true entries
+// count toward this cap; unshare (shared=false) deletes the entry so the count
+// falls.  The cap bounds the worst-case memory of the map under adversarial
+// repeated-share-distinct-conversations requests from an authenticated operator.
+//
+// 256 matches maxTotalSessions: in the realistic case one dispatch ↔ one pane ↔
+// one conversation, so shared conversations can never exceed the session cap under
+// normal use.  The cap only fires under unusual or adversarial conditions.
+//
+// LOW-1 (pre-claim squat): an authenticated operator who calls share before the
+// real owner can lock out the owner by establishing a different ownerOperatorID in
+// the conversationShare map.  Full pre-claim prevention (cross-checking the
+// transcript on EVERY share call, not just on cold-start) is left as a follow-up.
+// The current mitigation is the transcript FirstUserOwner check on the cold-start
+// path and the cap above, which limits the total blast radius.
+const maxSharedConversations = 256
+
 // sseChBuf is the per-connection channel buffer depth.  A slow client that
 // cannot drain faster than this will drop chunks (never blocks the hub mutex
 // or other clients).
@@ -172,6 +190,15 @@ type sessionEntry struct {
 	conversationID  string // the conversation this session writes to; set by SetConversationID
 }
 
+// conversationShareEntry is the stable, session-independent share state for a
+// conversation.  It outlives individual hub sessions (survives CloseSession)
+// and is the authoritative source for whether a conversation is shared when
+// no live session exists.
+type conversationShareEntry struct {
+	ownerOperatorID string
+	shared          bool
+}
+
 // errSessionOwnerConflict is returned by OpenSession and SetShared when the
 // sessionID is already owned by a different operatorID.  The HTTP handler must
 // return 403.
@@ -189,6 +216,11 @@ var errConversationOwnerConflict = errors.New("chathub: conversationID already b
 // exist in the hub.  The HTTP handler must return 404.
 var errSessionNotFound = errors.New("chathub: session not found")
 
+// errConversationNotOwned is returned by SetConversationShared when the
+// conversationID is not owned by the supplied operatorID.  The HTTP handler
+// must return 403 (or 404 per existence-leak policy — callers choose).
+var errConversationNotOwned = errors.New("chathub: conversation not owned by this operator")
+
 // errTooManyConns is returned by Register when the per-operator or global
 // connection cap would be exceeded.  The HTTP handler must return 429.
 var errTooManyConns = errors.New("chathub: too many SSE connections for this operator")
@@ -197,22 +229,30 @@ var errTooManyConns = errors.New("chathub: too many SSE connections for this ope
 // would be exceeded.  The HTTP handler must return 429.
 var errTooManySessions = errors.New("chathub: global session cap reached")
 
+// errTooManySharedConversations is returned by SetConversationShared when
+// creating a NEW shared=true entry would exceed maxSharedConversations.
+// Toggling an already-tracked entry (shared=true→false or same owner update)
+// never triggers this.  The HTTP handler must return 429.
+var errTooManySharedConversations = errors.New("chathub: shared conversation cap reached")
+
 // ChatHub is the authoritative router for chat SSE events.
 // All exported methods are safe for concurrent use.
 type ChatHub struct {
-	mu         sync.Mutex
-	conns      map[string][]*sseConn   // operatorID → list of connections
-	connByID   map[string]*sseConn     // connID → conn (for Unregister)
-	sessions   map[string]sessionEntry // sessionID → entry
-	totalConns int                     // M3: global SSE connection count across all operators
+	mu                sync.Mutex
+	conns             map[string][]*sseConn              // operatorID → list of connections
+	connByID          map[string]*sseConn                // connID → conn (for Unregister)
+	sessions          map[string]sessionEntry            // sessionID → entry
+	conversationShare map[string]conversationShareEntry  // conversationID → stable share state
+	totalConns        int                                // M3: global SSE connection count across all operators
 }
 
 // NewChatHub allocates an empty hub.
 func NewChatHub() *ChatHub {
 	return &ChatHub{
-		conns:    make(map[string][]*sseConn),
-		connByID: make(map[string]*sseConn),
-		sessions: make(map[string]sessionEntry),
+		conns:             make(map[string][]*sseConn),
+		connByID:          make(map[string]*sseConn),
+		sessions:          make(map[string]sessionEntry),
+		conversationShare: make(map[string]conversationShareEntry),
 	}
 }
 
@@ -469,6 +509,31 @@ func (h *ChatHub) SetConversationID(sessionID, conversationID string) error {
 	}
 
 	e.conversationID = conversationID
+
+	// Inherit the conversation-level shared flag into the new session when a
+	// shared=true entry exists for this conversationID, owned by the same operator.
+	//
+	// This is the "new turn on a previously-shared pane" path: the conversation
+	// was shared while idle; the new session must inherit shared=true immediately
+	// so Route delivers events to watchers from the very first chunk.
+	//
+	// When NO entry exists (conversation has never been shared), we do NOT seed
+	// one here.  Seeding shared=false entries for every dispatched conversation
+	// would grow the map unboundedly over the daemon's lifetime.  The map only
+	// holds actively-shared conversations (shared=true entries).
+	//
+	// Cold-start ownership verification (handleChatShare reading FirstUserOwner)
+	// is unaffected: it reads the transcript, not this map.
+	//
+	// Security invariant: the owner check (cse.ownerOperatorID == e.ownerOperatorID)
+	// ensures an attacker who pre-claimed the conversationID in conversationShare
+	// cannot force a victim's new session into shared=true.
+	if cse, hasCE := h.conversationShare[conversationID]; hasCE && cse.shared {
+		if cse.ownerOperatorID == e.ownerOperatorID {
+			e.shared = true
+		}
+	}
+
 	h.sessions[sessionID] = e
 	return nil
 }
@@ -484,23 +549,32 @@ func (h *ChatHub) ConversationForSession(sessionID string) string {
 	return h.sessions[sessionID].conversationID
 }
 
-// IsConversationShared returns true iff a currently-open, SHARED session that
-// owns conversationID is also owned by expectedOwnerOperatorID.
+// IsConversationShared returns true when conversationID is shared.
 //
-// Owner-anchoring: the lookup matches on BOTH conversationID and session owner.
-// An attacker who bound their own session to the same conversationID will have
-// a different ownerOperatorID, so their shared session cannot satisfy this
-// check.  Combined with SetConversationID's cross-operator rejection, this
-// provides two independent layers of defence.
+// The lookup is two-layered:
 //
-// expectedOwnerOperatorID is the operator established by the transcript file's
-// first user turn (M1 logic).  Passing "" disables the owner check (internal
-// daemon calls where no operatorID is known).
+//  1. Live-session check: scan open sessions for one bound to conversationID.
+//     If found and owner-anchored correctly, return its shared flag.  This path
+//     keeps the existing behaviour for mid-turn events.
 //
-// Returns false when no matching session is found or it is not shared.
+//  2. Stable conversation-share check: if no live session is found, fall back
+//     to the conversation-level share map (set via SetConversationShared).  This
+//     is the idle-pane path: shared state set while no session is active is
+//     honoured here, enabling the transcript handler to serve watchers between
+//     turns.
+//
+// Owner-anchoring: both paths match on ownerOperatorID when
+// expectedOwnerOperatorID is non-empty.  An attacker who bound their session to
+// the victim's conversationID will have a different ownerOperatorID and cannot
+// satisfy either check.  Passing "" disables the owner check (internal calls
+// where no operatorID is known).
+//
+// Returns false when no matching entry is found or it is not shared.
 func (h *ChatHub) IsConversationShared(conversationID, expectedOwnerOperatorID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	// Layer 1: check live sessions.
 	for _, e := range h.sessions {
 		if e.conversationID != conversationID {
 			continue
@@ -512,7 +586,89 @@ func (h *ChatHub) IsConversationShared(conversationID, expectedOwnerOperatorID s
 		}
 		return e.shared
 	}
+
+	// Layer 2: fall back to the stable conversation-share map (idle-pane path).
+	if cse, ok := h.conversationShare[conversationID]; ok {
+		if expectedOwnerOperatorID == "" || cse.ownerOperatorID == expectedOwnerOperatorID {
+			return cse.shared
+		}
+	}
 	return false
+}
+
+// SetConversationShared sets or clears the stable, session-independent shared
+// flag for a conversation.
+//
+// Map lifecycle — only actively-shared conversations occupy the map:
+//   - shared=true, NEW entry:   create the entry (subject to maxSharedConversations cap).
+//   - shared=true, EXISTING:    update in place (no cap check; already counted).
+//   - shared=false, any:        DELETE the entry.  This bounds the map to
+//     actively-shared conversations and prevents unbounded growth from repeated
+//     share→unshare cycles or adversarial requests.
+//
+// In both cases the flag is propagated into all currently-open sessions bound
+// to conversationID so that Route honours the change immediately without waiting
+// for the next SetConversationID call.
+//
+// Owner enforcement:
+//   - First call (no map entry): caller's ownerOperatorID is accepted as-is.
+//     The handleChatShare cold-start path verifies ownership against the
+//     transcript's FirstUserOwner before reaching here; we do not duplicate that
+//     check.
+//   - Subsequent calls: ownerOperatorID must match the stored owner.  A mismatch
+//     returns errConversationNotOwned (→ 403 at the HTTP layer).
+//
+// Cap: errTooManySharedConversations (→ 429) when creating a NEW shared=true
+// entry would exceed maxSharedConversations.  Toggling/deleting an existing
+// entry is never capped.
+//
+// Concurrent writes by the same operator are safe; the mutex serialises them.
+func (h *ChatHub) SetConversationShared(conversationID, ownerOperatorID string, shared bool) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	existing, hasEntry := h.conversationShare[conversationID]
+	if hasEntry && existing.ownerOperatorID != ownerOperatorID {
+		return errConversationNotOwned
+	}
+
+	if !shared {
+		// Unshare: remove the map entry entirely so the map only holds active shares.
+		delete(h.conversationShare, conversationID)
+	} else {
+		// Share: create or update.
+		if !hasEntry {
+			// New entry — check the cap before writing.
+			if len(h.conversationShare) >= maxSharedConversations {
+				return errTooManySharedConversations
+			}
+		}
+		h.conversationShare[conversationID] = conversationShareEntry{
+			ownerOperatorID: ownerOperatorID,
+			shared:          true,
+		}
+	}
+
+	// Propagate to any currently-open sessions bound to this conversation so
+	// in-flight events are routed correctly without waiting for the next
+	// SetConversationID call.
+	for sid, e := range h.sessions {
+		if e.conversationID == conversationID && e.ownerOperatorID == ownerOperatorID {
+			e.shared = shared
+			h.sessions[sid] = e
+		}
+	}
+	return nil
+}
+
+// GetConversationShared returns the stable shared flag and owner for a
+// conversation, and whether a stable entry exists at all.  Used by the share
+// handler to return the current state to the caller.
+func (h *ChatHub) GetConversationShared(conversationID string) (ownerOperatorID string, shared bool, exists bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cse, ok := h.conversationShare[conversationID]
+	return cse.ownerOperatorID, cse.shared, ok
 }
 
 // connCount returns the number of live SSE connections for operatorID.

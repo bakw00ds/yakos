@@ -108,12 +108,13 @@ func authGet(t *testing.T, ts *httptest.Server, tok, path string) *http.Response
 
 // ---- C1: Share-pane confidentiality -----------------------------------------
 
-// TestC1_AuthenticatedOperatorB_CannotFlipOperatorASession verifies that an
-// authenticated operator B cannot flip the shared flag on operator A's session
-// by supplying A's operatorId in the request body.  The cert CN (B) is used for
-// the ownership check; the body operatorId is ignored.
+// TestC1_AuthenticatedOperatorB_CannotFlipOperatorAConversation verifies that an
+// authenticated operator B cannot flip the shared flag on operator A's
+// conversation by supplying A's operatorId in the request body.  The cert CN (B)
+// is used for the ownership check; the body operatorId is ignored.
 //
-// This is the core C1 regression test for Phase 6b.
+// This is the core C1 regression test for Phase 6b (updated for conversation-
+// keyed share endpoint).
 func TestC1_AuthenticatedOperatorB_CannotFlipOperatorASession(t *testing.T) {
 	t.Parallel()
 
@@ -126,17 +127,20 @@ func TestC1_AuthenticatedOperatorB_CannotFlipOperatorASession(t *testing.T) {
 	}
 	ts, tok, hub := newEnforcementTestServer(t, idB)
 
-	// Set up a session owned by operator A.
-	if err := hub.OpenSession("sess-alice", "operator-a", false); err != nil {
-		t.Fatalf("OpenSession: %v", err)
+	// Establish operator A as the owner by sharing (shared=true creates the entry).
+	// shared=false on a nonexistent entry is a no-op under the bounded-map model,
+	// so we must use shared=true to actually record the owner.
+	if err := hub.SetConversationShared("conv-alice", "operator-a", true); err != nil {
+		t.Fatalf("SetConversationShared: %v", err)
 	}
 
-	// Operator B attempts to flip the shared flag on A's session,
+	// Operator B attempts to flip the shared flag on A's conversation,
 	// supplying A's operatorId in the body (the attack vector).
+	// The cert CN ("operator-b") is used; the body operatorId is ignored.
 	resp := authPost(t, ts, tok, "/api/chat/share", map[string]interface{}{
-		"sessionId":  "sess-alice",
-		"operatorId": "operator-a", // forged — should be ignored; cert CN (B) is used
-		"shared":     true,
+		"conversationId": "conv-alice",
+		"operatorId":     "operator-a", // forged — should be ignored; cert CN (B) is used
+		"shared":         true,
 	})
 	defer resp.Body.Close()
 
@@ -147,7 +151,7 @@ func TestC1_AuthenticatedOperatorB_CannotFlipOperatorASession(t *testing.T) {
 }
 
 // TestC1_AuthenticatedOwner_CanFlipOwnSession verifies that an authenticated
-// operator can flip the shared flag on their own session (happy path).
+// operator can flip the shared flag on their own conversation (happy path).
 func TestC1_AuthenticatedOwner_CanFlipOwnSession(t *testing.T) {
 	t.Parallel()
 
@@ -157,21 +161,19 @@ func TestC1_AuthenticatedOwner_CanFlipOwnSession(t *testing.T) {
 		Authenticated: true,
 		Resolved:      true,
 	}
-	ts, tok, hub := newEnforcementTestServer(t, idA)
+	ts, tok, _ := newEnforcementTestServer(t, idA)
 
-	if err := hub.OpenSession("sess-own", "operator-a", false); err != nil {
-		t.Fatalf("OpenSession: %v", err)
-	}
-
+	// No prior hub entry — the endpoint creates one with operator-a as owner
+	// (first call, no transcript yet, operator-a from cert CN).
 	resp := authPost(t, ts, tok, "/api/chat/share", map[string]interface{}{
-		"sessionId":  "sess-own",
-		"operatorId": "operator-b", // body operatorId is ignored; cert CN "operator-a" is used
-		"shared":     true,
+		"conversationId": "conv-own",
+		"operatorId":     "operator-b", // body operatorId is ignored; cert CN "operator-a" is used
+		"shared":         true,
 	})
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("C1: authenticated owner flipping own session: got %d; want 200 OK", resp.StatusCode)
+		t.Errorf("C1: authenticated owner flipping own conversation: got %d; want 200 OK", resp.StatusCode)
 	}
 }
 
