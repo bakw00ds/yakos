@@ -103,10 +103,10 @@ type Watcher struct {
 	eventCh chan ChangeEvent
 	closeCh chan struct{}
 
-	mu       sync.Mutex
-	watchN   int            // number of dirs currently watched
-	pending  map[string]pendingEvent // keyed by relative path
-	timers   map[string]*time.Timer  // debounce timers, keyed by relative path
+	mu          sync.Mutex
+	watchedDirs map[string]bool         // absolute paths of directories currently in the OS watch set
+	pending     map[string]pendingEvent // keyed by relative path
+	timers      map[string]*time.Timer  // debounce timers, keyed by relative path
 
 	once sync.Once // guards Close
 }
@@ -127,12 +127,13 @@ func New(root string) (*Watcher, error) {
 	}
 
 	w := &Watcher{
-		root:    root,
-		fw:      fw,
-		eventCh: make(chan ChangeEvent, 512),
-		closeCh: make(chan struct{}),
-		pending: make(map[string]pendingEvent),
-		timers:  make(map[string]*time.Timer),
+		root:        root,
+		fw:          fw,
+		eventCh:     make(chan ChangeEvent, 512),
+		closeCh:     make(chan struct{}),
+		watchedDirs: make(map[string]bool),
+		pending:     make(map[string]pendingEvent),
+		timers:      make(map[string]*time.Timer),
 	}
 
 	// Recursively add all existing subdirs to the watch set.
@@ -238,20 +239,34 @@ func (w *Watcher) handleFSEvent(ev fsnotify.Event) {
 	// When a dir is removed, fsnotify automatically stops watching it on
 	// most platforms; no explicit action needed. We just do bookkeeping.
 	if ev.Op.Has(fsnotify.Remove) || ev.Op.Has(fsnotify.Rename) {
-		if fi, statErr := os.Lstat(ev.Name); statErr != nil || fi.IsDir() {
-			// Path is gone or is a dir: update watchN counter heuristically.
-			// fsnotify will have already un-watched the path internally.
-			w.mu.Lock()
-			if w.watchN > 0 {
-				w.watchN--
-			}
-			w.mu.Unlock()
-			// Don't emit deleted events for directories.
-			if statErr == nil && fi.IsDir() {
-				return
-			}
-			// Fall through for deleted files.
+		// Always check the watchedDirs set first. If the removed path was a
+		// watched directory, remove it from the set. This is authoritative —
+		// we do NOT stat the path (it may be gone) and do NOT fall back to
+		// heuristic inference from stat errors, which previously caused watchN
+		// to decrement for deleted regular files as well (drifting below the
+		// true dir count and silently re-allowing the cap to be exceeded).
+		w.mu.Lock()
+		wasWatchedDir := w.watchedDirs[ev.Name]
+		if wasWatchedDir {
+			delete(w.watchedDirs, ev.Name)
 		}
+		w.mu.Unlock()
+
+		if wasWatchedDir {
+			// This was a directory. Don't emit a deleted event for dirs.
+			return
+		}
+
+		// Not a watched directory. It might be a regular file or a directory
+		// that was never added to our watch set. Stat to distinguish — but only
+		// to decide whether to suppress the event, not to update the dir count.
+		if fi, statErr := os.Lstat(ev.Name); statErr == nil && fi.IsDir() {
+			// It's a dir that existed but wasn't in watchedDirs (e.g. a skipped
+			// dir that was removed). Don't emit a deleted event.
+			return
+		}
+		// Fall through: path is gone (stat error) or is a regular file.
+		// Emit a deleted event below.
 	}
 
 	// Enqueue debounced emit.
@@ -326,8 +341,14 @@ func (w *Watcher) addDirRecursive(dir string) error {
 		}
 
 		w.mu.Lock()
-		n := w.watchN
+		alreadyWatched := w.watchedDirs[path]
+		n := len(w.watchedDirs)
 		w.mu.Unlock()
+
+		// Don't double-add a dir already in the watch set.
+		if alreadyWatched {
+			return nil
+		}
 
 		if n >= maxWatchedDirs {
 			slog.Warn("filewatch: max watched dirs reached; skipping subtree",
@@ -343,11 +364,19 @@ func (w *Watcher) addDirRecursive(dir string) error {
 		}
 
 		w.mu.Lock()
-		w.watchN++
+		w.watchedDirs[path] = true
 		w.mu.Unlock()
 
 		return nil
 	})
+}
+
+// watchedDirCount returns the number of directories currently in the OS watch
+// set. Exposed for testing.
+func (w *Watcher) watchedDirCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.watchedDirs)
 }
 
 // toRelPath converts an absolute path to a workspace-relative forward-slash

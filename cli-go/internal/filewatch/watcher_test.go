@@ -399,6 +399,65 @@ func TestPayloadNoContentField(t *testing.T) {
 	}
 }
 
+// TestDeleteFilesDoesNotChangeWatchedDirCount verifies that creating and then
+// deleting many regular files does not alter the watched-directory count.
+//
+// Regression test for the watchN drift bug: the previous implementation
+// decremented watchN whenever a removed path stat-failed (which includes
+// deleted regular files), causing watchN to drift below the true dir count
+// and silently letting the 8192 cap be re-exceeded.
+//
+// The new implementation maintains an explicit watchedDirs set and only
+// decrements when a path that IS in that set is removed.
+func TestDeleteFilesDoesNotChangeWatchedDirCount(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	w := newWatcher(t, root)
+
+	// Record the initial directory count (should be 1: the root itself).
+	initialCount := w.watchedDirCount()
+	if initialCount == 0 {
+		t.Fatal("expected watchedDirCount > 0 after New(root)")
+	}
+
+	// Drain startup events.
+	time.Sleep(200 * time.Millisecond)
+	for len(w.Events()) > 0 {
+		<-w.Events()
+	}
+
+	const nFiles = 20
+	// Create then immediately delete many regular files.
+	for i := 0; i < nFiles; i++ {
+		name := filepath.Join(root, "tmpfile_"+string(rune('a'+i))+".txt")
+		if err := os.WriteFile(name, []byte("x"), 0644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	// Give fsnotify time to process the creates.
+	time.Sleep(200 * time.Millisecond)
+	for len(w.Events()) > 0 {
+		<-w.Events()
+	}
+
+	for i := 0; i < nFiles; i++ {
+		name := filepath.Join(root, "tmpfile_"+string(rune('a'+i))+".txt")
+		_ = os.Remove(name) // ignore error if already gone
+	}
+	// Wait for debounce + fsnotify processing.
+	time.Sleep(400 * time.Millisecond)
+	// Drain delete events.
+	for len(w.Events()) > 0 {
+		<-w.Events()
+	}
+
+	afterCount := w.watchedDirCount()
+	if afterCount != initialCount {
+		t.Errorf("watchedDirCount changed: was %d before file creates/deletes, got %d after; "+
+			"file deletes must not alter the watched-directory count", initialCount, afterCount)
+	}
+}
+
 // TestYakosSkipped verifies that the .yakos directory is not watched.
 func TestYakosSkipped(t *testing.T) {
 	t.Parallel()

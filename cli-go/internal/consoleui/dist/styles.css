@@ -3985,28 +3985,6 @@ html[data-theme="light"] .users-action-btn.danger:hover:not(:disabled) {
   line-height: 1;
 }
 
-/* Decaying line-highlight decoration applied by ide-editor.js when an
-   external file change is live-applied into Monaco.  The decoration class
-   is injected via monaco.createDecorationsCollection; Monaco adds it as a
-   CSS class on the line element inside the iframe.  This block is therefore
-   only effective inside ide-editor.html (which loads the same styles.css via
-   the /ide/editor route that serves ide-editor.html).
-   The animation fades from a warm yellow tint to transparent over 2 s. */
-@keyframes ide-external-change-fade {
-  from { background: rgba(255, 200, 0, 0.18); }
-  to   { background: transparent; }
-}
-
-.ide-external-change-line {
-  animation: ide-external-change-fade 2s ease-out forwards;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ide-external-change-line {
-    animation: none;
-    background: rgba(255, 200, 0, 0.12);
-  }
-}
 
 /* File:line reference links in assistant chat messages.
    Styled to look like inline code with an underline hint.

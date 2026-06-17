@@ -6496,6 +6496,28 @@
           ideEditable && ideIsDirty && !ideIsSaving) {
         performSave(ideCurrentPath, msg.content);
       }
+    } else if (msg.type === 'externalChangeBlocked') {
+      // ide-editor.js rejected an applyExternalContent because the target model
+      // has unsaved changes (its iframe-side isDirty flag is true).  Show the
+      // "changed on disk — reload" affordance so the operator knows the file
+      // was modified externally while they were editing.
+      var blockedPath = typeof msg.path === 'string' ? msg.path : '';
+      if (blockedPath) {
+        ideShowExternalChangeNotice(blockedPath, 'modified');
+        // Also ensure the parent-side dirty flag is consistent: if the blocked
+        // path's fileState does not yet reflect dirty (the 300 ms debounce
+        // hasn't fired yet), mark it dirty now so subsequent handleFilesChanged
+        // calls don't attempt another auto-apply.
+        var blockedState = ideOpenFiles.get(blockedPath);
+        if (blockedState && !blockedState.dirty) {
+          blockedState.dirty = true;
+          if (blockedPath === ideActiveTabPath) {
+            ideIsDirty = true;
+            ideRenderTabStrip();
+            ideUpdateEditorHeader();
+          }
+        }
+      }
     } else if (msg.type === 'askAgent') {
       // "Ask agent about selection" Monaco action posted from ide-editor.js.
       // Inject a context-prefixed message into the IDE chat input (the slot
@@ -7360,8 +7382,9 @@
   //   e.g.  internal/foo/bar.go:42  or  cmd/main.go:12:3
   //
   // Constraints to avoid over-linkifying:
-  //   - Path must contain at least one "/" (so bare filenames like "main.go:1"
-  //     don't fire) OR must have a recognisable source-file extension.
+  //   - Path must contain a dot (bare names without an extension don't fire);
+  //     the regex also accepts paths with a slash prefix, so bare filenames
+  //     like "README.md:42" are linkified when they have a recognisable extension.
   //   - Path must not start with "http" (URLs).
   //   - Column is captured but only the line is used for revealLine.
   //

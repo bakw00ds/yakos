@@ -346,6 +346,10 @@ var externalChangeDecorTimers = {}; // path → clearTimeout handle
 //   { type: 'dirty', path, dirty } — dirty state changed (debounced 300 ms).
 //   { type: 'save', path, content } — ⌘S / Ctrl-S triggered (parent does the fetch).
 //   { type: 'content', path, content } — reply to 'requestContent'.
+//   { type: 'externalChangeBlocked', path }
+//     — applyExternalContent was rejected because the target model has unsaved
+//       changes (isDirty is true).  Parent should show the "changed on disk —
+//       reload" affordance for this path via ideShowExternalChangeNotice.
 //   { type: 'askAgent', path, startLine, endLine, text }
 //     — Operator invoked "Ask agent about selection"; text is the raw selected
 //       text; parent injects a context-prefixed message into the IDE chat input.
@@ -486,10 +490,18 @@ window.addEventListener('message', function(e) {
     // Live-apply an external file change into the cached Monaco model.
     //
     // Strategy:
+    //   0. Dirty guard — check the authoritative per-model isDirty flag FIRST.
+    //      If the target model has unsaved changes, do NOT apply the external
+    //      content (it would clobber an in-progress keystroke).  Instead post
+    //      externalChangeBlocked so the parent can show the "changed on disk"
+    //      affordance.  This check uses the iframe's own isDirty flag, which is
+    //      updated synchronously on every keystroke — there is no 300 ms lag
+    //      unlike the debounced dirty postMessage sent to the parent.
     //   1. Save the editor view-state (cursor + scroll) if this model is active.
-    //   2. Temporarily mark model read-only, replace content, restore read-only.
-    //      Using setValue on the model directly avoids triggering the dirty
-    //      listener (the listener is guarded by editor.getRawOptions().readOnly).
+    //   2. Temporarily mark model read-only (active model only), replace content,
+    //      restore read-only.  Using setValue on the model directly avoids
+    //      triggering the dirty listener (the listener is guarded by
+    //      editor.getRawOptions().readOnly, and only fires for the active model).
     //   3. Restore the view-state.
     //   4. Apply a decaying line-highlight decoration on all changed lines.
     //
@@ -501,6 +513,20 @@ window.addEventListener('message', function(e) {
     if (!applyPath) return;
     var applyEntry = modelMap[applyPath];
     if (!applyEntry) return; // model not open; nothing to do
+
+    // 0. Dirty guard: consult the iframe's authoritative per-model dirty flag.
+    //    This is set synchronously on every onDidChangeContent event — it has
+    //    no debounce lag, so it correctly reflects in-progress keystrokes even
+    //    within the 300 ms window before the parent's own dirty state is updated.
+    if (applyEntry.isDirty) {
+      try {
+        window.parent.postMessage(
+          { type: 'externalChangeBlocked', path: applyPath },
+          window.location.origin
+        );
+      } catch (_) {}
+      return;
+    }
 
     var isActive = (currentPath === applyPath) && (editor.getModel() === applyEntry.model);
 
@@ -530,10 +556,20 @@ window.addEventListener('message', function(e) {
     }
 
     // 3. Replace model content without triggering dirty.
-    var wasReadOnly = editor.getRawOptions().readOnly;
-    editor.updateOptions({ readOnly: true });
-    applyEntry.model.setValue(applyContent);
-    editor.updateOptions({ readOnly: wasReadOnly });
+    //    Only toggle the editor's readOnly option when this model is active —
+    //    toggling readOnly is global to the editor widget and would briefly
+    //    freeze the currently visible model when updating a background one.
+    if (isActive) {
+      var wasReadOnly = editor.getRawOptions().readOnly;
+      editor.updateOptions({ readOnly: true });
+      applyEntry.model.setValue(applyContent);
+      editor.updateOptions({ readOnly: wasReadOnly });
+    } else {
+      // Inactive model: setValue directly. The dirty listener's guard
+      // (editor.getModel() === model) is false for inactive models, so no
+      // dirty event is triggered.
+      applyEntry.model.setValue(applyContent);
+    }
     // External content is by definition clean (not a user edit).
     applyEntry.isDirty = false;
     if (applyEntry.dirtyTimer !== null) {

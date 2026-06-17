@@ -352,8 +352,9 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// Start the file watcher (IDE Phase 2).
 	// Publishes wsbus.TopicFilesChanged events for workspace file changes.
-	// No-op when WorkspaceRoot is empty. The watcher is stopped when ctx is
-	// cancelled (via a dedicated goroutine) so shutdown is clean.
+	// WorkspaceRoot is guaranteed non-empty at this point (validated above).
+	// The watcher is stopped when ctx is cancelled (via a dedicated goroutine)
+	// so shutdown is clean.
 	if cfg.WorkspaceRoot != "" {
 		fw, fwErr := filewatch.New(cfg.WorkspaceRoot)
 		if fwErr != nil {
