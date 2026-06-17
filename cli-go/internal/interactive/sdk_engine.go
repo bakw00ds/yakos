@@ -51,6 +51,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,11 +61,6 @@ import (
 // sidecarWriteTimeout is the bounded write timeout for sidecar stdin writes.
 // Mirrors session.go's stdinWriteTimeout.
 const sidecarWriteTimeout = 10 * time.Second
-
-// maxSidecarLineBytes is the per-line cap for sidecar stdout.
-// Reuses dispatch.ReadLineLoop which already enforces maxStreamLineBytes.
-// Declared here for documentation; the actual cap is inside ReadLineLoop.
-const maxSidecarLineBytes = 2 * 1024 * 1024
 
 // ---------------------------------------------------------------------------
 // NDJSON frame types (sidecar → Go)
@@ -397,8 +393,17 @@ func (e *SDKEngine) SendUserTurn(frame []byte) error {
 
 	// Extract the "text" from the user-turn frame (which is in claude streaming
 	// JSON format: {"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}).
-	// Fall back to writing the raw frame text if parsing fails.
-	text := extractUserTurnText(frame)
+	// An unparseable frame is an error: silently using raw JSON as text would
+	// corrupt the conversation without any signal to the caller.
+	text, err := extractUserTurnText(frame)
+	if err != nil {
+		slog.Warn("interactive: sdk engine: malformed user-turn frame; dropping turn",
+			"conversationID", e.conversationID,
+			"err", err,
+			"frame_prefix", truncateForLog(frame, 120),
+		)
+		return fmt.Errorf("interactive: sdk engine: %w", err)
+	}
 
 	out, err := json.Marshal(sidecarInUserTurn{V: 1, Kind: "user_turn", Text: text})
 	if err != nil {
@@ -710,14 +715,56 @@ func (e *SDKEngine) writeWithTimeout(w io.Writer, b []byte) error {
 // Node binary + bundle discovery
 // ---------------------------------------------------------------------------
 
-// FindNodeBinary locates the `node` binary using exec.LookPath.
-// Returns an error that includes a clear message for surfacing as a 503.
+// minNodeMajor is the minimum Node.js major version required by the sidecar.
+// The @anthropic-ai/claude-agent-sdk package requires Node ≥ 18.
+const minNodeMajor = 18
+
+// FindNodeBinary locates the `node` binary using exec.LookPath and checks
+// that its major version is at least minNodeMajor (18).
+//
+// Returns a descriptive error when node is not found or is too old, so the
+// 503 / startup message names the required version rather than timing out
+// with "sidecar did not emit ready".
 func FindNodeBinary() (string, error) {
 	p, err := exec.LookPath("node")
 	if err != nil {
-		return "", fmt.Errorf("node binary not found in PATH; install Node.js to enable structured questions (SDK engine)")
+		return "", fmt.Errorf("node binary not found in PATH; install Node.js ≥%d to enable structured questions (SDK engine)", minNodeMajor)
+	}
+
+	// Probe the version: `node --version` prints "v18.0.0\n".
+	out, err := exec.Command(p, "--version").Output() //nolint:gosec
+	if err != nil {
+		// If the probe fails we still return the path — the caller will get a
+		// clear error when the sidecar itself fails to start.
+		return p, nil
+	}
+
+	major := parseNodeMajor(strings.TrimSpace(string(out)))
+	if major > 0 && major < minNodeMajor {
+		return "", fmt.Errorf("node %s is too old (found major=%d, need ≥%d); upgrade Node.js to enable structured questions (SDK engine)",
+			strings.TrimSpace(string(out)), major, minNodeMajor)
 	}
 	return p, nil
+}
+
+// parseNodeMajor extracts the major version number from a node --version
+// string of the form "v18.12.1".  Returns 0 if the string cannot be parsed.
+func parseNodeMajor(version string) int {
+	// Strip leading 'v' or 'V'.
+	v := strings.TrimLeft(version, "vV")
+	// Take everything up to the first '.'.
+	dot := strings.IndexByte(v, '.')
+	if dot < 0 {
+		dot = len(v)
+	}
+	major := 0
+	for _, ch := range v[:dot] {
+		if ch < '0' || ch > '9' {
+			return 0
+		}
+		major = major*10 + int(ch-'0')
+	}
+	return major
 }
 
 // FindSidecarBundle returns the absolute path to sidecar.bundle.js, located
@@ -830,8 +877,10 @@ func NewSDKEngineFactory(yakosRoot string) (SDKEngineFactory, error) {
 //
 //	{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<TEXT>"}]}}
 //
-// Falls back to returning the raw frame bytes as a string if parsing fails.
-func extractUserTurnText(frame []byte) string {
+// Returns an error when the frame cannot be parsed or contains no text block,
+// so SendUserTurn can surface a clear failure rather than silently corrupting
+// the conversation with raw JSON as message text.
+func extractUserTurnText(frame []byte) (string, error) {
 	var outer struct {
 		Message struct {
 			Content []struct {
@@ -840,15 +889,15 @@ func extractUserTurnText(frame []byte) string {
 			} `json:"content"`
 		} `json:"message"`
 	}
-	if err := json.Unmarshal(frame, &outer); err == nil {
-		for _, c := range outer.Message.Content {
-			if c.Type == "text" && c.Text != "" {
-				return c.Text
-			}
+	if err := json.Unmarshal(frame, &outer); err != nil {
+		return "", fmt.Errorf("malformed user-turn frame: %w", err)
+	}
+	for _, c := range outer.Message.Content {
+		if c.Type == "text" && c.Text != "" {
+			return c.Text, nil
 		}
 	}
-	// Fallback: treat the whole frame as text (should not happen in practice).
-	return string(frame)
+	return "", fmt.Errorf("user-turn frame contains no text content block")
 }
 
 // truncateForLog truncates a byte slice to at most n bytes for logging.
@@ -861,12 +910,19 @@ func truncateForLog(b []byte, n int) string {
 
 // slogWriter is an io.Writer that writes to slog at DEBUG level.
 // Used to capture sidecar stderr without polluting stdout.
+//
+// exec drains stderr on its own goroutine (one goroutine per writerDescriptor),
+// so Write must be goroutine-safe.  mu guards buf across concurrent Write calls.
 type slogWriter struct {
+	mu     sync.Mutex
 	prefix string
 	buf    []byte
 }
 
 func (w *slogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	w.buf = append(w.buf, p...)
 	// Flush complete lines.
 	for {

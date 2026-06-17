@@ -47,6 +47,19 @@ function log(msg, ...args) {
 }
 
 // ---------------------------------------------------------------------------
+// Tool name registry — correlate tool_use ids with tool names for tool_result
+// ---------------------------------------------------------------------------
+
+/**
+ * toolUseIdToName maps tool-use block ids to their tool name so that the
+ * tool_result frame can carry a populated toolName field.  This mirrors the
+ * toolIDToName map in the Go CLI engine path (dispatch/streamhelper.go).
+ * Entries are added when an assistant tool_use block is seen and removed once
+ * the corresponding tool_result is emitted.
+ */
+const toolUseIdToName = new Map();
+
+// ---------------------------------------------------------------------------
 // Pending question registry (one at a time per spec)
 // ---------------------------------------------------------------------------
 
@@ -85,6 +98,9 @@ function deliverAnswer(frame) {
 
   // Reconstruct the AskUserQuestion input for the canUseTool response.
   // The Go side sends back the answers map and optional response/annotations.
+  // frame.questions may be null/absent when the Go caller did not echo them
+  // back (e.g. older client); fall back to [] so the SDK always gets a valid
+  // array rather than null, which would fail schema validation.
   const updatedInput = { questions: frame.questions || [], answers: answers || {} };
   if (response !== undefined) updatedInput.response = response;
   if (annotations !== undefined) updatedInput.annotations = annotations;
@@ -230,6 +246,11 @@ function processMessage(msg) {
             redacted: true,
           });
         } else if (block.type === "tool_use") {
+          // Register the tool name for tool_result correlation (S3).
+          // The SDK provides block.id as the stable correlation key.
+          if (block.id) {
+            toolUseIdToName.set(block.id, block.name);
+          }
           // Non-AskUserQuestion tool_use events are emitted as tool_use chunks.
           // AskUserQuestion is handled by canUseTool and emitted as ask_user_question.
           if (block.name !== "AskUserQuestion") {
@@ -246,18 +267,24 @@ function processMessage(msg) {
     }
 
     case "user": {
-      // tool_result blocks from the user role
+      // tool_result blocks from the user role.
+      // block.tool_use_id correlates with the earlier tool_use block's id.
       const content = msg.message?.content || [];
       for (const block of content) {
         if (block.type === "tool_result") {
           const toolContent = Array.isArray(block.content)
             ? block.content.map((c) => (c.type === "text" ? c.text : "")).join("")
             : String(block.content || "");
-          // Look up the tool name from our pending registry (best-effort).
+          // Resolve the tool name from the correlation map (S3 parity with CLI engine).
+          const toolName = toolUseIdToName.get(block.tool_use_id) || "";
+          // Remove the entry once used to bound map growth across long sessions.
+          if (block.tool_use_id) {
+            toolUseIdToName.delete(block.tool_use_id);
+          }
           emit({
             v: 1,
             kind: "tool_result",
-            toolName: "",
+            toolName,
             toolOutput: toolContent,
             isError: block.is_error || false,
           });

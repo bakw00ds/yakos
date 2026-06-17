@@ -19531,6 +19531,7 @@ function log(msg, ...args) {
   process.stderr.write(`[sidecar] ${msg} ${args.map(String).join(" ")}
 `);
 }
+var toolUseIdToName = /* @__PURE__ */ new Map();
 var pendingQuestions = /* @__PURE__ */ new Map();
 function parkQuestion(toolUseId, questions) {
   return new Promise((resolve, reject) => {
@@ -19646,6 +19647,9 @@ function processMessage(msg) {
             redacted: true
           });
         } else if (block.type === "tool_use") {
+          if (block.id) {
+            toolUseIdToName.set(block.id, block.name);
+          }
           if (block.name !== "AskUserQuestion") {
             emit({
               v: 1,
@@ -19663,10 +19667,14 @@ function processMessage(msg) {
       for (const block of content) {
         if (block.type === "tool_result") {
           const toolContent = Array.isArray(block.content) ? block.content.map((c) => c.type === "text" ? c.text : "").join("") : String(block.content || "");
+          const toolName = toolUseIdToName.get(block.tool_use_id) || "";
+          if (block.tool_use_id) {
+            toolUseIdToName.delete(block.tool_use_id);
+          }
           emit({
             v: 1,
             kind: "tool_result",
-            toolName: "",
+            toolName,
             toolOutput: toolContent,
             isError: block.is_error || false
           });

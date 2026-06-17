@@ -4,6 +4,9 @@
   "description": "yakOS Agent SDK sidecar — NDJSON bridge between Go SDKEngine and the claude-agent-sdk",
   "type": "module",
   "private": true,
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "node_modules/.bin/esbuild sidecar.mjs --bundle --platform=node --format=esm --outfile=sidecar.bundle.js --external:readline --external:node:readline --external:fs --external:path --external:os --external:child_process --external:util",
     "prebuild": "npm ci --ignore-scripts"
