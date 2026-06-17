@@ -1021,6 +1021,8 @@
   function savePaneState() {
     const serializable = [];
     for (const [id, p] of chatPanes) {
+      // Skip IDE-embedded panes: they are ephemeral and not persisted.
+      if (p.ideEmbedded) continue;
       serializable.push({
         id,
         conversationId: p.conversationId,
@@ -1028,6 +1030,7 @@
         model: p.model,
         agent: p.agent,
         effort: p.effort || '',
+        interactive: !!p.interactive,
       });
     }
     try { localStorage.setItem(CHAT_PANEL_LS_KEY, JSON.stringify(serializable)); } catch { /* ignore */ }
@@ -1044,6 +1047,9 @@
       p.model = MODEL_TIERS.includes(item.model) ? item.model : 'sonnet';
       p.agent = item.agent || 'claude';
       p.effort = EFFORT_LEVELS.includes(item.effort) ? item.effort : '';
+      // Restore interactive toggle preference; interactiveLive always starts false
+      // because the server session cannot survive a page reload.
+      p.interactive = !!item.interactive;
       chatPanes.set(item.id, p);
     }
   }
@@ -1056,6 +1062,16 @@
       model: 'sonnet',
       agent: 'claude',
       effort: '',        // '' = omit from dispatch (backend default); else 'low'|'medium'|'high'|'xhigh'|'max'
+      // Interactive-P1 fields.
+      // interactive: persisted to localStorage; when true, the first turn starts
+      //   a persistent claude session (interactive:true on dispatch) and subsequent
+      //   turns are delivered via POST /api/chat/send instead of a fresh dispatch.
+      // interactiveLive: in-memory only; true while the interactive session is
+      //   open on the server (first dispatch succeeded and no 404/error since).
+      //   Reset to false when a 404 is received (session reaped) or on explicit
+      //   pane close.  Not persisted: the page reload always starts fresh.
+      interactive: false,
+      interactiveLive: false,
       activeSessionId: null,
       status: 'idle',
       costSoFar: null,
@@ -1466,7 +1482,17 @@
       });
 
       // Done streaming — update pane state.
-      pane.status = exitCode === 0 ? 'done' : 'error';
+      // Interactive-P1: when a pane is in interactive mode and the session is
+      // still live, a summary event marks the END OF ONE TURN, not the end of
+      // the session.  Set status to 'idle' so the send button re-enables for
+      // the next turn.  The conversation remains registered in
+      // conversationToPaneIds so future SSE frames (from subsequent turns) are
+      // still routed here.
+      if (pane.interactive && pane.interactiveLive) {
+        pane.status = 'idle';
+      } else {
+        pane.status = exitCode === 0 ? 'done' : 'error';
+      }
       pane.activeSessionId = null;
 
       // Teardown: remove THIS paneId from the session fan-out set.
@@ -1487,7 +1513,13 @@
       // was the active dispatcher for this session (wasDispatcher === true).
       // Passive mirror/attach panes must STAY registered so they continue
       // receiving events for all future turns on the same conversation.
-      if (wasDispatcher && pane.conversationId) {
+      //
+      // Interactive-P1 addition: even when wasDispatcher, do NOT de-register
+      // when the pane is interactive and the session is still live.  The
+      // conversationToPaneIds entry MUST survive across turns so that the SSE
+      // demux routes subsequent turns' frames (keyed on the same conversationId)
+      // to this pane without re-registering each time.
+      if (wasDispatcher && pane.conversationId && !(pane.interactive && pane.interactiveLive)) {
         var doneConvSet = conversationToPaneIds.get(pane.conversationId);
         if (doneConvSet) {
           doneConvSet.delete(paneId);
@@ -1770,6 +1802,9 @@
         'role="log" aria-label="Conversation" aria-live="polite"></div>' +
       // Status announcer (aria-live=polite, not per-token)
       '<div id="pane-announce-' + esc(paneId) + '" class="sr-only" aria-live="polite" aria-atomic="true"></div>' +
+      // Inline notice (interactive: turn-in-progress, etc.) — hidden until needed.
+      '<div id="pane-notice-' + esc(paneId) + '" class="pane-inline-notice" style="display:none" ' +
+        'role="status" aria-live="polite"></div>' +
       // Input area
       '<div class="chat-input-area">' +
         '<textarea class="chat-input" id="pane-input-' + esc(paneId) + '" ' +
@@ -1834,6 +1869,10 @@
     const opId = getChatOperatorId();
     const opColor = operatorColor(opId);
 
+    const interactivePressed = pane.interactive ? 'true' : 'false';
+    const interactiveTitle = 'Interactive: keep one live claude session for back-and-forth (multi-turn), instead of a fresh dispatch per message.';
+    const interactiveActiveClass = pane.interactive ? ' pane-interactive-active' : '';
+
     return '<div class="pane-header-row">' +
         '<span class="pane-op-badge" style="color:' + esc(opColor) + '" ' +
           'aria-label="Operator" title="' + esc(opId) + '">●</span>' +
@@ -1852,6 +1891,9 @@
           'aria-label="Status: ' + esc(statusLabel) + '">' +
           paneStatusIcon(pane.status) + '<span class="sr-only">' + esc(statusLabel) + '</span>' +
         '</span>' +
+        '<button class="pane-interactive-btn' + interactiveActiveClass + '" id="pane-interactive-' + esc(paneId) + '" type="button" ' +
+          'title="' + esc(interactiveTitle) + '" ' +
+          'aria-label="Toggle interactive multi-turn mode" aria-pressed="' + interactivePressed + '">&#x1F501;</button>' +
         '<button class="pane-share-btn" id="pane-share-' + esc(paneId) + '" type="button" ' +
           'title="Share pane" aria-label="Share or unshare pane" aria-pressed="false">&#x1F517;</button>' +
         '<button class="pane-cancel-btn" id="pane-cancel-' + esc(paneId) + '" type="button" ' +
@@ -1903,6 +1945,12 @@
     const cancelBtn = document.getElementById('pane-cancel-' + paneId);
     if (cancelBtn) {
       cancelBtn.addEventListener('click', () => cancelPaneSession(paneId));
+    }
+
+    // Interactive toggle button.
+    const interactiveBtn = document.getElementById('pane-interactive-' + paneId);
+    if (interactiveBtn) {
+      interactiveBtn.addEventListener('click', () => togglePaneInteractive(paneId));
     }
 
     // Share toggle.
@@ -2248,6 +2296,8 @@
     // Re-wire header buttons.
     const cancelBtn = document.getElementById('pane-cancel-' + paneId);
     if (cancelBtn) cancelBtn.addEventListener('click', () => cancelPaneSession(paneId));
+    const interactiveBtnH = document.getElementById('pane-interactive-' + paneId);
+    if (interactiveBtnH) interactiveBtnH.addEventListener('click', () => togglePaneInteractive(paneId));
     const shareBtn = document.getElementById('pane-share-' + paneId);
     if (shareBtn) shareBtn.addEventListener('click', () => togglePaneShare(paneId));
     const closeBtn = document.getElementById('pane-close-' + paneId);
@@ -2622,6 +2672,155 @@
       return;
     }
 
+    // Interactive-P1: if this pane has a live interactive session, route the
+    // follow-up turn via POST /api/chat/send instead of a fresh dispatch.
+    // This is the multi-turn path — the server keeps one running claude process
+    // per conversationId.
+    //
+    // Send routing decision:
+    //   pane.interactive && pane.interactiveLive  → /api/chat/send  (follow-up turn)
+    //   pane.interactive && !pane.interactiveLive → /api/chat/dispatch with interactive:true
+    //                                               (first turn or after session reaped)
+    //   !pane.interactive                         → /api/chat/dispatch (one-shot, unchanged)
+    if (pane.interactive && pane.interactiveLive) {
+      // Follow-up turn into the existing interactive session.
+      // Do NOT mint a new sessionId — the conversation is already registered.
+      pane.status = 'streaming';
+      pane.costSoFar = null;
+      pane.startedAt = new Date();
+
+      // Optimistic user message render.
+      pane.messages.push({ role: 'user', text: task, ts: new Date().toISOString(), sessionId: pane.activeSessionId || '' });
+      if (textarea) textarea.value = '';
+
+      renderPaneHeader(paneId);
+      renderPaneMessages(paneId);
+      if (pane.autoScroll) scrollPaneToBottom(paneId);
+      startElapsedTimer(pane, paneId);
+
+      const sendBody = {
+        conversationId: pane.conversationId,
+        operatorId: getChatOperatorId(),
+        text: task,
+      };
+
+      apiFetch('POST', '/api/chat/send', sendBody).then((resp) => {
+        if (resp.status === 202) {
+          // Accepted — SSE will deliver the response on the existing stream.
+          return;
+        }
+        if (resp.status === 409) {
+          // Turn already in flight — restore input text so the operator can retry.
+          pane.status = 'streaming'; // keep streaming; do not falsely mark error
+          pane.costSoFar = null;
+          if (textarea) { textarea.value = task; textarea.disabled = false; }
+          // Remove the optimistically-added user message (last message).
+          if (pane.messages.length && pane.messages[pane.messages.length - 1].role === 'user') {
+            pane.messages.pop();
+          }
+          // S1: do NOT call stopElapsedTimer here — the in-flight turn is still
+          // streaming and its summary event will stop the timer naturally.
+          // Calling stopElapsedTimer while status='streaming' would blank the
+          // elapsed display while the real turn is still running.
+          renderPaneHeader(paneId);
+          renderPaneMessages(paneId);
+          // Surface a brief inline notice without losing the typed text.
+          var notice = document.getElementById('pane-notice-' + paneId);
+          if (notice) {
+            notice.textContent = 'Turn in progress — try again when the current turn finishes.';
+            notice.style.display = '';
+            setTimeout(function() { if (notice) notice.style.display = 'none'; }, 4000);
+          }
+          return;
+        }
+        if (resp.status === 404) {
+          // Session was reaped (idle timeout) — clear live flag and transparently
+          // restart by sending this turn as a new interactive dispatch.
+          pane.interactiveLive = false;
+          // Remove the optimistic user message; sendPaneMessage will re-add it
+          // via the dispatch path once we restore the textarea.
+          if (pane.messages.length && pane.messages[pane.messages.length - 1].role === 'user') {
+            pane.messages.pop();
+          }
+          pane.status = 'idle';
+          pane.activeSessionId = null;
+          stopElapsedTimer(pane);
+          // Restore the text and re-invoke via the dispatch (first-turn) path.
+          if (textarea) textarea.value = task;
+          renderPaneHeader(paneId);
+          renderPaneMessages(paneId);
+          // Push a system notice so the operator knows what happened.
+          pane.messages.push({
+            role: 'system',
+            text: 'Interactive session ended (idle timeout). Starting new session…',
+            ts: new Date().toISOString(),
+            sessionId: null,
+          });
+          renderPaneMessages(paneId);
+          // Re-invoke immediately: this will take the interactive dispatch path.
+          sendPaneMessage(paneId);
+          return;
+        }
+        if (resp.status === 503) {
+          // Interactive mode not configured server-side — fall back to one-shot
+          // for this send and surface a notice.
+          pane.interactiveLive = false;
+          pane.interactive = false; // turn off the toggle so future sends go one-shot
+          savePaneState();
+          // Remove optimistic user message so the one-shot path re-adds it.
+          if (pane.messages.length && pane.messages[pane.messages.length - 1].role === 'user') {
+            pane.messages.pop();
+          }
+          pane.status = 'idle';
+          pane.activeSessionId = null;
+          stopElapsedTimer(pane);
+          if (textarea) textarea.value = task;
+          renderPaneHeader(paneId);
+          renderPaneMessages(paneId);
+          pane.messages.push({
+            role: 'system',
+            text: 'Interactive mode is not enabled on this server — falling back to one-shot dispatch.',
+            ts: new Date().toISOString(),
+            sessionId: null,
+          });
+          renderPaneMessages(paneId);
+          sendPaneMessage(paneId);
+          return;
+        }
+        // Other error — treat as dispatch error.
+        return resp.text().then(function(errText) {
+          pane.status = 'error';
+          pane.activeSessionId = null;
+          pane.interactiveLive = false;
+          stopElapsedTimer(pane);
+          pane.messages.push({
+            role: 'summary',
+            text: '',
+            ts: new Date().toISOString(),
+            sessionId: '',
+            exitCode: 1,
+            durationS: null,
+            costUSD: null,
+            errorText: errText,
+          });
+          renderPaneHeader(paneId);
+          renderPaneMessages(paneId);
+          announcePaneStatus(paneId, 'send failed: ' + errText);
+          updateTotalCostBadge();
+        });
+      }).catch(function(err) {
+        pane.status = 'error';
+        pane.activeSessionId = null;
+        pane.interactiveLive = false;
+        stopElapsedTimer(pane);
+        renderPaneHeader(paneId);
+        announcePaneStatus(paneId, 'network error');
+        console.warn('[chat interactive send] error:', err);
+      });
+      return;
+    }
+
+    // One-shot dispatch path (default) OR first turn of a new interactive session.
     // Mint a fresh sessionId per turn.
     const sessionId = newSessionId();
     pane.activeSessionId = sessionId;
@@ -2659,6 +2858,11 @@
     if (pane.effort) {
       dispatchBody.effort = pane.effort;
     }
+    // Interactive-P1: tag the first-turn dispatch so the server starts a
+    // persistent session.  Subsequent turns will use /api/chat/send.
+    if (pane.interactive) {
+      dispatchBody.interactive = true;
+    }
     // Phase 3: if this pane is the IDE embedded pane and review mode is ON,
     // signal to the server that edits should land in an isolated worktree.
     if (pane.ideEmbedded && ideReviewMode) {
@@ -2685,11 +2889,20 @@
 
     // Route through apiFetch so session mode sends X-CSRF-Token + credentials.
     apiFetch('POST', '/api/chat/dispatch', dispatchBody).then((resp) => {
-      if (resp.ok) return; // 202 Accepted — streaming will arrive on SSE
+      if (resp.ok) {
+        // 202 Accepted — streaming will arrive on SSE.
+        // For interactive first-turn: mark the session live so the next send
+        // routes to /api/chat/send instead of a fresh dispatch.
+        if (pane.interactive) {
+          pane.interactiveLive = true;
+        }
+        return;
+      }
       // Error path: clean up.
       return resp.text().then((errText) => {
         pane.status = 'error';
         pane.activeSessionId = null;
+        pane.interactiveLive = false;
         // Teardown: remove this paneId from the fan-out set.
         var errSet = sessionToPaneIds.get(sessionId);
         if (errSet) { errSet.delete(paneId); if (errSet.size === 0) sessionToPaneIds.delete(sessionId); }
@@ -2715,6 +2928,7 @@
     }).catch((err) => {
       pane.status = 'error';
       pane.activeSessionId = null;
+      pane.interactiveLive = false;
       // Teardown: remove this paneId from the fan-out set.
       var netErrSet = sessionToPaneIds.get(sessionId);
       if (netErrSet) { netErrSet.delete(paneId); if (netErrSet.size === 0) sessionToPaneIds.delete(sessionId); }
@@ -2858,6 +3072,9 @@
 
     pane.status = 'idle';
     pane.activeSessionId = null;
+    // Cancelling an interactive session kills the server-side process, so the
+    // live flag must be cleared — the next send will restart with a fresh dispatch.
+    pane.interactiveLive = false;
     // Teardown session mapping (teardown/cancel correlation).
     var cancelSet = sessionToPaneIds.get(sessionId);
     if (cancelSet) { cancelSet.delete(paneId); if (cancelSet.size === 0) sessionToPaneIds.delete(sessionId); }
@@ -2918,6 +3135,58 @@
         }
       }).catch(function() { /* ignore JSON parse failure */ });
     }).catch(() => { /* silent */ });
+  }
+
+  // ---- Interactive mode toggle -----------------------------------------------
+  //
+  // togglePaneInteractive flips pane.interactive and persists the preference.
+  // The change takes effect on the NEXT send.  If the pane already has a live
+  // interactive session (interactiveLive=true) and the operator turns interactive
+  // OFF, we mark it ended so the next send starts a fresh one-shot dispatch.
+  //
+  // S2 guard: toggling while a turn is streaming is a no-op — the in-flight
+  // turn owns the session state and silently mutating interactiveLive/
+  // conversationToPaneIds mid-stream would leave the pane in a broken state
+  // (subsequent SSE frames for the running turn would be unroutable).  Show a
+  // brief inline notice instead so the operator knows why the click was ignored.
+
+  function togglePaneInteractive(paneId) {
+    const pane = chatPanes.get(paneId);
+    if (!pane) return;
+
+    // S2: block toggle while a turn is in flight.
+    if (pane.status === 'streaming') {
+      var guardNotice = document.getElementById('pane-notice-' + paneId);
+      if (guardNotice) {
+        guardNotice.textContent = 'Finish the current turn before toggling interactive mode.';
+        guardNotice.style.display = '';
+        setTimeout(function() { if (guardNotice) guardNotice.style.display = 'none'; }, 3000);
+      }
+      return;
+    }
+
+    pane.interactive = !pane.interactive;
+
+    // If the operator turned interactive OFF and a live session exists, treat the
+    // session as ended: the next send will use the one-shot path, starting fresh.
+    // We don't call /api/chat/cancel on the conversationId here — the server's
+    // idle-reaper will clean it up.  Just clear the client-side live flag.
+    if (!pane.interactive && pane.interactiveLive) {
+      pane.interactiveLive = false;
+      // Remove this pane from conversation-level routing so stale SSE frames
+      // from the old interactive session do not arrive after mode switch.
+      if (pane.conversationId) {
+        var offConvSet = conversationToPaneIds.get(pane.conversationId);
+        if (offConvSet) {
+          offConvSet.delete(paneId);
+          if (offConvSet.size === 0) conversationToPaneIds.delete(pane.conversationId);
+        }
+      }
+    }
+
+    // Persist the preference and update the header.
+    savePaneState();
+    renderPaneHeader(paneId);
   }
 
   // ---- Elapsed timer ---------------------------------------------------------
