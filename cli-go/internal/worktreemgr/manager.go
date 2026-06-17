@@ -25,6 +25,8 @@ package worktreemgr
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -302,25 +304,15 @@ func validateSessionID(sessionID string) error {
 	return nil
 }
 
-// sanitizeSessionID replaces any character that is not alphanumeric, '-', or
-// '_' with '_'. This ensures the result is safe as a directory name component
-// regardless of the input's origin.
-func sanitizeSessionID(sessionID string) string {
-	var sb strings.Builder
-	sb.Grow(len(sessionID))
-	for _, r := range sessionID {
-		if isAlphanumericOrDash(r) {
-			sb.WriteRune(r)
-		} else {
-			sb.WriteByte('_')
-		}
-	}
-	return sb.String()
-}
-
-func isAlphanumericOrDash(r rune) bool {
-	return (r >= 'a' && r <= 'z') ||
-		(r >= 'A' && r <= 'Z') ||
-		(r >= '0' && r <= '9') ||
-		r == '-' || r == '_'
+// sanitizeSessionID returns a collision-free, filesystem-safe directory name
+// component for rawID. It uses the first 16 hex characters of SHA-256(rawID)
+// so that two distinct raw session IDs — even ones that the old character-
+// replacement strategy would have mapped to the same string (e.g. "sess@1"
+// and "sess#1" both becoming "sess_1") — always produce distinct directory
+// names.
+//
+// The hex output is alphanumeric-only (0-9, a-f), safe on all platforms.
+func sanitizeSessionID(rawID string) string {
+	sum := sha256.Sum256([]byte(rawID))
+	return hex.EncodeToString(sum[:])[:16]
 }

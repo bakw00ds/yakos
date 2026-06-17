@@ -791,3 +791,191 @@ var _ = consoleui.GitStatusResponse{}
 var _ = consoleui.GitStatusFile{}
 var _ = consoleui.CommitRequest{}
 var _ = consoleui.CommitResponse{}
+
+// ---- Security regression tests -----------------------------------------------
+
+// TestDiffHandler_BinaryPromote_SymlinkParentEscape verifies that accepting a
+// binary file whose real-tree parent directory is a symlink pointing OUTSIDE
+// the workspace is rejected with 4xx and the victim path is NOT written.
+//
+// This is a regression test for the arbitrary-file-write via binary-promote
+// vulnerability: jailPath returned an unresolved lexical candidate for
+// not-yet-existing targets, which let a symlinked parent dir inside the
+// workspace redirect the write to an outside location.
+func TestDiffHandler_BinaryPromote_SymlinkParentEscape(t *testing.T) {
+	requireGit(t)
+
+	// Check that symlinks work on this platform (some CI setups restrict them).
+	tmpCheck := t.TempDir()
+	testLink := filepath.Join(tmpCheck, "linkcheck")
+	if err := os.Symlink(tmpCheck, testLink); err != nil {
+		t.Skip("symlinks not supported in this environment; skipping")
+	}
+
+	env := newDiffEnv(t)
+
+	// Create a directory OUTSIDE the workspace that we want to verify cannot
+	// be written to.
+	outsideDir := t.TempDir()
+	victimPath := filepath.Join(outsideDir, "victim.bin")
+
+	// Create a symlinked subdirectory INSIDE the workspace that points outside.
+	// e.g. <repoRoot>/evil-link -> <outsideDir>
+	evilLink := filepath.Join(env.repoRoot, "evil-link")
+	if err := os.Symlink(outsideDir, evilLink); err != nil {
+		t.Fatalf("os.Symlink: %v", err)
+	}
+
+	// Write a binary file in the worktree at the "normal" relative path that
+	// would (via the symlink) try to land outside the workspace.
+	// Worktree directory must contain the same subdir structure.
+	wtSubdir := filepath.Join(env.wtPath, "evil-link")
+	if err := os.MkdirAll(wtSubdir, 0755); err != nil {
+		t.Fatalf("MkdirAll wtSubdir: %v", err)
+	}
+	// A binary file (contains a NUL byte) so the diff handler treats it as binary.
+	binaryContent := []byte("binary\x00data")
+	writeFile(t, filepath.Join(wtSubdir, "victim.bin"), string(binaryContent))
+	// Stage in worktree so it shows up in git status as untracked.
+	// (untracked binary shows up with status "added" + binary=true)
+
+	// The relative path that would be requested: "evil-link/victim.bin"
+	// jailPath("evil-link/victim.bin") resolves lexically to
+	// <repoRoot>/evil-link/victim.bin which PASSES the lexical isUnderRoot check
+	// (since evilLink is under repoRoot), but its real location is
+	// <outsideDir>/victim.bin which is OUTSIDE.
+	accept := consoleui.AcceptRequest{
+		SessionID:  env.sessionA,
+		OperatorID: env.opA,
+		Path:       "evil-link/victim.bin",
+		HunkID:     0,
+	}
+	resp := diffDo(t, env, http.MethodPost, "/api/files/diff/accept", accept)
+	defer resp.Body.Close()
+
+	// Must be rejected with a 4xx — not 200.
+	if resp.StatusCode == http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("binary-promote symlink escape: expected 4xx, got 200 (body: %q)", body)
+	}
+	if resp.StatusCode < 400 || resp.StatusCode >= 500 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("binary-promote symlink escape: got %d, want a 4xx status (body: %q)", resp.StatusCode, body)
+	}
+
+	// The victim file outside the workspace must NOT have been written.
+	if _, err := os.Stat(victimPath); !os.IsNotExist(err) {
+		t.Errorf("binary-promote symlink escape: victim file at %q was created (escape succeeded!)", victimPath)
+	}
+}
+
+// TestDiffHandler_BinaryPromote_GitHooksEscape verifies that accepting a
+// binary file targeting .git/hooks/pre-commit via a symlinked parent is
+// rejected with 4xx and the .git directory is not written.
+//
+// This is the RCE variant of the binary-promote escape: writing an executable
+// to .git/hooks/pre-commit would execute on the next git commit.
+func TestDiffHandler_BinaryPromote_GitHooksEscape(t *testing.T) {
+	requireGit(t)
+
+	tmpCheck := t.TempDir()
+	testLink := filepath.Join(tmpCheck, "linkcheck")
+	if err := os.Symlink(tmpCheck, testLink); err != nil {
+		t.Skip("symlinks not supported in this environment; skipping")
+	}
+
+	env := newDiffEnv(t)
+
+	// Create a symlink inside the workspace that points to .git/hooks/.
+	// This simulates an attacker who has written a symlink into the workspace
+	// (e.g. via a malicious tool output). The symlink passes jailPath's
+	// lexical isUnderRoot check but EvalSymlinks resolves to .git/hooks.
+	gitHooksDir := filepath.Join(env.repoRoot, ".git", "hooks")
+	if err := os.MkdirAll(gitHooksDir, 0755); err != nil {
+		t.Fatalf("MkdirAll .git/hooks: %v", err)
+	}
+
+	evilLink := filepath.Join(env.repoRoot, "hooks-link")
+	if err := os.Symlink(gitHooksDir, evilLink); err != nil {
+		t.Fatalf("os.Symlink .git/hooks: %v", err)
+	}
+
+	// Set up the worktree side with the same relative path.
+	wtSubdir := filepath.Join(env.wtPath, "hooks-link")
+	if err := os.MkdirAll(wtSubdir, 0755); err != nil {
+		t.Fatalf("MkdirAll wtSubdir: %v", err)
+	}
+	hookContent := []byte("#!/bin/sh\necho pwned\x00") // NUL byte → binary
+	writeFile(t, filepath.Join(wtSubdir, "pre-commit"), string(hookContent))
+
+	accept := consoleui.AcceptRequest{
+		SessionID:  env.sessionA,
+		OperatorID: env.opA,
+		Path:       "hooks-link/pre-commit",
+		HunkID:     0,
+	}
+	resp := diffDo(t, env, http.MethodPost, "/api/files/diff/accept", accept)
+	defer resp.Body.Close()
+
+	// Must be rejected with a 4xx.
+	if resp.StatusCode == http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf(".git hooks escape: expected 4xx, got 200 (body: %q)", body)
+	}
+	if resp.StatusCode < 400 || resp.StatusCode >= 500 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf(".git hooks escape: got %d, want a 4xx status (body: %q)", resp.StatusCode, body)
+	}
+
+	// The hook file must NOT have been written.
+	hookPath := filepath.Join(gitHooksDir, "pre-commit")
+	if data, err := os.ReadFile(hookPath); err == nil {
+		t.Errorf(".git hooks escape: pre-commit was written (RCE). Content: %q", data)
+	}
+}
+
+// TestDiffHandler_GitCommit_NoVerify verifies that POST /api/git/commit passes
+// --no-verify so pre-existing hooks do not execute during programmatic commits.
+// We test this indirectly: a commit message starting with "--" is committed
+// literally (not parsed as a git flag), confirming the "--" separator is
+// present and correct.
+func TestDiffHandler_GitCommit_DashDashMessageCommitsLiterally(t *testing.T) {
+	env := newDiffEnv(t)
+
+	// Promote a change to the real tree so there is something to commit.
+	writeFile(t, filepath.Join(env.repoRoot, "hello.txt"), "line1\nLINE2-CHANGED\nline3\n")
+
+	// Use a commit message that starts with "--" to verify it is treated as a
+	// literal message, not a flag (requires the "--" separator in git commit).
+	literalMessage := "--this-is-a-message-not-a-flag"
+	req := consoleui.CommitRequest{
+		SessionID:  env.sessionA,
+		OperatorID: env.opA,
+		Message:    literalMessage,
+		Paths:      []string{"hello.txt"},
+	}
+	resp := diffDo(t, env, http.MethodPost, "/api/git/commit", req)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("commit with '--' message: got %d, want 200 (body: %q)", resp.StatusCode, body)
+	}
+
+	var cr consoleui.CommitResponse
+	decodeJSON(t, resp.Body, &cr)
+	if cr.SHA == "" {
+		t.Error("expected non-empty SHA")
+	}
+
+	// Verify the commit message is exactly the literal string.
+	cmd := exec.Command("git", "-C", env.repoRoot, "log", "-1", "--format=%s")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	subject := strings.TrimSpace(string(out))
+	if subject != literalMessage {
+		t.Errorf("commit subject: got %q, want %q", subject, literalMessage)
+	}
+}

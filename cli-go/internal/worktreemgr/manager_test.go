@@ -401,3 +401,90 @@ func TestPathFor_ReturnsEmptyWhenAbsent(t *testing.T) {
 		t.Errorf("PathFor returned non-empty path for nonexistent session: %q", path)
 	}
 }
+
+// TestSessionID_CollisionDistinctIDs verifies that two distinct raw session
+// IDs that would previously have produced the SAME sanitized directory name
+// (e.g. "sess@1" and "sess#1" both mapped to "sess_1") now produce DISTINCT
+// on-disk worktree directories and never share each other's tree.
+//
+// This is the regression test for the confused-deputy / cross-session edit
+// bleed vulnerability: the old character-replacement sanitizer collapsed
+// all special characters to '_', causing "sess@1" and "sess#1" (and many
+// other pairs) to resolve to identical directory names. The second Ensure
+// would silently reuse the first session's worktree.
+func TestSessionID_CollisionDistinctIDs(t *testing.T) {
+	skipIfNoGit(t)
+
+	repoDir := t.TempDir()
+	initRepo(t, repoDir)
+	stateDir := t.TempDir()
+
+	m := worktreemgr.New(stateDir)
+
+	// These two IDs previously sanitized to identical strings ("sess_1") under
+	// the old character-replacement approach.
+	idA := "sess@1"
+	idB := "sess#1"
+
+	// Both are valid (no "..", no "/", no "\") so Ensure should succeed.
+	pathA, err := m.Ensure(idA, repoDir)
+	if err != nil {
+		t.Fatalf("Ensure(%q): %v", idA, err)
+	}
+	pathB, err := m.Ensure(idB, repoDir)
+	if err != nil {
+		t.Fatalf("Ensure(%q): %v", idB, err)
+	}
+
+	// The two sessions must have DISTINCT worktree directories.
+	if pathA == pathB {
+		t.Errorf("collision: Ensure(%q) and Ensure(%q) returned the same path %q; sessions must be isolated", idA, idB, pathA)
+	}
+
+	// Both directories must exist on disk.
+	if _, err := os.Stat(pathA); err != nil {
+		t.Errorf("worktree for %q does not exist: %v", idA, err)
+	}
+	if _, err := os.Stat(pathB); err != nil {
+		t.Errorf("worktree for %q does not exist: %v", idB, err)
+	}
+
+	// PathFor keyed by raw ID must return the correct (distinct) paths.
+	if got, ok := m.PathFor(idA); !ok || got != pathA {
+		t.Errorf("PathFor(%q) = (%q, %v); want (%q, true)", idA, got, ok, pathA)
+	}
+	if got, ok := m.PathFor(idB); !ok || got != pathB {
+		t.Errorf("PathFor(%q) = (%q, %v); want (%q, true)", idB, got, ok, pathB)
+	}
+
+	t.Cleanup(func() {
+		_ = m.Remove(idA)
+		_ = m.Remove(idB)
+	})
+}
+
+// TestSessionID_SameIDIdempotent verifies that Ensure with the same raw ID
+// twice returns the same path (idempotency is preserved under the hash scheme).
+func TestSessionID_SameIDIdempotent(t *testing.T) {
+	skipIfNoGit(t)
+
+	repoDir := t.TempDir()
+	initRepo(t, repoDir)
+	stateDir := t.TempDir()
+
+	m := worktreemgr.New(stateDir)
+	id := "sess@1"
+
+	p1, err := m.Ensure(id, repoDir)
+	if err != nil {
+		t.Fatalf("Ensure first: %v", err)
+	}
+	p2, err := m.Ensure(id, repoDir)
+	if err != nil {
+		t.Fatalf("Ensure second: %v", err)
+	}
+	if p1 != p2 {
+		t.Errorf("Ensure not idempotent for same ID: first=%q second=%q", p1, p2)
+	}
+	t.Cleanup(func() { _ = m.Remove(id) })
+}

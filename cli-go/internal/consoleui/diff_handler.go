@@ -557,18 +557,44 @@ func applyPatchToRealTree(repoRoot string, patch []byte) error {
 }
 
 // promoteBinaryFile copies the binary file from the worktree to the real tree.
-func (d *diffHandlers) promoteBinaryFile(wtPath, relPath, absTarget string) error {
+//
+// Security: absTarget from the caller is the UNRESOLVED lexical candidate
+// produced by jailPath (which returns the unresolved path for not-yet-existing
+// files). A symlinked parent directory inside the workspace whose real location
+// is outside the workspace would pass jailPath's lexical isUnderRoot check but
+// the write would escape the workspace. To close this, promoteBinaryFile
+// re-resolves the target using jailPathForCreate (EvalSymlinks on the parent)
+// and writes only to the fully-resolved realTarget. It also explicitly rejects
+// any path that resolves into the .git directory.
+func (d *diffHandlers) promoteBinaryFile(wtPath, relPath, _ string) error {
+	// Re-resolve using the write-safe jailPathForCreate. This EvalSymlinks the
+	// parent directory and reasserts it is inside WorkspaceRoot.
+	realTarget, err := d.files.jailPathForCreate(relPath)
+	if err != nil {
+		return fmt.Errorf("binary promote: path jail violation: %w", err)
+	}
+
+	// Belt-and-suspenders: explicitly reject writes into .git/ even if
+	// jailPathForCreate somehow produced such a path.
+	if isGitPath(realTarget, d.files.workspaceRoot) {
+		return fmt.Errorf("binary promote: refusing write to .git path")
+	}
+	// Belt-and-suspenders: assert the final resolved target is under workspace root.
+	if !isUnderRoot(realTarget, d.files.workspaceRoot) {
+		return fmt.Errorf("binary promote: resolved path escapes workspace jail")
+	}
+
 	src := filepath.Join(wtPath, filepath.FromSlash(relPath))
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return fmt.Errorf("read worktree file: %w", err)
 	}
-	// Jail check on target is done by the caller; write atomically.
-	tmp := absTarget + ".yakos-diff-promote-tmp"
+	// Write atomically to the fully-resolved realTarget.
+	tmp := realTarget + ".yakos-diff-promote-tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return fmt.Errorf("write temp file: %w", err)
 	}
-	if err := os.Rename(tmp, absTarget); err != nil {
+	if err := os.Rename(tmp, realTarget); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename: %w", err)
 	}
@@ -645,8 +671,17 @@ func (d *diffHandlers) handleDiffReject(w http.ResponseWriter, r *http.Request) 
 
 	if target.Binary || target.Status == "added" {
 		// Binary or new untracked file: remove from worktree.
-		absWT := filepath.Join(wt, filepath.FromSlash(req.Path))
-		if err := os.Remove(absWT); err != nil && !os.IsNotExist(err) {
+		// Use a write-safe jail rooted at the worktree so a symlinked parent
+		// directory inside the worktree cannot escape to outside.
+		wtJail := newFilesHandlers(wt)
+		realWTTarget, jailErr := wtJail.jailPathForCreate(req.Path)
+		if jailErr != nil {
+			slog.Warn("consoleui/diff: reject remove: path jail violation",
+				"session", req.SessionID, "path", req.Path, "err", jailErr)
+			writeGenericError(w, http.StatusBadRequest, "invalid path: outside worktree jail")
+			return
+		}
+		if err := os.Remove(realWTTarget); err != nil && !os.IsNotExist(err) {
 			slog.Error("consoleui/diff: reject remove",
 				"session", req.SessionID, "path", req.Path, "err", err)
 			writeGenericError(w, http.StatusInternalServerError, "failed to remove file from worktree")
@@ -877,7 +912,11 @@ func (d *diffHandlers) handleGitCommit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Commit with the supplied message.
-	sha, err := runGitOutputIn(d.workspaceRoot, "commit", "--no-gpg-sign",
+	// --no-verify: belt-and-suspenders defence — even if a hook were somehow
+	// written to .git/hooks (e.g. via a different vulnerability), it must not
+	// execute during this programmatic commit. The primary defence is
+	// jailPathForCreate blocking writes into .git/; this is the secondary layer.
+	sha, err := runGitOutputIn(d.workspaceRoot, "commit", "--no-gpg-sign", "--no-verify",
 		"-m", req.Message,
 		"--", // paths already staged; this prevents double-staging
 	)
