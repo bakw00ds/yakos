@@ -938,6 +938,10 @@
   // Runtimes that stream incrementally (token events):
   const STREAMING_RUNTIMES = new Set(['claude']);
 
+  // Effort levels accepted by the backend (empty string = omit from dispatch body = default).
+  // Values map directly to --effort flag values accepted by the claude runtime.
+  const EFFORT_LEVELS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
+
   const CHAT_PANEL_LS_KEY = 'yakos_chat_panes_v1'; // localStorage key for pane state
   const MAX_PANES = 6; // grid wraps after 3; up to 6 total
 
@@ -965,9 +969,18 @@
   let chatSSEAbort = null;     // AbortController for the SSE fetch
 
   // Map sessionId → Set<paneId> for 1:many SSE fan-out.
-  // Multiple panes (e.g. Chat tab + IDE embedded pane) can watch the same
-  // sessionId simultaneously; each receives every live SSE frame.
+  // Used for teardown/cancel correlation only (session_id is per-turn).
+  // SSE delivery is keyed on conversation_id via conversationToPaneIds below.
   let sessionToPaneIds = new Map();
+
+  // Map conversationId → Set<paneId> for conversation-level SSE delivery.
+  // Each SSE frame carries conversation_id (stable across per-turn session_ids).
+  // Panes register here when they are created or attached; the demux fans out
+  // to ALL panes whose conversationId matches ev.conversation_id so that the
+  // sending Chat pane AND any IDE pane watching the same conversation both
+  // receive live frames.  Guarded teardown: removing a pane deletes only that
+  // pane's entry from the Set, preserving other panes watching the same conversation.
+  let conversationToPaneIds = new Map();
 
   // The self-asserted operator ID for this browser session.
   let chatOperatorId = '';
@@ -1014,6 +1027,7 @@
         runtime: p.runtime,
         model: p.model,
         agent: p.agent,
+        effort: p.effort || '',
       });
     }
     try { localStorage.setItem(CHAT_PANEL_LS_KEY, JSON.stringify(serializable)); } catch { /* ignore */ }
@@ -1029,6 +1043,7 @@
       p.runtime = RUNTIMES.includes(item.runtime) ? item.runtime : 'claude';
       p.model = MODEL_TIERS.includes(item.model) ? item.model : 'sonnet';
       p.agent = item.agent || 'claude';
+      p.effort = EFFORT_LEVELS.includes(item.effort) ? item.effort : '';
       chatPanes.set(item.id, p);
     }
   }
@@ -1040,6 +1055,7 @@
       runtime: 'claude',
       model: 'sonnet',
       agent: 'claude',
+      effort: '',        // '' = omit from dispatch (backend default); else 'low'|'medium'|'high'|'xhigh'|'max'
       activeSessionId: null,
       status: 'idle',
       costSoFar: null,
@@ -1118,9 +1134,12 @@
     p.status = 'idle';
 
     chatPanes.set(p.id, p);
-    // Fan-out registration: add this paneId to the Set for this sessionId.
+    // Fan-out registration: add this paneId to the Set for this sessionId (teardown/cancel).
     if (!sessionToPaneIds.has(sessionId)) sessionToPaneIds.set(sessionId, new Set());
     sessionToPaneIds.get(sessionId).add(p.id);
+    // Conversation-level routing: register by conversationId for SSE delivery.
+    if (!conversationToPaneIds.has(p.conversationId)) conversationToPaneIds.set(p.conversationId, new Set());
+    conversationToPaneIds.get(p.conversationId).add(p.id);
 
     // Rebuild the pane rail to include the new pane.
     var rail = document.getElementById('chat-pane-rail');
@@ -1138,7 +1157,7 @@
   //
   // One long-lived GET /api/chat/stream?operatorId=… per browser tab.
   // The SW injects Authorization: Bearer so we never put the token in the URL.
-  // Events are demuxed by session_id into the correct pane.
+  // Events are demuxed by conversation_id into the correct pane(s).
 
   let chatSSERetryMs = 1000;
   let chatSSERetryTimer = null;
@@ -1248,17 +1267,39 @@
   // ---- SSE event demux -------------------------------------------------------
 
   function handleSSEEvent(ev) {
-    // ev: {session_id, type, text?, exit_code?, duration_s?, total_cost_usd?,
-    //       model_resolved?, tool_name?, tool_input?, tool_output?, is_error?,
-    //       thinking?, ts}
-    const sessionId = ev.session_id;
-    if (!sessionId) return;
+    // ev: {session_id, conversation_id, type, text?, exit_code?, duration_s?,
+    //       total_cost_usd?, model_resolved?, tool_name?, tool_input?,
+    //       tool_output?, is_error?, thinking?, ts}
+    //
+    // Routing: primary fan-out is keyed on conversation_id (stable across the
+    // per-turn session_ids).  This ensures both the sending Chat pane AND an
+    // IDE pane bound to the same conversation receive every live frame,
+    // regardless of which per-turn session_id is active.
+    //
+    // session_id is still used as a fallback (e.g. older backend frames that
+    // lack conversation_id) and for teardown/cancel correlation in
+    // sessionToPaneIds — but NOT for delivery/render here.
+    const sessionId = ev.session_id || '';
+    const conversationId = ev.conversation_id || '';
 
-    const paneIdSet = sessionToPaneIds.get(sessionId);
-    if (!paneIdSet || paneIdSet.size === 0) return; // unknown session
+    // Build the delivery set from conversationToPaneIds (preferred) +
+    // any sessionToPaneIds fallback when conversation_id is absent.
+    // Use a combined Set to avoid double-delivering to a pane that appears in both.
+    const deliverySet = new Set();
+    if (conversationId) {
+      var convSet = conversationToPaneIds.get(conversationId);
+      if (convSet) { for (var pid of convSet) deliverySet.add(pid); }
+    }
+    if (!conversationId && sessionId) {
+      // Fallback: no conversation_id on this frame — route by session_id.
+      var sessSet = sessionToPaneIds.get(sessionId);
+      if (sessSet) { for (var pid of sessSet) deliverySet.add(pid); }
+    }
 
-    // Fan-out: deliver the event to EVERY pane registered for this sessionId.
-    for (const paneId of paneIdSet) {
+    if (deliverySet.size === 0) return; // unknown conversation/session
+
+    // Fan-out: deliver the event to EVERY pane in the delivery set.
+    for (const paneId of deliverySet) {
       const pane = chatPanes.get(paneId);
       if (!pane) continue; // pane was closed; skip stale entry
 
@@ -1421,11 +1462,23 @@
       pane.status = exitCode === 0 ? 'done' : 'error';
       pane.activeSessionId = null;
 
-      // Teardown: remove THIS paneId from the set; delete map entry when set empties.
+      // Teardown: remove THIS paneId from the session fan-out set.
+      // Only delete the map entry when the set empties so other panes
+      // watching the same session keep their registration.
       var doneSet = sessionToPaneIds.get(sessionId);
       if (doneSet) {
         doneSet.delete(paneId);
         if (doneSet.size === 0) sessionToPaneIds.delete(sessionId);
+      }
+      // Conversation-level routing: remove this paneId from conversationToPaneIds
+      // only when this pane's own turn is done.  Other panes on the same
+      // conversation keep their entries.
+      if (pane.conversationId) {
+        var doneConvSet = conversationToPaneIds.get(pane.conversationId);
+        if (doneConvSet) {
+          doneConvSet.delete(paneId);
+          if (doneConvSet.size === 0) conversationToPaneIds.delete(pane.conversationId);
+        }
       }
 
       stopElapsedTimer(pane);
@@ -1647,6 +1700,14 @@
         if (closeAttachSet.size === 0) sessionToPaneIds.delete(pane.attachedSessionId);
       }
     }
+    // Remove from conversation-level routing map.
+    if (pane.conversationId) {
+      var closeConvSet = conversationToPaneIds.get(pane.conversationId);
+      if (closeConvSet) {
+        closeConvSet.delete(paneId);
+        if (closeConvSet.size === 0) conversationToPaneIds.delete(pane.conversationId);
+      }
+    }
     chatPanes.delete(paneId);
     savePaneState();
     const el = document.getElementById('pane-' + paneId);
@@ -1746,6 +1807,12 @@
       '<option value="' + esc(m) + '"' + (m === pane.model ? ' selected' : '') + '>' + esc(m) + '</option>'
     ).join('');
 
+    // Effort selector: 'default' shown for '' (omit); else the exact backend value.
+    const effortOpts = EFFORT_LEVELS.map((e) => {
+      var label = e === '' ? 'default' : e;
+      return '<option value="' + esc(e) + '"' + (e === (pane.effort || '') ? ' selected' : '') + '>' + esc(label) + '</option>';
+    }).join('');
+
     const statusClass = 'pane-status-' + esc(pane.status);
     const statusLabel = paneStatusLabel(pane.status);
     const costStr = formatCost(pane.costSoFar, pane.runtime);
@@ -1760,6 +1827,8 @@
           'aria-label="Runtime">' + runtimeOpts + '</select>' +
         '<select class="pane-model-select" id="pane-model-' + esc(paneId) + '" ' +
           'aria-label="Model tier">' + modelOpts + '</select>' +
+        '<select class="pane-effort-select" id="pane-effort-' + esc(paneId) + '" ' +
+          'aria-label="Effort level">' + effortOpts + '</select>' +
         '<input class="pane-agent-input" id="pane-agent-' + esc(paneId) + '" ' +
           'type="text" value="' + esc(pane.agent) + '" ' +
           'placeholder="agent name" aria-label="Agent name" maxlength="80">' +
@@ -1796,6 +1865,14 @@
     if (modelSel) {
       modelSel.addEventListener('change', () => {
         pane.model = modelSel.value;
+        savePaneState();
+      });
+    }
+
+    const effortSel = document.getElementById('pane-effort-' + paneId);
+    if (effortSel) {
+      effortSel.addEventListener('change', () => {
+        pane.effort = EFFORT_LEVELS.includes(effortSel.value) ? effortSel.value : '';
         savePaneState();
       });
     }
@@ -2163,10 +2240,12 @@
     if (closeBtn) closeBtn.addEventListener('click', () => closePane(paneId));
     const runtimeSel = document.getElementById('pane-runtime-' + paneId);
     const modelSel = document.getElementById('pane-model-' + paneId);
+    const effortSelH = document.getElementById('pane-effort-' + paneId);
     const agentIn = document.getElementById('pane-agent-' + paneId);
     const pane = chatPanes.get(paneId);
     if (pane && runtimeSel) runtimeSel.addEventListener('change', () => { pane.runtime = runtimeSel.value; savePaneState(); });
     if (pane && modelSel) modelSel.addEventListener('change', () => { pane.model = modelSel.value; savePaneState(); });
+    if (pane && effortSelH) effortSelH.addEventListener('change', () => { pane.effort = EFFORT_LEVELS.includes(effortSelH.value) ? effortSelH.value : ''; savePaneState(); });
     if (pane && agentIn) agentIn.addEventListener('change', () => { pane.agent = agentIn.value.trim() || 'claude'; savePaneState(); });
   }
 
@@ -2536,9 +2615,12 @@
     pane.costSoFar = null; // reset for this turn
     pane.startedAt = new Date();
 
-    // Register session → pane mapping for demux (fan-out set).
+    // Register session → pane mapping for teardown/cancel correlation.
     if (!sessionToPaneIds.has(sessionId)) sessionToPaneIds.set(sessionId, new Set());
     sessionToPaneIds.get(sessionId).add(paneId);
+    // Register conversation → pane mapping for SSE delivery (conversation-keyed).
+    if (!conversationToPaneIds.has(pane.conversationId)) conversationToPaneIds.set(pane.conversationId, new Set());
+    conversationToPaneIds.get(pane.conversationId).add(paneId);
 
     // Append user message immediately (optimistic).
     pane.messages.push({ role: 'user', text: task, ts: new Date().toISOString(), sessionId });
@@ -2559,6 +2641,10 @@
       operatorId: getChatOperatorId(),
       conversationId: pane.conversationId,
     };
+    // Effort: only include when non-empty (empty = backend default; omitting is cleaner).
+    if (pane.effort) {
+      dispatchBody.effort = pane.effort;
+    }
     // Phase 3: if this pane is the IDE embedded pane and review mode is ON,
     // signal to the server that edits should land in an isolated worktree.
     if (pane.ideEmbedded && ideReviewMode) {
@@ -2593,6 +2679,8 @@
         // Teardown: remove this paneId from the fan-out set.
         var errSet = sessionToPaneIds.get(sessionId);
         if (errSet) { errSet.delete(paneId); if (errSet.size === 0) sessionToPaneIds.delete(sessionId); }
+        var errConvSet = conversationToPaneIds.get(pane.conversationId);
+        if (errConvSet) { errConvSet.delete(paneId); if (errConvSet.size === 0) conversationToPaneIds.delete(pane.conversationId); }
         stopElapsedTimer(pane);
         pane.messages.push({
           role: 'summary',
@@ -2616,6 +2704,8 @@
       // Teardown: remove this paneId from the fan-out set.
       var netErrSet = sessionToPaneIds.get(sessionId);
       if (netErrSet) { netErrSet.delete(paneId); if (netErrSet.size === 0) sessionToPaneIds.delete(sessionId); }
+      var netErrConvSet = conversationToPaneIds.get(pane.conversationId);
+      if (netErrConvSet) { netErrConvSet.delete(paneId); if (netErrConvSet.size === 0) conversationToPaneIds.delete(pane.conversationId); }
       stopElapsedTimer(pane);
       renderPaneHeader(paneId);
       announcePaneStatus(paneId, 'network error');
@@ -2754,9 +2844,14 @@
 
     pane.status = 'idle';
     pane.activeSessionId = null;
-    // Teardown: remove this paneId from the fan-out set (guard: only when it points to us).
+    // Teardown session mapping (teardown/cancel correlation).
     var cancelSet = sessionToPaneIds.get(sessionId);
     if (cancelSet) { cancelSet.delete(paneId); if (cancelSet.size === 0) sessionToPaneIds.delete(sessionId); }
+    // Teardown conversation-level routing for this pane's cancelled turn.
+    if (pane.conversationId) {
+      var cancelConvSet = conversationToPaneIds.get(pane.conversationId);
+      if (cancelConvSet) { cancelConvSet.delete(paneId); if (cancelConvSet.size === 0) conversationToPaneIds.delete(pane.conversationId); }
+    }
     stopElapsedTimer(pane);
     renderPaneHeader(paneId);
     announcePaneStatus(paneId, 'stopped');
@@ -6217,15 +6312,25 @@
     const picker = document.getElementById('ide-chat-picker');
     if (picker) {
       picker.addEventListener('change', function() {
-        var val = picker.value; // '' = new session; else = sessionId
+        var val = picker.value; // '' = new session; else = conversation_id
         if (val === '') {
           // Operator chose "new session": replace with a fresh ephemeral pane.
           mountIdeChatPane();
         } else {
-          // Operator chose an existing session: attach to it.
-          var fleetRow = fleetSessions.get(val);
+          // val is conversation_id.  Look up the fleet entry by conversation_id
+          // to determine ownership and to obtain a session_id for IsShared checks.
+          // fleetSessions is keyed by session_id, so iterate to find the match.
+          var fleetRow = null;
+          for (var fEntry of fleetSessions.values()) {
+            if ((fEntry.conversation_id || fEntry.session_id) === val) {
+              fleetRow = fEntry;
+              break;
+            }
+          }
           var watchOnly = !(fleetRow && fleetRow.owned);
-          ideBindChatToSession(val, val, watchOnly);
+          var sessionId = fleetRow ? (fleetRow.session_id || '') : '';
+          // ideBindChatToSession(conversationId, sessionId, watchOnly)
+          ideBindChatToSession(val, sessionId, watchOnly);
         }
       });
     }
@@ -7211,6 +7316,15 @@
           if (attachSet.size === 0) sessionToPaneIds.delete(pane.attachedSessionId);
         }
       }
+      // Conversation-level routing: remove only this pane's entry.
+      // Chat-tab panes watching the same conversation keep their registration.
+      if (pane.conversationId) {
+        var teardownConvSet = conversationToPaneIds.get(pane.conversationId);
+        if (teardownConvSet) {
+          teardownConvSet.delete(paneId);
+          if (teardownConvSet.size === 0) conversationToPaneIds.delete(pane.conversationId);
+        }
+      }
       stopElapsedTimer(pane);
       chatPanes.delete(paneId);
       // Do NOT call savePaneState() — ideEmbedded panes are never persisted.
@@ -7265,8 +7379,12 @@
   // POST /api/chat/dispatch and POST /api/chat/cancel, so a circumvented client
   // cannot interject into a session it does not own.
 
-  function ideBindChatToSession(sessionId, conversationId, watchOnly) {
-    if (!sessionId) return;
+  function ideBindChatToSession(conversationId, sessionId, watchOnly) {
+    // conversationId — the stable conversation to mirror and backfill.
+    // sessionId      — a known live session_id for the server IsShared check;
+    //                  also stored on the pane for teardown/cancel correlation.
+    // watchOnly      — true when the operator does not own the session (read-only).
+    if (!conversationId) return;
 
     // Tear down the previous IDE-slot pane cleanly.
     teardownIdeChatPane();
@@ -7274,27 +7392,30 @@
     const slot = document.getElementById('ide-chat-slot');
     if (!slot) return;
 
-    // With 1:many fan-out, both Chat-tab panes and the IDE embedded pane can
-    // watch the same sessionId simultaneously — each receives every live SSE
-    // frame.  Unconditionally add this paneId to the Set so the IDE slot
-    // always gets live events (the prior `if(!has)` skip was the mirror bug).
-    var convId = conversationId || sessionId;
-    var p = makePane(newPaneId(), convId);
+    // Create the IDE-slot pane keyed on conversationId so it appears in
+    // conversationToPaneIds and receives all future SSE frames for this
+    // conversation regardless of which per-turn session_id is active.
+    var p = makePane(newPaneId(), conversationId);
     p.ideEmbedded = true;
-    p.attachedSessionId = sessionId;
+    p.attachedSessionId = sessionId || '';  // for server IsShared check + cancel
     p.watchOnly = !!watchOnly;
     p.status = 'idle';
     chatPanes.set(p.id, p);
     ideEmbeddedPaneId = p.id;
 
-    // Unconditional add — fan-out Set allows multiple paneIds per sessionId.
-    if (!sessionToPaneIds.has(sessionId)) sessionToPaneIds.set(sessionId, new Set());
-    sessionToPaneIds.get(sessionId).add(p.id);
+    // Conversation-level routing: primary routing for SSE delivery.
+    if (!conversationToPaneIds.has(conversationId)) conversationToPaneIds.set(conversationId, new Set());
+    conversationToPaneIds.get(conversationId).add(p.id);
+    // Session-level routing: kept for teardown/cancel correlation only.
+    if (sessionId) {
+      if (!sessionToPaneIds.has(sessionId)) sessionToPaneIds.set(sessionId, new Set());
+      sessionToPaneIds.get(sessionId).add(p.id);
+    }
 
     const paneEl = buildPaneElement(p.id);
     slot.appendChild(paneEl);
 
-    // Backfill transcript; sessionId param triggers the IsShared check server-side.
+    // Backfill transcript by conversationId; sessionId param enables server IsShared check.
     loadTranscriptForPane(p.id);
   }
 
@@ -7312,12 +7433,18 @@
     if (!picker) return; // IDE tab not yet rendered.
 
     // Preserve current selection so a live fleet update doesn't reset the picker.
+    // Option values are now conversation_id (stable) rather than session_id.
     var currentVal = picker.value;
 
-    // Rebuild option list.
+    // Rebuild option list.  Value = conversation_id (stable across per-turn
+    // session_ids); displayed label = agent + task_preview + shared badge.
     var html = '<option value="">new session</option>';
     for (var entry of fleetSessions.values()) {
       if (!entry.attachable) continue;
+      // conversation_id is the stable identifier; fall back to session_id
+      // for old servers that don't yet populate it.
+      var convId = entry.conversation_id || entry.session_id || '';
+      if (!convId) continue;
       var isOwned = !!(entry.owned);
       var label = esc(entry.agent || '?');
       if (entry.task_preview) {
@@ -7328,8 +7455,8 @@
         label += ' — ' + esc(preview);
       }
       var badge = isOwned ? '' : ' (shared)';
-      var selected = (entry.session_id === currentVal) ? ' selected' : '';
-      html += '<option value="' + esc(entry.session_id) + '"' + selected + '>' +
+      var selected = (convId === currentVal) ? ' selected' : '';
+      html += '<option value="' + esc(convId) + '"' + selected + '>' +
         label + esc(badge) +
         '</option>';
     }
