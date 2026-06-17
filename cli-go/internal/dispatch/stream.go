@@ -95,7 +95,9 @@ type StreamChunk struct {
 	Text string
 
 	// Thinking holds an incremental thinking delta (Type=="thinking").
-	// It is bounded at maxThinkingChunkBytes per chunk.
+	// The per-delta text cap is enforced by the parser (runtime.ParseStreamLineWithThinking)
+	// at maxThinkingBytes accumulated per block; ThinkingTruncated reflects the
+	// parser's signal that the cap was hit.  emitThinkingChunk does NOT truncate.
 	Thinking string
 
 	// ThinkingTruncated is true when the Thinking text was cut at the cap
@@ -651,12 +653,11 @@ func emitToolChunk(te *runtime.ToolEvent, onChunk func(StreamChunk)) {
 }
 
 // emitThinkingChunk translates a runtime.ThinkingEvent into a StreamChunk and
-// calls onChunk.  The thinking text is bounded at maxThinkingChunkBytes per
-// chunk on a rune boundary; ThinkingTruncated is set on the emitted chunk when
-// the delta itself was capped by the parser (runtime.ThinkingEvent.Truncated).
-//
-// redacted_thinking blocks have ThinkingRedacted=true and a fixed placeholder
-// text — no rune-boundary truncation is needed.
+// calls onChunk.  No truncation is applied here: the 64 KiB cap is enforced by
+// the parser (runtime.ParseStreamLineWithThinking / maxThinkingBytes); the
+// ThinkingTruncated flag is the parser's signal that the cap was hit on this
+// delta.  redacted_thinking blocks arrive with Redacted=true and a fixed
+// placeholder — no text cap applies to them.
 func emitThinkingChunk(te *runtime.ThinkingEvent, onChunk func(StreamChunk)) {
 	onChunk(StreamChunk{
 		Type:              "thinking",

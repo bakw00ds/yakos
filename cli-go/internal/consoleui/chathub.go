@@ -90,6 +90,16 @@ type SSEEvent struct {
 	// For redacted_thinking blocks the value is the fixed placeholder "[redacted thinking]".
 	Thinking string `json:"thinking,omitempty"`
 
+	// ThinkingTruncated is true when the parser's 64 KiB per-block cap was hit
+	// on this delta (Type=="thinking" only).  Signals the UI to append a
+	// truncation marker after the last rendered thinking text.
+	ThinkingTruncated bool `json:"thinking_truncated,omitempty"`
+
+	// ThinkingRedacted is true when this chunk represents a redacted_thinking
+	// block whose content is opaque (Type=="thinking" only).  The UI should
+	// render it distinctly rather than as plain thinking text.
+	ThinkingRedacted bool `json:"thinking_redacted,omitempty"`
+
 	// ExitCode is set on summary events.  Pointer so exit_code:0 (success) is
 	// serialized on summary turns and absent on token/other turns (omitempty on
 	// an int zero-value would suppress a legitimate exit code of 0).

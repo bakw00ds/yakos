@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/bakw00ds/yakos/internal/cost"
 )
@@ -566,13 +567,28 @@ func parseStreamEventWithThinking(
 						return "", false, 0, nil, nil
 					}
 					truncated := false
-					if len(delta) >= remaining {
-						// This delta reaches or exceeds the cap.
-						delta = delta[:remaining]
+					if len(delta) > remaining {
+						// This delta exceeds the remaining cap.
+						// Walk back from remaining to the nearest valid rune boundary
+						// so we never split a multi-byte UTF-8 sequence.
+						// delta[remaining] is in-bounds because len(delta) > remaining
+						// guarantees len(delta) >= remaining+1.
+						end := remaining
+						for end > 0 && !utf8.RuneStart(delta[end]) {
+							end--
+						}
+						delta = delta[:end]
+						entry.accumulated += delta
+						entry.truncated = true
+						truncated = true
+					} else if len(delta) == remaining {
+						// This delta fills the cap exactly.
+						// Take all of it and mark truncated so the next delta is discarded.
 						entry.accumulated += delta
 						entry.truncated = true
 						truncated = true
 					} else {
+						// Delta fits within remaining capacity: accumulate normally.
 						entry.accumulated += delta
 					}
 					return "", false, 0, nil, &ThinkingEvent{

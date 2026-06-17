@@ -704,6 +704,8 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				// the session is not shared.  Not persisted to the transcript —
 				// thinking is ephemeral UI state.
 				ev.Thinking = chunk.Thinking
+				ev.ThinkingTruncated = chunk.ThinkingTruncated
+				ev.ThinkingRedacted = chunk.ThinkingRedacted
 			}
 			ch.hub.Route(ev)
 		}
@@ -1045,7 +1047,7 @@ func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) 
 	}
 	resp := shareResponse{OK: true}
 	if req.Shared {
-		resp.Warning = "Tool output (bash stdout, file contents) will be visible to all session watchers."
+		resp.Warning = "Tool output (bash stdout, file contents) and model thinking will be visible to all session watchers."
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

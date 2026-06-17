@@ -725,7 +725,6 @@
           task_preview: '', // intentionally empty: not available on WS events
           attachable:   false,
         });
-        renderReplFleet();
         // Phase 5 (fix): debounced re-seed so the IDE picker shows the new session
         // with correct attachable/owned/task_preview from /api/fleet.  Debounce
         // (300 ms) collapses bursts when several sessions start simultaneously.
@@ -768,7 +767,6 @@
             attachable:   false,
           });
         }
-        renderReplFleet();
         // Phase 5: keep the IDE session picker in sync with live fleet state.
         renderIdeChatPicker();
       }
@@ -1286,12 +1284,24 @@
       // Thinking events: dim/italic collapsible block distinct from assistant text.
       // Streams like tokens — append to last thinking block if one is open,
       // otherwise open a new one.
+      // thinking_truncated / thinking_redacted flags are latched (once true, stay true)
+      // on the message object so the render can display the appropriate marker.
       const msgs = pane.messages;
       const last = msgs[msgs.length - 1];
       if (last && last.role === 'thinking' && last.sessionId === sessionId && last.streaming) {
         last.text += ev.thinking || '';
+        if (ev.thinking_truncated) last.truncated = true;
+        if (ev.thinking_redacted) last.redacted = true;
       } else {
-        msgs.push({ role: 'thinking', text: ev.thinking || '', ts: ev.ts, sessionId, streaming: true });
+        msgs.push({
+          role: 'thinking',
+          text: ev.thinking || '',
+          ts: ev.ts,
+          sessionId,
+          streaming: true,
+          truncated: !!(ev.thinking_truncated),
+          redacted:  !!(ev.thinking_redacted),
+        });
       }
       renderPaneMessages(paneId);
       if (pane.autoScroll) scrollPaneToBottom(paneId);
@@ -1373,14 +1383,16 @@
       renderPaneMessages(paneId);
       if (pane.autoScroll) scrollPaneToBottom(paneId);
     } else if (ev.type === 'summary') {
-      // Close any open thinking streams.
+      // Close ALL open thinking streams for this session.
+      // A single turn may produce multiple thinking blocks (e.g. interleaved
+      // around tool calls); iterate the full list rather than stopping at the
+      // first match so every open block is closed.
       const msgs = pane.messages;
-      for (var si = msgs.length - 1; si >= 0; si--) {
-        if (msgs[si].role === 'thinking' && msgs[si].sessionId === sessionId && msgs[si].streaming) {
-          msgs[si].streaming = false;
-          break;
+      msgs.forEach(function(m) {
+        if (m.role === 'thinking' && m.sessionId === sessionId && m.streaming) {
+          m.streaming = false;
         }
-      }
+      });
       // Mark the last streaming assistant message as done.
       const last = msgs[msgs.length - 1];
       if (last && last.streaming) {
@@ -2235,15 +2247,26 @@
       // Thinking block: dim/italic, collapsible, streamed like tokens.
       // Distinct from assistant text — de-emphasized visual treatment.
       // XSS discipline: msg.text is server-supplied; goes through escLines().
-      el.className = 'chat-msg chat-msg-thinking' + (msg.streaming ? ' streaming' : '');
+      // msg.truncated — set by parser when the 64 KiB per-block cap was hit;
+      //   render a "[…thinking truncated]" footer to signal incomplete content.
+      // msg.redacted  — set when the server emits a redacted_thinking block;
+      //   render a distinct "redacted" label (do NOT string-match msg.text).
+      var thinkingModifier = msg.redacted ? ' chat-msg-thinking-redacted' :
+                             msg.truncated ? ' chat-msg-thinking-truncated' : '';
+      el.className = 'chat-msg chat-msg-thinking' + thinkingModifier + (msg.streaming ? ' streaming' : '');
+      var thinkingLabel = msg.redacted ? 'thinking (redacted)' : 'thinking';
+      var truncatedFooter = (!msg.streaming && msg.truncated)
+        ? '<div class="chat-thinking-truncated-marker" aria-label="Thinking truncated">[&hellip;thinking truncated]</div>'
+        : '';
       el.innerHTML =
         '<details class="chat-thinking-details"' + (msg.streaming ? ' open' : '') + '>' +
           '<summary class="chat-thinking-summary" aria-label="Model thinking">' +
             '<span class="chat-thinking-icon" aria-hidden="true">&#x1F4AD;</span>' +
-            '<span class="chat-thinking-label">thinking</span>' +
+            '<span class="chat-thinking-label">' + esc(thinkingLabel) + '</span>' +
             '<span class="chat-msg-time">' + esc(formatTime(msg.ts)) + '</span>' +
           '</summary>' +
           '<div class="chat-thinking-body">' + escLines(msg.text || '') + '</div>' +
+          truncatedFooter +
         '</details>';
     } else if (msg.role === 'todo_write') {
       // TodoWrite widget: checklist with status icons.
@@ -2922,9 +2945,9 @@
   //   - All interpolated strings go through esc() before innerHTML insertion.
 
   // seedFleet fetches GET /api/fleet, merges the response into fleetSessions
-  // (replacing the map), and calls both renderReplFleet() and
-  // renderIdeChatPicker() on completion.  It is the single canonical path for
-  // populating fleetSessions from the REST snapshot.
+  // (replacing the map), and calls renderIdeChatPicker() on completion.
+  // It is the single canonical path for populating fleetSessions from the
+  // REST snapshot.
   //
   // onDone is an optional callback invoked after a successful merge so callers
   // can chain behaviour (e.g. restoring a picker selection).
@@ -2949,29 +2972,14 @@
           fleetSessions.set(s.session_id, s);
         }
       }
-      renderReplFleet();
       renderIdeChatPicker();
       if (typeof onDone === 'function') onDone();
     }).catch(function() {
       // /api/fleet unavailable — keep existing state; mark initialised so
       // callers don't retry on every subsequent event.
       fleetInitialized = true;
-      renderReplFleet();
       renderIdeChatPicker();
     });
-  }
-
-  function initReplTab() {
-    // Fetch kanban action items (once per page load; changes are infrequent).
-    loadReplKanban();
-
-    // Seed fleet from REST; subsequent live updates arrive via fleet.* WS events.
-    if (!fleetInitialized) {
-      seedFleet();
-    } else {
-      // Already seeded; just re-render in case tab was re-opened.
-      renderReplFleet();
-    }
   }
 
   // loadReplKanban fetches /kanban/api/board and renders the action-items list.
@@ -3020,82 +3028,6 @@
     }).catch(function() {
       el.innerHTML = '<p class="empty-state">Kanban unavailable</p>';
     });
-  }
-
-  // renderReplFleet updates the fleet panel DOM from the current fleetSessions map.
-  // Called on initial seed (initReplTab) and on each fleet.* WS event.
-  //
-  // Phase 3: rows where attachable=true show an "attach" button.  Clicking the
-  // row (or its attach button) calls openAttachPane with watchOnly derived from
-  // the server-supplied owned field.  esc() is applied to all interpolated strings.
-  function renderReplFleet() {
-    const el = document.getElementById('repl-fleet-list');
-    if (!el) return;
-
-    if (fleetSessions.size === 0) {
-      el.innerHTML = '<p class="empty-state">No active dispatches</p>';
-      return;
-    }
-
-    el.innerHTML = '';
-    const ul = document.createElement('ul');
-    ul.className = 'repl-fleet-list';
-    ul.setAttribute('aria-label', 'Active dispatch sessions');
-    for (const [, s] of fleetSessions) {
-      const li = document.createElement('li');
-      const isAttachable = !!(s.attachable);
-      const isOwned = !!(s.owned);
-      li.className = 'repl-fleet-item repl-fleet-status-' + esc(s.status || 'running') +
-        (isAttachable ? ' repl-fleet-attachable' : '');
-      // Format started_at as a locale time string.
-      let startedStr = '';
-      if (s.started_at) {
-        try { startedStr = new Date(s.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); } catch (_) {}
-      }
-      const preview = s.task_preview ? esc(s.task_preview) : '';
-      // Phase 3: attach button — only rendered when attachable.
-      // The button text signals ownership: "watch" for non-owners, "attach" for owners.
-      const attachBtnHtml = isAttachable
-        ? '<button class="repl-fleet-attach-btn" type="button" ' +
-            'aria-label="' + esc(isOwned ? 'Attach to session' : 'Watch session') + '">' +
-            esc(isOwned ? 'attach' : 'watch') +
-          '</button>'
-        : '';
-      li.innerHTML =
-        '<span class="repl-fleet-agent" aria-label="agent">' + esc(s.agent || '?') + '</span>' +
-        '<span class="repl-fleet-status" aria-label="status">' + esc(s.status || 'running') + '</span>' +
-        (startedStr ? '<span class="repl-fleet-time" aria-label="started at">' + esc(startedStr) + '</span>' : '') +
-        (preview ? '<span class="repl-fleet-preview" aria-label="task preview">' + preview + '</span>' : '') +
-        attachBtnHtml;
-
-      // Wire click: the native attach <button> is the primary keyboard target.
-      // S3: do NOT set role="button" on the <li> — the nested <button> already
-      // provides the correct ARIA semantics, and a redundant role on the <li>
-      // would create a double-fire hazard on Enter (keydown fires on both).
-      // The row click handler is kept as a pointer-only convenience (no tabindex).
-      if (isAttachable) {
-        // Capture loop variables for closure.
-        (function(sessionId, watchOnly) {
-          var attachBtn = li.querySelector('.repl-fleet-attach-btn');
-          if (attachBtn) {
-            // Native button handles both click and keyboard (Enter/Space natively).
-            attachBtn.addEventListener('click', function(e) {
-              e.stopPropagation();
-              openAttachPane(sessionId, sessionId, watchOnly);
-            });
-          }
-          // Row click: pointer-only convenience (no tabindex / role=button on li).
-          li.addEventListener('click', function(e) {
-            // Only fire when the click target is not the button itself
-            // (the button's own handler fires in that case via stopPropagation).
-            openAttachPane(sessionId, sessionId, watchOnly);
-          });
-        })(s.session_id, !isOwned);
-      }
-
-      ul.appendChild(li);
-    }
-    el.appendChild(ul);
   }
 
   // =========================================================================
