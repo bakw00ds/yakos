@@ -1394,3 +1394,44 @@ func TestSessionWSOrigin_ExactMatchInvariant(t *testing.T) {
 		})
 	}
 }
+
+// ---- isLoopbackHost canonical predicate tests ---------------------------------
+//
+// Tests cover the fix for CRITICAL-1: the old strings.HasPrefix(host, "127.")
+// predicate was over-permissive (accepted "127.0.0.1.evil.com") and under-
+// permissive (rejected "::ffff:127.0.0.1" and zoned "::1%eth0").
+
+func TestIsLoopbackHost_Loopback(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		host string
+		want bool
+	}{
+		// Canonical loopback addresses — must return true.
+		{"127.0.0.1", true},
+		{"::1", true},
+		{"::ffff:127.0.0.1", true},  // IPv4-mapped loopback via IPv6
+		{"localhost", true},
+		{"::1%eth0", true},           // IPv6 with zone ID stripped before parsing
+
+		// Non-loopback or deceptive inputs — must return false.
+		{"127.0.0.1.evil.com", false}, // prefix trick: was wrongly accepted
+		{"127.000.000.001", false},    // octal-style: was wrongly accepted
+		{"127.0.0.1 ", false},         // trailing space: was wrongly accepted
+		{"10.0.0.1", false},
+		{"192.168.1.1", false},
+		{"0.0.0.0", false},
+		{"example.com", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.host, func(t *testing.T) {
+			t.Parallel()
+			got := isLoopbackHost(tc.host)
+			if got != tc.want {
+				t.Errorf("isLoopbackHost(%q) = %v; want %v", tc.host, got, tc.want)
+			}
+		})
+	}
+}

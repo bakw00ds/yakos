@@ -158,6 +158,15 @@ type Config struct {
 	// Only applies when ConsoleBind is a non-loopback address.
 	NoBootstrapCert bool
 
+	// ConsoleAllowBash, when true, permits POST /api/console/bash from
+	// non-loopback connections.  Activates AllowNetworkedBash in the
+	// consoleui.Config.  Off by default (loopback connections are always allowed
+	// regardless of this flag).
+	//
+	// Activated by --console-allow-bash in runServe.  A loud WARNING banner is
+	// printed when this flag is set and the console is in networked mode.
+	ConsoleAllowBash bool
+
 	// Bus is the in-process event bus shared between the JSON-RPC layer and the
 	// WebSocket layer.  If nil, a new Bus is created by Run.  Inject for tests.
 	Bus *wsbus.Bus
@@ -502,16 +511,17 @@ func Run(ctx context.Context, cfg Config) error {
 			// PerfWorkDir points at the yakOS state dir (where dispatch-log.ndjson
 			// is written), not at work/current. The writer (dispatch/events.go)
 			// uses YAKOS_DISPATCH_LOG → ~/.yakos-state; DefaultStateDir() matches.
-			PerfWorkDir:      perfStateDir,
-			Bus:              bus,
-			DispatchService:  dispatchSvc,
-			WorkDir:          workDir, // chat transcripts + workflow artifacts
-			WorkflowEngine:   workflowEngine,
-			StateDir:         stateDir,
-			WorkspaceRoot:    cfg.WorkspaceRoot,
-			YakosRoot:        cfg.YakosRoot,
-			AuthSessionStore: authStore,
-			UserStore:        uStore,
+			PerfWorkDir:        perfStateDir,
+			Bus:                bus,
+			DispatchService:    dispatchSvc,
+			WorkDir:            workDir, // chat transcripts + workflow artifacts
+			WorkflowEngine:     workflowEngine,
+			StateDir:           stateDir,
+			WorkspaceRoot:      cfg.WorkspaceRoot,
+			YakosRoot:          cfg.YakosRoot,
+			AuthSessionStore:   authStore,
+			UserStore:          uStore,
+			AllowNetworkedBash: cfg.ConsoleAllowBash,
 		}
 
 		if networked {
@@ -638,6 +648,19 @@ func Run(ctx context.Context, cfg Config) error {
 			// surface to the network.
 			certFP := serverCertFingerprint(serverCert)
 			printNetworkedConsoleBanner(bindAddr, externalHosts, certFP, stateDir, bootstrapResult)
+		}
+
+		// Warn loudly when --console-allow-bash is active and the console is
+		// in networked mode.  Loopback-only deployments already have a trusted
+		// network boundary; this warning is for non-loopback exposure only.
+		if cfg.ConsoleAllowBash && networked {
+			sep := strings.Repeat("!", 72)
+			fmt.Fprintln(os.Stderr, sep)
+			fmt.Fprintln(os.Stderr, "  WARNING: --console-allow-bash is active on a networked console.")
+			fmt.Fprintln(os.Stderr, "  POST /api/console/bash executes arbitrary shell commands on this host.")
+			fmt.Fprintln(os.Stderr, "  Any operator with RoleAdmin can run arbitrary code via this endpoint.")
+			fmt.Fprintln(os.Stderr, "  Only enable this flag if you understand and accept the risk.")
+			fmt.Fprintln(os.Stderr, sep)
 		}
 
 		consoleSrv, err := consoleui.New(consoleCfg)

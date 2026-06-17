@@ -759,13 +759,22 @@ func (s *server) loadBoard() (*Board, error) {
 
 // ---- small utilities --------------------------------------------------------
 
+// isLoopback returns true when host is a loopback address.
+//
+// Uses net.ParseIP + IP.IsLoopback() for an exact check; prefix tricks
+// such as "127.0.0.1.evil.com" or "127.000.000.001" are rejected.
+// IPv6 zone IDs are stripped before parsing (net.ParseIP rejects them).
+// "localhost" and "[::1]" are accepted explicitly.
 func isLoopback(host string) bool {
-	switch host {
-	case "127.0.0.1", "::1", "localhost", "[::1]":
+	if host == "localhost" || host == "[::1]" {
 		return true
 	}
-	// Also accept 127.x.x.x range.
-	return strings.HasPrefix(host, "127.")
+	// Strip IPv6 zone ID before parsing.
+	if idx := strings.IndexByte(host, '%'); idx >= 0 {
+		host = host[:idx]
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func pathDir(p string) string {

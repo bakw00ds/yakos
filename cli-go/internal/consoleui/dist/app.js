@@ -2120,6 +2120,62 @@
       el.innerHTML =
         '<span class="chat-msg-role" aria-hidden="true">system</span>' +
         '<div class="chat-msg-text">' + escLines(msg.text) + '</div>';
+    } else if (msg.role === 'bash_result') {
+      // Bash pass-through result (! prefix).
+      // Rendered as a collapsible block reusing tool-output markup + classes so
+      // it inherits all existing styles without a parallel design surface.
+      //
+      // XSS discipline: command, stdout, stderr are all untrusted (server-side
+      // values are passed back as-is; command is operator input but still escaped
+      // for defense-in-depth).  Every string goes through esc() or escLines().
+      el.className = 'chat-msg chat-msg-tool';
+
+      var bashHeaderText = msg.pending
+        ? 'running: ' + esc(msg.command)
+        : 'ran: ' + esc(msg.command);
+
+      var bashBodyHtml = '';
+      if (!msg.pending) {
+        // stdout block (always present, even if empty).
+        var stdoutClass = 'chat-tool-output' + (msg.exitCode !== 0 && !msg.stdout ? ' chat-tool-output-error' : '');
+        var stdoutContent = msg.stdout
+          ? '<pre class="chat-tool-output-pre">' + escLines(msg.stdout) + '</pre>'
+          : '<span class="chat-bash-empty">(no stdout)</span>';
+
+        bashBodyHtml +=
+          '<div class="' + esc(stdoutClass) + '">' +
+            '<span class="chat-tool-output-label" aria-hidden="true">stdout</span>' +
+            stdoutContent +
+          '</div>';
+
+        // stderr block (only shown when non-empty).
+        if (msg.stderr) {
+          bashBodyHtml +=
+            '<div class="chat-tool-output chat-tool-output-error">' +
+              '<span class="chat-tool-output-label" aria-hidden="true">stderr</span>' +
+              '<pre class="chat-tool-output-pre">' + escLines(msg.stderr) + '</pre>' +
+            '</div>';
+        }
+
+        // Exit code + truncated notice.
+        var exitLabel = msg.exitCode === 0 ? 'exit 0' : 'exit ' + esc(String(msg.exitCode !== null ? msg.exitCode : '?'));
+        var exitClass = 'chat-bash-exit' + (msg.exitCode !== 0 ? ' chat-bash-exit-err' : '');
+        bashBodyHtml +=
+          '<div class="' + esc(exitClass) + '">' +
+            '<span>' + exitLabel + '</span>' +
+            (msg.truncated ? '<span class="chat-bash-truncated">(truncated)</span>' : '') +
+          '</div>';
+      }
+
+      el.innerHTML =
+        '<details class="chat-tool-details"' + (msg.pending ? '' : ' open') + '>' +
+          '<summary class="chat-tool-summary">' +
+            '<span class="chat-tool-icon" aria-hidden="true">$</span>' +
+            '<span class="chat-tool-label">' + bashHeaderText + '</span>' +
+            '<span class="chat-msg-time">' + esc(formatTime(msg.ts)) + '</span>' +
+          '</summary>' +
+          bashBodyHtml +
+        '</details>';
     }
 
     return el;
@@ -2191,6 +2247,16 @@
     const textarea = document.getElementById('pane-input-' + paneId);
     const task = textarea ? textarea.value.trim() : '';
     if (!task) return;
+
+    // Bash pass-through: if the trimmed input starts with '!', treat the
+    // remainder as a shell command and route to executeBashCommand.
+    // Normal chat dispatch does NOT fire in this branch.
+    if (task.startsWith('!')) {
+      const cmd = task.slice(1).trim();
+      if (textarea) textarea.value = '';
+      if (cmd) executeBashCommand(paneId, cmd);
+      return;
+    }
 
     // Mint a fresh sessionId per turn.
     const sessionId = newSessionId();
@@ -2273,6 +2339,122 @@
       renderPaneHeader(paneId);
       announcePaneStatus(paneId, 'network error');
       console.warn('[chat dispatch] error:', err);
+    });
+  }
+
+  // ---- Bash pass-through (! prefix) -----------------------------------------
+  //
+  // executeBashCommand is invoked when the user types "!<command>" in the chat
+  // input.  It POSTs {command} to /api/console/bash and renders the result as a
+  // collapsible block in the pane transcript, reusing the same
+  // .chat-tool-details / .chat-msg-tool markup as tool_use/tool_result so it
+  // inherits all existing styles without adding a parallel design surface.
+  //
+  // Security discipline (same as tool rendering above):
+  //   - stdout, stderr, and the command string are all untrusted.
+  //   - Every value inserted into innerHTML goes through esc() or escLines().
+  //   - No eval(); no raw concatenation without escaping.
+  //
+  // HTTP contract (POST /api/console/bash):
+  //   200 → {stdout:string, stderr:string, exit_code:number, truncated:boolean}
+  //   400 → empty body (bad request)
+  //   403 → not admin or not loopback / --console-allow-bash not set
+  //   other → generic error
+
+  function executeBashCommand(paneId, command) {
+    const pane = chatPanes.get(paneId);
+    if (!pane) return;
+
+    const ts = new Date().toISOString();
+
+    // Show a "pending" entry so the user sees the command was accepted.
+    const pendingMsg = {
+      role: 'bash_result',
+      command: command,
+      stdout: '',
+      stderr: '',
+      exitCode: null,
+      truncated: false,
+      pending: true,
+      ts: ts,
+    };
+    pane.messages.push(pendingMsg);
+    renderPaneMessages(paneId);
+    if (pane.autoScroll) scrollPaneToBottom(paneId);
+
+    apiFetch('POST', '/api/console/bash', { command: command }).then(function(resp) {
+      // Replace the pending sentinel in-place by mutating the last bash_result
+      // message (it is the one we just pushed — safe because bash is synchronous
+      // from the UI's perspective: we don't allow pipelined commands).
+      const idx = pane.messages.lastIndexOf(pendingMsg);
+      if (idx === -1) return; // pane was cleared while in-flight; discard
+
+      if (resp.status === 403) {
+        pane.messages[idx] = {
+          role: 'bash_result',
+          command: command,
+          stdout: '',
+          stderr: 'bash requires admin + loopback, or start the daemon with --console-allow-bash',
+          exitCode: 1,
+          truncated: false,
+          pending: false,
+          error403: true,
+          ts: ts,
+        };
+        renderPaneMessages(paneId);
+        if (pane.autoScroll) scrollPaneToBottom(paneId);
+        return;
+      }
+
+      if (!resp.ok) {
+        return resp.text().then(function(errText) {
+          if (pane.messages.indexOf(pendingMsg) === -1) return; // already replaced
+          pane.messages[idx] = {
+            role: 'bash_result',
+            command: command,
+            stdout: '',
+            stderr: errText || ('bash error: HTTP ' + resp.status),
+            exitCode: 1,
+            truncated: false,
+            pending: false,
+            ts: ts,
+          };
+          renderPaneMessages(paneId);
+          if (pane.autoScroll) scrollPaneToBottom(paneId);
+        });
+      }
+
+      return resp.json().then(function(data) {
+        if (pane.messages.indexOf(pendingMsg) === -1) return; // already replaced
+        pane.messages[idx] = {
+          role: 'bash_result',
+          command: command,
+          stdout: typeof data.stdout === 'string' ? data.stdout : '',
+          stderr: typeof data.stderr === 'string' ? data.stderr : '',
+          exitCode: typeof data.exit_code === 'number' ? data.exit_code : null,
+          truncated: !!data.truncated,
+          pending: false,
+          ts: ts,
+        };
+        renderPaneMessages(paneId);
+        if (pane.autoScroll) scrollPaneToBottom(paneId);
+      });
+    }).catch(function(err) {
+      const idx = pane.messages.lastIndexOf(pendingMsg);
+      if (idx === -1) return;
+      pane.messages[idx] = {
+        role: 'bash_result',
+        command: command,
+        stdout: '',
+        stderr: 'network error: ' + String(err),
+        exitCode: 1,
+        truncated: false,
+        pending: false,
+        ts: ts,
+      };
+      renderPaneMessages(paneId);
+      if (pane.autoScroll) scrollPaneToBottom(paneId);
+      console.warn('[bash pass-through] error:', err);
     });
   }
 
