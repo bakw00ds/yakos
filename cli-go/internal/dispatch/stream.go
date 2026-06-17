@@ -31,8 +31,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"log/slog"
 	"os/exec"
 	"strings"
 	"time"
@@ -403,141 +401,45 @@ func execWithStreaming(
 			return Result{ExitCode: -1}, fmt.Errorf("dispatch: stream: start: %w", startErr)
 		}
 
-		// Read stdout with a fixed-size read buffer and a manual per-line byte
-		// counter.  This is the REAL per-line cap:
-		//   - readBuf is the I/O buffer; bytes are never accumulated beyond it
-		//     before we process and classify them.
-		//   - lineLen tracks bytes accumulated in lineBuf since the last '\n'.
-		//   - When lineLen would exceed maxStreamLineBytes, we set overlong=true,
-		//     discard further bytes for that line, log once, and resume on '\n'.
-		//   - When a '\n' is found (or EOF), we process the accumulated lineBuf
-		//     (if not overlong) and reset.
-		//
-		// NOTE: Phase 4 will add process-group kill on context cancel to reap
-		// grandchild processes spawned by the runtime.  For now, exec.CommandContext
-		// only kills the direct child; orphan grandchildren are a pre-existing
-		// limitation tracked for Phase 4.
-		const readBufSize = 64 * 1024 // 64 KB I/O read granule
-		readBuf := make([]byte, readBufSize)
-		var lineBuf []byte
-		overlong := false
+		// Read stdout line-by-line via the shared ReadLineLoop helper (streamhelper.go)
+		// so the one-shot path and the interactive path share one implementation.
+		// The per-line byte-cap (maxStreamLineBytes) is enforced inside ReadLineLoop.
 		bufferedOutputTruncated := false
-
 		isClaudeRuntime := adapter.Name() == "claude"
 
-	readLoop:
-		for {
-			n, readErr := stdoutPipe.Read(readBuf)
-			if n > 0 {
-				chunk := readBuf[:n]
-				for len(chunk) > 0 {
-					// Find the next '\n' in the remaining chunk.
-					nlIdx := bytes.IndexByte(chunk, '\n')
-					var segment []byte
-					var haveNewline bool
-					if nlIdx >= 0 {
-						segment = chunk[:nlIdx]
-						chunk = chunk[nlIdx+1:]
-						haveNewline = true
-					} else {
-						segment = chunk
-						chunk = nil
-					}
-
-					if overlong {
-						// Already discarding this line; skip until newline.
-						if haveNewline {
-							overlong = false
-							lineBuf = lineBuf[:0]
-						}
-					} else {
-						if len(lineBuf)+len(segment) > maxStreamLineBytes {
-							// This line would exceed the cap.  Discard what we have.
-							slog.Debug("dispatch: stream: line exceeds maxStreamLineBytes; truncating",
-								"agent", req.AgentName,
-								"accumulated_bytes", len(lineBuf)+len(segment),
-								"limit", maxStreamLineBytes,
-							)
-							lineBuf = lineBuf[:0]
-							overlong = !haveNewline // if newline present, already done
-						} else {
-							lineBuf = append(lineBuf, segment...)
-							if haveNewline {
-								// Complete line ready: process it.
-								line := bytes.TrimRight(lineBuf, "\r")
-								if len(line) > 0 {
-									if isClaudeRuntime {
-										tok, isResult, lineCost, lineUsage, toolEv, thinkEv := runtime.ParseStreamLineWithThinking(line, textBlocks, toolUseBlocks, toolIDToName, thinkingBlocks)
-										if tok != "" {
-											allText = append(allText, tok...)
-											onChunk(StreamChunk{Type: "token", Text: tok})
-										}
-										if isResult {
-											costUSD = lineCost
-											usageCost = lineUsage
-										}
-										if toolEv != nil {
-											emitToolChunk(toolEv, onChunk)
-										}
-										if thinkEv != nil {
-											emitThinkingChunk(thinkEv, onChunk)
-										}
-									} else {
-										// Buffered path: accumulate with ceiling check.
-										if !bufferedOutputTruncated {
-											if len(allText)+len(line)+1 > maxBufferedOutputBytes {
-												allText = append(allText, []byte("\n[...output truncated...]")...)
-												bufferedOutputTruncated = true
-											} else {
-												allText = append(allText, line...)
-												allText = append(allText, '\n')
-											}
-										}
-									}
-								}
-								lineBuf = lineBuf[:0]
-							}
-						}
-					}
-				}
-			}
-
-			if readErr != nil {
-				if readErr != io.EOF {
-					// Non-EOF read error: log at debug; don't abort — the subprocess
-					// may still have exited cleanly.  cmd.Wait() below captures the
-					// real exit status.
-					slog.Debug("dispatch: stream: stdout read error", "agent", req.AgentName, "err", readErr)
-				}
-				break readLoop
-			}
+		// Wire the parser state maps into a StreamParserState so ParseAndDispatch
+		// can manage them.  The maps were already allocated above; we wrap them so
+		// both paths share the same underlying maps (no copy).
+		ps := &StreamParserState{
+			TextBlocks:     textBlocks,
+			ToolUseBlocks:  toolUseBlocks,
+			ToolIDToName:   toolIDToName,
+			ThinkingBlocks: thinkingBlocks,
 		}
 
-		// Process any remaining bytes in lineBuf (line without trailing newline).
-		if !overlong && len(lineBuf) > 0 {
-			line := bytes.TrimRight(lineBuf, "\r")
-			if len(line) > 0 {
-				if isClaudeRuntime {
-					tok, isResult, lineCost, lineUsage, toolEv, thinkEv := runtime.ParseStreamLineWithThinking(line, textBlocks, toolUseBlocks, toolIDToName, thinkingBlocks)
-					if tok != "" {
-						allText = append(allText, tok...)
-						onChunk(StreamChunk{Type: "token", Text: tok})
+		ReadLineLoop(stdoutPipe, ReadLineLoopConfig{AgentName: req.AgentName}, func(line []byte) {
+			if isClaudeRuntime {
+				res := ParseAndDispatch(line, ps, onChunk)
+				if res.Token != "" {
+					allText = append(allText, res.Token...)
+				}
+				if res.IsResult {
+					costUSD = res.CostUSD
+					usageCost = res.Usage
+				}
+			} else {
+				// Buffered path: accumulate with ceiling check.
+				if !bufferedOutputTruncated {
+					if len(allText)+len(line)+1 > maxBufferedOutputBytes {
+						allText = append(allText, []byte("\n[...output truncated...]")...)
+						bufferedOutputTruncated = true
+					} else {
+						allText = append(allText, line...)
+						allText = append(allText, '\n')
 					}
-					if isResult {
-						costUSD = lineCost
-						usageCost = lineUsage
-					}
-					if toolEv != nil {
-						emitToolChunk(toolEv, onChunk)
-					}
-					if thinkEv != nil {
-						emitThinkingChunk(thinkEv, onChunk)
-					}
-				} else if !bufferedOutputTruncated {
-					allText = append(allText, line...)
 				}
 			}
-		}
+		})
 
 		// Wait for the process and collect exit code.
 		waitErr := cmd.Wait()

@@ -16,6 +16,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/authsession"
 	"github.com/bakw00ds/yakos/internal/dashauth"
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/interactive"
 	"github.com/bakw00ds/yakos/internal/kanban"
 	"github.com/bakw00ds/yakos/internal/metricsdash"
 	"github.com/bakw00ds/yakos/internal/netid"
@@ -256,6 +257,14 @@ type Config struct {
 	// and calls PruneOrphans(WorkspaceRoot) at startup if WorkspaceRoot is a git repo.
 	// Tests may inject a custom manager.
 	WorktreeManager *worktreemgr.Manager
+
+	// InteractiveManager, when non-nil, enables the persistent multi-turn
+	// session regime (Interactive-P1).  When nil, POST /api/chat/dispatch with
+	// interactive:true returns 503 and POST /api/chat/send returns 503.
+	//
+	// serve.go constructs this from interactive.NewManager(serverCtx, cfg).
+	// Tests may inject a fake manager.
+	InteractiveManager *interactive.Manager
 }
 
 func (c *Config) addr() string {
@@ -358,6 +367,9 @@ func New(cfg Config) (*Server, error) {
 	chatH.workspaceRoot = cfg.WorkspaceRoot
 	// Wire the worktreemgr so review-mode dispatches can provision worktrees.
 	chatH.worktreeMgr = cfg.WorktreeManager
+	// Wire the interactive manager when provided (Interactive-P1).
+	// When nil, interactive:true in dispatch returns 503.
+	chatH.interactiveMgr = cfg.InteractiveManager
 	flowsH := &flowsHandlers{
 		engine:     cfg.WorkflowEngine,
 		workDir:    cfg.WorkDir,
@@ -848,6 +860,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/chat/transcript", requireRoleFunc(netid.RoleRead, s.chat.handleChatTranscript))
 	// POST /api/chat/share — flip shared flag; owner-gated.
 	s.mux.HandleFunc("/api/chat/share", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatShare))
+	// POST /api/chat/send — deliver a follow-up turn to a persistent interactive
+	// session started with interactive:true in /api/chat/dispatch.
+	// RoleDispatch: only the session owner may drive the session; watchers (RoleRead)
+	// may subscribe to the SSE stream but cannot send turns.
+	// CSRF + JSON-mutation gates applied by the global middleware in New().
+	s.mux.HandleFunc("/api/chat/send", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatSend))
 
 	// ---- Phase 5: Flows UI endpoints (token-gated at edge) ------------------
 	// GET  /flows/api/workflows          — list workflow names (RoleRead)
