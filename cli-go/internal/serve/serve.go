@@ -48,8 +48,10 @@ import (
 	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/restapi"
 	"github.com/bakw00ds/yakos/internal/setuptoken"
+	"github.com/bakw00ds/yakos/internal/statepath"
 	"github.com/bakw00ds/yakos/internal/userstore"
 	"github.com/bakw00ds/yakos/internal/workflow"
+	"github.com/bakw00ds/yakos/internal/worktreemgr"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
@@ -539,6 +541,18 @@ func Run(ctx context.Context, cfg Config) error {
 		}()
 
 		// Build the consoleui config (common fields).
+		//
+		// IDE Phase 3b: construct a worktree manager for diff-review mode.
+		// The manager is allocated unconditionally (its stateDir is created lazily
+		// by the first Ensure call).  PruneOrphans is called at startup to clean up
+		// any stale worktrees from a prior crash; it tolerates a non-git workspace
+		// gracefully (logs a warning; no error propagated).
+		wtStateDir := filepath.Join(statepath.Dir(), "ide-worktrees")
+		wtMgr := worktreemgr.New(wtStateDir)
+		// PruneOrphans is best-effort; errors are logged inside the function.
+		if cfg.WorkspaceRoot != "" {
+			wtMgr.PruneOrphans(cfg.WorkspaceRoot)
+		}
 		consoleCfg := consoleui.Config{
 			Addr:              bindAddr,
 			Token:             consoleTok,
@@ -559,6 +573,7 @@ func Run(ctx context.Context, cfg Config) error {
 			AuthSessionStore:   authStore,
 			UserStore:          uStore,
 			AllowNetworkedBash: cfg.ConsoleAllowBash,
+			WorktreeManager:    wtMgr,
 		}
 
 		if networked {
