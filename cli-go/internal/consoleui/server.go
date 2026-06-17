@@ -367,10 +367,38 @@ func New(cfg Config) (*Server, error) {
 	chatH.workspaceRoot = cfg.WorkspaceRoot
 	// Wire the worktreemgr so review-mode dispatches can provision worktrees.
 	chatH.worktreeMgr = cfg.WorktreeManager
-	// Wire the interactive manager when provided (Interactive-P1).
-	// When nil, interactive:true in dispatch returns 503.
-	chatH.interactiveMgr = cfg.InteractiveManager
-	chatH.interactiveSend = cfg.InteractiveManager // satisfies interactiveSender; nil is safe (guarded by interactiveMgr nil check)
+	// Wire the interactive manager (Interactive-P1).
+	//
+	// When cfg.InteractiveManager is non-nil (test injection or explicit caller
+	// override), use it as-is.  Otherwise, construct one here now that hub and
+	// serverCtx are both available.
+	//
+	// The OnError callback emits an error SSEEvent routed via hub.Route so the
+	// browser pane shows an error (instead of hanging) when a session's process
+	// crashes.  It uses the same SSEEvent type as the one-shot path so ChatHub
+	// delivers it to the correct owner-scoped SSE connections — i.e. interactive
+	// crash events are owner-scoped identically to normal token/summary frames.
+	//
+	// The manager's reaper goroutine runs until serverCtx is cancelled (daemon
+	// shutdown), at which point the goroutine exits cleanly via ctx.Done().
+	interactiveMgr := cfg.InteractiveManager
+	if interactiveMgr == nil {
+		interactiveMgr = interactive.NewManager(serverCtx, interactive.ManagerConfig{
+			// Cap and timeouts use package defaults (0 → defaultSessionCap=4,
+			// defaultIdleTimeout=15min, defaultReaperInterval=30s).
+			OnError: func(conversationID, sessionID, operatorID, msg string) {
+				hub.Route(SSEEvent{
+					SessionID:      sessionID,
+					ConversationID: conversationID,
+					Type:           "error",
+					Text:           msg,
+					TS:             time.Now().UTC().Format(time.RFC3339Nano),
+				})
+			},
+		})
+	}
+	chatH.interactiveMgr = interactiveMgr
+	chatH.interactiveSend = interactiveMgr
 	flowsH := &flowsHandlers{
 		engine:     cfg.WorkflowEngine,
 		workDir:    cfg.WorkDir,

@@ -1036,3 +1036,42 @@ func TestVendorRoute_FontsServedNoToken(t *testing.T) {
 		})
 	}
 }
+
+// ---- Interactive-P1 wiring regression guard ---------------------------------
+
+// TestConsoleConfig_InteractiveManagerWired asserts that consoleui.New() always
+// constructs and wires a non-nil interactive.Manager into the Server, even when
+// Config.InteractiveManager is not set by the caller.
+//
+// This is the regression guard for the bug where serve.go never constructed the
+// Manager, leaving Config.InteractiveManager nil so that POST /api/chat/send
+// always returned 503 "interactive mode not configured".
+//
+// If New() ever stops constructing the Manager (e.g. the construction block is
+// accidentally deleted or skipped behind a wrong condition), this test fails.
+func TestConsoleConfig_InteractiveManagerWired(t *testing.T) {
+	t.Parallel()
+
+	stateDir := t.TempDir()
+	tok, err := consoleui.LoadOrCreateToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+
+	// Construct a minimal Server with NO explicit InteractiveManager in Config.
+	// New() must auto-construct one.
+	srv := consoleui.MustNew(t, consoleui.Config{
+		Token:             tok,
+		KanbanBoardPath:   t.TempDir() + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: t.TempDir(),
+		PerfWorkDir:       t.TempDir(),
+		// InteractiveManager intentionally absent — New() must wire it.
+	})
+
+	if consoleui.InteractiveMgrForTest(srv) == nil {
+		t.Error("consoleui.New(): InteractiveManager is nil; " +
+			"POST /api/chat/send will 503 (interactive mode not configured) — " +
+			"wire interactive.NewManager in New() and assign to chatH.interactiveMgr")
+	}
+}
