@@ -796,12 +796,27 @@ var _ = consoleui.CommitResponse{}
 
 // TestDiffHandler_BinaryPromote_SymlinkParentEscape verifies that accepting a
 // binary file whose real-tree parent directory is a symlink pointing OUTSIDE
-// the workspace is rejected with 4xx and the victim path is NOT written.
+// the workspace is rejected (jail violation) and the victim path is NOT written.
 //
 // This is a regression test for the arbitrary-file-write via binary-promote
 // vulnerability: jailPath returned an unresolved lexical candidate for
 // not-yet-existing targets, which let a symlinked parent dir inside the
 // workspace redirect the write to an outside location.
+//
+// Test harness design — making the binary surface individually in buildDiff:
+//
+// git status --porcelain collapses an entirely-untracked directory to
+// "?? subdir/" (directory entry, not individual files). buildDiff reads the
+// directory entry, calls os.ReadFile on it (a directory) which fails, and
+// skips — so the binary never enters the diff and the handler returns 404
+// before jail code runs.
+//
+// Fix: commit a harmless placeholder file inside the worktree's "evil-link/"
+// subdirectory so the directory is tracked. The binary file then appears as
+// a distinct "?? evil-link/victim.bin" entry, buildDiff surfaces it with
+// Binary=true, the accept handler reaches promoteBinaryFile, and the jail
+// fires. A revert of promoteBinaryFile to the lexical write would write the
+// file to outsideDir and the test would catch it (victim path assertion).
 func TestDiffHandler_BinaryPromote_SymlinkParentEscape(t *testing.T) {
 	requireGit(t)
 
@@ -819,31 +834,54 @@ func TestDiffHandler_BinaryPromote_SymlinkParentEscape(t *testing.T) {
 	outsideDir := t.TempDir()
 	victimPath := filepath.Join(outsideDir, "victim.bin")
 
-	// Create a symlinked subdirectory INSIDE the workspace that points outside.
-	// e.g. <repoRoot>/evil-link -> <outsideDir>
+	// ---- Surface the binary individually in buildDiff -------------------------
+	//
+	// Step 1: in the WORKTREE, create the "evil-link/" subdir and commit a
+	// placeholder file so the directory is tracked. This makes git status emit
+	// "?? evil-link/victim.bin" individually instead of "?? evil-link/".
+	wtSubdir := filepath.Join(env.wtPath, "evil-link")
+	if err := os.MkdirAll(wtSubdir, 0755); err != nil {
+		t.Fatalf("MkdirAll wtSubdir: %v", err)
+	}
+	writeFile(t, filepath.Join(wtSubdir, "placeholder.txt"), "tracked\n")
+	gitRun(t, env.wtPath, "add", "evil-link/placeholder.txt")
+	gitRun(t, env.wtPath, "commit", "--no-gpg-sign", "-m", "add placeholder to track dir")
+
+	// Step 2: place the binary in the worktree. Because its sibling is now
+	// tracked, git reports it as "?? evil-link/victim.bin" (individual entry).
+	binaryContent := []byte("binary\x00data")
+	writeFile(t, filepath.Join(wtSubdir, "victim.bin"), string(binaryContent))
+
+	// Step 3: create the symlink in the REAL tree AFTER the worktree commit.
+	// The symlink makes the real-tree "evil-link/" point outside the workspace,
+	// so a write to repoRoot/evil-link/victim.bin would land in outsideDir.
 	evilLink := filepath.Join(env.repoRoot, "evil-link")
 	if err := os.Symlink(outsideDir, evilLink); err != nil {
 		t.Fatalf("os.Symlink: %v", err)
 	}
 
-	// Write a binary file in the worktree at the "normal" relative path that
-	// would (via the symlink) try to land outside the workspace.
-	// Worktree directory must contain the same subdir structure.
-	wtSubdir := filepath.Join(env.wtPath, "evil-link")
-	if err := os.MkdirAll(wtSubdir, 0755); err != nil {
-		t.Fatalf("MkdirAll wtSubdir: %v", err)
+	// ---- Verify the binary IS in the diff (test has teeth) --------------------
+	diffResp := diffDo(t, env, http.MethodGet,
+		fmt.Sprintf("/api/files/diff?session=%s&operatorId=%s", env.sessionA, env.opA), nil)
+	defer diffResp.Body.Close()
+	if diffResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(diffResp.Body)
+		t.Fatalf("GET /api/files/diff: got %d (body: %q)", diffResp.StatusCode, body)
 	}
-	// A binary file (contains a NUL byte) so the diff handler treats it as binary.
-	binaryContent := []byte("binary\x00data")
-	writeFile(t, filepath.Join(wtSubdir, "victim.bin"), string(binaryContent))
-	// Stage in worktree so it shows up in git status as untracked.
-	// (untracked binary shows up with status "added" + binary=true)
+	var dr consoleui.DiffResponse
+	decodeJSON(t, diffResp.Body, &dr)
+	foundBinary := false
+	for _, f := range dr.Files {
+		if f.Path == "evil-link/victim.bin" && f.Binary {
+			foundBinary = true
+			break
+		}
+	}
+	if !foundBinary {
+		t.Fatalf("evil-link/victim.bin not found as Binary=true in diff — test setup error; diff files: %+v", dr.Files)
+	}
 
-	// The relative path that would be requested: "evil-link/victim.bin"
-	// jailPath("evil-link/victim.bin") resolves lexically to
-	// <repoRoot>/evil-link/victim.bin which PASSES the lexical isUnderRoot check
-	// (since evilLink is under repoRoot), but its real location is
-	// <outsideDir>/victim.bin which is OUTSIDE.
+	// ---- Drive the accept — jail must fire, not 404 ---------------------------
 	accept := consoleui.AcceptRequest{
 		SessionID:  env.sessionA,
 		OperatorID: env.opA,
@@ -851,30 +889,42 @@ func TestDiffHandler_BinaryPromote_SymlinkParentEscape(t *testing.T) {
 		HunkID:     0,
 	}
 	resp := diffDo(t, env, http.MethodPost, "/api/files/diff/accept", accept)
-	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
 
-	// Must be rejected with a 4xx — not 200.
-	if resp.StatusCode == http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("binary-promote symlink escape: expected 4xx, got 200 (body: %q)", body)
+	// Must NOT be 404 (that would mean the file never reached promoteBinaryFile).
+	if resp.StatusCode == http.StatusNotFound {
+		t.Fatalf("binary-promote symlink escape: got 404 — binary did not reach promoteBinaryFile; test setup error")
 	}
+	// Must NOT be 200 — the jail must have fired.
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("binary-promote symlink escape: got 200 — jail did NOT fire; escape succeeded (body: %q)", body)
+	}
+	// Expect a 4xx (specifically 409 from the handler wrapping the jail error).
 	if resp.StatusCode < 400 || resp.StatusCode >= 500 {
-		body, _ := io.ReadAll(resp.Body)
-		t.Errorf("binary-promote symlink escape: got %d, want a 4xx status (body: %q)", resp.StatusCode, body)
+		t.Errorf("binary-promote symlink escape: got %d, want 4xx (body: %q)", resp.StatusCode, body)
+	}
+	// Body must mention the jail violation, not an unrelated error.
+	if !strings.Contains(string(body), "jail") && !strings.Contains(string(body), "outside") && !strings.Contains(string(body), "promote") {
+		t.Errorf("binary-promote symlink escape: response body does not mention jail violation: %q", body)
 	}
 
 	// The victim file outside the workspace must NOT have been written.
 	if _, err := os.Stat(victimPath); !os.IsNotExist(err) {
-		t.Errorf("binary-promote symlink escape: victim file at %q was created (escape succeeded!)", victimPath)
+		t.Errorf("binary-promote symlink escape: victim file at %q was created — escape succeeded!", victimPath)
 	}
 }
 
 // TestDiffHandler_BinaryPromote_GitHooksEscape verifies that accepting a
 // binary file targeting .git/hooks/pre-commit via a symlinked parent is
-// rejected with 4xx and the .git directory is not written.
+// rejected (jail violation) and the .git directory is not written.
 //
 // This is the RCE variant of the binary-promote escape: writing an executable
 // to .git/hooks/pre-commit would execute on the next git commit.
+//
+// Same surfacing strategy as TestDiffHandler_BinaryPromote_SymlinkParentEscape:
+// commit a placeholder in the worktree subdirectory so git reports the binary
+// as an individual "?? hooks-link/pre-commit" entry rather than "?? hooks-link/".
 func TestDiffHandler_BinaryPromote_GitHooksEscape(t *testing.T) {
 	requireGit(t)
 
@@ -886,28 +936,57 @@ func TestDiffHandler_BinaryPromote_GitHooksEscape(t *testing.T) {
 
 	env := newDiffEnv(t)
 
-	// Create a symlink inside the workspace that points to .git/hooks/.
-	// This simulates an attacker who has written a symlink into the workspace
-	// (e.g. via a malicious tool output). The symlink passes jailPath's
-	// lexical isUnderRoot check but EvalSymlinks resolves to .git/hooks.
 	gitHooksDir := filepath.Join(env.repoRoot, ".git", "hooks")
 	if err := os.MkdirAll(gitHooksDir, 0755); err != nil {
 		t.Fatalf("MkdirAll .git/hooks: %v", err)
 	}
 
+	// ---- Surface the hook binary individually in buildDiff --------------------
+	//
+	// Commit a placeholder in the worktree's "hooks-link/" subdirectory so the
+	// dir is tracked and git emits "?? hooks-link/pre-commit" individually.
+	wtSubdir := filepath.Join(env.wtPath, "hooks-link")
+	if err := os.MkdirAll(wtSubdir, 0755); err != nil {
+		t.Fatalf("MkdirAll wtSubdir: %v", err)
+	}
+	writeFile(t, filepath.Join(wtSubdir, "placeholder.txt"), "tracked\n")
+	gitRun(t, env.wtPath, "add", "hooks-link/placeholder.txt")
+	gitRun(t, env.wtPath, "commit", "--no-gpg-sign", "-m", "add placeholder to track dir")
+
+	// Place the hook binary in the worktree after the commit.
+	hookContent := []byte("#!/bin/sh\necho pwned\x00") // NUL byte → binary
+	writeFile(t, filepath.Join(wtSubdir, "pre-commit"), string(hookContent))
+
+	// Create the symlink in the real tree: hooks-link → .git/hooks.
+	// This is the attack vector: a write to repoRoot/hooks-link/pre-commit
+	// (lexically inside the workspace) resolves to .git/hooks/pre-commit.
 	evilLink := filepath.Join(env.repoRoot, "hooks-link")
 	if err := os.Symlink(gitHooksDir, evilLink); err != nil {
 		t.Fatalf("os.Symlink .git/hooks: %v", err)
 	}
 
-	// Set up the worktree side with the same relative path.
-	wtSubdir := filepath.Join(env.wtPath, "hooks-link")
-	if err := os.MkdirAll(wtSubdir, 0755); err != nil {
-		t.Fatalf("MkdirAll wtSubdir: %v", err)
+	// ---- Verify the binary IS in the diff (test has teeth) --------------------
+	diffResp := diffDo(t, env, http.MethodGet,
+		fmt.Sprintf("/api/files/diff?session=%s&operatorId=%s", env.sessionA, env.opA), nil)
+	defer diffResp.Body.Close()
+	if diffResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(diffResp.Body)
+		t.Fatalf("GET /api/files/diff: got %d (body: %q)", diffResp.StatusCode, body)
 	}
-	hookContent := []byte("#!/bin/sh\necho pwned\x00") // NUL byte → binary
-	writeFile(t, filepath.Join(wtSubdir, "pre-commit"), string(hookContent))
+	var dr consoleui.DiffResponse
+	decodeJSON(t, diffResp.Body, &dr)
+	foundBinary := false
+	for _, f := range dr.Files {
+		if f.Path == "hooks-link/pre-commit" && f.Binary {
+			foundBinary = true
+			break
+		}
+	}
+	if !foundBinary {
+		t.Fatalf("hooks-link/pre-commit not found as Binary=true in diff — test setup error; diff files: %+v", dr.Files)
+	}
 
+	// ---- Drive the accept — jail must fire, not 404 ---------------------------
 	accept := consoleui.AcceptRequest{
 		SessionID:  env.sessionA,
 		OperatorID: env.opA,
@@ -915,22 +994,30 @@ func TestDiffHandler_BinaryPromote_GitHooksEscape(t *testing.T) {
 		HunkID:     0,
 	}
 	resp := diffDo(t, env, http.MethodPost, "/api/files/diff/accept", accept)
-	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
 
-	// Must be rejected with a 4xx.
+	// Must NOT be 404 — that would mean the file never reached promoteBinaryFile.
+	if resp.StatusCode == http.StatusNotFound {
+		t.Fatalf(".git hooks escape: got 404 — binary did not reach promoteBinaryFile; test setup error")
+	}
+	// Must NOT be 200 — the jail must have fired.
 	if resp.StatusCode == http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf(".git hooks escape: expected 4xx, got 200 (body: %q)", body)
+		t.Fatalf(".git hooks escape: got 200 — jail did NOT fire; RCE hook was written (body: %q)", body)
 	}
+	// Expect a 4xx.
 	if resp.StatusCode < 400 || resp.StatusCode >= 500 {
-		body, _ := io.ReadAll(resp.Body)
-		t.Errorf(".git hooks escape: got %d, want a 4xx status (body: %q)", resp.StatusCode, body)
+		t.Errorf(".git hooks escape: got %d, want 4xx (body: %q)", resp.StatusCode, body)
+	}
+	// Body must mention the jail violation.
+	if !strings.Contains(string(body), "jail") && !strings.Contains(string(body), "outside") && !strings.Contains(string(body), "promote") {
+		t.Errorf(".git hooks escape: response body does not mention jail violation: %q", body)
 	}
 
-	// The hook file must NOT have been written.
+	// The hook file must NOT have been written into .git/hooks.
 	hookPath := filepath.Join(gitHooksDir, "pre-commit")
 	if data, err := os.ReadFile(hookPath); err == nil {
-		t.Errorf(".git hooks escape: pre-commit was written (RCE). Content: %q", data)
+		t.Errorf(".git hooks escape: pre-commit was written to .git/hooks (RCE). Content: %q", data)
 	}
 }
 
