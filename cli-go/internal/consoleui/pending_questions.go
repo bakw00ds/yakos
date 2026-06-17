@@ -15,9 +15,16 @@ package consoleui
 //     don't leak whether a different question is in flight).
 //   - Single-use: clearing the pending entry on accept means a second answer
 //     for the same question returns ErrAnswerAlreadyConsumed (→ 409).
-//   - Option validation: the chosen option labels/keys must be among the ones
-//     emitted in the original ask_user_question (→ 400 for unknown options).
+//   - Option values are NOT restricted to declared options.  The product
+//     requirement is that operators can pick a provided option, add notes, OR
+//     type a completely custom answer ("add-your-own" / free-text path).
+//     Therefore an answer value that is not among the menu labels is LEGITIMATE,
+//     not an attack.  Structural forged-answer prevention relies on toolUseID
+//     match (→ 404) and single-use enforcement (→ 409), not on option
+//     enumeration.
 //   - multiSelect enforcement: at most one option when multiSelect is false.
+//     (Note: answers is map[string]string, so JSON decoding structurally limits
+//     to one value per question-text key — see R6 below.)
 //
 // # Concurrency
 //
@@ -32,11 +39,16 @@ import (
 )
 
 // questionOption represents one option from an AskUserQuestion.
+//
+// The native Claude AskUserQuestion tool shape is:
+//
+//	{"label":"...","description":"..."}
+//
+// There is no "key" field in the native shape.  "description" is informational
+// only and not used for validation.
 type questionOption struct {
-	Label string `json:"label"`
-	// key is an optional machine-readable alias; when present, either the
-	// label or the key is accepted in the answer.
-	Key string `json:"key,omitempty"`
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
 }
 
 // pendingQuestion holds the state for one in-flight AskUserQuestion.
@@ -45,7 +57,7 @@ type pendingQuestion struct {
 	toolUseID string
 
 	// questions holds the structured question list decoded from questionsJSON.
-	// Each element has the question text and its valid option labels/keys.
+	// Each element has the question text and its valid option labels.
 	questions []parsedQuestion
 
 	// questionsJSON is the raw JSON echoed back to the engine in the answer
@@ -60,8 +72,20 @@ type pendingQuestion struct {
 }
 
 // parsedQuestion is one question from the ask_user_question frame.
+//
+// Native Claude AskUserQuestion tool input shape (per sidecar.mjs verbatim
+// passthrough and sdk_engine_test.go fixture):
+//
+//	{"question":"<full text>","header":"<short label>","options":[{"label":"...","description":"..."}],"multiSelect":false}
+//
+// The sidecar passes tool.input.questions verbatim — Go must decode using this
+// native field name, not an aliased one.
 type parsedQuestion struct {
-	Text        string           `json:"text"`
+	// Question is the full question text (native field: "question").
+	// This is also the key used in the answers map sent by the frontend:
+	//   answers: { [question.question]: chosenLabelOrCustomText }
+	Question    string           `json:"question"`
+	Header      string           `json:"header,omitempty"`
 	Options     []questionOption `json:"options,omitempty"`
 	MultiSelect bool             `json:"multiSelect,omitempty"`
 }
@@ -74,10 +98,6 @@ var (
 	// errPendingAlreadyConsumed is returned when a pending question was already
 	// answered (single-use enforcement).
 	errPendingAlreadyConsumed = errors.New("pending question already answered")
-
-	// errPendingUnknownOption is returned when the submitted answer contains an
-	// option label/key that was not offered in the original question.
-	errPendingUnknownOption = errors.New("answer contains unknown option")
 
 	// errPendingMultiSelectViolation is returned when the caller submits more
 	// than one answer for a single-select question.
@@ -129,9 +149,14 @@ func (s *pendingQuestionStore) Clear(conversationID string) {
 }
 
 // ValidateAndConsume checks that toolUseID matches the current pending question,
-// validates the submitted answers against the allowed option set, enforces
-// multiSelect rules, and on success returns the raw questionsJSON to be echoed
-// back to the engine and clears the pending entry (single-use).
+// enforces multiSelect rules, and on success returns the raw questionsJSON to be
+// echoed back to the engine and clears the pending entry (single-use).
+//
+// Option values are NOT checked against the declared option list.  The
+// add-your-own-option requirement means a custom/free-text answer value that is
+// not among the menu labels is a valid, first-class answer path.  Validation
+// focuses on structural security: toolUseID identity (→ 404) and single-use
+// replay prevention (→ 409).
 //
 // On success returns the questionsJSON (may be "[]" if no options were declared).
 // On failure returns one of the sentinel errors for the caller to map to HTTP status.
@@ -155,7 +180,8 @@ func (s *pendingQuestionStore) ValidateAndConsume(conversationID, toolUseID stri
 		return "", errPendingAlreadyConsumed
 	}
 
-	// Validate answers against declared options.
+	// Validate multiSelect constraints (option enumeration is not checked —
+	// custom answers are permitted; see package-level doc for the rationale).
 	if err := validateAnswers(pq.questions, answers); err != nil {
 		return "", err
 	}
@@ -180,40 +206,40 @@ func parseQuestions(questionsJSON string) ([]parsedQuestion, error) {
 	return qs, nil
 }
 
-// validateAnswers checks that each answer's chosen option is among the options
-// declared for its question, and enforces multiSelect constraints.
+// validateAnswers enforces multiSelect constraints.
+//
+// Option-value validation (checking that the chosen value is among the declared
+// option labels) is intentionally ABSENT.  The product contract requires that
+// operators can submit a custom/free-text answer that is not one of the provided
+// menu options ("add-your-own" path).  A submitted answer value that is not in
+// the menu is therefore legitimate — rejecting it would break a first-class
+// feature.  The load-bearing security checks are toolUseID match (→ 404) and
+// single-use enforcement (→ 409), both enforced in ValidateAndConsume before
+// this function is called.
 //
 // When questions is nil (no options declared), all answers pass validation —
 // the questions were free-text or the options JSON was unparseable.
 func validateAnswers(questions []parsedQuestion, answers map[string]string) error {
 	if len(questions) == 0 {
-		// No option constraints declared; any answer is valid.
+		// No structural constraints declared; any answer is valid.
 		return nil
 	}
 
-	// Build a per-question map from text → allowed {label, key} set.
-	type allowedSet struct {
-		labels      map[string]struct{}
+	// Build a per-question lookup keyed by the native "question" field value.
+	// The answers map is also keyed by this value (the frontend does:
+	//   answers: { [question.question]: chosenLabelOrCustomText }
+	// so the keys now align with production data).
+	type questionMeta struct {
 		multiSelect bool
 	}
-	byText := make(map[string]allowedSet, len(questions))
+	byQuestion := make(map[string]questionMeta, len(questions))
 	for _, q := range questions {
-		allowed := make(map[string]struct{}, len(q.Options)*2)
-		for _, opt := range q.Options {
-			if opt.Label != "" {
-				allowed[opt.Label] = struct{}{}
-			}
-			if opt.Key != "" {
-				allowed[opt.Key] = struct{}{}
-			}
-		}
-		byText[q.Text] = allowedSet{
-			labels:      allowed,
-			multiSelect: q.MultiSelect,
+		if q.Question != "" {
+			byQuestion[q.Question] = questionMeta{multiSelect: q.MultiSelect}
 		}
 	}
 
-	// Validate each answer's chosen option.
+	// Enforce multiSelect=false: at most one answer per single-select question.
 	//
 	// R6 (multiSelect note): answers is map[string]string, so JSON decoding
 	// guarantees at most one value per question-text key.  The answerCounts
@@ -225,26 +251,19 @@ func validateAnswers(questions []parsedQuestion, answers map[string]string) erro
 	// map[string]string type implicitly enforces single-select on the wire;
 	// the multiSelect=true path is therefore partially unimplemented.
 	answerCounts := make(map[string]int, len(answers))
-	for questionText, chosenLabel := range answers {
-		as, exists := byText[questionText]
+	for questionText := range answers {
+		meta, exists := byQuestion[questionText]
 		if !exists {
-			// Unknown question text — pass (may be a free-text question not in the
-			// structured list; we only enforce options for known questions).
+			// Unknown question text — pass (may be a free-text question not in
+			// the structured list; we only enforce structure for known questions).
 			continue
-		}
-		if len(as.labels) > 0 {
-			// Options were declared: validate the chosen label.
-			if _, ok := as.labels[chosenLabel]; !ok {
-				return fmt.Errorf("%w: question %q received option %q which is not among the declared options",
-					errPendingUnknownOption, questionText, chosenLabel)
-			}
 		}
 		answerCounts[questionText]++
 		// Dead check: answerCounts[questionText] can never exceed 1 because
 		// answers is map[string]string (see R6 note above).  Kept for
 		// documentation intent and to make the enforcement live automatically
 		// if the wire type is later upgraded to map[string][]string.
-		if !as.multiSelect && answerCounts[questionText] > 1 {
+		if !meta.multiSelect && answerCounts[questionText] > 1 {
 			return fmt.Errorf("%w: question %q", errPendingMultiSelectViolation, questionText)
 		}
 	}

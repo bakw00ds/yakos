@@ -209,9 +209,18 @@ func TestChatAnswer_Replay_409(t *testing.T) {
 	}
 }
 
-// TestChatAnswer_UnknownOption_400 verifies that an unknown option label in
-// answers returns 400.
-func TestChatAnswer_UnknownOption_400(t *testing.T) {
+// TestChatAnswer_CustomAnswer_202 verifies that a custom/free-text answer value
+// (not among the declared option labels) is ACCEPTED with 202.
+//
+// The product requirement is that operators can pick a provided option, add
+// notes, OR type a completely custom answer ("add-your-own" path).  A submitted
+// value that is not in the menu is legitimate — rejecting it would break a
+// first-class feature.  The load-bearing security checks are toolUseID match
+// (→ 404) and single-use enforcement (→ 409), not option enumeration.
+//
+// This test uses the NATIVE Claude AskUserQuestion shape:
+//   {"question":"...","header":"...","options":[{"label":"...","description":"..."}],"multiSelect":bool}
+func TestChatAnswer_CustomAnswer_202(t *testing.T) {
 	stateDir := t.TempDir()
 	workDir := t.TempDir()
 	tok, err := consoleui.LoadOrCreateToken(stateDir)
@@ -226,8 +235,8 @@ func TestChatAnswer_UnknownOption_400(t *testing.T) {
 	mgr := interactive.NewManager(ctx, interactive.ManagerConfig{Cap: 4})
 	t.Cleanup(mgr.Stop)
 
-	eng := newFakeAnswerEngine("conv-option", "alice", nil)
-	if err := interactivetest.ManagerInjectForTest(mgr, "conv-option", eng); err != nil {
+	eng := newFakeAnswerEngine("conv-custom", "alice", nil)
+	if err := interactivetest.ManagerInjectForTest(mgr, "conv-custom", eng); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 
@@ -242,24 +251,81 @@ func TestChatAnswer_UnknownOption_400(t *testing.T) {
 		InteractiveManager: mgr,
 	})
 
-	// Set a pending question WITH declared options.
-	questionsJSON := `[{"text":"q1","options":[{"label":"Yes"},{"label":"No"}],"multiSelect":false}]`
-	consoleui.SetPendingQuestionForTest(srv, "conv-option", "tool-option", questionsJSON)
+	// Native AskUserQuestion shape: field is "question", options are {label, description}.
+	questionsJSON := `[{"question":"Pick one","header":"Choose","options":[{"label":"Yes","description":"Affirmative"},{"label":"No","description":"Negative"}],"multiSelect":false}]`
+	consoleui.SetPendingQuestionForTest(srv, "conv-custom", "tool-custom", questionsJSON)
 
 	wrapped := consoleui.RequireTokenForNonStatic(tok,
 		consoleui.RequireJSONForMutations(srv.Handler()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
+	// Custom answer "Maybe" is not in the declared options but MUST be accepted (202).
+	// "add-your-own" is a first-class feature; only toolUseID forgery and replay are rejected.
 	resp := doAnswerRequest(t, ts, tok, map[string]interface{}{
-		"conversationId": "conv-option",
+		"conversationId": "conv-custom",
 		"operatorId":     "alice",
-		"toolUseId":      "tool-option",
-		"answers":        map[string]string{"q1": "Maybe"}, // not a declared option
+		"toolUseId":      "tool-custom",
+		"answers":        map[string]string{"Pick one": "Maybe — with a custom note"}, // custom, not in menu
 	})
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("unknown option: expected 400, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("custom answer: expected 202 (add-your-own is permitted), got %d", resp.StatusCode)
+	}
+}
+
+// TestChatAnswer_MenuOption_202 verifies that a declared menu-option answer is
+// also accepted (202) with the native field shape.
+func TestChatAnswer_MenuOption_202(t *testing.T) {
+	stateDir := t.TempDir()
+	workDir := t.TempDir()
+	tok, err := consoleui.LoadOrCreateToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	bus := wsbus.New()
+	t.Cleanup(bus.Stop)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	mgr := interactive.NewManager(ctx, interactive.ManagerConfig{Cap: 4})
+	t.Cleanup(mgr.Stop)
+
+	eng := newFakeAnswerEngine("conv-menu", "alice", nil)
+	if err := interactivetest.ManagerInjectForTest(mgr, "conv-menu", eng); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+
+	srv := consoleui.MustNew(t, consoleui.Config{
+		Token:              tok,
+		KanbanBoardPath:    t.TempDir() + "/kanban.md",
+		KanbanProject:      "test",
+		MetricsProjectDir:  t.TempDir(),
+		PerfWorkDir:        t.TempDir(),
+		Bus:                bus,
+		WorkDir:            workDir,
+		InteractiveManager: mgr,
+	})
+
+	// Native AskUserQuestion shape.
+	questionsJSON := `[{"question":"Pick one","header":"Choose","options":[{"label":"Yes","description":"Affirmative"},{"label":"No","description":"Negative"}],"multiSelect":false}]`
+	consoleui.SetPendingQuestionForTest(srv, "conv-menu", "tool-menu", questionsJSON)
+
+	wrapped := consoleui.RequireTokenForNonStatic(tok,
+		consoleui.RequireJSONForMutations(srv.Handler()))
+	ts := httptest.NewServer(wrapped)
+	t.Cleanup(ts.Close)
+
+	// "Yes" is a declared option label — must also be accepted (202).
+	resp := doAnswerRequest(t, ts, tok, map[string]interface{}{
+		"conversationId": "conv-menu",
+		"operatorId":     "alice",
+		"toolUseId":      "tool-menu",
+		"answers":        map[string]string{"Pick one": "Yes"},
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("menu option: expected 202, got %d", resp.StatusCode)
 	}
 }
 
@@ -564,40 +630,88 @@ func TestSDKEngineFactory_WiringGuard(t *testing.T) {
 // Pending-question store unit tests (option validation, multiSelect)
 // ---------------------------------------------------------------------------
 
-// TestPendingQuestions_OptionValidation exercises the option validation and
-// multiSelect rules through the exported test helper.
-func TestPendingQuestions_OptionValidation(t *testing.T) {
+// TestPendingQuestions_NativeShape exercises the pending-question store using
+// the native Claude AskUserQuestion shape (field "question", not "text";
+// options are {label, description}, not {label, key}).
+//
+// Verifies:
+//  (a) A declared menu-option answer is accepted (no enumeration rejection).
+//  (b) A custom/free-text answer NOT in the options is ACCEPTED (add-your-own).
+//  (c) A forged toolUseID returns ErrPendingNoPendingQuestion (→ 404).
+//  (d) A replay of the same toolUseID after a successful consume returns
+//      ErrPendingAlreadyConsumed (→ 409).
+func TestPendingQuestions_NativeShape(t *testing.T) {
 	store := consoleui.NewPendingQuestionStoreForTest()
 
-	// Set a question with two options, single-select.
-	store.Set("conv1", "tu-1", `[{"text":"q1","options":[{"label":"Yes"},{"label":"No"}],"multiSelect":false}]`)
+	// Native shape: "question" field (not "text"), options are {label, description}.
+	nativeJSON := `[{"question":"Pick one","header":"Choose","options":[{"label":"Yes","description":"Affirmative"},{"label":"No","description":"Negative"}],"multiSelect":false}]`
 
-	// Unknown option → error.
-	_, err := store.ValidateAndConsume("conv1", "tu-1", map[string]string{"q1": "Maybe"})
-	if !errors.Is(err, consoleui.ErrPendingUnknownOption) {
-		t.Errorf("unknown option: expected ErrPendingUnknownOption, got %v", err)
-	}
-
-	// Re-set after failed validation (store was NOT consumed on failure).
-	store.Set("conv1", "tu-1", `[{"text":"q1","options":[{"label":"Yes"},{"label":"No"}],"multiSelect":false}]`)
-
-	// Valid option → success.
-	qs, err := store.ValidateAndConsume("conv1", "tu-1", map[string]string{"q1": "Yes"})
+	// (a) Declared menu-option answer → success (202).
+	store.Set("conv1", "tu-1", nativeJSON)
+	qs, err := store.ValidateAndConsume("conv1", "tu-1", map[string]string{"Pick one": "Yes"})
 	if err != nil {
-		t.Errorf("valid option: unexpected error %v", err)
+		t.Errorf("(a) menu option: unexpected error %v", err)
 	}
 	if qs == "" {
-		t.Error("valid option: expected non-empty questionsJSON")
+		t.Error("(a) menu option: expected non-empty questionsJSON")
 	}
 
-	// Re-set with multiSelect=false and try to pass multiple answers.
-	store.Set("conv2", "tu-2", `[{"text":"q2","options":[{"label":"A"},{"label":"B"}],"multiSelect":false}]`)
-	_, err = store.ValidateAndConsume("conv2", "tu-2", map[string]string{"q2": "A", "q2_extra": "B"})
-	// q2_extra is an unknown question (not declared), which passes validation.
-	// Only same-question multi-answer violates multiSelect.  This tests unknown
-	// question passthrough.
+	// (b) Custom/free-text answer NOT in options → also accepted (add-your-own path).
+	store.Set("conv2", "tu-2", nativeJSON)
+	_, err = store.ValidateAndConsume("conv2", "tu-2", map[string]string{"Pick one": "Something entirely custom"})
 	if err != nil {
-		t.Logf("multiSelect passthrough: got err (may be expected): %v", err)
+		t.Errorf("(b) custom answer: expected nil (add-your-own is permitted), got %v", err)
+	}
+
+	// (c) Forged toolUseID → ErrPendingNoPendingQuestion (→ 404).
+	store.Set("conv3", "tu-3", nativeJSON)
+	_, err = store.ValidateAndConsume("conv3", "WRONG-id", map[string]string{"Pick one": "Yes"})
+	if !errors.Is(err, consoleui.ErrPendingNoPendingQuestion) {
+		t.Errorf("(c) forged toolUseID: expected ErrPendingNoPendingQuestion, got %v", err)
+	}
+
+	// (d) Replay of consumed toolUseID → ErrPendingAlreadyConsumed (→ 409).
+	store.Set("conv4", "tu-4", nativeJSON)
+	if _, err = store.ValidateAndConsume("conv4", "tu-4", map[string]string{"Pick one": "No"}); err != nil {
+		t.Fatalf("(d) first consume: unexpected error %v", err)
+	}
+	_, err = store.ValidateAndConsume("conv4", "tu-4", map[string]string{"Pick one": "No"})
+	if !errors.Is(err, consoleui.ErrPendingAlreadyConsumed) {
+		t.Errorf("(d) replay: expected ErrPendingAlreadyConsumed, got %v", err)
+	}
+}
+
+// TestPendingQuestions_AnswersKeyedByQuestionField verifies that the answers map
+// must be keyed by the "question" field value (not by "text"), and that
+// the store correctly aligns production data with the native shape.
+//
+// Before the fix, parsedQuestion decoded with json:"text" so q.Question was
+// always "" in production, byText[""] was the key, and no real answer ever
+// matched — multiSelect checks silently no-op'd.  After the fix, the key is
+// q.Question (the native "question" field value), and answers keyed by that
+// value are looked up correctly.
+func TestPendingQuestions_AnswersKeyedByQuestionField(t *testing.T) {
+	store := consoleui.NewPendingQuestionStoreForTest()
+
+	// This is the exact shape emitted by the sidecar in production (confirmed
+	// by sdk_engine_test.go:56 and sidecar.mjs canUseTool verbatim passthrough).
+	nativeJSON := `[{"question":"Pick one","header":"Choose","multiSelect":false,"options":[{"label":"A","description":"Option A"}]}]`
+	store.Set("conv5", "tu-5", nativeJSON)
+
+	// Answers keyed by the native "question" field value must be accepted.
+	_, err := store.ValidateAndConsume("conv5", "tu-5", map[string]string{"Pick one": "A"})
+	if err != nil {
+		t.Errorf("answers keyed by 'question' field: unexpected error %v", err)
+	}
+
+	// Regression check: if the old "text" key were used instead of "question",
+	// the store would have decoded q.Question="" and the byQuestion map would be
+	// empty (or keyed by ""), causing a silent pass regardless of the answer.
+	// Re-set and verify a custom answer also passes (add-your-own path).
+	store.Set("conv6", "tu-6", nativeJSON)
+	_, err = store.ValidateAndConsume("conv6", "tu-6", map[string]string{"Pick one": "custom text not in menu"})
+	if err != nil {
+		t.Errorf("custom answer with correct question key: unexpected error %v", err)
 	}
 }
 

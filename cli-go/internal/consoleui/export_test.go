@@ -383,6 +383,7 @@ var ErrPendingNoPendingQuestion = errPendingNoPendingQuestion
 // answered" error from the pending-question store (replay → 409).
 var ErrPendingAlreadyConsumed = errPendingAlreadyConsumed
 
-// ErrPendingUnknownOption is the exported sentinel for the "unknown option"
-// error from the pending-question store.
-var ErrPendingUnknownOption = errPendingUnknownOption
+// Note: ErrPendingUnknownOption has been removed.  Custom/free-text answer
+// values that are not among the declared menu options are a first-class feature
+// ("add-your-own" path) and must not be rejected.  The load-bearing security
+// checks are toolUseID match (→ 404) and single-use enforcement (→ 409).

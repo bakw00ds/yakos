@@ -1608,13 +1608,14 @@ func (ch *chatHandlers) handleChatAnswer(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// --- Forged-answer prevention: validate toolUseID + option labels ---
+	// --- Forged-answer prevention: validate toolUseID and single-use ---
 	// ValidateAndConsume checks:
 	//   1. A pending question exists for this conversationID.
 	//   2. toolUseID matches exactly (mismatch → errPendingNoPendingQuestion → 404).
-	//   3. Chosen option labels/keys are among those declared (unknown → 400).
-	//   4. multiSelect enforcement (>1 answer on single-select → 400).
-	// On success it clears the pending entry (single-use) and returns questionsJSON.
+	//   3. Single-use: entry already consumed → errPendingAlreadyConsumed → 409.
+	// Option values are NOT restricted to declared menu labels — custom/free-text
+	// answers are a first-class feature (add-your-own path) and must not be rejected.
+	// On success the pending entry is marked consumed and questionsJSON is returned.
 	// questionsJSON is ALWAYS from server-recorded state; the client cannot supply it.
 	if ch.pendingQuestions == nil {
 		// Safety: pendingQuestions is always set by New(); this guard is defensive.
@@ -1627,11 +1628,11 @@ func (ch *chatHandlers) handleChatAnswer(w http.ResponseWriter, r *http.Request)
 		case errors.Is(pqErr, errPendingNoPendingQuestion):
 			// 404: no matching pending question.  We intentionally do not distinguish
 			// "no question at all" from "wrong toolUseId" to avoid leaking state.
+			// Note: option-value enumeration is NOT enforced here — custom/free-text
+			// answers are a first-class feature (add-your-own path).
 			http.Error(w, "not found", http.StatusNotFound)
 		case errors.Is(pqErr, errPendingAlreadyConsumed):
 			http.Error(w, "question already answered", http.StatusConflict)
-		case errors.Is(pqErr, errPendingUnknownOption):
-			http.Error(w, pqErr.Error(), http.StatusBadRequest)
 		case errors.Is(pqErr, errPendingMultiSelectViolation):
 			http.Error(w, pqErr.Error(), http.StatusBadRequest)
 		default:
