@@ -47,6 +47,32 @@ const (
 	TopicWorkflowNodeTruncated = "workflow.node.truncated"
 )
 
+// Topic constants for Phase-2 IDE file-watcher events.
+//
+// Invariant: files.changed carries ONLY path/action/ts.
+// File contents MUST NEVER appear in this payload.
+// Secret-pattern paths are filtered at the source (filewatch.Watcher) and
+// must not appear in published events.
+const (
+	// TopicFilesChanged is emitted when a workspace file is created,
+	// modified, or deleted. Payload: FilesChangedPayload.
+	TopicFilesChanged = "files.changed"
+)
+
+// FilesChangedPayload is the payload for [TopicFilesChanged].
+//
+// Invariant: this struct MUST NOT contain a Content, Data, Body, or any other
+// field that carries file bytes. The path/action/ts triad is the complete
+// payload. This invariant is enforced by TestFilesChangedPayloadNoContent.
+type FilesChangedPayload struct {
+	// Path is the workspace-relative path of the changed file (forward slashes).
+	Path string `json:"path"`
+	// Action is "created", "modified", or "deleted".
+	Action string `json:"action"`
+	// TS is the server-side time at which the debounced event fired.
+	TS time.Time `json:"ts"`
+}
+
 // Topic constants for Phase-2 fleet (REPL session panel) events.
 //
 // Invariant: these topics carry ONLY session metadata — session_id, agent name,
