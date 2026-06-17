@@ -310,6 +310,39 @@ func (m *Manager) Ensure(conversationID, ownerOperatorID string, params SessionP
 	return sess, nil
 }
 
+// IsOwner reports whether a live session exists for conversationID and, if so,
+// whether ownerOperatorID is its owner.
+//
+// This is a non-consuming read-only check intended for pre-flight ownership
+// validation BEFORE calling ValidateAndConsume on the pending-question store.
+// By checking ownership first, a non-owner attempt cannot consume (burn) the
+// legitimate owner's pending-question entry.
+//
+// # Lock-free field read safety
+//
+// IsOwner takes the manager lock to look up the entry pointer, then drops it
+// before reading entry.session fields.  This is safe because managerEntry.session
+// is write-once: it is set at construction time and never mutated; only the map
+// entry itself is replaced (by reaper or crash-detection goroutine removing it).
+// Once IsOwner holds a stable pointer to *managerEntry, OwnerOperatorID() and
+// IsClosed() read immutable / goroutine-safe fields on the Engine interface.
+//
+// The same stable-pointer reasoning applies to Send and AnswerQuestion; this
+// comment documents the invariant for all three callers.
+func (m *Manager) IsOwner(conversationID, operatorID string) (exists bool, owned bool) {
+	m.mu.Lock()
+	entry, ok := m.entries[conversationID]
+	m.mu.Unlock()
+
+	if !ok {
+		return false, false
+	}
+	if entry.session.IsClosed() {
+		return false, false
+	}
+	return true, entry.session.OwnerOperatorID() == operatorID
+}
+
 // AnswerQuestion delivers the operator's answer to an AskUserQuestion tool call
 // on the session identified by conversationID.
 //
@@ -322,6 +355,10 @@ func (m *Manager) Ensure(conversationID, ownerOperatorID string, params SessionP
 // session's currently pending question.
 // Returns ErrAnswerAlreadyConsumed (→ 409) when the pending question was
 // already answered.
+// R4 invariant: the ownership check below reads entry.session fields after
+// dropping the lock.  This is safe because managerEntry.session is write-once
+// (set at construction, never mutated; only the map entry is replaced).
+// See IsOwner for the full stable-pointer explanation.
 func (m *Manager) AnswerQuestion(conversationID, ownerOperatorID, toolUseID string, answer QuestionAnswer) error {
 	m.mu.Lock()
 	entry, ok := m.entries[conversationID]
@@ -345,6 +382,10 @@ func (m *Manager) AnswerQuestion(conversationID, ownerOperatorID, toolUseID stri
 // Returns ErrOwnerConflict (→ 403) when the conversationID is owned by a
 // different operator.
 // Returns ErrTurnInFlight (→ 409) when a turn is already in progress.
+// R4 invariant: the ownership check below reads entry.session fields after
+// dropping the lock.  managerEntry.session is write-once (set at construction,
+// never mutated); reading OwnerOperatorID() / IsClosed() off the stable pointer
+// is safe without holding the lock.  See IsOwner for the full explanation.
 func (m *Manager) Send(conversationID, ownerOperatorID string, frame []byte) error {
 	m.mu.Lock()
 	entry, ok := m.entries[conversationID]

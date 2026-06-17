@@ -15,6 +15,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/authsession"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/interactive"
+	"github.com/bakw00ds/yakos/internal/interactive/interactivetest"
 	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/userstore"
 	"github.com/bakw00ds/yakos/internal/workflow"
@@ -364,7 +365,7 @@ func SetInteractiveMgrNilForTest(s *Server) {
 // non-nil, making it suitable for testing that the factory pointer is wired
 // into chatHandlers by Config.SDKEngineFactory.
 func FakeSDKEngineFactoryForTest() *interactive.SDKEngineFactory {
-	f := interactive.FakeSDKEngineFactory()
+	f := interactivetest.FakeSDKEngineFactory()
 	return &f
 }
 

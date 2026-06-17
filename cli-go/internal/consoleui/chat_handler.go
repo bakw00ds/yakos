@@ -66,6 +66,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os/exec"
@@ -1486,18 +1487,22 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 //     ask_user_question (unknown options → 400).
 //   - multiSelect is enforced: at most 1 answer for single-select questions.
 //   - response and answers are size-bounded to dispatch.MaxTaskBytes.
+//   - questionsJSON is NOT accepted from the client; the server-recorded value
+//     from pendingQuestionStore is always used (forged-answer prevention).
 //
 // Idempotency-Key: not declared — each answer is one-time-use by construction
 // (the pending entry is cleared on acceptance; retrying returns 409).
 type AnswerRequest struct {
-	ConversationID string            `json:"conversationId"`
-	OperatorID     string            `json:"operatorId"`
-	SessionID      string            `json:"sessionId,omitempty"`
-	ToolUseID      string            `json:"toolUseId"`
-	Answers        map[string]string `json:"answers"` // question text → chosen option label
-	Response       string            `json:"response,omitempty"`
-	AnnotationsJSON string           `json:"annotations,omitempty"`
-	QuestionsJSON  string            `json:"questions,omitempty"` // echoed back to engine
+	ConversationID  string            `json:"conversationId"`
+	OperatorID      string            `json:"operatorId"`
+	SessionID       string            `json:"sessionId,omitempty"`
+	ToolUseID       string            `json:"toolUseId"`
+	Answers         map[string]string `json:"answers"` // question text → chosen option label
+	Response        string            `json:"response,omitempty"`
+	AnnotationsJSON string            `json:"annotations,omitempty"`
+	// QuestionsJSON is intentionally absent: the server always uses the value
+	// recorded by pendingQuestionStore when the ask_user_question SSE was emitted.
+	// Clients cannot substitute this value.
 }
 
 // handleChatAnswer delivers the operator's answer to an AskUserQuestion tool call.
@@ -1522,8 +1527,9 @@ func (ch *chatHandlers) handleChatAnswer(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// R2: cap request body before decoding to prevent memory exhaustion.
 	var req AnswerRequest
-	dec := json.NewDecoder(r.Body)
+	dec := json.NewDecoder(io.LimitReader(r.Body, int64(dispatch.MaxTaskBytes)+1))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -1552,10 +1558,21 @@ func (ch *chatHandlers) handleChatAnswer(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// Size-bound response (same limit as task text).
+	// R2: Size-bound all client-supplied answer fields forwarded to the sidecar.
 	if len(req.Response) > dispatch.MaxTaskBytes {
-		http.Error(w, fmt.Sprintf("response exceeds maximum size (%d bytes; limit %d)",
-			len(req.Response), dispatch.MaxTaskBytes), http.StatusBadRequest)
+		http.Error(w, "request body too large", http.StatusBadRequest)
+		return
+	}
+	if len(req.AnnotationsJSON) > dispatch.MaxTaskBytes {
+		http.Error(w, "request body too large", http.StatusBadRequest)
+		return
+	}
+	var answersTotal int
+	for _, v := range req.Answers {
+		answersTotal += len(v)
+	}
+	if answersTotal > dispatch.MaxTaskBytes {
+		http.Error(w, "request body too large", http.StatusBadRequest)
 		return
 	}
 
@@ -1576,6 +1593,21 @@ func (ch *chatHandlers) handleChatAnswer(w http.ResponseWriter, r *http.Request)
 		effectiveOperatorID = req.OperatorID
 	}
 
+	// R3: Ownership check BEFORE consuming the pending entry.
+	//
+	// A non-owner attempt must not burn the legitimate owner's pending question.
+	// Check that a live session exists and that effectiveOperatorID is its owner
+	// before calling ValidateAndConsume (which marks the question consumed).
+	exists, owned := ch.interactiveMgr.IsOwner(req.ConversationID, effectiveOperatorID)
+	if !exists {
+		http.Error(w, "no live session for this conversationId", http.StatusNotFound)
+		return
+	}
+	if !owned {
+		http.Error(w, "forbidden: session owned by different operator", http.StatusForbidden)
+		return
+	}
+
 	// --- Forged-answer prevention: validate toolUseID + option labels ---
 	// ValidateAndConsume checks:
 	//   1. A pending question exists for this conversationID.
@@ -1583,6 +1615,7 @@ func (ch *chatHandlers) handleChatAnswer(w http.ResponseWriter, r *http.Request)
 	//   3. Chosen option labels/keys are among those declared (unknown → 400).
 	//   4. multiSelect enforcement (>1 answer on single-select → 400).
 	// On success it clears the pending entry (single-use) and returns questionsJSON.
+	// questionsJSON is ALWAYS from server-recorded state; the client cannot supply it.
 	if ch.pendingQuestions == nil {
 		// Safety: pendingQuestions is always set by New(); this guard is defensive.
 		http.Error(w, "answer service not configured", http.StatusServiceUnavailable)
@@ -1608,12 +1641,9 @@ func (ch *chatHandlers) handleChatAnswer(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Allow the caller to override questionsJSON (forwarded verbatim to the engine).
-	if req.QuestionsJSON != "" {
-		questionsJSON = req.QuestionsJSON
-	}
-
-	// --- Owner scope check + forward answer to engine ---
+	// --- Forward answer to engine ---
+	// questionsJSON is the server-recorded value from pendingQuestionStore; never
+	// overridden by anything from the client request (R1).
 	answer := interactive.QuestionAnswer{
 		Answers:         req.Answers,
 		Response:        req.Response,

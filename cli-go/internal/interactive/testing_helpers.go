@@ -1,18 +1,20 @@
 package interactive
 
-// testing_helpers.go — exported test helpers for the interactive package.
+// testing_helpers.go — exported test seams for the interactive package.
 //
-// These functions are intended for use in external test packages that need to
-// inject fake engines or factories without going through the real EnsureSDK /
-// Ensure lifecycle (which requires real subprocesses).
+// WARNING: These functions ARE compiled into production binaries.  They exist
+// in a non-_test.go file because they must access unexported Manager fields
+// (mu, entries, cap) to inject fake engines, and Go does not allow external
+// _test.go files to access unexported symbols.  Moving them to _test.go files
+// within this package would make them inaccessible to external test packages
+// such as consoleui_test.
 //
-// They are NOT compiled into production binaries because production code never
-// imports testing helper files.  However, they ARE exported symbols (not in
-// _test.go files) so that external test packages (e.g. consoleui_test) can
-// import and call them.
+// The exported symbols here (ManagerInjectForTest, FakeSDKEngineFactory) are
+// test-only seams by convention and naming.  Production code must not call
+// them.  A future refactor may replace them with a functional-options injection
+// API on Manager so they can be removed from the production binary.
 //
-// Convention: functions named *ForTest or *InjectForTest are test helpers.
-// Do not call them from production code.
+// Do not call these functions from production code.
 
 import "errors"
 

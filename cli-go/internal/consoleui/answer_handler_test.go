@@ -31,6 +31,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/interactive"
+	"github.com/bakw00ds/yakos/internal/interactive/interactivetest"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
@@ -93,7 +94,7 @@ func newAnswerTestServer(t *testing.T, convID, ownerID string, answerErr error) 
 
 	// Register a fake engine so AnswerQuestion has something to call.
 	eng := newFakeAnswerEngine(convID, ownerID, answerErr)
-	if err := interactive.ManagerInjectForTest(mgr, convID, eng); err != nil {
+	if err := interactivetest.ManagerInjectForTest(mgr, convID, eng); err != nil {
 		t.Fatalf("inject engine: %v", err)
 	}
 
@@ -226,7 +227,7 @@ func TestChatAnswer_UnknownOption_400(t *testing.T) {
 	t.Cleanup(mgr.Stop)
 
 	eng := newFakeAnswerEngine("conv-option", "alice", nil)
-	if err := interactive.ManagerInjectForTest(mgr, "conv-option", eng); err != nil {
+	if err := interactivetest.ManagerInjectForTest(mgr, "conv-option", eng); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 
@@ -262,7 +263,14 @@ func TestChatAnswer_UnknownOption_400(t *testing.T) {
 	}
 }
 
-// TestChatAnswer_NonOwner_403 verifies that a non-owner gets 403.
+// TestChatAnswer_NonOwner_403 verifies that a non-owner gets 403 AND that the
+// pending question is NOT consumed by the rejected attempt (R3 fix).
+//
+// Before R3 the handler called ValidateAndConsume BEFORE the ownership check,
+// so a non-owner attempt would burn the legitimate owner's pending entry and
+// the owner's subsequent answer would return 409 (session stuck until timeout).
+// After R3 the ownership check precedes ValidateAndConsume; a rejected attempt
+// leaves the pending entry intact so the real owner can still answer.
 func TestChatAnswer_NonOwner_403(t *testing.T) {
 	ts, tok, _ := newAnswerTestServer(t, "conv-nonowner", "alice", nil)
 
@@ -273,21 +281,23 @@ func TestChatAnswer_NonOwner_403(t *testing.T) {
 		"toolUseId":      "tool-abc",
 		"answers":        map[string]string{},
 	})
-	defer resp.Body.Close()
-	// The pending question check comes BEFORE the owner check; mismatch gives 404.
-	// We need to set a pending for this conv owned by alice's engine.
-	// Since "bob" passes pending check (tool-abc matches), but engine.AnswerQuestion
-	// is called with ErrOwnerConflict from the manager, we expect 403.
-	// However ValidateAndConsume clears the pending on success, so if 403 comes
-	// from the manager AnswerQuestion, the status should be 403.
-	//
-	// Actually: the pending check happens first and clears on pass; then manager
-	// AnswerQuestion returns ErrOwnerConflict → 403.
-	// But for "bob" the pending was cleared! Subsequent tests for replay would
-	// see 404. This is acceptable: the pending is single-use regardless of auth
-	// outcome. The key invariant here is 403 on non-owner.
+	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("non-owner: expected 403, got %d", resp.StatusCode)
+		t.Fatalf("non-owner: expected 403, got %d", resp.StatusCode)
+	}
+
+	// R3 assertion: after a non-owner 403, the real owner MUST still succeed.
+	// The pending entry must NOT have been consumed by the rejected attempt.
+	resp2 := doAnswerRequest(t, ts, tok, map[string]interface{}{
+		"conversationId": "conv-nonowner",
+		"operatorId":     "alice",
+		"toolUseId":      "tool-abc",
+		"answers":        map[string]string{},
+	})
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusAccepted {
+		t.Errorf("owner after non-owner rejection: expected 202, got %d (pending was consumed by rejected attempt — R3 regression)",
+			resp2.StatusCode)
 	}
 }
 
@@ -308,8 +318,9 @@ func TestChatAnswer_CLIEngine_501(t *testing.T) {
 }
 
 // TestChatAnswer_NoSession_404 verifies that /api/chat/answer returns 404 when
-// no live session exists.  The pending question check fires first and returns
-// 404 when there is no pending question for the conversation.
+// no live session exists.  After the R3 fix, the ownership check (IsOwner)
+// fires before ValidateAndConsume, so the 404 now comes from the manager
+// reporting no live session rather than from the pending-question store.
 func TestChatAnswer_NoSession_404(t *testing.T) {
 	stateDir := t.TempDir()
 	workDir := t.TempDir()
@@ -341,7 +352,8 @@ func TestChatAnswer_NoSession_404(t *testing.T) {
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
-	// No pending question set → 404 from pending store (not from manager).
+	// No session in manager → 404 from IsOwner check (owner check precedes
+	// ValidateAndConsume after the R3 fix).
 	resp := doAnswerRequest(t, ts, tok, map[string]interface{}{
 		"conversationId": "conv-no-session",
 		"operatorId":     "alice",

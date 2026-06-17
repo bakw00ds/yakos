@@ -213,7 +213,17 @@ func validateAnswers(questions []parsedQuestion, answers map[string]string) erro
 		}
 	}
 
-	// Count answers per question (for multiSelect enforcement).
+	// Validate each answer's chosen option.
+	//
+	// R6 (multiSelect note): answers is map[string]string, so JSON decoding
+	// guarantees at most one value per question-text key.  The answerCounts
+	// counter below can never exceed 1, making the "> 1" multiSelect check dead.
+	// True multi-select support requires changing the wire type to
+	// map[string][]string (AnswerRequest.Answers, QuestionAnswer.Answers, the
+	// sdk_engine serialiser, and all tests) — that change is deferred as a
+	// follow-up to avoid broad ripple in this security-gate PR.  The current
+	// map[string]string type implicitly enforces single-select on the wire;
+	// the multiSelect=true path is therefore partially unimplemented.
 	answerCounts := make(map[string]int, len(answers))
 	for questionText, chosenLabel := range answers {
 		as, exists := byText[questionText]
@@ -230,7 +240,10 @@ func validateAnswers(questions []parsedQuestion, answers map[string]string) erro
 			}
 		}
 		answerCounts[questionText]++
-		// multiSelect enforcement: >1 answer for a single-select question is invalid.
+		// Dead check: answerCounts[questionText] can never exceed 1 because
+		// answers is map[string]string (see R6 note above).  Kept for
+		// documentation intent and to make the enforcement live automatically
+		// if the wire type is later upgraded to map[string][]string.
 		if !as.multiSelect && answerCounts[questionText] > 1 {
 			return fmt.Errorf("%w: question %q", errPendingMultiSelectViolation, questionText)
 		}
