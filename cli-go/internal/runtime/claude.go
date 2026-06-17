@@ -92,6 +92,14 @@ func (a *ClaudeAdapter) ExecCmd(ctx context.Context, req DispatchRequest) *exec.
 
 	cmd := exec.CommandContext(ctx, "claude", args...) //nolint:gosec
 	cmd.Env = buildEnv(req)
+	// WorkDirOverride redirects the subprocess into an isolated worktree (IDE
+	// Phase 3 diff-mode). When set, cmd.Dir is the worktree path instead of
+	// the default (inherited from the daemon process). Project still identifies
+	// the canonical source of truth for agent composition; WorkDirOverride is
+	// where the agent actually reads/writes files.
+	if req.WorkDirOverride != "" {
+		cmd.Dir = req.WorkDirOverride
+	}
 	return cmd
 }
 
@@ -173,6 +181,9 @@ func (a *ClaudeAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest
 
 	cmd := exec.CommandContext(ctx, "claude", args...) //nolint:gosec
 	cmd.Env = buildEnvChat(req)
+	if req.WorkDirOverride != "" {
+		cmd.Dir = req.WorkDirOverride
+	}
 	return cmd
 }
 
@@ -550,6 +561,11 @@ type ChatDispatchRequest struct {
 
 	// AllowRoot enables IS_SANDBOX=1 in the subprocess env (PR #17).
 	AllowRoot bool
+
+	// WorkDirOverride, when non-empty, sets cmd.Dir on the subprocess instead
+	// of the default (inherited from the daemon process). Used by IDE Phase 3
+	// diff-mode to run the agent in an isolated git worktree.
+	WorkDirOverride string
 }
 
 // buildEnvChat constructs the subprocess environment for unframed chat dispatch.

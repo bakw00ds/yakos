@@ -112,6 +112,15 @@ type Params struct {
 	// today's loopback behavior as an explicit NO-OP.
 	ResolvedIdentity IdentityCarrier
 
+	// WorkDirOverride, when non-empty, overrides the subprocess working
+	// directory for this dispatch. It is forwarded directly into
+	// Request.WorkDirOverride and from there into the runtime adapter's
+	// cmd.Dir. This field MUST be set only by trusted server-side code
+	// (e.g. the IDE diff handler after validating the path against a
+	// Manager-allocated worktree). It must never be derived from a client
+	// request body.
+	WorkDirOverride string
+
 	// isMCPStamped signals that this Params was built by the MCP transport
 	// layer, not by a human-facing transport (gRPC/REST/JSON-RPC/console).
 	// Only the MCP transport sets this to true; it is not derivable from the
@@ -273,16 +282,17 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 	// ConversationID happens inside dispatch.Run (preserved for legacy callers).
 
 	req := Request{
-		AgentName:      p.Agent,
-		Task:           p.Task,
-		Project:        project,
-		Runtime:        p.Runtime,
-		Model:          p.Model,
-		YakosRoot:      yakosRoot,
-		Timeout:        p.Timeout,
-		OperatorID:     operatorID,
-		ConversationID: p.ConversationID,
-		SessionID:      p.SessionID,
+		AgentName:       p.Agent,
+		Task:            p.Task,
+		Project:         project,
+		Runtime:         p.Runtime,
+		Model:           p.Model,
+		YakosRoot:       yakosRoot,
+		Timeout:         p.Timeout,
+		OperatorID:      operatorID,
+		ConversationID:  p.ConversationID,
+		SessionID:       p.SessionID,
+		WorkDirOverride: p.WorkDirOverride,
 	}
 
 	// --- Acquire governor slot ---

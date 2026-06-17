@@ -37,6 +37,9 @@ func (a *AgyAdapter) ExecCmd(ctx context.Context, req DispatchRequest) *exec.Cmd
 
 	cmd := exec.CommandContext(ctx, "agy", args...) //nolint:gosec
 	cmd.Env = buildEnv(req)
+	if req.WorkDirOverride != "" {
+		cmd.Dir = req.WorkDirOverride
+	}
 	return cmd
 }
 
@@ -69,6 +72,9 @@ func (a *AgyAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *
 		ModelOverride: req.ModelOverride,
 		AllowRoot:     req.AllowRoot,
 	})
+	if req.WorkDirOverride != "" {
+		cmd.Dir = req.WorkDirOverride
+	}
 	return cmd
 }
 

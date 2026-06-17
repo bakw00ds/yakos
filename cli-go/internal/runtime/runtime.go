@@ -48,6 +48,11 @@ type DispatchRequest struct {
 	// Timeout is the maximum time for the dispatch (seconds). 0 means use
 	// the adapter's default (600s).
 	Timeout int
+
+	// WorkDirOverride, when non-empty, sets cmd.Dir on the subprocess instead
+	// of Project. Set exclusively by server-side code (IDE worktree path);
+	// never derived from client request bodies.
+	WorkDirOverride string
 }
 
 // DispatchResult captures the outcome of a runtime dispatch call. The stdout

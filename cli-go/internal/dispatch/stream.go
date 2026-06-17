@@ -260,18 +260,19 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 	}
 
 	req := Request{
-		AgentName:      p.Agent,
-		Task:           p.Task,
-		Project:        project,
-		Runtime:        runtimeName,
-		Model:          p.Model,
-		YakosRoot:      yakosRoot,
-		Timeout:        p.Timeout,
-		OperatorID:     operatorID,
-		ConversationID: p.ConversationID,
-		SessionID:      p.SessionID,
-		ModelChosenBy:  modelChosenBy,
-		ModelResolved:  modelResolved,
+		AgentName:       p.Agent,
+		Task:            p.Task,
+		Project:         project,
+		Runtime:         runtimeName,
+		Model:           p.Model,
+		YakosRoot:       yakosRoot,
+		Timeout:         p.Timeout,
+		OperatorID:      operatorID,
+		ConversationID:  p.ConversationID,
+		SessionID:       p.SessionID,
+		ModelChosenBy:   modelChosenBy,
+		ModelResolved:   modelResolved,
+		WorkDirOverride: p.WorkDirOverride,
 	}
 
 	chatReq := runtime.ChatDispatchRequest{
@@ -279,6 +280,7 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		UserText:          p.Task,
 		AgentSystemPrompt: targetAgent.Prompt,
 		ModelOverride:     modelResolved,
+		WorkDirOverride:   p.WorkDirOverride,
 		// AllowRoot is not plumbed through Params (CLI-only flag); defaults to
 		// false for console/gRPC-originated streaming dispatches.
 	}
