@@ -1544,7 +1544,227 @@
           ideRefreshGitStatus();
         }
       }
+    } else if (ev.type === 'ask_user_question') {
+      // P2d: interactive question widget.
+      // Owner-private: only the session owner receives this event type (enforced
+      // by ChatHub.Route).  Rendered across ALL panes in the delivery set so
+      // both the Chat pane and any IDE mirror pane show the widget.
+      _handleAskUserQuestionEvent(ev, paneId, pane);
     }
+  }
+
+  // ---- AskUserQuestion SSE handler -------------------------------------------
+  //
+  // Receives an ask_user_question event and appends an interactive widget
+  // message block to the pane.  The message's form state (selections, custom
+  // text, notes) is stored on the message object itself so it survives
+  // renderPaneMessages re-renders while streaming tokens are still arriving.
+  //
+  // Deduplication: if a pending widget with the same toolUseId already exists
+  // (e.g. from an SSE reconnect), skip adding a duplicate.
+  //
+  // The branch is guarded by ev.type === 'ask_user_question' in the caller
+  // (_handleSSEEventForPane).  Only the session owner receives this event type
+  // (ChatHub.Route enforces owner-private delivery).
+
+  // askWidgetPanes tracks which paneIds have an unanswered widget keyed by
+  // toolUseId.  Used by _markAskWidgetAnswered to update every pane that
+  // received the same question (fan-out dedup on the answer path).
+  // Shape: Map<toolUseId, Set<paneId>>
+  var _askWidgetPanes = new Map();
+
+  function _handleAskUserQuestionEvent(ev, paneId, pane) {
+    var toolUseId = ev.ask_tool_use_id || '';
+    if (!toolUseId) return; // malformed — skip
+
+    // Dedup: if this pane already has a widget for this toolUseId, skip.
+    for (var qi = 0; qi < pane.messages.length; qi++) {
+      if (pane.messages[qi].role === 'ask_user_question' &&
+          pane.messages[qi].toolUseId === toolUseId) {
+        return;
+      }
+    }
+
+    // Parse ask_questions_json defensively.
+    var questions = [];
+    try {
+      var parsed = JSON.parse(ev.ask_questions_json || '[]');
+      if (Array.isArray(parsed)) questions = parsed;
+    } catch (_) { /* fallback: empty array → free-text fallback below */ }
+
+    // Per-question state: selections and custom text stored on the msg object.
+    // Shape: { [questionText]: { selectedLabel: string, customText: string } }
+    // '_fallback' is always initialized so the fallback free-text path and the
+    // structured-question path are consistent (no lazy creation mid-interaction).
+    var selState = { '_fallback': { selectedLabel: '', customText: '' } };
+    for (var i = 0; i < questions.length; i++) {
+      selState[questions[i].question || String(i)] = { selectedLabel: '', customText: '' };
+    }
+
+    var msg = {
+      role: 'ask_user_question',
+      toolUseId: toolUseId,
+      conversationId: ev.conversation_id || '',
+      questions: questions,
+      selState: selState,
+      notes: '',
+      answered: false,      // true after successful POST
+      answerSummary: null,  // human-readable summary on answered
+      locked: false,        // true on 404/409/403 (no-longer-pending)
+      lockedReason: null,   // muted message on locked
+      submitting: false,    // true while POST is in flight
+      submitError: null,    // inline error string on network failure
+      ts: ev.ts,
+      sessionId: ev.session_id || '',
+    };
+
+    pane.messages.push(msg);
+
+    // Track which panes have this widget (for fan-out answer marking).
+    if (!_askWidgetPanes.has(toolUseId)) _askWidgetPanes.set(toolUseId, new Set());
+    _askWidgetPanes.get(toolUseId).add(paneId);
+
+    renderPaneMessages(paneId);
+    if (pane.autoScroll) scrollPaneToBottom(paneId);
+  }
+
+  // _markAskWidgetAnswered updates every pane widget with the given toolUseId
+  // to the answered/locked state, then re-renders.  Called after a successful
+  // POST /api/chat/answer (or terminal error).
+  function _markAskWidgetAnswered(toolUseId, answered, summary, locked, lockedReason) {
+    var paneSet = _askWidgetPanes.get(toolUseId);
+    if (!paneSet) return;
+    for (var pid of paneSet) {
+      var p = chatPanes.get(pid);
+      if (!p) continue;
+      for (var mi = 0; mi < p.messages.length; mi++) {
+        var m = p.messages[mi];
+        if (m.role === 'ask_user_question' && m.toolUseId === toolUseId) {
+          m.answered = !!answered;
+          m.answerSummary = summary || null;
+          m.locked = !!locked;
+          m.lockedReason = lockedReason || null;
+          m.submitting = false;
+          m.submitError = null;
+        }
+      }
+      renderPaneMessages(pid);
+    }
+    // Clean up the tracking entry so we don't accumulate stale pane refs.
+    _askWidgetPanes.delete(toolUseId);
+  }
+
+  // _submitAskAnswer reads the current msg state and POSTs to /api/chat/answer.
+  // paneId is needed to update submitting state and trigger re-render.
+  function _submitAskAnswer(msg, paneId) {
+    if (msg.submitting || msg.answered || msg.locked) return;
+
+    // Build answers map: question.question → selectedLabel OR customText.
+    // For multiSelect: join comma-separated selected labels (wire format is
+    // map[string]string; true multi-value is a backend follow-up — P2c contract).
+    var answersMap = {};
+    var qs = Array.isArray(msg.questions) ? msg.questions : [];
+    for (var i = 0; i < qs.length; i++) {
+      var q = qs[i];
+      var key = q.question || String(i);
+      var st = (msg.selState && msg.selState[key]) || { selectedLabel: '', customText: '' };
+      var val = st.customText.trim() || st.selectedLabel;
+      answersMap[key] = val;
+    }
+
+    // Fallback path: ask_questions_json was empty or unparseable.
+    // The user's answer lives in selState['_fallback'].customText.
+    // Send it as body.response (the backend's free-text notes field) so the
+    // agent receives something meaningful.  If the user also typed notes,
+    // combine: fallback answer first, then a separator, then the notes.
+    var isFallback = qs.length === 0;
+    var fallbackAnswer = isFallback
+      ? ((msg.selState && msg.selState['_fallback'] && msg.selState['_fallback'].customText) || '').trim()
+      : '';
+    var responseField;
+    if (isFallback) {
+      // fallbackAnswer is guaranteed non-empty here (updateSubmitBtn gated on it).
+      responseField = msg.notes ? fallbackAnswer + '\n\n' + msg.notes : fallbackAnswer;
+    } else {
+      responseField = msg.notes || '';
+    }
+
+    var body = {
+      conversationId: msg.conversationId,
+      operatorId: getChatOperatorId(),
+      toolUseId: msg.toolUseId,
+      answers: answersMap,
+      response: responseField,
+      // annotations: omitted — the Go field (AnnotationsJSON string) expects a
+      // JSON-encoded string, not an object.  Empty annotations = no field needed.
+    };
+
+    // Mark submitting.
+    msg.submitting = true;
+    msg.submitError = null;
+    var p = chatPanes.get(paneId);
+    if (p) renderPaneMessages(paneId);
+
+    apiFetch('POST', '/api/chat/answer', body).then(function(resp) {
+      if (resp.status === 202 || resp.status === 200) {
+        // Build a human-readable summary for the answered state.
+        var summaryParts = [];
+        if (isFallback) {
+          // Fallback path: the meaningful content is in fallbackAnswer / responseField.
+          if (fallbackAnswer) summaryParts.push(fallbackAnswer);
+        } else {
+          var ks = Object.keys(answersMap);
+          for (var ki = 0; ki < ks.length; ki++) {
+            if (answersMap[ks[ki]]) summaryParts.push(answersMap[ks[ki]]);
+          }
+        }
+        var summary = summaryParts.join('; ') || '(submitted)';
+        if (!isFallback && msg.notes) summary += ' — notes: ' + msg.notes.slice(0, 80);
+        _markAskWidgetAnswered(msg.toolUseId, true, summary, false, null);
+        return;
+      }
+      // Terminal errors: lock the widget so it can't be resubmitted.
+      if (resp.status === 404) {
+        _markAskWidgetAnswered(msg.toolUseId, false, null, true,
+          'This question is no longer awaiting an answer.');
+        return;
+      }
+      if (resp.status === 409) {
+        _markAskWidgetAnswered(msg.toolUseId, false, null, true,
+          'This question has already been answered.');
+        return;
+      }
+      if (resp.status === 403) {
+        _markAskWidgetAnswered(msg.toolUseId, false, null, true,
+          'Only the session owner can answer this question.');
+        return;
+      }
+      if (resp.status === 503) {
+        _markAskWidgetAnswered(msg.toolUseId, false, null, true,
+          'Structured questions are not enabled on this server.');
+        return;
+      }
+      if (resp.status === 501) {
+        _markAskWidgetAnswered(msg.toolUseId, false, null, true,
+          'This session does not support structured questions (use structuredQuestions:true in dispatch).');
+        return;
+      }
+      // 400 or unexpected: surface inline retry.
+      return resp.text().then(function(errText) {
+        msg.submitting = false;
+        msg.submitError = resp.status === 400
+          ? 'Couldn’t submit answer (invalid request).'
+          : 'Submit failed (' + resp.status + '). Try again.';
+        var pRetry = chatPanes.get(paneId);
+        if (pRetry) renderPaneMessages(paneId);
+      });
+    }).catch(function() {
+      // Network error: inline retry (re-enable submit).
+      msg.submitting = false;
+      msg.submitError = 'Network error — check your connection and try again.';
+      var pErr = chatPanes.get(paneId);
+      if (pErr) renderPaneMessages(paneId);
+    });
   }
 
   // ---- TodoWrite parser -------------------------------------------------------
@@ -2337,7 +2557,7 @@
     msgsEl.appendChild(indicator);
 
     for (const msg of pane.messages) {
-      msgsEl.appendChild(buildMessageElement(msg, pane));
+      msgsEl.appendChild(buildMessageElement(msg, pane, paneId));
     }
 
     // Streaming shimmer line (if last message is assistant or thinking and streaming).
@@ -2350,7 +2570,7 @@
     }
   }
 
-  function buildMessageElement(msg, pane) {
+  function buildMessageElement(msg, pane, paneId) {
     const el = document.createElement('div');
 
     if (msg.role === 'user') {
@@ -2590,6 +2810,269 @@
           '</summary>' +
           bashBodyHtml +
         '</details>';
+    } else if (msg.role === 'ask_user_question') {
+      // P2d: AskUserQuestion widget.
+      // XSS discipline: ALL question text, headers, labels, descriptions are
+      // agent-supplied (UNTRUSTED).  Every string goes through esc() before
+      // DOM insertion.  No innerHTML interpolation without esc().
+      el.className = 'chat-msg chat-msg-ask-question';
+
+      var qs2 = Array.isArray(msg.questions) ? msg.questions : [];
+
+      if (msg.answered) {
+        // Answered state: compact read-only summary.
+        el.innerHTML =
+          '<div class="ask-answered-header">' +
+            '<span class="ask-answered-icon" aria-hidden="true">&#x2714;</span>' +
+            '<span class="ask-answered-label">Answered</span>' +
+          '</div>' +
+          '<div class="ask-answered-summary">' + esc(msg.answerSummary || '(submitted)') + '</div>';
+        return el;
+      }
+
+      if (msg.locked) {
+        // Locked/expired state: muted no-op.
+        el.innerHTML =
+          '<div class="ask-locked-notice" aria-label="Question no longer active">' +
+            esc(msg.lockedReason || 'This question is no longer awaiting an answer.') +
+          '</div>';
+        return el;
+      }
+
+      // Active widget: build form using DOM methods (not innerHTML) so no
+      // string-interpolation XSS risk for user-typed content in state fields.
+      var formEl = document.createElement('div');
+      formEl.className = 'ask-widget-form';
+      formEl.setAttribute('role', 'form');
+      formEl.setAttribute('aria-label', 'Answer question');
+
+      // Header bar.
+      var headerEl = document.createElement('div');
+      headerEl.className = 'ask-widget-header';
+      var headerIcon = document.createElement('span');
+      headerIcon.className = 'ask-widget-icon';
+      headerIcon.setAttribute('aria-hidden', 'true');
+      headerIcon.textContent = '❓'; // ❓
+      var headerLabel = document.createElement('span');
+      headerLabel.className = 'ask-widget-label';
+      headerLabel.textContent = 'Question from agent';
+      var headerTime = document.createElement('span');
+      headerTime.className = 'chat-msg-time';
+      headerTime.textContent = formatTime(msg.ts);
+      headerEl.appendChild(headerIcon);
+      headerEl.appendChild(headerLabel);
+      headerEl.appendChild(headerTime);
+      formEl.appendChild(headerEl);
+
+      // Fallback: if no questions parsed, render a single free-text field.
+      var hasFallback = qs2.length === 0;
+      if (hasFallback) {
+        var fbDiv = document.createElement('div');
+        fbDiv.className = 'ask-question-block';
+        var fbLabel = document.createElement('div');
+        fbLabel.className = 'ask-question-text';
+        fbLabel.textContent = 'Agent question (could not parse structured format)';
+        var fbInput = document.createElement('input');
+        fbInput.type = 'text';
+        fbInput.className = 'ask-custom-input';
+        fbInput.placeholder = 'Your answer…';
+        fbInput.setAttribute('aria-label', 'Answer');
+        fbInput.disabled = !!msg.submitting;
+        // Restore in-progress value from msg state.
+        var fbState = (msg.selState && msg.selState['_fallback']) || { selectedLabel: '', customText: '' };
+        fbInput.value = fbState.customText;
+        fbInput.addEventListener('input', function() {
+          if (!msg.selState) msg.selState = {};
+          if (!msg.selState['_fallback']) msg.selState['_fallback'] = { selectedLabel: '', customText: '' };
+          msg.selState['_fallback'].customText = fbInput.value;
+          updateSubmitBtn();
+        });
+        fbDiv.appendChild(fbLabel);
+        fbDiv.appendChild(fbInput);
+        formEl.appendChild(fbDiv);
+      }
+
+      // Per-question blocks.
+      for (var qi2 = 0; qi2 < qs2.length; qi2++) {
+        (function(q, qIdx) {
+          var qKey = q.question || String(qIdx);
+          if (!msg.selState[qKey]) msg.selState[qKey] = { selectedLabel: '', customText: '' };
+          var qState = msg.selState[qKey];
+
+          var qBlock = document.createElement('div');
+          qBlock.className = 'ask-question-block';
+
+          // Optional header label above the question text.
+          if (q.header) {
+            var qHeaderEl = document.createElement('div');
+            qHeaderEl.className = 'ask-question-header-label';
+            qHeaderEl.textContent = q.header;
+            qBlock.appendChild(qHeaderEl);
+          }
+
+          var qTextEl = document.createElement('div');
+          qTextEl.className = 'ask-question-text';
+          qTextEl.textContent = q.question || '';
+          qBlock.appendChild(qTextEl);
+
+          var opts = Array.isArray(q.options) ? q.options : [];
+          var isMulti = !!q.multiSelect;
+
+          // Render options as radio (single) or checkbox (multi).
+          if (opts.length > 0) {
+            var optsList = document.createElement('div');
+            optsList.className = 'ask-options-list';
+            optsList.setAttribute('role', isMulti ? 'group' : 'radiogroup');
+            optsList.setAttribute('aria-label', 'Options for: ' + (q.question || ''));
+
+            for (var oi = 0; oi < opts.length; oi++) {
+              (function(opt) {
+                var optRow = document.createElement('label');
+                optRow.className = 'ask-option-row';
+
+                var inp = document.createElement('input');
+                inp.type = isMulti ? 'checkbox' : 'radio';
+                inp.name = 'ask-q-' + msg.toolUseId + '-' + qIdx;
+                inp.value = opt.label || '';
+                inp.className = 'ask-option-input';
+                inp.disabled = !!msg.submitting;
+
+                // Restore state.
+                if (isMulti) {
+                  // For multiSelect, selectedLabel is comma-joined.
+                  var selected = qState.selectedLabel ? qState.selectedLabel.split(',').map(function(s) { return s.trim(); }) : [];
+                  inp.checked = selected.indexOf(opt.label) >= 0;
+                } else {
+                  inp.checked = !qState.customText && qState.selectedLabel === opt.label;
+                }
+
+                inp.addEventListener('change', function() {
+                  if (isMulti) {
+                    // Rebuild comma list from all checked boxes in this group.
+                    var allCbs = optsList.querySelectorAll('input[type="checkbox"]');
+                    var checked = [];
+                    for (var ci = 0; ci < allCbs.length; ci++) {
+                      if (allCbs[ci].checked) checked.push(allCbs[ci].value);
+                    }
+                    qState.selectedLabel = checked.join(', ');
+                  } else {
+                    qState.selectedLabel = inp.value;
+                    // Custom text overrides selection; clear it when radio chosen.
+                    if (qState.customText) {
+                      qState.customText = '';
+                      // Clear the custom input's DOM value too.
+                      var customInp = qBlock.querySelector('.ask-custom-input');
+                      if (customInp) customInp.value = '';
+                    }
+                  }
+                  updateSubmitBtn();
+                });
+
+                var optLabelSpan = document.createElement('span');
+                optLabelSpan.className = 'ask-option-label';
+                optLabelSpan.textContent = opt.label || '';
+                optRow.appendChild(inp);
+                optRow.appendChild(optLabelSpan);
+
+                if (opt.description) {
+                  var optDesc = document.createElement('span');
+                  optDesc.className = 'ask-option-desc';
+                  optDesc.textContent = opt.description;
+                  optRow.appendChild(optDesc);
+                }
+
+                optsList.appendChild(optRow);
+              }(opts[oi]));
+            }
+            qBlock.appendChild(optsList);
+          }
+
+          // "Add your own option" free-text input.
+          var customLabel = document.createElement('label');
+          customLabel.className = 'ask-custom-label';
+          customLabel.textContent = 'Other / type your own…';
+          var customInput = document.createElement('input');
+          customInput.type = 'text';
+          customInput.className = 'ask-custom-input';
+          customInput.placeholder = 'Custom answer…';
+          customInput.setAttribute('aria-label', 'Custom answer for: ' + (q.question || ''));
+          customInput.disabled = !!msg.submitting;
+          customInput.value = qState.customText;
+          customInput.addEventListener('input', function() {
+            qState.customText = customInput.value;
+            if (!isMulti && qState.customText) {
+              // Deselect radios when typing a custom answer.
+              qState.selectedLabel = '';
+              var radios = qBlock.querySelectorAll('input[type="radio"]');
+              for (var ri = 0; ri < radios.length; ri++) radios[ri].checked = false;
+            }
+            updateSubmitBtn();
+          });
+          customLabel.appendChild(customInput);
+          qBlock.appendChild(customLabel);
+
+          formEl.appendChild(qBlock);
+        }(qs2[qi2], qi2));
+      }
+
+      // "Add notes" textarea → maps to top-level response field.
+      var notesSection = document.createElement('div');
+      notesSection.className = 'ask-notes-section';
+      var notesLabel = document.createElement('label');
+      notesLabel.className = 'ask-notes-label';
+      notesLabel.textContent = 'Add notes (optional)';
+      var notesTextarea = document.createElement('textarea');
+      notesTextarea.className = 'ask-notes-textarea';
+      notesTextarea.placeholder = 'Additional notes for the agent…';
+      notesTextarea.setAttribute('aria-label', 'Notes');
+      notesTextarea.rows = 2;
+      notesTextarea.disabled = !!msg.submitting;
+      notesTextarea.value = msg.notes || '';
+      notesTextarea.addEventListener('input', function() {
+        msg.notes = notesTextarea.value;
+      });
+      notesLabel.appendChild(notesTextarea);
+      notesSection.appendChild(notesLabel);
+      formEl.appendChild(notesSection);
+
+      // Error message (network/400 retry path).
+      var errorEl = document.createElement('div');
+      errorEl.className = 'ask-submit-error';
+      errorEl.setAttribute('role', 'alert');
+      errorEl.style.display = msg.submitError ? '' : 'none';
+      if (msg.submitError) errorEl.textContent = msg.submitError;
+      formEl.appendChild(errorEl);
+
+      // Submit button.
+      var submitBtn = document.createElement('button');
+      submitBtn.type = 'button';
+      submitBtn.className = 'ask-submit-btn';
+      submitBtn.textContent = msg.submitting ? 'Submitting…' : 'Submit answer';
+      submitBtn.disabled = true; // enabled by updateSubmitBtn()
+      submitBtn.setAttribute('aria-label', 'Submit answer to agent');
+      submitBtn.addEventListener('click', function() {
+        _submitAskAnswer(msg, paneId);
+      });
+      formEl.appendChild(submitBtn);
+
+      // updateSubmitBtn: enable submit only when every question has a value.
+      var updateSubmitBtn = function() {
+        var ok = true;
+        if (hasFallback) {
+          var fbSt = (msg.selState && msg.selState['_fallback']) || { customText: '' };
+          if (!fbSt.customText.trim()) ok = false;
+        } else {
+          for (var qi3 = 0; qi3 < qs2.length; qi3++) {
+            var qk = qs2[qi3].question || String(qi3);
+            var s = (msg.selState && msg.selState[qk]) || { selectedLabel: '', customText: '' };
+            if (!s.selectedLabel && !s.customText.trim()) { ok = false; break; }
+          }
+        }
+        submitBtn.disabled = !ok || !!msg.submitting;
+      };
+      updateSubmitBtn();
+
+      el.appendChild(formEl);
     }
 
     return el;
