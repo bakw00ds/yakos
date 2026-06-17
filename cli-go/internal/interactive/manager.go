@@ -50,8 +50,8 @@ const (
 	// defaultIdleTimeout is how long a session may be idle before the reaper closes it.
 	defaultIdleTimeout = 15 * time.Minute
 
-	// reaperInterval is how often the idle reaper scans for stale sessions.
-	reaperInterval = 30 * time.Second
+	// defaultReaperInterval is how often the idle reaper scans for stale sessions.
+	defaultReaperInterval = 30 * time.Second
 )
 
 // ErrOwnerConflict is returned by Ensure and Send when the conversationID is
@@ -77,8 +77,9 @@ type Manager struct {
 	mu      sync.Mutex
 	entries map[string]*managerEntry // conversationID → entry
 
-	cap         int
-	idleTimeout time.Duration
+	cap            int
+	idleTimeout    time.Duration
+	reaperInterval time.Duration
 
 	// onError is called when a session's readLoop exits unexpectedly.
 	// It emits an error SSE event so the browser pane shows an error.
@@ -99,6 +100,11 @@ type ManagerConfig struct {
 	// Defaults to defaultIdleTimeout (15 min) when 0.
 	IdleTimeout time.Duration
 
+	// ReaperInterval is how often the idle reaper scans for stale sessions.
+	// Defaults to defaultReaperInterval (30s) when 0.
+	// Set to a small value in tests to speed up idle-reaper assertions.
+	ReaperInterval time.Duration
+
 	// OnError is called when a session's process crashes or exits unexpectedly.
 	// The parameters are: conversationID, sessionID, ownerOperatorID, errorMessage.
 	// Callers should route an error SSEEvent to the browser via hub.Route.
@@ -117,12 +123,17 @@ func NewManager(ctx context.Context, cfg ManagerConfig) *Manager {
 	if idleTimeout <= 0 {
 		idleTimeout = defaultIdleTimeout
 	}
+	reaperInterval := cfg.ReaperInterval
+	if reaperInterval <= 0 {
+		reaperInterval = defaultReaperInterval
+	}
 	m := &Manager{
-		entries:     make(map[string]*managerEntry),
-		cap:         cap,
-		idleTimeout: idleTimeout,
-		onError:     cfg.OnError,
-		stop:        make(chan struct{}),
+		entries:        make(map[string]*managerEntry),
+		cap:            cap,
+		idleTimeout:    idleTimeout,
+		reaperInterval: reaperInterval,
+		onError:        cfg.OnError,
+		stop:           make(chan struct{}),
 	}
 	go m.reaper(ctx)
 	return m
@@ -267,7 +278,7 @@ func (m *Manager) ActiveCount() int {
 
 // reaper scans for idle sessions and closes them.
 func (m *Manager) reaper(ctx context.Context) {
-	ticker := time.NewTicker(reaperInterval)
+	ticker := time.NewTicker(m.reaperInterval)
 	defer ticker.Stop()
 	for {
 		select {
