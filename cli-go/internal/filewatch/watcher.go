@@ -17,11 +17,22 @@
 //     any event is emitted. (Mirror of that logic; see isSecretPath below for
 //     the canonical source comment.)
 //
-// # Debounce
+// # Debounce and action coalescing
 //
 // Rapid bursts of OS events for the same path are coalesced into a single
-// event after a 100 ms quiet window. The action of the coalesced event is
-// the LAST action seen for the path within the window.
+// event after a 100 ms quiet window.  The coalesced action is determined by
+// precedence over all raw events seen during the window, not last-wins:
+//
+//  1. CREATE seen AND DELETE seen → net no-op; emit nothing (born and died in
+//     the same window).
+//  2. CREATE seen, no DELETE → emit "created" (a create followed by writes is
+//     still a creation; guards the Linux/Windows pattern of CREATE+WRITE on
+//     os.WriteFile).
+//  3. DELETE seen, no CREATE → emit "deleted".
+//  4. Only writes seen → emit "modified".
+//
+// This is platform-independent: the decision is made from the set of observed
+// fsnotify op-classes, not from a single raw event order.
 //
 // # Invariant: paths only
 //
@@ -111,8 +122,19 @@ type Watcher struct {
 	once sync.Once // guards Close
 }
 
+// pendingEvent accumulates the set of raw fsnotify op-classes observed for a
+// path during one debounce window.  The final action is resolved at flush time
+// using the precedence rules documented in the package comment.
 type pendingEvent struct {
-	action ChangeAction
+	sawCreate bool // a CREATE op was observed
+	sawDelete bool // a DELETE or RENAME op was observed
+	// sawWrite is implicit: any pending entry that exists and has neither
+	// sawCreate nor sawDelete has only writes.  Tracked separately for
+	// completeness so the flush logic is a simple four-case switch.
+	sawWrite bool
+	// absPath is the absolute filesystem path; used at flush to stat-confirm
+	// that a created file still exists before emitting "created".
+	absPath string
 }
 
 // New constructs a Watcher rooted at root. root must be an existing directory.
@@ -270,25 +292,36 @@ func (w *Watcher) handleFSEvent(ev fsnotify.Event) {
 	}
 
 	// Enqueue debounced emit.
-	w.debounce(rel, action)
+	w.debounce(rel, ev.Name, action)
 }
 
-// debounce schedules or resets a timer to emit a ChangeEvent for relpath
-// after debounceDuration of silence. Multiple calls within the window are
-// coalesced; the last action wins.
-func (w *Watcher) debounce(relPath string, action ChangeAction) {
+// debounce schedules or resets a debounce timer for relPath and accumulates
+// the observed op-class (create / delete / write) into the pending entry.
+// Multiple calls within the window do NOT last-action-win; instead each
+// op-class flag is OR'd in so the flush closure has the full picture.
+func (w *Watcher) debounce(relPath string, absPath string, action ChangeAction) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	// Update or set the pending action for this path.
-	w.pending[relPath] = pendingEvent{action: action}
+	// Accumulate op-class flags into the pending entry for this path.
+	p := w.pending[relPath]
+	p.absPath = absPath
+	switch action {
+	case ActionCreated:
+		p.sawCreate = true
+	case ActionDeleted:
+		p.sawDelete = true
+	default: // ActionModified
+		p.sawWrite = true
+	}
+	w.pending[relPath] = p
 
 	if t, exists := w.timers[relPath]; exists {
 		t.Reset(debounceDuration)
 		return
 	}
 
-	// Capture path for the closure; don't capture the map value.
+	// Capture path for the closure; don't capture the map value directly.
 	path := relPath
 	w.timers[path] = time.AfterFunc(debounceDuration, func() {
 		w.mu.Lock()
@@ -301,6 +334,31 @@ func (w *Watcher) debounce(relPath string, action ChangeAction) {
 			return
 		}
 
+		// Resolve the coalesced action using precedence rules (see package doc):
+		//  1. CREATE + DELETE in same window → net no-op.
+		//  2. CREATE only (+ optional writes) → "created" if file still exists.
+		//  3. DELETE only → "deleted".
+		//  4. Writes only → "modified".
+		var action ChangeAction
+		switch {
+		case p.sawCreate && p.sawDelete:
+			// Net no-op: file was born and died within the debounce window.
+			return
+		case p.sawCreate:
+			// CREATE followed by WRITEs is still a creation.  Stat-confirm the
+			// file still exists — it could have been deleted after the last
+			// debounce reset but before the timer fired (extremely tight race).
+			if _, err := os.Lstat(p.absPath); err != nil {
+				// File is gone; treat as net no-op.
+				return
+			}
+			action = ActionCreated
+		case p.sawDelete:
+			action = ActionDeleted
+		default:
+			action = ActionModified
+		}
+
 		// Check closeCh before attempting send.
 		select {
 		case <-w.closeCh:
@@ -311,7 +369,7 @@ func (w *Watcher) debounce(relPath string, action ChangeAction) {
 		select {
 		case w.eventCh <- ChangeEvent{
 			Path:   path,
-			Action: p.action,
+			Action: action,
 			TS:     time.Now().UTC(),
 		}:
 		case <-w.closeCh:

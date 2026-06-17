@@ -44,8 +44,15 @@ func newWatcher(t *testing.T, root string) *Watcher {
 	return w
 }
 
-// TestCreateEmitsCreated verifies that creating a file emits an "created" event
-// with a relative path and no file content.
+// TestCreateEmitsCreated verifies that creating a new file emits a "created"
+// event regardless of platform.
+//
+// Cross-platform note: on Linux (inotify) and Windows, os.WriteFile on a new
+// path emits a raw CREATE followed by one or more WRITEs.  The old last-wins
+// coalescer turned that sequence into "modified", breaking this test on CI.
+// The new coalescer uses flag accumulation + precedence: any window that
+// contains a CREATE (with or without subsequent WRITEs) and no DELETE flushes
+// as "created", so the result is deterministic on all platforms.
 func TestCreateEmitsCreated(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -66,10 +73,17 @@ func TestCreateEmitsCreated(t *testing.T) {
 	if ev.TS.IsZero() {
 		t.Error("TS is zero")
 	}
+	// Confirm no second event leaks out (the create+write pair must be a
+	// single coalesced event, not two).
+	mustNoEvent(t, w.Events(), 300*time.Millisecond)
 }
 
-// TestModifyEmitsModified verifies that writing to an existing file emits a
+// TestModifyEmitsModified verifies that writing to an EXISTING file emits a
 // "modified" event.
+//
+// The file is created before the watcher starts so no CREATE is ever observed
+// during the debounce window; only WRITEs arrive, which coalesce to "modified"
+// on all platforms.
 func TestModifyEmitsModified(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -78,11 +92,11 @@ func TestModifyEmitsModified(t *testing.T) {
 		t.Fatalf("setup WriteFile: %v", err)
 	}
 
+	// Start watcher AFTER the file exists so the initial write is not observed.
 	w := newWatcher(t, root)
 
-	// Drain any spurious create event from setup.
+	// Drain any spurious events from setup (some platforms emit on watcher add).
 	time.Sleep(200 * time.Millisecond)
-	// Flush channel.
 	for len(w.Events()) > 0 {
 		<-w.Events()
 	}
@@ -101,6 +115,9 @@ func TestModifyEmitsModified(t *testing.T) {
 }
 
 // TestDeleteEmitsDeleted verifies that removing a file emits a "deleted" event.
+//
+// The file is created before the watcher starts; the watcher sees only the
+// DELETE op, which coalesces to "deleted" on all platforms.
 func TestDeleteEmitsDeleted(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -109,6 +126,7 @@ func TestDeleteEmitsDeleted(t *testing.T) {
 		t.Fatalf("setup WriteFile: %v", err)
 	}
 
+	// Start watcher AFTER the file exists.
 	w := newWatcher(t, root)
 
 	// Drain setup events.
@@ -128,6 +146,38 @@ func TestDeleteEmitsDeleted(t *testing.T) {
 	if ev.Action != ActionDeleted {
 		t.Errorf("Action = %q; want %q", ev.Action, ActionDeleted)
 	}
+}
+
+// TestCreateThenDeleteInWindowEmitsNothing verifies that a file which is
+// created AND deleted within a single debounce window produces no event.
+//
+// This is the net-no-op rule: the coalescer sees sawCreate=true AND
+// sawDelete=true and suppresses the flush entirely.  Cross-platform: the rule
+// is based on accumulated flags, not on raw event order, so it is identical
+// on Linux, Windows, and macOS.
+func TestCreateThenDeleteInWindowEmitsNothing(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	w := newWatcher(t, root)
+
+	// Drain startup events.
+	time.Sleep(200 * time.Millisecond)
+	for len(w.Events()) > 0 {
+		<-w.Events()
+	}
+
+	// Create then immediately delete — both ops land within the 100 ms window.
+	target := filepath.Join(root, "transient.txt")
+	if err := os.WriteFile(target, []byte("ephemeral"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	// No event should arrive: the net effect is no change from the observer's
+	// perspective.  Wait well beyond the debounce window.
+	mustNoEvent(t, w.Events(), 500*time.Millisecond)
 }
 
 // TestPathsAreRelative asserts that event paths are relative to the root and
