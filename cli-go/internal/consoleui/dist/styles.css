@@ -1405,6 +1405,54 @@ html[data-theme="light"] .pane-close-btn:hover {
   margin-left: auto;
 }
 
+/* ---- Interactive toggle button (Interactive-P1) ---- */
+
+.pane-interactive-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control, 3px);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 5px;
+  transition: background var(--dur, 0.1s) var(--ease, ease),
+              color var(--dur, 0.1s) var(--ease, ease),
+              border-color var(--dur, 0.1s) var(--ease, ease);
+  flex-shrink: 0;
+}
+
+.pane-interactive-btn:hover {
+  background: rgba(255,255,255,0.06);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+html[data-theme="light"] .pane-interactive-btn:hover {
+  background: rgba(0,0,0,0.06);
+}
+
+.pane-interactive-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Active state: interactive mode is ON */
+.pane-interactive-btn.pane-interactive-active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ---- Inline pane notice (turn-in-progress, session-ended, etc.) ---- */
+
+.pane-inline-notice {
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--color-accent-dim, rgba(34, 139, 230, 0.12));
+  border-top: 1px solid var(--accent);
+  padding: 4px 10px;
+  text-align: center;
+}
+
 /* ---- Pane messages ---- */
 
 .chat-messages {
@@ -1710,7 +1758,8 @@ html[data-theme="og"] .chat-send-btn {
   .chat-send-btn,
   .pane-share-btn,
   .pane-cancel-btn,
-  .pane-close-btn {
+  .pane-close-btn,
+  .pane-interactive-btn {
     transition: none;
   }
 
