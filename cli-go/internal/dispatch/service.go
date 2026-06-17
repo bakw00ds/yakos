@@ -121,6 +121,13 @@ type Params struct {
 	// request body.
 	WorkDirOverride string
 
+	// Effort is the reasoning effort level for claude dispatches.
+	// Valid values: low, medium, high, xhigh, max.  Empty means no override
+	// (omit the --effort flag).  This field MUST be validated by the transport
+	// layer (handler) before being placed here — see ValidateEffort.
+	// Only the claude adapter acts on this field; other runtimes ignore it.
+	Effort string
+
 	// isMCPStamped signals that this Params was built by the MCP transport
 	// layer, not by a human-facing transport (gRPC/REST/JSON-RPC/console).
 	// Only the MCP transport sets this to true; it is not derivable from the
@@ -293,6 +300,7 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 		ConversationID:  p.ConversationID,
 		SessionID:       p.SessionID,
 		WorkDirOverride: p.WorkDirOverride,
+		Effort:          p.Effort,
 	}
 
 	// --- Acquire governor slot ---
@@ -331,6 +339,31 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 	}
 
 	return stdout, result, err
+}
+
+// validEffortLevels is the closed set of --effort values the claude CLI accepts.
+// Validated server-side before the value reaches subprocess argv.
+var validEffortLevels = map[string]struct{}{
+	"low":    {},
+	"medium": {},
+	"high":   {},
+	"xhigh":  {},
+	"max":    {},
+}
+
+// ValidateEffort checks that effort is either empty (meaning "no override") or
+// one of the valid level names.  Returns a descriptive error on invalid input.
+// The error message is safe to return to the caller (does not echo the value
+// verbatim — value is caller-controlled; a format string would be fine here
+// but the name list makes the constraint self-documenting).
+func ValidateEffort(effort string) error {
+	if effort == "" {
+		return nil // empty → omit flag; perfectly valid
+	}
+	if _, ok := validEffortLevels[effort]; !ok {
+		return fmt.Errorf("dispatch: invalid effort %q: must be one of low, medium, high, xhigh, max", effort)
+	}
+	return nil
 }
 
 // ValidateIdentityField is the exported wrapper around validateIdentityField.

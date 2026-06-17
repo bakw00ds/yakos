@@ -265,6 +265,12 @@ func writeSSEEvent(w http.ResponseWriter, ev SSEEvent) error {
 // flag when the workspace is not a git repo (returns 409 with a clear message)
 // or when no WorktreeManager is configured (returns 409).
 // Default: false (agent operates in the real workspace unchanged).
+//
+// Effort, when non-empty, passes --effort <level> to the claude CLI so it
+// adjusts reasoning intensity.  Valid values: low, medium, high, xhigh, max.
+// Empty string (the default) omits the flag entirely.  Invalid values return
+// 400.  This field is claude-only; for other runtimes it is accepted in the
+// body but silently ignored at the adapter level.
 type DispatchRequest struct {
 	Runtime        string `json:"runtime"`
 	Model          string `json:"model"`
@@ -273,6 +279,11 @@ type DispatchRequest struct {
 	SessionID      string `json:"sessionId"`
 	OperatorID     string `json:"operatorId"`
 	ConversationID string `json:"conversationId"` // optional; empty → new conversation
+	// Effort is the reasoning effort level for this dispatch.
+	// Valid values: low, medium, high, xhigh, max.  Empty string (default)
+	// omits the flag.  Invalid values → 400.  claude-only; other runtimes
+	// accept the field without error but do not act on it.
+	Effort string `json:"effort"`
 	// WorktreeMode opts into diff-review mode for this dispatch.
 	// When true, the agent runs inside a per-session git worktree rather than
 	// the real workspace.  The caller can then use GET /api/files/diff,
@@ -333,6 +344,14 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "invalid model", http.StatusBadRequest)
 			return
 		}
+	}
+
+	// --- Validate effort ---
+	// Empty string is valid (means "no override — omit the flag").
+	// Non-empty must be one of: low, medium, high, xhigh, max.
+	if err := dispatch.ValidateEffort(req.Effort); err != nil {
+		http.Error(w, "invalid effort: must be one of low, medium, high, xhigh, max", http.StatusBadRequest)
+		return
 	}
 
 	// --- Validate required string fields ---
@@ -718,6 +737,8 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			OperatorID:     capturedOperatorID,
 			ConversationID: conversationID,
 			SessionID:      dispReq.SessionID,
+			// Effort was validated in the handler (ValidateEffort); empty = no flag.
+			Effort: dispReq.Effort,
 			// Project is intentionally omitted: Service.RunStream pins it to
 			// cfg.WorkspaceRoot when empty.  This is the server-side project pin.
 			// Pass the resolved identity so dispatch can enforce roles and use cert CN.

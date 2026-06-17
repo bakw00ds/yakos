@@ -221,6 +221,135 @@ func TestAgyDispatch_MockRuntime(t *testing.T) {
 	assertContains(t, argv, "@yakos-security-reviewer", "agy @-mention missing")
 }
 
+// ---- Effort flag tests ---------------------------------------------------------
+
+// TestClaudeChatExecCmd_EffortHigh verifies that ChatExecCmd includes --effort high
+// in argv when Effort=="high".
+func TestClaudeChatExecCmd_EffortHigh(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec.Cmd inspection requires sh; skipping on Windows")
+	}
+	a := &ClaudeAdapter{}
+	req := ChatDispatchRequest{
+		Project:  "/tmp/project",
+		UserText: "say hello",
+		Effort:   "high",
+	}
+	cmd := a.ChatExecCmd(context.Background(), req)
+	argv := strings.Join(cmd.Args, " ")
+	if !strings.Contains(argv, "--effort high") {
+		t.Errorf("ChatExecCmd with Effort=high: --effort high not in argv: %s", argv)
+	}
+}
+
+// TestClaudeChatExecCmd_EffortEmpty verifies that ChatExecCmd omits --effort
+// entirely when Effort is empty.
+func TestClaudeChatExecCmd_EffortEmpty(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec.Cmd inspection requires sh; skipping on Windows")
+	}
+	a := &ClaudeAdapter{}
+	req := ChatDispatchRequest{
+		Project:  "/tmp/project",
+		UserText: "say hello",
+		Effort:   "", // no override
+	}
+	cmd := a.ChatExecCmd(context.Background(), req)
+	argv := strings.Join(cmd.Args, " ")
+	if strings.Contains(argv, "--effort") {
+		t.Errorf("ChatExecCmd with empty Effort: --effort unexpectedly in argv: %s", argv)
+	}
+}
+
+// TestClaudeChatExecCmd_AllEffortLevels verifies that each valid effort level
+// produces the correct --effort <level> argv entry.
+func TestClaudeChatExecCmd_AllEffortLevels(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec.Cmd inspection requires sh; skipping on Windows")
+	}
+	a := &ClaudeAdapter{}
+	for _, level := range []string{"low", "medium", "high", "xhigh", "max"} {
+		req := ChatDispatchRequest{
+			Project:  "/tmp/project",
+			UserText: "task",
+			Effort:   level,
+		}
+		cmd := a.ChatExecCmd(context.Background(), req)
+		argv := strings.Join(cmd.Args, " ")
+		want := "--effort " + level
+		if !strings.Contains(argv, want) {
+			t.Errorf("ChatExecCmd(Effort=%q): %q not found in argv: %s", level, want, argv)
+		}
+	}
+}
+
+// TestClaudeExecCmd_NoEffortFlag verifies that ExecCmd (one-shot dispatch path)
+// does NOT pass --effort. ExecCmd receives a DispatchRequest which has no Effort
+// field; this confirms the one-shot path is unaffected.
+func TestClaudeExecCmd_NoEffortFlag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec.Cmd inspection requires sh; skipping on Windows")
+	}
+	a := &ClaudeAdapter{}
+	req := DispatchRequest{
+		Project:   "/tmp/project",
+		AgentName: "backend",
+		AgentJSON: `{"backend":{"description":"be","prompt":"p"}}`,
+		Task:      "task",
+	}
+	cmd := a.ExecCmd(context.Background(), req)
+	argv := strings.Join(cmd.Args, " ")
+	if strings.Contains(argv, "--effort") {
+		t.Errorf("ExecCmd: --effort unexpectedly in argv: %s", argv)
+	}
+}
+
+// TestCodexChatExecCmd_NoEffortFlag verifies that CodexAdapter.ChatExecCmd
+// does NOT pass --effort even when the ChatDispatchRequest carries Effort.
+// Codex does not support this flag; the adapter should ignore it.
+func TestCodexChatExecCmd_NoEffortFlag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec.Cmd inspection requires sh; skipping on Windows")
+	}
+	a := &CodexAdapter{}
+	req := ChatDispatchRequest{
+		Project:  "/tmp/project",
+		UserText: "task",
+		Effort:   "high", // set but must be ignored by codex
+	}
+	cmd := a.ChatExecCmd(context.Background(), req)
+	argv := strings.Join(cmd.Args, " ")
+	if strings.Contains(argv, "--effort") {
+		t.Errorf("CodexAdapter.ChatExecCmd: --effort in argv (should be ignored): %s", argv)
+	}
+}
+
+// TestAgyDispatch_NoEffortFlag verifies that AgyAdapter.Dispatch does not pass
+// --effort; agy does not support this flag.
+func TestAgyDispatch_NoEffortFlag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock runtime scripts require bash; skipping on Windows")
+	}
+	mockDir, agyScript := writeMockRuntime(t, "agy", 0, "agy output\n")
+	t.Setenv("PATH", mockDir+":"+os.Getenv("PATH"))
+
+	req := DispatchRequest{
+		Project:   "/tmp/project",
+		AgentName: "security-reviewer",
+		Task:      "audit",
+	}
+	a := &AgyAdapter{}
+	_, err := a.Dispatch(context.Background(), req)
+	if err != nil {
+		t.Fatalf("AgyAdapter.Dispatch: unexpected error: %v", err)
+	}
+
+	argv := readMockArgv(t, agyScript)
+	if strings.Contains(argv, "--effort") {
+		t.Errorf("AgyAdapter.Dispatch: --effort in argv (should not be present): %s", argv)
+	}
+}
+
 // TestBuildEnv_AllowRoot verifies that IS_SANDBOX=1 is set in the env when AllowRoot is true.
 func TestBuildEnv_AllowRoot(t *testing.T) {
 	req := DispatchRequest{AllowRoot: true}

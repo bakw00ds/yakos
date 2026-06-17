@@ -272,6 +272,61 @@ func TestChatDispatch_ValidAliasModels(t *testing.T) {
 	}
 }
 
+// ---- Effort field validation -------------------------------------------------
+
+// TestChatDispatch_400OnInvalidEffort verifies that an unrecognised effort
+// value returns 400 before any dispatch is attempted.
+func TestChatDispatch_400OnInvalidEffort(t *testing.T) {
+	ts, tok := newChatTestServer(t)
+	body := `{"runtime":"claude","model":"sonnet","agent":"myagent","task":"hi","sessionId":"s-effort1","operatorId":"alice","effort":"extreme"}`
+	resp := post(t, ts.URL+"/api/chat/dispatch", tok, body)
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST /api/chat/dispatch (invalid effort): status=%d; want 400", resp.StatusCode)
+	}
+}
+
+// TestChatDispatch_400OnUppercaseEffort verifies that effort values are
+// case-sensitive (the CLI only accepts lowercase).
+func TestChatDispatch_400OnUppercaseEffort(t *testing.T) {
+	ts, tok := newChatTestServer(t)
+	body := `{"runtime":"claude","model":"sonnet","agent":"myagent","task":"hi","sessionId":"s-effort2","operatorId":"alice","effort":"HIGH"}`
+	resp := post(t, ts.URL+"/api/chat/dispatch", tok, body)
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST /api/chat/dispatch (uppercase effort): status=%d; want 400", resp.StatusCode)
+	}
+}
+
+// TestChatDispatch_ValidEffortLevelsAccepted verifies that all five valid effort
+// levels are accepted at the HTTP layer (→ 503 because no svc, not 400).
+func TestChatDispatch_ValidEffortLevelsAccepted(t *testing.T) {
+	ts, tok := newChatTestServer(t)
+	for i, level := range []string{"low", "medium", "high", "xhigh", "max"} {
+		sessID := "s-eff-valid-" + level + string(rune('0'+i))
+		body := `{"runtime":"claude","model":"sonnet","agent":"myagent","task":"hi","sessionId":"` + sessID + `","operatorId":"alice","effort":"` + level + `"}`
+		resp := post(t, ts.URL+"/api/chat/dispatch", tok, body)
+		defer drainClose(resp)
+		// No DispatchService → 503; a 400 means effort was wrongly rejected.
+		if resp.StatusCode == http.StatusBadRequest {
+			t.Errorf("POST /api/chat/dispatch (effort=%q): got 400; valid effort should not be rejected", level)
+		}
+	}
+}
+
+// TestChatDispatch_EmptyEffortAccepted verifies that omitting the effort field
+// (or sending it as empty string) is valid — the flag is simply omitted.
+func TestChatDispatch_EmptyEffortAccepted(t *testing.T) {
+	ts, tok := newChatTestServer(t)
+	// Omit the field entirely.
+	body := `{"runtime":"claude","model":"sonnet","agent":"myagent","task":"hi","sessionId":"s-eff-empty","operatorId":"alice"}`
+	resp := post(t, ts.URL+"/api/chat/dispatch", tok, body)
+	defer drainClose(resp)
+	if resp.StatusCode == http.StatusBadRequest {
+		t.Errorf("POST /api/chat/dispatch (no effort field): got 400; empty effort should be accepted")
+	}
+}
+
 // ---- 5. Dispatch: no project field accepted from body -----------------------
 // (Defensive: disallowUnknownFields in the decoder means sending a "project"
 // field causes 400.  This is intentional — the field is server-pinned.)
