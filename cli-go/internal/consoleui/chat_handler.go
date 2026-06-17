@@ -64,6 +64,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/runtime"
+	"github.com/bakw00ds/yakos/internal/worktreemgr"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
@@ -124,6 +125,9 @@ type chatHandlers struct {
 	yakosRoot     string                    // used for up-front agent validation
 	workspaceRoot string                    // used as project for up-front agent validation
 	serverCtx     context.Context           // server-lifetime context; dispatch goroutines derive from this (NOT r.Context())
+	// worktreeMgr is wired by New() when Config.WorktreeManager is non-nil.
+	// Used to provision per-session worktrees when WorktreeMode is true in a dispatch request.
+	worktreeMgr *worktreemgr.Manager
 }
 
 // newChatHandlers is called from registerChatRoutes.
@@ -256,6 +260,11 @@ func writeSSEEvent(w http.ResponseWriter, ev SSEEvent) error {
 //
 // Project is intentionally absent — it is pinned server-side.
 // SystemPrompt is intentionally absent — the agent name resolves the persona.
+// WorktreeMode, when true, provisions a git worktree for this session so the
+// agent operates on an isolated copy of the workspace.  The server ignores this
+// flag when the workspace is not a git repo (returns 409 with a clear message)
+// or when no WorktreeManager is configured (returns 409).
+// Default: false (agent operates in the real workspace unchanged).
 type DispatchRequest struct {
 	Runtime        string `json:"runtime"`
 	Model          string `json:"model"`
@@ -264,6 +273,14 @@ type DispatchRequest struct {
 	SessionID      string `json:"sessionId"`
 	OperatorID     string `json:"operatorId"`
 	ConversationID string `json:"conversationId"` // optional; empty → new conversation
+	// WorktreeMode opts into diff-review mode for this dispatch.
+	// When true, the agent runs inside a per-session git worktree rather than
+	// the real workspace.  The caller can then use GET /api/files/diff,
+	// POST /api/files/diff/accept, and POST /api/files/diff/reject to review
+	// and selectively promote changes.
+	// SERVER-SIDE ONLY: the resulting WorkDirOverride is set from the manager
+	// path, never from the client body.
+	WorktreeMode bool `json:"worktreeMode"`
 }
 
 // DispatchResponse is the JSON body returned by POST /api/chat/dispatch.
@@ -504,6 +521,38 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		})
 	}
 
+	// --- Worktree mode: provision a per-session git worktree BEFORE goroutine launch.
+	// The path is resolved here (in the handler) so the goroutine captures a stable value.
+	// WorktreeMode is an opt-in flag from the request body; the resulting
+	// WorkDirOverride is ALWAYS set from the manager (server-derived), never from
+	// the client body.
+	//
+	// Fallback to normal mode on error (ErrNotAGitRepo, ErrCapExceeded, nil manager,
+	// empty workspaceRoot) — the dispatch proceeds without isolation so the operator
+	// still gets a response rather than a hard failure.
+	capturedWorktreeOverride := "" // server-derived; captured by the goroutine below
+	if dispReq.WorktreeMode {
+		if ch.worktreeMgr == nil {
+			slog.Warn("consoleui: worktree mode requested but no manager configured; falling back to normal mode",
+				"session", dispReq.SessionID)
+		} else if ch.workspaceRoot == "" {
+			slog.Warn("consoleui: worktree mode requested but workspaceRoot is empty; falling back",
+				"session", dispReq.SessionID)
+		} else {
+			wt, wtErr := ch.worktreeMgr.Ensure(dispReq.SessionID, ch.workspaceRoot)
+			if wtErr != nil {
+				slog.Warn("consoleui: worktree mode unavailable; falling back to normal mode",
+					"session", dispReq.SessionID, "err", wtErr)
+			} else {
+				capturedWorktreeOverride = wt
+				slog.Info("consoleui: worktree mode active",
+					"session", dispReq.SessionID, "worktree", wt)
+			}
+		}
+	}
+	// capturedMgr is non-nil only when we need to clean up the worktree on session close.
+	capturedMgr := ch.worktreeMgr
+
 	// Launch RunStream in a goroutine.  The goroutine owns the cancel function
 	// and the hub session for its lifetime.
 	//
@@ -561,6 +610,18 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		defer cancel()                               // 1. stop any pending RunStream
 		defer ch.state.remove(dispReq.SessionID)     // 2. release slot
 		defer ch.hub.CloseSession(dispReq.SessionID) // 3. remove hub entry
+		// 5. Remove the per-session worktree on session close (if any was provisioned).
+		// Registered after hub.CloseSession defer; in LIFO order this runs BEFORE
+		// hub.CloseSession — acceptable because the worktree path is independent of the
+		// hub entry and the diff handler's PathFor check will return (false) once removed.
+		if capturedWorktreeOverride != "" && capturedMgr != nil {
+			defer func() {
+				if err := capturedMgr.Remove(dispReq.SessionID); err != nil {
+					slog.Warn("consoleui: worktree remove on session close",
+						"session", dispReq.SessionID, "err", err)
+				}
+			}()
+		}
 
 		// Accumulate assistant text for a single coalesced assistant turn.
 		var assistantBuf strings.Builder
@@ -655,6 +716,9 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				Populated: capturedIdentityForGoroutine.Resolved,
 				Identity:  capturedIdentityForGoroutine,
 			},
+			// WorkDirOverride is set server-side from the worktreemgr path when
+			// WorktreeMode is true.  It is NEVER derived from the client request body.
+			WorkDirOverride: capturedWorktreeOverride,
 		}
 
 		if _, err := ch.svc.RunStream(ctx, params, onChunk); err != nil {

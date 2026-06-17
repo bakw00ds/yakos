@@ -903,4 +903,244 @@ When set alongside `--console-bind <non-loopback-addr>`, a WARNING banner is pri
 | `cli-go/cmd/yakos/main.go` | `--console-allow-bash` CLI flag in `runServe` |
 | `cli-go/internal/serve/export_test.go` | `BuildConsoleCfgForTest` wiring of `AllowNetworkedBash` |
 | `cli-go/internal/consoleui/bash_handler_test.go` | 10 tests covering all gate conditions |
+
+---
+
+## IDE Phase 3b: Diff-Review Endpoints
+
+**Implemented in:** Phase 3b (2026-06-17)
+**Source of truth:** `cli-go/internal/consoleui/diff_handler.go`
+**Server:** Console HTTP server (`127.0.0.1:7890`)
+**Auth:** Bearer token (same as all `/api/*` console endpoints)
+
+### Model
+
+Agent edits happen inside a per-session git worktree (detached at HEAD).
+The real working tree is untouched until the operator accepts a hunk.
+
+- **Review mode dispatch:** POST `/api/chat/dispatch` with `worktreeMode: true`
+  tells the server to provision an isolated worktree for the session.
+- **Accept:** promotes an individual hunk into the real working tree
+  (`git apply --recount`, atomic — 409 on conflict, real tree unchanged).
+- **Reject:** discards an individual hunk from the worktree
+  (`git apply -R`, or file removal for added/binary files).
+- **Commit:** stages only the explicitly listed promoted paths
+  (never `git add -A`) and commits to the real tree.
+
+### Security
+
+Every mutating endpoint enforces:
+- `RoleDispatch` role gate
+- Owner-scope: caller's operatorId must match the session owner
+- Path jail: all paths resolved through `filesHandlers.jailPath`
+  (rejects `../`, absolute paths, symlink escape, `.git` internals)
+- `WorkDirOverride` is always server-derived from `worktreemgr.PathFor`;
+  client cannot supply a directory path via any request body
+- Audit log (slog) on every mutation: `operator_id`, `session`, `path`, `hunk_id`, `result`
+
+### POST /api/chat/dispatch — review-mode flag
+
+Add `worktreeMode: true` to the existing dispatch request body to opt in.
+All other fields unchanged from Phase 3b chat dispatch.
+
+```jsonc
+// Request body (addition to existing DispatchRequest)
+{
+  "runtime": "claude",
+  "agent": "lead",
+  "task": "refactor the auth module",
+  "sessionId": "sess-abc-123",
+  "operatorId": "alice",
+  "worktreeMode": true   // NEW: opt-in; default false
+}
+```
+
+When `worktreeMode` is `true` and the workspace is not a git repo, the server
+falls back to normal mode (no error returned to the client; a warning is logged).
+
+---
+
+### GET /api/files/diff
+
+**Auth:** RoleRead + owner-scope (sessionId must be owned by the caller)
+**Method:** GET
+**Query:** `session=<sessionId>&operatorId=<operatorId>`
+
+Returns per-file structured hunks of the session worktree's uncommitted changes.
+
+**Response 200:**
+```jsonc
+{
+  "session_id": "sess-abc-123",
+  "truncated": false,           // true if diff exceeded 1 MiB cap
+  "files": [
+    {
+      "path": "src/auth.go",    // workspace-relative path (forward slashes)
+      "status": "modified",     // "modified" | "added" | "deleted" | "renamed" | "binary"
+      "old_path": "",           // non-empty only when status == "renamed"
+      "binary": false,          // true for binary files (hunks will be empty)
+      "hunks": [
+        {
+          "hunk_id": 0,         // zero-based ordinal within this file; use in accept/reject
+          "header": "@@ -1,3 +1,4 @@",
+          "lines": [
+            "@@ -1,3 +1,4 @@",
+            " line1",
+            "-line2",
+            "+line2-new",
+            "+extra-line",
+            " line3"
+          ],
+          "old_start": 1,
+          "old_count": 3,
+          "new_start": 1,
+          "new_count": 4
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Error responses:**
+- `400` — missing/invalid `session` parameter
+- `403` — session is owned by a different operator
+- `404` — session not found or no worktree provisioned
+- `503` — worktree manager not configured
+
+---
+
+### POST /api/files/diff/accept
+
+**Auth:** RoleDispatch + owner-scope + path jail
+**Method:** POST
+**Content-Type:** `application/json`
+
+Promotes exactly one hunk from the session worktree into the **real** working tree.
+For binary files, `hunk_id` is ignored and the whole file is copied.
+
+**Request body (`AcceptRequest`):**
+```jsonc
+{
+  "session_id": "sess-abc-123",
+  "operator_id": "alice",       // used on loopback; ignored on mTLS (cert CN wins)
+  "path": "src/auth.go",        // workspace-relative path
+  "hunk_id": 0                  // zero-based hunk ordinal from GET /api/files/diff
+}
+```
+
+**Response 200:**
+```json
+{"ok": true}
+```
+
+**Error responses:**
+- `400` — missing field, invalid path, `hunk_id` out of range
+- `403` — wrong operator or secret file
+- `404` — path not in diff or session not found
+- `409` — `git apply` failed (context lines do not match real tree; real tree unchanged)
+- `503` — worktree manager not configured
+
+---
+
+### POST /api/files/diff/reject
+
+**Auth:** RoleDispatch + owner-scope + path jail
+**Method:** POST
+**Content-Type:** `application/json`
+
+Discards exactly one hunk from the session **worktree** (does not touch the real tree).
+For added (untracked) files, the file is removed from the worktree.
+For deleted files, the file is restored from HEAD in the worktree.
+For binary files, the file is removed from the worktree.
+
+**Request body (`RejectRequest`):**
+```jsonc
+{
+  "session_id": "sess-abc-123",
+  "operator_id": "alice",
+  "path": "src/auth.go",
+  "hunk_id": 0
+}
+```
+
+**Response 200:**
+```json
+{"ok": true}
+```
+
+**Error responses:**
+- `400` — missing field, invalid path, `hunk_id` out of range
+- `403` — wrong operator or secret file
+- `404` — path not in diff or session not found
+- `409` — reverse-apply failed (worktree unchanged)
+
+---
+
+### GET /api/git/status
+
+**Auth:** RoleRead + owner-scope
+**Method:** GET
+**Query:** `session=<sessionId>&operatorId=<operatorId>`
+
+Returns the git status of the **session worktree** (not the real tree).
+
+**Response 200:**
+```jsonc
+{
+  "session_id": "sess-abc-123",
+  "branch": "main",             // worktree detached branch name or "(HEAD detached)"
+  "ahead": 0,                   // commits ahead of upstream
+  "behind": 0,                  // commits behind upstream
+  "staged": [],                 // files staged in worktree index
+  "unstaged": [
+    {"path": "src/auth.go", "code": "M"}   // M=modified, D=deleted, A=added, R=renamed
+  ],
+  "untracked": ["new-file.go"]
+}
+```
+
+---
+
+### POST /api/git/commit
+
+**Auth:** RoleDispatch + owner-scope + path jail on each path
+**Method:** POST
+**Content-Type:** `application/json`
+
+Stages only the explicitly listed paths (never `git add -A`) and commits
+to the **real** working tree.
+
+**Request body (`CommitRequest`):**
+```jsonc
+{
+  "session_id": "sess-abc-123",
+  "operator_id": "alice",
+  "message": "feat(auth): refactor token validation",
+  "paths": ["src/auth.go", "src/auth_test.go"]  // must be non-empty; each is jailed
+}
+```
+
+**Response 200:**
+```jsonc
+{
+  "sha": "6ae13ec"   // short SHA of the new commit
+}
+```
+
+**Error responses:**
+- `400` — empty `message`, empty `paths`, invalid path, traversal path
+- `403` — wrong operator or secret path
+- `500` — `git add` or `git commit` failed (uncommitted staging is rolled back)
+
+### Implementation files
+
+| File | Purpose |
+|---|---|
+| `cli-go/internal/consoleui/diff_handler.go` | All 5 endpoints: diff, accept, reject, git status, git commit |
+| `cli-go/internal/consoleui/chat_handler.go` | `worktreeMode` field in `DispatchRequest`; pre-goroutine worktree provisioning |
+| `cli-go/internal/consoleui/server.go` | `WorktreeManager` field in `Config`; route registration for all 5 endpoints |
+| `cli-go/internal/serve/serve.go` | `worktreemgr.New` + `PruneOrphans` at daemon startup; wired into `consoleCfg.WorktreeManager` |
+| `cli-go/internal/worktreemgr/manager.go` | `Manager.Ensure`, `Remove`, `PathFor`, `PruneOrphans` |
+| `cli-go/internal/consoleui/diff_handler_test.go` | 15 integration tests with temp git repos |
 | `cli-go/internal/serve/bash_wiring_test.go` | 2 tests: wiring guard + default-false guard |

@@ -81,4 +81,15 @@ type Request struct {
 	// terminal pane). Empty for non-console dispatches. Used for routing
 	// SSE streams and presence attribution.
 	SessionID string
+
+	// WorkDirOverride, when non-empty, sets the working directory for the
+	// runtime subprocess instead of Project. This is set exclusively by
+	// server-side code (e.g. the IDE diff handler) to redirect execution into
+	// an isolated git worktree; it is never derived from client request bodies.
+	//
+	// The override value must be an absolute path to a directory that already
+	// exists. Callers are responsible for validating that the path is within
+	// the expected state directory (e.g. a Manager-allocated worktree path)
+	// before setting it.
+	WorkDirOverride string
 }

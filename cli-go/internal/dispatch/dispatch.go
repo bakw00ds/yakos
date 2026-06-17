@@ -139,14 +139,15 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	convID := req.ConversationID
 
 	dispatchReq := runtime.DispatchRequest{
-		Project:        req.Project,
-		AgentName:      req.AgentName,
-		AgentJSON:      agentJSON,
-		Task:           req.Task,
-		ModelOverride:  modelResolved,
-		AllowRoot:      req.AllowRoot,
-		ConversationID: convID,
-		Timeout:        timeout,
+		Project:         req.Project,
+		AgentName:       req.AgentName,
+		AgentJSON:       agentJSON,
+		Task:            req.Task,
+		ModelOverride:   modelResolved,
+		AllowRoot:       req.AllowRoot,
+		ConversationID:  convID,
+		Timeout:         timeout,
+		WorkDirOverride: req.WorkDirOverride,
 	}
 
 	var stderrBuf bytes.Buffer

@@ -127,6 +127,22 @@
   var IDE_FOLLOW_LS_KEY = 'yakos_ide_follow';
   var ideTreeModified = null; // set to new Set() in IDE section init
 
+  // ── Phase 3 diff-review state (hoisted for TDZ safety) ───────────────────
+  //
+  // ideReviewMode: when true, IDE chat dispatches send worktreeMode:true so
+  //   agent edits land in an isolated worktree rather than the real tree.
+  //   Persisted in localStorage so it survives page refresh.
+  // IDE_REVIEW_LS_KEY: localStorage key.
+  // ideDiffData: cached response from GET /api/files/diff — null until first
+  //   fetch.  Shape mirrors the API: {session_id, truncated, files:[...]}.
+  // ideDiffSelectedFile: path of the file currently selected in the diff panel.
+  // ideGitStatusData: cached response from GET /api/git/status.
+  var ideReviewMode = false;
+  var IDE_REVIEW_LS_KEY = 'yakos_ide_review_mode';
+  var ideDiffData = null;
+  var ideDiffSelectedFile = '';
+  var ideGitStatusData = null;
+
   function defaultTheme() {
     try {
       if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
@@ -1331,6 +1347,17 @@
       // Announce to screen reader (aria-live polite — not per-token).
       announcePaneStatus(paneId, pane.status === 'done' ? 'completed' : 'finished with error');
       if (pane.autoScroll) scrollPaneToBottom(paneId);
+
+      // Phase 3: if the completed pane is the IDE embedded pane, the Changes
+      // panel is open, and review mode is on — auto-refresh the diff so the
+      // operator sees new pending hunks immediately after a dispatch turn.
+      if (pane.ideEmbedded && ideReviewMode) {
+        var changesPanel = document.getElementById('ide-changes-panel');
+        if (changesPanel && changesPanel.style.display !== 'none') {
+          ideRefreshDiff();
+          ideRefreshGitStatus();
+        }
+      }
     }
   }
 
@@ -2334,6 +2361,11 @@
       operatorId: getChatOperatorId(),
       conversationId: pane.conversationId,
     };
+    // Phase 3: if this pane is the IDE embedded pane and review mode is ON,
+    // signal to the server that edits should land in an isolated worktree.
+    if (pane.ideEmbedded && ideReviewMode) {
+      dispatchBody.worktreeMode = true;
+    }
 
     // Phase 4: for non-claude runtimes (buffered path), tool events are never
     // emitted by the server.  Show a one-time static affordance so the operator
@@ -5011,6 +5043,11 @@
   // Phase 2 live-coupling state.
   try { ideFollowToggle = !!JSON.parse(localStorage.getItem(IDE_FOLLOW_LS_KEY)); } catch (_) { ideFollowToggle = false; }
   ideTreeModified   = new Set();
+  // Phase 3 diff-review state init.
+  try { ideReviewMode = !!JSON.parse(localStorage.getItem(IDE_REVIEW_LS_KEY)); } catch (_) { ideReviewMode = false; }
+  ideDiffData           = null;
+  ideDiffSelectedFile   = '';
+  ideGitStatusData      = null;
 
   // ── Layout persistence helpers ────────────────────────────────────────────
 
@@ -5815,7 +5852,7 @@
           '<div class="ide-tab-strip" id="ide-tab-strip" ' +
             'role="tablist" aria-label="Open files">' +
           '</div>' +
-          // Editor header: dirty marker, path, Edit, Save, Follow, status.
+          // Editor header: dirty marker, path, Edit, Save, Follow, Changes, status.
           '<div class="ide-editor-header" id="ide-editor-header">' +
             '<span id="ide-dirty-marker" class="ide-dirty-marker" aria-hidden="true" style="display:none">●</span>' +
             '<span id="ide-open-path" class="ide-open-path" aria-live="polite"></span>' +
@@ -5826,8 +5863,43 @@
             // Follow toggle: when ON, files.changed WS events auto-switch the editor.
             '<button id="ide-follow-toggle" type="button" class="ide-header-btn ide-follow-btn" ' +
               'aria-pressed="false" title="Follow agent: auto-open files changed by the agent">Follow agent</button>' +
+            // Phase 3: Changes toggle — opens the diff-review + git panel.
+            '<button id="ide-changes-toggle" type="button" class="ide-header-btn" ' +
+              'aria-pressed="false" aria-controls="ide-changes-panel" ' +
+              'title="Show worktree diff and git panel">Changes</button>' +
             '<span id="ide-save-status" class="ide-save-status" aria-live="polite" role="status"></span>' +
           '</div>' +
+
+          // Phase 3: diff-review + git panel (hidden by default, toggled by Changes button).
+          '<div id="ide-changes-panel" class="ide-changes-panel" style="display:none" role="region" aria-label="Diff review">' +
+            '<div class="ide-changes-toolbar">' +
+              '<span class="ide-changes-title">Worktree changes</span>' +
+              '<button id="ide-changes-refresh" type="button" class="ide-header-btn" title="Refresh diff">Refresh</button>' +
+              '<button id="ide-changes-accept-all" type="button" class="ide-header-btn ide-changes-accept-btn" title="Accept all hunks">Accept all</button>' +
+              '<button id="ide-changes-reject-all" type="button" class="ide-header-btn ide-changes-reject-btn" title="Reject all hunks">Reject all</button>' +
+            '</div>' +
+            '<div id="ide-changes-status" class="ide-changes-status" role="status" aria-live="polite"></div>' +
+            '<div class="ide-changes-body">' +
+              '<ul id="ide-changes-files" class="ide-changes-files" role="listbox" aria-label="Changed files"></ul>' +
+              '<div id="ide-changes-hunks" class="ide-changes-hunks" role="region" aria-label="Diff hunks"></div>' +
+            '</div>' +
+            // Git panel below the diff body.
+            '<div id="ide-git-panel" class="ide-git-panel">' +
+              '<div class="ide-git-header">' +
+                '<span class="ide-changes-title">Git</span>' +
+                '<button id="ide-git-refresh" type="button" class="ide-header-btn" title="Refresh git status">Refresh</button>' +
+              '</div>' +
+              '<div id="ide-git-status-body" class="ide-git-status-body"></div>' +
+              '<div class="ide-git-commit-row">' +
+                '<input id="ide-git-commit-msg" type="text" class="ide-git-commit-input" ' +
+                  'placeholder="feat(scope): conventional commit message" ' +
+                  'aria-label="Commit message">' +
+                '<button id="ide-git-commit-btn" type="button" class="ide-header-btn ide-changes-accept-btn" title="Commit staged changes">Commit</button>' +
+              '</div>' +
+              '<div id="ide-git-status" class="ide-changes-status" role="status" aria-live="polite"></div>' +
+            '</div>' +
+          '</div>' +
+
           '<div class="ide-editor-wrap">' +
             '<div id="ide-editor-notice" class="ide-editor-notice" style="display:none" role="status"></div>' +
             // Transparent drag overlay — covers iframe during column resize so
@@ -5871,6 +5943,14 @@
               (layout.chatCollapsed ? ' style="display:none"' : '') + '>' +
               '<option value="">new session</option>' +
             '</select>' +
+            // Phase 3: review-mode toggle.  When ON, IDE chat dispatches send
+            // worktreeMode:true so agent edits land in an isolated worktree.
+            // Tooltip explains the affordance; persisted in localStorage.
+            '<button id="ide-review-toggle" type="button" class="ide-header-btn ide-review-btn' +
+              (ideReviewMode ? ' ide-header-btn-active' : '') + '" ' +
+              'aria-pressed="' + (ideReviewMode ? 'true' : 'false') + '" ' +
+              'title="Review mode: agent edits land in an isolated worktree for review. Real tree is untouched until you Accept."' +
+              (layout.chatCollapsed ? ' style="display:none"' : '') + '>Review</button>' +
           '</div>' +
           '<div id="ide-chat-slot"' +
             (layout.chatCollapsed ? ' style="display:none"' : '') + '></div>' +
@@ -5953,6 +6033,68 @@
       chatToggle.addEventListener('click', () => {
         ideTogglePane('chat');
       });
+    }
+
+    // ── Phase 3: Review-mode toggle ───────────────────────────────────────
+    var reviewToggle = document.getElementById('ide-review-toggle');
+    if (reviewToggle) {
+      reviewToggle.addEventListener('click', function() {
+        ideReviewMode = !ideReviewMode;
+        reviewToggle.setAttribute('aria-pressed', ideReviewMode ? 'true' : 'false');
+        reviewToggle.classList.toggle('ide-header-btn-active', ideReviewMode);
+        try { localStorage.setItem(IDE_REVIEW_LS_KEY, JSON.stringify(ideReviewMode)); } catch (_) {}
+      });
+    }
+
+    // ── Phase 3: Changes panel toggle ────────────────────────────────────
+    var changesToggle = document.getElementById('ide-changes-toggle');
+    if (changesToggle) {
+      changesToggle.addEventListener('click', function() {
+        var panel = document.getElementById('ide-changes-panel');
+        if (!panel) return;
+        var isOpen = panel.style.display !== 'none';
+        panel.style.display = isOpen ? 'none' : '';
+        changesToggle.setAttribute('aria-pressed', isOpen ? 'false' : 'true');
+        changesToggle.classList.toggle('ide-header-btn-active', !isOpen);
+        if (!isOpen) {
+          // Opening: fetch fresh data.
+          ideRefreshDiff();
+          ideRefreshGitStatus();
+        }
+      });
+    }
+
+    // ── Phase 3: Changes Refresh button ──────────────────────────────────
+    var changesRefresh = document.getElementById('ide-changes-refresh');
+    if (changesRefresh) {
+      changesRefresh.addEventListener('click', function() {
+        ideRefreshDiff();
+        ideRefreshGitStatus();
+      });
+    }
+
+    // ── Phase 3: Accept all hunks ─────────────────────────────────────────
+    var acceptAllBtn = document.getElementById('ide-changes-accept-all');
+    if (acceptAllBtn) {
+      acceptAllBtn.addEventListener('click', function() { ideAcceptAllHunks(); });
+    }
+
+    // ── Phase 3: Reject all hunks ─────────────────────────────────────────
+    var rejectAllBtn = document.getElementById('ide-changes-reject-all');
+    if (rejectAllBtn) {
+      rejectAllBtn.addEventListener('click', function() { ideRejectAllHunks(); });
+    }
+
+    // ── Phase 3: Git Refresh button ───────────────────────────────────────
+    var gitRefreshBtn = document.getElementById('ide-git-refresh');
+    if (gitRefreshBtn) {
+      gitRefreshBtn.addEventListener('click', function() { ideRefreshGitStatus(); });
+    }
+
+    // ── Phase 3: Git Commit button ────────────────────────────────────────
+    var gitCommitBtn = document.getElementById('ide-git-commit-btn');
+    if (gitCommitBtn) {
+      gitCommitBtn.addEventListener('click', function() { ideCommitChanges(); });
     }
 
     // ── Session picker (Phase 5) ──────────────────────────────────────────
@@ -6047,6 +6189,9 @@
       if (chatSlot)   chatSlot.style.display = collapsed2 ? 'none' : '';
       if (chatPicker) chatPicker.style.display = collapsed2 ? 'none' : '';
       if (rSplitter)  rSplitter.style.display = collapsed2 ? 'none' : '';
+      // Phase 3: also hide/show the Review toggle button when chat collapses.
+      var reviewTog2 = document.getElementById('ide-review-toggle');
+      if (reviewTog2) reviewTog2.style.display = collapsed2 ? 'none' : '';
       if (chatTog) {
         chatTog.innerHTML = collapsed2 ? '&#x276E;' : '&#x276F;';
         chatTog.setAttribute('aria-expanded', collapsed2 ? 'false' : 'true');
@@ -7080,6 +7225,513 @@
         '</option>';
     }
     picker.innerHTML = html;
+  }
+
+  // =========================================================================
+  // ---- Phase 3: Diff-review + Git functions -----------------------------------
+
+  // ideGetCurrentSessionId returns the session ID to use for diff/git API calls.
+  // Prefers the IDE embedded pane's active/attached session, falls back to any
+  // active pane (mirrors how other IDE API calls resolve the session).
+  function ideGetCurrentSessionId() {
+    if (ideEmbeddedPaneId) {
+      var ep = chatPanes.get(ideEmbeddedPaneId);
+      if (ep) {
+        return ep.activeSessionId || ep.attachedSessionId || ep.conversationId || '';
+      }
+    }
+    // Fallback: any pane with an active session.
+    var sid = '';
+    chatPanes.forEach(function(p) {
+      if (!sid && (p.activeSessionId || p.attachedSessionId || p.conversationId)) {
+        sid = p.activeSessionId || p.attachedSessionId || p.conversationId;
+      }
+    });
+    return sid;
+  }
+
+  // ideSetChangesStatus sets the diff-panel status message.
+  // isError=true renders in error color.
+  function ideSetChangesStatus(msg, isError) {
+    var el = document.getElementById('ide-changes-status');
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.toggle('ide-changes-status-error', !!isError);
+  }
+
+  // ideSetGitStatus sets the git-panel status message.
+  function ideSetGitStatus(msg, isError) {
+    var el = document.getElementById('ide-git-status');
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.toggle('ide-changes-status-error', !!isError);
+  }
+
+  // ideRefreshDiff fetches GET /api/files/diff?session=<id> and renders the
+  // file list + hunks for the currently selected file.
+  function ideRefreshDiff() {
+    var sid = ideGetCurrentSessionId();
+    if (!sid) {
+      ideSetChangesStatus('No active session — start a dispatch first.', true);
+      return;
+    }
+    ideSetChangesStatus('Loading…', false);
+    apiFetch('GET', '/api/files/diff?session=' + encodeURIComponent(sid), null)
+      .then(function(data) {
+        ideDiffData = data;
+        ideSetChangesStatus('', false);
+        renderDiffFileList(data);
+        // Re-render hunks for the currently selected file (if still present).
+        if (ideDiffSelectedFile) {
+          var stillPresent = data.files && data.files.some(function(f) {
+            return f.path === ideDiffSelectedFile;
+          });
+          if (stillPresent) {
+            renderDiffHunks(ideDiffSelectedFile);
+          } else {
+            ideDiffSelectedFile = '';
+            var hunksEl = document.getElementById('ide-changes-hunks');
+            if (hunksEl) hunksEl.innerHTML = '';
+          }
+        }
+      })
+      .catch(function(err) {
+        ideSetChangesStatus('Error loading diff: ' + String(err), true);
+      });
+  }
+
+  // renderDiffFileList renders the file list sidebar from a diff response.
+  function renderDiffFileList(data) {
+    var listEl = document.getElementById('ide-changes-files');
+    if (!listEl) return;
+
+    var files = (data && data.files) ? data.files : [];
+    if (files.length === 0) {
+      listEl.innerHTML = '';
+      var emptyItem = document.createElement('li');
+      emptyItem.className = 'ide-diff-file-item';
+      emptyItem.textContent = 'No pending changes';
+      listEl.appendChild(emptyItem);
+      return;
+    }
+
+    listEl.innerHTML = '';
+    files.forEach(function(fileEntry) {
+      var item = document.createElement('li');
+      item.className = 'ide-diff-file-item' + (fileEntry.path === ideDiffSelectedFile ? ' ide-diff-file-selected' : '');
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', fileEntry.path === ideDiffSelectedFile ? 'true' : 'false');
+      item.setAttribute('tabindex', '0');
+
+      var badge = document.createElement('span');
+      badge.className = 'ide-diff-status-badge ide-diff-status-' + (fileEntry.status || 'modified');
+      badge.textContent = (fileEntry.status || 'M').charAt(0).toUpperCase();
+      badge.title = fileEntry.status || 'modified';
+
+      var pathSpan = document.createElement('span');
+      pathSpan.className = 'ide-diff-file-path';
+      pathSpan.textContent = fileEntry.path;
+
+      var countSpan = document.createElement('span');
+      countSpan.className = 'ide-diff-hunk-count';
+      var hunkCount = (fileEntry.hunks && fileEntry.hunks.length) || 0;
+      countSpan.textContent = hunkCount + (hunkCount === 1 ? ' hunk' : ' hunks');
+
+      item.appendChild(badge);
+      item.appendChild(pathSpan);
+      item.appendChild(countSpan);
+
+      function selectFile() {
+        ideDiffSelectedFile = fileEntry.path;
+        renderDiffFileList(ideDiffData); // re-render to update selection highlight
+        renderDiffHunks(fileEntry.path);
+      }
+      item.addEventListener('click', selectFile);
+      item.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectFile(); }
+      });
+
+      listEl.appendChild(item);
+    });
+  }
+
+  // renderDiffHunks renders the hunk blocks for the given file path.
+  function renderDiffHunks(filePath) {
+    var hunksEl = document.getElementById('ide-changes-hunks');
+    if (!hunksEl) return;
+    hunksEl.innerHTML = '';
+
+    if (!ideDiffData || !ideDiffData.files) return;
+    var fileEntry = null;
+    for (var i = 0; i < ideDiffData.files.length; i++) {
+      if (ideDiffData.files[i].path === filePath) { fileEntry = ideDiffData.files[i]; break; }
+    }
+    if (!fileEntry) return;
+
+    if (fileEntry.binary) {
+      var binMsg = document.createElement('p');
+      binMsg.className = 'ide-changes-status';
+      binMsg.textContent = 'Binary file — diff not shown.';
+      hunksEl.appendChild(binMsg);
+      return;
+    }
+
+    if (!fileEntry.hunks || fileEntry.hunks.length === 0) {
+      var noHunks = document.createElement('p');
+      noHunks.className = 'ide-changes-status';
+      noHunks.textContent = 'No hunks for this file.';
+      hunksEl.appendChild(noHunks);
+      return;
+    }
+
+    fileEntry.hunks.forEach(function(hunk) {
+      var block = buildHunkBlock(fileEntry, hunk);
+      hunksEl.appendChild(block);
+    });
+  }
+
+  // buildHunkBlock builds the DOM element for a single hunk.
+  // Uses textContent for all diff line content — never innerHTML — to prevent XSS.
+  function buildHunkBlock(fileEntry, hunk) {
+    var block = document.createElement('div');
+    block.className = 'ide-diff-hunk';
+    block.dataset.hunkId = hunk.hunk_id;
+    block.dataset.filePath = fileEntry.path;
+
+    // Header row: hunk header text + Accept + Reject buttons.
+    var hdrRow = document.createElement('div');
+    hdrRow.className = 'ide-diff-hunk-header';
+
+    var hdrText = document.createElement('span');
+    hdrText.className = 'ide-diff-hunk-header-text';
+    hdrText.textContent = hunk.header || '';
+    hdrRow.appendChild(hdrText);
+
+    var acceptBtn = document.createElement('button');
+    acceptBtn.type = 'button';
+    acceptBtn.className = 'ide-header-btn ide-changes-accept-btn';
+    acceptBtn.textContent = 'Accept';
+    acceptBtn.setAttribute('aria-label', 'Accept hunk ' + hunk.hunk_id + ' in ' + fileEntry.path);
+    acceptBtn.addEventListener('click', function() {
+      ideHunkAction('accept', fileEntry.path, hunk.hunk_id, block);
+    });
+
+    var rejectBtn = document.createElement('button');
+    rejectBtn.type = 'button';
+    rejectBtn.className = 'ide-header-btn ide-changes-reject-btn';
+    rejectBtn.textContent = 'Reject';
+    rejectBtn.setAttribute('aria-label', 'Reject hunk ' + hunk.hunk_id + ' in ' + fileEntry.path);
+    rejectBtn.addEventListener('click', function() {
+      ideHunkAction('reject', fileEntry.path, hunk.hunk_id, block);
+    });
+
+    hdrRow.appendChild(acceptBtn);
+    hdrRow.appendChild(rejectBtn);
+    block.appendChild(hdrRow);
+
+    // Unified diff lines — use textContent per line, never innerHTML.
+    var pre = document.createElement('pre');
+    pre.className = 'ide-diff-lines';
+    var lines = hunk.lines || [];
+    lines.forEach(function(lineText) {
+      var span = document.createElement('span');
+      var firstChar = lineText.charAt(0);
+      if (firstChar === '+') {
+        span.className = 'ide-diff-line ide-diff-line-add';
+      } else if (firstChar === '-') {
+        span.className = 'ide-diff-line ide-diff-line-del';
+      } else if (firstChar === '@') {
+        span.className = 'ide-diff-line ide-diff-line-hdr';
+      } else {
+        span.className = 'ide-diff-line';
+      }
+      span.textContent = lineText; // SAFE: textContent, not innerHTML
+      pre.appendChild(span);
+    });
+    block.appendChild(pre);
+
+    return block;
+  }
+
+  // ideHunkAction calls POST /api/files/diff/{accept|reject}.
+  // On 200: removes the hunk block from the DOM and refreshes the file list.
+  // On 409: shows conflict message WITHOUT removing the block.
+  function ideHunkAction(action, path, hunkId, blockEl) {
+    var sid = ideGetCurrentSessionId();
+    if (!sid) { ideSetChangesStatus('No active session.', true); return; }
+
+    var acceptBtn = blockEl ? blockEl.querySelector('.ide-changes-accept-btn') : null;
+    var rejectBtn = blockEl ? blockEl.querySelector('.ide-changes-reject-btn') : null;
+    if (acceptBtn) acceptBtn.disabled = true;
+    if (rejectBtn) rejectBtn.disabled = true;
+
+    var body = {
+      session_id:  sid,
+      operator_id: getChatOperatorId(),
+      path:        path,
+      hunk_id:     hunkId,
+    };
+
+    apiFetch('POST', '/api/files/diff/' + action, body)
+      .then(function() {
+        // 200: remove block from DOM and from cache, then refresh list.
+        if (blockEl && blockEl.parentNode) blockEl.parentNode.removeChild(blockEl);
+        ideRemoveHunkFromCache(path, hunkId);
+        renderDiffFileList(ideDiffData);
+        // If the file is now empty of hunks, clear selection.
+        var stillPresent = ideDiffData && ideDiffData.files && ideDiffData.files.some(function(f) {
+          return f.path === path;
+        });
+        if (!stillPresent && ideDiffSelectedFile === path) {
+          ideDiffSelectedFile = '';
+          var hunksEl = document.getElementById('ide-changes-hunks');
+          if (hunksEl) hunksEl.innerHTML = '';
+        }
+        ideSetChangesStatus(action === 'accept' ? 'Hunk accepted.' : 'Hunk rejected.', false);
+      })
+      .catch(function(err) {
+        // Re-enable buttons so the operator can retry.
+        if (acceptBtn) acceptBtn.disabled = false;
+        if (rejectBtn) rejectBtn.disabled = false;
+
+        var status = err && err.status;
+        if (status === 409) {
+          ideSetChangesStatus(
+            'Conflict: real tree changed — refresh to reload and try again.', true
+          );
+        } else if (status === 403) {
+          ideSetChangesStatus('Permission denied.', true);
+        } else {
+          ideSetChangesStatus('Error: ' + String(err), true);
+        }
+      });
+  }
+
+  // ideRemoveHunkFromCache removes a hunk from ideDiffData in-place.
+  // If the file has no remaining hunks it is removed from the files array.
+  function ideRemoveHunkFromCache(path, hunkId) {
+    if (!ideDiffData || !ideDiffData.files) return;
+    for (var i = 0; i < ideDiffData.files.length; i++) {
+      var f = ideDiffData.files[i];
+      if (f.path !== path) continue;
+      if (f.hunks) {
+        f.hunks = f.hunks.filter(function(h) { return h.hunk_id !== hunkId; });
+      }
+      if (!f.hunks || f.hunks.length === 0) {
+        ideDiffData.files.splice(i, 1);
+      }
+      break;
+    }
+  }
+
+  // ideAcceptAllHunks collects all pending hunk pairs and processes them
+  // sequentially via _ideProcessHunkPairs, stopping on the first 409.
+  function ideAcceptAllHunks() {
+    var pairs = _ideCollectHunkPairs();
+    if (pairs.length === 0) { ideSetChangesStatus('No pending hunks.', false); return; }
+    ideSetChangesStatus('Accepting ' + pairs.length + ' hunk(s)…', false);
+    _ideProcessHunkPairs(pairs, 'accept', 0, function(conflictMsg) {
+      if (conflictMsg) {
+        ideSetChangesStatus(conflictMsg, true);
+      } else {
+        ideSetChangesStatus('All hunks accepted.', false);
+      }
+    });
+  }
+
+  // ideRejectAllHunks collects all pending hunk pairs and rejects them
+  // sequentially, stopping on the first 409.
+  function ideRejectAllHunks() {
+    var pairs = _ideCollectHunkPairs();
+    if (pairs.length === 0) { ideSetChangesStatus('No pending hunks.', false); return; }
+    ideSetChangesStatus('Rejecting ' + pairs.length + ' hunk(s)…', false);
+    _ideProcessHunkPairs(pairs, 'reject', 0, function(conflictMsg) {
+      if (conflictMsg) {
+        ideSetChangesStatus(conflictMsg, true);
+      } else {
+        ideSetChangesStatus('All hunks rejected.', false);
+      }
+    });
+  }
+
+  // _ideCollectHunkPairs returns [{path, hunk_id}] for all files/hunks in ideDiffData.
+  function _ideCollectHunkPairs() {
+    var pairs = [];
+    if (!ideDiffData || !ideDiffData.files) return pairs;
+    ideDiffData.files.forEach(function(f) {
+      if (!f.hunks) return;
+      f.hunks.forEach(function(h) {
+        pairs.push({ path: f.path, hunk_id: h.hunk_id });
+      });
+    });
+    return pairs;
+  }
+
+  // _ideProcessHunkPairs processes pairs[idx] recursively (sequential).
+  // Calls done(null) on full success, done(errorMsg) on first 409/error.
+  function _ideProcessHunkPairs(pairs, action, idx, done) {
+    if (idx >= pairs.length) { done(null); return; }
+    var pair = pairs[idx];
+    var sid = ideGetCurrentSessionId();
+    if (!sid) { done('No active session.'); return; }
+
+    var body = {
+      session_id:  sid,
+      operator_id: getChatOperatorId(),
+      path:        pair.path,
+      hunk_id:     pair.hunk_id,
+    };
+
+    apiFetch('POST', '/api/files/diff/' + action, body)
+      .then(function() {
+        ideRemoveHunkFromCache(pair.path, pair.hunk_id);
+        renderDiffFileList(ideDiffData);
+        // Refresh hunk view for selected file if it still exists.
+        if (ideDiffSelectedFile) {
+          var stillPresent = ideDiffData && ideDiffData.files && ideDiffData.files.some(function(f) {
+            return f.path === ideDiffSelectedFile;
+          });
+          if (stillPresent) {
+            renderDiffHunks(ideDiffSelectedFile);
+          } else {
+            ideDiffSelectedFile = '';
+            var hunksEl = document.getElementById('ide-changes-hunks');
+            if (hunksEl) hunksEl.innerHTML = '';
+          }
+        }
+        _ideProcessHunkPairs(pairs, action, idx + 1, done);
+      })
+      .catch(function(err) {
+        var status = err && err.status;
+        if (status === 409) {
+          done('Conflict at ' + pair.path + ' hunk ' + pair.hunk_id +
+               ' — real tree changed. Refresh and try again.');
+        } else {
+          done('Error on ' + pair.path + ' hunk ' + pair.hunk_id + ': ' + String(err));
+        }
+      });
+  }
+
+  // ideRefreshGitStatus fetches GET /api/git/status?session=<id> and renders
+  // the git panel.
+  function ideRefreshGitStatus() {
+    var sid = ideGetCurrentSessionId();
+    if (!sid) {
+      ideSetGitStatus('No active session.', true);
+      return;
+    }
+    ideSetGitStatus('Loading…', false);
+    apiFetch('GET', '/api/git/status?session=' + encodeURIComponent(sid), null)
+      .then(function(data) {
+        ideGitStatusData = data;
+        ideSetGitStatus('', false);
+        renderGitStatus(data);
+      })
+      .catch(function(err) {
+        ideSetGitStatus('Error loading git status: ' + String(err), true);
+      });
+  }
+
+  // renderGitStatus renders the branch info + staged/unstaged/untracked file lists.
+  // Uses textContent throughout — git status output is untrusted.
+  function renderGitStatus(data) {
+    var bodyEl = document.getElementById('ide-git-status-body');
+    if (!bodyEl) return;
+    bodyEl.innerHTML = '';
+
+    if (!data) return;
+
+    // Branch row.
+    var branchRow = document.createElement('div');
+    branchRow.className = 'ide-git-branch-row';
+
+    var branchSpan = document.createElement('span');
+    branchSpan.className = 'ide-git-branch';
+    branchSpan.textContent = data.branch || '(unknown)';
+
+    var syncSpan = document.createElement('span');
+    syncSpan.className = 'ide-git-sync';
+    var ahead  = data.ahead  || 0;
+    var behind = data.behind || 0;
+    if (ahead > 0 || behind > 0) {
+      syncSpan.textContent = '↑' + ahead + ' ↓' + behind;
+      syncSpan.title = ahead + ' ahead, ' + behind + ' behind';
+    }
+
+    branchRow.appendChild(branchSpan);
+    branchRow.appendChild(syncSpan);
+    bodyEl.appendChild(branchRow);
+
+    // Collect all changed paths for the commit button (staged + unstaged).
+    var allPaths = [];
+
+    function renderFileSection(label, items, cssClass) {
+      if (!items || items.length === 0) return;
+      var hdr = document.createElement('div');
+      hdr.className = 'ide-git-section-hdr';
+      hdr.textContent = label;
+      bodyEl.appendChild(hdr);
+
+      var ul = document.createElement('ul');
+      ul.className = 'ide-git-file-list';
+      items.forEach(function(item) {
+        var fp = (typeof item === 'string') ? item : (item.path || String(item));
+        allPaths.push(fp);
+        var li = document.createElement('li');
+        li.className = 'ide-git-file-item ' + cssClass;
+        li.textContent = fp; // SAFE: textContent, not innerHTML
+        ul.appendChild(li);
+      });
+      bodyEl.appendChild(ul);
+    }
+
+    renderFileSection('Staged', data.staged, 'ide-git-file-staged');
+    renderFileSection('Unstaged', data.unstaged, 'ide-git-file-unstaged');
+    renderFileSection('Untracked', data.untracked, 'ide-git-file-untracked');
+
+    // Store paths for commit action.
+    bodyEl.dataset.changedPaths = JSON.stringify(allPaths);
+  }
+
+  // ideCommitChanges reads the commit message + changed paths and calls
+  // POST /api/git/commit. Shows the returned SHA on success.
+  function ideCommitChanges() {
+    var msgInput = document.getElementById('ide-git-commit-msg');
+    var message = msgInput ? msgInput.value.trim() : '';
+    if (!message) {
+      ideSetGitStatus('Commit message is required.', true);
+      if (msgInput) msgInput.focus();
+      return;
+    }
+
+    var sid = ideGetCurrentSessionId();
+    if (!sid) { ideSetGitStatus('No active session.', true); return; }
+
+    var bodyEl = document.getElementById('ide-git-status-body');
+    var paths = [];
+    if (bodyEl && bodyEl.dataset.changedPaths) {
+      try { paths = JSON.parse(bodyEl.dataset.changedPaths); } catch (_) {}
+    }
+
+    ideSetGitStatus('Committing…', false);
+
+    var body = {
+      session_id:  sid,
+      operator_id: getChatOperatorId(),
+      message:     message,
+      paths:       paths,
+    };
+
+    apiFetch('POST', '/api/git/commit', body)
+      .then(function(data) {
+        var sha = (data && data.sha) ? data.sha : '(unknown)';
+        ideSetGitStatus('Committed: ' + sha, false);
+        if (msgInput) msgInput.value = '';
+        ideRefreshGitStatus();
+      })
+      .catch(function(err) {
+        ideSetGitStatus('Commit failed: ' + String(err), true);
+      });
   }
 
   // =========================================================================

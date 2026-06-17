@@ -23,6 +23,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/setuptoken"
 	"github.com/bakw00ds/yakos/internal/userstore"
 	"github.com/bakw00ds/yakos/internal/workflow"
+	"github.com/bakw00ds/yakos/internal/worktreemgr"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
@@ -247,6 +248,14 @@ type Config struct {
 	// Activated by --console-allow-bash in runServe; serve.go prints a WARNING
 	// banner when this flag is set and the console is in networked mode.
 	AllowNetworkedBash bool
+
+	// WorktreeManager, when non-nil, enables the IDE diff-review mode.
+	// When nil, review-mode dispatch is unavailable (the endpoints return 503).
+	//
+	// serve.go constructs this via worktreemgr.New(filepath.Join(statepath.Dir(), "ide-worktrees"))
+	// and calls PruneOrphans(WorkspaceRoot) at startup if WorkspaceRoot is a git repo.
+	// Tests may inject a custom manager.
+	WorktreeManager *worktreemgr.Manager
 }
 
 func (c *Config) addr() string {
@@ -285,6 +294,7 @@ type Server struct {
 	files        *filesHandlers
 	skills       *skillsHandlers
 	fleet        *fleetHandlers
+	diff         *diffHandlers      // IDE Phase 3b diff-review endpoints; nil if WorktreeManager is nil
 	serverCtx    context.Context    // cancelled on Serve shutdown; dispatch goroutines use this
 	serverCancel context.CancelFunc // called by Serve when the server shuts down
 }
@@ -346,6 +356,8 @@ func New(cfg Config) (*Server, error) {
 	// newChatHandlers signature stable (it is also called from export_test.go).
 	chatH.yakosRoot = cfg.YakosRoot
 	chatH.workspaceRoot = cfg.WorkspaceRoot
+	// Wire the worktreemgr so review-mode dispatches can provision worktrees.
+	chatH.worktreeMgr = cfg.WorktreeManager
 	flowsH := &flowsHandlers{
 		engine:     cfg.WorkflowEngine,
 		workDir:    cfg.WorkDir,
@@ -360,6 +372,7 @@ func New(cfg Config) (*Server, error) {
 	chatH.registry = registry
 	chatH.bus = cfg.Bus
 	fleetH := newFleetHandlers(registry, hub)
+	diffH := newDiffHandlers(cfg.WorktreeManager, filesH, cfg.WorkspaceRoot, hub)
 	s := &Server{
 		cfg:          cfg,
 		mux:          http.NewServeMux(),
@@ -370,6 +383,7 @@ func New(cfg Config) (*Server, error) {
 		files:        filesH,
 		skills:       skillsH,
 		fleet:        fleetH,
+		diff:         diffH,
 		serverCtx:    serverCtx,
 		serverCancel: serverCancel,
 	}
@@ -907,6 +921,29 @@ func (s *Server) registerRoutes() {
 	// requireJSONForMutations (applied globally in New()) enforces Content-Type:
 	// application/json for this POST, providing CSRF defence.
 	s.mux.HandleFunc("/api/files/write", requireRoleFunc(netid.RoleDispatch, s.files.handleFilesWrite))
+
+	// ---- IDE Phase 3b: diff-review endpoints ------------------------------------
+	// GET  /api/files/diff             — per-file structured diff (RoleRead, owner-scoped)
+	// POST /api/files/diff/accept      — promote hunk to real tree (RoleDispatch, owner-scoped)
+	// POST /api/files/diff/reject      — discard hunk from worktree (RoleDispatch, owner-scoped)
+	// GET  /api/git/status             — git status for session worktree (RoleRead, owner-scoped)
+	// POST /api/git/commit             — commit promoted changes in real tree (RoleDispatch)
+	//
+	// All mutating endpoints: CSRF + JSON gate (via global middleware in New()) +
+	// RoleDispatch + owner-scoped to the caller's session + path jailed under
+	// WorkspaceRoot.  WorkDirOverride paths are server-derived, never from request body.
+	//
+	// Idempotency-Key: not required for diff/accept or diff/reject because they
+	// operate on exact hunk identity (same hunk_id + same session = idempotent in
+	// effect after first apply; subsequent apply returns 409 not a duplicate).
+	// POST /api/git/commit: callers MUST deduplicate via the returned SHA.
+	if s.diff != nil {
+		s.mux.HandleFunc("/api/files/diff", requireRoleFunc(netid.RoleRead, s.diff.handleFilesDiff))
+		s.mux.HandleFunc("/api/files/diff/accept", requireRoleFunc(netid.RoleDispatch, s.diff.handleDiffAccept))
+		s.mux.HandleFunc("/api/files/diff/reject", requireRoleFunc(netid.RoleDispatch, s.diff.handleDiffReject))
+		s.mux.HandleFunc("/api/git/status", requireRoleFunc(netid.RoleRead, s.diff.handleGitStatus))
+		s.mux.HandleFunc("/api/git/commit", requireRoleFunc(netid.RoleDispatch, s.diff.handleGitCommit))
+	}
 
 	// ---- Phase 1 (REPL slash-skills): agent + command catalog ------------------
 	// GET /api/skills — read-only roster of composed agents + static client commands.

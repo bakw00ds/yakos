@@ -59,6 +59,9 @@ func (a *CodexAdapter) ExecCmd(ctx context.Context, req DispatchRequest) *exec.C
 
 	cmd := exec.CommandContext(ctx, "codex", args...) //nolint:gosec
 	cmd.Env = buildEnv(req)
+	if req.WorkDirOverride != "" {
+		cmd.Dir = req.WorkDirOverride
+	}
 	return cmd
 }
 
@@ -88,6 +91,9 @@ func (a *CodexAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest)
 		ModelOverride: req.ModelOverride,
 		AllowRoot:     req.AllowRoot,
 	})
+	if req.WorkDirOverride != "" {
+		cmd.Dir = req.WorkDirOverride
+	}
 	return cmd
 }
 
