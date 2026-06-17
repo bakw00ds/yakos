@@ -1162,7 +1162,7 @@ func TestTranscript_FailClosedWithNoUserTurn(t *testing.T) {
 
 func TestChatShare_401WithoutToken(t *testing.T) {
 	ts, _ := newChatTestServer(t)
-	body := `{"sessionId":"s1","operatorId":"alice","shared":true}`
+	body := `{"conversationId":"conv-s1","operatorId":"alice","shared":true}`
 	resp := post(t, ts.URL+"/api/chat/share", "", body)
 	defer drainClose(resp)
 	if resp.StatusCode != http.StatusUnauthorized {
@@ -1170,19 +1170,19 @@ func TestChatShare_401WithoutToken(t *testing.T) {
 	}
 }
 
-func TestChatShare_400OnMissingSessionId(t *testing.T) {
+func TestChatShare_400OnMissingConversationId(t *testing.T) {
 	ts, tok := newChatTestServer(t)
 	body := `{"operatorId":"alice","shared":true}`
 	resp := post(t, ts.URL+"/api/chat/share", tok, body)
 	defer drainClose(resp)
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("POST /api/chat/share (missing sessionId): status=%d; want 400", resp.StatusCode)
+		t.Errorf("POST /api/chat/share (missing conversationId): status=%d; want 400", resp.StatusCode)
 	}
 }
 
 func TestChatShare_400OnMissingOperatorId(t *testing.T) {
 	ts, tok := newChatTestServer(t)
-	body := `{"sessionId":"s1","shared":true}`
+	body := `{"conversationId":"conv-s1","shared":true}`
 	resp := post(t, ts.URL+"/api/chat/share", tok, body)
 	defer drainClose(resp)
 	if resp.StatusCode != http.StatusBadRequest {
@@ -1190,13 +1190,18 @@ func TestChatShare_400OnMissingOperatorId(t *testing.T) {
 	}
 }
 
-func TestChatShare_404OnNonexistentSession(t *testing.T) {
+// TestChatShare_200OnNoLiveSession is the regression test for the bug:
+// previously, sharing returned 404 when no live session existed because the
+// endpoint was keyed on the ephemeral sessionId.  The fixed endpoint accepts
+// conversationId and returns 200 even when idle.
+func TestChatShare_200OnNoLiveSession(t *testing.T) {
 	ts, tok := newChatTestServer(t)
-	body := `{"sessionId":"no-such-session99","operatorId":"alice","shared":true}`
+	// No session open in the hub — this used to 404.
+	body := `{"conversationId":"conv-idle-share","operatorId":"alice","shared":true}`
 	resp := post(t, ts.URL+"/api/chat/share", tok, body)
 	defer drainClose(resp)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("POST /api/chat/share (non-existent session): status=%d; want 404", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("POST /api/chat/share (no live session, idle pane): status=%d; want 200 (bug fix)", resp.StatusCode)
 	}
 }
 
@@ -1215,8 +1220,10 @@ func TestChatShare_403OnNonOwner(t *testing.T) {
 		WorkDir:           t.TempDir(),
 	})
 	hub := srv.ChatHub()
-	if err := hub.OpenSession("sess-share-a", "alice", false); err != nil {
-		t.Fatalf("OpenSession: %v", err)
+	// Establish alice as the owner by sharing (shared=true creates the entry).
+	// shared=false on a nonexistent entry is a no-op under the bounded-map model.
+	if err := hub.SetConversationShared("conv-share-a", "alice", true); err != nil {
+		t.Fatalf("SetConversationShared: %v", err)
 	}
 
 	wrapped := consoleui.RequireTokenForNonStatic(realTok,
@@ -1224,8 +1231,8 @@ func TestChatShare_403OnNonOwner(t *testing.T) {
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
-	// bob tries to share alice's session → 403.
-	body := `{"sessionId":"sess-share-a","operatorId":"bob","shared":true}`
+	// bob tries to share alice's conversation → 403.
+	body := `{"conversationId":"conv-share-a","operatorId":"bob","shared":true}`
 	resp := post(t, ts.URL+"/api/chat/share", realTok, body)
 	defer drainClose(resp)
 	if resp.StatusCode != http.StatusForbidden {
@@ -1248,8 +1255,12 @@ func TestChatShare_OwnerCanToggle(t *testing.T) {
 		WorkDir:           t.TempDir(),
 	})
 	hub := srv.ChatHub()
+	// Open a live session under conv-share-owner so the hub knows the conversation owner.
 	if err := hub.OpenSession("sess-share-owner", "alice", false); err != nil {
 		t.Fatalf("OpenSession: %v", err)
+	}
+	if err := hub.SetConversationID("sess-share-owner", "conv-share-owner"); err != nil {
+		t.Fatalf("SetConversationID: %v", err)
 	}
 
 	wrapped := consoleui.RequireTokenForNonStatic(realTok,
@@ -1257,15 +1268,16 @@ func TestChatShare_OwnerCanToggle(t *testing.T) {
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
-	// alice promotes to shared → 200.
-	body := `{"sessionId":"sess-share-owner","operatorId":"alice","shared":true}`
+	// alice promotes to shared via conversationId → 200.
+	body := `{"conversationId":"conv-share-owner","operatorId":"alice","shared":true}`
 	resp := post(t, ts.URL+"/api/chat/share", realTok, body)
 	defer drainClose(resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("POST /api/chat/share (owner promote): status=%d; want 200", resp.StatusCode)
 	}
 
-	// Verify hub reflects shared=true: bob's connection now receives events.
+	// Verify hub reflects shared=true: bob's connection now receives events routed
+	// to the live session.
 	aliceConn, err := hub.Register("conn-share-alice", "alice")
 	if err != nil {
 		t.Fatalf("Register alice: %v", err)
@@ -1440,10 +1452,11 @@ func TestChatHub_SetShared_ConcurrentCloseNoResidual(t *testing.T) {
 	}
 }
 
-// TestChatShare_HTTPSetShared_404OnClosed verifies the HTTP handler returns
-// 404 (not a recreated entry or internal error) when SetShared hits a closed
-// session.
-func TestChatShare_HTTPSetShared_404OnClosed(t *testing.T) {
+// TestChatShare_200AfterSessionClose is the regression test for the core bug:
+// the previous implementation returned 404 when the session was closed, because
+// it was keyed on the ephemeral sessionId.  The fixed implementation is keyed on
+// the stable conversationId, so sharing after session close returns 200.
+func TestChatShare_200AfterSessionClose(t *testing.T) {
 	stateDir := t.TempDir()
 	realTok, _ := consoleui.LoadOrCreateToken(stateDir)
 	bus := wsbus.New()
@@ -1459,23 +1472,27 @@ func TestChatShare_HTTPSetShared_404OnClosed(t *testing.T) {
 	})
 	hub := srv.ChatHub()
 
-	// Open and immediately close the session (simulates the dispatch goroutine
-	// closing the session before the share request arrives).
-	if err := hub.OpenSession("sess-closed-share", "alice", false); err != nil {
+	// Simulate a completed turn: open a session, bind it to a conversation,
+	// then close it (dispatch goroutine finished).
+	if err := hub.OpenSession("sess-done-share", "alice", false); err != nil {
 		t.Fatalf("OpenSession: %v", err)
 	}
-	hub.CloseSession("sess-closed-share")
+	if err := hub.SetConversationID("sess-done-share", "conv-done-share"); err != nil {
+		t.Fatalf("SetConversationID: %v", err)
+	}
+	hub.CloseSession("sess-done-share") // turn complete — session gone, conversation persists
 
 	wrapped := consoleui.RequireTokenForNonStatic(realTok,
 		consoleui.RequireJSONForMutations(srv.Handler()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
-	body := `{"sessionId":"sess-closed-share","operatorId":"alice","shared":true}`
+	// Share the conversation (pane is now idle) — must return 200, not 404.
+	body := `{"conversationId":"conv-done-share","operatorId":"alice","shared":true}`
 	resp := post(t, ts.URL+"/api/chat/share", realTok, body)
 	defer drainClose(resp)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("share after close: status=%d; want 404", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("share after session close: status=%d; want 200 (bug fix: idle pane must be shareable)", resp.StatusCode)
 	}
 }
 
