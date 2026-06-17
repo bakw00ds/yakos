@@ -2,6 +2,8 @@
 
 **Introduced in:** v0.40.0.0
 **Networked multi-operator mode:** v0.44.0.0+
+**Answerable AskUserQuestion (structured questions):** v0.45.0.0+
+**Share-pane by conversationId (idle-capable):** v0.45.0.0+
 **Audience:** operators who want to use the browser-based console for
 interactive Chat, workflow orchestration, or unified dashboard access.
 
@@ -69,6 +71,39 @@ To disable the console and run the daemon without it:
 ```sh
 yakos serve --no-console
 ```
+
+### Answerable structured questions (`--console-structured-questions`)
+
+When an interactive agent calls `AskUserQuestion`, the console normally
+shows the question as text only. With `--console-structured-questions`,
+the Chat and IDE panes render it as an interactive widget: the operator
+can select a provided option, add notes, or type a custom free-form
+answer in-browser.
+
+```sh
+yakos serve --console-structured-questions
+```
+
+**Prerequisite:** Node.js ≥18 must be on `PATH`. The daemon spawns a
+Node sidecar process (the Anthropic Agent SDK interactive engine) to
+handle the question/answer protocol. If Node or the sidecar bundle is
+missing, the daemon still starts normally, but any dispatch request that
+enables structured questions returns 503 rather than hanging.
+
+**Security model:** questions are owner-private — only the originating
+operator's session receives the `ask_user_question` SSE event, never
+shared-session watchers. Answers are guarded by `toolUseId` match,
+single-use/replay protection (409 on retry), owner-scope (403 for
+non-owners), and size caps.
+
+This flag is off by default. It is independent of `--console-allow-bash`.
+
+### Bash pass-through (`--console-allow-bash`)
+
+Enables `POST /api/console/bash` (RoleAdmin only) for in-browser shell
+execution. Off by default; printing a warning banner when combined with
+`--console-bind` (networked mode). See the Console Bash section in
+[docs/api-contracts.md](api-contracts.md) for the full security model.
 
 ---
 
@@ -392,9 +427,25 @@ Each pane is **multi-turn** with a persisted transcript at
 `<work>/current/chats/<conversationID>.ndjson`. Refreshing the browser
 restores prior turns.
 
+**Interactive mode and effort selector:** panes can be started in
+interactive mode (multi-turn with persistent session) and support an
+in-browser effort selector for model-tier overrides.
+
+**Answerable AskUserQuestion:** when an agent calls `AskUserQuestion`
+and `--console-structured-questions` is active, the pane renders the
+question as an interactive widget. The operator can select a provided
+option, add notes, or type a custom answer. Submitting sends the answer
+back to the agent via `POST /api/chat/answer`. Questions are
+owner-private and never forwarded to shared-session watchers.
+
 Panes are private by default. Click **Share pane** to make a pane
-visible to other operators on the same console (the server enforces
-ownership; other operators get a 403 on your unshared session stream).
+visible to other operators on the same console. Sharing is keyed on
+the stable `conversationId` — it works whether or not a live session
+is currently active, so a pane can be shared before or after an agent
+turn completes. The server enforces ownership (403 for non-owners). A
+warning is shown in the UI when sharing, because tool output (bash
+stdout, file contents) and model thinking are visible to all watchers;
+`AskUserQuestion` events are excluded from sharing regardless.
 
 ### Flows
 

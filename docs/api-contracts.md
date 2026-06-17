@@ -906,6 +906,126 @@ When set alongside `--console-bind <non-loopback-addr>`, a WARNING banner is pri
 
 ---
 
+## Console Chat endpoints — structured questions and share (v0.45.0.0+)
+
+These endpoints are on the console server (`127.0.0.1:7890`, or the
+networked-console bind). Auth follows the same three-regime model as all
+other `/api/chat/*` paths: loopback bearer token, session cookie (mTLS
+networked humans), or mTLS cert (networked machines).
+
+### POST /api/chat/answer
+
+**Introduced in:** v0.45.0.0
+**Auth:** RoleDispatch; caller must be the conversation owner
+**Requires:** `--console-structured-questions` on `yakos serve`
+**CSRF:** `X-CSRF-Token` required for session-auth callers; exempt for mTLS and loopback
+**Content-Type:** `application/json`
+
+Delivers the operator's answer to an `AskUserQuestion` tool call. The
+question must currently be pending for the conversation (identified by
+`conversationId`), and the `toolUseId` must match the pending question.
+Each pending question is single-use: a second answer returns 409.
+
+**Request body:**
+```json
+{
+  "conversationId": "conv-abc-123",
+  "operatorId": "alice",
+  "toolUseId": "toolu_01AbCdEfGhIjKlMn",
+  "answers": {
+    "Which approach?": "Option B"
+  },
+  "response": "optional free-form text appended to the selected answers",
+  "annotations": ""
+}
+```
+
+- `conversationId`: required; must match a live session owned by the caller.
+- `operatorId`: required on the loopback bearer path; ignored when cert CN
+  is available (cert CN wins in mTLS mode).
+- `toolUseId`: required; must match the pending question's `toolUseId`.
+- `answers`: map of question text → chosen option label. Keys must be
+  declared option labels from the original `AskUserQuestion`; unknown
+  options → 400. At most 1 answer for single-select questions.
+- `response`: optional free-form text (size-bounded to `dispatch.MaxTaskBytes`).
+- `annotations`: optional JSON string (size-bounded).
+
+**Response 202 Accepted:** answer delivered to the sidecar engine.
+
+**Error responses:**
+- `400` — missing `conversationId` or `toolUseId`; unknown option label;
+  multi-select violation; body too large; unknown JSON field.
+- `403` — caller is not the conversation owner.
+- `404` — no live session for `conversationId`, OR `toolUseId` does not
+  match the current pending question (404 used for mismatch so pending
+  state is not leaked).
+- `409` — question already answered (single-use enforcement; retry → 409).
+- `501` — session is backed by the CLI engine, which does not support
+  `AskUserQuestion` answers. Use `--console-structured-questions` and
+  `interactive:true` on the dispatch request.
+- `503` — interactive mode not configured (daemon started without
+  `--console-structured-questions`, or Node/sidecar bundle is missing).
+
+**Security notes:**
+- `questionsJSON` is NOT accepted from the client. The server always uses
+  the question shape recorded when the `ask_user_question` SSE event was
+  emitted (forged-answer prevention).
+- Questions are owner-private: the `ask_user_question` SSE event is
+  delivered only to the session owner, never to shared-session watchers.
+
+---
+
+### POST /api/chat/share
+
+**Updated in:** v0.45.0.0 (keyed on `conversationId` instead of live
+session; works when idle)
+**Auth:** RoleDispatch; caller must be the conversation owner
+**CSRF:** `X-CSRF-Token` required for session-auth callers; exempt for mTLS and loopback
+**Content-Type:** `application/json`
+
+Sets the shared flag on a conversation. Unlike the previous
+session-keyed behavior, this endpoint operates on the stable
+`conversationId`, so it works whether or not a live session is currently
+active.
+
+**Request body:**
+```json
+{
+  "conversationId": "conv-abc-123",
+  "operatorId": "alice",
+  "shared": true
+}
+```
+
+- `conversationId`: required.
+- `operatorId`: required on loopback bearer path; ignored when cert CN wins.
+- `shared`: required; explicit set (not a toggle) to avoid races on retry.
+
+**Response 200:**
+```json
+{
+  "shared": true,
+  "warning": "Tool output (bash stdout, file contents) and model thinking will be visible to all session watchers."
+}
+```
+`warning` is included only when `shared` is `true`. When unsharing,
+the response is `{"shared": false}` with no `warning` field.
+
+**Error responses:**
+- `400` — missing/invalid fields or unknown JSON field.
+- `403` — caller is not the conversation owner.
+- `405` — non-POST request.
+- `429` — global shared-conversation cap reached.
+
+**Security notes:**
+- `AskUserQuestion` events are excluded from sharing regardless of
+  the shared flag. Watchers can subscribe to the SSE stream for shared
+  conversations but never receive `ask_user_question` frames.
+- On the loopback bearer path, `operatorId` is cooperative (self-asserted)
+  attribution. In mTLS networked mode, the cert CN is the enforced owner.
+
+---
+
 ## IDE Phase 3b: Diff-Review Endpoints
 
 **Implemented in:** Phase 3b (2026-06-17)
