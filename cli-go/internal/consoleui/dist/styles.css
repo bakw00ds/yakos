@@ -1279,7 +1279,8 @@ html[data-theme="light"] .chat-pane-header {
 }
 
 .pane-runtime-select,
-.pane-model-select {
+.pane-model-select,
+.pane-effort-select {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-control, 3px);
@@ -1291,7 +1292,8 @@ html[data-theme="light"] .chat-pane-header {
 }
 
 .pane-runtime-select:focus,
-.pane-model-select:focus {
+.pane-model-select:focus,
+.pane-effort-select:focus {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }

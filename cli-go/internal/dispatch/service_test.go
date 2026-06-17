@@ -784,6 +784,97 @@ func TestDaemonPathIgnoresEnvConversationID(t *testing.T) {
 	}
 }
 
+// ---- Effort validation tests ---------------------------------------------------
+
+// TestValidateEffort_Empty verifies that empty string is valid (means "no flag").
+func TestValidateEffort_Empty(t *testing.T) {
+	if err := ValidateEffort(""); err != nil {
+		t.Errorf("ValidateEffort(\"\") = %v; want nil (empty is valid)", err)
+	}
+}
+
+// TestValidateEffort_ValidLevels verifies all five valid effort levels are accepted.
+func TestValidateEffort_ValidLevels(t *testing.T) {
+	valid := []string{"low", "medium", "high", "xhigh", "max"}
+	for _, v := range valid {
+		if err := ValidateEffort(v); err != nil {
+			t.Errorf("ValidateEffort(%q) = %v; want nil", v, err)
+		}
+	}
+}
+
+// TestValidateEffort_InvalidValues verifies that invalid strings are rejected.
+func TestValidateEffort_InvalidValues(t *testing.T) {
+	invalid := []string{
+		"extreme", "ultra", "normal", "HIGH", "Max",
+		"--effort", "low;rm -rf /", "low medium",
+		"very-high", "1", "0",
+	}
+	for _, v := range invalid {
+		if err := ValidateEffort(v); err == nil {
+			t.Errorf("ValidateEffort(%q) = nil; want error (invalid value)", v)
+		}
+	}
+}
+
+// TestEffortThreadedToRequest verifies that a non-empty Effort in Params flows
+// into the Request that reaches runFn — confirming the Service.Run plumbing.
+func TestEffortThreadedToRequest(t *testing.T) {
+	var capturedEffort string
+	setRunFn(t, func(ctx context.Context, req Request) ([]byte, Result, error) {
+		capturedEffort = req.Effort
+		return nil, Result{}, nil
+	})
+
+	svc := NewService(ServiceConfig{
+		YakosRoot:     "/y",
+		WorkspaceRoot: "/p",
+		OperatorID:    "op",
+	})
+
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:   "backend",
+		Task:    "task",
+		Project: "/p",
+		Effort:  "high",
+	})
+	if err != nil {
+		t.Fatalf("Service.Run: unexpected error: %v", err)
+	}
+	if capturedEffort != "high" {
+		t.Errorf("Effort in Request: got %q, want %q", capturedEffort, "high")
+	}
+}
+
+// TestEffortEmptyNotForwarded verifies that an empty Effort in Params leaves
+// Request.Effort empty (no default value injected by the service).
+func TestEffortEmptyNotForwarded(t *testing.T) {
+	var capturedEffort string
+	setRunFn(t, func(ctx context.Context, req Request) ([]byte, Result, error) {
+		capturedEffort = req.Effort
+		return nil, Result{}, nil
+	})
+
+	svc := NewService(ServiceConfig{
+		YakosRoot:     "/y",
+		WorkspaceRoot: "/p",
+		OperatorID:    "op",
+	})
+
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:   "backend",
+		Task:    "task",
+		Project: "/p",
+		// Effort intentionally empty
+	})
+	if err != nil {
+		t.Fatalf("Service.Run: unexpected error: %v", err)
+	}
+	if capturedEffort != "" {
+		t.Errorf("Effort in Request: got %q; want empty (no default injected)", capturedEffort)
+	}
+}
+
 // TestValidateIdentityField_Exported verifies that the exported
 // ValidateIdentityField function enforces the same allow-list as the internal
 // validateIdentityField used by Service.Run.

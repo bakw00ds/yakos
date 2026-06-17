@@ -74,6 +74,12 @@ type SSEEvent struct {
 	// SessionID identifies which chat pane this event belongs to.
 	SessionID string `json:"session_id"`
 
+	// ConversationID is the stable transcript key for this turn's conversation.
+	// Transcripts are keyed by conversationID (not sessionID), and the IDE picker
+	// binds panes by conversationID so it can mirror the correct stream/transcript
+	// across turns.  Populated on every chat SSE frame.
+	ConversationID string `json:"conversation_id,omitempty"`
+
 	// Type is "token" | "summary" | "ping" | "tool_use" | "tool_result" | "error" | "thinking".
 	// "error" is emitted by the dispatch goroutine when RunStream returns a
 	// non-cancel error, so the client UI can show an error instead of hanging.

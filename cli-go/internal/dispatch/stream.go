@@ -287,6 +287,7 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		ModelChosenBy:   modelChosenBy,
 		ModelResolved:   modelResolved,
 		WorkDirOverride: p.WorkDirOverride,
+		Effort:          p.Effort,
 	}
 
 	chatReq := runtime.ChatDispatchRequest{
@@ -295,6 +296,7 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		AgentSystemPrompt: targetAgent.Prompt,
 		ModelOverride:     modelResolved,
 		WorkDirOverride:   p.WorkDirOverride,
+		Effort:            p.Effort,
 		// AllowRoot is not plumbed through Params (CLI-only flag); defaults to
 		// false for console/gRPC-originated streaming dispatches.
 	}

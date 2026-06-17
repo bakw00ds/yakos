@@ -92,4 +92,12 @@ type Request struct {
 	// the expected state directory (e.g. a Manager-allocated worktree path)
 	// before setting it.
 	WorkDirOverride string
+
+	// Effort is the reasoning effort level for claude dispatches.
+	// Valid values: low, medium, high, xhigh, max.  Empty means no override
+	// (omit the --effort flag).  Validated by the handler before being set
+	// here; this field is server-set, never derived from raw client input
+	// without prior validation.
+	// Only the claude adapter uses this; other runtimes ignore it.
+	Effort string
 }

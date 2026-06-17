@@ -39,13 +39,14 @@ const (
 // TaskPreview is intentionally excluded from WS payloads — see fleet_handler.go
 // and wsbus event payload types for the no-task-text invariant.
 type SessionEntry struct {
-	SessionID   string        `json:"session_id"`
-	Agent       string        `json:"agent"`
-	Runtime     string        `json:"runtime"`
-	OperatorID  string        `json:"operator_id"`
-	TaskPreview string        `json:"task_preview"` // <=120 chars; REST-only, never in WS
-	StartedAt   time.Time     `json:"started_at"`
-	Status      SessionStatus `json:"status"`
+	SessionID      string        `json:"session_id"`
+	ConversationID string        `json:"conversation_id,omitempty"` // stable transcript key; same value used as transcript filename
+	Agent          string        `json:"agent"`
+	Runtime        string        `json:"runtime"`
+	OperatorID     string        `json:"operator_id"`
+	TaskPreview    string        `json:"task_preview"` // <=120 chars; REST-only, never in WS
+	StartedAt      time.Time     `json:"started_at"`
+	Status         SessionStatus `json:"status"`
 }
 
 // SessionRegistry is a concurrency-safe map of sessionID → SessionEntry.

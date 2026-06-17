@@ -53,15 +53,21 @@ import (
 // the agent is doing without the caller needing to fetch the transcript.
 // TaskPreview is intentionally absent from WS fleet.* payloads (metadata-only
 // invariant there); the REST snapshot is the only channel that carries it.
+//
+// ConversationID is the stable transcript key for this session.  The IDE picker
+// binds panes by conversationID so it can mirror the correct stream/transcript.
+// It is safe to expose to the owner/shared callers — it is already used as the
+// transcript filename and carries no additional privilege.
 type FleetSession struct {
-	SessionID   string    `json:"session_id"`
-	Agent       string    `json:"agent"`
-	Runtime     string    `json:"runtime"`
-	Status      string    `json:"status"`
-	StartedAt   time.Time `json:"started_at"`
-	TaskPreview string    `json:"task_preview"` // <=120 chars; REST-only
-	Attachable  bool      `json:"attachable"`   // true = caller may re-attach (owned || shared)
-	Owned       bool      `json:"owned"`        // true = caller is the session owner (can interject)
+	SessionID      string    `json:"session_id"`
+	ConversationID string    `json:"conversation_id,omitempty"` // stable transcript key; enables IDE↔Chat mirroring
+	Agent          string    `json:"agent"`
+	Runtime        string    `json:"runtime"`
+	Status         string    `json:"status"`
+	StartedAt      time.Time `json:"started_at"`
+	TaskPreview    string    `json:"task_preview"` // <=120 chars; REST-only
+	Attachable     bool      `json:"attachable"`   // true = caller may re-attach (owned || shared)
+	Owned          bool      `json:"owned"`        // true = caller is the session owner (can interject)
 }
 
 // FleetResponse is the JSON body returned by GET /api/fleet.
@@ -127,14 +133,15 @@ func (fh *fleetHandlers) handleFleet(w http.ResponseWriter, r *http.Request) {
 		}
 
 		rows = append(rows, FleetSession{
-			SessionID:   e.SessionID,
-			Agent:       e.Agent,
-			Runtime:     e.Runtime,
-			Status:      string(e.Status),
-			StartedAt:   e.StartedAt,
-			TaskPreview: e.TaskPreview,
-			Attachable:  owned || shared,
-			Owned:       owned,
+			SessionID:      e.SessionID,
+			ConversationID: e.ConversationID,
+			Agent:          e.Agent,
+			Runtime:        e.Runtime,
+			Status:         string(e.Status),
+			StartedAt:      e.StartedAt,
+			TaskPreview:    e.TaskPreview,
+			Attachable:     owned || shared,
+			Owned:          owned,
 		})
 	}
 

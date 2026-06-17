@@ -89,6 +89,9 @@ func (a *ClaudeAdapter) Available(_ context.Context) bool {
 // Invariants:
 //   - PR #31: --exclude-dynamic-system-prompt-sections on every call
 //   - PR #17: IS_SANDBOX=1 in env when AllowRoot is set
+//
+// Note: DispatchRequest does not carry an Effort field; effort is only supported
+// on the ChatExecCmd path (console chat dispatch).
 func (a *ClaudeAdapter) ExecCmd(ctx context.Context, req DispatchRequest) *exec.Cmd {
 	framed := "Use the Agent tool to dispatch the following task to subagent_type=\"" +
 		req.AgentName + "\". Return only the subagent's final report.\n\nTask:\n" + req.Task
@@ -194,6 +197,13 @@ func (a *ClaudeAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest
 	}
 	if req.AgentSystemPrompt != "" {
 		args = append(args, "--append-system-prompt", req.AgentSystemPrompt)
+	}
+	// Effort passthrough: when non-empty, append --effort <level> so the claude
+	// CLI adjusts reasoning intensity.  At high+ the CLI also enables extended
+	// thinking automatically.  Codex/agy/gemini adapters do not implement this
+	// flag; callers validate the value before it reaches here.
+	if req.Effort != "" {
+		args = append(args, "--effort", req.Effort)
 	}
 
 	cmd := exec.CommandContext(ctx, "claude", args...) //nolint:gosec
@@ -745,6 +755,13 @@ type ChatDispatchRequest struct {
 	// of the default (inherited from the daemon process). Used by IDE Phase 3
 	// diff-mode to run the agent in an isolated git worktree.
 	WorkDirOverride string
+
+	// Effort is the reasoning effort level passed to the claude CLI as
+	// --effort <level>.  Valid values: low, medium, high, xhigh, max.
+	// Empty string means no --effort flag is appended (default behavior).
+	// At high+ the claude CLI enables extended thinking automatically.
+	// This field is claude-only; other adapters ignore it.
+	Effort string
 }
 
 // buildEnvChat constructs the subprocess environment for unframed chat dispatch.
