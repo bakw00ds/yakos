@@ -30,15 +30,31 @@ import (
 
 // QuestionAnswer carries the caller's response to an AskUserQuestion tool call.
 //
-// This is a placeholder for P2c; the SDK engine will use it to route answers
-// back to the model.  The CLI engine ignores the contents and always returns
-// ErrAnswerUnsupported.
+// The CLI engine (*Session) ignores the contents and always returns
+// ErrAnswerUnsupported.  The SDK engine (SDKEngine) serialises the fields
+// into the sidecar "answer" frame to resolve the parked canUseTool promise.
 //
-// The map key is the field name declared by the AskUserQuestion schema;
-// values are free-form strings supplied by the operator.
+// The Answers map key is the question string (as declared in the SDK's
+// AskUserQuestion input); the value is the chosen option label.
 type QuestionAnswer struct {
-	// Answers maps AskUserQuestion field names to operator-supplied values.
+	// Answers maps each AskUserQuestion question string to the chosen option label.
+	// Required when the question has options (multiSelect or single-select).
 	Answers map[string]string
+
+	// Response is an optional free-text response accompanying the answers.
+	// Maps to the "response" field in the canUseTool updatedInput shape.
+	Response string
+
+	// AnnotationsJSON is optional JSON-encoded per-question annotations.
+	// Shape: {"<question string>": {"preview": "...", "notes": "..."}}.
+	// When non-empty it is forwarded verbatim to the sidecar.
+	AnnotationsJSON string
+
+	// QuestionsJSON is the raw JSON questions slice from the original
+	// ask_user_question chunk.  It is echoed back to the sidecar so the
+	// sidecar can reconstruct the AskUserQuestion input in the answer frame.
+	// When empty the sidecar uses an empty questions array.
+	QuestionsJSON string
 }
 
 // ErrAnswerUnsupported is returned by Engine.AnswerQuestion on engines that do

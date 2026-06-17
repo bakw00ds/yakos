@@ -1,0 +1,17 @@
+{
+  "name": "yakos-sidecar",
+  "version": "1.0.0",
+  "description": "yakOS Agent SDK sidecar — NDJSON bridge between Go SDKEngine and the claude-agent-sdk",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "node_modules/.bin/esbuild sidecar.mjs --bundle --platform=node --format=esm --outfile=sidecar.bundle.js --external:readline --external:node:readline --external:fs --external:path --external:os --external:child_process --external:util",
+    "prebuild": "npm ci --ignore-scripts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.179"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.5"
+  }
+}

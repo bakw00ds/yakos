@@ -91,7 +91,9 @@ const toolInputTruncationMarker = "\n[...tool input truncated...]"
 type StreamChunk struct {
 	// Type is "token" for incremental text, "summary" for the terminal record,
 	// "tool_use" when the agent invoked a tool, "tool_result" when the tool
-	// returned a result, or "thinking" for an incremental extended-thinking delta.
+	// returned a result, "thinking" for an incremental extended-thinking delta,
+	// or "ask_user_question" when the SDK engine needs the operator to answer
+	// an AskUserQuestion tool call before the model can continue.
 	Type string
 
 	// Text holds the token text (Type=="token") or the full result text (Type=="summary").
@@ -133,6 +135,22 @@ type StreamChunk struct {
 	OutputBytes   int64
 	ModelResolved string
 	TotalCostUSD  float64
+
+	// AskUserQuestion fields — populated only when Type=="ask_user_question".
+	// These are emitted by the SDK engine (P2b) when the model invokes the
+	// AskUserQuestion tool and needs operator input before continuing.
+	// P2c wires the SSE frame and the /api/chat/answer endpoint.
+
+	// AskToolUseID is the SDK tool-use ID for this AskUserQuestion invocation.
+	// Callers must echo it back in the /api/chat/answer body so AnswerQuestion
+	// can resolve the parked promise in the sidecar.
+	AskToolUseID string
+
+	// AskQuestionsJSON is the JSON-encoded questions slice from the SDK's
+	// AskUserQuestion input ([]AskUserQuestionItem).  The consumer (SSE encoder,
+	// chat_handler) unmarshals this to surface question text, options, and
+	// multiSelect flags to the frontend.
+	AskQuestionsJSON string
 }
 
 // chatCmdProvider is the interface implemented by adapters that support the
