@@ -5,7 +5,7 @@ ships a roster of specialist agents, audit-first hooks, kanban +
 retrospectives, and per-project audit trails across runtimes.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.40.0.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.45.0.0-orange.svg)](CHANGELOG.md)
 [![Stability: alpha](https://img.shields.io/badge/stability-alpha-red.svg)](#status)
 
 > Not affiliated with Anthropic, OpenAI, or Google.
@@ -76,7 +76,13 @@ Full list: `yakos --help` (41 subcommands ported to Go).
   `http://127.0.0.1:7890` behind one bearer token. Tabs: Overview (live
   activity feed + operator presence), Chat (per-model REPL panes across
   claude/codex/agy/gemini × model tiers; claude streams token-by-token),
-  Kanban, Cost, and Performance — plus the Flows workflow builder. See
+  Kanban, Cost, and Performance — plus the Flows workflow builder. Chat panes
+  support interactive multi-turn mode and an effort selector. When an agent
+  calls `AskUserQuestion`, the Chat and IDE panes render it as an interactive
+  widget the operator can answer in-browser — opt in with
+  `--console-structured-questions` (requires Node.js ≥18 on PATH). Share a
+  pane with `POST /api/chat/share`; sharing is keyed on the stable
+  `conversationId` so it works whether or not the agent is mid-turn. See
   [docs/unified-console.md](docs/unified-console.md).
 - **Flows DAG orchestration.** Define multi-agent workflows as YAML files;
   the headless DAG engine runs them with Kahn topological scheduling,
@@ -120,7 +126,7 @@ yakos/
 
 ## Status
 
-**v0.40.0.0** — alpha, pre-1.0. CLI commands and `.yakos.yml` schema are
+**v0.45.0.0** — alpha, pre-1.0. CLI commands and `.yakos.yml` schema are
 stable within minor versions. See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
