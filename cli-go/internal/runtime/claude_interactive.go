@@ -68,8 +68,12 @@ func InteractiveExecCmd(project, agentSystemPrompt, modelOverride, effort string
 		"--verbose",                        // REQUIRED: --output-format stream-json fails without it
 		"--include-partial-messages",       // stream deltas incrementally
 		"--permission-mode", "bypassPermissions",
-		"--add-dir", project,
 		"--exclude-dynamic-system-prompt-sections", // PR #31 prompt-cache flag
+	}
+	// --add-dir is only added when project is non-empty; passing --add-dir ""
+	// causes the claude CLI to error (it treats the empty string as an invalid path).
+	if project != "" {
+		args = append(args, "--add-dir", project)
 	}
 
 	if agentSystemPrompt != "" {

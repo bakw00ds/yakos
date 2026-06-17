@@ -57,11 +57,16 @@ const maxStreamLineBytes = 2 * 1024 * 1024
 // "[...output truncated...]" is appended so callers know data was dropped.
 const maxBufferedOutputBytes = 32 * 1024 * 1024 // 32 MB
 
-// maxTaskBytes is the facade-level limit on Task / UserText size.  Enforced in
-// RunStream (and separately in Run) before any subprocess is forked.  1 MB is
-// generous for an LLM prompt while keeping the boundary well below the 4 MB
-// gRPC frame cap so Phase 3b's SSE/REST path (no gRPC framing) stays safe.
-const maxTaskBytes = 1 * 1024 * 1024 // 1 MB
+// MaxTaskBytes is the facade-level limit on Task / UserText size.  Enforced in
+// RunStream (and separately in Run) before any subprocess is forked, and in
+// POST /api/chat/send before writing to stdin.  1 MB is generous for an LLM
+// prompt while keeping the boundary well below the 4 MB gRPC frame cap so
+// Phase 3b's SSE/REST path (no gRPC framing) stays safe.
+const MaxTaskBytes = 1 * 1024 * 1024 // 1 MB
+
+// maxTaskBytes keeps the old unexported name as an alias so callers inside this
+// package do not need updating.
+const maxTaskBytes = MaxTaskBytes
 
 // maxToolOutputBytes is the hard truncation ceiling for a single tool_result
 // output before it is emitted as a StreamChunk.  Tool output is untrusted text

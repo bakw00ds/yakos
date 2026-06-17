@@ -17,6 +17,7 @@ package dispatch
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
 
@@ -69,6 +70,14 @@ type StreamLineResult struct {
 // Returns the raw parse result so callers (execWithStreaming) can accumulate
 // allText and costUSD outside this function.  Interactive callers that only
 // want the side-effect (SSE fan-out) can ignore the return.
+//
+// # TextBlocks cleanup (S4)
+//
+// ParseStreamLineWithThinking removes ToolUseBlocks and ThinkingBlocks entries
+// on content_block_stop but does NOT clean TextBlocks (they have no stop-time
+// payload).  For long interactive sessions TextBlocks would grow unboundedly
+// across turns.  ParseAndDispatch detects content_block_stop lines and deletes
+// the corresponding TextBlocks entry so the map stays bounded.
 func ParseAndDispatch(line []byte, ps *StreamParserState, onChunk func(StreamChunk)) StreamLineResult {
 	tok, isResult, costUSD, usage, toolEv, thinkEv := runtime.ParseStreamLineWithThinking(
 		line,
@@ -86,6 +95,13 @@ func ParseAndDispatch(line []byte, ps *StreamParserState, onChunk func(StreamChu
 	if thinkEv != nil {
 		emitThinkingChunk(thinkEv, onChunk)
 	}
+
+	// Clean up the TextBlocks entry on content_block_stop.  The runtime already
+	// removes ToolUseBlocks and ThinkingBlocks on stop; TextBlocks has no
+	// stop-time payload so the runtime leaves it.  We parse the index ourselves
+	// and delete it here to keep the map bounded across long sessions.
+	cleanupTextBlockOnStop(line, ps.TextBlocks)
+
 	return StreamLineResult{
 		Token:         tok,
 		IsResult:      isResult,
@@ -94,6 +110,36 @@ func ParseAndDispatch(line []byte, ps *StreamParserState, onChunk func(StreamChu
 		ToolEvent:     toolEv,
 		ThinkingEvent: thinkEv,
 	}
+}
+
+// streamEventEnvelope is the outer wrapper for stream_event lines.
+type streamEventEnvelope struct {
+	Type  string          `json:"type"`
+	Event json.RawMessage `json:"event"`
+}
+
+// contentBlockStopEvent holds the index from a content_block_stop event.
+type contentBlockStopEvent struct {
+	Type  string `json:"type"`
+	Index int    `json:"index"`
+}
+
+// cleanupTextBlockOnStop deletes the TextBlocks entry for a content_block_stop
+// line that corresponds to a text block.  It is a no-op for non-stop lines,
+// for non-text blocks (already handled by the runtime), and on parse errors.
+func cleanupTextBlockOnStop(line []byte, textBlocks map[int]struct{}) {
+	if textBlocks == nil || len(textBlocks) == 0 {
+		return
+	}
+	var env streamEventEnvelope
+	if err := json.Unmarshal(line, &env); err != nil || env.Type != "stream_event" {
+		return
+	}
+	var stop contentBlockStopEvent
+	if err := json.Unmarshal(env.Event, &stop); err != nil || stop.Type != "content_block_stop" {
+		return
+	}
+	delete(textBlocks, stop.Index)
 }
 
 // ReadLineLoopConfig holds parameters for ReadLineLoop.

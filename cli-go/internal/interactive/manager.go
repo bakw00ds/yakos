@@ -155,6 +155,10 @@ func (m *Manager) Stop() {
 //
 // params.CmdProvider is used to build the exec.Cmd.  For production callers,
 // pass a closure over runtime.InteractiveExecCmd.  For tests, inject a fake.
+//
+// Note: params.ConversationID and params.OwnerOperatorID are always overwritten
+// by the conversationID and ownerOperatorID arguments; values set in params for
+// those fields are ignored.
 func (m *Manager) Ensure(conversationID, ownerOperatorID string, params SessionParams) (*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

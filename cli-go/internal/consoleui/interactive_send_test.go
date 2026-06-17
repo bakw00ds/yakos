@@ -8,6 +8,8 @@ package consoleui_test
 //  3. 400 on missing conversationId.
 //  4. 400 on missing text.
 //  5. One-shot path is UNCHANGED (interactive:false → existing RunStream path).
+//  6. 403 when caller is not the session owner (ErrOwnerConflict).
+//  7. 409 when a turn is already in flight (ErrTurnInFlight).
 
 import (
 	"bytes"
@@ -15,9 +17,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/bakw00ds/yakos/internal/consoleui"
+	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/interactive"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
@@ -147,6 +152,127 @@ func TestChatSend_MissingText_400(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// aliveProvider returns a CmdProvider for a process that stays alive until
+// stdin is closed — no output, just a blocking read loop.  Used in S2 tests.
+func aliveProvider() func() *exec.Cmd {
+	script := "while read -r _; do :; done"
+	return func() *exec.Cmd {
+		return exec.Command("sh", "-c", script) //nolint:gosec
+	}
+}
+
+// noopOnChunk is a no-op chunk handler for sessions whose output is not under test.
+func noopOnChunk(_ dispatch.StreamChunk) {}
+
+// TestChatSend_OwnerConflict_403 verifies that /api/chat/send returns 403 when
+// the caller is not the session owner (ErrOwnerConflict).
+func TestChatSend_OwnerConflict_403(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mgr := interactive.NewManager(ctx, interactive.ManagerConfig{Cap: 4})
+	defer mgr.Stop()
+
+	// Start a session owned by "alice".
+	_, err := mgr.Ensure("conv-owner", "alice", interactive.SessionParams{
+		OnChunk:     noopOnChunk,
+		CmdProvider: aliveProvider(),
+	})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	ts, tok := newInteractiveSendTestServer(t, mgr)
+
+	// Send as "bob" — should be 403.
+	resp := sendTurnHTTP(t, ts, tok, map[string]string{
+		"conversationId": "conv-owner",
+		"operatorId":     "bob",
+		"text":           "hello",
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden, got %d", resp.StatusCode)
+	}
+}
+
+// TestChatSend_TurnInFlight_409 verifies that /api/chat/send returns 409 when
+// a turn is already in flight on the session (ErrTurnInFlight).
+//
+// Strategy: start a session whose process never reads stdin.  Send a large
+// frame (128 KiB, larger than the typical 64 KiB OS pipe buffer) so the
+// write goroutine inside Session.SendUserTurn blocks on the pipe write while
+// holding turnMu.  Then send a second concurrent request; it must observe 409.
+// Both requests are issued concurrently (goroutines) to avoid the serial-HTTP
+// deadlock.  We close the session at the end to unblock the first goroutine.
+func TestChatSend_TurnInFlight_409(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mgr := interactive.NewManager(ctx, interactive.ManagerConfig{Cap: 4})
+	defer mgr.Stop()
+
+	// A process that never reads stdin — write goroutine blocks when pipe fills.
+	blockingProvider := func() *exec.Cmd {
+		return exec.Command("sh", "-c", "sleep 30") //nolint:gosec
+	}
+
+	_, err := mgr.Ensure("conv-inflight", "alice", interactive.SessionParams{
+		OnChunk:     noopOnChunk,
+		CmdProvider: blockingProvider,
+	})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	ts, tok := newInteractiveSendTestServer(t, mgr)
+
+	// Large frame: 128 KiB of text > 64 KiB typical macOS pipe buffer.
+	// When JSON-encoded by EncodeUserTurn the frame is even larger.
+	bigText := string(make([]byte, 128*1024))
+
+	firstDone := make(chan int, 1)
+
+	// First goroutine: send large blocking write, will block on full pipe.
+	go func() {
+		resp := sendTurnHTTP(t, ts, tok, map[string]string{
+			"conversationId": "conv-inflight",
+			"operatorId":     "alice",
+			"text":           bigText,
+		})
+		resp.Body.Close()
+		firstDone <- resp.StatusCode
+	}()
+
+	// Give the first goroutine's write goroutine time to start and fill the pipe
+	// (so turnMu is held by the time the second request races).
+	time.Sleep(100 * time.Millisecond)
+
+	// Poll: fire second requests until we observe 409 or exhaust retries.
+	var got409 bool
+	for i := 0; i < 50; i++ {
+		resp2 := sendTurnHTTP(t, ts, tok, map[string]string{
+			"conversationId": "conv-inflight",
+			"operatorId":     "alice",
+			"text":           "ping",
+		})
+		code := resp2.StatusCode
+		resp2.Body.Close()
+		if code == http.StatusConflict {
+			got409 = true
+			break
+		}
+	}
+
+	// Close the session to unblock the blocked write goroutine, then drain.
+	mgr.Close("conv-inflight")
+	<-firstDone
+
+	if !got409 {
+		t.Error("expected 409 Conflict for in-flight turn, never observed it")
 	}
 }
 

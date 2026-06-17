@@ -147,8 +147,7 @@ func waitForChunk(t *testing.T, get func() []dispatch.StreamChunk, n int, timeou
 // SAME running process (chunks arrive from the same session).
 func TestSession_Turn2SameProcess(t *testing.T) {
 	if os.Getenv("CI") == "" {
-		// Skip on non-CI unless explicitly requested: the shell subprocess is
-		// reliable but slow.
+		t.Skip("skipping shell-subprocess test outside CI; set CI=1 to run")
 	}
 
 	onChunk, getChunks := collectChunks()

@@ -1210,9 +1210,9 @@ func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) 
 //     (cooperative-label path), same as /api/chat/dispatch.
 //   - Only the session owner may send turns.  Non-owners receive 403.
 //   - sessionId and conversationId are validated by ValidateIdentityField.
-//   - text is not validated for content (the claude process handles it);
-//     it IS validated for size (maxTaskBytes via dispatch.maxTaskBytes
-//     is not re-checked here; the claude stdin write has its own timeout).
+//   - text is validated for size (dispatch.MaxTaskBytes; 1 MB); oversized
+//     text is rejected with 400 before any stdin write is attempted.
+//     Content is not otherwise validated — the claude process handles it.
 type SendRequest struct {
 	ConversationID string `json:"conversationId"`
 	OperatorID     string `json:"operatorId"`
@@ -1261,6 +1261,10 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "text is required", http.StatusBadRequest)
 		return
 	}
+	if len(req.Text) > dispatch.MaxTaskBytes {
+		http.Error(w, fmt.Sprintf("text exceeds maximum size (%d bytes; limit %d)", len(req.Text), dispatch.MaxTaskBytes), http.StatusBadRequest)
+		return
+	}
 
 	// sessionId is optional but validated when present.
 	if req.SessionID != "" {
@@ -1287,15 +1291,6 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		effectiveOperatorID = req.OperatorID
 	}
 
-	// Append the user turn to the transcript (mirrors handleChatDispatch).
-	_ = ch.transcripts.Append(TranscriptEntry{
-		SessionID:      req.SessionID,
-		ConversationID: req.ConversationID,
-		OperatorID:     effectiveOperatorID,
-		Role:           RoleUser,
-		Text:           req.Text,
-	})
-
 	frame := runtime.EncodeUserTurn(req.Text)
 	err := ch.interactiveMgr.Send(req.ConversationID, effectiveOperatorID, frame)
 	if err != nil {
@@ -1312,6 +1307,16 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	// Append the user turn to the transcript only after successful delivery —
+	// orphaned entries (from failed sends) would have no corresponding response.
+	_ = ch.transcripts.Append(TranscriptEntry{
+		SessionID:      req.SessionID,
+		ConversationID: req.ConversationID,
+		OperatorID:     effectiveOperatorID,
+		Role:           RoleUser,
+		Text:           req.Text,
+	})
 
 	w.WriteHeader(http.StatusAccepted)
 }

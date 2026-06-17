@@ -224,12 +224,21 @@ func (s *Session) readLoop(ctx context.Context) {
 
 // SendUserTurn writes a user-turn frame to the claude process's stdin.
 //
-// Returns errTurnInFlight when a turn is already in progress (the caller should
+// Returns ErrTurnInFlight when a turn is already in progress (the caller should
 // return 409 Conflict).  Returns an error if the session is closed or the write
 // times out (stdinWriteTimeout).
 //
 // The frame is encoded by runtime.EncodeUserTurn and written atomically with
 // a bounded write timeout.
+//
+// # Write-timeout behaviour
+//
+// If the stdin write does not complete within stdinWriteTimeout (e.g. the
+// claude process has stopped reading its stdin), the session is closed
+// immediately via Close().  This prevents an orphaned write goroutine from
+// blocking on the pipe while a subsequent turn is admitted — closing the pipe
+// unblocks the goroutine so it exits promptly.  Callers receive an error and
+// should not retry on the same session.
 func (s *Session) SendUserTurn(frame []byte) error {
 	select {
 	case <-s.closed:
@@ -253,6 +262,8 @@ func (s *Session) SendUserTurn(frame []byte) error {
 	}
 
 	// Bounded write: use a goroutine + channel to enforce the timeout.
+	// On timeout, Close() is called so the write goroutine unblocks promptly
+	// (closing the write end of the pipe causes the blocked Write to return).
 	done := make(chan error, 1)
 	go func() {
 		_, err := stdin.Write(frame)
@@ -266,7 +277,10 @@ func (s *Session) SendUserTurn(frame []byte) error {
 		}
 		return nil
 	case <-time.After(stdinWriteTimeout):
-		return fmt.Errorf("interactive: stdin write timed out after %s", stdinWriteTimeout)
+		// Close the session so the blocked write goroutine unblocks and exits,
+		// and no subsequent turn can race against the orphaned write.
+		s.Close()
+		return fmt.Errorf("interactive: stdin write timed out after %s; session closed", stdinWriteTimeout)
 	case <-s.closed:
 		return fmt.Errorf("interactive: session closed during write")
 	}
