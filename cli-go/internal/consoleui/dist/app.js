@@ -2718,7 +2718,10 @@
           if (pane.messages.length && pane.messages[pane.messages.length - 1].role === 'user') {
             pane.messages.pop();
           }
-          stopElapsedTimer(pane);
+          // S1: do NOT call stopElapsedTimer here — the in-flight turn is still
+          // streaming and its summary event will stop the timer naturally.
+          // Calling stopElapsedTimer while status='streaming' would blank the
+          // elapsed display while the real turn is still running.
           renderPaneHeader(paneId);
           renderPaneMessages(paneId);
           // Surface a brief inline notice without losing the typed text.
@@ -3137,14 +3140,30 @@
   // ---- Interactive mode toggle -----------------------------------------------
   //
   // togglePaneInteractive flips pane.interactive and persists the preference.
-  // It does NOT interrupt a streaming turn or clear messages — the change takes
-  // effect on the NEXT send.  If the pane already has a live interactive session
-  // (interactiveLive=true) and the operator turns interactive OFF, we mark it
-  // ended so the next send starts a fresh one-shot dispatch.
+  // The change takes effect on the NEXT send.  If the pane already has a live
+  // interactive session (interactiveLive=true) and the operator turns interactive
+  // OFF, we mark it ended so the next send starts a fresh one-shot dispatch.
+  //
+  // S2 guard: toggling while a turn is streaming is a no-op — the in-flight
+  // turn owns the session state and silently mutating interactiveLive/
+  // conversationToPaneIds mid-stream would leave the pane in a broken state
+  // (subsequent SSE frames for the running turn would be unroutable).  Show a
+  // brief inline notice instead so the operator knows why the click was ignored.
 
   function togglePaneInteractive(paneId) {
     const pane = chatPanes.get(paneId);
     if (!pane) return;
+
+    // S2: block toggle while a turn is in flight.
+    if (pane.status === 'streaming') {
+      var guardNotice = document.getElementById('pane-notice-' + paneId);
+      if (guardNotice) {
+        guardNotice.textContent = 'Finish the current turn before toggling interactive mode.';
+        guardNotice.style.display = '';
+        setTimeout(function() { if (guardNotice) guardNotice.style.display = 'none'; }, 3000);
+      }
+      return;
+    }
 
     pane.interactive = !pane.interactive;
 
