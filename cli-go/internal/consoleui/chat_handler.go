@@ -697,6 +697,15 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				ev.ToolName = chunk.ToolName
 				ev.ToolOutput = chunk.ToolOutput
 				ev.IsError = chunk.IsError
+
+			case "thinking":
+				// Extended thinking delta.  Owner-scoped (same as token/tool events):
+				// ChatHub.Route delivers only to the session owner's connections when
+				// the session is not shared.  Not persisted to the transcript —
+				// thinking is ephemeral UI state.
+				ev.Thinking = chunk.Thinking
+				ev.ThinkingTruncated = chunk.ThinkingTruncated
+				ev.ThinkingRedacted = chunk.ThinkingRedacted
 			}
 			ch.hub.Route(ev)
 		}
@@ -1038,7 +1047,7 @@ func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) 
 	}
 	resp := shareResponse{OK: true}
 	if req.Shared {
-		resp.Warning = "Tool output (bash stdout, file contents) will be visible to all session watchers."
+		resp.Warning = "Tool output (bash stdout, file contents) and model thinking will be visible to all session watchers."
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

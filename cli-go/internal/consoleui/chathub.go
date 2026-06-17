@@ -74,13 +74,31 @@ type SSEEvent struct {
 	// SessionID identifies which chat pane this event belongs to.
 	SessionID string `json:"session_id"`
 
-	// Type is "token" | "summary" | "ping" | "tool_use" | "tool_result" | "error".
+	// Type is "token" | "summary" | "ping" | "tool_use" | "tool_result" | "error" | "thinking".
 	// "error" is emitted by the dispatch goroutine when RunStream returns a
 	// non-cancel error, so the client UI can show an error instead of hanging.
+	// "thinking" carries an incremental extended-thinking delta (see Thinking field).
 	Type string `json:"type"`
 
 	// Text is the token text (Type=="token") or full text (Type=="summary").
 	Text string `json:"text,omitempty"`
+
+	// Thinking is an incremental extended-thinking delta (Type=="thinking").
+	// Owner-scoped: only the session owner's SSE connections receive thinking
+	// events (same scoping rule as token and tool events).  Not persisted to
+	// the transcript (ephemeral, like tool events).
+	// For redacted_thinking blocks the value is the fixed placeholder "[redacted thinking]".
+	Thinking string `json:"thinking,omitempty"`
+
+	// ThinkingTruncated is true when the parser's 64 KiB per-block cap was hit
+	// on this delta (Type=="thinking" only).  Signals the UI to append a
+	// truncation marker after the last rendered thinking text.
+	ThinkingTruncated bool `json:"thinking_truncated,omitempty"`
+
+	// ThinkingRedacted is true when this chunk represents a redacted_thinking
+	// block whose content is opaque (Type=="thinking" only).  The UI should
+	// render it distinctly rather than as plain thinking text.
+	ThinkingRedacted bool `json:"thinking_redacted,omitempty"`
 
 	// ExitCode is set on summary events.  Pointer so exit_code:0 (success) is
 	// serialized on summary turns and absent on token/other turns (omitempty on
