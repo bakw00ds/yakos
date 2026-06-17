@@ -3962,3 +3962,75 @@ html[data-theme="light"] .users-action-btn.danger:hover:not(:disabled) {
     transition: none;
   }
 }
+
+/* ── Phase 2: IDE live-coupling additions ───────────────────────────────── */
+
+/* Follow-agent toggle — reuses ide-header-btn base; active state via
+   ide-header-btn-active (already defined above). No new design tokens. */
+.ide-follow-btn {
+  /* min-width so it doesn't collapse when the label wraps */
+  min-width: 80px;
+}
+
+/* Tree modified dot: a small "M" badge appended to file buttons that
+   received a files.changed WS event since they were last opened. */
+.ide-tree-modified-dot {
+  margin-left: auto;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--accent);
+  opacity: 0.8;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+/* Decaying line-highlight decoration applied by ide-editor.js when an
+   external file change is live-applied into Monaco.  The decoration class
+   is injected via monaco.createDecorationsCollection; Monaco adds it as a
+   CSS class on the line element inside the iframe.  This block is therefore
+   only effective inside ide-editor.html (which loads the same styles.css via
+   the /ide/editor route that serves ide-editor.html).
+   The animation fades from a warm yellow tint to transparent over 2 s. */
+@keyframes ide-external-change-fade {
+  from { background: rgba(255, 200, 0, 0.18); }
+  to   { background: transparent; }
+}
+
+.ide-external-change-line {
+  animation: ide-external-change-fade 2s ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ide-external-change-line {
+    animation: none;
+    background: rgba(255, 200, 0, 0.12);
+  }
+}
+
+/* File:line reference links in assistant chat messages.
+   Styled to look like inline code with an underline hint.
+   Uses the theme accent color for interactivity; no hardcoded hex. */
+.ide-file-ref-link {
+  color: var(--accent);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: rgba(var(--accent-rgb, 255,255,255), 0.4);
+  border-radius: 2px;
+  padding: 0 1px;
+  /* No href so no default link appearance; must be explicit */
+  display: inline;
+}
+
+.ide-file-ref-link:hover {
+  text-decoration-color: var(--accent);
+  background: var(--color-accent-dim, rgba(255,255,255,0.08));
+}
+
+.ide-file-ref-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
