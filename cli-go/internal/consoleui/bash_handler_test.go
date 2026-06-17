@@ -444,8 +444,10 @@ func TestBashHandler_StdoutTruncation(t *testing.T) {
 			injectIdentityMiddleware(adminID, srv.Handler())))
 
 	// Generate 20000 bytes of output (well above 16384 cap).
-	// "printf '%0.s#' {1..20000}" produces 20000 # characters without a newline.
-	cmd := "printf '%0.s#' {1..20000}"
+	// POSIX-portable: head -c + tr avoids bash brace-expansion {1..N} which
+	// dash (the default /bin/sh on Ubuntu) does not expand, producing ~0 bytes
+	// and causing the truncation assertion to fail on Linux CI.
+	cmd := "head -c 20000 /dev/zero | tr '\\0' x"
 	body, _ := json.Marshal(map[string]string{"command": cmd})
 	req := httptest.NewRequest(http.MethodPost, "/api/console/bash", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -493,7 +495,9 @@ func TestBashHandler_StderrTruncation(t *testing.T) {
 			injectIdentityMiddleware(adminID, srv.Handler())))
 
 	// 20000 bytes of stderr output.
-	cmd := "printf '%0.s@' {1..20000} >&2"
+	// POSIX-portable: same head -c + tr form as the stdout test, redirected
+	// to stderr. Avoids bash brace-expansion which dash does not support.
+	cmd := "head -c 20000 /dev/zero | tr '\\0' x 1>&2"
 	body, _ := json.Marshal(map[string]string{"command": cmd})
 	req := httptest.NewRequest(http.MethodPost, "/api/console/bash", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
