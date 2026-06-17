@@ -370,6 +370,7 @@ func New(cfg Config) (*Server, error) {
 	// Wire the interactive manager when provided (Interactive-P1).
 	// When nil, interactive:true in dispatch returns 503.
 	chatH.interactiveMgr = cfg.InteractiveManager
+	chatH.interactiveSend = cfg.InteractiveManager // satisfies interactiveSender; nil is safe (guarded by interactiveMgr nil check)
 	flowsH := &flowsHandlers{
 		engine:     cfg.WorkflowEngine,
 		workDir:    cfg.WorkDir,

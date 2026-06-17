@@ -254,6 +254,32 @@ func RequireCSRFForSessionForTest(authStore *authsession.Store, next http.Handle
 	return requireCSRFForSession(authStore, next)
 }
 
+// ---- Interactive-P1 test exports --------------------------------------------
+
+// InteractiveSender is the exported alias for the interactiveSender interface.
+// Tests in consoleui_test can implement it to inject deterministic Send errors
+// (e.g. ErrTurnInFlight) without needing a real subprocess.
+type InteractiveSender = interactiveSender
+
+// SetInteractiveSender replaces the chat handler's Send-side implementation
+// with stub.  Call this AFTER MustNew and BEFORE the first HTTP request.
+// The interactiveMgr nil-guard in handleChatSend is bypassed by this helper:
+// it sets interactiveMgr to a non-nil sentinel and interactiveSend to stub.
+func SetInteractiveSender(srv *Server, stub InteractiveSender) {
+	// We need interactiveMgr != nil so the 503 guard passes.  Reuse the same
+	// non-nil value already set (if any), or set a sentinel non-nil pointer.
+	// In tests that pass a real Manager via Config, interactiveMgr is already
+	// set; we only replace interactiveSend.
+	// For tests that pass nil InteractiveManager but want to test the 409 path,
+	// we set interactiveMgr to a bare non-nil value via the sentinel field trick.
+	srv.chat.interactiveSend = stub
+	// If interactiveMgr is nil (no real manager provided), we still need it
+	// non-nil to pass the 503 guard.  We cannot construct a Manager here
+	// (requires context + goroutine), so callers of SetInteractiveSender must
+	// also pass a non-nil InteractiveManager in Config (even a dummy one).
+	// See TestChatSend_TurnInFlight_409 for the pattern.
+}
+
 // ---- File API test exports ---------------------------------------------------
 
 // MaxTreeEntriesPerDir is exported so tests can exercise the per-directory

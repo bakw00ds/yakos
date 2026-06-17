@@ -18,8 +18,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/dispatch"
@@ -27,9 +27,16 @@ import (
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
+// sendTestServer bundles the resources needed to drive /api/chat/send tests.
+type sendTestServer struct {
+	ts  *httptest.Server
+	srv *consoleui.Server // unwrapped consoleui.Server; use for SetInteractiveSender
+	tok string
+}
+
 // newInteractiveSendTestServer builds a test server wired with an
 // InteractiveManager (or nil) for testing /api/chat/send.
-func newInteractiveSendTestServer(t *testing.T, mgr *interactive.Manager) (*httptest.Server, string) {
+func newInteractiveSendTestServer(t *testing.T, mgr *interactive.Manager) sendTestServer {
 	t.Helper()
 	stateDir := t.TempDir()
 	workDir := t.TempDir()
@@ -55,24 +62,24 @@ func newInteractiveSendTestServer(t *testing.T, mgr *interactive.Manager) (*http
 		consoleui.RequireJSONForMutations(srv.Handler()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
-	return ts, tok
+	return sendTestServer{ts: ts, srv: srv, tok: tok}
 }
 
 // sendTurnHTTP performs POST /api/chat/send to the test server.
-func sendTurnHTTP(t *testing.T, ts *httptest.Server, tok string, body interface{}) *http.Response {
+func sendTurnHTTP(t *testing.T, s sendTestServer, body interface{}) *http.Response {
 	t.Helper()
 	b, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
-		ts.URL+"/api/chat/send", bytes.NewReader(b))
+		s.ts.URL+"/api/chat/send", bytes.NewReader(b))
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Authorization", "Bearer "+s.tok)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := ts.Client().Do(req)
+	resp, err := s.ts.Client().Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -82,8 +89,8 @@ func sendTurnHTTP(t *testing.T, ts *httptest.Server, tok string, body interface{
 // TestChatSend_NoManager_503 verifies that /api/chat/send returns 503 when
 // no InteractiveManager is configured.
 func TestChatSend_NoManager_503(t *testing.T) {
-	ts, tok := newInteractiveSendTestServer(t, nil)
-	resp := sendTurnHTTP(t, ts, tok, map[string]string{
+	s := newInteractiveSendTestServer(t, nil)
+	resp := sendTurnHTTP(t, s, map[string]string{
 		"conversationId": "conv-test",
 		"operatorId":     "alice",
 		"text":           "hello",
@@ -103,8 +110,8 @@ func TestChatSend_NoSession_404(t *testing.T) {
 	mgr := interactive.NewManager(ctx, interactive.ManagerConfig{Cap: 4})
 	defer mgr.Stop()
 
-	ts, tok := newInteractiveSendTestServer(t, mgr)
-	resp := sendTurnHTTP(t, ts, tok, map[string]string{
+	s := newInteractiveSendTestServer(t, mgr)
+	resp := sendTurnHTTP(t, s, map[string]string{
 		"conversationId": "no-such-conv",
 		"operatorId":     "alice",
 		"text":           "hello",
@@ -124,8 +131,8 @@ func TestChatSend_MissingConversationID_400(t *testing.T) {
 	mgr := interactive.NewManager(ctx, interactive.ManagerConfig{Cap: 4})
 	defer mgr.Stop()
 
-	ts, tok := newInteractiveSendTestServer(t, mgr)
-	resp := sendTurnHTTP(t, ts, tok, map[string]string{
+	s := newInteractiveSendTestServer(t, mgr)
+	resp := sendTurnHTTP(t, s, map[string]string{
 		"operatorId": "alice",
 		"text":       "hello",
 	})
@@ -144,8 +151,8 @@ func TestChatSend_MissingText_400(t *testing.T) {
 	mgr := interactive.NewManager(ctx, interactive.ManagerConfig{Cap: 4})
 	defer mgr.Stop()
 
-	ts, tok := newInteractiveSendTestServer(t, mgr)
-	resp := sendTurnHTTP(t, ts, tok, map[string]string{
+	s := newInteractiveSendTestServer(t, mgr)
+	resp := sendTurnHTTP(t, s, map[string]string{
 		"conversationId": "conv-test",
 		"operatorId":     "alice",
 	})
@@ -153,6 +160,11 @@ func TestChatSend_MissingText_400(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
 	}
+}
+
+// shellQuote escapes s for safe embedding inside POSIX single quotes.
+func shellQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "'\\''")
 }
 
 // aliveProvider returns a CmdProvider for a process that stays alive until
@@ -185,10 +197,10 @@ func TestChatSend_OwnerConflict_403(t *testing.T) {
 		t.Fatalf("Ensure: %v", err)
 	}
 
-	ts, tok := newInteractiveSendTestServer(t, mgr)
+	s := newInteractiveSendTestServer(t, mgr)
 
 	// Send as "bob" — should be 403.
-	resp := sendTurnHTTP(t, ts, tok, map[string]string{
+	resp := sendTurnHTTP(t, s, map[string]string{
 		"conversationId": "conv-owner",
 		"operatorId":     "bob",
 		"text":           "hello",
@@ -199,80 +211,54 @@ func TestChatSend_OwnerConflict_403(t *testing.T) {
 	}
 }
 
+// errTurnInFlightSender is a stub interactiveSender that always returns
+// interactive.ErrTurnInFlight from Send.  Used by TestChatSend_TurnInFlight_409
+// to exercise the 409 mapping deterministically without any subprocess.
+type errTurnInFlightSender struct{}
+
+func (errTurnInFlightSender) Send(_, _ string, _ []byte) error {
+	return interactive.ErrTurnInFlight
+}
+
 // TestChatSend_TurnInFlight_409 verifies that /api/chat/send returns 409 when
 // a turn is already in flight on the session (ErrTurnInFlight).
 //
-// Strategy: start a session whose process never reads stdin.  Send a large
-// frame (128 KiB, larger than the typical 64 KiB OS pipe buffer) so the
-// write goroutine inside Session.SendUserTurn blocks on the pipe write while
-// holding turnMu.  Then send a second concurrent request; it must observe 409.
-// Both requests are issued concurrently (goroutines) to avoid the serial-HTTP
-// deadlock.  We close the session at the end to unblock the first goroutine.
+// # Why a stub sender
+//
+// Prior approaches held turnMu by filling the OS pipe buffer with a large frame,
+// relying on pipe-buffer exhaustion timing.  Pipe-buffer sizes and drain timings
+// differ between Linux and macOS, making that approach flaky in CI.
+//
+// Instead, we replace only the Send path (via the interactiveSender interface)
+// with errTurnInFlightSender which returns ErrTurnInFlight unconditionally.
+// This exercises the HTTP 409 mapping — `errors.Is(err, ErrTurnInFlight) → 409`
+// in handleChatSend — deterministically without any subprocess or timing
+// dependency.  The lock mechanics of Session.SendUserTurn are already covered by
+// TestSession_ErrTurnInFlight in the interactive package.
 func TestChatSend_TurnInFlight_409(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// A real Manager is needed so the `interactiveMgr != nil` guard in
+	// handleChatSend passes (returning 503 otherwise).  The Send path is
+	// replaced with the stub below, so no session or subprocess is created.
 	mgr := interactive.NewManager(ctx, interactive.ManagerConfig{Cap: 4})
 	defer mgr.Stop()
 
-	// A process that never reads stdin — write goroutine blocks when pipe fills.
-	blockingProvider := func() *exec.Cmd {
-		return exec.Command("sh", "-c", "sleep 30") //nolint:gosec
-	}
+	s := newInteractiveSendTestServer(t, mgr)
 
-	_, err := mgr.Ensure("conv-inflight", "alice", interactive.SessionParams{
-		OnChunk:     noopOnChunk,
-		CmdProvider: blockingProvider,
+	// Replace the Send-side implementation with the stub.  The interactiveMgr
+	// nil-guard already passes because mgr is non-nil.
+	consoleui.SetInteractiveSender(s.srv, errTurnInFlightSender{})
+
+	resp := sendTurnHTTP(t, s, map[string]string{
+		"conversationId": "conv-inflight",
+		"operatorId":     "alice",
+		"text":           "hello",
 	})
-	if err != nil {
-		t.Fatalf("Ensure: %v", err)
-	}
-
-	ts, tok := newInteractiveSendTestServer(t, mgr)
-
-	// Large frame: 128 KiB of text > 64 KiB typical macOS pipe buffer.
-	// When JSON-encoded by EncodeUserTurn the frame is even larger.
-	bigText := string(make([]byte, 128*1024))
-
-	firstDone := make(chan int, 1)
-
-	// First goroutine: send large blocking write, will block on full pipe.
-	go func() {
-		resp := sendTurnHTTP(t, ts, tok, map[string]string{
-			"conversationId": "conv-inflight",
-			"operatorId":     "alice",
-			"text":           bigText,
-		})
-		resp.Body.Close()
-		firstDone <- resp.StatusCode
-	}()
-
-	// Give the first goroutine's write goroutine time to start and fill the pipe
-	// (so turnMu is held by the time the second request races).
-	time.Sleep(100 * time.Millisecond)
-
-	// Poll: fire second requests until we observe 409 or exhaust retries.
-	var got409 bool
-	for i := 0; i < 50; i++ {
-		resp2 := sendTurnHTTP(t, ts, tok, map[string]string{
-			"conversationId": "conv-inflight",
-			"operatorId":     "alice",
-			"text":           "ping",
-		})
-		code := resp2.StatusCode
-		resp2.Body.Close()
-		if code == http.StatusConflict {
-			got409 = true
-			break
-		}
-	}
-
-	// Close the session to unblock the blocked write goroutine, then drain.
-	mgr.Close("conv-inflight")
-	<-firstDone
-
-	if !got409 {
-		t.Error("expected 409 Conflict for in-flight turn, never observed it")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("expected 409 Conflict, got %d", resp.StatusCode)
 	}
 }
 
@@ -283,7 +269,7 @@ func TestChatSend_OneShotPathUnchanged(t *testing.T) {
 	// Build a server WITHOUT InteractiveManager — /api/chat/dispatch with no
 	// interactive flag should still return 202 (assuming no svc; returns 503 from
 	// the dispatch handler's svc==nil guard).
-	ts, tok := newInteractiveSendTestServer(t, nil)
+	s := newInteractiveSendTestServer(t, nil)
 	b, _ := json.Marshal(map[string]interface{}{
 		"agent":      "claude",
 		"task":       "hello",
@@ -292,10 +278,10 @@ func TestChatSend_OneShotPathUnchanged(t *testing.T) {
 		// interactive is absent — defaults to false
 	})
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost,
-		ts.URL+"/api/chat/dispatch", bytes.NewReader(b))
-	req.Header.Set("Authorization", "Bearer "+tok)
+		s.ts.URL+"/api/chat/dispatch", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+s.tok)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := ts.Client().Do(req)
+	resp, err := s.ts.Client().Do(req)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

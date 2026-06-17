@@ -146,6 +146,21 @@ type chatHandlers struct {
 	// Nil when interactive mode is not enabled (feature gate).
 	// Wired by New() from Config.InteractiveManager.
 	interactiveMgr *interactive.Manager
+
+	// interactiveSend is the narrower interface used by handleChatSend for the
+	// Send operation.  Normally wired to interactiveMgr (same pointer); tests may
+	// substitute a stub to inject specific error returns (e.g. ErrTurnInFlight)
+	// without needing a real subprocess.
+	// Nil check guards are NOT required here: handleChatSend guards on
+	// interactiveMgr != nil first and only reaches interactiveSend when that
+	// guard passes, so interactiveSend is always non-nil when used.
+	interactiveSend interactiveSender
+}
+
+// interactiveSender is the minimal interface covering the Send method consumed
+// by handleChatSend.  *interactive.Manager satisfies it; tests can stub it.
+type interactiveSender interface {
+	Send(conversationID, ownerOperatorID string, frame []byte) error
 }
 
 // newChatHandlers is called from registerChatRoutes.
@@ -1292,7 +1307,7 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	frame := runtime.EncodeUserTurn(req.Text)
-	err := ch.interactiveMgr.Send(req.ConversationID, effectiveOperatorID, frame)
+	err := ch.interactiveSend.Send(req.ConversationID, effectiveOperatorID, frame)
 	if err != nil {
 		switch {
 		case errors.Is(err, interactive.ErrNoSession):
