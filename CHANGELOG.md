@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.45.0.0] — 2026-06-17
+
+### Added
+
+- **Answerable AskUserQuestion over the networked console** — agents'
+  `AskUserQuestion` prompts now render as an interactive widget in the
+  chat and IDE panes. Operators can select a predefined option, add a
+  note, or type their own answer; answered via a new
+  `POST /api/chat/answer` endpoint backed by the Node Agent-SDK
+  interactive engine. Opt-in behind `--console-structured-questions`.
+  (#229, #231)
+- **Owner-private question delivery + forged-answer prevention** —
+  questions are delivered only to the originating operator session;
+  toolUseID replay and owner-scope gates block forged or replayed
+  answers; question payloads are size-capped. (#229)
+
+### Fixed
+
+- **AskUserQuestion validation aligned to native question shape** —
+  custom / "add your own" answer options are now correctly supported
+  without a validation error. (#230)
+- **Console share-pane keyed on stable conversationId** — the pane is
+  now found by the stable `conversationId` rather than ephemeral
+  agent-state, so it works whether the agent is idle or active.
+  Share state is bounded and owner-scoped; question carve-out
+  preserved. (#232)
+
 ## [0.44.0.0] — 2026-06-14
 
 ### Added
