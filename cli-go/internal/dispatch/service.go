@@ -353,9 +353,9 @@ var validEffortLevels = map[string]struct{}{
 
 // ValidateEffort checks that effort is either empty (meaning "no override") or
 // one of the valid level names.  Returns a descriptive error on invalid input.
-// The error message is safe to return to the caller (does not echo the value
-// verbatim — value is caller-controlled; a format string would be fine here
-// but the name list makes the constraint self-documenting).
+// The error DOES include the caller-supplied value (via %q) for internal
+// logging clarity.  Handlers must construct their own client-facing message
+// rather than forwarding this error string directly to the HTTP response.
 func ValidateEffort(effort string) error {
 	if effort == "" {
 		return nil // empty → omit flag; perfectly valid

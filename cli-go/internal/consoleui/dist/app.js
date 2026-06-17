@@ -1282,16 +1282,23 @@
     const sessionId = ev.session_id || '';
     const conversationId = ev.conversation_id || '';
 
-    // Build the delivery set from conversationToPaneIds (preferred) +
-    // any sessionToPaneIds fallback when conversation_id is absent.
-    // Use a combined Set to avoid double-delivering to a pane that appears in both.
+    // B-2 fix: build the delivery set as the TRUE UNION of:
+    //   conversationToPaneIds[conversation_id]  — IDE mirror panes bound by conversation
+    //   sessionToPaneIds[session_id]            — /attach panes bound by session_id
+    // The Set deduplicates panes that appear in both (e.g. a Chat pane that both
+    // dispatched the turn and is also registered by session).  The prior either/or
+    // logic caused /attach panes to go dark whenever conversation_id was present,
+    // because they only register in sessionToPaneIds (they attach by session_id, not
+    // by conversation_id).  Using a union means both routing strategies deliver
+    // simultaneously with no double-render risk.
     const deliverySet = new Set();
     if (conversationId) {
       var convSet = conversationToPaneIds.get(conversationId);
       if (convSet) { for (var pid of convSet) deliverySet.add(pid); }
     }
-    if (!conversationId && sessionId) {
-      // Fallback: no conversation_id on this frame — route by session_id.
+    if (sessionId) {
+      // Always include session-keyed panes (covers /attach panes and provides a
+      // fallback for older backend frames that may lack conversation_id).
       var sessSet = sessionToPaneIds.get(sessionId);
       if (sessSet) { for (var pid of sessSet) deliverySet.add(pid); }
     }
@@ -1465,15 +1472,22 @@
       // Teardown: remove THIS paneId from the session fan-out set.
       // Only delete the map entry when the set empties so other panes
       // watching the same session keep their registration.
+      // Set.prototype.delete returns true if the element was present — use
+      // that as the authoritative "this pane was the dispatcher" signal,
+      // because sendPaneMessage is the ONLY path that registers a pane in
+      // sessionToPaneIds.  Mirror/attach/watch panes never call sendPaneMessage
+      // for sessions they are watching, so they are never in this set.
       var doneSet = sessionToPaneIds.get(sessionId);
+      var wasDispatcher = false;
       if (doneSet) {
-        doneSet.delete(paneId);
+        wasDispatcher = doneSet.delete(paneId); // true iff this pane dispatched this turn
         if (doneSet.size === 0) sessionToPaneIds.delete(sessionId);
       }
-      // Conversation-level routing: remove this paneId from conversationToPaneIds
-      // only when this pane's own turn is done.  Other panes on the same
-      // conversation keep their entries.
-      if (pane.conversationId) {
+      // B-1 fix: de-register from conversationToPaneIds ONLY when this pane
+      // was the active dispatcher for this session (wasDispatcher === true).
+      // Passive mirror/attach panes must STAY registered so they continue
+      // receiving events for all future turns on the same conversation.
+      if (wasDispatcher && pane.conversationId) {
         var doneConvSet = conversationToPaneIds.get(pane.conversationId);
         if (doneConvSet) {
           doneConvSet.delete(paneId);
@@ -7366,10 +7380,15 @@
   }
 
   // ideBindChatToSession tears down the current IDE-slot pane and opens an
-  // attached view of an existing session in the IDE chat slot.
+  // attached view of an existing conversation in the IDE chat slot.
   //
-  // sessionId      — the session to mirror (must be in fleetSessions as attachable).
-  // conversationId — usually the same as sessionId (single-session convention).
+  // conversationId — the stable conversation to mirror and backfill.  This is
+  //                  the picker's option value (from fleet row.conversation_id).
+  //                  Used as the pane's conversationId so it is registered in
+  //                  conversationToPaneIds and receives all future SSE frames for
+  //                  this conversation regardless of per-turn session_id.
+  // sessionId      — a known live session_id for the server IsShared check and
+  //                  for cancel correlation.  May be '' when unavailable.
   // watchOnly      — true when the operator does not own the session (read-only);
   //                  false when the operator owns it (composer enabled).
   //
