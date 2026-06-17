@@ -400,7 +400,6 @@
 
   const TABS = [
     { id: 'overview',  label: 'Overview',    src: null,       phase: null },
-    { id: 'repl',      label: 'REPL',        src: null,       phase: null },
     { id: 'kanban',    label: 'Kanban',       src: '/kanban/', phase: null },
     { id: 'cost',      label: 'Cost',         src: '/cost/',   phase: null },
     { id: 'perf',      label: 'Performance',  src: '/perf/',   phase: null },
@@ -498,12 +497,6 @@
           }
         });
       }
-    }
-
-    // On first switch to REPL tab, seed the fleet panel from GET /api/fleet
-    // and load kanban action items.
-    if (id === 'repl') {
-      initReplTab();
     }
 
     // On first switch to chat tab, ensure SSE is running.
@@ -973,8 +966,10 @@
   let chatPanes = new Map();   // paneId → PaneState
   let chatSSEAbort = null;     // AbortController for the SSE fetch
 
-  // Map sessionId → paneId for fast event demux.
-  let sessionToPaneId = new Map();
+  // Map sessionId → Set<paneId> for 1:many SSE fan-out.
+  // Multiple panes (e.g. Chat tab + IDE embedded pane) can watch the same
+  // sessionId simultaneously; each receives every live SSE frame.
+  let sessionToPaneIds = new Map();
 
   // The self-asserted operator ID for this browser session.
   let chatOperatorId = '';
@@ -1075,7 +1070,7 @@
   // watchOnly   — true when the caller does NOT own the session (shared watcher);
   //               false when the caller is the owner (can interject).
   //
-  // The pane is registered in chatPanes and sessionToPaneId so that incoming SSE
+  // The pane is registered in chatPanes and sessionToPaneIds so that incoming SSE
   // frames for sessionId are routed to it by the existing SSE demux.
   // loadTranscriptForPane is called with the sessionId param so the transcript
   // handler's IsShared path applies for shared-session backfill.
@@ -1099,10 +1094,18 @@
     // Normalise: conversationId defaults to sessionId (single-session convention).
     var convId = conversationId || sessionId;
 
-    // Reuse existing pane if we are already watching this session.
-    if (sessionToPaneId.has(sessionId)) {
-      // Already attached — nothing to do; pane is already visible.
-      return;
+    // Check if we already have a pane for this exact session in chatPanes.
+    // (Allow re-attaching when the existing pane has been removed, but skip
+    // when the same pane is still live to avoid duplicates.)
+    var existingSet = sessionToPaneIds.get(sessionId);
+    if (existingSet) {
+      // Walk the set: if any of those paneIds is still in chatPanes, bail out.
+      for (var xid of existingSet) {
+        if (chatPanes.has(xid)) {
+          // Already attached and live — nothing to do; pane is visible.
+          return;
+        }
+      }
     }
 
     if (chatPanes.size >= MAX_PANES) {
@@ -1117,7 +1120,9 @@
     p.status = 'idle';
 
     chatPanes.set(p.id, p);
-    sessionToPaneId.set(sessionId, p.id);
+    // Fan-out registration: add this paneId to the Set for this sessionId.
+    if (!sessionToPaneIds.has(sessionId)) sessionToPaneIds.set(sessionId, new Set());
+    sessionToPaneIds.get(sessionId).add(p.id);
 
     // Rebuild the pane rail to include the new pane.
     var rail = document.getElementById('chat-pane-rail');
@@ -1246,16 +1251,26 @@
 
   function handleSSEEvent(ev) {
     // ev: {session_id, type, text?, exit_code?, duration_s?, total_cost_usd?,
-    //       model_resolved?, tool_name?, tool_input?, tool_output?, is_error?, ts}
+    //       model_resolved?, tool_name?, tool_input?, tool_output?, is_error?,
+    //       thinking?, ts}
     const sessionId = ev.session_id;
     if (!sessionId) return;
 
-    const paneId = sessionToPaneId.get(sessionId);
-    if (!paneId) return; // unknown session — ignore (could belong to another tab)
+    const paneIdSet = sessionToPaneIds.get(sessionId);
+    if (!paneIdSet || paneIdSet.size === 0) return; // unknown session
 
-    const pane = chatPanes.get(paneId);
-    if (!pane) return;
+    // Fan-out: deliver the event to EVERY pane registered for this sessionId.
+    for (const paneId of paneIdSet) {
+      const pane = chatPanes.get(paneId);
+      if (!pane) continue; // pane was closed; skip stale entry
 
+      _handleSSEEventForPane(ev, sessionId, paneId, pane);
+    }
+  }
+
+  // _handleSSEEventForPane applies a single SSE event to one pane.
+  // Called by handleSSEEvent for each pane in the fan-out Set.
+  function _handleSSEEventForPane(ev, sessionId, paneId, pane) {
     if (ev.type === 'token') {
       // Append token text to the last streaming message, or start a new one.
       const msgs = pane.messages;
@@ -1267,17 +1282,53 @@
       }
       renderPaneMessages(paneId);
       if (pane.autoScroll) scrollPaneToBottom(paneId);
+    } else if (ev.type === 'thinking') {
+      // Thinking events: dim/italic collapsible block distinct from assistant text.
+      // Streams like tokens — append to last thinking block if one is open,
+      // otherwise open a new one.
+      const msgs = pane.messages;
+      const last = msgs[msgs.length - 1];
+      if (last && last.role === 'thinking' && last.sessionId === sessionId && last.streaming) {
+        last.text += ev.thinking || '';
+      } else {
+        msgs.push({ role: 'thinking', text: ev.thinking || '', ts: ev.ts, sessionId, streaming: true });
+      }
+      renderPaneMessages(paneId);
+      if (pane.autoScroll) scrollPaneToBottom(paneId);
     } else if (ev.type === 'tool_use') {
       // Phase 4: collapsible tool-invocation block.
       // XSS discipline: esc() applied to all server-supplied strings before DOM insertion.
       // ToolName and ToolInput arrive from the runtime (untrusted text).
-      pane.messages.push({
-        role: 'tool_use',
-        toolName: ev.tool_name || '',
-        toolInput: ev.tool_input || '',
-        ts: ev.ts,
-        sessionId,
-      });
+      //
+      // TodoWrite: rendered as a dedicated checklist widget instead of a generic block.
+      var toolName = ev.tool_name || '';
+      var toolInputRaw = ev.tool_input || '';
+      if (toolName === 'TodoWrite') {
+        // Parse the todo list and record it; update in-place if one exists already.
+        var todoItems = _parseTodoInput(toolInputRaw);
+        // Replace the previous TodoWrite message for this session (latest wins).
+        var msgs = pane.messages;
+        var replacedTodo = false;
+        for (var ti = msgs.length - 1; ti >= 0; ti--) {
+          if (msgs[ti].role === 'todo_write' && msgs[ti].sessionId === sessionId) {
+            msgs[ti].items = todoItems;
+            msgs[ti].ts = ev.ts;
+            replacedTodo = true;
+            break;
+          }
+        }
+        if (!replacedTodo) {
+          msgs.push({ role: 'todo_write', items: todoItems, ts: ev.ts, sessionId });
+        }
+      } else {
+        pane.messages.push({
+          role: 'tool_use',
+          toolName: toolName,
+          toolInput: toolInputRaw,
+          ts: ev.ts,
+          sessionId,
+        });
+      }
       renderPaneMessages(paneId);
       if (pane.autoScroll) scrollPaneToBottom(paneId);
     } else if (ev.type === 'tool_result') {
@@ -1311,9 +1362,26 @@
       }
       renderPaneMessages(paneId);
       if (pane.autoScroll) scrollPaneToBottom(paneId);
+    } else if (ev.type === 'error') {
+      // Runtime error event (distinct from summary exit_code != 0).
+      pane.messages.push({
+        role: 'system',
+        text: 'Error: ' + (ev.text || ev.error || 'unknown error'),
+        ts: ev.ts,
+        sessionId,
+      });
+      renderPaneMessages(paneId);
+      if (pane.autoScroll) scrollPaneToBottom(paneId);
     } else if (ev.type === 'summary') {
-      // Mark the last streaming message as done.
+      // Close any open thinking streams.
       const msgs = pane.messages;
+      for (var si = msgs.length - 1; si >= 0; si--) {
+        if (msgs[si].role === 'thinking' && msgs[si].sessionId === sessionId && msgs[si].streaming) {
+          msgs[si].streaming = false;
+          break;
+        }
+      }
+      // Mark the last streaming assistant message as done.
       const last = msgs[msgs.length - 1];
       if (last && last.streaming) {
         last.streaming = false;
@@ -1337,10 +1405,17 @@
         costUSD,
       });
 
-      // Done streaming.
+      // Done streaming — update pane state.
       pane.status = exitCode === 0 ? 'done' : 'error';
       pane.activeSessionId = null;
-      sessionToPaneId.delete(sessionId);
+
+      // Teardown: remove THIS paneId from the set; delete map entry when set empties.
+      var doneSet = sessionToPaneIds.get(sessionId);
+      if (doneSet) {
+        doneSet.delete(paneId);
+        if (doneSet.size === 0) sessionToPaneIds.delete(sessionId);
+      }
+
       stopElapsedTimer(pane);
       renderPaneHeader(paneId);
       renderPaneMessages(paneId);
@@ -1358,6 +1433,31 @@
           ideRefreshGitStatus();
         }
       }
+    }
+  }
+
+  // ---- TodoWrite parser -------------------------------------------------------
+  //
+  // _parseTodoInput tolerates field-name variants:
+  //   content / subject  (the text of the item)
+  //   activeForm         (unused by the renderer but preserved)
+  //   status             "pending" | "in_progress" | "completed"
+
+  function _parseTodoInput(raw) {
+    if (!raw) return [];
+    try {
+      var parsed = JSON.parse(raw);
+      // Accept either a top-level array or {items:[...]} shape.
+      var arr = Array.isArray(parsed) ? parsed :
+                (parsed && Array.isArray(parsed.items) ? parsed.items : []);
+      return arr.map(function(item) {
+        return {
+          text: String(item.content || item.subject || ''),
+          status: String(item.status || 'pending'),
+        };
+      });
+    } catch (_) {
+      return [];
     }
   }
 
@@ -1526,9 +1626,15 @@
       cancelPaneSession(paneId);
     }
     stopElapsedTimer(pane);
-    // Note: pane.activeSessionId is null here — cancelPaneSession (above) always
-    // nulls it, and if there was no active session the guard above skipped it.
-    // The sessionToPaneId entry was already removed inside cancelPaneSession.
+    // Remove this paneId from the fan-out set for attachedSessionId if present.
+    // (activeSessionId was already cleaned by cancelPaneSession above.)
+    if (pane.attachedSessionId) {
+      var closeAttachSet = sessionToPaneIds.get(pane.attachedSessionId);
+      if (closeAttachSet) {
+        closeAttachSet.delete(paneId);
+        if (closeAttachSet.size === 0) sessionToPaneIds.delete(pane.attachedSessionId);
+      }
+    }
     chatPanes.delete(paneId);
     savePaneState();
     const el = document.getElementById('pane-' + paneId);
@@ -2079,9 +2185,9 @@
       msgsEl.appendChild(buildMessageElement(msg, pane));
     }
 
-    // Streaming shimmer line (if last message is streaming).
+    // Streaming shimmer line (if last message is assistant or thinking and streaming).
     const last = pane.messages[pane.messages.length - 1];
-    if (last && last.role === 'assistant' && last.streaming) {
+    if (last && (last.role === 'assistant' || last.role === 'thinking') && last.streaming) {
       const shimmer = document.createElement('span');
       shimmer.className = 'chat-streaming-cursor';
       shimmer.setAttribute('aria-hidden', 'true');
@@ -2125,33 +2231,100 @@
           });
         }(fileRefLinks[fli]));
       }
+    } else if (msg.role === 'thinking') {
+      // Thinking block: dim/italic, collapsible, streamed like tokens.
+      // Distinct from assistant text — de-emphasized visual treatment.
+      // XSS discipline: msg.text is server-supplied; goes through escLines().
+      el.className = 'chat-msg chat-msg-thinking' + (msg.streaming ? ' streaming' : '');
+      el.innerHTML =
+        '<details class="chat-thinking-details"' + (msg.streaming ? ' open' : '') + '>' +
+          '<summary class="chat-thinking-summary" aria-label="Model thinking">' +
+            '<span class="chat-thinking-icon" aria-hidden="true">&#x1F4AD;</span>' +
+            '<span class="chat-thinking-label">thinking</span>' +
+            '<span class="chat-msg-time">' + esc(formatTime(msg.ts)) + '</span>' +
+          '</summary>' +
+          '<div class="chat-thinking-body">' + escLines(msg.text || '') + '</div>' +
+        '</details>';
+    } else if (msg.role === 'todo_write') {
+      // TodoWrite widget: checklist with status icons.
+      // XSS discipline: all item text goes through esc().
+      el.className = 'chat-msg chat-msg-todo';
+      var todoItems = Array.isArray(msg.items) ? msg.items : [];
+      var todoRows = '';
+      for (var ti2 = 0; ti2 < todoItems.length; ti2++) {
+        var todoItem = todoItems[ti2];
+        var statusIcon = todoItem.status === 'completed' ? '&#x2611;' :
+                         todoItem.status === 'in_progress' ? '&#x25D0;' : '&#x2610;';
+        var statusClass = 'chat-todo-item chat-todo-' + esc(String(todoItem.status || 'pending').replace(/_/g, '-'));
+        todoRows +=
+          '<li class="' + statusClass + '">' +
+            '<span class="chat-todo-icon" aria-hidden="true">' + statusIcon + '</span>' +
+            '<span class="chat-todo-text">' + esc(todoItem.text || '') + '</span>' +
+          '</li>';
+      }
+      el.innerHTML =
+        '<div class="chat-todo-header">' +
+          '<span class="chat-tool-icon" aria-hidden="true">&#x2611;</span>' +
+          '<span class="chat-todo-label">TodoWrite</span>' +
+          '<span class="chat-msg-time">' + esc(formatTime(msg.ts)) + '</span>' +
+        '</div>' +
+        '<ul class="chat-todo-list" aria-label="Todo list">' +
+          (todoRows || '<li class="chat-todo-empty">No items</li>') +
+        '</ul>';
     } else if (msg.role === 'tool_use') {
-      // Phase 4: collapsible tool-invocation block.
+      // Phase 4: tool-invocation block with improved visibility.
       // XSS discipline: all server-supplied strings go through esc() before innerHTML.
       // tool_name and tool_input arrive from the runtime — treat as untrusted.
-      el.className = 'chat-msg chat-msg-tool';
+      //
+      // Bash is auto-expanded (short commands are the norm; operator needs to see them).
+      // Other tools with large inputs remain collapsed by default.
+      var isBash = msg.toolName === 'Bash';
       var label = toolLabel(msg.toolName, msg.toolInput);
-      // Render as a <details> collapsible so the operator can expand to see args.
-      var outputHtml = '';
+      el.className = 'chat-msg chat-msg-tool';
+
+      // Bash: extract command string for the always-visible affordance line.
+      var bashCmd = '';
+      if (isBash && msg.toolInput) {
+        try {
+          var bparsed = JSON.parse(msg.toolInput);
+          bashCmd = bparsed.command || bparsed.cmd || '';
+        } catch (_) { bashCmd = msg.toolInput; }
+      }
+
+      // Always-visible summary line with icon + tool name + command snippet.
+      // For Bash: "▸ ⌘ Bash: <cmd>"; for others: "▸ ⚙ ToolName: <input>".
+      var summaryIcon = isBash ? '&#x2318;' : '&#x2699;';
+      var visibleLabel = isBash
+        ? 'Bash: ' + esc(bashCmd.length > 120 ? bashCmd.slice(0, 120) + '…' : bashCmd)
+        : esc(label);
+
+      // Output section (merged tool_result or pending indicator).
+      var toolOutputHtml = '';
       if (msg.hasResult) {
-        // If this tool_use has its result merged in, render the output inside the block.
         var outputClass = msg.isError ? 'chat-tool-output chat-tool-output-error' : 'chat-tool-output';
-        outputHtml = '<div class="' + esc(outputClass) + '">' +
+        toolOutputHtml = '<div class="' + esc(outputClass) + '">' +
           '<span class="chat-tool-output-label" aria-hidden="true">' + (msg.isError ? 'error' : 'output') + '</span>' +
           '<pre class="chat-tool-output-pre">' + escLines(msg.toolOutput || '') + '</pre>' +
           '</div>';
       }
+
+      // Bash: auto-open when it has a result (shows stdout immediately).
+      // Non-Bash with no result: collapsed (avoids screen clutter for large inputs).
+      var detailsOpen = (isBash && msg.hasResult) ? ' open' : '';
+      var inputPreHtml = (!isBash && msg.toolInput)
+        ? '<pre class="chat-tool-input">' + escLines(msg.toolInput) + '</pre>'
+        : '';
+
       el.innerHTML =
-        '<details class="chat-tool-details">' +
+        '<details class="chat-tool-details"' + detailsOpen + '>' +
           '<summary class="chat-tool-summary">' +
-            '<span class="chat-tool-icon" aria-hidden="true">⚙</span>' +
-            '<span class="chat-tool-label">' + esc(label) + '</span>' +
+            '<span class="chat-tool-expand-arrow" aria-hidden="true">&#x25B8;</span>' +
+            '<span class="chat-tool-icon" aria-hidden="true">' + summaryIcon + '</span>' +
+            '<span class="chat-tool-label">' + visibleLabel + '</span>' +
             '<span class="chat-msg-time">' + esc(formatTime(msg.ts)) + '</span>' +
           '</summary>' +
-          (msg.toolInput
-            ? '<pre class="chat-tool-input">' + escLines(msg.toolInput) + '</pre>'
-            : '') +
-          outputHtml +
+          inputPreHtml +
+          toolOutputHtml +
         '</details>';
     } else if (msg.role === 'tool_result') {
       // Phase 4: standalone tool_result (no prior tool_use matched in the pane).
@@ -2160,9 +2333,10 @@
       var resLabel = msg.toolName ? msg.toolName + ' result' : 'tool result';
       var resOutputClass = msg.isError ? 'chat-tool-output chat-tool-output-error' : 'chat-tool-output';
       el.innerHTML =
-        '<details class="chat-tool-details">' +
+        '<details class="chat-tool-details" open>' +
           '<summary class="chat-tool-summary">' +
-            '<span class="chat-tool-icon" aria-hidden="true">⚙</span>' +
+            '<span class="chat-tool-expand-arrow" aria-hidden="true">&#x25B8;</span>' +
+            '<span class="chat-tool-icon" aria-hidden="true">&#x2699;</span>' +
             '<span class="chat-tool-label">' + esc(resLabel) + '</span>' +
             '<span class="chat-msg-time">' + esc(formatTime(msg.ts)) + '</span>' +
           '</summary>' +
@@ -2339,8 +2513,9 @@
     pane.costSoFar = null; // reset for this turn
     pane.startedAt = new Date();
 
-    // Register session → pane mapping for demux.
-    sessionToPaneId.set(sessionId, paneId);
+    // Register session → pane mapping for demux (fan-out set).
+    if (!sessionToPaneIds.has(sessionId)) sessionToPaneIds.set(sessionId, new Set());
+    sessionToPaneIds.get(sessionId).add(paneId);
 
     // Append user message immediately (optimistic).
     pane.messages.push({ role: 'user', text: task, ts: new Date().toISOString(), sessionId });
@@ -2392,7 +2567,9 @@
       return resp.text().then((errText) => {
         pane.status = 'error';
         pane.activeSessionId = null;
-        sessionToPaneId.delete(sessionId);
+        // Teardown: remove this paneId from the fan-out set.
+        var errSet = sessionToPaneIds.get(sessionId);
+        if (errSet) { errSet.delete(paneId); if (errSet.size === 0) sessionToPaneIds.delete(sessionId); }
         stopElapsedTimer(pane);
         pane.messages.push({
           role: 'summary',
@@ -2413,7 +2590,9 @@
     }).catch((err) => {
       pane.status = 'error';
       pane.activeSessionId = null;
-      sessionToPaneId.delete(sessionId);
+      // Teardown: remove this paneId from the fan-out set.
+      var netErrSet = sessionToPaneIds.get(sessionId);
+      if (netErrSet) { netErrSet.delete(paneId); if (netErrSet.size === 0) sessionToPaneIds.delete(sessionId); }
       stopElapsedTimer(pane);
       renderPaneHeader(paneId);
       announcePaneStatus(paneId, 'network error');
@@ -2552,7 +2731,9 @@
 
     pane.status = 'idle';
     pane.activeSessionId = null;
-    sessionToPaneId.delete(sessionId);
+    // Teardown: remove this paneId from the fan-out set (guard: only when it points to us).
+    var cancelSet = sessionToPaneIds.get(sessionId);
+    if (cancelSet) { cancelSet.delete(paneId); if (cancelSet.size === 0) sessionToPaneIds.delete(sessionId); }
     stopElapsedTimer(pane);
     renderPaneHeader(paneId);
     announcePaneStatus(paneId, 'stopped');
@@ -7061,9 +7242,9 @@
   // ---- Phase 5: IDE chat slot teardown ----------------------------------------
   //
   // teardownIdeChatPane removes the pane currently occupying #ide-chat-slot from
-  // chatPanes and sessionToPaneId, stops its elapsed timer, and removes the DOM
+  // chatPanes and sessionToPaneIds, stops its elapsed timer, and removes the DOM
   // element.  Call before mounting a replacement pane so that chatPanes never
-  // accumulates stale ideEmbedded entries and sessionToPaneId never has a leaked
+  // accumulates stale ideEmbedded entries and sessionToPaneIds never has a leaked
   // mapping that shadows the new pane's SSE routing.
   //
   // Only operates on the pane tracked in ideEmbeddedPaneId.  If the pane has an
@@ -7079,19 +7260,24 @@
 
     var pane = chatPanes.get(paneId);
     if (pane) {
-      // Guard: only remove the SSE demux mapping when it points TO THIS pane.
-      // If ideBindChatToSession skipped registration because a Chat-tab pane
-      // already owned sessionToPaneId[S], then that entry belongs to the Chat-tab
-      // pane — deleting it unconditionally would cut that pane's live SSE feed.
-      if (pane.activeSessionId &&
-          sessionToPaneId.get(pane.activeSessionId) === paneId) {
-        sessionToPaneId.delete(pane.activeSessionId);
+      // Guard: remove THIS paneId from the fan-out set for activeSessionId.
+      // Only deletes the set entry when the set becomes empty so concurrent
+      // Chat-tab panes watching the same session keep their registration.
+      if (pane.activeSessionId) {
+        var activeSet = sessionToPaneIds.get(pane.activeSessionId);
+        if (activeSet) {
+          activeSet.delete(paneId);
+          if (activeSet.size === 0) sessionToPaneIds.delete(pane.activeSessionId);
+        }
       }
       // Same guard for the attachedSessionId path (attach/watch mode).
       if (pane.attachedSessionId &&
-          pane.attachedSessionId !== pane.activeSessionId &&
-          sessionToPaneId.get(pane.attachedSessionId) === paneId) {
-        sessionToPaneId.delete(pane.attachedSessionId);
+          pane.attachedSessionId !== pane.activeSessionId) {
+        var attachSet = sessionToPaneIds.get(pane.attachedSessionId);
+        if (attachSet) {
+          attachSet.delete(paneId);
+          if (attachSet.size === 0) sessionToPaneIds.delete(pane.attachedSessionId);
+        }
       }
       stopElapsedTimer(pane);
       chatPanes.delete(paneId);
@@ -7118,7 +7304,7 @@
 
     // Mark as IDE-embedded so Chat-tab rendering skips this pane.  It stays
     // in chatPanes for the duration of this page load so the SSE demux
-    // (sessionToPaneId → chatPanes.get()) can route events to it correctly.
+    // (sessionToPaneIds → chatPanes.get()) can route events to it correctly.
     // We do NOT call savePaneState() — the pane is session-only.
     p.ideEmbedded = true;
     chatPanes.set(p.id, p);
@@ -7156,16 +7342,10 @@
     const slot = document.getElementById('ide-chat-slot');
     if (!slot) return;
 
-    // If the session is already open in a Chat-tab pane, we still mount a
-    // separate ideEmbedded view.  Two panes can watch the same sessionId because
-    // sessionToPaneId maps one sessionId → one paneId; the second watcher gets
-    // its transcript from the backfill path only, not from live SSE (the demux
-    // routes to the first registered paneId).  This is the same trade-off as
-    // having two Chat-tab panes open for the same session — acceptable for the
-    // IDE mirror use-case.
-    //
-    // If the session is already in sessionToPaneId (Chat-tab pane), we skip
-    // re-registering to avoid clobbering the Chat-tab routing.
+    // With 1:many fan-out, both Chat-tab panes and the IDE embedded pane can
+    // watch the same sessionId simultaneously — each receives every live SSE
+    // frame.  Unconditionally add this paneId to the Set so the IDE slot
+    // always gets live events (the prior `if(!has)` skip was the mirror bug).
     var convId = conversationId || sessionId;
     var p = makePane(newPaneId(), convId);
     p.ideEmbedded = true;
@@ -7175,12 +7355,9 @@
     chatPanes.set(p.id, p);
     ideEmbeddedPaneId = p.id;
 
-    // Only register SSE routing if no Chat-tab pane is already watching this
-    // session.  This prevents silently re-routing a Chat-tab pane's events to
-    // the IDE slot.
-    if (!sessionToPaneId.has(sessionId)) {
-      sessionToPaneId.set(sessionId, p.id);
-    }
+    // Unconditional add — fan-out Set allows multiple paneIds per sessionId.
+    if (!sessionToPaneIds.has(sessionId)) sessionToPaneIds.set(sessionId, new Set());
+    sessionToPaneIds.get(sessionId).add(p.id);
 
     const paneEl = buildPaneElement(p.id);
     slot.appendChild(paneEl);
@@ -7826,23 +8003,6 @@
               </p>
               <div id="feed-list" class="feed-list" aria-live="polite" aria-label="Activity events">
                 <p class="empty-state">No events yet</p>
-              </div>
-            </section>
-          </div>
-        </div>
-        <div id="panel-repl" class="tab-panel">
-          <div class="repl-layout">
-            <aside class="repl-sidebar" aria-label="Action items">
-              <h2 class="subsection-title">Action items</h2>
-              <p class="repl-sidebar-hint">Read-only mirror of TODO + IN PROGRESS from Kanban</p>
-              <div id="repl-action-items" aria-live="polite">
-                <p class="empty-state">Switch to this tab to load</p>
-              </div>
-            </aside>
-            <section class="repl-main" aria-label="Fleet — active dispatches">
-              <h2 class="subsection-title">In-flight dispatches</h2>
-              <div id="repl-fleet-list" aria-live="polite">
-                <p class="empty-state">No active dispatches</p>
               </div>
             </section>
           </div>
