@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.46.0.0] — 2026-06-18
+
+### Added
+
+- **`--networked` convenience flag for `yakos start`** — auto-derives the
+  host's outbound IP, forwards `--console-bind 0.0.0.0:<port>` and
+  `--console-external-host <ip>:<port>`, enables https mode, and activates
+  password auth with a `/setup`-token flow. Eliminates the manual
+  three-flag dance for single-command networked starts. Explicit
+  `--console-bind` and `--console-external-host` passthroughs remain
+  available for custom deployments. Start banner updated to show the
+  https endpoint when networked mode is active.
+- **Project-rooted IDE file-pane and git-diff handler** — the console IDE
+  file-pane and git-diff handler now automatically root at the project
+  directory resolved from `.project-path`, so file browsing and diffs
+  reflect the project source rather than the agent-control tree. Override
+  with `--ide-root <path>`; opt out entirely with `--no-project-ide`. Help
+  text updated in both `yakos start` and `yakos serve` to document the new
+  flags.
+
 ## [0.45.0.0] — 2026-06-17
 
 ### Added
