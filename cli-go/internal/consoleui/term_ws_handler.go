@@ -1,21 +1,47 @@
 // Package consoleui — term_ws_handler.go
 //
 // buildTermWSHandler and buildTermWSHandlerNetworked implement the
-// /v1/term/<sessionId> WebSocket endpoint (ADR-0008 Phase 1).
+// /v1/term/<sessionId> WebSocket endpoint (ADR-0008 Phase 1/2).
 //
 // # Frame format (binary WebSocket frames)
 //
-// Server→client:
+// Server→client (output path, Phase 1 unchanged):
 //
-//	0x00 <raw PTY bytes>   — PTY output chunk
-//	0x01 <4-byte big-endian exit code>  — session closed / process exited
+//	0x00 <raw PTY bytes>                   — PTY output chunk
+//	0x01 <4-byte big-endian exit code>     — session closed / process exited
 //
-// Client→server:
+// Client→server (input path, Phase 2, RoleAdmin only):
 //
-//	All inbound frames are DROPPED in Phase 1 (output-only).
-//	Phase 2 will wire 0x10 (keystrokes) and 0x11 (resize) for RoleAdmin callers.
+//	0x10 <keystroke bytes>                 — browser keystrokes → PTY stdin
+//	0x11 <cols uint16 BE><rows uint16 BE>  — browser resize → PTY window size
 //
-// # Auth
+//	Non-admin connections: all inbound frames are silently dropped (fail-closed).
+//	Admin connections: 0x10/0x11 are routed to mgr.SendInput / mgr.SendResize.
+//	Frames exceeding maxInboundFrameBytes are dropped (log + discard, no panic).
+//	Malformed 0x11 frames (< 5 bytes total) are dropped.
+//
+// # Auth and write-path gates
+//
+// The role check on line ~94 is the single gate for all inbound frames:
+//
+//	id.Role.Allows(netid.RoleAdmin) → route 0x10/0x11 to manager
+//	otherwise                       → drain and discard all inbound frames
+//
+// Fail-closed: a non-resolved identity (id.Resolved == false) has
+// id.Role == RoleNone, which does NOT pass Allows(RoleAdmin).  Non-admin
+// connections can only receive output; they can never inject input.
+//
+// # Phase 2 write path (full trace)
+//
+//	browser 0x10/0x11 frame
+//	→ WS handler (RoleAdmin gate — this file)
+//	→ mgr.SendInput / mgr.SendResize       [terminalmanager/manager.go]
+//	→ externalSession.sendToOwner(frame)   [terminalmanager/external_session.go]
+//	→ conn.Write(frame)                    [daemon → start via hijacked conn]
+//	→ readDaemonFrames goroutine           [start/pump_unix.go]
+//	→ ptmx.Write / pty.Setsize             [PTY stdin / window size]
+//
+// # Auth (WS middleware stack — unchanged from Phase 1)
 //
 // Reuses the existing WS middleware stack verbatim (same as /v1/events):
 //   - Loopback: consoleLoopbackOnly → consoleOriginAllowList → consoleAuthSubprotocol
@@ -38,6 +64,21 @@ import (
 	"github.com/bakw00ds/yakos/internal/terminalmanager"
 	"golang.org/x/net/websocket"
 )
+
+// terminalSessionManager is the subset of *terminalmanager.Manager that the
+// WS handler uses.  Extracted as an interface so tests can pass a fake without
+// constructing a full Manager.
+type terminalSessionManager interface {
+	Subscribe(sessionId string, outputFn func([]byte), exitFn func(int)) (func(), error)
+	SendInput(sessionId string, data []byte) error
+	SendResize(sessionId string, cols, rows uint16) error
+}
+
+// maxInboundFrameBytes is the maximum size of an inbound WebSocket frame
+// accepted from a browser client.  Frames exceeding this limit are dropped
+// (logged and discarded) without panicking.  Applies only to RoleAdmin
+// connections; non-admin connections discard all frames regardless.
+const maxInboundFrameBytes = 64 * 1024 // 64 KB
 
 // buildTermWSHandler returns an http.Handler for the loopback /v1/term/<sessionId> path.
 // termMgr must be non-nil (caller must check before mounting).
@@ -85,9 +126,13 @@ func buildTermWSHandlerFull(token string, termMgr *terminalmanager.Manager, netw
 }
 
 // makeTermWSFunc returns the websocket.Handler func for one PTY viewer connection.
-func makeTermWSFunc(termMgr *terminalmanager.Manager) websocket.Handler {
+func makeTermWSFunc(termMgr terminalSessionManager) websocket.Handler {
 	return func(conn *websocket.Conn) {
 		defer func() { _ = conn.Close() }()
+
+		// Bound inbound WebSocket message size before the first Receive call so the
+		// library rejects oversized frames at the read level, not after buffering them.
+		conn.MaxPayloadBytes = maxInboundFrameBytes
 
 		// ---- 1. Role gate: require RoleAdmin ----------------------------------
 		id := netid.IdentityFrom(conn.Request().Context())
@@ -136,13 +181,84 @@ func makeTermWSFunc(termMgr *terminalmanager.Manager) websocket.Handler {
 		}
 		defer unsub()
 
-		// ---- 4. Drain inbound frames (Phase 1: DROP all) -------------------
+		// ---- 4. Inbound frame router (Phase 2) ------------------------------
+		//
+		// RoleAdmin connections: route 0x10 (keystrokes) and 0x11 (resize)
+		// frames to the manager's back-channel.  All other frames are dropped.
+		//
+		// Non-admin connections: drain and discard all inbound frames silently
+		// (fail-closed — same behavior as Phase 1 DROP-all).
+		//
+		// Fail-closed invariant: a non-resolved identity (Resolved==false) has
+		// Role==RoleNone < RoleAdmin, so isAdmin is false for unresolved
+		// identities.  The gate is the single decision point for all writes.
+		isAdmin := id.Resolved && id.Role.Allows(netid.RoleAdmin)
 		go func() {
+			// This goroutine handles adversarial network input and is detached from
+			// net/http's request goroutine.  Any unrecovered panic here would crash
+			// the process.  Log and close instead.
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("consoleui: /v1/term: inbound goroutine panic (closing connection)", "recover", r, "sessionId", sessionId)
+					_ = conn.Close()
+				}
+			}()
 			defer close(disconnCh)
-			var discard []byte
+			// firstWrite gates the one-time audit log entry for the first accepted
+			// write frame from a RoleAdmin connection.  Emitted exactly once per
+			// connection regardless of how many frames follow.
+			// (Fix 3 — audit log, ADR-0008 P2 security review.)
+			firstWrite := false
+			var frame []byte
 			for {
-				if err := websocket.Message.Receive(conn, &discard); err != nil {
+				if err := websocket.Message.Receive(conn, &frame); err != nil {
 					return
+				}
+				if !isAdmin {
+					// Non-admin: silently discard all inbound frames.
+					continue
+				}
+				// Admin: bound check and route.
+				if len(frame) > maxInboundFrameBytes {
+					slog.Warn("consoleui: /v1/term: inbound frame exceeds max size; dropping",
+						"sessionId", sessionId, "size", len(frame), "max", maxInboundFrameBytes)
+					continue
+				}
+				if len(frame) == 0 {
+					continue
+				}
+				tag := frame[0]
+				// One-time audit log on the first accepted write frame per connection.
+				if !firstWrite && (tag == 0x10 || tag == 0x11) {
+					slog.Info("term: admin input session", "sessionId", sessionId, "operatorId", id.OperatorID)
+					firstWrite = true
+				}
+				switch tag {
+				case 0x10: // keystrokes → PTY stdin
+					payload := frame[1:]
+					if len(payload) == 0 {
+						continue
+					}
+					if err := termMgr.SendInput(sessionId, payload); err != nil {
+						slog.Debug("consoleui: /v1/term: SendInput error", "sessionId", sessionId, "err", err)
+					}
+				case 0x11: // resize → PTY window size
+					// Requires exactly 4 payload bytes: cols uint16 BE + rows uint16 BE.
+					payload := frame[1:]
+					if len(payload) < 4 {
+						slog.Debug("consoleui: /v1/term: malformed 0x11 resize frame; dropping",
+							"sessionId", sessionId, "payloadLen", len(payload))
+						continue
+					}
+					cols := binary.BigEndian.Uint16(payload[0:2])
+					rows := binary.BigEndian.Uint16(payload[2:4])
+					if err := termMgr.SendResize(sessionId, cols, rows); err != nil {
+						slog.Debug("consoleui: /v1/term: SendResize error", "sessionId", sessionId, "err", err)
+					}
+				default:
+					// Unknown tag — drop silently; do not panic.
+					slog.Debug("consoleui: /v1/term: unknown inbound frame tag; dropping",
+						"sessionId", sessionId, "tag", tag)
 				}
 			}
 		}()

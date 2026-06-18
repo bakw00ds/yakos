@@ -451,3 +451,185 @@ func TestGenericAgentForRuntime_PanicsOnUnknown(t *testing.T) {
 	}()
 	GenericAgentForRuntime("nope")
 }
+
+// ---- ComposeSkills -----------------------------------------------------------
+
+// buildFixtureSkills creates a yakosRoot with lib/skills/<slug>/SKILL.md
+// for each entry in the skills map (slug → SKILL.md content).
+func buildFixtureSkills(t *testing.T, skills map[string]string) string {
+	t.Helper()
+	root := t.TempDir()
+	for slug, content := range skills {
+		dir := filepath.Join(root, "lib", "skills", slug)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		path := filepath.Join(dir, "SKILL.md")
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	return root
+}
+
+func TestComposeSkills_ReadsFrameworkSlugs(t *testing.T) {
+	root := buildFixtureSkills(t, map[string]string{
+		"a11y-scan": "---\nname: a11y-scan\ndescription: Accessibility scan.\n---\n\nbody",
+		"code-review": "---\nname: code-review\ndescription: Review code.\n---\n\nbody",
+	})
+
+	got, err := ComposeSkills(root, "")
+	if err != nil {
+		t.Fatalf("ComposeSkills: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 skills, got %d: %v", len(got), got)
+	}
+
+	// Both slugs present.
+	slugs := make([]string, len(got))
+	for i, s := range got {
+		slugs[i] = s.Slug
+	}
+	if !strings.Contains(strings.Join(slugs, ","), "a11y-scan") {
+		t.Errorf("expected a11y-scan in slugs: %v", slugs)
+	}
+	if !strings.Contains(strings.Join(slugs, ","), "code-review") {
+		t.Errorf("expected code-review in slugs: %v", slugs)
+	}
+
+	// Source is "framework" for all.
+	for _, s := range got {
+		if s.Source != "framework" {
+			t.Errorf("slug %q: expected source=framework, got %q", s.Slug, s.Source)
+		}
+	}
+}
+
+func TestComposeSkills_DeterministicOrder(t *testing.T) {
+	root := buildFixtureSkills(t, map[string]string{
+		"zzz-last":  "---\nname: zzz-last\ndescription: Last.\n---\n",
+		"aaa-first": "---\nname: aaa-first\ndescription: First.\n---\n",
+		"mmm-mid":   "---\nname: mmm-mid\ndescription: Mid.\n---\n",
+	})
+
+	got, err := ComposeSkills(root, "")
+	if err != nil {
+		t.Fatalf("ComposeSkills: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 skills, got %d", len(got))
+	}
+	// Results must be sorted by slug.
+	if got[0].Slug != "aaa-first" || got[1].Slug != "mmm-mid" || got[2].Slug != "zzz-last" {
+		t.Errorf("order wrong: %v %v %v", got[0].Slug, got[1].Slug, got[2].Slug)
+	}
+}
+
+func TestComposeSkills_ProjectOverridesFramework(t *testing.T) {
+	root := buildFixtureSkills(t, map[string]string{
+		"my-skill": "---\nname: my-skill\ndescription: Framework version.\n---\n",
+	})
+
+	// Project override for the same slug.
+	proj := t.TempDir()
+	projSkillDir := filepath.Join(proj, ".claude", "skills", "my-skill")
+	if err := os.MkdirAll(projSkillDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projSkillDir, "SKILL.md"),
+		[]byte("---\nname: my-skill\ndescription: Project version.\n---\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got, err := ComposeSkills(root, proj)
+	if err != nil {
+		t.Fatalf("ComposeSkills: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 skill (project overrides framework), got %d: %v", len(got), got)
+	}
+	if got[0].Source != "project" {
+		t.Errorf("expected source=project, got %q", got[0].Source)
+	}
+	if got[0].Description != "Project version." {
+		t.Errorf("expected project description, got %q", got[0].Description)
+	}
+}
+
+func TestComposeSkills_EmptyDirReturnsEmpty(t *testing.T) {
+	// yakosRoot with no lib/skills directory at all.
+	root := t.TempDir()
+
+	got, err := ComposeSkills(root, "")
+	if err != nil {
+		t.Fatalf("ComposeSkills on missing dir: %v", err)
+	}
+	if got == nil {
+		t.Error("expected non-nil slice, got nil")
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty slice, got %d entries", len(got))
+	}
+}
+
+func TestComposeSkills_SlugFallbackWhenNameAbsent(t *testing.T) {
+	root := buildFixtureSkills(t, map[string]string{
+		"my-skill": "---\ndescription: A skill without a name field.\n---\n\nbody",
+	})
+
+	got, err := ComposeSkills(root, "")
+	if err != nil {
+		t.Fatalf("ComposeSkills: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(got))
+	}
+	// Name should fall back to the slug.
+	if got[0].Name != "my-skill" {
+		t.Errorf("expected name=my-skill (slug fallback), got %q", got[0].Name)
+	}
+}
+
+// TestComposeSkills_RealRoot runs ComposeSkills against the actual yakOS
+// lib/skills directory (60+ skills) to confirm the end-to-end count.
+// Skipped when the yakosRoot is not available (e.g. in CI without the repo
+// mounted at the expected path).
+func TestComposeSkills_RealRoot(t *testing.T) {
+	const realRoot = "/Users/tw/github/yakOS"
+	if _, err := os.Stat(filepath.Join(realRoot, "lib", "skills")); err != nil {
+		t.Skipf("real yakosRoot not available at %s: %v", realRoot, err)
+	}
+
+	got, err := ComposeSkills(realRoot, "")
+	if err != nil {
+		t.Fatalf("ComposeSkills: %v", err)
+	}
+	t.Logf("real skills count: %d", len(got))
+	for i, s := range got {
+		if i < 5 {
+			t.Logf("  [%d] slug=%-30s source=%s", i, s.Slug, s.Source)
+		}
+	}
+	if len(got) > 5 {
+		t.Logf("  ... (%d more)", len(got)-5)
+	}
+	if len(got) < 60 {
+		t.Errorf("expected 60+ skills from real root, got %d", len(got))
+	}
+	// All must be source="framework" (no project dir passed).
+	for _, s := range got {
+		if s.Source != "framework" {
+			t.Errorf("skill %q: expected source=framework, got %q", s.Slug, s.Source)
+		}
+		if s.Name == "" {
+			t.Errorf("skill %q: Name is empty", s.Slug)
+		}
+	}
+	// Results must be sorted by slug (deterministic order per rule:cache-stability).
+	for i := 1; i < len(got); i++ {
+		if got[i].Slug < got[i-1].Slug {
+			t.Errorf("skills not sorted: got[%d].Slug=%q < got[%d].Slug=%q", i, got[i].Slug, i-1, got[i-1].Slug)
+		}
+	}
+}

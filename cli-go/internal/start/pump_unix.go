@@ -3,7 +3,7 @@
 // Package start — pump_unix.go
 //
 // runLocalPump is the POSIX implementation of the --share-terminal local pump
-// (ADR-0008 Phase 1 T2).
+// (ADR-0008 Phase 1/2 T2).
 //
 // T2 architecture — start owns the PTY:
 //
@@ -17,12 +17,27 @@
 //     SIGWINCH → pty.Setsize (local resize, no daemon round-trip).
 //  6. Tee PTY output to the daemon as length-prefixed 0x00 frames so browser
 //     /v1/term subscribers mirror the session in real time.
-//  7. On child exit: send 0x01 exit frame to daemon; restore TTY; propagate
+//  7. Phase 2: read daemon → start 0x10/0x11 frames and apply them to the PTY.
+//     Browser keystrokes (0x10) are written to ptmx; resize events (0x11) call
+//     pty.Setsize.  Local SIGWINCH and browser 0x11 both call pty.Setsize —
+//     last-writer-wins is the correct shared-terminal behavior.
+//  8. On child exit: send 0x01 exit frame to daemon; restore TTY; propagate
 //     exit code.
 //
 // The daemon NEVER fork/execs the child process in this path.  The only daemon
-// actions are registering the session (yakos.term.create) and relaying pushed
-// output to browser subscribers (/v1/term WebSocket).
+// actions are registering the session (yakos.term.create), relaying pushed
+// output to browser subscribers (/v1/term WebSocket), and forwarding browser
+// input back to start (Phase 2).
+//
+// # Phase 2 write path (browser → PTY)
+//
+//	browser 0x10/0x11 frame
+//	→ WS handler (RoleAdmin gate)
+//	→ mgr.SendInput / mgr.SendResize       [daemon: manager.go]
+//	→ externalSession.sendToOwner(frame)   [daemon: external_session.go]
+//	→ conn.Write(frame)                    [daemon → start via hijacked conn]
+//	→ readDaemonFrames goroutine           [start: pump_unix.go, below]
+//	→ ptmx.Write / pty.Setsize             [start: PTY stdin / window size]
 
 package start
 
@@ -240,6 +255,52 @@ func runLocalPump(socketPath string, spawnSpec map[string]interface{}, ew io.Wri
 		}
 	}()
 
+	// ---- 9b. daemon → start back-channel: 0x10 keystrokes and 0x11 resize ---
+	//
+	// Phase 2: the daemon can write 0x10 (browser keystrokes) and 0x11 (browser
+	// resize) frames back over the same hijacked conn.  Go net.Conn supports
+	// concurrent reads and writes (separate kernel paths), so this goroutine
+	// reading from conn is safe to run concurrently with the 0x00/0x01 write
+	// path above (writeFrame calls conn.Write).
+	//
+	// Local stdin passthrough (step 9) and browser input (0x10) both feed the
+	// same PTY — that is expected shared-terminal behavior.  For resize, local
+	// SIGWINCH (step 8) and browser 0x11 both call pty.Setsize; last-writer-wins.
+	go func() {
+		hdr := make([]byte, 2)
+		for {
+			if _, err := io.ReadFull(conn, hdr); err != nil {
+				return
+			}
+			frameLen := binary.BigEndian.Uint16(hdr)
+			if frameLen == 0 {
+				continue
+			}
+			buf := make([]byte, frameLen)
+			if _, err := io.ReadFull(conn, buf); err != nil {
+				return
+			}
+			tag, payload := buf[0], buf[1:]
+			switch tag {
+			case 0x10: // browser keystrokes → PTY stdin
+				if len(payload) > 0 {
+					_, _ = ptmx.Write(payload)
+				}
+			case 0x11: // browser resize → PTY window size
+				if len(payload) >= 4 {
+					cols, rows := clampDims(
+						binary.BigEndian.Uint16(payload[0:2]),
+						binary.BigEndian.Uint16(payload[2:4]),
+					)
+					_ = pty.Setsize(ptmx, &pty.Winsize{Cols: cols, Rows: rows})
+				}
+			default:
+				// Unknown tag from daemon — ignore; do not panic.
+				slog.Debug("start: unknown daemon→start frame tag", "tag", tag)
+			}
+		}
+	}()
+
 	// ---- 10. PTY master → stdout + daemon push (0x00 output frames) ----------
 	exitCh := make(chan int, 1)
 	go func() {
@@ -288,6 +349,27 @@ func runLocalPump(socketPath string, spawnSpec map[string]interface{}, ew io.Wri
 	_ = writeFrame(0x01, exitPayload)
 
 	return code, nil
+}
+
+// clampDims sanitizes PTY dimensions received from a remote browser before
+// passing them to pty.Setsize.  Zero values are replaced with safe defaults;
+// values above 1000 are capped to prevent unreasonably large allocations in
+// the kernel's TTY layer.  Mirrors the clamping in session_unix.go:66-70.
+// (Fix 2 — LOW, ADR-0008 P2 security review.)
+func clampDims(cols, rows uint16) (uint16, uint16) {
+	if cols == 0 {
+		cols = 80
+	}
+	if rows == 0 {
+		rows = 24
+	}
+	if cols > 1000 {
+		cols = 1000
+	}
+	if rows > 1000 {
+		rows = 1000
+	}
+	return cols, rows
 }
 
 // newLocalSessionID generates a random 16-hex-char session identifier.
