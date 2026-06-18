@@ -1096,6 +1096,7 @@ html[data-theme="light"] .feed-item:hover {
 
 #panel-chat.active {
   display: flex;
+  height: 100%;
 }
 
 .chat-loading {
@@ -1781,6 +1782,7 @@ html[data-theme="og"] .chat-send-btn {
 
 #panel-flows.active {
   display: flex;
+  height: 100%;
 }
 
 /* ---- Top-level layout: sidebar + main ---- */
@@ -2566,6 +2568,7 @@ html[data-theme="light"] .modal-btn-cancel:hover {
 
 #panel-ide.active {
   display: flex;
+  height: 100%;
 }
 
 .ide-loading {
@@ -3633,6 +3636,7 @@ html[data-theme="og"] .flows-btn-primary {
 
 #panel-users.active {
   display: flex;
+  height: 100%;
 }
 
 /* ---- Users toolbar ---- */
@@ -4852,6 +4856,7 @@ html[data-theme="light"] .ask-widget-header {
 
 #panel-terminal.active {
   display: flex;
+  height: 100%;
 }
 
 .term-toolbar {
