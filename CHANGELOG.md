@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.47.0.0] — 2026-06-18
+
+### Fixed
+
+- **Networked console now requires `--no-repl` or `--web`** — launching
+  `yakos start --networked` (or with a non-loopback `--console-bind`)
+  in interactive REPL mode would exec the process away, killing the
+  daemon and leaving the advertised URL dead. The command now exits with
+  a clear error explaining the conflict and the flags needed to resolve
+  it, instead of silently printing an unreachable URL.
+- **Non-loopback `--console-bind` implies networked mode** — specifying
+  `--console-bind 0.0.0.0:<port>` (or any non-loopback address) now
+  automatically activates networked mode (https banner, forwarding,
+  password auth), matching the behavior previously gated behind
+  `--networked` only.
+
 ## [0.46.0.0] — 2026-06-18
 
 ### Added
