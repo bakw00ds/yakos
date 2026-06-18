@@ -2,8 +2,9 @@ package consoleui
 
 // skills_handler.go — GET /api/skills
 //
-// Returns the composed agent roster and a static list of client slash-commands.
-// Consumed by the chat REPL to power the "/" popover (Phase 1 of CLI-parity).
+// Returns the composed agent roster, the composed skills list, and a static
+// list of client slash-commands.  Consumed by the chat REPL to power the "/"
+// popover (Phase 1 of CLI-parity).
 //
 // # Endpoint
 //
@@ -13,7 +14,8 @@ package consoleui
 //
 //	{
 //	  "agents":   [{"name":"backend","description":"…","runtime":"claude"}],
-//	  "commands": [{"name":"clear","summary":"clear the pane"}]
+//	  "commands": [{"name":"clear","summary":"clear the pane"}],
+//	  "skills":   [{"name":"a11y-scan","description":"…","source":"framework"}]
 //	}
 //
 // # Auth
@@ -23,7 +25,7 @@ package consoleui
 //
 // # System-prompt leakage guard
 //
-// Only name, description, and runtime ship in the response.  The Prompt
+// Only name, description, and runtime ship in the agents response.  The Prompt
 // (system-prompt body) field of ComposedAgent is NEVER serialised here.
 //
 // # Caching
@@ -72,10 +74,18 @@ type clientCommand struct {
 	Summary string `json:"summary"`
 }
 
+// skillEntry is the wire DTO for a single skill entry.
+type skillEntry struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Source      string `json:"source"`
+}
+
 // skillsResponse is the top-level wire shape for GET /api/skills.
 type skillsResponse struct {
 	Agents   []agentSkill    `json:"agents"`
 	Commands []clientCommand `json:"commands"`
+	Skills   []skillEntry    `json:"skills"`
 }
 
 // staticCommands is the fixed client-side slash-command list.
@@ -122,9 +132,28 @@ func (sh *skillsHandlers) handleSkills(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Compose the skills catalog from lib/skills/<slug>/SKILL.md.
+	// Errors are non-fatal: return an empty slice so the popover still shows
+	// agents and commands when the skills directory is absent or misconfigured.
+	composedSkills, err := agentscompose.ComposeSkills(sh.yakosRoot, sh.workspaceRoot)
+	if err != nil {
+		slog.Error("consoleui: skills: compose skills", "err", err)
+		composedSkills = nil
+	}
+
+	skills := make([]skillEntry, 0, len(composedSkills))
+	for _, s := range composedSkills {
+		skills = append(skills, skillEntry{
+			Name:        s.Name,
+			Description: s.Description,
+			Source:      s.Source,
+		})
+	}
+
 	resp := skillsResponse{
 		Agents:   agents,
 		Commands: staticCommands,
+		Skills:   skills,
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

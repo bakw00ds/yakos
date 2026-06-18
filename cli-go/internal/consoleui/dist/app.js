@@ -1839,11 +1839,12 @@
   //
   // skillsFetched guards the single fetch so bootChatInfrastructure re-entries
   // (IDE tab boot) do not issue duplicate requests.
-  var skillsCache = { agents: [], commands: [] };
+  var skillsCache = { agents: [], commands: [], skills: [] };
   var skillsFetched = false;
 
   // fetchSkills fetches GET /api/skills and caches the result in skillsCache.
   // Silent on failure: the popover simply shows the partial list.
+  // /api/skills now returns agents, commands, and skills arrays.
   function fetchSkills() {
     if (skillsFetched) return;
     skillsFetched = true;
@@ -1852,7 +1853,11 @@
       return resp.json();
     }).then(function(data) {
       if (data && Array.isArray(data.agents) && Array.isArray(data.commands)) {
-        skillsCache = data;
+        skillsCache = {
+          agents: data.agents,
+          commands: data.commands,
+          skills: Array.isArray(data.skills) ? data.skills : [],
+        };
       }
     }).catch(function() {
       // Silent: popover still shows static client commands from initial empty cache.
@@ -2316,9 +2321,13 @@
       return !f || c.name.toLowerCase().indexOf(f) !== -1 ||
              (c.summary || '').toLowerCase().indexOf(f) !== -1;
     });
+    var skills = (skillsCache.skills || []).filter(function(s) {
+      return !f || s.name.toLowerCase().indexOf(f) !== -1 ||
+             (s.description || '').toLowerCase().indexOf(f) !== -1;
+    });
 
     // Nothing matches — hide and return.
-    if (agents.length === 0 && commands.length === 0) {
+    if (agents.length === 0 && commands.length === 0 && skills.length === 0) {
       hideSlashPopover(paneId);
       return;
     }
@@ -2380,6 +2389,19 @@
                'data-slash-type="command" data-slash-name="' + esc(c.name) + '">' +
             '<span class="slash-item-name">/' + esc(c.name) + '</span>' +
             '<span class="slash-item-desc">' + esc(c.summary || '') + '</span>' +
+          '</div>';
+      });
+    }
+
+    if (skills.length > 0) {
+      html += '<div class="slash-popover-section-label" aria-hidden="true">Skills</div>';
+      skills.forEach(function(s) {
+        html +=
+          '<div class="slash-popover-item" role="option" aria-selected="false" ' +
+               'data-slash-type="skill" data-slash-name="' + esc(s.name) + '">' +
+            '<span class="slash-item-name">/' + esc(s.name) + '</span>' +
+            '<span class="slash-item-desc">' + esc(s.description || '') + '</span>' +
+            '<span class="slash-item-meta">' + esc(s.source || '') + '</span>' +
           '</div>';
       });
     }
@@ -2517,6 +2539,15 @@
           var isOwned = !!(fleetRow && fleetRow.owned);
           openAttachPane(attachSessionId, attachSessionId, !isOwned);
         }
+      }
+    } else if (type === 'skill') {
+      // Skills are invoked as slash commands sent to the model: insert "/name "
+      // into the textarea so the operator can append args then submit.
+      if (textarea) {
+        textarea.value = '/' + name + ' ';
+        textarea.focus();
+        // Move cursor to end.
+        textarea.setSelectionRange(textarea.value.length, textarea.value.length);
       }
     }
   }
@@ -4156,10 +4187,11 @@
     if (!viewport) return;
 
     // Construct xterm Terminal.  fontFamily mirrors the console's mono stack.
+    // Phase 2: interactive input — cursorBlink enabled, read-only mode removed.
     termInstance = new Terminal({
       fontFamily: 'JetBrains Mono, Menlo, monospace',
       fontSize: 14,
-      cursorBlink: false,  // read-only viewer; blinking cursor is misleading
+      cursorBlink: true,
       convertEol: true,
       scrollback: 5000,
       theme: _xtermThemeForCurrentConsoleTheme(),
@@ -4169,11 +4201,28 @@
     termInstance.open(viewport);
     termFit.fit();
 
-    // ResizeObserver: re-fit xterm when the container resizes (panel show/hide,
-    // window resize).  Read-only Phase 1: we do NOT send 0x11 resize frames.
+    // _sendResize sends a 0x11 resize frame: [0x11][cols_hi][cols_lo][rows_hi][rows_lo].
+    // Called after each fit so the PTY dimensions stay in sync with the rendered terminal.
+    function _sendResize() {
+      if (!termWS || termWS.readyState !== WebSocket.OPEN) return;
+      if (!termInstance) return;
+      var cols = termInstance.cols;
+      var rows = termInstance.rows;
+      var frame = new Uint8Array(5);
+      frame[0] = 0x11;
+      frame[1] = (cols >> 8) & 0xff;
+      frame[2] = cols & 0xff;
+      frame[3] = (rows >> 8) & 0xff;
+      frame[4] = rows & 0xff;
+      termWS.send(frame.buffer);
+    }
+
+    // ResizeObserver: re-fit xterm and send resize frame when the container
+    // resizes (panel show/hide, window resize).
     termResizeObserver = new ResizeObserver(function() {
       if (termFit) {
         try { termFit.fit(); } catch (_) {}
+        _sendResize();
       }
     });
     termResizeObserver.observe(viewport);
@@ -4188,6 +4237,18 @@
 
     termWS.addEventListener('open', function() {
       if (statusEl) statusEl.textContent = '';
+      // Send initial resize so the PTY matches the rendered terminal dimensions.
+      _sendResize();
+    });
+
+    // Wire keystroke input: encode data as UTF-8 bytes, prefix with 0x10 tag byte.
+    termInstance.onData(function(data) {
+      if (!termWS || termWS.readyState !== WebSocket.OPEN) return;
+      var encoded = (new TextEncoder()).encode(data);
+      var frame = new Uint8Array(1 + encoded.length);
+      frame[0] = 0x10;
+      frame.set(encoded, 1);
+      termWS.send(frame.buffer);
     });
 
     termWS.addEventListener('message', function(ev) {
