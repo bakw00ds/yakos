@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.53.0.0] — 2026-06-18
+
+### Fixed
+
+- **Console Terminal tab now shows the live native TUI** — the externally-owned
+  terminal session gained a 512 KB scrollback ring buffer replayed to each new
+  `/v1/term` subscriber on connect (under lock). Opening the Terminal tab after
+  `claude` had already painted its screen previously showed a blank pane; the
+  late-join replay now surfaces the full current TUI immediately.
+- **Bare release-binary installs now auto-register agents** — `yakos start` and
+  `yakos serve` previously printed "agents: 0 registered" / "no agents composed"
+  when invoked from a bare binary install with no on-disk `$YAKOS_ROOT/lib/agents`.
+  The lib-root resolver now cascades: on-disk `$YAKOS_ROOT/lib/agents` → previously
+  materialized copy → auto-materializes from the embedded framework lib. Agent
+  count is now computed via the Go `agentscompose.Compose` path (replacing the
+  bash script call), ensuring the preflight banner reflects the true registered
+  count on a fresh install.
+
 ## [0.52.0.0] — 2026-06-18
 
 ### Fixed

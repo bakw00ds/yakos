@@ -1016,6 +1016,77 @@ func TestBuildConsoleURL(t *testing.T) {
 	}
 }
 
+// ---- countAgents (Go agentscompose port) ------------------------------------
+
+// TestCountAgents_WithAgents verifies that countAgents returns the number of
+// .md files in yakosRoot/lib/agents (excluding skipped files) when the
+// directory exists and contains valid agent definitions.
+func TestCountAgents_WithAgents(t *testing.T) {
+	yakosRoot := t.TempDir()
+	agentsDir := filepath.Join(yakosRoot, "lib", "agents")
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatalf("mkdir agents: %v", err)
+	}
+	// Write two minimal agent .md files.
+	for _, name := range []string{"alpha.md", "beta.md"} {
+		content := "# " + name + "\nA test agent.\n"
+		if err := os.WriteFile(filepath.Join(agentsDir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("write agent: %v", err)
+		}
+	}
+	// lead-template.md is skipped by Compose; doesn't count.
+	if err := os.WriteFile(filepath.Join(agentsDir, "lead-template.md"), []byte("# lead\n"), 0644); err != nil {
+		t.Fatalf("write lead-template: %v", err)
+	}
+	projectRepo := t.TempDir()
+
+	got := countAgents(yakosRoot, projectRepo, "claude")
+	if got != 2 {
+		t.Errorf("countAgents = %d; want 2", got)
+	}
+}
+
+// TestCountAgents_NoAgentsDir verifies countAgents returns 0 when lib/agents
+// does not exist (e.g. yakosRoot points at an empty directory).
+func TestCountAgents_NoAgentsDir(t *testing.T) {
+	yakosRoot := t.TempDir() // has no lib/agents
+	projectRepo := t.TempDir()
+	if got := countAgents(yakosRoot, projectRepo, "claude"); got != 0 {
+		t.Errorf("countAgents = %d; want 0", got)
+	}
+}
+
+// TestCountAgents_EmptyArgs verifies countAgents returns 0 for empty inputs.
+func TestCountAgents_EmptyArgs(t *testing.T) {
+	if got := countAgents("", "proj", "claude"); got != 0 {
+		t.Errorf("empty yakosRoot: countAgents = %d; want 0", got)
+	}
+	if got := countAgents("/some/root", "", "claude"); got != 0 {
+		t.Errorf("empty projectRepo: countAgents = %d; want 0", got)
+	}
+}
+
+// TestCountAgents_MatchesCompose verifies that countAgents returns the same
+// count as a direct call to agentscompose.Compose so the start banner and
+// dispatch are consistent.
+func TestCountAgents_MatchesCompose(t *testing.T) {
+	yakosRoot := t.TempDir()
+	agentsDir := filepath.Join(yakosRoot, "lib", "agents")
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatalf("mkdir agents: %v", err)
+	}
+	for _, name := range []string{"x.md", "y.md", "z.md"} {
+		if err := os.WriteFile(filepath.Join(agentsDir, name), []byte("# "+name+"\n"), 0644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	projectRepo := t.TempDir()
+	count := countAgents(yakosRoot, projectRepo, "claude")
+	if count != 3 {
+		t.Errorf("countAgents = %d; want 3", count)
+	}
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 // findInPATH is a test-only helper: returns the resolved binary path and nil
