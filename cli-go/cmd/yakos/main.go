@@ -29,6 +29,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"net"
 	"net/http"
 
 	"github.com/bakw00ds/yakos/internal/agent"
@@ -412,7 +413,7 @@ var helpGroups = []helpGroup{
 	{
 		Title: "Console & Web",
 		Commands: []string{
-			"serve", "kanban", "status", "session", "events", "mtls",
+			"serve", "console", "kanban", "status", "session", "events", "mtls",
 		},
 	},
 	{
@@ -448,6 +449,7 @@ var builtinDescs = map[string]string{
 	"--help":    "Print this help",
 	"workflow":  "Run a named multi-step workflow",
 	"serve":     "Run the daemon + web console (requires daemon running)",
+	"console":   "Manage console users and bootstrap tokens (run on daemon host)",
 	"events":    "Stream live bus events (requires daemon running)",
 }
 
@@ -1766,6 +1768,11 @@ func printKanbanHelp(w io.Writer) {
                                      #   [--host H] [--no-open]
                                      #   (default: random high port on 127.0.0.1)
                                      #   binds 127.0.0.1 by default (loopback only)
+                                     #   example: --host localhost
+                                     #   note: on macOS, "localhost" may resolve to
+                                     #   ::1 (IPv6); Go listens on one resolved addr,
+                                     #   so a browser hitting 127.0.0.1 can then fail
+                                     #   — the 127.0.0.1 default avoids this ambiguity
   yakos kanban status                # is the web UI running? print its URL
   yakos kanban stop                  # stop the running web UI
   yakos kanban add "<title>"         # append to TODO
@@ -2536,6 +2543,13 @@ func runStart(yakosRoot string, args []string) {
 	model := ""
 	noREPL := false
 	consoleAddr := ""
+	wsAddr := ""
+	perfAddr := ""
+	networked := false
+	consoleBind := ""
+	var consoleExternalHosts []string
+	ideRoot := ""
+	noProjectIDE := false
 	var passthrough []string
 
 	// Honor YAKOS_ALLOW_ROOT env as equivalent to --allow-root.
@@ -2593,6 +2607,62 @@ func runStart(yakosRoot string, args []string) {
 		case len(arg) > 15 && arg[:15] == "--console-addr=":
 			consoleAddr = arg[15:]
 
+		case arg == "--ws-addr":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "start: --ws-addr requires an address")
+				os.Exit(1)
+			}
+			wsAddr = args[i]
+		case len(arg) > 10 && arg[:10] == "--ws-addr=":
+			wsAddr = arg[10:]
+
+		case arg == "--perf-addr":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "start: --perf-addr requires an address")
+				os.Exit(1)
+			}
+			perfAddr = args[i]
+		case len(arg) > 12 && arg[:12] == "--perf-addr=":
+			perfAddr = arg[12:]
+
+		case arg == "--networked":
+			networked = true
+
+		case arg == "--console-bind":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "start: --console-bind requires an address")
+				os.Exit(1)
+			}
+			consoleBind = args[i]
+		case len(arg) > 15 && arg[:15] == "--console-bind=":
+			consoleBind = arg[15:]
+
+		case arg == "--console-external-host":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "start: --console-external-host requires a host[:port] value")
+				os.Exit(1)
+			}
+			consoleExternalHosts = append(consoleExternalHosts, args[i])
+		case len(arg) > 24 && arg[:24] == "--console-external-host=":
+			consoleExternalHosts = append(consoleExternalHosts, arg[24:])
+
+		case arg == "--ide-root":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "start: --ide-root requires a path")
+				os.Exit(1)
+			}
+			ideRoot = args[i]
+		case len(arg) > 11 && arg[:11] == "--ide-root=":
+			ideRoot = arg[11:]
+
+		case arg == "--no-project-ide":
+			noProjectIDE = true
+
 		case arg == "--resume":
 			i++
 			if i >= len(args) {
@@ -2642,6 +2712,20 @@ func runStart(yakosRoot string, args []string) {
 		home = "/tmp"
 	}
 
+	// --networked: auto-detect the host's primary non-loopback IPv4 and derive
+	// --console-bind / --console-external-host when not explicitly provided.
+	// An operator-supplied --console-bind or --console-external-host wins.
+	var detectedNetworkedIP string
+	if networked {
+		detectedNetworkedIP = detectPrimaryNonLoopbackIPv4()
+		if detectedNetworkedIP == "" && len(consoleExternalHosts) == 0 {
+			fmt.Fprintln(os.Stderr,
+				"start: --networked: no usable non-loopback IPv4 address found;\n"+
+					"  pass --console-external-host <host>:<port> explicitly.")
+			os.Exit(1)
+		}
+	}
+
 	// Resolve the console token so the banner URL is accurate.
 	// Skip token I/O on --dry-run / --print-agents: those paths must be
 	// read-only and must not create ~/.yakos-state/ or write a token file.
@@ -2651,32 +2735,56 @@ func runStart(yakosRoot string, args []string) {
 		consoleTok, _ = internalconsoleui.LoadOrCreateToken(stateDir)
 	}
 
-	cfg := start.Config{
-		Name:         name,
-		YakosRoot:    yakosRoot,
-		HomeDir:      home,
-		Runtime:      runtime,
-		Safe:         safe,
-		AllowRoot:    allowRoot,
-		NoAgents:     noAgents,
-		DryRun:       dryRun,
-		PrintAgents:  printAgents,
-		Continue:     continueSession,
-		Resume:       resume,
-		Fork:         fork,
-		IDE:          ide,
-		Bare:         bare,
-		StrictMCP:    strictMCP,
-		Model:        model,
-		Passthrough:  passthrough,
-		NoREPL:       noREPL,
-		ConsoleAddr:  consoleAddr,
-		ConsoleToken: consoleTok,
-		Writer:       os.Stdout,
-		ErrWriter:    os.Stderr,
+	// Resolve the effective console port for --networked auto-derivation.
+	// If the operator passed --console-addr we honour that port; else 7890.
+	consolePort := "7890"
+	if consoleAddr != "" {
+		_, p, _ := net.SplitHostPort(consoleAddr)
+		if p != "" {
+			consolePort = p
+		}
 	}
 
-	if _, err := start.Run(cfg); err != nil {
+	// Effective external host for the banner URL when networked.
+	// Operator-supplied --console-external-host wins; else use detected IP.
+	var effectiveExternalHost string
+	if networked {
+		if len(consoleExternalHosts) > 0 {
+			effectiveExternalHost = consoleExternalHosts[0]
+		} else {
+			effectiveExternalHost = detectedNetworkedIP + ":" + consolePort
+		}
+	}
+
+	cfg := start.Config{
+		Name:                name,
+		YakosRoot:           yakosRoot,
+		HomeDir:             home,
+		Runtime:             runtime,
+		Safe:                safe,
+		AllowRoot:           allowRoot,
+		NoAgents:            noAgents,
+		DryRun:              dryRun,
+		PrintAgents:         printAgents,
+		Continue:            continueSession,
+		Resume:              resume,
+		Fork:                fork,
+		IDE:                 ide,
+		Bare:                bare,
+		StrictMCP:           strictMCP,
+		Model:               model,
+		Passthrough:         passthrough,
+		NoREPL:              noREPL,
+		ConsoleAddr:         consoleAddr,
+		Networked:           networked,
+		ConsoleExternalHost: effectiveExternalHost,
+		ConsoleToken:        consoleTok,
+		Writer:              os.Stdout,
+		ErrWriter:           os.Stderr,
+	}
+
+	banner, err := start.Run(cfg)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "start: %v\n", err)
 		os.Exit(1)
 	}
@@ -2688,6 +2796,37 @@ func runStart(yakosRoot string, args []string) {
 		if consoleAddr != "" {
 			serveArgs = append(serveArgs, "--console-addr", consoleAddr)
 		}
+		if wsAddr != "" {
+			serveArgs = append(serveArgs, "--ws-addr", wsAddr)
+		}
+		if perfAddr != "" {
+			serveArgs = append(serveArgs, "--perf-addr", perfAddr)
+		}
+		// Forward --networked derived or explicit console-bind / external-host.
+		if networked && consoleBind == "" {
+			// Auto-derive --console-bind from the detected IP.
+			serveArgs = append(serveArgs, "--console-bind", "0.0.0.0:"+consolePort)
+		}
+		if consoleBind != "" {
+			serveArgs = append(serveArgs, "--console-bind", consoleBind)
+		}
+		for _, eh := range consoleExternalHosts {
+			serveArgs = append(serveArgs, "--console-external-host", eh)
+		}
+		// When --networked was used and no explicit --console-external-host was
+		// passed, forward the auto-detected IP as the external host.
+		if networked && len(consoleExternalHosts) == 0 && detectedNetworkedIP != "" {
+			serveArgs = append(serveArgs, "--console-external-host", detectedNetworkedIP+":"+consolePort)
+		}
+		// Forward IDE root unless --no-project-ide opts out.
+		// Explicit --ide-root wins; otherwise use banner.ProjectRepo (from .project-path).
+		if !noProjectIDE {
+			if ideRoot != "" {
+				serveArgs = append(serveArgs, "--ide-root", ideRoot)
+			} else if banner != nil && banner.ProjectRepo != "" {
+				serveArgs = append(serveArgs, "--ide-root", banner.ProjectRepo)
+			}
+		}
 		if dryRun {
 			// --no-repl --dry-run: serve path already printed its intent in
 			// the banner; exit cleanly without binding.
@@ -2695,6 +2834,54 @@ func runStart(yakosRoot string, args []string) {
 		}
 		runServe(yakosRoot, serveArgs)
 	}
+}
+
+// detectPrimaryNonLoopbackIPv4 returns the first non-loopback, non-link-local
+// IPv4 address found on the host's network interfaces.  It skips interfaces
+// whose names begin with "docker" or "br-" (typical Docker bridge prefixes) so
+// that container runtimes don't shadow the real LAN address.  When no suitable
+// address is found, it returns "".
+func detectPrimaryNonLoopbackIPv4() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		// Skip Docker bridge and virtual interfaces by name heuristic.
+		n := iface.Name
+		if strings.HasPrefix(n, "docker") || strings.HasPrefix(n, "br-") || strings.HasPrefix(n, "veth") {
+			continue
+		}
+		// Skip down interfaces.
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil {
+				continue
+			}
+			ip4 := ip.To4()
+			if ip4 == nil {
+				continue
+			}
+			if ip4.IsLoopback() || ip4.IsLinkLocalUnicast() {
+				continue
+			}
+			return ip4.String()
+		}
+	}
+	return ""
 }
 
 // runUpdate implements `yakos update` natively in Go.
@@ -5576,6 +5763,7 @@ func runServe(yakosRoot string, args []string) {
 	consoleAddr := ""
 	consoleBind := ""
 	var consoleExternalHosts []string
+	ideRoot := ""
 	detach := false
 	rotateToken := false
 	rotatePerfToken := false
@@ -5673,6 +5861,13 @@ func runServe(yakosRoot string, args []string) {
 			consoleAllowBash = true
 		case "--console-structured-questions":
 			consoleStructuredQuestions = true
+		case "--ide-root":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "serve: --ide-root requires a path")
+				os.Exit(1)
+			}
+			ideRoot = args[i]
 		case "--detach":
 			detach = true
 		default:
@@ -5692,6 +5887,8 @@ func runServe(yakosRoot string, args []string) {
 				consoleExternalHosts = append(consoleExternalHosts, args[i][24:])
 			} else if len(args[i]) > 25 && args[i][:25] == "--console-bootstrap-cert=" {
 				consoleBootstrapCertName = args[i][25:]
+			} else if len(args[i]) > 11 && args[i][:11] == "--ide-root=" {
+				ideRoot = args[i][11:]
 			} else {
 				fmt.Fprintf(os.Stderr, "serve: unknown flag %q (try --help)\n", args[i])
 				os.Exit(1)
@@ -5758,21 +5955,22 @@ func runServe(yakosRoot string, args []string) {
 	perfTok, _ := internalperfdash.LoadOrCreatePerfToken(perfStateDir)
 
 	cfg := internalserve.Config{
-		WorkspaceRoot:                workspaceRoot,
-		SocketPath:                   socketPath,
-		PIDFile:                      pidFile,
-		YakosRoot:                    yakosRoot,
-		WSAddr:                       wsAddr,
-		PerfAddr:                     perfAddr,
-		NoPerfDash:                   noPerfDash,
-		ConsoleAddr:                  consoleAddr,
-		ConsoleBind:                  consoleBind,
-		ConsoleExternalHosts:         consoleExternalHosts,
-		NoConsole:                    noConsole,
-		ConsoleBootstrapCertName:     consoleBootstrapCertName,
-		NoBootstrapCert:              noBootstrapCert,
-		ConsoleAllowBash:             consoleAllowBash,
-		ConsoleStructuredQuestions:   consoleStructuredQuestions,
+		WorkspaceRoot:              workspaceRoot,
+		SocketPath:                 socketPath,
+		PIDFile:                    pidFile,
+		YakosRoot:                  yakosRoot,
+		WSAddr:                     wsAddr,
+		PerfAddr:                   perfAddr,
+		NoPerfDash:                 noPerfDash,
+		ConsoleAddr:                consoleAddr,
+		ConsoleBind:                consoleBind,
+		ConsoleExternalHosts:       consoleExternalHosts,
+		IDERoot:                    ideRoot,
+		NoConsole:                  noConsole,
+		ConsoleBootstrapCertName:   consoleBootstrapCertName,
+		NoBootstrapCert:            noBootstrapCert,
+		ConsoleAllowBash:           consoleAllowBash,
+		ConsoleStructuredQuestions: consoleStructuredQuestions,
 	}
 
 	wsBindAddr := wsAddr
@@ -5793,6 +5991,20 @@ func runServe(yakosRoot string, args []string) {
 		consoleEffectiveBind = "127.0.0.1:7890"
 	}
 
+	// Determine whether the console is in networked (https) mode for the banner.
+	// A non-loopback or wildcard consoleBind triggers networked mode in serve.Run.
+	consoleIsNetworked := consoleBind != "" && consoleBind != "-" &&
+		consoleEffectiveBind != "127.0.0.1:7890" &&
+		!strings.HasPrefix(consoleEffectiveBind, "127.") &&
+		!strings.HasPrefix(consoleEffectiveBind, "[::1]") &&
+		consoleEffectiveBind != "localhost:7890" &&
+		!strings.HasPrefix(consoleEffectiveBind, "localhost:")
+
+	consoleScheme := "http"
+	if consoleIsNetworked {
+		consoleScheme = "https"
+	}
+
 	fmt.Fprintf(os.Stderr, "yakos serve: starting daemon for workspace %s\n", workspaceRoot)
 	fmt.Fprintf(os.Stderr, "yakos serve: socket at %s\n", jsonrpc.SocketPath(workspaceRoot))
 	if !noConsole {
@@ -5802,7 +6014,7 @@ func runServe(yakosRoot string, args []string) {
 		// Note: for the networked path (--console-bind non-loopback), the
 		// full banner is printed by printNetworkedConsoleBanner in serve.Run();
 		// this line covers the brief pre-Run startup line only.
-		fmt.Fprintf(os.Stderr, "yakos serve: console: http://%s/#token=%s\n", consoleEffectiveBind, consoleTok)
+		fmt.Fprintf(os.Stderr, "yakos serve: console: %s://%s/#token=%s\n", consoleScheme, consoleEffectiveBind, consoleTok)
 		fmt.Fprintf(os.Stderr, "yakos serve: ws events (console): ws://%s/v1/events\n", consoleEffectiveBind)
 		fmt.Fprintf(os.Stderr, "yakos serve: ws events (standalone): ws://%s/v1/events\n", wsBindAddr)
 	} else {
@@ -6058,6 +6270,10 @@ Flags:
   --perf-addr <addr>        Standalone performance dashboard address (default 127.0.0.1:7895).
                             Only used when --no-console is set.
   --no-perf                 Disable the standalone performance dashboard.
+  --ide-root <path>         IDE file-pane root (default: project dir from .project-path;
+                            falls back to workspace root when .project-path is absent).
+                            Pass --ide-root <path> to override; use WorkspaceRoot to revert
+                            to the old behaviour.
   --rotate-ws-token         Generate a new WS bearer token and exit.
   --rotate-perf-token       Generate a new perf dashboard token and exit.
   --rotate-console-token    Generate a new console token and exit.

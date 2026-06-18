@@ -40,8 +40,8 @@ import (
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/filewatch"
-	"github.com/bakw00ds/yakos/internal/interactive"
 	"github.com/bakw00ds/yakos/internal/grpcserver"
+	"github.com/bakw00ds/yakos/internal/interactive"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/mcpserver"
 	"github.com/bakw00ds/yakos/internal/mtls"
@@ -184,6 +184,20 @@ type Config struct {
 	//
 	// Activated by --console-structured-questions in runServe.  Off by default.
 	ConsoleStructuredQuestions bool
+
+	// IDERoot, when non-empty, overrides WorkspaceRoot as the jail root for the
+	// IDE file pane (/api/files/*) and the diff handler.  All other handlers
+	// (chat, skills, kanban, metrics) continue to use WorkspaceRoot.
+	//
+	// When empty, the serve.Run logic performs self-discovery: if
+	// <WorkspaceRoot>/.project-path exists and resolves to a real directory,
+	// that directory is used as the effective IDE root.  This makes raw
+	// 'yakos serve' (run from the agent-control dir) automatically root the
+	// IDE file pane at the project repo without any extra flags.
+	//
+	// Set via --ide-root on both 'yakos serve' and 'yakos start --no-repl'.
+	// Set to WorkspaceRoot (or left empty) to disable project-dir auto-rooting.
+	IDERoot string
 
 	// Bus is the in-process event bus shared between the JSON-RPC layer and the
 	// WebSocket layer.  If nil, a new Bus is created by Run.  Inject for tests.
@@ -566,6 +580,23 @@ func Run(ctx context.Context, cfg Config) error {
 		if cfg.WorkspaceRoot != "" {
 			wtMgr.PruneOrphans(cfg.WorkspaceRoot)
 		}
+		// Resolve the effective IDE root for the file pane and diff handler.
+		//
+		// Priority: explicit --ide-root flag > .project-path self-discovery > WorkspaceRoot.
+		// The chat handler, skills handler, kanban and metrics always use WorkspaceRoot.
+		effectiveIDERoot := cfg.IDERoot
+		if effectiveIDERoot == "" && cfg.WorkspaceRoot != "" {
+			projectPathFile := filepath.Join(cfg.WorkspaceRoot, ".project-path")
+			if data, err := os.ReadFile(projectPathFile); err == nil { //nolint:gosec
+				candidate := strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0])
+				if candidate != "" {
+					if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+						effectiveIDERoot = candidate
+					}
+				}
+			}
+		}
+
 		consoleCfg := consoleui.Config{
 			Addr:              bindAddr,
 			Token:             consoleTok,
@@ -582,6 +613,7 @@ func Run(ctx context.Context, cfg Config) error {
 			WorkflowEngine:     workflowEngine,
 			StateDir:           stateDir,
 			WorkspaceRoot:      cfg.WorkspaceRoot,
+			IDERoot:            effectiveIDERoot,
 			YakosRoot:          cfg.YakosRoot,
 			AuthSessionStore:   authStore,
 			UserStore:          uStore,

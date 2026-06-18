@@ -912,18 +912,21 @@ func TestRun_NoREPL_BannerIndicatesStarting(t *testing.T) {
 
 func TestBuildConsoleURL(t *testing.T) {
 	cases := []struct {
-		addr  string
-		token string
-		want  string
+		addr      string
+		token     string
+		networked bool
+		want      string
 	}{
-		{"127.0.0.1:7890", "abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123abcd", "http://127.0.0.1:7890/#token=abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123abcd"},
-		{"127.0.0.1:7890", "", "http://127.0.0.1:7890/"},
-		{"", "tok", "http://127.0.0.1:7890/#token=tok"},
+		{"127.0.0.1:7890", "abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123abcd", false, "http://127.0.0.1:7890/#token=abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123abcd"},
+		{"127.0.0.1:7890", "", false, "http://127.0.0.1:7890/"},
+		{"", "tok", false, "http://127.0.0.1:7890/#token=tok"},
+		{"192.168.1.50:7890", "tok", true, "https://192.168.1.50:7890/#token=tok"},
+		{"192.168.1.50:7890", "", true, "https://192.168.1.50:7890/"},
 	}
 	for _, tc := range cases {
-		got := buildConsoleURL(tc.addr, tc.token)
+		got := buildConsoleURL(tc.addr, tc.token, tc.networked)
 		if got != tc.want {
-			t.Errorf("buildConsoleURL(%q, %q) = %q; want %q", tc.addr, tc.token, got, tc.want)
+			t.Errorf("buildConsoleURL(%q, %q, %v) = %q; want %q", tc.addr, tc.token, tc.networked, got, tc.want)
 		}
 	}
 }

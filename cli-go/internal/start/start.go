@@ -115,6 +115,17 @@ type Config struct {
 	// the Web console URL shown in the preflight banner.
 	ConsoleAddr string
 
+	// Networked, when true, signals that the console should be bound to a
+	// non-loopback address.  runStart auto-detects the host's primary
+	// non-loopback IPv4 and forwards --console-bind / --console-external-host
+	// to the serve sub-command.  The banner URL is emitted as https://.
+	Networked bool
+
+	// ConsoleExternalHost is the resolved external host[:port] used when
+	// Networked is true.  The banner emits an https:// URL using this value.
+	// When empty and Networked is true, the banner falls back to ConsoleAddr.
+	ConsoleExternalHost string
+
 	// ConsoleProbeFn, if non-nil, is called to detect whether a console
 	// daemon is already listening on addr.  Returns true when reachable.
 	// When nil, net.DialTimeout is used with a 200 ms timeout.
@@ -337,12 +348,19 @@ func Run(cfg Config) (*Banner, error) {
 	if consoleAddr == "" {
 		consoleAddr = "127.0.0.1:7890"
 	}
+	// When networked, use the external host for the banner URL so the operator
+	// can copy-paste a reachable https:// address.  The probe still uses the
+	// local bind address (consoleAddr) which may differ from the external host.
+	bannerAddr := consoleAddr
+	if cfg.Networked && cfg.ConsoleExternalHost != "" {
+		bannerAddr = cfg.ConsoleExternalHost
+	}
 	probeFn := cfg.ConsoleProbeFn
 	if probeFn == nil {
 		probeFn = defaultConsoleProbe
 	}
 	consoleRunning := probeFn(consoleAddr)
-	consoleURL := buildConsoleURL(consoleAddr, cfg.ConsoleToken)
+	consoleURL := buildConsoleURL(bannerAddr, cfg.ConsoleToken, cfg.Networked)
 
 	// ---- preflight banner ------------------------------------------------------
 
@@ -794,13 +812,18 @@ func printBanner(w io.Writer, name, projectRepo, controlDir, runtime, caps strin
 	}
 }
 
-// buildConsoleURL returns the http URL for the unified console.
+// buildConsoleURL returns the URL for the unified console.
+// When networked is true the scheme is https://; otherwise http://.
 // If token is empty, the fragment is omitted.
-func buildConsoleURL(addr, token string) string {
+func buildConsoleURL(addr, token string, networked bool) string {
 	if addr == "" {
 		addr = "127.0.0.1:7890"
 	}
-	u := "http://" + addr + "/"
+	scheme := "http"
+	if networked {
+		scheme = "https"
+	}
+	u := scheme + "://" + addr + "/"
 	if token != "" {
 		u += "#token=" + token
 	}
@@ -1136,6 +1159,35 @@ Web console:
                           --no-repl --dry-run prints the serve intent without
                           binding.
 
+Daemon bind addresses (forwarded to yakos serve; only used with --no-repl / --web):
+    --console-addr <addr>  Console bind address        (default 127.0.0.1:7890)
+    --ws-addr <addr>       Event WebSocket bind address (default 127.0.0.1:7891)
+    --perf-addr <addr>     Perf dashboard bind address  (default 127.0.0.1:7895)
+    Note: on macOS, "localhost" may resolve to ::1 (IPv6); Go binds a single
+    resolved address, so a client/browser using 127.0.0.1 can then fail —
+    the 127.0.0.1 default avoids this ambiguity.
+
+Networked console (https, mTLS, accessible from other machines):
+    --networked           Auto-detect the host's primary non-loopback IPv4 and
+                          start the console on 0.0.0.0:<port> with mTLS (https).
+                          Banner shows https://<detected-ip>:<port>/.
+                          Requires first-time /setup (token printed once when
+                          zero console users exist; use 'yakos console
+                          bootstrap-token' to regenerate).
+    --console-bind <addr> Explicit console bind address (e.g. 0.0.0.0:7890).
+                          Forwarded to yakos serve --console-bind.  Overrides
+                          --networked auto-derivation.
+    --console-external-host <host[:port]>
+                          Explicit external host browsers use to reach the
+                          console.  Repeatable.  Overrides --networked
+                          auto-derivation for the external host.
+
+IDE file pane (forwarded to yakos serve; only used with --no-repl / --web):
+    --ide-root <path>     Root directory for the IDE file pane (default: project
+                          dir from .project-path; auto-set from banner).
+    --no-project-ide      Opt out of auto-rooting the IDE pane at the project
+                          dir; use the agent-control work dir instead.
+
 Inspection:
     --dry-run             Print what would be exec'd; exit 0.
     --print-agents        Print the composed agent JSON; exit 0.
@@ -1150,6 +1202,14 @@ Examples:
     yakos start myapp --allow-root    # container/root bypass mode
     yakos start myapp --no-repl       # web console only, no REPL
     yakos start myapp --web           # same as --no-repl
+    yakos start myapp --no-repl \
+        --console-addr localhost:7890 \
+        --ws-addr localhost:7891 \
+        --perf-addr localhost:7895    # custom bind addrs (see macOS note above)
+    yakos start myapp --no-repl --networked  # https, LAN-accessible console
+    yakos start myapp --no-repl \
+        --console-bind 0.0.0.0:7890 \
+        --console-external-host 192.168.1.50:7890  # explicit networked console
 `)
 }
 
