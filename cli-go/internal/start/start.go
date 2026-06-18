@@ -1168,29 +1168,28 @@ Daemon bind addresses (forwarded to yakos serve; only used with --no-repl / --we
     the 127.0.0.1 default avoids this ambiguity.
 
 Networked console (https, mTLS, accessible from other machines):
-    IMPORTANT: networked mode requires --no-repl or --web.  Interactive REPL
-    mode replaces the process via exec and cannot host a daemon.  Using
-    --networked or a non-loopback --console-bind without --no-repl/--web is
-    an error.
+    Passing any of the flags below in interactive mode (without --no-repl)
+    automatically spawns a detached background daemon before the REPL exec.
+    The daemon prints its setup token and URL; the REPL then starts normally.
+    Stop the background daemon with: yakos serve stop
 
     --networked           Auto-detect the host's primary non-loopback IPv4 and
                           start the console on 0.0.0.0:<port> with mTLS (https).
                           Banner shows https://<detected-ip>:<port>/.
-                          Requires --no-repl or --web.
                           Requires first-time /setup (token printed once when
                           zero console users exist; use 'yakos console
                           bootstrap-token' to regenerate).
     --console-bind <addr> Explicit console bind address (e.g. 0.0.0.0:7890).
                           Forwarded to yakos serve --console-bind.  Overrides
                           --networked auto-derivation.  A non-loopback bind
-                          address implies networked mode; requires --no-repl
-                          or --web.
+                          address implies networked mode.
     --console-external-host <host[:port]>
                           Explicit external host browsers use to reach the
                           console.  Repeatable.  Overrides --networked
                           auto-derivation for the external host.
 
-IDE file pane (forwarded to yakos serve; only used with --no-repl / --web):
+IDE file pane (forwarded to yakos serve; only used with --no-repl / --web or
+when a daemon is auto-spawned):
     --ide-root <path>     Root directory for the IDE file pane (default: project
                           dir from .project-path; auto-set from banner).
     --no-project-ide      Opt out of auto-rooting the IDE pane at the project
@@ -1214,10 +1213,11 @@ Examples:
         --console-addr localhost:7890 \
         --ws-addr localhost:7891 \
         --perf-addr localhost:7895    # custom bind addrs (see macOS note above)
-    yakos start myapp --no-repl --networked  # https, LAN-accessible console
-    yakos start myapp --no-repl \
-        --console-bind 0.0.0.0:7890 \
-        --console-external-host 192.168.1.50:7890  # explicit networked console
+    yakos start myapp --networked     # spawns background daemon + drops into REPL
+    yakos start myapp --no-repl --networked  # https, LAN-accessible console (no REPL)
+    yakos start myapp --console-bind 0.0.0.0:7890 \
+        --console-external-host 192.168.1.50:7890  # explicit networked console + REPL
+    yakos serve stop                  # stop a daemon auto-spawned by the above
 `)
 }
 

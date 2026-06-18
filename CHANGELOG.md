@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.0.0] — 2026-06-18
+
+### Added
+
+- **`yakos start` auto-spawns the console daemon alongside the REPL** —
+  when console or networked flags are provided, `yakos start` now
+  launches the daemon as a detached background process in addition to
+  the interactive REPL, replacing the v0.47 hard-error that required
+  `--no-repl` or `--web`. Both the REPL and the console coexist in the
+  same invocation.
+- **`yakos serve stop`** — new subcommand that terminates a running
+  daemon via its pidfile and SIGTERM. Help text for both `yakos start`
+  and `yakos serve` updated to document the new behaviour.
+- **ADR-0007 (Proposed): terminal REPL as thin client of the console
+  interactive engine** — design proposal for a shared bidirectional
+  session between the terminal REPL and the web console (not yet
+  implemented; tracked for the next implementation phase).
+
 ## [0.47.0.0] — 2026-06-18
 
 ### Fixed
