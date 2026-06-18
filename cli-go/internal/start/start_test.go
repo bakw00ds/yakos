@@ -501,10 +501,90 @@ func TestPrintHelp(t *testing.T) {
 		"claude",
 		"codex",
 		"gemini",
+		// share-terminal: must mention auto-start behavior and stop command
+		"--share-terminal",
+		"--direct",
+		"yakos serve stop",
 	} {
 		if !strings.Contains(got, phrase) {
 			t.Errorf("help text missing %q;\nfull output:\n%s", phrase, got)
 		}
+	}
+
+	// The share-terminal section must NOT tell users to run yakos serve manually.
+	if strings.Contains(got, "you need to run 'yakos serve'") {
+		t.Errorf("help text should not tell operator to run 'yakos serve' manually with --share-terminal; got:\n%s", got)
+	}
+}
+
+// TestRun_DaemonAutoSpawn_BannerIndicatesStarting verifies that setting
+// DaemonAutoSpawn=true produces "(starting daemon…)" in the console line
+// instead of the "run 'yakos serve'" manual hint.
+func TestRun_DaemonAutoSpawn_BannerIndicatesStarting(t *testing.T) {
+	home, _, _ := newFakeProject(t, "autospawnbanner")
+
+	var stdout bytes.Buffer
+	cfg := Config{
+		Name:            "autospawnbanner",
+		HomeDir:         home,
+		Runtime:         "claude",
+		NoAgents:        true,
+		DryRun:          true, // dry-run to avoid exec
+		DaemonAutoSpawn: true,
+		Now:             time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:          &stdout,
+		ErrWriter:       &bytes.Buffer{},
+		Env:             map[string]string{"HOME": home},
+		ConsoleToken:    "cccc0000cccc0000cccc0000cccc0000cccc0000cccc0000cccc0000cccc0000",
+		ConsoleProbeFn:  func(string) bool { return false },
+	}
+
+	_, err := Run(cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "starting daemon") {
+		t.Errorf("banner should show 'starting daemon' hint with DaemonAutoSpawn=true; got:\n%s", out)
+	}
+	if strings.Contains(out, "run 'yakos serve'") {
+		t.Errorf("banner must not tell operator to run 'yakos serve' when DaemonAutoSpawn=true; got:\n%s", out)
+	}
+}
+
+// TestRun_NoAutoSpawn_BannerHintsManualServe verifies that when neither
+// DaemonAutoSpawn nor NoREPL is set (plain interactive, no console flags),
+// the banner still shows the "run 'yakos serve'" hint so the operator knows
+// how to bring up the console.
+func TestRun_NoAutoSpawn_BannerHintsManualServe(t *testing.T) {
+	home, _, _ := newFakeProject(t, "nospawnbanner")
+
+	var stdout bytes.Buffer
+	cfg := Config{
+		Name:            "nospawnbanner",
+		HomeDir:         home,
+		Runtime:         "claude",
+		NoAgents:        true,
+		DryRun:          true,
+		DaemonAutoSpawn: false,
+		NoREPL:          false,
+		Now:             time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC),
+		Writer:          &stdout,
+		ErrWriter:       &bytes.Buffer{},
+		Env:             map[string]string{"HOME": home},
+		ConsoleToken:    "dddd0000dddd0000dddd0000dddd0000dddd0000dddd0000dddd0000dddd0000",
+		ConsoleProbeFn:  func(string) bool { return false },
+	}
+
+	_, err := Run(cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "run 'yakos serve'") {
+		t.Errorf("banner should show 'run yakos serve' hint for plain interactive mode (no auto-spawn, no --no-repl); got:\n%s", out)
 	}
 }
 
@@ -876,8 +956,8 @@ func TestRun_NoREPL_DryRun(t *testing.T) {
 }
 
 // TestRun_NoREPL_BannerIndicatesStarting verifies that the banner hints
-// "(starting...)" for the console URL when --no-repl is set and the daemon
-// is not yet running.
+// "(starting daemon…)" for the console URL when --no-repl is set and the
+// daemon is not yet running.
 func TestRun_NoREPL_BannerIndicatesStarting(t *testing.T) {
 	home, _, _ := newFakeProject(t, "noreplastart")
 
@@ -903,8 +983,13 @@ func TestRun_NoREPL_BannerIndicatesStarting(t *testing.T) {
 	}
 
 	out := stdout.String()
-	if !strings.Contains(out, "starting...") {
-		t.Errorf("banner should show '(starting...)' hint for --no-repl; got:\n%s", out)
+	// NoREPL triggers "(starting daemon…)" — the daemon is coming up as part
+	// of this invocation; the old "run 'yakos serve'" hint must not appear.
+	if !strings.Contains(out, "starting daemon") {
+		t.Errorf("banner should show 'starting daemon' hint for --no-repl; got:\n%s", out)
+	}
+	if strings.Contains(out, "run 'yakos serve'") {
+		t.Errorf("banner must not tell the operator to run 'yakos serve' when --no-repl is active; got:\n%s", out)
 	}
 }
 

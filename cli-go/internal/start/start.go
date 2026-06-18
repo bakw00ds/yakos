@@ -180,6 +180,13 @@ type Config struct {
 	// ShareTerminal.  Preserved as an escape hatch (--direct) for operators on
 	// environments without a running daemon or who prefer zero-daemon terminal.
 	Direct bool
+
+	// DaemonAutoSpawn, when true, tells the banner that runStart has already
+	// (or will imminently) spawn a background daemon before calling start.Run.
+	// The preflight banner suppresses the "run 'yakos serve' to start" hint and
+	// instead shows "(starting daemon…)" so the operator knows the daemon is
+	// coming up without any manual action.
+	DaemonAutoSpawn bool
 }
 
 // Banner holds all fields computed during the preflight phase.  It is
@@ -383,7 +390,7 @@ func Run(cfg Config) (*Banner, error) {
 
 	// ---- preflight banner ------------------------------------------------------
 
-	printBanner(w, name, projectRepo, controlDir, runtime, caps, cliOk, authOk, permMode, cfg.AllowRoot, agentCount, cfg.NoAgents, modeFlags, consoleURL, consoleRunning, cfg.NoREPL)
+	printBanner(w, name, projectRepo, controlDir, runtime, caps, cliOk, authOk, permMode, cfg.AllowRoot, agentCount, cfg.NoAgents, modeFlags, consoleURL, consoleRunning, cfg.NoREPL, cfg.DaemonAutoSpawn)
 
 	// ---- share-terminal banner warning ------------------------------------------
 	// Modelled on the --console-allow-bash warning in serve.go:770-778.
@@ -811,7 +818,7 @@ func materializeAgents(yakosRoot, projectRepo, runtime string, ew io.Writer) err
 // identical to bash start.sh's print_banner() function.
 func printBanner(w io.Writer, name, projectRepo, controlDir, runtime, caps string,
 	cliOk, authOk bool, permMode string, allowRoot bool, agentCount int, noAgents bool,
-	modeFlags, consoleURL string, consoleRunning, noREPL bool) {
+	modeFlags, consoleURL string, consoleRunning, noREPL, daemonAutoSpawn bool) {
 
 	cliStr := "OK"
 	if !cliOk {
@@ -836,15 +843,17 @@ func printBanner(w io.Writer, name, projectRepo, controlDir, runtime, caps strin
 		agentStr += " (--no-agents: suppressed)"
 	}
 
-	// Compose the web console line.  When the daemon is already listening we
-	// say "(running)"; when it isn't, we give the operator a hint.
+	// Compose the web console line.  Three states:
+	//   - Daemon already listening at banner time: "(running) <url>"
+	//   - Daemon being started by this invocation (--no-repl or auto-spawn): "<url>  (starting daemon…)"
+	//   - No daemon involved: "<url>  (run 'yakos serve' or 'yakos start --no-repl' to start)"
 	var consoleLine string
 	if consoleURL != "" {
 		if consoleRunning {
 			consoleLine = "  web console:    (running) " + consoleURL
-		} else if noREPL {
-			// --no-repl: serve will start momentarily — hint is not needed.
-			consoleLine = "  web console:    " + consoleURL + "  (starting...)"
+		} else if noREPL || daemonAutoSpawn {
+			// Daemon is coming up as part of this invocation; no manual action needed.
+			consoleLine = "  web console:    " + consoleURL + "  (starting daemon…)"
 		} else {
 			consoleLine = "  web console:    " + consoleURL + "  (run 'yakos serve' or 'yakos start --no-repl' to start)"
 		}
@@ -1240,9 +1249,10 @@ Daemon bind addresses (forwarded to yakos serve; only used with --no-repl / --we
 
 Networked console (https, mTLS, accessible from other machines):
     Passing any of the flags below in interactive mode (without --no-repl)
-    automatically spawns a detached background daemon before the REPL exec.
-    The daemon prints its setup token and URL; the REPL then starts normally.
-    Stop the background daemon with: yakos serve stop
+    automatically starts a detached background daemon before the REPL exec —
+    you do NOT need to run 'yakos serve' separately.  The banner reflects this
+    with "(starting daemon…)".  Stop the background daemon with:
+      yakos serve stop
 
     --networked           Auto-detect the host's primary non-loopback IPv4 and
                           start the console on 0.0.0.0:<port> with mTLS (https).
@@ -1270,8 +1280,9 @@ Terminal sharing (ADR-0008 Phase 1):
     --share-terminal      Mirror the native claude TUI to the console Terminal
                           pane (admin-only; read-only in Phase 1).  The daemon
                           owns the PTY; the browser tab mirrors its output.
-                          When a daemon is auto-spawned, --share-terminal is
-                          forwarded so the daemon mounts /api/term and /v1/term.
+                          Automatically starts a background daemon — you do NOT
+                          need to run 'yakos serve' separately.  Stop it with:
+                            yakos serve stop
     --direct              Force the legacy in-process exec path regardless of
                           --share-terminal.  Escape hatch for environments where
                           daemon PTY ownership is unavailable.
