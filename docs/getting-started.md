@@ -532,26 +532,37 @@ another machine.
 
 ### Mirroring the native TUI to the browser (`--share-terminal`)
 
-`--share-terminal` (v0.50.0.0+) lets you drive `claude` from your
-local terminal while watching the session live in the browser's
-Terminal tab. Off by default.
+`--share-terminal` (v0.50.0.0+) starts the console daemon automatically
+alongside the interactive session — no separate `yakos serve` needed.
+You drive `claude` from your local terminal as usual; the browser's
+Terminal tab mirrors the output read-only.
 
 ```sh
-# Local mirror (loopback console)
+# Local mirror (loopback console; daemon auto-starts)
 yakos start --share-terminal
 
-# Share over the network (authenticated admins see the Terminal tab)
+# Networked (daemon auto-starts; authenticated admins see the Terminal tab)
 yakos start --share-terminal \
             --console-bind 0.0.0.0:7890 \
             --console-external-host <host>:7890
 ```
 
-Open the console URL, then navigate to the **Terminal** tab. The tab
-is admin-only and only appears when `--share-terminal` is active.
-Phase 1 is read-only — you type in the terminal; the browser watches.
-Bidirectional browser input is a planned Phase 2.
+Open the console URL printed in the preflight banner, then navigate to
+the **Terminal** tab. The tab is admin-only and only appears when
+`--share-terminal` is active. Phase 1 is read-only — you type in the
+terminal; the browser watches. Bidirectional browser input is a
+planned Phase 2.
 
-When done, stop the daemon:
+**If a daemon is already running** for this workspace without
+`--share-terminal`, stop it first — the Terminal pane only mounts when
+the daemon itself was started with the flag:
+
+```sh
+yakos serve stop
+yakos start --share-terminal
+```
+
+Stop the daemon when done:
 
 ```sh
 yakos serve stop

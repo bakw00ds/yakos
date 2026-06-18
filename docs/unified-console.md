@@ -108,8 +108,11 @@ execution. Off by default; printing a warning banner when combined with
 
 ### Web-terminal mirror (`--share-terminal`)
 
-`--share-terminal` (v0.50.0.0+, opt-in, off by default) causes the
-console daemon to own a PTY that runs the native `claude` TUI. You
+`--share-terminal` (v0.50.0.0+, opt-in, off by default) causes
+`yakos start` to auto-start the console daemon in the background and
+own a PTY that runs the native `claude` TUI. You do not need to run
+`yakos serve` first — the single `yakos start --share-terminal`
+command brings up both the interactive session and the daemon. You
 drive the session from your local terminal exactly as usual; the PTY
 output is also mirrored read-only into the console's admin-only
 **Terminal** pane in the browser.
@@ -119,37 +122,50 @@ cannot type into it from the browser. Bidirectional browser input is a
 planned Phase 2 and is not available yet.
 
 ```sh
-# Loopback: mirror the native TUI into the local console
+# Loopback: start session + daemon; open the console Terminal tab
 yakos start --share-terminal
 
-# Networked: mirror and expose to authenticated admins on the network
+# Networked: start session + daemon; admins on the network see the Terminal tab
 yakos start --share-terminal \
             --console-bind 0.0.0.0:7890 \
             --console-external-host <host>:7890
 ```
 
-After starting, open the console URL and navigate to the **Terminal**
-tab to see the live PTY output.
+After starting, open the console URL printed in the preflight banner
+and navigate to the **Terminal** tab to see the live PTY output.
 
-Stop the daemon (and the PTY session) when done:
+**Caveat: daemon already running without `--share-terminal`.** If a
+daemon is already running for this workspace (e.g., started via
+`yakos serve` or a prior `yakos start` without `--share-terminal`),
+the Terminal pane will not be mounted — it only activates when the
+daemon itself was started with `--share-terminal`. Stop the existing
+daemon first, then re-start with the flag:
+
+```sh
+yakos serve stop
+yakos start --share-terminal
+```
+
+Stop the daemon when done:
 
 ```sh
 yakos serve stop
 ```
 
-**`--direct` — legacy exec path.** If you need to run `yakos start`
-without a daemon PTY (environments without a running daemon, or
-preferences for the zero-daemon terminal experience), use:
+**`--direct` — legacy exec path.** If you want to run `yakos start`
+without a daemon PTY (preference for the zero-daemon terminal
+experience, or environments where daemon auto-start is not wanted),
+use:
 
 ```sh
 yakos start --direct
 ```
 
 This forces the legacy `syscall.Exec` path that replaces the yakOS
-process with `claude` directly. No console mirroring is available in
-this mode. `--direct` is the escape hatch for the transition period;
-a deprecation notice will appear when the PTY path is ready to become
-the default.
+process with `claude` directly. No daemon is started; no console
+mirroring is available. `--direct` is the escape hatch for the
+transition period; a deprecation notice will appear when the PTY path
+is ready to become the default.
 
 **Security note for networked deployments.** The Terminal pane exposes
 live PTY output, which can contain secrets the operator types (API
