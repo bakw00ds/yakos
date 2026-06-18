@@ -22,6 +22,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/setuptoken"
+	"github.com/bakw00ds/yakos/internal/terminalmanager"
 	"github.com/bakw00ds/yakos/internal/userstore"
 	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/worktreemgr"
@@ -66,11 +67,20 @@ var swJS []byte
 //	SHA-256 pinned in pinnedDrawflowChecksums in vendor_checksum_test.go.
 //	Documented in VENDOR.md §Drawflow.
 //
+// xterm.js: dist/vendor/xterm/ — terminal emulator for the Terminal pane (ADR-0008 P1).
+//
+//	xterm.js (UMD core) + xterm-addon-fit.js (FitAddon) + xterm.css.
+//	xterm 5.3.0, xterm-addon-fit 0.8.0; MIT license.
+//	No eval(); no workers; loads under script-src 'self' with no CSP changes.
+//	SHA-256 pinned in pinnedXtermChecksums in vendor_checksum_test.go.
+//	Documented in VENDOR.md §xterm.js.
+//
 //go:embed all:dist/vendor/fonts
 //go:embed dist/vendor/mermaid.min.js
 //go:embed dist/vendor/VENDOR.md
 //go:embed all:dist/vendor/monaco
 //go:embed all:dist/vendor/drawflow
+//go:embed all:dist/vendor/xterm
 var vendorFS embed.FS
 
 //go:embed dist/ide-editor.html
@@ -283,6 +293,14 @@ type Config struct {
 	// missing, the factory is nil (→ 503); no hard fail at startup.
 	// Tests may inject a factory built with interactive.NewSDKEngineWithProvider.
 	SDKEngineFactory *interactive.SDKEngineFactory
+
+	// TerminalManager, when non-nil, enables the /v1/term/<sessionId> WebSocket
+	// endpoint and GET /api/term (ADR-0008 Phase 1).  When nil, both endpoints
+	// are absent (not mounted).
+	//
+	// serve.go constructs this when --share-terminal is active.  When absent,
+	// no PTY-related routes are mounted — the feature is invisible unless opted in.
+	TerminalManager *terminalmanager.Manager
 }
 
 func (c *Config) addr() string {
@@ -1068,6 +1086,46 @@ func (s *Server) registerRoutes() {
 	// and cannot be made retry-safe. Callers must not retry without human review.
 	bashH := newBashHandlers(s.cfg)
 	s.mux.HandleFunc("/api/console/bash", requireRoleFunc(netid.RoleAdmin, bashH.handleBash))
+
+	// ---- ADR-0008 Phase 1: PTY terminal session endpoints -------------------
+	// Mounted ONLY when TerminalManager is non-nil (i.e. --share-terminal was
+	// passed to `yakos start`).  When nil, neither /v1/term/* nor /api/term
+	// is registered — the feature is completely invisible unless opted in.
+	//
+	// Both endpoints require RoleAdmin: terminal output can contain secrets
+	// typed by the operator (passwords, tokens) so read-only viewers are NOT
+	// permitted at RoleRead.
+	//
+	// /v1/term/<sessionId> — binary-framed WebSocket stream (output-only in P1).
+	// /api/term            — GET JSON list of active sessions (for frontend discovery).
+	if s.cfg.TerminalManager != nil {
+		var termWSHandler http.Handler
+		if s.cfg.NetworkedMode {
+			termWSHandler = buildTermWSHandlerNetworked(s.cfg.Token, s.cfg.TerminalManager, s.cfg.externalHosts())
+		} else {
+			termWSHandler = buildTermWSHandler(s.cfg.Token, s.cfg.TerminalManager)
+		}
+		// Apply the same auth middleware stack as /v1/events.
+		var termWSMounted http.Handler
+		if s.cfg.NetworkedMode {
+			termWSMounted = consoleOriginAllowListNetworked(s.cfg.externalHosts(),
+				consoleAuthSubprotocolOrSession(s.cfg.Token, s.cfg.externalHosts(), termWSHandler),
+			)
+		} else {
+			termWSMounted = consoleLoopbackOnly(
+				consoleOriginAllowList(
+					consoleAuthSubprotocol(s.cfg.Token, termWSHandler),
+				),
+			)
+		}
+		// requireRole(RoleAdmin) wraps the entire WS handler so that the auth
+		// middleware fires before the WS upgrade.  Non-admin requests receive a
+		// 403 before the WebSocket handshake, avoiding an upgrade→close round-trip.
+		s.mux.Handle("/v1/term/", requireRole(netid.RoleAdmin, termWSMounted))
+
+		// GET /api/term — list active sessions.  RoleAdmin required.
+		s.mux.HandleFunc("/api/term", requireRoleFunc(netid.RoleAdmin, s.handleTerm))
+	}
 }
 
 // handlePresence returns the current online operator presence snapshot as a
@@ -1367,10 +1425,11 @@ func requireTokenForNonStaticNetworked(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// /v1/events WebSocket upgrade: require bearer token via subprotocol.
+		// /v1/* WebSocket upgrades: require bearer token via subprotocol.
 		// The downstream consoleAuthSubprotocol middleware validates the token;
 		// we must let the request through the outer gate so it can reach that.
-		if r.URL.Path == "/v1/events" && strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		// This covers /v1/events and /v1/term/<sessionId>.
+		if strings.HasPrefix(r.URL.Path, "/v1/") && strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1388,11 +1447,12 @@ func requireTokenForNonStatic(token string, next http.Handler) http.Handler {
 		}
 		// WebSocket upgrade requests cannot carry an Authorization header —
 		// browsers forbid setting it on the WS upgrade.  Scope the bypass
-		// strictly to /v1/events: a spoofed Upgrade: websocket header on any
-		// other path (e.g. /api/files/content) must NOT skip the token check.
-		// The downstream consoleAuthSubprotocol middleware gates /v1/events
-		// itself via the Sec-WebSocket-Protocol subprotocol token.
-		if r.URL.Path == "/v1/events" && strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		// strictly to /v1/ WebSocket paths: a spoofed Upgrade: websocket header
+		// on any other path (e.g. /api/files/content) must NOT skip the token
+		// check.  The downstream consoleAuthSubprotocol middleware gates
+		// /v1/events and /v1/term/* via the Sec-WebSocket-Protocol subprotocol
+		// token.
+		if strings.HasPrefix(r.URL.Path, "/v1/") && strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			next.ServeHTTP(w, r)
 			return
 		}

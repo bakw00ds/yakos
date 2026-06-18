@@ -66,6 +66,9 @@ func registerMethods(srv *jsonrpc.Server, cfg Config) {
 	srv.Register("yakos.workflow.run", handleWorkflowRun(cfg))
 	srv.Register("yakos.workflow.resume", handleWorkflowResume(cfg))
 	srv.Register("yakos.workflow.status", handleWorkflowStatus(cfg))
+
+	// ADR-0008 Phase 1 — PTY terminal session management (3; only when ShareTerminal)
+	registerTermMethods(srv, cfg)
 }
 
 // ---- yakos.version ----------------------------------------------------------

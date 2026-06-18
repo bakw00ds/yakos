@@ -25,3 +25,8 @@ cli-go/internal/consoleui/dist/vendor/fonts/*.woff2 binary
 # SHA-256 pinned in vendor_checksum_test.go + VENDOR.md.
 cli-go/internal/consoleui/dist/vendor/drawflow/drawflow.min.js binary
 cli-go/internal/consoleui/dist/vendor/drawflow/drawflow.min.css binary
+# xterm.js terminal emulator (ADR-0008 Phase 1 Terminal pane).
+# SHA-256 pinned in vendor_checksum_test.go + VENDOR.md.
+cli-go/internal/consoleui/dist/vendor/xterm/xterm.js binary
+cli-go/internal/consoleui/dist/vendor/xterm/xterm-addon-fit.js binary
+cli-go/internal/consoleui/dist/vendor/xterm/xterm.css binary

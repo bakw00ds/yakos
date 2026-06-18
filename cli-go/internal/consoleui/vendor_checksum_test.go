@@ -63,6 +63,37 @@ var pinnedDrawflowChecksums = map[string]string{
 	"drawflow.min.css": "57e5b37f72d95f97597263f17ef0ae9f0a0cd7b966e039b9f43508040d5dedf2",
 }
 
+// pinnedXtermChecksums maps filename (relative to dist/vendor/xterm/) to its
+// expected SHA-256 hex digest.  Computed at vendor time; locked here.
+//
+// xterm 5.3.0 + xterm-addon-fit 0.8.0 — terminal emulator for the Terminal
+// pane (ADR-0008 Phase 1).  UMD bundles; MIT license; no eval(); no workers.
+// Source: https://www.npmjs.com/package/xterm/v/5.3.0 and
+//         https://www.npmjs.com/package/xterm-addon-fit/v/0.8.0
+//
+// To update:
+//
+//	cd /tmp && npm pack xterm@<VERSION> xterm-addon-fit@<FITVERSION>
+//	tar xzf xterm-<VERSION>.tgz package/lib/xterm.js package/css/xterm.css
+//	tar xzf xterm-addon-fit-<FITVERSION>.tgz package/lib/xterm-addon-fit.js
+//	grep -c "eval(" package/lib/xterm.js  # must be 0
+//	grep -c "eval(" package/lib/xterm-addon-fit.js  # must be 0
+//	shasum -a 256 package/lib/xterm.js package/lib/xterm-addon-fit.js package/css/xterm.css
+//	cp package/lib/xterm.js package/lib/xterm-addon-fit.js \
+//	    cli-go/internal/consoleui/dist/vendor/xterm/
+//	cp package/css/xterm.css cli-go/internal/consoleui/dist/vendor/xterm/
+//	# Update pinnedXtermChecksums below and dist/vendor/VENDOR.md §xterm.js.
+var pinnedXtermChecksums = map[string]string{
+	// xterm 5.3.0 — UMD terminal emulator core.
+	// Source: https://www.npmjs.com/package/xterm/v/5.3.0
+	"xterm.js": "f0aea0f75f48559013ae6643c2479dd737d26da42d5524e6d2b70915ae6523c7",
+	// xterm-addon-fit 0.8.0 — FitAddon for container-aware terminal sizing.
+	// Source: https://www.npmjs.com/package/xterm-addon-fit/v/0.8.0
+	"xterm-addon-fit.js": "10f3194c5f17c1786fb7d5db865c1ec8539b6736a318063fd38bdaaf7c46848f",
+	// xterm.css — base terminal styles.
+	"xterm.css": "832f3f2c603b43ad4351ff04970150cc7a873014276db126a6065c6dd81e4872",
+}
+
 // pinnedFontChecksums maps font filename (relative to dist/vendor/fonts/) to
 // its expected SHA-256 hex digest.  Populated when the font woff2 files are
 // vendored (see VENDOR.md §Fonts for the download + hash recipe).
@@ -282,6 +313,31 @@ func TestVendorChecksums(t *testing.T) {
 					"If this is an intentional update, recompute with:\n"+
 					"  shasum -a 256 cli-go/internal/consoleui/dist/vendor/drawflow/%s\n"+
 					"and update pinnedDrawflowChecksums and dist/vendor/VENDOR.md",
+					path, got, wantHash, name)
+			}
+			return nil
+		}
+		// xterm.js files (dist/vendor/xterm/) use per-file pins in pinnedXtermChecksums.
+		if strings.HasPrefix(path, "xterm/") {
+			name := strings.TrimPrefix(path, "xterm/")
+			wantHash, ok := pinnedXtermChecksums[name]
+			if !ok {
+				t.Errorf("vendored xterm file %q has no pinned checksum — "+
+					"add it to pinnedXtermChecksums in vendor_checksum_test.go and VENDOR.md", path)
+				return nil
+			}
+			data, err := fs.ReadFile(sub, path)
+			if err != nil {
+				t.Errorf("read xterm file %q: %v", path, err)
+				return nil
+			}
+			sum := sha256.Sum256(data)
+			got := hex.EncodeToString(sum[:])
+			if got != wantHash {
+				t.Errorf("SHA-256 mismatch for %s\n  got:  %s\n  want: %s\n\n"+
+					"If this is an intentional update, recompute with:\n"+
+					"  shasum -a 256 cli-go/internal/consoleui/dist/vendor/xterm/%s\n"+
+					"and update pinnedXtermChecksums and dist/vendor/VENDOR.md",
 					path, got, wantHash, name)
 			}
 			return nil

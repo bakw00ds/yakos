@@ -83,6 +83,41 @@ func (e *RPCError) Error() string {
 // Returning a non-*RPCError Go error wraps it as CodeInternalError.
 type Handler func(ctx context.Context, params json.RawMessage) (interface{}, error)
 
+// hijackKey is the unexported context key type for connection hijacking.
+type hijackKey struct{}
+
+// HijackedConn is delivered to a handler that calls RequestHijack.
+// It bundles the raw net.Conn plus any bytes already buffered by the scanner
+// (bytes read from the wire but not yet consumed as an RPC request).
+type HijackedConn struct {
+	Conn     net.Conn
+	Buffered []byte // scanner leftovers; may be nil
+}
+
+// RequestHijack signals that the current handler wishes to take ownership of
+// the underlying net.Conn after this response is sent.  The handler sends its
+// desired callback function on the channel stored in ctx; handleConn will call
+// it with the raw connection after the response is flushed.
+//
+// Usage inside a Handler:
+//
+//	ch, ok := jsonrpc.HijackChanFromCtx(ctx)
+//	if ok {
+//	    ch <- func(hc jsonrpc.HijackedConn) { /* own conn here */ }
+//	}
+//
+// Only one hijack per connection is supported.  If the context does not carry
+// the channel (i.e. the server was not started with hijack support), ok is false
+// and the handler should fall back to normal behaviour.
+func HijackChanFromCtx(ctx context.Context) (chan<- func(HijackedConn), bool) {
+	v := ctx.Value(hijackKey{})
+	if v == nil {
+		return nil, false
+	}
+	ch, ok := v.(chan func(HijackedConn))
+	return ch, ok
+}
+
 // Server is a JSON-RPC 2.0 server backed by a net.Listener.
 // Register methods before calling Serve.
 type Server struct {
@@ -134,8 +169,25 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 // handleConn reads NDJSON frames from conn, dispatches each to the registered
 // handler, and writes responses back. Per-connection responses are serialized
 // by a mutex so frames never interleave on the wire.
+//
+// If a handler calls HijackChanFromCtx and sends a callback on the channel,
+// the scanner loop stops after that response is sent and the callback receives
+// the raw net.Conn (plus any bytes buffered by the scanner).  The callback
+// owns the conn from that point on; handleConn exits without closing it.
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
-	defer func() { _ = conn.Close() }()
+	// hijackCh is injected into the handler context.  A handler that wants to
+	// own the conn after its response posts a callback here.
+	hijackCh := make(chan func(HijackedConn), 1)
+	ctx = context.WithValue(ctx, hijackKey{}, hijackCh)
+
+	// owned tracks whether a hijack was requested; if so we must NOT close the
+	// conn ourselves (the hijacker owns it).
+	owned := false
+	defer func() {
+		if !owned {
+			_ = conn.Close()
+		}
+	}()
 
 	// Per-connection write serialization.
 	var writeMu sync.Mutex
@@ -153,7 +205,6 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, maxTokenSize), maxTokenSize)
 
-	var wg sync.WaitGroup
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -163,14 +214,26 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		frame := make([]byte, len(line))
 		copy(frame, line)
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			resp := s.dispatch(ctx, frame)
-			writeResponse(resp)
-		}()
+		// Dispatch synchronously on this connection.  Concurrent dispatch
+		// across requests within one connection is intentionally removed here
+		// to support the hijack protocol: the hijack must happen after the
+		// response is flushed and before the next scanner.Scan().
+		resp := s.dispatch(ctx, frame)
+		writeResponse(resp)
+
+		// Check for a pending hijack request.
+		select {
+		case hijackFn := <-hijackCh:
+			// Hand the raw conn (and any scanner-buffered bytes) to the
+			// hijacker.  The scanner may have pre-read bytes beyond the
+			// current line; pass them along so the transport can replay them.
+			buffered := scanner.Bytes() // usually nil after a successful scan
+			owned = true
+			go hijackFn(HijackedConn{Conn: conn, Buffered: buffered})
+			return
+		default:
+		}
 	}
-	wg.Wait()
 }
 
 // dispatch parses one NDJSON frame and invokes the appropriate handler.

@@ -50,6 +50,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/restapi"
 	"github.com/bakw00ds/yakos/internal/setuptoken"
 	"github.com/bakw00ds/yakos/internal/statepath"
+	termmanager "github.com/bakw00ds/yakos/internal/terminalmanager"
 	"github.com/bakw00ds/yakos/internal/userstore"
 	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/worktreemgr"
@@ -216,6 +217,17 @@ type Config struct {
 	// ListenFn is injected in tests to replace the real socket listener.
 	// nil means use jsonrpc.Listen.
 	ListenFn func(path string) (net.Listener, error)
+
+	// ShareTerminal, when true, activates ADR-0008 Phase 1: the daemon spawns
+	// `claude` under a daemon-owned PTY (via terminalmanager) and mounts the
+	// /v1/term/<sessionId> WebSocket and GET /api/term endpoints on the console.
+	// Off by default; requires --share-terminal on `yakos start`.
+	ShareTerminal bool
+
+	// TerminalManager, when non-nil, is the active PTY session manager.
+	// Populated by Run() when ShareTerminal is true; also injectable for tests.
+	// When nil and ShareTerminal is true, Run() constructs one from termmanager.New.
+	TerminalManager *termmanager.Manager
 }
 
 func (c *Config) socketPath() string {
@@ -619,6 +631,21 @@ func Run(ctx context.Context, cfg Config) error {
 			UserStore:          uStore,
 			AllowNetworkedBash: cfg.ConsoleAllowBash,
 			WorktreeManager:    wtMgr,
+		}
+
+		// Wire the terminal manager when --share-terminal is active (ADR-0008 P1).
+		// The manager is started here and its lifecycle is tied to ctx so
+		// daemon shutdown cleanly stops all active PTY sessions.
+		// cfg.TerminalManager is also set so the cfgWithBus copy (built below)
+		// picks it up automatically.
+		if cfg.ShareTerminal {
+			termMgr := cfg.TerminalManager
+			if termMgr == nil {
+				termMgr = termmanager.New(ctx, termmanager.Config{})
+			}
+			consoleCfg.TerminalManager = termMgr
+			cfg.TerminalManager = termMgr // propagates to cfgWithBus via copy below
+			slog.Info("serve: --share-terminal: terminal session manager started; /v1/term and /api/term mounted")
 		}
 
 		// Wire the SDK engine factory when --console-structured-questions is set.

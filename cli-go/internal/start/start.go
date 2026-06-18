@@ -33,6 +33,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/bakw00ds/yakos/internal/jsonrpc"
 )
 
 // KnownRuntimes is the ordered list of built-in runtime IDs. Mirrors
@@ -161,6 +163,23 @@ type Config struct {
 	// the dispatch path) must set this to true so each invocation does not
 	// permanently pollute the daemon's working directory.
 	RestoreCwdOnReturn bool
+
+	// ShareTerminal, when true, activates ADR-0008 Phase 1: instead of
+	// syscall.Exec'ing the runtime directly, the runtime is spawned under a
+	// daemon-owned PTY.  `yakos start` becomes a thin local pump: it dials the
+	// daemon's JSON-RPC Unix socket, sends a "yakos.term.create" RPC with the
+	// spawn spec, receives a sessionId, then bridges local stdin/stdout to the
+	// PTY stream.
+	//
+	// Off by default.  Requires the daemon to be running.
+	// Preserved behind this flag for the entire Phase 1→2 transition period so
+	// operators who do not need the web terminal are unaffected.
+	ShareTerminal bool
+
+	// Direct, when true, forces the legacy syscall.Exec path regardless of
+	// ShareTerminal.  Preserved as an escape hatch (--direct) for operators on
+	// environments without a running daemon or who prefer zero-daemon terminal.
+	Direct bool
 }
 
 // Banner holds all fields computed during the preflight phase.  It is
@@ -366,6 +385,21 @@ func Run(cfg Config) (*Banner, error) {
 
 	printBanner(w, name, projectRepo, controlDir, runtime, caps, cliOk, authOk, permMode, cfg.AllowRoot, agentCount, cfg.NoAgents, modeFlags, consoleURL, consoleRunning, cfg.NoREPL)
 
+	// ---- share-terminal banner warning ------------------------------------------
+	// Modelled on the --console-allow-bash warning in serve.go:770-778.
+	// Terminal output can contain secrets typed by the operator (passwords,
+	// tokens, keys) — callers must understand the risk before enabling this flag.
+	if cfg.ShareTerminal {
+		sep := strings.Repeat("!", 72)
+		_, _ = fmt.Fprintln(ew, sep)
+		_, _ = fmt.Fprintln(ew, "  WARNING: --share-terminal is active.")
+		_, _ = fmt.Fprintln(ew, "  The console web UI will be able to view your live terminal output.")
+		_, _ = fmt.Fprintln(ew, "  Terminal output may contain secrets (passwords, tokens, API keys).")
+		_, _ = fmt.Fprintln(ew, "  Any console operator with RoleAdmin can view this session.")
+		_, _ = fmt.Fprintln(ew, "  Only enable this flag if you understand and accept the risk.")
+		_, _ = fmt.Fprintln(ew, sep)
+	}
+
 	// ---- soft-degrade warnings --------------------------------------------------
 
 	if cfg.Continue && runtime != "claude" {
@@ -468,6 +502,23 @@ func Run(cfg Config) (*Banner, error) {
 		return banner, nil
 	}
 
+	// ---- share-terminal path (ADR-0008 Phase 1) ----------------------------
+	// When --share-terminal is set and --direct is NOT set, use the daemon-owned
+	// PTY path: dial the daemon's JSON-RPC socket, create a terminal session,
+	// then pump stdin/stdout via the daemon PTY.
+	if cfg.ShareTerminal && !cfg.Direct && cfg.ExecFn == nil {
+		socketPath := jsonrpc.SocketPath(projectRepo)
+		spawnSpec := buildSpawnSpec(argv0, argv, execEnv, projectRepo, cfg)
+		exitCode, err := runLocalPump(socketPath, spawnSpec, ew)
+		if err != nil {
+			return banner, fmt.Errorf("start: share-terminal pump: %w", err)
+		}
+		if exitCode != 0 {
+			os.Exit(exitCode) //nolint:gocritic
+		}
+		return banner, nil
+	}
+
 	execFn := cfg.ExecFn
 	if execFn == nil {
 		// Production path: cd to the control directory then exec.
@@ -490,6 +541,20 @@ func Run(cfg Config) (*Banner, error) {
 		return banner, fmt.Errorf("start: exec %s: %w", argv0, err)
 	}
 	return banner, nil
+}
+
+// buildSpawnSpec constructs the SpawnSpec for the daemon terminal session.
+func buildSpawnSpec(argv0 string, argv, env []string, workspaceRoot string, cfg Config) map[string]interface{} {
+	cols := uint16(80)
+	rows := uint16(24)
+	return map[string]interface{}{
+		"argv":          argv,
+		"cwd":           workspaceRoot,
+		"env":           env,
+		"workspaceRoot": workspaceRoot,
+		"cols":          cols,
+		"rows":          rows,
+	}
 }
 
 // ---- name inference -----------------------------------------------------------
@@ -865,6 +930,12 @@ func buildModeFlags(cfg Config) string {
 	}
 	if cfg.NoREPL {
 		parts = append(parts, "no-repl")
+	}
+	if cfg.ShareTerminal {
+		parts = append(parts, "share-terminal")
+	}
+	if cfg.Direct {
+		parts = append(parts, "direct")
 	}
 	return strings.Join(parts, " ")
 }
