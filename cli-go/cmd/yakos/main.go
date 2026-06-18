@@ -2644,6 +2644,20 @@ func parsePID(data []byte) (int, error) {
 // daemonAlive and spawnDetachedDaemon are OS-specific.
 // See daemon_unix.go (!windows) and daemon_windows.go (windows).
 
+// spawnDaemonFn is the function used by runStart to launch a detached daemon.
+// It defaults to spawnDetachedDaemon and can be overridden in tests to record
+// whether spawn was invoked without actually forking a process.
+var spawnDaemonFn = spawnDetachedDaemon
+
+// pollSocketFn is the function used by runStart to wait for the daemon's
+// JSON-RPC socket to become dial-able.  Overridable in tests.
+var pollSocketFn = pollUnixSocket
+
+// startExecFnOverride, when non-nil, is injected into start.Config.ExecFn so
+// that tests can make start.Run return immediately without spawning a runtime.
+// In production this is nil (real syscall.Exec path).
+var startExecFnOverride func(argv0 string, argv []string, env []string) error
+
 // pollConsolePort dials addr repeatedly until it succeeds or deadline elapses.
 // Returns true when the port accepts a connection within deadline, false otherwise.
 func pollConsolePort(addr string, deadline, interval time.Duration) bool {
@@ -2655,6 +2669,26 @@ func pollConsolePort(addr string, deadline, interval time.Duration) bool {
 			return true
 		}
 		if time.Since(start) >= deadline {
+			return false
+		}
+		time.Sleep(interval)
+	}
+}
+
+// pollUnixSocket dials the Unix socket at path repeatedly until it succeeds or
+// deadline elapses.  Returns true when the socket is dial-able.
+// Used to block until the daemon's JSON-RPC socket is ready before the
+// share-terminal pump dials it.
+func pollUnixSocket(path string, deadline time.Duration) bool {
+	const interval = 100 * time.Millisecond
+	started := time.Now()
+	for {
+		conn, err := net.DialTimeout("unix", path, interval)
+		if err == nil {
+			_ = conn.Close()
+			return true
+		}
+		if time.Since(started) >= deadline {
 			return false
 		}
 		time.Sleep(interval)
@@ -2929,6 +2963,114 @@ func runStart(yakosRoot string, args []string) {
 		}
 	}
 
+	// ---- daemon pre-spawn (interactive mode, before start.Run) ----------------
+	//
+	// IMPORTANT: this block MUST run before start.Run.  In interactive mode
+	// start.Run either syscall.Exec's (never returns), or — when --share-terminal
+	// is active — calls runLocalPump which immediately dials the daemon's
+	// JSON-RPC socket.  If the daemon is not already up at that point the dial
+	// fails with "no such file or directory".
+	//
+	// Trigger: any explicit console/networked flag, OR --share-terminal.
+	// --share-terminal mandates the daemon even with no console flags (the pump
+	// needs the daemon's PTY manager).
+	//
+	// --no-repl is handled separately below (runServe, not spawnDetachedDaemon).
+	// --dry-run / --print-agents skip the spawn (they don't run the pump).
+	// --direct skips the spawn (legacy exec path, no PTY manager needed).
+	spawnDaemon := !noREPL && !dryRun && !printAgents && !direct &&
+		(shouldSpawnDaemon(networked, consoleBindProvided, consoleExternalHostProvided, consoleAddrProvided) || shareTerminal)
+
+	// Resolve workspace root once; used for PID/socket path checks.
+	workspaceRoot := ""
+	if spawnDaemon {
+		var cwdErr error
+		workspaceRoot, cwdErr = os.Getwd()
+		if cwdErr != nil {
+			fmt.Fprintf(os.Stderr, "start: could not resolve cwd for daemon spawn: %v\n", cwdErr)
+			if shareTerminal {
+				// Without a workspace root we cannot locate the socket; pump will fail.
+				fmt.Fprintln(os.Stderr, "start: cannot start --share-terminal without a valid workspace root")
+				os.Exit(1)
+			}
+			spawnDaemon = false // non-fatal for console-only starts
+		}
+	}
+
+	if spawnDaemon {
+		pidPath := jsonrpc.PIDPath(workspaceRoot)
+		socketPath := jsonrpc.SocketPath(workspaceRoot)
+
+		if daemonAlive(pidPath) {
+			// A daemon is already running.  If --share-terminal is requested but the
+			// daemon was started without it (TerminalManager absent), term.create will
+			// fail silently.  Warn the operator and exit so they can restart cleanly.
+			if shareTerminal && !pollUnixSocket(socketPath, 200*time.Millisecond) {
+				fmt.Fprintln(os.Stderr, "start: a daemon is running but its terminal pane is unavailable.")
+				fmt.Fprintln(os.Stderr, "start: run 'yakos serve stop' then retry with --share-terminal.")
+				os.Exit(1)
+			}
+			// else: daemon already live with the right capabilities; fall through.
+		} else {
+			// No daemon running — spawn one now, before start.Run dials the socket.
+			serveArgs := buildServeArgs(serveArgsInput{
+				consoleAddr:          consoleAddr,
+				wsAddr:               wsAddr,
+				perfAddr:             perfAddr,
+				networked:            networked,
+				consoleBind:          consoleBind,
+				consolePort:          consolePort,
+				consoleExternalHosts: consoleExternalHosts,
+				detectedNetworkedIP:  detectedNetworkedIP,
+				noProjectIDE:         noProjectIDE,
+				ideRoot:              ideRoot,
+				shareTerminal:        shareTerminal,
+				// bannerProjectRepo is set from the banner after start.Run; but the
+				// daemon is spawned BEFORE start.Run here, so we omit it.  The IDE
+				// root auto-detection will fall back to the daemon's cwd heuristic.
+			})
+			if spawnErr := spawnDaemonFn(serveArgs); spawnErr != nil {
+				if shareTerminal {
+					// Fatal: the pump cannot run without the daemon.
+					fmt.Fprintf(os.Stderr, "start: daemon spawn failed: %v\n", spawnErr)
+					fmt.Fprintln(os.Stderr, "start: cannot start --share-terminal without a running daemon")
+					os.Exit(1)
+				}
+				fmt.Fprintf(os.Stderr, "start: daemon spawn failed: %v\n", spawnErr)
+				// Non-fatal for console-only starts: REPL still launches.
+			} else if shareTerminal {
+				// --share-terminal: block until the JSON-RPC socket is dial-able.
+				// The pump in start.Run will dial this socket immediately; a missing
+				// socket produces a cryptic error ("no such file or directory").
+				if !pollSocketFn(socketPath, 5*time.Second) {
+					fmt.Fprintf(os.Stderr, "start: daemon did not bind socket %s within 5s\n", socketPath)
+					fmt.Fprintln(os.Stderr, "start: check daemon logs; run 'yakos serve stop' to reset")
+					os.Exit(1)
+				}
+			} else {
+				// Console-only: poll the HTTP port briefly so the daemon prints its
+				// setup token / URL before the REPL exec takes over the terminal.
+				probeAddr := consoleAddr
+				if probeAddr == "" {
+					if consoleBind != "" {
+						// For 0.0.0.0 wildcard, probe on loopback.
+						_, port, _ := net.SplitHostPort(consoleBind)
+						if port == "" {
+							port = consolePort
+						}
+						probeAddr = "127.0.0.1:" + port
+					} else {
+						probeAddr = "127.0.0.1:" + consolePort
+					}
+				}
+				if !pollConsolePort(probeAddr, 2*time.Second, 200*time.Millisecond) {
+					fmt.Fprintf(os.Stderr, "start: warning: console daemon did not bind on %s within 2s; continuing to REPL\n", probeAddr)
+				}
+			}
+		}
+	}
+	// ---- end daemon pre-spawn --------------------------------------------------
+
 	cfg := start.Config{
 		Name:                name,
 		YakosRoot:           yakosRoot,
@@ -2954,6 +3096,8 @@ func runStart(yakosRoot string, args []string) {
 		ConsoleToken:        consoleTok,
 		ShareTerminal:       shareTerminal,
 		Direct:              direct,
+		DaemonAutoSpawn:     spawnDaemon,
+		ExecFn:              startExecFnOverride, // nil in production; injectable for tests
 		Writer:              os.Stdout,
 		ErrWriter:           os.Stderr,
 	}
@@ -2994,71 +3138,8 @@ func runStart(yakosRoot string, args []string) {
 		runServe(yakosRoot, serveArgs)
 		return
 	}
-
-	// Interactive path: spawn a detached daemon when the operator expressed
-	// console/networked intent.  This allows `yakos start --networked` (or
-	// any explicit console flag) to bring up the background daemon and then
-	// drop into the interactive REPL — no --no-repl required.
-	//
-	// Trigger condition: operator provided at least one of --networked,
-	// --console-bind, --console-external-host, or --console-addr.
-	spawnDaemon := shouldSpawnDaemon(networked, consoleBindProvided, consoleExternalHostProvided, consoleAddrProvided)
-	if spawnDaemon {
-		workspaceRoot, cwdErr := os.Getwd()
-		if cwdErr != nil {
-			fmt.Fprintf(os.Stderr, "start: could not resolve cwd for daemon spawn: %v\n", cwdErr)
-			// Non-fatal: fall through to REPL.
-		} else {
-			pidPath := jsonrpc.PIDPath(workspaceRoot)
-			if !daemonAlive(pidPath) {
-				serveArgs := buildServeArgs(serveArgsInput{
-					consoleAddr:          consoleAddr,
-					wsAddr:               wsAddr,
-					perfAddr:             perfAddr,
-					networked:            networked,
-					consoleBind:          consoleBind,
-					consolePort:          consolePort,
-					consoleExternalHosts: consoleExternalHosts,
-					detectedNetworkedIP:  detectedNetworkedIP,
-					noProjectIDE:         noProjectIDE,
-					ideRoot:              ideRoot,
-					shareTerminal:        shareTerminal,
-					bannerProjectRepo: func() string {
-						if banner != nil {
-							return banner.ProjectRepo
-						}
-						return ""
-					}(),
-				})
-				if spawnErr := spawnDetachedDaemon(serveArgs); spawnErr != nil {
-					fmt.Fprintf(os.Stderr, "start: daemon spawn failed: %v\n", spawnErr)
-					// Non-fatal: REPL still launches.
-				} else {
-					// Poll the console port briefly so the daemon prints its setup
-					// token/URL before the REPL exec takes over the terminal.
-					probeAddr := consoleAddr
-					if probeAddr == "" {
-						if consoleBind != "" {
-							// For 0.0.0.0 wildcard, probe on loopback.
-							_, port, _ := net.SplitHostPort(consoleBind)
-							if port == "" {
-								port = consolePort
-							}
-							probeAddr = "127.0.0.1:" + port
-						} else {
-							probeAddr = "127.0.0.1:" + consolePort
-						}
-					}
-					if !pollConsolePort(probeAddr, 2*time.Second, 200*time.Millisecond) {
-						fmt.Fprintf(os.Stderr, "start: warning: console daemon did not bind on %s within 2s; continuing to REPL\n", probeAddr)
-					}
-				}
-			}
-			// else: daemon already running — skip spawn, fall through to REPL.
-		}
-	}
-	// Fall through: start.Run already did the exec (replaced the process).
-	// The return here is only reached in test mode (ExecFn injected).
+	// start.Run exec'd the runtime (replaced this process) or, with --share-terminal,
+	// ran the PTY pump and returned.  Either way we are done.
 }
 
 // detectPrimaryNonLoopbackIPv4 returns the first non-loopback, non-link-local
