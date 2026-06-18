@@ -52,6 +52,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/statepath"
 	termmanager "github.com/bakw00ds/yakos/internal/terminalmanager"
 	"github.com/bakw00ds/yakos/internal/userstore"
+	"github.com/bakw00ds/yakos/internal/version"
 	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/worktreemgr"
 	"github.com/bakw00ds/yakos/internal/wsbus"
@@ -940,7 +941,9 @@ func checkPIDFile(path string) error {
 		// Unreadable file → assume stale.
 		return nil
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	// Use only the first line; writePIDFile now writes version on line 2.
+	firstLine := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)[0]
+	pid, err := strconv.Atoi(strings.TrimSpace(firstLine))
 	if err != nil {
 		return nil // malformed → stale
 	}
@@ -952,13 +955,39 @@ func checkPIDFile(path string) error {
 	return nil
 }
 
-// writePIDFile writes the current process PID to path (atomic temp+rename).
+// writePIDFile writes the current process PID and binary version to path
+// (atomic temp+rename).
+//
+// Format:
+//
+//	<pid>\n
+//	<version>\n
+//
+// The version line is a cheap non-RPC fallback for version-mismatch detection
+// in yakos start. Callers that cannot reach the JSON-RPC socket read the second
+// line directly.
 func writePIDFile(path string) error {
 	if err := os.MkdirAll(jsonrpc.PIDDir(path), 0700); err != nil { //nolint:gosec
 		return err
 	}
+	// Resolve version: compiled-in var wins; VERSION file is the dev-build fallback.
+	// BinaryRoot() is used for the file fallback; errors are non-fatal — we fall
+	// back to an empty string so the pidfile is still written (PID is always present).
+	ver := ""
+	if root, err := version.BinaryRoot(); err == nil {
+		if v, err := version.Read(root); err == nil {
+			ver = v
+		}
+	}
+	// If BinaryRoot or Read failed, use the compiled-in var directly (may be empty
+	// on dev builds that skip ldflags; an empty version line is handled gracefully
+	// by the reader, which treats it as "unknown" and triggers a safe restart).
+	if ver == "" && version.Version != "" {
+		ver = version.Version + " (go)"
+	}
+	content := strconv.Itoa(os.Getpid()) + "\n" + ver + "\n"
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strconv.Itoa(os.Getpid())+"\n"), 0600); err != nil { //nolint:gosec
+	if err := os.WriteFile(tmp, []byte(content), 0600); err != nil { //nolint:gosec
 		return err
 	}
 	return os.Rename(tmp, path)

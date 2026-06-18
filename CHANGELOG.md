@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.54.0.0] — 2026-06-18
+
+### Fixed
+
+- **`yakos start` now restarts a version-mismatched/stale background daemon** —
+  previously a running daemon that predated the current binary was silently
+  reused, shadowing every update until the user manually killed the process
+  (e.g. the v0.52 web-terminal fix never took effect when a pre-v0.52 daemon
+  was still alive). `yakos start` now detects version mismatch via a new
+  `yakos.version` RPC (with the pidfile's version line as fallback) and
+  restarts the daemon automatically.
+- **Claude auth detection no longer falsely reports "NOT CONFIGURED"** —
+  preflight previously only checked the `ANTHROPIC_API_KEY` environment
+  variable and the legacy `~/.config/anthropic/` path. Claude Code stores
+  OAuth credentials in `~/.claude.json` (`oauthAccount`); the shared
+  `claudeauth.IsAuthed` helper now checks all three sources, fixing the false
+  "auth: NOT CONFIGURED" banner on authenticated Claude Code installs.
+
 ## [0.53.0.0] — 2026-06-18
 
 ### Fixed

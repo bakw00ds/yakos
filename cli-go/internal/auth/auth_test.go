@@ -591,6 +591,63 @@ func TestCheckAuth_ClaudeEnvVar(t *testing.T) {
 	}
 }
 
+func TestCheckAuth_Claude_LegacyAuthJSON(t *testing.T) {
+	var out, errOut bytes.Buffer
+	cfg := newCfg(t, &out, &errOut)
+	if err := os.MkdirAll(filepath.Join(cfg.HomeDir, ".claude"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.HomeDir, ".claude", "auth.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !checkAuth("claude", cfg) {
+		t.Error("checkAuth claude should be true when ~/.claude/auth.json exists")
+	}
+}
+
+func TestCheckAuth_Claude_OAuthAccount_Present(t *testing.T) {
+	var out, errOut bytes.Buffer
+	cfg := newCfg(t, &out, &errOut)
+	content := `{"oauthAccount":{"email":"user@example.com","id":"acc_123"}}`
+	if err := os.WriteFile(filepath.Join(cfg.HomeDir, ".claude.json"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !checkAuth("claude", cfg) {
+		t.Error("checkAuth claude should be true when oauthAccount is a non-empty object")
+	}
+}
+
+func TestCheckAuth_Claude_OAuthAccount_Null(t *testing.T) {
+	var out, errOut bytes.Buffer
+	cfg := newCfg(t, &out, &errOut)
+	if err := os.WriteFile(filepath.Join(cfg.HomeDir, ".claude.json"), []byte(`{"oauthAccount":null}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if checkAuth("claude", cfg) {
+		t.Error("checkAuth claude should be false when oauthAccount is null")
+	}
+}
+
+func TestCheckAuth_Claude_OAuthAccount_Absent(t *testing.T) {
+	var out, errOut bytes.Buffer
+	cfg := newCfg(t, &out, &errOut)
+	// ~/.claude.json exists without oauthAccount (onboarding-only state).
+	if err := os.WriteFile(filepath.Join(cfg.HomeDir, ".claude.json"), []byte(`{"onboardingComplete":true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if checkAuth("claude", cfg) {
+		t.Error("checkAuth claude should be false when oauthAccount key is absent")
+	}
+}
+
+func TestCheckAuth_Claude_NoneConfigured(t *testing.T) {
+	var out, errOut bytes.Buffer
+	cfg := newCfg(t, &out, &errOut)
+	if checkAuth("claude", cfg) {
+		t.Error("checkAuth claude should be false when nothing is configured")
+	}
+}
+
 func TestCheckAuth_GeminiEnvVar(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "test-key-XXX")
 	var out, errOut bytes.Buffer

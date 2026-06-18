@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
+	"github.com/bakw00ds/yakos/internal/claudeauth"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 )
 
@@ -690,16 +691,10 @@ func checkRuntimeCLI(rt string) bool {
 func checkRuntimeAuth(rt string, env map[string]string) bool {
 	switch rt {
 	case "claude", "claude-sdk":
-		// ANTHROPIC_API_KEY env or ~/.claude/credentials.json
-		if envGet(env, "ANTHROPIC_API_KEY") != "" {
-			return true
-		}
-		home := envGet(env, "HOME")
-		if home == "" {
-			return false
-		}
-		_, err := os.Stat(filepath.Join(home, ".claude", "credentials.json"))
-		return err == nil
+		// Delegate to claudeauth.IsAuthed for the full detection order:
+		// ANTHROPIC_API_KEY → ~/.claude/auth.json → ~/.claude.json oauthAccount
+		// → ~/.claude/credentials.json. See internal/claudeauth for details.
+		return claudeauth.IsAuthed(envGet(env, "HOME"), envGet(env, "ANTHROPIC_API_KEY"))
 	case "codex":
 		return envGet(env, "OPENAI_API_KEY") != ""
 	case "agy", "antigravity-sdk":

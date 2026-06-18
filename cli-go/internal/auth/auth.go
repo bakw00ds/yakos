@@ -25,6 +25,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/bakw00ds/yakos/internal/claudeauth"
 )
 
 // Config holds all parameters for the auth subcommand.
@@ -585,13 +587,10 @@ func cliInstallHint(id string) string {
 func checkAuth(id string, cfg Config) bool {
 	switch id {
 	case "claude", "claude-sdk":
-		// Auth is env-var or ~/.claude/auth.json.
-		if os.Getenv("ANTHROPIC_API_KEY") != "" {
-			return true
-		}
-		authFile := filepath.Join(cfg.HomeDir, ".claude", "auth.json")
-		_, err := os.Stat(authFile)
-		return err == nil
+		// Delegate to claudeauth.IsAuthed for the full detection order:
+		// ANTHROPIC_API_KEY → ~/.claude/auth.json → ~/.claude.json oauthAccount
+		// → ~/.claude/credentials.json. See internal/claudeauth for details.
+		return claudeauth.IsAuthed(cfg.HomeDir, os.Getenv("ANTHROPIC_API_KEY"))
 
 	case "codex":
 		// Auth is OPENAI_API_KEY env var or ~/.codex/auth.json.

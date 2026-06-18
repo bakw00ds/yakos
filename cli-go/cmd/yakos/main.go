@@ -2637,8 +2637,98 @@ var errDaemonGone = errors.New("daemon process no longer exists")
 // parsePID converts the raw content of a PID file into an integer.
 // Returns an error for absent, unreadable, or non-numeric content.
 // Shared by daemonAlive (OS-specific files) and readPIDFile.
+//
+// The PID file format is:
+//
+//	<pid>\n
+//	<version>\n   (written since v0.53.0.1; absent on pre-T2 daemons)
+//
+// Only the first line is parsed here; callers that need the version use
+// readPIDFileVersion.
 func parsePID(data []byte) (int, error) {
-	return strconv.Atoi(strings.TrimSpace(string(data)))
+	firstLine := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)[0]
+	return strconv.Atoi(strings.TrimSpace(firstLine))
+}
+
+// readPIDFileVersion reads the version string from the second line of a pidfile.
+// Returns "" when the file is absent, unreadable, or has only one line
+// (pre-T2 daemon that did not write a version line).
+func readPIDFileVersion(path string) string {
+	data, err := os.ReadFile(path) //nolint:gosec
+	if err != nil {
+		return ""
+	}
+	lines := strings.SplitN(string(data), "\n", 3)
+	if len(lines) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(lines[1])
+}
+
+// queryDaemonVersion returns the version string reported by the running daemon.
+// It tries the yakos.version JSON-RPC method first (requires the socket to be
+// reachable); if that fails it falls back to reading the second line of the
+// pidfile.  Returns "" when neither source is readable — the caller treats
+// this as "version unknown" and should restart.
+func queryDaemonVersion(socketPath, pidPath string) string {
+	// Primary: JSON-RPC yakos.version call.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if client, err := jsonrpc.DialClient(socketPath); err == nil {
+		defer client.Close() //nolint:errcheck
+		if raw, err := client.Call(ctx, "yakos.version", nil); err == nil {
+			var result struct {
+				Version string `json:"version"`
+			}
+			if err := json.Unmarshal(raw, &result); err == nil && result.Version != "" {
+				return result.Version
+			}
+		}
+	}
+	// Fallback: second line of pidfile.
+	return readPIDFileVersion(pidPath)
+}
+
+// shouldRestartDaemon returns true when the running daemon's version differs
+// from the current binary's version, indicating a stale daemon that needs to
+// be replaced.  An empty runningVersion (unknown, e.g. pre-T2 daemon) always
+// triggers a restart — safe default.
+func shouldRestartDaemon(runningVersion, currentVersion string) bool {
+	if runningVersion == "" {
+		return true // unknown → restart (safe default)
+	}
+	return runningVersion != currentVersion
+}
+
+// stopStaleDaemon sends SIGTERM to the process identified by pidPath and waits
+// up to 5 seconds for the pidfile and socket to disappear (signs of clean exit).
+// If the process does not exit within 5 seconds, stopStaleDaemon logs clearly
+// and returns — the caller proceeds with a new spawn attempt regardless.
+func stopStaleDaemon(pidPath, socketPath string) {
+	pid, err := readPIDFile(pidPath)
+	if err != nil || pid <= 0 {
+		return
+	}
+	if err := killDaemonProcess(pid); err != nil {
+		if !errors.Is(err, errDaemonGone) {
+			fmt.Fprintf(os.Stderr, "start: SIGTERM pid %d: %v\n", pid, err)
+		}
+		return
+	}
+	fmt.Fprintf(os.Stderr, "start: sent SIGTERM to stale daemon pid %d\n", pid)
+
+	// Poll until pidfile and socket are gone (clean exit) or 5s elapses.
+	const poll = 200 * time.Millisecond
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(poll)
+		_, pidErr := os.Stat(pidPath)
+		_, sockErr := os.Stat(socketPath)
+		if os.IsNotExist(pidErr) && os.IsNotExist(sockErr) {
+			return // clean exit confirmed
+		}
+	}
+	fmt.Fprintln(os.Stderr, "start: daemon did not exit after SIGTERM; proceeding with spawn anyway")
 }
 
 // daemonAlive and spawnDetachedDaemon are OS-specific.
@@ -3046,18 +3136,52 @@ func runStart(yakosRoot string, args []string) {
 		pidPath := jsonrpc.PIDPath(workspaceRoot)
 		socketPath := jsonrpc.SocketPath(workspaceRoot)
 
-		if daemonAlive(pidPath) {
-			// A daemon is already running.  If --share-terminal is requested but the
-			// daemon was started without it (TerminalManager absent), term.create will
-			// fail silently.  Warn the operator and exit so they can restart cleanly.
-			if shareTerminal && !pollUnixSocket(socketPath, 200*time.Millisecond) {
-				fmt.Fprintln(os.Stderr, "start: a daemon is running but its terminal pane is unavailable.")
-				fmt.Fprintln(os.Stderr, "start: run 'yakos serve stop' then retry with --share-terminal.")
-				os.Exit(1)
+		// needsSpawn is true when we must launch a fresh daemon (either no existing
+		// daemon was found, or an existing daemon has a version mismatch).
+		// versionMismatchRestart is set when the spawn is triggered by a version
+		// mismatch — used after spawn to verify the fresh daemon reports the right
+		// version (restart-loop protection).
+		needsSpawn := !daemonAlive(pidPath)
+		versionMismatchRestart := false
+
+		if !needsSpawn {
+			// A daemon is alive.  Version-mismatch check: compare the running
+			// daemon's version to this binary's version.  A mismatch means the
+			// operator upgraded yakos while the old daemon was still running; the
+			// old daemon must be replaced so T2 fixes take effect.
+			currentVer, _ := version.Read(yakosRoot)
+			runningVer := queryDaemonVersion(socketPath, pidPath)
+			if shouldRestartDaemon(runningVer, currentVer) {
+				if runningVer == "" {
+					fmt.Fprintf(os.Stderr, "start: running daemon version unknown (pre-T2); restarting daemon\n")
+				} else {
+					fmt.Fprintf(os.Stderr, "start: running daemon is %s, this binary is %s; restarting daemon\n",
+						runningVer, currentVer)
+				}
+				stopStaleDaemon(pidPath, socketPath)
+				needsSpawn = true
+				versionMismatchRestart = true
+			} else {
+				// Same version: reuse the running daemon.
+				// If --share-terminal was requested but the socket is not reachable,
+				// the daemon was started without --share-terminal (TerminalManager
+				// absent) — warn and exit so the operator can restart cleanly.
+				if shareTerminal && !pollUnixSocket(socketPath, 200*time.Millisecond) {
+					fmt.Fprintln(os.Stderr, "start: a daemon is running but its terminal pane is unavailable.")
+					fmt.Fprintln(os.Stderr, "start: run 'yakos serve stop' then retry with --share-terminal.")
+					os.Exit(1)
+				}
+				// else: daemon already live with the right capabilities; fall through.
 			}
-			// else: daemon already live with the right capabilities; fall through.
-		} else {
-			// No daemon running — spawn one now, before start.Run dials the socket.
+		}
+
+		if needsSpawn {
+			// Spawn a daemon now, before start.Run dials the socket.
+			// If this is a version-mismatch restart, note it.
+			if versionMismatchRestart {
+				currentVer, _ := version.Read(yakosRoot)
+				fmt.Fprintf(os.Stderr, "start: (daemon restarted: fresh daemon is %s)\n", currentVer)
+			}
 			serveArgs := buildServeArgs(serveArgsInput{
 				consoleAddr:          consoleAddr,
 				wsAddr:               wsAddr,
@@ -3091,6 +3215,20 @@ func runStart(yakosRoot string, args []string) {
 					fmt.Fprintf(os.Stderr, "start: daemon did not bind socket %s within 5s\n", socketPath)
 					fmt.Fprintln(os.Stderr, "start: check daemon logs; run 'yakos serve stop' to reset")
 					os.Exit(1)
+				}
+				// Restart-loop protection: if this spawn was triggered by a version
+				// mismatch, verify the fresh daemon reports the expected version.
+				// If it still mismatches, the installation is corrupt — error out
+				// rather than looping.
+				if versionMismatchRestart {
+					currentVer, _ := version.Read(yakosRoot)
+					freshVer := queryDaemonVersion(socketPath, pidPath)
+					if shouldRestartDaemon(freshVer, currentVer) {
+						fmt.Fprintf(os.Stderr,
+							"start: fresh daemon version mismatch after restart (got %q, want %q) — please check your installation\n",
+							freshVer, currentVer)
+						os.Exit(1)
+					}
 				}
 			} else {
 				// Console-only: poll the HTTP port briefly so the daemon prints its
