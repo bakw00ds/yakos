@@ -56,6 +56,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/metrics"
 	"github.com/bakw00ds/yakos/internal/metricsdash"
 	"github.com/bakw00ds/yakos/internal/migrate"
+	"github.com/bakw00ds/yakos/internal/mtls"
 	"github.com/bakw00ds/yakos/internal/mtlscmd"
 	"github.com/bakw00ds/yakos/internal/passthrough"
 	"github.com/bakw00ds/yakos/internal/peer"
@@ -2512,6 +2513,39 @@ func runUninstall(args []string) {
 	}
 }
 
+// networkedFromFlags derives the effective "networked" boolean from the
+// --networked flag value and the --console-bind address.  A non-loopback
+// --console-bind implies networked mode even when --networked was not passed
+// explicitly.  The logic mirrors serve.go's isNonLoopbackBind so that the
+// start-side and daemon-side agree on what counts as non-loopback.
+func networkedFromFlags(networkedFlag bool, consoleBind string) bool {
+	if networkedFlag {
+		return true
+	}
+	if consoleBind == "" {
+		return false
+	}
+	return mtls.IsNonLoopback(consoleBind)
+}
+
+// validateNetworkedStartMode returns a descriptive error when a networked
+// console is requested but interactive (REPL) mode is active.  Interactive
+// mode calls syscall.Exec and replaces the process, so no daemon can bind.
+// A networked console therefore requires --no-repl or --web.
+func validateNetworkedStartMode(networked, noREPL bool) error {
+	if networked && !noREPL {
+		return fmt.Errorf(
+			"a networked console (--networked or a non-loopback --console-bind) " +
+				"requires --no-repl or --web.\n" +
+				"Interactive REPL mode replaces the process via exec and cannot host a daemon.\n" +
+				"Run instead:\n" +
+				"  yakos start --no-repl --networked\n" +
+				"  yakos start --web --console-bind 0.0.0.0:7890 --console-external-host <host>:7890",
+		)
+	}
+	return nil
+}
+
 // runStart implements `yakos start` natively in Go.
 //
 // Usage mirrors cli/lib/start.sh exactly:
@@ -2712,6 +2746,10 @@ func runStart(yakosRoot string, args []string) {
 		home = "/tmp"
 	}
 
+	// Fix A: a non-loopback --console-bind implies networked mode even when
+	// --networked was not passed explicitly.  Derive once after flag parsing.
+	networked = networkedFromFlags(networked, consoleBind)
+
 	// --networked: auto-detect the host's primary non-loopback IPv4 and derive
 	// --console-bind / --console-external-host when not explicitly provided.
 	// An operator-supplied --console-bind or --console-external-host wins.
@@ -2781,6 +2819,14 @@ func runStart(yakosRoot string, args []string) {
 		ConsoleToken:        consoleTok,
 		Writer:              os.Stdout,
 		ErrWriter:           os.Stderr,
+	}
+
+	// Fix B: fail loudly if a networked console is requested in interactive mode.
+	// Interactive mode calls syscall.Exec and replaces the process, so no daemon
+	// can bind; the operator must pass --no-repl or --web.
+	if err := validateNetworkedStartMode(networked, noREPL); err != nil {
+		fmt.Fprintf(os.Stderr, "start: %v\n", err)
+		os.Exit(1)
 	}
 
 	banner, err := start.Run(cfg)

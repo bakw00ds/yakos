@@ -1168,15 +1168,23 @@ Daemon bind addresses (forwarded to yakos serve; only used with --no-repl / --we
     the 127.0.0.1 default avoids this ambiguity.
 
 Networked console (https, mTLS, accessible from other machines):
+    IMPORTANT: networked mode requires --no-repl or --web.  Interactive REPL
+    mode replaces the process via exec and cannot host a daemon.  Using
+    --networked or a non-loopback --console-bind without --no-repl/--web is
+    an error.
+
     --networked           Auto-detect the host's primary non-loopback IPv4 and
                           start the console on 0.0.0.0:<port> with mTLS (https).
                           Banner shows https://<detected-ip>:<port>/.
+                          Requires --no-repl or --web.
                           Requires first-time /setup (token printed once when
                           zero console users exist; use 'yakos console
                           bootstrap-token' to regenerate).
     --console-bind <addr> Explicit console bind address (e.g. 0.0.0.0:7890).
                           Forwarded to yakos serve --console-bind.  Overrides
-                          --networked auto-derivation.
+                          --networked auto-derivation.  A non-loopback bind
+                          address implies networked mode; requires --no-repl
+                          or --web.
     --console-external-host <host[:port]>
                           Explicit external host browsers use to reach the
                           console.  Repeatable.  Overrides --networked
