@@ -22,12 +22,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -2625,48 +2623,19 @@ func buildServeArgs(in serveArgsInput) []string {
 	return args
 }
 
-// daemonAlive reads the PID file at pidPath and returns true when the process
-// with that PID is currently running.  Returns false for absent / stale files.
-func daemonAlive(pidPath string) bool {
-	data, err := os.ReadFile(pidPath) //nolint:gosec
-	if err != nil {
-		return false
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return false
-	}
-	return syscall.Kill(pid, 0) == nil || syscall.Kill(pid, 0) == syscall.EPERM
+// errDaemonGone is returned by killDaemonProcess when the target process no
+// longer exists (race: died between liveness check and kill attempt).
+var errDaemonGone = errors.New("daemon process no longer exists")
+
+// parsePID converts the raw content of a PID file into an integer.
+// Returns an error for absent, unreadable, or non-numeric content.
+// Shared by daemonAlive (OS-specific files) and readPIDFile.
+func parsePID(data []byte) (int, error) {
+	return strconv.Atoi(strings.TrimSpace(string(data)))
 }
 
-// spawnDetachedDaemon starts `yakos serve <serveArgs>` as a detached child
-// process (new session, not waited on).  The child inherits the parent's
-// stdout/stderr so the setup token and banner URL appear on the terminal.
-// YAKOS_IMPL=go is forced in the child environment so the Go binary handles
-// the serve subcommand regardless of the parent's YAKOS_IMPL setting.
-func spawnDetachedDaemon(serveArgs []string) error {
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve executable: %w", err)
-	}
-	argv := append([]string{"serve"}, serveArgs...)
-	cmd := exec.Command(exe, argv...) //nolint:gosec
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	// Build child env: inherit everything, then force YAKOS_IMPL=go so the
-	// child's serve subcommand routes through the Go implementation.
-	env := os.Environ()
-	filtered := make([]string, 0, len(env))
-	for _, kv := range env {
-		if !strings.HasPrefix(kv, "YAKOS_IMPL=") {
-			filtered = append(filtered, kv)
-		}
-	}
-	filtered = append(filtered, "YAKOS_IMPL=go")
-	cmd.Env = filtered
-	return cmd.Start()
-}
+// daemonAlive and spawnDetachedDaemon are OS-specific.
+// See daemon_unix.go (!windows) and daemon_windows.go (windows).
 
 // pollConsolePort dials addr repeatedly until it succeeds or deadline elapses.
 // Returns true when the port accepts a connection within deadline, false otherwise.
@@ -6487,8 +6456,8 @@ func runServeStop() {
 		fmt.Fprintf(os.Stderr, "serve: no daemon running for %s\n", workspaceRoot)
 		os.Exit(0)
 	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-		if err == syscall.ESRCH {
+	if err := killDaemonProcess(pid); err != nil {
+		if errors.Is(err, errDaemonGone) {
 			fmt.Fprintf(os.Stderr, "serve: no daemon running for %s\n", workspaceRoot)
 			os.Exit(0)
 		}
@@ -6505,7 +6474,7 @@ func readPIDFile(path string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	pid, err := parsePID(data)
 	if err != nil {
 		return 0, fmt.Errorf("malformed pid file %s: %w", path, err)
 	}
