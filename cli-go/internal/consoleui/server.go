@@ -214,11 +214,19 @@ type Config struct {
 	UserStore *userstore.Store
 
 	// WorkspaceRoot is the absolute path to the workspace root served by the
-	// IDE file API (/api/files/tree and /api/files/content).  When empty,
-	// both endpoints return 503 Service Unavailable.  The path is jailed:
-	// all requested paths are resolved against WorkspaceRoot and symlink-
-	// escaped or traversal attempts are rejected with a generic 400/403.
+	// chat handler, skills handler, kanban and metrics.  When empty those
+	// handlers degrade gracefully (503 or empty results).
 	WorkspaceRoot string
+
+	// IDERoot, when non-empty, is the root directory jailed by the IDE file
+	// pane (/api/files/*) and the diff handler.  When empty, WorkspaceRoot is
+	// used as the IDE root (preserving existing behaviour).
+	//
+	// Typical value: the project repo path (from .project-path), set
+	// automatically by 'yakos start --no-repl' or by the serve self-discovery
+	// logic.  The operator can override via --ide-root, or opt out via
+	// --no-project-ide (which leaves IDERoot empty → falls back to WorkspaceRoot).
+	IDERoot string
 
 	// YakosRoot is the yakOS framework root directory (e.g. the yakOS repo root).
 	// Required for GET /api/skills to compose the agent roster via
@@ -299,6 +307,15 @@ func (c *Config) externalHosts() []string {
 		return []string{c.ExternalHost}
 	}
 	return []string{c.addr()}
+}
+
+// ideRoot returns the effective IDE root for the file pane and diff handler.
+// IDERoot takes precedence over WorkspaceRoot.
+func (c *Config) ideRoot() string {
+	if c.IDERoot != "" {
+		return c.IDERoot
+	}
+	return c.WorkspaceRoot
 }
 
 // Server is the unified console HTTP server.
@@ -422,7 +439,10 @@ func New(cfg Config) (*Server, error) {
 		serverCtx:  serverCtx,
 		activeRuns: make(map[string]context.CancelFunc),
 	}
-	filesH := newFilesHandlers(cfg.WorkspaceRoot)
+	// IDE file pane and diff handler use cfg.ideRoot() — either IDERoot (when
+	// set, e.g. the project repo) or WorkspaceRoot as fallback.
+	// Skills handler and chat handler continue to use WorkspaceRoot.
+	filesH := newFilesHandlers(cfg.ideRoot())
 	skillsH := newSkillsHandlers(cfg.YakosRoot, cfg.WorkspaceRoot)
 	// Fleet handler: registry is allocated here and shared with chatHandlers
 	// via chatH so the dispatch goroutine can call Add/UpdateStatus/Remove.
@@ -430,7 +450,7 @@ func New(cfg Config) (*Server, error) {
 	chatH.registry = registry
 	chatH.bus = cfg.Bus
 	fleetH := newFleetHandlers(registry, hub)
-	diffH := newDiffHandlers(cfg.WorktreeManager, filesH, cfg.WorkspaceRoot, hub)
+	diffH := newDiffHandlers(cfg.WorktreeManager, filesH, cfg.ideRoot(), hub)
 	s := &Server{
 		cfg:          cfg,
 		mux:          http.NewServeMux(),
