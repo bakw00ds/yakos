@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.51.0.0] — 2026-06-18
+
+### Fixed
+
+- **Console daemon now auto-spawns before the interactive session** — in
+  v0.50.0.0 the spawn call was placed after `start.Run`'s `exec`/pump
+  invocation (dead code), so `yakos start --share-terminal` always failed
+  with `"dial daemon socket: no such file or directory"` and interactive
+  `--console-bind` never brought the console up. The spawn now runs
+  (and waits up to 5 s for the Unix socket) before `start.Run` is called.
+  Stale-daemon detection resets the PID before a fresh spawn.
+- **Preflight banner and `--share-terminal` help corrected** — the banner
+  previously printed `"(run 'yakos serve'…)"` even when auto-spawning;
+  it now shows `"(starting daemon…)"`. The `--share-terminal` flag help
+  now reads `"Automatically starts a background daemon — you do NOT need
+  to run 'yakos serve' separately"` and documents `yakos serve stop` for
+  teardown.
+
+### Docs
+
+- **`docs/getting-started.md` / `docs/unified-console.md`** — updated for
+  the single-command flow: `yakos start --share-terminal` is now
+  self-contained; separate `yakos serve` invocations are no longer
+  required. Version annotations corrected to v0.51.0.0+.
+
 ## [0.50.0.0] — 2026-06-18
 
 ### Fixed
