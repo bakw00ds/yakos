@@ -2,8 +2,10 @@
 
 // Package serve — term_transport_windows.go
 //
-// Windows stub for the attach transport. PTY sessions are not supported on
-// Windows; yakos.term.attach returns ErrNotSupported on this platform.
+// Windows stubs for the push and attach transports.  PTY sessions are not
+// supported on Windows; yakos.term.attach returns ErrNotSupported on this
+// platform before the connection is ever hijacked, so these functions are
+// never reached in practice.
 
 package serve
 
@@ -13,11 +15,16 @@ import (
 	termmanager "github.com/bakw00ds/yakos/internal/terminalmanager"
 )
 
-// runAttachTransport is a no-op on Windows.  The yakos.term.attach RPC handler
-// returns an error before hijacking on Windows, so this function is never
-// reached in practice.
+// runPushTransport is a no-op on Windows.
+func runPushTransport(conn net.Conn, sessionID string, mgr *termmanager.Manager) {
+	_ = conn.Close()
+	_ = mgr
+	_ = sessionID
+}
+
+// runAttachTransport is a no-op on Windows (T1 path, preserved for tests).
 func runAttachTransport(conn net.Conn, sessionID string, mgr *termmanager.Manager) {
 	_ = conn.Close()
-	_ = mgr // suppress unused import
+	_ = mgr
 	_ = sessionID
 }

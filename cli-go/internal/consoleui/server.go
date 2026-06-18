@@ -202,6 +202,15 @@ type Config struct {
 	// Loopback bearer sessions always resolve to admin regardless of StateDir.
 	StateDir string
 
+	// LoopbackOwnerID, when non-empty, overrides the stable loopback operator
+	// identity derived from StateDir.  Intended for tests that need to set a
+	// predictable operator ID without touching the filesystem.
+	//
+	// Production callers leave this empty; serve.go never sets it.  The
+	// production value is loaded from <StateDir>/loopback-operator-id at
+	// server construction time.
+	LoopbackOwnerID string
+
 	// AuthSessionStore is the server-side session store used for the
 	// password+session-cookie auth regime (ADR-0005 Phase 3).  When non-nil and
 	// NetworkedMode is true, it is wired into NewResolverWithSession so that
@@ -499,8 +508,17 @@ func New(cfg Config) (*Server, error) {
 	//             fail-closed gate for unauthenticated certless requests.
 	//
 	// callerLabelFn extracts the cooperative OperatorID for loopback bearer sessions.
-	// The dispatch facade stamps operator_id from its daemon-level opID on the
-	// loopback path; we return "" here and let the facade do it.
+	//
+	// On the loopback path we now return a STABLE server-derived operator ID
+	// (loadOrCreateLoopbackOwnerID) instead of "" so that every browser
+	// session — regardless of localStorage state, port, or profile — presents
+	// the same identity to the chat ownership checks.  This fixes the
+	// "owner lock" bug where an operator reconnecting from a new browser
+	// window (different localStorage, same human) received HTTP 403.
+	//
+	// On the networked path we continue to return "" and let the TLS/session
+	// middleware supply the authoritative identity; the stable loopback ID is
+	// never consulted on the networked path.
 	//
 	// Session regime (ADR-0005 Phase 3a + Phase 3b):
 	//   - Networked path + AuthSessionStore + UserStore set → use
@@ -509,9 +527,22 @@ func New(cfg Config) (*Server, error) {
 	//   - Loopback path → always NewResolver (no session path on loopback).
 	loopbackTrusted := !cfg.NetworkedMode
 	mapper := netid.NewRoleMapper(cfg.StateDir)
+	// stableLoopbackID is computed once at server construction and reused for
+	// every request on the loopback path.  It is derived from the OS username
+	// and persisted to <stateDir>/loopback-operator-id so it survives restarts.
+	// cfg.LoopbackOwnerID is an override for tests that need a predictable value.
+	stableLoopbackID := cfg.LoopbackOwnerID
+	if stableLoopbackID == "" {
+		stableLoopbackID = loadOrCreateLoopbackOwnerID(cfg.StateDir)
+	}
 	callerLabelFn := func(r *http.Request) string {
-		// No per-request cooperative label is available at the edge; the
-		// dispatch facade stamps operator_id from its daemon-level opID.
+		if loopbackTrusted {
+			// Stamp every loopback request with the stable server-derived ID.
+			// The chat handlers prefer this over the client-supplied body token.
+			return stableLoopbackID
+		}
+		// Networked path: no cooperative label at the edge; TLS/session supplies
+		// the authoritative identity.
 		return ""
 	}
 	var resolver *netid.Resolver

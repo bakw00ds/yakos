@@ -1,26 +1,36 @@
 // Package serve — term_methods.go
 //
-// JSON-RPC handlers for ADR-0008 Phase 1 terminal session management.
+// JSON-RPC handlers for ADR-0008 Phase 1 T2 terminal session management.
 //
 // Methods registered (when cfg.TerminalManager is non-nil):
 //
-//   - yakos.term.create  — spawn a new PTY session; returns {sessionId}
-//   - yakos.term.attach  — switch this connection to raw PTY stream for sessionId
+//   - yakos.term.create  — register an externally-owned session; returns {sessionId}
+//   - yakos.term.attach  — switch this connection to the push transport where
+//     start pushes PTY output to the daemon (direction: start → daemon)
+//   - yakos.term.list    — list active sessions
 //
-// # Wire protocol after attach
+// # T2 data-flow direction
 //
-// After yakos.term.attach is acknowledged, the connection switches from
-// NDJSON RPC frames to raw binary PTY frames:
+// In ADR-0008 Phase 1 T2, the login-shell `yakos start` owns the PTY and child
+// process.  The daemon registers the session (yakos.term.create), then receives
+// pushed output over the attach connection (yakos.term.attach + runPushTransport).
 //
-//	Server → client:  0x00 <raw pty bytes> — output chunk
-//	                  0x01 <4-byte big-endian exit code> — session closed
-//	Client → server:  0x10 <raw bytes> — keystrokes (Phase 1: local pump only)
-//	                  0x11 <2-byte cols> <2-byte rows> — resize
+// Wire protocol after attach (start → daemon):
 //
-// This is implemented in the per-connection transport layer; the NDJSON
-// scanner is bypassed after attach by handing the raw net.Conn to the pump.
+//	start → daemon:  0x00 <raw PTY bytes>       — output chunk
+//	                 0x01 <4-byte BE exit code>   — session exited
 //
-// Phase 1 note: the attach streaming is implemented in term_transport_unix.go
+// All frames are length-prefixed:
+//
+//	[ 2-byte big-endian total length ] [ tag byte ] [ payload ]
+//
+// The daemon fans received output to /v1/term browser subscribers via
+// Manager.PushOutput and signals exit via Manager.PushExit.
+//
+// The daemon NO LONGER fork/execs the child process in the P1 share-terminal
+// flow; it only relays output.
+//
+// Phase 1 note: the attach transport is implemented in term_transport_unix.go
 // / term_transport_windows.go (OS-specific raw I/O). The Windows stub returns
 // ErrNotSupported.
 package serve
@@ -47,14 +57,13 @@ func registerTermMethods(srv *jsonrpc.Server, cfg Config) {
 
 // ---- yakos.term.create -------------------------------------------------------
 
-// termCreateParams is the request shape for yakos.term.create.
+// termCreateParams is the request shape for yakos.term.create (T2).
+// start generates the sessionId and sends its argv + workspaceRoot so the
+// daemon can populate session metadata for the /v1/term handler.
 type termCreateParams struct {
+	SessionID     string   `json:"sessionId"`
 	Argv          []string `json:"argv"`
-	Cwd           string   `json:"cwd"`
-	Env           []string `json:"env"`
 	WorkspaceRoot string   `json:"workspaceRoot"`
-	Cols          uint16   `json:"cols"`
-	Rows          uint16   `json:"rows"`
 }
 
 // termCreateResult is the response shape for yakos.term.create.
@@ -71,21 +80,13 @@ func handleTermCreate(cfg Config) jsonrpc.Handler {
 				Message: fmt.Sprintf("term.create: invalid params: %v", err),
 			}
 		}
-		if len(p.Argv) == 0 {
+		if p.SessionID == "" {
 			return nil, &jsonrpc.RPCError{
 				Code:    jsonrpc.CodeInvalidParams,
-				Message: "term.create: argv must not be empty",
+				Message: "term.create: sessionId must not be empty",
 			}
 		}
-		spec := termmanager.SpawnSpec{
-			Argv:          p.Argv,
-			Cwd:           p.Cwd,
-			Env:           p.Env,
-			WorkspaceRoot: p.WorkspaceRoot,
-			Cols:          p.Cols,
-			Rows:          p.Rows,
-		}
-		sessionID, err := cfg.TerminalManager.CreateSession(spec)
+		err := cfg.TerminalManager.RegisterExternalSession(p.SessionID, p.WorkspaceRoot, p.Argv)
 		if err != nil {
 			if err == termmanager.ErrCapExceeded {
 				return nil, &jsonrpc.RPCError{
@@ -93,18 +94,12 @@ func handleTermCreate(cfg Config) jsonrpc.Handler {
 					Message: "term.create: session cap exceeded",
 				}
 			}
-			if err == termmanager.ErrNotSupported {
-				return nil, &jsonrpc.RPCError{
-					Code:    jsonrpc.CodeInternalError,
-					Message: "term.create: " + err.Error(),
-				}
-			}
 			return nil, &jsonrpc.RPCError{
 				Code:    jsonrpc.CodeInternalError,
 				Message: fmt.Sprintf("term.create: %v", err),
 			}
 		}
-		return termCreateResult{SessionID: sessionID}, nil
+		return termCreateResult{SessionID: p.SessionID}, nil
 	}
 }
 
@@ -121,12 +116,13 @@ type termAttachResult struct {
 }
 
 // handleTermAttach validates that the session exists, sends {ok:true}, then
-// hijacks the connection to run the bidirectional binary-frame transport
-// (term_transport_unix.go / term_transport_windows.go).
+// hijacks the connection to run the push transport (term_transport_unix.go /
+// term_transport_windows.go).
 //
 // After the ack is flushed, the NDJSON scanner loop stops (via the hijack
-// channel injected by jsonrpc.handleConn) and runAttachTransport takes
-// ownership of the raw net.Conn.
+// channel injected by jsonrpc.handleConn) and runPushTransport takes ownership
+// of the raw net.Conn.  In T2 the data flows start → daemon: start sends
+// length-prefixed 0x00/0x01 frames, daemon calls PushOutput/PushExit.
 func handleTermAttach(cfg Config) jsonrpc.Handler {
 	return func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		var p termAttachParams
@@ -157,7 +153,7 @@ func handleTermAttach(cfg Config) jsonrpc.Handler {
 		}
 
 		// Request connection hijack: after the {ok:true} ack is flushed, hand
-		// the raw net.Conn to runAttachTransport.
+		// the raw net.Conn to runPushTransport.
 		hijackCh, ok := jsonrpc.HijackChanFromCtx(ctx)
 		if !ok {
 			// Hijack not supported by this server (should not happen in production).
@@ -166,7 +162,7 @@ func handleTermAttach(cfg Config) jsonrpc.Handler {
 		mgr := cfg.TerminalManager
 		sessionID := p.SessionID
 		hijackCh <- func(hc jsonrpc.HijackedConn) {
-			runAttachTransport(hc.Conn, sessionID, mgr)
+			runPushTransport(hc.Conn, sessionID, mgr)
 		}
 		return termAttachResult{OK: true}, nil
 	}

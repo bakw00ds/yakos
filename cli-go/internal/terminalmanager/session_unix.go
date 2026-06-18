@@ -17,6 +17,11 @@ import (
 
 // session is the POSIX implementation of a PTY-backed terminal session.
 // It owns the PTY master fd and the child process.
+//
+// ADR-0008 Phase 1 T2 note: the daemon-owned PTY path (newSession) is preserved
+// for tests and future use but is NOT invoked in the P1 share-terminal flow.
+// The P1 flow uses externalSession instead — start.go owns the PTY, the daemon
+// only fans output to browser subscribers.
 type session struct {
 	id        string
 	spec      SpawnSpec
@@ -239,3 +244,5 @@ func (s *session) lastActivity() time.Time {
 	s.actMu.Unlock()
 	return t
 }
+
+// externalSession is defined in external_session.go (no build tag — cross-platform).

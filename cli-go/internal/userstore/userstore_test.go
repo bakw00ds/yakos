@@ -401,6 +401,52 @@ func TestCreate_InvalidUsername_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestCreate_ReservedPrefixes verifies that usernames beginning with "op-" or
+// "lbop-" (case-insensitive) are rejected.  These prefixes are reserved for the
+// console's loopback owner-identity tokens; allowing a real username to match
+// them would create a transcript-adoption collision (a user named "op-<12hex>"
+// would be treated as an anonymous legacy token and their conversations could
+// be read by any caller).
+func TestCreate_ReservedPrefixes(t *testing.T) {
+	t.Parallel()
+	s := openEmpty(t)
+
+	// These must be rejected.
+	reserved := []string{
+		"op-deadbeef0123",
+		"op-aaaaaaaaaaaa",
+		"OP-deadbeef0123",
+		"Op-DEADBEEF0123",
+		"lbop-alice",
+		"lbop-tw",
+		"LBOP-alice",
+		"Lbop-foo",
+		"op-short",
+		"lbop-",
+	}
+	for _, name := range reserved {
+		err := s.Create(name, "password-long-enough", netid.RoleRead)
+		if err == nil {
+			t.Errorf("Create(%q): expected error (reserved prefix); got nil", name)
+		}
+	}
+
+	// These must still be accepted.
+	normal := []string{
+		"alice",
+		"bob.smith",
+		"carol-1",
+		"user@x",
+		"operator", // contains "op" but not "op-" prefix
+	}
+	for _, name := range normal {
+		err := s.Create(name, "password-long-enough", netid.RoleRead)
+		if err != nil {
+			t.Errorf("Create(%q): unexpected error: %v", name, err)
+		}
+	}
+}
+
 // ---- password length floor --------------------------------------------------
 
 func TestCreate_ShortPassword_ReturnsError(t *testing.T) {

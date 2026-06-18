@@ -3,47 +3,53 @@
 // Package start — pump_unix.go
 //
 // runLocalPump is the POSIX implementation of the --share-terminal local pump
-// (ADR-0008 Phase 1).
+// (ADR-0008 Phase 1 T2).
 //
-// Behaviour:
-//  1. Dial the daemon's JSON-RPC Unix socket (socketPath).
-//  2. Send yakos.term.create RPC with the spawn spec.
-//  3. Receive sessionId and a streaming connection for PTY I/O.
-//  4. Put local stdin into raw mode (golang.org/x/term).
-//  5. Bridge:  stdin → daemon PTY (write frames via jsonrpc stream)
-//     daemon PTY output → stdout
-//     SIGWINCH → resize frames → daemon pty.Setsize
-//  6. On child exit, restore terminal and propagate the exit code.
+// T2 architecture — start owns the PTY:
 //
-// Phase 1 note: the daemon only wires output (0x00 frames) + close (0x01 frames)
-// from the PTY.  The pump sends input keystrokes (0x10 frames) and resize frames
-// (0x11 frames) in Phase 1 for the local pump path only.  Browser keystroke
-// ingestion is Phase 2.
+//  1. Generate a sessionId; dial the daemon's JSON-RPC Unix socket.
+//  2. Send yakos.term.create RPC (registers the externally-owned session on
+//     the daemon — no daemon fork/exec).
+//  3. Send yakos.term.attach RPC; hijacks the connection to the push transport.
+//  4. Open a local PTY (creack/pty) and spawn the runtime (claude / codex / …)
+//     under it.  start owns the PTY master for the lifetime of the session.
+//  5. Local raw-mode passthrough: stdin → PTY master, PTY master → stdout.
+//     SIGWINCH → pty.Setsize (local resize, no daemon round-trip).
+//  6. Tee PTY output to the daemon as length-prefixed 0x00 frames so browser
+//     /v1/term subscribers mirror the session in real time.
+//  7. On child exit: send 0x01 exit frame to daemon; restore TTY; propagate
+//     exit code.
+//
+// The daemon NEVER fork/execs the child process in this path.  The only daemon
+// actions are registering the session (yakos.term.create) and relaying pushed
+// output to browser subscribers (/v1/term WebSocket).
 
 package start
 
 import (
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 
+	"github.com/creack/pty"
 	"golang.org/x/term"
 )
 
-// termCreateParams is the JSON body for yakos.term.create RPC.
+// termCreateParams is the JSON body for yakos.term.create RPC (T2).
+// start generates the sessionId; the daemon registers it without spawning.
 type termCreateParams struct {
+	SessionID     string   `json:"sessionId"`
 	Argv          []string `json:"argv"`
-	Cwd           string   `json:"cwd"`
-	Env           []string `json:"env"`
 	WorkspaceRoot string   `json:"workspaceRoot"`
-	Cols          uint16   `json:"cols"`
-	Rows          uint16   `json:"rows"`
 }
 
 // termCreateResult is the JSON response for yakos.term.create RPC.
@@ -51,65 +57,29 @@ type termCreateResult struct {
 	SessionID string `json:"sessionId"`
 }
 
-// runLocalPump dials socketPath, creates a terminal session from spawnSpec, and
-// pumps stdin/stdout until the child process exits.  Returns the child's exit code.
+// runLocalPump dials socketPath, registers a terminal session on the daemon,
+// spawns the child process under a local PTY, and pumps I/O until the child
+// exits.  Returns the child's exit code.
 func runLocalPump(socketPath string, spawnSpec map[string]interface{}, ew io.Writer) (int, error) {
-	// ---- 1. Dial the daemon JSON-RPC socket ------------------------------------
+	// ---- 1. Generate sessionId and dial the daemon socket ----------------------
+	sessionID, err := newLocalSessionID()
+	if err != nil {
+		return 1, fmt.Errorf("start: generate sessionId: %w", err)
+	}
+
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
 		return 1, fmt.Errorf("start: dial daemon socket %s: %w\n  (Is the daemon running? Start it with 'yakos serve')", socketPath, err)
 	}
 	defer conn.Close()
 
-	// ---- 2. Detect terminal dimensions -----------------------------------------
-	cols, rows := uint16(80), uint16(24)
-	if fdInt := int(os.Stdin.Fd()); term.IsTerminal(fdInt) {
-		if w, h, err := term.GetSize(fdInt); err == nil {
-			cols, rows = uint16(w), uint16(h)
-		}
-	}
-
-	// ---- 3. Build and send yakos.term.create RPC --------------------------------
-	params := termCreateParams{
-		WorkspaceRoot: strFromSpec(spawnSpec, "workspaceRoot"),
-		Cwd:           strFromSpec(spawnSpec, "cwd"),
-		Cols:          cols,
-		Rows:          rows,
-	}
-	if argv, ok := spawnSpec["argv"].([]string); ok {
-		params.Argv = argv
-	}
-	if envSlice, ok := spawnSpec["env"].([]string); ok {
-		params.Env = envSlice
-	}
-
-	paramsJSON, err := json.Marshal(params)
-	if err != nil {
-		return 1, fmt.Errorf("start: marshal term.create params: %w", err)
-	}
-
+	// Shared RPC types.
 	type rpcRequest struct {
 		JSONRPC string          `json:"jsonrpc"`
 		ID      int             `json:"id"`
 		Method  string          `json:"method"`
 		Params  json.RawMessage `json:"params"`
 	}
-	req := rpcRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "yakos.term.create",
-		Params:  paramsJSON,
-	}
-	reqBytes, err := json.Marshal(req)
-	if err != nil {
-		return 1, fmt.Errorf("start: marshal term.create request: %w", err)
-	}
-	reqBytes = append(reqBytes, '\n')
-	if _, err := conn.Write(reqBytes); err != nil {
-		return 1, fmt.Errorf("start: write term.create: %w", err)
-	}
-
-	// ---- 4. Read the RPC response -----------------------------------------------
 	type rpcResponse struct {
 		JSONRPC string          `json:"jsonrpc"`
 		ID      interface{}     `json:"id"`
@@ -119,48 +89,103 @@ func runLocalPump(socketPath string, spawnSpec map[string]interface{}, ew io.Wri
 			Message string `json:"message"`
 		} `json:"error,omitempty"`
 	}
+
+	sendRPC := func(id int, method string, params interface{}) error {
+		p, err := json.Marshal(params)
+		if err != nil {
+			return err
+		}
+		req := rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: p}
+		b, err := json.Marshal(req)
+		if err != nil {
+			return err
+		}
+		b = append(b, '\n')
+		_, err = conn.Write(b)
+		return err
+	}
+
 	dec := json.NewDecoder(conn)
-	var resp rpcResponse
-	if err := dec.Decode(&resp); err != nil {
+	readResp := func() (rpcResponse, error) {
+		var r rpcResponse
+		return r, dec.Decode(&r)
+	}
+
+	// ---- 2. Send yakos.term.create RPC -----------------------------------------
+	argv, _ := spawnSpec["argv"].([]string)
+	workspaceRoot := strFromSpec(spawnSpec, "workspaceRoot")
+
+	if err := sendRPC(1, "yakos.term.create", termCreateParams{
+		SessionID:     sessionID,
+		Argv:          argv,
+		WorkspaceRoot: workspaceRoot,
+	}); err != nil {
+		return 1, fmt.Errorf("start: write term.create: %w", err)
+	}
+	resp, err := readResp()
+	if err != nil {
 		return 1, fmt.Errorf("start: decode term.create response: %w", err)
 	}
 	if resp.Error != nil {
 		return 1, fmt.Errorf("start: term.create RPC error %d: %s", resp.Error.Code, resp.Error.Message)
 	}
-	var result termCreateResult
-	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		return 1, fmt.Errorf("start: unmarshal term.create result: %w", err)
-	}
-	sessionID := result.SessionID
-	slog.Debug("start: term session created", "sessionId", sessionID)
+	slog.Debug("start: external term session registered", "sessionId", sessionID)
 
-	// ---- 5. Send yakos.term.attach — switch connection to streaming PTY I/O ----
-	type termAttachParams struct {
+	// ---- 3. Send yakos.term.attach — switch to push transport ------------------
+	if err := sendRPC(2, "yakos.term.attach", struct {
 		SessionID string `json:"sessionId"`
-	}
-	attachParams, _ := json.Marshal(termAttachParams{SessionID: sessionID})
-	attachReq := rpcRequest{
-		JSONRPC: "2.0",
-		ID:      2,
-		Method:  "yakos.term.attach",
-		Params:  attachParams,
-	}
-	attachBytes, _ := json.Marshal(attachReq)
-	attachBytes = append(attachBytes, '\n')
-	if _, err := conn.Write(attachBytes); err != nil {
+	}{SessionID: sessionID}); err != nil {
 		return 1, fmt.Errorf("start: write term.attach: %w", err)
 	}
-	// Read the attach ack.
-	var attachResp rpcResponse
-	if err := dec.Decode(&attachResp); err != nil {
+	attachResp, err := readResp()
+	if err != nil {
 		return 1, fmt.Errorf("start: decode term.attach response: %w", err)
 	}
 	if attachResp.Error != nil {
 		return 1, fmt.Errorf("start: term.attach RPC error %d: %s", attachResp.Error.Code, attachResp.Error.Message)
 	}
+	// From this point conn is in push-transport mode (binary frames, no NDJSON).
 
-	// ---- 6. Put stdin into raw mode ---------------------------------------------
+	// writeFrame sends a length-prefixed binary frame over conn to the daemon.
+	// Layout: [ 2-byte big-endian total length ] [ tag byte ] [ payload ]
+	writeFrame := func(tag byte, payload []byte) error {
+		total := uint16(1 + len(payload))
+		buf := make([]byte, 2+int(total))
+		binary.BigEndian.PutUint16(buf[0:2], total)
+		buf[2] = tag
+		copy(buf[3:], payload)
+		_, err := conn.Write(buf)
+		return err
+	}
+
+	// ---- 4. Detect terminal dimensions -----------------------------------------
+	cols, rows := uint16(80), uint16(24)
 	stdinFd := int(os.Stdin.Fd())
+	if term.IsTerminal(stdinFd) {
+		if w, h, err := term.GetSize(stdinFd); err == nil {
+			cols, rows = uint16(w), uint16(h)
+		}
+	}
+
+	// ---- 5. Spawn child under a local PTY --------------------------------------
+	if len(argv) == 0 {
+		return 1, fmt.Errorf("start: share-terminal: argv is empty")
+	}
+	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec
+	cmd.Dir = strFromSpec(spawnSpec, "cwd")
+	if envSlice, ok := spawnSpec["env"].([]string); ok {
+		cmd.Env = envSlice
+	}
+	// Run in its own process group so signals don't propagate directly.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 1}
+
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: cols, Rows: rows})
+	if err != nil {
+		return 1, fmt.Errorf("start: pty.StartWithSize %v: %w", argv[0], err)
+	}
+	defer func() { _ = ptmx.Close() }()
+
+	// ---- 6. Put stdin into raw mode --------------------------------------------
 	var oldState *term.State
 	if term.IsTerminal(stdinFd) {
 		oldState, err = term.MakeRaw(stdinFd)
@@ -171,6 +196,7 @@ func runLocalPump(socketPath string, spawnSpec map[string]interface{}, ew io.Wri
 	restoreTTY := func() {
 		if oldState != nil {
 			_ = term.Restore(stdinFd, oldState)
+			oldState = nil
 		}
 	}
 	defer restoreTTY()
@@ -184,19 +210,8 @@ func runLocalPump(socketPath string, spawnSpec map[string]interface{}, ew io.Wri
 		os.Exit(1) //nolint:gocritic
 	}()
 
-	// writeFrame sends a length-prefixed binary frame to the daemon transport.
-	// Layout: [ 2-byte big-endian total length ] [ tag byte ] [ payload ]
-	writeFrame := func(tag byte, payload []byte) error {
-		total := uint16(1 + len(payload))
-		buf := make([]byte, 2+int(total))
-		binary.BigEndian.PutUint16(buf[0:2], total)
-		buf[2] = tag
-		copy(buf[3:], payload)
-		_, err := conn.Write(buf)
-		return err
-	}
-
-	// ---- 8. SIGWINCH → 0x11 resize frames ---------------------------------------
+	// ---- 8. SIGWINCH → local PTY resize ----------------------------------------
+	// T2: resize applies locally to the PTY we own; no daemon round-trip needed.
 	winchCh := make(chan os.Signal, 4)
 	signal.Notify(winchCh, syscall.SIGWINCH)
 	go func() {
@@ -205,21 +220,17 @@ func runLocalPump(socketPath string, spawnSpec map[string]interface{}, ew io.Wri
 			if err != nil {
 				continue
 			}
-			payload := make([]byte, 4)
-			binary.BigEndian.PutUint16(payload[0:], uint16(w))
-			binary.BigEndian.PutUint16(payload[2:], uint16(h))
-			_ = writeFrame(0x11, payload)
+			_ = pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(w), Rows: uint16(h)})
 		}
 	}()
 
-	// ---- 9. stdin → daemon (0x10 keystroke frames) ------------------------------
-	exitCh := make(chan int, 1)
+	// ---- 9. stdin → PTY master (local passthrough) ----------------------------
 	go func() {
 		buf := make([]byte, 4096)
 		for {
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
-				if werr := writeFrame(0x10, buf[:n]); werr != nil {
+				if _, werr := ptmx.Write(buf[:n]); werr != nil {
 					return
 				}
 			}
@@ -229,45 +240,63 @@ func runLocalPump(socketPath string, spawnSpec map[string]interface{}, ew io.Wri
 		}
 	}()
 
-	// ---- 10. daemon PTY output → stdout (0x00 / 0x01 frames) -------------------
+	// ---- 10. PTY master → stdout + daemon push (0x00 output frames) ----------
+	exitCh := make(chan int, 1)
 	go func() {
 		buf := make([]byte, 32*1024)
 		for {
-			n, err := conn.Read(buf)
+			n, err := ptmx.Read(buf)
 			if n > 0 {
-				data := buf[:n]
-				for len(data) > 0 {
-					if len(data) < 1 {
-						break
-					}
-					tag := data[0]
-					switch tag {
-					case 0x00: // PTY output
-						payload := data[1:]
-						_, _ = os.Stdout.Write(payload)
-						data = nil // consumed
-					case 0x01: // exit frame (5 bytes: tag + 4-byte exit code)
-						if len(data) >= 5 {
-							code := int(binary.BigEndian.Uint32(data[1:5]))
-							exitCh <- code
-							return
-						}
-						data = nil
-					default:
-						data = nil
-					}
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				// Write to local stdout for the operator's own terminal.
+				_, _ = os.Stdout.Write(chunk)
+				// Push to daemon for browser fan-out.
+				if ferr := writeFrame(0x00, chunk); ferr != nil {
+					// Daemon disconnected — continue local passthrough anyway.
+					slog.Debug("start: push frame write error (daemon disconnected?)", "err", ferr)
 				}
 			}
 			if err != nil {
-				exitCh <- 0
-				return
+				// PTY EOF: child exited.
+				break
 			}
 		}
+		// Reap the child.
+		exitCode := 0
+		if state := cmd.ProcessState; state != nil {
+			exitCode = state.ExitCode()
+		} else {
+			// ProcessState is nil until Wait is called; it may have already been
+			// set by the time we get here if cmd.Wait was called elsewhere.
+			// Call Wait to ensure the process is reaped (may return err if
+			// already waited, which is safe to ignore).
+			_ = cmd.Wait()
+			if state := cmd.ProcessState; state != nil {
+				exitCode = state.ExitCode()
+			}
+		}
+		exitCh <- exitCode
 	}()
 
 	// Wait for child exit.
 	code := <-exitCh
+
+	// ---- 11. Send 0x01 exit frame to daemon ------------------------------------
+	exitPayload := make([]byte, 4)
+	binary.BigEndian.PutUint32(exitPayload, uint32(code))
+	_ = writeFrame(0x01, exitPayload)
+
 	return code, nil
+}
+
+// newLocalSessionID generates a random 16-hex-char session identifier.
+func newLocalSessionID() (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func strFromSpec(spec map[string]interface{}, key string) string {

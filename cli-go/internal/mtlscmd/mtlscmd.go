@@ -65,9 +65,15 @@ var clientNameRe = regexp.MustCompile(`^[A-Za-z0-9._@-]{1,64}$`)
 // certificate CN.  A name is valid if it:
 //   - matches [A-Za-z0-9._@-]{1,64}
 //   - is not the reserved relative-path tokens "." or ".."
+//   - does not start with the reserved prefixes "op-" or "lbop-" (case-insensitive)
 //
 // The allow-list is applied at every entry point that turns a name into a
 // filesystem path, preventing path-traversal attacks.
+//
+// The "op-" and "lbop-" prefix reservation prevents a cert CN from colliding
+// with the console's loopback owner-identity tokens ("op-<12hex>" random tokens
+// and "lbop-<username>" stable tokens), which would otherwise allow transcript
+// adoption by an unrelated party.
 func ValidateClientName(name string) error {
 	if name == "" {
 		return fmt.Errorf("client name must not be empty")
@@ -77,6 +83,16 @@ func ValidateClientName(name string) error {
 	}
 	if !clientNameRe.MatchString(name) {
 		return fmt.Errorf("client name %q is invalid: must match [A-Za-z0-9._@-]{1,64} and contain no path separators", name)
+	}
+	// Reserved prefixes: "op-" and "lbop-" (case-insensitive) are used by the
+	// console's loopback owner-identity system.  Blocking these here ensures no
+	// cert CN can collide with a legacy random token or a stable loopback ID.
+	lower := strings.ToLower(name)
+	if strings.HasPrefix(lower, "op-") {
+		return fmt.Errorf("client name %q is invalid: names starting with 'op-' are reserved", name)
+	}
+	if strings.HasPrefix(lower, "lbop-") {
+		return fmt.Errorf("client name %q is invalid: names starting with 'lbop-' are reserved", name)
 	}
 	return nil
 }

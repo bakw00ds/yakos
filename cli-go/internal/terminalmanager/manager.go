@@ -1,34 +1,28 @@
-// Package terminalmanager implements ADR-0008 Phase 1 daemon-side PTY ownership.
+// Package terminalmanager implements ADR-0008 Phase 1 terminal session management.
 //
-// The Manager maintains a bounded set of TermSessions. Each TermSession owns
-// a PTY master (via github.com/creack/pty) and drives a single `claude`
-// (or any other) child process under that PTY. A single goroutine fans PTY
-// output bytes to all registered sinks (local pump callbacks + browser WS
-// viewers).
+// Two session modes are supported:
 //
-// Phase 1 scope: output-only. Browser viewers receive 0x00 frames (raw PTY
-// bytes) and 0x01 frames (close/exit-code). Input path (0x10/0x11 frames) is
-// wired for the local pump only (accept resize from the owning pump); browser
-// keystroke forwarding is a Phase 2 concern.
+//   - Daemon-owned (CreateSession): the daemon forks the child process under a
+//     local PTY. Output is read from the PTY master by a fanOut goroutine and
+//     delivered to all subscribers. This path is preserved for tests and future
+//     use but is NOT the active P1 share-terminal path.
+//
+//   - Externally-owned (RegisterExternalSession / T2): the login-shell yakos-start
+//     owns the PTY and child process. It pushes PTY output bytes to the daemon
+//     over the owner-only Unix socket (PushOutput / PushExit). The daemon fans
+//     those bytes to browser /v1/term subscribers. The daemon never fork/execs
+//     the child in this mode.
 //
 // # Session cap and idle reaper
 //
 // Modelled on internal/interactive/manager.go. A bounded cap (defaultCap)
 // prevents accumulation. An idle reaper goroutine closes sessions that have
-// been inactive for defaultIdleTimeout. Inactivity means no output was
-// produced (the child may be waiting for input — this matches the
-// interactive/manager.go pattern).
-//
-// # Process-group kill
-//
-// The child is started in its own process group (SysProcAttr.Setpgid=true).
-// On close, the manager kills the process group (kill(-pgid, SIGKILL)) so no
-// zombie sub-processes are left behind.
+// been inactive for defaultIdleTimeout.
 //
 // # Build tags
 //
 // PTY allocation and process-group kill are POSIX-only. This file is built on
-// all platforms; the platform-specific PTY operations are in session_unix.go
+// all platforms; the platform-specific operations are in session_unix.go
 // (//go:build !windows) and session_windows.go (//go:build windows).
 package terminalmanager
 
@@ -91,7 +85,11 @@ type SessionMeta struct {
 // All exported methods are safe for concurrent use.
 type Manager struct {
 	mu      sync.Mutex
-	entries map[string]*session // sessionId → session
+	entries map[string]*session // sessionId → daemon-owned PTY session
+
+	// externals holds externally-owned sessions (ADR-0008 Phase 1 T2).
+	// The login-shell process owns the PTY; the daemon only relays output.
+	externals map[string]*externalSession
 
 	cap            int
 	idleTimeout    time.Duration
@@ -128,6 +126,7 @@ func New(ctx context.Context, cfg Config) *Manager {
 	}
 	m := &Manager{
 		entries:        make(map[string]*session),
+		externals:      make(map[string]*externalSession),
 		cap:            cap,
 		idleTimeout:    idleTimeout,
 		reaperInterval: reaperInterval,
@@ -186,29 +185,39 @@ func (m *Manager) CreateSession(spec SpawnSpec) (string, error) {
 	return s.id, nil
 }
 
-// Get returns the metadata for a session. Returns ErrNotFound if unknown.
+// Get returns the metadata for a session (daemon-owned or externally-owned).
+// Returns ErrNotFound if unknown.
 func (m *Manager) Get(sessionId string) (SessionMeta, error) {
 	m.mu.Lock()
 	s, ok := m.entries[sessionId]
-	m.mu.Unlock()
 	if !ok {
-		return SessionMeta{}, ErrNotFound
+		ext, extOk := m.externals[sessionId]
+		m.mu.Unlock()
+		if !extOk {
+			return SessionMeta{}, ErrNotFound
+		}
+		return ext.meta(), nil
 	}
+	m.mu.Unlock()
 	return s.meta(), nil
 }
 
-// List returns metadata for all active sessions.
+// List returns metadata for all active sessions (daemon-owned and externally-owned).
 func (m *Manager) List() []SessionMeta {
 	m.mu.Lock()
-	result := make([]SessionMeta, 0, len(m.entries))
+	result := make([]SessionMeta, 0, len(m.entries)+len(m.externals))
 	for _, s := range m.entries {
+		result = append(result, s.meta())
+	}
+	for _, s := range m.externals {
 		result = append(result, s.meta())
 	}
 	m.mu.Unlock()
 	return result
 }
 
-// Subscribe registers output and exit callbacks for a session.
+// Subscribe registers output and exit callbacks for a session (daemon-owned or
+// externally-owned).
 //
 // outputFn is called with each raw PTY output chunk (no framing tags; just the
 // bytes the child process wrote to the terminal).  It must not retain the slice
@@ -225,13 +234,94 @@ func (m *Manager) List() []SessionMeta {
 func (m *Manager) Subscribe(sessionId string, outputFn func([]byte), exitFn func(int)) (func(), error) {
 	m.mu.Lock()
 	s, ok := m.entries[sessionId]
-	m.mu.Unlock()
 	if !ok {
-		return nil, ErrNotFound
+		ext, extOk := m.externals[sessionId]
+		m.mu.Unlock()
+		if !extOk {
+			return nil, ErrNotFound
+		}
+		unsub := ext.subscribe(outputFn, exitFn)
+		return unsub, nil
 	}
+	m.mu.Unlock()
 	unsub := s.subscribe(outputFn, exitFn)
 	return unsub, nil
 }
+
+// ---- externally-owned session API (ADR-0008 Phase 1 T2) ----------------------
+
+// RegisterExternalSession registers a new externally-owned session with the
+// given sessionId.  The caller (start.go) owns the PTY and child process; the
+// daemon only fans output pushed via PushOutput to browser subscribers.
+//
+// Returns ErrCapExceeded when the combined (daemon + external) session count
+// reaches cap.  Returns an error if sessionId is already registered.
+func (m *Manager) RegisterExternalSession(sessionId, workspaceRoot string, argv []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.entries)+len(m.externals) >= m.cap {
+		return ErrCapExceeded
+	}
+	if _, dup := m.externals[sessionId]; dup {
+		return fmt.Errorf("terminalmanager: session %q already registered", sessionId)
+	}
+	if _, dup := m.entries[sessionId]; dup {
+		return fmt.Errorf("terminalmanager: session %q already registered", sessionId)
+	}
+	m.externals[sessionId] = newExternalSession(sessionId, workspaceRoot, argv)
+	return nil
+}
+
+// PushOutput delivers a PTY output chunk for an externally-owned session to all
+// registered subscribers.  Called by the daemon-side push transport when start
+// sends a 0x00 frame.  Returns ErrNotFound if the session is unknown.
+func (m *Manager) PushOutput(sessionId string, chunk []byte) error {
+	m.mu.Lock()
+	ext, ok := m.externals[sessionId]
+	m.mu.Unlock()
+	if !ok {
+		return ErrNotFound
+	}
+	ext.pushOutput(chunk)
+	return nil
+}
+
+// PushExit signals exit for an externally-owned session and removes it from the
+// manager.  Called by the daemon-side push transport when start sends a 0x01
+// frame.  Returns ErrNotFound if the session is unknown.
+func (m *Manager) PushExit(sessionId string, exitCode int) error {
+	m.mu.Lock()
+	ext, ok := m.externals[sessionId]
+	if ok {
+		delete(m.externals, sessionId)
+	}
+	m.mu.Unlock()
+	if !ok {
+		return ErrNotFound
+	}
+	ext.pushExit(exitCode)
+	slog.Debug("terminalmanager: external session exited", "sessionId", sessionId, "exitCode", exitCode)
+	return nil
+}
+
+// CloseExternal removes an externally-owned session without sending an exit
+// notification (used on transport disconnect without a clean 0x01 close).
+// Returns ErrNotFound if unknown.
+func (m *Manager) CloseExternal(sessionId string) error {
+	m.mu.Lock()
+	ext, ok := m.externals[sessionId]
+	if ok {
+		delete(m.externals, sessionId)
+	}
+	m.mu.Unlock()
+	if !ok {
+		return ErrNotFound
+	}
+	ext.close()
+	return nil
+}
+
+// ---- daemon-owned input path (preserved for tests / future use) --------------
 
 // WriteInput writes raw bytes to the PTY master (stdin of the child process).
 //
@@ -343,19 +433,30 @@ func (m *Manager) reaper(ctx context.Context) {
 func (m *Manager) reapIdle() {
 	m.mu.Lock()
 	var stale []string
+	var staleExt []string
 	now := time.Now()
 	for id, s := range m.entries {
 		if now.Sub(s.lastActivity()) > m.idleTimeout {
 			stale = append(stale, id)
 		}
 	}
+	for id, s := range m.externals {
+		if now.Sub(s.lastActivity()) > m.idleTimeout {
+			staleExt = append(staleExt, id)
+		}
+	}
 	for _, id := range stale {
 		delete(m.entries, id)
+	}
+	for _, id := range staleExt {
+		delete(m.externals, id)
 	}
 	m.mu.Unlock()
 
 	for _, id := range stale {
-		// session.close already handles nil gracefully via the platform stubs.
 		slog.Info("terminalmanager: idle reaper closing session", "sessionId", id)
+	}
+	for _, id := range staleExt {
+		slog.Info("terminalmanager: idle reaper closing external session", "sessionId", id)
 	}
 }
