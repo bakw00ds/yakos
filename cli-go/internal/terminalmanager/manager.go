@@ -28,9 +28,11 @@ package terminalmanager
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 )
@@ -45,6 +47,11 @@ const (
 
 	// defaultReaperInterval is how often the idle reaper scans for stale sessions.
 	defaultReaperInterval = 60 * time.Second
+
+	// maxOwnerFramePayload is the maximum keystroke payload that SendInput will
+	// accept.  It must be < math.MaxUint16 - 1 so the uint16 frame-length prefix
+	// never overflows.  Kept well below the 64 KB WS bound as defense-in-depth.
+	maxOwnerFramePayload = 32 * 1024 // 32 KB
 )
 
 // ErrCapExceeded is returned by CreateSession when the session cap is reached.
@@ -319,6 +326,88 @@ func (m *Manager) CloseExternal(sessionId string) error {
 	}
 	ext.close()
 	return nil
+}
+
+// ---- Phase 2 back-channel: browser input → start PTY ------------------------
+
+// SetAttachConn records (or clears) the hijacked attach conn for an
+// externally-owned session.  Called by runPushTransport after the session is
+// registered (conn != nil) and again on transport exit (conn == nil).
+//
+// Returns ErrNotFound if the session is unknown.
+func (m *Manager) SetAttachConn(sessionId string, conn net.Conn) error {
+	m.mu.Lock()
+	ext, ok := m.externals[sessionId]
+	m.mu.Unlock()
+	if !ok {
+		return ErrNotFound
+	}
+	ext.setAttachConn(conn)
+	return nil
+}
+
+// SendInput delivers browser keystroke bytes to the session's owning start
+// process via the attach conn back-channel.
+//
+// Owner-scoping: only externally-owned sessions (m.externals) are reachable.
+// Daemon-owned sessions (m.entries) are NOT reachable from the browser input
+// path — the browser writer must not be able to inject keystrokes into a
+// daemon-owned PTY.  Callers that need to write to a daemon-owned session
+// must use Manager.WriteInput (the owner-only attach path).
+//
+// Frame format sent to start:
+//
+//	[ 2-byte BE total length ] [ 0x10 ] [ keystroke bytes ]
+//
+// Returns ErrNotFound if the session is unknown.
+func (m *Manager) SendInput(sessionId string, data []byte) error {
+	if len(data) > maxOwnerFramePayload {
+		return fmt.Errorf("terminalmanager: SendInput payload too large: %d bytes (max %d)", len(data), maxOwnerFramePayload)
+	}
+	m.mu.Lock()
+	ext, ok := m.externals[sessionId]
+	m.mu.Unlock()
+	if !ok {
+		return ErrNotFound
+	}
+	// Build: [2-byte BE total len][tag=0x10][payload]
+	total := uint16(1 + len(data))
+	frame := make([]byte, 2+int(total))
+	binary.BigEndian.PutUint16(frame[0:2], total)
+	frame[2] = 0x10
+	copy(frame[3:], data)
+	return ext.sendToOwner(frame)
+}
+
+// SendResize delivers a browser resize event to the session's owning start
+// process via the attach conn back-channel.
+//
+// Owner-scoping: only externally-owned sessions (m.externals) are reachable
+// (same isolation guarantee as SendInput).
+//
+// Frame format sent to start:
+//
+//	[ 2-byte BE total length=5 ] [ 0x11 ] [ cols uint16 BE ] [ rows uint16 BE ]
+//
+// Last-writer-wins for resize: local SIGWINCH and browser 0x11 can both call
+// pty.Setsize on start's side; the last one wins — correct behavior for a
+// shared terminal.
+//
+// Returns ErrNotFound if the session is unknown.
+func (m *Manager) SendResize(sessionId string, cols, rows uint16) error {
+	m.mu.Lock()
+	ext, ok := m.externals[sessionId]
+	m.mu.Unlock()
+	if !ok {
+		return ErrNotFound
+	}
+	// Build: [2-byte BE total len=5][tag=0x11][cols uint16 BE][rows uint16 BE]
+	frame := make([]byte, 7) // 2 (len prefix) + 5 (tag + 4 payload)
+	binary.BigEndian.PutUint16(frame[0:2], 5)
+	frame[2] = 0x11
+	binary.BigEndian.PutUint16(frame[3:5], cols)
+	binary.BigEndian.PutUint16(frame[5:7], rows)
+	return ext.sendToOwner(frame)
 }
 
 // ---- daemon-owned input path (preserved for tests / future use) --------------

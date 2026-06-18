@@ -7,6 +7,10 @@
 // The composed roster is used by the dispatch orchestrator to materialize the
 // --plugin-dir layout for the claude adapter (PR #15) and equivalent agent
 // file layouts for codex and agy.
+//
+// ComposeSkills is the analogous composer for framework skills
+// (lib/skills/<slug>/SKILL.md) and project skill overrides
+// (<project>/.claude/skills/<slug>/SKILL.md).
 package agentscompose
 
 import (
@@ -14,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/bakw00ds/yakos/internal/runtime"
@@ -304,4 +309,111 @@ func deriveDescription(body string) string {
 		}
 	}
 	return ""
+}
+
+// ComposedSkill is a single resolved skill entry for the /api/skills response.
+type ComposedSkill struct {
+	// Slug is the directory name (e.g. "a11y-scan").
+	Slug string
+
+	// Name is from the frontmatter `name:` field, falling back to Slug.
+	Name string
+
+	// Description is from the frontmatter `description:` field.
+	Description string
+
+	// Source is "framework" or "project".
+	Source string
+}
+
+// ComposeSkills walks lib/skills/<slug>/SKILL.md (framework skills) and
+// <project>/.claude/skills/<slug>/SKILL.md (project skills), parses
+// frontmatter for name and description, and returns a deterministically
+// ordered slice (sorted by slug). Project skills override framework skills
+// on slug collision, mirroring how Compose handles agent project-overrides.
+//
+// Returns an empty (non-nil) slice when either directory is absent — callers
+// should not treat a missing skills dir as an error.
+func ComposeSkills(yakosRoot, project string) ([]ComposedSkill, error) {
+	fwDir := filepath.Join(yakosRoot, "lib", "skills")
+	projDir := ""
+	if project != "" {
+		candidate := filepath.Join(project, ".claude", "skills")
+		if stat, err := os.Stat(candidate); err == nil && stat.IsDir() {
+			projDir = candidate
+		}
+	}
+
+	// index by slug; source tracks whether it came from framework or project.
+	type entry struct {
+		skill  ComposedSkill
+		source string // "framework" or "project"
+	}
+	index := make(map[string]entry)
+
+	addSkillsDir := func(dir, source string) error {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("agentscompose: read skills dir %s: %w", dir, err)
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			slug := e.Name()
+			skillPath := filepath.Join(dir, slug, "SKILL.md")
+			data, err := os.ReadFile(skillPath) //nolint:gosec
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue // dir exists but no SKILL.md — skip silently
+				}
+				return fmt.Errorf("agentscompose: read %s: %w", skillPath, err)
+			}
+
+			fm, _ := splitFrontmatter(string(data))
+			fields := parseFrontmatter(fm)
+
+			name := fields["name"]
+			if name == "" {
+				name = slug
+			}
+			description := fields["description"]
+
+			index[slug] = entry{
+				skill: ComposedSkill{
+					Slug:        slug,
+					Name:        name,
+					Description: description,
+					Source:      source,
+				},
+				source: source,
+			}
+		}
+		return nil
+	}
+
+	if err := addSkillsDir(fwDir, "framework"); err != nil {
+		return nil, err
+	}
+	if projDir != "" {
+		if err := addSkillsDir(projDir, "project"); err != nil {
+			return nil, err
+		}
+	}
+
+	// Deterministic ordering by slug (rule:cache-stability).
+	slugs := make([]string, 0, len(index))
+	for slug := range index {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+
+	result := make([]ComposedSkill, 0, len(slugs))
+	for _, slug := range slugs {
+		result = append(result, index[slug].skill)
+	}
+	return result, nil
 }

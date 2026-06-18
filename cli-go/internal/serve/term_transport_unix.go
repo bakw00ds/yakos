@@ -4,41 +4,48 @@
 //
 // Two transport functions are defined here:
 //
-//  1. runPushTransport — ADR-0008 Phase 1 T2 (active P1 path).
+//  1. runPushTransport — ADR-0008 Phase 1/2 T2 (active path).
 //     Data flows start → daemon: start sends length-prefixed 0x00/0x01 frames;
 //     daemon calls Manager.PushOutput / Manager.PushExit to fan output to
 //     browser /v1/term subscribers.  The daemon NEVER fork/execs the child
 //     process in this path.
 //
+//     Phase 2 adds a back-channel (daemon → start): after the session is
+//     registered, the hijacked conn is recorded via mgr.SetAttachConn so that
+//     mgr.SendInput / mgr.SendResize can write 0x10/0x11 frames back to start.
+//     The start-side readDaemonFrames goroutine (pump_unix.go) reads these
+//     frames and applies them to the PTY.
+//
 //  2. runAttachTransport — T1 daemon-owned PTY path (preserved for tests).
 //     Data flows daemon → client: daemon reads PTY output and sends it over the
-//     connection.  NOT used in the active P1 share-terminal flow; only invoked
-//     by the test suite.
+//     connection.  NOT used in the active P1/P2 share-terminal flow; only
+//     invoked by the test suite.
 //
-// # Wire protocol for runPushTransport (T2)
-//
-// Both directions use the same length-prefix framing:
+// # Wire protocol for runPushTransport (T2, both directions)
 //
 //	[ 2-byte big-endian total length ] [ tag byte ] [ payload ]
 //
-//	start → daemon:  0x00 <raw PTY bytes>       — output chunk
-//	                 0x01 <4-byte BE exit code>   — session exited (clean)
+//	start → daemon:  0x00 <raw PTY bytes>          — output chunk
+//	                 0x01 <4-byte BE exit code>      — session exited (clean)
 //
-// # Security scope (unchanged from T1)
+//	daemon → start:  0x10 <keystroke bytes>          — browser keystrokes
+//	                 0x11 <cols uint16 BE><rows uint16 BE> — browser resize
+//
+// # Security scope
 //
 // Both transports are reachable only through the daemon's Unix socket (mode
 // 0600, owner's UID).  The OS kernel enforces the ownership check.
 //
-// The browser WebSocket path (consoleui/term_ws_handler.go) is write-isolated:
+// The browser WebSocket path (consoleui/term_ws_handler.go) gates all input on
+// RoleAdmin before calling mgr.SendInput / mgr.SendResize.  The gate is
+// fail-closed: non-admin inbound frames are silently dropped; only RoleAdmin
+// frames reach the Manager.
 //
-//  1. The browser WS handler calls only Manager.Subscribe and Manager.Get.
-//     It discards every inbound WebSocket frame (Phase 1: output-only).
-//
-//  2. PushOutput / PushExit are called only from runPushTransport, which is
-//     reachable only via the owner-only Unix-socket attach hijack.
-//
-// Phase 2 note: browser keystroke ingestion requires a separate security review
-// before any write path is exposed to the WS handler.
+// Go net.Conn allows concurrent reads and writes (separate kernel paths), so
+// runPushTransport's read loop (start → daemon) and SendInput/SendResize's
+// Write calls (daemon → start) can run concurrently on the same conn without
+// a mutex.  Only the conn pointer itself is guarded (by attachMu in
+// externalSession) to protect against nil-deref on transport exit.
 
 package serve
 
@@ -79,7 +86,16 @@ const (
 //	  0x01: exit (payload is a 4-byte big-endian exit code)
 
 func runPushTransport(conn net.Conn, sessionID string, mgr *termmanager.Manager) {
+	// Phase 2: record the attach conn so mgr.SendInput / mgr.SendResize can
+	// write 0x10/0x11 frames back to start via the same hijacked connection.
+	// SetAttachConn is a no-op if the session is already gone (race with
+	// CloseExternal from a concurrent idle-reaper tick).
+	_ = mgr.SetAttachConn(sessionID, conn)
+
 	defer func() {
+		// Clear the attach conn before closing so sendToOwner returns an error
+		// rather than writing to a closed connection.
+		_ = mgr.SetAttachConn(sessionID, nil)
 		conn.Close()
 		// If the connection dropped without a clean 0x01 close, remove the
 		// session from the manager so subscribers are not left dangling.
