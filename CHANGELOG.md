@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.50.0.0] — 2026-06-18
+
+### Fixed
+
+- **`yakos start --share-terminal` / `--direct` are now recognized by the
+  CLI parser** — the flags were defined in the daemon's `serve` subcommand
+  (ADR-0008) but were never wired into `runStart` or `runServe` argument
+  parsing, making the web-terminal feature unreachable from the command
+  line in v0.49.0.0. `runStart` now parses `--share-terminal` and
+  `--direct` and forwards `--share-terminal` to the auto-spawned daemon's
+  serveArgs; `runServe` parses `--share-terminal`; both `start --help` and
+  `serve --help` document the flags.
+
+### Docs
+
+- **Web-terminal usage + security notes** — `docs/unified-console.md` and
+  `docs/getting-started.md` now include the `--share-terminal` / `--direct`
+  flag reference, admin-only Terminal pane description, and a security note
+  on the RoleAdmin gate. Version annotations corrected to v0.50.0.0+.
+
 ## [0.49.0.0] — 2026-06-18
 
 ### Added

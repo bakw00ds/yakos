@@ -2572,6 +2572,7 @@ type serveArgsInput struct {
 	noProjectIDE         bool
 	ideRoot              string
 	bannerProjectRepo    string
+	shareTerminal        bool
 }
 
 // buildServeArgs assembles the []string of flags forwarded to `yakos serve`.
@@ -2619,6 +2620,12 @@ func buildServeArgs(in serveArgsInput) []string {
 		} else if in.bannerProjectRepo != "" {
 			args = append(args, "--ide-root", in.bannerProjectRepo)
 		}
+	}
+	// Forward --share-terminal so the daemon's serve.Config.ShareTerminal is set.
+	// Without this, the TerminalManager is never created and /api/term + /v1/term
+	// never mount, making term.create and term.attach fail.
+	if in.shareTerminal {
+		args = append(args, "--share-terminal")
 	}
 	return args
 }
@@ -2692,6 +2699,8 @@ func runStart(yakosRoot string, args []string) {
 	var consoleExternalHosts []string
 	ideRoot := ""
 	noProjectIDE := false
+	shareTerminal := false
+	direct := false
 	var passthrough []string
 
 	// Explicit-flag sentinels for daemon auto-spawn decision.
@@ -2838,6 +2847,11 @@ func runStart(yakosRoot string, args []string) {
 		case len(arg) > 8 && arg[:8] == "--model=":
 			model = arg[8:]
 
+		case arg == "--share-terminal":
+			shareTerminal = true
+		case arg == "--direct":
+			direct = true
+
 		case arg == "--":
 			// Rest forwarded to runtime CLI.
 			passthrough = append(passthrough, args[i+1:]...)
@@ -2938,6 +2952,8 @@ func runStart(yakosRoot string, args []string) {
 		Networked:           networked,
 		ConsoleExternalHost: effectiveExternalHost,
 		ConsoleToken:        consoleTok,
+		ShareTerminal:       shareTerminal,
+		Direct:              direct,
 		Writer:              os.Stdout,
 		ErrWriter:           os.Stderr,
 	}
@@ -2962,6 +2978,7 @@ func runStart(yakosRoot string, args []string) {
 			detectedNetworkedIP:  detectedNetworkedIP,
 			noProjectIDE:         noProjectIDE,
 			ideRoot:              ideRoot,
+			shareTerminal:        shareTerminal,
 			bannerProjectRepo: func() string {
 				if banner != nil {
 					return banner.ProjectRepo
@@ -3005,6 +3022,7 @@ func runStart(yakosRoot string, args []string) {
 					detectedNetworkedIP:  detectedNetworkedIP,
 					noProjectIDE:         noProjectIDE,
 					ideRoot:              ideRoot,
+					shareTerminal:        shareTerminal,
 					bannerProjectRepo: func() string {
 						if banner != nil {
 							return banner.ProjectRepo
@@ -5987,6 +6005,7 @@ func runServe(yakosRoot string, args []string) {
 	noBootstrapCert := false
 	consoleAllowBash := false
 	consoleStructuredQuestions := false
+	shareTerminal := false
 
 	// YAKOS_ROOT env override mirrors runValidate / runRefresh behavior:
 	// when the binary is not installed at <root>/bin/yakos (e.g. in tests or
@@ -6074,6 +6093,8 @@ func runServe(yakosRoot string, args []string) {
 			consoleAllowBash = true
 		case "--console-structured-questions":
 			consoleStructuredQuestions = true
+		case "--share-terminal":
+			shareTerminal = true
 		case "--ide-root":
 			i++
 			if i >= len(args) {
@@ -6184,6 +6205,7 @@ func runServe(yakosRoot string, args []string) {
 		NoBootstrapCert:            noBootstrapCert,
 		ConsoleAllowBash:           consoleAllowBash,
 		ConsoleStructuredQuestions: consoleStructuredQuestions,
+		ShareTerminal:              shareTerminal,
 	}
 
 	wsBindAddr := wsAddr
@@ -6546,6 +6568,9 @@ Flags:
                             falls back to workspace root when .project-path is absent).
                             Pass --ide-root <path> to override; use WorkspaceRoot to revert
                             to the old behaviour.
+  --share-terminal          Mount the PTY terminal pane (ADR-0008 Phase 1).
+                            Creates the TerminalManager so /api/term and /v1/term
+                            are available.  Admin-only; output is read-only in P1.
   --rotate-ws-token         Generate a new WS bearer token and exit.
   --rotate-perf-token       Generate a new perf dashboard token and exit.
   --rotate-console-token    Generate a new console token and exit.

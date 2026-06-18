@@ -4,6 +4,7 @@
 **Networked multi-operator mode:** v0.44.0.0+
 **Answerable AskUserQuestion (structured questions):** v0.45.0.0+
 **Share-pane by conversationId (idle-capable):** v0.45.0.0+
+**Web-terminal mirror (read-only Terminal pane):** v0.50.0.0+
 **Audience:** operators who want to use the browser-based console for
 interactive Chat, workflow orchestration, or unified dashboard access.
 
@@ -104,6 +105,65 @@ Enables `POST /api/console/bash` (RoleAdmin only) for in-browser shell
 execution. Off by default; printing a warning banner when combined with
 `--console-bind` (networked mode). See the Console Bash section in
 [docs/api-contracts.md](api-contracts.md) for the full security model.
+
+### Web-terminal mirror (`--share-terminal`)
+
+`--share-terminal` (v0.50.0.0+, opt-in, off by default) causes the
+console daemon to own a PTY that runs the native `claude` TUI. You
+drive the session from your local terminal exactly as usual; the PTY
+output is also mirrored read-only into the console's admin-only
+**Terminal** pane in the browser.
+
+**Phase 1 is read-only.** The browser shows the live TUI output; you
+cannot type into it from the browser. Bidirectional browser input is a
+planned Phase 2 and is not available yet.
+
+```sh
+# Loopback: mirror the native TUI into the local console
+yakos start --share-terminal
+
+# Networked: mirror and expose to authenticated admins on the network
+yakos start --share-terminal \
+            --console-bind 0.0.0.0:7890 \
+            --console-external-host <host>:7890
+```
+
+After starting, open the console URL and navigate to the **Terminal**
+tab to see the live PTY output.
+
+Stop the daemon (and the PTY session) when done:
+
+```sh
+yakos serve stop
+```
+
+**`--direct` — legacy exec path.** If you need to run `yakos start`
+without a daemon PTY (environments without a running daemon, or
+preferences for the zero-daemon terminal experience), use:
+
+```sh
+yakos start --direct
+```
+
+This forces the legacy `syscall.Exec` path that replaces the yakOS
+process with `claude` directly. No console mirroring is available in
+this mode. `--direct` is the escape hatch for the transition period;
+a deprecation notice will appear when the PTY path is ready to become
+the default.
+
+**Security note for networked deployments.** The Terminal pane exposes
+live PTY output, which can contain secrets the operator types (API
+keys, passwords, file contents echoed to the terminal). The pane is
+`RoleAdmin`-gated — only operators with an admin client certificate can
+view it. On a networked console (`--console-bind` to a non-loopback
+address), this output is reachable by any authenticated admin on the
+network. Treat `--share-terminal` with the same care as
+`--console-allow-bash`. When active with a networked bind, the daemon
+prints a prominent warning banner to stderr. The native `claude` TUI
+runs with `--permission-mode bypassPermissions`; a compromised admin
+credential on a networked deployment gives an attacker full interactive
+access. See [docs/adr/ADR-0008.md](adr/ADR-0008.md) for the full threat
+model and mitigations.
 
 ---
 
@@ -471,6 +531,21 @@ and per-runtime breakdowns. Not a live stream — refreshes on tab open.
 
 Dispatch latency percentiles and per-agent time-series from the
 performance dashboard. Not a live stream.
+
+### Terminal (admin-only, v0.50.0.0+)
+
+The Terminal tab appears only when a `--share-terminal` session is
+active (see [Web-terminal mirror](#web-terminal-mirror---share-terminal)
+above). It renders the live PTY output of the native `claude` TUI using
+xterm.js.
+
+- **Read-only in Phase 1.** You see what the terminal session is doing;
+  you cannot send keystrokes from the browser. Bidirectional input is a
+  Phase 2 feature.
+- **Admin-only.** The tab is hidden for non-admin roles. Authenticated
+  admins (`RoleAdmin`) can view it in both loopback and networked mode.
+- **Output is live.** The tab shows the stream from the daemon-owned
+  PTY as it arrives — same content you see in your local terminal.
 
 ---
 
