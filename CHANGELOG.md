@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.55.0.0] — 2026-06-18
+
+### Added
+
+- **Interactive web terminal (ADR-0008 Phase 2)** — a RoleAdmin browser
+  can now type into and resize the shared `claude` session from the
+  console Terminal tab. Previously the Terminal tab was a read-only
+  mirror; browser keystrokes now flow daemon → login-shell PTY in real
+  time. Resize negotiation is also wired end-to-end, fixing garbled
+  rendering when the browser window dimensions differ from the PTY
+  allocation.
+- **Skills in the console popover** — `/api/skills` now composes the
+  66 framework skills (`lib/skills/<slug>/SKILL.md`) into a `skills`
+  array; the chat/IDE popover renders the full skill list for quick
+  reference while prompting.
+
+### Fixed
+
+- **Terminal resize negotiation fixes garbled web rendering** — PTY
+  column/row dimensions are now negotiated on connect and on every
+  browser resize event, eliminating the rendering artifacts seen when
+  the Terminal tab was opened at a size different from the PTY's
+  initial allocation.
+
+### Security
+
+- **RoleAdmin-gated browser terminal input with bounded frames** —
+  browser-to-PTY keystroke delivery is restricted to RoleAdmin
+  sessions; frames are length-bounded to prevent DoS via oversized
+  payloads; `MaxPayloadBytes` enforced at the WebSocket layer.
+- **Serialized concurrent writes** — a mutex guards concurrent
+  PTY-write paths, eliminating an interleaved-write race under
+  multiple simultaneous admin connections.
+- **Resize clamping** — PTY resize requests are clamped to sane
+  column/row bounds, preventing pathological allocations.
+- **Admin-input audit logging** — every browser-originated keystroke
+  batch is written to the audit log so operator and security tooling
+  can observe terminal input from admin sessions.
+- **ADR-0008 Phase 2 threat model recorded** — the updated ADR
+  documents the threat model, mitigations, and residual risk
+  (RoleAdmin terminal input is operator-equivalent RCE by design;
+  single-admin model).
+
 ## [0.54.0.0] — 2026-06-18
 
 ### Fixed
