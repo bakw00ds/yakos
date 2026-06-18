@@ -4841,3 +4841,56 @@ html[data-theme="light"] .ask-widget-form {
 html[data-theme="light"] .ask-widget-header {
   background: rgba(0,0,0,0.03);
 }
+
+/* ---- Terminal pane (ADR-0008 Phase 1) ------------------------------------- */
+
+#panel-terminal {
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#panel-terminal.active {
+  display: flex;
+}
+
+.term-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.term-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.term-status {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+
+/* term-viewport: fills the remaining panel height; xterm renders inside it. */
+.term-viewport {
+  flex: 1;
+  overflow: hidden;
+  background: #0d0d0d;  /* near-black default; overridden by xterm internal styles */
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+/* In light theme, use a white background so xterm's own light-theme colours
+   are visible.  The xterm theme object is applied programmatically by
+   _xtermThemeForCurrentConsoleTheme(); this rule only sets the outer wrapper. */
+html[data-theme="light"] .term-viewport {
+  background: #ffffff;
+}

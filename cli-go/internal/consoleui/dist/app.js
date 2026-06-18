@@ -406,6 +406,11 @@
     { id: 'chat',      label: 'Chat',         src: null,       phase: null },
     { id: 'ide',       label: 'IDE',          src: null,       phase: null },
     { id: 'flows',     label: 'Flows',        src: null,       phase: null },
+    // terminal tab: only shown when the server has a TerminalManager wired
+    // (i.e. --share-terminal was passed).  Detected via GET /api/term on
+    // first open; hidden by default so it only appears when the feature is
+    // active.  Server enforces RoleAdmin — client-side hiding is UX only.
+    { id: 'terminal',  label: 'Terminal',     src: null,       phase: null, adminOnly: true },
     // users tab: only shown when account role === 'admin'; hidden by default
     // via adminOnly flag checked in renderTabs().  Server enforces RoleAdmin —
     // client-side hiding is convenience UX only, not a security gate.
@@ -517,6 +522,11 @@
     // On every switch to users tab, refresh the table (data may have changed).
     if (id === 'users') {
       initUsersTab();
+    }
+
+    // On first switch to terminal tab, initialize the PTY viewer.
+    if (id === 'terminal') {
+      initTermTab();
     }
   }
 
@@ -4014,6 +4024,230 @@
   // Idempotency:
   //   POST /flows/api/run is NOT idempotent (always creates a new run).
   //   POST /flows/api/resume is idempotent for the same newRunId.
+
+  // ---- Terminal state (ADR-0008 Phase 1) ------------------------------------
+  //
+  // termTabInitialized: true once the Terminal tab has been opened and xterm.js
+  //   assets injected.  Guards the lazy-load in initTermTab().
+  // termWS: the live /v1/term/<sessionId> WebSocket, or null when disconnected.
+  // termInstance: the live xterm.Terminal instance, or null before first open.
+  // termFit: the live FitAddon, or null before first open.
+  // termResizeObserver: ResizeObserver watching the terminal container for layout
+  //   changes.  Cleaned up on tab close / WS close.
+  // termSessionId: the sessionId currently connected, or '' when none.
+
+  let termTabInitialized = false;
+  let termWS = null;
+  let termInstance = null;
+  let termFit = null;
+  let termResizeObserver = null;
+  let termSessionId = '';
+
+  // ---- Terminal init --------------------------------------------------------
+
+  function initTermTab() {
+    if (termTabInitialized) return;
+    termTabInitialized = true;
+    // Load xterm.js + FitAddon + xterm.css lazily (only on first tab open).
+    _loadXterm(function() {
+      renderTermLayout();
+      _connectTerm();
+    });
+  }
+
+  // _loadXterm injects xterm CSS + xterm.js + xterm-addon-fit.js if not
+  // already present, then calls onReady() once both scripts have executed.
+  //
+  // Load order: xterm.js must be evaluated before xterm-addon-fit.js because
+  // the addon's UMD wrapper references the global `Terminal` exposed by xterm.
+  function _loadXterm(onReady) {
+    // Already loaded — this branch is taken on every re-open after the first.
+    if (typeof Terminal !== 'undefined' && typeof FitAddon !== 'undefined') {
+      onReady();
+      return;
+    }
+    // Inject CSS (idempotent).
+    if (!document.getElementById('xterm-css')) {
+      var link = document.createElement('link');
+      link.id = 'xterm-css';
+      link.rel = 'stylesheet';
+      link.href = '/vendor/xterm/xterm.css';
+      document.head.appendChild(link);
+    }
+    // Inject xterm.js, then xterm-addon-fit.js, then call onReady.
+    var coreScript = document.createElement('script');
+    coreScript.src = '/vendor/xterm/xterm.js';
+    coreScript.onerror = function() {
+      var el = document.getElementById('term-status');
+      if (el) el.textContent = 'Terminal unavailable: failed to load xterm.js';
+    };
+    coreScript.onload = function() {
+      var fitScript = document.createElement('script');
+      fitScript.src = '/vendor/xterm/xterm-addon-fit.js';
+      fitScript.onerror = function() {
+        var el = document.getElementById('term-status');
+        if (el) el.textContent = 'Terminal unavailable: failed to load xterm-addon-fit.js';
+      };
+      fitScript.onload = function() { onReady(); };
+      document.head.appendChild(fitScript);
+    };
+    document.head.appendChild(coreScript);
+  }
+
+  // renderTermLayout builds the Terminal panel DOM.  Called once per session
+  // (initTermTab is guarded by termTabInitialized).
+  function renderTermLayout() {
+    var panel = document.getElementById('panel-terminal');
+    if (!panel) return;
+    panel.innerHTML =
+      '<div class="term-toolbar" role="toolbar" aria-label="Terminal controls">' +
+        '<span class="term-title">Terminal</span>' +
+        '<span id="term-status" class="term-status" role="status" aria-live="polite"></span>' +
+      '</div>' +
+      '<div id="term-viewport" class="term-viewport" aria-label="Terminal output" role="region"></div>';
+  }
+
+  // _connectTerm fetches GET /api/term, picks the first active session, and
+  // opens a /v1/term/<sessionId> WebSocket to stream PTY output to xterm.
+  function _connectTerm() {
+    var statusEl = document.getElementById('term-status');
+
+    apiFetch('GET', '/api/term').then(function(resp) {
+      if (!resp.ok) {
+        if (statusEl) statusEl.textContent = 'GET /api/term failed (' + resp.status + ')';
+        return null;
+      }
+      return resp.json();
+    }).then(function(sessions) {
+      if (!sessions) return; // error path already handled above
+      if (!Array.isArray(sessions) || sessions.length === 0) {
+        if (statusEl) statusEl.textContent = 'No active terminal sessions. Start one with: yakos start --share-terminal';
+        return;
+      }
+      // P1: pick the first session.  P2 will add a session picker.
+      var session = sessions[0];
+      termSessionId = session.sessionId || '';
+      if (!termSessionId) {
+        if (statusEl) statusEl.textContent = 'Session missing sessionId';
+        return;
+      }
+      if (statusEl) statusEl.textContent = 'Connecting…';
+      _openTermWS(termSessionId, statusEl);
+    }).catch(function(err) {
+      if (statusEl) statusEl.textContent = 'Error fetching sessions: ' + String(err);
+    });
+  }
+
+  // _openTermWS opens the /v1/term/<sessionId> binary WebSocket and wires it
+  // to a new xterm.Terminal instance rendered in #term-viewport.
+  //
+  // Frame protocol (server → browser):
+  //   0x00 <PTY bytes>       — raw terminal output; write to xterm
+  //   0x01 <4-byte exit code> — process exited; show notice and close
+  //
+  // Auth: reuses the same subprotocol scheme as /v1/events.
+  //   bearer mode: ['yakos-bearer', TOKEN]
+  //   session mode: no subprotocol (browser sends session cookie automatically)
+  function _openTermWS(sessionId, statusEl) {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var url = proto + '//' + location.host + '/v1/term/' + sessionId;
+
+    var viewport = document.getElementById('term-viewport');
+    if (!viewport) return;
+
+    // Construct xterm Terminal.  fontFamily mirrors the console's mono stack.
+    termInstance = new Terminal({
+      fontFamily: 'JetBrains Mono, Menlo, monospace',
+      fontSize: 14,
+      cursorBlink: false,  // read-only viewer; blinking cursor is misleading
+      convertEol: true,
+      scrollback: 5000,
+      theme: _xtermThemeForCurrentConsoleTheme(),
+    });
+    termFit = new FitAddon.FitAddon();
+    termInstance.loadAddon(termFit);
+    termInstance.open(viewport);
+    termFit.fit();
+
+    // ResizeObserver: re-fit xterm when the container resizes (panel show/hide,
+    // window resize).  Read-only Phase 1: we do NOT send 0x11 resize frames.
+    termResizeObserver = new ResizeObserver(function() {
+      if (termFit) {
+        try { termFit.fit(); } catch (_) {}
+      }
+    });
+    termResizeObserver.observe(viewport);
+
+    // Open WebSocket with the same subprotocol/token scheme as /v1/events.
+    if (AUTH_MODE === 'session') {
+      termWS = new WebSocket(url);
+    } else {
+      termWS = new WebSocket(url, ['yakos-bearer', TOKEN]);
+    }
+    termWS.binaryType = 'arraybuffer';
+
+    termWS.addEventListener('open', function() {
+      if (statusEl) statusEl.textContent = '';
+    });
+
+    termWS.addEventListener('message', function(ev) {
+      if (!(ev.data instanceof ArrayBuffer)) return;
+      var buf = new Uint8Array(ev.data);
+      if (buf.length < 1) return;
+
+      var frameType = buf[0];
+      if (frameType === 0x00) {
+        // PTY output: write remaining bytes to xterm.
+        if (termInstance) termInstance.write(buf.slice(1));
+      } else if (frameType === 0x01) {
+        // Process exit: decode 4-byte big-endian exit code and show notice.
+        var code = 0;
+        if (buf.length >= 5) {
+          code = ((buf[1] << 24) | (buf[2] << 16) | (buf[3] << 8) | buf[4]) >>> 0;
+        }
+        if (termInstance) {
+          termInstance.write('\r\n\r\n[Terminal session exited (code ' + code + ')]\r\n');
+        }
+        if (statusEl) statusEl.textContent = 'Session exited (code ' + code + ')';
+        _cleanupTermWS();
+      }
+    });
+
+    termWS.addEventListener('close', function() {
+      if (statusEl) statusEl.textContent = 'Disconnected';
+      _cleanupTermWS();
+    });
+
+    termWS.addEventListener('error', function() {
+      // error fires before close; let close handler update status
+    });
+  }
+
+  // _xtermThemeForCurrentConsoleTheme maps the console data-theme to an xterm
+  // theme object so the terminal blends with the active console palette.
+  function _xtermThemeForCurrentConsoleTheme() {
+    var theme = document.documentElement.getAttribute('data-theme') || 'og';
+    // All dark themes: near-black background, white foreground, green cursor.
+    // Light theme: white background, dark text, blue cursor.
+    if (theme === 'light') {
+      return { background: '#ffffff', foreground: '#1a1a2e', cursor: '#0066cc', selectionBackground: '#b3d4ff' };
+    }
+    // ops: near-black with mint accent; fluid/og: near-black with brand accent.
+    return { background: '#0d0d0d', foreground: '#e8e8e8', cursor: '#00ff88', selectionBackground: '#1a3a2a' };
+  }
+
+  // _cleanupTermWS closes and nulls the WS + ResizeObserver.
+  // The xterm instance is left open so the operator can still read the last output.
+  function _cleanupTermWS() {
+    if (termWS) {
+      try { termWS.close(); } catch (_) {}
+      termWS = null;
+    }
+    if (termResizeObserver) {
+      termResizeObserver.disconnect();
+      termResizeObserver = null;
+    }
+  }
 
   // ---- Flows state ----------------------------------------------------------
 
@@ -8958,6 +9192,13 @@
           <div class="flows-loading">
             <p class="empty-state">Initializing Flows…</p>
           </div>
+        </div>
+        <div id="panel-terminal" class="tab-panel">
+          <div class="term-toolbar" role="toolbar" aria-label="Terminal controls">
+            <span class="term-title">Terminal</span>
+            <span class="term-status">Initializing…</span>
+          </div>
+          <div class="term-viewport" aria-label="Terminal output" role="region"></div>
         </div>
         <div id="panel-users" class="tab-panel">
           <div class="users-toolbar">

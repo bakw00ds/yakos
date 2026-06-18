@@ -195,3 +195,52 @@ To update: download the new woff2 files, recompute SHA-256:
 
 Update `pinnedFontChecksums` in `vendor_checksum_test.go` and the table above.
 `.gitattributes` marks `*.woff2 binary` — no EOL conversion on Windows.
+
+---
+
+## xterm.js (Terminal pane — ADR-0008 Phase 1)
+
+| Field   | Value |
+|---------|-------|
+| Library | xterm + xterm-addon-fit |
+| xterm version | 5.3.0 |
+| xterm-addon-fit version | 0.8.0 |
+| Source (xterm) | https://www.npmjs.com/package/xterm/v/5.3.0 |
+| Source (fit) | https://www.npmjs.com/package/xterm-addon-fit/v/0.8.0 |
+| License | MIT — https://github.com/xtermjs/xterm.js/blob/master/LICENSE |
+| Copyright | Copyright (c) 2017-2019, The xterm.js authors |
+| Files vendored | 3 (`xterm.js`, `xterm-addon-fit.js`, `xterm.css`) |
+| SHA-256 (xterm.js) | f0aea0f75f48559013ae6643c2479dd737d26da42d5524e6d2b70915ae6523c7 |
+| SHA-256 (xterm-addon-fit.js) | 10f3194c5f17c1786fb7d5db865c1ec8539b6736a318063fd38bdaaf7c46848f |
+| SHA-256 (xterm.css) | 832f3f2c603b43ad4351ff04970150cc7a873014276db126a6065c6dd81e4872 |
+
+Purpose: browser-side terminal emulator for the Console "Terminal" pane that
+mirrors the native `claude` PTY session via the `/v1/term/<sessionId>` WebSocket
+(ADR-0008 Phase 1 read-only viewer).
+
+Supply-chain note: verified zero `eval()` / `new Function()` calls before
+vendoring.  UMD bundles load under `script-src 'self'` with no CSP changes.
+
+Files vendored under `dist/vendor/xterm/`:
+- `xterm.js` — UMD bundle: terminal core (rendering, input, scroll, a11y)
+- `xterm-addon-fit.js` — UMD bundle: FitAddon for container-aware sizing
+- `xterm.css` — base terminal styles (selection, cursor, scrollbar)
+
+Serve path: `/vendor/xterm/xterm.js`, `/vendor/xterm/xterm-addon-fit.js`, `/vendor/xterm/xterm.css`
+Embed: via `//go:embed all:dist/vendor/xterm` in `server.go`
+Checksum: per-file SHA-256 in `pinnedXtermChecksums` in `vendor_checksum_test.go`
+
+`.gitattributes` marks all three files as `binary` — no EOL conversion on Windows.
+
+To update:
+
+    cd /tmp && npm pack xterm@<VERSION> xterm-addon-fit@<FITVERSION>
+    tar xzf xterm-<VERSION>.tgz package/lib/xterm.js package/css/xterm.css
+    tar xzf xterm-addon-fit-<FITVERSION>.tgz package/lib/xterm-addon-fit.js
+    grep -c "eval(" package/lib/xterm.js        # must be 0
+    grep -c "eval(" package/lib/xterm-addon-fit.js  # must be 0
+    shasum -a 256 package/lib/xterm.js package/lib/xterm-addon-fit.js package/css/xterm.css
+    cp package/lib/xterm.js package/lib/xterm-addon-fit.js \
+        cli-go/internal/consoleui/dist/vendor/xterm/
+    cp package/css/xterm.css cli-go/internal/consoleui/dist/vendor/xterm/
+    # Update pinnedXtermChecksums in vendor_checksum_test.go and this table.

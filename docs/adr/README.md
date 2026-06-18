@@ -11,4 +11,5 @@ the Michael Nygard format (Context / Decision / Consequences).
 | [ADR-0004](ADR-0004.md) | Networked multi-operator identity layer | Accepted |
 | [ADR-0005](ADR-0005.md) | Hybrid authentication for the networked console | Accepted |
 | [ADR-0006](ADR-0006.md) | Node Agent-SDK sidecar for answerable structured questions | Accepted |
-| [ADR-0007](ADR-0007.md) | Terminal REPL as a thin client of the console interactive engine (shared bidirectional session) | Proposed |
+| [ADR-0007](ADR-0007.md) | Terminal REPL as a thin client of the console interactive engine (shared bidirectional session) | Superseded by ADR-0008 |
+| [ADR-0008](ADR-0008.md) | Native `claude` TUI shared between terminal and web via daemon-owned PTY | Accepted |

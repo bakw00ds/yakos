@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.0.0] — 2026-06-18
+
+### Added
+
+- **Read-only web-terminal mirror of the native `claude` TUI** — `yakos start
+  --share-terminal` (opt-in, off by default) spawns the console daemon owning
+  a PTY running `claude`; a thin local pump drives the PTY and streams output
+  to the browser via a new output-only WebSocket endpoint. `--direct` forces
+  the legacy `syscall.Exec` path for environments that don't need sharing.
+- **`/v1/term/<sessionId>` WebSocket + `GET /api/term`** — new RoleAdmin-gated
+  endpoints, mounted only when `--share-terminal` is active. The WebSocket
+  streams terminal frames (stdout/stderr) to connected clients; the REST
+  endpoint returns current session metadata.
+- **xterm.js Terminal pane in the console** — admin-only "Terminal" tab renders
+  the live PTY output using xterm.js 5.3.0 + fit addon, vendored with pinned
+  checksums. P2 bidirectional browser-write is deferred.
+
+### Docs
+
+- **ADR-0008 (Accepted): read-only web-terminal mirror** — records the
+  architecture decision for Phase 1 (output-only PTY mirror via WebSocket)
+  and defers Phase 2 (bidirectional browser-write). ADR-0007 is superseded.
+
 ## [0.48.0.0] — 2026-06-18
 
 ### Added
