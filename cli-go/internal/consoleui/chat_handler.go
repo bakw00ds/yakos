@@ -453,15 +453,24 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// C1 dual-regime operator_id:
-	// Authenticated (mTLS cert): cert CN is authoritative; body operatorId silently ignored.
-	// Unauthenticated (loopback bearer): require and validate operatorId from body.
+	// Authenticated (mTLS cert / session): cert CN or username is authoritative;
+	//   body operatorId is silently ignored.
+	// Unauthenticated (loopback bearer): the resolver stamps a stable OS-derived
+	//   ID via callerLabelFn (capturedIdentity.OperatorID); prefer that over the
+	//   client body token so the owner identity is stable across browser restarts,
+	//   port changes, and localStorage clears.  If the resolver provided no label
+	//   (pre-fix test servers, empty stateDir), fall back to the body token.
 	capturedIdentity := netid.IdentityFrom(r.Context())
 	var effectiveOperatorID string
 	if capturedIdentity.Authenticated {
-		// Cert CN wins; body operatorId is ignored.
+		// Cert CN / session username wins; body operatorId is ignored.
+		effectiveOperatorID = capturedIdentity.OperatorID
+	} else if capturedIdentity.OperatorID != "" {
+		// Loopback path with stable server-derived label: use it directly.
+		// No body validation needed — the server stamped this value, not the client.
 		effectiveOperatorID = capturedIdentity.OperatorID
 	} else {
-		// Require and validate from body.
+		// Legacy path: no resolver label; require and validate from body.
 		if strings.TrimSpace(req.OperatorID) == "" {
 			http.Error(w, "operatorId is required", http.StatusBadRequest)
 			return
@@ -1102,11 +1111,15 @@ func (ch *chatHandlers) handleChatCancel(w http.ResponseWriter, r *http.Request)
 	}
 
 	// C1 dual-regime operator_id for cancel ownership check:
-	// Authenticated (mTLS cert): cert CN is the identity; body operatorId silently ignored.
-	// Unauthenticated (loopback): require and validate operatorId from body.
+	// Authenticated (mTLS cert / session): cert CN or username wins; body operatorId ignored.
+	// Unauthenticated loopback with stable label: resolver-stamped ID wins; body ignored.
+	// Legacy (no resolver label): require and validate operatorId from body.
 	cancelID := netid.IdentityFrom(r.Context())
 	var effectiveOperatorID string
 	if cancelID.Authenticated {
+		effectiveOperatorID = cancelID.OperatorID
+	} else if cancelID.OperatorID != "" {
+		// Loopback path: stable server-derived label; no body validation needed.
 		effectiveOperatorID = cancelID.OperatorID
 	} else {
 		if req.OperatorID == "" {
@@ -1194,11 +1207,17 @@ func (ch *chatHandlers) handleChatTranscript(w http.ResponseWriter, r *http.Requ
 	}
 
 	// C1 dual-regime operator_id for transcript scoping:
-	// Authenticated (mTLS cert): cert CN scopes the transcript; query param ignored.
-	// Unauthenticated (loopback): require and validate operatorId from query param.
+	// Authenticated (mTLS cert / session): cert CN or username scopes the
+	//   transcript; query param ignored.
+	// Unauthenticated loopback with stable label: resolver-stamped ID wins;
+	//   query param ignored.
+	// Legacy (no resolver label): require and validate operatorId from query param.
 	transcriptID := netid.IdentityFrom(r.Context())
 	var operatorID string
 	if transcriptID.Authenticated {
+		operatorID = transcriptID.OperatorID
+	} else if transcriptID.OperatorID != "" {
+		// Loopback path with stable server-derived label.
 		operatorID = transcriptID.OperatorID
 	} else {
 		operatorID = r.URL.Query().Get("operatorId")
@@ -1257,9 +1276,12 @@ func (ch *chatHandlers) handleChatTranscript(w http.ResponseWriter, r *http.Requ
 //
 // conversationId (primary key, required): the stable conversation identifier.
 // shared (required): the desired shared state — explicit set rather than
-//   blind toggle avoids races when the client retries.
+//
+//	blind toggle avoids races when the client retries.
+//
 // operatorId: required on the loopback bearer path; ignored when cert CN is
-//   available (C1 dual-regime, same as /api/chat/send and /api/chat/answer).
+//
+//	available (C1 dual-regime, same as /api/chat/send and /api/chat/answer).
 //
 // The share state is keyed on conversationId and persists across session
 // boundaries: a pane may be shared or unshared whether or not a live session
@@ -1463,10 +1485,14 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// C1 dual-regime operator_id (identical to dispatch handler).
+	// C1 dual-regime operator_id (same logic as dispatch handler — see that
+	// comment for the full rationale on the three-branch pattern).
 	capturedIdentity := netid.IdentityFrom(r.Context())
 	var effectiveOperatorID string
 	if capturedIdentity.Authenticated {
+		effectiveOperatorID = capturedIdentity.OperatorID
+	} else if capturedIdentity.OperatorID != "" {
+		// Loopback path: stable server-derived label; no body validation needed.
 		effectiveOperatorID = capturedIdentity.OperatorID
 	} else {
 		if strings.TrimSpace(req.OperatorID) == "" {
@@ -1615,10 +1641,14 @@ func (ch *chatHandlers) handleChatAnswer(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// C1 dual-regime operator_id (identical to dispatch handler).
+	// C1 dual-regime operator_id (same logic as dispatch handler — see that
+	// comment for the full rationale on the three-branch pattern).
 	capturedIdentity := netid.IdentityFrom(r.Context())
 	var effectiveOperatorID string
 	if capturedIdentity.Authenticated {
+		effectiveOperatorID = capturedIdentity.OperatorID
+	} else if capturedIdentity.OperatorID != "" {
+		// Loopback path: stable server-derived label; no body validation needed.
 		effectiveOperatorID = capturedIdentity.OperatorID
 	} else {
 		if strings.TrimSpace(req.OperatorID) == "" {

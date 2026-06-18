@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -269,9 +270,38 @@ func (tr *Transcripts) ReadShared(conversationID, ownerOperatorID string, shared
 			// Non-empty file with no user turn → fail closed (403) for all callers.
 			return nil, errTranscriptForbidden
 		}
-		// For non-shared (owner-only) reads: the caller must be the owner.
+		// For non-shared (owner-only) reads: the caller must be the owner, OR
+		// the conversation was created by a legacy browser-minted random token.
+		//
+		// Legacy-token adoption rule (same-identity reclaim across runs/restarts):
+		//   A legacy random token ("op-XXXX") was minted by app.js localStorage
+		//   and cannot correspond to any real authenticated identity.  Any caller
+		//   — the now-stable loopback identity after the fix, OR an authenticated
+		//   networked user — may safely adopt such a conversation, because no
+		//   human operator can legitimately "own" it in a security sense: those
+		//   tokens are not tied to any persistent user account.
+		//
+		// Security invariant preserved (PR #229 forged-answer protection):
+		//   If firstOwner is NOT a legacy random token (i.e. it looks like a real
+		//   username or cert CN), the mismatch is always denied — no authenticated
+		//   user can silently take over another authenticated user's conversation.
+		//   The ErrOwnerConflict checks in the interactive manager are unaffected.
 		if !sharedAccess && firstOwner != ownerOperatorID {
-			return nil, errTranscriptForbidden
+			if !isLegacyRandomToken(firstOwner) {
+				// firstOwner is a real identity (username / cert CN / stable lbop-
+				// token); refuse — this is a different user's conversation.
+				return nil, errTranscriptForbidden
+			}
+			// firstOwner is a legacy random token: allow adoption.
+			// The conversation has no stable human owner; the current caller
+			// may re-claim it without security risk.
+			//
+			// Emit an audit log so every adoption (legitimate or otherwise)
+			// is traceable in the daemon log.
+			slog.Info("transcript: legacy-token conversation adopted",
+				"conversationId", conversationID,
+				"by", ownerOperatorID,
+				"legacyOwner", firstOwner)
 		}
 		// For shared reads: ownership mismatch is allowed (the caller is an
 		// authorised watcher); only the "no owner established" case above is denied.

@@ -279,6 +279,50 @@ func TestValidateClientName(t *testing.T) {
 	}
 }
 
+// TestValidateClientName_ReservedPrefixes verifies that cert CNs beginning with
+// "op-" or "lbop-" (case-insensitive) are rejected.  These prefixes are
+// reserved for the console's loopback owner-identity tokens; allowing a real
+// cert CN to match them would create a transcript-adoption collision.
+func TestValidateClientName_ReservedPrefixes(t *testing.T) {
+	t.Parallel()
+
+	// These must be rejected (reserved prefixes, case-insensitive).
+	reserved := []string{
+		"op-deadbeef0123", // matches legacy random token shape exactly
+		"op-aaaaaaaaaaaa", // all-a hex variant
+		"op-000000000000", // all-zero
+		"OP-deadbeef0123", // uppercase OP-
+		"Op-deadbeef0123", // mixed case
+		"lbop-foo",        // stable loopback prefix
+		"lbop-alice",      // stable loopback prefix with username
+		"LBOP-alice",      // uppercase
+		"Lbop-ALICE",      // mixed case
+		"op-short",        // op- prefix even when not exactly 12 hex chars
+		"lbop-",           // bare prefix
+	}
+	for _, n := range reserved {
+		if err := mtlscmd.ValidateClientName(n); err == nil {
+			t.Errorf("ValidateClientName(%q): expected error (reserved prefix); got nil", n)
+		}
+	}
+
+	// These must still be accepted (normal cert CN names).
+	normal := []string{
+		"alice",
+		"bob.smith",
+		"carol-1",
+		"user@example",
+		"dave_ci",
+		"operator", // contains "op" but not "op-" prefix
+		"lopback",  // contains "lbop" substring but not "lbop-" prefix
+	}
+	for _, n := range normal {
+		if err := mtlscmd.ValidateClientName(n); err != nil {
+			t.Errorf("ValidateClientName(%q): unexpected error: %v", n, err)
+		}
+	}
+}
+
 // ---- set-role ---------------------------------------------------------------
 
 func TestSetRole_RoundTrip(t *testing.T) {

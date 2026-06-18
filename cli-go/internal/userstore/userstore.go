@@ -1001,6 +1001,19 @@ func validateUsername(name string) error {
 	if !usernameRe.MatchString(name) {
 		return fmt.Errorf("username %q is invalid: must match [A-Za-z0-9._@-]{1,64} and contain no path separators", name)
 	}
+	// Reserved prefixes: "op-" and "lbop-" (case-insensitive) are used by the
+	// console's loopback owner-identity system.  A real username that matches
+	// the legacy-random-token pattern ("op-<12hex>") would be mistakenly treated
+	// as an adoptable anonymous token by the transcript ownership check, allowing
+	// another user to read that user's transcripts.  Blocking these prefixes at
+	// account creation removes the collision class entirely.
+	lower := strings.ToLower(name)
+	if strings.HasPrefix(lower, "op-") {
+		return fmt.Errorf("username %q is invalid: names starting with 'op-' are reserved", name)
+	}
+	if strings.HasPrefix(lower, "lbop-") {
+		return fmt.Errorf("username %q is invalid: names starting with 'lbop-' are reserved", name)
+	}
 	return nil
 }
 

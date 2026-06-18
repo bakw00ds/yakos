@@ -401,3 +401,12 @@ var ErrPendingAlreadyConsumed = errPendingAlreadyConsumed
 // values that are not among the declared menu options are a first-class feature
 // ("add-your-own" path) and must not be rejected.  The load-bearing security
 // checks are toolUseID match (→ 404) and single-use enforcement (→ 409).
+
+// ---- Owner-lock fix test exports --------------------------------------------
+
+// LoadOrCreateLoopbackOwnerIDForTest exposes loadOrCreateLoopbackOwnerID for
+// external tests verifying that the loopback operator ID is stable across
+// repeated calls and daemon restarts.
+func LoadOrCreateLoopbackOwnerIDForTest(stateDir string) string {
+	return loadOrCreateLoopbackOwnerID(stateDir)
+}
