@@ -22,10 +22,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -2528,10 +2530,10 @@ func networkedFromFlags(networkedFlag bool, consoleBind string) bool {
 	return mtls.IsNonLoopback(consoleBind)
 }
 
-// validateNetworkedStartMode returns a descriptive error when a networked
-// console is requested but interactive (REPL) mode is active.  Interactive
-// mode calls syscall.Exec and replaces the process, so no daemon can bind.
-// A networked console therefore requires --no-repl or --web.
+// validateNetworkedStartMode is retained for reference but is no longer called
+// from runStart.  Interactive + networked mode is now supported by auto-spawning
+// a detached daemon alongside the REPL (see shouldSpawnDaemon / spawnDetachedDaemon).
+// Kept here (and tested) as documentation of the old constraint.
 func validateNetworkedStartMode(networked, noREPL bool) error {
 	if networked && !noREPL {
 		return fmt.Errorf(
@@ -2544,6 +2546,143 @@ func validateNetworkedStartMode(networked, noREPL bool) error {
 		)
 	}
 	return nil
+}
+
+// shouldSpawnDaemon returns true when the operator expressed console or
+// networked intent in interactive (REPL) mode and a background daemon should
+// be auto-spawned before the REPL exec.
+//
+// The trigger is explicit: any of --networked, --console-bind,
+// --console-external-host, or --console-addr causes a spawn.  A plain
+// `yakos start` without any console flag preserves today's behaviour (no
+// daemon, aspirational loopback banner).
+func shouldSpawnDaemon(networked, consoleBindProvided, consoleExternalHostProvided, consoleAddrProvided bool) bool {
+	return networked || consoleBindProvided || consoleExternalHostProvided || consoleAddrProvided
+}
+
+// serveArgsInput carries the flag values needed by buildServeArgs.
+// It is a plain struct so the helper can be unit-tested without globals.
+type serveArgsInput struct {
+	consoleAddr          string
+	wsAddr               string
+	perfAddr             string
+	networked            bool
+	consoleBind          string
+	consolePort          string // derived effective port
+	consoleExternalHosts []string
+	detectedNetworkedIP  string
+	noProjectIDE         bool
+	ideRoot              string
+	bannerProjectRepo    string
+}
+
+// buildServeArgs assembles the []string of flags forwarded to `yakos serve`.
+// It is used by both the --no-repl path and the interactive daemon-spawn path
+// so the two never drift.
+func buildServeArgs(in serveArgsInput) []string {
+	var args []string
+	if in.consoleAddr != "" {
+		args = append(args, "--console-addr", in.consoleAddr)
+	}
+	if in.wsAddr != "" {
+		args = append(args, "--ws-addr", in.wsAddr)
+	}
+	if in.perfAddr != "" {
+		args = append(args, "--perf-addr", in.perfAddr)
+	}
+	// Forward --networked derived or explicit console-bind / external-host.
+	if in.networked && in.consoleBind == "" {
+		// Auto-derive --console-bind from the detected IP.
+		port := in.consolePort
+		if port == "" {
+			port = "7890"
+		}
+		args = append(args, "--console-bind", "0.0.0.0:"+port)
+	}
+	if in.consoleBind != "" {
+		args = append(args, "--console-bind", in.consoleBind)
+	}
+	for _, eh := range in.consoleExternalHosts {
+		args = append(args, "--console-external-host", eh)
+	}
+	// When --networked was used and no explicit --console-external-host was
+	// passed, forward the auto-detected IP as the external host.
+	if in.networked && len(in.consoleExternalHosts) == 0 && in.detectedNetworkedIP != "" {
+		port := in.consolePort
+		if port == "" {
+			port = "7890"
+		}
+		args = append(args, "--console-external-host", in.detectedNetworkedIP+":"+port)
+	}
+	// Forward IDE root unless --no-project-ide opts out.
+	if !in.noProjectIDE {
+		if in.ideRoot != "" {
+			args = append(args, "--ide-root", in.ideRoot)
+		} else if in.bannerProjectRepo != "" {
+			args = append(args, "--ide-root", in.bannerProjectRepo)
+		}
+	}
+	return args
+}
+
+// daemonAlive reads the PID file at pidPath and returns true when the process
+// with that PID is currently running.  Returns false for absent / stale files.
+func daemonAlive(pidPath string) bool {
+	data, err := os.ReadFile(pidPath) //nolint:gosec
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil || syscall.Kill(pid, 0) == syscall.EPERM
+}
+
+// spawnDetachedDaemon starts `yakos serve <serveArgs>` as a detached child
+// process (new session, not waited on).  The child inherits the parent's
+// stdout/stderr so the setup token and banner URL appear on the terminal.
+// YAKOS_IMPL=go is forced in the child environment so the Go binary handles
+// the serve subcommand regardless of the parent's YAKOS_IMPL setting.
+func spawnDetachedDaemon(serveArgs []string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable: %w", err)
+	}
+	argv := append([]string{"serve"}, serveArgs...)
+	cmd := exec.Command(exe, argv...) //nolint:gosec
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	// Build child env: inherit everything, then force YAKOS_IMPL=go so the
+	// child's serve subcommand routes through the Go implementation.
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "YAKOS_IMPL=") {
+			filtered = append(filtered, kv)
+		}
+	}
+	filtered = append(filtered, "YAKOS_IMPL=go")
+	cmd.Env = filtered
+	return cmd.Start()
+}
+
+// pollConsolePort dials addr repeatedly until it succeeds or deadline elapses.
+// Returns true when the port accepts a connection within deadline, false otherwise.
+func pollConsolePort(addr string, deadline, interval time.Duration) bool {
+	start := time.Now()
+	for {
+		conn, err := net.DialTimeout("tcp", addr, interval)
+		if err == nil {
+			_ = conn.Close()
+			return true
+		}
+		if time.Since(start) >= deadline {
+			return false
+		}
+		time.Sleep(interval)
+	}
 }
 
 // runStart implements `yakos start` natively in Go.
@@ -2585,6 +2724,13 @@ func runStart(yakosRoot string, args []string) {
 	ideRoot := ""
 	noProjectIDE := false
 	var passthrough []string
+
+	// Explicit-flag sentinels for daemon auto-spawn decision.
+	// We only spawn a background daemon when the operator asked for
+	// console/networked behaviour; loopback-only starts are unchanged.
+	consoleAddrProvided := false
+	consoleBindProvided := false
+	consoleExternalHostProvided := false
 
 	// Honor YAKOS_ALLOW_ROOT env as equivalent to --allow-root.
 	if os.Getenv("YAKOS_ALLOW_ROOT") == "1" {
@@ -2638,8 +2784,10 @@ func runStart(yakosRoot string, args []string) {
 				os.Exit(1)
 			}
 			consoleAddr = args[i]
+			consoleAddrProvided = true
 		case len(arg) > 15 && arg[:15] == "--console-addr=":
 			consoleAddr = arg[15:]
+			consoleAddrProvided = true
 
 		case arg == "--ws-addr":
 			i++
@@ -2671,8 +2819,10 @@ func runStart(yakosRoot string, args []string) {
 				os.Exit(1)
 			}
 			consoleBind = args[i]
+			consoleBindProvided = true
 		case len(arg) > 15 && arg[:15] == "--console-bind=":
 			consoleBind = arg[15:]
+			consoleBindProvided = true
 
 		case arg == "--console-external-host":
 			i++
@@ -2681,8 +2831,10 @@ func runStart(yakosRoot string, args []string) {
 				os.Exit(1)
 			}
 			consoleExternalHosts = append(consoleExternalHosts, args[i])
+			consoleExternalHostProvided = true
 		case len(arg) > 24 && arg[:24] == "--console-external-host=":
 			consoleExternalHosts = append(consoleExternalHosts, arg[24:])
+			consoleExternalHostProvided = true
 
 		case arg == "--ide-root":
 			i++
@@ -2821,14 +2973,6 @@ func runStart(yakosRoot string, args []string) {
 		ErrWriter:           os.Stderr,
 	}
 
-	// Fix B: fail loudly if a networked console is requested in interactive mode.
-	// Interactive mode calls syscall.Exec and replaces the process, so no daemon
-	// can bind; the operator must pass --no-repl or --web.
-	if err := validateNetworkedStartMode(networked, noREPL); err != nil {
-		fmt.Fprintf(os.Stderr, "start: %v\n", err)
-		os.Exit(1)
-	}
-
 	banner, err := start.Run(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "start: %v\n", err)
@@ -2838,48 +2982,96 @@ func runStart(yakosRoot string, args []string) {
 	// When --no-repl is set, start.Run returns after the banner (no exec).
 	// Hand off to runServe to bring up the daemon + console.
 	if noREPL {
-		serveArgs := []string{}
-		if consoleAddr != "" {
-			serveArgs = append(serveArgs, "--console-addr", consoleAddr)
-		}
-		if wsAddr != "" {
-			serveArgs = append(serveArgs, "--ws-addr", wsAddr)
-		}
-		if perfAddr != "" {
-			serveArgs = append(serveArgs, "--perf-addr", perfAddr)
-		}
-		// Forward --networked derived or explicit console-bind / external-host.
-		if networked && consoleBind == "" {
-			// Auto-derive --console-bind from the detected IP.
-			serveArgs = append(serveArgs, "--console-bind", "0.0.0.0:"+consolePort)
-		}
-		if consoleBind != "" {
-			serveArgs = append(serveArgs, "--console-bind", consoleBind)
-		}
-		for _, eh := range consoleExternalHosts {
-			serveArgs = append(serveArgs, "--console-external-host", eh)
-		}
-		// When --networked was used and no explicit --console-external-host was
-		// passed, forward the auto-detected IP as the external host.
-		if networked && len(consoleExternalHosts) == 0 && detectedNetworkedIP != "" {
-			serveArgs = append(serveArgs, "--console-external-host", detectedNetworkedIP+":"+consolePort)
-		}
-		// Forward IDE root unless --no-project-ide opts out.
-		// Explicit --ide-root wins; otherwise use banner.ProjectRepo (from .project-path).
-		if !noProjectIDE {
-			if ideRoot != "" {
-				serveArgs = append(serveArgs, "--ide-root", ideRoot)
-			} else if banner != nil && banner.ProjectRepo != "" {
-				serveArgs = append(serveArgs, "--ide-root", banner.ProjectRepo)
-			}
-		}
+		serveArgs := buildServeArgs(serveArgsInput{
+			consoleAddr:          consoleAddr,
+			wsAddr:               wsAddr,
+			perfAddr:             perfAddr,
+			networked:            networked,
+			consoleBind:          consoleBind,
+			consolePort:          consolePort,
+			consoleExternalHosts: consoleExternalHosts,
+			detectedNetworkedIP:  detectedNetworkedIP,
+			noProjectIDE:         noProjectIDE,
+			ideRoot:              ideRoot,
+			bannerProjectRepo: func() string {
+				if banner != nil {
+					return banner.ProjectRepo
+				}
+				return ""
+			}(),
+		})
 		if dryRun {
 			// --no-repl --dry-run: serve path already printed its intent in
 			// the banner; exit cleanly without binding.
 			os.Exit(0)
 		}
 		runServe(yakosRoot, serveArgs)
+		return
 	}
+
+	// Interactive path: spawn a detached daemon when the operator expressed
+	// console/networked intent.  This allows `yakos start --networked` (or
+	// any explicit console flag) to bring up the background daemon and then
+	// drop into the interactive REPL — no --no-repl required.
+	//
+	// Trigger condition: operator provided at least one of --networked,
+	// --console-bind, --console-external-host, or --console-addr.
+	spawnDaemon := shouldSpawnDaemon(networked, consoleBindProvided, consoleExternalHostProvided, consoleAddrProvided)
+	if spawnDaemon {
+		workspaceRoot, cwdErr := os.Getwd()
+		if cwdErr != nil {
+			fmt.Fprintf(os.Stderr, "start: could not resolve cwd for daemon spawn: %v\n", cwdErr)
+			// Non-fatal: fall through to REPL.
+		} else {
+			pidPath := jsonrpc.PIDPath(workspaceRoot)
+			if !daemonAlive(pidPath) {
+				serveArgs := buildServeArgs(serveArgsInput{
+					consoleAddr:          consoleAddr,
+					wsAddr:               wsAddr,
+					perfAddr:             perfAddr,
+					networked:            networked,
+					consoleBind:          consoleBind,
+					consolePort:          consolePort,
+					consoleExternalHosts: consoleExternalHosts,
+					detectedNetworkedIP:  detectedNetworkedIP,
+					noProjectIDE:         noProjectIDE,
+					ideRoot:              ideRoot,
+					bannerProjectRepo: func() string {
+						if banner != nil {
+							return banner.ProjectRepo
+						}
+						return ""
+					}(),
+				})
+				if spawnErr := spawnDetachedDaemon(serveArgs); spawnErr != nil {
+					fmt.Fprintf(os.Stderr, "start: daemon spawn failed: %v\n", spawnErr)
+					// Non-fatal: REPL still launches.
+				} else {
+					// Poll the console port briefly so the daemon prints its setup
+					// token/URL before the REPL exec takes over the terminal.
+					probeAddr := consoleAddr
+					if probeAddr == "" {
+						if consoleBind != "" {
+							// For 0.0.0.0 wildcard, probe on loopback.
+							_, port, _ := net.SplitHostPort(consoleBind)
+							if port == "" {
+								port = consolePort
+							}
+							probeAddr = "127.0.0.1:" + port
+						} else {
+							probeAddr = "127.0.0.1:" + consolePort
+						}
+					}
+					if !pollConsolePort(probeAddr, 2*time.Second, 200*time.Millisecond) {
+						fmt.Fprintf(os.Stderr, "start: warning: console daemon did not bind on %s within 2s; continuing to REPL\n", probeAddr)
+					}
+				}
+			}
+			// else: daemon already running — skip spawn, fall through to REPL.
+		}
+	}
+	// Fall through: start.Run already did the exec (replaced the process).
+	// The return here is only reached in test mode (ExecFn injected).
 }
 
 // detectPrimaryNonLoopbackIPv4 returns the first non-loopback, non-link-local
@@ -5802,6 +5994,12 @@ func exitWith(code int, err error) {
 // YAKOS_DAEMON=on or YAKOS_DAEMON=auto in their shell rc to route CLI calls
 // through the daemon.
 func runServe(yakosRoot string, args []string) {
+	// `yakos serve stop` — signal the running daemon for this workspace to exit.
+	if len(args) > 0 && args[0] == "stop" {
+		runServeStop()
+		return
+	}
+
 	socketPath := ""
 	pidFile := ""
 	wsAddr := ""
@@ -6264,8 +6462,58 @@ Example:
 `)
 }
 
+// runServeStop implements `yakos serve stop`.
+//
+// Reads the PID file for the current workspace, sends SIGTERM to the daemon,
+// and exits.
+//
+// Exit codes:
+//
+//	0  Daemon was found and signalled (or was already stopped).
+//	1  OS-level error (could not read cwd, send signal failed with unexpected error).
+func runServeStop() {
+	workspaceRoot, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "serve stop: could not resolve workspace: %v\n", err)
+		os.Exit(1)
+	}
+	pidPath := jsonrpc.PIDPath(workspaceRoot)
+	pid, err := readPIDFile(pidPath)
+	if err != nil || pid <= 0 {
+		fmt.Fprintf(os.Stderr, "serve: no daemon running for %s\n", workspaceRoot)
+		os.Exit(0)
+	}
+	if !daemonAlive(pidPath) {
+		fmt.Fprintf(os.Stderr, "serve: no daemon running for %s\n", workspaceRoot)
+		os.Exit(0)
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		if err == syscall.ESRCH {
+			fmt.Fprintf(os.Stderr, "serve: no daemon running for %s\n", workspaceRoot)
+			os.Exit(0)
+		}
+		fmt.Fprintf(os.Stderr, "serve stop: kill pid %d: %v\n", pid, err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stdout, "serve: sent SIGTERM to daemon pid %d for workspace %s\n", pid, workspaceRoot)
+}
+
+// readPIDFile reads a PID from a file.  Returns 0 and a non-nil error when
+// the file is absent, unreadable, or contains non-numeric content.
+func readPIDFile(path string) (int, error) {
+	data, err := os.ReadFile(path) //nolint:gosec
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, fmt.Errorf("malformed pid file %s: %w", path, err)
+	}
+	return pid, nil
+}
+
 func printServeHelp(w io.Writer) {
-	_, _ = fmt.Fprint(w, `yakos serve [--socket <path>] [--pidfile <path>] [--ws-addr <addr>]
+	_, _ = fmt.Fprint(w, `yakos serve [stop | --socket <path>] [--pidfile <path>] [--ws-addr <addr>]
              [--console-addr <addr>] [--console-bind <addr>]
              [--console-external-host <host[:port]>] [--no-console]
              [--perf-addr <addr>] [--no-perf] [--detach] [--help]
@@ -6278,6 +6526,10 @@ per invocation.  It also starts a WebSocket event server for real-time
 multi-dev coordination (see yakos events) and a unified console dashboard
 that mounts kanban, cost (metrics), and performance tabs under one token.
 
+  yakos serve stop           Stop the running daemon for this workspace.
+                             Sends SIGTERM to the daemon; exits 0 whether or not
+                             a daemon was running.  --detach is advisory only.
+
 The daemon is OFF by default (YAKOS_DAEMON=off). To opt in:
 
   export YAKOS_DAEMON=auto     # uses daemon if running; falls back otherwise
@@ -6288,6 +6540,11 @@ The console URL (with token) is printed at startup:
 
 For persistent daemon startup, see docs/integrations/ for systemd (Linux),
 launchd (macOS), and Task Scheduler (Windows) unit files.
+
+Auto-spawn from yakos start:
+  Passing any console or networked flag to 'yakos start' in interactive mode
+  (without --no-repl) automatically spawns a background daemon before the REPL
+  exec.  To stop that daemon: yakos serve stop.
 
 Flags:
   --socket <path>           Override the socket/pipe path (default: platform XDG path).
@@ -6351,7 +6608,7 @@ Performance dashboard (standalone, used only with --no-console):
   Token stored at ~/.yakos-state/perf-token (mode 0600).
 
 Exit codes:
-  0   Clean shutdown (SIGTERM/SIGINT received).
+  0   Clean shutdown (SIGTERM/SIGINT received); or 'stop' with no daemon running.
   75  Another daemon is already running for this workspace (EX_TEMPFAIL).
   1   Error.
 `)
