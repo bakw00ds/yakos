@@ -1266,6 +1266,16 @@ when a daemon is auto-spawned):
     --no-project-ide      Opt out of auto-rooting the IDE pane at the project
                           dir; use the agent-control work dir instead.
 
+Terminal sharing (ADR-0008 Phase 1):
+    --share-terminal      Mirror the native claude TUI to the console Terminal
+                          pane (admin-only; read-only in Phase 1).  The daemon
+                          owns the PTY; the browser tab mirrors its output.
+                          When a daemon is auto-spawned, --share-terminal is
+                          forwarded so the daemon mounts /api/term and /v1/term.
+    --direct              Force the legacy in-process exec path regardless of
+                          --share-terminal.  Escape hatch for environments where
+                          daemon PTY ownership is unavailable.
+
 Inspection:
     --dry-run             Print what would be exec'd; exit 0.
     --print-agents        Print the composed agent JSON; exit 0.
