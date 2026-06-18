@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 )
 
@@ -726,37 +727,22 @@ func runtimeBinary(rt string) string {
 
 // ---- agent count / materialization -------------------------------------------
 
-// countAgents counts the number of composed agents for the project.
-// Returns 0 when the yakos root or project path is not available.
-func countAgents(yakosRoot, projectRepo, runtime string) int {
+// countAgents counts the number of composed agents for the project using the
+// Go agentscompose package.  This mirrors what serve.go does (agentscompose.Compose)
+// so the start banner's agent count matches what dispatch will actually compose,
+// and works for binary-only / materialized installs where the bash
+// agents-compose.sh script is not present on disk.
+//
+// Returns 0 when yakosRoot or projectRepo is empty, or when composition fails.
+func countAgents(yakosRoot, projectRepo, _ string) int {
 	if yakosRoot == "" || projectRepo == "" {
 		return 0
 	}
-	// Use the agents-compose bash script to count agents.
-	// Mirrors: yk_agents_compose "$YAKOS_ROOT" "$PROJECT_REPO" | jq 'length'
-	composeScript := filepath.Join(yakosRoot, "cli", "lib", "agents-compose.sh")
-	if _, err := os.Stat(composeScript); os.IsNotExist(err) {
-		return 0
-	}
-	cmd := exec.Command("bash", "-c",
-		fmt.Sprintf(`. %q && . %q && yk_agents_compose %q %q 2>/dev/null | jq -e 'length' 2>/dev/null || echo 0`,
-			filepath.Join(yakosRoot, "cli", "lib", "compat.sh"),
-			composeScript,
-			yakosRoot,
-			projectRepo,
-		),
-	)
-	cmd.Env = append(os.Environ(),
-		"YAKOS_ROOT="+yakosRoot,
-		"YAKOS_LIB="+filepath.Join(yakosRoot, "cli", "lib"),
-	)
-	out, err := cmd.Output()
+	agents, err := agentscompose.Compose(yakosRoot, projectRepo)
 	if err != nil {
 		return 0
 	}
-	n := 0
-	_, _ = fmt.Sscan(strings.TrimSpace(string(out)), &n)
-	return n
+	return len(agents)
 }
 
 // printAgents writes the composed agent JSON to w.

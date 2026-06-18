@@ -2695,6 +2695,46 @@ func pollUnixSocket(path string, deadline time.Duration) bool {
 	}
 }
 
+// resolveLibRoot returns the effective yakOS framework root for runtime
+// commands (start, serve) that need to compose agents.  It implements the
+// same three-stage cascade as install.ResolveRoot but is quieter — it logs
+// only when it falls back to materializing the embedded lib.
+//
+// Resolution order:
+//  1. If yakosRoot/lib/agents exists on disk, use yakosRoot as-is (dev-repo
+//     and bash-tree installs).
+//  2. If the materialized dir (~/.local/share/yakos/<version>/lib/agents)
+//     exists, use it.
+//  3. If the binary carries the embedded lib, materialize it now (idempotent)
+//     and use the materialized dir.
+//  4. If none of the above apply (bare dev build, no embed), return yakosRoot
+//     unchanged and let the caller handle the empty-roster warning.
+//
+// w receives the single-line "materialized embedded framework lib to <dir>"
+// message when step 3 fires.  Pass os.Stderr for runtime commands.
+func resolveLibRoot(yakosRoot, home string, w io.Writer) string {
+	// 1. Fast path: existing on-disk lib/agents.
+	if fi, err := os.Stat(filepath.Join(yakosRoot, "lib", "agents")); err == nil && fi.IsDir() {
+		return yakosRoot
+	}
+
+	// 2. Materialized dir from a previous install/start/serve.
+	matDir := install.MaterializedLibDir(home, version.Version)
+	if fi, err := os.Stat(filepath.Join(matDir, "lib", "agents")); err == nil && fi.IsDir() {
+		return matDir
+	}
+
+	// 3. Embedded lib — materialize on first use, then return the matDir.
+	if install.MaterializeEmbedded(matDir, version.Version, w) {
+		// MaterializeEmbedded returns true when it wrote (or confirmed) the lib.
+		return matDir
+	}
+
+	// 4. Nothing available — return yakosRoot unchanged; caller sees the
+	//    existing empty-roster warning and guidance.
+	return yakosRoot
+}
+
 // runStart implements `yakos start` natively in Go.
 //
 // Usage mirrors cli/lib/start.sh exactly:
@@ -2914,6 +2954,11 @@ func runStart(yakosRoot string, args []string) {
 	if home == "" {
 		home = "/tmp"
 	}
+
+	// Resolve the effective lib root via the cascade: on-disk → materialized →
+	// embedded auto-materialize.  This ensures binary-only installs (no
+	// lib/agents on disk) compose agents from the embedded framework lib.
+	yakosRoot = resolveLibRoot(yakosRoot, home, os.Stderr)
 
 	// Fix A: a non-loopback --console-bind implies networked mode even when
 	// --networked was not passed explicitly.  Derive once after flag parsing.
@@ -6268,6 +6313,11 @@ func runServe(yakosRoot string, args []string) {
 	perfStateDir := filepath.Join(home, ".yakos-state")
 	consoleTok, _ := internalconsoleui.LoadOrCreateToken(perfStateDir)
 	perfTok, _ := internalperfdash.LoadOrCreatePerfToken(perfStateDir)
+
+	// Resolve the effective lib root via the cascade: on-disk → materialized →
+	// embedded auto-materialize.  This ensures binary-only installs (no
+	// lib/agents on disk) compose agents from the embedded framework lib.
+	yakosRoot = resolveLibRoot(yakosRoot, home, os.Stderr)
 
 	cfg := internalserve.Config{
 		WorkspaceRoot:              workspaceRoot,

@@ -158,6 +158,50 @@ func materializeEmbeddedLib(destRoot, version string, force bool, w io.Writer) e
 	return nil
 }
 
+// MaterializeEmbedded materializes the embedded lib to destRoot when the
+// binary carries real framework content (HasEmbeddedLib() is true).
+//
+// It is idempotent — calling it when the version stamp already matches is a
+// no-op.  Returns true when the lib is now present (materialized now or
+// already present from a previous run), false when the binary was built
+// without the embedded lib (dev build).
+//
+// When materialization writes new files, a single-line log is written to w:
+//
+//	"materialized embedded framework lib to <destRoot>"
+//
+// No log is written when the lib was already present and up-to-date.
+//
+// This is the public companion to the internal materializeEmbeddedLib used
+// by runInstall; runtime commands (start, serve) call this to auto-resolve
+// the lib without requiring an explicit `yakos install` step.
+func MaterializeEmbedded(destRoot, version string, w io.Writer) bool {
+	if !framework.HasEmbeddedLib() {
+		return false
+	}
+	// Detect whether materialization will actually write (stamp mismatch).
+	needsWrite := true
+	stampPath := filepath.Join(destRoot, materializedStampFile)
+	if stamp, err := os.ReadFile(stampPath); err == nil { //nolint:gosec
+		v := strings.TrimSpace(version)
+		if v == "" {
+			v = "dev"
+		}
+		if strings.TrimSpace(string(stamp)) == v {
+			needsWrite = false
+		}
+	}
+	if err := materializeEmbeddedLib(destRoot, version, false, io.Discard); err != nil {
+		// Non-fatal: log the failure but don't prevent startup.
+		_, _ = fmt.Fprintf(w, "yakos: WARNING: could not materialize embedded lib to %s: %v\n", destRoot, err)
+		return false
+	}
+	if needsWrite {
+		_, _ = fmt.Fprintf(w, "materialized embedded framework lib to %s\n", destRoot)
+	}
+	return true
+}
+
 // IsMaterializedRoot returns true when root looks like a materialized
 // (not a repo clone) framework root.  The heuristic is: contains lib/ but
 // does NOT contain cli/ or .git/.
