@@ -2,41 +2,40 @@
 
 // Package serve — term_transport_unix.go
 //
-// runAttachTransport is the daemon-side binary pump for an owner-attached
-// terminal session (ADR-0008 Phase 1).
+// Two transport functions are defined here:
 //
-// # How the attach protocol works
+//  1. runPushTransport — ADR-0008 Phase 1 T2 (active P1 path).
+//     Data flows start → daemon: start sends length-prefixed 0x00/0x01 frames;
+//     daemon calls Manager.PushOutput / Manager.PushExit to fan output to
+//     browser /v1/term subscribers.  The daemon NEVER fork/execs the child
+//     process in this path.
 //
-// After yakos.term.attach is acknowledged over the NDJSON socket, the connection
-// is hijacked (via jsonrpc.HijackChanFromCtx) and handed to this function.
-// The connection then speaks a binary frame protocol instead of NDJSON:
+//  2. runAttachTransport — T1 daemon-owned PTY path (preserved for tests).
+//     Data flows daemon → client: daemon reads PTY output and sends it over the
+//     connection.  NOT used in the active P1 share-terminal flow; only invoked
+//     by the test suite.
 //
-//	Client → daemon:  0x10 <N bytes>                  — keystrokes to PTY stdin
-//	                  0x11 <2-byte cols> <2-byte rows> — resize event
-//	Daemon → client:  0x00 <raw PTY bytes>             — PTY output
-//	                  0x01 <4-byte exit code>           — session exited
+// # Wire protocol for runPushTransport (T2)
 //
-// Inbound frames are length-prefixed:
+// Both directions use the same length-prefix framing:
 //
 //	[ 2-byte big-endian total length ] [ tag byte ] [ payload ]
 //
-// Outbound frames are NOT length-prefixed (plain binary, consumed by pump_unix.go
-// which parses by tag).
+//	start → daemon:  0x00 <raw PTY bytes>       — output chunk
+//	                 0x01 <4-byte BE exit code>   — session exited (clean)
 //
-// # Security scope
+// # Security scope (unchanged from T1)
 //
-// This transport is reachable only through the daemon's Unix socket, which is
-// mode 0600 and owned by the operator's UID.  The operator's yakos-start process
-// dials this socket; the OS kernel enforces the ownership check.
+// Both transports are reachable only through the daemon's Unix socket (mode
+// 0600, owner's UID).  The OS kernel enforces the ownership check.
 //
 // The browser WebSocket path (consoleui/term_ws_handler.go) is write-isolated:
 //
-//  1. Manager.WriteInput has exactly one caller — runAttachTransport — which is
-//     reachable only via the owner-only Unix-socket attach hijack.
+//  1. The browser WS handler calls only Manager.Subscribe and Manager.Get.
+//     It discards every inbound WebSocket frame (Phase 1: output-only).
 //
-//  2. The browser WS handler calls only Manager.Subscribe and Manager.Get; it
-//     discards every inbound WebSocket frame (Phase 1: output-only).  WriteInput
-//     does not appear in any file under internal/consoleui/.
+//  2. PushOutput / PushExit are called only from runPushTransport, which is
+//     reachable only via the owner-only Unix-socket attach hijack.
 //
 // Phase 2 note: browser keystroke ingestion requires a separate security review
 // before any write path is exposed to the WS handler.
@@ -46,14 +45,14 @@ package serve
 import (
 	"encoding/binary"
 	"io"
+	"log/slog"
 	"net"
 
 	termmanager "github.com/bakw00ds/yakos/internal/terminalmanager"
 )
 
-// outEvent is the typed union carried on outCh from the subscriber callbacks.
-// Using an explicit kind field means the outbound goroutine dispatches purely
-// on ev.kind — it never inspects payload bytes to determine event type.
+// outEvent is the typed union carried on outCh from the subscriber callbacks
+// (used by runAttachTransport — the T1 daemon-owned PTY path preserved for tests).
 type outEvent struct {
 	kind     outEventKind
 	payload  []byte // for kindOutput: raw PTY bytes (no tag)
@@ -67,9 +66,78 @@ const (
 	kindExit
 )
 
-// runAttachTransport runs the bidirectional binary frame pump over conn for
-// the session identified by sessionID.  It blocks until the session exits or
-// the connection closes, then returns.  conn is closed before returning.
+// ---- runPushTransport: ADR-0008 Phase 1 T2 (active path) --------------------
+//
+// start → daemon direction: start sends length-prefixed binary frames carrying
+// PTY output (0x00) and exit notification (0x01).  The daemon fans them to
+// browser /v1/term subscribers via Manager.PushOutput and Manager.PushExit.
+//
+// Frame format (inbound from start):
+//
+//	[ 2-byte big-endian total length ] [ tag byte ] [ payload ]
+//	  0x00: raw PTY bytes (payload is the PTY output)
+//	  0x01: exit (payload is a 4-byte big-endian exit code)
+
+func runPushTransport(conn net.Conn, sessionID string, mgr *termmanager.Manager) {
+	defer func() {
+		conn.Close()
+		// If the connection dropped without a clean 0x01 close, remove the
+		// session from the manager so subscribers are not left dangling.
+		_ = mgr.CloseExternal(sessionID)
+	}()
+
+	hdr := make([]byte, 2)
+	for {
+		if _, err := io.ReadFull(conn, hdr); err != nil {
+			// Connection closed or reset — treat as unclean exit.
+			break
+		}
+		frameLen := binary.BigEndian.Uint16(hdr)
+		if frameLen == 0 {
+			continue
+		}
+		buf := make([]byte, frameLen)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			break
+		}
+		tag := buf[0]
+		payload := buf[1:]
+
+		switch tag {
+		case 0x00: // PTY output chunk
+			if len(payload) > 0 {
+				if err := mgr.PushOutput(sessionID, payload); err != nil {
+					// Session already removed (race with idle reaper or duplicate close).
+					slog.Debug("term.push: PushOutput on unknown session", "sessionId", sessionID)
+					return
+				}
+			}
+		case 0x01: // exit notification
+			code := 0
+			if len(payload) >= 4 {
+				code = int(binary.BigEndian.Uint32(payload[0:4]))
+			}
+			// PushExit removes the session from the manager after notifying subscribers.
+			_ = mgr.PushExit(sessionID, code)
+			return
+		default:
+			// Unknown tag — ignore and continue.
+			slog.Debug("term.push: unknown frame tag", "tag", tag, "sessionId", sessionID)
+		}
+	}
+}
+
+// ---- runAttachTransport: T1 daemon-owned PTY path (preserved for tests) -----
+//
+// Daemon → client direction: daemon subscribes to PTY output (from
+// Manager.CreateSession / newSession) and sends 0x00/0x01 frames to the
+// connected client.  Client can send 0x10 keystroke frames and 0x11 resize
+// frames back.
+//
+// NOT used in the active P1 share-terminal flow.  The daemon no longer spawns
+// a PTY in the share-terminal path (that is T2 / runPushTransport).  This
+// function remains callable from the test suite for regression coverage of
+// the daemon-owned session subscriber path.
 func runAttachTransport(conn net.Conn, sessionID string, mgr *termmanager.Manager) {
 	defer conn.Close()
 
