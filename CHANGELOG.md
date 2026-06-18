@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.52.0.0] — 2026-06-18
+
+### Fixed
+
+- **Web-terminal mirror now works on hardened hosts** — `yakos start
+  --share-terminal` now owns the PTY in the login shell and streams output
+  to the daemon (which relays to browser `/v1/term`). The previous T1
+  architecture required the daemon to fork/exec `claude`, which fails with
+  EPERM on hosts protected by seccomp or AppArmor. Under the new T2
+  architecture the login shell drives the PTY directly; the daemon only
+  receives the stream. ADR-0008 Phase 1 re-architected to login-shell-owned
+  PTY. See `docs/adr/ADR-0008.md`.
+- **Chat-pane owner lock** — the operator could not reliably drive their own
+  conversation across runs because the owner identity drifted. Owner is now
+  stable and server-derived (loopback: `lbop-<osuser>`; networked: cert
+  CN/username) with conservative reclaim semantics. Stale or mismatched
+  locks are reclaimed cleanly on reconnect.
+- **Chat panes now fill full window height** — `.active` flex panels now
+  carry `height: 100%` in the stylesheet, fixing the half-height rendering
+  regression introduced in v0.50.0.0.
+
+### Security
+
+- **Reserved `op-`/`lbop-` username and client-cert prefixes** — these
+  prefixes are now rejected at registration time in the userstore and at
+  mTLS cert validation, closing a legacy-token transcript-adoption authz
+  gap where a crafted username could impersonate an operator.
+- **Audit-log on conversation adoption** — legacy-token transcript adoption
+  now writes an audit-log entry so operator and security tooling can observe
+  the event.
+
+### Docs
+
+- **ADR-0008 amended** — updated to reflect the T1→T2 topology change
+  (login-shell-owned PTY, stream-only daemon relay). ADR index updated.
+
 ## [0.51.0.0] — 2026-06-18
 
 ### Fixed
