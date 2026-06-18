@@ -1087,6 +1087,72 @@ func TestCountAgents_MatchesCompose(t *testing.T) {
 	}
 }
 
+// ---- checkRuntimeAuth -------------------------------------------------------
+
+func TestCheckRuntimeAuth_Claude_APIKey(t *testing.T) {
+	env := map[string]string{"ANTHROPIC_API_KEY": "sk-ant-test-XXX", "HOME": t.TempDir()}
+	if !checkRuntimeAuth("claude", env) {
+		t.Error("checkRuntimeAuth claude = false; want true when ANTHROPIC_API_KEY is set")
+	}
+}
+
+func TestCheckRuntimeAuth_Claude_LegacyAuthJSON(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "auth.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"HOME": home}
+	if !checkRuntimeAuth("claude", env) {
+		t.Error("checkRuntimeAuth claude = false; want true when ~/.claude/auth.json exists")
+	}
+}
+
+func TestCheckRuntimeAuth_Claude_OAuthAccount_Present(t *testing.T) {
+	home := t.TempDir()
+	content := `{"oauthAccount":{"email":"user@example.com","id":"acc_123"}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"HOME": home}
+	if !checkRuntimeAuth("claude", env) {
+		t.Error("checkRuntimeAuth claude = false; want true when oauthAccount is a non-empty object")
+	}
+}
+
+func TestCheckRuntimeAuth_Claude_OAuthAccount_Null(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"oauthAccount":null}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"HOME": home}
+	if checkRuntimeAuth("claude", env) {
+		t.Error("checkRuntimeAuth claude = true; want false when oauthAccount is null")
+	}
+}
+
+func TestCheckRuntimeAuth_Claude_OAuthAccount_Absent(t *testing.T) {
+	home := t.TempDir()
+	// ~/.claude.json exists without oauthAccount (onboarding-only state).
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"onboardingComplete":true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"HOME": home}
+	if checkRuntimeAuth("claude", env) {
+		t.Error("checkRuntimeAuth claude = true; want false when oauthAccount key is absent")
+	}
+}
+
+func TestCheckRuntimeAuth_Claude_NoneConfigured(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home}
+	if checkRuntimeAuth("claude", env) {
+		t.Error("checkRuntimeAuth claude = true; want false when nothing is configured")
+	}
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 // findInPATH is a test-only helper: returns the resolved binary path and nil
