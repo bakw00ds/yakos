@@ -528,6 +528,38 @@ another machine.
 | **Kanban** | The project kanban board with the same drag-and-drop UI as `yakos kanban serve`. |
 | **Cost** | Token spending over time (same data as `yakos metrics report`). |
 | **Performance** | Dispatch latency and per-agent time-series. |
+| **Terminal** | Live read-only mirror of the native `claude` TUI (admin-only; appears only when `--share-terminal` is active). See below. |
+
+### Mirroring the native TUI to the browser (`--share-terminal`)
+
+`--share-terminal` (v0.50.0.0+) lets you drive `claude` from your
+local terminal while watching the session live in the browser's
+Terminal tab. Off by default.
+
+```sh
+# Local mirror (loopback console)
+yakos start --share-terminal
+
+# Share over the network (authenticated admins see the Terminal tab)
+yakos start --share-terminal \
+            --console-bind 0.0.0.0:7890 \
+            --console-external-host <host>:7890
+```
+
+Open the console URL, then navigate to the **Terminal** tab. The tab
+is admin-only and only appears when `--share-terminal` is active.
+Phase 1 is read-only — you type in the terminal; the browser watches.
+Bidirectional browser input is a planned Phase 2.
+
+When done, stop the daemon:
+
+```sh
+yakos serve stop
+```
+
+See [docs/unified-console.md](unified-console.md) for the security
+model (the Terminal pane can expose secrets typed at the terminal and
+runs in `bypassPermissions` mode — treat it like `--console-allow-bash`).
 
 ### Your first workflow (five minutes)
 
