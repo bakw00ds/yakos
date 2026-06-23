@@ -74,7 +74,7 @@ func TestVersionRead_RepoRoot(t *testing.T) {
 // telemetry (ideas rank 10 / Phase 1.5), metrics (Phase-1 MVP),
 // mtls (Go-native; ADR-0004 networked console client-cert management).
 func TestPortedCommandsCount(t *testing.T) {
-	const want = 42
+	const want = 43
 	if len(portedCommands) != want {
 		t.Errorf(
 			"expected %d ported command(s); got %d — "+
@@ -234,6 +234,16 @@ func TestUpdateCommandEntry(t *testing.T) {
 		}
 	}
 	t.Error("expected 'update' in portedCommands; not found")
+}
+
+// TestUpgradeCommandEntry asserts that "upgrade" is in the ported list.
+func TestUpgradeCommandEntry(t *testing.T) {
+	for _, cmd := range portedCommands {
+		if cmd.Name == "upgrade" {
+			return
+		}
+	}
+	t.Error("expected 'upgrade' in portedCommands; not found")
 }
 
 // TestQuickstartCommandEntry asserts that "quickstart" is in the ported list.

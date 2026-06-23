@@ -108,6 +108,7 @@ var portedCommands = []portedCommand{
 	{Name: "uninstall", Since: "0.48.0", Desc: "Remove yakOS symlinks and launcher", Notes: "full feature parity with cli/lib/uninstall.sh; removes YakOS-owned symlinks + launcher + pointer; --restore-settings/--root/--dry-run; partial-uninstall log+continue"},
 	{Name: "start", Since: "0.49.0", Desc: "Start a yakOS session (preflight + exec runtime)", Notes: "full feature parity with cli/lib/start.sh; preflight banner + audit-log; exec deferred to runtime CLI; --dry-run/--print-agents/--safe/--allow-root/passthrough flags supported"},
 	{Name: "update", Since: "0.50.0", Desc: "Pull latest yakOS and refresh all projects", Notes: "full feature parity with cli/lib/update.sh; git pull --ff-only + per-project refresh via refresh.CollectProjects + refresh.Run; --allow-non-ff/--all/--dry-run supported"},
+	{Name: "upgrade", Since: "0.76.1", Desc: "Download latest release and fully re-provision", Notes: "binary-install upgrade: selfupdate.Apply (GitHub release fetch + SHA-256 + atomic replace) then install.Run re-provision (re-materialize embedded lib, re-point ~/.claude symlinks, re-merge settings); --force/--dry-run/--check flags; idempotent"},
 	{Name: "quickstart", Since: "0.51.0", Desc: "One-shot install + init + start", Notes: "full feature parity with cli/lib/quickstart.sh; composes install+init+start; idempotent; --runtime/--multi-dev/--safe/--allow-root/--dry-run flags"},
 	{Name: "auth", Since: "0.52.0", Desc: "Manage runtime API credentials (keychain-backed)", Notes: "full feature parity with cli/lib/auth.sh; status/login/logout/set-default; OS keychain via go-keyring; graceful degradation on headless Linux"},
 	{Name: "memory", Since: "0.53.0", Desc: "Read/write/index the project MEMORY.md store", Notes: "full feature parity with cli/lib/memory.sh; list/read/write/delete/index-rebuild; MEMORY.md byte-identical index; schema sidecar; atomic writes"},
@@ -302,6 +303,8 @@ func main() {
 		runStart(yakosRoot, args[1:])
 	case "update":
 		runUpdate(yakosRoot, args[1:])
+	case "upgrade":
+		runUpgrade(yakosRoot, args[1:])
 	case "quickstart":
 		runQuickstart(yakosRoot, args[1:])
 	case "auth":
@@ -401,7 +404,7 @@ var helpGroups = []helpGroup{
 		Title: "Core / Project",
 		Commands: []string{
 			"--version", "--help", "go-port-status",
-			"init", "install", "uninstall", "update", "quickstart",
+			"init", "install", "uninstall", "update", "upgrade", "quickstart",
 			"start", "refresh", "doctor", "validate", "auth",
 		},
 	},
@@ -927,8 +930,11 @@ func runDoctor(yakosRoot string, args []string) {
 //	yakos refresh --dry-run              — report changes without writing
 //	yakos refresh --help                 — print help and exit 0
 //
-// YAKOS_ROOT must be set in the environment (set by the bash entry-point;
-// in tests it is injected via the env map).
+// YAKOS_ROOT is resolved via the same three-stage cascade used by start/serve:
+// on-disk YAKOS_ROOT/lib → materialized ~/.local/share/yakos/<ver>/ →
+// embedded lib auto-materialize.  On a bare binary install (no YAKOS_ROOT set,
+// no on-disk clone), the embedded lib is materialized automatically so that
+// `yakos refresh` provisions hook scripts just as `yakos start` does.
 func runRefresh(yakosRoot string, args []string) {
 	dryRun := false
 	allProjects := false
@@ -966,20 +972,27 @@ func runRefresh(yakosRoot string, args []string) {
 	if r := os.Getenv("YAKOS_ROOT"); r != "" {
 		yakosRoot = r
 	}
-	if yakosRoot == "" {
-		fmt.Fprintln(os.Stderr, "refresh: YAKOS_ROOT is not set")
-		os.Exit(1)
-	}
 
 	home := os.Getenv("HOME")
 	if home == "" {
 		home = "/tmp"
 	}
 
-	// Validate prerequisites exist.
+	// Resolve the effective lib root via the cascade: on-disk → materialized →
+	// embedded auto-materialize.  This ensures bare binary installs (no
+	// YAKOS_ROOT set, no cloned repo) can provision hook scripts just as
+	// `yakos start` and `yakos serve` do.
+	yakosRoot = resolveLibRoot(yakosRoot, home, os.Stderr)
+
+	// Validate prerequisites exist now that the root is resolved.
 	hooksRoot := filepath.Join(yakosRoot, "lib", "hooks")
 	if _, err := os.Stat(hooksRoot); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "refresh: lib/hooks not found at %s (bad YAKOS_ROOT?)\n", hooksRoot)
+		// Surface the canonical materialized path so the operator knows exactly
+		// what to set YAKOS_ROOT to (or what `yakos install` would produce).
+		canonical := install.MaterializedLibDir(home, version.Version)
+		fmt.Fprintf(os.Stderr, "refresh: lib/hooks not found at %s\n", hooksRoot)
+		fmt.Fprintf(os.Stderr, "  If YAKOS_ROOT is wrong, unset it and run `yakos refresh` again — the embedded lib\n")
+		fmt.Fprintf(os.Stderr, "  will be materialized automatically to %s\n", canonical)
 		os.Exit(1)
 	}
 	templateFile := filepath.Join(yakosRoot, "lib", "settings", "settings.template.json")
@@ -3562,6 +3575,13 @@ func runUpdateBinary(yakosRoot string, dryRun, force bool) {
 	if !res.AlreadyUpToDate {
 		fmt.Fprintf(os.Stdout, "latest version: %s\n", res.NewVersion)
 	}
+
+	// Re-provision: the new binary embeds the new lib; exec it to materialize
+	// the updated framework files and re-point ~/.claude symlinks.  Skip when
+	// already up to date (nothing changed) or in dry-run/check mode.
+	if !dryRun && !res.AlreadyUpToDate {
+		reprovisionViaSelf(res.ExePath, "update")
+	}
 }
 
 // printUpdateHelp writes the combined help text for `yakos update`.
@@ -3591,6 +3611,206 @@ Source-install options:
 
 Common options:
   --help, -h       Print this help.
+`)
+}
+
+// reprovisionViaSelf execs the binary at exePath (the freshly-placed new
+// binary) with the "install" subcommand so the new embedded lib is
+// materialized and ~/.claude symlinks are re-pointed to the new version.
+// The exec replaces the current process; on success this function never
+// returns.  On error a warning is printed and the function returns (the
+// caller can continue or exit as appropriate).
+//
+// cmdLabel is the subcommand name used in warning messages ("update" or
+// "upgrade").
+//
+// If exePath is empty (e.g. the exe resolver failed) the function falls back
+// to os.Executable so the best-available path is used.
+func reprovisionViaSelf(exePath, cmdLabel string) {
+	exe := exePath
+	if exe == "" {
+		if e, err := os.Executable(); err == nil {
+			exe = e
+		}
+	}
+	if exe == "" {
+		fmt.Fprintf(os.Stderr, "%s: warning: could not determine binary path for re-provision; run `yakos install` manually\n", cmdLabel)
+		return
+	}
+
+	fmt.Fprintf(os.Stdout, "\nRe-provisioning framework (materializing embedded lib + refreshing ~/.claude symlinks)...\n")
+	if err := execSelf(exe, []string{exe, "install", "--force"}); err != nil {
+		// execSelf only returns on non-Unix or on error.
+		fmt.Fprintf(os.Stderr, "%s: warning: re-provision exec failed: %v\n", cmdLabel, err)
+		fmt.Fprintf(os.Stderr, "  Run `yakos install --force` manually to complete the upgrade.\n")
+	}
+}
+
+// runUpgrade implements `yakos upgrade`.
+//
+// Upgrade is the operator-facing command to go from an older installed version
+// to the latest, fully provisioned.  It:
+//
+//  1. Calls selfupdate.Apply to download the latest release from GitHub,
+//     verify the SHA-256 checksum, and atomically replace the running binary.
+//  2. Execs the new binary with `yakos install --force` to re-materialize the
+//     embedded lib and re-point ~/.claude symlinks to the new version.
+//
+// If already on the latest version, step 1 reports "already up to date" and
+// step 2 is still run idempotently (re-provision is a no-op when the lib is
+// already current).
+//
+// Flags: --force (reinstall even if up to date), --dry-run / --check (report
+// only; write nothing), --help.
+//
+// Note on source installs: upgrade is designed for binary-only installs.  On
+// a source install (bash tree present), it prints a warning and suggests
+// `yakos update` instead.
+func runUpgrade(yakosRoot string, args []string) {
+	force := false
+	dryRun := false
+	checkOnly := false
+
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help":
+			printUpgradeHelp(os.Stdout)
+			os.Exit(0)
+		case "--force":
+			force = true
+		case "--dry-run":
+			dryRun = true
+		case "--check":
+			checkOnly = true
+		default:
+			fmt.Fprintf(os.Stderr, "upgrade: unknown argument %q (try --help)\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	// Resolve YAKOS_ROOT from env.
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+
+	// Warn on source installs: upgrade targets binary-only installs.
+	if passthrough.BashYakosExists(yakosRoot) {
+		fmt.Fprintln(os.Stderr, "upgrade: this appears to be a source install (bash tree detected).")
+		fmt.Fprintln(os.Stderr, "  Use `yakos update` to pull the latest from git and refresh.")
+		fmt.Fprintln(os.Stderr, "  Use `yakos upgrade --force` to force a binary upgrade anyway.")
+		if !force {
+			os.Exit(1)
+		}
+	}
+
+	// --check: just report current vs. latest; apply nothing.
+	if checkOnly {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		latest, err := selfupdate.LatestRelease(ctx, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "upgrade: %v\n", err)
+			os.Exit(1)
+		}
+		currentVersion := strings.TrimSpace(version.Version)
+		if currentVersion == "" {
+			if v, err := version.Read(yakosRoot); err == nil {
+				currentVersion = strings.TrimSuffix(strings.TrimSpace(v), " (go)")
+				currentVersion = strings.TrimSpace(currentVersion)
+			}
+		}
+		fmt.Fprintf(os.Stdout, "current: %s\nlatest:  %s\n", currentVersion, latest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	// Determine the running version.
+	currentVersion := strings.TrimSpace(version.Version)
+	if currentVersion == "" {
+		if v, err := version.Read(yakosRoot); err == nil {
+			currentVersion = strings.TrimSuffix(strings.TrimSpace(v), " (go)")
+			currentVersion = strings.TrimSpace(currentVersion)
+		}
+	}
+
+	// Resolve the executable path so the operator can see what will be replaced.
+	exePath, exeErr := os.Executable()
+	if exeErr == nil {
+		exePath, exeErr = filepath.EvalSymlinks(exePath)
+	}
+	fmt.Fprintf(os.Stdout, "yakos upgrade\n\n")
+	if exeErr == nil {
+		fmt.Fprintf(os.Stdout, "  Binary:          %s\n", exePath)
+	}
+	if currentVersion != "" {
+		fmt.Fprintf(os.Stdout, "  Current version: %s\n", currentVersion)
+	}
+	fmt.Fprintf(os.Stdout, "\nStep 1: downloading latest release...\n")
+
+	res, err := selfupdate.Apply(ctx, selfupdate.Opts{
+		CurrentVersion: currentVersion,
+		Force:          force,
+		DryRun:         dryRun,
+		Writer:         os.Stdout,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "upgrade: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !res.AlreadyUpToDate && !dryRun {
+		fmt.Fprintf(os.Stdout, "  Updated:         %s → %s\n", res.OldVersion, res.NewVersion)
+	}
+
+	// Step 2: re-provision via the new binary (exec replaces this process).
+	// Even when already up to date we still re-provision so the command is
+	// idempotent and safe to re-run after any failed previous upgrade.
+	if dryRun {
+		fmt.Fprintf(os.Stdout, "\n[dry-run] Step 2: would exec new binary with `yakos install --force` to re-provision\n")
+		return
+	}
+
+	fmt.Fprintf(os.Stdout, "\nStep 2: re-provisioning framework...\n")
+	newExe := res.ExePath
+	if newExe == "" {
+		if e, exeErr2 := os.Executable(); exeErr2 == nil {
+			newExe = e
+		}
+	}
+	reprovisionViaSelf(newExe, "upgrade")
+
+	// reprovisionViaSelf only returns on error (exec failed).  Print a fallback
+	// hint so the operator knows what to run manually.
+	fmt.Fprintf(os.Stdout, "\nBinary updated. Run `yakos install --force` to complete re-provisioning.\n")
+}
+
+// printUpgradeHelp writes the help text for `yakos upgrade`.
+func printUpgradeHelp(w io.Writer) {
+	_, _ = fmt.Fprint(w, `yakos upgrade — download the latest release and fully re-provision
+
+Downloads the latest yakOS release from GitHub, verifies the SHA-256
+checksum, atomically replaces the running binary, then execs the new
+binary with `+"`yakos install --force`"+` to materialize the updated embedded
+framework lib and refresh ~/.claude/{agents,skills,rules,playbooks}
+symlinks to the new version.
+
+This is the recommended command for in-place upgrades of binary-only
+(curl|sh) installs.  It is equivalent to re-running the curl installer
+but without requiring curl — all network I/O is native Go.
+
+For source/dev installs (git clone), use `+"`yakos update`"+` instead.
+
+Options:
+  --force          Reinstall latest even when already on the current version.
+                   Also suppresses the source-install warning.
+  --check          Report current vs. latest versions; apply nothing.
+  --dry-run        Print what would happen; write nothing.
+  --help, -h       Print this help.
+
+Curl one-liner (equivalent):
+  curl -fsSL https://raw.githubusercontent.com/bakw00ds/yakos/main/scripts/install.sh | sh
 `)
 }
 
