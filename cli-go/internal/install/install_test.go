@@ -878,6 +878,129 @@ func TestInstall_CreatedSettingsIsValidJSON(t *testing.T) {
 	}
 }
 
+// ---- (x) stale materialized-version symlink is re-pointed -------------------
+
+// TestInstall_StaleVersionSymlinkRepointed verifies that a symlink pointing into
+// a DIFFERENT yakos materialized version (the old-version case: agent was linked
+// to 0.39.0.0 but current install is 0.55.0.0) is treated as yakos-owned and
+// re-pointed to the current version, rather than left as "foreign".
+func TestInstall_StaleVersionSymlinkRepointed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test not supported on Windows without Developer Mode")
+	}
+
+	root := newFakeYakosRoot(t)
+	cfg := baseConfig(t, root)
+	home := cfg.HomeDir
+
+	agentsDir := filepath.Join(home, ".claude", "agents")
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Simulate a stale materialized install: create a fake old-version materialized
+	// dir under ~/.local/share/yakos/0.39.0.0/ and put a file there.
+	oldMatDir := filepath.Join(home, ".local", "share", "yakos", "0.39.0.0", "lib", "agents")
+	if err := os.MkdirAll(oldMatDir, 0755); err != nil {
+		t.Fatalf("mkdir old mat dir: %v", err)
+	}
+	oldTarget := filepath.Join(oldMatDir, "example.md")
+	if err := os.WriteFile(oldTarget, []byte("# old version\n"), 0644); err != nil {
+		t.Fatalf("write old target: %v", err)
+	}
+
+	// Place a symlink in ~/.claude/agents/ pointing to the OLD materialized root.
+	staleSymlink := filepath.Join(agentsDir, "example.md")
+	symlinkOrSkip(t, oldTarget, staleSymlink)
+
+	// Run install with the CURRENT root (t.TempDir()-based, not the old mat dir).
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// The stale symlink must have been REFRESHED (not skipped as foreign).
+	if res.Symlinks.Refreshed == 0 {
+		t.Errorf("expected stale materialized-version symlink to be refreshed; got refreshed=%d skipped=%d",
+			res.Symlinks.Refreshed, res.Symlinks.Skipped)
+	}
+
+	// Verify the symlink now points to the CURRENT root, not the old one.
+	newTarget, err := os.Readlink(staleSymlink)
+	if err != nil {
+		t.Fatalf("Readlink: %v", err)
+	}
+	expectedTarget := filepath.Join(root, "lib", "agents", "example.md")
+	// Resolve both to handle any macOS /private/var symlinks.
+	newResolved, _ := filepath.EvalSymlinks(newTarget)
+	expectedResolved, _ := filepath.EvalSymlinks(expectedTarget)
+	if newResolved != "" && expectedResolved != "" && newResolved != expectedResolved {
+		t.Errorf("symlink was not re-pointed to current root\n  got:  %s\n  want: %s", newTarget, expectedTarget)
+	} else if newTarget != expectedTarget && newResolved != expectedResolved {
+		t.Errorf("symlink was not re-pointed to current root\n  got:  %s\n  want: %s", newTarget, expectedTarget)
+	}
+}
+
+// ---- isBinaryInstallLauncher ---------------------------------------------------
+
+// TestIsBinaryInstallLauncher_ForeignFile verifies that a path whose file is
+// NOT the running binary returns false (so the install continues to treat it
+// as a foreign real file and prints a warning).
+func TestIsBinaryInstallLauncher_ForeignFile(t *testing.T) {
+	// Write a real file that is definitely not the running test binary.
+	dir := t.TempDir()
+	foreign := filepath.Join(dir, "yakos-foreign")
+	if err := os.WriteFile(foreign, []byte("#!/bin/sh\necho hi\n"), 0755); err != nil {
+		t.Fatalf("write foreign: %v", err)
+	}
+	if isBinaryInstallLauncher(foreign) {
+		t.Error("isBinaryInstallLauncher should return false for a foreign file")
+	}
+}
+
+// TestIsBinaryInstallLauncher_SameInode verifies that when a path points to the
+// same inode as the running executable, isBinaryInstallLauncher returns true.
+// This simulates the binary-install case where install.sh places the binary at
+// ~/.local/bin/yakos via `mv`.
+func TestIsBinaryInstallLauncher_SameInode(t *testing.T) {
+	// Resolve the running test binary.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skip("cannot determine running executable; skipping")
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		resolved = exe
+	}
+
+	// Create a hardlink in a temp dir that points to the same inode.
+	dir := t.TempDir()
+	hardlink := filepath.Join(dir, "yakos-hardlink")
+	if err := os.Link(resolved, hardlink); err != nil {
+		// Hardlinks across filesystems are not always supported; skip gracefully.
+		t.Skipf("os.Link not supported here (%v); skipping same-inode test", err)
+	}
+	if !isBinaryInstallLauncher(hardlink) {
+		t.Error("isBinaryInstallLauncher should return true for a hardlink to the running binary")
+	}
+}
+
+// TestIsBinaryInstallLauncher_RunningExe verifies that the running executable
+// itself is recognised as the binary-install launcher.
+func TestIsBinaryInstallLauncher_RunningExe(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skip("cannot determine running executable")
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		resolved = exe
+	}
+	if !isBinaryInstallLauncher(resolved) {
+		t.Error("isBinaryInstallLauncher should return true for the running binary itself")
+	}
+}
+
 // ---- (w) empty lib subdir is a no-op ----------------------------------------
 
 // TestInstall_EmptyLibSubdir verifies that install succeeds even when some lib/

@@ -229,6 +229,22 @@ func mergeSettingsForProject(templateFile, deployedFile string, dryRun bool, w i
 //   - Skipping .gitkeep, README.md, and git/ subdirectory entries.
 //   - Writing / updating a .framework-hash sidecar beside each deployed file.
 //   - Dry-run: reports counts without writing.
+//
+// Symlink / materialized-install handling: on a dev-repo install, top-level
+// lib/hooks/<name>.sh entries are symlinks to legacy/<name>.sh; filepath.Walk
+// follows them so they are processed correctly.  On a bare binary install
+// (materialized embedded lib), go:embed does not follow symlinks, so only
+// lib/hooks/legacy/<name>.sh exists — the top-level <name>.sh symlinks are
+// absent.  To cover both cases this function runs two passes:
+//
+//  1. Walk srcRoot, skipping git/ and legacy/ as before.  Track the base
+//     names of all .sh files processed so the second pass can deduplicate.
+//  2. Walk srcRoot/legacy/, copy each <name>.sh to dstRoot/<name>.sh (flat,
+//     no legacy/ prefix) only when it was NOT already covered in pass 1.
+//
+// This ensures that on a bare install the legacy/ real files are copied to
+// the project as flat <name>.sh hooks, matching what the symlinks would have
+// produced on a full repo install.
 func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseReport, error) {
 	var rpt HookPhaseReport
 
@@ -236,6 +252,67 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 		return rpt, nil
 	}
 
+	// processedNames tracks flat hook basenames that pass-1 already handled,
+	// so pass-2 (legacy/) can skip duplicates.
+	processedNames := make(map[string]bool)
+
+	// syncOne performs the copy-or-update logic for a single (src, dst, rel) triple.
+	syncOne := func(srcPath, dstPath, rel string) {
+		hashFile := dstPath + ".framework-hash"
+
+		srcHash, err := deploydrift.SHA256File(srcPath)
+		if err != nil {
+			return // skip unhashable files
+		}
+
+		if _, err := os.Stat(dstPath); os.IsNotExist(err) {
+			// NEW — file not deployed yet
+			if dryRun {
+				_, _ = fmt.Fprintf(w, "    [dry-run] hooks: would copy NEW  %s\n", rel)
+			} else {
+				if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil { //nolint:gosec
+					return
+				}
+				if err := copyFile(srcPath, dstPath); err != nil {
+					return
+				}
+				if err := os.WriteFile(hashFile, []byte(srcHash), 0644); err != nil { //nolint:gosec
+					return
+				}
+			}
+			rpt.New++
+			return
+		}
+
+		// File exists — compare by content hash
+		dstHash, err := deploydrift.SHA256File(dstPath)
+		if err != nil {
+			return
+		}
+
+		if srcHash != dstHash {
+			// SYNC — deployed is stale
+			if dryRun {
+				_, _ = fmt.Fprintf(w, "    [dry-run] hooks: would sync STALE %s\n", rel)
+			} else {
+				if err := copyFile(srcPath, dstPath); err != nil {
+					return
+				}
+				if err := os.WriteFile(hashFile, []byte(srcHash), 0644); err != nil { //nolint:gosec
+					return
+				}
+			}
+			rpt.Synced++
+		} else {
+			// OK — ensure sidecar is up to date even if content matches
+			if !dryRun {
+				_ = os.WriteFile(hashFile, []byte(srcHash), 0644) //nolint:gosec
+			}
+			rpt.OK++
+		}
+	}
+
+	// Pass 1: walk the top-level srcRoot, skip git/ and legacy/.
 	err := filepath.Walk(srcRoot, func(srcPath string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // skip inaccessible entries
@@ -255,70 +332,51 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 			return nil
 		}
 		// Skip files under git/ (admin-only, not deployed).
-		// Skip files under legacy/ (post-F6 holding area; canonical entries are
-		// the symlinks at lib/hooks/<name>.sh that refresh already visits).
+		// Skip files under legacy/ — handled by pass 2 when not covered here.
 		parts := strings.SplitN(rel, string(filepath.Separator), 2)
 		if len(parts) > 0 && (parts[0] == "git" || parts[0] == "legacy") {
 			return nil
 		}
 
 		dstPath := filepath.Join(dstRoot, rel)
-		hashFile := dstPath + ".framework-hash"
-
-		srcHash, err := deploydrift.SHA256File(srcPath)
-		if err != nil {
-			return nil // skip unhashable files
-		}
-
-		if _, err := os.Stat(dstPath); os.IsNotExist(err) {
-			// NEW — file not deployed yet
-			if dryRun {
-				_, _ = fmt.Fprintf(w, "    [dry-run] hooks: would copy NEW  %s\n", rel)
-			} else {
-				if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil { //nolint:gosec
-					return nil
-				}
-				if err := copyFile(srcPath, dstPath); err != nil {
-					return nil
-				}
-				if err := os.WriteFile(hashFile, []byte(srcHash), 0644); err != nil { //nolint:gosec
-					return nil
-				}
-			}
-			rpt.New++
-			return nil
-		}
-
-		// File exists — compare by content hash
-		dstHash, err := deploydrift.SHA256File(dstPath)
-		if err != nil {
-			return nil
-		}
-
-		if srcHash != dstHash {
-			// SYNC — deployed is stale
-			if dryRun {
-				_, _ = fmt.Fprintf(w, "    [dry-run] hooks: would sync STALE %s\n", rel)
-			} else {
-				if err := copyFile(srcPath, dstPath); err != nil {
-					return nil
-				}
-				if err := os.WriteFile(hashFile, []byte(srcHash), 0644); err != nil { //nolint:gosec
-					return nil
-				}
-			}
-			rpt.Synced++
-		} else {
-			// OK — ensure sidecar is up to date even if content matches
-			if !dryRun {
-				_ = os.WriteFile(hashFile, []byte(srcHash), 0644) //nolint:gosec
-			}
-			rpt.OK++
-		}
+		syncOne(srcPath, dstPath, rel)
+		// Track the flat basename so pass-2 can skip it.
+		processedNames[base] = true
 		return nil
 	})
+	if err != nil {
+		return rpt, err
+	}
 
-	return rpt, err
+	// Pass 2: walk srcRoot/legacy/ and copy <name>.sh to dstRoot/<name>.sh for
+	// any file not already covered by pass 1.  This handles materialized installs
+	// where go:embed did not include the top-level symlinks.
+	legacyRoot := filepath.Join(srcRoot, "legacy")
+	if fi, statErr := os.Stat(legacyRoot); statErr == nil && fi.IsDir() {
+		_ = filepath.Walk(legacyRoot, func(srcPath string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return nil
+			}
+			base := filepath.Base(srcPath)
+			if base == ".gitkeep" || base == "README.md" {
+				return nil
+			}
+			// Only .sh files need to be promoted to the flat dst.
+			if !strings.HasSuffix(base, ".sh") {
+				return nil
+			}
+			// Skip if pass-1 already handled a file with this name.
+			if processedNames[base] {
+				return nil
+			}
+			// Copy legacy/<name>.sh → dstRoot/<name>.sh (flat, no subdir).
+			dstPath := filepath.Join(dstRoot, base)
+			syncOne(srcPath, dstPath, base)
+			return nil
+		})
+	}
+
+	return rpt, nil
 }
 
 // copyFile copies the file at src to dst, preserving execute permission.

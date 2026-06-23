@@ -28,18 +28,24 @@ all: build
 
 ## embed-lib: copy lib/ from repo root into cli-go/internal/framework/embedded/
 ##            (gitignored; run before build to produce a self-contained binary)
+##
+## The hooks/ subdirectory uses top-level *.sh symlinks that point into
+## hooks/legacy/.  go:embed does not follow symlinks, so we must dereference
+## them at staging time.  cp -RL follows symlinks on macOS/BSD; the
+## destination is cleaned first so stale symlinks don't interfere.
 embed-lib:
 	@echo "Staging lib/ into $(EMBEDDED_DIR)/"
-	@for sub in agents skills rules hooks playbooks; do \
+	@for src in lib/*/; do \
+		sub=$$(basename "$$src"); \
 		dest="$(EMBEDDED_DIR)/$$sub"; \
-		src="lib/$$sub"; \
 		if [ ! -d "$$src" ]; then \
 			echo "  skip: $$src not found"; \
 			continue; \
 		fi; \
 		mkdir -p "$$dest"; \
-		cp -R "$$src/." "$$dest/"; \
-		echo "  copied $$src → $$dest"; \
+		find "$$dest" -mindepth 1 -name '.keep' -prune -o -print | xargs rm -rf 2>/dev/null || true; \
+		cp -RL "$$src/." "$$dest/"; \
+		echo "  copied $$src → $$dest (symlinks resolved)"; \
 	done
 	@echo "embed-lib: done ($(EMBEDDED_DIR) populated)"
 
@@ -96,7 +102,8 @@ clean:
 	rm -rf $(BIN_DIR)
 	@# Remove all staged lib content (files and nested dirs) but keep the
 	@# top-level subdir and its .keep placeholder.
-	@for sub in agents skills rules hooks playbooks; do \
+	@for src in lib/*/; do \
+		sub=$$(basename "$$src"); \
 		dir="$(EMBEDDED_DIR)/$$sub"; \
 		if [ -d "$$dir" ]; then \
 			find "$$dir" -mindepth 1 -name '.keep' -prune -o -print | xargs rm -rf 2>/dev/null || true; \

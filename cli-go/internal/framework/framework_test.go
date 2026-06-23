@@ -86,6 +86,27 @@ func TestDriftGuard(t *testing.T) {
 	}
 }
 
+// TestDriftGuard_SettingsPresent asserts that the embedded FS includes the
+// settings subdirectory and its two required template files.  This test will
+// FAIL (not skip) if settings is ever accidentally dropped from embed-lib.
+func TestDriftGuard_SettingsPresent(t *testing.T) {
+	if !framework.HasEmbeddedLib() {
+		t.Skip("embedded lib not present (run `make embed-lib` first); skipping settings drift guard")
+	}
+
+	libFS := framework.LibFS()
+
+	required := []string{
+		"embedded/settings/settings.template.json",
+		"embedded/settings/soul.template.md",
+	}
+	for _, path := range required {
+		if _, err := libFS.Open(path); err != nil {
+			t.Errorf("drift guard: required settings file missing: %s", path)
+		}
+	}
+}
+
 // TestMaterializeLib_NoOp verifies that MaterializeLib is a no-op when the
 // embedded lib is absent (bare checkout).
 func TestMaterializeLib_NoOp(t *testing.T) {
