@@ -81,7 +81,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
     steps:
       - name: Checkout caller's project
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install yakOS
         run: |
