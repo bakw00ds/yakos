@@ -711,6 +711,112 @@ func TestSyncAgents_DryRunNoSymlink(t *testing.T) {
 	}
 }
 
+// TestSyncHooks_LegacyFallback verifies that when the srcRoot has no top-level
+// *.sh files but legacy/<name>.sh real files exist (the materialized-embed
+// case), syncHooks copies them flat to dstRoot/<name>.sh.
+func TestSyncHooks_LegacyFallback(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	// Simulate a materialized install: only legacy/ has real files; no
+	// top-level symlinks exist (go:embed does not follow them).
+	legacyDir := filepath.Join(src, "legacy")
+	if err := os.MkdirAll(legacyDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cycleContent := []byte("#!/usr/bin/env bash\n# cycle-counter\necho hi\n")
+	budgetContent := []byte("#!/usr/bin/env bash\n# budget-guard\necho budget\n")
+	if err := os.WriteFile(filepath.Join(legacyDir, "cycle-counter.sh"), cycleContent, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "budget-guard.sh"), budgetContent, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	rpt, err := syncHooks(src, dst, false, os.Stdout)
+	if err != nil {
+		t.Fatalf("syncHooks error: %v", err)
+	}
+	if rpt.New != 2 {
+		t.Errorf("expected new=2 from legacy fallback; got %+v", rpt)
+	}
+
+	// Verify files land at the flat dst path (not dst/legacy/).
+	for name, want := range map[string][]byte{
+		"cycle-counter.sh": cycleContent,
+		"budget-guard.sh":  budgetContent,
+	} {
+		dstPath := filepath.Join(dst, name)
+		data, err := os.ReadFile(dstPath) //nolint:gosec
+		if err != nil {
+			t.Errorf("%s: not found in dst: %v", name, err)
+			continue
+		}
+		if string(data) != string(want) {
+			t.Errorf("%s: content mismatch", name)
+		}
+		// Must be executable.
+		info, _ := os.Stat(dstPath)
+		if info.Mode()&0111 == 0 {
+			t.Errorf("%s: not executable (mode %v)", name, info.Mode())
+		}
+		// legacy/ subdir must NOT have been created in dst.
+		if _, err := os.Stat(filepath.Join(dst, "legacy")); !os.IsNotExist(err) {
+			t.Errorf("legacy/ subdir was created in dst (should not exist)")
+		}
+	}
+}
+
+// TestSyncHooks_LegacyDeduplicatesTopLevel verifies that when the srcRoot has
+// BOTH a top-level a.sh AND legacy/a.sh (as on a real repo install with
+// symlinks resolved), only one copy is made (no double-counting).
+func TestSyncHooks_LegacyDeduplicatesTopLevel(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	content := []byte("#!/usr/bin/env bash\necho hook\n")
+
+	// Top-level real file (simulates resolved symlink on disk).
+	if err := os.WriteFile(filepath.Join(src, "a.sh"), content, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// legacy/a.sh exists too (same content — would produce ok if counted, not new).
+	legacyDir := filepath.Join(src, "legacy")
+	if err := os.MkdirAll(legacyDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "a.sh"), content, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// legacy/b.sh exists with no top-level counterpart.
+	bContent := []byte("#!/usr/bin/env bash\necho b\n")
+	if err := os.WriteFile(filepath.Join(legacyDir, "b.sh"), bContent, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	rpt, err := syncHooks(src, dst, false, os.Stdout)
+	if err != nil {
+		t.Fatalf("syncHooks error: %v", err)
+	}
+	// a.sh from top level → new=1; b.sh from legacy (no top-level) → new=1; total new=2.
+	totalNew := rpt.New + rpt.Synced + rpt.OK
+	if totalNew != 2 {
+		t.Errorf("expected 2 total operations (a.sh + b.sh); got new=%d synced=%d ok=%d",
+			rpt.New, rpt.Synced, rpt.OK)
+	}
+	// Specifically: a.sh must appear exactly once.
+	if _, err := os.Stat(filepath.Join(dst, "a.sh")); err != nil {
+		t.Errorf("a.sh not found in dst: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "b.sh")); err != nil {
+		t.Errorf("b.sh (from legacy fallback) not found in dst: %v", err)
+	}
+	// legacy/ subdir must NOT exist in dst.
+	if _, err := os.Stat(filepath.Join(dst, "legacy")); !os.IsNotExist(err) {
+		t.Errorf("legacy/ subdir was created in dst (should not exist)")
+	}
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 func fileMtime(t *testing.T, path string) int64 {

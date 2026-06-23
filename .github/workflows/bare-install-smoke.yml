@@ -1,0 +1,66 @@
+name: Bare-install smoke
+
+# Guard against incomplete release-binary provisioning.
+#
+# The class of bugs this catches:
+#   - lib/settings/ (or any other lib/ subdir) omitted from the embed,
+#     causing 'settings template not found' on a bare install.
+#   - Hook scripts not provisioned because syncHooks missed the materialized
+#     embedded tree (symlinks in lib/hooks/ not followed by go:embed).
+#   - Any path where resolveLibRoot fell back to a repo-adjacent lib/ that
+#     happens to be present on the test machine, masking embed gaps.
+#
+# Trigger paths mirror go-ci.yml so that any change to embedded content,
+# the refresh pipeline, or install logic re-runs this job.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cli-go/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+      - 'lib/**'
+      - 'scripts/smoke-bare-install.sh'
+      - '.github/workflows/bare-install-smoke.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'cli-go/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+      - 'lib/**'
+      - 'scripts/smoke-bare-install.sh'
+      - '.github/workflows/bare-install-smoke.yml'
+  workflow_dispatch:
+
+jobs:
+  bare-install-smoke:
+    name: bare-install smoke (linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4511f1884172cec0e10  # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6
+        with:
+          go-version: '1.25'
+          cache-dependency-path: cli-go/go.sum
+
+      - name: Download modules
+        working-directory: cli-go
+        run: go mod download
+
+      - name: Build binary with embedded lib
+        # make build runs embed-lib first (see Makefile), so the resulting
+        # binary carries the full lib/ tree. The smoke script copies the
+        # binary outside the repo tree before invoking it so that
+        # resolveLibRoot cannot fall back to the adjacent repo lib/.
+        run: make build
+
+      - name: Run bare-install smoke
+        run: bash scripts/smoke-bare-install.sh

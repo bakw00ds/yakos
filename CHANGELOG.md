@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.56.0.0] — 2026-06-23
+
+### Added
+
+- **`yakos upgrade`** — in-place upgrade command: downloads the latest
+  GitHub release, verifies SHA-256, atomically replaces the binary, then
+  execs the new binary to fully re-provision (re-materialize embedded lib,
+  re-point symlinks, re-merge settings). Native Go; equivalent to
+  re-running the curl installer. `yakos update` now also re-provisions
+  after self-update. Launcher binary-case warning fixed (binary install
+  recorded as managed launcher).
+- **CI bare-install smoke test** (`.github/workflows/bare-install-smoke.yml`
+  + `scripts/smoke-bare-install.sh`) — 68 assertions simulating a true bare
+  install (binary outside repo, isolated HOME, no YAKOS_ROOT). Guards the
+  complete bare-install provisioning path against regression.
+
+### Fixed
+
+- **Bare release-binary installs now provision the COMPLETE framework** —
+  `make embed-lib` was using a hardcoded subdir list that omitted
+  `lib/settings/`, causing "settings template not found" errors on every
+  bare install. The embed step now discovers all `lib/` subdirs dynamically.
+- **`yakos refresh` self-resolves without YAKOS_ROOT** — `refresh` now
+  locates the embedded lib directly from the binary (no `YAKOS_ROOT`
+  required) and lays down real executable hook scripts; error messages now
+  identify the missing file by path for faster diagnosis.
+- **Stale old-version `~/.claude` symlinks re-pointed** — `yakos refresh`
+  previously skipped symlinks that already pointed to a yakos-owned path
+  (e.g. an older version's lib). They are now re-pointed to the current
+  version's embedded lib so upgrades take full effect.
+
 ## [0.55.0.0] — 2026-06-18
 
 ### Added

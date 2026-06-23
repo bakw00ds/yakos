@@ -247,7 +247,7 @@ func Run(cfg Config) (*Result, error) {
 
 	// ---- 2. per-file symlinks ---------------------------------------------------
 
-	srpt, err := linkSubdirs(yakosRootAbs, claudeDir, cfg.Force, cfg.DryRun, cfg.JunctionFn, cfg.Writer, cfg.ErrWriter)
+	srpt, err := linkSubdirs(yakosRootAbs, claudeDir, home, cfg.Force, cfg.DryRun, cfg.JunctionFn, cfg.Writer, cfg.ErrWriter)
 	if err != nil {
 		return nil, fmt.Errorf("install: per-file symlinks: %w", err)
 	}
@@ -349,19 +349,29 @@ func manageLauncher(launcherDir, launcherPath, launcherTarget, yakosRootAbs stri
 		return LauncherReport{Outcome: LauncherSkipped, Path: launcherPath, Warning: msg}
 	}
 
-	// Real file — never touch it.
+	// Real file — check whether it is the running binary (binary-install case).
+	// When install.sh places the downloaded binary at ~/.local/bin/yakos, the
+	// file is a real file (not a symlink).  In that case the launcher IS the
+	// managed binary: record it in the manifest and skip the misleading
+	// "add <root>/cli to your PATH" warning, which does not apply when there
+	// is no bash cli/ tree under root (binary-only installs).
+	if isBinaryInstallLauncher(launcherPath) {
+		_, _ = fmt.Fprintf(w, "  Launcher: %s (binary install; recorded as managed)\n", launcherPath)
+		return LauncherReport{Outcome: LauncherCreated, Path: launcherPath, Target: launcherPath}
+	}
+
 	msg := fmt.Sprintf("WARNING: %s exists and is not a symlink (real file). Leaving it alone. "+
-		"To use this yakOS install, add %s/cli to your PATH or remove/rename the existing binary.",
-		launcherPath, yakosRootAbs)
+		"To use this yakOS install, remove or rename the existing binary at that path.",
+		launcherPath)
 	_, _ = fmt.Fprintf(ew, "install: %s\n", msg)
 	return LauncherReport{Outcome: LauncherSkipped, Path: launcherPath, Warning: msg}
 }
 
 // linkSubdirs creates per-file symlinks for all four subdirs.
-func linkSubdirs(yakosRootAbs, claudeDir string, force, dryRun bool, junctionFn func(string, string) error, w, ew io.Writer) (SymlinkReport, error) {
+func linkSubdirs(yakosRootAbs, claudeDir, home string, force, dryRun bool, junctionFn func(string, string) error, w, ew io.Writer) (SymlinkReport, error) {
 	var total SymlinkReport
 	for _, sub := range subdirs {
-		rpt, err := linkFilesIn(sub, yakosRootAbs, claudeDir, force, dryRun, junctionFn, w, ew)
+		rpt, err := linkFilesIn(sub, yakosRootAbs, claudeDir, home, force, dryRun, junctionFn, w, ew)
 		if err != nil {
 			return total, err
 		}
@@ -375,7 +385,17 @@ func linkSubdirs(yakosRootAbs, claudeDir string, force, dryRun bool, junctionFn 
 // linkFilesIn handles one subdir (e.g. "agents").
 // It mirrors the bash link_files_in() logic: per-file recursive symlinks from
 // yakosRootAbs/lib/<sub>/ into claudeDir/<sub>/.
-func linkFilesIn(sub, yakosRootAbs, claudeDir string, force, dryRun bool, junctionFn func(string, string) error, w, ew io.Writer) (SymlinkReport, error) {
+//
+// Ownership: a symlink is treated as yakos-owned when its resolved target is:
+//   - empty (dangling — we wrote it, re-point it), OR
+//   - under yakosRootAbs (the current install root), OR
+//   - under the yakos materialized-lib base dir (~/.local/share/yakos/).
+//
+// The third case handles stale symlinks from a previous version's materialized
+// root (e.g. 0.39.0.0) that were left behind when upgrading to a newer version
+// (0.55.0.0).  Without it, install skips every agent symlink as "foreign" and
+// the agent roster is never updated after an upgrade.
+func linkFilesIn(sub, yakosRootAbs, claudeDir, home string, force, dryRun bool, junctionFn func(string, string) error, w, ew io.Writer) (SymlinkReport, error) {
 	var rpt SymlinkReport
 	srcRoot := filepath.Join(yakosRootAbs, "lib", sub)
 	dstRoot := filepath.Join(claudeDir, sub)
@@ -438,7 +458,25 @@ func linkFilesIn(sub, yakosRootAbs, claudeDir string, force, dryRun bool, juncti
 				existing = ""
 			}
 
-			yakosOwned := existing == "" || strings.HasPrefix(existing, yakosRootAbs+string(filepath.Separator))
+			// A symlink is yakos-owned when its target is:
+			//   - empty (dangling — we wrote it, so re-point),
+			//   - under the current yakosRootAbs, OR
+			//   - under ~/.local/share/yakos/ (any version — stale materialized root).
+			//     This covers agents linked to a previous version (e.g. 0.39.0.0)
+			//     that need re-pointing to the current one (e.g. 0.55.0.0).
+			// Resolve matBase through EvalSymlinks so the prefix comparison works on
+			// macOS where /var/folders/... resolves to /private/var/folders/... and
+			// a bare path/EvalSymlinks mismatch would otherwise falsely classify the
+			// stale symlink as foreign.
+			matBaseRaw := filepath.Join(home, ".local", "share", "yakos") + string(filepath.Separator)
+			matBase := matBaseRaw
+			if resolved, err := filepath.EvalSymlinks(filepath.Join(home, ".local", "share", "yakos")); err == nil {
+				matBase = resolved + string(filepath.Separator)
+			}
+			yakosOwned := existing == "" ||
+				strings.HasPrefix(existing, yakosRootAbs+string(filepath.Separator)) ||
+				strings.HasPrefix(existing, matBase) ||
+				strings.HasPrefix(existing, matBaseRaw)
 
 			if yakosOwned {
 				if force || existing != srcPath {
@@ -601,6 +639,44 @@ Never touches:
 }
 
 // ---- helpers ----------------------------------------------------------------
+
+// isBinaryInstallLauncher returns true when path is a real file AND it
+// is the same inode as the running executable.  This covers the binary-install
+// case where install.sh places the downloaded binary at ~/.local/bin/yakos via
+// `mv` (not a symlink), making it the launcher itself rather than a foreign
+// file.  We treat it as managed so install does not emit the misleading
+// "add <root>/cli to your PATH" warning (there is no cli/ tree in a binary
+// install).
+func isBinaryInstallLauncher(path string) bool {
+	// Resolve the running executable to its real path.
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	resolvedExe, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		resolvedExe = exe
+	}
+
+	// Resolve path too (should already be a real file, but be consistent).
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		resolvedPath = path
+	}
+
+	// Same absolute path → same binary.
+	if resolvedPath == resolvedExe {
+		return true
+	}
+
+	// Fallback: compare inodes via os.SameFile so hardlinks also match.
+	fi1, err1 := os.Stat(resolvedPath)
+	fi2, err2 := os.Stat(resolvedExe)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return os.SameFile(fi1, fi2)
+}
 
 // atomicWriteString writes content to path atomically via temp-rename.
 func atomicWriteString(path, content string) error {
