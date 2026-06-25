@@ -331,6 +331,33 @@ assert_grep "yakos update --help mentions refresh" \
 echo
 
 # ---------------------------------------------------------------------------
+# Step 6: Read-commands work on a bare binary install
+# ---------------------------------------------------------------------------
+# Guards the class of bug where runAgent (and similar) never called
+# resolveLibRoot, so the raw yakosRoot (~/.local) had no lib/agents and
+# agentscompose.Compose silently returned 0.
+echo "=== Step 6: read-commands on bare binary install ==="
+
+# yakos agent list must exit 0 and report a NON-zero agent count.
+assert_exit0 "yakos agent list exits 0" run_yakos agent list
+
+# The count line must match "N agent(s)" with N > 0.
+assert_grep "yakos agent list: non-zero agent count" \
+    "^[1-9][0-9]* agent\(s\)" \
+    run_yakos agent list
+
+# Known framework agents must appear in the listing.
+assert_grep "yakos agent list: 'backend' agent present" \
+    "^backend" \
+    run_yakos agent list
+
+assert_grep "yakos agent list: 'architect' agent present" \
+    "^architect" \
+    run_yakos agent list
+
+echo
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "=== Summary ==="
