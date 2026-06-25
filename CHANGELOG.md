@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.57.0.0] — 2026-06-25
+
+### Fixed
+
+- **`yakos agent list` and other lib-reading commands now show framework
+  agents on bare-binary installs** — these commands previously reported
+  "0 agent(s)" on installs where no `YAKOS_ROOT` is set because they
+  never called `resolveLibRoot`. They now resolve the embedded/materialized
+  lib root the same way `start`, `serve`, and `refresh` do, so the full
+  agent roster appears on any bare-binary install.
+- **CI smoke test extended** — `scripts/smoke-bare-install.sh` now asserts
+  that `yakos agent list` returns agents on a bare install (72 assertions
+  total), preventing this class of regression from recurring undetected.
+
 ## [0.56.0.0] — 2026-06-23
 
 ### Added

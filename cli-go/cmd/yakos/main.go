@@ -893,6 +893,21 @@ func runDoctor(yakosRoot string, args []string) {
 		}
 	}
 
+	// Resolve YAKOS_ROOT from env, then cascade to materialized/embedded lib.
+	// doctor reads lib/hooks/git/ and lib/agents for its runtime-probe checks;
+	// giving it the resolved root means it reports on the actual installed
+	// content rather than an empty bare-install path.
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+	{
+		drHome := os.Getenv("HOME")
+		if drHome == "" {
+			drHome = "/tmp"
+		}
+		yakosRoot = resolveLibRoot(yakosRoot, drHome, os.Stderr)
+	}
+
 	// Resolve YAKOS_LIB from env.
 	yakosLib := os.Getenv("YAKOS_LIB")
 	if yakosLib == "" && yakosRoot != "" {
@@ -1925,6 +1940,20 @@ func runDispatch(yakosRoot string, args []string) {
 		os.Exit(1)
 	}
 
+	// Resolve YAKOS_ROOT from env, then cascade to materialized/embedded lib.
+	// dispatch.Run → agentscompose.Compose reads lib/agents; a bare binary
+	// install with a raw yakosRoot (~/.local) would find nothing without this.
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+	{
+		dispatchHome := os.Getenv("HOME")
+		if dispatchHome == "" {
+			dispatchHome = "/tmp"
+		}
+		yakosRoot = resolveLibRoot(yakosRoot, dispatchHome, os.Stderr)
+	}
+
 	// Resolve project from env or inference (mirrors dispatch.sh project resolution).
 	if project == "" {
 		project = os.Getenv("YAKOS_PROJECT_PATH")
@@ -2158,6 +2187,14 @@ func runArchive(yakosRoot string, args []string) {
 		home = "/tmp"
 	}
 
+	// Resolve YAKOS_ROOT from env, then cascade to materialized/embedded lib.
+	// archive reads lib/settings/hook-bypass.template.md; without this the
+	// bare install emits a warning and skips the template restore.
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+	yakosRoot = resolveLibRoot(yakosRoot, home, os.Stderr)
+
 	cfg := archive.Config{
 		YakosRoot: yakosRoot,
 		Project:   project,
@@ -2244,6 +2281,14 @@ func runTeamRestart(yakosRoot string, args []string) {
 	if home == "" {
 		home = "/tmp"
 	}
+
+	// Resolve YAKOS_ROOT from env, then cascade to materialized/embedded lib.
+	// team restart calls archive.Run which reads lib/settings/; without this
+	// a bare binary install warns on the missing hook-bypass template.
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+	yakosRoot = resolveLibRoot(yakosRoot, home, os.Stderr)
 
 	cfg := team.Config{
 		YakosRoot: yakosRoot,
@@ -4149,6 +4194,12 @@ func runAgent(yakosRoot, cmdName string, args []string) {
 		home = "/tmp"
 	}
 
+	// Resolve the effective lib root via the cascade: on-disk → materialized →
+	// embedded auto-materialize.  Bare binary installs (no YAKOS_ROOT set, no
+	// cloned repo) need this so agent list/diff/docs see the framework agents
+	// rather than silently returning 0.
+	yakosRoot = resolveLibRoot(yakosRoot, home, os.Stderr)
+
 	cfg := agent.Config{
 		YakosRoot: yakosRoot,
 		HomeDir:   home,
@@ -4918,6 +4969,15 @@ func runSoul(yakosRoot string, args []string) {
 		home = "/tmp"
 	}
 
+	// Resolve YAKOS_ROOT from env, then cascade to materialized/embedded lib.
+	// soul seed reads lib/settings/soul.template.md; without this the bare
+	// install silently falls back to a built-in default instead of the shipped
+	// template.
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+	yakosRoot = resolveLibRoot(yakosRoot, home, os.Stderr)
+
 	cfg := soul.Config{
 		Subcommand: sub,
 		Args:       rest,
@@ -5009,6 +5069,9 @@ func runSkill(yakosRoot string, args []string) {
 	if r := os.Getenv("YAKOS_ROOT"); r != "" {
 		yakosRoot = r
 	}
+	// Cascade to materialized/embedded lib so skill promote --global can
+	// locate lib/skills/ on a bare binary install.
+	yakosRoot = resolveLibRoot(yakosRoot, home, os.Stderr)
 
 	cfg := skill.Config{
 		Subcommand: sub,
@@ -5704,9 +5767,18 @@ func runGitHooks(yakosRoot string, args []string) {
 		os.Exit(0)
 	}
 
-	// Resolve YAKOS_ROOT from env.
+	// Resolve YAKOS_ROOT from env, then cascade to materialized/embedded lib.
+	// install copies lib/hooks/git/ scripts and will hard-fail if yakosRoot
+	// has no lib/ (bare binary install without this cascade).
 	if r := os.Getenv("YAKOS_ROOT"); r != "" {
 		yakosRoot = r
+	}
+	{
+		ghHome := os.Getenv("HOME")
+		if ghHome == "" {
+			ghHome = "/tmp"
+		}
+		yakosRoot = resolveLibRoot(yakosRoot, ghHome, os.Stderr)
 	}
 
 	sub := args[0]
@@ -6242,10 +6314,13 @@ func runModelRouting(yakosRoot string, args []string) {
 		ErrWriter:  os.Stderr,
 	}
 
-	// Apply YAKOS_ROOT override from env (matches other subcommands).
+	// Apply YAKOS_ROOT override from env, then cascade to materialized/embedded
+	// lib.  model-routing list/show/promote read lib/agents; bare binary installs
+	// would find nothing without the cascade.
 	if envRoot := os.Getenv("YAKOS_ROOT"); envRoot != "" {
 		cfg.YakosRoot = envRoot
 	}
+	cfg.YakosRoot = resolveLibRoot(cfg.YakosRoot, home, os.Stderr)
 
 	switch sub {
 	case "eval":
