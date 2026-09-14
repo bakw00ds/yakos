@@ -5,7 +5,7 @@ ships a roster of specialist agents, audit-first hooks, kanban +
 retrospectives, and per-project audit trails across runtimes.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.45.0.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.57.0.0-orange.svg)](CHANGELOG.md)
 [![Stability: alpha](https://img.shields.io/badge/stability-alpha-red.svg)](#status)
 
 > Not affiliated with Anthropic, OpenAI, or Google.
@@ -52,8 +52,9 @@ for the full install guide, including the dev/from-source path.
 | `yakos metrics collect\|report\|trend\|compare\|gate\|serve\|install-hook\|uninstall-hook` | Project-health metrics time series |
 | `yakos skill plan-quality-eval <plan.md>` | Score a plan against the 6-dimension rubric |
 | `yakos model-routing eval\|list\|show` | Evaluate an agent's golden-set across model tiers |
+| `yakos mcp` | Manage MCP server config (install/uninstall/status/probe) |
 
-Full list: `yakos --help` (41 subcommands ported to Go).
+Full list: `yakos --help` (43 subcommands ported to Go).
 
 ## What it does
 
@@ -104,7 +105,7 @@ Full list: `yakos --help` (41 subcommands ported to Go).
 
 ```
 yakos/
-  cli-go/           Go binary source (41 ported subcommands)
+  cli-go/           Go binary source (43 ported subcommands)
   cli/              bash CLI fallback + adapter scripts
   lib/
     agents/         framework specialist agents (lead-template, planner, …)
@@ -127,7 +128,7 @@ yakos/
 
 ## Status
 
-**v0.45.0.0** — alpha, pre-1.0. CLI commands and `.yakos.yml` schema are
+**v0.57.0.0** — alpha, pre-1.0. CLI commands and `.yakos.yml` schema are
 stable within minor versions. See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
