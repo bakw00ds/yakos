@@ -83,7 +83,20 @@ print_runtime_status() {
             claude)          cli_hint="install: https://docs.claude.com/en/docs/claude-code" ;;
             claude-sdk)      cli_hint="install: pip install claude-agent-sdk (python 3.10+)" ;;
             codex)           cli_hint="install: npm install -g @openai/codex" ;;
-            gemini)          cli_hint="install: npm install -g @google/gemini-cli (DEPRECATED 2026-06-18; use agy)" ;;
+            gemini)
+                # yk_rt_load sourced gemini.sh above, which defines
+                # _yk_rt_gemini_past_removal in this shell. Past the removal
+                # date, yk_rt_check_cli already returned non-zero (the shim
+                # returns 1 instead of calling agy); give an explicit
+                # "removed" status rather than an install hint that no
+                # longer applies.
+                if command -v _yk_rt_gemini_past_removal >/dev/null 2>&1 && _yk_rt_gemini_past_removal; then
+                    cli_state="removed"
+                    cli_hint="removed as of ${_YK_RT_GEMINI_REMOVAL_DATE:-2026-09-01}; use 'agy' instead"
+                else
+                    cli_hint="install: npm install -g @google/gemini-cli (DEPRECATED 2026-06-18; use agy)"
+                fi
+                ;;
             agy)             cli_hint="install: curl -fsSL https://antigravity.google/cli/install.sh | bash" ;;
             antigravity-sdk) cli_hint="install: pip install google-antigravity (bundles compiled binary)" ;;
         esac
