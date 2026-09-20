@@ -40,6 +40,15 @@ HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 . "$HOOK_DIR/lib/hook-input.sh"
 . "$HOOK_DIR/lib/hook-output.sh"
 
+# No-op when coord isn't enabled. Checked BEFORE hi_init (security review
+# N2) so a missing jq / broken stdin doesn't make this the-hook-is-off
+# state unreachable — yakos_coord_enabled (sourced transitively via
+# hook-output.sh's paths.sh) needs no stdin/jq, and whether coord is on
+# doesn't depend on which tool triggered this event.
+if ! command -v yakos_coord_enabled >/dev/null 2>&1 || ! yakos_coord_enabled; then
+    exit 0
+fi
+
 hi_init
 
 tool="$(hi_tool)"
@@ -47,11 +56,6 @@ case "$tool" in
     Edit|Write|MultiEdit) ;;
     *) exit 0 ;;
 esac
-
-# No-op when coord isn't enabled.
-if ! command -v yakos_coord_enabled >/dev/null 2>&1 || ! yakos_coord_enabled; then
-    exit 0
-fi
 # jq's own absence is already caught fail-closed by hi_init above.
 
 file="$(hi_file_path)"

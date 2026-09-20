@@ -27,7 +27,7 @@ fail_log=""
 # (bash, grep, cat, mkdir, date, ...) available. Built once; cleaned up on
 # exit via the trap below.
 NOJQ_PATH="$(mktemp -d -t yakos-hookfix-nojq-XXXXXX)"
-trap 'rm -rf "$NOJQ_PATH"' EXIT
+trap 'rm -rf "$NOJQ_PATH" "$NORESOLVE_PATH"' EXIT
 for _dir in /usr/bin /bin /usr/local/bin; do
     [ -d "$_dir" ] || continue
     for _bin in "$_dir"/*; do
@@ -35,6 +35,26 @@ for _dir in /usr/bin /bin /usr/local/bin; do
         _name="$(basename -- "$_bin")"
         [ "$_name" = "jq" ] && continue
         ln -sf "$_bin" "$NOJQ_PATH/$_name" 2>/dev/null || true
+    done
+done
+
+# ---- no-realpath/python3 PATH (security review N3 regression coverage) -----
+#
+# Mirrors NOJQ_PATH above, but strips `realpath` and `python3` instead of
+# `jq` — the manual cd+pwd -P / readlink fallback in ps_realpath is the
+# code path under test, and on this exact platform (macOS) it's the ONLY
+# fallback that ever runs anyway, since BSD `realpath` has no `-m` and
+# plain `realpath` errors on a non-existent target.
+NORESOLVE_PATH="$(mktemp -d -t yakos-hookfix-noresolve-XXXXXX)"
+for _dir in /usr/bin /bin /usr/local/bin; do
+    [ -d "$_dir" ] || continue
+    for _bin in "$_dir"/*; do
+        [ -x "$_bin" ] || continue
+        _name="$(basename -- "$_bin")"
+        case "$_name" in
+            realpath|python3) continue ;;
+        esac
+        ln -sf "$_bin" "$NORESOLVE_PATH/$_name" 2>/dev/null || true
     done
 done
 
@@ -80,9 +100,18 @@ _secret_pem() {
 case_check() {
     # Args: hook-script-relpath, fixture-relpath, expected-rc, expected-log-name, [setup-fn], [extra-env-assignment]
     #
-    # extra-env-assignment, if given, is a single "NAME=value" string
-    # exported into the hook's environment for this one invocation (used
-    # by the missing-jq fail-closed cases to override PATH).
+    # extra-env-assignment, if given, is one or more space-separated
+    # "NAME=value" assignments exported into the hook's environment for
+    # this one invocation (used by the missing-jq fail-closed cases to
+    # override PATH, and to combine that with an escape-hatch env var —
+    # e.g. "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1").
+    #
+    # The fixture is read through a sed pass that substitutes the literal
+    # token __CLAUDE_PROJECT_DIR__ with this case's actual temp project
+    # dir — a no-op for fixtures that don't contain the token, and the
+    # only way a static fixture file can exercise an in-root ABSOLUTE
+    # file_path (the shape Claude Code always sends) without knowing the
+    # temp dir ahead of time (security review N1).
     local hook="$1" fixture="$2" expected_rc="$3" log_name="$4" setup_fn="${5:-}" extra_env="${6:-}"
 
     local tmp
@@ -94,7 +123,8 @@ case_check() {
     fi
 
     local payload
-    payload="$(cat "$FIXT/$fixture")"
+    payload="$(sed "s|__CLAUDE_PROJECT_DIR__|$tmp|g" "$FIXT/$fixture")"
+
     # Assemble any synthetic-secret placeholders (see the _secret_* functions
     # above) into their real values — a no-op for fixtures that carry none.
     # Plain substring replacement (no glob metacharacters in the search
@@ -114,7 +144,9 @@ case_check() {
     local actual_rc=0
     local stdout_capture
     if [ -n "$extra_env" ]; then
-        stdout_capture="$(printf '%s' "$payload" | env "$extra_env" YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$tmp" bash "$HOOKS/$hook" 2>/dev/null)" || actual_rc=$?
+        # shellcheck disable=SC2086  # intentional: extra_env may carry
+        # multiple space-separated NAME=value assignments.
+        stdout_capture="$(printf '%s' "$payload" | env $extra_env YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$tmp" bash "$HOOKS/$hook" 2>/dev/null)" || actual_rc=$?
     else
         stdout_capture="$(printf '%s' "$payload" | YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$tmp" bash "$HOOKS/$hook" 2>/dev/null)" || actual_rc=$?
     fi
@@ -273,6 +305,32 @@ budget:
 EOF
 }
 
+setup_budget_low_cap_disabled() {
+    # Same over-cap state as setup_budget_low_cap, plus YAKOS_BUDGET_DISABLE
+    # is passed via extra_env at the call site — this setup only needs the
+    # over-cap state so the *_DISABLE reorder (security review N2) is what
+    # makes the difference, not an absent cap.
+    setup_budget_low_cap "$1"
+}
+
+setup_allowlist_deny_only_goapi() {
+    # go-api has a deny-only policy (no "allow" key at all) — used for the
+    # N1 absolute-out-of-root-path regression under a policy shape that
+    # never even reaches the allow-matching branch.
+    cat > "$1/.claude/path-allowlist.json" <<'EOF'
+{
+  "go-api": {"deny": ["api/migrations/**"]}
+}
+EOF
+}
+
+setup_allowlist_corrupt_truncated() {
+    # A policy file that exists but is truncated mid-write (security review
+    # N4.1) — must BLOCK under HOOK_FAIL_CLOSED, not silently disable
+    # enforcement the way an absent file does.
+    printf '{"go-api": {"allow"' > "$1/.claude/path-allowlist.json"
+}
+
 # ---- cases ------------------------------------------------------------------
 
 echo "Running hook fixtures..."
@@ -301,6 +359,30 @@ case_check path-allowlist.sh   pretooluse-write-pem-upper.json    2 path-allowli
 case_check path-allowlist.sh   pretooluse-write-symlink-escape.json 2 path-allowlist setup_symlink_escape
 # C5: missing jq must fail CLOSED (block), not silently pass every write.
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH"
+# N1 (round 2): an absolute out-of-root file_path — the shape Claude Code
+# actually sends — must be rejected even under an allow:["**"] policy or a
+# deny-only policy, and an in-root ABSOLUTE path must still PASS (the
+# prefix-strip's job). Before the fix, ps_lexical_normalize silently
+# dropped the leading "/" and the M7 check re-anchored the target under
+# the project root, so both of these previously PASSED.
+case_check path-allowlist.sh   pretooluse-write-absolute-outroot.json       2 path-allowlist setup_allowlist_strict
+case_check path-allowlist.sh   pretooluse-write-absolute-outroot-goapi.json 2 path-allowlist setup_allowlist_deny_only_goapi
+case_check path-allowlist.sh   pretooluse-write-absolute-inroot.json        0 path-allowlist setup_allowlist_strict
+# N3 (round 2): the symlink-escape case must still block when NEITHER GNU
+# realpath -m NOR python3 is on PATH (the manual ps_realpath fallback's own
+# job) — mirrors the NOJQ_PATH pattern above, minus realpath/python3
+# instead of minus jq.
+case_check path-allowlist.sh   pretooluse-write-symlink-escape.json 2 path-allowlist setup_symlink_escape "PATH=$NORESOLVE_PATH"
+# N4.1 (round 2): a policy file that EXISTS but doesn't parse (truncated
+# write) must BLOCK, not silently behave like "no policy file".
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json 2 path-allowlist setup_allowlist_corrupt_truncated
+# N2 (round 2): the emergency escape hatch must be honored even with jq
+# missing, and only when actually set.
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1"
+# C5 residue (round 2, addendum): same hi_init gap as secret-scan below —
+# an empty pipe and a non-object JSON payload must both fail closed.
+case_check path-allowlist.sh   pretooluse-write-empty-stdin.json      2 path-allowlist setup_allowlist_strict
+case_check path-allowlist.sh   pretooluse-json-array-not-object.json  2 path-allowlist setup_allowlist_strict
 
 # --- path-log ---
 case_check path-log.sh         pretooluse-edit-api.json          0 path-log
@@ -316,8 +398,41 @@ case_check secret-scan.sh      pretooluse-write-pem-secret.json  2 secret-scan
 # C4: NotebookEdit's .new_source must be scanned like any other write.
 case_check secret-scan.sh      pretooluse-notebookedit-secret.json 2 secret-scan
 case_check secret-scan.sh      pretooluse-notebookedit-api-ok.json  0 secret-scan
+# N4.2 (round 2): every PATTERNS entry needs its own firing fixture — only
+# AWS and PEM had one before this round, so a future `-e`-class regression
+# in the other six would have gone unnoticed. Also widened the PEM rule
+# itself to `-----BEGIN [A-Z0-9 ]*PRIVATE KEY` so ENCRYPTED PRIVATE KEY and
+# PGP PRIVATE KEY BLOCK (previously missed) fire too.
+case_check secret-scan.sh      pretooluse-write-github-token.json    2 secret-scan
+case_check secret-scan.sh      pretooluse-write-github-token-fg.json 2 secret-scan
+case_check secret-scan.sh      pretooluse-write-slack-token.json     2 secret-scan
+case_check secret-scan.sh      pretooluse-write-stripe-key.json      2 secret-scan
+case_check secret-scan.sh      pretooluse-write-anthropic-key.json   2 secret-scan
+case_check secret-scan.sh      pretooluse-write-google-key.json      2 secret-scan
 # C5: missing jq must fail CLOSED (block), not silently pass every write.
 case_check secret-scan.sh      pretooluse-write-secret.json      2 secret-scan "" "PATH=$NOJQ_PATH"
+# N2 (round 2): the emergency escape hatch must be honored even with jq
+# missing.
+case_check secret-scan.sh      pretooluse-write-secret.json      0 secret-scan "" "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1"
+# C5 residue (round 2, addendum): hi_init used to pass on an empty pipe
+# (the `[ -n "$HI_INPUT" ] &&` guard skipped validation on a zero-byte
+# read) and on valid-JSON-that-isn't-an-object (`jq empty` accepts an
+# array/string/number/null, not just an object). Both must now fail
+# closed like malformed JSON does.
+case_check secret-scan.sh      pretooluse-write-empty-stdin.json      2 secret-scan
+case_check secret-scan.sh      pretooluse-json-array-not-object.json  2 secret-scan
+# The escape hatch must still reach both of the above.
+case_check secret-scan.sh      pretooluse-write-empty-stdin.json      0 secret-scan "" "YAKOS_HOOKS_FAIL_OPEN=1"
+# M6 residue (round 2, addendum): a non-string value at any unioned field
+# (new_string here is a number) used to make the whole jq union error,
+# which silently swallowed to an empty write_text with NO log record —
+# fail open with no trace. content still carries a real secret and must
+# still be caught.
+case_check secret-scan.sh      pretooluse-edit-newstring-number-secret-content.json 2 secret-scan
+# .edits itself can also be the wrong shape (an object instead of an
+# array) — must not crash the scan, and a real secret in .new_source
+# (NotebookEdit) must still be caught.
+case_check secret-scan.sh      pretooluse-notebookedit-edits-object-secret-newsource.json 2 secret-scan
 
 # --- budget-guard ---
 # Previously had zero shell fixtures (Go unit test only, per the security
@@ -326,6 +441,16 @@ case_check secret-scan.sh      pretooluse-write-secret.json      2 secret-scan "
 case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard setup_budget_headroom
 case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_low_cap
 case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_low_cap "PATH=$NOJQ_PATH"
+# N2 (round 2): budget-guard matches EVERY tool call ("*"), so this is the
+# hook where a missing jq previously locked an operator out of the whole
+# session. Its own emergency var, YAKOS_BUDGET_DISABLE, is now checked
+# BEFORE hi_init, so it must reach the hook even with jq missing (and the
+# hook exits before ever touching jq, so it's a clean rc=0 — unlike the
+# shared YAKOS_HOOKS_FAIL_OPEN switch, which only overrides hi_init's own
+# check and can't rescue this script's other direct `jq` calls further
+# down; that combination is intentionally not asserted here). With
+# NEITHER set (the case right above this one), missing jq still BLOCKs.
+case_check budget-guard.sh     pretooluse-generic-tool.json      0 "" setup_budget_low_cap_disabled "PATH=$NOJQ_PATH YAKOS_BUDGET_DISABLE=1"
 
 # --- mailbox-mirror ---
 case_check mailbox-mirror.sh   sendmessage-peer.json             0 mailbox-mirror

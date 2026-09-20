@@ -40,11 +40,16 @@ HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 . "$HOOK_DIR/lib/hook-input.sh"
 . "$HOOK_DIR/lib/hook-output.sh"
 
-hi_init
-
+# Checked BEFORE hi_init (security review N2): this hook matches EVERY tool
+# call (matcher "*"), so if hi_init's own fail-closed jq/stdin check ran
+# first, a missing jq would make YAKOS_BUDGET_DISABLE unreachable and lock
+# the operator out of every tool call session-wide. This check needs no
+# stdin/jq, so it's safe to run first.
 if [ "${YAKOS_BUDGET_DISABLE:-0}" = "1" ]; then
     exit 0
 fi
+
+hi_init
 
 project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 yakos_yml="$project_dir/.yakos.yml"

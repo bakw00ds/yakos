@@ -37,6 +37,23 @@
 # HOOK_FAIL_CLOSED — they keep today's fail-open-with-a-warning behavior,
 # per the README's "no-block policy for telemetry hooks".
 #
+# --- Emergency escape hatches (security review N2, round 2) -----------------
+#
+# A degraded jq/stdin lands BEFORE each hook's own tool-name case gate, so
+# with HOOK_FAIL_CLOSED=1 the exit 2 above used to run unconditionally —
+# including for budget-guard.sh, which matches every tool call ("*"). A
+# missing jq therefore locked an operator out of Read/Edit/Bash entirely,
+# with YAKOS_BUDGET_DISABLE=1, .yakos.yml, and hook-bypass.md all
+# unreachable, because they're normally checked AFTER hi_init. Two
+# independent overrides are honored here, BEFORE the exit 2:
+#   1. YAKOS_HOOKS_FAIL_OPEN=1 — a single documented, session-wide,
+#      emergency-only kill switch. Set it, fix jq, unset it.
+#   2. A work/current/hook-bypass.md entry with `**Hook:** <hookname>`
+#      (checked via the awk-based ho_check_bypass, which needs no jq).
+# Each hook's own `*_DISABLE` / `yakos_coord_enabled` check is ALSO moved
+# above its `hi_init` call so it's reachable even when jq is broken,
+# without needing either override above.
+#
 # See lib/hooks/README.md for the full writeup.
 
 if [ "${HI_LOADED:-0}" = "1" ]; then
@@ -55,6 +72,25 @@ _hi_fail_or_warn() {
     name="${name%.sh}"
 
     if [ "${HOOK_FAIL_CLOSED:-0}" = "1" ]; then
+        # Emergency escape hatches — checked BEFORE the exit 2. Both work
+        # without jq: the env var is a plain string compare, and
+        # ho_check_bypass (hook-output.sh) is awk-based.
+        if [ "${YAKOS_HOOKS_FAIL_OPEN:-0}" = "1" ]; then
+            if command -v ho_log >/dev/null 2>&1; then
+                ho_log "$name" "WARN" "pass" "degraded input ($reason) but YAKOS_HOOKS_FAIL_OPEN=1 override active" "{}" 2>/dev/null || true
+            fi
+            echo "${name}: WARN — degraded input ($reason), but YAKOS_HOOKS_FAIL_OPEN=1 is set; passing through." >&2
+            echo "${name}: this is an emergency override — unset it once jq/stdin are fixed." >&2
+            return 0
+        fi
+        if command -v ho_check_bypass >/dev/null 2>&1 && ho_check_bypass "$name" ""; then
+            if command -v ho_log >/dev/null 2>&1; then
+                ho_log "$name" "WARN" "pass" "degraded input ($reason) but hook-bypass.md override active" "{}" 2>/dev/null || true
+            fi
+            echo "${name}: WARN — degraded input ($reason), but a hook-bypass.md entry for '$name' is active; passing through." >&2
+            return 0
+        fi
+
         # Best-effort log record before we exit — ho_log degrades gracefully
         # when jq itself is the thing that's missing (see hook-output.sh).
         if command -v ho_log >/dev/null 2>&1; then
@@ -63,6 +99,8 @@ _hi_fail_or_warn() {
         echo "${name}: BLOCKED — cannot safely evaluate this tool call ($reason)." >&2
         echo "${name}: this hook enforces a security control and refuses to fail open." >&2
         echo "${name}: fix jq on PATH / the caller's JSON payload, then retry." >&2
+        echo "${name}: emergency overrides: export YAKOS_HOOKS_FAIL_OPEN=1, or add a" >&2
+        echo "${name}: work/current/hook-bypass.md entry with **Hook:** $name." >&2
         exit 2
     fi
 
@@ -89,9 +127,37 @@ hi_init() {
         return 0
     fi
 
-    if [ -n "$HI_INPUT" ] && ! jq empty <<< "$HI_INPUT" >/dev/null 2>&1; then
+    # Security review N4 / C5 residue (round 2): stdin WAS provided (not a
+    # tty — the exemption above) but read zero bytes. The previous
+    # `[ -n "$HI_INPUT" ] &&` guard skipped validation entirely on an empty
+    # read, so an empty pipe fell through to hi_tool -> "" ->
+    # `case ... *) exit 0` — the exact silent PASS this whole mechanism
+    # exists to close, just triggered by an empty payload instead of a
+    # malformed one. Note this also revises the empty-`/dev/null`-redirect
+    # case from a tolerated no-op to a normal degraded-input event; that's
+    # intentional (see YAKOS_HOOKS_FAIL_OPEN / hook-bypass.md if a manual
+    # `hook.sh < /dev/null` invocation needs to pass under
+    # HOOK_FAIL_CLOSED=1).
+    if [ -z "$HI_INPUT" ]; then
+        _hi_fail_or_warn "stdin was provided but empty (0 bytes) — expected a JSON hook payload"
+        return 0
+    fi
+
+    if ! jq empty <<< "$HI_INPUT" >/dev/null 2>&1; then
         HI_INPUT=""
         _hi_fail_or_warn "stdin did not parse as valid JSON"
+        return 0
+    fi
+
+    # Security review N4 / C5 residue (round 2): `jq empty` accepts ANY
+    # valid JSON — an array, a bare string, a number, `null` — not just an
+    # object. Every hi_* accessor assumes an object (`.tool_name`,
+    # `.tool_input.file_path`, ...), so a non-object payload silently
+    # yielded empty fields everywhere, which is the same fail-open shape
+    # as malformed JSON.
+    if ! jq -e 'type == "object"' <<< "$HI_INPUT" >/dev/null 2>&1; then
+        HI_INPUT=""
+        _hi_fail_or_warn "stdin parsed as JSON but is not a JSON object (hook payloads are always an object)"
         return 0
     fi
 }
@@ -145,9 +211,17 @@ hi_strip_rt_prefix() {
 # with any "yakos:" namespace prefix stripped (see hi_strip_rt_prefix).
 # Reading from stdin JSON, NOT $CLAUDE_CODE_AGENT (per Phase 1.7: env var
 # is missing in team SendMessage hook fires).
+#
+# Leading/trailing whitespace is trimmed (security review N4.3: a runtime
+# that happens to send "go-api " with a trailing space would otherwise miss
+# its own policy key and fall through to "no policy" PASS — a robustness
+# fix, not a security one, since .agent_type comes from the runtime, not
+# an attacker). Case is deliberately left alone.
 hi_sender_role() {
     local raw
     raw="$(hi_field_or '.agent_type' 'lead')"
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    raw="${raw%"${raw##*[![:space:]]}"}"
     hi_strip_rt_prefix "$raw"
 }
 

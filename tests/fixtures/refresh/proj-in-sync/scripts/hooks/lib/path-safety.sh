@@ -121,6 +121,17 @@ ps_realpath() {
             return 0
         fi
     fi
+    # Manual fallback: resolve any symlink chain on the FINAL path component
+    # first (security review N3 — the loop below only tests `-d`, so a
+    # symlink to a plain FILE, or a dangling symlink, was peeled off into
+    # `tail` unresolved and never followed; on macOS, where the two
+    # `realpath` branches above always fail — BSD `realpath` has no `-m`,
+    # and plain `realpath` errors on a non-existent target — this manual
+    # path is reached whenever python3 is unavailable, making it load-
+    # bearing rather than a rare fallback). Bounded to 40 hops to avoid an
+    # infinite loop on a symlink cycle; `readlink` (no `-f`) is available on
+    # both BSD and GNU.
+    p="$(_ps_resolve_final_symlink "$p")"
     # Manual fallback: resolve the deepest existing ancestor with cd+pwd -P,
     # then tack the unresolved tail back on.
     local dir="$p" tail=""
@@ -143,6 +154,26 @@ ps_realpath() {
     fi
     printf '%s' "$p"
     return 0
+}
+
+# _ps_resolve_final_symlink <path>
+#   If <path> is itself a symlink (to a file, a directory, or nothing —
+#   dangling), follow the chain (bounded, cycle-safe) and return the final
+#   target. A relative target is resolved against its symlink's own
+#   directory, matching POSIX symlink semantics. If <path> is not a
+#   symlink, or once the chain ends, returns the path unchanged.
+_ps_resolve_final_symlink() {
+    local p="$1" hops=0 t
+    while [ -L "$p" ] && [ "$hops" -lt 40 ]; do
+        t="$(readlink -- "$p" 2>/dev/null || true)"
+        [ -n "$t" ] || break
+        case "$t" in
+            /*) p="$t" ;;
+            *) p="$(dirname -- "$p")/$t" ;;
+        esac
+        hops=$((hops + 1))
+    done
+    printf '%s' "$p"
 }
 
 # ps_is_within <root> <path>

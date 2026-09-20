@@ -49,16 +49,35 @@ file="$(hi_file_path)"
 # NotebookEdit's .new_source was invisible outright (security review C4).
 # MultiEdit's edits[] is iterated in full (verified: this hook has never
 # had the "first-edit-only" bug some earlier notes suspected).
-write_text="$(jq -r '
+#
+# Every value is filtered through `select(type == "string")` (security
+# review M6 residue, round 2): a non-string at any of these paths — a
+# number, an object, an array, a bool — used to make the whole jq
+# expression error, `2>/dev/null || true` swallowed the error, and
+# `write_text` came back empty with NO log record: the same fail-open
+# shape C5 exists to close, just reached through a type mismatch instead
+# of a missing jq. `.edits` is guarded to only iterate when it's actually
+# an array, for the same reason. A jq value is silently DROPPED rather
+# than stringified when it's the wrong type — this hook only scans literal
+# string content, it doesn't walk into nested objects looking for secrets.
+if ! write_text="$(jq -r '
+    def as_str: if type == "string" then . else empty end;
     [
-      .tool_input.content,
-      .tool_input.new_string,
-      .tool_input.new_source,
-      (.tool_input.edits[]?.new_string // empty)
+      (.tool_input.content // empty | as_str),
+      (.tool_input.new_string // empty | as_str),
+      (.tool_input.new_source // empty | as_str),
+      ((.tool_input.edits // []) | (if type == "array" then . else [] end)[]?
+        | (.new_string // empty | as_str))
     ]
     | map(select(. != null and . != ""))
     | join("\n")
-' <<< "$(hi_raw)" 2>/dev/null || true)"
+' <<< "$(hi_raw)" 2>/dev/null)"; then
+    # jq itself failed in some other unforeseen way — degraded input, same
+    # class as a broken hi_init, same escape hatches (YAKOS_HOOKS_FAIL_OPEN
+    # / hook-bypass.md).
+    _hi_fail_or_warn "could not evaluate tool_input for secret patterns (jq error)"
+    exit 0
+fi
 
 # If we don't have text, pass.
 if [ -z "$write_text" ]; then
@@ -70,7 +89,7 @@ PATTERNS=(
     'AWS Access Key|AKIA[0-9A-Z]{16}'
     'GitHub Token|ghp_[A-Za-z0-9]{36}'
     'GitHub Token (fine-grained)|github_pat_[A-Za-z0-9_]{82}'
-    'PEM Private Key|-----BEGIN ((RSA|EC|OPENSSH|DSA) )?PRIVATE KEY-----'
+    'PEM Private Key|-----BEGIN [A-Z0-9 ]*PRIVATE KEY'
     'Slack Token|xox[baprs]-[A-Za-z0-9-]{10,}'
     'Stripe Secret Key|sk_live_[A-Za-z0-9]{24,}'
     'Anthropic API Key|sk-ant-[A-Za-z0-9_-]{93}'

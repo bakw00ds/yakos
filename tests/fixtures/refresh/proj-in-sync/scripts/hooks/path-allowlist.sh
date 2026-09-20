@@ -57,10 +57,15 @@ if [ -z "$file" ]; then
 fi
 
 # Project-relative form for matching: strip the project dir prefix if present.
+# The expansion is double-quoted (security review N4.4 / SC2295): an
+# unquoted "$CLAUDE_PROJECT_DIR" is glob-matched, not literal-matched, by
+# bash's `#` prefix-removal operator, so a project dir containing '*', '?'
+# or '[' could mis-strip the prefix and leave the path absolute — feeding
+# straight into the N1 bypass below.
 rel_file="$file"
 if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
     case "$file" in
-        "$CLAUDE_PROJECT_DIR"/*) rel_file="${file#$CLAUDE_PROJECT_DIR/}" ;;
+        "$CLAUDE_PROJECT_DIR"/*) rel_file="${file#"$CLAUDE_PROJECT_DIR"/}" ;;
     esac
 fi
 
@@ -74,6 +79,22 @@ if [ ! -f "$ALLOWLIST_FILE" ]; then
     exit 0
 fi
 
+# ---- N4.1: policy file must actually parse as a JSON object ----------------
+#
+# A present-but-corrupt policy file (truncated write, chmod 000, top-level
+# JSON that isn't an object) used to be indistinguishable from "no policy
+# file" and silently PASSED — the exact class of bug C5 was raised about,
+# just one file over. Under HOOK_FAIL_CLOSED (always set in this hook), a
+# policy file that EXISTS but doesn't parse as an object BLOCKS rather than
+# disabling enforcement. An absent file is unaffected (handled above).
+if ! jq -e 'type == "object"' "$ALLOWLIST_FILE" >/dev/null 2>&1; then
+    extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" \
+        '{agent_type: $agent, file_path: $file, note: "path-allowlist.json exists but did not parse as a JSON object"}' 2>/dev/null \
+        || printf '{"agent_type":"%s","file_path":"%s"}' "$agent" "$rel_file")"
+    ho_log "path-allowlist" "BLOCK" "block" "path-allowlist.json unreadable or not a JSON object" "$extra"
+    ho_block "path-allowlist" ".claude/path-allowlist.json exists but could not be parsed as a JSON object (truncated write? bad permissions? wrong top-level type?) — refusing rather than silently disabling enforcement. Fix or remove the file."
+fi
+
 # Look up the agent's policy. Lead = "lead" key. Missing key = no enforcement.
 policy="$(jq -c --arg agent "$agent" '.[$agent] // empty' "$ALLOWLIST_FILE" 2>/dev/null || true)"
 if [ -z "$policy" ] || [ "$policy" = "null" ]; then
@@ -82,6 +103,45 @@ if [ -z "$policy" ] || [ "$policy" = "null" ]; then
     ho_log "path-allowlist" "REPORT" "pass" "no policy for agent_type" "$extra"
     exit 0
 fi
+
+# A per-agent policy value that parsed but isn't an object (e.g.
+# {"go-api": "oops"}) is the same class of corruption as above — every
+# downstream .deny / .allow lookup on it silently errors and swallows to
+# empty, which is again indistinguishable from "no policy". Block it too.
+if ! jq -e 'type == "object"' <<< "$policy" >/dev/null 2>&1; then
+    extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" \
+        '{agent_type: $agent, file_path: $file, note: "policy value for agent_type is not a JSON object"}' 2>/dev/null \
+        || printf '{"agent_type":"%s","file_path":"%s"}' "$agent" "$rel_file")"
+    ho_log "path-allowlist" "BLOCK" "block" "policy value for agent_type is not a JSON object" "$extra"
+    ho_block "path-allowlist" ".claude/path-allowlist.json's entry for '$agent' is not a JSON object ({\"allow\":[...],\"deny\":[...]}) — refusing rather than silently disabling enforcement."
+fi
+
+# ---- N1: reject an absolute path before it can be normalized away ----------
+#
+# ps_lexical_normalize treats a leading "/" as a bare separator and drops
+# it — by design, for paths that are already project-relative — but an
+# absolute file_path that is OUTSIDE the project root never got stripped
+# above, so it would otherwise arrive here still absolute, get silently
+# rewritten into a relative-looking path with no leading "..", sail past
+# ps_escapes_root, and then get re-anchored under the project root by the
+# M7 check below ("$CLAUDE_PROJECT_DIR/etc/passwd" IS inside the root) —
+# defeating both C3 and M7 for exactly the path shape Claude Code always
+# sends (file_path is documented as always absolute). Refuse it outright,
+# regardless of allow/deny policy, before normalization ever sees it.
+case "$rel_file" in
+    /*)
+        if ho_check_bypass "path-allowlist" "$rel_file"; then
+            extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" \
+                '{agent_type: $agent, file_path: $file, note: "absolute out-of-root path but bypass active", bypass: true}')"
+            ho_log "path-allowlist" "WARN" "pass" "absolute out-of-root path but bypass active" "$extra"
+            exit 0
+        fi
+        extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" \
+            '{agent_type: $agent, file_path: $file}')"
+        ho_log "path-allowlist" "BLOCK" "block" "absolute path outside project root" "$extra"
+        ho_block "path-allowlist" "agent '$agent' path '$rel_file' is absolute and outside the project root — refused regardless of allow/deny policy"
+        ;;
+esac
 
 # ---- C3: lexical traversal guard --------------------------------------------
 #
@@ -112,21 +172,37 @@ rel_file="$norm_rel_file"
 # symlink somewhere in its chain, at a file outside the project entirely.
 # Resolve the real, symlink-free path and confirm it is still inside the
 # (also-resolved) project root before trusting any allow/deny match.
-if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "$CLAUDE_PROJECT_DIR" ]; then
-    project_real="$(ps_realpath "$CLAUDE_PROJECT_DIR")"
-    target_real="$(ps_realpath "$CLAUDE_PROJECT_DIR/$rel_file")"
-    if ! ps_is_within "$project_real" "$target_real"; then
-        if ho_check_bypass "path-allowlist" "$rel_file"; then
-            extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" --arg real "$target_real" \
-                '{agent_type: $agent, file_path: $file, resolved: $real, note: "symlink escape but bypass active", bypass: true}')"
-            ho_log "path-allowlist" "WARN" "pass" "symlink escape detected but bypass active" "$extra"
-            exit 0
-        fi
-        extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" --arg real "$target_real" --arg root "$project_real" \
-            '{agent_type: $agent, file_path: $file, resolved: $real, project_root: $root}')"
-        ho_log "path-allowlist" "BLOCK" "block" "path resolves outside project root via symlink" "$extra"
-        ho_block "path-allowlist" "agent '$agent' path '$rel_file' resolves (following symlinks) to '$target_real', which is outside the project root — refused regardless of allow/deny policy"
+#
+# Unconditional (security review N1): this used to be gated on
+# CLAUDE_PROJECT_DIR being set AND a directory, so an unset/bogus
+# CLAUDE_PROJECT_DIR disabled symlink checking entirely while allow/deny
+# matching still ran. Fall back to $PWD as the project root when
+# CLAUDE_PROJECT_DIR isn't usable; if even that can't be determined, block
+# under HOOK_FAIL_CLOSED rather than silently skipping the check.
+project_root="${CLAUDE_PROJECT_DIR:-}"
+if [ -z "$project_root" ] || [ ! -d "$project_root" ]; then
+    project_root="$PWD"
+fi
+if [ -z "$project_root" ] || [ ! -d "$project_root" ]; then
+    extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" \
+        '{agent_type: $agent, file_path: $file, note: "no usable project root for symlink check"}' 2>/dev/null \
+        || printf '{"agent_type":"%s","file_path":"%s"}' "$agent" "$rel_file")"
+    ho_log "path-allowlist" "BLOCK" "block" "no project root available to check for symlink escapes" "$extra"
+    ho_block "path-allowlist" "cannot determine a project root (CLAUDE_PROJECT_DIR unset/invalid, \$PWD unusable) to check '$rel_file' for a symlink escape — refusing rather than skipping the check"
+fi
+project_real="$(ps_realpath "$project_root")"
+target_real="$(ps_realpath "$project_root/$rel_file")"
+if ! ps_is_within "$project_real" "$target_real"; then
+    if ho_check_bypass "path-allowlist" "$rel_file"; then
+        extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" --arg real "$target_real" \
+            '{agent_type: $agent, file_path: $file, resolved: $real, note: "symlink escape but bypass active", bypass: true}')"
+        ho_log "path-allowlist" "WARN" "pass" "symlink escape detected but bypass active" "$extra"
+        exit 0
     fi
+    extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" --arg real "$target_real" --arg root "$project_real" \
+        '{agent_type: $agent, file_path: $file, resolved: $real, project_root: $root}')"
+    ho_log "path-allowlist" "BLOCK" "block" "path resolves outside project root via symlink" "$extra"
+    ho_block "path-allowlist" "agent '$agent' path '$rel_file' resolves (following symlinks) to '$target_real', which is outside the project root — refused regardless of allow/deny policy"
 fi
 
 # ---- glob matching -----------------------------------------------------------

@@ -122,6 +122,36 @@ probably wouldn't have blocked anyway." `jq` is a hard dependency of this
 whole hook system; treat its absence as an environment bug to fix, not a
 steady state to design around.
 
+### Emergency escape hatches (`YAKOS_HOOKS_FAIL_OPEN`)
+
+Security review N2 (round 2, 2026-09-20): `budget-guard.sh` matches every
+tool call (`matcher: "*"`), and the exit-2 path above used to run before
+any of the hook's own recovery mechanisms were reachable. A missing `jq`
+therefore locked an operator out of **every** tool call — `Read`, `Edit`,
+`Bash`, all of them — with `YAKOS_BUDGET_DISABLE=1`, `.yakos.yml`, and
+`work/current/hook-bypass.md` all unreachable, because they were normally
+checked *after* `hi_init`. Two independent fixes:
+
+1. **`YAKOS_HOOKS_FAIL_OPEN=1`** — a single, documented, session-wide,
+   **emergency-only** kill switch. `_hi_fail_or_warn` checks it (and the
+   `awk`-based `ho_check_bypass`, which needs no `jq`) *before* the
+   `exit 2`. Either one turns the block into a WARN + PASS, with a log
+   record either way. Set it to recover a locked-out session, fix `jq`,
+   then **unset it** — it degrades every fail-closed hook in the same
+   session for as long as it's set.
+2. Each hook's own `*_DISABLE` env check (`YAKOS_BUDGET_DISABLE`,
+   `YAKOS_SUPERVISOR_DISABLE`) and `yakos_coord_enabled` check now run
+   **before** `hi_init` in `budget-guard.sh`, `supervisor-gate.sh`,
+   `supervisor-ack-gate.sh`, and `peer-claim.sh` — none of them need
+   stdin/`jq`, so there's no reason they should be gated behind a
+   jq-dependent step that might itself be the thing that's broken.
+
+`YAKOS_HOOKS_FAIL_OPEN=1` is strictly broader than the per-hook disables:
+it silences the fail-closed behavior of *every* `HOOK_FAIL_CLOSED` hook at
+once, for any kind of degraded input, until unset. Prefer the narrower
+per-hook `*_DISABLE` var or a scoped `hook-bypass.md` entry when either
+one is enough.
+
 ## Bypass mechanism
 
 Every hook checks `work/current/hook-bypass.md` before deciding to block.

@@ -55,6 +55,17 @@ HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 # shellcheck source=lib/paths.sh
 . "$HOOK_DIR/lib/paths.sh"
 
+# --- Guard: emergency bypass --------------------------------------------------
+#
+# Checked BEFORE hi_init (security review N2) so a missing jq / broken
+# stdin doesn't make this override unreachable. It needs no stdin/jq, and
+# disabling the hook doesn't depend on which tool triggered it, so it's
+# safe to run before we even know the tool name.
+
+if [ "${YAKOS_SUPERVISOR_DISABLE:-0}" = "1" ]; then
+    exit 0
+fi
+
 hi_init
 
 # --- Guard: only fires on TeamCreate and Agent --------------------------------
@@ -64,12 +75,6 @@ case "$tool" in
     TeamCreate|Agent) ;;
     *) exit 0 ;;
 esac
-
-# --- Guard: emergency bypass --------------------------------------------------
-
-if [ "${YAKOS_SUPERVISOR_DISABLE:-0}" = "1" ]; then
-    exit 0
-fi
 
 # --- Guard: per-project opt-out in .yakos.yml ---------------------------------
 
