@@ -1,0 +1,13 @@
+{
+  "session_id": "fixture-generic-tool-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "api/main.go"
+  },
+  "tool_use_id": "toolu_fixture_generic_tool_001"
+}

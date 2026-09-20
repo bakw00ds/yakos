@@ -1,0 +1,14 @@
+{
+  "session_id": "fixture-write-dotenv-upper-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "lead",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": ".ENV",
+    "content": "SOME_VAR=1\n"
+  },
+  "tool_use_id": "toolu_fixture_write_dotenv_upper_001"
+}

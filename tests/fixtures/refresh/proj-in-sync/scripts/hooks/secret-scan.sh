@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Purpose: secret-scan.sh — PreToolUse hook on Edit|Write|MultiEdit.
+# Purpose: secret-scan.sh — PreToolUse hook on Edit|Write|MultiEdit|NotebookEdit.
 #
 # Refuses tool calls whose written content matches well-known secret
 # patterns (AWS keys, GitHub tokens, Anthropic keys, Google API keys,
@@ -15,8 +15,17 @@
 # v0.1 patterns are deliberately conservative — false positives are worse
 # than false negatives at this layer because hooks run on every Edit/Write.
 # Add patterns only when the signal-to-noise ratio is clearly favorable.
+#
+# This hook can BLOCK (ho_block below), so it fails closed on a missing jq
+# or malformed stdin rather than silently passing every write — see
+# HOOK_FAIL_CLOSED in lib/hook-input.sh (security review C5).
 
 set -eu
+
+# Read by hi_init in hook-input.sh, which shellcheck cannot statically
+# follow (HOOK_DIR is dynamic; excluded via -e SC1091 in CI).
+# shellcheck disable=SC2034
+HOOK_FAIL_CLOSED=1
 
 HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 . "$HOOK_DIR/lib/hook-input.sh"
@@ -26,21 +35,30 @@ hi_init
 
 tool="$(hi_tool)"
 case "$tool" in
-    Edit|Write|MultiEdit) ;;
+    Edit|Write|MultiEdit|NotebookEdit) ;;
     *) exit 0 ;;
 esac
 
 agent="$(hi_sender_role)"
 file="$(hi_file_path)"
 
-# Gather text-to-be-written. For Write it's tool_input.content; for Edit
-# it's tool_input.new_string; for MultiEdit it's an array of new_strings.
-write_text=""
-case "$tool" in
-    Write)      write_text="$(hi_content)" ;;
-    Edit)       write_text="$(hi_new_string)" ;;
-    MultiEdit)  write_text="$(jq -r '[.tool_input.edits[]?.new_string] | join("\n")' <<< "$(hi_raw)" 2>/dev/null || true)" ;;
-esac
+# Gather text-to-be-written. Union every content-bearing field this codebase
+# knows about, rather than switching on $tool — a payload with a "swapped"
+# shape (e.g. a Write carrying .new_string, or an Edit carrying .content)
+# was previously invisible to this scan (security review M6), and
+# NotebookEdit's .new_source was invisible outright (security review C4).
+# MultiEdit's edits[] is iterated in full (verified: this hook has never
+# had the "first-edit-only" bug some earlier notes suspected).
+write_text="$(jq -r '
+    [
+      .tool_input.content,
+      .tool_input.new_string,
+      .tool_input.new_source,
+      (.tool_input.edits[]?.new_string // empty)
+    ]
+    | map(select(. != null and . != ""))
+    | join("\n")
+' <<< "$(hi_raw)" 2>/dev/null || true)"
 
 # If we don't have text, pass.
 if [ -z "$write_text" ]; then
@@ -52,7 +70,7 @@ PATTERNS=(
     'AWS Access Key|AKIA[0-9A-Z]{16}'
     'GitHub Token|ghp_[A-Za-z0-9]{36}'
     'GitHub Token (fine-grained)|github_pat_[A-Za-z0-9_]{82}'
-    'PEM Private Key|-----BEGIN (RSA |EC |OPENSSH |DSA |)PRIVATE KEY-----'
+    'PEM Private Key|-----BEGIN ((RSA|EC|OPENSSH|DSA) )?PRIVATE KEY-----'
     'Slack Token|xox[baprs]-[A-Za-z0-9-]{10,}'
     'Stripe Secret Key|sk_live_[A-Za-z0-9]{24,}'
     'Anthropic API Key|sk-ant-[A-Za-z0-9_-]{93}'
@@ -64,7 +82,12 @@ matched_pattern=""
 for entry in "${PATTERNS[@]}"; do
     name="${entry%%|*}"
     pattern="${entry#*|}"
-    if printf '%s' "$write_text" | grep -qE "$pattern"; then
+    # `-e "$pattern"` (not a bare "$pattern") so a pattern that starts with
+    # "-" — the PEM rule above starts with "-----BEGIN" — is treated as the
+    # regex it is, not parsed by grep as an option string (security review
+    # H5a: this made the PEM rule dead code and printed
+    # "grep: unrecognized option" to stderr on every non-matching write).
+    if printf '%s' "$write_text" | grep -qE -e "$pattern"; then
         matched_name="$name"
         matched_pattern="$pattern"
         break

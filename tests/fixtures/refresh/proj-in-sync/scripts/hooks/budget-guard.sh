@@ -23,8 +23,18 @@
 # Per-cap bypass: add hook-bypass.md entry with
 #   Scope: cap=max_tool_calls
 # (or max_wall_seconds / max_repeat_same_tool)
+#
+# This hook can BLOCK (ho_block below on cap exceeded), so it fails closed
+# on a missing jq or malformed stdin rather than silently passing every
+# tool call — see HOOK_FAIL_CLOSED in lib/hook-input.sh (security review
+# C5).
 
 set -eu
+
+# Read by hi_init in hook-input.sh, which shellcheck cannot statically
+# follow (HOOK_DIR is dynamic; excluded via -e SC1091 in CI).
+# shellcheck disable=SC2034
+HOOK_FAIL_CLOSED=1
 
 HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 . "$HOOK_DIR/lib/hook-input.sh"
@@ -50,7 +60,9 @@ fi
 # If no budget block at all, also no-op
 grep -q '^[[:space:]]*budget:' "$yakos_yml" 2>/dev/null || exit 0
 
-command -v jq >/dev/null 2>&1 || exit 0
+# jq's own absence is already caught fail-closed by hi_init above (via
+# HOOK_FAIL_CLOSED); this only covers yakos_current_dir specifically not
+# having loaded, which is not itself a jq problem.
 command -v yakos_current_dir >/dev/null 2>&1 || exit 0
 
 current_dir="$(yakos_current_dir)"
