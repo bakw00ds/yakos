@@ -56,6 +56,20 @@ if [ -z "$file" ]; then
     exit 0
 fi
 
+# Normalize a trailing slash on CLAUDE_PROJECT_DIR once, up front (security
+# review R2-1, round 3): the prefix-strip case below requires an exact "/"
+# separator between the root and the rest of the path, so
+# CLAUDE_PROJECT_DIR=/proj/ (trailing slash — set by some wrappers/test
+# harnesses/operator shells, not just the bare form Claude Code sends) turns
+# the pattern into "/proj//*", which never matches. rel_file then stayed
+# absolute and the N1 guard below refused every single in-root Edit/Write
+# with "outside the project root" — a false-block-everything regression.
+# Normalizing once here also fixes ALLOWLIST_FILE (which would otherwise
+# read "//.claude/...") and the M7 project_root fallback further down.
+if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
+    CLAUDE_PROJECT_DIR="${CLAUDE_PROJECT_DIR%/}"
+fi
+
 # Project-relative form for matching: strip the project dir prefix if present.
 # The expansion is double-quoted (security review N4.4 / SC2295): an
 # unquoted "$CLAUDE_PROJECT_DIR" is glob-matched, not literal-matched, by
@@ -114,6 +128,27 @@ if ! jq -e 'type == "object"' <<< "$policy" >/dev/null 2>&1; then
         || printf '{"agent_type":"%s","file_path":"%s"}' "$agent" "$rel_file")"
     ho_log "path-allowlist" "BLOCK" "block" "policy value for agent_type is not a JSON object" "$extra"
     ho_block "path-allowlist" ".claude/path-allowlist.json's entry for '$agent' is not a JSON object ({\"allow\":[...],\"deny\":[...]}) — refusing rather than silently disabling enforcement."
+fi
+
+# ---- R2-5: file_path exactly equal to the project root itself --------------
+#
+# The prefix-strip case above requires a "/" separator, so a file_path that
+# IS the project root, with nothing after it, never gets stripped and would
+# otherwise fall into the generic N1 "absolute and outside the project
+# root" message below — actively misleading, since the path is not outside
+# the root, it IS the root. Give it its own accurate reason: you cannot
+# write a file over a directory.
+if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ "$rel_file" = "$CLAUDE_PROJECT_DIR" ]; then
+    if ho_check_bypass "path-allowlist" "$rel_file"; then
+        extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" \
+            '{agent_type: $agent, file_path: $file, note: "file_path is the project root but bypass active", bypass: true}')"
+        ho_log "path-allowlist" "WARN" "pass" "file_path is the project root but bypass active" "$extra"
+        exit 0
+    fi
+    extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" \
+        '{agent_type: $agent, file_path: $file}')"
+    ho_log "path-allowlist" "BLOCK" "block" "file_path is the project root itself" "$extra"
+    ho_block "path-allowlist" "agent '$agent' path '$rel_file' IS the project root — a file cannot be written over a directory"
 fi
 
 # ---- N1: reject an absolute path before it can be normalized away ----------

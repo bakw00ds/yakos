@@ -48,8 +48,13 @@
 # independent overrides are honored here, BEFORE the exit 2:
 #   1. YAKOS_HOOKS_FAIL_OPEN=1 — a single documented, session-wide,
 #      emergency-only kill switch. Set it, fix jq, unset it.
-#   2. A work/current/hook-bypass.md entry with `**Hook:** <hookname>`
-#      (checked via the awk-based ho_check_bypass, which needs no jq).
+#   2. A work/current/hook-bypass.md entry with `**Hook:** <hookname>` AND
+#      `**Scope:** degraded-input` (checked via the awk-based
+#      ho_check_bypass, which needs no jq). The scope sentinel is required
+#      (security review R2-3, round 3) — an empty probe scope would
+#      otherwise match ANY entry for that hook, so a narrow bypass an
+#      operator wrote for one unrelated file would silently disable this
+#      hook's fail-closed behavior for every future degraded-input event.
 # Each hook's own `*_DISABLE` / `yakos_coord_enabled` check is ALSO moved
 # above its `hi_init` call so it's reachable even when jq is broken,
 # without needing either override above.
@@ -83,11 +88,22 @@ _hi_fail_or_warn() {
             echo "${name}: this is an emergency override — unset it once jq/stdin are fixed." >&2
             return 0
         fi
-        if command -v ho_check_bypass >/dev/null 2>&1 && ho_check_bypass "$name" ""; then
+        # Security review R2-3 (round 3): the scope probe is the literal
+        # sentinel "degraded-input", NOT an empty string. ho_check_bypass's
+        # awk treats an empty scope as "matches any entry for this hook"
+        # (`scope == "" || index(line, scope) > 0`), so an empty probe here
+        # meant ANY hook-bypass.md entry for this hook name — including one
+        # an operator scoped to a single unrelated file weeks ago — silently
+        # disabled this hook's fail-closed behavior for every future
+        # degraded-input event. Requiring the explicit sentinel means an
+        # operator has to opt in to THIS specific override on purpose.
+        # YAKOS_HOOKS_FAIL_OPEN=1 above already covers the genuine
+        # emergency case, so this path can afford to be strict.
+        if command -v ho_check_bypass >/dev/null 2>&1 && ho_check_bypass "$name" "degraded-input"; then
             if command -v ho_log >/dev/null 2>&1; then
-                ho_log "$name" "WARN" "pass" "degraded input ($reason) but hook-bypass.md override active" "{}" 2>/dev/null || true
+                ho_log "$name" "WARN" "pass" "degraded input ($reason) but hook-bypass.md override active (scope: degraded-input)" "{}" 2>/dev/null || true
             fi
-            echo "${name}: WARN — degraded input ($reason), but a hook-bypass.md entry for '$name' is active; passing through." >&2
+            echo "${name}: WARN — degraded input ($reason), but a hook-bypass.md entry for '$name' scoped to 'degraded-input' is active; passing through." >&2
             return 0
         fi
 
@@ -100,7 +116,8 @@ _hi_fail_or_warn() {
         echo "${name}: this hook enforces a security control and refuses to fail open." >&2
         echo "${name}: fix jq on PATH / the caller's JSON payload, then retry." >&2
         echo "${name}: emergency overrides: export YAKOS_HOOKS_FAIL_OPEN=1, or add a" >&2
-        echo "${name}: work/current/hook-bypass.md entry with **Hook:** $name." >&2
+        echo "${name}: work/current/hook-bypass.md entry with **Hook:** $name and" >&2
+        echo "${name}: **Scope:** degraded-input." >&2
         exit 2
     fi
 

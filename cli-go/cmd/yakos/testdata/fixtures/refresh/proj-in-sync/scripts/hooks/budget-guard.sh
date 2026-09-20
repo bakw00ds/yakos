@@ -51,6 +51,17 @@ fi
 
 hi_init
 
+# Security review R2-2 (round 3): hi_init's own fail-closed check already
+# adjudicated a missing jq — this line is only reached at all when an
+# escape hatch (YAKOS_HOOKS_FAIL_OPEN or a hook-bypass.md entry) was
+# honored, in which case falling through is exactly the intended
+# behavior. Bail out here rather than reach the unguarded `jq` calls
+# below, which — because this hook has no tool-name gate (matcher "*") —
+# would otherwise print "jq: command not found" and exit 127 on every
+# single tool call for as long as jq stays missing, turning a clean
+# recovery into a wall of shell errors.
+command -v jq >/dev/null 2>&1 || exit 0
+
 project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 yakos_yml="$project_dir/.yakos.yml"
 if [ ! -f "$yakos_yml" ]; then

@@ -50,26 +50,24 @@ file="$(hi_file_path)"
 # MultiEdit's edits[] is iterated in full (verified: this hook has never
 # had the "first-edit-only" bug some earlier notes suspected).
 #
-# Every value is filtered through `select(type == "string")` (security
-# review M6 residue, round 2): a non-string at any of these paths — a
-# number, an object, an array, a bool — used to make the whole jq
-# expression error, `2>/dev/null || true` swallowed the error, and
-# `write_text` came back empty with NO log record: the same fail-open
-# shape C5 exists to close, just reached through a type mismatch instead
-# of a missing jq. `.edits` is guarded to only iterate when it's actually
-# an array, for the same reason. A jq value is silently DROPPED rather
-# than stringified when it's the wrong type — this hook only scans literal
-# string content, it doesn't walk into nested objects looking for secrets.
+# `.. | strings` recurses into each of content/new_string/new_source/edits
+# and collects every string leaf, regardless of what shape the field
+# itself turns out to be (security review R2-4, round 3, superseding the
+# round-2 `select(type == "string")` per-field filter): a per-field filter
+# DROPPED a secret sitting inside an array of strings or a nested object
+# (round 2's own fix left this gap — M6 residue PARTIAL) — e.g.
+# `content: ["...", "AKIA..."]` or `new_source: ["line1", "AKIA..."]`
+# (a Jupyter cell's `source` is canonically an array of strings, so this
+# is a plausible real shape, not just a theoretical one). `.. | strings`
+# cannot error regardless of the value's shape (number, object, array,
+# null all just contribute zero string leaves), so the `jq` call itself
+# can now only fail for a reason unrelated to field shape. Note `.edits`
+# is walked in full, so an edit's `old_string` — the text being replaced,
+# not written — is scanned too; over-blocking here is the safe direction
+# (worst case, deleting a secret needs a bypass) and matches this file's
+# existing "deny stays conservative" precedent (H5b's basename fallback).
 if ! write_text="$(jq -r '
-    def as_str: if type == "string" then . else empty end;
-    [
-      (.tool_input.content // empty | as_str),
-      (.tool_input.new_string // empty | as_str),
-      (.tool_input.new_source // empty | as_str),
-      ((.tool_input.edits // []) | (if type == "array" then . else [] end)[]?
-        | (.new_string // empty | as_str))
-    ]
-    | map(select(. != null and . != ""))
+    [.tool_input | (.content, .new_string, .new_source, .edits) | .. | strings]
     | join("\n")
 ' <<< "$(hi_raw)" 2>/dev/null)"; then
     # jq itself failed in some other unforeseen way — degraded input, same
@@ -79,8 +77,15 @@ if ! write_text="$(jq -r '
     exit 0
 fi
 
-# If we don't have text, pass.
+# If we don't have text, pass — but leave a REPORT record (security review
+# R2-4, round 3): this used to be a bare `exit 0` with no log record at
+# all, so a write with no scannable content and a genuinely-skipped scan
+# were indistinguishable from each other in secret-scan.ndjson.
 if [ -z "$write_text" ]; then
+    extra="$(jq -nc --arg agent "$agent" --arg file "$file" --arg tool "$tool" \
+        '{agent_type: $agent, file_path: $file, tool: $tool}' 2>/dev/null \
+        || printf '{"agent_type":"%s","file_path":"%s","tool":"%s"}' "$agent" "$file" "$tool")"
+    ho_log "secret-scan" "REPORT" "pass" "no content-bearing string fields to scan" "$extra"
     exit 0
 fi
 

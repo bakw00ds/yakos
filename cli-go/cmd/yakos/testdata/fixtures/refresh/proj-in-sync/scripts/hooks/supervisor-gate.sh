@@ -53,9 +53,19 @@ if [ -f "$yakos_yml" ]; then
     fi
 fi
 
-# jq's own absence is already caught fail-closed by hi_init above (via
-# HOOK_FAIL_CLOSED); this only covers yakos_current_dir specifically not
-# having loaded, which is not itself a jq problem.
+# jq's own absence is caught fail-closed by hi_init above (via
+# HOOK_FAIL_CLOSED) UNLESS an escape hatch (YAKOS_HOOKS_FAIL_OPEN or a
+# hook-bypass.md entry) was honored, in which case this line IS reached
+# with jq still missing (security review R2-2, round 3 — same class as
+# budget-guard.sh's finding, just gated behind a findings file existing
+# rather than every tool call: :76-79 below call `jq -r` unguarded, and
+# under `set -eu` a missing jq there triggers an immediate errexit at
+# rc=127 with an unsuppressed "jq: command not found" on stderr). Bail
+# out now rather than reach those calls.
+command -v jq >/dev/null 2>&1 || exit 0
+
+# This only covers yakos_current_dir specifically not having loaded,
+# which is not itself a jq problem.
 command -v yakos_current_dir >/dev/null 2>&1 || exit 0
 
 current_dir="$(yakos_current_dir)"

@@ -54,6 +54,31 @@ both the file path AND the peer; either field alone wildcards in the
 other dimension (e.g. `peer=alice@dev01` alone matches any file claimed
 by alice).
 
+## `degraded-input` Scope sentinel (security review R2-3 / round 3)
+
+Every `HOOK_FAIL_CLOSED` hook (`path-allowlist`, `secret-scan`,
+`budget-guard`, `supervisor-gate`, `supervisor-ack-gate`, `peer-claim`)
+fails closed when `jq` is missing or stdin is unparseable. To recover a
+specific hook via this file (rather than the session-wide
+`YAKOS_HOOKS_FAIL_OPEN=1` env var), the Scope must be **exactly**
+`degraded-input` — an empty or unrelated Scope does **not** cover a
+degraded-input event, on purpose, so a narrow bypass written for one
+file can't accidentally disable a hook's fail-closed behavior for every
+future broken-`jq` session:
+
+```markdown
+## bypass:jq-reinstall-2026-06-01
+
+**Hook:** budget-guard
+**Reason:** jq was removed from the CI image by a base-image bump; PR to
+  fix the image is open. Unblocking local sessions in the meantime.
+**Approved by:** alice
+**Created:** 2026-06-01T09:00:00Z
+**Expires:** 2026-06-01T21:00:00Z
+**Scope:** degraded-input
+**Follow-up:** remove once the base-image PR merges.
+```
+
 ## Active entries
 
 (none)

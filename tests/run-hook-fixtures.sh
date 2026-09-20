@@ -98,7 +98,7 @@ _secret_pem() {
 }
 
 case_check() {
-    # Args: hook-script-relpath, fixture-relpath, expected-rc, expected-log-name, [setup-fn], [extra-env-assignment]
+    # Args: hook-script-relpath, fixture-relpath, expected-rc, expected-log-name, [setup-fn], [extra-env-assignment], [cpd-suffix]
     #
     # extra-env-assignment, if given, is one or more space-separated
     # "NAME=value" assignments exported into the hook's environment for
@@ -106,13 +106,21 @@ case_check() {
     # override PATH, and to combine that with an escape-hatch env var —
     # e.g. "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1").
     #
+    # cpd-suffix, if given, is appended to the temp dir before it's passed
+    # to the hook as CLAUDE_PROJECT_DIR — used by the trailing-slash
+    # regression case (security review R2-1, round 3: CLAUDE_PROJECT_DIR=
+    # "$tmp/" must behave identically to "$tmp"). The __CLAUDE_PROJECT_DIR__
+    # substitution in the fixture body always uses the bare (no-suffix)
+    # temp dir, since that's the real filesystem path setup_fn created
+    # directories under.
+    #
     # The fixture is read through a sed pass that substitutes the literal
     # token __CLAUDE_PROJECT_DIR__ with this case's actual temp project
     # dir — a no-op for fixtures that don't contain the token, and the
     # only way a static fixture file can exercise an in-root ABSOLUTE
     # file_path (the shape Claude Code always sends) without knowing the
     # temp dir ahead of time (security review N1).
-    local hook="$1" fixture="$2" expected_rc="$3" log_name="$4" setup_fn="${5:-}" extra_env="${6:-}"
+    local hook="$1" fixture="$2" expected_rc="$3" log_name="$4" setup_fn="${5:-}" extra_env="${6:-}" cpd_suffix="${7:-}"
 
     local tmp
     tmp="$(mktemp -d -t yakos-hookfix-XXXXXX)"
@@ -122,8 +130,9 @@ case_check() {
         "$setup_fn" "$tmp"
     fi
 
-    local payload
+    local payload cpd
     payload="$(sed "s|__CLAUDE_PROJECT_DIR__|$tmp|g" "$FIXT/$fixture")"
+    cpd="${tmp}${cpd_suffix}"
 
     # Assemble any synthetic-secret placeholders (see the _secret_* functions
     # above) into their real values — a no-op for fixtures that carry none.
@@ -146,9 +155,9 @@ case_check() {
     if [ -n "$extra_env" ]; then
         # shellcheck disable=SC2086  # intentional: extra_env may carry
         # multiple space-separated NAME=value assignments.
-        stdout_capture="$(printf '%s' "$payload" | env $extra_env YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$tmp" bash "$HOOKS/$hook" 2>/dev/null)" || actual_rc=$?
+        stdout_capture="$(printf '%s' "$payload" | env $extra_env YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$cpd" bash "$HOOKS/$hook" 2>/dev/null)" || actual_rc=$?
     else
-        stdout_capture="$(printf '%s' "$payload" | YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$tmp" bash "$HOOKS/$hook" 2>/dev/null)" || actual_rc=$?
+        stdout_capture="$(printf '%s' "$payload" | YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$cpd" bash "$HOOKS/$hook" 2>/dev/null)" || actual_rc=$?
     fi
 
     # Verify rc
@@ -235,6 +244,52 @@ setup_with_bypass() {
 EOF
 }
 
+setup_allowlist_bypass_narrow_scope() {
+    # A hook-bypass.md entry for path-allowlist, but scoped to one
+    # unrelated file — security review R2-3, round 3: before the fix, an
+    # empty probe scope in the degraded-input check matched ANY entry for
+    # the hook, so this narrow, unrelated entry would have silently
+    # disabled path-allowlist's fail-closed behavior for every future
+    # degraded-input event. Must NOT cover a degraded-input event.
+    mkdir -p "$1/work/current"
+    cat > "$1/work/current/hook-bypass.md" <<EOF
+# Active hook bypasses
+
+## Active entries
+
+## bypass:narrow-scope-fixture
+
+**Hook:** path-allowlist
+**Reason:** test fixture — narrow scope, unrelated to degraded input
+**Approved by:** TestSuite
+**Created:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**Expires:** $(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+**Scope:** api/legacy/vendor.pem
+**Follow-up:** none — fixture only
+EOF
+}
+
+setup_allowlist_bypass_degraded_input_scope() {
+    # The explicit sentinel scope (security review R2-3, round 3) — this
+    # one DOES cover a degraded-input event, on purpose.
+    mkdir -p "$1/work/current"
+    cat > "$1/work/current/hook-bypass.md" <<EOF
+# Active hook bypasses
+
+## Active entries
+
+## bypass:degraded-input-fixture
+
+**Hook:** path-allowlist
+**Reason:** test fixture — explicit degraded-input opt-in
+**Approved by:** TestSuite
+**Created:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**Expires:** $(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+**Scope:** degraded-input
+**Follow-up:** none — fixture only
+EOF
+}
+
 setup_with_decisions_stale() {
     mkdir -p "$1/work/current"
     # Touch decisions.md as 3h old
@@ -294,6 +349,17 @@ EOF
     cat > "$1/work/current/.budget-state.json" <<EOF
 {"session_id":"fixture-generic-tool-0001","started_at":$(date +%s),"tool_call_count":1,"last_tool":"Read","last_tool_run_count":1}
 EOF
+}
+
+setup_supervisor_findings_critical() {
+    # A supervisor-findings.ndjson with one CRITICAL finding — the state
+    # that makes supervisor-gate.sh reach its unguarded `jq -r` calls
+    # (security review R2-2, round 3). block_on_critical isn't relevant
+    # to this fixture: with jq missing, the escape hatch fires before the
+    # hook ever gets far enough to read that config value.
+    mkdir -p "$1/work/current"
+    echo '{"ts":"2026-09-20T00:00:00Z","overall":"CRITICAL","rationale":"fixture","recommended_action":"halt"}' \
+        > "$1/work/current/supervisor-findings.ndjson"
 }
 
 setup_budget_headroom() {
@@ -383,6 +449,22 @@ case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlis
 # an empty pipe and a non-object JSON payload must both fail closed.
 case_check path-allowlist.sh   pretooluse-write-empty-stdin.json      2 path-allowlist setup_allowlist_strict
 case_check path-allowlist.sh   pretooluse-json-array-not-object.json  2 path-allowlist setup_allowlist_strict
+# R2-1 (round 3, regression from round 1): a trailing slash on
+# CLAUDE_PROJECT_DIR must not defeat the in-root prefix strip — the
+# pattern "$CLAUDE_PROJECT_DIR/*" becomes a literal double-slash
+# requirement otherwise, so rel_file stays absolute and the N1 guard
+# refuses every in-root write. cpd_suffix="/" appends the trailing slash
+# to CLAUDE_PROJECT_DIR only (not to the fixture's embedded path).
+case_check path-allowlist.sh   pretooluse-write-inroot-via-placeholder.json 0 path-allowlist setup_allowlist_notebook "" "/"
+# R2-5 (round 3, cosmetic): a file_path exactly equal to the project root
+# must block (you can't write a file over a directory) with an accurate
+# reason, not the generic "absolute and outside the project root" one.
+case_check path-allowlist.sh   pretooluse-write-root-equal.json 2 path-allowlist setup_allowlist_notebook
+# R2-3 (round 3): the degraded-input bypass now requires the explicit
+# "degraded-input" Scope sentinel — a bypass entry scoped to an unrelated
+# file must NOT cover a degraded-input event.
+case_check path-allowlist.sh   pretooluse-write-empty-stdin.json 2 path-allowlist setup_allowlist_bypass_narrow_scope
+case_check path-allowlist.sh   pretooluse-write-empty-stdin.json 0 path-allowlist setup_allowlist_bypass_degraded_input_scope
 
 # --- path-log ---
 case_check path-log.sh         pretooluse-edit-api.json          0 path-log
@@ -433,6 +515,15 @@ case_check secret-scan.sh      pretooluse-edit-newstring-number-secret-content.j
 # array) — must not crash the scan, and a real secret in .new_source
 # (NotebookEdit) must still be caught.
 case_check secret-scan.sh      pretooluse-notebookedit-edits-object-secret-newsource.json 2 secret-scan
+# R2-4 (round 3): a secret inside an array of strings, or an array-valued
+# .new_source (the canonical shape of a Jupyter cell's `source`), used to
+# be DROPPED by the round-2 select(type=="string") per-field filter — the
+# recursive `.. | strings` walk must catch both. A payload with no
+# scannable content at all must still pass, AND leave a REPORT record
+# (previously a bare exit 0 with no log at all).
+case_check secret-scan.sh      pretooluse-write-content-array-secret.json 2 secret-scan
+case_check secret-scan.sh      pretooluse-notebookedit-newsource-array-secret.json 2 secret-scan
+case_check secret-scan.sh      pretooluse-edit-no-content-fields.json 0 secret-scan
 
 # --- budget-guard ---
 # Previously had zero shell fixtures (Go unit test only, per the security
@@ -445,12 +536,25 @@ case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard 
 # hook where a missing jq previously locked an operator out of the whole
 # session. Its own emergency var, YAKOS_BUDGET_DISABLE, is now checked
 # BEFORE hi_init, so it must reach the hook even with jq missing (and the
-# hook exits before ever touching jq, so it's a clean rc=0 — unlike the
-# shared YAKOS_HOOKS_FAIL_OPEN switch, which only overrides hi_init's own
-# check and can't rescue this script's other direct `jq` calls further
-# down; that combination is intentionally not asserted here). With
-# NEITHER set (the case right above this one), missing jq still BLOCKs.
+# hook exits before ever touching jq, so it's a clean rc=0). With NEITHER
+# set (the case right above this one), missing jq still BLOCKs.
 case_check budget-guard.sh     pretooluse-generic-tool.json      0 "" setup_budget_low_cap_disabled "PATH=$NOJQ_PATH YAKOS_BUDGET_DISABLE=1"
+# R2-2 (round 3): YAKOS_HOOKS_FAIL_OPEN=1 lets execution continue past
+# hi_init with jq still missing, and this hook has no tool-name gate
+# (matcher "*"), so it used to reach an unguarded `jq -nc` downstream and
+# crash with "jq: command not found" / rc=127 on every tool call. Must
+# now be a clean rc=0 with no crash. This exact combination was
+# deliberately NOT asserted in round 2 (see the comment that used to sit
+# here) because it was known-broken; now fixed and locked in.
+case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard setup_budget_low_cap "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1"
+
+# --- supervisor-gate ---
+# R2-2 (round 3): a second, independent instance of the same defect class
+# as budget-guard above — supervisor-gate.sh has no tool-name gate either,
+# and reaches unguarded `jq -r` calls once a supervisor-findings.ndjson
+# file exists (a common state in an active session, not a rare edge
+# case). Same fix, same fixture shape.
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_supervisor_findings_critical "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1"
 
 # --- mailbox-mirror ---
 case_check mailbox-mirror.sh   sendmessage-peer.json             0 mailbox-mirror

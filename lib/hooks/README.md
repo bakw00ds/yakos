@@ -152,6 +152,29 @@ once, for any kind of degraded input, until unset. Prefer the narrower
 per-hook `*_DISABLE` var or a scoped `hook-bypass.md` entry when either
 one is enough.
 
+**The `hook-bypass.md` scope for a degraded-input override must be the
+literal sentinel `degraded-input`** (security review R2-3, round 3) — not
+empty, and not the file-scoped entry you might already have for that
+hook. `ho_check_bypass`'s `awk` treats an empty probe scope as "matches
+any entry for this hook," so before this fix a narrow bypass an operator
+wrote weeks ago for one unrelated file silently disabled that hook's
+fail-closed behavior for every future broken-`jq` session, without the
+operator ever intending that. See `lib/settings/hook-bypass.template.md`
+for the format.
+
+**Two hooks reach an unguarded `jq` call downstream of the escape
+hatch** (security review R2-2, round 3): `budget-guard.sh` (matcher
+`"*"`, no tool-name gate at all) and `supervisor-gate.sh` (no tool-name
+gate; reachable once a `supervisor-findings.ndjson` exists). Both now
+`command -v jq >/dev/null 2>&1 || exit 0` immediately after `hi_init`,
+so a recovered-but-still-missing `jq` degrades to a clean `exit 0`
+instead of an uncontrolled `jq: command not found` / `exit 127` on every
+matching event. `path-allowlist.sh`, `secret-scan.sh`,
+`supervisor-ack-gate.sh`, and `peer-claim.sh` don't need the same guard —
+each has a tool-name `case` gate immediately after `hi_init` that exits 0
+before reaching any further `jq` call when the tool name comes back
+empty (the degraded-input signature).
+
 ## Bypass mechanism
 
 Every hook checks `work/current/hook-bypass.md` before deciding to block.
