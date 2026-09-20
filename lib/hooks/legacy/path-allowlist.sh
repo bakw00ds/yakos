@@ -56,19 +56,26 @@ if [ -z "$file" ]; then
     exit 0
 fi
 
-# Normalize a trailing slash on CLAUDE_PROJECT_DIR once, up front (security
-# review R2-1, round 3): the prefix-strip case below requires an exact "/"
-# separator between the root and the rest of the path, so
-# CLAUDE_PROJECT_DIR=/proj/ (trailing slash — set by some wrappers/test
-# harnesses/operator shells, not just the bare form Claude Code sends) turns
-# the pattern into "/proj//*", which never matches. rel_file then stayed
-# absolute and the N1 guard below refused every single in-root Edit/Write
-# with "outside the project root" — a false-block-everything regression.
+# Normalize ALL trailing slashes on CLAUDE_PROJECT_DIR once, up front
+# (security review R2-1 / R3-1, rounds 3-4): the prefix-strip case below
+# requires an exact "/" separator between the root and the rest of the
+# path, so CLAUDE_PROJECT_DIR=/proj/ (trailing slash — set by some
+# wrappers/test harnesses/operator shells, not just the bare form Claude
+# Code sends) turns the pattern into "/proj//*", which never matches.
+# rel_file then stayed absolute and the N1 guard below refused every
+# single in-root Edit/Write with "outside the project root" — a
+# false-block-everything regression. A single `${VAR%/}` (round 3's fix)
+# only strips ONE trailing slash, so /proj// or /proj/// reproduced the
+# exact same false-block (R3-1) — loop until none remain. Never reduce
+# "/" itself to empty: the loop condition stops as soon as stripping one
+# more slash would no longer change the string, which for "/" happens
+# immediately (there's nothing before its own trailing slash to reveal).
 # Normalizing once here also fixes ALLOWLIST_FILE (which would otherwise
 # read "//.claude/...") and the M7 project_root fallback further down.
-if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
+while [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ "$CLAUDE_PROJECT_DIR" != "/" ] \
+      && [ "${CLAUDE_PROJECT_DIR%/}" != "$CLAUDE_PROJECT_DIR" ]; do
     CLAUDE_PROJECT_DIR="${CLAUDE_PROJECT_DIR%/}"
-fi
+done
 
 # Project-relative form for matching: strip the project dir prefix if present.
 # The expansion is double-quoted (security review N4.4 / SC2295): an

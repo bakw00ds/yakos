@@ -126,3 +126,54 @@ ho_check_bypass() {
         }
     ' "$bypass_file"
 }
+
+ho_check_bypass_exact() {
+    # Like ho_check_bypass, but the **Scope:** value must match <scope>
+    # EXACTLY (after trimming surrounding whitespace), not merely contain
+    # it as a substring.
+    #
+    # ho_check_bypass's substring matching is intentional and load-bearing
+    # for its normal callers — a path-scoped bypass like
+    # `Scope: src/auth/login.ts` is meant to match that path appearing
+    # anywhere in a longer candidate string, and the peer-claim idiom
+    # (`Scope: file=... peer=...`) relies on the same behavior. That is
+    # the wrong tool for an opt-in SENTINEL, though: a literal-string
+    # sentinel like "degraded-input" is meant to mean "the operator wrote
+    # this exact word on purpose," and under substring matching an
+    # unrelated Scope that happens to CONTAIN the sentinel — a real
+    # filename `api/degraded-input.go`, or the literal negation
+    # `not-degraded-input` — satisfied it too (security review R3-2,
+    # round 4), silently widening the opt-in exactly the way R2-3 already
+    # had to close once for the probe-scope side of this same check.
+    local hook="$1" scope="$2"
+    local bypass_file
+    if command -v yakos_bypass_file >/dev/null 2>&1; then
+        bypass_file="$(yakos_bypass_file)"
+    else
+        bypass_file="${CLAUDE_PROJECT_DIR:-.}/work/current/hook-bypass.md"
+    fi
+    [ -f "$bypass_file" ] || return 1
+
+    awk -v hook="$hook" -v scope="$scope" '
+        BEGIN { active=0; in_entry=0; ok_hook=0; ok_scope=0; found=0 }
+        /^##[[:space:]]+Active entries[[:space:]]*$/ { active=1; next }
+        active && /^##[[:space:]]+bypass:/ {
+            if (in_entry && ok_hook && ok_scope) found=1
+            in_entry=1; ok_hook=0; ok_scope=0; next
+        }
+        in_entry && /^\*\*Hook:\*\*/ {
+            line=$0; sub(/^\*\*Hook:\*\*[[:space:]]*/, "", line)
+            if (index(line, hook) > 0) ok_hook=1
+        }
+        in_entry && /^\*\*Scope:\*\*/ {
+            line=$0; sub(/^\*\*Scope:\*\*[[:space:]]*/, "", line)
+            gsub(/^[[:space:]]+/, "", line)
+            gsub(/[[:space:]]+$/, "", line)
+            if (line == scope) ok_scope=1
+        }
+        END {
+            if (in_entry && ok_hook && ok_scope) found=1
+            exit(found ? 0 : 1)
+        }
+    ' "$bypass_file"
+}

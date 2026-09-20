@@ -290,6 +290,32 @@ setup_allowlist_bypass_degraded_input_scope() {
 EOF
 }
 
+setup_allowlist_bypass_substring_collision_scope() {
+    # A Scope that CONTAINS the "degraded-input" sentinel as a substring
+    # (an ordinary filename) but does not equal it — security review
+    # R3-2, round 4: before the exact-match fix, this satisfied the
+    # degraded-input check via ho_check_bypass's substring semantics,
+    # even though the operator almost certainly meant an unrelated file
+    # bypass, not "yes, disable fail-closed behavior on broken input."
+    # Must NOT cover a degraded-input event.
+    mkdir -p "$1/work/current"
+    cat > "$1/work/current/hook-bypass.md" <<EOF
+# Active hook bypasses
+
+## Active entries
+
+## bypass:substring-collision-fixture
+
+**Hook:** path-allowlist
+**Reason:** test fixture — Scope contains the sentinel as a substring
+**Approved by:** TestSuite
+**Created:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**Expires:** $(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+**Scope:** api/degraded-input.go
+**Follow-up:** none — fixture only
+EOF
+}
+
 setup_with_decisions_stale() {
     mkdir -p "$1/work/current"
     # Touch decisions.md as 3h old
@@ -456,6 +482,10 @@ case_check path-allowlist.sh   pretooluse-json-array-not-object.json  2 path-all
 # refuses every in-root write. cpd_suffix="/" appends the trailing slash
 # to CLAUDE_PROJECT_DIR only (not to the fixture's embedded path).
 case_check path-allowlist.sh   pretooluse-write-inroot-via-placeholder.json 0 path-allowlist setup_allowlist_notebook "" "/"
+# R3-1 (round 4): a single `${VAR%/}` strips only ONE trailing slash, so
+# a doubled trailing slash reproduced the exact same R2-1 false-block.
+# The normalization loop must strip all of them.
+case_check path-allowlist.sh   pretooluse-write-inroot-via-placeholder.json 0 path-allowlist setup_allowlist_notebook "" "//"
 # R2-5 (round 3, cosmetic): a file_path exactly equal to the project root
 # must block (you can't write a file over a directory) with an accurate
 # reason, not the generic "absolute and outside the project root" one.
@@ -465,6 +495,10 @@ case_check path-allowlist.sh   pretooluse-write-root-equal.json 2 path-allowlist
 # file must NOT cover a degraded-input event.
 case_check path-allowlist.sh   pretooluse-write-empty-stdin.json 2 path-allowlist setup_allowlist_bypass_narrow_scope
 case_check path-allowlist.sh   pretooluse-write-empty-stdin.json 0 path-allowlist setup_allowlist_bypass_degraded_input_scope
+# R3-2 (round 4): the sentinel match must be EXACT, not substring — a
+# Scope that merely CONTAINS "degraded-input" (an ordinary filename) must
+# NOT cover a degraded-input event either.
+case_check path-allowlist.sh   pretooluse-write-empty-stdin.json 2 path-allowlist setup_allowlist_bypass_substring_collision_scope
 
 # --- path-log ---
 case_check path-log.sh         pretooluse-edit-api.json          0 path-log
@@ -524,6 +558,15 @@ case_check secret-scan.sh      pretooluse-notebookedit-edits-object-secret-newso
 case_check secret-scan.sh      pretooluse-write-content-array-secret.json 2 secret-scan
 case_check secret-scan.sh      pretooluse-notebookedit-newsource-array-secret.json 2 secret-scan
 case_check secret-scan.sh      pretooluse-edit-no-content-fields.json 0 secret-scan
+# R3-3 (round 4, regression from round 3): the R2-4 recursive walk
+# scanned .edits WHOLE, so a MultiEdit redacting a leaked secret (secret
+# only in old_string, clean new_string) was blocked, while the identical
+# single-Edit remediation passed — main never scanned old_string at all.
+# Scoping the walk to map(.new_string) makes both forms agree: a secret
+# being actively REMOVED is allowed in both, a secret being introduced
+# or left in a new_string is blocked in both.
+case_check secret-scan.sh      pretooluse-multiedit-secret-only-oldstring.json 0 secret-scan
+case_check secret-scan.sh      pretooluse-multiedit-secret-newstring.json      2 secret-scan
 
 # --- budget-guard ---
 # Previously had zero shell fixtures (Go unit test only, per the security

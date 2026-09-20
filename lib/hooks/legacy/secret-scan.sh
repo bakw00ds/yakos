@@ -50,24 +50,39 @@ file="$(hi_file_path)"
 # MultiEdit's edits[] is iterated in full (verified: this hook has never
 # had the "first-edit-only" bug some earlier notes suspected).
 #
-# `.. | strings` recurses into each of content/new_string/new_source/edits
-# and collects every string leaf, regardless of what shape the field
-# itself turns out to be (security review R2-4, round 3, superseding the
-# round-2 `select(type == "string")` per-field filter): a per-field filter
-# DROPPED a secret sitting inside an array of strings or a nested object
-# (round 2's own fix left this gap — M6 residue PARTIAL) — e.g.
-# `content: ["...", "AKIA..."]` or `new_source: ["line1", "AKIA..."]`
-# (a Jupyter cell's `source` is canonically an array of strings, so this
-# is a plausible real shape, not just a theoretical one). `.. | strings`
-# cannot error regardless of the value's shape (number, object, array,
-# null all just contribute zero string leaves), so the `jq` call itself
-# can now only fail for a reason unrelated to field shape. Note `.edits`
-# is walked in full, so an edit's `old_string` — the text being replaced,
-# not written — is scanned too; over-blocking here is the safe direction
-# (worst case, deleting a secret needs a bypass) and matches this file's
-# existing "deny stays conservative" precedent (H5b's basename fallback).
+# `.. | strings` recurses into each of content/new_string/new_source/the
+# WRITTEN half of edits and collects every string leaf, regardless of
+# what shape the field itself turns out to be (security review R2-4,
+# round 3, superseding the round-2 `select(type == "string")` per-field
+# filter): a per-field filter DROPPED a secret sitting inside an array of
+# strings or a nested object (round 2's own fix left this gap — M6
+# residue PARTIAL) — e.g. `content: ["...", "AKIA..."]` or
+# `new_source: ["line1", "AKIA..."]` (a Jupyter cell's `source` is
+# canonically an array of strings, so this is a plausible real shape, not
+# just a theoretical one). `.. | strings` cannot error regardless of the
+# value's shape (number, object, array, null all just contribute zero
+# string leaves), so the `jq` call itself can now only fail for a reason
+# unrelated to field shape.
+#
+# `.edits` is mapped to `.new_string` BEFORE the walk (security review
+# R3-3, round 4 — a regression the R2-4 fix introduced): walking `.edits`
+# whole also scanned each edit's `old_string` — the text being REPLACED,
+# not written — while a top-level Edit's `old_string` was never scanned.
+# That asymmetry blocked the natural incident-response move (MultiEdit
+# redacting several leaked-secret occurrences at once) while the
+# single-edit form of the identical remediation passed. Decision: scan
+# only what is actually being WRITTEN, consistently, for both tool
+# shapes — matching origin/main's original behavior (which never scanned
+# old_string at all) rather than the round-2 asymmetry. A secret an agent
+# is actively deleting is not a new leak; a secret it is introducing or
+# leaving in place is.
 if ! write_text="$(jq -r '
-    [.tool_input | (.content, .new_string, .new_source, .edits) | .. | strings]
+    [
+      .tool_input
+      | (.content, .new_string, .new_source,
+         ((.edits // []) | if type == "array" then map(.new_string) else [] end))
+      | .. | strings
+    ]
     | join("\n")
 ' <<< "$(hi_raw)" 2>/dev/null)"; then
     # jq itself failed in some other unforeseen way — degraded input, same

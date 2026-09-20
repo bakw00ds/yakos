@@ -49,12 +49,15 @@
 #   1. YAKOS_HOOKS_FAIL_OPEN=1 — a single documented, session-wide,
 #      emergency-only kill switch. Set it, fix jq, unset it.
 #   2. A work/current/hook-bypass.md entry with `**Hook:** <hookname>` AND
-#      `**Scope:** degraded-input` (checked via the awk-based
-#      ho_check_bypass, which needs no jq). The scope sentinel is required
-#      (security review R2-3, round 3) — an empty probe scope would
-#      otherwise match ANY entry for that hook, so a narrow bypass an
-#      operator wrote for one unrelated file would silently disable this
-#      hook's fail-closed behavior for every future degraded-input event.
+#      `**Scope:** degraded-input` EXACTLY (checked via the awk-based
+#      ho_check_bypass_exact, which needs no jq). The scope sentinel is
+#      required (security review R2-3, round 3) — an empty probe scope
+#      would otherwise match ANY entry for that hook, so a narrow bypass
+#      an operator wrote for one unrelated file would silently disable
+#      this hook's fail-closed behavior for every future degraded-input
+#      event. The match is exact, not substring (security review R3-2,
+#      round 4) — a Scope that merely contains the word (a filename like
+#      `api/degraded-input.go`) does not count.
 # Each hook's own `*_DISABLE` / `yakos_coord_enabled` check is ALSO moved
 # above its `hi_init` call so it's reachable even when jq is broken,
 # without needing either override above.
@@ -99,7 +102,17 @@ _hi_fail_or_warn() {
         # operator has to opt in to THIS specific override on purpose.
         # YAKOS_HOOKS_FAIL_OPEN=1 above already covers the genuine
         # emergency case, so this path can afford to be strict.
-        if command -v ho_check_bypass >/dev/null 2>&1 && ho_check_bypass "$name" "degraded-input"; then
+        #
+        # Security review R3-2 (round 4): ho_check_bypass's own substring
+        # matching (correct and load-bearing for its OTHER callers — see
+        # its comment in hook-output.sh) meant a Scope that merely
+        # CONTAINED "degraded-input" also satisfied this probe — an
+        # ordinary filename like `api/degraded-input.go`, or even the
+        # literal negation `not-degraded-input`. Use
+        # ho_check_bypass_exact instead, which requires the Scope value to
+        # equal the sentinel exactly, matching what
+        # hook-bypass.template.md has always documented.
+        if command -v ho_check_bypass_exact >/dev/null 2>&1 && ho_check_bypass_exact "$name" "degraded-input"; then
             if command -v ho_log >/dev/null 2>&1; then
                 ho_log "$name" "WARN" "pass" "degraded input ($reason) but hook-bypass.md override active (scope: degraded-input)" "{}" 2>/dev/null || true
             fi
