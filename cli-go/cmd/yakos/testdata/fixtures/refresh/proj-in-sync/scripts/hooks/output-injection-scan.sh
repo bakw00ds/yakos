@@ -27,11 +27,12 @@
 #     cli-go/internal/workflow/output_scan.go, never through Claude Code's
 #     hook dispatch): on match, BLOCK (exit 2 via ho_block). New in C1.
 #
-# Disabled when:
-#   - YAKOS_INJECTION_SCAN_DISABLE=1 (both invocation paths)
-#   - .yakos.yml has injection_scan.enabled: false (both invocation paths)
+# Disabled when (each switch is scoped to ONE path only, since R3 — see
+# the case-gate and disable-check comments below for why):
+#   - YAKOS_INJECTION_SCAN_DISABLE=1 (PostToolUse path only)
+#   - .yakos.yml has injection_scan.enabled: false (PostToolUse path only)
 #   - YAKOS_WORKFLOW_INJECTION_SCAN_DISABLE=1, set by the Flows engine's own
-#     caller (workflow path only; does not affect the PostToolUse path)
+#     caller (workflow path only)
 #
 # Patterns matched (case-insensitive):
 #   - "ignore (all|previous|prior) instructions"
@@ -52,19 +53,6 @@ HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 
 hi_init
 
-# Env / config disable
-if [ "${YAKOS_INJECTION_SCAN_DISABLE:-0}" = "1" ]; then
-    exit 0
-fi
-project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
-yakos_yml="$project_dir/.yakos.yml"
-if [ -f "$yakos_yml" ]; then
-    if grep -A 5 '^[[:space:]]*injection_scan:' "$yakos_yml" 2>/dev/null \
-        | grep -q '^[[:space:]]*enabled:[[:space:]]*false[[:space:]]*$'; then
-        exit 0
-    fi
-fi
-
 # Only relevant tools. Bash/Read/WebFetch are direct attack surfaces;
 # we also match anything MCP-shaped (mcp__*) which is the cross-runtime
 # dispatch surface yakOS opened in v0.31.
@@ -80,6 +68,17 @@ fi
 # the spliced content becomes another agent's instructions under
 # bypassPermissions — so this one case BLOCKS on a match (is_workflow=1
 # below) instead of the WARN-only behavior every other caller keeps.
+#
+# This case gate runs BEFORE the two disable checks below (R3,
+# s3-flows-security-review-2026-09-21.md): both of those switches predate
+# this change, were written to quiet the WARN-only PostToolUse path, and
+# used to make ANY caller — including a WorkflowNodeOutput call — exit 0
+# before reaching this gate. An operator who silenced a chatty warning on
+# the PostToolUse path had, invisibly, also disabled the blocking control
+# on a different code path. The workflow path has its own dedicated,
+# narrowly-scoped disable (YAKOS_WORKFLOW_INJECTION_SCAN_DISABLE, checked
+# in Go before this script is even launched) and must not honor either of
+# the two switches below.
 tool="$(hi_tool)"
 is_workflow=0
 case "$tool" in
@@ -88,6 +87,22 @@ case "$tool" in
     WorkflowNodeOutput) is_workflow=1 ;;
     *) exit 0 ;;
 esac
+
+# Env / config disable — WARN-path only (R3). Skipped entirely for the
+# workflow path; see the comment on the case gate above.
+if [ "$is_workflow" != "1" ]; then
+    if [ "${YAKOS_INJECTION_SCAN_DISABLE:-0}" = "1" ]; then
+        exit 0
+    fi
+    project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
+    yakos_yml="$project_dir/.yakos.yml"
+    if [ -f "$yakos_yml" ]; then
+        if grep -A 5 '^[[:space:]]*injection_scan:' "$yakos_yml" 2>/dev/null \
+            | grep -q '^[[:space:]]*enabled:[[:space:]]*false[[:space:]]*$'; then
+            exit 0
+        fi
+    fi
+fi
 
 # PostToolUse payload carries the tool result. Pull it.
 output="$(hi_raw 2>/dev/null | jq -r '.tool_response // .tool_result // empty' 2>/dev/null | head -c 50000 || true)"
@@ -145,10 +160,19 @@ if printf '%s' "$output" | grep -qE '(sk-ant-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}
     add_match "leaked-api-key-shape"
 fi
 
-# Pattern 9: long base64 blob (potential encoded payload). Conservative
-# threshold: 400+ base64 chars in a single match. Most legit base64
-# in normal tool output is shorter (icons, hashes, etc.).
-if printf '%s' "$output" | grep -qE '[A-Za-z0-9+/]{400,}={0,2}'; then
+# Pattern 9: long base64 blob (potential encoded payload). Threshold:
+# 255+ base64 chars in a single match — still well above any incidental
+# base64 in normal tool output (icons, hashes, etc.).
+#
+# R7 (s3-flows-security-review-2026-09-21.md): the original {400,} bound
+# silently never fired on any BSD grep (macOS's system grep included) —
+# "maximum repetition exceeds 255" is printed to stderr and the command
+# exits non-zero, which the surrounding `if` swallows with no error
+# surfaced anywhere, so pattern 9 was dead on this platform since it
+# shipped. {255,} is the largest bound BSD grep's regex engine (RE_DUP_MAX)
+# accepts, and matches identically to {400,} under GNU grep for any input
+# actually long enough to trip either bound.
+if printf '%s' "$output" | grep -qE '[A-Za-z0-9+/]{255,}={0,2}'; then
     add_match "long-base64-payload"
 fi
 
