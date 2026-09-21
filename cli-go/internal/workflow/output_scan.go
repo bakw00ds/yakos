@@ -77,12 +77,22 @@ type OutputScanFunc func(ctx context.Context, nodeID, agent string, output []byt
 // NewOutputInjectionScanFunc returns the production OutputScanFunc, which
 // shells out to lib/hooks/output-injection-scan.sh under yakosRoot.
 //
+// project is the workflow's project directory (Engine.Project). It is set
+// as both the subprocess's working directory and its CLAUDE_PROJECT_DIR
+// env var (R3, s3-flows-security-review-2026-09-21.md): without it, the
+// script's own `${CLAUDE_PROJECT_DIR:-$PWD}` fallback resolves against
+// whatever directory the daemon happens to be running in — not the
+// workflow's actual project — for both its .yakos.yml lookup and its log
+// directory. project may be empty (some callers may not have one); the
+// script falls back to its own process cwd in that case, exactly as
+// before this fix.
+//
 // A nil error from the returned func means "the scan ran clean" OR
 // "scanning was explicitly skipped" (disabled via env, or the emergency
 // fail-open override was used because the hook infrastructure itself could
 // not be reached) — every skip path is logged to stderr, so it is never a
 // silent pass.
-func NewOutputInjectionScanFunc(yakosRoot string) OutputScanFunc {
+func NewOutputInjectionScanFunc(yakosRoot, project string) OutputScanFunc {
 	return func(ctx context.Context, nodeID, _ string, output []byte) error {
 		if os.Getenv(envWorkflowScanDisable) == "1" {
 			return nil
@@ -107,11 +117,17 @@ func NewOutputInjectionScanFunc(yakosRoot string) OutputScanFunc {
 
 		cmd := exec.CommandContext(scanCtx, "bash", hookPath) //nolint:gosec
 		cmd.Stdin = bytes.NewReader(payload)
-		// HOOK_FAIL_CLOSED=1 is set on THIS exec.Cmd's own Env slice only
-		// (built from os.Environ(), not os.Setenv) — it cannot affect any
-		// other invocation of this script, including a live Claude Code
-		// session's own PostToolUse call to the exact same file.
-		cmd.Env = append(os.Environ(), "HOOK_FAIL_CLOSED=1")
+		// cmd.Dir: empty string means "inherit the calling process's cwd"
+		// (Go's documented default), so this is safe even when project=="".
+		cmd.Dir = project
+		// HOOK_FAIL_CLOSED=1 and CLAUDE_PROJECT_DIR are set on THIS
+		// exec.Cmd's own Env slice only (built from os.Environ(), not
+		// os.Setenv) — neither can affect any other invocation of this
+		// script, including a live Claude Code session's own PostToolUse
+		// call to the exact same file. An empty project value here still
+		// takes the script's own "${CLAUDE_PROJECT_DIR:-$PWD}" fallback
+		// (POSIX ":-" triggers on empty as well as unset).
+		cmd.Env = append(os.Environ(), "HOOK_FAIL_CLOSED=1", "CLAUDE_PROJECT_DIR="+project)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 
