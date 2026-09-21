@@ -17,6 +17,9 @@ package dispatch
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bakw00ds/yakos/internal/netid"
@@ -355,6 +358,13 @@ func TestRunStream_UnauthenticatedIdentity_OperatorID_Preserved(t *testing.T) {
 // cwd for the dispatched agent (which would widen tool scope to everything
 // the operator's user account can read or write). Populated=false so the
 // role gate does not fire first.
+//
+// Round-2 review R6: the original version of this test asserted only
+// `err == nil -> Fatal`. Run() also fails for the UNRELATED reason of
+// "any" not existing in the composed agent roster
+// (`dispatch: agent "any" not found in composed set`), so the test passed
+// even with validateProjectPath's call sites removed entirely and would not
+// have caught that regression. Asserting the actual message closes that.
 func TestRun_RejectsFilesystemRootProject(t *testing.T) {
 	logDir := isolatedLogDir(t)
 	svc := NewService(ServiceConfig{
@@ -367,18 +377,103 @@ func TestRun_RejectsFilesystemRootProject(t *testing.T) {
 		Task:    "do something",
 		Project: "/",
 	})
-	if err == nil {
-		t.Fatal("Run with Project=\"/\": want error, got nil")
+	if err == nil || !strings.Contains(err.Error(), "must not be the filesystem root") {
+		t.Fatalf("Run with Project=%q: got %v; want filesystem-root rejection", "/", err)
 	}
 }
 
-// TestRun_AllowsOrdinaryProjectPath verifies the L8 fix does not overtighten
-// -- an ordinary project directory (the whole point of this field) must
-// still be accepted at the validation layer (the call may still fail later
-// for unrelated reasons, e.g. no roster; we only assert it's not rejected
-// as a root path).
+// TestRun_RejectsBroadScopeDirs is the R6 regression proper: the original
+// validator rejected only the literal string "/", so a caller who wanted
+// "/" and got rejected could pass "/Users" (or "/home", "/etc", ...) and
+// obtain an effectively equivalent scope -- every local user's files,
+// commonly including SSH keys and every other project on the machine. Each
+// of these must now be rejected too, with the broad-scope message (not the
+// literal-root message, which broadScopeDirs is a distinct check from).
+func TestRun_RejectsBroadScopeDirs(t *testing.T) {
+	logDir := isolatedLogDir(t)
+	svc := NewService(ServiceConfig{
+		YakosRoot:     logDir,
+		WorkspaceRoot: logDir,
+	})
+
+	for _, project := range []string{"/Users", "/home", "/etc", "/private", "/tmp"} {
+		t.Run(project, func(t *testing.T) {
+			_, _, err := svc.Run(context.Background(), Params{
+				Agent:   "any",
+				Task:    "do something",
+				Project: project,
+			})
+			if err == nil || !strings.Contains(err.Error(), "scope materially equivalent to the filesystem root") {
+				t.Fatalf("Run with Project=%q: got %v; want broad-scope rejection", project, err)
+			}
+		})
+	}
+}
+
+// TestRun_RejectsRelativeDotDotEscapingToRoot is the R6 relative-path
+// regression: a relative ".." value was previously accepted unresolved and
+// escaped against the DAEMON's cwd rather than being validated as the
+// caller intended. Resolving to an absolute path before the check closes
+// this for the concrete case where the relative path resolves onto a
+// broad-scope directory.
+func TestRun_RejectsRelativeDotDotEscapingToRoot(t *testing.T) {
+	logDir := isolatedLogDir(t)
+	svc := NewService(ServiceConfig{
+		YakosRoot:     logDir,
+		WorkspaceRoot: logDir,
+	})
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	// Enough ".." segments to reach the filesystem root from the daemon's
+	// actual working directory, regardless of how deep the test runner's
+	// cwd happens to be.
+	depth := strings.Count(filepath.Clean(wd), string(filepath.Separator))
+	dotdot := strings.Repeat(".."+string(filepath.Separator), depth+2)
+
+	_, _, runErr := svc.Run(context.Background(), Params{
+		Agent:   "any",
+		Task:    "do something",
+		Project: dotdot,
+	})
+	if runErr == nil || !strings.Contains(runErr.Error(), "invalid project") {
+		t.Fatalf("Run with Project=%q (relative escape to root): got %v; want a project-validation rejection", dotdot, runErr)
+	}
+}
+
+// TestRun_AllowsOrdinaryProjectPath verifies the L8/R6 fix does not
+// overtighten -- an ordinary project directory (the whole point of this
+// field) must still be accepted, all the way through to Run/RunStream, not
+// just at the validator function in isolation. Round-2 review R6: the
+// original version of this test called validateProjectPath directly and
+// never called Run despite its name, so it could not catch a regression in
+// how Run wires the validator in. This drives it through svc.Run/RunStream
+// with a real ordinary temp-dir path and asserts the failure (there will be
+// one, since "any" is not a real agent) is NOT a project-validation
+// rejection.
 func TestRun_AllowsOrdinaryProjectPath(t *testing.T) {
-	if err := validateProjectPath("/Users/op/projects/myapp"); err != nil {
+	logDir := isolatedLogDir(t)
+	svc := NewService(ServiceConfig{
+		YakosRoot:     logDir,
+		WorkspaceRoot: logDir,
+	})
+	ordinary := filepath.Join(t.TempDir(), "myapp")
+	if err := os.MkdirAll(ordinary, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:   "any",
+		Task:    "do something",
+		Project: ordinary,
+	})
+	if err != nil && strings.Contains(err.Error(), "invalid project") {
+		t.Errorf("Run with an ordinary project path %q was rejected as invalid: %v", ordinary, err)
+	}
+
+	if err := validateProjectPath(ordinary); err != nil {
 		t.Errorf("validateProjectPath(ordinary path): want nil, got %v", err)
 	}
 	if err := validateProjectPath(""); err != nil {
@@ -400,8 +495,8 @@ func TestRunStream_RejectsFilesystemRootProject(t *testing.T) {
 		Task:    "do something",
 		Project: "/",
 	}, func(StreamChunk) {})
-	if err == nil {
-		t.Fatal("RunStream with Project=\"/\": want error, got nil")
+	if err == nil || !strings.Contains(err.Error(), "must not be the filesystem root") {
+		t.Fatalf("RunStream with Project=%q: got %v; want filesystem-root rejection", "/", err)
 	}
 }
 
