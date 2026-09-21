@@ -72,10 +72,11 @@ type terminalSessionManager interface {
 	Subscribe(sessionId string, outputFn func([]byte), exitFn func(int)) (func(), error)
 	SendInput(sessionId, operatorID string, data []byte) error
 	SendResize(sessionId, operatorID string, cols, rows uint16) error
-	// ClaimOwner records operatorID as the session's owner on first attach and
-	// verifies the match on every subsequent attach (H2). Callers must call
-	// this before Subscribe and must deny the attach — never subscribing —
-	// on error.
+	// ClaimOwner verifies operatorID against the owner recorded at
+	// registration time and denies the attach (ErrUnowned) if no owner was
+	// recorded (H2, R3). It does not grant ownership on first attach.
+	// Callers must call this before Subscribe and must deny the attach —
+	// never subscribing — on error.
 	ClaimOwner(sessionId, operatorID string) error
 }
 
@@ -176,8 +177,11 @@ func makeTermWSFunc(termMgr terminalSessionManager) websocket.Handler {
 		// shell, and read up to 512 KB of that operator's prior terminal
 		// output via scrollback replay. ClaimOwner denies the attach entirely
 		// — before Subscribe, so there is no replay — when a different
-		// operator already owns the session. The same operator (or the first
-		// attacher, when no owner is recorded yet) is always allowed through.
+		// operator already owns the session. Ownership is set once, at
+		// registration time (not on first attach, per R3); a session with no
+		// recorded owner is denied (fail closed, ErrUnowned), never claimed
+		// by whoever attaches first. Only the operator recorded at
+		// registration is ever allowed through.
 		if err := termMgr.ClaimOwner(sessionId, id.OperatorID); err != nil {
 			_ = sendWSBinary(conn, []byte{0x01, 0x00, 0x00, 0x00, 0x01})
 			slog.Warn("consoleui: /v1/term: owner lock denied attach",

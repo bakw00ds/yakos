@@ -118,6 +118,14 @@ func isAllowlistedEnvKey(key string) bool {
 // next one the CLI adds.
 type runtimeEnvSpec struct {
 	prefixes []string
+	// exact holds case-insensitive exact-name matches for narrow
+	// allowances that a full prefix would over-capture (round-2 review
+	// N3): e.g. claude's Vertex support needs GOOGLE_APPLICATION_CREDENTIALS
+	// and GOOGLE_CLOUD_PROJECT specifically, but a bare "GOOGLE_" prefix
+	// also matches GOOGLE_API_KEY (the Gemini API key), handing that
+	// credential to the Anthropic CLI on every claude dispatch whenever an
+	// operator has Gemini configured.
+	exact []string
 }
 
 func (s runtimeEnvSpec) allows(key string) bool {
@@ -127,20 +135,35 @@ func (s runtimeEnvSpec) allows(key string) bool {
 			return true
 		}
 	}
+	for _, e := range s.exact {
+		if k == strings.ToUpper(e) {
+			return true
+		}
+	}
 	return false
 }
 
 // claudeEnvSpec: ANTHROPIC_* covers the API key, ANTHROPIC_BASE_URL (private
-// gateway relocation), ANTHROPIC_AUTH_TOKEN (non-API-key auth mode), and
-// ANTHROPIC_CUSTOM_HEADERS. CLAUDE_* covers CLAUDE_CONFIG_DIR and every
-// CLAUDE_CODE_* flag (including the Bedrock/Vertex deployment switches
-// CLAUDE_CODE_USE_BEDROCK/CLAUDE_CODE_USE_VERTEX). AWS_*/GOOGLE_*/GCLOUD_*/
-// CLOUD_ML_REGION/AZURE_* are the credential families those Bedrock/Vertex/
-// Foundry deployment modes need once selected.
+// gateway relocation), ANTHROPIC_AUTH_TOKEN (non-API-key auth mode),
+// ANTHROPIC_CUSTOM_HEADERS, and ANTHROPIC_VERTEX_PROJECT_ID. CLAUDE_* covers
+// CLAUDE_CONFIG_DIR and every CLAUDE_CODE_* flag (including the
+// Bedrock/Vertex deployment switches CLAUDE_CODE_USE_BEDROCK/
+// CLAUDE_CODE_USE_VERTEX). AWS_*/AZURE_* are the credential families the
+// Bedrock/Foundry deployment modes need once selected.
+//
+// Vertex needs three more names, listed exactly rather than by prefix
+// (round-2 review N3): a bare "GOOGLE_" prefix also captures
+// GOOGLE_API_KEY, the Gemini API key — narrow but real over-capture of the
+// exact M4 class this allowlist exists to close, since claude's CLI never
+// reads GOOGLE_API_KEY. GCLOUD_* was dropped outright: nothing in Claude
+// Code's Vertex support reads a GCLOUD_-prefixed variable.
 var claudeEnvSpec = runtimeEnvSpec{
 	prefixes: []string{
 		"ANTHROPIC_", "CLAUDE_",
-		"AWS_", "GOOGLE_", "GCLOUD_", "CLOUD_ML_REGION", "AZURE_",
+		"AWS_", "AZURE_",
+	},
+	exact: []string{
+		"GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "CLOUD_ML_REGION",
 	},
 }
 

@@ -152,16 +152,25 @@ type StatusReadResponse struct {
 // RefreshRunRequest is the request for Refresh.Run.
 //
 // SECURITY (round-2 review R5, M2 follow-up, security-review-2026-09-14.md):
-// this field used to be named DryRun (proto field dry_run). A proto3 scalar
-// bool has no wire-presence bit, so "omitted" and "false" are
-// indistinguishable — the zero value (false) meant APPLY, so an entirely
-// omitted request already wrote hook scripts, settings.json, and agent
-// symlinks across every project under $HOME/agent-control. Renamed to Apply
-// (destructive = true, explicit) so the zero value is safe by construction,
-// with no default state left that means write. Field number 1 is reused
-// (dry_run and apply are exclusive; no client should ever send both).
+// this field used to be named DryRun (proto field dry_run, field number 1).
+// A proto3 scalar bool has no wire-presence bit, so "omitted" and "false"
+// are indistinguishable — the zero value (false) meant APPLY, so an
+// entirely omitted request already wrote hook scripts, settings.json, and
+// agent symlinks across every project under $HOME/agent-control. Renamed to
+// Apply (destructive = true, explicit) so the zero value is safe by
+// construction, with no default state left that means write.
+//
+// Field number 1 (dry_run) is retired, not reused (round-2 review N9): under
+// a real protobuf wire codec, reusing number 1 with inverted semantics would
+// let an old client's explicit, safe `dry_run = true` decode as
+// `apply = true` and write. This JSON codec (internal/grpcserver) keys on
+// field name, not number, so the collision is not reachable today — but the
+// .proto is the published contract for any future real-protobuf client, so
+// it reserves 1 and "dry_run" and assigns Apply field number 3. Hand-edited
+// to match proto/yakos/v1/yakos.proto; see that file's header for why this
+// .pb.go is hand-maintained rather than protoc-generated.
 type RefreshRunRequest struct {
-	Apply bool `json:"apply,omitempty"` // field 1 (was dry_run; semantics inverted, see above)
+	Apply bool `json:"apply,omitempty"` // field 3 (dry_run/field 1 retired, see above)
 	// Scope selects how many projects a write reaches. "" (default) or
 	// "project" limits repair to the server-configured WorkspaceRoot only;
 	// "all" reaches every project under $HOME/agent-control — a much

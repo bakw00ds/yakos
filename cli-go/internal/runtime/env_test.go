@@ -254,6 +254,43 @@ func TestClaudeEnvSpec_KeepsGatewayAndDeploymentVars(t *testing.T) {
 	}
 }
 
+// TestClaudeEnvSpec_VertexExactNamesNotBroadPrefix is the round-2 review N3
+// regression: claude's Vertex support needs GOOGLE_APPLICATION_CREDENTIALS,
+// GOOGLE_CLOUD_PROJECT, and CLOUD_ML_REGION specifically, listed as exact
+// names — not a bare "GOOGLE_"/"GCLOUD_" prefix, which also captures
+// GOOGLE_API_KEY (the Gemini API key). Before the fix, an operator
+// configured for Gemini handed that key to the Anthropic CLI on every
+// claude dispatch. agy's own GOOGLE_* prefix is unaffected: GOOGLE_API_KEY
+// must still reach agy, since that is the runtime that actually reads it.
+func TestClaudeEnvSpec_VertexExactNamesNotBroadPrefix(t *testing.T) {
+	t.Setenv("GOOGLE_API_KEY", "gemini-key-should-not-reach-claude")
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/etc/gcp/creds.json")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "my-vertex-project")
+	t.Setenv("CLOUD_ML_REGION", "us-central1")
+
+	claudeEnv := buildEnv(DispatchRequest{})
+	if hasEnvKey(claudeEnv, "GOOGLE_API_KEY") {
+		t.Error("buildEnv (claude): GOOGLE_API_KEY leaked (N3 regression: Gemini key reaching the Anthropic CLI)")
+	}
+	for _, key := range []string{"GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "CLOUD_ML_REGION"} {
+		if !hasEnvKey(claudeEnv, key) {
+			t.Errorf("buildEnv (claude): %s missing (needed for Vertex deployment)", key)
+		}
+	}
+
+	// GCLOUD_-prefixed vars are dropped outright for claude (nothing in
+	// Claude Code's Vertex support reads one).
+	t.Setenv("GCLOUD_PROJECT", "should-not-reach-claude")
+	if hasEnvKey(buildEnv(DispatchRequest{}), "GCLOUD_PROJECT") {
+		t.Error("buildEnv (claude): GCLOUD_PROJECT leaked — GCLOUD_* prefix should be gone from claudeEnvSpec")
+	}
+
+	// agy still gets GOOGLE_API_KEY — it is the runtime that reads it.
+	if !hasEnvKey(buildEnvAgy(DispatchRequest{}), "GOOGLE_API_KEY") {
+		t.Error("buildEnvAgy: GOOGLE_API_KEY missing — agy's GOOGLE_* namespace must be unaffected by the claude-side narrowing")
+	}
+}
+
 // TestFilterEnv_PassthroughEscapeHatch verifies YAKOS_DISPATCH_ENV_PASSTHROUGH
 // forwards additional operator-named variables (exact name or "PREFIX*")
 // regardless of the static allowlist, and that it forwards nothing when unset.
