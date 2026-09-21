@@ -237,7 +237,7 @@ func TestPushTransportP2_E2E_Input(t *testing.T) {
 
 	const sessionID = "p2-e2e-input"
 	argv := []string{"/bin/sh"}
-	if err := mgr.RegisterExternalSession(sessionID, "/tmp", argv); err != nil {
+	if err := mgr.RegisterExternalSession(sessionID, "/tmp", argv, "test-owner"); err != nil {
 		t.Fatalf("RegisterExternalSession: %v", err)
 	}
 
@@ -352,7 +352,7 @@ func TestPushTransportP2_E2E_Input(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// ---- Send 0x10 keystroke "echo hi\n" via mgr.SendInput -------------------
-	if err := mgr.SendInput(sessionID, []byte("echo hi\n")); err != nil {
+	if err := mgr.SendInput(sessionID, "test-owner", []byte("echo hi\n")); err != nil {
 		t.Fatalf("SendInput: %v", err)
 	}
 
@@ -424,7 +424,7 @@ func TestPushTransportP2_E2E_Resize(t *testing.T) {
 	defer mgr.Stop()
 
 	const sessionID = "p2-e2e-resize"
-	if err := mgr.RegisterExternalSession(sessionID, "/tmp", []string{"/bin/sh"}); err != nil {
+	if err := mgr.RegisterExternalSession(sessionID, "/tmp", []string{"/bin/sh"}, "test-owner"); err != nil {
 		t.Fatalf("RegisterExternalSession: %v", err)
 	}
 
@@ -501,7 +501,7 @@ func TestPushTransportP2_E2E_Resize(t *testing.T) {
 
 	// Send resize via mgr.SendResize.
 	const wantCols, wantRows = uint16(100), uint16(30)
-	if err := mgr.SendResize(sessionID, wantCols, wantRows); err != nil {
+	if err := mgr.SendResize(sessionID, "test-owner", wantCols, wantRows); err != nil {
 		t.Fatalf("SendResize: %v", err)
 	}
 

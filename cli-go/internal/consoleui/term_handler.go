@@ -1,6 +1,6 @@
 // Package consoleui — term_handler.go
 //
-// GET /api/term — list active terminal sessions for the current workspace.
+// GET /api/term — list active terminal sessions OWNED BY THE CALLER.
 // Returns a JSON array of SessionMeta objects.
 // Requires RoleAdmin; wired only when TerminalManager is non-nil.
 //
@@ -23,18 +23,34 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/terminalmanager"
 )
 
-// handleTerm serves GET /api/term — list active terminal sessions.
-// Auth is enforced by requireRoleFunc(RoleAdmin) at the route level.
+// handleTerm serves GET /api/term — list active terminal sessions owned by
+// the calling operator. Auth is enforced by requireRoleFunc(RoleAdmin) at
+// the route level.
+//
+// SECURITY (round-2 review R18): this used to call Manager.List(), returning
+// EVERY operator's session metadata (including argv, which routinely
+// contains --permission-mode bypassPermissions, and the absolute workspace
+// path) to any RoleAdmin identity — exactly the discovery step the H2
+// finding's exploit depends on ("list session IDs, then attach to someone
+// else's"). Now scoped to ListForOperator(id.OperatorID). On loopback every
+// request is stamped with the SAME stable operator ID
+// (netid/server.go's loopbackTrusted path), and every session was
+// registered under that identical ID at creation (RegisterExternalSession,
+// R3), so this is a no-op there — the single loopback operator still sees
+// all of their own sessions. It only changes behavior on the networked
+// bind, where distinct admin identities now see only their own sessions.
 func (s *Server) handleTerm(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	sessions := s.cfg.TerminalManager.List()
+	id := netid.IdentityFrom(r.Context())
+	sessions := s.cfg.TerminalManager.ListForOperator(id.OperatorID)
 	// Always return an array, never null.
 	if sessions == nil {
 		sessions = []terminalmanager.SessionMeta{}

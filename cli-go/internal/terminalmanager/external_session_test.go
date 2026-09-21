@@ -17,7 +17,7 @@ func TestExternalSession_RegisterAndSubscribe(t *testing.T) {
 	defer mgr.Stop()
 
 	const sessionID = "ext-test-001"
-	if err := mgr.RegisterExternalSession(sessionID, "/workspace", []string{"claude"}); err != nil {
+	if err := mgr.RegisterExternalSession(sessionID, "/workspace", []string{"claude"}, "test-owner"); err != nil {
 		t.Fatalf("RegisterExternalSession: %v", err)
 	}
 
@@ -96,7 +96,7 @@ func TestExternalSession_FanOut(t *testing.T) {
 	defer mgr.Stop()
 
 	const sessionID = "ext-fanout-001"
-	if err := mgr.RegisterExternalSession(sessionID, "/workspace", nil); err != nil {
+	if err := mgr.RegisterExternalSession(sessionID, "/workspace", nil, "test-owner"); err != nil {
 		t.Fatalf("RegisterExternalSession: %v", err)
 	}
 
@@ -145,7 +145,7 @@ func TestExternalSession_CloseExternal(t *testing.T) {
 	defer mgr.Stop()
 
 	const sessionID = "ext-close-001"
-	if err := mgr.RegisterExternalSession(sessionID, "/workspace", nil); err != nil {
+	if err := mgr.RegisterExternalSession(sessionID, "/workspace", nil, "test-owner"); err != nil {
 		t.Fatalf("RegisterExternalSession: %v", err)
 	}
 
@@ -187,13 +187,13 @@ func TestExternalSession_CapIncludesExternal(t *testing.T) {
 	mgr := New(ctx, Config{Cap: 2})
 	defer mgr.Stop()
 
-	if err := mgr.RegisterExternalSession("ext-cap-1", "/w", nil); err != nil {
+	if err := mgr.RegisterExternalSession("ext-cap-1", "/w", nil, "test-owner"); err != nil {
 		t.Fatalf("first register: %v", err)
 	}
-	if err := mgr.RegisterExternalSession("ext-cap-2", "/w", nil); err != nil {
+	if err := mgr.RegisterExternalSession("ext-cap-2", "/w", nil, "test-owner"); err != nil {
 		t.Fatalf("second register: %v", err)
 	}
-	if err := mgr.RegisterExternalSession("ext-cap-3", "/w", nil); err != ErrCapExceeded {
+	if err := mgr.RegisterExternalSession("ext-cap-3", "/w", nil, "test-owner"); err != ErrCapExceeded {
 		t.Errorf("third register: want ErrCapExceeded, got %v", err)
 	}
 }
@@ -207,7 +207,7 @@ func TestExternalSession_ListIncludesExternal(t *testing.T) {
 	mgr := New(ctx, Config{Cap: 4})
 	defer mgr.Stop()
 
-	if err := mgr.RegisterExternalSession("list-ext-1", "/w1", []string{"claude"}); err != nil {
+	if err := mgr.RegisterExternalSession("list-ext-1", "/w1", []string{"claude"}, "test-owner"); err != nil {
 		t.Fatalf("RegisterExternalSession: %v", err)
 	}
 
@@ -232,7 +232,7 @@ func TestScrollback_LateJoin(t *testing.T) {
 	defer mgr.Stop()
 
 	const sessionID = "scroll-latejoin-001"
-	if err := mgr.RegisterExternalSession(sessionID, "/workspace", nil); err != nil {
+	if err := mgr.RegisterExternalSession(sessionID, "/workspace", nil, "test-owner"); err != nil {
 		t.Fatalf("RegisterExternalSession: %v", err)
 	}
 
@@ -280,7 +280,7 @@ func TestScrollback_CapEviction(t *testing.T) {
 	defer mgr.Stop()
 
 	const sessionID = "scroll-cap-001"
-	if err := mgr.RegisterExternalSession(sessionID, "/workspace", nil); err != nil {
+	if err := mgr.RegisterExternalSession(sessionID, "/workspace", nil, "test-owner"); err != nil {
 		t.Fatalf("RegisterExternalSession: %v", err)
 	}
 
@@ -344,7 +344,7 @@ func TestScrollback_Mixed(t *testing.T) {
 	defer mgr.Stop()
 
 	const sessionID = "scroll-mixed-001"
-	if err := mgr.RegisterExternalSession(sessionID, "/workspace", nil); err != nil {
+	if err := mgr.RegisterExternalSession(sessionID, "/workspace", nil, "test-owner"); err != nil {
 		t.Fatalf("RegisterExternalSession: %v", err)
 	}
 
@@ -438,7 +438,7 @@ func TestScrollback_NoLossAtJoin(t *testing.T) {
 	// Interleaving 1: push THEN subscribe.
 	t.Run("push-then-subscribe", func(t *testing.T) {
 		const sid = "no-loss-push-first"
-		if err := mgr.RegisterExternalSession(sid, "/w", nil); err != nil {
+		if err := mgr.RegisterExternalSession(sid, "/w", nil, "test-owner"); err != nil {
 			t.Fatalf("register: %v", err)
 		}
 		if err := mgr.PushOutput(sid, []byte("early")); err != nil {
@@ -455,7 +455,7 @@ func TestScrollback_NoLossAtJoin(t *testing.T) {
 	// Interleaving 2: subscribe THEN push.
 	t.Run("subscribe-then-push", func(t *testing.T) {
 		const sid = "no-loss-sub-first"
-		if err := mgr.RegisterExternalSession(sid, "/w", nil); err != nil {
+		if err := mgr.RegisterExternalSession(sid, "/w", nil, "test-owner"); err != nil {
 			t.Fatalf("register: %v", err)
 		}
 		ch := make(chan string, 4)
@@ -490,7 +490,7 @@ func TestDaemonNeverSpawnsInExternalPath(t *testing.T) {
 	mgr := New(ctx, Config{Cap: 4})
 	defer mgr.Stop()
 
-	if err := mgr.RegisterExternalSession("no-spawn", "/workspace", []string{"claude"}); err != nil {
+	if err := mgr.RegisterExternalSession("no-spawn", "/workspace", []string{"claude"}, "test-owner"); err != nil {
 		t.Fatalf("RegisterExternalSession: %v", err)
 	}
 

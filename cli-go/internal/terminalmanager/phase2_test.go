@@ -76,7 +76,7 @@ func TestSetAttachConn_RecordsAndClears(t *testing.T) {
 	defer mgr.Stop()
 
 	const sid = "conn-lifecycle"
-	if err := mgr.RegisterExternalSession(sid, "/w", nil); err != nil {
+	if err := mgr.RegisterExternalSession(sid, "/w", nil, "test-owner"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
@@ -102,7 +102,7 @@ func TestSetAttachConn_RecordsAndClears(t *testing.T) {
 		}
 	}()
 
-	if err := mgr.SendInput(sid, []byte("hi")); err != nil {
+	if err := mgr.SendInput(sid, "test-owner", []byte("hi")); err != nil {
 		t.Fatalf("SendInput: %v", err)
 	}
 	select {
@@ -117,7 +117,7 @@ func TestSetAttachConn_RecordsAndClears(t *testing.T) {
 	}
 
 	// SendInput should now fail with an error (conn is nil).
-	if err := mgr.SendInput(sid, []byte("hi")); err == nil {
+	if err := mgr.SendInput(sid, "test-owner", []byte("hi")); err == nil {
 		t.Error("SendInput after SetAttachConn(nil): want error, got nil")
 	}
 }
@@ -148,7 +148,7 @@ func TestSendInput_OnlyRoutesToExternals(t *testing.T) {
 	}()
 
 	// SendInput must NOT route to a daemon-owned session.
-	err := mgr.SendInput(sid, []byte("x"))
+	err := mgr.SendInput(sid, "any-operator", []byte("x"))
 	if err != ErrNotFound {
 		t.Errorf("SendInput on daemon-owned session: want ErrNotFound, got %v", err)
 	}
@@ -162,7 +162,7 @@ func TestSendInput_UnknownSession(t *testing.T) {
 	mgr := New(ctx, Config{Cap: 4})
 	defer mgr.Stop()
 
-	err := mgr.SendInput("gone", []byte("x"))
+	err := mgr.SendInput("gone", "any-operator", []byte("x"))
 	if err != ErrNotFound {
 		t.Errorf("SendInput on missing session: want ErrNotFound, got %v", err)
 	}
@@ -176,7 +176,7 @@ func TestSendResize_UnknownSession(t *testing.T) {
 	mgr := New(ctx, Config{Cap: 4})
 	defer mgr.Stop()
 
-	err := mgr.SendResize("gone", 80, 24)
+	err := mgr.SendResize("gone", "any-operator", 80, 24)
 	if err != ErrNotFound {
 		t.Errorf("SendResize on missing session: want ErrNotFound, got %v", err)
 	}
@@ -194,7 +194,7 @@ func TestSendInput_FrameFormat(t *testing.T) {
 	defer mgr.Stop()
 
 	const sid = "input-frame-fmt"
-	if err := mgr.RegisterExternalSession(sid, "/w", nil); err != nil {
+	if err := mgr.RegisterExternalSession(sid, "/w", nil, "test-owner"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
@@ -218,7 +218,7 @@ func TestSendInput_FrameFormat(t *testing.T) {
 		}
 	}()
 
-	if err := mgr.SendInput(sid, keystroke); err != nil {
+	if err := mgr.SendInput(sid, "test-owner", keystroke); err != nil {
 		t.Fatalf("SendInput: %v", err)
 	}
 	select {
@@ -238,7 +238,7 @@ func TestSendResize_FrameFormat(t *testing.T) {
 	defer mgr.Stop()
 
 	const sid = "resize-frame-fmt"
-	if err := mgr.RegisterExternalSession(sid, "/w", nil); err != nil {
+	if err := mgr.RegisterExternalSession(sid, "/w", nil, "test-owner"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
@@ -267,7 +267,7 @@ func TestSendResize_FrameFormat(t *testing.T) {
 		}
 	}()
 
-	if err := mgr.SendResize(sid, 120, 40); err != nil {
+	if err := mgr.SendResize(sid, "test-owner", 120, 40); err != nil {
 		t.Fatalf("SendResize: %v", err)
 	}
 	select {
@@ -289,7 +289,7 @@ func TestSendInput_CrossSessionIsolation(t *testing.T) {
 	const sidA = "cross-iso-A"
 	const sidB = "cross-iso-B"
 	for _, sid := range []string{sidA, sidB} {
-		if err := mgr.RegisterExternalSession(sid, "/w", nil); err != nil {
+		if err := mgr.RegisterExternalSession(sid, "/w", nil, "test-owner"); err != nil {
 			t.Fatalf("register %s: %v", sid, err)
 		}
 	}
@@ -327,7 +327,7 @@ func TestSendInput_CrossSessionIsolation(t *testing.T) {
 		readFrameFromConn(t, startConnA)
 	}()
 
-	if err := mgr.SendInput(sidA, []byte("secret")); err != nil {
+	if err := mgr.SendInput(sidA, "test-owner", []byte("secret")); err != nil {
 		t.Fatalf("SendInput A: %v", err)
 	}
 
@@ -378,7 +378,7 @@ func TestSendInput_ConcurrentWritersNoInterleave(t *testing.T) {
 	defer mgr.Stop()
 
 	const sid = "concurrent-writers"
-	if err := mgr.RegisterExternalSession(sid, "/w", nil); err != nil {
+	if err := mgr.RegisterExternalSession(sid, "/w", nil, "test-owner"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
@@ -437,7 +437,7 @@ func TestSendInput_ConcurrentWritersNoInterleave(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			payload := bytes.Repeat([]byte{byte(0x41 + i)}, payloadPerMsg)
-			if err := mgr.SendInput(sid, payload); err != nil {
+			if err := mgr.SendInput(sid, "test-owner", payload); err != nil {
 				t.Errorf("SendInput goroutine %d: %v", i, err)
 			}
 		}()

@@ -41,6 +41,7 @@ import (
 	"fmt"
 
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
+	"github.com/bakw00ds/yakos/internal/loopbackowner"
 	termmanager "github.com/bakw00ds/yakos/internal/terminalmanager"
 )
 
@@ -86,7 +87,16 @@ func handleTermCreate(cfg Config) jsonrpc.Handler {
 				Message: "term.create: sessionId must not be empty",
 			}
 		}
-		err := cfg.TerminalManager.RegisterExternalSession(p.SessionID, p.WorkspaceRoot, p.Argv)
+		// SECURITY (round-2 review R3): the owner is the daemon's own stable
+		// loopback operator ID, derived server-side from cfg.restStateDir()'s
+		// <stateDir>/loopback-operator-id — never a value taken from p
+		// (termCreateParams intentionally has no owner/operatorId field). This
+		// JSON-RPC method is reachable only over the mode-0600, owner-UID Unix
+		// socket (see jsonrpc.SocketPath), so the daemon process itself is the
+		// only thing that can call it; a caller-supplied owner would let
+		// anything on the socket mint a session it "owns".
+		ownerOperatorID := loopbackowner.LoadOrCreate(cfg.restStateDir())
+		err := cfg.TerminalManager.RegisterExternalSession(p.SessionID, p.WorkspaceRoot, p.Argv, ownerOperatorID)
 		if err != nil {
 			if err == termmanager.ErrCapExceeded {
 				return nil, &jsonrpc.RPCError{

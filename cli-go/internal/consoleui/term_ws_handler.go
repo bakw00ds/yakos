@@ -70,8 +70,8 @@ import (
 // constructing a full Manager.
 type terminalSessionManager interface {
 	Subscribe(sessionId string, outputFn func([]byte), exitFn func(int)) (func(), error)
-	SendInput(sessionId string, data []byte) error
-	SendResize(sessionId string, cols, rows uint16) error
+	SendInput(sessionId, operatorID string, data []byte) error
+	SendResize(sessionId, operatorID string, cols, rows uint16) error
 	// ClaimOwner records operatorID as the session's owner on first attach and
 	// verifies the match on every subsequent attach (H2). Callers must call
 	// this before Subscribe and must deny the attach — never subscribing —
@@ -274,7 +274,7 @@ func makeTermWSFunc(termMgr terminalSessionManager) websocket.Handler {
 					if len(payload) == 0 {
 						continue
 					}
-					if err := termMgr.SendInput(sessionId, payload); err != nil {
+					if err := termMgr.SendInput(sessionId, id.OperatorID, payload); err != nil {
 						slog.Debug("consoleui: /v1/term: SendInput error", "sessionId", sessionId, "err", err)
 					}
 				case 0x11: // resize → PTY window size
@@ -287,7 +287,7 @@ func makeTermWSFunc(termMgr terminalSessionManager) websocket.Handler {
 					}
 					cols := binary.BigEndian.Uint16(payload[0:2])
 					rows := binary.BigEndian.Uint16(payload[2:4])
-					if err := termMgr.SendResize(sessionId, cols, rows); err != nil {
+					if err := termMgr.SendResize(sessionId, id.OperatorID, cols, rows); err != nil {
 						slog.Debug("consoleui: /v1/term: SendResize error", "sessionId", sessionId, "err", err)
 					}
 				default:

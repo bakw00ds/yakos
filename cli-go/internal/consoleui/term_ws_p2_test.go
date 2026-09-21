@@ -67,12 +67,14 @@ type fakeTermMgr2 struct {
 }
 
 type inputCall2 struct {
-	sessionID string
-	data      []byte
+	sessionID  string
+	operatorID string
+	data       []byte
 }
 
 type resizeCall2 struct {
 	sessionID  string
+	operatorID string
 	cols, rows uint16
 }
 
@@ -116,7 +118,7 @@ func (f *fakeTermMgr2) getSubscribeCallCount() int {
 	return f.subscribeCallCount
 }
 
-func (f *fakeTermMgr2) SendInput(sessionID string, data []byte) error {
+func (f *fakeTermMgr2) SendInput(sessionID, operatorID string, data []byte) error {
 	if f.sendInputPanics {
 		panic("fakeTermMgr2: deliberate SendInput panic for TestWS_RecoverContainsPanic")
 	}
@@ -124,14 +126,14 @@ func (f *fakeTermMgr2) SendInput(sessionID string, data []byte) error {
 	defer f.mu.Unlock()
 	cp := make([]byte, len(data))
 	copy(cp, data)
-	f.sendInputCalls = append(f.sendInputCalls, inputCall2{sessionID: sessionID, data: cp})
+	f.sendInputCalls = append(f.sendInputCalls, inputCall2{sessionID: sessionID, operatorID: operatorID, data: cp})
 	return nil
 }
 
-func (f *fakeTermMgr2) SendResize(sessionID string, cols, rows uint16) error {
+func (f *fakeTermMgr2) SendResize(sessionID, operatorID string, cols, rows uint16) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.sendResizeCalls = append(f.sendResizeCalls, resizeCall2{sessionID: sessionID, cols: cols, rows: rows})
+	f.sendResizeCalls = append(f.sendResizeCalls, resizeCall2{sessionID: sessionID, operatorID: operatorID, cols: cols, rows: rows})
 	return nil
 }
 
