@@ -1088,3 +1088,54 @@ func TestAppendAck_RoundTrip(t *testing.T) {
 		t.Errorf("Note: got %q; want %q", got.Note, rec.Note)
 	}
 }
+
+// ---- M3/L8: project path traversal ------------------------------------------
+
+// TestValidateProjectSlug_RejectsTraversalAndAbsolute is the core M3
+// regression: yakos.supervise.run/.ack pass `project` straight from an
+// MCP/JSON-RPC caller, and resolveProjectPaths joins it onto acRoot
+// unmodified. A traversal or absolute-path payload must be rejected before
+// it ever reaches filepath.Join.
+func TestValidateProjectSlug_RejectsTraversalAndAbsolute(t *testing.T) {
+	bad := []string{
+		"../../../tmp/x",
+		"..",
+		"foo/../../bar",
+		"/etc/passwd",
+		"a/b",
+		`a\b`,
+	}
+	for _, p := range bad {
+		if err := validateProjectSlug(p); err == nil {
+			t.Errorf("validateProjectSlug(%q): want error, got nil", p)
+		}
+	}
+}
+
+// TestValidateProjectSlug_AllowsPlainSlugs verifies ordinary project slugs
+// (and the empty string, meaning "infer from cwd") are still accepted.
+func TestValidateProjectSlug_AllowsPlainSlugs(t *testing.T) {
+	ok := []string{"", "yakos", "my-project", "proj_1", "a.b"}
+	for _, p := range ok {
+		if err := validateProjectSlug(p); err != nil {
+			t.Errorf("validateProjectSlug(%q): want nil, got %v", p, err)
+		}
+	}
+}
+
+// TestRun_RejectsTraversalProject is the end-to-end M3 regression: Run with
+// a traversal payload in cfg.Project must fail closed rather than reading or
+// writing supervisor-findings.ndjson (or anything else) under an arbitrary
+// directory outside the caller's own agent-control project directory.
+func TestRun_RejectsTraversalProject(t *testing.T) {
+	cfg := newCfg(t, "status")
+	cfg.Project = "../../../../tmp/evil"
+
+	_, err := Run(cfg)
+	if err == nil {
+		t.Fatal("Run with traversal project: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid project") {
+		t.Errorf("Run error = %q; want it to mention 'invalid project'", err.Error())
+	}
+}

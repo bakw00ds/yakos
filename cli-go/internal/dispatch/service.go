@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/user"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -226,6 +227,9 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 	}
 
 	// --- Resolve project and yakos root ---
+	if err := validateProjectPath(p.Project); err != nil {
+		return nil, Result{}, err
+	}
 	project := p.Project
 	if project == "" {
 		project = s.cfg.WorkspaceRoot
@@ -383,6 +387,32 @@ func validateIdentityField(name, value string) error {
 	}
 	if !identityFieldRe.MatchString(value) {
 		return fmt.Errorf("dispatch: invalid %s: must match ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ (leading char must be alphanumeric, max 128 chars)", name)
+	}
+	return nil
+}
+
+// validateProjectPath rejects a caller-supplied project path that would hand
+// the dispatched agent (--add-dir + cwd; claude.go:101, codex.go:54,
+// agy.go:29) scope over the entire filesystem (L8,
+// security-review-2026-09-14.md). It intentionally does NOT restrict project
+// to some fixed parent directory -- accepting an arbitrary project directory
+// is the whole point of this field -- it only rejects the degenerate
+// filesystem-root case (and its Windows drive-root equivalent) that the
+// review calls out: a caller passing "/" widens tool scope to everything the
+// operator's user account can read or write.
+//
+// Not flag-injectable (--add-dir is a required-value flag; see H1), so this
+// is purely a scope check, not an injection check.
+func validateProjectPath(project string) error {
+	if project == "" {
+		return nil // caller falls back to the server-configured WorkspaceRoot
+	}
+	clean := filepath.Clean(project)
+	if clean == string(filepath.Separator) || clean == "." {
+		return fmt.Errorf("dispatch: invalid project: must not be the filesystem root")
+	}
+	if vol := filepath.VolumeName(clean); vol != "" && clean == vol+string(filepath.Separator) {
+		return fmt.Errorf("dispatch: invalid project: must not be a filesystem drive root")
 	}
 	return nil
 }

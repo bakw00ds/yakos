@@ -48,6 +48,7 @@ package supervise
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -248,8 +249,36 @@ See docs/supervisor-mode.md for the full guide.
 // ---- project resolution -----------------------------------------------------
 
 // resolveProject returns the project slug from cfg.Project or from cwd inference.
+// ErrInvalidProject is returned by resolveProject when cfg.Project is a
+// path-traversal or absolute-path payload rather than a plain project slug.
+var ErrInvalidProject = errors.New("supervise: invalid project: must be a plain slug (no path separators or '..')")
+
+// validateProjectSlug rejects a project value that could escape acRoot.
+//
+// SECURITY (M3/L8, security-review-2026-09-14.md): yakos.supervise.run and
+// .ack pass `project` straight from an MCP/JSON-RPC caller with no other
+// validation, and resolveProjectPaths joins it onto acRoot unmodified
+// (filepath.Join(acRoot, project, ...)). A value like "../../../tmp/x" (or
+// an absolute path) reads/writes files under an arbitrary directory instead
+// of the caller's own agent-control project directory. Project is always a
+// single path segment (e.g. "yakos"; see Config.Project doc comment above),
+// so any path separator or ".." is rejected outright rather than attempting
+// to lexically normalize and re-validate containment.
+func validateProjectSlug(project string) error {
+	if project == "" {
+		return nil
+	}
+	if filepath.IsAbs(project) || strings.ContainsAny(project, "/\\") || strings.Contains(project, "..") {
+		return ErrInvalidProject
+	}
+	return nil
+}
+
 func resolveProject(cfg Config, acRoot string) (string, error) {
 	if cfg.Project != "" {
+		if err := validateProjectSlug(cfg.Project); err != nil {
+			return "", err
+		}
 		return cfg.Project, nil
 	}
 	p, err := inferProjectFromCWD(acRoot)

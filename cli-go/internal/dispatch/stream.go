@@ -200,6 +200,9 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 	}
 
 	// --- Resolve project and yakos root (mirrors Service.Run) ---
+	if err := validateProjectPath(p.Project); err != nil {
+		return Result{}, err
+	}
 	project := p.Project
 	if project == "" {
 		project = s.cfg.WorkspaceRoot

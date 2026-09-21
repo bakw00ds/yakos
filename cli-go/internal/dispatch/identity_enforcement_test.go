@@ -348,6 +348,63 @@ func TestRunStream_UnauthenticatedIdentity_OperatorID_Preserved(t *testing.T) {
 	}
 }
 
+// ---- L8: project path scope ---------------------------------------------
+
+// TestRun_RejectsFilesystemRootProject is the core L8 regression: a caller
+// passing "/" as Project must be rejected before it becomes --add-dir /
+// cwd for the dispatched agent (which would widen tool scope to everything
+// the operator's user account can read or write). Populated=false so the
+// role gate does not fire first.
+func TestRun_RejectsFilesystemRootProject(t *testing.T) {
+	logDir := isolatedLogDir(t)
+	svc := NewService(ServiceConfig{
+		YakosRoot:     logDir,
+		WorkspaceRoot: logDir,
+	})
+
+	_, _, err := svc.Run(context.Background(), Params{
+		Agent:   "any",
+		Task:    "do something",
+		Project: "/",
+	})
+	if err == nil {
+		t.Fatal("Run with Project=\"/\": want error, got nil")
+	}
+}
+
+// TestRun_AllowsOrdinaryProjectPath verifies the L8 fix does not overtighten
+// -- an ordinary project directory (the whole point of this field) must
+// still be accepted at the validation layer (the call may still fail later
+// for unrelated reasons, e.g. no roster; we only assert it's not rejected
+// as a root path).
+func TestRun_AllowsOrdinaryProjectPath(t *testing.T) {
+	if err := validateProjectPath("/Users/op/projects/myapp"); err != nil {
+		t.Errorf("validateProjectPath(ordinary path): want nil, got %v", err)
+	}
+	if err := validateProjectPath(""); err != nil {
+		t.Errorf("validateProjectPath(\"\"): want nil (falls back to WorkspaceRoot), got %v", err)
+	}
+}
+
+// TestRunStream_RejectsFilesystemRootProject mirrors
+// TestRun_RejectsFilesystemRootProject for the streaming path.
+func TestRunStream_RejectsFilesystemRootProject(t *testing.T) {
+	logDir := isolatedLogDir(t)
+	svc := NewService(ServiceConfig{
+		YakosRoot:     logDir,
+		WorkspaceRoot: logDir,
+	})
+
+	_, err := svc.RunStream(context.Background(), Params{
+		Agent:   "any",
+		Task:    "do something",
+		Project: "/",
+	}, func(StreamChunk) {})
+	if err == nil {
+		t.Fatal("RunStream with Project=\"/\": want error, got nil")
+	}
+}
+
 // ---- notes ------------------------------------------------------------------
 // withRunFn is defined in service_test.go (same package dispatch).
 // withStreamRunFn is defined in stream_test.go (same package dispatch).
