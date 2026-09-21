@@ -326,6 +326,47 @@ func TestRun_WritesAndRemovesPIDFile(t *testing.T) {
 	}
 }
 
+// TestRun_GeneratesWriteTokenEvenWhenRESTDisabled covers C2: the REST write
+// token must be generated (and thus available to authenticate the MCP
+// streamable-HTTP transport) even when the REST listener itself is disabled
+// via RESTAddr: "-". Before the fix, the write token was only loaded inside
+// the `cfg.restAddr() != "-"` branch, so `yakos serve --rest-addr -` left the
+// MCP HTTP transport (which starts unconditionally) with an empty token —
+// see security-review-2026-09-14.md C2.
+func TestRun_GeneratesWriteTokenEvenWhenRESTDisabled(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, "state")
+
+	cfg := serve.Config{
+		WorkspaceRoot: tmp,
+		YakosRoot:     repoRoot(t),
+		PIDFile:       filepath.Join(tmp, "yakos.pid"),
+		RESTAddr:      "-", // REST listener disabled
+		RESTStateDir:  stateDir,
+		GRPCAddr:      "-",
+		MCPHTTPAddr:   "-",
+		ConsoleAddr:   "-",
+		PerfAddr:      "-",
+		NoPerfDash:    true,
+		ListenFn: func(path string) (net.Listener, error) {
+			return &pipeListener{ch: make(chan net.Conn, 1)}, nil
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_ = serve.Run(ctx, cfg)
+
+	tokPath := filepath.Join(stateDir, "rest-write-token")
+	data, err := os.ReadFile(tokPath)
+	if err != nil {
+		t.Fatalf("write token was not generated with REST disabled: %v", err)
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		t.Fatal("write token file is empty")
+	}
+}
+
 func TestRun_MissingWorkspaceRoot(t *testing.T) {
 	err := serve.Run(context.Background(), serve.Config{})
 	if err == nil {

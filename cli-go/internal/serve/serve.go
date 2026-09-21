@@ -448,16 +448,24 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
-	// Load (or generate) REST tokens once; reused for gRPC and MCP HTTP auth parity.
-	var restReadToken, restWriteToken string
+	// Load (or generate) REST tokens once; reused for gRPC and MCP HTTP auth
+	// parity. This happens unconditionally, even when the REST listener
+	// itself is disabled (--rest-addr -), because the MCP streamable-HTTP
+	// transport and the gRPC listener both authenticate with this same
+	// write token and must not fall back to an empty one (see C2 in
+	// security-review-2026-09-14.md: an unconditionally-started MCP HTTP
+	// listener plus a token that was only generated when REST was enabled
+	// meant `yakos serve --rest-addr -` exposed an unauthenticated
+	// yakos.dispatch endpoint on :7894).
+	restToks, err := restapi.LoadOrGenerateTokens(cfg.restStateDir())
+	if err != nil {
+		return fmt.Errorf("serve: REST tokens: %w", err)
+	}
+	restReadToken := restToks.Read
+	restWriteToken := restToks.Write
+
 	restErrCh := make(chan error, 1)
 	if cfg.restAddr() != "-" {
-		restToks, err := restapi.LoadOrGenerateTokens(cfg.restStateDir())
-		if err != nil {
-			return fmt.Errorf("serve: REST tokens: %w", err)
-		}
-		restReadToken = restToks.Read
-		restWriteToken = restToks.Write
 		restSrv := restapi.New(restapi.Config{
 			Addr:            cfg.restAddr(),
 			Tokens:          restToks,
