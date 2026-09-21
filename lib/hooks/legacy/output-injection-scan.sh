@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Purpose: output-injection-scan.sh — PostToolUse hook that scans inbound
-# tool output for known prompt-injection patterns (v0.34+).
+# Purpose: output-injection-scan.sh — scans inbound tool output / workflow
+# node output for known prompt-injection patterns (v0.34+; workflow path
+# added under C1, security-review-2026-09-14.md).
 #
 # Tool output is the largest untrusted attack surface in a yakOS session:
 #
@@ -11,14 +12,26 @@
 #   - MCP tool calls (dispatch_codex / dispatch_agy / etc.) relay
 #     responses from OTHER runtimes whose agents may have ingested
 #     adversarial inputs themselves
+#   - Flows workflow node output (${nodes.<id>.output}) is spliced into a
+#     downstream node's prompt and dispatched under bypassPermissions with
+#     no human in the loop (C1)
 #
 # This hook scans that output for known injection patterns drawn from
-# tldrsec/prompt-injection-defenses and OWASP LLM01. On match: WARN
-# (stderr surfaced to the lead) — never blocks. Detection only.
+# tldrsec/prompt-injection-defenses and OWASP LLM01.
+#
+#   - PostToolUse invocation (Bash/Read/WebFetch/mcp__*, via Claude Code's
+#     own settings.json hook dispatch): on match, WARN (stderr surfaced to
+#     the lead) — never blocks. Detection only. UNCHANGED by C1.
+#   - Workflow node-output invocation (tool_name "WorkflowNodeOutput" — a
+#     synthetic value only the Flows engine itself ever sends, via
+#     cli-go/internal/workflow/output_scan.go, never through Claude Code's
+#     hook dispatch): on match, BLOCK (exit 2 via ho_block). New in C1.
 #
 # Disabled when:
-#   - YAKOS_INJECTION_SCAN_DISABLE=1
-#   - .yakos.yml has injection_scan.enabled: false
+#   - YAKOS_INJECTION_SCAN_DISABLE=1 (both invocation paths)
+#   - .yakos.yml has injection_scan.enabled: false (both invocation paths)
+#   - YAKOS_WORKFLOW_INJECTION_SCAN_DISABLE=1, set by the Flows engine's own
+#     caller (workflow path only; does not affect the PostToolUse path)
 #
 # Patterns matched (case-insensitive):
 #   - "ignore (all|previous|prior) instructions"
@@ -55,10 +68,24 @@ fi
 # Only relevant tools. Bash/Read/WebFetch are direct attack surfaces;
 # we also match anything MCP-shaped (mcp__*) which is the cross-runtime
 # dispatch surface yakOS opened in v0.31.
+#
+# "WorkflowNodeOutput" (C1, security-review-2026-09-14.md) is a SYNTHETIC
+# tool_name — no Claude Code tool is ever actually named this. It appears
+# ONLY when the Flows workflow engine (cli-go/internal/workflow/
+# output_scan.go, NewOutputInjectionScanFunc) invokes this exact script
+# directly, outside of Claude Code's own PreToolUse/PostToolUse hook
+# dispatch, right before splicing one node's raw output into a downstream
+# node's prompt via ${nodes.<id>.output}. That is a materially higher-stakes
+# trust boundary than a human-supervised tool result inside a live session —
+# the spliced content becomes another agent's instructions under
+# bypassPermissions — so this one case BLOCKS on a match (is_workflow=1
+# below) instead of the WARN-only behavior every other caller keeps.
 tool="$(hi_tool)"
+is_workflow=0
 case "$tool" in
     Bash|Read|WebFetch) ;;
     mcp__*) ;;  # any MCP tool call's response
+    WorkflowNodeOutput) is_workflow=1 ;;
     *) exit 0 ;;
 esac
 
@@ -148,8 +175,27 @@ if [ -z "$matches" ]; then
     exit 0
 fi
 
-# Matches found — WARN
+# Matches found.
 agent="$(hi_sender_role)"
+
+# C1 (security-review-2026-09-14.md): the workflow node-output path BLOCKS
+# on a match instead of warning. This content is about to be spliced
+# verbatim into a downstream node's prompt and dispatched under
+# bypassPermissions — there is no human in the loop to apply the "re-read
+# skeptically" judgment call the WARN path below asks of the lead, so a
+# known-injection-shaped payload is refused outright rather than passed
+# through with a warning attached.
+if [ "$is_workflow" = "1" ]; then
+    ho_log "output-injection-scan" "BLOCK" "block" \
+        "injection patterns detected in workflow node output: $matches" \
+        "$(jq -nc --arg t "$tool" --arg a "$agent" --arg m "$matches" \
+            '{tool: $t, agent: $a, matches: $m, hook: "output-injection-scan", workflow: true}')"
+    ho_block "output-injection-scan" "BLOCKED — suspicious patterns detected in upstream workflow node output ($matches). Refusing to splice this into a downstream node's prompt. To proceed anyway for one run, fix the upstream node; to disable this scan, set YAKOS_WORKFLOW_INJECTION_SCAN_DISABLE=1. Reference: lib/playbooks/09-prompt-injection-defense.md"
+fi
+
+# Every other caller (Bash/Read/WebFetch/mcp__*) keeps the original,
+# unchanged WARN-only behavior: detection surfaced to the lead, never
+# blocking.
 ho_log "output-injection-scan" "WARN" "pass" \
     "injection patterns detected in tool output: $matches" \
     "$(jq -nc --arg t "$tool" --arg a "$agent" --arg m "$matches" \

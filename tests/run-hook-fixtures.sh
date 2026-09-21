@@ -610,6 +610,28 @@ case_check team-lifecycle.sh   agent-spawn.json                  0 team-lifecycl
 # namespaced subagent_type (yakos: prefix) must also pass
 case_check team-lifecycle.sh   agent-spawn-namespaced.json       0 team-lifecycle
 
+# --- output-injection-scan ---
+# C1 (security-review-2026-09-14.md): the Flows workflow engine splices one
+# node's raw output into a downstream node's prompt via
+# ${nodes.<id>.output}, dispatched under bypassPermissions with no human in
+# the loop. This hook now recognizes a SYNTHETIC tool_name,
+# "WorkflowNodeOutput" — sent only by cli-go/internal/workflow/
+# output_scan.go, never by Claude Code's own PreToolUse/PostToolUse hook
+# dispatch — and BLOCKS (rc=2) on a match there, unlike its long-standing
+# WARN-only (rc=0), non-blocking behavior for every real tool name
+# (Bash/Read/WebFetch/mcp__*).
+#
+# 1. A workflow node output matching a known injection pattern must BLOCK.
+case_check output-injection-scan.sh posttooluse-workflow-node-output-injected.json 2 output-injection-scan
+# 2. Benign workflow node output must still PASS (no false-positive block).
+case_check output-injection-scan.sh posttooluse-workflow-node-output-benign.json   0 output-injection-scan
+# 3. The exact same injection-pattern text, but on a REAL tool_name (Bash)
+#    rather than the synthetic WorkflowNodeOutput value, must keep the
+#    original WARN-only behavior — this is the regression guard that a
+#    future change to the workflow branch must not widen into the
+#    long-standing PostToolUse path.
+case_check output-injection-scan.sh posttooluse-bash-output-injected.json         0 output-injection-scan
+
 # --- session-end-check ---
 case_check session-end-check.sh sessionend-clean.json            0 session-end-check
 case_check session-end-check.sh sessionend-stuck.json            0 session-end-check setup_with_decisions_stale

@@ -1,0 +1,12 @@
+{
+  "_doc": "C1 (security-review-2026-09-14.md): same synthetic WorkflowNodeOutput tool_name as posttooluse-workflow-node-output-injected.json, but tool_response is ordinary content that matches none of the ten patterns. Expect PASS (rc=0) — the blocking path must not false-positive on normal upstream node output.",
+  "session_id": "fixture-workflow-node-output-benign-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "flows:fetch",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "WorkflowNodeOutput",
+  "tool_response": "The quarterly report shows revenue increased by 12% year over year, driven mainly by growth in the enterprise segment.",
+  "tool_use_id": "toolu_fixture_workflow_benign_001"
+}

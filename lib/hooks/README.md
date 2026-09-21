@@ -16,6 +16,7 @@ are expected to customize).
 | `mailbox-mirror.sh` | PreToolUse on `SendMessage` | LOG | Mirrors every team-internal message to `messages.ndjson` (Phase 1.7 confirmed clean) |
 | `team-lifecycle.sh` | PreToolUse on `TeamCreate\|Agent` | LOG | Records team creation and teammate spawns |
 | `session-end-check.sh` | SessionEnd | AUDIT | Final state record (stuck teammates, stale decisions, expired bypasses, hook outcome counts). Cannot block exit. |
+| `output-injection-scan.sh` | PostToolUse on `Bash\|Read\|WebFetch\|mcp__*`; also invoked directly (not via Claude Code) by the Flows workflow engine | **WARN** for the PostToolUse path; **BLOCKING** for the workflow path | Scans tool output (or, for the workflow path, an upstream node's raw output about to be spliced into a downstream node's prompt) for known prompt-injection patterns. See "Workflow node-output scanning (C1)" below. |
 | `task-dependency-gate.sh` | TaskCompleted | **REPORT-ONLY** | Would enforce `blockedBy`; UNCLEAR in v0.1 — see hook source |
 | `task-complete-dispatch.sh` | TaskCompleted | **REPORT-ONLY** | Would route to per-domain validators; UNCLEAR in v0.1 — see hook source |
 
@@ -97,12 +98,34 @@ fail closed on — see the next section) sets it: `path-allowlist.sh`,
 `budget-guard.sh`, `peer-claim.sh`.
 
 Purely observational hooks (`path-log.sh`, `mailbox-mirror.sh`,
-`team-lifecycle.sh`, `session-end-check.sh`, `output-injection-scan.sh`,
-`task-dependency-gate.sh`, `task-complete-dispatch.sh` — none of which
-ever call `ho_block`) must **not** set `HOOK_FAIL_CLOSED`. They keep the
-original behavior: `hi_init` prints a WARN to stderr and continues with
-empty input, so a broken `jq` degrades telemetry, never the user's actual
-work — consistent with "No-block policy for telemetry hooks" above.
+`team-lifecycle.sh`, `session-end-check.sh`, `task-dependency-gate.sh`,
+`task-complete-dispatch.sh` — none of which ever call `ho_block`) must
+**not** set `HOOK_FAIL_CLOSED`. They keep the original behavior: `hi_init`
+prints a WARN to stderr and continues with empty input, so a broken `jq`
+degrades telemetry, never the user's actual work — consistent with
+"No-block policy for telemetry hooks" above.
+
+`output-injection-scan.sh` (C1, security-review-2026-09-14.md) is a
+deliberate exception with a *different* mechanism than every other row in
+this section: it does call `ho_block`, but only on one of its two call
+sites, so it does **not** hardcode `HOOK_FAIL_CLOSED=1` in its own script
+the way `path-allowlist.sh` etc. do. Its PostToolUse invocation
+(Bash/Read/WebFetch/mcp__\*, via Claude Code's own hook dispatch) must
+keep the original WARN-only, fail-open-on-degraded-input behavior — a
+broken `jq` there should never block ordinary tool use over a detection-
+only hook. Its workflow-node-output invocation (synthetic `tool_name`
+`WorkflowNodeOutput`, sent only by the Flows engine —
+`cli-go/internal/workflow/output_scan.go`, never by Claude Code) needs the
+opposite: fail closed, since a match there is about to become another
+agent's instructions under `bypassPermissions` with no human in the loop.
+The engine gets this by setting `HOOK_FAIL_CLOSED=1` in **its own
+subprocess environment** for that one call only — `hi_init`'s existing
+fail-closed machinery above then does the right thing automatically,
+without the hook script itself ever needing to know which caller invoked
+it. Because that environment variable is set on the child process's `Env`
+slice (not via `os.Setenv` on the daemon itself), it can never leak into a
+live Claude Code session's own PostToolUse invocation of the identical
+script file.
 
 `plan-quality-gate.sh` is a deliberate exception even though its
 PreToolUse gate path can block: the hook's own documented contract for
@@ -174,6 +197,64 @@ matching event. `path-allowlist.sh`, `secret-scan.sh`,
 each has a tool-name `case` gate immediately after `hi_init` that exits 0
 before reaching any further `jq` call when the tool name comes back
 empty (the degraded-input signature).
+
+## Workflow node-output scanning (C1)
+
+`security-review-2026-09-14.md`'s most severe finding (C1): the Flows
+workflow engine splices one node's raw output verbatim into a downstream
+node's prompt via `${nodes.<id>.output}` (`cli-go/internal/workflow/
+engine.go`), and the downstream node then dispatches under
+`--permission-mode bypassPermissions` with no human reviewing the
+substituted prompt first. A prompt injection carried in an upstream node's
+output — e.g. from a fetched web page, an issue body, a third-party
+file — therefore had a direct path to code execution.
+
+Two independent mitigations now apply to every `${nodes.*.output)}`
+substitution, in `substitutePrompt` (`cli-go/internal/workflow/engine.go`)
+and `cli-go/internal/workflow/untrusted_output.go`:
+
+1. **Delimiting.** Each substituted value is wrapped in an
+   `<untrusted-node-output node="..." nonce="...">...</untrusted-node-output
+   nonce="...">` block, and the downstream prompt is prefixed with a
+   standing notice that delimited content is data, not instructions. The
+   nonce is generated fresh per node run (after the upstream content
+   already exists, so it cannot be forged in advance), and any
+   attacker-supplied closing-tag look-alike inside the content is
+   neutralized before wrapping. This is a mitigation, not a guarantee — an
+   LLM can still choose to disregard the notice — so it is paired with:
+2. **Blocking scan.** Before the substitution happens,
+   `cli-go/internal/workflow/output_scan.go`'s `NewOutputInjectionScanFunc`
+   invokes this exact `output-injection-scan.sh` script with a synthetic
+   `tool_name` of `WorkflowNodeOutput` (see the table above and the
+   `HOOK_FAIL_CLOSED` section above for how the same script blocks here
+   but not on its normal PostToolUse invocation). A match refuses the
+   downstream node's dispatch entirely — `dispatch.Params` is never
+   built, no subprocess is spawned.
+
+Operator controls specific to the workflow path:
+
+- `YAKOS_WORKFLOW_INJECTION_SCAN_DISABLE=1` skips the scan entirely
+  (checked by the Go engine before it even locates the script).
+- `YAKOS_HOOKS_FAIL_OPEN=1` (the existing S-1 emergency kill switch) lets
+  a node proceed **unscanned** specifically when the scan infrastructure
+  itself could not be reached (script missing, exec failure, unexpected
+  exit code) — a distinct failure mode from "the scan ran and found a
+  match," which always blocks regardless of this variable.
+- `.yakos.yml`'s `injection_scan.enabled: false` and
+  `YAKOS_INJECTION_SCAN_DISABLE=1` (the hook's own, pre-existing disables)
+  apply to both invocation paths.
+
+Deferred as a larger follow-up, not implemented here: running a
+downstream node that consumes upstream output at a stricter permission
+mode than `bypassPermissions` (e.g. a tool allowlist excluding
+`Bash`/`Write` for such nodes). `--permission-mode` is a single global
+flag for the whole dispatched session and every non-`bypassPermissions`
+mode either requires an interactive approver (`default`) or changes what
+the node can accomplish at all (`plan`), so this needs new plumbing
+(a per-node tool-allowlist threaded through `dispatch.Params` /
+`runtime.DispatchRequest` into `--allowed-tools`/`--disallowed-tools`)
+and a policy decision about which tools are safe for an
+output-consuming node — not a safe one-line change.
 
 ## Bypass mechanism
 
