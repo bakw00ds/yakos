@@ -128,12 +128,13 @@ func EncodeUserTurn(text string) []byte {
 }
 
 // buildEnvInteractive constructs the subprocess environment for a persistent
-// interactive session.  Inherits the current process env; adds
-// YAKOS_MODEL_OVERRIDE when modelOverride is non-empty.
+// interactive session: an allowlisted subset of the parent env (M4; see
+// env.go and buildEnv) plus YAKOS_MODEL_OVERRIDE when modelOverride is
+// non-empty. This is the env that also reaches the PTY (start/pump_unix.go),
+// so limiting it also narrows what an H2-style terminal-access leak could
+// expose.
 func buildEnvInteractive(modelOverride string) []string {
-	base := os.Environ()
-	env := make([]string, 0, len(base)+1)
-	env = append(env, base...)
+	env := filterEnv(os.Environ(), claudeEnvExtras...)
 	if modelOverride != "" {
 		env = append(env, "YAKOS_MODEL_OVERRIDE="+modelOverride)
 	}

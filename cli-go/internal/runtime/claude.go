@@ -144,26 +144,20 @@ func (a *ClaudeAdapter) Dispatch(ctx context.Context, req DispatchRequest) (*Dis
 	return &DispatchResult{Stdout: textOut, ExitCode: exitCode}, nil
 }
 
-// buildEnv constructs the subprocess environment, merging the current process
-// env with dispatch-specific variables.
-func buildEnv(req DispatchRequest) []string {
-	base := os.Environ()
-	env := make([]string, 0, len(base)+4)
-	env = append(env, base...)
+// claudeEnvExtras are the ANTHROPIC/claude-specific environment variables
+// forwarded through filterEnv's allowlist (M4). Identified from this
+// codebase's own claude auth-detection logic (claude.go Available(),
+// internal/claudeauth, internal/auth checkAuth "claude"/"claude-sdk" case).
+var claudeEnvExtras = []string{"ANTHROPIC_API_KEY"}
 
-	if req.ModelOverride != "" {
-		env = append(env, "YAKOS_MODEL_OVERRIDE="+req.ModelOverride)
-	}
-	if req.UsageOutPath != "" {
-		env = append(env, "YAKOS_USAGE_OUT="+req.UsageOutPath)
-	}
-	if req.SessionOutPath != "" {
-		env = append(env, "YAKOS_SESSION_OUT="+req.SessionOutPath)
-	}
-	if req.AllowRoot {
-		env = append(env, "IS_SANDBOX=1") // PR #17
-	}
-	return env
+// buildEnv constructs the subprocess environment for claude dispatch: an
+// allowlisted subset of the parent env (see env.go / M4) plus
+// dispatch-specific variables. Codex and agy have their own
+// buildEnvCodex/buildEnvAgy so that ANTHROPIC_API_KEY is never handed to a
+// third-party binary, and vice versa.
+func buildEnv(req DispatchRequest) []string {
+	env := filterEnv(os.Environ(), claudeEnvExtras...)
+	return appendDispatchEnv(env, req)
 }
 
 // ChatExecCmd returns the exec.Cmd for unframed chat dispatch.
@@ -774,11 +768,11 @@ type ChatDispatchRequest struct {
 	Effort string
 }
 
-// buildEnvChat constructs the subprocess environment for unframed chat dispatch.
+// buildEnvChat constructs the subprocess environment for unframed chat
+// dispatch: an allowlisted subset of the parent env (see env.go / M4) plus
+// dispatch-specific variables.
 func buildEnvChat(req ChatDispatchRequest) []string {
-	base := os.Environ()
-	env := make([]string, 0, len(base)+2)
-	env = append(env, base...)
+	env := filterEnv(os.Environ(), claudeEnvExtras...)
 	if req.ModelOverride != "" {
 		env = append(env, "YAKOS_MODEL_OVERRIDE="+req.ModelOverride)
 	}

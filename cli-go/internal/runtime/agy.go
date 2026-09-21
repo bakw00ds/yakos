@@ -2,8 +2,24 @@ package runtime
 
 import (
 	"context"
+	"os"
 	"os/exec"
 )
+
+// agyEnvExtras are the agy/gemini-specific environment variables forwarded
+// through filterEnv's allowlist (M4). Identified from this codebase's own
+// agy/gemini auth-detection logic (internal/auth checkAuth "agy"/
+// "antigravity-sdk"/"gemini" cases).
+var agyEnvExtras = []string{"ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI"}
+
+// buildEnvAgy constructs the subprocess environment for agy dispatch: an
+// allowlisted subset of the parent env (see env.go / M4) plus
+// dispatch-specific variables. agy never inherits ANTHROPIC_API_KEY or
+// OPENAI_API_KEY/CODEX_HOME this way.
+func buildEnvAgy(req DispatchRequest) []string {
+	env := filterEnv(os.Environ(), agyEnvExtras...)
+	return appendDispatchEnv(env, req)
+}
 
 // AgyAdapter implements Adapter for the Antigravity (agy) CLI.
 //
@@ -36,7 +52,7 @@ func (a *AgyAdapter) ExecCmd(ctx context.Context, req DispatchRequest) *exec.Cmd
 	}
 
 	cmd := exec.CommandContext(ctx, "agy", args...) //nolint:gosec
-	cmd.Env = buildEnv(req)
+	cmd.Env = buildEnvAgy(req)
 	if req.WorkDirOverride != "" {
 		cmd.Dir = req.WorkDirOverride
 	}
@@ -67,7 +83,7 @@ func (a *AgyAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *
 	}
 
 	cmd := exec.CommandContext(ctx, "agy", args...) //nolint:gosec
-	cmd.Env = buildEnv(DispatchRequest{
+	cmd.Env = buildEnvAgy(DispatchRequest{
 		Project:       req.Project,
 		ModelOverride: req.ModelOverride,
 		AllowRoot:     req.AllowRoot,

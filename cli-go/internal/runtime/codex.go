@@ -7,6 +7,21 @@ import (
 	"path/filepath"
 )
 
+// codexEnvExtras are the OpenAI/codex-specific environment variables
+// forwarded through filterEnv's allowlist (M4). Identified from this
+// codebase's own codex auth-detection logic (codex.go Available(),
+// internal/auth checkAuth "codex" case).
+var codexEnvExtras = []string{"OPENAI_API_KEY", "CODEX_HOME"}
+
+// buildEnvCodex constructs the subprocess environment for codex dispatch: an
+// allowlisted subset of the parent env (see env.go / M4) plus
+// dispatch-specific variables. Codex never inherits ANTHROPIC_API_KEY,
+// ANTIGRAVITY_API_KEY, or GEMINI_API_KEY this way.
+func buildEnvCodex(req DispatchRequest) []string {
+	env := filterEnv(os.Environ(), codexEnvExtras...)
+	return appendDispatchEnv(env, req)
+}
+
 // CodexAdapter implements Adapter for the OpenAI Codex CLI.
 //
 // Codex agents are TOML-based. Agent materialization (writing TOML files to
@@ -58,7 +73,7 @@ func (a *CodexAdapter) ExecCmd(ctx context.Context, req DispatchRequest) *exec.C
 	)
 
 	cmd := exec.CommandContext(ctx, "codex", args...) //nolint:gosec
-	cmd.Env = buildEnv(req)
+	cmd.Env = buildEnvCodex(req)
 	if req.WorkDirOverride != "" {
 		cmd.Dir = req.WorkDirOverride
 	}
@@ -86,7 +101,7 @@ func (a *CodexAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest)
 	args = append(args, "--", req.UserText)
 
 	cmd := exec.CommandContext(ctx, "codex", args...) //nolint:gosec
-	cmd.Env = buildEnv(DispatchRequest{
+	cmd.Env = buildEnvCodex(DispatchRequest{
 		Project:       req.Project,
 		ModelOverride: req.ModelOverride,
 		AllowRoot:     req.AllowRoot,
