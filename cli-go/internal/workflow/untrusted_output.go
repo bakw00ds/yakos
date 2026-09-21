@@ -84,6 +84,32 @@ func neutralizeClosingTag(value []byte) []byte {
 	return closingTagRe.ReplaceAll(value, []byte(neutralizedClosingTagMarker))
 }
 
+// neutralizedPlaceholderMarker replaces every substitution-placeholder
+// look-alike (${inputs.*} / ${nodes.*.output}) found inside untrusted
+// content.
+const neutralizedPlaceholderMarker = "[neutralized-placeholder]"
+
+// neutralizePlaceholderSyntax rewrites any literal ${inputs.*} or
+// ${nodes.*.output} look-alike found inside upstream content, using the
+// exact same varRefRe pattern substitutePrompt itself matches against.
+//
+// R2 (s3-flows-security-review-2026-09-21.md): substitutePrompt used to
+// apply substitutions sequentially to an accumulating string, so content
+// spliced in at one placeholder was itself rescanned for placeholder
+// syntax at a later iteration — upstream output containing the literal
+// text "${nodes.<other>.output}" could splice a nonce-valid closing tag
+// into its own delimited region, escaping it without ever knowing the
+// nonce. substitutePrompt now does a single pass over the ORIGINAL prompt
+// text (see its own doc comment), which already closes that exploit by
+// construction: spliced-in content is never rescanned, full stop. This
+// function is defense in depth on top of that fix, in the same spirit as
+// neutralizeClosingTag — even a future change that reintroduced
+// multi-pass substitution would find no live placeholder syntax inside
+// untrusted content to exploit.
+func neutralizePlaceholderSyntax(value []byte) []byte {
+	return varRefRe.ReplaceAll(value, []byte(neutralizedPlaceholderMarker))
+}
+
 // wrapUntrustedNodeOutput wraps one upstream node's output in an explicit
 // untrusted-data delimiter (C1 fix).
 //
@@ -97,6 +123,7 @@ func neutralizeClosingTag(value []byte) []byte {
 //     An empty value produces a valid, empty delimited block.
 func wrapUntrustedNodeOutput(nodeID, nonce string, value []byte) []byte {
 	safe := neutralizeClosingTag(value)
+	safe = neutralizePlaceholderSyntax(safe)
 	open := "<" + untrustedOutputTag + " node=\"" + nodeID + "\" nonce=\"" + nonce + "\">\n"
 	closeTag := "\n</" + untrustedOutputTag + " nonce=\"" + nonce + "\">"
 	out := make([]byte, 0, len(open)+len(safe)+len(closeTag))

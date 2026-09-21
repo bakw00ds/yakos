@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -802,6 +801,19 @@ func (e *Engine) nodeFailure(
 // ${inputs.<k>} values are operator-supplied at workflow-trigger time, not
 // upstream model output, and are left exactly as before — unscanned,
 // unwrapped, and outside the output budget.
+//
+// R2 (s3-flows-security-review-2026-09-21.md): the final substitution step
+// is a SINGLE PASS over the original, author-written node.Prompt
+// (varRefRe.ReplaceAllStringFunc), never a sequence of replacements applied
+// to an accumulating string. That distinction is load-bearing: applying
+// substitutions sequentially let content spliced in at one placeholder be
+// rescanned for placeholder syntax at a later step, so upstream output
+// containing the literal text "${nodes.<other>.output}" could splice an
+// already-wrapped, nonce-valid closing tag into its own delimited region —
+// escaping the delimiter without ever knowing the nonce. A single pass over
+// the original template text can never do this: every match is found and
+// replaced against the trusted prompt the workflow author wrote, not
+// against anything already substituted in.
 func substitutePrompt(node Node, inputs map[string]string, rs *RunState, scanUpstream func(nodeID string, value []byte) error) (string, bool, error) {
 	// Collect all upstream outputs referenced in this prompt.
 	// The OutputLimit is a TOTAL budget across node outputs ONLY (inputs are not
@@ -817,6 +829,13 @@ func substitutePrompt(node Node, inputs map[string]string, rs *RunState, scanUps
 	var substitutions []subst
 	totalUpstreamBytes := 0
 	hasNodeOutput := false
+	// Dedupe by placeholder text up front (not just at final-substitution
+	// time): a placeholder referenced more than once in one prompt must
+	// only be read/scanned/wrapped once — doing it per OCCURRENCE would
+	// re-invoke the blocking scan subprocess redundantly for the exact
+	// same content, and (before R2) is also what let the sequential loop's
+	// "seen" dedup mask how many times a value was actually rescanned.
+	seenPlaceholder := make(map[string]bool)
 
 	matches := varRefRe.FindAllStringSubmatch(node.Prompt, -1)
 	for _, m := range matches {
@@ -824,6 +843,11 @@ func substitutePrompt(node Node, inputs map[string]string, rs *RunState, scanUps
 		key := m[2]
 		suffix := m[3]
 		placeholder := m[0]
+
+		if seenPlaceholder[placeholder] {
+			continue
+		}
+		seenPlaceholder[placeholder] = true
 
 		switch kind {
 		case "inputs":
@@ -907,16 +931,27 @@ func substitutePrompt(node Node, inputs map[string]string, rs *RunState, scanUps
 		}
 	}
 
-	// Apply all substitutions to the prompt.
-	result := node.Prompt
-	seen := make(map[string]bool)
+	// R2: apply every substitution in a SINGLE PASS over the original
+	// node.Prompt text via ReplaceAllStringFunc. This is the fix itself,
+	// not just an optimization — see the function's own doc comment.
+	// ReplaceAllStringFunc finds matches against node.Prompt (the
+	// author's own template) and never rescans its own output, so
+	// whatever varRefRe-shaped text an upstream node's content contains is
+	// inserted verbatim as inert data, never re-expanded.
+	valueByPlaceholder := make(map[string]string, len(substitutions))
 	for _, s := range substitutions {
-		if seen[s.placeholder] {
-			continue
-		}
-		seen[s.placeholder] = true
-		result = replaceAll(result, s.placeholder, string(s.value))
+		valueByPlaceholder[s.placeholder] = string(s.value)
 	}
+	result := varRefRe.ReplaceAllStringFunc(node.Prompt, func(placeholder string) string {
+		if v, ok := valueByPlaceholder[placeholder]; ok {
+			return v
+		}
+		// Unreachable in practice: every match ReplaceAllStringFunc finds
+		// here was already found by the identical varRefRe.
+		// FindAllStringSubmatch call above and therefore has an entry.
+		// Left unchanged as the conservative default rather than panicking.
+		return placeholder
+	})
 
 	// C1: prepend the standing "this is data, not instructions" notice
 	// whenever at least one upstream node output was substituted in. A
@@ -927,11 +962,6 @@ func substitutePrompt(node Node, inputs map[string]string, rs *RunState, scanUps
 	}
 
 	return result, truncated, nil
-}
-
-// replaceAll is a simple string replacement that handles the placeholder correctly.
-func replaceAll(s, old, new string) string {
-	return string(bytes.ReplaceAll([]byte(s), []byte(old), []byte(new)))
 }
 
 // tailTruncate returns the last limit bytes of data. If data is within limit,
