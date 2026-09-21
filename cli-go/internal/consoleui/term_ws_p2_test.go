@@ -53,6 +53,17 @@ type fakeTermMgr2 struct {
 
 	// sendInputPanics causes SendInput to panic — used by TestWS_RecoverContainsPanic.
 	sendInputPanics bool
+
+	// subscribeCallCount records how many times Subscribe was actually invoked
+	// (H2/M1 regression: a denied attach — owner mismatch or fail-closed
+	// identity — must never reach Subscribe, since Subscribe is what triggers
+	// scrollback replay in the real terminalmanager.Manager).
+	subscribeCallCount int
+
+	// owners mirrors terminalmanager.Manager's ClaimOwner semantics: first
+	// caller for a sessionID becomes its owner; a different operatorID is
+	// denied with termmanager.ErrOwnerMismatch.
+	owners map[string]string
 }
 
 type inputCall2 struct {
@@ -69,12 +80,40 @@ type resizeCall2 struct {
 var _ terminalSessionManager = (*fakeTermMgr2)(nil)
 
 func (f *fakeTermMgr2) Subscribe(sessionID string, outputFn func([]byte), exitFn func(int)) (func(), error) {
+	f.mu.Lock()
+	f.subscribeCallCount++
+	f.mu.Unlock()
 	if f.subscribeFails {
 		return nil, termmanager.ErrNotFound
 	}
 	// Return a no-op unsub. The test controls output/exit via the channels below
 	// but this fake just keeps the subscription alive.
 	return func() {}, nil
+}
+
+// ClaimOwner mirrors terminalmanager.Manager.ClaimOwner: first caller for a
+// sessionID wins; a different operatorID on the same sessionID is denied.
+func (f *fakeTermMgr2) ClaimOwner(sessionID, operatorID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.owners == nil {
+		f.owners = make(map[string]string)
+	}
+	existing, has := f.owners[sessionID]
+	if !has {
+		f.owners[sessionID] = operatorID
+		return nil
+	}
+	if existing != operatorID {
+		return termmanager.ErrOwnerMismatch
+	}
+	return nil
+}
+
+func (f *fakeTermMgr2) getSubscribeCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.subscribeCallCount
 }
 
 func (f *fakeTermMgr2) SendInput(sessionID string, data []byte) error {
@@ -96,6 +135,15 @@ func (f *fakeTermMgr2) SendResize(sessionID string, cols, rows uint16) error {
 	return nil
 }
 
+// operatorHeaderForTest carries the OperatorID a test wants stamped onto the
+// resolved Identity for a given WS connection. Real identity resolution
+// never reads a client-supplied header (see security-review-2026-09-14.md
+// "no identity is ever derived from a client-supplied header") — this header
+// exists ONLY in this test harness, read by the mux handler below, never by
+// production code, precisely so two connections in the same test can present
+// two distinct operator identities to the same fake manager / session ID.
+const operatorHeaderForTest = "X-Test-Operator"
+
 // buildP2WSTestServer builds an httptest.Server that serves a WebSocket endpoint
 // using the REAL makeTermWSFunc (not a fake mirror), with the identity stamped
 // from roleForTest.  Returns the server URL and the fake manager.
@@ -110,8 +158,12 @@ func buildP2WSTestServer(t *testing.T, role netid.Role, mgr *fakeTermMgr2) (*htt
 
 	mux := http.NewServeMux()
 	mux.Handle("/v1/term/test-session", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		opID := r.Header.Get(operatorHeaderForTest)
+		if opID == "" {
+			opID = "test-op"
+		}
 		id := netid.Identity{
-			OperatorID:    "test-op",
+			OperatorID:    opID,
 			Role:          role,
 			Authenticated: role >= netid.RoleDispatch,
 			Resolved:      true,
@@ -157,6 +209,26 @@ func dialTestWS(t *testing.T, url string) *websocket.Conn {
 	conn, err := websocket.Dial(url, "", origin)
 	if err != nil {
 		t.Fatalf("websocket.Dial %s: %v", url, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+// dialTestWSAsOperator dials a WebSocket connection carrying the test-only
+// operatorHeaderForTest header, so the server-side mux handler (see
+// buildP2WSTestServer) stamps the resolved Identity with this OperatorID.
+// Used to simulate two distinct admin operators attaching to the same
+// session ID (H2 owner-lock tests).
+func dialTestWSAsOperator(t *testing.T, url, operatorID string) *websocket.Conn {
+	t.Helper()
+	cfg, err := websocket.NewConfig(url, "http://127.0.0.1")
+	if err != nil {
+		t.Fatalf("websocket.NewConfig %s: %v", url, err)
+	}
+	cfg.Header.Set(operatorHeaderForTest, operatorID)
+	conn, err := websocket.DialConfig(cfg)
+	if err != nil {
+		t.Fatalf("websocket.DialConfig %s (operator=%s): %v", url, operatorID, err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
@@ -225,6 +297,65 @@ func waitForSendResizeCalls(t *testing.T, mgr *fakeTermMgr2, n int) []resizeCall
 }
 
 // ---- tests ------------------------------------------------------------------
+
+// TestWS_OwnerLock_SecondOperatorDenied is the core H2 regression: a second
+// RoleAdmin operator attaching to a session already owned by a different
+// operator must be denied — the connection closed, and crucially Subscribe
+// must never be called for the second connection, so no scrollback replay
+// or live output ever reaches the non-owner.
+func TestWS_OwnerLock_SecondOperatorDenied(t *testing.T) {
+	mgr := &fakeTermMgr2{}
+	_, wsURL := buildP2WSTestServer(t, netid.RoleAdmin, mgr)
+
+	// Alice attaches first and claims ownership.
+	aliceConn := dialTestWSAsOperator(t, wsURL, "alice")
+	// Prove alice's connection is live and can write.
+	sendWSFrame(t, aliceConn, append([]byte{0x10}, []byte("alice-keystroke")...))
+	waitForSendInputCalls(t, mgr, 1)
+
+	// Bob attaches to the SAME session ID.
+	bobConn := dialTestWSAsOperator(t, wsURL, "bob")
+	_ = bobConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var frame []byte
+	_ = websocket.Message.Receive(bobConn, &frame) // exit frame or EOF; either means denied
+
+	// Bob's keystrokes must never reach SendInput even if the connection
+	// somehow stayed open briefly.
+	sendWSFrame(t, bobConn, append([]byte{0x10}, []byte("bob-keystroke")...))
+	time.Sleep(100 * time.Millisecond)
+
+	mgr.mu.Lock()
+	calls := append([]inputCall2(nil), mgr.sendInputCalls...)
+	mgr.mu.Unlock()
+	for _, c := range calls {
+		if string(c.data) == "bob-keystroke" {
+			t.Fatalf("bob's keystroke reached SendInput despite owner-lock denial: %+v", calls)
+		}
+	}
+	if got := mgr.getSubscribeCallCount(); got != 1 {
+		t.Errorf("Subscribe call count = %d; want 1 (only alice's attach; bob must be denied before Subscribe)", got)
+	}
+}
+
+// TestWS_OwnerLock_SameOperatorReattachAllowed verifies that the SAME
+// operator can reconnect to a session they already own (e.g. a browser
+// refresh) without being denied.
+func TestWS_OwnerLock_SameOperatorReattachAllowed(t *testing.T) {
+	mgr := &fakeTermMgr2{}
+	_, wsURL := buildP2WSTestServer(t, netid.RoleAdmin, mgr)
+
+	firstConn := dialTestWSAsOperator(t, wsURL, "alice")
+	sendWSFrame(t, firstConn, append([]byte{0x10}, []byte("first")...))
+	waitForSendInputCalls(t, mgr, 1)
+	_ = firstConn.Close()
+
+	secondConn := dialTestWSAsOperator(t, wsURL, "alice")
+	sendWSFrame(t, secondConn, append([]byte{0x10}, []byte("second")...))
+	calls := waitForSendInputCalls(t, mgr, 2)
+	if string(calls[1].data) != "second" {
+		t.Errorf("reattach: SendInput data = %q; want %q", calls[1].data, "second")
+	}
+}
 
 // TestWS_AdminKeystrokeReachesSendInput verifies that a RoleAdmin WS connection
 // sending a 0x10 frame causes mgr.SendInput to be called with the correct payload.
@@ -490,6 +621,33 @@ func TestWS_ResolverAbsenceIsFailClosed(t *testing.T) {
 	mgr.mu.Unlock()
 	if n != 0 {
 		t.Errorf("no-resolver 0x10 frame: SendInput called %d times; want 0 (fail-closed)", n)
+	}
+}
+
+// TestWS_ResolverAbsenceDeniesReadToo is the M1 regression: an unresolved
+// identity must be denied the CONNECTION outright (never reach Subscribe),
+// not merely have its writes silently dropped. Before the fix, the role gate
+// was `id.Resolved && !id.Role.Allows(RoleAdmin)`, which is false when
+// id.Resolved is false — so an unresolved identity fell through to Subscribe
+// and could read live PTY output (and, on the real Manager, up to 512 KB of
+// scrollback) even though it could never write. See security-review
+// 2026-09-14.md M1: "unreachable today because New() always installs
+// resolver.Middleware — but any future mount that skips the resolver
+// silently grants [read] admin[-equivalent access], including PTY [output]."
+func TestWS_ResolverAbsenceDeniesReadToo(t *testing.T) {
+	mgr := &fakeTermMgr2{}
+	_, wsURL := buildP2WSTestServerNoIdentity(t, mgr)
+	conn := dialTestWS(t, wsURL)
+
+	// The server should close the connection almost immediately (before ever
+	// calling Subscribe). Confirm by reading: we should get EOF/closed rather
+	// than being left open waiting for PTY output.
+	var frame []byte
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = websocket.Message.Receive(conn, &frame) // either the exit frame or EOF; both indicate closed
+
+	if got := mgr.getSubscribeCallCount(); got != 0 {
+		t.Errorf("unresolved identity: Subscribe called %d times; want 0 (fail-closed read path, M1)", got)
 	}
 }
 

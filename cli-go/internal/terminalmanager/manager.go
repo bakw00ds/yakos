@@ -48,6 +48,14 @@ const (
 	// defaultReaperInterval is how often the idle reaper scans for stale sessions.
 	defaultReaperInterval = 60 * time.Second
 
+	// idleReapExitCode is the exit code delivered to subscribers of an
+	// externally-owned session that the idle reaper closes. There is no real
+	// process exit here (the daemon does not own the PTY for external
+	// sessions), but subscribers must still receive a 0x01 frame so browser
+	// clients stop believing the terminal is live (M8). 124 is the
+	// conventional shell "command timed out" exit code.
+	idleReapExitCode = 124
+
 	// maxOwnerFramePayload is the maximum keystroke payload that SendInput will
 	// accept.  It must be < math.MaxUint16 - 1 so the uint16 frame-length prefix
 	// never overflows.  Kept well below the 64 KB WS bound as defense-in-depth.
@@ -63,6 +71,10 @@ var ErrNotFound = errors.New("terminalmanager: session not found")
 // ErrNotSupported is returned on platforms that do not support PTY allocation
 // (i.e. Windows).
 var ErrNotSupported = errors.New("terminalmanager: web terminal is not supported on this platform")
+
+// ErrOwnerMismatch is returned by ClaimOwner when a different operator
+// already owns the session (see ClaimOwner).
+var ErrOwnerMismatch = errors.New("terminalmanager: session is owned by a different operator")
 
 // SpawnSpec describes the command to launch under the PTY.
 type SpawnSpec struct {
@@ -97,6 +109,13 @@ type Manager struct {
 	// externals holds externally-owned sessions (ADR-0008 Phase 1 T2).
 	// The login-shell process owns the PTY; the daemon only relays output.
 	externals map[string]*externalSession
+
+	// owners maps sessionId to the OperatorID that first attached to it as a
+	// viewer (see ClaimOwner). It closes the H2 finding
+	// (security-review-2026-09-14.md): without it, any RoleAdmin identity
+	// could inject keystrokes into, or read the scrollback of, any other
+	// admin's live terminal session by guessing/listing its session ID.
+	owners map[string]string
 
 	cap            int
 	idleTimeout    time.Duration
@@ -134,6 +153,7 @@ func New(ctx context.Context, cfg Config) *Manager {
 	m := &Manager{
 		entries:        make(map[string]*session),
 		externals:      make(map[string]*externalSession),
+		owners:         make(map[string]string),
 		cap:            cap,
 		idleTimeout:    idleTimeout,
 		reaperInterval: reaperInterval,
@@ -255,6 +275,44 @@ func (m *Manager) Subscribe(sessionId string, outputFn func([]byte), exitFn func
 	return unsub, nil
 }
 
+// ClaimOwner records operatorID as the owner of sessionId the first time it
+// is called for that session, and verifies the match on every subsequent
+// call (e.g. a browser reconnect from the same operator).
+//
+// Callers (the /v1/term WS handler) must call this BEFORE Subscribe, and
+// must deny the attach entirely — never subscribing, never replaying
+// scrollback — when it returns ErrOwnerMismatch. This closes H2
+// (security-review-2026-09-14.md): without an owner lock, any RoleAdmin
+// identity could list session IDs via GET /api/term and then attach to any
+// other admin's live session, injecting keystrokes into a
+// bypassPermissions shell and reading up to 512 KB of that admin's prior
+// terminal output (tokens, env dumps, etc.) via the scrollback replay.
+//
+// This intentionally has no "takeover" path: the codebase has no existing
+// admin-override concept for terminal sessions, so a mismatch is a hard
+// deny (fail closed) rather than silently displacing the current owner.
+//
+// Returns ErrNotFound if the session does not exist (daemon-owned or
+// externally-owned), ErrOwnerMismatch if a different operator already
+// owns it, or nil if operatorID is now (or already was) the owner.
+func (m *Manager) ClaimOwner(sessionId, operatorID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.entries[sessionId]; !ok {
+		if _, ok := m.externals[sessionId]; !ok {
+			return ErrNotFound
+		}
+	}
+	if existing, has := m.owners[sessionId]; has {
+		if existing != operatorID {
+			return ErrOwnerMismatch
+		}
+		return nil
+	}
+	m.owners[sessionId] = operatorID
+	return nil
+}
+
 // ---- externally-owned session API (ADR-0008 Phase 1 T2) ----------------------
 
 // RegisterExternalSession registers a new externally-owned session with the
@@ -301,6 +359,7 @@ func (m *Manager) PushExit(sessionId string, exitCode int) error {
 	ext, ok := m.externals[sessionId]
 	if ok {
 		delete(m.externals, sessionId)
+		delete(m.owners, sessionId)
 	}
 	m.mu.Unlock()
 	if !ok {
@@ -319,6 +378,7 @@ func (m *Manager) CloseExternal(sessionId string) error {
 	ext, ok := m.externals[sessionId]
 	if ok {
 		delete(m.externals, sessionId)
+		delete(m.owners, sessionId)
 	}
 	m.mu.Unlock()
 	if !ok {
@@ -455,6 +515,7 @@ func (m *Manager) Close(sessionId string) error {
 	s, ok := m.entries[sessionId]
 	if ok {
 		delete(m.entries, sessionId)
+		delete(m.owners, sessionId)
 	}
 	m.mu.Unlock()
 	if !ok {
@@ -522,30 +583,45 @@ func (m *Manager) reaper(ctx context.Context) {
 func (m *Manager) reapIdle() {
 	m.mu.Lock()
 	var stale []string
+	var staleSessions []*session
 	var staleExt []string
+	var staleExtSessions []*externalSession
 	now := time.Now()
 	for id, s := range m.entries {
 		if now.Sub(s.lastActivity()) > m.idleTimeout {
 			stale = append(stale, id)
+			staleSessions = append(staleSessions, s)
 		}
 	}
 	for id, s := range m.externals {
 		if now.Sub(s.lastActivity()) > m.idleTimeout {
 			staleExt = append(staleExt, id)
+			staleExtSessions = append(staleExtSessions, s)
 		}
 	}
 	for _, id := range stale {
 		delete(m.entries, id)
+		delete(m.owners, id)
 	}
 	for _, id := range staleExt {
 		delete(m.externals, id)
+		delete(m.owners, id)
 	}
 	m.mu.Unlock()
 
-	for _, id := range stale {
+	// SECURITY/CORRECTNESS (M8): actually close each reaped session instead
+	// of only deleting the map entry. Before this fix, daemon-owned PTYs and
+	// their child process groups leaked (the fanOut goroutine and the child
+	// process ran forever), and external subscribers never received the 0x01
+	// exit frame, so browser clients kept believing the terminal was live.
+	// Mirrors what Close()/CloseExternal() do for an explicit close, done
+	// here without holding m.mu since close() may block briefly on I/O.
+	for i, id := range stale {
 		slog.Info("terminalmanager: idle reaper closing session", "sessionId", id)
+		_ = staleSessions[i].close()
 	}
-	for _, id := range staleExt {
+	for i, id := range staleExt {
 		slog.Info("terminalmanager: idle reaper closing external session", "sessionId", id)
+		staleExtSessions[i].pushExit(idleReapExitCode)
 	}
 }

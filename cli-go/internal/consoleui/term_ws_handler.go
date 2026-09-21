@@ -72,6 +72,11 @@ type terminalSessionManager interface {
 	Subscribe(sessionId string, outputFn func([]byte), exitFn func(int)) (func(), error)
 	SendInput(sessionId string, data []byte) error
 	SendResize(sessionId string, cols, rows uint16) error
+	// ClaimOwner records operatorID as the session's owner on first attach and
+	// verifies the match on every subsequent attach (H2). Callers must call
+	// this before Subscribe and must deny the attach — never subscribing —
+	// on error.
+	ClaimOwner(sessionId, operatorID string) error
 }
 
 // maxInboundFrameBytes is the maximum size of an inbound WebSocket frame
@@ -135,11 +140,22 @@ func makeTermWSFunc(termMgr terminalSessionManager) websocket.Handler {
 		conn.MaxPayloadBytes = maxInboundFrameBytes
 
 		// ---- 1. Role gate: require RoleAdmin ----------------------------------
+		//
+		// SECURITY (M1): this must fail CLOSED on an unresolved identity.
+		// The previous condition (`id.Resolved && !id.Role.Allows(...)`) let an
+		// unresolved identity (Resolved==false) fall through to Subscribe below
+		// — meaning a request that reached this handler without the identity
+		// resolver having run at all (e.g. a future mount that skips it) could
+		// still read PTY output and up to 512 KB of scrollback, even though it
+		// could not write (see isAdmin below). RoleNone.Allows(RoleAdmin) is
+		// already false for a zero-value Identity, so this inversion is a
+		// no-op for every request that goes through the resolver today; it
+		// only changes behavior for the "resolver didn't run" case.
 		id := netid.IdentityFrom(conn.Request().Context())
-		if id.Resolved && !id.Role.Allows(netid.RoleAdmin) {
+		if !id.Resolved || !id.Role.Allows(netid.RoleAdmin) {
 			// Send a close frame before disconnecting; best-effort.
 			_ = sendWSBinary(conn, []byte{0x01, 0x00, 0x00, 0x00, 0x01}) // exit code 1
-			slog.Warn("consoleui: /v1/term: insufficient role", "role", id.Role)
+			slog.Warn("consoleui: /v1/term: insufficient role", "role", id.Role, "resolved", id.Resolved)
 			return
 		}
 
@@ -147,6 +163,25 @@ func makeTermWSFunc(termMgr terminalSessionManager) websocket.Handler {
 		sessionId := strings.TrimPrefix(conn.Request().URL.Path, "/v1/term/")
 		sessionId = strings.Trim(sessionId, "/")
 		if sessionId == "" {
+			return
+		}
+
+		// ---- 2b. Owner lock (H2) ---------------------------------------------
+		//
+		// Every identity reaching this point has RoleAdmin, but "admin" is a
+		// role, not a person: in networked mode multiple distinct operators
+		// can hold RoleAdmin, and GET /api/term lists every live session ID to
+		// any of them. Without this check, any admin could attach to any other
+		// admin's live session, inject keystrokes into a bypassPermissions
+		// shell, and read up to 512 KB of that operator's prior terminal
+		// output via scrollback replay. ClaimOwner denies the attach entirely
+		// — before Subscribe, so there is no replay — when a different
+		// operator already owns the session. The same operator (or the first
+		// attacher, when no owner is recorded yet) is always allowed through.
+		if err := termMgr.ClaimOwner(sessionId, id.OperatorID); err != nil {
+			_ = sendWSBinary(conn, []byte{0x01, 0x00, 0x00, 0x00, 0x01})
+			slog.Warn("consoleui: /v1/term: owner lock denied attach",
+				"sessionId", sessionId, "operatorId", id.OperatorID, "err", err)
 			return
 		}
 
