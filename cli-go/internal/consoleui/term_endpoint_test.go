@@ -80,11 +80,18 @@ func buildNoTermTestHandler(t *testing.T) http.Handler {
 // RemoteAddr is set to "127.0.0.1:12345" (loopback) so consoleLoopbackOnly
 // passes for requests that reach the WS handler middleware chain.
 func requestWithRole(method, path string, role netid.Role) *http.Request {
+	return requestWithRoleAndOperator(method, path, role, "test-op")
+}
+
+// requestWithRoleAndOperator is requestWithRole with an explicit operator ID,
+// for tests that need to distinguish between multiple distinct callers
+// (e.g. R18 operator-scoping regression coverage).
+func requestWithRoleAndOperator(method, path string, role netid.Role, operatorID string) *http.Request {
 	req := httptest.NewRequest(method, path, nil)
 	req.RemoteAddr = "127.0.0.1:12345" // loopback so consoleLoopbackOnly passes
 	req.Header.Set("Origin", "http://127.0.0.1")
 	id := netid.Identity{
-		OperatorID:    "test-op",
+		OperatorID:    operatorID,
 		Role:          role,
 		Authenticated: role >= netid.RoleDispatch,
 		Resolved:      true,
@@ -150,6 +157,59 @@ func TestAPITermEmptyArray(t *testing.T) {
 	}
 	if len(sessions) != 0 {
 		t.Errorf("expected empty sessions array, got %v", sessions)
+	}
+}
+
+// TestAPITermScopedToCallingOperator is the round-2 review R18/N8
+// regression: GET /api/term must return only the calling operator's own
+// sessions, not every session known to the daemon. Registers two external
+// sessions under two distinct operators (alice, bob), and asserts each
+// operator's request sees exactly their own session — and that an operator
+// with no sessions of their own (mallory) sees none, even though sessions
+// exist. Reverting handleTerm from ListForOperator(id.OperatorID) back to
+// List() makes this fail (alice and bob would each see both sessions).
+func TestAPITermScopedToCallingOperator(t *testing.T) {
+	handler, mgr := buildTermTestHandler(t)
+
+	if err := mgr.RegisterExternalSession("alice-shell", "/workspace/alice", []string{"claude"}, "alice"); err != nil {
+		t.Fatalf("RegisterExternalSession(alice): %v", err)
+	}
+	if err := mgr.RegisterExternalSession("bob-shell", "/workspace/bob", []string{"claude"}, "bob"); err != nil {
+		t.Fatalf("RegisterExternalSession(bob): %v", err)
+	}
+
+	fetch := func(operatorID string) []termmanager.SessionMeta {
+		t.Helper()
+		req := requestWithRoleAndOperator(http.MethodGet, "/api/term", netid.RoleAdmin, operatorID)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET /api/term (operator=%s): expected 200, got %d (body: %s)", operatorID, w.Code, w.Body.String())
+		}
+		var sessions []termmanager.SessionMeta
+		if err := json.NewDecoder(w.Body).Decode(&sessions); err != nil {
+			t.Fatalf("decode /api/term response (operator=%s): %v", operatorID, err)
+		}
+		return sessions
+	}
+
+	aliceSessions := fetch("alice")
+	if len(aliceSessions) != 1 || aliceSessions[0].SessionID != "alice-shell" {
+		t.Errorf("alice: expected exactly [alice-shell], got %+v", aliceSessions)
+	}
+
+	bobSessions := fetch("bob")
+	if len(bobSessions) != 1 || bobSessions[0].SessionID != "bob-shell" {
+		t.Errorf("bob: expected exactly [bob-shell], got %+v", bobSessions)
+	}
+
+	// mallory holds RoleAdmin (e.g. on a networked bind with multiple
+	// distinct admin identities) but owns no sessions of her own — she must
+	// see none of alice's or bob's, confirming this is not merely "the list
+	// happens to be non-empty" but genuinely scoped to the caller.
+	mallorySessions := fetch("mallory")
+	if len(mallorySessions) != 0 {
+		t.Errorf("mallory: expected no sessions (owns none), got %+v", mallorySessions)
 	}
 }
 

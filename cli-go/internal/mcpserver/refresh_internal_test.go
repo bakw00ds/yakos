@@ -18,6 +18,8 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -82,5 +84,59 @@ func TestHandleRefresh_OmittedScopeStaysProjectScoped(t *testing.T) {
 		_ = res
 	case <-time.After(5 * time.Second):
 		t.Fatal("handleRefresh({}) did not return promptly — suspect it scoped to CollectProjects(real $HOME) despite scope being omitted (R19 regression)")
+	}
+}
+
+// TestHandleRefresh_OmittedApplyDoesNotWrite is the round-2 review N7
+// regression. The implementer's report claimed one *_OmittedApplyDoesNotWrite
+// test "per transport", but no such test existed for MCP: the two tests
+// above only prove refreshArgs decodes Apply to the expected bool — neither
+// calls refresh.ResolveApply or refresh.Run, so an inverted ResolveApply
+// (`return apply` instead of `return !apply`) would leave every test in
+// this file green while MCP silently applied on every default call.
+//
+// This drives handleRefresh end-to-end — the same shared
+// refresh.ResolveApply helper the JSON-RPC (internal/serve), gRPC
+// (internal/grpcserver), and REST (internal/restapi) transports' own
+// *_OmittedApplyDoesNotWrite tests exercise — and asserts on
+// refresh.Run's own "[DRY RUN]" marker (internal/refresh/refresh.go) plus
+// zero new entries under an isolated, scratch WorkspaceRoot (never the
+// real repo). Reverting refresh.ResolveApply to `return apply` makes
+// every subtest here fail.
+func TestHandleRefresh_OmittedApplyDoesNotWrite(t *testing.T) {
+	cases := []struct {
+		name string
+		args json.RawMessage
+	}{
+		{"apply omitted", json.RawMessage(`{}`)},
+		{"apply explicit false", json.RawMessage(`{"apply":false}`)},
+		{"apply zero-value via null args", json.RawMessage(`null`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yakosRoot := t.TempDir()
+			workspaceRoot := t.TempDir()
+			cfg := Config{YakosRoot: yakosRoot, WorkspaceRoot: workspaceRoot}
+
+			res := handleRefresh(context.Background(), cfg, tc.args)
+			if res.IsError {
+				t.Fatalf("handleRefresh(%s): unexpected error result: %+v", tc.args, res)
+			}
+			if len(res.Content) == 0 {
+				t.Fatalf("handleRefresh(%s): empty content", tc.args)
+			}
+			out := res.Content[0].Text
+			if !strings.Contains(out, "[DRY RUN]") {
+				t.Errorf("handleRefresh(%s): output = %q; want a dry-run report ([DRY RUN] marker) — omitting/falsifying apply must never write (N7 regression)", tc.args, out)
+			}
+
+			// Nothing should have been written under the scratch WorkspaceRoot —
+			// the concrete blast-radius check the grpc/JSON-RPC/REST siblings
+			// also make.
+			entries, _ := os.ReadDir(workspaceRoot)
+			if len(entries) != 0 {
+				t.Errorf("handleRefresh(%s): workspaceRoot has %d new entries after a dry-run call: %v (N7 regression: dry-run wrote files)", tc.args, len(entries), entries)
+			}
+		})
 	}
 }
