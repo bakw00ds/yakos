@@ -104,15 +104,27 @@ func (fh *fleetHandlers) handleFleet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve the caller's effective operator ID (dual-regime: cert CN or body).
-	// On the loopback path the identity is Authenticated=false with RoleAdmin;
-	// we use an empty string as the caller ID, which means every session is
-	// considered "owned" (loopback = trusted boundary, single operator).
+	// On the loopback path the identity is Resolved=true, Authenticated=false,
+	// with RoleAdmin; we use an empty string as the caller ID, which means
+	// every session is considered "owned" (loopback = trusted boundary, single
+	// operator).
+	//
+	// SECURITY (round-2 review R11): loopbackPath previously included
+	// !id.Resolved, so an UNRESOLVED identity (the resolver never ran — the
+	// same "future mount that skips Resolver.Middleware" class of gap M1
+	// addresses elsewhere) was treated as loopback-trusted and made every
+	// session "owned", dumping the entire fleet's session IDs, conversation
+	// IDs, agent names, and task previews to that request. loopbackPath must
+	// mean "the resolver ran AND determined this is the loopback path"
+	// (Resolved=true, Authenticated=false), never "the resolver didn't run at
+	// all" — those are opposite trust conclusions that happened to share a
+	// boolean expression.
 	id := netid.IdentityFrom(r.Context())
 	callerOperatorID := ""
 	if id.Authenticated {
 		callerOperatorID = id.OperatorID
 	}
-	loopbackPath := !id.Resolved || !id.Authenticated
+	loopbackPath := id.Resolved && !id.Authenticated
 
 	snapshot := fh.registry.Snapshot()
 	rows := make([]FleetSession, 0, len(snapshot))
