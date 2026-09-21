@@ -54,13 +54,54 @@ type Engine struct {
 	// bypassPermissions.
 	//
 	// Nil (the default, e.g. in unit tests) skips scanning entirely.
-	// Production callers wire NewOutputInjectionScanFunc(yakosRoot).
+	//
+	// Production code MUST NOT construct an Engine as a bare struct
+	// literal — use NewEngine, which wires this field automatically (R1,
+	// s3-flows-security-review-2026-09-21.md: every production
+	// construction site left this nil by hand, so the blocking scan
+	// silently never ran anywhere). Test code that injects a fake runFn
+	// via SetEngineRunFn continues to construct &Engine{} directly, which
+	// leaves this nil (scanning skipped) unless a test sets it itself —
+	// that is the intended, hermetic default for unit tests.
 	OutputScanFn OutputScanFunc
 
 	// runFn is the dispatch function used per node. Nil means use Svc.Run.
 	// Tests inject a deterministic fake here to avoid live LLM calls.
 	// Must NOT be set in production; setting it bypasses the governed Service.
 	runFn EngineRunFn
+}
+
+// EngineConfig groups the fields a production caller needs to construct an
+// Engine via NewEngine. It intentionally mirrors Engine's own exported
+// fields (minus OutputScanFn, which NewEngine always derives from
+// YakosRoot/Project rather than accepting as input — see NewEngine).
+type EngineConfig struct {
+	Svc       *dispatch.Service
+	Bus       *wsbus.Bus
+	YakosRoot string
+	Project   string
+	WorkDir   string
+}
+
+// NewEngine constructs a production Engine with OutputScanFn wired to the
+// real output-injection-scan.sh-backed scanner (C1;
+// s3-flows-security-review-2026-09-21.md R1). Every production
+// construction site — cmd/yakos's `workflow run`/`workflow resume`, the
+// daemon's workflow.run/workflow.resume RPC handler, and the console's
+// Flows engine — MUST call this instead of building &Engine{} by hand, so
+// that a future call site cannot silently reintroduce R1 by forgetting to
+// set the field itself. Test code is unaffected: it constructs &Engine{}
+// directly (see Engine.OutputScanFn's doc comment) and is never expected
+// to call NewEngine.
+func NewEngine(cfg EngineConfig) *Engine {
+	return &Engine{
+		Svc:          cfg.Svc,
+		Bus:          cfg.Bus,
+		YakosRoot:    cfg.YakosRoot,
+		Project:      cfg.Project,
+		WorkDir:      cfg.WorkDir,
+		OutputScanFn: NewOutputInjectionScanFunc(cfg.YakosRoot, cfg.Project),
+	}
 }
 
 // dispatchNode calls either the injected runFn (tests) or Svc.Run (production).

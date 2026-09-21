@@ -7691,12 +7691,14 @@ func runWorkflowRun(yakosRoot, workspaceRoot, workDir string, args []string) {
 		YakosRoot:     yakosRoot,
 	})
 
-	eng := &workflow.Engine{
+	// NewEngine (not a bare &workflow.Engine{}) wires OutputScanFn to the
+	// real blocking scan (C1; s3-flows-security-review-2026-09-21.md R1).
+	eng := workflow.NewEngine(workflow.EngineConfig{
 		Svc:       svc,
 		YakosRoot: yakosRoot,
 		Project:   workspaceRoot,
 		WorkDir:   workDir,
-	}
+	})
 
 	fmt.Fprintf(os.Stderr, "workflow run: starting %q run %s\n", name, runID)
 	// CLI callers pass zero IdentityCarrier: loopback path, no RBAC enforcement.
@@ -7777,12 +7779,14 @@ func runWorkflowResume(yakosRoot, workspaceRoot, workDir string, args []string) 
 		YakosRoot:     yakosRoot,
 	})
 
-	eng := &workflow.Engine{
+	// NewEngine (not a bare &workflow.Engine{}) wires OutputScanFn to the
+	// real blocking scan (C1; s3-flows-security-review-2026-09-21.md R1).
+	eng := workflow.NewEngine(workflow.EngineConfig{
 		Svc:       svc,
 		YakosRoot: yakosRoot,
 		Project:   workspaceRoot,
 		WorkDir:   workDir,
-	}
+	})
 
 	fmt.Fprintf(os.Stderr, "workflow resume: resuming %q from %s → %s\n", name, priorRunID, newRunID)
 	// CLI callers pass zero IdentityCarrier: loopback path, no RBAC enforcement.

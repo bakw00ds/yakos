@@ -2446,3 +2446,52 @@ func TestEngine_OutputScanFn_AllowsCleanOutput(t *testing.T) {
 		t.Errorf("expected the C1 delimiter to still wrap scanned-clean content, got %q", prompt)
 	}
 }
+
+// ---- R1 (s3-flows-security-review-2026-09-21.md): production Engine
+// construction must always wire the blocking scan ------------------------
+
+// TestNewEngine_WiresOutputScanFn is the regression test the review asked
+// for: a freshly constructed production Engine (via workflow.NewEngine,
+// the way every real call site — cmd/yakos's workflow run/resume, the
+// daemon RPC handler, and the console Flows engine — now constructs one)
+// must have a non-nil OutputScanFn. Before R1's fix, every one of those
+// four call sites built &workflow.Engine{} by hand and left this field
+// nil, so the blocking scan added under C1 silently never ran in
+// production. This test fails without the wiring in NewEngine, exactly as
+// the review asked, and stays true regardless of which of the four
+// production sites might drift in the future, since they all now share
+// this one constructor.
+func TestNewEngine_WiresOutputScanFn(t *testing.T) {
+	t.Parallel()
+
+	eng := workflow.NewEngine(workflow.EngineConfig{
+		YakosRoot: "/yakos",
+		Project:   "/project",
+		WorkDir:   t.TempDir(),
+	})
+
+	if eng.OutputScanFn == nil {
+		t.Fatal("workflow.NewEngine must wire a non-nil OutputScanFn (R1) — every production call site relies on this constructor rather than setting the field by hand")
+	}
+}
+
+// TestNewEngine_PlainStructLiteralLeavesScanFnNil documents, as a control,
+// that a bare &workflow.Engine{} (the pattern every production site used
+// before this fix, and the pattern test code is still expected to use for
+// hermetic unit tests) leaves OutputScanFn nil. This is intentional test
+// behavior, not a bug — see the field's own doc comment — but recording it
+// here makes the contrast with NewEngine explicit and would catch an
+// accidental change to Engine's zero-value behavior.
+func TestNewEngine_PlainStructLiteralLeavesScanFnNil(t *testing.T) {
+	t.Parallel()
+
+	eng := &workflow.Engine{
+		YakosRoot: "/yakos",
+		Project:   "/project",
+		WorkDir:   t.TempDir(),
+	}
+
+	if eng.OutputScanFn != nil {
+		t.Fatal("a bare &workflow.Engine{} is expected to leave OutputScanFn nil; this test's counterpart, TestNewEngine_WiresOutputScanFn, is what production code must use instead")
+	}
+}

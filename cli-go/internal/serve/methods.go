@@ -855,13 +855,15 @@ func buildEngineAndLoad(cfg Config, name string) (*workflow.Engine, *workflow.Wo
 	}
 
 	workDir := workflowWorkDir(cfg.WorkspaceRoot)
-	eng := &workflow.Engine{
+	// NewEngine (not a bare &workflow.Engine{}) wires OutputScanFn to the
+	// real blocking scan (C1; s3-flows-security-review-2026-09-21.md R1).
+	eng := workflow.NewEngine(workflow.EngineConfig{
 		Svc:       cfg.DispatchService,
 		Bus:       cfg.Bus,
 		YakosRoot: cfg.YakosRoot,
 		Project:   cfg.WorkspaceRoot,
 		WorkDir:   workDir,
-	}
+	})
 
 	// Validate the workflow name before any filesystem access.
 	if err := workflow.ValidateID("workflow name", name); err != nil {
