@@ -32,8 +32,10 @@ func appendEvent(path string, line []byte) error {
 		return fmt.Errorf("events: mkdir %s: %w", filepath.Dir(path), err)
 	}
 
-	// Open with O_APPEND for atomic multi-process appends.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600) //nolint:gosec
+	// Open with O_APPEND for atomic multi-process appends. noFollowFlag
+	// (round-2 review R4) refuses to follow a symlink planted at path —
+	// see openflags_unix.go.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|noFollowFlag, 0600) //nolint:gosec
 	if err != nil {
 		return fmt.Errorf("events: open %s: %w", path, err)
 	}

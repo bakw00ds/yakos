@@ -61,13 +61,15 @@ type Tokens struct {
 // persisting them if absent.  stateDir is typically ~/.yakos-state.
 //
 // Each token file is written at mode 0600.  The directory is created at
-// 0700 if absent.
+// 0700 if absent, and its existing mode/type is verified (see
+// secureStateDir) — MkdirAll alone is a no-op on an existing directory and
+// does not tighten a pre-existing permissive mode.
 //
 // Errors:
 //   - returns error on directory creation or file I/O failure
 func LoadOrGenerateTokens(stateDir string) (*Tokens, error) {
-	if err := os.MkdirAll(stateDir, 0700); err != nil {
-		return nil, fmt.Errorf("restapi: mkdir %s: %w", stateDir, err)
+	if err := secureStateDir(stateDir); err != nil {
+		return nil, err
 	}
 
 	read, err := loadOrGenToken(filepath.Join(stateDir, readTokenFile))
@@ -89,8 +91,8 @@ func LoadOrGenerateTokens(stateDir string) (*Tokens, error) {
 // Errors:
 //   - returns error on directory creation or file I/O failure
 func RotateTokens(stateDir string) (*Tokens, error) {
-	if err := os.MkdirAll(stateDir, 0700); err != nil {
-		return nil, fmt.Errorf("restapi: mkdir %s: %w", stateDir, err)
+	if err := secureStateDir(stateDir); err != nil {
+		return nil, err
 	}
 
 	read, err := generateToken(filepath.Join(stateDir, readTokenFile))
@@ -104,6 +106,49 @@ func RotateTokens(stateDir string) (*Tokens, error) {
 	}
 
 	return &Tokens{Read: read, Write: write}, nil
+}
+
+// secureStateDir creates stateDir if absent (0700) and, whether newly
+// created or pre-existing, verifies it is a real directory (not a symlink)
+// with no group/other permission bits set — tightening the mode if needed.
+//
+// SECURITY (round-2 review R4): MkdirAll alone is a no-op on an existing
+// path and does NOT tighten an existing permissive mode. Combined with the
+// caller previously falling back to a fixed, well-known, world-writable
+// directory when $HOME was unset (see serve.Config.restStateDir), this let
+// a local attacker `mkdir -m 0777 <path>` ahead of the daemon starting,
+// then plant a valid-looking rest-write-token file that LoadOrGenerateTokens
+// would adopt (loadOrGenToken accepts any existing 64-hex-char file).  That
+// token grants POST access to yakos.dispatch, which runs with
+// --permission-mode bypassPermissions: unattended arbitrary code execution
+// as the operator. This closes that whether or not the /tmp-fallback route
+// is also closed, since a shared directory with a permissive mode is the
+// same hazard regardless of how the path was chosen.
+//
+// A symlink is rejected outright (Lstat, not Stat) rather than followed and
+// tightened, since tightening the mode of whatever the daemon's own creator
+// (an attacker who planted the symlink) pointed it at would be worse than
+// refusing.
+func secureStateDir(stateDir string) error {
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		return fmt.Errorf("restapi: mkdir %s: %w", stateDir, err)
+	}
+	fi, err := os.Lstat(stateDir)
+	if err != nil {
+		return fmt.Errorf("restapi: stat %s: %w", stateDir, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("restapi: refusing to use state dir %s: it is a symlink (possible planted-directory attack)", stateDir)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("restapi: refusing to use state dir %s: not a directory", stateDir)
+	}
+	if fi.Mode().Perm()&0077 != 0 {
+		if err := os.Chmod(stateDir, 0700); err != nil { //nolint:gosec
+			return fmt.Errorf("restapi: state dir %s has permissive mode %o and could not be tightened: %w", stateDir, fi.Mode().Perm(), err)
+		}
+	}
+	return nil
 }
 
 // loadOrGenToken reads the token at path, or generates and writes a new one.

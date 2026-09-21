@@ -53,3 +53,31 @@ func TestAppendEvent_DirModeIs0700(t *testing.T) {
 		t.Errorf("dispatch-log directory mode = %#o; want 0700", got)
 	}
 }
+
+// TestAppendEvent_RefusesSymlinkedLogPath is the R4 regression: appendEvent
+// must not follow a symlink planted at the dispatch-log path — that would
+// let a local attacker redirect the daemon's append-only write to an
+// arbitrary target file.
+func TestAppendEvent_RefusesSymlinkedLogPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics + O_NOFOLLOW are POSIX-specific; see openflags_windows.go")
+	}
+	dir := t.TempDir()
+	logDir := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	target := filepath.Join(dir, "attacker-target")
+	logPath := filepath.Join(logDir, "dispatch-log.ndjson")
+	if err := os.Symlink(target, logPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	err := appendEvent(logPath, []byte(`{"type":"dispatch_started"}`))
+	if err == nil {
+		t.Fatal("appendEvent through a symlinked log path: want error, got nil (R4 regression: symlink was followed)")
+	}
+	if _, statErr := os.Stat(target); statErr == nil {
+		t.Error("attacker-target was created — appendEvent followed the symlink (R4 regression)")
+	}
+}
