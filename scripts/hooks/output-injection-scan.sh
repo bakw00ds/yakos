@@ -41,7 +41,8 @@
 #   - "you are now (a|in)" (role override attempt)
 #   - "system: " or "[SYSTEM]" at start of line (prompt impersonation)
 #   - "<\|im_start\|>" / "<\|im_end\|>" (model-format tokens)
-#   - Base64-looking blobs > 200 chars (potential encoded payload)
+#   - Base64-looking blobs >= 400 chars in a single contiguous run
+#     (potential encoded payload)
 #   - "BEGIN PRIVATE KEY" / "BEGIN RSA" (credential exfil)
 #   - Excessive zero-width / unicode-direction chars (steganographic injection)
 
@@ -161,18 +162,30 @@ if printf '%s' "$output" | grep -qE '(sk-ant-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}
 fi
 
 # Pattern 9: long base64 blob (potential encoded payload). Threshold:
-# 255+ base64 chars in a single match — still well above any incidental
-# base64 in normal tool output (icons, hashes, etc.).
+# 400+ base64 chars in a single contiguous run — still well above any
+# incidental base64 in normal tool output (icons, hashes, short digests,
+# inline images under a few hundred chars).
 #
-# R7 (s3-flows-security-review-2026-09-21.md): the original {400,} bound
-# silently never fired on any BSD grep (macOS's system grep included) —
-# "maximum repetition exceeds 255" is printed to stderr and the command
-# exits non-zero, which the surrounding `if` swallows with no error
-# surfaced anywhere, so pattern 9 was dead on this platform since it
-# shipped. {255,} is the largest bound BSD grep's regex engine (RE_DUP_MAX)
-# accepts, and matches identically to {400,} under GNU grep for any input
-# actually long enough to trip either bound.
-if printf '%s' "$output" | grep -qE '[A-Za-z0-9+/]{255,}={0,2}'; then
+# R7 (s3-flows-security-review-2026-09-21.md): the original `{400,}` bound
+# in a `grep -E` character-class repetition silently never fired on any BSD
+# grep (macOS's system grep included) — "maximum repetition exceeds 255" is
+# printed to stderr and the command exits non-zero, which the surrounding
+# `if` swallows with no error surfaced anywhere, so pattern 9 was dead on
+# this platform since it shipped.
+#
+# N2 (round 2 of the same review): the first fix narrowed the bound to
+# `{255,}` — the largest BSD grep's regex engine (RE_DUP_MAX) accepts — to
+# get *some* match on this platform, but {255,} is not equivalent to
+# {400,}: on the WorkflowNodeOutput path (BLOCKING since C1), that silently
+# dropped the threshold 36% below what it was ever intended to be,
+# hard-blocking ordinary 255-399-char base64 runs (a fetched page's inline
+# `data:image/...;base64,...`, a build fingerprint, a concatenated digest)
+# that were never meant to match. Restored the intended 400-char bound
+# portably: grep -oE emits each contiguous base64-alphabet run on its own
+# line (no `{n,}` repetition count, so no RE_DUP_MAX limit on any grep
+# implementation), and awk measures each run's length against the real
+# threshold.
+if printf '%s' "$output" | grep -oE '[A-Za-z0-9+/]+' | awk 'length($0) >= 400 { found = 1 } END { exit !found }'; then
     add_match "long-base64-payload"
 fi
 

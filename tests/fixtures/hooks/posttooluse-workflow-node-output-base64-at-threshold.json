@@ -1,0 +1,12 @@
+{
+  "_doc": "N2 (s3-flows-security-review-r2-2026-09-21.md): a 400-char base64-looking run \u2014 exactly at the intended pattern-9 threshold \u2014 must still BLOCK (rc=2) on the BLOCKING workflow-node path. Regression guard proving the portable grep -oE | awk restoration did not silently widen the bound back down (or disable it) while fixing the below-threshold false positives.",
+  "session_id": "fixture-workflow-node-output-base64-at-threshold-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "flows:fetch",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "WorkflowNodeOutput",
+  "tool_response": "Here is the page summary, followed by an embedded asset reference: IPFlJ5F7WRd/Px+BTHRJJbykE0+E8+5clLCZFNV8S2QT6INGDpyOpxyB9JKmyLDUwMbqJfgLq+nbK894RxgG9oiZ+jgttMkFp1CW54M2NhmABHkuEwjua058LeDKK6jDHz2oCtIsjhvNK4p7MZI/4kf3PGdlDcIfw84Jx3+l8S0QPnuQ0/KZe6lOGPoZa70gyU/4gAIqK4+pdEuNb0lCo7pt/LI198F6sXyriJ1RIaKM+t59SQW6PyEXD0fO8WXt/eqQm4m6bs0tj8HRYkQWO+eiEKDl3mm4vMdfPhLTV3sF0xvwkWE/sD7G6Gb7Kuj4SM2G6MzX9nEWTLLcYJbg/KDTCyGrmfN4eUqlLP1wzqUIvG9LRo7jsCYUlYbHp6VHWVnD8dPCi7M0orfe -- end of asset.",
+  "tool_use_id": "toolu_fixture_workflow_base64_at_threshold_001"
+}

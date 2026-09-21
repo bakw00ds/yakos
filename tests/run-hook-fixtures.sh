@@ -631,6 +631,20 @@ case_check output-injection-scan.sh posttooluse-workflow-node-output-benign.json
 #    future change to the workflow branch must not widen into the
 #    long-standing PostToolUse path.
 case_check output-injection-scan.sh posttooluse-bash-output-injected.json         0 output-injection-scan
+#
+# N2 (s3-flows-security-review-r2-2026-09-21.md): round 2's fix for the
+# BSD-grep RE_DUP_MAX limit on pattern 9 (long base64 blob) narrowed the
+# threshold to {255,} to get *some* match on macOS, but {255,} is not
+# equivalent to the intended {400,} — it hard-blocked ordinary 255-399-char
+# base64/hex runs on the now-BLOCKING workflow-node path. Restored the
+# 400-char threshold via a portable `grep -oE | awk` form (no RE_DUP_MAX
+# limit on any grep implementation). These three fixtures pin the boundary:
+# 4. A 308-char base64 run (below the 400-char threshold) must PASS.
+case_check output-injection-scan.sh posttooluse-workflow-node-output-base64-below-threshold.json 0 output-injection-scan
+# 5. A 260-char hex run (below the 400-char threshold) must PASS.
+case_check output-injection-scan.sh posttooluse-workflow-node-output-hex-below-threshold.json    0 output-injection-scan
+# 6. A 400-char base64 run (at the intended threshold) must still BLOCK.
+case_check output-injection-scan.sh posttooluse-workflow-node-output-base64-at-threshold.json    2 output-injection-scan
 
 # --- session-end-check ---
 case_check session-end-check.sh sessionend-clean.json            0 session-end-check
