@@ -7608,6 +7608,29 @@ func runWorkflow(yakosRoot string, args []string) {
 	sub := args[0]
 	rest := args[1:]
 
+	// N1 (s3-flows-security-review-r2-2026-09-21.md): resolve YAKOS_ROOT
+	// from env, then cascade to materialized/embedded lib. runWorkflow was
+	// the only lib-reading command handler that never called
+	// resolveLibRoot — every workflow.NewEngine since R1 wires OutputScanFn
+	// to NewOutputInjectionScanFunc(yakosRoot, ...), which stats
+	// <yakosRoot>/lib/hooks/output-injection-scan.sh directly. On a bare
+	// binary install (yakosRoot has no adjacent lib/, only the
+	// materialized/embedded copy) that stat failed and every node
+	// consuming ${nodes.*.output} was refused with "hook not found" — an
+	// infrastructure failure, not a scan match. Mirrors every sibling
+	// handler (doctor, dispatch, start, agent, soul, skill, git-hooks,
+	// serve, archive, ...).
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+	{
+		wfHome := os.Getenv("HOME")
+		if wfHome == "" {
+			wfHome = "/tmp"
+		}
+		yakosRoot = resolveLibRoot(yakosRoot, wfHome, os.Stderr)
+	}
+
 	workspaceRoot, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "workflow: resolve cwd: %v\n", err)
