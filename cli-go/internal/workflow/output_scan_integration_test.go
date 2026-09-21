@@ -201,3 +201,52 @@ func TestNewOutputInjectionScanFunc_ProjectDirThreadedForLogPlacement(t *testing
 			"argument, not inherited ambiently): %v", logPath, statErr)
 	}
 }
+
+// ---- N3 (s3-flows-security-review-r2-2026-09-21.md): a missing/stale
+// project directory must degrade to an inherited cwd, not a raw chdir
+// hard-fail ---------------------------------------------------------------
+
+// TestNewOutputInjectionScanFunc_MissingProjectDirDoesNotHardFail
+// reproduces the review's N3 repro: Engine.Project pointing at a directory
+// that does not exist (a renamed or removed workspace) used to set
+// exec.Cmd.Dir unconditionally, so the subprocess's own chdir failed before
+// the script ever ran — routing through handleScanInfraFailure and failing
+// closed with a confusing raw "chdir: no such file or directory" error
+// attributed to the injection scanner, even for completely benign upstream
+// content. The fix falls back to an inherited cwd (cmd.Dir == "") when the
+// project directory isn't usable, warning once at construction instead of
+// failing the node.
+func TestNewOutputInjectionScanFunc_MissingProjectDirDoesNotHardFail(t *testing.T) {
+	root := repoLibHooksRoot(t)
+	missingProject := filepath.Join(t.TempDir(), "renamed-or-removed-workspace")
+	if _, statErr := os.Stat(missingProject); !os.IsNotExist(statErr) {
+		t.Fatalf("pre-condition: expected %s to not exist", missingProject)
+	}
+
+	scan := workflow.NewOutputInjectionScanFunc(root, missingProject)
+	err := scan(context.Background(), "fetch", "summarizer", []byte("perfectly benign upstream output"))
+	if err != nil {
+		t.Fatalf("expected a missing project directory to degrade to an inherited cwd "+
+			"rather than fail the node, got error: %v", err)
+	}
+}
+
+// TestNewOutputInjectionScanFunc_ProjectIsAFileDoesNotHardFail covers the
+// sibling case the review's fix (stat + IsDir, not just stat) guards: a
+// project path that exists but is a regular file, not a directory (e.g. a
+// misconfigured workspace path), must also degrade rather than hard-fail
+// chdir.
+func TestNewOutputInjectionScanFunc_ProjectIsAFileDoesNotHardFail(t *testing.T) {
+	root := repoLibHooksRoot(t)
+	notADir := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(notADir, []byte("i am a file, not a project directory"), 0644); err != nil {
+		t.Fatalf("write notADir: %v", err)
+	}
+
+	scan := workflow.NewOutputInjectionScanFunc(root, notADir)
+	err := scan(context.Background(), "fetch", "summarizer", []byte("perfectly benign upstream output"))
+	if err != nil {
+		t.Fatalf("expected a project path that is a file (not a directory) to degrade to an "+
+			"inherited cwd rather than fail the node, got error: %v", err)
+	}
+}

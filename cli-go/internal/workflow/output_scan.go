@@ -93,6 +93,39 @@ type OutputScanFunc func(ctx context.Context, nodeID, agent string, output []byt
 // not be reached) — every skip path is logged to stderr, so it is never a
 // silent pass.
 func NewOutputInjectionScanFunc(yakosRoot, project string) OutputScanFunc {
+	// N3 (s3-flows-security-review-r2-2026-09-21.md): resolve the
+	// subprocess's working directory ONCE, at construction time, rather
+	// than trusting project on every call. R3 (round 2) set cmd.Dir =
+	// project unconditionally; if project does not exist (a renamed or
+	// removed workspace — a configuration fault, not a security-
+	// infrastructure fault), exec.Cmd's own chdir fails BEFORE the script
+	// ever runs, which routed through handleScanInfraFailure and failed
+	// closed for every node consuming upstream output, surfacing a raw
+	// "chdir: no such file or directory" error confusingly attributed to
+	// the injection scanner. Fall back to an inherited cwd (cmd.Dir == "",
+	// the pre-R3 behavior) when project isn't usable, and warn once here
+	// instead of once per scan call. CLAUDE_PROJECT_DIR is still set to the
+	// original project value either way (below) — the hook script's own
+	// "${CLAUDE_PROJECT_DIR:-$PWD}" fallback and its log-directory
+	// mkdir -p handle a stale/nonexistent value gracefully; only cmd.Dir's
+	// hard os/exec chdir cannot.
+	cmdDir := project
+	if project != "" {
+		if fi, statErr := os.Stat(project); statErr != nil {
+			fmt.Fprintf(os.Stderr,
+				"workflow: WARN — output-injection-scan project directory %q is not usable (%v); "+
+					"running the scan from the process's own working directory instead of failing "+
+					"closed on a chdir error.\n", project, statErr)
+			cmdDir = ""
+		} else if !fi.IsDir() {
+			fmt.Fprintf(os.Stderr,
+				"workflow: WARN — output-injection-scan project directory %q is not a directory; "+
+					"running the scan from the process's own working directory instead of failing "+
+					"closed on a chdir error.\n", project)
+			cmdDir = ""
+		}
+	}
+
 	return func(ctx context.Context, nodeID, _ string, output []byte) error {
 		if os.Getenv(envWorkflowScanDisable) == "1" {
 			return nil
@@ -118,8 +151,10 @@ func NewOutputInjectionScanFunc(yakosRoot, project string) OutputScanFunc {
 		cmd := exec.CommandContext(scanCtx, "bash", hookPath) //nolint:gosec
 		cmd.Stdin = bytes.NewReader(payload)
 		// cmd.Dir: empty string means "inherit the calling process's cwd"
-		// (Go's documented default), so this is safe even when project=="".
-		cmd.Dir = project
+		// (Go's documented default), so this is safe whenever cmdDir=="" —
+		// either because project itself was empty, or because it wasn't
+		// usable (N3, see cmdDir's resolution above).
+		cmd.Dir = cmdDir
 		// HOOK_FAIL_CLOSED=1 and CLAUDE_PROJECT_DIR are set on THIS
 		// exec.Cmd's own Env slice only (built from os.Environ(), not
 		// os.Setenv) — neither can affect any other invocation of this
