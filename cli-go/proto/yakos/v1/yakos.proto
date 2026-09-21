@@ -169,7 +169,29 @@ service Refresh {
 }
 
 message RefreshRunRequest {
-  bool dry_run = 1;
+  // apply, when true, writes the detected repairs (hook scripts,
+  // settings.json registrations, agent symlinks). The proto3 zero value
+  // (false) — whether sent explicitly or simply omitted, which proto3
+  // cannot distinguish for a scalar bool — means dry-run/read-only.
+  //
+  // SECURITY (round-2 review R5, M2 follow-up,
+  // security-review-2026-09-14.md): the field this replaced was named
+  // dry_run, whose proto3 zero value (false) meant APPLY — so an omitted
+  // field already wrote hook scripts, settings.json, and agent symlinks
+  // across every project under $HOME/agent-control. A proto3 scalar bool
+  // cannot distinguish "omitted" from "false" at all (there is no wire
+  // presence bit for a plain bool field), so the only way to make the
+  // zero value safe is to name the field for the SAFE state. Naming it
+  // "apply" (destructive = true, explicit) closes that permanently; a
+  // future reader cannot reintroduce the bug by "fixing" a default,
+  // because there is no default state left that means write.
+  bool apply = 1;
+  // scope selects how many projects a write reaches. "" (default) or
+  // "project" limits repair to the caller-configured WorkspaceRoot only;
+  // "all" reaches every project under $HOME/agent-control
+  // (refresh.CollectProjects) — a much larger blast radius that must be
+  // requested explicitly (round-2 review R19).
+  string scope = 2;
 }
 
 message RefreshRunResponse {

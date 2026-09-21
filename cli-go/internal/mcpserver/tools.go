@@ -408,12 +408,13 @@ func toolRefresh() tool {
 	return tool{
 		def: ToolDefinition{
 			Name: "yakos.refresh",
-			Description: `Detect and repair deployment drift: hook scripts, settings.json registrations, and agent symlinks.
-Idempotent when dryRun=true (read-only). Non-idempotent otherwise (touches symlinks and files).`,
+			Description: `Detect and repair deployment drift: hook scripts, settings.json registrations, and agent symlinks, scoped to the current project.
+Idempotent when apply=false (read-only, the default). Non-idempotent when apply=true (touches symlinks and files). Pass scope:"all" to reach every project under $HOME/agent-control instead of just the current one.`,
 			InputSchema: mustSchema(`{
   "type": "object",
   "properties": {
-    "dryRun": {"type": "boolean", "description": "Report changes without writing. Defaults to true (safe/read-only); pass dryRun:false to actually apply changes."}
+    "apply": {"type": "boolean", "description": "Actually write changes. Defaults to false (safe/read-only); pass apply:true to apply the detected repairs."},
+    "scope": {"type": "string", "enum": ["project", "all"], "description": "\"project\" (default) limits repair to the current workspace project. \"all\" reaches every project under $HOME/agent-control — a much larger blast radius; must be requested explicitly."}
   },
   "additionalProperties": false
 }`),
@@ -422,28 +423,17 @@ Idempotent when dryRun=true (read-only). Non-idempotent otherwise (touches symli
 	}
 }
 
-// DryRun is a *bool (not bool) so the handler can tell "omitted" apart from
-// "explicitly false" — see resolveDryRun (M2).
-type refreshArgs struct {
-	DryRun *bool `json:"dryRun,omitempty"`
-}
-
-// resolveDryRun applies the M2 fail-safe default.
+// refreshArgs is the yakos.refresh input shape.
 //
-// yakos.refresh rewrites hook scripts, settings.json, and agent symlinks
-// across EVERY project under $HOME/agent-control (refresh.CollectProjects),
-// and this tool is reachable from the same MCP surface implicated in C2
-// (an unauthenticated caller, absent that fix, could reach it with zero
-// prior setup). Before this fix, dryRun defaulted to false (Go's bool zero
-// value) whenever the caller simply omitted the field, so the SAFE call
-// shape — "just call yakos.refresh" — was actually the DESTRUCTIVE one.
-// Requiring an explicit dryRun:false to write inverts that: omitting the
-// field is now always safe, and applying changes is an opt-in action.
-func resolveDryRun(p refreshArgs) bool {
-	if p.DryRun == nil {
-		return true
-	}
-	return *p.DryRun
+// SECURITY (round-2 review R5, R19): both fields are opt-in, fail-safe by
+// construction. Apply's Go zero value (false) is dry-run — see
+// refresh.ResolveApply's doc comment for why every transport must use an
+// "apply" field rather than a "dryRun" one. Scope's zero value ("") is
+// resolved to "project" (the current workspace only), not "all" — omitting
+// scope must never silently reach every project under $HOME/agent-control.
+type refreshArgs struct {
+	Apply bool   `json:"apply,omitempty"`
+	Scope string `json:"scope,omitempty"`
 }
 
 func handleRefresh(ctx context.Context, cfg Config, args json.RawMessage) ToolsCallResult {
@@ -455,14 +445,25 @@ func handleRefresh(ctx context.Context, cfg Config, args json.RawMessage) ToolsC
 			return errorContent(fmt.Sprintf("yakos.refresh: invalid arguments: %v", err))
 		}
 	}
+	if p.Scope != "" && p.Scope != "project" && p.Scope != "all" {
+		return errorContent(fmt.Sprintf("yakos.refresh: invalid scope %q: must be \"project\" or \"all\"", p.Scope))
+	}
 
 	if cfg.YakosRoot == "" {
 		return errorContent("yakos.refresh: yakos_root not configured")
 	}
 
-	// Collect project paths from $HOME/agent-control.
-	home := os.Getenv("HOME")
-	projects := refresh.CollectProjects(home)
+	// SECURITY (round-2 review R19): M2's original fix addressed only the
+	// destructive-by-default problem, not the blast radius of an
+	// intentional apply=true call — a single {"apply":true} still rewrote
+	// every project under $HOME/agent-control (refresh.CollectProjects),
+	// persistent code execution far outside the calling workspace. Scope
+	// now defaults to the current project; reaching every project requires
+	// an explicit scope:"all" opt-in, mirroring apply's opt-in shape.
+	var projects []string
+	if p.Scope == "all" {
+		projects = refresh.CollectProjects(os.Getenv("HOME"))
+	}
 	if len(projects) == 0 && cfg.WorkspaceRoot != "" {
 		projects = []string{cfg.WorkspaceRoot}
 	}
@@ -471,7 +472,7 @@ func handleRefresh(ctx context.Context, cfg Config, args json.RawMessage) ToolsC
 	rcfg := refresh.Config{
 		YakosRoot:    cfg.YakosRoot,
 		ProjectPaths: projects,
-		DryRun:       resolveDryRun(p),
+		DryRun:       refresh.ResolveApply(p.Apply),
 		Writer:       &out,
 		ErrWriter:    &out,
 	}

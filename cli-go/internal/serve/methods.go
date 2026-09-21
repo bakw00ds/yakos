@@ -512,8 +512,19 @@ func splitKanbanTaskHeader(s string) (id, title string) {
 // ---- yakos.refresh.run -------------------------------------------------------
 
 // refreshRunParams is the request shape for yakos.refresh.run.
+//
+// SECURITY (round-2 review R5, R19): Apply's Go zero value (false) is
+// dry-run — see refresh.ResolveApply's doc comment for why this field is
+// named "apply", never "dry_run"/"dryRun" (a bool named for the SAFE state
+// makes its zero value the safe default; a bool named for the DESTRUCTIVE
+// state, as round 1 shipped here, makes its zero value destructive, which
+// is exactly the M2 bug this closes). Scope mirrors the same opt-in shape
+// for blast radius: omitted/"project" (default) limits repair to the
+// current WorkspaceRoot; only an explicit "all" reaches every project under
+// $HOME/agent-control.
 type refreshRunParams struct {
-	DryRun bool `json:"dry_run,omitempty"`
+	Apply bool   `json:"apply,omitempty"`
+	Scope string `json:"scope,omitempty"`
 }
 
 // refreshRunResult is the response shape for yakos.refresh.run.
@@ -532,12 +543,17 @@ func handleRefreshRun(cfg Config) jsonrpc.Handler {
 				return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("refresh.run: invalid params: %v", err)}
 			}
 		}
+		if p.Scope != "" && p.Scope != "project" && p.Scope != "all" {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("refresh.run: invalid scope %q: must be \"project\" or \"all\"", p.Scope)}
+		}
 		if cfg.YakosRoot == "" {
 			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeDispatchUnavailable, Message: "refresh.run: yakos_root not configured"}
 		}
 
-		home := os.Getenv("HOME")
-		projects := refresh.CollectProjects(home)
+		var projects []string
+		if p.Scope == "all" {
+			projects = refresh.CollectProjects(os.Getenv("HOME"))
+		}
 		if len(projects) == 0 && cfg.WorkspaceRoot != "" {
 			projects = []string{cfg.WorkspaceRoot}
 		}
@@ -546,7 +562,7 @@ func handleRefreshRun(cfg Config) jsonrpc.Handler {
 		rcfg := refresh.Config{
 			YakosRoot:    cfg.YakosRoot,
 			ProjectPaths: projects,
-			DryRun:       p.DryRun,
+			DryRun:       refresh.ResolveApply(p.Apply),
 			Writer:       &out,
 			ErrWriter:    &out,
 		}

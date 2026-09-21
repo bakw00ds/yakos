@@ -24,6 +24,30 @@ import (
 	"github.com/bakw00ds/yakos/internal/deploydrift"
 )
 
+// ResolveApply converts a transport-level "apply" flag into the DryRun value
+// for Config.
+//
+// SECURITY (round-2 review R5/R19, M2 follow-up): yakos.refresh rewrites
+// hook scripts, settings.json, and agent symlinks across every project
+// under $HOME/agent-control. Round 1 fixed this fail-safe default on the
+// MCP transport only (via a *bool dryRun field defaulting to dry-run when
+// omitted); JSON-RPC (yakos.refresh.run), gRPC (Refresh.Run), and REST
+// (currently unrouted, but inherits the bug the day it is wired) all still
+// had `DryRun bool json:"dry_run,omitempty"`, whose Go zero value (false,
+// indistinguishable from an omitted field) meant the field being merely
+// ABSENT from the request already applied changes.
+//
+// The fix standardizes every transport on a single "apply" boolean instead
+// of "dry_run": the wire field's Go zero value (false) now means dry-run by
+// construction, for every transport, with no *bool/pointer machinery
+// needed. Every transport MUST decode into an "apply" field and call this
+// function — never invert a locally-named "dryRun bool" field, which
+// reintroduces the exact zero-value bug this closes. There is intentionally
+// no transport-specific variation: same inputs, same result, everywhere.
+func ResolveApply(apply bool) bool {
+	return !apply
+}
+
 // Config controls a refresh run.
 type Config struct {
 	// YakosRoot is the framework repo root ($YAKOS_ROOT).

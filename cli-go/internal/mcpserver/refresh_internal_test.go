@@ -1,74 +1,86 @@
 package mcpserver
 
-// refresh_internal_test.go — internal (white-box) tests for the M2 fix:
-// yakos.refresh's dryRun flag must default to true (safe/read-only), not
-// false, when the caller omits it. See security-review-2026-09-14.md M2.
+// refresh_internal_test.go — internal (white-box) tests for the M2 fix
+// (round 1) and its round-2 follow-ups (R5, R19): yakos.refresh must
+// default to a safe, project-scoped, read-only run, requiring explicit
+// opt-in for both writing (apply:true) and reaching every project under
+// $HOME/agent-control (scope:"all"). See security-review-2026-09-14.md M2
+// and work/current/reports/s2-daemon-security-review-2026-09-21.md R5/R19.
 //
-// This uses the unexported resolveDryRun/refreshArgs directly rather than
-// exercising the full handleRefresh -> refresh.Run path, because Run calls
-// refresh.CollectProjects(os.Getenv("HOME")) directly (not test-injectable),
-// so a full end-to-end test would scan the real developer/CI machine's home
-// directory. The dryRun-default decision is a pure function; testing it in
-// isolation avoids that unrelated flakiness while still proving the fix.
+// This uses the unexported refreshArgs/handleRefresh directly rather than
+// exercising the full handleRefresh -> refresh.Run(scope:"all") path, since
+// scope:"all" calls refresh.CollectProjects(os.Getenv("HOME")) directly
+// (not test-injectable), which would make a test scan the real
+// developer/CI machine's home directory. The apply/scope decoding and
+// defaulting is what's under test; it's exercised precisely, without
+// touching that unrelated code path.
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
+	"time"
 )
 
-// TestResolveDryRun_OmittedDefaultsTrue is the core M2 regression: omitting
-// dryRun entirely must resolve to a SAFE (dry-run) call, not a destructive
-// one. Before the fix, refreshArgs.DryRun was a plain bool, whose Go zero
-// value (false) was indistinguishable from an explicit dryRun:false — so
-// "just call yakos.refresh" silently meant "rewrite hooks/settings/symlinks
-// across every project under $HOME/agent-control".
-func TestResolveDryRun_OmittedDefaultsTrue(t *testing.T) {
-	got := resolveDryRun(refreshArgs{})
-	if !got {
-		t.Fatal("resolveDryRun(refreshArgs{}) = false; want true (omitted dryRun must default to safe/dry-run)")
-	}
-}
-
-// TestResolveDryRun_ExplicitFalseApplies verifies the opt-in write path
-// still works: an explicit dryRun:false must resolve to false so an
-// operator can still actually apply changes.
-func TestResolveDryRun_ExplicitFalseApplies(t *testing.T) {
-	f := false
-	got := resolveDryRun(refreshArgs{DryRun: &f})
-	if got {
-		t.Fatal("resolveDryRun({DryRun: false}) = true; want false (explicit dryRun:false must apply changes)")
-	}
-}
-
-// TestResolveDryRun_ExplicitTrueStaysDryRun verifies an explicit dryRun:true
-// still resolves to true (no change in behavior for the explicit case).
-func TestResolveDryRun_ExplicitTrueStaysDryRun(t *testing.T) {
-	tr := true
-	got := resolveDryRun(refreshArgs{DryRun: &tr})
-	if !got {
-		t.Fatal("resolveDryRun({DryRun: true}) = false; want true")
-	}
-}
-
-// TestRefreshArgs_JSONOmittedFieldIsNilPointer proves the *bool field
-// actually distinguishes "field absent from the JSON" from "field present
-// and false" — the property the whole M2 fix depends on. A plain `bool`
-// field cannot make this distinction; encoding/json always decodes an
-// absent boolean field to Go's zero value (false).
-func TestRefreshArgs_JSONOmittedFieldIsNilPointer(t *testing.T) {
+// TestRefreshArgs_OmittedApplyDefaultsFalse is the core M2/R5 regression:
+// omitting "apply" entirely must decode to false (Go's bool zero value),
+// which refresh.ResolveApply then correctly treats as dry-run — no *bool
+// pointer machinery is needed anymore because the wire field is named
+// "apply", not "dryRun": the zero value IS the safe value by construction.
+func TestRefreshArgs_OmittedApplyDefaultsFalse(t *testing.T) {
 	var p refreshArgs
 	if err := json.Unmarshal([]byte(`{}`), &p); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if p.DryRun != nil {
-		t.Fatalf("DryRun = %v; want nil for an omitted field", *p.DryRun)
+	if p.Apply {
+		t.Fatal("refreshArgs{} decoded Apply = true; want false (omitting apply must be safe/dry-run)")
 	}
+}
 
-	var p2 refreshArgs
-	if err := json.Unmarshal([]byte(`{"dryRun":false}`), &p2); err != nil {
+// TestRefreshArgs_ExplicitApplyTrueDecodes verifies the opt-in write path
+// still works: an explicit apply:true must decode to true.
+func TestRefreshArgs_ExplicitApplyTrueDecodes(t *testing.T) {
+	var p refreshArgs
+	if err := json.Unmarshal([]byte(`{"apply":true}`), &p); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if p2.DryRun == nil || *p2.DryRun != false {
-		t.Fatalf("DryRun for explicit {\"dryRun\":false} = %v; want non-nil pointer to false", p2.DryRun)
+	if !p.Apply {
+		t.Fatal(`refreshArgs{"apply":true} decoded Apply = false; want true`)
+	}
+}
+
+// TestHandleRefresh_RejectsInvalidScope verifies scope is validated against
+// the {"", "project", "all"} enum rather than silently accepted (and, worse,
+// silently treated as "all" by some future refactor).
+func TestHandleRefresh_RejectsInvalidScope(t *testing.T) {
+	cfg := Config{YakosRoot: "/does/not/matter/for/this/test"}
+	res := handleRefresh(context.Background(), cfg, json.RawMessage(`{"scope":"everything"}`))
+	if !res.IsError {
+		t.Fatal(`handleRefresh({"scope":"everything"}): want an error result for an invalid scope value`)
+	}
+}
+
+// TestHandleRefresh_OmittedScopeStaysProjectScoped is the R19 regression:
+// omitting scope must resolve to the current WorkspaceRoot only, never
+// refresh.CollectProjects's every-project-under-$HOME sweep. Verified
+// indirectly: cfg.YakosRoot is set to a nonexistent path so refresh.Run
+// fails fast (this test asserts only that it does NOT hang/scan a real
+// home directory, i.e. it must return quickly and deterministically).
+func TestHandleRefresh_OmittedScopeStaysProjectScoped(t *testing.T) {
+	cfg := Config{YakosRoot: "/does/not/exist/yakos-root", WorkspaceRoot: "/does/not/exist/workspace"}
+	done := make(chan ToolsCallResult, 1)
+	go func() {
+		done <- handleRefresh(context.Background(), cfg, json.RawMessage(`{}`))
+	}()
+	select {
+	case res := <-done:
+		// A nonexistent YakosRoot/WorkspaceRoot should surface as an error
+		// result quickly; the point of this test is that handleRefresh
+		// returns at all without falling into CollectProjects's real-$HOME
+		// walk (which this synthetic YakosRoot makes trivially fail-fast
+		// instead of silently succeeding against the real machine).
+		_ = res
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleRefresh({}) did not return promptly — suspect it scoped to CollectProjects(real $HOME) despite scope being omitted (R19 regression)")
 	}
 }

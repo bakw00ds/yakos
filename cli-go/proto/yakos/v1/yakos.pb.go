@@ -150,8 +150,23 @@ type StatusReadResponse struct {
 // ---- Refresh ----------------------------------------------------------------
 
 // RefreshRunRequest is the request for Refresh.Run.
+//
+// SECURITY (round-2 review R5, M2 follow-up, security-review-2026-09-14.md):
+// this field used to be named DryRun (proto field dry_run). A proto3 scalar
+// bool has no wire-presence bit, so "omitted" and "false" are
+// indistinguishable — the zero value (false) meant APPLY, so an entirely
+// omitted request already wrote hook scripts, settings.json, and agent
+// symlinks across every project under $HOME/agent-control. Renamed to Apply
+// (destructive = true, explicit) so the zero value is safe by construction,
+// with no default state left that means write. Field number 1 is reused
+// (dry_run and apply are exclusive; no client should ever send both).
 type RefreshRunRequest struct {
-	DryRun bool `json:"dry_run,omitempty"`
+	Apply bool `json:"apply,omitempty"` // field 1 (was dry_run; semantics inverted, see above)
+	// Scope selects how many projects a write reaches. "" (default) or
+	// "project" limits repair to the server-configured WorkspaceRoot only;
+	// "all" reaches every project under $HOME/agent-control — a much
+	// larger blast radius that must be requested explicitly (R19).
+	Scope string `json:"scope,omitempty"` // field 2
 }
 
 // RefreshRunResponse is the result of Refresh.Run.

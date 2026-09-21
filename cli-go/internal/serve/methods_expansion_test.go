@@ -358,7 +358,9 @@ func TestMethod_RefreshRun_DryRunReturnsOutput(t *testing.T) {
 	cfg := serve.Config{WorkspaceRoot: root, YakosRoot: root}
 	client, _ := newTestDaemon(t, cfg)
 
-	raw, err := client.Call(context.Background(), "yakos.refresh.run", map[string]interface{}{"dry_run": true})
+	// apply omitted (round-2 review R5): the field's Go zero value (false)
+	// IS dry-run, so this call is safe/read-only by construction.
+	raw, err := client.Call(context.Background(), "yakos.refresh.run", map[string]interface{}{"apply": false})
 	if err != nil {
 		t.Fatalf("refresh.run: %v", err)
 	}
@@ -372,6 +374,35 @@ func TestMethod_RefreshRun_DryRunReturnsOutput(t *testing.T) {
 	// Output may be empty when no projects are registered; that's OK.
 	// The key assertion is that the call succeeded and the field exists.
 	_ = result.Output
+}
+
+// TestMethod_RefreshRun_OmittedApplyDoesNotWrite is the round-2 review R5
+// regression: the previous "dry_run bool" field's Go zero value (false)
+// meant an entirely OMITTED field already applied changes — the safe call
+// shape ("just call yakos.refresh.run") was actually the destructive one.
+// With the field renamed to "apply", the zero value (false, whether typed
+// explicitly or left out) is dry-run by construction. This asserts the
+// refresh output for an omitted-params call reports dry-run, not applied,
+// output — refresh.Run's own [DRY RUN] / "(dry-run: no files written)"
+// markers (see internal/refresh/refresh.go) are the observable signal.
+func TestMethod_RefreshRun_OmittedApplyDoesNotWrite(t *testing.T) {
+	root := repoRoot(t)
+	cfg := serve.Config{WorkspaceRoot: root, YakosRoot: root}
+	client, _ := newTestDaemon(t, cfg)
+
+	raw, err := client.Call(context.Background(), "yakos.refresh.run", nil)
+	if err != nil {
+		t.Fatalf("refresh.run: %v", err)
+	}
+	var result struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Output != "" && !strings.Contains(result.Output, "[DRY RUN]") {
+		t.Errorf("refresh.run with omitted params: output = %q; want a dry-run report ([DRY RUN] marker) — omitting apply must never write (R5 regression)", result.Output)
+	}
 }
 
 // ---- yakos.cost.aggregate ----------------------------------------------------

@@ -649,9 +649,18 @@ func (r *refreshSrv) Run(ctx context.Context, req *pb.RefreshRunRequest) (*pb.Re
 	if r.cfg.YakosRoot == "" {
 		return nil, status.Errorf(codes.FailedPrecondition, "yakos_root not configured")
 	}
+	if req.Scope != "" && req.Scope != "project" && req.Scope != "all" {
+		return nil, status.Errorf(codes.InvalidArgument, "refresh: invalid scope %q: must be \"project\" or \"all\"", req.Scope)
+	}
 
-	home := os.Getenv("HOME")
-	projects := refresh.CollectProjects(home)
+	// SECURITY (round-2 review R19): scope defaults to the current project
+	// only. Reaching every project under $HOME/agent-control
+	// (refresh.CollectProjects) requires an explicit scope:"all" — see
+	// RefreshRunRequest's doc comment.
+	var projects []string
+	if req.Scope == "all" {
+		projects = refresh.CollectProjects(os.Getenv("HOME"))
+	}
 	if len(projects) == 0 && r.cfg.WorkspaceRoot != "" {
 		projects = []string{r.cfg.WorkspaceRoot}
 	}
@@ -660,9 +669,13 @@ func (r *refreshSrv) Run(ctx context.Context, req *pb.RefreshRunRequest) (*pb.Re
 	rcfg := refresh.Config{
 		YakosRoot:    r.cfg.YakosRoot,
 		ProjectPaths: projects,
-		DryRun:       req.DryRun,
-		Writer:       &out,
-		ErrWriter:    &out,
+		// SECURITY (round-2 review R5): req.Apply's zero value (false) is
+		// dry-run — see RefreshRunRequest's doc comment and
+		// refresh.ResolveApply. Never invert a "DryRun"-named field here;
+		// that reintroduces the exact zero-value bug this closes.
+		DryRun:    refresh.ResolveApply(req.Apply),
+		Writer:    &out,
+		ErrWriter: &out,
 	}
 	if _, err := refresh.Run(rcfg); err != nil {
 		return nil, status.Errorf(codes.Internal, "refresh: %v", err)
