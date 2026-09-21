@@ -242,7 +242,25 @@ Operator controls specific to the workflow path:
   match," which always blocks regardless of this variable.
 - `.yakos.yml`'s `injection_scan.enabled: false` and
   `YAKOS_INJECTION_SCAN_DISABLE=1` (the hook's own, pre-existing disables)
-  apply to both invocation paths.
+  apply **only** to the PostToolUse path (R3, round 2 of
+  `s3-flows-security-review-2026-09-21.md`: both switches predate this
+  feature and were written to quiet the WARN-only PostToolUse noise; they
+  used to also silently disable the blocking workflow-path control before
+  the hook's tool-name case gate was moved above them). The two paths now
+  have entirely non-overlapping disables.
+
+**What the blocking scan does and does not buy (R5, round 2).** The
+pattern set is ten literal regexes drawn from known injection corpora. It
+catches unsophisticated, accidental, or copy-pasted payloads reliably; it
+is not a boundary an adversary who knows it exists cannot cross. Mild
+rewording, non-English phrasing, Unicode zero-width insertion inside a
+matched word, or base64-encoding the instruction all evade every pattern
+here. Treat this scan as a cheap first filter, not the security argument —
+**the delimiter above is what the security argument actually rests on**:
+even a payload that evades every pattern here still has to talk the
+downstream model into disregarding an explicit, freshly-stated "this is
+data, not instructions" policy, which is a materially higher bar than
+matching no regex.
 
 Deferred as a larger follow-up, not implemented here: running a
 downstream node that consumes upstream output at a stricter permission
