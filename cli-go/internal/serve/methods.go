@@ -36,6 +36,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/kanban"
+	"github.com/bakw00ds/yakos/internal/pathsafe"
 	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/refresh"
 	"github.com/bakw00ds/yakos/internal/status"
@@ -630,6 +631,14 @@ type statusReadParams struct {
 }
 
 // handleStatusRead returns a handler that reads the project status report.
+//
+// SECURITY (round-2 review R13): status.Status joins Project onto
+// $HOME/agent-control unvalidated (internal/status/status.go), the
+// identical pattern M3 fixed in internal/supervise one package over. A
+// value like "../../.." resolves the work directory to an arbitrary
+// directory and stats/walks files under it (oracle-grade info disclosure
+// plus a computeDirSize-driven denial of service). Validated here with the
+// same pathsafe.ValidateProjectSlug the M3 fix now shares.
 func handleStatusRead(cfg Config) jsonrpc.Handler {
 	return func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		var p statusReadParams
@@ -639,6 +648,9 @@ func handleStatusRead(cfg Config) jsonrpc.Handler {
 			if err := dec.Decode(&p); err != nil {
 				return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("status.read: invalid params: %v", err)}
 			}
+		}
+		if err := pathsafe.ValidateProjectSlug(p.Project); err != nil {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("status.read: %v", err)}
 		}
 
 		project := p.Project

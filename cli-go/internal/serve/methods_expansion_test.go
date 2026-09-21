@@ -529,6 +529,25 @@ func TestMethod_StatusRead_UnknownFieldRejected(t *testing.T) {
 	}
 }
 
+// TestMethod_StatusRead_RejectsPathTraversal is the round-2 review R13
+// regression: internal/status.Status joins Project onto
+// $HOME/agent-control unvalidated, the identical pattern M3 fixed one
+// package over in internal/supervise. A value like "../../.." resolves the
+// work directory to an arbitrary directory and stats/walks files under it.
+func TestMethod_StatusRead_RejectsPathTraversal(t *testing.T) {
+	cfg := serve.Config{WorkspaceRoot: t.TempDir(), YakosRoot: repoRoot(t)}
+	client, _ := newTestDaemon(t, cfg)
+
+	for _, project := range []string{"../../..", "../escape", "/etc/passwd", "a/../../b"} {
+		t.Run(project, func(t *testing.T) {
+			_, err := client.Call(context.Background(), "yakos.status.read", map[string]string{"project": project})
+			if err == nil {
+				t.Fatalf("status.read with project=%q: want error, got nil (R13 regression: traversal accepted)", project)
+			}
+		})
+	}
+}
+
 // ---- yakos.supervise.pending ------------------------------------------------
 
 func TestMethod_SupervisePending_NoFindingsFile(t *testing.T) {

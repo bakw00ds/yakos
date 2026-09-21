@@ -48,7 +48,6 @@ package supervise
 import (
 	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -56,6 +55,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bakw00ds/yakos/internal/pathsafe"
 )
 
 // ---- public types -----------------------------------------------------------
@@ -251,7 +252,11 @@ See docs/supervisor-mode.md for the full guide.
 // resolveProject returns the project slug from cfg.Project or from cwd inference.
 // ErrInvalidProject is returned by resolveProject when cfg.Project is a
 // path-traversal or absolute-path payload rather than a plain project slug.
-var ErrInvalidProject = errors.New("supervise: invalid project: must be a plain slug (no path separators or '..')")
+//
+// This wraps pathsafe.ErrInvalidProjectSlug (round-2 review R13) so existing
+// callers that compare against ErrInvalidProject keep working; errors.Is
+// unwraps to the shared sentinel.
+var ErrInvalidProject = fmt.Errorf("supervise: invalid project: must be a plain slug (no path separators or '..'): %w", pathsafe.ErrInvalidProjectSlug)
 
 // validateProjectSlug rejects a project value that could escape acRoot.
 //
@@ -260,15 +265,15 @@ var ErrInvalidProject = errors.New("supervise: invalid project: must be a plain 
 // validation, and resolveProjectPaths joins it onto acRoot unmodified
 // (filepath.Join(acRoot, project, ...)). A value like "../../../tmp/x" (or
 // an absolute path) reads/writes files under an arbitrary directory instead
-// of the caller's own agent-control project directory. Project is always a
-// single path segment (e.g. "yakos"; see Config.Project doc comment above),
-// so any path separator or ".." is rejected outright rather than attempting
-// to lexically normalize and re-validate containment.
+// of the caller's own agent-control project directory.
+//
+// Delegates to pathsafe.ValidateProjectSlug (round-2 review R13: the
+// identical unvalidated-slug pattern was found one package over in
+// yakos.status.read, unswept by the original M3 fix) but returns the
+// package-local ErrInvalidProject so existing error-comparison call sites
+// are unaffected.
 func validateProjectSlug(project string) error {
-	if project == "" {
-		return nil
-	}
-	if filepath.IsAbs(project) || strings.ContainsAny(project, "/\\") || strings.Contains(project, "..") {
+	if err := pathsafe.ValidateProjectSlug(project); err != nil {
 		return ErrInvalidProject
 	}
 	return nil

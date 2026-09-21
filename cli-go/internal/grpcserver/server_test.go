@@ -458,6 +458,24 @@ func TestStatus_Read_WithProject(t *testing.T) {
 	_ = resp
 }
 
+// TestStatus_Read_RejectsPathTraversal is the round-2 review R13
+// regression: internal/status.Status joins Project onto
+// $HOME/agent-control unvalidated, the identical pattern M3 fixed one
+// package over in internal/supervise.
+func TestStatus_Read_RejectsPathTraversal(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	conn := startTestServer(t, dir, wsbus.New())
+	sc := pb.NewStatusClient(conn)
+
+	for _, project := range []string{"../../..", "../escape", "/etc/passwd", "a/../../b"} {
+		_, err := sc.Read(ctxWithToken(context.Background(), testReadToken), &pb.StatusReadRequest{Project: project})
+		if err == nil {
+			t.Errorf("Read with Project=%q: want error, got nil (R13 regression: traversal accepted)", project)
+		}
+	}
+}
+
 func TestStatus_Read_RequiresToken(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

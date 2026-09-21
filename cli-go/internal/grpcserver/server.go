@@ -46,6 +46,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	iKanban "github.com/bakw00ds/yakos/internal/kanban"
+	"github.com/bakw00ds/yakos/internal/pathsafe"
 	"github.com/bakw00ds/yakos/internal/refresh"
 	iStatus "github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/wsbus"
@@ -605,7 +606,16 @@ type statusSrv struct {
 	cfg Config
 }
 
+// SECURITY (round-2 review R13): status.Status joins Project onto
+// $HOME/agent-control unvalidated — the identical unswept M3 pattern, see
+// serve/methods.go's handleStatusRead for the full rationale. Validated
+// here with the shared pathsafe.ValidateProjectSlug before req.Project ever
+// reaches iStatus.Status.
 func (s *statusSrv) Read(ctx context.Context, req *pb.StatusReadRequest) (*pb.StatusReadResponse, error) {
+	if err := pathsafe.ValidateProjectSlug(req.Project); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "status: %v", err)
+	}
+
 	project := req.Project
 	if project == "" {
 		project = filepath.Base(s.cfg.WorkspaceRoot)
