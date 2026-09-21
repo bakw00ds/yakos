@@ -304,6 +304,47 @@ func TestClaudeExecCmd_NoEffortFlag(t *testing.T) {
 	}
 }
 
+// TestClaudeChatExecCmd_UserTextFlagInjection covers H1: claude's -p is a
+// boolean flag (the prompt is a bare positional), so a UserText beginning
+// with '-' must not be interpreted as a CLI flag. The fix is the same '--'
+// end-of-options sentinel the codex adapter already uses
+// (codex.go: args = append(args, "--", req.UserText)).
+func TestClaudeChatExecCmd_UserTextFlagInjection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec.Cmd inspection requires sh; skipping on Windows")
+	}
+	a := &ClaudeAdapter{}
+	req := ChatDispatchRequest{
+		Project:  "/tmp/project",
+		UserText: "--settings /tmp/evil.json",
+	}
+	cmd := a.ChatExecCmd(context.Background(), req)
+
+	// Find "-p" in argv; the very next element must be the literal "--"
+	// end-of-options sentinel, and the element after THAT must be the
+	// untouched UserText — never handed to the CLI as a bare positional
+	// immediately after a boolean -p.
+	idx := -1
+	for i, a := range cmd.Args {
+		if a == "-p" {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		t.Fatalf("-p not found in argv: %v", cmd.Args)
+	}
+	if idx+2 >= len(cmd.Args) {
+		t.Fatalf("argv too short after -p: %v", cmd.Args)
+	}
+	if cmd.Args[idx+1] != "--" {
+		t.Errorf("expected '--' sentinel immediately after -p, got %q; argv: %v", cmd.Args[idx+1], cmd.Args)
+	}
+	if cmd.Args[idx+2] != req.UserText {
+		t.Errorf("expected UserText immediately after '--' sentinel, got %q; argv: %v", cmd.Args[idx+2], cmd.Args)
+	}
+}
+
 // TestCodexChatExecCmd_NoEffortFlag verifies that CodexAdapter.ChatExecCmd
 // does NOT pass --effort even when the ChatDispatchRequest carries Effort.
 // Codex does not support this flag; the adapter should ignore it.

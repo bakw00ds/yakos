@@ -193,7 +193,7 @@ func (a *ClaudeAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest
 		"--include-partial-messages",
 		"--verbose",
 		"--exclude-dynamic-system-prompt-sections", // PR #31
-		"-p", req.UserText,
+		"-p",
 	}
 	if req.AgentSystemPrompt != "" {
 		args = append(args, "--append-system-prompt", req.AgentSystemPrompt)
@@ -205,6 +205,13 @@ func (a *ClaudeAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest
 	if req.Effort != "" {
 		args = append(args, "--effort", req.Effort)
 	}
+	// SECURITY (H1): claude's -p is a boolean flag — the prompt is a bare
+	// positional, not -p's value — so commander would otherwise parse a
+	// UserText beginning with '-' (e.g. "--settings /tmp/evil.json") as
+	// another CLI flag rather than as prompt text. The '--' end-of-options
+	// sentinel forces everything after it to be treated as a positional,
+	// mirroring the codex adapter (codex.go: append(args, "--", req.UserText)).
+	args = append(args, "--", req.UserText)
 
 	cmd := exec.CommandContext(ctx, "claude", args...) //nolint:gosec
 	cmd.Env = buildEnvChat(req)
@@ -736,7 +743,10 @@ type ChatDispatchRequest struct {
 	// Project is the absolute path to the project repository.
 	Project string
 
-	// UserText is the user's message (passed as -p to the CLI).
+	// UserText is the user's message (passed as -p to the CLI, after a '--'
+	// end-of-options sentinel — see ChatExecCmd / H1 in
+	// security-review-2026-09-14.md — since claude's -p is a boolean flag and
+	// UserText is untrusted, caller-supplied text that may begin with '-').
 	UserText string
 
 	// AgentSystemPrompt is the agent's body/persona, injected via
