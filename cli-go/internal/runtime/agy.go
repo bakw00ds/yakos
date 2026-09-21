@@ -6,18 +6,12 @@ import (
 	"os/exec"
 )
 
-// agyEnvExtras are the agy/gemini-specific environment variables forwarded
-// through filterEnv's allowlist (M4). Identified from this codebase's own
-// agy/gemini auth-detection logic (internal/auth checkAuth "agy"/
-// "antigravity-sdk"/"gemini" cases).
-var agyEnvExtras = []string{"ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI"}
-
 // buildEnvAgy constructs the subprocess environment for agy dispatch: an
-// allowlisted subset of the parent env (see env.go / M4) plus
-// dispatch-specific variables. agy never inherits ANTHROPIC_API_KEY or
-// OPENAI_API_KEY/CODEX_HOME this way.
+// allowlisted subset of the parent env (see env.go / M4, agyEnvSpec) plus
+// dispatch-specific variables. agy never inherits ANTHROPIC_* or
+// OPENAI_*/CODEX_* this way.
 func buildEnvAgy(req DispatchRequest) []string {
-	env := filterEnv(os.Environ(), agyEnvExtras...)
+	env := filterEnv(os.Environ(), agyEnvSpec)
 	return appendDispatchEnv(env, req)
 }
 

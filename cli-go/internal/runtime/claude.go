@@ -144,19 +144,13 @@ func (a *ClaudeAdapter) Dispatch(ctx context.Context, req DispatchRequest) (*Dis
 	return &DispatchResult{Stdout: textOut, ExitCode: exitCode}, nil
 }
 
-// claudeEnvExtras are the ANTHROPIC/claude-specific environment variables
-// forwarded through filterEnv's allowlist (M4). Identified from this
-// codebase's own claude auth-detection logic (claude.go Available(),
-// internal/claudeauth, internal/auth checkAuth "claude"/"claude-sdk" case).
-var claudeEnvExtras = []string{"ANTHROPIC_API_KEY"}
-
 // buildEnv constructs the subprocess environment for claude dispatch: an
-// allowlisted subset of the parent env (see env.go / M4) plus
+// allowlisted subset of the parent env (see env.go / M4, claudeEnvSpec) plus
 // dispatch-specific variables. Codex and agy have their own
-// buildEnvCodex/buildEnvAgy so that ANTHROPIC_API_KEY is never handed to a
+// buildEnvCodex/buildEnvAgy so that ANTHROPIC_* is never handed to a
 // third-party binary, and vice versa.
 func buildEnv(req DispatchRequest) []string {
-	env := filterEnv(os.Environ(), claudeEnvExtras...)
+	env := filterEnv(os.Environ(), claudeEnvSpec)
 	return appendDispatchEnv(env, req)
 }
 
@@ -772,7 +766,7 @@ type ChatDispatchRequest struct {
 // dispatch: an allowlisted subset of the parent env (see env.go / M4) plus
 // dispatch-specific variables.
 func buildEnvChat(req ChatDispatchRequest) []string {
-	env := filterEnv(os.Environ(), claudeEnvExtras...)
+	env := filterEnv(os.Environ(), claudeEnvSpec)
 	if req.ModelOverride != "" {
 		env = append(env, "YAKOS_MODEL_OVERRIDE="+req.ModelOverride)
 	}

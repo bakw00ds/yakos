@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -306,42 +307,124 @@ func TestClaudeExecCmd_NoEffortFlag(t *testing.T) {
 
 // TestClaudeChatExecCmd_UserTextFlagInjection covers H1: claude's -p is a
 // boolean flag (the prompt is a bare positional), so a UserText beginning
-// with '-' must not be interpreted as a CLI flag. The fix is the same '--'
-// end-of-options sentinel the codex adapter already uses
-// (codex.go: args = append(args, "--", req.UserText)).
+// with '-' must not be interpreted as a CLI flag. The fix is the '--'
+// end-of-options sentinel.
+//
+// Round-2 review R9: the original version of this test asserted
+// cmd.Args[idx+1] == "--", i.e. the sentinel immediately after "-p". That
+// invariant never holds for production argv, because buildEnvChat's caller
+// inserts --append-system-prompt and --effort between "-p" and "--" when
+// AgentSystemPrompt/Effort are set — the ONE shape that never occurs in real
+// chat dispatch is both fields empty. This table drives the same case over
+// {AgentSystemPrompt: "", "you are the lead"} x {Effort: "", "high"} and
+// asserts the REAL property instead: '--' exists in argv, is the
+// second-to-last element, and req.UserText is the last element and the sole
+// element after '--'. That holds regardless of what flags precede it.
 func TestClaudeChatExecCmd_UserTextFlagInjection(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("exec.Cmd inspection requires sh; skipping on Windows")
 	}
 	a := &ClaudeAdapter{}
+
+	for _, systemPrompt := range []string{"", "you are the lead"} {
+		for _, effort := range []string{"", "high"} {
+			name := fmt.Sprintf("systemPrompt=%q/effort=%q", systemPrompt, effort)
+			t.Run(name, func(t *testing.T) {
+				req := ChatDispatchRequest{
+					Project:           "/tmp/project",
+					UserText:          "--settings /tmp/evil.json",
+					AgentSystemPrompt: systemPrompt,
+					Effort:            effort,
+				}
+				cmd := a.ChatExecCmd(context.Background(), req)
+
+				sentinel := -1
+				for i, arg := range cmd.Args {
+					if arg == "--" {
+						sentinel = i
+						break
+					}
+				}
+				if sentinel == -1 {
+					t.Fatalf("no '--' end-of-options sentinel in argv: %v", cmd.Args)
+				}
+				if sentinel != len(cmd.Args)-2 {
+					t.Errorf("'--' is not second-to-last (found more argv after UserText); argv: %v", cmd.Args)
+				}
+				if cmd.Args[len(cmd.Args)-1] != req.UserText {
+					t.Errorf("UserText must be the sole element after '--', got %q; argv: %v", cmd.Args[len(cmd.Args)-1], cmd.Args)
+				}
+			})
+		}
+	}
+}
+
+// TestCodexChatExecCmd_UserTextFlagInjection is the codex equivalent of the
+// claude H1 regression: '--' must be the second-to-last argv element and
+// req.UserText the last, so a flag inserted between the fixed prefix and
+// '--' (e.g. --system-prompt) cannot push UserText out of the trailing
+// positional slot.
+func TestCodexChatExecCmd_UserTextFlagInjection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec.Cmd inspection requires sh; skipping on Windows")
+	}
+	a := &CodexAdapter{}
+	for _, systemPrompt := range []string{"", "you are the lead"} {
+		req := ChatDispatchRequest{
+			Project:           "/tmp/project",
+			UserText:          "--dangerously-bypass-approvals-and-sandbox",
+			AgentSystemPrompt: systemPrompt,
+		}
+		cmd := a.ChatExecCmd(context.Background(), req)
+		sentinel := -1
+		for i, arg := range cmd.Args {
+			if arg == "--" {
+				sentinel = i
+				break
+			}
+		}
+		if sentinel == -1 {
+			t.Fatalf("no '--' sentinel in codex argv: %v", cmd.Args)
+		}
+		if sentinel != len(cmd.Args)-2 || cmd.Args[len(cmd.Args)-1] != req.UserText {
+			t.Errorf("UserText must be the sole element after '--'; argv: %v", cmd.Args)
+		}
+	}
+}
+
+// TestAgyChatExecCmd_NoSentinel_PMinusPTakesValueDirectly is a negative
+// counterpart (R9): agy's '-p' takes the NEXT argv element as its value
+// directly (not a boolean flag), so it must NOT gain a '--' sentinel. A
+// future "make all adapters consistent" refactor that added one would
+// regress agy, since agy would then treat the literal string "--" as the
+// prompt text and req.UserText would never be seen as the prompt at all.
+func TestAgyChatExecCmd_NoSentinel_PMinusPTakesValueDirectly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec.Cmd inspection requires sh; skipping on Windows")
+	}
+	a := &AgyAdapter{}
 	req := ChatDispatchRequest{
 		Project:  "/tmp/project",
-		UserText: "--settings /tmp/evil.json",
+		UserText: "--dangerously-skip-permissions",
 	}
 	cmd := a.ChatExecCmd(context.Background(), req)
-
-	// Find "-p" in argv; the very next element must be the literal "--"
-	// end-of-options sentinel, and the element after THAT must be the
-	// untouched UserText — never handed to the CLI as a bare positional
-	// immediately after a boolean -p.
+	for _, arg := range cmd.Args {
+		if arg == "--" {
+			t.Fatalf("agy argv must not contain a '--' sentinel: %v", cmd.Args)
+		}
+	}
 	idx := -1
-	for i, a := range cmd.Args {
-		if a == "-p" {
+	for i, arg := range cmd.Args {
+		if arg == "-p" {
 			idx = i
 			break
 		}
 	}
 	if idx == -1 {
-		t.Fatalf("-p not found in argv: %v", cmd.Args)
+		t.Fatalf("-p not found in agy argv: %v", cmd.Args)
 	}
-	if idx+2 >= len(cmd.Args) {
-		t.Fatalf("argv too short after -p: %v", cmd.Args)
-	}
-	if cmd.Args[idx+1] != "--" {
-		t.Errorf("expected '--' sentinel immediately after -p, got %q; argv: %v", cmd.Args[idx+1], cmd.Args)
-	}
-	if cmd.Args[idx+2] != req.UserText {
-		t.Errorf("expected UserText immediately after '--' sentinel, got %q; argv: %v", cmd.Args[idx+2], cmd.Args)
+	if idx != len(cmd.Args)-2 || cmd.Args[len(cmd.Args)-1] != req.UserText {
+		t.Errorf("expected UserText as the immediate value of -p (second-to-last, no sentinel); argv: %v", cmd.Args)
 	}
 }
 

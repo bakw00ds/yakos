@@ -7,18 +7,12 @@ import (
 	"path/filepath"
 )
 
-// codexEnvExtras are the OpenAI/codex-specific environment variables
-// forwarded through filterEnv's allowlist (M4). Identified from this
-// codebase's own codex auth-detection logic (codex.go Available(),
-// internal/auth checkAuth "codex" case).
-var codexEnvExtras = []string{"OPENAI_API_KEY", "CODEX_HOME"}
-
 // buildEnvCodex constructs the subprocess environment for codex dispatch: an
-// allowlisted subset of the parent env (see env.go / M4) plus
-// dispatch-specific variables. Codex never inherits ANTHROPIC_API_KEY,
-// ANTIGRAVITY_API_KEY, or GEMINI_API_KEY this way.
+// allowlisted subset of the parent env (see env.go / M4, codexEnvSpec) plus
+// dispatch-specific variables. Codex never inherits ANTHROPIC_* or GEMINI_*
+// this way.
 func buildEnvCodex(req DispatchRequest) []string {
-	env := filterEnv(os.Environ(), codexEnvExtras...)
+	env := filterEnv(os.Environ(), codexEnvSpec)
 	return appendDispatchEnv(env, req)
 }
 
