@@ -209,7 +209,7 @@ substituted prompt first. A prompt injection carried in an upstream node's
 output — e.g. from a fetched web page, an issue body, a third-party
 file — therefore had a direct path to code execution.
 
-Two independent mitigations now apply to every `${nodes.*.output)}`
+Two independent mitigations now apply to every `${nodes.*.output}`
 substitution, in `substitutePrompt` (`cli-go/internal/workflow/engine.go`)
 and `cli-go/internal/workflow/untrusted_output.go`:
 
@@ -222,6 +222,16 @@ and `cli-go/internal/workflow/untrusted_output.go`:
    attacker-supplied closing-tag look-alike inside the content is
    neutralized before wrapping. This is a mitigation, not a guarantee — an
    LLM can still choose to disregard the notice — so it is paired with:
+   (N5, round 2: as defense in depth against a future regression back to
+   multi-pass substitution, a literal `${inputs.*}` or `${nodes.*.output}`
+   look-alike found INSIDE upstream content is also rewritten to a fixed
+   `[neutralized-placeholder]` marker before wrapping. This is cosmetic
+   today — single-pass substitution already closes the exploit this
+   guards against by construction — but it means upstream content that
+   legitimately contains that literal text, e.g. a flow whose job is to
+   author or review workflow YAML, will see it replaced with that marker
+   in the downstream prompt. If you see `[neutralized-placeholder]` in a
+   node's output, that's why.)
 2. **Blocking scan.** Before the substitution happens,
    `cli-go/internal/workflow/output_scan.go`'s `NewOutputInjectionScanFunc`
    invokes this exact `output-injection-scan.sh` script with a synthetic
