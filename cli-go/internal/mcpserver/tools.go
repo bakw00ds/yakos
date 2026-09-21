@@ -413,7 +413,7 @@ Idempotent when dryRun=true (read-only). Non-idempotent otherwise (touches symli
 			InputSchema: mustSchema(`{
   "type": "object",
   "properties": {
-    "dryRun": {"type": "boolean", "description": "Report changes without writing (default: false)"}
+    "dryRun": {"type": "boolean", "description": "Report changes without writing. Defaults to true (safe/read-only); pass dryRun:false to actually apply changes."}
   },
   "additionalProperties": false
 }`),
@@ -422,8 +422,28 @@ Idempotent when dryRun=true (read-only). Non-idempotent otherwise (touches symli
 	}
 }
 
+// DryRun is a *bool (not bool) so the handler can tell "omitted" apart from
+// "explicitly false" — see resolveDryRun (M2).
 type refreshArgs struct {
-	DryRun bool `json:"dryRun,omitempty"`
+	DryRun *bool `json:"dryRun,omitempty"`
+}
+
+// resolveDryRun applies the M2 fail-safe default.
+//
+// yakos.refresh rewrites hook scripts, settings.json, and agent symlinks
+// across EVERY project under $HOME/agent-control (refresh.CollectProjects),
+// and this tool is reachable from the same MCP surface implicated in C2
+// (an unauthenticated caller, absent that fix, could reach it with zero
+// prior setup). Before this fix, dryRun defaulted to false (Go's bool zero
+// value) whenever the caller simply omitted the field, so the SAFE call
+// shape — "just call yakos.refresh" — was actually the DESTRUCTIVE one.
+// Requiring an explicit dryRun:false to write inverts that: omitting the
+// field is now always safe, and applying changes is an opt-in action.
+func resolveDryRun(p refreshArgs) bool {
+	if p.DryRun == nil {
+		return true
+	}
+	return *p.DryRun
 }
 
 func handleRefresh(ctx context.Context, cfg Config, args json.RawMessage) ToolsCallResult {
@@ -451,7 +471,7 @@ func handleRefresh(ctx context.Context, cfg Config, args json.RawMessage) ToolsC
 	rcfg := refresh.Config{
 		YakosRoot:    cfg.YakosRoot,
 		ProjectPaths: projects,
-		DryRun:       p.DryRun,
+		DryRun:       resolveDryRun(p),
 		Writer:       &out,
 		ErrWriter:    &out,
 	}
