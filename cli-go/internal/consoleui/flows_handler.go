@@ -15,10 +15,15 @@ package consoleui
 //   - Error messages never leak filesystem paths or roster contents.
 //
 // Idempotency note:
-//   POST /flows/api/run is NOT idempotent — it always starts a new run.
-//   Callers that need idempotent trigger semantics must supply a deterministic
-//   runId (via the body) and accept 409 if a run with that ID already exists.
-//   POST /flows/api/resume is idempotent when the same newRunId is supplied.
+//   POST /flows/api/run is NOT idempotent — it always starts a new run, and
+//   the run ID is always server-minted (flowsRunRequest carries no run-ID
+//   field a caller could supply).
+//   POST /flows/api/resume is likewise NOT idempotent: the resumed run's ID
+//   is always server-minted (K1, k82-security-review-2026-09-23.md — a
+//   client-chosen new_run_id let a caller write a resumed run into another
+//   operator's existing run directory, overwriting its owner and exposing
+//   its node output). flowsResumeRequest.NewRunID is accepted for wire
+//   back-compat with older frontend builds but is never consulted.
 
 import (
 	"context"
@@ -60,14 +65,25 @@ type flowsHandlers struct {
 
 	// cancelMu guards activeRuns.
 	cancelMu sync.Mutex
-	// activeRuns maps runID → cancel function for in-flight runs.
-	// Entries are inserted by handleRun when a run goroutine is launched and
-	// deleted (under cancelMu) when the goroutine exits.  handleCancel looks up
-	// and calls the cancel func to stop a running engine.Run.
+	// activeRuns maps runID → the in-flight run's cancel function and its
+	// recorded owner. Entries are inserted by handleRun when a run goroutine
+	// is launched and deleted (under cancelMu) when the goroutine exits.
+	// handleCancel looks up an entry, checks ownerOpID against the caller's
+	// resolved identity (R10, round-1 security review), then calls cancel to
+	// stop a running engine.Run.
+	//
+	// ownerOpID is stamped from the resolved operator identity at run-start
+	// time (see resolveRunOperatorID) — never from a client-supplied body
+	// field. An empty ownerOpID marks a run started through a path that never
+	// resolved an identity (production: impossible, since resolveRunOperatorID
+	// fails the request instead; test-only nodeRunFn path: possible, when the
+	// test injects none). checkRunOwnership treats an empty owner as a
+	// legacy/unowned run, open to any caller — this also keeps every
+	// pre-existing no-identity-injected test passing unchanged.
 	//
 	// Memory bound: one entry per concurrent in-flight run.  Entries are always
 	// deleted on goroutine exit (via deferred cleanup) so there is no leak.
-	activeRuns map[string]context.CancelFunc
+	activeRuns map[string]activeRunEntry
 
 	// nodeRunFn, when non-nil, is used by the consoleui test suite to inject a
 	// fake per-node dispatch function so tests exercise the handler code path
@@ -81,6 +97,14 @@ type flowsHandlers struct {
 	// use nodeRunFn directly. This is intentional for testing — the handler
 	// layer is what is under test, not the engine or governor.
 	nodeRunFn workflow.EngineRunFn
+}
+
+// activeRunEntry pairs an in-flight run's cancel function with its recorded
+// owner, so handleCancel can enforce ownership from the in-memory entry
+// without a second run.json read (R10, round-1 security review).
+type activeRunEntry struct {
+	cancel    context.CancelFunc
+	ownerOpID string
 }
 
 // workflowsDir returns <workDir>/workflows/.
@@ -104,6 +128,79 @@ func (h *flowsHandlers) runJSONPath(runID string) string {
 // Both runID and nodeID are pre-validated by all callers via workflow.ValidateID.
 func (h *flowsHandlers) nodeStdoutPath(runID, nodeID string) string {
 	return filepath.Join(h.workflowsDir(), "runs", runID, "nodes", nodeID+".stdout")
+}
+
+// ---- Owner-scope helpers (R10, round-1 security review) -----------------------
+//
+// Every run is attributed to the operator who started it, resolved from the
+// server-side identity — never from a client-supplied body field:
+//   - Authenticated (mTLS cert / session): the cert CN / session username.
+//   - Loopback, unauthenticated: the stable server-derived ID that netid's
+//     callerLabelFn stamps onto the resolved identity (see
+//     consoleui/server.go and internal/loopbackowner; R3). Every loopback
+//     request on this daemon presents the same ID, so the common
+//     single-operator deployment mode "just works" without any client-side
+//     bookkeeping and without ever trusting a client-supplied token.
+//   - Otherwise (the resolver never ran, or ran and resolved nothing at
+//     all): the request is refused. A run's owner must be a real,
+//     server-derived identity, never a blank slot a client could later
+//     claim by supplying any operator_id it likes.
+//
+// A run whose recorded owner is empty ("") predates this fix, or was
+// created through a test-only path that intentionally never resolves an
+// identity; such runs stay accessible to any caller for back-compat,
+// matching the round-1 review's explicit guidance ("allow empty-owner
+// legacy runs so existing artifacts keep working").
+
+// errUnresolvedOperatorIdentity is returned by resolveRunOperatorID when the
+// request carries no server-resolved operator identity at all.
+var errUnresolvedOperatorIdentity = errors.New("flows: no resolvable operator identity")
+
+// resolveRunOperatorID returns the operator ID to record as a new or resumed
+// run's owner. See the package doc above: resolved identity only; the
+// caller-supplied request body is never consulted.
+func resolveRunOperatorID(r *http.Request) (string, error) {
+	id := netid.IdentityFrom(r.Context())
+	if id.Authenticated {
+		return id.OperatorID, nil
+	}
+	if id.OperatorID != "" {
+		// Loopback path: callerLabelFn already stamped the stable
+		// server-derived ID onto the resolved identity.
+		return id.OperatorID, nil
+	}
+	return "", errUnresolvedOperatorIdentity
+}
+
+// runOwnerFromJSON extracts owner_operator_id from a run.json byte blob.
+// A parse failure or an absent field returns "", which checkRunOwnership
+// treats as a legacy/unowned run (see doc comment above). Callers that need
+// the full validated RunState already use workflow.LoadRunState elsewhere
+// (e.g. handleResume, for the prior run).
+func runOwnerFromJSON(data []byte) string {
+	var probe struct {
+		OwnerOpID string `json:"owner_operator_id"`
+	}
+	_ = json.Unmarshal(data, &probe)
+	return probe.OwnerOpID
+}
+
+// checkRunOwnership enforces that the caller's resolved identity matches
+// ownerOpID. An empty ownerOpID (legacy/unowned run) is accessible to any
+// caller. A caller with no resolvable identity resolves to "", which can
+// never match a non-empty owner — so an unresolved identity fails closed
+// against any run that does record an owner. On mismatch this writes a 403
+// and returns false; callers must return immediately when it does.
+func checkRunOwnership(w http.ResponseWriter, r *http.Request, ownerOpID string) bool {
+	if ownerOpID == "" {
+		return true
+	}
+	callerID := netid.IdentityFrom(r.Context()).OperatorID
+	if callerID == "" || callerID != ownerOpID {
+		writeGenericError(w, http.StatusForbidden, "forbidden: run owned by a different operator")
+		return false
+	}
+	return true
 }
 
 // contentHash returns the SHA-256 hex digest of data.
@@ -404,8 +501,10 @@ func (h *flowsHandlers) handleSaveWorkflow(w http.ResponseWriter, r *http.Reques
 
 // flowsRunRequest is the DTO for POST /flows/api/run.
 type flowsRunRequest struct {
-	// OperatorID is the self-asserted operator ID for attribution.
-	// Not an auth boundary; cooperative attribution only.
+	// OperatorID is deprecated (R10, round-1 security review) and no longer
+	// used for attribution: it is retained only so older frontend builds
+	// that still send it decode without error. The run's owner always comes
+	// from the resolved server-side identity — see resolveRunOperatorID.
 	OperatorID string `json:"operator_id"`
 }
 
@@ -477,11 +576,19 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 		fn := h.nodeRunFn
 		nodeRunCtx, nodeRunCancel := context.WithCancel(h.serverCtx)
 
+		// Best-effort owner attribution for this test-only path: unlike the
+		// production path below, an unresolved identity here does not fail
+		// the request — it just leaves the run unowned (legacy/open), which
+		// is what every pre-existing test that injects no identity already
+		// relies on. This path is never reachable in production (nodeRunFn
+		// is set only by NewFlowsHandlerForTest).
+		ownerOpID, _ := resolveRunOperatorID(r)
+
 		h.cancelMu.Lock()
 		if h.activeRuns == nil {
-			h.activeRuns = make(map[string]context.CancelFunc)
+			h.activeRuns = make(map[string]activeRunEntry)
 		}
-		h.activeRuns[runID] = nodeRunCancel
+		h.activeRuns[runID] = activeRunEntry{cancel: nodeRunCancel, ownerOpID: ownerOpID}
 		h.cancelMu.Unlock()
 
 		go func() {
@@ -511,12 +618,15 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Mint a run ID: timestamp + random suffix, path-safe.
 	runID := mintRunID()
 
-	// Dual-regime operator_id: cert CN overrides body operator_id when authenticated.
-	var operatorID string
-	if resolvedID.Authenticated {
-		operatorID = resolvedID.OperatorID
-	} else {
-		operatorID = req.OperatorID
+	// R10 (round-1 security review): the run's owner comes from the
+	// resolved server-side identity only — see resolveRunOperatorID's doc
+	// comment. req.OperatorID is never consulted; a request with no
+	// resolvable identity is refused rather than attributed to a
+	// self-asserted body token.
+	operatorID, err := resolveRunOperatorID(r)
+	if err != nil {
+		writeGenericError(w, http.StatusForbidden, "forbidden: unable to resolve operator identity")
+		return
 	}
 
 	// Build the identity carrier from the resolved HTTP identity so the engine
@@ -536,9 +646,9 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 	// The goroutine below defers the delete so the entry is always cleaned up.
 	h.cancelMu.Lock()
 	if h.activeRuns == nil {
-		h.activeRuns = make(map[string]context.CancelFunc)
+		h.activeRuns = make(map[string]activeRunEntry)
 	}
-	h.activeRuns[runID] = runCancel
+	h.activeRuns[runID] = activeRunEntry{cancel: runCancel, ownerOpID: operatorID}
 	h.cancelMu.Unlock()
 
 	// Launch in a background goroutine parented to runCtx.
@@ -570,10 +680,20 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 type flowsResumeRequest struct {
 	// RunID is the prior run ID to resume from.
 	RunID string `json:"run_id"`
-	// NewRunID is the run ID to use for the resumed run.
-	// If empty, the server mints one.
+	// NewRunID is deprecated (K1, k82-security-review-2026-09-23.md) and no
+	// longer consulted: a caller-chosen write target for the resumed run let
+	// an operator resume their own run INTO another operator's existing run
+	// ID, overwriting that run's owner (run.json) and exposing its node
+	// output. The resumed run's ID is now always server-minted, the same way
+	// handleRun already mints new-run IDs. Retained only so older frontend
+	// builds that still send it decode without error; nothing in the
+	// frontend needs to choose it.
 	NewRunID string `json:"new_run_id,omitempty"`
-	// OperatorID is the self-asserted operator ID for attribution.
+	// OperatorID is deprecated (R10, round-1 security review) and no longer
+	// used for attribution: it is retained only so older frontend builds
+	// that still send it decode without error. The resumed run's owner
+	// always comes from the resolved server-side identity — see
+	// resolveRunOperatorID.
 	OperatorID string `json:"operator_id,omitempty"`
 }
 
@@ -586,8 +706,9 @@ type flowsResumeResponse struct {
 // prior run's run.json; the engine rejects resumes against an edited YAML.
 //
 // POST /flows/api/resume
-// Idempotent when the same newRunId is supplied (engine will refuse a
-// duplicate runDir creation).
+// Not idempotent: always starts a fresh, server-minted run ID (K1,
+// k82-security-review-2026-09-23.md — see flowsResumeRequest.NewRunID's doc
+// comment for why a caller-chosen run ID is no longer accepted).
 func (h *flowsHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -611,15 +732,14 @@ func (h *flowsHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newRunID := req.NewRunID
-	if newRunID == "" {
-		newRunID = mintRunID()
-	} else {
-		if err := workflow.ValidateID("new_run_id", newRunID); err != nil {
-			writeGenericError(w, http.StatusBadRequest, "invalid new_run_id")
-			return
-		}
-	}
+	// K1 (k82-security-review-2026-09-23.md): the resumed run's ID is always
+	// server-minted. req.NewRunID is decoded (above, for wire back-compat)
+	// but deliberately never read past this point — see the field's doc
+	// comment. Minting fresh here, unconditionally, is what makes the
+	// take-over attack structurally impossible rather than merely rejected:
+	// there is no code path left that can turn a caller-supplied value into
+	// a filesystem write target.
+	newRunID := mintRunID()
 
 	// Load the prior run to determine which workflow to use.
 	// Do this BEFORE the engine nil-check so 404 is returned for missing runs
@@ -645,6 +765,14 @@ func (h *flowsHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// R10 (round-1 security review): resuming a run reads its prior state
+	// and inherits its pinned outputs, so it is scoped to the prior run's
+	// recorded owner the same as a direct read. checkRunOwnership treats an
+	// empty (legacy) owner as open to any caller.
+	if !checkRunOwnership(w, r, priorRS.OwnerOpID) {
+		return
+	}
+
 	wf, err := workflow.Load(h.workflowPath(priorRS.WorkflowName))
 	if err != nil {
 		if isNotExist(err) {
@@ -660,13 +788,16 @@ func (h *flowsHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Dual-regime operator_id: cert CN overrides body operator_id when authenticated.
+	// R10 (round-1 security review): the resumed run's owner comes from the
+	// resolved server-side identity only — see resolveRunOperatorID's doc
+	// comment. req.OperatorID is never consulted; a request with no
+	// resolvable identity is refused rather than attributed to a
+	// self-asserted body token.
 	resumeID := netid.IdentityFrom(r.Context())
-	var operatorID string
-	if resumeID.Authenticated {
-		operatorID = resumeID.OperatorID
-	} else {
-		operatorID = req.OperatorID
+	operatorID, err := resolveRunOperatorID(r)
+	if err != nil {
+		writeGenericError(w, http.StatusForbidden, "forbidden: unable to resolve operator identity")
+		return
 	}
 
 	// Build identity carrier (same semantics as handleRun).
@@ -721,6 +852,11 @@ func (h *flowsHandlers) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// R10 (round-1 security review): scope to the run's recorded owner.
+	if !checkRunOwnership(w, r, runOwnerFromJSON(data)) {
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(data)
@@ -749,6 +885,23 @@ func (h *flowsHandlers) handleGetNodeOutput(w http.ResponseWriter, r *http.Reque
 	}
 	if err := workflow.ValidateID("node", nodeID); err != nil {
 		writeGenericError(w, http.StatusBadRequest, "invalid node id")
+		return
+	}
+
+	// R10 (round-1 security review): scope to the run's recorded owner.
+	// run.json must be read regardless to learn the owner, so this also
+	// doubles as the existence check for the run itself.
+	runData, err := os.ReadFile(h.runJSONPath(runID)) //nolint:gosec
+	if err != nil {
+		if isNotExist(err) {
+			writeGenericError(w, http.StatusNotFound, "node output not found")
+			return
+		}
+		slog.Error("flows: get node output: read run.json", "run_id", runID, "err", err)
+		writeGenericError(w, http.StatusInternalServerError, "failed to read run state")
+		return
+	}
+	if !checkRunOwnership(w, r, runOwnerFromJSON(runData)) {
 		return
 	}
 
@@ -879,7 +1032,7 @@ func (h *flowsHandlers) handleCancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.cancelMu.Lock()
-	cancelFn, ok := h.activeRuns[runID]
+	entry, ok := h.activeRuns[runID]
 	h.cancelMu.Unlock()
 
 	if !ok {
@@ -890,10 +1043,19 @@ func (h *flowsHandlers) handleCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// R10 (round-1 security review): scope cancellation to the run's
+	// recorded owner. Checked against the in-memory entry (stamped at
+	// run-start time by resolveRunOperatorID) rather than re-reading
+	// run.json, since activeRuns is already the source of truth for
+	// "is this run live" and this avoids a second filesystem round trip.
+	if !checkRunOwnership(w, r, entry.ownerOpID) {
+		return
+	}
+
 	// Signal cancellation.  The engine goroutine will wind down asynchronously;
 	// we do not block waiting for it.  The defer in handleRun's goroutine
 	// removes the entry from activeRuns and calls runCancel when done.
-	cancelFn()
+	entry.cancel()
 
 	slog.Info("flows: cancel requested", "run_id", runID)
 

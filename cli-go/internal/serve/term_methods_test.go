@@ -92,3 +92,81 @@ func TestHandleTermCreate_RejectsArbitraryCallerAsOwner(t *testing.T) {
 		t.Fatal("ClaimOwner(mallory) succeeded — a caller-supplied owner field was honored (R3 regression)")
 	}
 }
+
+// TestHandleTermList_ScopedToOwner is the "Should" follow-up the lead
+// dispatched alongside R10 (K-82): scope yakos.term.list the same way
+// GET /api/term is scoped (round-2 review R18), for the same reason —
+// consistency across every session-listing surface, not because the
+// mode-0600 owner-UID JSON-RPC socket is itself exploitable (round-2 review
+// N6/accepted-residual-risk table judged that unscoped listing acceptable
+// given the socket's own permissions). Every yakos.term.create call stamps
+// the SAME daemon-derived stable owner (R3), so in production this is a
+// no-op for the only caller that exists; the test proves it by planting a
+// second, foreign-owned session directly via RegisterExternalSession (a
+// shape the socket's trust boundary would need to be loosened to reach) and
+// asserting it is excluded.
+func TestHandleTermList_ScopedToOwner(t *testing.T) {
+	stateDir := t.TempDir()
+	mgr := terminalmanager.New(context.Background(), terminalmanager.Config{Cap: 4})
+	defer mgr.Stop()
+
+	cfg := Config{
+		RESTStateDir:    stateDir,
+		TerminalManager: mgr,
+	}
+
+	// Owned by the daemon's own stable loopback ID, via the real
+	// registration path (mirrors production: every yakos.term.create call
+	// stamps this ID).
+	createHandler := handleTermCreate(cfg)
+	createParams, err := json.Marshal(termCreateParams{
+		SessionID:     "sess-term-list-owned",
+		Argv:          []string{"claude"},
+		WorkspaceRoot: "/tmp/project-a",
+	})
+	if err != nil {
+		t.Fatalf("marshal create params: %v", err)
+	}
+	if _, err := createHandler(context.Background(), createParams); err != nil {
+		t.Fatalf("handleTermCreate: %v", err)
+	}
+
+	// A second, foreign-owned session — not reachable via yakos.term.create
+	// (which never accepts a caller-supplied owner; see
+	// TestHandleTermCreate_RejectsArbitraryCallerAsOwner above), planted
+	// directly to prove the list handler itself filters rather than merely
+	// inheriting a coincidence of every session sharing one owner.
+	if err := mgr.RegisterExternalSession("sess-term-list-foreign", "/tmp/project-b", []string{"claude"}, "mallory"); err != nil {
+		t.Fatalf("RegisterExternalSession (foreign owner): %v", err)
+	}
+
+	listHandler := handleTermList(cfg)
+	result, err := listHandler(context.Background(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("handleTermList: %v", err)
+	}
+	got, ok := result.(termListResult)
+	if !ok {
+		t.Fatalf("handleTermList result type = %T; want termListResult", result)
+	}
+
+	var ids []string
+	for _, s := range got.Sessions {
+		ids = append(ids, s.SessionID)
+	}
+	foundOwned, foundForeign := false, false
+	for _, id := range ids {
+		if id == "sess-term-list-owned" {
+			foundOwned = true
+		}
+		if id == "sess-term-list-foreign" {
+			foundForeign = true
+		}
+	}
+	if !foundOwned {
+		t.Errorf("yakos.term.list omitted the daemon's own session; sessions=%v", ids)
+	}
+	if foundForeign {
+		t.Errorf("yakos.term.list leaked a foreign-owned session (%q); sessions=%v", "sess-term-list-foreign", ids)
+	}
+}

@@ -157,7 +157,7 @@ func NewFlowsHandlerForTest(t *testing.T, workDir string, fn func(context.Contex
 		workDir:    workDir,
 		serverCtx:  context.Background(),
 		nodeRunFn:  workflow.EngineRunFn(fn),
-		activeRuns: make(map[string]context.CancelFunc),
+		activeRuns: make(map[string]activeRunEntry),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/flows/api/workflows", h.handleListWorkflows)
@@ -167,6 +167,24 @@ func NewFlowsHandlerForTest(t *testing.T, workDir string, fn func(context.Contex
 	mux.HandleFunc("/flows/api/resume", h.handleResume)
 	mux.HandleFunc("/flows/api/cancel", h.handleCancel)
 	return mux, nil
+}
+
+// N.b. K2 (k82-security-review-2026-09-23.md) needed a way to drive a REAL
+// workflow.Engine (not the nodeRunFn shortcut above) through handleRun /
+// handleResume, to close the coverage gap where the production
+// operator-attribution branch was never exercised by any test. That does
+// NOT need a new export here: consoleui.Config.WorkflowEngine is already
+// public production surface (see server.go), and workflow.NewEngineForTest
+// (workflow/engine.go) is the one new seam required to hand it a fake
+// per-node dispatch function. See flows_handler_test.go's
+// newProductionEngineTestServer for the resulting test harness.
+
+// ResolveRunOperatorIDForTest exposes resolveRunOperatorID (R10, round-1
+// security review) for external tests that need to assert its dual-regime
+// resolution (authenticated CN / stable loopback ID / fail-closed) directly,
+// without going through an HTTP round trip.
+func ResolveRunOperatorIDForTest(r *http.Request) (string, error) {
+	return resolveRunOperatorID(r)
 }
 
 // ---- Phase 6c: console-bind test exports ------------------------------------

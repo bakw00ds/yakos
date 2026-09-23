@@ -465,7 +465,7 @@ func New(cfg Config) (*Server, error) {
 		engine:     cfg.WorkflowEngine,
 		workDir:    cfg.WorkDir,
 		serverCtx:  serverCtx,
-		activeRuns: make(map[string]context.CancelFunc),
+		activeRuns: make(map[string]activeRunEntry),
 	}
 	// IDE file pane and diff handler use cfg.ideRoot() — either IDERoot (when
 	// set, e.g. the project repo) or WorkspaceRoot as fallback.
