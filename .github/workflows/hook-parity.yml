@@ -69,10 +69,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
         with:
           go-version: '1.25'
           cache-dependency-path: cli-go/go.sum
@@ -545,32 +545,69 @@ jobs:
           echo "team-lifecycle: bash smoke PASS"
 
       # ---------------------------------------------------------------------------
-      # Go Tier-0 hook parity tests (all 21 hooks; fixtures present for all)
+      # Go-native Tier-0 hook unit tests (cycle-counter, path-log,
+      # session-end-check).
+      #
+      # These previously ran `go test -run TestHookParity_{CycleCounter,
+      # PathLog,SessionEndCheck}`, but no test functions with those names
+      # ever existed in these packages (there is no Go<->bash byte-identity
+      # comparison harness for Tier-0 hooks — the two sides consume
+      # different stdin JSON schemas: bash reads Claude Code's native
+      # hook_event_name/tool_name/tool_input/cwd shape via hi_init, while
+      # the .github/fixtures/hooks/{cycle-counter,path-log,session-end-check}
+      # fixtures use the Go-side event/tool/payload/env/work_dir shape).
+      # `go test -run <pattern-matching-nothing>` prints
+      # "[no tests to run]" and exits 0, so this step passed vacuously on
+      # every run without ever executing a single assertion.
+      #
+      # Until a real bash<->Go parity harness exists (tracked separately —
+      # it needs a HookInput-to-Claude-hook-JSON translator), this step
+      # runs each package's actual Go-native unit test suite and the guard
+      # below fails the job outright if a future rename/typo makes `-run`
+      # (or the bare package path) match zero tests again.
       # ---------------------------------------------------------------------------
 
-      - name: Go Tier-0 hook exit-code parity (cycle-counter)
+      - name: Go-native hook unit tests (cycle-counter)
         working-directory: cli-go
+        shell: bash
         env:
           YAKOS_HOOK_NOW: "2026-01-01T00:00:00Z"
         run: |
-          go test -count=1 -timeout 30s -run TestHookParity_CycleCounter \
-            ./internal/hooks/cyclecounter/...
+          log="$(mktemp)"
+          go test -v -count=1 -race -timeout 30s ./internal/hooks/cyclecounter/... | tee "$log"
+          if ! grep -q '=== RUN' "$log"; then
+            echo "ERROR: go test matched zero tests in ./internal/hooks/cyclecounter/... (vacuous CI pass guard)"
+            exit 1
+          fi
+          echo "cycle-counter: $(grep -c '=== RUN' "$log") Go-native test(s) ran"
 
-      - name: Go Tier-0 hook exit-code parity (path-log)
+      - name: Go-native hook unit tests (path-log)
         working-directory: cli-go
+        shell: bash
         env:
           YAKOS_HOOK_NOW: "2026-01-01T00:00:00Z"
         run: |
-          go test -count=1 -timeout 30s -run TestHookParity_PathLog \
-            ./internal/hooks/pathlog/...
+          log="$(mktemp)"
+          go test -v -count=1 -race -timeout 30s ./internal/hooks/pathlog/... | tee "$log"
+          if ! grep -q '=== RUN' "$log"; then
+            echo "ERROR: go test matched zero tests in ./internal/hooks/pathlog/... (vacuous CI pass guard)"
+            exit 1
+          fi
+          echo "path-log: $(grep -c '=== RUN' "$log") Go-native test(s) ran"
 
-      - name: Go Tier-0 hook exit-code parity (session-end-check)
+      - name: Go-native hook unit tests (session-end-check)
         working-directory: cli-go
+        shell: bash
         env:
           YAKOS_HOOK_NOW: "2026-01-01T00:00:00Z"
         run: |
-          go test -count=1 -timeout 30s -run TestHookParity_SessionEndCheck \
-            ./internal/hooks/sessionendcheck/...
+          log="$(mktemp)"
+          go test -v -count=1 -race -timeout 30s ./internal/hooks/sessionendcheck/... | tee "$log"
+          if ! grep -q '=== RUN' "$log"; then
+            echo "ERROR: go test matched zero tests in ./internal/hooks/sessionendcheck/... (vacuous CI pass guard)"
+            exit 1
+          fi
+          echo "session-end-check: $(grep -c '=== RUN' "$log") Go-native test(s) ran"
 
       - name: Summary
         if: always()
@@ -580,5 +617,5 @@ jobs:
           echo "Hook parity audit complete."
           echo "Full scope (21 hooks): all hooks have fixtures and bash smoke coverage."
           echo "Bash smoke tests cover all 21 hooks."
-          echo "Go Tier-0 parity tests: cycle-counter, path-log, session-end-check."
+          echo "Go-native unit tests ran (with a zero-tests-matched guard) for: cycle-counter, path-log, session-end-check."
           echo "Go implementations for all 21 hooks are present in cli-go/internal/hooks/."
