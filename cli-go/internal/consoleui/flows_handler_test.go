@@ -472,6 +472,125 @@ func TestFlows_GetRun_ReturnsJSON(t *testing.T) {
 	}
 }
 
+// newOwnerScopeTestServer builds a real consoleui.Server (MustNew) with a
+// live WorkDir and returns a helper that issues a GET/POST wrapped with a
+// given identity injected into the request context (simulating the resolver
+// having run with that identity — see injectIdentityMiddleware). Used by the
+// R10 (round-1 security review) owner-scoping regression tests below, which
+// need per-request identity control that newFlowsTestServer's shared
+// unauthenticated srv.Handler() cannot provide.
+func newOwnerScopeTestServer(t *testing.T) (tok, workDir string, doAs func(id netid.Identity, method, path, body string) *http.Response) {
+	t.Helper()
+	stateDir := t.TempDir()
+	wDir := t.TempDir()
+	tk, err := consoleui.LoadOrCreateToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	bus := wsbus.New()
+	t.Cleanup(bus.Stop)
+
+	srv := consoleui.MustNew(t, consoleui.Config{
+		Token:             tk,
+		KanbanBoardPath:   t.TempDir() + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: t.TempDir(),
+		PerfWorkDir:       t.TempDir(),
+		Bus:               bus,
+		WorkDir:           wDir,
+	})
+
+	doAs = func(id netid.Identity, method, path, reqBody string) *http.Response {
+		t.Helper()
+		handler := consoleui.RequireTokenForNonStatic(tk,
+			consoleui.RequireJSONForMutations(
+				injectIdentityMiddleware(id, srv.Handler())))
+		ts := httptest.NewServer(handler)
+		defer ts.Close()
+
+		var bodyReader io.Reader
+		if reqBody != "" {
+			bodyReader = strings.NewReader(reqBody)
+		}
+		req, err := http.NewRequest(method, ts.URL+path, bodyReader)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tk)
+		if reqBody != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		return resp
+	}
+	return tk, wDir, doAs
+}
+
+// writeOwnedRun seeds run.json for runID with owner ownerOpID directly on
+// disk, matching the shape engine.go's newRunState/persistNow produces.
+func writeOwnedRun(t *testing.T, workDir, runID, ownerOpID string) {
+	t.Helper()
+	runDir := filepath.Join(workDir, "workflows", "runs", runID)
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	runJSON, err := json.Marshal(map[string]any{
+		"run_id":            runID,
+		"workflow_name":     "my-flow",
+		"workflow_hash":     "x",
+		"owner_operator_id": ownerOpID,
+		"status":            "completed",
+		"nodes":             map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "run.json"), runJSON, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFlows_GetRun_OwnerScoping proves R10 (round-1 security review): a
+// run's owner is enforced on GET /flows/api/run. The creator (same resolved
+// operator ID the run was recorded under) can read it; a different resolved
+// operator cannot (403); a caller with no resolvable identity at all cannot
+// either (403 — "unresolved identity fails closed"). Reverting
+// checkRunOwnership's call in handleGetRun to a no-op makes the "other
+// operator" and "unresolved" subtests fail (they'd observe 200 instead of
+// 403), confirming this test exercises the fix and not a tautology.
+func TestFlows_GetRun_OwnerScoping(t *testing.T) {
+	_, workDir, doAs := newOwnerScopeTestServer(t)
+
+	runID := "run-20260101-000000-aaaaaa"
+	writeOwnedRun(t, workDir, runID, "alice")
+
+	creator := netid.Identity{OperatorID: "alice", Role: netid.RoleAdmin, Authenticated: true, Resolved: true}
+	other := netid.Identity{OperatorID: "mallory", Role: netid.RoleAdmin, Authenticated: true, Resolved: true}
+	unresolved := netid.Identity{} // Resolved=false: resolver never ran / no identity at all.
+
+	cases := []struct {
+		name string
+		id   netid.Identity
+		want int
+	}{
+		{"creator reads own run", creator, http.StatusOK},
+		{"different operator denied", other, http.StatusForbidden},
+		{"unresolved identity denied", unresolved, http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := doAs(tc.id, http.MethodGet, "/flows/api/run?id="+runID, "")
+			body := bodyStr(t, resp)
+			if resp.StatusCode != tc.want {
+				t.Errorf("status=%d; want %d; body=%s", resp.StatusCode, tc.want, body)
+			}
+		})
+	}
+}
+
 // ---- GET /flows/api/run/node tests -------------------------------------------
 
 func TestFlows_GetNodeOutput_InvalidRunID(t *testing.T) {
@@ -509,10 +628,20 @@ func TestFlows_GetNodeOutput_NotFound(t *testing.T) {
 func TestFlows_GetNodeOutput_Happy(t *testing.T) {
 	ts, tok, workDir := newFlowsTestServer(t)
 
-	// Manually create a node stdout file.
+	// Manually create a node stdout file, plus the run.json that production
+	// always writes before any node output exists (engine.go persists
+	// run.json, including its owner, before executeGraph starts). R10
+	// (round-1 security review): handleGetNodeOutput now reads run.json to
+	// scope the response to the run's owner, so a run.json-less node stdout
+	// file no longer reflects a reachable production state.
 	runID := "run-20240101-000000-aabbcc"
-	nodesDir := filepath.Join(workDir, "workflows", "runs", runID, "nodes")
+	runDir := filepath.Join(workDir, "workflows", "runs", runID)
+	nodesDir := filepath.Join(runDir, "nodes")
 	if err := os.MkdirAll(nodesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	runJSON := `{"run_id":"` + runID + `","workflow_name":"my-flow","workflow_hash":"x","status":"running","nodes":{}}`
+	if err := os.WriteFile(filepath.Join(runDir, "run.json"), []byte(runJSON), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(nodesDir, "step1.stdout"), []byte("hello world\n"), 0644); err != nil {
@@ -527,6 +656,79 @@ func TestFlows_GetNodeOutput_Happy(t *testing.T) {
 	}
 	if body != "hello world\n" {
 		t.Errorf("body=%q; want 'hello world\\n'", body)
+	}
+}
+
+// TestFlows_GetNodeOutput_OwnerScoping proves R10 (round-1 security review)
+// for the node-output artifact read: same three-way split as
+// TestFlows_GetRun_OwnerScoping (creator OK, different operator 403,
+// unresolved identity 403). This is the finding's original headline repro
+// ("operator B issues GET /flows/api/run/node?... and receives operator A's
+// raw agent stdout").
+func TestFlows_GetNodeOutput_OwnerScoping(t *testing.T) {
+	_, workDir, doAs := newOwnerScopeTestServer(t)
+
+	runID := "run-20260101-000000-bbbbbb"
+	writeOwnedRun(t, workDir, runID, "alice")
+	nodesDir := filepath.Join(workDir, "workflows", "runs", runID, "nodes")
+	if err := os.MkdirAll(nodesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nodesDir, "step1.stdout"), []byte("agent secret output\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	creator := netid.Identity{OperatorID: "alice", Role: netid.RoleAdmin, Authenticated: true, Resolved: true}
+	other := netid.Identity{OperatorID: "mallory", Role: netid.RoleAdmin, Authenticated: true, Resolved: true}
+	unresolved := netid.Identity{}
+
+	cases := []struct {
+		name string
+		id   netid.Identity
+		want int
+	}{
+		{"creator reads own node output", creator, http.StatusOK},
+		{"different operator denied", other, http.StatusForbidden},
+		{"unresolved identity denied", unresolved, http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := doAs(tc.id, http.MethodGet, "/flows/api/run/node?id="+runID+"&node=step1", "")
+			body := bodyStr(t, resp)
+			if resp.StatusCode != tc.want {
+				t.Errorf("status=%d; want %d; body=%s", resp.StatusCode, tc.want, body)
+			}
+			if tc.want == http.StatusOK && body != "agent secret output\n" {
+				t.Errorf("body=%q; want the node's stdout", body)
+			}
+			if tc.want != http.StatusOK && strings.Contains(body, "agent secret output") {
+				t.Errorf("leaked node output to a non-owner: body=%q", body)
+			}
+		})
+	}
+}
+
+// TestFlows_Resume_OwnerScoping proves R10 (round-1 security review): the
+// prior run resumed by POST /flows/api/resume is scoped to its recorded
+// owner, so resuming (and thereby inheriting the pinned outputs of) another
+// operator's run is denied the same as a direct read.
+func TestFlows_Resume_OwnerScoping(t *testing.T) {
+	_, workDir, doAs := newOwnerScopeTestServer(t)
+
+	runID := "run-20260101-000000-cccccc"
+	writeOwnedRun(t, workDir, runID, "alice")
+	// Write the workflow definition too, so a request that gets past the
+	// ownership gate proceeds all the way to the (nil, in this harness)
+	// engine check — isolating the assertion to the ownership gate itself
+	// rather than an incidental "workflow file missing" 404.
+	writeWorkflow(t, workDir, "my-flow", minimalYAML)
+
+	other := netid.Identity{OperatorID: "mallory", Role: netid.RoleAdmin, Authenticated: true, Resolved: true}
+
+	resp := doAs(other, http.MethodPost, "/flows/api/resume", `{"run_id":"`+runID+`"}`)
+	body := bodyStr(t, resp)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status=%d; want 403 (resume of another operator's run); body=%s", resp.StatusCode, body)
 	}
 }
 
@@ -1048,4 +1250,177 @@ func TestFlows_Cancel_RoleReadForbidden(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("RoleRead on /flows/api/cancel: status=%d; want 403", resp.StatusCode)
 	}
+}
+
+// ---- R10 (round-1 security review) owner-scoping regression tests ------------
+//
+// The suites above cover role gating and traversal; these cover the R10
+// finding itself: attribution must come from the resolved server identity,
+// never a client body field, and every read/cancel surface must scope to
+// the recorded owner. Each subtest below is proven to fail against the
+// pre-fix code (checkRunOwnership / resolveRunOperatorID reverted to
+// no-ops): "different operator" and "unresolved identity" cases observe 200
+// or 202 instead of 403, and the self-asserted-body-field case observes the
+// impersonating identity succeeding at cancel.
+
+// newOwnerScopeCancelServer builds a nodeRunFn-backed flows handler (same
+// seam as newCancelTestServer) and returns a helper that issues a request
+// with a given identity injected into its context — mirroring
+// newOwnerScopeTestServer's doAs, but for the bare test-only mux (no token
+// or content-type middleware, matching the existing cancel tests).
+func newOwnerScopeCancelServer(t *testing.T) (workDir string, started <-chan struct{}, doAs func(id netid.Identity, method, path, body string) *http.Response) {
+	t.Helper()
+	wDir := t.TempDir()
+
+	startedCh := make(chan struct{})
+	unblockCh := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-unblockCh:
+		default:
+			close(unblockCh)
+		}
+	})
+	var startOnce sync.Once
+	fn := func(ctx context.Context, _ dispatch.Params) ([]byte, dispatch.Result, error) {
+		startOnce.Do(func() { close(startedCh) })
+		select {
+		case <-ctx.Done():
+			return nil, dispatch.Result{ExitCode: 1}, ctx.Err()
+		case <-unblockCh:
+			return []byte("ok"), dispatch.Result{ExitCode: 0}, nil
+		}
+	}
+	handler, _ := consoleui.NewFlowsHandlerForTest(t, wDir, fn)
+
+	doAs = func(id netid.Identity, method, path, reqBody string) *http.Response {
+		t.Helper()
+		ts := httptest.NewServer(injectIdentityMiddleware(id, handler))
+		defer ts.Close()
+		var bodyReader io.Reader
+		if reqBody != "" {
+			bodyReader = strings.NewReader(reqBody)
+		}
+		req, err := http.NewRequest(method, ts.URL+path, bodyReader)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		if reqBody != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		return resp
+	}
+	return wDir, startedCh, doAs
+}
+
+// TestFlows_Cancel_OwnerScoping proves R10 (round-1 security review) for
+// cancellation, and specifically the landmine the round-2 implementation
+// report identified: the run is started as "alice" (the resolved identity)
+// while the request body ALSO carries a self-asserted operator_id of
+// "mallory". A caller presenting "mallory" — matching that body token, not
+// the real creator — must still be denied, proving the body field was never
+// used to attribute the run. The real creator ("alice") can cancel; an
+// unresolved identity cannot ("fails closed").
+func TestFlows_Cancel_OwnerScoping(t *testing.T) {
+	workDir, started, doAs := newOwnerScopeCancelServer(t)
+
+	dir := filepath.Join(workDir, "workflows")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "my-flow.yaml"), []byte(minimalYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	creator := netid.Identity{OperatorID: "alice", Role: netid.RoleAdmin, Authenticated: true, Resolved: true}
+	impersonator := netid.Identity{OperatorID: "mallory", Role: netid.RoleAdmin, Authenticated: true, Resolved: true}
+	unresolved := netid.Identity{}
+
+	runResp := doAs(creator, http.MethodPost, "/flows/api/run?name=my-flow", `{"operator_id":"mallory"}`)
+	runBody := bodyStr(t, runResp)
+	if runResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("run status=%d; want 202; body=%s", runResp.StatusCode, runBody)
+	}
+	var runResult map[string]string
+	if err := json.Unmarshal([]byte(runBody), &runResult); err != nil {
+		t.Fatalf("unmarshal run response: %v", err)
+	}
+	runID := runResult["run_id"]
+	if runID == "" {
+		t.Fatal("empty run_id in run response")
+	}
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for run to start")
+	}
+
+	// "mallory" matches the self-asserted body token from run-start, but is
+	// NOT the real resolved creator: must be denied.
+	resp := doAs(impersonator, http.MethodPost, "/flows/api/cancel?id="+runID, "")
+	body := bodyStr(t, resp)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("self-asserted-body impersonation cancel: status=%d; want 403; body=%s", resp.StatusCode, body)
+	}
+
+	// No resolvable identity at all: denied too.
+	resp2 := doAs(unresolved, http.MethodPost, "/flows/api/cancel?id="+runID, "")
+	body2 := bodyStr(t, resp2)
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Errorf("unresolved identity cancel: status=%d; want 403; body=%s", resp2.StatusCode, body2)
+	}
+
+	// The real creator can cancel.
+	resp3 := doAs(creator, http.MethodPost, "/flows/api/cancel?id="+runID, "")
+	body3 := bodyStr(t, resp3)
+	if resp3.StatusCode != http.StatusAccepted {
+		t.Errorf("creator cancel: status=%d; want 202; body=%s", resp3.StatusCode, body3)
+	}
+}
+
+// TestResolveRunOperatorID unit-tests the resolution rule directly (R10,
+// round-1 security review): authenticated identity and the stable loopback
+// ID both win outright; an unresolved identity (the resolver never ran, or
+// ran and stamped nothing) fails closed with an error rather than falling
+// through to any caller-supplied value.
+func TestResolveRunOperatorID(t *testing.T) {
+	newReq := func(id netid.Identity) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/flows/api/run", nil)
+		return r.WithContext(netid.WithIdentityForTest(r.Context(), id))
+	}
+
+	t.Run("authenticated identity wins", func(t *testing.T) {
+		id := netid.Identity{OperatorID: "alice", Authenticated: true, Resolved: true}
+		got, err := consoleui.ResolveRunOperatorIDForTest(newReq(id))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "alice" {
+			t.Errorf("got %q; want alice", got)
+		}
+	})
+
+	t.Run("loopback stable ID used when unauthenticated", func(t *testing.T) {
+		id := netid.Identity{OperatorID: "lbop-tw", Authenticated: false, Resolved: true}
+		got, err := consoleui.ResolveRunOperatorIDForTest(newReq(id))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "lbop-tw" {
+			t.Errorf("got %q; want lbop-tw", got)
+		}
+	})
+
+	t.Run("unresolved identity fails closed", func(t *testing.T) {
+		id := netid.Identity{}
+		got, err := consoleui.ResolveRunOperatorIDForTest(newReq(id))
+		if err == nil {
+			t.Errorf("want error for unresolved identity; got nil (resolved %q)", got)
+		}
+	})
 }
