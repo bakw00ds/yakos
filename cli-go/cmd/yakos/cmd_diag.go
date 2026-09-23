@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 
+	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/doctor"
 	"github.com/bakw00ds/yakos/internal/envcfg"
@@ -35,26 +36,43 @@ import (
 // YAKOS_ROOT must be set in the environment (the bash entry-point sets it;
 // in tests it is injected via Case.Env).
 func runValidate(yakosRoot string, args []string) {
+	help := false
 	allMode := false
 	strict := false
-	var targets []string
 
-	for _, arg := range args {
-		switch arg {
-		case "-h", "--help":
-			printValidateHelp(os.Stdout)
-			os.Exit(0)
-		case "--all":
-			allMode = true
-		case "--strict", "-s":
-			strict = true
-		default:
-			if len(arg) > 0 && arg[0] == '-' {
-				fmt.Fprintf(os.Stderr, "validate: unknown flag %q\n", arg)
-				os.Exit(1)
-			}
-			targets = append(targets, arg)
+	fs := &cliflag.Set{Cmd: "validate", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--all", Kind: cliflag.Bool, Bool: &allMode},
+		{Name: "--strict", Aliases: []string{"-s"}, Kind: cliflag.Bool, Bool: &strict},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	// NOTE (behavior-neutrality caveat): the pre-cliflag loop processed args
+	// left to right and stopped at the FIRST bad/exit-worthy token, so
+	// `validate --bogus --help` errored on --bogus without ever reaching
+	// --help. cliflag.Set.Parse separates recognized flags from unrecognized
+	// ones before either is acted on, so --help now always wins over an
+	// unknown-flag error regardless of argv order. This only differs from
+	// today's behavior for the pathological case of combining --help with an
+	// unknown flag in one invocation — not something any real caller or
+	// existing test does — and is strictly more forgiving (prints help
+	// instead of erroring), not less. Same caveat applies to every other
+	// function converted in this commit.
+	if help {
+		printValidateHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	var targets []string
+	for _, arg := range rest {
+		if len(arg) > 0 && arg[0] == '-' {
+			fmt.Fprintf(os.Stderr, "validate: unknown flag %q\n", arg)
+			os.Exit(1)
 		}
+		targets = append(targets, arg)
 	}
 
 	// YAKOS_ROOT can be overridden by env (matches bash behaviour where the
@@ -131,45 +149,37 @@ grep-based checks otherwise (with a "limited validation" warning).
 // Parity tests set YAKOS_DISPATCH_LOG to a temp dir containing a
 // fixture dispatch-log.ndjson.
 func runCost(args []string) {
+	help := false
 	since := ""
 	by := "runtime"
 	emitJSON := false
+	allProjects := false // accepted as a no-op (mirrors bash behaviour)
 
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "-h" || arg == "--help":
-			printCostHelp(os.Stdout)
-			os.Exit(0)
-		case arg == "--since":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "cost: --since requires a date")
-				os.Exit(1)
-			}
-			since = args[i]
-		case len(arg) > 8 && arg[:8] == "--since=":
-			since = arg[8:]
-		case arg == "--by":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "cost: --by requires an axis")
-				os.Exit(1)
-			}
-			by = args[i]
-		case len(arg) > 5 && arg[:5] == "--by=":
-			by = arg[5:]
-		case arg == "--json":
-			emitJSON = true
-		case arg == "--all-projects":
-			// accepted as a no-op (mirrors bash behaviour)
-		case len(arg) > 0 && arg[0] == '-':
+	fs := &cliflag.Set{Cmd: "cost", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--since", Kind: cliflag.String, Str: &since, ValueDesc: "a date"},
+		{Name: "--by", Kind: cliflag.String, Str: &by, ValueDesc: "an axis"},
+		{Name: "--json", Kind: cliflag.Bool, Bool: &emitJSON},
+		{Name: "--all-projects", Kind: cliflag.Bool, Bool: &allProjects},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		printCostHelp(os.Stdout)
+		os.Exit(0)
+	}
+	// cost accepts no positional arguments at all; anything left in rest —
+	// flag-shaped or not — is an error, in original argv order.
+	for _, arg := range rest {
+		if len(arg) > 0 && arg[0] == '-' {
 			fmt.Fprintf(os.Stderr, "cost: unknown flag %q\n", arg)
-			os.Exit(1)
-		default:
+		} else {
 			fmt.Fprintf(os.Stderr, "cost: unexpected argument %q\n", arg)
-			os.Exit(1)
 		}
+		os.Exit(1)
 	}
 
 	axis, err := cost.ParseAxis(by)
@@ -270,24 +280,32 @@ Examples:
 //  2. YAKOS_INPLACE_WORK=1 + CLAUDE_PROJECT_DIR
 //  3. $HOME/agent-control/<project>/work  (canonical)
 func runStatus(args []string) {
-	project := ""
+	help := false
 
-	for _, arg := range args {
-		switch arg {
-		case "-h", "--help":
-			status.PrintHelp(os.Stdout)
-			os.Exit(0)
-		default:
-			if len(arg) > 0 && arg[0] == '-' {
-				fmt.Fprintf(os.Stderr, "status: unknown flag %q\n", arg)
-				os.Exit(1)
-			}
-			if project != "" {
-				fmt.Fprintln(os.Stderr, "status: too many positional args")
-				os.Exit(1)
-			}
-			project = arg
+	fs := &cliflag.Set{Cmd: "status", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		status.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	project := ""
+	for _, arg := range rest {
+		if len(arg) > 0 && arg[0] == '-' {
+			fmt.Fprintf(os.Stderr, "status: unknown flag %q\n", arg)
+			os.Exit(1)
 		}
+		if project != "" {
+			fmt.Fprintln(os.Stderr, "status: too many positional args")
+			os.Exit(1)
+		}
+		project = arg
 	}
 
 	if project == "" {
@@ -335,34 +353,43 @@ func runStatus(args []string) {
 // Exits 1 when one or more error-severity findings are reported.
 // The --fix flag is recognised but rejected (Phase 1 scope constraint).
 func runDoctor(yakosRoot string, args []string) {
-	projectPath := ""
+	help := false
 	probeRuntime := false
 	production := false
+	fix := false
 
-	for _, arg := range args {
-		switch arg {
-		case "-h", "--help":
-			doctor.PrintHelp(os.Stdout)
-			os.Exit(0)
-		case "--probe-runtime":
-			probeRuntime = true
-		case "--production":
-			production = true
-		case "--fix":
-			fmt.Fprintln(os.Stderr, "doctor: --fix is not yet implemented in the Go port (see ideas wishlist rank 5)")
-			fmt.Fprintln(os.Stderr, "  Use 'YAKOS_IMPL=bash yakos doctor --fix' to reach the bash implementation.")
+	fs := &cliflag.Set{Cmd: "doctor", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--probe-runtime", Kind: cliflag.Bool, Bool: &probeRuntime},
+		{Name: "--production", Kind: cliflag.Bool, Bool: &production},
+		{Name: "--fix", Kind: cliflag.Bool, Bool: &fix},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		doctor.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	if fix {
+		fmt.Fprintln(os.Stderr, "doctor: --fix is not yet implemented in the Go port (see ideas wishlist rank 5)")
+		fmt.Fprintln(os.Stderr, "  Use 'YAKOS_IMPL=bash yakos doctor --fix' to reach the bash implementation.")
+		os.Exit(1)
+	}
+
+	projectPath := ""
+	for _, arg := range rest {
+		if len(arg) > 0 && arg[0] == '-' {
+			fmt.Fprintf(os.Stderr, "doctor: unknown flag %q\n", arg)
 			os.Exit(1)
-		default:
-			if len(arg) > 0 && arg[0] == '-' {
-				fmt.Fprintf(os.Stderr, "doctor: unknown flag %q\n", arg)
-				os.Exit(1)
-			}
-			if projectPath != "" {
-				fmt.Fprintln(os.Stderr, "doctor: too many positional args")
-				os.Exit(1)
-			}
-			projectPath = arg
 		}
+		if projectPath != "" {
+			fmt.Fprintln(os.Stderr, "doctor: too many positional args")
+			os.Exit(1)
+		}
+		projectPath = arg
 	}
 
 	// Resolve YAKOS_ROOT from env, then cascade to materialized/embedded lib.
@@ -423,36 +450,33 @@ func runDoctor(yakosRoot string, args []string) {
 // no on-disk clone), the embedded lib is materialized automatically so that
 // `yakos refresh` provisions hook scripts just as `yakos start` does.
 func runRefresh(yakosRoot string, args []string) {
+	help := false
 	dryRun := false
 	allProjects := false
 	explicitProject := ""
 
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "-h" || arg == "--help":
-			printRefreshHelp(os.Stdout)
-			os.Exit(0)
-		case arg == "--dry-run":
-			dryRun = true
-		case arg == "--all":
-			allProjects = true
-		case arg == "--project":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "refresh: --project requires a path")
-				os.Exit(1)
-			}
-			explicitProject = args[i]
-		case len(arg) > 10 && arg[:10] == "--project=":
-			explicitProject = arg[10:]
-		case len(arg) > 0 && arg[0] == '-':
-			fmt.Fprintf(os.Stderr, "refresh: unknown argument %q (try --help)\n", arg)
-			os.Exit(1)
-		default:
-			fmt.Fprintf(os.Stderr, "refresh: unknown argument %q (try --help)\n", arg)
-			os.Exit(1)
-		}
+	fs := &cliflag.Set{Cmd: "refresh", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--dry-run", Kind: cliflag.Bool, Bool: &dryRun},
+		{Name: "--all", Kind: cliflag.Bool, Bool: &allProjects},
+		{Name: "--project", Kind: cliflag.String, Str: &explicitProject, ValueDesc: "a path"},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		printRefreshHelp(os.Stdout)
+		os.Exit(0)
+	}
+	// refresh accepts no positional arguments at all; anything left in
+	// rest — flag-shaped or not — gets the same "unknown argument" text,
+	// matching the pre-cliflag loop's default: branch (which both the
+	// unknown-flag and unexpected-positional cases fell into).
+	if len(rest) > 0 {
+		fmt.Fprintf(os.Stderr, "refresh: unknown argument %q (try --help)\n", rest[0])
+		os.Exit(1)
 	}
 
 	// Resolve YAKOS_ROOT from env (bash entry-point may set it).
@@ -523,7 +547,7 @@ func runRefresh(yakosRoot string, args []string) {
 		HomeDir:      home,
 	}
 
-	_, err := refresh.Run(cfg)
+	_, err = refresh.Run(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "refresh: %v\n", err)
 		os.Exit(1)
