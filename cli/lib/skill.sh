@@ -143,7 +143,15 @@ cmd_candidates() {
         # TODO(M2): interactive loop — for each candidate, show full
         # body, prompt for [p]romote/[r]eject/[d]efer/[s]kip. Loop
         # until exhausted.
-        ct_log "interactive review not yet implemented (M2 follow-up)"
+        #
+        # The non-interactive listing above (real work) has already
+        # printed, but --review specifically promises an interactive
+        # review loop that doesn't exist yet. Fail loudly (non-zero
+        # exit + stderr) instead of silently downgrading to a plain
+        # listing, so a caller can't mistake "listed" for "reviewed".
+        # Mirrors internal/skill.runCandidates on the Go side.
+        ct_log "skill: interactive review not yet implemented (M2 follow-up)"
+        return 1
     fi
 }
 
