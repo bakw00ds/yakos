@@ -675,6 +675,213 @@ func waitForRunStatus(t *testing.T, workDir, runID, want string) []byte {
 	return nil
 }
 
+// TestFlows_Run_ProductionPath_AttributionIgnoresBodyOperatorID proves K2's
+// fix on the REAL production path (not the nodeRunFn shortcut): mallory
+// POSTs /flows/api/run with a self-asserted {"operator_id":"alice"} body
+// field. The run's recorded owner must be mallory (the resolved identity),
+// never alice (the self-asserted body field).
+//
+// Two identity shapes are tried because the review's mutation
+// (k82-security-review-2026-09-23.md, K2) is:
+//
+//	if resolvedID.Authenticated { operatorID = resolvedID.OperatorID
+//	} else                       { operatorID = req.OperatorID }
+//
+// — an authenticated identity's OperatorID is unaffected by that mutation
+// (both branches agree), so an authenticated-only test would pass even
+// against the mutant. The loopback shape (Authenticated=false, a stable
+// server-stamped OperatorID already present — see resolveRunOperatorID's
+// doc comment) is the one the mutation actually flips to the body field,
+// and is the shape the review calls out by name: "on the loopback path
+// (Authenticated == false) the owner reverts to the browser-minted
+// operator_id token, which is precisely the R10 bug."
+func TestFlows_Run_ProductionPath_AttributionIgnoresBodyOperatorID(t *testing.T) {
+	cases := []struct {
+		name    string
+		mallory netid.Identity
+	}{
+		{"authenticated identity", netid.Identity{OperatorID: "mallory", Role: netid.RoleAdmin, Authenticated: true, Resolved: true}},
+		{"loopback stamped identity", netid.Identity{OperatorID: "mallory", Role: netid.RoleAdmin, Authenticated: false, Resolved: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := make(chan struct{}, 16)
+			fn := func(ctx context.Context, _ dispatch.Params) ([]byte, dispatch.Result, error) {
+				calls <- struct{}{}
+				return []byte("ok"), dispatch.Result{ExitCode: 0}, nil
+			}
+			workDir, doAs := newProductionEngineTestServer(t, fn)
+			writeWorkflow(t, workDir, "my-flow", minimalYAML)
+
+			resp := doAs(tc.mallory, http.MethodPost, "/flows/api/run?name=my-flow", `{"operator_id":"alice"}`)
+			body := bodyStr(t, resp)
+			if resp.StatusCode != http.StatusAccepted {
+				t.Fatalf("status=%d; want 202; body=%s", resp.StatusCode, body)
+			}
+			var runResult map[string]string
+			if err := json.Unmarshal([]byte(body), &runResult); err != nil {
+				t.Fatalf("unmarshal run response: %v; body=%s", err, body)
+			}
+			runID := runResult["run_id"]
+			if runID == "" {
+				t.Fatal("empty run_id in run response")
+			}
+
+			select {
+			case <-calls:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for node dispatch to start")
+			}
+
+			if got := runJSONOwner(t, workDir, runID); got != "mallory" {
+				t.Errorf("SECURITY: run.json owner_operator_id=%q; want %q (resolved identity, not the self-asserted operator_id body field)", got, "mallory")
+			}
+
+			// Wait for the run's background goroutine to fully settle
+			// before the test (and its t.TempDir() cleanup) returns —
+			// otherwise the goroutine's still-in-flight debounce/final
+			// persistNow writes can race t.TempDir()'s RemoveAll.
+			waitForRunStatus(t, workDir, runID, "completed")
+		})
+	}
+}
+
+// TestFlows_Run_ProductionPath_UnresolvedIdentity_FailsClosed proves K2's
+// fix's other half: on the REAL production path, a request that never
+// resolved any identity at all must be refused (403) rather than starting a
+// run under an empty/legacy owner. fn asserts it is never invoked.
+func TestFlows_Run_ProductionPath_UnresolvedIdentity_FailsClosed(t *testing.T) {
+	fn := func(ctx context.Context, _ dispatch.Params) ([]byte, dispatch.Result, error) {
+		t.Error("node dispatch must not run for a request with no resolvable operator identity")
+		return nil, dispatch.Result{}, nil
+	}
+	workDir, doAs := newProductionEngineTestServer(t, fn)
+	writeWorkflow(t, workDir, "my-flow", minimalYAML)
+
+	unresolved := netid.Identity{} // Resolved=false: resolver never ran / no identity at all.
+	resp := doAs(unresolved, http.MethodPost, "/flows/api/run?name=my-flow", `{}`)
+	body := bodyStr(t, resp)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status=%d; want 403 (unresolved identity must fail closed rather than start a run); body=%s", resp.StatusCode, body)
+	}
+
+	runsDir := filepath.Join(workDir, "workflows", "runs")
+	entries, _ := os.ReadDir(runsDir)
+	if len(entries) != 0 {
+		t.Errorf("a run directory was created for an unresolved identity: %v", entries)
+	}
+}
+
+// TestFlows_Resume_ProductionPath_AttributionIgnoresBodyOperatorID is
+// TestFlows_Run_ProductionPath_AttributionIgnoresBodyOperatorID's
+// handleResume counterpart (K2 / mutation M8). mallory owns the prior run
+// (created through the same production path, so its workflow_hash matches);
+// she then resumes it with a self-asserted {"operator_id":"alice"}. The
+// resumed run's owner must still be mallory. Both identity shapes are
+// exercised for the same reason as the handleRun test: the mutation only
+// flips the loopback (Authenticated=false) branch to the body field.
+func TestFlows_Resume_ProductionPath_AttributionIgnoresBodyOperatorID(t *testing.T) {
+	cases := []struct {
+		name    string
+		mallory netid.Identity
+	}{
+		{"authenticated identity", netid.Identity{OperatorID: "mallory", Role: netid.RoleAdmin, Authenticated: true, Resolved: true}},
+		{"loopback stamped identity", netid.Identity{OperatorID: "mallory", Role: netid.RoleAdmin, Authenticated: false, Resolved: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := make(chan struct{}, 16)
+			fn := func(ctx context.Context, _ dispatch.Params) ([]byte, dispatch.Result, error) {
+				calls <- struct{}{}
+				return []byte("ok"), dispatch.Result{ExitCode: 0}, nil
+			}
+			waitForDispatch := func() {
+				t.Helper()
+				select {
+				case <-calls:
+				case <-time.After(5 * time.Second):
+					t.Fatal("timed out waiting for node dispatch to start")
+				}
+			}
+
+			workDir, doAs := newProductionEngineTestServer(t, fn)
+			writeWorkflow(t, workDir, "my-flow", minimalYAML)
+
+			// mallory creates a prior run through the real production path
+			// (so its workflow_hash matches minimalYAML — engine.Resume
+			// pins the hash).
+			priorResp := doAs(tc.mallory, http.MethodPost, "/flows/api/run?name=my-flow", `{}`)
+			priorBody := bodyStr(t, priorResp)
+			if priorResp.StatusCode != http.StatusAccepted {
+				t.Fatalf("prior run status=%d; want 202; body=%s", priorResp.StatusCode, priorBody)
+			}
+			var priorResult map[string]string
+			if err := json.Unmarshal([]byte(priorBody), &priorResult); err != nil {
+				t.Fatalf("unmarshal prior run response: %v; body=%s", err, priorBody)
+			}
+			priorRunID := priorResult["run_id"]
+			waitForDispatch()
+			// Wait for the prior run to fully settle (not just dispatch-
+			// started) before resuming it: this both guarantees run.json
+			// (incl. the hash Resume pins against) is fully written, and
+			// avoids racing this run's own goroutine against a later
+			// t.TempDir() cleanup.
+			waitForRunStatus(t, workDir, priorRunID, "completed")
+
+			resumeBody := `{"run_id":"` + priorRunID + `","operator_id":"alice"}`
+			resumeResp := doAs(tc.mallory, http.MethodPost, "/flows/api/resume", resumeBody)
+			respBody := bodyStr(t, resumeResp)
+			if resumeResp.StatusCode != http.StatusAccepted {
+				t.Fatalf("resume status=%d; want 202; body=%s", resumeResp.StatusCode, respBody)
+			}
+			var resumeResult map[string]string
+			if err := json.Unmarshal([]byte(respBody), &resumeResult); err != nil {
+				t.Fatalf("unmarshal resume response: %v; body=%s", err, respBody)
+			}
+			newRunID := resumeResult["new_run_id"]
+			if newRunID == "" {
+				t.Fatal("empty new_run_id in resume response")
+			}
+			// The prior run's single node is already NodeCompleted by the
+			// time Resume loads it (pinned-output resume), so the resumed
+			// run has no node left to dispatch — waitForDispatch's channel
+			// never fires. Wait on the resumed run.json reaching its
+			// terminal state instead, which persistNow writes unconditionally
+			// regardless of whether any node re-executes.
+			waitForRunStatus(t, workDir, newRunID, "completed")
+
+			if got := runJSONOwner(t, workDir, newRunID); got != "mallory" {
+				t.Errorf("SECURITY: resumed run.json owner_operator_id=%q; want %q (resolved identity, not the self-asserted operator_id body field)", got, "mallory")
+			}
+		})
+	}
+}
+
+// TestFlows_Resume_ProductionPath_UnresolvedIdentity_FailsClosed is
+// TestFlows_Run_ProductionPath_UnresolvedIdentity_FailsClosed's
+// handleResume counterpart (K2). The prior run is legacy/unowned (owner
+// "") so checkRunOwnership's first gate lets any caller past it — isolating
+// the assertion to resolveRunOperatorID's own fail-closed behaviour on the
+// NEW run's attribution, not the prior-run ownership gate.
+func TestFlows_Resume_ProductionPath_UnresolvedIdentity_FailsClosed(t *testing.T) {
+	fn := func(ctx context.Context, _ dispatch.Params) ([]byte, dispatch.Result, error) {
+		t.Error("node dispatch must not run for a resume with no resolvable operator identity")
+		return nil, dispatch.Result{}, nil
+	}
+	workDir, doAs := newProductionEngineTestServer(t, fn)
+	writeWorkflow(t, workDir, "my-flow", minimalYAML)
+
+	priorRunID := "run-20260101-000000-legacyxx"
+	writeOwnedRun(t, workDir, priorRunID, "") // legacy/unowned: open to any caller
+
+	unresolved := netid.Identity{}
+	resp := doAs(unresolved, http.MethodPost, "/flows/api/resume", `{"run_id":"`+priorRunID+`"}`)
+	body := bodyStr(t, resp)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status=%d; want 403 (unresolved identity must fail closed rather than resume); body=%s", resp.StatusCode, body)
+	}
+}
+
 // TestFlows_Resume_K1_NewRunIDCannotTargetAnotherOperatorsRun is the
 // regression test for K1 (k82-security-review-2026-09-23.md), reproducing
 // the review's exact scenario end-to-end against the real production path:
