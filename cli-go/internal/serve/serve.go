@@ -259,15 +259,45 @@ func (c *Config) restAddr() string {
 	return "127.0.0.1:7892"
 }
 
+// restStateDir returns the directory used to persist REST/console/perf/MCP
+// state (~/.yakos-state), or "" if no usable home directory could be
+// resolved and RESTStateDir was not set explicitly.
+//
+// SECURITY (round-2 review R4): this used to fall back to the literal "/tmp"
+// whenever $HOME was empty — true whenever the daemon is launched by
+// launchd/systemd with no HOME set, from cron, under `env -i`, inside many
+// containers, and on Windows (where HOME is not normally set at all; this
+// used os.Getenv("HOME") directly, so USERPROFILE was ignored). "/tmp" is a
+// fixed, world-writable, well-known path: a local attacker who pre-creates
+// /tmp/.yakos-state and plants a syntactically-valid rest-write-token file
+// gets it adopted by LoadOrGenerateTokens, then POSTs yakos.dispatch with
+// that token — unattended RCE as the operator, since dispatch runs with
+// --permission-mode bypassPermissions. Falling back to a shared directory is
+// never safe regardless of which shared path is chosen, so this now returns
+// "" instead and mustResolveStateDir (called from Run, before any listener
+// binds) turns that into a hard startup failure rather than a silent
+// world-writable fallback.
 func (c *Config) restStateDir() string {
 	if c.RESTStateDir != "" {
 		return c.RESTStateDir
 	}
-	home := os.Getenv("HOME")
-	if home == "" {
-		home = "/tmp"
+	// os.UserHomeDir (unlike a raw os.Getenv("HOME")) also consults
+	// USERPROFILE on Windows and the appropriate APIs on other platforms.
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
 	}
 	return filepath.Join(home, ".yakos-state")
+}
+
+// mustResolveStateDir hard-fails Run before any listener binds if the state
+// directory cannot be resolved to a real, non-shared path (round-2 review
+// R4). See restStateDir's doc comment for the exploit this prevents.
+func (c *Config) mustResolveStateDir() error {
+	if c.restStateDir() == "" {
+		return fmt.Errorf("serve: could not resolve a home directory for the yakOS state directory (~/.yakos-state) — set RESTStateDir explicitly, or HOME (Unix) / USERPROFILE (Windows) in the environment; refusing to fall back to a shared, world-writable directory for REST/MCP auth tokens")
+	}
+	return nil
 }
 
 func (c *Config) perfAddr() string {
@@ -338,6 +368,15 @@ func (c *Config) listen(path string) (net.Listener, error) {
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.WorkspaceRoot == "" {
 		return fmt.Errorf("serve: WorkspaceRoot is required")
+	}
+
+	// SECURITY (round-2 review R4): fail loudly, before binding any
+	// listener, if the state directory can't be resolved to a real
+	// non-shared path — see restStateDir/mustResolveStateDir's doc
+	// comments. Must run before the REST/console/perf/MCP token loads
+	// below, all of which derive their directory from restStateDir().
+	if err := cfg.mustResolveStateDir(); err != nil {
+		return err
 	}
 
 	// Check for an existing daemon (PID file liveness).
@@ -448,16 +487,24 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
-	// Load (or generate) REST tokens once; reused for gRPC and MCP HTTP auth parity.
-	var restReadToken, restWriteToken string
+	// Load (or generate) REST tokens once; reused for gRPC and MCP HTTP auth
+	// parity. This happens unconditionally, even when the REST listener
+	// itself is disabled (--rest-addr -), because the MCP streamable-HTTP
+	// transport and the gRPC listener both authenticate with this same
+	// write token and must not fall back to an empty one (see C2 in
+	// security-review-2026-09-14.md: an unconditionally-started MCP HTTP
+	// listener plus a token that was only generated when REST was enabled
+	// meant `yakos serve --rest-addr -` exposed an unauthenticated
+	// yakos.dispatch endpoint on :7894).
+	restToks, err := restapi.LoadOrGenerateTokens(cfg.restStateDir())
+	if err != nil {
+		return fmt.Errorf("serve: REST tokens: %w", err)
+	}
+	restReadToken := restToks.Read
+	restWriteToken := restToks.Write
+
 	restErrCh := make(chan error, 1)
 	if cfg.restAddr() != "-" {
-		restToks, err := restapi.LoadOrGenerateTokens(cfg.restStateDir())
-		if err != nil {
-			return fmt.Errorf("serve: REST tokens: %w", err)
-		}
-		restReadToken = restToks.Read
-		restWriteToken = restToks.Write
 		restSrv := restapi.New(restapi.Config{
 			Addr:            cfg.restAddr(),
 			Tokens:          restToks,

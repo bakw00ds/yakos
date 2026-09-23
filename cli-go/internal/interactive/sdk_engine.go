@@ -56,11 +56,29 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	yakruntime "github.com/bakw00ds/yakos/internal/runtime"
 )
 
 // sidecarWriteTimeout is the bounded write timeout for sidecar stdin writes.
 // Mirrors session.go's stdinWriteTimeout.
 const sidecarWriteTimeout = 10 * time.Second
+
+// sdkSidecarEnv returns the environment for the spawned Node sidecar process
+// (see Start, below). Extracted to a standalone function so the M4/R7
+// allowlisting is directly unit-testable without spawning a real node
+// process.
+//
+// SECURITY (M4/R7, security-review-2026-09-14.md + round-2 review): this
+// sidecar runs the @anthropic-ai/claude-agent-sdk Node bundle, i.e. the
+// claude SDK — the exact spawn the M4 finding named and the round-1 fix
+// missed. Before this, Start() left cmd.Env nil, so Go (per exec.Cmd's
+// documented behavior) inherited the FULL parent environment unfiltered:
+// every other configured runtime's credentials reached this sidecar. This
+// applies the same claude allowlist the dispatch adapters in
+// internal/runtime use.
+func sdkSidecarEnv() []string {
+	return yakruntime.FilterEnvFor("claude", os.Environ())
+}
 
 // ---------------------------------------------------------------------------
 // NDJSON frame types (sidecar → Go)
@@ -310,6 +328,10 @@ func (e *SDKEngine) Start(ctx context.Context) error {
 			args = append(args, "--model", e.params.Model)
 		}
 		cmd = exec.CommandContext(ctx, e.params.NodePath, args...) //nolint:gosec
+
+		// A nil Env is never intentional in a security-reviewed spawn — see
+		// sdkSidecarEnv's doc comment (M4/R7).
+		cmd.Env = sdkSidecarEnv()
 	}
 
 	// Forward sidecar stderr to our slog at DEBUG level.

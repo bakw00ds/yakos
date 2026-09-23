@@ -126,3 +126,66 @@ func TestIsValidToken(t *testing.T) {
 		})
 	}
 }
+
+// ---- round-2 review R4: secureStateDir hardening --------------------------
+
+// TestLoadOrGenerateTokens_RejectsSymlinkStateDir is the R4 regression: an
+// attacker-plantable symlink at the state dir path must be refused, not
+// followed and "tightened" (which would just chmod whatever the symlink
+// points at).
+func TestLoadOrGenerateTokens_RejectsSymlinkStateDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on windows; posix-focused regression")
+	}
+	parent := t.TempDir()
+	realDir := filepath.Join(parent, "real")
+	if err := os.Mkdir(realDir, 0700); err != nil {
+		t.Fatalf("mkdir real: %v", err)
+	}
+	linkPath := filepath.Join(parent, "state-symlink")
+	if err := os.Symlink(realDir, linkPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := LoadOrGenerateTokens(linkPath)
+	if err == nil {
+		t.Fatal("LoadOrGenerateTokens on a symlinked state dir: want error, got nil (R4 regression: planted-symlink attack not rejected)")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("error should mention symlink; got: %v", err)
+	}
+}
+
+// TestLoadOrGenerateTokens_TightensPermissiveExistingDir is the R4
+// regression for the world-writable-directory attack: MkdirAll is a no-op
+// on an existing directory and does not tighten its mode, so an
+// attacker-created `mkdir -m 0777 <stateDir>` ahead of the daemon starting
+// previously stayed world-writable forever. secureStateDir must now detect
+// and tighten it.
+func TestLoadOrGenerateTokens_TightensPermissiveExistingDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix permission bits; posix-focused regression")
+	}
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "world-writable-state")
+	if err := os.Mkdir(stateDir, 0777); err != nil {
+		t.Fatalf("mkdir 0777: %v", err)
+	}
+	// Force the mode past umask, since Mkdir's mode argument is masked by
+	// the process umask.
+	if err := os.Chmod(stateDir, 0777); err != nil {
+		t.Fatalf("chmod 0777: %v", err)
+	}
+
+	if _, err := LoadOrGenerateTokens(stateDir); err != nil {
+		t.Fatalf("LoadOrGenerateTokens: %v", err)
+	}
+
+	fi, err := os.Stat(stateDir)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm&0077 != 0 {
+		t.Errorf("state dir mode after LoadOrGenerateTokens = %o; want group/other bits cleared (0700) — R4 regression: pre-existing 0777 dir left world-writable", perm)
+	}
+}

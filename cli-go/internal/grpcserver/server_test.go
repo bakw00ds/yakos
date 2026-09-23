@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -457,6 +458,24 @@ func TestStatus_Read_WithProject(t *testing.T) {
 	_ = resp
 }
 
+// TestStatus_Read_RejectsPathTraversal is the round-2 review R13
+// regression: internal/status.Status joins Project onto
+// $HOME/agent-control unvalidated, the identical pattern M3 fixed one
+// package over in internal/supervise.
+func TestStatus_Read_RejectsPathTraversal(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	conn := startTestServer(t, dir, wsbus.New())
+	sc := pb.NewStatusClient(conn)
+
+	for _, project := range []string{"../../..", "../escape", "/etc/passwd", "a/../../b"} {
+		_, err := sc.Read(ctxWithToken(context.Background(), testReadToken), &pb.StatusReadRequest{Project: project})
+		if err == nil {
+			t.Errorf("Read with Project=%q: want error, got nil (R13 regression: traversal accepted)", project)
+		}
+	}
+}
+
 func TestStatus_Read_RequiresToken(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -579,9 +598,67 @@ func TestRefresh_Run_NoYakosRoot_Error(t *testing.T) {
 	conn := startTestServer(t, dir, wsbus.New())
 	rc := pb.NewRefreshClient(conn)
 
-	_, err := rc.Run(ctxWithToken(context.Background(), testWriteToken), &pb.RefreshRunRequest{DryRun: true})
+	_, err := rc.Run(ctxWithToken(context.Background(), testWriteToken), &pb.RefreshRunRequest{Apply: false})
 	if err == nil {
 		t.Fatal("expected error when YakosRoot is empty")
+	}
+}
+
+// TestRefresh_Run_OmittedApplyDoesNotWrite is the round-2 review R5
+// regression: an omitted Apply field (proto3 zero value, indistinguishable
+// from explicit false for a plain bool) must resolve to dry-run, not
+// apply — the exact opposite of the previous DryRun-named field, whose zero
+// value meant "write". Uses fully isolated t.TempDir()s for YakosRoot and
+// WorkspaceRoot (never the real repo) so a pre-fix run (which would apply)
+// cannot touch anything outside the test's own throwaway directory.
+func TestRefresh_Run_OmittedApplyDoesNotWrite(t *testing.T) {
+	t.Parallel()
+	yakosRoot := t.TempDir()
+	workspaceRoot := t.TempDir()
+
+	cfg := grpcserver.Config{
+		ReadToken:       testReadToken,
+		WriteToken:      testWriteToken,
+		YakosRoot:       yakosRoot,
+		WorkspaceRoot:   workspaceRoot,
+		DispatchService: grpcserver.NewDispatchServiceForTest(workspaceRoot, wsbus.New()),
+	}
+	srv := grpcserver.New(cfg)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = srv.ServeListener(ctx, ln) }()
+	time.Sleep(10 * time.Millisecond)
+
+	conn, err := grpc.NewClient(
+		ln.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(grpcserver.JSONCodec{})),
+	)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	rc := pb.NewRefreshClient(conn)
+
+	// Apply omitted entirely — proto3 zero value.
+	resp, err := rc.Run(ctxWithToken(context.Background(), testWriteToken), &pb.RefreshRunRequest{})
+	if err != nil {
+		t.Fatalf("Run with omitted Apply: %v", err)
+	}
+	if resp.Output != "" && !strings.Contains(resp.Output, "[DRY RUN]") {
+		t.Errorf("Run with omitted Apply: output = %q; want a dry-run report ([DRY RUN] marker) — omitting apply must never write (R5 regression)", resp.Output)
+	}
+
+	// Nothing should have been written under workspaceRoot's .claude/ or
+	// scripts/hooks/ — the concrete blast radius the finding describes.
+	entries, _ := os.ReadDir(workspaceRoot)
+	if len(entries) != 0 {
+		t.Errorf("workspaceRoot has %d new entries after an omitted-Apply refresh run: %v (R5 regression: dry-run wrote files)", len(entries), entries)
 	}
 }
 

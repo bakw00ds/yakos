@@ -144,26 +144,14 @@ func (a *ClaudeAdapter) Dispatch(ctx context.Context, req DispatchRequest) (*Dis
 	return &DispatchResult{Stdout: textOut, ExitCode: exitCode}, nil
 }
 
-// buildEnv constructs the subprocess environment, merging the current process
-// env with dispatch-specific variables.
+// buildEnv constructs the subprocess environment for claude dispatch: an
+// allowlisted subset of the parent env (see env.go / M4, claudeEnvSpec) plus
+// dispatch-specific variables. Codex and agy have their own
+// buildEnvCodex/buildEnvAgy so that ANTHROPIC_* is never handed to a
+// third-party binary, and vice versa.
 func buildEnv(req DispatchRequest) []string {
-	base := os.Environ()
-	env := make([]string, 0, len(base)+4)
-	env = append(env, base...)
-
-	if req.ModelOverride != "" {
-		env = append(env, "YAKOS_MODEL_OVERRIDE="+req.ModelOverride)
-	}
-	if req.UsageOutPath != "" {
-		env = append(env, "YAKOS_USAGE_OUT="+req.UsageOutPath)
-	}
-	if req.SessionOutPath != "" {
-		env = append(env, "YAKOS_SESSION_OUT="+req.SessionOutPath)
-	}
-	if req.AllowRoot {
-		env = append(env, "IS_SANDBOX=1") // PR #17
-	}
-	return env
+	env := filterEnv(os.Environ(), claudeEnvSpec)
+	return appendDispatchEnv(env, req)
 }
 
 // ChatExecCmd returns the exec.Cmd for unframed chat dispatch.
@@ -193,7 +181,7 @@ func (a *ClaudeAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest
 		"--include-partial-messages",
 		"--verbose",
 		"--exclude-dynamic-system-prompt-sections", // PR #31
-		"-p", req.UserText,
+		"-p",
 	}
 	if req.AgentSystemPrompt != "" {
 		args = append(args, "--append-system-prompt", req.AgentSystemPrompt)
@@ -205,6 +193,13 @@ func (a *ClaudeAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest
 	if req.Effort != "" {
 		args = append(args, "--effort", req.Effort)
 	}
+	// SECURITY (H1): claude's -p is a boolean flag — the prompt is a bare
+	// positional, not -p's value — so commander would otherwise parse a
+	// UserText beginning with '-' (e.g. "--settings /tmp/evil.json") as
+	// another CLI flag rather than as prompt text. The '--' end-of-options
+	// sentinel forces everything after it to be treated as a positional,
+	// mirroring the codex adapter (codex.go: append(args, "--", req.UserText)).
+	args = append(args, "--", req.UserText)
 
 	cmd := exec.CommandContext(ctx, "claude", args...) //nolint:gosec
 	cmd.Env = buildEnvChat(req)
@@ -736,7 +731,10 @@ type ChatDispatchRequest struct {
 	// Project is the absolute path to the project repository.
 	Project string
 
-	// UserText is the user's message (passed as -p to the CLI).
+	// UserText is the user's message (passed as -p to the CLI, after a '--'
+	// end-of-options sentinel — see ChatExecCmd / H1 in
+	// security-review-2026-09-14.md — since claude's -p is a boolean flag and
+	// UserText is untrusted, caller-supplied text that may begin with '-').
 	UserText string
 
 	// AgentSystemPrompt is the agent's body/persona, injected via
@@ -764,11 +762,11 @@ type ChatDispatchRequest struct {
 	Effort string
 }
 
-// buildEnvChat constructs the subprocess environment for unframed chat dispatch.
+// buildEnvChat constructs the subprocess environment for unframed chat
+// dispatch: an allowlisted subset of the parent env (see env.go / M4) plus
+// dispatch-specific variables.
 func buildEnvChat(req ChatDispatchRequest) []string {
-	base := os.Environ()
-	env := make([]string, 0, len(base)+2)
-	env = append(env, base...)
+	env := filterEnv(os.Environ(), claudeEnvSpec)
 	if req.ModelOverride != "" {
 		env = append(env, "YAKOS_MODEL_OVERRIDE="+req.ModelOverride)
 	}

@@ -55,6 +55,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bakw00ds/yakos/internal/pathsafe"
 )
 
 // ---- public types -----------------------------------------------------------
@@ -248,8 +250,40 @@ See docs/supervisor-mode.md for the full guide.
 // ---- project resolution -----------------------------------------------------
 
 // resolveProject returns the project slug from cfg.Project or from cwd inference.
+// ErrInvalidProject is returned by resolveProject when cfg.Project is a
+// path-traversal or absolute-path payload rather than a plain project slug.
+//
+// This wraps pathsafe.ErrInvalidProjectSlug (round-2 review R13) so existing
+// callers that compare against ErrInvalidProject keep working; errors.Is
+// unwraps to the shared sentinel.
+var ErrInvalidProject = fmt.Errorf("supervise: invalid project: must be a plain slug (no path separators or '..'): %w", pathsafe.ErrInvalidProjectSlug)
+
+// validateProjectSlug rejects a project value that could escape acRoot.
+//
+// SECURITY (M3/L8, security-review-2026-09-14.md): yakos.supervise.run and
+// .ack pass `project` straight from an MCP/JSON-RPC caller with no other
+// validation, and resolveProjectPaths joins it onto acRoot unmodified
+// (filepath.Join(acRoot, project, ...)). A value like "../../../tmp/x" (or
+// an absolute path) reads/writes files under an arbitrary directory instead
+// of the caller's own agent-control project directory.
+//
+// Delegates to pathsafe.ValidateProjectSlug (round-2 review R13: the
+// identical unvalidated-slug pattern was found one package over in
+// yakos.status.read, unswept by the original M3 fix) but returns the
+// package-local ErrInvalidProject so existing error-comparison call sites
+// are unaffected.
+func validateProjectSlug(project string) error {
+	if err := pathsafe.ValidateProjectSlug(project); err != nil {
+		return ErrInvalidProject
+	}
+	return nil
+}
+
 func resolveProject(cfg Config, acRoot string) (string, error) {
 	if cfg.Project != "" {
+		if err := validateProjectSlug(cfg.Project); err != nil {
+			return "", err
+		}
 		return cfg.Project, nil
 	}
 	p, err := inferProjectFromCWD(acRoot)

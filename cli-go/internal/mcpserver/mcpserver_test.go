@@ -579,7 +579,7 @@ func TestRefresh_NoYakosRootError(t *testing.T) {
 		WorkspaceRoot: t.TempDir(),
 		YakosRoot:     "",
 	}
-	results := session(t, cfg, callReq(1, "yakos.refresh", map[string]interface{}{"dryRun": true}))
+	results := session(t, cfg, callReq(1, "yakos.refresh", map[string]interface{}{"apply": false}))
 	resp := findByID(t, results, 1)
 	if !isToolError(resp) {
 		t.Error("expected tool error for missing yakos_root")
@@ -588,7 +588,7 @@ func TestRefresh_NoYakosRootError(t *testing.T) {
 
 func TestRefresh_UnknownFieldRejected(t *testing.T) {
 	cfg := defaultCfg(t)
-	results := session(t, cfg, callReq(1, "yakos.refresh", map[string]interface{}{"dryRun": true, "badField": 1}))
+	results := session(t, cfg, callReq(1, "yakos.refresh", map[string]interface{}{"apply": false, "badField": 1}))
 	resp := findByID(t, results, 1)
 	if !isToolError(resp) {
 		t.Error("expected tool error for unknown field")

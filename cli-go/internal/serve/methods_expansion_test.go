@@ -358,7 +358,9 @@ func TestMethod_RefreshRun_DryRunReturnsOutput(t *testing.T) {
 	cfg := serve.Config{WorkspaceRoot: root, YakosRoot: root}
 	client, _ := newTestDaemon(t, cfg)
 
-	raw, err := client.Call(context.Background(), "yakos.refresh.run", map[string]interface{}{"dry_run": true})
+	// apply omitted (round-2 review R5): the field's Go zero value (false)
+	// IS dry-run, so this call is safe/read-only by construction.
+	raw, err := client.Call(context.Background(), "yakos.refresh.run", map[string]interface{}{"apply": false})
 	if err != nil {
 		t.Fatalf("refresh.run: %v", err)
 	}
@@ -372,6 +374,35 @@ func TestMethod_RefreshRun_DryRunReturnsOutput(t *testing.T) {
 	// Output may be empty when no projects are registered; that's OK.
 	// The key assertion is that the call succeeded and the field exists.
 	_ = result.Output
+}
+
+// TestMethod_RefreshRun_OmittedApplyDoesNotWrite is the round-2 review R5
+// regression: the previous "dry_run bool" field's Go zero value (false)
+// meant an entirely OMITTED field already applied changes — the safe call
+// shape ("just call yakos.refresh.run") was actually the destructive one.
+// With the field renamed to "apply", the zero value (false, whether typed
+// explicitly or left out) is dry-run by construction. This asserts the
+// refresh output for an omitted-params call reports dry-run, not applied,
+// output — refresh.Run's own [DRY RUN] / "(dry-run: no files written)"
+// markers (see internal/refresh/refresh.go) are the observable signal.
+func TestMethod_RefreshRun_OmittedApplyDoesNotWrite(t *testing.T) {
+	root := repoRoot(t)
+	cfg := serve.Config{WorkspaceRoot: root, YakosRoot: root}
+	client, _ := newTestDaemon(t, cfg)
+
+	raw, err := client.Call(context.Background(), "yakos.refresh.run", nil)
+	if err != nil {
+		t.Fatalf("refresh.run: %v", err)
+	}
+	var result struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Output != "" && !strings.Contains(result.Output, "[DRY RUN]") {
+		t.Errorf("refresh.run with omitted params: output = %q; want a dry-run report ([DRY RUN] marker) — omitting apply must never write (R5 regression)", result.Output)
+	}
 }
 
 // ---- yakos.cost.aggregate ----------------------------------------------------
@@ -495,6 +526,25 @@ func TestMethod_StatusRead_UnknownFieldRejected(t *testing.T) {
 	_, err := client.Call(context.Background(), "yakos.status.read", map[string]interface{}{"badField": true})
 	if err == nil {
 		t.Fatal("expected error for unknown field")
+	}
+}
+
+// TestMethod_StatusRead_RejectsPathTraversal is the round-2 review R13
+// regression: internal/status.Status joins Project onto
+// $HOME/agent-control unvalidated, the identical pattern M3 fixed one
+// package over in internal/supervise. A value like "../../.." resolves the
+// work directory to an arbitrary directory and stats/walks files under it.
+func TestMethod_StatusRead_RejectsPathTraversal(t *testing.T) {
+	cfg := serve.Config{WorkspaceRoot: t.TempDir(), YakosRoot: repoRoot(t)}
+	client, _ := newTestDaemon(t, cfg)
+
+	for _, project := range []string{"../../..", "../escape", "/etc/passwd", "a/../../b"} {
+		t.Run(project, func(t *testing.T) {
+			_, err := client.Call(context.Background(), "yakos.status.read", map[string]string{"project": project})
+			if err == nil {
+				t.Fatalf("status.read with project=%q: want error, got nil (R13 regression: traversal accepted)", project)
+			}
+		})
 	}
 }
 

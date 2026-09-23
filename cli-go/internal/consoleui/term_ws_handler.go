@@ -70,8 +70,14 @@ import (
 // constructing a full Manager.
 type terminalSessionManager interface {
 	Subscribe(sessionId string, outputFn func([]byte), exitFn func(int)) (func(), error)
-	SendInput(sessionId string, data []byte) error
-	SendResize(sessionId string, cols, rows uint16) error
+	SendInput(sessionId, operatorID string, data []byte) error
+	SendResize(sessionId, operatorID string, cols, rows uint16) error
+	// ClaimOwner verifies operatorID against the owner recorded at
+	// registration time and denies the attach (ErrUnowned) if no owner was
+	// recorded (H2, R3). It does not grant ownership on first attach.
+	// Callers must call this before Subscribe and must deny the attach —
+	// never subscribing — on error.
+	ClaimOwner(sessionId, operatorID string) error
 }
 
 // maxInboundFrameBytes is the maximum size of an inbound WebSocket frame
@@ -135,11 +141,22 @@ func makeTermWSFunc(termMgr terminalSessionManager) websocket.Handler {
 		conn.MaxPayloadBytes = maxInboundFrameBytes
 
 		// ---- 1. Role gate: require RoleAdmin ----------------------------------
+		//
+		// SECURITY (M1): this must fail CLOSED on an unresolved identity.
+		// The previous condition (`id.Resolved && !id.Role.Allows(...)`) let an
+		// unresolved identity (Resolved==false) fall through to Subscribe below
+		// — meaning a request that reached this handler without the identity
+		// resolver having run at all (e.g. a future mount that skips it) could
+		// still read PTY output and up to 512 KB of scrollback, even though it
+		// could not write (see isAdmin below). RoleNone.Allows(RoleAdmin) is
+		// already false for a zero-value Identity, so this inversion is a
+		// no-op for every request that goes through the resolver today; it
+		// only changes behavior for the "resolver didn't run" case.
 		id := netid.IdentityFrom(conn.Request().Context())
-		if id.Resolved && !id.Role.Allows(netid.RoleAdmin) {
+		if !id.Resolved || !id.Role.Allows(netid.RoleAdmin) {
 			// Send a close frame before disconnecting; best-effort.
 			_ = sendWSBinary(conn, []byte{0x01, 0x00, 0x00, 0x00, 0x01}) // exit code 1
-			slog.Warn("consoleui: /v1/term: insufficient role", "role", id.Role)
+			slog.Warn("consoleui: /v1/term: insufficient role", "role", id.Role, "resolved", id.Resolved)
 			return
 		}
 
@@ -147,6 +164,28 @@ func makeTermWSFunc(termMgr terminalSessionManager) websocket.Handler {
 		sessionId := strings.TrimPrefix(conn.Request().URL.Path, "/v1/term/")
 		sessionId = strings.Trim(sessionId, "/")
 		if sessionId == "" {
+			return
+		}
+
+		// ---- 2b. Owner lock (H2) ---------------------------------------------
+		//
+		// Every identity reaching this point has RoleAdmin, but "admin" is a
+		// role, not a person: in networked mode multiple distinct operators
+		// can hold RoleAdmin, and GET /api/term lists every live session ID to
+		// any of them. Without this check, any admin could attach to any other
+		// admin's live session, inject keystrokes into a bypassPermissions
+		// shell, and read up to 512 KB of that operator's prior terminal
+		// output via scrollback replay. ClaimOwner denies the attach entirely
+		// — before Subscribe, so there is no replay — when a different
+		// operator already owns the session. Ownership is set once, at
+		// registration time (not on first attach, per R3); a session with no
+		// recorded owner is denied (fail closed, ErrUnowned), never claimed
+		// by whoever attaches first. Only the operator recorded at
+		// registration is ever allowed through.
+		if err := termMgr.ClaimOwner(sessionId, id.OperatorID); err != nil {
+			_ = sendWSBinary(conn, []byte{0x01, 0x00, 0x00, 0x00, 0x01})
+			slog.Warn("consoleui: /v1/term: owner lock denied attach",
+				"sessionId", sessionId, "operatorId", id.OperatorID, "err", err)
 			return
 		}
 
@@ -239,7 +278,7 @@ func makeTermWSFunc(termMgr terminalSessionManager) websocket.Handler {
 					if len(payload) == 0 {
 						continue
 					}
-					if err := termMgr.SendInput(sessionId, payload); err != nil {
+					if err := termMgr.SendInput(sessionId, id.OperatorID, payload); err != nil {
 						slog.Debug("consoleui: /v1/term: SendInput error", "sessionId", sessionId, "err", err)
 					}
 				case 0x11: // resize → PTY window size
@@ -252,7 +291,7 @@ func makeTermWSFunc(termMgr terminalSessionManager) websocket.Handler {
 					}
 					cols := binary.BigEndian.Uint16(payload[0:2])
 					rows := binary.BigEndian.Uint16(payload[2:4])
-					if err := termMgr.SendResize(sessionId, cols, rows); err != nil {
+					if err := termMgr.SendResize(sessionId, id.OperatorID, cols, rows); err != nil {
 						slog.Debug("consoleui: /v1/term: SendResize error", "sessionId", sessionId, "err", err)
 					}
 				default:

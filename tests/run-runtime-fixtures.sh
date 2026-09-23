@@ -17,6 +17,12 @@
 #   5. codex emitter: TOML has required keys (name, description,
 #      developer_instructions)
 #   6. gemini emitter: markdown has frontmatter and body separator
+#      (materializes under YAKOS_GEMINI_SHIM_FORCE=1, since the shim is
+#      hardcoded past its removal date; deterministic regardless of
+#      wall-clock date — see 6b)
+#   6b. gemini shim past removal date: returns non-zero without the
+#       force override, prints a migration hint, writes no agent files,
+#       and — critically — does not exit the test runner process
 #   7. runtime-resolve: yk_rt_default falls back to claude
 #   8. runtime-resolve: yk_rt_capability returns 0/1 correctly
 set -eu
@@ -188,12 +194,15 @@ fi
 
 # ---- 6. gemini markdown emitter ----------------------------------------------
 echo
-echo "Test 6: gemini markdown emitter"
+echo "Test 6: gemini markdown emitter (under YAKOS_GEMINI_SHIM_FORCE=1 override)"
 # shellcheck source=../cli/lib/runtimes/gemini.sh
 . "$YAKOS_LIB/runtimes/gemini.sh"
 gemini_out="$WORKDIR/gemini-agents"
 mkdir -p "$gemini_out"
-yk_rt_gemini_materialize_agents "$REPO_ROOT" "" "$gemini_out" >/dev/null 2>&1 || true
+# The shim's removal date (2026-09-01) is hardcoded and in the past as of
+# any CI run from here on, so exercise the materialize path under the
+# documented operator override rather than relying on the wall clock.
+YAKOS_GEMINI_SHIM_FORCE=1 yk_rt_gemini_materialize_agents "$REPO_ROOT" "" "$gemini_out" >/dev/null 2>&1 || true
 emitted_count="$(find "$gemini_out" -name 'yakos-*.md' -type f 2>/dev/null | wc -l | tr -d ' ')"
 if [ "$emitted_count" -ge 11 ]; then
     ok "gemini emitter wrote $emitted_count markdown files (expected ≥ 11)"
@@ -214,6 +223,39 @@ if [ -f "$sample" ]; then
 else
     fail "gemini sample file not found at $sample"
 fi
+
+# ---- 6b. gemini shim past removal date, no override ---------------------
+echo
+echo "Test 6b: gemini shim past removal date (no override) returns non-zero, does not exit"
+blocked_out="$WORKDIR/gemini-agents-blocked"
+mkdir -p "$blocked_out"
+blocked_err="$WORKDIR/gemini-blocked.stderr"
+unset YAKOS_GEMINI_SHIM_FORCE YAKOS_GEMINI_FORCE_WARNED YAKOS_GEMINI_REMOVAL_WARNED YAKOS_GEMINI_DEPRECATION_WARNED 2>/dev/null || true
+# This call is deliberately NOT wrapped in `|| true` alone at top level of a
+# subshell trick — it's a plain `if`, which is enough now that the shim
+# returns 1 instead of calling exit. If a regression reintroduces exit/
+# ct_die here, this whole script dies right here and Tests 7+ never run —
+# the same failure signature the CI diagnosis identified.
+if yk_rt_gemini_materialize_agents "$REPO_ROOT" "" "$blocked_out" >/dev/null 2>"$blocked_err"; then
+    fail "gemini shim past removal date unexpectedly succeeded without YAKOS_GEMINI_SHIM_FORCE"
+else
+    ok "gemini shim past removal date returns non-zero without YAKOS_GEMINI_SHIM_FORCE (script continues)"
+fi
+if grep -qi "migration\|removal date\|removed" "$blocked_err" 2>/dev/null; then
+    ok "gemini shim prints a migration hint on past-removal call"
+else
+    fail "gemini shim did not print an expected migration hint"
+    sed 's/^/    /' "$blocked_err" >&2
+fi
+blocked_count="$(find "$blocked_out" -name 'yakos-*.md' -type f 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$blocked_count" -eq 0 ]; then
+    ok "gemini shim past removal date wrote no agent files (no silent partial materialize)"
+else
+    fail "gemini shim past removal date unexpectedly wrote $blocked_count agent files"
+fi
+# Proof-of-life: if the process had been killed above, this line — and
+# every test after it — would never run.
+ok "test runner process is still alive after the past-removal-date call"
 
 # ---- 7. runtime-resolve default ----------------------------------------------
 echo

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/user"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -226,6 +227,9 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 	}
 
 	// --- Resolve project and yakos root ---
+	if err := validateProjectPath(p.Project); err != nil {
+		return nil, Result{}, err
+	}
 	project := p.Project
 	if project == "" {
 		project = s.cfg.WorkspaceRoot
@@ -383,6 +387,125 @@ func validateIdentityField(name, value string) error {
 	}
 	if !identityFieldRe.MatchString(value) {
 		return fmt.Errorf("dispatch: invalid %s: must match ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ (leading char must be alphanumeric, max 128 chars)", name)
+	}
+	return nil
+}
+
+// broadScopeDirs is the set of well-known directories whose effective
+// dispatch scope (--add-dir + cwd, under --permission-mode
+// bypassPermissions) is materially equivalent to the filesystem root for
+// this threat model, even though none of them literally equals "/".
+//
+// Round-2 review R6: the original validateProjectPath rejected only the
+// literal filesystem-root string. "/Users" (macOS) or "/home" (Linux) is
+// not materially different: it covers every local user's files, which
+// commonly includes the operator's own home directory and, transitively,
+// SSH keys, cloud credentials, and every other project on the machine. A
+// caller who wanted "/" and got rejected simply passes "/Users" and obtains
+// the same effective scope. This list closes that concrete gap without
+// imposing a hard containment root, which would break the product's
+// explicit design (accepting an arbitrary project directory anywhere on
+// disk -- see refresh.go's .project-path indirection, which allows a
+// project's real location to be anywhere the operator chooses). A
+// project-roots ALLOWLIST (the alternative the review also offers) is
+// deliberately NOT adopted here: it is a per-deployment policy decision
+// (which roots an operator trusts) that this package has no basis to guess,
+// and getting it wrong would silently break dispatch to any project not
+// physically nested under one hardcoded tree.
+//
+// Platform note: this list is a superset across POSIX and Windows
+// spellings; entries irrelevant to the running OS simply never match a real
+// path and are harmless to include.
+var broadScopeDirs = map[string]bool{
+	"/":                    true,
+	"/Users":               true,
+	"/home":                true,
+	"/root":                true,
+	"/etc":                 true,
+	"/var":                 true,
+	"/usr":                 true,
+	"/bin":                 true,
+	"/sbin":                true,
+	"/opt":                 true,
+	"/tmp":                 true,
+	"/private":             true,
+	"/System":              true,
+	"/Library":             true,
+	"/Applications":        true,
+	"/mnt":                 true,
+	"/media":               true,
+	"/proc":                true,
+	"/sys":                 true,
+	"/dev":                 true,
+	"/Windows":             true,
+	"/Program Files":       true,
+	"/Program Files (x86)": true,
+	"/ProgramData":         true,
+	"/Users/Public":        true,
+}
+
+// validateProjectPath rejects a caller-supplied project path that would hand
+// the dispatched agent (--add-dir + cwd; claude.go:101, codex.go:54,
+// agy.go:29) scope over the entire filesystem, or a scope materially
+// equivalent to it (L8, security-review-2026-09-14.md; broadened per
+// round-2 review R6). It intentionally does NOT restrict project to some
+// fixed parent directory -- accepting an arbitrary project directory is the
+// whole point of this field (see broadScopeDirs's doc comment for why a
+// containment allowlist was considered and rejected).
+//
+// The path is resolved to an absolute, symlink-free form before the check:
+// round-2 review R6 also found a relative ".." project value was accepted
+// and resolved against the DAEMON's cwd (not the caller's), and that
+// filepath.EvalSymlinks defeats a project directory that is itself a
+// symlink to "/" or another broad-scope directory.
+//
+// Not flag-injectable (--add-dir is a required-value flag; see H1), so this
+// is purely a scope check, not an injection check.
+func validateProjectPath(project string) error {
+	if project == "" {
+		return nil // caller falls back to the server-configured WorkspaceRoot
+	}
+	clean := filepath.Clean(project)
+	if clean == string(filepath.Separator) || clean == "." {
+		return fmt.Errorf("dispatch: invalid project: must not be the filesystem root")
+	}
+	if vol := filepath.VolumeName(clean); vol != "" && clean == vol+string(filepath.Separator) {
+		return fmt.Errorf("dispatch: invalid project: must not be a filesystem drive root")
+	}
+
+	abs, err := filepath.Abs(clean)
+	if err != nil {
+		return fmt.Errorf("dispatch: invalid project: %w", err)
+	}
+	abs = filepath.Clean(abs)
+	// Check the unresolved absolute path against broadScopeDirs BEFORE
+	// resolving symlinks: several of these entries (/etc, /tmp, and on
+	// macOS /home) are themselves symlinks to OS-internal locations
+	// (/private/etc, /System/Volumes/Data/home, ...) that would not
+	// otherwise match the map. The caller-facing, semantically broad path
+	// is "/etc"; what it happens to resolve to on a given OS is an
+	// implementation detail the check must not depend on.
+	if broadScopeDirs[abs] {
+		return fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", abs)
+	}
+	// Resolve symlinks when possible and check again: this is the
+	// complementary case, a project directory that does NOT look broad by
+	// name but is itself a symlink to one (e.g. a symlink to "/"). A
+	// nonexistent path (a project that will be created, or simply a typo)
+	// is not itself a security problem here, so EvalSymlinks failing is
+	// not fatal -- the unresolved-path check above already ran.
+	resolved := abs
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		resolved = filepath.Clean(real)
+	}
+	if resolved == string(filepath.Separator) {
+		return fmt.Errorf("dispatch: invalid project: must not be the filesystem root")
+	}
+	if vol := filepath.VolumeName(resolved); vol != "" && resolved == vol+string(filepath.Separator) {
+		return fmt.Errorf("dispatch: invalid project: must not be a filesystem drive root")
+	}
+	if broadScopeDirs[resolved] {
+		return fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", resolved)
 	}
 	return nil
 }
