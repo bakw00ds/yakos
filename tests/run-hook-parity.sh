@@ -342,7 +342,8 @@ parity_check() {
     # is a no-op ("no file, no file") for every hook other than
     # mailbox-mirror, so it's safe to run unconditionally for every case.
     if [ "$divergence" = "-" ]; then
-        local bash_msgs="$(dirname -- "$bash_log_dir")/messages.ndjson"
+        local bash_msgs
+        bash_msgs="$(dirname -- "$bash_log_dir")/messages.ndjson"
         local go_msgs="$tmp2/work/current/messages.ndjson"
         local bash_msgs_has=0 go_msgs_has=0
         [ -f "$bash_msgs" ] && bash_msgs_has=1
