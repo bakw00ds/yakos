@@ -33,9 +33,11 @@
 // an advisory reminding the operator to run `yakos refresh --project <path>`
 // which handles hook installation idempotently.
 //
-// --with-gate and --multi-dev are accepted as no-ops with advisory messages;
-// those features depend on bash utilities (sha256, git hooks, /var/lib/yakos)
-// beyond the Phase 1 Go scope.
+// --with-gate and --multi-dev are accepted, still write the base project
+// scaffold above, but return a non-nil error (not a silent no-op): those
+// features depend on bash utilities (sha256, git hooks, /var/lib/yakos)
+// beyond the Phase 1 Go scope, and the caller must not be told the flag's
+// own work succeeded when it didn't run.
 package initialize
 
 import (
@@ -398,10 +400,14 @@ func Run(cfg Config) (*Result, error) {
 		_, _ = fmt.Fprintf(cfg.Writer, "\nTo start a session:\n  yakos start %s\n", cfg.Name)
 	}
 
-	// --multi-dev's coord provisioning is not ported to Go (Phase 1 scope);
-	// the base project above is real, useful work and stays written, but
-	// the command must not exit 0 as if multi-dev coordination was set up
-	// — that would be a silent no-op for the flag the caller asked for.
+	// --with-gate's pre-push gate installation and --multi-dev's coord
+	// provisioning are not ported to Go (Phase 1 scope); the base project
+	// above is real, useful work and stays written, but the command must
+	// not exit 0 as if the requested flag's work was done — that would be
+	// a silent no-op for the flag the caller asked for.
+	if cfg.WithGate {
+		return res, fmt.Errorf("init: --with-gate: not ported: use YAKOS_IMPL=bash yakos init --with-gate %s --project %s", cfg.Name, projAbs)
+	}
 	if cfg.MultiDev {
 		return res, fmt.Errorf("init: --multi-dev: not ported: use YAKOS_IMPL=bash yakos init --multi-dev %s --project %s", cfg.Name, projAbs)
 	}
