@@ -201,11 +201,19 @@ var entries = []Entry{
 	{
 		Name:       "task-complete-dispatch",
 		FailClosed: false,
-		New:        func(cfg Config) Hook { return taskcompletedispatch.New(cfg.WorkCurrentDir) },
+		// GoReady stays false: would_run resolves to an absolute
+		// $HOOK_DIR-relative path on the bash side (lib/hooks/lib/
+		// hook-input.sh-adjacent HOOK_DIR resolution), which this package
+		// cannot reproduce without a framework-root resolver plumbed in
+		// from cmd/yakos/cmd_hook.go (outside this package's ownership) —
+		// see tests/run-hook-parity.sh's task-complete-dispatch divergence
+		// (log-schema, would_run field only) and the S-6 A-2a report.
+		New: func(cfg Config) Hook { return taskcompletedispatch.New(cfg.WorkCurrentDir) },
 	},
 	{
 		Name:       "task-dependency-gate",
 		FailClosed: false,
+		GoReady:    true,
 		New:        func(cfg Config) Hook { return taskdependencygate.New(cfg.WorkCurrentDir) },
 	},
 	{
