@@ -66,6 +66,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -76,6 +77,13 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrDispatchUnavailable is returned by realDispatch/realJudge when
+// dispatch.sh cannot be located or invoked at all (as opposed to being
+// invoked successfully and exiting non-zero, which is a normal outcome
+// per the dispatch contract). Callers use errors.Is to distinguish a
+// broken harness from a legitimately failing eval case.
+var ErrDispatchUnavailable = errors.New("model-routing: dispatch.sh unavailable")
 
 // ---- public types -----------------------------------------------------------
 
@@ -767,10 +775,22 @@ func locateEvalDir(agentFile string) (string, error) {
 // ---- real dispatch shim -----------------------------------------------------
 
 // realDispatch invokes dispatch.sh via shell (production path only).
+//
+// dispatch.sh lives at <yakosRoot>/cli/lib/dispatch.sh — the same
+// lib-root-plus-"cli/lib" resolution used by sibling callers such as
+// internal/start/start.go (agents-compose.sh) and internal/team/archive.go
+// (archive.sh). yakosRoot itself is expected to already be resolved via
+// resolveLibRoot (see cmd/yakos/main.go), so "lib/agents" and "cli/lib"
+// both hang directly off it.
 func realDispatch(yakosRoot, agentID, task, tier, runID, project string) (DispatchResult, error) {
-	yakosLib := filepath.Join(yakosRoot, "lib")
+	yakosLib := filepath.Join(yakosRoot, "cli", "lib")
+	dispatchSh := filepath.Join(yakosLib, "dispatch.sh")
+	if _, statErr := os.Stat(dispatchSh); statErr != nil {
+		return DispatchResult{}, fmt.Errorf("%w: %s: %v", ErrDispatchUnavailable, dispatchSh, statErr)
+	}
+
 	args := []string{
-		filepath.Join(yakosLib, "dispatch.sh"),
+		dispatchSh,
 		agentID, task,
 		"--model", tier,
 		"--eval-run-id", runID,
@@ -786,7 +806,7 @@ func realDispatch(yakosRoot, agentID, task, tier, runID, project string) (Dispat
 	)
 	var outBuf bytes.Buffer
 	cmd.Stdout = &outBuf
-	_ = cmd.Run() // non-zero exit is OK per dispatch contract
+	_ = cmd.Run() // dispatch.sh's own non-zero exit is OK per dispatch contract
 
 	// We do not parse the dispatch-log here (keeping the scope small).
 	return DispatchResult{
@@ -794,11 +814,17 @@ func realDispatch(yakosRoot, agentID, task, tier, runID, project string) (Dispat
 	}, nil
 }
 
-// realJudge invokes dispatch.sh for the judge agent.
+// realJudge invokes dispatch.sh for the judge agent. See realDispatch for
+// the path-resolution rationale.
 func realJudge(yakosRoot, judgeID, inputJSON, project string) (JudgeResult, error) {
-	yakosLib := filepath.Join(yakosRoot, "lib")
+	yakosLib := filepath.Join(yakosRoot, "cli", "lib")
+	dispatchSh := filepath.Join(yakosLib, "dispatch.sh")
+	if _, statErr := os.Stat(dispatchSh); statErr != nil {
+		return JudgeResult{}, fmt.Errorf("%w: %s: %v", ErrDispatchUnavailable, dispatchSh, statErr)
+	}
+
 	args := []string{
-		filepath.Join(yakosLib, "dispatch.sh"),
+		dispatchSh,
 		judgeID, inputJSON,
 	}
 	if project != "" {
@@ -970,6 +996,12 @@ outerLoop:
 			// Dispatch subject.
 			dr, err := dispatchFn(cfg.AgentID, ec.Task, tier, runID, cfg.Project)
 			if err != nil {
+				if errors.Is(err, ErrDispatchUnavailable) {
+					// The harness itself is broken (dispatch.sh missing or
+					// unreachable) — abort loudly instead of silently
+					// scoring every remaining case as a failure.
+					return Result{}, fmt.Errorf("model-routing eval: %w", err)
+				}
 				// Non-fatal: treat as failed case.
 				dr = DispatchResult{}
 			}
@@ -988,6 +1020,9 @@ outerLoop:
 			// Dispatch judge.
 			jr, err := judgeFn(judge, judgeInput, cfg.Project)
 			if err != nil {
+				if errors.Is(err, ErrDispatchUnavailable) {
+					return Result{}, fmt.Errorf("model-routing eval: %w", err)
+				}
 				jr = JudgeResult{}
 			}
 

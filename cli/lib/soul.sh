@@ -171,14 +171,20 @@ cmd_pending() {
 }
 
 cmd_approve() {
+    # Operator gate for rule:retrospective-discipline — this must fail
+    # loudly (non-zero exit + stderr) rather than silently no-op, so a
+    # caller can't mistake "not implemented" for "approved". Mirrors
+    # internal/soul.runApprove's errNotImplemented on the Go side.
     ct_log "soul approve: not yet implemented (M1 ships read/edit/history; approve/reject deferred to when librarian is dispatched)"
     ct_log "      proposed-edit format: see librarian agent + framework-internal-plan.md §3.4"
-    exit 0
+    exit 1
 }
 
 cmd_reject() {
+    # See cmd_approve above — same fail-loud contract, mirrors
+    # internal/soul.runReject.
     ct_log "soul reject: not yet implemented (same status as 'soul approve' above)"
-    exit 0
+    exit 1
 }
 
 case "${1:-help}" in

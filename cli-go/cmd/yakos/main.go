@@ -103,7 +103,7 @@ var portedCommands = []portedCommand{
 	{Name: "dispatch", Since: "0.43.0", Desc: "Dispatch a task to a specialist agent", Notes: "full feature parity with cli/lib/dispatch.sh; PRs #15/#31/#32/#34/#39/#40 invariants"},
 	{Name: "team", Since: "0.44.0", Desc: "Create, list, or archive agent teams", Notes: "full feature parity with cli/lib/team.sh; archive step now native Go (rank 10)"},
 	{Name: "archive", Since: "0.45.0", Desc: "Archive a completed work session", Notes: "full feature parity with cli/lib/archive.sh; worktree cleanup deferred (manual, v0.1)"},
-	{Name: "init", Since: "0.46.0", Desc: "Bootstrap a new yakOS-wired project", Notes: "full feature parity with cli/lib/init.sh; hook copy advisory printed (bash refresh handles hooks); --with-gate/--multi-dev advisory only in Phase 1"},
+	{Name: "init", Since: "0.46.0", Desc: "Bootstrap a new yakOS-wired project", Notes: "full feature parity with cli/lib/init.sh; hook copy advisory printed (bash refresh handles hooks); --with-gate/--multi-dev not ported in Phase 1 (base project still written, but the command exits non-zero for either flag)"},
 	{Name: "install", Since: "0.47.0", Desc: "Install yakOS framework files into a project", Notes: "full feature parity with cli/lib/install.sh; --force/--dry-run supported; per-file symlinks into ~/.claude/{agents,skills,rules,playbooks}; launcher symlink at ~/.local/bin/yakos; settings.json env merge"},
 	{Name: "uninstall", Since: "0.48.0", Desc: "Remove yakOS symlinks and launcher", Notes: "full feature parity with cli/lib/uninstall.sh; removes YakOS-owned symlinks + launcher + pointer; --restore-settings/--root/--dry-run; partial-uninstall log+continue"},
 	{Name: "start", Since: "0.49.0", Desc: "Start a yakOS session (preflight + exec runtime)", Notes: "full feature parity with cli/lib/start.sh; preflight banner + audit-log; exec deferred to runtime CLI; --dry-run/--print-agents/--safe/--allow-root/passthrough flags supported"},
@@ -2344,10 +2344,12 @@ Does NOT auto-launch claude in v0.1.
 // named "initialize" to avoid the reserved word collision (package init is
 // special in Go).
 //
-// Bash flags --with-gate and --multi-dev are accepted for CLI parity but
-// print advisory messages in the Go port; the underlying operations
-// (git hook installation, /var/lib/yakos coord provisioning) delegate to
-// bash in Phase 1.
+// Bash flags --with-gate and --multi-dev are accepted for CLI parity; the
+// underlying operations (git hook installation, /var/lib/yakos coord
+// provisioning) delegate to bash in Phase 1 and are not performed here.
+// initialize.Run still writes the base project scaffold but returns a
+// non-nil error for either flag, so this exits non-zero rather than
+// silently succeeding as if the flag's work had been done.
 func runInit(args []string) {
 	name := ""
 	project := ""

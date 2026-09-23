@@ -974,7 +974,30 @@ func TestIsBinaryInstallLauncher_SameInode(t *testing.T) {
 	}
 
 	// Create a hardlink in a temp dir that points to the same inode.
-	dir := t.TempDir()
+	//
+	// Managed manually (not via t.TempDir()) because on Windows, removing a
+	// hardlink that shares data with the CURRENTLY EXECUTING test binary's
+	// image fails with "Access is denied" for as long as the process is
+	// running: this is an OS-level image-in-use lock applying to every
+	// hardlink pointing at that file data, not just the original path, and
+	// it isn't caused by (or fixable by closing) any handle held here.
+	// t.TempDir()'s automatic cleanup treats that removal failure as a test
+	// failure (observed on windows-latest CI: "TempDir RemoveAll cleanup:
+	// unlinkat ...yakos-hardlink: Access is denied", with the assertion
+	// below never actually failing). Best-effort removal here just logs
+	// the failure instead: the leftover hardlink is harmless temp-dir
+	// litter reclaimed by the OS once this process exits, not a resource
+	// leak, so the test still exercises the real assertion on every
+	// platform instead of skipping outright on Windows.
+	dir, err := os.MkdirTemp("", "yakos-samefile-test-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() {
+		if rmErr := os.RemoveAll(dir); rmErr != nil {
+			t.Logf("cleanup: could not remove %s (expected on Windows while this test binary is still executing): %v", dir, rmErr)
+		}
+	})
 	hardlink := filepath.Join(dir, "yakos-hardlink")
 	if err := os.Link(resolved, hardlink); err != nil {
 		// Hardlinks across filesystems are not always supported; skip gracefully.

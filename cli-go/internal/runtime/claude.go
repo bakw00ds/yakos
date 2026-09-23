@@ -12,13 +12,17 @@ import (
 	"github.com/bakw00ds/yakos/internal/cost"
 )
 
-// maxToolInputBytes is the hard cap on accumulated tool_use Input (the JSON
-// args assembled from input_json_delta fragments).  Symmetric with the
-// maxToolOutputBytes ceiling enforced by emitToolChunk in the dispatch layer.
-// Defined here so the parser can enforce it without importing dispatch.
-// Value must equal dispatch.maxToolOutputBytes (16 KiB); kept in sync by the
-// cross-package test TestToolInputCap_MatchesOutputCap in stream_tool_test.go.
-const maxToolInputBytes = 16 * 1024
+// MaxToolInputBytes is the hard cap on accumulated tool_use Input (the JSON
+// args assembled from input_json_delta fragments). Symmetric with the
+// truncation ceiling enforced by emitToolChunk in the dispatch layer.
+// Defined here (exported) so the parser can enforce it without importing
+// dispatch, and so dispatch.maxToolOutputBytes can be defined directly in
+// terms of this constant instead of duplicating the literal — a hostile
+// stream must not be able to route oversized input through one side and
+// bypass the other because the two ceilings silently drifted apart. See
+// dispatch/stream.go's maxToolOutputBytes and the cross-package test
+// TestToolInputCap_MatchesOutputCap in dispatch/stream_tool_test.go.
+const MaxToolInputBytes = 16 * 1024
 
 // maxToolUseBlocks is the maximum number of concurrent in-progress tool_use
 // content blocks tracked per dispatch.  Beyond this cap, new tool_use blocks
@@ -378,9 +382,9 @@ func parseStreamLineWithThinking(
 //   - ToolID is the opaque tool-use id (e.g. "toolu_01…")
 //   - ToolName is the human-readable name (e.g. "Bash", "Read")
 //   - Input is the accumulated JSON-encoded argument (e.g. the bash command string),
-//     capped at maxToolInputBytes; if the stream sent more bytes, InputTruncated is
+//     capped at MaxToolInputBytes; if the stream sent more bytes, InputTruncated is
 //     set and emitToolChunk appends the truncation marker at emit time.
-//   - InputTruncated is true when accumulated input exceeded maxToolInputBytes.
+//   - InputTruncated is true when accumulated input exceeded MaxToolInputBytes.
 //
 // For tool_result events:
 //   - Kind is "tool_result"
@@ -393,7 +397,7 @@ type ToolEvent struct {
 	ToolID         string
 	ToolName       string
 	Input          string // tool_use: accumulated JSON args; tool_result: ""
-	InputTruncated bool   // tool_use: true when Input was cut at maxToolInputBytes
+	InputTruncated bool   // tool_use: true when Input was cut at MaxToolInputBytes
 	Output         string // tool_result: content; tool_use: ""
 	IsError        bool   // tool_result only
 }
@@ -522,12 +526,12 @@ func parseStreamEventWithThinking(
 		case "input_json_delta":
 			if toolUseBlocks != nil {
 				if te, ok := toolUseBlocks[ev.Index]; ok {
-					// Cap accumulated Input at maxToolInputBytes.
+					// Cap accumulated Input at MaxToolInputBytes.
 					// Once the cap is reached, stop appending (the InputTruncated flag
 					// is set once; the marker will be appended at emit time by
 					// emitToolChunk so the SSE frame stays bounded).
 					if !te.InputTruncated {
-						remaining := maxToolInputBytes - len(te.Input)
+						remaining := MaxToolInputBytes - len(te.Input)
 						if remaining <= 0 {
 							te.InputTruncated = true
 						} else if len(ev.Delta.PartialJSON) > remaining {

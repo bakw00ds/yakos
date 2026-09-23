@@ -47,9 +47,8 @@ func buildSessionLookupFn(authStore *authsession.Store, userStore *userstore.Sto
 	return func(r *http.Request) (operatorID string, role netid.Role, ok bool) {
 		// Step 1: read the session cookie.
 		// sessionCookieName is the package-level constant defined in authhandler.go
-		// (same package).  A cross-package test asserts that this constant matches
-		// authsession.CookieNameSession (the authoritative value in the authsession
-		// package, exported for tests only via authsession/export_test.go).
+		// (same package), itself defined directly as authsession.CookieNameSession
+		// so the two packages cannot drift apart.
 		cookie, err := r.Cookie(sessionCookieName)
 		if err != nil {
 			// http.ErrNoCookie or any parse error — not authenticated.

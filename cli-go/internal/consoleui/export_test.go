@@ -259,8 +259,10 @@ func SetChatHandlersAgentValidation(srv *Server, yakosRoot, workspaceRoot string
 const LoginRateLimitRequests = loginRateLimitRequests
 
 // SessionCookieName is the session cookie name constant, exported for tests
-// so the cross-package invariant test can compare it to
-// authsession.CookieNameSession without reaching into the unexported symbol.
+// that live outside this package (consoleui_test) and need it — e.g. the
+// login-flow assertions in auth_3b_test.go. sessionCookieName is itself
+// defined directly as authsession.CookieNameSession, so this is a plain
+// re-export, not an independent literal.
 const SessionCookieName = sessionCookieName
 
 // RequireCSRFForSessionForTest exposes requireCSRFForSession for direct

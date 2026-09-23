@@ -368,15 +368,24 @@ func runPending(cfg Config, home string) (*Result, error) {
 	return res, nil
 }
 
+// errNotImplemented is returned by runApprove/runReject. Both are operator
+// gates the retrospective-discipline workflow depends on (rule:
+// retrospective-discipline — "Do NOT approve soul edits yourself... only the
+// operator approves via `yakos soul approve <slug>`"). Until the real
+// approve/reject logic ships, the command must fail loudly rather than
+// print an advisory and exit 0, which would let a caller believe the
+// approval happened when nothing was applied.
+var errNotImplemented = fmt.Errorf("soul: not yet implemented (M1 ships read/edit/history; approve/reject deferred to when librarian is dispatched; proposed-edit format: see librarian agent + framework-internal-plan.md §3.4)")
+
 func runApprove(cfg Config) (*Result, error) {
-	_, _ = fmt.Fprintln(cfg.Writer, "soul approve: not yet implemented (M1 ships read/edit/history; approve/reject deferred to when librarian is dispatched)")
-	_, _ = fmt.Fprintln(cfg.Writer, "      proposed-edit format: see librarian agent + framework-internal-plan.md §3.4")
-	return &Result{Subcommand: "approve"}, nil
+	_, _ = fmt.Fprintln(cfg.ErrWriter, "soul approve: not yet implemented (M1 ships read/edit/history; approve/reject deferred to when librarian is dispatched)")
+	_, _ = fmt.Fprintln(cfg.ErrWriter, "      proposed-edit format: see librarian agent + framework-internal-plan.md §3.4")
+	return nil, errNotImplemented
 }
 
 func runReject(cfg Config) (*Result, error) {
-	_, _ = fmt.Fprintln(cfg.Writer, "soul reject: not yet implemented (same status as 'soul approve' above)")
-	return &Result{Subcommand: "reject"}, nil
+	_, _ = fmt.Fprintln(cfg.ErrWriter, "soul reject: not yet implemented (same status as 'soul approve' above)")
+	return nil, errNotImplemented
 }
 
 // ---- helpers ----------------------------------------------------------------

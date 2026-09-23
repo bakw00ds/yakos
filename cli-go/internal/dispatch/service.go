@@ -485,7 +485,7 @@ func validateProjectPath(project string) error {
 	// otherwise match the map. The caller-facing, semantically broad path
 	// is "/etc"; what it happens to resolve to on a given OS is an
 	// implementation detail the check must not depend on.
-	if broadScopeDirs[abs] {
+	if broadScopeDirs[broadScopeKey(abs)] {
 		return fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", abs)
 	}
 	// Resolve symlinks when possible and check again: this is the
@@ -504,10 +504,33 @@ func validateProjectPath(project string) error {
 	if vol := filepath.VolumeName(resolved); vol != "" && resolved == vol+string(filepath.Separator) {
 		return fmt.Errorf("dispatch: invalid project: must not be a filesystem drive root")
 	}
-	if broadScopeDirs[resolved] {
+	if broadScopeDirs[broadScopeKey(resolved)] {
 		return fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", resolved)
 	}
 	return nil
+}
+
+// broadScopeKey normalizes an absolute, cleaned path for comparison against
+// broadScopeDirs's POSIX-spelled keys (e.g. "/Users", "/Windows",
+// "/Program Files").
+//
+// Without this, the check is a silent no-op on Windows: filepath.Abs/Clean
+// produce a drive-qualified, backslash-separated path (e.g. "/Users" ->
+// "C:\Users"), which never equals the forward-slash map literal "/Users" by
+// plain map lookup -- every broadScopeDirs entry would fail to match on
+// Windows, defeating the L8/R6 guard exactly on the platform this list's
+// Windows-specific entries (/Windows, /Program Files, ...) were added for.
+// Stripping the volume/drive prefix and converting to forward slashes
+// recovers the same "/Users"-shaped key the map expects on every OS.
+func broadScopeKey(p string) string {
+	if vol := filepath.VolumeName(p); vol != "" {
+		p = p[len(vol):]
+	}
+	p = filepath.ToSlash(p)
+	if p == "" {
+		p = "/"
+	}
+	return p
 }
 
 // mintOperatorID returns a best-effort operator identifier derived from the

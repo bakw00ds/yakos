@@ -11,6 +11,7 @@ package routing
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -626,6 +627,112 @@ func TestEval_NoEvalDir(t *testing.T) {
 	_, err := Run(cfg)
 	if err == nil || !strings.Contains(err.Error(), "eval/") {
 		t.Errorf("expected eval/ dir error; got %v", err)
+	}
+}
+
+// ---- realDispatch/realJudge path resolution ---------------------------------
+//
+// Regression coverage for the bug where realDispatch/realJudge shelled to
+// "<yakosRoot>/lib/dispatch.sh", which never exists (the script lives at
+// "<yakosRoot>/cli/lib/dispatch.sh", same as sibling callers such as
+// internal/start/start.go and internal/team/archive.go). The old code
+// discarded exec errors (`_ = cmd.Run()`), so a wrong path silently produced
+// an empty-but-"successful" dispatch instead of a visible failure.
+
+// writeFakeDispatchSh writes an executable stub at
+// <root>/cli/lib/dispatch.sh that echoes a fixed line to stdout, mimicking
+// dispatch.sh's success path closely enough to exercise path resolution.
+func writeFakeDispatchSh(t *testing.T, root, echoLine string) {
+	t.Helper()
+	dir := filepath.Join(root, "cli", "lib")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir cli/lib: %v", err)
+	}
+	script := "#!/usr/bin/env bash\necho " + echoLine + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "dispatch.sh"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write dispatch.sh: %v", err)
+	}
+}
+
+func TestRealDispatch_ResolvesScriptUnderCliLib(t *testing.T) {
+	root := t.TempDir()
+	writeFakeDispatchSh(t, root, "hello-from-dispatch")
+
+	dr, err := realDispatch(root, "backend", "do the thing", "sonnet", "run-1", "")
+	if err != nil {
+		t.Fatalf("realDispatch: unexpected error: %v", err)
+	}
+	if !strings.Contains(dr.Stdout, "hello-from-dispatch") {
+		t.Errorf("expected stdout from cli/lib/dispatch.sh stub; got %q", dr.Stdout)
+	}
+}
+
+func TestRealDispatch_MissingScript_ReturnsError(t *testing.T) {
+	root := t.TempDir() // no cli/lib/dispatch.sh at all
+	_, err := realDispatch(root, "backend", "task", "sonnet", "run-1", "")
+	if err == nil {
+		t.Fatal("expected error when dispatch.sh is missing; got nil")
+	}
+	if !errors.Is(err, ErrDispatchUnavailable) {
+		t.Errorf("expected ErrDispatchUnavailable; got %v", err)
+	}
+}
+
+func TestRealJudge_ResolvesScriptUnderCliLib(t *testing.T) {
+	root := t.TempDir()
+	// The judge stub must emit valid JSON for parseJudgeOutput.
+	dir := filepath.Join(root, "cli", "lib")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir cli/lib: %v", err)
+	}
+	script := `#!/usr/bin/env bash
+echo '{"pass":true,"notes":"stub"}'
+`
+	if err := os.WriteFile(filepath.Join(dir, "dispatch.sh"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write dispatch.sh: %v", err)
+	}
+
+	jr, err := realJudge(root, "code-reviewer", "{}", "")
+	if err != nil {
+		t.Fatalf("realJudge: unexpected error: %v", err)
+	}
+	if !jr.Pass {
+		t.Errorf("expected Pass=true from stub judge output; got %+v", jr)
+	}
+}
+
+func TestRealJudge_MissingScript_ReturnsError(t *testing.T) {
+	root := t.TempDir()
+	_, err := realJudge(root, "code-reviewer", "{}", "")
+	if err == nil {
+		t.Fatal("expected error when dispatch.sh is missing; got nil")
+	}
+	if !errors.Is(err, ErrDispatchUnavailable) {
+		t.Errorf("expected ErrDispatchUnavailable; got %v", err)
+	}
+}
+
+// TestEval_RealDispatchPath_BrokenHarnessFailsLoudly exercises the eval path
+// end-to-end with DispatchFn/JudgeFn left nil, so Run falls through to the
+// real dispatch.sh shim. cfg.YakosRoot has lib/agents (via setupEvalAgent)
+// but no cli/lib/dispatch.sh, reproducing the exact broken-harness scenario:
+// before the fix this returned (Result{}, nil) — a silent "pass" with no
+// agent ever dispatched. It must now return a non-nil error.
+func TestEval_RealDispatchPath_BrokenHarnessFailsLoudly(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	setupEvalAgent(t, cfg, "backend", "sonnet", "backend", 5)
+	// Deliberately leave cfg.DispatchFn / cfg.JudgeFn nil and do NOT create
+	// cfg.YakosRoot/cli/lib/dispatch.sh.
+
+	_, err := Run(cfg)
+	if err == nil {
+		t.Fatal("expected non-nil error when dispatch.sh cannot be found; got nil (silent no-op)")
+	}
+	if !errors.Is(err, ErrDispatchUnavailable) {
+		t.Errorf("expected error to wrap ErrDispatchUnavailable; got %v", err)
 	}
 }
 
