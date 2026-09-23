@@ -386,8 +386,19 @@ func TestMethod_RefreshRun_DryRunReturnsOutput(t *testing.T) {
 // output — refresh.Run's own [DRY RUN] / "(dry-run: no files written)"
 // markers (see internal/refresh/refresh.go) are the observable signal.
 func TestMethod_RefreshRun_OmittedApplyDoesNotWrite(t *testing.T) {
-	root := repoRoot(t)
-	cfg := serve.Config{WorkspaceRoot: root, YakosRoot: root}
+	// WorkspaceRoot is the refresh WRITE target (yakos.refresh.run scopes to
+	// it — see methods.go's refreshRunParams doc comment / R19). Using
+	// repoRoot(t) here would point that write target at the actual checked-
+	// out repo: harmless as long as this test's own assertion holds, but a
+	// live footgun for anyone who breaks the dry-run default while editing
+	// this code, since the "apply" path would then rewrite hook scripts and
+	// settings.json in the real working tree instead of failing a test.
+	// t.TempDir() is never a write target other tests need to protect.
+	// YakosRoot stays repoRoot(t): it is read-only (the template source for
+	// the dry-run report to compare against; see refresh.Config's doc
+	// comment) and other tests in this file use the identical split (e.g.
+	// TestMethod_CostAggregate_EmptyLog).
+	cfg := serve.Config{WorkspaceRoot: t.TempDir(), YakosRoot: repoRoot(t)}
 	client, _ := newTestDaemon(t, cfg)
 
 	raw, err := client.Call(context.Background(), "yakos.refresh.run", nil)

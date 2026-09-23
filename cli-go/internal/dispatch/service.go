@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/user"
 	"path/filepath"
 	"regexp"
@@ -444,6 +445,59 @@ var broadScopeDirs = map[string]bool{
 	"/Users/Public":        true,
 }
 
+// broadScopeDirsResolved is broadScopeDirs's key set closed under
+// EvalSymlinks, plus a few operator-specific/mount-point paths that no
+// amount of symlink-closure would ever add (round-2 review N1).
+//
+// N1: validateProjectPath already resolves the CALLER's path through
+// EvalSymlinks and re-checks it against broadScopeDirs (see below), which
+// closes the direction "caller supplies the alias, e.g. /etc, which
+// resolves to the real path". It did not close the opposite direction:
+// broadScopeDirs itself held only the alias spellings ("/etc", "/tmp",
+// "/home", ...), so a caller who supplied the ALREADY-RESOLVED spelling
+// directly (e.g. "/private/etc" on macOS, proven via os.SameFile to be the
+// same directory as "/etc") matched neither the literal map nor its own
+// symlink resolution (EvalSymlinks on an already-resolved path is a
+// no-op), and sailed through. Demonstrated bypasses: "/private/etc",
+// "/private/var", "/private/tmp", "/System/Volumes/Data/home".
+//
+// Separately, N1 also found $HOME itself accepted outright: broadScopeDirs
+// bans "/Users" and "/home" (the PARENT directories) with a stated
+// rationale — SSH keys, cloud credentials, every other project on the
+// machine — that applies at least as strongly to $HOME directly, and $HOME
+// is not a name-based alias of any existing entry, so it needs its own
+// slot.
+//
+// Computed once at package init: EvalSymlinks/os.UserHomeDir do filesystem
+// I/O, and this is a small, fixed set of well-known paths, not a per-call
+// cost.
+var broadScopeDirsResolved = computeBroadScopeDirsResolved()
+
+func computeBroadScopeDirsResolved() map[string]bool {
+	out := make(map[string]bool, len(broadScopeDirs)*2+8)
+	addResolved := func(p string) {
+		out[broadScopeKey(filepath.Clean(p))] = true
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			out[broadScopeKey(filepath.Clean(real))] = true
+		}
+	}
+	for k := range broadScopeDirs {
+		addResolved(k)
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		addResolved(home)
+	}
+	// Round-2 review N1's repro also named these: /Volumes and /Network
+	// (/net on some BSD-derived systems) are root-level mount points for
+	// every external/network filesystem: a scope grant there is not
+	// meaningfully narrower than the filesystem root. /Users/Shared is
+	// multi-user-readable by design.
+	for _, extra := range []string{"/Volumes", "/Network", "/net", "/Users/Shared"} {
+		addResolved(extra)
+	}
+	return out
+}
+
 // validateProjectPath rejects a caller-supplied project path that would hand
 // the dispatched agent (--add-dir + cwd; claude.go:101, codex.go:54,
 // agy.go:29) scope over the entire filesystem, or a scope materially
@@ -459,8 +513,16 @@ var broadScopeDirs = map[string]bool{
 // filepath.EvalSymlinks defeats a project directory that is itself a
 // symlink to "/" or another broad-scope directory.
 //
-// Not flag-injectable (--add-dir is a required-value flag; see H1), so this
-// is purely a scope check, not an injection check.
+// This is purely a scope check, not a flag-injection check: it does not
+// itself defend against a Project value that starts with '-' being
+// misparsed as a flag by the target CLI. (Round-2 security review R26: an
+// earlier version of this comment claimed that was unnecessary because
+// "--add-dir is a required-value flag" — false; `claude --help` documents
+// --add-dir as variadic, `<directories...>`. The round-2 review verified
+// empirically that a leading-dash Project is not currently exploitable
+// this way, but not for that reason, and did not pin down the actual
+// mechanism — treat this as unverified rather than repeat a specific but
+// incorrect justification.)
 func validateProjectPath(project string) error {
 	if project == "" {
 		return nil // caller falls back to the server-configured WorkspaceRoot
@@ -478,14 +540,18 @@ func validateProjectPath(project string) error {
 		return fmt.Errorf("dispatch: invalid project: %w", err)
 	}
 	abs = filepath.Clean(abs)
-	// Check the unresolved absolute path against broadScopeDirs BEFORE
-	// resolving symlinks: several of these entries (/etc, /tmp, and on
-	// macOS /home) are themselves symlinks to OS-internal locations
+	// Check the unresolved absolute path against broadScopeDirsResolved
+	// BEFORE resolving symlinks: several of these entries (/etc, /tmp, and
+	// on macOS /home) are themselves symlinks to OS-internal locations
 	// (/private/etc, /System/Volumes/Data/home, ...) that would not
 	// otherwise match the map. The caller-facing, semantically broad path
 	// is "/etc"; what it happens to resolve to on a given OS is an
 	// implementation detail the check must not depend on.
-	if broadScopeDirs[broadScopeKey(abs)] {
+	//
+	// broadScopeDirsResolved (not broadScopeDirs) so this also catches the
+	// caller supplying the ALREADY-RESOLVED spelling directly, e.g.
+	// "/private/etc" (round-2 review N1) — see that map's doc comment.
+	if broadScopeDirsResolved[broadScopeKey(abs)] {
 		return fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", abs)
 	}
 	// Resolve symlinks when possible and check again: this is the
@@ -504,7 +570,7 @@ func validateProjectPath(project string) error {
 	if vol := filepath.VolumeName(resolved); vol != "" && resolved == vol+string(filepath.Separator) {
 		return fmt.Errorf("dispatch: invalid project: must not be a filesystem drive root")
 	}
-	if broadScopeDirs[broadScopeKey(resolved)] {
+	if broadScopeDirsResolved[broadScopeKey(resolved)] {
 		return fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", resolved)
 	}
 	return nil

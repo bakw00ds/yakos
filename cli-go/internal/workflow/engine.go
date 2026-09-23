@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,16 @@ import (
 	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
+
+// ErrRunIDExists is returned by Run/Resume when runID's directory already
+// exists on disk — i.e. a caller (or a defense-in-depth double-check) is
+// trying to write a new or resumed run into a run ID that is already in
+// use. See run()'s exclusive-create comment (K1,
+// k82-security-review-2026-09-23.md): the run directory is the write
+// target that must never be silently reused, because reuse lets a second
+// caller overwrite another run's run.json (including its owner) and read
+// whatever node-output files survive underneath it.
+var ErrRunIDExists = errors.New("workflow: run id already exists")
 
 // defaultMaxParallel is the default per-run concurrency limit.
 // This cap is applied INSIDE the global dispatch.Service governor, so the
@@ -101,6 +112,33 @@ func NewEngine(cfg EngineConfig) *Engine {
 		WorkDir:      cfg.WorkDir,
 		OutputScanFn: NewOutputInjectionScanFunc(cfg.YakosRoot, cfg.Project),
 	}
+}
+
+// NewEngineForTest constructs an Engine exactly like NewEngine, except the
+// per-node dispatch is the caller-supplied runFn instead of the governed
+// dispatch.Service — so tests can drive a REAL Engine.Run/Engine.Resume
+// (run-directory creation, run.json persistence, event publication, owner
+// attribution) without live LLM calls.
+//
+// This exists specifically for packages other than workflow itself (e.g.
+// consoleui's flows_handler_test.go) that need this seam: Engine.runFn is
+// unexported, and Go's _test.go-only files (this package's own
+// export_test.go, which already offers SetEngineRunFn) are never visible
+// outside the package they belong to, even to another package's own tests.
+// A regular, non-test-gated function is the only way to bridge that
+// boundary — first needed for K1's regression test
+// (k82-security-review-2026-09-23.md), which has to drive the real
+// Engine.Resume to reproduce the review's exact cross-operator takeover
+// scenario, and reused by K2's production-attribution tests for the same
+// reason (see flows_handler_test.go's newProductionEngineTestServer).
+//
+// No production code calls this — NewEngine is the only production
+// constructor (see its doc comment above). Grep internal/ and cmd/ to
+// confirm before changing that invariant.
+func NewEngineForTest(cfg EngineConfig, runFn EngineRunFn) *Engine {
+	e := NewEngine(cfg)
+	e.runFn = runFn
+	return e
 }
 
 // dispatchNode calls either the injected runFn (tests) or Svc.Run (production).
@@ -235,8 +273,24 @@ func (e *Engine) run(
 	}
 
 	// Set up the run directory.
+	//
+	// K1 (k82-security-review-2026-09-23.md): this is an exclusive create,
+	// not the MkdirAll-on-an-existing-dir this used to be. A run's
+	// directory is a write target — a second caller landing here with a
+	// runID that already has a run.json would silently overwrite that
+	// run's owner and leave its old node-output files readable under the
+	// new owner. Ensure the runs ROOT exists (idempotent, shared across all
+	// runs), then create THIS run's own leaf directory with create-only
+	// semantics: os.Mkdir fails with os.ErrExist if it's already there,
+	// where os.MkdirAll would have silently succeeded and reused it.
 	runDir := e.runDir(runID)
-	if err := os.MkdirAll(runDir, 0755); err != nil {
+	if err := os.MkdirAll(e.runsDir(), 0755); err != nil {
+		return nil, fmt.Errorf("workflow: run: mkdir runs root: %w", err)
+	}
+	if err := os.Mkdir(runDir, 0755); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("workflow: run: run id %q already exists: %w", runID, ErrRunIDExists)
+		}
 		return nil, fmt.Errorf("workflow: run: mkdir run dir: %w", err)
 	}
 
@@ -275,12 +329,17 @@ func (e *Engine) run(
 	rs.startDebounce(ctx)
 
 	// Publish run.started.
+	// K3 (k82-security-review-2026-09-23.md): PublishMeta carries the run's
+	// owner so the WS handler can scope delivery the same way fleet.*
+	// already is (ownerScopedEventVisible in consoleui/ws_handler.go) —
+	// otherwise every run ID, the exact K1 attack target, is broadcast to
+	// every RoleRead subscriber regardless of ownership.
 	if e.Bus != nil {
-		e.Bus.Publish(wsbus.TopicWorkflowRunStarted, wsbus.WorkflowRunStartedPayload{
+		e.Bus.PublishMeta(wsbus.TopicWorkflowRunStarted, wsbus.WorkflowRunStartedPayload{
 			RunID:    runID,
 			Workflow: wf.Name,
 			TS:       time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: rs.OwnerOpID})
 	}
 
 	rs.markRunStarted()
@@ -293,14 +352,14 @@ func (e *Engine) run(
 	// Stop debounce (final flush included).
 	rs.stopDebounce()
 
-	// Publish run.finished.
+	// Publish run.finished. (K3 — see run.started above.)
 	if e.Bus != nil {
-		e.Bus.Publish(wsbus.TopicWorkflowRunFinished, wsbus.WorkflowRunFinishedPayload{
+		e.Bus.PublishMeta(wsbus.TopicWorkflowRunFinished, wsbus.WorkflowRunFinishedPayload{
 			RunID:    runID,
 			Workflow: wf.Name,
 			Status:   string(rs.Status),
 			TS:       time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: rs.OwnerOpID})
 	}
 
 	return rs, nil
@@ -611,15 +670,15 @@ func (e *Engine) runNode(
 	// Mark running.
 	rs.markNodeRunning(node.ID)
 
-	// Publish node.started.
+	// Publish node.started. (K3 — see run.started's comment above in run().)
 	if e.Bus != nil {
-		e.Bus.Publish(wsbus.TopicWorkflowNodeStarted, wsbus.WorkflowNodeStartedPayload{
+		e.Bus.PublishMeta(wsbus.TopicWorkflowNodeStarted, wsbus.WorkflowNodeStartedPayload{
 			RunID:    rs.RunID,
 			Workflow: wf.Name,
 			NodeID:   node.ID,
 			Agent:    node.Agent,
 			TS:       time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: rs.OwnerOpID})
 	}
 
 	// Substitute ${inputs.<k>} and ${nodes.<id>.output} in the prompt.
@@ -710,16 +769,17 @@ func (e *Engine) runNode(
 	// Node succeeded.
 	rs.markNodeCompleted(node.ID, 0, outputTruncated)
 
-	// Publish truncation event if output was truncated.
+	// Publish truncation event if output was truncated. (K3 — see run.started's
+	// comment above in run().)
 	if outputTruncated && e.Bus != nil {
-		e.Bus.Publish(wsbus.TopicWorkflowNodeTruncated, wsbus.WorkflowNodeTruncatedPayload{
+		e.Bus.PublishMeta(wsbus.TopicWorkflowNodeTruncated, wsbus.WorkflowNodeTruncatedPayload{
 			RunID:       rs.RunID,
 			Workflow:    wf.Name,
 			NodeID:      node.ID,
 			OriginalLen: len(stdout),
 			TruncatedTo: len(output),
 			TS:          time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: rs.OwnerOpID})
 	}
 
 	// Extract cost from the dispatch result. TotalCostUSD is only present for
@@ -731,9 +791,9 @@ func (e *Engine) runNode(
 		nodeCostUSD = &v
 	}
 
-	// Publish node.finished.
+	// Publish node.finished. (K3 — see run.started's comment above in run().)
 	if e.Bus != nil {
-		e.Bus.Publish(wsbus.TopicWorkflowNodeFinished, wsbus.WorkflowNodeFinishedPayload{
+		e.Bus.PublishMeta(wsbus.TopicWorkflowNodeFinished, wsbus.WorkflowNodeFinishedPayload{
 			RunID:    rs.RunID,
 			Workflow: wf.Name,
 			NodeID:   node.ID,
@@ -741,7 +801,7 @@ func (e *Engine) runNode(
 			ExitCode: 0,
 			CostUSD:  nodeCostUSD,
 			TS:       time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: rs.OwnerOpID})
 	}
 }
 
@@ -765,15 +825,16 @@ func (e *Engine) nodeFailure(
 	failedSet[nodeID] = true
 	queueMu.Unlock()
 
+	// K3 — see run.started's comment above in run().
 	if e.Bus != nil {
-		e.Bus.Publish(wsbus.TopicWorkflowNodeFinished, wsbus.WorkflowNodeFinishedPayload{
+		e.Bus.PublishMeta(wsbus.TopicWorkflowNodeFinished, wsbus.WorkflowNodeFinishedPayload{
 			RunID:    rs.RunID,
 			Workflow: workflowName,
 			NodeID:   nodeID,
 			Status:   string(NodeFailed),
 			ExitCode: exitCode,
 			TS:       time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: rs.OwnerOpID})
 	}
 }
 

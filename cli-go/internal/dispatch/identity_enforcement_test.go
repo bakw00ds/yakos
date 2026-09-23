@@ -410,6 +410,55 @@ func TestRun_RejectsBroadScopeDirs(t *testing.T) {
 	}
 }
 
+// TestValidateProjectPath_RejectsResolvedFormBypass is the round-2 review N1
+// regression: the pre-fix code resolved the CALLER's path via EvalSymlinks
+// and re-checked it against broadScopeDirs, which closed "caller supplies
+// the alias" (e.g. "/etc", which resolves to a different real path) but not
+// the opposite direction -- broadScopeDirs held only alias spellings, so a
+// caller who supplied the ALREADY-RESOLVED spelling directly matched
+// neither the literal map (wrong string) nor its own EvalSymlinks
+// resolution (a no-op on an already-resolved path), and sailed through.
+// N1's own repro used macOS's /etc -> /private/etc; this drives the same
+// property generically off whatever broadScopeDirs/OS combination actually
+// has a real symlink alias on the machine running the test, so it is not
+// tied to one platform's specific paths.
+func TestValidateProjectPath_RejectsResolvedFormBypass(t *testing.T) {
+	exercised := 0
+	for k := range broadScopeDirs {
+		real, err := filepath.EvalSymlinks(k)
+		if err != nil {
+			continue // path doesn't exist on this machine/OS -- skip
+		}
+		real = filepath.Clean(real)
+		if real == filepath.Clean(k) {
+			continue // no aliasing on this OS for this entry
+		}
+		exercised++
+		if err := validateProjectPath(real); err == nil || !strings.Contains(err.Error(), "scope materially equivalent to the filesystem root") {
+			t.Errorf("validateProjectPath(%q) (the EvalSymlinks-resolved form of broad-scope entry %q): got %v; want broad-scope rejection", real, k, err)
+		}
+	}
+	if exercised == 0 {
+		t.Skip("no broadScopeDirs entry aliases to a different real path on this machine/OS; N1's specific bypass shape did not apply here")
+	}
+}
+
+// TestValidateProjectPath_RejectsHome is the other half of round-2 review
+// N1: broadScopeDirs bans "/Users" and "/home" (the PARENT directories) with
+// a stated rationale -- SSH keys, cloud credentials, every other project on
+// the machine -- that applies at least as strongly to $HOME directly, yet
+// $HOME itself (an operator-specific path, not a name-based alias of any
+// existing entry) was accepted outright pre-fix.
+func TestValidateProjectPath_RejectsHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("os.UserHomeDir unavailable in this environment")
+	}
+	if err := validateProjectPath(home); err == nil || !strings.Contains(err.Error(), "scope materially equivalent to the filesystem root") {
+		t.Errorf("validateProjectPath(%q) ($HOME): got %v; want broad-scope rejection", home, err)
+	}
+}
+
 // TestRun_RejectsRelativeDotDotEscapingToRoot is the R6 relative-path
 // regression: a relative ".." value was previously accepted unresolved and
 // escaped against the DAEMON's cwd rather than being validated as the
