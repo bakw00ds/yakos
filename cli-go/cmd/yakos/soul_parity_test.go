@@ -66,6 +66,10 @@ func soulOut(cfg soul.Config) string {
 	return cfg.Writer.(*bytes.Buffer).String()
 }
 
+func soulErr(cfg soul.Config) string {
+	return cfg.ErrWriter.(*bytes.Buffer).String()
+}
+
 func makeSoulParityFile(t *testing.T, homeDir, name, content string) string {
 	t.Helper()
 	dir := filepath.Join(homeDir, ".yakos-state", "soul")
@@ -402,33 +406,39 @@ func TestSoulParity_Pending_ListsEdits(t *testing.T) {
 
 // ---- scenario (o): approve — not yet implemented ---------------------------
 
+// TestSoulParity_Approve_NotYetImplemented asserts `yakos soul approve`
+// returns a non-nil error (CLI exits non-zero) instead of the old
+// silent-success behavior. approve/reject are the operator gates
+// rule:retrospective-discipline depends on; see internal/soul's
+// TestApprove_NotYetImplemented_FailsLoudly for the full rationale.
 func TestSoulParity_Approve_NotYetImplemented(t *testing.T) {
 	home := t.TempDir()
 	cfg := newSoulConfig(home, "approve", []string{"some-slug"})
 	res, err := soul.Run(cfg)
-	if err != nil {
-		t.Fatalf("Run approve: %v", err)
+	if err == nil {
+		t.Fatal("expected non-nil error from 'soul approve' (not yet implemented); got nil")
 	}
-	if res.Subcommand != "approve" {
-		t.Errorf("expected subcommand=approve; got %q", res.Subcommand)
+	if res != nil {
+		t.Errorf("expected nil Result on error; got %+v", res)
 	}
-	out := soulOut(cfg)
-	if !strings.Contains(out, "not yet implemented") {
-		t.Errorf("expected 'not yet implemented' message; got: %q", out)
+	errOut := soulErr(cfg)
+	if !strings.Contains(errOut, "not yet implemented") {
+		t.Errorf("expected 'not yet implemented' message on stderr; got: %q", errOut)
 	}
 }
 
-// ---- scenario (p): reject — not yet implemented ----------------------------
+// ---- scenario (p): reject — fails loudly (not yet implemented) -------------
 
 func TestSoulParity_Reject_NotYetImplemented(t *testing.T) {
 	home := t.TempDir()
 	cfg := newSoulConfig(home, "reject", []string{"some-slug"})
-	if _, err := soul.Run(cfg); err != nil {
-		t.Fatalf("Run reject: %v", err)
+	_, err := soul.Run(cfg)
+	if err == nil {
+		t.Fatal("expected non-nil error from 'soul reject' (not yet implemented); got nil")
 	}
-	out := soulOut(cfg)
-	if !strings.Contains(out, "not yet implemented") {
-		t.Errorf("expected 'not yet implemented'; got: %q", out)
+	errOut := soulErr(cfg)
+	if !strings.Contains(errOut, "not yet implemented") {
+		t.Errorf("expected 'not yet implemented'; got: %q", errOut)
 	}
 }
 

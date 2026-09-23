@@ -17,7 +17,14 @@ func skipIfPTYUnavailable(t *testing.T, err error) {
 	if err == nil {
 		return
 	}
-	if err == ErrNotSupported {
+	// errors.Is, not ==: CreateSession wraps ErrNotSupported via
+	// fmt.Errorf("terminalmanager: spawn: %w", err) (manager.go), so a
+	// direct equality check here never matches and this helper silently
+	// failed to skip on Windows -- confirmed on windows-latest CI, where
+	// TestSessionLifecycle/TestSessionCapExceeded/TestSessionClose/TestFanOut
+	// all failed with "CreateSession: terminalmanager: spawn: terminalmanager:
+	// web terminal is not supported on this platform" instead of skipping.
+	if errors.Is(err, ErrNotSupported) {
 		t.Skip("PTY not supported on this platform")
 	}
 	if errors.Is(err, syscall.EPERM) {

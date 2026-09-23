@@ -3,6 +3,7 @@ package refresh
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -755,9 +756,15 @@ func TestSyncHooks_LegacyFallback(t *testing.T) {
 		if string(data) != string(want) {
 			t.Errorf("%s: content mismatch", name)
 		}
-		// Must be executable.
+		// Must be executable. Windows has no POSIX exec-bit concept: Go's
+		// os.Stat on Windows always reports plain -rw-rw-rw- for a regular
+		// file regardless of the mode passed to WriteFile/Chmod (confirmed
+		// on windows-latest CI: "cycle-counter.sh: not executable (mode
+		// -rw-rw-rw-)"), so this assertion is structurally unsatisfiable
+		// there and isn't testing syncHooks's own behavior on that
+		// platform.
 		info, _ := os.Stat(dstPath)
-		if info.Mode()&0111 == 0 {
+		if runtime.GOOS != "windows" && info.Mode()&0111 == 0 {
 			t.Errorf("%s: not executable (mode %v)", name, info.Mode())
 		}
 		// legacy/ subdir must NOT have been created in dst.
