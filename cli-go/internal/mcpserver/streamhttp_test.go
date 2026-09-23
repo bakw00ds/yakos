@@ -467,22 +467,58 @@ func newProtectedTestServer(t *testing.T, token string) http.Handler {
 	return mcpserver.ProtectedHandlerForTest(srv)
 }
 
-// TestHTTP_ProtectedHandler_RejectsNonLoopbackHost proves R14's Host check.
-// This is the finding's own repro: "POST /mcp Host: evil.attacker.com
-// Origin: https://evil.attacker.com + valid token → 200" (pre-fix). Reverting
-// the dashauth.RequireLocalHost wrap in NewHTTPServer makes this observe 200
-// instead of 403, and the request reaches handleMCP.
+// TestHTTP_ProtectedHandler_RejectsNonLoopbackHost proves R14's Host check —
+// in isolation from the Origin check.
+//
+// K4 (k82-security-review-2026-09-23.md): the original version of this test
+// set BOTH a non-loopback Host and a non-loopback Origin, so its 403 could
+// come from either check — and it was actually rejectNonLoopbackOrigin
+// producing it, not dashauth.RequireLocalHost. Deleting the Host check
+// alone (while leaving the Origin check in place) left `go test
+// ./internal/mcpserver/` fully green, which matters because the Host check
+// is the half that actually stops DNS rebinding: a rebound page's Host
+// header is attacker-controlled regardless of what Origin it sends (or
+// omits, e.g. a form POST or a no-cors request). No Origin header is set
+// here at all, so this 403 can only come from the Host check.
+//
+// This is also the finding's own repro shape: "POST /mcp Host:
+// evil.attacker.com + valid token → 200" (pre-fix). Reverting the
+// dashauth.RequireLocalHost wrap in NewHTTPServer makes every rejecting
+// case below observe 200 instead of 403.
 func TestHTTP_ProtectedHandler_RejectsNonLoopbackHost(t *testing.T) {
-	h := newProtectedTestServer(t, "tok")
-	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`+"\n"))
-	req.Host = "evil.attacker.com"
-	req.Header.Set("Origin", "https://evil.attacker.com")
-	req.Header.Set("Authorization", "Bearer tok")
-	req.Header.Set("Content-Type", "application/x-ndjson")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("non-loopback Host: status=%d; want 403; body=%s", rec.Code, rec.Body.String())
+	cases := []struct {
+		host       string
+		wantForbid bool
+	}{
+		{"evil.attacker.com", true},
+		{"127.0.0.1.evil.com", true}, // R14's suffix-match trick
+		{"evil.com", true},
+		{"127.0.0.1:9999", true}, // right host, wrong port
+		{"", true},               // missing Host header
+		{"127.0.0.1:7894", false},
+		{"localhost:7894", false},
+		{"[::1]:7894", false},
+	}
+	for _, tc := range cases {
+		t.Run("Host="+tc.host, func(t *testing.T) {
+			h := newProtectedTestServer(t, "tok")
+			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`+"\n"))
+			req.Host = tc.host
+			// Deliberately no Origin header: this test isolates the Host
+			// check. TestHTTP_ProtectedHandler_RejectsNonLoopbackOrigin
+			// below isolates the Origin check the same way, with a
+			// loopback Host.
+			req.Header.Set("Authorization", "Bearer tok")
+			req.Header.Set("Content-Type", "application/x-ndjson")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if tc.wantForbid && rec.Code != http.StatusForbidden {
+				t.Errorf("Host=%q: status=%d; want 403; body=%s", tc.host, rec.Code, rec.Body.String())
+			}
+			if !tc.wantForbid && rec.Code == http.StatusForbidden {
+				t.Errorf("Host=%q: status=%d; want not-403 (legitimate loopback Host wrongly rejected); body=%s", tc.host, rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
