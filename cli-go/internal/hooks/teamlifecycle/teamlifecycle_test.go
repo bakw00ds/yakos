@@ -41,16 +41,21 @@ func readLastLog(t *testing.T, logFile string) map[string]any {
 	return last
 }
 
+// makeInput builds a HookInput matching bash's actual shape: team name
+// lives under .tool_input.name (tool_input="$(... | jq -c '.tool_input //
+// {}')"; team_name="$(... | jq -r '.name // empty')" reads FROM that nested
+// object), and session_id is the top-level .session_id Payload field
+// (hi_session_id), not an env var — team-lifecycle.sh never reads
+// CLAUDE_SESSION_ID from the environment.
 func makeInput(tool, teamName, sessionID string) hooktype.HookInput {
 	payload := map[string]any{}
 	if teamName != "" {
-		payload["name"] = teamName
+		payload["tool_input"] = map[string]any{"name": teamName}
 	}
-	env := map[string]string{}
 	if sessionID != "" {
-		env["CLAUDE_SESSION_ID"] = sessionID
+		payload["session_id"] = sessionID
 	}
-	return hooktype.HookInput{Tool: tool, Payload: payload, Env: env}
+	return hooktype.HookInput{Tool: tool, Payload: payload, Env: map[string]string{}}
 }
 
 func TestTeamLifecycle_NonLifecycleToolSkipped(t *testing.T) {
@@ -116,9 +121,12 @@ func TestTeamLifecycle_AgentLogsSpawn(t *testing.T) {
 	work := t.TempDir()
 	h := &teamlifecycle.Hook{WorkCurrentDir: work, NowFn: fixedNow}
 	_, _ = h.Run(context.Background(), hooktype.HookInput{
-		Tool:    "Agent",
-		Payload: map[string]any{"subagent_type": "backend"},
-		Env:     map[string]string{"CLAUDE_SESSION_ID": "sess-3"},
+		Tool: "Agent",
+		Payload: map[string]any{
+			"tool_input": map[string]any{"subagent_type": "backend"},
+			"session_id": "sess-3",
+		},
+		Env: map[string]string{},
 	})
 	rec := readLastLog(t, filepath.Join(work, "logs", "team-lifecycle.ndjson"))
 	if rec["event"] != "agent_spawned" {
@@ -130,9 +138,12 @@ func TestTeamLifecycle_AgentDoesNotTouchSessionStarted(t *testing.T) {
 	work := t.TempDir()
 	h := &teamlifecycle.Hook{WorkCurrentDir: work, NowFn: fixedNow}
 	_, _ = h.Run(context.Background(), hooktype.HookInput{
-		Tool:    "Agent",
-		Payload: map[string]any{"subagent_type": "backend"},
-		Env:     map[string]string{"CLAUDE_SESSION_ID": "sess-4"},
+		Tool: "Agent",
+		Payload: map[string]any{
+			"tool_input": map[string]any{"subagent_type": "backend"},
+			"session_id": "sess-4",
+		},
+		Env: map[string]string{},
 	})
 	if _, err := os.Stat(filepath.Join(work, ".session-started")); !os.IsNotExist(err) {
 		t.Error("Agent should not write .session-started")

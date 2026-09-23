@@ -33,6 +33,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/kanban"
 )
@@ -77,18 +79,30 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		return out, nil
 	}
 
-	ts := h.NowFn().UTC().Format(time.RFC3339)
-	sessionID := in.Env["CLAUDE_SESSION_ID"]
+	now := time.Now()
+	if h.NowFn != nil {
+		now = h.NowFn()
+	}
+	ts := now.UTC().Format(time.RFC3339)
+	// Field derivation matches bash exactly: session_id/agent come from the
+	// stdin payload (hi_session_id/hi_sender_role), never env vars; tool_input
+	// is the NESTED .tool_input object (jq -c '.tool_input // {}'), not the
+	// whole payload — the previous appendLifecycleEvent logged the entire
+	// Payload (including session_id/tool_name/etc.) under the "tool_input"
+	// key, and stringField(in.Payload, "name") always returned "" since
+	// "name" only ever exists under .tool_input, never top-level.
+	sessionID := hookio.PayloadString(in, "session_id")
 	callerRole := senderRole(in)
-	toolInput := in.Payload
-
-	lifecycleLog := filepath.Join(h.WorkCurrentDir, "logs", hookName+".ndjson")
+	toolInput := hookio.ToolInput(in)
+	if toolInput == nil {
+		toolInput = map[string]any{}
+	}
 
 	switch in.Tool {
 	case "TeamCreate":
 		teamName := stringField(toolInput, "name")
 
-		h.appendLifecycleEvent(&out, lifecycleLog, ts, "team_created", callerRole, in.Tool, toolInput)
+		h.appendLifecycleEvent(&out, now, "team_created", callerRole, in.Tool, in.Event, sessionID, toolInput)
 
 		// .session-started — overwrite with current ts.
 		startedFile := filepath.Join(h.WorkCurrentDir, ".session-started")
@@ -106,13 +120,13 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		h.kanbanMoveFirst(&out, kanban.ColTODO, kanban.ColInProgress)
 
 	case "Agent":
-		h.appendLifecycleEvent(&out, lifecycleLog, ts, "agent_spawned", callerRole, in.Tool, toolInput)
+		h.appendLifecycleEvent(&out, now, "agent_spawned", callerRole, in.Tool, in.Event, sessionID, toolInput)
 		// Intentionally does NOT touch .session-started or history.
 
 	case "TeamDelete":
 		teamName := stringField(toolInput, "name")
 
-		h.appendLifecycleEvent(&out, lifecycleLog, ts, "team_deleted", callerRole, in.Tool, toolInput)
+		h.appendLifecycleEvent(&out, now, "team_deleted", callerRole, in.Tool, in.Event, sessionID, toolInput)
 
 		// Kanban: first IN PROGRESS → DONE.
 		h.kanbanMoveFirst(&out, kanban.ColInProgress, kanban.ColDone)
@@ -144,7 +158,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 			}
 			_ = appendNDJSON(sessionsLog, summaryEntry)
 		} else {
-			h.appendLifecycleEvent(&out, lifecycleLog, ts, "duplicate_summary_suppressed", callerRole, in.Tool, toolInput)
+			h.appendLifecycleEvent(&out, now, "duplicate_summary_suppressed", callerRole, in.Tool, in.Event, sessionID, toolInput)
 		}
 
 		// Marker for session-end-check.
@@ -197,22 +211,34 @@ func (h *Hook) kanbanMoveFirst(out *hooktype.HookOutput, srcCol, dstCol string) 
 	}
 }
 
-// appendLifecycleEvent writes one NDJSON line to the lifecycle log.
-func (h *Hook) appendLifecycleEvent(out *hooktype.HookOutput, logFile, ts, event, caller, tool string, toolInput map[string]any) {
-	entry := map[string]any{
-		"ts":       ts,
-		"hook":     hookName,
-		"severity": "REPORT",
-		"action":   "pass",
-		"message":  "team-lifecycle: " + event,
-		"event":    event,
-		"caller":   caller,
-		"tool":     tool,
-	}
-	if toolInput != nil {
-		entry["tool_input"] = toolInput
-	}
-	if err := appendNDJSON(logFile, entry); err != nil {
+// appendLifecycleEvent writes one NDJSON line to the lifecycle log via the
+// shared hooklog writer, matching bash's emit_event exactly:
+//
+//	extra="$(jq -nc --arg event "$event" --arg caller "$caller" --arg tool "$tool" --argjson input "$tool_input" \
+//	    '{event: $event, caller: $caller, tool: $tool, tool_input: $input}')"
+//	ho_log "team-lifecycle" "REPORT" "pass" "team-lifecycle: $event" "$extra"
+//
+// Note the extra object's own "event" key (the lifecycle sub-event, e.g.
+// "team_created") deliberately overrides ho_log's base "event" field (the
+// Claude Code hook_event_name, e.g. "PreToolUse") per jq's `{...} + $extra`
+// merge — hooklog.Append's Extra map has the identical override semantics.
+func (h *Hook) appendLifecycleEvent(out *hooktype.HookOutput, now time.Time, event, caller, tool, hookEvent, sessionID string, toolInput map[string]any) {
+	err := hooklog.Append(h.WorkCurrentDir, hooklog.Entry{
+		Hook:      hookName,
+		Severity:  "REPORT",
+		Decision:  "pass",
+		Reason:    "team-lifecycle: " + event,
+		Agent:     caller,
+		SessionID: sessionID,
+		Event:     hookEvent,
+		Extra: map[string]any{
+			"event":      event,
+			"caller":     caller,
+			"tool":       tool,
+			"tool_input": toolInput,
+		},
+	}, now)
+	if err != nil {
 		out.Stderr = fmt.Appendf(out.Stderr, "%s: log: %v\n", hookName, err)
 	}
 }
@@ -277,14 +303,16 @@ func (h *Hook) lookupTeamCreatedTs(sessionID string) string {
 
 // ---- helpers -----------------------------------------------------------------
 
+// senderRole extracts the agent/role, matching hi_sender_role exactly:
+// hi_field_or '.agent_type' 'lead' (top-level, fallback "lead" when
+// absent/empty), trimmed, then the "yakos:" namespace prefix stripped.
 func senderRole(in hooktype.HookInput) string {
-	if r, ok := in.Env["YAKOS_AGENT_ROLE"]; ok && r != "" {
-		return r
+	raw := hookio.PayloadString(in, "agent_type")
+	if raw == "" {
+		raw = "lead"
 	}
-	if r := stringField(in.Payload, "agent_type"); r != "" {
-		return r
-	}
-	return "lead"
+	raw = strings.TrimSpace(raw)
+	return strings.TrimPrefix(raw, "yakos:")
 }
 
 func stringField(payload map[string]any, key string) string {

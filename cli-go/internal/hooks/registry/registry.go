@@ -219,6 +219,7 @@ var entries = []Entry{
 	{
 		Name:       "team-lifecycle",
 		FailClosed: false,
+		GoReady:    true,
 		New:        func(cfg Config) Hook { return teamlifecycle.New(cfg.WorkCurrentDir) },
 	},
 }
