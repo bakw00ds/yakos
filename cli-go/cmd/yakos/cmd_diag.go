@@ -102,6 +102,11 @@ Schema + reference validation. Three modes:
   yakos validate --all          Validate framework lib/ AND the project's
                                 .claude/ (must also pass <path>).
 
+Flags:
+  --all           Validate framework lib/ AND the project's .claude/.
+  --strict, -s    Treat warnings as errors (non-zero exit on any warning).
+  --help, -h      Print this help.
+
 v0.1 lib/ is intentionally empty — this command handles the empty
 case and reports cleanly. Full frontmatter+reference validation runs
 once Batch 3 populates lib/agents/, lib/skills/, lib/rules/.

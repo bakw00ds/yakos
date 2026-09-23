@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -516,6 +517,32 @@ func runGitHooks(yakosRoot string, args []string) {
 //
 //	yakos workflow status <run-id>
 //	  Print the run.json for a given runID.
+//
+// Unlike every other command, workflow does not intercept -h/--help itself
+// (its argv loops only recognize --run-id / --operator / --prior-run-id /
+// --new-run-id; "yakos workflow --help" falls through to the "unknown
+// subcommand" branch, same as any other bad first argument). printWorkflowHelp
+// exists for the command registry's help-vs-parser diff test
+// (help_parser_diff_test.go) and mirrors the usage lines runWorkflow prints
+// on a missing subcommand.
+func printWorkflowHelp(w io.Writer) {
+	_, _ = fmt.Fprint(w, `yakos workflow <subcommand> [args...]
+
+Subcommands:
+  run <name> [--run-id <id>] [--operator <id>]
+      Load <work>/current/workflows/<name>.yaml and execute it headlessly.
+      Blocks until the graph drains (or ctx is cancelled). --run-id defaults
+      to a time-based id when omitted.
+
+  resume <name> --prior-run-id <id> --new-run-id <id> [--operator <id>]
+      Resume a failed workflow run from a prior runID. Fails loudly if the
+      YAML has changed since the prior run.
+
+  status <run-id>
+      Print the run.json for a given runID.
+`)
+}
+
 func runWorkflow(yakosRoot string, args []string) {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "workflow: subcommand required (run | resume | status)")
