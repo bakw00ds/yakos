@@ -7,9 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/completion"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/githooks"
@@ -53,38 +53,35 @@ func runHooks(args []string) {
 }
 
 func runHooksInstall(args []string) {
+	help := false
 	runtime := ""
 	project := ""
 	force := false
 
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--help", "-h":
-			hooksinstall.PrintHelp(os.Stdout)
-			os.Exit(0)
-		case "--project":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "hooks install: --project requires a path")
-				os.Exit(1)
-			}
-			project = args[i]
-		case "--force":
-			force = true
-		default:
-			if len(args[i]) > 10 && args[i][:10] == "--project=" {
-				project = args[i][10:]
-			} else if args[i][0] == '-' {
-				fmt.Fprintf(os.Stderr, "hooks install: unknown flag %q\n", args[i])
-				os.Exit(1)
-			} else {
-				if runtime == "" {
-					runtime = args[i]
-				} else {
-					fmt.Fprintln(os.Stderr, "hooks install: too many positional args")
-					os.Exit(1)
-				}
-			}
+	fs := &cliflag.Set{Cmd: "hooks install", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--project", Kind: cliflag.String, Str: &project, ValueDesc: "a path"},
+		{Name: "--force", Kind: cliflag.Bool, Bool: &force},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		hooksinstall.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
+		if len(arg) > 0 && arg[0] == '-' {
+			fmt.Fprintf(os.Stderr, "hooks install: unknown flag %q\n", arg)
+			os.Exit(1)
+		}
+		if runtime == "" {
+			runtime = arg
+		} else {
+			fmt.Fprintln(os.Stderr, "hooks install: too many positional args")
+			os.Exit(1)
 		}
 	}
 
@@ -159,11 +156,20 @@ func runHooksStatus(args []string) {
 }
 
 func runHooksLint(args []string) {
+	help := false
 	hooksDir := ""
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--help", "-h":
-			fmt.Fprintln(os.Stdout, `yakos hooks lint [--hooks-dir <path>]
+
+	fs := &cliflag.Set{Cmd: "hooks lint", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--hooks-dir", Kind: cliflag.String, Str: &hooksDir, ValueDesc: "a path"},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		fmt.Fprintln(os.Stdout, `yakos hooks lint [--hooks-dir <path>]
 
 Lint all .star files in the hooks directory.
 
@@ -179,22 +185,11 @@ Checks performed:
 Exit codes:
   0 — no errors (warnings may be present)
   1 — one or more errors found`)
-			os.Exit(0)
-		case "--hooks-dir":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "hooks lint: --hooks-dir requires a path")
-				os.Exit(1)
-			}
-			hooksDir = args[i]
-		default:
-			if strings.HasPrefix(args[i], "--hooks-dir=") {
-				hooksDir = args[i][len("--hooks-dir="):]
-			} else {
-				fmt.Fprintf(os.Stderr, "hooks lint: unknown arg %q\n", args[i])
-				os.Exit(1)
-			}
-		}
+		os.Exit(0)
+	}
+	for _, arg := range rest {
+		fmt.Fprintf(os.Stderr, "hooks lint: unknown arg %q\n", arg)
+		os.Exit(1)
 	}
 
 	if hooksDir == "" {
@@ -598,30 +593,23 @@ func runWorkflow(yakosRoot string, args []string) {
 }
 
 func runWorkflowRun(yakosRoot, workspaceRoot, workDir string, args []string) {
-	var name, runID, operatorID string
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--run-id":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "workflow run: --run-id requires a value")
-				os.Exit(1)
-			}
-			runID = args[i]
-		case "--operator":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "workflow run: --operator requires a value")
-				os.Exit(1)
-			}
-			operatorID = args[i]
-		default:
-			if name == "" && len(args[i]) > 0 && args[i][0] != '-' {
-				name = args[i]
-			} else {
-				fmt.Fprintf(os.Stderr, "workflow run: unknown argument %q\n", args[i])
-				os.Exit(1)
-			}
+	var runID, operatorID string
+	fs := &cliflag.Set{Cmd: "workflow run", Specs: []cliflag.Spec{
+		{Name: "--run-id", Kind: cliflag.String, Str: &runID, ValueDesc: "a value"},
+		{Name: "--operator", Kind: cliflag.String, Str: &operatorID, ValueDesc: "a value"},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	name := ""
+	for _, arg := range rest {
+		if name == "" && len(arg) > 0 && arg[0] != '-' {
+			name = arg
+		} else {
+			fmt.Fprintf(os.Stderr, "workflow run: unknown argument %q\n", arg)
+			os.Exit(1)
 		}
 	}
 	if name == "" {
@@ -684,37 +672,24 @@ func runWorkflowRun(yakosRoot, workspaceRoot, workDir string, args []string) {
 }
 
 func runWorkflowResume(yakosRoot, workspaceRoot, workDir string, args []string) {
-	var name, priorRunID, newRunID, operatorID string
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--prior-run-id":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "workflow resume: --prior-run-id requires a value")
-				os.Exit(1)
-			}
-			priorRunID = args[i]
-		case "--new-run-id":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "workflow resume: --new-run-id requires a value")
-				os.Exit(1)
-			}
-			newRunID = args[i]
-		case "--operator":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "workflow resume: --operator requires a value")
-				os.Exit(1)
-			}
-			operatorID = args[i]
-		default:
-			if name == "" && len(args[i]) > 0 && args[i][0] != '-' {
-				name = args[i]
-			} else {
-				fmt.Fprintf(os.Stderr, "workflow resume: unknown argument %q\n", args[i])
-				os.Exit(1)
-			}
+	var priorRunID, newRunID, operatorID string
+	fs := &cliflag.Set{Cmd: "workflow resume", Specs: []cliflag.Spec{
+		{Name: "--prior-run-id", Kind: cliflag.String, Str: &priorRunID, ValueDesc: "a value"},
+		{Name: "--new-run-id", Kind: cliflag.String, Str: &newRunID, ValueDesc: "a value"},
+		{Name: "--operator", Kind: cliflag.String, Str: &operatorID, ValueDesc: "a value"},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	name := ""
+	for _, arg := range rest {
+		if name == "" && len(arg) > 0 && arg[0] != '-' {
+			name = arg
+		} else {
+			fmt.Fprintf(os.Stderr, "workflow resume: unknown argument %q\n", arg)
+			os.Exit(1)
 		}
 	}
 	if name == "" || priorRunID == "" || newRunID == "" {
