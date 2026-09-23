@@ -101,18 +101,39 @@ func chdirTemp(t *testing.T, dir string) {
 	t.Cleanup(func() { _ = os.Chdir(orig) })
 }
 
-// resolveDir returns dir with all symlinks resolved — the same
-// canonicalization os.Getwd() performs after an os.Chdir. t.TempDir() can
-// return a path through a symlink (e.g. macOS's /var → /private/var), and
-// jsonrpc.SocketPath hashes its input verbatim with no symlink resolution;
-// maybeRouteToDaemon derives its socket path from os.Getwd(), so a fake
-// daemon registered under the raw t.TempDir() string would hash to a
-// different socket path than the one maybeRouteToDaemon actually dials.
+// resolveDir returns the canonical form of dir that a real process's
+// os.Getwd() would report after os.Chdir(dir) — i.e. it actually chdirs
+// there, calls os.Getwd(), and chdirs back, rather than trying to
+// reconstruct canonicalization rules per OS. jsonrpc.SocketPath hashes its
+// input verbatim with no canonicalization of its own, and every real
+// caller (maybeRouteToDaemon, checkDaemonHandshakeForEvents, and the
+// subprocess helpers in this file) derives its socket path from
+// os.Getwd(), so a fake daemon registered under any other spelling of the
+// same directory hashes to a different socket path than the one they
+// actually dial.
+//
+// t.TempDir() does not always return the same spelling os.Getwd() would:
+// on macOS /var is a symlink to /private/var; on Windows, os.Getwd() can
+// return an 8.3 short-path form (e.g. RUNNER~1) that differs from
+// t.TempDir()'s long-path spelling and that filepath.EvalSymlinks does not
+// normalize (short-name aliasing isn't a symlink). Round-tripping through
+// an actual Chdir+Getwd sidesteps needing to know which OS-specific
+// canonicalization applies.
 func resolveDir(t *testing.T, dir string) string {
 	t.Helper()
-	resolved, err := filepath.EvalSymlinks(dir)
+	orig, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("EvalSymlinks(%s): %v", dir, err)
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir(%s): %v", dir, err)
+	}
+	resolved, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd after Chdir(%s): %v", dir, err)
+	}
+	if err := os.Chdir(orig); err != nil {
+		t.Fatalf("Chdir back to %s: %v", orig, err)
 	}
 	return resolved
 }
