@@ -1,6 +1,6 @@
 # YakOS — overview
 
-**Version this overview targets:** v0.40.0.0 (2026-06-12).
+**Version this overview targets:** v0.57.0.0 (2026-06-25).
 **Audience:** operators evaluating yakOS or onboarding to it.
 **Companion docs:** [README.md](../README.md) for install,
 [UPGRADING.md](../UPGRADING.md) for upgrade/uninstall,
@@ -25,7 +25,7 @@ bootstrap projects with `yakos init`, launch sessions with
   (path-allowlist, secret-scan, mailbox-mirror, session-end).
 - **Runtime adapters** — pluggable per-CLI (claude / codex / gemini
   + plugins) so the same agent file can dispatch on any runtime.
-- **CLI** — `yakos` with 41 Go-native subcommands: install, init,
+- **CLI** — `yakos` with 43 Go-native subcommands: install, init,
   start, dispatch, auth, memory, cost, agent, plugin, migrate, doctor,
   validate, archive, session, metrics, supervise, and more.
 - **Unified console** — `yakos serve` starts the daemon and opens a
@@ -304,7 +304,7 @@ Plugin runtimes load from `~/.yakos/plugins/<id>/runtime.sh`; see
 [plugin-spec.md](plugin-spec.md) for the contract. Built-in
 shadowing is protected.
 
-## CLI surface (41 subcommands)
+## CLI surface (43 subcommands)
 
 **Lifecycle:** `install`, `update`, `uninstall`, `doctor`
 (`--probe-runtime`, `--fix`).
