@@ -336,6 +336,27 @@ parity_check() {
         fi
     fi
 
+    # messages.ndjson — the mailbox-mirror audit trail — was never
+    # compared at all before this (S-6 A-2a round 2 review finding 5):
+    # only exit code, the hooklog record, stdout, and stderr were. This
+    # is a no-op ("no file, no file") for every hook other than
+    # mailbox-mirror, so it's safe to run unconditionally for every case.
+    if [ "$divergence" = "-" ]; then
+        local bash_msgs="$(dirname -- "$bash_log_dir")/messages.ndjson"
+        local go_msgs="$tmp2/work/current/messages.ndjson"
+        local bash_msgs_has=0 go_msgs_has=0
+        [ -f "$bash_msgs" ] && bash_msgs_has=1
+        [ -f "$go_msgs" ] && go_msgs_has=1
+        if [ "$bash_msgs_has" != "$go_msgs_has" ]; then
+            if [ "$go_msgs_has" = "1" ]; then divergence="messages-present-go-only"; else divergence="messages-missing-go"; fi
+        elif [ "$bash_msgs_has" = "1" ]; then
+            local norm_bash_msgs norm_go_msgs
+            norm_bash_msgs="$(tail -n 1 "$bash_msgs" | jq -cS 'del(.ts)' 2>/dev/null || echo "__unparseable_bash_msgs__")"
+            norm_go_msgs="$(tail -n 1 "$go_msgs" | jq -cS 'del(.ts)' 2>/dev/null || echo "__unparseable_go_msgs__")"
+            [ "$norm_bash_msgs" != "$norm_go_msgs" ] && divergence="messages-ndjson"
+        fi
+    fi
+
     if [ "$divergence" = "-" ] && [ "$bash_stdout" != "$go_stdout" ]; then
         divergence="stdout"
     fi
@@ -497,6 +518,29 @@ setup_with_decisions_stale() {
     # Touch decisions.md as 3h old
     touch -t "$(date -u -v-3H +%Y%m%d%H%M 2>/dev/null || date -u -d '-3 hours' +%Y%m%d%H%M)" "$1/work/current/decisions.md" 2>/dev/null
     : > "$1/work/current/decisions.md"
+}
+
+setup_with_team_created_history() {
+    # Exercises session-end-check's team_name lookup and
+    # scratchpad_size_bytes fields (S-6 A-2a round 2 review finding 1):
+    # a .session-started-history.ndjson team_created record matching the
+    # fixture's session_id, plus real scratchpad content so
+    # scratchpad_size_bytes is nonzero on both sides. Deliberately does
+    # NOT attempt to exercise the team-inbox snapshot feature here — that
+    # reads $HOME/.claude/teams/<team>/inboxes, which this harness never
+    # sandboxes (see the harness's own top-of-file comment on
+    # NOJQ_PATH/NORESOLVE_PATH for why other cross-cutting env is
+    # sandboxed the way it is); a fixture that depended on the real
+    # $HOME's team-inbox state would be non-deterministic across
+    # machines/CI runners. The inbox-snapshot code path is covered
+    # instead by cli-go/internal/hooks/sessionendcheck's own
+    # t.TempDir()-based unit tests via the Hook.TeamsDir override.
+    mkdir -p "$1/work/current"
+    printf '%s\n' \
+        '{"ts":"2026-01-15T09:00:00Z","event":"team_created","team_name":"fixture-team","session_id":"fixture-sessionend-with-team-0001"}' \
+        > "$1/work/current/.session-started-history.ndjson"
+    head -c 16384 /dev/zero > "$1/work/current/scratchpad-filler.bin" 2>/dev/null \
+        || dd if=/dev/zero of="$1/work/current/scratchpad-filler.bin" bs=1024 count=16 2>/dev/null
 }
 
 setup_allowlist_deny_pem() {
@@ -779,6 +823,12 @@ case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-ga
 case_check mailbox-mirror.sh   sendmessage-peer.json             0 mailbox-mirror
 case_check mailbox-mirror.sh   sendmessage-from-lead.json        0 mailbox-mirror
 case_check mailbox-mirror.sh   sendmessage-to-lead.json          0 mailbox-mirror
+# HTML-special chars (<, >, &) in summary/body — regression guard for S-6
+# A-2a round 2 review finding 5 (Go's default json.Marshal HTML-escaped
+# these; bash's jq -nc never does). The new messages.ndjson content
+# comparison in parity_check (above) is what actually catches a
+# regression here — exit code and the hooklog record alone wouldn't.
+case_check mailbox-mirror.sh   sendmessage-html-chars.json       0 mailbox-mirror
 
 # --- team-lifecycle ---
 case_check team-lifecycle.sh   teamcreate.json                   0 team-lifecycle
@@ -825,6 +875,7 @@ case_check output-injection-scan.sh posttooluse-workflow-node-output-base64-at-t
 # --- session-end-check ---
 case_check session-end-check.sh sessionend-clean.json            0 session-end-check
 case_check session-end-check.sh sessionend-stuck.json            0 session-end-check setup_with_decisions_stale
+case_check session-end-check.sh sessionend-with-team.json        0 session-end-check setup_with_team_created_history
 
 # --- task-* (REPORT-only in v0.1) ---
 case_check task-dependency-gate.sh    taskcompleted-blocked.json   0 task-dependency-gate
