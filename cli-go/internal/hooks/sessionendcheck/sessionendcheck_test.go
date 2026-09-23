@@ -41,10 +41,19 @@ func readLastLog(t *testing.T, logFile string) map[string]any {
 	return last
 }
 
+// makeInput builds a HookInput with sessionID as the top-level .session_id
+// Payload field, matching hi_session_id.
+//
+// S-6 A-2a: previously set the CLAUDE_SESSION_ID env var, which bash's
+// session-end-check.sh never reads.
 func makeInput(sessionID string) hooktype.HookInput {
+	payload := map[string]any{}
+	if sessionID != "" {
+		payload["session_id"] = sessionID
+	}
 	return hooktype.HookInput{
-		Payload: map[string]any{},
-		Env:     map[string]string{"CLAUDE_SESSION_ID": sessionID},
+		Payload: payload,
+		Env:     map[string]string{},
 	}
 }
 
@@ -152,8 +161,10 @@ func TestSessionEndCheck_StaleDecisionsWarn(t *testing.T) {
 	if rec["severity"] != "WARN" {
 		t.Errorf("severity=%v, want WARN for stale decisions.md", rec["severity"])
 	}
-	if rec["decisions_stale"] != true {
-		t.Errorf("decisions_stale=%v, want true", rec["decisions_stale"])
+	// S-6 A-2a: bash builds decisions_stale via jq --arg (always a JSON
+	// string "true"/"false"), not --argjson (a boolean).
+	if rec["decisions_stale"] != "true" {
+		t.Errorf("decisions_stale=%v, want \"true\"", rec["decisions_stale"])
 	}
 }
 
@@ -162,8 +173,8 @@ func TestSessionEndCheck_NoDecisionsFileNoStale(t *testing.T) {
 	h := &sessionendcheck.Hook{WorkCurrentDir: work, NowFn: fixedNow}
 	_, _ = h.Run(context.Background(), makeInput("sess-6"))
 	rec := readLastLog(t, filepath.Join(work, "logs", "session-end-check.ndjson"))
-	if rec["decisions_stale"] != false {
-		t.Errorf("decisions_stale=%v, want false when no decisions.md", rec["decisions_stale"])
+	if rec["decisions_stale"] != "false" {
+		t.Errorf("decisions_stale=%v, want \"false\" when no decisions.md", rec["decisions_stale"])
 	}
 }
 

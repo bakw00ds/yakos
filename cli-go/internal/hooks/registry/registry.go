@@ -181,6 +181,7 @@ var entries = []Entry{
 	{
 		Name:       "session-end-check",
 		FailClosed: false,
+		GoReady:    true,
 		New:        func(cfg Config) Hook { return sessionendcheck.New(cfg.WorkCurrentDir) },
 	},
 	{

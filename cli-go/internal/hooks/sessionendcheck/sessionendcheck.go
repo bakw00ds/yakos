@@ -19,9 +19,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
@@ -61,11 +64,16 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		return out, nil
 	}
 
-	now := h.NowFn()
+	now := time.Now()
+	if h.NowFn != nil {
+		now = h.NowFn()
+	}
 	ts := now.UTC().Format(time.RFC3339)
-	sessionID := in.Env["CLAUDE_SESSION_ID"]
+	// session_id comes from the stdin payload (hi_session_id), not an env
+	// var — session-end-check.sh never reads CLAUDE_SESSION_ID.
+	sessionID := hookio.PayloadString(in, "session_id")
+	callerRole := senderRole(in)
 	logsDir := filepath.Join(h.WorkCurrentDir, "logs")
-	logFile := filepath.Join(logsDir, hookName+".ndjson")
 
 	_ = os.MkdirAll(logsDir, 0755) //nolint:gosec
 
@@ -91,22 +99,30 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		severity = "WARN"
 	}
 
-	auditEntry := map[string]any{
-		"ts":                   ts,
-		"hook":                 hookName,
-		"severity":             severity,
-		"action":               "pass",
-		"message":              "session terminal state recorded",
-		"decisions_stale":      decisionsStale,
-		"decisions_age_s":      decisionsAgeS,
-		"expired_bypass_count": expiredCount,
-		"expired_bypass_ids":   strings.Join(expiredIDs, " "),
-		"hook_blocks":          blockCount,
-		"hook_warns":           warnCount,
-		"hook_reports":         reportCount,
-		"hooks":                hookSummary,
+	logErr := hooklog.Append(h.WorkCurrentDir, hooklog.Entry{
+		Hook:      hookName,
+		Severity:  severity,
+		Decision:  "pass",
+		Reason:    "session terminal state recorded",
+		Agent:     callerRole,
+		SessionID: sessionID,
+		Event:     in.Event,
+		Extra: map[string]any{
+			// bash builds decisions_stale with --arg (always a JSON
+			// STRING "true"/"false"), not --argjson — matching exactly.
+			"decisions_stale":      strconv.FormatBool(decisionsStale),
+			"decisions_age_s":      decisionsAgeS,
+			"expired_bypass_count": expiredCount,
+			"expired_bypass_ids":   strings.Join(expiredIDs, " "),
+			"hook_blocks":          blockCount,
+			"hook_warns":           warnCount,
+			"hook_reports":         reportCount,
+			"hooks":                hookSummary,
+		},
+	}, now)
+	if logErr != nil {
+		out.Stderr = fmt.Appendf(out.Stderr, "%s: log: %v\n", hookName, logErr)
 	}
-	_ = appendNDJSON(logFile, auditEntry)
 
 	// ---- session summary (idempotent) ----
 	markerFile := filepath.Join(h.WorkCurrentDir, ".session-summarized")
@@ -290,6 +306,18 @@ func (h *Hook) lookupStartTs(sessionID string) string {
 		}
 	}
 	return ""
+}
+
+// senderRole extracts the agent/role, matching hi_sender_role exactly:
+// hi_field_or '.agent_type' 'lead' (top-level, fallback "lead" when
+// absent/empty), trimmed, then the "yakos:" namespace prefix stripped.
+func senderRole(in hooktype.HookInput) string {
+	raw := hookio.PayloadString(in, "agent_type")
+	if raw == "" {
+		raw = "lead"
+	}
+	raw = strings.TrimSpace(raw)
+	return strings.TrimPrefix(raw, "yakos:")
 }
 
 // ---- generic helpers ---------------------------------------------------------
