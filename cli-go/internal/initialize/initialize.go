@@ -370,7 +370,7 @@ func Run(cfg Config) (*Result, error) {
 		_, _ = fmt.Fprintln(cfg.ErrWriter, "      Run: YAKOS_IMPL=bash yakos git-hooks install")
 	}
 	if cfg.MultiDev {
-		_, _ = fmt.Fprintln(cfg.ErrWriter, "init: --multi-dev: coord provisioning is handled by the bash yakos in Phase 1.")
+		_, _ = fmt.Fprintln(cfg.ErrWriter, "init: --multi-dev: coord provisioning is not ported: use YAKOS_IMPL=bash yakos init --multi-dev.")
 		_, _ = fmt.Fprintln(cfg.ErrWriter, "      Run: YAKOS_IMPL=bash yakos init --multi-dev "+cfg.Name+" --project "+projAbs)
 	}
 
@@ -396,6 +396,14 @@ func Run(cfg Config) (*Result, error) {
 		_, _ = fmt.Fprintf(cfg.Writer, "  Written:      %d file(s)\n", len(res.FilesWritten))
 		_, _ = fmt.Fprintf(cfg.Writer, "  Skipped:      %d file(s) (already exist)\n", len(res.FilesSkipped))
 		_, _ = fmt.Fprintf(cfg.Writer, "\nTo start a session:\n  yakos start %s\n", cfg.Name)
+	}
+
+	// --multi-dev's coord provisioning is not ported to Go (Phase 1 scope);
+	// the base project above is real, useful work and stays written, but
+	// the command must not exit 0 as if multi-dev coordination was set up
+	// — that would be a silent no-op for the flag the caller asked for.
+	if cfg.MultiDev {
+		return res, fmt.Errorf("init: --multi-dev: not ported: use YAKOS_IMPL=bash yakos init --multi-dev %s --project %s", cfg.Name, projAbs)
 	}
 
 	return res, nil

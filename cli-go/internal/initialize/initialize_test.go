@@ -460,6 +460,41 @@ func TestRun_HappyPath(t *testing.T) {
 	}
 }
 
+// TestRun_MultiDev_FailsExplicitly_ButStillWritesBaseProject asserts
+// `yakos init --multi-dev` fails loudly instead of silently succeeding.
+// The Go port doesn't implement multi-dev coord provisioning (Phase 1
+// scope); it used to print an advisory to stderr and still return a nil
+// error, so `yakos init --multi-dev foo && next-step` would run next-step
+// even though coord provisioning never happened. The base project (real,
+// useful work) must still be written; only the exit status/error changes.
+func TestRun_MultiDev_FailsExplicitly_ButStillWritesBaseProject(t *testing.T) {
+	proj := newGitRepo(t)
+	cfg := baseConfig(t, "multidevproj", proj)
+	cfg.MultiDev = true
+
+	res, err := Run(cfg)
+	if err == nil {
+		t.Fatal("expected non-nil error for --multi-dev (coord provisioning not ported); got nil")
+	}
+	if !strings.Contains(err.Error(), "not ported") {
+		t.Errorf("expected 'not ported' in error; got: %v", err)
+	}
+	errOut := cfg.ErrWriter.(*bytes.Buffer).String()
+	if !strings.Contains(errOut, "YAKOS_IMPL=bash") {
+		t.Errorf("expected YAKOS_IMPL=bash guidance on stderr; got: %q", errOut)
+	}
+
+	// The base project is still real, useful work: it must be written
+	// despite the multi-dev coord gap.
+	if res == nil {
+		t.Fatal("expected non-nil Result even on --multi-dev error")
+	}
+	controlDir := filepath.Join(cfg.HomeDir, "agent-control", "multidevproj")
+	if _, statErr := os.Stat(filepath.Join(controlDir, ".gitignore")); statErr != nil {
+		t.Errorf("expected base project files still written despite --multi-dev error: %v", statErr)
+	}
+}
+
 // TestRun_ControlDirPreserved verifies re-running init does not overwrite
 // agent-control files.
 func TestRun_ControlDirPreserved(t *testing.T) {
