@@ -4,12 +4,37 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"testing"
 
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/hooks/registry"
 )
+
+// repoRoot walks up from the test's working directory to the repo root,
+// identified by the top-level VERSION file. Same pattern as
+// cmd/yakos/main_test.go's repoRoot — duplicated here rather than shared
+// because the two live in different modules' test packages and importing
+// a test-only helper across packages isn't idiomatic Go.
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	for {
+		fi, err := os.Stat(filepath.Join(dir, "VERSION"))
+		if err == nil && !fi.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == "" || parent == dir {
+			t.Fatal("could not find repo root (no VERSION regular file in any parent dir)")
+		}
+		dir = parent
+	}
+}
 
 // wantHooks is the exact set of hooks settings.template.json registers,
 // per the S-6 structural plan §2.5 ("None [stay bash], on porting
@@ -171,5 +196,49 @@ func TestGoReady_PathLogOnly(t *testing.T) {
 	}
 	if len(goReady) != 1 || goReady[0] != "path-log" {
 		t.Errorf("GoReady hooks=%v, want [path-log]", goReady)
+	}
+}
+
+// failClosedLineRE matches an actual `HOOK_FAIL_CLOSED=1` assignment line
+// (allowing leading whitespace, e.g. inside an `if`/function body), not a
+// comment that merely mentions the variable (lib/hooks/*.sh has several —
+// "see HOOK_FAIL_CLOSED in lib/hook-input.sh" etc.).
+var failClosedLineRE = regexp.MustCompile(`(?m)^\s*HOOK_FAIL_CLOSED=1\s*$`)
+
+// TestFailClosed_MatchesShScripts pins registry.go's FailClosed flags
+// against the actual bash scripts' HOOK_FAIL_CLOSED=1 assignments, so the
+// two can never silently drift apart again (S-6 A-1 round-2 fix — the
+// registry originally had peer-claim and plan-quality-gate's flags
+// swapped; nothing caught it because no test read FailClosed at all).
+//
+// Ground truth is lib/hooks/<name>.sh; a handful of hooks (currently only
+// auto-compact-trigger) don't have a live copy there and are checked
+// against lib/hooks/legacy/<name>.sh instead — same script content, kept
+// under legacy/ for hooks not (yet) promoted to lib/hooks/ directly. If
+// neither copy exists the test fails loudly rather than skipping, since a
+// missing ground-truth file means this check isn't actually verifying
+// anything for that hook.
+func TestFailClosed_MatchesShScripts(t *testing.T) {
+	root := repoRoot(t)
+	for _, e := range registry.All() {
+		primary := filepath.Join(root, "lib", "hooks", e.Name+".sh")
+		legacy := filepath.Join(root, "lib", "hooks", "legacy", e.Name+".sh")
+
+		path := primary
+		src, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			path = legacy
+			src, err = os.ReadFile(path)
+		}
+		if err != nil {
+			t.Errorf("hook %q: no ground-truth script found at %s or %s: %v", e.Name, primary, legacy, err)
+			continue
+		}
+
+		want := failClosedLineRE.Match(src)
+		if e.FailClosed != want {
+			t.Errorf("registry entry %q: FailClosed=%v, but %s %s HOOK_FAIL_CLOSED=1 (want FailClosed=%v)",
+				e.Name, e.FailClosed, path, map[bool]string{true: "sets", false: "does not set"}[want], want)
+		}
 	}
 }

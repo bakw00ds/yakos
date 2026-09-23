@@ -12,11 +12,13 @@
 #   2. YAKOS_HOOKS=go yakos hook run <name> < fixture (S-6 A-1's new path)
 #
 # in separate temp CLAUDE_PROJECT_DIR/work sandboxes with identical
-# env/payload, and compares: exit code (exact), the last NDJSON log record
-# (parsed and compared field-by-field with `ts` masked — a hook that never
-# logs on the bash side is compared as "no record" on both), and stderr
-# (compared modulo a leading "[<ts>] " prefix bash's ct_log-style hooks add
-# and Go does not).
+# env/payload, and compares: exit code (exact), stdout (exact), the last
+# NDJSON log record (parsed and compared field-by-field with `ts` masked —
+# a hook that never logs on the bash side is compared as "no record" on
+# both), and stderr (compared modulo a leading "[<ts>] " prefix bash's
+# ct_log-style hooks add and Go does not, and modulo each side's own
+# mktemp -d sandbox path, since those never match across sides even for
+# the same fixture).
 #
 # This harness does NOT assert bash-vs-Go equality as a pass/fail gate on
 # the whole suite (see S-6 structural plan §1.2 / §2.4: the two sides are
@@ -198,13 +200,18 @@ case_check() {
     # not into ~/agent-control/.
     local actual_rc=0
     local stdout_capture
+    local bash_stderr_file
+    bash_stderr_file="$(mktemp)"
     if [ -n "$extra_env" ]; then
         # shellcheck disable=SC2086  # intentional: extra_env may carry
         # multiple space-separated NAME=value assignments.
-        stdout_capture="$(printf '%s' "$payload" | env $extra_env YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$cpd" bash "$HOOKS/$hook" 2>/dev/null)" || actual_rc=$?
+        stdout_capture="$(printf '%s' "$payload" | env $extra_env YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$cpd" bash "$HOOKS/$hook" 2>"$bash_stderr_file")" || actual_rc=$?
     else
-        stdout_capture="$(printf '%s' "$payload" | YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$cpd" bash "$HOOKS/$hook" 2>/dev/null)" || actual_rc=$?
+        stdout_capture="$(printf '%s' "$payload" | YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$cpd" bash "$HOOKS/$hook" 2>"$bash_stderr_file")" || actual_rc=$?
     fi
+    local bash_stderr
+    bash_stderr="$(cat "$bash_stderr_file")"
+    rm -f "$bash_stderr_file"
 
     # Verify rc
     local rc_ok=0
@@ -236,16 +243,41 @@ case_check() {
     # against `yakos hook run <name>` in a fresh sandbox, and compare against
     # the bash run captured above.
     parity_check "$hook" "$fixture" "$actual_rc" "$log_name" "$setup_fn" "$extra_env" "$cpd_suffix" \
-        "$tmp/work/current/logs" "$stdout_capture"
+        "$tmp/work/current/logs" "$stdout_capture" "$bash_stderr" "$tmp"
 
     rm -rf "$tmp"
 }
 
+# normalize_stderr strips the two axes of expected-and-harmless divergence
+# from a captured stderr blob before comparison:
+#
+#   1. A leading "[<ts>] " prefix — bash's ct_log()-style hooks
+#      (compat.sh's ct_log, and the per-hook copies cycle-counter.sh /
+#      plan-quality-gate.sh inline when compat.sh isn't sourced) add this;
+#      Go's hookio/hooklog output never does. Stripped per-line so it
+#      matches regardless of where in a multi-line stderr blob it occurs.
+#   2. Each side's own mktemp -d sandbox path — every case_check /
+#      parity_check pair gets a FRESH temp dir on each side (never the
+#      same path even for bash vs. Go of the very same fixture), so any
+#      message that echoes an absolute path under the sandbox (a file
+#      path from the fixture's tool_input, a log-dir path in an error
+#      string) would show a spurious divergence without this.
+#
+# Args: raw-stderr, bash-sandbox-dir, go-sandbox-dir
+normalize_stderr() {
+    local text="$1" bash_dir="$2" go_dir="$3"
+    printf '%s' "$text" \
+        | sed -E 's/^\[[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\] //' \
+        | sed "s|$bash_dir|__SANDBOX__|g; s|$go_dir|__SANDBOX__|g"
+}
+
 # parity_check runs the Go side of one case and records the comparison.
 # Args: hook-script-relpath, fixture-relpath, bash-rc, log-name, setup-fn,
-#       extra-env, cpd-suffix, bash-log-dir, bash-stdout
+#       extra-env, cpd-suffix, bash-log-dir, bash-stdout, bash-stderr,
+#       bash-sandbox-dir
 parity_check() {
     local hook="$1" fixture="$2" bash_rc="$3" log_name="$4" setup_fn="$5" extra_env="$6" cpd_suffix="$7" bash_log_dir="$8" bash_stdout="$9"
+    local bash_stderr="${10}" bash_tmp="${11}"
     local hookname
     hookname="$(basename "$hook" .sh)"
 
@@ -282,6 +314,8 @@ parity_check() {
     else
         go_stdout="$(printf '%s' "$payload" | YAKOS_IMPL=go YAKOS_HOOKS=go YAKOS_WORK_DIR="$tmp2/work" CLAUDE_PROJECT_DIR="$cpd" "$GO_BINARY" hook run "$hookname" 2>"$go_stderr_file")" || go_rc=$?
     fi
+    local go_stderr
+    go_stderr="$(cat "$go_stderr_file")"
     rm -f "$go_stderr_file"
 
     local divergence="-"
@@ -304,6 +338,13 @@ parity_check() {
 
     if [ "$divergence" = "-" ] && [ "$bash_stdout" != "$go_stdout" ]; then
         divergence="stdout"
+    fi
+
+    if [ "$divergence" = "-" ]; then
+        local norm_bash_stderr norm_go_stderr
+        norm_bash_stderr="$(normalize_stderr "$bash_stderr" "$bash_tmp" "$tmp2")"
+        norm_go_stderr="$(normalize_stderr "$go_stderr" "$bash_tmp" "$tmp2")"
+        [ "$norm_bash_stderr" != "$norm_go_stderr" ] && divergence="stderr"
     fi
 
     printf '{"hook":%s,"fixture":%s,"bash_rc":%s,"go_rc":%s,"divergence":%s}\n' \

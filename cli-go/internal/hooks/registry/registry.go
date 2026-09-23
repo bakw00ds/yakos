@@ -148,7 +148,7 @@ var entries = []Entry{
 	},
 	{
 		Name:       "peer-claim",
-		FailClosed: false,
+		FailClosed: true,
 		New:        func(cfg Config) Hook { return peerclaim.New(cfg.WorkCurrentDir, cfg.ProjectDir) },
 	},
 	{
@@ -163,7 +163,7 @@ var entries = []Entry{
 	},
 	{
 		Name:       "plan-quality-gate",
-		FailClosed: true,
+		FailClosed: false,
 		New:        func(cfg Config) Hook { return planqualitygate.New(cfg.WorkCurrentDir, cfg.ProjectDir) },
 	},
 	{

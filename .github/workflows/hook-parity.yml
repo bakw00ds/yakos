@@ -104,8 +104,10 @@ jobs:
       # yet. It decodes real Claude Code hook JSON via internal/hooks/hookio
       # and dispatches through `yakos hook run <name>` for every one of the
       # 76 bash-baseline case_check tuples in tests/run-hook-fixtures.sh's
-      # corpus, comparing exit code, stdout, and the last NDJSON log record
-      # (ts masked) against the bash run of the same tuple.
+      # corpus, comparing exit code, stdout, stderr (modulo a bash-only
+      # "[<ts>] " ct_log prefix and each side's own temp-sandbox path), and
+      # the last NDJSON log record (ts masked) against the bash run of the
+      # same tuple.
       #
       # continue-on-error: true — parity is EXPECTED to be partial today.
       # internal/hooks/pathlog is the one hook converted to 100% parity so
