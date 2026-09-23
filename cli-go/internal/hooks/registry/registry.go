@@ -124,7 +124,7 @@ var entries = []Entry{
 		Name:       "cycle-counter",
 		FailClosed: false,
 		GoReady:    true,
-		New:        func(cfg Config) Hook { return cyclecounter.New(cfg.WorkCurrentDir) },
+		New:        func(cfg Config) Hook { return cyclecounter.New(cfg.WorkCurrentDir, cfg.StateDir) },
 	},
 	{
 		Name:       "mailbox-mirror",

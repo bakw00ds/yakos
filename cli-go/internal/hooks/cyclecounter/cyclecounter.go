@@ -8,12 +8,24 @@
 //  4. Emits a REPORT-level NDJSON log entry to work/current/logs/cycle-counter.ndjson.
 //  5. Always exits 0 (telemetry hook, never blocks).
 //
-// CycleLength defaults to 10 and can be overridden via Config.CycleLength.
-// AutoRetro defaults to true and can be overridden via Config.AutoRetro.
+// CycleLength defaults to 10 and can be overridden via Config.CycleLength,
+// or via ~/.yakos-state/settings.json's .retro.cycle_length (StateDir),
+// mirroring bash's own settings-file read — see loadSettings /
+// settingsCycleLength / settingsAutoRetro below.
+// AutoRetro defaults to true and can be overridden via Config.AutoRetro, or
+// via settings.json's .retro.auto_dispatch, INCLUDING bash's jq `//`
+// pre-existing quirk: `.retro.auto_dispatch // true` treats a literal JSON
+// `false` as falsy and falls through to `true`, so `yakos retro disable`
+// (which writes boolean `false`) has never actually disabled auto-retro on
+// the bash side. This is a real, pre-existing bash bug (S-6 A-2a round 2
+// review finding 4, flagged for a follow-up ticket) — Go replicates it
+// rather than silently fixing it, since byte-parity with bash is this
+// package's job, not correctness triage.
 package cyclecounter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,6 +51,16 @@ type Hook struct {
 	// session. When empty, Run returns immediately (no active session).
 	WorkCurrentDir string
 
+	// StateDir is the yakOS state directory (bash's ~/.yakos-state/). When
+	// non-empty and <StateDir>/settings.json exists and parses, its
+	// .retro.cycle_length / .retro.auto_dispatch values override
+	// CycleLength / AutoRetro for this run, mirroring bash's own
+	// per-invocation settings-file read (cycle-counter.sh never caches
+	// the setting either). Empty StateDir, or a missing/invalid file,
+	// leaves CycleLength/AutoRetro as constructed — the same fallback
+	// bash uses when the settings file is absent.
+	StateDir string
+
 	// CycleLength overrides the default 10-prompt cadence.
 	// 0 means use DefaultCycleLength.
 	CycleLength int
@@ -52,9 +74,10 @@ type Hook struct {
 }
 
 // New returns a Hook with sensible defaults.
-func New(workCurrentDir string) *Hook {
+func New(workCurrentDir, stateDir string) *Hook {
 	return &Hook{
 		WorkCurrentDir: workCurrentDir,
+		StateDir:       stateDir,
 		CycleLength:    DefaultCycleLength,
 		AutoRetro:      true,
 		NowFn:          time.Now,
@@ -80,6 +103,16 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	if cycleLen <= 0 {
 		cycleLen = DefaultCycleLength
 	}
+	autoRetro := h.AutoRetro
+
+	// Operator-tunable cadence override, matching bash's own read of
+	// ~/.yakos-state/settings.json on every invocation (not cached).
+	if settings, ok := loadSettings(h.StateDir); ok {
+		if n, ok := settingsCycleLength(settings); ok {
+			cycleLen = n
+		}
+		autoRetro = settingsAutoRetro(settings)
+	}
 
 	counterFile := filepath.Join(h.WorkCurrentDir, ".cycle-count")
 	markerFile := filepath.Join(h.WorkCurrentDir, ".retro-due")
@@ -96,7 +129,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 	// Emit .retro-due marker at cadence.
 	retroDue := false
-	if h.AutoRetro && count%cycleLen == 0 {
+	if autoRetro && count%cycleLen == 0 {
 		retroDue = true
 		if err := atomicTouch(markerFile); err != nil {
 			out.Stderr = fmt.Appendf(out.Stderr, "cycle-counter: touch .retro-due: %v\n", err)
@@ -128,7 +161,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 			"cycle":        count,
 			"cycle_length": cycleLen,
 			"retro_due":    retroDue,
-			"auto_retro":   h.AutoRetro,
+			"auto_retro":   autoRetro,
 		},
 	}, now)
 	if err != nil {
@@ -148,6 +181,77 @@ func senderRole(in hooktype.HookInput) string {
 	}
 	raw = strings.TrimSpace(raw)
 	return strings.TrimPrefix(raw, "yakos:")
+}
+
+// ---- settings.json overrides --------------------------------------------------
+
+// loadSettings reads and parses <stateDir>/settings.json, mirroring bash's
+// `[ -f "$settings_file" ] && command -v jq >/dev/null` guard: a missing
+// StateDir, missing file, or unparseable JSON all resolve to "no
+// override" (ok=false) rather than an error — this is a best-effort,
+// telemetry-hook read, never a hard dependency.
+func loadSettings(stateDir string) (map[string]any, bool) {
+	if stateDir == "" {
+		return nil, false
+	}
+	data, err := os.ReadFile(filepath.Join(stateDir, "settings.json")) //nolint:gosec
+	if err != nil {
+		return nil, false
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, false
+	}
+	return m, true
+}
+
+// settingsCycleLength reproduces:
+//
+//	n="$(jq -r '.retro.cycle_length // empty' "$settings_file")"
+//	case "$n" in
+//	    ''|*[!0-9]*) : ;;            # invalid / empty — keep default
+//	    *) CYCLE_LENGTH="$n" ;;
+//	esac
+//
+// i.e. the override only applies when the resolved value, rendered the
+// way `jq -r` would render it, is a non-empty string of ASCII digits.
+func settingsCycleLength(settings map[string]any) (int, bool) {
+	retro, _ := settings["retro"].(map[string]any)
+	raw := hookio.JQRawOrJSON(hookio.JQAlt(retro["cycle_length"]))
+	if raw == "" {
+		return 0, false
+	}
+	for _, c := range raw {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// settingsAutoRetro reproduces:
+//
+//	val="$(jq -r '.retro.auto_dispatch // true' "$settings_file")"
+//	[ "$val" = "false" ] && auto_retro=false
+//
+// including the jq `//` falsy-set quirk this operator inherits from
+// hookio.JQAlt: `//` treats only {null, false} as falsy, so a literal
+// JSON `false` for .retro.auto_dispatch is itself falsy and falls
+// through to the `true` fallback — `.retro.auto_dispatch: false` (what
+// `yakos retro disable` actually writes) therefore NEVER disables
+// auto-retro via this path on the bash side, and Go must not "fix" that
+// here; only a literal JSON STRING "false" makes it through as a
+// non-falsy value that then string-compares equal to "false". This is a
+// pre-existing bash bug (S-6 A-2a round 2 review finding 4) tracked
+// separately, not something this port corrects.
+func settingsAutoRetro(settings map[string]any) bool {
+	retro, _ := settings["retro"].(map[string]any)
+	raw := hookio.JQRawOrJSON(hookio.JQAlt(retro["auto_dispatch"], true))
+	return raw != "false"
 }
 
 // ---- helpers -----------------------------------------------------------------
