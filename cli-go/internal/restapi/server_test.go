@@ -201,6 +201,27 @@ func TestVersion_ContainsGoSuffix(t *testing.T) {
 	}
 }
 
+// TestVersion_BuildIdentity asserts GET /v1/version carries the same
+// build-handshake fields as the JSON-RPC yakos.version method and the gRPC
+// Version.Get RPC — see internal/daemonclient.VersionInfo.
+func TestVersion_BuildIdentity(t *testing.T) {
+	ts, _ := newTestServer(t, restapi.Config{})
+	resp := get(t, ts.URL+"/v1/version", "")
+	var result struct {
+		Version string `json:"version"`
+		Commit  string `json:"commit"`
+		LibHash string `json:"lib_hash"`
+		BuildID string `json:"build_id"`
+	}
+	decodeJSON(t, resp, &result)
+	if result.BuildID == "" {
+		t.Error("build_id should not be empty")
+	}
+	if result.LibHash == "" {
+		t.Error("lib_hash should not be empty")
+	}
+}
+
 // ---- GET /v1/kanban ---------------------------------------------------------
 
 func TestKanban_RequiresAuth(t *testing.T) {

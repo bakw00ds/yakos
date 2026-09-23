@@ -210,3 +210,24 @@ message RefreshRunRequest {
 message RefreshRunResponse {
   string output = 1;
 }
+
+// ---- Version ------------------------------------------------------------
+
+// CLI↔daemon build handshake — see internal/daemonclient and
+// internal/buildinfo. Shares the exact field shape used by the JSON-RPC
+// yakos.version method and the REST GET /v1/version endpoint.
+service Version {
+  rpc Get(VersionRequest) returns (VersionResponse);
+}
+
+message VersionRequest {}
+
+message VersionResponse {
+  // version is the legacy display string (internal/version.Read's output),
+  // kept for parity with the other two transports. commit, lib_hash, and
+  // build_id are the build-identity fields used for staleness comparison.
+  string version  = 1;
+  string commit   = 2;
+  string lib_hash = 3;
+  string build_id = 4;
+}

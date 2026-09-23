@@ -22,6 +22,21 @@ INSTALL_DIR := $(HOME)/.local/bin
 INSTALL_NAME := yakos
 EMBEDDED_DIR := $(CLI_GO_DIR)/internal/framework/embedded
 
+# Build identity (internal/buildinfo — CLI↔daemon handshake, S-6).
+#
+# BUILD_VERSION mirrors internal/version.Read's VERSION-file source, but is
+# injected separately: internal/version.Version is intentionally left
+# untouched by this Makefile so `yakos --version` output stays byte-for-byte
+# identical (version_parity_test.go pins it). BUILD_COMMIT falls back to
+# "dev" for a source tarball or shallow checkout with no git metadata, which
+# buildinfo.BuildID() also treats as its own dev fallback if left empty —
+# setting it explicitly here just makes `git rev-parse` failures visible in
+# the build id rather than silently blank.
+BUILD_VERSION := $(shell cat VERSION 2>/dev/null || echo dev)
+BUILD_COMMIT  := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo dev)
+BUILDINFO_PKG := github.com/bakw00ds/yakos/internal/buildinfo
+LDFLAGS       := -X $(BUILDINFO_PKG).Version=$(BUILD_VERSION) -X $(BUILDINFO_PKG).Commit=$(BUILD_COMMIT)
+
 .PHONY: all build build-mac build-mac-amd64 build-linux build-windows test lint install clean help embed-lib
 
 all: build
@@ -52,27 +67,27 @@ embed-lib:
 ## build: stage lib/ then compile the Go binary to ./bin/yakos
 build: embed-lib
 	mkdir -p $(BIN_DIR)
-	cd $(CLI_GO_DIR) && $(GO) build -o $(BIN_DIR)/$(BINARY_NAME) ./cmd/yakos
+	cd $(CLI_GO_DIR) && $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_NAME) ./cmd/yakos
 
 ## build-mac: cross-compile for macOS arm64 (Apple Silicon)
 build-mac:
 	mkdir -p $(BIN_DIR)
-	cd $(CLI_GO_DIR) && GOOS=darwin GOARCH=arm64 $(GO) build -o $(BIN_DIR)/$(BINARY_NAME)-darwin-arm64 ./cmd/yakos
+	cd $(CLI_GO_DIR) && GOOS=darwin GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_NAME)-darwin-arm64 ./cmd/yakos
 
 ## build-mac-amd64: cross-compile for macOS x86_64 (Intel)
 build-mac-amd64:
 	mkdir -p $(BIN_DIR)
-	cd $(CLI_GO_DIR) && GOOS=darwin GOARCH=amd64 $(GO) build -o $(BIN_DIR)/$(BINARY_NAME)-darwin-amd64 ./cmd/yakos
+	cd $(CLI_GO_DIR) && GOOS=darwin GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_NAME)-darwin-amd64 ./cmd/yakos
 
 ## build-linux: cross-compile for Linux amd64
 build-linux:
 	mkdir -p $(BIN_DIR)
-	cd $(CLI_GO_DIR) && GOOS=linux GOARCH=amd64 $(GO) build -o $(BIN_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/yakos
+	cd $(CLI_GO_DIR) && GOOS=linux GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/yakos
 
 ## build-windows: cross-compile for Windows amd64
 build-windows:
 	mkdir -p $(BIN_DIR)
-	cd $(CLI_GO_DIR) && GOOS=windows GOARCH=amd64 $(GO) build -o $(BIN_DIR)/$(BINARY_NAME)-windows-amd64.exe ./cmd/yakos
+	cd $(CLI_GO_DIR) && GOOS=windows GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_NAME)-windows-amd64.exe ./cmd/yakos
 
 ## test: run all Go tests under cli-go/
 test:
