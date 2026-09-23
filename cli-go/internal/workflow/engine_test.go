@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -835,6 +836,131 @@ func TestEngine_CrashReconciliation(t *testing.T) {
 	}
 	if updated["status"] != "interrupted" {
 		t.Errorf("status after reconcile: got %v, want interrupted", updated["status"])
+	}
+}
+
+// ---- Engine: K1 run-ID collision guard (k82-security-review-2026-09-23.md) --
+
+// singleNodeWorkflow returns a trivial one-node workflow, sufficient for
+// tests that only care about run-directory creation semantics, not DAG
+// topology.
+func singleNodeWorkflow() *workflow.Workflow {
+	return &workflow.Workflow{
+		Version: 1,
+		Name:    "single",
+		Nodes: []workflow.Node{
+			{ID: "only", Agent: "agent-a", Prompt: "step", OutputLimit: 1000},
+		},
+	}
+}
+
+// TestEngine_Run_RefusesExistingRunID is the engine-layer defense-in-depth
+// regression test for K1 (k82-security-review-2026-09-23.md). Before the
+// fix, run()'s os.MkdirAll(runDir, 0755) silently succeeded on an already-
+// existing run directory, letting a second Run/Resume call with the same
+// runID overwrite that run's run.json (including its owner_operator_id)
+// and leave any node-output files the second run doesn't itself overwrite
+// readable under the new owner. The engine must now fail closed with
+// ErrRunIDExists instead — this is what makes the handler-layer fix
+// (flows_handler.go's handleResume always minting a fresh runID) a
+// belt-and-suspenders defense rather than the only thing standing between a
+// caller and a cross-operator run takeover; it also protects the other
+// production callers of Engine.Run/Resume (internal/serve/methods.go's
+// yakos.workflow.run/resume RPC methods, cmd/yakos's `workflow run`/`resume`
+// CLI commands), which accept a caller-chosen run ID on their own trusted
+// (RPC-socket / local-CLI) paths and never had any collision guard either.
+func TestEngine_Run_RefusesExistingRunID(t *testing.T) {
+	t.Parallel()
+
+	eng, workDir := newTestEngine(t, immediateOKFn([]byte("first-owner-secret-output")))
+	wf := singleNodeWorkflow()
+
+	first, err := eng.Run(context.Background(), wf, "run-collision", "alice", dispatch.IdentityCarrier{})
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if first.Status != workflow.RunCompleted {
+		t.Fatalf("first run status: got %q, want %q", first.Status, workflow.RunCompleted)
+	}
+
+	runDir := filepath.Join(workDir, "workflows", "runs", "run-collision")
+	before, err := os.ReadFile(filepath.Join(runDir, "run.json"))
+	if err != nil {
+		t.Fatalf("read run.json after first run: %v", err)
+	}
+
+	// A second Run call with the SAME run ID, a different owner, must be
+	// refused rather than silently reusing the directory.
+	_, err = eng.Run(context.Background(), wf, "run-collision", "mallory", dispatch.IdentityCarrier{})
+	if err == nil {
+		t.Fatal("SECURITY: second Run with a colliding run ID succeeded; want ErrRunIDExists")
+	}
+	if !errors.Is(err, workflow.ErrRunIDExists) {
+		t.Errorf("second Run error = %v; want errors.Is(err, workflow.ErrRunIDExists)", err)
+	}
+
+	// The first run's run.json (including its owner and node output) must be
+	// byte-for-byte untouched by the refused second call.
+	after, err := os.ReadFile(filepath.Join(runDir, "run.json"))
+	if err != nil {
+		t.Fatalf("read run.json after refused second run: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("SECURITY: run.json changed after a refused colliding Run call.\nbefore: %s\nafter:  %s", before, after)
+	}
+	stdout, err := os.ReadFile(filepath.Join(runDir, "nodes", "only.stdout"))
+	if err != nil {
+		t.Fatalf("read node stdout after refused second run: %v", err)
+	}
+	if string(stdout) != "first-owner-secret-output" {
+		t.Errorf("SECURITY: node output changed after a refused colliding Run call: got %q", stdout)
+	}
+}
+
+// TestEngine_Resume_RefusesExistingNewRunID is
+// TestEngine_Run_RefusesExistingRunID's Resume counterpart: a Resume call
+// whose newRunID collides with an existing run directory must be refused
+// the same way — this is the exact write-target Engine.Resume shares with
+// Engine.Run via run()'s shared implementation.
+func TestEngine_Resume_RefusesExistingNewRunID(t *testing.T) {
+	t.Parallel()
+
+	eng, workDir := newTestEngine(t, immediateOKFn([]byte("out")))
+	wf := singleNodeWorkflow()
+
+	// A prior run to resume from, and a second, unrelated existing run
+	// whose ID the resume will attempt to collide with.
+	if _, err := eng.Run(context.Background(), wf, "run-prior", "alice", dispatch.IdentityCarrier{}); err != nil {
+		t.Fatalf("prior Run: %v", err)
+	}
+	victim, err := eng.Run(context.Background(), wf, "run-victim", "alice", dispatch.IdentityCarrier{})
+	if err != nil {
+		t.Fatalf("victim Run: %v", err)
+	}
+	if victim.Status != workflow.RunCompleted {
+		t.Fatalf("victim run status: got %q, want %q", victim.Status, workflow.RunCompleted)
+	}
+
+	runDir := filepath.Join(workDir, "workflows", "runs", "run-victim")
+	before, err := os.ReadFile(filepath.Join(runDir, "run.json"))
+	if err != nil {
+		t.Fatalf("read victim run.json: %v", err)
+	}
+
+	_, err = eng.Resume(context.Background(), wf, "run-prior", "run-victim", "mallory", dispatch.IdentityCarrier{})
+	if err == nil {
+		t.Fatal("SECURITY: Resume with a colliding newRunID succeeded; want ErrRunIDExists")
+	}
+	if !errors.Is(err, workflow.ErrRunIDExists) {
+		t.Errorf("Resume error = %v; want errors.Is(err, workflow.ErrRunIDExists)", err)
+	}
+
+	after, err := os.ReadFile(filepath.Join(runDir, "run.json"))
+	if err != nil {
+		t.Fatalf("read victim run.json after refused resume: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("SECURITY: victim run.json changed after a refused colliding Resume call.\nbefore: %s\nafter:  %s", before, after)
 	}
 }
 

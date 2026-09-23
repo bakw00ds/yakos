@@ -15,10 +15,15 @@ package consoleui
 //   - Error messages never leak filesystem paths or roster contents.
 //
 // Idempotency note:
-//   POST /flows/api/run is NOT idempotent — it always starts a new run.
-//   Callers that need idempotent trigger semantics must supply a deterministic
-//   runId (via the body) and accept 409 if a run with that ID already exists.
-//   POST /flows/api/resume is idempotent when the same newRunId is supplied.
+//   POST /flows/api/run is NOT idempotent — it always starts a new run, and
+//   the run ID is always server-minted (flowsRunRequest carries no run-ID
+//   field a caller could supply).
+//   POST /flows/api/resume is likewise NOT idempotent: the resumed run's ID
+//   is always server-minted (K1, k82-security-review-2026-09-23.md — a
+//   client-chosen new_run_id let a caller write a resumed run into another
+//   operator's existing run directory, overwriting its owner and exposing
+//   its node output). flowsResumeRequest.NewRunID is accepted for wire
+//   back-compat with older frontend builds but is never consulted.
 
 import (
 	"context"
@@ -675,8 +680,14 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 type flowsResumeRequest struct {
 	// RunID is the prior run ID to resume from.
 	RunID string `json:"run_id"`
-	// NewRunID is the run ID to use for the resumed run.
-	// If empty, the server mints one.
+	// NewRunID is deprecated (K1, k82-security-review-2026-09-23.md) and no
+	// longer consulted: a caller-chosen write target for the resumed run let
+	// an operator resume their own run INTO another operator's existing run
+	// ID, overwriting that run's owner (run.json) and exposing its node
+	// output. The resumed run's ID is now always server-minted, the same way
+	// handleRun already mints new-run IDs. Retained only so older frontend
+	// builds that still send it decode without error; nothing in the
+	// frontend needs to choose it.
 	NewRunID string `json:"new_run_id,omitempty"`
 	// OperatorID is deprecated (R10, round-1 security review) and no longer
 	// used for attribution: it is retained only so older frontend builds
@@ -695,8 +706,9 @@ type flowsResumeResponse struct {
 // prior run's run.json; the engine rejects resumes against an edited YAML.
 //
 // POST /flows/api/resume
-// Idempotent when the same newRunId is supplied (engine will refuse a
-// duplicate runDir creation).
+// Not idempotent: always starts a fresh, server-minted run ID (K1,
+// k82-security-review-2026-09-23.md — see flowsResumeRequest.NewRunID's doc
+// comment for why a caller-chosen run ID is no longer accepted).
 func (h *flowsHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -720,15 +732,14 @@ func (h *flowsHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newRunID := req.NewRunID
-	if newRunID == "" {
-		newRunID = mintRunID()
-	} else {
-		if err := workflow.ValidateID("new_run_id", newRunID); err != nil {
-			writeGenericError(w, http.StatusBadRequest, "invalid new_run_id")
-			return
-		}
-	}
+	// K1 (k82-security-review-2026-09-23.md): the resumed run's ID is always
+	// server-minted. req.NewRunID is decoded (above, for wire back-compat)
+	// but deliberately never read past this point — see the field's doc
+	// comment. Minting fresh here, unconditionally, is what makes the
+	// take-over attack structurally impossible rather than merely rejected:
+	// there is no code path left that can turn a caller-supplied value into
+	// a filesystem write target.
+	newRunID := mintRunID()
 
 	// Load the prior run to determine which workflow to use.
 	// Do this BEFORE the engine nil-check so 404 is returned for missing runs

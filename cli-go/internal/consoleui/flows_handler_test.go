@@ -33,6 +33,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/netid"
+	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
@@ -553,6 +554,240 @@ func writeOwnedRun(t *testing.T, workDir, runID, ownerOpID string) {
 	}
 }
 
+// newProductionEngineTestServer builds a real consoleui.Server (MustNew)
+// wired with a REAL *workflow.Engine (workflow.NewEngineForTest) whose
+// per-node dispatch is fn — no LLM calls, no live dispatch, but unlike
+// newFlowsHandlerServer/NewFlowsHandlerForTest (which set flowsHandlers'
+// handler-level nodeRunFn shortcut and never touch the engine at all), this
+// exercises handleRun/handleResume's REAL production code path.
+//
+// K2 (k82-security-review-2026-09-23.md): every other flows test in this
+// file uses the nodeRunFn shortcut, which causes handleRun/handleResume to
+// return BEFORE reaching their production operator-attribution branch (the
+// one that calls resolveRunOperatorID and 403s an unresolved identity, or
+// that a mutation could revert to the pre-R10 self-asserted body-field
+// fallback) — reverting that branch left the whole package green because no
+// test ever reached it. Tests built on this helper drive that exact branch.
+//
+// Returns workDir (for on-disk run.json assertions) and a doAs helper
+// identical in shape to newOwnerScopeTestServer's.
+func newProductionEngineTestServer(t *testing.T, fn workflow.EngineRunFn) (workDir string, doAs func(id netid.Identity, method, path, body string) *http.Response) {
+	t.Helper()
+	stateDir := t.TempDir()
+	wDir := t.TempDir()
+	tk, err := consoleui.LoadOrCreateToken(stateDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	bus := wsbus.New()
+	t.Cleanup(bus.Stop)
+
+	eng := workflow.NewEngineForTest(workflow.EngineConfig{
+		Bus:     bus,
+		WorkDir: wDir,
+	}, fn)
+
+	srv := consoleui.MustNew(t, consoleui.Config{
+		Token:             tk,
+		KanbanBoardPath:   t.TempDir() + "/kanban.md",
+		KanbanProject:     "test",
+		MetricsProjectDir: t.TempDir(),
+		PerfWorkDir:       t.TempDir(),
+		Bus:               bus,
+		WorkDir:           wDir,
+		WorkflowEngine:    eng,
+	})
+
+	doAs = func(id netid.Identity, method, path, reqBody string) *http.Response {
+		t.Helper()
+		handler := consoleui.RequireTokenForNonStatic(tk,
+			consoleui.RequireJSONForMutations(
+				injectIdentityMiddleware(id, srv.Handler())))
+		ts := httptest.NewServer(handler)
+		defer ts.Close()
+
+		var bodyReader io.Reader
+		if reqBody != "" {
+			bodyReader = strings.NewReader(reqBody)
+		}
+		req, err := http.NewRequest(method, ts.URL+path, bodyReader)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tk)
+		if reqBody != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		return resp
+	}
+	return wDir, doAs
+}
+
+// runJSONOwner reads <workDir>/workflows/runs/<runID>/run.json and returns
+// its owner_operator_id field.
+func runJSONOwner(t *testing.T, workDir, runID string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(workDir, "workflows", "runs", runID, "run.json"))
+	if err != nil {
+		t.Fatalf("read run.json for %s: %v", runID, err)
+	}
+	var probe struct {
+		OwnerOpID string `json:"owner_operator_id"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		t.Fatalf("unmarshal run.json for %s: %v", runID, err)
+	}
+	return probe.OwnerOpID
+}
+
+// waitForRunStatus polls <workDir>/workflows/runs/<runID>/run.json until its
+// status field equals want (or 5s elapses), and returns the final bytes.
+// Used so a "byte-identical run.json" assertion snapshots a run only once
+// it has settled into its terminal state — the fake node fns in this file
+// always succeed synchronously, so "completed" is reached almost
+// immediately, but the run.json write for status/started_at/ended_at/nodes
+// happens strictly after the waitForDispatch() signal (which fires from
+// inside the node dispatch call, before the run is marked done), so a plain
+// read right after that signal would race the debounce writer.
+func waitForRunStatus(t *testing.T, workDir, runID, want string) []byte {
+	t.Helper()
+	path := filepath.Join(workDir, "workflows", "runs", runID, "run.json")
+	deadline := time.Now().Add(5 * time.Second)
+	var last []byte
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			last = data
+			var probe struct {
+				Status string `json:"status"`
+			}
+			if json.Unmarshal(data, &probe) == nil && probe.Status == want {
+				return data
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for run %s status=%q; last=%s", runID, want, last)
+	return nil
+}
+
+// TestFlows_Resume_K1_NewRunIDCannotTargetAnotherOperatorsRun is the
+// regression test for K1 (k82-security-review-2026-09-23.md), reproducing
+// the review's exact scenario end-to-end against the real production path:
+// mallory owns her own run; she POSTs /flows/api/resume asking the server
+// to write the resumed run into alice's EXISTING run ID via new_run_id.
+// This must be refused — in the fixed code, refused structurally, because
+// new_run_id is never consulted at all: the server always mints its own ID,
+// alice's run.json is untouched byte-for-byte, alice can still read her own
+// run, and mallory still cannot read alice's run directly.
+func TestFlows_Resume_K1_NewRunIDCannotTargetAnotherOperatorsRun(t *testing.T) {
+	calls := make(chan struct{}, 16)
+	fn := func(ctx context.Context, _ dispatch.Params) ([]byte, dispatch.Result, error) {
+		calls <- struct{}{}
+		return []byte("ok"), dispatch.Result{ExitCode: 0}, nil
+	}
+	waitForDispatch := func() {
+		t.Helper()
+		select {
+		case <-calls:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for node dispatch to start")
+		}
+	}
+
+	workDir, doAs := newProductionEngineTestServer(t, fn)
+	writeWorkflow(t, workDir, "my-flow", minimalYAML)
+
+	alice := netid.Identity{OperatorID: "alice", Role: netid.RoleAdmin, Authenticated: true, Resolved: true}
+	mallory := netid.Identity{OperatorID: "mallory", Role: netid.RoleAdmin, Authenticated: true, Resolved: true}
+
+	// alice creates her own run — the attack's target.
+	aliceResp := doAs(alice, http.MethodPost, "/flows/api/run?name=my-flow", `{}`)
+	aliceBody := bodyStr(t, aliceResp)
+	if aliceResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("alice's run status=%d; want 202; body=%s", aliceResp.StatusCode, aliceBody)
+	}
+	var aliceRun map[string]string
+	if err := json.Unmarshal([]byte(aliceBody), &aliceRun); err != nil {
+		t.Fatalf("unmarshal alice's run response: %v; body=%s", err, aliceBody)
+	}
+	aliceRunID := aliceRun["run_id"]
+	waitForDispatch()
+	// Snapshot only once alice's run has settled into its terminal state —
+	// the fake fn succeeds synchronously, so this is immediate, but a plain
+	// read right after waitForDispatch would race the run's own
+	// status/started_at/ended_at finalization (unrelated to the attack).
+	before := waitForRunStatus(t, workDir, aliceRunID, "completed")
+	aliceRunJSONPath := filepath.Join(workDir, "workflows", "runs", aliceRunID, "run.json")
+
+	// mallory creates her own run — a legitimate resume source she owns.
+	malloryResp := doAs(mallory, http.MethodPost, "/flows/api/run?name=my-flow", `{}`)
+	malloryBody := bodyStr(t, malloryResp)
+	if malloryResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("mallory's run status=%d; want 202; body=%s", malloryResp.StatusCode, malloryBody)
+	}
+	var malloryRun map[string]string
+	if err := json.Unmarshal([]byte(malloryBody), &malloryRun); err != nil {
+		t.Fatalf("unmarshal mallory's run response: %v; body=%s", err, malloryBody)
+	}
+	malloryRunID := malloryRun["run_id"]
+	waitForDispatch()
+	// Wait for full settlement (not just dispatch-started), same reasoning
+	// as the resume-attribution test above: guarantees run.json is fully
+	// written before resuming it, and avoids racing this run's own
+	// goroutine against t.TempDir()'s later cleanup.
+	waitForRunStatus(t, workDir, malloryRunID, "completed")
+
+	// K1 attack: mallory resumes her OWN run (so checkRunOwnership's gate on
+	// the prior run passes) but asks the server to write the result into
+	// alice's EXISTING run ID.
+	attackBody := `{"run_id":"` + malloryRunID + `","new_run_id":"` + aliceRunID + `"}`
+	attackResp := doAs(mallory, http.MethodPost, "/flows/api/resume", attackBody)
+	attackRespBody := bodyStr(t, attackResp)
+	if attackResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("resume status=%d; want 202; body=%s", attackResp.StatusCode, attackRespBody)
+	}
+	var resumeResult map[string]string
+	if err := json.Unmarshal([]byte(attackRespBody), &resumeResult); err != nil {
+		t.Fatalf("unmarshal resume response: %v; body=%s", err, attackRespBody)
+	}
+	if resumeResult["new_run_id"] == aliceRunID {
+		t.Fatalf("SECURITY: server honored mallory's client-supplied new_run_id and used alice's run id %q as the resumed run's write target", aliceRunID)
+	}
+	// mallory's prior run's single node is already NodeCompleted by the time
+	// Resume loads it (pinned-output resume), so no node dispatch happens for
+	// the resumed run — wait on its own run.json reaching a terminal state
+	// instead of the (never-firing) dispatch channel.
+	waitForRunStatus(t, workDir, resumeResult["new_run_id"], "completed")
+
+	// alice's run.json must be byte-for-byte untouched by the attack.
+	after, err := os.ReadFile(aliceRunJSONPath)
+	if err != nil {
+		t.Fatalf("read alice's run.json after attack: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("SECURITY: alice's run.json changed as a result of mallory's resume attempt.\nbefore: %s\nafter:  %s", before, after)
+	}
+
+	// alice must still be able to read her own, untouched run.
+	aliceReadResp := doAs(alice, http.MethodGet, "/flows/api/run?id="+aliceRunID, "")
+	aliceReadBody := bodyStr(t, aliceReadResp)
+	if aliceReadResp.StatusCode != http.StatusOK {
+		t.Errorf("alice read her own run after the attack: status=%d; want 200; body=%s", aliceReadResp.StatusCode, aliceReadBody)
+	}
+
+	// mallory must still be refused reading alice's run directly.
+	malloryReadResp := doAs(mallory, http.MethodGet, "/flows/api/run?id="+aliceRunID, "")
+	malloryReadBody := bodyStr(t, malloryReadResp)
+	if malloryReadResp.StatusCode != http.StatusForbidden {
+		t.Errorf("mallory read alice's run: status=%d; want 403; body=%s", malloryReadResp.StatusCode, malloryReadBody)
+	}
+}
+
 // TestFlows_GetRun_OwnerScoping proves R10 (round-1 security review): a
 // run's owner is enforced on GET /flows/api/run. The creator (same resolved
 // operator ID the run was recorded under) can read it; a different resolved
@@ -745,14 +980,25 @@ func TestFlows_Resume_InvalidRunID(t *testing.T) {
 	}
 }
 
-func TestFlows_Resume_InvalidNewRunID(t *testing.T) {
+// TestFlows_Resume_NewRunIDFieldIgnored proves K1's fix
+// (k82-security-review-2026-09-23.md): the deprecated new_run_id field is
+// decoded (so older frontend builds that still send it don't get a decode
+// error) but never consulted — not even to validate it. A path-traversal-
+// shaped new_run_id produces the exact same outcome as any other value or
+// no value at all (404, prior run not found), because the field is never
+// reached by workflow.ValidateID or any path construction; the resumed
+// run's ID is always minted server-side. Before the fix this same payload
+// would have been rejected with 400 from the traversal guard on
+// new_run_id — a different, and misleading, signal that the field was
+// still load-bearing.
+func TestFlows_Resume_NewRunIDFieldIgnored(t *testing.T) {
 	ts, tok, _ := newFlowsTestServer(t)
-	body := `{"run_id":"run-20240101-000000-aabbcc","new_run_id":"../bad"}`
+	body := `{"run_id":"run-20240101-000000-aabbcc","new_run_id":"../../../etc/passwd"}`
 	resp := authedPost(t, ts.URL+"/flows/api/resume", tok, body)
-	drainClose(resp)
+	respBody := bodyStr(t, resp)
 
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("status=%d; want 400 (traversal guard on new_run_id)", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status=%d; want 404 (prior run not found; new_run_id must never be validated or consulted); body=%s", resp.StatusCode, respBody)
 	}
 }
 
