@@ -234,6 +234,8 @@ func main() {
 		runModelRouting(yakosRoot, args[1:])
 	case "hooks":
 		runHooks(args[1:])
+	case "hook":
+		runHookCmd(yakosRoot, args[1:])
 	case "serve":
 		runServe(yakosRoot, args[1:])
 	case "console":

@@ -96,6 +96,42 @@ jobs:
           YAKOS_HOOKS: "go"
         run: go test -count=1 -race -timeout 60s ./internal/hooks/...
 
+      # ---------------------------------------------------------------------------
+      # S-6 A-1: real bash-vs-Go parity harness (tests/run-hook-parity.sh).
+      #
+      # This is the "real bash<->Go parity harness" the comment above the
+      # (now-removed) vacuous -run TestHookParity_* steps said didn't exist
+      # yet. It decodes real Claude Code hook JSON via internal/hooks/hookio
+      # and dispatches through `yakos hook run <name>` for every one of the
+      # 76 bash-baseline case_check tuples in tests/run-hook-fixtures.sh's
+      # corpus, comparing exit code, stdout, and the last NDJSON log record
+      # (ts masked) against the bash run of the same tuple.
+      #
+      # continue-on-error: true — parity is EXPECTED to be partial today.
+      # internal/hooks/pathlog is the one hook converted to 100% parity so
+      # far (S-6 A-1's reference conversion); closing the rest is S-6 A-2,
+      # sized from this step's own matrix output. This step still runs on
+      # every push/PR so the matrix is always current, and the per-hook
+      # PASS/FAIL matrix is uploaded as a job artifact either way.
+      - name: Build yakos (Go)
+        run: make build
+
+      - name: Bash-vs-Go hook parity matrix (S-6 A-1, advisory)
+        id: hook_parity_matrix
+        continue-on-error: true
+        shell: bash
+        env:
+          YAKOS_HOOK_NOW: "2026-01-01T00:00:00Z"
+        run: bash tests/run-hook-parity.sh
+
+      - name: Upload hook parity matrix
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: hook-parity-report-${{ matrix.os }}
+          path: work/current/logs/hook-parity-report.ndjson
+          if-no-files-found: warn
+
       - name: Verify fixture files are valid JSON
         shell: bash
         run: |
