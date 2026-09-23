@@ -12,6 +12,7 @@
 package mailboxmirror
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -89,11 +90,20 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		"session_id":      sessionID,
 		"transcript_path": transcriptPath,
 	}
-	line, err := json.Marshal(record)
-	if err != nil {
+	// Use an Encoder with HTML-escaping disabled, not json.Marshal, so
+	// `<`, `>`, and `&` round-trip as literal bytes in messages.ndjson —
+	// the durable peer-message audit trail — matching bash's `jq -nc`,
+	// which never HTML-escapes. json.Marshal's default escaping is inert
+	// to programmatic (JSON-parsing) readers but breaks raw grep/byte-diff
+	// tooling over the audit log (S-6 A-2a round 2 review finding 5).
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(record); err != nil {
 		out.Stderr = fmt.Appendf(out.Stderr, "%s: marshal record: %v\n", hookName, err)
 		return out, nil
 	}
+	line := bytes.TrimRight(buf.Bytes(), "\n")
 
 	// Append to messages.ndjson using O_APPEND for atomic multi-process writes.
 	if appendErr := mailbox.AppendLine(messagesLog, line); appendErr != nil {
