@@ -71,6 +71,15 @@ jobs:
         run: |
           ./tests/run-runtime-fixtures.sh
 
+  soul-skill-noop:
+    name: soul/skill silent no-op regression coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - name: Run soul/skill no-op test suite
+        run: |
+          ./tests/run-soul-skill-noop-test.sh
+
   hook-fixtures:
     name: hook fixtures
     runs-on: ubuntu-latest

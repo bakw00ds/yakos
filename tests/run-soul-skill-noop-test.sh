@@ -26,7 +26,6 @@
 # but can be overridden via $SOUL_SH / $SKILL_SH so the same assertions
 # can be replayed against a pre-fix checkout (e.g. `git show
 # <rev>:cli/lib/soul.sh`) to prove the suite catches the regression.
-# See tests/run-soul-skill-noop-fail-then-pass.sh for that proof.
 
 set -eu
 
