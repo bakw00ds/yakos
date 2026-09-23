@@ -258,8 +258,13 @@ func runCandidates(cfg Config) (*Result, error) {
 	}
 
 	if cfg.Review {
-		// M2 follow-up: interactive review loop.
+		// M2 follow-up: interactive review loop. The non-interactive
+		// candidate list above is still printed (real, useful work), but
+		// the command must not exit 0: the operator explicitly asked for
+		// --review and silently downgrading to a plain listing would let
+		// a caller believe an interactive review happened when it did not.
 		_, _ = fmt.Fprintln(cfg.ErrWriter, "skill: interactive review not yet implemented (M2 follow-up)")
+		return res, fmt.Errorf("skill candidates --review: interactive review not yet implemented (M2 follow-up)")
 	}
 
 	return res, nil

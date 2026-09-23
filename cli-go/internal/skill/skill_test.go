@@ -172,18 +172,32 @@ func TestSkillParity_Candidates_MissingFile(t *testing.T) {
 	}
 }
 
-// ---- scenario (d): --review prints M2 advisory ------------------------------
-
+// ---- scenario (d): --review fails loudly (interactive review not shipped) --
+//
+// `yakos skill candidates --review` used to print the M2 advisory to stderr
+// and still return a nil error, so the command exited 0 even though the
+// interactive review the operator asked for never ran — a silent no-op. It
+// must now still print the non-interactive candidate list (real, useful
+// work) but return a non-nil error so the CLI exits non-zero.
 func TestSkillParity_Candidates_ReviewAdvisory(t *testing.T) {
 	cfg := newTestConfig(t)
 	sampleCandidatesFile(cfg.ProjectDir)
 	cfg.Subcommand = "candidates"
 	cfg.Review = true
-	if _, err := Run(cfg); err != nil {
-		t.Fatalf("Run: %v", err)
+	_, err := Run(cfg)
+	if err == nil {
+		t.Fatal("expected non-nil error for --review (interactive review not implemented); got nil")
+	}
+	if !strings.Contains(err.Error(), "not yet implemented") {
+		t.Errorf("expected 'not yet implemented' in error; got: %v", err)
 	}
 	if !strings.Contains(errOut(cfg), "M2") {
 		t.Errorf("expected M2 advisory in stderr; got: %q", errOut(cfg))
+	}
+	// The plain candidate listing is still real, useful work and should
+	// still be printed to stdout despite the error.
+	if !strings.Contains(out(cfg), "conf=") {
+		t.Errorf("expected candidate list still printed to stdout; got: %q", out(cfg))
 	}
 }
 

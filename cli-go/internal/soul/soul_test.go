@@ -28,6 +28,10 @@ func cfgOut(cfg Config) string {
 	return cfg.Writer.(*bytes.Buffer).String()
 }
 
+func cfgErr(cfg Config) string {
+	return cfg.ErrWriter.(*bytes.Buffer).String()
+}
+
 // makeSoulFile creates ~/.yakos-state/soul/<name>.md under homeDir.
 func makeSoulFile(t *testing.T, homeDir, name, content string) string {
 	t.Helper()
@@ -543,35 +547,54 @@ func TestPending_EmptyPendingFile(t *testing.T) {
 
 // ---- approve / reject -------------------------------------------------------
 
-func TestApprove_NotYetImplemented(t *testing.T) {
+// TestApprove_NotYetImplemented_FailsLoudly asserts `yakos soul approve`
+// returns a non-nil error (so the CLI exits non-zero) instead of silently
+// succeeding. It used to print an advisory to stdout and return (Result{},
+// nil), which meant `yakos soul approve <slug> && do-the-thing` would run
+// do-the-thing even though nothing was approved — exactly the silent-no-op
+// class of bug this fix addresses. approve/reject are the operator gates
+// the retrospective-discipline workflow depends on.
+func TestApprove_NotYetImplemented_FailsLoudly(t *testing.T) {
 	home := t.TempDir()
 	cfg := newTestConfig(home, "approve", []string{"some-slug"})
 	res, err := Run(cfg)
-	if err != nil {
-		t.Fatalf("Run approve: %v", err)
+	if err == nil {
+		t.Fatal("expected non-nil error from 'soul approve' (not yet implemented); got nil")
 	}
-	if res.Subcommand != "approve" {
-		t.Errorf("expected subcommand=approve; got %q", res.Subcommand)
+	if res != nil {
+		t.Errorf("expected nil Result on error; got %+v", res)
 	}
-	out := cfgOut(cfg)
-	if !strings.Contains(out, "not yet implemented") {
-		t.Errorf("expected 'not yet implemented' in output; got: %q", out)
+	if !strings.Contains(err.Error(), "not yet implemented") {
+		t.Errorf("expected 'not yet implemented' in error; got: %v", err)
+	}
+	errOut := cfgErr(cfg)
+	if !strings.Contains(errOut, "not yet implemented") {
+		t.Errorf("expected 'not yet implemented' on stderr; got: %q", errOut)
+	}
+	// Nothing should land on stdout for a failed operator gate.
+	if out := cfgOut(cfg); out != "" {
+		t.Errorf("expected empty stdout on failure; got: %q", out)
 	}
 }
 
-func TestReject_NotYetImplemented(t *testing.T) {
+// TestReject_NotYetImplemented_FailsLoudly mirrors
+// TestApprove_NotYetImplemented_FailsLoudly for `yakos soul reject`.
+func TestReject_NotYetImplemented_FailsLoudly(t *testing.T) {
 	home := t.TempDir()
 	cfg := newTestConfig(home, "reject", []string{"some-slug"})
 	res, err := Run(cfg)
-	if err != nil {
-		t.Fatalf("Run reject: %v", err)
+	if err == nil {
+		t.Fatal("expected non-nil error from 'soul reject' (not yet implemented); got nil")
 	}
-	if res.Subcommand != "reject" {
-		t.Errorf("expected subcommand=reject; got %q", res.Subcommand)
+	if res != nil {
+		t.Errorf("expected nil Result on error; got %+v", res)
 	}
-	out := cfgOut(cfg)
-	if !strings.Contains(out, "not yet implemented") {
-		t.Errorf("expected 'not yet implemented' in output; got: %q", out)
+	if !strings.Contains(err.Error(), "not yet implemented") {
+		t.Errorf("expected 'not yet implemented' in error; got: %v", err)
+	}
+	errOut := cfgErr(cfg)
+	if !strings.Contains(errOut, "not yet implemented") {
+		t.Errorf("expected 'not yet implemented' on stderr; got: %q", errOut)
 	}
 }
 
