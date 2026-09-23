@@ -185,9 +185,24 @@ type termListResult struct {
 	Sessions []termmanager.SessionMeta `json:"sessions"`
 }
 
+// handleTermList lists sessions owned by the daemon's own stable loopback
+// operator ID — the same scoping GET /api/term applies (round-2 review R18)
+// and the same ID yakos.term.create stamps as owner (round-2 review R3).
+//
+// Round-2 review N6/N-follow-up: the JSON-RPC socket is mode-0600,
+// owner-UID, so an unfiltered List() here was judged an accepted residual
+// risk ("the last unscoped listing") rather than a live vulnerability — the
+// socket's own permissions already restrict callers to the daemon's own
+// process tree. Scoping it anyway costs nothing and keeps every session
+// listing surface consistent: the daemon only ever needs to see sessions it
+// itself registered under its own stable ID (every yakos.term.create call
+// stamps that same owner), so this is a no-op for the only caller that
+// exists today and closes the listing for good if the socket's trust
+// boundary is ever loosened.
 func handleTermList(cfg Config) jsonrpc.Handler {
 	return func(ctx context.Context, params json.RawMessage) (interface{}, error) {
-		sessions := cfg.TerminalManager.List()
+		ownerOperatorID := loopbackowner.LoadOrCreate(cfg.restStateDir())
+		sessions := cfg.TerminalManager.ListForOperator(ownerOperatorID)
 		if sessions == nil {
 			sessions = []termmanager.SessionMeta{}
 		}
