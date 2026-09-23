@@ -70,6 +70,16 @@ func scan(content, hook string, scopeOK func(scopeLine string) bool) bool {
 	}
 
 	for _, line := range strings.Split(content, "\n") {
+		// bash's awk state machine matches POSIX [[:space:]] in its
+		// heading/entry patterns, which (unlike our [ \t] classes here)
+		// also matches \r — so a CRLF-terminated hook-bypass.md (edited on
+		// Windows, or saved by a CRLF-preserving tool) is honored by
+		// bash's ho_check_bypass. Trimming the trailing \r before matching
+		// reproduces that without widening every character class to
+		// [[:space:]] equivalents (Go's regexp DOES support POSIX classes,
+		// but a single TrimRight here is simpler and covers every pattern
+		// below uniformly, including the ones that don't anchor on $).
+		line = strings.TrimRight(line, "\r")
 		switch {
 		case !active && reActiveHeading.MatchString(line):
 			active = true

@@ -99,3 +99,33 @@ func TestCheckExact_TrimsWhitespace(t *testing.T) {
 		t.Error("expected surrounding whitespace to be trimmed before exact comparison")
 	}
 }
+
+// CRLF-terminated hook-bypass.md — a file edited on Windows, or saved by
+// a CRLF-preserving tool. bash's awk state machine matches POSIX
+// [[:space:]] (which also matches \r) in its heading/entry patterns, so
+// it honors this file; Go must too (S-6 A-2a round 2 review finding 6).
+func TestCheck_CRLFLineEndings_StillMatches(t *testing.T) {
+	md := "## Active entries\r\n## bypass: b1\r\n**Hook:** secret-scan\r\n**Scope:** api/main.go\r\n"
+	if !hookbypass.Check(md, "secret-scan", "api/main.go") {
+		t.Error("expected CRLF-terminated hook-bypass.md to match, same as bash's awk")
+	}
+}
+
+func TestCheckExact_CRLFLineEndings_ScopeTrimmedOfCR(t *testing.T) {
+	// The trailing \r must not leak into the extracted Scope value, or an
+	// exact-match sentinel comparison would spuriously fail even once the
+	// heading/entry regexes themselves tolerate CRLF.
+	md := "## Active entries\r\n## bypass: b1\r\n**Hook:** peer-claim\r\n**Scope:** degraded-input\r\n"
+	if !hookbypass.CheckExact(md, "peer-claim", "degraded-input") {
+		t.Error("expected CRLF-terminated hook-bypass.md to satisfy an exact scope match")
+	}
+}
+
+func TestCheck_CRLF_ActiveHeadingAlone_NoTrailingSpaceRequired(t *testing.T) {
+	// A bare CRLF-terminated "## Active entries" heading (no entries yet)
+	// must not itself be mistaken for a match, and must not error/panic.
+	md := "## Active entries\r\n"
+	if hookbypass.Check(md, "secret-scan", "api/main.go") {
+		t.Error("expected no match with no entries present")
+	}
+}
