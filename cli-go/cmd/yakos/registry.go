@@ -263,7 +263,7 @@ var commandRegistry = []commandEntry{
 	},
 	{
 		Name:   "events",
-		Specs:  specSet("events", "--ws-addr", "--topic", "--since"),
+		Specs:  specSet("events", "--ws-addr", "--topic", "--since", "--restart-stale-daemon"),
 		HelpFn: printEventsHelp,
 		AllowUnparsed: []flagAllow{
 			{Flag: "--rotate-ws-token", Reason: "printEventsHelp's `Rotate the token with: yakos serve --rotate-ws-token` describes yakos serve's flag, not an events flag"},

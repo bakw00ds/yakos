@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -212,7 +213,24 @@ func TestMaybeRouteToDaemon_RefusesOnMismatch_Helper(t *testing.T) {
 // an actionable message on stderr and exits 1, rather than silently falling
 // through to bash passthrough or routing against a daemon that predates the
 // current build.
+//
+// Skipped on Windows: internal/jsonrpc's Windows transport
+// (transport_windows.go) is a documented "Phase 2 scaffold" — Listen/Dial
+// ignore the socket path entirely and communicate the daemon's address via
+// a single process-global TCP loopback address (windowsListenerAddr), with
+// a comment noting the real go-winio named-pipe implementation is a
+// follow-up. That address only exists in the process that called Listen; a
+// separate subprocess (this test's helper, re-exec'd to safely exercise
+// maybeRouteToDaemon's os.Exit(1) path) starts with its own zero-valued
+// windowsListenerAddr and can never reach a daemon a sibling process
+// started, on Windows, regardless of any application-level fix — the same
+// gap production `yakos serve` + a second `yakos` process would hit today.
+// Covered on macOS/Linux, where the real Unix-domain-socket transport is
+// cross-process by construction.
 func TestMaybeRouteToDaemon_RefusesOnMismatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("internal/jsonrpc's Windows transport is a single-process TCP-loopback scaffold (see transport_windows.go) — a subprocess can never dial a daemon a sibling process started; see this test's doc comment")
+	}
 	dir := resolveDir(t, t.TempDir())
 	stop := startFakeDaemon(t, dir, "0.0.0-stale+aaaaaaaaaaaa+deadbeef0000")
 	defer stop()
@@ -407,7 +425,15 @@ func TestCheckDaemonHandshakeForEvents_MismatchRefuses_Helper(t *testing.T) {
 // TestCheckDaemonHandshakeForEvents_MismatchRefuses asserts `yakos events`
 // refuses (exit 1, actionable message) rather than subscribing against a
 // stale local daemon.
+//
+// Skipped on Windows — same reason as
+// TestMaybeRouteToDaemon_RefusesOnMismatch's doc comment: the Windows
+// transport scaffold's daemon address is a process-global variable, not
+// reachable from this test's re-exec'd subprocess.
 func TestCheckDaemonHandshakeForEvents_MismatchRefuses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("internal/jsonrpc's Windows transport is a single-process TCP-loopback scaffold (see transport_windows.go) — a subprocess can never dial a daemon a sibling process started; see TestMaybeRouteToDaemon_RefusesOnMismatch's doc comment")
+	}
 	dir := resolveDir(t, t.TempDir())
 	stop := startFakeDaemon(t, dir, "0.0.0-stale+aaaaaaaaaaaa+deadbeef0000")
 	defer stop()
