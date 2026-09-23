@@ -70,7 +70,18 @@ func startFakeDaemon(t *testing.T, workspaceRoot, buildID string) func() {
 			return
 		}
 		stopped = true
-		cancel() // Serve closes ln on ctx.Done()
+		cancel()
+		// Close ln synchronously here rather than relying solely on the
+		// ctx.Done() goroutine inside Serve (which closes it
+		// asynchronously): a caller that immediately starts a fresh
+		// listener on this same socketPath (the restart tests do exactly
+		// this) can otherwise race the old listener's async close against
+		// the new listener's bind+os.Remove, occasionally unlinking the
+		// FRESH socket file out from under the new listener. Observed as a
+		// flaky "no such file or directory" on jsonrpc.Dial under CI's
+		// timing (macOS runner, -race) even though it passed reliably
+		// on a faster local machine.
+		_ = ln.Close()
 		_ = os.Remove(socketPath)
 	}
 }
