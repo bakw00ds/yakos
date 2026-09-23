@@ -15,13 +15,15 @@ package taskcompletedispatch
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
@@ -76,8 +78,10 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 	agentRole := senderRole(in)
 
-	// Look up per-domain route.
-	domain := domainRoutes[strings.ToLower(agentRole)]
+	// Look up per-domain route. Case-sensitive, matching bash's `case
+	// "$agent" in go-api|backend|api) ...` (no case-folding on either
+	// side).
+	domain := domainRoutes[agentRole]
 
 	// Construct the would_run path (report-only; nothing executes).
 	wouldRun := ""
@@ -92,24 +96,31 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	// Bypass-aware (even though we don't actually run anything in v0.1).
 	bypassActive := h.isBypassed(domain)
 
-	entry := map[string]any{
-		"ts":            h.NowFn().UTC().Format(time.RFC3339),
-		"hook":          hookName,
-		"severity":      "REPORT",
-		"action":        "pass",
-		"message":       "report-only in v0.1 (UNCLEAR — see hook source)",
-		"mode":          "report-only",
-		"agent_type":    agentRole,
-		"routed_domain": domain,
-		"would_run":     wouldRun,
-		"bypass_active": bypassActive,
+	now := time.Now()
+	if h.NowFn != nil {
+		now = h.NowFn()
 	}
-
-	if h.WorkCurrentDir != "" {
-		logFile := filepath.Join(h.WorkCurrentDir, "logs", hookName+".ndjson")
-		if err := appendNDJSON(logFile, entry); err != nil {
-			out.Stderr = fmt.Appendf(out.Stderr, "%s: log: %v\n", hookName, err)
-		}
+	err := hooklog.Append(h.WorkCurrentDir, hooklog.Entry{
+		Hook:      hookName,
+		Severity:  "REPORT",
+		Decision:  "pass",
+		Reason:    "report-only in v0.1 (UNCLEAR — see hook source)",
+		Agent:     agentRole,
+		SessionID: hookio.PayloadString(in, "session_id"),
+		Event:     in.Event,
+		Extra: map[string]any{
+			"mode":          "report-only",
+			"agent_type":    agentRole,
+			"routed_domain": domain,
+			"would_run":     wouldRun,
+			// bash's --arg bypass "$bypass_active" always yields a JSON
+			// STRING ("true"/"false"), not a boolean — ho_log's extra jq
+			// object is built entirely from --arg-typed shell strings.
+			"bypass_active": strconv.FormatBool(bypassActive),
+		},
+	}, now)
+	if err != nil {
+		out.Stderr = fmt.Appendf(out.Stderr, "%s: log: %v\n", hookName, err)
 	}
 
 	return out, nil
@@ -131,39 +142,14 @@ func (h *Hook) isBypassed(domain string) bool {
 
 // ---- helpers -----------------------------------------------------------------
 
+// senderRole extracts the agent/role, matching hi_sender_role exactly:
+// hi_field_or '.agent_type' 'lead' (top-level, fallback "lead" when
+// absent/empty), trimmed, then the "yakos:" namespace prefix stripped.
 func senderRole(in hooktype.HookInput) string {
-	if r, ok := in.Env["YAKOS_AGENT_ROLE"]; ok && r != "" {
-		return r
+	raw := hookio.PayloadString(in, "agent_type")
+	if raw == "" {
+		raw = "lead"
 	}
-	if r := stringField(in.Payload, "agent_type"); r != "" {
-		return r
-	}
-	return "unknown"
-}
-
-func stringField(payload map[string]any, key string) string {
-	v, ok := payload[key]
-	if !ok {
-		return ""
-	}
-	s, _ := v.(string)
-	return s
-}
-
-func appendNDJSON(logFile string, entry map[string]any) error {
-	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil { //nolint:gosec
-		return err
-	}
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec
-	if err != nil {
-		return err
-	}
-	defer f.Close() //nolint:errcheck
-	_, err = f.Write(data)
-	return err
+	raw = strings.TrimSpace(raw)
+	return strings.TrimPrefix(raw, "yakos:")
 }

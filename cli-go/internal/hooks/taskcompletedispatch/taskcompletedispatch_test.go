@@ -41,12 +41,17 @@ func readLastLog(t *testing.T, logFile string) map[string]any {
 	return last
 }
 
+// newInput builds a HookInput carrying agentRole as the top-level
+// .agent_type Payload field, matching hi_sender_role.
+//
+// S-6 A-2a: previously set the YAKOS_AGENT_ROLE env var, which bash's
+// task-complete-dispatch.sh never reads.
 func newInput(agentRole string) hooktype.HookInput {
-	env := map[string]string{}
+	payload := map[string]any{}
 	if agentRole != "" {
-		env["YAKOS_AGENT_ROLE"] = agentRole
+		payload["agent_type"] = agentRole
 	}
-	return hooktype.HookInput{Payload: map[string]any{}, Env: env}
+	return hooktype.HookInput{Payload: payload, Env: map[string]string{}}
 }
 
 func TestTaskCompleteDispatch_ReportOnly(t *testing.T) {
@@ -137,8 +142,8 @@ func TestTaskCompleteDispatch_BypassInactive(t *testing.T) {
 	h := &taskcompletedispatch.Hook{WorkCurrentDir: dir, NowFn: fixedNow}
 	_, _ = h.Run(context.Background(), newInput("backend"))
 	rec := readLastLog(t, filepath.Join(dir, "logs", "task-complete-dispatch.ndjson"))
-	if rec["bypass_active"] != false {
-		t.Errorf("bypass_active=%v, want false", rec["bypass_active"])
+	if rec["bypass_active"] != "false" {
+		t.Errorf("bypass_active=%v, want \"false\"", rec["bypass_active"])
 	}
 }
 
@@ -151,8 +156,8 @@ func TestTaskCompleteDispatch_BypassActive(t *testing.T) {
 	h := &taskcompletedispatch.Hook{WorkCurrentDir: dir, NowFn: fixedNow}
 	_, _ = h.Run(context.Background(), newInput("backend"))
 	rec := readLastLog(t, filepath.Join(dir, "logs", "task-complete-dispatch.ndjson"))
-	if rec["bypass_active"] != true {
-		t.Errorf("bypass_active=%v, want true", rec["bypass_active"])
+	if rec["bypass_active"] != "true" {
+		t.Errorf("bypass_active=%v, want \"true\"", rec["bypass_active"])
 	}
 }
 
