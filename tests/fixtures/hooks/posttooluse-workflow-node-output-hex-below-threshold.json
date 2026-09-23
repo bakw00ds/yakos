@@ -1,0 +1,12 @@
+{
+  "_doc": "N2 (s3-flows-security-review-r2-2026-09-21.md): a 260-char hex string (e.g. a build fingerprint or concatenated hash digest) is well below the 400-char pattern-9 threshold, but must still PASS (rc=0) \u2014 regression guard for the restored threshold alongside the base64 fixture.",
+  "session_id": "fixture-workflow-node-output-hex-below-threshold-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "flows:fetch",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "WorkflowNodeOutput",
+  "tool_response": "Build fingerprint for this artifact: 9b1b673bd4755d05ad7853c1f76eb97706ca828bca0385813dbad3c681d06bd2aa399dac946dc59c0996daeee6f529a279764017f2ed6cfc7403d75e173e4eaede5fe878f78e2978aa2447c462ddaed16dc0cf0b9cd7f78df0cac5e40c02d4e518ca6eaac8d82f01b7210760474f36e8b5359309cc6273931bdb2a0df3dbe4d58fed (matches expected checksum).",
+  "tool_use_id": "toolu_fixture_workflow_hex_below_threshold_001"
+}

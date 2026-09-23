@@ -1,0 +1,12 @@
+{
+  "_doc": "N2 (s3-flows-security-review-r2-2026-09-21.md): a 308-char base64-looking run embedded in otherwise-ordinary prose (e.g. a fetched page's inline asset, a concatenated digest) is BELOW the intended 400-char pattern-9 threshold. Expect PASS (rc=0). Round 2's {255,} bound would have hard-blocked this on the BLOCKING workflow-node path \u2014 this fixture guards the restored 400-char threshold.",
+  "session_id": "fixture-workflow-node-output-base64-below-threshold-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "flows:fetch",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "WorkflowNodeOutput",
+  "tool_response": "Here is the page summary, followed by an embedded asset reference: odJFCrnl2edlBDdz1C5Jau2RJtBRnlWmTSHf6pWkLUyifDLkDmWJ6UuVTAIjvFu7WICPhDeOZIiBOB/Y6sHrFH2ZUCr/lgotu2iXW7GboIRoL3u6aHwnMztVuaP+coUNEhEkk+iqq8vH2BzNZV45pFCiRcDCajhDieQjEJ+Bq8F80ymm3T207gmhZRnFyy5r2xJ7Fj4mgblEv0+9BZhvWaXH6K2+tyLBhhOhg9uhkxiiEZpFfk1OHAOEHYqM6Ojb6mjBHqSiFVKu4MbMnrHontIKARAH+Ggl2JfaQqHu42bojteVs3qf -- end of asset.",
+  "tool_use_id": "toolu_fixture_workflow_base64_below_threshold_001"
+}

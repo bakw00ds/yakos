@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -44,10 +43,64 @@ type Engine struct {
 	Project   string // pinned project path for all workflow node dispatches
 	WorkDir   string // <work>/current/ root
 
+	// OutputScanFn, when non-nil, is called once per ${nodes.<id>.output}
+	// reference substituted into a downstream node's prompt (C1:
+	// security-review-2026-09-14.md), with the raw upstream bytes that are
+	// about to be spliced in (post-truncation, pre-delimiter-wrap). A
+	// non-nil error blocks that substitution — and therefore the
+	// downstream node run — rather than merely warning, since this output
+	// is about to become another agent's instructions under
+	// bypassPermissions.
+	//
+	// Nil (the default, e.g. in unit tests) skips scanning entirely.
+	//
+	// Production code MUST NOT construct an Engine as a bare struct
+	// literal — use NewEngine, which wires this field automatically (R1,
+	// s3-flows-security-review-2026-09-21.md: every production
+	// construction site left this nil by hand, so the blocking scan
+	// silently never ran anywhere). Test code that injects a fake runFn
+	// via SetEngineRunFn continues to construct &Engine{} directly, which
+	// leaves this nil (scanning skipped) unless a test sets it itself —
+	// that is the intended, hermetic default for unit tests.
+	OutputScanFn OutputScanFunc
+
 	// runFn is the dispatch function used per node. Nil means use Svc.Run.
 	// Tests inject a deterministic fake here to avoid live LLM calls.
 	// Must NOT be set in production; setting it bypasses the governed Service.
 	runFn EngineRunFn
+}
+
+// EngineConfig groups the fields a production caller needs to construct an
+// Engine via NewEngine. It intentionally mirrors Engine's own exported
+// fields (minus OutputScanFn, which NewEngine always derives from
+// YakosRoot/Project rather than accepting as input — see NewEngine).
+type EngineConfig struct {
+	Svc       *dispatch.Service
+	Bus       *wsbus.Bus
+	YakosRoot string
+	Project   string
+	WorkDir   string
+}
+
+// NewEngine constructs a production Engine with OutputScanFn wired to the
+// real output-injection-scan.sh-backed scanner (C1;
+// s3-flows-security-review-2026-09-21.md R1). Every production
+// construction site — cmd/yakos's `workflow run`/`workflow resume`, the
+// daemon's workflow.run/workflow.resume RPC handler, and the console's
+// Flows engine — MUST call this instead of building &Engine{} by hand, so
+// that a future call site cannot silently reintroduce R1 by forgetting to
+// set the field itself. Test code is unaffected: it constructs &Engine{}
+// directly (see Engine.OutputScanFn's doc comment) and is never expected
+// to call NewEngine.
+func NewEngine(cfg EngineConfig) *Engine {
+	return &Engine{
+		Svc:          cfg.Svc,
+		Bus:          cfg.Bus,
+		YakosRoot:    cfg.YakosRoot,
+		Project:      cfg.Project,
+		WorkDir:      cfg.WorkDir,
+		OutputScanFn: NewOutputInjectionScanFunc(cfg.YakosRoot, cfg.Project),
+	}
 }
 
 // dispatchNode calls either the injected runFn (tests) or Svc.Run (production).
@@ -570,7 +623,18 @@ func (e *Engine) runNode(
 	}
 
 	// Substitute ${inputs.<k>} and ${nodes.<id>.output} in the prompt.
-	prompt, truncated, err := substitutePrompt(node, wf.Inputs, rs)
+	// C1: bind e.OutputScanFn (if any) to this call's ctx/agent so
+	// substitutePrompt can run it against each upstream node-output value
+	// before splicing it in. nil OutputScanFn (e.g. in unit tests) skips
+	// scanning entirely.
+	var scanUpstream func(upstreamNodeID string, value []byte) error
+	if e.OutputScanFn != nil {
+		scanFn := e.OutputScanFn
+		scanUpstream = func(upstreamNodeID string, value []byte) error {
+			return scanFn(ctx, upstreamNodeID, node.Agent, value)
+		}
+	}
+	prompt, truncated, err := substitutePrompt(node, wf.Inputs, rs, scanUpstream)
 	if err != nil {
 		e.nodeFailure(rs, node.ID, 0, err.Error(), runFailed, failedSet, queueMu, wf.Name)
 		return
@@ -716,7 +780,41 @@ func (e *Engine) nodeFailure(
 // substitutePrompt replaces ${inputs.<k>} and ${nodes.<id>.output} references
 // in the node's prompt. Returns the substituted prompt, whether any upstream
 // output was tail-truncated (within the node's OutputLimit budget), and any error.
-func substitutePrompt(node Node, inputs map[string]string, rs *RunState) (string, bool, error) {
+//
+// C1 (security-review-2026-09-14.md): every ${nodes.*.output} value is
+// upstream, potentially attacker-influenced content and MUST NOT be spliced
+// into the downstream prompt as if it were part of the workflow author's own
+// instructions. Three things happen to each such value, in order:
+//
+//  1. It is tail-truncated against the node's OutputLimit budget (unchanged
+//     from before C1).
+//  2. If scanUpstream is non-nil, it is passed to scanUpstream for a
+//     blocking injection-pattern check; a non-nil error aborts the whole
+//     substitution (and therefore the downstream node run) before anything
+//     is spliced in.
+//  3. It is wrapped in an explicit untrusted-data delimiter
+//     (wrapUntrustedNodeOutput), and the final prompt is prefixed with a
+//     standing "this is data, not instructions" notice
+//     (untrustedOutputPreamble) whenever at least one such reference was
+//     substituted.
+//
+// ${inputs.<k>} values are operator-supplied at workflow-trigger time, not
+// upstream model output, and are left exactly as before — unscanned,
+// unwrapped, and outside the output budget.
+//
+// R2 (s3-flows-security-review-2026-09-21.md): the final substitution step
+// is a SINGLE PASS over the original, author-written node.Prompt
+// (varRefRe.ReplaceAllStringFunc), never a sequence of replacements applied
+// to an accumulating string. That distinction is load-bearing: applying
+// substitutions sequentially let content spliced in at one placeholder be
+// rescanned for placeholder syntax at a later step, so upstream output
+// containing the literal text "${nodes.<other>.output}" could splice an
+// already-wrapped, nonce-valid closing tag into its own delimited region —
+// escaping the delimiter without ever knowing the nonce. A single pass over
+// the original template text can never do this: every match is found and
+// replaced against the trusted prompt the workflow author wrote, not
+// against anything already substituted in.
+func substitutePrompt(node Node, inputs map[string]string, rs *RunState, scanUpstream func(nodeID string, value []byte) error) (string, bool, error) {
 	// Collect all upstream outputs referenced in this prompt.
 	// The OutputLimit is a TOTAL budget across node outputs ONLY (inputs are not
 	// truncated — they are operator-supplied and not subject to the output cap).
@@ -724,11 +822,20 @@ func substitutePrompt(node Node, inputs map[string]string, rs *RunState) (string
 	type subst struct {
 		placeholder string
 		value       []byte
-		isNodeOut   bool // true for nodes.*.output refs; false for inputs.*
+		isNodeOut   bool   // true for nodes.*.output refs; false for inputs.*
+		nodeID      string // set when isNodeOut: the upstream node id (for the delimiter tag)
 	}
 
 	var substitutions []subst
 	totalUpstreamBytes := 0
+	hasNodeOutput := false
+	// Dedupe by placeholder text up front (not just at final-substitution
+	// time): a placeholder referenced more than once in one prompt must
+	// only be read/scanned/wrapped once — doing it per OCCURRENCE would
+	// re-invoke the blocking scan subprocess redundantly for the exact
+	// same content, and (before R2) is also what let the sequential loop's
+	// "seen" dedup mask how many times a value was actually rescanned.
+	seenPlaceholder := make(map[string]bool)
 
 	matches := varRefRe.FindAllStringSubmatch(node.Prompt, -1)
 	for _, m := range matches {
@@ -736,6 +843,11 @@ func substitutePrompt(node Node, inputs map[string]string, rs *RunState) (string
 		key := m[2]
 		suffix := m[3]
 		placeholder := m[0]
+
+		if seenPlaceholder[placeholder] {
+			continue
+		}
+		seenPlaceholder[placeholder] = true
 
 		switch kind {
 		case "inputs":
@@ -753,14 +865,18 @@ func substitutePrompt(node Node, inputs map[string]string, rs *RunState) (string
 			if err != nil {
 				return "", false, fmt.Errorf("workflow: node %q: read output of node %q: %w", node.ID, key, err)
 			}
-			substitutions = append(substitutions, subst{placeholder: placeholder, value: out, isNodeOut: true})
+			substitutions = append(substitutions, subst{placeholder: placeholder, value: out, isNodeOut: true, nodeID: key})
 			totalUpstreamBytes += len(out)
+			hasNodeOutput = true
 		}
 	}
 
 	// Apply tail-truncation budget across node outputs collectively.
 	// S6: only node outputs (isNodeOut=true) are counted and truncated.
 	// Input substitutions are excluded from the budget and never truncated.
+	// This operates on the raw upstream bytes, before the C1 delimiter wrap
+	// below, so the budget governs actual upstream content rather than the
+	// small fixed delimiter overhead.
 	truncated := false
 	if totalUpstreamBytes > node.OutputLimit {
 		truncated = true
@@ -780,23 +896,72 @@ func substitutePrompt(node Node, inputs map[string]string, rs *RunState) (string
 		}
 	}
 
-	// Apply all substitutions to the prompt.
-	result := node.Prompt
-	seen := make(map[string]bool)
-	for _, s := range substitutions {
-		if seen[s.placeholder] {
-			continue
+	// C1: run the blocking injection scan against each upstream node's raw,
+	// truncated-but-not-yet-wrapped output. Scanning after truncation means
+	// the budget still governs cost/size; scanning before the delimiter
+	// wrap means the scanner sees exactly the untrusted bytes, not our own
+	// tag markup around them.
+	if scanUpstream != nil {
+		for _, s := range substitutions {
+			if !s.isNodeOut {
+				continue
+			}
+			if err := scanUpstream(s.nodeID, s.value); err != nil {
+				return "", false, fmt.Errorf("workflow: node %q: %w", node.ID, err)
+			}
 		}
-		seen[s.placeholder] = true
-		result = replaceAll(result, s.placeholder, string(s.value))
+	}
+
+	// C1: wrap every node-output substitution in an explicit untrusted-data
+	// delimiter. One random nonce is generated per call (i.e. per downstream
+	// node run) and shared by every wrapped block in this prompt — see
+	// newOutputNonce for why a shared per-call nonce is sufficient.
+	var nonce string
+	if hasNodeOutput {
+		var err error
+		nonce, err = newOutputNonce()
+		if err != nil {
+			return "", false, fmt.Errorf("workflow: node %q: generate untrusted-output nonce: %w", node.ID, err)
+		}
+		for i, s := range substitutions {
+			if !s.isNodeOut {
+				continue
+			}
+			substitutions[i].value = wrapUntrustedNodeOutput(s.nodeID, nonce, s.value)
+		}
+	}
+
+	// R2: apply every substitution in a SINGLE PASS over the original
+	// node.Prompt text via ReplaceAllStringFunc. This is the fix itself,
+	// not just an optimization — see the function's own doc comment.
+	// ReplaceAllStringFunc finds matches against node.Prompt (the
+	// author's own template) and never rescans its own output, so
+	// whatever varRefRe-shaped text an upstream node's content contains is
+	// inserted verbatim as inert data, never re-expanded.
+	valueByPlaceholder := make(map[string]string, len(substitutions))
+	for _, s := range substitutions {
+		valueByPlaceholder[s.placeholder] = string(s.value)
+	}
+	result := varRefRe.ReplaceAllStringFunc(node.Prompt, func(placeholder string) string {
+		if v, ok := valueByPlaceholder[placeholder]; ok {
+			return v
+		}
+		// Unreachable in practice: every match ReplaceAllStringFunc finds
+		// here was already found by the identical varRefRe.
+		// FindAllStringSubmatch call above and therefore has an entry.
+		// Left unchanged as the conservative default rather than panicking.
+		return placeholder
+	})
+
+	// C1: prepend the standing "this is data, not instructions" notice
+	// whenever at least one upstream node output was substituted in. A
+	// prompt that only references ${inputs.*} (operator-supplied, not
+	// upstream model output) is left byte-for-byte as before.
+	if hasNodeOutput {
+		result = untrustedOutputPreamble + result
 	}
 
 	return result, truncated, nil
-}
-
-// replaceAll is a simple string replacement that handles the placeholder correctly.
-func replaceAll(s, old, new string) string {
-	return string(bytes.ReplaceAll([]byte(s), []byte(old), []byte(new)))
 }
 
 // tailTruncate returns the last limit bytes of data. If data is within limit,

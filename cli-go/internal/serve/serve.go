@@ -579,13 +579,15 @@ func Run(ctx context.Context, cfg Config) error {
 		// This is the read path for the Performance dashboard embedded in the console.
 		perfStateDir := perfdash.DefaultStateDir()
 		kanbanPath := filepath.Join(cfg.WorkspaceRoot, "work", "current", "kanban.md")
-		workflowEngine := &workflow.Engine{
+		// NewEngine (not a bare &workflow.Engine{}) wires OutputScanFn to the
+		// real blocking scan (C1; s3-flows-security-review-2026-09-21.md R1).
+		workflowEngine := workflow.NewEngine(workflow.EngineConfig{
 			Svc:       dispatchSvc,
 			Bus:       bus,
 			YakosRoot: cfg.YakosRoot,
 			Project:   cfg.WorkspaceRoot,
 			WorkDir:   workDir,
-		}
+		})
 
 		bindAddr := cfg.consoleBind()
 		networked := isNonLoopbackBind(bindAddr)
