@@ -1,0 +1,14 @@
+{
+  "session_id": "fixture-write-stripe-key-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "config.yaml",
+    "content": "stripe_key: __SECRET_STRIPE__\n"
+  },
+  "tool_use_id": "toolu_fixture_write_stripe_key_001"
+}

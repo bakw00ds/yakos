@@ -40,7 +40,7 @@
       },
       {
         "matcher": "Edit|Write|MultiEdit",
-        "_doc_hook_order": "telemetry-first (path-log preserves audit even when later hooks block), then ascending by cost. supervisor-gate is cheap FS lookup; peer-claim is cheap FS lookup; path-allowlist is cheap JSON lookup; secret-scan is most expensive (regex over full content).",
+        "_doc_hook_order": "telemetry-first (path-log preserves audit even when later hooks block), then ascending by cost. supervisor-gate is cheap FS lookup; peer-claim is cheap FS lookup.",
         "hooks": [
           {
             "type": "command",
@@ -53,7 +53,13 @@
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/peer-claim.sh"
-          },
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "_doc": "path-allowlist and secret-scan get their own matcher block (rather than sharing the plain 'Edit|Write|MultiEdit' one above) so they can also cover NotebookEdit — which writes via notebook_path/new_source and was previously invisible to both (security review C4). path-allowlist is a cheap JSON lookup; secret-scan is the most expensive (regex over full content), so it runs last.",
+        "hooks": [
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/path-allowlist.sh"
@@ -149,6 +155,17 @@
       }
     ],
     "TeammateIdle": [],
+    "Stop": [
+      {
+        "_doc": "M3.1 auto-compact: checks for .compact-pending marker (written by context-threshold when context_thresholds.auto threshold is crossed) and injects /compact as the next turn. Opt-in via 'yakos compact threshold --auto 85'. No-op when marker absent or auto not configured.",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/auto-compact-trigger.sh"
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [

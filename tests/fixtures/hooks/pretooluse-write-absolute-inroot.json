@@ -1,0 +1,14 @@
+{
+  "session_id": "fixture-write-abs-inroot-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "__CLAUDE_PROJECT_DIR__",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "__CLAUDE_PROJECT_DIR__/api/main.go",
+    "content": "package main\n"
+  },
+  "tool_use_id": "toolu_fixture_write_abs_inroot_001"
+}

@@ -23,18 +23,44 @@
 # Per-cap bypass: add hook-bypass.md entry with
 #   Scope: cap=max_tool_calls
 # (or max_wall_seconds / max_repeat_same_tool)
+#
+# This hook can BLOCK (ho_block below on cap exceeded), so it fails closed
+# on a missing jq or malformed stdin rather than silently passing every
+# tool call — see HOOK_FAIL_CLOSED in lib/hook-input.sh (security review
+# C5).
 
 set -eu
+
+# Read by hi_init in hook-input.sh, which shellcheck cannot statically
+# follow (HOOK_DIR is dynamic; excluded via -e SC1091 in CI).
+# shellcheck disable=SC2034
+HOOK_FAIL_CLOSED=1
 
 HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 . "$HOOK_DIR/lib/hook-input.sh"
 . "$HOOK_DIR/lib/hook-output.sh"
 
-hi_init
-
+# Checked BEFORE hi_init (security review N2): this hook matches EVERY tool
+# call (matcher "*"), so if hi_init's own fail-closed jq/stdin check ran
+# first, a missing jq would make YAKOS_BUDGET_DISABLE unreachable and lock
+# the operator out of every tool call session-wide. This check needs no
+# stdin/jq, so it's safe to run first.
 if [ "${YAKOS_BUDGET_DISABLE:-0}" = "1" ]; then
     exit 0
 fi
+
+hi_init
+
+# Security review R2-2 (round 3): hi_init's own fail-closed check already
+# adjudicated a missing jq — this line is only reached at all when an
+# escape hatch (YAKOS_HOOKS_FAIL_OPEN or a hook-bypass.md entry) was
+# honored, in which case falling through is exactly the intended
+# behavior. Bail out here rather than reach the unguarded `jq` calls
+# below, which — because this hook has no tool-name gate (matcher "*") —
+# would otherwise print "jq: command not found" and exit 127 on every
+# single tool call for as long as jq stays missing, turning a clean
+# recovery into a wall of shell errors.
+command -v jq >/dev/null 2>&1 || exit 0
 
 project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 yakos_yml="$project_dir/.yakos.yml"
@@ -50,7 +76,9 @@ fi
 # If no budget block at all, also no-op
 grep -q '^[[:space:]]*budget:' "$yakos_yml" 2>/dev/null || exit 0
 
-command -v jq >/dev/null 2>&1 || exit 0
+# jq's own absence is already caught fail-closed by hi_init above (via
+# HOOK_FAIL_CLOSED); this only covers yakos_current_dir specifically not
+# having loaded, which is not itself a jq problem.
 command -v yakos_current_dir >/dev/null 2>&1 || exit 0
 
 current_dir="$(yakos_current_dir)"

@@ -1,0 +1,14 @@
+{
+  "session_id": "fixture-inroot-placeholder-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "__CLAUDE_PROJECT_DIR__",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "__CLAUDE_PROJECT_DIR__/api/ok.go",
+    "content": "package main\n"
+  },
+  "tool_use_id": "toolu_fixture_inroot_placeholder_001"
+}

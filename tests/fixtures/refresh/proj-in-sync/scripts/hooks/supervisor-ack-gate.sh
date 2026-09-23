@@ -23,7 +23,10 @@
 #   - Missing findings file      → log WARN + PASS (no false block)
 #   - Malformed JSON lines       → skip that line (log WARN per-line)
 #   - Missing ack file           → treat all findings as unacknowledged
-#   - jq/yakos_current_dir absent → log WARN + PASS
+#   - jq absent / stdin malformed → BLOCK (HOOK_FAIL_CLOSED; security
+#     review C5 — a gate that degrades to PASS on missing jq is not a gate)
+#   - yakos_current_dir absent   → log WARN + PASS (a paths.sh load issue,
+#     not a jq/input issue — see the guard below)
 #
 # Per-project opt-out via .yakos.yml:
 #   supervise:
@@ -37,11 +40,31 @@
 
 set -eu
 
+# This hook can BLOCK (ho_block below on unacknowledged escalations), so it
+# fails closed on a missing jq or malformed stdin rather than silently
+# passing every TeamCreate/Agent dispatch — see HOOK_FAIL_CLOSED in
+# lib/hook-input.sh (security review C5).
+# Read by hi_init in hook-input.sh, which shellcheck cannot statically
+# follow (HOOK_DIR is dynamic; excluded via -e SC1091 in CI).
+# shellcheck disable=SC2034
+HOOK_FAIL_CLOSED=1
+
 HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 . "$HOOK_DIR/lib/hook-input.sh"
 . "$HOOK_DIR/lib/hook-output.sh"
 # shellcheck source=lib/paths.sh
 . "$HOOK_DIR/lib/paths.sh"
+
+# --- Guard: emergency bypass --------------------------------------------------
+#
+# Checked BEFORE hi_init (security review N2) so a missing jq / broken
+# stdin doesn't make this override unreachable. It needs no stdin/jq, and
+# disabling the hook doesn't depend on which tool triggered it, so it's
+# safe to run before we even know the tool name.
+
+if [ "${YAKOS_SUPERVISOR_DISABLE:-0}" = "1" ]; then
+    exit 0
+fi
 
 hi_init
 
@@ -52,12 +75,6 @@ case "$tool" in
     TeamCreate|Agent) ;;
     *) exit 0 ;;
 esac
-
-# --- Guard: emergency bypass --------------------------------------------------
-
-if [ "${YAKOS_SUPERVISOR_DISABLE:-0}" = "1" ]; then
-    exit 0
-fi
 
 # --- Guard: per-project opt-out in .yakos.yml ---------------------------------
 
@@ -75,12 +92,10 @@ if [ -f "$yakos_yml" ]; then
 fi
 
 # --- Hard dependencies --------------------------------------------------------
-
-if ! command -v jq >/dev/null 2>&1; then
-    ho_log "supervisor-ack-gate" "WARN" "pass" \
-        "jq not available; skipping supervisor-ack-gate" "{}"
-    exit 0
-fi
+#
+# jq's own absence is already caught fail-closed by hi_init above (via
+# HOOK_FAIL_CLOSED). What remains here is yakos_current_dir specifically
+# not having loaded, which is a paths.sh problem, not a jq problem.
 
 if ! command -v yakos_current_dir >/dev/null 2>&1; then
     ho_log "supervisor-ack-gate" "WARN" "pass" \

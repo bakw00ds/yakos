@@ -16,8 +16,18 @@
 #   - YAKOS_SUPERVISOR_DISABLE=1 (env override; emergency bypass)
 #   - .yakos.yml has supervisor.enabled: false
 #   - .yakos.yml has supervisor.block_on_critical: false (passive mode)
+#
+# This hook can BLOCK (ho_block below on CRITICAL findings), so it fails
+# closed on a missing jq or malformed stdin rather than silently passing
+# every tool call — see HOOK_FAIL_CLOSED in lib/hook-input.sh (security
+# review C5).
 
 set -eu
+
+# Read by hi_init in hook-input.sh, which shellcheck cannot statically
+# follow (HOOK_DIR is dynamic; excluded via -e SC1091 in CI).
+# shellcheck disable=SC2034
+HOOK_FAIL_CLOSED=1
 
 HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 . "$HOOK_DIR/lib/hook-input.sh"
@@ -25,12 +35,14 @@ HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 # shellcheck source=lib/paths.sh
 . "$HOOK_DIR/lib/paths.sh"
 
-hi_init
-
-# Emergency bypass
+# Emergency bypass — checked BEFORE hi_init (security review N2) so a
+# missing jq / broken stdin doesn't make this override unreachable. It
+# needs no stdin/jq, so it's safe to run first.
 if [ "${YAKOS_SUPERVISOR_DISABLE:-0}" = "1" ]; then
     exit 0
 fi
+
+hi_init
 
 project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 yakos_yml="$project_dir/.yakos.yml"
@@ -41,7 +53,19 @@ if [ -f "$yakos_yml" ]; then
     fi
 fi
 
+# jq's own absence is caught fail-closed by hi_init above (via
+# HOOK_FAIL_CLOSED) UNLESS an escape hatch (YAKOS_HOOKS_FAIL_OPEN or a
+# hook-bypass.md entry) was honored, in which case this line IS reached
+# with jq still missing (security review R2-2, round 3 — same class as
+# budget-guard.sh's finding, just gated behind a findings file existing
+# rather than every tool call: :76-79 below call `jq -r` unguarded, and
+# under `set -eu` a missing jq there triggers an immediate errexit at
+# rc=127 with an unsuppressed "jq: command not found" on stderr). Bail
+# out now rather than reach those calls.
 command -v jq >/dev/null 2>&1 || exit 0
+
+# This only covers yakos_current_dir specifically not having loaded,
+# which is not itself a jq problem.
 command -v yakos_current_dir >/dev/null 2>&1 || exit 0
 
 current_dir="$(yakos_current_dir)"
