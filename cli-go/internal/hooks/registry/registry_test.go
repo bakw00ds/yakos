@@ -196,7 +196,7 @@ func TestGoReady_S6A2aSet(t *testing.T) {
 			goReady = append(goReady, e.Name)
 		}
 	}
-	want := []string{"cycle-counter", "path-log"}
+	want := []string{"cycle-counter", "mailbox-mirror", "path-log"}
 	if len(goReady) != len(want) {
 		t.Fatalf("GoReady hooks=%v, want %v", goReady, want)
 	}

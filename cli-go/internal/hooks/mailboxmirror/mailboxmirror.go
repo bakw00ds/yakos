@@ -17,8 +17,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/mailbox"
 )
@@ -56,11 +59,18 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 	ts := mailbox.FormatTS(h.NowFn())
 	sender := senderRole(in)
-	to := stringField(in.Payload, "to")
-	summary := stringField(in.Payload, "summary")
-	body := stringField(in.Payload, "message")
-	sessionID := in.Env["CLAUDE_SESSION_ID"]
-	transcriptPath := in.Env["CLAUDE_TRANSCRIPT_PATH"]
+	// Field derivation mirrors hi_msg_to/hi_msg_summary/hi_msg_body exactly:
+	// .tool_input.to / .tool_input.summary / .tool_input.message — NOT
+	// top-level Payload fields (SendMessage's own arguments live under
+	// tool_input like every other tool call).
+	to := hookio.ToolInputString(in, "to")
+	summary := hookio.ToolInputString(in, "summary")
+	body := hookio.ToolInputString(in, "message")
+	// session_id/transcript_path come from the stdin payload (hi_session_id /
+	// hi_transcript), not env vars — bash never reads CLAUDE_SESSION_ID or
+	// CLAUDE_TRANSCRIPT_PATH from the environment for these.
+	sessionID := hookio.PayloadString(in, "session_id")
+	transcriptPath := hookio.PayloadString(in, "transcript_path")
 
 	// Resolve messages log path.
 	messagesLog := h.resolveMessagesLog(in)
@@ -95,9 +105,24 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		h.emitCoordActivity(in, ts, sender, to, summary)
 	}
 
-	logFile := filepath.Join(h.WorkCurrentDir, "logs", hookName+".ndjson")
-	h.appendLog(&out, logFile, "REPORT", "pass", "logged peer message",
-		map[string]any{"from": sender, "to": to, "summary": summary})
+	now := h.NowFn()
+	logErr := hooklog.Append(h.WorkCurrentDir, hooklog.Entry{
+		Hook:      hookName,
+		Severity:  "REPORT",
+		Decision:  "pass",
+		Reason:    "logged peer message",
+		Agent:     sender,
+		SessionID: sessionID,
+		Event:     in.Event,
+		Extra: map[string]any{
+			"from":    sender,
+			"to":      to,
+			"summary": summary,
+		},
+	}, now)
+	if logErr != nil {
+		out.Stderr = fmt.Appendf(out.Stderr, "%s: log: %v\n", hookName, logErr)
+	}
 
 	return out, nil
 }
@@ -158,50 +183,14 @@ func (h *Hook) resolveMessagesLog(in hooktype.HookInput) string {
 	return filepath.Join(".", "work", "current", "messages.ndjson")
 }
 
+// senderRole extracts the agent/role, matching hi_sender_role exactly:
+// hi_field_or '.agent_type' 'lead' (top-level, fallback "lead" when
+// absent/empty), trimmed, then the "yakos:" namespace prefix stripped.
 func senderRole(in hooktype.HookInput) string {
-	if r := in.Env["YAKOS_AGENT_ROLE"]; r != "" {
-		return r
+	raw := hookio.PayloadString(in, "agent_type")
+	if raw == "" {
+		raw = "lead"
 	}
-	if r := stringField(in.Payload, "agent_type"); r != "" {
-		return r
-	}
-	return "lead"
-}
-
-func stringField(payload map[string]any, key string) string {
-	v, ok := payload[key]
-	if !ok {
-		return ""
-	}
-	s, _ := v.(string)
-	return s
-}
-
-func (h *Hook) appendLog(out *hooktype.HookOutput, logFile, severity, action, message string, extra map[string]any) {
-	ts := h.NowFn().UTC().Format(time.RFC3339)
-	entry := map[string]any{
-		"ts":       ts,
-		"hook":     hookName,
-		"severity": severity,
-		"action":   action,
-		"message":  message,
-	}
-	for k, v := range extra {
-		entry[k] = v
-	}
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return
-	}
-	data = append(data, '\n')
-	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil { //nolint:gosec
-		return
-	}
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec
-	if err != nil {
-		out.Stderr = fmt.Appendf(out.Stderr, "%s: open log: %v\n", hookName, err)
-		return
-	}
-	defer func() { _ = f.Close() }()
-	_, _ = f.Write(data)
+	raw = strings.TrimSpace(raw)
+	return strings.TrimPrefix(raw, "yakos:")
 }

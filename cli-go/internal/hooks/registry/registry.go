@@ -129,6 +129,7 @@ var entries = []Entry{
 	{
 		Name:       "mailbox-mirror",
 		FailClosed: false,
+		GoReady:    true,
 		New:        func(cfg Config) Hook { return mailboxmirror.New(cfg.WorkCurrentDir) },
 	},
 	{
