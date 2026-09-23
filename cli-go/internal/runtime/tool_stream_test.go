@@ -372,10 +372,10 @@ func itoa(n int) string {
 	return string(buf[pos:])
 }
 
-// ---- 9. Input accumulation cap at maxToolInputBytes -------------------------
+// ---- 9. Input accumulation cap at MaxToolInputBytes -------------------------
 
 // TestParseStreamLineWithTools_InputLargeCapped sends many input_json_delta
-// fragments totalling >maxToolInputBytes and verifies that the accumulated
+// fragments totalling >MaxToolInputBytes and verifies that the accumulated
 // Input is bounded and InputTruncated is set on the resulting ToolEvent.
 func TestParseStreamLineWithTools_InputLargeCapped(t *testing.T) {
 	textBlocks := make(map[int]struct{})
@@ -386,9 +386,9 @@ func TestParseStreamLineWithTools_InputLargeCapped(t *testing.T) {
 	startLine := []byte(`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_large","name":"Bash"}}}`)
 	_, _, _, _, _ = ParseStreamLineWithTools(startLine, textBlocks, toolUseBlocks, toolIDToName)
 
-	// Send fragments totalling maxToolInputBytes + 512 bytes.
+	// Send fragments totalling MaxToolInputBytes + 512 bytes.
 	chunkSize := 4096
-	totalBytes := maxToolInputBytes + 512
+	totalBytes := MaxToolInputBytes + 512
 	sent := 0
 	for sent < totalBytes {
 		n := chunkSize
@@ -411,8 +411,8 @@ func TestParseStreamLineWithTools_InputLargeCapped(t *testing.T) {
 	if toolEv.Kind != "tool_use" {
 		t.Errorf("Kind: got %q, want %q", toolEv.Kind, "tool_use")
 	}
-	if len(toolEv.Input) > maxToolInputBytes {
-		t.Errorf("Input len=%d exceeds maxToolInputBytes=%d", len(toolEv.Input), maxToolInputBytes)
+	if len(toolEv.Input) > MaxToolInputBytes {
+		t.Errorf("Input len=%d exceeds MaxToolInputBytes=%d", len(toolEv.Input), MaxToolInputBytes)
 	}
 	if !toolEv.InputTruncated {
 		t.Error("InputTruncated: got false, want true (input exceeded cap)")

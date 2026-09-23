@@ -186,39 +186,67 @@ func TestEmitToolChunk_InputAlreadyTruncatedAtCap(t *testing.T) {
 	}
 }
 
-// TestToolInputCap_MatchesOutputCap asserts that the parser's maxToolInputBytes
-// (runtime package) equals the dispatch layer's maxToolOutputBytes.  Both sides
-// of the wire must share the same 16 KiB ceiling so a hostile stream cannot
-// route oversized input through one side and bypass the other.
+// TestToolInputCap_MatchesOutputCap asserts that the parser's
+// runtime.MaxToolInputBytes and the dispatch layer's maxToolOutputBytes are
+// the same value, AND exercises both packages' real enforcement code paths
+// end-to-end against that shared cap — not two independently hardcoded
+// literals that could drift apart while each still individually "passes".
 //
-// If either constant changes, this test catches the drift immediately.
+// Previously this test only checked maxToolOutputBytes against a hardcoded
+// 16*1024 and hand-built a ToolEvent with InputTruncated already set to
+// true; it never touched runtime.MaxToolInputBytes (unexported at the time)
+// or runtime's own accumulation/truncation logic, so it could not have
+// caught the two ceilings drifting apart — the actual bug class this test's
+// name and comment claimed to guard against. maxToolOutputBytes is now
+// defined directly as runtime.MaxToolInputBytes (see stream.go), so the two
+// constants cannot drift by definition; this test also feeds oversized
+// input through the real runtime.ParseStreamLineWithTools accumulator (the
+// code that actually enforces the cap) and confirms the resulting
+// truncated ToolEvent is bounded correctly once passed through dispatch's
+// emitToolChunk.
 func TestToolInputCap_MatchesOutputCap(t *testing.T) {
-	const wantCap = 16 * 1024
+	if maxToolOutputBytes != runtime.MaxToolInputBytes {
+		t.Fatalf("dispatch.maxToolOutputBytes=%d != runtime.MaxToolInputBytes=%d; the two truncation ceilings have drifted apart",
+			maxToolOutputBytes, runtime.MaxToolInputBytes)
+	}
 
-	if maxToolOutputBytes != wantCap {
-		t.Errorf("dispatch.maxToolOutputBytes=%d, want %d", maxToolOutputBytes, wantCap)
+	// Drive the REAL runtime accumulator past the cap, not a hand-built
+	// ToolEvent, so this test would fail if runtime's own enforcement logic
+	// (not just the constant) diverged from dispatch's expectations.
+	textBlocks := make(map[int]struct{})
+	toolUseBlocks := make(map[int]*runtime.ToolEvent)
+	toolIDToName := make(map[string]string)
+
+	startLine := []byte(`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_cap_parity","name":"Bash"}}}`)
+	runtime.ParseStreamLineWithTools(startLine, textBlocks, toolUseBlocks, toolIDToName)
+
+	overCap := runtime.MaxToolInputBytes + 1
+	fragment := strings.Repeat("X", overCap)
+	deltaLine := []byte(`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"` + fragment + `"}}}`)
+	runtime.ParseStreamLineWithTools(deltaLine, textBlocks, toolUseBlocks, toolIDToName)
+
+	stopLine := []byte(`{"type":"stream_event","event":{"type":"content_block_stop","index":0}}`)
+	_, _, _, _, te := runtime.ParseStreamLineWithTools(stopLine, textBlocks, toolUseBlocks, toolIDToName)
+	if te == nil {
+		t.Fatal("expected a ToolEvent from the real runtime accumulator, got nil")
 	}
-	// Cross-package: runtime.maxToolInputBytes must equal maxToolOutputBytes.
-	// We verify via the exported constant value surfaced through the ToolEvent
-	// struct tag comment; the actual enforcement is in ParseStreamLineWithTools.
-	// The canonical cross-package check: feed exactly wantCap+1 bytes and confirm
-	// the emitted ToolInput is bounded at wantCap (marker excluded).
-	overInput := strings.Repeat("X", wantCap+1)
-	te := &runtime.ToolEvent{
-		Kind:           "tool_use",
-		ToolName:       "Bash",
-		Input:          overInput,
-		InputTruncated: true,
+	if !te.InputTruncated {
+		t.Fatal("expected runtime to truncate input exceeding MaxToolInputBytes, but InputTruncated=false")
 	}
+	if len(te.Input) > runtime.MaxToolInputBytes {
+		t.Fatalf("runtime accumulated Input len=%d exceeds MaxToolInputBytes=%d", len(te.Input), runtime.MaxToolInputBytes)
+	}
+
+	// Now hand that real ToolEvent to dispatch's emitToolChunk and confirm
+	// the dispatch-side cap agrees with what runtime already enforced.
 	var chunks []StreamChunk
 	emitToolChunk(te, func(c StreamChunk) { chunks = append(chunks, c) })
 	if len(chunks) != 1 {
 		t.Fatalf("expected 1 chunk, got %d", len(chunks))
 	}
-	// Strip the marker to measure the content bytes.
 	content := strings.TrimSuffix(chunks[0].ToolInput, toolInputTruncationMarker)
-	if len(content) > wantCap {
-		t.Errorf("emitted ToolInput content bytes=%d exceeds cap=%d; caps are out of sync", len(content), wantCap)
+	if len(content) > maxToolOutputBytes {
+		t.Errorf("emitted ToolInput content bytes=%d exceeds dispatch cap=%d; caps are out of sync", len(content), maxToolOutputBytes)
 	}
 }
 

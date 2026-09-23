@@ -70,8 +70,13 @@ import (
 	"github.com/bakw00ds/yakos/internal/netid"
 )
 
-// cookieNameSession is the cookie name for the session ID.
-const cookieNameSession = "yakos_session"
+// CookieNameSession is the cookie name for the session ID. Exported (not
+// just test-exported) so consumers like internal/consoleui can define their
+// own session-cookie-name constant directly in terms of this one instead of
+// duplicating the "yakos_session" literal — the two names must never drift
+// apart, since a mismatch means sessionauth.go reads a cookie with the
+// wrong name and login sessions are silently never found.
+const CookieNameSession = "yakos_session"
 
 // cookieNameCSRF is the name of the non-HttpOnly double-submit CSRF cookie.
 const cookieNameCSRF = "yakos_csrf"
@@ -490,7 +495,7 @@ func (s *Store) isExpiredLocked(sess *Session, now time.Time) bool {
 // attributes. MaxAge is set to the store's AbsoluteTimeout.
 func (s *Store) SessionCookie(id string, secure bool) *http.Cookie {
 	return &http.Cookie{
-		Name:     cookieNameSession,
+		Name:     CookieNameSession,
 		Value:    id,
 		Path:     "/",
 		HttpOnly: true,
@@ -521,7 +526,7 @@ func (s *Store) CSRFCookie(token string, secure bool) *http.Cookie {
 // correct cookie for deletion. Used on logout.
 func (s *Store) ClearSessionCookie(secure bool) *http.Cookie {
 	return &http.Cookie{
-		Name:     cookieNameSession,
+		Name:     CookieNameSession,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,

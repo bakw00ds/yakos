@@ -73,9 +73,13 @@ const maxTaskBytes = MaxTaskBytes
 // from the runtime (bash stdout, file contents, etc.); bounding it prevents
 // large outputs from bloating SSE frames and transcript entries.
 //
-// 16 KB is generous for a code snippet or command output while keeping each
-// SSE frame well under typical reverse-proxy buffer limits.
-const maxToolOutputBytes = 16 * 1024
+// Defined directly in terms of runtime.MaxToolInputBytes (the parser's cap on
+// accumulated tool_use Input) rather than duplicating the 16 KiB literal: the
+// two ceilings must stay symmetric so a hostile stream cannot route oversized
+// input through one side and bypass the other by drifting the constants
+// apart. The cross-package test TestToolInputCap_MatchesOutputCap in
+// stream_tool_test.go asserts both sides against the real runtime constant.
+const maxToolOutputBytes = runtime.MaxToolInputBytes
 
 // toolOutputTruncationMarker is appended to a tool output that was cut at
 // maxToolOutputBytes.  Chosen to be unmistakable in context.

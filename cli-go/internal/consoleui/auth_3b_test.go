@@ -44,10 +44,11 @@ import (
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
-// authsession is imported for authsession.NewStore and authsession.Config in tests.
-// The session cookie name is referenced via consoleui.SessionCookieName (exported
-// from export_test.go).  authsession.CookieNameSession is only accessible within
-// the authsession package test binary (export_test.go with package authsession).
+// authsession is imported for authsession.NewStore and authsession.Config in
+// tests, and for authsession.CookieNameSession — the real, production-exported
+// constant that consoleui.sessionCookieName is defined directly in terms of
+// (see authhandler.go). consoleui.SessionCookieName (exported from
+// export_test.go) re-exports the same value for tests outside this package.
 
 // ---- test infrastructure ----------------------------------------------------
 
@@ -190,17 +191,25 @@ func readBody(t *testing.T, resp *http.Response) string {
 // ---- Test 1: cookie name constant invariant ---------------------------------
 
 func TestCookieNameConstantInvariant(t *testing.T) {
-	// Verify that consoleui's sessionCookieName constant has the ADR-0005-locked
-	// value "yakos_session".  This is the cross-package assertion described in
-	// the Phase 3b task: a mismatch would mean sessionauth.go reads a cookie
-	// with the wrong name and login sessions would never be found.
+	// Verify that consoleui's sessionCookieName constant equals the
+	// authoritative authsession.CookieNameSession constant (exported for
+	// tests via authsession/export_test.go). A mismatch would mean
+	// sessionauth.go reads a cookie with the wrong name and login sessions
+	// would never be found.
 	//
-	// The authoritative value is authsession.cookieNameSession (unexported
-	// production constant).  Both sides must use the same string literal, and
-	// this test guards against independent drift.
+	// This used to compare consoleui.SessionCookieName against a hardcoded
+	// literal "yakos_session" instead of the real authsession constant, so
+	// it could never catch the two packages' values drifting apart from
+	// each other — only from the literal. authsession.CookieNameSession
+	// already existed as a test-only export for exactly this purpose; this
+	// test just wasn't using it.
 	const want = "yakos_session"
-	if consoleui.SessionCookieName != want {
-		t.Errorf("consoleui.SessionCookieName=%q; want %q", consoleui.SessionCookieName, want)
+	if authsession.CookieNameSession != want {
+		t.Fatalf("authsession.CookieNameSession=%q; want %q (ADR-0005-locked value)", authsession.CookieNameSession, want)
+	}
+	if consoleui.SessionCookieName != authsession.CookieNameSession {
+		t.Errorf("consoleui.SessionCookieName=%q != authsession.CookieNameSession=%q; the two packages' cookie names have drifted apart",
+			consoleui.SessionCookieName, authsession.CookieNameSession)
 	}
 
 	// Also verify by exercising the login flow: the Set-Cookie name in the login

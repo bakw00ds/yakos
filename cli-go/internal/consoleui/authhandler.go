@@ -283,14 +283,20 @@ func (ah *authHandlers) handleLogout(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"ok":true}` + "\n"))
 }
 
-// sessionCookieName is the authoritative cookie name for the session ID.
-// This package-level const is used by authhandler.go so that we have a
-// single definition within consoleui rather than repeating the string literal.
+// sessionCookieName is the authoritative cookie name for the session ID,
+// used by authhandler.go and sessionauth.go so consoleui has a single
+// definition rather than repeating the string literal.
 //
-// NOTE: the value must equal authsession.cookieNameSession (unexported).
-// A cross-package test in authhandler_test.go asserts this invariant using
-// the authsession.CookieNameSession test export.
-const sessionCookieName = "yakos_session"
+// Defined directly in terms of authsession.CookieNameSession (the real
+// exported production constant, not a test-only export) so the two
+// packages' cookie names cannot drift apart by construction. A previous
+// version duplicated the "yakos_session" literal here and relied on a
+// broken test-export pattern to check it against authsession — broken
+// because a test-only const in one package's _test.go file is invisible
+// to another package's tests even via a normal import, so the check could
+// never actually fail. See TestCookieNameConstantInvariant in
+// auth_3b_test.go.
+const sessionCookieName = authsession.CookieNameSession
 
 // ---- CSRF middleware --------------------------------------------------------
 
