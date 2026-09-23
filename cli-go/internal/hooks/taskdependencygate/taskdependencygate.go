@@ -21,7 +21,6 @@ package taskdependencygate
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -62,19 +61,26 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 	// Best-effort schema guess — field names are plausible but unverified.
 	// Matches hi_field '.task.id // .task_id // .tool_input.id // empty'
-	// exactly (three fallbacks, all top-level-or-nested Payload lookups).
-	taskID := nestedStringField(in.Payload, "task", "id")
-	if taskID == "" {
-		taskID = stringField(in.Payload, "task_id")
-	}
-	if taskID == "" {
-		taskID = hookio.ToolInputString(in, "id")
-	}
-	blockedBy := nestedField(in.Payload, "task", "blockedBy")
-	if blockedBy == nil {
-		blockedBy = in.Payload["blockedBy"]
-	}
-	blockedByStr := jsonStr(blockedBy)
+	// and hi_field '.task.blockedBy // .blockedBy // empty' EXACTLY,
+	// including jq's `//` falsy set ({null, false} only — not "", 0, or
+	// []) and jq -r's raw-string-vs-pretty-JSON rendering. A naive
+	// string-typed field lookup collapses "absent", "wrong type", and
+	// "present but empty string" into the same "" and falls through in
+	// all three cases, which jq's `//` does not — see S-6 A-2a round 2
+	// review finding 3 for the three reproductions this replicates
+	// (numeric task.id, empty-string task.id, and blockedBy: false).
+	taskIDVal := hookio.JQAlt(
+		hookio.Nested(in.Payload, "task", "id"),
+		in.Payload["task_id"],
+		hookio.ToolInputField(in, "id"),
+	)
+	taskID := hookio.JQRawOrJSON(taskIDVal)
+
+	blockedByVal := hookio.JQAlt(
+		hookio.Nested(in.Payload, "task", "blockedBy"),
+		in.Payload["blockedBy"],
+	)
+	blockedByStr := hookio.JQRawOrJSON(blockedByVal)
 
 	suspectBlockReason := ""
 	if blockedByStr != "" && blockedByStr != "[]" && blockedByStr != "null" {
@@ -121,54 +127,4 @@ func senderRole(in hooktype.HookInput) string {
 	}
 	raw = strings.TrimSpace(raw)
 	return strings.TrimPrefix(raw, "yakos:")
-}
-
-func stringField(payload map[string]any, key string) string {
-	v, ok := payload[key]
-	if !ok {
-		return ""
-	}
-	s, _ := v.(string)
-	return s
-}
-
-func nestedStringField(payload map[string]any, outer, inner string) string {
-	v, ok := payload[outer]
-	if !ok {
-		return ""
-	}
-	m, ok := v.(map[string]any)
-	if !ok {
-		return ""
-	}
-	return stringField(m, inner)
-}
-
-func nestedField(payload map[string]any, outer, inner string) any {
-	v, ok := payload[outer]
-	if !ok {
-		return nil
-	}
-	m, ok := v.(map[string]any)
-	if !ok {
-		return nil
-	}
-	return m[inner]
-}
-
-// jsonStr matches hi_field's `jq -r "$1 // empty"` rendering of a non-string
-// resolved value exactly: jq's default (non -c) output is 2-space-indented
-// pretty JSON, e.g. `["a","b"]` renders as "[\n  \"a\",\n  \"b\"\n]", while
-// an empty array stays "[]" (jq doesn't add newlines around zero elements).
-// encoding/json's MarshalIndent produces byte-identical output for these
-// shapes.
-func jsonStr(v any) string {
-	if v == nil {
-		return ""
-	}
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("%v", v)
-	}
-	return string(b)
 }
