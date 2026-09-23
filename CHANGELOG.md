@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`govulncheck ./...` now reports zero reachable findings** (was 35) —
+  bumped the Go toolchain directive to `go1.25.14` (clears 32 Go standard
+  library CVEs fixed across 1.25.2–1.25.13) and `google.golang.org/grpc`
+  from `v1.79.3` to `v1.83.2` (clears GO-2026-6061, GO-2026-6348, and
+  GO-2026-6443 — the last of these was fixed at 1.82.2, regressed at
+  1.83.0, and re-fixed at 1.83.2; a later regression at 1.84.0 is fixed
+  only in an unreleased grpc dev snapshot, so `v1.83.2` is the newest
+  stable release without it). Three residual findings in
+  `golang.org/x/crypto` (`ssh` deadlock DoS, unmaintained `openpgp`) remain
+  but are unreachable — yakOS doesn't use either package — and bumping
+  `x/crypto` further would force a `go 1.26` floor and trade 3 unreachable
+  findings for 23 new (unpatched Go 1.26.0 stdlib), so it's deferred.
+- **`govulncheck` CI job green again** — its "Install govulncheck" step
+  ran `go install golang.org/x/vuln/cmd/govulncheck@latest`, which now
+  resolves to `x/vuln v1.8.0` and requires `go >= 1.26.0`; the job's Go
+  is pinned to `go-version: '1.25'` with no toolchain auto-switch, so the
+  install failed outright. Pinned to `v1.7.0`, the newest `x/vuln`
+  release that still supports go 1.25.
+- **`bare-install smoke` CI job green again** — `bare-install-smoke.yml`
+  pinned `actions/checkout` to a SHA
+  (`df4cb1c069e1874edd31b4511f1884172cec0e10`) that doesn't resolve to any
+  commit (a single hex-digit typo against the correct SHA used everywhere
+  else in the repo), so the job has failed at "Set up job" on every run
+  since 2026-06-23. Re-pinned to the correct `actions/checkout@v7` SHA.
+- **Stale GitHub Actions pins refreshed**: `actions/checkout` 6→7,
+  `actions/setup-go` 6.4.0→6.5.0, `softprops/action-gh-release`
+  3.0.0→3.0.1, `github/codeql-action/{init,analyze}` 4.36.2→4.36.3 (bumped
+  together — bumping only one half of the pair breaks CodeQL with "Loaded
+  a configuration file for version '4.36.3', but running version
+  '4.36.2'", which is what dependabot PRs #251/#252 hit individually).
+  Supersedes dependabot PRs #246, #247, #250, #251, #252.
+
 ## [0.57.0.0] — 2026-06-25
 
 ### Fixed
