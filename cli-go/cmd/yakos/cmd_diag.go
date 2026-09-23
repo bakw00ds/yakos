@@ -50,17 +50,38 @@ func runValidate(yakosRoot string, args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	// NOTE (behavior-neutrality caveat): the pre-cliflag loop processed args
-	// left to right and stopped at the FIRST bad/exit-worthy token, so
-	// `validate --bogus --help` errored on --bogus without ever reaching
-	// --help. cliflag.Set.Parse separates recognized flags from unrecognized
-	// ones before either is acted on, so --help now always wins over an
-	// unknown-flag error regardless of argv order. This only differs from
-	// today's behavior for the pathological case of combining --help with an
-	// unknown flag in one invocation — not something any real caller or
-	// existing test does — and is strictly more forgiving (prints help
-	// instead of erroring), not less. Same caveat applies to every other
-	// function converted in this commit.
+	// NOTE (behavior-neutrality caveat, broadened per
+	// s6-b2-review-2026-09-23.md finding 3): the pre-cliflag loops all
+	// processed args in a single left-to-right pass and stopped at the
+	// FIRST bad/exit-worthy token. cliflag.Set.Parse is two-phase — it
+	// finishes recognizing/consuming every flag (returning immediately on
+	// the first recognized-flag-missing-value error) before the caller ever
+	// inspects rest for unrecognized tokens — so ANY recognized-flag error
+	// (a missing value, or a post-parse check like doctor's --fix) can now
+	// preempt an unrecognized-token report that would have fired first, in
+	// argv order, under the old scan. The exit code is unchanged (still 1)
+	// but the error text differs, which matters for scripts/tests grepping
+	// stderr. This is not restructured to match old argv-order precedence
+	// exactly because doing so would require merging flag recognition and
+	// rest-inspection back into one pass, undoing the two-phase design that
+	// makes cliflag reusable across commands with different "unknown
+	// token" wording; the two-phase design is the cheaper, correct
+	// tradeoff, so this is a documented caveat rather than a code fix.
+	//
+	// Concretely, for the nine functions converted in cmd_diag.go /
+	// cmd_integration.go: validate and status have no String/StringSlice
+	// flags, so --help-vs-unknown-flag (as in the `validate --bogus --help`
+	// example above) is their only instance of this. cost, refresh, hooks
+	// install, hooks lint, workflow run, and workflow resume each have at
+	// least one String flag whose missing-value error can now preempt an
+	// earlier unrecognized token (e.g. `cost --by= --since` used to report
+	// "unknown flag \"--by=\"" and now reports "--since requires a date").
+	// doctor additionally has this via its --fix post-parse check (e.g.
+	// `doctor --production -x a --fix --fix=false` now reports the --fix
+	// rejection instead of the earlier unknown "-x"). Not a pattern any
+	// real caller or existing test exercises today, and always strictly
+	// more forgiving in the --help case, but the general rule above is the
+	// accurate scope of the tradeoff — not just the --help special case.
 	if help {
 		printValidateHelp(os.Stdout)
 		os.Exit(0)

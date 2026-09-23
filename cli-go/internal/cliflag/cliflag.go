@@ -1,8 +1,10 @@
 // Package cliflag is a small, declarative flag parser that reproduces the
 // exact argv-scanning semantics yakos's cmd/yakos hand-rolled parsers use
 // today: interleaved positionals and flags, both "--flag value" and
-// "--flag=value" forms, repeatable flags, a "--" terminator, and byte-exact
-// "missing value" error text.
+// "--flag=value" forms, repeatable flags, an opt-in "--" terminator
+// (Set.AllowTerminator; most converted commands never had "--" semantics
+// and must not gain them by default), and byte-exact "missing value" error
+// text.
 //
 // It is deliberately NOT stdlib flag and NOT a CLI framework (cobra/kong).
 // stdlib flag stops parsing at the first non-flag argument, which breaks
@@ -75,6 +77,19 @@ type Spec struct {
 	// Seen, if non-nil, is set true the first time this flag is matched
 	// (by Name or any Alias), regardless of Kind. Optional.
 	Seen *bool
+
+	// AllowEmpty opts this Spec into recognizing the bare-equals form
+	// ("--name=" with nothing after the "=") as a String/StringSlice value
+	// of "", rather than leaving it unrecognized in rest (the default —
+	// see the package doc and TestParse_BareEqualsFormIsNotRecognized for
+	// why that's the behavior-neutral default reproducing the other
+	// hand-rolled parsers' magic-length quirk). Only set this when the
+	// pre-conversion parser for this exact flag used strings.HasPrefix (or
+	// equivalent) instead of that magic-length check — e.g. `yakos hooks
+	// lint --hooks-dir=` historically fell back to the default hooks dir,
+	// which cliflag reproduces only with AllowEmpty: true on that one
+	// Spec. Ignored for Kind == Bool.
+	AllowEmpty bool
 }
 
 // names returns every spelling (Name plus Aliases) this Spec matches.
@@ -100,6 +115,24 @@ type Set struct {
 	Cmd string
 	// Specs is the list of flags this Set recognizes.
 	Specs []Spec
+
+	// AllowTerminator opts this Set into treating a literal "--" as a
+	// terminator: everything after it is appended to rest verbatim,
+	// unparsed, and the "--" token itself is dropped. Default false.
+	//
+	// This is NOT the default because none of the hand-rolled parsers
+	// converted so far ever had "--" semantics — every one of them fell
+	// into a generic "unrecognized token" branch and reported a bare "--"
+	// as just another unknown flag/argument, same as any other unmatched
+	// "-..." token. Only runStart's eventual conversion (last in the
+	// planned order) is meant to opt in here, matching its existing
+	// passthrough-to-runtime behavior. Setting this unconditionally for
+	// every Set silently changed real program behavior for the nine
+	// functions converted in s6-b2 (found by differential fuzz review,
+	// s6-b2-review-2026-09-23.md finding 1): `yakos validate --` went from
+	// erroring "unknown flag \"--\"" (exit 1) to running a full validation
+	// (exit 0).
+	AllowTerminator bool
 }
 
 // lookup returns the Spec matching arg (by exact Name or Alias equality)
@@ -119,6 +152,11 @@ func (s *Set) lookup(arg string) (Spec, bool) {
 // String/StringSlice specs only; Bool specs never take "=" values) along
 // with the value suffix, and true, or false when no spec's "<name>="
 // prefixes arg.
+//
+// A bare "<name>=" (arg exactly equal to the prefix, nothing after the
+// "=") only matches when the Spec sets AllowEmpty; otherwise it is left
+// unrecognized, reproducing the magic-length quirk every hand-rolled
+// parser had (see TestParse_BareEqualsFormIsNotRecognized).
 func (s *Set) lookupPrefix(arg string) (spec Spec, value string, ok bool) {
 	for _, spec := range s.Specs {
 		if spec.Kind == Bool {
@@ -126,6 +164,12 @@ func (s *Set) lookupPrefix(arg string) (spec Spec, value string, ok bool) {
 		}
 		for _, n := range spec.names() {
 			prefix := n + "="
+			if len(arg) == len(prefix) {
+				if !spec.AllowEmpty || arg != prefix {
+					continue
+				}
+				return spec, "", true
+			}
 			if len(arg) > len(prefix) && arg[:len(prefix)] == prefix {
 				return spec, arg[len(prefix):], true
 			}
@@ -164,9 +208,14 @@ func mark(spec Spec, val string) {
 // "<alias>=<value>") is also recognized for String/StringSlice specs and
 // needs no following element.
 //
-// A literal "--" stops recognition: it is dropped, and every argument after
-// it — regardless of shape — is appended to rest verbatim, unparsed. This
-// matches runStart's passthrough-to-runtime behavior.
+// A literal "--" is only special when s.AllowTerminator is true, in which
+// case it stops recognition: it is dropped, and every argument after it —
+// regardless of shape — is appended to rest verbatim, unparsed. This
+// matches runStart's passthrough-to-runtime behavior. When AllowTerminator
+// is false (the default), "--" is not treated specially at all: it falls
+// through to the "anything else" case below, exactly like any other
+// unmatched "-..." token, so the caller's existing "unknown flag"/"unknown
+// argument" handling for rest applies to it unchanged.
 //
 // Anything else — a token starting with "-" that matches no Spec, or a
 // plain positional argument — is appended to rest in original order. Parse
@@ -180,7 +229,7 @@ func (s *Set) Parse(args []string) (rest []string, err error) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 
-		if arg == "--" {
+		if s.AllowTerminator && arg == "--" {
 			rest = append(rest, args[i+1:]...)
 			return rest, nil
 		}

@@ -72,6 +72,18 @@ func runHooksInstall(args []string) {
 		hooksinstall.PrintHelp(os.Stdout)
 		os.Exit(0)
 	}
+	// NOTE (disclosed incidental fix, s6-b2-review-2026-09-23.md finding 4):
+	// the pre-conversion loop here did `args[i][0] == '-'` with no length
+	// guard, so an empty-string argv element (e.g. `yakos hooks install
+	// ""`) panicked with "index out of range [0] with length 0" — a
+	// pre-existing bug on main, not introduced by this conversion. This
+	// `len(arg) > 0 &&` guard fixes it as a side effect: an empty-string
+	// positional now falls through to the runtime == "" branch below (so
+	// runtime stays "" and the command reports the ordinary "<runtime>
+	// required" message) instead of crashing. Not claimed as byte-exact for
+	// that specific input; pinned by
+	// hooks_install_empty_positional_does_not_panic in
+	// cliflag_conversion_test.go.
 	for _, arg := range rest {
 		if len(arg) > 0 && arg[0] == '-' {
 			fmt.Fprintf(os.Stderr, "hooks install: unknown flag %q\n", arg)
@@ -161,7 +173,15 @@ func runHooksLint(args []string) {
 
 	fs := &cliflag.Set{Cmd: "hooks lint", Specs: []cliflag.Spec{
 		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
-		{Name: "--hooks-dir", Kind: cliflag.String, Str: &hooksDir, ValueDesc: "a path"},
+		// AllowEmpty: true — deliberate, s6-b2-review-2026-09-23.md finding
+		// 2. This is the one converted flag whose pre-conversion parser used
+		// strings.HasPrefix instead of the magic-length check every other
+		// converted flag used, so a bare "--hooks-dir=" was already
+		// recognized as an empty value (which the code below defaults from
+		// YAKOS_ROOT), not left unrecognized. Pinned by
+		// TestParse_HooksLintBareEqualsHooksDirAllowsEmpty and
+		// hooks_lint_bare_equals_hooks_dir in cliflag_conversion_test.go.
+		{Name: "--hooks-dir", Kind: cliflag.String, Str: &hooksDir, ValueDesc: "a path", AllowEmpty: true},
 	}}
 	rest, err := fs.Parse(args)
 	if err != nil {

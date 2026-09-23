@@ -126,9 +126,12 @@ func TestParse_InterleavedPositionalsAndFlags(t *testing.T) {
 	}
 }
 
+// TestParse_DoubleDashTerminator covers the opt-in path: a Set that
+// explicitly sets AllowTerminator (as runStart's eventual conversion will)
+// treats "--" as a terminator.
 func TestParse_DoubleDashTerminator(t *testing.T) {
 	var safe bool
-	s := &Set{Cmd: "start", Specs: []Spec{
+	s := &Set{Cmd: "start", AllowTerminator: true, Specs: []Spec{
 		{Name: "--safe", Kind: Bool, Bool: &safe},
 	}}
 	rest, err := s.Parse([]string{"--safe", "--", "--not-a-flag", "plain"})
@@ -141,6 +144,32 @@ func TestParse_DoubleDashTerminator(t *testing.T) {
 	want := []string{"--not-a-flag", "plain"}
 	if !reflect.DeepEqual(rest, want) {
 		t.Errorf("rest = %v, want %v", rest, want)
+	}
+}
+
+// TestParse_DoubleDashNotAcceptedByDefault pins the default (AllowTerminator
+// unset / false) behavior: a bare "--" is NOT a terminator. It falls through
+// like any other unmatched "-..." token into rest, so the caller's existing
+// "unknown flag"/"unknown argument" handling applies to it unchanged. This
+// is the s6-b2-review-2026-09-23.md finding 1 fix — the nine functions
+// converted in that PR never had "--" semantics in their original
+// hand-rolled loops, so a bare "--" must keep behaving like any other
+// unrecognized token unless a Set explicitly opts in.
+func TestParse_DoubleDashNotAcceptedByDefault(t *testing.T) {
+	var safe bool
+	s := &Set{Cmd: "validate", Specs: []Spec{
+		{Name: "--strict", Kind: Bool, Bool: &safe},
+	}}
+	rest, err := s.Parse([]string{"--strict", "--", "extra"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !safe {
+		t.Error("safe = false, want true")
+	}
+	want := []string{"--", "extra"}
+	if !reflect.DeepEqual(rest, want) {
+		t.Errorf("rest = %v, want %v (bare \"--\" must not be swallowed by default)", rest, want)
 	}
 }
 
@@ -212,6 +241,51 @@ func TestParse_BareEqualsFormIsNotRecognized(t *testing.T) {
 	want := []string{"--since="}
 	if !reflect.DeepEqual(rest, want) {
 		t.Errorf("rest = %v, want %v (unrecognized token falls through)", rest, want)
+	}
+}
+
+// TestParse_AllowEmptyAcceptsBareEquals pins the opt-in path added for
+// s6-b2-review-2026-09-23.md finding 2: a Spec with AllowEmpty: true
+// recognizes a bare "<name>=" as an explicit empty-string value, unlike the
+// default (see TestParse_BareEqualsFormIsNotRecognized).
+func TestParse_AllowEmptyAcceptsBareEquals(t *testing.T) {
+	v := "unset"
+	s := &Set{Cmd: "hooks lint", Specs: []Spec{
+		{Name: "--hooks-dir", Kind: String, Str: &v, ValueDesc: "a path", AllowEmpty: true},
+	}}
+	rest, err := s.Parse([]string{"--hooks-dir="})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v != "" {
+		t.Errorf("v = %q, want \"\" (explicit empty value)", v)
+	}
+	if len(rest) != 0 {
+		t.Errorf("rest = %v, want empty", rest)
+	}
+}
+
+// TestParse_AllowEmptyDoesNotAffectOtherSpecs confirms AllowEmpty is
+// per-Spec, not global: a Set with one AllowEmpty Spec still rejects the
+// bare-equals form for a sibling Spec that doesn't set it.
+func TestParse_AllowEmptyDoesNotAffectOtherSpecs(t *testing.T) {
+	var hooksDir, since string
+	s := &Set{Cmd: "mixed", Specs: []Spec{
+		{Name: "--hooks-dir", Kind: String, Str: &hooksDir, ValueDesc: "a path", AllowEmpty: true},
+		{Name: "--since", Kind: String, Str: &since, ValueDesc: "a date"},
+	}}
+	rest, err := s.Parse([]string{"--since="})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// since/hooksDir stay their zero values ("") here because "--since="
+	// was NOT recognized (falls through to rest) — not because it was set.
+	if since != "" || hooksDir != "" {
+		t.Errorf("since=%q hooksDir=%q, want both unset", since, hooksDir)
+	}
+	want := []string{"--since="}
+	if !reflect.DeepEqual(rest, want) {
+		t.Errorf("rest = %v, want %v (--since= must stay unrecognized; AllowEmpty is per-Spec)", rest, want)
 	}
 }
 
