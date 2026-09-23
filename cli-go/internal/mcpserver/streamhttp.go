@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/bakw00ds/yakos/internal/dashauth"
 )
 
 // HTTPConfig holds configuration for the streamable HTTP MCP server.
@@ -51,6 +53,7 @@ type HTTPConfig struct {
 // HTTPServer is the streamable HTTP MCP server.
 type HTTPServer struct {
 	cfg     HTTPConfig
+	mux     *http.ServeMux
 	httpSrv *http.Server
 }
 
@@ -59,19 +62,73 @@ func NewHTTPServer(cfg HTTPConfig) *HTTPServer {
 	s := &HTTPServer{cfg: cfg}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /mcp", s.handleMCP)
+	s.mux = mux
+
+	// R14 (round-1 security review): this transport had no Origin/Host
+	// check, despite its own doc comment (above) acknowledging the gap and
+	// an in-repo helper (dashauth.RequireLocalHost) already implementing
+	// exactly this for perfdash/metricsdash. The token is bearer-only over
+	// plaintext loopback HTTP, so under DNS rebinding a malicious page can
+	// become same-origin with this listener and both set Authorization and
+	// read the response — Host/Origin checks are the only defense that
+	// survives that. reject a present, non-loopback Origin in addition to
+	// the Host check, since most MCP clients are not browsers and never
+	// send Origin at all — only a browser-issued fetch is affected.
+	_, port, _ := net.SplitHostPort(cfg.Addr)
+	protected := dashauth.RequireLocalHost(cfg.Addr, rejectNonLoopbackOrigin(port, mux))
+
 	s.httpSrv = &http.Server{
 		Addr:         cfg.Addr,
-		Handler:      mux,
+		Handler:      protected,
 		ReadTimeout:  0, // streaming; no read timeout
 		WriteTimeout: 0, // streaming; no write timeout
 		IdleTimeout:  60 * time.Second,
+		// R24 (round-1 security review): ReadHeaderTimeout was left at its
+		// zero value, which inherits ReadTimeout (also 0 here, deliberately,
+		// for streaming request bodies). That left the header-read phase —
+		// before auth ever runs — open to a pre-auth slowloris (gosec
+		// G112): a connection that trickles a partial request line is held
+		// open indefinitely. Bounding only the header phase does not affect
+		// legitimate streaming bodies, which are read after headers.
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return s
 }
 
-// Handler returns the underlying http.Handler (for httptest.NewServer in tests).
+// Handler returns the raw handler (no Host/Origin check) for use with
+// httptest.NewServer in tests, which binds an ephemeral port that would
+// never match cfg.Addr's configured port. This mirrors
+// perfdash.Server.Handler's identical caveat and reasoning. Tests that
+// specifically exercise Host/Origin rejection build a request with req.Host
+// / the Origin header set and call dashauth.RequireLocalHost /
+// rejectNonLoopbackOrigin directly, or exercise Serve() against a real
+// loopback listener.
 func (s *HTTPServer) Handler() http.Handler {
-	return s.httpSrv.Handler
+	return s.mux
+}
+
+// rejectNonLoopbackOrigin rejects any request carrying a non-empty Origin
+// header that isn't one of the loopback origins for port (R14, round-1
+// security review). A missing Origin (the common case: MCP clients are
+// typically not browsers) is allowed through unchanged; only a
+// browser-issued fetch sets Origin, which is exactly the DNS-rebinding
+// threat model dashauth.RequireLocalHost covers for the Host header. An
+// unparseable port (should not happen in production, where cfg.Addr is
+// always host:port) fails closed: every non-empty Origin is rejected rather
+// than silently allowed.
+func rejectNonLoopbackOrigin(port string, next http.Handler) http.Handler {
+	allowed := map[string]bool{
+		"http://127.0.0.1:" + port: true,
+		"http://localhost:" + port: true,
+		"http://[::1]:" + port:     true,
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" && !allowed[origin] {
+			http.Error(w, `{"error":"DNS-rebinding defense: unexpected Origin"}`, http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ErrNoWriteToken is returned by Serve when no WriteToken is configured.
