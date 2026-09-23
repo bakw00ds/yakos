@@ -2019,6 +2019,206 @@ func TestEngine_NodeFinished_NoCostUSD_WhenUsageNil(t *testing.T) {
 	}
 }
 
+// ---- K3: workflow.* events carry owner metadata (k82-security-review-2026-09-23.md) --
+
+// TestEngine_WorkflowEvents_CarryOwnerMeta proves K3's fix: every
+// workflow.* event Engine publishes (run.started, run.finished,
+// node.started, node.finished, and — separately, see
+// TestEngine_NodeTruncated_CarriesOwnerMeta — node.truncated) is published
+// via Bus.PublishMeta with EventMeta.OwnerOperatorID set to the run's
+// owner, not the plain (broadcast) Bus.Publish. Before this fix, every run
+// ID, workflow name, node ID and agent name on these topics was delivered
+// to every /v1/events subscriber regardless of ownership — see
+// consoleui/ws_handler.go's ownerScopedEventVisible for the consumer side
+// of this same fix, and consoleui/ws_handler_test.go's TestWorkflowWS_*
+// for the delivery-filtering half. Reverting any of engine.go's
+// PublishMeta calls back to Publish makes this test observe ev.Meta == nil
+// for that topic.
+func TestEngine_WorkflowEvents_CarryOwnerMeta(t *testing.T) {
+	t.Parallel()
+
+	const wantOwner = "alice"
+
+	fn := func(_ context.Context, _ dispatch.Params) ([]byte, dispatch.Result, error) {
+		return []byte("done"), dispatch.Result{ExitCode: 0}, nil
+	}
+
+	bus := wsbus.New()
+	defer bus.Stop()
+
+	sub := bus.Subscribe("") // wildcard: capture every topic
+	defer sub.Unsubscribe()
+
+	workDir := t.TempDir()
+	eng := &workflow.Engine{
+		YakosRoot: "/yakos",
+		Project:   "/project",
+		WorkDir:   workDir,
+		Bus:       bus,
+	}
+	workflow.SetEngineRunFn(eng, fn)
+
+	wf := singleNodeWorkflow()
+	rs, err := eng.Run(context.Background(), wf, "run-owner-meta", wantOwner, dispatch.IdentityCarrier{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rs.Status != workflow.RunCompleted {
+		t.Fatalf("run status: got %q, want completed", rs.Status)
+	}
+
+	wantTopics := map[string]bool{
+		wsbus.TopicWorkflowRunStarted:   false,
+		wsbus.TopicWorkflowRunFinished:  false,
+		wsbus.TopicWorkflowNodeStarted:  false,
+		wsbus.TopicWorkflowNodeFinished: false,
+	}
+	deadline := time.After(5 * time.Second)
+collect:
+	for {
+		select {
+		case ev := <-sub.C():
+			if _, ok := wantTopics[ev.Topic]; !ok {
+				continue
+			}
+			if ev.Meta == nil {
+				t.Errorf("SECURITY: %s published with nil Meta; want EventMeta{OwnerOperatorID: %q} (Bus.Publish used instead of Bus.PublishMeta)", ev.Topic, wantOwner)
+			} else if ev.Meta.OwnerOperatorID != wantOwner {
+				t.Errorf("%s Meta.OwnerOperatorID=%q; want %q", ev.Topic, ev.Meta.OwnerOperatorID, wantOwner)
+			}
+			wantTopics[ev.Topic] = true
+			allSeen := true
+			for _, seen := range wantTopics {
+				if !seen {
+					allSeen = false
+					break
+				}
+			}
+			if allSeen {
+				break collect
+			}
+		case <-deadline:
+			break collect
+		}
+	}
+	for topic, seen := range wantTopics {
+		if !seen {
+			t.Errorf("never observed topic %s", topic)
+		}
+	}
+}
+
+// TestEngine_NodeTruncated_CarriesOwnerMeta is
+// TestEngine_WorkflowEvents_CarryOwnerMeta's counterpart for
+// workflow.node.truncated (K3), which only fires when a node's output is
+// actually truncated — exercised separately here rather than forcing every
+// other subtest in the table above to also produce oversized output.
+func TestEngine_NodeTruncated_CarriesOwnerMeta(t *testing.T) {
+	t.Parallel()
+
+	const wantOwner = "alice"
+
+	// Output larger than OutputLimit forces a truncation event.
+	fn := func(_ context.Context, _ dispatch.Params) ([]byte, dispatch.Result, error) {
+		return bytes.Repeat([]byte("x"), 100), dispatch.Result{ExitCode: 0}, nil
+	}
+
+	bus := wsbus.New()
+	defer bus.Stop()
+
+	sub := bus.Subscribe(wsbus.TopicWorkflowNodeTruncated)
+	defer sub.Unsubscribe()
+
+	workDir := t.TempDir()
+	eng := &workflow.Engine{
+		YakosRoot: "/yakos",
+		Project:   "/project",
+		WorkDir:   workDir,
+		Bus:       bus,
+	}
+	workflow.SetEngineRunFn(eng, fn)
+
+	wf := &workflow.Workflow{
+		Version: 1,
+		Name:    "truncate-test",
+		Nodes: []workflow.Node{
+			{ID: "step1", Agent: "agent-a", Prompt: "do work", OutputLimit: 10},
+		},
+	}
+
+	rs, err := eng.Run(context.Background(), wf, "run-truncate-owner-meta", wantOwner, dispatch.IdentityCarrier{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rs.Status != workflow.RunCompleted {
+		t.Fatalf("run status: got %q, want completed", rs.Status)
+	}
+
+	var ev wsbus.Event
+	select {
+	case ev = <-sub.C():
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for workflow.node.truncated event")
+	}
+	if ev.Meta == nil {
+		t.Fatalf("SECURITY: workflow.node.truncated published with nil Meta; want EventMeta{OwnerOperatorID: %q}", wantOwner)
+	}
+	if ev.Meta.OwnerOperatorID != wantOwner {
+		t.Errorf("Meta.OwnerOperatorID=%q; want %q", ev.Meta.OwnerOperatorID, wantOwner)
+	}
+}
+
+// TestEngine_NodeFailed_CarriesOwnerMeta is
+// TestEngine_WorkflowEvents_CarryOwnerMeta's counterpart for the
+// node.finished event published from nodeFailure (a distinct code path
+// from runNode's own node.finished publish on success) — K3 covers both.
+func TestEngine_NodeFailed_CarriesOwnerMeta(t *testing.T) {
+	t.Parallel()
+
+	const wantOwner = "alice"
+
+	fn := func(_ context.Context, _ dispatch.Params) ([]byte, dispatch.Result, error) {
+		return nil, dispatch.Result{ExitCode: 1}, fmt.Errorf("boom")
+	}
+
+	bus := wsbus.New()
+	defer bus.Stop()
+
+	sub := bus.Subscribe(wsbus.TopicWorkflowNodeFinished)
+	defer sub.Unsubscribe()
+
+	workDir := t.TempDir()
+	eng := &workflow.Engine{
+		YakosRoot: "/yakos",
+		Project:   "/project",
+		WorkDir:   workDir,
+		Bus:       bus,
+	}
+	workflow.SetEngineRunFn(eng, fn)
+
+	wf := singleNodeWorkflow()
+	rs, err := eng.Run(context.Background(), wf, "run-failed-owner-meta", wantOwner, dispatch.IdentityCarrier{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rs.Status != workflow.RunFailed {
+		t.Fatalf("run status: got %q, want failed", rs.Status)
+	}
+
+	var ev wsbus.Event
+	select {
+	case ev = <-sub.C():
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for workflow.node.finished (failure) event")
+	}
+	if ev.Meta == nil {
+		t.Fatalf("SECURITY: failed-node workflow.node.finished published with nil Meta; want EventMeta{OwnerOperatorID: %q}", wantOwner)
+	}
+	if ev.Meta.OwnerOperatorID != wantOwner {
+		t.Errorf("Meta.OwnerOperatorID=%q; want %q", ev.Meta.OwnerOperatorID, wantOwner)
+	}
+}
+
 // ---- Finding #1: IdentityCarrier threading -----------------------------------
 
 // TestEngine_IdentityCarrier_ThreadedToDispatch verifies that a populated

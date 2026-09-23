@@ -1270,8 +1270,8 @@ func TestFleetWS_SharedSessionVisibleToBoth(t *testing.T) {
 // This guards against a future code path that constructs a fleet event without
 // going through Bus.PublishMeta — such an event must not leak to other operators.
 func TestFleetWS_NilMetaFailsClosed(t *testing.T) {
-	// Unit-test fleetEventVisible directly: it is unexported but accessible from
-	// the same package (consoleui internal test file).
+	// Unit-test ownerScopedEventVisible directly: it is unexported but
+	// accessible from the same package (consoleui internal test file).
 	nilMetaEv := wsbus.Event{
 		Topic:   wsbus.TopicFleetStarted,
 		Payload: json.RawMessage(`{"session_id":"sess-x","agent":"backend"}`),
@@ -1279,22 +1279,83 @@ func TestFleetWS_NilMetaFailsClosed(t *testing.T) {
 	}
 
 	// An authenticated connection (non-empty connOperatorID) must NOT receive it.
-	if fleetEventVisible(nilMetaEv, "alice") {
-		t.Error("SECURITY: fleetEventVisible returned true for fleet event with nil Meta and non-empty connOperatorID; must fail closed")
+	if ownerScopedEventVisible(nilMetaEv, "alice") {
+		t.Error("SECURITY: ownerScopedEventVisible returned true for fleet event with nil Meta and non-empty connOperatorID; must fail closed")
 	}
-	if fleetEventVisible(nilMetaEv, "bob") {
-		t.Error("SECURITY: fleetEventVisible returned true for fleet event with nil Meta and non-empty connOperatorID; must fail closed")
+	if ownerScopedEventVisible(nilMetaEv, "bob") {
+		t.Error("SECURITY: ownerScopedEventVisible returned true for fleet event with nil Meta and non-empty connOperatorID; must fail closed")
 	}
 
 	// Loopback path (empty connOperatorID) still delivers — single-operator, no isolation needed.
-	if !fleetEventVisible(nilMetaEv, "") {
-		t.Error("fleetEventVisible returned false for fleet event with nil Meta on loopback path (connOperatorID=''); want true")
+	if !ownerScopedEventVisible(nilMetaEv, "") {
+		t.Error("ownerScopedEventVisible returned false for fleet event with nil Meta on loopback path (connOperatorID=''); want true")
 	}
 
-	// Non-fleet topics with nil Meta must still pass through.
+	// Non-scoped topics with nil Meta must still pass through.
 	kanbanEv := wsbus.Event{Topic: wsbus.TopicKanbanAdded, Meta: nil}
-	if !fleetEventVisible(kanbanEv, "alice") {
-		t.Error("fleetEventVisible returned false for non-fleet topic with nil Meta; must pass through")
+	if !ownerScopedEventVisible(kanbanEv, "alice") {
+		t.Error("ownerScopedEventVisible returned false for non-scoped topic with nil Meta; must pass through")
+	}
+}
+
+// TestWorkflowWS_NilMetaFailsClosed is TestFleetWS_NilMetaFailsClosed's
+// counterpart for the workflow.* topics added to ownerScopedTopics by K3
+// (k82-security-review-2026-09-23.md). A hand-built workflow.* Event{} with
+// Meta == nil (i.e. not published via Bus.PublishMeta) must be withheld from
+// any authenticated connection, the same as fleet.* — this is the guard
+// against a future engine.go change reintroducing Bus.Publish (plain,
+// broadcast) for one of these topics.
+func TestWorkflowWS_NilMetaFailsClosed(t *testing.T) {
+	nilMetaEv := wsbus.Event{
+		Topic:   wsbus.TopicWorkflowRunStarted,
+		Payload: json.RawMessage(`{"run_id":"run-x","workflow":"my-flow"}`),
+		Meta:    nil,
+	}
+	if ownerScopedEventVisible(nilMetaEv, "alice") {
+		t.Error("SECURITY: ownerScopedEventVisible returned true for workflow.run.started with nil Meta and non-empty connOperatorID; must fail closed")
+	}
+	if !ownerScopedEventVisible(nilMetaEv, "") {
+		t.Error("ownerScopedEventVisible returned false for workflow.run.started with nil Meta on loopback path (connOperatorID=''); want true")
+	}
+}
+
+// TestWorkflowWS_OwnerScoping proves K3 end-to-end at the visibility-function
+// layer (the same layer TestFleetWS_* already uses): a workflow.* event
+// published with EventMeta{OwnerOperatorID: "alice"} is visible to alice's
+// own connection but not to a second operator's connection — closing the
+// finding's repro ("every flows run ID, workflow name, node ID and agent
+// name is broadcast to all RoleRead subscribers"). Reverting engine.go's
+// PublishMeta calls back to plain Publish (unscoped, Meta always nil) would
+// make this event visible to "mallory" too, since a nil-Meta event on a
+// non-loopback connection would then have to be treated as broadcast instead
+// of withheld — this test's alice/mallory split catches that regression at
+// the Meta-population layer directly, without needing a live WS round trip.
+func TestWorkflowWS_OwnerScoping(t *testing.T) {
+	aliceRunStarted := wsbus.Event{
+		Topic:   wsbus.TopicWorkflowRunStarted,
+		Payload: json.RawMessage(`{"run_id":"run-alice-secret","workflow":"my-flow"}`),
+		Meta:    &wsbus.EventMeta{OwnerOperatorID: "alice"},
+	}
+	if !ownerScopedEventVisible(aliceRunStarted, "alice") {
+		t.Error("alice's own run.started event must be visible to alice's connection")
+	}
+	if ownerScopedEventVisible(aliceRunStarted, "mallory") {
+		t.Error("SECURITY: alice's run.started event (run_id leaked in payload) was visible to mallory's connection")
+	}
+	// Every other workflow.* topic must be scoped the same way.
+	for _, topic := range []string{
+		wsbus.TopicWorkflowRunFinished,
+		wsbus.TopicWorkflowNodeStarted,
+		wsbus.TopicWorkflowNodeFinished,
+		wsbus.TopicWorkflowNodeTruncated,
+	} {
+		ev := wsbus.Event{Topic: topic, Meta: &wsbus.EventMeta{OwnerOperatorID: "alice"}}
+		if ownerScopedEventVisible(ev, "mallory") {
+			t.Errorf("SECURITY: %s owned by alice was visible to mallory's connection", topic)
+		}
+		if !ownerScopedEventVisible(ev, "alice") {
+			t.Errorf("%s owned by alice was NOT visible to alice's own connection", topic)
+		}
 	}
 }
 
@@ -1324,7 +1385,7 @@ func TestFleetWS_NonFleetTopicsUnaffected(t *testing.T) {
 		}
 		if ev.Topic == wsbus.TopicKanbanAdded {
 			conn.SetReadDeadline(time.Time{}) //nolint:errcheck
-			return // expected frame received — pass
+			return                            // expected frame received — pass
 		}
 		// Any other frame (presence, ping): skip and keep reading.
 	}
@@ -1410,9 +1471,9 @@ func TestIsLoopbackHost_Loopback(t *testing.T) {
 		// Canonical loopback addresses — must return true.
 		{"127.0.0.1", true},
 		{"::1", true},
-		{"::ffff:127.0.0.1", true},  // IPv4-mapped loopback via IPv6
+		{"::ffff:127.0.0.1", true}, // IPv4-mapped loopback via IPv6
 		{"localhost", true},
-		{"::1%eth0", true},           // IPv6 with zone ID stripped before parsing
+		{"::1%eth0", true}, // IPv6 with zone ID stripped before parsing
 
 		// Non-loopback or deceptive inputs — must return false.
 		{"127.0.0.1.evil.com", false}, // prefix trick: was wrongly accepted

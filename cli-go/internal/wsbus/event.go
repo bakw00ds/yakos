@@ -39,6 +39,11 @@ const (
 // Topic constants for Phase-4 workflow events.
 // Invariant: no token or node content is published on these topics.
 // Only run/node lifecycle metadata is carried (IDs, status, timestamps).
+//
+// Delivery is owner-scoped (K3, k82-security-review-2026-09-23.md):
+// workflow.Engine publishes these via Bus.PublishMeta with the run's owner,
+// and consoleui's WS handler withholds them from any connection that isn't
+// that owner. See EventMeta and ownerScopedEventVisible.
 const (
 	TopicWorkflowRunStarted    = "workflow.run.started"
 	TopicWorkflowRunFinished   = "workflow.run.finished"
@@ -112,9 +117,10 @@ type FleetFinishedPayload struct {
 // EventMeta carries server-side-only routing metadata for events that require
 // per-operator fan-out filtering.  It is NEVER serialized to clients (json:"-").
 //
-// Currently used exclusively by fleet.* topics to enforce per-operator WS
-// isolation: the WS handler in consoleui/ws_handler.go reads Meta before
-// sending and drops events whose owner does not match the connection's operator.
+// Used by fleet.* and workflow.* topics (K3, k82-security-review-2026-09-23.md)
+// to enforce per-operator WS isolation: the WS handler in
+// consoleui/ws_handler.go (ownerScopedEventVisible) reads Meta before sending
+// and drops events whose owner does not match the connection's operator.
 type EventMeta struct {
 	// OwnerOperatorID is the operator that owns the session associated with
 	// this event.  Empty string means "visible to all" (loopback / broadcast).

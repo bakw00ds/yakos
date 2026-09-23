@@ -329,12 +329,17 @@ func (e *Engine) run(
 	rs.startDebounce(ctx)
 
 	// Publish run.started.
+	// K3 (k82-security-review-2026-09-23.md): PublishMeta carries the run's
+	// owner so the WS handler can scope delivery the same way fleet.*
+	// already is (ownerScopedEventVisible in consoleui/ws_handler.go) —
+	// otherwise every run ID, the exact K1 attack target, is broadcast to
+	// every RoleRead subscriber regardless of ownership.
 	if e.Bus != nil {
-		e.Bus.Publish(wsbus.TopicWorkflowRunStarted, wsbus.WorkflowRunStartedPayload{
+		e.Bus.PublishMeta(wsbus.TopicWorkflowRunStarted, wsbus.WorkflowRunStartedPayload{
 			RunID:    runID,
 			Workflow: wf.Name,
 			TS:       time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: rs.OwnerOpID})
 	}
 
 	rs.markRunStarted()
@@ -347,14 +352,14 @@ func (e *Engine) run(
 	// Stop debounce (final flush included).
 	rs.stopDebounce()
 
-	// Publish run.finished.
+	// Publish run.finished. (K3 — see run.started above.)
 	if e.Bus != nil {
-		e.Bus.Publish(wsbus.TopicWorkflowRunFinished, wsbus.WorkflowRunFinishedPayload{
+		e.Bus.PublishMeta(wsbus.TopicWorkflowRunFinished, wsbus.WorkflowRunFinishedPayload{
 			RunID:    runID,
 			Workflow: wf.Name,
 			Status:   string(rs.Status),
 			TS:       time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: rs.OwnerOpID})
 	}
 
 	return rs, nil
@@ -665,15 +670,15 @@ func (e *Engine) runNode(
 	// Mark running.
 	rs.markNodeRunning(node.ID)
 
-	// Publish node.started.
+	// Publish node.started. (K3 — see run.started's comment above in run().)
 	if e.Bus != nil {
-		e.Bus.Publish(wsbus.TopicWorkflowNodeStarted, wsbus.WorkflowNodeStartedPayload{
+		e.Bus.PublishMeta(wsbus.TopicWorkflowNodeStarted, wsbus.WorkflowNodeStartedPayload{
 			RunID:    rs.RunID,
 			Workflow: wf.Name,
 			NodeID:   node.ID,
 			Agent:    node.Agent,
 			TS:       time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: rs.OwnerOpID})
 	}
 
 	// Substitute ${inputs.<k>} and ${nodes.<id>.output} in the prompt.
@@ -764,16 +769,17 @@ func (e *Engine) runNode(
 	// Node succeeded.
 	rs.markNodeCompleted(node.ID, 0, outputTruncated)
 
-	// Publish truncation event if output was truncated.
+	// Publish truncation event if output was truncated. (K3 — see run.started's
+	// comment above in run().)
 	if outputTruncated && e.Bus != nil {
-		e.Bus.Publish(wsbus.TopicWorkflowNodeTruncated, wsbus.WorkflowNodeTruncatedPayload{
+		e.Bus.PublishMeta(wsbus.TopicWorkflowNodeTruncated, wsbus.WorkflowNodeTruncatedPayload{
 			RunID:       rs.RunID,
 			Workflow:    wf.Name,
 			NodeID:      node.ID,
 			OriginalLen: len(stdout),
 			TruncatedTo: len(output),
 			TS:          time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: rs.OwnerOpID})
 	}
 
 	// Extract cost from the dispatch result. TotalCostUSD is only present for
@@ -785,9 +791,9 @@ func (e *Engine) runNode(
 		nodeCostUSD = &v
 	}
 
-	// Publish node.finished.
+	// Publish node.finished. (K3 — see run.started's comment above in run().)
 	if e.Bus != nil {
-		e.Bus.Publish(wsbus.TopicWorkflowNodeFinished, wsbus.WorkflowNodeFinishedPayload{
+		e.Bus.PublishMeta(wsbus.TopicWorkflowNodeFinished, wsbus.WorkflowNodeFinishedPayload{
 			RunID:    rs.RunID,
 			Workflow: wf.Name,
 			NodeID:   node.ID,
@@ -795,7 +801,7 @@ func (e *Engine) runNode(
 			ExitCode: 0,
 			CostUSD:  nodeCostUSD,
 			TS:       time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: rs.OwnerOpID})
 	}
 }
 
@@ -819,15 +825,16 @@ func (e *Engine) nodeFailure(
 	failedSet[nodeID] = true
 	queueMu.Unlock()
 
+	// K3 — see run.started's comment above in run().
 	if e.Bus != nil {
-		e.Bus.Publish(wsbus.TopicWorkflowNodeFinished, wsbus.WorkflowNodeFinishedPayload{
+		e.Bus.PublishMeta(wsbus.TopicWorkflowNodeFinished, wsbus.WorkflowNodeFinishedPayload{
 			RunID:    rs.RunID,
 			Workflow: workflowName,
 			NodeID:   nodeID,
 			Status:   string(NodeFailed),
 			ExitCode: exitCode,
 			TS:       time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: rs.OwnerOpID})
 	}
 }
 
