@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/hooks/dirsize"
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
@@ -40,6 +41,12 @@ type Hook struct {
 
 	// NowFn is injected for tests.
 	NowFn func() time.Time
+
+	// TeamsDir overrides $HOME/.claude/teams for the peer-inbox-snapshot
+	// feature. Empty (the production default) resolves $HOME itself —
+	// see teamsDir(). Tests must always set this to a t.TempDir()-rooted
+	// path, never touch the operator's real $HOME/.claude/teams.
+	TeamsDir string
 }
 
 // New returns a Hook with sensible defaults.
@@ -150,13 +157,26 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		}
 	}
 
+	teamName := h.lookupTeamName(sessionID)
+	scratchpadBytes := dirsize.Bytes(h.WorkCurrentDir)
+
+	// Snapshot team mailbox inbox files into the session audit log. Per
+	// Phase 0.5 (2026-04-29), ~/.claude/teams/<team>/inboxes/<recipient>.json
+	// is the durable on-disk record of every peer DM — including
+	// peer-to-peer DMs that never transit the lead's hook context. The
+	// PreToolUse mailbox-mirror hook captures live SendMessage calls, but
+	// it can miss messages routed teammate-to-teammate. Snapshotting at
+	// session end ensures the full peer-DM history lands in the audit
+	// trail. Per the no-block telemetry policy, every step is guarded.
+	h.snapshotTeamInboxes(&out, now, teamName, callerRole, sessionID, in.Event)
+
 	summaryEntry := map[string]any{
 		"ts_start":              tsStart,
 		"ts_end":                ts,
 		"duration_seconds":      durationSec,
-		"team_name":             "",
+		"team_name":             teamName,
 		"session_id":            sessionID,
-		"scratchpad_size_bytes": 0,
+		"scratchpad_size_bytes": scratchpadBytes,
 		"exit_kind":             exitKind,
 	}
 	if err := appendNDJSON(sessionsLog, summaryEntry); err != nil {
@@ -164,6 +184,93 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	return out, nil
+}
+
+// teamsDir resolves $HOME/.claude/teams, matching bash's
+// teams_dir="$HOME/.claude/teams" (an OS env var read, not a stdin
+// payload field — same convention every other HOME-reading Go hook in
+// this package uses). h.TeamsDir overrides it for tests, which must
+// never touch the operator's real $HOME/.claude/teams.
+func (h *Hook) teamsDir() string {
+	if h.TeamsDir != "" {
+		return h.TeamsDir
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "teams")
+}
+
+// snapshotTeamInboxes copies every *.json file from
+// <teamsDir>/<teamName>/inboxes/ into <WorkCurrentDir>/team-inboxes/, and
+// — matching bash exactly — emits a SECOND REPORT-severity hooklog entry
+// (in addition to the audit entry Run already wrote) when at least one
+// file was copied. Never blocks; every step is best-effort.
+func (h *Hook) snapshotTeamInboxes(out *hooktype.HookOutput, now time.Time, teamName, callerRole, sessionID, event string) {
+	if teamName == "" {
+		return
+	}
+	teamsDir := h.teamsDir()
+	if teamsDir == "" {
+		return
+	}
+	if info, err := os.Stat(teamsDir); err != nil || !info.IsDir() {
+		return
+	}
+
+	inboxSrc := filepath.Join(teamsDir, teamName, "inboxes")
+	info, err := os.Stat(inboxSrc)
+	if err != nil || !info.IsDir() {
+		return
+	}
+
+	entries, err := os.ReadDir(inboxSrc)
+	if err != nil {
+		return
+	}
+
+	snapshotDst := filepath.Join(h.WorkCurrentDir, "team-inboxes")
+	if err := os.MkdirAll(snapshotDst, 0755); err != nil { //nolint:gosec
+		return
+	}
+
+	snapCount := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		src := filepath.Join(inboxSrc, e.Name())
+		data, readErr := os.ReadFile(src) //nolint:gosec
+		if readErr != nil {
+			continue
+		}
+		if writeErr := os.WriteFile(filepath.Join(snapshotDst, e.Name()), data, 0644); writeErr != nil { //nolint:gosec
+			continue
+		}
+		snapCount++
+	}
+
+	if snapCount == 0 {
+		return
+	}
+
+	logErr := hooklog.Append(h.WorkCurrentDir, hooklog.Entry{
+		Hook:      hookName,
+		Severity:  "REPORT",
+		Decision:  "pass",
+		Reason:    fmt.Sprintf("snapshotted %d inbox file(s) from team %s", snapCount, teamName),
+		Agent:     callerRole,
+		SessionID: sessionID,
+		Event:     event,
+		Extra: map[string]any{
+			"team":        teamName,
+			"inbox_files": snapCount,
+		},
+	}, now)
+	if logErr != nil {
+		out.Stderr = fmt.Appendf(out.Stderr, "%s: inbox snapshot log: %v\n", hookName, logErr)
+	}
 }
 
 // ---- audit helpers -----------------------------------------------------------
@@ -306,6 +413,40 @@ func (h *Hook) lookupStartTs(sessionID string) string {
 		}
 	}
 	return ""
+}
+
+// lookupTeamName finds the most recent "team_created" .team_name for
+// sessionID from .session-started-history.ndjson, matching bash exactly:
+//
+//	team_name="$(jq -rc --arg sid "$session_id" \
+//	    'select(.session_id == $sid and .event == "team_created") | .team_name' \
+//	    "$(yakos_session_history_file)" | tail -n 1)"
+//
+// Unlike lookupStartTs, bash has NO fallback to .session-started here
+// (that file only ever holds a timestamp, never a team name) — a session
+// with no matching history record resolves to "".
+func (h *Hook) lookupTeamName(sessionID string) string {
+	histFile := filepath.Join(h.WorkCurrentDir, ".session-started-history.ndjson")
+	data, err := os.ReadFile(histFile) //nolint:gosec
+	if err != nil {
+		return ""
+	}
+	var last string
+	for _, line := range splitLines(string(data)) {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		if rec["event"] == "team_created" && rec["session_id"] == sessionID {
+			if name, ok := rec["team_name"].(string); ok {
+				last = name
+			}
+		}
+	}
+	return last
 }
 
 // senderRole extracts the agent/role, matching hi_sender_role exactly:
