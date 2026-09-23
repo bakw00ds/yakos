@@ -6,23 +6,30 @@
 package hooktype
 
 // HookInput is the structured payload delivered to every hook tier.
+//
+// The JSON tags below match the Go-shape fixture corpus under
+// .github/fixtures/hooks/**/*.json ({event, tool, payload, env, work_dir}),
+// added so internal/hooks/hookio.DecodeGoShape can be a plain
+// json.Unmarshal instead of a hand-rolled field mapper. This is additive:
+// no existing caller constructs a HookInput via JSON decoding today, so
+// adding tags changes no behavior (S-6 A-1).
 type HookInput struct {
 	// Event is the Claude hook event name, e.g. "PreToolUse", "PostToolUse",
 	// "UserPromptSubmit".
-	Event string
+	Event string `json:"event"`
 
 	// Tool is the tool name that triggered this hook, e.g. "Edit", "Write".
 	// May be empty for non-tool events.
-	Tool string
+	Tool string `json:"tool"`
 
 	// Payload holds the schema-validated event payload (JSON-decoded).
-	Payload map[string]any
+	Payload map[string]any `json:"payload"`
 
 	// Env is a snapshot of relevant environment variables.
-	Env map[string]string
+	Env map[string]string `json:"env"`
 
 	// WorkDir is the working directory for the hook invocation.
-	WorkDir string
+	WorkDir string `json:"work_dir"`
 }
 
 // HookOutput is the result of a hook invocation across all tiers.
