@@ -14,7 +14,6 @@ package cyclecounter
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +21,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
@@ -64,7 +65,7 @@ func New(workCurrentDir string) *Hook {
 func (h *Hook) Name() string { return hookName }
 
 // Run executes the cycle-counter logic.
-func (h *Hook) Run(_ context.Context, _ hooktype.HookInput) (hooktype.HookOutput, error) {
+func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutput, error) {
 	out := hooktype.HookOutput{ExitCode: 0}
 
 	// No active session — no-op.
@@ -82,7 +83,6 @@ func (h *Hook) Run(_ context.Context, _ hooktype.HookInput) (hooktype.HookOutput
 
 	counterFile := filepath.Join(h.WorkCurrentDir, ".cycle-count")
 	markerFile := filepath.Join(h.WorkCurrentDir, ".retro-due")
-	logFile := filepath.Join(h.WorkCurrentDir, "logs", "cycle-counter.ndjson")
 
 	// Read current count.
 	count := readCount(counterFile)
@@ -107,23 +107,47 @@ func (h *Hook) Run(_ context.Context, _ hooktype.HookInput) (hooktype.HookOutput
 		}
 	}
 
-	// Write NDJSON log entry (O_APPEND so concurrent writes don't corrupt).
-	ts := h.NowFn().UTC().Format(time.RFC3339)
-	entry := map[string]any{
-		"ts":           ts,
-		"hook":         hookName,
-		"severity":     "REPORT",
-		"action":       "counted",
-		"cycle":        count,
-		"cycle_length": cycleLen,
-		"retro_due":    retroDue,
-		"auto_retro":   h.AutoRetro,
+	// Write NDJSON log entry via the shared hooklog writer — field set/order
+	// matches bash's ho_log exactly (ho_log "cycle-counter" REPORT "counted"
+	// "cycle=$count cycle_length=$CYCLE_LENGTH retro_due=$retro_due" \
+	// "{cycle, cycle_length, retro_due, auto_retro}").
+	now := time.Now()
+	if h.NowFn != nil {
+		now = h.NowFn()
 	}
-	if err := appendNDJSON(logFile, entry); err != nil {
+	reason := fmt.Sprintf("cycle=%d cycle_length=%d retro_due=%t", count, cycleLen, retroDue)
+	err := hooklog.Append(h.WorkCurrentDir, hooklog.Entry{
+		Hook:      hookName,
+		Severity:  "REPORT",
+		Decision:  "counted",
+		Reason:    reason,
+		Agent:     senderRole(in),
+		SessionID: hookio.PayloadString(in, "session_id"),
+		Event:     in.Event,
+		Extra: map[string]any{
+			"cycle":        count,
+			"cycle_length": cycleLen,
+			"retro_due":    retroDue,
+			"auto_retro":   h.AutoRetro,
+		},
+	}, now)
+	if err != nil {
 		out.Stderr = fmt.Appendf(out.Stderr, "cycle-counter: log: %v\n", err)
 	}
 
 	return out, nil
+}
+
+// senderRole extracts the agent/role, matching hi_sender_role exactly:
+// hi_field_or '.agent_type' 'lead' (top-level, fallback "lead" when
+// absent/empty), trimmed, then the "yakos:" namespace prefix stripped.
+func senderRole(in hooktype.HookInput) string {
+	raw := hookio.PayloadString(in, "agent_type")
+	if raw == "" {
+		raw = "lead"
+	}
+	raw = strings.TrimSpace(raw)
+	return strings.TrimPrefix(raw, "yakos:")
 }
 
 // ---- helpers -----------------------------------------------------------------
@@ -177,24 +201,4 @@ func atomicTouch(path string) error {
 		return err
 	}
 	return nil
-}
-
-// appendNDJSON opens logFile with O_APPEND and writes a single JSON line.
-func appendNDJSON(logFile string, entry map[string]any) error {
-	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil { //nolint:gosec
-		return err
-	}
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec
-	if err != nil {
-		return err
-	}
-	defer f.Close() //nolint:errcheck
-	_, err = f.Write(data)
-	return err
 }

@@ -180,11 +180,13 @@ func TestLookup_EveryHookRunsWithoutPanicking(t *testing.T) {
 	}
 }
 
-func TestGoReady_PathLogOnly(t *testing.T) {
-	// path-log is the one hook converted to hookio/hooklog end-to-end and
-	// brought to parity in S-6 A-1 (structural plan §2.4's "convert one
-	// hook ... to prove the pattern"). Every other hook is still
-	// bash-registered pending A-2. Update this test alongside any future
+func TestGoReady_S6A2aSet(t *testing.T) {
+	// path-log is the reference conversion (S-6 A-1, structural plan
+	// §2.4's "convert one hook ... to prove the pattern"). S-6 A-2a is
+	// now converting the mechanical log-schema-only hooks to 100% parity
+	// (tests/run-hook-parity.sh) one at a time, flipping GoReady as each
+	// lands: cycle-counter. Every other hook is still bash-registered
+	// pending the rest of A-2. Update this test alongside any future
 	// GoReady flip, so the "who is safe for refresh --hooks-impl=go" list
 	// stays a reviewed, visible diff.
 	entries := registry.All()
@@ -194,8 +196,15 @@ func TestGoReady_PathLogOnly(t *testing.T) {
 			goReady = append(goReady, e.Name)
 		}
 	}
-	if len(goReady) != 1 || goReady[0] != "path-log" {
-		t.Errorf("GoReady hooks=%v, want [path-log]", goReady)
+	want := []string{"cycle-counter", "path-log"}
+	if len(goReady) != len(want) {
+		t.Fatalf("GoReady hooks=%v, want %v", goReady, want)
+	}
+	for i, name := range want {
+		if goReady[i] != name {
+			t.Errorf("GoReady hooks=%v, want %v", goReady, want)
+			break
+		}
 	}
 }
 

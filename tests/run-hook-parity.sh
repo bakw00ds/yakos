@@ -832,6 +832,14 @@ case_check task-dependency-gate.sh    taskcompleted-unblocked.json 0 task-depend
 case_check task-complete-dispatch.sh  taskcompleted-backend.json   0 task-complete-dispatch
 case_check task-complete-dispatch.sh  taskcompleted-frontend.json  0 task-complete-dispatch
 
+# --- cycle-counter ---
+# S-6 A-2a: cycle-counter had zero case_check coverage before this WP (A-1
+# report §"A-2 sizing") — the hook doesn't gate on tool_name/hook_event_name
+# at all, so any well-formed fixture with a session_id + agent_type
+# exercises it; reusing pretooluse-generic-tool.json rather than adding a
+# new fixture file.
+case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter
+
 # ---- summary ------------------------------------------------------------
 
 echo
