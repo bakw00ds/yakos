@@ -75,9 +75,17 @@ Recommendation:   <commit|review-first|hold>
 ## Deployment drift
 
 Framework-level hook scripts in `<project>/scripts/hooks/` can also drift from
-`lib/hooks/` as the framework evolves. That is not a dependency update — use
-`yakos refresh [--project <path>|--all]` to detect and repair hook-script drift,
-settings.json registration drift, and agent-symlink drift in one command.
+`lib/hooks/` as the framework evolves. That is not a dependency update — run
+the **CLI command** `yakos refresh [--project <path>|--all]` (via Bash) to
+detect and repair hook-script drift, settings.json registration drift, and
+agent-symlink drift in one command; it applies by default (pass `--dry-run`
+for a report-only run).
+
+If you instead reach for the `yakos.refresh` **MCP tool**, note it defaults
+the other way: report-only (dry run) unless the call explicitly sets
+`"apply": true`. This asymmetry is deliberate (a remote tool call gets a
+safer default than a local operator command) but easy to trip over if you
+expect the tool to behave like the CLI.
 
 ## Known gotchas
 

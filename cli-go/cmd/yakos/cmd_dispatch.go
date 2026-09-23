@@ -316,6 +316,7 @@ Flags:
                     run. Sets model_chosen_by:"eval" and eval_run_id in
                     the dispatch-log. Intended for use by the eval
                     harness (Phase 2); not for operator use.
+  --allow-root      Set IS_SANDBOX=1 for root-user container dispatch.
 
 Audit trail at ~/.yakos-state/dispatch-log.ndjson.
 

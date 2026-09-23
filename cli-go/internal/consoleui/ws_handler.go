@@ -319,7 +319,7 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) webs
 		if sinceStr := conn.Request().URL.Query().Get("since"); sinceStr != "" {
 			if sinceSeq, err := parseSinceSeq(sinceStr); err == nil {
 				for _, ev := range bus.History(sinceSeq) {
-					if !fleetEventVisible(ev, connOperatorID) {
+					if !ownerScopedEventVisible(ev, connOperatorID) {
 						continue
 					}
 					conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
@@ -344,7 +344,7 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) webs
 				if !ok {
 					return
 				}
-				if !fleetEventVisible(ev, connOperatorID) {
+				if !ownerScopedEventVisible(ev, connOperatorID) {
 					continue
 				}
 				conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
@@ -366,38 +366,63 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) webs
 	}
 }
 
-// fleetEventVisible reports whether ev should be delivered to a WS connection
-// whose authoritative operator ID is connOperatorID.
+// ownerScopedTopics is the set of topics that carry per-operator EventMeta
+// and must be filtered by ownerScopedEventVisible before delivery. Every
+// other topic is a broadcast topic and passes through unchanged.
 //
-// For fleet.* topics, the event's EventMeta carries OwnerOperatorID and Shared.
-// The event is visible when:
+// K3 (k82-security-review-2026-09-23.md): the workflow.* topics joined this
+// set alongside fleet.*. Before the fix, every flows run ID, workflow name,
+// node ID and agent name was broadcast to all RoleRead subscribers — which
+// is what made K1's run-ID-guessing attack targetable rather than
+// theoretical, since run IDs are handed out on this same stream. The fix
+// mirrors the existing fleet.* mechanism exactly: workflow.Engine now calls
+// Bus.PublishMeta with EventMeta.OwnerOperatorID set to the run's owner
+// (see internal/workflow/engine.go's run/runNode/nodeFailure).
+var ownerScopedTopics = map[string]bool{
+	wsbus.TopicFleetStarted:          true,
+	wsbus.TopicFleetFinished:         true,
+	wsbus.TopicWorkflowRunStarted:    true,
+	wsbus.TopicWorkflowRunFinished:   true,
+	wsbus.TopicWorkflowNodeStarted:   true,
+	wsbus.TopicWorkflowNodeFinished:  true,
+	wsbus.TopicWorkflowNodeTruncated: true,
+}
+
+// ownerScopedEventVisible reports whether ev should be delivered to a WS
+// connection whose authoritative operator ID is connOperatorID.
+//
+// For topics in ownerScopedTopics (fleet.* and workflow.*), the event's
+// EventMeta carries OwnerOperatorID and Shared. The event is visible when:
 //   - connOperatorID is empty (loopback / single-operator path — no isolation needed)
 //   - ev.Meta.OwnerOperatorID is empty (broadcast event)
-//   - ev.Meta.OwnerOperatorID == connOperatorID (the connection owns the session)
-//   - ev.Meta.Shared is true (the session is shared; all operators may see it)
+//   - ev.Meta.OwnerOperatorID == connOperatorID (the connection owns the session/run)
+//   - ev.Meta.Shared is true (the session is shared; all operators may see it —
+//     workflow.* events never set this; only fleet.* does today)
 //
-// Fail-closed: a fleet.* event with nil Meta is WITHHELD from any authenticated
-// connection (connOperatorID != "").  Any future code path that hand-builds a
-// fleet Event{} without going through Bus.PublishMeta must not leak to other
-// operators — withholding is the safe default.
+// Fail-closed: an owner-scoped event with nil Meta is WITHHELD from any
+// authenticated connection (connOperatorID != ""). Any future code path
+// that hand-builds an Event{} on one of these topics without going through
+// Bus.PublishMeta must not leak to other operators — withholding is the
+// safe default.
 //
-// All non-fleet topics pass through unchanged (Meta is nil for those events).
+// All other topics pass through unchanged (Meta is nil for those events).
 // The client payload is NEVER modified; Meta is server-side-only (json:"-").
-func fleetEventVisible(ev wsbus.Event, connOperatorID string) bool {
-	// Non-fleet topics: always deliver.
-	if ev.Topic != wsbus.TopicFleetStarted && ev.Topic != wsbus.TopicFleetFinished {
+func ownerScopedEventVisible(ev wsbus.Event, connOperatorID string) bool {
+	// Non-scoped topics: always deliver.
+	if !ownerScopedTopics[ev.Topic] {
 		return true
 	}
 	// Loopback / single-operator path: empty connOperatorID means deliver all.
 	if connOperatorID == "" {
 		return true
 	}
-	// Fail-closed: fleet event with no meta must be withheld from authenticated
-	// connections.  PublishMeta is the only correct publish path for fleet topics.
+	// Fail-closed: an owner-scoped event with no meta must be withheld from
+	// authenticated connections. PublishMeta is the only correct publish
+	// path for topics in ownerScopedTopics.
 	if ev.Meta == nil {
 		return false
 	}
-	// Broadcast fleet event (OwnerOperatorID empty): deliver to all.
+	// Broadcast event (OwnerOperatorID empty): deliver to all.
 	if ev.Meta.OwnerOperatorID == "" {
 		return true
 	}

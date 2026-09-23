@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: `yakos.refresh`'s wire field renamed `dry_run` → `apply`
+  across all four transports** (JSON-RPC, gRPC, REST, MCP) as part of
+  flipping the tool's default from apply-by-default to dry-run-by-default
+  (round-1 daemon security review M2/R5). An existing client that sends
+  `{"dry_run": true}` expecting a safe, report-only run is not recognized
+  by the new field name and will instead get the new **safe** default
+  (report-only, since an unrecognized field is ignored and `apply`
+  defaults to `false`) — the failure mode is "no write happens", not "an
+  unexpected write happens". A client that wants to actually apply changes
+  must be updated to send `{"apply": true}`. The CLI (`yakos refresh`) is
+  unaffected — it does not go through this wire field and keeps its own
+  `--dry-run`-opt-in, apply-by-default behavior, which is a deliberate,
+  documented asymmetry: a remote tool call defaults to the safer option; a
+  local operator command does not.
+
 ### Fixed
 
 - **`govulncheck ./...` now reports zero reachable findings** (was 35) —
