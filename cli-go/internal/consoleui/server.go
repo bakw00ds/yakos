@@ -881,8 +881,19 @@ func (s *Server) registerRoutes() {
 	// ---- Kanban sub-dashboard -----------------------------------------------
 	// Mount kanban.Handler() under /kanban/. The kanban handler's own
 	// Host-allowlist is NOT invoked (we used Handler() not Serve()).
+	//
+	// SECURITY (H3): the whole tree must NOT be mounted at a single RoleRead
+	// gate. kanban/serve.go registers mutating routes (POST /api/add,
+	// /api/move, /api/notes, /api/delete) on the SAME mux as the read-only
+	// ones (GET /, /api/board, /api/meta), and NewKanbanServer sets
+	// skipHostCheck=true (the console edge is the auth authority here, not
+	// kanban's own inner Host check) — so a single RoleRead mount let any
+	// read-only identity delete or mutate the team board. kanbanRoleGate
+	// requires RoleDispatch for every non-GET/HEAD request (i.e. exactly the
+	// mutating routes above, which are all POST-only per kanban/serve.go's
+	// own per-handler method checks) and RoleRead for GET/HEAD.
 	kanbanSrv := kanban.NewKanbanServer(s.cfg.KanbanBoardPath, s.cfg.KanbanProject, "")
-	s.mux.Handle("/kanban/", requireRole(netid.RoleRead, http.StripPrefix("/kanban", kanbanSrv.Handler())))
+	s.mux.Handle("/kanban/", kanbanRoleGate(http.StripPrefix("/kanban", kanbanSrv.Handler())))
 
 	// ---- Metrics (cost) sub-dashboard ---------------------------------------
 	// HandlerNoToken() is used instead of Handler() so that session-cookie-
@@ -1547,4 +1558,21 @@ func requireRole(required netid.Role, next http.Handler) http.Handler {
 // requireRoleFunc wraps an http.HandlerFunc with requireRole.
 func requireRoleFunc(required netid.Role, fn http.HandlerFunc) http.HandlerFunc {
 	return requireRole(required, fn).ServeHTTP
+}
+
+// kanbanRoleGate applies a per-method role requirement to the kanban
+// sub-dashboard tree (H3, security-review-2026-09-14.md): GET/HEAD (the
+// read-only routes GET /, /api/board, /api/meta) require only RoleRead;
+// every other method (the mutating routes POST /api/add, /api/move,
+// /api/notes, /api/delete — all POST-only per their own handlers in
+// kanban/serve.go) requires RoleDispatch. Mirrors the per-method role checks
+// already used for mixed-method flows routes (flows_handler.go).
+func kanbanRoleGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		required := netid.RoleRead
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			required = netid.RoleDispatch
+		}
+		requireRole(required, next).ServeHTTP(w, r)
+	})
 }

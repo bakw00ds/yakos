@@ -320,14 +320,28 @@ func TestFleet_OwnedSessionIsAttachable(t *testing.T) {
 
 // ---- 8. Loopback path sees all sessions (no isolation on loopback) ----------
 //
-// On the loopback path, id.Resolved=false (no resolver middleware applied via
-// srv.Handler() without identity injection).  The fleet handler treats
-// Resolved=false as the loopback trusted path and returns all sessions.
-
+// On the REAL loopback path, the resolver middleware runs and stamps
+// Resolved=true, Authenticated=false, Role=RoleAdmin (see
+// consoleui/server.go's loopbackTrusted branch). This injects exactly that
+// identity via newFleetTestServerWithIdentity, matching production.
+//
+// Round-2 review R11: the previous version of this test used
+// newFleetTestServer(t) (NO identity injection at all, i.e. the zero-value
+// Identity: Resolved=FALSE), on the mistaken premise that "loopback" and
+// "resolver never ran" were the same condition — they are not. That
+// conflation was the R11 bug itself: fleet_handler.go's loopbackPath check
+// was `!id.Resolved || !id.Authenticated`, so an entirely unresolved
+// identity (a future mount that skips the resolver, not loopback traffic at
+// all) was ALSO treated as loopback-trusted and dumped the whole fleet. See
+// TestFleet_UnresolvedIdentityFailsClosed below for the corrected behavior
+// of that other case.
 func TestFleet_LoopbackSeesAllSessions(t *testing.T) {
-	// No identity injection: simulates the loopback path where the resolver
-	// middleware has not run (srv.Handler() is used without identity middleware).
-	ts, tok, reg, srv := newFleetTestServer(t)
+	loopbackID := netid.Identity{
+		Resolved:      true,
+		Authenticated: false,
+		Role:          netid.RoleAdmin,
+	}
+	ts, tok, reg, srv := newFleetTestServerWithIdentity(t, loopbackID)
 
 	hub := srv.ChatHub()
 
@@ -372,10 +386,58 @@ func TestFleet_LoopbackSeesAllSessions(t *testing.T) {
 	}
 }
 
+// TestFleet_UnresolvedIdentityFailsClosed is the round-2 review R11
+// regression proper: a request that reaches handleFleet with a genuinely
+// UNRESOLVED identity (Resolved=false — the resolver middleware did not run
+// at all, e.g. a future mount that skips it; this is NOT what loopback
+// traffic looks like, see TestFleet_LoopbackSeesAllSessions above) must see
+// NO sessions, not every operator's. newFleetTestServer(t) uses srv.Handler()
+// with no identity middleware injected, producing exactly the zero-value
+// (Resolved=false) Identity this test needs.
+func TestFleet_UnresolvedIdentityFailsClosed(t *testing.T) {
+	ts, tok, reg, srv := newFleetTestServer(t)
+
+	hub := srv.ChatHub()
+	if err := hub.OpenSession("sess-unresolved-a", "alice", false); err != nil {
+		t.Fatalf("OpenSession a: %v", err)
+	}
+	if err := hub.OpenSession("sess-unresolved-b", "bob", false); err != nil {
+		t.Fatalf("OpenSession b: %v", err)
+	}
+	t.Cleanup(func() {
+		hub.CloseSession("sess-unresolved-a")
+		hub.CloseSession("sess-unresolved-b")
+	})
+
+	reg.Add(dispatch.SessionEntry{
+		SessionID: "sess-unresolved-a", Agent: "a", Runtime: "claude",
+		OperatorID: "alice", TaskPreview: "task a", StartedAt: time.Now(),
+		Status: dispatch.StatusRunning,
+	})
+	reg.Add(dispatch.SessionEntry{
+		SessionID: "sess-unresolved-b", Agent: "b", Runtime: "claude",
+		OperatorID: "bob", TaskPreview: "task b", StartedAt: time.Now(),
+		Status: dispatch.StatusRunning,
+	})
+
+	resp := get(t, ts.URL+"/api/fleet", tok)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d; want 200", resp.StatusCode)
+	}
+	fr := decodeFleetResponse(t, resp)
+
+	for _, s := range fr.Sessions {
+		if s.SessionID == "sess-unresolved-a" || s.SessionID == "sess-unresolved-b" {
+			t.Errorf("SECURITY: unresolved identity was treated as loopback-trusted and saw session %q — fleet leaked to an unauthenticated/unresolved caller (R11 regression)", s.SessionID)
+		}
+	}
+}
+
 // ---- 9. TaskPreview is capped at 120 runes in REST snapshot -----------------
 
 func TestFleet_TaskPreviewCappedAt120Runes(t *testing.T) {
-	ts, tok, reg, srv := newFleetTestServer(t)
+	loopbackID := netid.Identity{Resolved: true, Authenticated: false, Role: netid.RoleAdmin}
+	ts, tok, reg, srv := newFleetTestServerWithIdentity(t, loopbackID)
 
 	hub := srv.ChatHub()
 	if err := hub.OpenSession("sess-tp", "alice", false); err != nil {
@@ -434,7 +496,8 @@ func TestFleet_MethodNotAllowed(t *testing.T) {
 // key) rather than by the ephemeral session_id.
 
 func TestFleet_ConversationIDPresentInRow(t *testing.T) {
-	ts, tok, reg, srv := newFleetTestServer(t)
+	loopbackID := netid.Identity{Resolved: true, Authenticated: false, Role: netid.RoleAdmin}
+	ts, tok, reg, srv := newFleetTestServerWithIdentity(t, loopbackID)
 
 	hub := srv.ChatHub()
 	if err := hub.OpenSession("sess-convid-1", "alice", false); err != nil {
@@ -473,7 +536,8 @@ func TestFleet_ConversationIDPresentInRow(t *testing.T) {
 // TestFleet_ConversationIDEmptyWhenNotSet verifies that rows with no
 // ConversationID do not error and return an empty/omitted conversation_id field.
 func TestFleet_ConversationIDEmptyWhenNotSet(t *testing.T) {
-	ts, tok, reg, srv := newFleetTestServer(t)
+	loopbackID := netid.Identity{Resolved: true, Authenticated: false, Role: netid.RoleAdmin}
+	ts, tok, reg, srv := newFleetTestServerWithIdentity(t, loopbackID)
 
 	hub := srv.ChatHub()
 	if err := hub.OpenSession("sess-noconvid", "alice", false); err != nil {

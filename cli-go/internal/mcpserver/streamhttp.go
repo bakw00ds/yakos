@@ -16,7 +16,9 @@ package mcpserver
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -30,7 +32,16 @@ type HTTPConfig struct {
 	Addr string
 
 	// WriteToken is the bearer token required for all requests.
-	// Empty means no auth (tests only).
+	//
+	// SECURITY: an empty WriteToken does NOT mean "no auth required". This
+	// transport listens on a TCP loopback socket reachable by any local
+	// process (or, absent Origin/Host checks, any web page running in the
+	// operator's browser), and serves yakos.dispatch — which is arbitrary
+	// local code execution on the operator's credentials (see C2 in
+	// security-review-2026-09-14.md). An empty token instead means the
+	// transport refuses to start at all (Serve returns an error) and, as a
+	// defense-in-depth backstop, every request is rejected with 401 even if
+	// something manages to invoke the handler directly (e.g. via Handler()).
 	WriteToken string
 
 	// MCPConfig is the MCP session configuration forwarded to each request handler.
@@ -63,8 +74,17 @@ func (s *HTTPServer) Handler() http.Handler {
 	return s.httpSrv.Handler
 }
 
+// ErrNoWriteToken is returned by Serve when no WriteToken is configured.
+// The streamable HTTP transport must never bind without one — see the
+// WriteToken doc comment on HTTPConfig.
+var ErrNoWriteToken = errors.New("mcpserver/http: refusing to start: no write token configured (unauthenticated dispatch endpoint)")
+
 // Serve listens on cfg.Addr and blocks until ctx is cancelled.
 func (s *HTTPServer) Serve(ctx context.Context) error {
+	if s.cfg.WriteToken == "" {
+		return ErrNoWriteToken
+	}
+
 	ln, err := net.Listen("tcp", s.cfg.Addr)
 	if err != nil {
 		return fmt.Errorf("mcpserver/http: listen %s: %w", s.cfg.Addr, err)
@@ -102,12 +122,16 @@ func (s *HTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // encoding + flush after each frame.
 func (s *HTTPServer) handleMCP(w http.ResponseWriter, r *http.Request) {
 	// --- Auth ---
-	if s.cfg.WriteToken != "" {
-		tok := bearerTokenHTTP(r)
-		if tok == "" || tok != s.cfg.WriteToken {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
+	// SECURITY (C2/L4): fail closed. An empty configured token must never be
+	// treated as "auth disabled" — Serve() already refuses to start in that
+	// case, but this handler is reachable directly in tests via Handler(),
+	// so it re-asserts the same fail-closed behavior. The token comparison
+	// uses subtle.ConstantTimeCompare to avoid a timing side-channel.
+	tok := bearerTokenHTTP(r)
+	if s.cfg.WriteToken == "" || tok == "" ||
+		subtle.ConstantTimeCompare([]byte(tok), []byte(s.cfg.WriteToken)) != 1 {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
 	}
 
 	// --- Response setup ---

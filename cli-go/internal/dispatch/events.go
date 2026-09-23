@@ -22,12 +22,20 @@ func dispatchLogPath() string {
 // flock for cross-process safety (matching the bash flock usage in dispatch.sh).
 // Errors are non-fatal: if the log can't be written, dispatch still proceeds.
 func appendEvent(path string, line []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil { //nolint:gosec
+	// SECURITY (M5, security-review-2026-09-14.md): the dispatch-log holds
+	// TaskPreview (the first 200 bytes of every dispatched task), operator
+	// IDs, and conversation/session IDs. 0755/0644 let any local user read
+	// it; 0700/0600 restrict it to the owner, matching every other
+	// yakOS-written credential/state file (console token, REST tokens,
+	// setup token — all 0600/0700).
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil { //nolint:gosec
 		return fmt.Errorf("events: mkdir %s: %w", filepath.Dir(path), err)
 	}
 
-	// Open with O_APPEND for atomic multi-process appends.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644) //nolint:gosec
+	// Open with O_APPEND for atomic multi-process appends. noFollowFlag
+	// (round-2 review R4) refuses to follow a symlink planted at path —
+	// see openflags_unix.go.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|noFollowFlag, 0600) //nolint:gosec
 	if err != nil {
 		return fmt.Errorf("events: open %s: %w", path, err)
 	}

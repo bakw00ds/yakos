@@ -169,7 +169,42 @@ service Refresh {
 }
 
 message RefreshRunRequest {
-  bool dry_run = 1;
+  // Field 1 (dry_run) is retired, not reused. It meant the opposite of
+  // "apply" (proto3 zero value false == APPLY), so an old client compiled
+  // against the retired field and a new server sharing field number 1
+  // would silently invert: an explicit, safe `dry_run = true` would decode
+  // as `apply = true` and write. Reserved so no future field can be
+  // assigned number 1 or the name "dry_run" and repeat this (round-2
+  // review N9, security-review-2026-09-14.md addendum).
+  reserved 1;
+  reserved "dry_run";
+
+  // apply, when true, writes the detected repairs (hook scripts,
+  // settings.json registrations, agent symlinks). The proto3 zero value
+  // (false) — whether sent explicitly or simply omitted, which proto3
+  // cannot distinguish for a scalar bool — means dry-run/read-only.
+  //
+  // SECURITY (round-2 review R5, M2 follow-up,
+  // security-review-2026-09-14.md): this field replaces the retired
+  // dry_run (field 1 above), whose proto3 zero value (false) meant
+  // APPLY — so an omitted field already wrote hook scripts,
+  // settings.json, and agent symlinks across every project under
+  // $HOME/agent-control. A proto3 scalar bool cannot distinguish
+  // "omitted" from "false" at all (there is no wire presence bit for a
+  // plain bool field), so the only way to make the zero value safe is to
+  // name the field for the SAFE state. Naming it "apply" (destructive =
+  // true, explicit) closes that permanently; a future reader cannot
+  // reintroduce the bug by "fixing" a default, because there is no
+  // default state left that means write. Field number 3 (not 1) so an
+  // old client's `dry_run = true` cannot decode as `apply = true` under a
+  // real protobuf wire codec (round-2 review N9).
+  bool apply = 3;
+  // scope selects how many projects a write reaches. "" (default) or
+  // "project" limits repair to the caller-configured WorkspaceRoot only;
+  // "all" reaches every project under $HOME/agent-control
+  // (refresh.CollectProjects) — a much larger blast radius that must be
+  // requested explicitly (round-2 review R19).
+  string scope = 2;
 }
 
 message RefreshRunResponse {

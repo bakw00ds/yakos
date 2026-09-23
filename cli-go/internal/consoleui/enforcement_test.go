@@ -308,3 +308,82 @@ func TestLoopbackInvariant_ZeroValueIdentity_NotBlocked(t *testing.T) {
 		t.Errorf("loopback (Resolved=false) on /api/chat/dispatch: got 403; want any non-403 (loopback must not be blocked)")
 	}
 }
+
+// ---- H3: kanban mutating endpoints must require RoleDispatch, not RoleRead -
+
+// TestKanbanRoleEnforcement_RoleRead_BlockedOnMutate is the core H3
+// regression: before the fix, the ENTIRE /kanban/ tree (including the
+// mutating POST /api/add, /api/move, /api/notes, /api/delete routes) was
+// mounted at a single requireRole(RoleRead) gate, so any read-only identity
+// (including any CN signed by the project CA — see L1) could delete or
+// mutate the team kanban board. A RoleRead identity must now get 403 on a
+// kanban mutation.
+func TestKanbanRoleEnforcement_RoleRead_BlockedOnMutate(t *testing.T) {
+	t.Parallel()
+
+	readOnly := netid.Identity{
+		OperatorID:    "reader",
+		Role:          netid.RoleRead,
+		Authenticated: true,
+		Resolved:      true,
+	}
+	ts, tok, _ := newEnforcementTestServer(t, readOnly)
+
+	resp := authPost(t, ts, tok, "/kanban/api/delete", map[string]interface{}{
+		"id": "K-3",
+	})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("RoleRead on POST /kanban/api/delete: got %d; want 403", resp.StatusCode)
+	}
+}
+
+// TestKanbanRoleEnforcement_RoleRead_PassesRead verifies that a RoleRead
+// identity can still reach the read-only kanban routes (GET /kanban/api/board),
+// i.e. the H3 fix did not overtighten and break ordinary board viewing.
+func TestKanbanRoleEnforcement_RoleRead_PassesRead(t *testing.T) {
+	t.Parallel()
+
+	readOnly := netid.Identity{
+		OperatorID:    "viewer",
+		Role:          netid.RoleRead,
+		Authenticated: true,
+		Resolved:      true,
+	}
+	ts, tok, _ := newEnforcementTestServer(t, readOnly)
+
+	resp := authGet(t, ts, tok, "/kanban/api/board")
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusForbidden {
+		t.Errorf("RoleRead on GET /kanban/api/board: got 403; want 200 (read-only route)")
+	}
+}
+
+// TestKanbanRoleEnforcement_RoleDispatch_PassesMutate verifies that a
+// RoleDispatch identity (the new minimum for kanban mutations) is not
+// blocked by the role gate on a mutating kanban route. The handler may still
+// reject the request for business reasons (e.g. bad task ID); we only assert
+// the role gate itself passed (not a 403).
+func TestKanbanRoleEnforcement_RoleDispatch_PassesMutate(t *testing.T) {
+	t.Parallel()
+
+	dispatcher := netid.Identity{
+		OperatorID:    "dispatcher",
+		Role:          netid.RoleDispatch,
+		Authenticated: true,
+		Resolved:      true,
+	}
+	ts, tok, _ := newEnforcementTestServer(t, dispatcher)
+
+	resp := authPost(t, ts, tok, "/kanban/api/add", map[string]interface{}{
+		"title":    "test task",
+		"category": "chore",
+	})
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusForbidden {
+		t.Errorf("RoleDispatch on POST /kanban/api/add: got 403; want any non-403 status")
+	}
+}

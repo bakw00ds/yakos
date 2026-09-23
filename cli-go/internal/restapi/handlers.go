@@ -1,6 +1,7 @@
 package restapi
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -469,6 +470,11 @@ func splitKanbanTaskHeader(s string) (id, title string) {
 
 // handleRefreshRun is the handler for a hypothetical POST /v1/refresh.
 // Kept here for completeness; not yet wired to a route in Phase 2.
+//
+// SECURITY (round-2 review R5): this inherited the exact M2 zero-value bug
+// pre-emptively — it wasn't reachable (unrouted), but the day someone wires
+// it up it would have shipped it fresh. The request field is "apply", never
+// "dry_run"/"dryRun"; see refresh.ResolveApply's doc comment for why.
 func (s *Server) handleRefreshRun(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.YakosRoot == "" {
 		writeError(w, http.StatusServiceUnavailable, "yakos_root not configured")
@@ -476,7 +482,8 @@ func (s *Server) handleRefreshRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type refreshRequest struct {
-		DryRun bool `json:"dry_run,omitempty"`
+		Apply bool   `json:"apply,omitempty"`
+		Scope string `json:"scope,omitempty"`
 	}
 	type refreshResponse struct {
 		Output string `json:"output"`
@@ -488,9 +495,18 @@ func (s *Server) handleRefreshRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.Scope != "" && req.Scope != "project" && req.Scope != "all" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid scope %q: must be \"project\" or \"all\"", req.Scope))
+		return
+	}
 
-	home := os.Getenv("HOME")
-	projects := refresh.CollectProjects(home)
+	// SECURITY (round-2 review R19): scope defaults to the current project
+	// only; "all" (reaching every project under $HOME/agent-control) must
+	// be requested explicitly.
+	var projects []string
+	if req.Scope == "all" {
+		projects = refresh.CollectProjects(os.Getenv("HOME"))
+	}
 	if len(projects) == 0 && s.cfg.WorkspaceRoot != "" {
 		projects = []string{s.cfg.WorkspaceRoot}
 	}
@@ -499,7 +515,7 @@ func (s *Server) handleRefreshRun(w http.ResponseWriter, r *http.Request) {
 	rcfg := refresh.Config{
 		YakosRoot:    s.cfg.YakosRoot,
 		ProjectPaths: projects,
-		DryRun:       req.DryRun,
+		DryRun:       refresh.ResolveApply(req.Apply),
 		Writer:       &out,
 		ErrWriter:    &out,
 	}

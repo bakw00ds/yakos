@@ -1161,3 +1161,59 @@ func TestCheckRuntimeAuth_Claude_NoneConfigured(t *testing.T) {
 func findInPATH(binary string) (string, error) {
 	return exec.LookPath(binary)
 }
+
+// ---- round-2 review R7: buildExecEnv must apply the M4 allowlist ----------
+
+// TestBuildExecEnv_FiltersOtherRuntimesCredentials is the R7 regression:
+// before this fix, buildExecEnv copied the parent environment map verbatim
+// (every key/value in `env`), so `yakos start --runtime claude` handed the
+// child process (and, via buildSpawnSpec, anyone attached to the PTY over
+// --share-terminal) OPENAI_API_KEY/CODEX_HOME and every other configured
+// runtime's credentials too, exactly the M4 finding the dispatch adapters in
+// internal/runtime were fixed for. buildExecEnv must apply the same
+// per-runtime allowlist (runtime.FilterEnvFor).
+func TestBuildExecEnv_FiltersOtherRuntimesCredentials(t *testing.T) {
+	env := map[string]string{
+		"HOME":                "/home/op",
+		"PATH":                "/usr/bin:/bin",
+		"ANTHROPIC_API_KEY":   "sk-ant-secret",
+		"OPENAI_API_KEY":      "sk-openai-secret",
+		"CODEX_HOME":          "/some/codex/home",
+		"ANTIGRAVITY_API_KEY": "agy-secret",
+		"GEMINI_API_KEY":      "gemini-secret",
+		"UNRELATED_SECRET":    "should-not-forward",
+	}
+
+	got := buildExecEnv("claude", env, false)
+
+	if !hasKey(got, "ANTHROPIC_API_KEY") {
+		t.Error("buildExecEnv(claude): ANTHROPIC_API_KEY missing; claude's own credential must be forwarded")
+	}
+	for _, leaked := range []string{"OPENAI_API_KEY", "CODEX_HOME", "ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "UNRELATED_SECRET"} {
+		if hasKey(got, leaked) {
+			t.Errorf("buildExecEnv(claude): %s leaked into claude's exec/PTY env (R7 regression)", leaked)
+		}
+	}
+	if !hasKey(got, "PATH") || !hasKey(got, "HOME") {
+		t.Errorf("buildExecEnv(claude): generic PATH/HOME dropped; got %v", got)
+	}
+}
+
+// TestBuildExecEnv_AllowRootStillInjectsSandboxFlag is a non-regression
+// check that filtering did not break the existing IS_SANDBOX=1 injection.
+func TestBuildExecEnv_AllowRootStillInjectsSandboxFlag(t *testing.T) {
+	got := buildExecEnv("claude", map[string]string{"HOME": "/home/op"}, true)
+	if !hasKey(got, "IS_SANDBOX") {
+		t.Error("buildExecEnv: IS_SANDBOX missing when allowRoot=true")
+	}
+}
+
+func hasKey(env []string, key string) bool {
+	prefix := key + "="
+	for _, kv := range env {
+		if len(kv) >= len(prefix) && kv[:len(prefix)] == prefix {
+			return true
+		}
+	}
+	return false
+}

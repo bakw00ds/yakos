@@ -36,6 +36,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/kanban"
+	"github.com/bakw00ds/yakos/internal/pathsafe"
 	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/refresh"
 	"github.com/bakw00ds/yakos/internal/status"
@@ -512,8 +513,19 @@ func splitKanbanTaskHeader(s string) (id, title string) {
 // ---- yakos.refresh.run -------------------------------------------------------
 
 // refreshRunParams is the request shape for yakos.refresh.run.
+//
+// SECURITY (round-2 review R5, R19): Apply's Go zero value (false) is
+// dry-run — see refresh.ResolveApply's doc comment for why this field is
+// named "apply", never "dry_run"/"dryRun" (a bool named for the SAFE state
+// makes its zero value the safe default; a bool named for the DESTRUCTIVE
+// state, as round 1 shipped here, makes its zero value destructive, which
+// is exactly the M2 bug this closes). Scope mirrors the same opt-in shape
+// for blast radius: omitted/"project" (default) limits repair to the
+// current WorkspaceRoot; only an explicit "all" reaches every project under
+// $HOME/agent-control.
 type refreshRunParams struct {
-	DryRun bool `json:"dry_run,omitempty"`
+	Apply bool   `json:"apply,omitempty"`
+	Scope string `json:"scope,omitempty"`
 }
 
 // refreshRunResult is the response shape for yakos.refresh.run.
@@ -532,12 +544,17 @@ func handleRefreshRun(cfg Config) jsonrpc.Handler {
 				return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("refresh.run: invalid params: %v", err)}
 			}
 		}
+		if p.Scope != "" && p.Scope != "project" && p.Scope != "all" {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("refresh.run: invalid scope %q: must be \"project\" or \"all\"", p.Scope)}
+		}
 		if cfg.YakosRoot == "" {
 			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeDispatchUnavailable, Message: "refresh.run: yakos_root not configured"}
 		}
 
-		home := os.Getenv("HOME")
-		projects := refresh.CollectProjects(home)
+		var projects []string
+		if p.Scope == "all" {
+			projects = refresh.CollectProjects(os.Getenv("HOME"))
+		}
 		if len(projects) == 0 && cfg.WorkspaceRoot != "" {
 			projects = []string{cfg.WorkspaceRoot}
 		}
@@ -546,7 +563,7 @@ func handleRefreshRun(cfg Config) jsonrpc.Handler {
 		rcfg := refresh.Config{
 			YakosRoot:    cfg.YakosRoot,
 			ProjectPaths: projects,
-			DryRun:       p.DryRun,
+			DryRun:       refresh.ResolveApply(p.Apply),
 			Writer:       &out,
 			ErrWriter:    &out,
 		}
@@ -614,6 +631,14 @@ type statusReadParams struct {
 }
 
 // handleStatusRead returns a handler that reads the project status report.
+//
+// SECURITY (round-2 review R13): status.Status joins Project onto
+// $HOME/agent-control unvalidated (internal/status/status.go), the
+// identical pattern M3 fixed in internal/supervise one package over. A
+// value like "../../.." resolves the work directory to an arbitrary
+// directory and stats/walks files under it (oracle-grade info disclosure
+// plus a computeDirSize-driven denial of service). Validated here with the
+// same pathsafe.ValidateProjectSlug the M3 fix now shares.
 func handleStatusRead(cfg Config) jsonrpc.Handler {
 	return func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		var p statusReadParams
@@ -623,6 +648,9 @@ func handleStatusRead(cfg Config) jsonrpc.Handler {
 			if err := dec.Decode(&p); err != nil {
 				return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("status.read: invalid params: %v", err)}
 			}
+		}
+		if err := pathsafe.ValidateProjectSlug(p.Project); err != nil {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("status.read: %v", err)}
 		}
 
 		project := p.Project

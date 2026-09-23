@@ -32,12 +32,12 @@ func TestSendInput_OverMaxPayloadRejected(t *testing.T) {
 	defer mgr.Stop()
 
 	const sid = "sec-over-max"
-	if err := mgr.RegisterExternalSession(sid, "/w", nil); err != nil {
+	if err := mgr.RegisterExternalSession(sid, "/w", nil, "test-owner"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
 	payload := make([]byte, maxOwnerFramePayload+1)
-	err := mgr.SendInput(sid, payload)
+	err := mgr.SendInput(sid, "test-owner", payload)
 	if err == nil {
 		t.Fatal("SendInput with payload > maxOwnerFramePayload: want error, got nil")
 	}
@@ -55,14 +55,14 @@ func TestSendInput_ExactMaxPayloadAccepted(t *testing.T) {
 	defer mgr.Stop()
 
 	const sid = "sec-exact-max"
-	if err := mgr.RegisterExternalSession(sid, "/w", nil); err != nil {
+	if err := mgr.RegisterExternalSession(sid, "/w", nil, "test-owner"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
 	payload := make([]byte, maxOwnerFramePayload)
 
 	// Must not panic. Error (if any) should be about conn, not about payload size.
-	err := mgr.SendInput(sid, payload)
+	err := mgr.SendInput(sid, "test-owner", payload)
 	// If there's an error it should be something other than "payload too large".
 	// We verify by checking it's not the size-error string; a nil error is also fine.
 	if err != nil {
@@ -84,7 +84,7 @@ func TestSendInput_BoundaryFuzz(t *testing.T) {
 	defer mgr.Stop()
 
 	const sid = "sec-fuzz"
-	if err := mgr.RegisterExternalSession(sid, "/w", nil); err != nil {
+	if err := mgr.RegisterExternalSession(sid, "/w", nil, "test-owner"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
@@ -94,7 +94,7 @@ func TestSendInput_BoundaryFuzz(t *testing.T) {
 		size := size
 		t.Run("size"+itoa(size), func(t *testing.T) {
 			payload := make([]byte, size)
-			err := mgr.SendInput(sid, payload)
+			err := mgr.SendInput(sid, "test-owner", payload)
 			if err == nil {
 				t.Errorf("SendInput(%d bytes): want error, got nil", size)
 			}
@@ -126,4 +126,48 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(buf[pos:])
+}
+
+// ---- round-2 review R16: SendInput/SendResize enforce owner themselves ----
+
+// TestSendInput_WrongOperatorDenied is the R16 regression: SendInput must
+// re-check the caller's operatorID against the session's recorded owner
+// itself, not rely solely on the one current caller (the WS handler) having
+// already called ClaimOwner. Before this fix SendInput took no operatorID
+// at all and routed to any externally-owned session by ID alone.
+func TestSendInput_WrongOperatorDenied(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	mgr := New(ctx, Config{Cap: 4})
+	defer mgr.Stop()
+
+	const sid = "sec-send-input-wrong-op"
+	if err := mgr.RegisterExternalSession(sid, "/w", nil, "alice"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	if err := mgr.SendInput(sid, "mallory", []byte("rm -rf /")); err != ErrOwnerMismatch {
+		t.Fatalf("SendInput(mallory) on alice-owned session: err = %v; want ErrOwnerMismatch", err)
+	}
+	if err := mgr.SendInput(sid, "", []byte("rm -rf /")); err != ErrOwnerMismatch {
+		t.Fatalf("SendInput(\"\") on alice-owned session: err = %v; want ErrOwnerMismatch", err)
+	}
+}
+
+// TestSendResize_WrongOperatorDenied mirrors TestSendInput_WrongOperatorDenied
+// for SendResize.
+func TestSendResize_WrongOperatorDenied(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	mgr := New(ctx, Config{Cap: 4})
+	defer mgr.Stop()
+
+	const sid = "sec-send-resize-wrong-op"
+	if err := mgr.RegisterExternalSession(sid, "/w", nil, "alice"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	if err := mgr.SendResize(sid, "mallory", 80, 24); err != ErrOwnerMismatch {
+		t.Fatalf("SendResize(mallory) on alice-owned session: err = %v; want ErrOwnerMismatch", err)
+	}
 }

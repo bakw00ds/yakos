@@ -148,13 +148,50 @@ func TestHTTP_Auth_WrongToken_401(t *testing.T) {
 	}
 }
 
-func TestHTTP_Auth_NoAuthRequired_WhenTokenEmpty(t *testing.T) {
+// TestHTTP_Auth_EmptyToken_AlwaysUnauthorized covers C2: the HTTP transport
+// must fail closed when no write token is configured, rather than treating
+// an empty WriteToken as "no auth required". Every request — including one
+// with no Authorization header at all — must be rejected.
+func TestHTTP_Auth_EmptyToken_AlwaysUnauthorized(t *testing.T) {
 	t.Parallel()
-	_, client := newHTTPTestServer(t, "", defaultCfg(t))
-	client.Token = ""
-	resp := callHTTP(t, client, "initialize", nil)
-	if resp["error"] != nil {
-		t.Errorf("unexpected error: %v", resp["error"])
+	ts, _ := newHTTPTestServer(t, "", defaultCfg(t))
+	resp := postMCP(t, ts, "", `{"jsonrpc":"2.0","id":1,"method":"initialize"}`+"\n")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status=%d; want 401 (empty token must fail closed)", resp.StatusCode)
+	}
+}
+
+// TestHTTP_Auth_EmptyToken_RejectsEmptyBearerToo guards against a subtly
+// wrong fix that only checks tok == "" *before* comparing to cfg.WriteToken:
+// if WriteToken is also "", a naive `tok != s.cfg.WriteToken` would let an
+// empty-Authorization request through.
+func TestHTTP_Auth_EmptyToken_RejectsEmptyBearerToo(t *testing.T) {
+	t.Parallel()
+	ts, _ := newHTTPTestServer(t, "", defaultCfg(t))
+	resp := postMCP(t, ts, "", `{"jsonrpc":"2.0","id":1,"method":"initialize"}`+"\n")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status=%d; want 401", resp.StatusCode)
+	}
+}
+
+// TestHTTPServer_Serve_RefusesEmptyToken covers C2 at the transport-startup
+// level: Serve must refuse to bind at all when no write token is configured,
+// rather than silently listening unauthenticated.
+func TestHTTPServer_Serve_RefusesEmptyToken(t *testing.T) {
+	t.Parallel()
+	srv := mcpserver.NewHTTPServer(mcpserver.HTTPConfig{
+		Addr:       "127.0.0.1:0",
+		WriteToken: "",
+		MCPConfig:  defaultCfg(t),
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := srv.Serve(ctx)
+	if err == nil {
+		t.Fatal("Serve with empty WriteToken should return an error, not start listening")
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("Serve should refuse immediately, not block until context deadline: %v", err)
 	}
 }
 

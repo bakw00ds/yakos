@@ -81,7 +81,7 @@ func TestPushTransport_E2E_StartOwnedPTYPushesToSubscriber(t *testing.T) {
 
 	const sessionID = "e2e-ext-001"
 	argv := []string{"/bin/sh", "-c", "printf hello"}
-	if err := mgr.RegisterExternalSession(sessionID, "/tmp", argv); err != nil {
+	if err := mgr.RegisterExternalSession(sessionID, "/tmp", argv, "test-owner"); err != nil {
 		t.Fatalf("RegisterExternalSession: %v", err)
 	}
 

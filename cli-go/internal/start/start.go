@@ -37,6 +37,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/claudeauth"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
+	runtimeenv "github.com/bakw00ds/yakos/internal/runtime"
 )
 
 // KnownRuntimes is the ordered list of built-in runtime IDs. Mirrors
@@ -1102,20 +1103,32 @@ func buildExecArgs(runtime, projectRepo, permMode string, agentCount int, cfg Co
 	argv = append(argv, extraFlags...)
 
 	// Build environment for exec.
-	execEnv := buildExecEnv(env, cfg.AllowRoot)
+	execEnv := buildExecEnv(runtime, env, cfg.AllowRoot)
 
 	return argv0, argv, execEnv, nil
 }
 
 // buildExecEnv constructs the environment slice for exec.
-// When AllowRoot is true, IS_SANDBOX=1 is injected (mirrors bash's ALLOW_ROOT export).
-func buildExecEnv(env map[string]string, allowRoot bool) []string {
-	var result []string
+//
+// SECURITY (M4/R7, security-review-2026-09-14.md + round-2 review): the raw
+// parent environment is filtered through runtime.FilterEnvFor(runtimeName,
+// ...) before being handed to the exec'd (or PTY-spawned, via
+// buildSpawnSpec) child, the same allowlist the dispatch adapters in
+// internal/runtime apply. Before this, `yakos start`'s exec/PTY paths
+// forwarded the full parent environment verbatim, including every other
+// configured runtime's credentials and (via --share-terminal) exposing that
+// full environment to anyone who gains terminal read access (see H2).
+//
+// When AllowRoot is true, IS_SANDBOX=1 is injected (mirrors bash's
+// ALLOW_ROOT export) after filtering, since it is yakOS-constructed
+// metadata, not a forwarded parent-env value.
+func buildExecEnv(runtimeName string, env map[string]string, allowRoot bool) []string {
+	base := make([]string, 0, len(env))
 	for k, v := range env {
-		result = append(result, k+"="+v)
+		base = append(base, k+"="+v)
 	}
+	result := runtimeenv.FilterEnvFor(runtimeName, base)
 	if allowRoot {
-		// Inject IS_SANDBOX=1 to signal disposable container context.
 		result = append(result, "IS_SANDBOX=1")
 	}
 	return result
