@@ -55,30 +55,44 @@ import (
 )
 
 // runWorkflowFuncBody extracts the source text of func runWorkflow(...) { ... }
-// from main.go, from its own "func runWorkflow(" line up to (but not
-// including) the next top-level "\nfunc " line. Fails the test (not just
-// skips) if runWorkflow can't be found, since that itself would mean this
-// guard is no longer watching the right function.
+// from whichever cmd/yakos/*.go source file declares it (S-6 B1 split
+// cmd/yakos/main.go into per-domain cmd_*.go files, all still package main —
+// runWorkflow now lives in cmd_integration.go, not main.go), from its own
+// "func runWorkflow(" line up to (but not including) the next top-level
+// "\nfunc " line. Fails the test (not just skips) if runWorkflow can't be
+// found in any of them, since that itself would mean this guard is no longer
+// watching the right function.
 func runWorkflowFuncBody(t *testing.T) string {
 	t.Helper()
 	root := repoRoot(t)
-	mainPath := filepath.Join(root, "cli-go", "cmd", "yakos", "main.go")
-	data, err := os.ReadFile(mainPath) //nolint:gosec
+	dir := filepath.Join(root, "cli-go", "cmd", "yakos")
+	matches, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
-		t.Fatalf("read main.go: %v", err)
+		t.Fatalf("glob %s: %v", dir, err)
 	}
-	src := string(data)
+	for _, path := range matches {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(path) //nolint:gosec
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		src := string(data)
 
-	start := strings.Index(src, "func runWorkflow(")
-	if start < 0 {
-		t.Fatalf("could not find %q in %s — this guard needs updating", "func runWorkflow(", mainPath)
+		start := strings.Index(src, "func runWorkflow(")
+		if start < 0 {
+			continue
+		}
+		rest := src[start+len("func runWorkflow("):]
+		nextFunc := regexp.MustCompile(`\nfunc `).FindStringIndex(rest)
+		if nextFunc == nil {
+			t.Fatalf("could not find the end of runWorkflow in %s", path)
+		}
+		return src[start : start+len("func runWorkflow(")+nextFunc[0]]
 	}
-	rest := src[start+len("func runWorkflow("):]
-	nextFunc := regexp.MustCompile(`\nfunc `).FindStringIndex(rest)
-	if nextFunc == nil {
-		t.Fatalf("could not find the end of runWorkflow in %s", mainPath)
-	}
-	return src[start : start+len("func runWorkflow(")+nextFunc[0]]
+	t.Fatalf("could not find %q in any cmd/yakos/*.go file under %s — this guard needs updating", "func runWorkflow(", dir)
+	return ""
 }
 
 // TestRunWorkflow_SourceCallsResolveLibRoot guards N1: runWorkflow must
