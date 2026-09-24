@@ -53,7 +53,14 @@ hi_init
 CYCLE_LENGTH=10
 settings_file="$HOME/.yakos-state/settings.json"
 if [ -f "$settings_file" ] && command -v jq >/dev/null 2>&1; then
-    n="$(jq -r '.retro.cycle_length // empty' "$settings_file" 2>/dev/null)"
+    # `|| n=""` guards against malformed/wrong-shape settings.json: under
+    # `set -eu` a bare assignment aborts the whole script on jq's non-zero
+    # exit (parse error, or type error e.g. `.retro` not an object), which
+    # would silently disable cycle counting (and retro auto-dispatch) for
+    # the rest of the session since the file doesn't change between calls.
+    # Falling back to "" degrades to the default cadence, matching the Go
+    # port's loadSettings/settingsCycleLength graceful-degradation.
+    n="$(jq -r '.retro.cycle_length // empty' "$settings_file" 2>/dev/null)" || n=""
     case "$n" in
         ''|*[!0-9]*) : ;;            # invalid / empty — keep default
         *) CYCLE_LENGTH="$n" ;;
@@ -80,7 +87,10 @@ printf '%d\n' "$count" > "$counter_file"
 # Is auto-retro enabled? (operator can disable via `yakos retro disable`)
 auto_retro=true
 if [ -f "$settings_file" ] && command -v jq >/dev/null 2>&1; then
-    val="$(jq -r '.retro.auto_dispatch // true' "$settings_file" 2>/dev/null)"
+    # Same crash guard as the cycle_length read above; fall back to "true"
+    # so a malformed/wrong-shape settings.json degrades to auto_retro
+    # staying at its default (true), matching the Go port.
+    val="$(jq -r '.retro.auto_dispatch // true' "$settings_file" 2>/dev/null)" || val="true"
     [ "$val" = "false" ] && auto_retro=false
 fi
 

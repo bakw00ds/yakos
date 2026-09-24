@@ -98,7 +98,7 @@ _secret_pem() {
 }
 
 case_check() {
-    # Args: hook-script-relpath, fixture-relpath, expected-rc, expected-log-name, [setup-fn], [extra-env-assignment], [cpd-suffix]
+    # Args: hook-script-relpath, fixture-relpath, expected-rc, expected-log-name, [setup-fn], [extra-env-assignment], [cpd-suffix], [home-fn]
     #
     # extra-env-assignment, if given, is one or more space-separated
     # "NAME=value" assignments exported into the hook's environment for
@@ -114,13 +114,18 @@ case_check() {
     # temp dir, since that's the real filesystem path setup_fn created
     # directories under.
     #
-    # The fixture is read through a sed pass that substitutes the literal
-    # token __CLAUDE_PROJECT_DIR__ with this case's actual temp project
-    # dir — a no-op for fixtures that don't contain the token, and the
-    # only way a static fixture file can exercise an in-root ABSOLUTE
-    # file_path (the shape Claude Code always sends) without knowing the
-    # temp dir ahead of time (security review N1).
-    local hook="$1" fixture="$2" expected_rc="$3" log_name="$4" setup_fn="${5:-}" extra_env="${6:-}" cpd_suffix="${7:-}"
+    # home-fn, if given, is a function name called as "$home_fn"
+    # "$tmp/home" — it should populate $tmp/home (e.g. $tmp/home/.yakos-state/
+    # settings.json) and the resulting $tmp/home is exported as HOME for
+    # this one invocation. Added in S-6 A-2a round 3 (re-review finding 1)
+    # because cycle-counter is the first hook under case_check test whose
+    # behavior genuinely depends on $HOME/.yakos-state/settings.json
+    # content — every other $HOME-reading hook's case_check coverage
+    # deliberately avoids exercising $HOME (see setup_with_team_created_history
+    # in run-hook-parity.sh for the prior documented rationale); sandboxing
+    # HOME per-case here is what makes it safe to finally cover that path
+    # without depending on the real machine's ~/.yakos-state contents.
+    local hook="$1" fixture="$2" expected_rc="$3" log_name="$4" setup_fn="${5:-}" extra_env="${6:-}" cpd_suffix="${7:-}" home_fn="${8:-}"
 
     local tmp
     tmp="$(mktemp -d -t yakos-hookfix-XXXXXX)"
@@ -128,6 +133,16 @@ case_check() {
 
     if [ -n "$setup_fn" ]; then
         "$setup_fn" "$tmp"
+    fi
+
+    if [ -n "$home_fn" ]; then
+        mkdir -p "$tmp/home"
+        "$home_fn" "$tmp/home"
+        if [ -n "$extra_env" ]; then
+            extra_env="$extra_env HOME=$tmp/home"
+        else
+            extra_env="HOME=$tmp/home"
+        fi
     fi
 
     local payload cpd
@@ -423,6 +438,40 @@ setup_allowlist_corrupt_truncated() {
     printf '{"go-api": {"allow"' > "$1/.claude/path-allowlist.json"
 }
 
+# ---- cycle-counter $HOME/.yakos-state/settings.json home-fn helpers --------
+#
+# S-6 A-2a round 3 (re-review finding 1): a malformed or wrong-shape
+# settings.json crashed bash's cycle-counter.sh (set -eu + a bare jq
+# assignment) before the counter was ever incremented — and since the
+# file doesn't change between invocations, every subsequent call for the
+# rest of the session hit the identical crash, silently killing
+# rule:retrospective-discipline's auto-dispatch cadence. Fixed with a
+# `|| n=""` / `|| val="true"` guard on both jq reads in
+# lib/hooks/cycle-counter.sh. These three home-fns (called with
+# $tmp/home, the case_check-sandboxed HOME — see case_check's home-fn
+# doc comment above) regression-guard the fix.
+setup_cycle_counter_malformed_settings() {
+    # Unparseable JSON (truncated mid-object) — jq compile/parse error.
+    mkdir -p "$1/.yakos-state"
+    printf '%s' '{"retro": {cycle_length: 3' > "$1/.yakos-state/settings.json"
+}
+
+setup_cycle_counter_wrong_shape_settings() {
+    # Valid JSON, wrong top-level shape (array, not object) — jq runtime
+    # error ("Cannot index array with string") on `.retro.cycle_length`.
+    mkdir -p "$1/.yakos-state"
+    printf '%s\n' '[1, 2, 3]' > "$1/.yakos-state/settings.json"
+}
+
+setup_cycle_counter_missing_settings() {
+    # No ~/.yakos-state directory at all — the sandboxed-HOME control
+    # case for the default/missing-file path, deterministic across
+    # machines (unlike the pre-round-3 fixture below, whose behavior
+    # depended on whatever happened to be at the real developer/CI
+    # machine's actual $HOME/.yakos-state/settings.json).
+    :
+}
+
 # ---- cases ------------------------------------------------------------------
 
 echo "Running hook fixtures..."
@@ -655,6 +704,16 @@ case_check task-dependency-gate.sh    taskcompleted-blocked.json   0 task-depend
 case_check task-dependency-gate.sh    taskcompleted-unblocked.json 0 task-dependency-gate
 case_check task-complete-dispatch.sh  taskcompleted-backend.json   0 task-complete-dispatch
 case_check task-complete-dispatch.sh  taskcompleted-frontend.json  0 task-complete-dispatch
+
+# --- cycle-counter ---
+# S-6 A-2a round 3 (re-review finding 1): malformed / wrong-shape / missing
+# ~/.yakos-state/settings.json must all degrade to the default cadence
+# (rc=0, counter incremented, log written) rather than crash — see the
+# home-fn helpers above. Reuses pretooluse-generic-tool.json (cycle-counter
+# doesn't gate on tool_name/hook_event_name at all).
+case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_malformed_settings
+case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_wrong_shape_settings
+case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_missing_settings
 
 # ---- summary ----------------------------------------------------------------
 

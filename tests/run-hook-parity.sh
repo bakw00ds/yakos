@@ -146,7 +146,7 @@ _secret_pem() {
 }
 
 case_check() {
-    # Args: hook-script-relpath, fixture-relpath, expected-rc, expected-log-name, [setup-fn], [extra-env-assignment], [cpd-suffix]
+    # Args: hook-script-relpath, fixture-relpath, expected-rc, expected-log-name, [setup-fn], [extra-env-assignment], [cpd-suffix], [home-fn]
     #
     # extra-env-assignment, if given, is one or more space-separated
     # "NAME=value" assignments exported into the hook's environment for
@@ -162,13 +162,21 @@ case_check() {
     # temp dir, since that's the real filesystem path setup_fn created
     # directories under.
     #
-    # The fixture is read through a sed pass that substitutes the literal
-    # token __CLAUDE_PROJECT_DIR__ with this case's actual temp project
-    # dir — a no-op for fixtures that don't contain the token, and the
-    # only way a static fixture file can exercise an in-root ABSOLUTE
-    # file_path (the shape Claude Code always sends) without knowing the
-    # temp dir ahead of time (security review N1).
-    local hook="$1" fixture="$2" expected_rc="$3" log_name="$4" setup_fn="${5:-}" extra_env="${6:-}" cpd_suffix="${7:-}"
+    # home-fn, if given, is a function name called as "$home_fn"
+    # "$tmp/home" — it should populate $tmp/home (e.g. $tmp/home/.yakos-state/
+    # settings.json) and the resulting $tmp/home is exported as HOME for
+    # this one invocation (bash side; the Go side gets its own sandboxed
+    # HOME under $tmp2/home via parity_check below — never bash's $tmp/home,
+    # since each side needs its own on-disk sandbox). Added in S-6 A-2a
+    # round 3 (re-review finding 1) because cycle-counter is the first hook
+    # under case_check test whose behavior genuinely depends on
+    # $HOME/.yakos-state/settings.json content — every other $HOME-reading
+    # hook's case_check coverage deliberately avoids exercising $HOME (see
+    # setup_with_team_created_history below for the prior documented
+    # rationale); sandboxing HOME per-case here is what makes it safe to
+    # finally cover that path without depending on the real machine's
+    # ~/.yakos-state contents.
+    local hook="$1" fixture="$2" expected_rc="$3" log_name="$4" setup_fn="${5:-}" extra_env="${6:-}" cpd_suffix="${7:-}" home_fn="${8:-}"
 
     local tmp
     tmp="$(mktemp -d -t yakos-hookfix-XXXXXX)"
@@ -176,6 +184,22 @@ case_check() {
 
     if [ -n "$setup_fn" ]; then
         "$setup_fn" "$tmp"
+    fi
+
+    # NOTE: extra_env is deliberately NOT mutated here (unlike
+    # run-hook-fixtures.sh's simpler bash-only case_check) — the unmutated
+    # value is forwarded to parity_check below, which builds its own
+    # HOME=$tmp2/home for the Go side. A local-only run_env carries the
+    # bash-side HOME= assignment instead.
+    local run_env="$extra_env"
+    if [ -n "$home_fn" ]; then
+        mkdir -p "$tmp/home"
+        "$home_fn" "$tmp/home"
+        if [ -n "$run_env" ]; then
+            run_env="$run_env HOME=$tmp/home"
+        else
+            run_env="HOME=$tmp/home"
+        fi
     fi
 
     local payload cpd
@@ -202,10 +226,10 @@ case_check() {
     local stdout_capture
     local bash_stderr_file
     bash_stderr_file="$(mktemp)"
-    if [ -n "$extra_env" ]; then
-        # shellcheck disable=SC2086  # intentional: extra_env may carry
+    if [ -n "$run_env" ]; then
+        # shellcheck disable=SC2086  # intentional: run_env may carry
         # multiple space-separated NAME=value assignments.
-        stdout_capture="$(printf '%s' "$payload" | env $extra_env YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$cpd" bash "$HOOKS/$hook" 2>"$bash_stderr_file")" || actual_rc=$?
+        stdout_capture="$(printf '%s' "$payload" | env $run_env YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$cpd" bash "$HOOKS/$hook" 2>"$bash_stderr_file")" || actual_rc=$?
     else
         stdout_capture="$(printf '%s' "$payload" | YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$cpd" bash "$HOOKS/$hook" 2>"$bash_stderr_file")" || actual_rc=$?
     fi
@@ -243,7 +267,7 @@ case_check() {
     # against `yakos hook run <name>` in a fresh sandbox, and compare against
     # the bash run captured above.
     parity_check "$hook" "$fixture" "$actual_rc" "$log_name" "$setup_fn" "$extra_env" "$cpd_suffix" \
-        "$tmp/work/current/logs" "$stdout_capture" "$bash_stderr" "$tmp"
+        "$tmp/work/current/logs" "$stdout_capture" "$bash_stderr" "$tmp" "$home_fn"
 
     rm -rf "$tmp"
 }
@@ -274,10 +298,10 @@ normalize_stderr() {
 # parity_check runs the Go side of one case and records the comparison.
 # Args: hook-script-relpath, fixture-relpath, bash-rc, log-name, setup-fn,
 #       extra-env, cpd-suffix, bash-log-dir, bash-stdout, bash-stderr,
-#       bash-sandbox-dir
+#       bash-sandbox-dir, home-fn
 parity_check() {
     local hook="$1" fixture="$2" bash_rc="$3" log_name="$4" setup_fn="$5" extra_env="$6" cpd_suffix="$7" bash_log_dir="$8" bash_stdout="$9"
-    local bash_stderr="${10}" bash_tmp="${11}"
+    local bash_stderr="${10}" bash_tmp="${11}" home_fn="${12:-}"
     local hookname
     hookname="$(basename "$hook" .sh)"
 
@@ -286,6 +310,19 @@ parity_check() {
     mkdir -p "$tmp2/.claude" "$tmp2/work/current/logs"
     if [ -n "$setup_fn" ]; then
         "$setup_fn" "$tmp2"
+    fi
+
+    # Go side gets its OWN sandboxed HOME under $tmp2/home (never bash's
+    # $tmp/home) — see case_check's home-fn doc comment above.
+    local go_run_env="$extra_env"
+    if [ -n "$home_fn" ]; then
+        mkdir -p "$tmp2/home"
+        "$home_fn" "$tmp2/home"
+        if [ -n "$go_run_env" ]; then
+            go_run_env="$go_run_env HOME=$tmp2/home"
+        else
+            go_run_env="HOME=$tmp2/home"
+        fi
     fi
 
     local payload cpd
@@ -308,9 +345,9 @@ parity_check() {
     # every invocation here would silently shell out to bash yakos instead
     # of exercising the Go-native `hook run` path at all (the same trap
     # documented for `yakos serve` daemon ops).
-    if [ -n "$extra_env" ]; then
+    if [ -n "$go_run_env" ]; then
         # shellcheck disable=SC2086  # see the bash-side comment above.
-        go_stdout="$(printf '%s' "$payload" | env $extra_env YAKOS_IMPL=go YAKOS_HOOKS=go YAKOS_WORK_DIR="$tmp2/work" CLAUDE_PROJECT_DIR="$cpd" "$GO_BINARY" hook run "$hookname" 2>"$go_stderr_file")" || go_rc=$?
+        go_stdout="$(printf '%s' "$payload" | env $go_run_env YAKOS_IMPL=go YAKOS_HOOKS=go YAKOS_WORK_DIR="$tmp2/work" CLAUDE_PROJECT_DIR="$cpd" "$GO_BINARY" hook run "$hookname" 2>"$go_stderr_file")" || go_rc=$?
     else
         go_stdout="$(printf '%s' "$payload" | YAKOS_IMPL=go YAKOS_HOOKS=go YAKOS_WORK_DIR="$tmp2/work" CLAUDE_PROJECT_DIR="$cpd" "$GO_BINARY" hook run "$hookname" 2>"$go_stderr_file")" || go_rc=$?
     fi
@@ -644,6 +681,38 @@ setup_allowlist_corrupt_truncated() {
     printf '{"go-api": {"allow"' > "$1/.claude/path-allowlist.json"
 }
 
+# ---- cycle-counter $HOME/.yakos-state/settings.json home-fn helpers --------
+#
+# S-6 A-2a round 3 (re-review finding 1): a malformed or wrong-shape
+# settings.json crashed bash's cycle-counter.sh (set -eu + a bare jq
+# assignment) before the counter was ever incremented, while the Go port's
+# loadSettings already degraded gracefully — while at 100% for its own 1
+# fixture, cycle-counter's bash-vs-Go parity was untested for exactly the
+# case where the two sides used to diverge most. Fixed with a `|| n=""` /
+# `|| val="true"` guard on both jq reads in lib/hooks/cycle-counter.sh.
+# These three home-fns (called with $tmp/home or $tmp2/home — each side's
+# own sandboxed HOME, see case_check's/parity_check's home-fn doc comments
+# above) regression-guard the fix on BOTH sides identically.
+setup_cycle_counter_malformed_settings() {
+    # Unparseable JSON (truncated mid-object) — jq compile/parse error.
+    mkdir -p "$1/.yakos-state"
+    printf '%s' '{"retro": {cycle_length: 3' > "$1/.yakos-state/settings.json"
+}
+
+setup_cycle_counter_wrong_shape_settings() {
+    # Valid JSON, wrong top-level shape (array, not object) — jq runtime
+    # error ("Cannot index array with string") on `.retro.cycle_length`.
+    mkdir -p "$1/.yakos-state"
+    printf '%s\n' '[1, 2, 3]' > "$1/.yakos-state/settings.json"
+}
+
+setup_cycle_counter_missing_settings() {
+    # No ~/.yakos-state directory at all — the sandboxed-HOME control
+    # case for the default/missing-file path, deterministic across
+    # machines/CI runners on both sides.
+    :
+}
+
 # ---- cases ------------------------------------------------------------------
 
 echo "Running hook fixtures..."
@@ -891,6 +960,14 @@ case_check task-complete-dispatch.sh  taskcompleted-frontend.json  0 task-comple
 # exercises it; reusing pretooluse-generic-tool.json rather than adding a
 # new fixture file.
 case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter
+# S-6 A-2a round 3 (re-review finding 1): malformed / wrong-shape / missing
+# ~/.yakos-state/settings.json — bash used to crash (rc=5, zero writes)
+# while Go degraded gracefully; both sides must now be byte-parity (rc=0,
+# default cycle length, counter written, identical log record) after the
+# `|| n=""` / `|| val="true"` bash guard. See the home-fn helpers above.
+case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_malformed_settings
+case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_wrong_shape_settings
+case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_missing_settings
 
 # ---- summary ------------------------------------------------------------
 
