@@ -732,3 +732,77 @@ func TestKanban_Move_PublishesToBus(t *testing.T) {
 		t.Fatal("no bus event received within 2s")
 	}
 }
+
+// ---- Version tests -----------------------------------------------------------
+
+// TestVersion_Get_BuildIdentity asserts the gRPC Version.Get RPC returns the
+// same four-field build-identity shape as the JSON-RPC yakos.version method
+// and REST GET /v1/version — see internal/daemonclient.VersionInfo.  Uses an
+// isolated YakosRoot (t.TempDir() with a VERSION file) rather than the real
+// repo, matching the pattern in TestRefresh_Run_OmittedApplyDoesNotWrite.
+func TestVersion_Get_BuildIdentity(t *testing.T) {
+	t.Parallel()
+	yakosRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(yakosRoot, "VERSION"), []byte("0.0.0-test\n"), 0644); err != nil {
+		t.Fatalf("write VERSION: %v", err)
+	}
+	workspaceRoot := t.TempDir()
+
+	cfg := grpcserver.Config{
+		ReadToken:       testReadToken,
+		WriteToken:      testWriteToken,
+		YakosRoot:       yakosRoot,
+		WorkspaceRoot:   workspaceRoot,
+		DispatchService: grpcserver.NewDispatchServiceForTest(workspaceRoot, wsbus.New()),
+	}
+	srv := grpcserver.New(cfg)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = srv.ServeListener(ctx, ln) }()
+	time.Sleep(10 * time.Millisecond)
+
+	conn, err := grpc.NewClient(
+		ln.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(grpcserver.JSONCodec{})),
+	)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	vc := pb.NewVersionClient(conn)
+
+	resp, err := vc.Get(ctxWithToken(context.Background(), testReadToken), &pb.VersionRequest{})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !strings.Contains(resp.Version, "0.0.0-test") {
+		t.Errorf("Version=%q; want it to contain the VERSION file contents", resp.Version)
+	}
+	if resp.BuildID == "" {
+		t.Error("BuildID should not be empty")
+	}
+	if resp.LibHash == "" {
+		t.Error("LibHash should not be empty")
+	}
+}
+
+// TestVersion_Get_RequiresToken mirrors TestStatus_Read_RequiresToken:
+// Version.Get is a read-level method and must still require a token (no
+// method is exempt from auth just because it is unauthenticated over REST).
+func TestVersion_Get_RequiresToken(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	conn := startTestServer(t, dir, wsbus.New())
+	vc := pb.NewVersionClient(conn)
+
+	_, err := vc.Get(context.Background(), &pb.VersionRequest{})
+	if err == nil {
+		t.Fatal("expected unauthenticated error")
+	}
+}

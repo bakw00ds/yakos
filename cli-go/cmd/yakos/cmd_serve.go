@@ -9,11 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"net/http"
 
+	"github.com/bakw00ds/yakos/internal/buildinfo"
 	"github.com/bakw00ds/yakos/internal/consolecmd"
 	internalconsoleui "github.com/bakw00ds/yakos/internal/consoleui"
+	"github.com/bakw00ds/yakos/internal/daemonclient"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/mtlscmd"
 	internalperfdash "github.com/bakw00ds/yakos/internal/perfdash"
@@ -382,6 +385,7 @@ func receiveWSJSON(conn *websocket.Conn, v interface{}) error {
 func runEvents(args []string) {
 	wsAddr := "127.0.0.1:7891"
 	topic := ""
+	restartStale := false
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -402,6 +406,8 @@ func runEvents(args []string) {
 				os.Exit(1)
 			}
 			topic = args[i]
+		case "--restart-stale-daemon":
+			restartStale = true
 		case "--since":
 			// Q8 decision: replay is out of scope for Phase 2.
 			fmt.Fprintln(os.Stderr, "events: --since is not supported in Phase 2 (event replay deferred to Phase 3)")
@@ -418,6 +424,20 @@ func runEvents(args []string) {
 			}
 		}
 	}
+	if os.Getenv("YAKOS_RESTART_STALE_DAEMON") == "1" {
+		restartStale = true
+	}
+
+	// Best-effort CLI↔daemon build handshake before subscribing (D5,
+	// work/current/reports/s6-structural-plan-2026-09-23.md §4.3). This
+	// checks the JSON-RPC socket for the current working directory's
+	// workspace, which is only meaningful when the WS bus we are about to
+	// subscribe to belongs to that same daemon — the common case
+	// (--ws-addr defaults to the local daemon's bind). If the local socket
+	// is unreachable (remote/networked mode, or simply no daemon), the
+	// check is skipped silently: a missing local socket does not by itself
+	// mean the WS bus at wsAddr is stale.
+	checkDaemonHandshakeForEvents(restartStale)
 
 	// Load token from default location.
 	token, err := wsbus.LoadOrCreateToken("")
@@ -469,6 +489,56 @@ func runEvents(args []string) {
 	}
 }
 
+// checkDaemonHandshakeForEvents performs the best-effort local-socket
+// handshake described in runEvents's doc comment. On a confirmed build-id
+// mismatch it either refuses (prints the actionable message and exits 1,
+// the D5 default) or — when restartStale is true — restarts the stale
+// daemon and exits 1 only if that restart itself fails (events has no
+// "fall through to local exec" alternative; a live daemon is required to
+// stream WS events at all).
+func checkDaemonHandshakeForEvents(restartStale bool) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	socketPath := jsonrpc.SocketPath(cwd)
+	pidPath := jsonrpc.PIDPath(cwd)
+
+	conn, dialErr := jsonrpc.Dial(socketPath)
+	if dialErr != nil {
+		return // no local daemon for this workspace; nothing to check
+	}
+	client := jsonrpc.NewClient(conn)
+
+	want := buildinfo.BuildID()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	checkErr := daemonclient.Check(ctx, client, want)
+	cancel()
+	_ = client.Close()
+
+	if checkErr == nil {
+		return
+	}
+	var stale *daemonclient.ErrStaleDaemon
+	if !errors.As(checkErr, &stale) {
+		return // query failure — non-fatal for a read-only monitor
+	}
+
+	if !restartStale {
+		pid, _ := readPIDFile(pidPath)
+		fmt.Fprint(os.Stderr, daemonMismatchMessage(stale, pid))
+		os.Exit(1)
+	}
+
+	freshClient, restartErr := restartStaleDaemonAndCheck(pidPath, socketPath, want)
+	if restartErr != nil {
+		fmt.Fprintf(os.Stderr, "events: %v\n", restartErr)
+		os.Exit(1)
+	}
+	_ = freshClient.Close()
+	fmt.Fprintln(os.Stderr, "events: restarted stale daemon")
+}
+
 // matchTopic returns true if pattern matches topic.
 // Supports trailing glob: "kanban.*" matches "kanban.added", "kanban.moved", etc.
 // Exact match always works.
@@ -502,6 +572,10 @@ Flags:
                        *               (all events, same as omitting --topic)
   --since <dur>      ERROR: replay is out of scope for Phase 2 (Q8).
                      Event replay arrives in Phase 3 if signal emerges.
+  --restart-stale-daemon
+                     If the local daemon's build id predates this binary's,
+                     restart it automatically instead of refusing. Same as
+                     setting YAKOS_RESTART_STALE_DAEMON=1.
   --help, -h         Print this help.
 
 Authentication:

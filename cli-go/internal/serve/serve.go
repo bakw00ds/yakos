@@ -37,6 +37,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/authsession"
+	"github.com/bakw00ds/yakos/internal/buildinfo"
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/filewatch"
@@ -52,7 +53,6 @@ import (
 	"github.com/bakw00ds/yakos/internal/statepath"
 	termmanager "github.com/bakw00ds/yakos/internal/terminalmanager"
 	"github.com/bakw00ds/yakos/internal/userstore"
-	"github.com/bakw00ds/yakos/internal/version"
 	"github.com/bakw00ds/yakos/internal/workflow"
 	"github.com/bakw00ds/yakos/internal/worktreemgr"
 	"github.com/bakw00ds/yakos/internal/wsbus"
@@ -1004,37 +1004,31 @@ func checkPIDFile(path string) error {
 	return nil
 }
 
-// writePIDFile writes the current process PID and binary version to path
+// writePIDFile writes the current process PID and build id to path
 // (atomic temp+rename).
 //
 // Format:
 //
 //	<pid>\n
-//	<version>\n
+//	<build id>\n
 //
-// The version line is a cheap non-RPC fallback for version-mismatch detection
-// in yakos start. Callers that cannot reach the JSON-RPC socket read the second
-// line directly.
+// The build-id line is a cheap non-RPC fallback for stale-daemon detection
+// in `yakos start` and the CLI's daemon-routing path (cmd/yakos/cmd_daemon.go's
+// readPIDFileBuildID). Callers that cannot reach the JSON-RPC socket read the
+// second line directly.
+//
+// Before the S-6 handshake work this line held internal/version.Read's
+// output — a VERSION-file string identical across every binary built from
+// the same commit-less source tree, so two binaries built from different
+// commits at the same VERSION compared equal and a stale daemon survived a
+// dev rebuild. buildinfo.BuildID() folds in the injected commit and a hash
+// of the embedded framework content, so it distinguishes those builds; see
+// internal/buildinfo's doc comment.
 func writePIDFile(path string) error {
 	if err := os.MkdirAll(jsonrpc.PIDDir(path), 0700); err != nil { //nolint:gosec
 		return err
 	}
-	// Resolve version: compiled-in var wins; VERSION file is the dev-build fallback.
-	// BinaryRoot() is used for the file fallback; errors are non-fatal — we fall
-	// back to an empty string so the pidfile is still written (PID is always present).
-	ver := ""
-	if root, err := version.BinaryRoot(); err == nil {
-		if v, err := version.Read(root); err == nil {
-			ver = v
-		}
-	}
-	// If BinaryRoot or Read failed, use the compiled-in var directly (may be empty
-	// on dev builds that skip ldflags; an empty version line is handled gracefully
-	// by the reader, which treats it as "unknown" and triggers a safe restart).
-	if ver == "" && version.Version != "" {
-		ver = version.Version + " (go)"
-	}
-	content := strconv.Itoa(os.Getpid()) + "\n" + ver + "\n"
+	content := strconv.Itoa(os.Getpid()) + "\n" + buildinfo.BuildID() + "\n"
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0600); err != nil { //nolint:gosec
 		return err

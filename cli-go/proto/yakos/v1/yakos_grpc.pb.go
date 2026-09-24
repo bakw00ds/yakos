@@ -578,3 +578,71 @@ func _Refresh_Run_Handler(srv interface{}, ctx context.Context, dec func(interfa
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+// ---- Version service ---------------------------------------------------------
+
+// VersionClient is the client API for the Version service.
+type VersionClient interface {
+	Get(ctx context.Context, in *VersionRequest, opts ...grpc.CallOption) (*VersionResponse, error)
+}
+
+type versionClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewVersionClient(cc grpc.ClientConnInterface) VersionClient {
+	return &versionClient{cc}
+}
+
+func (c *versionClient) Get(ctx context.Context, in *VersionRequest, opts ...grpc.CallOption) (*VersionResponse, error) {
+	out := new(VersionResponse)
+	err := c.cc.Invoke(ctx, "/yakos.v1.Version/Get", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// VersionServer is the server API for the Version service.
+type VersionServer interface {
+	Get(context.Context, *VersionRequest) (*VersionResponse, error)
+	mustEmbedUnimplementedVersionServer()
+}
+
+// UnimplementedVersionServer must be embedded to have forward-compatible implementations.
+type UnimplementedVersionServer struct{}
+
+func (UnimplementedVersionServer) Get(context.Context, *VersionRequest) (*VersionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Get not implemented")
+}
+func (UnimplementedVersionServer) mustEmbedUnimplementedVersionServer() {}
+
+// RegisterVersionServer registers the server implementation.
+func RegisterVersionServer(s grpc.ServiceRegistrar, srv VersionServer) {
+	s.RegisterService(&Version_ServiceDesc, srv)
+}
+
+// Version_ServiceDesc is the grpc.ServiceDesc for the Version service.
+var Version_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "yakos.v1.Version",
+	HandlerType: (*VersionServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{MethodName: "Get", Handler: _Version_Get_Handler},
+	},
+	Streams: []grpc.StreamDesc{},
+}
+
+func _Version_Get_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VersionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VersionServer).Get(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/yakos.v1.Version/Get"}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VersionServer).Get(ctx, req.(*VersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}

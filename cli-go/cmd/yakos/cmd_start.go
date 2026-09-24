@@ -10,6 +10,7 @@ import (
 
 	"net"
 
+	"github.com/bakw00ds/yakos/internal/buildinfo"
 	internalconsoleui "github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/install"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
@@ -500,18 +501,25 @@ func runStart(yakosRoot string, args []string) {
 		versionMismatchRestart := false
 
 		if !needsSpawn {
-			// A daemon is alive.  Version-mismatch check: compare the running
-			// daemon's version to this binary's version.  A mismatch means the
-			// operator upgraded yakos while the old daemon was still running; the
-			// old daemon must be replaced so T2 fixes take effect.
-			currentVer, _ := version.Read(yakosRoot)
-			runningVer := queryDaemonVersion(socketPath, pidPath)
-			if shouldRestartDaemon(runningVer, currentVer) {
-				if runningVer == "" {
-					fmt.Fprintf(os.Stderr, "start: running daemon version unknown (pre-T2); restarting daemon\n")
+			// A daemon is alive.  Build-identity mismatch check: compare the
+			// running daemon's build id to this binary's build id.  A mismatch
+			// means the operator upgraded (or simply rebuilt) yakos while the
+			// old daemon was still running; the old daemon must be replaced so
+			// the new build's fixes take effect.
+			//
+			// Compared on buildinfo.BuildID() (version+commit+libhash), not
+			// internal/version.Read's display string: two binaries built from
+			// different commits at the same VERSION file compare equal on the
+			// version string, which let a dev rebuild's stale daemon survive —
+			// see work/current/reports/s6-structural-plan-2026-09-23.md §1.3/§4.1.
+			currentBuildID := buildinfo.BuildID()
+			runningBuildID := queryDaemonBuildID(socketPath, pidPath)
+			if shouldRestartDaemon(runningBuildID, currentBuildID) {
+				if runningBuildID == "" {
+					fmt.Fprintf(os.Stderr, "start: running daemon build id unknown (pre-handshake); restarting daemon\n")
 				} else {
-					fmt.Fprintf(os.Stderr, "start: running daemon is %s, this binary is %s; restarting daemon\n",
-						runningVer, currentVer)
+					fmt.Fprintf(os.Stderr, "start: running daemon is build %s, this binary is build %s; restarting daemon\n",
+						runningBuildID, currentBuildID)
 				}
 				stopStaleDaemon(pidPath, socketPath)
 				needsSpawn = true
@@ -534,8 +542,7 @@ func runStart(yakosRoot string, args []string) {
 			// Spawn a daemon now, before start.Run dials the socket.
 			// If this is a version-mismatch restart, note it.
 			if versionMismatchRestart {
-				currentVer, _ := version.Read(yakosRoot)
-				fmt.Fprintf(os.Stderr, "start: (daemon restarted: fresh daemon is %s)\n", currentVer)
+				fmt.Fprintf(os.Stderr, "start: (daemon restarted: fresh daemon is build %s)\n", buildinfo.BuildID())
 			}
 			serveArgs := buildServeArgs(serveArgsInput{
 				consoleAddr:          consoleAddr,
@@ -571,17 +578,17 @@ func runStart(yakosRoot string, args []string) {
 					fmt.Fprintln(os.Stderr, "start: check daemon logs; run 'yakos serve stop' to reset")
 					os.Exit(1)
 				}
-				// Restart-loop protection: if this spawn was triggered by a version
-				// mismatch, verify the fresh daemon reports the expected version.
+				// Restart-loop protection: if this spawn was triggered by a build-id
+				// mismatch, verify the fresh daemon reports the expected build id.
 				// If it still mismatches, the installation is corrupt — error out
 				// rather than looping.
 				if versionMismatchRestart {
-					currentVer, _ := version.Read(yakosRoot)
-					freshVer := queryDaemonVersion(socketPath, pidPath)
-					if shouldRestartDaemon(freshVer, currentVer) {
+					currentBuildID := buildinfo.BuildID()
+					freshBuildID := queryDaemonBuildID(socketPath, pidPath)
+					if shouldRestartDaemon(freshBuildID, currentBuildID) {
 						fmt.Fprintf(os.Stderr,
-							"start: fresh daemon version mismatch after restart (got %q, want %q) — please check your installation\n",
-							freshVer, currentVer)
+							"start: fresh daemon build mismatch after restart (got %q, want %q) — please check your installation\n",
+							freshBuildID, currentBuildID)
 						os.Exit(1)
 					}
 				}
