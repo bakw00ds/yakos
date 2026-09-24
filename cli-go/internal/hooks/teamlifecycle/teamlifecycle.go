@@ -21,7 +21,9 @@
 //     session_id + exit_kind).
 //   - Creates .session-summarized marker for session-end-check.
 //
-// Reuses internal/kanban for the kanban mutation (Move).
+// The kanban mutation (kanbanMoveFirst) is a from-scratch, line-based port
+// of bash's awk state machine rather than a caller of internal/kanban's
+// ID-based Move API — see kanbanMoveFirst's doc comment for why.
 package teamlifecycle
 
 import (
@@ -30,11 +32,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/hooks/dirsize"
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
-	"github.com/bakw00ds/yakos/internal/kanban"
 )
 
 const hookName = "team-lifecycle"
@@ -77,18 +82,30 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		return out, nil
 	}
 
-	ts := h.NowFn().UTC().Format(time.RFC3339)
-	sessionID := in.Env["CLAUDE_SESSION_ID"]
+	now := time.Now()
+	if h.NowFn != nil {
+		now = h.NowFn()
+	}
+	ts := now.UTC().Format(time.RFC3339)
+	// Field derivation matches bash exactly: session_id/agent come from the
+	// stdin payload (hi_session_id/hi_sender_role), never env vars; tool_input
+	// is the NESTED .tool_input object (jq -c '.tool_input // {}'), not the
+	// whole payload — the previous appendLifecycleEvent logged the entire
+	// Payload (including session_id/tool_name/etc.) under the "tool_input"
+	// key, and stringField(in.Payload, "name") always returned "" since
+	// "name" only ever exists under .tool_input, never top-level.
+	sessionID := hookio.PayloadString(in, "session_id")
 	callerRole := senderRole(in)
-	toolInput := in.Payload
-
-	lifecycleLog := filepath.Join(h.WorkCurrentDir, "logs", hookName+".ndjson")
+	toolInput := hookio.ToolInput(in)
+	if toolInput == nil {
+		toolInput = map[string]any{}
+	}
 
 	switch in.Tool {
 	case "TeamCreate":
 		teamName := stringField(toolInput, "name")
 
-		h.appendLifecycleEvent(&out, lifecycleLog, ts, "team_created", callerRole, in.Tool, toolInput)
+		h.appendLifecycleEvent(&out, now, "team_created", callerRole, in.Tool, in.Event, sessionID, toolInput)
 
 		// .session-started — overwrite with current ts.
 		startedFile := filepath.Join(h.WorkCurrentDir, ".session-started")
@@ -103,19 +120,19 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		_ = appendNDJSON(histFile, histEntry)
 
 		// Kanban: first TODO → IN PROGRESS.
-		h.kanbanMoveFirst(&out, kanban.ColTODO, kanban.ColInProgress)
+		h.kanbanMoveFirst(&out, colTODO, colInProgress, "-")
 
 	case "Agent":
-		h.appendLifecycleEvent(&out, lifecycleLog, ts, "agent_spawned", callerRole, in.Tool, toolInput)
+		h.appendLifecycleEvent(&out, now, "agent_spawned", callerRole, in.Tool, in.Event, sessionID, toolInput)
 		// Intentionally does NOT touch .session-started or history.
 
 	case "TeamDelete":
 		teamName := stringField(toolInput, "name")
 
-		h.appendLifecycleEvent(&out, lifecycleLog, ts, "team_deleted", callerRole, in.Tool, toolInput)
+		h.appendLifecycleEvent(&out, now, "team_deleted", callerRole, in.Tool, in.Event, sessionID, toolInput)
 
 		// Kanban: first IN PROGRESS → DONE.
-		h.kanbanMoveFirst(&out, kanban.ColInProgress, kanban.ColDone)
+		h.kanbanMoveFirst(&out, colInProgress, colDone, "x")
 
 		// Write session summary (idempotent).
 		sessionsLog := filepath.Join(filepath.Dir(h.WorkCurrentDir), "sessions.ndjson")
@@ -139,12 +156,12 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 				"duration_seconds":      maybeInt64(durationSec),
 				"team_name":             teamName,
 				"session_id":            sessionID,
-				"scratchpad_size_bytes": 0,
+				"scratchpad_size_bytes": dirsize.Bytes(h.WorkCurrentDir),
 				"exit_kind":             exitKind,
 			}
 			_ = appendNDJSON(sessionsLog, summaryEntry)
 		} else {
-			h.appendLifecycleEvent(&out, lifecycleLog, ts, "duplicate_summary_suppressed", callerRole, in.Tool, toolInput)
+			h.appendLifecycleEvent(&out, now, "duplicate_summary_suppressed", callerRole, in.Tool, in.Event, sessionID, toolInput)
 		}
 
 		// Marker for session-end-check.
@@ -155,64 +172,157 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	return out, nil
 }
 
-// kanbanMoveFirst moves the first task in srcCol to dstCol in kanban.md.
-// No-op if kanban.md doesn't exist. Never panics — telemetry hook.
-func (h *Hook) kanbanMoveFirst(out *hooktype.HookOutput, srcCol, dstCol string) {
+// Column header text, matching the "## <col>" headings kanban.md uses —
+// kept as plain strings (not internal/kanban's Board/ID-based Move API)
+// because kanbanMoveFirst is a from-scratch, line-based port of bash's
+// kanban_move_first awk script below, not a caller of internal/kanban.
+const (
+	colTODO       = "TODO"
+	colInProgress = "IN PROGRESS"
+	colDone       = "DONE"
+)
+
+var (
+	reBulletStart = regexp.MustCompile(`^- \[`)
+	reContinued   = regexp.MustCompile(`^  `)
+	reAnyHeader   = regexp.MustCompile(`^## `)
+	reCheckbox    = regexp.MustCompile(`^- \[.\]`)
+)
+
+// srcHeaderRe / dstHeaderRe build the "^## <col>[[:space:]]*$" pattern
+// bash's awk uses, anchored to one exact column name.
+func colHeaderRe(col string) *regexp.Regexp {
+	return regexp.MustCompile(`^## ` + regexp.QuoteMeta(col) + `[[:space:]]*$`)
+}
+
+// kanbanMoveFirst moves the first task bullet under "## srcCol" to "## dstCol"
+// in kanban.md, replacing its checkbox character with cbox. No-op if
+// kanban.md doesn't exist. Never panics — telemetry hook.
+//
+// This is a faithful, from-scratch port of bash's kanban_move_first
+// (lib/hooks/team-lifecycle.sh), a pure line-based awk state machine that
+// moves the FIRST bullet under the source section REGARDLESS of its text
+// content — no task-ID format (e.g. "K-<digits>") is required or assumed.
+// A prior Go port instead extracted a "K-<digits>" token and called
+// internal/kanban's ID-based Move, which silently no-ops (no move, no
+// warning) for any board that doesn't use that ID convention — S-6 A-2a
+// round 2 review finding 2 reproduced this with a free-form task title
+// and confirmed bash moves it while the ID-based Go port left the board
+// untouched. rule:kanban-discipline documents "TeamCreate → most recent
+// matching TODO task → IN PROGRESS" without mandating any ID format, so
+// this port restores that behavior exactly rather than the narrower one.
+func (h *Hook) kanbanMoveFirst(out *hooktype.HookOutput, srcCol, dstCol, cbox string) {
 	kanbanPath := filepath.Join(h.WorkCurrentDir, "kanban.md")
-	f, err := os.Open(kanbanPath) //nolint:gosec
+	data, err := os.ReadFile(kanbanPath) //nolint:gosec
 	if err != nil {
 		return // file absent is not an error for a telemetry hook
 	}
-	b, err := kanban.Parse(f)
-	f.Close() //nolint:errcheck
-	if err != nil {
-		out.Stderr = fmt.Appendf(out.Stderr, "%s: kanban parse: %v\n", hookName, err)
-		return
+
+	lines := splitLines(string(data))
+	// awk always treats a file with N newline-terminated records as N
+	// lines and never emits a trailing blank record for the final "\n"
+	// itself; splitLines (used elsewhere in this package) already drops
+	// that trailing empty element the same way strings.Split would add
+	// one, so no extra adjustment is needed here.
+
+	srcHeaderRe := colHeaderRe(srcCol)
+	dstHeaderRe := colHeaderRe(dstCol)
+
+	var outLines []string
+	state := "scan" // "scan" | "in_src" | "capturing_cont"
+	var taskFirst string
+	var taskRest []string
+	moved := false
+	movedEmitted := false
+
+	for _, line := range lines {
+		if srcHeaderRe.MatchString(line) {
+			outLines = append(outLines, line)
+			state = "in_src"
+			continue
+		}
+
+		if state == "in_src" && !moved && reBulletStart.MatchString(line) {
+			taskFirst = line
+			state = "capturing_cont"
+			continue
+		}
+
+		if state == "capturing_cont" && reContinued.MatchString(line) {
+			taskRest = append(taskRest, line)
+			continue
+		}
+
+		if state == "capturing_cont" {
+			moved = true
+			state = "in_src"
+			// Fall through — this line still needs the checks below
+			// (it may itself be an "## " header, or the dst header).
+		}
+
+		if reAnyHeader.MatchString(line) && state == "in_src" {
+			state = "scan"
+			// Fall through, same as the awk source.
+		}
+
+		if dstHeaderRe.MatchString(line) {
+			outLines = append(outLines, line)
+			if moved {
+				outLines = append(outLines, reCheckbox.ReplaceAllString(taskFirst, "- ["+cbox+"]"))
+				outLines = append(outLines, taskRest...)
+				movedEmitted = true
+			}
+			continue
+		}
+
+		outLines = append(outLines, line)
 	}
 
-	// Find first task ID in srcCol.
-	var srcItems []string
-	switch srcCol {
-	case kanban.ColTODO:
-		srcItems = b.TODOItems
-	case kanban.ColInProgress:
-		srcItems = b.InProgressItems
-	}
-	if len(srcItems) == 0 {
-		return // nothing to move
+	// END block: captured but never re-emitted (src found, dst section
+	// missing) — don't drop the task, emit a warning marker instead.
+	if moved && !movedEmitted {
+		outLines = append(outLines, "# WARN: yakos kanban auto-update found src but no dst section")
+		outLines = append(outLines, taskFirst)
+		outLines = append(outLines, taskRest...)
 	}
 
-	// Extract the task ID from the first item (format: "K-N — title").
-	taskID := extractTaskID(srcItems[0])
-	if taskID == "" {
-		return
+	newContent := strings.Join(outLines, "\n")
+	if len(outLines) > 0 {
+		newContent += "\n"
 	}
-
-	if err := b.Move(taskID, dstCol); err != nil {
-		out.Stderr = fmt.Appendf(out.Stderr, "%s: kanban move %s → %s: %v\n", hookName, taskID, dstCol, err)
-		return
-	}
-	if err := b.Save(kanbanPath); err != nil {
+	if err := atomicWrite(kanbanPath, []byte(newContent)); err != nil {
 		out.Stderr = fmt.Appendf(out.Stderr, "%s: kanban save: %v\n", hookName, err)
 	}
 }
 
-// appendLifecycleEvent writes one NDJSON line to the lifecycle log.
-func (h *Hook) appendLifecycleEvent(out *hooktype.HookOutput, logFile, ts, event, caller, tool string, toolInput map[string]any) {
-	entry := map[string]any{
-		"ts":       ts,
-		"hook":     hookName,
-		"severity": "REPORT",
-		"action":   "pass",
-		"message":  "team-lifecycle: " + event,
-		"event":    event,
-		"caller":   caller,
-		"tool":     tool,
-	}
-	if toolInput != nil {
-		entry["tool_input"] = toolInput
-	}
-	if err := appendNDJSON(logFile, entry); err != nil {
+// appendLifecycleEvent writes one NDJSON line to the lifecycle log via the
+// shared hooklog writer, matching bash's emit_event exactly:
+//
+//	extra="$(jq -nc --arg event "$event" --arg caller "$caller" --arg tool "$tool" --argjson input "$tool_input" \
+//	    '{event: $event, caller: $caller, tool: $tool, tool_input: $input}')"
+//	ho_log "team-lifecycle" "REPORT" "pass" "team-lifecycle: $event" "$extra"
+//
+// Note the extra object's own "event" key (the lifecycle sub-event, e.g.
+// "team_created") deliberately overrides ho_log's base "event" field (the
+// Claude Code hook_event_name, e.g. "PreToolUse") per jq's `{...} + $extra`
+// merge — hooklog.Append's Extra map has the identical override semantics.
+func (h *Hook) appendLifecycleEvent(out *hooktype.HookOutput, now time.Time, event, caller, tool, hookEvent, sessionID string, toolInput map[string]any) {
+	err := hooklog.Append(h.WorkCurrentDir, hooklog.Entry{
+		Hook:      hookName,
+		Severity:  "REPORT",
+		Decision:  "pass",
+		Reason:    "team-lifecycle: " + event,
+		Agent:     caller,
+		SessionID: sessionID,
+		Event:     hookEvent,
+		Extra: map[string]any{
+			"event":      event,
+			"caller":     caller,
+			"tool":       tool,
+			"tool_input": toolInput,
+		},
+	}, now)
+	if err != nil {
 		out.Stderr = fmt.Appendf(out.Stderr, "%s: log: %v\n", hookName, err)
 	}
 }
@@ -277,14 +387,16 @@ func (h *Hook) lookupTeamCreatedTs(sessionID string) string {
 
 // ---- helpers -----------------------------------------------------------------
 
+// senderRole extracts the agent/role, matching hi_sender_role exactly:
+// hi_field_or '.agent_type' 'lead' (top-level, fallback "lead" when
+// absent/empty), trimmed, then the "yakos:" namespace prefix stripped.
 func senderRole(in hooktype.HookInput) string {
-	if r, ok := in.Env["YAKOS_AGENT_ROLE"]; ok && r != "" {
-		return r
+	raw := hookio.PayloadString(in, "agent_type")
+	if raw == "" {
+		raw = "lead"
 	}
-	if r := stringField(in.Payload, "agent_type"); r != "" {
-		return r
-	}
-	return "lead"
+	raw = strings.TrimSpace(raw)
+	return strings.TrimPrefix(raw, "yakos:")
 }
 
 func stringField(payload map[string]any, key string) string {
@@ -347,35 +459,6 @@ func atomicTouch(path string) error {
 		return err
 	}
 	return nil
-}
-
-// extractTaskID extracts the K-N id from a task item string.
-//
-// Board.TODOItems/InProgressItems strip the leading "- " bullet but preserve
-// the checkbox: "[ ] K-3 — title" or "[-] K-3 — title".
-// This function scans all space-separated tokens for the first "K-<digits>" token.
-func extractTaskID(item string) string {
-	// Scan tokens separated by spaces.
-	start := 0
-	for i := 0; i <= len(item); i++ {
-		if i == len(item) || item[i] == ' ' || item[i] == '\t' {
-			token := item[start:i]
-			if len(token) > 2 && token[:2] == "K-" {
-				valid := true
-				for _, c := range token[2:] {
-					if c < '0' || c > '9' {
-						valid = false
-						break
-					}
-				}
-				if valid && len(token) > 2 {
-					return token
-				}
-			}
-			start = i + 1
-		}
-	}
-	return ""
 }
 
 func splitLines(s string) []string {

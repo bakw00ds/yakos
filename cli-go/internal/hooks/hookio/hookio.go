@@ -158,3 +158,72 @@ func ToolInputString(in hooktype.HookInput, key string) string {
 	s, _ := v.(string)
 	return s
 }
+
+// ToolInputField reads a raw (untyped) field off in.Payload["tool_input"] —
+// the Go-side equivalent of jq's `.tool_input.foo` (no type coercion).
+// Returns nil if tool_input is absent, not an object, or the field is
+// absent.
+func ToolInputField(in hooktype.HookInput, key string) any {
+	ti := ToolInput(in)
+	if ti == nil {
+		return nil
+	}
+	return ti[key]
+}
+
+// Nested reads a raw (untyped) field at Payload[outer][inner] — the
+// Go-side equivalent of jq's `.outer.inner`. Returns nil if outer is
+// absent or not a JSON object, which also matches jq's `//`-chain
+// behavior: jq's `//` treats an evaluation error on its left-hand side
+// (e.g. indexing a non-object) the same as null/false, so a type
+// mismatch here collapsing to nil is the correct analogue, not a bug.
+func Nested(payload map[string]any, outer, inner string) any {
+	v, ok := payload[outer]
+	if !ok {
+		return nil
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return m[inner]
+}
+
+// JQAlt mirrors jq's `//` alternative-operator chain: `a // b // c` in jq
+// evaluates left to right and returns the first operand that is not
+// jq-falsy (jq's `//` treats only `null` and literal boolean `false` as
+// falsy — critically NOT an empty string, `0`, or `[]`). JQAlt reproduces
+// that exact falsy set. Passing no values, or only falsy ones, returns
+// nil — the Go-side equivalent of a chain terminating in `// empty`.
+func JQAlt(vals ...any) any {
+	for _, v := range vals {
+		if v == nil {
+			continue
+		}
+		if b, ok := v.(bool); ok && !b {
+			continue
+		}
+		return v
+	}
+	return nil
+}
+
+// JQRawOrJSON renders v the way `jq -r` renders a resolved value: a
+// string is printed raw, with no surrounding quotes; every other JSON
+// type (number, bool, array, object) is printed as jq's default
+// (non-`-c`) 2-space-indented pretty JSON. A nil v (the `// empty`
+// terminal case) renders as "", matching hi_field's empty-string
+// convention for "field absent".
+func JQRawOrJSON(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return string(b)
+}

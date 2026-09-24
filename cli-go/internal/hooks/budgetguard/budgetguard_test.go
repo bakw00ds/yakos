@@ -56,12 +56,21 @@ func makeHook(workDir, projectDir string) *budgetguard.Hook {
 	return &budgetguard.Hook{WorkCurrentDir: workDir, ProjectDir: projectDir, NowFn: fixedNow}
 }
 
+// makeInput builds a HookInput with session_id as the top-level
+// .session_id Payload field, matching hi_session_id.
+//
+// S-6 A-2a: previously set the CLAUDE_SESSION_ID env var, which bash's
+// budget-guard.sh never reads.
 func makeInput(tool string, extraEnv map[string]string) hooktype.HookInput {
-	env := map[string]string{"CLAUDE_SESSION_ID": "sess-1"}
+	env := map[string]string{}
 	for k, v := range extraEnv {
 		env[k] = v
 	}
-	return hooktype.HookInput{Tool: tool, Payload: map[string]any{}, Env: env}
+	return hooktype.HookInput{
+		Tool:    tool,
+		Payload: map[string]any{"session_id": "sess-1"},
+		Env:     env,
+	}
 }
 
 func TestBudgetGuard_NoConfigNoop(t *testing.T) {
@@ -171,12 +180,20 @@ func TestBudgetGuard_DifferentToolResetsRunCount(t *testing.T) {
 	}
 }
 
+// S-6 A-2a: the bypass file body now needs the real work/current/
+// hook-bypass.md shape (## Active entries heading, ## bypass: <id>
+// marker, **Hook:**/**Scope:** bold fields) instead of a bare "Hook:
+// .../Scope: ..." fragment, since isBypassed now goes through the real
+// ho_check_bypass-equivalent parser (internal/hooks/hookbypass) instead
+// of an ad hoc substring check. The Hook value is also "budget", not
+// "budget-guard" — that's the literal probe bash's
+// `ho_check_bypass "budget" "$scope"` call actually uses.
 func TestBudgetGuard_BypassMaxToolCalls(t *testing.T) {
 	work := t.TempDir()
 	proj := t.TempDir()
 	writeYAML(t, proj, "budget:\n  enabled: true\n  max_tool_calls: 1\n")
 	_ = os.WriteFile(filepath.Join(work, "hook-bypass.md"),
-		[]byte("Hook: budget-guard\nScope: cap=max_tool_calls\n"), 0644)
+		[]byte("## Active entries\n## bypass: b1\n**Hook:** budget\n**Scope:** cap=max_tool_calls\n"), 0644)
 	h := makeHook(work, proj)
 	// Exceed the cap.
 	h.Run(context.Background(), makeInput("Edit", nil)) //nolint:errcheck

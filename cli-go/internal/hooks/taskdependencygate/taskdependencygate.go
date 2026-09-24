@@ -21,12 +21,12 @@ package taskdependencygate
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
@@ -60,40 +60,56 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	agentType := senderRole(in)
 
 	// Best-effort schema guess — field names are plausible but unverified.
-	taskID := nestedStringField(in.Payload, "task", "id")
-	if taskID == "" {
-		taskID = stringField(in.Payload, "task_id")
-	}
-	blockedBy := nestedField(in.Payload, "task", "blockedBy")
-	if blockedBy == nil {
-		blockedBy = in.Payload["blockedBy"]
-	}
-	blockedByStr := jsonStr(blockedBy)
+	// Matches hi_field '.task.id // .task_id // .tool_input.id // empty'
+	// and hi_field '.task.blockedBy // .blockedBy // empty' EXACTLY,
+	// including jq's `//` falsy set ({null, false} only — not "", 0, or
+	// []) and jq -r's raw-string-vs-pretty-JSON rendering. A naive
+	// string-typed field lookup collapses "absent", "wrong type", and
+	// "present but empty string" into the same "" and falls through in
+	// all three cases, which jq's `//` does not — see S-6 A-2a round 2
+	// review finding 3 for the three reproductions this replicates
+	// (numeric task.id, empty-string task.id, and blockedBy: false).
+	taskIDVal := hookio.JQAlt(
+		hookio.Nested(in.Payload, "task", "id"),
+		in.Payload["task_id"],
+		hookio.ToolInputField(in, "id"),
+	)
+	taskID := hookio.JQRawOrJSON(taskIDVal)
+
+	blockedByVal := hookio.JQAlt(
+		hookio.Nested(in.Payload, "task", "blockedBy"),
+		in.Payload["blockedBy"],
+	)
+	blockedByStr := hookio.JQRawOrJSON(blockedByVal)
 
 	suspectBlockReason := ""
 	if blockedByStr != "" && blockedByStr != "[]" && blockedByStr != "null" {
 		suspectBlockReason = "task declares blockedBy: " + blockedByStr + " (cannot verify resolution in v0.1)"
 	}
 
-	entry := map[string]any{
-		"ts":                   h.NowFn().UTC().Format(time.RFC3339),
-		"hook":                 hookName,
-		"severity":             "REPORT",
-		"action":               "pass",
-		"message":              "report-only in v0.1 (UNCLEAR — see hook source)",
-		"mode":                 "report-only",
-		"agent_type":           agentType,
-		"task_id":              taskID,
-		"blocked_by":           blockedByStr,
-		"would_block":          "unknown",
-		"suspect_block_reason": suspectBlockReason,
+	now := time.Now()
+	if h.NowFn != nil {
+		now = h.NowFn()
 	}
-
-	if h.WorkCurrentDir != "" {
-		logFile := filepath.Join(h.WorkCurrentDir, "logs", hookName+".ndjson")
-		if err := appendNDJSON(logFile, entry); err != nil {
-			out.Stderr = fmt.Appendf(out.Stderr, "%s: log: %v\n", hookName, err)
-		}
+	err := hooklog.Append(h.WorkCurrentDir, hooklog.Entry{
+		Hook:      hookName,
+		Severity:  "REPORT",
+		Decision:  "pass",
+		Reason:    "report-only in v0.1 (UNCLEAR — see hook source)",
+		Agent:     agentType,
+		SessionID: hookio.PayloadString(in, "session_id"),
+		Event:     in.Event,
+		Extra: map[string]any{
+			"mode":                 "report-only",
+			"agent_type":           agentType,
+			"task_id":              taskID,
+			"blocked_by":           blockedByStr,
+			"would_block":          "unknown",
+			"suspect_block_reason": suspectBlockReason,
+		},
+	}, now)
+	if err != nil {
+		out.Stderr = fmt.Appendf(out.Stderr, "%s: log: %v\n", hookName, err)
 	}
 
 	return out, nil
@@ -101,74 +117,14 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 // ---- helpers -----------------------------------------------------------------
 
+// senderRole extracts the agent/role, matching hi_sender_role exactly:
+// hi_field_or '.agent_type' 'lead' (top-level, fallback "lead" when
+// absent/empty), trimmed, then the "yakos:" namespace prefix stripped.
 func senderRole(in hooktype.HookInput) string {
-	if r, ok := in.Env["YAKOS_AGENT_ROLE"]; ok && r != "" {
-		return r
+	raw := hookio.PayloadString(in, "agent_type")
+	if raw == "" {
+		raw = "lead"
 	}
-	if r := stringField(in.Payload, "agent_type"); r != "" {
-		return r
-	}
-	return "unknown"
-}
-
-func stringField(payload map[string]any, key string) string {
-	v, ok := payload[key]
-	if !ok {
-		return ""
-	}
-	s, _ := v.(string)
-	return s
-}
-
-func nestedStringField(payload map[string]any, outer, inner string) string {
-	v, ok := payload[outer]
-	if !ok {
-		return ""
-	}
-	m, ok := v.(map[string]any)
-	if !ok {
-		return ""
-	}
-	return stringField(m, inner)
-}
-
-func nestedField(payload map[string]any, outer, inner string) any {
-	v, ok := payload[outer]
-	if !ok {
-		return nil
-	}
-	m, ok := v.(map[string]any)
-	if !ok {
-		return nil
-	}
-	return m[inner]
-}
-
-func jsonStr(v any) string {
-	if v == nil {
-		return ""
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Sprintf("%v", v)
-	}
-	return string(b)
-}
-
-func appendNDJSON(logFile string, entry map[string]any) error {
-	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil { //nolint:gosec
-		return err
-	}
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec
-	if err != nil {
-		return err
-	}
-	defer f.Close() //nolint:errcheck
-	_, err = f.Write(data)
-	return err
+	raw = strings.TrimSpace(raw)
+	return strings.TrimPrefix(raw, "yakos:")
 }

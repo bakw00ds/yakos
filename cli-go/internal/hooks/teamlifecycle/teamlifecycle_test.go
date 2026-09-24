@@ -41,16 +41,21 @@ func readLastLog(t *testing.T, logFile string) map[string]any {
 	return last
 }
 
+// makeInput builds a HookInput matching bash's actual shape: team name
+// lives under .tool_input.name (tool_input="$(... | jq -c '.tool_input //
+// {}')"; team_name="$(... | jq -r '.name // empty')" reads FROM that nested
+// object), and session_id is the top-level .session_id Payload field
+// (hi_session_id), not an env var — team-lifecycle.sh never reads
+// CLAUDE_SESSION_ID from the environment.
 func makeInput(tool, teamName, sessionID string) hooktype.HookInput {
 	payload := map[string]any{}
 	if teamName != "" {
-		payload["name"] = teamName
+		payload["tool_input"] = map[string]any{"name": teamName}
 	}
-	env := map[string]string{}
 	if sessionID != "" {
-		env["CLAUDE_SESSION_ID"] = sessionID
+		payload["session_id"] = sessionID
 	}
-	return hooktype.HookInput{Tool: tool, Payload: payload, Env: env}
+	return hooktype.HookInput{Tool: tool, Payload: payload, Env: map[string]string{}}
 }
 
 func TestTeamLifecycle_NonLifecycleToolSkipped(t *testing.T) {
@@ -116,9 +121,12 @@ func TestTeamLifecycle_AgentLogsSpawn(t *testing.T) {
 	work := t.TempDir()
 	h := &teamlifecycle.Hook{WorkCurrentDir: work, NowFn: fixedNow}
 	_, _ = h.Run(context.Background(), hooktype.HookInput{
-		Tool:    "Agent",
-		Payload: map[string]any{"subagent_type": "backend"},
-		Env:     map[string]string{"CLAUDE_SESSION_ID": "sess-3"},
+		Tool: "Agent",
+		Payload: map[string]any{
+			"tool_input": map[string]any{"subagent_type": "backend"},
+			"session_id": "sess-3",
+		},
+		Env: map[string]string{},
 	})
 	rec := readLastLog(t, filepath.Join(work, "logs", "team-lifecycle.ndjson"))
 	if rec["event"] != "agent_spawned" {
@@ -130,9 +138,12 @@ func TestTeamLifecycle_AgentDoesNotTouchSessionStarted(t *testing.T) {
 	work := t.TempDir()
 	h := &teamlifecycle.Hook{WorkCurrentDir: work, NowFn: fixedNow}
 	_, _ = h.Run(context.Background(), hooktype.HookInput{
-		Tool:    "Agent",
-		Payload: map[string]any{"subagent_type": "backend"},
-		Env:     map[string]string{"CLAUDE_SESSION_ID": "sess-4"},
+		Tool: "Agent",
+		Payload: map[string]any{
+			"tool_input": map[string]any{"subagent_type": "backend"},
+			"session_id": "sess-4",
+		},
+		Env: map[string]string{},
 	})
 	if _, err := os.Stat(filepath.Join(work, ".session-started")); !os.IsNotExist(err) {
 		t.Error("Agent should not write .session-started")
@@ -319,6 +330,121 @@ func TestTeamLifecycle_TimestampInLog(t *testing.T) {
 }
 
 // indexOf is a helper since strings package isn't imported.
+// TestTeamLifecycle_KanbanMoveFreeFormTaskID_NoID confirms kanbanMoveFirst
+// moves the first bullet under the source column verbatim, regardless of
+// whether it contains a "K-<digits>" token — bash's kanban_move_first is a
+// pure line-based awk state machine with no ID-format requirement at all
+// (S-6 A-2a round 2 review finding 2). A prior Go port used an ID-based
+// internal/kanban.Move call that silently no-op'd for exactly this case.
+func TestTeamLifecycle_KanbanMoveFreeFormTaskID_NoID(t *testing.T) {
+	work := t.TempDir()
+	kanbanContent := `# Kanban — test
+
+## TODO
+- [ ] Free-form task with no ID token
+  - category: chore
+  - assigned: unassigned
+  - blockers: none
+  - notes:
+
+## IN PROGRESS
+
+## DONE
+`
+	_ = os.WriteFile(filepath.Join(work, "kanban.md"), []byte(kanbanContent), 0644)
+
+	h := &teamlifecycle.Hook{WorkCurrentDir: work, NowFn: fixedNow}
+	_, _ = h.Run(context.Background(), makeInput("TeamCreate", "team-ff", "sess-ff"))
+
+	data, err := os.ReadFile(filepath.Join(work, "kanban.md"))
+	if err != nil {
+		t.Fatalf("kanban.md not readable: %v", err)
+	}
+	content := string(data)
+	if indexOf(content, "## IN PROGRESS") < 0 {
+		t.Fatal("IN PROGRESS section not found")
+	}
+	inProgress := content[indexOf(content, "## IN PROGRESS"):]
+	if indexOf(inProgress, "Free-form task with no ID token") < 0 {
+		t.Error("free-form task (no K-<digits> token) should still move to IN PROGRESS")
+	}
+	todo := content[indexOf(content, "## TODO"):indexOf(content, "## IN PROGRESS")]
+	if indexOf(todo, "Free-form task") >= 0 {
+		t.Error("task should no longer appear under TODO after the move")
+	}
+	// Checkbox character must flip from "[ ]" to "[-]".
+	if indexOf(inProgress, "- [-] Free-form task") < 0 {
+		t.Error("expected checkbox to flip to '[-]' on the moved task")
+	}
+}
+
+// TestTeamLifecycle_KanbanMoveFreeFormTaskID_TeamDelete mirrors the above
+// for the TeamDelete (IN PROGRESS → DONE, checkbox "x") path.
+func TestTeamLifecycle_KanbanMoveFreeFormTaskID_TeamDelete(t *testing.T) {
+	work := t.TempDir()
+	kanbanContent := `# Kanban — test
+
+## TODO
+
+## IN PROGRESS
+- [-] Another free-form task
+  - category: chore
+
+## DONE
+`
+	_ = os.WriteFile(filepath.Join(work, "kanban.md"), []byte(kanbanContent), 0644)
+	base := filepath.Dir(work)
+	_ = os.MkdirAll(base, 0755)
+
+	h := &teamlifecycle.Hook{WorkCurrentDir: work, NowFn: fixedNow}
+	_, _ = h.Run(context.Background(), makeInput("TeamDelete", "team-ffd", "sess-ffd"))
+
+	data, err := os.ReadFile(filepath.Join(work, "kanban.md"))
+	if err != nil {
+		t.Fatalf("kanban.md: %v", err)
+	}
+	content := string(data)
+	doneIdx := indexOf(content, "## DONE")
+	if doneIdx < 0 {
+		t.Fatal("DONE section not found")
+	}
+	doneSection := content[doneIdx:]
+	if indexOf(doneSection, "- [x] Another free-form task") < 0 {
+		t.Error("expected free-form task to move to DONE with checkbox '[x]'")
+	}
+}
+
+// TestTeamLifecycle_TeamDelete_ScratchpadSizeBytes_NotHardcodedZero confirms
+// scratchpad_size_bytes reflects the actual work/current/ directory size
+// rather than the previous hardcoded 0 (S-6 A-2a round 2 review finding 2).
+func TestTeamLifecycle_TeamDelete_ScratchpadSizeBytes_NotHardcodedZero(t *testing.T) {
+	base := t.TempDir()
+	work := filepath.Join(base, "work", "current")
+	_ = os.MkdirAll(work, 0755)
+	// Give the scratchpad some real content so its on-disk size is > 0.
+	if err := os.WriteFile(filepath.Join(work, "notes.md"), make([]byte, 16384), 0644); err != nil {
+		t.Fatalf("write notes.md: %v", err)
+	}
+	sessLog := filepath.Join(base, "work", "sessions.ndjson")
+
+	h := &teamlifecycle.Hook{WorkCurrentDir: work, NowFn: fixedNow}
+	_, _ = h.Run(context.Background(), makeInput("TeamDelete", "team-sz", "sess-sz"))
+
+	data, err := os.ReadFile(sessLog)
+	if err != nil {
+		t.Fatalf("sessions.ndjson not written: %v", err)
+	}
+	var rec map[string]any
+	_ = json.Unmarshal(data[:len(data)-1], &rec)
+	size, ok := rec["scratchpad_size_bytes"].(float64)
+	if !ok {
+		t.Fatalf("scratchpad_size_bytes missing or wrong type: %v", rec["scratchpad_size_bytes"])
+	}
+	if size <= 0 {
+		t.Errorf("expected scratchpad_size_bytes > 0 for a non-empty work dir; got %v", size)
+	}
+}
+
 func indexOf(s, sub string) int {
 	for i := 0; i <= len(s)-len(sub); i++ {
 		if s[i:i+len(sub)] == sub {

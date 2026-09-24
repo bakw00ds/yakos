@@ -1,0 +1,15 @@
+{
+  "session_id": "fixture-htmlchars-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "SendMessage",
+  "tool_input": {
+    "to": "flutter-ui",
+    "summary": "compare A & B <old vs new>",
+    "message": "diff shows <RemovedProp/> & a<b, b>c in the generated types"
+  },
+  "tool_use_id": "toolu_fixture_htmlchars_001"
+}
