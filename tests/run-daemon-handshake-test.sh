@@ -56,16 +56,36 @@ WORKSPACE="$TMP/workspace"
 mkdir -p "$WORKSPACE"
 
 BUILDINFO_PKG="github.com/bakw00ds/yakos/internal/buildinfo"
+# internal/version.Version (the LEGACY display-string package, deliberately
+# untouched everywhere else in this PR — see internal/buildinfo's doc
+# comment) is also injected here, for a reason specific to this test
+# script only: yakos.version's RPC handler (internal/serve/methods.go)
+# calls version.Read(cfg.YakosRoot) and returns a hard RPC error if that
+# fails. A binary run from a throwaway location (not the usual
+# <repo>/bin/yakos, where version.Read falls back to reading <repo>/VERSION
+# from disk) has no VERSION file reachable from wherever its "dev build"
+# auto-materialization resolves YakosRoot to, so version.Read errors, so
+# yakos.version errors, so every daemon-routed CLI call in this script
+# would silently fall through to in-process execution — reproduced and
+# root-caused via a Docker ubuntu:24.04 container matching CI: the
+# failure was "yakos: daemon ping failed: ... version: reading
+# .../dev/VERSION: no such file or directory", not a timing issue at all.
+# Injecting Version here matches what an installed/released binary already
+# gets for free from the file-based fallback — it does not change
+# `yakos --version`'s own output (that stays governed by VERSION-file
+# presence, per version.Read's precedence order) since this script never
+# inspects that command's output.
+VERSION_PKG="github.com/bakw00ds/yakos/internal/version"
 
 echo "== building binary A (commit aaaaaaaaaaaa) =="
 ( cd "$CLI_GO_DIR" && go build \
-    -ldflags "-X $BUILDINFO_PKG.Version=0.0.0-handshake-test -X $BUILDINFO_PKG.Commit=aaaaaaaaaaaa" \
+    -ldflags "-X $BUILDINFO_PKG.Version=0.0.0-handshake-test -X $BUILDINFO_PKG.Commit=aaaaaaaaaaaa -X $VERSION_PKG.Version=0.0.0-handshake-test" \
     -o "$TMP/yakos-a" ./cmd/yakos )
 ok "built binary A"
 
 echo "== building binary B (commit bbbbbbbbbbbb — same version, different commit) =="
 ( cd "$CLI_GO_DIR" && go build \
-    -ldflags "-X $BUILDINFO_PKG.Version=0.0.0-handshake-test -X $BUILDINFO_PKG.Commit=bbbbbbbbbbbb" \
+    -ldflags "-X $BUILDINFO_PKG.Version=0.0.0-handshake-test -X $BUILDINFO_PKG.Commit=bbbbbbbbbbbb -X $VERSION_PKG.Version=0.0.0-handshake-test" \
     -o "$TMP/yakos-b" ./cmd/yakos )
 ok "built binary B"
 
@@ -120,6 +140,12 @@ else
     fail "daemon from binary A never became reachable"
     echo "---- daemon.log ----" >&2
     cat "$TMP/daemon.log" >&2
+    echo "---- last readiness probe's stdout ----" >&2
+    cat "$STDOUT_FILE" >&2
+    echo "---- last readiness probe's stderr ----" >&2
+    cat "$STDERR_FILE" >&2
+    echo "---- socket dir listing ----" >&2
+    ls -la "$(dirname "$(grep "yakos serve: socket at " "$TMP/daemon.log" | head -1 | sed 's/^yakos serve: socket at //')" 2>/dev/null)" >&2 2>&1 || true
     echo "yakos daemon-handshake: $PASS passed, $FAIL failed"
     exit 1
 fi
