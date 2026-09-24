@@ -39,6 +39,30 @@ func makeInput(tool string, payload map[string]any, env map[string]string) hookt
 	}
 }
 
+// makeSendMessageInput builds a HookInput matching bash's actual SendMessage
+// shape: to/summary/message live under .tool_input (hi_msg_to/hi_msg_summary/
+// hi_msg_body), session_id/transcript_path/agent_type are top-level Payload
+// fields (hi_session_id/hi_transcript/hi_sender_role) — not env vars, which
+// mailbox-mirror.sh never reads for any of these.
+func makeSendMessageInput(to, summary, message string, extra map[string]any) hooktype.HookInput {
+	payload := map[string]any{
+		"tool_input": map[string]any{
+			"to":      to,
+			"summary": summary,
+			"message": message,
+		},
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	return hooktype.HookInput{
+		Event:   "PreToolUse",
+		Tool:    "SendMessage",
+		Payload: payload,
+		Env:     map[string]string{},
+	}
+}
+
 func readMessages(t *testing.T, workDir string) []map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(workDir, "messages.ndjson"))
@@ -80,16 +104,16 @@ func TestOnlySendMessage(t *testing.T) {
 }
 
 // TestMessageLogged confirms a SendMessage call writes a record.
+//
+// S-6 A-2a: session_id/transcript_path now come from the stdin Payload
+// (hi_session_id/hi_transcript), matching bash exactly — the hook never
+// reads CLAUDE_SESSION_ID/CLAUDE_TRANSCRIPT_PATH from the environment.
 func TestMessageLogged(t *testing.T) {
 	tmp := t.TempDir()
 	h := newHook(tmp)
-	in := makeInput("SendMessage", map[string]any{
-		"to":      "researcher",
-		"summary": "start on task 1",
-		"message": "begin investigating the hook pattern",
-	}, map[string]string{
-		"CLAUDE_SESSION_ID":      "sess-abc",
-		"CLAUDE_TRANSCRIPT_PATH": "/tmp/tx.json",
+	in := makeSendMessageInput("researcher", "start on task 1", "begin investigating the hook pattern", map[string]any{
+		"session_id":      "sess-abc",
+		"transcript_path": "/tmp/tx.json",
 	})
 	out, err := h.Run(context.Background(), in)
 	if err != nil {
@@ -120,16 +144,59 @@ func TestMessageLogged(t *testing.T) {
 	}
 }
 
-// TestSenderFromEnv confirms YAKOS_AGENT_ROLE is used for the from field.
-func TestSenderFromEnv(t *testing.T) {
+// TestMessageBody_HTMLCharsNotEscaped confirms messages.ndjson — the
+// durable peer-message audit trail — round-trips `<`, `>`, and `&` as
+// literal bytes, matching bash's `jq -nc` (which never HTML-escapes).
+// encoding/json.Marshal's default behavior DOES escape these to
+// </>/&, which is semantically inert to a JSON-parsing
+// reader but breaks raw grep/byte-diff tooling over the audit log (S-6
+// A-2a round 2 review finding 5) — this asserts the RAW file bytes, not
+// the round-tripped-through-json.Unmarshal value, since Unmarshal would
+// silently undo the very escaping under test.
+func TestMessageBody_HTMLCharsNotEscaped(t *testing.T) {
 	tmp := t.TempDir()
 	h := newHook(tmp)
-	in := makeInput("SendMessage", map[string]any{
-		"to":      "lead",
-		"summary": "done",
-		"message": "task complete",
-	}, map[string]string{
-		"YAKOS_AGENT_ROLE": "researcher",
+	in := makeSendMessageInput("researcher", "A & B <compare>", "see <b>bold</b> & \"quoted\"", nil)
+	if _, err := h.Run(context.Background(), in); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(tmp, "messages.ndjson"))
+	if err != nil {
+		t.Fatalf("read messages.ndjson: %v", err)
+	}
+	raw := string(data)
+	for _, want := range []string{"A & B <compare>", "see <b>bold</b> & "} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("expected raw messages.ndjson to contain literal %q, got: %s", want, raw)
+		}
+	}
+	// Built from byte slices rather than string literals containing a
+	// backslash-u escape, so this source file itself never carries a
+	// literal "<"-shaped token for any tool (or this very test) to
+	// trip over.
+	for _, unwanted := range []string{
+		string([]byte{'\\', 'u', '0', '0', '3', 'c'}), // <
+		string([]byte{'\\', 'u', '0', '0', '3', 'e'}), // >
+		string([]byte{'\\', 'u', '0', '0', '2', '6'}), // &
+	} {
+		if strings.Contains(raw, unwanted) {
+			t.Errorf("messages.ndjson should not HTML-escape (%s found), got: %s", unwanted, raw)
+		}
+	}
+}
+
+// TestSenderFromPayload confirms the top-level .agent_type Payload field is
+// used for the from field, matching hi_sender_role.
+//
+// S-6 A-2a: previously pinned YAKOS_AGENT_ROLE (an env var bash's
+// mailbox-mirror.sh never reads — hi_sender_role reads .agent_type from
+// stdin JSON only, per lib/hooks/lib/hook-input.sh) as the sender source;
+// renamed and switched to the Payload field to match bash.
+func TestSenderFromPayload(t *testing.T) {
+	tmp := t.TempDir()
+	h := newHook(tmp)
+	in := makeSendMessageInput("lead", "done", "task complete", map[string]any{
+		"agent_type": "researcher",
 	})
 	_, err := h.Run(context.Background(), in)
 	if err != nil {
@@ -145,11 +212,7 @@ func TestSenderFromEnv(t *testing.T) {
 func TestSenderDefaultsToLead(t *testing.T) {
 	tmp := t.TempDir()
 	h := newHook(tmp)
-	in := makeInput("SendMessage", map[string]any{
-		"to":      "frontend",
-		"summary": "contracts ready",
-		"message": "see api-contracts.md",
-	}, nil)
+	in := makeSendMessageInput("frontend", "contracts ready", "see api-contracts.md", nil)
 	_, err := h.Run(context.Background(), in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -165,11 +228,7 @@ func TestMultipleMessagesAppended(t *testing.T) {
 	tmp := t.TempDir()
 	h := newHook(tmp)
 	for i := 0; i < 3; i++ {
-		in := makeInput("SendMessage", map[string]any{
-			"to":      "researcher",
-			"summary": "msg",
-			"message": "body",
-		}, nil)
+		in := makeSendMessageInput("researcher", "msg", "body", nil)
 		if _, err := h.Run(context.Background(), in); err != nil {
 			t.Fatalf("msg %d: unexpected error: %v", i, err)
 		}
@@ -187,11 +246,7 @@ func TestAuditLogWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := newHook(tmp)
-	in := makeInput("SendMessage", map[string]any{
-		"to":      "researcher",
-		"summary": "hello",
-		"message": "world",
-	}, nil)
+	in := makeSendMessageInput("researcher", "hello", "world", nil)
 	if _, err := h.Run(context.Background(), in); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -213,14 +268,11 @@ func TestCoordActivityEmitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := newHook(tmp)
-	in := makeInput("SendMessage", map[string]any{
-		"to":      "frontend",
-		"summary": "contracts done",
-		"message": "private body not shared",
-	}, map[string]string{
+	in := makeSendMessageInput("frontend", "contracts done", "private body not shared", nil)
+	in.Env = map[string]string{
 		"YAKOS_COORD_ENABLED": "1",
 		"YAKOS_COORD_DIR":     coordDir,
-	})
+	}
 	if _, err := h.Run(context.Background(), in); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -242,11 +294,7 @@ func TestCoordActivityEmitted(t *testing.T) {
 func TestCoordSkippedWhenDisabled(t *testing.T) {
 	tmp := t.TempDir()
 	h := newHook(tmp)
-	in := makeInput("SendMessage", map[string]any{
-		"to":      "lead",
-		"summary": "done",
-		"message": "body",
-	}, nil) // No YAKOS_COORD_ENABLED
+	in := makeSendMessageInput("lead", "done", "body", nil) // No YAKOS_COORD_ENABLED
 	if _, err := h.Run(context.Background(), in); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -268,11 +316,7 @@ func TestAlwaysExitZero(t *testing.T) {
 		WorkCurrentDir: filepath.Join(unwritable, "work"),
 		NowFn:          fixedNow,
 	}
-	in := makeInput("SendMessage", map[string]any{
-		"to":      "researcher",
-		"summary": "hello",
-		"message": "body",
-	}, nil)
+	in := makeSendMessageInput("researcher", "hello", "body", nil)
 	out, err := h.Run(context.Background(), in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -283,15 +327,15 @@ func TestAlwaysExitZero(t *testing.T) {
 }
 
 // TestTranscriptPathRecorded confirms transcript_path is saved.
+//
+// S-6 A-2a: transcript_path now comes from the stdin Payload
+// (hi_transcript), matching bash; previously pinned the CLAUDE_TRANSCRIPT_PATH
+// env var, which bash never reads.
 func TestTranscriptPathRecorded(t *testing.T) {
 	tmp := t.TempDir()
 	h := newHook(tmp)
-	in := makeInput("SendMessage", map[string]any{
-		"to":      "researcher",
-		"summary": "s",
-		"message": "m",
-	}, map[string]string{
-		"CLAUDE_TRANSCRIPT_PATH": "/transcripts/tx-123.json",
+	in := makeSendMessageInput("researcher", "s", "m", map[string]any{
+		"transcript_path": "/transcripts/tx-123.json",
 	})
 	if _, err := h.Run(context.Background(), in); err != nil {
 		t.Fatalf("unexpected error: %v", err)

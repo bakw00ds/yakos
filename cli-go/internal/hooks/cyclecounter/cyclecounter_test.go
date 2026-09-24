@@ -25,7 +25,7 @@ func buildHook(t *testing.T) (*cyclecounter.Hook, string) {
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	h := cyclecounter.New(workDir)
+	h := cyclecounter.New(workDir, "")
 	h.NowFn = func() time.Time { return time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC) }
 	return h, workDir
 }
@@ -249,7 +249,7 @@ func TestCycleCounter_LogAppends_MultipleRuns(t *testing.T) {
 }
 
 func TestCycleCounter_EmptyWorkDir_NoOp(t *testing.T) {
-	h := cyclecounter.New("")
+	h := cyclecounter.New("", "")
 	out, err := h.Run(context.Background(), hooktype.HookInput{Event: "UserPromptSubmit"})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -260,7 +260,7 @@ func TestCycleCounter_EmptyWorkDir_NoOp(t *testing.T) {
 }
 
 func TestCycleCounter_NonexistentWorkDir_NoOp(t *testing.T) {
-	h := cyclecounter.New("/nonexistent/path/99999")
+	h := cyclecounter.New("/nonexistent/path/99999", "")
 	out, err := h.Run(context.Background(), hooktype.HookInput{Event: "UserPromptSubmit"})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -341,14 +341,14 @@ func TestCycleCounter_ReturnsNilError(t *testing.T) {
 }
 
 func TestCycleCounter_New_HasAutoRetroTrue(t *testing.T) {
-	h := cyclecounter.New("/tmp")
+	h := cyclecounter.New("/tmp", "")
 	if !h.AutoRetro {
 		t.Error("expected AutoRetro=true by default")
 	}
 }
 
 func TestCycleCounter_New_HasDefaultCycleLength(t *testing.T) {
-	h := cyclecounter.New("/tmp")
+	h := cyclecounter.New("/tmp", "")
 	if h.CycleLength != cyclecounter.DefaultCycleLength {
 		t.Errorf("expected CycleLength=%d; got %d", cyclecounter.DefaultCycleLength, h.CycleLength)
 	}
@@ -371,5 +371,127 @@ func TestCycleCounter_LogEntry_ContainsCycleLengthField(t *testing.T) {
 	data, _ := os.ReadFile(logFile)
 	if !bytes.Contains(data, []byte(`"cycle_length"`)) {
 		t.Error("log entry missing 'cycle_length' field")
+	}
+}
+
+// ---- settings.json overrides (S-6 A-2a round 2, finding 4) -------------------
+//
+// Sandbox StateDir (never the real $HOME/.yakos-state) throughout, per the
+// review's instruction to test with a sandbox HOME rather than touching
+// the operator's real settings.
+
+func writeSettings(t *testing.T, stateDir, content string) {
+	t.Helper()
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		t.Fatalf("mkdir stateDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "settings.json"), []byte(content), 0644); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+}
+
+func TestCycleCounter_SettingsOverride_CustomCycleLength(t *testing.T) {
+	tmp := t.TempDir()
+	workDir := filepath.Join(tmp, "work", "current")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatalf("mkdir workDir: %v", err)
+	}
+	stateDir := filepath.Join(tmp, "state")
+	writeSettings(t, stateDir, `{"retro":{"cycle_length":5}}`)
+
+	h := cyclecounter.New(workDir, stateDir)
+	h.NowFn = func() time.Time { return time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC) }
+
+	for i := 0; i < 4; i++ {
+		runHook(t, h)
+	}
+	if markerExists(workDir) {
+		t.Error("marker should not exist before the settings-overridden cycle length (5)")
+	}
+	runHook(t, h)
+	if !markerExists(workDir) {
+		t.Error("expected .retro-due at cycle 5 (settings.json override)")
+	}
+}
+
+func TestCycleCounter_SettingsOverride_InvalidCycleLengthKeepsDefault(t *testing.T) {
+	tmp := t.TempDir()
+	workDir := filepath.Join(tmp, "work", "current")
+	_ = os.MkdirAll(workDir, 0755)
+	stateDir := filepath.Join(tmp, "state")
+	writeSettings(t, stateDir, `{"retro":{"cycle_length":"abc"}}`)
+
+	h := cyclecounter.New(workDir, stateDir)
+	h.NowFn = func() time.Time { return time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC) }
+
+	for i := 0; i < 9; i++ {
+		runHook(t, h)
+	}
+	if markerExists(workDir) {
+		t.Error("marker should not exist before the DEFAULT cycle length (10) when override is invalid")
+	}
+	runHook(t, h)
+	if !markerExists(workDir) {
+		t.Error("expected .retro-due at cycle 10 (default; invalid override ignored)")
+	}
+}
+
+func TestCycleCounter_SettingsOverride_AutoDispatchBooleanFalseIsIneffective(t *testing.T) {
+	// Reproduces the pre-existing bash bug (finding 4 side note): jq's `//`
+	// treats a literal JSON `false` as falsy, so `.retro.auto_dispatch:
+	// false` (what `yakos retro disable` actually writes) falls through to
+	// the `// true` default and auto-retro stays enabled. Go must
+	// replicate this, not "fix" it.
+	tmp := t.TempDir()
+	workDir := filepath.Join(tmp, "work", "current")
+	_ = os.MkdirAll(workDir, 0755)
+	stateDir := filepath.Join(tmp, "state")
+	writeSettings(t, stateDir, `{"retro":{"auto_dispatch":false,"cycle_length":1}}`)
+
+	h := cyclecounter.New(workDir, stateDir)
+	h.NowFn = func() time.Time { return time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC) }
+
+	runHook(t, h)
+	if !markerExists(workDir) {
+		t.Error("expected .retro-due despite auto_dispatch:false — boolean false is jq-falsy and never disables (pre-existing bash quirk)")
+	}
+}
+
+func TestCycleCounter_SettingsOverride_AutoDispatchStringFalseDisables(t *testing.T) {
+	// The one shape that DOES disable auto-retro via this path: a literal
+	// JSON string "false" (not boolean) is truthy to jq's `//` and then
+	// string-compares equal to "false".
+	tmp := t.TempDir()
+	workDir := filepath.Join(tmp, "work", "current")
+	_ = os.MkdirAll(workDir, 0755)
+	stateDir := filepath.Join(tmp, "state")
+	writeSettings(t, stateDir, `{"retro":{"auto_dispatch":"false","cycle_length":1}}`)
+
+	h := cyclecounter.New(workDir, stateDir)
+	h.NowFn = func() time.Time { return time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC) }
+
+	runHook(t, h)
+	if markerExists(workDir) {
+		t.Error("expected no .retro-due: auto_dispatch as a JSON STRING \"false\" does disable")
+	}
+}
+
+func TestCycleCounter_SettingsOverride_MissingFileKeepsConstructedDefaults(t *testing.T) {
+	tmp := t.TempDir()
+	workDir := filepath.Join(tmp, "work", "current")
+	_ = os.MkdirAll(workDir, 0755)
+	stateDir := filepath.Join(tmp, "state") // no settings.json written
+
+	h := cyclecounter.New(workDir, stateDir)
+	h.NowFn = func() time.Time { return time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC) }
+	h.CycleLength = 2 // explicit test override, must survive an absent settings file
+
+	runHook(t, h)
+	if markerExists(workDir) {
+		t.Error("marker should not exist at cycle 1 of 2")
+	}
+	runHook(t, h)
+	if !markerExists(workDir) {
+		t.Error("expected .retro-due at cycle 2 (constructed CycleLength, no settings.json present)")
 	}
 }

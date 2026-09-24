@@ -32,6 +32,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookbypass"
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
@@ -117,9 +120,14 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	stateFile := filepath.Join(h.WorkCurrentDir, ".budget-state.json")
-	nowEpoch := h.NowFn().Unix()
+	now := time.Now()
+	if h.NowFn != nil {
+		now = h.NowFn()
+	}
+	nowEpoch := now.Unix()
 	tool := in.Tool
-	sessionID := in.Env["CLAUDE_SESSION_ID"]
+	// session_id comes from the stdin payload (hi_session_id), not an env
+	sessionID := hookio.PayloadString(in, "session_id")
 
 	// Load or initialize state.
 	state := loadBudgetState(stateFile, sessionID, nowEpoch)
@@ -140,30 +148,32 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	elapsed := int(nowEpoch - state.StartedAt)
-	logFile := filepath.Join(h.WorkCurrentDir, "logs", hookName+".ndjson")
-
 	// ---- check max_tool_calls ----
 	if cfg.MaxToolCalls != nil && state.ToolCallCount > *cfg.MaxToolCalls {
-		if h.isBypassed(in, "cap=max_tool_calls") {
-			h.appendLog(&out, logFile, "WARN", "pass",
+		if h.isBypassed("cap=max_tool_calls") {
+			h.appendLog(&out, in, now, "WARN", "pass",
 				"max_tool_calls exceeded but bypass active",
 				map[string]any{"cap": "max_tool_calls", "tool_call_count": state.ToolCallCount,
 					"elapsed_seconds": elapsed, "repeat_count": state.LastToolRunCount, "tool": tool, "bypass": true})
 			return out, nil
 		} else {
-			h.appendLog(&out, logFile, "BLOCK", "block",
+			h.appendLog(&out, in, now, "BLOCK", "block",
 				fmt.Sprintf("session tool-call count %d exceeds cap %d", state.ToolCallCount, *cfg.MaxToolCalls),
 				map[string]any{"cap": "max_tool_calls", "tool_call_count": state.ToolCallCount,
-					"elapsed_seconds": elapsed, "repeat_count": state.LastToolRunCount, "tool": tool})
+					"elapsed_seconds": elapsed, "repeat_count": state.LastToolRunCount, "tool": tool, "bypass": false})
+			// Indentation and wording match bash's literal heredoc-style
+			// message byte for byte (ho_block prints "${hook}: ${reason}"
+			// verbatim, including the source's embedded leading whitespace
+			// on continuation lines).
 			msg := fmt.Sprintf(
 				"budget-guard: session tool-call budget exceeded: %d > %d.\n"+
-					"This is a session-level cap configured in .yakos.yml budget.max_tool_calls.\n"+
-					"Options:\n"+
-					"  1. Wait for the next session (counters reset per session)\n"+
-					"  2. Add a bypass entry in work/current/hook-bypass.md with\n"+
-					"     Scope: cap=max_tool_calls\n"+
-					"  3. Raise the cap in .yakos.yml budget.max_tool_calls\n"+
-					"  4. Emergency: set YAKOS_BUDGET_DISABLE=1",
+					"       This is a session-level cap configured in .yakos.yml budget.max_tool_calls.\n"+
+					"       Options:\n"+
+					"         1. Wait for the next session (counters reset per session)\n"+
+					"         2. Add a bypass entry in work/current/hook-bypass.md with\n"+
+					"            Scope: cap=max_tool_calls\n"+
+					"         3. Raise the cap in .yakos.yml budget.max_tool_calls\n"+
+					"         4. Emergency: export YAKOS_BUDGET_DISABLE=1",
 				state.ToolCallCount, *cfg.MaxToolCalls)
 			out.Stderr = append(out.Stderr, []byte(msg+"\n")...)
 			out.ExitCode = 2
@@ -173,25 +183,25 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 	// ---- check max_wall_seconds ----
 	if cfg.MaxWallSeconds != nil && elapsed > *cfg.MaxWallSeconds {
-		if h.isBypassed(in, "cap=max_wall_seconds") {
-			h.appendLog(&out, logFile, "WARN", "pass",
+		if h.isBypassed("cap=max_wall_seconds") {
+			h.appendLog(&out, in, now, "WARN", "pass",
 				"max_wall_seconds exceeded but bypass active",
 				map[string]any{"cap": "max_wall_seconds", "tool_call_count": state.ToolCallCount,
 					"elapsed_seconds": elapsed, "repeat_count": state.LastToolRunCount, "tool": tool, "bypass": true})
 			return out, nil
 		} else {
-			h.appendLog(&out, logFile, "BLOCK", "block",
+			h.appendLog(&out, in, now, "BLOCK", "block",
 				fmt.Sprintf("session elapsed %ds exceeds cap %ds", elapsed, *cfg.MaxWallSeconds),
 				map[string]any{"cap": "max_wall_seconds", "tool_call_count": state.ToolCallCount,
-					"elapsed_seconds": elapsed, "repeat_count": state.LastToolRunCount, "tool": tool})
+					"elapsed_seconds": elapsed, "repeat_count": state.LastToolRunCount, "tool": tool, "bypass": false})
 			msg := fmt.Sprintf(
 				"budget-guard: session wall-clock budget exceeded: %ds > %ds.\n"+
-					"This is a session-level cap configured in .yakos.yml budget.max_wall_seconds.\n"+
-					"Options:\n"+
-					"  1. End the current session (counters reset)\n"+
-					"  2. Add a bypass entry with Scope: cap=max_wall_seconds\n"+
-					"  3. Raise the cap in .yakos.yml budget.max_wall_seconds\n"+
-					"  4. Emergency: set YAKOS_BUDGET_DISABLE=1",
+					"       This is a session-level cap configured in .yakos.yml budget.max_wall_seconds.\n"+
+					"       Options:\n"+
+					"         1. End the current session (counters reset)\n"+
+					"         2. Add a bypass entry with Scope: cap=max_wall_seconds\n"+
+					"         3. Raise the cap in .yakos.yml budget.max_wall_seconds\n"+
+					"         4. Emergency: export YAKOS_BUDGET_DISABLE=1",
 				elapsed, *cfg.MaxWallSeconds)
 			out.Stderr = append(out.Stderr, []byte(msg+"\n")...)
 			out.ExitCode = 2
@@ -201,24 +211,30 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 	// ---- check max_repeat_same_tool ----
 	if cfg.MaxRepeatSameTool != nil && state.LastToolRunCount > *cfg.MaxRepeatSameTool {
-		if h.isBypassed(in, "cap=max_repeat_same_tool") {
-			h.appendLog(&out, logFile, "WARN", "pass",
+		if h.isBypassed("cap=max_repeat_same_tool") {
+			h.appendLog(&out, in, now, "WARN", "pass",
 				fmt.Sprintf("%s repeated %d times in a row but bypass active", tool, state.LastToolRunCount),
 				map[string]any{"cap": "max_repeat_same_tool", "tool_call_count": state.ToolCallCount,
 					"elapsed_seconds": elapsed, "repeat_count": state.LastToolRunCount, "tool": tool, "bypass": true})
 			return out, nil
 		} else {
-			h.appendLog(&out, logFile, "BLOCK", "block",
+			h.appendLog(&out, in, now, "BLOCK", "block",
 				fmt.Sprintf("%s repeated %d times in a row, exceeds cap %d (likely loop)", tool, state.LastToolRunCount, *cfg.MaxRepeatSameTool),
 				map[string]any{"cap": "max_repeat_same_tool", "tool_call_count": state.ToolCallCount,
-					"elapsed_seconds": elapsed, "repeat_count": state.LastToolRunCount, "tool": tool})
+					"elapsed_seconds": elapsed, "repeat_count": state.LastToolRunCount, "tool": tool, "bypass": false})
 			msg := fmt.Sprintf(
 				"budget-guard: loop suspected: '%s' invoked %d times in a row, exceeds cap %d.\n"+
-					"Options:\n"+
-					"  1. Reconsider whether the work needs %s repeatedly\n"+
-					"  2. Add bypass with Scope: cap=max_repeat_same_tool\n"+
-					"  3. Raise the cap in .yakos.yml budget.max_repeat_same_tool\n"+
-					"  4. Emergency: set YAKOS_BUDGET_DISABLE=1",
+					"       This is loop-detection cap configured in .yakos.yml budget.max_repeat_same_tool.\n"+
+					"       Common causes:\n"+
+					"         - Agent stuck retrying a failing tool call\n"+
+					"         - Agent reading many files sequentially when a glob would suffice\n"+
+					"         - Genuine workflow that happens to use the same tool a lot\n"+
+					"       Options:\n"+
+					"         1. Reconsider whether the work needs %s repeatedly\n"+
+					"         2. Add bypass with Scope: cap=max_repeat_same_tool (if this is\n"+
+					"            a genuine batch operation, not a loop)\n"+
+					"         3. Raise the cap in .yakos.yml budget.max_repeat_same_tool\n"+
+					"         4. Emergency: export YAKOS_BUDGET_DISABLE=1",
 				tool, state.LastToolRunCount, *cfg.MaxRepeatSameTool, tool)
 			out.Stderr = append(out.Stderr, []byte(msg+"\n")...)
 			out.ExitCode = 2
@@ -227,7 +243,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	// All caps respected.
-	h.appendLog(&out, logFile, "REPORT", "pass", "within all budget caps",
+	h.appendLog(&out, in, now, "REPORT", "pass", "within all budget caps",
 		map[string]any{"tool_call_count": state.ToolCallCount,
 			"elapsed_seconds": elapsed, "repeat_count": state.LastToolRunCount, "tool": tool})
 
@@ -235,7 +251,13 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 }
 
 // isBypassed checks hook-bypass.md for an entry mentioning this hook and scope.
-func (h *Hook) isBypassed(in hooktype.HookInput, scope string) bool {
+// isBypassed replicates `ho_check_bypass "budget" "$scope"` exactly — note
+// the probe hook-name bash actually uses is the literal string "budget",
+// NOT "budget-guard" (the hook's own registered name). An operator's
+// hook-bypass.md entry for this cap is therefore written with
+// `**Hook:** budget`, and would never have matched the previous ad hoc
+// strings.Contains(content, "budget-guard") check.
+func (h *Hook) isBypassed(scope string) bool {
 	if h.WorkCurrentDir == "" {
 		return false
 	}
@@ -244,38 +266,39 @@ func (h *Hook) isBypassed(in hooktype.HookInput, scope string) bool {
 	if err != nil {
 		return false
 	}
-	content := string(data)
-	return strings.Contains(content, hookName) && strings.Contains(content, scope)
+	return hookbypass.Check(string(data), "budget", scope)
 }
 
-// appendLog writes an NDJSON log entry.
-func (h *Hook) appendLog(out *hooktype.HookOutput, logFile, severity, action, message string, extra map[string]any) {
-	ts := h.NowFn().UTC().Format(time.RFC3339)
-	entry := map[string]any{
-		"ts":       ts,
-		"hook":     hookName,
-		"severity": severity,
-		"action":   action,
-		"message":  message,
-	}
-	for k, v := range extra {
-		entry[k] = v
-	}
-	data, err := json.Marshal(entry)
+// appendLog writes an NDJSON log entry via the shared hooklog writer —
+// field set/order matches bash's ho_log exactly (agent/session_id/event
+// were previously entirely absent, and decision/reason were named
+// action/message).
+func (h *Hook) appendLog(out *hooktype.HookOutput, in hooktype.HookInput, now time.Time, severity, decision, reason string, extra map[string]any) {
+	err := hooklog.Append(h.WorkCurrentDir, hooklog.Entry{
+		Hook:      hookName,
+		Severity:  severity,
+		Decision:  decision,
+		Reason:    reason,
+		Agent:     senderRole(in),
+		SessionID: hookio.PayloadString(in, "session_id"),
+		Event:     in.Event,
+		Extra:     extra,
+	}, now)
 	if err != nil {
-		return
+		out.Stderr = fmt.Appendf(out.Stderr, "%s: log: %v\n", hookName, err)
 	}
-	data = append(data, '\n')
-	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil { //nolint:gosec
-		return
+}
+
+// senderRole extracts the agent/role, matching hi_sender_role exactly:
+// hi_field_or '.agent_type' 'lead' (top-level, fallback "lead" when
+// absent/empty), trimmed, then the "yakos:" namespace prefix stripped.
+func senderRole(in hooktype.HookInput) string {
+	raw := hookio.PayloadString(in, "agent_type")
+	if raw == "" {
+		raw = "lead"
 	}
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec
-	if err != nil {
-		out.Stderr = fmt.Appendf(out.Stderr, "%s: open log: %v\n", hookName, err)
-		return
-	}
-	defer f.Close() //nolint:errcheck
-	_, _ = f.Write(data)
+	raw = strings.TrimSpace(raw)
+	return strings.TrimPrefix(raw, "yakos:")
 }
 
 // ---- state helpers -----------------------------------------------------------

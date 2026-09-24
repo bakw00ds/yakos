@@ -127,12 +127,15 @@ func TestTaskDependencyGate_WouldBlockUnknown(t *testing.T) {
 	}
 }
 
+// S-6 A-2a: previously pinned the YAKOS_AGENT_ROLE env var, which bash's
+// task-dependency-gate.sh never reads — hi_sender_role reads the top-level
+// .agent_type Payload field only. Switched to match.
 func TestTaskDependencyGate_AgentTypeLogged(t *testing.T) {
 	dir := t.TempDir()
 	h := &taskdependencygate.Hook{WorkCurrentDir: dir, NowFn: fixedNow}
 	in := hooktype.HookInput{
-		Payload: map[string]any{},
-		Env:     map[string]string{"YAKOS_AGENT_ROLE": "backend"},
+		Payload: map[string]any{"agent_type": "backend"},
+		Env:     map[string]string{},
 	}
 	_, _ = h.Run(context.Background(), in)
 	rec := readLastLog(t, filepath.Join(dir, "logs", "task-dependency-gate.ndjson"))

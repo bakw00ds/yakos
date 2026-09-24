@@ -15,7 +15,6 @@ package secretscan
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,25 +22,37 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookbypass"
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
 const hookName = "secret-scan"
 
-// Pattern describes one secret detection rule.
+// Pattern describes one secret detection rule. Source is the literal regex
+// TEXT as bash's PATTERNS array carries it (grep -E syntax) — logged
+// verbatim in the "pattern" field of a BLOCK record, matching
+// `--arg pat "$matched_pattern"` exactly, so Source must stay byte-identical
+// to the string in lib/hooks/secret-scan.sh even though Regex is the
+// compiled RE2 equivalent used for the actual match.
 type Pattern struct {
-	Name  string
-	Regex *regexp.Regexp
+	Name   string
+	Source string
+	Regex  *regexp.Regexp
 }
 
-// DefaultPatterns are the high-confidence patterns ported from secret-scan.sh.
+// DefaultPatterns are the 8 high-confidence patterns from secret-scan.sh's
+// PATTERNS array, in the same order (first match wins).
 var DefaultPatterns = []Pattern{
-	{Name: "AWS Access Key", Regex: regexp.MustCompile(`AKIA[0-9A-Z]{16}`)},
-	{Name: "GitHub Token", Regex: regexp.MustCompile(`ghp_[A-Za-z0-9]{36}`)},
-	{Name: "GitHub Token (fine-grained)", Regex: regexp.MustCompile(`github_pat_[A-Za-z0-9_]{82}`)},
-	{Name: "PEM Private Key", Regex: regexp.MustCompile(`-----BEGIN (RSA |EC |OPENSSH |DSA |)PRIVATE KEY-----`)},
-	{Name: "Slack Token", Regex: regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`)},
-	{Name: "Stripe Secret Key", Regex: regexp.MustCompile(`sk_live_[A-Za-z0-9]{24,}`)},
+	{Name: "AWS Access Key", Source: `AKIA[0-9A-Z]{16}`, Regex: regexp.MustCompile(`AKIA[0-9A-Z]{16}`)},
+	{Name: "GitHub Token", Source: `ghp_[A-Za-z0-9]{36}`, Regex: regexp.MustCompile(`ghp_[A-Za-z0-9]{36}`)},
+	{Name: "GitHub Token (fine-grained)", Source: `github_pat_[A-Za-z0-9_]{82}`, Regex: regexp.MustCompile(`github_pat_[A-Za-z0-9_]{82}`)},
+	{Name: "PEM Private Key", Source: `-----BEGIN [A-Z0-9 ]*PRIVATE KEY`, Regex: regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY`)},
+	{Name: "Slack Token", Source: `xox[baprs]-[A-Za-z0-9-]{10,}`, Regex: regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`)},
+	{Name: "Stripe Secret Key", Source: `sk_live_[A-Za-z0-9]{24,}`, Regex: regexp.MustCompile(`sk_live_[A-Za-z0-9]{24,}`)},
+	{Name: "Anthropic API Key", Source: `sk-ant-[A-Za-z0-9_-]{93}`, Regex: regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{93}`)},
+	{Name: "Google API Key", Source: `AIza[0-9A-Za-z_-]{35}`, Regex: regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`)},
 }
 
 // Hook implements runner.Hook for secret scanning.
@@ -74,76 +85,95 @@ func (h *Hook) Name() string { return hookName }
 func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutput, error) {
 	out := hooktype.HookOutput{ExitCode: 0}
 
-	// Only fire on Edit, Write, MultiEdit.
+	// Only fire on Edit, Write, MultiEdit, NotebookEdit.
 	switch in.Tool {
-	case "Edit", "Write", "MultiEdit":
+	case "Edit", "Write", "MultiEdit", "NotebookEdit":
 	default:
 		return out, nil
 	}
 
-	// Extract the text to scan from the payload.
+	now := time.Now()
+	if h.NowFn != nil {
+		now = h.NowFn()
+	}
+	agent := senderRole(in)
+	file := fileFromPayload(in)
+
+	// Extract the text to scan from the payload — unions every
+	// content-bearing field (content, new_string, new_source, and each
+	// edits[].new_string — NOT the whole edit object, so old_string being
+	// replaced is never scanned) and recursively collects every string
+	// leaf, mirroring `.. | strings` exactly (a nested array/object under
+	// any of those fields is still fully explored).
 	text := extractWriteText(in)
 	if text == "" {
-		return out, nil
-	}
-
-	// Scan for patterns.
-	matchedName, matched := h.scan(text)
-	if !matched {
-		// Log REPORT-level pass.
-		h.appendLog(&out, "REPORT", "pass", "no secret patterns matched", map[string]any{
-			"tool":    in.Tool,
-			"file":    fileFromPayload(in),
-			"matched": false,
+		h.appendLog(&out, in, now, "REPORT", "pass", "no content-bearing string fields to scan", map[string]any{
+			"agent_type": agent,
+			"file_path":  file,
+			"tool":       in.Tool,
 		})
 		return out, nil
 	}
 
-	filePath := fileFromPayload(in)
+	// Scan for patterns.
+	matched := h.scan(text)
+	if matched == nil {
+		h.appendLog(&out, in, now, "REPORT", "pass", "no secret patterns matched", map[string]any{
+			"agent_type": agent,
+			"file_path":  file,
+			"tool":       in.Tool,
+		})
+		return out, nil
+	}
 
-	// Check bypass.
-	if h.isBypassed() {
-		h.appendLog(&out, "WARN", "pass", "match but bypass active", map[string]any{
-			"tool":    in.Tool,
-			"file":    filePath,
-			"matched": matchedName,
-			"bypass":  true,
+	// Check bypass (scope = file path, matching `ho_check_bypass
+	// "secret-scan" "$file"` exactly).
+	if h.isBypassed(file) {
+		h.appendLog(&out, in, now, "WARN", "pass", "match but bypass active", map[string]any{
+			"agent_type": agent,
+			"file_path":  file,
+			"matched":    matched.Name,
+			"bypass":     true,
 		})
 		return out, nil
 	}
 
 	// Block.
-	h.appendLog(&out, "BLOCK", "block", "secret pattern matched: "+matchedName, map[string]any{
-		"tool":    in.Tool,
-		"file":    filePath,
-		"matched": matchedName,
+	h.appendLog(&out, in, now, "BLOCK", "block", "secret pattern matched: "+matched.Name, map[string]any{
+		"agent_type": agent,
+		"file_path":  file,
+		"matched":    matched.Name,
+		"pattern":    matched.Source,
 	})
 	msg := fmt.Sprintf(
-		"secret-scan: refused write to %q: matches %s pattern. "+
+		"secret-scan: refused write to '%s': matches %s pattern. "+
 			"Either remove the secret, or add a current bypass entry to work/current/hook-bypass.md if this is intentional.",
-		filePath, matchedName,
+		file, matched.Name,
 	)
 	out.Stderr = append(out.Stderr, []byte(msg+"\n")...)
 	out.ExitCode = 2
 	return out, nil
 }
 
-// scan returns (matchedPatternName, true) for the first pattern that matches text.
-func (h *Hook) scan(text string) (string, bool) {
+// scan returns the first pattern that matches text, or nil.
+func (h *Hook) scan(text string) *Pattern {
 	pats := h.Patterns
 	if len(pats) == 0 {
 		pats = DefaultPatterns
 	}
-	for _, p := range pats {
-		if p.Regex.MatchString(text) {
-			return p.Name, true
+	for i := range pats {
+		if pats[i].Regex.MatchString(text) {
+			return &pats[i]
 		}
 	}
-	return "", false
+	return nil
 }
 
-// isBypassed returns true when hook-bypass.md mentions "secret-scan".
-func (h *Hook) isBypassed() bool {
+// isBypassed replicates ho_check_bypass("secret-scan", filePath) exactly:
+// an entry under the "## Active entries" heading whose **Hook:** value
+// CONTAINS "secret-scan" (substring) AND whose **Scope:** value CONTAINS
+// filePath (substring; empty scope always matches).
+func (h *Hook) isBypassed(filePath string) bool {
 	if h.WorkCurrentDir == "" {
 		return false
 	}
@@ -152,94 +182,109 @@ func (h *Hook) isBypassed() bool {
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(data), "secret-scan")
+	return hookbypass.Check(string(data), hookName, filePath)
 }
 
-// appendLog writes an NDJSON log entry to out.Stdout (matching bash hook
-// log convention: NDJSON to stdout, human message to stderr).
-func (h *Hook) appendLog(out *hooktype.HookOutput, severity, action, message string, extra map[string]any) {
-	ts := h.NowFn().UTC().Format(time.RFC3339)
-	entry := map[string]any{
-		"ts":       ts,
-		"hook":     hookName,
-		"severity": severity,
-		"action":   action,
-		"message":  message,
-	}
-	for k, v := range extra {
-		entry[k] = v
-	}
-	data, err := json.Marshal(entry)
+// appendLog writes an NDJSON log entry via the shared hooklog writer —
+// field set/order matches bash's ho_log exactly. agent/session_id/event
+// come from the hook's own base-field derivation (hi_sender_role/
+// hi_session_id/hi_event), independent of whatever "agent_type" happens
+// to also be duplicated into extra for bash's own extra-object shape.
+func (h *Hook) appendLog(out *hooktype.HookOutput, in hooktype.HookInput, now time.Time, severity, decision, reason string, extra map[string]any) {
+	err := hooklog.Append(h.WorkCurrentDir, hooklog.Entry{
+		Hook:      hookName,
+		Severity:  severity,
+		Decision:  decision,
+		Reason:    reason,
+		Agent:     senderRole(in),
+		SessionID: hookio.PayloadString(in, "session_id"),
+		Event:     in.Event,
+		Extra:     extra,
+	}, now)
 	if err != nil {
-		return
+		out.Stderr = fmt.Appendf(out.Stderr, "%s: log: %v\n", hookName, err)
 	}
-	out.Stdout = append(out.Stdout, data...)
-	out.Stdout = append(out.Stdout, '\n')
 }
 
 // ---- payload extraction helpers ---------------------------------------------
 
-// extractWriteText returns the text content that would be written to disk.
-// Mirrors the bash hook's logic for each tool.
+// extractWriteText returns the text content that would be written to disk,
+// mirroring secret-scan.sh's jq expression exactly:
+//
+//	[.tool_input | (.content, .new_string, .new_source,
+//	  ((.edits // []) | if type == "array" then map(.new_string) else [] end))
+//	 | .. | strings] | join("\n")
+//
+// Every one of content/new_string/new_source/each edit's new_string is
+// recursively walked (a nested array or object anywhere under any of
+// those fields is still fully explored) collecting every string leaf —
+// NOT switched on tool name, so a payload with a "swapped" shape (e.g. a
+// Write carrying .new_string) is still caught. edits[].old_string (the
+// text being REPLACED, not written) is never scanned.
 func extractWriteText(in hooktype.HookInput) string {
-	switch in.Tool {
-	case "Write":
-		return stringField(in.Payload, "content")
-	case "Edit":
-		return stringField(in.Payload, "new_string")
-	case "MultiEdit":
-		return extractMultiEditText(in.Payload)
-	}
-	return ""
-}
-
-// extractMultiEditText collects all new_string values from a MultiEdit edits array.
-func extractMultiEditText(payload map[string]any) string {
-	editsRaw, ok := payload["edits"]
-	if !ok {
+	ti := hookio.ToolInput(in)
+	if ti == nil {
 		return ""
 	}
-	// The payload may come as []any from JSON-decoded input.
-	edits, ok := editsRaw.([]any)
-	if !ok {
-		// Try JSON round-trip.
-		b, err := json.Marshal(editsRaw)
-		if err != nil {
-			return ""
-		}
-		if err := json.Unmarshal(b, &edits); err != nil {
-			return ""
-		}
-	}
-	var sb strings.Builder
-	for _, e := range edits {
-		if m, ok := e.(map[string]any); ok {
-			if ns, ok := m["new_string"].(string); ok {
-				sb.WriteString(ns)
-				sb.WriteByte('\n')
+	var leaves []string
+	leaves = append(leaves, collectStringLeaves(ti["content"])...)
+	leaves = append(leaves, collectStringLeaves(ti["new_string"])...)
+	leaves = append(leaves, collectStringLeaves(ti["new_source"])...)
+	if editsRaw, ok := ti["edits"]; ok {
+		if edits, ok := editsRaw.([]any); ok {
+			for _, e := range edits {
+				if m, ok := e.(map[string]any); ok {
+					leaves = append(leaves, collectStringLeaves(m["new_string"])...)
+				}
 			}
 		}
 	}
-	return sb.String()
+	return strings.Join(leaves, "\n")
 }
 
-// stringField extracts a string field from a payload map.
-func stringField(payload map[string]any, key string) string {
-	v, ok := payload[key]
-	if !ok {
-		return ""
-	}
-	s, _ := v.(string)
-	return s
-}
-
-// fileFromPayload extracts the file path from the hook payload.
-func fileFromPayload(in hooktype.HookInput) string {
-	// Edit/Write use "path" or "file_path".
-	for _, key := range []string{"path", "file_path"} {
-		if s := stringField(in.Payload, key); s != "" {
-			return s
+// collectStringLeaves is the Go equivalent of jq's `.. | strings`: recurse
+// into v and return every string value found at any depth. Map iteration
+// order doesn't affect correctness here — the result is only ever regex-
+// matched (order-independent) or joined for that purpose, never itself
+// logged or compared.
+func collectStringLeaves(v any) []string {
+	switch x := v.(type) {
+	case string:
+		return []string{x}
+	case []any:
+		var out []string
+		for _, e := range x {
+			out = append(out, collectStringLeaves(e)...)
 		}
+		return out
+	case map[string]any:
+		var out []string
+		for _, e := range x {
+			out = append(out, collectStringLeaves(e)...)
+		}
+		return out
+	default:
+		return nil
 	}
-	return "(unknown)"
+}
+
+// senderRole extracts the agent/role, matching hi_sender_role exactly:
+// hi_field_or '.agent_type' 'lead' (top-level, fallback "lead" when
+// absent/empty), trimmed, then the "yakos:" namespace prefix stripped.
+func senderRole(in hooktype.HookInput) string {
+	raw := hookio.PayloadString(in, "agent_type")
+	if raw == "" {
+		raw = "lead"
+	}
+	raw = strings.TrimSpace(raw)
+	return strings.TrimPrefix(raw, "yakos:")
+}
+
+// fileFromPayload extracts the file path, matching hi_file_path:
+// .tool_input.file_path // .tool_input.notebook_path.
+func fileFromPayload(in hooktype.HookInput) string {
+	if s := hookio.ToolInputString(in, "file_path"); s != "" {
+		return s
+	}
+	return hookio.ToolInputString(in, "notebook_path")
 }
