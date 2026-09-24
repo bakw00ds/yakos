@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/authsession"
+	"github.com/bakw00ds/yakos/internal/buildinfo"
 	"github.com/bakw00ds/yakos/internal/dashauth"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/interactive"
@@ -681,6 +682,15 @@ func New(cfg Config) (*Server, error) {
 			requireTokenForNonStatic(cfg.Token, inner))
 	}
 
+	// Outermost: stamp every response with the daemon's build id, so a
+	// browser holding an open console page (or any client polling
+	// GET /v1/version) can detect that the daemon behind it was replaced —
+	// the phantom-stale-console class described in the S-6 handshake design
+	// (work/current/reports/s6-structural-plan-2026-09-23.md §4.2). This is a
+	// header only: the front-end's own polling/reload-banner logic is out of
+	// scope for this package (dist/ assets are frontend-owned).
+	protected = withBuildIDHeader(protected)
+
 	s.httpSrv = &http.Server{
 		Addr:    cfg.addr(),
 		Handler: protected,
@@ -699,6 +709,17 @@ func New(cfg Config) (*Server, error) {
 		IdleTimeout:  120 * time.Second,
 	}
 	return s, nil
+}
+
+// withBuildIDHeader wraps next so every response carries an X-Yakos-Build
+// header set to this daemon process's buildinfo.BuildID(). A client (or a
+// browser tab left open across a daemon restart) can compare this header
+// across requests to detect that the daemon behind it changed identity.
+func withBuildIDHeader(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Yakos-Build", buildinfo.BuildID())
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Handler returns the underlying http.Handler for mounting in tests.

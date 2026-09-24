@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +11,7 @@ import (
 
 	"net"
 
+	"github.com/bakw00ds/yakos/internal/daemonclient"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 )
 
@@ -35,10 +35,14 @@ func parsePID(data []byte) (int, error) {
 	return strconv.Atoi(strings.TrimSpace(firstLine))
 }
 
-// readPIDFileVersion reads the version string from the second line of a pidfile.
+// readPIDFileBuildID reads the build id from the second line of a pidfile.
 // Returns "" when the file is absent, unreadable, or has only one line
-// (pre-T2 daemon that did not write a version line).
-func readPIDFileVersion(path string) string {
+// (pre-handshake daemon that did not write a build-id line).
+//
+// Renamed from readPIDFileVersion — the second line now holds
+// buildinfo.BuildID() rather than internal/version.Read's output; see
+// internal/serve/serve.go's writePIDFile doc comment.
+func readPIDFileBuildID(path string) string {
 	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
 		return ""
@@ -50,39 +54,43 @@ func readPIDFileVersion(path string) string {
 	return strings.TrimSpace(lines[1])
 }
 
-// queryDaemonVersion returns the version string reported by the running daemon.
+// queryDaemonBuildID returns the build id reported by the running daemon.
 // It tries the yakos.version JSON-RPC method first (requires the socket to be
 // reachable); if that fails it falls back to reading the second line of the
 // pidfile.  Returns "" when neither source is readable — the caller treats
-// this as "version unknown" and should restart.
-func queryDaemonVersion(socketPath, pidPath string) string {
+// this as "build id unknown" and should restart.
+//
+// Renamed from queryDaemonVersion; now decodes the full build-identity
+// response (internal/daemonclient.VersionInfo) and returns its BuildID field
+// instead of the legacy display Version string — see
+// work/current/reports/s6-structural-plan-2026-09-23.md §4.3.
+func queryDaemonBuildID(socketPath, pidPath string) string {
 	// Primary: JSON-RPC yakos.version call.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if client, err := jsonrpc.DialClient(socketPath); err == nil {
 		defer client.Close() //nolint:errcheck
-		if raw, err := client.Call(ctx, "yakos.version", nil); err == nil {
-			var result struct {
-				Version string `json:"version"`
-			}
-			if err := json.Unmarshal(raw, &result); err == nil && result.Version != "" {
-				return result.Version
-			}
+		if info, err := daemonclient.QueryVersion(ctx, client); err == nil && info.BuildID != "" {
+			return info.BuildID
 		}
 	}
 	// Fallback: second line of pidfile.
-	return readPIDFileVersion(pidPath)
+	return readPIDFileBuildID(pidPath)
 }
 
-// shouldRestartDaemon returns true when the running daemon's version differs
-// from the current binary's version, indicating a stale daemon that needs to
-// be replaced.  An empty runningVersion (unknown, e.g. pre-T2 daemon) always
-// triggers a restart — safe default.
-func shouldRestartDaemon(runningVersion, currentVersion string) bool {
-	if runningVersion == "" {
+// shouldRestartDaemon returns true when the running daemon's build id differs
+// from the current binary's build id, indicating a stale daemon that needs to
+// be replaced.  An empty runningBuildID (unknown, e.g. pre-handshake daemon)
+// always triggers a restart — safe default.
+//
+// Callers now pass buildinfo.BuildID()-shaped strings rather than the legacy
+// version display string; the comparison itself (string equality, empty →
+// restart) is unchanged.
+func shouldRestartDaemon(runningBuildID, currentBuildID string) bool {
+	if runningBuildID == "" {
 		return true // unknown → restart (safe default)
 	}
-	return runningVersion != currentVersion
+	return runningBuildID != currentBuildID
 }
 
 // stopStaleDaemon sends SIGTERM to the process identified by pidPath and waits

@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/bakw00ds/yakos/internal/buildinfo"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/kanban"
@@ -21,9 +22,16 @@ import (
 
 // versionResponse is the response shape for GET /v1/version.
 // This endpoint requires no authentication (public).
+//
+// Version and Runtime are the pre-existing fields, unchanged. Commit,
+// LibHash, and BuildID are additive — same build-identity shape as
+// internal/serve's yakos.version RPC and internal/daemonclient.VersionInfo.
 type versionResponse struct {
 	Version string `json:"version"`
 	Runtime string `json:"runtime"`
+	Commit  string `json:"commit"`
+	LibHash string `json:"lib_hash"`
+	BuildID string `json:"build_id"`
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
@@ -35,6 +43,9 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, versionResponse{
 		Version: v,
 		Runtime: runtime.Version(),
+		Commit:  buildinfo.Commit,
+		LibHash: buildinfo.LibHash(),
+		BuildID: buildinfo.BuildID(),
 	})
 }
 

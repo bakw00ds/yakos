@@ -43,12 +43,14 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/bakw00ds/yakos/internal/buildinfo"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	iKanban "github.com/bakw00ds/yakos/internal/kanban"
 	"github.com/bakw00ds/yakos/internal/pathsafe"
 	"github.com/bakw00ds/yakos/internal/refresh"
 	iStatus "github.com/bakw00ds/yakos/internal/status"
+	"github.com/bakw00ds/yakos/internal/version"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 	pb "github.com/bakw00ds/yakos/proto/yakos/v1"
 )
@@ -133,6 +135,7 @@ func New(cfg Config) *Server {
 	pb.RegisterCostServer(s.gSrv, &costSrv{cfg: cfg})
 	pb.RegisterStatusServer(s.gSrv, &statusSrv{cfg: cfg})
 	pb.RegisterRefreshServer(s.gSrv, &refreshSrv{cfg: cfg})
+	pb.RegisterVersionServer(s.gSrv, &versionSrv{cfg: cfg})
 
 	return s
 }
@@ -691,6 +694,30 @@ func (r *refreshSrv) Run(ctx context.Context, req *pb.RefreshRunRequest) (*pb.Re
 		return nil, status.Errorf(codes.Internal, "refresh: %v", err)
 	}
 	return &pb.RefreshRunResponse{Output: out.String()}, nil
+}
+
+// ---- Version service ---------------------------------------------------------
+
+// versionSrv implements the CLI↔daemon build handshake over gRPC — the third
+// transport alongside JSON-RPC yakos.version (internal/serve/methods.go) and
+// REST GET /v1/version (internal/restapi/handlers.go). All three return the
+// same four fields; see internal/buildinfo and internal/daemonclient.
+type versionSrv struct {
+	pb.UnimplementedVersionServer
+	cfg Config
+}
+
+func (v *versionSrv) Get(ctx context.Context, req *pb.VersionRequest) (*pb.VersionResponse, error) {
+	ver, err := version.Read(v.cfg.YakosRoot)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "version: %v", err)
+	}
+	return &pb.VersionResponse{
+		Version: ver,
+		Commit:  buildinfo.Commit,
+		LibHash: buildinfo.LibHash(),
+		BuildID: buildinfo.BuildID(),
+	}, nil
 }
 
 // ---- helpers ----------------------------------------------------------------

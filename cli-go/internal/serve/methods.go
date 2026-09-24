@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bakw00ds/yakos/internal/buildinfo"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
@@ -75,12 +76,23 @@ func registerMethods(srv *jsonrpc.Server, cfg Config) {
 // ---- yakos.version ----------------------------------------------------------
 
 // versionResult is the response shape for yakos.version.
+//
+// Version is the legacy display string (internal/version.Read's output,
+// byte-for-byte unchanged) and MUST stay first and unchanged so an older CLI
+// talking to a newer daemon still parses this response. Commit, LibHash, and
+// BuildID are additive — see internal/daemonclient.VersionInfo, which shares
+// this exact shape and is what CLI-side handshake checks decode into.
 type versionResult struct {
 	Version string `json:"version"`
+	Commit  string `json:"commit"`
+	LibHash string `json:"lib_hash"`
+	BuildID string `json:"build_id"`
 }
 
 // handleVersion returns a handler that reads the VERSION file and returns
-// the version string.  yakosRoot is resolved at registration time.
+// the version string plus the build identity (commit, embedded-lib hash,
+// composed build id) used by the CLI↔daemon handshake.  yakosRoot is
+// resolved at registration time.
 func handleVersion(cfg Config) jsonrpc.Handler {
 	return func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		v, err := version.Read(cfg.YakosRoot)
@@ -90,7 +102,12 @@ func handleVersion(cfg Config) jsonrpc.Handler {
 				Message: fmt.Sprintf("version: %v", err),
 			}
 		}
-		return versionResult{Version: v}, nil
+		return versionResult{
+			Version: v,
+			Commit:  buildinfo.Commit,
+			LibHash: buildinfo.LibHash(),
+			BuildID: buildinfo.BuildID(),
+		}, nil
 	}
 }
 

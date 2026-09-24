@@ -1,14 +1,24 @@
-// start_version_check_test.go — unit tests for daemon version-mismatch detection.
+// start_version_check_test.go — unit tests for daemon build-id-mismatch
+// detection.
 //
 // These are pure-function tests for the decision logic extracted as helpers:
 //
-//   - shouldRestartDaemon: given running vs current version → restart bool
-//   - readPIDFileVersion: extracts second line of a two-line pidfile
-//   - queryDaemonVersion: pidfile fallback path (socket unreachable)
+//   - shouldRestartDaemon: given running vs current build id → restart bool
+//   - readPIDFileBuildID: extracts second line of a two-line pidfile
+//   - queryDaemonBuildID: pidfile fallback path (socket unreachable)
 //   - parsePID: handles two-line pidfile format without errors
 //
-// The RPC primary path of queryDaemonVersion is exercised by the
-// internal/serve package's own TestMethod_Version test.
+// The RPC primary path of queryDaemonBuildID is exercised by the
+// internal/serve package's own TestMethod_Version_BuildIdentity test.
+//
+// Renamed from *Version to *BuildID (S-6 daemon handshake,
+// work/current/reports/s6-structural-plan-2026-09-23.md §4.3): the pidfile's
+// second line and the yakos.version RPC's comparison key both moved from
+// internal/version.Read's display string to buildinfo.BuildID(), which
+// distinguishes two binaries built from different commits at the same
+// VERSION file — the exact case that let a stale daemon survive a dev
+// rebuild. The comparison logic these tests exercise (string equality,
+// empty → restart) is unchanged; only the shape of the compared value is.
 //
 // These tests do not fork processes, spawn daemons, or touch real sockets.
 package main
@@ -23,31 +33,42 @@ import (
 
 func TestShouldRestartDaemon_VersionMatch(t *testing.T) {
 	t.Parallel()
-	if shouldRestartDaemon("0.53.0.0 (go)", "0.53.0.0 (go)") {
-		t.Error("shouldRestartDaemon: expected false for matching versions")
+	if shouldRestartDaemon("0.53.0.0+abc123+deadbeef0000", "0.53.0.0+abc123+deadbeef0000") {
+		t.Error("shouldRestartDaemon: expected false for matching build ids")
 	}
 }
 
 func TestShouldRestartDaemon_VersionMismatch(t *testing.T) {
 	t.Parallel()
-	if !shouldRestartDaemon("0.50.0.0 (go)", "0.53.0.0 (go)") {
-		t.Error("shouldRestartDaemon: expected true when running version differs from current")
+	if !shouldRestartDaemon("0.50.0.0+aaaaaaaaaaaa+deadbeef0000", "0.53.0.0+bbbbbbbbbbbb+deadbeef0000") {
+		t.Error("shouldRestartDaemon: expected true when running build id differs from current")
+	}
+}
+
+// TestShouldRestartDaemon_SameVersionDifferentCommit is the v0.54 regression
+// this rename exists to fix: two binaries built from different commits at
+// the same VERSION file must now compare unequal (they didn't when the
+// comparison key was internal/version.Read's display string).
+func TestShouldRestartDaemon_SameVersionDifferentCommit(t *testing.T) {
+	t.Parallel()
+	if !shouldRestartDaemon("0.53.0.0+aaaaaaaaaaaa+deadbeef0000", "0.53.0.0+bbbbbbbbbbbb+deadbeef0000") {
+		t.Error("shouldRestartDaemon: expected true when only the commit component differs (same VERSION)")
 	}
 }
 
 func TestShouldRestartDaemon_EmptyRunningVersion(t *testing.T) {
 	t.Parallel()
-	// Empty running version = unknown (pre-T2 daemon) → must restart.
-	if !shouldRestartDaemon("", "0.53.0.0 (go)") {
-		t.Error("shouldRestartDaemon: expected true when running version is empty (unknown)")
+	// Empty running build id = unknown (pre-handshake daemon) → must restart.
+	if !shouldRestartDaemon("", "0.53.0.0+abc123+deadbeef0000") {
+		t.Error("shouldRestartDaemon: expected true when running build id is empty (unknown)")
 	}
 }
 
 func TestShouldRestartDaemon_BothEmpty(t *testing.T) {
 	t.Parallel()
-	// Both empty: dev build with no version info; treat as mismatch → restart.
+	// Both empty: dev build with no build-id info; treat as mismatch → restart.
 	if !shouldRestartDaemon("", "") {
-		t.Error("shouldRestartDaemon: expected true when both versions are empty")
+		t.Error("shouldRestartDaemon: expected true when both build ids are empty")
 	}
 }
 
@@ -60,101 +81,101 @@ func TestShouldRestartDaemon_SameEmptyVersions(t *testing.T) {
 	}
 }
 
-// ---- readPIDFileVersion ---------------------------------------------------
+// ---- readPIDFileBuildID ---------------------------------------------------
 
-func TestReadPIDFileVersion_TwoLineFormat(t *testing.T) {
+func TestReadPIDFileBuildID_TwoLineFormat(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "daemon.pid")
-	if err := os.WriteFile(path, []byte("12345\n0.53.0.0 (go)\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("12345\n0.53.0.0+abc123+deadbeef0000\n"), 0600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	got := readPIDFileVersion(path)
-	if got != "0.53.0.0 (go)" {
-		t.Errorf("readPIDFileVersion: got %q; want %q", got, "0.53.0.0 (go)")
+	got := readPIDFileBuildID(path)
+	if got != "0.53.0.0+abc123+deadbeef0000" {
+		t.Errorf("readPIDFileBuildID: got %q; want %q", got, "0.53.0.0+abc123+deadbeef0000")
 	}
 }
 
-func TestReadPIDFileVersion_OneLineLegacyFormat(t *testing.T) {
+func TestReadPIDFileBuildID_OneLineLegacyFormat(t *testing.T) {
 	t.Parallel()
-	// Pre-T2 pidfile: only a PID, no version line.
+	// Pre-handshake pidfile: only a PID, no build-id line.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "daemon.pid")
 	if err := os.WriteFile(path, []byte("12345\n"), 0600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	got := readPIDFileVersion(path)
-	// Single line → version is empty string.
+	got := readPIDFileBuildID(path)
+	// Single line → build id is empty string.
 	if got != "" {
-		t.Errorf("readPIDFileVersion one-line: got %q; want empty string", got)
+		t.Errorf("readPIDFileBuildID one-line: got %q; want empty string", got)
 	}
 }
 
-func TestReadPIDFileVersion_AbsentFile(t *testing.T) {
+func TestReadPIDFileBuildID_AbsentFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	got := readPIDFileVersion(filepath.Join(dir, "nonexistent.pid"))
+	got := readPIDFileBuildID(filepath.Join(dir, "nonexistent.pid"))
 	if got != "" {
-		t.Errorf("readPIDFileVersion missing file: got %q; want empty string", got)
+		t.Errorf("readPIDFileBuildID missing file: got %q; want empty string", got)
 	}
 }
 
-func TestReadPIDFileVersion_EmptyVersionLine(t *testing.T) {
+func TestReadPIDFileBuildID_EmptyVersionLine(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "daemon.pid")
-	// Two lines but second is blank (edge case: writePIDFile on dev build with no version).
+	// Two lines but second is blank (edge case: writePIDFile on dev build with no build-id).
 	if err := os.WriteFile(path, []byte("12345\n\n"), 0600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	got := readPIDFileVersion(path)
+	got := readPIDFileBuildID(path)
 	if got != "" {
-		t.Errorf("readPIDFileVersion empty version line: got %q; want empty string", got)
+		t.Errorf("readPIDFileBuildID empty build-id line: got %q; want empty string", got)
 	}
 }
 
-// TestQueryDaemonVersion_PidfileFallback verifies that queryDaemonVersion falls
-// back to the pidfile's second line when the socket is not reachable.
-func TestQueryDaemonVersion_PidfileFallback(t *testing.T) {
+// TestQueryDaemonBuildID_PidfileFallback verifies that queryDaemonBuildID
+// falls back to the pidfile's second line when the socket is not reachable.
+func TestQueryDaemonBuildID_PidfileFallback(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "daemon.pid")
 	sockPath := filepath.Join(dir, "daemon.sock") // non-existent socket
 
-	const wantVer = "0.50.0.0 (go)"
-	if err := os.WriteFile(pidPath, []byte("99999\n"+wantVer+"\n"), 0600); err != nil {
+	const wantBuildID = "0.50.0.0+aaaaaaaaaaaa+deadbeef0000"
+	if err := os.WriteFile(pidPath, []byte("99999\n"+wantBuildID+"\n"), 0600); err != nil {
 		t.Fatalf("write pidfile: %v", err)
 	}
 
-	got := queryDaemonVersion(sockPath, pidPath)
-	if got != wantVer {
-		t.Errorf("queryDaemonVersion fallback: got %q; want %q", got, wantVer)
+	got := queryDaemonBuildID(sockPath, pidPath)
+	if got != wantBuildID {
+		t.Errorf("queryDaemonBuildID fallback: got %q; want %q", got, wantBuildID)
 	}
 }
 
-// TestQueryDaemonVersion_BothUnreachable verifies that queryDaemonVersion
+// TestQueryDaemonBuildID_BothUnreachable verifies that queryDaemonBuildID
 // returns "" when neither RPC nor pidfile is available.
-func TestQueryDaemonVersion_BothUnreachable(t *testing.T) {
+func TestQueryDaemonBuildID_BothUnreachable(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	got := queryDaemonVersion(
+	got := queryDaemonBuildID(
 		filepath.Join(dir, "nonexistent.sock"),
 		filepath.Join(dir, "nonexistent.pid"),
 	)
 	if got != "" {
-		t.Errorf("queryDaemonVersion both missing: got %q; want empty string", got)
+		t.Errorf("queryDaemonBuildID both missing: got %q; want empty string", got)
 	}
 }
 
 // ---- parsePID multi-line format ------------------------------------------
 
 // TestParsePID_TwoLineFormat verifies that parsePID correctly extracts the PID
-// from the new two-line pidfile format without returning an error.
+// from the two-line pidfile format without returning an error.
 func TestParsePID_TwoLineFormat(t *testing.T) {
 	t.Parallel()
-	data := []byte("12345\n0.53.0.0 (go)\n")
+	data := []byte("12345\n0.53.0.0+abc123+deadbeef0000\n")
 	pid, err := parsePID(data)
 	if err != nil {
 		t.Fatalf("parsePID two-line: unexpected error: %v", err)
@@ -165,7 +186,7 @@ func TestParsePID_TwoLineFormat(t *testing.T) {
 }
 
 // TestParsePID_LegacyOneLineFormat verifies backward compatibility: a pidfile
-// with only a PID (no version line) still parses correctly.
+// with only a PID (no build-id line) still parses correctly.
 func TestParsePID_LegacyOneLineFormat(t *testing.T) {
 	t.Parallel()
 	data := []byte("99999\n")

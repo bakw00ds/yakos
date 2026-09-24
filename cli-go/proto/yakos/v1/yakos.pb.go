@@ -182,3 +182,19 @@ type RefreshRunRequest struct {
 type RefreshRunResponse struct {
 	Output string `json:"output,omitempty"`
 }
+
+// ---- Version ------------------------------------------------------------
+
+// VersionRequest is the request for Version.Get. It carries no fields.
+type VersionRequest struct{}
+
+// VersionResponse is the result of Version.Get — the CLI↔daemon build
+// handshake. Shares its field shape with the JSON-RPC yakos.version method
+// and REST GET /v1/version; see internal/daemonclient.VersionInfo and
+// internal/buildinfo.
+type VersionResponse struct {
+	Version string `json:"version,omitempty"`
+	Commit  string `json:"commit,omitempty"`
+	LibHash string `json:"lib_hash,omitempty"`
+	BuildID string `json:"build_id,omitempty"`
+}

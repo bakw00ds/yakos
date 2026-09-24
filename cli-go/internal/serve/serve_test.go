@@ -111,6 +111,55 @@ func TestMethod_Version_BadRoot(t *testing.T) {
 	}
 }
 
+// TestMethod_Version_BuildIdentity asserts yakos.version returns the four
+// build-handshake fields (internal/daemonclient.VersionInfo's shape), with
+// Version kept unchanged (legacy field, checked above) and BuildID composed
+// per internal/buildinfo.BuildID's "<version>+<commit>+<libhash[:12]>" shape.
+func TestMethod_Version_BuildIdentity(t *testing.T) {
+	root := repoRoot(t)
+	cfg := serve.Config{
+		WorkspaceRoot: root,
+		YakosRoot:     root,
+	}
+	client, _ := newTestDaemon(t, cfg)
+
+	raw, err := client.Call(context.Background(), "yakos.version", nil)
+	if err != nil {
+		t.Fatalf("yakos.version: %v", err)
+	}
+
+	var result struct {
+		Version string `json:"version"`
+		Commit  string `json:"commit"`
+		LibHash string `json:"lib_hash"`
+		BuildID string `json:"build_id"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.BuildID == "" {
+		t.Error("build_id should not be empty")
+	}
+	if !strings.Contains(result.BuildID, result.LibHash[:min(12, len(result.LibHash))]) {
+		t.Errorf("build_id %q should contain the lib_hash prefix %q", result.BuildID, result.LibHash)
+	}
+	// Re-querying must return the same build_id: the daemon's build identity
+	// does not change mid-process.
+	raw2, err := client.Call(context.Background(), "yakos.version", nil)
+	if err != nil {
+		t.Fatalf("yakos.version (second call): %v", err)
+	}
+	var result2 struct {
+		BuildID string `json:"build_id"`
+	}
+	if err := json.Unmarshal(raw2, &result2); err != nil {
+		t.Fatalf("unmarshal (second call): %v", err)
+	}
+	if result2.BuildID != result.BuildID {
+		t.Errorf("build_id changed across calls: %q vs %q", result.BuildID, result2.BuildID)
+	}
+}
+
 // ---- yakos.kanban.summary ---------------------------------------------------
 
 func TestMethod_KanbanSummary_NoFile(t *testing.T) {
