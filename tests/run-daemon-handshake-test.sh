@@ -99,9 +99,14 @@ DAEMON_PID=$!
 
 # Poll a real kanban add routed through the daemon (STDOUT carries the
 # success line only once routed — see kanban_add's doc comment) rather than
-# a fixed sleep.
+# a fixed sleep. 150 * 0.2s = a 30s budget (plus each kanban_add's own
+# subprocess overhead on top) — generous margin for a loaded/shared CI
+# runner, where daemon cold-start (first exec of a freshly built ~45MB
+# binary, competing with other concurrent jobs) can take meaningfully
+# longer than on a quiet local machine; 10s was observed to be too tight
+# on GitHub's ubuntu-latest runner.
 ready=0
-for i in $(seq 1 50); do
+for i in $(seq 1 150); do
     if kanban_add "$BIN_A" "readiness-probe-$i"; then :; fi
     if grep -q "kanban: added" "$STDOUT_FILE" 2>/dev/null; then
         ready=1
@@ -113,6 +118,28 @@ if [ "$ready" -eq 1 ]; then
     ok "daemon started from binary A and is reachable"
 else
     fail "daemon from binary A never became reachable"
+    echo "---- daemon.log ----" >&2
+    cat "$TMP/daemon.log" >&2
+    echo "yakos daemon-handshake: $PASS passed, $FAIL failed"
+    exit 1
+fi
+
+# PIDFILE: derived from the daemon's own startup banner ("yakos serve:
+# socket at <path>", cmd_serve.go) rather than recomputed independently —
+# internal/jsonrpc.PIDPath/SocketPath hash the workspace root with no
+# symlink resolution or case-folding rules a shell script can cheaply
+# reproduce byte-for-byte (macOS's $TMPDIR going through /var ->
+# /private/var, and the darwin/windows-only lowercasing step in
+# workspaceHash, both bit us here in earlier iterations of this script).
+# Reading it back from the process that actually computed it sidesteps the
+# whole class of parity bugs. WORKSPACE never changes for the rest of this
+# script, so this same path stays valid across the restart in step 3 below
+# (the restart's fresh daemon binds the *same* socket/pidfile pair).
+DAEMON_SOCKET_LINE=$(grep "yakos serve: socket at " "$TMP/daemon.log" | head -1)
+DAEMON_SOCKET_PATH=${DAEMON_SOCKET_LINE#yakos serve: socket at }
+PIDFILE="${DAEMON_SOCKET_PATH%.sock}.pid"
+if [ -z "$DAEMON_SOCKET_PATH" ] || [ ! -f "$PIDFILE" ]; then
+    fail "could not derive pidfile path from daemon.log's startup banner"
     echo "---- daemon.log ----" >&2
     cat "$TMP/daemon.log" >&2
     echo "yakos daemon-handshake: $PASS passed, $FAIL failed"
@@ -188,9 +215,11 @@ else
 fi
 
 # The daemon that answers now should be a fresh process started by B's
-# spawnDaemonFn — find its pidfile and confirm the build-id line reflects
-# binary B, then swap DAEMON_PID so cleanup signals the right process.
-PIDFILE=$(find "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/yakos" -name '*.pid' 2>/dev/null | head -1)
+# spawnDaemonFn. WORKSPACE never changes, so PIDFILE (derived above from
+# binary A's own startup banner) is still the right path — the restart
+# writes a fresh PID/build-id into the exact same file. Confirm the
+# build-id line now reflects binary B, then swap DAEMON_PID so cleanup
+# signals the right (post-restart) process.
 if [ -n "$PIDFILE" ] && [ -f "$PIDFILE" ]; then
     NEW_PID=$(head -1 "$PIDFILE" 2>/dev/null || true)
     BUILD_LINE=$(sed -n '2p' "$PIDFILE" 2>/dev/null || true)
