@@ -7,25 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+## [0.58.0.0] — 2026-09-24
 
-- **BREAKING: `yakos.refresh`'s wire field renamed `dry_run` → `apply`
-  across all four transports** (JSON-RPC, gRPC, REST, MCP) as part of
-  flipping the tool's default from apply-by-default to dry-run-by-default
-  (round-1 daemon security review M2/R5). An existing client that sends
-  `{"dry_run": true}` expecting a safe, report-only run is not recognized
-  by the new field name and will instead get the new **safe** default
-  (report-only, since an unrecognized field is ignored and `apply`
-  defaults to `false`) — the failure mode is "no write happens", not "an
-  unexpected write happens". A client that wants to actually apply changes
-  must be updated to send `{"apply": true}`. The CLI (`yakos refresh`) is
-  unaffected — it does not go through this wire field and keeps its own
-  `--dry-run`-opt-in, apply-by-default behavior, which is a deliberate,
-  documented asymmetry: a remote tool call defaults to the safer option; a
-  local operator command does not.
+### Security
+
+- **Hooks hardened against traversal, notebook-edit bypass, and fail-open
+  validation** (S-1): `path-allowlist.sh` now lexically normalizes paths
+  and blocks residual `..`, absolute paths outside the project root, and
+  any target whose resolved real path escapes the root; both blocking
+  hooks now gate on `NotebookEdit` (previously unguarded, letting a
+  notebook edit skip path/secret checks entirely); hooks that call
+  `ho_block` now fail **closed** (`HOOK_FAIL_CLOSED=1`, exit 2) on a
+  missing `jq`, empty stdin, or malformed JSON instead of silently
+  allowing the write through, with an explicit emergency-recovery hatch
+  (`YAKOS_HOOKS_FAIL_OPEN=1` or a scoped `hook-bypass.md` entry); the PEM
+  secret pattern now actually fires (was a no-op regex) and `.ENV`/`*.PEM`
+  case-variant bypasses are closed. Hook fixture coverage grew from 22 to
+  70 cases.
+- **Daemon transports and dispatch hardened** (S-2): the MCP
+  streamable-HTTP transport required no authentication at all (any local
+  process could drive it); the terminal owner lock wasn't bound until
+  first use, letting a second process race to claim someone else's
+  terminal; kanban writes went through without the `RoleDispatch`
+  permission check other write paths already enforced; a `--` argv
+  sentinel now stops flag injection into chat dispatch; every exec path
+  (including `YAKOS_DISPATCH_ENV_PASSTHROUGH`) now passes an explicit
+  allowlisted child environment instead of the parent's; project-path
+  validation was tightened; the dispatch log is now written `0600`.
+- **Flows output-injection scanning** (S-3): upstream node output is now
+  wrapped in a per-run, nonce-delimited `<untrusted-node-output>` block
+  before being spliced into a downstream prompt (closing tags inside the
+  content are neutralized; substitution is single-pass so a forged nonce
+  can't be smuggled through a second-order `${nodes.*.output}`
+  reference), and the output-injection scan now runs as a **blocking**
+  gate on every workflow node — previously the scan existed but never
+  covered this path, and nodes ran under `bypassPermissions`.
+- **Flows run ownership and MCP transport hardening** (K-82): daemon
+  handlers for reading a run, reading node output, and cancelling a run
+  performed no ownership check at all, and starting/resuming a run
+  attributed it to a self-asserted request-body `operator_id` instead of
+  the server-derived identity — any operator with `RoleFlowsRun` could
+  read another operator's raw agent stdout or cancel their in-flight run
+  by guessing a run ID. Every run's owner is now resolved from the
+  server-side identity only (never the body field), and every
+  read/cancel/resume-of-a-prior-run is gated against it. The
+  streamable-HTTP MCP transport gained an Origin/Host check (DNS-rebinding
+  defense) and a `ReadHeaderTimeout` (pre-auth slowloris). `yakos.term.list`
+  is now scoped to the calling operator, matching the REST endpoint's
+  existing scoping. `validateProjectPath`'s denylist had two bypasses —
+  the already-resolved spelling of a banned alias (e.g. macOS's
+  `/private/etc`, the same directory as `/etc`) and `$HOME` itself, never
+  in the denylist — both closed via a symlink-closed check computed once
+  at init.
+- **A Windows-only no-op in a dispatch security guard** (S-5): the
+  broad-scope-dispatch check relied on POSIX-only path literals and was a
+  complete no-op on Windows; fixed as part of getting Windows CI green.
 
 ### Fixed
 
+- **`yakos auth status` and the runtime-adapter fixtures no longer hang
+  past 2026-09-01`** — the `gemini` shim's removal-date guard called
+  `ct_die` from a *sourced* function, so its `exit` killed the calling
+  process outright once the hardcoded removal date passed, instead of
+  just failing that one call. The shim now returns non-zero per verb
+  (`YAKOS_GEMINI_SHIM_FORCE=1` still forces it through to `agy`).
 - **`govulncheck ./...` now reports zero reachable findings** (was 35) —
   bumped the Go toolchain directive to `go1.25.14` (clears 32 Go standard
   library CVEs fixed across 1.25.2–1.25.13) and `google.golang.org/grpc`
@@ -57,6 +102,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a configuration file for version '4.36.3', but running version
   '4.36.2'", which is what dependabot PRs #251/#252 hit individually).
   Supersedes dependabot PRs #246, #247, #250, #251, #252.
+- **`hook-parity.yml`'s three `TestHookParity_*` CI steps passed
+  vacuously** — they ran `go test -run` against test names that never
+  existed (`[no tests to run]`, exit 0 on every run). Repointed at each
+  package's real 14–27 Go-native tests and added a guard that fails the
+  job outright if zero tests match in future.
+- **Model-routing eval silently "passed" without ever dispatching an
+  agent** — `realDispatch`/`realJudge` shelled out to a `lib/dispatch.sh`
+  path that never existed (the real script lives at
+  `cli/lib/dispatch.sh`); the exec error was discarded, so every eval run
+  scored as if dispatch had happened. Fixed the path and added
+  `ErrDispatchUnavailable` so a broken harness now aborts loudly.
+  Two cross-package invariant tests that compared a hardcoded literal (or
+  never actually exercised the code they claimed to guard) were rewired
+  to share one real source of truth with the runtime package.
+- **`go test` on `windows-latest` green again** — fixed a wrapped-error
+  `errors.Is`-vs-`==` bug in a PTY-skip test helper, a Windows
+  hardlink-to-running-binary cleanup limitation, and a POSIX-exec-bit
+  assumption that doesn't hold on Windows.
+
+### Changed
+
+- **BREAKING: `yakos.refresh`'s wire field renamed `dry_run` → `apply`
+  across all four transports** (JSON-RPC, gRPC, REST, MCP) as part of
+  flipping the tool's default from apply-by-default to dry-run-by-default
+  (round-1 daemon security review M2/R5). An existing client that sends
+  `{"dry_run": true}` expecting a safe, report-only run is not recognized
+  by the new field name and will instead get the new **safe** default
+  (report-only, since an unrecognized field is ignored and `apply`
+  defaults to `false`) — the failure mode is "no write happens", not "an
+  unexpected write happens". A client that wants to actually apply changes
+  must be updated to send `{"apply": true}`. The CLI (`yakos refresh`) is
+  unaffected — it does not go through this wire field and keeps its own
+  `--dry-run`-opt-in, apply-by-default behavior, which is a deliberate,
+  documented asymmetry: a remote tool call defaults to the safer option; a
+  local operator command does not. `lib/skills/dependency-update/SKILL.md`
+  updated to stop conflating the CLI's and the MCP tool's defaults.
+- **BREAKING: the daemon no longer falls back to `/tmp` for its state
+  directory** — a writable, project-scoped state dir is now required at
+  startup; the daemon refuses to start rather than run against a
+  world-writable fallback location.
+- **`soul approve`/`reject` and `skill candidates --review` now exit
+  non-zero on failure** instead of printing an advisory and exiting 0 —
+  both are the operator gates `rule:retrospective-discipline` depends on.
+- **`init --multi-dev` (and `quickstart --multi-dev`) no longer silently
+  no-op** — the base project scaffold was written but the multi-dev setup
+  step failed silently; it now fails the command visibly.
+- **`cmd/yakos/main.go` split into 12 per-domain files** (S-6 B1,
+  `cmd_<domain>.go`), shrinking `main.go` from 7,855 to 323 lines. Purely
+  structural — verified behavior-identical via an empty `go tool nm`
+  symbol-table diff and an empty help-corpus diff across all 45
+  subcommands.
+- **BREAKING: the CLI now refuses to talk to a daemon built from a
+  different commit/lib content** — every CLI→daemon connect site now
+  checks a build identity (`<version>+<commit>+<lib-hash>`) via a new
+  handshake and, on mismatch, exits 1 with an explanation instead of
+  silently talking to a stale daemon. Opt in to an automatic restart with
+  `yakos events --restart-stale-daemon` or `YAKOS_RESTART_STALE_DAEMON=1`;
+  otherwise, stop the stale daemon with `yakos serve stop` and re-run.
+
+### Added
+
+- **`yakos hook run|list|mode`** (S-6 A-1, experimental) — a new,
+  previously-unwired Go hooks entrypoint, backed by new
+  `internal/hooks/hookio` (decodes Claude Code's native hook stdin JSON),
+  `internal/hooks/hooklog` (NDJSON writer, log-byte-compatible with the
+  bash hooks' `ho_log`), and `internal/hooks/registry` (the canonical list
+  of all 22 registered hooks). A new dual-run parity harness
+  (`tests/run-hook-parity.sh`) compares bash vs. Go output across the
+  fixture corpus. **Bash remains the shipped default** — nothing in
+  `settings.template.json` or `refresh` changes; this is groundwork for a
+  future opt-in switch.
+- **Five hooks reach 100% bash-vs-Go parity** (S-6 A-2a, experimental):
+  `cycle-counter`, `mailbox-mirror`, `session-end-check`,
+  `task-dependency-gate`, `team-lifecycle`, plus large partial progress on
+  `secret-scan` (18/23 fixtures, two previously-missing secret patterns
+  and NotebookEdit support added to the Go port) and `budget-guard`/
+  `task-complete-dispatch` (log-field fixes). Still opt-in only; no
+  shipped-behavior change.
+- **`internal/cliflag`**, a declarative CLI flag parser, plus a
+  help-vs-parser regression test that diffs each command's declared flags
+  against its own `--help` text (S-6 B2) — this caught and fixed three
+  real, pre-existing drifts: `validate`'s `--strict`/`-s` and
+  `dispatch`'s `--allow-root` were undocumented, and `workflow` had no
+  help text at all.
+- **CLI↔daemon build handshake** — `yakos.version` on all three
+  transports (JSON-RPC, REST, and a new gRPC `Version` service) now
+  reports `commit` and `lib_hash` alongside `version`; every daemon
+  response carries an `X-Yakos-Build` header. See the breaking behavior
+  change above.
+
+### Known issues / follow-ups
+
+Tracked on the project kanban for future work:
+
+- **K-81** — Hooks follow-ups from S-1: `refresh`'s hook-sync walk, a
+  `plan-quality-gate.sh` fail-closed split, and a fixture harness for
+  per-domain validators.
+- **K-83** — Flows scan follow-ups from S-3: scan-window vs. engine-tail
+  mismatch, hook-script integrity check, pattern-set gaps, per-node
+  opt-out, cross-node split-payload evasion.
+- **K-86** — `validateProjectPath` follow-up: replace string denylist
+  matching with `os.SameFile` for case variants and macOS firmlinks; plus
+  remaining S-2 review deferrals.
+- **K-87** — S-6 structural follow-ups: hooks A-2b (remaining fixtures +
+  exit-code divergences), A-3 (`refresh --hooks-impl go|hybrid` switch),
+  and the rest of the B2 cliflag conversions.
+- **K-88** — Flaky tests: an `internal/interactive` SDK-sidecar startup
+  race and `internal/dispatch` Windows flakes.
+- **K-89** — `cycle-counter.sh`'s `auto_dispatch: false` setting is never
+  honored (a `jq` `//` bug treats `false` as null), so retro auto-dispatch
+  can't actually be disabled via settings.
+- **K-90** — `team-lifecycle`'s kanban auto-move drops a task that is the
+  literal last line of `kanban.md` with no trailing content.
 
 ## [0.57.0.0] — 2026-06-25
 

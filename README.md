@@ -5,7 +5,7 @@ ships a roster of specialist agents, audit-first hooks, kanban +
 retrospectives, and per-project audit trails across runtimes.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.57.0.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.58.0.0-orange.svg)](CHANGELOG.md)
 [![Stability: alpha](https://img.shields.io/badge/stability-alpha-red.svg)](#status)
 
 > Not affiliated with Anthropic, OpenAI, or Google.
@@ -128,7 +128,7 @@ yakos/
 
 ## Status
 
-**v0.57.0.0** — alpha, pre-1.0. CLI commands and `.yakos.yml` schema are
+**v0.58.0.0** — alpha, pre-1.0. CLI commands and `.yakos.yml` schema are
 stable within minor versions. See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
