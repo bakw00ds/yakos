@@ -1,7 +1,9 @@
 package refresh
 
 import (
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -822,6 +824,274 @@ func TestSyncHooks_LegacyDeduplicatesTopLevel(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dst, "legacy")); !os.IsNotExist(err) {
 		t.Errorf("legacy/ subdir was created in dst (should not exist)")
 	}
+}
+
+// ---- CollectProjects self-sweep exclusion (K-91a) --------------------------
+
+// writeYakosWiredSettings writes a minimal .claude/settings.json under dir
+// that satisfies CollectProjects' "looks yakos-wired" scan criterion (must
+// contain the literal substring "scripts/hooks/").
+func writeYakosWiredSettings(t *testing.T, dir string) {
+	t.Helper()
+	claudeDir := filepath.Join(dir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := `{"hooks": {"PreToolUse": [{"hooks": [{"command": "scripts/hooks/path-allowlist.sh"}]}]}}`
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCollectProjectsExcluding_ExcludesFrameworkRoot is the K-91a regression
+// test: a fake HOME containing both a consumer project and the framework's
+// own repo (both yakos-wired under ~/github/) must, when yakosRoot is
+// passed, collect only the consumer — never the framework repo itself. This
+// is the exact self-sweep mechanism from
+// work/current/reports/scripts-hooks-drift-diag-2026-09-23.md: the
+// framework's own .claude/settings.json legitimately contains
+// "scripts/hooks/", so without exclusion it is indistinguishable from any
+// consumer project.
+//
+// Mutation test: revert the isFrameworkSelf check (e.g. make add() always
+// append) and this test fails, because the framework root then appears in
+// the result alongside the consumer.
+func TestCollectProjectsExcluding_ExcludesFrameworkRoot(t *testing.T) {
+	home := t.TempDir()
+	ghRoot := filepath.Join(home, "github")
+
+	consumer := filepath.Join(ghRoot, "consumer-project")
+	framework := filepath.Join(ghRoot, "yakOS")
+	if err := os.MkdirAll(consumer, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(framework, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeYakosWiredSettings(t, consumer)
+	writeYakosWiredSettings(t, framework)
+
+	got := CollectProjectsExcluding(home, framework)
+
+	if len(got) != 1 || got[0] != consumer {
+		t.Fatalf("expected exactly [%s]; got %v", consumer, got)
+	}
+	for _, p := range got {
+		if p == framework {
+			t.Fatalf("framework root %s leaked into CollectProjectsExcluding result: %v", framework, got)
+		}
+	}
+}
+
+// TestCollectProjectsExcluding_EmptyYakosRootDisablesExclusion verifies the
+// documented opt-out: yakosRoot="" must reproduce the historical (pre-K-91a)
+// behavior of including every yakos-wired project, since some callers
+// legitimately have no resolved YakosRoot yet.
+func TestCollectProjectsExcluding_EmptyYakosRootDisablesExclusion(t *testing.T) {
+	home := t.TempDir()
+	ghRoot := filepath.Join(home, "github")
+
+	a := filepath.Join(ghRoot, "proj-a")
+	b := filepath.Join(ghRoot, "proj-b")
+	if err := os.MkdirAll(a, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(b, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeYakosWiredSettings(t, a)
+	writeYakosWiredSettings(t, b)
+
+	got := CollectProjectsExcluding(home, "")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 projects with exclusion disabled; got %v", got)
+	}
+}
+
+// TestCollectProjects_UsesEnvYakosRoot verifies that the exported
+// CollectProjects (the function every existing caller, including the
+// bash-parity `yakos refresh --all` command, already calls) self-excludes
+// using $YAKOS_ROOT from the environment — the reproducible trigger the
+// incident diagnosis identified — with zero call-site changes required.
+func TestCollectProjects_UsesEnvYakosRoot(t *testing.T) {
+	home := t.TempDir()
+	ghRoot := filepath.Join(home, "github")
+
+	consumer := filepath.Join(ghRoot, "consumer-project")
+	framework := filepath.Join(ghRoot, "yakOS")
+	if err := os.MkdirAll(consumer, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(framework, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeYakosWiredSettings(t, consumer)
+	writeYakosWiredSettings(t, framework)
+
+	t.Setenv("YAKOS_ROOT", framework)
+
+	got := CollectProjects(home)
+	if len(got) != 1 || got[0] != consumer {
+		t.Fatalf("expected exactly [%s] with YAKOS_ROOT=%s; got %v", consumer, framework, got)
+	}
+}
+
+// TestCollectProjectsExcluding_ExcludesWorktree verifies the worktree half
+// of K-91a: a git worktree of the framework repo, deployed under
+// ~/github/<name> as its own yakos-wired-looking project, must also be
+// excluded — it is not a distinct consumer project, it's the same repo
+// checked out twice. Exercises the git-common-dir comparison path in
+// isFrameworkSelf (the os.SameFile-on-toplevel check alone would not catch
+// this, since a worktree's toplevel is a different directory from the main
+// checkout's).
+func TestCollectProjectsExcluding_ExcludesWorktree(t *testing.T) {
+	if _, err := runGit("", "--version"); err != nil {
+		t.Skip("git not available")
+	}
+
+	home := t.TempDir()
+	ghRoot := filepath.Join(home, "github")
+	if err := os.MkdirAll(ghRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	framework := filepath.Join(ghRoot, "yakOS")
+	if err := os.MkdirAll(framework, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runGit(framework, "init", "-q"); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if out, err := runGit(framework, "config", "user.email", "test@example.com"); err != nil {
+		t.Fatalf("git config email: %v\n%s", out, err)
+	}
+	if out, err := runGit(framework, "config", "user.name", "test"); err != nil {
+		t.Fatalf("git config name: %v\n%s", out, err)
+	}
+	if err := os.WriteFile(filepath.Join(framework, "README.md"), []byte("root\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runGit(framework, "add", "README.md"); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	if out, err := runGit(framework, "commit", "-q", "-m", "init"); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+
+	worktree := filepath.Join(ghRoot, "yakOS-wt-test")
+	if out, err := runGit(framework, "worktree", "add", "-q", worktree, "-b", "wt-branch"); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+
+	consumer := filepath.Join(ghRoot, "consumer-project")
+	if err := os.MkdirAll(consumer, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeYakosWiredSettings(t, framework)
+	writeYakosWiredSettings(t, worktree)
+	writeYakosWiredSettings(t, consumer)
+
+	got := CollectProjectsExcluding(home, framework)
+
+	if len(got) != 1 || got[0] != consumer {
+		t.Fatalf("expected exactly [%s] (framework root AND its worktree excluded); got %v", consumer, got)
+	}
+}
+
+// TestRun_RefusesApplyAgainstYakosRootUnderTest is the K-91b regression
+// test: Run must refuse apply=true (DryRun:false) whenever a ProjectPath is
+// YakosRoot itself, while running under `go test` (testing.Testing() is
+// always true in this test binary). This is the safety net for the
+// footgun shape diagnosed in
+// work/current/reports/scripts-hooks-drift-diag-2026-09-23.md §4 — a test
+// that hardcodes the real repo checkout as a write target.
+//
+// Mutation test: comment out the `!cfg.DryRun && testing.Testing()` guard
+// block in Run and this test fails, because Run then proceeds to actually
+// write scripts/hooks/* into the "project" (== YakosRoot) directory instead
+// of returning an error.
+func TestRun_RefusesApplyAgainstYakosRootUnderTest(t *testing.T) {
+	yakosRoot := t.TempDir()
+	// Minimal framework layout so, if the guard failed to fire, Run's write
+	// path would actually have something to copy (making a guard failure
+	// observable as a real file write, not just a silent no-op).
+	hooksSrc := filepath.Join(yakosRoot, "lib", "hooks")
+	if err := os.MkdirAll(hooksSrc, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hooksSrc, "example.sh"), []byte("#!/usr/bin/env bash\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	settingsDir := filepath.Join(yakosRoot, "lib", "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, "settings.template.json"), []byte(`{"hooks":{}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Run(Config{
+		YakosRoot:    yakosRoot,
+		ProjectPaths: []string{yakosRoot}, // the footgun: project == YakosRoot
+		DryRun:       false,               // apply=true
+		Writer:       io.Discard,
+		ErrWriter:    io.Discard,
+	})
+	if err == nil {
+		t.Fatal("expected Run to refuse apply=true against a ProjectPath equal to YakosRoot under go test; got nil error")
+	}
+	if !strings.Contains(err.Error(), "refusing apply=true") {
+		t.Errorf("error should explain the refusal; got: %v", err)
+	}
+
+	// Confirm nothing was actually written into the "project" — the hooks
+	// dir must not have gained a scripts/hooks mirror.
+	if _, statErr := os.Stat(filepath.Join(yakosRoot, "scripts", "hooks")); !os.IsNotExist(statErr) {
+		t.Errorf("scripts/hooks was written into YakosRoot despite the refusal (statErr=%v)", statErr)
+	}
+}
+
+// TestRun_AllowsApplyAgainstYakosRootWhenDryRun verifies the guard is
+// specific to apply=true — a dry-run against a ProjectPath equal to
+// YakosRoot (as several intentionally-safe existing tests do, e.g.
+// internal/serve's TestMethod_RefreshRun_OmittedApplyDoesNotWrite-style
+// patterns) must not be refused.
+func TestRun_AllowsApplyAgainstYakosRootWhenDryRun(t *testing.T) {
+	yakosRoot := t.TempDir()
+	hooksSrc := filepath.Join(yakosRoot, "lib", "hooks")
+	if err := os.MkdirAll(hooksSrc, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settingsDir := filepath.Join(yakosRoot, "lib", "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, "settings.template.json"), []byte(`{"hooks":{}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Run(Config{
+		YakosRoot:    yakosRoot,
+		ProjectPaths: []string{yakosRoot},
+		DryRun:       true,
+		Writer:       io.Discard,
+		ErrWriter:    io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("dry-run against YakosRoot should not be refused; got: %v", err)
+	}
+}
+
+// runGit runs git with args in dir (or the current directory, for
+// version-probing calls where dir is "") and returns combined output.
+func runGit(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 // ---- helpers ----------------------------------------------------------------

@@ -516,7 +516,10 @@ func (s *Server) handleRefreshRun(w http.ResponseWriter, r *http.Request) {
 	// be requested explicitly.
 	var projects []string
 	if req.Scope == "all" {
-		projects = refresh.CollectProjects(os.Getenv("HOME"))
+		// K-91a: exclude the framework's own repo (and any worktree of it)
+		// using the daemon's resolved YakosRoot, not a raw env re-read, so
+		// scope:"all" can never sweep the framework itself.
+		projects = refresh.CollectProjectsExcluding(os.Getenv("HOME"), s.cfg.YakosRoot)
 	}
 	if len(projects) == 0 && s.cfg.WorkspaceRoot != "" {
 		projects = []string{s.cfg.WorkspaceRoot}

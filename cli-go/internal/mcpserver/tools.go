@@ -462,7 +462,10 @@ func handleRefresh(ctx context.Context, cfg Config, args json.RawMessage) ToolsC
 	// an explicit scope:"all" opt-in, mirroring apply's opt-in shape.
 	var projects []string
 	if p.Scope == "all" {
-		projects = refresh.CollectProjects(os.Getenv("HOME"))
+		// K-91a: exclude the framework's own repo (and any worktree of it)
+		// using the daemon's resolved YakosRoot, not a raw env re-read, so
+		// scope:"all" can never sweep the framework itself.
+		projects = refresh.CollectProjectsExcluding(os.Getenv("HOME"), cfg.YakosRoot)
 	}
 	if len(projects) == 0 && cfg.WorkspaceRoot != "" {
 		projects = []string{cfg.WorkspaceRoot}

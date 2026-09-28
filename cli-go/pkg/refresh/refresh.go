@@ -88,3 +88,17 @@ func Run(cfg Config) (*Report, error) {
 func CollectProjects(homeDir string) []string {
 	return internalrefresh.CollectProjects(homeDir)
 }
+
+// CollectProjectsExcluding is CollectProjects, additionally excluding
+// yakosRoot itself and any git worktree of it from the result. Prefer this
+// over CollectProjects whenever the caller already holds a resolved
+// YakosRoot value — it does not depend on the $YAKOS_ROOT environment
+// variable being set or accurate. Pass "" for yakosRoot to disable
+// exclusion (equivalent to CollectProjects with $YAKOS_ROOT unset).
+//
+// Example:
+//
+//	projects := refresh.CollectProjectsExcluding("/home/user", "/home/user/yakos")
+func CollectProjectsExcluding(homeDir, yakosRoot string) []string {
+	return internalrefresh.CollectProjectsExcluding(homeDir, yakosRoot)
+}

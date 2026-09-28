@@ -570,7 +570,10 @@ func handleRefreshRun(cfg Config) jsonrpc.Handler {
 
 		var projects []string
 		if p.Scope == "all" {
-			projects = refresh.CollectProjects(os.Getenv("HOME"))
+			// K-91a: exclude the framework's own repo (and any worktree of
+			// it) using the daemon's resolved YakosRoot, not a raw env
+			// re-read, so scope:"all" can never sweep the framework itself.
+			projects = refresh.CollectProjectsExcluding(os.Getenv("HOME"), cfg.YakosRoot)
 		}
 		if len(projects) == 0 && cfg.WorkspaceRoot != "" {
 			projects = []string{cfg.WorkspaceRoot}
