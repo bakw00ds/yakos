@@ -282,7 +282,7 @@ discovered by the resolver after built-ins
 `changelog-ui-scaffold`, `feedback-scaffold`, `logging-scaffold`,
 `monitor-scaffold`, `plan-quality-eval`.
 
-## Rule inventory (5 always-loaded rules)
+## Rule inventory (6 always-loaded rules)
 
 | Rule | Purpose |
 |---|---|
@@ -290,6 +290,7 @@ discovered by the resolver after built-ins
 | `git-hygiene` | Worktree per concurrent teammate; never `git add -A`; never force-push to main. |
 | `commit-format` | Conventional Commits with project-aware additions. |
 | `pr-conventions` | Branch naming, PR template, review requirements. |
+| `verification-discipline` | Definition of done before a PR opens: mutation-tested regression tests, differential checks for behavior-neutral changes, adversarial cases beyond the fixture corpus, security findings covered call-site by call-site. |
 | `secret-handling` | Path-scoped to `**/.env*` and credential patterns; never commit secrets. |
 
 ## Runtime adapters (3 built-in + plugin model)

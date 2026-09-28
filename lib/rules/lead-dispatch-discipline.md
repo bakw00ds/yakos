@@ -3,6 +3,8 @@ name: lead-dispatch-discipline
 description: The lead orchestrates and synthesizes; specialists do specialist work. Independent dispatches run in parallel.
 references:
   - rule:git-hygiene
+  - rule:verification-discipline
+  - rule:pr-conventions
 ---
 
 # Lead Dispatch Discipline
@@ -48,102 +50,84 @@ agent (framework template or project override) is in charge.
 
 ## Why these four
 
-- **Parallel by default** is a 3-5× speedup on multi-file work.
-  Sequential dispatch through a lead's single thread of attention
-  is the framework's largest waste-of-clock category.
-- **Lead inhabiting specialist roles** produces context-bloat,
-  confused audit trails, and the "lead silently fixed it" class of
-  bug that bypasses every project gate.
-- **Delegating late** — exploring and partially solving a task solo
-  before dispatching — is the same failure as not delegating at all.
-  The specialist roster exists to be used from the start.
+- **Parallel by default** is a 3-5× speedup on multi-file work;
+  sequential dispatch through a lead's single thread of attention is
+  the framework's largest waste-of-clock category.
+- **Lead inhabiting specialist roles** produces context-bloat and the
+  "lead silently fixed it" class of bug that bypasses every gate.
+- **Delegating late** is the same failure as not delegating at all.
 - **Concurrent file-edits without worktree separation** caused
-  `incident:v2.62.4-worktree-collision`. The parallel-dispatch
-  pattern requires the worktree-per-teammate discipline from
-  `rule:git-hygiene`. The two rules pair.
+  `incident:v2.62.4-worktree-collision` — pairs with `rule:git-hygiene`.
 
 ## What this means in practice
 
-When the lead receives a task that can be decomposed into N
-independent specialist tasks, the lead:
-
-1. **Decomposes.** Names the N tasks; sketches the contract
-   between them (what each one needs as input, what each one
-   returns).
-2. **Sets up worktrees** if any of the N will edit files
-   concurrently (`rule:git-hygiene` §Worktree).
-3. **Dispatches all N in parallel** — single tool batch with
-   multiple Agent calls, OR a single shell command running N
-   `yakos dispatch` invocations in parallel (`&` + `wait`, or
-   GNU parallel, or xargs -P).
-4. **Waits, supervises, integrates.** Reads each return; decides
-   if any need a follow-up; synthesizes the result for the
-   operator.
-
-When the lead receives a task that has explicit dependencies
-(architect-then-implementer, contract-then-consumer,
-plan-then-execute), the lead dispatches sequentially with
-explicit hand-offs.
-
-## What this means at session launch
-
-Every yakos-launched session loads this rule into the lead's
-context. `yakos start` prints a one-line reminder to the
-preflight banner ("dispatch in parallel; lead does not do
-specialist work") so the operator sees the discipline before the
-first task arrives.
+N independent tasks: decompose (name each, sketch input/output
+contracts) → set up worktrees for any that edit files concurrently
+(`rule:git-hygiene` §Worktree) → dispatch all N in one tool batch, or
+one shell command running N `yakos dispatch` in parallel (`&` + `wait`,
+GNU parallel, `xargs -P`) → wait, supervise, integrate. Explicit
+dependencies (architect-then-implementer, contract-then-consumer,
+plan-then-execute) dispatch sequentially with explicit hand-offs.
+`yakos start` prints a one-line reminder in the preflight banner so
+the operator sees the discipline before the first task.
 
 ## When it's OK for the lead to do specialist work
 
-Almost never. The exceptions are tightly scoped:
+Almost never. Tightly scoped exceptions: updating coordination
+artifacts the lead owns (`work/current/decisions.md`, `notes/*.md`,
+task-list state — not project source); read-only inspection to inform
+a dispatch decision (`git status`/`log`, `cat`, a read-only build
+sanity check); one-off interactive operator handoffs in chat. None of
+these justify code edits.
 
-- **Updating coordination artifacts** the lead owns:
-  `work/current/decisions.md`, `work/current/notes/*.md`,
-  task-list state. These are not project source; they are the
-  lead's notebook.
-- **Read-only inspection** to inform a dispatch decision:
-  `git status`, `git log`, `cat` on a few files, running a
-  read-only build sanity check. The lead can read; the lead
-  cannot write to project source.
-- **One-off interactive operator handoffs** where the operator
-  is in the loop (the operator asks the lead a question; the
-  lead answers in chat). Doesn't justify code edits.
+This is a discipline document, not a permission system — the hard
+control is the lead-template's tool list (`Edit` removed in v0.5+).
+It doesn't prohibit reading widely to inform dispatch, and it isn't
+runtime-specific: parallelism applies to claude (Agent calls), codex
+(`codex exec` shell-outs), gemini (`gemini -p`), and any plugin runtime.
 
-## What this rule is NOT
+## Loop cadence
 
-- It is not a permission system. It is a discipline document. The
-  hard control is the lead-template's tool list (`Edit` removed
-  in v0.5+). This rule explains the why so future leads (and
-  project lead-template overrides) preserve the spirit.
-- It is not a prohibition on the lead reading widely. Reading
-  widely informs better dispatch decisions; it just doesn't
-  excuse doing the specialist's job.
-- It is not specific to any single runtime. The dispatch
-  parallelism applies to claude (Agent tool calls in parallel),
-  codex (concurrent `codex exec` shell-outs), gemini (concurrent
-  `gemini -p` invocations), and any plugin runtime via `yakos
-  dispatch`.
+- **Dispatch the reviewer the moment a PR is pushed.** Review and CI
+  are independent; don't wait for green checks before starting review.
+- **The lead owns CI watching** (`gh pr checks --watch` in the
+  background) and never leaves an agent parked on a monitor.
+- **One narrow agent per follow-up round**, briefed with the review's
+  finding list — not a fresh full-scope dispatch.
+- **Classify a red job before rerunning it.** Flake evidence = passes
+  on base commit, or the failing package is outside the diff. Rerun
+  only after that check; otherwise dispatch a fix (`rule:verification-
+  discipline`).
+- **Merge on reviewer SHIP + green CI only when the operator has
+  explicitly delegated merging for the session; otherwise hand the PR
+  to the human reviewer** (`rule:pr-conventions`). After merging,
+  rebuild (`make build`), stop the running `yakos serve`, restart it
+  with `YAKOS_IMPL=go` from the workspace, and hard-refresh the
+  console; a stale daemon shadows merged fixes (the v0.58 build-id
+  handshake now refuses a mismatched daemon).
+
+## Session preflight
+
+Before dispatching: `git --version`; `gh auth status` including
+required scopes (`workflow` for `.github/workflows/` changes); `git
+status` clean in the main checkout; `YAKOS_ROOT` unset or equal to the
+cwd's toplevel; no stale worktrees/branches from a prior session; the
+kanban reconciled against actual PR/branch state.
 
 ## Anti-patterns
 
-- **Solo specialist work.** The lead does the specialist's job (edits
-  code, runs linters, writes docs) instead of dispatching the
-  appropriate specialist. The roster exists; use it.
-- **Late dispatch.** The lead explores, partially solves, or drafts
-  output solo, then dispatches only when stuck. Dispatch happens at
-  the start, not as a fallback.
-- **Serial dispatch of independent work.** Dispatching specialists
-  one-at-a-time when their tasks are independent. Use a single
-  parallel batch.
-- **Owning a file a specialist should own.** If a file is in a
-  specialist's domain, the specialist edits it — even if the lead's
-  read confirms what the change should be.
+- **Solo specialist work.** The lead does the specialist's job instead
+  of dispatching. The roster exists; use it.
+- **Late dispatch.** Exploring or drafting output solo, then
+  dispatching only when stuck, instead of from the start.
+- **Serial dispatch of independent work.** One-at-a-time instead of a
+  single parallel batch.
+- **Owning a file a specialist should own** — even when the lead's
+  read already confirms what the change should be.
 
 ## References
 
-- `rule:git-hygiene` (worktree-per-teammate) — pairs with
-  parallel dispatch.
-- `lib/agents/lead-template.md` — the template that codifies this
-  in agent body form.
-- `incident:v2.62.4-worktree-collision` — what happens without
-  the worktree discipline.
+- `rule:git-hygiene` — worktree-per-teammate, pairs with parallel
+  dispatch.
+- `lib/agents/lead-template.md` — codifies this in agent body form.
+- `incident:v2.62.4-worktree-collision` — what happens without it.
