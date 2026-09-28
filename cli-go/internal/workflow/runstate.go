@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -68,6 +69,14 @@ type RunState struct {
 	dirty     bool          `json:"-"` // pending debounced write
 	stopFlush chan struct{} `json:"-"` // closed to stop the debounce goroutine
 	flushDone chan struct{} `json:"-"` // closed when debounce goroutine exits
+
+	// lastPersistErr records the most recent persistNow failure (nil once a
+	// later attempt succeeds). K-88 Windows CI: persistNow's caller used to
+	// discard every error (`_ = rs.persistNow()`), so a run.json that could
+	// never be written looked byte-for-byte identical to a run that simply
+	// hadn't progressed yet — "pending" forever, silently. LastPersistError
+	// lets a caller (engine.run, tests) tell those two states apart.
+	lastPersistErr error `json:"-"`
 }
 
 // newRunState creates an in-memory RunState for the given run.
@@ -92,6 +101,12 @@ func newRunState(runID, workflowName, workflowHash, ownerOpID, runDir string, no
 
 // startDebounce launches a background goroutine that flushes dirty state to
 // disk every ~200ms. Call stopDebounce when the run completes to flush + stop.
+//
+// Every persistNow call's error is recorded via recordPersistErr (never
+// silently discarded) — see lastPersistErr's doc comment and persistNow's
+// retry for why a rename can fail transiently on Windows, and
+// stopDebounce/LastPersistError for how a caller observes a failure that
+// outlives the retry.
 func (rs *RunState) startDebounce(ctx context.Context) {
 	rs.flushDone = make(chan struct{})
 	go func() {
@@ -105,27 +120,57 @@ func (rs *RunState) startDebounce(ctx context.Context) {
 				dirty := rs.dirty
 				rs.mu.Unlock()
 				if dirty {
-					_ = rs.persistNow()
+					rs.recordPersistErr(rs.persistNow())
 				}
 			case <-rs.stopFlush:
 				// Final flush before exiting.
-				_ = rs.persistNow()
+				rs.recordPersistErr(rs.persistNow())
 				return
 			case <-ctx.Done():
-				_ = rs.persistNow()
+				rs.recordPersistErr(rs.persistNow())
 				return
 			}
 		}
 	}()
 }
 
-// stopDebounce stops the debounce goroutine and waits for the final flush to complete.
-func (rs *RunState) stopDebounce() {
+// recordPersistErr updates lastPersistErr with the outcome of the most
+// recent persistNow call (nil clears a prior failure once a later attempt
+// succeeds) and logs a non-nil error loudly. persistNow already retries
+// transient failures internally (see renameWithRetry), so anything that
+// reaches here has already survived persistRenameMaxWait of retrying and is
+// worth a human's attention.
+func (rs *RunState) recordPersistErr(err error) {
+	rs.mu.Lock()
+	rs.lastPersistErr = err
+	rs.mu.Unlock()
+	if err != nil {
+		slog.Error("workflow: persist run.json failed after retry",
+			"run_id", rs.RunID, "err", err)
+	}
+}
+
+// LastPersistError returns the most recent persistNow failure, or nil if
+// the last attempt succeeded. A non-nil result means run.json on disk may
+// not reflect the in-memory RunState's current status — in particular, a
+// run that finished (in memory) but whose FINAL flush failed will look
+// identical to a run still in progress to anything reading run.json from
+// disk, unless it also checks this.
+func (rs *RunState) LastPersistError() error {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.lastPersistErr
+}
+
+// stopDebounce stops the debounce goroutine, waits for the final flush to
+// complete, and returns its outcome (see LastPersistError).
+func (rs *RunState) stopDebounce() error {
 	close(rs.stopFlush)
 	// Wait for the goroutine to complete its final flush.
 	if rs.flushDone != nil {
 		<-rs.flushDone
 	}
+	return rs.LastPersistError()
 }
 
 // markRunStarted transitions the run to running and marks the time.
@@ -249,7 +294,7 @@ func (rs *RunState) writeNodeOutput(nodeID string, output []byte) error {
 	if err := os.WriteFile(tmp, output, 0644); err != nil { //nolint:gosec
 		return fmt.Errorf("workflow: write node stdout tmp: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameWithRetry(tmp, path, persistRenameMaxWait); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("workflow: rename node stdout: %w", err)
 	}
@@ -271,8 +316,67 @@ func (rs *RunState) readNodeOutput(nodeID string) ([]byte, error) {
 	return data, nil
 }
 
+// persistRenameMaxWait bounds how long renameWithRetry keeps retrying a
+// failed rename before giving up.
+//
+// On Windows, os.Rename(tmp, path) maps to MoveFileEx, which fails with a
+// sharing violation if ANY handle to path is currently open without
+// FILE_SHARE_DELETE. Go's own os.Open/os.OpenFile/os.ReadFile do not
+// request that share mode on Windows (see syscall.Open in the Go standard
+// library: sharemode is hardcoded to FILE_SHARE_READ|FILE_SHARE_WRITE
+// only) — so a concurrent reader of run.json (another goroutine in this
+// process, a caller polling the file, or an antivirus/indexer scan) can
+// make a single rename attempt fail transiently. The collision clears as
+// soon as that reader's Open/Read/Close completes, which is normally very
+// fast, so a short bounded retry resolves it without materially delaying a
+// genuine, non-transient failure (which will still exhaust the retry and
+// surface — see recordPersistErr/LastPersistError).
+//
+// K-88 (work/current/reports/h1-flakes-ci-diag-2026-09-28.md): this is the
+// diagnosed root cause of a Windows CI run where run.json stayed "pending"
+// for the entire poll window with zero progress — every persistNow call's
+// rename was silently failing and the error was discarded
+// (`_ = rs.persistNow()`), not just arriving late.
+//
+// A var, not a const, so tests can shrink it temporarily instead of
+// spending multiple real seconds proving the "gives up eventually" path.
+var persistRenameMaxWait = 2 * time.Second
+
+// osRename is os.Rename by default; overridable in tests (package-internal
+// only) to inject deterministic rename failures without needing a real
+// Windows sharing violation.
+var osRename = os.Rename
+
+// renameWithRetry retries osRename(oldpath, newpath) with a short bounded
+// backoff, up to maxWait total, before giving up and returning the last
+// error. See persistRenameMaxWait's doc comment for why a transient
+// failure is expected here, not exceptional.
+func renameWithRetry(oldpath, newpath string, maxWait time.Duration) error {
+	deadline := time.Now().Add(maxWait)
+	backoff := 5 * time.Millisecond
+	const maxBackoff = 100 * time.Millisecond
+	for {
+		err := osRename(oldpath, newpath)
+		if err == nil {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return err
+		}
+		time.Sleep(backoff)
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
 // persistNow writes the current state to run.json atomically (temp-rename).
 // Called by the debounce goroutine and on final flush.
+//
+// The tmp file is fully written and closed (os.WriteFile opens, writes, and
+// closes internally) before renameWithRetry is ever called, so the rename
+// never races its own writer's handle — only a concurrent reader's.
 func (rs *RunState) persistNow() error {
 	rs.mu.Lock()
 	rs.dirty = false
@@ -290,7 +394,7 @@ func (rs *RunState) persistNow() error {
 	if err := os.WriteFile(tmp, data, 0644); err != nil { //nolint:gosec
 		return fmt.Errorf("workflow: write run.json tmp: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameWithRetry(tmp, path, persistRenameMaxWait); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("workflow: rename run.json: %w", err)
 	}
@@ -313,7 +417,7 @@ const maxRunJSONNodes = 512
 // themselves via ValidateID before calling readNodeOutput/writeNodeOutput.
 func LoadRunState(runDir string) (*RunState, error) {
 	path := filepath.Join(runDir, "run.json")
-	f, err := os.Open(path) //nolint:gosec
+	f, err := openRunJSONForRead(path)
 	if err != nil {
 		return nil, fmt.Errorf("workflow: load run.json %s: %w", path, err)
 	}
