@@ -55,8 +55,8 @@ CI watching and dispatches follow-up (`rule:lead-dispatch-discipline`
 
 Each failure mode here was caught only on a second review round, after
 work was reported done: a pinned-table test that missed an argv `--`
-terminator a fuzz pass found in minutes; hooks marked "ready" that
-diverged on 4/5 adversarial cases never in the fixture corpus;
+terminator a fuzz pass found in minutes; 4 of 5 hooks marked "ready"
+that diverged on adversarial cases never in the fixture corpus;
 regression tests that only exercised a seam, found by mutation
 testing; a tautological path test. Catching these before the PR is
 opened is cheaper than a second review round.

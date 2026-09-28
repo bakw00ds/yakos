@@ -4,7 +4,7 @@ description: The lead orchestrates and synthesizes; specialists do specialist wo
 references:
   - rule:git-hygiene
   - rule:verification-discipline
-  - memory:yakos-console-daemon-ops
+  - rule:pr-conventions
 ---
 
 # Lead Dispatch Discipline
@@ -98,8 +98,13 @@ runtime-specific: parallelism applies to claude (Agent calls), codex
   on base commit, or the failing package is outside the diff. Rerun
   only after that check; otherwise dispatch a fix (`rule:verification-
   discipline`).
-- **Merge on SHIP + green.** Rebuild/restart the daemon after merging
-  (`memory:yakos-console-daemon-ops`).
+- **Merge on reviewer SHIP + green CI only when the operator has
+  explicitly delegated merging for the session; otherwise hand the PR
+  to the human reviewer** (`rule:pr-conventions`). After merging,
+  rebuild (`make build`), stop the running `yakos serve`, restart it
+  with `YAKOS_IMPL=go` from the workspace, and hard-refresh the
+  console; a stale daemon shadows merged fixes (the v0.58 build-id
+  handshake now refuses a mismatched daemon).
 
 ## Session preflight
 
