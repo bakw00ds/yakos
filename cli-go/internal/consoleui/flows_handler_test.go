@@ -37,6 +37,22 @@ import (
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
+// flowsPollTimeout bounds every "wait for async run state" poll/select in
+// this file (node-dispatch start, run status, run cancellation).
+//
+// Was a hardcoded 5s at each call site. That is comfortably long on a quiet
+// dev machine but proved too short on GitHub's windows-latest runner under
+// -race + full-module contention (K-88; e.g. run 35931951994's
+// TestFlows_Run_ProductionPath_AttributionIgnoresBodyOperatorID/loopback_stamped_identity
+// failed with the run.json debounce writer still showing "pending" after
+// the full 5s window, even though the node dispatch itself had already
+// fired). This is a deadline-too-short-for-a-slow-runner flake, not an
+// ordering bug: every wait below is already condition-based (polls a real
+// signal/file state), never a blind sleep-and-hope. 15s matches
+// rule:verification-discipline's "Eventually-style poll with deadline >= 10s
+// on CI" guidance while still failing promptly on a genuine hang locally.
+const flowsPollTimeout = 15 * time.Second
+
 // ---- Test helpers ------------------------------------------------------------
 
 // newFlowsTestServer builds a consoleui.Server with a real workDir wired in.
@@ -656,7 +672,7 @@ func runJSONOwner(t *testing.T, workDir, runID string) string {
 func waitForRunStatus(t *testing.T, workDir, runID, want string) []byte {
 	t.Helper()
 	path := filepath.Join(workDir, "workflows", "runs", runID, "run.json")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(flowsPollTimeout)
 	var last []byte
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
@@ -729,7 +745,7 @@ func TestFlows_Run_ProductionPath_AttributionIgnoresBodyOperatorID(t *testing.T)
 
 			select {
 			case <-calls:
-			case <-time.After(5 * time.Second):
+			case <-time.After(flowsPollTimeout):
 				t.Fatal("timed out waiting for node dispatch to start")
 			}
 
@@ -799,7 +815,7 @@ func TestFlows_Resume_ProductionPath_AttributionIgnoresBodyOperatorID(t *testing
 				t.Helper()
 				select {
 				case <-calls:
-				case <-time.After(5 * time.Second):
+				case <-time.After(flowsPollTimeout):
 					t.Fatal("timed out waiting for node dispatch to start")
 				}
 			}
@@ -901,7 +917,7 @@ func TestFlows_Resume_K1_NewRunIDCannotTargetAnotherOperatorsRun(t *testing.T) {
 		t.Helper()
 		select {
 		case <-calls:
-		case <-time.After(5 * time.Second):
+		case <-time.After(flowsPollTimeout):
 			t.Fatal("timed out waiting for node dispatch to start")
 		}
 	}
@@ -1572,7 +1588,7 @@ func TestFlows_Cancel_HappyPath(t *testing.T) {
 	// Wait for the fake node fn to start so we know the run is in-flight.
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(flowsPollTimeout):
 		t.Fatal("timed out waiting for run to start")
 	}
 
@@ -1594,7 +1610,7 @@ func TestFlows_Cancel_HappyPath(t *testing.T) {
 
 	// After cancellation the run goroutine should exit and remove the entry from
 	// activeRuns.  Poll for 404 on a second cancel call (entry removed on exit).
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(flowsPollTimeout)
 	for time.Now().Before(deadline) {
 		resp2 := postCancel(t, ts.URL, runID)
 		body2 := bodyStr(t, resp2)
@@ -1809,7 +1825,7 @@ func TestFlows_Cancel_OwnerScoping(t *testing.T) {
 
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(flowsPollTimeout):
 		t.Fatal("timed out waiting for run to start")
 	}
 
