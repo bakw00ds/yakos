@@ -570,9 +570,19 @@ func handleRefreshRun(cfg Config) jsonrpc.Handler {
 
 		var projects []string
 		if p.Scope == "all" {
-			projects = refresh.CollectProjects(os.Getenv("HOME"))
+			// K-91a: exclude the framework's own repo (and any worktree of
+			// it) using the daemon's resolved YakosRoot, not a raw env
+			// re-read, so scope:"all" can never sweep the framework itself.
+			projects = refresh.CollectProjectsExcluding(os.Getenv("HOME"), cfg.YakosRoot)
 		}
-		if len(projects) == 0 && cfg.WorkspaceRoot != "" {
+		// K-91a review Finding 2: the WorkspaceRoot fallback bypassed
+		// exclusion entirely — a daemon served with WorkspaceRoot equal to
+		// the framework's own repo (e.g. `yakos serve` run from inside a
+		// yakOS dev checkout) whose scope:"all" discovery legitimately
+		// finds zero other registered projects would sweep the framework
+		// repo via this fallback with no check at all. Apply the same
+		// exclusion the discovery path just used.
+		if len(projects) == 0 && cfg.WorkspaceRoot != "" && !refresh.IsFrameworkSelf(cfg.WorkspaceRoot, cfg.YakosRoot) {
 			projects = []string{cfg.WorkspaceRoot}
 		}
 

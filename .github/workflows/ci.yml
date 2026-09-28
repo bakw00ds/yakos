@@ -85,11 +85,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - name: Install jq
-        run: sudo apt-get update -y && sudo apt-get install -y jq
+      - name: Install jq + python3
+        run: sudo apt-get update -y && sudo apt-get install -y jq python3
       - name: Run hook fixture suite
         run: |
           ./tests/run-hook-fixtures.sh
+      - name: Run refresh integration suite
+        run: |
+          ./tests/run-refresh-test.sh
+      # K-91c: fails when any tracked scripts/hooks/** mirror (the
+      # framework's own root mirror, or either refresh-fixture mirror under
+      # tests/fixtures/refresh/ or cli-go/cmd/yakos/testdata/fixtures/
+      # refresh/) has drifted from lib/hooks/, the source of truth. Without
+      # this gate, drift in a tracked-but-generated mirror only surfaces as
+      # a run-refresh-test.sh Test 5 failure that's easy to write off as
+      # flaky rather than "the committed mirror needs regenerating" — see
+      # work/current/reports/scripts-hooks-drift-diag-2026-09-23.md.
+      - name: Check scripts/hooks mirrors are not stale
+        run: |
+          ./tests/check-hook-mirror.sh
 
   e2e:
     name: end-to-end smoke (every subcommand)

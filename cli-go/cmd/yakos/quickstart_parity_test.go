@@ -404,9 +404,33 @@ func resolveQuickstartBinary() string {
 
 // runGoQuickstart runs the Go binary with YAKOS_IMPL=go and the given args.
 // Returns combined stdout+stderr and exit code.
+//
+// BUG FIX (K-91 follow-on, found while verifying this PR's own test suite):
+// this previously set only a "PWD" ENTRY IN extraEnv, never cmd.Dir. PWD is
+// just a convention env var — os.Getwd() and `git rev-parse` both read the
+// real OS cwd via syscall, ignoring it — so the subprocess actually
+// inherited the running `go test` process's own cwd
+// (cli-go/cmd/yakos/, inside this real repo checkout). For
+// TestQuickstart_Binary_NonGit specifically, that made the "non-git cwd"
+// scenario silently run `yakos quickstart` against this real repo instead
+// (which very much IS a git repo), which — unlike the other callers, which
+// either pass --dry-run or --help — proceeds to actually provision a
+// project: every `go test ./cmd/yakos/...` run left a stray, untracked
+// .claude/settings.json (and .claude/path-allowlist.json) at the repo
+// root. Same failure family as the framework self-sweep incident this PR's
+// K-91 fixes address, just via test-harness cwd leakage rather than
+// refresh's own project discovery. cmd.Dir now defaults to a fresh
+// t.TempDir() (never the real repo) and is overridden by extraEnv["PWD"]
+// when a caller supplies one, preserving each existing call site's intent
+// without requiring a signature change.
 func runGoQuickstart(t *testing.T, bin string, args []string, extraEnv map[string]string) (string, int) {
 	t.Helper()
 	cmd := exec.Command(bin, args...) //nolint:gosec
+
+	cmd.Dir = t.TempDir()
+	if pwd, ok := extraEnv["PWD"]; ok && pwd != "" {
+		cmd.Dir = pwd
+	}
 
 	overrideKeys := make(map[string]bool, len(extraEnv)+2)
 	overrideKeys["YAKOS_IMPL"] = true

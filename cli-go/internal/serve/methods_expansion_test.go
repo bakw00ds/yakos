@@ -354,8 +354,20 @@ func TestMethod_RefreshRun_UnknownFieldRejected(t *testing.T) {
 }
 
 func TestMethod_RefreshRun_DryRunReturnsOutput(t *testing.T) {
-	root := repoRoot(t)
-	cfg := serve.Config{WorkspaceRoot: root, YakosRoot: root}
+	// K-91b: WorkspaceRoot is the refresh WRITE target (yakos.refresh.run
+	// scopes to it when apply:true — see methods.go's refreshRunParams doc
+	// comment / R19). This test hardcoded "apply": false below so it was
+	// never actually destructive, but repoRoot(t) as a write target is the
+	// exact footgun flagged in work/current/reports/
+	// scripts-hooks-drift-diag-2026-09-23.md §4: a future edit to this test
+	// that flips apply to true, or a regression in the dry-run default,
+	// would silently start rewriting hook scripts and settings.json in the
+	// real checked-out repo instead of failing loudly. t.TempDir() is never
+	// a write target another test needs to protect. YakosRoot stays
+	// repoRoot(t): it is read-only (the template source for the dry-run
+	// report to compare against — same split TestMethod_RefreshRun_
+	// OmittedApplyDoesNotWrite already uses, a few tests below).
+	cfg := serve.Config{WorkspaceRoot: t.TempDir(), YakosRoot: repoRoot(t)}
 	client, _ := newTestDaemon(t, cfg)
 
 	// apply omitted (round-2 review R5): the field's Go zero value (false)
@@ -413,6 +425,53 @@ func TestMethod_RefreshRun_OmittedApplyDoesNotWrite(t *testing.T) {
 	}
 	if result.Output != "" && !strings.Contains(result.Output, "[DRY RUN]") {
 		t.Errorf("refresh.run with omitted params: output = %q; want a dry-run report ([DRY RUN] marker) — omitting apply must never write (R5 regression)", result.Output)
+	}
+}
+
+// TestMethod_RefreshRun_WorkspaceRootFallbackExcludesFrameworkSelf is the
+// K-91a review Finding 2 regression test
+// (work/current/reports/h1-testinfra-review-2026-09-28.md): the
+// WorkspaceRoot fallback ("scope:all discovery found nothing, so treat
+// WorkspaceRoot itself as the project") bypassed the K-91a self-exclusion
+// check entirely — a daemon served with WorkspaceRoot equal to the
+// framework's own repo (e.g. `yakos serve` run from inside a yakOS dev
+// checkout) could still have that repo swept via this fallback alone, with
+// no check applied to it at all, even though the discovery path a few
+// lines above it is correctly protected.
+//
+// Mutation test: drop the `&& !refresh.IsFrameworkSelf(...)` guard from
+// the fallback condition in methods.go and this test fails, because the
+// framework root then appears as a processed project in the output.
+func TestMethod_RefreshRun_WorkspaceRootFallbackExcludesFrameworkSelf(t *testing.T) {
+	// scope:"all" discovery (refresh.CollectProjectsExcluding) reads
+	// os.Getenv("HOME") directly, not a Config field — sandbox it to an
+	// empty temp dir so this test exercises ONLY the WorkspaceRoot
+	// fallback, not whatever is actually registered under this machine's
+	// real ~/github/ or ~/agent-control/.
+	t.Setenv("HOME", t.TempDir())
+
+	// WorkspaceRoot == YakosRoot is the exact hazardous configuration: a
+	// daemon whose own workspace IS the framework checkout.
+	root := t.TempDir()
+	cfg := serve.Config{WorkspaceRoot: root, YakosRoot: root}
+	client, _ := newTestDaemon(t, cfg)
+
+	raw, err := client.Call(context.Background(), "yakos.refresh.run", map[string]interface{}{"scope": "all", "apply": false})
+	if err != nil {
+		t.Fatalf("refresh.run: %v", err)
+	}
+	var result struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if strings.Contains(result.Output, "project: "+root) {
+		t.Errorf("WorkspaceRoot fallback swept the framework's own repo (WorkspaceRoot == YakosRoot) with no exclusion check applied:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "Summary: 0 project(s) processed") {
+		t.Errorf("expected zero projects processed (WorkspaceRoot excluded, scope:all found nothing else); got:\n%s", result.Output)
 	}
 }
 

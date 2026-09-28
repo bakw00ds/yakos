@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -109,6 +110,128 @@ func TestCapture_WritesGoldenFiles(t *testing.T) {
 		if string(got) != want {
 			t.Errorf("golden file %s: got %q; want %q", path, got, want)
 		}
+	}
+}
+
+// TestCapture_AppliesStdoutTransformBash is the K-92 follow-on regression
+// test: Capture must apply c.StdoutTransformBash before writing the golden
+// stdout file, because Run's CompareGolden path compares the golden against
+// Go output that HAS had StdoutTransformGo applied. Before this fix,
+// Capture wrote bash's raw output, so a Case combining CompareGolden with a
+// transform pair (TestVersionParity's exact shape) could never pass a plain
+// run after -update-goldens: the update always "succeeds" (Capture has no
+// assertions), silently producing a golden the next real comparison fails
+// against.
+//
+// Mutation test: revert Capture to write r.Stdout directly (skip the
+// StdoutTransformBash application) and this test fails, because the golden
+// file then contains the raw, untransformed fake-bash output instead of the
+// normalized form.
+func TestCapture_AppliesStdoutTransformBash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake binary; bash parity is not exercised on Windows")
+	}
+
+	goldenDir := t.TempDir()
+	fakeBash := writeFakeBashBinary(t, "yakos 9.9.9.9\n")
+	t.Setenv("YAKOS_BASH_BINARY", fakeBash)
+
+	c := Case{
+		Name:                "transform-test",
+		Args:                []string{"--version"},
+		GoldenDir:           goldenDir,
+		StdoutTransformBash: extractDigitsDotted,
+	}
+	Capture(t, c)
+
+	base := goldenBase(goldenDir, c.Name)
+	got, err := os.ReadFile(base + ".stdout")
+	if err != nil {
+		t.Fatalf("reading golden: %v", err)
+	}
+	want := "9.9.9.9\n"
+	if string(got) != want {
+		t.Errorf("golden stdout: got %q; want %q (transform was not applied before write)", got, want)
+	}
+}
+
+// extractDigitsDotted is a minimal stand-in for version_parity_test.go's
+// extractVersionNumber, kept local so this package's tests don't import
+// cmd/yakos.
+func extractDigitsDotted(b []byte) []byte {
+	s := strings.TrimSpace(string(b))
+	s = strings.TrimPrefix(s, "yakos ")
+	return []byte(s + "\n")
+}
+
+// writeFakeBashBinary writes an executable shell script to a temp dir that
+// prints stdout unconditionally and exits 0, standing in for the real bash
+// yakos binary in tests that need Capture/invoke to actually exec something.
+func writeFakeBashBinary(t *testing.T, stdout string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fake-bash-yakos")
+	script := "#!/bin/sh\nprintf '%s' " + shellQuote(stdout) + "\nexit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil { //nolint:gosec
+		t.Fatalf("writing fake bash binary: %v", err)
+	}
+	return path
+}
+
+// shellQuote wraps s in single quotes for embedding in a generated shell
+// script, escaping any single quotes it contains.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// TestBashBinary_DefaultResolvesRelativeToSource is the K-92 regression
+// test: bashBinary(), with $YAKOS_BASH_BINARY unset, must resolve to
+// <repo-root>/cli/yakos where <repo-root> is derived from this source
+// file's own location (runtime.Caller), never a hardcoded checkout path.
+// Verified by confirming the resolved repo root actually contains this
+// very source file at the expected relative path — which only holds when
+// the resolution is self-relative, not hardcoded to some other checkout.
+//
+// Mutation test: hardcode bashBinary()'s return value to a fixed path
+// (e.g. "/Users/tw/github/yakOS/cli/yakos") and this test fails whenever
+// run from a differently-located checkout or worktree, because the
+// hardcoded path's directory does not contain this repo's own
+// internal/paritytest/paritytest.go.
+func TestBashBinary_DefaultResolvesRelativeToSource(t *testing.T) {
+	t.Setenv("YAKOS_BASH_BINARY", "") // ensure no override leaks from the environment
+
+	got := bashBinary()
+	if filepath.Base(got) != "yakos" || filepath.Base(filepath.Dir(got)) != "cli" {
+		t.Fatalf("bashBinary() = %q; want a path ending in cli/yakos", got)
+	}
+
+	// Primary assertion: bashBinary() must be derived from
+	// repoRootFromSource() (the same self-relative resolution goBinary()
+	// uses), not a hardcoded literal. This is the assertion that actually
+	// catches a reintroduced hardcoded path — a "does the resolved root
+	// contain this checkout's own files" check alone would NOT catch it
+	// when, as on this machine, a hardcoded canonical checkout happens to
+	// also exist on disk with the same file layout.
+	want := filepath.Join(repoRootFromSource(), "cli", "yakos")
+	if got != want {
+		t.Errorf("bashBinary() = %q; want %q (derived from repoRootFromSource(), not a hardcoded path)", got, want)
+	}
+
+	// Belt-and-suspenders: the resolved repo root must actually contain
+	// this exact source file.
+	repoRoot := filepath.Dir(filepath.Dir(got))
+	selfPath := filepath.Join(repoRoot, "cli-go", "internal", "paritytest", "paritytest.go")
+	if _, err := os.Stat(selfPath); err != nil {
+		t.Errorf("resolved repo root %q does not contain this package's own source (%q): %v — bashBinary() is not resolving relative to this checkout", repoRoot, selfPath, err)
+	}
+}
+
+// TestBashBinary_HonorsEnvOverride verifies $YAKOS_BASH_BINARY still wins
+// over the self-relative default.
+func TestBashBinary_HonorsEnvOverride(t *testing.T) {
+	t.Setenv("YAKOS_BASH_BINARY", "/some/override/path")
+	if got := bashBinary(); got != "/some/override/path" {
+		t.Errorf("bashBinary() = %q; want env override honored", got)
 	}
 }
 

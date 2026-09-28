@@ -420,6 +420,146 @@ func TestRefresh_GoNative_UnknownFlag(t *testing.T) {
 	}
 }
 
+// TestRefresh_GoNative_AllExcludesFrameworkRootWithoutEnvVar is the K-91a
+// review-fix regression test (Finding 1,
+// work/current/reports/h1-testinfra-review-2026-09-28.md): `yakos refresh
+// --all`, run WITHOUT $YAKOS_ROOT exported, must still exclude the
+// framework's own repo from the sweep.
+//
+// runRefresh (cmd_diag.go) resolves its own `yakosRoot` local variable
+// correctly (env override → resolveLibRoot cascade, which falls back to
+// the exe-path-derived root when nothing else is set) and threads it into
+// cfg.YakosRoot for the actual sync — but it previously called the plain
+// refresh.CollectProjects(home) for project DISCOVERY, which does its own,
+// unrelated os.Getenv("YAKOS_ROOT") read internally and silently disables
+// self-exclusion whenever that read comes back empty. An operator running
+// their own locally-built binary without $YAKOS_ROOT exported is exactly
+// that case — not an edge case.
+//
+// Reproduces the reviewer's live repro: copies the built Go binary to
+// <fakeHome>/github/fakerepo/bin/yakos, so main()'s exe-path cascade
+// (`yakosRoot := filepath.Dir(filepath.Dir(exe))`) resolves yakosRoot to
+// <fakeHome>/github/fakerepo with no env var involved at all; registers
+// that same directory as a yakos-wired "project" (a .claude/settings.json
+// containing "scripts/hooks/" — exactly what makes the real framework
+// repo itself discoverable) alongside a genuine consumer project under the
+// same ~/github/; asserts `--all --dry-run` processes only the consumer.
+//
+// Mutation test: revert cmd_diag.go's CollectProjectsExcluding(home,
+// yakosRoot) back to the plain CollectProjects(home) and this test fails,
+// because the fake framework repo then appears in the "Project hook +
+// settings refresh:" output alongside the consumer.
+func TestRefresh_GoNative_AllExcludesFrameworkRootWithoutEnvVar(t *testing.T) {
+	goBinSrc := resolveGoBinary()
+	if _, err := os.Stat(goBinSrc); err != nil {
+		t.Skipf("Go yakos binary not found at %q: %v", goBinSrc, err)
+	}
+
+	home := t.TempDir()
+	ghRoot := filepath.Join(home, "github")
+
+	// The "framework repo": its own binary will live at <fakeRepo>/bin/yakos,
+	// and — just like the real yakOS repo — it is ALSO yakos-wired.
+	fakeRepo := filepath.Join(ghRoot, "fakerepo")
+	if err := os.MkdirAll(filepath.Join(fakeRepo, "lib", "agents"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(fakeRepo, "lib", "hooks"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(fakeRepo, "lib", "settings"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeRepo, "lib", "settings", "settings.template.json"), []byte(`{"hooks":{}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeMinimalWiredSettings(t, fakeRepo)
+
+	// Copy the built binary to <fakeRepo>/bin/yakos so the exe-path cascade
+	// resolves yakosRoot to fakeRepo without $YAKOS_ROOT ever being set —
+	// the exact "any locally-built binary" scenario the reviewer reproduced.
+	fakeBin := filepath.Join(fakeRepo, "bin", "yakos")
+	copyExecutableFileTo(t, goBinSrc, fakeBin)
+
+	// A genuine consumer project alongside it under the same ~/github/.
+	consumer := filepath.Join(ghRoot, "consumer-project")
+	if err := os.MkdirAll(consumer, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeMinimalWiredSettings(t, consumer)
+
+	out, exitCode := runGoRefresh(t, fakeBin, []string{"refresh", "--all", "--dry-run"}, map[string]string{
+		"HOME":       home,
+		"YAKOS_ROOT": "", // explicitly unset — the exact scenario under test
+	})
+	if exitCode != 0 {
+		t.Fatalf("expected exit 0; got %d\noutput:\n%s", exitCode, out)
+	}
+
+	// The binary's own path-resolution (os.Executable / exe-path cascade)
+	// may report a symlink-resolved form of fakeRepo (e.g. macOS's
+	// /var → /private/var aliasing); resolve both sides before comparing
+	// so that doesn't produce a false pass/fail.
+	fakeRepoResolved := resolveTestPath(t, fakeRepo)
+	consumerResolved := resolveTestPath(t, consumer)
+
+	if strings.Contains(out, "project: "+fakeRepoResolved) || strings.Contains(out, "project: "+fakeRepo) {
+		t.Errorf("framework repo %s was NOT excluded from --all without $YAKOS_ROOT exported:\n%s", fakeRepo, out)
+	}
+	if !strings.Contains(out, "project: "+consumerResolved) && !strings.Contains(out, "project: "+consumer) {
+		t.Errorf("consumer project %s should have been processed:\n%s", consumer, out)
+	}
+}
+
+// writeMinimalWiredSettings writes a minimal .claude/settings.json under
+// dir that satisfies CollectProjects' "looks yakos-wired" scan criterion
+// (must contain the literal substring "scripts/hooks/").
+func writeMinimalWiredSettings(t *testing.T, dir string) {
+	t.Helper()
+	claudeDir := filepath.Join(dir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := `{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/cycle-counter.sh"}]}]}}`
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// copyExecutableFileTo copies src to dst (creating parent directories as
+// needed) preserving the executable bit, so dst can itself be exec'd.
+func copyExecutableFileTo(t *testing.T, src, dst string) {
+	t.Helper()
+	data, err := os.ReadFile(src) //nolint:gosec
+	if err != nil {
+		t.Fatalf("read %s: %v", src, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(dst), err)
+	}
+	if err := os.WriteFile(dst, data, 0755); err != nil { //nolint:gosec
+		t.Fatalf("write %s: %v", dst, err)
+	}
+}
+
+// resolveTestPath returns p with all symlinks evaluated, so OS-level path
+// aliasing (e.g. macOS's /tmp, /var → /private/tmp, /private/var) doesn't
+// produce a false mismatch when comparing a path built directly via
+// t.TempDir() against the same path as reported by a subprocess's own
+// path resolution. Falls back to filepath.Abs if the path doesn't exist.
+func resolveTestPath(t *testing.T, p string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		abs, aerr := filepath.Abs(p)
+		if aerr != nil {
+			t.Fatalf("resolveTestPath(%q): %v (abs fallback also failed: %v)", p, err, aerr)
+		}
+		return abs
+	}
+	return resolved
+}
+
 // TestRefresh_GoNative_SummaryLine verifies the summary line format.
 func TestRefresh_GoNative_SummaryLine(t *testing.T) {
 	_, projPath := setupRefreshProject(t, "proj-in-sync")

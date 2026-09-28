@@ -214,8 +214,12 @@ func Run(cfg Config) (*Result, error) {
 	}
 
 	// Per-project refresh (--all flag or always when HEAD changed and AllProjects is true).
+	//
+	// K-91a: exclude the framework repo itself (cfg.YakosRoot is the repo
+	// `update` just git-pulled) from the deployed-projects sweep — it is
+	// not a deployed consumer project.
 	if cfg.AllProjects && !cfg.DryRun {
-		projects := refresh.CollectProjects(home)
+		projects := refresh.CollectProjectsExcluding(home, cfg.YakosRoot)
 		if len(projects) == 0 {
 			_, _ = fmt.Fprintln(cfg.Writer, "No deployed projects found to refresh.")
 		} else {
@@ -234,7 +238,7 @@ func Run(cfg Config) (*Result, error) {
 			result.ProjectsRefreshed = len(projects)
 		}
 	} else if cfg.AllProjects && cfg.DryRun {
-		projects := refresh.CollectProjects(home)
+		projects := refresh.CollectProjectsExcluding(home, cfg.YakosRoot)
 		_, _ = fmt.Fprintf(cfg.Writer, "[dry-run] would refresh %d deployed project(s)\n", len(projects))
 		result.ProjectsRefreshed = len(projects)
 	}

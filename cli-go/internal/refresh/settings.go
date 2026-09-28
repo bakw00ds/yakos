@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // MergeStats records how many hook registrations were added / removed.
@@ -126,10 +127,25 @@ func isValidJSON(data []byte) bool {
 func performMerge(tmpl, deployed map[string]any) (MergeStats, error) {
 	var stats MergeStats
 
-	// Build lookup: (event, command) → matcher in template.
-	// Used by Phase A to detect superseded matchers.
-	type eventCmd struct{ event, command string }
-	templateCmdMatcher := make(map[eventCmd]string)
+	// Build lookup: (event, canonical hook name) → the template's own
+	// {matcher, command} for that hook.
+	//
+	// Keying on the CANONICAL hook name (canonicalHookName — the script's
+	// basename) rather than the exact command string is deliberate: a
+	// deployed registration and the template's registration for the SAME
+	// hook can carry different command-string PREFIXES (an absolute
+	// checkout path like /Users/tw/github/yakOS/scripts/hooks/x.sh vs the
+	// template's ${CLAUDE_PROJECT_DIR}/scripts/hooks/x.sh macro form) while
+	// still being the same hook. Keying Phase A/B on the raw command string
+	// made this prefix drift invisible to "is this hook already
+	// registered?", so `yakos refresh` on a settings.json with the
+	// absolute-path form added the template's macro-form registration
+	// ALONGSIDE the existing one instead of replacing it — every hook in
+	// that settings.json then fired twice. See K-91 follow-up (live
+	// duplicate-registration incident, 2026-09-28).
+	type eventName struct{ event, name string }
+	type desired struct{ matcher, command string }
+	templateDesired := make(map[eventName]desired)
 
 	tmplHooks := hooksMap(tmpl)
 	for event, entries := range tmplHooks {
@@ -139,28 +155,21 @@ func performMerge(tmpl, deployed map[string]any) (MergeStats, error) {
 			for _, rawH := range asList(hooksList(entry)) {
 				h := toMap(rawH)
 				if cmd := commandOf(h); cmd != "" {
-					templateCmdMatcher[eventCmd{event, cmd}] = m
+					if name := canonicalHookName(cmd); name != "" {
+						templateDesired[eventName{event, name}] = desired{matcher: m, command: cmd}
+					}
 				}
 			}
 		}
 	}
 
-	// Build set of (event, matcher, command) triples present in template.
-	type eMC struct{ event, matcher, command string }
-	templateTriples := make(map[eMC]bool)
-	// Also record template entries by event for Phase B.
+	// Also record template entries by event for Phase B (which entry block
+	// — i.e. which matcher grouping — a newly-added hook belongs in).
 	tmplEntriesByEvent := make(map[string][]map[string]any)
 	for event, entries := range tmplHooks {
 		for _, rawEntry := range asList(entries) {
 			entry := toMap(rawEntry)
-			m := matcherOf(entry)
 			tmplEntriesByEvent[event] = append(tmplEntriesByEvent[event], entry)
-			for _, rawH := range asList(hooksList(entry)) {
-				h := toMap(rawH)
-				if cmd := commandOf(h); cmd != "" {
-					templateTriples[eMC{event, m, cmd}] = true
-				}
-			}
 		}
 	}
 
@@ -172,8 +181,11 @@ func performMerge(tmpl, deployed map[string]any) (MergeStats, error) {
 	}
 
 	// ---- Phase A: remove superseded -----------------------------------------
-	// For each hook in deployed whose (event, command) appears in template with
-	// a DIFFERENT matcher, remove that hook.
+	// For each hook in deployed whose canonical (event, name) appears in the
+	// template with a DIFFERENT matcher OR a DIFFERENT exact command string
+	// (path-prefix drift — see the templateDesired comment above), remove
+	// it. Phase B re-adds it in the template's own form, so the net effect
+	// is REPLACE, never duplicate.
 	for event, rawEntries := range deployedHooks {
 		entries := asList(rawEntries)
 		newEntries := make([]any, 0, len(entries))
@@ -184,11 +196,13 @@ func performMerge(tmpl, deployed map[string]any) (MergeStats, error) {
 			for _, rawH := range asList(hooksList(entry)) {
 				h := toMap(rawH)
 				cmd := commandOf(h)
-				key := eventCmd{event, cmd}
 				if cmd != "" {
-					if tmplMatcher, inTemplate := templateCmdMatcher[key]; inTemplate && tmplMatcher != m {
-						stats.Removed++
-						continue
+					name := canonicalHookName(cmd)
+					if d, inTemplate := templateDesired[eventName{event, name}]; inTemplate {
+						if d.matcher != m || d.command != cmd {
+							stats.Removed++
+							continue
+						}
 					}
 				}
 				keptHooks = append(keptHooks, rawH)
@@ -218,24 +232,26 @@ func performMerge(tmpl, deployed map[string]any) (MergeStats, error) {
 	}
 	deployed["hooks"] = deployedHooks
 
-	// Re-compute deployed triples after Phase A so Phase B is accurate.
-	deployedTriplesAfterA := make(map[eMC]bool)
+	// Re-compute which (event, canonical name) hooks are present in deployed
+	// after Phase A, so Phase B knows what's still missing.
+	deployedPresentAfterA := make(map[eventName]bool)
 	for event, rawEntries := range deployedHooks {
 		for _, rawEntry := range asList(rawEntries) {
 			entry := toMap(rawEntry)
-			m := matcherOf(entry)
 			for _, rawH := range asList(hooksList(entry)) {
 				h := toMap(rawH)
 				if cmd := commandOf(h); cmd != "" {
-					deployedTriplesAfterA[eMC{event, m, cmd}] = true
+					if name := canonicalHookName(cmd); name != "" {
+						deployedPresentAfterA[eventName{event, name}] = true
+					}
 				}
 			}
 		}
 	}
 
 	// ---- Phase B: add missing -----------------------------------------------
-	// For each (event, matcher, command) in template not yet in deployed (after
-	// Phase A), add it.
+	// For each (event, canonical name) in template not yet present in
+	// deployed (after Phase A), add the template's own hook entry.
 	for event, tEntries := range tmplEntriesByEvent {
 		for _, tEntry := range tEntries {
 			tMatcher := matcherOf(tEntry)
@@ -243,9 +259,14 @@ func performMerge(tmpl, deployed map[string]any) (MergeStats, error) {
 			for _, rawH := range asList(hooksList(tEntry)) {
 				h := toMap(rawH)
 				cmd := commandOf(h)
-				if cmd != "" && !deployedTriplesAfterA[eMC{event, tMatcher, cmd}] {
+				name := canonicalHookName(cmd)
+				if cmd != "" && name != "" && !deployedPresentAfterA[eventName{event, name}] {
 					missingHooks = append(missingHooks, rawH)
 					stats.Added++
+					// Mark present immediately so a hook appearing in more
+					// than one template entry for the same event is never
+					// added twice.
+					deployedPresentAfterA[eventName{event, name}] = true
 				}
 			}
 			if len(missingHooks) == 0 {
@@ -286,11 +307,36 @@ func performMerge(tmpl, deployed map[string]any) (MergeStats, error) {
 	}
 	deployed["hooks"] = deployedHooks
 
-	// Phase C is implicit: deployed-only triples (project-local hooks like
-	// kanban-stop.sh) are preserved because we only operate on template-keyed
-	// (event, command) pairs.
+	// Phase C is implicit: deployed-only hooks (project-local hooks like
+	// kanban-stop.sh, whose canonical name never appears in
+	// templateDesired for that event) are preserved because Phase A only
+	// removes hooks the template has an entry for.
 
 	return stats, nil
+}
+
+// canonicalHookName extracts a hook registration's identity from its
+// "command" string, independent of the path-PREFIX form used to reach the
+// script (${CLAUDE_PROJECT_DIR}/scripts/hooks/x.sh, an absolute checkout
+// path, a relative path, ...). Two commands that invoke the same script
+// under different prefixes are the SAME hook and must be recognized as
+// such by the merge, or refresh duplicates rather than replaces the
+// registration when the deployed prefix form differs from the template's
+// (see performMerge's templateDesired comment).
+//
+// Hook commands are not expected to carry arguments (every hook script
+// reads its input from stdin), but this takes only the first
+// whitespace-separated field to be robust if one ever does. Basename
+// collisions across different subdirectories under scripts/hooks/ (e.g. a
+// lib/ helper sharing a name with a top-level hook) are not a concern in
+// practice: only top-level hook scripts are ever referenced from a
+// settings.json "command" field.
+func canonicalHookName(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return ""
+	}
+	return filepath.Base(fields[0])
 }
 
 // ---- JSON navigation helpers ------------------------------------------------

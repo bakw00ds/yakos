@@ -18,8 +18,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"testing"
 
 	"github.com/bakw00ds/yakos/internal/deploydrift"
 )
@@ -115,6 +117,28 @@ func Run(cfg Config) (*Report, error) {
 	}
 	if cfg.ErrWriter == nil {
 		cfg.ErrWriter = os.Stderr
+	}
+
+	// SECURITY / K-91b test-safety net: under `go test`, refuse to apply
+	// (write) against a project path that is YakosRoot itself, or a git
+	// worktree of it. This is not a production behavior change — a real
+	// operator passing YakosRoot as one of its own ProjectPaths is not a
+	// scenario refresh needs to support — but it turns a class of test bug
+	// (a test that hardcodes the real repo checkout as WorkspaceRoot /
+	// ProjectPaths, then a later edit or a dry-run-default regression flips
+	// DryRun to false) from "silently rewrites the real checked-out repo's
+	// hook scripts and settings.json" into a loud, immediate failure
+	// instead. See work/current/reports/
+	// scripts-hooks-drift-diag-2026-09-23.md §4 for the incident shape this
+	// guards against (methods_expansion_test.go's
+	// TestMethod_RefreshRun_DryRunReturnsOutput was exactly this pattern,
+	// safe only because it happened to hardcode apply:false).
+	if !cfg.DryRun && testing.Testing() {
+		for _, p := range cfg.ProjectPaths {
+			if isFrameworkSelf(p, cfg.YakosRoot) {
+				return nil, fmt.Errorf("refresh: refusing apply=true against project path %q under go test — it is YakosRoot (%q) or a worktree of it; this looks like a test using the real repo checkout as a write target, use t.TempDir() for the project path instead", p, cfg.YakosRoot)
+			}
+		}
 	}
 
 	home := cfg.HomeDir
@@ -434,12 +458,56 @@ func copyFile(src, dst string) error {
 // CollectProjects discovers all yakos-wired project paths under the canonical
 // search roots (~/agent-control/*/.project-path and ~/github/*/.claude/settings.json).
 // Deduplication is performed by resolved absolute path.
+//
+// SECURITY / K-91a: the framework's own repo checkout commonly lives under
+// ~/github/<name> and its own .claude/settings.json legitimately mentions
+// "scripts/hooks/" (it is itself a yakos-wired project for tooling
+// purposes) — so without exclusion it is indistinguishable from any
+// consumer project and gets swept by scope:"all" refresh, overwriting its
+// tracked scripts/hooks/ mirror from whatever stale $YAKOS_ROOT the caller
+// resolved to. This is the exact mechanism the framework repo self-sweep
+// incident traced back to (see work/current/reports/
+// scripts-hooks-drift-diag-2026-09-23.md §1/§3). CollectProjects therefore
+// self-excludes using $YAKOS_ROOT read from the environment, which is the
+// reproducible trigger the diagnosis identified. Callers that already hold
+// a resolved YakosRoot value (which may differ from the environment, e.g.
+// an explicitly configured daemon) should prefer CollectProjectsExcluding
+// for a precise exclusion instead of relying on this env-var fallback.
 func CollectProjects(home string) []string {
+	return CollectProjectsExcluding(home, os.Getenv("YAKOS_ROOT"))
+}
+
+// CollectProjectsExcluding is CollectProjects, additionally excluding
+// yakosRoot itself and any git worktree of it from the result. Pass "" for
+// yakosRoot to disable exclusion (equivalent to the historical, unsafe
+// CollectProjects behavior — callers should only do this deliberately).
+//
+// Exclusion is by os.SameFile on each candidate's resolved toplevel, never
+// raw string/path comparison, so it is correct on case-insensitive
+// filesystems where two differently-cased paths can alias the same inode
+// (see the YAKOS_ROOT / YAKOS_LIB aliasing note in cache-stability
+// discipline), and by comparing `git rev-parse --git-common-dir` so a
+// worktree of yakosRoot is caught even though its own toplevel is a
+// different directory than yakosRoot's.
+func CollectProjectsExcluding(home, yakosRoot string) []string {
 	seen := make(map[string]bool)
 	var result []string
 
 	acRoot := filepath.Join(home, "agent-control")
 	ghRoot := filepath.Join(home, "github")
+
+	add := func(abs string) {
+		if seen[abs] {
+			return
+		}
+		if isFrameworkSelf(abs, yakosRoot) {
+			_, _ = fmt.Fprintf(os.Stderr, "refresh: skipping %s — it is the framework's own repo (or a worktree of it)\n", abs)
+			seen[abs] = true // don't re-evaluate on a later duplicate encounter
+			return
+		}
+		seen[abs] = true
+		result = append(result, abs)
+	}
 
 	// From ~/agent-control/*/.project-path
 	if entries, err := os.ReadDir(acRoot); err == nil {
@@ -463,10 +531,7 @@ func CollectProjects(home string) []string {
 			if fi, err := os.Stat(abs); err != nil || !fi.IsDir() {
 				continue
 			}
-			if !seen[abs] {
-				seen[abs] = true
-				result = append(result, abs)
-			}
+			add(abs)
 		}
 	}
 
@@ -488,14 +553,100 @@ func CollectProjects(home string) []string {
 			if err != nil {
 				continue
 			}
-			if !seen[abs] {
-				seen[abs] = true
-				result = append(result, abs)
-			}
+			add(abs)
 		}
 	}
 
 	return result
+}
+
+// IsFrameworkSelf reports whether candidate is yakosRoot itself, or a git
+// worktree of it. It is the exported form of the same check
+// CollectProjectsExcluding applies to every filesystem-discovered
+// candidate, for callers that need to test a single already-known path —
+// e.g. a WorkspaceRoot used as a refresh project fallback when scope:"all"
+// discovery finds nothing — rather than filter a discovered list.
+// yakosRoot == "" always returns false (exclusion disabled).
+func IsFrameworkSelf(candidate, yakosRoot string) bool {
+	return isFrameworkSelf(candidate, yakosRoot)
+}
+
+// isFrameworkSelf reports whether candidate is yakosRoot itself, or a git
+// worktree of it. yakosRoot == "" always returns false (exclusion
+// disabled).
+func isFrameworkSelf(candidate, yakosRoot string) bool {
+	if yakosRoot == "" {
+		return false
+	}
+	rootInfo, err := os.Stat(yakosRoot)
+	if err != nil {
+		return false
+	}
+	candInfo, err := os.Stat(candidate)
+	if err != nil {
+		return false
+	}
+	if os.SameFile(rootInfo, candInfo) {
+		return true
+	}
+
+	// Not the same directory by inode — check whether candidate is a git
+	// worktree of yakosRoot by comparing each path's --git-common-dir
+	// (a worktree's --git-common-dir resolves to the SAME physical .git
+	// directory as the main checkout's, from any worktree path).
+	rootCommon, rootOK := gitCommonDir(yakosRoot)
+	candCommon, candOK := gitCommonDir(candidate)
+	if !rootOK || !candOK {
+		return false
+	}
+	rootCommonInfo, err := os.Stat(rootCommon)
+	if err != nil {
+		return false
+	}
+	candCommonInfo, err := os.Stat(candCommon)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(rootCommonInfo, candCommonInfo)
+}
+
+// gitCommonDir resolves `git -C dir rev-parse --git-common-dir` to an
+// absolute path. Returns ok=false if dir is not inside a git repo, or git
+// is unavailable.
+func gitCommonDir(dir string) (path string, ok bool) {
+	return gitRevParsePath(dir, "--git-common-dir")
+}
+
+// gitDir resolves `git -C dir rev-parse --git-dir` to an absolute path.
+// For a git worktree this differs from gitCommonDir (it points at the
+// worktree's own <main-repo>/.git/worktrees/<name> admin directory); for
+// the main checkout the two are identical. Returns ok=false if dir is not
+// inside a git repo, or git is unavailable.
+func gitDir(dir string) (path string, ok bool) {
+	return gitRevParsePath(dir, "--git-dir")
+}
+
+// gitRevParsePath runs `git -C dir rev-parse <flag>` and resolves the
+// result to an absolute path. Returns ok=false if dir is not inside a git
+// repo, or git is unavailable.
+func gitRevParsePath(dir, flag string) (path string, ok bool) {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", flag)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	p := strings.TrimSpace(string(out))
+	if p == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(dir, p)
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", false
+	}
+	return abs, true
 }
 
 // InferProjectFromCWD attempts to determine the project path from the current

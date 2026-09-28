@@ -552,7 +552,17 @@ func runRefresh(yakosRoot string, args []string) {
 	case explicitProject != "":
 		projectPaths = []string{explicitProject}
 	case allProjects:
-		projectPaths = refresh.CollectProjects(home)
+		// K-91a review fix: use the already-resolved yakosRoot (env override
+		// → resolveLibRoot cascade → materialized/embedded fallback, above),
+		// not the plain CollectProjects, which re-reads $YAKOS_ROOT from the
+		// environment on its own and silently disables self-exclusion
+		// whenever the shell running this CLI doesn't have it exported —
+		// even though yakosRoot itself was resolved correctly a few lines
+		// up. Live-reproduced: `yakos refresh --all` without $YAKOS_ROOT
+		// exported swept the framework's own repo. Mirrors the four
+		// daemon-facing handlers (serve/methods.go, grpcserver, restapi,
+		// mcpserver), which already pass their own resolved root this way.
+		projectPaths = refresh.CollectProjectsExcluding(home, yakosRoot)
 		if len(projectPaths) == 0 {
 			_, _ = fmt.Fprintln(os.Stdout, "No yakos-wired projects found under ~/agent-control/ or ~/github/.")
 			_, _ = fmt.Fprintln(os.Stdout, "Run 'yakos init <name> --project <path>' to bootstrap a project.")
