@@ -296,7 +296,16 @@ func (r *runner) checkYakosRootSanity() {
 // filesystem, a wrong-case path fails to resolve well before this is ever
 // called (see filepath.EvalSymlinks above), so no separate
 // case-insensitivity probe is needed.
+//
+// On Windows, resolveLongPath (preflight_windows.go) first expands any NTFS
+// 8.3 short-name components (e.g. RUNNER~1 for a long profile-directory
+// name like runneradmin, which GitHub Actions' windows-latest runner
+// resolves %TEMP% through) to their long-name form — an EqualFold match
+// against the real directory listing below would otherwise fail on a
+// short-name segment, since it isn't a case-fold of the long name, it's a
+// different string. No-op on non-Windows (preflight_unix.go).
 func actualCasePath(path string) (string, bool) {
+	path = resolveLongPath(path)
 	vol := filepath.VolumeName(path)
 	rest := strings.TrimPrefix(path[len(vol):], string(filepath.Separator))
 	if rest == "" {

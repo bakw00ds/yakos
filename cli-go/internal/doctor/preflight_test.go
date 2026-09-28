@@ -394,18 +394,28 @@ func TestActualCasePath_MatchesAndMismatches(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// t.TempDir() itself can traverse an NTFS 8.3 short-name alias on
+	// Windows (GitHub Actions' windows-latest runner resolves %TEMP%
+	// through exactly such an alias — see
+	// work/current/reports/h1-doctor-ci-diag-2026-09-28.md), which
+	// actualCasePath's resolveLongPath step normalizes away. The expected
+	// value has to go through the same normalization, not hard-code the
+	// raw (possibly short-named) target string — resolveLongPath is a
+	// no-op on non-Windows, so this changes nothing off Windows.
+	wantTarget := resolveLongPath(target)
+
 	// Exact case in, exact case out.
 	actual, ok := actualCasePath(target)
-	if !ok || actual != target {
-		t.Errorf("actualCasePath(%q) = (%q, %v); want (%q, true)", target, actual, ok, target)
+	if !ok || actual != wantTarget {
+		t.Errorf("actualCasePath(%q) = (%q, %v); want (%q, true)", target, actual, ok, wantTarget)
 	}
 
 	// Wrong-case input still resolves to the on-disk casing, and differs
 	// from the input — this is what checkYakosRootSanity compares against.
 	wrongCase := filepath.Join(tmp, "yakos")
 	actual2, ok2 := actualCasePath(wrongCase)
-	if !ok2 || actual2 != target {
-		t.Errorf("actualCasePath(%q) = (%q, %v); want (%q, true) [case-insensitive match]", wrongCase, actual2, ok2, target)
+	if !ok2 || actual2 != wantTarget {
+		t.Errorf("actualCasePath(%q) = (%q, %v); want (%q, true) [case-insensitive match]", wrongCase, actual2, ok2, wantTarget)
 	}
 
 	// Nonexistent path fails cleanly.
