@@ -545,7 +545,29 @@ func TestSDKEngine_LastActivity(t *testing.T) {
 // The frame must be valid (parseable) so extractUserTurnText succeeds and the
 // write is actually attempted — the blocking happens in the pipe write, not in
 // the extraction step.
+//
+// This is a bounded retry (fresh engine per attempt), not a single race + a
+// fixed settle sleep — see TestSession_ErrTurnInFlight's doc comment
+// (interactive_test.go) for the full rationale: a start barrier alone proves
+// the goroutines were scheduled, not that the TryLock winner has begun
+// blocking on its write before Close() runs, and there is no exported signal
+// for that. Retrying the whole attempt is what makes this deterministic.
 func TestSDKEngine_ErrTurnInFlight(t *testing.T) {
+	const maxAttempts = 20
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if sdkEngineErrTurnInFlightAttempt(t) {
+			return
+		}
+	}
+	t.Fatalf("expected at least one ErrTurnInFlight across %d attempts; never observed one", maxAttempts)
+}
+
+// sdkEngineErrTurnInFlightAttempt runs one attempt of the race described in
+// TestSDKEngine_ErrTurnInFlight and reports whether at least one of the two
+// concurrent SendUserTurn calls observed ErrTurnInFlight.
+func sdkEngineErrTurnInFlightAttempt(t *testing.T) bool {
+	t.Helper()
+
 	// Sidecar emits ready then never reads stdin.
 	script := `printf '{"v":1,"kind":"ready"}\n'; sleep 30`
 	provider := func() *exec.Cmd {
@@ -572,27 +594,34 @@ func TestSDKEngine_ErrTurnInFlight(t *testing.T) {
 	var wg sync.WaitGroup
 	var results [2]error
 	wg.Add(2)
+
+	// ready is a start barrier that removes the "goroutine never got
+	// scheduled at all" failure mode; the residual settle sleep gives the
+	// TryLock winner a chance to reach its blocking write before Close()
+	// runs. The caller's retry loop is what makes the overall test
+	// deterministic, not this delay's exact duration.
+	var ready sync.WaitGroup
+	ready.Add(2)
 	for i := 0; i < 2; i++ {
 		i := i
 		go func() {
 			defer wg.Done()
+			ready.Done()
 			results[i] = eng.SendUserTurn(bigFrame)
 		}()
 	}
 
-	time.Sleep(80 * time.Millisecond)
+	ready.Wait()
+	time.Sleep(15 * time.Millisecond)
 	eng.Close()
 	wg.Wait()
 
-	inflightCount := 0
 	for _, r := range results {
 		if isErr(r, interactive.ErrTurnInFlight) {
-			inflightCount++
+			return true
 		}
 	}
-	if inflightCount == 0 {
-		t.Errorf("expected at least one ErrTurnInFlight; got: %v, %v", results[0], results[1])
-	}
+	return false
 }
 
 // TestSDKEngine_FindNodeBinary verifies FindNodeBinary returns a non-empty path

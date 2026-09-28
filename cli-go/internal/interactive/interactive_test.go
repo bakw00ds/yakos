@@ -232,6 +232,12 @@ func TestManager_OwnerConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ensure alice: %v", err)
 	}
+	// mgr.Stop() above only halts the idle reaper; it does not close
+	// in-flight sessions (see Stop's doc comment). Without this, conv-a's
+	// fake process and crash-detection goroutine stay alive for the rest of
+	// the package's test binary, adding to the OS/goroutine load that later
+	// tests (e.g. the SDKEngine suite) run under — a contributor to K-88.
+	defer mgr.Close("conv-a")
 
 	// Second Ensure with same convID but different owner: must be ErrOwnerConflict.
 	_, err = mgr.Ensure("conv-a", "bob", params)
@@ -272,6 +278,10 @@ func TestManager_CapExceeded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Ensure: %v", err)
 	}
+	// See TestManager_OwnerConflict: mgr.Stop() does not close in-flight
+	// sessions, so conv-1's fake process would otherwise leak for the rest
+	// of the package's test binary run.
+	defer mgr.Close("conv-1")
 
 	// Second session: cap exceeded.
 	_, err = mgr.Ensure("conv-2", "bob", params)
@@ -405,10 +415,46 @@ func TestSession_CloseIdempotent(t *testing.T) {
 // already in progress returns ErrTurnInFlight.
 //
 // We test ErrTurnInFlight directly: by calling SendUserTurn concurrently and
-// observing that exactly one returns ErrTurnInFlight.  We use a session with a
-// process that never reads stdin (pipe buffer fills up, blocking the write goroutine
-// so turnMu stays locked for the second concurrent call).
+// observing that at least one call returns ErrTurnInFlight. We use a session
+// with a process that never reads stdin (pipe buffer fills up, blocking the
+// write goroutine so turnMu stays locked for the second concurrent call).
+//
+// # Why this is a bounded retry, not a single race + sleep
+//
+// A prior version used a single race attempt preceded by a fixed
+// "time.Sleep(100ms); give goroutines time to race" before calling Close().
+// That is a K-88-class flake (rule:verification-discipline): under CPU
+// contention the goroutines might not be scheduled at all within the sleep
+// window, so Close() wins before either one even reaches turnMu.
+//
+// The fix is NOT simply "wait for both goroutines to start" (tried first,
+// reverted): a start barrier only proves the goroutines were scheduled once
+// — it does not prove the TryLock winner has actually begun blocking on its
+// write before Close() tears the pipe down. If Close() still lands in that
+// narrow window, the winner's write fails fast ("file already closed")
+// instead of blocking, it releases turnMu quickly, and the loser can then
+// acquire an already-free lock — so *neither* call ever observes
+// ErrTurnInFlight, even though the single-flight behavior itself is fine.
+// There is no exported signal for "a write is now blocked on a full pipe",
+// so this loop instead retries the whole race attempt (fresh session each
+// time) until it is actually observed, bounded so a genuine regression
+// still fails promptly.
 func TestSession_ErrTurnInFlight(t *testing.T) {
+	const maxAttempts = 20
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if sessionErrTurnInFlightAttempt(t) {
+			return
+		}
+	}
+	t.Fatalf("expected at least one ErrTurnInFlight across %d attempts; never observed one", maxAttempts)
+}
+
+// sessionErrTurnInFlightAttempt runs one attempt of the race described in
+// TestSession_ErrTurnInFlight's doc comment and reports whether at least one
+// of the two concurrent SendUserTurn calls observed ErrTurnInFlight.
+func sessionErrTurnInFlightAttempt(t *testing.T) bool {
+	t.Helper()
+
 	// Use a script that never reads stdin — its stdin pipe buffer fills up,
 	// causing the write goroutine in SendUserTurn to block while turnMu is held.
 	script := `sleep 10`
@@ -439,33 +485,37 @@ func TestSession_ErrTurnInFlight(t *testing.T) {
 	var wg sync.WaitGroup
 	var results [2]error
 
-	// Launch two concurrent sends.
+	// ready is a start barrier: it removes the "goroutine never got
+	// scheduled at all" failure mode. The residual settle delay below gives
+	// the TryLock winner a chance to actually reach its blocking write
+	// before Close() runs; the outer retry loop is what makes the attempt
+	// as a whole deterministic rather than that delay's exact duration.
+	var ready sync.WaitGroup
+	ready.Add(2)
+
 	wg.Add(2)
 	for i := 0; i < 2; i++ {
 		i := i
 		go func() {
 			defer wg.Done()
+			ready.Done()
 			results[i] = sess.SendUserTurn(bigFrame)
 		}()
 	}
 
-	// Give goroutines time to race.
-	time.Sleep(100 * time.Millisecond)
+	ready.Wait()
+	time.Sleep(15 * time.Millisecond)
 
 	// Close to unblock the sleeping script and the blocked write.
 	sess.Close()
 	wg.Wait()
 
-	// One of the two calls should have returned ErrTurnInFlight.
-	inflightCount := 0
 	for _, r := range results {
 		if errors.Is(r, interactive.ErrTurnInFlight) {
-			inflightCount++
+			return true
 		}
 	}
-	if inflightCount == 0 {
-		t.Errorf("expected at least one ErrTurnInFlight; got results: %v, %v", results[0], results[1])
-	}
+	return false
 }
 
 // TestManager_ActiveCount tracks add/remove correctly.
