@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -127,6 +128,10 @@ func TestCapture_WritesGoldenFiles(t *testing.T) {
 // file then contains the raw, untransformed fake-bash output instead of the
 // normalized form.
 func TestCapture_AppliesStdoutTransformBash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake binary; bash parity is not exercised on Windows")
+	}
+
 	goldenDir := t.TempDir()
 	fakeBash := writeFakeBashBinary(t, "yakos 9.9.9.9\n")
 	t.Setenv("YAKOS_BASH_BINARY", fakeBash)
