@@ -354,8 +354,20 @@ func TestMethod_RefreshRun_UnknownFieldRejected(t *testing.T) {
 }
 
 func TestMethod_RefreshRun_DryRunReturnsOutput(t *testing.T) {
-	root := repoRoot(t)
-	cfg := serve.Config{WorkspaceRoot: root, YakosRoot: root}
+	// K-91b: WorkspaceRoot is the refresh WRITE target (yakos.refresh.run
+	// scopes to it when apply:true — see methods.go's refreshRunParams doc
+	// comment / R19). This test hardcoded "apply": false below so it was
+	// never actually destructive, but repoRoot(t) as a write target is the
+	// exact footgun flagged in work/current/reports/
+	// scripts-hooks-drift-diag-2026-09-23.md §4: a future edit to this test
+	// that flips apply to true, or a regression in the dry-run default,
+	// would silently start rewriting hook scripts and settings.json in the
+	// real checked-out repo instead of failing loudly. t.TempDir() is never
+	// a write target another test needs to protect. YakosRoot stays
+	// repoRoot(t): it is read-only (the template source for the dry-run
+	// report to compare against — same split TestMethod_RefreshRun_
+	// OmittedApplyDoesNotWrite already uses, a few tests below).
+	cfg := serve.Config{WorkspaceRoot: t.TempDir(), YakosRoot: repoRoot(t)}
 	client, _ := newTestDaemon(t, cfg)
 
 	// apply omitted (round-2 review R5): the field's Go zero value (false)

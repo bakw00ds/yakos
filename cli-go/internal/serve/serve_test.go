@@ -64,10 +64,15 @@ func newTestDaemon(t *testing.T, cfg serve.Config) (*jsonrpc.Client, context.Can
 // ---- yakos.version ----------------------------------------------------------
 
 func TestMethod_Version(t *testing.T) {
-	root := repoRoot(t)
+	// K-91b: WorkspaceRoot is a refresh WRITE target elsewhere in this
+	// package's Config; yakos.version never reads it (see
+	// methods.go's handleVersion, which only touches cfg.YakosRoot), so
+	// there's no reason to point it at the real repo checkout. YakosRoot
+	// stays repoRoot(t): it is read-only here (version.Read needs a real
+	// VERSION file / git metadata to report against).
 	cfg := serve.Config{
-		WorkspaceRoot: root,
-		YakosRoot:     root,
+		WorkspaceRoot: t.TempDir(),
+		YakosRoot:     repoRoot(t),
 	}
 	client, _ := newTestDaemon(t, cfg)
 
@@ -116,10 +121,11 @@ func TestMethod_Version_BadRoot(t *testing.T) {
 // Version kept unchanged (legacy field, checked above) and BuildID composed
 // per internal/buildinfo.BuildID's "<version>+<commit>+<libhash[:12]>" shape.
 func TestMethod_Version_BuildIdentity(t *testing.T) {
-	root := repoRoot(t)
+	// K-91b: see TestMethod_Version's comment — WorkspaceRoot is a refresh
+	// write target elsewhere; yakos.version never reads it.
 	cfg := serve.Config{
-		WorkspaceRoot: root,
-		YakosRoot:     root,
+		WorkspaceRoot: t.TempDir(),
+		YakosRoot:     repoRoot(t),
 	}
 	client, _ := newTestDaemon(t, cfg)
 
