@@ -44,6 +44,7 @@ is the definition of done that closes that gap, before a PR is opened.
 
 Per finding: change (`file:function`), test name, mutation proof,
 deferrals with one line each. ≤10-line return summary.
+- Name the exact sha reviewed/verified.
 
 ## Push, report, exit
 

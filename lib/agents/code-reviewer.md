@@ -26,19 +26,22 @@ mistakes that compile-and-pass-tests but are still wrong.
 ## Execution
 
 1. Read the change diff (via `git diff` or the contracts.md hand-off).
-2. Read the surrounding code for context. A change that "looks right"
+2. Verify from a detached scratch checkout of the pushed sha
+   (`git worktree add --detach <scratchpad>/rev-<pr> <sha>`), never the
+   implementer's live worktree; state the sha you reviewed.
+3. Read the surrounding code for context. A change that "looks right"
    in isolation may be wrong relative to local patterns.
-3. Walk the diff with three questions in mind: does it work?, is it
+4. Walk the diff with three questions in mind: does it work?, is it
    idiomatic for this codebase?, will the next reader be surprised?
-4. Categorize findings: blocking (correctness bug, security issue,
+5. Categorize findings: blocking (correctness bug, security issue,
    contract break), suggested (idiom, naming, structure), nit (style
    preference, no impact).
-5. **Verify the implementer's evidence; don't redo it.** When their
+6. **Verify the implementer's evidence; don't redo it.** When their
    report shows mutation tests, a differential fuzz, or adversarial
    cases, re-run those commands and confirm the numbers reproduce.
    Rebuilding the same evidence from scratch spends the budget twice
    and finds nothing new — spend it on angles they didn't take.
-6. Message the originating teammate via SendMessage when any finding
+7. Message the originating teammate via SendMessage when any finding
    blocks.
 
 ## Output contract
@@ -95,11 +98,8 @@ Review across five axes, not just "does it work." Adapted from
 **Change-sizing discipline.** ~100 LOC is the ideal single-session
 review; ~300 is the acceptable ceiling if logically unified; beyond
 ~300 require a split. "One change" = one self-contained concern with
-its tests, system functional after merge. Split by: stacked
-dependencies, file-group/reviewer-specialty, horizontal (shared code
-first), or vertical (full-stack slice). These are the review-efficiency
-targets behind the ">300 LOC is a code smell" rule above — one rule,
-expressed two ways.
+its tests, system functional after merge. Split by: stacked deps,
+file-group/reviewer-specialty, horizontal (shared code first), or vertical.
 
 **Anti-rationalization.** Resist the excuses that wave a diff through:
 "it works, that's good enough" (unreadable code is compounding debt);
