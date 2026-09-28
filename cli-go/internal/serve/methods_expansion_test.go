@@ -428,6 +428,53 @@ func TestMethod_RefreshRun_OmittedApplyDoesNotWrite(t *testing.T) {
 	}
 }
 
+// TestMethod_RefreshRun_WorkspaceRootFallbackExcludesFrameworkSelf is the
+// K-91a review Finding 2 regression test
+// (work/current/reports/h1-testinfra-review-2026-09-28.md): the
+// WorkspaceRoot fallback ("scope:all discovery found nothing, so treat
+// WorkspaceRoot itself as the project") bypassed the K-91a self-exclusion
+// check entirely — a daemon served with WorkspaceRoot equal to the
+// framework's own repo (e.g. `yakos serve` run from inside a yakOS dev
+// checkout) could still have that repo swept via this fallback alone, with
+// no check applied to it at all, even though the discovery path a few
+// lines above it is correctly protected.
+//
+// Mutation test: drop the `&& !refresh.IsFrameworkSelf(...)` guard from
+// the fallback condition in methods.go and this test fails, because the
+// framework root then appears as a processed project in the output.
+func TestMethod_RefreshRun_WorkspaceRootFallbackExcludesFrameworkSelf(t *testing.T) {
+	// scope:"all" discovery (refresh.CollectProjectsExcluding) reads
+	// os.Getenv("HOME") directly, not a Config field — sandbox it to an
+	// empty temp dir so this test exercises ONLY the WorkspaceRoot
+	// fallback, not whatever is actually registered under this machine's
+	// real ~/github/ or ~/agent-control/.
+	t.Setenv("HOME", t.TempDir())
+
+	// WorkspaceRoot == YakosRoot is the exact hazardous configuration: a
+	// daemon whose own workspace IS the framework checkout.
+	root := t.TempDir()
+	cfg := serve.Config{WorkspaceRoot: root, YakosRoot: root}
+	client, _ := newTestDaemon(t, cfg)
+
+	raw, err := client.Call(context.Background(), "yakos.refresh.run", map[string]interface{}{"scope": "all", "apply": false})
+	if err != nil {
+		t.Fatalf("refresh.run: %v", err)
+	}
+	var result struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if strings.Contains(result.Output, "project: "+root) {
+		t.Errorf("WorkspaceRoot fallback swept the framework's own repo (WorkspaceRoot == YakosRoot) with no exclusion check applied:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "Summary: 0 project(s) processed") {
+		t.Errorf("expected zero projects processed (WorkspaceRoot excluded, scope:all found nothing else); got:\n%s", result.Output)
+	}
+}
+
 // ---- yakos.cost.aggregate ----------------------------------------------------
 
 func TestMethod_CostAggregate_EmptyLog(t *testing.T) {

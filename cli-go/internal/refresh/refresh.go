@@ -560,6 +560,17 @@ func CollectProjectsExcluding(home, yakosRoot string) []string {
 	return result
 }
 
+// IsFrameworkSelf reports whether candidate is yakosRoot itself, or a git
+// worktree of it. It is the exported form of the same check
+// CollectProjectsExcluding applies to every filesystem-discovered
+// candidate, for callers that need to test a single already-known path —
+// e.g. a WorkspaceRoot used as a refresh project fallback when scope:"all"
+// discovery finds nothing — rather than filter a discovered list.
+// yakosRoot == "" always returns false (exclusion disabled).
+func IsFrameworkSelf(candidate, yakosRoot string) bool {
+	return isFrameworkSelf(candidate, yakosRoot)
+}
+
 // isFrameworkSelf reports whether candidate is yakosRoot itself, or a git
 // worktree of it. yakosRoot == "" always returns false (exclusion
 // disabled).

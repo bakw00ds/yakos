@@ -467,7 +467,10 @@ func handleRefresh(ctx context.Context, cfg Config, args json.RawMessage) ToolsC
 		// scope:"all" can never sweep the framework itself.
 		projects = refresh.CollectProjectsExcluding(os.Getenv("HOME"), cfg.YakosRoot)
 	}
-	if len(projects) == 0 && cfg.WorkspaceRoot != "" {
+	// K-91a review Finding 2: apply the same exclusion to the WorkspaceRoot
+	// fallback as the discovery path above — see methods.go's identical
+	// comment for the scenario this closes.
+	if len(projects) == 0 && cfg.WorkspaceRoot != "" && !refresh.IsFrameworkSelf(cfg.WorkspaceRoot, cfg.YakosRoot) {
 		projects = []string{cfg.WorkspaceRoot}
 	}
 
