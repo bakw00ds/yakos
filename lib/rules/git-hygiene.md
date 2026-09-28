@@ -20,6 +20,14 @@ Always loaded (no `paths:` field).
   other's working tree mid-edit (incident: v2.62.4 worktree collision).
 - Cleanup happens at archive time — `yakos archive` does NOT clean
   worktrees; that's manual still in v0.1.
+- **Never build an edit or write path from `YAKOS_ROOT`/`YAKOS_LIB`.**
+  A case-insensitive filesystem can alias them to the main checkout;
+  use cwd or `git rev-parse --show-toplevel` instead.
+- Before merging or building in the main checkout, run `git status
+  --porcelain`; if a non-worktree agent left tracked drift, save the
+  diff and restore with `git checkout --`.
+- **Remove a worktree and its branch immediately after its PR
+  merges** — don't let merged worktrees accumulate across sessions.
 
 ## Force push
 

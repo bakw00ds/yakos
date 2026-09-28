@@ -3,6 +3,8 @@ name: lead-dispatch-discipline
 description: The lead orchestrates and synthesizes; specialists do specialist work. Independent dispatches run in parallel.
 references:
   - rule:git-hygiene
+  - rule:verification-discipline
+  - memory:yakos-console-daemon-ops
 ---
 
 # Lead Dispatch Discipline
@@ -123,6 +125,29 @@ Almost never. The exceptions are tightly scoped:
   codex (concurrent `codex exec` shell-outs), gemini (concurrent
   `gemini -p` invocations), and any plugin runtime via `yakos
   dispatch`.
+
+## Loop cadence
+
+- **Dispatch the reviewer the moment a PR is pushed.** Review and CI
+  are independent; don't wait for green checks before starting review.
+- **The lead owns CI watching** (`gh pr checks --watch` in the
+  background) and never leaves an agent parked on a monitor.
+- **One narrow agent per follow-up round**, briefed with the review's
+  finding list — not a fresh full-scope dispatch.
+- **Classify a red job before rerunning it.** Flake evidence = passes
+  on base commit, or the failing package is outside the diff. Rerun
+  only after that check; otherwise dispatch a fix (`rule:verification-
+  discipline`).
+- **Merge on SHIP + green.** Rebuild/restart the daemon after merging
+  (`memory:yakos-console-daemon-ops`).
+
+## Session preflight
+
+Before dispatching: `git --version`; `gh auth status` including
+required scopes (`workflow` for `.github/workflows/` changes); `git
+status` clean in the main checkout; `YAKOS_ROOT` unset or equal to the
+cwd's toplevel; no stale worktrees/branches from a prior session; the
+kanban reconciled against actual PR/branch state.
 
 ## Anti-patterns
 
