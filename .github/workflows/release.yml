@@ -444,7 +444,7 @@ jobs:
           echo "| Linux (arm64 + amd64) | unsigned; verify via checksums.txt |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: "yakos ${{ steps.version.outputs.tag }} (Go)"
