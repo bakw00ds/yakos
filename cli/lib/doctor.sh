@@ -64,6 +64,14 @@ EOF
         --probe-runtime) PROBE_RUNTIME=1 ;;
         --fix) FIX=1 ;;
         --production) PRODUCTION=1 ;;
+        --preflight)
+            # Go-only (cli-go/internal/doctor/preflight.go): the gh-auth and
+            # CLI<->daemon-handshake checks aren't cheaply portable to bash.
+            # main.go forces Go-native routing for `doctor --preflight`
+            # under normal use; this only fires when the bash tree was
+            # invoked directly, or explicitly via YAKOS_IMPL=bash.
+            ct_die "doctor: --preflight is Go-only; run 'YAKOS_IMPL=go yakos doctor --preflight'"
+            ;;
         --*)
             ct_die "doctor: unknown flag '$arg'"
             ;;

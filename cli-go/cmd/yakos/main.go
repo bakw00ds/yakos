@@ -44,6 +44,35 @@ func isHelpArg(arg string) bool {
 	return arg == "--help" || arg == "-h" || arg == "help"
 }
 
+// isDoctorPreflightForceGo reports whether this invocation is `doctor
+// --preflight` (in any argument position after the subcommand) and should
+// therefore bypass the normal YAKOS_IMPL gate to always reach the Go-native
+// implementation. `--preflight` has no bash equivalent (see
+// internal/doctor/preflight.go's package doc comment: the CLI<->daemon
+// handshake and gh-auth network checks aren't cheaply portable to bash), so
+// leaving it to shadow-mode routing would silently hand it to bash's
+// doctor.sh, which only knows to reject it as an unknown flag.
+//
+// impl == "bash" is a deliberate exception: an operator who explicitly set
+// YAKOS_IMPL=bash asked for bash, and that request is honored as-is (bash
+// prints a clear "unknown flag" error rather than silently ignoring
+// --preflight) — see selectImpl's explicit-impl precedence, which this
+// mirrors.
+func isDoctorPreflightForceGo(impl string, args []string) bool {
+	if impl == "bash" {
+		return false
+	}
+	if len(args) == 0 || args[0] != "doctor" {
+		return false
+	}
+	for _, a := range args[1:] {
+		if a == "--preflight" {
+			return true
+		}
+	}
+	return false
+}
+
 // selectImpl encodes the YAKOS_IMPL gate decision as a pure function so it
 // can be unit-tested without touching the filesystem or spawning processes.
 //
@@ -129,11 +158,16 @@ func main() {
 	//   (unset)         → shadow-mode when bash yakos exists; Go-native otherwise.
 	//
 	// selectImpl encodes this decision; it is separately unit-tested.
-	switch selectImpl(os.Getenv("YAKOS_IMPL"), passthrough.BashYakosExists(yakosRoot)) {
-	case implPassthrough:
-		exitWith(passthrough.Run(yakosRoot, args))
-	case implGoNative:
-		// no-op: execution continues to the Go-native router below
+	//
+	// `doctor --preflight` is a narrow, deliberate exception to this gate:
+	// see isDoctorPreflightForceGo's doc comment.
+	if !isDoctorPreflightForceGo(os.Getenv("YAKOS_IMPL"), args) {
+		switch selectImpl(os.Getenv("YAKOS_IMPL"), passthrough.BashYakosExists(yakosRoot)) {
+		case implPassthrough:
+			exitWith(passthrough.Run(yakosRoot, args))
+		case implGoNative:
+			// no-op: execution continues to the Go-native router below
+		}
 	}
 
 	// Go-native routing.

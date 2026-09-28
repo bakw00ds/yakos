@@ -18,6 +18,14 @@ func defaultLookPath(cmd string) (string, error) {
 	return exec.LookPath(cmd)
 }
 
+// defaultRunCommand runs name with args and returns combined stdout+stderr,
+// for use when cfg.RunCommand is nil. Used by the Preflight checks
+// (preflight.go) to invoke gh and git.
+func defaultRunCommand(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...) //nolint:gosec
+	return cmd.CombinedOutput()
+}
+
 // sha256File returns the lowercase hex SHA-256 of the file at path.
 func sha256File(path string) (string, error) {
 	f, err := os.Open(path) //nolint:gosec

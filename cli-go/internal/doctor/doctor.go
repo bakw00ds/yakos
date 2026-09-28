@@ -20,6 +20,14 @@
 //  12. Runtime feature probe (only when ProbeRuntime is true)
 //  13. Production checklist (only when Production is true)
 //  14. Summary
+//
+// `yakos doctor --preflight` (Config.PreflightOnly) is a separate, opt-in
+// fast path: it runs ONLY the seven Preflight checks (see preflight.go) and
+// skips the above entirely. It is not part of the default report — the
+// gh-auth and daemon-handshake checks make network/socket calls that would
+// slow down every plain `yakos doctor` run, and keeping the default report
+// unchanged preserves its bash/Go parity (doctor_parity_test.go CompareExact
+// cases) without needing a from-scratch bash port of the daemon handshake.
 package doctor
 
 import (
@@ -58,6 +66,17 @@ const (
 	SectionAPIKeys
 	SectionRuntimeProbe
 	SectionProduction
+
+	// Preflight sections (H-1, `yakos doctor --preflight`) are appended
+	// after the existing sections so their iota values never renumber (and
+	// thus never change the meaning of) any pre-existing Section constant.
+	SectionPreflightGhAuth
+	SectionPreflightGitUsable
+	SectionPreflightRootSanity
+	SectionPreflightCheckoutClean
+	SectionPreflightStaleWorktrees
+	SectionPreflightDaemonBuild
+	SectionPreflightKanban
 )
 
 // Finding is one reported item: a severity level plus a human-readable message.
@@ -108,6 +127,28 @@ type Config struct {
 
 	// ErrWriter is the error destination. Defaults to os.Stderr.
 	ErrWriter io.Writer
+
+	// PreflightOnly runs ONLY the Preflight section (the `--preflight` fast
+	// path) instead of the full doctor report. See preflight.go.
+	PreflightOnly bool
+
+	// PreflightFast skips the Preflight sub-checks that make a network call
+	// (gh auth status) or dial the daemon socket — used by `yakos start`'s
+	// banner integration so composing the banner never adds subprocess/
+	// network latency to session launch. `yakos doctor --preflight` always
+	// runs the full set (PreflightFast stays false).
+	PreflightFast bool
+
+	// RunCommand is an optional function for running external commands (gh,
+	// git) used by the Preflight checks, returning combined stdout+stderr.
+	// If nil, defaultRunCommand (os/exec) is used. Tests inject a
+	// controlled version so no real process is spawned.
+	RunCommand func(name string, args ...string) ([]byte, error)
+
+	// Getwd is an optional override for os.Getwd, used by the Preflight
+	// checks that need the current working directory. Tests inject a
+	// controlled version.
+	Getwd func() (string, error)
 }
 
 // Run performs the full doctor check and returns a structured Report.
@@ -150,6 +191,12 @@ func Run(cfg Config) (*Report, error) {
 
 	_, _ = fmt.Fprintln(r.w, "yakos doctor")
 	_, _ = fmt.Fprintln(r.w, "")
+
+	if cfg.PreflightOnly {
+		r.runPreflight()
+		_, _ = fmt.Fprintf(r.w, "Summary: %d error(s), %d warning(s)\n", r.report.Errors, r.report.Warnings)
+		return r.report, nil
+	}
 
 	r.checkRequiredCommands()
 	r.checkOptionalCommands()

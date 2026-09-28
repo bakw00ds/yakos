@@ -852,6 +852,7 @@ func printBanner(w io.Writer, name, projectRepo, controlDir, runtime, caps strin
 		"  permission:     " + permStr,
 		"  agents:         " + agentStr,
 		"  mode flags:     " + modeFlags,
+		"  preflight:      run `yakos doctor --preflight` to check for session blockers",
 	}
 	if consoleLine != "" {
 		lines = append(lines, consoleLine)
