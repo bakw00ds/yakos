@@ -365,25 +365,37 @@ func runStatus(args []string) {
 
 // runDoctor implements `yakos doctor` natively in Go.
 //
-// Usage mirrors cli/lib/doctor.sh exactly:
+// Usage mirrors cli/lib/doctor.sh exactly, plus the Go-only --preflight fast
+// path (H-1; see internal/doctor/preflight.go):
 //
 //	yakos doctor [<project-path>] [--probe-runtime] [--production]
+//	yakos doctor --preflight
 //	yakos doctor --help
 //
 // Exits 0 when no errors found (warnings/info/drift are OK).
 // Exits 1 when one or more error-severity findings are reported.
 // The --fix flag is recognised but rejected (Phase 1 scope constraint).
+//
+// --preflight has no bash equivalent: it runs the CLI↔daemon build
+// handshake (internal/daemonclient) and network gh-auth checks that bash
+// doctor.sh cannot cheaply replicate, so it is Go-only by design. main.go
+// forces Go-native routing for `doctor --preflight` regardless of
+// YAKOS_IMPL/shadow-mode so it reaches this implementation even on hosts
+// where plain `yakos doctor` still routes to bash (see selectImpl callers
+// in main.go).
 func runDoctor(yakosRoot string, args []string) {
 	help := false
 	probeRuntime := false
 	production := false
 	fix := false
+	preflight := false
 
 	fs := &cliflag.Set{Cmd: "doctor", Specs: []cliflag.Spec{
 		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
 		{Name: "--probe-runtime", Kind: cliflag.Bool, Bool: &probeRuntime},
 		{Name: "--production", Kind: cliflag.Bool, Bool: &production},
 		{Name: "--fix", Kind: cliflag.Bool, Bool: &fix},
+		{Name: "--preflight", Kind: cliflag.Bool, Bool: &preflight},
 	}}
 	rest, err := fs.Parse(args)
 	if err != nil {
@@ -435,13 +447,14 @@ func runDoctor(yakosRoot string, args []string) {
 	}
 
 	cfg := doctor.Config{
-		YakosRoot:    yakosRoot,
-		YakosLib:     yakosLib,
-		ProjectPath:  projectPath,
-		ProbeRuntime: probeRuntime,
-		Production:   production,
-		Writer:       os.Stdout,
-		ErrWriter:    os.Stderr,
+		YakosRoot:     yakosRoot,
+		YakosLib:      yakosLib,
+		ProjectPath:   projectPath,
+		ProbeRuntime:  probeRuntime,
+		Production:    production,
+		PreflightOnly: preflight,
+		Writer:        os.Stdout,
+		ErrWriter:     os.Stderr,
 	}
 
 	report, err := doctor.Run(cfg)

@@ -250,7 +250,7 @@ var commandRegistry = []commandEntry{
 	},
 	{
 		Name:   "doctor",
-		Specs:  specSet("doctor", "--probe-runtime", "--production", "--fix"),
+		Specs:  specSet("doctor", "--probe-runtime", "--production", "--fix", "--preflight"),
 		HelpFn: doctor.PrintHelp,
 		AllowUndocumented: []flagAllow{
 			{Flag: "--production", Reason: "doctor.PrintHelp (internal/doctor) documents --probe-runtime and --fix but never mentions --production; doc gap in a package this PR does not own"},

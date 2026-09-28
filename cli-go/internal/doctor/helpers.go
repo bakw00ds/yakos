@@ -2,8 +2,10 @@ package doctor
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +18,70 @@ import (
 // defaultLookPath wraps exec.LookPath for use when cfg.LookPath is nil.
 func defaultLookPath(cmd string) (string, error) {
 	return exec.LookPath(cmd)
+}
+
+// defaultRunCommandTimeout bounds every external command the Preflight
+// checks (preflight.go) invoke through defaultRunCommand (gh, git).
+// Generous for a single `gh auth status` or `git` invocation, while still
+// keeping `yakos doctor --preflight` from hanging indefinitely behind a
+// stalled network call, an SSO device-auth prompt, or a credential-helper
+// prompt blocking on stdin — all real-world gh/git failure modes, not
+// contrived ones (see work/current/reports/h1-doctor-review-2026-09-28.md
+// Finding 1, which reproduced an unbounded hang live before this fix).
+const defaultRunCommandTimeout = 5 * time.Second
+
+// CommandTimeoutError indicates an external command invoked by
+// runCommandWithTimeout did not complete within Timeout. The Preflight
+// checks that shell out (checkGhAuth, checkGitUsable) check for this via
+// errors.As so they can report a specific "did not respond" WARN instead
+// of treating a stalled command as a hard failure.
+type CommandTimeoutError struct {
+	Cmd     string
+	Timeout time.Duration
+}
+
+func (e *CommandTimeoutError) Error() string {
+	return fmt.Sprintf("%s: did not respond within %s", e.Cmd, e.Timeout)
+}
+
+// defaultRunCommand runs name with args, bounded by defaultRunCommandTimeout,
+// and returns combined stdout+stderr, for use when cfg.RunCommand is nil.
+// Used by the Preflight checks (preflight.go) to invoke gh and git.
+func defaultRunCommand(name string, args ...string) ([]byte, error) {
+	return runCommandWithTimeout(defaultRunCommandTimeout, name, args...)
+}
+
+// runCommandWithTimeout is defaultRunCommand's implementation, parameterized
+// on the timeout so tests can exercise the timeout/process-group-kill path
+// without waiting defaultRunCommandTimeout for real.
+//
+// The child is started as its own process-group leader (configureProcAttr,
+// procattr_unix.go/procattr_windows.go) so that on timeout,
+// killProcessGroup can terminate the whole group — not just the direct
+// child — so a grandchild (e.g. gh spawning a browser for device-auth, or
+// git's credential helper) doesn't survive as an orphan. cmd.Cancel
+// overrides exec.CommandContext's default cancellation behavior (which
+// only calls cmd.Process.Kill() on the direct process); cmd.WaitDelay
+// bounds how long CombinedOutput blocks waiting for the child's stdout/
+// stderr pipes to close after that kill, as a safety net if the process
+// ignores termination.
+func runCommandWithTimeout(timeout time.Duration, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec
+	configureProcAttr(cmd)
+	cmd.Cancel = func() error {
+		killProcessGroup(cmd)
+		return nil
+	}
+	cmd.WaitDelay = 2 * time.Second
+
+	out, err := cmd.CombinedOutput()
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return out, &CommandTimeoutError{Cmd: name, Timeout: timeout}
+	}
+	return out, err
 }
 
 // sha256File returns the lowercase hex SHA-256 of the file at path.
