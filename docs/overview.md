@@ -1,6 +1,6 @@
 # YakOS — overview
 
-**Version this overview targets:** v0.58.0.0 (2026-09-24).
+**Version this overview targets:** v0.59.0.0 (2026-09-28).
 **Audience:** operators evaluating yakOS or onboarding to it.
 **Companion docs:** [README.md](../README.md) for install,
 [UPGRADING.md](../UPGRADING.md) for upgrade/uninstall,
