@@ -264,25 +264,30 @@ func (s *Session) SendUserTurn(frame []byte) error {
 	// Bounded write: use a goroutine + channel to enforce the timeout.
 	// On timeout, Close() is called so the write goroutine unblocks promptly
 	// (closing the write end of the pipe causes the blocked Write to return).
+	//
+	// See stdin_write.go (awaitStdinWrite) for why the timeout/closed outcomes
+	// below are only reported when the write goroutine has not already
+	// produced a result — otherwise a write that completed at nearly the same
+	// instant the session closed could be misreported as failed.
 	done := make(chan error, 1)
 	go func() {
 		_, err := stdin.Write(frame)
 		done <- err
 	}()
 
-	select {
-	case err := <-done:
-		if err != nil {
-			return fmt.Errorf("interactive: stdin write: %w", err)
-		}
-		return nil
-	case <-time.After(stdinWriteTimeout):
+	err, timedOut, closed := awaitStdinWrite(done, s.closed, time.After(stdinWriteTimeout))
+	switch {
+	case timedOut:
 		// Close the session so the blocked write goroutine unblocks and exits,
 		// and no subsequent turn can race against the orphaned write.
 		s.Close()
 		return fmt.Errorf("interactive: stdin write timed out after %s; session closed", stdinWriteTimeout)
-	case <-s.closed:
+	case closed:
 		return fmt.Errorf("interactive: session closed during write")
+	case err != nil:
+		return fmt.Errorf("interactive: stdin write: %w", err)
+	default:
+		return nil
 	}
 }
 
