@@ -62,8 +62,12 @@ func TestConsoleWS_ValidToken(t *testing.T) {
 		t.Errorf("first message type=%v; want welcome", msg["type"])
 	}
 
-	// Verify bus events flow through.
-	time.Sleep(20 * time.Millisecond)
+	// Verify bus events flow through. Wait for the subscription to actually
+	// register (rather than a fixed sleep — a K-88-class flake risk on a
+	// slow/contended runner: Publish() before the WS handler's goroutine has
+	// subscribed silently drops the event, since Publish does not buffer for
+	// late subscribers) before publishing.
+	waitForNSubscribers(t, bus, 1)
 	bus.Publish(wsbus.TopicKanbanAdded, wsbus.KanbanAddedPayload{ID: "K-1", Title: "test", Column: "TODO"})
 
 	var ev wsbus.Event
@@ -697,8 +701,12 @@ func TestConsoleWSNetworked_SessionAuth_EndToEnd(t *testing.T) {
 		t.Errorf("first message type=%v; want welcome", msg["type"])
 	}
 
-	// Verify bus events flow through.
-	time.Sleep(20 * time.Millisecond)
+	// Verify bus events flow through. Wait for the subscription to actually
+	// register (rather than a fixed sleep — a K-88-class flake risk on a
+	// slow/contended runner: Publish() before the WS handler's goroutine has
+	// subscribed silently drops the event, since Publish does not buffer for
+	// late subscribers) before publishing.
+	waitForNSubscribers(t, bus, 1)
 	bus.Publish(wsbus.TopicKanbanAdded, wsbus.KanbanAddedPayload{ID: "K-2", Title: "session test", Column: "TODO"})
 
 	var ev wsbus.Event
