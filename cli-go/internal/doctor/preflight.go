@@ -91,6 +91,12 @@ func (r *runner) checkGhAuth() {
 	}
 
 	out, err := r.runCommand("gh", "auth", "status")
+	var timeoutErr *CommandTimeoutError
+	if errors.As(err, &timeoutErr) {
+		r.warn(SectionPreflightGhAuth, "%s did not respond within %s", timeoutErr.Cmd, timeoutErr.Timeout)
+		_, _ = fmt.Fprintln(r.w, "")
+		return
+	}
 	text := string(out)
 	if err != nil && !strings.Contains(text, "Logged in to") {
 		r.warn(SectionPreflightGhAuth, "not authenticated; run `gh auth login`")
@@ -168,6 +174,12 @@ func activeGhScopes(text string) map[string]bool {
 func (r *runner) checkGitUsable() {
 	_, _ = fmt.Fprintln(r.w, "git usable")
 	out, err := r.runCommand("git", "--version")
+	var timeoutErr *CommandTimeoutError
+	if errors.As(err, &timeoutErr) {
+		r.warn(SectionPreflightGitUsable, "%s did not respond within %s", timeoutErr.Cmd, timeoutErr.Timeout)
+		_, _ = fmt.Fprintln(r.w, "")
+		return
+	}
 	text := string(out)
 	if err != nil {
 		if strings.Contains(text, "Xcode") && strings.Contains(text, "license") {

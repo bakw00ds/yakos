@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -832,5 +835,139 @@ func TestRun_PreflightOnly_SkipsFullReport(t *testing.T) {
 	}
 	if report == nil {
 		t.Fatal("expected a non-nil report")
+	}
+}
+
+// ---- subprocess timeout (h1-doctor-review-2026-09-28.md Finding 1) --------
+
+// writeSleepScript writes a POSIX shell script at dir/name that sleeps for
+// the given duration, marks it executable, and returns its path. Used to
+// reproduce a genuinely hung gh/git invocation — a real subprocess, not a
+// fake RunCommand — since the timeout/process-group-kill wiring under test
+// (runCommandWithTimeout, procattr_unix.go) only engages on a real
+// *exec.Cmd.
+func writeSleepScript(t *testing.T, dir, name string, sleep time.Duration) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	secs := int(sleep.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	script := "#!/bin/sh\nsleep " + strconv.Itoa(secs) + "\n"
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil { //nolint:gosec
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestRunCommandWithTimeout_HungProcess_ReturnsWithinBound is the
+// mutation-proof case for the bug reported live in
+// work/current/reports/h1-doctor-review-2026-09-28.md Finding 1: before
+// this fix, defaultRunCommand had no timeout at all, and a hung `gh`/`git`
+// hung `yakos doctor --preflight` indefinitely (reproduced there with a
+// fake `sleep 300` gh/git on PATH, SIGTERM'd by an external watcher after
+// 8s with the process never returning).
+//
+// This test spawns a real script that sleeps far longer than the bound,
+// asserts runCommandWithTimeout returns promptly (not after the sleep
+// duration), that the error is a *CommandTimeoutError, and — the orphan
+// half of Finding 1 — that no process matching the script's path survives
+// the kill. Mutation-tested by hand: reverting cmd.Cancel/killProcessGroup
+// wiring makes this test hang until the outer `go test` timeout instead of
+// failing fast here (see h1-doctor-timeout-fix report addendum).
+func TestRunCommandWithTimeout_HungProcess_ReturnsWithinBound(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hung-subprocess repro uses a POSIX shell script; Windows coverage is go vet + go test -c only (process-group semantics differ — see procattr_windows.go)")
+	}
+
+	dir := t.TempDir()
+	script := writeSleepScript(t, dir, "hung-cmd", 300*time.Second)
+
+	const bound = 250 * time.Millisecond
+	start := time.Now()
+	_, err := runCommandWithTimeout(bound, script)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error from a hung process, got nil")
+	}
+	var timeoutErr *CommandTimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("expected *CommandTimeoutError, got %v (%T)", err, err)
+	}
+	if timeoutErr.Cmd != script || timeoutErr.Timeout != bound {
+		t.Errorf("CommandTimeoutError = %+v, want Cmd=%q Timeout=%s", timeoutErr, script, bound)
+	}
+	// Generous slack over `bound` for process teardown — well under the
+	// script's real 300s sleep. This is the assertion that proves the
+	// timeout actually fired instead of the test merely waiting it out.
+	if elapsed > 5*time.Second {
+		t.Errorf("runCommandWithTimeout(%s, ...) took %s; want it bounded near the %s timeout (kill wiring likely broken)", bound, elapsed, bound)
+	}
+
+	if _, err := exec.LookPath("pgrep"); err != nil {
+		t.Skip("pgrep not on PATH; skipping the no-leftover-process assertion")
+	}
+	// Give the OS a brief grace period to finish reaping the killed process.
+	time.Sleep(200 * time.Millisecond)
+	out, _ := exec.Command("pgrep", "-f", script).CombinedOutput() //nolint:gosec
+	if leftover := strings.TrimSpace(string(out)); leftover != "" {
+		t.Errorf("expected no leftover process matching %q after timeout; pgrep found PID(s):\n%s", script, leftover)
+	}
+}
+
+// TestRunCommandWithTimeout_NormalCompletion_NoTimeoutError is the
+// counterpart sanity check: a command that finishes well inside its bound
+// must not be misreported as a timeout.
+func TestRunCommandWithTimeout_NormalCompletion_NoTimeoutError(t *testing.T) {
+	out, err := runCommandWithTimeout(5*time.Second, "echo", "hi")
+	if err != nil {
+		t.Fatalf("expected no error for a fast command; got %v", err)
+	}
+	var timeoutErr *CommandTimeoutError
+	if errors.As(err, &timeoutErr) {
+		t.Fatalf("fast command misreported as a timeout: %v", timeoutErr)
+	}
+	if !strings.Contains(string(out), "hi") {
+		t.Errorf("expected output to contain %q; got %q", "hi", out)
+	}
+}
+
+// TestCheckGhAuth_Timeout_Warns and TestCheckGitUsable_Timeout_Warns cover
+// the caller-side wiring — that checkGhAuth/checkGitUsable recognize a
+// *CommandTimeoutError from the RunCommand seam and report the specific
+// "did not respond" WARN, rather than falling through to the generic
+// unauthenticated/failure branch. These use the fakeRunCommand seam (not a
+// real subprocess) since they're testing the caller's error handling, not
+// the timeout mechanism itself (covered above).
+
+func TestCheckGhAuth_Timeout_Warns(t *testing.T) {
+	r, buf := newPreflightRunner(t, Config{
+		LookPath: singleLookPath(map[string]string{"gh": "/usr/bin/gh"}),
+		RunCommand: func(name string, args ...string) ([]byte, error) {
+			return nil, &CommandTimeoutError{Cmd: "gh", Timeout: 5 * time.Second}
+		},
+	})
+	r.checkGhAuth()
+	if r.report.Warnings != 1 {
+		t.Fatalf("expected exactly 1 warning; report=%+v\noutput:\n%s", r.report, buf.String())
+	}
+	if !strings.Contains(buf.String(), "gh did not respond within 5s") {
+		t.Errorf("expected the specific timeout WARN text; got:\n%s", buf.String())
+	}
+}
+
+func TestCheckGitUsable_Timeout_Warns(t *testing.T) {
+	r, buf := newPreflightRunner(t, Config{
+		RunCommand: func(name string, args ...string) ([]byte, error) {
+			return nil, &CommandTimeoutError{Cmd: "git", Timeout: 5 * time.Second}
+		},
+	})
+	r.checkGitUsable()
+	if r.report.Warnings != 1 || r.report.Errors != 0 {
+		t.Fatalf("expected exactly 1 warning and 0 errors (a timeout is advisory, not a hard failure); report=%+v\noutput:\n%s", r.report, buf.String())
+	}
+	if !strings.Contains(buf.String(), "git did not respond within 5s") {
+		t.Errorf("expected the specific timeout WARN text; got:\n%s", buf.String())
 	}
 }
