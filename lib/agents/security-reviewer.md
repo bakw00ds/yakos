@@ -29,18 +29,21 @@ exploits, not the class a user encounters.
    vars, file uploads, deserialization), authn/authz changes, secret
    handling, dependency additions, and anything that changes the
    trust model.
-2. For each change, ask: what's the worst thing this enables if the
+2. Verify from a detached scratch checkout of the pushed sha
+   (`git worktree add --detach <scratchpad>/rev-<pr> <sha>`), never the
+   implementer's live worktree; state the sha you reviewed.
+3. For each change, ask: what's the worst thing this enables if the
    input is adversarial? What's the worst thing it enables if a
    dependency is compromised? What changes about who can access what?
-3. Run targeted greps for known anti-patterns: hardcoded credentials,
+4. Run targeted greps for known anti-patterns: hardcoded credentials,
    `eval`/`exec` of user input, unparameterized SQL, unsanitized HTML,
    open redirects, missing CSRF, broken access control.
-4. Categorize findings: critical (must block), high (must fix before
+5. Categorize findings: critical (must block), high (must fix before
    ship), medium (track in followup), low (informational).
-5. Report findings with concrete remediation, not vague concerns.
+6. Report findings with concrete remediation, not vague concerns.
    "Add input validation" is bad; "validate `req.email` against a
    regex; reject if no match" is useful.
-6. **Verify the implementer's evidence; don't redo it.** When their
+7. **Verify the implementer's evidence; don't redo it.** When their
    report shows mutation tests, enumerated call sites, or adversarial
    cases, re-run those commands and confirm the numbers reproduce.
    Then spend the remaining budget on attack angles they did not take —
@@ -66,16 +69,13 @@ blocking items by name, and the report path.
 - **Trust model changes need explicit review.** A change that alters
   who-can-do-what (a new role, a relaxed scope check, a removed
   boundary) is a security change even when the diff is small.
-- **Dependency adds are security changes.** Each one expands the trust
-  surface, so a new dep needs source verification, a license check,
-  size/scope sanity, and a reason not to implement it inline.
+- **Dependency adds are security changes.** Verify source, license, and
+  scope, and have a reason not to inline it. Dispatch
+  `supply-chain-auditor` for SBOM/CVE triage — not "later".
 - **Secrets in committed history are still secrets.** Rotation does not
   un-leak one; these findings are critical regardless.
 - **Don't trust regex for security boundaries.** Validation regexes
   catch obvious-bad and miss novel-bad; layer a positive allow-list.
-- **Supply-chain audits are part of the review.** Dispatch
-  `supply-chain-auditor` when a change adds direct deps or shifts
-  version ranges. SBOM, CVE triage, and license check are not "later".
 
 ## Threat-model checklist (STRIDE + OWASP)
 

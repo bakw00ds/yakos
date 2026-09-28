@@ -98,6 +98,9 @@ runtime-specific: parallelism applies to claude (Agent calls), codex
   on base commit, or the failing package is outside the diff. Rerun
   only after that check; otherwise dispatch a fix (`rule:verification-
   discipline`).
+- **Name the pushed sha in the review brief and require a scratch
+  checkout.** If the implementer is still active on the branch, say so
+  in the brief so the reviewer doesn't build against a moving tree.
 - **Merge on reviewer SHIP + green CI only when the operator has
   explicitly delegated merging for the session; otherwise hand the PR
   to the human reviewer** (`rule:pr-conventions`). After merging,
