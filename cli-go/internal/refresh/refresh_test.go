@@ -1,6 +1,7 @@
 package refresh
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -397,6 +398,143 @@ func TestMergeSettings_AtomicNoTempLeak(t *testing.T) {
 	}
 }
 
+// TestMergeSettings_ReplacesAbsolutePathFormWithTemplateForm is the K-91
+// follow-up regression test for a live duplicate-registration incident
+// (2026-09-28): `yakos refresh --project <path>` against a settings.json
+// whose hook commands used an absolute checkout path
+// (/Users/tw/github/yakOS/scripts/hooks/<name>.sh) instead of the
+// template's ${CLAUDE_PROJECT_DIR}/scripts/hooks/<name>.sh macro form
+// added the template-form registration ALONGSIDE the existing absolute-form
+// one for every hook, instead of replacing it — every hook fired twice.
+// The merge must recognize both spellings as the SAME hook (by canonical
+// name, i.e. script basename) and end up with exactly one registration per
+// (event, hook), in the template's own form.
+//
+// Mutation test: revert canonicalHookName-based matching in Phase A/B back
+// to raw command-string matching (the pre-fix behavior) and this test
+// fails — both the absolute and template forms end up in the merged file,
+// and Added/Removed no longer balance.
+func TestMergeSettings_ReplacesAbsolutePathFormWithTemplateForm(t *testing.T) {
+	tmp := t.TempDir()
+	templateFile := filepath.Join(tmp, "template.json")
+	deployedFile := filepath.Join(tmp, "settings.json")
+
+	templateContent := `{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/supervisor-gate.sh"},
+          {"type": "command", "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/secret-scan.sh"}
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {"type": "command", "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/cycle-counter.sh"}
+        ]
+      }
+    ]
+  }
+}`
+	// Deployed has the SAME three hooks, same matchers, but registered via
+	// an absolute checkout path instead of the ${CLAUDE_PROJECT_DIR} macro
+	// — exactly the live-incident shape.
+	deployedContent := `{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "/Users/tw/github/yakOS/scripts/hooks/supervisor-gate.sh"},
+          {"type": "command", "command": "/Users/tw/github/yakOS/scripts/hooks/secret-scan.sh"}
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {"type": "command", "command": "/Users/tw/github/yakOS/scripts/hooks/cycle-counter.sh"}
+        ]
+      }
+    ]
+  }
+}`
+	if err := os.WriteFile(templateFile, []byte(templateContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(deployedFile, []byte(deployedContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := MergeSettingsFiles(templateFile, deployedFile, false, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// All 3 absolute-form registrations replaced: 3 removed, 3 added.
+	if stats.Removed != 3 {
+		t.Errorf("expected 3 removed (absolute-form registrations superseded); got %d", stats.Removed)
+	}
+	if stats.Added != 3 {
+		t.Errorf("expected 3 added (template-form registrations); got %d", stats.Added)
+	}
+
+	data, err := os.ReadFile(deployedFile) //nolint:gosec
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var merged map[string]any
+	if err := json.Unmarshal(data, &merged); err != nil {
+		t.Fatalf("merged settings.json is not valid JSON: %v\n%s", err, data)
+	}
+
+	// The absolute-path form must be gone entirely.
+	if strings.Contains(string(data), "/Users/tw/github/yakOS/scripts/hooks/") {
+		t.Errorf("absolute-path form still present in merged settings.json (duplicate registration not removed):\n%s", data)
+	}
+
+	// Exactly one registration per hook — count occurrences of each command
+	// string (which, post-merge, can only be the template form).
+	for _, name := range []string{"supervisor-gate.sh", "secret-scan.sh", "cycle-counter.sh"} {
+		want := "${CLAUDE_PROJECT_DIR}/scripts/hooks/" + name
+		count := strings.Count(string(data), want)
+		if count != 1 {
+			t.Errorf("hook %s: expected exactly 1 registration in template form; found %d\n%s", name, count, data)
+		}
+	}
+
+	// Re-running the merge must now be a no-op (idempotent on the replaced form).
+	stats2, err := MergeSettingsFiles(templateFile, deployedFile, false, nil)
+	if err != nil {
+		t.Fatalf("second merge error: %v", err)
+	}
+	if stats2.Added != 0 || stats2.Removed != 0 {
+		t.Errorf("second merge should be a no-op; got added=%d removed=%d", stats2.Added, stats2.Removed)
+	}
+}
+
+// TestCanonicalHookName verifies path-prefix-independent hook identity
+// extraction used by the settings merge (see performMerge's
+// templateDesired comment).
+func TestCanonicalHookName(t *testing.T) {
+	cases := map[string]string{
+		"${CLAUDE_PROJECT_DIR}/scripts/hooks/secret-scan.sh":  "secret-scan.sh",
+		"/Users/tw/github/yakOS/scripts/hooks/secret-scan.sh": "secret-scan.sh",
+		"scripts/hooks/secret-scan.sh":                        "secret-scan.sh",
+		"secret-scan.sh":                                      "secret-scan.sh",
+		"":                                                    "",
+		"  ":                                                  "",
+	}
+	for cmd, want := range cases {
+		if got := canonicalHookName(cmd); got != want {
+			t.Errorf("canonicalHookName(%q) = %q; want %q", cmd, got, want)
+		}
+	}
+}
+
 // ---- hook sync unit tests ---------------------------------------------------
 
 // TestSyncHooks_NewAndStale creates a fake srcRoot with two hooks and a dstRoot
@@ -711,6 +849,213 @@ func TestSyncAgents_DryRunNoSymlink(t *testing.T) {
 	// Symlink must not have been created.
 	if _, err := os.Lstat(filepath.Join(agentsDst, "backend.md")); !os.IsNotExist(err) {
 		t.Errorf("dry-run: symlink was created (should not be)")
+	}
+}
+
+// ---- resolveAgentsSourceRoot / worktree-target agent symlink tests --------
+//
+// Regression coverage for the live incident (2026-09-28): an install/
+// refresh run using a worktree's binary re-pointed the GLOBAL
+// ~/.claude/agents symlinks at that worktree; the worktree was later
+// removed, leaving every project's agent symlinks dangling machine-wide.
+
+// TestResolveAgentsSourceRoot_NonGitDirUnchanged verifies that a plain
+// (non-git) directory — the materialized-embedded-install case — passes
+// through unchanged: there is no worktree to redirect away from.
+func TestResolveAgentsSourceRoot_NonGitDirUnchanged(t *testing.T) {
+	root := t.TempDir()
+	got, err := resolveAgentsSourceRoot(root, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != root {
+		t.Errorf("expected unchanged root %q; got %q", root, got)
+	}
+}
+
+// TestResolveAgentsSourceRoot_MainCheckoutUnchanged verifies that the main
+// checkout of a git repo (not a worktree) passes through unchanged.
+func TestResolveAgentsSourceRoot_MainCheckoutUnchanged(t *testing.T) {
+	if _, err := runGit("", "--version"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	initGitRepoWithCommit(t, root)
+
+	got, err := resolveAgentsSourceRoot(root, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resolvePath(t, root) != resolvePath(t, got) {
+		t.Errorf("expected unchanged root %q; got %q", root, got)
+	}
+}
+
+// TestResolveAgentsSourceRoot_WorktreeRedirectsToCanonical verifies that a
+// git worktree of the framework repo is redirected to the canonical (main)
+// checkout when the canonical checkout has a usable lib/agents/.
+func TestResolveAgentsSourceRoot_WorktreeRedirectsToCanonical(t *testing.T) {
+	if _, err := runGit("", "--version"); err != nil {
+		t.Skip("git not available")
+	}
+	main := t.TempDir()
+	initGitRepoWithCommit(t, main)
+	if err := os.MkdirAll(filepath.Join(main, "lib", "agents"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(main, "lib", "agents", "backend.md"), []byte("# backend\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	wtParent := t.TempDir()
+	worktree := filepath.Join(wtParent, "wt")
+	if out, err := runGit(main, "worktree", "add", "-q", worktree, "-b", "wt-branch"); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+
+	var logBuf strings.Builder
+	got, err := resolveAgentsSourceRoot(worktree, &logBuf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resolvePath(t, got) != resolvePath(t, main) {
+		t.Errorf("expected redirect to canonical checkout %q; got %q", main, got)
+	}
+	if !strings.Contains(logBuf.String(), "worktree") {
+		t.Errorf("expected an info log line mentioning the worktree redirect; got: %s", logBuf.String())
+	}
+}
+
+// TestResolveAgentsSourceRoot_WorktreeWithoutUsableCanonicalRefuses
+// verifies that when the canonical checkout can't be confirmed usable (no
+// lib/agents/ there), resolveAgentsSourceRoot refuses with a clear error
+// instead of silently falling back to the worktree path — the exact
+// behavior the incident needs closed.
+func TestResolveAgentsSourceRoot_WorktreeWithoutUsableCanonicalRefuses(t *testing.T) {
+	if _, err := runGit("", "--version"); err != nil {
+		t.Skip("git not available")
+	}
+	main := t.TempDir()
+	initGitRepoWithCommit(t, main)
+	// Deliberately do NOT create lib/agents/ under main.
+
+	wtParent := t.TempDir()
+	worktree := filepath.Join(wtParent, "wt")
+	if out, err := runGit(main, "worktree", "add", "-q", worktree, "-b", "wt-branch"); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+
+	_, err := resolveAgentsSourceRoot(worktree, io.Discard)
+	if err == nil {
+		t.Fatal("expected an error when the canonical checkout has no usable lib/agents/; got nil")
+	}
+	if !strings.Contains(err.Error(), "worktree") {
+		t.Errorf("error should explain the worktree refusal; got: %v", err)
+	}
+}
+
+// TestSyncAgents_WorktreeRootTargetsCanonical is the end-to-end regression
+// test: syncAgents, given a worktree as yakosRoot, must symlink
+// ~/.claude/agents/*.md into the CANONICAL checkout's lib/agents/, never
+// into the worktree's own lib/agents/ — even though the worktree also has
+// a (different) agents directory.
+//
+// Mutation test: make resolveAgentsSourceRoot always return yakosRoot
+// unchanged (skip the worktree redirect) and this test fails, because the
+// created symlink then points into the worktree's lib/agents/ instead of
+// the canonical checkout's.
+func TestSyncAgents_WorktreeRootTargetsCanonical(t *testing.T) {
+	if _, err := runGit("", "--version"); err != nil {
+		t.Skip("git not available")
+	}
+	main := t.TempDir()
+	initGitRepoWithCommit(t, main)
+	mainAgents := filepath.Join(main, "lib", "agents")
+	if err := os.MkdirAll(mainAgents, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainAgents, "backend.md"), []byte("# canonical backend\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	wtParent := t.TempDir()
+	worktree := filepath.Join(wtParent, "wt")
+	if out, err := runGit(main, "worktree", "add", "-q", worktree, "-b", "wt-branch2"); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	// The worktree ALSO has a lib/agents/ (its own working tree content,
+	// possibly diverged from main) — this is what a naive, unredirected
+	// syncAgents would incorrectly symlink into.
+	wtAgents := filepath.Join(worktree, "lib", "agents")
+	if err := os.MkdirAll(wtAgents, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtAgents, "backend.md"), []byte("# worktree backend\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	home := t.TempDir()
+	rpt, err := syncAgents(worktree, home, false, io.Discard)
+	if err != nil {
+		t.Fatalf("syncAgents error: %v", err)
+	}
+	if rpt.New != 1 {
+		t.Errorf("expected new=1; got %+v", rpt)
+	}
+
+	target, err := os.Readlink(filepath.Join(home, ".claude", "agents", "backend.md"))
+	if err != nil {
+		t.Fatalf("symlink not created: %v", err)
+	}
+	targetResolved := resolvePath(t, target)
+	wantResolved := resolvePath(t, filepath.Join(mainAgents, "backend.md"))
+	notWantResolved := resolvePath(t, filepath.Join(wtAgents, "backend.md"))
+	if targetResolved != wantResolved {
+		t.Errorf("symlink target = %q; want canonical checkout's %q (not the worktree's %q)", target, wantResolved, notWantResolved)
+	}
+}
+
+// resolvePath returns p with all symlinks evaluated (so macOS's
+// /tmp → /private/tmp aliasing, and similar OS-level path canonicalization,
+// don't produce false mismatches when comparing paths derived two
+// different ways — e.g. one via t.TempDir() directly, the other via a
+// `git rev-parse` round trip). Falls back to filepath.Abs if the path
+// doesn't exist yet (EvalSymlinks requires the path to exist).
+func resolvePath(t *testing.T, p string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		abs, aerr := filepath.Abs(p)
+		if aerr != nil {
+			t.Fatalf("resolvePath(%q): %v (abs fallback also failed: %v)", p, err, aerr)
+		}
+		return abs
+	}
+	return resolved
+}
+
+// initGitRepoWithCommit initializes a minimal, real git repo at dir with
+// one commit, so `git worktree add` and `git rev-parse
+// --git-dir/--git-common-dir` all work against it.
+func initGitRepoWithCommit(t *testing.T, dir string) {
+	t.Helper()
+	if out, err := runGit(dir, "init", "-q"); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if out, err := runGit(dir, "config", "user.email", "test@example.com"); err != nil {
+		t.Fatalf("git config email: %v\n%s", out, err)
+	}
+	if out, err := runGit(dir, "config", "user.name", "test"); err != nil {
+		t.Fatalf("git config name: %v\n%s", out, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("root\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runGit(dir, "add", "README.md"); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	if out, err := runGit(dir, "commit", "-q", "-m", "init"); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
 	}
 }
 

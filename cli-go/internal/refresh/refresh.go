@@ -603,7 +603,23 @@ func isFrameworkSelf(candidate, yakosRoot string) bool {
 // absolute path. Returns ok=false if dir is not inside a git repo, or git
 // is unavailable.
 func gitCommonDir(dir string) (path string, ok bool) {
-	cmd := exec.Command("git", "-C", dir, "rev-parse", "--git-common-dir")
+	return gitRevParsePath(dir, "--git-common-dir")
+}
+
+// gitDir resolves `git -C dir rev-parse --git-dir` to an absolute path.
+// For a git worktree this differs from gitCommonDir (it points at the
+// worktree's own <main-repo>/.git/worktrees/<name> admin directory); for
+// the main checkout the two are identical. Returns ok=false if dir is not
+// inside a git repo, or git is unavailable.
+func gitDir(dir string) (path string, ok bool) {
+	return gitRevParsePath(dir, "--git-dir")
+}
+
+// gitRevParsePath runs `git -C dir rev-parse <flag>` and resolves the
+// result to an absolute path. Returns ok=false if dir is not inside a git
+// repo, or git is unavailable.
+func gitRevParsePath(dir, flag string) (path string, ok bool) {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", flag)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", false
