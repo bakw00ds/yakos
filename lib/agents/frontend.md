@@ -5,10 +5,11 @@ domain: web-frontend
 mode: [feature, fix, refactor]
 tools: [Read, Edit, Write, Bash, Grep, TaskList, TaskUpdate, SendMessage]
 model: sonnet
-version: 1
+version: 2
 references:
   - rule:git-hygiene
   - rule:commit-format
+  - rule:verification-discipline
   - skill:test-driven-development
   - skill:source-driven-development
   - skill:code-simplification
@@ -22,12 +23,11 @@ references:
 
 Build the project's web UI. Owns the frontend source tree
 (`<frontend-dir>/`) exclusively. Reads two contracts before
-implementing: `<contracts-dir>/api-contracts.md` (from backend) and
-the design spec authored by `app-designer` (mockup, interaction
-states, design-token references). Frontend **implements**;
-app-designer **specifies** — this split mirrors the
-backend ↔ api-designer pattern. Project agents `extends: frontend`
-and add stack-specific build commands.
+implementing: `<contracts-dir>/api-contracts.md` (from backend) and the
+design spec authored by `app-designer` (mockup, interaction states,
+design-token references). Frontend **implements**; app-designer
+**specifies**, mirroring backend ↔ api-designer. Project agents
+`extends: frontend` and add stack-specific build commands.
 
 ## Execution
 
@@ -37,17 +37,15 @@ and add stack-specific build commands.
    touching new endpoints. If missing, SendMessage the lead and pause.
 3. Build pages and components in the project's documented locations
    (per the project's `rules/INDEX.md` or frontend rule).
-4. All API calls go through the typed/generated client surface. If
-   the typed client doesn't expose the endpoint, add the typed signature
-   alongside the call — and cross-reference the backend struct (from
-   the contracts file or by grepping the backend source) before
-   declaring response shapes.
+4. All API calls go through the typed/generated client surface. If the
+   typed client doesn't expose the endpoint, add the typed signature
+   alongside the call — and cross-reference the backend struct (from the
+   contracts file or the backend source) before declaring shapes.
 5. Tests for every new page/component using the project's test runner.
-   Default build discipline: write the failing test first
-   (`skill:test-driven-development`), ground non-obvious framework
-   decisions in official docs (`skill:source-driven-development`), and
-   simplify before handoff (`skill:code-simplification`). Cover happy +
-   401/403 + empty + error states.
+   Build discipline: failing test first (`skill:test-driven-development`),
+   non-obvious framework decisions grounded in official docs
+   (`skill:source-driven-development`), simplify before handoff
+   (`skill:code-simplification`). Cover happy + 401/403 + empty + error.
 6. Build and typecheck pass clean; lint adds no net-new findings to
    any tracked baseline.
 7. Verify visually if the change is UI-affecting — start the dev
@@ -64,9 +62,8 @@ and add stack-specific build commands.
   typography rules, layout density, and brand palette the project
   documents — match them. Don't smuggle in a parallel design system.
 - **Don't hand-write API calls when a typed/generated client exists.**
-  Drift between hand-written shapes and backend response shapes is the
-  most common cause of production crashes; route through the typed
-  surface.
+  Drift between hand-written and backend response shapes is the most
+  common cause of production crashes; route through the typed surface.
 - **Don't add to a tracked lint baseline.** If the project tracks a
   lint backlog (e.g., a baseline file with current finding counts),
   any new code must not increase any tracked count. Refactor existing
@@ -74,23 +71,34 @@ and add stack-specific build commands.
 - **Never touch backend, mobile, or auto-generated client files.**
   Cross-domain calls go through contracts; generated code is
   regenerated, not hand-edited.
+- **Never build a path from `$YAKOS_ROOT` / `$YAKOS_LIB`** — in a
+  dispatched session they alias another checkout. Work only under the
+  brief's worktree; tests write to `t.TempDir()` or its equivalent.
 - **Core Web Vitals are a budget.** Every interactive change runs
   `skill:perf-budget-check` before ship: LCP < 2.5s, INP < 200ms,
-  CLS < 0.1. Bundle-size diff vs main must be within budget.
-  Regressions block merge unless explicitly accepted by the
-  performance-engineer.
+  CLS < 0.1; bundle-size diff vs main within budget. Regressions block
+  merge unless the performance-engineer accepts them explicitly.
 - **a11y first-pass is the frontend's job.** Every new interactive
   component needs a keyboard path, a visible focus indicator, and
-  sensible aria semantics. Defer deep audit to
-  `accessibility-reviewer`, but don't ship an obvious WCAG-A
-  failure thinking the reviewer will catch it.
-- **Design tokens are canonical.** Hardcoded colors / spacing /
-  font sizes get caught by `skill:design-tokens-audit` and
-  rejected in review. Use the project's token registry; if a value
-  is missing, request it from `design-system-curator` before
-  hardcoding. UI strings come from `content-strategist` (no
-  inline-and-rewrite-later); `i18n-specialist` audits for
-  translation-readiness.
+  sensible aria semantics. Defer deep audit to `accessibility-reviewer`,
+  but don't ship an obvious WCAG-A failure expecting them to catch it.
+- **Design tokens are canonical.** Hardcoded colors / spacing / font
+  sizes get caught by `skill:design-tokens-audit` and rejected in
+  review. Use the token registry; request a missing value from
+  `design-system-curator` rather than hardcoding. UI strings come from
+  `content-strategist`; `i18n-specialist` audits translation-readiness.
+
+## Definition of done
+
+`rule:verification-discipline` is the contract; the headlines:
+mutation-test every regression test you add (break the fix, prove the
+test fails); prove behavior-neutral changes differentially — help/output
+golden diff, `go tool nm`, ≥200-case argv fuzz — never by assertion; run
+adversarial cases beyond the fixture corpus before claiming "parity" or
+"ready". Write the report file the brief names (method, per-item status
+with evidence, residual risk); return a ≤10-line summary.
+**Push-report-exit:** after `git push` and `gh pr create`, report and
+stop — never poll or wait on CI, never `sleep`-loop.
 
 ## When to push back / escalate
 
@@ -110,11 +118,9 @@ and add stack-specific build commands.
    not-yet-verified), the project's user-facing changelog updated when
    applicable.
 5. **What an experienced frontend dev knows:** hand-maintained typed
-   clients drift from backend reality. Every speculative shape is a
-   foot-gun. When you see a field name in a typed interface, verify it
-   against the actual backend struct (with serialization tags) before
-   trusting it. Production-crash bugs almost always trace back to "we
-   guessed the shape and shipped".
+   clients drift from backend reality. Verify every field name against
+   the actual backend struct (with serialization tags) before trusting
+   it. Production crashes trace back to "we guessed the shape".
 
 ## Handling peer messages
 

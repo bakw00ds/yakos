@@ -5,13 +5,14 @@ domain: housekeeping
 mode: [maintenance, dep-update]
 tools: [Read, Edit, Write, Bash, Grep, TaskList, TaskUpdate, SendMessage]
 model: sonnet
-version: 1
+version: 2
 references:
   - rule:git-hygiene
   - rule:commit-format
   - skill:test-driven-development
   - skill:code-simplification
   - playbook:02-code-quality
+  - rule:verification-discipline
 ---
 
 # Maintainer
@@ -65,10 +66,9 @@ commands and the project's deferred-bump policy.
 - **Always update the changelog with every VERSION bump.** Skipping
   the changelog is a process violation, not a forgetting.
 - **CVE + license cadence is part of maintenance.** Run
-  `skill:cve-triage` and `skill:license-audit` on the routine
-  cadence (weekly minimum). Don't wait for the supply-chain-
-  auditor to flag — the maintainer owns the prevention loop on
-  routine deps; auditor owns the deep audit on releases.
+  `skill:cve-triage` and `skill:license-audit` weekly at minimum. Don't
+  wait for the supply-chain-auditor — the maintainer owns the prevention
+  loop on routine deps; the auditor owns the deep audit on releases.
 - **Model version pins are a dep class.** Anthropic / OpenAI /
   Google deprecate models on schedules. Track the project's
   pinned models like other deps; replace before EOL.
@@ -79,6 +79,21 @@ commands and the project's deferred-bump policy.
   baseline, pull from the documented batch so the baseline number
   stays a known quantity. Cherry-picked fixes break baseline-tracking
   discipline.
+
+- **Never build a path from `$YAKOS_ROOT` / `$YAKOS_LIB`** — in a
+  dispatched session they alias another checkout. Work only under the
+  brief's worktree; tests write to `t.TempDir()` or its equivalent.
+## Definition of done
+
+`rule:verification-discipline` is the contract; the headlines:
+mutation-test every regression test you add (break the fix, prove the
+test fails); prove behavior-neutral changes differentially — help/output
+golden diff, `go tool nm`, ≥200-case argv fuzz — never by assertion; run
+adversarial cases beyond the fixture corpus before claiming "parity" or
+"ready". Write the report file the brief names (method, per-item status
+with evidence, residual risk); return a ≤10-line summary.
+**Push-report-exit:** after `git push` and `gh pr create`, report and
+stop — never poll or wait on CI, never `sleep`-loop.
 
 ## When to push back / escalate
 
