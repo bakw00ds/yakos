@@ -104,6 +104,13 @@ jobs:
       - name: Check scripts/hooks mirrors are not stale
         run: |
           ./tests/check-hook-mirror.sh
+      # Self-check for check-hook-mirror.sh itself: confirms its verdict
+      # keys only on tracked scripts/hooks/ drift, not on unrelated
+      # settings.json drift (regression coverage for the false positive
+      # fixed alongside this gate).
+      - name: Check scripts/hooks mirror gate self-check
+        run: |
+          ./tests/run-check-hook-mirror-test.sh
 
   e2e:
     name: end-to-end smoke (every subcommand)

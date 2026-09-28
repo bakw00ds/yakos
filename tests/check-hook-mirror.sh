@@ -14,6 +14,15 @@
 # counts as drift. Each run is fully sandboxed (scratch $HOME, --dry-run:
 # no files are written, no real ~/.claude/agents symlinks are touched).
 #
+# The gate keys ONLY on refresh.sh's per-project "hooks:" summary line
+# (new=/synced=/ok=), which is the tracked scripts/hooks/ vs lib/hooks/
+# comparison this gate exists to enforce. It deliberately ignores the
+# "settings:" line and the global "Agent symlinks" phase: those reflect
+# a developer's untracked local .claude/settings.json and the sandboxed
+# $HOME's (absent) ~/.claude/agents, neither of which has anything to do
+# with the tracked hook mirror — including them made this gate fail on a
+# clean checkout whenever the developer had local settings.json drift.
+#
 # Usage: bash tests/check-hook-mirror.sh
 set -euo pipefail
 
@@ -43,12 +52,32 @@ check_project() {
         bash "$REFRESH_SH" --project "$project" --dry-run 2>&1)" || true
     rm -rf "$scratch_home"
 
-    if echo "$out" | grep -q 'status:   in sync'; then
-        printf '  [ok]   %s: scripts/hooks in sync with lib/hooks\n' "$label"
+    # Decide only on the "hooks:" summary line (new=N synced=N ok=N), not
+    # the combined "status:" line, which also folds in settings.json drift
+    # and is unrelated to the tracked scripts/hooks/ mirror this gate checks.
+    local hooks_line new_count sync_count
+    hooks_line="$(echo "$out" | grep -m1 '^    hooks:')" || true
+
+    if [ -z "$hooks_line" ]; then
+        printf '  [FAIL] %s: could not find a hooks: summary in refresh --dry-run output\n' "$label" >&2
+        # shellcheck disable=SC2001 # multi-line prefix; no pure param-expansion equivalent
+        echo "$out" | sed 's/^/    /' >&2
+        FAIL=1
         return
     fi
 
-    printf '  [FAIL] %s: scripts/hooks/ has drifted from lib/hooks/\n' "$label" >&2
+    # [0-9][0-9]* (not \+) — BSD sed (macOS default) doesn't support the \+
+    # BRE extension; this pattern is portable to both BSD and GNU sed.
+    new_count="$(echo "$hooks_line" | sed -n 's/.*new=\([0-9][0-9]*\).*/\1/p')"
+    sync_count="$(echo "$hooks_line" | sed -n 's/.*synced=\([0-9][0-9]*\).*/\1/p')"
+
+    if [ "${new_count:-0}" -eq 0 ] && [ "${sync_count:-0}" -eq 0 ]; then
+        printf '  [ok]   %s: scripts/hooks in sync with lib/hooks (%s)\n' "$label" "${hooks_line#    }"
+        return
+    fi
+
+    printf '  [FAIL] %s: scripts/hooks/ has drifted from lib/hooks/ (%s)\n' "$label" "${hooks_line#    }" >&2
+    # shellcheck disable=SC2001 # multi-line prefix; no pure param-expansion equivalent
     echo "$out" | sed 's/^/    /' >&2
     FAIL=1
 }
