@@ -695,6 +695,11 @@ func (e *SDKEngine) dispatchLine(line []byte) {
 
 // writeWithTimeout writes b to w within sidecarWriteTimeout.
 // On timeout, doClose() is called to unblock any blocked write goroutine.
+//
+// See stdin_write.go (awaitStdinWrite) for why the closed/timeout outcomes
+// are only reported when the write goroutine has not already produced a
+// result — otherwise a write that completed at nearly the same instant the
+// engine closed could be misreported as failed.
 func (e *SDKEngine) writeWithTimeout(w io.Writer, b []byte) error {
 	done := make(chan error, 1)
 	go func() {
@@ -702,17 +707,17 @@ func (e *SDKEngine) writeWithTimeout(w io.Writer, b []byte) error {
 		done <- err
 	}()
 
-	select {
-	case err := <-done:
-		if err != nil {
-			return fmt.Errorf("interactive: sdk engine: stdin write: %w", err)
-		}
-		return nil
-	case <-time.After(sidecarWriteTimeout):
+	err, timedOut, closed := awaitStdinWrite(done, e.closed, time.After(sidecarWriteTimeout))
+	switch {
+	case timedOut:
 		e.doClose()
 		return fmt.Errorf("interactive: sdk engine: stdin write timed out after %s; engine closed", sidecarWriteTimeout)
-	case <-e.closed:
+	case closed:
 		return fmt.Errorf("interactive: sdk engine: engine closed during write")
+	case err != nil:
+		return fmt.Errorf("interactive: sdk engine: stdin write: %w", err)
+	default:
+		return nil
 	}
 }
 

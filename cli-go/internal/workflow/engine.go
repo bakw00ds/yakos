@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -349,8 +350,14 @@ func (e *Engine) run(
 
 	rs.markRunDone(success)
 
-	// Stop debounce (final flush included).
-	rs.stopDebounce()
+	// Stop debounce (final flush included). A non-nil error here (K-88)
+	// means run.json on disk may not reflect rs.Status even though the run
+	// itself is genuinely done in memory — log it loudly rather than let a
+	// stuck-looking run.json go unexplained.
+	if err := rs.stopDebounce(); err != nil {
+		slog.Error("workflow: run: final run.json persist failed; on-disk state may be stale",
+			"run_id", runID, "status", rs.Status, "err", err)
+	}
 
 	// Publish run.finished. (K3 — see run.started above.)
 	if e.Bus != nil {

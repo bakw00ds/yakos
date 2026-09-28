@@ -130,9 +130,39 @@ func startNetworkedServer(t *testing.T, tlsCfg *tls.Config) (baseURL string, srv
 		}
 	}
 
-	// Give the server a moment to start accepting.
-	time.Sleep(50 * time.Millisecond)
+	waitForListen(t, addr)
 	return baseURL, srv, teardown
+}
+
+// waitForListen polls addr with a bare TCP dial until a connection succeeds
+// or the deadline passes, then closes that probe connection.
+//
+// Every consoleui.Server in this file is started via `go func() {
+// srv.Serve(ctx) }()` against an already-open, test-created net.Listener
+// (so the socket is bound before Serve is even called) — but Serve() itself
+// still does its own setup (mode/TLS validation, then `go
+// s.httpSrv.Serve(ln)`) on that goroutine before the server is actually
+// accepting protocol traffic. A fixed "give the server a moment" sleep
+// before the real dial (TLS/WS/HTTP) is a K-88-class flake: on a slow or
+// contended runner (Windows CI in particular; see
+// work/current/reports/h1-flakes-2026-09-28.md) the goroutine may not have
+// reached Serve() yet when the sleep elapses, so the real dial can race a
+// server that isn't listening/serving. Polling a cheap TCP dial removes the
+// fixed-duration guess: it returns as soon as the socket actually accepts,
+// and tolerates a slow runner up to the deadline instead of failing at a
+// hardcoded instant.
+func waitForListen(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("waitForListen: %s did not accept connections within 10s", addr)
 }
 
 // doTLSGet issues a GET to url using the given *tls.Config.  Returns the response
@@ -594,7 +624,7 @@ func TestConsoleBind_Presence_CertCN_Integration(t *testing.T) {
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	time.Sleep(80 * time.Millisecond) // wait for server to accept
+	waitForListen(t, addr)
 
 	// Dial WS over TLS using the client cert.
 	// Use a custom dial function so we can pass the mTLS clientTLSCfg to the
@@ -769,7 +799,7 @@ func TestConsoleBind_ExternalHosts_CSP_UsesFirstHost(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = srv.Serve(ctx) }()
-	time.Sleep(50 * time.Millisecond)
+	waitForListen(t, addr)
 
 	resp, err := doTLSGet(t, "https://"+addr+"/", clientTLSCfg)
 	if err != nil {
@@ -898,7 +928,7 @@ func startHybridServer(t *testing.T) (*hybridServerConfig, *tls.Config) {
 	go func() {
 		errCh <- srv.Serve(ctx)
 	}()
-	time.Sleep(60 * time.Millisecond)
+	waitForListen(t, addr)
 
 	teardown := func() {
 		cancel()
@@ -1253,8 +1283,8 @@ func TestConsoleBind_LoopbackDefault_Unchanged(t *testing.T) {
 	}()
 
 	// The loopback server should start successfully (loopback listener, no TLS).
+	waitForListen(t, tcpLn.Addr().String())
 	addr := "http://" + tcpLn.Addr().String()
-	time.Sleep(50 * time.Millisecond)
 
 	resp, httpErr := http.Get(addr + "/") //nolint:noctx
 	if httpErr != nil {
