@@ -7,6 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.59.0.0] — 2026-09-28
+
+### Added
+
+- **`yakos doctor --preflight`** (H-1): a fast Go-only session-start check
+  covering `gh auth` scopes, git usability (including macOS Xcode-license
+  detection), `YAKOS_ROOT`/`YAKOS_LIB` sanity (worktree aliasing and
+  case-mismatch detection), framework checkout cleanliness, stale
+  worktrees/branches, CLI↔daemon build-id handshake, and kanban board
+  health. `yakos start`'s banner now points at it. Go-only by design;
+  bash falls back with a clear error under an explicit `YAKOS_IMPL=bash`.
+- **`tests/check-hook-mirror.sh`** CI gate: fails the build if the tracked
+  `scripts/hooks/` mirror drifts from `lib/hooks/`; paired with
+  `tests/run-check-hook-mirror-test.sh`, a self-check for the gate.
+- **`lib/rules/verification-discipline.md`**, a new always-loaded rule
+  defining the pre-PR bar: mutation-tested regression tests, differential
+  equivalence proof for behavior-neutral changes, adversarial cases
+  beyond the fixture corpus, a call-site coverage table for security
+  findings, `t.TempDir()`-only tests, and pre-existing-failure
+  classification — with implementers (`backend`, `frontend`, `mobile`,
+  `database`, `maintainer`, `devops-engineer`, `data-engineer`) gaining a
+  matching "Definition of done" section, and `test-runner`,
+  `code-reviewer`, `security-reviewer`, `troubleshooter`, and
+  `lead-template` gaining companion changes (diff-scoped verification,
+  explicit review output contracts, ship-loop cadence, flake-triage
+  recipe).
+
+### Fixed
+
+- **Framework self-sweep** (K-91): `refresh`'s project scan no longer
+  sweeps the framework's own repo (or a worktree of it) under
+  `scope:all`; daemon-facing callers now exclude `YakosRoot` explicitly.
+  `refresh.Run` also refuses to apply against a project path equal to
+  `YakosRoot` under test.
+- **Settings-merge duplicate hook registrations**: a settings.json whose
+  hook commands used an absolute checkout path instead of the
+  `${CLAUDE_PROJECT_DIR}` macro form previously got the template's
+  registration added *alongside* the existing one for every hook,
+  double-firing each one. Merge now keys on a canonical hook name and
+  replaces in place.
+- **Agent symlinks pinned to the canonical checkout**: `~/.claude/agents/*.md`
+  symlinks no longer get re-pointed at a git worktree by a refresh/install
+  run from a worktree binary; `syncAgents` detects the worktree case and
+  redirects to the canonical checkout, refusing rather than symlinking
+  into a worktree it can't confirm.
+- **Parity-test hardcoded path** (K-92): `paritytest.bashBinary()` no
+  longer hardcodes the canonical checkout path, so version-parity and
+  validate-parity tests work correctly from any worktree; a related bug
+  where `Capture()` wrote un-normalized goldens for cases combining
+  `CompareGolden` with a stdout transform is also fixed.
+- **CI flakes closed, not quarantined** (K-88): a genuine write/close
+  `select` priority race in `internal/interactive`'s SDK engine and
+  session handling, plus leaked test sessions and sleep-based test
+  synchronization; `internal/consoleui` poll deadlines widened for
+  contended CI runners and fixed-sleep waits replaced with condition
+  polls. The previously-flagged `internal/dispatch` Windows flakes were
+  confirmed stale (already resolved by #260) and documented, not
+  code-changed.
+- **`os.Rename` persist failures surfaced**: run-state persistence now
+  retries a Windows sharing-violation on rename with backoff and surfaces
+  any remaining error instead of discarding it silently.
+- **`tests/check-hook-mirror.sh` false positive**: the gate's verdict was
+  folding unrelated `settings.json` drift into the same PASS/FAIL as the
+  `scripts/hooks/` mirror check it exists to enforce, and its `new=`/`synced=`
+  extraction regex silently matched nothing on macOS's BSD `sed`. Now
+  parses the `hooks:` summary line directly and uses a portable regex.
+- **`TestQuickstart_Binary_NonGit`** no longer leaks a `.claude/settings.json`
+  into the real repo checkout (missing `cmd.Dir` on its subprocess helper).
+
+### Changed
+
+- **Review from a scratch checkout**: `code-reviewer` and
+  `security-reviewer` now verify from a detached scratch checkout of the
+  pushed sha rather than the implementer's live worktree, and state the
+  sha reviewed.
+- **`lead-dispatch-discipline`**: added a loop-cadence section (dispatch
+  review on push, not on green CI; lead owns background CI watch; one
+  narrow follow-up agent per round; classify red jobs before rerun;
+  merge on SHIP + green) and a session-preflight checklist.
+- **`git-hygiene`**: bans deriving edit/write paths from
+  `YAKOS_ROOT`/`YAKOS_LIB` (case-insensitive filesystem aliasing risk),
+  adds a pre-merge working-tree drift check, and requires removing a
+  merged worktree and its branch immediately.
+- **CI action pins**: `codeql-action` (init/analyze) to v4.38.2,
+  `actions/setup-go` to v7.0.0 across all five workflows that use it,
+  `softprops/action-gh-release` to v3.0.3.
+
+### Known issues / follow-ups
+
+- K-81 — Hooks follow-ups from S-1 (refresh hook-dir walk, plan-quality-gate
+  fail-closed split, per-domain fixture harness).
+- K-83 — Flows output-injection scan follow-ups (window coverage,
+  hook-script integrity check, pattern-set gaps, per-node opt-out).
+- K-86 — `validateProjectPath` should use `os.SameFile` instead of string
+  denylist matching; remaining S-2 review deferrals.
+- K-87 — Structural hooks/CLI-flag follow-ups (fixture coverage for 10
+  hooks, `--hooks-impl go|hybrid` switch, remaining cliflag conversions).
+- K-89 — `cycle-counter.sh`'s `auto_dispatch: false` isn't honored (jq
+  `//` treats `false` as null); retro auto-dispatch can't be disabled.
+- K-90 — `team-lifecycle` kanban auto-move drops a task that's the literal
+  last line of `kanban.md` with no trailing content (bash and Go, shared
+  bug).
+- K-94 — Hook-mirror layout divergence between bash's `_sync_hooks`
+  (preserves `legacy/` subdir) and Go's `syncHooks` (flattens it); pick
+  one algorithm.
+- K-95 — `RunState.LastPersistError()` (new in this release) is only
+  logged, not surfaced to API consumers on `GetRun`/`run.json` status.
+- K-93's `doctor --preflight` stale-worktree heuristic has a known false
+  positive: a fresh branch that merely equals `main`'s tip gets flagged
+  as stale/merged.
+
 ## [0.58.0.0] — 2026-09-24
 
 ### Security
