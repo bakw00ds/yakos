@@ -14,8 +14,14 @@
 //
 // # Binary resolution
 //
-// Bash yakos: $YAKOS_BASH_BINARY (default: /Users/tw/github/yakOS/cli/yakos)
-// Go yakos:   $YAKOS_GO_BINARY   (default: ./bin/yakos relative to the repo root)
+// Bash yakos: $YAKOS_BASH_BINARY (default: cli/yakos relative to the repo root)
+// Go yakos:   $YAKOS_GO_BINARY   (default: bin/yakos relative to the repo root)
+//
+// Both defaults resolve the repo root relative to this package's own source
+// file (runtime.Caller), so they always point at whichever checkout or
+// worktree the running test binary was built from — never a hardcoded
+// canonical path. Set the env var overrides to compare against a fixed
+// reference build instead.
 //
 // # Golden files
 //
@@ -166,6 +172,19 @@ func Run(t *testing.T, c Case) {
 
 // Capture runs only bash yakos and writes its output to golden files.
 // Called by Run when -update-goldens is set, or directly to seed baselines.
+//
+// BUG FIX (K-92 follow-on): this previously wrote r.Stdout RAW to the golden
+// file, but Run's CompareGolden path compares the golden against goData
+// AFTER c.StdoutTransformGo has been applied. For any Case combining
+// StdoutCompare: CompareGolden with a StdoutTransformBash/StdoutTransformGo
+// pair (TestVersionParity is the canonical example — bash emits
+// "yakos 0.58.0.0", Go emits "0.58.0.0 (go)", both normalized to
+// "0.58.0.0\n" for comparison), the untransformed golden could never match
+// the transformed Go output: -update-goldens always "succeeds" (Capture has
+// no assertions), silently writing a golden that the very next plain
+// (comparison-mode) run then fails against. Capture now applies
+// StdoutTransformBash before writing, so the golden is captured in the same
+// normalized form it will be compared against.
 func Capture(t *testing.T, c Case) {
 	t.Helper()
 
@@ -173,13 +192,18 @@ func Capture(t *testing.T, c Case) {
 	workdir := setupWorkdir(t, c)
 	r := invoke(t, "bash", bashBin, c.Args, c.Env, c.Stdin, workdir)
 
+	stdout := r.Stdout
+	if c.StdoutTransformBash != nil {
+		stdout = c.StdoutTransformBash(stdout)
+	}
+
 	goldenDir := callerGoldenDir(t, c)
 	if err := os.MkdirAll(goldenDir, 0755); err != nil {
 		t.Fatalf("paritytest: creating golden dir %s: %v", goldenDir, err)
 	}
 
 	base := goldenBase(goldenDir, c.Name)
-	mustWriteGolden(t, base+".stdout", r.Stdout)
+	mustWriteGolden(t, base+".stdout", stdout)
 	mustWriteGolden(t, base+".stderr", r.Stderr)
 	mustWriteGolden(t, base+".exit", []byte(strconv.Itoa(r.ExitCode)+"\n"))
 }
@@ -206,12 +230,21 @@ func MakeFixtureProject(t testing.TB, layout map[string]string) string {
 // ---- internal helpers -------------------------------------------------------
 
 // bashBinary returns the bash yakos binary path from $YAKOS_BASH_BINARY or
-// the default hard-coded location relative to the repo root.
+// the default location derived from the repo root (cli/yakos), resolved the
+// same way goBinary resolves its default — relative to this source file via
+// runtime.Caller, never a hardcoded checkout path. A hardcoded path (this
+// function's shape prior to K-92) only ever worked from one specific
+// canonical checkout; every worktree, every renamed clone, and every
+// version bump made from a worktree (whose VERSION differs from the
+// hardcoded path's until the branch merges) failed parity comparisons for
+// reasons unrelated to the change under test. See work/current/reports/
+// release-0.58.0.0-prep-2026-09-24.md §4 for the release-prep session that
+// hit this exact false failure.
 func bashBinary() string {
 	if v := os.Getenv("YAKOS_BASH_BINARY"); v != "" {
 		return v
 	}
-	return "/Users/tw/github/yakOS/cli/yakos"
+	return filepath.Join(repoRootFromSource(), "cli", "yakos")
 }
 
 // goBinary returns the Go yakos binary path from $YAKOS_GO_BINARY or the
@@ -220,16 +253,22 @@ func goBinary() string {
 	if v := os.Getenv("YAKOS_GO_BINARY"); v != "" {
 		return v
 	}
-	// Default: locate the repo root relative to this source file and return
-	// <repo-root>/bin/yakos.
+	return filepath.Join(repoRootFromSource(), "bin", "yakos")
+}
+
+// repoRootFromSource locates the repo root relative to this source file
+// (paritytest.go, at <repo-root>/cli-go/internal/paritytest/paritytest.go)
+// via runtime.Caller, so it always resolves to whichever checkout/worktree
+// the running test binary was actually built from — never a fixed path.
+// Falls back to "." (repo-root-relative-to-cwd) if the caller info is
+// unavailable, matching goBinary's historical fallback behavior.
+func repoRootFromSource() string {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
-		// Fallback: relative path from cwd.
-		return "./bin/yakos"
+		return "."
 	}
 	// thisFile = <repo>/cli-go/internal/paritytest/paritytest.go
-	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..", "..")
-	return filepath.Join(repoRoot, "bin", "yakos")
+	return filepath.Join(filepath.Dir(thisFile), "..", "..", "..")
 }
 
 // setupWorkdir creates a temp dir and runs c.WorkdirSetup in it if non-nil.
