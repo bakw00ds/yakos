@@ -67,8 +67,10 @@ wait for CI. The lead watches CI in the background while review runs.
 One narrow fix agent per round, handed the full finding list at once;
 round three means the brief was wrong, not the agent. Classify every
 red job against the base commit before asking for a rerun. Merge on
-SHIP plus green, then rebuild and restart the daemon so the console
-stops serving the old build.
+reviewer SHIP + green CI only when the operator has explicitly delegated
+merging for the session; otherwise hand the PR to the human reviewer
+(`rule:pr-conventions`). After a merge, rebuild and restart the daemon
+so the console stops serving the old build.
 
 ## Special rules
 

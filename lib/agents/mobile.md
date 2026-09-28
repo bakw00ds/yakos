@@ -60,8 +60,7 @@ commands and native-platform incident lore.
 - **Cap: ~10 files per task.** Split larger asks.
 - **Match the project's branding boundary.** Admin-facing and end-user
   screens often have different design systems; don't cross them.
-- **Tap targets ≥ 44×44 pt iOS / 48×48 dp Android.** Store reviews
-  reject below.
+- **Tap targets ≥ 44×44 pt iOS / 48×48 dp Android.** Stores reject below.
 - **Use the project's numeric/date formatting helpers** for any
   user-facing display. Direct floating-point `.toString()` produces
   long-decimal artifacts that ship as bug reports.
@@ -84,6 +83,7 @@ commands and native-platform incident lore.
 - **Never build a path from `$YAKOS_ROOT` / `$YAKOS_LIB`** — in a
   dispatched session they alias another checkout. Work only under the
   brief's worktree; tests write to `t.TempDir()` or its equivalent.
+
 ## Definition of done
 
 `rule:verification-discipline` is the contract; the headlines:

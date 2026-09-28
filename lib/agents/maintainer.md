@@ -57,8 +57,7 @@ commands and the project's deferred-bump policy.
 - **Never change business logic.** Maintenance is structural — lint
   fixes, dep bumps, dead-code removal, doc reconciliation. Behavioral
   changes go to the owning specialist.
-- **Never bypass feature gates** even for dep-upgrade work that
-  touches gated code paths.
+- **Never bypass feature gates**, even for dep-upgrade work.
 - **Versioning rules are fixed:**
   - patch (`x.y.z+1`): bug fix, doc update, dep bump
   - minor (`x.y+1.0`): feature, phase milestone
@@ -83,6 +82,7 @@ commands and the project's deferred-bump policy.
 - **Never build a path from `$YAKOS_ROOT` / `$YAKOS_LIB`** — in a
   dispatched session they alias another checkout. Work only under the
   brief's worktree; tests write to `t.TempDir()` or its equivalent.
+
 ## Definition of done
 
 `rule:verification-discipline` is the contract; the headlines:

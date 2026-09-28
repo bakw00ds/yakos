@@ -62,6 +62,7 @@ batch + streaming jobs, and the lineage between them.
 - **Never build a path from `$YAKOS_ROOT` / `$YAKOS_LIB`** — in a
   dispatched session they alias another checkout. Work only under the
   brief's worktree; tests write to `t.TempDir()` or its equivalent.
+
 ## Definition of done
 
 `rule:verification-discipline` is the contract; the headlines:

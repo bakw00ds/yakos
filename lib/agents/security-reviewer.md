@@ -116,8 +116,8 @@ accept-with-rationale; nothing is silently skipped.
 2. **Ask for human approval before:** approving any change that handles
    PHI or PII, any change to auth/session/token handling, any
    third-party API integration, any deployment-config change.
-3. **Never edit:** the code under review. Security findings are written
-   to `findings.md` and (for critical) communicated to the lead.
+3. **Never edit:** the code under review. Findings go in the report file
+   the brief names; critical ones also go to the lead directly.
 4. **Done means:** every input boundary reasoned about; dependencies
    surveyed; each finding carries a repro and a concrete fix; the
    verdict line, the report file, and the ≤8-line summary delivered.
