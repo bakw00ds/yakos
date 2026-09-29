@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -55,13 +56,30 @@ func lookPath(name, pathVar string) string {
 		}
 		return ""
 	}
+	names := []string{name}
+	if runtime.GOOS == "windows" {
+		// Windows resolves through PATHEXT (yakos.exe), and has no exec bit.
+		names = nil
+		exts := os.Getenv("PATHEXT")
+		if exts == "" {
+			exts = ".EXE;.CMD;.BAT"
+		}
+		for _, e := range strings.Split(exts, ";") {
+			if e != "" {
+				names = append(names, name+strings.ToLower(e))
+			}
+		}
+	}
 	for _, dir := range filepath.SplitList(pathVar) {
 		if dir == "" {
 			dir = "."
 		}
-		p := filepath.Join(dir, name)
-		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0 {
-			return p
+		for _, n := range names {
+			p := filepath.Join(dir, n)
+			if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() &&
+				(runtime.GOOS == "windows" || st.Mode().Perm()&0o111 != 0) {
+				return p
+			}
 		}
 	}
 	return ""
@@ -78,6 +96,8 @@ func buildTask(bufferPath, findingsPath, decisionsPath string, scoreEvery int) s
 		}
 		intent = strings.TrimRight(string(data), "\n")
 	}
+	// Bash builds these from slash paths (Git-bash too); keep the text identical.
+	bufferPath, findingsPath = filepath.ToSlash(bufferPath), filepath.ToSlash(findingsPath)
 	return fmt.Sprintf("Read %s (the last 50 tool calls; focus on the most recent %d).\n"+
 		"Apply the rubric in your persona. Write your finding as a single\n"+
 		"JSON line appended to %s.\n\n"+

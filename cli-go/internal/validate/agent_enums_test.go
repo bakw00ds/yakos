@@ -100,6 +100,7 @@ func TestAgentEnums_PluginRuntimeAccepted(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "x.md"), []byte("---\nid: x\nruntime: myplug\n---\n# X\n"+strings.Repeat("filler\n", 90)), 0o644)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	_ = os.MkdirAll(filepath.Join(home, ".yakos", "plugins", "myplug"), 0o755)
 	_ = os.WriteFile(filepath.Join(home, ".yakos", "plugins", "myplug", "runtime.sh"), []byte("#!/bin/sh\n"), 0o755)
 	var buf bytes.Buffer

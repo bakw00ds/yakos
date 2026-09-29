@@ -78,9 +78,10 @@ func TestLaunchAtThreshold_MatchesBash(t *testing.T) {
 	if sp.CLI != "/fake/yakos" {
 		t.Errorf("CLI=%q", sp.CLI)
 	}
-	wantTask := "Read " + work + "/supervisor-buffer.ndjson (the last 50 tool calls; focus on the most recent 3).\n" +
+	sw := filepath.ToSlash(work)
+	wantTask := "Read " + sw + "/supervisor-buffer.ndjson (the last 50 tool calls; focus on the most recent 3).\n" +
 		"Apply the rubric in your persona. Write your finding as a single\n" +
-		"JSON line appended to " + work + "/supervisor-findings.ndjson.\n\n" +
+		"JSON line appended to " + sw + "/supervisor-findings.ndjson.\n\n" +
 		"Stated intent of the active session: ship the thing"
 	want := []string{"dispatch", "watcher", wantTask, "--runtime", "codex", "--model", "sonnet"}
 	if strings.Join(sp.Args, "\x00") != strings.Join(want, "\x00") {
@@ -175,12 +176,16 @@ func TestLaunchFindsCLIViaYakosRootThenPath(t *testing.T) {
 	}
 
 	bin := t.TempDir()
-	_ = os.WriteFile(filepath.Join(bin, "yakos"), []byte("#!/bin/sh\n"), 0o755)
+	exe := "yakos"
+	if runtime.GOOS == "windows" {
+		exe = "yakos.exe"
+	}
+	_ = os.WriteFile(filepath.Join(bin, exe), []byte("#!/bin/sh\n"), 0o755)
 	rec2 := &recorder{}
 	h2 := newHook(t.TempDir(), proj)
 	h2.Launch = rec2.launch
 	bigEdit(t, h2, map[string]string{"PATH": bin}, 1)
-	if len(rec2.specs) != 1 || rec2.specs[0].CLI != filepath.Join(bin, "yakos") {
+	if len(rec2.specs) != 1 || rec2.specs[0].CLI != filepath.Join(bin, exe) {
 		t.Fatalf("PATH lookup: %+v", rec2.specs)
 	}
 }

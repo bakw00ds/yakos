@@ -1041,12 +1041,21 @@ func inSet(v string, set []string) bool {
 	return false
 }
 
+// homeDir prefers $HOME like the bash validator, then the OS notion of home.
+func homeDir() string {
+	if h := os.Getenv("HOME"); h != "" {
+		return h
+	}
+	h, _ := os.UserHomeDir()
+	return h
+}
+
 // runtimeKnown reports whether id is a built-in or plugin runtime.
 func runtimeKnown(id string) bool {
 	if inSet(id, knownRuntimes) {
 		return true
 	}
-	if home, err := os.UserHomeDir(); err == nil && id != "" && !strings.ContainsAny(id, "/\\") && id != "." && id != ".." {
+	if home := homeDir(); home != "" && id != "" && !strings.ContainsAny(id, "/\\") && id != "." && id != ".." {
 		if fileExists(filepath.Join(home, ".yakos", "plugins", id, "runtime.sh")) {
 			return true
 		}
