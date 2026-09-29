@@ -64,7 +64,9 @@ if [ -f "$settings_file" ] && command -v jq >/dev/null 2>&1; then
     # NOTE: jq's `//` operator treats `false` as an alternative trigger, so
     # `.retro.auto_dispatch // true` would return `true` when the value is
     # the boolean `false`. Use explicit null check instead.
-    val="$(jq -r 'if .retro.auto_dispatch == false then "false" else "true" end' \
+    # Boolean false AND the string "false" disable, matching cycle-counter.sh
+    # and `yakos retro status`.
+    val="$(jq -r 'if (.retro.auto_dispatch == false or .retro.auto_dispatch == "false") then "false" else "true" end' \
         "$settings_file" 2>/dev/null || true)"
     [ "$val" = "false" ] && auto_dispatch=false
 fi
