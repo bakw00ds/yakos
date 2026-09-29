@@ -91,11 +91,11 @@ classes:
 - **Bash bug.** Go deliberately does not reproduce a bash weakness. Each one
   is listed in the K-87 A-2b report for a bash-side fix.
 
-Current matrix (K-107, `bash tests/run-hook-parity.sh`): 214 of 259 comparisons
-at exact parity, plus 20 accepted, pinned divergences. It was 202 of 251 plus
+Current matrix (K-107, `bash tests/run-hook-parity.sh`): 215 of 259 comparisons
+at exact parity, plus 19 accepted, pinned divergences. It was 202 of 251 plus
 21 accepted after #300. The changes: two new `agent_type` fixtures, four
 plan-quality-gate and two plan-quality-score cases, and the context-threshold
-cases moving from accepted to exact (log schema and transcript path fixed).
+cases moving from accepted to exact (log schema and transcript path fixed), and the supervisor-gate non-object case now exact.
 The 25 remaining unaccepted divergences are advisory (non-gated hooks).
 
 `YAKOS_PARITY_ONLY`, `YAKOS_PARITY_FIXTURE` and `YAKOS_PARITY_VERBOSE=1` narrow
