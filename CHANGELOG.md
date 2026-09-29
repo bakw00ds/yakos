@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Survey bug batch (K-112).** Seven pre-existing bugs from the K-111
+  design survey and this week's reviews:
+  - `supervisor-stream` (bash and Go) now inspects `tool_input.command`
+    and `tool_input.description`, so Bash calls such as `rm -rf`,
+    `curl | sh`, `git push --force` and `>` writes to `.env`, `.ssh/`,
+    `/etc/` or `.claude/settings` reach the risk regexes. The buffer
+    gains `command_preview` and `description_preview` (300 bytes, not
+    redacted, like the existing previews); the scanned text is capped at
+    2048 bytes.
+  - The Go `supervisor-stream` now launches the supervisor at the score
+    threshold, like bash (`yakos dispatch <agent> <task> --runtime R
+    --model M`, detached, same `.supervisor-*.log` files and log
+    records). It used to write a `.supervisor-dispatch-ready` marker that
+    nothing read, so the LLM tier never ran under `YAKOS_HOOKS=go`. The
+    marker is gone.
+  - `general-agy` pins `runtime: agy` instead of the removed `gemini`
+    shim. `yakos validate` (bash and Go) rejects an agent whose
+    `runtime:` or `runtime-fallback:` is not a known runtime;
+    `gemini` still validates but warns (an error under `--strict`).
+  - `model-routing-eval` no longer sets `model-policy: pinned`, which
+    made `yakos dispatch` die with "invalid model tier". `model-policy`
+    is the promoted model tier; `yakos validate` now rejects any value
+    that is not `haiku`, `sonnet`, `opus` or `fable`, and
+    `lib/agents/README.md` documents that instead of a policy enum no code
+    read.
+  - `plan-quality-score` (bash and Go) scores a freshly written
+    `plan.md`. The old "skip when mtime is under 5 s old" rule skipped
+    every fire, because the hook runs right after the write. The
+    debounce is now keyed on the last scored mtime: the same version is
+    never scored twice and a re-save under 5 s after a scoring is
+    collapsed. State: `work/current/.plan-quality-last-scored`.
+    **Behavior change:** a plan is now scored on the write that saves it,
+    which spends one judge panel per distinct version, at most one per 5 s.
+  - `context-threshold` (bash and Go) looks for
+    `~/.claude/projects/<encoded>/<session>.jsonl`, the name Claude Code
+    writes. It looked for `transcript-<session>.jsonl`, which never
+    exists, so the 75% notice and 90% auto-checkpoint never fired.
+  - `YAKOS_HOOK_JQ_TIMEOUT` is clamped to 1..25 instead of 1..30. The
+    generated hook timeout is 30 s, so at 30 Claude Code's timeout fired
+    first and let the tool call through.
+
 ## [0.60.1.0] — 2026-09-29
 
 > **Breaking (K-98):** an unmapped client-cert CN now gets no access
