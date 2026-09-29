@@ -267,27 +267,13 @@ func runCompact(args []string) {
 	//   yakos compact threshold N        → set notice threshold to N
 	//   yakos compact threshold --auto N → set auto-compact threshold to N
 	if sub == "threshold" {
-		// Deliberately NOT converted to cliflag: this loop only ever
-		// recognized the space form ("--auto 85"). "--auto=85" is an
-		// ordinary positional here (and then fails "too many arguments" or
-		// the threshold validation), whereas cliflag.Set always recognizes
-		// "--name=value" for String specs. Converting would silently start
-		// accepting "--auto=85". Revisit if cliflag grows a space-only Spec
-		// option.
+		// cliflag also accepts "--auto=85" (the old loop treated it as a
+		// positional and then failed); accepting the "=" form is intended.
 		autoArg := ""
-		positional := []string{}
-		for i := 0; i < len(rest); i++ {
-			if rest[i] == "--auto" {
-				if i+1 >= len(rest) {
-					fmt.Fprintln(os.Stderr, "compact threshold: --auto requires a value (e.g. --auto 85)")
-					os.Exit(1)
-				}
-				autoArg = rest[i+1]
-				i++ // consume the value
-			} else {
-				positional = append(positional, rest[i])
-			}
-		}
+		fs := &cliflag.Set{Cmd: "compact threshold", Specs: []cliflag.Spec{
+			{Name: "--auto", Kind: cliflag.String, Str: &autoArg, ValueDesc: "a value (e.g. --auto 85)"},
+		}}
+		positional := parseWorkFlags(fs, rest)
 		if len(positional) > 1 {
 			fmt.Fprintln(os.Stderr, "compact threshold: too many arguments")
 			os.Exit(1)
@@ -728,60 +714,35 @@ func runPlan(yakosRoot string, args []string) {
 		}
 
 	case "correlate":
-		// Deliberately NOT converted to cliflag: the old "--min-n=" branch
-		// tested arg[:7] == "--min-n=" (an 8-char literal against a 7-char
-		// slice), so it was dead code and "--min-n=5" has always been an
-		// "unknown option". cliflag would start accepting it. Left
-		// hand-rolled to keep behavior identical; converting is a one-line
-		// follow-up once cliflag has a space-only Spec option (or the
-		// operator accepts the "=" form as a bug fix).
-		for i := 0; i < len(rest); i++ {
-			arg := rest[i]
-			switch {
-			case arg == "--project":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "plan score correlate: --project requires a value")
-					os.Exit(1)
-				}
-				cfg.Project = rest[i]
-			case len(arg) > 10 && arg[:10] == "--project=":
-				cfg.Project = arg[10:]
-			case arg == "--since":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "plan score correlate: --since requires a value")
-					os.Exit(1)
-				}
-				cfg.Since = rest[i]
-			case len(arg) > 8 && arg[:8] == "--since=":
-				cfg.Since = arg[8:]
-			case arg == "--min-n":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "plan score correlate: --min-n requires a value")
-					os.Exit(1)
-				}
-				n, err := strconv.Atoi(rest[i])
-				if err != nil || n <= 0 {
-					fmt.Fprintf(os.Stderr, "plan score correlate: --min-n %q must be a positive integer\n", rest[i])
-					os.Exit(1)
-				}
-				cfg.MinN = n
-			case len(arg) > 7 && arg[:7] == "--min-n=":
-				n, err := strconv.Atoi(arg[7:])
-				if err != nil || n <= 0 {
-					fmt.Fprintf(os.Stderr, "plan score correlate: --min-n value %q must be a positive integer\n", arg[7:])
-					os.Exit(1)
-				}
-				cfg.MinN = n
-			case arg == "-h" || arg == "--help":
+		// "--min-n=5" is now accepted: the old "--min-n=" branch compared an
+		// 8-char literal to a 7-char slice, so it was dead code and the "="
+		// form was always "unknown option"; accepting it is intended.
+		var minNVals []string
+		fs := &cliflag.Set{Cmd: "plan score correlate", Specs: []cliflag.Spec{
+			{Name: "--project", Kind: cliflag.String, Str: &cfg.Project, ValueDesc: "a value"},
+			{Name: "--since", Kind: cliflag.String, Str: &cfg.Since, ValueDesc: "a value"},
+			// Repeatable so every occurrence is validated in order; last wins.
+			{Name: "--min-n", Kind: cliflag.StringSlice, Slice: &minNVals, ValueDesc: "a value"},
+		}}
+		for _, arg := range parseWorkFlags(fs, rest) {
+			if arg == "-h" || arg == "--help" {
 				planscore.PrintHelp(os.Stdout)
 				os.Exit(0)
-			default:
-				fmt.Fprintf(os.Stderr, "plan score correlate: unknown option %q (try --help)\n", arg)
+			}
+			fmt.Fprintf(os.Stderr, "plan score correlate: unknown option %q (try --help)\n", arg)
+			os.Exit(1)
+		}
+		for _, val := range minNVals {
+			n, err := strconv.Atoi(val)
+			if err != nil || n <= 0 {
+				if flagValueUsedEquals(rest, "--min-n", val) {
+					fmt.Fprintf(os.Stderr, "plan score correlate: --min-n value %q must be a positive integer\n", val)
+				} else {
+					fmt.Fprintf(os.Stderr, "plan score correlate: --min-n %q must be a positive integer\n", val)
+				}
 				os.Exit(1)
 			}
+			cfg.MinN = n
 		}
 
 	case "-h", "--help", "help", "":

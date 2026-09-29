@@ -467,13 +467,12 @@ func TestSelectImpl(t *testing.T) {
 	}
 }
 
-// TestIsDoctorPreflightForceGo verifies the narrow routing override that
-// forces `doctor --preflight` to reach the Go-native implementation even
+// TestIsDoctorForceGo verifies the routing override that
+// forces `doctor` (any flags) to reach the Go-native implementation even
 // under YAKOS_IMPL unset (shadow-mode) or YAKOS_IMPL=go, while honoring an
 // explicit YAKOS_IMPL=bash. Mutation proof: removing the `impl == "bash"`
-// early-return, the `args[0] != "doctor"` guard, or the `--preflight` scan
-// entirely each flip at least one of these cases.
-func TestIsDoctorPreflightForceGo(t *testing.T) {
+// early-return or the `args[0] != "doctor"` guard each flip at least one of these cases.
+func TestIsDoctorForceGo(t *testing.T) {
 	tests := []struct {
 		impl string
 		args []string
@@ -483,17 +482,19 @@ func TestIsDoctorPreflightForceGo(t *testing.T) {
 		{"", []string{"doctor", "--preflight"}, true, "unset impl + doctor --preflight → force go"},
 		{"go", []string{"doctor", "--preflight"}, true, "impl=go + doctor --preflight → force go (already go, but stays true)"},
 		{"bash", []string{"doctor", "--preflight"}, false, "impl=bash explicit → honored, no override"},
-		{"", []string{"doctor"}, false, "doctor with no flags → no override"},
-		{"", []string{"doctor", "--probe-runtime"}, false, "doctor with unrelated flag → no override"},
+		{"", []string{"doctor"}, true, "bare doctor, unset impl → force go (bash doctor.sh lacks Go-only checks)"},
+		{"go", []string{"doctor"}, true, "bare doctor, impl=go → force go"},
+		{"bash", []string{"doctor"}, false, "bare doctor, impl=bash explicit → honored"},
+		{"", []string{"doctor", "--probe-runtime"}, true, "doctor with other flag → force go"},
 		{"", []string{"start", "--preflight"}, false, "--preflight on a different command → no override (not doctor's flag)"},
 		{"", []string{}, false, "empty args → no override"},
 		{"", []string{"doctor", "myproject", "--preflight"}, true, "--preflight after a positional arg → still detected"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got := isDoctorPreflightForceGo(tc.impl, tc.args)
+			got := isDoctorForceGo(tc.impl, tc.args)
 			if got != tc.want {
-				t.Errorf("isDoctorPreflightForceGo(%q, %v) = %v, want %v (%s)",
+				t.Errorf("isDoctorForceGo(%q, %v) = %v, want %v (%s)",
 					tc.impl, tc.args, got, tc.want, tc.desc)
 			}
 		})

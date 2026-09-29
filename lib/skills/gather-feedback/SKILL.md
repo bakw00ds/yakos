@@ -57,10 +57,11 @@ anything that mutates the source systems. Read-only by design.
    / rendering bugs and often resolves the bug/feature/question
    classification on its own. If a screenshot URL is local-fs
    (e.g., a project's own `/uploads/` path), read directly; if it's
-   a remote URL, fetch only when the source contract permits and the
-   project's outbound-HTTP allowlist includes the host. Never read
-   screenshots from sources outside the configured allowlist — that
-   class of read is an SSRF surface. If an image fails to load,
+   a remote URL (e.g., an imgur/CDN link in a public bug tracker), fetch
+   only when the source contract permits and the project's outbound-HTTP
+   allowlist includes the host; otherwise default to URL-only logging.
+   Never read screenshots from sources outside the configured allowlist —
+   that class of read is an SSRF surface. If an image fails to load,
    record the URL + reason in the entry's metadata and continue;
    don't block the rest of the pass on one bad attachment.
 4. **Correlate against deploy timeline (regression-window flagging).**
@@ -324,25 +325,16 @@ can re-open the image without re-running the gather pass.
   attachments and the gather skill skips them, mark the gap in the
   artifact + raise it as a configuration issue rather than silently
   proceeding.
-- **Outbound-fetch allowlist matters for remote screenshot URLs.**
-  When the screenshot URL is on the project's own infra, read the
-  local path directly. When it's a third-party URL (e.g., an
-  imgur/CDN link in a public bug tracker), only fetch if the project
-  configuration permits — otherwise the gather pass becomes an SSRF
-  vector. Default to local reads + URL-only logging for remote.
 - **`--include-resolved` is for retrospective passes only**, not the
   default daily/weekly cadence. Including resolved entries on every
   run clutters triage with already-actioned items; use the flag
   only when verifying the auto-resolve hook is firing correctly or
   when reviewing a closed batch (e.g., post-release retrospective).
-- **`--stale` is for periodic cleanup**, not weekly cadence. The
-  flag flips the time window — it surfaces entries OLDER than the
-  cutoff that are still in `status='new'`, the "we never got around
-  to it" pile. Run quarterly (or before a planning cycle) to force-
-  decide each entry: action / dismiss / dedup / accept-as-known.
-  Running `--stale` weekly produces noise; the answer to "why are
-  these still here?" is usually "because nobody triaged them last
-  week either."
+- **`--stale` is for periodic cleanup**, not weekly cadence (step 2 flips
+  the time window). Run quarterly (or before a planning cycle) to force-
+  decide each entry: action / dismiss / dedup / accept-as-known. Weekly
+  runs are noise: the answer to "why are these still here?" is usually
+  "because nobody triaged them last week either."
 - **Regression-window correlation requires a release timeline.**
   When the project config doesn't expose `release_timeline_path` or
   equivalent, step 4 is skipped silently and the artifact records

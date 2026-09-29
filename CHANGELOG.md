@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CLI and hygiene follow-ups (K-102).** `yakos doctor` warns when a
+  hook command in the project's `settings.json` pins an absolute `yakos`
+  path that no longer exists or is not executable (the hook exits 127,
+  which Claude Code treats as non-blocking, a silent fail-open) and names
+  the fix, `yakos refresh --hooks-impl go`. `doctor` now always routes
+  Go-native, like `hook`, so a checkout that still has the bash tree no
+  longer runs the weaker `doctor.sh` (explicit `YAKOS_IMPL=bash` is still
+  honored). `compact threshold --auto` and `plan score correlate` are
+  converted to `cliflag`: `--auto=85` and `--min-n=5` are now accepted,
+  and `--help` wins over an earlier bad `--min-n`. Shell completion gains
+  the missing top-level commands (`serve`, `refresh`, `upgrade`, `plan`,
+  `work`, `console`, and others) with a test that fails when the router
+  and the bash, zsh and fish templates drift. Agent and skill bodies for
+  `eval-engineer`, `librarian`, `planner`, and `gather-feedback` fit
+  their line budgets without dropping instructions; eval-engineer's
+  calibration procedure moved to `playbook:plan-quality-calibration`.
+
 ## [0.60.0.0] — 2026-09-29
 
 ### Changed

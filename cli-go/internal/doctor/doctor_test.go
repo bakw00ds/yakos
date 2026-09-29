@@ -651,3 +651,60 @@ func TestHookDrift_FlagsNonExecutableHook(t *testing.T) {
 		t.Errorf("expected non-executable warning; output:\n%s", buf.String())
 	}
 }
+
+// A pinned absolute yakos binary that vanished makes the hook exit 127
+// (non-blocking, silent fail-open): doctor must warn with path and fix.
+func TestHookBinaries_WarnsOnMissingPinnedBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits are not meaningful on Windows")
+	}
+	home := makeTmpHome(t)
+	projectPath := t.TempDir()
+	good := filepath.Join(projectPath, "bin ary", "yakos")
+	writeFile(t, good, "#!/bin/sh\n")
+	if err := os.Chmod(good, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(projectPath, "gone", "yakos")
+	noexec := filepath.Join(projectPath, "noexec", "yakos")
+	writeFile(t, noexec, "x")
+	if err := os.Chmod(noexec, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	q := func(p string) string { return "'" + p + "'" }
+	settings := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[
+	 {"type":"command","command":"` + q(gone) + ` hook run --impl go secret-scan"},
+	 {"type":"command","command":"` + q(good) + ` hook run --impl go pre-commit"},
+	 {"type":"command","command":"` + q(noexec) + ` hook run --impl go x"},
+	 {"type":"command","command":"yakos hook run --impl go bare"},
+	 {"type":"command","command":"scripts/hooks/a.sh"}]}]}}`
+	writeFile(t, filepath.Join(projectPath, ".claude", "settings.json"), settings)
+	var buf bytes.Buffer
+	report, _ := Run(Config{HomeDir: home, ProjectPath: projectPath, LookPath: noLookPath,
+		Environ: func(string) string { return "" }, Writer: &buf})
+	out := buf.String()
+	if !strings.Contains(out, gone) || !strings.Contains(out, noexec) ||
+		!strings.Contains(out, "yakos refresh --hooks-impl go") {
+		t.Errorf("expected warn naming both bad binaries and the fix; got:\n%s", out)
+	}
+	if strings.Contains(out, good) {
+		t.Errorf("healthy binary must not be reported:\n%s", out)
+	}
+	if report.Warnings == 0 {
+		t.Error("expected a warning to be counted")
+	}
+}
+
+// Healthy or hook-less projects must add no output (bash doctor parity).
+func TestHookBinaries_SilentWhenHealthy(t *testing.T) {
+	home := makeTmpHome(t)
+	projectPath := t.TempDir()
+	writeFile(t, filepath.Join(projectPath, ".claude", "settings.json"),
+		`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"scripts/hooks/a.sh"}]}]}}`)
+	var buf bytes.Buffer
+	Run(Config{HomeDir: home, ProjectPath: projectPath, LookPath: noLookPath,
+		Environ: func(string) string { return "" }, Writer: &buf}) //nolint:errcheck
+	if strings.Contains(buf.String(), "Project hook binaries") {
+		t.Errorf("unexpected output:\n%s", buf.String())
+	}
+}
