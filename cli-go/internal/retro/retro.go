@@ -20,9 +20,16 @@
 //
 // # State file
 //
-// The auto-dispatch disabled flag is stored as an empty sentinel file at
-// ~/.yakos-state/retro-disabled. Present → disabled; absent → enabled.
-// This matches the task spec (Q8 atomic writes: temp-rename on creation).
+// The auto-dispatch flag lives in ~/.yakos-state/settings.json as
+// .retro.auto_dispatch (boolean), the same key and file the bash CLI
+// (cli/lib/retro.sh) writes and the cycle-counter / retro-dispatch hooks
+// read. null/absent means enabled. Writes are atomic (temp-rename, Q8) and
+// preserve every other key in the file.
+//
+// K-89: this package previously wrote an empty sentinel file
+// ~/.yakos-state/retro-disabled that no hook ever read, so `yakos retro
+// disable` from the Go CLI silently did nothing. The sentinel is now
+// legacy: `enable` and `disable` remove a stale one, and nothing reads it.
 //
 // # Dispatch injection
 //
@@ -33,6 +40,7 @@
 package retro
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -115,18 +123,15 @@ func Run(cfg Config) (*Result, error) {
 		home = os.Getenv("HOME")
 	}
 
-	stateDir := filepath.Join(home, ".yakos-state")
-	disabledFlag := filepath.Join(stateDir, "retro-disabled")
-
 	switch cfg.Subcommand {
 	case "now":
 		return runNow(cfg, home)
 	case "disable":
-		return runDisable(cfg, disabledFlag)
+		return runDisable(cfg, home)
 	case "enable":
-		return runEnable(cfg, disabledFlag)
+		return runEnable(cfg, home)
 	case "status":
-		return runStatus(cfg, home, disabledFlag)
+		return runStatus(cfg, home)
 	case "last":
 		return runLast(cfg, home)
 	case "history":
@@ -158,7 +163,7 @@ lead dispatches the librarian agent per rule:retrospective-discipline.
 
 func runNow(cfg Config, home string) (*Result, error) {
 	res := &Result{Subcommand: "now", CycleLength: defaultCycleLength}
-	res.AutoDispatch = !isDisabled(disabledFlagPath(home))
+	res.AutoDispatch = autoDispatchEnabled(home)
 
 	cur, err := resolveCurrentDir(cfg, home)
 	if err != nil {
@@ -182,37 +187,35 @@ func runNow(cfg Config, home string) (*Result, error) {
 	return res, nil
 }
 
-func runDisable(cfg Config, disabledFlag string) (*Result, error) {
+func runDisable(cfg Config, home string) (*Result, error) {
 	res := &Result{Subcommand: "disable", CycleLength: defaultCycleLength, AutoDispatch: false}
 
-	if err := os.MkdirAll(filepath.Dir(disabledFlag), 0755); err != nil { //nolint:gosec
-		return nil, fmt.Errorf("retro: mkdir state dir: %w", err)
+	if err := setAutoDispatch(home, false); err != nil {
+		return nil, err
 	}
-	if err := atomicTouch(disabledFlag); err != nil {
-		return nil, fmt.Errorf("retro: writing disabled flag: %w", err)
-	}
+	_ = os.Remove(legacyDisabledFlagPath(home)) // stale pre-K-89 sentinel
 
 	_, _ = fmt.Fprintln(cfg.Writer, "retro: auto-dispatch DISABLED (cycle counter still increments)")
 	return res, nil
 }
 
-func runEnable(cfg Config, disabledFlag string) (*Result, error) {
+func runEnable(cfg Config, home string) (*Result, error) {
 	res := &Result{Subcommand: "enable", CycleLength: defaultCycleLength, AutoDispatch: true}
 
-	// Remove the flag file — absence means enabled.
-	if err := os.Remove(disabledFlag); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("retro: removing disabled flag: %w", err)
+	if err := setAutoDispatch(home, true); err != nil {
+		return nil, err
 	}
+	_ = os.Remove(legacyDisabledFlagPath(home)) // stale pre-K-89 sentinel
 
 	_, _ = fmt.Fprintln(cfg.Writer, "retro: auto-dispatch ENABLED")
 	return res, nil
 }
 
-func runStatus(cfg Config, home, disabledFlag string) (*Result, error) {
+func runStatus(cfg Config, home string) (*Result, error) {
 	res := &Result{
 		Subcommand:   "status",
 		CycleLength:  defaultCycleLength,
-		AutoDispatch: !isDisabled(disabledFlag),
+		AutoDispatch: autoDispatchEnabled(home),
 	}
 
 	autoStr := "true"
@@ -252,7 +255,7 @@ func runStatus(cfg Config, home, disabledFlag string) (*Result, error) {
 
 func runLast(cfg Config, home string) (*Result, error) {
 	res := &Result{Subcommand: "last", CycleLength: defaultCycleLength}
-	res.AutoDispatch = !isDisabled(disabledFlagPath(home))
+	res.AutoDispatch = autoDispatchEnabled(home)
 
 	cur, err := resolveCurrentDir(cfg, home)
 	if err != nil {
@@ -295,7 +298,7 @@ func runLast(cfg Config, home string) (*Result, error) {
 
 func runHistory(cfg Config, home string) (*Result, error) {
 	res := &Result{Subcommand: "history", CycleLength: defaultCycleLength}
-	res.AutoDispatch = !isDisabled(disabledFlagPath(home))
+	res.AutoDispatch = autoDispatchEnabled(home)
 
 	cur, err := resolveCurrentDir(cfg, home)
 	if err != nil {
@@ -419,14 +422,99 @@ func agentControlRoot(cfg Config, home string) string {
 	return filepath.Join(home, "agent-control")
 }
 
-// disabledFlagPath returns the path to the retro-disabled sentinel file.
-func disabledFlagPath(home string) string {
+// legacyDisabledFlagPath is the pre-K-89 sentinel file. Nothing reads it any
+// more; enable/disable just clean up a stale one.
+func legacyDisabledFlagPath(home string) string {
 	return filepath.Join(home, ".yakos-state", "retro-disabled")
 }
 
-// isDisabled returns true when the retro-disabled sentinel file exists.
-func isDisabled(flagPath string) bool {
-	return fileExists(flagPath)
+// settingsPath is the file the hooks and the bash CLI share.
+func settingsPath(home string) string {
+	return filepath.Join(home, ".yakos-state", "settings.json")
+}
+
+// autoDispatchEnabled reads .retro.auto_dispatch with the semantics the
+// hooks use: null/absent (or a missing/unparseable file, or a non-object
+// .retro) means enabled; any other value is taken as-is, and boolean false
+// or the string "false" disables.
+func autoDispatchEnabled(home string) bool {
+	data, err := os.ReadFile(settingsPath(home)) //nolint:gosec
+	if err != nil {
+		return true
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return true
+	}
+	retro, _ := m["retro"].(map[string]any)
+	switch v := retro["auto_dispatch"].(type) {
+	case nil:
+		return true
+	case bool:
+		return v
+	case string:
+		return v != "false"
+	default:
+		return true
+	}
+}
+
+// setAutoDispatch writes .retro.auto_dispatch, preserving every other key.
+// A missing file is created; an existing file that is not a JSON object is
+// left untouched and reported as an error (never clobbered).
+func setAutoDispatch(home string, enabled bool) error {
+	path := settingsPath(home)
+	m := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil { //nolint:gosec
+		if len(strings.TrimSpace(string(data))) > 0 {
+			dec := json.NewDecoder(strings.NewReader(string(data)))
+			dec.UseNumber()
+			if err := dec.Decode(&m); err != nil || m == nil {
+				return fmt.Errorf("retro: %s is not a JSON object; refusing to overwrite it", path)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("retro: reading settings: %w", err)
+	}
+	retro, ok := m["retro"].(map[string]any)
+	if !ok {
+		retro = map[string]any{}
+	}
+	retro["auto_dispatch"] = enabled
+	m["retro"] = retro
+
+	out, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("retro: encoding settings: %w", err)
+	}
+	out = append(out, '\n')
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil { //nolint:gosec
+		return fmt.Errorf("retro: mkdir state dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".yakos-settings-*.tmp")
+	if err != nil {
+		return fmt.Errorf("retro: create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(out); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("retro: write settings: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("retro: close settings: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0644); err != nil { //nolint:gosec
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("retro: chmod settings: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("retro: rename settings: %w", err)
+	}
+	return nil
 }
 
 // fileExists returns true when path exists (any file type).

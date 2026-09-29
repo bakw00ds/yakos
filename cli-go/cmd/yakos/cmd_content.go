@@ -841,8 +841,8 @@ func runSoul(yakosRoot string, args []string) {
 //	yakos retro last          — show last retro outputs from scratchpad
 //	yakos retro history       — cadence stats from cycle-counter logs
 //
-// State (enabled/disabled) is stored as a sentinel file at
-// ~/.yakos-state/retro-disabled. Present = disabled; absent = enabled.
+// State (enabled/disabled) is stored in
+// ~/.yakos-state/settings.json as .retro.auto_dispatch (null/absent = enabled).
 func runRetro(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
 		retro.PrintHelp(os.Stdout)

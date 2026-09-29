@@ -303,3 +303,35 @@ func TestRetroDispatch_LogSeverity_Report(t *testing.T) {
 		t.Errorf("expected severity='REPORT'; got %v", entries[0]["severity"])
 	}
 }
+
+// TestRetroDispatch_SettingsFalseDisables pins the K-89 follow-through: the
+// Go hook must honor .retro.auto_dispatch:false in settings.json exactly as
+// bash retro-dispatch.sh does (bool false only), instead of always running.
+func TestRetroDispatch_SettingsFalseDisables(t *testing.T) {
+	cases := []struct {
+		name, settings string
+		wantConsumed   bool
+	}{
+		{"bool false skips", `{"retro":{"auto_dispatch":false}}`, false},
+		{"bool true dispatches", `{"retro":{"auto_dispatch":true}}`, true},
+		{"absent dispatches", `{"retro":{}}`, true},
+		{"null dispatches", `{"retro":{"auto_dispatch":null}}`, true},
+		{"malformed dispatches", `{nope`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, workDir, stateDir := buildHook(t)
+			if err := os.MkdirAll(stateDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(stateDir, "settings.json"), []byte(tc.settings), 0644); err != nil {
+				t.Fatal(err)
+			}
+			touchMarker(t, workDir)
+			run(t, h)
+			if consumed := !markerExists(workDir); consumed != tc.wantConsumed {
+				t.Errorf("marker consumed = %v, want %v", consumed, tc.wantConsumed)
+			}
+		})
+	}
+}

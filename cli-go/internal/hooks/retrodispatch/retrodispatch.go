@@ -67,6 +67,26 @@ func New(workCurrentDir, stateDir string) *Hook {
 	}
 }
 
+// settingsDisableAutoDispatch reports whether <stateDir>/settings.json holds
+// an explicit boolean false at .retro.auto_dispatch. Bash uses
+// `jq 'if .retro.auto_dispatch == false ...'`, so only boolean false counts.
+func settingsDisableAutoDispatch(stateDir string) bool {
+	if stateDir == "" {
+		stateDir = filepath.Join(os.Getenv("HOME"), ".yakos-state")
+	}
+	data, err := os.ReadFile(filepath.Join(stateDir, "settings.json")) //nolint:gosec
+	if err != nil {
+		return false
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return false
+	}
+	retro, _ := m["retro"].(map[string]any)
+	v, ok := retro["auto_dispatch"].(bool)
+	return ok && !v
+}
+
 // Name returns the canonical hook name.
 func (h *Hook) Name() string { return hookName }
 
@@ -91,8 +111,11 @@ func (h *Hook) Run(_ context.Context, _ hooktype.HookInput) (hooktype.HookOutput
 		return out, nil
 	}
 
-	// Guard: auto_dispatch.
-	if !s.AutoDispatch {
+	// Guard: auto_dispatch. The constructed flag can disable; so can an
+	// explicit boolean false in settings.json (`yakos retro disable`),
+	// mirroring bash's `.retro.auto_dispatch == false` check. A missing or
+	// unparseable settings file leaves the constructed value in force.
+	if !s.AutoDispatch || settingsDisableAutoDispatch(s.StateDir) {
 		h.appendLog(&out, logFile, "REPORT", "skipped", "auto_dispatch disabled; marker left in place",
 			map[string]any{"reason": "auto_dispatch_disabled"})
 		return out, nil
