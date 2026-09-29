@@ -55,8 +55,8 @@ func TestRoleMapper_Symlink_TreatedAsMissing(t *testing.T) {
 	m := netid.NewRoleMapper(linkDir)
 	// Must return RoleRead (symlink rejected), NOT the mapped admin role.
 	got := m.Lookup("alice")
-	if got != netid.RoleRead {
-		t.Errorf("Lookup via symlink: got %v; want RoleRead (symlink must be rejected)", got)
+	if got != netid.RoleNone {
+		t.Errorf("Lookup via symlink: got %v; want RoleNone (symlink must be rejected)", got)
 	}
 }
 
@@ -80,8 +80,8 @@ func TestRoleMapper_GroupWritable_TreatedAsMissing(t *testing.T) {
 
 	m := netid.NewRoleMapper(stateDir)
 	got := m.Lookup("alice")
-	if got != netid.RoleRead {
-		t.Errorf("group-writable roles.json: got %v; want RoleRead (group-writable must be rejected)", got)
+	if got != netid.RoleNone {
+		t.Errorf("group-writable roles.json: got %v; want RoleNone (group-writable must be rejected)", got)
 	}
 }
 
@@ -104,8 +104,8 @@ func TestRoleMapper_OtherWritable_TreatedAsMissing(t *testing.T) {
 
 	m := netid.NewRoleMapper(stateDir)
 	got := m.Lookup("bob")
-	if got != netid.RoleRead {
-		t.Errorf("other-writable roles.json: got %v; want RoleRead (other-writable must be rejected)", got)
+	if got != netid.RoleNone {
+		t.Errorf("other-writable roles.json: got %v; want RoleNone (other-writable must be rejected)", got)
 	}
 }
 

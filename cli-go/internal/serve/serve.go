@@ -1201,7 +1201,7 @@ func printNetworkedConsoleBanner(bindAddr string, externalHosts []string, certFi
 	fmt.Fprintln(os.Stderr, "  Auth model:      hybrid — mTLS client certs OR password+session")
 	fmt.Fprintln(os.Stderr, "                   (client cert verified if presented; certless users login at /login)")
 	fmt.Fprintf(os.Stderr, "  Role mapping:    %s\n", rolesPath)
-	fmt.Fprintln(os.Stderr, "  Default role:    read (fail-closed; no roles.json = everyone reads)")
+	fmt.Fprintln(os.Stderr, "  Default role:    none (fail-closed; unmapped certs are denied; add \"*\": \"read\" to roles.json to grant read to any cert)")
 	fmt.Fprintln(os.Stderr, "")
 
 	// Bootstrap cert section.

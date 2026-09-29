@@ -199,7 +199,7 @@ type Config struct {
 	// StateDir is the yakOS state directory (e.g. ~/.yakos-state) used to
 	// locate the mTLS role-mapping file (mtls/roles.json) for the identity
 	// resolver.  When empty, the identity resolver uses an empty stateDir and
-	// all authenticated certs default to RoleRead (missing-file-tolerant).
+	// every client cert resolves to RoleNone (fail closed; ADR-0005 Amendment 2026-09-29).
 	// Loopback bearer sessions always resolve to admin regardless of StateDir.
 	StateDir string
 
@@ -500,7 +500,7 @@ func New(cfg Config) (*Server, error) {
 	// loopbackTrusted controls the no-cert fallback:
 	//   - true  (loopback path): certless requests → RoleAdmin / Authenticated=false.
 	//             Preserves today's cooperative-labeling bearer-token behaviour exactly.
-	//   - false (networked path): certless requests → RoleRead / Authenticated=false.
+	//   - false (networked path): certless requests → RoleNone / Authenticated=false.
 	//             Defence-in-depth alongside the TLS layer — even if TLS config
 	//             were somehow misconfigured, certless requests NEVER receive admin
 	//             on the networked listener.  After Phase 3f, the TLS layer uses
@@ -528,6 +528,16 @@ func New(cfg Config) (*Server, error) {
 	//   - Loopback path → always NewResolver (no session path on loopback).
 	loopbackTrusted := !cfg.NetworkedMode
 	mapper := netid.NewRoleMapper(cfg.StateDir)
+	if cfg.NetworkedMode {
+		// K-98: unmapped certs are RoleNone. Say once, at startup, whether any
+		// cert can be authorized (this is the daemon-side stand-in for a
+		// doctor check; internal/doctor is out of this change's scope).
+		if msg, warn := mapper.StartupSummary(); warn {
+			slog.Warn("consoleui: " + msg)
+		} else {
+			slog.Info("consoleui: " + msg)
+		}
+	}
 	// stableLoopbackID is computed once at server construction and reused for
 	// every request on the loopback path.  It is derived from the OS username
 	// and persisted to <stateDir>/loopback-operator-id so it survives restarts.

@@ -357,11 +357,26 @@ yakos mtls set-role alice flows-run
 Updates `roles.json`. The change takes effect on the operator's next
 request (no daemon restart required).
 
+### Unmapped certificates fail closed
+
+A client cert whose CN is not in `roles.json` has no access (ADR-0005
+Amendment 2026-09-29). The same applies when `roles.json` is missing or
+empty; the daemon logs one startup line saying no certificate is
+authorized. To grant a role to every authenticated cert without an
+explicit entry, add a wildcard:
+
+```bash
+yakos mtls set-role '*' read
+```
+
+An explicit CN entry always beats `"*"`. An unrecognised role string
+resolves to no access for that CN and logs a WARN naming it.
+
 ### Roles and what they allow
 
 | Role | Access |
 |---|---|
-| `read` | Overview, Cost, Perf, Kanban; own and shared transcripts (view only). Default for any CN not in `roles.json`. |
+| `read` | Overview, Cost, Perf, Kanban; own and shared transcripts (view only). Not a default: a CN with no entry in `roles.json` has no access unless a `"*"` wildcard entry grants one. |
 | `dispatch` | All `read` access, plus: open Chat panes, run dispatches. |
 | `flows-run` | All `dispatch` access, plus: trigger and resume Flows workflows. |
 | `admin` | All `flows-run` access, plus: cert and role management via `yakos mtls`. |
@@ -407,7 +422,7 @@ requires mTLS.
   Operators receive certs from the daemon operator via secure file
   transfer.
 - **No CRL / OCSP.** Revocation is accomplished by removing the CN from
-  `roles.json` (which degrades access to `read`) or by re-generating
+  `roles.json` (which removes its access, unless a `"*"` wildcard grants one) or by re-generating
   the CA (`--no-bootstrap-cert` + manual reissue for all operators).
   A full CA rotation is the nuclear option for a compromised key.
 - **Single CA per daemon.** The CA is scoped to the daemon instance at
