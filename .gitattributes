@@ -30,3 +30,7 @@ cli-go/internal/consoleui/dist/vendor/drawflow/drawflow.min.css binary
 cli-go/internal/consoleui/dist/vendor/xterm/xterm.js binary
 cli-go/internal/consoleui/dist/vendor/xterm/xterm-addon-fit.js binary
 cli-go/internal/consoleui/dist/vendor/xterm/xterm.css binary
+
+# Golden settings.json compared byte-for-byte by internal/refresh tests;
+# autocrlf on Windows would turn them CRLF and fail the comparison.
+cli-go/internal/refresh/testdata/golden-bash/* binary

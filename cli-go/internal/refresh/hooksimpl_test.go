@@ -565,8 +565,17 @@ func TestHooksImpl_DefaultBinaryResolvesAbsoluteAndWarnsWhenTemporary(t *testing
 	if !strings.Contains(buf.String(), "looks temporary") {
 		t.Fatalf("no temp-path warning:\n%s", buf.String())
 	}
-	if !strings.Contains(string(readSettings(t, proj)), filepath.Join(os.TempDir(), "yakos-x", "yakos")+" hook run ") {
-		t.Fatal("resolved binary path not embedded")
+	// Compare decoded commands (JSON-unescaped, shell-quoted as needed) so
+	// Windows backslash paths are handled.
+	wantCmd := goCommand(filepath.Join(os.TempDir(), "yakos-x", "yakos"), "cycle-counter")
+	found := false
+	for _, c := range commands(t, readSettings(t, proj)) {
+		if strings.HasSuffix(c, "|"+wantCmd) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("resolved binary path not embedded; want %q", wantCmd)
 	}
 	// Installed path: no warning.
 	runningBinary = func() (string, error) { return "/opt/yakos/bin/yakos", nil }
