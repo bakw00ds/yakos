@@ -242,6 +242,40 @@ type Result struct {
 
 	// HistoryCount is the number of records shown in history.
 	HistoryCount int
+
+	// TierCILower is the Wilson 95% lower bound per tier that was run (eval).
+	TierCILower map[string]float64
+
+	// Gate is the promotion-gate evaluation for eval.
+	Gate Gate
+}
+
+// GateRow is the gate verdict for one candidate tier.
+type GateRow struct {
+	Tier string `json:"tier"`
+	// NScored is the number of scored cases for the tier.
+	NScored int `json:"n_scored"`
+	// CILower is the Wilson 95% lower bound of the tier's pass rate.
+	CILower float64 `json:"ci_lower"`
+	// Mode is "ci" (n >= min_cases_for_confidence) or "strict_floor".
+	Mode string `json:"mode"`
+	// Threshold is the bar CILower must clear in "ci" mode
+	// (baseline pass rate minus epsilon); 0 in strict_floor mode.
+	Threshold float64 `json:"threshold"`
+	Pass      bool    `json:"pass"`
+	Detail    string  `json:"detail"`
+}
+
+// Gate summarises the promotion-gate evaluation for a run.
+type Gate struct {
+	Baseline     string    `json:"baseline"`
+	BaselineN    int       `json:"baseline_n"`
+	BaselineRate float64   `json:"baseline_pass_rate"`
+	MinCasesConf int       `json:"min_cases_for_confidence"`
+	Epsilon      float64   `json:"epsilon"`
+	Decision     string    `json:"decision"` // "candidate", "refused" or "partial"
+	Reason       string    `json:"reason"`
+	Rows         []GateRow `json:"tiers"`
 }
 
 // ---- per-tier accumulator ---------------------------------------------------
@@ -1606,6 +1640,14 @@ outerLoop:
 		}))
 	}
 
+	gate := Gate{
+		Baseline:     curKey,
+		BaselineN:    stats[curKey].total,
+		BaselineRate: stats[curKey].rate(),
+		MinCasesConf: settings.MinCasesForConf,
+		Epsilon:      settings.EpsilonPassRate,
+	}
+
 	for _, candTier := range []string{"haiku", "sonnet", "opus"} {
 		if baselineMissing {
 			break
@@ -1639,6 +1681,12 @@ outerLoop:
 		if nRun >= settings.MinCasesForConf {
 			// CI-only gate.
 			threshold := curRate - settings.EpsilonPassRate
+			gate.Rows = append(gate.Rows, GateRow{
+				Tier: candTier, NScored: nRun, CILower: candCI, Mode: "ci",
+				Threshold: threshold, Pass: candCI >= threshold,
+				Detail: fmt.Sprintf("ci_lower %.1f%% vs baseline %.1f%% - epsilon %.1f%% = %.1f%%",
+					candCI*100, curRate*100, settings.EpsilonPassRate*100, threshold*100),
+			})
 			if candCI >= threshold {
 				candidateTier = candTier
 				candidateReason = fmt.Sprintf(
@@ -1664,6 +1712,12 @@ outerLoop:
 			// Strict floor gate.
 			costOK := curMeanCost > 0 && candCost <= curMeanCost/2
 			marginOK := candRate >= curRate+0.10
+			gate.Rows = append(gate.Rows, GateRow{
+				Tier: candTier, NScored: nRun, CILower: candCI, Mode: "strict_floor",
+				Pass: costOK && marginOK,
+				Detail: fmt.Sprintf("n=%d < %d: need >=2x cost saving (%v) and >=+0.10 pass-rate margin (%v)",
+					nRun, settings.MinCasesForConf, costOK, marginOK),
+			})
 
 			if costOK && marginOK {
 				candidateTier = candTier
@@ -1692,6 +1746,27 @@ outerLoop:
 	}
 
 	candidateEmitted := candidateTier != ""
+	switch {
+	case candidateEmitted:
+		gate.Decision, gate.Reason = "candidate", candidateReason
+	case baselineMissing:
+		gate.Decision = "refused"
+		gate.Reason = fmt.Sprintf("current_tier_not_run: baseline tier %q has no scored cases", curKey)
+	case len(gate.Rows) == 0:
+		gate.Decision = "refused"
+		gate.Reason = "no cheaper tier was run and scored"
+	default:
+		gate.Decision = "refused"
+		gate.Reason = "no cheaper tier cleared the gate"
+	}
+	tierN := map[string]int{}
+	tierUnscored := map[string]int{}
+	tierCI := map[string]float64{}
+	for _, tier := range tiers {
+		tierN[tier] = stats[tier].total
+		tierUnscored[tier] = stats[tier].unscored
+		tierCI[tier] = WilsonLower(stats[tier].pass, stats[tier].total)
+	}
 
 	// Emit eval_run_finished.
 	finishedRec := mustJSON(map[string]interface{}{
@@ -1717,6 +1792,10 @@ outerLoop:
 			"opus":   opusCI,
 			"fable":  fableCI,
 		},
+		"tiers_run":         tiers,
+		"tier_n_scored":     tierN,
+		"tier_n_unscored":   tierUnscored,
+		"gate":              gate,
 		"candidate_emitted": candidateEmitted,
 		"candidate_tier":    nilOrString(candidateTier),
 		"candidate_reason":  candidateReason,
@@ -1760,12 +1839,17 @@ outerLoop:
 	}
 
 	// Human summary.
-	fmt.Fprintf(cfg.Writer, "  tier     pass-rate  ci-lower  mean-cost/case\n")
+	fmt.Fprintf(cfg.Writer, "  tier     pass-rate  ci-lower  mean-cost/case  n\n")
 	for _, tier := range tiers {
 		st := stats[tier]
-		fmt.Fprintf(cfg.Writer, "  %-8s   %5.1f%%    %5.1f%%    $%.4f\n",
-			tier, st.rate()*100, WilsonLower(st.pass, st.total)*100, st.meanCost())
+		note := ""
+		if st.unscored > 0 {
+			note = fmt.Sprintf("  (%d unscored: judge output unparseable)", st.unscored)
+		}
+		fmt.Fprintf(cfg.Writer, "  %-8s   %5.1f%%    %5.1f%%    $%.4f          %d%s\n",
+			tier, st.rate()*100, WilsonLower(st.pass, st.total)*100, st.meanCost(), st.total, note)
 	}
+	printGate(cfg.Writer, gate)
 	fmt.Fprintln(cfg.Writer)
 
 	if candidateEmitted {
@@ -1797,7 +1881,26 @@ outerLoop:
 		CandidateEmitted: candidateEmitted,
 		CandidateTier:    candidateTier,
 		CandidateReason:  candidateReason,
+		TierCILower:      tierCI,
+		Gate:             gate,
 	}, nil
+}
+
+// printGate writes the promotion-gate evaluation: the Wilson lower bound per
+// candidate tier against the gate that applies at its case count, and the
+// decision. Format is stable so callers can grep the "gate decision" line.
+func printGate(w io.Writer, g Gate) {
+	fmt.Fprintf(w, "  gate: baseline=%s n=%d pass=%.1f%%  min_cases_for_confidence=%d  epsilon=%.2f\n",
+		g.Baseline, g.BaselineN, g.BaselineRate*100, g.MinCasesConf, g.Epsilon)
+	for _, r := range g.Rows {
+		verdict := "FAIL"
+		if r.Pass {
+			verdict = "PASS"
+		}
+		fmt.Fprintf(w, "    %-7s n=%-3d ci-lower=%5.1f%%  mode=%-12s %s  %s\n",
+			r.Tier, r.NScored, r.CILower*100, r.Mode, verdict, r.Detail)
+	}
+	fmt.Fprintf(w, "  gate decision: %s (%s)\n", strings.ToUpper(g.Decision), g.Reason)
 }
 
 // finishPartial logs an eval_run_finished record for a run that stopped

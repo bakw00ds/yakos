@@ -3,6 +3,7 @@ package routing
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -715,3 +716,136 @@ func TestEval_CasesNoMatchErrorsBeforeSpend(t *testing.T) {
 		t.Error("dispatched despite unmatched --cases")
 	}
 }
+
+// ---- defect 5: Wilson lower bound and gate decision in the summary ------------
+
+// tierJudge builds Dispatch/Judge fakes where pass depends on the tier.
+func tierJudge(cfg *Config, passes map[string]func(caseNo int) bool, cost map[string]float64) {
+	lastTier := ""
+	caseNo := map[string]int{}
+	cfg.DispatchFn = func(agentID, task, tier, runID, project string) (DispatchResult, error) {
+		lastTier = tier
+		caseNo[tier]++
+		return DispatchResult{Stdout: "x", Cost: cost[tier], DurationS: 1}, nil
+	}
+	cfg.JudgeFn = func(string, string, string) (JudgeResult, error) {
+		return JudgeResult{Pass: passes[lastTier](caseNo[lastTier])}, nil
+	}
+}
+
+func always(_ bool) func(int) bool { return func(int) bool { return true } }
+
+func TestEval_GateSummary_CIMode_Candidate(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 12) // exactly the 12-case gate
+	// opus fails 8/12 (rate .333); haiku and sonnet pass 12/12.
+	tierJudge(&cfg, map[string]func(int) bool{
+		"haiku": always(true), "sonnet": always(true),
+		"opus": func(n int) bool { return n <= 4 },
+	}, map[string]float64{"haiku": 0.001, "sonnet": 0.002, "opus": 0.01})
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := cfgOut(cfg)
+	want := WilsonLower(12, 12)
+	if !strings.Contains(out, "mode=ci") {
+		t.Errorf("12 cases must use the CI gate: %q", out)
+	}
+	if !strings.Contains(out, "gate decision: CANDIDATE") {
+		t.Errorf("gate decision line missing: %q", out)
+	}
+	if !strings.Contains(out, "ci-lower=") || !strings.Contains(out, fmtPct(want)) {
+		t.Errorf("wilson lower %s not printed: %q", fmtPct(want), out)
+	}
+	if !res.CandidateEmitted || res.Gate.Decision != "candidate" || res.Gate.Baseline != "opus" {
+		t.Errorf("result gate wrong: %+v", res.Gate)
+	}
+	if res.TierCILower["haiku"] != want {
+		t.Errorf("Result.TierCILower[haiku] = %v want %v", res.TierCILower["haiku"], want)
+	}
+	fin := lastRecord(t, cfg.EvalLog, "eval_run_finished")
+	g, ok := fin["gate"].(map[string]interface{})
+	if !ok || g["decision"] != "candidate" || g["min_cases_for_confidence"] != float64(12) {
+		t.Fatalf("gate not in eval_run_finished: %v", fin["gate"])
+	}
+	rows := g["tiers"].([]interface{})
+	if len(rows) == 0 || rows[0].(map[string]interface{})["mode"] != "ci" {
+		t.Errorf("gate rows wrong: %v", rows)
+	}
+}
+
+func TestEval_GateSummary_CIMode_Refused(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 12)
+	// Everything passes: haiku lower bound (~0.76) is below opus 1.0 - 0.05.
+	tierJudge(&cfg, map[string]func(int) bool{
+		"haiku": always(true), "sonnet": always(true), "opus": always(true),
+	}, map[string]float64{"haiku": 0.001, "sonnet": 0.002, "opus": 0.01})
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := cfgOut(cfg)
+	if res.CandidateEmitted || !strings.Contains(out, "gate decision: REFUSED") || !strings.Contains(out, "FAIL") {
+		t.Errorf("expected REFUSED with FAIL rows: %q", out)
+	}
+	if res.Gate.Decision != "refused" {
+		t.Errorf("Gate.Decision = %q", res.Gate.Decision)
+	}
+}
+
+func TestEval_GateSummary_ModeBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		n    int
+		mode string
+	}{{11, "strict_floor"}, {12, "ci"}} {
+		cfg := newCfg(t)
+		cfg.Subcommand = "eval"
+		cfg.AgentID = "backend"
+		cfg.Judge = "code-reviewer"
+		setupEvalAgent(t, cfg, "backend", "opus", "backend", tc.n)
+		tierJudge(&cfg, map[string]func(int) bool{
+			"haiku": always(true), "sonnet": always(true), "opus": always(true),
+		}, map[string]float64{"haiku": 0.001, "sonnet": 0.002, "opus": 0.01})
+		res, err := Run(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Gate.Rows) == 0 || res.Gate.Rows[0].Mode != tc.mode {
+			t.Errorf("n=%d: mode = %+v want %s", tc.n, res.Gate.Rows, tc.mode)
+		}
+		if !strings.Contains(cfgOut(cfg), "mode="+tc.mode) {
+			t.Errorf("n=%d: summary lacks mode=%s: %q", tc.n, tc.mode, cfgOut(cfg))
+		}
+	}
+}
+
+func TestEval_GateSummary_BaselineNotRun(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	cfg.Tiers = []string{"haiku"}
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 12)
+	cfg.DispatchFn = mockDispatch(0.001, "x")
+	cfg.JudgeFn = mockJudge(true)
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cfgOut(cfg), "gate decision: REFUSED (current_tier_not_run") {
+		t.Errorf("baseline-not-run reason not surfaced: %q", cfgOut(cfg))
+	}
+	if res.Gate.Decision != "refused" {
+		t.Errorf("decision = %q", res.Gate.Decision)
+	}
+}
+
+func fmtPct(f float64) string { return strings.TrimSpace(fmt.Sprintf("%5.1f%%", f*100)) }
