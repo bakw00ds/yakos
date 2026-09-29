@@ -67,7 +67,7 @@ ho_log() {
 
     # K-107: bounded like hi_init's own jq calls (a hung jq must not hang the
     # BLOCK/WARN record on the way out of a degraded-input exit). _hi_jq exists
-    # only when hook-input.sh is loaded; rc 124 = timed out -> minimal record.
+    # only when hook-input.sh is loaded; rc 124 = timed out; any jq failure -> minimal record.
     local jqcmd=jq rec jqrc=0
     if command -v _hi_jq >/dev/null 2>&1; then jqcmd=_hi_jq; fi
     rec="$($jqcmd -nc \
@@ -81,14 +81,14 @@ ho_log() {
         --arg event "$(hi_event 2>/dev/null || echo '')" \
         --argjson extra "$extra" \
         '{ts: $ts, hook: $hook, severity: $severity, decision: $decision, reason: $reason, agent: $agent, session_id: $session, event: $event} + $extra')" || jqrc=$?
-    if [ "$jqrc" = "124" ]; then
+    if [ "$jqrc" != "0" ]; then
+        # jq timed out (124) or crashed: keep a minimal record rather than none.
         printf '{"ts":"%s","hook":"%s","severity":"%s","decision":"%s","reason":%s}\n' \
             "$(ho_now)" "$hook" "$severity" "$decision" \
             "$(printf '%s' "$reason" | sed 's/"/\\"/g; s/^/"/; s/$/"/')" \
             >> "$logfile"
         return 0
     fi
-    [ "$jqrc" -eq 0 ] || return "$jqrc"
     printf '%s\n' "$rec" >> "$logfile"
 }
 
