@@ -66,7 +66,8 @@ for raw in 0 -1 '"abc"' '""' 1000000000 null; do
         if [ "$rc" -ne 0 ]; then bad "cycle_length=$raw retro $sub: rc=$rc: $out"; continue; fi
         case "$out" in
             *"Cycle length:"*" 10"*)
-                if [ "$raw" != null ] && ! printf '%s' "$out" | grep -q 'WARN: ignoring invalid retro.cycle_length'; then
+                # null and "" read as unset (settings_get treats empty as absent): no WARN.
+                if [ "$raw" != null ] && [ "$raw" != '""' ] && ! printf '%s' "$out" | grep -q 'WARN: ignoring invalid retro.cycle_length'; then
                     bad "cycle_length=$raw retro $sub: missing WARN: $out"
                 else ok "cycle_length=$raw retro $sub: falls back to 10"; fi ;;
             *) bad "cycle_length=$raw retro $sub: no fallback to 10: $out" ;;
