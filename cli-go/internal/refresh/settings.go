@@ -39,7 +39,7 @@ type MergeStats struct {
 // Returns MergeStats and any error. A non-nil error means the merge was aborted;
 // the original deployed file is always preserved on error.
 func MergeSettingsFiles(templateFile, deployedFile string, dryRun bool, w io.Writer) (MergeStats, error) {
-	return MergeSettingsFilesImpl(templateFile, deployedFile, dryRun, w, HooksImplBash)
+	return MergeSettingsFilesImpl(templateFile, deployedFile, dryRun, w, HooksImplBash, "")
 }
 
 // MergeSettingsFilesImpl is MergeSettingsFiles with a hook-implementation
@@ -47,7 +47,7 @@ func MergeSettingsFiles(templateFile, deployedFile string, dryRun bool, w io.Wri
 // untouched, so output is byte-identical to MergeSettingsFiles. For go and
 // hybrid it validates against the Go registry first and returns an error
 // (writing nothing) when a hook has no registered Go implementation.
-func MergeSettingsFilesImpl(templateFile, deployedFile string, dryRun bool, w io.Writer, impl HooksImpl) (MergeStats, error) {
+func MergeSettingsFilesImpl(templateFile, deployedFile string, dryRun bool, w io.Writer, impl HooksImpl, bin string) (MergeStats, error) {
 	// Read and parse both files.
 	templateData, err := os.ReadFile(templateFile) //nolint:gosec
 	if err != nil {
@@ -71,7 +71,7 @@ func MergeSettingsFilesImpl(templateFile, deployedFile string, dryRun bool, w io
 		if err := ValidateHooksImpl(impl, tmpl); err != nil {
 			return MergeStats{}, err
 		}
-		applyHooksImpl(tmpl, impl)
+		applyHooksImpl(tmpl, impl, bin)
 	}
 
 	stats, err := performMerge(tmpl, deployed)
@@ -222,8 +222,8 @@ func performMerge(tmpl, deployed map[string]any) (MergeStats, error) {
 				if cmd != "" {
 					name := canonicalHookName(cmd)
 					if d, inTemplate := templateDesired[eventName{event, name}]; inTemplate {
-						if d.matcher == m && d.command != cmd && isGoCommand(d.command) != isGoCommand(cmd) {
-							// Implementation switch (bash <-> go) for the
+						if d.matcher == m && d.command != cmd && (isGoCommand(d.command) || isGoCommand(cmd)) {
+							// Implementation switch (bash <-> go) or Go binary path change for the
 							// same hook in the same matcher block: replace
 							// the command IN PLACE so hook order within the
 							// block is preserved. Counted as one removal

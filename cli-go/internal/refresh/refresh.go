@@ -74,6 +74,11 @@ type Config struct {
 	// A non-empty value overrides and (outside dry-run) re-persists.
 	HooksImpl HooksImpl
 
+	// YakosBinary overrides the absolute yakos path embedded in Go-form hook
+	// commands. Empty means the running binary (os.Executable, symlinks
+	// evaluated). Tests set it for determinism.
+	YakosBinary string
+
 	// HomeDir overrides $HOME. Used in tests. If empty, os.Getenv("HOME") is used.
 	HomeDir string
 }
@@ -240,7 +245,7 @@ func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, ri resolv
 		settingsRpt.Skipped = true
 		settingsRpt.SkipMsg = "skipped (no .claude/settings.json)"
 	} else {
-		settingsRpt, err = mergeSettingsForProject(templateFile, deployedSettings, dryRun, ri.impl, w)
+		settingsRpt, err = mergeSettingsForProject(templateFile, deployedSettings, dryRun, ri.impl, ri.bin, w)
 		if err != nil {
 			_, _ = fmt.Fprintf(ew, "refresh: settings merge error for %s: %v\n", absPath, err)
 		}
@@ -280,8 +285,8 @@ func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, ri resolv
 
 // mergeSettingsForProject wraps MergeSettingsFiles and converts MergeStats into
 // SettingsPhaseReport for per-project reporting.
-func mergeSettingsForProject(templateFile, deployedFile string, dryRun bool, impl HooksImpl, w io.Writer) (SettingsPhaseReport, error) {
-	stats, err := MergeSettingsFilesImpl(templateFile, deployedFile, dryRun, w, impl)
+func mergeSettingsForProject(templateFile, deployedFile string, dryRun bool, impl HooksImpl, bin string, w io.Writer) (SettingsPhaseReport, error) {
+	stats, err := MergeSettingsFilesImpl(templateFile, deployedFile, dryRun, w, impl, bin)
 	if err != nil {
 		return SettingsPhaseReport{}, err
 	}
@@ -776,6 +781,7 @@ type resolvedImpl struct {
 	impl    HooksImpl
 	source  string // "flag", "persisted", or "default"
 	persist bool   // write hooks_impl to .yakos.yml (flag given)
+	bin     string // absolute yakos path for Go-form commands (go/hybrid)
 }
 
 // resolveProjectImpls decides each project's impl (flag > persisted >
@@ -785,6 +791,7 @@ func resolveProjectImpls(cfg Config, templateFile string) (map[string]resolvedIm
 	out := make(map[string]resolvedImpl, len(cfg.ProjectPaths))
 	var tmpl map[string]any
 	loaded := false
+	warnedTemp, warnedGo := false, false
 	for _, p := range cfg.ProjectPaths {
 		abs, err := filepath.Abs(p)
 		if err != nil {
@@ -794,11 +801,11 @@ func resolveProjectImpls(cfg Config, templateFile string) (map[string]resolvedIm
 		if cfg.HooksImpl != "" {
 			impl, err := ParseHooksImpl(string(cfg.HooksImpl))
 			if err != nil {
-				return nil, fmt.Errorf("refresh: %w", err)
+				return nil, err
 			}
 			ri = resolvedImpl{impl: impl, source: "flag", persist: true}
 		} else if impl, found, err := ReadPersistedHooksImpl(abs); err != nil {
-			return nil, fmt.Errorf("refresh: %w", err)
+			return nil, err
 		} else if found {
 			ri = resolvedImpl{impl: impl, source: "persisted"}
 		}
@@ -806,15 +813,33 @@ func resolveProjectImpls(cfg Config, templateFile string) (map[string]resolvedIm
 			if !loaded {
 				data, err := os.ReadFile(templateFile) //nolint:gosec
 				if err != nil {
-					return nil, fmt.Errorf("refresh: reading template %s: %w", templateFile, err)
+					return nil, fmt.Errorf("reading template %s: %w", templateFile, err)
 				}
 				if err := json.Unmarshal(data, &tmpl); err != nil {
-					return nil, fmt.Errorf("refresh: template JSON invalid at %s: %w", templateFile, err)
+					return nil, fmt.Errorf("template JSON invalid at %s: %w", templateFile, err)
 				}
 				loaded = true
 			}
+			bin := cfg.YakosBinary
+			if bin == "" {
+				var berr error
+				if bin, berr = runningBinary(); berr != nil {
+					return nil, fmt.Errorf("resolving the yakos binary path for Go hook commands: %w", berr)
+				}
+			}
+			ri.bin = bin
+			if !warnedTemp && ephemeralBinary(bin) {
+				warnedTemp = true
+				_, _ = fmt.Fprintf(cfg.ErrWriter, "refresh: warning: Go hook commands will point at %s, which looks temporary (temp dir or worktree); re-run refresh from an installed yakos\n", bin)
+			}
+			if !warnedGo && ri.impl == HooksImplGo {
+				warnedGo = true
+				if names := nonGoReadyIn(tmpl); len(names) > 0 {
+					_, _ = fmt.Fprintf(cfg.ErrWriter, "refresh: warning: --hooks-impl go also switches %d hook(s) not yet marked GoReady (parity-unverified): %s\n", len(names), strings.Join(names, ", "))
+				}
+			}
 			if err := ValidateHooksImpl(ri.impl, tmpl); err != nil {
-				return nil, fmt.Errorf("refresh: %s: %w", abs, err)
+				return nil, fmt.Errorf("%s: %w", abs, err)
 			}
 		}
 		out[p] = ri

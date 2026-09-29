@@ -13,6 +13,8 @@ import (
 
 // ---- helpers ----------------------------------------------------------------
 
+const testBin = "/opt/yakos/bin/yakos"
+
 func hooksImplRepoRoot(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
@@ -71,6 +73,7 @@ func runImpl(t *testing.T, proj, home string, impl HooksImpl) (string, error) {
 		YakosRoot:    hooksImplRepoRoot(t),
 		ProjectPaths: []string{proj},
 		HooksImpl:    impl,
+		YakosBinary:  testBin,
 		Writer:       &buf,
 		ErrWriter:    &buf,
 		HomeDir:      home,
@@ -121,7 +124,7 @@ func sortStrings(s []string) {
 }
 
 func isAllowlisted(name string) bool {
-	for _, n := range goReadyAllowlist {
+	for _, n := range GoReadyAllowlist() {
 		if n == name {
 			return true
 		}
@@ -176,7 +179,7 @@ func TestHooksImpl_GoRewritesEveryHookCommand(t *testing.T) {
 	}
 	for _, c := range cmds {
 		cmd := c[strings.Index(c, "|")+1:]
-		if !strings.HasPrefix(cmd, "yakos hook run ") {
+		if !isGoCommand(cmd) {
 			t.Errorf("go mode left a non-Go command: %s", c)
 		}
 	}
@@ -211,7 +214,7 @@ func TestHooksImpl_HybridRewritesOnlyAllowlist(t *testing.T) {
 			t.Errorf("hybrid left allowlisted hook %s as bash", n)
 		}
 	}
-	for _, n := range goReadyAllowlist {
+	for _, n := range GoReadyAllowlist() {
 		if !goSeen[n] {
 			t.Errorf("allowlisted hook %s not registered as Go", n)
 		}
@@ -251,7 +254,7 @@ func TestHooksImpl_PersistedValueHonoredThenFlagOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range commands(t, readSettings(t, proj)) {
-		if !strings.Contains(c, "yakos hook run ") {
+		if !strings.Contains(c, testBin+" hook run ") {
 			t.Fatalf("persisted go not honored: %s", c)
 		}
 	}
@@ -420,13 +423,25 @@ func TestHooksImpl_AllowlistAndTemplateAgreeWithRegistry(t *testing.T) {
 	for _, e := range registry.All() {
 		reg[e.Name] = e
 	}
-	for i, n := range goReadyAllowlist {
-		if i > 0 && goReadyAllowlist[i-1] >= n {
-			t.Errorf("allowlist not sorted at %q", n)
+	var want []string
+	for _, e := range registry.All() {
+		if e.GoReady {
+			want = append(want, e.Name)
 		}
-		e, ok := reg[n]
-		if !ok || !e.GoReady {
-			t.Errorf("allowlisted %q is not a registered GoReady hook", n)
+	}
+	got := GoReadyAllowlist()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("hybrid list %v != registry GoReady set %v", got, want)
+	}
+	if !isAllowlisted("path-log") {
+		t.Error("path-log (GoReady since A-1) missing from the hybrid list")
+	}
+	for i, n := range got {
+		if i > 0 && got[i-1] >= n {
+			t.Errorf("hybrid list not sorted at %q", n)
+		}
+		if _, ok := reg[n]; !ok {
+			t.Errorf("%q not registered", n)
 		}
 	}
 	data, err := os.ReadFile(filepath.Join(hooksImplRepoRoot(t), "lib", "settings", "settings.template.json")) //nolint:gosec
@@ -463,7 +478,7 @@ func TestHooksImpl_DryRunReportsImplAndWritesNothing(t *testing.T) {
 	var buf bytes.Buffer
 	_, err := Run(Config{
 		YakosRoot: hooksImplRepoRoot(t), ProjectPaths: []string{proj},
-		HooksImpl: HooksImplGo, DryRun: true, Writer: &buf, ErrWriter: &buf, HomeDir: home,
+		HooksImpl: HooksImplGo, YakosBinary: testBin, DryRun: true, Writer: &buf, ErrWriter: &buf, HomeDir: home,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -476,5 +491,151 @@ func TestHooksImpl_DryRunReportsImplAndWritesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(proj, ".yakos.yml")); err == nil {
 		t.Fatal("dry-run persisted .yakos.yml")
+	}
+}
+
+func TestHooksImpl_CommandsUseAbsoluteBinaryPath(t *testing.T) {
+	proj, home := fixtureProject(t, "proj-missing-settings")
+	if _, err := runImpl(t, proj, home, HooksImplGo); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range commands(t, readSettings(t, proj)) {
+		cmd := c[strings.Index(c, "|")+1:]
+		if !strings.HasPrefix(cmd, testBin+" hook run ") {
+			t.Errorf("not an absolute-path Go command: %s", cmd)
+		}
+	}
+}
+
+// Moving the binary rewrites commands in place (order kept, no duplicates).
+func TestHooksImpl_BinaryPathChangeReplacesInPlace(t *testing.T) {
+	// hybrid, so bash and Go commands share matcher blocks: a remove+append
+	// replace would reorder them.
+	proj, home := fixtureProject(t, "proj-missing-settings")
+	if _, err := runImpl(t, proj, home, HooksImplHybrid); err != nil {
+		t.Fatal(err)
+	}
+	before := commands(t, readSettings(t, proj))
+	var buf bytes.Buffer
+	if _, err := Run(Config{YakosRoot: hooksImplRepoRoot(t), ProjectPaths: []string{proj}, YakosBinary: "/usr/local/bin/yakos",
+		Writer: &buf, ErrWriter: &buf, HomeDir: home}); err != nil {
+		t.Fatal(err)
+	}
+	after := commands(t, readSettings(t, proj))
+	if len(after) != len(before) {
+		t.Fatalf("count changed %d -> %d", len(before), len(after))
+	}
+	moved := 0
+	for i := range after {
+		if strings.Replace(before[i], testBin, "/usr/local/bin/yakos", 1) != after[i] {
+			t.Fatalf("entry %d: %q -> %q", i, before[i], after[i])
+		}
+		if strings.Contains(after[i], "/usr/local/bin/yakos") {
+			moved++
+		}
+	}
+	if moved == 0 {
+		t.Fatal("no command picked up the new binary path")
+	}
+}
+
+func TestHooksImpl_PathWithSpaceIsQuotedAndParsed(t *testing.T) {
+	c := goCommand("/Users/a b/bin/yakos", "path-log")
+	if c != "'/Users/a b/bin/yakos' hook run path-log" {
+		t.Fatalf("quoting: %s", c)
+	}
+	if n, ok := goHookName(c); !ok || n != "path-log" {
+		t.Fatalf("parse: %q %v", n, ok)
+	}
+	if _, ok := goHookName("/usr/bin/other hook run x"); ok {
+		t.Fatal("non-yakos binary parsed as a Go hook command")
+	}
+}
+
+func TestHooksImpl_DefaultBinaryResolvesAbsoluteAndWarnsWhenTemporary(t *testing.T) {
+	orig := runningBinary
+	t.Cleanup(func() { runningBinary = orig })
+	runningBinary = func() (string, error) { return filepath.Join(os.TempDir(), "yakos-x", "yakos"), nil }
+	proj, home := fixtureProject(t, "proj-missing-settings")
+	var buf bytes.Buffer
+	if _, err := Run(Config{YakosRoot: hooksImplRepoRoot(t), ProjectPaths: []string{proj}, HooksImpl: HooksImplHybrid,
+		Writer: &buf, ErrWriter: &buf, HomeDir: home}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "looks temporary") {
+		t.Fatalf("no temp-path warning:\n%s", buf.String())
+	}
+	if !strings.Contains(string(readSettings(t, proj)), filepath.Join(os.TempDir(), "yakos-x", "yakos")+" hook run ") {
+		t.Fatal("resolved binary path not embedded")
+	}
+	// Installed path: no warning.
+	runningBinary = func() (string, error) { return "/opt/yakos/bin/yakos", nil }
+	buf.Reset()
+	p2, h2 := fixtureProject(t, "proj-missing-settings")
+	if _, err := Run(Config{YakosRoot: hooksImplRepoRoot(t), ProjectPaths: []string{p2}, HooksImpl: HooksImplHybrid,
+		Writer: &buf, ErrWriter: &buf, HomeDir: h2}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "looks temporary") {
+		t.Fatal("spurious temp warning for an installed path")
+	}
+}
+
+func TestHooksImpl_GoWarnsAboutNonGoReadyHooks(t *testing.T) {
+	proj, home := fixtureProject(t, "proj-missing-settings")
+	out, err := runImpl(t, proj, home, HooksImplGo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "not yet marked GoReady") || !strings.Contains(out, "secret-scan") {
+		t.Fatalf("go mode did not warn naming non-GoReady hooks:\n%s", out)
+	}
+	if strings.Contains(out, "path-log,") || strings.Contains(out, ": path-log") {
+		t.Fatalf("warning lists a GoReady hook:\n%s", out)
+	}
+	proj2, home2 := fixtureProject(t, "proj-missing-settings")
+	out, _ = runImpl(t, proj2, home2, HooksImplHybrid)
+	if strings.Contains(out, "not yet marked GoReady") {
+		t.Fatal("hybrid must not print the go-mode warning")
+	}
+}
+
+func TestPersistHooksImpl_KeepsInlineCommentAndCRLF(t *testing.T) {
+	dir := t.TempDir()
+	write := func(s string) {
+		if err := os.WriteFile(filepath.Join(dir, ".yakos.yml"), []byte(s), 0o644); err != nil { //nolint:gosec
+			t.Fatal(err)
+		}
+	}
+	read := func() string { b, _ := os.ReadFile(filepath.Join(dir, ".yakos.yml")); return string(b) } //nolint:gosec
+
+	write("name: x\nhooks_impl: go   # keep me\nother: 1\n")
+	if err := PersistHooksImpl(dir, HooksImplHybrid); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got != "name: x\nhooks_impl: hybrid   # keep me\nother: 1\n" {
+		t.Fatalf("inline comment lost: %q", got)
+	}
+	if v, _, _ := ReadPersistedHooksImpl(dir); v != HooksImplHybrid {
+		t.Fatalf("read back %q", v)
+	}
+
+	write("name: x\r\nhooks_impl: go\r\nother: 1\r\n")
+	if err := PersistHooksImpl(dir, HooksImplBash); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got != "name: x\r\nhooks_impl: bash\r\nother: 1\r\n" {
+		t.Fatalf("CRLF lost: %q", got)
+	}
+	if v, ok, err := ReadPersistedHooksImpl(dir); err != nil || !ok || v != HooksImplBash {
+		t.Fatalf("CRLF read back %q %v %v", v, ok, err)
+	}
+
+	write("name: x\r\nother: 1")
+	if err := PersistHooksImpl(dir, HooksImplGo); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got != "name: x\r\nother: 1\r\nhooks_impl: go\r\n" {
+		t.Fatalf("CRLF append: %q", got)
 	}
 }

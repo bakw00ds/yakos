@@ -9,17 +9,21 @@ package refresh
 //
 //	bash   — template untouched (byte-identical to pre-A-3 behavior)
 //	go     — every hook command becomes `yakos hook run <name>`
-//	hybrid — only hooks in goReadyAllowlist become `yakos hook run <name>`
+//	hybrid — only registry GoReady hooks become `<yakos> hook run <name>`
 //
-// Binary reference: the command uses the bare name `yakos`, resolved via PATH
-// when Claude Code runs the hook. No other generated settings command embeds
-// an absolute binary path, and a bare name keeps settings.json stable across
-// reinstalls (rule:cache-stability: same inputs, same bytes).
+// Binary reference: the Go-form command embeds the ABSOLUTE path of the
+// running yakos binary (os.Executable, symlinks evaluated), not a bare
+// `yakos`. Claude Code launched from a GUI/IDE may not have yakos on PATH;
+// a missing command exits 127, which Claude Code treats as non-blocking, so
+// gates such as secret-scan and budget-guard would silently stop enforcing.
+// The tradeoff: settings.json changes when the binary moves; the next
+// refresh rewrites the command in place.
 //
 // The switch is Go-only. cli/lib/refresh.sh (bash refresh) always registers
 // the bash scripts.
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,25 +56,22 @@ func ParseHooksImpl(s string) (HooksImpl, error) {
 	return "", fmt.Errorf("invalid hooks impl %q (want bash, go, or hybrid)", s)
 }
 
-// goReadyAllowlist is the set of hooks `--hooks-impl hybrid` moves to the Go
-// implementation. Names are hook names without the .sh extension.
-//
-// Source of truth: the parity matrix in
-// work/current/reports/s6-a1-hooks-translator-2026-09-23.md ("GoReady"
-// hooks). Widen this list only when that matrix marks another hook
-// parity-verified. Keep it sorted (rule:cache-stability).
-var goReadyAllowlist = []string{
-	"cycle-counter",
-	"mailbox-mirror",
-	"session-end-check",
-	"task-dependency-gate",
-	"team-lifecycle",
-}
+// GoReadyAllowlist returns the hooks `--hooks-impl hybrid` moves to Go:
+// every registry entry marked GoReady (parity-verified by the A-1 work and
+// tests/run-hook-parity.sh). The registry is the single source of truth;
+// there is no second list to keep in sync. Sorted by name
+// (rule:cache-stability).
+func GoReadyAllowlist() []string { return goReadyHooks() }
 
-// GoReadyAllowlist returns a copy of the hybrid allowlist.
-func GoReadyAllowlist() []string {
-	out := make([]string, len(goReadyAllowlist))
-	copy(out, goReadyAllowlist)
+// goReadyHooks lists registry names with GoReady set. A variable so tests can
+// simulate registry states.
+var goReadyHooks = func() []string {
+	var out []string
+	for _, e := range registry.All() {
+		if e.GoReady {
+			out = append(out, e.Name)
+		}
+	}
 	return out
 }
 
@@ -79,7 +80,16 @@ func GoReadyAllowlist() []string {
 var registeredHooks = func() []string { return registry.Names() }
 
 // goCommand renders the Go-form hook command for a hook name.
-func goCommand(name string) string { return "yakos hook run " + name }
+func goCommand(bin, name string) string { return shellQuote(bin) + " hook run " + name }
+
+// shellQuote single-quotes s only when it contains characters a shell would
+// treat specially, so ordinary paths stay readable.
+func shellQuote(s string) string {
+	if s != "" && !strings.ContainsAny(s, " \t\"'$`\\&;|<>(){}[]*?!#~") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
 
 // isGoCommand reports whether command is a `yakos hook run <name>` form.
 func isGoCommand(command string) bool {
@@ -87,16 +97,24 @@ func isGoCommand(command string) bool {
 	return ok
 }
 
-// goHookName extracts <name> from `[<path>/]yakos hook run <name>`.
+var goHookRe = regexp.MustCompile(`^(?:'([^']*)'|(\S+)) hook run (\S+)$`)
+
+// goHookName extracts <name> from `<path>/yakos hook run <name>` (the path
+// may be single-quoted, or the bare word `yakos`).
 func goHookName(command string) (string, bool) {
-	f := strings.Fields(command)
-	if len(f) != 4 || f[1] != "hook" || f[2] != "run" {
+	m := goHookRe.FindStringSubmatch(strings.TrimSpace(command))
+	if m == nil {
 		return "", false
 	}
-	if f[0] != "yakos" && !strings.HasSuffix(f[0], "/yakos") {
+	bin := m[1]
+	if bin == "" {
+		bin = m[2]
+	}
+	base := filepath.Base(strings.ReplaceAll(bin, "\\", "/"))
+	if base != "yakos" && base != "yakos.exe" {
 		return "", false
 	}
-	return f[3], true
+	return m[3], true
 }
 
 // hookNameFromTemplateCommand returns the hook name (no .sh) for a bash-form
@@ -136,7 +154,7 @@ func goNamesFor(impl HooksImpl, present []string) []string {
 	case HooksImplGo:
 		return present
 	case HooksImplHybrid:
-		return GoReadyAllowlist()
+		return goReadyHooks()
 	}
 	return nil
 }
@@ -169,7 +187,7 @@ func ValidateHooksImpl(impl HooksImpl, tmpl map[string]any) error {
 // applyHooksImpl rewrites template hook commands in place per impl. Call
 // ValidateHooksImpl first. Hook ordering and everything but the "command"
 // string is untouched.
-func applyHooksImpl(tmpl map[string]any, impl HooksImpl) {
+func applyHooksImpl(tmpl map[string]any, impl HooksImpl, bin string) {
 	names := goNamesFor(impl, templateHookNames(tmpl))
 	if len(names) == 0 {
 		return
@@ -183,7 +201,7 @@ func applyHooksImpl(tmpl map[string]any, impl HooksImpl) {
 			for _, rawH := range asList(hooksList(toMap(rawEntry))) {
 				h := toMap(rawH)
 				if n := hookNameFromTemplateCommand(commandOf(h)); n != "" && goSet[n] {
-					h["command"] = goCommand(n)
+					h["command"] = goCommand(bin, n)
 				}
 			}
 		}
@@ -192,7 +210,9 @@ func applyHooksImpl(tmpl map[string]any, impl HooksImpl) {
 
 // ---- persistence in <project>/.yakos.yml -----------------------------------
 
-var hooksImplLineRe = regexp.MustCompile(`(?m)^` + hooksImplYAMLKey + `:[ \t]*([^\n#]*?)[ \t]*(#[^\n]*)?$`)
+// Groups: 1 = spacing after the colon, 2 = value, 3+ = trailing spacing,
+// inline comment, and CR of a CRLF line (all preserved on rewrite).
+var hooksImplLineRe = regexp.MustCompile(`(?m)^` + hooksImplYAMLKey + `:([ \t]*)([^\n#\r]*?)[ \t]*(#[^\n\r]*)?\r?$`)
 
 // ReadPersistedHooksImpl returns the project's persisted impl. found is false
 // when .yakos.yml or the key is absent. An unparseable value is an error, not
@@ -209,7 +229,7 @@ func ReadPersistedHooksImpl(projPath string) (impl HooksImpl, found bool, err er
 	if m == nil {
 		return "", false, nil
 	}
-	v := strings.Trim(strings.TrimSpace(string(m[1])), `"'`)
+	v := strings.Trim(strings.TrimSpace(string(m[2])), `"'`)
 	impl, perr := ParseHooksImpl(v)
 	if perr != nil {
 		return "", false, fmt.Errorf("%s: %s: %w", filepath.Join(projPath, ".yakos.yml"), hooksImplYAMLKey, perr)
@@ -227,16 +247,20 @@ func PersistHooksImpl(projPath string, impl HooksImpl) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	line := hooksImplYAMLKey + ": " + string(impl)
+	eol := "\n"
+	if bytes.Contains(data, []byte("\r\n")) {
+		eol = "\r\n"
+	}
 	var out []byte
-	if loc := hooksImplLineRe.FindIndex(data); loc != nil {
-		out = append(append(append([]byte{}, data[:loc[0]]...), line...), data[loc[1]:]...)
+	if loc := hooksImplLineRe.FindSubmatchIndex(data); loc != nil {
+		// Replace only the value; spacing, inline comment, and line ending stay.
+		out = append(append(append([]byte{}, data[:loc[4]]...), string(impl)...), data[loc[5]:]...)
 	} else {
 		out = append([]byte{}, data...)
 		if len(out) > 0 && out[len(out)-1] != '\n' {
-			out = append(out, '\n')
+			out = append(out, eol...)
 		}
-		out = append(out, line+"\n"...)
+		out = append(out, hooksImplYAMLKey+": "+string(impl)+eol...)
 	}
 	if string(out) == string(data) {
 		return nil
@@ -264,4 +288,47 @@ func PersistHooksImpl(projPath string, impl HooksImpl) error {
 		return err
 	}
 	return nil
+}
+
+// nonGoReadyIn returns the template hooks that `go` mode moves to Go even
+// though the registry does not mark them GoReady (sorted).
+func nonGoReadyIn(tmpl map[string]any) []string {
+	ready := map[string]bool{}
+	for _, n := range goReadyHooks() {
+		ready[n] = true
+	}
+	var out []string
+	for _, n := range templateHookNames(tmpl) {
+		if !ready[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// runningBinary resolves the absolute, symlink-evaluated path of the
+// running yakos binary. A variable so tests can substitute a fixed path.
+var runningBinary = func() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if r, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = r
+	}
+	return filepath.Abs(exe)
+}
+
+// ephemeralBinary reports whether bin lives somewhere unlikely to survive:
+// the OS temp dir or a git-worktree-style directory.
+func ephemeralBinary(bin string) bool {
+	slash := filepath.ToSlash(bin)
+	tmp := filepath.ToSlash(os.TempDir())
+	if r, err := filepath.EvalSymlinks(os.TempDir()); err == nil {
+		if strings.HasPrefix(slash, filepath.ToSlash(r)+"/") {
+			return true
+		}
+	}
+	return strings.HasPrefix(slash, strings.TrimRight(tmp, "/")+"/") ||
+		strings.Contains(slash, "-wt-") || strings.Contains(slash, "/worktrees/")
 }
