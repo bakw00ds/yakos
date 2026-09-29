@@ -515,6 +515,27 @@ parity_check() {
         fi
     fi
 
+    # supervisor-buffer.ndjson (supervisor-stream's rolling event window): the
+    # only place the payload-derived agent and session_id land in a schema the
+    # two sides share. No-op ("no file, no file") for every other hook.
+    if [ "$divergence" = "-" ]; then
+        local bash_sbuf go_sbuf
+        bash_sbuf="$(dirname -- "$bash_log_dir")/supervisor-buffer.ndjson"
+        go_sbuf="$tmp2/work/current/supervisor-buffer.ndjson"
+        if [ -f "$bash_sbuf" ] || [ -f "$go_sbuf" ]; then
+            if [ -f "$bash_sbuf" ] && [ -f "$go_sbuf" ]; then
+                local norm_bash_sbuf norm_go_sbuf
+                norm_bash_sbuf="$(tail -n 1 "$bash_sbuf" | jq -cS 'del(.ts)' 2>/dev/null || echo "__unparseable_bash_sbuf__")"
+                norm_go_sbuf="$(tail -n 1 "$go_sbuf" | jq -cS 'del(.ts)' 2>/dev/null || echo "__unparseable_go_sbuf__")"
+                [ "$norm_bash_sbuf" != "$norm_go_sbuf" ] && divergence="supervisor-buffer"
+            elif [ -f "$go_sbuf" ]; then
+                divergence="supervisor-buffer-present-go-only"
+            else
+                divergence="supervisor-buffer-missing-go"
+            fi
+        fi
+    fi
+
     if [ "$divergence" = "-" ] && [ "$bash_stdout" != "$go_stdout" ]; then
         divergence="stdout"
     fi
@@ -1564,6 +1585,43 @@ case_check peer-claim-confirm.sh posttooluse-peer-claim-confirm.json 0 peer-clai
 case_check peer-claim-confirm.sh posttooluse-peer-claim-confirm.json 0 "" "" "YAKOS_COORD_ROOT=__TMP__/nocoord YAKOS_PROJECT_NAME=proj"
 case_check peer-claim.sh       pretooluse-peer-claim-write-toolinput-only.json 2 peer-claim setup_pc_peer_claim "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
 case_check peer-claim-confirm.sh posttooluse-peer-claim-confirm-write-toolinput-only.json 0 peer-claim-confirm setup_pc_coord "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
+
+# K-100 items 1-3: identity comes from the stdin payload (agent_type with the
+# "yakos:" prefix and surrounding whitespace, session_id), never from
+# YAKOS_AGENT_ROLE / CLAUDE_SESSION_ID. The decoy env values must not surface
+# in either side's records.
+case_check mailbox-mirror.sh   sendmessage-peer-prefixed-agent.json 0 mailbox-mirror "" "YAKOS_AGENT_ROLE=decoy-role CLAUDE_SESSION_ID=decoy-sid"
+# log name is "" on purpose: the hooklog record schema differs (pre-existing, tracked
+# separately); the buffer comparison above is what pins the payload-derived identity.
+case_check supervisor-stream.sh pretooluse-edit-api.json   0 "" setup_ss_passfilter "YAKOS_AGENT_ROLE=decoy-role CLAUDE_SESSION_ID=decoy-sid"
+# bash context-threshold.sh never sources lib/compat.sh, so ct_encode_project_path is
+# undefined and the claude probe always reports probe_unavailable there; Go probes
+# the transcript by the payload session_id and crosses the notice threshold.
+case_check context-threshold.sh pretooluse-generic-tool.json 0 context-threshold "" "CLAUDE_SESSION_ID=decoy-sid" "" home_ct_notice "0:bash never sources compat.sh (ct_encode_project_path undefined), so its probe is always unavailable; Go finds the transcript via the payload session_id"
+
+# K-100 item 5: undecodable stdin (0 bytes) on NON-BLOCKING hooks. The registry
+# FailClosed flag (checked against bash HOOK_FAIL_CLOSED=1 by
+# TestRegistryFailClosedMatchesBashDeclaration) drives the entrypoint: these hooks
+# WARN on stderr and pass with exit 0 and no stdout, exactly like bash's
+# _hi_fail_or_warn. Where the log record differs it is an accepted, pinned
+# divergence, see DEGRADED_ACCEPT below.
+DEGRADED_ACCEPT="0:bash continues into the hook body with EMPTY input after the WARN and appends a log or telemetry record built from empty fields; Go exits 0 right after the identical WARN. Neither blocks nor writes stdout."
+case_check context-inject.sh        pretooluse-write-empty-stdin.json 0 ""
+case_check context-threshold.sh     pretooluse-write-empty-stdin.json 0 context-threshold "" "" "" "" "$DEGRADED_ACCEPT"
+case_check cycle-counter.sh         pretooluse-write-empty-stdin.json 0 cycle-counter "" "" "" "" "$DEGRADED_ACCEPT"
+case_check mailbox-mirror.sh        pretooluse-write-empty-stdin.json 0 ""
+case_check output-injection-scan.sh pretooluse-write-empty-stdin.json 0 ""
+case_check path-log.sh              pretooluse-write-empty-stdin.json 0 ""
+case_check peer-claim-confirm.sh    pretooluse-write-empty-stdin.json 0 ""
+case_check plan-outcome-capture.sh  pretooluse-write-empty-stdin.json 0 plan-outcome-capture "" "" "" "" "$DEGRADED_ACCEPT"
+case_check plan-quality-score.sh    pretooluse-write-empty-stdin.json 0 ""
+case_check retro-dispatch.sh        pretooluse-write-empty-stdin.json 0 ""
+case_check session-end-check.sh     pretooluse-write-empty-stdin.json 0 session-end-check "" "" "" "" "$DEGRADED_ACCEPT"
+case_check supervisor-stream.sh     pretooluse-write-empty-stdin.json 0 supervisor-stream "" "" "" "" "$DEGRADED_ACCEPT"
+case_check task-complete-dispatch.sh pretooluse-write-empty-stdin.json 0 task-complete-dispatch "" "" "" "" "$DEGRADED_ACCEPT"
+case_check task-dependency-gate.sh  pretooluse-write-empty-stdin.json 0 task-dependency-gate "" "" "" "" "$DEGRADED_ACCEPT"
+case_check team-lifecycle.sh        pretooluse-write-empty-stdin.json 0 ""
+
 
 # --- task-complete-dispatch: K-87 A-2b (would_run is framework-root-relative on both sides) ---
 case_check task-complete-dispatch.sh  taskcompleted-backend.json   0 task-complete-dispatch setup_tcd_bypass
