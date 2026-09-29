@@ -27,6 +27,7 @@ import (
 	"unicode"
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
+	"github.com/bakw00ds/yakos/internal/decision"
 	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
@@ -286,6 +287,9 @@ func runNew(cfg Config, w io.Writer) (*Result, error) {
 	}
 
 	rt := cfg.Runtime
+	if strings.EqualFold(rt, decision.ProviderJev) {
+		return nil, fmt.Errorf("agent new: jev is a decision provider, not a runtime; see ADR-0009")
+	}
 	if rt != "" && !isKnownRuntime(rt) {
 		return nil, fmt.Errorf("agent new: unknown runtime %q (known: %s)", rt, knownRuntimesStr())
 	}
@@ -472,9 +476,20 @@ func runLint(cfg Config, w io.Writer) (*Result, error) {
 			}
 		}
 
+		// ADR-0009: jev is a decision provider, never a runtime. The explicit
+		// message replaces the generic known-list error for that token.
+		fmAny := make(map[string]any, len(fm))
+		for k, v := range fm {
+			fmAny[k] = v
+		}
+		for _, msg := range decision.CheckAgentFrontmatter(strings.TrimSuffix(base, ".md"), fmAny) {
+			errFn(fmt.Sprintf("%s: %s", base, msg))
+			localErrs++
+		}
+
 		// runtime: must be a known runtime if set.
 		if rt := fm["runtime"]; rt != "" {
-			if !isKnownRuntime(rt) {
+			if !isKnownRuntime(rt) && !strings.EqualFold(rt, decision.ProviderJev) {
 				errFn(fmt.Sprintf("%s: runtime %q is not in known list (%s)", base, rt, knownRuntimesStr()))
 				localErrs++
 			}
@@ -483,7 +498,7 @@ func runLint(cfg Config, w io.Writer) (*Result, error) {
 		// runtime-fallback: all entries valid.
 		if fb := fm["runtime-fallback"]; fb != "" {
 			for _, entry := range splitList(fb) {
-				if !isKnownRuntime(entry) {
+				if !isKnownRuntime(entry) && !strings.EqualFold(entry, decision.ProviderJev) {
 					errFn(fmt.Sprintf("%s: runtime-fallback entry %q is not a known runtime", base, entry))
 					localErrs++
 				}

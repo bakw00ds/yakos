@@ -26,6 +26,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/bakw00ds/yakos/internal/decision"
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 // Level is the severity of a finding.
@@ -175,6 +178,10 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 		r.addInfo(w, "directory does not exist; nothing to validate")
 		return
 	}
+
+	// ADR-0009 guards. Silent when clean so validate's output stays
+	// line-identical to the bash implementation on a healthy tree.
+	checkDecisionGuards(r, w, base)
 
 	nAgents := countDirFiles(filepath.Join(base, "agents"), "*.md")
 	nSkills := countDirFiles(filepath.Join(base, "skills"), "SKILL.md")
@@ -968,4 +975,45 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ---- decision-provider guards (ADR-0009) -------------------------------------
+
+// checkDecisionGuards enforces the routing guardrail and validates
+// lib/decisions/*.yaml. Jev is a decision provider, not a runtime: no agent
+// may name it as one, and no agent that can write may reference a provider.
+// It reports errors only; a clean tree adds no output lines.
+func checkDecisionGuards(r *Result, w io.Writer, base string) {
+	agentsDir := filepath.Join(base, "agents")
+	var agentFiles []string
+	_ = filepath.WalkDir(agentsDir, func(p string, de fs.DirEntry, err error) error {
+		if err != nil || de.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(de.Name(), ".md") && de.Name() != "README.md" {
+			agentFiles = append(agentFiles, p)
+		}
+		return nil
+	})
+	sort.Strings(agentFiles)
+	for _, p := range agentFiles {
+		fm, err := parseFrontmatter(p)
+		if err != nil {
+			continue // reported by the frontmatter check
+		}
+		name := strings.TrimSuffix(filepath.Base(p), ".md")
+		if id, ok := fm["id"].(string); ok && id != "" {
+			name = id
+		}
+		for _, msg := range decision.CheckAgentFrontmatter(name, fm) {
+			r.addErr(w, fmt.Sprintf("%s: %s", p, msg))
+		}
+	}
+
+	promotions := filepath.Join(statepath.Dir(), decision.PromotionsName)
+	for _, sf := range decision.ValidateDir(filepath.Join(base, "decisions"), promotions) {
+		for _, e := range sf.Errs {
+			r.addErr(w, fmt.Sprintf("%s: %v", sf.Path, e))
+		}
+	}
 }

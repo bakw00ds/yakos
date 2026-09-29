@@ -811,3 +811,47 @@ func TestUnifiedDiff_HasHunkHeader(t *testing.T) {
 		t.Errorf("diff should contain hunk header @@; got %q", got)
 	}
 }
+
+// ---- ADR-0009: jev is a decision provider, not a runtime ---------------------
+
+func TestRunLint_JevRuntimeIsHardError(t *testing.T) {
+	root := buildFixture(t, nil)
+	for name, fm := range map[string]string{
+		"runtime":  "runtime: jev\n",
+		"fallback": "runtime: claude\nruntime-fallback: [codex, jev]\n",
+	} {
+		proj := buildProjectDir(t, map[string]string{
+			"jevagent.md": "---\nid: jevagent\nrole: specialist\ndomain: api\n" + fm + "---\n\n## Purpose\n\nx\n",
+		})
+		out, r, err := runCapture(t, Config{YakosRoot: root, Subcommand: "lint", Project: proj})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if r.Errors == 0 || !strings.Contains(out, "jevagent") || !strings.Contains(out, "not a runtime") || !strings.Contains(out, "ADR-0009") {
+			t.Errorf("%s: errors=%d\n%s", name, r.Errors, out)
+		}
+		if strings.Contains(out, "not in known list") {
+			t.Errorf("%s: jev must get the explicit message, not the generic one:\n%s", name, out)
+		}
+	}
+}
+
+func TestRunLint_WriteToolsWithDecisionProviderIsError(t *testing.T) {
+	root := buildFixture(t, nil)
+	proj := buildProjectDir(t, map[string]string{
+		"w.md": "---\nid: w\nrole: specialist\ndomain: api\ndecision-provider: mock\ntools: Read, Edit\n---\n\n## Purpose\n\nx\n",
+	})
+	out, r, _ := runCapture(t, Config{YakosRoot: root, Subcommand: "lint", Project: proj})
+	if r.Errors == 0 || !strings.Contains(out, "Edit/Write/Bash") {
+		t.Fatalf("errors=%d\n%s", r.Errors, out)
+	}
+}
+
+func TestRunNew_JevRuntimeRefused(t *testing.T) {
+	root := buildFixture(t, nil)
+	proj := buildProjectDir(t, nil)
+	_, _, err := runCapture(t, Config{YakosRoot: root, Subcommand: "new", Name: "jevy", Project: proj, Runtime: "jev"})
+	if err == nil || !strings.Contains(err.Error(), "decision provider, not a runtime") {
+		t.Fatalf("err = %v", err)
+	}
+}
