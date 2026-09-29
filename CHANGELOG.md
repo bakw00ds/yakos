@@ -88,6 +88,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `judge_fallback`. (5) The summary and `eval_run_finished` record now
   carry the per-tier Wilson 95% lower bound, the gate mode (CI at 12+
   scored cases, strict floor below) and the gate decision.
+  Review follow-ups: a truncated judge verdict is never scored from a
+  nested object; a budget-hit run is partial (no candidate, non-zero
+  exit, `partial: true`); candidates need at least `min_cases_for_eval`
+  cases scored on both candidate and baseline, compared pairwise; all
+  selected cases must load; a failed subject dispatch is unscored.
 
 ## [0.60.0.0] — 2026-09-29
 

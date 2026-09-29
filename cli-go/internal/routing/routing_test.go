@@ -567,8 +567,8 @@ func TestEval_BudgetCapHits(t *testing.T) {
 	cfg.JudgeFn = mockJudge(true)
 
 	_, err := Run(cfg)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "exceeded") {
+		t.Fatalf("budget-hit run must be partial and return an error; got %v", err)
 	}
 	data, _ := os.ReadFile(cfg.EvalLog)
 	if !strings.Contains(string(data), "budget_exceeded") {

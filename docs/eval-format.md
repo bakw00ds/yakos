@@ -171,7 +171,9 @@ yakos model-routing eval <agent-id> [--judge <agent>] \
   current tier must be included, otherwise no candidate is emitted.
   `--include-fable` adds fable.
 - `--cases` takes comma-separated filename globs and case ids (`01,02` or
-  `case-0*.json`); every entry must match. A subset below
+  `case-0*.json`); every entry must match. An id is an exact file stem
+  (with or without `case-`) or exact `case_id`: `1` does not match `01`,
+  and an id matching two files runs both. Every selected case must load. A subset below
   `min_cases_for_eval` is still refused.
 - The default judge is `code-reviewer` (`architect` for cross-cutting and
   design agents) and never the subject; when the default equals the
@@ -179,6 +181,12 @@ yakos model-routing eval <agent-id> [--judge <agent>] \
 - Cost, duration and tokens come from the run's `dispatch_finished`
   dispatch-log record. If a dispatch reports no cost the run stops with
   partial results and no candidate, since the cap cannot be enforced.
+- A run that hits the cost cap is partial: `eval_run_finished` has
+  `partial: true`, no candidate is emitted and the command exits non-zero.
+  Candidate and baseline are compared on the cases both scored, and any
+  candidate needs at least `min_cases_for_eval` such cases. A judge verdict
+  cut off mid-object, or a failed subject dispatch, leaves the case
+  unscored.
 - The summary prints each tier's Wilson 95% lower bound and a
   `gate decision:` line (CI gate at `min_cases_for_confidence` scored
   cases, strict floor below); `eval_run_finished` carries the same data.

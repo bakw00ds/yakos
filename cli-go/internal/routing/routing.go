@@ -403,12 +403,20 @@ Subcommands:
       --cases <spec>     Comma-separated filename globs and/or case ids
                          (e.g. "01,02" or "case-0*.json").  Default:
                          every case-*.json.  Each entry must match.
+                         An id is an exact file stem (with or without the
+                         "case-" prefix) or exact case_id: "1" does not
+                         match "01", and an id matching two files runs
+                         both.  Every selected case must load.
       --judge <agent>    Default: code-reviewer, or architect for
                          cross-cutting/design agents; never the subject
                          (falls back to another judge and logs it).
-      --max-cost-usd <n> Per-run cap.  Cost is read from the dispatch-log;
-                         the run stops (partial results, no candidate)
-                         if a dispatch reports no cost.
+      --max-cost-usd <n> Per-run cap.  Cost is read from the dispatch-log.
+                         A run that hits the cap, or whose dispatch
+                         reports no cost, is partial: results are logged
+                         (partial=true), no candidate is emitted, and the
+                         command exits non-zero.  Any candidate also needs
+                         at least min_cases_for_eval cases scored on both
+                         the candidate and the current tier.
 
   list
       Show the latest candidate per agent (from
@@ -1251,8 +1259,13 @@ func judgeJSONCandidates(raw string) []string {
 }
 
 // balancedObjects returns every top-level balanced {...} span in s. Braces
-// inside JSON strings are ignored. An unbalanced opener is skipped so a
-// stray "{" in prose does not hide a later valid object.
+// inside JSON strings are ignored.
+//
+// An unclosed "{" that begins like a JSON object ({ then optional space then
+// a quote or a closing brace) is a truncated verdict: scanning stops there,
+// so an inner object such as a criteria_scores entry can never be promoted
+// to the verdict. An unclosed "{" that does not look like JSON is stray
+// prose and is skipped.
 func balancedObjects(s string) []string {
 	var out []string
 	i := 0
@@ -1263,6 +1276,9 @@ func balancedObjects(s string) []string {
 		}
 		end := matchBrace(s, i)
 		if end < 0 {
+			if looksLikeJSONObjectStart(s[i:]) {
+				break
+			}
 			i++
 			continue
 		}
@@ -1270,6 +1286,22 @@ func balancedObjects(s string) []string {
 		i = end + 1
 	}
 	return out
+}
+
+// looksLikeJSONObjectStart reports whether s (starting at "{") begins like a
+// JSON object: "{", optional whitespace, then a quote or "}".
+func looksLikeJSONObjectStart(s string) bool {
+	for j := 1; j < len(s); j++ {
+		switch s[j] {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '"', '}':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // matchBrace returns the index of the brace closing the one at s[start], or
@@ -1360,7 +1392,22 @@ func runEval(cfg Config) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("model-routing eval: list cases: %w", err)
 	}
-	nCases := len(caseFiles)
+	// Load every selected case up front: an unloadable file fails loudly
+	// instead of silently shrinking the run, and the minimum counts loaded
+	// cases.
+	type loadedCase struct {
+		file string
+		ec   evalCase
+	}
+	var loaded []loadedCase
+	for _, cf := range caseFiles {
+		lc, lerr := loadEvalCase(cf)
+		if lerr != nil {
+			return Result{}, fmt.Errorf("model-routing eval: case file %s: %w", cf, lerr)
+		}
+		loaded = append(loaded, loadedCase{file: cf, ec: lc})
+	}
+	nCases := len(loaded)
 
 	if nCases < settings.MinCasesForEval {
 		refused := mustJSON(map[string]interface{}{
@@ -1420,17 +1467,19 @@ func runEval(cfg Config) (Result, error) {
 		"opus":   {},
 		"fable":  {},
 	}
+	// results[tier][caseFile] = pass, for scored cases only. The gate pairs
+	// candidate and baseline on the cases both scored.
+	results := map[string]map[string]bool{}
+	for _, t := range allTiers {
+		results[t] = map[string]bool{}
+	}
 	var totalSpent float64
 	budgetHit := false
 	costUnverifiable := false
 
 outerLoop:
-	for _, caseFile := range caseFiles {
-		ec, err := loadEvalCase(caseFile)
-		if err != nil {
-			// Log and skip bad case files (matches bash || continue).
-			continue
-		}
+	for _, lc := range loaded {
+		caseFile, ec := lc.file, lc.ec
 		hash := caseHash(caseFile)
 
 		for _, tier := range tiers {
@@ -1439,6 +1488,7 @@ outerLoop:
 			}
 
 			// Dispatch subject.
+			var dispatchErr error
 			dr, err := dispatchFn(cfg.AgentID, ec.Task, tier, runID, cfg.Project)
 			if err != nil {
 				if errors.Is(err, ErrDispatchUnavailable) {
@@ -1447,8 +1497,9 @@ outerLoop:
 					// scoring every remaining case as a failure.
 					return Result{}, fmt.Errorf("model-routing eval: %w", err)
 				}
-				// Non-fatal: treat as failed case.
+				// Non-fatal: the case is unscored, not a zero-cost fail.
 				dr = DispatchResult{}
+				dispatchErr = err
 			}
 
 			// Fail closed: with no cost telemetry the per-run cap cannot be
@@ -1481,13 +1532,19 @@ outerLoop:
 				"actual_cost_usd":   dr.Cost,
 			})
 
-			// Dispatch judge.
-			jr, err := judgeFn(judge, judgeInput, cfg.Project)
-			if err != nil {
-				if errors.Is(err, ErrDispatchUnavailable) {
-					return Result{}, fmt.Errorf("model-routing eval: %w", err)
+			// Dispatch judge (skipped when the subject dispatch failed).
+			var jr JudgeResult
+			if dispatchErr != nil {
+				jr = JudgeResult{ParseErr: "subject dispatch failed: " + dispatchErr.Error()}
+			} else {
+				var jerr error
+				jr, jerr = judgeFn(judge, judgeInput, cfg.Project)
+				if jerr != nil {
+					if errors.Is(jerr, ErrDispatchUnavailable) {
+						return Result{}, fmt.Errorf("model-routing eval: %w", jerr)
+					}
+					jr = JudgeResult{ParseErr: "judge dispatch failed: " + jerr.Error()}
 				}
-				jr = JudgeResult{ParseErr: "judge dispatch failed: " + err.Error()}
 			}
 
 			// A judge verdict that could not be parsed leaves the case
@@ -1556,6 +1613,7 @@ outerLoop:
 			logWrite(cfg.EvalLog, caseRec)
 
 			// Accumulate.
+			results[tier][caseFile] = jr.Pass
 			st := stats[tier]
 			st.total++
 			if jr.Pass {
@@ -1572,8 +1630,13 @@ outerLoop:
 		}
 	}
 
+	if budgetHit && !costUnverifiable {
+		return finishPartial(cfg, runID, tiers, stats, totalSpent, "budget cap exceeded"), fmt.Errorf(
+			"model-routing eval: run %s stopped: spend $%.6f exceeded the $%.2f cap (partial results logged; no candidate emitted)",
+			runID, totalSpent, maxCost)
+	}
 	if costUnverifiable {
-		return finishPartial(cfg, runID, stats, totalSpent), fmt.Errorf(
+		return finishPartial(cfg, runID, tiers, stats, totalSpent, "no cost telemetry"), fmt.Errorf(
 			"model-routing eval: run %s stopped: dispatch returned no cost telemetry, so the $%.2f cap cannot be enforced (partial results logged; no candidate emitted)",
 			runID, maxCost)
 	}
@@ -1600,22 +1663,17 @@ outerLoop:
 	fableMeanCost := fable.meanCost()
 
 	// Promotion decision.
-	var curRate, curMeanCost float64
+	var curMeanCost float64
 	switch currentModel {
 	case "haiku":
-		curRate = haikuRate
 		curMeanCost = haikuMeanCost
 	case "sonnet":
-		curRate = sonnetRate
 		curMeanCost = sonnetMeanCost
 	case "opus":
-		curRate = opusRate
 		curMeanCost = opusMeanCost
 	case "fable":
-		curRate = fableRate
 		curMeanCost = fableMeanCost
 	default:
-		curRate = sonnetRate
 		curMeanCost = sonnetMeanCost
 	}
 
@@ -1658,40 +1716,53 @@ outerLoop:
 		if !tierCheaperThan(candTier, currentModel) {
 			continue
 		}
-		var candRate, candCI, candCost float64
-		var nRun int
+		// Pair candidate and baseline on the cases both scored, so a
+		// baseline with unscored gaps is never compared to a fuller
+		// candidate, and require a minimum paired sample for any candidate.
+		nRun, candPass, basePass := pairedCounts(results, candTier, curKey)
+		candRate := ratio(candPass, nRun)
+		candCI := WilsonLower(candPass, nRun)
+		baseRate := ratio(basePass, nRun)
+		var candCost float64
 		switch candTier {
 		case "haiku":
-			candRate = haikuRate
-			candCI = haikuCI
 			candCost = haikuMeanCost
-			nRun = haiku.total
 		case "sonnet":
-			candRate = sonnetRate
-			candCI = sonnetCI
 			candCost = sonnetMeanCost
-			nRun = sonnet.total
 		case "opus":
-			candRate = opusRate
-			candCI = opusCI
 			candCost = opusMeanCost
-			nRun = opus.total
+		}
+		if nRun < settings.MinCasesForEval {
+			gate.Rows = append(gate.Rows, GateRow{
+				Tier: candTier, NScored: nRun, CILower: candCI, Mode: "insufficient_n",
+				Detail: fmt.Sprintf("only %d case(s) scored on both %s and %s; need >= %d",
+					nRun, candTier, curKey, settings.MinCasesForEval),
+			})
+			logWrite(cfg.EvalLog, mustJSON(map[string]interface{}{
+				"type":   "candidate_refused",
+				"ts":     isoNow(cfg.Now),
+				"run_id": runID,
+				"agent":  cfg.AgentID,
+				"reason": "insufficient_scored_cases",
+				"detail": fmt.Sprintf("paired n=%d < min_cases_for_eval=%d for %s vs %s", nRun, settings.MinCasesForEval, candTier, curKey),
+			}))
+			continue
 		}
 
 		if nRun >= settings.MinCasesForConf {
 			// CI-only gate.
-			threshold := curRate - settings.EpsilonPassRate
+			threshold := baseRate - settings.EpsilonPassRate
 			gate.Rows = append(gate.Rows, GateRow{
 				Tier: candTier, NScored: nRun, CILower: candCI, Mode: "ci",
 				Threshold: threshold, Pass: candCI >= threshold,
 				Detail: fmt.Sprintf("ci_lower %.1f%% vs baseline %.1f%% - epsilon %.1f%% = %.1f%%",
-					candCI*100, curRate*100, settings.EpsilonPassRate*100, threshold*100),
+					candCI*100, baseRate*100, settings.EpsilonPassRate*100, threshold*100),
 			})
 			if candCI >= threshold {
 				candidateTier = candTier
 				candidateReason = fmt.Sprintf(
 					"ci_lower[%s]=%.6f >= pass_rate[%s]=%.6f - epsilon=%.6f",
-					candTier, candCI, currentModel, curRate, settings.EpsilonPassRate,
+					candTier, candCI, currentModel, baseRate, settings.EpsilonPassRate,
 				)
 				break
 			}
@@ -1704,14 +1775,14 @@ outerLoop:
 				"reason": "low_confidence",
 				"detail": fmt.Sprintf(
 					"ci_lower[%s]=%.6f < pass_rate[%s]=%.6f - epsilon=%.6f",
-					candTier, candCI, currentModel, curRate, settings.EpsilonPassRate,
+					candTier, candCI, currentModel, baseRate, settings.EpsilonPassRate,
 				),
 			})
 			logWrite(cfg.EvalLog, refusedRec)
 		} else {
 			// Strict floor gate.
 			costOK := curMeanCost > 0 && candCost <= curMeanCost/2
-			marginOK := candRate >= curRate+0.10
+			marginOK := candRate >= baseRate+0.10
 			gate.Rows = append(gate.Rows, GateRow{
 				Tier: candTier, NScored: nRun, CILower: candCI, Mode: "strict_floor",
 				Pass: costOK && marginOK,
@@ -1723,7 +1794,7 @@ outerLoop:
 				candidateTier = candTier
 				candidateReason = fmt.Sprintf(
 					"strict_floor: cost_saving=%.6f<=%.6f/2 AND margin=%.6f>=%.6f+0.10",
-					candCost, curMeanCost, candRate, curRate,
+					candCost, curMeanCost, candRate, baseRate,
 				)
 				break
 			}
@@ -1792,6 +1863,7 @@ outerLoop:
 			"opus":   opusCI,
 			"fable":  fableCI,
 		},
+		"partial":           false,
 		"tiers_run":         tiers,
 		"tier_n_scored":     tierN,
 		"tier_n_unscored":   tierUnscored,
@@ -1889,6 +1961,32 @@ outerLoop:
 // printGate writes the promotion-gate evaluation: the Wilson lower bound per
 // candidate tier against the gate that applies at its case count, and the
 // decision. Format is stable so callers can grep the "gate decision" line.
+// pairedCounts returns the number of cases scored on both tiers and the pass
+// counts of each tier over exactly those cases.
+func pairedCounts(results map[string]map[string]bool, cand, base string) (n, candPass, basePass int) {
+	for f, cp := range results[cand] {
+		bp, ok := results[base][f]
+		if !ok {
+			continue
+		}
+		n++
+		if cp {
+			candPass++
+		}
+		if bp {
+			basePass++
+		}
+	}
+	return n, candPass, basePass
+}
+
+func ratio(k, n int) float64 {
+	if n == 0 {
+		return 0
+	}
+	return float64(k) / float64(n)
+}
+
 func printGate(w io.Writer, g Gate) {
 	fmt.Fprintf(w, "  gate: baseline=%s n=%d pass=%.1f%%  min_cases_for_confidence=%d  epsilon=%.2f\n",
 		g.Baseline, g.BaselineN, g.BaselineRate*100, g.MinCasesConf, g.Epsilon)
@@ -1906,7 +2004,7 @@ func printGate(w io.Writer, g Gate) {
 // finishPartial logs an eval_run_finished record for a run that stopped
 // early (no candidate is ever emitted from a partial run), prints the partial
 // per-tier results, and returns the Result.
-func finishPartial(cfg Config, runID string, stats map[string]*tierStats, spent float64) Result {
+func finishPartial(cfg Config, runID string, tiers []string, stats map[string]*tierStats, spent float64, why string) Result {
 	rates := map[string]float64{}
 	cis := map[string]float64{}
 	costs := map[string]float64{}
@@ -1930,7 +2028,8 @@ func finishPartial(cfg Config, runID string, stats map[string]*tierStats, spent 
 		"tier_n_scored":     ns,
 		"candidate_emitted": false,
 		"candidate_tier":    nil,
-		"candidate_reason":  "partial run: stopped before completion",
+		"candidate_reason":  "partial run: " + why,
+		"tiers_run":         tiers,
 	}))
 	fmt.Fprintf(cfg.Writer, "  partial results (run stopped early):\n")
 	fmt.Fprintf(cfg.Writer, "  tier     n  pass-rate  ci-lower  mean-cost/case\n")

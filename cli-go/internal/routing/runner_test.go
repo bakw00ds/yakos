@@ -3,6 +3,7 @@ package routing
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -422,8 +423,8 @@ func TestEval_CapTripsFromRealDispatchTelemetry(t *testing.T) {
 	setupEvalAgent(t, cfg, "backend", "opus", "backend", 5)
 	writeTelemetryDispatchSh(t, cfg.YakosRoot, `{"total_cost_usd":3.0}`)
 	cfg.JudgeFn = mockJudge(true)
-	if _, err := Run(cfg); err != nil {
-		t.Fatalf("Run: %v", err)
+	if _, err := Run(cfg); err == nil {
+		t.Fatal("budget-hit run must return an error")
 	}
 	if len(readRecords(t, cfg.EvalLog, "budget_exceeded")) != 1 {
 		t.Error("cap did not trip on real telemetry")
@@ -875,3 +876,229 @@ func TestEval_GateSummary_BaselineNotRun(t *testing.T) {
 }
 
 func fmtPct(f float64) string { return strings.TrimSpace(fmt.Sprintf("%5.1f%%", f*100)) }
+
+// ---- review round: truncated verdicts, partial data, paired gate ---------------
+
+func TestParseJudgeOutput_TruncatedNeverScoredFromNested(t *testing.T) {
+	cases := []struct{ name, raw string }{
+		{"unclosed outer, inner pass true", `{"notes":"x","criteria_scores":[{"id":1,"pass":true}]`},
+		{"truncated after inner pass false", `{"pass":true,"criteria_scores":[{"id":1,"pass":false},{"id":2,"no`},
+		{"fenced block cut mid-way", "```json\n{\"criteria_scores\":[{\"id\":1,\"pass\":true},{\"id\":2,"},
+		{"prose then truncated", `Verdict follows. {"notes": "long", "criteria_scores": [{"pass": true}]`},
+		{"spaced opener truncated", "{\n  \"criteria_scores\": [{\"pass\": true}]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseJudgeOutput(tc.raw)
+			if !got.Unscored() {
+				t.Fatalf("truncated verdict scored: %+v", got)
+			}
+			if got.Raw != tc.raw {
+				t.Errorf("raw not kept")
+			}
+		})
+	}
+	// A stray prose brace must still not hide a later valid verdict.
+	if got := parseJudgeOutput(`Note { see below. {"pass":true}`); got.Unscored() || !got.Pass {
+		t.Errorf("stray brace hid the verdict: %+v", got)
+	}
+}
+
+// fixed-size partial-data tests use 5 cases (the minimum).
+func TestEval_PartialBudgetRun_NoCandidate(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	cfg.MaxCostUSD = 0.05
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 8)
+	lastTier := ""
+	cfg.DispatchFn = func(agentID, task, tier, runID, project string) (DispatchResult, error) {
+		lastTier = tier
+		return DispatchResult{Stdout: "x", Cost: 0.01, DurationS: 1}, nil
+	}
+	// Baseline opus fails, cheaper tiers pass: would promote on partial data.
+	cfg.JudgeFn = func(string, string, string) (JudgeResult, error) {
+		return JudgeResult{Pass: lastTier != "opus"}, nil
+	}
+	res, err := Run(cfg)
+	if err == nil {
+		t.Fatal("partial run must return an error")
+	}
+	if res.CandidateEmitted {
+		t.Error("partial run emitted a candidate")
+	}
+	if _, serr := os.Stat(cfg.CandidatesFile); serr == nil {
+		t.Error("candidates file written for a partial run")
+	}
+	if fin := lastRecord(t, cfg.EvalLog, "eval_run_finished"); fin["partial"] != true {
+		t.Errorf("eval_run_finished must carry partial=true: %v", fin["partial"])
+	}
+}
+
+func TestEval_CompleteRun_FinishedNotPartial(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 5)
+	cfg.DispatchFn = mockDispatch(0.001, "x")
+	cfg.JudgeFn = mockJudge(true)
+	if _, err := Run(cfg); err != nil {
+		t.Fatal(err)
+	}
+	fin := lastRecord(t, cfg.EvalLog, "eval_run_finished")
+	if fin["partial"] != false {
+		t.Errorf("partial = %v want false", fin["partial"])
+	}
+	if _, ok := fin["tier_n_scored"]; !ok {
+		t.Error("tier_n_scored missing")
+	}
+}
+
+// All-but-one case unscored must not yield a candidate at n=1.
+func TestEval_MostlyUnscored_NoCandidate(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 5)
+	lastTier := ""
+	seen := map[string]int{}
+	cfg.DispatchFn = func(agentID, task, tier, runID, project string) (DispatchResult, error) {
+		lastTier = tier
+		seen[tier]++
+		return DispatchResult{Stdout: "x", Cost: 0.001, DurationS: 1}, nil
+	}
+	cfg.JudgeFn = func(string, string, string) (JudgeResult, error) {
+		if seen[lastTier] > 1 { // only each tier's first case is scored
+			return parseJudgeOutput("no verdict"), nil
+		}
+		return JudgeResult{Pass: lastTier != "opus"}, nil // baseline fails, cheap passes
+	}
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.CandidateEmitted {
+		t.Fatalf("candidate emitted at n=1: %+v", res.Gate)
+	}
+	found := false
+	for _, r := range readRecords(t, cfg.EvalLog, "candidate_refused") {
+		if r["reason"] == "insufficient_scored_cases" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("insufficient_scored_cases refusal not logged")
+	}
+}
+
+// The gate compares candidate and baseline on the cases both scored: a
+// baseline unscored on its failing cases must not look better or worse.
+func TestEval_GatePairedOnCommonCases(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 6)
+	lastTier := ""
+	n := map[string]int{}
+	cfg.DispatchFn = func(agentID, task, tier, runID, project string) (DispatchResult, error) {
+		lastTier = tier
+		n[tier]++
+		return DispatchResult{Stdout: "x", Cost: 0.001, DurationS: 1}, nil
+	}
+	cfg.JudgeFn = func(string, string, string) (JudgeResult, error) {
+		switch lastTier {
+		case "opus": // scores only cases 1-4
+			if n["opus"] > 4 {
+				return parseJudgeOutput("?"), nil
+			}
+			return JudgeResult{Pass: true}, nil
+		default:
+			return JudgeResult{Pass: true}, nil
+		}
+	}
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range res.Gate.Rows {
+		if r.NScored != 4 {
+			t.Errorf("row %s NScored=%d want 4 (paired with baseline)", r.Tier, r.NScored)
+		}
+		if r.Mode != "insufficient_n" {
+			t.Errorf("row %s mode=%s want insufficient_n (4 < 5)", r.Tier, r.Mode)
+		}
+	}
+	if res.CandidateEmitted {
+		t.Error("candidate emitted from 4 paired cases")
+	}
+}
+
+func TestEval_DispatchError_UnscoredNotJudged(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 5)
+	calls := 0
+	cfg.DispatchFn = func(agentID, task, tier, runID, project string) (DispatchResult, error) {
+		calls++
+		if calls == 2 {
+			return DispatchResult{}, errors.New("boom")
+		}
+		return DispatchResult{Stdout: "x", Cost: 0.001, DurationS: 1}, nil
+	}
+	judged := 0
+	cfg.JudgeFn = func(string, string, string) (JudgeResult, error) { judged++; return JudgeResult{Pass: true}, nil }
+	if _, err := Run(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if judged != 14 {
+		t.Errorf("judged=%d want 14 (the failed dispatch must not be judged)", judged)
+	}
+	var unscored int
+	for _, r := range readRecords(t, cfg.EvalLog, "eval_case") {
+		if r["scored"] == false && strings.Contains(r["judge_error"].(string), "subject dispatch failed") {
+			unscored++
+		}
+	}
+	if unscored != 1 {
+		t.Errorf("unscored dispatch-failure records = %d want 1", unscored)
+	}
+}
+
+func TestEval_UnloadableCase_FailsLoudly(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 5)
+	bad := filepath.Join(cfg.YakosRoot, "lib", "agents", "backend", "eval", "case-zz.json")
+	_ = os.WriteFile(bad, []byte("{not json"), 0o644)
+	called := false
+	cfg.DispatchFn = func(agentID, task, tier, runID, project string) (DispatchResult, error) {
+		called = true
+		return DispatchResult{}, nil
+	}
+	if _, err := Run(cfg); err == nil || !strings.Contains(err.Error(), "case-zz.json") {
+		t.Fatalf("want error naming the bad case, got %v", err)
+	}
+	if called {
+		t.Error("dispatched despite an unloadable case")
+	}
+}
+
+func TestEval_MinCasesCountsLoadedCases(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 4)
+	_ = os.WriteFile(filepath.Join(cfg.YakosRoot, "lib", "agents", "backend", "eval", "case-zz.json"), []byte("{bad"), 0o644)
+	if _, err := Run(cfg); err == nil {
+		t.Fatal("4 loadable + 1 broken must not satisfy the 5-case minimum")
+	}
+}
