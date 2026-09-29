@@ -16,7 +16,9 @@
 #     normalization) or resolves through a symlink to outside the project
 #     root: BLOCK, before any allow/deny matching (security review C3/M7).
 #   - If 'deny' matches: BLOCK.
-#   - If 'allow' is set and no glob matches: BLOCK.
+#   - If 'allow' is an array and no glob matches: BLOCK. An EMPTY array is
+#     deny-all (K-81); a non-array 'allow' is malformed and BLOCKs; a
+#     missing/null 'allow' means no allow-list.
 #   - Otherwise: PASS.
 #
 # Phase 0 Test 6a confirmed exit-2 from a PreToolUse script blocks the
@@ -337,8 +339,28 @@ done <<< "$deny_globs"
 
 # ---- check allow patterns --------------------------------------------------
 
+# K-81: an `allow` key that is a JSON ARRAY constrains the agent — including
+# the EMPTY array, which means deny-all. It used to be read as "no
+# constraint" (`length > 0` was the gate), so `"allow": []` silently granted
+# every path. A missing or null `allow` still means "no allow-list". Any
+# other type (string, number, boolean, object) is malformed and blocks,
+# for the same fail-closed reason as the N4.1 checks above — the old jq
+# pipeline turned most of those into a silent PASS or an accidental block.
+allow_kind="$(jq -r 'if has("allow") and .allow != null then (.allow | type) else "absent" end' <<< "$policy" 2>/dev/null || echo error)"
+case "$allow_kind" in
+    absent|array) ;;
+    *)
+        extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" \
+            '{agent_type: $agent, file_path: $file, note: "policy '"'"'allow'"'"' is not a JSON array"}' 2>/dev/null \
+            || printf '{"agent_type":"%s","file_path":"%s"}' "$agent" "$rel_file")"
+        ho_log "path-allowlist" "BLOCK" "block" "policy 'allow' for agent_type is not an array" "$extra"
+        ho_block "path-allowlist" ".claude/path-allowlist.json's 'allow' for '$agent' is not an array — refusing rather than silently disabling allow enforcement."
+        ;;
+esac
+
 allow_globs="$(jq -r '.allow // [] | .[]' <<< "$policy" 2>/dev/null || true)"
-allow_present="$(jq -r '.allow // empty | if length > 0 then "1" else "" end' <<< "$policy" 2>/dev/null || true)"
+allow_present=""
+[ "$allow_kind" = "array" ] && allow_present="1"
 
 if [ -n "$allow_present" ]; then
     matched=""
@@ -357,9 +379,15 @@ if [ -n "$allow_present" ]; then
             ho_log "path-allowlist" "WARN" "pass" "outside allow but bypass active" "$extra"
             exit 0
         fi
-        extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" \
-            '{agent_type: $agent, file_path: $file, note: "outside allow"}')"
+        allow_note="outside allow"
+        [ "$(jq -r '.allow | length' <<< "$policy" 2>/dev/null || echo 1)" = "0" ] && allow_note="allow-list is empty (deny-all)"
+        extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" --arg note "$allow_note" \
+            '{agent_type: $agent, file_path: $file, note: $note}')"
         ho_log "path-allowlist" "BLOCK" "block" "path outside agent's allow-list" "$extra"
+        allow_len="$(jq -r '.allow | length' <<< "$policy" 2>/dev/null || echo 1)"
+        if [ "$allow_len" = "0" ]; then
+            ho_block "path-allowlist" "agent '$agent' may only edit paths in the allow-list; '$rel_file' is outside it (the allow-list is empty: deny-all)"
+        fi
         ho_block "path-allowlist" "agent '$agent' may only edit paths in the allow-list; '$rel_file' is outside it"
     fi
 
