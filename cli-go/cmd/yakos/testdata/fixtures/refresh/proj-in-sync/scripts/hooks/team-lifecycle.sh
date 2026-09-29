@@ -94,18 +94,28 @@ kanban_move_first() {
     local tmp
     tmp="$(mktemp -t yakos-kb.XXXXXX)" || return 0
 
+    # K-101: when the destination section is absent (or precedes the source, so
+    # the task can never be re-emitted), the task is NOT moved: it stays where it
+    # was, with one "# WARN" marker line directly above it. Output is buffered in
+    # out[] so the block can be re-inserted at the position it was captured from.
+    # A task already directly preceded by an identical WARN line gets no second
+    # one, so repeated lifecycle events leave the file byte-identical.
     awk -v src="$src" -v dst="$dst" -v cbox="$cbox" '
-        # Captured task block stored in `task_buf`; emitted when we hit dst section.
-        BEGIN { state = "scan"; task_first = ""; task_rest = ""; moved = 0 }
+        function emit(s) { out[n++] = s }
+        BEGIN {
+            state = "scan"; task_first = ""; task_rest = ""; moved = 0; n = 0; cap_pos = -1
+            WARN = "# WARN: yakos kanban auto-update found src but no dst section"
+        }
 
         # Source section header — start scanning for first task line.
         $0 ~ "^## " src "[[:space:]]*$" {
-            print; state = "in_src"; next
+            emit($0); state = "in_src"; next
         }
 
         # Inside source section: first "- [<x>] " line is the task to capture.
         state == "in_src" && !moved && /^- \[/ {
             task_first = $0
+            cap_pos = n
             state = "capturing_cont"
             next
         }
@@ -131,20 +141,25 @@ kanban_move_first() {
 
         # Destination section: print header, then re-insert task block with new checkbox.
         $0 ~ "^## " dst "[[:space:]]*$" {
-            print
+            emit($0)
             if (moved) {
                 # Replace first "- [<any>]" with "- [<cbox>]"
                 line = task_first
                 sub(/^- \[.\]/, "- [" cbox "]", line)
-                print line
-                if (length(task_rest) > 0) printf "%s", task_rest
+                emit(line)
+                if (length(task_rest) > 0) {
+                    r = task_rest
+                    sub(/\n$/, "", r)
+                    m = split(r, rl, "\n")
+                    for (i = 1; i <= m; i++) emit(rl[i])
+                }
                 moved_emitted = 1
             }
             next
         }
 
         # Default: pass through.
-        { print }
+        { emit($0) }
 
         END {
             # K-90: a task that is the last record of the file never meets
@@ -152,12 +167,22 @@ kanban_move_first() {
             # committed (moved stayed 0) and the task was silently dropped.
             # Flush the pending capture at end of input.
             if (state == "capturing_cont" && !moved) moved = 1
-            # If we captured but didnt emit (src found, dst missing), best
-            # not to drop the task — emit a warning marker.
-            if (moved && !moved_emitted) {
-                print "# WARN: yakos kanban auto-update found src but no dst section"
-                print task_first
-                printf "%s", task_rest
+            fallback = (moved && !moved_emitted)
+            if (fallback) {
+                have_warn = (cap_pos > 0 && out[cap_pos - 1] == WARN)
+                if (task_rest != "") {
+                    r = task_rest
+                    sub(/\n$/, "", r)
+                    rn = split(r, rl, "\n")
+                } else rn = 0
+            }
+            for (k = 0; k <= n; k++) {
+                if (fallback && k == cap_pos) {
+                    if (!have_warn) print WARN
+                    print task_first
+                    for (i = 1; i <= rn; i++) print rl[i]
+                }
+                if (k < n) print out[k]
             }
         }
     ' "$kb" > "$tmp" 2>/dev/null && mv "$tmp" "$kb" 2>/dev/null || rm -f "$tmp" 2>/dev/null
