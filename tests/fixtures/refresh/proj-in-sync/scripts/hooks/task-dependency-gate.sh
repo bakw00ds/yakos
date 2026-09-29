@@ -31,6 +31,9 @@ HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 . "$HOOK_DIR/lib/hook-input.sh"
 . "$HOOK_DIR/lib/hook-output.sh"
 
+# K-81: non-blocking hook — a missing jq must never block the tool call.
+hi_skip_if_no_jq
+
 hi_init
 
 # Best-effort schema guess — these field names are plausible but unverified.

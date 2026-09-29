@@ -29,6 +29,9 @@ HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 # shellcheck source=./lib/compat.sh
 [ -f "$HOOK_DIR/lib/compat.sh" ] && . "$HOOK_DIR/lib/compat.sh"
 
+# K-81: non-blocking hook — a missing jq must never block the tool call.
+hi_skip_if_no_jq
+
 hi_init
 
 session_id="$(hi_session_id)"
