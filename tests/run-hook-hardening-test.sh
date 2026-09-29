@@ -199,6 +199,13 @@ run_suite() {
     # a live hook; no marker, so an un-fixed hook would otherwise pass (0).
     local sig
     for sig in TERM HUP; do
+        # Under nohup (or any parent that sets SIGHUP to ignored) the signal
+        # cannot be trapped by the hook either; skip rather than report a false
+        # failure the hook cannot influence.
+        if [ "$sig" = HUP ] && [ "$(bash -c 'kill -HUP $$; sleep 0.3; echo alive' 2>/dev/null)" = alive ]; then
+            echo "  SKIP $L: gate SIGHUP (SIGHUP is ignored in this environment)"
+            continue
+        fi
         sb="$(new_sandbox "t-$L-sig-$sig")"
         mkdir -p "$sb/slow"
         local flag="$sb/slow/once"
