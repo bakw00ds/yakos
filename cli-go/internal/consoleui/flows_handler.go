@@ -472,7 +472,7 @@ func (h *flowsHandlers) handleSaveWorkflow(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Ensure the workflows directory exists.
-	if err := os.MkdirAll(h.workflowsDir(), 0755); err != nil {
+	if err := os.MkdirAll(h.workflowsDir(), 0700); err != nil { // S-2 R20: private when newly created
 		slog.Error("flows: save workflow: mkdirall", "err", err)
 		writeGenericError(w, http.StatusInternalServerError, "failed to create workflows directory")
 		return
@@ -480,7 +480,7 @@ func (h *flowsHandlers) handleSaveWorkflow(w http.ResponseWriter, r *http.Reques
 
 	// Atomic save via temp-rename (same pattern as kanban/write.go).
 	savePath := path + ".tmp"
-	if err := os.WriteFile(savePath, newYAML, 0644); err != nil { //nolint:gosec
+	if err := os.WriteFile(savePath, newYAML, 0600); err != nil { // S-2 R20; the rename below carries this mode
 		slog.Error("flows: save workflow: write tmp", "name", req.Name, "err", err)
 		writeGenericError(w, http.StatusInternalServerError, "failed to save workflow")
 		return
