@@ -123,7 +123,13 @@ func (h *Hook) run(in hooktype.HookInput) hooktype.HookOutput {
 		// directory exists it must also be listable, matching the bash gate.
 		d, openErr := os.Open(currentDir) //nolint:gosec
 		if openErr == nil {
+			fi, dirErr := d.Stat()
 			_ = d.Close()
+			// Windows reports a path under a regular file as not-exist
+			// rather than ENOTDIR, so confirm work/current is a directory.
+			if dirErr != nil || !fi.IsDir() {
+				return blocked(fmt.Sprintf("%s exists but is not a directory", currentDir))
+			}
 		} else if !errors.Is(openErr, fs.ErrNotExist) {
 			return blocked(fmt.Sprintf("cannot read %s (%v)", currentDir, openErr))
 		}

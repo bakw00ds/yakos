@@ -338,7 +338,7 @@ HOOKS_DIR_MARKER = "/scripts/hooks/"
 
 
 def canonical_hook_name(command):
-    """Hook identity independent of the path PREFIX, keyed by the script's
+    """Hook identity independent of the path PREFIX, keyed by the script
     path relative to scripts/hooks/ (not its basename, so same-named hooks in
     different subdirectories stay distinct). Falls back to the basename when
     the command does not route through a scripts/hooks/ directory."""
@@ -371,7 +371,7 @@ def command_of(h):
 
 tmpl_hooks = template.get("hooks", {}) or {}
 
-# (event, canonical name) -> the template's own (matcher, command).
+# (event, canonical name) -> the template-owned (matcher, command).
 template_desired = {}
 for event, entries in tmpl_hooks.items():
     for entry in entries:
@@ -397,7 +397,7 @@ RETIRED_REGISTRATIONS = {
 
 # PHASE A: remove superseded. A deployed hook whose canonical (event, name)
 # is in the template with a DIFFERENT matcher OR a DIFFERENT exact command
-# string (path-prefix drift) is removed; Phase B re-adds it in the template's
+# string (path-prefix drift) is removed; Phase B re-adds it in its
 # own form, so the net effect is REPLACE, never duplicate.
 for event in list(deployed_hooks.keys()):
     new_entries = []
@@ -483,7 +483,7 @@ for event, t_entries in tmpl_hooks.items():
 # kanban-stop.sh) are never removed because Phase A only touches hooks the
 # template has an entry for.
 
-# sort_keys matches Go's json.MarshalIndent (map keys sorted) so both
+# sort_keys matches Go json.MarshalIndent (map keys sorted) so both
 # implementations write byte-identical settings.json.
 print(json.dumps(deployed, indent=2, ensure_ascii=False, sort_keys=True))
 sys.stdout.flush()
