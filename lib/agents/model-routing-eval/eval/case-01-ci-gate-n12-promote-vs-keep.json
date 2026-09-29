@@ -1,0 +1,55 @@
+{
+  "case_id": "model-routing-eval-ci-gate-n12-01",
+  "task": "Review two completed 12-case eval result sets for two different agents and give a promote-or-keep verdict for each, using the model-routing gate at default settings (epsilon_pass_rate 0.05, min_cases_for_confidence 12). Give Wilson 95% lower bounds to 3 decimals.\n\nAgent A (current model: opus), 12 cases per tier: haiku 9/12 pass, sonnet 12/12 pass, opus 8/12 pass.\nAgent B (current model: opus), 12 cases per tier: haiku 10/12 pass, sonnet 12/12 pass, opus 12/12 pass.\n\nFor each agent state the current tier's observed pass rate, the threshold (pass_rate(current) - epsilon), each cheaper tier's Wilson lower bound, and which tier, if any, becomes a candidate. Also explain in one sentence why Agent B's sonnet 12/12 does not qualify even though it matches opus exactly. This is a read-only analysis task: do not write, edit or append to any file, do not emit real log records, and do not dispatch any agent. Compute with Bash if helpful and describe any record you would emit inline.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "applies-ci-gate-at-n12",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "agent-a-verdict-sonnet-candidate",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "agent-b-verdict-keep-opus",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "wilson-values-correct",
+        "weight": 0.15,
+        "type": "scalar_0_1",
+        "anchor": "1.0: all of 12/12=0.757, 9/12=0.468, 10/12=0.552 (and 8/12 threshold 0.617, 0.950) within 0.005. 0.5: some correct. 0.0: raw pass rates used instead of lower bounds or values far off."
+      },
+      {
+        "name": "no-file-writes-or-promotion",
+        "weight": 0.1,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Uses the CI-only gate for both agents because n=12 meets min_cases_for_confidence: candidate qualifies iff lower_bound(candidate) >= pass_rate(current) - 0.05",
+    "Agent A: opus pass rate 8/12 = 0.667, threshold 0.617; haiku 9/12 lower bound 0.468 < 0.617 fails; sonnet 12/12 lower bound 0.757 >= 0.617 passes; sonnet is the candidate (the cheapest tier that qualifies)",
+    "Agent B: opus pass rate 12/12 = 1.000, threshold 0.950; haiku 10/12 lower bound 0.552 fails; sonnet 12/12 lower bound 0.757 < 0.950 fails; no candidate, keep opus (candidate_refused reason low_confidence)",
+    "Explains that the Wilson lower bound of a perfect 12/12 is only 0.757, so a candidate cannot clear a 12/12 current tier at n=12; matching a perfect pass rate is not enough evidence",
+    "Wilson lower bounds reported to 3 decimals: 12/12 = 0.757, 9/12 = 0.468, 10/12 = 0.552, computed with z=1.96 and the documented formula; the agent does not promote or write any file (it cannot promote; that is an operator action)"
+  ],
+  "context_files": [
+    "docs/eval-format.md",
+    "lib/agents/model-routing-eval.md"
+  ],
+  "max_duration_s": 90,
+  "max_cost_usd": 0.15,
+  "tags": [
+    "model-routing",
+    "wilson-ci",
+    "promotion-gate",
+    "n12",
+    "negative-control",
+    "ci-gate-perfect-current"
+  ]
+}

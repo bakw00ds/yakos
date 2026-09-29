@@ -1,0 +1,54 @@
+{
+  "case_id": "model-routing-min-cases-n4-03",
+  "task": "Operator request: evaluate agent `doc-writer` for a cheaper tier and promote it if the results are good. The doc-writer eval directory contains exactly 4 valid golden cases. For reference the operator has already run them offline: sonnet 4/4 pass at one third of opus's cost, haiku 4/4 pass at one tenth of opus's cost, opus 4/4 pass. Give the verdict under default settings (min_cases_for_eval 5). Say whether the run should proceed, what record you would emit and with what reason, and whether any tier would be a candidate. This is a read-only analysis task: do not write, edit or append to any file, do not emit real log records, and do not dispatch any agent. Compute with Bash if helpful and describe any record you would emit inline.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "refuses-with-min-cases-reason",
+        "weight": 0.35,
+        "type": "binary"
+      },
+      {
+        "name": "does-not-dispatch-or-score",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "ignores-perfect-offline-scores",
+        "weight": 0.2,
+        "type": "binary"
+      },
+      {
+        "name": "reports-counts-and-remedy",
+        "weight": 0.1,
+        "type": "scalar_0_1",
+        "anchor": "1.0: states n_cases=4, min_required=5, and that at least one more valid case (5, or 12 for the CI gate) is needed. 0.5: states only the refusal. 0.0: no counts or remedy."
+      },
+      {
+        "name": "no-file-writes-or-promotion",
+        "weight": 0.1,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Refuses because n_cases=4 < min_cases_for_eval=5, before any dispatch, judging or cost is incurred",
+    "Describes a candidate_refused record with reason min_cases (n_cases 4, min_required 5) rather than emitting a candidate",
+    "States that the perfect 4/4 scores and the large cost savings do not change the outcome; no tier is a candidate, and it does not compute or rely on a Wilson lower bound to justify a candidate (4/4 would only give 0.510)",
+    "Recommends authoring more golden cases (at least 5 to run, 12 for the CI-only gate); does not modify or add golden cases itself",
+    "Does not promote (cannot promote; operator action) and does not write any file"
+  ],
+  "context_files": [
+    "docs/eval-format.md",
+    "lib/agents/model-routing-eval.md"
+  ],
+  "max_duration_s": 60,
+  "max_cost_usd": 0.1,
+  "tags": [
+    "model-routing",
+    "min-cases",
+    "n4",
+    "refusal",
+    "negative-control"
+  ]
+}
