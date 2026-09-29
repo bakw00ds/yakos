@@ -43,8 +43,22 @@ set -eu
 # `set -e` / `set -u` / a failed `.` source all exit 1, which Claude Code treats
 # as NON-blocking. Rewrite every exit status other than 0 (pass) and 2 (block)
 # to 2 so a crash in this script blocks instead of waving the dispatch through.
+# A readable helper lib with a SYNTAX error makes bash 3.2 exit 0 outright, which
+# the status check above cannot see. So a pass must also be an explicit decision:
+# every intended `exit 0` goes through _pqg_pass, and an exit 0 without it is
+# rewritten to 2.
+_pqg_decided=0
+_pqg_pass() {
+    _pqg_decided=1
+    exit 0
+}
 _pqg_on_exit() {
     _pqg_rc=$?
+    if [ "$_pqg_rc" -eq 0 ] && [ "$_pqg_decided" -ne 1 ]; then
+        echo "plan-quality-gate: BLOCKED — exited without a gate decision (a helper library likely failed to parse); failing closed." >&2
+        echo "plan-quality-gate: emergency override: export YAKOS_PLAN_QUALITY_DISABLE=1" >&2
+        exit 2
+    fi
     if [ "$_pqg_rc" -ne 0 ] && [ "$_pqg_rc" -ne 2 ]; then
         echo "plan-quality-gate: BLOCKED — internal error (exit $_pqg_rc); failing closed rather than passing the dispatch." >&2
         echo "plan-quality-gate: emergency override: export YAKOS_PLAN_QUALITY_DISABLE=1" >&2
@@ -55,11 +69,14 @@ trap _pqg_on_exit EXIT
 
 # Emergency disable is checked BEFORE hi_init so it stays reachable when jq is
 # broken (same ordering the other blocking hooks use).
+HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 if [ "${YAKOS_PLAN_QUALITY_DISABLE:-0}" = "1" ]; then
+    # Leave a record of the bypass, best effort (libs may be what is broken).
+    _pqg_decided=1
+    { . "$HOOK_DIR/lib/hook-output.sh" && ho_log "plan-quality-gate" "WARN" "pass" \
+        "YAKOS_PLAN_QUALITY_DISABLE=1: gate bypassed" "{}"; } 2>/dev/null || true
     exit 0
 fi
-
-HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 # shellcheck disable=SC2034  # read by hi_init in lib/hook-input.sh
 HOOK_FAIL_CLOSED=1
 # A failed `.` does NOT trip `set -e` on bash 3.2 (macOS /bin/bash): the script
@@ -94,7 +111,7 @@ fi
 # Exact match only: "AgentX" or "TeamCreateFoo" are not gated.
 case "$tool" in
     TeamCreate|Agent) ;;
-    *) exit 0 ;;
+    *) _pqg_pass ;;
 esac
 
 current_dir="$(yakos_current_dir)"
@@ -133,7 +150,7 @@ fi
 if [ ! -e "$blocked_marker" ] && [ ! -L "$blocked_marker" ]; then
     ho_log "plan-quality-gate" "REPORT" "pass" \
         "no .plan-blocked marker; proceeding" "{}" 2>/dev/null || true
-    exit 0
+    _pqg_pass
 fi
 
 # ---- read the marker (best effort; never changes the block decision) ----------
@@ -154,12 +171,16 @@ fi
 project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 yakos_yml="$project_dir/.yakos.yml"
 if [ -f "$yakos_yml" ]; then
-    if grep -A 10 '^[[:space:]]*plan_quality:' "$yakos_yml" 2>/dev/null \
-        | grep -q '^[[:space:]]*enabled:[[:space:]]*false[[:space:]]*$'; then
+    # Scope to the plan_quality: section (stop at the next top-level key) so an
+    # `enabled: false` belonging to another section does not disable the gate.
+    if awk '/^[[:space:]]*plan_quality[[:space:]]*:/ { b = 1; next }
+            b && /^[^[:space:]#]/ { exit }
+            b && /^[[:space:]]*enabled:[[:space:]]*false[[:space:]]*$/ { f = 1 }
+            END { exit !f }' "$yakos_yml" 2>/dev/null; then
         rm -f "$blocked_marker" 2>/dev/null || true
         ho_log "plan-quality-gate" "REPORT" "pass" \
             "plan_quality.enabled=false; .plan-blocked marker cleared" "{}" 2>/dev/null || true
-        exit 0
+        _pqg_pass
     fi
 fi
 
