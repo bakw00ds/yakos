@@ -595,6 +595,30 @@ func defaultJudge(domain string) string {
 	}
 }
 
+// fallbackJudges is tried in order when the domain default equals the subject.
+var fallbackJudges = []string{"code-reviewer", "architect"}
+
+// resolveJudge picks the judge for subject. An explicit override is returned
+// as-is (the caller enforces judge != subject). Otherwise the domain default
+// is used; when it equals the subject, the first differing fallback wins.
+// note describes a fallback so the caller can log the choice; it is empty
+// when the plain domain default was used.
+func resolveJudge(override, domain, subject string) (judge, note string) {
+	if override != "" {
+		return override, ""
+	}
+	def := defaultJudge(domain)
+	if def != subject {
+		return def, ""
+	}
+	for _, fb := range fallbackJudges {
+		if fb != subject {
+			return fb, fmt.Sprintf("default judge %q for domain %q is the subject; fell back to %q", def, domain, fb)
+		}
+	}
+	return def, ""
+}
+
 // ---- NDJSON log helpers -----------------------------------------------------
 
 func appendLine(path, line string) error {
@@ -1011,10 +1035,7 @@ func runEval(cfg Config) (Result, error) {
 	domain := agentDomain(agentFile)
 
 	// Resolve judge.
-	judge := cfg.Judge
-	if judge == "" {
-		judge = defaultJudge(domain)
-	}
+	judge, judgeNote := resolveJudge(cfg.Judge, domain, cfg.AgentID)
 
 	// Anti-self-congratulation guard.
 	if judge == cfg.AgentID {
@@ -1074,6 +1095,17 @@ func runEval(cfg Config) (Result, error) {
 
 	fmt.Fprintf(cfg.Writer, "model-routing eval: %s  run=%s\n", cfg.AgentID, runID)
 	fmt.Fprintf(cfg.Writer, "  cases=%d  judge=%s  budget=$0/$%.2f\n", nCases, judge, maxCost)
+	if judgeNote != "" {
+		fmt.Fprintf(cfg.Writer, "  judge: %s\n", judgeNote)
+		logWrite(cfg.EvalLog, mustJSON(map[string]interface{}{
+			"type":   "judge_fallback",
+			"ts":     isoNow(cfg.Now),
+			"run_id": runID,
+			"agent":  cfg.AgentID,
+			"judge":  judge,
+			"reason": judgeNote,
+		}))
+	}
 	fmt.Fprintln(cfg.Writer)
 
 	// Resolve dispatch/judge functions.

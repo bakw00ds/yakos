@@ -166,3 +166,76 @@ func lastRecord(t *testing.T, path, typ string) map[string]interface{} {
 	}
 	return recs[len(recs)-1]
 }
+
+// ---- defect 4: default judge never equals the subject ------------------------
+
+func TestResolveJudge_Table(t *testing.T) {
+	cases := []struct {
+		name, override, domain, subject string
+		wantJudge                       string
+		wantNote                        bool
+	}{
+		{"cross-cutting default is architect", "", "cross-cutting", "backend", "architect", false},
+		{"architect subject falls back to code-reviewer", "", "cross-cutting", "architect", "code-reviewer", true},
+		{"design subject architect falls back", "", "design", "architect", "code-reviewer", true},
+		{"code-reviewer subject in backend domain falls back to architect", "", "backend", "code-reviewer", "architect", true},
+		{"override wins even if equal (caller refuses)", "architect", "cross-cutting", "architect", "architect", false},
+		{"override differing", "opus-judge", "backend", "backend", "opus-judge", false},
+		{"unknown domain default", "", "weird", "backend", "code-reviewer", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			j, note := resolveJudge(tc.override, tc.domain, tc.subject)
+			if j != tc.wantJudge {
+				t.Errorf("judge = %q want %q", j, tc.wantJudge)
+			}
+			if (note != "") != tc.wantNote {
+				t.Errorf("note = %q, wantNote=%v", note, tc.wantNote)
+			}
+			if tc.override == "" && j == tc.subject {
+				t.Errorf("default judge equals subject %q", tc.subject)
+			}
+		})
+	}
+}
+
+func TestEval_ArchitectSubject_FallsBackAndLogs(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "architect"
+	setupEvalAgent(t, cfg, "architect", "opus", "cross-cutting", 5)
+	cfg.DispatchFn = mockDispatch(0.001, "ok")
+	var gotJudge string
+	cfg.JudgeFn = func(judgeID, inputJSON, project string) (JudgeResult, error) {
+		gotJudge = judgeID
+		return JudgeResult{Pass: true}, nil
+	}
+	if _, err := Run(cfg); err != nil {
+		t.Fatalf("architect as subject must not need --judge: %v", err)
+	}
+	if gotJudge != "code-reviewer" {
+		t.Errorf("judge used = %q want code-reviewer", gotJudge)
+	}
+	if !strings.Contains(cfgOut(cfg), "fell back to \"code-reviewer\"") {
+		t.Errorf("fallback not shown in output: %q", cfgOut(cfg))
+	}
+	fb := readRecords(t, cfg.EvalLog, "judge_fallback")
+	if len(fb) != 1 || fb[0]["judge"] != "code-reviewer" {
+		t.Errorf("judge_fallback record missing/wrong: %v", fb)
+	}
+	started := lastRecord(t, cfg.EvalLog, "eval_run_started")
+	if started["judge"] != nil && started["judge"] != "code-reviewer" {
+		t.Errorf("eval_run_started judge = %v", started["judge"])
+	}
+}
+
+func TestEval_ExplicitSelfJudgeStillRefused(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "architect"
+	cfg.Judge = "architect"
+	setupEvalAgent(t, cfg, "architect", "opus", "cross-cutting", 5)
+	if _, err := Run(cfg); err == nil || !strings.Contains(err.Error(), "same agent") {
+		t.Fatalf("explicit self judge must be refused, got %v", err)
+	}
+}
