@@ -16,8 +16,12 @@
 package hookbypass
 
 import (
+	"fmt"
+	"os"
 	"regexp"
 	"strings"
+
+	"github.com/bakw00ds/yakos/internal/hooks/fnmatch"
 )
 
 var (
@@ -30,14 +34,53 @@ var (
 	reScopeField    = regexp.MustCompile(`^\*\*Scope:\*\*`)
 )
 
+// Warnf receives non-fatal diagnostics (currently only the empty-scope
+// warning). Defaults to stderr; tests override it. Bash prints the same
+// text to stderr from ho_check_bypass.
+var Warnf = func(msg string) { fmt.Fprintln(os.Stderr, msg) }
+
+// EmptyScopeWarning is the diagnostic emitted when an entry for the hook
+// carries a blank **Scope:** value. Kept byte-identical to hook-output.sh.
+const EmptyScopeWarning = "WARN: bypass entry has empty scope, ignored"
+
 // Check replicates ho_check_bypass(hook, scope): true if content (the
 // hook-bypass.md file's contents) has an entry, under "## Active entries",
 // whose **Hook:** value CONTAINS hook (substring) AND whose **Scope:**
-// value CONTAINS scope (substring) — an empty scope always matches.
+// value matches scope EXACTLY or as an explicit glob.
+//
+// Scope matching (K-99; was a substring test, which let the entry scope
+// "web/secret.env-rotation" also cover "web/secret.env" and let an empty
+// probe scope match every entry for the hook):
+//
+//   - the probe is slash-normalized (backslash becomes "/");
+//   - an entry scope matches when it equals the probe, byte for byte
+//     (case-sensitive, like bash `[ = ]`);
+//   - otherwise, an entry scope containing '*' is a glob with bash `case`
+//     semantics (the same matcher path-allowlist uses: '*' crosses '/');
+//     "web/**" therefore covers everything under web/;
+//   - a blank entry scope matches nothing and logs EmptyScopeWarning;
+//   - an empty probe matches nothing.
 func Check(content, hook, scope string) bool {
+	probe := strings.ReplaceAll(scope, "\\", "/")
+	if probe == "" {
+		return false
+	}
 	return scan(content, hook, func(scopeLine string) bool {
-		return scope == "" || strings.Contains(scopeLine, scope)
+		entry := strings.TrimSpace(scopeLine)
+		if entry == "" {
+			Warnf(EmptyScopeWarning)
+			return false
+		}
+		return scopeMatches(entry, probe)
 	})
+}
+
+// scopeMatches reports whether a non-empty entry scope covers probe.
+func scopeMatches(entry, probe string) bool {
+	if entry == probe {
+		return true
+	}
+	return strings.Contains(entry, "*") && fnmatch.Match(entry, probe)
 }
 
 // CheckExact replicates ho_check_bypass_exact(hook, scope): true if content
@@ -60,12 +103,24 @@ func scan(content, hook string, scopeOK func(scopeLine string) bool) bool {
 	active := false
 	inEntry := false
 	okHook := false
-	okScope := false
+	var scopes []string
 	found := false
 
+	// Scope values are judged at flush time, once the entry's **Hook:**
+	// verdict is known, so a diagnostic (empty scope) fires only for
+	// entries that actually target this hook. Field order within an entry
+	// is free, which is why the verdict cannot be assumed earlier.
 	flush := func() {
-		if inEntry && okHook && okScope {
-			found = true
+		if found || !inEntry || !okHook {
+			return
+		}
+		// Stop at the first match, like the bash loop's early return, so
+		// diagnostics for later entries are not emitted on a match.
+		for _, sc := range scopes {
+			if scopeOK(sc) {
+				found = true
+				return
+			}
 		}
 	}
 
@@ -88,7 +143,7 @@ func scan(content, hook string, scopeOK func(scopeLine string) bool) bool {
 			flush()
 			inEntry = true
 			okHook = false
-			okScope = false
+			scopes = scopes[:0]
 			continue
 		case inEntry && reHookField.MatchString(line):
 			v := reHookField.ReplaceAllString(line, "")
@@ -99,9 +154,7 @@ func scan(content, hook string, scopeOK func(scopeLine string) bool) bool {
 		case inEntry && reScopeField.MatchString(line):
 			v := reScopeField.ReplaceAllString(line, "")
 			v = strings.TrimLeft(v, " \t")
-			if scopeOK(v) {
-				okScope = true
-			}
+			scopes = append(scopes, v)
 		}
 	}
 	flush()

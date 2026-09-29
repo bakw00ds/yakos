@@ -93,8 +93,21 @@ ho_block() {
 ho_check_bypass() {
     # Returns 0 (success) if the active-bypass file has an entry whose:
     #   **Hook:** value contains <hook-name>, AND
-    #   **Scope:** value contains <scope-string> (or scope is empty)
+    #   **Scope:** value matches <scope-string> EXACTLY or as an explicit glob
     # Otherwise returns 1.
+    #
+    # Scope matching (K-99). This used to be a substring test, so a scope of
+    # `web/secret.env-rotation` also bypassed `web/secret.env`, and an empty
+    # probe scope matched every entry for the hook. Now:
+    #   - the probe is slash-normalized (backslash -> /);
+    #   - an entry scope matches when it equals the probe (case-sensitive);
+    #   - otherwise an entry scope containing `*` is a glob with bash `case`
+    #     semantics (the matcher path-allowlist uses; `*` crosses `/`), so
+    #     `web/**` covers everything under web/;
+    #   - a blank entry scope matches nothing and prints a WARN to stderr;
+    #   - an empty probe matches nothing.
+    # Migration: a bare-prefix entry keeps working only as `prefix/**`.
+    # Go twin: cli-go/internal/hooks/hookbypass (Check).
     #
     # Bypass entries must appear after the literal `## Active entries`
     # heading in work/current/hook-bypass.md. The format-example block
@@ -108,12 +121,24 @@ ho_check_bypass() {
     fi
     [ -f "$bypass_file" ] || return 1
 
-    awk -v hook="$hook" -v scope="$scope" '
-        BEGIN { active=0; in_entry=0; ok_hook=0; ok_scope=0; found=0 }
+    local probe="${scope//\\//}"
+    [ -n "$probe" ] || return 1
+
+    # awk owns the entry state machine (identical to ho_check_bypass_exact)
+    # and emits one "S<scope>" line per Scope field of every entry whose
+    # Hook matches, judged once the entry is complete so field order is
+    # free. The glob/equality decision is made in bash below because awk
+    # has no `case`-style matcher.
+    local scopes
+    scopes="$(awk -v hook="$hook" '
+        BEGIN { active=0; in_entry=0; ok_hook=0; n=0 }
+        function flush(   i) {
+            if (in_entry && ok_hook) for (i = 1; i <= n; i++) print "S" sc[i]
+        }
         /^##[[:space:]]+Active entries[[:space:]]*$/ { active=1; next }
         active && /^##[[:space:]]+bypass:/ {
-            if (in_entry && ok_hook && ok_scope) found=1
-            in_entry=1; ok_hook=0; ok_scope=0; next
+            flush()
+            in_entry=1; ok_hook=0; n=0; next
         }
         in_entry && /^\*\*Hook:\*\*/ {
             line=$0; sub(/^\*\*Hook:\*\*[[:space:]]*/, "", line)
@@ -121,13 +146,35 @@ ho_check_bypass() {
         }
         in_entry && /^\*\*Scope:\*\*/ {
             line=$0; sub(/^\*\*Scope:\*\*[[:space:]]*/, "", line)
-            if (scope == "" || index(line, scope) > 0) ok_scope=1
+            gsub(/[[:space:]]+$/, "", line)
+            sc[++n]=line
         }
-        END {
-            if (in_entry && ok_hook && ok_scope) found=1
-            exit(found ? 0 : 1)
-        }
-    ' "$bypass_file"
+        END { flush() }
+    ' "$bypass_file")"
+
+    local line entry
+    while IFS= read -r line; do
+        case "$line" in S*) ;; *) continue ;; esac
+        entry="${line#S}"
+        if [ -z "$entry" ]; then
+            echo "WARN: bypass entry has empty scope, ignored" >&2
+            continue
+        fi
+        if [ "$entry" = "$probe" ]; then
+            return 0
+        fi
+        case "$entry" in
+            *'*'*)
+                # shellcheck disable=SC2254  # intentional: entry is a glob
+                case "$probe" in
+                    $entry) return 0 ;;
+                esac
+                ;;
+        esac
+    done <<EOF
+$scopes
+EOF
+    return 1
 }
 
 ho_check_bypass_exact() {

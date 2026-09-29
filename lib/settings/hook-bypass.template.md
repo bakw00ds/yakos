@@ -14,7 +14,7 @@ writes to its log, so the forensic record remains.
 - **Approved by:** human name
 - **Created:** ISO-8601 UTC timestamp (use the `Z` suffix, e.g. `2026-04-28T09:15:00Z`)
 - **Expires:** ISO-8601 UTC timestamp; 24h max for ad-hoc, 7d max for tracked-dep issues
-- **Scope:** which task / which file pattern / which command
+- **Scope:** the exact path/value, or an explicit glob (`*`, `**`); see "Scope matching" below
 - **Follow-up:** plan to remove the bypass
 
 ## Format
@@ -49,10 +49,41 @@ peer it pins to:
 **Follow-up:** alice restarts her session at 16:00; bypass auto-expires.
 ```
 
-Substring matching: `file=src/auth/login.ts peer=alice@dev01` matches
-both the file path AND the peer; either field alone wildcards in the
-other dimension (e.g. `peer=alice@dev01` alone matches any file claimed
-by alice).
+The peer-claim probe is the literal string `file=<path> peer=<user>@<host>`,
+so the Scope must equal it exactly, or be a glob over it. To cover any
+file claimed by alice, write `file=* peer=alice@dev01`; to cover every
+peer for one file, write `file=src/auth/login.ts peer=*`. (Earlier
+versions matched by substring; see "Scope matching".)
+
+## Scope matching (K-99)
+
+A **Scope** covers an action only when it is the exact value the hook is
+checking, or an explicit glob over it. It is no longer a substring test.
+
+- **Exact:** the Scope equals the checked value byte for byte. Paths are
+  slash-normalized first (`web\secret.env` is checked as `web/secret.env`).
+  Matching is case-sensitive.
+- **Glob:** a Scope containing `*` is matched with shell `case` semantics,
+  the same matcher `path-allowlist` uses. `*` matches any run of
+  characters including `/`, so `web/**` and `web/*` both cover everything
+  under `web/`.
+- **Empty:** a blank Scope matches nothing. The hook prints
+  `WARN: bypass entry has empty scope, ignored` to stderr.
+- **Not a match:** a Scope that merely contains the checked value.
+  `web/secret.env-rotation` does not cover `web/secret.env`, and
+  `path=web/index.js reason=x` does not cover `web/index.js`.
+
+**Migration.** An entry written as a bare prefix (`web/`, `web`, or
+`api/legacy`) used to cover everything containing that text. It now
+covers nothing. Rewrite it as `web/**` (or list the exact paths). Entries
+that already spelled the exact path keep working unchanged. The
+`hook-bypass-review` skill flags entries that need rewriting.
+
+Checked values by hook: `path-allowlist` and `secret-scan` use the
+project-relative file path, `budget-guard` uses `cap=<name>`,
+`supervisor-gate` uses `finding=<ts>`, `peer-claim` uses
+`file=<path> peer=<user>@<host>`, `task-complete-dispatch` uses the
+domain. The `degraded-input` sentinel is unchanged: exact match only.
 
 ## `degraded-input` Scope sentinel (security review R2-3 / round 3)
 

@@ -203,12 +203,21 @@ one is enough.
 **The `hook-bypass.md` scope for a degraded-input override must be the
 literal sentinel `degraded-input`** (security review R2-3, round 3) — not
 empty, and not the file-scoped entry you might already have for that
-hook. `ho_check_bypass`'s `awk` treats an empty probe scope as "matches
+hook. `ho_check_bypass` used to treat an empty probe scope as "matches
 any entry for this hook," so before this fix a narrow bypass an operator
 wrote weeks ago for one unrelated file silently disabled that hook's
 fail-closed behavior for every future broken-`jq` session, without the
 operator ever intending that. See `lib/settings/hook-bypass.template.md`
 for the format.
+
+**Scope matching is exact-or-glob** (K-99). `ho_check_bypass` (and its Go
+twin `hookbypass.Check`) used to test whether the entry's Scope
+*contained* the checked value, so `web/secret.env-rotation` also bypassed
+`web/secret.env`. It now matches only when the Scope equals the
+slash-normalized value or is a `*` glob over it (`web/**`); a blank
+Scope, and an empty probe, match nothing. A bare-prefix entry keeps
+working only when rewritten as `prefix/**`. Details and the migration
+note: `docs/hook-bypass-scope.md`.
 
 **Two hooks reach an unguarded `jq` call downstream of the escape
 hatch** (security review R2-2, round 3): `budget-guard.sh` (matcher
