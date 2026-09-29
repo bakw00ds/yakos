@@ -39,6 +39,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--hooks-impl go|hybrid` gates were silent no-ops (fail-open).** The
+  generated `yakos hook run <name>` command took its tier from
+  `YAKOS_HOOKS`, whose default is bash mode; with it unset the runner
+  found no `lib/hooks-user/<name>.sh` and exited 0, so plan-quality-gate,
+  secret-scan and the rest never blocked. Commands are now
+  `yakos hook run --impl go <name>`; the flag beats `YAKOS_HOOKS`, an
+  unregistered hook under `--impl` exits 2, and `yakos hook` bypasses
+  shadow-mode routing to the bash CLI (which exited 64, also
+  non-blocking). Already-refreshed projects migrate on the next refresh.
+  New end-to-end tests run the literal settings.json command through
+  `sh -c` and assert exit 2.
+
 - **`yakos refresh` hook-mirror layout unified (K-94, K-81).** Bash
   `cli/lib/refresh.sh` now uses the same layout algorithm as the Go
   port: `lib/hooks/legacy/<name>.sh` deploys flat and `legacy/` is never

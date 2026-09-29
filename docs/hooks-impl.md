@@ -2,7 +2,7 @@
 
 `yakos refresh` decides which implementation `settings.json` wires up for
 each hook. Two implementations exist: the bash scripts under
-`scripts/hooks/<name>.sh`, and the Go hooks behind `yakos hook run <name>`.
+`scripts/hooks/<name>.sh`, and the Go hooks behind `yakos hook run --impl go <name>`.
 
 ```
 yakos refresh --hooks-impl bash|go|hybrid
@@ -11,8 +11,8 @@ yakos refresh --hooks-impl bash|go|hybrid
 | Value | What `settings.json` registers |
 |---|---|
 | `bash` (default) | `${CLAUDE_PROJECT_DIR}/scripts/hooks/<name>.sh` for every hook. Byte-identical to refresh before this switch existed. |
-| `go` | `<yakos> hook run <name>` for every hook, GoReady or not. Refresh prints a warning naming the non-GoReady hooks it switched. |
-| `hybrid` | `<yakos> hook run <name>` only for hooks the registry marks `GoReady`; every other hook stays bash. |
+| `go` | `<yakos> hook run --impl go <name>` for every hook, GoReady or not. Refresh prints a warning naming the non-GoReady hooks it switched. |
+| `hybrid` | `<yakos> hook run --impl go <name>` only for hooks the registry marks `GoReady`; every other hook stays bash. |
 
 `<yakos>` is the absolute path of the running binary (`os.Executable`,
 symlinks evaluated), not a bare `yakos`. Claude Code launched from a GUI
@@ -20,6 +20,29 @@ or IDE may not have `yakos` on its `PATH`. A missing command exits 127,
 which Claude Code treats as non-blocking, so gates such as `secret-scan`
 and `budget-guard` would silently stop enforcing. A path containing shell
 special characters is single-quoted.
+
+## The tier is pinned in the command
+
+Every generated command carries `--impl go`. The flag beats the
+`YAKOS_HOOKS` environment variable, so enforcement never depends on
+ambient environment. Without it the runner defaults to bash mode, which
+runs only `lib/hooks-user/<name>.sh` and exits 0 when that file is
+absent: a Go-form command run without `YAKOS_HOOKS=go` was a silent
+no-op for every gate (fail-open). The first `--hooks-impl go|hybrid`
+release (#288) generated that flag-less form.
+
+Under `hybrid` the per-command flag is still `--impl go`: hybrid decides
+which hooks are rewritten, and a rewritten hook always runs in Go.
+`--impl` also accepts `bash` and `hybrid` for manual use; `YAKOS_HOOKS`
+keeps working when the flag is absent. A hook with no Go implementation
+run with `--impl` exits 2 with a reason on stderr. `yakos hook` is always
+routed to the Go implementation, because the bash CLI has no `hook`
+command and would answer exit 64, which Claude Code treats as
+non-blocking.
+
+Projects refreshed with the flag-less form are migrated in place by the
+next `yakos refresh --hooks-impl go|hybrid` (or by a persisted
+`hooks_impl`), and stay byte-stable after that.
 
 The tradeoff: `settings.json` changes when the binary moves. Re-run
 `yakos refresh` after reinstalling to a new location; each command is
@@ -51,7 +74,7 @@ why, for example `hooks-impl: hybrid (persisted)`. The source is `flag`,
 ## Fail closed
 
 For `go` and `hybrid`, every hook that would become `yakos hook run
-<name>` must be registered in the Go registry (`yakos hook list`). If one
+--impl go <name>` must be registered in the Go registry (`yakos hook list`). If one
 is not, refresh exits non-zero before writing anything, including under
 `--dry-run`. It does not fall back to bash.
 
