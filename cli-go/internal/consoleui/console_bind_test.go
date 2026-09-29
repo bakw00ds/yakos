@@ -72,6 +72,9 @@ func newMTLSFixture(t *testing.T) (caCert *x509.Certificate, serverTLSCfg *tls.C
 func startNetworkedServer(t *testing.T, tlsCfg *tls.Config) (baseURL string, srv *consoleui.Server, teardown func()) {
 	t.Helper()
 	stateDir := t.TempDir()
+	// K-98: unmapped certs resolve to no access; these fixtures are not about
+	// the role default, so opt in explicitly with the wildcard.
+	writeRoleMap(t, stateDir, map[string]string{"*": "read"})
 	tok, err := consoleui.LoadOrCreateToken(stateDir)
 	if err != nil {
 		t.Fatalf("LoadOrCreateToken: %v", err)
@@ -182,6 +185,9 @@ func doTLSGet(t *testing.T, url string, tlsCfg *tls.Config) (*http.Response, err
 func TestConsoleBind_FailClosed_NoTLSConfig(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
+	// K-98: unmapped certs resolve to no access; these fixtures are not about
+	// the role default, so opt in explicitly with the wildcard.
+	writeRoleMap(t, stateDir, map[string]string{"*": "read"})
 	tok, err := consoleui.LoadOrCreateToken(stateDir)
 	if err != nil {
 		t.Fatalf("LoadOrCreateToken: %v", err)
@@ -309,6 +315,9 @@ func TestConsoleBind_UntrustedClientCert_Rejected(t *testing.T) {
 func TestConsoleBind_Resolver_CertlessIsNeverAdmin(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
+	// K-98: unmapped certs resolve to no access; these fixtures are not about
+	// the role default, so opt in explicitly with the wildcard.
+	writeRoleMap(t, stateDir, map[string]string{"*": "read"})
 	mapper := netid.NewRoleMapper(stateDir)
 	// loopbackTrusted=false: networked path.
 	resolver := netid.NewResolver(mapper, func(*http.Request) string { return "" }, false)
@@ -331,6 +340,9 @@ func TestConsoleBind_Resolver_CertlessIsNeverAdmin(t *testing.T) {
 func TestConsoleBind_Resolver_LoopbackTrustedGrantsAdmin(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
+	// K-98: unmapped certs resolve to no access; these fixtures are not about
+	// the role default, so opt in explicitly with the wildcard.
+	writeRoleMap(t, stateDir, map[string]string{"*": "read"})
 	mapper := netid.NewRoleMapper(stateDir)
 	// loopbackTrusted=true: loopback path (default, unchanged).
 	resolver := netid.NewResolver(mapper, func(*http.Request) string { return "alice" }, true)
@@ -584,6 +596,9 @@ func TestConsoleBind_Presence_CertCN_Integration(t *testing.T) {
 	_, serverTLSCfg, clientTLSCfg, clientCN := newMTLSFixture(t)
 
 	stateDir := t.TempDir()
+	// K-98: unmapped certs resolve to no access; these fixtures are not about
+	// the role default, so opt in explicitly with the wildcard.
+	writeRoleMap(t, stateDir, map[string]string{"*": "read"})
 	tok, err := consoleui.LoadOrCreateToken(stateDir)
 	if err != nil {
 		t.Fatalf("LoadOrCreateToken: %v", err)
@@ -757,6 +772,9 @@ func TestConsoleBind_ExternalHosts_CSP_UsesFirstHost(t *testing.T) {
 	_, serverTLSCfg, clientTLSCfg, _ := newMTLSFixture(t)
 
 	stateDir := t.TempDir()
+	// K-98: unmapped certs resolve to no access; these fixtures are not about
+	// the role default, so opt in explicitly with the wildcard.
+	writeRoleMap(t, stateDir, map[string]string{"*": "read"})
 	tok, err := consoleui.LoadOrCreateToken(stateDir)
 	if err != nil {
 		t.Fatalf("LoadOrCreateToken: %v", err)
@@ -878,6 +896,9 @@ func startHybridServer(t *testing.T) (*hybridServerConfig, *tls.Config) {
 	caPool, serverTLSCfg, certClientTLSCfg, _ := newHybridFixture(t)
 
 	stateDir := t.TempDir()
+	// K-98: unmapped certs resolve to no access; these fixtures are not about
+	// the role default, so opt in explicitly with the wildcard.
+	writeRoleMap(t, stateDir, map[string]string{"*": "read"})
 	tok, err := consoleui.LoadOrCreateToken(stateDir)
 	if err != nil {
 		t.Fatalf("LoadOrCreateToken: %v", err)
@@ -1250,6 +1271,9 @@ func TestPhase3f_WS_CertlessNoSession_Rejected(t *testing.T) {
 func TestConsoleBind_LoopbackDefault_Unchanged(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
+	// K-98: unmapped certs resolve to no access; these fixtures are not about
+	// the role default, so opt in explicitly with the wildcard.
+	writeRoleMap(t, stateDir, map[string]string{"*": "read"})
 	tok, err := consoleui.LoadOrCreateToken(stateDir)
 	if err != nil {
 		t.Fatalf("LoadOrCreateToken: %v", err)

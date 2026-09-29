@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Unmapped client-cert CN now resolves to no access (K-98, ADR-0005
+  Amendment 2026-09-29).** Any cert signed by the daemon CA whose CN was
+  not in `mtls/roles.json` used to get `read` on kanban, flows list/get,
+  cost, perf, chat transcripts and `/v1/events`. It now gets `RoleNone`
+  and a 403 on every route. A missing, empty, symlinked, unsafe or
+  malformed role map fails closed the same way, and an unrecognised role
+  string maps that CN to no access with one WARN naming it. The new
+  `"*"` role-map key grants a role to every authenticated cert without
+  an explicit entry; an explicit CN entry beats it. Loopback and the
+  bootstrap admin cert are unaffected. `yakos mtls set-role <cn> none`
+  is the explicit-deny value and beats `"*"`; `issue-client` without
+  `--role` now reports `Role: none (unmapped ...)`.
+  **Migration:** cert-only deployments that relied on the implicit read
+  default will see 403 after upgrading. One-line fix restoring the old
+  behaviour: `yakos mtls set-role '*' read` (or `"*": "read"` in
+  `roles.json`); or map each CN. `internal/doctor` is out of this
+  change's scope, so instead of a `yakos doctor` check the networked
+  daemon logs one startup line: WARN `no client certificate is
+  authorized` when the map is missing or empty, INFO `role map loaded`
+  otherwise.
+- **WebSocket bearer-only hello no longer sets the operator ID (K-98,
+  K-86 review r1 finding 4).** On a networked daemon, `/v1/events`
+  connections without a verified cert or authenticated session took the
+  operator ID from the client hello, letting a bearer holder claim
+  another operator's ID and receive their owner-scoped events. The ID is
+  now derived server-side (cert CN, else authenticated session); a
+  differing hello claim is ignored and logged, and a connection with no
+  server identity receives no owner-scoped events. Loopback keeps its
+  cooperative hello behaviour.
+
 ### Changed
 
 - **CLI and hygiene follow-ups (K-102).** `yakos doctor` warns when a

@@ -252,7 +252,7 @@ func runIssueClient(args []string, stdout, stderr io.Writer, stateDir string) er
 	if roleName != "" {
 		fmt.Fprintf(stdout, "  Role assigned: %s\n", roleName)
 	} else {
-		fmt.Fprintf(stdout, "  Role: read (default — use 'yakos mtls set-role %s <role>' to change)\n", name)
+		fmt.Fprintf(stdout, "  Role: none (unmapped — run 'yakos mtls set-role %s <role>' or 'yakos mtls set-role '*' read')\n", name)
 	}
 	fmt.Fprintln(stdout, "")
 	fmt.Fprintln(stdout, "To convert to PKCS#12 for browser import:")
@@ -399,10 +399,13 @@ func runSetRole(args []string, stdout, _ io.Writer, stateDir string) error {
 // ---- shared helpers ---------------------------------------------------------
 
 // validateRoleStr returns an error when roleStr is not a valid Role string.
+// "none" is accepted as the explicit-deny value (it beats a "*" wildcard).
 func validateRoleStr(roleStr string) error {
-	role := netid.ParseRole(roleStr)
-	if role.String() != roleStr {
-		return fmt.Errorf("unknown role %q; valid: read, dispatch, flows-run, admin", roleStr)
+	if roleStr == "none" {
+		return nil
+	}
+	if _, ok := netid.ParseRoleStrict(roleStr); !ok {
+		return fmt.Errorf("unknown role %q; valid: read, dispatch, flows-run, admin, none", roleStr)
 	}
 	return nil
 }
@@ -530,7 +533,7 @@ func printMTLSHelp(w io.Writer) {
 	fmt.Fprintln(w, "  show-ca                 Print CA cert path and SHA-256 fingerprint")
 	fmt.Fprintln(w, "  set-role <cn> <role>    Assign a role to a cert CN in roles.json")
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "Roles: read | dispatch | flows-run | admin")
+	fmt.Fprintln(w, "Roles: read | dispatch | flows-run | admin | none (explicit deny)")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Run  yakos mtls <subcommand> --help  for per-subcommand help.")
 }

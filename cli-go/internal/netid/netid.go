@@ -31,11 +31,11 @@
 //
 // The CN→Role mapping is read from
 // ~/.yakos-state/mtls/roles.json (or the stateDir-relative path
-// mtls/roles.json).  The file is optional; a missing file is tolerated
-// (all authenticated certs default to RoleRead).
+// mtls/roles.json).  The file is optional; a missing file is tolerated but
+// fails closed: every authenticated cert resolves to RoleNone (no access).
 //
 // When NewRoleMapper is called with an empty stateDir, file I/O is skipped
-// entirely and all lookups return RoleRead (fail-closed for misconfiguration).
+// entirely and all lookups return RoleNone (fail-closed for misconfiguration).
 //
 // Format (JSON):
 //
@@ -46,7 +46,10 @@
 //	}
 //
 // Keys are certificate Common Names; values are role strings matching the
-// Role constants below.  Unknown role strings fall back to RoleRead.
+// Role constants below.  The special key "*" (WildcardCN) grants its role to
+// every authenticated cert without an explicit entry, e.g. {"*": "read"}
+// restores the pre-2026-09-29 default.  A CN with no entry and no wildcard,
+// and any unknown role string, resolves to RoleNone (fail closed).
 // Reloading on every request is safe (file is small; OS page cache keeps I/O
 // cheap) and avoids the need for signal-based reload machinery.
 //
@@ -64,10 +67,18 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 )
+
+// WildcardCN is the roles.json key meaning "any authenticated client cert
+// without an explicit mapping gets this role" (ADR-0005 Amendment 2026-09-29).
+// An explicit CN entry always beats the wildcard.
+const WildcardCN = "*"
 
 // ---- Role -------------------------------------------------------------------
 
@@ -142,6 +153,24 @@ func ParseRole(s string) Role {
 		return RoleAdmin
 	default:
 		return RoleRead
+	}
+}
+
+// ParseRoleStrict is ParseRole without the RoleRead fallback: ok is false for
+// any unrecognised string (including "none" and ""), so callers deciding
+// authorization can fail closed instead of silently granting read.
+func ParseRoleStrict(s string) (Role, bool) {
+	switch s {
+	case "read":
+		return RoleRead, true
+	case "dispatch":
+		return RoleDispatch, true
+	case "flows-run":
+		return RoleFlowsRun, true
+	case "admin":
+		return RoleAdmin, true
+	default:
+		return RoleNone, false
 	}
 }
 
@@ -297,23 +326,24 @@ func WithIdentityForTest(ctx context.Context, id Identity) context.Context {
 // ---- Role mapper ------------------------------------------------------------
 
 // RoleMapper resolves a certificate CN to a Role using a JSON mapping file.
-// A missing file is tolerated (all CNs default to RoleRead).
+// A missing file is tolerated and fails closed (all CNs resolve to RoleNone).
 //
 // The file is re-read on every call to Lookup; since it is small the OS
 // page cache makes repeated reads cheap and no signal-based reload is needed.
 // Concurrent reads are safe: path is immutable after construction and
 // ReadFile + Unmarshal operate on local variables only.
 //
-// When stateDir is empty (NewRoleMapper("")) all Lookups return RoleRead
+// When stateDir is empty (NewRoleMapper("")) all Lookups return RoleNone
 // with no file I/O, preventing CWD-relative path resolution as a footgun.
 type RoleMapper struct {
-	path string // absolute path to roles.json; empty when stateDir was ""
+	path   string   // absolute path to roles.json; empty when stateDir was ""
+	warned sync.Map // dedup keys for bad-role WARN logs
 }
 
 // NewRoleMapper returns a RoleMapper that reads from
 // <stateDir>/mtls/roles.json.
 //
-// If stateDir is empty, no file is ever read and all Lookups return RoleRead.
+// If stateDir is empty, no file is ever read and all Lookups return RoleNone.
 // Callers should always pass the actual state directory (e.g. ~/.yakos-state)
 // to avoid an empty path being silently resolved against the process CWD.
 func NewRoleMapper(stateDir string) *RoleMapper {
@@ -326,57 +356,138 @@ func NewRoleMapper(stateDir string) *RoleMapper {
 }
 
 // Lookup returns the Role for the given certificate CN.
-// If the CN is not in the mapping, or the file is absent or unparseable,
-// Lookup returns RoleRead (least privilege; fail-closed).
 //
-// When the mapper was constructed with an empty stateDir, Lookup always
-// returns RoleRead without any file I/O.
+// Fail-closed posture (ADR-0005 Amendment 2026-09-29): a CN that is not in
+// the mapping resolves to RoleNone.  Resolution order:
+//
+//  1. an explicit entry for the CN wins (including over the wildcard);
+//  2. otherwise the wildcard entry WildcardCN ("*") applies, if present;
+//  3. otherwise RoleNone.
+//
+// The role string "none" is an explicit deny (beats the wildcard, no log).
+// Any other string ParseRoleStrict does not recognise (typo, "") resolves to
+// RoleNone and logs one WARN per (key, value) naming the key ("*" for the
+// wildcard, else the CN).
+// A missing, empty, symlinked, unsafe-permission or malformed file resolves
+// to RoleNone for every CN.  When the mapper was constructed with an empty
+// stateDir, Lookup always returns RoleNone without any file I/O.
 //
 // LOW-1 file-trust hardening: before reading the file, Lookup calls
 // os.Lstat to check:
-//   - Symlinks: if the path is a symlink it is treated as missing (RoleRead).
-//     This prevents a symlink-redirect attack where the file is replaced with
-//     a symlink to an attacker-controlled path.
+//   - Symlinks: if the path is a symlink it is treated as missing.
 //   - Permission bits (Unix only): see roles_perm_unix.go / roles_perm_windows.go.
-//     On Unix, group/other-writable files are treated as missing (RoleRead).
-//     On Windows, Unix permission bits are not meaningful (Go reports synthetic
-//     values); the check is skipped — Windows ACL trust is established by the
-//     0700 parent directory created by the mtls package, which prevents writes
-//     by non-owners via NTFS inherited permissions.  Windows is not the primary
-//     networked-server target for yakOS.
+//     On Unix, group/other-writable files are treated as missing.
+//     On Windows, Unix permission bits are not meaningful; the check is
+//     skipped (the 0700 parent directory created by the mtls package
+//     provides the trust boundary).
 func (m *RoleMapper) Lookup(cn string) Role {
-	if m.path == "" {
-		// No stateDir configured; fail-closed.
-		return RoleRead
+	mapping, ok := m.load()
+	if !ok {
+		return RoleNone
 	}
-	// LOW-1: use Lstat so we see the symlink itself, not its target.
+	key := cn
+	roleStr, found := mapping[key]
+	if !found {
+		key = WildcardCN
+		roleStr, found = mapping[key]
+		if !found {
+			return RoleNone
+		}
+	}
+	// "none" is the explicit-deny value: it beats the wildcard and is not a
+	// typo, so it does not warn.
+	if roleStr == "none" {
+		return RoleNone
+	}
+	r, valid := ParseRoleStrict(roleStr)
+	if !valid {
+		// Name the key the bad value lives under ("*" for the wildcard), not
+		// the requesting CN, so one bad entry logs once however many certs hit it.
+		m.warnBadRole(key, roleStr)
+		return RoleNone
+	}
+	return r
+}
+
+// load reads and validates the mapping file.  ok is false when the file is
+// unusable (no path, missing, symlink, unsafe perms, unreadable, malformed).
+func (m *RoleMapper) load() (map[string]string, bool) {
+	if m.path == "" {
+		return nil, false
+	}
 	fi, err := os.Lstat(m.path)
 	if err != nil {
-		// Missing file is expected before the operator configures roles.
-		return RoleRead
+		return nil, false // missing: expected before roles are configured
 	}
-	// Reject symlinks (cross-platform: ModeSymlink is meaningful on all Go targets).
+	// From here the file exists but may be unusable. That locks out every
+	// cert (including the bootstrap admin), so say why, once per file version.
 	if fi.Mode()&os.ModeSymlink != 0 {
-		return RoleRead
+		m.warnUnusable(fi, "is a symlink")
+		return nil, false
 	}
-	// Reject files with unsafe permissions (Unix only; see roles_perm_unix.go).
 	if !rolesFilePermOK(fi) {
-		return RoleRead
+		m.warnUnusable(fi, "is group/other-writable")
+		return nil, false
 	}
 	data, err := os.ReadFile(m.path) //nolint:gosec
 	if err != nil {
-		return RoleRead
+		m.warnUnusable(fi, "is unreadable: "+err.Error())
+		return nil, false
 	}
 	var mapping map[string]string
 	if err := json.Unmarshal(data, &mapping); err != nil {
-		// Malformed file → fail closed.
-		return RoleRead
+		m.warnUnusable(fi, "is not valid JSON: "+err.Error())
+		return nil, false
 	}
-	if roleStr, ok := mapping[cn]; ok {
-		return ParseRole(roleStr)
-	}
-	return RoleRead
+	return mapping, true
 }
+
+// warnUnusable logs one WARN per (reason, file mtime) so per-request loads do
+// not flood, yet each new bad version of the file is reported.
+func (m *RoleMapper) warnUnusable(fi os.FileInfo, reason string) {
+	if _, dup := m.warned.LoadOrStore("file\x00"+reason+"\x00"+fi.ModTime().String(), struct{}{}); dup {
+		return
+	}
+	slog.Warn("netid: role map is unusable; every client cert resolves to no access",
+		"file", m.path, "reason", reason)
+}
+
+// warnBadRole logs once per (CN, value) so per-request Lookups do not flood.
+func (m *RoleMapper) warnBadRole(cn, roleStr string) {
+	if _, dup := m.warned.LoadOrStore(cn+"\x00"+roleStr, struct{}{}); dup {
+		return
+	}
+	slog.Warn("netid: roles.json has an unrecognised role; treating CN as no access",
+		"cn", cn, "role", roleStr,
+		"valid_roles", "read, dispatch, flows-run, admin")
+}
+
+// StartupSummary inspects the mapping file once and returns a single
+// human-readable line for the daemon startup log, plus whether it is a
+// warning.  It is used only for networked daemons.
+//
+//   - no usable file, or file with zero entries: warn=true, states that no
+//     client certificate is authorized and how to fix it;
+//   - otherwise: warn=false, a short summary (entry count, wildcard role).
+func (m *RoleMapper) StartupSummary() (msg string, warn bool) {
+	mapping, ok := m.load()
+	if !ok || len(mapping) == 0 {
+		where := m.path
+		if where == "" {
+			where = "<stateDir>/mtls/roles.json"
+		}
+		return "no client certificate is authorized: role map " + where +
+			" is missing, empty or untrusted, so every CA-signed cert resolves to no access (RoleNone). " +
+			"Fix: run `yakos mtls set-role <cn> <role>`, or `yakos mtls set-role '*' read` to grant read to any authenticated cert", true
+	}
+	if w, has := mapping[WildcardCN]; has {
+		return "role map loaded: " + itoa(len(mapping)) + " entries; wildcard \"*\" grants \"" + w +
+			"\" to every authenticated cert without an explicit mapping", false
+	}
+	return "role map loaded: " + itoa(len(mapping)) + " entries; unmapped certs get no access", false
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
 
 // ---- Client-cert CN extraction ---------------------------------------------
 
@@ -440,7 +551,7 @@ type SessionLookupFn func(r *http.Request) (operatorID string, role Role, ok boo
 //
 // Resolution rules (per ADR-0005) — single decision point, evaluated in order:
 //  1. Verified mTLS client cert (r.TLS.VerifiedChains non-empty) →
-//     Identity{OperatorID: CN, Role: mapped-or-RoleRead, Authenticated: true,
+//     Identity{OperatorID: CN, Role: mapped-or-wildcard-or-RoleNone, Authenticated: true,
 //     AuthMethod: AuthMethodCert}.
 //     Cert beats session deliberately: a machine presenting a cert must never
 //     be silently downgraded to a stray browser session.

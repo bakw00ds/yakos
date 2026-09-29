@@ -131,23 +131,23 @@ func TestRole_Allows_Ordering(t *testing.T) {
 
 // ---- RoleMapper -------------------------------------------------------------
 
-func TestRoleMapper_MissingFile_DefaultsToRead(t *testing.T) {
+func TestRoleMapper_MissingFile_DefaultsToNone(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
 	m := netid.NewRoleMapper(stateDir)
-	if got := m.Lookup("alice"); got != netid.RoleRead {
-		t.Errorf("Lookup with missing file: got %v; want RoleRead", got)
+	if got := m.Lookup("alice"); got != netid.RoleNone {
+		t.Errorf("Lookup with missing file: got %v; want RoleNone", got)
 	}
 }
 
-func TestRoleMapper_EmptyStateDir_AlwaysRead_NoFileAccess(t *testing.T) {
+func TestRoleMapper_EmptyStateDir_AlwaysNone_NoFileAccess(t *testing.T) {
 	t.Parallel()
 	// NewRoleMapper("") must never touch the filesystem (no CWD-relative read)
 	// and must always return RoleRead regardless of CN.
 	m := netid.NewRoleMapper("")
 	for _, cn := range []string{"alice", "admin", "root", "", "anything"} {
-		if got := m.Lookup(cn); got != netid.RoleRead {
-			t.Errorf("NewRoleMapper(\"\").Lookup(%q)=%v; want RoleRead (empty stateDir → fail-closed, no file I/O)", cn, got)
+		if got := m.Lookup(cn); got != netid.RoleNone {
+			t.Errorf("NewRoleMapper(\"\").Lookup(%q)=%v; want RoleNone (empty stateDir → fail-closed, no file I/O)", cn, got)
 		}
 	}
 }
@@ -186,17 +186,17 @@ func TestRoleMapper_KnownCN_MapsRole(t *testing.T) {
 	}
 }
 
-func TestRoleMapper_UnknownCN_DefaultsToRead(t *testing.T) {
+func TestRoleMapper_UnknownCN_DefaultsToNone(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
 	writeRolesFile(t, stateDir, map[string]string{"alice": "admin"})
 	m := netid.NewRoleMapper(stateDir)
-	if got := m.Lookup("unknown-operator"); got != netid.RoleRead {
-		t.Errorf("unknown CN: got %v; want RoleRead", got)
+	if got := m.Lookup("unknown-operator"); got != netid.RoleNone {
+		t.Errorf("unknown CN: got %v; want RoleNone", got)
 	}
 }
 
-func TestRoleMapper_CorruptFile_DefaultsToRead(t *testing.T) {
+func TestRoleMapper_CorruptFile_DefaultsToNone(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
 	rolesDir := filepath.Join(stateDir, "mtls")
@@ -207,20 +207,20 @@ func TestRoleMapper_CorruptFile_DefaultsToRead(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	m := netid.NewRoleMapper(stateDir)
-	if got := m.Lookup("alice"); got != netid.RoleRead {
-		t.Errorf("corrupt file: got %v; want RoleRead (fail-closed)", got)
+	if got := m.Lookup("alice"); got != netid.RoleNone {
+		t.Errorf("corrupt file: got %v; want RoleNone (fail-closed)", got)
 	}
 }
 
-func TestRoleMapper_UnknownRoleString_DefaultsToRead(t *testing.T) {
+func TestRoleMapper_UnknownRoleString_DefaultsToNone(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
 	writeRolesFile(t, stateDir, map[string]string{
 		"dan": "superuser", // not a valid role
 	})
 	m := netid.NewRoleMapper(stateDir)
-	if got := m.Lookup("dan"); got != netid.RoleRead {
-		t.Errorf("unknown role string: got %v; want RoleRead", got)
+	if got := m.Lookup("dan"); got != netid.RoleNone {
+		t.Errorf("unknown role string: got %v; want RoleNone", got)
 	}
 }
 
@@ -406,7 +406,7 @@ func TestResolver_VerifiedClientCert_AuthenticatedWithMappedRole(t *testing.T) {
 	}
 }
 
-func TestResolver_VerifiedClientCert_UnmappedCN_DefaultsToRead(t *testing.T) {
+func TestResolver_VerifiedClientCert_UnmappedCN_DefaultsToNone(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir() // no roles.json → all default to RoleRead
 	m := netid.NewRoleMapper(stateDir)
@@ -421,8 +421,8 @@ func TestResolver_VerifiedClientCert_UnmappedCN_DefaultsToRead(t *testing.T) {
 	if !id.Authenticated {
 		t.Error("verified cert: Authenticated=false; want true")
 	}
-	if id.Role != netid.RoleRead {
-		t.Errorf("verified cert, no mapping: Role=%v; want RoleRead (default)", id.Role)
+	if id.Role != netid.RoleNone {
+		t.Errorf("verified cert, no mapping: Role=%v; want RoleNone (fail closed)", id.Role)
 	}
 }
 
