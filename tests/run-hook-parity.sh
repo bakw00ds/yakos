@@ -20,17 +20,37 @@
 # mktemp -d sandbox path, since those never match across sides even for
 # the same fixture).
 #
-# This harness does NOT assert bash-vs-Go equality as a pass/fail gate on
-# the whole suite (see S-6 structural plan §1.2 / §2.4: the two sides are
-# known to diverge systemically until A-2 closes each hook's gap). Instead
-# it emits a per-hook PASS/FAIL matrix — fixtures compared, parity count,
-# and the first divergence class (exit / stdout / stderr / log-schema /
-# missing-log) for the first fixture that diverged — to
-# work/current/logs/hook-parity-report.ndjson, and prints the same matrix
-# to stdout. The script's own exit code reflects whether every GO-SIDE
-# invocation completed without an unexpected process error (crash, unknown
-# hook, etc.) — not whether bash and Go agree; CI treats this step as
-# advisory (continue-on-error) rather than blocking, per D4.
+# Gating (K-87 A-2b). The script prints a per-hook matrix (fixtures compared,
+# parity count, accepted count, first unaccepted divergence class) and writes
+# one NDJSON record per comparison to work/current/logs/hook-parity-report.ndjson.
+# Its exit code is non-zero when:
+#   * a bash-baseline assertion fails (same as run-hook-fixtures.sh), or
+#   * a hook named in YAKOS_PARITY_REQUIRE_HOOKS (default: path-allowlist, the
+#     security-critical hook) has any divergence that is not an ACCEPTED one, or
+#   * an accept annotation is stale (the two sides now agree; remove it).
+# Every other hook stays advisory: it appears in the matrix but cannot fail
+# the run, exactly as before.
+#
+# Accepted divergences. A tuple may carry a 9th argument "<go-rc>:<reason>"
+# documenting a KNOWN, INTENTIONAL bash-vs-Go difference. It pins Go's exit
+# code (so the case still guards Go's decision) and the reason is printed next
+# to the case. Two kinds are in use:
+#   * architectural: Go never shells out to jq, so a jq-less or jq-broken PATH
+#     cannot put it into bash's "degraded input" state; it evaluates the
+#     payload and decides on policy instead. Where bash fails closed the two
+#     agree on rc but not on the log record; where bash passes through
+#     (YAKOS_HOOKS_FAIL_OPEN=1, or a jq that prints garbage) Go is stricter.
+#   * bash bug: Go deliberately does NOT reproduce a bash weakness (a
+#     lexical-only symlink check, NUL-dropping, non-array deny ignored, a jq
+#     crash on a non-object finding). Each is reported for a bash-side fix.
+#
+# Iteration helpers (env):
+#   YAKOS_PARITY_ONLY=<hook>       run only that hook's tuples
+#   YAKOS_PARITY_FIXTURE=<substr>  run only tuples whose fixture name contains it
+#   YAKOS_PARITY_VERBOSE=1         print bash-vs-Go stdout/stderr/log side by
+#                                  side for every raw divergence
+#   YAKOS_PARITY_REQUIRE_HOOKS     space-separated gate list (default path-allowlist;
+#                                  set to "" to make the whole run advisory)
 #
 # Env:
 #   YAKOS_GO_BINARY   Go yakos binary (default: <repo-root>/bin/yakos, same
@@ -43,6 +63,28 @@ set -eu
 REPO_ROOT="$(cd "$(dirname -- "$0")/.." && pwd -P)"
 HOOKS="$REPO_ROOT/lib/hooks"
 FIXT="$REPO_ROOT/tests/fixtures/hooks"
+
+# ---- jq resolution (K-81 rider) ---------------------------------------------
+#
+# This script (and the hooks it drives) need a real jq. A sandboxed PATH
+# (CI runners, `env -i`, agent sandboxes) may not include jq's directory
+# even though it is installed; resolve it explicitly, put its directory on
+# PATH for the rest of the run, and fail with a clear message if there
+# genuinely is none. The no-jq cases below build their own jq-less PATH
+# from directory listings, so this never leaks jq into them.
+if ! command -v jq >/dev/null 2>&1; then
+    _jq_found=""
+    for _c in /opt/homebrew/bin/jq /usr/local/bin/jq /usr/bin/jq; do
+        if [ -x "$_c" ]; then _jq_found="$_c"; break; fi
+    done
+    if [ -z "$_jq_found" ]; then
+        echo "$(basename -- "$0"): jq is required but was not found on PATH, /opt/homebrew/bin, /usr/local/bin or /usr/bin." >&2
+        echo "$(basename -- "$0"): install jq (brew install jq / apt-get install jq) and re-run." >&2
+        exit 1
+    fi
+    PATH="$(dirname -- "$_jq_found"):$PATH"
+    export PATH
+fi
 GO_BINARY="${YAKOS_GO_BINARY:-$REPO_ROOT/bin/yakos}"
 
 if [ ! -x "$GO_BINARY" ]; then
@@ -75,7 +117,7 @@ fail_log=""
 # (bash, grep, cat, mkdir, date, ...) available. Built once; cleaned up on
 # exit via the trap below.
 NOJQ_PATH="$(mktemp -d -t yakos-hookfix-nojq-XXXXXX)"
-trap 'rm -rf "$NOJQ_PATH" "$NORESOLVE_PATH"' EXIT
+trap 'rm -rf "$NOJQ_PATH" "$NORESOLVE_PATH" "$FAKEJQ_GARBAGE_PATH" "$FAKEJQ_FAIL_PATH" "$NOYAKOS_PATH"' EXIT
 for _dir in /usr/bin /bin /usr/local/bin; do
     [ -d "$_dir" ] || continue
     for _bin in "$_dir"/*; do
@@ -103,6 +145,46 @@ for _dir in /usr/bin /bin /usr/local/bin; do
             realpath|python3) continue ;;
         esac
         ln -sf "$_bin" "$NORESOLVE_PATH/$_name" 2>/dev/null || true
+    done
+done
+
+# ---- broken-jq PATHs (K-87 A-2b adversarial coverage) ------------------------
+#
+# Same construction as NOJQ_PATH, but a `jq` IS present and misbehaves:
+#   FAKEJQ_GARBAGE_PATH  jq exits 0 and prints "garbage" for every query — a
+#                        jq that is present but returns invalid output.
+#   FAKEJQ_FAIL_PATH     jq exits 5 with no output — a crashing jq.
+FAKEJQ_GARBAGE_PATH="$(mktemp -d -t yakos-hookfix-fakejq-g-XXXXXX)"
+FAKEJQ_FAIL_PATH="$(mktemp -d -t yakos-hookfix-fakejq-f-XXXXXX)"
+for _dir in /usr/bin /bin /usr/local/bin; do
+    [ -d "$_dir" ] || continue
+    for _bin in "$_dir"/*; do
+        [ -x "$_bin" ] || continue
+        _name="$(basename -- "$_bin")"
+        [ "$_name" = "jq" ] && continue
+        ln -sf "$_bin" "$FAKEJQ_GARBAGE_PATH/$_name" 2>/dev/null || true
+        ln -sf "$_bin" "$FAKEJQ_FAIL_PATH/$_name" 2>/dev/null || true
+    done
+done
+printf '#!/bin/sh\necho garbage\n' > "$FAKEJQ_GARBAGE_PATH/jq"
+printf '#!/bin/sh\nexit 5\n' > "$FAKEJQ_FAIL_PATH/jq"
+chmod +x "$FAKEJQ_GARBAGE_PATH/jq" "$FAKEJQ_FAIL_PATH/jq"
+
+# ---- no-yakos PATH (retro-dispatch) ------------------------------------------
+#
+# retro-dispatch shells out to `yakos dispatch librarian` in the background
+# when a .retro-due marker exists and a yakos binary is found. A fixture must
+# never launch that, on a machine where yakos IS installed. This PATH has
+# every binary EXCEPT yakos, so the "yakos not found" branch is the only one
+# reachable.
+NOYAKOS_PATH="$(mktemp -d -t yakos-hookfix-noyakos-XXXXXX)"
+for _dir in /usr/bin /bin /usr/local/bin /opt/homebrew/bin; do
+    [ -d "$_dir" ] || continue
+    for _bin in "$_dir"/*; do
+        [ -x "$_bin" ] || continue
+        _name="$(basename -- "$_bin")"
+        [ "$_name" = "yakos" ] && continue
+        ln -sf "$_bin" "$NOYAKOS_PATH/$_name" 2>/dev/null || true
     done
 done
 
@@ -176,7 +258,23 @@ case_check() {
     # rationale); sandboxing HOME per-case here is what makes it safe to
     # finally cover that path without depending on the real machine's
     # ~/.yakos-state contents.
-    local hook="$1" fixture="$2" expected_rc="$3" log_name="$4" setup_fn="${5:-}" extra_env="${6:-}" cpd_suffix="${7:-}" home_fn="${8:-}"
+    local hook="$1" fixture="$2" expected_rc="$3" log_name="$4" setup_fn="${5:-}" extra_env="${6:-}" cpd_suffix="${7:-}" home_fn="${8:-}" accept="${9:-}"
+
+    # YAKOS_PARITY_ONLY=<hook-name> restricts the run to one hook (fast
+    # iteration while closing a hook's gaps).
+    if [ -n "${YAKOS_PARITY_ONLY:-}" ] && [ "$(basename "$hook" .sh)" != "$YAKOS_PARITY_ONLY" ]; then
+        return 0
+    fi
+
+    # YAKOS_PARITY_FIXTURE=<substring> restricts the run to tuples whose
+    # fixture file name contains it (mutation testing: run just the fixtures
+    # that guard the check under test).
+    if [ -n "${YAKOS_PARITY_FIXTURE:-}" ]; then
+        case "$fixture" in
+            *"$YAKOS_PARITY_FIXTURE"*) ;;
+            *) return 0 ;;
+        esac
+    fi
 
     local tmp
     tmp="$(mktemp -d -t yakos-hookfix-XXXXXX)"
@@ -201,6 +299,8 @@ case_check() {
             run_env="HOME=$tmp/home"
         fi
     fi
+
+    run_env="${run_env//__TMP__/$tmp}"
 
     local payload cpd
     payload="$(sed "s|__CLAUDE_PROJECT_DIR__|$tmp|g" "$FIXT/$fixture")"
@@ -267,7 +367,7 @@ case_check() {
     # against `yakos hook run <name>` in a fresh sandbox, and compare against
     # the bash run captured above.
     parity_check "$hook" "$fixture" "$actual_rc" "$log_name" "$setup_fn" "$extra_env" "$cpd_suffix" \
-        "$tmp/work/current/logs" "$stdout_capture" "$bash_stderr" "$tmp" "$home_fn"
+        "$tmp/work/current/logs" "$stdout_capture" "$bash_stderr" "$tmp" "$home_fn" "$accept"
 
     rm -rf "$tmp"
 }
@@ -292,7 +392,7 @@ normalize_stderr() {
     local text="$1" bash_dir="$2" go_dir="$3"
     printf '%s' "$text" \
         | sed -E 's/^\[[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\] //' \
-        | sed "s|$bash_dir|__SANDBOX__|g; s|$go_dir|__SANDBOX__|g"
+        | sed "s|/private$bash_dir|__SANDBOX__|g; s|/private$go_dir|__SANDBOX__|g; s|$bash_dir|__SANDBOX__|g; s|$go_dir|__SANDBOX__|g"
 }
 
 # parity_check runs the Go side of one case and records the comparison.
@@ -301,7 +401,7 @@ normalize_stderr() {
 #       bash-sandbox-dir, home-fn
 parity_check() {
     local hook="$1" fixture="$2" bash_rc="$3" log_name="$4" setup_fn="$5" extra_env="$6" cpd_suffix="$7" bash_log_dir="$8" bash_stdout="$9"
-    local bash_stderr="${10}" bash_tmp="${11}" home_fn="${12:-}"
+    local bash_stderr="${10}" bash_tmp="${11}" home_fn="${12:-}" accept="${13:-}"
     local hookname
     hookname="$(basename "$hook" .sh)"
 
@@ -324,6 +424,8 @@ parity_check() {
             go_run_env="HOME=$tmp2/home"
         fi
     fi
+
+    go_run_env="${go_run_env//__TMP__/$tmp2}"
 
     local payload cpd
     payload="$(sed "s|__CLAUDE_PROJECT_DIR__|$tmp2|g" "$FIXT/$fixture")"
@@ -367,8 +469,18 @@ parity_check() {
             if [ "$go_has" = "1" ]; then divergence="log-present-go-only"; else divergence="log-missing-go"; fi
         elif [ "$bash_has" = "1" ]; then
             local norm_bash norm_go
-            norm_bash="$(tail -n 1 "$bash_log" | jq -cS 'del(.ts)' 2>/dev/null || echo "__unparseable_bash__")"
-            norm_go="$(tail -n 1 "$go_log" | jq -cS 'del(.ts)' 2>/dev/null || echo "__unparseable_go__")"
+            # Each side's own mktemp -d sandbox path (and its macOS
+            # /private-prefixed realpath form) is masked, exactly as
+            # normalize_stderr does for stderr: a record that embeds an
+            # absolute path (path-allowlist's project_root / resolved /
+            # root-equal file_path) can never match across two sandboxes.
+            # ts is masked (never equal across two runs), and so is
+            # elapsed_seconds (budget-guard: wall-clock since a state file
+            # written at case setup, so the two sides' runs can straddle a
+            # second boundary; Go's elapsed arithmetic is covered by its own
+            # unit tests instead).
+            norm_bash="$(tail -n 1 "$bash_log" | sed "s|/private$bash_tmp|__SANDBOX__|g; s|$bash_tmp|__SANDBOX__|g" | jq -cS 'del(.ts, .elapsed_seconds)' 2>/dev/null || echo "__unparseable_bash__")"
+            norm_go="$(tail -n 1 "$go_log" | sed "s|/private$tmp2|__SANDBOX__|g; s|$tmp2|__SANDBOX__|g" | jq -cS 'del(.ts, .elapsed_seconds)' 2>/dev/null || echo "__unparseable_go__")"
             [ "$norm_bash" != "$norm_go" ] && divergence="log-schema"
         fi
     fi
@@ -406,13 +518,47 @@ parity_check() {
         [ "$norm_bash_stderr" != "$norm_go_stderr" ] && divergence="stderr"
     fi
 
-    printf '{"hook":%s,"fixture":%s,"bash_rc":%s,"go_rc":%s,"divergence":%s}\n' \
-        "$(json_str "$hookname")" "$(json_str "$(basename "$fixture")")" "$bash_rc" "$go_rc" "$(json_str "$divergence")" >> "$REPORT_FILE"
+    # Accepted (documented, intentional) divergences. A tuple carries an
+    # `accept` annotation of the form "<go-rc>:<reason>" when bash and Go are
+    # KNOWN to differ on purpose — e.g. Go never depends on jq, or Go is
+    # stricter than a bash weakness. The annotation pins Go's exit code, so an
+    # accepted case still guards Go's decision; it does not excuse it. If the
+    # two sides start agreeing, the stale annotation is itself flagged.
+    local raw_divergence="$divergence" accepted_reason=""
+    if [ -n "$accept" ]; then
+        local acc_rc="${accept%%:*}"
+        accepted_reason="${accept#*:}"
+        if [ "$divergence" = "-" ]; then
+            divergence="accept-stale"
+        elif [ "$go_rc" = "$acc_rc" ]; then
+            divergence="accepted"
+        fi
+    fi
+
+    printf '{"hook":%s,"fixture":%s,"bash_rc":%s,"go_rc":%s,"divergence":%s,"raw_divergence":%s,"accepted_reason":%s}\n' \
+        "$(json_str "$hookname")" "$(json_str "$(basename "$fixture")")" "$bash_rc" "$go_rc" \
+        "$(json_str "$divergence")" "$(json_str "$raw_divergence")" "$(json_str "$accepted_reason")" >> "$REPORT_FILE"
 
     if [ "$divergence" = "-" ]; then
         printf 'PARITY  %-24s | %-42s | rc=%s\n' "$hookname" "$(basename "$fixture")" "$go_rc"
+    elif [ "$divergence" = "accepted" ]; then
+        printf 'ACCEPT  %-24s | %-42s | %s (bash_rc=%s go_rc=%s) -- %s\n' "$hookname" "$(basename "$fixture")" "$raw_divergence" "$bash_rc" "$go_rc" "$accepted_reason"
     else
         printf 'DIVERGE %-24s | %-42s | %s (bash_rc=%s go_rc=%s)\n' "$hookname" "$(basename "$fixture")" "$divergence" "$bash_rc" "$go_rc"
+    fi
+
+    # YAKOS_PARITY_VERBOSE=1: side-by-side evidence for every raw divergence.
+    if [ "${YAKOS_PARITY_VERBOSE:-0}" = "1" ] && [ "$raw_divergence" != "-" ]; then
+        {
+            echo "    --- bash: rc=$bash_rc"
+            echo "    stdout: $bash_stdout"
+            echo "    stderr: $bash_stderr"
+            [ -n "$log_name" ] && [ -f "$bash_log_dir/${log_name}.ndjson" ] && echo "    log:    $(tail -n 1 "$bash_log_dir/${log_name}.ndjson")"
+            echo "    --- go:   rc=$go_rc"
+            echo "    stdout: $go_stdout"
+            echo "    stderr: $go_stderr"
+            [ -n "$log_name" ] && [ -f "$tmp2/work/current/logs/${log_name}.ndjson" ] && echo "    log:    $(tail -n 1 "$tmp2/work/current/logs/${log_name}.ndjson")"
+        } | sed "s|$bash_tmp|<bash-sandbox>|g; s|$tmp2|<go-sandbox>|g"
     fi
 
     rm -rf "$tmp2"
@@ -713,6 +859,286 @@ setup_cycle_counter_missing_settings() {
     :
 }
 
+# ---- K-87 A-2b path-allowlist setups ----------------------------------------
+
+_pa_write_policy() { printf '%s' "$2" > "$1/.claude/path-allowlist.json"; }
+
+setup_allowlist_allow_empty() { _pa_write_policy "$1" '{"go-api":{"allow":[]}}'; }
+setup_allowlist_allow_string() { _pa_write_policy "$1" '{"go-api":{"allow":"api/**"}}'; }
+setup_allowlist_allow_false() { _pa_write_policy "$1" '{"go-api":{"allow":false}}'; }
+setup_allowlist_allow_zero() { _pa_write_policy "$1" '{"go-api":{"allow":0}}'; }
+setup_allowlist_allow_object() { _pa_write_policy "$1" '{"go-api":{"allow":{"a":"api/**"}}}'; }
+setup_allowlist_allow_null() { _pa_write_policy "$1" '{"go-api":{"allow":null}}'; }
+setup_allowlist_deny_string() { _pa_write_policy "$1" '{"go-api":{"deny":"api/**","allow":["**"]}}'; }
+setup_allowlist_policy_not_object() { _pa_write_policy "$1" '{"go-api":"oops"}'; }
+setup_allowlist_policy_false() { _pa_write_policy "$1" '{"go-api":false}'; }
+setup_allowlist_toplevel_array() { _pa_write_policy "$1" '[]'; }
+
+setup_allowlist_allow_empty_bypassed() {
+    # allow: [] (deny-all) plus a bypass entry scoped to the fixture's file —
+    # the bypass must still work for the deny-all branch.
+    setup_allowlist_allow_empty "$1"
+    mkdir -p "$1/work/current"
+    cat > "$1/work/current/hook-bypass.md" <<EOF
+# Active hook bypasses
+
+## Active entries
+
+## bypass:allow-empty-fixture
+
+**Hook:** path-allowlist
+**Reason:** test fixture for the deny-all bypass branch
+**Approved by:** TestSuite
+**Created:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**Expires:** $(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+**Scope:** api/main.go
+**Follow-up:** none — fixture only
+EOF
+}
+
+setup_symlink_dir_escape() {
+    # api/escape-dir is a symlink to a directory OUTSIDE the project root
+    # (/etc — never written, the hook only reads the path), used by the
+    # "..-after-a-symlink" case: the OS resolves "escape-dir/sub/../.." to
+    # "/", not to "api".
+    mkdir -p "$1/api"
+    _pa_write_policy "$1" '{"go-api":{"allow":["api/**"]}}'
+    ln -sf /etc "$1/api/escape-dir"
+}
+
+setup_symlink_inroot_dotdot() {
+    # api/inl is a symlink to a directory INSIDE the project root; "inl/.."
+    # therefore stays in-root under both lexical and physical resolution.
+    mkdir -p "$1/api" "$1/internal/deep"
+    _pa_write_policy "$1" '{"go-api":{"allow":["api/**","internal/**"]}}'
+    ln -sf "$1/internal/deep" "$1/api/inl"
+}
+
+# ---- K-87 A-2b supervisor-gate setups ----------------------------------------
+
+_sg_findings() { mkdir -p "$1/work/current"; printf '%s\n' "$2" > "$1/work/current/supervisor-findings.ndjson"; }
+_SG_CRIT='{"ts":"2026-09-20T00:00:00Z","overall":"CRITICAL","rationale":"fixture critical","recommended_action":"halt"}'
+setup_sg_pass() { _sg_findings "$1" '{"ts":"2026-09-20T00:00:00Z","overall":"PASS","rationale":"all good","recommended_action":"continue"}'; }
+setup_sg_warn() { _sg_findings "$1" '{"ts":"2026-09-20T00:00:00Z","overall":"WARN","rationale":"drifting","recommended_action":"review"}'; }
+setup_sg_critical() { _sg_findings "$1" "$_SG_CRIT"; }
+setup_sg_unknown() { _sg_findings "$1" '{"ts":"2026-09-20T00:00:00Z","overall":"MYSTERY","rationale":"x"}'; }
+setup_sg_invalid_json() { _sg_findings "$1" '{"overall":"CRITICAL"'; }
+setup_sg_nonobject() { _sg_findings "$1" '[]'; }
+setup_sg_blank_last_line() { mkdir -p "$1/work/current"; printf '%s\n\n' "$_SG_CRIT" > "$1/work/current/supervisor-findings.ndjson"; }
+setup_sg_critical_passive() {
+    _sg_findings "$1" "$_SG_CRIT"
+    printf 'supervisor:\n  block_on_critical: false\n' > "$1/.yakos.yml"
+}
+setup_sg_critical_passive_comment() {
+    # A trailing comment defeats the script's awk/tr comparison: still blocks.
+    _sg_findings "$1" "$_SG_CRIT"
+    printf 'supervisor:\n  block_on_critical: false # passive\n' > "$1/.yakos.yml"
+}
+setup_sg_disabled() {
+    _sg_findings "$1" "$_SG_CRIT"
+    printf 'supervisor:\n  enabled: false\n' > "$1/.yakos.yml"
+}
+setup_sg_critical_bypassed() {
+    _sg_findings "$1" "$_SG_CRIT"
+    cat > "$1/work/current/hook-bypass.md" <<EOF
+# Active hook bypasses
+
+## Active entries
+
+## bypass:sg-fixture
+
+**Hook:** supervisor
+**Reason:** test fixture for the supervisor-gate bypass branch
+**Approved by:** TestSuite
+**Created:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**Expires:** $(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+**Scope:** finding=2026-09-20T00:00:00Z
+**Follow-up:** none — fixture only
+EOF
+}
+
+# ---- K-87 A-2b budget-guard setups -------------------------------------------
+
+setup_budget_repeat_cap() {
+    # max_repeat_same_tool: 2 with the previous call already the 2nd Read in
+    # a row — this Read is the 3rd, over the cap.
+    cat > "$1/.yakos.yml" <<'EOF'
+budget:
+  enabled: true
+  max_repeat_same_tool: 2
+EOF
+    mkdir -p "$1/work/current"
+    cat > "$1/work/current/.budget-state.json" <<EOF
+{"session_id":"fixture-generic-tool-0001","started_at":$(date +%s),"tool_call_count":2,"last_tool":"Read","last_tool_run_count":2}
+EOF
+}
+setup_budget_low_cap_bypassed() {
+    setup_budget_low_cap "$1"
+    cat > "$1/work/current/hook-bypass.md" <<EOF
+# Active hook bypasses
+
+## Active entries
+
+## bypass:budget-fixture
+
+**Hook:** budget
+**Reason:** test fixture for the budget bypass branch
+**Approved by:** TestSuite
+**Created:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**Expires:** $(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+**Scope:** cap=max_tool_calls
+**Follow-up:** none — fixture only
+EOF
+}
+setup_budget_disabled_in_yml() {
+    setup_budget_low_cap "$1"
+    cat > "$1/.yakos.yml" <<'EOF'
+budget:
+  enabled: false
+  max_tool_calls: 1
+EOF
+}
+setup_budget_corrupt_state() {
+    setup_budget_headroom "$1"
+    mkdir -p "$1/work/current"
+    printf 'not json at all' > "$1/work/current/.budget-state.json"
+}
+
+# ---- K-87 A-2b output-injection-scan setups ----------------------------------
+
+setup_injection_scan_disabled_in_yml() {
+    printf 'injection_scan:\n  enabled: false\n' > "$1/.yakos.yml"
+}
+
+# ---- K-87 A-2b: hooks that had no fixture coverage ---------------------------
+#
+# extra_env values may contain the literal token __TMP__, replaced with each
+# side's own sandbox dir (bash: $tmp, Go: $tmp2) so a fixture can point an
+# env var (YAKOS_COORD_ROOT, YAKOS_PLAN_QUALITY_LOG, ...) INTO its sandbox.
+
+home_noop() { : ; }   # an empty sandboxed $HOME (keeps the real ~/.yakos-state out of the run)
+
+# -- context-inject --
+_ci_yml() { printf 'context_inject:\n  enabled: true\n%b' "$2" > "$1/.yakos.yml"; }
+setup_ci_with_decisions() {
+    _ci_yml "$1" ""
+    mkdir -p "$1/work/current"
+    printf '# decisions\n- d1: use postgres\n- d2: ship friday\n' > "$1/work/current/decisions.md"
+}
+setup_ci_empty() { _ci_yml "$1" ""; }
+setup_ci_decisions_section_off() {
+    _ci_yml "$1" "  inject_decisions: false\n"
+    mkdir -p "$1/work/current"
+    printf '# decisions\n- d1\n' > "$1/work/current/decisions.md"
+}
+setup_ci_with_critical() {
+    _ci_yml "$1" ""
+    mkdir -p "$1/work/current"
+    printf '%s\n' '{"ts":"2026-09-20T00:00:00Z","overall":"CRITICAL","rationale":"fixture critical","recommended_action":"halt"}' > "$1/work/current/supervisor-findings.ndjson"
+}
+
+# -- context-threshold: a claude transcript of N bytes in the sandboxed HOME --
+_ct_transcript() {
+    local proj enc
+    proj="$(dirname "$1")"
+    enc="${proj//\//-}"; enc="${enc//./-}"
+    mkdir -p "$1/.claude/projects/$enc"
+    head -c "$2" /dev/zero | tr '\0' 'x' > "$1/.claude/projects/$enc/transcript-fixture-generic-tool-0001.jsonl"
+}
+home_ct_notice() { _ct_transcript "$1" 640000; }   # ~80% of the 200k-token window: over the 75% notice line
+home_ct_low() { _ct_transcript "$1" 80000; }       # ~10%
+
+# -- supervisor-ack-gate --
+_sag_findings() { mkdir -p "$1/work/current"; printf '%s\n' "$2" > "$1/work/current/supervisor-findings.ndjson"; }
+_SAG_HALT='{"ts":"2026-09-20T00:00:00Z","overall":"CRITICAL","rationale":"fixture critical","recommended_action":"halt"}'
+setup_sag_halt() { _sag_findings "$1" "$_SAG_HALT"; }
+setup_sag_continue() { _sag_findings "$1" '{"ts":"2026-09-20T00:00:00Z","overall":"PASS","rationale":"fine","recommended_action":"continue"}'; }
+setup_sag_gate_off() { _sag_findings "$1" "$_SAG_HALT"; printf 'supervise:\n  gate_on_escalation: false\n' > "$1/.yakos.yml"; }
+setup_sag_malformed_then_halt() {
+    mkdir -p "$1/work/current"
+    printf '{"broken"\n%s\n' "$_SAG_HALT" > "$1/work/current/supervisor-findings.ndjson"
+}
+home_sag_acked() {
+    mkdir -p "$1/.yakos-state"
+    printf '{"project":"proj","finding_id":"f-2026-09-20T00-00-00Z-proj-1"}\n' > "$1/.yakos-state/supervisor-acks.ndjson"
+}
+
+# -- supervisor-stream --
+setup_ss_passfilter() { printf 'supervisor:\n  score_every_n_calls: 1000\n' > "$1/.yakos.yml"; }
+setup_ss_prefilter_off() { printf 'supervisor:\n  score_every_n_calls: 1000\n  pre_filter:\n    enabled: false\n' > "$1/.yakos.yml"; }
+setup_ss_disabled() { printf 'supervisor:\n  enabled: false\n' > "$1/.yakos.yml"; }
+
+# -- retro-dispatch --
+setup_rd_marker() { mkdir -p "$1/work/current"; : > "$1/work/current/.retro-due"; }
+home_rd_auto_off() { mkdir -p "$1/.yakos-state"; printf '{"retro":{"auto_dispatch":false}}' > "$1/.yakos-state/settings.json"; }
+home_rd_inflight() {
+    # $$ is the harness shell itself: alive for the whole hook run, so
+    # `kill -0` sees a live prior dispatch on both the bash and Go sides.
+    mkdir -p "$1/.yakos-state"
+    printf '%s' "$$" > "$1/.yakos-state/retro-dispatch.pid"
+}
+
+# -- plan-outcome-capture --
+setup_poc_scored() { printf '{"type":"plan_scored","plan_id":"p1","project":"%s"}\n' "$1" > "$1/pql.ndjson"; }
+setup_poc_complete() {
+    printf '{"type":"plan_scored","plan_id":"p1","project":"%s"}\n{"type":"plan_outcome","plan_id":"p1"}\n' "$1" > "$1/pql.ndjson"
+}
+
+# -- plan-quality-gate (PreToolUse marker path) --
+setup_pqg_blocked() { mkdir -p "$1/work/current"; printf '{"plan_id":"p-1","reason":"score 40 below threshold 70"}' > "$1/work/current/.plan-blocked"; }
+setup_pqg_blocked_but_disabled() { setup_pqg_blocked "$1"; printf 'plan_quality:\n  enabled: false\n' > "$1/.yakos.yml"; }
+
+# -- peer-claim / peer-claim-confirm (coordination dir inside the sandbox) --
+setup_pc_coord() { mkdir -p "$1/coord/proj/coord"; }
+_pc_claim() {
+    # _pc_claim <sandbox> <user> <host> <pid> <expires_at>
+    setup_pc_coord "$1"
+    printf '{"generated_at":"2026-09-20T00:00:00Z","claims":[{"path":"src/auth/login.ts","owners":[{"user":"%s","host":"%s","pid":%s,"agent":"frontend-pro","status":"confirmed","expires_at":"%s"}]}]}\n' \
+        "$2" "$3" "$4" "$5" > "$1/coord/proj/coord/active-claims.json"
+}
+setup_pc_peer_claim() { _pc_claim "$1" alice dev01 1001 2099-01-01T00:00:00Z; }
+setup_pc_own_claim() { _pc_claim "$1" bob dev01 2002 2099-01-01T00:00:00Z; }
+setup_pc_expired_claim() { _pc_claim "$1" alice dev01 1001 2000-01-01T00:00:00Z; }
+setup_pc_peer_claim_bypassed() {
+    setup_pc_peer_claim "$1"
+    mkdir -p "$1/work/current"
+    cat > "$1/work/current/hook-bypass.md" <<EOF
+# Active hook bypasses
+
+## Active entries
+
+## bypass:pc-fixture
+
+**Hook:** peer-claim
+**Reason:** test fixture for the peer-claim bypass branch
+**Approved by:** TestSuite
+**Created:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**Expires:** $(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+**Scope:** file=src/auth/login.ts peer=alice@dev01
+**Follow-up:** none — fixture only
+EOF
+}
+
+# -- task-complete-dispatch --
+setup_tcd_bypass() {
+    mkdir -p "$1/work/current"
+    cat > "$1/work/current/hook-bypass.md" <<EOF
+# Active hook bypasses
+
+## Active entries
+
+## bypass:tcd-fixture
+
+**Hook:** task-complete-dispatch
+**Reason:** test fixture for the bypass_active field
+**Approved by:** TestSuite
+**Created:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**Expires:** $(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+**Scope:** backend
+**Follow-up:** none — fixture only
+EOF
+}
+
 # ---- cases ------------------------------------------------------------------
 
 echo "Running hook fixtures..."
@@ -740,7 +1166,7 @@ case_check path-allowlist.sh   pretooluse-write-pem-upper.json    2 path-allowli
 # project root must be blocked regardless of what the allow list says.
 case_check path-allowlist.sh   pretooluse-write-symlink-escape.json 2 path-allowlist setup_symlink_escape
 # C5: missing jq must fail CLOSED (block), not silently pass every write.
-case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH"
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH" "" "" "2:Go never shells out to jq; a jq-less PATH cannot degrade it, so it decides on policy where bash fails closed on degraded input"
 # N1 (round 2): an absolute out-of-root file_path — the shape Claude Code
 # actually sends — must be rejected even under an allow:["**"] policy or a
 # deny-only policy, and an in-root ABSOLUTE path must still PASS (the
@@ -760,7 +1186,7 @@ case_check path-allowlist.sh   pretooluse-write-symlink-escape.json 2 path-allow
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json 2 path-allowlist setup_allowlist_corrupt_truncated
 # N2 (round 2): the emergency escape hatch must be honored even with jq
 # missing, and only when actually set.
-case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1"
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "2:Go never shells out to jq; a jq-less PATH cannot degrade it, so it decides on policy where bash fails closed on degraded input"
 # C5 residue (round 2, addendum): same hi_init gap as secret-scan below —
 # an empty pipe and a non-object JSON payload must both fail closed.
 case_check path-allowlist.sh   pretooluse-write-empty-stdin.json      2 path-allowlist setup_allowlist_strict
@@ -816,10 +1242,10 @@ case_check secret-scan.sh      pretooluse-write-stripe-key.json      2 secret-sc
 case_check secret-scan.sh      pretooluse-write-anthropic-key.json   2 secret-scan
 case_check secret-scan.sh      pretooluse-write-google-key.json      2 secret-scan
 # C5: missing jq must fail CLOSED (block), not silently pass every write.
-case_check secret-scan.sh      pretooluse-write-secret.json      2 secret-scan "" "PATH=$NOJQ_PATH"
+case_check secret-scan.sh      pretooluse-write-secret.json      2 secret-scan "" "PATH=$NOJQ_PATH" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 # N2 (round 2): the emergency escape hatch must be honored even with jq
 # missing.
-case_check secret-scan.sh      pretooluse-write-secret.json      0 secret-scan "" "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1"
+case_check secret-scan.sh      pretooluse-write-secret.json      0 secret-scan "" "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 # C5 residue (round 2, addendum): hi_init used to pass on an empty pipe
 # (the `[ -n "$HI_INPUT" ] &&` guard skipped validation on a zero-byte
 # read) and on valid-JSON-that-isn't-an-object (`jq empty` accepts an
@@ -864,7 +1290,7 @@ case_check secret-scan.sh      pretooluse-multiedit-secret-newstring.json      2
 # missing-jq fail-closed case.
 case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard setup_budget_headroom
 case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_low_cap
-case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_low_cap "PATH=$NOJQ_PATH"
+case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_low_cap "PATH=$NOJQ_PATH" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 # N2 (round 2): budget-guard matches EVERY tool call ("*"), so this is the
 # hook where a missing jq previously locked an operator out of the whole
 # session. Its own emergency var, YAKOS_BUDGET_DISABLE, is now checked
@@ -879,7 +1305,7 @@ case_check budget-guard.sh     pretooluse-generic-tool.json      0 "" setup_budg
 # now be a clean rc=0 with no crash. This exact combination was
 # deliberately NOT asserted in round 2 (see the comment that used to sit
 # here) because it was known-broken; now fixed and locked in.
-case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard setup_budget_low_cap "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1"
+case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard setup_budget_low_cap "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 
 # --- supervisor-gate ---
 # R2-2 (round 3): a second, independent instance of the same defect class
@@ -887,7 +1313,7 @@ case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard 
 # and reaches unguarded `jq -r` calls once a supervisor-findings.ndjson
 # file exists (a common state in an active session, not a rare edge
 # case). Same fix, same fixture shape.
-case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_supervisor_findings_critical "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1"
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_supervisor_findings_critical "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 
 # --- mailbox-mirror ---
 case_check mailbox-mirror.sh   sendmessage-peer.json             0 mailbox-mirror
@@ -969,6 +1395,141 @@ case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter
 case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_wrong_shape_settings
 case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_missing_settings
 
+# --- path-allowlist: K-87 A-2b gap closure -----------------------------------
+#
+# K-81 allow semantics: an allow ARRAY constrains (empty = deny-all); missing
+# or null = no allow-list; any other type is malformed and blocks.
+case_check path-allowlist.sh   pretooluse-edit-api.json          2 path-allowlist setup_allowlist_allow_empty
+case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlist setup_allowlist_allow_empty_bypassed
+case_check path-allowlist.sh   pretooluse-edit-api.json          2 path-allowlist setup_allowlist_allow_string
+case_check path-allowlist.sh   pretooluse-edit-api.json          2 path-allowlist setup_allowlist_allow_false
+case_check path-allowlist.sh   pretooluse-edit-api.json          2 path-allowlist setup_allowlist_allow_zero
+case_check path-allowlist.sh   pretooluse-edit-api.json          2 path-allowlist setup_allowlist_allow_object
+case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlist setup_allowlist_allow_null
+case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlist setup_allowlist_policy_false
+case_check path-allowlist.sh   pretooluse-edit-api.json          2 path-allowlist setup_allowlist_policy_not_object
+case_check path-allowlist.sh   pretooluse-edit-api.json          2 path-allowlist setup_allowlist_toplevel_array
+# Accepted: bash's `.deny // [] | .[]` silently yields NO deny patterns for a
+# non-array deny (a fail-open); Go blocks. Bash is wrong; not editable this round.
+case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlist setup_allowlist_deny_string "" "" "" "2:bash bug: a non-array deny silently disables deny enforcement; Go fails closed (bash fix deferred, K-87 A-2b report)"
+# Glob semantics: '*' spans '/' (bash case), so deny recursion works; deny is case-insensitive.
+case_check path-allowlist.sh   pretooluse-write-deep-deny.json           2 path-allowlist setup_allowlist_strict
+case_check path-allowlist.sh   pretooluse-write-deny-mixed-case-dir.json 2 path-allowlist setup_allowlist_strict
+case_check path-allowlist.sh   pretooluse-write-inroot-dotdot.json       0 path-allowlist setup_allowlist_strict
+# Symlink handling, including ".." applied AFTER a symlink.
+case_check path-allowlist.sh   pretooluse-write-inroot-symlink-dotdot.json 0 path-allowlist setup_symlink_inroot_dotdot
+case_check path-allowlist.sh   pretooluse-write-dotdot-after-symlink.json 0 path-allowlist setup_symlink_dir_escape "" "" "" "2:bash bug: checks only the lexically-normalized path, so api/link/sub/../../x escapes via the symlink target; Go also resolves the as-written path (bash fix deferred, K-87 A-2b report)"
+# NUL byte: bash's command substitution silently drops it (evaluating a different path than the tool receives); Go refuses.
+case_check path-allowlist.sh   pretooluse-write-nul-in-path.json 0 path-allowlist setup_allowlist_strict "" "" "" "2:bash drops NUL bytes in command substitution and evaluates a different path; Go refuses a NUL-bearing path outright"
+# Broken jq (present but misbehaving). Go never shells out to jq.
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 "" setup_allowlist_strict "PATH=$FAKEJQ_GARBAGE_PATH" "" "" "2:bash trusts a jq that prints garbage (tool name becomes garbage, hook exits 0 = fail-open); Go is jq-independent and blocks on policy"
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict "PATH=$FAKEJQ_FAIL_PATH" "" "" "2:bash fails closed on a crashing jq (degraded input); Go is jq-independent and blocks on policy"
+
+# --- supervisor-gate: K-87 A-2b -----------------------------------------------
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_sg_pass
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_sg_warn
+case_check supervisor-gate.sh  pretooluse-edit-api.json          2 supervisor-gate setup_sg_critical
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_sg_critical_passive
+case_check supervisor-gate.sh  pretooluse-edit-api.json          2 supervisor-gate setup_sg_critical_passive_comment
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_sg_critical_bypassed
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_sg_unknown
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_sg_invalid_json
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 "" setup_sg_disabled
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 "" setup_sg_blank_last_line
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 "" "" "YAKOS_SUPERVISOR_DISABLE=1"
+# Accepted: a valid-JSON NON-object last line (e.g. []) crashes bash (jq error
+# under set -e, rc=5 — a non-blocking hook error); Go treats it as an unusable
+# finding, logs a WARN and passes (rc=0).
+case_check supervisor-gate.sh  pretooluse-edit-api.json          5 "" setup_sg_nonobject "" "" "" "0:bash crashes (rc=5, jq error under set -e) on a valid-JSON non-object last line; Go treats it as an unusable finding and passes with a WARN"
+
+# --- budget-guard: K-87 A-2b ----------------------------------------------------
+case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_repeat_cap
+case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard setup_budget_low_cap_bypassed
+case_check budget-guard.sh     pretooluse-generic-tool.json      0 "" setup_budget_disabled_in_yml
+case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard setup_budget_corrupt_state
+case_check budget-guard.sh     pretooluse-generic-tool.json      0 "" setup_no_allowlist
+
+# --- output-injection-scan: K-87 A-2b -------------------------------------------
+case_check output-injection-scan.sh posttooluse-bash-clean.json               0 output-injection-scan
+case_check output-injection-scan.sh posttooluse-mcp-injected.json             0 output-injection-scan
+case_check output-injection-scan.sh posttooluse-bash-response-object.json     0 output-injection-scan
+case_check output-injection-scan.sh posttooluse-bash-zero-width.json          0 output-injection-scan
+case_check output-injection-scan.sh posttooluse-bash-zero-width-below.json    0 output-injection-scan
+case_check output-injection-scan.sh posttooluse-read-dsa-key.json             0 output-injection-scan
+case_check output-injection-scan.sh posttooluse-read-rsa-key.json             0 output-injection-scan
+case_check output-injection-scan.sh posttooluse-bash-multiline-phrase.json    0 output-injection-scan
+case_check output-injection-scan.sh posttooluse-bash-system-line.json         0 output-injection-scan
+case_check output-injection-scan.sh posttooluse-workflow-node-output-object.json 2 output-injection-scan
+case_check output-injection-scan.sh posttooluse-bash-output-injected.json     0 "" "" "YAKOS_INJECTION_SCAN_DISABLE=1"
+case_check output-injection-scan.sh posttooluse-bash-output-injected.json     0 "" setup_injection_scan_disabled_in_yml
+# The two disable switches quiet ONLY the WARN-only path; the blocking workflow path ignores them.
+case_check output-injection-scan.sh posttooluse-workflow-node-output-injected.json 2 output-injection-scan "" "YAKOS_INJECTION_SCAN_DISABLE=1"
+case_check output-injection-scan.sh posttooluse-workflow-node-output-injected.json 2 output-injection-scan setup_injection_scan_disabled_in_yml
+
+# --- context-inject: K-87 A-2b ---------------------------------------------------
+case_check context-inject.sh   pretooluse-generic-tool.json 0 context-inject setup_ci_with_decisions
+case_check context-inject.sh   pretooluse-generic-tool.json 0 context-inject setup_ci_empty
+case_check context-inject.sh   pretooluse-generic-tool.json 0 context-inject setup_ci_with_critical
+case_check context-inject.sh   pretooluse-generic-tool.json 0 context-inject setup_ci_decisions_section_off
+case_check context-inject.sh   pretooluse-generic-tool.json 0 "" setup_no_allowlist
+case_check context-inject.sh   pretooluse-generic-tool.json 0 "" setup_ci_with_decisions "YAKOS_CONTEXT_INJECT_DISABLE=1"
+
+# --- context-threshold ------------------------------------------------------------
+case_check context-threshold.sh pretooluse-generic-tool.json 0 context-threshold "" "" "" home_noop
+case_check context-threshold.sh pretooluse-generic-tool.json 0 context-threshold "" "" "" home_ct_low
+case_check context-threshold.sh pretooluse-generic-tool.json 0 context-threshold "" "" "" home_ct_notice
+
+# --- supervisor-ack-gate ----------------------------------------------------------
+case_check supervisor-ack-gate.sh teamcreate.json 0 supervisor-ack-gate "" "YAKOS_PROJECT_NAME=proj" "" home_noop
+case_check supervisor-ack-gate.sh teamcreate.json 0 supervisor-ack-gate setup_sag_continue "YAKOS_PROJECT_NAME=proj" "" home_noop
+case_check supervisor-ack-gate.sh teamcreate.json 2 supervisor-ack-gate setup_sag_halt "YAKOS_PROJECT_NAME=proj" "" home_noop
+case_check supervisor-ack-gate.sh agent-spawn.json 2 supervisor-ack-gate setup_sag_halt "YAKOS_PROJECT_NAME=proj" "" home_noop
+case_check supervisor-ack-gate.sh teamcreate.json 2 supervisor-ack-gate setup_sag_malformed_then_halt "YAKOS_PROJECT_NAME=proj" "" home_noop
+case_check supervisor-ack-gate.sh teamcreate.json 0 supervisor-ack-gate setup_sag_halt "YAKOS_PROJECT_NAME=proj" "" home_sag_acked
+case_check supervisor-ack-gate.sh teamcreate.json 0 "" setup_sag_gate_off "YAKOS_PROJECT_NAME=proj" "" home_noop
+case_check supervisor-ack-gate.sh teamcreate.json 0 "" setup_sag_halt "YAKOS_PROJECT_NAME=proj YAKOS_SUPERVISOR_DISABLE=1" "" home_noop
+case_check supervisor-ack-gate.sh pretooluse-generic-tool.json 0 "" setup_sag_halt "YAKOS_PROJECT_NAME=proj" "" home_noop
+
+# --- supervisor-stream ------------------------------------------------------------
+case_check supervisor-stream.sh pretooluse-edit-api.json   0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh pretooluse-edit-risky.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh pretooluse-edit-api.json   0 supervisor-stream setup_ss_prefilter_off
+case_check supervisor-stream.sh pretooluse-edit-api.json   0 "" setup_ss_disabled
+case_check supervisor-stream.sh pretooluse-edit-risky.json 0 "" setup_ss_passfilter "YAKOS_SUPERVISOR_DISABLE=1"
+
+# --- retro-dispatch ---------------------------------------------------------------
+case_check retro-dispatch.sh   pretooluse-generic-tool.json 0 "" "" "" "" home_noop
+case_check retro-dispatch.sh   pretooluse-generic-tool.json 0 retro-dispatch setup_rd_marker "" "" home_rd_auto_off
+case_check retro-dispatch.sh   pretooluse-generic-tool.json 0 retro-dispatch setup_rd_marker "" "" home_rd_inflight
+case_check retro-dispatch.sh   pretooluse-generic-tool.json 0 retro-dispatch setup_rd_marker "PATH=$NOYAKOS_PATH" "" home_noop
+
+# --- plan-outcome-capture ---------------------------------------------------------
+case_check plan-outcome-capture.sh pretooluse-generic-tool.json 0 plan-outcome-capture "" "YAKOS_PLAN_QUALITY_LOG=__TMP__/pql.ndjson YAKOS_DISPATCH_LOG=__TMP__/dl.ndjson"
+case_check plan-outcome-capture.sh pretooluse-generic-tool.json 0 plan-outcome-capture setup_poc_scored "YAKOS_PLAN_QUALITY_LOG=__TMP__/pql.ndjson YAKOS_DISPATCH_LOG=__TMP__/dl.ndjson"
+case_check plan-outcome-capture.sh pretooluse-generic-tool.json 0 plan-outcome-capture setup_poc_complete "YAKOS_PLAN_QUALITY_LOG=__TMP__/pql.ndjson YAKOS_DISPATCH_LOG=__TMP__/dl.ndjson"
+
+# --- plan-quality-gate (PreToolUse marker gate) -------------------------------------
+case_check plan-quality-gate.sh teamcreate.json 0 plan-quality-gate
+case_check plan-quality-gate.sh teamcreate.json 2 plan-quality-gate setup_pqg_blocked
+case_check plan-quality-gate.sh agent-spawn.json 2 plan-quality-gate setup_pqg_blocked
+case_check plan-quality-gate.sh teamcreate.json 0 plan-quality-gate setup_pqg_blocked_but_disabled
+case_check plan-quality-gate.sh teamcreate.json 0 "" setup_pqg_blocked "YAKOS_PLAN_QUALITY_DISABLE=1"
+case_check plan-quality-gate.sh pretooluse-generic-tool.json 0 "" setup_pqg_blocked
+
+# --- peer-claim / peer-claim-confirm ------------------------------------------------
+case_check peer-claim.sh       pretooluse-peer-claim-block.json 0 "" "" "YAKOS_COORD_ROOT=__TMP__/nocoord YAKOS_PROJECT_NAME=proj"
+case_check peer-claim.sh       pretooluse-peer-claim-block.json 0 "" setup_pc_coord "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
+case_check peer-claim.sh       pretooluse-peer-claim-block.json 2 peer-claim setup_pc_peer_claim "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
+case_check peer-claim.sh       pretooluse-peer-claim-block.json 0 peer-claim setup_pc_peer_claim_bypassed "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
+case_check peer-claim.sh       pretooluse-peer-claim-block.json 0 "" setup_pc_own_claim "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
+case_check peer-claim.sh       pretooluse-peer-claim-block.json 0 "" setup_pc_expired_claim "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
+case_check peer-claim-confirm.sh posttooluse-peer-claim-confirm.json 0 peer-claim-confirm setup_pc_coord "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
+case_check peer-claim-confirm.sh posttooluse-peer-claim-confirm.json 0 "" "" "YAKOS_COORD_ROOT=__TMP__/nocoord YAKOS_PROJECT_NAME=proj"
+
+# --- task-complete-dispatch: K-87 A-2b (would_run is framework-root-relative on both sides) ---
+case_check task-complete-dispatch.sh  taskcompleted-backend.json   0 task-complete-dispatch setup_tcd_bypass
+case_check task-complete-dispatch.sh  teamcreate.json              0 task-complete-dispatch
+
 # ---- summary ------------------------------------------------------------
 
 echo
@@ -986,6 +1547,8 @@ echo
 # has no declare -A).
 total_cases="$(wc -l < "$REPORT_FILE" | tr -d ' ')"
 total_parity="$(jq -s '[.[] | select(.divergence == "-")] | length' "$REPORT_FILE" 2>/dev/null || echo 0)"
+total_accepted="$(jq -s '[.[] | select(.divergence == "accepted")] | length' "$REPORT_FILE" 2>/dev/null || echo 0)"
+total_stale="$(jq -s '[.[] | select(.divergence == "accept-stale")] | length' "$REPORT_FILE" 2>/dev/null || echo 0)"
 
 jq -rs '
   group_by(.hook)
@@ -993,30 +1556,54 @@ jq -rs '
       hook: .[0].hook,
       fixtures: length,
       parity: ([.[] | select(.divergence == "-")] | length),
-      first_divergence: ([.[] | select(.divergence != "-")][0].divergence // "-"),
-      first_divergence_fixture: ([.[] | select(.divergence != "-")][0].fixture // "-")
+      accepted: ([.[] | select(.divergence == "accepted")] | length),
+      first_divergence: ([.[] | select(.divergence != "-" and .divergence != "accepted")][0].divergence // "-"),
+      first_divergence_fixture: ([.[] | select(.divergence != "-" and .divergence != "accepted")][0].fixture // "-")
     })
   | sort_by(.hook)
   | .[]
-  | "\(.hook)|\(.fixtures)|\(.parity)|\(.first_divergence)|\(.first_divergence_fixture)"
-' "$REPORT_FILE" 2>/dev/null | while IFS='|' read -r hook fixtures parity first_div first_fix; do
+  | "\(.hook)|\(.fixtures)|\(.parity)|\(.accepted)|\(.first_divergence)|\(.first_divergence_fixture)"
+' "$REPORT_FILE" 2>/dev/null | while IFS='|' read -r hook fixtures parity accepted first_div first_fix; do
     if [ "$parity" = "$fixtures" ]; then
         status="100%"
     else
         status="${parity}/${fixtures}"
     fi
-    printf '  %-24s %-10s divergence=%s (%s)\n' "$hook" "$status" "$first_div" "$first_fix"
+    if [ "$accepted" != "0" ]; then
+        status="$status +${accepted}acc"
+    fi
+    printf '  %-24s %-14s divergence=%s (%s)\n' "$hook" "$status" "$first_div" "$first_fix"
 done
 
 echo
-echo "Overall: $total_parity/$total_cases fixture comparisons at parity."
+echo "Overall: $total_parity/$total_cases fixture comparisons at parity (+$total_accepted accepted, documented divergences)."
 echo "Report:  $REPORT_FILE"
 
-# The script's own exit code reflects the bash baseline (same contract as
-# run-hook-fixtures.sh) and the Go side actually running without a process
-# error — NOT bash-vs-Go agreement, which is expected to be partial until
-# A-2. CI wires this step with continue-on-error: true regardless (D4).
-if [ "$fail" -gt 0 ]; then
+# Enforcement gate. Every hook named in YAKOS_PARITY_REQUIRE_HOOKS (space-
+# separated; default: path-allowlist, the security-critical hook whose Go port
+# is expected to hold exact decision parity) must have NO unaccepted
+# divergence and NO stale accept-annotation, or the script exits non-zero.
+# Hooks not listed remain advisory, as before (see the header).
+gate_fail=0
+for _h in ${YAKOS_PARITY_REQUIRE_HOOKS-path-allowlist}; do
+    if [ -n "${YAKOS_PARITY_ONLY:-}" ] && [ "$_h" != "$YAKOS_PARITY_ONLY" ]; then
+        continue
+    fi
+    _bad="$(jq -s --arg h "$_h" '[.[] | select(.hook == $h and .divergence != "-" and .divergence != "accepted")] | length' "$REPORT_FILE" 2>/dev/null || echo 1)"
+    if [ "$_bad" != "0" ]; then
+        echo "PARITY GATE FAIL: $_h has $_bad unaccepted divergence(s)/stale annotation(s)" >&2
+        gate_fail=1
+    fi
+done
+if [ "$total_stale" != "0" ]; then
+    echo "PARITY GATE FAIL: $total_stale stale accept annotation(s) (the divergence no longer exists; remove the annotation)" >&2
+    gate_fail=1
+fi
+
+# Exit code: non-zero on a bash-baseline failure or a gate failure (see the
+# header). Bash-vs-Go disagreement on any non-gated hook is reported in the
+# matrix but does not fail the run.
+if [ "$fail" -gt 0 ] || [ "$gate_fail" -gt 0 ]; then
     exit 1
 fi
 exit 0

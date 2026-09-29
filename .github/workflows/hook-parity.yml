@@ -43,16 +43,26 @@ on:
     branches: [main]
     paths:
       - 'cli-go/internal/hooks/**'
-      - 'lib/hooks/*.sh'
+      - 'cli-go/cmd/yakos/cmd_hook*.go'
+      - 'lib/hooks/**'
       - '.github/fixtures/hooks/**'
       - '.github/workflows/hook-parity.yml'
+      - 'tests/run-hook-parity.sh'
+      - 'tests/run-hook-fixtures.sh'
+      - 'tests/run-validator-fixtures.sh'
+      - 'tests/fixtures/hooks/**'
   pull_request:
     branches: [main]
     paths:
       - 'cli-go/internal/hooks/**'
-      - 'lib/hooks/*.sh'
+      - 'cli-go/cmd/yakos/cmd_hook*.go'
+      - 'lib/hooks/**'
       - '.github/fixtures/hooks/**'
       - '.github/workflows/hook-parity.yml'
+      - 'tests/run-hook-parity.sh'
+      - 'tests/run-hook-fixtures.sh'
+      - 'tests/run-validator-fixtures.sh'
+      - 'tests/fixtures/hooks/**'
   workflow_dispatch:
 
 jobs:
@@ -109,22 +119,29 @@ jobs:
       # the last NDJSON log record (ts masked) against the bash run of the
       # same tuple.
       #
-      # continue-on-error: true — parity is EXPECTED to be partial today.
-      # internal/hooks/pathlog is the one hook converted to 100% parity so
-      # far (S-6 A-1's reference conversion); closing the rest is S-6 A-2,
-      # sized from this step's own matrix output. This step still runs on
-      # every push/PR so the matrix is always current, and the per-hook
-      # PASS/FAIL matrix is uploaded as a job artifact either way.
+      # K-87 A-2b: this step now GATES, narrowly. tests/run-hook-parity.sh exits
+      # non-zero when (a) any bash-baseline case fails, (b) path-allowlist —
+      # the security-critical hook, whose Go port is expected to hold exact
+      # decision parity — has any divergence that is not a documented,
+      # exit-code-pinned "accepted" one (see the accept annotations in the
+      # script), or (c) an accepted-divergence annotation has gone stale.
+      # Every other hook stays advisory: its matrix row is still printed and
+      # uploaded, it just cannot fail the job. Widen the gate by setting
+      # YAKOS_PARITY_REQUIRE_HOOKS (space-separated hook names) below.
       - name: Build yakos (Go)
         run: make build
 
-      - name: Bash-vs-Go hook parity matrix (S-6 A-1, advisory)
+      - name: Bash-vs-Go hook parity matrix (gates path-allowlist; other hooks advisory)
         id: hook_parity_matrix
-        continue-on-error: true
         shell: bash
         env:
           YAKOS_HOOK_NOW: "2026-01-01T00:00:00Z"
+          YAKOS_PARITY_REQUIRE_HOOKS: "path-allowlist"
         run: bash tests/run-hook-parity.sh
+
+      - name: Per-domain validator + promotion-gate fixtures
+        shell: bash
+        run: bash tests/run-validator-fixtures.sh
 
       - name: Upload hook parity matrix
         if: always()

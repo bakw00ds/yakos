@@ -1,0 +1,15 @@
+{
+  "_doc": "K-87 A-2b: a BEGIN DSA PRIVATE KEY header. The bash pattern lists RSA|EC|OPENSSH|PRIVATE only, so bash does NOT flag it (a bash-side detection gap); Go matches bash by design. REPORT only.",
+  "session_id": "fixture-posttooluse-read-dsa-key-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "id_dsa"
+  },
+  "tool_response": "-----BEGIN DSA PRIVATE KEY-----\nMIIBuwIBAAKBgQ\n",
+  "tool_use_id": "toolu_fixture_posttooluse_read_dsa_key_001"
+}

@@ -43,3 +43,50 @@ bash lib/hooks/path-allowlist.sh < tests/fixtures/hooks/pretooluse-edit-api.json
 | `teammateidle-api.json` | (telemetry only — no hook in v0.1) | n/a |
 | `teamcreate.json` | team-lifecycle | PASS + log entry |
 | `agent-spawn.json` | team-lifecycle | PASS + log entry |
+
+### K-87 A-2b fixtures
+
+| Fixture | Used by | Expected outcome |
+|---|---|---|
+| `pretooluse-write-deep-deny.json` | path-allowlist | BLOCK (`api/migrations/**` must deny a nested path: `*` spans `/`) |
+| `pretooluse-write-deny-mixed-case-dir.json` | path-allowlist | BLOCK (deny matching is case-insensitive in the directory part too) |
+| `pretooluse-write-inroot-dotdot.json` | path-allowlist | PASS (`api/x/../handler.go` normalizes inside the root) |
+| `pretooluse-write-inroot-symlink-dotdot.json` | path-allowlist | PASS (`link/..` where the link stays in-root) |
+| `pretooluse-write-dotdot-after-symlink.json` | path-allowlist | BLOCK in Go, PASS in bash (accepted divergence: bash only checks the lexically normalized path) |
+| `pretooluse-write-nul-in-path.json` | path-allowlist | BLOCK in Go, PASS in bash (accepted divergence: bash drops the NUL byte) |
+| `posttooluse-bash-clean.json` | output-injection-scan | REPORT, no patterns |
+| `posttooluse-mcp-injected.json` | output-injection-scan | WARN (`mcp__*` tool, role-override phrase) |
+| `posttooluse-bash-response-object.json` | output-injection-scan | WARN (object-valued `tool_response`, rendered like `jq -r`) |
+| `posttooluse-bash-zero-width.json` / `-below.json` | output-injection-scan | WARN at 11 zero-width chars, REPORT at exactly 10 |
+| `posttooluse-read-rsa-key.json` / `posttooluse-read-dsa-key.json` | output-injection-scan | WARN for RSA; REPORT for DSA (bash's pattern does not list DSA) |
+| `posttooluse-bash-multiline-phrase.json` | output-injection-scan | REPORT (a phrase split across a newline does not match; grep is per line) |
+| `posttooluse-bash-system-line.json` | output-injection-scan | WARN (`SYSTEM:` line) |
+| `posttooluse-workflow-node-output-object.json` | output-injection-scan | BLOCK (`WorkflowNodeOutput`, object response with a model-format token) |
+| `pretooluse-edit-risky.json` | supervisor-stream | Drives the pre-filter's risk-regex escalation |
+
+## Bash-vs-Go parity (`tests/run-hook-parity.sh`)
+
+The parity harness runs every `case_check` tuple in `tests/run-hook-fixtures.sh`
+(the two files carry the same tuples) against BOTH the bash hook and
+`yakos hook run <name>`, and compares exit code, stdout, stderr, and the last
+NDJSON log record. A tuple's optional 9th argument, `"<go-rc>:<reason>"`,
+records an ACCEPTED divergence: a known, intentional difference whose reason is
+printed with the case and whose Go exit code stays pinned. Accepted
+divergences fall in two classes:
+
+- **Architectural.** Go never shells out to `jq`, so a missing or misbehaving
+  `jq` cannot put it into bash's "degraded input" state. Where bash fails
+  closed the two agree on the exit code but not the log record; where bash
+  passes through (`YAKOS_HOOKS_FAIL_OPEN=1`, or a `jq` that prints garbage) Go
+  is stricter, because it can still evaluate the payload.
+- **Bash bug.** Go deliberately does not reproduce a bash weakness. Each one
+  is listed in the K-87 A-2b report for a bash-side fix.
+
+`YAKOS_PARITY_ONLY`, `YAKOS_PARITY_FIXTURE` and `YAKOS_PARITY_VERBOSE=1` narrow
+a run and print bash and Go side by side. `YAKOS_PARITY_REQUIRE_HOOKS`
+(default `path-allowlist`) names the hooks whose unaccepted divergences fail
+the run.
+
+Placeholders available to tuples: `__CLAUDE_PROJECT_DIR__` in a fixture body
+(the sandbox), `__SECRET_*__` (assembled at runtime), and `__TMP__` in an
+extra-env value (each side's own sandbox dir).

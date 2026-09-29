@@ -12,7 +12,11 @@ tests/
 ├── smoke/                     end-to-end smoke tests (Batch 6 will populate)
 ├── manual/                    test scripts requiring human observation
 │                              (e.g., live Agent Teams session probes)
-└── run-hook-fixtures.sh       drives every hook against its fixtures
+├── run-hook-fixtures.sh       drives every hook against its fixtures (bash only)
+├── run-hook-parity.sh         same tuples, run against bash AND `yakos hook run`;
+│                              prints a per-hook parity matrix (see
+│                              fixtures/hooks/README.md)
+└── run-validator-fixtures.sh  per-domain validators + pre-push promotion gate
 ```
 
 `smoke/` and `manual/` directories will be populated in later batches:
@@ -35,6 +39,28 @@ bash tests/run-hook-fixtures.sh
 Output is one line per (hook, fixture) case: `PASS` or `FAIL` plus the
 observed/expected exit codes. The driver creates a temp `$YAKOS_WORK_DIR`
 per case so hooks don't write to your real `~/agent-control/`.
+
+### Bash-vs-Go hook parity
+
+```sh
+make build && bash tests/run-hook-parity.sh
+```
+
+Needs `bin/yakos` (`make build`) and `jq`. Exits non-zero on a bash-baseline
+failure or an unaccepted `path-allowlist` divergence; other hooks are
+advisory. See `fixtures/hooks/README.md` for accepted divergences and the
+iteration env vars.
+
+### Validator and promotion-gate fixtures
+
+```sh
+bash tests/run-validator-fixtures.sh
+```
+
+Covers `lib/hooks/per-domain/*-validate.sh` and
+`lib/hooks/git/pre-push-promotion-gate.sh`. Cases needing a real `go` or `npm`
+are skipped when absent; known script bugs are reported as `XFAIL` rather than
+failures.
 
 ### Standards checks (WARN-only in v0.1)
 
