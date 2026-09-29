@@ -7,26 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [0.60.1.0] — 2026-09-29
 
-- **Decision-provider abstraction with a Jev client (K-111, ADR-0009).**
-  New `yakos decide <surface>` asks a typed decision provider a reviewed
-  question set from `lib/decisions/<surface>.yaml` and prints the answer as
-  JSON. Providers are `jev` (TypeSafe, raw HTTP, pinned model `jev-1.13.0`,
-  key from `TYPESAFE_API_KEY` at call time), `mock` (deterministic, for CI) and
-  `none`. Jev is a decision provider, not a runtime: `yakos validate` and
-  `yakos agent lint` reject `runtime: jev` and any agent with Edit/Write/Bash
-  tools that references a decision provider. State is allowlisted, previewed and
-  secret-redacted before it leaves, with a 64 KiB cap. Each call is logged to
-  `decision-log.ndjson` without the raw state. A circuit breaker and per-session
-  and per-day budget caps (an append-only ledger, safe across concurrent hook
-  processes) bound the blast radius. The API key is only sent to
-  `*.typesafe.ai` or loopback, and a project `.yakos.yml` can only tighten the
-  user-level budget and egress ceiling. `yakos decide` exits 0 or 3 on
-  every failure and never 2, so no hook can block on it. `yakos doctor
-  --probe-decision [--live]` checks key, config, question-set hashes, breaker
-  and budget. No hook calls it yet, and no live call to TypeSafe has been made.
-  See `docs/decision-providers.md`.
+> **Breaking (K-98):** an unmapped client-cert CN now gets no access
+> (403 on every route). Cert-only deployments that relied on the old
+> implicit `read` default should run `yakos mtls set-role '*' read`
+> after upgrading.
+>
+> **v0.60.0.0 users:** the v0.60.0.0 binary cannot self-update. Reinstall
+> once via `scripts/install.sh` (or download the asset and verify the
+> checksum). `yakos upgrade` works again from v0.60.1.0. See UPGRADING.md.
 
 ### Security
 
@@ -94,9 +84,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server identity receives no owner-scoped events. Loopback keeps its
   cooperative hello behaviour.
 
+### Added
+
+- **Decision-provider abstraction with a Jev client (K-111, ADR-0009).**
+  New `yakos decide <surface>` asks a typed decision provider a reviewed
+  question set from `lib/decisions/<surface>.yaml` and prints the answer as
+  JSON. Providers are `jev` (TypeSafe, raw HTTP, pinned model `jev-1.13.0`,
+  key from `TYPESAFE_API_KEY` at call time), `mock` (deterministic, for CI) and
+  `none`. Jev is a decision provider, not a runtime: `yakos validate` and
+  `yakos agent lint` reject `runtime: jev` and any agent with Edit/Write/Bash
+  tools that references a decision provider. State is allowlisted, previewed and
+  secret-redacted before it leaves, with a 64 KiB cap. Each call is logged to
+  `decision-log.ndjson` without the raw state. A circuit breaker and per-session
+  and per-day budget caps (an append-only ledger, safe across concurrent hook
+  processes) bound the blast radius. The API key is only sent to
+  `*.typesafe.ai` or loopback, and a project `.yakos.yml` can only tighten the
+  user-level budget and egress ceiling. `yakos decide` exits 0 or 3 on
+  every failure and never 2, so no hook can block on it. `yakos doctor
+  --probe-decision [--live]` checks key, config, question-set hashes, breaker
+  and budget. No hook calls it yet, and no live call to TypeSafe has been made.
+  See `docs/decision-providers.md`.
+
+### Changed
+
+- **Docs: plan-quality-score debounce (K-110).** `docs/hooks-impl.md` and
+  the settings template now state that the bash and Go hooks skip a
+  `plan.md` whose mtime is under 5 s old, so a fresh plan is normally
+  scored on a later fire. No behavior change.
+
+- **Networked console explains "no access" instead of an empty shell
+  (K-110).** An authenticated identity that resolves to no role (a cert
+  with no `roles.json` entry, or a user whose stored role is
+  unrecognised) used to get the SPA shell at `/` with 200 and then 403
+  on every data route with no explanation. `/` now returns a 403 page
+  naming the fix (`yakos mtls set-role <cn> <role>` for certs, an
+  operator setting the role for password users). Loopback is unchanged.
+
+- **CLI and hygiene follow-ups (K-102).** `yakos doctor` warns when a
+  hook command in the project's `settings.json` pins an absolute `yakos`
+  path that no longer exists or is not executable (the hook exits 127,
+  which Claude Code treats as non-blocking, a silent fail-open) and names
+  the fix, `yakos refresh --hooks-impl go`. `doctor` now always routes
+  Go-native, like `hook`, so a checkout that still has the bash tree no
+  longer runs the weaker `doctor.sh` (explicit `YAKOS_IMPL=bash` is still
+  honored). `compact threshold --auto` and `plan score correlate` are
+  converted to `cliflag`: `--auto=85` and `--min-n=5` are now accepted,
+  and `--help` wins over an earlier bad `--min-n`. Shell completion gains
+  the missing top-level commands (`serve`, `refresh`, `upgrade`, `plan`,
+  `work`, `console`, and others) with a test that fails when the router
+  and the bash, zsh and fish templates drift. Agent and skill bodies for
+  `eval-engineer`, `librarian`, `planner`, and `gather-feedback` fit
+  their line budgets without dropping instructions; eval-engineer's
+  calibration procedure moved to `playbook:plan-quality-calibration`.
+
+- **Round-2 eval golden cases (K-103).** Adds architect cases 07-12,
+  performance-engineer cases 07-12 and model-routing-eval cases 01-05,
+  and retags architect case 04 as a grep count. Cases only: no agent
+  `model:` pin, routing code or docs changed. Giving model-routing-eval
+  an eval directory clears its `yakos validate --strict` flag.
+
 ### Fixed
 
 - **`yakos upgrade` rejected GitHub's new release-asset host (K-113).**
+  **v0.60.0.0 users: reinstall once via `scripts/install.sh` (or download
+  the asset and verify the checksum). `yakos upgrade` works again from
+  v0.60.1.0.**
   GitHub now redirects release assets to
   `release-assets.githubusercontent.com`, which the self-updater's redirect
   allowlist did not contain, so `yakos upgrade` failed while fetching
@@ -153,40 +205,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Parity ACCEPT annotations pin both exit codes (K-107).** The format
   is now `<bash-rc>/<go-rc>:<reason>`; a moved rc on either side fails
   the run.
-
-### Changed
-
-- **Docs: plan-quality-score debounce (K-110).** `docs/hooks-impl.md` and
-  the settings template now state that the bash and Go hooks skip a
-  `plan.md` whose mtime is under 5 s old, so a fresh plan is normally
-  scored on a later fire. No behavior change.
-
-- **Networked console explains "no access" instead of an empty shell
-  (K-110).** An authenticated identity that resolves to no role (a cert
-  with no `roles.json` entry, or a user whose stored role is
-  unrecognised) used to get the SPA shell at `/` with 200 and then 403
-  on every data route with no explanation. `/` now returns a 403 page
-  naming the fix (`yakos mtls set-role <cn> <role>` for certs, an
-  operator setting the role for password users). Loopback is unchanged.
-
-- **CLI and hygiene follow-ups (K-102).** `yakos doctor` warns when a
-  hook command in the project's `settings.json` pins an absolute `yakos`
-  path that no longer exists or is not executable (the hook exits 127,
-  which Claude Code treats as non-blocking, a silent fail-open) and names
-  the fix, `yakos refresh --hooks-impl go`. `doctor` now always routes
-  Go-native, like `hook`, so a checkout that still has the bash tree no
-  longer runs the weaker `doctor.sh` (explicit `YAKOS_IMPL=bash` is still
-  honored). `compact threshold --auto` and `plan score correlate` are
-  converted to `cliflag`: `--auto=85` and `--min-n=5` are now accepted,
-  and `--help` wins over an earlier bad `--min-n`. Shell completion gains
-  the missing top-level commands (`serve`, `refresh`, `upgrade`, `plan`,
-  `work`, `console`, and others) with a test that fails when the router
-  and the bash, zsh and fish templates drift. Agent and skill bodies for
-  `eval-engineer`, `librarian`, `planner`, and `gather-feedback` fit
-  their line budgets without dropping instructions; eval-engineer's
-  calibration procedure moved to `playbook:plan-quality-calibration`.
-
-### Fixed
 
 - **Bash hook hardening (K-101, from the #289 and #291 security reviews).**
   `hi_init` no longer trusts a jq that lies: a jq printing garbage, a
@@ -276,6 +294,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exit, `partial: true`); candidates need at least `min_cases_for_eval`
   cases scored on both candidate and baseline, compared pairwise; all
   selected cases must load; a failed subject dispatch is unscored.
+
+- **File-watcher debounce no longer double-fires on one burst (K-105).**
+  `Timer.Reset` re-armed an already-fired callback that could flush a
+  newer debounce window early, so one burst produced two events. The
+  debounce now restarts with a fresh timer and a monotonic generation,
+  and stale callbacks do nothing. `TestDebounceCollapses` runs on an
+  injected fake clock with no filesystem or sleeps.
 
 ## [0.60.0.0] — 2026-09-29
 
