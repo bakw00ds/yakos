@@ -549,10 +549,10 @@ func TestEval_EvalCasesWritten(t *testing.T) {
 	}
 	data, _ := os.ReadFile(cfg.EvalLog)
 	content := string(data)
-	// 5 cases × 4 tiers (haiku/sonnet/opus/fable) = 20 eval_case records.
+	// 5 cases × 3 default tiers (haiku/sonnet/opus; fable is opt-in) = 15.
 	count := strings.Count(content, `"type":"eval_case"`)
-	if count != 20 {
-		t.Errorf("expected 20 eval_case records; got %d", count)
+	if count != 15 {
+		t.Errorf("expected 15 eval_case records; got %d", count)
 	}
 }
 

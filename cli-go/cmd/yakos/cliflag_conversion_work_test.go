@@ -107,6 +107,7 @@ func TestWorkFlagErrorText_BeforeAndAfterConversion(t *testing.T) {
 		{name: "mr_eval_cost_bad", args: []string{"model-routing", "eval", "--max-cost-usd", "x"}, wantStderr: "model-routing eval: --max-cost-usd \"x\" must be a positive number\n", wantExit: 1},
 		{name: "mr_eval_cost_eq_bad", args: []string{"model-routing", "eval", "--max-cost-usd=0"}, wantStderr: "model-routing eval: --max-cost-usd value \"0\" must be a positive number\n", wantExit: 1},
 		{name: "mr_eval_cases_missing", args: []string{"model-routing", "eval", "--cases"}, wantStderr: "model-routing eval: --cases requires a value\n", wantExit: 1},
+		{name: "mr_eval_tiers_missing", args: []string{"model-routing", "eval", "--tiers"}, wantStderr: "model-routing eval: --tiers requires a value\n", wantExit: 1},
 		{name: "mr_eval_project_missing", args: []string{"model-routing", "eval", "--project"}, wantStderr: "model-routing eval: --project requires a value\n", wantExit: 1},
 		{name: "mr_eval_unknown", args: []string{"model-routing", "eval", "--bogus"}, wantStderr: "model-routing eval: unknown flag \"--bogus\"\n", wantExit: 1},
 		{name: "mr_eval_double_dash", args: []string{"model-routing", "eval", "--"}, wantStderr: "model-routing eval: unknown flag \"--\"\n", wantExit: 1},

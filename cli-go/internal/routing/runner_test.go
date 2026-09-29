@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -451,5 +452,266 @@ func TestEval_MissingCostTelemetry_FailsClosed(t *testing.T) {
 	}
 	if _, err := os.Stat(cfg.CandidatesFile); err == nil {
 		t.Error("candidate file must not be written for a partial run")
+	}
+}
+
+// ---- defect 1: --tiers and --cases -------------------------------------------
+
+func TestResolveTiers_Table(t *testing.T) {
+	cases := []struct {
+		name    string
+		tiers   []string
+		fable   bool
+		want    string
+		wantErr bool
+	}{
+		{"default excludes fable", nil, false, "haiku,sonnet,opus", false},
+		{"default include fable", nil, true, "haiku,sonnet,opus,fable", false},
+		{"explicit subset", []string{"haiku", "sonnet"}, false, "haiku,sonnet", false},
+		{"explicit order normalised", []string{"sonnet", "haiku"}, false, "haiku,sonnet", false},
+		{"explicit plus include-fable", []string{"haiku"}, true, "haiku,fable", false},
+		{"duplicates collapse", []string{"haiku", "haiku"}, false, "haiku", false},
+		{"case and space tolerated", []string{" Haiku "}, false, "haiku", false},
+		{"unknown tier", []string{"haiku", "gpt"}, false, "", true},
+		{"empty entry", []string{"haiku", ""}, false, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveTiers(tc.tiers, tc.fable)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err == nil && strings.Join(got, ",") != tc.want {
+				t.Errorf("got %v want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEval_OnlyRequestedTiersDispatched(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	cfg.Tiers = []string{"haiku", "sonnet"}
+	setupEvalAgent(t, cfg, "backend", "sonnet", "backend", 5)
+	seen := map[string]int{}
+	cfg.DispatchFn = func(agentID, task, tier, runID, project string) (DispatchResult, error) {
+		seen[tier]++
+		return DispatchResult{Stdout: "x", Cost: 0.001, DurationS: 1}, nil
+	}
+	cfg.JudgeFn = mockJudge(true)
+	if _, err := Run(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if seen["opus"] != 0 || seen["fable"] != 0 || seen["haiku"] != 5 || seen["sonnet"] != 5 {
+		t.Errorf("dispatch counts = %v; want only haiku,sonnet x5", seen)
+	}
+	out := cfgOut(cfg)
+	if strings.Contains(out, "opus") || strings.Contains(out, "fable") {
+		t.Errorf("summary mentions excluded tiers: %q", out)
+	}
+}
+
+func TestEval_DefaultTiersExcludeFable_IncludeFableOptIn(t *testing.T) {
+	for _, inc := range []bool{false, true} {
+		cfg := newCfg(t)
+		cfg.Subcommand = "eval"
+		cfg.AgentID = "backend"
+		cfg.Judge = "code-reviewer"
+		cfg.IncludeFable = inc
+		setupEvalAgent(t, cfg, "backend", "opus", "backend", 5)
+		fable := 0
+		cfg.DispatchFn = func(agentID, task, tier, runID, project string) (DispatchResult, error) {
+			if tier == "fable" {
+				fable++
+			}
+			return DispatchResult{Stdout: "x", Cost: 0.001, DurationS: 1}, nil
+		}
+		cfg.JudgeFn = mockJudge(true)
+		if _, err := Run(cfg); err != nil {
+			t.Fatal(err)
+		}
+		if (fable > 0) != inc {
+			t.Errorf("includeFable=%v but fable dispatches=%d", inc, fable)
+		}
+	}
+}
+
+func TestEval_UnknownTierRefusedBeforeSpend(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	cfg.Tiers = []string{"haiku", "turbo"}
+	setupEvalAgent(t, cfg, "backend", "sonnet", "backend", 5)
+	called := false
+	cfg.DispatchFn = func(agentID, task, tier, runID, project string) (DispatchResult, error) {
+		called = true
+		return DispatchResult{}, nil
+	}
+	if _, err := Run(cfg); err == nil || !strings.Contains(err.Error(), "unknown tier") {
+		t.Fatalf("want unknown tier error, got %v", err)
+	}
+	if called {
+		t.Error("dispatch must not run for an invalid tier list")
+	}
+}
+
+// A baseline tier that was not run must never let a candidate through
+// (curRate would otherwise read as 0).
+func TestEval_BaselineTierNotRun_NoCandidate(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	cfg.Tiers = []string{"haiku"} // current is opus, not run
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 14)
+	cfg.DispatchFn = mockDispatch(0.001, "x")
+	cfg.JudgeFn = mockJudge(false) // haiku fails everything
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.CandidateEmitted {
+		t.Fatal("candidate emitted with no baseline tier run")
+	}
+	ref := readRecords(t, cfg.EvalLog, "candidate_refused")
+	found := false
+	for _, r := range ref {
+		if r["reason"] == "current_tier_not_run" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("current_tier_not_run refusal not logged: %v", ref)
+	}
+}
+
+func TestEval_FableCurrentModel_DefaultTiersRefuse(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	setupEvalAgent(t, cfg, "backend", "fable", "backend", 14)
+	cfg.DispatchFn = mockDispatch(0.001, "x")
+	cfg.JudgeFn = mockJudge(true)
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.CandidateEmitted {
+		t.Fatal("fable-current agent must not get a candidate without running fable")
+	}
+	cfg2 := cfg
+	cfg2.EvalLog = filepath.Join(t.TempDir(), "log.ndjson")
+	cfg2.CandidatesFile = filepath.Join(t.TempDir(), "c.ndjson")
+	cfg2.Writer = &bytes.Buffer{}
+	cfg2.IncludeFable = true
+	// Baseline present but weak: fable fails every case, cheaper tiers pass.
+	lastTier := ""
+	cfg2.DispatchFn = func(agentID, task, tier, runID, project string) (DispatchResult, error) {
+		lastTier = tier
+		return DispatchResult{Stdout: "x", Cost: 0.001, DurationS: 1}, nil
+	}
+	cfg2.JudgeFn = func(string, string, string) (JudgeResult, error) {
+		return JudgeResult{Pass: lastTier != "fable"}, nil
+	}
+	res2, err := Run(cfg2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res2.CandidateEmitted {
+		t.Errorf("with --include-fable the fable baseline exists and a cheaper passing tier qualifies: %+v", res2)
+	}
+}
+
+func TestSelectCaseFiles_Table(t *testing.T) {
+	dir := t.TempDir()
+	for _, id := range []string{"01", "02", "03", "alpha"} {
+		writeEvalCase(t, dir, id)
+	}
+	// A case whose case_id differs from its file name.
+	data, _ := json.Marshal(map[string]interface{}{"case_id": "weird-id", "task": "t", "expected_outcomes": []string{"x"}, "rubric": map[string]interface{}{}})
+	_ = os.WriteFile(filepath.Join(dir, "case-zzz.json"), data, 0o644)
+
+	names := func(files []string) string {
+		var b []string
+		for _, f := range files {
+			b = append(b, strings.TrimSuffix(strings.TrimPrefix(filepath.Base(f), "case-"), ".json"))
+		}
+		return strings.Join(b, ",")
+	}
+	cases := []struct {
+		name, spec, want string
+		wantErr          bool
+	}{
+		{"empty is all", "", "01,02,03,alpha,zzz", false},
+		{"glob", "case-0*.json", "01,02,03", false},
+		{"single id", "02", "02", false},
+		{"id list", "03,01", "01,03", false},
+		{"full name", "case-alpha.json", "alpha", false},
+		{"stem with prefix", "case-alpha", "alpha", false},
+		{"case_id field", "weird-id", "zzz", false},
+		{"glob plus id", "case-0[12].json,alpha", "01,02,alpha", false},
+		{"duplicates collapse", "01,01,case-01.json", "01", false},
+		{"no match errors", "01,nope", "", true},
+		{"glob no match errors", "zzz-*.json", "", true},
+		{"empty entry errors", "01,,02", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := selectCaseFiles(dir, tc.spec)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
+			}
+			if err == nil && names(got) != tc.want {
+				t.Errorf("got %s want %s", names(got), tc.want)
+			}
+		})
+	}
+}
+
+func TestEval_CasesSubsetRunsOnlySelected(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	cfg.CasesGlob = "01,02,03,04,05"
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 8)
+	tasks := map[string]bool{}
+	cfg.DispatchFn = func(agentID, task, tier, runID, project string) (DispatchResult, error) {
+		tasks[task] = true
+		return DispatchResult{Stdout: "x", Cost: 0.001, DurationS: 1}, nil
+	}
+	cfg.JudgeFn = mockJudge(true)
+	if _, err := Run(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 5 || tasks["test task for 06"] {
+		t.Errorf("subset not honoured: %v", tasks)
+	}
+	if s := lastRecord(t, cfg.EvalLog, "eval_run_started"); s["n_cases"] != float64(5) {
+		t.Errorf("n_cases = %v want 5", s["n_cases"])
+	}
+}
+
+func TestEval_CasesNoMatchErrorsBeforeSpend(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	cfg.CasesGlob = "99"
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 6)
+	called := false
+	cfg.DispatchFn = func(agentID, task, tier, runID, project string) (DispatchResult, error) {
+		called = true
+		return DispatchResult{}, nil
+	}
+	if _, err := Run(cfg); err == nil {
+		t.Fatal("expected error for unmatched --cases")
+	}
+	if called {
+		t.Error("dispatched despite unmatched --cases")
 	}
 }

@@ -101,8 +101,19 @@ type Config struct {
 	// MaxCostUSD overrides the per-run cost cap for eval.
 	MaxCostUSD float64
 
-	// CasesGlob is the glob pattern for eval case files (default "case-*.json").
+	// CasesGlob selects eval case files. Empty means every "case-*.json".
+	// A value is a comma-separated list of filename globs (any of * ? [) and
+	// case ids (a case_id, or a file name with or without the "case-" prefix
+	// and ".json" suffix). Every entry must match at least one case.
 	CasesGlob string
+
+	// Tiers lists the model tiers to dispatch. Empty means haiku, sonnet
+	// and opus (plus fable when IncludeFable is set).
+	Tiers []string
+
+	// IncludeFable adds the fable tier to the default tier list, or to an
+	// explicit Tiers list.
+	IncludeFable bool
 
 	// Project is the optional project path for agent resolution.
 	Project string
@@ -343,11 +354,27 @@ func PrintHelp(w io.Writer) {
 
 Subcommands:
   eval <agent-id> [--judge <agent>] [--max-cost-usd <n>]
-                  [--cases <glob>]  [--project <path>]
+                  [--tiers <t1,t2,...>] [--include-fable]
+                  [--cases <glob|ids>]  [--project <path>]
       Run a model-routing eval for <agent-id>.  Dispatches each eval/
-      case at haiku/sonnet/opus, scores with a judge, computes Wilson
-      95% CI bounds, and emits a candidate (or a refused-reason).
+      case at each tier, scores with a judge, computes Wilson 95% CI
+      lower bounds, and emits a candidate (or a refused-reason).
       Hard-refuses if judge == subject.
+
+      --tiers <list>     Comma-separated tiers to run (haiku, sonnet,
+                         opus, fable).  Default: haiku,sonnet,opus.
+                         The agent's current tier must be included or
+                         no candidate can be emitted.
+      --include-fable    Add the fable tier to the default (or listed) tiers.
+      --cases <spec>     Comma-separated filename globs and/or case ids
+                         (e.g. "01,02" or "case-0*.json").  Default:
+                         every case-*.json.  Each entry must match.
+      --judge <agent>    Default: code-reviewer, or architect for
+                         cross-cutting/design agents; never the subject
+                         (falls back to another judge and logs it).
+      --max-cost-usd <n> Per-run cap.  Cost is read from the dispatch-log;
+                         the run stops (partial results, no candidate)
+                         if a dispatch reports no cost.
 
   list
       Show the latest candidate per agent (from
@@ -661,14 +688,14 @@ func mustJSON(v interface{}) string {
 }
 
 // buildEvalRunStarted constructs the eval_run_started NDJSON record.
-func buildEvalRunStarted(now time.Time, runID, agentID string, nCases int, judge string, epsilon, maxCost float64) string {
+func buildEvalRunStarted(now time.Time, runID, agentID string, nCases int, tiers []string, judge string, epsilon, maxCost float64) string {
 	return mustJSON(map[string]interface{}{
 		"type":         "eval_run_started",
 		"ts":           isoNow(now),
 		"run_id":       runID,
 		"agent":        agentID,
 		"n_cases":      nCases,
-		"tiers":        []string{"haiku", "sonnet", "opus", "fable"},
+		"tiers":        tiers,
 		"judge":        judge,
 		"epsilon":      epsilon,
 		"max_cost_usd": maxCost,
@@ -768,7 +795,118 @@ func loadEvalCase(path string) (evalCase, error) {
 	return c, nil
 }
 
+// ---- tier selection ---------------------------------------------------------
+
+// allTiers is the canonical tier order, cheapest to most expensive.
+var allTiers = []string{"haiku", "sonnet", "opus", "fable"}
+
+// resolveTiers turns cfg.Tiers/cfg.IncludeFable into the ordered list of
+// tiers to run. Unknown tier names are an error so a typo cannot silently
+// run a different (possibly more expensive) set.
+func resolveTiers(tiers []string, includeFable bool) ([]string, error) {
+	want := map[string]bool{}
+	if len(tiers) == 0 {
+		for _, t := range allTiers[:3] {
+			want[t] = true
+		}
+	}
+	for _, t := range tiers {
+		t = strings.ToLower(strings.TrimSpace(t))
+		if t == "" {
+			return nil, fmt.Errorf("--tiers has an empty entry")
+		}
+		known := false
+		for _, k := range allTiers {
+			if k == t {
+				known = true
+			}
+		}
+		if !known {
+			return nil, fmt.Errorf("unknown tier %q (valid: %s)", t, strings.Join(allTiers, ", "))
+		}
+		want[t] = true
+	}
+	if includeFable {
+		want["fable"] = true
+	}
+	var out []string
+	for _, t := range allTiers {
+		if want[t] {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no tiers selected")
+	}
+	return out, nil
+}
+
 // ---- find eval case files ---------------------------------------------------
+
+// selectCaseFiles applies a --cases spec (see Config.CasesGlob) to evalDir.
+// An empty spec selects every "case-*.json". Each comma-separated entry must
+// match at least one file, so a mistyped id fails loudly rather than
+// silently shrinking the run.
+func selectCaseFiles(evalDir, spec string) ([]string, error) {
+	if strings.TrimSpace(spec) == "" {
+		return findCaseFiles(evalDir, "case-*.json")
+	}
+	entries, err := os.ReadDir(evalDir)
+	if err != nil {
+		return nil, err
+	}
+	var all []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+			all = append(all, filepath.Join(evalDir, e.Name()))
+		}
+	}
+	sort.Strings(all)
+
+	picked := map[string]bool{}
+	for _, tok := range strings.Split(spec, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			return nil, fmt.Errorf("--cases has an empty entry")
+		}
+		matched := 0
+		for _, f := range all {
+			ok, err := caseMatches(f, tok)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				picked[f] = true
+				matched++
+			}
+		}
+		if matched == 0 {
+			return nil, fmt.Errorf("--cases entry %q matches no case in %s", tok, evalDir)
+		}
+	}
+	var out []string
+	for _, f := range all {
+		if picked[f] {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+func caseMatches(path, tok string) (bool, error) {
+	base := filepath.Base(path)
+	if strings.ContainsAny(tok, "*?[") {
+		return filepath.Match(tok, base)
+	}
+	stem := strings.TrimSuffix(base, ".json")
+	if tok == base || tok == stem || tok == strings.TrimPrefix(stem, "case-") {
+		return true, nil
+	}
+	if ec, err := loadEvalCase(path); err == nil && ec.CaseID == tok {
+		return true, nil
+	}
+	return false, nil
+}
 
 func findCaseFiles(evalDir, glob string) ([]string, error) {
 	if glob == "" {
@@ -1163,6 +1301,11 @@ func runEval(cfg Config) (Result, error) {
 		)
 	}
 
+	tiers, err := resolveTiers(cfg.Tiers, cfg.IncludeFable)
+	if err != nil {
+		return Result{}, fmt.Errorf("model-routing eval: %w", err)
+	}
+
 	maxCost := cfg.MaxCostUSD
 	if maxCost <= 0 {
 		maxCost = settings.MaxEvalRunCostUSD
@@ -1179,11 +1322,7 @@ func runEval(cfg Config) (Result, error) {
 		return Result{}, fmt.Errorf("model-routing eval: %w", err)
 	}
 
-	casesGlob := cfg.CasesGlob
-	if casesGlob == "" {
-		casesGlob = "case-*.json"
-	}
-	caseFiles, err := findCaseFiles(evalDir, casesGlob)
+	caseFiles, err := selectCaseFiles(evalDir, cfg.CasesGlob)
 	if err != nil {
 		return Result{}, fmt.Errorf("model-routing eval: list cases: %w", err)
 	}
@@ -1208,11 +1347,11 @@ func runEval(cfg Config) (Result, error) {
 	runID := genRunID(cfg.Now)
 
 	// Emit eval_run_started.
-	started := buildEvalRunStarted(cfg.Now, runID, cfg.AgentID, nCases, judge, settings.EpsilonPassRate, maxCost)
+	started := buildEvalRunStarted(cfg.Now, runID, cfg.AgentID, nCases, tiers, judge, settings.EpsilonPassRate, maxCost)
 	logWrite(cfg.EvalLog, started)
 
 	fmt.Fprintf(cfg.Writer, "model-routing eval: %s  run=%s\n", cfg.AgentID, runID)
-	fmt.Fprintf(cfg.Writer, "  cases=%d  judge=%s  budget=$0/$%.2f\n", nCases, judge, maxCost)
+	fmt.Fprintf(cfg.Writer, "  cases=%d  judge=%s  tiers=%s  budget=$0/$%.2f\n", nCases, judge, strings.Join(tiers, ","), maxCost)
 	if judgeNote != "" {
 		fmt.Fprintf(cfg.Writer, "  judge: %s\n", judgeNote)
 		logWrite(cfg.EvalLog, mustJSON(map[string]interface{}{
@@ -1250,8 +1389,6 @@ func runEval(cfg Config) (Result, error) {
 	var totalSpent float64
 	budgetHit := false
 	costUnverifiable := false
-
-	tiers := []string{"haiku", "sonnet", "opus", "fable"}
 
 outerLoop:
 	for _, caseFile := range caseFiles {
@@ -1450,7 +1587,32 @@ outerLoop:
 
 	var candidateTier, candidateReason string
 
+	// The current tier is the baseline every candidate is measured against.
+	// If it was not run (or nothing was scored), curRate would read 0 and any
+	// candidate would clear the gate, so refuse instead.
+	curKey := currentModel
+	if _, ok := stats[curKey]; !ok {
+		curKey = "sonnet"
+	}
+	baselineMissing := stats[curKey].total == 0
+	if baselineMissing {
+		logWrite(cfg.EvalLog, mustJSON(map[string]interface{}{
+			"type":   "candidate_refused",
+			"ts":     isoNow(cfg.Now),
+			"run_id": runID,
+			"agent":  cfg.AgentID,
+			"reason": "current_tier_not_run",
+			"detail": fmt.Sprintf("baseline tier %q has no scored cases; include it in --tiers (or --include-fable)", curKey),
+		}))
+	}
+
 	for _, candTier := range []string{"haiku", "sonnet", "opus"} {
+		if baselineMissing {
+			break
+		}
+		if stats[candTier].total == 0 {
+			continue // not run (or nothing scored): nothing to evaluate
+		}
 		if !tierCheaperThan(candTier, currentModel) {
 			continue
 		}
@@ -1599,14 +1761,11 @@ outerLoop:
 
 	// Human summary.
 	fmt.Fprintf(cfg.Writer, "  tier     pass-rate  ci-lower  mean-cost/case\n")
-	fmt.Fprintf(cfg.Writer, "  %-8s   %5.1f%%    %5.1f%%    $%.4f\n",
-		"haiku", haikuRate*100, haikuCI*100, haikuMeanCost)
-	fmt.Fprintf(cfg.Writer, "  %-8s   %5.1f%%    %5.1f%%    $%.4f\n",
-		"sonnet", sonnetRate*100, sonnetCI*100, sonnetMeanCost)
-	fmt.Fprintf(cfg.Writer, "  %-8s   %5.1f%%    %5.1f%%    $%.4f\n",
-		"opus", opusRate*100, opusCI*100, opusMeanCost)
-	fmt.Fprintf(cfg.Writer, "  %-8s   %5.1f%%    %5.1f%%    $%.4f\n",
-		"fable", fableRate*100, fableCI*100, fableMeanCost)
+	for _, tier := range tiers {
+		st := stats[tier]
+		fmt.Fprintf(cfg.Writer, "  %-8s   %5.1f%%    %5.1f%%    $%.4f\n",
+			tier, st.rate()*100, WilsonLower(st.pass, st.total)*100, st.meanCost())
+	}
 	fmt.Fprintln(cfg.Writer)
 
 	if candidateEmitted {

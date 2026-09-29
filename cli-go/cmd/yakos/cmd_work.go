@@ -869,12 +869,15 @@ func runModelRouting(yakosRoot string, args []string) {
 	case "eval":
 		help := false
 		var costVals []string
+		var tiersVals []string
 		fs := &cliflag.Set{Cmd: "model-routing eval", Specs: []cliflag.Spec{
 			{Name: "--judge", Kind: cliflag.String, Str: &cfg.Judge, ValueDesc: "a value"},
 			// Repeatable in the spec so every occurrence is validated in order,
 			// as the old loop did; the last valid value wins.
 			{Name: "--max-cost-usd", Kind: cliflag.StringSlice, Slice: &costVals, ValueDesc: "a value"},
 			{Name: "--cases", Kind: cliflag.String, Str: &cfg.CasesGlob, ValueDesc: "a value"},
+			{Name: "--tiers", Kind: cliflag.StringSlice, Slice: &tiersVals, ValueDesc: "a value"},
+			{Name: "--include-fable", Kind: cliflag.Bool, Bool: &cfg.IncludeFable},
 			{Name: "--project", Kind: cliflag.String, Str: &cfg.Project, ValueDesc: "a value"},
 			{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
 		}}
@@ -882,6 +885,12 @@ func runModelRouting(yakosRoot string, args []string) {
 		if help {
 			routing.PrintHelp(os.Stdout)
 			os.Exit(0)
+		}
+		// --tiers is comma-separated; the last occurrence wins.
+		if len(tiersVals) > 0 {
+			for _, t := range strings.Split(tiersVals[len(tiersVals)-1], ",") {
+				cfg.Tiers = append(cfg.Tiers, strings.TrimSpace(t))
+			}
 		}
 		for _, val := range costVals {
 			v, err := strconv.ParseFloat(val, 64)
