@@ -7895,12 +7895,15 @@
   // ── handleFilesChangedEvent ───────────────────────────────────────────────
   //
   // Called from handleWsMessage when topic === 'files.changed'.
-  // payload: { path: string (workspace-relative), action: 'created'|'modified'|'deleted', ts }
+  // payload: { path: string (workspace-relative), action: 'created'|'modified'|'deleted'|'rescanned', ts, count? }
+  // 'rescanned' means path is a DIRECTORY that arrived with many files; it is
+  // not a file, so it must not reach the tab/follow logic below.
 
   function handleFilesChangedEvent(payload) {
     var fPath   = typeof payload.path   === 'string' ? payload.path   : '';
     var fAction = typeof payload.action === 'string' ? payload.action : '';
     if (!fPath) return;
+    if (fAction === 'rescanned') return;
 
     // 1. Tree modified indicator: mark & re-render relevant tree node.
     if (fAction === 'created' || fAction === 'modified') {

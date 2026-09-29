@@ -139,6 +139,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `yakos retro status` and `retro history` apply the same range and no
   longer die on `count / 0`.
 
+- **File watcher no longer loses writes in a newly created directory
+  (K-108).** On macOS/BSD the OS watcher could re-register a just-created
+  directory with fewer flags right after yakOS added it, so files written
+  inside were never reported (about 1 in 2,500 under load). The watcher
+  now re-registers new directories once the OS side has settled and
+  reports files that appeared before the watch became active. The
+  file-watcher tests and supervisor prefilter case (h) no longer depend
+  on fixed sleeps or a millisecond budget.
+  A "modified" event on a directory itself (Windows reports one when a
+  child changes) is now dropped, since only file events are surfaced. A
+  new directory holding more than 500 files produces one summary
+  `created` event for the directory with a `count`, not one event per
+  file.
+
+- **A completed stdin write is no longer reported as "session closed
+  during write" (K-108).** When the child read the frame and exited
+  before the writer goroutine reported its result, the close signal won
+  and a successful turn was reported as failed
+  (`TestSession_Turn2SameProcess` on CI). The wait now gives a just-
+  completed write a bounded moment to report before deciding the session
+  closed. Applies to the CLI and SDK engines.
+
 - **Go hooks read identity and coord state like bash (K-100).**
   peer-claim, peer-claim-confirm, supervisor-stream and context-threshold
   take the agent and session id from the stdin payload, not

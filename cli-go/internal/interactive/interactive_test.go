@@ -596,3 +596,39 @@ func TestStreamHelper_SharedWithOneShotPath(t *testing.T) {
 		t.Errorf("expected 2 token chunks, got %d (all chunks: %v)", tokenChunks, chunks)
 	}
 }
+
+// TestSession_WriteCompletesBeforeCloseNotReportedClosed is the deterministic
+// repro of the CI flake in TestSession_Turn2SameProcess. The write goroutine is
+// held after the pipe write while the 2-turn fake script consumes both frames
+// and exits, so the read loop signals closed before the goroutine reports its
+// result. A completed write must win over that close.
+func TestSession_WriteCompletesBeforeCloseNotReportedClosed(t *testing.T) {
+	if os.Getenv("CI") == "" {
+		t.Skip("skipping shell-subprocess test outside CI; set CI=1 to run")
+	}
+	onChunk, getChunks := collectChunks()
+	sess := interactive.NewSession(interactive.SessionParams{
+		ConversationID:  "conv-race",
+		OwnerOperatorID: "op-alice",
+		OnChunk:         onChunk,
+		CmdProvider:     fakeClaude(t, 2),
+	})
+	if err := sess.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer sess.Close()
+
+	turn := func(s string) []byte {
+		return []byte(`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"` + s + `"}]}}` + "\n")
+	}
+	if err := sess.SendUserTurn(turn("hello")); err != nil {
+		t.Fatalf("turn1: %v", err)
+	}
+	waitForChunk(t, getChunks, 1, 5*time.Second)
+
+	restore := interactive.SetAfterStdinWriteHookExported(func() { time.Sleep(200 * time.Millisecond) })
+	defer restore()
+	if err := sess.SendUserTurn(turn("second")); err != nil {
+		t.Fatalf("turn2 reported failure although the write completed: %v", err)
+	}
+}

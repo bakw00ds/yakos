@@ -13,8 +13,8 @@
 #   (f) Pre-filter disabled → every Nth mutation dispatches (reverts to v0.33).
 #   (g) .yakos.yml matcher key present → settings.template.json registers
 #       Edit|Write|MultiEdit|Bash (not "*") for supervisor-stream.sh.
-#   (h) Dispatch is async → PostToolUse hook returns in < 100ms even when
-#       dispatch fires.
+#   (h) Dispatch is async → PostToolUse hook returns while a still-running
+#       dispatch is in flight (checked by state, not by a millisecond budget).
 #
 # Each test uses a mock yakos binary (PATH override) to detect dispatch calls.
 
@@ -408,19 +408,33 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Test (h): Dispatch is async — hook returns < 200ms even when dispatch fires
+# Test (h): Dispatch is async — hook returns while dispatch is still running
 # ---------------------------------------------------------------------------
 note ""
-note "=== Test (h): Async dispatch — hook returns in < 200ms ==="
+note "=== Test (h): Async dispatch — hook returns while dispatch is in flight ==="
 
 reset_all
 
-# Use a mock yakos that sleeps 2s to simulate a slow LLM call.
-# The hook must still return immediately because it uses nohup … & disown.
-cat > "$MOCK_BIN/yakos" <<'SLOW_MOCK'
+# Deterministic trigger instead of a wall-clock budget. The mock yakos blocks
+# on a release file (bounded at ~20s so a broken test cannot hang) and only
+# then writes a done marker. If the hook dispatched synchronously it could not
+# return before the mock finished, so the done marker would already exist. If
+# the hook is async, it returns while the mock is still blocked, however slow
+# or loaded the machine is. A millisecond threshold here flaked under load.
+H_STARTED="$MOCK_BIN/h-started"
+H_RELEASE="$MOCK_BIN/h-release"
+H_DONE="$MOCK_BIN/h-done"
+rm -f "$H_STARTED" "$H_RELEASE" "$H_DONE"
+cat > "$MOCK_BIN/yakos" <<SLOW_MOCK
 #!/usr/bin/env bash
-printf 'called: %s\n' "$*" >> "${YAKOS_DISPATCH_LOG}"
-sleep 2
+printf 'called: %s\n' "\$*" >> "\${YAKOS_DISPATCH_LOG}"
+: > "$H_STARTED"
+i=0
+while [ ! -e "$H_RELEASE" ] && [ "\$i" -lt 200 ]; do
+    sleep 0.1
+    i=\$((i + 1))
+done
+: > "$H_DONE"
 exit 0
 SLOW_MOCK
 chmod +x "$MOCK_BIN/yakos"
@@ -435,15 +449,35 @@ else
     bad "test (h): expected rc=0, got rc=$LAST_RC"
 fi
 
-# LAST_ELAPSED_MS is 0 on systems where date +%N is unsupported; skip timing
-# assertion in that case to avoid false failures in CI.
-if [ "$LAST_ELAPSED_MS" -eq 0 ] 2>/dev/null; then
-    ok "test (h): timing not available on this platform (date +%N unsupported) — skipping ms assertion"
-elif [ "$LAST_ELAPSED_MS" -lt 200 ]; then
-    ok "test (h): hook returned in ${LAST_ELAPSED_MS}ms (< 200ms — async confirmed)"
+# The hook has returned. Dispatch must not have completed (it is still
+# blocked on the release file), which proves the hook did not wait for it.
+if [ -e "$H_DONE" ]; then
+    bad "test (h): dispatch finished before the hook returned — possible sync dispatch"
 else
-    bad "test (h): hook took ${LAST_ELAPSED_MS}ms (>= 200ms — possible sync dispatch)"
+    ok "test (h): hook returned while dispatch was still running (async confirmed)"
 fi
+
+# Dispatch must actually have started (condition poll, 10s deadline), else the
+# assertion above would pass vacuously when nothing was dispatched.
+h_i=0
+while [ ! -e "$H_STARTED" ] && [ "$h_i" -lt 200 ]; do
+    sleep 0.05
+    h_i=$((h_i + 1))
+done
+if [ -e "$H_STARTED" ]; then
+    ok "test (h): dispatch was started in the background"
+else
+    bad "test (h): dispatch never started"
+fi
+
+# Release the mock and wait for it so no background process outlives the test.
+: > "$H_RELEASE"
+h_i=0
+while [ ! -e "$H_DONE" ] && [ "$h_i" -lt 200 ]; do
+    sleep 0.05
+    h_i=$((h_i + 1))
+done
+note "  (info) hook wall time: ${LAST_ELAPSED_MS}ms — not asserted"
 
 # Restore fast mock
 cat > "$MOCK_BIN/yakos" <<'MOCK'
