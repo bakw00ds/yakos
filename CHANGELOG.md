@@ -39,6 +39,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--hooks-impl go|hybrid` gates were silent no-ops (fail-open).** The
+  generated `yakos hook run <name>` command took its tier from
+  `YAKOS_HOOKS`, whose default is bash mode; with it unset the runner
+  found no `lib/hooks-user/<name>.sh` and exited 0, so plan-quality-gate,
+  secret-scan and the rest never blocked. Commands are now
+  `yakos hook run --impl go <name>`; the flag beats `YAKOS_HOOKS`, an
+  unregistered hook under `--impl` exits 2, and `yakos hook` bypasses
+  shadow-mode routing to the bash CLI (which exited 64, also
+  non-blocking). Already-refreshed projects migrate on the next refresh.
+  New end-to-end tests run the literal settings.json command through
+  `sh -c` and assert exit 2.
+  `yakos hook` is now routed Go-native even when `YAKOS_IMPL=bash` is
+  exported. A repeated `--impl` exits 2. CI builds `bin/yakos` before
+  `go test` so the end-to-end guard runs there and fails, not skips.
+- **Non-executable hook scripts silently disabled their gate.** Refresh
+  copied the source file mode, and eight tracked `lib/hooks/legacy/*.sh`
+  files (including `secret-scan.sh` and `path-allowlist.sh`) were mode
+  100644, so a dev-checkout refresh deployed hooks that exit 126, which
+  Claude Code treats as non-blocking. The sources are now 0755, both
+  refreshes force 0755 on every deployed hook (including a
+  content-identical 0644 destination), and `yakos doctor` warns about any
+  non-executable `scripts/hooks/*.sh`.
+
 - **`yakos refresh` hook-mirror layout unified (K-94, K-81).** Bash
   `cli/lib/refresh.sh` now uses the same layout algorithm as the Go
   port: `lib/hooks/legacy/<name>.sh` deploys flat and `legacy/` is never

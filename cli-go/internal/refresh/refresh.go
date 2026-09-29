@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -380,7 +381,16 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 			}
 			rpt.Synced++
 		} else {
-			// OK — ensure sidecar is up to date even if content matches
+			// OK — ensure sidecar is up to date even if content matches, and
+			// that the script is executable (content-identical but 0644 is a
+			// silent fail-open: exit 126 is non-blocking).
+			if fi, serr := os.Stat(dstPath); serr == nil && runtimeGOOS != "windows" && fi.Mode().Perm()&0o111 != 0o111 {
+				if dryRun {
+					_, _ = fmt.Fprintf(w, "    [dry-run] hooks: would chmod 0755 %s (not executable)\n", rel)
+				} else {
+					_ = os.Chmod(dstPath, hookFileMode) //nolint:gosec
+				}
+			}
 			if !dryRun {
 				_ = os.WriteFile(hashFile, []byte(srcHash+"\n"), 0644) //nolint:gosec
 			}
@@ -495,22 +505,23 @@ func pruneLegacyMirror(dstRoot string, dryRun bool, w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    [hooks] removed orphan legacy/ subdir (%d files, all have flat counterparts)\n", count)
 }
 
-// copyFile copies the file at src to dst, preserving execute permission.
-func copyFile(src, dst string) error {
-	srcInfo, err := os.Stat(src)
-	if err != nil {
-		return fmt.Errorf("stat src %s: %w", src, err)
-	}
+// hookFileMode is forced on every deployed hook script regardless of the
+// source mode. A non-executable hook exits 126, which Claude Code treats as
+// non-blocking, so a 0644 source (or a stale 0644 destination) would silently
+// disable the gate.
+const hookFileMode os.FileMode = 0o755
 
+var runtimeGOOS = runtime.GOOS
+
+// copyFile copies the file at src to dst and forces hookFileMode.
+func copyFile(src, dst string) error {
 	in, err := os.Open(src) //nolint:gosec
 	if err != nil {
 		return fmt.Errorf("open src %s: %w", src, err)
 	}
 	defer func() { _ = in.Close() }()
 
-	// Preserve execute bits from source.
-	mode := srcInfo.Mode()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode) //nolint:gosec
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, hookFileMode) //nolint:gosec
 	if err != nil {
 		return fmt.Errorf("create dst %s: %w", dst, err)
 	}
@@ -520,7 +531,11 @@ func copyFile(src, dst string) error {
 	if copyErr != nil {
 		return fmt.Errorf("copy %s → %s: %w", src, dst, copyErr)
 	}
-	return closeErr
+	if closeErr != nil {
+		return closeErr
+	}
+	// OpenFile's mode applies only on create; fix an existing 0644 file too.
+	return os.Chmod(dst, hookFileMode) //nolint:gosec
 }
 
 // CollectProjects discovers all yakos-wired project paths under the canonical

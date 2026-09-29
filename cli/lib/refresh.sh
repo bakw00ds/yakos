@@ -201,7 +201,16 @@ _sync_one() {
         fi
         H_SYNC=$((H_SYNC + 1))
     else
-        # OK — ensure hash sidecar is current even if content matches
+        # OK — ensure hash sidecar is current even if content matches, and
+        # that the script is executable (a non-executable hook exits 126,
+        # which Claude Code treats as non-blocking: silent fail-open).
+        if [ ! -x "$dst" ]; then
+            if [ "$DRY_RUN" = "1" ]; then
+                printf '    [dry-run] hooks: would chmod +x %s (not executable)\n' "$rel"
+            else
+                chmod +x "$dst" 2>/dev/null || true
+            fi
+        fi
         if [ "$DRY_RUN" != "1" ]; then
             echo "$src_hash" > "$hash_file"
         fi

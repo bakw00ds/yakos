@@ -100,6 +100,11 @@ type Runner struct {
 	// when nil. Injected for tests so the routing matrix is deterministic.
 	EnvLookup func(string) string
 
+	// ModeOverride, when non-empty, selects the tier and takes precedence over
+	// YAKOS_HOOKS. `yakos hook run --impl <mode>` sets it so generated
+	// settings.json commands do not depend on ambient environment.
+	ModeOverride HooksMode
+
 	// NowFn is injected for tests to control timestamps on parity-divergence
 	// log entries. Defaults to time.Now when nil.
 	NowFn func() time.Time
@@ -149,6 +154,9 @@ func NewWithBashPath(hooksDir, userHooksDir, workCurrentDir string, allowPaths [
 // hooksMode reads YAKOS_HOOKS via EnvLookup and normalises the value.
 // Unknown values fall back to HooksModeBash (safe default).
 func (r *Runner) hooksMode() HooksMode {
+	if r.ModeOverride != "" {
+		return r.ModeOverride
+	}
 	lookup := r.EnvLookup
 	if lookup == nil {
 		lookup = os.Getenv

@@ -8,8 +8,8 @@ package refresh
 // existing merge phases stay the single place that decides add/replace/keep:
 //
 //	bash   — template untouched (byte-identical to pre-A-3 behavior)
-//	go     — every hook command becomes `yakos hook run <name>`
-//	hybrid — only registry GoReady hooks become `<yakos> hook run <name>`
+//	go     — every hook command becomes `yakos hook run --impl go <name>`
+//	hybrid — only registry GoReady hooks become `<yakos> hook run --impl go <name>`
 //
 // Binary reference: the Go-form command embeds the ABSOLUTE path of the
 // running yakos binary (os.Executable, symlinks evaluated), not a bare
@@ -80,7 +80,14 @@ var goReadyHooks = func() []string {
 var registeredHooks = func() []string { return registry.Names() }
 
 // goCommand renders the Go-form hook command for a hook name.
-func goCommand(bin, name string) string { return shellQuote(bin) + " hook run " + name }
+//
+// The command pins the Go tier with an explicit `--impl go`. Without it the
+// runner falls back to YAKOS_HOOKS, whose default is bash mode: a Go-form
+// command run with the variable unset would look for lib/hooks-user/<name>.sh,
+// find nothing, and exit 0, silently disabling every gate (fail-open).
+func goCommand(bin, name string) string {
+	return shellQuote(bin) + " hook run --impl go " + name
+}
 
 // shellQuote single-quotes s only when it contains characters a shell would
 // treat specially, so ordinary paths stay readable.
@@ -146,18 +153,34 @@ func posixWords(command string) ([]string, bool) {
 	return words, true
 }
 
-// goHookName extracts <name> from `<path>/yakos hook run <name>` (the path
-// may be shell-quoted, or the bare word `yakos`).
+// goHookName extracts <name> from `<path>/yakos hook run --impl go <name>`
+// (the path may be shell-quoted, or the bare word `yakos`). The legacy
+// flag-less form `<path>/yakos hook run <name>` is also recognized so a
+// project refreshed before the flag existed is migrated in place.
 func goHookName(command string) (string, bool) {
 	w, ok := posixWords(command)
-	if !ok || len(w) != 4 || w[1] != "hook" || w[2] != "run" || w[3] == "" {
+	if !ok || len(w) < 4 || w[1] != "hook" || w[2] != "run" {
+		return "", false
+	}
+	name := w[3]
+	switch len(w) {
+	case 4:
+	case 6:
+		if w[3] != "--impl" || w[4] != "go" {
+			return "", false
+		}
+		name = w[5]
+	default:
+		return "", false
+	}
+	if name == "" || strings.HasPrefix(name, "-") {
 		return "", false
 	}
 	base := filepath.Base(strings.ReplaceAll(w[0], "\\", "/"))
 	if base != "yakos" && base != "yakos.exe" {
 		return "", false
 	}
-	return w[3], true
+	return name, true
 }
 
 // hookNameFromTemplateCommand returns the hook name (no .sh) for a bash-form

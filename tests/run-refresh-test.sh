@@ -694,6 +694,27 @@ else
 fi
 
 # ===========================================================================
+# Test 17: a content-identical but non-executable deployed hook is repaired
+# (exit 126 is non-blocking, so 0644 hooks silently disable their gate)
+# ===========================================================================
+echo ""
+echo "Test 17: non-executable deployed hook is made executable"
+T17="$(setup_project proj-in-sync)"
+run_refresh "$T17" >/dev/null 2>&1 || true
+H17="$T17/project/scripts/hooks/secret-scan.sh"
+if [ -f "$H17" ]; then
+    chmod 0644 "$H17"
+    run_refresh "$T17" >/dev/null 2>&1 || true
+    if [ -x "$H17" ]; then
+        ok "0644 secret-scan.sh restored to executable"
+    else
+        fail "0644 secret-scan.sh stayed non-executable after refresh"
+    fi
+else
+    skip "secret-scan.sh not present in fixture deployment"
+fi
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""
