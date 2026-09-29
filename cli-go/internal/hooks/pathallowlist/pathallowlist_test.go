@@ -337,7 +337,9 @@ func TestRootEqualBlocks(t *testing.T) {
 	in := e.input("Write", e.proj, "go-api")
 	in.Env["CLAUDE_PROJECT_DIR"] = e.proj + "/"
 	e.expect("root, slash env", in, 2, "file_path is the project root itself")
-	e.bypass(e.proj)
+	// The hook matches bypass scopes against the "/"-normalized path (a no-op on
+	// POSIX), so the scope must be written in that form on Windows too.
+	e.bypass(filepath.ToSlash(e.proj))
 	e.expect("root bypass", e.input("Write", e.proj, "go-api"), 0, "file_path is the project root but bypass active")
 }
 
