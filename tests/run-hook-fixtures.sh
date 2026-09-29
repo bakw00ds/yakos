@@ -1254,6 +1254,37 @@ case_check path-allowlist.sh   pretooluse-write-fallback-tail-dotdot.json 2 path
 # Symlink cycle: not an escape (the OS returns ELOOP), so bash's pass is harmless; Go fails closed.
 case_check path-allowlist.sh   pretooluse-write-symlink-cycle.json 0 path-allowlist setup_symlink_cycle "" "" "" "2:a symlink cycle is not an escape (ELOOP on write) so bash passes; Go's resolver fails closed on an unresolvable chain"
 
+# ---- syntax pass (K-101) ------------------------------------------------------
+#
+# `bash -n` over every hook script and shared lib, under /bin/bash (3.2 on
+# macOS: a parse error there makes the script exit 0 outright, i.e. silently
+# pass) AND under $HOOK_BASH. Symlinks are skipped (lib/hooks/foo.sh ->
+# legacy/foo.sh, lib/hooks/lib/paths.sh -> cli/lib/paths.sh): their targets are
+# checked directly. Same scope as the plan-quality-gate workflow's pass, so a
+# local run catches what CI would.
+echo
+echo "== bash -n syntax pass =="
+_syn_files="$(find "$REPO_ROOT/lib/hooks" -name '*.sh' -not -type l | sort; ls "$REPO_ROOT"/cli/lib/*.sh 2>/dev/null | sort)"
+_syn_bad=0
+_syn_n=0
+for _f in $_syn_files; do
+    _syn_n=$((_syn_n + 1))
+    for _sh in /bin/bash "$HOOK_BASH"; do
+        command -v "$_sh" >/dev/null 2>&1 || continue
+        if ! "$_sh" -n "$_f" 2>/dev/null; then
+            _syn_bad=$((_syn_bad + 1))
+            fail=$((fail + 1))
+            fail_log="${fail_log}    - syntax error under $_sh -n: ${_f#"$REPO_ROOT"/}
+"
+            echo "  FAIL syntax error under $_sh -n: ${_f#"$REPO_ROOT"/}"
+        fi
+    done
+done
+if [ "$_syn_bad" -eq 0 ]; then
+    pass=$((pass + 1))
+    echo "  OK   $_syn_n scripts parse under /bin/bash and $HOOK_BASH"
+fi
+
 # ---- summary ----------------------------------------------------------------
 
 echo

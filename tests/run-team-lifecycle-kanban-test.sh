@@ -68,6 +68,48 @@ kcase() {
     done
 }
 
+# run_side_n <bash|go> <tool> <n> <input-printf-fmt>: fire the hook n times on
+# ONE board; prints the resulting kanban.md path.
+run_side_n() {
+    local side="$1" tool="$2" n="$3" input="$4" d i
+    d="$(mktemp -d "$TMP/case.XXXXXX")"
+    mkdir -p "$d/work/current" "$d/home"
+    # shellcheck disable=SC2059
+    printf "$input" > "$d/work/current/kanban.md"
+    i=0
+    while [ "$i" -lt "$n" ]; do
+        if [ "$side" = bash ]; then
+            payload "$tool" | env HOME="$d/home" YAKOS_WORK_DIR="$d/work" CLAUDE_PROJECT_DIR="$d" \
+                bash "$HOOK" >/dev/null 2>&1 || true
+        else
+            payload "$tool" | env HOME="$d/home" YAKOS_IMPL=go YAKOS_HOOKS=go YAKOS_WORK_DIR="$d/work" \
+                CLAUDE_PROJECT_DIR="$d" "$GO_BINARY" hook run team-lifecycle >/dev/null 2>&1 || true
+        fi
+        i=$((i + 1))
+    done
+    printf '%s' "$d/work/current/kanban.md"
+}
+
+# kcase_n <name> <tool> <fires> <input-printf-fmt> <expected-printf-fmt>
+kcase_n() {
+    local name="$1" tool="$2" n="$3" input="$4" want="$5" side got wantf
+    wantf="$TMP/want-n.$$"
+    # shellcheck disable=SC2059
+    printf "$want" > "$wantf"
+    for side in bash go; do
+        if [ "$side" = go ] && [ ! -x "$GO_BINARY" ]; then continue; fi
+        got="$(run_side_n "$side" "$tool" "$n" "$input")"
+        if cmp -s "$got" "$wantf" && [ "$(grep -c -F "$WARN" "$got")" = "$(grep -c -F "$WARN" "$wantf")" ]; then
+            printf '  \033[32mOK\033[0m   %s [%s]\n' "$name" "$side"; pass=$((pass + 1))
+        else
+            printf '  \033[31mFAIL\033[0m %s [%s]\n    want: %s\n    got:  %s\n' "$name" "$side" \
+                "$(od -c "$wantf" | head -8 | tr -s ' ' | tr '\n' '|')" \
+                "$(od -c "$got" | head -8 | tr -s ' ' | tr '\n' '|')"
+            fail=$((fail + 1))
+        fi
+    done
+}
+
 [ -x "$GO_BINARY" ] || printf '  (Go binary not found at %s; bash side only)\n' "$GO_BINARY"
 
 # 1. Reported bug: last task, no trailing newline, no DONE section.
@@ -114,6 +156,29 @@ kcase "normal board TeamCreate" TeamCreate \
 kcase "empty source section" TeamDelete \
     '## TODO\n\n## IN PROGRESS\n\n## DONE\n' \
     '## TODO\n\n## IN PROGRESS\n\n## DONE\n'
+
+# 10. K-101: no destination section. Three lifecycle events must leave ONE
+# WARN line and the task where it was (not one more WARN per event).
+kcase_n "no DONE section, three TeamDelete fires -> one WARN" TeamDelete 3 \
+    '## TODO\n\n## IN PROGRESS\n- [-] K-1 task\n  - notes: x\n' \
+    "## TODO\n\n## IN PROGRESS\n$WARN\n- [-] K-1 task\n  - notes: x\n"
+
+# 11. K-101: destination precedes the source; three TeamCreate fires.
+kcase_n "IN PROGRESS before TODO, three TeamCreate fires -> one WARN" TeamCreate 3 \
+    '## IN PROGRESS\n\n## TODO\n- [ ] K-2 t2\n- [ ] K-3 t3\n' \
+    "## IN PROGRESS\n\n## TODO\n$WARN\n- [ ] K-2 t2\n- [ ] K-3 t3\n"
+
+# 12. K-101: the unmovable task is not the last thing in the file. It stays in
+# place (it used to be relocated to end of file), still one WARN after 3 fires.
+kcase_n "unmovable task mid-file stays in place" TeamDelete 3 \
+    '## TODO\n\n## IN PROGRESS\n- [-] K-1 a\n  - n: 1\n- [-] K-9 b\n\n## NOTES\ntext\n' \
+    "## TODO\n\n## IN PROGRESS\n$WARN\n- [-] K-1 a\n  - n: 1\n- [-] K-9 b\n\n## NOTES\ntext\n"
+
+# 13. K-101: a normal move is untouched by the idempotence logic; a second
+# fire moves the next task and never warns.
+kcase_n "normal board, two TeamCreate fires move two tasks" TeamCreate 2 \
+    '## TODO\n- [ ] K-1 a\n- [ ] K-2 b\n\n## IN PROGRESS\n\n## DONE\n' \
+    '## TODO\n\n## IN PROGRESS\n- [-] K-2 b\n- [-] K-1 a\n\n## DONE\n'
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

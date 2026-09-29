@@ -28,7 +28,8 @@
 if [ "${YAKOS_PATHS_LOADED:-0}" = "1" ]; then
     return 0 2>/dev/null || exit 0
 fi
-YAKOS_PATHS_LOADED=1
+# YAKOS_PATHS_LOADED=1 is set on the LAST line of this file (K-101): a checked `.` must mean
+# "parsed through to the end", not merely "started".
 
 yakos_project_name() {
     # Caller-controlled: set $YAKOS_PROJECT_NAME explicitly when the basename
@@ -221,3 +222,6 @@ yakos_migrate_session_history() {
         fi
     fi
 }
+
+# Must stay the last statement: reaching it proves the whole file parsed.
+YAKOS_PATHS_LOADED=1

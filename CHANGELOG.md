@@ -60,6 +60,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Bash hook hardening (K-101, from the #289 and #291 security reviews).**
+  `hi_init` no longer trusts a jq that lies: a jq printing garbage, a
+  wrong-typed value, or "object" for every query is caught by a
+  computed-at-call-time canary plus a cross-check of one decoded
+  identity field against the raw payload. Blocking hooks exit 2 with a
+  reason, non-blocking hooks exit 0 with a WARN and no stdout, and
+  `HI_DEGRADED` / `HI_DEGRADED_REASON` expose the state.
+  `plan-quality-gate.sh`'s EXIT trap now survives closed or broken
+  stderr/stdout and maps SIGTERM/SIGHUP/SIGINT to exit 2 instead of a
+  non-blocking 143/129/130. The `*_LOADED` source guards in `paths.sh`,
+  `hook-output.sh`, `hook-input.sh` and `compat.sh` moved to the last
+  line, so a syntax error in a helper library no longer looks like a
+  successful load on bash 5. The kanban auto-move (bash and Go) writes the
+  "no dst section" WARN once and leaves the task where it was instead of
+  adding a WARN and relocating the task on every lifecycle event.
+  `context-threshold.sh` now sources `lib/compat.sh`, which it used but
+  never loaded, so its Claude probe no longer always reports
+  `probe_unavailable`. `tests/run-hook-fixtures.sh` gains a `bash -n`
+  pass under `/bin/bash`.
+
 - **Go hooks read identity and coord state like bash (K-100).**
   peer-claim, peer-claim-confirm, supervisor-stream and context-threshold
   take the agent and session id from the stdin payload, not

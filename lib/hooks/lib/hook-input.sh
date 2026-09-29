@@ -67,15 +67,34 @@
 if [ "${HI_LOADED:-0}" = "1" ]; then
     return 0 2>/dev/null || exit 0
 fi
-HI_LOADED=1
+# NOTE: HI_LOADED=1 is set on the LAST line of this file, not here. Setting it
+# up front made a parse error later in the file invisible to a caller that
+# checks the sentinel after `.` (K-101). The sentinel proves the whole file was
+# consumed: it catches a file truncated at a statement boundary (where `.` still
+# returns 0), and a stale guard set by an earlier partial load.
 
 HI_INPUT=""
+# HI_DEGRADED=1 once hi_init decided the payload could not be trusted (missing
+# jq, empty / malformed / non-object stdin, or a jq that lies). HI_DEGRADED_REASON
+# carries the human-readable cause. Blocking hooks never see HI_DEGRADED=1 unless
+# an emergency override let them continue; non-blocking hooks exit 0 (see
+# _hi_fail_or_warn).
+HI_DEGRADED=0
+HI_DEGRADED_REASON=""
 
 # hi_init's own degraded-input handler. Kept separate from hi_init so it can
 # be unit-exercised and so the control flow in hi_init stays readable.
 _hi_fail_or_warn() {
     local reason="$1"
+    # $2 == "exit": the degradation is one where continuing with an empty
+    # HI_INPUT is unsafe even for a non-blocking hook (a jq that lies), so the
+    # non-blocking branch exits 0 (WARN, no stdout) instead of returning.
+    local mode="${2:-}"
     local name
+    # shellcheck disable=SC2034  # read by the sourcing hook (public state)
+    HI_DEGRADED=1
+    # shellcheck disable=SC2034
+    HI_DEGRADED_REASON="$reason"
     name="$(basename -- "${0:-hook}" 2>/dev/null || echo hook)"
     name="${name%.sh}"
 
@@ -87,8 +106,9 @@ _hi_fail_or_warn() {
             if command -v ho_log >/dev/null 2>&1; then
                 ho_log "$name" "WARN" "pass" "degraded input ($reason) but YAKOS_HOOKS_FAIL_OPEN=1 override active" "{}" 2>/dev/null || true
             fi
-            echo "${name}: WARN — degraded input ($reason), but YAKOS_HOOKS_FAIL_OPEN=1 is set; passing through." >&2
-            echo "${name}: this is an emergency override — unset it once jq/stdin are fixed." >&2
+            echo "${name}: WARN — degraded input ($reason), but YAKOS_HOOKS_FAIL_OPEN=1 is set; passing through." >&2 || true
+            echo "${name}: this is an emergency override — unset it once jq/stdin are fixed." >&2 || true
+            HI_INPUT=""
             return 0
         fi
         # Security review R2-3 (round 3): the scope probe is the literal
@@ -116,7 +136,8 @@ _hi_fail_or_warn() {
             if command -v ho_log >/dev/null 2>&1; then
                 ho_log "$name" "WARN" "pass" "degraded input ($reason) but hook-bypass.md override active (scope: degraded-input)" "{}" 2>/dev/null || true
             fi
-            echo "${name}: WARN — degraded input ($reason), but a hook-bypass.md entry for '$name' scoped to 'degraded-input' is active; passing through." >&2
+            echo "${name}: WARN — degraded input ($reason), but a hook-bypass.md entry for '$name' scoped to 'degraded-input' is active; passing through." >&2 || true
+            HI_INPUT=""
             return 0
         fi
 
@@ -125,16 +146,39 @@ _hi_fail_or_warn() {
         if command -v ho_log >/dev/null 2>&1; then
             ho_log "$name" "BLOCK" "block" "degraded input, failing closed: $reason" "{}" 2>/dev/null || true
         fi
-        echo "${name}: BLOCKED — cannot safely evaluate this tool call ($reason)." >&2
-        echo "${name}: this hook enforces a security control and refuses to fail open." >&2
-        echo "${name}: fix jq on PATH / the caller's JSON payload, then retry." >&2
-        echo "${name}: emergency overrides: export YAKOS_HOOKS_FAIL_OPEN=1, or add a" >&2
-        echo "${name}: work/current/hook-bypass.md entry with **Hook:** $name and" >&2
-        echo "${name}: **Scope:** degraded-input." >&2
+        echo "${name}: BLOCKED — cannot safely evaluate this tool call ($reason)." >&2 || true
+        echo "${name}: this hook enforces a security control and refuses to fail open." >&2 || true
+        echo "${name}: fix jq on PATH / the caller's JSON payload, then retry." >&2 || true
+        echo "${name}: emergency overrides: export YAKOS_HOOKS_FAIL_OPEN=1, or add a" >&2 || true
+        echo "${name}: work/current/hook-bypass.md entry with **Hook:** $name and" >&2 || true
+        echo "${name}: **Scope:** degraded-input." >&2 || true
         exit 2
     fi
 
-    echo "${name}: WARN — $reason. This hook is degraded for this event (jq unavailable or stdin unparseable); treating input as empty." >&2
+    if [ "$mode" = "exit" ]; then
+        if command -v ho_log >/dev/null 2>&1; then
+            ho_log "$name" "WARN" "pass" "degraded input ($reason); non-blocking hook skipped" "{}" 2>/dev/null || true
+        fi
+        echo "${name}: WARN — $reason. Skipping this non-blocking hook (tool call not blocked)." >&2 || true
+        exit 0
+    fi
+    echo "${name}: WARN — $reason. This hook is degraded for this event (jq unavailable or stdin unparseable); treating input as empty." >&2 || true
+}
+
+# _hi_decoder_sane — 0 when jq actually evaluates programs. A jq that prints
+# garbage, prints a constant ("object", `[1]`, ...) for every query, or is a
+# shim that ignores its program cannot compute a fresh arithmetic result, so
+# the canary below fails. The value is derived at call time from $$/$RANDOM so a
+# stub cannot hard-code the answer. Without this, `jq -r type` answering
+# "object" to everything sailed through every type check and each accessor then
+# returned the same constant, so the hook's tool-name gate fell to `*) exit 0`.
+_hi_decoder_sane() {
+    local a b want got
+    a=$(( ($$ % 89) + 11 ))
+    b=$(( (${RANDOM:-7} % 89) + 11 ))
+    want=$(( a * b + a ))
+    got="$(jq -nr --argjson a "$a" --argjson b "$b" '$a * $b + $a' 2>/dev/null)" || return 1
+    [ "$got" = "$want" ]
 }
 
 # hi_skip_if_no_jq — for NON-BLOCKING (telemetry / report-only) hooks.
@@ -149,7 +193,7 @@ hi_skip_if_no_jq() {
     local name
     name="$(basename -- "${0:-hook}" 2>/dev/null || echo hook)"
     name="${name%.sh}"
-    echo "${name}: WARN — jq is not installed or not on PATH; skipping this non-blocking hook (tool call not blocked)." >&2
+    echo "${name}: WARN — jq is not installed or not on PATH; skipping this non-blocking hook (tool call not blocked)." >&2 || true
     if command -v ho_log >/dev/null 2>&1; then
         ho_log "$name" "WARN" "pass" "jq missing; non-blocking hook skipped" "{}" 2>/dev/null || true
     fi
@@ -208,6 +252,35 @@ hi_init() {
         HI_INPUT=""
         _hi_fail_or_warn "stdin parsed as JSON but is not a JSON object (hook payloads are always an object)"
         return 0
+    fi
+
+    # K-101 (#289 review): every check above trusts jq's answers. A jq that is
+    # present but lying (prints "garbage", a wrong-typed value, or "object" for
+    # every query) passes them all. Verify the decoder with a canary, then
+    # cross-check one decoded identity field (hook_event_name, else tool_name)
+    # against the raw payload: a real answer is literally present in the input.
+    # Non-blocking hooks exit 0 here rather than continue on garbage accessors.
+    #
+    # hook_event_name is deliberately NOT required: the Flows engine
+    # (cli-go/internal/workflow/output_scan.go) invokes output-injection-scan.sh
+    # with a synthetic {tool_name, tool_response, agent_type} payload that has
+    # none, and requiring it turned every workflow node scan into a block.
+    if ! _hi_decoder_sane; then
+        HI_INPUT=""
+        _hi_fail_or_warn "jq is present but returned a wrong answer for a known query (broken or shadowed jq)" exit
+        return 0
+    fi
+    local _hi_ev
+    _hi_ev="$(jq -r 'if type == "object" then ((.hook_event_name // .tool_name // "") | if type == "string" then . else "" end) else "" end' <<< "$HI_INPUT" 2>/dev/null)" || _hi_ev=""
+    if [ -n "$_hi_ev" ]; then
+        case "$HI_INPUT" in
+            *"$_hi_ev"*) ;;
+            *)
+                HI_INPUT=""
+                _hi_fail_or_warn "jq decoded an identity field (hook_event_name / tool_name) that is not present in the payload (broken or shadowed jq)" exit
+                return 0
+                ;;
+        esac
     fi
 }
 
@@ -289,3 +362,6 @@ hi_notebook_path() { hi_field '.tool_input.notebook_path'; } # NotebookEdit
 hi_msg_to()       { hi_field '.tool_input.to'; }
 hi_msg_summary()  { hi_field '.tool_input.summary'; }
 hi_msg_body()     { hi_field '.tool_input.message'; }
+
+# Must stay the last statement: reaching it proves the whole file parsed.
+HI_LOADED=1

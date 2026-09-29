@@ -189,6 +189,11 @@ var (
 	reCheckbox    = regexp.MustCompile(`^- \[.\]`)
 )
 
+// kanbanWarnLine marks a task the mover could not relocate because the
+// destination section is absent or precedes the source. Byte-identical to the
+// bash hook's marker.
+const kanbanWarnLine = "# WARN: yakos kanban auto-update found src but no dst section"
+
 // srcHeaderRe / dstHeaderRe build the "^## <col>[[:space:]]*$" pattern
 // bash's awk uses, anchored to one exact column name.
 func colHeaderRe(col string) *regexp.Regexp {
@@ -234,6 +239,7 @@ func (h *Hook) kanbanMoveFirst(out *hooktype.HookOutput, srcCol, dstCol, cbox st
 	var taskRest []string
 	moved := false
 	movedEmitted := false
+	capPos := -1 // index in outLines the captured task was lifted from
 
 	for _, line := range lines {
 		if srcHeaderRe.MatchString(line) {
@@ -244,6 +250,7 @@ func (h *Hook) kanbanMoveFirst(out *hooktype.HookOutput, srcCol, dstCol, cbox st
 
 		if state == "in_src" && !moved && reBulletStart.MatchString(line) {
 			taskFirst = line
+			capPos = len(outLines)
 			state = "capturing_cont"
 			continue
 		}
@@ -287,11 +294,24 @@ func (h *Hook) kanbanMoveFirst(out *hooktype.HookOutput, srcCol, dstCol, cbox st
 	}
 
 	// END block: captured but never re-emitted (src found, dst section
-	// missing) — don't drop the task, emit a warning marker instead.
+	// missing or before src). K-101: the task is not moved. It goes back
+	// where it was captured from, with ONE warning marker directly above it,
+	// and a task already preceded by an identical marker gets no second one,
+	// so repeated lifecycle events leave the board byte-identical. (Bash's
+	// awk mirrors this exactly.)
 	if moved && !movedEmitted {
-		outLines = append(outLines, "# WARN: yakos kanban auto-update found src but no dst section")
-		outLines = append(outLines, taskFirst)
-		outLines = append(outLines, taskRest...)
+		block := make([]string, 0, 2+len(taskRest))
+		haveWarn := capPos > 0 && outLines[capPos-1] == kanbanWarnLine
+		if !haveWarn {
+			block = append(block, kanbanWarnLine)
+		}
+		block = append(block, taskFirst)
+		block = append(block, taskRest...)
+		merged := make([]string, 0, len(outLines)+len(block))
+		merged = append(merged, outLines[:capPos]...)
+		merged = append(merged, block...)
+		merged = append(merged, outLines[capPos:]...)
+		outLines = merged
 	}
 
 	newContent := strings.Join(outLines, "\n")

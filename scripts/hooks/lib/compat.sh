@@ -12,7 +12,8 @@
 if [ "${YAKOS_COMPAT_LOADED:-0}" = "1" ]; then
     return 0 2>/dev/null || exit 0
 fi
-YAKOS_COMPAT_LOADED=1
+# YAKOS_COMPAT_LOADED=1 is set on the LAST line of this file (K-101): a checked `.` must mean
+# "parsed through to the end", not merely "started".
 
 # ---- logging --------------------------------------------------------------
 
@@ -253,3 +254,6 @@ ct_encode_project_path() {
     p="${p//./-}"
     printf '%s\n' "$p"
 }
+
+# Must stay the last statement: reaching it proves the whole file parsed.
+YAKOS_COMPAT_LOADED=1

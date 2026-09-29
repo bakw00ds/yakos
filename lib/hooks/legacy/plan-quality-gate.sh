@@ -54,18 +54,31 @@ _pqg_pass() {
 }
 _pqg_on_exit() {
     _pqg_rc=$?
+    # This trap runs under the script's `set -e`. A failing `echo >&2` in here
+    # (stderr closed -> rc 1) would exit the trap with that status, and any
+    # status other than 2 is NON-blocking in Claude Code. So: no errexit, no
+    # SIGPIPE, and every write is best effort. The decision below never depends
+    # on whether the message could be delivered.
+    set +e
+    trap '' PIPE
     if [ "$_pqg_rc" -eq 0 ] && [ "$_pqg_decided" -ne 1 ]; then
-        echo "plan-quality-gate: BLOCKED — exited without a gate decision (a helper library likely failed to parse); failing closed." >&2
-        echo "plan-quality-gate: emergency override: export YAKOS_PLAN_QUALITY_DISABLE=1" >&2
+        echo "plan-quality-gate: BLOCKED — exited without a gate decision (a helper library likely failed to parse); failing closed." >&2 || true
+        echo "plan-quality-gate: emergency override: export YAKOS_PLAN_QUALITY_DISABLE=1" >&2 || true
         exit 2
     fi
     if [ "$_pqg_rc" -ne 0 ] && [ "$_pqg_rc" -ne 2 ]; then
-        echo "plan-quality-gate: BLOCKED — internal error (exit $_pqg_rc); failing closed rather than passing the dispatch." >&2
-        echo "plan-quality-gate: emergency override: export YAKOS_PLAN_QUALITY_DISABLE=1" >&2
+        echo "plan-quality-gate: BLOCKED — internal error (exit $_pqg_rc); failing closed rather than passing the dispatch." >&2 || true
+        echo "plan-quality-gate: emergency override: export YAKOS_PLAN_QUALITY_DISABLE=1" >&2 || true
         exit 2
     fi
 }
 trap _pqg_on_exit EXIT
+# SIGPIPE (closed reader on stderr/stdout) would kill the script with 141 and
+# skip nothing useful; ignore it so a failed write is just a failed write.
+# SIGTERM/SIGHUP/SIGINT would exit 143/129/130, all non-blocking: turn them
+# into the blocking status. (`exit 2` still runs the EXIT trap, with rc 2.)
+trap '' PIPE
+trap 'exit 2' TERM HUP INT
 
 # Emergency disable is checked BEFORE hi_init so it stays reachable when jq is
 # broken (same ordering the other blocking hooks use).
@@ -82,15 +95,19 @@ HOOK_FAIL_CLOSED=1
 # A failed `.` does NOT trip `set -e` on bash 3.2 (macOS /bin/bash): the script
 # would carry on without the library and could pass. Check each source explicitly.
 _pqg_source() {
+    # $2 names the sentinel variable the library sets on its LAST line. bash 5
+    # returns 0 from `.` even when the file has a syntax error partway through
+    # (it keeps executing after the bad command), so a zero status alone does
+    # not prove the library loaded; the sentinel does.
     # shellcheck disable=SC1090  # path is one of three fixed lib files below
-    if [ ! -r "$1" ] || ! . "$1"; then
-        echo "plan-quality-gate: BLOCKED — cannot load helper library '$1'; failing closed." >&2
+    if [ ! -r "$1" ] || ! . "$1" || [ "${!2:-0}" != "1" ]; then
+        echo "plan-quality-gate: BLOCKED — cannot load helper library '$1' (failed to parse or run to completion); failing closed." >&2 || true
         exit 2
     fi
 }
-_pqg_source "$HOOK_DIR/lib/hook-input.sh"
-_pqg_source "$HOOK_DIR/lib/hook-output.sh"
-_pqg_source "$HOOK_DIR/lib/paths.sh"
+_pqg_source "$HOOK_DIR/lib/hook-input.sh" HI_LOADED
+_pqg_source "$HOOK_DIR/lib/hook-output.sh" HO_LOADED
+_pqg_source "$HOOK_DIR/lib/paths.sh" YAKOS_PATHS_LOADED
 for _pqg_fn in hi_init hi_tool ho_log ho_block yakos_current_dir; do
     if ! command -v "$_pqg_fn" >/dev/null 2>&1; then
         echo "plan-quality-gate: BLOCKED — helper '$_pqg_fn' is not defined after loading libraries; failing closed." >&2

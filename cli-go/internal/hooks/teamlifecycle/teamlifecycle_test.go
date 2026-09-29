@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -509,6 +510,52 @@ func TestTeamLifecycle_KanbanMove_EOFCases(t *testing.T) {
 			}
 			if string(got) != tc.want {
 				t.Errorf("kanban.md mismatch\n got: %q\nwant: %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTeamLifecycle_KanbanMove_WarnIdempotent pins K-101. When the destination
+// section is absent or precedes the source, the task cannot move. Each
+// lifecycle event used to append another WARN line plus a relocated copy of
+// the task; now the task stays where it is with exactly one WARN above it, and
+// repeated events leave the board byte-identical. Mirrored byte for byte by
+// tests/run-team-lifecycle-kanban-test.sh against the bash hook.
+func TestTeamLifecycle_KanbanMove_WarnIdempotent(t *testing.T) {
+	const warn = "# WARN: yakos kanban auto-update found src but no dst section"
+	cases := []struct {
+		name, tool, in, want string
+	}{
+		{"no DONE section", "TeamDelete",
+			"## TODO\n\n## IN PROGRESS\n- [-] K-1 task\n  - notes: x\n",
+			"## TODO\n\n## IN PROGRESS\n" + warn + "\n- [-] K-1 task\n  - notes: x\n"},
+		{"dst before src", "TeamCreate",
+			"## IN PROGRESS\n\n## TODO\n- [ ] K-2 t2\n- [ ] K-3 t3\n",
+			"## IN PROGRESS\n\n## TODO\n" + warn + "\n- [ ] K-2 t2\n- [ ] K-3 t3\n"},
+		{"unmovable task mid-file stays in place", "TeamDelete",
+			"## TODO\n\n## IN PROGRESS\n- [-] K-1 a\n  - n: 1\n- [-] K-9 b\n\n## NOTES\ntext\n",
+			"## TODO\n\n## IN PROGRESS\n" + warn + "\n- [-] K-1 a\n  - n: 1\n- [-] K-9 b\n\n## NOTES\ntext\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			work := t.TempDir()
+			kb := filepath.Join(work, "kanban.md")
+			if err := os.WriteFile(kb, []byte(tc.in), 0644); err != nil {
+				t.Fatal(err)
+			}
+			h := &teamlifecycle.Hook{WorkCurrentDir: work, NowFn: fixedNow}
+			for fire := 1; fire <= 3; fire++ {
+				_, _ = h.Run(context.Background(), makeInput(tc.tool, "team-k101", "sess-k101"))
+				got, err := os.ReadFile(kb)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(got) != tc.want {
+					t.Fatalf("after fire %d kanban.md mismatch\n got: %q\nwant: %q", fire, got, tc.want)
+				}
+				if n := strings.Count(string(got), warn); n != 1 {
+					t.Fatalf("after fire %d: %d WARN lines, want 1", fire, n)
+				}
 			}
 		})
 	}

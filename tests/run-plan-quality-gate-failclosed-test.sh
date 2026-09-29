@@ -313,3 +313,8 @@ fi
 echo
 echo "Results: $pass passed, $fail failed"
 if [ "$fail" -gt 0 ]; then printf '%b' "$fail_log"; exit 1; fi
+
+# K-101: lying-jq, exit-trap/signal and helper-lib parse-guard coverage. Lives in
+# its own file because it also drives every other hook; run here so the
+# plan-quality-gate workflow (which already runs this file) picks it up.
+bash "$REPO_ROOT/tests/run-hook-hardening-test.sh"
