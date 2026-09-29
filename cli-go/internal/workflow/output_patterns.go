@@ -271,20 +271,28 @@ func tagEncode(s string) string {
 	return b.String()
 }
 
-// countStrayTagChars counts tag characters that are NOT part of a subdivision
-// flag emoji (U+1F3F4 followed by tag characters ending in U+E007F), the one
-// legitimate use of the block.
+// isSubdivisionTag reports the tag characters valid in a UTS #51 subdivision
+// tag spec: a-z (U+E0061-E007A) and 0-9 (U+E0030-E0039).
+func isSubdivisionTag(r rune) bool {
+	return (r >= 0xE0061 && r <= 0xE007A) || (r >= 0xE0030 && r <= 0xE0039)
+}
+
+// countStrayTagChars counts tag characters that are NOT part of a valid
+// subdivision flag emoji, the one legitimate use of the block. A valid
+// sequence is exactly: U+1F3F4, then 2 to 7 tag characters drawn from a-z and
+// 0-9 only, then the cancel tag U+E007F, all contiguous. Anything else
+// (longer, other characters, tags after the cancel tag) is stray.
 func countStrayTagChars(s string) int {
 	rs := []rune(s)
 	n := 0
 	for i := 0; i < len(rs); i++ {
 		if rs[i] == 0x1F3F4 {
 			j := i + 1
-			for j < len(rs) && isTagChar(rs[j]) {
+			for j < len(rs) && isSubdivisionTag(rs[j]) {
 				j++
 			}
-			if j > i+1 && rs[j-1] == 0xE007F {
-				i = j - 1
+			if body := j - (i + 1); body >= 2 && body <= 7 && j < len(rs) && rs[j] == 0xE007F {
+				i = j // skip the whole valid sequence, cancel tag included
 				continue
 			}
 		}
@@ -392,6 +400,10 @@ func normalizeVariants(s string) [2]string {
 			if r >= 0xE0020 && r <= 0xE007E {
 				drop.WriteByte(byte(r - 0xE0000))
 				space.WriteByte(byte(r - 0xE0000))
+			} else {
+				// Cancel tag and other non-printable tags separate words.
+				drop.WriteByte(' ')
+				space.WriteByte(' ')
 			}
 			continue
 		}
