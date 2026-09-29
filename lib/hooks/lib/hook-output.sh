@@ -17,7 +17,8 @@
 if [ "${HO_LOADED:-0}" = "1" ]; then
     return 0 2>/dev/null || exit 0
 fi
-HO_LOADED=1
+# HO_LOADED=1 is set on the LAST line of this file (K-101): a checked `.` must mean
+# "parsed through to the end", not merely "started".
 
 # paths.sh provides yakos_work_dir / yakos_current_dir / yakos_logs_dir /
 # yakos_bypass_file etc. — the canonical resolver shared with the CLI.
@@ -83,7 +84,9 @@ ho_block() {
     # exit 2. The hook should already have written its log record before
     # calling this.
     local hook="$1" reason="$2"
-    echo "${hook}: ${reason}" >&2
+    # `|| true` (K-101): with stderr closed the echo fails, and under a caller's
+    # `set -e` that would exit 1 (non-blocking) before the `exit 2` below.
+    echo "${hook}: ${reason}" >&2 || true
     exit 2
 }
 
@@ -177,3 +180,6 @@ ho_check_bypass_exact() {
         }
     ' "$bypass_file"
 }
+
+# Must stay the last statement: reaching it proves the whole file parsed.
+HO_LOADED=1
