@@ -11,6 +11,10 @@ import (
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
+// stateDirName is the base name of the yakOS-owned state directory
+// (statepath.Dir's default). Kept in sync by TestStateDirName_MatchesStatepath.
+const stateDirName = ".yakos-state"
+
 // dispatchLogPath returns the path to the active dispatch-log file.
 // Delegates to statepath.DispatchLog() — the single canonical resolver
 // shared with perfdash and metricsdash so reader and writer always agree.
@@ -28,8 +32,19 @@ func appendEvent(path string, line []byte) error {
 	// it; 0700/0600 restrict it to the owner, matching every other
 	// yakOS-written credential/state file (console token, REST tokens,
 	// setup token — all 0600/0700).
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil { //nolint:gosec
-		return fmt.Errorf("events: mkdir %s: %w", filepath.Dir(path), err)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil { //nolint:gosec
+		return fmt.Errorf("events: mkdir %s: %w", dir, err)
+	}
+	// S-2 R12 / N5: MkdirAll and O_CREATE apply their modes only when they
+	// create the path, so an existing 0755 directory (bash-created install)
+	// or an attacker-pre-created file keeps its mode. Verify and tighten the
+	// yakOS-owned state directory; an operator-chosen override directory
+	// (YAKOS_DISPATCH_LOG) is left alone, since it is not ours to chmod.
+	if filepath.Base(dir) == stateDirName {
+		if err := statepath.SecureDir(dir); err != nil {
+			return fmt.Errorf("events: %w", err)
+		}
 	}
 
 	// Open with O_APPEND for atomic multi-process appends. noFollowFlag
@@ -40,6 +55,12 @@ func appendEvent(path string, line []byte) error {
 		return fmt.Errorf("events: open %s: %w", path, err)
 	}
 	defer func() { _ = f.Close() }()
+
+	// Tighten via the open descriptor (fchmod, no TOCTOU) and refuse a file
+	// owned by another user — see statepath.SecureFile.
+	if err := statepath.SecureFile(f); err != nil {
+		return fmt.Errorf("events: %w", err)
+	}
 
 	// flock for cross-process append safety (mirrors bash flock usage).
 	// Per-platform impl in lock_unix.go / lock_windows.go.

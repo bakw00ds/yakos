@@ -2,7 +2,9 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -228,10 +230,10 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 	}
 
 	// --- Resolve project and yakos root ---
-	if err := validateProjectPath(p.Project); err != nil {
+	project, err := resolveProjectPath(p.Project)
+	if err != nil {
 		return nil, Result{}, err
 	}
-	project := p.Project
 	if project == "" {
 		project = s.cfg.WorkspaceRoot
 	}
@@ -319,11 +321,11 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 
 	// --- Bus: dispatch started ---
 	if s.cfg.Bus != nil {
-		s.cfg.Bus.Publish(wsbus.TopicDispatchStarted, wsbus.DispatchStartedPayload{
+		s.cfg.Bus.PublishMeta(wsbus.TopicDispatchStarted, wsbus.DispatchStartedPayload{
 			Agent:   p.Agent,
 			Project: project,
 			TS:      time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: operatorID})
 	}
 
 	// --- Execute ---
@@ -335,12 +337,12 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 		if err != nil {
 			exitCode = -1
 		}
-		s.cfg.Bus.Publish(wsbus.TopicDispatchFinished, wsbus.DispatchFinishedPayload{
+		s.cfg.Bus.PublishMeta(wsbus.TopicDispatchFinished, wsbus.DispatchFinishedPayload{
 			Agent:    p.Agent,
 			Project:  project,
 			ExitCode: exitCode,
 			TS:       time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: operatorID})
 	}
 
 	return stdout, result, err
@@ -498,6 +500,111 @@ func computeBroadScopeDirsResolved() map[string]bool {
 	return out
 }
 
+// broadScopeIdentityExtras are directories that are added to the identity
+// denylist (broadScopeInfos) beyond broadScopeDirs's alias spellings.
+//
+// K-86 (k82-security-review-2026-09-23.md K6): APFS firmlinks are not
+// symlinks, so EvalSymlinks never resolves them; /System/Volumes/Data is the
+// data-volume root holding every writable directory on the machine, and
+// os.SameFile covers its CHILDREN only when the child is itself in the set,
+// so the volume roots must be listed explicitly. /var/root is macOS's root
+// home (broadScopeDirs carries only Linux's /root).
+var broadScopeIdentityExtras = []string{
+	"/System/Volumes/Data",
+	"/System/Volumes",
+	"/var/root",
+	"/private/var/root",
+	"/Volumes",
+	"/Network",
+	"/net",
+	"/Users/Shared",
+}
+
+// broadScopeInfos is the identity (os.FileInfo) form of the broad-scope
+// denylist, computed once at init.
+//
+// K-86 (K5/K6): the string maps above compare SPELLINGS. On a
+// case-insensitive filesystem "/USERS" is "/Users" and on macOS
+// "/System/Volumes/Data/Users" is "/Users", yet neither matches a textual
+// key, and lowercasing would false-reject a legitimate "/users" on
+// case-sensitive Linux. Identity, not spelling, is the portable test: stat
+// every denied directory once and compare the caller's path with os.SameFile
+// (device+inode on POSIX, volume serial+file index on Windows). The string
+// maps are kept as well: they still cover entries that do not exist when the
+// daemon starts and paths that fail to stat.
+var broadScopeInfos = computeBroadScopeInfos()
+
+func computeBroadScopeInfos() []os.FileInfo {
+	seen := make(map[string]bool)
+	var paths []string
+	add := func(p string) {
+		if p == "" || seen[p] {
+			return
+		}
+		seen[p] = true
+		paths = append(paths, p)
+	}
+	for k := range broadScopeDirs {
+		add(filepath.FromSlash(k))
+	}
+	for _, e := range broadScopeIdentityExtras {
+		add(filepath.FromSlash(e))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		add(home)
+	}
+	// Windows: the real system directories live wherever the OS was
+	// installed; %SystemRoot% etc. are authoritative and need no drive guess.
+	for _, env := range []string{"SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "SystemDrive"} {
+		if v := os.Getenv(env); v != "" {
+			if env == "SystemDrive" && !strings.HasSuffix(v, string(filepath.Separator)) {
+				v += string(filepath.Separator)
+			}
+			add(v)
+		}
+	}
+	var infos []os.FileInfo
+	for _, p := range paths {
+		fi, err := os.Stat(p) // follows symlinks: the alias and its target are one identity
+		if err != nil || !fi.IsDir() {
+			continue // absent on this OS: the string maps still cover its spelling
+		}
+		dup := false
+		for _, have := range infos {
+			if os.SameFile(have, fi) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			infos = append(infos, fi)
+		}
+	}
+	return infos
+}
+
+// checkBroadScopeIdentity denies abs when it is the same directory as any
+// broad-scope directory, whatever its spelling. A stat failure other than
+// "does not exist" denies (fail closed): an unreadable path cannot be proven
+// to be something else. A nonexistent path is allowed, as before: it cannot
+// alias an existing directory, and a project that will be created is a
+// legitimate input.
+func checkBroadScopeIdentity(abs string) error {
+	fi, err := os.Stat(abs)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("dispatch: invalid project: cannot verify %q is not a broad-scope directory: %w", abs, err)
+	}
+	for _, broad := range broadScopeInfos {
+		if os.SameFile(fi, broad) {
+			return fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", abs)
+		}
+	}
+	return nil
+}
+
 // validateProjectPath rejects a caller-supplied project path that would hand
 // the dispatched agent (--add-dir + cwd; claude.go:101, codex.go:54,
 // agy.go:29) scope over the entire filesystem, or a scope materially
@@ -524,20 +631,49 @@ func computeBroadScopeDirsResolved() map[string]bool {
 // mechanism — treat this as unverified rather than repeat a specific but
 // incorrect justification.)
 func validateProjectPath(project string) error {
+	_, err := resolveProjectPath(project)
+	return err
+}
+
+// hasDotDotElement reports whether path has a ".." path element.
+func hasDotDotElement(path string) bool {
+	for _, el := range strings.Split(filepath.ToSlash(path), "/") {
+		if el == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveProjectPath validates project (see validateProjectPath) and returns
+// the canonical path the dispatch must use: absolute, cleaned and
+// symlink-resolved when the path exists, or absolute and cleaned when it does
+// not. An empty project returns "" (the caller substitutes its workspace root).
+//
+// K-86 review round 1 (MEDIUM): callers used to validate a cleaned copy and
+// then pass the RAW string to --add-dir and as cwd. filepath.Clean removes
+// "<symlink>/.." lexically, but the kernel resolves the symlink first, so
+// "<dir>/<link-to-/>/.." validated as "<dir>" and executed as "/". Two rules
+// close that: any ".." element in the raw input is rejected, and callers use
+// the returned canonical path instead of the raw string.
+func resolveProjectPath(project string) (string, error) {
 	if project == "" {
-		return nil // caller falls back to the server-configured WorkspaceRoot
+		return "", nil // caller falls back to the server-configured WorkspaceRoot
+	}
+	if hasDotDotElement(project) {
+		return "", fmt.Errorf("dispatch: invalid project: %q must not contain '..' path elements", project)
 	}
 	clean := filepath.Clean(project)
 	if clean == string(filepath.Separator) || clean == "." {
-		return fmt.Errorf("dispatch: invalid project: must not be the filesystem root")
+		return "", fmt.Errorf("dispatch: invalid project: must not be the filesystem root")
 	}
 	if vol := filepath.VolumeName(clean); vol != "" && clean == vol+string(filepath.Separator) {
-		return fmt.Errorf("dispatch: invalid project: must not be a filesystem drive root")
+		return "", fmt.Errorf("dispatch: invalid project: must not be a filesystem drive root")
 	}
 
 	abs, err := filepath.Abs(clean)
 	if err != nil {
-		return fmt.Errorf("dispatch: invalid project: %w", err)
+		return "", fmt.Errorf("dispatch: invalid project: %w", err)
 	}
 	abs = filepath.Clean(abs)
 	// Check the unresolved absolute path against broadScopeDirsResolved
@@ -552,7 +688,7 @@ func validateProjectPath(project string) error {
 	// caller supplying the ALREADY-RESOLVED spelling directly, e.g.
 	// "/private/etc" (round-2 review N1) — see that map's doc comment.
 	if broadScopeDirsResolved[broadScopeKey(abs)] {
-		return fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", abs)
+		return "", fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", abs)
 	}
 	// Resolve symlinks when possible and check again: this is the
 	// complementary case, a project directory that does NOT look broad by
@@ -565,15 +701,20 @@ func validateProjectPath(project string) error {
 		resolved = filepath.Clean(real)
 	}
 	if resolved == string(filepath.Separator) {
-		return fmt.Errorf("dispatch: invalid project: must not be the filesystem root")
+		return "", fmt.Errorf("dispatch: invalid project: must not be the filesystem root")
 	}
 	if vol := filepath.VolumeName(resolved); vol != "" && resolved == vol+string(filepath.Separator) {
-		return fmt.Errorf("dispatch: invalid project: must not be a filesystem drive root")
+		return "", fmt.Errorf("dispatch: invalid project: must not be a filesystem drive root")
 	}
 	if broadScopeDirsResolved[broadScopeKey(resolved)] {
-		return fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", resolved)
+		return "", fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", resolved)
 	}
-	return nil
+	// K-86 (K5/K6): identity check last, catching what no spelling can —
+	// case variants on case-insensitive filesystems and macOS firmlinks.
+	if err := checkBroadScopeIdentity(abs); err != nil {
+		return "", err
+	}
+	return resolved, nil
 }
 
 // broadScopeKey normalizes an absolute, cleaned path for comparison against

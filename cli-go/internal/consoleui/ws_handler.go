@@ -319,7 +319,7 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) webs
 		if sinceStr := conn.Request().URL.Query().Get("since"); sinceStr != "" {
 			if sinceSeq, err := parseSinceSeq(sinceStr); err == nil {
 				for _, ev := range bus.History(sinceSeq) {
-					if !ownerScopedEventVisible(ev, connOperatorID) {
+					if !eventVisibleToConn(ev, connOperatorID, networked) {
 						continue
 					}
 					conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
@@ -344,7 +344,7 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) webs
 				if !ok {
 					return
 				}
-				if !ownerScopedEventVisible(ev, connOperatorID) {
+				if !eventVisibleToConn(ev, connOperatorID, networked) {
 					continue
 				}
 				conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
@@ -366,18 +366,37 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) webs
 	}
 }
 
-// ownerScopedTopics is the set of topics that carry per-operator EventMeta
-// and must be filtered by ownerScopedEventVisible before delivery. Every
-// other topic is a broadcast topic and passes through unchanged.
+// Topic policy for /v1/events fan-out.
+//
+// K-86 (k82-security-review-2026-09-23.md K3 + follow-ups): the filter used
+// to be an owner-scoped DENY list — a topic absent from ownerScopedTopics
+// passed through to every subscriber. A new topic therefore leaked to every
+// operator until someone remembered to list it (fail-open by omission), and
+// dispatch.* (agent name + project path) was in that unlisted set. The policy
+// is now an ALLOW list: a topic is delivered only if it is explicitly
+// classified below; anything else is dropped for every connection, loopback
+// included. Adding a topic means classifying it here, and
+// TestWSTopicPolicy_EveryWsbusTopicIsClassified fails until you do.
+//
+// broadcastTopics carry nothing operator-specific and go to every connection.
+var broadcastTopics = map[string]bool{
+	wsbus.TopicKanbanAdded:  true,
+	wsbus.TopicKanbanMoved:  true,
+	wsbus.TopicPresence:     true,
+	wsbus.TopicFilesChanged: true,
+	"ping":                  true, // synthetic keep-alive; sent directly, not via the bus
+}
+
+// ownerScopedTopics carry per-operator EventMeta and are filtered by
+// ownerScopedEventVisible before delivery.
 //
 // K3 (k82-security-review-2026-09-23.md): the workflow.* topics joined this
-// set alongside fleet.*. Before the fix, every flows run ID, workflow name,
-// node ID and agent name was broadcast to all RoleRead subscribers — which
-// is what made K1's run-ID-guessing attack targetable rather than
-// theoretical, since run IDs are handed out on this same stream. The fix
-// mirrors the existing fleet.* mechanism exactly: workflow.Engine now calls
-// Bus.PublishMeta with EventMeta.OwnerOperatorID set to the run's owner
-// (see internal/workflow/engine.go's run/runNode/nodeFailure).
+// set alongside fleet.*; workflow.Engine publishes them with
+// Bus.PublishMeta and the run's owner.
+//
+// K-86: dispatch.* joined too. The payload carries the agent name and the
+// project path, and dispatch.Service now publishes with the dispatching
+// operator as owner.
 var ownerScopedTopics = map[string]bool{
 	wsbus.TopicFleetStarted:          true,
 	wsbus.TopicFleetFinished:         true,
@@ -386,18 +405,60 @@ var ownerScopedTopics = map[string]bool{
 	wsbus.TopicWorkflowNodeStarted:   true,
 	wsbus.TopicWorkflowNodeFinished:  true,
 	wsbus.TopicWorkflowNodeTruncated: true,
+	wsbus.TopicDispatchStarted:       true,
+	wsbus.TopicDispatchFinished:      true,
+}
+
+// ownerRequiredTopics are the owner-scoped topics for which an EMPTY owner
+// does NOT mean "broadcast". For the others an empty owner is a deliberate
+// "visible to all"; for dispatch.* it can only mean the publisher forgot to
+// attribute the event (plain Bus.Publish stamps an empty EventMeta), so it is
+// withheld from any authenticated connection instead of leaking.
+var ownerRequiredTopics = map[string]bool{
+	wsbus.TopicDispatchStarted:  true,
+	wsbus.TopicDispatchFinished: true,
+}
+
+// unresolvedViewerID is the connection identity used for a networked
+// connection that has no resolved operator ID. It is not a valid operator ID
+// (control character), so it matches no event owner and every owner-scoped
+// event is withheld from it.
+const unresolvedViewerID = "\x00unresolved"
+
+// eventVisibleToConn is the single delivery decision used by both the live
+// stream and the ?since= replay. networked=false is the loopback listener:
+// its clients are the machine owner (loopback RemoteAddr + bearer token) and
+// their hello operator_id is cooperative, so dispatch.* events — attributed
+// by the daemon to an OS-user/label that a browser hello never matches — are
+// delivered to them rather than filtered on a self-asserted ID. On the
+// networked listener the operator ID is server-derived (cert CN or session),
+// and a connection with none resolves to a viewer that sees no scoped event.
+func eventVisibleToConn(ev wsbus.Event, connOperatorID string, networked bool) bool {
+	viewer := connOperatorID
+	if networked && viewer == "" {
+		viewer = unresolvedViewerID
+	}
+	if !networked && ownerRequiredTopics[ev.Topic] {
+		viewer = ""
+	}
+	return ownerScopedEventVisible(ev, viewer)
 }
 
 // ownerScopedEventVisible reports whether ev should be delivered to a WS
 // connection whose authoritative operator ID is connOperatorID.
 //
-// For topics in ownerScopedTopics (fleet.* and workflow.*), the event's
-// EventMeta carries OwnerOperatorID and Shared. The event is visible when:
+// Unknown topics (neither in broadcastTopics nor ownerScopedTopics) are
+// dropped for every connection, including the loopback path
+// (connOperatorID == ""): fail closed.
+//
+// For topics in ownerScopedTopics, the event's EventMeta carries
+// OwnerOperatorID and Shared. The event is visible when:
 //   - connOperatorID is empty (loopback / single-operator path — no isolation needed)
-//   - ev.Meta.OwnerOperatorID is empty (broadcast event)
+//   - ev.Meta.OwnerOperatorID is empty (broadcast event) — except for
+//     ownerRequiredTopics, where an empty owner is withheld
 //   - ev.Meta.OwnerOperatorID == connOperatorID (the connection owns the session/run)
 //   - ev.Meta.Shared is true (the session is shared; all operators may see it —
-//     workflow.* events never set this; only fleet.* does today)
+//     workflow.* and dispatch.* events never set this; only fleet.* does today)
 //
 // Fail-closed: an owner-scoped event with nil Meta is WITHHELD from any
 // authenticated connection (connOperatorID != ""). Any future code path
@@ -405,12 +466,14 @@ var ownerScopedTopics = map[string]bool{
 // Bus.PublishMeta must not leak to other operators — withholding is the
 // safe default.
 //
-// All other topics pass through unchanged (Meta is nil for those events).
 // The client payload is NEVER modified; Meta is server-side-only (json:"-").
 func ownerScopedEventVisible(ev wsbus.Event, connOperatorID string) bool {
-	// Non-scoped topics: always deliver.
-	if !ownerScopedTopics[ev.Topic] {
+	if broadcastTopics[ev.Topic] {
 		return true
+	}
+	// Fail-closed allow list: a topic nobody classified is not delivered.
+	if !ownerScopedTopics[ev.Topic] {
+		return false
 	}
 	// Loopback / single-operator path: empty connOperatorID means deliver all.
 	if connOperatorID == "" {
@@ -422,9 +485,10 @@ func ownerScopedEventVisible(ev wsbus.Event, connOperatorID string) bool {
 	if ev.Meta == nil {
 		return false
 	}
-	// Broadcast event (OwnerOperatorID empty): deliver to all.
+	// Broadcast event (OwnerOperatorID empty): deliver to all, unless the
+	// topic requires an owner.
 	if ev.Meta.OwnerOperatorID == "" {
-		return true
+		return !ownerRequiredTopics[ev.Topic]
 	}
 	// Owned by this connection's operator, or session is shared.
 	return ev.Meta.OwnerOperatorID == connOperatorID || ev.Meta.Shared

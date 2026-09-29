@@ -83,7 +83,7 @@ func newFleetTestServer(t *testing.T) (*httptest.Server, string, *dispatch.Sessi
 	})
 
 	wrapped := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 	return ts, tok, consoleui.RegistryForTest(srv), srv
@@ -116,7 +116,7 @@ func newFleetTestServerWithIdentity(t *testing.T, id netid.Identity) (*httptest.
 	// Inject identity before the mux so requireRole and fleet scoping fire.
 	handler := consoleui.RequireTokenForNonStatic(tok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(id, srv.Handler())))
+			injectIdentityMiddleware(id, srv.HandlerForTest())))
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 	return ts, tok, consoleui.RegistryForTest(srv), srv
@@ -391,11 +391,13 @@ func TestFleet_LoopbackSeesAllSessions(t *testing.T) {
 // UNRESOLVED identity (Resolved=false — the resolver middleware did not run
 // at all, e.g. a future mount that skips it; this is NOT what loopback
 // traffic looks like, see TestFleet_LoopbackSeesAllSessions above) must see
-// NO sessions, not every operator's. newFleetTestServer(t) uses srv.Handler()
+// NO sessions, not every operator's. newFleetTestServer(t) uses srv.HandlerForTest()
 // with no identity middleware injected, producing exactly the zero-value
 // (Resolved=false) Identity this test needs.
 func TestFleet_UnresolvedIdentityFailsClosed(t *testing.T) {
-	ts, tok, reg, srv := newFleetTestServer(t)
+	// S-2 R17: a bare srv.HandlerForTest() now acts as the loopback operator, so the
+	// unresolved identity this test needs is injected explicitly.
+	ts, tok, reg, srv := newFleetTestServerWithIdentity(t, netid.Identity{})
 
 	hub := srv.ChatHub()
 	if err := hub.OpenSession("sess-unresolved-a", "alice", false); err != nil {
@@ -421,8 +423,11 @@ func TestFleet_UnresolvedIdentityFailsClosed(t *testing.T) {
 	})
 
 	resp := get(t, ts.URL+"/api/fleet", tok)
+	if resp.StatusCode == http.StatusForbidden {
+		return // refused outright by the fail-closed role gate: nothing leaked
+	}
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d; want 200", resp.StatusCode)
+		t.Fatalf("status=%d; want 403 (role gate) or 200 with no sessions", resp.StatusCode)
 	}
 	fr := decodeFleetResponse(t, resp)
 

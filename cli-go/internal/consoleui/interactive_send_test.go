@@ -59,7 +59,7 @@ func newInteractiveSendTestServer(t *testing.T, mgr *interactive.Manager) sendTe
 	})
 
 	wrapped := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 	return sendTestServer{ts: ts, srv: srv, tok: tok}

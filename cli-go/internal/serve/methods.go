@@ -37,6 +37,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/kanban"
+	"github.com/bakw00ds/yakos/internal/loopbackowner"
 	"github.com/bakw00ds/yakos/internal/pathsafe"
 	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/refresh"
@@ -738,6 +739,19 @@ func handleSupervisePending(cfg Config) jsonrpc.Handler {
 	}
 }
 
+// workflowOwnerID returns the operator ID recorded as the owner of runs
+// started over JSON-RPC: the daemon's own stable loopback operator ID, read
+// from <stateDir>/loopback-operator-id. It is the SAME value the console
+// stamps on loopback HTTP requests (consoleui.resolveRunOperatorID), so a run
+// started here is visible and cancellable to the same operator in the console,
+// and is what yakos.term.create records. It never comes from request params:
+// this method is reachable only over the mode-0600, owner-UID Unix socket, and
+// a caller-supplied owner would let anything on it forge run attribution.
+// loopbackowner.LoadOrCreate never returns "".
+func workflowOwnerID(cfg Config) string {
+	return loopbackowner.LoadOrCreate(cfg.restStateDir())
+}
+
 // ---- yakos.workflow.run -------------------------------------------------------
 
 // workflowRunParams is the request shape for yakos.workflow.run.
@@ -745,9 +759,11 @@ func handleSupervisePending(cfg Config) jsonrpc.Handler {
 // Retrying with the same runID against an existing run dir is not safe;
 // use yakos.workflow.resume for failed runs.
 type workflowRunParams struct {
-	Name       string `json:"name"`                  // workflow file name (without .yaml)
-	RunID      string `json:"run_id"`                // caller-supplied unique run ID
-	OperatorID string `json:"operator_id,omitempty"` // self-asserted attribution
+	Name  string `json:"name"`   // workflow file name (without .yaml)
+	RunID string `json:"run_id"` // caller-supplied unique run ID
+	// There is intentionally NO operator/owner field: the run's owner is
+	// derived server-side (workflowOwnerID). A client-supplied "operator_id"
+	// in the JSON is ignored (K-86; PR #262 did the same for REST).
 }
 
 // workflowRunResult is the response shape for yakos.workflow.run.
@@ -777,6 +793,8 @@ func handleWorkflowRun(cfg Config) jsonrpc.Handler {
 			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("workflow.run: %v", err)}
 		}
 
+		ownerOperatorID := workflowOwnerID(cfg)
+
 		// Run asynchronously. The caller polls workflow.status or watches bus events.
 		// S5: use the daemon's root context (cfg.ServerCtx) as parent so daemon
 		// shutdown cancels in-flight runs. Fall back to Background if not set
@@ -787,7 +805,7 @@ func handleWorkflowRun(cfg Config) jsonrpc.Handler {
 				runCtx = context.Background()
 			}
 			// CLI/RPC callers pass zero IdentityCarrier: loopback path, no RBAC enforcement.
-			_, _ = eng.Run(runCtx, wf, p.RunID, p.OperatorID, dispatch.IdentityCarrier{})
+			_, _ = eng.Run(runCtx, wf, p.RunID, ownerOperatorID, dispatch.IdentityCarrier{})
 		}()
 
 		return workflowRunResult{RunID: p.RunID, Status: "started"}, nil
@@ -798,10 +816,10 @@ func handleWorkflowRun(cfg Config) jsonrpc.Handler {
 
 // workflowResumeParams is the request shape for yakos.workflow.resume.
 type workflowResumeParams struct {
-	Name       string `json:"name"`                  // workflow name (to load current YAML)
-	PriorRunID string `json:"prior_run_id"`          // the run to resume from
-	NewRunID   string `json:"new_run_id"`            // new run ID for the forked run
-	OperatorID string `json:"operator_id,omitempty"` // self-asserted attribution
+	Name       string `json:"name"`         // workflow name (to load current YAML)
+	PriorRunID string `json:"prior_run_id"` // the run to resume from
+	NewRunID   string `json:"new_run_id"`   // new run ID for the forked run
+	// No operator/owner field — see workflowRunParams.
 }
 
 // workflowResumeResult is the response shape for yakos.workflow.resume.
@@ -843,6 +861,8 @@ func handleWorkflowResume(cfg Config) jsonrpc.Handler {
 			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("workflow.resume: %v", err)}
 		}
 
+		ownerOperatorID := workflowOwnerID(cfg)
+
 		// S5: same as handleWorkflowRun — use daemon root ctx for cancellation.
 		go func() {
 			runCtx := cfg.ServerCtx
@@ -853,7 +873,7 @@ func handleWorkflowResume(cfg Config) jsonrpc.Handler {
 			// The Engine.Resume call below validates again, but early rejection gives
 			// a clearer RPC error instead of a filesystem error.
 			// CLI/RPC callers pass zero IdentityCarrier: loopback path, no RBAC enforcement.
-			_, _ = eng.Resume(runCtx, wf, p.PriorRunID, p.NewRunID, p.OperatorID, dispatch.IdentityCarrier{})
+			_, _ = eng.Resume(runCtx, wf, p.PriorRunID, p.NewRunID, ownerOperatorID, dispatch.IdentityCarrier{})
 		}()
 
 		return workflowResumeResult{

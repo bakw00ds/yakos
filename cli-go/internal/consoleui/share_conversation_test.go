@@ -56,7 +56,7 @@ func newShareConvTestServer(t *testing.T) (ts *httptest.Server, tok string, hub 
 	})
 
 	wrapped := consoleui.RequireTokenForNonStatic(tok2,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts2 := httptest.NewServer(wrapped)
 	t.Cleanup(ts2.Close)
 	return ts2, tok2, srv.ChatHub()

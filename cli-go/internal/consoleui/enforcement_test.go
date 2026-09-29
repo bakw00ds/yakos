@@ -64,7 +64,7 @@ func newEnforcementTestServer(t *testing.T, id netid.Identity) (*httptest.Server
 	// Wrap with injectIdentityMiddleware (innermost) then token/JSON gates.
 	handler := consoleui.RequireTokenForNonStatic(tok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(id, srv.Handler())))
+			injectIdentityMiddleware(id, srv.HandlerForTest())))
 
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
@@ -259,9 +259,9 @@ func TestRoleEnforcement_RoleRead_PassesPresence(t *testing.T) {
 
 // TestLoopbackInvariant_ZeroValueIdentity_NotBlocked verifies that when the
 // resolver middleware has NOT run (Resolved=false, zero-value Identity from
-// srv.Handler()), the requireRole check is skipped entirely — no 403.
+// srv.HandlerForTest()), the requireRole check is skipped entirely — no 403.
 //
-// This is the loopback safety guarantee: all current tests that use srv.Handler()
+// This is the loopback safety guarantee: all current tests that use srv.HandlerForTest()
 // directly continue to work unmodified.
 func TestLoopbackInvariant_ZeroValueIdentity_NotBlocked(t *testing.T) {
 	t.Parallel()
@@ -285,10 +285,10 @@ func TestLoopbackInvariant_ZeroValueIdentity_NotBlocked(t *testing.T) {
 		WorkDir:           workDir,
 	})
 
-	// Use srv.Handler() directly — no identity injection, no resolver middleware.
+	// Use srv.HandlerForTest() directly — no identity injection, no resolver middleware.
 	// Zero-value Identity has Resolved=false → requireRole is a no-op.
 	handler := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 

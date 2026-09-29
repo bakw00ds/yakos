@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 // conversationIDRe is the strict allow-list for conversation IDs used in
@@ -179,15 +180,22 @@ func (tr *Transcripts) Append(entry TranscriptEntry) error {
 	}
 	line = append(line, '\n')
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil { //nolint:gosec
-		return fmt.Errorf("transcript: mkdir: %w", err)
+	// S-2 R20: a transcript holds the complete conversation (prompts,
+	// streamed replies, cost lines). Same treatment as the dispatch log
+	// (R12): private directory and file, tightened even when they already
+	// exist from a version that wrote 0755/0644.
+	if err := statepath.SecureDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("transcript: %w", err)
 	}
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644) //nolint:gosec
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600) //nolint:gosec
 	if err != nil {
 		return fmt.Errorf("transcript: open: %w", err)
 	}
 	defer func() { _ = f.Close() }()
+	if err := statepath.SecureFile(f); err != nil {
+		return fmt.Errorf("transcript: %w", err)
+	}
 
 	// flock for cross-process append safety (same as dispatch.appendEvent).
 	lockFile(f)

@@ -38,7 +38,7 @@ func newTestServer(t *testing.T) (*httptest.Server, string) {
 		Bus:               bus,
 	})
 	// Use the inner Handler (no Host middleware) for httptest.
-	ts := httptest.NewServer(srv.Handler())
+	ts := httptest.NewServer(srv.HandlerForTest())
 	t.Cleanup(ts.Close)
 	return ts, tok
 }
@@ -73,7 +73,7 @@ func newAuthTestServer(t *testing.T) (*httptest.Server, string) {
 	// RequireLocalHost is port-sensitive so we omit it for httptest
 	// (it is exercised separately below).
 	wrapped := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 	return ts, tok
@@ -471,7 +471,7 @@ func TestAuthMatrix_HostCheck_403OnBadHost(t *testing.T) {
 	// Wrap with RequireLocalHost for a known fake address.
 	// Any request with a Host that doesn't match 127.0.0.1:9999 / localhost:9999 /
 	// [::1]:9999 should get 403.
-	protected := dashauth.RequireLocalHost("127.0.0.1:9999", srv.Handler())
+	protected := dashauth.RequireLocalHost("127.0.0.1:9999", srv.HandlerForTest())
 
 	req := httptest.NewRequest(http.MethodGet, "/kanban/api/board", nil)
 	req.Host = "evil.example.com:9999"
@@ -499,7 +499,7 @@ func TestAuthMatrix_HostCheck_AllowsLoopbackHost(t *testing.T) {
 		Bus:             bus,
 	})
 
-	protected := dashauth.RequireLocalHost("127.0.0.1:9999", consoleui.RequireTokenForNonStatic(tok, srv.Handler()))
+	protected := dashauth.RequireLocalHost("127.0.0.1:9999", consoleui.RequireTokenForNonStatic(tok, srv.HandlerForTest()))
 
 	req := httptest.NewRequest(http.MethodGet, "/kanban/api/board", nil)
 	req.Host = "127.0.0.1:9999"

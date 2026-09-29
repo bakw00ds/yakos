@@ -470,7 +470,7 @@ func TestConsoleConfig_InteractiveManagerWired_ServeLayer(t *testing.T) {
 
 	// Wrap with token middleware and use httptest so we can issue real requests.
 	wrapped := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 

@@ -429,7 +429,7 @@ func TestWebRoot_Loopback_Unchanged(t *testing.T) {
 
 	// Wrap with the loopback token gate (not the networked CSRF/edge stack).
 	loopbackHandler := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(loopbackHandler)
 	t.Cleanup(ts.Close)
 

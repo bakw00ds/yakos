@@ -161,7 +161,7 @@ var errUnresolvedOperatorIdentity = errors.New("flows: no resolvable operator id
 // caller-supplied request body is never consulted.
 func resolveRunOperatorID(r *http.Request) (string, error) {
 	id := netid.IdentityFrom(r.Context())
-	if id.Authenticated {
+	if id.Authenticated && id.OperatorID != "" {
 		return id.OperatorID, nil
 	}
 	if id.OperatorID != "" {
@@ -367,9 +367,9 @@ func (h *flowsHandlers) handleSaveWorkflow(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Per-method role check: POST (save) requires RoleFlowsRun.
-	// Only fires when the resolver middleware has run (id.Resolved==true).
-	// Loopback tests using srv.Handler() bypass this (Resolved=false → no-op).
-	if id := netid.IdentityFrom(r.Context()); id.Resolved && !id.Role.Allows(netid.RoleFlowsRun) {
+	// Fails closed on an unresolved identity (S-2 R17); Server.HandlerForTest()
+	// stamps the loopback identity for bare test mounts.
+	if id := netid.IdentityFrom(r.Context()); !id.Resolved || !id.Role.Allows(netid.RoleFlowsRun) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -472,7 +472,7 @@ func (h *flowsHandlers) handleSaveWorkflow(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Ensure the workflows directory exists.
-	if err := os.MkdirAll(h.workflowsDir(), 0755); err != nil {
+	if err := os.MkdirAll(h.workflowsDir(), 0700); err != nil { // S-2 R20: private when newly created
 		slog.Error("flows: save workflow: mkdirall", "err", err)
 		writeGenericError(w, http.StatusInternalServerError, "failed to create workflows directory")
 		return
@@ -480,7 +480,7 @@ func (h *flowsHandlers) handleSaveWorkflow(w http.ResponseWriter, r *http.Reques
 
 	// Atomic save via temp-rename (same pattern as kanban/write.go).
 	savePath := path + ".tmp"
-	if err := os.WriteFile(savePath, newYAML, 0644); err != nil { //nolint:gosec
+	if err := os.WriteFile(savePath, newYAML, 0600); err != nil { // S-2 R20; the rename below carries this mode
 		slog.Error("flows: save workflow: write tmp", "name", req.Name, "err", err)
 		writeGenericError(w, http.StatusInternalServerError, "failed to save workflow")
 		return
@@ -525,9 +525,9 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Per-method role check: POST (run) requires RoleFlowsRun.
-	// Fires only when resolver middleware has run (Resolved==true).
+	// Fails closed on an unresolved identity (S-2 R17).
 	resolvedID := netid.IdentityFrom(r.Context())
-	if resolvedID.Resolved && !resolvedID.Role.Allows(netid.RoleFlowsRun) {
+	if !resolvedID.Resolved || !resolvedID.Role.Allows(netid.RoleFlowsRun) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -572,7 +572,12 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 	// The per-run context is still created and registered in activeRuns so that
 	// cancel tests can exercise handleCancel even with the fake node runner.
 	if h.nodeRunFn != nil {
-		runID := mintRunID()
+		runID, mintErr := mintRunID()
+		if mintErr != nil {
+			slog.Error("flows: mint run id failed", "err", mintErr)
+			writeGenericError(w, http.StatusInternalServerError, "failed to generate run id")
+			return
+		}
 		fn := h.nodeRunFn
 		nodeRunCtx, nodeRunCancel := context.WithCancel(h.serverCtx)
 
@@ -616,7 +621,12 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Mint a run ID: timestamp + random suffix, path-safe.
-	runID := mintRunID()
+	runID, mintErr := mintRunID()
+	if mintErr != nil {
+		slog.Error("flows: mint run id failed", "err", mintErr)
+		writeGenericError(w, http.StatusInternalServerError, "failed to generate run id")
+		return
+	}
 
 	// R10 (round-1 security review): the run's owner comes from the
 	// resolved server-side identity only — see resolveRunOperatorID's doc
@@ -739,7 +749,12 @@ func (h *flowsHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	// take-over attack structurally impossible rather than merely rejected:
 	// there is no code path left that can turn a caller-supplied value into
 	// a filesystem write target.
-	newRunID := mintRunID()
+	newRunID, mintErr := mintRunID()
+	if mintErr != nil {
+		slog.Error("flows: mint run id failed", "err", mintErr)
+		writeGenericError(w, http.StatusInternalServerError, "failed to generate run id")
+		return
+	}
 
 	// Load the prior run to determine which workflow to use.
 	// Do this BEFORE the engine nil-check so 404 is returned for missing runs
@@ -960,7 +975,7 @@ func (h *flowsHandlers) handleDeleteWorkflow(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Per-method role check: DELETE requires RoleFlowsRun.
-	if id := netid.IdentityFrom(r.Context()); id.Resolved && !id.Role.Allows(netid.RoleFlowsRun) {
+	if id := netid.IdentityFrom(r.Context()); !id.Resolved || !id.Role.Allows(netid.RoleFlowsRun) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -1028,8 +1043,8 @@ func (h *flowsHandlers) handleCancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Per-method role check: cancelling a run requires RoleFlowsRun.
-	// Fires only when resolver middleware has run (Resolved==true).
-	if id := netid.IdentityFrom(r.Context()); id.Resolved && !id.Role.Allows(netid.RoleFlowsRun) {
+	// Fails closed on an unresolved identity (S-2 R17).
+	if id := netid.IdentityFrom(r.Context()); !id.Resolved || !id.Role.Allows(netid.RoleFlowsRun) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -1103,21 +1118,31 @@ func (h *flowsHandlers) handleRunDispatch(w http.ResponseWriter, r *http.Request
 
 // ---- Helpers -------------------------------------------------------------------
 
-// mintRunID generates a path-safe run ID of the form "run-<timestamp>-<rand6>".
-// The timestamp prefix makes runs sort chronologically; the random suffix
-// avoids collisions on concurrent triggers.
-func mintRunID() string {
+// runIDRandBytes is the width of the random suffix in a minted run ID:
+// 16 bytes = 128 bits, rendered as 32 lowercase hex characters. The full
+// ID ("run-" + 15-char timestamp + "-" + 32 hex = 52 chars) stays inside the
+// workflow ID pattern's 64-character cap (^[a-z0-9][a-z0-9-]{0,63}$).
+const runIDRandBytes = 16
+
+// mintRunID generates a path-safe run ID of the form
+// "run-<yyyymmdd-hhmmss>-<32 hex>". The timestamp prefix makes runs sort
+// chronologically; the suffix is 128 bits from crypto/rand.
+//
+// K-86 (k82-security-review-2026-09-23.md K3): the suffix used to be 24 bits
+// over a second-resolution timestamp, so IDs were guessable in a per-second
+// bucket, and a crypto/rand failure silently fell back to a clock-derived
+// suffix. Run IDs are write targets (resume) and authorization keys (run
+// lookups), so there is no safe weak fallback: on a randomness failure this
+// returns an error and the caller refuses the request. Uniqueness is still
+// enforced independently by the engine's exclusive run-directory create
+// (workflow.ErrRunIDExists).
+func mintRunID() (string, error) {
 	ts := time.Now().UTC().Format("20060102-150405")
-	randBytes := make([]byte, 3)
+	randBytes := make([]byte, runIDRandBytes)
 	if _, err := cryptoRead(randBytes); err != nil {
-		// Fallback to a simpler scheme using nanoseconds if crypto/rand fails.
-		ns := fmt.Sprintf("%d", time.Now().UnixNano())
-		if len(ns) > 6 {
-			ns = ns[len(ns)-6:]
-		}
-		return "run-" + ts + "-" + ns
+		return "", fmt.Errorf("flows: mint run id: %w", err)
 	}
-	return fmt.Sprintf("run-%s-%x", ts, randBytes)
+	return fmt.Sprintf("run-%s-%x", ts, randBytes), nil
 }
 
 // sanitizeErr strips newlines from error messages before sending to the client.

@@ -356,7 +356,36 @@ type projectPaths struct {
 	counter     string
 }
 
+// ensureContainedInACRoot verifies <acRoot>/<project>, after resolving
+// symlinks, is still inside the resolved acRoot.
+//
+// S-2 R21: ValidateProjectSlug is lexical (a single path segment), so a slug
+// whose <acRoot>/<slug> is a symlink to elsewhere passes it and every later
+// read/write follows the link out of agent-control. Planting the link needs
+// local write access to acRoot, which keeps this LOW, but the containment
+// check is cheap and closes the class. A link that stays inside acRoot is
+// allowed; a project that does not exist yet is left to the caller's own
+// existence check.
+func ensureContainedInACRoot(acRoot, project string) error {
+	realRoot, err := filepath.EvalSymlinks(acRoot)
+	if err != nil {
+		return nil // acRoot itself missing: the .project-path stat below reports it
+	}
+	realProj, err := filepath.EvalSymlinks(filepath.Join(acRoot, project))
+	if err != nil {
+		return nil // project dir missing: reported by the caller's stat
+	}
+	rel, err := filepath.Rel(realRoot, realProj)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("supervise: project %q resolves outside %s; refusing", project, acRoot)
+	}
+	return nil
+}
+
 func resolveProjectPaths(acRoot, project string) (projectPaths, error) {
+	if err := ensureContainedInACRoot(acRoot, project); err != nil {
+		return projectPaths{}, err
+	}
 	cdFile := filepath.Join(acRoot, project, ".project-path")
 	if _, err := os.Stat(cdFile); err != nil {
 		return projectPaths{}, fmt.Errorf("supervise: %s missing; run 'yakos init %s --project <repo>' first", cdFile, project)

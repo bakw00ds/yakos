@@ -392,7 +392,7 @@ type Server struct {
 //   - The loopback path is additionally wrapped by RequireLocalHost.
 //   - Sub-dashboard handlers are mounted via Handler() without their inner
 //     per-dashboard Host/token middleware.
-//   - /v1/events is mounted from wsbus.Server.Handler() which enforces
+//   - /v1/events is mounted from wsbus.Server.HandlerForTest() which enforces
 //     loopback-only + Origin allow-list (DNS-rebinding defence).
 func New(cfg Config) (*Server, error) {
 	if cfg.NetworkedMode && (cfg.AuthSessionStore == nil || cfg.UserStore == nil) {
@@ -722,10 +722,44 @@ func withBuildIDHeader(next http.Handler) http.Handler {
 	})
 }
 
-// Handler returns the underlying http.Handler for mounting in tests.
+// HandlerForTest returns the bare mux wrapped only in the local-operator
+// stamp, for mounting in tests. It is NOT a production handler: it omits the
+// resolver, token and Host middleware, and grants admin to a request with no
+// identity. Production must use FullHandler / Serve (K-86 review: renamed from
+// Handler so it cannot be mounted by accident).
 // Neither the Host-header middleware nor the token middleware is applied here —
 // the caller supplies them.
-func (s *Server) Handler() http.Handler { return s.mux }
+func (s *Server) HandlerForTest() http.Handler {
+	return stampLoopbackIfNoIdentity(s.mux)
+}
+
+// stampLoopbackIfNoIdentity gives a request that carries NO identity at all a
+// resolved local-operator identity: RoleAdmin, Authenticated=false, and an
+// EMPTY operator ID.
+//
+// S-2 R17: the role gates fail closed on an unresolved identity, so a bare
+// mount of the mux (Server.HandlerForTest(), used directly by tests and never by
+// production, whose chain always includes the resolver) needs an identity to
+// act as the single local operator. The operator ID is deliberately left
+// empty rather than set to the stable loopback ID: handlers that prefer a
+// resolved ID over a client-supplied token (chat) then keep taking the token
+// from the request body, exactly as they did for the zero identity, so bare
+// mounts behave as before apart from passing the role gates.
+//
+// Only an ABSENT identity is stamped: one injected explicitly, including an
+// explicit unresolved zero Identity, is passed through untouched so it is
+// still enforced.
+func stampLoopbackIfNoIdentity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !netid.HasIdentity(r.Context()) {
+			r = r.WithContext(netid.WithIdentityForTest(r.Context(), netid.Identity{
+				Role:     netid.RoleAdmin,
+				Resolved: true,
+			}))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 // FullHandler returns the full protected handler chain (identical to what
 // Serve would use internally), including:
@@ -1554,21 +1588,20 @@ func requireJSONForMutations(next http.Handler) http.Handler {
 // DefaultAddr returns the default console listen address.
 func DefaultAddr() string { return "127.0.0.1:7890" }
 
-// requireRole returns an http.Handler that enforces minimum role when the
-// identity has been resolved (Identity.Resolved==true).
-//
-// The Resolved gate is critical: tests that bypass the resolver middleware by
-// calling srv.Handler() directly receive the zero-value Identity
-// (Resolved=false).  Without the gate, those tests would receive spurious 403s
-// on any route that needs more than RoleRead — breaking the loopback invariant.
+// requireRole returns an http.Handler that enforces a minimum role and FAILS
+// CLOSED: an identity with Resolved=false is refused (S-2 R17).
 //
 // Production paths always run through resolver.Middleware (set up in New()),
-// which stamps Resolved=true on every identity; enforcement fires normally.
+// which stamps Resolved=true on every identity. Tests that mount
+// Server.HandlerForTest() bare get the loopback operator stamped by that method.
 func requireRole(required netid.Role, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := netid.IdentityFrom(r.Context())
-		// Only enforce when the resolver has explicitly resolved the identity.
-		if id.Resolved && !id.Role.Allows(required) {
+		// Fail closed (S-2 R17): an identity the resolver never resolved is
+		// refused, not waved through. Production always resolves (the
+		// resolver wraps every mount); Server.HandlerForTest() stamps a loopback
+		// identity for bare test mounts.
+		if !id.Resolved || !id.Role.Allows(required) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}

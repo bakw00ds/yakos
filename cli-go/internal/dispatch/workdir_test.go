@@ -9,6 +9,7 @@ package dispatch
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/bakw00ds/yakos/internal/runtime"
@@ -23,17 +24,25 @@ func TestWorkDirOverride_Run(t *testing.T) {
 		return nil, Result{}, nil
 	})
 
+	// Dispatch hands the executor the canonical (absolute, symlink-resolved)
+	// project path, so use a real temp dir and compare against its canonical
+	// form; a bare "/p" is rewritten to "D:\p" on Windows.
+	proj := t.TempDir()
+	wantProject, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
 	svc := NewService(ServiceConfig{
 		YakosRoot:     "/yakos",
-		WorkspaceRoot: "/p",
+		WorkspaceRoot: proj,
 		OperatorID:    "op",
 	})
 
 	const overridePath = "/state/ide-worktrees/wt-sess-abc"
-	_, _, err := svc.Run(context.Background(), Params{
+	_, _, err = svc.Run(context.Background(), Params{
 		Agent:           "backend",
 		Task:            "task",
-		Project:         "/p",
+		Project:         proj,
 		WorkDirOverride: overridePath,
 	})
 	if err != nil {
@@ -45,9 +54,9 @@ func TestWorkDirOverride_Run(t *testing.T) {
 			capturedReq.WorkDirOverride, overridePath)
 	}
 	// Project must still be the original project path (not overwritten by WorkDirOverride).
-	if capturedReq.Project != "/p" {
+	if capturedReq.Project != wantProject {
 		t.Errorf("Project must not be changed by WorkDirOverride: got %q, want %q",
-			capturedReq.Project, "/p")
+			capturedReq.Project, wantProject)
 	}
 }
 

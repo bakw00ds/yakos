@@ -332,9 +332,16 @@ ts_start="$(ct_iso_now_z)"
 
 # ---- audit log -------------------------------------------------------------
 
+# S-2 R12: the log holds task previews and operator/conversation/session IDs.
+# `mkdir -p` and `>>` only apply a mode when they CREATE the path, so an
+# existing install keeps 0755/0644 unless we tighten it explicitly (the Go
+# writer, internal/dispatch/events.go, does the same on every append).
 mkdir -p "$HOME/.yakos-state" 2>/dev/null || true
+chmod 700 "$HOME/.yakos-state" 2>/dev/null || true
 DISPATCH_LOG="$HOME/.yakos-state/dispatch-log.ndjson"
 ct_rotate_log "$DISPATCH_LOG" 2>/dev/null || true
+( umask 077; : >> "$DISPATCH_LOG" ) 2>/dev/null || true
+chmod 600 "$DISPATCH_LOG" 2>/dev/null || true
 event_start="$(jq -cn \
     --arg t "$ts_start" \
     --arg agent "$AGENT_NAME" \

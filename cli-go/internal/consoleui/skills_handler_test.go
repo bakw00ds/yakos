@@ -77,7 +77,7 @@ func newSkillsTestServer(t *testing.T, yakosRoot string) (*httptest.Server, stri
 		WorkspaceRoot:     t.TempDir(),
 		YakosRoot:         yakosRoot,
 	})
-	ts := httptest.NewServer(srv.Handler())
+	ts := httptest.NewServer(srv.HandlerForTest())
 	t.Cleanup(ts.Close)
 	return ts, tok
 }
@@ -300,7 +300,7 @@ func TestSkillsHandler_NoToken_Returns401(t *testing.T) {
 
 	// Wrap with the production edge middleware so the auth gate fires.
 	handler := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 

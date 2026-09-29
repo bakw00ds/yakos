@@ -479,7 +479,7 @@ func TestLoopback_SetupRouteNotWired(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/setup", nil)
 	req.Header.Set("Authorization", "Bearer test-token")
 	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, req)
+	srv.HandlerForTest().ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("loopback GET /setup want 404, got %d", rr.Code)

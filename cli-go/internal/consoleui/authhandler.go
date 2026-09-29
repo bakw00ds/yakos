@@ -418,13 +418,12 @@ func requireAuthOrRedirect(uStore *userstore.Store, next http.Handler) http.Hand
 
 		id := netid.IdentityFrom(r.Context())
 
-		// If identity is not yet resolved (zero-value — e.g. in tests that call
-		// srv.Handler() directly without resolver middleware), pass through so
-		// loopback and unit-test callers are not broken.
-		if !id.Resolved {
-			next.ServeHTTP(w, r)
-			return
-		}
+		// An identity the resolver never resolved is NOT waved through
+		// (K-86 review; matches the R17 fail-closed role gates). It is not
+		// Authenticated, so it falls to the unauthenticated handling below:
+		// 401 for API requests, redirect to /login for navigations. This
+		// middleware is only mounted on the networked path, after the
+		// resolver, which always resolves.
 
 		// Authenticated: pass through regardless of method.
 		if id.Authenticated {

@@ -258,14 +258,23 @@ type contextKey struct{}
 // If no middleware has run, it returns a zero Identity (unauthenticated,
 // empty OperatorID, RoleNone, Resolved=false).
 //
-// Enforcement middleware (requireRole) checks Identity.Resolved before applying
-// role gates; a zero Identity with Resolved=false is never blocked by role
-// checks, preserving the loopback-via-srv.Handler() test invariant.
+// Enforcement middleware (requireRole) fails CLOSED on an identity with
+// Resolved=false (S-2 R17): the zero Identity is not a real principal and is
+// refused by every role gate.
 func IdentityFrom(ctx context.Context) Identity {
 	if id, ok := ctx.Value(contextKey{}).(Identity); ok {
 		return id
 	}
 	return Identity{}
+}
+
+// HasIdentity reports whether ANY identity was stored in ctx, including an
+// explicit unresolved one. It lets a caller tell "the resolver never ran"
+// (nothing stored) from "an identity was stored" without treating the zero
+// Identity as a real principal.
+func HasIdentity(ctx context.Context) bool {
+	_, ok := ctx.Value(contextKey{}).(Identity)
+	return ok
 }
 
 // withIdentity returns a new context carrying id.
@@ -390,7 +399,8 @@ func CNFromRequest(r *http.Request) (cn string, ok bool) {
 }
 
 // CNFromTLS extracts the client certificate CN from a TLS connection state.
-// Returns ("", false) if cs is nil or contains no verified peer certificates.
+// Returns ("", false) if cs is nil, contains no verified peer certificates, or
+// the leaf certificate has an empty Subject CN (SAN-only).
 func CNFromTLS(cs *tls.ConnectionState) (cn string, ok bool) {
 	if cs == nil {
 		return "", false
@@ -398,7 +408,15 @@ func CNFromTLS(cs *tls.ConnectionState) (cn string, ok bool) {
 	if len(cs.VerifiedChains) == 0 || len(cs.VerifiedChains[0]) == 0 {
 		return "", false
 	}
-	return cs.VerifiedChains[0][0].Subject.CommonName, true
+	cn = cs.VerifiedChains[0][0].Subject.CommonName
+	if cn == "" {
+		// A CN-less (SAN-only) certificate has no operator identity. Treating
+		// it as ("", true) would merge every such certificate into one shared
+		// anonymous principal and hand owner checks an authenticated-but-empty
+		// ID. Fall through to the fail-closed / session branches instead.
+		return "", false
+	}
+	return cn, true
 }
 
 // ---- Session lookup injection -----------------------------------------------

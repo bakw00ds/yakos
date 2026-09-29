@@ -79,7 +79,7 @@ func newFlowsTestServer(t *testing.T) (*httptest.Server, string, string) {
 		WorkDir:           workDir,
 		// WorkflowEngine intentionally nil — run/resume return 503.
 	})
-	ts := httptest.NewServer(srv.Handler())
+	ts := httptest.NewServer(srv.HandlerForTest())
 	t.Cleanup(ts.Close)
 	return ts, tok, workDir
 }
@@ -496,7 +496,7 @@ func TestFlows_GetRun_ReturnsJSON(t *testing.T) {
 // having run with that identity — see injectIdentityMiddleware). Used by the
 // R10 (round-1 security review) owner-scoping regression tests below, which
 // need per-request identity control that newFlowsTestServer's shared
-// unauthenticated srv.Handler() cannot provide.
+// unauthenticated srv.HandlerForTest() cannot provide.
 func newOwnerScopeTestServer(t *testing.T) (tok, workDir string, doAs func(id netid.Identity, method, path, body string) *http.Response) {
 	t.Helper()
 	stateDir := t.TempDir()
@@ -522,7 +522,7 @@ func newOwnerScopeTestServer(t *testing.T) (tok, workDir string, doAs func(id ne
 		t.Helper()
 		handler := consoleui.RequireTokenForNonStatic(tk,
 			consoleui.RequireJSONForMutations(
-				injectIdentityMiddleware(id, srv.Handler())))
+				injectIdentityMiddleware(id, srv.HandlerForTest())))
 		ts := httptest.NewServer(handler)
 		defer ts.Close()
 
@@ -619,7 +619,7 @@ func newProductionEngineTestServer(t *testing.T, fn workflow.EngineRunFn) (workD
 		t.Helper()
 		handler := consoleui.RequireTokenForNonStatic(tk,
 			consoleui.RequireJSONForMutations(
-				injectIdentityMiddleware(id, srv.Handler())))
+				injectIdentityMiddleware(id, srv.HandlerForTest())))
 		ts := httptest.NewServer(handler)
 		defer ts.Close()
 
@@ -1705,7 +1705,7 @@ func TestFlows_Cancel_RoleReadForbidden(t *testing.T) {
 	// Inject a RoleRead identity so the per-endpoint role check fires.
 	handler := consoleui.RequireTokenForNonStatic(tok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(readOnly, srv.Handler())))
+			injectIdentityMiddleware(readOnly, srv.HandlerForTest())))
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 

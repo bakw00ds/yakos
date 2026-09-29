@@ -54,7 +54,7 @@ func TestRoleNone_AllowsNothing(t *testing.T) {
 // This simulation matches that logic exactly.
 func simulatedRequireRole(required netid.Role, id netid.Identity) bool {
 	// If the resolver did not stamp the identity, let it through (Resolved=false
-	// means "test / loopback via srv.Handler() — no enforcement").
+	// means "test / loopback via srv.HandlerForTest() — no enforcement").
 	if !id.Resolved {
 		return true // not blocked
 	}

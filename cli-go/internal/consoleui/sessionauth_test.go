@@ -126,7 +126,7 @@ func newNetworkedTestServer(t *testing.T, uStore *userstore.Store, aStore *auths
 	// handler.  consoleui.New returns a *Server; its httpSrv.Handler is the
 	// protected chain.  We expose it via a net/http/httptest.Server.
 	ts := httptest.NewServer(consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler())))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest())))
 	t.Cleanup(ts.Close)
 	return ts, tok
 }

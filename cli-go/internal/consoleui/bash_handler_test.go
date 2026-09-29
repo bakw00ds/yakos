@@ -149,10 +149,10 @@ func (ts *bashTestServer) doBashRequest(t *testing.T, sessCookie, csrfCookie *ht
 	return rr
 }
 
-// ---- Loopback path (also tested via loopback srv.Handler() with identity injection) ---
+// ---- Loopback path (also tested via loopback srv.HandlerForTest() with identity injection) ---
 
 // newLoopbackBashServer builds a loopback (non-networked) Server that uses
-// srv.Handler() + identity injection, mirroring enforcement_test.go.
+// srv.HandlerForTest() + identity injection, mirroring enforcement_test.go.
 // This is the preferred pattern for tests that don't need the full middleware stack.
 func newLoopbackBashServer(t *testing.T, id netid.Identity, allowBash bool) (*httptest.Server, string) {
 	t.Helper()
@@ -180,7 +180,7 @@ func newLoopbackBashServer(t *testing.T, id netid.Identity, allowBash bool) (*ht
 	// enforcement_test.go newEnforcementTestServer.
 	handler := consoleui.RequireTokenForNonStatic(tok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(id, srv.Handler())))
+			injectIdentityMiddleware(id, srv.HandlerForTest())))
 
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
@@ -289,7 +289,7 @@ func TestBashHandler_RoleDispatch_Forbidden(t *testing.T) {
 					KanbanProject: "test", MetricsProjectDir: t.TempDir(),
 					PerfWorkDir: t.TempDir(), Bus: bus,
 				})
-				return srv.Handler()
+				return srv.HandlerForTest()
 			}())))
 	_ = rr
 
@@ -328,7 +328,7 @@ func TestBashHandler_RoleRead_Forbidden(t *testing.T) {
 
 	handler := consoleui.RequireTokenForNonStatic(tok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(readID, srv.Handler())))
+			injectIdentityMiddleware(readID, srv.HandlerForTest())))
 
 	body, _ := json.Marshal(map[string]string{"command": "echo hi"})
 	req := httptest.NewRequest(http.MethodPost, "/api/console/bash", bytes.NewReader(body))
@@ -404,7 +404,7 @@ func TestBashHandler_EmptyCommand_BadRequest(t *testing.T) {
 
 	handler := consoleui.RequireTokenForNonStatic(tok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(adminID, srv.Handler())))
+			injectIdentityMiddleware(adminID, srv.HandlerForTest())))
 
 	// Empty string command.
 	body, _ := json.Marshal(map[string]string{"command": ""})
@@ -441,7 +441,7 @@ func TestBashHandler_StdoutTruncation(t *testing.T) {
 
 	handler := consoleui.RequireTokenForNonStatic(tok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(adminID, srv.Handler())))
+			injectIdentityMiddleware(adminID, srv.HandlerForTest())))
 
 	// Generate 20000 bytes of output (well above 16384 cap).
 	// POSIX-portable: head -c + tr avoids bash brace-expansion {1..N} which
@@ -492,7 +492,7 @@ func TestBashHandler_StderrTruncation(t *testing.T) {
 
 	handler := consoleui.RequireTokenForNonStatic(tok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(adminID, srv.Handler())))
+			injectIdentityMiddleware(adminID, srv.HandlerForTest())))
 
 	// 20000 bytes of stderr output.
 	// POSIX-portable: same head -c + tr form as the stdout test, redirected
@@ -539,7 +539,7 @@ func TestBashHandler_ExitCode_NonZero(t *testing.T) {
 
 	handler := consoleui.RequireTokenForNonStatic(tok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(adminID, srv.Handler())))
+			injectIdentityMiddleware(adminID, srv.HandlerForTest())))
 
 	// "exit 42" makes sh exit with code 42.
 	body, _ := json.Marshal(map[string]string{"command": "exit 42"})
@@ -595,7 +595,7 @@ func TestBashHandler_BackgroundedGrandchild_DoesNotHang(t *testing.T) {
 
 	handler := consoleui.RequireTokenForNonStatic(tok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(adminID, srv.Handler())))
+			injectIdentityMiddleware(adminID, srv.HandlerForTest())))
 
 	// "sleep 60 &": sh backgrounds the grandchild and exits 0 immediately.
 	// Without defer killProcessGroup the grandchild keeps stdout/stderr open

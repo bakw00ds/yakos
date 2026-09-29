@@ -684,8 +684,9 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 
 		// Wire the terminal manager when --share-terminal is active (ADR-0008 P1).
-		// The manager is started here and its lifecycle is tied to ctx so
-		// daemon shutdown cleanly stops all active PTY sessions.
+		// The manager is started here; its idle reaper is tied to ctx and Run
+		// calls Manager.Stop after the JSON-RPC server returns, which closes
+		// all active PTY sessions (S-2 R23: ctx alone closes none).
 		// cfg.TerminalManager is also set so the cfgWithBus copy (built below)
 		// picks it up automatically.
 		if cfg.ShareTerminal {
@@ -896,9 +897,10 @@ func Run(ctx context.Context, cfg Config) error {
 				DispatchService: dispatchSvc,
 			},
 		})
-		go func() {
-			mcpHTTPErrCh <- mcpHTTPSrv.Serve(ctx)
-		}()
+		// S-2 R15: bind synchronously so a failed start is reported now.
+		if err := startMCPHTTP(ctx, mcpHTTPSrv, cfg.mcpHTTPAddr(), mcpHTTPErrCh, mcpStartWarn); err != nil {
+			return err
+		}
 	} else {
 		close(mcpHTTPErrCh)
 	}
@@ -914,6 +916,14 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// Serve blocks until ctx is done or the listener is closed.
 	rpcErr := srv.Serve(ctx, ln)
+
+	// S-2 R23: ctx cancellation stops only the terminal manager's idle
+	// reaper; it closes no session. Stop it explicitly so daemon-owned PTYs
+	// are closed and external sessions and their owner records are dropped.
+	// Stop is idempotent, so an injected manager the caller also stops is fine.
+	if cfg.TerminalManager != nil {
+		cfg.TerminalManager.Stop()
+	}
 
 	// Wait for WS, REST, perf-dashboard, console, gRPC, and MCP servers to drain.
 	select {
@@ -960,6 +970,52 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	return rpcErr
+}
+
+// mcpHTTPBinder is the slice of *mcpserver.HTTPServer startMCPHTTP needs.
+type mcpHTTPBinder interface {
+	Listen() (net.Listener, error)
+	ServeListener(ctx context.Context, ln net.Listener) error
+}
+
+// mcpStartWarn is the production warning sink: a structured log line plus a
+// plain line on stderr, where an operator watching the daemon start sees it
+// (the startup banner path is not available this early).
+func mcpStartWarn(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	slog.Error("serve: " + msg)
+	fmt.Fprintln(os.Stderr, "yakos serve: WARNING: "+msg)
+}
+
+// startMCPHTTP binds the MCP streamable-HTTP listener and serves it in the
+// background, reporting a failed start immediately rather than at shutdown.
+//
+// S-2 R15 (s2-daemon-security-review-2026-09-21.md): the transport's result
+// used to be drained only after the daemon stopped, so a bind failure was
+// silent for the whole daemon lifetime. That mattered because the address is
+// fixed and unauthenticated-to-bind: a hostile local process that squats
+// 127.0.0.1:7894 first makes yakOS's listener fail invisibly while MCP clients
+// keep connecting to the squatter and send it their bearer tokens.
+//
+//   - ErrNoWriteToken is fatal: an unauthenticated dispatch endpoint must not
+//     be left half-configured, so startup aborts.
+//   - Any other bind failure is a loud warning and the daemon continues
+//     without the MCP surface; errCh is closed so shutdown does not wait on a
+//     goroutine that never started.
+func startMCPHTTP(ctx context.Context, srv mcpHTTPBinder, addr string, errCh chan error, warn func(format string, args ...any)) error {
+	ln, err := srv.Listen()
+	if err != nil {
+		if errors.Is(err, mcpserver.ErrNoWriteToken) {
+			return err
+		}
+		warn("MCP HTTP transport could not bind %s: %v. MCP clients configured for that address may be talking to another process that holds the port and could capture their bearer tokens; the yakOS MCP surface is DISABLED for this run", addr, err)
+		close(errCh)
+		return nil
+	}
+	go func() {
+		errCh <- srv.ServeListener(ctx, ln)
+	}()
+	return nil
 }
 
 // withSignals returns a context that is cancelled when SIGTERM or SIGINT

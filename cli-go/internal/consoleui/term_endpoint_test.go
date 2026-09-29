@@ -47,7 +47,7 @@ func buildTermTestHandler(t *testing.T) (http.Handler, *termmanager.Manager) {
 		Bus:               bus,
 		TerminalManager:   mgr,
 	})
-	return srv.Handler(), mgr
+	return srv.HandlerForTest(), mgr
 }
 
 // buildNoTermTestHandler builds a server without TerminalManager (flag off).
@@ -70,7 +70,7 @@ func buildNoTermTestHandler(t *testing.T) http.Handler {
 		Bus:               bus,
 		// TerminalManager intentionally nil (--share-terminal off).
 	})
-	return srv.Handler()
+	return srv.HandlerForTest()
 }
 
 // requestWithRole builds an HTTP request whose context carries a resolved
