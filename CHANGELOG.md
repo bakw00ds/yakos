@@ -101,15 +101,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `release-assets.githubusercontent.com`, which the self-updater's redirect
   allowlist did not contain, so `yakos upgrade` failed while fetching
   `checksums.txt`. The allowlist is now `github.com`, `codeload.github.com`
-  and exactly one DNS label under `githubusercontent.com`, over HTTPS on
-  port 443 with no userinfo. Deeper subdomains, look-alike suffixes, trailing
-  dots and non-ASCII hosts are still rejected, and a 10-redirect cap is now
+  `objects.`, `releases.` and `release-assets.githubusercontent.com`, over
+  HTTPS on port 443 with no userinfo. Any other host, including other
+  `githubusercontent.com` subdomains, is rejected, and a 10-redirect cap is now
   enforced explicitly (a custom `CheckRedirect` had silently dropped the
   net/http default). Previously any depth under `github.com` was also
   accepted; that is tightened. **v0.60.0.0 users:** the installed binary
   cannot self-update to the fix; reinstall via `scripts/install.sh` (or
   download the asset and verify the checksum). `yakos upgrade` works again
-  from v0.60.1.0. `yakos doctor` now warns on v0.60.0.0. See UPGRADING.md.
+  from v0.60.1.0. See UPGRADING.md.
 
 - **Hook-bypass scopes are exact-or-glob (K-99).** `ho_check_bypass` and
   the Go `hookbypass.Check` used to match when the entry's Scope merely

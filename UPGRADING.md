@@ -61,7 +61,7 @@ curl -fsSL https://raw.githubusercontent.com/bakw00ds/yakos/main/scripts/install
 
 or download the release asset manually and verify it against
 `checksums.txt` yourself. `yakos upgrade` works again from v0.60.1.0
-onward, and `yakos doctor` warns while you are still on v0.60.0.0.
+onward.
 
 ## Cloned-repo / dev upgrade
 

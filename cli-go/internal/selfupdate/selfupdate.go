@@ -7,13 +7,13 @@
 //     never taken from user input.
 //   - HTTP redirects are followed only when the destination uses HTTPS, has
 //     no userinfo, uses the default port (443), and its host is either
-//     exactly github.com or codeload.github.com, or a single-label
-//     subdomain of githubusercontent.com (objects., release-assets., ...).
-//     GitHub rotates its asset CDN hostnames (K-113: release-assets.
-//     githubusercontent.com), so the CDN is matched by suffix rather than by
-//     a fixed list; deeper subdomains, look-alike suffixes, trailing dots and
-//     non-ASCII hosts are rejected.  Any non-HTTPS redirect, unlisted host,
-//     or chain longer than maxRedirects aborts the download.
+//     one of an explicit host list: github.com, codeload.github.com,
+//     objects.githubusercontent.com, releases.githubusercontent.com and
+//     release-assets.githubusercontent.com (K-113).  If GitHub renames its
+//     CDN host again, add the host rather than trusting the whole zone.
+//     Comparison is on the lower-cased ASCII host; trailing dots, look-alikes
+//     and other subdomains are rejected.  Any non-HTTPS redirect, unlisted
+//     host, or chain longer than maxRedirects aborts the download.
 //   - The release tag is validated against a strict regex before use in
 //     any URL or filename, preventing path traversal.
 //   - Every downloaded binary is SHA-256 verified against the release's
@@ -77,18 +77,14 @@ const (
 // http.Client replaces net/http's built-in cap of 10, so it is re-imposed here.
 const maxRedirects = 10
 
-// allowedExactHosts are the hosts allowed verbatim as redirect destinations.
+// allowedExactHosts is the explicit redirect-destination allowlist.
 var allowedExactHosts = map[string]bool{
-	"github.com":          true,
-	"codeload.github.com": true,
+	"github.com":                           true,
+	"codeload.github.com":                  true,
+	"objects.githubusercontent.com":        true,
+	"releases.githubusercontent.com":       true,
+	"release-assets.githubusercontent.com": true,
 }
-
-// cdnSuffix is the parent domain of GitHub's asset CDN hosts.  Exactly one
-// extra DNS label is allowed in front of it.
-const cdnSuffix = ".githubusercontent.com"
-
-// cdnLabelRe matches the single permitted label in front of cdnSuffix.
-var cdnLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 // tagRe validates a release tag before it is interpolated into any URL or
 // filename.  It accepts the forms "v1.2.3", "v1.2.3.4", "1.2.3", "1.2.3.4".
@@ -542,15 +538,9 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 }
 
 // isAllowedHost reports whether host (lower-cased, port stripped) is on the
-// redirect allowlist: an exact host, or one label under githubusercontent.com.
+// explicit redirect allowlist.
 func isAllowedHost(host string) bool {
-	if allowedExactHosts[host] {
-		return true
-	}
-	if !strings.HasSuffix(host, cdnSuffix) {
-		return false
-	}
-	return cdnLabelRe.MatchString(strings.TrimSuffix(host, cdnSuffix))
+	return allowedExactHosts[host]
 }
 
 // checkRedirectHost returns an error when the redirect destination uses a

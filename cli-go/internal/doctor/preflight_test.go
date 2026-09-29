@@ -971,21 +971,3 @@ func TestCheckGitUsable_Timeout_Warns(t *testing.T) {
 		t.Errorf("expected the specific timeout WARN text; got:\n%s", buf.String())
 	}
 }
-
-func TestCheckBrokenSelfUpdate(t *testing.T) {
-	for _, tc := range []struct {
-		ver  string
-		warn int
-	}{
-		{"0.60.0.0", 1}, {"v0.60.0.0", 1}, {"0.60.1.0", 0}, {"", 0}, {"0.59.0.0", 0},
-	} {
-		r, buf := newPreflightRunner(t, Config{})
-		r.checkBrokenSelfUpdate(tc.ver)
-		if r.report.Warnings != tc.warn {
-			t.Errorf("%q: warnings=%d want %d", tc.ver, r.report.Warnings, tc.warn)
-		}
-		if tc.warn == 0 && buf.Len() != 0 {
-			t.Errorf("%q: expected no output, got %q", tc.ver, buf.String())
-		}
-	}
-}

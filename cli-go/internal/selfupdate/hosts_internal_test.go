@@ -21,6 +21,8 @@ func TestCheckRedirectHost(t *testing.T) {
 		{"https://releases.githubusercontent.com/x", ""},
 		{"https://Release-Assets.GitHubUserContent.com/x", ""},
 		{"https://release-assets.githubusercontent.com:443/x", ""},
+		{"https://raw.githubusercontent.com/x", "disallowed host"},
+		{"https://gist.githubusercontent.com/x", "disallowed host"},
 		{"https://evil.github.com/x", "disallowed host"},
 		{"https://api.github.com/x", "disallowed host"},
 		{"https://githubusercontent.com/x", "disallowed host"},
