@@ -187,7 +187,13 @@ var entries = []Entry{
 		// errors WARN and pass, it never blocks a save.
 		Name:       "plan-quality-score",
 		FailClosed: false,
-		New:        func(cfg Config) Hook { return planqualityscore.New(cfg.WorkCurrentDir, cfg.ProjectDir) },
+		// The scorer locates score-plan.sh from HooksDir/../.. like the
+		// bash hook's HOOK_DIR-relative YAKOS_ROOT default.
+		New: func(cfg Config) Hook {
+			h := planqualityscore.New(cfg.WorkCurrentDir, cfg.ProjectDir)
+			h.HooksDir = cfg.HooksDir
+			return h
+		},
 	},
 	{
 		Name:       "retro-dispatch",

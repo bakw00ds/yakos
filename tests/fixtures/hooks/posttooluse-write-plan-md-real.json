@@ -1,0 +1,18 @@
+{
+  "_doc": "K-99: real PostToolUse Write to work/current/plan.md (target only at tool_input.file_path). The scorer must score the file on disk at hook time.",
+  "session_id": "fixture-plan-score-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "__CLAUDE_PROJECT_DIR__",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "__CLAUDE_PROJECT_DIR__/work/current/plan.md",
+    "content": "# Plan\n"
+  },
+  "tool_response": {
+    "filePath": "__CLAUDE_PROJECT_DIR__/work/current/plan.md",
+    "type": "update"
+  },
+  "tool_use_id": "toolu_plan_score_001"
+}

@@ -14,7 +14,7 @@ writes to its log, so the forensic record remains.
 - **Approved by:** human name
 - **Created:** ISO-8601 UTC timestamp (use the `Z` suffix, e.g. `2026-04-28T09:15:00Z`)
 - **Expires:** ISO-8601 UTC timestamp; 24h max for ad-hoc, 7d max for tracked-dep issues
-- **Scope:** which task / which file pattern / which command
+- **Scope:** the exact value the hook checks (a path, `cap=<name>`, ...) or an explicit glob such as `web/**`. A Scope that merely contains the value does not match; a blank Scope matches nothing.
 - **Follow-up:** plan to remove the bypass
 
 ## Format

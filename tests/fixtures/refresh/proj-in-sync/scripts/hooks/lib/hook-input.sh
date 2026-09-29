@@ -123,9 +123,9 @@ _hi_fail_or_warn() {
         # YAKOS_HOOKS_FAIL_OPEN=1 above already covers the genuine
         # emergency case, so this path can afford to be strict.
         #
-        # Security review R3-2 (round 4): ho_check_bypass's own substring
-        # matching (correct and load-bearing for its OTHER callers — see
-        # its comment in hook-output.sh) meant a Scope that merely
+        # Security review R3-2 (round 4): ho_check_bypass used to match by
+        # substring (exact-or-glob since K-99; a glob such as `*` would
+        # still satisfy this sentinel), so a Scope that merely
         # CONTAINED "degraded-input" also satisfied this probe — an
         # ordinary filename like `api/degraded-input.go`, or even the
         # literal negation `not-degraded-input`. Use

@@ -59,8 +59,8 @@ func TestFnmatchMatchesBashCase(t *testing.T) {
 		{"[-a]", "-", true},
 	}
 	for _, c := range cases {
-		if got := fnmatch(c.pat, c.name); got != c.want {
-			t.Errorf("fnmatch(%q, %q)=%v want %v", c.pat, c.name, got, c.want)
+		if got := fnmatchGlob(c.pat, c.name); got != c.want {
+			t.Errorf("fnmatchGlob(%q, %q)=%v want %v", c.pat, c.name, got, c.want)
 		}
 	}
 }

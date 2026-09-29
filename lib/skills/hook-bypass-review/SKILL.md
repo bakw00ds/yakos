@@ -58,6 +58,13 @@ For each:
 - **Follow-up status:** does the Follow-up field describe a
   concrete action that's been done?
   - If no → the bypass is unaccounted for; surface to operator.
+- **Scope format:** is the Scope an exact value or an explicit glob?
+  - **NEEDS REWRITE** if it is blank, or carries extra text around the
+    value (`path=web/index.js reason=x`, `cap=max_tool_calls (long run)`).
+    Since K-99 these cover nothing (exact-or-glob matching). Rewrite as the
+    exact value, or `prefix/**` for a subtree. Escape-guard bypasses
+    (absolute, `..`, symlink) must stay exact. See
+    `docs/hook-bypass-scope.md`.
 ```
 
 ## Manual pass

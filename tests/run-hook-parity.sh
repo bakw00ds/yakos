@@ -486,9 +486,10 @@ parity_check() {
             # elapsed_seconds (budget-guard: wall-clock since a state file
             # written at case setup, so the two sides' runs can straddle a
             # second boundary; Go's elapsed arithmetic is covered by its own
-            # unit tests instead).
-            norm_bash="$(tail -n 1 "$bash_log" | sed "s|/private$bash_tmp|__SANDBOX__|g; s|$bash_tmp|__SANDBOX__|g" | jq -cS 'del(.ts, .elapsed_seconds)' 2>/dev/null || echo "__unparseable_bash__")"
-            norm_go="$(tail -n 1 "$go_log" | sed "s|/private$tmp2|__SANDBOX__|g; s|$tmp2|__SANDBOX__|g" | jq -cS 'del(.ts, .elapsed_seconds)' 2>/dev/null || echo "__unparseable_go__")"
+            # unit tests instead). plan-quality-score's debounce record carries
+            # age=<n>s / age_s for the same wall-clock reason (K-99).
+            norm_bash="$(tail -n 1 "$bash_log" | sed "s|/private$bash_tmp|__SANDBOX__|g; s|$bash_tmp|__SANDBOX__|g; s|age=[0-9-]*s|age=Ns|g" | jq -cS 'del(.ts, .elapsed_seconds, .age_s)' 2>/dev/null || echo "__unparseable_bash__")"
+            norm_go="$(tail -n 1 "$go_log" | sed "s|/private$tmp2|__SANDBOX__|g; s|$tmp2|__SANDBOX__|g; s|age=[0-9-]*s|age=Ns|g" | jq -cS 'del(.ts, .elapsed_seconds, .age_s)' 2>/dev/null || echo "__unparseable_go__")"
             [ "$norm_bash" != "$norm_go" ] && divergence="log-schema"
         fi
     fi
@@ -725,6 +726,68 @@ setup_allowlist_bypass_substring_collision_scope() {
 **Follow-up:** none — fixture only
 EOF
 }
+
+# ---- K-99: hook-bypass Scope is exact-or-glob (was substring) -------------
+# Each setup writes the strict go-api allowlist (web/** is not allowed, so
+# web/index.js blocks) plus one active path-allowlist bypass entry with the
+# given Scope. Probe scope = "web/index.js".
+_bp_scope_setup() {
+    setup_allowlist_strict "$1"
+    mkdir -p "$1/work/current"
+    cat > "$1/work/current/hook-bypass.md" <<EOF
+# Active hook bypasses
+
+## Active entries
+
+## bypass:k99-scope-fixture
+
+**Hook:** path-allowlist
+**Reason:** K-99 scope-matching fixture
+**Approved by:** TestSuite
+**Created:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**Expires:** $(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+**Scope:** $2
+**Follow-up:** none — fixture only
+EOF
+}
+setup_bp_scope_exact()      { _bp_scope_setup "$1" 'web/index.js'; }
+setup_bp_scope_longer()     { _bp_scope_setup "$1" 'web/index.js-rotation'; }
+setup_bp_scope_freetext()   { _bp_scope_setup "$1" 'path=web/index.js reason=intentional'; }
+setup_bp_scope_glob()       { _bp_scope_setup "$1" 'web/**'; }
+setup_bp_scope_bare_prefix() { _bp_scope_setup "$1" 'web'; }
+setup_bp_scope_empty()      { _bp_scope_setup "$1" ''; }
+setup_bp_scope_case()       { _bp_scope_setup "$1" 'Web/Index.js'; }
+
+_bp_esc_setup() {  # <tmp> <scope> <base-setup-fn>
+    "$3" "$1"
+    mkdir -p "$1/work/current"
+    cat > "$1/work/current/hook-bypass.md" <<EOF
+# Active hook bypasses
+
+## Active entries
+
+## bypass:k99-escape-fixture
+
+**Hook:** path-allowlist
+**Reason:** K-99 escape-guard fixture
+**Approved by:** TestSuite
+**Created:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**Expires:** $(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+**Scope:** $2
+**Follow-up:** none — fixture only
+EOF
+}
+# The root/absolute/".."/symlink escape guards take EXACT scopes only.
+setup_bp_esc_trav_glob()   { _bp_esc_setup "$1" 'api/**' setup_allowlist_strict; }
+setup_bp_esc_trav_star()   { _bp_esc_setup "$1" '**' setup_allowlist_strict; }
+setup_bp_esc_trav_exact()  { _bp_esc_setup "$1" 'api/../../../../etc/cron.d/pwn' setup_allowlist_strict; }
+setup_bp_esc_abs_glob()    { _bp_esc_setup "$1" '/etc/*' setup_allowlist_strict; }
+setup_bp_esc_abs_star()    { _bp_esc_setup "$1" '*' setup_allowlist_strict; }
+setup_bp_esc_abs_exact()   { _bp_esc_setup "$1" '/etc/cron.d/pwn' setup_allowlist_strict; }
+setup_bp_esc_sym_glob()    { _bp_esc_setup "$1" 'api/**' setup_symlink_escape; }
+setup_bp_esc_sym_exact()   { _bp_esc_setup "$1" 'api/escape-link' setup_symlink_escape; }
+setup_bp_esc_sym_norm()    { _bp_esc_setup "$1" 'api/secret.go' setup_symlink_dir_escape; }   # normalized form must NOT waive the as-written escape
+setup_bp_esc_sym_aswrit()  { _bp_esc_setup "$1" 'api/escape-dir/sub/../../secret.go' setup_symlink_dir_escape; }
 
 setup_with_decisions_stale() {
     mkdir -p "$1/work/current"
@@ -1216,6 +1279,23 @@ echo
 case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlist setup_allowlist_strict
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_with_bypass     # bypass dir + allowlist absent → permissive
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_bp_scope_exact       # K-99: exact scope bypasses
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_bp_scope_glob        # K-99: web/** glob bypasses
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_bp_scope_longer      # K-99: web/index.js-rotation must NOT bypass web/index.js
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_bp_scope_freetext    # K-99: free-text scope containing the path no longer bypasses
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_bp_scope_bare_prefix # K-99: bare prefix needs prefix/**
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_bp_scope_empty       # K-99: empty scope ignored
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_bp_scope_case        # K-99: case-sensitive, like bash
+case_check path-allowlist.sh   pretooluse-write-traversal.json        2 path-allowlist setup_bp_esc_trav_glob    # K-99: glob must not bypass ".." traversal
+case_check path-allowlist.sh   pretooluse-write-traversal.json        2 path-allowlist setup_bp_esc_trav_star
+case_check path-allowlist.sh   pretooluse-write-traversal.json        0 path-allowlist setup_bp_esc_trav_exact   # exact scope still bypasses
+case_check path-allowlist.sh   pretooluse-write-absolute-outroot.json 2 path-allowlist setup_bp_esc_abs_glob     # K-99: glob must not bypass absolute path
+case_check path-allowlist.sh   pretooluse-write-absolute-outroot.json 2 path-allowlist setup_bp_esc_abs_star
+case_check path-allowlist.sh   pretooluse-write-absolute-outroot.json 0 path-allowlist setup_bp_esc_abs_exact
+case_check path-allowlist.sh   pretooluse-write-symlink-escape.json   2 path-allowlist setup_bp_esc_sym_glob     # K-99: glob must not bypass symlink escape
+case_check path-allowlist.sh   pretooluse-write-symlink-escape.json   0 path-allowlist setup_bp_esc_sym_exact
+case_check path-allowlist.sh   pretooluse-write-dotdot-after-symlink.json 2 path-allowlist setup_bp_esc_sym_norm    # K-99: symlink guard probes the as-written path
+case_check path-allowlist.sh   pretooluse-write-dotdot-after-symlink.json 0 path-allowlist setup_bp_esc_sym_aswrit
 case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlist setup_no_allowlist    # no allowlist → permissive WARN
 # namespaced agent ("yakos:go-api") must hit bare-keyed policy ("go-api")
 case_check path-allowlist.sh   pretooluse-edit-api-namespaced.json 0 path-allowlist setup_allowlist_strict_namespaced
@@ -1697,7 +1777,37 @@ case_check plan-quality-score.sh pretooluse-generic-tool.json        0 ""
 # tool_input.file_path only. plan_quality.enabled=false makes the recognised
 # plan.md write observable as a "skipping" REPORT without invoking the scorer.
 setup_pqs_disabled() { printf 'plan_quality:\n  enabled: false\n' > "$1/.yakos.yml"; }
+
+# ---- K-99 plan-quality-score: score the file just written -----------------
+# The scorer runs the real score-plan.sh against canned judge verdicts
+# (YAKOS_PLAN_JUDGE_MOCK), on both sides, in a sandboxed HOME.
+PQS_MOCK="$REPO_ROOT/tests/fixtures/plan-judge-mock"
+PQS_PLANS="$REPO_ROOT/tests/fixtures/plans"
+pqs_home() { :; }
+_pqs_plan() {  # <tmp> <plan-fixture> <age-seconds> <yml-body>
+    mkdir -p "$1/work/current"
+    cp "$PQS_PLANS/$2" "$1/work/current/plan.md"
+    if [ "$3" -gt 0 ]; then
+        touch -t "$(date -u -v-"$3"S +%Y%m%d%H%M.%S 2>/dev/null || date -u -d "$3 seconds ago" +%Y%m%d%H%M.%S)" "$1/work/current/plan.md"
+    fi
+    printf '%s' "$4" > "$1/.yakos.yml"
+}
+PQS_BLOCK_YML=$'plan_quality:\n  enabled: true\n  mode: block\n  threshold: 0.75\n'
+PQS_SURFACE_YML=$'plan_quality:\n  enabled: true\n  mode: surface\n  threshold: 0.75\n'
+setup_pqs_vague_block()   { _pqs_plan "$1" vague-plan.md 30 "$PQS_BLOCK_YML"; }
+setup_pqs_vague_surface() { _pqs_plan "$1" vague-plan.md 30 "$PQS_SURFACE_YML"; }
+setup_pqs_good_block()    { _pqs_plan "$1" good-plan.md 30 "$PQS_BLOCK_YML"; }
+setup_pqs_dissent_block() { _pqs_plan "$1" dissent-plan.md 30 "$PQS_BLOCK_YML"; }
+setup_pqs_yml_is_dir()   { _pqs_plan "$1" good-plan.md 30 ""; rm -f "$1/.yakos.yml"; mkdir "$1/.yakos.yml"; }
+setup_pqs_fresh_plan()    { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; }
 case_check plan-quality-score.sh posttooluse-write-plan-md-toolinput-only.json 0 plan-quality-score setup_pqs_disabled
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_vague_block   "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # below threshold + block: .plan-blocked, block_next_tool
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_vague_surface "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # below threshold + surface: notes only
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_good_block    "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/good"         "" pqs_home   # above threshold: pass
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_dissent_block "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/dissent"      "" pqs_home   # dissent: surface, never block
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_fresh_plan    "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"        "" pqs_home   # mtime < 5 s: debounced, nothing scored
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_yml_is_dir     "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/good"         "" pqs_home   # .yakos.yml is a directory: defaults + WARN on both sides
+case_check plan-quality-score.sh posttooluse-write-other-file.json   0 ""                 setup_pqs_vague_block   "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # non-plan.md write: silent no-op
 
 # ---- summary ------------------------------------------------------------
 

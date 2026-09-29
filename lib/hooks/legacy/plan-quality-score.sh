@@ -92,7 +92,7 @@ if [ "$event" = "PostToolUse" ]; then
     PQ_THRESHOLD="0.75"
     PQ_COST_CEILING="${YAKOS_PLAN_EVAL_MAX_COST_USD:-0.15}"
 
-    if [ -f "$yakos_yml" ]; then
+    if [ -f "$yakos_yml" ] && [ -r "$yakos_yml" ]; then
         # Parse plan_quality: block using awk (avoids complex quoting in bash)
         _pq_raw="$(awk '
             /^[[:space:]]*plan_quality[[:space:]]*:/ { in_block=1; next }
@@ -136,6 +136,11 @@ if [ "$event" = "PostToolUse" ]; then
         done <<EOF
 $_pq_raw
 EOF
+    elif [ -e "$yakos_yml" ]; then
+        # A directory (or other non-regular file): defaults apply, but say so.
+        ct_log "WARN: plan-quality-score: .yakos.yml is not a readable file; using defaults"
+        ho_log "plan-quality-score" "WARN" "pass" \
+            ".yakos.yml is not a readable file; using plan_quality defaults" "{}"
     fi
 
     # ---- check enabled -------------------------------------------------------
