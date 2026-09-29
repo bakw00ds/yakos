@@ -68,6 +68,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `YAKOS_COORD_ENABLED`. A supervisor deny list with a non-string element
   still escalates on its string globs.
 
+- **`yakos model-routing eval` runner (K-104).** Five defects found when
+  the K-20 routing eval was run by hand. (1) A fixed haiku/sonnet/opus/
+  fable tier list spent on tiers the operator had excluded: `--tiers
+  haiku,sonnet` picks the tiers, fable is opt-in via `--include-fable`,
+  and `--cases` takes a comma list of globs and case ids (every entry
+  must match). If the agent's current tier is not run, no candidate is
+  emitted. (2) `realDispatch` never filled cost, duration or tokens, so
+  the per-run cap could not trip: they now come from the run's
+  `dispatch_finished` dispatch-log record, and a dispatch with no cost
+  telemetry stops the run (partial results, `budget_unverifiable`, no
+  candidate, non-zero exit). (3) The judge parser needed the whole stdout
+  to be one JSON object: it now extracts the first fenced or balanced
+  object with a boolean `pass`, and an unparseable verdict is recorded
+  with its raw output and left unscored instead of counted as a fail.
+  (4) The default judge for a cross-cutting subject was `architect`, so
+  `architect` could not be evaluated without `--judge`: the default now
+  never equals the subject and falls back to `code-reviewer`, logged as
+  `judge_fallback`. (5) The summary and `eval_run_finished` record now
+  carry the per-tier Wilson 95% lower bound, the gate mode (CI at 12+
+  scored cases, strict floor below) and the gate decision.
+  Review follow-ups: a truncated judge verdict is never scored from a
+  nested object; a budget-hit run is partial (no candidate, non-zero
+  exit, `partial: true`); candidates need at least `min_cases_for_eval`
+  cases scored on both candidate and baseline, compared pairwise; all
+  selected cases must load; a failed subject dispatch is unscored.
+
 ## [0.60.0.0] — 2026-09-29
 
 ### Changed

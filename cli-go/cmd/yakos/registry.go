@@ -322,7 +322,7 @@ var commandRegistry = []commandEntry{
 	},
 	{
 		Name:   "model-routing",
-		Specs:  specSet("model-routing", "--judge", "--max-cost-usd", "--cases", "--project", "--global", "--note", "--force"),
+		Specs:  specSet("model-routing", "--judge", "--max-cost-usd", "--cases", "--tiers", "--include-fable", "--project", "--global", "--note", "--force"),
 		HelpFn: routing.PrintHelp,
 	},
 	{
