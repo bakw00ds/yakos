@@ -11,6 +11,7 @@ import (
 	"net"
 
 	"github.com/bakw00ds/yakos/internal/buildinfo"
+	"github.com/bakw00ds/yakos/internal/cliflag"
 	internalconsoleui "github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/install"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
@@ -235,152 +236,59 @@ func runStart(yakosRoot string, args []string) {
 		allowRoot = true
 	}
 
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
+	// Ordering caveat: the pre-cliflag loop acted on each token inline (first
+	// bad token in argv order won); cliflag.Set.Parse resolves recognized
+	// flags first, so a later --help or missing-value error can preempt an
+	// earlier unknown-flag/positional report. Exit codes are unchanged (see
+	// runValidate for the general rule). "--" IS a terminator here, as before:
+	// everything after it is forwarded to the runtime CLI. That split is done
+	// by splitStartTerminator rather than Set.AllowTerminator, because
+	// Parse's rest slice cannot distinguish the tail from earlier leftovers
+	// ("start foo -- bar" must keep foo as the name and bar as passthrough).
+	help := false
+	fs := &cliflag.Set{Cmd: "start", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--runtime", Kind: cliflag.String, Str: &runtime, ValueDesc: "an id"},
+		{Name: "--safe", Kind: cliflag.Bool, Bool: &safe},
+		{Name: "--allow-root", Kind: cliflag.Bool, Bool: &allowRoot},
+		{Name: "--no-agents", Kind: cliflag.Bool, Bool: &noAgents},
+		{Name: "--dry-run", Kind: cliflag.Bool, Bool: &dryRun},
+		{Name: "--print-agents", Kind: cliflag.Bool, Bool: &printAgents},
+		{Name: "--continue", Aliases: []string{"-c"}, Kind: cliflag.Bool, Bool: &continueSession},
+		{Name: "--fork-session", Kind: cliflag.Bool, Bool: &fork},
+		{Name: "--ide", Kind: cliflag.Bool, Bool: &ide},
+		{Name: "--bare", Kind: cliflag.Bool, Bool: &bare},
+		{Name: "--strict-mcp", Kind: cliflag.Bool, Bool: &strictMCP},
+		{Name: "--no-repl", Aliases: []string{"--web"}, Kind: cliflag.Bool, Bool: &noREPL},
+		{Name: "--console-addr", Kind: cliflag.String, Str: &consoleAddr, Seen: &consoleAddrProvided, ValueDesc: "an address"},
+		{Name: "--ws-addr", Kind: cliflag.String, Str: &wsAddr, ValueDesc: "an address"},
+		{Name: "--perf-addr", Kind: cliflag.String, Str: &perfAddr, ValueDesc: "an address"},
+		{Name: "--networked", Kind: cliflag.Bool, Bool: &networked},
+		{Name: "--console-bind", Kind: cliflag.String, Str: &consoleBind, Seen: &consoleBindProvided, ValueDesc: "an address"},
+		{Name: "--console-external-host", Kind: cliflag.StringSlice, Slice: &consoleExternalHosts, Seen: &consoleExternalHostProvided, ValueDesc: "a host[:port] value"},
+		{Name: "--ide-root", Kind: cliflag.String, Str: &ideRoot, ValueDesc: "a path"},
+		{Name: "--no-project-ide", Kind: cliflag.Bool, Bool: &noProjectIDE},
+		{Name: "--resume", Kind: cliflag.String, Str: &resume, ValueDesc: "a session id"},
+		{Name: "--model", Kind: cliflag.String, Str: &model, ValueDesc: "an alias"},
+		{Name: "--share-terminal", Kind: cliflag.Bool, Bool: &shareTerminal},
+		{Name: "--direct", Kind: cliflag.Bool, Bool: &direct},
+	}}
+	head, tail := splitStartTerminator(args, fs)
+	rest, perr := fs.Parse(head)
+	if perr != nil {
+		fmt.Fprintln(os.Stderr, perr)
+		os.Exit(1)
+	}
+	if help {
+		start.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	passthrough = append(passthrough, tail...)
+	for _, arg := range rest {
 		switch {
-		case arg == "-h" || arg == "--help":
-			start.PrintHelp(os.Stdout)
-			os.Exit(0)
-
-		case arg == "--runtime":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "start: --runtime requires an id")
-				os.Exit(1)
-			}
-			runtime = args[i]
-		case len(arg) > 10 && arg[:10] == "--runtime=":
-			runtime = arg[10:]
-
-		case arg == "--safe":
-			safe = true
-		case arg == "--allow-root":
-			allowRoot = true
-		case arg == "--no-agents":
-			noAgents = true
-		case arg == "--dry-run":
-			dryRun = true
-		case arg == "--print-agents":
-			printAgents = true
-		case arg == "-c" || arg == "--continue":
-			continueSession = true
-		case arg == "--fork-session":
-			fork = true
-		case arg == "--ide":
-			ide = true
-		case arg == "--bare":
-			bare = true
-		case arg == "--strict-mcp":
-			strictMCP = true
-		case arg == "--no-repl" || arg == "--web":
-			noREPL = true
-
-		case arg == "--console-addr":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "start: --console-addr requires an address")
-				os.Exit(1)
-			}
-			consoleAddr = args[i]
-			consoleAddrProvided = true
-		case len(arg) > 15 && arg[:15] == "--console-addr=":
-			consoleAddr = arg[15:]
-			consoleAddrProvided = true
-
-		case arg == "--ws-addr":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "start: --ws-addr requires an address")
-				os.Exit(1)
-			}
-			wsAddr = args[i]
-		case len(arg) > 10 && arg[:10] == "--ws-addr=":
-			wsAddr = arg[10:]
-
-		case arg == "--perf-addr":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "start: --perf-addr requires an address")
-				os.Exit(1)
-			}
-			perfAddr = args[i]
-		case len(arg) > 12 && arg[:12] == "--perf-addr=":
-			perfAddr = arg[12:]
-
-		case arg == "--networked":
-			networked = true
-
-		case arg == "--console-bind":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "start: --console-bind requires an address")
-				os.Exit(1)
-			}
-			consoleBind = args[i]
-			consoleBindProvided = true
-		case len(arg) > 15 && arg[:15] == "--console-bind=":
-			consoleBind = arg[15:]
-			consoleBindProvided = true
-
-		case arg == "--console-external-host":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "start: --console-external-host requires a host[:port] value")
-				os.Exit(1)
-			}
-			consoleExternalHosts = append(consoleExternalHosts, args[i])
-			consoleExternalHostProvided = true
-		case len(arg) > 24 && arg[:24] == "--console-external-host=":
-			consoleExternalHosts = append(consoleExternalHosts, arg[24:])
-			consoleExternalHostProvided = true
-
-		case arg == "--ide-root":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "start: --ide-root requires a path")
-				os.Exit(1)
-			}
-			ideRoot = args[i]
-		case len(arg) > 11 && arg[:11] == "--ide-root=":
-			ideRoot = arg[11:]
-
-		case arg == "--no-project-ide":
-			noProjectIDE = true
-
-		case arg == "--resume":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "start: --resume requires a session id")
-				os.Exit(1)
-			}
-			resume = args[i]
-		case len(arg) > 9 && arg[:9] == "--resume=":
-			resume = arg[9:]
-
-		case arg == "--model":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "start: --model requires an alias")
-				os.Exit(1)
-			}
-			model = args[i]
-		case len(arg) > 8 && arg[:8] == "--model=":
-			model = arg[8:]
-
-		case arg == "--share-terminal":
-			shareTerminal = true
-		case arg == "--direct":
-			direct = true
-
-		case arg == "--":
-			// Rest forwarded to runtime CLI.
-			passthrough = append(passthrough, args[i+1:]...)
-			i = len(args)
-
 		case len(arg) > 0 && arg[0] == '-':
 			fmt.Fprintf(os.Stderr, "start: unknown flag %q (try --help)\n", arg)
 			os.Exit(1)
-
 		default:
 			if name == "" {
 				name = arg
@@ -733,4 +641,31 @@ func detectPrimaryNonLoopbackIPv4() string {
 		}
 	}
 	return ""
+}
+
+// splitStartTerminator splits args at the first "--" that is a real
+// terminator: one that is not the value of a preceding value-taking flag
+// (the old loop consumed "--runtime --" as runtime="--"). Everything before
+// it is returned as head, everything after as tail; without a terminator
+// head is args and tail is nil.
+func splitStartTerminator(args []string, fs *cliflag.Set) (head, tail []string) {
+	takesValue := map[string]bool{}
+	for _, sp := range fs.Specs {
+		if sp.Kind == cliflag.Bool {
+			continue
+		}
+		takesValue[sp.Name] = true
+		for _, a := range sp.Aliases {
+			takesValue[a] = true
+		}
+	}
+	for i := 0; i < len(args); i++ {
+		switch {
+		case takesValue[args[i]]:
+			i++
+		case args[i] == "--":
+			return args[:i], args[i+1:]
+		}
+	}
+	return args, nil
 }
