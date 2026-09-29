@@ -39,6 +39,11 @@ const (
 	// DefaultCycleLength is the number of user prompts between auto-retros.
 	DefaultCycleLength = 10
 
+	// MaxCycleLength is the largest accepted cycle_length. Anything above it
+	// (K-106: "absurdly large", e.g. 1e9) is treated as invalid and falls
+	// back to DefaultCycleLength, matching bash's digit-count guard.
+	MaxCycleLength = 100000
+
 	hookName = "cycle-counter"
 )
 
@@ -105,10 +110,23 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	// Operator-tunable cadence override, matching bash's own read of
 	// ~/.yakos-state/settings.json on every invocation (not cached).
 	if settings, ok := loadSettings(h.StateDir); ok {
-		if n, ok := settingsCycleLength(settings); ok {
+		n, bad, present, valid := settingsCycleLength(settings)
+		switch {
+		case present && valid:
 			cycleLen = n
+		case present:
+			// K-106: one WARN naming the bad value; keep the default.
+			out.Stderr = fmt.Appendf(out.Stderr,
+				"WARN: ignoring invalid retro.cycle_length %s (need an integer 1..%d); using default %d\n",
+				displayBad(bad), MaxCycleLength, DefaultCycleLength)
 		}
 		autoRetro = settingsAutoRetro(settings)
+	}
+	// K-106: the guard MUST come after every assignment to cycleLen. It used
+	// to run before the settings override, so a settings-supplied 0 reached
+	// count%cycleLen and panicked (exit 2 = a blocking error).
+	if cycleLen <= 0 {
+		cycleLen = DefaultCycleLength
 	}
 
 	counterFile := filepath.Join(h.WorkCurrentDir, ".cycle-count")
@@ -202,32 +220,48 @@ func loadSettings(stateDir string) (map[string]any, bool) {
 	return m, true
 }
 
-// settingsCycleLength reproduces:
+// settingsCycleLength reads .retro.cycle_length the way bash does:
 //
-//	n="$(jq -r '.retro.cycle_length // empty' "$settings_file")"
-//	case "$n" in
-//	    ''|*[!0-9]*) : ;;            # invalid / empty — keep default
-//	    *) CYCLE_LENGTH="$n" ;;
-//	esac
+//	raw="$(jq -r '.retro.cycle_length | if . == null then "absent" else "v " + tostring end' ...)"
 //
-// i.e. the override only applies when the resolved value, rendered the
-// way `jq -r` would render it, is a non-empty string of ASCII digits.
-func settingsCycleLength(settings map[string]any) (int, bool) {
+// present=false means null/absent (silently keep the default). Otherwise
+// present=true and either valid=true with n in 1..MaxCycleLength, or bad
+// holds the raw rendering (possibly "") of an unusable value for the WARN.
+// Only digit strings of at most six characters are candidates; the value
+// is parsed base-10 so "010" is 10 on both sides (bash needs 10#).
+func settingsCycleLength(settings map[string]any) (n int, bad string, present, valid bool) {
 	retro, _ := settings["retro"].(map[string]any)
-	raw := hookio.JQRawOrJSON(hookio.JQAlt(retro["cycle_length"]))
-	if raw == "" {
-		return 0, false
+	v := retro["cycle_length"]
+	if v == nil {
+		return 0, "", false, false
+	}
+	raw := hookio.JQRawOrJSON(v)
+	if raw == "" || len(raw) > 6 {
+		return 0, raw, true, false
 	}
 	for _, c := range raw {
 		if c < '0' || c > '9' {
-			return 0, false
+			return 0, raw, true, false
 		}
 	}
 	n, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, false
+	if err != nil || n < 1 || n > MaxCycleLength {
+		return 0, raw, true, false
 	}
-	return n, true
+	return n, "", true, true
+}
+
+// displayBad renders a rejected value for the WARN line: empty becomes "",
+// newlines collapse to spaces, and it is cut to 40 bytes. Mirrors bash.
+func displayBad(raw string) string {
+	if raw == "" {
+		return `""`
+	}
+	raw = strings.ReplaceAll(raw, "\n", " ")
+	if len(raw) > 40 {
+		raw = raw[:40]
+	}
+	return raw
 }
 
 // settingsAutoRetro reproduces:

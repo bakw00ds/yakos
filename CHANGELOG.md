@@ -80,6 +80,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `probe_unavailable`. `tests/run-hook-fixtures.sh` gains a `bash -n`
   pass under `/bin/bash`.
 
+- **`cycle-counter` no longer divides by zero on a bad `cycle_length` (K-106).**
+  A `retro.cycle_length` of 0 in `~/.yakos-state/settings.json` made the Go
+  hook panic on `count % 0` (exit 2, a blocking error under Claude Code,
+  because the default guard ran before the settings value was assigned) and
+  made the bash hook skip the retro marker on every prompt. A value that is
+  not an integer from 1 to 100000 (0, negative, non-integer, empty string,
+  boolean, or huge like `1e9`) now falls back to the default of 10 with one
+  WARN naming the value; null or absent stays silent. Both implementations
+  apply the same rules and exit 0. Leading zeros no longer make bash read
+  the value as octal.
+
 - **Go hooks read identity and coord state like bash (K-100).**
   peer-claim, peer-claim-confirm, supervisor-stream and context-threshold
   take the agent and session id from the stdin payload, not
