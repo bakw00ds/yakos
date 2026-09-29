@@ -79,6 +79,12 @@ mk_fakejq "$TMP/fj-object"  'object'
 # "hook_event_name is present in the payload" cross-check, so only the
 # arithmetic canary in hi_init can catch it.
 mk_fakejq "$TMP/fj-event"   'PreToolUse'
+# Proxies real jq for `jq -n ...` (so the arithmetic canary PASSES) and lies
+# for every query that reads the payload. Only the identity cross-check in
+# hi_init can catch this one.
+mk_fakejq "$TMP/fj-proxy"   'BogusEventName'
+printf '#!/bin/sh\ncase "$1" in -n*|-rn*|-nr*) exec "%s" "$@" ;; esac\nprintf "%%s\\n" BogusEventName\n' "$REAL_JQ" > "$TMP/fj-proxy/jq"
+chmod +x "$TMP/fj-proxy/jq"
 
 new_sandbox() {
     local root="$TMP/$1"
@@ -122,7 +128,7 @@ run_suite() {
     echo "== $L =="
 
     # ---- 1. lying jq -----------------------------------------------------------
-    for fj in garbage array object event; do
+    for fj in garbage array object event proxy; do
         for h in $BLOCKING; do
             [ -f "$HOOKS/$h.sh" ] || continue
             sb="$(new_sandbox "j-$L-$h-$fj")"
@@ -143,6 +149,28 @@ run_suite() {
                 bad "$L: non-blocking $h + jq($fj) — want rc=0 no stdout WARN; got rc=$rc out=[$out] err=[$err]"
             fi
         done
+    done
+
+    # Blocking hooks with a lying jq AND stderr closed: the fail-closed branch's
+    # own echos fail, and under `set -e` that used to exit 1 (non-blocking).
+    for h in $BLOCKING; do
+        [ -f "$HOOKS/$h.sh" ] || continue
+        for fj in garbage proxy; do
+            sb="$(new_sandbox "j-$L-$h-$fj-noerr")"
+            rc=0
+            printf '%s' "$PAYLOAD" | env PATH="$TMP/fj-$fj" HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" \
+                CLAUDE_PROJECT_DIR="$sb/proj" YAKOS_COORD_ROOT="$sb/coord" \
+                "$SH" "$HOOKS/$h.sh" >/dev/null 2>&- || rc=$?
+            if [ "$rc" = 2 ]; then ok "$L: blocking $h + jq($fj) + stderr closed -> exit 2"; else bad "$L: blocking $h + jq($fj) + stderr closed rc=$rc (1 = fail-open)"; fi
+        done
+    done
+    # Non-blocking hooks must stay exit 0 (not 1) with stderr closed too.
+    for h in path-log cycle-counter; do
+        sb="$(new_sandbox "j-$L-$h-noerr")"
+        rc=0
+        printf '%s' "$PAYLOAD" | env PATH="$TMP/fj-garbage" HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" \
+            CLAUDE_PROJECT_DIR="$sb/proj" "$SH" "$HOOKS/$h.sh" >/dev/null 2>&- || rc=$?
+        if [ "$rc" = 0 ]; then ok "$L: non-blocking $h + lying jq + stderr closed -> exit 0"; else bad "$L: non-blocking $h + stderr closed rc=$rc"; fi
     done
 
     # The Flows engine invokes output-injection-scan.sh with a synthetic payload
@@ -264,6 +292,16 @@ run_suite() {
         sb="$(new_sandbox "s-$L-$lib")"
         run "$SH" "$hd" plan-quality-gate.sh "$sb" "$GATE_PAYLOAD"
         if [ "$rc" = 2 ]; then ok "$L: gate + syntax error in lib/$lib -> 2"; else bad "$L: syntax error in $lib rc=$rc err=[$err]"; fi
+    done
+    # Clean truncation: drop the final sentinel statement so `.` returns 0 and
+    # every function is defined. Only the sentinel check catches it.
+    for lib in paths.sh hook-output.sh hook-input.sh; do
+        local td="$TMP/h-$L-trunc-$lib"
+        copy_hooks "$td"
+        grep -v '^[A-Z_]*LOADED=1$' "$td/lib/$lib" > "$td/lib/$lib.new" && mv "$td/lib/$lib.new" "$td/lib/$lib"
+        sb="$(new_sandbox "s-$L-trunc-$lib")"
+        run "$SH" "$td" plan-quality-gate.sh "$sb" "$GATE_PAYLOAD"
+        if [ "$rc" = 2 ] && printf '%s' "$err" | grep -q 'cannot load helper library'; then ok "$L: gate + lib/$lib truncated before its sentinel -> 2"; else bad "$L: truncated $lib rc=$rc err=[$err]"; fi
     done
     local hd="$TMP/h-$L-clean"
     copy_hooks "$hd"
