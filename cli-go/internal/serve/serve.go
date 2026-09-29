@@ -1175,7 +1175,7 @@ func serverCertFingerprint(serverCert *tls.Certificate) string {
 // bound to a non-loopback address.  The banner conveys:
 //   - The active URL(s) (wss://) — one per externalHost
 //   - The server cert fingerprint (operators should verify this out of band)
-//   - The authz model (mTLS client certs; roles from roles.json; default=read)
+//   - The authz model (mTLS client certs; roles from roles.json; unmapped certs=none)
 //   - Bootstrap client cert status (auto-issued or pre-existing)
 //   - How to obtain additional client certs via `yakos mtls issue-client`
 //

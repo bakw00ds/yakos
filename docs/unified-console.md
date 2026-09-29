@@ -369,7 +369,8 @@ explicit entry, add a wildcard:
 yakos mtls set-role '*' read
 ```
 
-An explicit CN entry always beats `"*"`. An unrecognised role string
+An explicit CN entry always beats `"*"`, including `yakos mtls set-role
+<cn> none`, the explicit-deny value. An unrecognised role string
 resolves to no access for that CN and logs a WARN naming it.
 
 ### Roles and what they allow
@@ -467,7 +468,8 @@ In networked mode:
 - Identity is **cryptographically bound** to the client certificate's
   Common Name. `operator_id` is non-forgeable off-loopback.
 - Access is governed by four roles (`read`, `dispatch`, `flows-run`,
-  `admin`). A CN with no role entry defaults to `read` (fail-closed).
+  `admin`). A CN with no role entry has no access (`none`; fail-closed) unless a
+  `"*"` wildcard entry grants a role.
 - There is **no plain-HTTP-over-network option**. Non-loopback bind always
   requires mTLS (RequireAndVerifyClientCert, TLS 1.2+).
 

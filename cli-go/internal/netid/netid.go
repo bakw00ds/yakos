@@ -35,7 +35,7 @@
 // fails closed: every authenticated cert resolves to RoleNone (no access).
 //
 // When NewRoleMapper is called with an empty stateDir, file I/O is skipped
-// entirely and all lookups return RoleRead (fail-closed for misconfiguration).
+// entirely and all lookups return RoleNone (fail-closed for misconfiguration).
 //
 // Format (JSON):
 //
@@ -364,8 +364,10 @@ func NewRoleMapper(stateDir string) *RoleMapper {
 //  2. otherwise the wildcard entry WildcardCN ("*") applies, if present;
 //  3. otherwise RoleNone.
 //
-// A role string that ParseRoleStrict does not recognise (typo, "none", "")
-// resolves to RoleNone and logs one WARN per (CN, value) naming the CN.
+// The role string "none" is an explicit deny (beats the wildcard, no log).
+// Any other string ParseRoleStrict does not recognise (typo, "") resolves to
+// RoleNone and logs one WARN per (key, value) naming the key ("*" for the
+// wildcard, else the CN).
 // A missing, empty, symlinked, unsafe-permission or malformed file resolves
 // to RoleNone for every CN.  When the mapper was constructed with an empty
 // stateDir, Lookup always returns RoleNone without any file I/O.
@@ -383,16 +385,25 @@ func (m *RoleMapper) Lookup(cn string) Role {
 	if !ok {
 		return RoleNone
 	}
-	roleStr, found := mapping[cn]
+	key := cn
+	roleStr, found := mapping[key]
 	if !found {
-		roleStr, found = mapping[WildcardCN]
+		key = WildcardCN
+		roleStr, found = mapping[key]
 		if !found {
 			return RoleNone
 		}
 	}
+	// "none" is the explicit-deny value: it beats the wildcard and is not a
+	// typo, so it does not warn.
+	if roleStr == "none" {
+		return RoleNone
+	}
 	r, valid := ParseRoleStrict(roleStr)
 	if !valid {
-		m.warnBadRole(cn, roleStr)
+		// Name the key the bad value lives under ("*" for the wildcard), not
+		// the requesting CN, so one bad entry logs once however many certs hit it.
+		m.warnBadRole(key, roleStr)
 		return RoleNone
 	}
 	return r
@@ -406,23 +417,39 @@ func (m *RoleMapper) load() (map[string]string, bool) {
 	}
 	fi, err := os.Lstat(m.path)
 	if err != nil {
-		return nil, false
+		return nil, false // missing: expected before roles are configured
 	}
+	// From here the file exists but may be unusable. That locks out every
+	// cert (including the bootstrap admin), so say why, once per file version.
 	if fi.Mode()&os.ModeSymlink != 0 {
+		m.warnUnusable(fi, "is a symlink")
 		return nil, false
 	}
 	if !rolesFilePermOK(fi) {
+		m.warnUnusable(fi, "is group/other-writable")
 		return nil, false
 	}
 	data, err := os.ReadFile(m.path) //nolint:gosec
 	if err != nil {
+		m.warnUnusable(fi, "is unreadable: "+err.Error())
 		return nil, false
 	}
 	var mapping map[string]string
 	if err := json.Unmarshal(data, &mapping); err != nil {
+		m.warnUnusable(fi, "is not valid JSON: "+err.Error())
 		return nil, false
 	}
 	return mapping, true
+}
+
+// warnUnusable logs one WARN per (reason, file mtime) so per-request loads do
+// not flood, yet each new bad version of the file is reported.
+func (m *RoleMapper) warnUnusable(fi os.FileInfo, reason string) {
+	if _, dup := m.warned.LoadOrStore("file\x00"+reason+"\x00"+fi.ModTime().String(), struct{}{}); dup {
+		return
+	}
+	slog.Warn("netid: role map is unusable; every client cert resolves to no access",
+		"file", m.path, "reason", reason)
 }
 
 // warnBadRole logs once per (CN, value) so per-request Lookups do not flood.
@@ -451,7 +478,7 @@ func (m *RoleMapper) StartupSummary() (msg string, warn bool) {
 		}
 		return "no client certificate is authorized: role map " + where +
 			" is missing, empty or untrusted, so every CA-signed cert resolves to no access (RoleNone). " +
-			"Fix: add a CN mapping such as {\"alice\": \"admin\"}, or {\"*\": \"read\"} to grant read to any authenticated cert", true
+			"Fix: run `yakos mtls set-role <cn> <role>`, or `yakos mtls set-role '*' read` to grant read to any authenticated cert", true
 	}
 	if w, has := mapping[WildcardCN]; has {
 		return "role map loaded: " + itoa(len(mapping)) + " entries; wildcard \"*\" grants \"" + w +

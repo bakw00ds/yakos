@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string maps that CN to no access with one WARN naming it. The new
   `"*"` role-map key grants a role to every authenticated cert without
   an explicit entry; an explicit CN entry beats it. Loopback and the
-  bootstrap admin cert are unaffected.
+  bootstrap admin cert are unaffected. `yakos mtls set-role <cn> none`
+  is the explicit-deny value and beats `"*"`; `issue-client` without
+  `--role` now reports `Role: none (unmapped ...)`.
   **Migration:** cert-only deployments that relied on the implicit read
   default will see 403 after upgrading. One-line fix restoring the old
   behaviour: `yakos mtls set-role '*' read` (or `"*": "read"` in

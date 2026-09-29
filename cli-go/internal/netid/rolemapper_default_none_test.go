@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -91,7 +93,7 @@ func TestRoleMapper_StartupSummary(t *testing.T) {
 	t.Parallel()
 	// missing file
 	msg, warn := netid.NewRoleMapper(t.TempDir()).StartupSummary()
-	if !warn || !strings.Contains(msg, "no client certificate is authorized") || !strings.Contains(msg, `"*": "read"`) {
+	if !warn || !strings.Contains(msg, "no client certificate is authorized") || !strings.Contains(msg, "yakos mtls set-role '*' read") {
 		t.Errorf("missing file: warn=%v msg=%q", warn, msg)
 	}
 	// empty stateDir
@@ -140,5 +142,80 @@ func TestResolver_Cert_WildcardAndExplicit(t *testing.T) {
 		if got := res.Resolve(r).Role; got != want {
 			t.Errorf("cert %q: role=%v; want %v", cn, got, want)
 		}
+	}
+}
+
+func captureWarn(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return &buf
+}
+
+// A bad wildcard value logs once naming "*", however many CNs hit it, and the
+// dedup set does not grow per CN.
+func TestRoleMapper_BadWildcard_LogsOnceNamingWildcard(t *testing.T) {
+	buf := captureWarn(t)
+	dir := t.TempDir()
+	writeRolesFile(t, dir, map[string]string{"*": "everything"})
+	m := netid.NewRoleMapper(dir)
+	for _, cn := range []string{"a", "b", "c", "d"} {
+		if got := m.Lookup(cn); got != netid.RoleNone {
+			t.Fatalf("Lookup(%q)=%v", cn, got)
+		}
+	}
+	out := buf.String()
+	if n := strings.Count(out, "unrecognised role"); n != 1 {
+		t.Errorf("WARN count=%d; want 1\n%s", n, out)
+	}
+	if !strings.Contains(out, `cn=*`) {
+		t.Errorf("WARN should name the wildcard key: %s", out)
+	}
+	for _, cn := range []string{"cn=a", "cn=b", "cn=c", "cn=d"} {
+		if strings.Contains(out, cn) {
+			t.Errorf("WARN must not name requesting CN %s: %s", cn, out)
+		}
+	}
+}
+
+func TestRoleMapper_ExplicitNone_NoWarn_BeatsWildcard(t *testing.T) {
+	buf := captureWarn(t)
+	dir := t.TempDir()
+	writeRolesFile(t, dir, map[string]string{"*": "admin", "eve": "none"})
+	m := netid.NewRoleMapper(dir)
+	if got := m.Lookup("eve"); got != netid.RoleNone {
+		t.Errorf("eve=%v; want none", got)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("explicit none must not warn: %s", buf.String())
+	}
+}
+
+// A role map that goes bad after startup locks everyone out; say why, once.
+func TestRoleMapper_MalformedAfterStartup_WarnsOncePerVersion(t *testing.T) {
+	buf := captureWarn(t)
+	dir := t.TempDir()
+	writeRolesFile(t, dir, map[string]string{"alice": "admin"})
+	m := netid.NewRoleMapper(dir)
+	if m.Lookup("alice") != netid.RoleAdmin {
+		t.Fatal("precondition")
+	}
+	path := filepath.Join(dir, "mtls", "roles.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if got := m.Lookup("alice"); got != netid.RoleNone {
+			t.Fatalf("Lookup=%v; want none", got)
+		}
+	}
+	out := buf.String()
+	if n := strings.Count(out, "role map is unusable"); n != 1 {
+		t.Errorf("WARN count=%d; want 1\n%s", n, out)
+	}
+	if !strings.Contains(out, "roles.json") || !strings.Contains(out, "not valid JSON") {
+		t.Errorf("WARN must name file and reason: %s", out)
 	}
 }
