@@ -108,7 +108,7 @@ _pqg_source() {
 _pqg_source "$HOOK_DIR/lib/hook-input.sh" HI_LOADED
 _pqg_source "$HOOK_DIR/lib/hook-output.sh" HO_LOADED
 _pqg_source "$HOOK_DIR/lib/paths.sh" YAKOS_PATHS_LOADED
-for _pqg_fn in hi_init hi_tool ho_log ho_block yakos_current_dir; do
+for _pqg_fn in hi_init hi_tool hi_yaml_block_children ho_log ho_block yakos_current_dir; do
     if ! command -v "$_pqg_fn" >/dev/null 2>&1; then
         echo "plan-quality-gate: BLOCKED — helper '$_pqg_fn' is not defined after loading libraries; failing closed." >&2
         exit 2
@@ -188,12 +188,19 @@ fi
 project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 yakos_yml="$project_dir/.yakos.yml"
 if [ -f "$yakos_yml" ]; then
-    # Scope to the plan_quality: section (stop at the next top-level key) so an
-    # `enabled: false` belonging to another section does not disable the gate.
-    if awk '/^[[:space:]]*plan_quality[[:space:]]*:/ { b = 1; next }
-            b && /^[^[:space:]#]/ { exit }
-            b && /^[[:space:]]*enabled:[[:space:]]*false[[:space:]]*$/ { f = 1 }
-            END { exit !f }' "$yakos_yml" 2>/dev/null; then
+    # Same per-key block reader as plan-quality-score.sh and the Go twins (K-107):
+    # only the DIRECT children of plan_quality: count, so an `enabled: false`
+    # in another section, in a child map, or in a sibling nested under a parent
+    # does not disable the gate. The value is compared after comment and quote
+    # stripping, exactly "false" (the scorer's own test). Any reader failure
+    # leaves the gate enforcing.
+    _pqg_enabled=""
+    while IFS='=' read -r _pqg_k _pqg_v; do
+        if [ "$_pqg_k" = "enabled" ] && [ -n "$_pqg_v" ]; then _pqg_enabled="$_pqg_v"; fi
+    done <<EOF
+$(hi_yaml_block_children "$yakos_yml" plan_quality || true)
+EOF
+    if [ "$_pqg_enabled" = "false" ]; then
         rm -f "$blocked_marker" 2>/dev/null || true
         ho_log "plan-quality-gate" "REPORT" "pass" \
             "plan_quality.enabled=false; .plan-blocked marker cleared" "{}" 2>/dev/null || true

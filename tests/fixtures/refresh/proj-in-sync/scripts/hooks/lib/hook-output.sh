@@ -65,7 +65,12 @@ ho_log() {
         return 0
     fi
 
-    jq -nc \
+    # K-107: bounded like hi_init's own jq calls (a hung jq must not hang the
+    # BLOCK/WARN record on the way out of a degraded-input exit). _hi_jq exists
+    # only when hook-input.sh is loaded; rc 124 = timed out; any jq failure -> minimal record.
+    local jqcmd=jq rec jqrc=0
+    if command -v _hi_jq >/dev/null 2>&1; then jqcmd=_hi_jq; fi
+    rec="$($jqcmd -nc \
         --arg ts "$(ho_now)" \
         --arg hook "$hook" \
         --arg severity "$severity" \
@@ -75,8 +80,16 @@ ho_log() {
         --arg session "$(hi_session_id 2>/dev/null || echo '')" \
         --arg event "$(hi_event 2>/dev/null || echo '')" \
         --argjson extra "$extra" \
-        '{ts: $ts, hook: $hook, severity: $severity, decision: $decision, reason: $reason, agent: $agent, session_id: $session, event: $event} + $extra' \
-        >> "$logfile"
+        '{ts: $ts, hook: $hook, severity: $severity, decision: $decision, reason: $reason, agent: $agent, session_id: $session, event: $event} + $extra')" || jqrc=$?
+    if [ "$jqrc" != "0" ]; then
+        # jq timed out (124) or crashed: keep a minimal record rather than none.
+        printf '{"ts":"%s","hook":"%s","severity":"%s","decision":"%s","reason":%s}\n' \
+            "$(ho_now)" "$hook" "$severity" "$decision" \
+            "$(printf '%s' "$reason" | sed 's/"/\\"/g; s/^/"/; s/$/"/')" \
+            >> "$logfile"
+        return 0
+    fi
+    printf '%s\n' "$rec" >> "$logfile"
 }
 
 ho_block() {
@@ -225,6 +238,76 @@ ho_check_bypass_exact() {
             exit(found ? 0 : 1)
         }
     ' "$bypass_file"
+}
+
+# ---- gate prologue helpers (K-107) ---------------------------------------------
+#
+# Shared by the registry-fail-closed hooks (budget-guard, path-allowlist,
+# peer-claim, secret-scan, supervisor-ack-gate, supervisor-gate). Claude Code
+# treats every hook exit status other than 2 as NON-blocking, so for a hook that
+# can block, any crash is a fail-open. The prologue each of these hooks runs:
+#
+#     set -eu
+#     trap '' PIPE; trap 'exit 2' TERM HUP INT; trap 'exit 2' EXIT
+#     HOOK_DIR=...; HOOK_FAIL_CLOSED=1
+#     <checked bootstrap of this file: readable, `.` succeeds, HO_LOADED=1>
+#     ho_install_gate_traps "<hook-name>"
+#     ho_source_lib "$HOOK_DIR/lib/hook-input.sh" HI_LOADED      # ...one per lib
+#     ho_gate_ready
+#
+# The bootstrap cannot use a helper from the file it is loading, so it is the
+# one piece each hook spells out; until ho_install_gate_traps replaces it the
+# EXIT trap is a plain `exit 2` (nothing may exit before the prologue is done).
+# plan-quality-gate.sh predates this and carries the same logic inline.
+
+# ho_install_gate_traps <hook-name>
+#   - SIGPIPE ignored: a closed reader on stderr must not kill the hook with
+#     141 (non-blocking); a failed write is just a failed write.
+#   - TERM/HUP/INT -> exit 2 (would be 143/129/130, all non-blocking).
+#   - EXIT trap: any status other than 0/2 becomes 2, and so does an exit 0
+#     taken before ho_gate_ready (a lib that failed to parse can end the
+#     script with 0 on some bash versions). The trap runs without errexit and
+#     every write is best effort, so the decision never depends on stderr
+#     being writable.
+ho_install_gate_traps() {
+    _HO_GATE_NAME="${1:-hook}"
+    _HO_GATE_READY=0
+    trap '' PIPE
+    trap 'exit 2' TERM HUP INT
+    trap _ho_gate_on_exit EXIT
+}
+
+# ho_gate_ready: call once every library is loaded and checked. From here on
+# an exit 0 is an intended pass.
+ho_gate_ready() {
+    _HO_GATE_READY=1
+}
+
+_ho_gate_on_exit() {
+    local rc=$?
+    set +e
+    trap '' PIPE
+    if [ "$rc" -eq 0 ] && [ "${_HO_GATE_READY:-0}" != "1" ]; then
+        echo "${_HO_GATE_NAME:-hook}: BLOCKED — exited before finishing start-up (a helper library likely failed to parse); failing closed." >&2 || true
+        exit 2
+    fi
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+        echo "${_HO_GATE_NAME:-hook}: BLOCKED — internal error (exit $rc); failing closed rather than passing the tool call." >&2 || true
+        exit 2
+    fi
+}
+
+# ho_source_lib <path> <sentinel-var>
+#   Checked `.`: bash 3.2 does not abort on a failed `.` even under `set -e`,
+#   and bash 5 returns 0 from a lib with a mid-file syntax error. So require
+#   the file to be readable, the `.` to succeed, and the lib's last-line
+#   sentinel variable to be set. Any miss exits 2 with a reason.
+ho_source_lib() {
+    # shellcheck disable=SC1090  # path is one of the fixed lib files
+    if [ ! -r "$1" ] || ! . "$1" || [ "${!2:-0}" != "1" ]; then
+        echo "${_HO_GATE_NAME:-hook}: BLOCKED — cannot load helper library '$1' (missing, a directory, or failed to parse to completion); failing closed." >&2 || true
+        exit 2
+    fi
 }
 
 # Must stay the last statement: reaching it proves the whole file parsed.
