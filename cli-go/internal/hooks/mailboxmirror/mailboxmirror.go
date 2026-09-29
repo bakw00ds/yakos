@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
@@ -111,8 +110,11 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	// Coord activity mirror (summary only; body excluded for privacy).
-	if in.Env["YAKOS_COORD_ENABLED"] == "1" {
-		h.emitCoordActivity(in, ts, sender, to, summary)
+	// Gate mirrors bash yakos_coord_enabled inside yakos_coord_emit: the coord
+	// dir under YAKOS_COORD_ROOT/<project>/coord exists and is writable. There
+	// is no env switch in bash.
+	if coordDir := hookio.CoordDir(in); hookio.CoordEnabled(coordDir) {
+		h.emitCoordActivity(in, coordDir, ts, sender, to, summary)
 	}
 
 	now := h.NowFn()
@@ -141,11 +143,8 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 // emitCoordActivity appends a send_message event to the coord activity log.
 // Body is excluded (peer DMs are private by default).
-func (h *Hook) emitCoordActivity(in hooktype.HookInput, ts, sender, to, summary string) {
-	activityLog := resolveCoordActivityLog(in)
-	if activityLog == "" {
-		return
-	}
+func (h *Hook) emitCoordActivity(in hooktype.HookInput, coordDir, ts, sender, to, summary string) {
+	activityLog := filepath.Join(coordDir, "activity.ndjson")
 	event := mailbox.Event{
 		Ts:   ts,
 		Kind: "send_message",
@@ -169,18 +168,6 @@ func (h *Hook) emitCoordActivity(in hooktype.HookInput, ts, sender, to, summary 
 	_ = mailbox.AppendEvent(activityLog, event)
 }
 
-// resolveCoordActivityLog returns the coord activity.ndjson path or "".
-func resolveCoordActivityLog(in hooktype.HookInput) string {
-	if d := in.Env["YAKOS_COORD_DIR"]; d != "" {
-		return filepath.Join(d, "activity.ndjson")
-	}
-	proj := in.Env["YAKOS_PROJECT_NAME"]
-	if proj == "" {
-		return ""
-	}
-	return filepath.Join("/var/lib/yakos", proj, "coord", "activity.ndjson")
-}
-
 // ---- helpers ----------------------------------------------------------------
 
 func (h *Hook) resolveMessagesLog(in hooktype.HookInput) string {
@@ -193,14 +180,7 @@ func (h *Hook) resolveMessagesLog(in hooktype.HookInput) string {
 	return filepath.Join(".", "work", "current", "messages.ndjson")
 }
 
-// senderRole extracts the agent/role, matching hi_sender_role exactly:
-// hi_field_or '.agent_type' 'lead' (top-level, fallback "lead" when
-// absent/empty), trimmed, then the "yakos:" namespace prefix stripped.
+// senderRole mirrors hi_sender_role (see hookio.SenderRole).
 func senderRole(in hooktype.HookInput) string {
-	raw := hookio.PayloadString(in, "agent_type")
-	if raw == "" {
-		raw = "lead"
-	}
-	raw = strings.TrimSpace(raw)
-	return strings.TrimPrefix(raw, "yakos:")
+	return hookio.SenderRole(in)
 }

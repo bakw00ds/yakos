@@ -273,7 +273,7 @@ func TestPeerInjectedWhenCoordEnabled(t *testing.T) {
 	writeYAML(t, tmp, "context_inject:\n  enabled: true\n")
 
 	// Create a fake coord sessions dir with 3 session files.
-	sessDir := filepath.Join(tmp, "coord", "sessions")
+	sessDir := filepath.Join(tmp, "proj", "coord", "sessions")
 	if err := os.MkdirAll(sessDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -285,8 +285,8 @@ func TestPeerInjectedWhenCoordEnabled(t *testing.T) {
 
 	h := newHook(tmp, tmp)
 	in := makeInput("UserPromptSubmit", "", map[string]string{
-		"YAKOS_COORD_ENABLED": "1",
-		"YAKOS_COORD_DIR":     filepath.Join(tmp, "coord"),
+		"YAKOS_COORD_ROOT":   tmp,
+		"YAKOS_PROJECT_NAME": "proj",
 	})
 	out, err := h.Run(context.Background(), in)
 	if err != nil {
