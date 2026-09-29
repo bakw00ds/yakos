@@ -338,7 +338,7 @@ HOOKS_DIR_MARKER = "/scripts/hooks/"
 
 
 def canonical_hook_name(command):
-    """Hook identity independent of the path PREFIX, keyed by the script's
+    """Hook identity independent of the path PREFIX, keyed by the script
     path relative to scripts/hooks/ (not its basename, so same-named hooks in
     different subdirectories stay distinct). Falls back to the basename when
     the command does not route through a scripts/hooks/ directory."""
@@ -371,7 +371,7 @@ def command_of(h):
 
 tmpl_hooks = template.get("hooks", {}) or {}
 
-# (event, canonical name) -> the template's own (matcher, command).
+# (event, canonical name) -> the template-owned (matcher, command).
 template_desired = {}
 for event, entries in tmpl_hooks.items():
     for entry in entries:
@@ -388,9 +388,16 @@ deployed_hooks = deployed["hooks"]
 
 stats = {"removed": 0, "added": 0}
 
+# Registrations an earlier template shipped that no template ships now; removed
+# so a script split migrates instead of leaving the old wiring behind. Keep in
+# sync with retiredRegistrations in cli-go/internal/refresh/settings.go.
+RETIRED_REGISTRATIONS = {
+    ("PostToolUse", "plan-quality-gate.sh"),  # K-81: split into plan-quality-score.sh
+}
+
 # PHASE A: remove superseded. A deployed hook whose canonical (event, name)
 # is in the template with a DIFFERENT matcher OR a DIFFERENT exact command
-# string (path-prefix drift) is removed; Phase B re-adds it in the template's
+# string (path-prefix drift) is removed; Phase B re-adds it in its
 # own form, so the net effect is REPLACE, never duplicate.
 for event in list(deployed_hooks.keys()):
     new_entries = []
@@ -400,7 +407,13 @@ for event in list(deployed_hooks.keys()):
         for h in hooks_of(entry):
             cmd = command_of(h)
             if cmd:
-                d = template_desired.get((event, canonical_hook_name(cmd)))
+                cname = canonical_hook_name(cmd)
+                d = template_desired.get((event, cname))
+                if d is None and (event, cname) in RETIRED_REGISTRATIONS:
+                    # Shipped by an earlier template, by no template now
+                    # (see retiredRegistrations in cli-go/internal/refresh/settings.go).
+                    stats["removed"] += 1
+                    continue
                 if d is not None and (d[0] != m or d[1] != cmd):
                     stats["removed"] += 1
                     continue
@@ -470,7 +483,7 @@ for event, t_entries in tmpl_hooks.items():
 # kanban-stop.sh) are never removed because Phase A only touches hooks the
 # template has an entry for.
 
-# sort_keys matches Go's json.MarshalIndent (map keys sorted) so both
+# sort_keys matches Go json.MarshalIndent (map keys sorted) so both
 # implementations write byte-identical settings.json.
 print(json.dumps(deployed, indent=2, ensure_ascii=False, sort_keys=True))
 sys.stdout.flush()

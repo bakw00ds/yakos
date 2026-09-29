@@ -55,6 +55,7 @@ var wantHooks = []string{
 	"peer-claim-confirm",
 	"plan-outcome-capture",
 	"plan-quality-gate",
+	"plan-quality-score",
 	"retro-dispatch",
 	"secret-scan",
 	"session-end-check",

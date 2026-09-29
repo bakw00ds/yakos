@@ -660,6 +660,40 @@ else
 fi
 
 # ===========================================================================
+# Test 16 (K-81): plan-quality-gate.sh split. A project refreshed before the
+# split has plan-quality-gate.sh under PostToolUse AND PreToolUse; refresh must
+# retire the PostToolUse one, add plan-quality-score.sh, keep the PreToolUse
+# gate exactly once, keep project-local hooks, and be byte-stable on rerun.
+# ===========================================================================
+echo ""
+echo "Test 16: plan-quality-gate split migration (old-layout fixture)"
+T16="$(setup_project proj-plan-quality-old-layout)"
+run_refresh "$T16" >/dev/null 2>&1 || true
+S16="$T16/project/.claude/settings.json"
+post_gate="$(jq -r '[.hooks.PostToolUse[]?.hooks[]?.command | select(endswith("/plan-quality-gate.sh"))] | length' "$S16")"
+post_score="$(jq -r '[.hooks.PostToolUse[]?.hooks[]?.command | select(endswith("/plan-quality-score.sh"))] | length' "$S16")"
+pre_gate="$(jq -r '[.hooks.PreToolUse[]?.hooks[]?.command | select(endswith("/plan-quality-gate.sh"))] | length' "$S16")"
+local_hook="$(jq -r '[.hooks.PostToolUse[]?.hooks[]?.command | select(endswith("/my-local-hook.sh"))] | length' "$S16")"
+if [ "$post_gate" = "0" ] && [ "$post_score" = "1" ] && [ "$pre_gate" = "1" ] && [ "$local_hook" = "1" ]; then
+    ok "PostToolUse gate retired, scorer added once, PreToolUse gate kept once, local hook kept"
+else
+    fail "migration wrong: post_gate=$post_gate post_score=$post_score pre_gate=$pre_gate local=$local_hook"
+fi
+if [ -x "$T16/project/scripts/hooks/plan-quality-score.sh" ]; then
+    ok "plan-quality-score.sh script deployed to the project"
+else
+    fail "plan-quality-score.sh script not deployed"
+fi
+SUM16A="$(shasum -a 256 "$S16" | awk '{print $1}')"
+OUT16="$(run_refresh "$T16" 2>&1 || true)"
+SUM16B="$(shasum -a 256 "$S16" | awk '{print $1}')"
+if [ "$SUM16A" = "$SUM16B" ] && echo "$OUT16" | grep -q "settings: added=0 removed=0"; then
+    ok "second refresh is a byte-stable no-op"
+else
+    fail "second refresh changed settings.json or reported changes: $(echo "$OUT16" | grep settings)"
+fi
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""

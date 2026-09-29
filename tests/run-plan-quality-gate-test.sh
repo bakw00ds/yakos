@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# run-plan-quality-gate-test.sh — unit tests for the plan-quality-gate
-# PostToolUse/PreToolUse hook and 'yakos plan score' CLI.
+# run-plan-quality-gate-test.sh — unit tests for the plan-quality-score
+# PostToolUse scorer, the (fail-closed) plan-quality-gate PreToolUse hook, and the CLI.
 #
 # Test coverage:
 #   (a) .yakos.yml enabled: false → PASS (no scoring)
@@ -109,7 +109,7 @@ run_hook_rc() {
     YAKOS_ROOT="$REPO_ROOT" \
     YAKOS_LIB="$CLI_LIB" \
     HOME="$HOME" \
-        bash "$HOOKS/plan-quality-gate.sh" >/dev/null 2>&1 || actual_rc=$?
+        bash "$HOOKS/plan-quality-score.sh" >/dev/null 2>&1 || actual_rc=$?
     printf '%s' "$actual_rc"
 }
 
@@ -135,10 +135,10 @@ write_fresh_plan() {
     # mtime is now — within the 5s debounce window
 }
 
-# Check that a log record was written in WORK_CURRENT/logs/plan-quality-gate.ndjson
+# Check that a log record was written in WORK_CURRENT/logs/plan-quality-score.ndjson
 check_log_decision() {
     local expected_decision="$1"
-    local logfile="$WORK_CURRENT/logs/plan-quality-gate.ndjson"
+    local logfile="$WORK_CURRENT/logs/plan-quality-score.ndjson"
     [ -f "$logfile" ] || { printf 'no'; return; }
     if grep -q "\"$expected_decision\"" "$logfile" 2>/dev/null; then
         printf 'yes'
@@ -149,7 +149,7 @@ check_log_decision() {
 
 # Reset state between tests
 reset_state() {
-    rm -f "$WORK_CURRENT/logs/plan-quality-gate.ndjson" 2>/dev/null || true
+    rm -f "$WORK_CURRENT/logs/plan-quality-score.ndjson" 2>/dev/null || true
     rm -f "$WORK_CURRENT/.plan-blocked" 2>/dev/null || true
     rm -f "$WORK_CURRENT/notes"/plan-quality-*.md 2>/dev/null || true
     rm -f "$HOME/.yakos-state/plan-quality-log.ndjson" 2>/dev/null || true
@@ -178,7 +178,7 @@ write_old_plan "$PLAN_PATH"
 actual_rc=0
 fixture_edit_plan "$PLAN_PATH" \
     | YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
-        bash "$HOOKS/plan-quality-gate.sh" >/dev/null 2>&1 \
+        bash "$HOOKS/plan-quality-score.sh" >/dev/null 2>&1 \
     || actual_rc=$?
 
 if [ "$actual_rc" -eq 0 ]; then
@@ -204,7 +204,7 @@ reset_state
 actual_rc=0
 fixture_write_other \
     | YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
-        bash "$HOOKS/plan-quality-gate.sh" >/dev/null 2>&1 \
+        bash "$HOOKS/plan-quality-score.sh" >/dev/null 2>&1 \
     || actual_rc=$?
 
 if [ "$actual_rc" -eq 0 ]; then
@@ -228,7 +228,7 @@ YAKOS_PLAN_JUDGE_MOCK="$MOCK_BASE/good" \
 fixture_edit_plan "$PLAN_PATH" \
     | YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
         YAKOS_PLAN_JUDGE_MOCK="$MOCK_BASE/good" \
-        bash "$HOOKS/plan-quality-gate.sh" >/dev/null 2>&1 \
+        bash "$HOOKS/plan-quality-score.sh" >/dev/null 2>&1 \
     || actual_rc=$?
 
 if [ "$actual_rc" -eq 0 ]; then
@@ -266,7 +266,7 @@ actual_rc=0
 fixture_edit_plan "$PLAN_PATH" \
     | YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
         YAKOS_PLAN_JUDGE_MOCK="$MOCK_BASE/vague" \
-        bash "$HOOKS/plan-quality-gate.sh" >/dev/null 2>&1 \
+        bash "$HOOKS/plan-quality-score.sh" >/dev/null 2>&1 \
     || actual_rc=$?
 
 if [ "$actual_rc" -eq 0 ]; then
@@ -325,7 +325,7 @@ actual_rc=0
 fixture_edit_plan "$PLAN_PATH" \
     | YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
         YAKOS_PLAN_JUDGE_MOCK="$MOCK_BASE/low-nodissent" \
-        bash "$HOOKS/plan-quality-gate.sh" >/dev/null 2>&1 \
+        bash "$HOOKS/plan-quality-score.sh" >/dev/null 2>&1 \
     || actual_rc=$?
 
 if [ "$actual_rc" -eq 0 ]; then
@@ -379,7 +379,7 @@ actual_rc=0
 fixture_edit_plan "$PLAN_PATH" \
     | YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
         YAKOS_PLAN_JUDGE_MOCK="$MOCK_BASE/dissent" \
-        bash "$HOOKS/plan-quality-gate.sh" >/dev/null 2>&1 \
+        bash "$HOOKS/plan-quality-score.sh" >/dev/null 2>&1 \
     || actual_rc=$?
 
 if [ "$actual_rc" -eq 0 ]; then
@@ -442,7 +442,7 @@ actual_rc=0
 fixture_edit_plan "$PLAN_PATH" \
     | YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
         YAKOS_PLAN_JUDGE_MOCK="$MOCK_BASE/vague" \
-        bash "$HOOKS/plan-quality-gate.sh" >/dev/null 2>&1 \
+        bash "$HOOKS/plan-quality-score.sh" >/dev/null 2>&1 \
     || actual_rc=$?
 
 if [ "$actual_rc" -eq 0 ]; then
@@ -472,7 +472,7 @@ actual_rc=0
 fixture_edit_plan "$PLAN_PATH" \
     | YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
         YAKOS_PLAN_JUDGE_MOCK="$MOCK_BASE/vague" \
-        bash "$HOOKS/plan-quality-gate.sh" >/dev/null 2>&1 \
+        bash "$HOOKS/plan-quality-score.sh" >/dev/null 2>&1 \
     || actual_rc=$?
 
 if [ "$actual_rc" -eq 0 ]; then
@@ -583,7 +583,7 @@ write_old_plan "$PLAN_PATH" "$FIXTURES/vague-plan.md"
 fixture_edit_plan "$PLAN_PATH" \
     | YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
         YAKOS_PLAN_JUDGE_MOCK="$MOCK_BASE/vague" \
-        bash "$HOOKS/plan-quality-gate.sh" >/dev/null 2>&1 \
+        bash "$HOOKS/plan-quality-score.sh" >/dev/null 2>&1 \
     || true
 
 # CLI show

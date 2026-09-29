@@ -105,11 +105,11 @@
       },
       {
         "matcher": "Edit|Write|MultiEdit",
-        "_doc": "Phase 2 plan-quality-gate: auto-scores work/current/plan.md on write.",
+        "_doc": "Phase 2 plan-quality-score (split from plan-quality-gate, K-81): auto-scores work/current/plan.md on write.",
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/plan-quality-gate.sh"
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/plan-quality-score.sh"
           }
         ]
       },

@@ -3,10 +3,11 @@ package planqualitygate_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,372 +15,331 @@ import (
 	"github.com/bakw00ds/yakos/internal/hooks/planqualitygate"
 )
 
-var fixedTime = time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
-
-func fixedNow() time.Time { return fixedTime }
-
-func newHook(workDir, projectDir, logPath string) *planqualitygate.Hook {
+func newHook(workDir, projectDir string) *planqualitygate.Hook {
 	return &planqualitygate.Hook{
 		WorkCurrentDir: workDir,
 		ProjectDir:     projectDir,
-		PlanQualityLog: logPath,
-		NowFn:          fixedNow,
+		NowFn:          func() time.Time { return time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC) },
 	}
 }
 
-func makeInput(event, tool, filePath string, env map[string]string) hooktype.HookInput {
+func input(tool string, env map[string]string) hooktype.HookInput {
 	if env == nil {
 		env = map[string]string{}
 	}
-	payload := map[string]any{}
-	if filePath != "" {
-		payload["path"] = filePath
-	}
-	return hooktype.HookInput{
-		Event:   event,
-		Tool:    tool,
-		Payload: payload,
-		Env:     env,
-	}
+	return hooktype.HookInput{Event: "PreToolUse", Tool: tool, Payload: map[string]any{}, Env: env}
 }
 
-func writeYAML(t *testing.T, dir, content string) {
+func writeMarker(t *testing.T, dir, planID, reason string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, ".yakos.yml"), []byte(content), 0644); err != nil {
-		t.Fatalf("write yaml: %v", err)
+	data, _ := json.Marshal(map[string]any{"plan_id": planID, "reason": reason})
+	if err := os.WriteFile(filepath.Join(dir, ".plan-blocked"), data, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func writeScoredRecord(t *testing.T, logPath string, planID string, aggregate float64, dissent bool) {
+func run(t *testing.T, h *planqualitygate.Hook, in hooktype.HookInput) hooktype.HookOutput {
 	t.Helper()
-	rec := map[string]any{
-		"type":            "plan_scored",
-		"plan_id":         planID,
-		"aggregate_score": aggregate,
-		"threshold":       0.75,
-		"verdict":         "pass",
-		"dissent":         dissent,
-		"panel_size":      3,
-	}
-	data, _ := json.Marshal(rec)
-	f, _ := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	defer func() { _ = f.Close() }()
-	_, _ = f.Write(append(data, '\n'))
-}
-
-// TestPreToolUseDisabledByEnv passes when env disable is set.
-func TestPreToolUseDisabledByEnv(t *testing.T) {
-	tmp := t.TempDir()
-	// Write .plan-blocked marker.
-	marker := map[string]any{"plan_id": "plan-1", "reason": "bad score"}
-	data, _ := json.Marshal(marker)
-	_ = os.WriteFile(filepath.Join(tmp, ".plan-blocked"), data, 0644)
-	h := newHook(tmp, tmp, "")
-	in := makeInput("PreToolUse", "TeamCreate", "", map[string]string{
-		"YAKOS_PLAN_QUALITY_DISABLE": "1",
-	})
 	out, err := h.Run(context.Background(), in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out.ExitCode != 0 {
-		t.Fatalf("expected pass when disabled, got exit %d", out.ExitCode)
+	return out
+}
+
+func TestName(t *testing.T) {
+	if got := newHook("", "").Name(); got != "plan-quality-gate" {
+		t.Fatalf("Name()=%q", got)
 	}
 }
 
-// TestPreToolUseNoMarkerPasses confirms TeamCreate passes when no marker.
-func TestPreToolUseNoMarkerPasses(t *testing.T) {
-	tmp := t.TempDir()
-	h := newHook(tmp, tmp, "")
-	in := makeInput("PreToolUse", "TeamCreate", "", nil)
-	out, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out.ExitCode != 0 {
-		t.Fatalf("expected pass when no marker, got exit %d", out.ExitCode)
-	}
-}
-
-// TestPreToolUseMarkerBlocks confirms block when .plan-blocked is present.
-func TestPreToolUseMarkerBlocks(t *testing.T) {
-	tmp := t.TempDir()
-	marker := map[string]any{
-		"plan_id": "plan-bad",
-		"reason":  "aggregate 0.5 < threshold 0.75",
-	}
-	data, _ := json.Marshal(marker)
-	_ = os.WriteFile(filepath.Join(tmp, ".plan-blocked"), data, 0644)
-	h := newHook(tmp, tmp, "")
-	in := makeInput("PreToolUse", "TeamCreate", "", nil)
-	out, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out.ExitCode != 2 {
-		t.Fatalf("expected block (exit 2), got %d", out.ExitCode)
-	}
-	if !strings.Contains(string(out.Stderr), "plan-bad") {
-		t.Fatalf("expected plan_id in block message, got: %s", out.Stderr)
-	}
-}
-
-// TestPreToolUseAgentBlocked confirms Agent tool is also gated.
-func TestPreToolUseAgentBlocked(t *testing.T) {
-	tmp := t.TempDir()
-	marker := map[string]any{"plan_id": "plan-x", "reason": "below threshold"}
-	data, _ := json.Marshal(marker)
-	_ = os.WriteFile(filepath.Join(tmp, ".plan-blocked"), data, 0644)
-	h := newHook(tmp, tmp, "")
-	in := makeInput("PreToolUse", "Agent", "", nil)
-	out, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out.ExitCode != 2 {
-		t.Fatalf("expected block for Agent tool, got %d", out.ExitCode)
-	}
-}
-
-// TestPreToolUseNonDispatchToolIgnored confirms Edit is not gated in PreToolUse.
-func TestPreToolUseNonDispatchToolIgnored(t *testing.T) {
-	tmp := t.TempDir()
-	marker := map[string]any{"plan_id": "plan-x", "reason": "bad"}
-	data, _ := json.Marshal(marker)
-	_ = os.WriteFile(filepath.Join(tmp, ".plan-blocked"), data, 0644)
-	h := newHook(tmp, tmp, "")
-	in := makeInput("PreToolUse", "Edit", "", nil)
-	out, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out.ExitCode != 0 {
-		t.Fatalf("Edit should not be gated in PreToolUse, got exit %d", out.ExitCode)
-	}
-}
-
-// TestPreToolUseGateDisabledByYAML clears marker and passes.
-func TestPreToolUseGateDisabledByYAML(t *testing.T) {
-	tmp := t.TempDir()
-	writeYAML(t, tmp, "plan_quality:\n  enabled: false\n")
-	marker := map[string]any{"plan_id": "plan-y", "reason": "bad"}
-	data, _ := json.Marshal(marker)
-	_ = os.WriteFile(filepath.Join(tmp, ".plan-blocked"), data, 0644)
-	h := newHook(tmp, tmp, "")
-	in := makeInput("PreToolUse", "TeamCreate", "", nil)
-	out, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out.ExitCode != 0 {
-		t.Fatalf("expected pass when gate disabled, got exit %d", out.ExitCode)
-	}
-	// Marker should be removed.
-	if _, err := os.Stat(filepath.Join(tmp, ".plan-blocked")); err == nil {
-		t.Fatalf("expected .plan-blocked marker to be removed")
-	}
-}
-
-// TestPostToolUseNonPlanFileIgnored confirms non-plan.md writes are ignored.
-func TestPostToolUseNonPlanFileIgnored(t *testing.T) {
-	tmp := t.TempDir()
-	h := newHook(tmp, tmp, "")
-	in := makeInput("PostToolUse", "Edit", "/some/other/file.md", nil)
-	out, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out.ExitCode != 0 {
-		t.Fatalf("non-plan file should pass, got exit %d", out.ExitCode)
-	}
-}
-
-// TestPostToolUseAboveThresholdPasses confirms pass when aggregate >= threshold.
-func TestPostToolUseAboveThresholdPasses(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "pq.ndjson")
-	writeScoredRecord(t, logPath, "plan-pass", 0.85, false)
-	h := newHook(tmp, tmp, logPath)
-	in := makeInput("PostToolUse", "Edit",
-		filepath.Join(tmp, "work/current/plan.md"), nil)
-	out, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out.ExitCode != 0 {
-		t.Fatalf("expected pass, got exit %d", out.ExitCode)
-	}
-	// No .plan-blocked marker.
-	if _, err := os.Stat(filepath.Join(tmp, ".plan-blocked")); err == nil {
-		t.Fatalf("should not write .plan-blocked when passing")
-	}
-}
-
-// TestPostToolUseBelowThresholdSurfaceMode writes notes but no block marker.
-func TestPostToolUseBelowThresholdSurfaceMode(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "pq.ndjson")
-	writeScoredRecord(t, logPath, "plan-low", 0.60, false)
-	writeYAML(t, tmp, "plan_quality:\n  enabled: true\n  mode: surface\n  threshold: 0.75\n")
-	h := newHook(tmp, tmp, logPath)
-	in := makeInput("PostToolUse", "Write",
-		filepath.Join(tmp, "work/current/plan.md"), nil)
-	out, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out.ExitCode != 0 {
-		t.Fatalf("surface mode should not block, got exit %d", out.ExitCode)
-	}
-	// No .plan-blocked.
-	if _, err := os.Stat(filepath.Join(tmp, ".plan-blocked")); err == nil {
-		t.Fatalf("surface mode should not write .plan-blocked")
-	}
-	// Notes file should exist.
-	entries, _ := os.ReadDir(filepath.Join(tmp, "notes"))
-	if len(entries) == 0 {
-		t.Fatalf("expected notes file in surface mode")
-	}
-}
-
-// TestPostToolUseBelowThresholdBlockMode writes .plan-blocked.
-func TestPostToolUseBelowThresholdBlockMode(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "pq.ndjson")
-	writeScoredRecord(t, logPath, "plan-block", 0.55, false)
-	writeYAML(t, tmp, "plan_quality:\n  enabled: true\n  mode: block\n  threshold: 0.75\n")
-	h := newHook(tmp, tmp, logPath)
-	in := makeInput("PostToolUse", "Write",
-		filepath.Join(tmp, "work/current/plan.md"), nil)
-	out, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out.ExitCode != 0 {
-		t.Fatalf("PostToolUse never blocks; got exit %d", out.ExitCode)
-	}
-	// .plan-blocked should exist.
-	if _, err := os.Stat(filepath.Join(tmp, ".plan-blocked")); err != nil {
-		t.Fatalf("expected .plan-blocked to be written in block mode")
-	}
-}
-
-// TestPostToolUseDissent surfaces but doesn't block regardless of mode.
-func TestPostToolUseDissent(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "pq.ndjson")
-	writeScoredRecord(t, logPath, "plan-dissent", 0.80, true) // dissent=true
-	writeYAML(t, tmp, "plan_quality:\n  enabled: true\n  mode: block\n  threshold: 0.75\n")
-	h := newHook(tmp, tmp, logPath)
-	in := makeInput("PostToolUse", "Write",
-		filepath.Join(tmp, "work/current/plan.md"), nil)
-	out, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out.ExitCode != 0 {
-		t.Fatalf("dissent path should not block, got exit %d", out.ExitCode)
-	}
-	// No .plan-blocked on dissent (dissent always surfaces).
-	if _, err := os.Stat(filepath.Join(tmp, ".plan-blocked")); err == nil {
-		t.Fatalf("should not write .plan-blocked on dissent")
-	}
-}
-
-// TestPostToolUseNoLogRecordPasses passes conservatively when no scored record.
-func TestPostToolUseNoLogRecordPasses(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "empty.ndjson")
-	_ = os.WriteFile(logPath, []byte{}, 0644)
-	h := newHook(tmp, tmp, logPath)
-	in := makeInput("PostToolUse", "Write",
-		filepath.Join(tmp, "work/current/plan.md"), nil)
-	out, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out.ExitCode != 0 {
-		t.Fatalf("expected conservative pass, got exit %d", out.ExitCode)
-	}
-}
-
-// TestPlanBlockedMarkerContainsPlanID confirms marker JSON has plan_id.
-func TestPlanBlockedMarkerContainsPlanID(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "pq.ndjson")
-	writeScoredRecord(t, logPath, "plan-mId", 0.40, false)
-	writeYAML(t, tmp, "plan_quality:\n  enabled: true\n  mode: block\n  threshold: 0.75\n")
-	h := newHook(tmp, tmp, logPath)
-	in := makeInput("PostToolUse", "Write",
-		fmt.Sprintf("%s/work/current/plan.md", tmp), nil)
-	_, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	markerPath := filepath.Join(tmp, ".plan-blocked")
-	data, err := os.ReadFile(markerPath)
-	if err != nil {
-		t.Fatalf("read marker: %v", err)
-	}
-	var marker map[string]any
-	if err := json.Unmarshal(data, &marker); err != nil {
-		// trim the trailing newline from atomic write.
-		if err2 := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &marker); err2 != nil {
-			t.Fatalf("unmarshal marker: %v (raw: %s)", err2, data)
+func TestMarkerBlocksDispatchTools(t *testing.T) {
+	for _, tool := range []string{"TeamCreate", "Agent"} {
+		tmp := t.TempDir()
+		writeMarker(t, tmp, "plan-bad", "aggregate 0.5 < threshold 0.75")
+		out := run(t, newHook(tmp, tmp), input(tool, nil))
+		if out.ExitCode != 2 {
+			t.Fatalf("%s: want block, got exit %d", tool, out.ExitCode)
+		}
+		s := string(out.Stderr)
+		if !strings.HasPrefix(s, "plan-quality-gate: ") {
+			t.Fatalf("%s: stderr should carry ho_block's hook prefix: %s", tool, s)
+		}
+		if !strings.Contains(s, "plan-bad") || !strings.Contains(s, "yakos plan score override plan-bad") {
+			t.Fatalf("%s: stderr lacks plan id / override hint: %s", tool, s)
 		}
 	}
-	if marker["plan_id"] != "plan-mId" {
-		t.Fatalf("expected plan_id=plan-mId in marker, got %v", marker["plan_id"])
+}
+
+func TestNoMarkerPasses(t *testing.T) {
+	tmp := t.TempDir()
+	if out := run(t, newHook(tmp, tmp), input("Agent", nil)); out.ExitCode != 0 {
+		t.Fatalf("want pass, got %d", out.ExitCode)
 	}
 }
 
-// TestWriteToolAlsoCovered confirms Write tool is handled in PostToolUse.
-func TestWriteToolAlsoCovered(t *testing.T) {
+func TestMissingWorkCurrentDirPasses(t *testing.T) {
 	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "pq.ndjson")
-	writeScoredRecord(t, logPath, "plan-w", 0.90, false)
-	h := newHook(tmp, tmp, logPath)
-	in := makeInput("PostToolUse", "Write",
-		filepath.Join(tmp, "work/current/plan.md"), nil)
-	out, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if out := run(t, newHook(filepath.Join(tmp, "absent", "current"), tmp), input("Agent", nil)); out.ExitCode != 0 {
+		t.Fatalf("absent work/current (searchable parent) must pass, got %d", out.ExitCode)
 	}
+}
+
+// Tool-name prefix / case variants must not be gated.
+func TestOnlyExactToolNamesGated(t *testing.T) {
+	tmp := t.TempDir()
+	writeMarker(t, tmp, "p", "bad")
+	for _, tool := range []string{"AgentX", "TeamCreateFoo", "agent", "XAgent", "Bash", "Edit"} {
+		if out := run(t, newHook(tmp, tmp), input(tool, nil)); out.ExitCode != 0 {
+			t.Fatalf("tool %q must not be gated, got exit %d", tool, out.ExitCode)
+		}
+	}
+}
+
+func TestEmptyToolNameFailsClosed(t *testing.T) {
+	tmp := t.TempDir()
+	out := run(t, newHook(tmp, tmp), input("", nil))
+	if out.ExitCode != 2 || !strings.Contains(string(out.Stderr), "BLOCKED") {
+		t.Fatalf("want exit 2 with BLOCKED, got %d %q", out.ExitCode, out.Stderr)
+	}
+}
+
+func TestEmptyWorkDirFailsClosed(t *testing.T) {
+	out := run(t, newHook("", ""), input("Agent", nil))
+	if out.ExitCode != 2 {
+		t.Fatalf("unresolvable work dir must block, got %d", out.ExitCode)
+	}
+}
+
+func TestDisableEnvPasses(t *testing.T) {
+	tmp := t.TempDir()
+	writeMarker(t, tmp, "p", "bad")
+	out := run(t, newHook(tmp, tmp), input("Agent", map[string]string{"YAKOS_PLAN_QUALITY_DISABLE": "1"}))
 	if out.ExitCode != 0 {
-		t.Fatalf("expected pass, got %d", out.ExitCode)
+		t.Fatalf("want pass, got %d", out.ExitCode)
+	}
+	data, err := os.ReadFile(filepath.Join(tmp, "logs", "plan-quality-gate.ndjson"))
+	if err != nil || !strings.Contains(string(data), "gate bypassed") {
+		t.Fatalf("bypass must leave a WARN record: %v %s", err, data)
 	}
 }
 
-// TestUnknownEventNoOp confirms unknown events are ignored.
-func TestUnknownEventNoOp(t *testing.T) {
+func TestOptOutClearsMarkerAndPasses(t *testing.T) {
 	tmp := t.TempDir()
-	h := newHook(tmp, tmp, "")
-	in := makeInput("UserPromptSubmit", "", "", nil)
-	out, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := os.WriteFile(filepath.Join(tmp, ".yakos.yml"), []byte("plan_quality:\n  enabled: false\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if out.ExitCode != 0 {
-		t.Fatalf("unknown event should pass, got %d", out.ExitCode)
+	writeMarker(t, tmp, "p", "bad")
+	if out := run(t, newHook(tmp, tmp), input("TeamCreate", nil)); out.ExitCode != 0 {
+		t.Fatalf("want pass, got %d", out.ExitCode)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, ".plan-blocked")); err == nil {
+		t.Fatal("marker should be cleared")
 	}
 }
 
-// TestMultipleLogRecordsLastWins confirms the last plan_scored record is used.
-func TestMultipleLogRecordsLastWins(t *testing.T) {
+// A directory (or dangling symlink) named .plan-blocked is still a marker.
+func TestNonRegularMarkerBlocks(t *testing.T) {
 	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "pq.ndjson")
-	writeScoredRecord(t, logPath, "plan-first", 0.90, false) // passes threshold
-	writeScoredRecord(t, logPath, "plan-last", 0.40, false)  // fails threshold
-	writeYAML(t, tmp, "plan_quality:\n  enabled: true\n  mode: block\n  threshold: 0.75\n")
-	h := newHook(tmp, tmp, logPath)
-	in := makeInput("PostToolUse", "Edit",
-		filepath.Join(tmp, "work/current/plan.md"), nil)
-	_, err := h.Run(context.Background(), in)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := os.Mkdir(filepath.Join(tmp, ".plan-blocked"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	// .plan-blocked should be written because last record is below threshold.
-	if _, err := os.Stat(filepath.Join(tmp, ".plan-blocked")); err != nil {
-		t.Fatalf("expected .plan-blocked for last below-threshold record")
+	out := run(t, newHook(tmp, tmp), input("Agent", nil))
+	if out.ExitCode != 2 || !strings.Contains(string(out.Stderr), "not a regular file") {
+		t.Fatalf("directory marker: want block w/ reason, got %d %q", out.ExitCode, out.Stderr)
+	}
+
+	tmp2 := t.TempDir()
+	if err := os.Symlink(filepath.Join(tmp2, "nope"), filepath.Join(tmp2, ".plan-blocked")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if out := run(t, newHook(tmp2, tmp2), input("Agent", nil)); out.ExitCode != 2 {
+		t.Fatalf("dangling symlink marker: want block, got %d", out.ExitCode)
+	}
+}
+
+func TestPlainTextAndEmptyMarkersBlock(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, ".plan-blocked"), []byte("plain reason\nmore\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := run(t, newHook(tmp, tmp), input("Agent", nil))
+	if out.ExitCode != 2 || !strings.Contains(string(out.Stderr), "plain reason") {
+		t.Fatalf("plain-text marker: got %d %q", out.ExitCode, out.Stderr)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, ".plan-blocked"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out := run(t, newHook(tmp, tmp), input("Agent", nil)); out.ExitCode != 2 {
+		t.Fatalf("empty marker: want block, got %d", out.ExitCode)
+	}
+}
+
+func TestPathWithSpaces(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "a dir with spaces", "work current")
+	if err := os.MkdirAll(tmp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out := run(t, newHook(tmp, tmp), input("Agent", nil)); out.ExitCode != 0 {
+		t.Fatalf("absent: want pass, got %d", out.ExitCode)
+	}
+	writeMarker(t, tmp, "p-sp", "bad")
+	if out := run(t, newHook(tmp, tmp), input("Agent", nil)); out.ExitCode != 2 {
+		t.Fatalf("present: want block, got %d", out.ExitCode)
+	}
+}
+
+func TestUnreadableDirFailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("permission bits not enforced here")
+	}
+	base := t.TempDir()
+	cur := filepath.Join(base, "work", "current")
+	if err := os.MkdirAll(cur, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeMarker(t, cur, "p", "bad")
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(base, "work"), 0o755); _ = os.Chmod(cur, 0o755) })
+
+	// Parent unsearchable: marker cannot be told apart from absent.
+	if err := os.Chmod(filepath.Join(base, "work"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if out := run(t, newHook(cur, base), input("Agent", nil)); out.ExitCode != 2 {
+		t.Fatalf("unsearchable parent: want block, got %d", out.ExitCode)
+	}
+	_ = os.Chmod(filepath.Join(base, "work"), 0o755)
+
+	// Directory searchable but not readable and marker absent.
+	_ = os.Remove(filepath.Join(cur, ".plan-blocked"))
+	if err := os.Chmod(cur, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	if out := run(t, newHook(cur, base), input("Agent", nil)); out.ExitCode != 2 {
+		t.Fatalf("unreadable work/current: want block, got %d", out.ExitCode)
+	}
+}
+
+func TestUnwritableLogDoesNotChangeDecision(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("permission bits not enforced here")
+	}
+	tmp := t.TempDir()
+	logs := filepath.Join(tmp, "logs")
+	if err := os.Mkdir(logs, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(logs, 0o755) })
+	if out := run(t, newHook(tmp, tmp), input("Agent", nil)); out.ExitCode != 0 {
+		t.Fatalf("absent marker + unwritable log: want pass, got %d", out.ExitCode)
+	}
+	writeMarker(t, tmp, "p", "bad")
+	if out := run(t, newHook(tmp, tmp), input("Agent", nil)); out.ExitCode != 2 {
+		t.Fatalf("marker + unwritable log: want block, got %d", out.ExitCode)
+	}
+}
+
+// Every panic must surface as exit 2. A nil Env map is fine; force a panic via a
+// nil NowFn-independent path by passing a nil hook receiver field misuse.
+func TestPanicFailsClosed(t *testing.T) {
+	var h *planqualitygate.Hook // nil receiver: h.WorkCurrentDir panics
+	out, err := h.Run(context.Background(), input("Agent", nil))
+	if out.ExitCode != 2 {
+		t.Fatalf("panic must fail closed (exit 2), got %d", out.ExitCode)
+	}
+	if err == nil {
+		t.Fatal("panic should also be reported as an error")
+	}
+}
+
+// Racing marker create/remove (what `yakos plan score override` does) must only
+// ever yield pass or block, never an error or another exit code.
+func TestConcurrentOverrideAndGate(t *testing.T) {
+	tmp := t.TempDir()
+	proto, _ := json.Marshal(map[string]any{"plan_id": "p", "reason": "bad"})
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		marker := filepath.Join(tmp, ".plan-blocked")
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = os.WriteFile(marker+".tmp", proto, 0o644)
+			_ = os.Rename(marker+".tmp", marker)
+			_ = os.Remove(marker)
+		}
+	}()
+	h := newHook(tmp, tmp)
+	for i := 0; i < 300; i++ {
+		out, err := h.Run(context.Background(), input("Agent", nil))
+		if err != nil || (out.ExitCode != 0 && out.ExitCode != 2) {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("iteration %d: exit=%d err=%v", i, out.ExitCode, err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// The gate is event-agnostic (bash parity): a stale PostToolUse registration
+// delivering Edit is a no-op; delivering Agent is still gated.
+func TestEventAgnostic(t *testing.T) {
+	tmp := t.TempDir()
+	writeMarker(t, tmp, "p", "bad")
+	in := input("Edit", nil)
+	in.Event = "PostToolUse"
+	if out := run(t, newHook(tmp, tmp), in); out.ExitCode != 0 {
+		t.Fatalf("stale PostToolUse Edit registration must be a no-op, got %d", out.ExitCode)
+	}
+}
+
+// work/current being a regular file (ENOTDIR on the marker lookup) means the
+// marker cannot be inspected: fail closed, do not read it as "absent".
+func TestWorkCurrentIsFileFailsClosed(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "current")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out := run(t, newHook(f, ""), input("Agent", nil)); out.ExitCode != 2 {
+		t.Fatalf("want block, got %d", out.ExitCode)
+	}
+}
+
+// The block record uses bash ho_log's schema (decision/reason/plan_id), so a
+// log consumer sees the same shape from either implementation.
+func TestBlockLogRecordSchema(t *testing.T) {
+	tmp := t.TempDir()
+	writeMarker(t, tmp, "plan-log", "aggregate 0.4 < threshold 0.75")
+	run(t, newHook(tmp, tmp), input("Agent", nil))
+	data, err := os.ReadFile(filepath.Join(tmp, "logs", "plan-quality-gate.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &rec); err != nil {
+		t.Fatalf("log record is not JSON: %v: %s", err, data)
+	}
+	for k, want := range map[string]any{"hook": "plan-quality-gate", "severity": "BLOCK", "decision": "block", "plan_id": "plan-log", "agent": "lead"} {
+		if rec[k] != want {
+			t.Errorf("record[%q]=%v want %v", k, rec[k], want)
+		}
+	}
+}
+
+// enabled:false under a different top-level section must not disable the gate.
+func TestOptOutScopedToPlanQualitySection(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, ".yakos.yml"), []byte("plan_quality:\n  mode: block\nother:\n  enabled: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeMarker(t, tmp, "p", "bad")
+	if out := run(t, newHook(tmp, tmp), input("Agent", nil)); out.ExitCode != 2 {
+		t.Fatalf("want block, got %d", out.ExitCode)
 	}
 }

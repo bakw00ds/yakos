@@ -28,6 +28,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/hooks/peerclaimconfirm"
 	"github.com/bakw00ds/yakos/internal/hooks/planoutcomecapture"
 	"github.com/bakw00ds/yakos/internal/hooks/planqualitygate"
+	"github.com/bakw00ds/yakos/internal/hooks/planqualityscore"
 	"github.com/bakw00ds/yakos/internal/hooks/retrodispatch"
 	"github.com/bakw00ds/yakos/internal/hooks/secretscan"
 	"github.com/bakw00ds/yakos/internal/hooks/sessionendcheck"
@@ -175,9 +176,18 @@ var entries = []Entry{
 		New:        func(cfg Config) Hook { return planoutcomecapture.New() },
 	},
 	{
+		// PreToolUse .plan-blocked gate. Fails closed (K-81): mirrors
+		// lib/hooks/plan-quality-gate.sh, which sets HOOK_FAIL_CLOSED=1.
 		Name:       "plan-quality-gate",
-		FailClosed: false,
+		FailClosed: true,
 		New:        func(cfg Config) Hook { return planqualitygate.New(cfg.WorkCurrentDir, cfg.ProjectDir) },
+	},
+	{
+		// PostToolUse plan.md scorer. Deliberately conservative: infra
+		// errors WARN and pass, it never blocks a save.
+		Name:       "plan-quality-score",
+		FailClosed: false,
+		New:        func(cfg Config) Hook { return planqualityscore.New(cfg.WorkCurrentDir, cfg.ProjectDir) },
 	},
 	{
 		Name:       "retro-dispatch",

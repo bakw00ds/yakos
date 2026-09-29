@@ -1,0 +1,194 @@
+{
+  "_doc": "Project-level settings.json template installed by 'yakos init'. Hook commands resolve to <project>/scripts/hooks/. Remove this _doc key after customizing — it is informational only and unused by Claude Code.",
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "_doc": "Plan 1 M2 — flips peer-claim intent → confirmed and rebuilds active-claims.json. No-op when multi-dev coord is not enabled.",
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/peer-claim-confirm.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit"
+      },
+      {
+        "_doc": "Phase 2 plan-quality-gate: auto-scores work/current/plan.md on write. Surfaces or blocks when aggregate score < threshold. No-op for non-plan.md writes. Conservative: infra errors → WARN + PASS.",
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/plan-quality-gate.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit"
+      },
+      {
+        "_doc": "v0.34 supervisor: stream mutation tool calls to the rolling buffer; pre-filter sieves noise before any LLM dispatch. Reads override per .yakos.yml supervisor.matcher. No-op when supervisor not enabled in .yakos.yml.",
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/supervisor-stream.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit|Bash"
+      },
+      {
+        "_doc": "v0.33 output-injection scanner: scans every tool output for prompt-injection patterns. Kept on '*' — reads are the injection attack surface, not just writes.",
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/output-injection-scan.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/my-local-hook.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "_doc": "v0.34 budget-guard runs on every tool call; no-op when .yakos.yml has no budget block",
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/budget-guard.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "_doc_hook_order": "telemetry-first (path-log preserves audit even when later hooks block), then ascending by cost. supervisor-gate is cheap FS lookup; peer-claim is cheap FS lookup.",
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/path-log.sh",
+            "type": "command"
+          },
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/supervisor-gate.sh",
+            "type": "command"
+          },
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/peer-claim.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit"
+      },
+      {
+        "_doc": "path-allowlist and secret-scan get their own matcher block (rather than sharing the plain 'Edit|Write|MultiEdit' one above) so they can also cover NotebookEdit — which writes via notebook_path/new_source and was previously invisible to both (security review C4). path-allowlist is a cheap JSON lookup; secret-scan is the most expensive (regex over full content), so it runs last.",
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/path-allowlist.sh",
+            "type": "command"
+          },
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/secret-scan.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit"
+      },
+      {
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/mailbox-mirror.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "SendMessage"
+      },
+      {
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/supervisor-ack-gate.sh",
+            "type": "command"
+          },
+          {
+            "_doc": "Phase 2 plan-quality-gate PreToolUse path: blocks TeamCreate|Agent when .plan-blocked marker is present. Override with 'yakos plan score override <plan_id> --reason ...'",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/plan-quality-gate.sh",
+            "type": "command"
+          },
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/team-lifecycle.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "TeamCreate|Agent"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/session-end-check.sh",
+            "type": "command"
+          },
+          {
+            "_doc": "Phase 3 plan-quality: best-effort outcome capture for any open plan_id. Non-blocking; writes null for fields it cannot compute. Skipped when 'yakos work close' was already run.",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/plan-outcome-capture.sh",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "_doc": "M3.1 auto-compact: checks for .compact-pending marker (written by context-threshold when context_thresholds.auto threshold is crossed) and injects /compact as the next turn. Opt-in via 'yakos compact threshold --auto 85'. No-op when marker absent or auto not configured.",
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/auto-compact-trigger.sh",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/task-dependency-gate.sh",
+            "type": "command"
+          },
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/task-complete-dispatch.sh",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/cycle-counter.sh",
+            "type": "command"
+          },
+          {
+            "_doc": "retro-dispatch runs after cycle-counter so the .retro-due marker is already written when this fires.",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/retro-dispatch.sh",
+            "type": "command"
+          },
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/context-threshold.sh",
+            "type": "command"
+          },
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/context-inject.sh",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}
