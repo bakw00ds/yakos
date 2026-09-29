@@ -294,3 +294,20 @@ func TestHookRun_ImplFlagFailsClosedOnUnknownHook(t *testing.T) {
 		t.Errorf("invalid --impl must fail closed, got %d", c)
 	}
 }
+
+// A repeated --impl is rejected (exit 2) rather than last-wins, even when the
+// values agree.
+func TestHookRun_RepeatedImplRejected(t *testing.T) {
+	bin := hooksImplBinary(t)
+	home, proj := hooksImplProject(t)
+	env := hooksImplEnv(home, filepath.Join(home, "work"), proj)
+	for _, cmd := range []string{
+		bin + " hook run --impl go --impl go plan-quality-gate",
+		bin + " hook run --impl go --impl bash plan-quality-gate",
+	} {
+		code, stderr := shRun(t, cmd, pqgPayload, env)
+		if code != 2 || !strings.Contains(stderr, "more than once") {
+			t.Errorf("%s: want exit 2 + reason, got %d %q", cmd, code, stderr)
+		}
+	}
+}

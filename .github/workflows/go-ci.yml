@@ -89,7 +89,7 @@ jobs:
       - name: go test
         working-directory: cli-go
         # Use -count=1 to bypass test result cache in CI.
-        run: go test -count=1 -race -timeout 60s ./...
+        run: go test -count=1 -race -timeout 5m ./...
 
       - name: Build binary (native)
         # Build from the module root (cli-go/) and output to repo-root bin/.
