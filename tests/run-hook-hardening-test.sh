@@ -344,6 +344,40 @@ hung_jq_suite() {
     dur=$(( $(date +%s) - t0 ))
     if [ "$rc" = 2 ] && [ "$dur" -lt 12 ]; then ok "$L: non-GNU timeout on PATH + hung jq -> 2 in ${dur}s"; else bad "$L: non-GNU timeout + hung jq rc=$rc dur=${dur}s"; fi
 
+    # K-107 review round: YAKOS_HOOK_JQ_TIMEOUT parsing. 08/09 are decimal (not
+    # octal), huge values do not overflow, garbage falls back to 5 with a WARN,
+    # and none of them makes a healthy blocking hook block.
+    local tv
+    for tv in 08 09 0 1 30 99999999999999999999 abc 1.5 -3; do
+        sb="$(new_sandbox "hj-$L-tv-$tv")"
+        grun "$SH" "$HOOKS" secret-scan "$sb" "$GS_PASS_PAYLOAD" "YAKOS_HOOK_JQ_TIMEOUT=$tv"
+        if [ "$rc" = 0 ]; then ok "$L: YAKOS_HOOK_JQ_TIMEOUT=$tv + healthy jq -> 0"; else bad "$L: YAKOS_HOOK_JQ_TIMEOUT=$tv rc=$rc err=[$err]"; fi
+        case "$tv" in
+            abc|1.5|-3)
+                if printf '%s' "$err" | grep -q 'not a whole number'; then ok "$L: YAKOS_HOOK_JQ_TIMEOUT=$tv warns"; else bad "$L: YAKOS_HOOK_JQ_TIMEOUT=$tv gave no WARN: [$err]"; fi ;;
+            *)
+                if [ -n "$err" ]; then bad "$L: YAKOS_HOOK_JQ_TIMEOUT=$tv must be accepted silently, stderr: [$err]"; else ok "$L: YAKOS_HOOK_JQ_TIMEOUT=$tv accepted silently"; fi ;;
+        esac
+    done
+    # The no-timeout watchdog path is silent: no job-control notice on stderr.
+    sb="$(new_sandbox "hj-$L-quiet")"
+    rc=0
+    printf '%s' "$GS_PASS_PAYLOAD" | env PATH="$TMP/hj-none" HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" YAKOS_HOOK_JQ_TIMEOUT=1 \
+        "$SH" "$HOOKS/secret-scan.sh" >/dev/null 2>"$sb/err" || rc=$?
+    if ! grep -qiE 'terminated|killed' "$sb/err"; then ok "$L: hung-jq watchdog leaves no job-control noise on stderr"; else bad "$L: watchdog noise: [$(cat "$sb/err")]"; fi
+
+    # ho_log's fallback record is valid JSON whatever the reason contains.
+    mkdir -p "$TMP/jqfail"; printf '#!/bin/sh\nexit 5\n' > "$TMP/jqfail/jq"; chmod +x "$TMP/jqfail/jq"
+    sb="$(new_sandbox "hj-$L-hologjson")"
+    env PATH="$TMP/jqfail:$PATH" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" "$SH" -c \
+        ". '$HOOKS/lib/hook-input.sh'; . '$HOOKS/lib/hook-output.sh'; ho_log t WARN pass \"line1
+line2\ttab \\\\ back \\\"quote\" '{}'" >/dev/null 2>&1 || true
+    if [ -s "$sb/work/current/logs/t.ndjson" ] && "$REAL_JQ" -e . "$sb/work/current/logs/t.ndjson" >/dev/null 2>&1; then
+        ok "$L: ho_log fallback record is valid JSON for a reason with newline/tab/backslash/quote"
+    else
+        bad "$L: ho_log fallback record invalid or missing: [$(cat "$sb/work/current/logs/t.ndjson" 2>/dev/null)]"
+    fi
+
     # A healthy jq is unaffected, and a nonsense timeout value falls back to the default.
     sb="$(new_sandbox "hj-$L-healthy")"
     grun "$SH" "$HOOKS" secret-scan "$sb" "$GS_PASS_PAYLOAD" "YAKOS_HOOK_JQ_TIMEOUT=abc"
