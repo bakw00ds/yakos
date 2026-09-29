@@ -161,7 +161,7 @@ var errUnresolvedOperatorIdentity = errors.New("flows: no resolvable operator id
 // caller-supplied request body is never consulted.
 func resolveRunOperatorID(r *http.Request) (string, error) {
 	id := netid.IdentityFrom(r.Context())
-	if id.Authenticated {
+	if id.Authenticated && id.OperatorID != "" {
 		return id.OperatorID, nil
 	}
 	if id.OperatorID != "" {

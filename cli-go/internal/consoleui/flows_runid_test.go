@@ -116,3 +116,16 @@ func TestFlows_RunAndResume_RandFailure_FailClosed(t *testing.T) {
 		t.Errorf("run directories created despite entropy failure: %v", entries)
 	}
 }
+
+// K8 (k82-security-review-2026-09-23.md): an authenticated identity with an
+// EMPTY operator ID (e.g. a SAN-only client certificate with no Subject CN)
+// must not resolve to an owner. An empty owner is treated as a legacy run
+// open to every caller.
+func TestResolveRunOperatorID_AuthenticatedEmptyID_FailsClosed(t *testing.T) {
+	r, _ := http.NewRequest(http.MethodGet, "/flows/api/run", nil)
+	r = r.WithContext(netid.WithIdentityForTest(r.Context(), netid.Identity{OperatorID: "", Authenticated: true, Resolved: true}))
+	got, err := consoleui.ResolveRunOperatorIDForTest(r)
+	if err == nil {
+		t.Fatalf("authenticated identity with empty OperatorID resolved to %q with nil error; want an error", got)
+	}
+}
