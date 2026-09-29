@@ -1,0 +1,9 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "risk_class": {"type": "choice", "choice": "dangerous", "probabilities": {"benign": 0.03, "needs_review": 0.07, "dangerous": 0.9}, "confidence": 0.85},
+    "in_stated_scope": {"type": "noul", "noul": 0.04},
+    "bypasses_hard_control": {"type": "noul", "noul": 0.02}
+  },
+  "usage": {"input_tokens": 640, "output_tokens": 0}
+}

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Decision-provider abstraction with a Jev client (K-111, ADR-0009).**
+  New `yakos decide <surface>` asks a typed decision provider a reviewed
+  question set from `lib/decisions/<surface>.yaml` and prints the answer as
+  JSON. Providers are `jev` (TypeSafe, raw HTTP, pinned model `jev-1.13.0`,
+  key from `TYPESAFE_API_KEY` at call time), `mock` (deterministic, for CI) and
+  `none`. Jev is a decision provider, not a runtime: `yakos validate` and
+  `yakos agent lint` reject `runtime: jev` and any agent with Edit/Write/Bash
+  tools that references a decision provider. State is allowlisted, previewed and
+  secret-redacted before it leaves, with a 64 KiB cap. Each call is logged to
+  `decision-log.ndjson` without the raw state. A circuit breaker and per-session
+  and per-day budget caps bound the blast radius. `yakos decide` exits 0 or 3 on
+  every failure and never 2, so no hook can block on it. `yakos doctor
+  --probe-decision [--live]` checks key, config, question-set hashes, breaker
+  and budget. No hook calls it yet, and no live call to TypeSafe has been made.
+  See `docs/decision-providers.md`.
+
 ### Security
 
 - **Unrecognised `users.json` role now resolves to no access (K-110).**
