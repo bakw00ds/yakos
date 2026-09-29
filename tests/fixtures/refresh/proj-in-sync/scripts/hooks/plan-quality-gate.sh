@@ -60,10 +60,12 @@ if [ "${YAKOS_PLAN_QUALITY_DISABLE:-0}" = "1" ]; then
 fi
 
 HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
+# shellcheck disable=SC2034  # read by hi_init in lib/hook-input.sh
 HOOK_FAIL_CLOSED=1
 # A failed `.` does NOT trip `set -e` on bash 3.2 (macOS /bin/bash): the script
 # would carry on without the library and could pass. Check each source explicitly.
 _pqg_source() {
+    # shellcheck disable=SC1090  # path is one of three fixed lib files below
     if [ ! -r "$1" ] || ! . "$1"; then
         echo "plan-quality-gate: BLOCKED — cannot load helper library '$1'; failing closed." >&2
         exit 2
