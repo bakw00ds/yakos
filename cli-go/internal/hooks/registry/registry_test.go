@@ -180,7 +180,7 @@ func TestLookup_EveryHookRunsWithoutPanicking(t *testing.T) {
 	}
 }
 
-func TestGoReady_S6A2aSet(t *testing.T) {
+func TestGoReady_S6A2bSet(t *testing.T) {
 	// path-log is the reference conversion (S-6 A-1, structural plan
 	// §2.4's "convert one hook ... to prove the pattern"). S-6 A-2a is
 	// now converting the mechanical log-schema-only hooks to 100% parity
@@ -196,7 +196,14 @@ func TestGoReady_S6A2aSet(t *testing.T) {
 			goReady = append(goReady, e.Name)
 		}
 	}
-	want := []string{"cycle-counter", "mailbox-mirror", "path-log", "session-end-check", "task-dependency-gate", "team-lifecycle"}
+	// S-6 A-2b added output-injection-scan (20/20 fixtures at exact parity)
+	// and task-complete-dispatch (framework-root resolver wired, 4/4).
+	// path-allowlist, secret-scan, budget-guard and supervisor-gate reach
+	// full decision parity except for documented, exit-code-pinned "accepted"
+	// divergences (Go never depends on jq; Go is stricter than a bash bug),
+	// and are deliberately NOT flipped here: that call belongs to the
+	// security review of this change, not to the change itself.
+	want := []string{"cycle-counter", "mailbox-mirror", "output-injection-scan", "path-log", "session-end-check", "task-complete-dispatch", "task-dependency-gate", "team-lifecycle"}
 	if len(goReady) != len(want) {
 		t.Fatalf("GoReady hooks=%v, want %v", goReady, want)
 	}

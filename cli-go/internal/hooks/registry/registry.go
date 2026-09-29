@@ -145,6 +145,7 @@ var entries = []Entry{
 	{
 		Name:       "output-injection-scan",
 		FailClosed: false,
+		GoReady:    true,
 		New:        func(cfg Config) Hook { return outputinjectionscan.New(cfg.WorkCurrentDir, cfg.ProjectDir) },
 	},
 	{
@@ -212,10 +213,10 @@ var entries = []Entry{
 	{
 		Name:       "task-complete-dispatch",
 		FailClosed: false,
-		// GoReady stays false until the parity flip commit: would_run is now
-		// derived from Config.HooksDir (cmd_hook.go's resolveHooksDir, the Go
-		// analogue of bash's `pwd -P` HOOK_DIR) so the logged absolute path
-		// matches the bash script's byte for byte.
+		GoReady:    true,
+		// would_run is derived from Config.HooksDir (cmd_hook.go's
+		// resolveHooksDir, the Go analogue of bash's `pwd -P` HOOK_DIR), so
+		// the logged absolute path matches the bash script's byte for byte.
 		New: func(cfg Config) Hook {
 			h := taskcompletedispatch.New(cfg.WorkCurrentDir)
 			if cfg.HooksDir != "" {
