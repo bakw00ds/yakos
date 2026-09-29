@@ -2,7 +2,9 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -498,6 +500,111 @@ func computeBroadScopeDirsResolved() map[string]bool {
 	return out
 }
 
+// broadScopeIdentityExtras are directories that are added to the identity
+// denylist (broadScopeInfos) beyond broadScopeDirs's alias spellings.
+//
+// K-86 (k82-security-review-2026-09-23.md K6): APFS firmlinks are not
+// symlinks, so EvalSymlinks never resolves them; /System/Volumes/Data is the
+// data-volume root holding every writable directory on the machine, and
+// os.SameFile covers its CHILDREN only when the child is itself in the set,
+// so the volume roots must be listed explicitly. /var/root is macOS's root
+// home (broadScopeDirs carries only Linux's /root).
+var broadScopeIdentityExtras = []string{
+	"/System/Volumes/Data",
+	"/System/Volumes",
+	"/var/root",
+	"/private/var/root",
+	"/Volumes",
+	"/Network",
+	"/net",
+	"/Users/Shared",
+}
+
+// broadScopeInfos is the identity (os.FileInfo) form of the broad-scope
+// denylist, computed once at init.
+//
+// K-86 (K5/K6): the string maps above compare SPELLINGS. On a
+// case-insensitive filesystem "/USERS" is "/Users" and on macOS
+// "/System/Volumes/Data/Users" is "/Users", yet neither matches a textual
+// key, and lowercasing would false-reject a legitimate "/users" on
+// case-sensitive Linux. Identity, not spelling, is the portable test: stat
+// every denied directory once and compare the caller's path with os.SameFile
+// (device+inode on POSIX, volume serial+file index on Windows). The string
+// maps are kept as well: they still cover entries that do not exist when the
+// daemon starts and paths that fail to stat.
+var broadScopeInfos = computeBroadScopeInfos()
+
+func computeBroadScopeInfos() []os.FileInfo {
+	seen := make(map[string]bool)
+	var paths []string
+	add := func(p string) {
+		if p == "" || seen[p] {
+			return
+		}
+		seen[p] = true
+		paths = append(paths, p)
+	}
+	for k := range broadScopeDirs {
+		add(filepath.FromSlash(k))
+	}
+	for _, e := range broadScopeIdentityExtras {
+		add(filepath.FromSlash(e))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		add(home)
+	}
+	// Windows: the real system directories live wherever the OS was
+	// installed; %SystemRoot% etc. are authoritative and need no drive guess.
+	for _, env := range []string{"SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "SystemDrive"} {
+		if v := os.Getenv(env); v != "" {
+			if env == "SystemDrive" && !strings.HasSuffix(v, string(filepath.Separator)) {
+				v += string(filepath.Separator)
+			}
+			add(v)
+		}
+	}
+	var infos []os.FileInfo
+	for _, p := range paths {
+		fi, err := os.Stat(p) // follows symlinks: the alias and its target are one identity
+		if err != nil || !fi.IsDir() {
+			continue // absent on this OS: the string maps still cover its spelling
+		}
+		dup := false
+		for _, have := range infos {
+			if os.SameFile(have, fi) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			infos = append(infos, fi)
+		}
+	}
+	return infos
+}
+
+// checkBroadScopeIdentity denies abs when it is the same directory as any
+// broad-scope directory, whatever its spelling. A stat failure other than
+// "does not exist" denies (fail closed): an unreadable path cannot be proven
+// to be something else. A nonexistent path is allowed, as before: it cannot
+// alias an existing directory, and a project that will be created is a
+// legitimate input.
+func checkBroadScopeIdentity(abs string) error {
+	fi, err := os.Stat(abs)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("dispatch: invalid project: cannot verify %q is not a broad-scope directory: %w", abs, err)
+	}
+	for _, broad := range broadScopeInfos {
+		if os.SameFile(fi, broad) {
+			return fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", abs)
+		}
+	}
+	return nil
+}
+
 // validateProjectPath rejects a caller-supplied project path that would hand
 // the dispatched agent (--add-dir + cwd; claude.go:101, codex.go:54,
 // agy.go:29) scope over the entire filesystem, or a scope materially
@@ -573,7 +680,9 @@ func validateProjectPath(project string) error {
 	if broadScopeDirsResolved[broadScopeKey(resolved)] {
 		return fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", resolved)
 	}
-	return nil
+	// K-86 (K5/K6): identity check last, catching what no spelling can —
+	// case variants on case-insensitive filesystems and macOS firmlinks.
+	return checkBroadScopeIdentity(abs)
 }
 
 // broadScopeKey normalizes an absolute, cleaned path for comparison against
