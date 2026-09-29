@@ -61,7 +61,7 @@ fi
 
 # The shipped framework passes strict on both sides.
 for side in $sides; do
-    out="$(cd "$REPO_ROOT" && run_$side --strict)"; rc=$?
+    out="$(cd "$REPO_ROOT" && run_$side --strict)"
     if printf '%s' "$out" | grep -q 'Summary: 0 error(s), 0 warning(s)'; then ok "$side: framework validate --strict clean"; else bad "$side: framework validate --strict not clean"; printf '%s\n' "$out" | grep -E '\[err\]|Summary' | head; fi
 done
 
