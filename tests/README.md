@@ -48,7 +48,8 @@ make build && bash tests/run-hook-parity.sh
 
 Needs `bin/yakos` (`make build`) and `jq`. Exits non-zero on a bash-baseline
 failure or an unaccepted `path-allowlist` divergence; other hooks are
-advisory. See `fixtures/hooks/README.md` for accepted divergences and the
+advisory; an ACCEPT annotation pins both exit codes as `<bash-rc>/<go-rc>:<reason>`
+and a moved rc on either side fails every hook. See `fixtures/hooks/README.md` for accepted divergences and the
 iteration env vars.
 
 ### Validator and promotion-gate fixtures

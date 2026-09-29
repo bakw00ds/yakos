@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Hook-robustness batch: crash, pipe, signal and hang paths now block
+  (K-107).** Claude Code treats every hook exit other than 2 as
+  non-blocking, so each crash path in a blocking hook was a fail-open.
+  All seven blocking bash hooks (`budget-guard`, `path-allowlist`,
+  `peer-claim`, `plan-quality-gate`, `secret-scan`, `supervisor-ack-gate`,
+  `supervisor-gate`) now exit 2 on a closed or broken stderr pipe
+  (`secret-scan` on a real AWS key used to die with 141), on SIGTERM,
+  SIGHUP or SIGINT, and when a helper lib is missing, a directory,
+  truncated or unparsable, via `ho_install_gate_traps` and
+  `ho_source_lib` in `hook-output.sh`. A hung `jq` is bounded
+  (`YAKOS_HOOK_JQ_TIMEOUT`, default 5 s): blocking hooks exit 2, non-
+  blocking hooks exit 0 with a WARN. `yakos hook run <name>` without
+  `--impl` no longer exits 0 silently when a blocking hook's bash script
+  is missing; it exits 2 with a reason. Go `path-allowlist` (and 11 other
+  hooks) now resolve `agent_type` through the shared `hookio.SenderRole`,
+  so `agent_type: "\n"` is the lead role on both sides instead of Go
+  allowing a `.env` write that bash blocks.
+  **Behavior change:** a crash inside a blocking bash hook (for example
+  `supervisor-gate` on a non-object last findings line, previously exit
+  5) now blocks with exit 2 and a reason. `YAKOS_HOOKS_FAIL_OPEN=1` and
+  `degraded-input` bypass scopes work as before.
+
 - **Unrecognised `users.json` role now resolves to no access (K-110).**
   A hand-edited role such as `"Raed"` used to be parsed leniently as
   `read`. It now maps to `RoleNone`, matching the `roles.json` posture
@@ -71,6 +93,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discard them, and a non-numeric `threshold` falls back to 0.75 with a
   WARN. `path-allowlist`'s symlink-escape bypass is now probed with the
   path as written.
+
+- **Plan-quality config is read per key by gate and scorer, in Go and
+  bash (K-107).** Go `plan-quality-gate` parsed the whole `.yakos.yml` as
+  YAML, so an unrelated YAML error made it ignore
+  `plan_quality.enabled: false` and keep enforcing a marker that bash
+  cleared. All four readers now share one block reader that takes only
+  the block's direct children, which also stops a child map's own
+  `enabled:` or a sibling nested under a common parent from bleeding in.
+  The gate compares the value after comment and quote stripping, like the
+  scorer.
+- **Go context-threshold matches bash (K-107).** Its log record uses
+  `decision`/`reason` plus `agent`/`session_id`/`event`, and its
+  transcript path is encoded like bash (leading `-`, dots become `-`), so
+  it finds the transcript bash finds.
+- **Out-of-range `plan_quality.threshold` (K-107).** `1e999` overflowed
+  to 0 in Go, so every plan passed while bash blocked every plan. A
+  `ParseFloat` error now falls back to 0.75 with a WARN and finite values
+  outside 0..1 are clamped with a WARN.
+- **Parity ACCEPT annotations pin both exit codes (K-107).** The format
+  is now `<bash-rc>/<go-rc>:<reason>`; a moved rc on either side fails
+  the run.
 
 ### Changed
 

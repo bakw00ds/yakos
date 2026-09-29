@@ -56,6 +56,7 @@ bash lib/hooks/path-allowlist.sh < tests/fixtures/hooks/pretooluse-edit-api.json
 | `pretooluse-write-nul-in-path.json` | path-allowlist | BLOCK (NUL byte refused outright) |
 | `pretooluse-write-newline-traversal.json`, `-newline-deny.json` | path-allowlist | BLOCK (a newline refused outright; bash used to normalize only the first line) |
 | `pretooluse-write-dotdot-dotenv.json` | path-allowlist | BLOCK (`api/../.env`; crashed bash 3.2 with exit 1, a fail-open) |
+| `pretooluse-write-dotenv-agent-newline.json` / `-agent-spaces.json` | path-allowlist | BLOCK / PASS (K-107: `agent_type` `"\n"` is the lead role so `.env` is denied; `"  "` trims to an empty role with no policy) |
 | `pretooluse-write-rootlink-dotdot.json` | path-allowlist | BLOCK (`..` after a symlink that points at the project root; also run with no realpath/python3) |
 | `pretooluse-write-midstar-deny.json`, `-midstar-ok.json` | path-allowlist | BLOCK / PASS (deny `api/*/secret.go`: `*` consumes `/` mid-pattern) |
 | `posttooluse-bash-clean.json` | output-injection-scan | REPORT, no patterns |
@@ -73,10 +74,14 @@ bash lib/hooks/path-allowlist.sh < tests/fixtures/hooks/pretooluse-edit-api.json
 The parity harness runs every `case_check` tuple in `tests/run-hook-fixtures.sh`
 (the two files carry the same tuples) against BOTH the bash hook and
 `yakos hook run <name>`, and compares exit code, stdout, stderr, and the last
-NDJSON log record. A tuple's optional 9th argument, `"<go-rc>:<reason>"`,
-records an ACCEPTED divergence: a known, intentional difference whose reason is
-printed with the case and whose Go exit code stays pinned. Accepted
-divergences fall in two classes:
+NDJSON log record. A tuple's optional 9th argument,
+`"<bash-rc>/<go-rc>:<reason>"`, records an ACCEPTED divergence: a known,
+intentional difference whose reason is printed with the case and whose bash
+AND Go exit codes both stay pinned (K-107). If either rc moves, the case reads
+`accept-pin-mismatch` and fails the run for every hook, so a future bash block
+on a pinned case cannot hide behind "accepted". A malformed annotation (no
+`<n>/<n>:` prefix) is a harness error. Accepted divergences fall in two
+classes:
 
 - **Architectural.** Go never shells out to `jq`, so a missing or misbehaving
   `jq` cannot put it into bash's "degraded input" state. Where bash fails
@@ -85,6 +90,13 @@ divergences fall in two classes:
   is stricter, because it can still evaluate the payload.
 - **Bash bug.** Go deliberately does not reproduce a bash weakness. Each one
   is listed in the K-87 A-2b report for a bash-side fix.
+
+Current matrix (K-107, `bash tests/run-hook-parity.sh`): 214 of 259 comparisons
+at exact parity, plus 20 accepted, pinned divergences. It was 202 of 251 plus
+21 accepted after #300. The changes: two new `agent_type` fixtures, four
+plan-quality-gate and two plan-quality-score cases, and the context-threshold
+cases moving from accepted to exact (log schema and transcript path fixed).
+The 25 remaining unaccepted divergences are advisory (non-gated hooks).
 
 `YAKOS_PARITY_ONLY`, `YAKOS_PARITY_FIXTURE` and `YAKOS_PARITY_VERBOSE=1` narrow
 a run and print bash and Go side by side. `YAKOS_PARITY_REQUIRE_HOOKS`
