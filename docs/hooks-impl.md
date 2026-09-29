@@ -95,25 +95,19 @@ every run.
 ## Plan-quality scoring debounce
 
 `plan-quality-score` is a PostToolUse hook on `Edit|Write|MultiEdit`
-that acts only on writes to `work/current/plan.md`. The two tiers differ
-here, so pick knowing which one is registered.
+that acts only on writes to `work/current/plan.md`. Both tiers (bash
+`plan-quality-score.sh` and `yakos hook run --impl go plan-quality-score`,
+once the K-99 change lands) skip any `plan.md` whose mtime is less than
+5 s old at hook time. The bash tier logs it as
+`debounced: plan.md mtime age=Ns < 5s`.
 
-- **Bash tier** (`plan-quality-score.sh`). Before it forks the scorer it
-  debounces on the file's mtime: any `plan.md` whose mtime is less than
-  5 s old is skipped, logged as `debounced: plan.md mtime age=Ns < 5s`.
-  A fresh write is therefore not scored by the fire it triggers. It is
-  scored only by a later fire that runs 5 s or more after the last
-  write. Because the hook runs right after the write that just set the
-  mtime, expect the scorer to run on that fire only if the hook itself
-  is delayed past 5 s; otherwise run the `plan-quality-eval` skill
-  to score explicitly, and check the hook log for the `debounced` line
-  when a plan you just wrote shows no new `plan_scored` record.
-- **Go tier** (`yakos hook run --impl go plan-quality-score`). It does
-  not fork the scorer and has no debounce. It reads the latest
-  `plan_scored` record already in the plan-quality log and, per the
-  configured mode, writes the `.plan-blocked` marker or a notes file
-  from that record. A record written by an earlier scoring run is what
-  it sees until a new one lands.
+Because the hook fires right after the write that just set the mtime, a
+fresh plan is normally scored on a later fire, not the triggering one.
+Expect the scorer to run on the triggering fire only if the hook itself
+is delayed past 5 s. That reading is from the code and is not verified
+empirically. When a plan you just wrote shows no new `plan_scored`
+record, check the hook log for the `debounced` line, or run the
+`plan-quality-eval` skill to score explicitly.
 
 The debounce is a design choice that avoids scoring a plan mid-edit
 (several quick saves in a row). It is not configurable. The fail-closed
