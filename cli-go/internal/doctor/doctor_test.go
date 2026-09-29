@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -624,5 +625,29 @@ func TestExitCode_ErrorsPresent(t *testing.T) {
 	report, _ := Run(cfg)
 	if report.Errors == 0 {
 		t.Error("expected errors > 0 for invalid settings.json")
+	}
+}
+
+// A non-executable hook exits 126 (non-blocking): doctor must say so.
+func TestHookDrift_FlagsNonExecutableHook(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits are not meaningful on Windows")
+	}
+	var buf bytes.Buffer
+	home := makeTmpHome(t)
+	projectPath := t.TempDir()
+	hooksDir := filepath.Join(projectPath, "scripts", "hooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(hooksDir, "secret-scan.sh")
+	writeFile(t, p, "#!/bin/sh\nexit 2\n")
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	Run(Config{HomeDir: home, ProjectPath: projectPath, LookPath: noLookPath,
+		Environ: func(string) string { return "" }, Writer: &buf}) //nolint:errcheck
+	if !strings.Contains(buf.String(), "not executable") || !strings.Contains(buf.String(), "secret-scan.sh") {
+		t.Errorf("expected non-executable warning; output:\n%s", buf.String())
 	}
 }

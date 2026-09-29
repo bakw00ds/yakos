@@ -1668,3 +1668,42 @@ func fileMtime(t *testing.T, path string) int64 {
 	}
 	return fi.ModTime().UnixNano()
 }
+
+// A 0644 source must deploy as 0755, and a content-identical but 0644
+// destination must be repaired: a non-executable hook exits 126, which
+// Claude Code treats as non-blocking (silent fail-open).
+func TestSyncHooks_ForcesExecutableMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits are not meaningful on Windows")
+	}
+	src := t.TempDir()
+	dst := t.TempDir()
+	writeMode := func(dir, name, body string, mode os.FileMode) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	writeMode(src, "new-hook.sh", "#!/bin/sh\nexit 2\n", 0o644)
+	writeMode(src, "same-hook.sh", "#!/bin/sh\nexit 2\n", 0o644)
+	writeMode(src, "stale-hook.sh", "#!/bin/sh\nexit 2\n", 0o644)
+	writeMode(dst, "same-hook.sh", "#!/bin/sh\nexit 2\n", 0o644)
+	writeMode(dst, "stale-hook.sh", "old\n", 0o644)
+
+	if _, err := syncHooks(src, dst, false, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"new-hook.sh", "same-hook.sh", "stale-hook.sh"} {
+		fi, err := os.Stat(filepath.Join(dst, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o755 {
+			t.Errorf("%s deployed as %v, want 0755", n, fi.Mode().Perm())
+		}
+	}
+}

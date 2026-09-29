@@ -36,6 +36,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -486,6 +487,28 @@ func (r *runner) checkHookDrift() {
 		if result.State == 1 { // drifted
 			r.info(SectionHookDrift, "DRIFT: %s  (expected %s, got %s; not an error — projects are expected to customize)",
 				result.RelPath, result.ExpectedHash, result.ActualHash)
+		}
+	}
+	// A non-executable hook exits 126, which Claude Code treats as
+	// non-blocking: the gate is silently off.
+	if runtime.GOOS != "windows" {
+		var nonExec []string
+		_ = filepath.WalkDir(hooksDir, func(p string, d os.DirEntry, werr error) error {
+			if werr != nil || d.IsDir() || !strings.HasSuffix(p, ".sh") {
+				return nil
+			}
+			rel, _ := filepath.Rel(hooksDir, p)
+			if strings.HasPrefix(filepath.ToSlash(rel), "lib/") {
+				return nil // sourced helpers, never executed directly
+			}
+			if fi, ierr := d.Info(); ierr == nil && fi.Mode().Perm()&0o111 == 0 {
+				nonExec = append(nonExec, rel)
+			}
+			return nil
+		})
+		if len(nonExec) > 0 {
+			r.warn(SectionHookDrift, "%d hook(s) not executable (exit 126 = silent fail-open): %s; run 'yakos refresh'",
+				len(nonExec), strings.Join(nonExec, ", "))
 		}
 	}
 	r.ok(SectionHookDrift, "%d clean, %d drifted, %d unhashed (no .framework-hash sibling)",
