@@ -56,11 +56,13 @@ func printHookHelp(w io.Writer) {
 	fmt.Fprint(w, `Usage: yakos hook <subcommand>
 
 Go-native hook dispatch (S-6). Reads Claude Code's hook JSON from stdin and
-runs the registered Tier-0 Go hook, per the YAKOS_HOOKS env var (go / bash /
-hybrid; default bash — see internal/hooks/runner).
+runs the registered Tier-0 Go hook, per --impl if given, else the YAKOS_HOOKS env
+var (go / bash / hybrid; default bash — see internal/hooks/runner). --impl
+beats the env var; refresh-generated commands always pass --impl go.
 
 Subcommands:
-  run <name>    Read hook JSON on stdin, dispatch, exit with the hook's code.
+  run [--impl go|bash|hybrid] <name>
+                Read hook JSON on stdin, dispatch, exit with the hook's code.
   list          Print every registered hook name and its readiness.
   mode          Print the effective YAKOS_HOOKS mode and why.
 
@@ -72,12 +74,37 @@ runtime-native hook *registration* (a separate, plural command).
 // runHookRun is `yakos hook run <name>`.
 func runHookRun(yakosRoot string, args []string) {
 	if len(args) == 0 || isHelpArg(args[0]) {
-		fmt.Fprintln(os.Stderr, "hook run: usage: yakos hook run <name>")
+		fmt.Fprintln(os.Stderr, "hook run: usage: yakos hook run [--impl go|bash|hybrid] <name>")
+		os.Exit(1)
+	}
+	var override runner.HooksMode
+	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		if args[0] != "--impl" || len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "hook run: unknown or incomplete flag %q (usage: yakos hook run [--impl go|bash|hybrid] <name>)\n", args[0])
+			os.Exit(2)
+		}
+		switch m := runner.HooksMode(args[1]); m {
+		case runner.HooksModeGo, runner.HooksModeBash, runner.HooksModeHybrid:
+			override = m
+		default:
+			fmt.Fprintf(os.Stderr, "hook run: invalid --impl %q (want go, bash, or hybrid)\n", args[1])
+			os.Exit(2)
+		}
+		args = args[2:]
+	}
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "hook run: usage: yakos hook run [--impl go|bash|hybrid] <name>")
 		os.Exit(1)
 	}
 	name := args[0]
 
 	entry, ok := lookupEntry(name)
+	if !ok && override != "" {
+		// An explicit tier request for a hook with no Go implementation must
+		// not pass silently: fail closed, consistent with refresh preflight.
+		fmt.Fprintf(os.Stderr, "yakos hook run --impl %s: no Go implementation registered for hook %q (see 'yakos hook list'); refusing to fail open\n", override, name)
+		os.Exit(2)
+	}
 	if !ok {
 		// Unknown hook: fail open (exit 0) with a one-line diagnostic,
 		// matching every bash hook's own posture toward inputs it can't
@@ -121,6 +148,7 @@ func runHookRun(yakosRoot string, args []string) {
 	hooksDir := filepath.Join(yakosRoot, "lib", "hooks")
 	userHooksDir := filepath.Join(projectDir, "lib", "hooks-user")
 	r := runner.New(hooksDir, userHooksDir, workCurrentDir, nil, os.Stderr)
+	r.ModeOverride = override
 
 	out, runErr := r.Run(context.Background(), hook, in)
 	if len(out.Stdout) > 0 {

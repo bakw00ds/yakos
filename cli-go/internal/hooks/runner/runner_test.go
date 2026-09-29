@@ -1082,3 +1082,27 @@ func TestRouting_HybridMode_GoFailure_ReturnsBashOutput(t *testing.T) {
 		t.Errorf("expected bash fallback exit 0; got %d", out.ExitCode)
 	}
 }
+
+// ModeOverride (`yakos hook run --impl`) beats YAKOS_HOOKS, including when the
+// env var is unset or says bash: the Tier-0 hook must run and block.
+func TestRunner_ModeOverrideBeatsEnv(t *testing.T) {
+	for _, env := range []string{"", "bash", "hybrid", "bogus"} {
+		r, _, _, _ := buildRunnerMode(t, "bash")
+		r.EnvLookup = func(k string) string {
+			if k == "YAKOS_HOOKS" {
+				return env
+			}
+			return ""
+		}
+		r.ModeOverride = runner.HooksModeGo
+		out, err := r.Run(context.Background(), newBlockHook("gate"), hooktype.HookInput{})
+		if err != nil || out.ExitCode != 2 {
+			t.Errorf("env %q: ModeOverride=go must run Tier-0 and block, got exit %d err %v", env, out.ExitCode, err)
+		}
+	}
+	// Control: without the override, unset env is bash mode and the gate is a no-op.
+	r, _, _, _ := buildRunnerMode(t, "bash")
+	if out, _ := r.Run(context.Background(), newBlockHook("gate"), hooktype.HookInput{}); out.ExitCode != 0 {
+		t.Errorf("control: bash mode without .sh should be a no-op, got %d", out.ExitCode)
+	}
+}

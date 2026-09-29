@@ -542,7 +542,7 @@ func TestHooksImpl_BinaryPathChangeReplacesInPlace(t *testing.T) {
 
 func TestHooksImpl_PathWithSpaceIsQuotedAndParsed(t *testing.T) {
 	c := goCommand("/Users/a b/bin/yakos", "path-log")
-	if c != "'/Users/a b/bin/yakos' hook run path-log" {
+	if c != "'/Users/a b/bin/yakos' hook run --impl go path-log" {
 		t.Fatalf("quoting: %s", c)
 	}
 	if n, ok := goHookName(c); !ok || n != "path-log" {
@@ -550,6 +550,30 @@ func TestHooksImpl_PathWithSpaceIsQuotedAndParsed(t *testing.T) {
 	}
 	if _, ok := goHookName("/usr/bin/other hook run x"); ok {
 		t.Fatal("non-yakos binary parsed as a Go hook command")
+	}
+}
+
+func TestHooksImpl_GoCommandPinsTierAndParserAcceptsLegacy(t *testing.T) {
+	if got := goCommand("/x/yakos", "secret-scan"); got != "/x/yakos hook run --impl go secret-scan" {
+		t.Fatalf("goCommand must pin the Go tier explicitly, got %q", got)
+	}
+	cases := map[string]struct {
+		name string
+		ok   bool
+	}{
+		"/x/yakos hook run --impl go secret-scan": {"secret-scan", true},
+		"/x/yakos hook run secret-scan":           {"secret-scan", true}, // legacy (A-3)
+		"/x/yakos hook run --impl bash x":         {"", false},
+		"/x/yakos hook run --impl go":             {"", false},
+		"/x/yakos hook run --other go x":          {"", false},
+		"/x/yakos hook run --impl go x y":         {"", false},
+		"/x/yakos hook run --impl go -x":          {"", false},
+	}
+	for in, want := range cases {
+		n, ok := goHookName(in)
+		if ok != want.ok || n != want.name {
+			t.Errorf("goHookName(%q) = %q,%v want %q,%v", in, n, ok, want.name, want.ok)
+		}
 	}
 }
 
