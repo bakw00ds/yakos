@@ -373,6 +373,10 @@ An explicit CN entry always beats `"*"`, including `yakos mtls set-role
 <cn> none`, the explicit-deny value. An unrecognised role string
 resolves to no access for that CN and logs a WARN naming it.
 
+A cert or user with no access that opens `/` gets a 403 "No access"
+page naming the fix (`yakos mtls set-role <cn> <role>`) rather than an
+empty console. Loopback is unaffected.
+
 ### Unrecognised roles in `users.json` fail closed
 
 The same posture applies to password users. A `role` in

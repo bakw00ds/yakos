@@ -50,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Networked console explains "no access" instead of an empty shell
+  (K-110).** An authenticated identity that resolves to no role (a cert
+  with no `roles.json` entry, or a user whose stored role is
+  unrecognised) used to get the SPA shell at `/` with 200 and then 403
+  on every data route with no explanation. `/` now returns a 403 page
+  naming the fix (`yakos mtls set-role <cn> <role>` for certs, an
+  operator setting the role for password users). Loopback is unchanged.
+
 - **CLI and hygiene follow-ups (K-102).** `yakos doctor` warns when a
   hook command in the project's `settings.json` pins an absolute `yakos`
   path that no longer exists or is not executable (the hook exits 127,

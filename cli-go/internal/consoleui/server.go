@@ -6,6 +6,8 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"html"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -1297,6 +1299,14 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// An authenticated identity with no role (unmapped cert, or a user whose
+	// stored role is unrecognised) would otherwise get the SPA shell and then
+	// a 403 on every data route with no explanation (K-110). Explain instead.
+	// Loopback identities are Authenticated=false, so they never reach this.
+	if id := netid.IdentityFrom(r.Context()); id.Resolved && id.Authenticated && id.Role == netid.RoleNone {
+		writeNoAccessPage(w, id)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	// Emit CSP as a response header so the ws:// / wss:// origin matches the
@@ -1313,6 +1323,37 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	// Cross-Origin-Resource-Policy: same-origin — prevents cross-origin reads.
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	_, _ = w.Write(indexHTML)
+}
+
+// writeNoAccessPage serves the minimal 403 page for an authenticated identity
+// that resolved to RoleNone. It is static HTML (no script, no styles) and the
+// identity string is HTML-escaped, since a cert CN is not trusted markup.
+func writeNoAccessPage(w http.ResponseWriter, id netid.Identity) {
+	var hint string
+	if id.AuthMethod == netid.AuthMethodSession {
+		hint = "Your account has no role assigned. Ask an operator to set your role " +
+			"from the admin Users panel."
+	} else {
+		hint = "Ask an operator to map your certificate: <code>yakos mtls set-role " +
+			html.EscapeString(id.OperatorID) + " &lt;role&gt;</code> " +
+			"(role is one of read, dispatch, flows-run, admin)."
+	}
+	who := ""
+	if id.OperatorID != "" {
+		who = "<p>Signed in as <strong>" + html.EscapeString(id.OperatorID) + "</strong>.</p>"
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = io.WriteString(w, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"+
+		"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"+
+		"<title>No access - yakOS</title></head><body>"+
+		"<h1>No access</h1>"+who+
+		"<p>You are authenticated, but no role is mapped to this identity, so the console cannot show you anything.</p>"+
+		"<p>"+hint+"</p></body></html>\n")
 }
 
 func (s *Server) handleAppJS(w http.ResponseWriter, r *http.Request) {
