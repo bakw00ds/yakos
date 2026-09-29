@@ -58,7 +58,6 @@
     "gctrace",
     "memory",
     "trap",
-    "hard-for-cheap-tier",
     "read-only"
   ]
 }

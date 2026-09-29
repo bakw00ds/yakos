@@ -57,7 +57,6 @@
     "benchmark",
     "measurement",
     "real-code",
-    "tree-dependent",
-    "hard-for-cheap-tier"
+    "tree-dependent"
   ]
 }

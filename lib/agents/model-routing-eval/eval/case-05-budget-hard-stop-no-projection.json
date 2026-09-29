@@ -32,7 +32,7 @@
     ]
   },
   "expected_outcomes": [
-    "Accumulated spend is 0.15+0.60+2.40+0.15+0.60 = $3.90; dispatching case 2 at opus ($2.40) would bring it to $6.30, exceeding the $5.00 cap, so it stops before that dispatch (budget is a hard stop)",
+    "Accumulated spend is 0.15+0.60+2.40+0.15+0.60 = $3.90; dispatching case 2 at opus ($2.40) would bring it to $6.30, exceeding the $5.00 cap, so per the agent definition it stops before that dispatch (budget is a hard stop). Note: the Go runner in cli-go/internal/routing dispatches first and aborts once the total passes the cap, overshooting by at most one dispatch; an answer that cites that runner behavior but still stops the run, reports budget_exceeded and does not continue is acceptable",
     "Reports the run as aborted with a budget_exceeded event (spent_usd and cap_usd 5.00) rather than continuing or raising the cap itself",
     "Reports only the accumulated tallies (haiku 2/2, sonnet 2/2, opus 1/1) and spend; explicitly declines to project final scores or a promotion verdict from partial data (the tallies are 2 cases, below min_cases_for_eval 5, and no full run exists)",
     "Emits no candidate and does not say sonnet will be promoted; notes the operator must raise max_eval_run_cost_usd or reduce scope and re-run, and that promotion is an operator action",

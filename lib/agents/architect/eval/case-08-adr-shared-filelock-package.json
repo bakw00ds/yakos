@@ -18,7 +18,7 @@
         "name": "finds-import-direction-constraint",
         "weight": 0.3,
         "type": "scalar_0_1",
-        "anchor": "1.0: states that consoleui imports dispatch, so the shared helper cannot live in consoleui and be used by dispatch; it must be in a leaf package (new or an existing leaf such as statepath) or in dispatch. 0.5: mentions a cycle risk without naming the direction. 0.0: does not consider package placement."
+        "anchor": "1.0: states that consoleui imports dispatch, so the shared helper cannot live in consoleui and be used by dispatch; it must be in a leaf package (a new leaf package, or an existing leaf) or in dispatch. 0.5: mentions a cycle risk without naming the direction. 0.0: does not consider package placement."
       },
       {
         "name": "signature-mismatch",
@@ -35,7 +35,7 @@
   "expected_outcomes": [
     "Makes a clear recommendation (A or B) with reasoning",
     "Reports that the Windows implementations are not equivalent: dispatch/lock_windows.go and mailbox/lock_windows.go are no-ops (dispatch documents it as Phase 1 / Decision Q8), while consoleui/lock_windows.go really locks with windows.LockFileEx; so consolidating requires an explicit decision on whether the dispatch-log and mailbox gain real Windows locking",
-    "Reports that consoleui already imports dispatch (verify with grep of consoleui non-test imports), so a shared helper cannot live in consoleui; a consolidated version must sit in a leaf package that both can import (both already import statepath) or be exported from a new package",
+    "Reports that consoleui already imports dispatch (verify with grep of consoleui non-test imports), so a shared helper cannot live in consoleui; a consolidated version must sit in a leaf package that its users can import (dispatch and consoleui already import statepath; mailbox does not) or be exported from a new package",
     "Notes that mailbox's lockFile/unlockFile return an error (the caller proceeds without the lock only when lockFile fails) whereas dispatch and consoleui swallow the error and return nothing, so a shared API needs one signature",
     "Cites only real files (verify the three lock_unix.go and lock_windows.go pairs and the three call sites exist) and invents no package"
   ],

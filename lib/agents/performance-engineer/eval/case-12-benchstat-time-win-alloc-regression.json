@@ -34,7 +34,7 @@
     ]
   },
   "expected_outcomes": [
-    "Does not approve on the headline: the benchstat is coherent (p=0.000, n=15, low variance) so the deltas are real for the two microbenchmarks, but the 4x claim holds only at n=256; at n=8 the PR is about 95 percent slower and both sizes allocate 3-8x more objects and 2.6-4.4x more bytes",
+    "Does not approve on the headline: the benchstat is coherent (p=0.000, n=15, low variance) so the deltas are real for the two microbenchmarks, but the 4x claim holds only at n=256; at n=8 the PR is about 95 percent slower and both sizes allocate 3-8x more objects and 3.6-4.4x more bytes",
     "Notes the geomean of -31.98 percent is produced by only two arbitrary sizes and cannot represent the workload; the owner's belief that most requests carry fewer than 16 tags means the common case may regress while the rare large case improves",
     "Weighs GC pressure: 3 calls per request at 2,000 req/s means the extra allocation volume scales with concurrency, and a serial b.N benchmark lets background GC run on otherwise idle cores so ns/op understates GC cost seen in a busy 4-core container; more allocations raise GC frequency and mark-assist risk for p99, not just p50",
     "Requests concrete measurement: a benchmark over a realistic tag-count distribution (for example weighted 4/8/16/64/256), run with b.RunParallel or -cpu 1,2,4 and -benchmem, plus GC metrics (GODEBUG=gctrace=1 or runtime/metrics) and a load test comparing end-to-end p99 against the 40 ms budget; may suggest allocation-free variants (sort a copy and compact, or linear scan below a size threshold and a map above it) as candidates to be measured, not asserted",
@@ -51,7 +51,6 @@
     "gc",
     "tradeoff",
     "trap",
-    "hard-for-cheap-tier",
     "read-only"
   ]
 }
