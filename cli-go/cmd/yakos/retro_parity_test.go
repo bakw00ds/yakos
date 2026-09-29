@@ -7,8 +7,9 @@
 //
 //  2. The bash retro.sh manages the 10-cycle retrospective cadence.
 //     Subcommands: now, disable, enable, status, last, history.
-//     State (auto-dispatch on/off) is stored in settings.json in bash; the
-//     Go port uses a simpler sentinel file at ~/.yakos-state/retro-disabled.
+//     State (auto-dispatch on/off) is stored in settings.json
+//     (.retro.auto_dispatch) by both bash and Go (K-89: Go used to write an
+//     unread sentinel file, so `yakos retro disable` was a no-op).
 //
 //  3. Parity is verified behaviourally (output shape, error conditions,
 //     filesystem effects) rather than byte-for-byte.
@@ -79,9 +80,12 @@ func TestRetroParity_Disable_CreatesFlag(t *testing.T) {
 	if res.AutoDispatch {
 		t.Error("expected AutoDispatch=false after disable")
 	}
-	flagPath := filepath.Join(home, ".yakos-state", "retro-disabled")
-	if _, err := os.Stat(flagPath); err != nil {
-		t.Errorf("expected disabled flag at %s; stat: %v", flagPath, err)
+	data, err := os.ReadFile(filepath.Join(home, ".yakos-state", "settings.json"))
+	if err != nil {
+		t.Fatalf("settings.json not written: %v", err)
+	}
+	if !strings.Contains(string(data), `"auto_dispatch": false`) {
+		t.Errorf("expected auto_dispatch:false in settings.json; got %s", data)
 	}
 	out := retroOut(cfg)
 	if !strings.Contains(out, "DISABLED") {

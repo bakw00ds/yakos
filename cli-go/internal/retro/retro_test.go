@@ -2,6 +2,7 @@ package retro
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,7 +37,32 @@ func makeCurrentDir(t *testing.T, home, slug string) string {
 
 // ---- enable/disable ---------------------------------------------------------
 
-func TestDisable_CreatesFlag(t *testing.T) {
+// readSettings parses ~/.yakos-state/settings.json under home.
+func readSettings(t *testing.T, home string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(home, ".yakos-state", "settings.json"))
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("settings.json not valid JSON: %v\n%s", err, data)
+	}
+	return m
+}
+
+func writeSettingsFile(t *testing.T, home, content string) {
+	t.Helper()
+	p := filepath.Join(home, ".yakos-state", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+}
+
+func TestDisable_WritesSettingsFalse(t *testing.T) {
 	home := t.TempDir()
 	cfg := newTestConfig(home, "disable")
 	res, err := Run(cfg)
@@ -46,9 +72,13 @@ func TestDisable_CreatesFlag(t *testing.T) {
 	if res.AutoDispatch {
 		t.Error("expected AutoDispatch=false after disable")
 	}
-	flagPath := filepath.Join(home, ".yakos-state", "retro-disabled")
-	if !fileExists(flagPath) {
-		t.Errorf("expected disabled flag at %s", flagPath)
+	m := readSettings(t, home)
+	retro, _ := m["retro"].(map[string]any)
+	if v, ok := retro["auto_dispatch"].(bool); !ok || v {
+		t.Errorf("expected .retro.auto_dispatch == false in settings.json; got %v", retro["auto_dispatch"])
+	}
+	if fileExists(filepath.Join(home, ".yakos-state", "retro-disabled")) {
+		t.Error("legacy sentinel must not be (re)created")
 	}
 	out := testOut(cfg)
 	if !strings.Contains(out, "DISABLED") {
@@ -56,13 +86,10 @@ func TestDisable_CreatesFlag(t *testing.T) {
 	}
 }
 
-func TestEnable_RemovesFlag(t *testing.T) {
+func TestEnable_WritesSettingsTrue_AndClearsLegacySentinel(t *testing.T) {
 	home := t.TempDir()
-	// Pre-create the flag.
+	writeSettingsFile(t, home, `{"retro":{"auto_dispatch":false}}`)
 	flagPath := filepath.Join(home, ".yakos-state", "retro-disabled")
-	if err := os.MkdirAll(filepath.Dir(flagPath), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
 	if err := os.WriteFile(flagPath, nil, 0644); err != nil {
 		t.Fatalf("write flag: %v", err)
 	}
@@ -75,12 +102,51 @@ func TestEnable_RemovesFlag(t *testing.T) {
 	if !res.AutoDispatch {
 		t.Error("expected AutoDispatch=true after enable")
 	}
+	retro, _ := readSettings(t, home)["retro"].(map[string]any)
+	if v, ok := retro["auto_dispatch"].(bool); !ok || !v {
+		t.Errorf("expected .retro.auto_dispatch == true; got %v", retro["auto_dispatch"])
+	}
 	if fileExists(flagPath) {
-		t.Error("expected disabled flag to be removed after enable")
+		t.Error("expected stale legacy sentinel to be removed after enable")
 	}
 	out := testOut(cfg)
 	if !strings.Contains(out, "ENABLED") {
 		t.Errorf("expected ENABLED in output; got: %q", out)
+	}
+}
+
+func TestDisable_PreservesOtherSettingsKeys(t *testing.T) {
+	home := t.TempDir()
+	writeSettingsFile(t, home, `{"theme":"dark","big":12345678901234567890,"retro":{"cycle_length":7}}`)
+	if _, err := Run(newTestConfig(home, "disable")); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(home, ".yakos-state", "settings.json"))
+	if !strings.Contains(string(raw), "12345678901234567890") {
+		t.Errorf("large number was not preserved verbatim: %s", raw)
+	}
+	m := readSettings(t, home)
+	if m["theme"] != "dark" {
+		t.Errorf("theme key lost: %v", m)
+	}
+	retro, _ := m["retro"].(map[string]any)
+	if retro["cycle_length"] != float64(7) {
+		t.Errorf("retro.cycle_length lost: %v", retro)
+	}
+	if retro["auto_dispatch"] != false {
+		t.Errorf("auto_dispatch not false: %v", retro)
+	}
+}
+
+func TestDisable_RefusesToClobberMalformedSettings(t *testing.T) {
+	home := t.TempDir()
+	writeSettingsFile(t, home, `{not json`)
+	if _, err := Run(newTestConfig(home, "disable")); err == nil {
+		t.Fatal("expected an error for malformed settings.json")
+	}
+	raw, _ := os.ReadFile(filepath.Join(home, ".yakos-state", "settings.json"))
+	if string(raw) != `{not json` {
+		t.Errorf("malformed settings.json was modified: %q", raw)
 	}
 }
 
@@ -100,21 +166,17 @@ func TestEnable_IdempotentWhenAlreadyEnabled(t *testing.T) {
 func TestDisable_Enable_RoundTrip(t *testing.T) {
 	home := t.TempDir()
 
-	cfg := newTestConfig(home, "disable")
-	if _, err := Run(cfg); err != nil {
+	if _, err := Run(newTestConfig(home, "disable")); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	flagPath := filepath.Join(home, ".yakos-state", "retro-disabled")
-	if !fileExists(flagPath) {
-		t.Fatal("flag should exist after disable")
+	if autoDispatchEnabled(home) {
+		t.Fatal("auto-dispatch should be disabled after disable")
 	}
-
-	cfg2 := newTestConfig(home, "enable")
-	if _, err := Run(cfg2); err != nil {
+	if _, err := Run(newTestConfig(home, "enable")); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
-	if fileExists(flagPath) {
-		t.Fatal("flag should be gone after enable")
+	if !autoDispatchEnabled(home) {
+		t.Fatal("auto-dispatch should be enabled after enable")
 	}
 }
 
@@ -273,13 +335,7 @@ func TestStatus_WithMarkerPresent(t *testing.T) {
 
 func TestStatus_Disabled_ShowsFalse(t *testing.T) {
 	home := t.TempDir()
-	flagPath := filepath.Join(home, ".yakos-state", "retro-disabled")
-	if err := os.MkdirAll(filepath.Dir(flagPath), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(flagPath, nil, 0644); err != nil {
-		t.Fatalf("write flag: %v", err)
-	}
+	writeSettingsFile(t, home, `{"retro":{"auto_dispatch":false}}`)
 
 	cfg := newTestConfig(home, "status")
 	res, err := Run(cfg)
@@ -481,23 +537,44 @@ func TestAtomicTouch_CreatesParentDirs(t *testing.T) {
 	}
 }
 
-// ---- isDisabled / fileExists ------------------------------------------------
+// ---- autoDispatchEnabled / fileExists --------------------------------------
 
-func TestIsDisabled_FlagAbsent(t *testing.T) {
-	dir := t.TempDir()
-	if isDisabled(filepath.Join(dir, "retro-disabled")) {
-		t.Error("expected isDisabled=false when flag absent")
+func TestAutoDispatchEnabled_Matrix(t *testing.T) {
+	cases := []struct {
+		name, settings string
+		want           bool
+	}{
+		{"file absent", "", true},
+		{"bool false", `{"retro":{"auto_dispatch":false}}`, false},
+		{"string false", `{"retro":{"auto_dispatch":"false"}}`, false},
+		{"bool true", `{"retro":{"auto_dispatch":true}}`, true},
+		{"null", `{"retro":{"auto_dispatch":null}}`, true},
+		{"absent key", `{"retro":{}}`, true},
+		{"retro not object", `{"retro":"x"}`, true},
+		{"malformed", `{nope`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			if tc.settings != "" {
+				writeSettingsFile(t, home, tc.settings)
+			}
+			if got := autoDispatchEnabled(home); got != tc.want {
+				t.Errorf("autoDispatchEnabled = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
-func TestIsDisabled_FlagPresent(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "retro-disabled")
+func TestAutoDispatchEnabled_IgnoresLegacySentinel(t *testing.T) {
+	home := t.TempDir()
+	p := filepath.Join(home, ".yakos-state", "retro-disabled")
+	_ = os.MkdirAll(filepath.Dir(p), 0755)
 	if err := os.WriteFile(p, nil, 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if !isDisabled(p) {
-		t.Error("expected isDisabled=true when flag present")
+	if !autoDispatchEnabled(home) {
+		t.Error("legacy sentinel must not be consulted (no hook reads it)")
 	}
 }
 
@@ -530,5 +607,42 @@ func TestReadCycleCount_Garbage(t *testing.T) {
 	n, _ := readCycleCount(dir)
 	if n != 0 {
 		t.Errorf("expected 0 for garbage; got %d", n)
+	}
+}
+
+func TestStatus_LegacySentinel_WarnsOnStderr(t *testing.T) {
+	home := t.TempDir()
+	p := filepath.Join(home, ".yakos-state", "retro-disabled")
+	_ = os.MkdirAll(filepath.Dir(p), 0755)
+	if err := os.WriteFile(p, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := newTestConfig(home, "status")
+	var errBuf strings.Builder
+	cfg.ErrWriter = &errBuf
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.AutoDispatch {
+		t.Error("legacy sentinel must not change reported state")
+	}
+	if !strings.Contains(errBuf.String(), "legacy sentinel") {
+		t.Errorf("expected legacy-sentinel note on stderr; got %q", errBuf.String())
+	}
+	if !fileExists(p) {
+		t.Error("status must not delete the sentinel")
+	}
+
+	// No sentinel -> no note.
+	home2 := t.TempDir()
+	cfg2 := newTestConfig(home2, "status")
+	var errBuf2 strings.Builder
+	cfg2.ErrWriter = &errBuf2
+	if _, err := Run(cfg2); err != nil {
+		t.Fatal(err)
+	}
+	if errBuf2.Len() != 0 {
+		t.Errorf("unexpected stderr without sentinel: %q", errBuf2.String())
 	}
 }

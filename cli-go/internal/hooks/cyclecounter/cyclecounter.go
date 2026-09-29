@@ -13,14 +13,11 @@
 // mirroring bash's own settings-file read — see loadSettings /
 // settingsCycleLength / settingsAutoRetro below.
 // AutoRetro defaults to true and can be overridden via Config.AutoRetro, or
-// via settings.json's .retro.auto_dispatch, INCLUDING bash's jq `//`
-// pre-existing quirk: `.retro.auto_dispatch // true` treats a literal JSON
-// `false` as falsy and falls through to `true`, so `yakos retro disable`
-// (which writes boolean `false`) has never actually disabled auto-retro on
-// the bash side. This is a real, pre-existing bash bug (S-6 A-2a round 2
-// review finding 4, flagged for a follow-up ticket) — Go replicates it
-// rather than silently fixing it, since byte-parity with bash is this
-// package's job, not correctness triage.
+// via settings.json's .retro.auto_dispatch: null/absent means true, any
+// other value is taken as-is (boolean false and the string "false" both
+// disable). K-89: bash used to read this with jq's `// true`, which treats
+// a literal false as null, so `yakos retro disable` never took effect; both
+// sides now use `if . == null then true else . end` semantics.
 package cyclecounter
 
 import (
@@ -235,23 +232,20 @@ func settingsCycleLength(settings map[string]any) (int, bool) {
 
 // settingsAutoRetro reproduces:
 //
-//	val="$(jq -r '.retro.auto_dispatch // true' "$settings_file")"
+//	val="$(jq -r 'if .retro.auto_dispatch == null then true else .retro.auto_dispatch end' "$settings_file")"
 //	[ "$val" = "false" ] && auto_retro=false
 //
-// including the jq `//` falsy-set quirk this operator inherits from
-// hookio.JQAlt: `//` treats only {null, false} as falsy, so a literal
-// JSON `false` for .retro.auto_dispatch is itself falsy and falls
-// through to the `true` fallback — `.retro.auto_dispatch: false` (what
-// `yakos retro disable` actually writes) therefore NEVER disables
-// auto-retro via this path on the bash side, and Go must not "fix" that
-// here; only a literal JSON STRING "false" makes it through as a
-// non-falsy value that then string-compares equal to "false". This is a
-// pre-existing bash bug (S-6 A-2a round 2 review finding 4) tracked
-// separately, not something this port corrects.
+// null/absent (or a non-object .retro, where jq errors and bash falls back
+// to "true") yields true; boolean false and the string "false" both render
+// as "false" and disable. This deliberately does NOT use hookio.JQAlt: jq's
+// `//` treats boolean false as falsy, which was the K-89 bug.
 func settingsAutoRetro(settings map[string]any) bool {
 	retro, _ := settings["retro"].(map[string]any)
-	raw := hookio.JQRawOrJSON(hookio.JQAlt(retro["auto_dispatch"], true))
-	return raw != "false"
+	v := retro["auto_dispatch"]
+	if v == nil {
+		return true
+	}
+	return hookio.JQRawOrJSON(v) != "false"
 }
 
 // ---- helpers -----------------------------------------------------------------

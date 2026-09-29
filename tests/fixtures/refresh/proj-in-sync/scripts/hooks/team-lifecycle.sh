@@ -42,6 +42,9 @@ HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 # shellcheck source=./lib/compat.sh
 [ -f "$HOOK_DIR/lib/compat.sh" ] && . "$HOOK_DIR/lib/compat.sh"
 
+# K-81: non-blocking hook — a missing jq must never block the tool call.
+hi_skip_if_no_jq
+
 hi_init
 
 tool="$(hi_tool)"
@@ -144,6 +147,11 @@ kanban_move_first() {
         { print }
 
         END {
+            # K-90: a task that is the last record of the file never meets
+            # a following non-indented line, so the capture was never
+            # committed (moved stayed 0) and the task was silently dropped.
+            # Flush the pending capture at end of input.
+            if (state == "capturing_cont" && !moved) moved = 1
             # If we captured but didnt emit (src found, dst missing), best
             # not to drop the task — emit a warning marker.
             if (moved && !moved_emitted) {

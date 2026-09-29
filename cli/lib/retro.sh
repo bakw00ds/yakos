@@ -78,16 +78,16 @@ _retro_settings_get() {
     printf '%s\n' "$default"
 }
 
+# _retro_settings_set <jq-expression>
+# Applies ONE jq expression to settings.json, creating `{}` first when the
+# file is absent. (K-89 review: this used to take (path, value) while both
+# callers passed a single combined expression, so disable/enable crashed
+# with "$2: unbound variable" under `set -u`.)
 _retro_settings_set() {
-    local jq_path="$1" value="$2"
+    local expr="$1"
     mkdir -p "$(dirname "$SETTINGS")"
-    if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
-        ct_json_merge "$SETTINGS" "$jq_path = $value"
-    else
-        # Fresh settings file.
-        echo "{\"retro\": {}}" > "$SETTINGS"
-        ct_json_merge "$SETTINGS" "$jq_path = $value"
-    fi
+    [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
+    ct_json_merge "$SETTINGS" "$expr"
 }
 
 cmd_now() {
@@ -156,7 +156,12 @@ cmd_enable() {
 
 cmd_status() {
     local auto cycle_length cur current_cycle
-    auto="$(_retro_settings_get .retro.auto_dispatch true)"
+    # K-89: `_retro_settings_get` uses jq's `// empty`, which swallows an
+    # explicit `false` and made status report "true" right after `disable`.
+    auto=true
+    if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        auto="$(jq -r 'if .retro.auto_dispatch == null then true else .retro.auto_dispatch end' "$SETTINGS" 2>/dev/null)" || auto=true
+    fi
     cycle_length="$(_retro_settings_get .retro.cycle_length 10)"
     cur="$(_retro_current_dir)"
     if [ -n "$cur" ] && [ -d "$cur" ]; then

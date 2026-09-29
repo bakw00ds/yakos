@@ -278,6 +278,14 @@ func (h *Hook) kanbanMoveFirst(out *hooktype.HookOutput, srcCol, dstCol, cbox st
 		outLines = append(outLines, line)
 	}
 
+	// K-90: flush a capture still pending at end of input. A task that is
+	// the last record of the file never meets a following non-indented
+	// line, so the loop above never committed it and it was silently
+	// dropped (bash's awk had the identical bug; fixed in its END block).
+	if state == "capturing_cont" {
+		moved = true
+	}
+
 	// END block: captured but never re-emitted (src found, dst section
 	// missing) — don't drop the task, emit a warning marker instead.
 	if moved && !movedEmitted {

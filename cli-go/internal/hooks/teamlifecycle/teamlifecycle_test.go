@@ -453,3 +453,63 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+// TestTeamLifecycle_KanbanMove_EOFCases pins K-90. The mover captured the
+// first task under the source section but only committed the capture when a
+// later non-indented line ended the block, so a task that was the literal
+// last record of kanban.md (with or without a final newline) was silently
+// dropped. Expectations are byte-exact and mirrored by
+// tests/run-team-lifecycle-kanban-test.sh against the bash hook.
+func TestTeamLifecycle_KanbanMove_EOFCases(t *testing.T) {
+	const warn = "# WARN: yakos kanban auto-update found src but no dst section"
+	cases := []struct {
+		name, tool, in, want string
+	}{
+		{"last task, no final newline, no DONE", "TeamDelete",
+			"## TODO\n\n## IN PROGRESS\n- [-] K-1 task",
+			"## TODO\n\n## IN PROGRESS\n" + warn + "\n- [-] K-1 task\n"},
+		{"last task, final newline, no DONE", "TeamDelete",
+			"## TODO\n\n## IN PROGRESS\n- [-] K-1 task\n",
+			"## TODO\n\n## IN PROGRESS\n" + warn + "\n- [-] K-1 task\n"},
+		{"last task with continuation lines", "TeamDelete",
+			"## TODO\n\n## IN PROGRESS\n- [-] K-1 task\n  - notes: x\n  - blockers: none",
+			"## TODO\n\n## IN PROGRESS\n" + warn + "\n- [-] K-1 task\n  - notes: x\n  - blockers: none\n"},
+		{"TeamCreate, TODO last, IN PROGRESS earlier", "TeamCreate",
+			"## IN PROGRESS\n\n## TODO\n- [ ] K-2 t2",
+			"## IN PROGRESS\n\n## TODO\n" + warn + "\n- [ ] K-2 t2\n"},
+		{"last task with trailing spaces", "TeamDelete",
+			"## TODO\n\n## IN PROGRESS\n- [-] K-1 task   ",
+			"## TODO\n\n## IN PROGRESS\n" + warn + "\n- [-] K-1 task   \n"},
+		{"CRLF, last task, no final newline", "TeamDelete",
+			"## TODO\r\n\r\n## IN PROGRESS\r\n- [-] K-1 task\r\n  - n: x\r",
+			"## TODO\r\n\r\n## IN PROGRESS\r\n" + warn + "\n- [-] K-1 task\r\n  - n: x\r\n"},
+		// Guards: behavior that already worked must not change.
+		{"empty DONE last, task not last", "TeamDelete",
+			"## TODO\n\n## IN PROGRESS\n- [-] K-1 task\n\n## DONE",
+			"## TODO\n\n## IN PROGRESS\n\n## DONE\n- [x] K-1 task\n"},
+		{"normal board TeamCreate", "TeamCreate",
+			"## TODO\n- [ ] K-1 a\n  - n: 1\n- [ ] K-2 b\n\n## IN PROGRESS\n\n## DONE\n",
+			"## TODO\n- [ ] K-2 b\n\n## IN PROGRESS\n- [-] K-1 a\n  - n: 1\n\n## DONE\n"},
+		{"empty source section", "TeamDelete",
+			"## TODO\n\n## IN PROGRESS\n\n## DONE\n",
+			"## TODO\n\n## IN PROGRESS\n\n## DONE\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			work := t.TempDir()
+			kb := filepath.Join(work, "kanban.md")
+			if err := os.WriteFile(kb, []byte(tc.in), 0644); err != nil {
+				t.Fatal(err)
+			}
+			h := &teamlifecycle.Hook{WorkCurrentDir: work, NowFn: fixedNow}
+			_, _ = h.Run(context.Background(), makeInput(tc.tool, "team-k90", "sess-k90"))
+			got, err := os.ReadFile(kb)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("kanban.md mismatch\n got: %q\nwant: %q", got, tc.want)
+			}
+		})
+	}
+}
