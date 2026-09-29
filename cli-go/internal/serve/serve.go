@@ -452,11 +452,7 @@ func Run(ctx context.Context, cfg Config) error {
 						if !ok {
 							return
 						}
-						bus.Publish(wsbus.TopicFilesChanged, wsbus.FilesChangedPayload{
-							Path:   ev.Path,
-							Action: string(ev.Action),
-							TS:     ev.TS,
-						})
+						bus.Publish(wsbus.TopicFilesChanged, filesChangedPayload(ev))
 					case <-ctx.Done():
 						return
 					}
@@ -1243,4 +1239,17 @@ func printNetworkedConsoleBanner(bindAddr string, externalHosts []string, certFi
 	fmt.Fprintln(os.Stderr, "           with 'dispatch' or higher roles.  Verify the fingerprint")
 	fmt.Fprintln(os.Stderr, "           above before connecting client certificates.")
 	fmt.Fprintln(os.Stderr, sep)
+}
+
+// filesChangedPayload maps a watcher event onto the bus payload. A directory
+// summary event (Count > 0: a new directory held too many files for per-file
+// events) is published as action "rescanned" with the count, so consumers can
+// tell a directory path from a file create and refresh the subtree.
+func filesChangedPayload(ev filewatch.ChangeEvent) wsbus.FilesChangedPayload {
+	p := wsbus.FilesChangedPayload{Path: ev.Path, Action: string(ev.Action), TS: ev.TS}
+	if ev.Count > 0 {
+		p.Action = "rescanned"
+		p.Count = ev.Count
+	}
+	return p
 }

@@ -72,10 +72,15 @@ const (
 type FilesChangedPayload struct {
 	// Path is the workspace-relative path of the changed file (forward slashes).
 	Path string `json:"path"`
-	// Action is "created", "modified", or "deleted".
+	// Action is "created", "modified", or "deleted"; or "rescanned", in
+	// which case Path is a DIRECTORY, not a file (see Count).
 	Action string `json:"action"`
 	// TS is the server-side time at which the debounced event fired.
 	TS time.Time `json:"ts"`
+	// Count is set only when Action is "rescanned": the number of files a
+	// new directory held when it was scanned. Consumers should refresh that
+	// subtree rather than treat Path as a file. Omitted otherwise.
+	Count int `json:"count,omitempty"`
 }
 
 // Topic constants for Phase-2 fleet (REPL session panel) events.
