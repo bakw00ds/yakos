@@ -1,0 +1,45 @@
+{
+  "case_id": "perf-n-plus-one-git-02",
+  "task": "Performance review. The code or data is supplied inline. This is a diagnosis-only task: do NOT edit or create any file and do not run commands; respond with findings and a proposed fix as text. Be explicit about what you measured versus what you are inferring.\n\n`yakos kanban --with-last-commit` renders a board with up to 300 items. Current implementation:\n\n```go\nfunc annotate(items []Item, repo string) {\n\tfor i := range items {\n\t\tcmd := exec.Command(\"git\", \"-C\", repo, \"log\", \"-1\", \"--format=%h %s\", \"--\", items[i].Path)\n\t\tout, err := cmd.Output()\n\t\tif err == nil {\n\t\t\titems[i].LastCommit = strings.TrimSpace(string(out))\n\t\t}\n\t}\n}\n```\nUsers report the command takes ~9 seconds on a large repo. Explain why, and propose the fix. Include at least two options with their tradeoffs and say which you would measure first.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "identifies-n-plus-one-subprocess",
+        "weight": 0.35,
+        "type": "binary"
+      },
+      {
+        "name": "two-options-with-tradeoffs",
+        "weight": 0.3,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "measure-first",
+        "weight": 0.2,
+        "type": "binary"
+      },
+      {
+        "name": "no-invented-numbers",
+        "weight": 0.15,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Identifies an N+1 pattern: one git subprocess (fork/exec plus history walk) per item, up to 300 per render",
+    "Proposes at least two options, for example a single `git log --name-only` pass building a path-to-last-commit map, bounded-concurrency workers, or caching results keyed by HEAD sha",
+    "States tradeoffs (memory or parse complexity of one big log, concurrency limits and disk contention, cache invalidation)",
+    "Says to measure first (time a single git log invocation on this repo, or profile) before choosing, and does not present the 9 seconds as fully explained by inference alone",
+    "Does not fabricate benchmark figures as measured facts"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.4,
+  "tags": [
+    "performance",
+    "go",
+    "n-plus-one",
+    "subprocess",
+    "read-only"
+  ]
+}

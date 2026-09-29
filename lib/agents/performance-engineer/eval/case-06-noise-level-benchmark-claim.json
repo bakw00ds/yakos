@@ -1,0 +1,51 @@
+{
+  "case_id": "perf-noise-level-benchmark-06",
+  "task": "Performance review. The code or data is supplied inline. This is a diagnosis-only task: do NOT edit or create any file and do not run commands; respond with findings and a proposed fix as text. Be explicit about what you measured versus what you are inferring.\n\nA PR titled 'perf: replace map[string]struct{} + RWMutex with sync.Map in the session registry' claims a speedup. The author pasted this benchstat output (old = main, new = PR), 10 runs each on a laptop with other applications running:\n\n```\nname                      old time/op    new time/op    delta\nRegistryLookup-8            41.2ns ± 9%    39.9ns ±11%   ~     (p=0.315 n=10+10)\nRegistryLookupParallel-8    118ns ± 14%    102ns ±13%  -13.56%  (p=0.043 n=10+10)\nRegistryInsert-8             212ns ± 6%     398ns ± 5%  +87.74%  (p=0.000 n=10+10)\n\nname                      old allocs/op  new allocs/op  delta\nRegistryInsert-8             1.00 ± 0%      3.00 ± 0%  +200.00%  (p=0.000 n=10+10)\n```\nIn production the registry sees roughly 50 inserts and 5,000 lookups per second. Should this PR be approved as a performance improvement? Give a verdict with reasoning from the numbers, and say what evidence you would still want.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "rejects-perf-claim",
+        "weight": 0.3,
+        "type": "binary"
+      },
+      {
+        "name": "reads-p-values-correctly",
+        "weight": 0.25,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "notes-insert-regression",
+        "weight": 0.2,
+        "type": "binary"
+      },
+      {
+        "name": "asks-for-quiet-machine-rerun",
+        "weight": 0.15,
+        "type": "binary"
+      },
+      {
+        "name": "weights-by-production-mix",
+        "weight": 0.1,
+        "type": "scalar_0_1"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Does not approve it as a performance improvement: single-threaded lookup shows no significant change (p=0.315), and the parallel gain is marginal (p=0.043 with 13-14 percent variance on a noisy laptop)",
+    "Points out the insert path regressed by about 88 percent in time and 3x in allocations, which is statistically clear",
+    "Weighs by workload: with 100 lookups per insert the lookup gain is at most small in absolute terms (tens of ns), so the net effect is likely negligible or negative and cannot be shown from these numbers",
+    "Requests a rerun on a quiet machine or in CI with more iterations and a benchmark that mixes reads and writes in the production ratio",
+    "Does not simply trust the headline percentage and does not claim the benchmark proves the opposite either"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.4,
+  "tags": [
+    "performance",
+    "go",
+    "benchstat",
+    "statistics",
+    "hard-for-cheap-tier",
+    "read-only"
+  ]
+}

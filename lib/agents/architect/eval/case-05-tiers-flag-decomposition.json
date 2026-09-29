@@ -1,0 +1,51 @@
+{
+  "case_id": "architect-tiers-flag-decomposition-05",
+  "task": "Design a bounded change. Kanban item: 'Let `yakos model-routing eval` run a subset of tiers via a `--tiers haiku,sonnet` flag; today it always dispatches every tier, which makes eval runs expensive.' Read cli-go/internal/routing/routing.go, the model-routing dispatch in cli-go/cmd/yakos/cmd_work.go, cli/lib/model-routing.sh, and docs/eval-format.md. Produce a plan of 3 to 6 tasks. For each task give the owning file scope, the contract it depends on or publishes, and the ordering constraint. Call out every place where the existing docs or twin implementations disagree with the code. This is a read-only task: do not edit, write, or create any file.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "identifies-all-touch-points",
+        "weight": 0.3,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "contract-handoff-order",
+        "weight": 0.25,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "spots-doc-code-drift",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "task-count-and-scope",
+        "weight": 0.2,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Identifies the hardcoded tier list in routing.go's runEval (haiku, sonnet, opus, fable) and the Config struct as the place the new option must be added first",
+    "Identifies flag parsing in cli-go/cmd/yakos/cmd_work.go (runModelRouting) and notes the flag must be wired there, not only in the Config struct",
+    "Notes the bash twin cli/lib/model-routing.sh needs the same flag or an explicit parity decision",
+    "Notes docs/eval-format.md already shows `--tiers haiku,sonnet,opus` in its bootstrap workflow although no such flag exists, and that the Go runner and bash twin dispatch four tiers including fable while the docs describe three (drift)",
+    "Orders the contract (Config.Tiers field and validation of unknown tier names) before flag wiring and before tests/docs",
+    "Produces between 3 and 6 tasks, each with a file scope; does not modify any file"
+  ],
+  "context_files": [
+    "cli-go/internal/routing/routing.go",
+    "cli-go/cmd/yakos/cmd_work.go",
+    "cli/lib/model-routing.sh",
+    "docs/eval-format.md"
+  ],
+  "max_duration_s": 360,
+  "max_cost_usd": 0.8,
+  "tags": [
+    "decomposition",
+    "contract-handoff",
+    "go",
+    "hard-for-cheap-tier",
+    "read-only"
+  ]
+}

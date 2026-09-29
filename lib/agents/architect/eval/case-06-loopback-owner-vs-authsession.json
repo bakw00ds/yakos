@@ -1,0 +1,48 @@
+{
+  "case_id": "architect-loopback-owner-vs-authsession-06",
+  "task": "ADR-style design decision. The daemon's `yakos.term.create` RPC registers an externally-owned terminal session and must record an owner. Two options: (A) keep deriving the owner server-side from the loopbackowner package (file-persisted ID, socket is mode 0600 owner-UID); (B) reuse the networked-console authsession so every RPC carries a user session and the owner is the authenticated user. Read cli-go/internal/serve/term_methods.go, cli-go/internal/loopbackowner/loopbackowner.go and skim cli-go/internal/authsession. Recommend A or B for today's single-user loopback deployment and say what would have to change to make B the right answer later. Write it as a short ADR: Context, Decision, Consequences. Cite files. This is a read-only task: do not edit, write, or create any file.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "makes-a-decision",
+        "weight": 0.2,
+        "type": "binary"
+      },
+      {
+        "name": "grounded-in-code",
+        "weight": 0.3,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "names-forgery-threat",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "states-future-trigger",
+        "weight": 0.25,
+        "type": "scalar_0_1"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Picks a single option (A recommended for the single-user loopback path) rather than listing both without a decision",
+    "Grounds the decision in the code: term_methods.go derives the owner via loopbackowner and does not accept an owner from RPC params",
+    "Names the threat: an owner taken from caller-supplied params could be forged by a hostile local caller; the UID-restricted 0600 socket plus server-side derivation avoids that",
+    "States a concrete trigger for revisiting (for example the RPC surface becoming reachable by multiple authenticated users or over the network)",
+    "Uses ADR structure Context / Decision / Consequences and cites real file paths only"
+  ],
+  "context_files": [
+    "cli-go/internal/serve/term_methods.go",
+    "cli-go/internal/loopbackowner/loopbackowner.go"
+  ],
+  "max_duration_s": 300,
+  "max_cost_usd": 0.6,
+  "tags": [
+    "adr",
+    "judgement",
+    "security-adjacent",
+    "hard-for-cheap-tier",
+    "read-only"
+  ]
+}

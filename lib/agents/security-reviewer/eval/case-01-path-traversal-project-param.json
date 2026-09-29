@@ -1,0 +1,51 @@
+{
+  "case_id": "security-path-traversal-project-01",
+  "task": "Security review of a pending change. The diff is supplied inline; review it as written and do not modify any file. Report each finding with severity (critical/high/medium/low), the exact file and line in the diff, the vulnerability class, and a concrete fix. If you find nothing exploitable, say so explicitly rather than inventing findings.\n\n```diff\ndiff --git a/cli-go/internal/serve/status_methods.go b/cli-go/internal/serve/status_methods.go\n--- a/cli-go/internal/serve/status_methods.go\n+++ b/cli-go/internal/serve/status_methods.go\n@@ -41,6 +41,32 @@ type statusReadParams struct {\n+// handleStatusNotes returns the free-form notes file for a project.\n+// Params arrive from any JSON-RPC caller on the daemon socket.\n+func handleStatusNotes(cfg Config) jsonrpc.Handler {\n+\treturn func(ctx context.Context, raw json.RawMessage) (any, error) {\n+\t\tvar p struct {\n+\t\t\tProject string `json:\"project\"`\n+\t\t}\n+\t\tdec := json.NewDecoder(bytes.NewReader(raw))\n+\t\tdec.DisallowUnknownFields()\n+\t\tif err := dec.Decode(&p); err != nil {\n+\t\t\treturn nil, jsonrpc.InvalidParams(err)\n+\t\t}\n+\t\tif p.Project == \"\" {\n+\t\t\treturn nil, jsonrpc.InvalidParams(errors.New(\"project required\"))\n+\t\t}\n+\t\tpath := filepath.Join(cfg.StateDir, \"projects\", p.Project, \"notes.md\")\n+\t\tb, err := os.ReadFile(path)\n+\t\tif err != nil {\n+\t\t\treturn nil, jsonrpc.Internal(err)\n+\t\t}\n+\t\treturn map[string]string{\"notes\": string(b)}, nil\n+\t}\n+}\n```",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "finds-planted-traversal",
+        "weight": 0.4,
+        "type": "binary"
+      },
+      {
+        "name": "correct-severity",
+        "weight": 0.15,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "actionable-fix",
+        "weight": 0.2,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "no-false-criticals",
+        "weight": 0.15,
+        "type": "binary"
+      },
+      {
+        "name": "read-only",
+        "weight": 0.1,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Finds path traversal: the caller-controlled `project` value is joined into a filesystem path without validation, so `../../..` sequences let a caller read notes.md-suffixed paths outside the projects directory",
+    "Rates it high (or medium-high); not informational",
+    "Recommends validating the slug with pathsafe.ValidateProjectSlug (reject separators and '..') before the join, and optionally a post-join containment check",
+    "Does not report the DisallowUnknownFields decode or the empty-project check as vulnerabilities",
+    "Modifies no files"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.5,
+  "tags": [
+    "security",
+    "go",
+    "planted-vulnerability",
+    "read-only",
+    "path-traversal",
+    "rpc"
+  ]
+}

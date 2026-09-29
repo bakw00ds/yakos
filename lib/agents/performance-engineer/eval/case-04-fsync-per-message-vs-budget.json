@@ -1,0 +1,45 @@
+{
+  "case_id": "perf-fsync-latency-budget-04",
+  "task": "Performance review. The code or data is supplied inline. This is a diagnosis-only task: do NOT edit or create any file and do not run commands; respond with findings and a proposed fix as text. Be explicit about what you measured versus what you are inferring.\n\nBudget: WebSocket fan-out in wsbus must keep p99 publish latency under 5 ms at 500 messages/second sustained. A PR adds durability by fsyncing on every message:\n\n```diff\n func (b *Bus) Publish(topic string, msg []byte) error {\n-\tb.mu.Lock()\n-\tdefer b.mu.Unlock()\n+\tb.mu.Lock()\n+\tdefer b.mu.Unlock()\n+\tif _, err := b.wal.Write(append(msg, '\\n')); err != nil {\n+\t\treturn err\n+\t}\n+\tif err := b.wal.Sync(); err != nil {\n+\t\treturn err\n+\t}\n \tfor _, c := range b.subs[topic] {\n \t\tc.send(msg)\n \t}\n \treturn nil\n }\n```\nThe PR description says 'fsync on an SSD is ~0.1 ms so this is fine'. Does this PR meet the budget? Give a verdict, name the specific mechanisms that matter, and specify the measurement you would require before approving.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "flags-sync-under-lock",
+        "weight": 0.35,
+        "type": "binary"
+      },
+      {
+        "name": "challenges-unmeasured-claim",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "mitigation-options",
+        "weight": 0.2,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "concrete-measurement-plan",
+        "weight": 0.2,
+        "type": "scalar_0_1"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Flags that Sync() runs while holding the bus mutex, so every publisher and every fan-out serializes behind disk latency and tail latency compounds at 500 msg/s",
+    "Challenges the PR's 0.1 ms figure as an unmeasured claim: fsync latency varies widely by device, filesystem, and queue depth, and p99 not the mean is what the budget constrains",
+    "Proposes mitigations such as group commit or batching syncs on an interval, moving the WAL write outside the lock or to a dedicated goroutine, or making durability opt-in per topic",
+    "Requires a measurement: a load test at 500 msg/s reporting p50/p99/p99.9 publish latency on the target storage, before and after",
+    "Does not simply approve or simply reject without evidence"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.4,
+  "tags": [
+    "performance",
+    "go",
+    "latency-budget",
+    "review",
+    "read-only"
+  ]
+}

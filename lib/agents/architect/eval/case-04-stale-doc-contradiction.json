@@ -1,0 +1,50 @@
+{
+  "case_id": "architect-stale-doc-contradiction-04",
+  "task": "Documentation audit with a planted-in-the-wild contradiction. cli-go/internal/serve/README.md has a section headed 'RPC methods (11 total: 3 foundation + 8 expansion)'. Verify that claim against the code: find every method registered on the JSON-RPC server via `Register(\"...\"` in the non-test files of cli-go/internal/serve, group them by namespace, and report whether the README is accurate. List each method that is registered but absent from the README. Give the true total. This is a read-only task: do not edit, write, or create any file.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "detects-stale-count",
+        "weight": 0.3,
+        "type": "binary"
+      },
+      {
+        "name": "lists-missing-methods",
+        "weight": 0.4,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "correct-total",
+        "weight": 0.2,
+        "type": "binary"
+      },
+      {
+        "name": "no-fabricated-methods",
+        "weight": 0.1,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "States the README is stale: the code registers 17 methods, not 11",
+    "Identifies the three yakos.workflow.* methods (run, resume, status) registered in methods.go but missing from the README",
+    "Identifies the three yakos.term.* methods (create, attach, list) registered in term_methods.go but missing from the README",
+    "Confirms the 3 foundation and 8 expansion methods (version, kanban.summary/add/move/done/list, dispatch.run, refresh.run, cost.aggregate, status.read, supervise.pending) do match",
+    "Does not invent methods that are not registered"
+  ],
+  "context_files": [
+    "cli-go/internal/serve/README.md",
+    "cli-go/internal/serve/methods.go",
+    "cli-go/internal/serve/term_methods.go"
+  ],
+  "max_duration_s": 300,
+  "max_cost_usd": 0.5,
+  "tags": [
+    "docs-drift",
+    "contradiction",
+    "recall",
+    "go",
+    "hard-for-cheap-tier",
+    "read-only"
+  ]
+}

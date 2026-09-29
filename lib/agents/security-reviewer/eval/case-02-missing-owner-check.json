@@ -1,0 +1,52 @@
+{
+  "case_id": "security-missing-owner-check-02",
+  "task": "Security review of a pending change. The diff is supplied inline; review it as written and do not modify any file. Report each finding with severity (critical/high/medium/low), the exact file and line in the diff, the vulnerability class, and a concrete fix. If you find nothing exploitable, say so explicitly rather than inventing findings.\n\n```diff\ndiff --git a/cli-go/internal/consoleui/flows_handler.go b/cli-go/internal/consoleui/flows_handler.go\n--- a/cli-go/internal/consoleui/flows_handler.go\n+++ b/cli-go/internal/consoleui/flows_handler.go\n@@ -20,6 +20,58 @@\n+func (s *Server) handleFlowsList(w http.ResponseWriter, r *http.Request) {\n+\tsess := authsession.FromContext(r.Context())\n+\tif sess == nil {\n+\t\thttp.Error(w, \"unauthorized\", http.StatusUnauthorized)\n+\t\treturn\n+\t}\n+\tall := s.flows.List()\n+\tmine := make([]*Flow, 0, len(all))\n+\tfor _, f := range all {\n+\t\tif f.OwnerID == sess.UserID {\n+\t\t\tmine = append(mine, f)\n+\t\t}\n+\t}\n+\twriteJSON(w, http.StatusOK, mine)\n+}\n+\n+func (s *Server) handleFlowGet(w http.ResponseWriter, r *http.Request) {\n+\tsess := authsession.FromContext(r.Context())\n+\tif sess == nil {\n+\t\thttp.Error(w, \"unauthorized\", http.StatusUnauthorized)\n+\t\treturn\n+\t}\n+\tf, ok := s.flows.Get(r.PathValue(\"id\"))\n+\tif !ok {\n+\t\thttp.NotFound(w, r)\n+\t\treturn\n+\t}\n+\twriteJSON(w, http.StatusOK, f)\n+}\n+\n+func (s *Server) handleFlowDelete(w http.ResponseWriter, r *http.Request) {\n+\tsess := authsession.FromContext(r.Context())\n+\tif sess == nil {\n+\t\thttp.Error(w, \"unauthorized\", http.StatusUnauthorized)\n+\t\treturn\n+\t}\n+\tid := r.PathValue(\"id\")\n+\tif f, ok := s.flows.Get(id); !ok || f.OwnerID != sess.UserID {\n+\t\thttp.NotFound(w, r)\n+\t\treturn\n+\t}\n+\ts.flows.Delete(id)\n+\tw.WriteHeader(http.StatusNoContent)\n+}\n```",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "finds-planted-idor",
+        "weight": 0.4,
+        "type": "binary"
+      },
+      {
+        "name": "locates-in-handleFlowGet",
+        "weight": 0.2,
+        "type": "binary"
+      },
+      {
+        "name": "correct-severity",
+        "weight": 0.1,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "actionable-fix",
+        "weight": 0.15,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "no-false-positive-on-delete-or-list",
+        "weight": 0.15,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Finds the missing owner check (IDOR / broken object-level authorization): handleFlowGet returns any flow by id to any authenticated user without comparing f.OwnerID to the session user",
+    "Locates it in handleFlowGet, not in handleFlowList or handleFlowDelete",
+    "Rates it high or medium-high (cross-user data disclosure)",
+    "Recommends the same owner comparison used in handleFlowDelete and returning 404 (not 403) on mismatch to avoid id enumeration",
+    "Does not flag handleFlowList or handleFlowDelete as vulnerable, both are correctly owner-scoped"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.5,
+  "tags": [
+    "security",
+    "go",
+    "planted-vulnerability",
+    "read-only",
+    "idor",
+    "authorization",
+    "owner-scoping"
+  ]
+}

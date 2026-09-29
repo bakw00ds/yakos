@@ -1,0 +1,45 @@
+{
+  "case_id": "perf-repeated-file-read-01",
+  "task": "Performance review. The code or data is supplied inline. This is a diagnosis-only task: do NOT edit or create any file and do not run commands; respond with findings and a proposed fix as text. Be explicit about what you measured versus what you are inferring.\n\nThis function backs `yakos cost --by agent` and is called once with ~5,000 agents' worth of dispatch-log lines (the log is ~40 MB NDJSON).\n\n```go\nfunc costForAgents(agents []string, logPath string) (map[string]float64, error) {\n\tout := make(map[string]float64, len(agents))\n\tfor _, a := range agents {\n\t\tdata, err := os.ReadFile(logPath)\n\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t\tfor _, line := range strings.Split(string(data), \"\\n\") {\n\t\t\tvar rec struct {\n\t\t\t\tAgent string  `json:\"agent\"`\n\t\t\t\tCost  float64 `json:\"cost_usd\"`\n\t\t\t}\n\t\t\tif json.Unmarshal([]byte(line), &rec) == nil && rec.Agent == a {\n\t\t\t\tout[a] += rec.Cost\n\t\t\t}\n\t\t}\n\t}\n\treturn out, nil\n}\n```\nIdentify the dominant cost, state its complexity, and give the fixed version.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "identifies-log-reread-per-agent",
+        "weight": 0.35,
+        "type": "binary"
+      },
+      {
+        "name": "states-complexity",
+        "weight": 0.2,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "single-pass-fix",
+        "weight": 0.3,
+        "type": "scalar_0_1"
+      },
+      {
+        "name": "does-not-edit-files",
+        "weight": 0.15,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Identifies that the whole log file is read and split once per agent, so total work is O(agents x log size), about 5,000 x 40 MB of IO and parsing",
+    "Notes JSON unmarshal is attempted for every line for every agent, multiplying the cost",
+    "Proposes a single pass: read the log once (streaming with bufio.Scanner or Decoder), unmarshal each line once, and accumulate into the map, filtering by a set of wanted agents if needed",
+    "Notes streaming also avoids holding 40 MB plus its string copy in memory",
+    "Makes no file edits"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.4,
+  "tags": [
+    "performance",
+    "go",
+    "io",
+    "quadratic",
+    "read-only"
+  ]
+}
