@@ -37,7 +37,7 @@ func TestRealPayloadShapesConfirmClaim(t *testing.T) {
 			abs, _ := json.Marshal(filepath.Join(tmp, "handler.go"))
 			raw := strings.ReplaceAll(tmpl, "%s", string(abs))
 			in := hooktype.HookInput{Event: "PostToolUse", Tool: tool, Payload: realPayload(t, raw),
-				Env: map[string]string{"YAKOS_COORD_ENABLED": "1", "CLAUDE_PROJECT_DIR": tmp}}
+				Env: map[string]string{"CLAUDE_PROJECT_DIR": tmp}}
 			out, err := newHook(tmp, coord).Run(context.Background(), in)
 			if err != nil || out.ExitCode != 0 {
 				t.Fatalf("err=%v exit=%d", err, out.ExitCode)
@@ -64,7 +64,7 @@ func TestTopLevelPathIgnored(t *testing.T) {
 	}
 	in := hooktype.HookInput{Event: "PostToolUse", Tool: "Edit",
 		Payload: map[string]any{"path": filepath.Join(tmp, "x.go"), "file_path": filepath.Join(tmp, "x.go")},
-		Env:     map[string]string{"YAKOS_COORD_ENABLED": "1", "CLAUDE_PROJECT_DIR": tmp}}
+		Env:     map[string]string{"CLAUDE_PROJECT_DIR": tmp}}
 	if _, err := newHook(tmp, coord).Run(context.Background(), in); err != nil {
 		t.Fatal(err)
 	}

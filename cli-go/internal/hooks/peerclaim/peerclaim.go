@@ -6,7 +6,8 @@
 // Plan 1 M2 — co-pilot mode per-file claim enforcement.
 //
 // Gate logic:
-//  1. If YAKOS_COORD_ENABLED is not set (or is "0"): exit 0 immediately.
+//  1. If the coord dir ($YAKOS_COORD_ROOT/<project>/coord) is absent or not
+//     writable (bash yakos_coord_enabled): exit 0 immediately.
 //     This is the common single-dev case; this hook is a no-op for vanilla yakOS.
 //  2. Resolve the target path to repo-relative form (claim keys are repo-relative).
 //  3. Read active-claims.json (rebuild from activity.ndjson if missing).
@@ -144,8 +145,9 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		return out, nil
 	}
 
-	// No-op when coord isn't enabled.
-	if in.Env["YAKOS_COORD_ENABLED"] != "1" {
+	// No-op when coord is not enabled (bash yakos_coord_enabled: dir exists+writable).
+	coordDir := h.resolveCoordDir(in)
+	if !hookio.CoordEnabled(coordDir) {
 		return out, nil
 	}
 
@@ -168,7 +170,6 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	pid := h.resolvePID(in)
 	agent := senderRole(in)
 
-	coordDir := h.resolveCoordDir(in)
 	claimsFile := filepath.Join(coordDir, "active-claims.json")
 	activityLog := filepath.Join(coordDir, "activity.ndjson")
 
@@ -422,20 +423,9 @@ func (h *Hook) isBypassed(scope string) bool {
 
 func (h *Hook) resolveCoordDir(in hooktype.HookInput) string {
 	if h.CoordDirFn != nil {
-		proj := in.Env["YAKOS_PROJECT_NAME"]
-		if proj == "" {
-			proj = "unknown"
-		}
-		return h.CoordDirFn(proj)
+		return h.CoordDirFn(hookio.CoordProjectName(in))
 	}
-	if d := in.Env["YAKOS_COORD_DIR"]; d != "" {
-		return d
-	}
-	proj := in.Env["YAKOS_PROJECT_NAME"]
-	if proj == "" {
-		proj = "unknown"
-	}
-	return filepath.Join("/var/lib/yakos", proj, "coord")
+	return hookio.CoordDir(in)
 }
 
 func (h *Hook) toRelative(filePath string, in hooktype.HookInput) string {
@@ -477,6 +467,11 @@ func (h *Hook) resolveHost(in hooktype.HookInput) string {
 func (h *Hook) resolvePID(in hooktype.HookInput) int {
 	if h.PID != 0 {
 		return h.PID
+	}
+	// bash: me_pid="${YAKOS_SESSION_PID:-$$}" — the durable session id used
+	// for own-claim matching.
+	if n, err := strconv.Atoi(in.Env["YAKOS_SESSION_PID"]); err == nil {
+		return n
 	}
 	return os.Getpid()
 }

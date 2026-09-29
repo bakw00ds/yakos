@@ -1562,12 +1562,7 @@ case_check peer-claim.sh       pretooluse-peer-claim-block.json 0 "" setup_pc_ow
 case_check peer-claim.sh       pretooluse-peer-claim-block.json 0 "" setup_pc_expired_claim "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
 case_check peer-claim-confirm.sh posttooluse-peer-claim-confirm.json 0 peer-claim-confirm setup_pc_coord "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
 case_check peer-claim-confirm.sh posttooluse-peer-claim-confirm.json 0 "" "" "YAKOS_COORD_ROOT=__TMP__/nocoord YAKOS_PROJECT_NAME=proj"
-# The two cases below additionally set YAKOS_COORD_ENABLED=1 / YAKOS_COORD_DIR
-# so the Go hooks get past their (separate, bash-divergent) coord gate and
-# the tool_input.file_path field read is what is under test.
-case_check peer-claim.sh       pretooluse-peer-claim-write-toolinput-only.json 2 peer-claim setup_pc_peer_claim "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002 YAKOS_COORD_ENABLED=1 YAKOS_COORD_DIR=__TMP__/coord/proj/coord"
 case_check peer-claim.sh       pretooluse-peer-claim-write-toolinput-only.json 2 peer-claim setup_pc_peer_claim "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
-case_check peer-claim-confirm.sh posttooluse-peer-claim-confirm-write-toolinput-only.json 0 peer-claim-confirm setup_pc_coord "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002 YAKOS_COORD_ENABLED=1 YAKOS_COORD_DIR=__TMP__/coord/proj/coord"
 case_check peer-claim-confirm.sh posttooluse-peer-claim-confirm-write-toolinput-only.json 0 peer-claim-confirm setup_pc_coord "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
 
 # --- task-complete-dispatch: K-87 A-2b (would_run is framework-root-relative on both sides) ---

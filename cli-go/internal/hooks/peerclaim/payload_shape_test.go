@@ -45,7 +45,7 @@ func TestRealPayloadShapesBlockForeignClaim(t *testing.T) {
 			raw := strings.Replace(tmpl, `"%s"`, string(abs), 1)
 			in := hooktype.HookInput{
 				Event: "PreToolUse", Tool: tool, Payload: realPayload(t, raw),
-				Env: map[string]string{"YAKOS_COORD_ENABLED": "1", "CLAUDE_PROJECT_DIR": tmp},
+				Env: map[string]string{"CLAUDE_PROJECT_DIR": tmp},
 			}
 			out, err := newHook(tmp, coord).Run(context.Background(), in)
 			if err != nil {
@@ -66,7 +66,7 @@ func TestRealPayloadNotebookEditNotGated(t *testing.T) {
 	abs, _ := json.Marshal(filepath.Join(tmp, "n.ipynb"))
 	raw := `{"hook_event_name":"PreToolUse","tool_name":"NotebookEdit","tool_input":{"notebook_path":` + string(abs) + `,"new_source":"x"}}`
 	in := hooktype.HookInput{Event: "PreToolUse", Tool: "NotebookEdit", Payload: realPayload(t, raw),
-		Env: map[string]string{"YAKOS_COORD_ENABLED": "1", "CLAUDE_PROJECT_DIR": tmp}}
+		Env: map[string]string{"CLAUDE_PROJECT_DIR": tmp}}
 	out, err := newHook(tmp, coord).Run(context.Background(), in)
 	if err != nil || out.ExitCode != 0 {
 		t.Fatalf("err=%v exit=%d", err, out.ExitCode)
@@ -80,7 +80,7 @@ func TestTopLevelPathIgnored(t *testing.T) {
 	foreignClaim(t, coord, "main.go")
 	in := hooktype.HookInput{Event: "PreToolUse", Tool: "Edit",
 		Payload: map[string]any{"path": filepath.Join(tmp, "main.go"), "file_path": filepath.Join(tmp, "main.go")},
-		Env:     map[string]string{"YAKOS_COORD_ENABLED": "1", "CLAUDE_PROJECT_DIR": tmp}}
+		Env:     map[string]string{"CLAUDE_PROJECT_DIR": tmp}}
 	out, err := newHook(tmp, coord).Run(context.Background(), in)
 	if err != nil || out.ExitCode != 0 {
 		t.Fatalf("err=%v exit=%d", err, out.ExitCode)
