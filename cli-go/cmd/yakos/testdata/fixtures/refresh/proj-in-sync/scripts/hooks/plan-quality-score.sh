@@ -150,7 +150,17 @@ EOF
     state_file="$current_dir/.plan-quality-last-scored"
     _pq_state_written=0
     _pq_scored=0
-    if [ "$mtime1" -gt 0 ]; then
+    # A symlinked state file is never followed (its target would be overwritten):
+    # no state is read or written, with a WARN (K-112).
+    state_link=0
+    if [ -L "$state_file" ]; then
+        state_link=1
+        ct_log "WARN: plan-quality-score: $state_file is a symlink; debounce state disabled"
+        ho_log "plan-quality-score" "WARN" "pass" \
+            "debounce state file is a symlink; not reading or writing it" \
+            "$(jq -nc --arg p "$state_file" '{path: $p}')"
+    fi
+    if [ "$mtime1" -gt 0 ] && [ "$state_link" = "0" ]; then
         last_mtime=""
         last_at=""
         if [ -f "$state_file" ]; then
@@ -158,6 +168,15 @@ EOF
         fi
         case "$last_mtime" in ''|*[!0-9]*) last_mtime="" ;; esac
         case "$last_at" in ''|*[!0-9]*) last_at="" ;; esac
+        # Base 10 (a leading 0 is not octal) and bounded like Go's ParseInt:
+        # either field unusable means no state.
+        if [ -n "$last_mtime" ] && [ -n "$last_at" ] && [ "${#last_mtime}" -le 15 ] && [ "${#last_at}" -le 15 ]; then
+            last_mtime=$((10#$last_mtime))
+            last_at=$((10#$last_at))
+        else
+            last_mtime=""
+            last_at=""
+        fi
         if [ -n "$last_mtime" ] && [ "$last_mtime" = "$mtime1" ]; then
             ho_log "plan-quality-score" "REPORT" "pass" \
                 "debounced: plan.md unchanged since the last score; skipping this fire" \
@@ -191,8 +210,15 @@ EOF
     # Record this scoring BEFORE running it so a rapid re-save (a second hook
     # process) collapses into it. An infra failure forgets it again (the EXIT
     # trap), so the next write retries instead of being debounced.
-    if [ "$mtime1" -gt 0 ] && printf '%s %s\n' "$mtime1" "$now_s" > "$state_file" 2>/dev/null; then
-        _pq_state_written=1
+    if [ "$mtime1" -gt 0 ] && [ "$state_link" = "0" ]; then
+        if printf '%s %s\n' "$mtime1" "$now_s" > "$state_file" 2>/dev/null; then
+            _pq_state_written=1
+        else
+            ct_log "WARN: plan-quality-score: cannot record debounce state at $state_file"
+            ho_log "plan-quality-score" "WARN" "pass" \
+                "cannot record debounce state; continuing without it" \
+                "$(jq -nc --arg p "$state_file" '{path: $p}')"
+        fi
     fi
     # shellcheck disable=SC2329  # invoked by the EXIT trap below
     _pq_cleanup() {
