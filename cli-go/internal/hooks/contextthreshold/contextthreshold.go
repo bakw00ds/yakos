@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -116,7 +117,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	if runtime == "" {
 		runtime = "claude"
 	}
-	sessionID := in.Env["CLAUDE_SESSION_ID"]
+	sessionID := hookio.SessionID(in) // bash hi_session_id: payload, not env
 	projectDir := in.Env["CLAUDE_PROJECT_DIR"]
 	if projectDir == "" {
 		projectDir = in.WorkDir

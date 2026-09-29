@@ -136,7 +136,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	agentType := senderRole(in)
 	filePath := fileFromPayload(in)
 	ts := h.NowFn().UTC().Format(time.RFC3339)
-	sessionID := in.Env["CLAUDE_SESSION_ID"]
+	sessionID := hookio.SessionID(in) // bash hi_session_id: payload, not env
 
 	// Truncated previews to prevent buffer bloat.
 	newPreview := truncate(hookio.ToolInputString(in, "new_string"), 300)
@@ -559,14 +559,10 @@ func nilIfEmpty(s string) any {
 	return s
 }
 
+// senderRole mirrors bash hi_sender_role: the payload agent_type ("lead"
+// when absent), whitespace-trimmed, "yakos:" prefix stripped. Env is not read.
 func senderRole(in hooktype.HookInput) string {
-	if r, ok := in.Env["YAKOS_AGENT_ROLE"]; ok && r != "" {
-		return r
-	}
-	if r := stringField(in.Payload, "agent_type"); r != "" {
-		return r
-	}
-	return "unknown"
+	return hookio.SenderRole(in)
 }
 
 func fileFromPayload(in hooktype.HookInput) string {
