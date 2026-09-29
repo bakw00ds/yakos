@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/team"
@@ -41,80 +42,49 @@ func runDispatch(yakosRoot string, args []string) {
 	timeoutSecs := 0
 	allowRoot := false
 
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
+	// The pre-cliflag loop acted on each token inline, so the first bad
+	// token in argv order won. cliflag.Set.Parse separates recognized flags
+	// from the rest before anything is acted on, so a later --help or a
+	// missing-value error can now preempt an earlier unknown-flag/positional
+	// or --timeout-not-a-number report. Exit codes are unchanged; only which
+	// message wins in multi-fault argv differs (see runValidate for the
+	// general rule). A bare "--" is NOT a terminator here, as before.
+	help := false
+	var timeoutRaw []string
+	fs := &cliflag.Set{Cmd: "dispatch", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--runtime", Kind: cliflag.String, Str: &runtimeOverride, ValueDesc: "an id"},
+		{Name: "--model", Kind: cliflag.String, Str: &modelOverride, ValueDesc: "a tier (haiku|sonnet|opus|fable)"},
+		{Name: "--eval-run-id", Kind: cliflag.String, Str: &evalRunID, ValueDesc: "an id string"},
+		{Name: "--project", Kind: cliflag.String, Str: &project, ValueDesc: "a path"},
+		{Name: "--timeout", Kind: cliflag.StringSlice, Slice: &timeoutRaw, ValueDesc: "a number"},
+		{Name: "--allow-root", Kind: cliflag.Bool, Bool: &allowRoot},
+	}}
+	rest, perr := fs.Parse(args)
+	if perr != nil {
+		fmt.Fprintln(os.Stderr, perr)
+		os.Exit(1)
+	}
+	if help {
+		printDispatchHelp(os.Stdout)
+		os.Exit(0)
+	}
+	// --timeout is collected as a slice so every occurrence is validated in
+	// argv order (the old loop rejected a bad earlier value even when a
+	// later valid one followed); the last valid value wins.
+	for _, v := range timeoutRaw {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dispatch: --timeout value %q is not a number\n", v)
+			os.Exit(1)
+		}
+		timeoutSecs = n
+	}
+	for _, arg := range rest {
 		switch {
-		case arg == "-h" || arg == "--help":
-			printDispatchHelp(os.Stdout)
-			os.Exit(0)
-
-		case arg == "--runtime":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "dispatch: --runtime requires an id")
-				os.Exit(1)
-			}
-			runtimeOverride = args[i]
-		case len(arg) > 10 && arg[:10] == "--runtime=":
-			runtimeOverride = arg[10:]
-
-		case arg == "--model":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "dispatch: --model requires a tier (haiku|sonnet|opus|fable)")
-				os.Exit(1)
-			}
-			modelOverride = args[i]
-		case len(arg) > 8 && arg[:8] == "--model=":
-			modelOverride = arg[8:]
-
-		case arg == "--eval-run-id":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "dispatch: --eval-run-id requires an id string")
-				os.Exit(1)
-			}
-			evalRunID = args[i]
-		case len(arg) > 14 && arg[:14] == "--eval-run-id=":
-			evalRunID = arg[14:]
-
-		case arg == "--project":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "dispatch: --project requires a path")
-				os.Exit(1)
-			}
-			project = args[i]
-		case len(arg) > 10 && arg[:10] == "--project=":
-			project = arg[10:]
-
-		case arg == "--timeout":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "dispatch: --timeout requires a number")
-				os.Exit(1)
-			}
-			n, err := strconv.Atoi(args[i])
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "dispatch: --timeout value %q is not a number\n", args[i])
-				os.Exit(1)
-			}
-			timeoutSecs = n
-		case len(arg) > 10 && arg[:10] == "--timeout=":
-			n, err := strconv.Atoi(arg[10:])
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "dispatch: --timeout value %q is not a number\n", arg[10:])
-				os.Exit(1)
-			}
-			timeoutSecs = n
-
-		case arg == "--allow-root":
-			allowRoot = true
-
 		case len(arg) > 0 && arg[0] == '-':
 			fmt.Fprintf(os.Stderr, "dispatch: unknown flag %q (try --help)\n", arg)
 			os.Exit(1)
-
 		default:
 			if agentName == "" {
 				agentName = arg
@@ -358,23 +328,26 @@ func runTeamRestart(yakosRoot string, args []string) {
 	project := ""
 	tag := ""
 
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
+	// -y/--yes is accepted for parity; the Go implementation is always
+	// non-interactive. Ordering caveat as in runDispatch.
+	help := false
+	yes := false
+	fs := &cliflag.Set{Cmd: "team restart", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--tag", Kind: cliflag.String, Str: &tag, ValueDesc: "a value"},
+		{Name: "--yes", Aliases: []string{"-y"}, Kind: cliflag.Bool, Bool: &yes},
+	}}
+	rest, perr := fs.Parse(args)
+	if perr != nil {
+		fmt.Fprintln(os.Stderr, perr)
+		os.Exit(1)
+	}
+	if help {
+		printTeamRestartHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
 		switch {
-		case arg == "-h" || arg == "--help":
-			printTeamRestartHelp(os.Stdout)
-			os.Exit(0)
-		case arg == "--tag":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "team restart: --tag requires a value")
-				os.Exit(1)
-			}
-			tag = args[i]
-		case len(arg) > 6 && arg[:6] == "--tag=":
-			tag = arg[6:]
-		case arg == "--yes" || arg == "-y":
-			// Accepted for parity; the Go implementation is always non-interactive.
 		case len(arg) > 0 && arg[0] == '-':
 			fmt.Fprintf(os.Stderr, "team restart: unknown flag %q\n", arg)
 			os.Exit(1)
