@@ -78,6 +78,15 @@ type Node struct {
 	// Needs lists the node IDs that must complete before this node starts.
 	// An empty slice (or absent field) means this is a root node (no dependencies).
 	Needs []string `yaml:"needs,omitempty"`
+
+	// ScanAllow (R6, K-83) is an explicit per-node allowlist of injection-scan
+	// pattern IDs (see KnownScanPatternIDs) for false positives in THIS
+	// node's output. It applies only when this node is the PRODUCER of the
+	// output being scanned, never to any other node's output. Default off
+	// (empty). Every use is logged at warn and recorded in the run's
+	// scan_status.json. Validated in Validate: unknown or duplicate IDs are
+	// rejected.
+	ScanAllow []string `yaml:"scan_allow,omitempty"`
 }
 
 // Workflow is the top-level workflow definition loaded from a YAML file.

@@ -703,7 +703,15 @@ func (e *Engine) runNode(
 	if e.OutputScanFn != nil {
 		scanFn := e.OutputScanFn
 		scanUpstream = func(upstreamNodeID string, value []byte) error {
-			return scanFn(ctx, upstreamNodeID, node.Agent, value)
+			// R6: attach ONLY the producing node's scan_allow list (a fresh
+			// list per upstream node, so an opt-out never carries over to
+			// another node's output), and a report so any skip/allow use is
+			// recorded in the run dir (N11).
+			rep := &scanReport{}
+			sctx := withScanReport(withScanAllow(ctx, scanAllowOf(wf, upstreamNodeID)), rep)
+			err := scanFn(sctx, upstreamNodeID, node.Agent, value)
+			appendScanStatus(rs.runDir, node.ID, rep.events)
+			return err
 		}
 	}
 	prompt, truncated, err := substitutePrompt(node, wf.Inputs, rs, scanUpstream)
@@ -986,6 +994,27 @@ func substitutePrompt(node Node, inputs map[string]string, rs *RunState, scanUps
 		}
 	}
 
+	// N4: cheap cross-node check. The per-node scan above cannot see a
+	// payload split across two nodes' outputs; check the boundary window of
+	// each adjacent pair (pure Go, no subprocess). Skipped when the operator
+	// has disabled the workflow scan entirely (that skip is already loud).
+	if scanUpstream != nil && os.Getenv(envWorkflowScanDisable) != "1" {
+		var prev *subst
+		for i := range substitutions {
+			s := &substitutions[i]
+			if !s.isNodeOut {
+				continue
+			}
+			if prev != nil {
+				if hits := splitPayloadMatches(prev.value, s.value); len(hits) > 0 {
+					return "", false, fmt.Errorf("workflow: node %q: split payload across upstream nodes %q and %q blocked by output-injection-scan: %s",
+						node.ID, prev.nodeID, s.nodeID, strings.Join(hits, "; "))
+				}
+			}
+			prev = s
+		}
+	}
+
 	// C1: wrap every node-output substitution in an explicit untrusted-data
 	// delimiter. One random nonce is generated per call (i.e. per downstream
 	// node run) and shared by every wrapped block in this prompt — see
@@ -1152,4 +1181,18 @@ func ReconcileInterrupted(runsDir string) ([]string, error) {
 		}
 	}
 	return interrupted, nil
+}
+
+// scanAllowOf returns the scan_allow list of the workflow node with the
+// given ID, or nil when the node is unknown or declares none (R6).
+func scanAllowOf(wf *Workflow, nodeID string) []string {
+	if wf == nil {
+		return nil
+	}
+	for i := range wf.Nodes {
+		if wf.Nodes[i].ID == nodeID {
+			return wf.Nodes[i].ScanAllow
+		}
+	}
+	return nil
 }
