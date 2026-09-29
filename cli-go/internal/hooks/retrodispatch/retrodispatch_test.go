@@ -306,13 +306,15 @@ func TestRetroDispatch_LogSeverity_Report(t *testing.T) {
 
 // TestRetroDispatch_SettingsFalseDisables pins the K-89 follow-through: the
 // Go hook must honor .retro.auto_dispatch:false in settings.json exactly as
-// bash retro-dispatch.sh does (bool false only), instead of always running.
+// bash retro-dispatch.sh does (bool false and the string "false"), instead of always running.
 func TestRetroDispatch_SettingsFalseDisables(t *testing.T) {
 	cases := []struct {
 		name, settings string
 		wantConsumed   bool
 	}{
 		{"bool false skips", `{"retro":{"auto_dispatch":false}}`, false},
+		{"string false skips", `{"retro":{"auto_dispatch":"false"}}`, false},
+		{"string true dispatches", `{"retro":{"auto_dispatch":"true"}}`, true},
 		{"bool true dispatches", `{"retro":{"auto_dispatch":true}}`, true},
 		{"absent dispatches", `{"retro":{}}`, true},
 		{"null dispatches", `{"retro":{"auto_dispatch":null}}`, true},

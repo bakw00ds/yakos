@@ -68,8 +68,8 @@ func New(workCurrentDir, stateDir string) *Hook {
 }
 
 // settingsDisableAutoDispatch reports whether <stateDir>/settings.json holds
-// an explicit boolean false at .retro.auto_dispatch. Bash uses
-// `jq 'if .retro.auto_dispatch == false ...'`, so only boolean false counts.
+// an explicit boolean false or the string "false" at .retro.auto_dispatch,
+// matching bash retro-dispatch.sh, cycle-counter and `yakos retro status`.
 func settingsDisableAutoDispatch(stateDir string) bool {
 	if stateDir == "" {
 		stateDir = filepath.Join(os.Getenv("HOME"), ".yakos-state")
@@ -83,8 +83,13 @@ func settingsDisableAutoDispatch(stateDir string) bool {
 		return false
 	}
 	retro, _ := m["retro"].(map[string]any)
-	v, ok := retro["auto_dispatch"].(bool)
-	return ok && !v
+	switch v := retro["auto_dispatch"].(type) {
+	case bool:
+		return !v
+	case string:
+		return v == "false"
+	}
+	return false
 }
 
 // Name returns the canonical hook name.

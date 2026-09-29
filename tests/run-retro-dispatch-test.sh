@@ -162,6 +162,25 @@ else
     bad "test 2: marker should remain when disabled; it was removed"
 fi
 
+# Test 2b (K-89 review): truth table for the disable flag. Boolean false and
+# the string "false" both disable (matches cycle-counter and `retro status`);
+# true / absent / null / malformed leave dispatch enabled.
+note ""
+note "=== Test 2b: auto_dispatch truth table ==="
+for row in 'false|left' '"false"|left' 'true|removed' '"true"|removed' 'null|removed'; do
+    val="${row%%|*}"; want="${row##*|}"
+    reset_all
+    touch "$MARKER"
+    printf '{"retro":{"auto_dispatch":%s}}\n' "$val" > "$SETTINGS"
+    rc="$(run_hook)"
+    if [ -f "$MARKER" ]; then got=left; else got=removed; fi
+    if [ "$rc" -eq 0 ] && [ "$got" = "$want" ]; then
+        ok "test 2b: auto_dispatch=$val -> marker $got"
+    else
+        bad "test 2b: auto_dispatch=$val expected marker $want (rc=0); got $got rc=$rc"
+    fi
+done
+
 # ---------------------------------------------------------------------------
 # Test 3: Marker present + prior dispatch in-flight → skip (marker left)
 # ---------------------------------------------------------------------------
