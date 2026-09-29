@@ -96,22 +96,31 @@ every run.
 
 `plan-quality-score` is a PostToolUse hook on `Edit|Write|MultiEdit`
 that acts only on writes to `work/current/plan.md`. Both tiers (bash
-`plan-quality-score.sh` and `yakos hook run --impl go plan-quality-score`,
-once the K-99 change lands) skip any `plan.md` whose mtime is less than
-5 s old at hook time. The bash tier logs it as
-`debounced: plan.md mtime age=Ns < 5s`.
+`plan-quality-score.sh` and `yakos hook run --impl go plan-quality-score`)
+debounce on the last scored version, not on the file's age (K-112):
 
-Because the hook fires right after the write that just set the mtime, a
-fresh plan is normally scored on a later fire, not the triggering one.
-Expect the scorer to run on the triggering fire only if the hook itself
-is delayed past 5 s. That reading is from the code and is not verified
-empirically. When a plan you just wrote shows no new `plan_scored`
-record, check the hook log for the `debounced` line, or run the
-`plan-quality-eval` skill to score explicitly.
+- A `plan.md` that has not been scored yet is scored on the triggering
+  fire, even though its mtime is only milliseconds old.
+- A `plan.md` with the same mtime as the last score is skipped
+  (`debounced: plan.md unchanged since the last score`).
+- A re-save whose last scoring was under 5 s ago is skipped
+  (`debounced: last score under 5s ago; rapid re-save collapsed`), so a
+  burst of quick saves costs one judge panel, not one per save. The last
+  version of a burst is scored by the next fire at least 5 s later.
+- A scoring that fails for infrastructure reasons (scorer missing, exit
+  2/3/4, no record) is forgotten, so the next fire retries the same version.
 
-The debounce is a design choice that avoids scoring a plan mid-edit
-(several quick saves in a row). It is not configurable. The fail-closed
-`plan-quality-gate` reads the marker, not the mtime, so it is unaffected.
+State lives in `work/current/.plan-quality-last-scored` as
+`<mtime> <scored-at>` (epoch seconds), shared by both tiers. A missing or
+malformed file means "nothing scored yet".
+
+History: the earlier rule skipped any `plan.md` whose mtime was under 5 s
+old at hook time. The hook runs right after the write that set the mtime,
+so that rule skipped every fire and a plan was scored only if the hook was
+delayed past 5 s. Measured with the real hook and a mock judge panel: fire
+right after a write, no score; the same plan 7 s later, a score. The 5 s
+window is not configurable. The fail-closed `plan-quality-gate` reads the
+marker, not the mtime, so it is unaffected.
 
 ## Scope
 

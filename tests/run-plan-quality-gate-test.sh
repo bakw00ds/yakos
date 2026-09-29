@@ -14,7 +14,8 @@
 #   (f) Dissent fixture (regardless of aggregate) → surface_to_operator
 #       (NOT block)
 #   (g) Score script returns non-zero → WARN + PASS (no false block)
-#   (h) Debounce: fresh plan.md (mtime ~= now) → debounced + PASS
+#   (h) Debounce (K-112): a fresh plan.md IS scored once; the same version
+#       again, or a re-save within 5 s, is debounced
 #   (i) PreToolUse gate: no .plan-blocked marker → PASS
 #   (j) PreToolUse gate: .plan-blocked present → BLOCK (rc=2)
 #   (k) PreToolUse gate: enabled=false in .yakos.yml → PASS (marker cleared)
@@ -151,6 +152,7 @@ check_log_decision() {
 reset_state() {
     rm -f "$WORK_CURRENT/logs/plan-quality-score.ndjson" 2>/dev/null || true
     rm -f "$WORK_CURRENT/.plan-blocked" 2>/dev/null || true
+    rm -f "$WORK_CURRENT/.plan-quality-last-scored" 2>/dev/null || true
     rm -f "$WORK_CURRENT/notes"/plan-quality-*.md 2>/dev/null || true
     rm -f "$HOME/.yakos-state/plan-quality-log.ndjson" 2>/dev/null || true
     # Restore default .yakos.yml
@@ -458,35 +460,51 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Test (h): debounce — fresh mtime → debounced + PASS
+# Test (h): debounce (K-112) — a fresh write is scored once; a duplicate fire
+# on the same version and a rapid re-save are debounced.
 # ---------------------------------------------------------------------------
 note ""
-note "=== Test (h): debounce — fresh mtime → PASS (debounced) ==="
+note "=== Test (h): debounce keyed on the last scored mtime ==="
 reset_state
 
 PLAN_PATH="$WORK_CURRENT/plan.md"
 write_fresh_plan "$PLAN_PATH" "$FIXTURES/vague-plan.md"
-# mtime is now — within 5s debounce window
+# mtime is now: the old age<5s rule skipped this fire and NO plan was ever scored.
 
-actual_rc=0
-fixture_edit_plan "$PLAN_PATH" \
-    | YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
-        YAKOS_PLAN_JUDGE_MOCK="$MOCK_BASE/vague" \
-        bash "$HOOKS/plan-quality-score.sh" >/dev/null 2>&1 \
-    || actual_rc=$?
+_h_fire() {
+    local rc=0
+    fixture_edit_plan "$PLAN_PATH" \
+        | YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$CLI_LIB" HOME="$HOME" \
+            YAKOS_PLAN_JUDGE_MOCK="$MOCK_BASE/vague" \
+            bash "$HOOKS/plan-quality-score.sh" >/dev/null 2>&1 \
+        || rc=$?
+    printf '%s' "$rc"
+}
+_h_scored() { grep -c '"plan_scored"' "$HOME/.yakos-state/plan-quality-log.ndjson" 2>/dev/null || true; }
 
-if [ "$actual_rc" -eq 0 ]; then
-    ok "(h) debounce: hook exits 0"
-else
-    bad "(h) debounce: expected rc=0, got $actual_rc"
+actual_rc="$(_h_fire)"
+if [ "$actual_rc" -eq 0 ]; then ok "(h) fresh write: hook exits 0"; else bad "(h) fresh write: expected rc=0, got $actual_rc"; fi
+if [ "$(_h_scored)" = "1" ]; then ok "(h) fresh write: scored on the triggering fire"; else bad "(h) fresh write: not scored (count=$(_h_scored))"; fi
+
+_h_fire >/dev/null
+if [ "$(_h_scored)" = "1" ]; then ok "(h) duplicate fire on the same version: not rescored"; else bad "(h) duplicate fire rescored (count=$(_h_scored))"; fi
+if grep -q 'debounced: plan.md unchanged since the last score' "$WORK_CURRENT/logs/plan-quality-score.ndjson" 2>/dev/null; then ok "(h) duplicate fire: debounce logged"; else bad "(h) duplicate fire: no debounce record"; fi
+
+# A re-save with a new mtime 2 s later, inside the 5 s window: collapsed.
+cp "$FIXTURES/vague-plan.md" "$PLAN_PATH"; printf '\n<!-- v2 -->\n' >> "$PLAN_PATH"
+_h_new="$(date -u -v+2S +%Y%m%d%H%M.%S 2>/dev/null || date -u -d '2 seconds' +%Y%m%d%H%M.%S)"
+touch -t "$_h_new" "$PLAN_PATH" 2>/dev/null || true
+_h_fire >/dev/null
+if [ "$(_h_scored)" = "1" ]; then ok "(h) rapid re-save: collapsed"; else bad "(h) rapid re-save rescored (count=$(_h_scored))"; fi
+if grep -q 'debounced: last score under 5s ago' "$WORK_CURRENT/logs/plan-quality-score.ndjson" 2>/dev/null; then ok "(h) rapid re-save: collapse logged"; else bad "(h) rapid re-save: no collapse record"; fi
+
+# Age the recorded scoring 10 s: the next new version is scored again.
+if [ -f "$WORK_CURRENT/.plan-quality-last-scored" ]; then
+    read -r _h_m _h_a < "$WORK_CURRENT/.plan-quality-last-scored"
+    printf '%s %s\n' "$_h_m" "$((_h_a - 10))" > "$WORK_CURRENT/.plan-quality-last-scored"
 fi
-
-# No scoring should have run; no record in state log
-if grep -q '"plan_scored"' "$HOME/.yakos-state/plan-quality-log.ndjson" 2>/dev/null; then
-    bad "(h) debounce: scoring ran (should have been debounced)"
-else
-    ok "(h) debounce: no scoring record (correctly debounced)"
-fi
+_h_fire >/dev/null
+if [ "$(_h_scored)" = "2" ]; then ok "(h) new version after the window: scored again"; else bad "(h) new version after the window not scored (count=$(_h_scored))"; fi
 
 # ---------------------------------------------------------------------------
 # Test (i): PreToolUse gate — no .plan-blocked → PASS

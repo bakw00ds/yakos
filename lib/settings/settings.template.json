@@ -111,7 +111,7 @@
       },
       {
         "matcher": "Edit|Write|MultiEdit",
-        "_doc": "Phase 2 plan-quality-score (split from plan-quality-gate, K-81): auto-scores work/current/plan.md on write. Surfaces or blocks the NEXT dispatch (via the .plan-blocked marker) when aggregate score < threshold. No-op for non-plan.md writes. Conservative: infra errors → WARN + PASS. Debounce (bash and Go tiers): a plan.md whose mtime is < 5 s old at hook time is skipped; because the hook fires right after the write, a fresh plan is normally scored on a later fire, not the triggering one. See docs/hooks-impl.md.",
+        "_doc": "Phase 2 plan-quality-score (split from plan-quality-gate, K-81): auto-scores work/current/plan.md on write. Surfaces or blocks the NEXT dispatch (via the .plan-blocked marker) when aggregate score < threshold. No-op for non-plan.md writes. Conservative: infra errors → WARN + PASS. Debounce (bash and Go tiers, K-112): keyed on the last scored mtime. A plan.md not yet scored is scored on the triggering fire; the same mtime is never scored twice; a re-save under 5 s after a scoring is collapsed. State: work/current/.plan-quality-last-scored. See docs/hooks-impl.md.",
         "hooks": [
           {
             "type": "command",

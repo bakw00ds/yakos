@@ -40,13 +40,16 @@ exit "${STUB_RC:-0}"
 `
 
 type env struct {
-	root  string // fake framework root holding the stub scorer
-	proj  string // project dir (.yakos.yml lives here)
-	work  string // work/current
-	plan  string // work/current/plan.md
-	calls string // STUB_CALLS file
-	home  string // HOME for persisted-record copy
+	root  string    // fake framework root holding the stub scorer
+	proj  string    // project dir (.yakos.yml lives here)
+	work  string    // work/current
+	plan  string    // work/current/plan.md
+	calls string    // STUB_CALLS file
+	home  string    // HOME for persisted-record copy
+	now   time.Time // injected clock; zero means the real one
 }
+
+func (e *env) setNow(t time.Time) { e.now = t }
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
@@ -98,6 +101,10 @@ func (e *env) hook() *planqualityscore.Hook {
 	h := planqualityscore.New(e.work, e.proj)
 	h.YakosRoot = e.root
 	h.HomeDir = e.home
+	if !e.now.IsZero() {
+		now := e.now
+		h.NowFn = func() time.Time { return now }
+	}
 	return h
 }
 
@@ -344,33 +351,84 @@ func TestPassAfterBelowLeavesMarkerLikeBash(t *testing.T) {
 	}
 }
 
-func TestDebounce(t *testing.T) {
-	cases := []struct {
-		name      string
-		age       time.Duration
-		wantCalls int
-	}{
-		{"fresh write is skipped", 0, 0},
-		{"4s old is skipped", 4 * time.Second, 0},
-		{"6s old is scored", 6 * time.Second, 1},
-		{"30s old is scored", old, 1},
+// K-112: the debounce is keyed on the last SCORED mtime. A plan written just
+// now (the normal case: the hook fires right after the write) IS scored; the
+// same version is never scored twice.
+func TestFreshWriteIsScoredOnce(t *testing.T) {
+	for _, age := range []time.Duration{0, 4 * time.Second, 6 * time.Second, old} {
+		e := newEnv(t)
+		e.writePlan(t, "0.9", "", age)
+		e.run(t, "Write", nil)
+		if got := e.callCount(t); got != 1 {
+			t.Fatalf("age %v: first fire scored %d times, want 1", age, got)
+		}
+		if _, err := os.Stat(filepath.Join(e.work, ".plan-quality-last-scored")); err != nil {
+			t.Fatalf("age %v: debounce state not recorded: %v", age, err)
+		}
+		e.run(t, "Write", nil) // same version again (a duplicate fire)
+		if got := e.callCount(t); got != 1 {
+			t.Fatalf("age %v: unchanged plan rescored (%d calls)", age, got)
+		}
+		rec := e.lastLog(t)
+		if rec["decision"] != "pass" || rec["severity"] != "REPORT" ||
+			rec["reason"] != "debounced: plan.md unchanged since the last score; skipping this fire" {
+			t.Fatalf("age %v: debounce log=%v", age, rec)
+		}
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			e := newEnv(t)
-			e.writePlan(t, "0.9", "", c.age)
-			e.run(t, "Write", nil)
-			if got := e.callCount(t); got != c.wantCalls {
-				t.Fatalf("calls=%d want %d", got, c.wantCalls)
-			}
-			if c.wantCalls == 0 {
-				rec := e.lastLog(t)
-				if rec["decision"] != "pass" || rec["severity"] != "REPORT" ||
-					!strings.HasPrefix(rec["reason"].(string), "debounced: plan.md mtime age=") {
-					t.Fatalf("debounce log=%v", rec)
-				}
-			}
-		})
+}
+
+// A re-save inside 5 s of the last scoring is collapsed into it; one after
+// 5 s is scored again. Driven by the injected clock, not sleeps.
+func TestResaveWithinWindowCollapsedAfterWindowScored(t *testing.T) {
+	e := newEnv(t)
+	t0 := time.Now()
+	at := func(d time.Duration) { e.setNow(t0.Add(d)) }
+	e.writePlan(t, "0.9", "id: v1\n", 0)
+	at(0)
+	e.run(t, "Write", nil)
+	e.writePlan(t, "0.9", "id: v2\n", -2*time.Second) // new mtime, 2 s later
+	at(2 * time.Second)
+	e.run(t, "Edit", nil)
+	if got := e.callCount(t); got != 1 {
+		t.Fatalf("re-save 2 s after a score: %d calls, want 1 (collapsed)", got)
+	}
+	rec := e.lastLog(t)
+	if rec["reason"] != "debounced: last score under 5s ago; rapid re-save collapsed; skipping this fire" {
+		t.Fatalf("collapse log=%v", rec)
+	}
+	e.writePlan(t, "0.9", "id: v3\n", -7*time.Second) // new mtime, 7 s after the first score
+	at(7 * time.Second)
+	e.run(t, "Edit", nil)
+	if got := e.callCount(t); got != 2 {
+		t.Fatalf("re-save 7 s after a score: %d calls, want 2", got)
+	}
+}
+
+// An infra failure must not consume the version: the next fire retries it.
+func TestInfraFailureForgetsDebounceState(t *testing.T) {
+	e := newEnv(t)
+	e.writePlan(t, "0.9", "", 0)
+	h := e.hook()
+	h.YakosRoot = filepath.Join(e.root, "nope") // scorer missing: exits before state
+	if _, err := h.Run(context.Background(), e.input("Write", e.plan, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if e.callCount(t) != 0 {
+		t.Fatal("setup: scorer should not run")
+	}
+	e.run(t, "Write", nil) // scorer present now
+	if got := e.callCount(t); got != 1 {
+		t.Fatalf("retry after infra failure: %d calls, want 1", got)
+	}
+}
+
+func TestMalformedDebounceStateIgnored(t *testing.T) {
+	e := newEnv(t)
+	e.writePlan(t, "0.9", "", 0)
+	_ = os.WriteFile(filepath.Join(e.work, ".plan-quality-last-scored"), []byte("garbage\n"), 0o644)
+	e.run(t, "Write", nil)
+	if got := e.callCount(t); got != 1 {
+		t.Fatalf("malformed state must not debounce: %d calls", got)
 	}
 }
 
@@ -396,19 +454,6 @@ func TestFutureMtimeDoesNotDebounce(t *testing.T) {
 	e.run(t, "Write", nil)
 	if e.callCount(t) != 1 {
 		t.Fatal("negative age must not debounce")
-	}
-}
-
-func TestDebounceUsesInjectedClock(t *testing.T) {
-	e := newEnv(t)
-	e.writePlan(t, "0.9", "", old)
-	h := e.hook()
-	h.NowFn = func() time.Time { return time.Now().Add(-old) } // "now" is when the file was written
-	if _, err := h.Run(context.Background(), e.input("Write", e.plan, nil)); err != nil {
-		t.Fatal(err)
-	}
-	if e.callCount(t) != 0 {
-		t.Fatal("injected clock 30s in the past makes the file 'fresh'")
 	}
 }
 
@@ -505,7 +550,10 @@ func TestFrameworkRootResolution(t *testing.T) {
 	if e.callCount(t) != 1 {
 		t.Fatal("HooksDir/../.. must locate the scorer")
 	}
-	// $YAKOS_ROOT wins over both.
+	// $YAKOS_ROOT wins over both. (A new plan version: the same one would be
+	// debounced as already scored.)
+	e.writePlan(t, "0.9", "id: v2\n", old+time.Minute)
+	h.NowFn = func() time.Time { return time.Now().Add(time.Minute) } // past the 5 s collapse window
 	h.HooksDir = filepath.Join(e.root, "elsewhere", "hooks")
 	if _, err := h.Run(context.Background(), e.input("Write", e.plan, map[string]string{"YAKOS_ROOT": e.root})); err != nil {
 		t.Fatal(err)
