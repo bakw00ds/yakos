@@ -44,6 +44,7 @@ Telemetry (always exit 0):
 - `session-end-check.sh` (audit, not enforcement)
 - `mailbox-mirror.sh`
 - `path-log.sh`
+- `plan-quality-score.sh` *(PostToolUse plan scorer; never blocks a save)*
 - any hook whose primary purpose is observation
 
 Enforcement (may exit 2 to BLOCK):
@@ -53,9 +54,8 @@ Enforcement (may exit 2 to BLOCK):
 - `supervisor-ack-gate.sh`
 - `budget-guard.sh`
 - `peer-claim.sh`
-- `plan-quality-gate.sh` *(only its PreToolUse `.plan-blocked`-marker gate
-  path — the PostToolUse scoring path is deliberately never-block, see
-  below)*
+- `plan-quality-gate.sh` *(PreToolUse `.plan-blocked`-marker gate;
+  fail-closed since the K-81 split)*
 - `task-dependency-gate.sh` *(REPORT-only in v0.1)*
 - `task-complete-dispatch.sh` *(REPORT-only in v0.1)*
 - per-domain validators
@@ -127,15 +127,40 @@ slice (not via `os.Setenv` on the daemon itself), it can never leak into a
 live Claude Code session's own PostToolUse invocation of the identical
 script file.
 
-`plan-quality-gate.sh` is a deliberate exception even though its
-PreToolUse gate path can block: the hook's own documented contract for
-its (much more commonly hit) PostToolUse scoring path is "any infra error
-→ WARN + PASS — the hook NEVER prevents the operator from saving a plan
-because scoring infrastructure broke." Since both paths share one `hi_init`
-call, opting this hook into `HOOK_FAIL_CLOSED` would break that documented
-contract for the common path to harden a rarer one. It is left as project
-follow-up (split the two paths into separate scripts, or gate more
-narrowly) rather than done as a side effect of this fix.
+`plan-quality-gate.sh` used to be a deliberate exception: one script served a
+PreToolUse `.plan-blocked` gate and a PostToolUse plan scorer whose contract
+is "any infra error → WARN + PASS — never prevent the operator from saving a
+plan", so opting the shared `hi_init` into `HOOK_FAIL_CLOSED` would have broken
+the scorer's contract, and the gate inherited the scorer's fail-open posture.
+K-81 split them:
+
+| Script | Event | Posture |
+|---|---|---|
+| `plan-quality-gate.sh` | PreToolUse `TeamCreate\|Agent` | **Fail-closed.** Tiny; sets `HOOK_FAIL_CLOSED=1`. |
+| `plan-quality-score.sh` | PostToolUse `Edit\|Write\|MultiEdit` | Conservative: infra errors WARN + PASS. |
+
+The gate exits 2 with a stderr reason on: missing `jq`, empty / malformed /
+non-object stdin, a payload with no `tool_name`, an uninspectable `work/current`
+(unsearchable ancestor, unreadable directory, or a regular file in the way), a
+`.plan-blocked` that is a directory or dangling symlink (any marker form blocks;
+a directory marker must be deleted by hand because `yakos plan score override`
+only removes files), a helper library that fails to load, and any unexpected
+internal failure. The last two are enforced by an `EXIT` trap that rewrites every
+status other than 0 and 2 to 2, plus an explicit check of each `source` (bash
+3.2 does not abort on a failed `.` even under `set -e`). The tool match is exact:
+`AgentX` is not gated. The scorer is unchanged in behavior; it logs under
+`plan-quality-score.ndjson` instead of `plan-quality-gate.ndjson`.
+
+The gate's own emergency switch is `YAKOS_PLAN_QUALITY_DISABLE=1` (checked before
+`jq` is needed). `YAKOS_HOOKS_FAIL_OPEN=1` lets `hi_init` continue past degraded
+input, but with no readable `tool_name` this gate still blocks.
+
+Projects refreshed before the split have `plan-quality-gate.sh` registered under
+PostToolUse as well; `yakos refresh` (Go and bash) removes that registration and
+adds `plan-quality-score.sh`, idempotently. Tests:
+`tests/run-plan-quality-gate-failclosed-test.sh` (run under `bash` and
+`/bin/bash`), `tests/run-plan-quality-gate-test.sh`, and the refresh migration
+cases in `tests/run-refresh-test.sh` and `cli-go/internal/refresh`.
 
 This is a coarse-grained fix: because determining whether a hook *would
 have* blocked (does a policy file exist? is a cap configured? is coord

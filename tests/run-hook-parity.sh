@@ -1589,6 +1589,30 @@ case_check path-allowlist.sh   pretooluse-write-fallback-tail-dotdot.json 2 path
 # Symlink cycle: not an escape (the OS returns ELOOP), so bash's pass is harmless; Go fails closed.
 case_check path-allowlist.sh   pretooluse-write-symlink-cycle.json 0 path-allowlist setup_symlink_cycle "" "" "" "2:a symlink cycle is not an escape (ELOOP on write) so bash passes; Go's resolver fails closed on an unresolvable chain"
 
+# --- plan-quality-gate / plan-quality-score (K-81 split) ---
+# The gate is the fail-closed PreToolUse half; the scorer is the conservative
+# PostToolUse half. Exit codes must agree bash-vs-Go for every case below.
+setup_plan_blocked() {
+    mkdir -p "$1/work/current"
+    printf '{"plan_id":"plan-abc123","reason":"aggregate 0.4 < threshold 0.75"}\n' > "$1/work/current/.plan-blocked"
+}
+setup_plan_blocked_dir() {
+    mkdir -p "$1/work/current/.plan-blocked"
+}
+setup_plan_blocked_text() {
+    mkdir -p "$1/work/current"
+    printf 'plain text reason\n' > "$1/work/current/.plan-blocked"
+}
+case_check plan-quality-gate.sh agent-spawn.json                     0 plan-quality-gate
+case_check plan-quality-gate.sh agent-spawn.json                     2 plan-quality-gate setup_plan_blocked
+case_check plan-quality-gate.sh agent-spawn.json                     2 plan-quality-gate setup_plan_blocked_dir
+case_check plan-quality-gate.sh agent-spawn.json                     2 plan-quality-gate setup_plan_blocked_text
+case_check plan-quality-gate.sh pretooluse-agentx-tool.json          0 ""                  setup_plan_blocked
+case_check plan-quality-gate.sh pretooluse-generic-tool.json         0 ""                  setup_plan_blocked
+case_check plan-quality-gate.sh pretooluse-json-array-not-object.json 2 plan-quality-gate
+case_check plan-quality-score.sh agent-spawn.json                    0 ""                  setup_plan_blocked
+case_check plan-quality-score.sh pretooluse-generic-tool.json        0 ""
+
 # ---- summary ------------------------------------------------------------
 
 echo

@@ -11,5 +11,7 @@
     "YAKOS_PLAN_QUALITY_DISABLE": "1",
     "YAKOS_AGENT_ROLE": "lead"
   },
-  "work_dir": ""
+  "work_dir": "",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "TeamCreate"
 }

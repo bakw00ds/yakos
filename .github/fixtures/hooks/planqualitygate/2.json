@@ -12,5 +12,7 @@
     "YAKOS_AGENT_ROLE": "lead",
     "CLAUDE_PROJECT_DIR": "/nonexistent-fixture-project-dir"
   },
-  "work_dir": ""
+  "work_dir": "",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Agent"
 }
