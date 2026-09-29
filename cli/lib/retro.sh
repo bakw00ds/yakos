@@ -78,16 +78,16 @@ _retro_settings_get() {
     printf '%s\n' "$default"
 }
 
+# _retro_settings_set <jq-expression>
+# Applies ONE jq expression to settings.json, creating `{}` first when the
+# file is absent. (K-89 review: this used to take (path, value) while both
+# callers passed a single combined expression, so disable/enable crashed
+# with "$2: unbound variable" under `set -u`.)
 _retro_settings_set() {
-    local jq_path="$1" value="$2"
+    local expr="$1"
     mkdir -p "$(dirname "$SETTINGS")"
-    if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
-        ct_json_merge "$SETTINGS" "$jq_path = $value"
-    else
-        # Fresh settings file.
-        echo "{\"retro\": {}}" > "$SETTINGS"
-        ct_json_merge "$SETTINGS" "$jq_path = $value"
-    fi
+    [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
+    ct_json_merge "$SETTINGS" "$expr"
 }
 
 cmd_now() {
