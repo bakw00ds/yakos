@@ -20,6 +20,21 @@ HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 . "$HOOK_DIR/lib/hook-output.sh"
 # shellcheck source=lib/paths.sh
 . "$HOOK_DIR/lib/paths.sh"
+# compat.sh provides ct_encode_project_path / ct_iso_utc / ct_iso_now_z / ct_log,
+# all used below. It was never sourced, so every probe hit "command not found"
+# inside a `|| true` and logged probe_unavailable (K-101). Check the source
+# explicitly (bash 3.2 does not abort on a failed `.`, bash 5 returns 0 on a
+# parse error) and verify the sentinel. A trial source in a subshell comes
+# first: bash 3.2 exits the WHOLE shell with status 2 (a block) on a parse
+# error in a sourced file, and this telemetry hook must never block. On any
+# failure warn and exit 0.
+# shellcheck source=lib/compat.sh
+if [ ! -r "$HOOK_DIR/lib/compat.sh" ] || ! ( . "$HOOK_DIR/lib/compat.sh" ) >/dev/null 2>&1 \
+    || ! . "$HOOK_DIR/lib/compat.sh" || [ "${YAKOS_COMPAT_LOADED:-0}" != "1" ] \
+    || ! command -v ct_encode_project_path >/dev/null 2>&1; then
+    echo "context-threshold: WARN — cannot load lib/compat.sh; skipping this non-blocking hook." >&2
+    exit 0
+fi
 
 hi_init
 
