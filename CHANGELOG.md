@@ -39,6 +39,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server identity receives no owner-scoped events. Loopback keeps its
   cooperative hello behaviour.
 
+### Fixed
+
+- **Hook-bypass scopes are exact-or-glob (K-99).** `ho_check_bypass` and
+  the Go `hookbypass.Check` used to match when the entry's Scope merely
+  contained the checked value, so `web/secret.env-rotation` also bypassed
+  `web/secret.env` and an empty probe matched every entry for the hook.
+  A Scope now matches only when it equals the slash-normalized value
+  (case-sensitive) or contains `*` and globs over it; a blank Scope and an
+  empty probe match nothing. **Migration:** a bare-prefix entry keeps
+  working only as `prefix/**`. See `docs/hook-bypass-scope.md`.
+- **Go plan-quality-score scores the file just written (K-99).** It
+  previously read the last persisted score record, which caused false and
+  missed `.plan-blocked` markers, and had no debounce. It now runs the
+  scorer on `tool_input.file_path` with bash's threshold, dissent, marker
+  and 5 s mtime-debounce behavior.
+
 ### Changed
 
 - **CLI and hygiene follow-ups (K-102).** `yakos doctor` warns when a
