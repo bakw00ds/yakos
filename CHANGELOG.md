@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.60.0.0] — 2026-09-29
+
 ### Changed
 
+- **Remaining CLI commands converted to `internal/cliflag` (K-87 B2).**
+  install, content, work, kanban, dispatch, serve and start no longer
+  hand-roll flag loops. Flags, defaults, help text, exit codes and error
+  text are unchanged and now pinned by tests. `compact threshold --auto`
+  and `plan score correlate --min-n` stay hand-rolled on purpose.
 - **`plan-quality-gate.sh` split into a fail-closed gate and a scorer
   (K-81).** One script used to serve both the PreToolUse `.plan-blocked`
   gate and the PostToolUse plan scorer, so the gate inherited the
@@ -26,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Console stale-build banner (K-87).** The console records the first
+  `X-Yakos-Build` id and, on mismatch (checked on every API response and a
+  60s visible-tab ping), shows a dismissible banner asking for a reload
+  after the daemon was rebuilt.
+- **Golden eval cases for `architect`, `security-reviewer` and
+  `performance-engineer` (K-20).** 18 model-routing cases under
+  `lib/agents/<agent>/eval/`; data only.
 - **`yakos refresh --hooks-impl bash|go|hybrid` (K-87 A-3).** Selects
   which hook implementation the merged `settings.json` registers: the
   bash scripts (default, byte-identical to before), `yakos hook run
@@ -39,6 +53,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Go hooks ignored real Claude Code payloads.** `peer-claim`,
+  `peer-claim-confirm`, `plan-quality-score` and `supervisor-stream` read
+  a top-level `path` instead of `tool_input.file_path`, so under
+  `--hooks-impl go` they no-oped on every Edit/Write. A shared
+  `hookio.ToolFilePath` now matches bash precedence.
+- **Flows `run.json` persist failures are visible (K-95).** `GET
+  /flows/api/run` reports a run whose final flush permanently failed as
+  `failed` with `persist: <reason>` and an additive `persist_error`.
+- **Flows upstream-output scan hardened (K-83).** Adds a pure-Go first
+  scan stage, per-node `scan_allow`, hook sha256 pinning, a run-visible
+  `scan_status.json` and an adjacent-node split-payload check.
+- **Retro and kanban hook bugs (K-89, K-90, K-81).** `auto_dispatch:
+  false` is now honored (bash and Go share `settings.json`
+  `.retro.auto_dispatch`); a task on the last line of `kanban.md` is no
+  longer dropped by the auto-move; non-blocking hooks exit 0 instead of
+  127 when `jq` is missing; `allow: []` is deny-all.
+
+### Security
+
+- **`path-allowlist` bash/Go parity and hardening (K-87 A-2b).** The Go
+  port now blocks what bash blocks (out-of-root absolute paths, symlink
+  escapes, the project root itself, case-variant denies). The bash hook
+  no longer crashes under macOS bash 3.2 when `..` empties the segment
+  list (a non-blocking exit that let `api/../.env` through), rejects
+  newline/NUL in paths, resolves `..` after a symlink, and blocks on a
+  non-array `deny` or garbled `jq` output.
+- **K-86 follow-ups.** Identity-based project-path denylist, 128-bit run
+  IDs, server-derived owner on JSON-RPC workflow methods, and a
+  fail-closed WebSocket topic allowlist with per-operator `dispatch.*`.
 - **`--hooks-impl go|hybrid` gates were silent no-ops (fail-open).** The
   generated `yakos hook run <name>` command took its tier from
   `YAKOS_HOOKS`, whose default is bash mode; with it unset the runner
