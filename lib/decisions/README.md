@@ -16,7 +16,7 @@ against one wording or model version is never silently applied to another.
 | `schema_id` | `<surface>@<version>`; must match `surface` and `version`. |
 | `surface` | Lowercase name; must equal the file name. |
 | `model` | Pinned version (`jev-1.13.0`). Aliases (`jev-latest`, `jev-preview`) are rejected by `yakos validate`. |
-| `may_block` | Must be `false` until `yakos decide promote` records an eval for this exact hash. |
+| `may_block` | Must be `false` until `yakos decide promote <surface> --report <eval report>` records a verified promotion for this exact hash. |
 | `max_state_bytes` | Cap on the redacted state (hard ceiling 64 KiB). |
 | `state_fields` | Allowlist of top-level state fields that may leave. Everything else is dropped. |
 | `questions` | Map of id to `noul`, `choice` (2-255 options), or `score` (2-10 levels). |

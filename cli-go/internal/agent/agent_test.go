@@ -842,7 +842,7 @@ func TestRunLint_WriteToolsWithDecisionProviderIsError(t *testing.T) {
 		"w.md": "---\nid: w\nrole: specialist\ndomain: api\ndecision-provider: mock\ntools: Read, Edit\n---\n\n## Purpose\n\nx\n",
 	})
 	out, r, _ := runCapture(t, Config{YakosRoot: root, Subcommand: "lint", Project: proj})
-	if r.Errors == 0 || !strings.Contains(out, "Edit/Write/Bash") {
+	if r.Errors == 0 || !strings.Contains(out, "not provably read-only") {
 		t.Fatalf("errors=%d\n%s", r.Errors, out)
 	}
 }

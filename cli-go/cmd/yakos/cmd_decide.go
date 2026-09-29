@@ -19,6 +19,7 @@ import (
 //	0  a typed answer was printed, OR the provider was unavailable and
 //	   --shadow was given (stdout: {"answer":null,"reason":"<class>"})
 //	1  usage error (bad flag, missing/extra surface); no decision attempted
+//	   (also `decide promote` failures: it is an operator command)
 //	3  the provider was unavailable, timed out, refused, or failed and
 //	   --shadow was NOT given (stdout: {"answer":null,"reason":"<class>"})
 //
@@ -46,13 +47,20 @@ Flags:
                           then decisions.provider in .yakos.yml, then none.
     --shadow              Advisory call: on any failure exit 0 with
                           {"answer":null,"reason":...} so a hook proceeds.
-    --timeout <duration>  Overall deadline (default 1.5s; 10s with --shadow).
+    --timeout <duration>  Overall deadline (default 1.5s in both modes; max 10s).
     --session <id>        Session id for the per-session call cap
                           (default $YAKOS_SESSION_ID, else "default").
     --state-file <path>   Read the state from a file instead of stdin.
     --sets-dir <dir>      Question-set directory (default <framework>/lib/decisions).
     --config <path>       .yakos.yml to read the decisions: block from
                           (default $CLAUDE_PROJECT_DIR/.yakos.yml, then ./.yakos.yml).
+                          A project may only TIGHTEN the user-level ceiling in
+                          ~/.yakos-state/decision-policy.yml (default: 2000
+                          calls, $1/day, strict egress).
+
+yakos decide promote <surface> --report <eval report>
+    Operator command: records a verified promotion for the surface's current
+    question-set hash (required before a set may declare may_block: true).
 
 Credentials: jev reads TYPESAFE_API_KEY from the environment at call time.
 It is never stored, logged, or printed. YAKOS_DECISION_DISABLE=1 turns every
@@ -107,7 +115,7 @@ func decideMain(env decideEnv, args []string) (code int) {
 	}()
 
 	var help bool
-	var providerFlag, timeoutFlag, sessionFlag, stateFile, setsDir, configPath string
+	var providerFlag, timeoutFlag, sessionFlag, stateFile, setsDir, configPath, reportPath string
 	fs := &cliflag.Set{Cmd: "decide", Specs: []cliflag.Spec{
 		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
 		{Name: "--shadow", Kind: cliflag.Bool, Bool: &shadow},
@@ -117,6 +125,7 @@ func decideMain(env decideEnv, args []string) (code int) {
 		{Name: "--state-file", Kind: cliflag.String, Str: &stateFile, ValueDesc: "a path"},
 		{Name: "--sets-dir", Kind: cliflag.String, Str: &setsDir, ValueDesc: "a directory"},
 		{Name: "--config", Kind: cliflag.String, Str: &configPath, ValueDesc: "a path"},
+		{Name: "--report", Kind: cliflag.String, Str: &reportPath, ValueDesc: "an eval report path"},
 	}}
 	rest, err := fs.Parse(args)
 	if err != nil {
@@ -126,6 +135,9 @@ func decideMain(env decideEnv, args []string) (code int) {
 	if help {
 		printDecideHelp(env.Stdout)
 		return decideExitOK
+	}
+	if len(rest) == 2 && rest[0] == "promote" {
+		return decidePromote(env, rest[1], reportPath, setsDir)
 	}
 	if len(rest) != 1 || (len(rest[0]) > 0 && rest[0][0] == '-') {
 		fmt.Fprintln(env.Stderr, "decide: expected exactly one <surface> (try --help)")
@@ -167,10 +179,21 @@ func decideMain(env decideEnv, args []string) (code int) {
 		return fail(decision.ClassDisabled, "YAKOS_DECISION_DISABLE=1")
 	}
 
+	stateDir := env.StateDir
+	if stateDir == "" {
+		stateDir = statepath.Dir()
+	}
+	paths := decision.StatePaths{Dir: stateDir}
 	cfg, cerr := decision.LoadConfig(decideConfigPath(configPath, getenv))
 	if cerr != nil {
 		return fail(decision.ClassBadRequest, "config: %v", cerr)
 	}
+	// A project's .yakos.yml may only tighten the user-level policy.
+	policy, perr := decision.LoadPolicy(paths.Policy())
+	if perr != nil {
+		fmt.Fprintf(env.Stderr, "decide: %v; using the default policy\n", perr)
+	}
+	cfg = decision.Tighten(cfg, policy)
 	name := providerFlag
 	if name == "" {
 		name = getenv(decision.EnvProvider)
@@ -201,11 +224,6 @@ func decideMain(env decideEnv, args []string) (code int) {
 
 	prov := env.Provider
 	if prov == nil {
-		stateDir := env.StateDir
-		if stateDir == "" {
-			stateDir = statepath.Dir()
-		}
-		paths := decision.StatePaths{Dir: stateDir}
 		switch name {
 		case decision.ProviderJev:
 			prov = &decision.Jev{
@@ -262,6 +280,44 @@ func decideMain(env decideEnv, args []string) (code int) {
 }
 
 // decideFail prints the null answer and returns the contract exit code.
+// decidePromote implements `yakos decide promote <surface> --report <file>`:
+// an operator command that records a verified promotion for the surface's
+// current question-set hash. It never exits 2.
+func decidePromote(env decideEnv, surface, report, setsDir string) int {
+	if !decision.ValidSurface(surface) || report == "" {
+		fmt.Fprintln(env.Stderr, "decide promote: usage: yakos decide promote <surface> --report <eval report path>")
+		return decideExitUsage
+	}
+	getenv := env.Getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if setsDir == "" {
+		root := env.YakosRoot
+		if r := getenv("YAKOS_ROOT"); r != "" {
+			root = r
+		}
+		setsDir = filepath.Join(resolveLibRoot(root, env.Home, env.Stderr), "lib", "decisions")
+	}
+	set, err := decision.LoadSet(setsDir, surface)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "decide promote: %v\n", err)
+		return decideExitUsage
+	}
+	stateDir := env.StateDir
+	if stateDir == "" {
+		stateDir = statepath.Dir()
+	}
+	p, err := decision.RecordPromotion(decision.StatePaths{Dir: stateDir}.Promotions(), surface, set.Hash, report, time.Now())
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "decide promote: %v\n", err)
+		return decideExitUsage
+	}
+	b, _ := json.Marshal(p)
+	fmt.Fprintln(env.Stdout, string(b))
+	return decideExitOK
+}
+
 func decideFail(stdout io.Writer, shadow bool, class string) int {
 	b, _ := json.Marshal(struct {
 		Answer *struct{} `json:"answer"`

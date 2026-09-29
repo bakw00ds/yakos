@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -156,8 +157,8 @@ func TestDecide_ExitContract_FailuresNeverExit2(t *testing.T) {
 		}, `{"tool":"x"}`, "breaker_open"},
 		{"budget exhausted", func(f *decideFixture) []string {
 			f.env[decision.KeyEnv] = "k"
-			day := time.Now().UTC().Format("2006-01-02")
-			_ = os.WriteFile(filepath.Join(f.state, decision.BudgetFileName), []byte(`{"day":"`+day+`","usd":5,"sessions":{}}`), 0o600)
+			b := decision.NewBudget(filepath.Join(f.state, decision.BudgetFileName), 1, 1)
+			_ = os.WriteFile(b.LedgerPath(), []byte(`{"u":5}`+"\n"), 0o600)
 			return []string{"--provider", "jev"}
 		}, `{"tool":"x"}`, "budget"},
 		{"missing question set", func(f *decideFixture) []string {
@@ -411,6 +412,101 @@ func TestDecide_BinaryReachesGoRouterWithImplUnset(t *testing.T) {
 		}
 		if nullReason(t, out.String()) != "disabled" {
 			t.Errorf("impl=%q: stdout=%s", impl, out.String())
+		}
+	}
+}
+
+// Review F7: shadow no longer blocks for 10 s by default.
+func TestDecide_ShadowDefaultDeadlineIsCapped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(8 * time.Second):
+		}
+	}))
+	defer srv.Close()
+	f := newDecideFixture(t)
+	f.env[decision.KeyEnv] = "k"
+	f.env[decision.BaseURLEnv] = srv.URL
+	start := time.Now()
+	code, out, _ := f.run(`{"tool":"x"}`, "demo", "--provider", "jev", "--shadow")
+	if code != 0 || nullReason(t, out) != "timeout" {
+		t.Fatalf("code=%d out=%s", code, out)
+	}
+	if d := time.Since(start); d > 2500*time.Millisecond {
+		t.Errorf("shadow default blocked for %v (want ~1.5 s)", d)
+	}
+}
+
+func TestDecide_ForeignBaseURLNeverReceivesTheKey(t *testing.T) {
+	f := newDecideFixture(t)
+	f.env[decision.KeyEnv] = "sk-SECRET"
+	f.env[decision.BaseURLEnv] = "https://collector.evil.example"
+	code, out, errs := f.run(`{"tool":"x"}`, "demo", "--provider", "jev")
+	if code != 3 || nullReason(t, out) != "bad_request" || !strings.Contains(errs, "not allowed") || strings.Contains(errs+out, "sk-SECRET") {
+		t.Fatalf("code=%d out=%s err=%s", code, out, errs)
+	}
+}
+
+// Review F6: a project's .yakos.yml cannot loosen egress or raise caps.
+func TestDecide_ProjectConfigCannotLoosenPolicy(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		half := 0.5
+		_ = json.NewEncoder(w).Encode(map[string]any{"model": "jev-1.13.0",
+			"answers": map[string]any{
+				"risk":  map[string]any{"type": "choice", "choice": "benign", "probabilities": map[string]float64{"benign": 1}, "confidence": 0.9},
+				"scope": map[string]any{"type": "noul", "noul": half}},
+			"usage": map[string]any{"input_tokens": 10, "output_tokens": 0}})
+	}))
+	defer srv.Close()
+	f := newDecideFixture(t)
+	f.env[decision.KeyEnv] = "k"
+	f.env[decision.BaseURLEnv] = srv.URL
+	cfg := filepath.Join(t.TempDir(), ".yakos.yml")
+	_ = os.WriteFile(cfg, []byte("decisions:\n  provider: jev\n  budget: {max_calls_per_session: 999999, max_usd_per_day: 999}\n  egress: {level: full}\n"), 0o600)
+	long := strings.Repeat("a b ", 2000) // 8000 bytes: cut to 2 KiB under strict, kept under full
+	var out, errb bytes.Buffer
+	code := decideMain(decideEnv{Stdin: strings.NewReader(`{"tool":"Write","preview":"` + long + `"}`), Stdout: &out, Stderr: &errb,
+		Getenv: func(k string) string { return f.env[k] }, StateDir: f.state, YakosRoot: t.TempDir(), Home: t.TempDir()},
+		[]string{"--sets-dir", f.sets, "--config", cfg, "demo"})
+	if code != 0 {
+		t.Fatalf("code=%d %s %s", code, out.String(), errb.String())
+	}
+	if len(body) > 4000 || !strings.Contains(string(body), "truncated") {
+		t.Errorf("project egress: full must be clamped to strict (body %d bytes)", len(body))
+	}
+	// The user-level policy may loosen it.
+	_ = os.WriteFile(filepath.Join(f.state, decision.PolicyFileName), []byte("egress: {level: full}\n"), 0o600)
+	out.Reset()
+	code = decideMain(decideEnv{Stdin: strings.NewReader(`{"tool":"Write","preview":"` + long + `"}`), Stdout: &out, Stderr: &errb,
+		Getenv: func(k string) string { return f.env[k] }, StateDir: f.state, YakosRoot: t.TempDir(), Home: t.TempDir()},
+		[]string{"--sets-dir", f.sets, "--config", cfg, "demo"})
+	if code != 3 { // 8000-byte preview exceeds the demo set's 4096 cap: oversize proves it was NOT truncated
+		t.Fatalf("with the user policy allowing full the long preview must reach the size cap: code=%d %s", code, out.String())
+	}
+}
+
+func TestDecide_Promote(t *testing.T) {
+	f := newDecideFixture(t)
+	report := filepath.Join(t.TempDir(), "eval.md")
+	_ = os.WriteFile(report, []byte("precision 0.9\n"), 0o600)
+	code, out, errs := f.run(``, "promote", "demo", "--report", report)
+	if code != 0 {
+		t.Fatalf("code=%d %s %s", code, out, errs)
+	}
+	var p decision.Promotion
+	if err := json.Unmarshal([]byte(out), &p); err != nil || p.Surface != "demo" || p.RecordSHA256 == "" {
+		t.Fatalf("%v %s", err, out)
+	}
+	set, _ := decision.LoadSet(f.sets, "demo")
+	if !decision.HasPromotion(decision.StatePaths{Dir: f.state}.Promotions(), "demo", set.Hash) {
+		t.Fatal("the recorded promotion must verify")
+	}
+	for _, args := range [][]string{{"promote", "demo"}, {"promote", "../x", "--report", report}, {"promote", "demo", "--report", filepath.Join(t.TempDir(), "missing")}, {"promote", "nosuch", "--report", report}} {
+		if c, _, _ := f.run(``, args...); c != 1 {
+			t.Errorf("%v: exit %d, want 1 (never 2)", args, c)
 		}
 	}
 }

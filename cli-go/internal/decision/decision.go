@@ -45,11 +45,14 @@ const (
 	ProviderNone = "none"
 )
 
-// Default deadlines per mode (ADR-0009 §4): prefilter runs synchronously in a
-// hook, shadow is asynchronous.
+// Deadlines (ADR-0009 §4). A hook may run the call synchronously, so BOTH
+// modes default to 1.5 s (shadow is meant to be backgrounded by the hook, but
+// the bound must not depend on that). An explicit --timeout may raise it, never
+// beyond MaxTimeout.
 const (
 	PrefilterTimeout = 1500 * time.Millisecond
-	ShadowTimeout    = 10 * time.Second
+	ShadowTimeout    = PrefilterTimeout
+	MaxTimeout       = 10 * time.Second
 )
 
 // Error classes recorded in the decision log and printed as the "reason".
@@ -234,8 +237,9 @@ func DefaultConfig() Config {
 		Provider:    ProviderNone,
 		Model:       PinnedModel,
 		DefaultMode: ModeShadow,
-		Budget:      BudgetConfig{MaxCallsPerSession: DefaultMaxCallsPerSession, MaxUSDPerDay: DefaultMaxUSDPerDay},
-		Egress:      EgressConfig{Level: EgressStrict},
+		// Budget and Egress are left zero on purpose: callers apply Tighten
+		// with the user-level Policy, which supplies the defaults and is the
+		// ceiling a project can only tighten.
 	}
 }
 
@@ -272,16 +276,84 @@ func LoadConfig(path string) (Config, error) {
 	if got.DefaultMode == "" {
 		got.DefaultMode = def.DefaultMode
 	}
-	if got.Budget.MaxCallsPerSession <= 0 {
-		got.Budget.MaxCallsPerSession = def.Budget.MaxCallsPerSession
-	}
-	if got.Budget.MaxUSDPerDay <= 0 {
-		got.Budget.MaxUSDPerDay = def.Budget.MaxUSDPerDay
-	}
-	if got.Egress.Level == "" {
-		got.Egress.Level = def.Egress.Level
-	}
 	return got, nil
+}
+
+// ---- policy: project config may only tighten ---------------------------------
+
+// PolicyFileName is the user-level ceiling, kept in the state directory (which
+// is owner-only and outside any repository), so a cloned project cannot write
+// it. The defaults below apply when it is absent.
+const PolicyFileName = "decision-policy.yml"
+
+// Policy is the user-level ceiling for budget and egress.
+type Policy struct {
+	Budget BudgetConfig `yaml:"budget"`
+	Egress EgressConfig `yaml:"egress"`
+}
+
+// DefaultPolicy is the documented ceiling: 2000 calls, $1/day, strict egress.
+func DefaultPolicy() Policy {
+	return Policy{
+		Budget: BudgetConfig{MaxCallsPerSession: DefaultMaxCallsPerSession, MaxUSDPerDay: DefaultMaxUSDPerDay},
+		Egress: EgressConfig{Level: EgressStrict},
+	}
+}
+
+// LoadPolicy reads the user-level policy file; a missing file is the default.
+// The operator loosens the ceiling here, never in a project's .yakos.yml.
+func LoadPolicy(path string) (Policy, error) {
+	p := DefaultPolicy()
+	data, err := os.ReadFile(path) //nolint:gosec // state-dir file
+	if err != nil {
+		if os.IsNotExist(err) {
+			return p, nil
+		}
+		return DefaultPolicy(), err
+	}
+	var got Policy
+	if err := yaml.Unmarshal(data, &got); err != nil {
+		return DefaultPolicy(), fmt.Errorf("parse %s: %w", path, err)
+	}
+	if got.Budget.MaxCallsPerSession > 0 {
+		p.Budget.MaxCallsPerSession = got.Budget.MaxCallsPerSession
+	}
+	if got.Budget.MaxUSDPerDay > 0 {
+		p.Budget.MaxUSDPerDay = got.Budget.MaxUSDPerDay
+	}
+	if got.Egress.Level != "" {
+		p.Egress.Level = got.Egress.Level
+	}
+	p.Egress.NeverPaths = got.Egress.NeverPaths
+	return p, nil
+}
+
+// Tighten returns cfg with budget and egress clamped to the policy: caps are
+// the minimum of the two, the egress level is the more restrictive, and
+// never_paths are the union. A project can only make things stricter.
+func Tighten(cfg Config, p Policy) Config {
+	if cfg.Budget.MaxCallsPerSession <= 0 || cfg.Budget.MaxCallsPerSession > p.Budget.MaxCallsPerSession {
+		cfg.Budget.MaxCallsPerSession = p.Budget.MaxCallsPerSession
+	}
+	if cfg.Budget.MaxUSDPerDay <= 0 || cfg.Budget.MaxUSDPerDay > p.Budget.MaxUSDPerDay {
+		cfg.Budget.MaxUSDPerDay = p.Budget.MaxUSDPerDay
+	}
+	if EgressRank(cfg.Egress.Level) > EgressRank(p.Egress.Level) || cfg.Egress.Level == "" {
+		cfg.Egress.Level = p.Egress.Level
+	}
+	if EgressRank(cfg.Egress.Level) == 0 {
+		cfg.Egress.Level = EgressStrict // normalises unknown levels
+	}
+	seen := map[string]bool{}
+	var never []string
+	for _, x := range append(append([]string{}, p.Egress.NeverPaths...), cfg.Egress.NeverPaths...) {
+		if !seen[x] {
+			seen[x] = true
+			never = append(never, x)
+		}
+	}
+	cfg.Egress.NeverPaths = never
+	return cfg
 }
 
 // ---- state-dir files --------------------------------------------------------
@@ -312,6 +384,7 @@ func (s StatePaths) Log() string        { return filepath.Join(s.dir(), LogFileN
 func (s StatePaths) Breaker() string    { return filepath.Join(s.dir(), BreakerFileName) }
 func (s StatePaths) Budget() string     { return filepath.Join(s.dir(), BudgetFileName) }
 func (s StatePaths) Promotions() string { return filepath.Join(s.dir(), PromotionsName) }
+func (s StatePaths) Policy() string     { return filepath.Join(s.dir(), PolicyFileName) }
 
 // KillSwitch reports whether YAKOS_DECISION_DISABLE=1 (checked before
 // anything else).
@@ -357,6 +430,9 @@ func (e *Engine) Execute(ctx context.Context, set *QuestionSet, state any, mode,
 		if mode == ModeShadow {
 			timeout = ShadowTimeout
 		}
+	}
+	if timeout > MaxTimeout {
+		timeout = MaxTimeout
 	}
 
 	rec := Record{

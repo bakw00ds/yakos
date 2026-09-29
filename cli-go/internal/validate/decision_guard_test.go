@@ -39,7 +39,7 @@ func TestDecisionGuards_WriteToolsPlusProviderIsError(t *testing.T) {
 	base, _ := makeTree(t)
 	makeAgentFile(t, filepath.Join(base, "agents"), "tester.md", agentWith("decision-provider: mock\ntools: Read, Bash\n"))
 	r, out := runTree(t, base)
-	if r.Errors == 0 || !strings.Contains(out, "Edit/Write/Bash") {
+	if r.Errors == 0 || !strings.Contains(out, "not provably read-only") {
 		t.Fatalf("errors=%d\n%s", r.Errors, out)
 	}
 	// Read-only agent referencing a provider is not an error.

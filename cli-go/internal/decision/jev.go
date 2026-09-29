@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -100,9 +101,10 @@ func (j *Jev) Available(_ context.Context) error {
 	return nil
 }
 
-// endpoint validates the base URL. The bearer key is only ever sent over TLS
-// (or to a loopback address, for tests and local gateways): a mistyped or
-// hostile TYPESAFE_BASE_URL must not turn into plaintext key exfiltration.
+// endpoint validates the base URL. The bearer key and the redacted state are
+// only ever sent to *.typesafe.ai over TLS, or to a loopback address (tests and
+// local gateways). A cloned project's environment must not be able to point the
+// key at another host, so any other host is refused.
 func (j *Jev) endpoint() (string, error) {
 	base := j.BaseURL
 	if base == "" {
@@ -115,17 +117,15 @@ func (j *Jev) endpoint() (string, error) {
 	if err != nil || u.Host == "" {
 		return "", newErr(ClassBadRequest, "invalid %s", BaseURLEnv)
 	}
-	switch u.Scheme {
-	case "https":
-	case "http":
-		if !isLoopbackHost(u.Hostname()) {
-			return "", newErr(ClassBadRequest, "%s must be https (http is allowed only for loopback)", BaseURLEnv)
-		}
-	default:
-		return "", newErr(ClassBadRequest, "%s must be https", BaseURLEnv)
-	}
 	if u.User != nil {
 		return "", newErr(ClassBadRequest, "%s must not embed credentials", BaseURLEnv)
+	}
+	host := strings.ToLower(u.Hostname())
+	switch {
+	case isLoopbackHost(host) && (u.Scheme == "http" || u.Scheme == "https"):
+	case u.Scheme == "https" && (host == "typesafe.ai" || strings.HasSuffix(host, ".typesafe.ai")):
+	default:
+		return "", newErr(ClassBadRequest, "%s host %q is not allowed: only https://*.typesafe.ai (or loopback for tests) may receive the API key", BaseURLEnv, host)
 	}
 	u.Path = u.Path + systemOnePath
 	u.RawQuery, u.Fragment = "", ""

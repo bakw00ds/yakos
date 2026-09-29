@@ -79,7 +79,7 @@ func TestEgress_RequestBodyNeverCarriesSecrets(t *testing.T) {
 
 func TestSanitize_NeverPathsWithholdContentKeepPath(t *testing.T) {
 	for _, p := range []string{".env", "app/.env.local", "certs/server.pem", "keys/id.key", "x/credentials/a.json", "a/secrets/b.txt", "/home/u/.ssh/id_rsa"} {
-		out, st, err := Sanitize(map[string]any{"file_path": p, "preview": "harmless text", "cmd": "cat"}, allowAll("file_path", "preview", "cmd"))
+		out, st, err := Sanitize(map[string]any{"file_path": p, "preview": "harmless text", "note": "cat"}, allowAll("file_path", "preview", "note"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -87,7 +87,7 @@ func TestSanitize_NeverPathsWithholdContentKeepPath(t *testing.T) {
 		if m["file_path"] != p {
 			t.Errorf("%s: path itself should be sent, got %v", p, m["file_path"])
 		}
-		if m["preview"] != withheldMarker || m["cmd"] != withheldMarker || !st.Withheld {
+		if m["preview"] != withheldMarker || m["note"] != withheldMarker || !st.Withheld {
 			t.Errorf("%s: content must be withheld: %v", p, m)
 		}
 	}
@@ -223,5 +223,195 @@ func TestRedactText_UsesSecretScanTable(t *testing.T) {
 		if out := RedactText("v "+s+" v", nil); strings.Contains(out, s) {
 			t.Errorf("%q not redacted", s)
 		}
+	}
+}
+
+// ---- review round: F1, F2, F3, F8, F9 ---------------------------------------
+
+// F1: a token straddling the preview cut must not leave as a partial.
+func TestSanitize_TokenStraddlingPreviewCutIsFullyRedacted(t *testing.T) {
+	tok := fakeGH // 40 chars
+	for _, level := range []string{EgressStrict, EgressPreviews} {
+		cut := strictPreviewBytes
+		if level == EgressPreviews {
+			cut = previewsPreviewBytes
+		}
+		// Every offset from "token starts 39 bytes before the cut" to "starts at the cut".
+		for back := 1; back <= len(tok); back++ {
+			pad := strings.Repeat("x ", (cut-back)/2)
+			pad += strings.Repeat("y", cut-back-len(pad))
+			s := pad + tok + " tail"
+			out, _, err := Sanitize(map[string]any{"p": s}, SanitizeOptions{Level: level, AllowedFields: []string{"p"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, _ := json.Marshal(out)
+			// No 8+ char run of the token may appear.
+			for i := 0; i+8 <= len(tok); i++ {
+				if strings.Contains(string(b), tok[i:i+8]) {
+					t.Fatalf("%s back=%d: token fragment %q leaked", level, back, tok[i:i+8])
+				}
+			}
+		}
+	}
+}
+
+func TestSanitize_PEMStraddlingCutAndAWSKeyAtCut(t *testing.T) {
+	for back := 1; back < 40; back++ {
+		pad := strings.Repeat("z", strictPreviewBytes-back)
+		out, _, _ := Sanitize(map[string]any{"p": pad + fakeAWS + "\n" + fakePEM}, allowAll("p"))
+		b, _ := json.Marshal(out)
+		if strings.Contains(string(b), "AKIAIOS") || strings.Contains(string(b), "MIIEow") {
+			t.Fatalf("back=%d leaked: %s", back, b[len(b)-120:])
+		}
+	}
+}
+
+// F2: never_paths at ANY depth withholds the enclosing content.
+func TestSanitize_NestedNeverPaths(t *testing.T) {
+	secretBody := "MY_SERVICE_PWD=hunter2hunter2\nSESSION_COOKIE=abcdef123456"
+	cases := map[string]map[string]any{
+		"tool_input.file_path":          {"tool_input": map[string]any{"file_path": "app/.env", "content": secretBody}},
+		"deep + array":                  {"calls": []any{map[string]any{"args": map[string]any{"notebook_path": "keys/id.key", "new_source": secretBody}}}},
+		"sibling of the holder":         {"tool_input": map[string]any{"file_path": ".env"}, "preview": secretBody},
+		"path key differently cased":    {"Tool": map[string]any{"File_Path": "x/secrets/a.txt", "body": secretBody}},
+		"command targets a secret path": {"tool_input": map[string]any{"command": "cat .env.production && echo done", "stdout": secretBody}},
+		"quoted command token":          {"cmd": `grep -r "x" 'certs/server.pem'`, "out": secretBody},
+	}
+	for name, st := range cases {
+		fields := []string{}
+		for k := range st {
+			fields = append(fields, k)
+		}
+		out, s, err := Sanitize(st, SanitizeOptions{Level: EgressFull, AllowedFields: fields})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(out)
+		for _, leak := range []string{"hunter2", "abcdef123456", "MY_SERVICE_PWD"} {
+			if strings.Contains(string(b), leak) {
+				t.Errorf("%s: %q leaked: %s", name, leak, b)
+			}
+		}
+		if !s.Withheld || !strings.Contains(string(b), withheldMarker) {
+			t.Errorf("%s: expected withheld content: %s", name, b)
+		}
+	}
+	// The path itself still leaves; unrelated state without a secret path is untouched.
+	out, s, _ := Sanitize(map[string]any{"tool_input": map[string]any{"file_path": "app/.env", "content": "x"}}, allowAll("tool_input"))
+	if out.(map[string]any)["tool_input"].(map[string]any)["file_path"] != "app/.env" || !s.Withheld {
+		t.Errorf("path must be kept: %v", out)
+	}
+	out, s, _ = Sanitize(map[string]any{"tool_input": map[string]any{"file_path": "src/a.go", "content": "fine"}}, allowAll("tool_input"))
+	if out.(map[string]any)["tool_input"].(map[string]any)["content"] != "fine" || s.Withheld {
+		t.Errorf("no secret path: nothing withheld: %v", out)
+	}
+}
+
+// F3: a realistic .env file, none of whose values may leave.
+var realisticEnv = strings.NewReplacer("@L@", "live", "@WH@", "whsec", "@SL@", "slack").Replace(`# app config
+NODE_ENV=production
+PORT=8080
+DB_HOST=db.internal
+DB_USER=app
+DB_PASS=Sup3rS3cretPassw0rd
+MY_SERVICE_PWD=hunter2hunter2
+STRIPE_KEY=sk_@L@_abc123
+STRIPE_WEBHOOK=@WH@_9f8e7d6c5b4a
+SLACK_HOOK=https://hooks.@SL@.com/services/T0000/B0000/XXXXXXXXXXXXXXXX
+AUTH_HEADER=Basic dXNlcjpwYXNzd29yZA==
+export API_AUTH=opaqueOpaque123
+AWS_ACCESS_KEY_ID=` + "AKIA" + `IOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+SESSION_SECRET_BASE=deadbeefcafebabe
+CACHE_DSN=redis://:cachepw@cache:6379/0
+`)
+
+func TestRedact_RealisticEnvFile(t *testing.T) {
+	out, _, err := Sanitize(map[string]any{"preview": realisticEnv, "tool": "Bash"}, allowAll("preview", "tool"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(out)
+	for _, leak := range []string{"Sup3rS3cretPassw0rd", "hunter2hunter2", "sk_live_abc123", "whsec_9f8e7d6c5b4a", "T0000/B0000", "XXXXXXXXXXXXXXXX",
+		"dXNlcjpwYXNzd29yZA", "opaqueOpaque123", "IOSFODNN7EXAMPLE", "wJalrXUtnFEMI", "deadbeefcafebabe", "cachepw"} {
+		if strings.Contains(string(b), leak) {
+			t.Errorf("%q leaked: %s", leak, b)
+		}
+	}
+	// Non-secret configuration survives, so the preview stays useful.
+	for _, keep := range []string{"NODE_ENV=production", "PORT=8080", "DB_HOST=db.internal", "DB_USER=app"} {
+		if !strings.Contains(string(b), keep) {
+			t.Errorf("%q should survive: %s", keep, b)
+		}
+	}
+}
+
+func TestRedact_BareSecretShapesAndHeaders(t *testing.T) {
+	for _, in := range []string{
+		"aws secret wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY here",
+		"curl -H 'Authorization: Basic dXNlcjpwYXNzd29yZA==' x",
+		"curl -H 'Authorization: Digest username=\"u\", response=\"abcdef0123456789\"' x",
+		"x-token: Token abcdef0123456789abcdef",
+		"hook https://hooks.slack.com/services/T1/B2/abcdEFGH",
+		"sk_" + "test_4eC39HqLyjWDarjtT1zdp7dc and rk_" + "live_abcDEF123456",
+		"pwd=abc123def456",
+		"PGPASS: hunter2hunter2",
+	} {
+		n := 0
+		out := RedactText(in, &n)
+		if n == 0 || out == in {
+			t.Errorf("not redacted: %q", in)
+		}
+		for _, leak := range []string{"wJalrXUtnFEMI", "dXNlcjpwYXNzd29yZA", "abcdef0123456789", "T1/B2", "4eC39HqLy", "abcDEF123456", "abc123def456", "hunter2hunter2"} {
+			if strings.Contains(out, leak) {
+				t.Errorf("%q leaked in %q", leak, out)
+			}
+		}
+	}
+	// A 40-hex git SHA and ordinary prose are not secrets.
+	for _, in := range []string{"commit 3f786850e387550fdab836ed7e6dc881de23001b done", "the compass bypass keyboard monkey", "PORT=8080 HOST=localhost"} {
+		n := 0
+		if out := RedactText(in, &n); out != in || n != 0 {
+			t.Errorf("false positive: %q -> %q", in, out)
+		}
+	}
+}
+
+// F8: an object under a path-named key still gets the per-string preview cap.
+func TestSanitize_PathNamedObjectIsCapped(t *testing.T) {
+	big := strings.Repeat("a b ", 5000)
+	out, _, err := Sanitize(map[string]any{"file_path": map[string]any{"content": big}}, allowAll("file_path"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["file_path"].(map[string]any)["content"].(string)
+	if len(got) > strictPreviewBytes+len(truncMarker) {
+		t.Errorf("object under a path key skipped the cap: %d bytes", len(got))
+	}
+}
+
+// F9: JSON map keys are redacted too.
+func TestSanitize_MapKeysRedacted(t *testing.T) {
+	out, _, _ := Sanitize(map[string]any{"env": map[string]any{fakeAWS: "v", "ok": "fine", fakeGH: "w"}}, allowAll("env"))
+	b, _ := json.Marshal(out)
+	if strings.Contains(string(b), "AKIAIOS") || strings.Contains(string(b), fakeGH[:12]) {
+		t.Errorf("secret used as a key leaked: %s", b)
+	}
+	if !strings.Contains(string(b), `"ok":"fine"`) {
+		t.Errorf("benign keys must survive: %s", b)
+	}
+	// Two secret keys must not collapse into one entry.
+	m := out.(map[string]any)["env"].(map[string]any)
+	if len(m) != 3 {
+		t.Errorf("redacted keys collided: %v", m)
+	}
+}
+
+func TestSanitize_LongPathStringsSurviveWhole(t *testing.T) {
+	p := strings.Repeat("dir-", 1250) + "file.go" // 5007 bytes, over the strict preview
+	out, _, _ := Sanitize(map[string]any{"file_path": p}, allowAll("file_path"))
+	if out.(map[string]any)["file_path"] != p {
+		t.Error("a path under the path cap must not be truncated by the strict preview")
 	}
 }

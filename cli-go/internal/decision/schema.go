@@ -11,8 +11,11 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 // MaxSchemaBytes bounds a question-set file.
@@ -319,7 +322,7 @@ func ValidateDir(dir, promotions string) []SetFile {
 		}
 		qs, errs := ParseSet(name, data)
 		if len(errs) == 0 && qs.MayBlock && !HasPromotion(promotions, qs.Surface, qs.Hash) {
-			errs = append(errs, fmt.Errorf("may_block: true requires a recorded promotion for this exact question-set hash (yakos decide promote); none found"))
+			errs = append(errs, fmt.Errorf("may_block: true requires a verified promotion for this exact question-set hash (run: yakos decide promote %s --report <eval report>); none found", qs.Surface))
 		}
 		sf.Set, sf.Errs = qs, errs
 		if qs != nil {
@@ -330,11 +333,72 @@ func ValidateDir(dir, promotions string) []SetFile {
 	return out
 }
 
-// HasPromotion reports whether the promotions log records a promotion of
-// surface at exactly this question-set hash. A missing or unreadable log means
-// no promotion (fail closed).
+// Promotion is one record of the operator-run `yakos decide promote`. It binds
+// a surface, the exact question-set hash, and an eval report file (by its
+// sha256), and carries a digest over those fields. The digest catches typos and
+// casual hand edits; it is NOT proof against a same-user process that can run
+// the CLI, which is why agents that can run commands may never reference a
+// provider (CheckAgentFrontmatter).
+type Promotion struct {
+	Type         string `json:"type"`
+	TS           string `json:"ts"`
+	Surface      string `json:"surface"`
+	SchemaHash   string `json:"schema_hash"`
+	ReportPath   string `json:"report_path"`
+	ReportSHA256 string `json:"report_sha256"`
+	RecordSHA256 string `json:"record_sha256"`
+}
+
+func (p Promotion) digest() string {
+	return HashBytes([]byte(strings.Join([]string{"promotion-v1", p.Surface, p.SchemaHash, p.ReportPath, p.ReportSHA256, p.TS}, "\n")))
+}
+
+// RecordPromotion appends a promotion for surface at schemaHash, citing the
+// eval report at reportPath (which must exist and is hashed).
+func RecordPromotion(path, surface, schemaHash, reportPath string, now time.Time) (Promotion, error) {
+	var p Promotion
+	if !ValidSurface(surface) || len(schemaHash) != 64 {
+		return p, fmt.Errorf("invalid surface or schema hash")
+	}
+	abs, err := filepath.Abs(reportPath)
+	if err != nil {
+		return p, err
+	}
+	data, err := readCapped(abs)
+	if err != nil {
+		return p, fmt.Errorf("eval report: %w", err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return p, fmt.Errorf("eval report %s is empty", abs)
+	}
+	p = Promotion{Type: "promotion", TS: now.UTC().Format(time.RFC3339), Surface: surface,
+		SchemaHash: schemaHash, ReportPath: abs, ReportSHA256: HashBytes(data)}
+	p.RecordSHA256 = p.digest()
+	line, err := json.Marshal(p)
+	if err != nil {
+		return p, err
+	}
+	if err := statepath.SecureDir(filepath.Dir(path)); err != nil {
+		return p, err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600) //nolint:gosec // state-dir file
+	if err != nil {
+		return p, err
+	}
+	defer f.Close()
+	if err := statepath.SecureFile(f); err != nil {
+		return p, err
+	}
+	_, err = f.Write(append(line, '\n'))
+	return p, err
+}
+
+// HasPromotion reports whether the promotions log holds a well-formed record
+// for surface at exactly this question-set hash whose digest verifies and whose
+// eval report still exists with the recorded sha256. A missing or unreadable
+// log means no promotion (fail closed).
 func HasPromotion(path, surface, hash string) bool {
-	if path == "" {
+	if path == "" || hash == "" {
 		return false
 	}
 	data, err := os.ReadFile(path) //nolint:gosec // state-dir file
@@ -345,22 +409,35 @@ func HasPromotion(path, surface, hash string) bool {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		var p struct {
-			Surface    string `json:"surface"`
-			SchemaHash string `json:"schema_hash"`
+		var p Promotion
+		if json.Unmarshal(line, &p) != nil || p.Type != "promotion" || p.Surface != surface || p.SchemaHash != hash {
+			continue
 		}
-		if json.Unmarshal(line, &p) == nil && p.Surface == surface && p.SchemaHash == hash && hash != "" {
-			return true
+		if p.RecordSHA256 == "" || p.RecordSHA256 != p.digest() {
+			continue
 		}
+		rep, rerr := readCapped(p.ReportPath)
+		if rerr != nil || HashBytes(rep) != p.ReportSHA256 {
+			continue
+		}
+		return true
 	}
 	return false
 }
 
+// readOnlyTools is the explicit allowlist of tools an agent may hold while
+// referencing a decision provider. Anything else (Bash, Edit, Write, Agent,
+// Task, mcp__*, WebFetch, a wildcard, Bash(...) scopes) can write, run
+// commands, spawn other agents or exfiltrate, so it is refused. WebFetch is
+// excluded because it can send data to an arbitrary host.
+var readOnlyTools = map[string]bool{"read": true, "grep": true, "glob": true, "ls": true, "sendmessage": true, "tasklist": true}
+
 // CheckAgentFrontmatter enforces the routing guardrail (ADR-0009): Jev is a
-// decision provider, not a runtime, so no agent may name it as one, and no
-// agent that can write (Edit/Write/Bash/MultiEdit/NotebookEdit) may reference
-// a decision provider at all. fm holds the raw frontmatter values; name is
-// used only in messages. Returned strings are complete error messages.
+// decision provider, not a runtime, so no agent may name it as one, and an
+// agent may reference a provider ONLY if its tools line is present and every
+// entry is on the read-only allowlist. An absent tools line inherits every
+// tool (including Bash) and is therefore refused. fm holds the raw frontmatter
+// values; name is used only in messages. Returned strings are complete errors.
 func CheckAgentFrontmatter(name string, fm map[string]any) []string {
 	var out []string
 	refs := false
@@ -383,10 +460,31 @@ func CheckAgentFrontmatter(name string, fm map[string]any) []string {
 			}
 		}
 	}
-	if refs && hasWriteTool(fm["tools"]) {
-		out = append(out, fmt.Sprintf("agent %s: has Edit/Write/Bash tools and references a decision provider; decision providers are never attached to agents that can change files or run commands (ADR-0009)", name))
+	if refs {
+		if bad, ok := nonReadOnlyTools(fm["tools"]); !ok {
+			out = append(out, fmt.Sprintf("agent %s: references a decision provider but is not provably read-only (%s); a provider is only allowed on agents whose tools line lists nothing beyond Read, Grep, Glob, LS, SendMessage, TaskList (ADR-0009)", name, bad))
+		}
 	}
 	return dedupe(out)
+}
+
+// nonReadOnlyTools reports whether the tools value is present and entirely
+// read-only. When it is not, the string describes why.
+func nonReadOnlyTools(v any) (string, bool) {
+	toks := splitTokens(flattenValue(v))
+	if len(toks) == 0 {
+		return "no tools line: the agent inherits every tool, including Bash", false
+	}
+	var bad []string
+	for _, t := range toks {
+		if !readOnlyTools[strings.ToLower(t)] {
+			bad = append(bad, t)
+		}
+	}
+	if len(bad) > 0 {
+		return "tools not on the read-only allowlist: " + strings.Join(bad, ", "), false
+	}
+	return "", true
 }
 
 func flattenValue(v any) string {
@@ -412,16 +510,6 @@ func splitTokens(s string) []string {
 	return strings.FieldsFunc(s, func(r rune) bool {
 		return r == ',' || r == ' ' || r == '[' || r == ']' || r == '"' || r == '\'' || r == '\t'
 	})
-}
-
-func hasWriteTool(v any) bool {
-	for _, tok := range splitTokens(flattenValue(v)) {
-		switch strings.ToLower(tok) {
-		case "edit", "write", "bash", "multiedit", "notebookedit":
-			return true
-		}
-	}
-	return false
 }
 
 func dedupe(in []string) []string {

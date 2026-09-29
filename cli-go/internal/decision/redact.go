@@ -14,6 +14,10 @@ import (
 
 // Egress levels (ADR-0009 §6). Redaction and the never_paths rule apply at
 // every level; the level only changes how much of a string may leave.
+//
+// Redaction is pattern-based and therefore BEST EFFORT: a secret that matches
+// no pattern and sits under no never_paths entry leaves verbatim. The allowlist
+// (state_fields), the previews, and the size cap are the primary controls.
 const (
 	EgressStrict   = "strict"   // previews: <= 2 KiB per string (default)
 	EgressPreviews = "previews" // <= 8 KiB per string
@@ -23,37 +27,89 @@ const (
 const (
 	strictPreviewBytes   = 2 * 1024
 	previewsPreviewBytes = 8 * 1024
+	pathStringCap        = 8 * 1024
+	// preRedactCap bounds the text the regexes see. It is far above the state
+	// cap, so a token cut here is cut well beyond anything that can leave.
+	preRedactCap = 256 * 1024
 	// HardMaxStateBytes caps the serialized state regardless of level or
 	// schema. The vendor limit is 32k tokens for state plus the longest
-	// question (https://docs.typesafe.ai/models); 64 KiB stays under it even
-	// at ~3 bytes/token for code.
+	// single question (https://docs.typesafe.ai/models); 64 KiB stays under it
+	// even at ~3 bytes/token for code.
 	HardMaxStateBytes = 64 * 1024
 
 	withheldMarker = "[content withheld: secret path]"
 	truncMarker    = "…[truncated]"
 )
 
-// pathKeys are state field names treated as file paths for never_paths.
-var pathKeys = map[string]bool{"file_path": true, "path": true, "filepath": true, "file": true, "notebook_path": true}
+// EgressRank orders levels from most to least restrictive; unknown is strict.
+func EgressRank(level string) int {
+	switch level {
+	case EgressFull:
+		return 2
+	case EgressPreviews:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// pathKey reports whether a state key names a file path or command target
+// that never_paths applies to, at any depth.
+func pathKey(k string) bool {
+	if pureFilePathKey(k) {
+		return true
+	}
+	l := strings.ToLower(k)
+	return l == "cmd" || l == "command" || strings.HasPrefix(l, "command_") || strings.HasPrefix(l, "command-")
+}
+
+// pureFilePathKey is a key whose value IS a path. Only these values still
+// leave when a secret path is present; a command may carry file content
+// (heredocs), so it is withheld like any other sibling.
+func pureFilePathKey(k string) bool {
+	l := strings.ToLower(k)
+	if strings.Contains(l, "path") {
+		return true
+	}
+	switch l {
+	case "file", "filename", "notebook":
+		return true
+	}
+	return false
+}
 
 // Patterns beyond the secret-scan table. The AWS/GitHub/Slack/Stripe/
-// Anthropic/Google/PEM-header patterns are reused from secretscan.
+// Anthropic/Google/PEM-header patterns are reused from secretscan (one shared
+// table); the patterns below are egress-only additions, because widening the
+// blocking hook's table is a separate, behaviour-changing decision.
 var (
 	// A whole PEM private key block; when the preview cut off the footer the
 	// rest of the string is consumed.
 	pemBlockRE = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)`)
-	// name=value / name: value credential assignments (the supervisor
-	// stream's own shape, widened to common env-style names).
-	credAssignRE = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*(?:password|passwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|token|credential)[A-Za-z0-9_.-]*)(\s*[=:]\s*)("[^"\n]*"|'[^'\n]*'|[^\s"',;]+)`)
+	// name=value / name: value credential assignments, any case.
+	credAssignRE = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|token|credential|authorization|webhook|dsn)[A-Za-z0-9_.-]*)(\s*[=:]\s*)("[^"\n]*"|'[^'\n]*'|[^\s"',;]+)`)
+	// Env-style lines: any UPPER_SNAKE name containing a credential word has
+	// the rest of the line redacted (DB_PASS, MY_SERVICE_PWD, STRIPE_KEY...).
+	envLineRE = regexp.MustCompile(`(?m)^([ \t]*(?:export[ \t]+)?[A-Z0-9_]*(?:PASS|PWD|SECRET|TOKEN|KEY|AUTH|CRED|DSN|WEBHOOK)[A-Z0-9_]*[ \t]*[=:][ \t]*)[^\r\n]+`)
+	// An Authorization header: the rest of the line (or quoted span) is the
+	// credential whatever the scheme.
+	authHeaderRE = regexp.MustCompile(`(?i)(\bauthorization\s*[:=]\s*)[^\r\n']+`)
 	// scheme://user:password@host userinfo.
-	urlCredsRE  = regexp.MustCompile(`\b([A-Za-z][A-Za-z0-9+.-]*://)[^/\s:@]+:[^@\s/]+@`)
-	jwtRE       = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)
-	bearerRE    = regexp.MustCompile(`(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{16,}`)
-	base64RunRE = regexp.MustCompile(`[A-Za-z0-9+/]{400,}={0,2}`)
+	urlCredsRE = regexp.MustCompile(`\b([A-Za-z][A-Za-z0-9+.-]*://)[^/\s:@]+:[^@\s/]+@`)
+	jwtRE      = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)
+	// Authorization schemes: Bearer / Basic / Token / Digest.
+	authSchemeRE = regexp.MustCompile(`(?i)\b(bearer|basic|token|digest)\s+[A-Za-z0-9._~+/=-]{8,}`)
+	// Short Stripe keys and webhook secrets (the shared table needs 24+).
+	stripeShortRE = regexp.MustCompile(`\b(?:[sr]k_(?:live|test)|whsec)_[A-Za-z0-9]{6,}`)
+	slackHookRE   = regexp.MustCompile(`https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+`)
+	base64RunRE   = regexp.MustCompile(`[A-Za-z0-9+/]{400,}={0,2}`)
+	// A standalone 40-char base64 token: the shape of a bare AWS secret key.
+	// Confirmed by mixed case + digit so 40-hex git SHAs are left alone.
+	awsSecretRE = regexp.MustCompile(`[A-Za-z0-9/+]{40}`)
 )
 
 // sensitiveKeyRE matches JSON object keys whose value is redacted wholesale.
-var sensitiveKeyRE = regexp.MustCompile(`(?i)(password|passwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|token|credential|authorization)`)
+var sensitiveKeyRE = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|token|credential|authorization|webhook|dsn)|(^|[_.-])(pass|auth|key)($|[_.-])`)
 
 // SanitizeOptions configures Sanitize.
 type SanitizeOptions struct {
@@ -70,13 +126,19 @@ type SanitizeStats struct {
 	Bytes      int
 }
 
+type sanitizer struct {
+	perString int
+	never     []string
+	st        *SanitizeStats
+	withhold  bool
+}
+
 // Sanitize turns raw state into the redacted, capped, allowlisted state that
 // may leave the machine. It fails with ClassOversize when the result still
 // exceeds the cap, and with ClassBadRequest for a state that is not a JSON
 // object (state is always named fields, never prose).
 func Sanitize(state any, o SanitizeOptions) (any, SanitizeStats, error) {
 	var st SanitizeStats
-	// Normalise through JSON so any Go value becomes generic maps/slices.
 	raw, err := json.Marshal(state)
 	if err != nil {
 		return nil, st, newErr(ClassBadRequest, "state is not JSON-serialisable")
@@ -94,56 +156,36 @@ func Sanitize(state any, o SanitizeOptions) (any, SanitizeStats, error) {
 	if limit <= 0 || limit > HardMaxStateBytes {
 		limit = HardMaxStateBytes
 	}
-	perString := 0
+	s := &sanitizer{
+		never: append(append([]string{}, DefaultNeverPaths...), o.NeverPaths...),
+		st:    &st,
+	}
 	switch o.Level {
 	case EgressFull:
-		perString = 0
+		s.perString = 0
 	case EgressPreviews:
-		perString = previewsPreviewBytes
+		s.perString = previewsPreviewBytes
 	default: // strict, and any unrecognised level fails closed to strict
-		perString = strictPreviewBytes
+		s.perString = strictPreviewBytes
 	}
-	never := append(append([]string{}, DefaultNeverPaths...), o.NeverPaths...)
 
 	allowed := map[string]bool{}
 	for _, f := range o.AllowedFields {
 		allowed[f] = true
 	}
-	secretPath := false
-	out := map[string]any{}
-	keys := make([]string, 0, len(obj))
-	for k := range obj {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		if !allowed[k] {
-			continue // not an allowlisted egress field
-		}
-		if pathKeys[k] {
-			if s, ok := obj[k].(string); ok && pathIsNever(s, never) {
-				secretPath = true
-			}
+	kept := map[string]any{}
+	for k, v := range obj {
+		if allowed[k] {
+			kept[k] = v
 		}
 	}
-	for _, k := range keys {
-		if !allowed[k] {
-			continue
-		}
-		v := obj[k]
-		if pathKeys[k] {
-			// Paths leave (redacted, not truncated below a useful length),
-			// even for secret paths: the path is the only thing that does.
-			out[k] = redactValue(k, v, 0, &st)
-			continue
-		}
-		if secretPath {
-			out[k] = withholdValue(v)
-			st.Withheld = true
-			continue
-		}
-		out[k] = redactValue(k, v, perString, &st)
+	// A secret path ANYWHERE in the allowed state withholds every content
+	// string in it: the path names the file, the other fields may be its body.
+	if hasSecretPath("", kept, s.never) {
+		s.withhold = true
+		st.Withheld = true
 	}
+	out := s.walk("", kept).(map[string]any)
 
 	b, err := json.Marshal(out)
 	if err != nil {
@@ -154,6 +196,40 @@ func Sanitize(state any, o SanitizeOptions) (any, SanitizeStats, error) {
 		return nil, st, newErr(ClassOversize, "sanitized state is %d bytes (cap %d)", len(b), limit)
 	}
 	return out, st, nil
+}
+
+// hasSecretPath walks the whole value for a path-named key (or command target)
+// that matches never_paths.
+func hasSecretPath(key string, v any, never []string) bool {
+	switch t := v.(type) {
+	case string:
+		if !pathKey(key) {
+			return false
+		}
+		if pathIsNever(t, never) {
+			return true
+		}
+		for _, tok := range strings.FieldsFunc(t, func(r rune) bool {
+			return r == ' ' || r == '\t' || r == '\n' || r == '"' || r == '\'' || r == '=' || r == ';' || r == '|' || r == '<' || r == '>' || r == '(' || r == ')'
+		}) {
+			if pathIsNever(tok, never) {
+				return true
+			}
+		}
+	case map[string]any:
+		for k, x := range t {
+			if hasSecretPath(k, x, never) {
+				return true
+			}
+		}
+	case []any:
+		for _, x := range t {
+			if hasSecretPath(key, x, never) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func pathIsNever(p string, patterns []string) bool {
@@ -170,63 +246,67 @@ func pathIsNever(p string, patterns []string) bool {
 	return false
 }
 
-// withholdValue replaces every string leaf with the withheld marker,
-// preserving shape (booleans and numbers carry no secrets we can name).
-func withholdValue(v any) any {
+// walk redacts a value. Map keys are redacted too (a secret can be a key).
+func (s *sanitizer) walk(key string, v any) any {
 	switch t := v.(type) {
 	case string:
+		return s.str(key, t)
+	case map[string]any:
+		names := make([]string, 0, len(t))
+		for k := range t {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		out := make(map[string]any, len(t))
+		for _, k := range names {
+			nk := RedactText(truncateUTF8(k, 256), &s.st.Redactions)
+			for i := 2; ; i++ { // keep redacted keys from colliding
+				if _, dup := out[nk]; !dup {
+					break
+				}
+				nk = fmt.Sprintf("%s#%d", nk, i)
+			}
+			out[nk] = s.walk(k, t[k])
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i := range t {
+			out[i] = s.walk(key, t[i])
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func (s *sanitizer) str(key, v string) string {
+	isPath := pureFilePathKey(key)
+	if s.withhold && !isPath {
 		return withheldMarker
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k := range t {
-			out[k] = withholdValue(t[k])
-		}
-		return out
-	case []any:
-		out := make([]any, len(t))
-		for i := range t {
-			out[i] = withholdValue(t[i])
-		}
-		return out
-	default:
-		return v
 	}
+	if sensitiveKeyRE.MatchString(key) && v != "" {
+		s.st.Redactions++
+		return "[REDACTED:credential-field]"
+	}
+	cap := s.perString
+	if isPath && (cap == 0 || cap < pathStringCap) {
+		cap = pathStringCap
+	}
+	return redactString(v, cap, s.st)
 }
 
-func redactValue(key string, v any, perString int, st *SanitizeStats) any {
-	switch t := v.(type) {
-	case string:
-		if sensitiveKeyRE.MatchString(key) && t != "" {
-			st.Redactions++
-			return "[REDACTED:credential-field]"
-		}
-		return redactString(t, perString, st)
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k := range t {
-			out[k] = redactValue(k, t[k], perString, st)
-		}
-		return out
-	case []any:
-		out := make([]any, len(t))
-		for i := range t {
-			out[i] = redactValue(key, t[i], perString, st)
-		}
-		return out
-	default:
-		return v
-	}
-}
-
-// redactString truncates to perString bytes FIRST (a secret straddling the cut
-// is then either whole and redacted, or partial and harmless), then redacts.
-// It re-checks after redaction so a truncated prefix of a PEM header is caught
-// by the block pattern's "$" alternative.
+// redactString redacts the WHOLE string first (so a secret straddling the
+// preview cut is matched intact), then truncates, then redacts again (the
+// cut can leave a fresh partial PEM header or marker fragment).
 func redactString(s string, perString int, st *SanitizeStats) string {
+	s = truncateUTF8(s, preRedactCap)
+	s = RedactText(s, &st.Redactions)
 	if perString > 0 && len(s) > perString {
 		s = truncateUTF8(s, perString) + truncMarker
+		s = RedactText(s, &st.Redactions)
 	}
-	return RedactText(s, &st.Redactions)
+	return s
 }
 
 func truncateUTF8(s string, n int) string {
@@ -245,18 +325,42 @@ func RedactText(s string, count *int) string {
 	n := 0
 	bump := func() { n++ }
 	// Order matters: whole PEM blocks first, then the shared secret-scan
-	// table, then assignment/JWT/Bearer shapes, then base64 runs.
+	// table, then the egress-only shapes, then base64 runs.
 	s = pemBlockRE.ReplaceAllStringFunc(s, func(string) string { bump(); return "[REDACTED:pem-private-key]" })
 	for _, p := range secretscan.DefaultPatterns {
 		name := kindName(p.Name)
 		s = p.Regex.ReplaceAllStringFunc(s, func(string) string { bump(); return "[REDACTED:" + name + "]" })
 	}
+	s = slackHookRE.ReplaceAllStringFunc(s, func(string) string { bump(); return "[REDACTED:slack-webhook]" })
+	s = stripeShortRE.ReplaceAllStringFunc(s, func(string) string { bump(); return "[REDACTED:stripe-key]" })
 	s = urlCredsRE.ReplaceAllStringFunc(s, func(m string) string {
 		bump()
 		return urlCredsRE.FindStringSubmatch(m)[1] + "[REDACTED:url-credentials]@"
 	})
 	s = jwtRE.ReplaceAllStringFunc(s, func(string) string { bump(); return "[REDACTED:jwt]" })
-	s = bearerRE.ReplaceAllStringFunc(s, func(string) string { bump(); return "Bearer [REDACTED:bearer]" })
+	s = authSchemeRE.ReplaceAllStringFunc(s, func(m string) string {
+		if strings.Contains(m, "[REDACTED") {
+			return m
+		}
+		bump()
+		return authSchemeRE.FindStringSubmatch(m)[1] + " [REDACTED:auth]"
+	})
+	s = authHeaderRE.ReplaceAllStringFunc(s, func(m string) string {
+		sub := authHeaderRE.FindStringSubmatch(m)
+		if strings.Contains(m[len(sub[1]):], "[REDACTED:authorization]") {
+			return m
+		}
+		bump()
+		return sub[1] + "[REDACTED:authorization]"
+	})
+	s = envLineRE.ReplaceAllStringFunc(s, func(m string) string {
+		sub := envLineRE.FindStringSubmatch(m)
+		if strings.HasPrefix(strings.TrimSpace(m[len(sub[1]):]), "[REDACTED") {
+			return m
+		}
+		bump()
+		return sub[1] + "[REDACTED:env-value]"
+	})
 	s = credAssignRE.ReplaceAllStringFunc(s, func(m string) string {
 		sub := credAssignRE.FindStringSubmatch(m)
 		if strings.HasPrefix(sub[3], "[REDACTED") {
@@ -264,6 +368,13 @@ func RedactText(s string, count *int) string {
 		}
 		bump()
 		return sub[1] + sub[2] + "[REDACTED:credential]"
+	})
+	s = awsSecretRE.ReplaceAllStringFunc(s, func(m string) string {
+		if !mixedSecretShape(m) {
+			return m
+		}
+		bump()
+		return "[REDACTED:secret-key-shape]"
 	})
 	s = base64RunRE.ReplaceAllStringFunc(s, func(m string) string {
 		bump()
@@ -273,6 +384,21 @@ func RedactText(s string, count *int) string {
 		*count += n
 	}
 	return s
+}
+
+func mixedSecretShape(m string) bool {
+	var up, low, dig bool
+	for _, r := range m {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			up = true
+		case r >= 'a' && r <= 'z':
+			low = true
+		case r >= '0' && r <= '9':
+			dig = true
+		}
+	}
+	return up && low && dig
 }
 
 func kindName(n string) string {

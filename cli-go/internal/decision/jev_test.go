@@ -242,8 +242,15 @@ func TestJev_MalformedResponses(t *testing.T) {
 	}
 }
 
-func TestJev_BaseURLMustBeTLSOrLoopback(t *testing.T) {
-	for _, u := range []string{"http://evil.example.com", "ftp://x", "https://user:pw@x.example.com", "://bad", "http://10.0.0.5"} {
+func TestJev_BaseURLAllowlist(t *testing.T) {
+	refused := []string{
+		"http://evil.example.com", "https://evil.example.com", "https://typesafe.ai.evil.com",
+		"https://api.typesafe.ai.evil.com", "https://evil-typesafe.ai", "https://eviltypesafe.ai",
+		"http://api.typesafe.ai", // plaintext even to the right host
+		"ftp://x", "https://user:pw@api.typesafe.ai", "://bad", "http://10.0.0.5", "https://10.0.0.5",
+		"https://localhost.evil.com",
+	}
+	for _, u := range refused {
 		j := &Jev{Getenv: func(k string) string {
 			if k == KeyEnv {
 				return "k"
@@ -252,7 +259,20 @@ func TestJev_BaseURLMustBeTLSOrLoopback(t *testing.T) {
 		}}
 		_, err := j.Decide(context.Background(), testRequest())
 		if ErrorClass(err) != ClassBadRequest {
-			t.Errorf("%q: class = %q, want bad_request (key must never travel over plaintext)", u, ErrorClass(err))
+			t.Errorf("%q: class = %q, want bad_request (the key must only reach *.typesafe.ai or loopback)", u, ErrorClass(err))
+		}
+		if ErrorClass(j.Available(context.Background())) != ClassBadRequest {
+			t.Errorf("%q: Available must refuse too", u)
+		}
+	}
+	allowed := []string{
+		"https://api.typesafe.ai", "https://typesafe.ai", "https://eu.api.typesafe.ai:8443", "HTTPS://API.TYPESAFE.AI",
+		"http://127.0.0.1:9", "http://localhost:9", "https://127.0.0.1:9", "http://[::1]:9",
+	}
+	for _, u := range allowed {
+		j := &Jev{BaseURL: u}
+		if _, err := j.endpoint(); err != nil {
+			t.Errorf("%q must be allowed: %v", u, err)
 		}
 	}
 }

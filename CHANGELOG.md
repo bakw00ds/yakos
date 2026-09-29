@@ -19,7 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tools that references a decision provider. State is allowlisted, previewed and
   secret-redacted before it leaves, with a 64 KiB cap. Each call is logged to
   `decision-log.ndjson` without the raw state. A circuit breaker and per-session
-  and per-day budget caps bound the blast radius. `yakos decide` exits 0 or 3 on
+  and per-day budget caps (an append-only ledger, safe across concurrent hook
+  processes) bound the blast radius. The API key is only sent to
+  `*.typesafe.ai` or loopback, and a project `.yakos.yml` can only tighten the
+  user-level budget and egress ceiling. `yakos decide` exits 0 or 3 on
   every failure and never 2, so no hook can block on it. `yakos doctor
   --probe-decision [--live]` checks key, config, question-set hashes, breaker
   and budget. No hook calls it yet, and no live call to TypeSafe has been made.

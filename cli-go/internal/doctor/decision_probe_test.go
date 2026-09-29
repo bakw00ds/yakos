@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/bakw00ds/yakos/internal/decision"
 )
 
 const probeSet = `schema_id: probe-demo@1
@@ -124,18 +126,19 @@ func TestDecisionProbe_ModelMismatchWarns(t *testing.T) {
 func TestDecisionProbe_BudgetAndBreakerState(t *testing.T) {
 	lib, proj, home := probeFixture(t, probeSet, "")
 	sd := filepath.Join(home, ".yakos-state")
-	writeFile(t, filepath.Join(sd, "decision-budget.json"), "not json")
+	ledger := decision.NewBudget(filepath.Join(sd, "decision-budget.json"), 1, 1).LedgerPath()
+	writeFile(t, ledger, "not json\n")
 	out, rep := runProbe(t, Config{HomeDir: home, YakosLib: lib, Getwd: func() (string, error) { return proj, nil }}, nil)
-	if errCount(rep) == 0 || !strings.Contains(out, "decision-budget.json: unreadable") {
+	if errCount(rep) == 0 || !strings.Contains(out, "unreadable") {
 		t.Fatalf("corrupt budget must error:\n%s", out)
 	}
-	os.Remove(filepath.Join(sd, "decision-budget.json"))
+	os.Remove(ledger)
 	writeFile(t, filepath.Join(sd, "decision-breaker.json"), `{"consecutive_failures":5,"open_until":"2999-01-01T00:00:00Z","last_failure_class":"timeout"}`)
 	out, rep = runProbe(t, Config{HomeDir: home, YakosLib: lib, Getwd: func() (string, error) { return proj, nil }}, nil)
 	if warnCount(rep) == 0 || !strings.Contains(out, "circuit breaker OPEN") {
 		t.Fatalf("open breaker must warn:\n%s", out)
 	}
-	if !strings.Contains(out, "budget file readable") {
+	if !strings.Contains(out, "budget ledger readable") {
 		t.Errorf("missing budget line:\n%s", out)
 	}
 }
@@ -215,4 +218,17 @@ func countSev(r *Report, sev Severity) int {
 		}
 	}
 	return n
+}
+
+func TestDecisionProbe_ProjectCapsAreClampedByPolicy(t *testing.T) {
+	lib, proj, home := probeFixture(t, probeSet, "decisions:\n  budget: {max_usd_per_day: 500}\n")
+	out, _ := runProbe(t, Config{HomeDir: home, YakosLib: lib, Getwd: func() (string, error) { return proj, nil }}, nil)
+	if !strings.Contains(out, "of $1.00 today") {
+		t.Fatalf("a project must not raise the daily cap above the default ceiling:\n%s", out)
+	}
+	writeFile(t, filepath.Join(home, ".yakos-state", "decision-policy.yml"), "budget: {max_usd_per_day: 600}\n")
+	out, _ = runProbe(t, Config{HomeDir: home, YakosLib: lib, Getwd: func() (string, error) { return proj, nil }}, nil)
+	if !strings.Contains(out, "of $500.00 today") {
+		t.Fatalf("the user-level policy raises the ceiling; the project value then applies:\n%s", out)
+	}
 }

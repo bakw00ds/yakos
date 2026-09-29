@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const goodSet = `schema_id: demo@1
@@ -116,34 +117,6 @@ func TestLoadSet_SurfaceTraversalRejected(t *testing.T) {
 	}
 }
 
-func TestValidateDir_MayBlockNeedsPromotionForExactHash(t *testing.T) {
-	dir := t.TempDir()
-	body := strings.Replace(goodSet, "may_block: false", "may_block: true", 1)
-	_ = os.WriteFile(filepath.Join(dir, "demo.yaml"), []byte(body), 0o600)
-	promo := filepath.Join(t.TempDir(), "p.ndjson")
-
-	res := ValidateDir(dir, promo) // no log at all
-	if len(res) != 1 || len(res[0].Errs) == 0 {
-		t.Fatalf("may_block without promotion must fail: %+v", res)
-	}
-	h := HashBytes([]byte(body))
-	_ = os.WriteFile(promo, []byte(`{"surface":"demo","schema_hash":"deadbeef"}`+"\n"), 0o600)
-	if len(ValidateDir(dir, promo)[0].Errs) == 0 {
-		t.Fatal("promotion for a different hash must not count")
-	}
-	_ = os.WriteFile(promo, []byte(`{"surface":"other","schema_hash":"`+h+`"}`+"\n"), 0o600)
-	if len(ValidateDir(dir, promo)[0].Errs) == 0 {
-		t.Fatal("promotion for a different surface must not count")
-	}
-	_ = os.WriteFile(promo, []byte("garbage\n"+`{"surface":"demo","schema_hash":"`+h+`"}`+"\n"), 0o600)
-	if errs := ValidateDir(dir, promo)[0].Errs; len(errs) != 0 {
-		t.Fatalf("recorded promotion must pass: %v", errs)
-	}
-	if len(ValidateDir(dir, "")[0].Errs) == 0 {
-		t.Fatal("empty promotions path fails closed")
-	}
-}
-
 func TestValidateDir_SortedAndMissingDir(t *testing.T) {
 	if ValidateDir(filepath.Join(t.TempDir(), "nope"), "") != nil {
 		t.Error("missing dir yields nothing")
@@ -171,17 +144,31 @@ func TestCheckAgentFrontmatter(t *testing.T) {
 		want int // number of errors
 		sub  string
 	}{
-		{"clean", map[string]any{"runtime": "claude", "tools": "Read, Grep"}, 0, ""},
-		{"runtime jev", map[string]any{"runtime": "jev", "tools": "Read"}, 1, "not a runtime"},
-		{"runtime jev caps", map[string]any{"runtime": "JEV"}, 1, "ADR-0009"},
-		{"fallback jev", map[string]any{"runtime": "claude", "runtime-fallback": []any{"codex", "jev"}}, 1, "runtime-fallback"},
-		{"fallback jev string", map[string]any{"runtime-fallback": "[claude, jev]"}, 1, "runtime-fallback"},
-		{"jev + Bash", map[string]any{"runtime": "jev", "tools": "Read, Bash"}, 2, "Edit/Write/Bash"},
-		{"provider + Edit", map[string]any{"decision-provider": "jev", "tools": []any{"Read", "Edit"}}, 1, "Edit/Write/Bash"},
-		{"provider + Write list", map[string]any{"decision_provider": "mock", "tools": "[Write]"}, 1, "Edit/Write/Bash"},
-		{"provider read-only", map[string]any{"decision-provider": "mock", "tools": "Read, Grep"}, 0, ""},
+		{"clean, no provider", map[string]any{"runtime": "claude", "tools": "Read, Grep"}, 0, ""},
+		{"clean, no provider, no tools", map[string]any{"runtime": "claude"}, 0, ""},
+		{"runtime jev read-only", map[string]any{"runtime": "jev", "tools": "Read"}, 1, "not a runtime"},
+		{"runtime jev caps", map[string]any{"runtime": "JEV", "tools": "Read"}, 1, "ADR-0009"},
+		{"fallback jev", map[string]any{"runtime": "claude", "runtime-fallback": []any{"codex", "jev"}, "tools": "Read"}, 1, "runtime-fallback"},
+		{"fallback jev string", map[string]any{"runtime-fallback": "[claude, jev]", "tools": "Read"}, 1, "runtime-fallback"},
+		{"jev + Bash", map[string]any{"runtime": "jev", "tools": "Read, Bash"}, 2, "not provably read-only"},
+		{"provider + Edit", map[string]any{"decision-provider": "jev", "tools": []any{"Read", "Edit"}}, 1, "Edit"},
+		{"provider + Write list", map[string]any{"decision_provider": "mock", "tools": "[Write]"}, 1, "Write"},
+		{"provider read-only", map[string]any{"decision-provider": "mock", "tools": "Read, Grep, Glob, SendMessage"}, 0, ""},
+		{"provider read-only list", map[string]any{"decision-provider": "mock", "tools": []any{"Read", "TaskList"}}, 0, ""},
 		{"provider none + Bash", map[string]any{"decision-provider": "none", "tools": "Bash"}, 0, ""},
 		{"jevelin substring is not jev", map[string]any{"runtime": "jevelin"}, 0, ""},
+		// Review F4: every write-capable shape must be refused.
+		{"provider, NO tools line (inherits Bash)", map[string]any{"decision-provider": "jev"}, 1, "no tools line"},
+		{"provider, empty tools", map[string]any{"decision-provider": "jev", "tools": ""}, 1, "no tools line"},
+		{"provider, empty tools list", map[string]any{"decision-provider": "jev", "tools": []any{}}, 1, "no tools line"},
+		{"provider + Bash scope", map[string]any{"decision-provider": "jev", "tools": "Read, Bash(git:*)"}, 1, "Bash(git:*)"},
+		{"provider + wildcard", map[string]any{"decision-provider": "jev", "tools": "*"}, 1, "*"},
+		{"provider + Agent", map[string]any{"decision-provider": "jev", "tools": "Read, Agent"}, 1, "Agent"},
+		{"provider + Task", map[string]any{"decision-provider": "jev", "tools": "Read, Task"}, 1, "Task"},
+		{"provider + mcp write tool", map[string]any{"decision-provider": "jev", "tools": "Read, mcp__github__create_issue"}, 1, "mcp__github__create_issue"},
+		{"provider + WebFetch (exfil)", map[string]any{"decision-provider": "jev", "tools": "Read, WebFetch"}, 1, "WebFetch"},
+		{"provider + lowercase bash", map[string]any{"decision-provider": "jev", "tools": "read, bash"}, 1, "bash"},
+		{"provider + NotebookEdit", map[string]any{"decision-provider": "jev", "tools": "Read, NotebookEdit"}, 1, "NotebookEdit"},
 	}
 	for _, c := range cases {
 		got := CheckAgentFrontmatter("a", c.fm)
@@ -196,5 +183,80 @@ func TestCheckAgentFrontmatter(t *testing.T) {
 				t.Errorf("%s: message must name the agent: %q", c.name, g)
 			}
 		}
+	}
+}
+
+func TestPromotion_RecordedAndVerified(t *testing.T) {
+	dir := t.TempDir()
+	body := strings.Replace(goodSet, "may_block: false", "may_block: true", 1)
+	_ = os.WriteFile(filepath.Join(dir, "demo.yaml"), []byte(body), 0o600)
+	h := HashBytes([]byte(body))
+	promo := filepath.Join(t.TempDir(), "p.ndjson")
+	report := filepath.Join(t.TempDir(), "eval.md")
+	_ = os.WriteFile(report, []byte("precision 0.93 over 210 labelled decisions\n"), 0o600)
+
+	if len(ValidateDir(dir, promo)[0].Errs) == 0 {
+		t.Fatal("no promotion: must fail")
+	}
+	// A hand-written line (the F10 attack) must not satisfy the gate.
+	_ = os.WriteFile(promo, []byte(`{"surface":"demo","schema_hash":"`+h+`"}`+"\n"), 0o600)
+	if HasPromotion(promo, "demo", h) {
+		t.Fatal("hand-written line accepted")
+	}
+	_ = os.WriteFile(promo, []byte(`{"type":"promotion","surface":"demo","schema_hash":"`+h+`","record_sha256":"x"}`+"\n"), 0o600)
+	if HasPromotion(promo, "demo", h) {
+		t.Fatal("record with a wrong digest accepted")
+	}
+	_ = os.Remove(promo)
+
+	p, err := RecordPromotion(promo, "demo", h, report, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !HasPromotion(promo, "demo", h) || len(ValidateDir(dir, promo)[0].Errs) != 0 {
+		t.Fatal("recorded promotion must verify")
+	}
+	if HasPromotion(promo, "other", h) || HasPromotion(promo, "demo", "deadbeef") || HasPromotion(promo, "demo", "") {
+		t.Fatal("wrong surface/hash must not verify")
+	}
+	// Tampering with any field breaks the digest.
+	raw, _ := os.ReadFile(promo)
+	tampered := strings.Replace(string(raw), p.TS, "2020-01-01T00:00:00Z", 1)
+	_ = os.WriteFile(promo, []byte(tampered), 0o600)
+	if HasPromotion(promo, "demo", h) {
+		t.Fatal("tampered timestamp accepted")
+	}
+	_ = os.WriteFile(promo, raw, 0o600)
+	// The cited eval report must still exist and match.
+	_ = os.WriteFile(report, []byte("edited after the fact"), 0o600)
+	if HasPromotion(promo, "demo", h) {
+		t.Fatal("changed report accepted")
+	}
+	_ = os.WriteFile(report, []byte("precision 0.93 over 210 labelled decisions\n"), 0o600)
+	if !HasPromotion(promo, "demo", h) {
+		t.Fatal("restored report should verify again")
+	}
+	_ = os.Remove(report)
+	if HasPromotion(promo, "demo", h) {
+		t.Fatal("missing report accepted")
+	}
+}
+
+func TestRecordPromotion_Rejects(t *testing.T) {
+	promo := filepath.Join(t.TempDir(), "p.ndjson")
+	h := strings.Repeat("a", 64)
+	if _, err := RecordPromotion(promo, "demo", h, filepath.Join(t.TempDir(), "missing"), time.Now()); err == nil {
+		t.Error("missing report")
+	}
+	empty := filepath.Join(t.TempDir(), "e")
+	_ = os.WriteFile(empty, []byte("  \n"), 0o600)
+	if _, err := RecordPromotion(promo, "demo", h, empty, time.Now()); err == nil {
+		t.Error("empty report")
+	}
+	if _, err := RecordPromotion(promo, "../x", h, empty, time.Now()); err == nil {
+		t.Error("bad surface")
+	}
+	if _, err := RecordPromotion(promo, "demo", "short", empty, time.Now()); err == nil {
+		t.Error("bad hash")
 	}
 }

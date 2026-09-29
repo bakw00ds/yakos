@@ -48,6 +48,12 @@ func (r *runner) checkDecisionProbe() {
 	default:
 		r.info(sec, "provider configured: %s (model %s)", dc.Provider, dc.Model)
 	}
+	if pol, perr := decision.LoadPolicy(decision.StatePaths{Dir: r.stateDir()}.Policy()); perr != nil {
+		r.err(sec, "%s: unreadable: %v", decision.PolicyFileName, perr)
+		dc = decision.Tighten(dc, decision.DefaultPolicy())
+	} else {
+		dc = decision.Tighten(dc, pol)
+	}
 	if keySet {
 		r.ok(sec, "%s: set", decision.KeyEnv)
 	} else if dc.Provider == decision.ProviderJev {
@@ -94,18 +100,18 @@ func (r *runner) checkDecisionProbe() {
 	}
 	bud := decision.NewBudget(paths.Budget(), dc.Budget.MaxCallsPerSession, dc.Budget.MaxUSDPerDay)
 	if st, err := bud.Load(); err != nil {
-		r.err(sec, "%s: unreadable: %v", paths.Budget(), err)
+		r.err(sec, "%s: unreadable: %v", bud.LedgerPath(), err)
 	} else {
 		total := 0
 		for _, n := range st.Sessions {
 			total += n
 		}
-		r.ok(sec, "budget file readable: $%.6f of $%.2f today, %d call(s) across %d session(s)", st.USD, bud.MaxUSDPerDay, total, len(st.Sessions))
+		r.ok(sec, "budget ledger readable: $%.6f of $%.2f today, %d call(s) across %d session(s)", st.USD, bud.MaxUSDPerDay, total, len(st.Sessions))
 	}
 
 	// 5. Live reachability, only on request.
 	if !r.cfg.ProbeDecisionLive {
-		r.info(sec, "live reachability not checked (pass --live for one minimal call, about $0.000002)")
+		r.info(sec, "live reachability not checked (pass --live for one minimal call, about $0.000002; it is not counted against the budget)")
 		writeln(r, "")
 		return
 	}

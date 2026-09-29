@@ -48,7 +48,8 @@ If --probe-decision is passed, additionally reports on the decision provider
     decisions: block in <project>/.yakos.yml and its pinned model
     Question sets under lib/decisions/ (schema, pinned model, hash)
     Circuit-breaker state and today's spend against the budget caps
-    With --live ONLY, one minimal real call (about $0.000002) reporting the
+    With --live ONLY, one minimal real call (about $0.000002, not counted
+        against the budget) reporting the
         HTTP outcome, latency, and drift between the served and pinned model
 
 If --preflight is passed, ONLY the Preflight section runs (fast path,

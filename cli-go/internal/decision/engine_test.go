@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testSet(t *testing.T) *QuestionSet {
@@ -115,8 +116,11 @@ func TestRecordHasNoStateField(t *testing.T) {
 
 func TestLoadConfig(t *testing.T) {
 	dir := t.TempDir()
-	if c, err := LoadConfig(filepath.Join(dir, "none.yml")); err != nil || c.Provider != ProviderNone || c.Budget.MaxCallsPerSession != 2000 {
+	if c, err := LoadConfig(filepath.Join(dir, "none.yml")); err != nil || c.Provider != ProviderNone {
 		t.Fatalf("missing file: %+v %v", c, err)
+	}
+	if c := Tighten(DefaultConfig(), DefaultPolicy()); c.Budget.MaxCallsPerSession != 2000 || c.Budget.MaxUSDPerDay != 1.0 || c.Egress.Level != EgressStrict {
+		t.Fatalf("defaults via policy: %+v", c)
 	}
 	p := filepath.Join(dir, ".yakos.yml")
 	_ = os.WriteFile(p, []byte("yakos: 0.9\nprofile:\n  type: cli-tool\n"), 0o600)
@@ -125,7 +129,7 @@ func TestLoadConfig(t *testing.T) {
 	}
 	_ = os.WriteFile(p, []byte("decisions:\n  provider: jev\n  model: jev-1.13.0\n  budget: {max_calls_per_session: 5}\n  egress: {level: previews, never_paths: [x/*]}\n  surfaces:\n    demo: {mode: shadow, min_confidence: 0.7}\n"), 0o600)
 	c, err := LoadConfig(p)
-	if err != nil || c.Provider != "jev" || c.Budget.MaxCallsPerSession != 5 || c.Budget.MaxUSDPerDay != 1.0 || c.Egress.Level != "previews" || c.Surfaces["demo"].MinConfidence != 0.7 {
+	if err != nil || c.Provider != "jev" || c.Budget.MaxCallsPerSession != 5 || c.Budget.MaxUSDPerDay != 0 || c.Egress.Level != "previews" || c.Surfaces["demo"].MinConfidence != 0.7 {
 		t.Fatalf("%+v %v", c, err)
 	}
 	_ = os.WriteFile(p, []byte("decisions: [not a map"), 0o600)
@@ -206,4 +210,83 @@ func TestErrorClass(t *testing.T) {
 	if ErrorClass(nil) != "" || ErrorClass(context.DeadlineExceeded) != ClassTimeout || ErrorClass(os.ErrNotExist) != ClassInternal {
 		t.Fatal("ErrorClass mapping")
 	}
+}
+
+func TestTighten_ProjectCanOnlyTighten(t *testing.T) {
+	pol := Policy{Budget: BudgetConfig{MaxCallsPerSession: 100, MaxUSDPerDay: 0.5}, Egress: EgressConfig{Level: EgressPreviews, NeverPaths: []string{"a/*"}}}
+	cases := []struct {
+		name   string
+		in     Config
+		calls  int
+		usd    float64
+		level  string
+		nevers int
+	}{
+		{"raise caps", Config{Budget: BudgetConfig{MaxCallsPerSession: 99999, MaxUSDPerDay: 500}}, 100, 0.5, EgressPreviews, 1},
+		{"lower caps", Config{Budget: BudgetConfig{MaxCallsPerSession: 7, MaxUSDPerDay: 0.01}}, 7, 0.01, EgressPreviews, 1},
+		{"unset takes the policy", Config{}, 100, 0.5, EgressPreviews, 1},
+		{"egress full is clamped", Config{Egress: EgressConfig{Level: EgressFull}}, 100, 0.5, EgressPreviews, 1},
+		{"egress strict is honoured", Config{Egress: EgressConfig{Level: EgressStrict}}, 100, 0.5, EgressStrict, 1},
+		{"unknown egress fails closed", Config{Egress: EgressConfig{Level: "wide-open"}}, 100, 0.5, EgressStrict, 1},
+		{"never_paths union", Config{Egress: EgressConfig{NeverPaths: []string{"b/*", "a/*"}}}, 100, 0.5, EgressPreviews, 2},
+	}
+	for _, c := range cases {
+		got := Tighten(c.in, pol)
+		if got.Budget.MaxCallsPerSession != c.calls || got.Budget.MaxUSDPerDay != c.usd || got.Egress.Level != c.level || len(got.Egress.NeverPaths) != c.nevers {
+			t.Errorf("%s: %+v", c.name, got)
+		}
+	}
+	// Default policy: a project cannot loosen egress or raise caps at all.
+	got := Tighten(Config{Budget: BudgetConfig{MaxCallsPerSession: 1e6, MaxUSDPerDay: 1e6}, Egress: EgressConfig{Level: EgressFull}}, DefaultPolicy())
+	if got.Budget.MaxCallsPerSession != 2000 || got.Budget.MaxUSDPerDay != 1.0 || got.Egress.Level != EgressStrict {
+		t.Errorf("default ceiling not enforced: %+v", got)
+	}
+}
+
+func TestLoadPolicy(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, PolicyFileName)
+	if pol, err := LoadPolicy(p); err != nil || pol.Budget.MaxCallsPerSession != 2000 || pol.Egress.Level != EgressStrict {
+		t.Fatalf("missing: %+v %v", pol, err)
+	}
+	_ = os.WriteFile(p, []byte("budget: {max_calls_per_session: 5000, max_usd_per_day: 3}\negress: {level: previews}\n"), 0o600)
+	pol, err := LoadPolicy(p)
+	if err != nil || pol.Budget.MaxCallsPerSession != 5000 || pol.Budget.MaxUSDPerDay != 3 || pol.Egress.Level != EgressPreviews {
+		t.Fatalf("%+v %v", pol, err)
+	}
+	_ = os.WriteFile(p, []byte("budget: [oops"), 0o600)
+	if pol, err := LoadPolicy(p); err == nil || pol.Egress.Level != EgressStrict {
+		t.Fatal("corrupt policy must error and fall back to the strict default")
+	}
+}
+
+func TestExecute_TimeoutBounds(t *testing.T) {
+	var got time.Duration
+	rec := recordingProvider{fn: func(r Request) { got = r.Timeout }}
+	eng := &Engine{Provider: rec}
+	set := testSet(t)
+	for _, c := range []struct {
+		mode string
+		in   time.Duration
+		want time.Duration
+	}{
+		{ModeShadow, 0, 1500 * time.Millisecond}, // review F7: shadow no longer 10 s
+		{ModePrefilter, 0, 1500 * time.Millisecond},
+		{ModeShadow, 3 * time.Second, 3 * time.Second},
+		{ModeShadow, time.Hour, MaxTimeout},
+	} {
+		eng.Execute(context.Background(), set, map[string]any{"tool": "x"}, c.mode, "", c.in)
+		if got != c.want {
+			t.Errorf("mode=%s in=%v: timeout %v, want %v", c.mode, c.in, got, c.want)
+		}
+	}
+}
+
+type recordingProvider struct{ fn func(Request) }
+
+func (recordingProvider) Name() string                    { return "rec" }
+func (recordingProvider) Available(context.Context) error { return nil }
+func (r recordingProvider) Decide(_ context.Context, req Request) (*Result, error) {
+	r.fn(req)
+	return nil, newErr(ClassInternal, "stop")
 }

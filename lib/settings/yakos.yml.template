@@ -172,6 +172,8 @@ profile:
 # until `yakos decide promote` records an eval for the surface.
 #
 # The API key is NEVER stored here. Export TYPESAFE_API_KEY in your shell.
+# A project can only TIGHTEN the user-level ceiling (default 2000 calls, $1/day,
+# strict egress); to raise it edit ~/.yakos-state/decision-policy.yml.
 # Kill switch: export YAKOS_DECISION_DISABLE=1
 # Check health: yakos doctor --probe-decision   (add --live for one real call)
 #
