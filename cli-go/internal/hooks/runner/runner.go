@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/hooks/bashbridge"
+	"github.com/bakw00ds/yakos/internal/hooks/hookbypass"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/hooks/starlarkbridge"
 )
@@ -222,14 +223,20 @@ func (r *Runner) runGoOnly(ctx context.Context, h Hook, in HookInput) (HookOutpu
 func (r *Runner) runBashOnly(ctx context.Context, h Hook, in HookInput) (HookOutput, error) {
 	out := HookOutput{ExitCode: 0}
 	shPath := r.shPath(h.Name())
-	if _, statErr := os.Stat(shPath); os.IsNotExist(statErr) {
+	if !usableScript(shPath) {
+		// Missing, a directory or unreadable: bash could not run it (a directory
+		// would exit 126, also non-blocking), so all three are "no script".
 		if r.FailClosed {
-			msg := fmt.Sprintf("%s: BLOCKED \u2014 bash script %s not found (YAKOS_HOOKS=bash); this hook enforces a security control and refusing to fail open. Re-provision the framework (yakos upgrade) or run with --impl go.\n", h.Name(), shPath)
+			if r.failOpenOverride(h.Name()) {
+				fmt.Fprintf(r.writer(), "%s: WARN \u2014 bash script %s is missing or unreadable, but a fail-open override (YAKOS_HOOKS_FAIL_OPEN=1 or a degraded-input bypass) is active; passing through.\n", h.Name(), shPath)
+				return out, nil
+			}
+			msg := fmt.Sprintf("%s: BLOCKED \u2014 bash script %s is missing or not a readable file; this hook enforces a security control, refusing to fail open. Run 'yakos refresh' to re-provision the hooks, or use --impl go. Emergency override: YAKOS_HOOKS_FAIL_OPEN=1 or a hook-bypass.md entry with Scope: degraded-input.\n", h.Name(), shPath)
 			out.ExitCode = 2
 			out.Stderr = []byte(msg)
 			return out, nil
 		}
-		fmt.Fprintf(r.writer(), "%s: WARN \u2014 bash script %s not found (YAKOS_HOOKS=bash); hook skipped for this event.\n", h.Name(), shPath)
+		fmt.Fprintf(r.writer(), "%s: WARN \u2014 bash script %s is missing or not a readable file; hook skipped for this event.\n", h.Name(), shPath)
 		return out, nil
 	}
 	if !r.bashAvailable {
@@ -243,6 +250,41 @@ func (r *Runner) runBashOnly(ctx context.Context, h Hook, in HookInput) (HookOut
 		return out, fmt.Errorf("hook %s tier-2 (bash-only): %w", h.Name(), err)
 	}
 	return out, nil
+}
+
+// usableScript reports whether path is a regular file that can be opened.
+func usableScript(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	f, err := os.Open(path) //nolint:gosec
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
+}
+
+// failOpenOverride mirrors the degraded-input escape hatches every blocking
+// hook honours: YAKOS_HOOKS_FAIL_OPEN=1, or an active hook-bypass.md entry for
+// this hook with the exact scope "degraded-input".
+func (r *Runner) failOpenOverride(name string) bool {
+	lookup := r.EnvLookup
+	if lookup == nil {
+		lookup = os.Getenv
+	}
+	if lookup("YAKOS_HOOKS_FAIL_OPEN") == "1" {
+		return true
+	}
+	if r.WorkCurrentDir == "" {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(r.WorkCurrentDir, "hook-bypass.md")) //nolint:gosec
+	if err != nil {
+		return false
+	}
+	return hookbypass.CheckExact(string(data), name, "degraded-input")
 }
 
 // runHybrid runs both Tier 0 (Go) and Tier 2 (bash) in sequence and writes

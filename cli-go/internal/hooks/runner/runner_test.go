@@ -1143,3 +1143,60 @@ func TestRunner_BashOnly_MissingScript_NonBlockingWarns(t *testing.T) {
 		t.Fatalf("expected a WARN naming the hook, got %q", w.String())
 	}
 }
+
+// K-107 review: a script path that is a directory is "no script" (bash would
+// exit 126, non-blocking); the fail-open overrides work; the message is accurate.
+func TestRunner_BashOnly_ScriptIsDirectory_FailClosedBlocks(t *testing.T) {
+	r, hooksDir, _, _ := buildRunnerMode(t, "bash")
+	if err := os.Mkdir(filepath.Join(hooksDir, "secret-scan.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.FailClosed = true
+	out, err := r.Run(context.Background(), newPassHook("secret-scan"), makeInput("PreToolUse", "Write"))
+	if err != nil || out.ExitCode != 2 {
+		t.Fatalf("directory script: exit=%d err=%v, want 2", out.ExitCode, err)
+	}
+	msg := string(out.Stderr)
+	if strings.Contains(msg, "YAKOS_HOOKS=bash") || strings.Contains(msg, "yakos upgrade") || !strings.Contains(msg, "yakos refresh") {
+		t.Fatalf("message must not blame YAKOS_HOOKS=bash or suggest upgrade: %q", msg)
+	}
+}
+
+func TestRunner_BashOnly_MissingScript_FailOpenOverrides(t *testing.T) {
+	// env override
+	r, _, _, _ := buildRunnerMode(t, "bash")
+	r.FailClosed = true
+	base := r.EnvLookup
+	r.EnvLookup = func(k string) string {
+		if k == "YAKOS_HOOKS_FAIL_OPEN" {
+			return "1"
+		}
+		return base(k)
+	}
+	var w bytes.Buffer
+	r.Writer = &w
+	out, _ := r.Run(context.Background(), newPassHook("secret-scan"), makeInput("PreToolUse", "Write"))
+	if out.ExitCode != 0 || !strings.Contains(w.String(), "WARN") {
+		t.Fatalf("YAKOS_HOOKS_FAIL_OPEN=1: exit=%d out=%q", out.ExitCode, w.String())
+	}
+	// degraded-input bypass entry
+	r2, _, _, work := buildRunnerMode(t, "bash")
+	r2.FailClosed = true
+	body := "# Active hook bypasses\n\n## Active entries\n\n## bypass:t\n\n**Hook:** secret-scan\n**Scope:** degraded-input\n"
+	if err := os.WriteFile(filepath.Join(work, "hook-bypass.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _ = r2.Run(context.Background(), newPassHook("secret-scan"), makeInput("PreToolUse", "Write"))
+	if out.ExitCode != 0 {
+		t.Fatalf("degraded-input bypass: exit=%d", out.ExitCode)
+	}
+	// a different scope does not override
+	r3, _, _, work3 := buildRunnerMode(t, "bash")
+	r3.FailClosed = true
+	if err := os.WriteFile(filepath.Join(work3, "hook-bypass.md"), []byte(strings.Replace(body, "degraded-input", "api/x.go", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ = r3.Run(context.Background(), newPassHook("secret-scan"), makeInput("PreToolUse", "Write")); out.ExitCode != 2 {
+		t.Fatalf("unrelated scope must not override: exit=%d", out.ExitCode)
+	}
+}
