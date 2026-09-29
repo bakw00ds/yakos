@@ -117,6 +117,15 @@ ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # Truncate previews so the buffer doesn't bloat
 new_preview="$(hi_new_string 2>/dev/null | head -c 300 || true)"
 content_preview="$(hi_content 2>/dev/null | head -c 300 || true)"
+# K-112 (a): Bash tool calls carry their payload in tool_input.command (and a
+# model-written tool_input.description). Both feed the risk-regex pre-filter.
+# The buffer stores the usual 300-byte preview; the scan text is capped at
+# 2048 bytes so a dangerous tail behind a long prefix is still seen. Go twin:
+# supervisorstream.go (commandScanCap).
+command_scan="$(hi_field '.tool_input.command' 2>/dev/null | head -c 2048 || true)"
+description_scan="$(hi_field '.tool_input.description' 2>/dev/null | head -c 2048 || true)"
+command_preview="$(printf '%s' "$command_scan" | head -c 300 || true)"
+description_preview="$(printf '%s' "$description_scan" | head -c 300 || true)"
 
 event="$(jq -nc \
     --arg ts "$ts" \
@@ -125,11 +134,15 @@ event="$(jq -nc \
     --arg file "$file_path" \
     --arg new "$new_preview" \
     --arg content "$content_preview" \
+    --arg cmd "$command_preview" \
+    --arg desc "$description_preview" \
     --arg sid "$session_id" \
     '{ts: $ts, agent: $agent, tool: $tool,
-      input: {file_path: $file,
+      input: ({file_path: $file,
               new_preview: (if $new == "" then null else $new end),
-              content_preview: (if $content == "" then null else $content end)},
+              content_preview: (if $content == "" then null else $content end)}
+              + (if $cmd == "" then {} else {command_preview: $cmd} end)
+              + (if $desc == "" then {} else {description_preview: $desc} end)),
       session_id: $sid}' 2>/dev/null)"
 
 [ -n "$event" ] || exit 0
@@ -223,8 +236,10 @@ else
 
     # 2d. Risk-regex check: content matches a dangerous-command pattern.
     # Default patterns; extendable via .yakos.yml supervisor.pre_filter.risk_regex list.
-    if [ -z "$escalate_reason" ] && [ -n "${new_preview}${content_preview}" ]; then
-        combined="${new_preview}${content_preview}"
+    if [ -z "$escalate_reason" ] && [ -n "${new_preview}${content_preview}${command_scan}${description_scan}" ]; then
+        # Newlines keep a command's tail from fusing with the description
+        # ("... | sh" + "run x" must not read as "shrun x").
+        combined="${new_preview}${content_preview}"$'\n'"${command_scan}"$'\n'"${description_scan}"
         # Built-in default patterns (POSIX ERE for grep -E)
         default_patterns=(
             'drop[[:space:]]+table'
@@ -232,6 +247,10 @@ else
             'rm[[:space:]]+-rf'
             'chmod[[:space:]]+777'
             '(password|secret|api_key|token)[[:space:]]*=[[:space:]]*[^$({][^[:space:]]{8,}'
+            # K-112 (a): Bash-command shapes the patterns above miss.
+            'git[[:space:]]+push[[:space:]]([^;&|]*[[:space:]])?(--force[a-z-]*|-f)([[:space:]]|$)'
+            '(curl|wget)[^|]*[|][[:space:]]*(sudo[[:space:]]+)?(ba|z|da)?sh([[:space:]]|$)'
+            '>>?[[:space:]]*[^[:space:]]*(\.env|\.ssh/|\.pem|credentials|\.claude/settings|hook-bypass|/etc/)'
         )
         for pat in "${default_patterns[@]}"; do
             if printf '%s' "$combined" | grep -qiE "$pat" 2>/dev/null; then
