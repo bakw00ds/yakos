@@ -256,29 +256,31 @@ hi_init() {
     # K-101 (#289 review): every check above trusts jq's answers. A jq that is
     # present but lying (prints "garbage", a wrong-typed value, or "object" for
     # every query) passes them all. Verify the decoder with a canary, then
-    # verify the payload decodes to an object carrying a string
-    # hook_event_name that is literally present in the raw input. Non-blocking
-    # hooks exit 0 here rather than continue on garbage accessors.
+    # cross-check one decoded identity field (hook_event_name, else tool_name)
+    # against the raw payload: a real answer is literally present in the input.
+    # Non-blocking hooks exit 0 here rather than continue on garbage accessors.
+    #
+    # hook_event_name is deliberately NOT required: the Flows engine
+    # (cli-go/internal/workflow/output_scan.go) invokes output-injection-scan.sh
+    # with a synthetic {tool_name, tool_response, agent_type} payload that has
+    # none, and requiring it turned every workflow node scan into a block.
     if ! _hi_decoder_sane; then
         HI_INPUT=""
         _hi_fail_or_warn "jq is present but returned a wrong answer for a known query (broken or shadowed jq)" exit
         return 0
     fi
     local _hi_ev
-    _hi_ev="$(jq -r 'if type == "object" and (.hook_event_name | type) == "string" then .hook_event_name else "" end' <<< "$HI_INPUT" 2>/dev/null)" || _hi_ev=""
-    if [ -z "$_hi_ev" ]; then
-        HI_INPUT=""
-        _hi_fail_or_warn "stdin is a JSON object but has no string hook_event_name (not a Claude Code hook payload)" exit
-        return 0
+    _hi_ev="$(jq -r 'if type == "object" then ((.hook_event_name // .tool_name // "") | if type == "string" then . else "" end) else "" end' <<< "$HI_INPUT" 2>/dev/null)" || _hi_ev=""
+    if [ -n "$_hi_ev" ]; then
+        case "$HI_INPUT" in
+            *"$_hi_ev"*) ;;
+            *)
+                HI_INPUT=""
+                _hi_fail_or_warn "jq decoded an identity field (hook_event_name / tool_name) that is not present in the payload (broken or shadowed jq)" exit
+                return 0
+                ;;
+        esac
     fi
-    case "$HI_INPUT" in
-        *"$_hi_ev"*) ;;
-        *)
-            HI_INPUT=""
-            _hi_fail_or_warn "jq decoded a hook_event_name that is not present in the payload (broken or shadowed jq)" exit
-            return 0
-            ;;
-    esac
 }
 
 hi_field() {
