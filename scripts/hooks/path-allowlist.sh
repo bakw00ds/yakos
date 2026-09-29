@@ -42,6 +42,16 @@ HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 
 hi_init
 
+# A jq that is present but misbehaves (prints garbage, e.g. a broken or
+# shadowed binary) used to turn the tool name into "garbage", fall through the
+# tool gate below, and exit 0: a fail-open. Sanity-check that jq can classify
+# the payload as an object; if not, take the same degraded-input path as a
+# missing jq (fail closed unless an override applies). `jq -e` alone is not
+# enough: a garbage-printing jq still exits 0.
+if [ -n "${HI_INPUT:-}" ] && [ "$(jq -r 'type' <<< "$HI_INPUT" 2>/dev/null || true)" != "object" ]; then
+    _hi_fail_or_warn "stdin parsed as JSON but is not a JSON object (hook payloads are always an object)"
+fi
+
 tool="$(hi_tool)"
 case "$tool" in
     Edit|Write|MultiEdit|NotebookEdit) ;;
@@ -49,7 +59,29 @@ case "$tool" in
 esac
 
 agent="$(hi_sender_role)"
-file="$(hi_file_path)"
+# tr -d NUL before command substitution sees the bytes: bash would otherwise
+# print "ignored null byte in input" on stderr (bash-version-specific text).
+# The NUL itself is detected separately below, on the raw JSON string.
+file="$(hi_file_path | tr -d '\000')"
+
+# A NUL or newline anywhere in the path is refused outright, with no bypass.
+# Command substitution silently drops NUL (the hook would evaluate a
+# different path than the tool receives) and the normalizer used to see only
+# the first line of a path containing a newline, so
+# "api/ok.go<LF>/../../etc/x" was checked as "api/ok.go". No legitimate
+# path contains either. The jq test looks at the raw JSON string, before
+# command substitution can strip anything.
+bad_char="$(jq -r '(.tool_input.file_path // .tool_input.notebook_path) | strings | if (contains("\u0000") or contains("\n")) then "1" else "" end' <<< "$HI_INPUT" 2>/dev/null || true)"
+case "$file" in
+    *$'\n'*) bad_char="1" ;;
+esac
+if [ -n "$bad_char" ]; then
+    extra="$(jq -nc --arg agent "$agent" --arg file "$file" \
+        '{agent_type: $agent, file_path: $file}' 2>/dev/null \
+        || printf '{"agent_type":"%s"}' "$agent")"
+    ho_log "path-allowlist" "BLOCK" "block" "file_path contains a NUL or newline byte" "$extra"
+    ho_block "path-allowlist" "agent '$agent' file_path contains a NUL or newline byte — refused regardless of allow/deny policy"
+fi
 
 # If we don't have a file path, we can't decide. Pass.
 if [ -z "$file" ]; then
@@ -208,6 +240,7 @@ if ps_escapes_root "$norm_rel_file"; then
     ho_log "path-allowlist" "BLOCK" "block" "path lexically escapes project root" "$extra"
     ho_block "path-allowlist" "agent '$agent' path '$rel_file' normalizes to '$norm_rel_file', which escapes the project root — refused regardless of allow/deny policy"
 fi
+as_written_rel="$rel_file"
 rel_file="$norm_rel_file"
 
 # ---- M7: symlink-escape guard -----------------------------------------------
@@ -236,7 +269,15 @@ if [ -z "$project_root" ] || [ ! -d "$project_root" ]; then
 fi
 project_real="$(ps_realpath "$project_root")"
 target_real="$(ps_realpath "$project_root/$rel_file")"
-if ! ps_is_within "$project_real" "$target_real"; then
+# ".." AFTER a symlink: the lexical collapse above turns
+# "api/lnk/sub/../../x" into "api/x", but the OS applies ".." to the
+# already-resolved prefix (lnk's TARGET), so the write lands outside the tree.
+# Resolve the path AS WRITTEN too and require both to stay inside the root.
+written_real="$(ps_realpath "$project_root/$as_written_rel")"
+if ! ps_is_within "$project_real" "$target_real" || ! ps_is_within "$project_real" "$written_real"; then
+    if ! ps_is_within "$project_real" "$written_real"; then
+        target_real="$written_real"
+    fi
     if ho_check_bypass "path-allowlist" "$rel_file"; then
         extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" --arg real "$target_real" \
             '{agent_type: $agent, file_path: $file, resolved: $real, note: "symlink escape but bypass active", bypass: true}')"
@@ -318,6 +359,23 @@ glob_match_deny() {
 }
 
 # ---- check deny patterns first ---------------------------------------------
+#
+# A present-but-malformed `deny` (string, number, boolean, object) used to
+# yield no patterns at all (`.deny // [] | .[]` errors and is swallowed, or an
+# object iterates its values), silently disabling deny enforcement. Same
+# fail-closed rule as `allow` below: only an array (or an absent/null key)
+# is acceptable.
+deny_kind="$(jq -r 'if has("deny") and .deny != null then (.deny | type) else "absent" end' <<< "$policy" 2>/dev/null || echo error)"
+case "$deny_kind" in
+    absent|array) ;;
+    *)
+        extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" \
+            '{agent_type: $agent, file_path: $file, note: "policy '"'"'deny'"'"' is not a JSON array"}' 2>/dev/null \
+            || printf '{"agent_type":"%s","file_path":"%s"}' "$agent" "$rel_file")"
+        ho_log "path-allowlist" "BLOCK" "block" "policy 'deny' for agent_type is not an array" "$extra"
+        ho_block "path-allowlist" ".claude/path-allowlist.json's 'deny' for '$agent' is not an array — refusing rather than silently disabling deny enforcement."
+        ;;
+esac
 
 deny_globs="$(jq -r '.deny // [] | .[]' <<< "$policy" 2>/dev/null || true)"
 while IFS= read -r g; do
