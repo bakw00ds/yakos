@@ -79,6 +79,15 @@ func isHookForceGo(args []string) bool {
 	return len(args) > 0 && args[0] == "hook"
 }
 
+// isDecideForceGo reports whether this invocation is `yakos decide ...`. Like
+// `hook`, it has no bash equivalent: shadow-mode routing would hand it to the
+// bash CLI, which prints "unknown command" and exits non-zero. Hooks that call
+// `yakos decide` depend on its 0/3 exit contract (never 2), so it is always
+// Go-native, even under an explicit YAKOS_IMPL=bash.
+func isDecideForceGo(args []string) bool {
+	return len(args) > 0 && args[0] == "decide"
+}
+
 // selectImpl encodes the YAKOS_IMPL gate decision as a pure function so it
 // can be unit-tested without touching the filesystem or spawning processes.
 //
@@ -167,7 +176,7 @@ func main() {
 	//
 	// `doctor` is a deliberate exception to this gate (unless YAKOS_IMPL=bash
 	// is explicit): see isDoctorForceGo's doc comment.
-	if !isDoctorForceGo(os.Getenv("YAKOS_IMPL"), args) && !isHookForceGo(args) {
+	if !isDoctorForceGo(os.Getenv("YAKOS_IMPL"), args) && !isHookForceGo(args) && !isDecideForceGo(args) {
 		switch selectImpl(os.Getenv("YAKOS_IMPL"), passthrough.BashYakosExists(yakosRoot)) {
 		case implPassthrough:
 			exitWith(passthrough.Run(yakosRoot, args))
@@ -191,6 +200,8 @@ func main() {
 		runPortStatus()
 	case "validate":
 		runValidate(yakosRoot, args[1:])
+	case "decide":
+		runDecide(yakosRoot, args[1:])
 	case "cost":
 		runCost(args[1:])
 	case "status":

@@ -54,6 +54,7 @@ complete -c yakos -n '__fish_use_subcommand' -a 'mtls'           -d 'manage mTLS
 complete -c yakos -n '__fish_use_subcommand' -a 'metrics'        -d 'collect and report per-project quality metrics'
 complete -c yakos -n '__fish_use_subcommand' -a 'telemetry'      -d 'opt-in anonymised CLI telemetry'
 complete -c yakos -n '__fish_use_subcommand' -a 'model-routing'  -d 'evaluate and promote per-task model assignments'
+complete -c yakos -n '__fish_use_subcommand' -a 'decide'        -d 'ask a typed decision provider (Jev or mock)'
 complete -c yakos -n '__fish_use_subcommand' -a 'plan'           -d 'score and correlate plan quality'
 complete -c yakos -n '__fish_use_subcommand' -a 'work'           -d 'record plan outcome and close work session'
 complete -c yakos -n '__fish_use_subcommand' -a 'workflow'       -d 'run a named multi-step workflow'
