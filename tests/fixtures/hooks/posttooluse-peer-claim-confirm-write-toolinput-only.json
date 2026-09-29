@@ -1,0 +1,19 @@
+{
+  "_doc": "Payload-shape regression: PostToolUse Write with the target ONLY at tool_input.file_path. With coord enabled, expect claim_confirmed on both bash and Go.",
+  "session_id": "fixture-peer-claim-confirm-write-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "api/handlers.go",
+    "content": "package api\n"
+  },
+  "tool_response": {
+    "filePath": "api/handlers.go",
+    "type": "create"
+  },
+  "tool_use_id": "toolu_peer_claim_confirm_write_001"
+}
