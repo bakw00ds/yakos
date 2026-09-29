@@ -7,7 +7,8 @@ package refresh
 // left alone with a WARN — the operator may have replaced the symlink with
 // a hand-edited version.
 //
-// Mirrors bash's _sync_agents function in refresh.sh exactly.
+// cli/lib/refresh.sh _sync_agents mirrors this, including the worktree
+// canonicalization in resolveAgentsSourceRoot (K-94).
 
 import (
 	"fmt"

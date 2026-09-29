@@ -131,7 +131,7 @@ func performMerge(tmpl, deployed map[string]any) (MergeStats, error) {
 	// {matcher, command} for that hook.
 	//
 	// Keying on the CANONICAL hook name (canonicalHookName — the script's
-	// basename) rather than the exact command string is deliberate: a
+	// path relative to scripts/hooks/) rather than the exact command string is deliberate: a
 	// deployed registration and the template's registration for the SAME
 	// hook can carry different command-string PREFIXES (an absolute
 	// checkout path like /Users/tw/github/yakOS/scripts/hooks/x.sh vs the
@@ -315,6 +315,10 @@ func performMerge(tmpl, deployed map[string]any) (MergeStats, error) {
 	return stats, nil
 }
 
+// hooksDirMarker is the path segment every deployed hook command passes
+// through, regardless of the prefix in front of it.
+const hooksDirMarker = "/scripts/hooks/"
+
 // canonicalHookName extracts a hook registration's identity from its
 // "command" string, independent of the path-PREFIX form used to reach the
 // script (${CLAUDE_PROJECT_DIR}/scripts/hooks/x.sh, an absolute checkout
@@ -324,17 +328,25 @@ func performMerge(tmpl, deployed map[string]any) (MergeStats, error) {
 // registration when the deployed prefix form differs from the template's
 // (see performMerge's templateDesired comment).
 //
+// The identity is the script's path RELATIVE to scripts/hooks/ (for
+// example "x.sh" or "per-domain/x.sh"), not its basename: two hooks that
+// share a basename in different subdirectories are different hooks and
+// must not collapse into one merge key (K-94). When the command does not
+// route through a scripts/hooks/ directory at all, the basename is used.
+//
 // Hook commands are not expected to carry arguments (every hook script
 // reads its input from stdin), but this takes only the first
-// whitespace-separated field to be robust if one ever does. Basename
-// collisions across different subdirectories under scripts/hooks/ (e.g. a
-// lib/ helper sharing a name with a top-level hook) are not a concern in
-// practice: only top-level hook scripts are ever referenced from a
-// settings.json "command" field.
+// whitespace-separated field to be robust if one ever does.
 func canonicalHookName(command string) string {
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
 		return ""
+	}
+	p := "/" + strings.ReplaceAll(fields[0], "\\", "/")
+	if i := strings.Index(p, hooksDirMarker); i >= 0 {
+		if rel := p[i+len(hooksDirMarker):]; rel != "" {
+			return rel
+		}
 	}
 	return filepath.Base(fields[0])
 }

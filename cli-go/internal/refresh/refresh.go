@@ -273,8 +273,10 @@ func mergeSettingsForProject(templateFile, deployedFile string, dryRun bool, w i
 }
 
 // syncHooks copies / updates hook files from srcRoot into dstRoot.
-// It mirrors the bash _sync_hooks logic exactly, including:
+// This is the canonical layout algorithm; cli/lib/refresh.sh _sync_hooks
+// mirrors it exactly (K-94) and must be changed in lockstep. It includes:
 //   - Skipping .gitkeep, README.md, and git/ subdirectory entries.
+//   - Never recreating legacy/ under dstRoot: legacy/<name>.sh deploys flat.
 //   - Writing / updating a .framework-hash sidecar beside each deployed file.
 //   - Dry-run: reports counts without writing.
 //
@@ -300,9 +302,11 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 		return rpt, nil
 	}
 
-	// processedNames tracks flat hook basenames that pass-1 already handled,
-	// so pass-2 (legacy/) can skip duplicates.
-	processedNames := make(map[string]bool)
+	// processedRels tracks the destination-relative paths pass-1 already
+	// handled, so pass-2 (legacy/) can skip a hook whose flat destination
+	// was already written. Keyed by relative path, not basename: a helper
+	// such as lib/x.sh must not suppress a distinct legacy/x.sh (K-94).
+	processedRels := make(map[string]bool)
 
 	// syncOne performs the copy-or-update logic for a single (src, dst, rel) triple.
 	syncOne := func(srcPath, dstPath, rel string) {
@@ -388,8 +392,8 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 
 		dstPath := filepath.Join(dstRoot, rel)
 		syncOne(srcPath, dstPath, rel)
-		// Track the flat basename so pass-2 can skip it.
-		processedNames[base] = true
+		// Track the destination-relative path so pass-2 can skip it.
+		processedRels[filepath.ToSlash(rel)] = true
 		return nil
 	})
 	if err != nil {
@@ -413,8 +417,8 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 			if !strings.HasSuffix(base, ".sh") {
 				return nil
 			}
-			// Skip if pass-1 already handled a file with this name.
-			if processedNames[base] {
+			// Skip if pass-1 already handled the flat destination.
+			if processedRels[base] {
 				return nil
 			}
 			// Copy legacy/<name>.sh → dstRoot/<name>.sh (flat, no subdir).

@@ -525,12 +525,98 @@ func TestCanonicalHookName(t *testing.T) {
 		"/Users/tw/github/yakOS/scripts/hooks/secret-scan.sh": "secret-scan.sh",
 		"scripts/hooks/secret-scan.sh":                        "secret-scan.sh",
 		"secret-scan.sh":                                      "secret-scan.sh",
+		"${CLAUDE_PROJECT_DIR}/scripts/hooks/per-domain/x.sh": "per-domain/x.sh",
+		"/Users/tw/github/yakOS/scripts/hooks/lib/x.sh":       "lib/x.sh",
+		"/opt/myscripts/hooks/y.sh":                           "y.sh",
 		"":                                                    "",
 		"  ":                                                  "",
 	}
 	for cmd, want := range cases {
 		if got := canonicalHookName(cmd); got != want {
 			t.Errorf("canonicalHookName(%q) = %q; want %q", cmd, got, want)
+		}
+	}
+}
+
+// TestMergeSettings_SameBasenameDifferentSubdirsStayDistinct is the K-94
+// regression test: two hooks that share a basename but live in different
+// subdirectories under scripts/hooks/ are DIFFERENT hooks and must each be
+// registered (and each replaced from an absolute-path form) independently.
+//
+// Mutation test: revert canonicalHookName to basename-only keying and the
+// two hooks collapse into one merge key, so the second is never added
+// (Added == 1, not 2) and the absolute-form replacement leaves one behind.
+func TestMergeSettings_SameBasenameDifferentSubdirsStayDistinct(t *testing.T) {
+	tmp := t.TempDir()
+	templateFile := filepath.Join(tmp, "template.json")
+	deployedFile := filepath.Join(tmp, "settings.json")
+
+	template := `{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/a/check.sh"},
+          {"type": "command", "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/b/check.sh"}
+        ]
+      }
+    ]
+  }
+}`
+	// Case 1: nothing deployed yet — both must be added.
+	if err := os.WriteFile(templateFile, []byte(template), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(deployedFile, []byte(`{"hooks": {}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := MergeSettingsFiles(templateFile, deployedFile, false, nil)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if stats.Added != 2 || stats.Removed != 0 {
+		t.Errorf("fresh merge: want added=2 removed=0; got added=%d removed=%d", stats.Added, stats.Removed)
+	}
+	data, _ := os.ReadFile(deployedFile) //nolint:gosec
+	for _, want := range []string{"scripts/hooks/a/check.sh", "scripts/hooks/b/check.sh"} {
+		if got := strings.Count(string(data), want); got != 1 {
+			t.Errorf("%s: want exactly 1 registration; got %d\n%s", want, got, data)
+		}
+	}
+
+	// Case 2: both deployed under absolute-path prefixes — each is replaced
+	// by its own template form, none lost or duplicated.
+	abs := `{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "/Users/x/repo/scripts/hooks/a/check.sh"},
+          {"type": "command", "command": "/Users/x/repo/scripts/hooks/b/check.sh"}
+        ]
+      }
+    ]
+  }
+}`
+	if err := os.WriteFile(deployedFile, []byte(abs), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stats, err = MergeSettingsFiles(templateFile, deployedFile, false, nil)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if stats.Added != 2 || stats.Removed != 2 {
+		t.Errorf("absolute-form merge: want added=2 removed=2; got added=%d removed=%d", stats.Added, stats.Removed)
+	}
+	data, _ = os.ReadFile(deployedFile) //nolint:gosec
+	if strings.Contains(string(data), "/Users/x/repo") {
+		t.Errorf("absolute-form registrations not replaced:\n%s", data)
+	}
+	for _, want := range []string{"${CLAUDE_PROJECT_DIR}/scripts/hooks/a/check.sh", "${CLAUDE_PROJECT_DIR}/scripts/hooks/b/check.sh"} {
+		if got := strings.Count(string(data), want); got != 1 {
+			t.Errorf("%s: want exactly 1 registration; got %d\n%s", want, got, data)
 		}
 	}
 }
@@ -1168,6 +1254,45 @@ func TestSyncHooks_LegacyDeduplicatesTopLevel(t *testing.T) {
 	// legacy/ subdir must NOT exist in dst.
 	if _, err := os.Stat(filepath.Join(dst, "legacy")); !os.IsNotExist(err) {
 		t.Errorf("legacy/ subdir was created in dst (should not exist)")
+	}
+}
+
+// TestSyncHooks_LegacyNotShadowedBySameBasenameInSubdir is the K-94
+// regression test for pass-1/pass-2 deduplication: a helper at lib/x.sh is
+// a different destination than the flat legacy/x.sh, so it must not
+// suppress it.
+//
+// Mutation test: key processedRels by basename again and legacy/x.sh is
+// skipped (only lib/x.sh is deployed).
+func TestSyncHooks_LegacyNotShadowedBySameBasenameInSubdir(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	write := func(rel, body string) {
+		t.Helper()
+		p := filepath.Join(src, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("lib/x.sh", "#!/usr/bin/env bash\necho helper\n")
+	write("legacy/x.sh", "#!/usr/bin/env bash\necho legacy\n")
+
+	rpt, err := syncHooks(src, dst, false, os.Stdout)
+	if err != nil {
+		t.Fatalf("syncHooks: %v", err)
+	}
+	if rpt.New != 2 {
+		t.Errorf("want new=2 (lib/x.sh + flat x.sh); got new=%d synced=%d ok=%d", rpt.New, rpt.Synced, rpt.OK)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dst, "x.sh")); !strings.Contains(string(got), "legacy") { //nolint:gosec
+		t.Errorf("flat x.sh should come from legacy/x.sh; got %q", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dst, "lib", "x.sh")); !strings.Contains(string(got), "helper") { //nolint:gosec
+		t.Errorf("lib/x.sh should be the helper; got %q", got)
 	}
 }
 
