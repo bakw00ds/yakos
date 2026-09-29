@@ -476,11 +476,9 @@ func (h *Hook) resolvePID(in hooktype.HookInput) int {
 	return os.Getpid()
 }
 
+// senderRole mirrors bash hi_sender_role: the payload agent_type, not env.
 func senderRole(in hooktype.HookInput) string {
-	if r := in.Env["YAKOS_AGENT_ROLE"]; r != "" {
-		return r
-	}
-	return "lead"
+	return hookio.SenderRole(in)
 }
 
 func stringField(payload map[string]any, key string) string {

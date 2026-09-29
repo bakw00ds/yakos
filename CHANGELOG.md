@@ -58,6 +58,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their line budgets without dropping instructions; eval-engineer's
   calibration procedure moved to `playbook:plan-quality-calibration`.
 
+### Fixed
+
+- **Go hooks read identity and coord state like bash (K-100).**
+  peer-claim, peer-claim-confirm, supervisor-stream and context-threshold
+  take the agent and session id from the stdin payload, not
+  `YAKOS_AGENT_ROLE` / `CLAUDE_SESSION_ID`. context-inject and
+  mailbox-mirror gate on the coord dir existing and being writable, not
+  `YAKOS_COORD_ENABLED`. A supervisor deny list with a non-string element
+  still escalates on its string globs.
+
 ## [0.60.0.0] — 2026-09-29
 
 ### Changed

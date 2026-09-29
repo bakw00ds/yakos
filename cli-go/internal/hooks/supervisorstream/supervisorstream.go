@@ -136,7 +136,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	agentType := senderRole(in)
 	filePath := fileFromPayload(in)
 	ts := h.NowFn().UTC().Format(time.RFC3339)
-	sessionID := in.Env["CLAUDE_SESSION_ID"]
+	sessionID := hookio.SessionID(in) // bash hi_session_id: payload, not env
 
 	// Truncated previews to prevent buffer bloat.
 	newPreview := truncate(hookio.ToolInputString(in, "new_string"), 300)
@@ -186,7 +186,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 		// 2a. Sensitive-path check.
 		if escalateReason == "" && filePath != "" {
-			escalateReason = h.checkSensitivePath(filePath, projectDir)
+			escalateReason = h.checkSensitivePath(&out, filePath, projectDir)
 		}
 
 		// 2b. Diff-size check.
@@ -262,7 +262,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 // checkSensitivePath returns an escalation reason if filePath matches a deny
 // glob in .claude/path-allowlist.json under the "lead" key.
-func (h *Hook) checkSensitivePath(filePath, projectDir string) string {
+func (h *Hook) checkSensitivePath(out *hooktype.HookOutput, filePath, projectDir string) string {
 	allowlistFile := filepath.Join(projectDir, ".claude", "path-allowlist.json")
 	data, err := os.ReadFile(allowlistFile) //nolint:gosec
 	if err != nil {
@@ -278,13 +278,24 @@ func (h *Hook) checkSensitivePath(filePath, projectDir string) string {
 	if !ok {
 		return ""
 	}
+	// Deny is decoded as []any so one non-string element ([5, ".env"]) does
+	// not drop the whole list: bash's `.lead.deny | .[]` still yields the
+	// remaining entries and escalates on ".env". Non-strings are skipped with
+	// a WARN (bash would stringify them into a glob like "5", which no real
+	// policy relies on).
 	var leadPolicy struct {
-		Deny []string `json:"deny"`
+		Deny []any `json:"deny"`
 	}
 	if err := json.Unmarshal(raw, &leadPolicy); err != nil {
 		return ""
 	}
-	for _, glob := range leadPolicy.Deny {
+	for i, el := range leadPolicy.Deny {
+		glob, isStr := el.(string)
+		if !isStr {
+			out.Stderr = fmt.Appendf(out.Stderr,
+				"%s: WARN: path-allowlist.json lead.deny[%d] is %T, not a string; skipped\n", hookName, i, el)
+			continue
+		}
 		if globMatch(glob, filePath) {
 			return "sensitive-path:" + glob
 		}
@@ -559,14 +570,10 @@ func nilIfEmpty(s string) any {
 	return s
 }
 
+// senderRole mirrors bash hi_sender_role: the payload agent_type ("lead"
+// when absent), whitespace-trimmed, "yakos:" prefix stripped. Env is not read.
 func senderRole(in hooktype.HookInput) string {
-	if r, ok := in.Env["YAKOS_AGENT_ROLE"]; ok && r != "" {
-		return r
-	}
-	if r := stringField(in.Payload, "agent_type"); r != "" {
-		return r
-	}
-	return "unknown"
+	return hookio.SenderRole(in)
 }
 
 func fileFromPayload(in hooktype.HookInput) string {

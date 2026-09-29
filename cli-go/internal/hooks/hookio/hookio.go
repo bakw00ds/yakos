@@ -259,3 +259,35 @@ func JQRawOrJSON(v any) string {
 	}
 	return strings.TrimSuffix(buf.String(), "\n")
 }
+
+// PayloadField renders a top-level payload field the way bash hi_field does:
+// jq's `.key // empty` printed with `jq -r`, then command-substitution's
+// trailing-newline stripping. A JSON null/false or an absent key yields "";
+// a non-string value (number, array, object) is rendered as jq would, not
+// dropped.
+func PayloadField(in hooktype.HookInput, key string) string {
+	return strings.TrimRight(JQRawOrJSON(JQAlt(in.Payload[key])), "\n")
+}
+
+// SessionID is the Go-side equivalent of bash hi_session_id: the payload's
+// top-level session_id (jq '.session_id // empty'). It deliberately does NOT
+// fall back to $CLAUDE_SESSION_ID: real Claude Code hook stdin always
+// carries session_id, and bash hi_session_id never consults the env.
+func SessionID(in hooktype.HookInput) string {
+	return PayloadField(in, "session_id")
+}
+
+// SenderRole is the Go-side equivalent of bash hi_sender_role: the payload's
+// agent_type ("lead" when absent or empty), with leading/trailing whitespace
+// trimmed (the [:space:] class: space, \t \n \v \f \r) and one leading
+// "yakos:" runtime namespace prefix stripped. It deliberately does NOT read
+// YAKOS_AGENT_ROLE: bash never does, and the env var is absent on
+// subagent hook fires (Phase 1.7).
+func SenderRole(in hooktype.HookInput) string {
+	raw := PayloadField(in, "agent_type")
+	if raw == "" {
+		raw = "lead"
+	}
+	raw = strings.Trim(raw, " \t\n\v\f\r")
+	return strings.TrimPrefix(raw, "yakos:")
+}

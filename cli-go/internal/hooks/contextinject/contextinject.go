@@ -24,6 +24,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,25 +165,26 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	// --- 3. Peer status (multi-dev) ---
-	// Mirror bash logic: check YAKOS_COORD_ENABLED env gate; read sessions dir.
+	// Mirror bash: yakos_coord_enabled (coord dir exists + writable under
+	// YAKOS_COORD_ROOT/<project>/coord; no env switch), then count
+	// `find <coord>/sessions -name '*.ndjson'` (recursive).
 	if sectionEnabled(ci.InjectPeers) {
-		if in.Env["YAKOS_COORD_ENABLED"] == "1" {
-			sessionsDir := resolveCoordSessionsDir(in)
-			if sessionsDir != "" {
-				if entries, readErr := os.ReadDir(sessionsDir); readErr == nil {
-					n := 0
-					for _, e := range entries {
-						if strings.HasSuffix(e.Name(), ".ndjson") {
-							n++
-						}
+		if coordDir := hookio.CoordDir(in); hookio.CoordEnabled(coordDir) {
+			sessionsDir := filepath.Join(coordDir, "sessions")
+			if fi, statErr := os.Stat(sessionsDir); statErr == nil && fi.IsDir() {
+				n := 0
+				_ = filepath.WalkDir(sessionsDir, func(_ string, d fs.DirEntry, err error) error {
+					if err == nil && strings.HasSuffix(d.Name(), ".ndjson") {
+						n++
 					}
-					if n > 1 {
-						out.Stderr = fmt.Appendf(out.Stderr,
-							"[yakos context-inject] Multi-dev: %d peer session(s) active.\n", n)
-						out.Stderr = fmt.Appendf(out.Stderr,
-							"  Run 'yakos peer status' for details, 'yakos peer log' for recent activity.\n\n")
-						emitted = true
-					}
+					return nil
+				})
+				if n > 1 {
+					out.Stderr = fmt.Appendf(out.Stderr,
+						"[yakos context-inject] Multi-dev: %d peer session(s) active.\n", n)
+					out.Stderr = fmt.Appendf(out.Stderr,
+						"  Run 'yakos peer status' for details, 'yakos peer log' for recent activity.\n\n")
+					emitted = true
 				}
 			}
 		}
@@ -279,20 +282,6 @@ func lastCriticalFinding(path string) (*supervisorFinding, error) {
 		}
 	}
 	return last, nil
-}
-
-// resolveCoordSessionsDir derives the coord sessions directory from env.
-// Mirrors bash yakos_coord_sessions_dir: $YAKOS_COORD_DIR/sessions or
-// /var/lib/yakos/<project>/coord/sessions.
-func resolveCoordSessionsDir(in hooktype.HookInput) string {
-	if d := in.Env["YAKOS_COORD_DIR"]; d != "" {
-		return filepath.Join(d, "sessions")
-	}
-	proj := in.Env["YAKOS_PROJECT_NAME"]
-	if proj == "" {
-		return ""
-	}
-	return filepath.Join("/var/lib/yakos", proj, "coord", "sessions")
 }
 
 func (h *Hook) resolveProjectDir(in hooktype.HookInput) string {

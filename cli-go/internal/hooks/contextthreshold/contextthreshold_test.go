@@ -99,9 +99,9 @@ func TestContextThreshold_ProbeUnavailableLogsReport(t *testing.T) {
 	h := contextthreshold.New(work)
 	h.NowFn = fixedNow
 	in := hooktype.HookInput{
+		Payload: map[string]any{"session_id": "sess-nope"}, // bash hi_session_id: payload
 		Env: map[string]string{
-			"YAKOS_RUNTIME":     "claude",
-			"CLAUDE_SESSION_ID": "sess-nope",
+			"YAKOS_RUNTIME": "claude",
 			// No CLAUDE_PROJECT_DIR → probe fails.
 		},
 	}
@@ -130,9 +130,9 @@ func TestContextThreshold_BelowThresholdsReport(t *testing.T) {
 		NowFn:          fixedNow,
 	}
 	in := hooktype.HookInput{
+		Payload: map[string]any{"session_id": sessionID}, // bash hi_session_id: payload
 		Env: map[string]string{
 			"YAKOS_RUNTIME":      "claude",
-			"CLAUDE_SESSION_ID":  sessionID,
 			"CLAUDE_PROJECT_DIR": proj,
 		},
 	}
@@ -165,9 +165,9 @@ func TestContextThreshold_AboveNoticeThresholdWarn(t *testing.T) {
 		NowFn:          fixedNow,
 	}
 	in := hooktype.HookInput{
+		Payload: map[string]any{"session_id": sessionID}, // bash hi_session_id: payload
 		Env: map[string]string{
 			"YAKOS_RUNTIME":      "claude",
-			"CLAUDE_SESSION_ID":  sessionID,
 			"CLAUDE_PROJECT_DIR": proj,
 		},
 	}
@@ -202,9 +202,9 @@ func TestContextThreshold_AboveWarningThresholdCheckpoint(t *testing.T) {
 		NowFn:          fixedNow,
 	}
 	in := hooktype.HookInput{
+		Payload: map[string]any{"session_id": sessionID}, // bash hi_session_id: payload
 		Env: map[string]string{
 			"YAKOS_RUNTIME":      "claude",
-			"CLAUDE_SESSION_ID":  sessionID,
 			"CLAUDE_PROJECT_DIR": proj,
 		},
 	}
@@ -245,9 +245,9 @@ func TestContextThreshold_DefaultThresholdValues(t *testing.T) {
 		NowFn:          fixedNow,
 	}
 	in := hooktype.HookInput{
+		Payload: map[string]any{"session_id": sessionID}, // bash hi_session_id: payload
 		Env: map[string]string{
 			"YAKOS_RUNTIME":      "claude",
-			"CLAUDE_SESSION_ID":  sessionID,
 			"CLAUDE_PROJECT_DIR": proj,
 		},
 	}
@@ -310,9 +310,9 @@ func TestContextThreshold_PctCapAt100(t *testing.T) {
 		NowFn:          fixedNow,
 	}
 	in := hooktype.HookInput{
+		Payload: map[string]any{"session_id": sessionID}, // bash hi_session_id: payload
 		Env: map[string]string{
 			"YAKOS_RUNTIME":      "claude",
-			"CLAUDE_SESSION_ID":  sessionID,
 			"CLAUDE_PROJECT_DIR": proj,
 		},
 	}
@@ -351,9 +351,9 @@ func TestContextThreshold_CheckpointManifestWritten(t *testing.T) {
 		NowFn:          fixedNow,
 	}
 	in := hooktype.HookInput{
+		Payload: map[string]any{"session_id": sessionID}, // bash hi_session_id: payload
 		Env: map[string]string{
 			"YAKOS_RUNTIME":      "claude",
-			"CLAUDE_SESSION_ID":  sessionID,
 			"CLAUDE_PROJECT_DIR": proj,
 		},
 	}
@@ -411,9 +411,9 @@ func TestContextThreshold_AutoCompact_MarkerWrittenWhenThresholdCrossed(t *testi
 		NowFn:          fixedNow,
 	}
 	in := hooktype.HookInput{
+		Payload: map[string]any{"session_id": sessionID}, // bash hi_session_id: payload
 		Env: map[string]string{
 			"YAKOS_RUNTIME":      "claude",
-			"CLAUDE_SESSION_ID":  sessionID,
 			"CLAUDE_PROJECT_DIR": proj,
 		},
 	}
@@ -444,9 +444,9 @@ func TestContextThreshold_AutoCompact_NoMarkerWhenBelowThreshold(t *testing.T) {
 		NowFn:          fixedNow,
 	}
 	in := hooktype.HookInput{
+		Payload: map[string]any{"session_id": sessionID}, // bash hi_session_id: payload
 		Env: map[string]string{
 			"YAKOS_RUNTIME":      "claude",
-			"CLAUDE_SESSION_ID":  sessionID,
 			"CLAUDE_PROJECT_DIR": proj,
 		},
 	}
@@ -477,9 +477,9 @@ func TestContextThreshold_AutoCompact_NoMarkerWhenAutoZero(t *testing.T) {
 		NowFn:          fixedNow,
 	}
 	in := hooktype.HookInput{
+		Payload: map[string]any{"session_id": sessionID}, // bash hi_session_id: payload
 		Env: map[string]string{
 			"YAKOS_RUNTIME":      "claude",
-			"CLAUDE_SESSION_ID":  sessionID,
 			"CLAUDE_PROJECT_DIR": proj,
 		},
 	}
@@ -507,9 +507,9 @@ func TestContextThreshold_AutoCompact_DisabledBySentinel(t *testing.T) {
 		NowFn:          fixedNow,
 	}
 	in := hooktype.HookInput{
+		Payload: map[string]any{"session_id": sessionID}, // bash hi_session_id: payload
 		Env: map[string]string{
 			"YAKOS_RUNTIME":      "claude",
-			"CLAUDE_SESSION_ID":  sessionID,
 			"CLAUDE_PROJECT_DIR": proj,
 		},
 	}
@@ -536,9 +536,9 @@ func TestContextThreshold_AutoCompact_MarkerContainsTimestamp(t *testing.T) {
 		NowFn:          fixedNow,
 	}
 	in := hooktype.HookInput{
+		Payload: map[string]any{"session_id": sessionID}, // bash hi_session_id: payload
 		Env: map[string]string{
 			"YAKOS_RUNTIME":      "claude",
-			"CLAUDE_SESSION_ID":  sessionID,
 			"CLAUDE_PROJECT_DIR": proj,
 		},
 	}
@@ -581,9 +581,9 @@ func TestContextThreshold_AutoCompact_LogIncludesAutoField(t *testing.T) {
 		NowFn:          fixedNow,
 	}
 	in := hooktype.HookInput{
+		Payload: map[string]any{"session_id": sessionID}, // bash hi_session_id: payload
 		Env: map[string]string{
 			"YAKOS_RUNTIME":      "claude",
-			"CLAUDE_SESSION_ID":  sessionID,
 			"CLAUDE_PROJECT_DIR": proj,
 		},
 	}

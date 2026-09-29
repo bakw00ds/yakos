@@ -263,15 +263,15 @@ func TestAuditLogWritten(t *testing.T) {
 // TestCoordActivityEmitted confirms the coord activity log is written when enabled.
 func TestCoordActivityEmitted(t *testing.T) {
 	tmp := t.TempDir()
-	coordDir := filepath.Join(tmp, "coord")
+	coordDir := filepath.Join(tmp, "proj", "coord")
 	if err := os.MkdirAll(coordDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 	h := newHook(tmp)
 	in := makeSendMessageInput("frontend", "contracts done", "private body not shared", nil)
 	in.Env = map[string]string{
-		"YAKOS_COORD_ENABLED": "1",
-		"YAKOS_COORD_DIR":     coordDir,
+		"YAKOS_COORD_ROOT":   tmp,
+		"YAKOS_PROJECT_NAME": "proj",
 	}
 	if _, err := h.Run(context.Background(), in); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -344,4 +344,49 @@ func TestTranscriptPathRecorded(t *testing.T) {
 	if records[0]["transcript_path"] != "/transcripts/tx-123.json" {
 		t.Fatalf("expected transcript_path, got %v", records[0]["transcript_path"])
 	}
+}
+
+// bash gates the coord mirror on yakos_coord_enabled inside yakos_coord_emit
+// (dir exists + writable under YAKOS_COORD_ROOT/<project>/coord). There is no
+// env switch: the old YAKOS_COORD_ENABLED / YAKOS_COORD_DIR pair is ignored.
+func TestCoordMirrorGatedOnCoordDirNotEnv(t *testing.T) {
+	t.Run("coord dir present, no env switch: mirrored", func(t *testing.T) {
+		tmp := t.TempDir()
+		coord := filepath.Join(tmp, "proj", "coord")
+		if err := os.MkdirAll(coord, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		in := makeSendMessageInput("lead", "hi", "secret body", map[string]any{"agent_type": "yakos:backend"})
+		in.Env = map[string]string{"YAKOS_COORD_ROOT": tmp, "YAKOS_PROJECT_NAME": "proj"}
+		if _, err := newHook(tmp).Run(context.Background(), in); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(filepath.Join(coord, "activity.ndjson"))
+		if err != nil {
+			t.Fatalf("send_message not mirrored: %v", err)
+		}
+		if !strings.Contains(string(data), `"agent":"backend"`) || strings.Contains(string(data), "secret body") {
+			t.Fatalf("bad mirrored event: %s", data)
+		}
+	})
+	t.Run("coord dir absent, old env set: not mirrored", func(t *testing.T) {
+		tmp := t.TempDir()
+		stale := filepath.Join(tmp, "stale")
+		if err := os.MkdirAll(stale, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		in := makeSendMessageInput("lead", "hi", "body", nil)
+		in.Env = map[string]string{
+			"YAKOS_COORD_ROOT": filepath.Join(tmp, "nocoord"), "YAKOS_PROJECT_NAME": "proj",
+			"YAKOS_COORD_ENABLED": "1", "YAKOS_COORD_DIR": stale,
+		}
+		if _, err := newHook(tmp).Run(context.Background(), in); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range []string{filepath.Join(stale, "activity.ndjson"), filepath.Join(tmp, "nocoord")} {
+			if _, err := os.Stat(p); err == nil {
+				t.Fatalf("%s must not be created", p)
+			}
+		}
+	})
 }
