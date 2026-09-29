@@ -283,8 +283,5 @@ func senderRole(in hooktype.HookInput) string {
 // fileFromPayload extracts the file path, matching hi_file_path:
 // .tool_input.file_path // .tool_input.notebook_path.
 func fileFromPayload(in hooktype.HookInput) string {
-	if s := hookio.ToolInputString(in, "file_path"); s != "" {
-		return s
-	}
-	return hookio.ToolInputString(in, "notebook_path")
+	return hookio.ToolFilePath(in)
 }

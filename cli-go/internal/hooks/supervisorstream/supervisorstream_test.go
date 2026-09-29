@@ -42,12 +42,17 @@ func readLastLog(t *testing.T, logFile string) map[string]any {
 }
 
 func makeInput(tool, filePath, newString string) hooktype.HookInput {
-	payload := map[string]any{}
+	// Real Claude Code shape: fields ride under tool_input.
+	ti := map[string]any{}
 	if filePath != "" {
-		payload["path"] = filePath
+		ti["file_path"] = filePath
 	}
 	if newString != "" {
-		payload["new_string"] = newString
+		ti["new_string"] = newString
+	}
+	payload := map[string]any{}
+	if len(ti) > 0 {
+		payload["tool_input"] = ti
 	}
 	return hooktype.HookInput{Tool: tool, Payload: payload, Env: map[string]string{}}
 }
@@ -81,7 +86,7 @@ func TestSupervisorStream_EnvDisable(t *testing.T) {
 	h := &supervisorstream.Hook{WorkCurrentDir: work, ProjectDir: proj, NowFn: fixedNow}
 	in := hooktype.HookInput{
 		Tool:    "Edit",
-		Payload: map[string]any{"path": "x.go"},
+		Payload: map[string]any{"tool_input": map[string]any{"file_path": "x.go"}},
 		Env:     map[string]string{"YAKOS_SUPERVISOR_DISABLE": "1"},
 	}
 	_, _ = h.Run(context.Background(), in)
@@ -153,7 +158,7 @@ func TestSupervisorStream_RiskRegexEscalates(t *testing.T) {
 	// Override payload.
 	in := hooktype.HookInput{
 		Tool:    "Edit",
-		Payload: map[string]any{"path": "deploy.sh", "new_string": "rm -rf /data"},
+		Payload: map[string]any{"tool_input": map[string]any{"file_path": "deploy.sh", "new_string": "rm -rf /data"}},
 		Env:     map[string]string{},
 	}
 	h2 := newHook(work, proj)

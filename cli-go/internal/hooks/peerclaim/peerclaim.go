@@ -38,6 +38,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/mailbox"
 )
@@ -148,10 +149,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		return out, nil
 	}
 
-	filePath := stringField(in.Payload, "path")
-	if filePath == "" {
-		filePath = stringField(in.Payload, "file_path")
-	}
+	filePath := hookio.ToolFilePath(in)
 	if filePath == "" {
 		return out, nil
 	}

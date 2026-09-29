@@ -36,6 +36,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
@@ -138,8 +139,8 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	sessionID := in.Env["CLAUDE_SESSION_ID"]
 
 	// Truncated previews to prevent buffer bloat.
-	newPreview := truncate(stringField(in.Payload, "new_string"), 300)
-	contentPreview := truncate(stringField(in.Payload, "content"), 300)
+	newPreview := truncate(hookio.ToolInputString(in, "new_string"), 300)
+	contentPreview := truncate(hookio.ToolInputString(in, "content"), 300)
 
 	// Build event JSON.
 	event := map[string]any{
@@ -519,12 +520,7 @@ func senderRole(in hooktype.HookInput) string {
 }
 
 func fileFromPayload(in hooktype.HookInput) string {
-	for _, key := range []string{"path", "file_path"} {
-		if s := stringField(in.Payload, key); s != "" {
-			return s
-		}
-	}
-	return ""
+	return hookio.ToolFilePath(in)
 }
 
 func stringField(payload map[string]any, key string) string {

@@ -184,6 +184,17 @@ func ToolInputField(in hooktype.HookInput, key string) any {
 	return ti[key]
 }
 
+// ToolFilePath is the Go-side equivalent of the bash hi_file_path helper:
+// jq's `.tool_input.file_path // .tool_input.notebook_path` rendered as
+// `jq -r` does, with command-substitution's trailing-newline stripping.
+// Edit/Write/MultiEdit carry the target under tool_input.file_path and
+// NotebookEdit under tool_input.notebook_path. It never reads a top-level
+// path/file_path: real Claude Code payloads do not carry one.
+func ToolFilePath(in hooktype.HookInput) string {
+	v := JQAlt(ToolInputField(in, "file_path"), ToolInputField(in, "notebook_path"))
+	return strings.TrimRight(JQRawOrJSON(v), "\n")
+}
+
 // Nested reads a raw (untyped) field at Payload[outer][inner] — the
 // Go-side equivalent of jq's `.outer.inner`. Returns nil if outer is
 // absent or not a JSON object, which also matches jq's `//`-chain

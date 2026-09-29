@@ -115,8 +115,5 @@ func senderRole(in hooktype.HookInput) string {
 // .tool_input.file_path // .tool_input.notebook_path (C4: NotebookEdit
 // carries its target under a different key).
 func fileFromPayload(in hooktype.HookInput) string {
-	if s := hookio.ToolInputString(in, "file_path"); s != "" {
-		return s
-	}
-	return hookio.ToolInputString(in, "notebook_path")
+	return hookio.ToolFilePath(in)
 }

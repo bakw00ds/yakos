@@ -29,6 +29,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
@@ -124,10 +125,7 @@ func (h *Hook) runPostToolUse(out hooktype.HookOutput, in hooktype.HookInput) (h
 	}
 
 	// Only act when the write targets plan.md.
-	filePath := stringField(in.Payload, "path")
-	if filePath == "" {
-		filePath = stringField(in.Payload, "file_path")
-	}
+	filePath := hookio.ToolFilePath(in)
 	// Normalise to forward slashes before the suffix check so that Windows
 	// paths (which use "\") and mixed-separator paths both match the
 	// canonical "/work/current/plan.md" suffix.

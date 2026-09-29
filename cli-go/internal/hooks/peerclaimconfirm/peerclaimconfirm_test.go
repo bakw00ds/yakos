@@ -36,7 +36,8 @@ func makeInput(tool, filePath string, env map[string]string) hooktype.HookInput 
 	env["YAKOS_COORD_ENABLED"] = "1"
 	payload := map[string]any{}
 	if filePath != "" {
-		payload["path"] = filePath
+		// Real Claude Code shape: the target rides tool_input.file_path.
+		payload["tool_input"] = map[string]any{"file_path": filePath}
 	}
 	return hooktype.HookInput{
 		Event:   "PostToolUse",
@@ -74,7 +75,7 @@ func TestCoordDisabledNoOp(t *testing.T) {
 	in := hooktype.HookInput{
 		Event:   "PostToolUse",
 		Tool:    "Edit",
-		Payload: map[string]any{"path": filepath.Join(tmp, "foo.go")},
+		Payload: map[string]any{"tool_input": map[string]any{"file_path": filepath.Join(tmp, "foo.go")}},
 		Env:     map[string]string{}, // no YAKOS_COORD_ENABLED
 	}
 	out, err := h.Run(context.Background(), in)
@@ -99,7 +100,7 @@ func TestNonWriteToolIgnored(t *testing.T) {
 		in := hooktype.HookInput{
 			Event:   "PostToolUse",
 			Tool:    tool,
-			Payload: map[string]any{"path": filepath.Join(tmp, "foo.go")},
+			Payload: map[string]any{"tool_input": map[string]any{"file_path": filepath.Join(tmp, "foo.go")}},
 			Env:     map[string]string{"YAKOS_COORD_ENABLED": "1"},
 		}
 		out, err := h.Run(context.Background(), in)
