@@ -53,6 +53,18 @@ _yakos() {
         'git-hooks:install/uninstall pre-push version gate'
         'completion:emit/install shell completion scripts'
         'supervise:manage the live shadow-agent supervisor'
+        'refresh:sync hooks and settings for wired projects'
+        'upgrade:download latest release and re-provision'
+        'serve:run the daemon + web console'
+        'console:manage console users and bootstrap tokens'
+        'events:stream live bus events (needs daemon)'
+        'mtls:manage mTLS client certs for the console'
+        'metrics:collect and report per-project quality metrics'
+        'telemetry:opt-in anonymised CLI telemetry'
+        'model-routing:evaluate and promote per-task model assignments'
+        'plan:score and correlate plan quality'
+        'work:record plan outcome and close work session'
+        'workflow:run a named multi-step workflow'
     )
 
     runtimes=(claude claude-sdk codex agy antigravity-sdk gemini)
