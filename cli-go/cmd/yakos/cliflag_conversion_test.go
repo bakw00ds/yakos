@@ -150,6 +150,20 @@ func TestDiagIntegration_FlagErrorText_BeforeAndAfterConversion(t *testing.T) {
 			wantStderr: "refresh: --project requires a path\n",
 			wantExit:   1,
 		},
+		{
+			name:       "refresh_hooks_impl_missing_value",
+			args:       []string{"refresh", "--hooks-impl"},
+			env:        map[string]string{"YAKOS_ROOT": repoRoot},
+			wantStderr: "refresh: --hooks-impl requires bash, go, or hybrid\n",
+			wantExit:   1,
+		},
+		{
+			name:       "refresh_hooks_impl_invalid_value",
+			args:       []string{"refresh", "--hooks-impl", "rust"},
+			env:        map[string]string{"YAKOS_ROOT": repoRoot},
+			wantStderr: "refresh: invalid hooks impl \"rust\" (want bash, go, or hybrid)\n",
+			wantExit:   1,
+		},
 		// ---- hooks install / lint ------------------------------------
 		{
 			name:       "hooks_install_project_missing_value",

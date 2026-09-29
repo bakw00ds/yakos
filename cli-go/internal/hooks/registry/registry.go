@@ -85,11 +85,12 @@ type Entry struct {
 
 	// GoReady marks a hook whose Go output has been brought to parity with
 	// its bash counterpart (verified by tests/run-hook-parity.sh) and is
-	// therefore safe for `yakos refresh --hooks-impl=go` to register as
-	// `yakos hook run <name>` instead of the .sh script. False means the
-	// hook still runs but is not yet parity-verified; refresh in `go` mode
-	// keeps writing the bash command for it until A-2 closes the gap
-	// (S-6 structural plan §2.5).
+	// therefore safe for `yakos refresh --hooks-impl=hybrid` to register as
+	// `yakos hook run <name>` instead of the .sh script; hybrid derives its
+	// list from this flag. False means the hook still runs but is not yet
+	// parity-verified. `--hooks-impl=go` is all-in: it registers every hook
+	// as Go, GoReady or not, and prints a warning naming the non-GoReady
+	// ones it switched (S-6 structural plan §2.5).
 	GoReady bool
 
 	// New constructs the Hook for this entry from Config.

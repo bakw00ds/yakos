@@ -15,6 +15,7 @@
 package refresh
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -67,6 +68,16 @@ type Config struct {
 
 	// ErrWriter is the error destination. Defaults to os.Stderr.
 	ErrWriter io.Writer
+
+	// HooksImpl is the explicit --hooks-impl choice. Empty means "not given":
+	// each project uses its persisted hooks_impl from .yakos.yml, else bash.
+	// A non-empty value overrides and (outside dry-run) re-persists.
+	HooksImpl HooksImpl
+
+	// YakosBinary overrides the absolute yakos path embedded in Go-form hook
+	// commands. Empty means the running binary (os.Executable, symlinks
+	// evaluated). Tests set it for determinism.
+	YakosBinary string
 
 	// HomeDir overrides $HOME. Used in tests. If empty, os.Getenv("HOME") is used.
 	HomeDir string
@@ -157,6 +168,14 @@ func Run(cfg Config) (*Report, error) {
 
 	report := &Report{DryRun: cfg.DryRun}
 
+	// Resolve and validate every project's hooks impl BEFORE any write, so a
+	// fail-closed refusal leaves the whole tree untouched.
+	templateFile := filepath.Join(cfg.YakosRoot, "lib", "settings", "settings.template.json")
+	impls, err := resolveProjectImpls(cfg, templateFile)
+	if err != nil {
+		return nil, err
+	}
+
 	// Phase: agent symlinks (once globally, not per-project)
 	_, _ = fmt.Fprintln(cfg.Writer, "Agent symlinks (~/.claude/agents/)")
 	agentRpt, err := syncAgents(cfg.YakosRoot, home, cfg.DryRun, cfg.Writer)
@@ -168,11 +187,10 @@ func Run(cfg Config) (*Report, error) {
 
 	// Per-project phases
 	hooksRoot := filepath.Join(cfg.YakosRoot, "lib", "hooks")
-	templateFile := filepath.Join(cfg.YakosRoot, "lib", "settings", "settings.template.json")
 
 	_, _ = fmt.Fprintln(cfg.Writer, "Project hook + settings refresh:")
 	for _, projPath := range cfg.ProjectPaths {
-		projRpt, err := refreshOne(projPath, hooksRoot, templateFile, cfg.DryRun, cfg.Writer, cfg.ErrWriter)
+		projRpt, err := refreshOne(projPath, hooksRoot, templateFile, cfg.DryRun, impls[projPath], cfg.Writer, cfg.ErrWriter)
 		if err != nil {
 			_, _ = fmt.Fprintf(cfg.ErrWriter, "refresh: project %s: %v\n", projPath, err)
 			continue
@@ -189,7 +207,7 @@ func Run(cfg Config) (*Report, error) {
 }
 
 // refreshOne runs hook sync + settings merge for a single project directory.
-func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, w, ew io.Writer) (ProjectReport, error) {
+func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, ri resolvedImpl, w, ew io.Writer) (ProjectReport, error) {
 	absPath, err := filepath.Abs(projPath)
 	if err != nil {
 		absPath = projPath
@@ -200,6 +218,12 @@ func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, w, ew io.
 	}
 
 	_, _ = fmt.Fprintf(w, "  project: %s\n", absPath)
+	_, _ = fmt.Fprintf(w, "    hooks-impl: %s (%s)\n", ri.impl, ri.source)
+	if ri.persist && !dryRun {
+		if err := PersistHooksImpl(absPath, ri.impl); err != nil {
+			return ProjectReport{}, fmt.Errorf("persisting hooks_impl: %w", err)
+		}
+	}
 
 	hooksDst := filepath.Join(absPath, "scripts", "hooks")
 
@@ -221,7 +245,7 @@ func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, w, ew io.
 		settingsRpt.Skipped = true
 		settingsRpt.SkipMsg = "skipped (no .claude/settings.json)"
 	} else {
-		settingsRpt, err = mergeSettingsForProject(templateFile, deployedSettings, dryRun, w)
+		settingsRpt, err = mergeSettingsForProject(templateFile, deployedSettings, dryRun, ri.impl, ri.bin, w)
 		if err != nil {
 			_, _ = fmt.Fprintf(ew, "refresh: settings merge error for %s: %v\n", absPath, err)
 		}
@@ -261,8 +285,8 @@ func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, w, ew io.
 
 // mergeSettingsForProject wraps MergeSettingsFiles and converts MergeStats into
 // SettingsPhaseReport for per-project reporting.
-func mergeSettingsForProject(templateFile, deployedFile string, dryRun bool, w io.Writer) (SettingsPhaseReport, error) {
-	stats, err := MergeSettingsFiles(templateFile, deployedFile, dryRun, w)
+func mergeSettingsForProject(templateFile, deployedFile string, dryRun bool, impl HooksImpl, bin string, w io.Writer) (SettingsPhaseReport, error) {
+	stats, err := MergeSettingsFilesImpl(templateFile, deployedFile, dryRun, w, impl, bin)
 	if err != nil {
 		return SettingsPhaseReport{}, err
 	}
@@ -750,4 +774,75 @@ func InferProjectFromCWD(cwd, home string) string {
 	}
 
 	return ""
+}
+
+// resolvedImpl is one project's effective hooks impl and where it came from.
+type resolvedImpl struct {
+	impl    HooksImpl
+	source  string // "flag", "persisted", or "default"
+	persist bool   // write hooks_impl to .yakos.yml (flag given)
+	bin     string // absolute yakos path for Go-form commands (go/hybrid)
+}
+
+// resolveProjectImpls decides each project's impl (flag > persisted >
+// bash) and validates go/hybrid against the Go registry. Any failure aborts
+// the run before a byte is written.
+func resolveProjectImpls(cfg Config, templateFile string) (map[string]resolvedImpl, error) {
+	out := make(map[string]resolvedImpl, len(cfg.ProjectPaths))
+	var tmpl map[string]any
+	loaded := false
+	warnedTemp, warnedGo := false, false
+	for _, p := range cfg.ProjectPaths {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			abs = p
+		}
+		ri := resolvedImpl{impl: HooksImplBash, source: "default"}
+		if cfg.HooksImpl != "" {
+			impl, err := ParseHooksImpl(string(cfg.HooksImpl))
+			if err != nil {
+				return nil, err
+			}
+			ri = resolvedImpl{impl: impl, source: "flag", persist: true}
+		} else if impl, found, err := ReadPersistedHooksImpl(abs); err != nil {
+			return nil, err
+		} else if found {
+			ri = resolvedImpl{impl: impl, source: "persisted"}
+		}
+		if ri.impl != HooksImplBash {
+			if !loaded {
+				data, err := os.ReadFile(templateFile) //nolint:gosec
+				if err != nil {
+					return nil, fmt.Errorf("reading template %s: %w", templateFile, err)
+				}
+				if err := json.Unmarshal(data, &tmpl); err != nil {
+					return nil, fmt.Errorf("template JSON invalid at %s: %w", templateFile, err)
+				}
+				loaded = true
+			}
+			bin := cfg.YakosBinary
+			if bin == "" {
+				var berr error
+				if bin, berr = runningBinary(); berr != nil {
+					return nil, fmt.Errorf("resolving the yakos binary path for Go hook commands: %w", berr)
+				}
+			}
+			ri.bin = bin
+			if !warnedTemp && ephemeralBinary(bin) {
+				warnedTemp = true
+				_, _ = fmt.Fprintf(cfg.ErrWriter, "refresh: warning: Go hook commands will point at %s, which looks temporary (temp dir or worktree); re-run refresh from an installed yakos\n", bin)
+			}
+			if !warnedGo && ri.impl == HooksImplGo {
+				warnedGo = true
+				if names := nonGoReadyIn(tmpl); len(names) > 0 {
+					_, _ = fmt.Fprintf(cfg.ErrWriter, "refresh: warning: --hooks-impl go also switches %d hook(s) not yet marked GoReady (parity-unverified): %s\n", len(names), strings.Join(names, ", "))
+				}
+			}
+			if err := ValidateHooksImpl(ri.impl, tmpl); err != nil {
+				return nil, fmt.Errorf("%s: %w", abs, err)
+			}
+		}
+		out[p] = ri
+	}
+	return out, nil
 }

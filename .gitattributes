@@ -30,3 +30,11 @@ cli-go/internal/consoleui/dist/vendor/drawflow/drawflow.min.css binary
 cli-go/internal/consoleui/dist/vendor/xterm/xterm.js binary
 cli-go/internal/consoleui/dist/vendor/xterm/xterm-addon-fit.js binary
 cli-go/internal/consoleui/dist/vendor/xterm/xterm.css binary
+
+# Golden settings.json compared byte-for-byte by internal/refresh tests;
+# autocrlf on Windows would turn them CRLF and fail the comparison.
+cli-go/internal/refresh/testdata/golden-bash/* binary
+
+# Refresh fixture settings.json files are inputs whose bytes flow into the
+# output when refresh sees them in sync; keep them LF on Windows too.
+cli-go/cmd/yakos/testdata/fixtures/refresh/*/.claude/settings.json text eol=lf

@@ -47,7 +47,7 @@ for the full install guide, including the dev/from-source path.
 | `yakos doctor` | Environment + install health check |
 | `yakos upgrade` | In-place binary upgrade + full re-provision (binary installs) |
 | `yakos update` | Pull framework updates + refresh symlinks (source/git installs) |
-| `yakos refresh` | Detect and repair per-project deployment drift |
+| `yakos refresh` | Detect and repair per-project deployment drift (`--hooks-impl bash\|go\|hybrid`, see docs/hooks-impl.md) |
 | `yakos uninstall` | Remove yakOS-owned symlinks (never touches your memory) |
 | `yakos metrics collect\|report\|trend\|compare\|gate\|serve\|install-hook\|uninstall-hook` | Project-health metrics time series |
 | `yakos skill plan-quality-eval <plan.md>` | Score a plan against the 6-dimension rubric |
