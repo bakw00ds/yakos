@@ -50,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Docs: plan-quality-score debounce (K-110).** `docs/hooks-impl.md` and
+  the settings template now state that the bash hook skips a `plan.md`
+  whose mtime is under 5 s old, and that the Go hook neither scores nor
+  debounces. No behavior change.
+
 - **Networked console explains "no access" instead of an empty shell
   (K-110).** An authenticated identity that resolves to no role (a cert
   with no `roles.json` entry, or a user whose stored role is
