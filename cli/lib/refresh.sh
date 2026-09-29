@@ -388,6 +388,13 @@ deployed_hooks = deployed["hooks"]
 
 stats = {"removed": 0, "added": 0}
 
+# Registrations an earlier template shipped that no template ships now; removed
+# so a script split migrates instead of leaving the old wiring behind. Keep in
+# sync with retiredRegistrations in cli-go/internal/refresh/settings.go.
+RETIRED_REGISTRATIONS = {
+    ("PostToolUse", "plan-quality-gate.sh"),  # K-81: split into plan-quality-score.sh
+}
+
 # PHASE A: remove superseded. A deployed hook whose canonical (event, name)
 # is in the template with a DIFFERENT matcher OR a DIFFERENT exact command
 # string (path-prefix drift) is removed; Phase B re-adds it in the template's
@@ -400,7 +407,13 @@ for event in list(deployed_hooks.keys()):
         for h in hooks_of(entry):
             cmd = command_of(h)
             if cmd:
-                d = template_desired.get((event, canonical_hook_name(cmd)))
+                cname = canonical_hook_name(cmd)
+                d = template_desired.get((event, cname))
+                if d is None and (event, cname) in RETIRED_REGISTRATIONS:
+                    # Shipped by an earlier template, by no template now
+                    # (see retiredRegistrations in cli-go/internal/refresh/settings.go).
+                    stats["removed"] += 1
+                    continue
                 if d is not None and (d[0] != m or d[1] != cmd):
                     stats["removed"] += 1
                     continue

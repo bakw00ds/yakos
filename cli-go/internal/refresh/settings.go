@@ -221,6 +221,14 @@ func performMerge(tmpl, deployed map[string]any) (MergeStats, error) {
 				cmd := commandOf(h)
 				if cmd != "" {
 					name := canonicalHookName(cmd)
+					if _, inTemplate := templateDesired[eventName{event, name}]; !inTemplate && isRetiredRegistration(event, name) {
+						// A registration an earlier template shipped that no
+						// template ships any more. Removing it (rather than
+						// leaving it as a "deployed-only" hook) is what makes
+						// a script split migrate instead of double-registering.
+						stats.Removed++
+						continue
+					}
 					if d, inTemplate := templateDesired[eventName{event, name}]; inTemplate {
 						if d.matcher == m && d.command != cmd && (isGoCommand(d.command) || isGoCommand(cmd)) {
 							// Implementation switch (bash <-> go) or Go binary path change for the
@@ -348,6 +356,26 @@ func performMerge(tmpl, deployed map[string]any) (MergeStats, error) {
 	// removes hooks the template has an entry for.
 
 	return stats, nil
+}
+
+// retiredRegistrations lists (event, canonical hook name) registrations that
+// an earlier template shipped and current templates deliberately do not.
+// Phase C would otherwise preserve them forever as "deployed-only" hooks, so a
+// script split would leave the old wiring behind.
+//
+//   - PostToolUse plan-quality-gate.sh (K-81): the script became a PreToolUse
+//     fail-closed gate only; its PostToolUse scoring role moved to
+//     plan-quality-score.sh, which Phase B adds. The PreToolUse registration
+//     of plan-quality-gate.sh is still in the template and is untouched.
+//
+// A retired pair is only removed when the template does not ship it, so
+// re-adding one to the template later is safe. Mirrored in cli/lib/refresh.sh.
+var retiredRegistrations = map[[2]string]bool{
+	{"PostToolUse", "plan-quality-gate.sh"}: true,
+}
+
+func isRetiredRegistration(event, name string) bool {
+	return retiredRegistrations[[2]string{event, name}]
 }
 
 // hooksDirMarker is the path segment every deployed hook command passes

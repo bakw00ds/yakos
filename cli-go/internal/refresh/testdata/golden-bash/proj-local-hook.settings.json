@@ -12,7 +12,7 @@
             "type": "command"
           },
           {
-            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/plan-quality-gate.sh",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/plan-quality-score.sh",
             "type": "command"
           }
         ],
@@ -98,7 +98,7 @@
             "type": "command"
           },
           {
-            "_doc": "Phase 2 plan-quality-gate PreToolUse path: blocks TeamCreate|Agent when .plan-blocked marker is present. Override with 'yakos plan score override <plan_id> --reason ...'",
+            "_doc": "Phase 2 plan-quality-gate PreToolUse gate (fails closed, K-81): blocks TeamCreate|Agent when .plan-blocked marker is present. Override with 'yakos plan score override <plan_id> --reason ...'",
             "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/plan-quality-gate.sh",
             "type": "command"
           },
