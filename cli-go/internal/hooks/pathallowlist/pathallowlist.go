@@ -128,7 +128,10 @@ func (c *ctx) run() {
 
 	// CLAUDE_PROJECT_DIR with ALL trailing slashes stripped (R2-1/R3-1),
 	// never reducing "/" itself.
-	cpd := c.projectDirEnv()
+	// Separators are normalized to "/" first (a no-op on POSIX, where a
+	// backslash is a legal filename character) so a Windows project dir
+	// compares equal to the "/"-normalized tool path below.
+	cpd := filepath.ToSlash(c.projectDirEnv())
 	for cpd != "" && cpd != "/" && strings.HasSuffix(cpd, "/") {
 		cpd = strings.TrimSuffix(cpd, "/")
 	}
