@@ -208,6 +208,7 @@ func Run(cfg Config) (*Report, error) {
 
 	if cfg.ProjectPath != "" {
 		r.checkHookDrift()
+		r.checkHookBinaries()
 		r.checkPrePushGate()
 	}
 
@@ -513,6 +514,23 @@ func (r *runner) checkHookDrift() {
 	}
 	r.ok(SectionHookDrift, "%d clean, %d drifted, %d unhashed (no .framework-hash sibling)",
 		report.Clean, report.Drifted, report.Unhashed)
+	_, _ = fmt.Fprintln(r.w, "")
+}
+
+// checkHookBinaries warns when a hook command in the project's settings.json
+// pins an absolute yakos path (`refresh --hooks-impl go|hybrid`) that no
+// longer exists or is not executable: the hook then exits 127, which Claude
+// Code treats as non-blocking, so the gate is silently off. It prints
+// nothing unless triggered, which keeps output identical to bash doctor.sh
+// on healthy projects.
+func (r *runner) checkHookBinaries() {
+	missing := missingHookBinaries(r.cfg.ProjectPath)
+	if len(missing) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(r.w, "Project hook binaries: %s/.claude/settings.json\n", r.cfg.ProjectPath)
+	r.warn(SectionHookDrift, "hook binary missing or not executable (exit 127 = silent fail-open): %s; run 'yakos refresh --hooks-impl go' to re-pin",
+		strings.Join(missing, ", "))
 	_, _ = fmt.Fprintln(r.w, "")
 }
 
