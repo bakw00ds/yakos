@@ -137,6 +137,25 @@ _hi_fail_or_warn() {
     echo "${name}: WARN — $reason. This hook is degraded for this event (jq unavailable or stdin unparseable); treating input as empty." >&2
 }
 
+# hi_skip_if_no_jq — for NON-BLOCKING (telemetry / report-only) hooks.
+#
+# Call before hi_init. When jq is missing, log a one-line warning to stderr
+# and exit 0 so the tool call proceeds, instead of dying with exit 127 from
+# an unguarded `$(jq ...)` under `set -e` (K-81). Blocking / security hooks
+# (path-allowlist, secret-scan, budget-guard, ...) must NOT call this: they
+# set HOOK_FAIL_CLOSED and rely on hi_init's fail-closed exit 2.
+hi_skip_if_no_jq() {
+    command -v jq >/dev/null 2>&1 && return 0
+    local name
+    name="$(basename -- "${0:-hook}" 2>/dev/null || echo hook)"
+    name="${name%.sh}"
+    echo "${name}: WARN — jq is not installed or not on PATH; skipping this non-blocking hook (tool call not blocked)." >&2
+    if command -v ho_log >/dev/null 2>&1; then
+        ho_log "$name" "WARN" "pass" "jq missing; non-blocking hook skipped" "{}" 2>/dev/null || true
+    fi
+    exit 0
+}
+
 hi_init() {
     # Slurp stdin once. Subsequent hi_* calls query $HI_INPUT via jq.
     if [ -t 0 ]; then
