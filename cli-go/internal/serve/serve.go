@@ -684,8 +684,9 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 
 		// Wire the terminal manager when --share-terminal is active (ADR-0008 P1).
-		// The manager is started here and its lifecycle is tied to ctx so
-		// daemon shutdown cleanly stops all active PTY sessions.
+		// The manager is started here; its idle reaper is tied to ctx and Run
+		// calls Manager.Stop after the JSON-RPC server returns, which closes
+		// all active PTY sessions (S-2 R23: ctx alone closes none).
 		// cfg.TerminalManager is also set so the cfgWithBus copy (built below)
 		// picks it up automatically.
 		if cfg.ShareTerminal {
@@ -915,6 +916,14 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// Serve blocks until ctx is done or the listener is closed.
 	rpcErr := srv.Serve(ctx, ln)
+
+	// S-2 R23: ctx cancellation stops only the terminal manager's idle
+	// reaper; it closes no session. Stop it explicitly so daemon-owned PTYs
+	// are closed and external sessions and their owner records are dropped.
+	// Stop is idempotent, so an injected manager the caller also stops is fine.
+	if cfg.TerminalManager != nil {
+		cfg.TerminalManager.Stop()
+	}
 
 	// Wait for WS, REST, perf-dashboard, console, gRPC, and MCP servers to drain.
 	select {

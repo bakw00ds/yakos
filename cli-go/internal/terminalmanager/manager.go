@@ -56,6 +56,11 @@ const (
 	// conventional shell "command timed out" exit code.
 	idleReapExitCode = 124
 
+	// shutdownExitCode is the exit code delivered to subscribers of an
+	// external session closed by Manager.Stop (daemon shutdown). 143 is the
+	// conventional 128+SIGTERM.
+	shutdownExitCode = 143
+
 	// maxOwnerFramePayload is the maximum keystroke payload that SendInput will
 	// accept.  It must be < math.MaxUint16 - 1 so the uint16 frame-length prefix
 	// never overflows.  Kept well below the 64 KB WS bound as defense-in-depth.
@@ -190,6 +195,22 @@ func (m *Manager) Stop() {
 		m.mu.Unlock()
 		for _, id := range ids {
 			_ = m.Close(id)
+		}
+		// S-2 R23: externally-owned sessions live in m.externals, not
+		// m.entries, and used to survive Stop with their owner record and
+		// subscribers intact. Drop and close them the way the idle reaper
+		// does, delivering an exit frame so browser clients stop believing
+		// the terminal is live.
+		m.mu.Lock()
+		exts := make([]*externalSession, 0, len(m.externals))
+		for id, ext := range m.externals {
+			exts = append(exts, ext)
+			delete(m.externals, id)
+			delete(m.owners, id)
+		}
+		m.mu.Unlock()
+		for _, ext := range exts {
+			ext.pushExit(shutdownExitCode)
 		}
 	})
 }
