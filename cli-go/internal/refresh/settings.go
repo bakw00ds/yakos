@@ -15,6 +15,7 @@ package refresh
 // No file locking in Phase 1 (daemon-era locking is Phase 2).
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -75,13 +76,19 @@ func MergeSettingsFiles(templateFile, deployedFile string, dryRun bool, w io.Wri
 		return stats, nil
 	}
 
-	// Marshal with 2-space indent to match python's json.dumps default.
-	out, err := json.MarshalIndent(deployed, "", "  ")
-	if err != nil {
+	// Marshal with 2-space indent and sorted map keys, WITHOUT HTML
+	// escaping, so the bytes match the bash implementation's
+	// json.dumps(indent=2, ensure_ascii=False, sort_keys=True): a doc string
+	// containing <plan_id> must not become \u003cplan_id\u003e. Encode
+	// appends the trailing newline itself.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(deployed); err != nil {
 		return MergeStats{}, fmt.Errorf("marshalling merged JSON: %w", err)
 	}
-	// Append a trailing newline (python json.dumps + print() appends one).
-	out = append(out, '\n')
+	out := buf.Bytes()
 
 	// Atomic write: temp file in same dir + os.Rename.
 	dir := filepath.Dir(deployedFile)

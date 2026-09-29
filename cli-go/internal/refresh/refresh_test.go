@@ -621,6 +621,100 @@ func TestMergeSettings_SameBasenameDifferentSubdirsStayDistinct(t *testing.T) {
 	}
 }
 
+// TestMergeSettings_NoHTMLEscaping guards byte parity with the bash merge
+// (json.dumps ensure_ascii=False): <, > and & in a doc string must be
+// written raw, not as \u003c / \u003e / \u0026. tests/run-refresh-test.sh
+// Test 14 asserts the same expected bytes from the bash side.
+//
+// Mutation test: switch the encoder back to json.MarshalIndent and this
+// fails.
+func TestMergeSettings_NoHTMLEscaping(t *testing.T) {
+	tmp := t.TempDir()
+	templateFile := filepath.Join(tmp, "template.json")
+	deployedFile := filepath.Join(tmp, "settings.json")
+	tmpl := `{"hooks":{"Stop":[{"_doc":"run <plan_id> && a > b","hooks":[{"type":"command","command":"${CLAUDE_PROJECT_DIR}/scripts/hooks/x.sh"}]}]}}`
+	if err := os.WriteFile(templateFile, []byte(tmpl), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(deployedFile, []byte(`{"hooks":{}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MergeSettingsFiles(templateFile, deployedFile, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(deployedFile) //nolint:gosec
+	if !strings.Contains(string(got), `"_doc": "run <plan_id> && a > b"`) {
+		t.Errorf("doc string not written raw:\n%s", got)
+	}
+	if strings.Contains(string(got), `\u00`) {
+		t.Errorf("HTML-escaped sequences present:\n%s", got)
+	}
+	if !strings.HasSuffix(string(got), "}\n") || strings.HasSuffix(string(got), "}\n\n") {
+		t.Errorf("want exactly one trailing newline; got %q", got[len(got)-3:])
+	}
+}
+
+// TestSyncHooks_PrunesOrphanLegacyMirror covers the one-shot cleanup of the
+// old-layout scripts/hooks/legacy/ subdirectory (K-94 review finding 3).
+//
+// Mutation test: remove the pruneLegacyMirror call and the covered case
+// fails; make it prune unconditionally and the uncovered case fails.
+func TestSyncHooks_PrunesOrphanLegacyMirror(t *testing.T) {
+	setup := func(withOrphanOnly bool) (src, dst string) {
+		src, dst = t.TempDir(), t.TempDir()
+		if err := os.MkdirAll(filepath.Join(src, "legacy"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.WriteFile(filepath.Join(src, "legacy", "a.sh"), []byte("#!/bin/sh\n"), 0755)
+		_ = os.MkdirAll(filepath.Join(dst, "legacy"), 0755)
+		_ = os.WriteFile(filepath.Join(dst, "legacy", "a.sh"), []byte("#!/bin/sh\n"), 0755)
+		_ = os.WriteFile(filepath.Join(dst, "legacy", "a.sh.framework-hash"), []byte("x\n"), 0644)
+		if withOrphanOnly {
+			// A file with no flat counterpart anywhere.
+			_ = os.WriteFile(filepath.Join(dst, "legacy", "mine.sh"), []byte("#!/bin/sh\n"), 0755)
+		}
+		return
+	}
+
+	// Covered: a.sh deployed flat by pass 2, sidecar flat too -> pruned.
+	src, dst := setup(false)
+	var sb strings.Builder
+	if _, err := syncHooks(src, dst, false, &sb); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "legacy")); !os.IsNotExist(err) {
+		t.Errorf("orphan legacy/ should be removed; err=%v", err)
+	}
+	if !strings.Contains(sb.String(), "removed orphan legacy/ subdir (2 files") {
+		t.Errorf("missing log line; got %q", sb.String())
+	}
+
+	// Dry run: reports, removes nothing.
+	src, dst = setup(false)
+	// Dry run writes nothing, so the flat counterparts must already exist.
+	_ = os.WriteFile(filepath.Join(dst, "a.sh"), []byte("#!/bin/sh\n"), 0755)
+	_ = os.WriteFile(filepath.Join(dst, "a.sh.framework-hash"), []byte("x\n"), 0644)
+	sb.Reset()
+	if _, err := syncHooks(src, dst, true, &sb); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "legacy")); err != nil {
+		t.Errorf("dry-run must not remove legacy/: %v", err)
+	}
+	if !strings.Contains(sb.String(), "would remove orphan legacy/") {
+		t.Errorf("dry-run log line missing; got %q", sb.String())
+	}
+
+	// Uncovered: mine.sh has no flat counterpart -> left alone.
+	src, dst = setup(true)
+	if _, err := syncHooks(src, dst, false, &sb); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "legacy", "mine.sh")); err != nil {
+		t.Errorf("legacy/ with an uncovered file must be preserved: %v", err)
+	}
+}
+
 // ---- hook sync unit tests ---------------------------------------------------
 
 // TestSyncHooks_NewAndStale creates a fake srcRoot with two hooks and a dstRoot

@@ -328,7 +328,7 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 				if err := copyFile(srcPath, dstPath); err != nil {
 					return
 				}
-				if err := os.WriteFile(hashFile, []byte(srcHash), 0644); err != nil { //nolint:gosec
+				if err := os.WriteFile(hashFile, []byte(srcHash+"\n"), 0644); err != nil { //nolint:gosec
 					return
 				}
 			}
@@ -350,7 +350,7 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 				if err := copyFile(srcPath, dstPath); err != nil {
 					return
 				}
-				if err := os.WriteFile(hashFile, []byte(srcHash), 0644); err != nil { //nolint:gosec
+				if err := os.WriteFile(hashFile, []byte(srcHash+"\n"), 0644); err != nil { //nolint:gosec
 					return
 				}
 			}
@@ -358,7 +358,7 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 		} else {
 			// OK — ensure sidecar is up to date even if content matches
 			if !dryRun {
-				_ = os.WriteFile(hashFile, []byte(srcHash), 0644) //nolint:gosec
+				_ = os.WriteFile(hashFile, []byte(srcHash+"\n"), 0644) //nolint:gosec
 			}
 			rpt.OK++
 		}
@@ -428,7 +428,47 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 		})
 	}
 
+	pruneLegacyMirror(dstRoot, dryRun, w)
+
 	return rpt, nil
+}
+
+// pruneLegacyMirror is a one-shot cleanup for projects refreshed under the
+// old layout, which mirrored lib/hooks/legacy/ as scripts/hooks/legacy/. If
+// that subdirectory exists and every file in it has a flat counterpart
+// (same basename) directly under dstRoot, it is a stale orphan and is
+// removed, logging one line. If any file lacks a counterpart the directory
+// is left alone (it may hold something operator-owned).
+// cli/lib/refresh.sh _prune_legacy_mirror mirrors this exactly.
+func pruneLegacyMirror(dstRoot string, dryRun bool, w io.Writer) {
+	legacy := filepath.Join(dstRoot, "legacy")
+	fi, err := os.Lstat(legacy)
+	if err != nil || !fi.IsDir() {
+		return
+	}
+	count := 0
+	allCovered := true
+	_ = filepath.Walk(legacy, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		count++
+		if _, statErr := os.Stat(filepath.Join(dstRoot, filepath.Base(p))); statErr != nil {
+			allCovered = false
+		}
+		return nil
+	})
+	if !allCovered {
+		return
+	}
+	if dryRun {
+		_, _ = fmt.Fprintf(w, "    [dry-run] hooks: would remove orphan legacy/ subdir (%d files, all have flat counterparts)\n", count)
+		return
+	}
+	if err := os.RemoveAll(legacy); err != nil {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "    [hooks] removed orphan legacy/ subdir (%d files, all have flat counterparts)\n", count)
 }
 
 // copyFile copies the file at src to dst, preserving execute permission.
