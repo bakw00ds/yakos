@@ -1688,6 +1688,10 @@ func TestSyncHooks_ForcesExecutableMode(t *testing.T) {
 		}
 		return p
 	}
+	if err := os.MkdirAll(filepath.Join(src, "per-domain"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeMode(src, "per-domain/backend-validate.sh", "#!/bin/sh\nexit 2\n", 0o644)
 	writeMode(src, "new-hook.sh", "#!/bin/sh\nexit 2\n", 0o644)
 	writeMode(src, "same-hook.sh", "#!/bin/sh\nexit 2\n", 0o644)
 	writeMode(src, "stale-hook.sh", "#!/bin/sh\nexit 2\n", 0o644)
@@ -1697,7 +1701,7 @@ func TestSyncHooks_ForcesExecutableMode(t *testing.T) {
 	if _, err := syncHooks(src, dst, false, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []string{"new-hook.sh", "same-hook.sh", "stale-hook.sh"} {
+	for _, n := range []string{"new-hook.sh", "same-hook.sh", "stale-hook.sh", "per-domain/backend-validate.sh"} {
 		fi, err := os.Stat(filepath.Join(dst, n))
 		if err != nil {
 			t.Fatal(err)
