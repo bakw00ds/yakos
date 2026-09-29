@@ -45,7 +45,7 @@ for the full install guide, including the dev/from-source path.
 | `yakos kanban` | Render the WIP board; `serve` opens a web UI |
 | `yakos supervise enable` | Turn on the live shadow-agent supervisor |
 | `yakos doctor` | Environment + install health check |
-| `yakos upgrade` | In-place binary upgrade + full re-provision (binary installs) |
+| `yakos upgrade` | In-place binary upgrade + full re-provision (binary installs; v0.60.0.0 must reinstall once via install.sh, see UPGRADING.md) |
 | `yakos update` | Pull framework updates + refresh symlinks (source/git installs) |
 | `yakos refresh` | Detect and repair per-project deployment drift (`--hooks-impl bash\|go\|hybrid`, see docs/hooks-impl.md) |
 | `yakos uninstall` | Remove yakOS-owned symlinks (never touches your memory) |

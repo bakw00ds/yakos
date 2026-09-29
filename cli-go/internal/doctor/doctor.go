@@ -38,6 +38,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/bakw00ds/yakos/internal/buildinfo"
 )
 
 // Severity describes the importance of a finding.
@@ -214,6 +216,7 @@ func Run(cfg Config) (*Report, error) {
 	r.checkRequiredCommands()
 	r.checkOptionalCommands()
 	r.checkInstallPointer()
+	r.checkBrokenSelfUpdate(buildinfo.Version)
 	r.checkSymlinks()
 	r.checkSettingsJSON()
 	r.checkAutoMemory()
@@ -303,6 +306,17 @@ func (r *runner) checkRequiredCommands() {
 			r.err(SectionRequiredCommands, "%s: not found in PATH", c)
 		}
 	}
+	_, _ = fmt.Fprintln(r.w, "")
+}
+
+// checkBrokenSelfUpdate warns when the running binary is v0.60.0.0, whose
+// self-updater rejects GitHub's release-assets CDN redirect (K-113) and so
+// cannot upgrade itself.  It prints nothing for any other version.
+func (r *runner) checkBrokenSelfUpdate(running string) {
+	if strings.TrimPrefix(strings.TrimSpace(running), "v") != "0.60.0.0" {
+		return
+	}
+	r.warn(SectionInstallPointer, "v0.60.0.0 cannot self-update ('yakos upgrade' rejects GitHub's asset host); reinstall via scripts/install.sh, see UPGRADING.md")
 	_, _ = fmt.Fprintln(r.w, "")
 }
 
