@@ -155,7 +155,8 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 				"max_tool_calls exceeded but bypass active",
 				map[string]any{"cap": "max_tool_calls", "tool_call_count": state.ToolCallCount,
 					"elapsed_seconds": elapsed, "repeat_count": state.LastToolRunCount, "tool": tool, "bypass": true})
-			return out, nil
+			// Like bash, a bypassed cap only logs a WARN; the remaining cap
+			// checks still run (a bypass for one cap must not waive the others).
 		} else {
 			h.appendLog(&out, in, now, "BLOCK", "block",
 				fmt.Sprintf("session tool-call count %d exceeds cap %d", state.ToolCallCount, *cfg.MaxToolCalls),
@@ -188,7 +189,8 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 				"max_wall_seconds exceeded but bypass active",
 				map[string]any{"cap": "max_wall_seconds", "tool_call_count": state.ToolCallCount,
 					"elapsed_seconds": elapsed, "repeat_count": state.LastToolRunCount, "tool": tool, "bypass": true})
-			return out, nil
+			// Like bash, a bypassed cap only logs a WARN; the remaining cap
+			// checks still run (a bypass for one cap must not waive the others).
 		} else {
 			h.appendLog(&out, in, now, "BLOCK", "block",
 				fmt.Sprintf("session elapsed %ds exceeds cap %ds", elapsed, *cfg.MaxWallSeconds),
@@ -216,7 +218,8 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 				fmt.Sprintf("%s repeated %d times in a row but bypass active", tool, state.LastToolRunCount),
 				map[string]any{"cap": "max_repeat_same_tool", "tool_call_count": state.ToolCallCount,
 					"elapsed_seconds": elapsed, "repeat_count": state.LastToolRunCount, "tool": tool, "bypass": true})
-			return out, nil
+			// Like bash, a bypassed cap only logs a WARN; the remaining cap
+			// checks still run (a bypass for one cap must not waive the others).
 		} else {
 			h.appendLog(&out, in, now, "BLOCK", "block",
 				fmt.Sprintf("%s repeated %d times in a row, exceeds cap %d (likely loop)", tool, state.LastToolRunCount, *cfg.MaxRepeatSameTool),
