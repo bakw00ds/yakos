@@ -23,8 +23,8 @@ HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
 # compat.sh provides ct_encode_project_path / ct_iso_utc / ct_iso_now_z / ct_log,
 # all used below. It was never sourced, so every probe hit "command not found"
 # inside a `|| true` and logged probe_unavailable (K-101). Check the source
-# explicitly (bash 3.2 does not abort on a failed `.`, bash 5 returns 0 on a
-# parse error) and verify the sentinel. A trial source in a subshell comes
+# explicitly (bash 3.2 does not abort on a failed `.`) and verify the sentinel,
+# which catches a compat.sh truncated at a statement boundary. A trial source in a subshell comes
 # first: bash 3.2 exits the WHOLE shell with status 2 (a block) on a parse
 # error in a sourced file, and this telemetry hook must never block. On any
 # failure warn and exit 0.
