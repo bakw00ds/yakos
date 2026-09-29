@@ -5,10 +5,15 @@
 //   - HTTPS only; TLS verification on by default.
 //   - GitHub repo is pinned in the code (repoOwner/repoName constants) and
 //     never taken from user input.
-//   - HTTP redirects are followed only when the destination uses HTTPS and
-//     its host is on the allowlist (github.com, objects.githubusercontent.com,
-//     releases.githubusercontent.com, codeload.github.com); any non-HTTPS
-//     redirect or redirect to an unlisted host causes the download to abort.
+//   - HTTP redirects are followed only when the destination uses HTTPS, has
+//     no userinfo, uses the default port (443), and its host is either
+//     exactly github.com or codeload.github.com, or a single-label
+//     subdomain of githubusercontent.com (objects., release-assets., ...).
+//     GitHub rotates its asset CDN hostnames (K-113: release-assets.
+//     githubusercontent.com), so the CDN is matched by suffix rather than by
+//     a fixed list; deeper subdomains, look-alike suffixes, trailing dots and
+//     non-ASCII hosts are rejected.  Any non-HTTPS redirect, unlisted host,
+//     or chain longer than maxRedirects aborts the download.
 //   - The release tag is validated against a strict regex before use in
 //     any URL or filename, preventing path traversal.
 //   - Every downloaded binary is SHA-256 verified against the release's
@@ -68,13 +73,22 @@ const (
 	downloadTimeout = 0
 )
 
-// allowedRedirectHosts is the allowlist for HTTP redirect destinations.
-var allowedRedirectHosts = []string{
-	"github.com",
-	"objects.githubusercontent.com",
-	"releases.githubusercontent.com",
-	"codeload.github.com",
+// maxRedirects caps the redirect chain length.  Setting CheckRedirect on an
+// http.Client replaces net/http's built-in cap of 10, so it is re-imposed here.
+const maxRedirects = 10
+
+// allowedExactHosts are the hosts allowed verbatim as redirect destinations.
+var allowedExactHosts = map[string]bool{
+	"github.com":          true,
+	"codeload.github.com": true,
 }
+
+// cdnSuffix is the parent domain of GitHub's asset CDN hosts.  Exactly one
+// extra DNS label is allowed in front of it.
+const cdnSuffix = ".githubusercontent.com"
+
+// cdnLabelRe matches the single permitted label in front of cdnSuffix.
+var cdnLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 // tagRe validates a release tag before it is interpolated into any URL or
 // filename.  It accepts the forms "v1.2.3", "v1.2.3.4", "1.2.3", "1.2.3.4".
@@ -499,11 +513,9 @@ func tlsTransport() *http.Transport {
 // the real policy with a test-server transport.
 func BuildDefaultClient() *http.Client {
 	return &http.Client{
-		Timeout:   defaultTimeout,
-		Transport: tlsTransport(),
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return checkRedirectHost(req.URL)
-		},
+		Timeout:       defaultTimeout,
+		Transport:     tlsTransport(),
+		CheckRedirect: checkRedirect,
 	}
 }
 
@@ -514,29 +526,52 @@ func BuildDefaultClient() *http.Client {
 // minimum apply as the metadata client.
 func buildDownloadClient() *http.Client {
 	return &http.Client{
-		Timeout:   downloadTimeout,
-		Transport: tlsTransport(),
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return checkRedirectHost(req.URL)
-		},
+		Timeout:       downloadTimeout,
+		Transport:     tlsTransport(),
+		CheckRedirect: checkRedirect,
 	}
 }
 
+// checkRedirect is the shared CheckRedirect policy: bounded chain length plus
+// checkRedirectHost on the destination.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("selfupdate: stopped after %d redirects", maxRedirects)
+	}
+	return checkRedirectHost(req.URL)
+}
+
+// isAllowedHost reports whether host (lower-cased, port stripped) is on the
+// redirect allowlist: an exact host, or one label under githubusercontent.com.
+func isAllowedHost(host string) bool {
+	if allowedExactHosts[host] {
+		return true
+	}
+	if !strings.HasSuffix(host, cdnSuffix) {
+		return false
+	}
+	return cdnLabelRe.MatchString(strings.TrimSuffix(host, cdnSuffix))
+}
+
 // checkRedirectHost returns an error when the redirect destination uses a
-// non-HTTPS scheme or when the host is not on the allowlist.
-// Both checks are required: an https→http downgrade to an allowlisted host
-// would otherwise slip through.
+// non-HTTPS scheme, carries userinfo, uses a port other than 443, or has a
+// host that is not on the allowlist.  Every check is required: an
+// https->http downgrade to an allowlisted host would otherwise slip through.
 func checkRedirectHost(u *url.URL) error {
 	if strings.ToLower(u.Scheme) != "https" {
 		return fmt.Errorf("selfupdate: redirect to non-HTTPS URL %q rejected", u.String())
 	}
-	host := strings.ToLower(u.Hostname())
-	for _, allowed := range allowedRedirectHosts {
-		if host == allowed || strings.HasSuffix(host, "."+allowed) {
-			return nil
-		}
+	if u.User != nil {
+		return fmt.Errorf("selfupdate: redirect URL with userinfo rejected")
 	}
-	return fmt.Errorf("selfupdate: redirect to disallowed host %q rejected", host)
+	if p := u.Port(); p != "" && p != "443" {
+		return fmt.Errorf("selfupdate: redirect to non-default port %q rejected", p)
+	}
+	host := strings.ToLower(u.Hostname())
+	if !isAllowedHost(host) {
+		return fmt.Errorf("selfupdate: redirect to disallowed host %q rejected", host)
+	}
+	return nil
 }
 
 // isNewer reports whether candidate is strictly newer than base using the
