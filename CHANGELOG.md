@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Unrecognised `users.json` role now resolves to no access (K-110).**
+  A hand-edited role such as `"Raed"` used to be parsed leniently as
+  `read`. It now maps to `RoleNone`, matching the `roles.json` posture
+  from K-98, and logs one WARN per user and value naming the user. The
+  raw string is still shown in the admin user list.
+  **Migration:** fix any typo'd `role` values in
+  `~/.yakos-state/users/users.json` (valid: `read`, `dispatch`,
+  `flows-run`, `admin`); an affected user otherwise loses read access.
+
 - **Unmapped client-cert CN now resolves to no access (K-98, ADR-0005
   Amendment 2026-09-29).** Any cert signed by the daemon CA whose CN was
   not in `mtls/roles.json` used to get `read` on kanban, flows list/get,

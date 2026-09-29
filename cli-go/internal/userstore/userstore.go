@@ -37,6 +37,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -251,10 +252,18 @@ type PublicUser struct {
 	SessionEpoch     int        `json:"sessionEpoch"`
 }
 
-func toPublic(u user) PublicUser {
+// toPublic builds the caller-facing view.  An unrecognised role string
+// (typo such as "Raed", "", or "none") resolves to netid.RoleNone, matching
+// the netid.RoleMapper fail-closed posture, and logs one WARN per
+// (user, value).  Callers must hold s.mu.
+func (s *Store) toPublic(u user) PublicUser {
+	role, ok := netid.ParseRoleStrict(u.Role)
+	if !ok {
+		s.warnBadRoleLocked(u.Username, u.Role)
+	}
 	return PublicUser{
 		Username:         u.Username,
-		Role:             netid.ParseRole(u.Role),
+		Role:             role,
 		RoleString:       u.Role,
 		Disabled:         u.Disabled,
 		PasswordResetReq: u.PasswordResetReq,
@@ -281,6 +290,24 @@ type Store struct {
 	mu     sync.Mutex
 	data   storeFile
 	logger func(msg string) // optional; called on non-fatal internal errors
+
+	warnedRoles map[string]struct{} // dedup keys for bad-role WARN logs
+}
+
+// warnBadRoleLocked logs once per (user, value) so per-request reads do not
+// flood the log.  "none" is not a valid stored role, so it warns too.
+func (s *Store) warnBadRoleLocked(username, role string) {
+	key := username + "\x00" + role
+	if _, dup := s.warnedRoles[key]; dup {
+		return
+	}
+	if s.warnedRoles == nil {
+		s.warnedRoles = make(map[string]struct{})
+	}
+	s.warnedRoles[key] = struct{}{}
+	slog.Warn("userstore: users.json has an unrecognised role; treating user as no access",
+		"user", username, "role", role,
+		"valid_roles", "read, dispatch, flows-run, admin")
 }
 
 // Open loads (or initialises) the user store at path.
@@ -469,7 +496,7 @@ func (s *Store) Get(username string) (PublicUser, bool) {
 	if !ok {
 		return PublicUser{}, false
 	}
-	return toPublic(u), true
+	return s.toPublic(u), true
 }
 
 // List returns all users as PublicUser (no password hashes).
@@ -480,7 +507,7 @@ func (s *Store) List() []PublicUser {
 
 	out := make([]PublicUser, len(s.data.Users))
 	for i, u := range s.data.Users {
-		out[i] = toPublic(u)
+		out[i] = s.toPublic(u)
 	}
 	return out
 }
@@ -555,7 +582,7 @@ func (s *Store) Verify(username, password string) (PublicUser, error) {
 		s.logger(fmt.Sprintf("userstore: failed to persist login-success state for %q: %v", u.Username, persistErr))
 	}
 
-	return toPublic(u), nil
+	return s.toPublic(u), nil
 }
 
 // SetRole sets the role for username and bumps SessionEpoch, atomically

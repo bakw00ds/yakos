@@ -3,6 +3,7 @@ package userstore_test
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1305,4 +1306,81 @@ func TestSetRole_RoleNone_Rejected(t *testing.T) {
 	if pub.Role != netid.RoleRead {
 		t.Errorf("SetRole with RoleNone: user role changed to %v; want RoleRead (original)", pub.Role)
 	}
+}
+
+// ---- K-110: unknown stored role fails closed --------------------------------
+
+// TestUnknownStoredRole_ResolvesToRoleNone_WarnsOnce hand-edits users.json
+// with typo'd roles.  Each must resolve to RoleNone (not read), keep the raw
+// string for admin display, and log exactly one WARN naming the user.
+// Not parallel: it swaps the process-wide slog default.
+func TestUnknownStoredRole_ResolvesToRoleNone_WarnsOnce(t *testing.T) {
+	var buf strings.Builder
+	var mu sync.Mutex
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&lockedWriter{&buf, &mu}, nil)))
+	defer slog.SetDefault(prev)
+
+	path := filepath.Join(t.TempDir(), "users.json")
+	body := `{"users":[
+	 {"username":"typo","passwordHash":"x","role":"Raed"},
+	 {"username":"empty","passwordHash":"x","role":""},
+	 {"username":"explicit-none","passwordHash":"x","role":"none"},
+	 {"username":"good","passwordHash":"x","role":"dispatch"},
+	 {"username":"goodadmin","passwordHash":"x","role":"admin"}]}`
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := userstore.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	for _, name := range []string{"typo", "empty", "explicit-none"} {
+		pu, ok := s.Get(name)
+		if !ok {
+			t.Fatalf("%s missing", name)
+		}
+		if pu.Role != netid.RoleNone {
+			t.Errorf("%s: role = %v; want RoleNone", name, pu.Role)
+		}
+	}
+	if pu, _ := s.Get("typo"); pu.RoleString != "Raed" {
+		t.Errorf("RoleString = %q; want raw %q", pu.RoleString, "Raed")
+	}
+	if pu, _ := s.Get("good"); pu.Role != netid.RoleDispatch {
+		t.Errorf("good: role = %v; want dispatch", pu.Role)
+	}
+	if pu, _ := s.Get("goodadmin"); pu.Role != netid.RoleAdmin {
+		t.Errorf("goodadmin: role = %v; want admin", pu.Role)
+	}
+
+	// Repeat reads: dedup must hold.
+	for i := 0; i < 3; i++ {
+		s.Get("typo")
+		s.List()
+	}
+	mu.Lock()
+	out := buf.String()
+	mu.Unlock()
+	if n := strings.Count(out, "user=typo"); n != 1 {
+		t.Errorf("WARN count for typo = %d; want 1\n%s", n, out)
+	}
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "role=Raed") {
+		t.Errorf("expected WARN naming role Raed:\n%s", out)
+	}
+	if strings.Contains(out, "user=good") {
+		t.Errorf("valid users must not warn:\n%s", out)
+	}
+}
+
+type lockedWriter struct {
+	b  *strings.Builder
+	mu *sync.Mutex
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.Write(p)
 }
