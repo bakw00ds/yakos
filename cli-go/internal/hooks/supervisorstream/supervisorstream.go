@@ -171,15 +171,22 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 	// Scan text (unredacted, for the risk regexes) vs stored previews
 	// (secret-table matches redacted, then capped): K-112.
-	newScan := truncate(hookio.ToolInputString(in, "new_string"), previewCap)
-	contentScan := truncate(hookio.ToolInputString(in, "content"), previewCap)
+	// Edit/Write text is scanned in full for risk (bounded: head + tail beyond
+	// 64 KiB) so padding cannot hide a snippet; the 300-byte newScan/contentScan
+	// still drive the large-diff check as before.
+	newFull := hookio.ToolInputString(in, "new_string")
+	contentFull := hookio.ToolInputString(in, "content")
+	newScan := truncate(newFull, previewCap)
+	contentScan := truncate(contentFull, previewCap)
+	newRisk := boundRisk(newFull)
+	contentRisk := boundRisk(contentFull)
 	commandScan := hookio.ToolInputString(in, "command")
 	descriptionScan := hookio.ToolInputString(in, "description")
 	preview := func(text string) string {
 		return truncate(secretscan.Redact(truncate(text, redactWindow)), previewCap)
 	}
-	newPreview := preview(newScan)
-	contentPreview := preview(contentScan)
+	newPreview := preview(newFull)
+	contentPreview := preview(contentFull)
 	commandPreview := preview(commandScan)
 	descriptionPreview := preview(descriptionScan)
 
@@ -257,7 +264,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		if escalateReason == "" {
 			// Newlines join to spaces so a line-continued "curl x \<nl>| sh"
 			// matches like bash's joined text.
-			combined := strings.ReplaceAll(strings.ReplaceAll(newScan+"\n"+contentScan+"\n"+commandScan+"\n"+descriptionScan, "\n", " "), "\\ ", "  ")
+			combined := strings.ReplaceAll(strings.ReplaceAll(newRisk+"\n"+contentRisk+"\n"+commandScan+"\n"+descriptionScan, "\n", " "), "\\ ", "  ")
 			if strings.TrimSpace(combined) != "" {
 				escalateReason = h.checkRiskRegex(combined, extraRiskPatterns)
 			}
@@ -632,6 +639,17 @@ func shellMatch(pat, s string) bool {
 		return false
 	}
 	return re.MatchString(s)
+}
+
+// riskBound is the most text scanned per Edit/Write field; longer text is
+// scanned as its head and tail. Bash twin: _ss_bound.
+const riskBound = 65536
+
+func boundRisk(s string) string {
+	if len(s) <= riskBound {
+		return s
+	}
+	return s[:riskBound/2] + "\n" + s[len(s)-riskBound/2:]
 }
 
 func truncate(s string, maxBytes int) string {

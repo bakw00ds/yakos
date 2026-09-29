@@ -16,11 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `curl | sh`, `git push --force` and `>` writes to `.env`, `.ssh/`,
     `/etc/` or `.claude/settings` reach the risk regexes (also `rm -fr`,
     `git push +main`, `tee .env`, `curl | python`, `bash <(curl ...)`,
-    `base64 | sh`, `chmod -R 777`). The full command is scanned, with
-    newlines and line continuations joined. The buffer gains
+    `base64 | sh`, `chmod -R 777`). The full command and the full Edit/Write
+    content (head and tail beyond 64 KiB) are scanned, with newlines and
+    line continuations joined, so padding cannot hide a risky snippet. The buffer gains
     `command_preview` and `description_preview` (300 bytes). Every buffered
     preview, edit previews included, is redacted with the secret-scan
-    pattern table (now shared in `lib/hooks/lib/secret-patterns.sh`) before
+    pattern table (now shared in `lib/hooks/lib/secret-patterns.sh`) plus
+    redaction-only generic `Bearer <opaque>` and `token=<value>` rules before
     it is written, and the buffer file is mode 0600.
   - The Go `supervisor-stream` now launches the supervisor at the score
     threshold, like bash (`yakos dispatch <agent> <task> --runtime R
