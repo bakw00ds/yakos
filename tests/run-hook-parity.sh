@@ -888,6 +888,18 @@ setup_cycle_counter_missing_settings() {
     :
 }
 
+# K-106: cycle_length guard. Each home-fn writes one settings.json variant;
+# bash and Go must both fall back to the default (10) with one WARN naming
+# the value (none for null/valid), counter written, identical log record.
+_cc_write_settings() { mkdir -p "$1/.yakos-state"; printf '%s\n' "$2" > "$1/.yakos-state/settings.json"; }
+setup_cycle_counter_len_zero() { _cc_write_settings "$1" '{"retro":{"cycle_length":0}}'; }
+setup_cycle_counter_len_negative() { _cc_write_settings "$1" '{"retro":{"cycle_length":-1}}'; }
+setup_cycle_counter_len_abc() { _cc_write_settings "$1" '{"retro":{"cycle_length":"abc"}}'; }
+setup_cycle_counter_len_emptystr() { _cc_write_settings "$1" '{"retro":{"cycle_length":""}}'; }
+setup_cycle_counter_len_null() { _cc_write_settings "$1" '{"retro":{"cycle_length":null}}'; }
+setup_cycle_counter_len_huge() { _cc_write_settings "$1" '{"retro":{"cycle_length":1e9}}'; }
+setup_cycle_counter_len_valid10() { _cc_write_settings "$1" '{"retro":{"cycle_length":10}}'; }
+
 # ---- K-87 A-2b path-allowlist setups ----------------------------------------
 
 _pa_write_policy() { printf '%s' "$2" > "$1/.claude/path-allowlist.json"; }
@@ -1450,6 +1462,15 @@ case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter
 case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_malformed_settings
 case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_wrong_shape_settings
 case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_missing_settings
+# K-106: cycle_length 0 / -1 / "abc" / "" / null / 1e9 / 10 — bash and Go
+# must agree (rc=0, default cadence, one WARN for the bad ones).
+case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_len_zero
+case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_len_negative
+case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_len_abc
+case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_len_emptystr
+case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_len_null
+case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_len_huge
+case_check cycle-counter.sh    pretooluse-generic-tool.json      0 cycle-counter "" "" "" setup_cycle_counter_len_valid10
 
 # --- path-allowlist: K-87 A-2b gap closure -----------------------------------
 #
