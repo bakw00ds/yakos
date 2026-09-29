@@ -25,6 +25,7 @@ var varRefRe = regexp.MustCompile(`\$\{(inputs|nodes)\.([^}]+?)(?:\.(output))?\}
 //  7. The dependency graph is acyclic (Kahn's algorithm).
 //  8. Model (when non-empty) is valid after alias resolution.
 //  9. Runtime (when non-empty) is a known runtime name.
+//  10. scan_allow (when non-empty) lists only known, unique scan pattern IDs.
 //
 // Returns the first error found; does not accumulate all errors.
 func Validate(wf *Workflow) error {
@@ -88,6 +89,11 @@ func Validate(wf *Workflow) error {
 			}
 		}
 
+		// --- 10. scan_allow validation (R6) ---
+		if err := validateScanAllow(n.ID, n.ScanAllow); err != nil {
+			return err
+		}
+
 		// --- 9. Runtime validation ---
 		if n.Runtime != "" {
 			known := false
@@ -108,6 +114,25 @@ func Validate(wf *Workflow) error {
 		return err
 	}
 
+	return nil
+}
+
+// validateScanAllow checks a node's scan_allow list (R6): every entry must be
+// a known pattern ID from the scan pattern table, and none may repeat.
+// Unknown IDs are rejected rather than ignored so a typo cannot silently
+// leave a false positive blocking (or, worse, look like protection).
+func validateScanAllow(nodeID string, allow []string) error {
+	seen := make(map[string]struct{}, len(allow))
+	for _, id := range allow {
+		if !isKnownScanPatternID(id) {
+			return fmt.Errorf("workflow: node %q: scan_allow entry %q is not a known scan pattern id (known: %s)",
+				nodeID, id, strings.Join(KnownScanPatternIDs(), ", "))
+		}
+		if _, dup := seen[id]; dup {
+			return fmt.Errorf("workflow: node %q: scan_allow lists %q more than once", nodeID, id)
+		}
+		seen[id] = struct{}{}
+	}
 	return nil
 }
 
