@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -212,39 +213,136 @@ func TestPathsAreRelative(t *testing.T) {
 	}
 }
 
-// TestDebounceCollapses verifies that rapid writes to the same file within
-// the debounce window produce a single event.
-func TestDebounceCollapses(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	target := filepath.Join(root, "burst.txt")
-	if err := os.WriteFile(target, []byte("v0"), 0644); err != nil {
-		t.Fatalf("setup WriteFile: %v", err)
-	}
+// fakeClock is a manually driven replacement for time.AfterFunc so debounce
+// tests do not depend on wall-clock scheduling or fsnotify delivery latency.
+type fakeClock struct {
+	mu      sync.Mutex
+	now     time.Duration
+	entries []*fakeTimer
+}
 
-	w := newWatcher(t, root)
+type fakeTimer struct {
+	due     time.Duration
+	f       func()
+	stopped bool
+}
 
-	// Drain setup events.
-	time.Sleep(200 * time.Millisecond)
-	for len(w.Events()) > 0 {
-		<-w.Events()
-	}
+func (ft *fakeTimer) Stop() bool {
+	was := !ft.stopped
+	ft.stopped = true
+	return was
+}
 
-	// Write rapidly — all within the 100 ms debounce window.
-	for i := 0; i < 5; i++ {
-		if err := os.WriteFile(target, []byte("burst"), 0644); err != nil {
-			t.Fatalf("WriteFile #%d: %v", i, err)
+func (c *fakeClock) afterFunc(d time.Duration, f func()) stopper {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ft := &fakeTimer{due: c.now + d, f: f}
+	c.entries = append(c.entries, ft)
+	return ft
+}
+
+// advance moves time forward and runs every live timer that became due.
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.now += d
+	var due []*fakeTimer
+	for _, e := range c.entries {
+		if !e.stopped && e.due <= c.now {
+			e.stopped = true
+			due = append(due, e)
 		}
 	}
-
-	// We expect exactly ONE event after the debounce window drains.
-	ev := waitForEvent(t, w.Events(), 3*time.Second)
-	if ev.Path != "burst.txt" {
-		t.Errorf("Path = %q; want %q", ev.Path, "burst.txt")
+	c.mu.Unlock()
+	for _, e := range due {
+		e.f()
 	}
+}
 
-	// No further event should arrive within a short window.
-	mustNoEvent(t, w.Events(), 300*time.Millisecond)
+// lastCallback returns the callback of the most recently scheduled timer,
+// whether or not it was stopped (a stopped timer's callback may already be
+// running on another goroutine in production, which is the race under test).
+func (c *fakeClock) lastCallback() func() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.entries[len(c.entries)-1].f
+}
+
+// newFakeWatcher returns an unstarted Watcher whose debouncer runs on a
+// fakeClock. Events are injected by calling w.debounce directly.
+func newFakeWatcher(t *testing.T) (*Watcher, *fakeClock) {
+	t.Helper()
+	w, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("filewatch.New: %v", err)
+	}
+	t.Cleanup(w.Close)
+	clk := &fakeClock{}
+	w.afterFunc = clk.afterFunc
+	return w, clk
+}
+
+// TestDebounceCollapses verifies that rapid writes to the same file within
+// the debounce window produce a single event, and that the window restarts on
+// every write. Driven by a fake clock: no real fsnotify delivery or sleeps,
+// so a loaded CI runner cannot straddle the window boundary.
+func TestDebounceCollapses(t *testing.T) {
+	t.Parallel()
+	w, clk := newFakeWatcher(t)
+
+	for i := 0; i < 5; i++ {
+		w.debounce("burst.txt", "/x/burst.txt", ActionModified)
+		clk.advance(debounceDuration - 1) // just inside the window each time
+		if n := len(w.Events()); n != 0 {
+			t.Fatalf("event emitted mid-burst after write #%d", i)
+		}
+	}
+	clk.advance(1) // quiet window now fully elapsed since the last write
+
+	ev := waitForEvent(t, w.Events(), time.Second)
+	if ev.Path != "burst.txt" || ev.Action != ActionModified {
+		t.Errorf("event = %+v; want burst.txt modified", ev)
+	}
+	clk.advance(10 * debounceDuration)
+	if n := len(w.Events()); n != 0 {
+		t.Errorf("%d extra event(s) after collapse", n)
+	}
+}
+
+// TestDebounceStaleCallbackIgnored guards the Timer.Reset race: a callback
+// whose timer already fired (or was superseded) but which runs after a newer
+// event must not flush the newer window early.
+func TestDebounceStaleCallbackIgnored(t *testing.T) {
+	t.Parallel()
+	w, clk := newFakeWatcher(t)
+
+	// Superseded before firing.
+	w.debounce("a.txt", "/x/a.txt", ActionModified)
+	stale := clk.lastCallback()
+	w.debounce("a.txt", "/x/a.txt", ActionModified)
+	stale() // late-running callback of the superseded window
+	if n := len(w.Events()); n != 0 {
+		t.Fatalf("stale callback flushed early: %d event(s)", n)
+	}
+	clk.advance(debounceDuration)
+	waitForEvent(t, w.Events(), time.Second)
+
+	// Fired, flushed, then a new burst starts; the old callback runs again
+	// (as a Reset-rearmed timer would) and must not eat the new window.
+	w.debounce("a.txt", "/x/a.txt", ActionModified)
+	stale2 := clk.lastCallback()
+	clk.advance(debounceDuration)
+	waitForEvent(t, w.Events(), time.Second)
+	w.debounce("a.txt", "/x/a.txt", ActionModified)
+	stale2()
+	if n := len(w.Events()); n != 0 {
+		t.Fatalf("stale callback flushed next window early: %d event(s)", n)
+	}
+	clk.advance(debounceDuration)
+	waitForEvent(t, w.Events(), time.Second)
+	clk.advance(10 * debounceDuration)
+	if n := len(w.Events()); n != 0 {
+		t.Errorf("%d extra event(s)", n)
+	}
 }
 
 // TestSecretPathSkipped verifies that files matching the secret deny-set are
