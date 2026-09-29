@@ -10,14 +10,18 @@
 //     a. sensitive-path: file matches a deny glob in .claude/path-allowlist.json
 //     b. large-diff: new_string/content line count > min_diff_lines (default 20)
 //     c. out-of-scope: touched file not referenced in decisions.md or plan.md
-//     d. risk-regex: content matches a dangerous-command pattern
+//     d. risk-regex: content, Bash command or description matches a
+//     dangerous-command pattern
 //  3. If no trigger fires → buffer-only, no counter tick, exit 0.
 //  4. If a trigger fires → increment escalation counter in
 //     work/current/.supervisor-counter.
-//  5. Every score_every_n_calls (default 10) escalations → write a
-//     "dispatch-ready" marker to work/current/.supervisor-dispatch-ready so
-//     that the Tier-2 bash hook or the lead monitor can invoke the supervisor.
-//     (The Go binary does not fork a subprocess. See package doc.)
+//  5. Every score_every_n_calls (default 10) escalations → launch the
+//     supervisor agent detached, exactly like the bash hook:
+//     `yakos dispatch <agent> <task> --runtime R --model M`, stdout/stderr
+//     appended to work/current/.supervisor-{stdout,stderr}.log. The CLI is
+//     found via $YAKOS_CLI, $YAKOS_ROOT/cli/yakos, then PATH. (K-112 b: this
+//     used to write a marker file nothing ever read, so the LLM tier never
+//     ran under YAKOS_HOOKS=go.)
 //
 // Never blocks. Always exits 0. This is telemetry, not policy.
 package supervisorstream
@@ -38,6 +42,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
+	"github.com/bakw00ds/yakos/internal/hooks/secretscan"
 )
 
 const (
@@ -45,6 +50,13 @@ const (
 	defaultMinDiffLines = 20
 	defaultScoreEvery   = 10
 	bufferMaxLines      = 50
+
+	// previewCap bounds every buffered preview; redactWindow is how much text
+	// is redacted before that cut so a token cannot straddle it. The risk
+	// regexes see the FULL command and description (K-112). Bash twin: the
+	// head -c calls in supervisor-stream.sh.
+	previewCap   = 300
+	redactWindow = 4096
 )
 
 // built-in risk-regex patterns (case-insensitive)
@@ -54,6 +66,19 @@ var defaultRiskPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)rm\s+-rf`),
 	regexp.MustCompile(`(?i)chmod\s+777`),
 	regexp.MustCompile(`(?i)(password|secret|api_key|token)\s*=\s*[^$({][^\s]{8,}`),
+	// K-112 (a): Bash-command shapes the patterns above miss. Keep in step
+	// with default_patterns in supervisor-stream.sh.
+	regexp.MustCompile(`(?i)git\s+push\s+([^;&|]*\s)?(--force[a-z-]*|-f)(\s|$)`),
+	regexp.MustCompile(`(?i)git\s+push\s+([^;&|]*\s)?[+][^\s]`),
+	regexp.MustCompile(`(?i)(curl|wget)[^|]*[|]\s*(sudo\s+)?((ba|z|da)?sh|python[0-9.]*|perl|ruby|node|php)(\s|$)`),
+	regexp.MustCompile(`(?i)(sh|source)\s+<[(][^)]*(curl|wget)`),
+	regexp.MustCompile(`(?i)base64[^|]*[|]\s*(sudo\s+)?(ba|z|da)?sh(\s|$)`),
+	regexp.MustCompile(`(?i)>[|>]?\s*[^\s]*(\.env|\.ssh/|\.pem|credentials|\.claude/settings|hook-bypass|/etc/)`),
+	regexp.MustCompile(`(?i)tee\s+([^;&|]*\s)?[^\s]*(\.env|\.ssh/|\.pem|credentials|\.claude/settings|hook-bypass|/etc/)`),
+	regexp.MustCompile(`(?i)rm\s+-[a-z]*(fr|rf)`),
+	regexp.MustCompile(`(?i)rm\s+-[a-z]*r[a-z]*\s+-[a-z]*f`),
+	regexp.MustCompile(`(?i)rm\s+-[a-z]*f[a-z]*\s+-[a-z]*r`),
+	regexp.MustCompile(`(?i)chmod\s+-[a-z]+\s+777`),
 }
 
 // yakosYMLSupervisor holds the shape needed from .yakos.yml.
@@ -87,6 +112,11 @@ type Hook struct {
 
 	// NowFn is injected for tests.
 	NowFn func() time.Time
+
+	// Launch starts the supervisor dispatch at the score threshold. New sets
+	// the production detached launcher; a nil Launch (struct-literal Hooks in
+	// tests) never spawns a process and logs a WARN instead.
+	Launch Launcher
 }
 
 // New returns a Hook with sensible defaults.
@@ -95,6 +125,7 @@ func New(workCurrentDir, projectDir string) *Hook {
 		WorkCurrentDir: workCurrentDir,
 		ProjectDir:     projectDir,
 		NowFn:          time.Now,
+		Launch:         launchDetached,
 	}
 }
 
@@ -138,20 +169,44 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	ts := h.NowFn().UTC().Format(time.RFC3339)
 	sessionID := hookio.SessionID(in) // bash hi_session_id: payload, not env
 
-	// Truncated previews to prevent buffer bloat.
-	newPreview := truncate(hookio.ToolInputString(in, "new_string"), 300)
-	contentPreview := truncate(hookio.ToolInputString(in, "content"), 300)
+	// Scan text (unredacted, for the risk regexes) vs stored previews
+	// (secret-table matches redacted, then capped): K-112.
+	// Edit/Write text is scanned in full for risk (bounded: head + tail beyond
+	// 64 KiB) so padding cannot hide a snippet; the 300-byte newScan/contentScan
+	// still drive the large-diff check as before.
+	newFull := hookio.ToolInputString(in, "new_string")
+	contentFull := hookio.ToolInputString(in, "content")
+	newScan := truncate(newFull, previewCap)
+	contentScan := truncate(contentFull, previewCap)
+	newRisk := boundRisk(newFull)
+	contentRisk := boundRisk(contentFull)
+	commandScan := hookio.ToolInputString(in, "command")
+	descriptionScan := hookio.ToolInputString(in, "description")
+	preview := func(text string) string {
+		return truncate(secretscan.Redact(truncate(text, redactWindow)), previewCap)
+	}
+	newPreview := preview(newFull)
+	contentPreview := preview(contentFull)
+	commandPreview := preview(commandScan)
+	descriptionPreview := preview(descriptionScan)
 
 	// Build event JSON.
+	evInput := map[string]any{
+		"file_path":       filePath,
+		"new_preview":     nilIfEmpty(newPreview),
+		"content_preview": nilIfEmpty(contentPreview),
+	}
+	if commandPreview != "" {
+		evInput["command_preview"] = commandPreview
+	}
+	if descriptionPreview != "" {
+		evInput["description_preview"] = descriptionPreview
+	}
 	event := map[string]any{
-		"ts":    ts,
-		"agent": agentType,
-		"tool":  in.Tool,
-		"input": map[string]any{
-			"file_path":       filePath,
-			"new_preview":     nilIfEmpty(newPreview),
-			"content_preview": nilIfEmpty(contentPreview),
-		},
+		"ts":         ts,
+		"agent":      agentType,
+		"tool":       in.Tool,
+		"input":      evInput,
 		"session_id": sessionID,
 	}
 
@@ -191,7 +246,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 		// 2b. Diff-size check.
 		if escalateReason == "" {
-			combined := newPreview + contentPreview
+			combined := newScan + contentScan
 			if combined != "" {
 				lineCount := strings.Count(combined, "\n") + 1
 				if lineCount > minDiffLines {
@@ -207,8 +262,10 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 		// 2d. Risk-regex check.
 		if escalateReason == "" {
-			combined := newPreview + contentPreview
-			if combined != "" {
+			// Newlines join to spaces so a line-continued "curl x \<nl>| sh"
+			// matches like bash's joined text.
+			combined := strings.ReplaceAll(strings.ReplaceAll(newRisk+"\n"+contentRisk+"\n"+commandScan+"\n"+descriptionScan, "\n", " "), "\\ ", "  ")
+			if strings.TrimSpace(combined) != "" {
 				escalateReason = h.checkRiskRegex(combined, extraRiskPatterns)
 			}
 		}
@@ -247,15 +304,60 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		return out, nil
 	}
 
-	// Threshold hit — write dispatch-ready marker.
-	dispatchMarker := filepath.Join(h.WorkCurrentDir, ".supervisor-dispatch-ready")
-	_ = atomicTouch(dispatchMarker)
-
+	// Threshold hit — fork the supervisor (bash: same log records, same order).
 	h.appendLog(&out, logFile, "REPORT", "pass",
-		"escalation score threshold hit; dispatch-ready marker written (async scoring expected from Tier-2 or lead monitor)",
-		map[string]any{"counter": cur, "score_every": scoreEvery, "will_score": true, "marker": dispatchMarker})
+		"escalation score threshold hit; forking supervisor dispatch (async)",
+		map[string]any{"counter": cur, "score_every": scoreEvery, "will_score": true})
+
+	h.launchSupervisor(&out, in, cfg, logFile, scoreEvery)
 
 	return out, nil
+}
+
+// launchSupervisor mirrors the tail of supervisor-stream.sh: resolve
+// runtime/agent/model (defaults claude / supervisor / haiku), locate the CLI,
+// build the task, start `dispatch` detached, and log the same records.
+func (h *Hook) launchSupervisor(out *hooktype.HookOutput, in hooktype.HookInput, cfg *supervisorConfig, logFile string, scoreEvery int) {
+	runtime, agent, model := "claude", "supervisor", "haiku"
+	if cfg != nil {
+		if cfg.Runtime != "" {
+			runtime = cfg.Runtime
+		}
+		if cfg.Agent != "" {
+			agent = cfg.Agent
+		}
+		if cfg.Model != "" {
+			model = cfg.Model
+		}
+	}
+
+	cli := findCLI(in.Env)
+	if cli == "" || h.Launch == nil {
+		h.appendLog(out, logFile, "WARN", "pass",
+			"could not locate yakos CLI to fork supervisor", map[string]any{})
+		return
+	}
+
+	task := buildTask(
+		filepath.Join(h.WorkCurrentDir, "supervisor-buffer.ndjson"),
+		filepath.Join(h.WorkCurrentDir, "supervisor-findings.ndjson"),
+		filepath.Join(h.WorkCurrentDir, "decisions.md"),
+		scoreEvery)
+	spec := LaunchSpec{
+		CLI:        cli,
+		Args:       []string{"dispatch", agent, task, "--runtime", runtime, "--model", model},
+		StdoutPath: filepath.Join(h.WorkCurrentDir, ".supervisor-stdout.log"),
+		StderrPath: filepath.Join(h.WorkCurrentDir, ".supervisor-stderr.log"),
+	}
+	if err := h.Launch(spec); err != nil {
+		h.appendLog(out, logFile, "WARN", "pass",
+			"supervisor dispatch launch failed",
+			map[string]any{"error": err.Error(), "model": model, "runtime": runtime})
+		return
+	}
+	h.appendLog(out, logFile, "REPORT", "pass",
+		fmt.Sprintf("supervisor dispatch forked async (model=%s runtime=%s)", model, runtime),
+		map[string]any{"dispatch": "async", "model": model, "runtime": runtime})
 }
 
 // ---- pre-filter checks -------------------------------------------------------
@@ -387,11 +489,13 @@ func appendBufferLine(bufferFile string, event map[string]any) error {
 		return err
 	}
 	data = append(data, '\n')
-	f, err := os.OpenFile(bufferFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec
+	// Owner-only: the buffer holds command lines and feeds an LLM (K-112).
+	f, err := os.OpenFile(bufferFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) //nolint:gosec
 	if err != nil {
 		return err
 	}
 	defer f.Close() //nolint:errcheck
+	_ = f.Chmod(0600)
 	_, err = f.Write(data)
 	return err
 }
@@ -417,9 +521,10 @@ func trimBuffer(bufferFile string, maxLines int) {
 		buf.WriteByte('\n')
 	}
 	tmp := bufferFile + ".tmp"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0644); err != nil { //nolint:gosec
+	if err := os.WriteFile(tmp, buf.Bytes(), 0600); err != nil {
 		return
 	}
+	_ = os.Chmod(tmp, 0600)
 	_ = os.Rename(tmp, bufferFile)
 }
 
@@ -476,26 +581,6 @@ func (h *Hook) appendLog(out *hooktype.HookOutput, logFile, severity, action, me
 }
 
 // ---- helpers -----------------------------------------------------------------
-
-func atomicTouch(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil { //nolint:gosec
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".yakos-ss-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	return nil
-}
 
 // globMatch mirrors bash supervisor-stream.sh, which uses `case` patterns:
 // `*` matches any characters INCLUDING "/" (so "**" behaves as "*"), and the
@@ -554,6 +639,17 @@ func shellMatch(pat, s string) bool {
 		return false
 	}
 	return re.MatchString(s)
+}
+
+// riskBound is the most text scanned per Edit/Write field; longer text is
+// scanned as its head and tail. Bash twin: _ss_bound.
+const riskBound = 65536
+
+func boundRisk(s string) string {
+	if len(s) <= riskBound {
+		return s
+	}
+	return s[:riskBound/2] + "\n" + s[len(s)-riskBound/2:]
 }
 
 func truncate(s string, maxBytes int) string {

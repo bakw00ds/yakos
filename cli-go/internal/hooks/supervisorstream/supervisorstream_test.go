@@ -196,37 +196,6 @@ func TestSupervisorStream_CounterIncrementsOnEscalation(t *testing.T) {
 	}
 }
 
-func TestSupervisorStream_DispatchMarkerAtThreshold(t *testing.T) {
-	work := t.TempDir()
-	proj := t.TempDir()
-	writeYAML(t, proj, "supervisor:\n  enabled: true\n  score_every_n_calls: 3\n")
-	h := newHook(work, proj)
-	bigChange := ""
-	for i := 0; i < 25; i++ {
-		bigChange += "line\n"
-	}
-	// 3 escalations should trigger dispatch marker.
-	for i := 0; i < 3; i++ {
-		_, _ = h.Run(context.Background(), makeInput("Edit", "big.go", bigChange))
-	}
-	if _, err := os.Stat(filepath.Join(work, ".supervisor-dispatch-ready")); err != nil {
-		t.Error("dispatch-ready marker should exist at score threshold")
-	}
-}
-
-func TestSupervisorStream_PreFilterDisabledCounts(t *testing.T) {
-	work := t.TempDir()
-	proj := t.TempDir()
-	writeYAML(t, proj, "supervisor:\n  enabled: true\n  pre_filter:\n    enabled: false\n  score_every_n_calls: 2\n")
-	h := newHook(work, proj)
-	// With pre_filter disabled, every call counts.
-	_, _ = h.Run(context.Background(), makeInput("Edit", "x.go", "small"))
-	_, _ = h.Run(context.Background(), makeInput("Edit", "y.go", "small"))
-	if _, err := os.Stat(filepath.Join(work, ".supervisor-dispatch-ready")); err != nil {
-		t.Error("dispatch marker should exist when pre_filter disabled and threshold hit")
-	}
-}
-
 func TestSupervisorStream_BufferTrimmedAt50(t *testing.T) {
 	work := t.TempDir()
 	proj := t.TempDir()

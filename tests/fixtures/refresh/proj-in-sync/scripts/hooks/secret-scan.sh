@@ -45,6 +45,7 @@ fi
 ho_install_gate_traps "secret-scan"
 ho_source_lib "$HOOK_DIR/lib/hook-input.sh" HI_LOADED
 ho_source_lib "$HOOK_DIR/lib/paths.sh" YAKOS_PATHS_LOADED
+ho_source_lib "$HOOK_DIR/lib/secret-patterns.sh" YAKOS_SECRET_PATTERNS_LOADED
 ho_gate_ready
 
 hi_init
@@ -120,17 +121,8 @@ if [ -z "$write_text" ]; then
     exit 0
 fi
 
-# Patterns. Each entry: name|regex
-PATTERNS=(
-    'AWS Access Key|AKIA[0-9A-Z]{16}'
-    'GitHub Token|ghp_[A-Za-z0-9]{36}'
-    'GitHub Token (fine-grained)|github_pat_[A-Za-z0-9_]{82}'
-    'PEM Private Key|-----BEGIN [A-Z0-9 ]*PRIVATE KEY'
-    'Slack Token|xox[baprs]-[A-Za-z0-9-]{10,}'
-    'Stripe Secret Key|sk_live_[A-Za-z0-9]{24,}'
-    'Anthropic API Key|sk-ant-[A-Za-z0-9_-]{93}'
-    'Google API Key|AIza[0-9A-Za-z_-]{35}'
-)
+# Patterns (shared table, lib/secret-patterns.sh). Each entry: name|regex
+PATTERNS=("${YAKOS_SECRET_PATTERNS[@]}")
 
 matched_name=""
 matched_pattern=""

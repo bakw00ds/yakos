@@ -359,6 +359,16 @@ hung_jq_suite() {
                 if [ -n "$err" ]; then bad "$L: YAKOS_HOOK_JQ_TIMEOUT=$tv must be accepted silently, stderr: [$err]"; else ok "$L: YAKOS_HOOK_JQ_TIMEOUT=$tv accepted silently"; fi ;;
         esac
     done
+    # K-112 (g): the clamp ceiling is 25, strictly below the 30 s timeout that
+    # `yakos refresh` writes for every hook, so the jq guard always fires first.
+    local hook_to want_lim got_lim
+    hook_to="$(sed -n 's/^[[:space:]]*Timeout:[[:space:]]*\([0-9][0-9]*\),$/\1/p' "$REPO_ROOT/cli-go/internal/hooksinstall/hooksinstall.go" | head -1)"
+    for pair in "30:25" "26:25" "25:25" "24:24" "99999999999999999999:25" "1000:25" "0:1" "08:8" "5:5" ":5"; do
+        tv="${pair%%:*}"; want_lim="${pair##*:}"
+        got_lim="$("$SH" -c ". '$HOOKS/lib/hook-input.sh' >/dev/null 2>&1; YAKOS_HOOK_JQ_TIMEOUT='$tv' _hi_jq_limit_parse; printf '%s' \"\$_HI_JQ_LIMIT\"" 2>/dev/null)"
+        if [ "$got_lim" = "$want_lim" ]; then ok "$L: YAKOS_HOOK_JQ_TIMEOUT='$tv' clamps to $want_lim"; else bad "$L: YAKOS_HOOK_JQ_TIMEOUT='$tv' gave limit '$got_lim' want $want_lim"; fi
+    done
+    if [ -n "$hook_to" ] && [ 25 -lt "$hook_to" ]; then ok "$L: jq ceiling 25 < generated hook timeout $hook_to"; else bad "$L: generated hook timeout '$hook_to' not above the jq ceiling"; fi
     # The no-timeout watchdog path is silent: no job-control notice on stderr.
     sb="$(new_sandbox "hj-$L-quiet")"
     rc=0
@@ -455,7 +465,10 @@ run_suite() {
     ct_proj="$ct_sb/proj"
     ct_enc="$(bash -c ". '$HOOKS/lib/compat.sh'; ct_encode_project_path '$ct_proj'")"
     mkdir -p "$ct_sb/home/.claude/projects/$ct_enc"
-    head -c 700000 /dev/zero | tr '\0' 'x' > "$ct_sb/home/.claude/projects/$ct_enc/transcript-$ct_sid.jsonl"
+    # Real-shaped transcript named <session_id>.jsonl (K-112), exactly 700000 bytes.
+    awk -v line="$(cat "$REPO_ROOT/tests/fixtures/hooks/claude-transcript-line.jsonl")" -v n=700000 \
+        'BEGIN { while (t < n) { l = line "\n"; if (t + length(l) > n) l = substr(l, 1, n - t); printf "%s", l; t += length(l) } }' \
+        > "$ct_sb/home/.claude/projects/$ct_enc/$ct_sid.jsonl"
     run "$SH" "$HOOKS" context-threshold.sh "$ct_sb" "{\"session_id\":\"$ct_sid\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"p\"}"
     ct_log="$ct_sb/work/current/logs/context-threshold.ndjson"
     if [ "$rc" = 0 ] && grep -q '"pct": *87' "$ct_log" 2>/dev/null && ! grep -q probe_unavailable "$ct_log" 2>/dev/null \

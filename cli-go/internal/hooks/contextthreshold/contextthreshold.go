@@ -12,7 +12,7 @@
 //	{ "context_thresholds": { "notice": 75, "warning": 90 } }
 //
 // Per-runtime probe strategy (bytes/4 ≈ tokens, same as bash original):
-//   - claude: reads ~/.claude/projects/<encoded>/transcript-<session>.jsonl
+//   - claude: reads ~/.claude/projects/<encoded>/<session>.jsonl
 //   - codex:  sizes the most-recent session dir under ~/.codex/sessions/
 //   - agy:    sizes the most-recent .pb file under ~/.gemini/antigravity-cli/conversations/
 //
@@ -198,8 +198,10 @@ func (h *Hook) probeClaude(sessionID, projectDir, homeDir string) (int, error) {
 		return -1, fmt.Errorf("session_id or project_dir missing")
 	}
 	encoded := encodeProjectPath(projectDir)
+	// K-112: Claude Code names the file <session>.jsonl; "transcript-<session>"
+	// never existed, so this probe always failed.
 	transcript := filepath.Join(homeDir, ".claude", "projects", encoded,
-		"transcript-"+sessionID+".jsonl")
+		sessionID+".jsonl")
 	info, err := os.Stat(transcript)
 	if err != nil {
 		return -1, err

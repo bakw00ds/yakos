@@ -55,6 +55,43 @@ var DefaultPatterns = []Pattern{
 	{Name: "Google API Key", Source: `AIza[0-9A-Za-z_-]{35}`, Regex: regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`)},
 }
 
+// RedactToken replaces every DefaultPatterns match in text (bash twin:
+// supervisor-stream.sh, sed over lib/secret-patterns.sh).
+const RedactToken = "[REDACTED]"
+
+// Redact returns text with every DefaultPatterns match replaced by
+// RedactToken, applied in table order. Used by supervisor-stream so
+// secrets never reach the supervisor buffer (K-112).
+func Redact(text string) string {
+	for _, p := range DefaultPatterns {
+		text = p.Regex.ReplaceAllString(text, RedactToken)
+	}
+	for _, re := range redactExtra {
+		text = re.ReplaceAllString(text, RedactToken)
+	}
+	return text
+}
+
+// redactExtra is redaction-only: generic Bearer and KEY=VALUE shapes too
+// loose to block a write on (secret-scan never reads them). Bash twin:
+// YAKOS_REDACT_EXTRA_PATTERNS in lib/hooks/lib/secret-patterns.sh; a test
+// keeps the two identical.
+var redactExtraSources = []string{
+	`[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:]]{8,}`,
+	`([Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww]([Oo][Rr])?[Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]).?[[:space:]]*[=:][[:space:]]*.?[^[:space:]]{8,}`,
+}
+
+var redactExtra = func() []*regexp.Regexp {
+	out := make([]*regexp.Regexp, len(redactExtraSources))
+	for i, src := range redactExtraSources {
+		out[i] = regexp.MustCompile(src)
+	}
+	return out
+}()
+
+// RedactExtraSources exposes the redaction-only regex text (drift test).
+func RedactExtraSources() []string { return append([]string(nil), redactExtraSources...) }
+
 // Hook implements runner.Hook for secret scanning.
 type Hook struct {
 	// WorkCurrentDir is the absolute path to work/current/ for the active

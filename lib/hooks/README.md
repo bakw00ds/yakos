@@ -348,6 +348,11 @@ upgrade them to BLOCKING in your project (ahead of YakOS v0.2):
 
 ## Hook helpers
 
+`lib/secret-patterns.sh` holds the one secret-detection pattern table.
+`secret-scan.sh` blocks writes that match it, and `supervisor-stream.sh`
+redacts matches from the previews it buffers for the supervisor LLM. The Go
+twin is `secretscan.DefaultPatterns`; keep them identical.
+
 `lib/hook-input.sh` and `lib/hook-output.sh` are sourced by every hook.
 They handle stdin parsing (`hi_*` functions, including the
 `HOOK_FAIL_CLOSED` behavior above), structured logging (`ho_log`), bypass

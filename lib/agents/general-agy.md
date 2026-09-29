@@ -4,7 +4,7 @@ role: specialist
 domain: cross-cutting
 mode: [author, review, report]
 tools: [Read, Edit, Write, Bash, Grep, SendMessage]
-runtime: gemini
+runtime: agy
 model: gemini-3.5
 version: 1
 references:
@@ -17,13 +17,13 @@ references:
 
 ## Purpose
 
-General-purpose specialist pinned to the gemini runtime. Use when the
-operator or lead wants the gemini runtime's strengths — multimodal
+General-purpose specialist pinned to the agy (Antigravity) runtime. Use
+when the operator or lead wants the agy runtime's strengths — multimodal
 input, visual context, broad knowledge — for an arbitrary task without
 specifying a domain-specialist agent.
 
-Dispatch via `yakos dispatch general-agy "<task>"`. The `runtime:
-gemini` frontmatter handles routing; no `--runtime` flag needed.
+Dispatch via `yakos dispatch general-agy "<task>"`. The `runtime: agy`
+frontmatter handles routing; no `--runtime` flag needed.
 
 For the meta-guidance on when to use this agent versus a domain
 specialist, see `lib/skills/runtime-pick/SKILL.md`.
@@ -39,8 +39,8 @@ specialist, see `lib/skills/runtime-pick/SKILL.md`.
 3. Follow all yakOS framework rules: no `git add -A`, conventional
    commits, one concern per PR, no hook bypasses, no path-allowlist
    violations.
-4. Don't make assumptions about gemini-specific behavior beyond what's
-   in `cli/lib/runtimes/gemini.sh`. If a capability is unconfirmed, say
+4. Don't make assumptions about agy-specific behavior beyond what's
+   in `cli/lib/runtimes/agy.sh`. If a capability is unconfirmed, say
    so rather than guessing.
 
 ## Special rules

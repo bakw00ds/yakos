@@ -489,8 +489,8 @@ parity_check() {
             # second boundary; Go's elapsed arithmetic is covered by its own
             # unit tests instead). plan-quality-score's debounce record carries
             # age=<n>s / age_s for the same wall-clock reason (K-99).
-            norm_bash="$(tail -n 1 "$bash_log" | sed "s|/private$bash_tmp|__SANDBOX__|g; s|$bash_tmp|__SANDBOX__|g; s|age=[0-9-]*s|age=Ns|g" | jq -cS 'del(.ts, .elapsed_seconds, .age_s)' 2>/dev/null || echo "__unparseable_bash__")"
-            norm_go="$(tail -n 1 "$go_log" | sed "s|/private$tmp2|__SANDBOX__|g; s|$tmp2|__SANDBOX__|g; s|age=[0-9-]*s|age=Ns|g" | jq -cS 'del(.ts, .elapsed_seconds, .age_s)' 2>/dev/null || echo "__unparseable_go__")"
+            norm_bash="$(tail -n 1 "$bash_log" | sed "s|/private$bash_tmp|__SANDBOX__|g; s|$bash_tmp|__SANDBOX__|g; s|age=[0-9-]*s|age=Ns|g" | jq -cS 'del(.ts, .elapsed_seconds, .age_s, .mtime)' 2>/dev/null || echo "__unparseable_bash__")"
+            norm_go="$(tail -n 1 "$go_log" | sed "s|/private$tmp2|__SANDBOX__|g; s|$tmp2|__SANDBOX__|g; s|age=[0-9-]*s|age=Ns|g" | jq -cS 'del(.ts, .elapsed_seconds, .age_s, .mtime)' 2>/dev/null || echo "__unparseable_go__")"
             [ "$norm_bash" != "$norm_go" ] && divergence="log-schema"
         fi
     fi
@@ -1163,7 +1163,11 @@ _ct_transcript() {
     proj="$(dirname "$1")"
     enc="${proj//\//-}"; enc="${enc//./-}"
     mkdir -p "$1/.claude/projects/$enc"
-    head -c "$2" /dev/zero | tr '\0' 'x' > "$1/.claude/projects/$enc/transcript-fixture-generic-tool-0001.jsonl"
+    # Real-shaped transcript (K-112): JSONL lines from claude-transcript-line.jsonl in a
+    # file named <session_id>.jsonl, exactly N bytes.
+    awk -v line="$(cat "$FIXT/claude-transcript-line.jsonl")" -v n="$2" \
+        'BEGIN { while (t < n) { l = line "\n"; if (t + length(l) > n) l = substr(l, 1, n - t); printf "%s", l; t += length(l) } }' \
+        > "$1/.claude/projects/$enc/fixture-generic-tool-0001.jsonl"
 }
 home_ct_notice() { _ct_transcript "$1" 640000; }   # ~80% of the 200k-token window: over the 75% notice line
 home_ct_low() { _ct_transcript "$1" 80000; }       # ~10%
@@ -1681,6 +1685,13 @@ case_check supervisor-stream.sh pretooluse-edit-risky.json 0 supervisor-stream s
 case_check supervisor-stream.sh pretooluse-edit-api.json   0 supervisor-stream setup_ss_prefilter_off
 case_check supervisor-stream.sh pretooluse-edit-api.json   0 "" setup_ss_disabled
 case_check supervisor-stream.sh pretooluse-edit-risky.json 0 "" setup_ss_passfilter "YAKOS_SUPERVISOR_DISABLE=1"
+# K-112 (a): Bash tool calls are inspected via tool_input.command (escalation itself is
+# asserted by tests/run-supervisor-stream-test.sh; these guard rc + log + buffer parity).
+case_check supervisor-stream.sh posttooluse-bash-ss-rm-rf.json          0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-curl-pipe-sh.json   0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-git-push-force.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-redirect-env.json   0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-ls.json             0 supervisor-stream setup_ss_passfilter
 
 # --- retro-dispatch ---------------------------------------------------------------
 case_check retro-dispatch.sh   pretooluse-generic-tool.json 0 "" "" "" "" home_noop
@@ -1829,7 +1840,15 @@ setup_pqs_vague_surface() { _pqs_plan "$1" vague-plan.md 30 "$PQS_SURFACE_YML"; 
 setup_pqs_good_block()    { _pqs_plan "$1" good-plan.md 30 "$PQS_BLOCK_YML"; }
 setup_pqs_dissent_block() { _pqs_plan "$1" dissent-plan.md 30 "$PQS_BLOCK_YML"; }
 setup_pqs_yml_is_dir()   { _pqs_plan "$1" good-plan.md 30 ""; rm -f "$1/.yakos.yml"; mkdir "$1/.yakos.yml"; }
+# K-112: the debounce is keyed on the last SCORED mtime. A fresh write with no
+# recorded score is scored on the triggering fire; the same version again, or a
+# re-save under 5 s after a scoring, is debounced (state: .plan-quality-last-scored).
 setup_pqs_fresh_plan()    { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; }
+_pqs_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
+setup_pqs_fresh_scored()  { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; printf '%s %s\n' "$(_pqs_mtime "$1/work/current/plan.md")" "$(date -u +%s)" > "$1/work/current/.plan-quality-last-scored"; }
+setup_pqs_resave_collapsed() { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; printf '%s %s\n' "$(( $(_pqs_mtime "$1/work/current/plan.md") - 20 ))" "$(date -u +%s)" > "$1/work/current/.plan-quality-last-scored"; }
+setup_pqs_resave_after_window() { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; printf '%s %s\n' "$(( $(_pqs_mtime "$1/work/current/plan.md") - 30 ))" "$(( $(date -u +%s) - 20 ))" > "$1/work/current/.plan-quality-last-scored"; }
+setup_pqs_bad_state()     { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; printf 'garbage\n' > "$1/work/current/.plan-quality-last-scored"; }
 # K-107 item 6: nested enabled:false must not disable scoring on either side.
 setup_pqs_child_disabled()   { _pqs_plan "$1" vague-plan.md 30 $'plan_quality:\n  panel:\n    enabled: false\n  mode: block\n  threshold: 0.75\n'; }
 setup_pqs_sibling_disabled() { _pqs_plan "$1" vague-plan.md 30 $'parent:\n  plan_quality:\n    mode: block\n    threshold: 0.75\n  sibling:\n    enabled: false\n'; }
@@ -1838,7 +1857,11 @@ case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-qual
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_vague_surface "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # below threshold + surface: notes only
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_good_block    "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/good"         "" pqs_home   # above threshold: pass
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_dissent_block "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/dissent"      "" pqs_home   # dissent: surface, never block
-case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_fresh_plan    "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"        "" pqs_home   # mtime < 5 s: debounced, nothing scored
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_fresh_plan    "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"        "" pqs_home   # K-112: fresh write, nothing scored yet: SCORED on the triggering fire
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_fresh_scored  "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"        "" pqs_home   # K-112: same version already scored: debounced
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_resave_collapsed "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"     "" pqs_home   # K-112: re-save < 5 s after a scoring: collapsed
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_resave_after_window "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague" "" pqs_home   # K-112: re-save > 5 s after a scoring: scored
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_bad_state     "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"        "" pqs_home   # K-112: malformed debounce state is ignored: scored
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_child_disabled   "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # K-107: child-map enabled:false does not bleed: scored, .plan-blocked written
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_sibling_disabled "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # K-107: sibling under a parent does not bleed
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_yml_is_dir     "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/good"         "" pqs_home   # .yakos.yml is a directory: defaults + WARN on both sides

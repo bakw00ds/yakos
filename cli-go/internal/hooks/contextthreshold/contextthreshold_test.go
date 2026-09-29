@@ -89,11 +89,15 @@ func writeClaudeTranscript(t *testing.T, homeDir, projectDir, sessionID string, 
 	project = strings.ReplaceAll(project, ".", "-")
 	dir := filepath.Join(homeDir, ".claude", "projects", project)
 	_ = os.MkdirAll(dir, 0755)
-	data := make([]byte, sizeBytes)
-	for i := range data {
-		data[i] = 'x'
+	// Real-shaped: one Claude Code JSONL object per line, named <session>.jsonl
+	// (K-112; the old "transcript-<session>.jsonl" name never existed).
+	line := `{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/tmp/p","sessionId":"` + sessionID +
+		`","version":"2.1.0","type":"user","message":{"role":"user","content":"synthetic line"},"uuid":"u","timestamp":"2026-09-29T00:00:00.000Z"}` + "\n"
+	data := make([]byte, 0, sizeBytes)
+	for len(data) < sizeBytes {
+		data = append(data, line...)
 	}
-	_ = os.WriteFile(filepath.Join(dir, "transcript-"+sessionID+".jsonl"), data, 0644)
+	_ = os.WriteFile(filepath.Join(dir, sessionID+".jsonl"), data[:sizeBytes], 0644)
 }
 
 func TestContextThreshold_ProbeUnavailableLogsReport(t *testing.T) {

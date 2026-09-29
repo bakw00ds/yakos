@@ -9,7 +9,12 @@
 #
 # Fires when a write targets a path ending in work/current/plan.md.
 #   1. Reads .yakos.yml plan_quality block (enabled, mode, threshold).
-#   2. Debounces: skips if plan.md mtime changed within the last 5 s.
+#   2. Debounces on the last SCORED version (K-112): a plan.md written now is
+#      scored once; the same mtime is never scored twice, and a re-save within
+#      5 s of the last scoring is collapsed into it. The state lives in
+#      work/current/.plan-quality-last-scored ("<mtime> <scored-at>"). The
+#      old rule, "skip when mtime age < 5 s", skipped EVERY fire because the
+#      hook runs right after the write that set the mtime.
 #   3. Invokes lib/skills/plan-quality-eval/scripts/score-plan.sh.
 #   4. Routes on the aggregate score + dissent flag:
 #        pass + no dissent → PASS (no surface)
@@ -123,23 +128,70 @@ EOF
         exit 0
     fi
 
-    # ---- debounce: skip if plan.md mtime changed within last 5 s ------------
-    # Uses stat with macOS (-f %m) and Linux (-c %Y) compat
+    # ---- debounce, keyed on the last scored mtime (K-112) -------------------
+    # The hook fires right after the write, so "mtime age < 5 s" (the old rule)
+    # skipped every fire and no plan was ever scored. Instead:
+    #   - same mtime as the last score            -> already scored, skip;
+    #   - last score less than 5 s ago            -> rapid re-save, collapse;
+    #   - otherwise                               -> score, and record it.
+    # A missing file has mtime 0: no debounce, the scorer reports the error.
+    # Go twin: planqualityscore.go (same state file, same format).
     plan_file="$file_path"
     mtime1=0
     # Portable mtime
-    if stat -f "%m" "$plan_file" >/dev/null 2>&1; then
-        mtime1="$(stat -f "%m" "$plan_file" 2>/dev/null || echo 0)"
-    elif stat -c "%Y" "$plan_file" >/dev/null 2>&1; then
+    # GNU first: on Linux `stat -f` is filesystem mode and "succeeds" with garbage.
+    if stat -c "%Y" "$plan_file" >/dev/null 2>&1; then
         mtime1="$(stat -c "%Y" "$plan_file" 2>/dev/null || echo 0)"
+    elif stat -f "%m" "$plan_file" >/dev/null 2>&1; then
+        mtime1="$(stat -f "%m" "$plan_file" 2>/dev/null || echo 0)"
     fi
+    case "$mtime1" in ''|*[!0-9]*) mtime1=0 ;; esac
     now_s="$(date -u +%s 2>/dev/null || echo 0)"
-    age_s=$((now_s - mtime1))
-    if [ "$age_s" -lt 5 ] && [ "$age_s" -ge 0 ]; then
-        ho_log "plan-quality-score" "REPORT" "pass" \
-            "debounced: plan.md mtime age=${age_s}s < 5s; skipping this fire" \
-            "$(jq -nc --arg f "$file_path" --argjson age "$age_s" '{file_path: $f, age_s: $age}')"
-        exit 0
+    state_file="$current_dir/.plan-quality-last-scored"
+    _pq_state_written=0
+    _pq_scored=0
+    # A symlinked state file is never followed (its target would be overwritten):
+    # no state is read or written, with a WARN (K-112).
+    state_link=0
+    if [ -L "$state_file" ]; then
+        state_link=1
+        ct_log "WARN: plan-quality-score: $state_file is a symlink; debounce state disabled"
+        ho_log "plan-quality-score" "WARN" "pass" \
+            "debounce state file is a symlink; not reading or writing it" \
+            "$(jq -nc --arg p "$state_file" '{path: $p}')"
+    fi
+    if [ "$mtime1" -gt 0 ] && [ "$state_link" = "0" ]; then
+        last_mtime=""
+        last_at=""
+        if [ -f "$state_file" ]; then
+            read -r last_mtime last_at < "$state_file" 2>/dev/null || true
+        fi
+        case "$last_mtime" in ''|*[!0-9]*) last_mtime="" ;; esac
+        case "$last_at" in ''|*[!0-9]*) last_at="" ;; esac
+        # Base 10 (a leading 0 is not octal) and bounded like Go's ParseInt:
+        # either field unusable means no state.
+        if [ -n "$last_mtime" ] && [ -n "$last_at" ] && [ "${#last_mtime}" -le 15 ] && [ "${#last_at}" -le 15 ]; then
+            last_mtime=$((10#$last_mtime))
+            last_at=$((10#$last_at))
+        else
+            last_mtime=""
+            last_at=""
+        fi
+        if [ -n "$last_mtime" ] && [ "$last_mtime" = "$mtime1" ]; then
+            ho_log "plan-quality-score" "REPORT" "pass" \
+                "debounced: plan.md unchanged since the last score; skipping this fire" \
+                "$(jq -nc --arg f "$file_path" --argjson m "$mtime1" '{file_path: $f, mtime: $m}')"
+            exit 0
+        fi
+        if [ -n "$last_at" ]; then
+            since_s=$((now_s - last_at))
+            if [ "$since_s" -ge 0 ] && [ "$since_s" -lt 5 ]; then
+                ho_log "plan-quality-score" "REPORT" "pass" \
+                    "debounced: last score under 5s ago; rapid re-save collapsed; skipping this fire" \
+                    "$(jq -nc --arg f "$file_path" --argjson age "$since_s" '{file_path: $f, age_s: $age}')"
+                exit 0
+            fi
+        fi
     fi
 
     # ---- verify skill script exists ------------------------------------------
@@ -155,7 +207,27 @@ EOF
     # ---- invoke score-plan.sh -----------------------------------------------
     tmp_home="$(mktemp -d -t yakos-pqscore.XXXXXX 2>/dev/null || mktemp -d /tmp/yakos-pqscore.XXXXXX)"
     mkdir -p "$tmp_home/.yakos-state"
-    trap 'rm -rf "$tmp_home" 2>/dev/null || true' EXIT
+    # Record this scoring BEFORE running it so a rapid re-save (a second hook
+    # process) collapses into it. An infra failure forgets it again (the EXIT
+    # trap), so the next write retries instead of being debounced.
+    if [ "$mtime1" -gt 0 ] && [ "$state_link" = "0" ]; then
+        if printf '%s %s\n' "$mtime1" "$now_s" > "$state_file" 2>/dev/null; then
+            _pq_state_written=1
+        else
+            ct_log "WARN: plan-quality-score: cannot record debounce state at $state_file"
+            ho_log "plan-quality-score" "WARN" "pass" \
+                "cannot record debounce state; continuing without it" \
+                "$(jq -nc --arg p "$state_file" '{path: $p}')"
+        fi
+    fi
+    # shellcheck disable=SC2329  # invoked by the EXIT trap below
+    _pq_cleanup() {
+        rm -rf "$tmp_home" 2>/dev/null || true
+        if [ "$_pq_state_written" = "1" ] && [ "$_pq_scored" != "1" ]; then
+            rm -f "$state_file" 2>/dev/null || true
+        fi
+    }
+    trap _pq_cleanup EXIT
 
     score_rc=0
     HOME="$tmp_home" \
@@ -190,6 +262,8 @@ EOF
             "invalid log record JSON; no gate action" "{}"
         exit 0
     fi
+
+    _pq_scored=1
 
     # Extract key fields
     AGGREGATE="$(printf '%s' "$RECORD" | jq -r '.aggregate_score // 0')"

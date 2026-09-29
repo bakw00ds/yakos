@@ -7,8 +7,12 @@
 // the bash hook does:
 //
 //  1. skip when plan_quality.enabled is false;
-//  2. debounce: skip when plan.md's mtime is under 5 s old (the debounce is
-//     keyed on the file's mtime, as in bash);
+//  2. debounce on the last SCORED version (K-112, same as bash): a plan.md
+//     written now is scored once; the same mtime is never scored twice and a
+//     re-save within 5 s of the last scoring is collapsed. State lives in
+//     work/current/.plan-quality-last-scored ("<mtime> <scored-at>"). The
+//     old rule, "skip when mtime age < 5 s", skipped every fire because the
+//     hook runs right after the write that set the mtime;
 //  3. run lib/skills/plan-quality-eval/scripts/score-plan.sh on the file
 //     from tool_input.file_path, with a throwaway HOME, and read the last
 //     record it wrote there (an earlier version read the last PERSISTED
@@ -90,8 +94,12 @@ const (
 	defaultThreshold   = "0.75"
 	defaultCostCeiling = "0.15"
 
-	// debounceSeconds is bash's `[ "$age_s" -lt 5 ]`.
+	// debounceSeconds collapses a re-save that follows a scoring by less than
+	// this long (bash: `[ "$since_s" -lt 5 ]`).
 	debounceSeconds = 5
+
+	// lastScoredFile is the debounce state (bash: .plan-quality-last-scored).
+	lastScoredFile = ".plan-quality-last-scored"
 )
 
 // Hook implements runner.Hook for plan quality scoring.
@@ -209,21 +217,44 @@ func (h *Hook) runPostToolUse(c context.Context, out hooktype.HookOutput, in hoo
 	mode := firstNonEmpty(cfg.Mode, "surface")
 	costCeiling := firstNonEmpty(cfg.CostCeilingUSD, in.Env["YAKOS_PLAN_EVAL_MAX_COST_USD"], defaultCostCeiling)
 
-	// Debounce, keyed on plan.md's mtime like bash: a file modified less
-	// than 5 s ago is skipped. A missing file has mtime 0 (bash's
-	// `mtime1=0`), so it proceeds and the scorer reports the extraction
-	// error. A negative age (mtime in the future) does not debounce.
+	// Debounce, keyed on the last scored mtime like bash (K-112): same mtime
+	// as the last score -> already scored; last score under 5 s ago -> a rapid
+	// re-save, collapsed; otherwise score. A missing file has mtime 0 (bash's
+	// `mtime1=0`): no debounce, and the scorer reports the extraction error.
 	nowT := h.now()
 	var mtime int64
 	if fi, err := os.Stat(filePath); err == nil {
 		mtime = fi.ModTime().Unix()
 	}
-	age := nowT.Unix() - mtime
-	if age < debounceSeconds && age >= 0 {
-		h.log(&out, in, "REPORT", "pass",
-			fmt.Sprintf("debounced: plan.md mtime age=%ds < 5s; skipping this fire", age),
-			map[string]any{"file_path": filePath, "age_s": age})
-		return out, nil
+	statePath := ""
+	if h.WorkCurrentDir != "" {
+		statePath = filepath.Join(h.WorkCurrentDir, lastScoredFile)
+	}
+	// A symlinked state file is never followed (its target would be
+	// overwritten): treat it as no state and do not write it (K-112).
+	stateLink := false
+	if statePath != "" {
+		if fi, err := os.Lstat(statePath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			stateLink = true
+			h.warnf(&out, "plan-quality-score: %s is a symlink; debounce state disabled", statePath)
+			h.log(&out, in, "WARN", "pass", "debounce state file is a symlink; not reading or writing it",
+				map[string]any{"path": statePath})
+		}
+	}
+	if mtime > 0 && statePath != "" && !stateLink {
+		lastMtime, lastAt, haveState := readLastScored(statePath)
+		if haveState && lastMtime == mtime {
+			h.log(&out, in, "REPORT", "pass",
+				"debounced: plan.md unchanged since the last score; skipping this fire",
+				map[string]any{"file_path": filePath, "mtime": mtime})
+			return out, nil
+		}
+		if since := nowT.Unix() - lastAt; haveState && since >= 0 && since < debounceSeconds {
+			h.log(&out, in, "REPORT", "pass",
+				"debounced: last score under 5s ago; rapid re-save collapsed; skipping this fire",
+				map[string]any{"file_path": filePath, "age_s": since})
+			return out, nil
+		}
 	}
 
 	// Locate the scorer.
@@ -251,6 +282,23 @@ func (h *Hook) runPostToolUse(c context.Context, out hooktype.HookOutput, in hoo
 			map[string]any{"error": err.Error()})
 		return out, nil
 	}
+
+	// Record this scoring BEFORE running it so a rapid re-save collapses into
+	// it; an infra failure forgets it again so the next write retries.
+	stateWritten, scored := false, false
+	if mtime > 0 && statePath != "" && !stateLink {
+		stateWritten = writeLastScored(statePath, mtime, nowT.Unix())
+		if !stateWritten {
+			h.warnf(&out, "plan-quality-score: cannot record debounce state at %s; rapid re-saves will not be collapsed", statePath)
+			h.log(&out, in, "WARN", "pass", "cannot record debounce state; continuing without it",
+				map[string]any{"path": statePath})
+		}
+	}
+	defer func() {
+		if stateWritten && !scored {
+			_ = os.Remove(statePath)
+		}
+	}()
 
 	yakosLib := firstNonEmpty(in.Env["YAKOS_LIB"], filepath.Join(root, "cli", "lib"))
 	rc, runErr := runScorer(c, script, filePath, scorerEnv(in.Env, map[string]string{
@@ -290,6 +338,7 @@ func (h *Hook) runPostToolUse(c context.Context, out hooktype.HookOutput, in hoo
 		h.log(&out, in, "WARN", "pass", "invalid log record JSON; no gate action", map[string]any{})
 		return out, nil
 	}
+	scored = true
 	if rec.PlanID == "" {
 		rec.PlanID = "unknown"
 	}
@@ -662,4 +711,29 @@ func (h *Hook) log(out *hooktype.HookOutput, in hooktype.HookInput, severity, de
 	if err != nil {
 		out.Stderr = fmt.Appendf(out.Stderr, "%s: log: %v\n", hookName, err)
 	}
+}
+
+// readLastScored parses the debounce state "<mtime> <scored-at>" (both
+// decimal seconds). ok is false when the file is absent or malformed, like
+// bash's `case ... *[!0-9]*` guards.
+func readLastScored(path string) (mtime, scoredAt int64, ok bool) {
+	data, err := os.ReadFile(path) //nolint:gosec
+	if err != nil {
+		return 0, 0, false
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) < 2 {
+		return 0, 0, false
+	}
+	m, err1 := strconv.ParseInt(fields[0], 10, 64)
+	a, err2 := strconv.ParseInt(fields[1], 10, 64)
+	if err1 != nil || err2 != nil || m < 0 || a < 0 {
+		return 0, 0, false
+	}
+	return m, a, true
+}
+
+// writeLastScored records the version being scored. Best effort.
+func writeLastScored(path string, mtime, scoredAt int64) bool {
+	return os.WriteFile(path, []byte(fmt.Sprintf("%d %d\n", mtime, scoredAt)), 0o644) == nil //nolint:gosec
 }

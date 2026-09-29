@@ -194,7 +194,11 @@ _hi_decoder_sane() {
 # `<&0` is explicit because an asynchronous command otherwise gets /dev/null.
 #
 # YAKOS_HOOK_JQ_TIMEOUT: whole seconds, parsed base 10 (so 08 is 8), clamped to
-# 1..30; unset means 5; anything else means 5 with a one-time WARN from hi_init.
+# 1..25; unset means 5; anything else means 5 with a one-time WARN from hi_init.
+# The ceiling must stay BELOW the timeout `yakos refresh` writes into
+# settings.json for every hook (30 s, cli-go/internal/hooksinstall): at 30 the
+# harness timeout fires first and Claude Code lets the tool call through, so a
+# blocking hook could not block (K-112 g).
 _hi_jq_limit_parse() {
     # sets _HI_JQ_LIMIT; returns 1 when the env value was unusable
     local v="${YAKOS_HOOK_JQ_TIMEOUT:-}"
@@ -203,10 +207,10 @@ _hi_jq_limit_parse() {
     case "$v" in
         *[!0-9]*) return 1 ;;
     esac
-    if [ "${#v}" -gt 3 ]; then _HI_JQ_LIMIT=30; return 0; fi
+    if [ "${#v}" -gt 3 ]; then _HI_JQ_LIMIT=25; return 0; fi
     v=$(( 10#$v ))
     if [ "$v" -lt 1 ]; then v=1; fi
-    if [ "$v" -gt 30 ]; then v=30; fi
+    if [ "$v" -gt 25 ]; then v=25; fi
     _HI_JQ_LIMIT=$v
     return 0
 }

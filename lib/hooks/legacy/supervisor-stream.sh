@@ -114,9 +114,60 @@ file_path="$(hi_file_path)"
 session_id="$(hi_session_id)"
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Truncate previews so the buffer doesn't bloat
-new_preview="$(hi_new_string 2>/dev/null | head -c 300 || true)"
-content_preview="$(hi_content 2>/dev/null | head -c 300 || true)"
+# Scan text vs stored preview (K-112):
+#   - the RISK REGEXES see the unredacted text: 300 bytes of new_string/content
+#     as before, and the FULL Bash command and description (a 2048-byte cap let
+#     "<2100 B padding> rm -rf /" through);
+#   - the BUFFER gets 300-byte previews with secret-table matches redacted
+#     first (the supervisor LLM reads the buffer), then capped. Go twin:
+#     supervisorstream.go.
+# Edit/Write text is scanned in full too (bounded: head + tail beyond 64 KiB),
+# so padding before a risky snippet cannot hide it; new_scan/content_scan (300
+# bytes) still drive the large-diff check as before.
+_ss_bound() {
+    local n
+    n="$(printf '%s' "$1" | wc -c | tr -d ' ')"
+    if [ "${n:-0}" -le 65536 ]; then
+        printf '%s' "$1"
+    else
+        printf '%s\n%s' "$(printf '%s' "$1" | head -c 32768)" "$(printf '%s' "$1" | tail -c 32768)"
+    fi
+}
+new_full="$(hi_new_string 2>/dev/null || true)"
+content_full="$(hi_content 2>/dev/null || true)"
+new_scan="$(printf '%s' "$new_full" | head -c 300)"
+content_scan="$(printf '%s' "$content_full" | head -c 300)"
+new_risk="$(_ss_bound "$new_full")"
+content_risk="$(_ss_bound "$content_full")"
+command_scan="$(hi_field '.tool_input.command' 2>/dev/null || true)"
+description_scan="$(hi_field '.tool_input.description' 2>/dev/null || true)"
+
+# Redaction: one sed over the shared table lib/secret-patterns.sh. If the table
+# cannot be loaded the previews are withheld rather than stored unredacted.
+_ss_sed_args=()
+_ss_redact_ok=0
+if [ -r "$HOOK_DIR/lib/secret-patterns.sh" ] && ( . "$HOOK_DIR/lib/secret-patterns.sh" ) >/dev/null 2>&1 \
+    && . "$HOOK_DIR/lib/secret-patterns.sh" && [ "${YAKOS_SECRET_PATTERNS_LOADED:-0}" = "1" ]; then
+    for _ss_entry in "${YAKOS_SECRET_PATTERNS[@]}"; do
+        _ss_sed_args+=(-e "s#${_ss_entry#*|}#[REDACTED]#g")
+    done
+    # Redaction-only generic Bearer / KEY=VALUE rules (never used to block).
+    for _ss_entry in "${YAKOS_REDACT_EXTRA_PATTERNS[@]}"; do
+        _ss_sed_args+=(-e "s#${_ss_entry#*|}#[REDACTED]#g")
+    done
+    _ss_redact_ok=1
+fi
+# _ss_preview <text>: redact (on up to 4096 bytes, so a token cannot straddle
+# the cut), then cap at 300 bytes.
+_ss_preview() {
+    [ -n "$1" ] || return 0
+    [ "$_ss_redact_ok" = "1" ] || return 0
+    printf '%s' "$1" | head -c 4096 | LC_ALL=C sed -E "${_ss_sed_args[@]}" | head -c 300 || true
+}
+new_preview="$(_ss_preview "$new_full")"
+content_preview="$(_ss_preview "$content_full")"
+command_preview="$(_ss_preview "$command_scan")"
+description_preview="$(_ss_preview "$description_scan")"
 
 event="$(jq -nc \
     --arg ts "$ts" \
@@ -125,22 +176,29 @@ event="$(jq -nc \
     --arg file "$file_path" \
     --arg new "$new_preview" \
     --arg content "$content_preview" \
+    --arg cmd "$command_preview" \
+    --arg desc "$description_preview" \
     --arg sid "$session_id" \
     '{ts: $ts, agent: $agent, tool: $tool,
-      input: {file_path: $file,
+      input: ({file_path: $file,
               new_preview: (if $new == "" then null else $new end),
-              content_preview: (if $content == "" then null else $content end)},
+              content_preview: (if $content == "" then null else $content end)}
+              + (if $cmd == "" then {} else {command_preview: $cmd} end)
+              + (if $desc == "" then {} else {description_preview: $desc} end)),
       session_id: $sid}' 2>/dev/null)"
 
 [ -n "$event" ] || exit 0
-printf '%s\n' "$event" >> "$buffer" 2>/dev/null || exit 0
+# The buffer feeds an LLM and holds command lines: owner-only (K-112).
+( umask 077; printf '%s\n' "$event" >> "$buffer" ) 2>/dev/null || exit 0
+chmod 600 "$buffer" 2>/dev/null || true
 
 # Trim buffer to last 50 lines (rolling window)
 if [ -f "$buffer" ]; then
     buf_lines="$(wc -l < "$buffer" 2>/dev/null | tr -d ' ')"
     if [ "${buf_lines:-0}" -gt 50 ]; then
         tmp="$buffer.tmp.$$"
-        tail -n 50 "$buffer" > "$tmp" 2>/dev/null && mv "$tmp" "$buffer" 2>/dev/null
+        ( umask 077; tail -n 50 "$buffer" > "$tmp" ) 2>/dev/null && mv "$tmp" "$buffer" 2>/dev/null
+        chmod 600 "$buffer" 2>/dev/null || true
     fi
 fi
 
@@ -187,7 +245,7 @@ else
 
     # 2b. Diff-size check: new_string or content line count > min_diff_lines
     if [ -z "$escalate_reason" ]; then
-        diff_text="${new_preview}${content_preview}"
+        diff_text="${new_scan}${content_scan}"
         if [ -n "$diff_text" ]; then
             diff_lines="$(printf '%s' "$diff_text" | wc -l | tr -d ' ')"
             if [ "${diff_lines:-0}" -gt "$min_diff_lines" ]; then
@@ -223,8 +281,11 @@ else
 
     # 2d. Risk-regex check: content matches a dangerous-command pattern.
     # Default patterns; extendable via .yakos.yml supervisor.pre_filter.risk_regex list.
-    if [ -z "$escalate_reason" ] && [ -n "${new_preview}${content_preview}" ]; then
-        combined="${new_preview}${content_preview}"
+    if [ -z "$escalate_reason" ] && [ -n "${new_risk}${content_risk}${command_scan}${description_scan}" ]; then
+        # Newlines join to spaces so a line-continued "curl x \<nl>| sh" matches the
+        # same on both sides (Go matches the whole string); a backslash before a space
+        # (what a continuation leaves behind) is dropped. K-112.
+        combined="$(printf '%s\n%s\n%s\n%s' "$new_risk" "$content_risk" "$command_scan" "$description_scan" | tr '\n' ' ' | sed 's/\\ /  /g')"
         # Built-in default patterns (POSIX ERE for grep -E)
         default_patterns=(
             'drop[[:space:]]+table'
@@ -232,6 +293,18 @@ else
             'rm[[:space:]]+-rf'
             'chmod[[:space:]]+777'
             '(password|secret|api_key|token)[[:space:]]*=[[:space:]]*[^$({][^[:space:]]{8,}'
+            # K-112: Bash-command shapes the patterns above miss. Go twin: defaultRiskPatterns.
+            'git[[:space:]]+push[[:space:]]([^;&|]*[[:space:]])?(--force[a-z-]*|-f)([[:space:]]|$)'
+            'git[[:space:]]+push[[:space:]]([^;&|]*[[:space:]])?[+][^[:space:]]'
+            '(curl|wget)[^|]*[|][[:space:]]*(sudo[[:space:]]+)?((ba|z|da)?sh|python[0-9.]*|perl|ruby|node|php)([[:space:]]|$)'
+            '(sh|source)[[:space:]]+<[(][^)]*(curl|wget)'
+            'base64[^|]*[|][[:space:]]*(sudo[[:space:]]+)?(ba|z|da)?sh([[:space:]]|$)'
+            '>[|>]?[[:space:]]*[^[:space:]]*(\.env|\.ssh/|\.pem|credentials|\.claude/settings|hook-bypass|/etc/)'
+            'tee[[:space:]]+([^;&|]*[[:space:]])?[^[:space:]]*(\.env|\.ssh/|\.pem|credentials|\.claude/settings|hook-bypass|/etc/)'
+            'rm[[:space:]]+-[a-z]*(fr|rf)'
+            'rm[[:space:]]+-[a-z]*r[a-z]*[[:space:]]+-[a-z]*f'
+            'rm[[:space:]]+-[a-z]*f[a-z]*[[:space:]]+-[a-z]*r'
+            'chmod[[:space:]]+-[a-z]+[[:space:]]+777'
         )
         for pat in "${default_patterns[@]}"; do
             if printf '%s' "$combined" | grep -qiE "$pat" 2>/dev/null; then

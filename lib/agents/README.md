@@ -96,11 +96,11 @@ When adding a new generic agent:
 | `version` | optional, v0.9+ | Integer version of THIS agent. Framework agents bump on substantive changes. Projects can use this for their own versioning too. |
 | `extends` | optional | Parent template id (e.g. `extends: backend`). |
 | `extends-version` | optional, v0.9+ | The framework parent's `version:` at the time this project agent was written. `yakos agents lint` warns when the framework parent has bumped (so the project knows to review the new parent body). |
-| `runtime` | optional, v0.4.2+ | Preferred runtime: `claude` \| `codex` \| `gemini`. Used by `yakos dispatch` to pick the CLI. Default: yakOS's runtime resolver (env var → state file → claude). |
+| `runtime` | optional, v0.4.2+ | Preferred runtime: `claude` \| `claude-sdk` \| `codex` \| `agy` \| `antigravity-sdk` (or a plugin id under `~/.yakos/plugins/`). `gemini` is a deprecated shim for `agy`. Used by `yakos dispatch` to pick the CLI. Default: yakOS's runtime resolver (env var → state file → claude). `yakos validate` rejects any other value. |
 | `runtime-fallback` | optional, v0.5+ | List of fallback runtimes, e.g. `[codex, claude]`. If the preferred runtime fails check_cli or check_auth, `yakos dispatch` walks this list. |
 | `max-cost-per-task` | optional, v0.8+ | Cost ceiling in USD (e.g. `0.50`). When the runtime returns real `total_cost_usd` telemetry and exceeds this value, dispatch-log emits a `budget_violation` event. Observation-only post-call; pre-flight is v0.9+. |
 | `max-duration-s` | optional, v0.8+ | Per-dispatch timeout in seconds (e.g. `300`). Applied if smaller than the global `--timeout`. |
-| `model-policy` | optional, v0.10+ | `pinned` (default; never auto-routes) \| `prefer-haiku-if-eval-equal` \| `prefer-sonnet-if-eval-equal` \| `eval-driven`. Controls how `yakos model-routing eval` interprets promotion candidates. `pinned` agents are never auto-promoted; operator must run `yakos model-routing promote` explicitly. |
+| `model-policy` | optional, v0.10+ | A model tier: `haiku` \| `sonnet` \| `opus` \| `fable`. Written by `yakos model-routing promote` after operator review; when set it overrides `model:` at dispatch (`model_chosen_by: policy`). Leave it unset to stay on `model:`. Not a policy name: `yakos validate` rejects `pinned`, `eval-driven` and the like, and `yakos dispatch` dies on them (`invalid model tier`). |
 | `model-policy-epsilon` | optional, v0.10+ | Float in [0, 0.30]. Per-agent override of the framework ε default (default 0.05). The eval harness uses this value instead of the global `epsilon_pass_rate` setting when computing the Wilson CI gate for this agent. |
 
 ### Model routing and promotion
