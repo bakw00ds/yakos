@@ -39,10 +39,13 @@
 #     cannot put it into bash's "degraded input" state; it evaluates the
 #     payload and decides on policy instead. Where bash fails closed the two
 #     agree on rc but not on the log record; where bash passes through
-#     (YAKOS_HOOKS_FAIL_OPEN=1, or a jq that prints garbage) Go is stricter.
-#   * bash bug: Go deliberately does NOT reproduce a bash weakness (a
-#     lexical-only symlink check, NUL-dropping, non-array deny ignored, a jq
-#     crash on a non-object finding). Each is reported for a bash-side fix.
+#     (YAKOS_HOOKS_FAIL_OPEN=1) Go is stricter. On an ALLOWED path with a
+#     missing or garbage-printing jq, bash fails closed (2) and Go allows (0).
+#   * bash bug: Go deliberately does NOT reproduce a bash weakness that is not
+#     fixed on the bash side (currently: supervisor-gate's jq crash on a
+#     non-object finding). path-allowlist's bash weaknesses (lexical-only
+#     symlink check, NUL/newline handling, non-array deny, bash 3.2 crash,
+#     garbage jq) were fixed in K-87 A-2b round 2 and are exact-parity cases.
 #
 # Iteration helpers (env):
 #   YAKOS_PARITY_ONLY=<hook>       run only that hook's tuples
@@ -63,6 +66,11 @@ set -eu
 REPO_ROOT="$(cd "$(dirname -- "$0")/.." && pwd -P)"
 HOOKS="$REPO_ROOT/lib/hooks"
 FIXT="$REPO_ROOT/tests/fixtures/hooks"
+# Interpreter the BASH side of every case runs under (default: whatever `bash`
+# resolves to). CI sets YAKOS_HOOK_BASH=/bin/bash on macOS to exercise stock
+# bash 3.2 explicitly: a case whose PATH is overridden would otherwise pick a
+# different bash than the one the script itself runs under.
+HOOK_BASH="${YAKOS_HOOK_BASH:-bash}"
 
 # ---- jq resolution (K-81 rider) ---------------------------------------------
 #
@@ -329,9 +337,9 @@ case_check() {
     if [ -n "$run_env" ]; then
         # shellcheck disable=SC2086  # intentional: run_env may carry
         # multiple space-separated NAME=value assignments.
-        stdout_capture="$(printf '%s' "$payload" | env $run_env YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$cpd" bash "$HOOKS/$hook" 2>"$bash_stderr_file")" || actual_rc=$?
+        stdout_capture="$(printf '%s' "$payload" | env $run_env YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$cpd" "$HOOK_BASH" "$HOOKS/$hook" 2>"$bash_stderr_file")" || actual_rc=$?
     else
-        stdout_capture="$(printf '%s' "$payload" | YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$cpd" bash "$HOOKS/$hook" 2>"$bash_stderr_file")" || actual_rc=$?
+        stdout_capture="$(printf '%s' "$payload" | YAKOS_WORK_DIR="$tmp/work" CLAUDE_PROJECT_DIR="$cpd" "$HOOK_BASH" "$HOOKS/$hook" 2>"$bash_stderr_file")" || actual_rc=$?
     fi
     local bash_stderr
     bash_stderr="$(cat "$bash_stderr_file")"
@@ -1139,6 +1147,16 @@ setup_tcd_bypass() {
 EOF
 }
 
+# ---- K-87 A-2b round 2 setups ----------------------------------------------------
+setup_allowlist_midstar_deny() { _pa_write_policy "$1" '{"go-api":{"allow":["api/**"],"deny":["api/*/secret.go"]}}'; }
+setup_symlink_rootlink() {
+    # api/rootlink points at the project root itself: "rootlink/.." is the
+    # parent of the project, but lexically collapses to "api".
+    mkdir -p "$1/api"
+    _pa_write_policy "$1" '{"go-api":{"allow":["api/**"]}}'
+    ln -sf "$1" "$1/api/rootlink"
+}
+
 # ---- cases ------------------------------------------------------------------
 
 echo "Running hook fixtures..."
@@ -1409,20 +1427,22 @@ case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlis
 case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlist setup_allowlist_policy_false
 case_check path-allowlist.sh   pretooluse-edit-api.json          2 path-allowlist setup_allowlist_policy_not_object
 case_check path-allowlist.sh   pretooluse-edit-api.json          2 path-allowlist setup_allowlist_toplevel_array
-# Accepted: bash's `.deny // [] | .[]` silently yields NO deny patterns for a
-# non-array deny (a fail-open); Go blocks. Bash is wrong; not editable this round.
-case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlist setup_allowlist_deny_string "" "" "" "2:bash bug: a non-array deny silently disables deny enforcement; Go fails closed (bash fix deferred, K-87 A-2b report)"
+# A non-array deny is malformed and blocks on BOTH sides (bash used to yield no
+# deny patterns from `.deny // [] | .[]`, silently disabling deny; fixed).
+case_check path-allowlist.sh   pretooluse-edit-api.json          2 path-allowlist setup_allowlist_deny_string
 # Glob semantics: '*' spans '/' (bash case), so deny recursion works; deny is case-insensitive.
 case_check path-allowlist.sh   pretooluse-write-deep-deny.json           2 path-allowlist setup_allowlist_strict
 case_check path-allowlist.sh   pretooluse-write-deny-mixed-case-dir.json 2 path-allowlist setup_allowlist_strict
 case_check path-allowlist.sh   pretooluse-write-inroot-dotdot.json       0 path-allowlist setup_allowlist_strict
-# Symlink handling, including ".." applied AFTER a symlink.
+# Symlink handling, including ".." applied AFTER a symlink (bash used to check only
+# the lexically collapsed path; both sides now also resolve the path as written).
 case_check path-allowlist.sh   pretooluse-write-inroot-symlink-dotdot.json 0 path-allowlist setup_symlink_inroot_dotdot
-case_check path-allowlist.sh   pretooluse-write-dotdot-after-symlink.json 0 path-allowlist setup_symlink_dir_escape "" "" "" "2:bash bug: checks only the lexically-normalized path, so api/link/sub/../../x escapes via the symlink target; Go also resolves the as-written path (bash fix deferred, K-87 A-2b report)"
-# NUL byte: bash's command substitution silently drops it (evaluating a different path than the tool receives); Go refuses.
-case_check path-allowlist.sh   pretooluse-write-nul-in-path.json 0 path-allowlist setup_allowlist_strict "" "" "" "2:bash drops NUL bytes in command substitution and evaluates a different path; Go refuses a NUL-bearing path outright"
-# Broken jq (present but misbehaving). Go never shells out to jq.
-case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 "" setup_allowlist_strict "PATH=$FAKEJQ_GARBAGE_PATH" "" "" "2:bash trusts a jq that prints garbage (tool name becomes garbage, hook exits 0 = fail-open); Go is jq-independent and blocks on policy"
+case_check path-allowlist.sh   pretooluse-write-dotdot-after-symlink.json 2 path-allowlist setup_symlink_dir_escape
+# NUL byte: refused outright on both sides (bash's command substitution used to drop it).
+case_check path-allowlist.sh   pretooluse-write-nul-in-path.json 2 path-allowlist setup_allowlist_strict
+# Broken jq (present but misbehaving): bash now fails closed on a jq that prints garbage;
+# Go never shells out to jq.
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 "" setup_allowlist_strict "PATH=$FAKEJQ_GARBAGE_PATH" "" "" "2:bash fails closed on degraded input (jq printing garbage); Go is jq-independent and blocks on policy (same exit code, different log record)"
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict "PATH=$FAKEJQ_FAIL_PATH" "" "" "2:bash fails closed on a crashing jq (degraded input); Go is jq-independent and blocks on policy"
 
 # --- supervisor-gate: K-87 A-2b -----------------------------------------------
@@ -1529,6 +1549,22 @@ case_check peer-claim-confirm.sh posttooluse-peer-claim-confirm.json 0 "" "" "YA
 # --- task-complete-dispatch: K-87 A-2b (would_run is framework-root-relative on both sides) ---
 case_check task-complete-dispatch.sh  taskcompleted-backend.json   0 task-complete-dispatch setup_tcd_bypass
 case_check task-complete-dispatch.sh  teamcreate.json              0 task-complete-dispatch
+
+# --- path-allowlist: K-87 A-2b round 2 (bash hardening) ------------------------------
+# bash 3.2 crash (fail-open, exit 1) when ".." pops the segment list to empty.
+case_check path-allowlist.sh   pretooluse-write-dotdot-dotenv.json   2 path-allowlist setup_allowlist_strict
+# Newline / NUL: refused outright on both sides.
+case_check path-allowlist.sh   pretooluse-write-newline-traversal.json 2 path-allowlist setup_allowlist_strict
+case_check path-allowlist.sh   pretooluse-write-newline-deny.json      2 path-allowlist setup_allowlist_strict
+# ".." after a symlink that points at the project root (physical parent escapes; lexical does not).
+case_check path-allowlist.sh   pretooluse-write-rootlink-dotdot.json   2 path-allowlist setup_symlink_rootlink
+case_check path-allowlist.sh   pretooluse-write-rootlink-dotdot.json   2 path-allowlist setup_symlink_rootlink "PATH=$NORESOLVE_PATH"
+# '*' consuming '/' in the MIDDLE of a pattern (deny "api/*/secret.go").
+case_check path-allowlist.sh   pretooluse-write-midstar-deny.json      2 path-allowlist setup_allowlist_midstar_deny
+case_check path-allowlist.sh   pretooluse-write-midstar-ok.json        0 path-allowlist setup_allowlist_midstar_deny
+# jq missing / garbage on an ALLOWED path: bash fails closed (2), Go evaluates and allows (0).
+case_check path-allowlist.sh   pretooluse-edit-api.json                2 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH" "" "" "0:bash fails closed on degraded input (jq missing or printing garbage) even for an allowed path; Go never depends on jq, evaluates the payload and allows it"
+case_check path-allowlist.sh   pretooluse-edit-api.json                2 "" setup_allowlist_strict "PATH=$FAKEJQ_GARBAGE_PATH" "" "" "0:bash fails closed on degraded input (jq missing or printing garbage) even for an allowed path; Go never depends on jq, evaluates the payload and allows it"
 
 # ---- summary ------------------------------------------------------------
 

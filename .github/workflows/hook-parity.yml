@@ -674,3 +674,37 @@ jobs:
           echo "Bash smoke tests cover all 21 hooks."
           echo "Go-native unit tests ran (with a zero-tests-matched guard) for: cycle-counter, path-log, session-end-check."
           echo "Go implementations for all 21 hooks are present in cli-go/internal/hooks/."
+
+  # K-87 A-2b: stock macOS ships bash 3.2, and the hooks run by shebang
+  # (#!/usr/bin/env bash), so any host whose first bash is 3.2 runs them under
+  # it. The other jobs put a newer bash first on PATH and never see 3.2-only
+  # failures: path-safety.sh once crashed there ("unbound variable" on an
+  # empty array under set -u), exiting 1, which Claude Code treats as
+  # NON-blocking, so a traversal write passed. This job runs the whole bash
+  # fixture corpus with /bin/bash explicitly, for both the harness and every
+  # hook, so that class of regression fails CI.
+  hook-fixtures-bash32:
+    name: hook fixtures under stock bash 3.2 (macos)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Require bash 3.x at /bin/bash
+        shell: bash
+        run: |
+          /bin/bash --version | head -1
+          case "$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"')" in
+            3) ;;
+            *) echo "ERROR: /bin/bash is not bash 3.x; this job exists to test bash 3.2" >&2; exit 1 ;;
+          esac
+
+      - name: Install jq
+        shell: bash
+        run: command -v jq >/dev/null 2>&1 || brew install jq
+
+      - name: Bash fixture suite under /bin/bash
+        shell: bash
+        env:
+          YAKOS_HOOK_BASH: /bin/bash
+        run: /bin/bash tests/run-hook-fixtures.sh

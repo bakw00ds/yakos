@@ -52,8 +52,12 @@ bash lib/hooks/path-allowlist.sh < tests/fixtures/hooks/pretooluse-edit-api.json
 | `pretooluse-write-deny-mixed-case-dir.json` | path-allowlist | BLOCK (deny matching is case-insensitive in the directory part too) |
 | `pretooluse-write-inroot-dotdot.json` | path-allowlist | PASS (`api/x/../handler.go` normalizes inside the root) |
 | `pretooluse-write-inroot-symlink-dotdot.json` | path-allowlist | PASS (`link/..` where the link stays in-root) |
-| `pretooluse-write-dotdot-after-symlink.json` | path-allowlist | BLOCK in Go, PASS in bash (accepted divergence: bash only checks the lexically normalized path) |
-| `pretooluse-write-nul-in-path.json` | path-allowlist | BLOCK in Go, PASS in bash (accepted divergence: bash drops the NUL byte) |
+| `pretooluse-write-dotdot-after-symlink.json` | path-allowlist | BLOCK (`..` after a symlink pointing outside; both sides resolve the path as written) |
+| `pretooluse-write-nul-in-path.json` | path-allowlist | BLOCK (NUL byte refused outright) |
+| `pretooluse-write-newline-traversal.json`, `-newline-deny.json` | path-allowlist | BLOCK (a newline refused outright; bash used to normalize only the first line) |
+| `pretooluse-write-dotdot-dotenv.json` | path-allowlist | BLOCK (`api/../.env`; crashed bash 3.2 with exit 1, a fail-open) |
+| `pretooluse-write-rootlink-dotdot.json` | path-allowlist | BLOCK (`..` after a symlink that points at the project root; also run with no realpath/python3) |
+| `pretooluse-write-midstar-deny.json`, `-midstar-ok.json` | path-allowlist | BLOCK / PASS (deny `api/*/secret.go`: `*` consumes `/` mid-pattern) |
 | `posttooluse-bash-clean.json` | output-injection-scan | REPORT, no patterns |
 | `posttooluse-mcp-injected.json` | output-injection-scan | WARN (`mcp__*` tool, role-override phrase) |
 | `posttooluse-bash-response-object.json` | output-injection-scan | WARN (object-valued `tool_response`, rendered like `jq -r`) |
