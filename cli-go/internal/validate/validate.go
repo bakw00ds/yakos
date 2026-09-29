@@ -222,6 +222,9 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 		}
 	}
 
+	// Agent frontmatter enums: runtime / runtime-fallback.
+	checkAgentEnums(cfg, r, w, base)
+
 	// Line budget warnings
 	checkLineBudgets(cfg, r, w, base)
 
@@ -1014,6 +1017,92 @@ func checkDecisionGuards(r *Result, w io.Writer, base string) {
 	for _, sf := range decision.ValidateDir(filepath.Join(base, "decisions"), promotions) {
 		for _, e := range sf.Errs {
 			r.addErr(w, fmt.Sprintf("%s: %v", sf.Path, e))
+		}
+	}
+}
+
+// ---- agent frontmatter enums (K-112 c) -----------------------------------
+
+// knownRuntimes mirrors YK_RT_KNOWN_BUILTIN in cli/lib/runtime-resolve.sh
+// (a test keeps the two in step). Plugin runtimes under
+// ~/.yakos/plugins/<id>/runtime.sh are accepted too, like yk_rt_is_known.
+var knownRuntimes = []string{"claude", "claude-sdk", "codex", "agy", "antigravity-sdk", "gemini"}
+
+func inSet(v string, set []string) bool {
+	for _, s := range set {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// runtimeKnown reports whether id is a built-in or plugin runtime.
+func runtimeKnown(id string) bool {
+	if inSet(id, knownRuntimes) {
+		return true
+	}
+	if home, err := os.UserHomeDir(); err == nil && id != "" && !strings.ContainsAny(id, "/\\") && id != "." && id != ".." {
+		if fileExists(filepath.Join(home, ".yakos", "plugins", id, "runtime.sh")) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkAgentEnums rejects agent frontmatter whose runtime or runtime-fallback value is not one the dispatcher can act on. A pinned-to-nothing
+// runtime silently fell through to the resolver default, and a non-tier
+// model-policy made `yakos dispatch` die with "invalid model tier".
+// Mirrors check_agent_enums in cli/lib/validate.sh.
+func checkAgentEnums(cfg Config, r *Result, w io.Writer, base string) {
+	agentsDir := filepath.Join(base, "agents")
+	entries, err := os.ReadDir(agentsDir)
+	if err != nil {
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		switch name {
+		case "README.md", "INDEX.md":
+			continue
+		}
+		file := filepath.Join(agentsDir, name)
+		fm, err := parseFrontmatter(file)
+		if err != nil || fm == nil {
+			continue // reported by the frontmatter pass
+		}
+		checkRuntimeValue := func(key, v string) {
+			switch {
+			case v == "gemini":
+				r.addWarn(cfg, w, fmt.Sprintf("%s: %s: gemini is a deprecated shim for agy; use agy", file, key))
+			case !runtimeKnown(v):
+				r.addErr(w, fmt.Sprintf("%s: %s: %q is not a known runtime (known: %s)", file, key, v, strings.Join(knownRuntimes, ", ")))
+			}
+		}
+		if v, ok := fm["runtime"]; ok && v != nil {
+			if sv, isStr := v.(string); !isStr {
+				r.addErr(w, fmt.Sprintf("%s: runtime: must be a string, got %T", file, v))
+			} else {
+				checkRuntimeValue("runtime", sv)
+			}
+		}
+		if v, ok := fm["runtime-fallback"]; ok && v != nil {
+			list, isList := v.([]any)
+			if !isList {
+				r.addErr(w, fmt.Sprintf("%s: runtime-fallback: must be a list, got %T", file, v))
+			} else {
+				for _, el := range list {
+					if sv, isStr := el.(string); isStr {
+						checkRuntimeValue("runtime-fallback", sv)
+					} else {
+						r.addErr(w, fmt.Sprintf("%s: runtime-fallback: entries must be strings, got %T", file, el))
+					}
+				}
+			}
 		}
 	}
 }

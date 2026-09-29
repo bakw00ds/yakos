@@ -195,6 +195,9 @@ validate_tree() {
         fi
     fi
 
+    # Agent frontmatter enums: runtime / runtime-fallback.
+    check_agent_enums "$base"
+
     # Line-budget WARNs (per Phase 1.5 §10 + STYLE.md §7)
     check_line_budgets "$base"
 
@@ -206,6 +209,75 @@ validate_tree() {
 }
 
 # ---- standards checks (framework-mode only; STYLE.md §1-§7) ----------------
+
+# ---- agent frontmatter enums (K-112 c) -----------------------------------
+#
+# runtime / runtime-fallback must name a runtime the dispatcher knows
+# (YK_RT_KNOWN_BUILTIN in runtime-resolve.sh, or a plugin under
+# ~/.yakos/plugins/<id>/runtime.sh). Go twin: checkAgentEnums in
+# cli-go/internal/validate/validate.go (keep the messages byte-identical).
+
+_VALIDATE_KNOWN_RUNTIMES="claude claude-sdk codex agy antigravity-sdk gemini"
+
+_validate_runtime_known() {
+    case " $_VALIDATE_KNOWN_RUNTIMES " in *" $1 "*) return 0 ;; esac
+    case "$1" in ''|*/*|*\\*|.|..) return 1 ;; esac
+    [ -f "$HOME/.yakos/plugins/$1/runtime.sh" ]
+}
+
+# _validate_fm_values <frontmatter> <key>
+#   One value per line: a scalar `key: v`, an inline list `key: [a, b]`, or a
+#   block list. Quotes and trailing comments are stripped.
+_validate_fm_values() {
+    printf '%s\n' "$1" | awk -v k="$2" '
+        function clean(v) {
+            sub(/[[:space:]]+#.*$/, "", v)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+            gsub(/^["'\'']|["'\'']$/, "", v)
+            return v
+        }
+        $0 ~ "^" k ":" {
+            v = $0; sub("^" k ":[[:space:]]*", "", v)
+            v = clean(v)
+            if (v ~ /^\[.*\]$/) {
+                sub(/^\[/, "", v); sub(/\]$/, "", v)
+                n = split(v, parts, ",")
+                for (i = 1; i <= n; i++) { p = clean(parts[i]); if (p != "") print p }
+                exit
+            }
+            if (v != "") { print v; exit }
+            inblock = 1; next
+        }
+        inblock && /^[[:space:]]+-[[:space:]]/ { v = $0; sub(/^[[:space:]]+-[[:space:]]+/, "", v); print clean(v); next }
+        inblock && /^[[:space:]]*(#.*)?$/ { next }
+        inblock { exit }
+    '
+}
+
+check_agent_enums() {
+    local base="$1" agent_file name fm v
+    [ -d "$base/agents" ] || return 0
+    while IFS= read -r agent_file; do
+        [ -n "$agent_file" ] || continue
+        name="$(basename -- "$agent_file")"
+        case "$name" in README.md|INDEX.md) continue ;; esac
+        fm="$(awk '
+            NR==1 && /^---[[:space:]]*$/ { in_fm=1; next }
+            in_fm==1 && /^---[[:space:]]*$/ { exit }
+            in_fm==1 { print }
+        ' "$agent_file")"
+        for key in runtime runtime-fallback; do
+            while IFS= read -r v; do
+                [ -n "$v" ] || continue
+                if [ "$v" = "gemini" ]; then
+                    warn "$agent_file: $key: gemini is a deprecated shim for agy; use agy"
+                elif ! _validate_runtime_known "$v"; then
+                    err "$agent_file: $key: \"$v\" is not a known runtime (known: ${_VALIDATE_KNOWN_RUNTIMES// /, })"
+                fi
+            done < <(_validate_fm_values "$fm" "$key")
+        done
+    done < <(find "$base/agents" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort)
+}
 
 check_line_budgets() {
     # WARN on any agent/skill/rule file outside its line budget.
