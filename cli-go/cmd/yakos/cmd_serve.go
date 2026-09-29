@@ -14,6 +14,7 @@ import (
 	"net/http"
 
 	"github.com/bakw00ds/yakos/internal/buildinfo"
+	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/consolecmd"
 	internalconsoleui "github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/daemonclient"
@@ -83,119 +84,48 @@ func runServe(yakosRoot string, args []string) {
 		yakosRoot = envRoot
 	}
 
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-h", "--help":
-			printServeHelp(os.Stdout)
-			os.Exit(0)
-		case "--socket":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "serve: --socket requires a path")
-				os.Exit(1)
-			}
-			socketPath = args[i]
-		case "--pidfile":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "serve: --pidfile requires a path")
-				os.Exit(1)
-			}
-			pidFile = args[i]
-		case "--ws-addr":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "serve: --ws-addr requires an address")
-				os.Exit(1)
-			}
-			wsAddr = args[i]
-		case "--perf-addr":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "serve: --perf-addr requires an address")
-				os.Exit(1)
-			}
-			perfAddr = args[i]
-		case "--console-addr":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "serve: --console-addr requires an address")
-				os.Exit(1)
-			}
-			consoleAddr = args[i]
-		case "--console-bind":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "serve: --console-bind requires an address")
-				os.Exit(1)
-			}
-			consoleBind = args[i]
-		case "--console-external-host":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "serve: --console-external-host requires a host[:port] value")
-				os.Exit(1)
-			}
-			// Repeatable; also accepts comma-separated values in a single flag.
-			consoleExternalHosts = append(consoleExternalHosts, args[i])
-		case "--rotate-ws-token":
-			rotateToken = true
-		case "--rotate-perf-token":
-			rotatePerfToken = true
-		case "--rotate-console-token":
-			rotateConsoleToken = true
-		case "--no-perf":
-			noPerfDash = true
-		case "--no-console":
-			noConsole = true
-		case "--console-bootstrap-cert":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "serve: --console-bootstrap-cert requires a name")
-				os.Exit(1)
-			}
-			consoleBootstrapCertName = args[i]
-		case "--no-bootstrap-cert":
-			noBootstrapCert = true
-		case "--console-allow-bash":
-			consoleAllowBash = true
-		case "--console-structured-questions":
-			consoleStructuredQuestions = true
-		case "--share-terminal":
-			shareTerminal = true
-		case "--ide-root":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "serve: --ide-root requires a path")
-				os.Exit(1)
-			}
-			ideRoot = args[i]
-		case "--detach":
-			detach = true
-		default:
-			if len(args[i]) > 9 && args[i][:9] == "--socket=" {
-				socketPath = args[i][9:]
-			} else if len(args[i]) > 10 && args[i][:10] == "--pidfile=" {
-				pidFile = args[i][10:]
-			} else if len(args[i]) > 10 && args[i][:10] == "--ws-addr=" {
-				wsAddr = args[i][10:]
-			} else if len(args[i]) > 12 && args[i][:12] == "--perf-addr=" {
-				perfAddr = args[i][12:]
-			} else if len(args[i]) > 15 && args[i][:15] == "--console-addr=" {
-				consoleAddr = args[i][15:]
-			} else if len(args[i]) > 15 && args[i][:15] == "--console-bind=" {
-				consoleBind = args[i][15:]
-			} else if len(args[i]) > 24 && args[i][:24] == "--console-external-host=" {
-				consoleExternalHosts = append(consoleExternalHosts, args[i][24:])
-			} else if len(args[i]) > 25 && args[i][:25] == "--console-bootstrap-cert=" {
-				consoleBootstrapCertName = args[i][25:]
-			} else if len(args[i]) > 11 && args[i][:11] == "--ide-root=" {
-				ideRoot = args[i][11:]
-			} else {
-				fmt.Fprintf(os.Stderr, "serve: unknown flag %q (try --help)\n", args[i])
-				os.Exit(1)
-			}
-		}
+	// Ordering caveat: the pre-cliflag loop acted on each token inline (first
+	// bad token in argv order won); cliflag.Set.Parse resolves recognized
+	// flags first, so a later --help or missing-value error can preempt an
+	// earlier unknown-flag report. Exit codes unchanged (see runValidate).
+	help := false
+	fs := &cliflag.Set{Cmd: "serve", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--socket", Kind: cliflag.String, Str: &socketPath, ValueDesc: "a path"},
+		{Name: "--pidfile", Kind: cliflag.String, Str: &pidFile, ValueDesc: "a path"},
+		{Name: "--ws-addr", Kind: cliflag.String, Str: &wsAddr, ValueDesc: "an address"},
+		{Name: "--perf-addr", Kind: cliflag.String, Str: &perfAddr, ValueDesc: "an address"},
+		{Name: "--console-addr", Kind: cliflag.String, Str: &consoleAddr, ValueDesc: "an address"},
+		{Name: "--console-bind", Kind: cliflag.String, Str: &consoleBind, ValueDesc: "an address"},
+		// Repeatable; also accepts comma-separated values in a single flag.
+		{Name: "--console-external-host", Kind: cliflag.StringSlice, Slice: &consoleExternalHosts, ValueDesc: "a host[:port] value"},
+		{Name: "--rotate-ws-token", Kind: cliflag.Bool, Bool: &rotateToken},
+		{Name: "--rotate-perf-token", Kind: cliflag.Bool, Bool: &rotatePerfToken},
+		{Name: "--rotate-console-token", Kind: cliflag.Bool, Bool: &rotateConsoleToken},
+		{Name: "--no-perf", Kind: cliflag.Bool, Bool: &noPerfDash},
+		{Name: "--no-console", Kind: cliflag.Bool, Bool: &noConsole},
+		{Name: "--console-bootstrap-cert", Kind: cliflag.String, Str: &consoleBootstrapCertName, ValueDesc: "a name"},
+		{Name: "--no-bootstrap-cert", Kind: cliflag.Bool, Bool: &noBootstrapCert},
+		{Name: "--console-allow-bash", Kind: cliflag.Bool, Bool: &consoleAllowBash},
+		{Name: "--console-structured-questions", Kind: cliflag.Bool, Bool: &consoleStructuredQuestions},
+		{Name: "--share-terminal", Kind: cliflag.Bool, Bool: &shareTerminal},
+		{Name: "--ide-root", Kind: cliflag.String, Str: &ideRoot, ValueDesc: "a path"},
+		{Name: "--detach", Kind: cliflag.Bool, Bool: &detach},
+	}}
+	rest, perr := fs.Parse(args)
+	if perr != nil {
+		fmt.Fprintln(os.Stderr, perr)
+		os.Exit(1)
+	}
+	if help {
+		printServeHelp(os.Stdout)
+		os.Exit(0)
+	}
+	// serve takes no positionals; any leftover token (flag-shaped or not)
+	// is reported with the same "unknown flag" text, first one wins.
+	for _, arg := range rest {
+		fmt.Fprintf(os.Stderr, "serve: unknown flag %q (try --help)\n", arg)
+		os.Exit(1)
 	}
 
 	// --rotate-ws-token: generate a new token and print the path, then exit.
@@ -387,42 +317,37 @@ func runEvents(args []string) {
 	topic := ""
 	restartStale := false
 
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-h", "--help":
-			printEventsHelp(os.Stdout)
-			os.Exit(0)
-		case "--ws-addr":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "events: --ws-addr requires an address")
-				os.Exit(1)
-			}
-			wsAddr = args[i]
-		case "--topic":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "events: --topic requires a topic string")
-				os.Exit(1)
-			}
-			topic = args[i]
-		case "--restart-stale-daemon":
-			restartStale = true
-		case "--since":
-			// Q8 decision: replay is out of scope for Phase 2.
-			fmt.Fprintln(os.Stderr, "events: --since is not supported in Phase 2 (event replay deferred to Phase 3)")
-			fmt.Fprintln(os.Stderr, "events: run without --since to receive live events from this moment forward")
-			os.Exit(1)
-		default:
-			if len(args[i]) > 10 && args[i][:10] == "--ws-addr=" {
-				wsAddr = args[i][10:]
-			} else if len(args[i]) > 8 && args[i][:8] == "--topic=" {
-				topic = args[i][8:]
-			} else {
-				fmt.Fprintf(os.Stderr, "events: unknown flag %q (try --help)\n", args[i])
-				os.Exit(1)
-			}
-		}
+	// Ordering caveat as in runServe: recognized-flag outcomes (help,
+	// missing value, --since) are resolved before unknown-flag reporting.
+	help := false
+	since := false
+	fs := &cliflag.Set{Cmd: "events", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--ws-addr", Kind: cliflag.String, Str: &wsAddr, ValueDesc: "an address"},
+		{Name: "--topic", Kind: cliflag.String, Str: &topic, ValueDesc: "a topic string"},
+		{Name: "--restart-stale-daemon", Kind: cliflag.Bool, Bool: &restartStale},
+		// --since is a bare bool here on purpose: the old parser rejected it
+		// immediately without consuming a value.
+		{Name: "--since", Kind: cliflag.Bool, Bool: &since},
+	}}
+	rest, perr := fs.Parse(args)
+	if perr != nil {
+		fmt.Fprintln(os.Stderr, perr)
+		os.Exit(1)
+	}
+	if help {
+		printEventsHelp(os.Stdout)
+		os.Exit(0)
+	}
+	if since {
+		// Q8 decision: replay is out of scope for Phase 2.
+		fmt.Fprintln(os.Stderr, "events: --since is not supported in Phase 2 (event replay deferred to Phase 3)")
+		fmt.Fprintln(os.Stderr, "events: run without --since to receive live events from this moment forward")
+		os.Exit(1)
+	}
+	for _, arg := range rest {
+		fmt.Fprintf(os.Stderr, "events: unknown flag %q (try --help)\n", arg)
+		os.Exit(1)
 	}
 	if os.Getenv("YAKOS_RESTART_STALE_DAEMON") == "1" {
 		restartStale = true

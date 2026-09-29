@@ -8,6 +8,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/archive"
 	"github.com/bakw00ds/yakos/internal/checkpoint"
+	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/compact"
 	"github.com/bakw00ds/yakos/internal/peer"
 	"github.com/bakw00ds/yakos/internal/planscore"
@@ -16,6 +17,44 @@ import (
 	"github.com/bakw00ds/yakos/internal/supervise"
 	"github.com/bakw00ds/yakos/internal/workclose"
 )
+
+// parseWorkFlags runs fs.Parse over args and exits 1 with the missing-value
+// error on failure, exactly as each hand-rolled loop did. It returns the
+// tokens Parse did not recognize (unknown flags and positionals, in argv
+// order) for the caller's command-specific error text.
+//
+// Ordering caveat inherited from cliflag's two-phase design (see the
+// runValidate comment in cmd_diag.go): a missing-value error, --help, or a
+// value-validation error is now resolved before the unknown-flag /
+// positional errors, where the old single-pass loops reported whichever
+// bad token came first in argv. Only the choice among several simultaneous
+// errors in one invocation can differ; each single-error argv is unchanged.
+func parseWorkFlags(fs *cliflag.Set, args []string) []string {
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	return rest
+}
+
+// flagValueUsedEquals reports whether the first occurrence of value val for
+// flag name in args was spelled "name=val" (true) rather than "name val"
+// (false). The old numeric-flag parsers worded their "not a positive
+// integer" error differently for the two spellings; cliflag hands back only
+// the value, so the spelling is recovered from argv to keep stderr
+// byte-identical.
+func flagValueUsedEquals(args []string, name, val string) bool {
+	for i, a := range args {
+		if a == name+"="+val {
+			return true
+		}
+		if a == name && i+1 < len(args) && args[i+1] == val {
+			return false
+		}
+	}
+	return false
+}
 
 // runArchive implements `yakos archive` natively in Go.
 //
@@ -35,28 +74,30 @@ func runArchive(yakosRoot string, args []string) {
 	tag := ""
 	autoTag := false
 
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "-h" || arg == "--help":
-			archive.PrintHelp(os.Stdout)
-			os.Exit(0)
-		case arg == "--auto-tag":
-			autoTag = true
-		case arg == "--yes" || arg == "-y":
-			// Accepted for parity; the Go implementation is always non-interactive.
-		case len(arg) > 0 && arg[0] == '-':
+	help := false
+	fs := &cliflag.Set{Cmd: "archive", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--auto-tag", Kind: cliflag.Bool, Bool: &autoTag},
+		// Accepted for parity; the Go implementation is always non-interactive.
+		{Name: "--yes", Aliases: []string{"-y"}, Kind: cliflag.Bool},
+	}}
+	left := parseWorkFlags(fs, args)
+	if help {
+		archive.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range left {
+		if len(arg) > 0 && arg[0] == '-' {
 			fmt.Fprintf(os.Stderr, "archive: unknown flag %q\n", arg)
 			os.Exit(1)
-		default:
-			if project == "" {
-				project = arg
-			} else if tag == "" {
-				tag = arg
-			} else {
-				fmt.Fprintln(os.Stderr, "archive: too many positional args")
-				os.Exit(1)
-			}
+		}
+		if project == "" {
+			project = arg
+		} else if tag == "" {
+			tag = arg
+		} else {
+			fmt.Fprintln(os.Stderr, "archive: too many positional args")
+			os.Exit(1)
 		}
 	}
 
@@ -138,24 +179,27 @@ func runSession(args []string) {
 	}
 
 	// Each subcommand takes: <project> [<id>]
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "-h" || arg == "--help":
-			session.PrintHelp(os.Stdout)
-			os.Exit(0)
-		case len(arg) > 0 && arg[0] == '-':
+	help := false
+	fs := &cliflag.Set{Cmd: "session", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+	}}
+	left := parseWorkFlags(fs, args)
+	if help {
+		session.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range left {
+		if len(arg) > 0 && arg[0] == '-' {
 			fmt.Fprintf(os.Stderr, "session: unknown flag %q (try --help)\n", arg)
 			os.Exit(1)
-		default:
-			if project == "" {
-				project = arg
-			} else if id == "" {
-				id = arg
-			} else {
-				fmt.Fprintln(os.Stderr, "session: too many positional args (try --help)")
-				os.Exit(1)
-			}
+		}
+		if project == "" {
+			project = arg
+		} else if id == "" {
+			id = arg
+		} else {
+			fmt.Fprintln(os.Stderr, "session: too many positional args (try --help)")
+			os.Exit(1)
 		}
 	}
 
@@ -223,6 +267,13 @@ func runCompact(args []string) {
 	//   yakos compact threshold N        → set notice threshold to N
 	//   yakos compact threshold --auto N → set auto-compact threshold to N
 	if sub == "threshold" {
+		// Deliberately NOT converted to cliflag: this loop only ever
+		// recognized the space form ("--auto 85"). "--auto=85" is an
+		// ordinary positional here (and then fails "too many arguments" or
+		// the threshold validation), whereas cliflag.Set always recognizes
+		// "--name=value" for String specs. Converting would silently start
+		// accepting "--auto=85". Revisit if cliflag grows a space-only Spec
+		// option.
 		autoArg := ""
 		positional := []string{}
 		for i := 0; i < len(rest); i++ {
@@ -301,33 +352,26 @@ func runCheckpoint(args []string) {
 		cfg.RestoreID = rest[0]
 
 	case "clean":
-		for i := 0; i < len(rest); i++ {
-			arg := rest[i]
-			switch {
-			case arg == "--age":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "checkpoint clean: --age requires a number (days)")
-					os.Exit(1)
-				}
-				n := 0
-				if _, err := fmt.Sscanf(rest[i], "%d", &n); err != nil || n <= 0 {
-					fmt.Fprintf(os.Stderr, "checkpoint clean: --age value %q is not a positive integer\n", rest[i])
-					os.Exit(1)
-				}
-				cfg.CleanAgeDays = n
-			case len(arg) > 6 && arg[:6] == "--age=":
-				val := arg[6:]
-				n := 0
-				if _, err := fmt.Sscanf(val, "%d", &n); err != nil || n <= 0 {
-					fmt.Fprintf(os.Stderr, "checkpoint clean: --age value %q is not a positive integer\n", val)
-					os.Exit(1)
-				}
-				cfg.CleanAgeDays = n
-			default:
-				fmt.Fprintf(os.Stderr, "checkpoint clean: unknown flag %q (try --help)\n", arg)
+		var ageVals []string
+		fs := &cliflag.Set{Cmd: "checkpoint clean", Specs: []cliflag.Spec{
+			// Repeatable in the spec so every occurrence is validated in order,
+			// as the old loop did; the last valid value wins.
+			{Name: "--age", Kind: cliflag.StringSlice, Slice: &ageVals, ValueDesc: "a number (days)"},
+		}}
+		left := parseWorkFlags(fs, rest)
+		for _, val := range ageVals {
+			n := 0
+			if _, err := fmt.Sscanf(val, "%d", &n); err != nil || n <= 0 {
+				fmt.Fprintf(os.Stderr, "checkpoint clean: --age value %q is not a positive integer\n", val)
 				os.Exit(1)
 			}
+			cfg.CleanAgeDays = n
+		}
+		// clean takes no positionals: every leftover token, flag-shaped or not,
+		// is reported as an unknown flag.
+		for _, arg := range left {
+			fmt.Fprintf(os.Stderr, "checkpoint clean: unknown flag %q (try --help)\n", arg)
+			os.Exit(1)
 		}
 
 	case "create", "now", "list":
@@ -467,40 +511,32 @@ func runSupervise(args []string) {
 		}
 
 	case "tail":
-		for i := 0; i < len(rest); i++ {
-			arg := rest[i]
-			switch {
-			case arg == "--watch" || arg == "-w":
-				cfg.Watch = true
-			case arg == "--n":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "supervise tail: --n requires a value")
-					os.Exit(1)
-				}
-				n, err := strconv.Atoi(rest[i])
-				if err != nil || n <= 0 {
-					fmt.Fprintf(os.Stderr, "supervise tail: --n value %q is not a positive integer\n", rest[i])
-					os.Exit(1)
-				}
-				cfg.TailN = n
-			case len(arg) > 4 && arg[:4] == "--n=":
-				n, err := strconv.Atoi(arg[4:])
-				if err != nil || n <= 0 {
-					fmt.Fprintf(os.Stderr, "supervise tail: --n value %q is not a positive integer\n", arg[4:])
-					os.Exit(1)
-				}
-				cfg.TailN = n
-			case len(arg) > 0 && arg[0] == '-':
+		var nVals []string
+		fs := &cliflag.Set{Cmd: "supervise tail", Specs: []cliflag.Spec{
+			{Name: "--watch", Aliases: []string{"-w"}, Kind: cliflag.Bool, Bool: &cfg.Watch},
+			// Repeatable in the spec so every occurrence is validated in order,
+			// as the old loop did; the last valid value wins.
+			{Name: "--n", Kind: cliflag.StringSlice, Slice: &nVals, ValueDesc: "a value"},
+		}}
+		left := parseWorkFlags(fs, rest)
+		for _, val := range nVals {
+			n, err := strconv.Atoi(val)
+			if err != nil || n <= 0 {
+				fmt.Fprintf(os.Stderr, "supervise tail: --n value %q is not a positive integer\n", val)
+				os.Exit(1)
+			}
+			cfg.TailN = n
+		}
+		for _, arg := range left {
+			if len(arg) > 0 && arg[0] == '-' {
 				fmt.Fprintf(os.Stderr, "supervise tail: unknown flag %q\n", arg)
 				os.Exit(1)
-			default:
-				if cfg.Project == "" {
-					cfg.Project = arg
-				} else {
-					fmt.Fprintln(os.Stderr, "supervise tail: too many positional args")
-					os.Exit(1)
-				}
+			}
+			if cfg.Project == "" {
+				cfg.Project = arg
+			} else {
+				fmt.Fprintln(os.Stderr, "supervise tail: too many positional args")
+				os.Exit(1)
 			}
 		}
 
@@ -528,55 +564,39 @@ func runSupervise(args []string) {
 		}
 		cfg.FindingID = rest[0]
 		rest = rest[1:]
-		for i := 0; i < len(rest); i++ {
-			arg := rest[i]
-			switch {
-			case arg == "--note":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "supervise ack: --note requires a value")
-					os.Exit(1)
-				}
-				cfg.Note = rest[i]
-			case len(arg) > 7 && arg[:7] == "--note=":
-				cfg.Note = arg[7:]
-			case len(arg) > 0 && arg[0] == '-':
+		fs := &cliflag.Set{Cmd: "supervise ack", Specs: []cliflag.Spec{
+			{Name: "--note", Kind: cliflag.String, Str: &cfg.Note, ValueDesc: "a value"},
+		}}
+		left := parseWorkFlags(fs, rest)
+		for _, arg := range left {
+			if len(arg) > 0 && arg[0] == '-' {
 				fmt.Fprintf(os.Stderr, "supervise ack: unknown flag %q\n", arg)
 				os.Exit(1)
-			default:
-				if cfg.Project == "" {
-					cfg.Project = arg
-				} else {
-					fmt.Fprintln(os.Stderr, "supervise ack: too many positional args")
-					os.Exit(1)
-				}
+			}
+			if cfg.Project == "" {
+				cfg.Project = arg
+			} else {
+				fmt.Fprintln(os.Stderr, "supervise ack: too many positional args")
+				os.Exit(1)
 			}
 		}
 
 	case "ack-all":
 		// Optional: [<project>] [--note "..."]
-		for i := 0; i < len(rest); i++ {
-			arg := rest[i]
-			switch {
-			case arg == "--note":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "supervise ack-all: --note requires a value")
-					os.Exit(1)
-				}
-				cfg.Note = rest[i]
-			case len(arg) > 7 && arg[:7] == "--note=":
-				cfg.Note = arg[7:]
-			case len(arg) > 0 && arg[0] == '-':
+		fs := &cliflag.Set{Cmd: "supervise ack-all", Specs: []cliflag.Spec{
+			{Name: "--note", Kind: cliflag.String, Str: &cfg.Note, ValueDesc: "a value"},
+		}}
+		left := parseWorkFlags(fs, rest)
+		for _, arg := range left {
+			if len(arg) > 0 && arg[0] == '-' {
 				fmt.Fprintf(os.Stderr, "supervise ack-all: unknown flag %q\n", arg)
 				os.Exit(1)
-			default:
-				if cfg.Project == "" {
-					cfg.Project = arg
-				} else {
-					fmt.Fprintln(os.Stderr, "supervise ack-all: too many positional args")
-					os.Exit(1)
-				}
+			}
+			if cfg.Project == "" {
+				cfg.Project = arg
+			} else {
+				fmt.Fprintln(os.Stderr, "supervise ack-all: too many positional args")
+				os.Exit(1)
 			}
 		}
 	}
@@ -636,54 +656,52 @@ func runPlan(yakosRoot string, args []string) {
 			cfg.PlanID = rest[0]
 			rest = rest[1:]
 		}
-		for _, arg := range rest {
-			if arg == "-h" || arg == "--help" {
-				planscore.PrintHelp(os.Stdout)
-				os.Exit(0)
-			}
+		help := false
+		fs := &cliflag.Set{Cmd: "plan score show", Specs: []cliflag.Spec{
+			{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		}}
+		left := parseWorkFlags(fs, rest)
+		if help {
+			planscore.PrintHelp(os.Stdout)
+			os.Exit(0)
+		}
+		for _, arg := range left {
 			fmt.Fprintf(os.Stderr, "plan score show: unknown option %q (try --help)\n", arg)
 			os.Exit(1)
 		}
 
 	case "history":
-		for i := 0; i < len(rest); i++ {
-			arg := rest[i]
-			switch {
-			case arg == "--project":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "plan score history: --project requires a value")
-					os.Exit(1)
+		help := false
+		var limitVals []string
+		fs := &cliflag.Set{Cmd: "plan score history", Specs: []cliflag.Spec{
+			{Name: "--project", Kind: cliflag.String, Str: &cfg.Project, ValueDesc: "a value"},
+			// Repeatable in the spec so every occurrence is validated in order,
+			// as the old loop did; the last valid value wins.
+			{Name: "--limit", Kind: cliflag.StringSlice, Slice: &limitVals, ValueDesc: "a value"},
+			{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		}}
+		left := parseWorkFlags(fs, rest)
+		if help {
+			planscore.PrintHelp(os.Stdout)
+			os.Exit(0)
+		}
+		for _, val := range limitVals {
+			n, err := strconv.Atoi(val)
+			if err != nil || n <= 0 {
+				// The old parser worded the error differently for the
+				// "--limit=N" and "--limit N" spellings; keep both.
+				label := "--limit"
+				if flagValueUsedEquals(rest, "--limit", val) {
+					label += " value"
 				}
-				cfg.Project = rest[i]
-			case len(arg) > 10 && arg[:10] == "--project=":
-				cfg.Project = arg[10:]
-			case arg == "--limit":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "plan score history: --limit requires a value")
-					os.Exit(1)
-				}
-				n, err := strconv.Atoi(rest[i])
-				if err != nil || n <= 0 {
-					fmt.Fprintf(os.Stderr, "plan score history: --limit %q must be a positive integer\n", rest[i])
-					os.Exit(1)
-				}
-				cfg.Limit = n
-			case len(arg) > 8 && arg[:8] == "--limit=":
-				n, err := strconv.Atoi(arg[8:])
-				if err != nil || n <= 0 {
-					fmt.Fprintf(os.Stderr, "plan score history: --limit value %q must be a positive integer\n", arg[8:])
-					os.Exit(1)
-				}
-				cfg.Limit = n
-			case arg == "-h" || arg == "--help":
-				planscore.PrintHelp(os.Stdout)
-				os.Exit(0)
-			default:
-				fmt.Fprintf(os.Stderr, "plan score history: unknown option %q (try --help)\n", arg)
+				fmt.Fprintf(os.Stderr, "plan score history: %s %q must be a positive integer\n", label, val)
 				os.Exit(1)
 			}
+			cfg.Limit = n
+		}
+		for _, arg := range left {
+			fmt.Fprintf(os.Stderr, "plan score history: unknown option %q (try --help)\n", arg)
+			os.Exit(1)
 		}
 
 	case "override":
@@ -694,28 +712,29 @@ func runPlan(yakosRoot string, args []string) {
 		}
 		cfg.PlanID = rest[0]
 		rest = rest[1:]
-		for i := 0; i < len(rest); i++ {
-			arg := rest[i]
-			switch {
-			case arg == "--reason":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "plan score override: --reason requires a value")
-					os.Exit(1)
-				}
-				cfg.Reason = rest[i]
-			case len(arg) > 9 && arg[:9] == "--reason=":
-				cfg.Reason = arg[9:]
-			case arg == "-h" || arg == "--help":
-				planscore.PrintHelp(os.Stdout)
-				os.Exit(0)
-			default:
-				fmt.Fprintf(os.Stderr, "plan score override: unknown option %q (try --help)\n", arg)
-				os.Exit(1)
-			}
+		help := false
+		fs := &cliflag.Set{Cmd: "plan score override", Specs: []cliflag.Spec{
+			{Name: "--reason", Kind: cliflag.String, Str: &cfg.Reason, ValueDesc: "a value"},
+			{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		}}
+		left := parseWorkFlags(fs, rest)
+		if help {
+			planscore.PrintHelp(os.Stdout)
+			os.Exit(0)
+		}
+		for _, arg := range left {
+			fmt.Fprintf(os.Stderr, "plan score override: unknown option %q (try --help)\n", arg)
+			os.Exit(1)
 		}
 
 	case "correlate":
+		// Deliberately NOT converted to cliflag: the old "--min-n=" branch
+		// tested arg[:7] == "--min-n=" (an 8-char literal against a 7-char
+		// slice), so it was dead code and "--min-n=5" has always been an
+		// "unknown option". cliflag would start accepting it. Left
+		// hand-rolled to keep behavior identical; converting is a one-line
+		// follow-up once cliflag has a space-only Spec option (or the
+		// operator accepts the "=" form as a bug fix).
 		for i := 0; i < len(rest); i++ {
 			arg := rest[i]
 			switch {
@@ -819,36 +838,21 @@ func runWorkClose(args []string) {
 		ErrWriter: os.Stderr,
 	}
 
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "--plan-id":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "work close: --plan-id requires a value")
-				os.Exit(1)
-			}
-			cfg.PlanID = args[i]
-		case len(arg) > 10 && arg[:10] == "--plan-id=":
-			cfg.PlanID = arg[10:]
-		case arg == "--no-prompt":
-			cfg.NoPrompt = true
-		case arg == "--project":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "work close: --project requires a value")
-				os.Exit(1)
-			}
-			cfg.ProjectDir = args[i]
-		case len(arg) > 10 && arg[:10] == "--project=":
-			cfg.ProjectDir = arg[10:]
-		case arg == "-h" || arg == "--help":
-			workclose.PrintHelp(os.Stdout)
-			os.Exit(0)
-		default:
-			fmt.Fprintf(os.Stderr, "work close: unknown option %q (try --help)\n", arg)
-			os.Exit(1)
-		}
+	help := false
+	fs := &cliflag.Set{Cmd: "work close", Specs: []cliflag.Spec{
+		{Name: "--plan-id", Kind: cliflag.String, Str: &cfg.PlanID, ValueDesc: "a value"},
+		{Name: "--no-prompt", Kind: cliflag.Bool, Bool: &cfg.NoPrompt},
+		{Name: "--project", Kind: cliflag.String, Str: &cfg.ProjectDir, ValueDesc: "a value"},
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+	}}
+	left := parseWorkFlags(fs, args)
+	if help {
+		workclose.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range left {
+		fmt.Fprintf(os.Stderr, "work close: unknown option %q (try --help)\n", arg)
+		os.Exit(1)
 	}
 
 	if _, err := workclose.Run(cfg); err != nil {
@@ -902,87 +906,74 @@ func runModelRouting(yakosRoot string, args []string) {
 
 	switch sub {
 	case "eval":
-		for i := 0; i < len(rest); i++ {
-			arg := rest[i]
-			switch {
-			case arg == "--judge":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "model-routing eval: --judge requires a value")
-					os.Exit(1)
+		help := false
+		var costVals []string
+		fs := &cliflag.Set{Cmd: "model-routing eval", Specs: []cliflag.Spec{
+			{Name: "--judge", Kind: cliflag.String, Str: &cfg.Judge, ValueDesc: "a value"},
+			// Repeatable in the spec so every occurrence is validated in order,
+			// as the old loop did; the last valid value wins.
+			{Name: "--max-cost-usd", Kind: cliflag.StringSlice, Slice: &costVals, ValueDesc: "a value"},
+			{Name: "--cases", Kind: cliflag.String, Str: &cfg.CasesGlob, ValueDesc: "a value"},
+			{Name: "--project", Kind: cliflag.String, Str: &cfg.Project, ValueDesc: "a value"},
+			{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		}}
+		left := parseWorkFlags(fs, rest)
+		if help {
+			routing.PrintHelp(os.Stdout)
+			os.Exit(0)
+		}
+		for _, val := range costVals {
+			v, err := strconv.ParseFloat(val, 64)
+			if err != nil || v <= 0 {
+				label := "--max-cost-usd"
+				if flagValueUsedEquals(rest, "--max-cost-usd", val) {
+					label += " value"
 				}
-				cfg.Judge = rest[i]
-			case len(arg) > 8 && arg[:8] == "--judge=":
-				cfg.Judge = arg[8:]
-			case arg == "--max-cost-usd":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "model-routing eval: --max-cost-usd requires a value")
-					os.Exit(1)
-				}
-				v, err := strconv.ParseFloat(rest[i], 64)
-				if err != nil || v <= 0 {
-					fmt.Fprintf(os.Stderr, "model-routing eval: --max-cost-usd %q must be a positive number\n", rest[i])
-					os.Exit(1)
-				}
-				cfg.MaxCostUSD = v
-			case len(arg) > 15 && arg[:15] == "--max-cost-usd=":
-				v, err := strconv.ParseFloat(arg[15:], 64)
-				if err != nil || v <= 0 {
-					fmt.Fprintf(os.Stderr, "model-routing eval: --max-cost-usd value %q must be a positive number\n", arg[15:])
-					os.Exit(1)
-				}
-				cfg.MaxCostUSD = v
-			case arg == "--cases":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "model-routing eval: --cases requires a value")
-					os.Exit(1)
-				}
-				cfg.CasesGlob = rest[i]
-			case len(arg) > 8 && arg[:8] == "--cases=":
-				cfg.CasesGlob = arg[8:]
-			case arg == "--project":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "model-routing eval: --project requires a value")
-					os.Exit(1)
-				}
-				cfg.Project = rest[i]
-			case len(arg) > 10 && arg[:10] == "--project=":
-				cfg.Project = arg[10:]
-			case arg == "-h" || arg == "--help":
-				routing.PrintHelp(os.Stdout)
-				os.Exit(0)
-			case len(arg) > 0 && arg[0] == '-':
+				fmt.Fprintf(os.Stderr, "model-routing eval: %s %q must be a positive number\n", label, val)
+				os.Exit(1)
+			}
+			cfg.MaxCostUSD = v
+		}
+		for _, arg := range left {
+			if len(arg) > 0 && arg[0] == '-' {
 				fmt.Fprintf(os.Stderr, "model-routing eval: unknown flag %q\n", arg)
 				os.Exit(1)
-			default:
-				if cfg.AgentID == "" {
-					cfg.AgentID = arg
-				} else {
-					fmt.Fprintf(os.Stderr, "model-routing eval: unexpected argument %q\n", arg)
-					os.Exit(1)
-				}
+			}
+			if cfg.AgentID == "" {
+				cfg.AgentID = arg
+			} else {
+				fmt.Fprintf(os.Stderr, "model-routing eval: unexpected argument %q\n", arg)
+				os.Exit(1)
 			}
 		}
 
 	case "list":
-		for _, arg := range rest {
-			if arg == "-h" || arg == "--help" {
-				routing.PrintHelp(os.Stdout)
-				os.Exit(0)
-			}
+		help := false
+		fs := &cliflag.Set{Cmd: "model-routing list", Specs: []cliflag.Spec{
+			{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		}}
+		left := parseWorkFlags(fs, rest)
+		if help {
+			routing.PrintHelp(os.Stdout)
+			os.Exit(0)
+		}
+		// list takes no arguments at all: anything left, flag-shaped or not, is an error.
+		for _, arg := range left {
 			fmt.Fprintf(os.Stderr, "model-routing list: unexpected argument %q\n", arg)
 			os.Exit(1)
 		}
 
 	case "show":
-		for _, arg := range rest {
-			if arg == "-h" || arg == "--help" {
-				routing.PrintHelp(os.Stdout)
-				os.Exit(0)
-			}
+		help := false
+		fs := &cliflag.Set{Cmd: "model-routing show", Specs: []cliflag.Spec{
+			{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		}}
+		left := parseWorkFlags(fs, rest)
+		if help {
+			routing.PrintHelp(os.Stdout)
+			os.Exit(0)
+		}
+		for _, arg := range left {
 			if len(arg) > 0 && arg[0] == '-' {
 				fmt.Fprintf(os.Stderr, "model-routing show: unknown flag %q\n", arg)
 				os.Exit(1)
@@ -996,64 +987,65 @@ func runModelRouting(yakosRoot string, args []string) {
 		}
 
 	case "promote":
-		for _, arg := range rest {
-			switch arg {
-			case "--global":
-				cfg.Global = true
-			case "-h", "--help":
-				routing.PrintHelp(os.Stdout)
-				os.Exit(0)
-			default:
-				if len(arg) > 0 && arg[0] == '-' {
-					fmt.Fprintf(os.Stderr, "model-routing promote: unknown flag %q\n", arg)
-					os.Exit(1)
-				}
-				if cfg.AgentID == "" {
-					cfg.AgentID = arg
-				} else {
-					fmt.Fprintf(os.Stderr, "model-routing promote: unexpected argument %q\n", arg)
-					os.Exit(1)
-				}
+		help := false
+		fs := &cliflag.Set{Cmd: "model-routing promote", Specs: []cliflag.Spec{
+			{Name: "--global", Kind: cliflag.Bool, Bool: &cfg.Global},
+			{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		}}
+		left := parseWorkFlags(fs, rest)
+		if help {
+			routing.PrintHelp(os.Stdout)
+			os.Exit(0)
+		}
+		for _, arg := range left {
+			if len(arg) > 0 && arg[0] == '-' {
+				fmt.Fprintf(os.Stderr, "model-routing promote: unknown flag %q\n", arg)
+				os.Exit(1)
+			}
+			if cfg.AgentID == "" {
+				cfg.AgentID = arg
+			} else {
+				fmt.Fprintf(os.Stderr, "model-routing promote: unexpected argument %q\n", arg)
+				os.Exit(1)
 			}
 		}
 
 	case "reject":
-		for i := 0; i < len(rest); i++ {
-			arg := rest[i]
-			switch {
-			case arg == "--note":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "model-routing reject: --note requires a value")
-					os.Exit(1)
-				}
-				cfg.Note = rest[i]
-			case len(arg) > 7 && arg[:7] == "--note=":
-				cfg.Note = arg[7:]
-			case arg == "--force":
-				cfg.Force = true
-			case arg == "-h" || arg == "--help":
-				routing.PrintHelp(os.Stdout)
-				os.Exit(0)
-			case len(arg) > 0 && arg[0] == '-':
+		help := false
+		fs := &cliflag.Set{Cmd: "model-routing reject", Specs: []cliflag.Spec{
+			{Name: "--note", Kind: cliflag.String, Str: &cfg.Note, ValueDesc: "a value"},
+			{Name: "--force", Kind: cliflag.Bool, Bool: &cfg.Force},
+			{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		}}
+		left := parseWorkFlags(fs, rest)
+		if help {
+			routing.PrintHelp(os.Stdout)
+			os.Exit(0)
+		}
+		for _, arg := range left {
+			if len(arg) > 0 && arg[0] == '-' {
 				fmt.Fprintf(os.Stderr, "model-routing reject: unknown flag %q\n", arg)
 				os.Exit(1)
-			default:
-				if cfg.AgentID == "" {
-					cfg.AgentID = arg
-				} else {
-					fmt.Fprintf(os.Stderr, "model-routing reject: unexpected argument %q\n", arg)
-					os.Exit(1)
-				}
+			}
+			if cfg.AgentID == "" {
+				cfg.AgentID = arg
+			} else {
+				fmt.Fprintf(os.Stderr, "model-routing reject: unexpected argument %q\n", arg)
+				os.Exit(1)
 			}
 		}
 
 	case "history":
-		for _, arg := range rest {
-			if arg == "-h" || arg == "--help" {
-				routing.PrintHelp(os.Stdout)
-				os.Exit(0)
-			}
+		help := false
+		fs := &cliflag.Set{Cmd: "model-routing history", Specs: []cliflag.Spec{
+			{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		}}
+		left := parseWorkFlags(fs, rest)
+		if help {
+			routing.PrintHelp(os.Stdout)
+			os.Exit(0)
+		}
+		for _, arg := range left {
 			if len(arg) > 0 && arg[0] == '-' {
 				fmt.Fprintf(os.Stderr, "model-routing history: unknown flag %q\n", arg)
 				os.Exit(1)

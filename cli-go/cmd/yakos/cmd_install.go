@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/auth"
+	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/initialize"
 	"github.com/bakw00ds/yakos/internal/install"
 	"github.com/bakw00ds/yakos/internal/migrate"
@@ -47,46 +48,30 @@ func runInit(args []string) {
 	multiDev := false
 	dryRun := false
 
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
+	help := false
+	fs := &cliflag.Set{Cmd: "init", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--project", Kind: cliflag.String, Str: &project, ValueDesc: "a path"},
+		{Name: "--template", Kind: cliflag.String, Str: &template, ValueDesc: "a kind (base, rails, go, python, node, rust, static-site)"},
+		{Name: "--force", Kind: cliflag.Bool, Bool: &force},
+		{Name: "--with-gate", Kind: cliflag.Bool, Bool: &withGate},
+		{Name: "--multi-dev", Kind: cliflag.Bool, Bool: &multiDev},
+		{Name: "--dry-run", Kind: cliflag.Bool, Bool: &dryRun},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		initialize.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
 		switch {
-		case arg == "-h" || arg == "--help":
-			initialize.PrintHelp(os.Stdout)
-			os.Exit(0)
-
-		case arg == "--project":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "init: --project requires a path")
-				os.Exit(1)
-			}
-			project = args[i]
-		case len(arg) > 10 && arg[:10] == "--project=":
-			project = arg[10:]
-
-		case arg == "--template":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "init: --template requires a kind (base, rails, go, python, node, rust, static-site)")
-				os.Exit(1)
-			}
-			template = args[i]
-		case len(arg) > 11 && arg[:11] == "--template=":
-			template = arg[11:]
-
-		case arg == "--force":
-			force = true
-		case arg == "--with-gate":
-			withGate = true
-		case arg == "--multi-dev":
-			multiDev = true
-		case arg == "--dry-run":
-			dryRun = true
-
 		case len(arg) > 0 && arg[0] == '-':
 			fmt.Fprintf(os.Stderr, "init: unknown flag %q (try --help)\n", arg)
 			os.Exit(1)
-
 		default:
 			if name == "" {
 				name = arg
@@ -154,19 +139,20 @@ func runInstall(yakosRoot string, args []string) {
 	force := false
 	dryRun := false
 
-	for _, arg := range args {
-		switch arg {
-		case "-h", "--help":
-			install.PrintHelp(os.Stdout)
-			os.Exit(0)
-		case "--force":
-			force = true
-		case "--dry-run":
-			dryRun = true
-		default:
-			fmt.Fprintf(os.Stderr, "install: unknown argument %q (try --help)\n", arg)
-			os.Exit(1)
-		}
+	help := false
+	fs := &cliflag.Set{Cmd: "install", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--force", Kind: cliflag.Bool, Bool: &force},
+		{Name: "--dry-run", Kind: cliflag.Bool, Bool: &dryRun},
+	}}
+	rest, _ := fs.Parse(args) // Bool-only Set: Parse cannot error
+	if help {
+		install.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
+		fmt.Fprintf(os.Stderr, "install: unknown argument %q (try --help)\n", arg)
+		os.Exit(1)
 	}
 
 	home := os.Getenv("HOME")
@@ -216,29 +202,25 @@ func runUninstall(args []string) {
 	explicitRoot := ""
 	dryRun := false
 
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "-h" || arg == "--help":
-			uninstall.PrintHelp(os.Stdout)
-			os.Exit(0)
-		case arg == "--restore-settings":
-			restoreSettings = true
-		case arg == "--dry-run":
-			dryRun = true
-		case arg == "--root":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "uninstall: --root requires a path argument")
-				os.Exit(1)
-			}
-			explicitRoot = args[i]
-		case len(arg) > 7 && arg[:7] == "--root=":
-			explicitRoot = arg[7:]
-		default:
-			fmt.Fprintf(os.Stderr, "uninstall: unknown argument %q (try --help)\n", arg)
-			os.Exit(1)
-		}
+	help := false
+	fs := &cliflag.Set{Cmd: "uninstall", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--restore-settings", Kind: cliflag.Bool, Bool: &restoreSettings},
+		{Name: "--dry-run", Kind: cliflag.Bool, Bool: &dryRun},
+		{Name: "--root", Kind: cliflag.String, Str: &explicitRoot, ValueDesc: "a path argument"},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		uninstall.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
+		fmt.Fprintf(os.Stderr, "uninstall: unknown argument %q (try --help)\n", arg)
+		os.Exit(1)
 	}
 
 	home := os.Getenv("HOME")
@@ -300,33 +282,25 @@ func runUpdate(yakosRoot string, args []string) {
 	forceBinary := false
 	forceSource := false
 
-	for _, arg := range args {
-		switch arg {
-		case "-h", "--help":
-			printUpdateHelp(os.Stdout)
-			os.Exit(0)
-		// Source-path flags.
-		case "--allow-non-ff":
-			allowNonFF = true
-		case "--all":
-			allProjects = true
-		// Binary-path flags.
-		case "--check":
-			checkOnly = true
-		case "--force":
-			force = true
-		// Common.
-		case "--dry-run":
-			dryRun = true
-		// Mode override.
-		case "--binary":
-			forceBinary = true
-		case "--source":
-			forceSource = true
-		default:
-			fmt.Fprintf(os.Stderr, "update: unknown argument %q (try --help)\n", arg)
-			os.Exit(1)
-		}
+	help := false
+	fs := &cliflag.Set{Cmd: "update", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--allow-non-ff", Kind: cliflag.Bool, Bool: &allowNonFF},
+		{Name: "--all", Kind: cliflag.Bool, Bool: &allProjects},
+		{Name: "--check", Kind: cliflag.Bool, Bool: &checkOnly},
+		{Name: "--force", Kind: cliflag.Bool, Bool: &force},
+		{Name: "--dry-run", Kind: cliflag.Bool, Bool: &dryRun},
+		{Name: "--binary", Kind: cliflag.Bool, Bool: &forceBinary},
+		{Name: "--source", Kind: cliflag.Bool, Bool: &forceSource},
+	}}
+	rest, _ := fs.Parse(args) // Bool-only Set: Parse cannot error
+	if help {
+		printUpdateHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
+		fmt.Fprintf(os.Stderr, "update: unknown argument %q (try --help)\n", arg)
+		os.Exit(1)
 	}
 
 	// Resolve YAKOS_ROOT from env (bash entry-point may set it).
@@ -546,21 +520,21 @@ func runUpgrade(yakosRoot string, args []string) {
 	dryRun := false
 	checkOnly := false
 
-	for _, arg := range args {
-		switch arg {
-		case "-h", "--help":
-			printUpgradeHelp(os.Stdout)
-			os.Exit(0)
-		case "--force":
-			force = true
-		case "--dry-run":
-			dryRun = true
-		case "--check":
-			checkOnly = true
-		default:
-			fmt.Fprintf(os.Stderr, "upgrade: unknown argument %q (try --help)\n", arg)
-			os.Exit(1)
-		}
+	help := false
+	fs := &cliflag.Set{Cmd: "upgrade", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--force", Kind: cliflag.Bool, Bool: &force},
+		{Name: "--dry-run", Kind: cliflag.Bool, Bool: &dryRun},
+		{Name: "--check", Kind: cliflag.Bool, Bool: &checkOnly},
+	}}
+	rest, _ := fs.Parse(args) // Bool-only Set: Parse cannot error
+	if help {
+		printUpgradeHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
+		fmt.Fprintf(os.Stderr, "upgrade: unknown argument %q (try --help)\n", arg)
+		os.Exit(1)
 	}
 
 	// Resolve YAKOS_ROOT from env.
@@ -715,40 +689,31 @@ func runQuickstart(yakosRoot string, args []string) {
 		allowRoot = true
 	}
 
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "-h" || arg == "--help":
-			quickstart.PrintHelp(os.Stdout)
-			os.Exit(0)
-
-		case arg == "--runtime":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "quickstart: --runtime requires an id")
-				os.Exit(1)
-			}
-			runtime = args[i]
-		case len(arg) > 10 && arg[:10] == "--runtime=":
-			runtime = arg[10:]
-
-		case arg == "--multi-dev":
-			multiDev = true
-		case arg == "--safe":
-			safe = true
-		case arg == "--allow-root":
-			allowRoot = true
-		case arg == "--dry-run":
-			dryRun = true
-
-		case len(arg) > 0 && arg[0] == '-':
+	help := false
+	fs := &cliflag.Set{Cmd: "quickstart", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--runtime", Kind: cliflag.String, Str: &runtime, ValueDesc: "an id"},
+		{Name: "--multi-dev", Kind: cliflag.Bool, Bool: &multiDev},
+		{Name: "--safe", Kind: cliflag.Bool, Bool: &safe},
+		{Name: "--allow-root", Kind: cliflag.Bool, Bool: &allowRoot},
+		{Name: "--dry-run", Kind: cliflag.Bool, Bool: &dryRun},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		quickstart.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
+		if len(arg) > 0 && arg[0] == '-' {
 			fmt.Fprintf(os.Stderr, "quickstart: unknown flag %q (try --help)\n", arg)
-			os.Exit(1)
-
-		default:
+		} else {
 			fmt.Fprintf(os.Stderr, "quickstart: unexpected argument %q (try --help)\n", arg)
-			os.Exit(1)
 		}
+		os.Exit(1)
 	}
 
 	// Resolve YAKOS_ROOT from env (bash entry-point may set it).
@@ -813,16 +778,19 @@ func runAuth(args []string) {
 		}
 	}
 
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
+	help := false
+	fs := &cliflag.Set{Cmd: "auth", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--as-default", Kind: cliflag.Bool, Bool: &asDefault},
+		{Name: "--all", Kind: cliflag.Bool, Bool: &doAll},
+	}}
+	rest, _ := fs.Parse(args) // Bool-only Set: Parse cannot error
+	if help {
+		auth.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
 		switch {
-		case arg == "-h" || arg == "--help":
-			auth.PrintHelp(os.Stdout)
-			os.Exit(0)
-		case arg == "--as-default":
-			asDefault = true
-		case arg == "--all":
-			doAll = true
 		case len(arg) > 0 && arg[0] == '-':
 			fmt.Fprintf(os.Stderr, "auth %s: unknown flag %q\n", sub, arg)
 			os.Exit(1)
@@ -877,14 +845,18 @@ func runMigrate(args []string) {
 	format := ""
 	dryRun := false
 
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
+	help := false
+	fs := &cliflag.Set{Cmd: "migrate", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--dry-run", Kind: cliflag.Bool, Bool: &dryRun},
+	}}
+	rest, _ := fs.Parse(args) // Bool-only Set: Parse cannot error
+	if help {
+		migrate.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
 		switch {
-		case arg == "-h" || arg == "--help":
-			migrate.PrintHelp(os.Stdout)
-			os.Exit(0)
-		case arg == "--dry-run":
-			dryRun = true
 		case len(arg) > 0 && arg[0] == '-':
 			fmt.Fprintf(os.Stderr, "migrate: unknown flag %q (try --help)\n", arg)
 			os.Exit(1)

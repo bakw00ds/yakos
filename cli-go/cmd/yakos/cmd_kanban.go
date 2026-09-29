@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/kanban"
 )
 
@@ -181,49 +182,29 @@ func kanbanAdd(args []string) {
 	notes := ""
 	title := ""
 
-	i := 0
-	for i < len(args) {
-		switch args[i] {
-		case "--category":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "kanban add: --category needs a value")
-				os.Exit(1)
-			}
-			category = args[i]
-		case "--notes":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "kanban add: --notes needs a value")
-				os.Exit(1)
-			}
-			notes = args[i]
-		default:
-			if len(args[i]) > 0 && args[i][0] == '-' && args[i] != "--" {
-				// Check for --category=<v> and --notes=<v> forms.
-				if len(args[i]) > 11 && args[i][:11] == "--category=" {
-					category = args[i][11:]
-				} else if len(args[i]) > 8 && args[i][:8] == "--notes=" {
-					notes = args[i][8:]
-				} else if args[i] == "--" {
-					i++
-					if i < len(args) && title == "" {
-						title = args[i]
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "kanban add: unknown option %q\n", args[i])
-					os.Exit(1)
-				}
-			} else {
-				if title == "" {
-					title = args[i]
-				} else {
-					fmt.Fprintf(os.Stderr, "kanban add: unexpected argument %q\n", args[i])
-					os.Exit(1)
-				}
-			}
+	fs := &cliflag.Set{Cmd: "kanban add", Specs: []cliflag.Spec{
+		{Name: "--category", Kind: cliflag.String, Str: &category, ValueDesc: "a value", Verb: "needs"},
+		{Name: "--notes", Kind: cliflag.String, Str: &notes, ValueDesc: "a value", Verb: "needs"},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	// A bare "--" is not a terminator here: it has always been treated as an
+	// ordinary positional (the title, or "unexpected argument" if a title is
+	// already set). Every other "-..." token is an unknown option.
+	for _, arg := range rest {
+		if len(arg) > 0 && arg[0] == '-' && arg != "--" {
+			fmt.Fprintf(os.Stderr, "kanban add: unknown option %q\n", arg)
+			os.Exit(1)
 		}
-		i++
+		if title == "" {
+			title = arg
+		} else {
+			fmt.Fprintf(os.Stderr, "kanban add: unexpected argument %q\n", arg)
+			os.Exit(1)
+		}
 	}
 
 	if title == "" {
@@ -406,56 +387,44 @@ func kanbanServe(args []string) {
 	host := "127.0.0.1"
 	openBrowser := true
 
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--port":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "kanban serve: --port needs a value")
-				os.Exit(1)
-			}
-			n := 0
-			for _, ch := range args[i] {
-				if ch < '0' || ch > '9' {
-					fmt.Fprintln(os.Stderr, "kanban serve: --port must be a number")
-					os.Exit(1)
-				}
-				n = n*10 + int(ch-'0')
-			}
-			port = n
-		case "--host":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "kanban serve: --host needs a value")
-				os.Exit(1)
-			}
-			host = args[i]
-			// Security: require explicit flag to expose on all interfaces.
-			if host == "0.0.0.0" {
-				fmt.Fprintln(os.Stderr, "kanban serve: binding 0.0.0.0 — the web UI is UNAUTHENTICATED and can mutate the board")
-			}
-		case "--no-open":
-			openBrowser = false
-		default:
-			if len(args[i]) > 7 && args[i][:7] == "--port=" {
-				// --port=N form.
-				val := args[i][7:]
-				n := 0
-				for _, ch := range val {
-					if ch < '0' || ch > '9' {
-						fmt.Fprintln(os.Stderr, "kanban serve: --port must be a number")
-						os.Exit(1)
-					}
-					n = n*10 + int(ch-'0')
-				}
-				port = n
-			} else if len(args[i]) > 7 && args[i][:7] == "--host=" {
-				host = args[i][7:]
-			} else {
-				fmt.Fprintf(os.Stderr, "kanban serve: unknown option %q\n", args[i])
-				os.Exit(1)
-			}
+	var ports []string
+	noOpen := false
+	fs := &cliflag.Set{Cmd: "kanban serve", Specs: []cliflag.Spec{
+		{Name: "--port", Kind: cliflag.StringSlice, Slice: &ports, ValueDesc: "a value", Verb: "needs"},
+		{Name: "--host", Kind: cliflag.String, Str: &host, ValueDesc: "a value", Verb: "needs"},
+		{Name: "--no-open", Kind: cliflag.Bool, Bool: &noOpen},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if noOpen {
+		openBrowser = false
+	}
+	// Security: require explicit flag to expose on all interfaces. The
+	// warning has always fired only for the space-separated "--host 0.0.0.0"
+	// form (once per occurrence), never for "--host=0.0.0.0".
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--host" && args[i+1] == "0.0.0.0" {
+			fmt.Fprintln(os.Stderr, "kanban serve: binding 0.0.0.0 \u2014 the web UI is UNAUTHENTICATED and can mutate the board")
 		}
+	}
+	// Every --port occurrence is validated in argv order; the last wins.
+	for _, val := range ports {
+		n := 0
+		for _, ch := range val {
+			if ch < '0' || ch > '9' {
+				fmt.Fprintln(os.Stderr, "kanban serve: --port must be a number")
+				os.Exit(1)
+			}
+			n = n*10 + int(ch-'0')
+		}
+		port = n
+	}
+	for _, arg := range rest {
+		fmt.Fprintf(os.Stderr, "kanban serve: unknown option %q\n", arg)
+		os.Exit(1)
 	}
 
 	boardPath := kanbanFilePath()
