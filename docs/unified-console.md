@@ -373,6 +373,20 @@ An explicit CN entry always beats `"*"`, including `yakos mtls set-role
 <cn> none`, the explicit-deny value. An unrecognised role string
 resolves to no access for that CN and logs a WARN naming it.
 
+A cert or user with no access that opens `/` gets a 403 "No access"
+page naming the fix (`yakos mtls set-role <cn> <role>`) rather than an
+empty console. Loopback is unaffected.
+
+### Unrecognised roles in `users.json` fail closed
+
+The same posture applies to password users. A `role` in
+`~/.yakos-state/users/users.json` that is not one of `read`, `dispatch`,
+`flows-run` or `admin` (a typo such as `"Raed"`, an empty string, or
+`"none"`) resolves to no access for that user, and the daemon logs one
+WARN per user and value naming the user. Previously such a value was
+silently treated as `read`. Fix the typo in `users.json` and restart the daemon (the store is read at
+startup), or set the role again from the admin Users panel.
+
 ### Roles and what they allow
 
 | Role | Access |

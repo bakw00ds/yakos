@@ -501,3 +501,26 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// ---- K-110: cli/completions copies must match the embedded templates --------
+
+// TestCompletionCopies_MatchEmbeddedTemplates keeps the bash-fallback copies
+// under cli/completions/ (read by cli/lib/completion.sh) byte-identical to the
+// //go:embed templates, for every supported shell including fish.
+func TestCompletionCopies_MatchEmbeddedTemplates(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "cli", "completions")
+	for shell, tmpl := range map[string][]byte{
+		"bash": bashTemplate,
+		"zsh":  zshTemplate,
+		"fish": fishTemplate,
+	} {
+		got, err := os.ReadFile(filepath.Join(root, "yakos."+shell))
+		if err != nil {
+			t.Errorf("%s: cli/completions copy missing: %v", shell, err)
+			continue
+		}
+		if !bytes.Equal(got, tmpl) {
+			t.Errorf("%s: cli/completions/yakos.%s differs from embedded template", shell, shell)
+		}
+	}
+}

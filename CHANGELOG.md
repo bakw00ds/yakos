@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Unrecognised `users.json` role now resolves to no access (K-110).**
+  A hand-edited role such as `"Raed"` used to be parsed leniently as
+  `read`. It now maps to `RoleNone`, matching the `roles.json` posture
+  from K-98, and logs one WARN per user and value naming the user. The
+  raw string is still shown in the admin user list.
+  **Migration:** fix any typo'd `role` values in
+  `~/.yakos-state/users/users.json` (valid: `read`, `dispatch`,
+  `flows-run`, `admin`); an affected user otherwise loses read access.
+
 - **Unmapped client-cert CN now resolves to no access (K-98, ADR-0005
   Amendment 2026-09-29).** Any cert signed by the daemon CA whose CN was
   not in `mtls/roles.json` used to get `read` on kanban, flows list/get,
@@ -64,6 +73,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path as written.
 
 ### Changed
+
+- **Docs: plan-quality-score debounce (K-110).** `docs/hooks-impl.md` and
+  the settings template now state that the bash and Go hooks skip a
+  `plan.md` whose mtime is under 5 s old, so a fresh plan is normally
+  scored on a later fire. No behavior change.
+
+- **Networked console explains "no access" instead of an empty shell
+  (K-110).** An authenticated identity that resolves to no role (a cert
+  with no `roles.json` entry, or a user whose stored role is
+  unrecognised) used to get the SPA shell at `/` with 200 and then 403
+  on every data route with no explanation. `/` now returns a 403 page
+  naming the fix (`yakos mtls set-role <cn> <role>` for certs, an
+  operator setting the role for password users). Loopback is unchanged.
 
 - **CLI and hygiene follow-ups (K-102).** `yakos doctor` warns when a
   hook command in the project's `settings.json` pins an absolute `yakos`
