@@ -1157,6 +1157,23 @@ setup_symlink_rootlink() {
     ln -sf "$1" "$1/api/rootlink"
 }
 
+setup_symlink_lnk_to_api() {
+    # api/lnk -> <root>/api, allow **: "lnk/nope/../../../x.go" (nope does NOT
+    # exist) lexically collapses to x.go (allowed) but physically is the
+    # project's PARENT. With no realpath/python3 the manual fallback must
+    # collapse the unresolved "nope/../../.." tail or it compares an
+    # uncollapsed string that merely starts with the root.
+    mkdir -p "$1/api"
+    _pa_write_policy "$1" '{"go-api":{"allow":["**"]}}'
+    ln -sf "$1/api" "$1/api/lnk"
+}
+setup_symlink_cycle() {
+    mkdir -p "$1/api"
+    _pa_write_policy "$1" '{"go-api":{"allow":["api/**"]}}'
+    ln -sf "$1/api/b" "$1/api/a"
+    ln -sf "$1/api/a" "$1/api/b"
+}
+
 # ---- cases ------------------------------------------------------------------
 
 echo "Running hook fixtures..."
@@ -1565,6 +1582,12 @@ case_check path-allowlist.sh   pretooluse-write-midstar-ok.json        0 path-al
 # jq missing / garbage on an ALLOWED path: bash fails closed (2), Go evaluates and allows (0).
 case_check path-allowlist.sh   pretooluse-edit-api.json                2 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH" "" "" "0:bash fails closed on degraded input (jq missing or printing garbage) even for an allowed path; Go never depends on jq, evaluates the payload and allows it"
 case_check path-allowlist.sh   pretooluse-edit-api.json                2 "" setup_allowlist_strict "PATH=$FAKEJQ_GARBAGE_PATH" "" "" "0:bash fails closed on degraded input (jq missing or printing garbage) even for an allowed path; Go never depends on jq, evaluates the payload and allows it"
+
+# realpath-fallback tail collapse (guards _ps_abs_normalize; only the NORESOLVE case reaches it).
+case_check path-allowlist.sh   pretooluse-write-fallback-tail-dotdot.json 2 path-allowlist setup_symlink_lnk_to_api
+case_check path-allowlist.sh   pretooluse-write-fallback-tail-dotdot.json 2 path-allowlist setup_symlink_lnk_to_api "PATH=$NORESOLVE_PATH"
+# Symlink cycle: not an escape (the OS returns ELOOP), so bash's pass is harmless; Go fails closed.
+case_check path-allowlist.sh   pretooluse-write-symlink-cycle.json 0 path-allowlist setup_symlink_cycle "" "" "" "2:a symlink cycle is not an escape (ELOOP on write) so bash passes; Go's resolver fails closed on an unresolvable chain"
 
 # ---- summary ------------------------------------------------------------
 
