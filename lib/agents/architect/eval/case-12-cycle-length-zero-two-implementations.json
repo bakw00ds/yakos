@@ -1,0 +1,60 @@
+{
+  "case_id": "architect-cycle-length-zero-parity-12",
+  "task": "Correctness question. The cycle-counter hook exists twice: lib/hooks/legacy/cycle-counter.sh and cli-go/internal/hooks/cyclecounter/cyclecounter.go, and the Go code claims to mirror bash. An operator writes {\"retro\":{\"cycle_length\":0}} to ~/.yakos-state/settings.json. Trace what each implementation does on the next user prompt: does the value pass validation, what is the value used at the modulo, is the Go `cycleLen <= 0` default guard reached for this value, what happens to the prompt counter file, and what does the hook process do (exit code or panic)? Is the Go port's zero-handling protective here? Also say whether existing tests cover this input (check cli-go/internal/hooks/cyclecounter/cyclecounter_test.go, tests/run-cycle-counter-test.sh and tests/run-hook-parity.sh). Cite files. Do not run the hooks; this is a read-only task: do not edit, write, or create any file.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "bash-trace",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: says the digit-only check accepts '0', CYCLE_LENGTH becomes 0, the counter file is already written, and `$((count % CYCLE_LENGTH))` aborts with a division-by-zero error (non-zero exit under set -eu) before the log line. 0.5: says it misbehaves without the mechanism. 0.0: says bash falls back to the default 10."
+      },
+      {
+        "name": "go-guard-not-reached",
+        "weight": 0.35,
+        "type": "binary"
+      },
+      {
+        "name": "go-consequence",
+        "weight": 0.2,
+        "type": "binary"
+      },
+      {
+        "name": "test-coverage-gap",
+        "weight": 0.15,
+        "type": "binary"
+      },
+      {
+        "name": "no-fabricated-paths",
+        "weight": 0.1,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Bash: '0' passes the `*[!0-9]*` case check, so CYCLE_LENGTH=0; count is incremented and written to .cycle-count first; then `$((count % CYCLE_LENGTH))` is a division-by-zero arithmetic error which aborts the script with non-zero status under `set -eu` (no ho_log record)",
+    "Go: settingsCycleLength returns (0, true) for the digit string '0', and Run assigns cycleLen = n AFTER the earlier `if cycleLen <= 0 { cycleLen = DefaultCycleLength }` guard, so the guard is not reached for a settings-supplied zero (it only protects a zero Config.CycleLength)",
+    "Go: `count%cycleLen` with cycleLen == 0 panics with 'integer divide by zero'; the counter file was already written; no recover() wraps the hook in the runner path (verify with grep for recover() in the non-test code under cli-go/internal/hooks and cli-go/cmd/yakos), so the process crashes rather than degrading; the two implementations 'agree' only in failing, and neither degrades to the default 10",
+    "Neither cyclecounter_test.go, run-cycle-counter-test.sh nor run-hook-parity.sh has a cycle_length: 0 case (verify with grep at eval time); recommends validating n >= 1 in both implementations and adding a parity case",
+    "Cites only real files and functions; every path exists"
+  ],
+  "context_files": [
+    "lib/hooks/legacy/cycle-counter.sh",
+    "cli-go/internal/hooks/cyclecounter/cyclecounter.go",
+    "cli-go/internal/hooks/cyclecounter/cyclecounter_test.go",
+    "tests/run-cycle-counter-test.sh"
+  ],
+  "max_duration_s": 360,
+  "max_cost_usd": 0.8,
+  "tags": [
+    "ordering",
+    "parity",
+    "edge-case",
+    "hidden-bug",
+    "go",
+    "bash",
+    "read-only",
+    "multi-file",
+    "tree-dependent"
+  ]
+}

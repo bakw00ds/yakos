@@ -1,0 +1,52 @@
+{
+  "case_id": "architect-reject-import-cycle-07",
+  "task": "Design review of a proposed change. A teammate proposes: 'Have internal/wsbus publish a topic whenever an interactive chat session changes state. To get the session state types, wsbus should import internal/interactive directly.' Read the import blocks of the non-test Go files in cli-go/internal/wsbus, cli-go/internal/interactive and cli-go/internal/dispatch (grep the import blocks; do not rely on memory). Decide whether to accept the proposed wsbus -> interactive import. If it is unsafe, name every existing import edge that closes the cycle, and propose an alternative that adds no new edge into a package that already depends on wsbus, citing how wsbus payloads are already defined today. This is a read-only task: do not edit, write, or create any file.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "rejects-proposed-edge",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "cites-cycle-edges",
+        "weight": 0.3,
+        "type": "scalar_0_1",
+        "anchor": "1.0: names both existing edges, interactive -> dispatch and dispatch -> wsbus, and states the resulting three-package cycle wsbus -> interactive -> dispatch -> wsbus. 0.5: names the cycle but only one edge, or says only that a cycle exists. 0.0: no edges cited or wrong edges."
+      },
+      {
+        "name": "leaf-alternative",
+        "weight": 0.3,
+        "type": "scalar_0_1",
+        "anchor": "1.0: proposes that wsbus keep owning plain payload structs and topic constants (no internal imports beyond dashauth/winsec) and that the interactive side publishes via wsbus or a small callback or interface injected from the composition root, the same way dispatch already publishes via wsbus.Bus. 0.5: proposes a generic decoupling (interface, event bus) without tying it to the existing wsbus payload pattern. 0.0: no alternative or an alternative that still adds a cycle."
+      },
+      {
+        "name": "no-fabricated-paths",
+        "weight": 0.15,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Rejects the proposal because wsbus -> interactive would create an import cycle",
+    "Cites the existing edges from the non-test files: interactive imports dispatch (interactive/session.go and sdk_engine.go) and dispatch imports wsbus (dispatch/service.go and stream.go); verified with grep of the import blocks at eval time; the cycle is wsbus -> interactive -> dispatch -> wsbus, and Go refuses import cycles at compile time",
+    "Offers an alternative in which wsbus stays a leaf-like package (event.go and bus.go import only the standard library; server.go imports only dashauth and winsec): payload structs and topic constants live in wsbus, and the interactive package or the serve/consoleui composition root publishes to a *wsbus.Bus or an injected callback",
+    "Names only real files and packages; every cited path exists in the repository (verify with grep or ls)"
+  ],
+  "context_files": [
+    "cli-go/internal/wsbus/event.go",
+    "cli-go/internal/wsbus/bus.go",
+    "cli-go/internal/interactive/session.go",
+    "cli-go/internal/dispatch/service.go"
+  ],
+  "max_duration_s": 360,
+  "max_cost_usd": 0.8,
+  "tags": [
+    "dependency-cycle",
+    "import-graph",
+    "go",
+    "read-only",
+    "tree-dependent",
+    "multi-file"
+  ]
+}

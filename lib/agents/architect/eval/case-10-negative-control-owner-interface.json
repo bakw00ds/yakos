@@ -1,0 +1,51 @@
+{
+  "case_id": "architect-negative-control-owner-interface-10",
+  "task": "Design review of a proposed change. A teammate proposes: 'Introduce an OwnerProvider interface in a new package internal/ownerid, with pluggable implementations (file-persisted loopback, authsession-backed, static-for-tests), and inject it into serve.Config and consoleui.Config in place of the direct calls to loopbackowner.LoadOrCreate.' Read cli-go/internal/loopbackowner/loopbackowner.go, its callers in cli-go/internal/serve (methods.go, term_methods.go) and cli-go/internal/consoleui (loopback_owner.go, server.go), and how tests currently control the owner value. Decide whether the abstraction is warranted today. If no change is the right answer, say so and justify it from the code. Do not propose an alternative design unless the code shows a concrete need for one. This is a read-only task: do not edit, write, or create any file.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "declines-the-abstraction",
+        "weight": 0.3,
+        "type": "binary"
+      },
+      {
+        "name": "evidence-from-code",
+        "weight": 0.3,
+        "type": "scalar_0_1",
+        "anchor": "1.0: cites that loopbackowner has a single implementation and a single function (LoadOrCreate) used by real callers in serve and consoleui, that consoleui already has a test seam (Config.LoopbackOwnerID override), and that no second implementation exists (authsession-backed is a deferred option, not code). 0.5: declines with generic YAGNI reasoning and one code fact. 0.0: declines with no code evidence."
+      },
+      {
+        "name": "does-not-invent-a-design",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "no-fabricated-paths",
+        "weight": 0.15,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Recommends no change: the interface and new package are not justified by the current code",
+    "Grounds this in verifiable facts: loopbackowner exports only LoadOrCreate and Derive; there is exactly one implementation; callers are workflowOwnerID and yakos.term.create in serve and loadOrCreateLoopbackOwnerID in consoleui (verify call sites with grep at eval time); consoleui.Config.LoopbackOwnerID already lets tests supply a predictable value; no authsession-backed owner implementation exists in the code",
+    "Does not produce a new interface, package layout, or task breakdown as its recommendation; at most notes what evidence (a second real implementation or a test that cannot be written) would justify revisiting",
+    "Names only real files and symbols; every cited path exists (verify with ls or grep)"
+  ],
+  "context_files": [
+    "cli-go/internal/loopbackowner/loopbackowner.go",
+    "cli-go/internal/serve/methods.go",
+    "cli-go/internal/serve/term_methods.go",
+    "cli-go/internal/consoleui/loopback_owner.go",
+    "cli-go/internal/consoleui/server.go"
+  ],
+  "max_duration_s": 300,
+  "max_cost_usd": 0.6,
+  "tags": [
+    "negative-control",
+    "do-nothing",
+    "go",
+    "read-only",
+    "multi-file"
+  ]
+}

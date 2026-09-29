@@ -1,0 +1,59 @@
+{
+  "case_id": "architect-six-package-responsibilities-11",
+  "task": "Package-responsibility survey. For each of these six packages under cli-go/internal, write a one-paragraph summary of its responsibility and its security or correctness properties, using only what the source and doc comments state: statepath, pathsafe, setuptoken, userstore, winsec, paritytest. For each package give at least two specific checkable facts (constants, rejected inputs, resolution order, platform behaviour). Where a package's README or doc comment disagrees with its code, say so. Cite the file for each fact and do not state anything you did not read. This is a read-only task: do not edit, write, or create any file.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "per-package-accuracy",
+        "weight": 0.4,
+        "type": "scalar_0_1",
+        "anchor": "1.0: all six packages summarised with correct checkable facts. 0.75: five packages correct. 0.5: three or four correct. 0.25: one or two. 0.0: none, or dominated by wrong facts."
+      },
+      {
+        "name": "catches-doc-code-contradiction",
+        "weight": 0.2,
+        "type": "binary"
+      },
+      {
+        "name": "no-fabricated-claims",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "cites-files",
+        "weight": 0.15,
+        "type": "scalar_0_1",
+        "anchor": "1.0: every package has at least one real file citation. 0.5: about half. 0.0: none."
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "statepath: single canonical resolver of the state directory; resolution is YAKOS_DISPATCH_LOG (used verbatim as the directory), then $HOME/.yakos-state, then os.TempDir()/.yakos-state when the home directory cannot be found; DispatchLog() appends dispatch-log.ndjson; also holds SecureDir/SecureFile helpers (secure.go). Note the doc says the override may be 'full path OR directory' but the code treats any value as a directory",
+    "pathsafe: dependency-free validator; ValidateProjectSlug accepts the empty string and rejects '.', absolute paths, any '/' or '\\', and any value containing '..'; it is an input-shape denylist, not a containment check on the resolved path",
+    "setuptoken: one-time first-admin setup token; 32 random bytes base64url; TokenTTL is 30 minutes; ValidateAndConsume is single-use under a mutex and deletes the 0600 marker file; constant-time compare via dashauth.TokenEqual; reload rejects symlinks and group/world-writable files on Unix",
+    "userstore: file-backed users.json (0600, parent 0700) with argon2id PHC hashes; LockoutThreshold is 10 failed logins with a 15-minute LockoutCooldown; Verify does the full argon2id derivation even for unknown usernames; Open refuses a symlink or group/other-writable users.json on Unix",
+    "winsec: SecureFile is a no-op on non-Windows (POSIX 0600 is the control); on Windows it restricts the file DACL to the current user SID via SetNamedSecurityInfo",
+    "paritytest: harness that runs bash yakos and Go yakos with identical args/env and compares stdout/stderr/exit code (CompareExact/JSONL/Regex/Golden/Ignore); binary paths come from YAKOS_BASH_BINARY / YAKOS_GO_BINARY or default via runtime.Caller relative to the repo root; flags the contradiction that paritytest/README.md still states a hardcoded default path /Users/tw/github/yakOS/cli/yakos while paritytest.go says defaults are never hardcoded (verify both at eval time)",
+    "Every fact is sourced from a file the response actually cites; no invented functions, constants or behaviours"
+  ],
+  "context_files": [
+    "cli-go/internal/statepath/statepath.go",
+    "cli-go/internal/pathsafe/pathsafe.go",
+    "cli-go/internal/setuptoken/setuptoken.go",
+    "cli-go/internal/userstore/userstore.go",
+    "cli-go/internal/winsec/secure_unix.go",
+    "cli-go/internal/paritytest/paritytest.go",
+    "cli-go/internal/paritytest/README.md"
+  ],
+  "max_duration_s": 420,
+  "max_cost_usd": 1.0,
+  "tags": [
+    "summarisation",
+    "package-responsibility",
+    "doc-drift",
+    "go",
+    "read-only",
+    "recall",
+    "multi-file"
+  ]
+}
