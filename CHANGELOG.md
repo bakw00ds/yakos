@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`yakos refresh` hook-mirror layout unified (K-94, K-81).** Bash
+  `cli/lib/refresh.sh` now uses the same layout algorithm as the Go
+  port: `lib/hooks/legacy/<name>.sh` deploys flat and `legacy/` is never
+  recreated under `scripts/hooks/`. Bash also gains the settings-merge
+  prefix dedupe and the agent-symlink worktree canonicalization that
+  only Go had, and writes `settings.json` with sorted keys so both
+  implementations produce byte-identical output. The committed
+  `scripts/hooks/legacy/` union (framework root and both `proj-in-sync`
+  fixtures) is removed so `check-hook-mirror.sh` is meaningful again, and
+  a refreshed project now reports "in sync".
+- **Settings-merge hook identity keyed by path under `scripts/hooks/`**,
+  not basename, so same-named hooks in different subdirectories no longer
+  collapse into one merge key. Hook sync pass-2 dedupes by destination
+  path for the same reason.
+- `yakos refresh` (Go) now writes `settings.json` without HTML escaping
+  (`<plan_id>` stays raw) and `.framework-hash` sidecars with a trailing
+  newline, matching bash byte for byte. Projects refreshed under the old
+  layout have their orphan `scripts/hooks/legacy/` removed once every file
+  in it has a flat counterpart.
+
 ## [0.59.0.0] — 2026-09-28
 
 ### Added

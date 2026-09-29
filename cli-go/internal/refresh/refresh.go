@@ -273,8 +273,10 @@ func mergeSettingsForProject(templateFile, deployedFile string, dryRun bool, w i
 }
 
 // syncHooks copies / updates hook files from srcRoot into dstRoot.
-// It mirrors the bash _sync_hooks logic exactly, including:
+// This is the canonical layout algorithm; cli/lib/refresh.sh _sync_hooks
+// mirrors it exactly (K-94) and must be changed in lockstep. It includes:
 //   - Skipping .gitkeep, README.md, and git/ subdirectory entries.
+//   - Never recreating legacy/ under dstRoot: legacy/<name>.sh deploys flat.
 //   - Writing / updating a .framework-hash sidecar beside each deployed file.
 //   - Dry-run: reports counts without writing.
 //
@@ -300,9 +302,11 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 		return rpt, nil
 	}
 
-	// processedNames tracks flat hook basenames that pass-1 already handled,
-	// so pass-2 (legacy/) can skip duplicates.
-	processedNames := make(map[string]bool)
+	// processedRels tracks the destination-relative paths pass-1 already
+	// handled, so pass-2 (legacy/) can skip a hook whose flat destination
+	// was already written. Keyed by relative path, not basename: a helper
+	// such as lib/x.sh must not suppress a distinct legacy/x.sh (K-94).
+	processedRels := make(map[string]bool)
 
 	// syncOne performs the copy-or-update logic for a single (src, dst, rel) triple.
 	syncOne := func(srcPath, dstPath, rel string) {
@@ -324,7 +328,7 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 				if err := copyFile(srcPath, dstPath); err != nil {
 					return
 				}
-				if err := os.WriteFile(hashFile, []byte(srcHash), 0644); err != nil { //nolint:gosec
+				if err := os.WriteFile(hashFile, []byte(srcHash+"\n"), 0644); err != nil { //nolint:gosec
 					return
 				}
 			}
@@ -346,7 +350,7 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 				if err := copyFile(srcPath, dstPath); err != nil {
 					return
 				}
-				if err := os.WriteFile(hashFile, []byte(srcHash), 0644); err != nil { //nolint:gosec
+				if err := os.WriteFile(hashFile, []byte(srcHash+"\n"), 0644); err != nil { //nolint:gosec
 					return
 				}
 			}
@@ -354,7 +358,7 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 		} else {
 			// OK — ensure sidecar is up to date even if content matches
 			if !dryRun {
-				_ = os.WriteFile(hashFile, []byte(srcHash), 0644) //nolint:gosec
+				_ = os.WriteFile(hashFile, []byte(srcHash+"\n"), 0644) //nolint:gosec
 			}
 			rpt.OK++
 		}
@@ -388,8 +392,8 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 
 		dstPath := filepath.Join(dstRoot, rel)
 		syncOne(srcPath, dstPath, rel)
-		// Track the flat basename so pass-2 can skip it.
-		processedNames[base] = true
+		// Track the destination-relative path so pass-2 can skip it.
+		processedRels[filepath.ToSlash(rel)] = true
 		return nil
 	})
 	if err != nil {
@@ -413,8 +417,8 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 			if !strings.HasSuffix(base, ".sh") {
 				return nil
 			}
-			// Skip if pass-1 already handled a file with this name.
-			if processedNames[base] {
+			// Skip if pass-1 already handled the flat destination.
+			if processedRels[base] {
 				return nil
 			}
 			// Copy legacy/<name>.sh → dstRoot/<name>.sh (flat, no subdir).
@@ -424,7 +428,47 @@ func syncHooks(srcRoot, dstRoot string, dryRun bool, w io.Writer) (HookPhaseRepo
 		})
 	}
 
+	pruneLegacyMirror(dstRoot, dryRun, w)
+
 	return rpt, nil
+}
+
+// pruneLegacyMirror is a one-shot cleanup for projects refreshed under the
+// old layout, which mirrored lib/hooks/legacy/ as scripts/hooks/legacy/. If
+// that subdirectory exists and every file in it has a flat counterpart
+// (same basename) directly under dstRoot, it is a stale orphan and is
+// removed, logging one line. If any file lacks a counterpart the directory
+// is left alone (it may hold something operator-owned).
+// cli/lib/refresh.sh _prune_legacy_mirror mirrors this exactly.
+func pruneLegacyMirror(dstRoot string, dryRun bool, w io.Writer) {
+	legacy := filepath.Join(dstRoot, "legacy")
+	fi, err := os.Lstat(legacy)
+	if err != nil || !fi.IsDir() {
+		return
+	}
+	count := 0
+	allCovered := true
+	_ = filepath.Walk(legacy, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		count++
+		if _, statErr := os.Stat(filepath.Join(dstRoot, filepath.Base(p))); statErr != nil {
+			allCovered = false
+		}
+		return nil
+	})
+	if !allCovered {
+		return
+	}
+	if dryRun {
+		_, _ = fmt.Fprintf(w, "    [dry-run] hooks: would remove orphan legacy/ subdir (%d files, all have flat counterparts)\n", count)
+		return
+	}
+	if err := os.RemoveAll(legacy); err != nil {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "    [hooks] removed orphan legacy/ subdir (%d files, all have flat counterparts)\n", count)
 }
 
 // copyFile copies the file at src to dst, preserving execute permission.

@@ -494,6 +494,172 @@ else
 fi
 
 # ===========================================================================
+# Test 11 (K-94 / K-81): hook layout matches Go — legacy/ deploys flat, never
+# as a subdirectory; a refreshed project then reports "in sync".
+# ===========================================================================
+echo ""
+echo "Test 11: legacy/ hooks deploy flat; refreshed project reports in sync"
+T11="$(setup_project proj-missing-settings)"
+run_refresh "$T11" >/dev/null 2>&1 || true
+
+if [ -d "$T11/project/scripts/hooks/legacy" ]; then
+    fail "legacy/ was recreated as a subdirectory of scripts/hooks (Go flattens it)"
+else
+    ok "no scripts/hooks/legacy/ subdirectory created"
+fi
+if [ -f "$T11/project/scripts/hooks/auto-compact-trigger.sh" ]; then
+    ok "legacy-only hook auto-compact-trigger.sh deployed flat"
+else
+    fail "legacy-only hook auto-compact-trigger.sh was NOT deployed flat"
+fi
+OUT11="$(run_refresh "$T11" 2>&1 || true)"
+if echo "$OUT11" | grep -q "status:   in sync"; then
+    ok "second run reports 'in sync' (K-81)"
+else
+    fail "second run did not report 'in sync' (got: $(echo "$OUT11" | grep 'hooks:\|status:' | tr '\n' ' '))"
+fi
+
+# ===========================================================================
+# Test 12 (K-94): settings merge dedupes prefix drift and keys hooks by path
+# under scripts/hooks/, so same-named hooks in different subdirs stay distinct.
+# Uses a fake framework root with a purpose-built template.
+# ===========================================================================
+echo ""
+echo "Test 12: merge dedupes absolute-path form; same-named hooks in subdirs stay distinct"
+T12="$WORKDIR/t12"
+mkdir -p "$T12/root/lib/hooks" "$T12/root/lib/settings" "$T12/root/lib/agents" "$T12/project/.claude" "$T12/home"
+cat > "$T12/root/lib/settings/settings.template.json" <<'JSON'
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/a/check.sh"},
+          {"type": "command", "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/b/check.sh"},
+          {"type": "command", "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/top.sh"}
+        ]
+      }
+    ]
+  }
+}
+JSON
+cat > "$T12/project/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "/Users/x/repo/scripts/hooks/top.sh"}
+        ]
+      }
+    ]
+  }
+}
+JSON
+HOME="$T12/home" YAKOS_ROOT="$T12/root" YAKOS_LIB="$YAKOS_LIB" \
+    bash "$REFRESH_SH" --project "$T12/project" >/dev/null 2>&1 || true
+S12="$T12/project/.claude/settings.json"
+for name in a/check.sh b/check.sh top.sh; do
+    n="$(jq_count_commands "$S12" "scripts/hooks/$name")"
+    if [ "$n" = "1" ]; then
+        ok "exactly one registration for scripts/hooks/$name"
+    else
+        fail "expected 1 registration for scripts/hooks/$name, found $n"
+    fi
+done
+if grep -q '/Users/x/repo' "$S12"; then
+    fail "absolute-path registration not replaced by template form"
+else
+    ok "absolute-path registration replaced (no duplicate)"
+fi
+
+# ===========================================================================
+# Test 13 (K-94): agent symlinks are pinned to the canonical checkout when
+# YAKOS_ROOT is a git worktree.
+# ===========================================================================
+echo ""
+echo "Test 13: agent symlinks target canonical checkout when YAKOS_ROOT is a worktree"
+if command -v git >/dev/null 2>&1; then
+    T13="$WORKDIR/t13"
+    mkdir -p "$T13/main/lib/hooks" "$T13/main/lib/settings" "$T13/main/lib/agents" "$T13/project" "$T13/home"
+    echo "# agent" > "$T13/main/lib/agents/zed.md"
+    echo '{"hooks": {}}' > "$T13/main/lib/settings/settings.template.json"
+    : > "$T13/main/lib/hooks/.gitkeep"
+    (
+        cd "$T13/main"
+        git init -q .
+        git add lib
+        git -c user.name=t -c user.email=t@example.invalid commit -q -m init
+        git worktree add -q "$T13/wt" -b wt-branch
+    ) >/dev/null 2>&1
+    MAIN_REAL="$(cd "$T13/main" && pwd -P)"
+    HOME="$T13/home" YAKOS_ROOT="$T13/wt" YAKOS_LIB="$YAKOS_LIB" \
+        bash "$REFRESH_SH" --project "$T13/project" >/dev/null 2>&1 || true
+    LINK_TARGET="$(readlink "$T13/home/.claude/agents/zed.md" 2>/dev/null || true)"
+    if [ "$LINK_TARGET" = "$MAIN_REAL/lib/agents/zed.md" ]; then
+        ok "agent symlink points at the canonical checkout, not the worktree"
+    else
+        fail "agent symlink target is '$LINK_TARGET' (expected $MAIN_REAL/lib/agents/zed.md)"
+    fi
+else
+    skip "git not available — worktree symlink test skipped"
+fi
+
+# ===========================================================================
+# Test 14 (K-94 review): <, > and & in a template doc string are written raw
+# (byte parity with Go, whose merge test asserts the same expected bytes).
+# ===========================================================================
+echo ""
+echo "Test 14: settings merge writes <, >, & unescaped"
+T14="$WORKDIR/t14"
+mkdir -p "$T14/root/lib/hooks" "$T14/root/lib/settings" "$T14/root/lib/agents" "$T14/project/.claude" "$T14/home"
+cat > "$T14/root/lib/settings/settings.template.json" <<'JSON'
+{"hooks":{"Stop":[{"_doc":"run <plan_id> && a > b","hooks":[{"type":"command","command":"${CLAUDE_PROJECT_DIR}/scripts/hooks/x.sh"}]}]}}
+JSON
+echo '{"hooks":{}}' > "$T14/project/.claude/settings.json"
+HOME="$T14/home" YAKOS_ROOT="$T14/root" YAKOS_LIB="$YAKOS_LIB" \
+    bash "$REFRESH_SH" --project "$T14/project" >/dev/null 2>&1 || true
+if grep -qF '"_doc": "run <plan_id> && a > b"' "$T14/project/.claude/settings.json"; then
+    ok "doc string written raw"
+else
+    fail "doc string not written raw: $(cat "$T14/project/.claude/settings.json")"
+fi
+
+# ===========================================================================
+# Test 15 (K-94 review): orphan scripts/hooks/legacy/ from the old layout is
+# pruned when every file has a flat counterpart; preserved otherwise.
+# ===========================================================================
+echo ""
+echo "Test 15: orphan legacy/ subdir pruned (covered) / preserved (uncovered)"
+T15="$(setup_project proj-in-sync)"
+mkdir -p "$T15/project/scripts/hooks/legacy"
+cp "$T15/project/scripts/hooks/cycle-counter.sh" "$T15/project/scripts/hooks/legacy/"
+cp "$T15/project/scripts/hooks/cycle-counter.sh.framework-hash" "$T15/project/scripts/hooks/legacy/"
+DRY15="$(run_refresh "$T15" --dry-run 2>&1 || true)"
+if echo "$DRY15" | grep -q "would remove orphan legacy/" && [ -d "$T15/project/scripts/hooks/legacy" ]; then
+    ok "dry-run reports the orphan and removes nothing"
+else
+    fail "dry-run did not report/preserve orphan legacy/"
+fi
+OUT15="$(run_refresh "$T15" 2>&1 || true)"
+if [ ! -d "$T15/project/scripts/hooks/legacy" ] && echo "$OUT15" | grep -q "removed orphan legacy/ subdir (2 files"; then
+    ok "orphan legacy/ removed with one log line"
+else
+    fail "orphan legacy/ not removed: $(echo "$OUT15" | grep legacy)"
+fi
+T15B="$(setup_project proj-in-sync)"
+mkdir -p "$T15B/project/scripts/hooks/legacy"
+echo "mine" > "$T15B/project/scripts/hooks/legacy/operator-owned.sh"
+run_refresh "$T15B" >/dev/null 2>&1 || true
+if [ -f "$T15B/project/scripts/hooks/legacy/operator-owned.sh" ]; then
+    ok "legacy/ with an uncovered file is preserved"
+else
+    fail "legacy/ with an uncovered file was removed"
+fi
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""
