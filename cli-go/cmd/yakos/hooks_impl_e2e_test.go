@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -46,8 +47,16 @@ func hooksImplEnv(home, workDir, proj string, extra ...string) []string {
 
 func hooksImplBinary(t *testing.T) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sh -c; POSIX only")
+	}
 	bin := resolveGoBinary()
 	if _, err := os.Stat(bin); err != nil {
+		if os.Getenv("CI") == "true" {
+			// The guard must never silently skip in CI (go-ci.yml runs
+			// `make build` before `go test`).
+			t.Fatalf("Go yakos binary not found at %q in CI: %v", bin, err)
+		}
 		t.Skipf("Go yakos binary not found at %q (run make build): %v", bin, err)
 	}
 	return bin
@@ -144,26 +153,51 @@ func TestHooksImplE2E_GoModeCommandsBlock(t *testing.T) {
 	home, proj := hooksImplProject(t)
 	work := filepath.Join(home, "work")
 	settings := hooksImplRefresh(t, bin, home, proj, "go")
-	env := hooksImplEnv(home, work, proj) // deliberately no YAKOS_HOOKS
 
+	// Arm the four fail-closed gates. Written after refresh, which persists
+	// hooks_impl into .yakos.yml.
 	if err := os.MkdirAll(filepath.Join(work, "current"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(work, "current", ".plan-blocked"), []byte(`{"plan_id":"p1","reason":"low score"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	yml, err := os.OpenFile(filepath.Join(proj, ".yakos.yml"), os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = yml.WriteString("\nbudget:\n  enabled: true\n  max_tool_calls: 0\n")
+	_ = yml.Close()
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, ".claude", "path-allowlist.json"), []byte(`{"lead":{"allow":["src/*"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pathPayload := `{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"docs/x.txt","content":"x"}}`
+	budgetPayload := `{"hook_event_name":"PreToolUse","tool_name":"Read","session_id":"s1","tool_input":{}}`
 
-	for name, payload := range map[string]string{
+	gates := map[string]string{
 		"plan-quality-gate": pqgPayload,
 		"secret-scan":       secretPayload(),
-	} {
-		cmd := settingsGoCommand(t, settings, name)
-		if !strings.Contains(cmd, "--impl go") {
-			t.Errorf("%s: command does not pin the tier: %s", name, cmd)
-		}
-		code, stderr := shRun(t, cmd, payload, env)
-		if code != 2 || strings.TrimSpace(stderr) == "" {
-			t.Errorf("%s: want exit 2 + stderr from `sh -c %s`, got exit %d stderr %q", name, cmd, code, stderr)
+		"path-allowlist":    pathPayload,
+		"budget-guard":      budgetPayload,
+	}
+	// An ambient YAKOS_IMPL (bash or go) or YAKOS_HOOKS must never turn a
+	// gate into a no-op or a non-blocking error.
+	for _, extra := range [][]string{nil, {"YAKOS_IMPL=bash"}, {"YAKOS_IMPL=go"}, {"YAKOS_HOOKS=bash"}} {
+		env := hooksImplEnv(home, work, proj, extra...)
+		for name, payload := range gates {
+			cmd := settingsGoCommand(t, settings, name)
+			if !strings.Contains(cmd, "--impl go") {
+				t.Errorf("%s: command does not pin the tier: %s", name, cmd)
+			}
+			code, stderr := shRun(t, cmd, payload, env)
+			if code != 2 || strings.TrimSpace(stderr) == "" {
+				t.Errorf("%v %s: want exit 2 + stderr from `sh -c %s`, got exit %d stderr %q", extra, name, cmd, code, stderr)
+			}
+			// budget-guard counts calls; reset so each variant starts fresh.
+			_ = os.Remove(filepath.Join(work, "current", ".budget-state.json"))
 		}
 	}
 }

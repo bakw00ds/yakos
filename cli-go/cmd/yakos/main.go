@@ -79,10 +79,12 @@ func isDoctorPreflightForceGo(impl string, args []string) bool {
 // carries the bash tree, shadow-mode routing would hand `hook run <name>` to
 // bash, which exits 64 ("unknown command"). Claude Code treats that as a
 // non-blocking error, so every gate registered by `refresh --hooks-impl
-// go|hybrid` would silently stop enforcing. As with doctor --preflight, an
-// explicit YAKOS_IMPL=bash is honored as-is.
-func isHookForceGo(impl string, args []string) bool {
-	return impl != "bash" && len(args) > 0 && args[0] == "hook"
+// go|hybrid` would silently stop enforcing. Unlike doctor --preflight, an
+// ambient YAKOS_IMPL=bash is deliberately NOT honored here: it would send the
+// gate to bash (exit 64) or to the Go-only passthrough error (exit 1), both
+// non-blocking, so `hook` is always Go-native.
+func isHookForceGo(args []string) bool {
+	return len(args) > 0 && args[0] == "hook"
 }
 
 // selectImpl encodes the YAKOS_IMPL gate decision as a pure function so it
@@ -173,7 +175,7 @@ func main() {
 	//
 	// `doctor --preflight` is a narrow, deliberate exception to this gate:
 	// see isDoctorPreflightForceGo's doc comment.
-	if !isDoctorPreflightForceGo(os.Getenv("YAKOS_IMPL"), args) && !isHookForceGo(os.Getenv("YAKOS_IMPL"), args) {
+	if !isDoctorPreflightForceGo(os.Getenv("YAKOS_IMPL"), args) && !isHookForceGo(args) {
 		switch selectImpl(os.Getenv("YAKOS_IMPL"), passthrough.BashYakosExists(yakosRoot)) {
 		case implPassthrough:
 			exitWith(passthrough.Run(yakosRoot, args))

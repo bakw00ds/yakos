@@ -79,6 +79,13 @@ jobs:
         working-directory: cli-go
         run: go vet ./...
 
+      - name: Build binary for binary-driven tests
+        # cmd/yakos e2e tests (hooks_impl_e2e_test.go) run the built
+        # bin/yakos; they FAIL (not skip) under CI=true when it is missing.
+        if: runner.os != 'Windows'
+        shell: bash
+        run: make build
+
       - name: go test
         working-directory: cli-go
         # Use -count=1 to bypass test result cache in CI.

@@ -624,8 +624,8 @@ Options:
                     ~/github/*/.claude/settings.json) and refresh each.
   --dry-run         Print what WOULD change without writing anything.
   --hooks-impl <m>  Hook implementation settings.json wires up (Go only):
-                    bash (default), go (yakos hook run <name> for every
-                    hook), or hybrid (Go only for parity-verified hooks).
+                    bash (default), go (every hook runs via 'yakos hook run'
+                    pinned to the Go tier), or hybrid (Go only for parity-verified hooks).
                     Persisted to <project>/.yakos.yml as hooks_impl and kept
                     on later runs; go/hybrid fail if a hook has no
                     registered Go implementation.

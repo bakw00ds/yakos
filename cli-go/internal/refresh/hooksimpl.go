@@ -8,8 +8,8 @@ package refresh
 // existing merge phases stay the single place that decides add/replace/keep:
 //
 //	bash   — template untouched (byte-identical to pre-A-3 behavior)
-//	go     — every hook command becomes `yakos hook run <name>`
-//	hybrid — only registry GoReady hooks become `<yakos> hook run <name>`
+//	go     — every hook command becomes `yakos hook run --impl go <name>`
+//	hybrid — only registry GoReady hooks become `<yakos> hook run --impl go <name>`
 //
 // Binary reference: the Go-form command embeds the ABSOLUTE path of the
 // running yakos binary (os.Executable, symlinks evaluated), not a bare

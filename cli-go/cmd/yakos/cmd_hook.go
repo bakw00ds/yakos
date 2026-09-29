@@ -83,6 +83,10 @@ func runHookRun(yakosRoot string, args []string) {
 			fmt.Fprintf(os.Stderr, "hook run: unknown or incomplete flag %q (usage: yakos hook run [--impl go|bash|hybrid] <name>)\n", args[0])
 			os.Exit(2)
 		}
+		if override != "" {
+			fmt.Fprintln(os.Stderr, "hook run: --impl given more than once")
+			os.Exit(2)
+		}
 		switch m := runner.HooksMode(args[1]); m {
 		case runner.HooksModeGo, runner.HooksModeBash, runner.HooksModeHybrid:
 			override = m
