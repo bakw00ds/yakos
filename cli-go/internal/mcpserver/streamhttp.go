@@ -136,17 +136,36 @@ func rejectNonLoopbackOrigin(port string, next http.Handler) http.Handler {
 // WriteToken doc comment on HTTPConfig.
 var ErrNoWriteToken = errors.New("mcpserver/http: refusing to start: no write token configured (unauthenticated dispatch endpoint)")
 
-// Serve listens on cfg.Addr and blocks until ctx is cancelled.
-func (s *HTTPServer) Serve(ctx context.Context) error {
+// Listen binds cfg.Addr synchronously and returns the listener. It returns
+// ErrNoWriteToken when no token is configured, and the bind error when the
+// address is unavailable.
+//
+// S-2 R15: binding is split out of Serve so the daemon can learn of a failed
+// start (a port squatted by a hostile process, a missing token) at startup
+// instead of when the daemon shuts down.
+func (s *HTTPServer) Listen() (net.Listener, error) {
 	if s.cfg.WriteToken == "" {
-		return ErrNoWriteToken
+		return nil, ErrNoWriteToken
 	}
-
 	ln, err := net.Listen("tcp", s.cfg.Addr)
 	if err != nil {
-		return fmt.Errorf("mcpserver/http: listen %s: %w", s.cfg.Addr, err)
+		return nil, fmt.Errorf("mcpserver/http: listen %s: %w", s.cfg.Addr, err)
 	}
+	return ln, nil
+}
 
+// Serve listens on cfg.Addr and blocks until ctx is cancelled.
+func (s *HTTPServer) Serve(ctx context.Context) error {
+	ln, err := s.Listen()
+	if err != nil {
+		return err
+	}
+	return s.ServeListener(ctx, ln)
+}
+
+// ServeListener serves on an already-bound listener (from Listen) and blocks
+// until ctx is cancelled.
+func (s *HTTPServer) ServeListener(ctx context.Context, ln net.Listener) error {
 	errCh := make(chan error, 1)
 	go func() {
 		if err := s.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
