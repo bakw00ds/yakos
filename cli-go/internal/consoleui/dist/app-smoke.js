@@ -159,6 +159,40 @@ if (validThemes.indexOf(_themeAttr) === -1) {
   process.exit(1);
 }
 
+// ── Build-watch (stale-console banner) compare/dismiss logic ────────────────
+var bw = global.__yakosBuildWatch;
+function fail(m) { process.stderr.write('FAIL: build-watch: ' + m + '\n'); process.exit(1); }
+if (!bw) fail('window.__yakosBuildWatch not exposed');
+var appended = [];
+var els = [];
+document.body = { appendChild: function(e) { appended.push(e); } };
+document.createElement = function() {
+  var e = { listeners: {}, children: [], attrs: {}, parentNode: null,
+    setAttribute: function(k, v) { this.attrs[k] = v; },
+    addEventListener: function(t, f) { this.listeners[t] = f; },
+    appendChild: function(c) { this.children.push(c); } };
+  els.push(e); return e;
+};
+var st = function() { return bw._state(); };
+bw.observeId('');                      // missing header: ignored
+if (st().baseline !== null) fail('empty id must not set baseline');
+bw.observeId('A');                     // first id = baseline, no banner
+if (st().baseline !== 'A' || st().shown) fail('first id must set baseline silently');
+bw.observeId('A');
+if (st().shown) fail('same id must not show banner');
+bw.observeId('B');                     // rebuild -> banner
+if (!st().shown || appended.length !== 1) fail('changed id must show banner once');
+if (appended[0].attrs.role !== 'status') fail('banner needs role=status');
+bw.observeId('B');
+if (appended.length !== 1) fail('banner must not duplicate');
+appended[0].listeners.keydown({ key: 'Escape' });  // Escape dismisses
+if (st().shown || st().dismissed !== 'B') fail('Escape must dismiss');
+bw.observeId('B');
+if (st().shown) fail('dismissed id must not re-show');
+bw.observeId('C');                     // further rebuild re-shows
+if (!st().shown) fail('new id after dismissal must re-show');
+bw.dismiss();
+
 process.stdout.write(
   'PASS: app.js loaded without error; data-theme="' + _themeAttr +
   '"; DOMContentLoaded registered.\n'

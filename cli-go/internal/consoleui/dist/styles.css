@@ -4899,3 +4899,49 @@ html[data-theme="light"] .ask-widget-header {
 html[data-theme="light"] .term-viewport {
   background: #ffffff;
 }
+
+/* ── Stale-build banner (K-87) — non-modal, bottom-centre, theme tokens ── */
+.build-banner {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(640px, calc(100vw - 32px));
+  padding: 10px 12px 10px 16px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  font: 13px/1.4 var(--font-sans);
+}
+.build-banner-btn {
+  flex: none;
+  padding: 4px 12px;
+  background: var(--accent);
+  color: var(--bg);
+  border: 0;
+  border-radius: 4px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.build-banner-close {
+  flex: none;
+  padding: 0 6px;
+  background: transparent;
+  color: var(--text-dim);
+  border: 0;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.build-banner-btn:focus-visible,
+.build-banner-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

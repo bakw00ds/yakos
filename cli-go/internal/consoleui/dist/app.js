@@ -269,6 +269,79 @@
     CSRF_TOKEN = readCookie('yakos_csrf');
   }
 
+  // ---- Build-id watch (stale-console banner) ----------------------------------
+  // The daemon stamps every response with X-Yakos-Build (its process build id).
+  // The first id observed after page load is the baseline (the console is
+  // same-origin, so the header is readable by fetch without CORS exposure).
+  // A later, different id means the daemon was rebuilt/replaced behind this
+  // open tab: show a non-modal, dismissable banner offering a reload.
+  // Dismissal is remembered per new id, so the same rebuild never nags twice,
+  // but a further rebuild shows the banner again.  The DOM is only touched on
+  // a mismatch, so first load has no flicker.  Missing header (older daemon)
+  // is ignored.  A 60s visible-tab GET / ping (HEAD is 401 at the auth gate) covers otherwise idle tabs.
+  const buildWatch = (function() {
+    let baseline = null;
+    let dismissed = null;
+    let el = null;
+
+    function dismiss() {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+      el = null;
+    }
+
+    function show(id) {
+      if (el || dismissed === id || typeof document.createElement !== 'function') return;
+      el = document.createElement('div');
+      el.className = 'build-banner';
+      el.setAttribute('role', 'status');
+      const msg = document.createElement('span');
+      msg.className = 'build-banner-msg';
+      msg.textContent = 'Console is out of date — the daemon was rebuilt. Reload to pick up changes.';
+      const reload = document.createElement('button');
+      reload.type = 'button';
+      reload.className = 'build-banner-btn';
+      reload.textContent = 'Reload';
+      reload.addEventListener('click', function() { window.location.reload(); });
+      const close = document.createElement('button');
+      close.type = 'button';
+      close.className = 'build-banner-close';
+      close.setAttribute('aria-label', 'Dismiss out-of-date notice');
+      close.textContent = '×';
+      close.addEventListener('click', function() { dismissed = id; dismiss(); });
+      // Escape dismisses only while focus is inside the banner, so it never
+      // competes with modal dialogs' own Escape handling.
+      el.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') { dismissed = id; dismiss(); }
+      });
+      el.appendChild(msg);
+      el.appendChild(reload);
+      el.appendChild(close);
+      document.body.appendChild(el);
+    }
+
+    function observeId(id) {
+      if (!id) return;
+      if (baseline === null) { baseline = id; return; }
+      if (id !== baseline) show(id);
+    }
+
+    function observe(resp) {
+      try { observeId(resp && resp.headers && resp.headers.get('X-Yakos-Build')); } catch (_) { /* ignore */ }
+    }
+
+    function ping() {
+      if (typeof document.hidden !== 'undefined' && document.hidden) return;
+      fetch('/', { cache: 'no-store' }).then(observe).catch(function() {});
+    }
+
+    return { observe: observe, observeId: observeId, ping: ping, dismiss: dismiss,
+             _state: function() { return { baseline: baseline, dismissed: dismissed, shown: !!el }; } };
+  })();
+  window.__yakosBuildWatch = buildWatch; // test hook (app-smoke.js)
+  setInterval(buildWatch.ping, 60000);
+  // Establish the baseline promptly, before any API call can race a rebuild.
+  buildWatch.ping();
+
   // apiFetch: mode-aware fetch wrapper for all console API calls.
   //
   // bearer mode: sets Authorization: Bearer <TOKEN>.  The SW also injects
@@ -304,6 +377,7 @@
       opts.body = JSON.stringify(body);
     }
     return fetch(path, opts).then(function(resp) {
+      buildWatch.observe(resp);
       if (resp.status === 401 && AUTH_MODE === 'session') {
         // Session expired — redirect to login.
         window.top.location.href = '/login';
