@@ -395,7 +395,9 @@ func TestFleet_LoopbackSeesAllSessions(t *testing.T) {
 // with no identity middleware injected, producing exactly the zero-value
 // (Resolved=false) Identity this test needs.
 func TestFleet_UnresolvedIdentityFailsClosed(t *testing.T) {
-	ts, tok, reg, srv := newFleetTestServer(t)
+	// S-2 R17: a bare srv.Handler() now acts as the loopback operator, so the
+	// unresolved identity this test needs is injected explicitly.
+	ts, tok, reg, srv := newFleetTestServerWithIdentity(t, netid.Identity{})
 
 	hub := srv.ChatHub()
 	if err := hub.OpenSession("sess-unresolved-a", "alice", false); err != nil {
@@ -421,8 +423,11 @@ func TestFleet_UnresolvedIdentityFailsClosed(t *testing.T) {
 	})
 
 	resp := get(t, ts.URL+"/api/fleet", tok)
+	if resp.StatusCode == http.StatusForbidden {
+		return // refused outright by the fail-closed role gate: nothing leaked
+	}
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d; want 200", resp.StatusCode)
+		t.Fatalf("status=%d; want 403 (role gate) or 200 with no sessions", resp.StatusCode)
 	}
 	fr := decodeFleetResponse(t, resp)
 

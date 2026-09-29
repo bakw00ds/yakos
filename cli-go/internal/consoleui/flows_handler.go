@@ -367,9 +367,9 @@ func (h *flowsHandlers) handleSaveWorkflow(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Per-method role check: POST (save) requires RoleFlowsRun.
-	// Only fires when the resolver middleware has run (id.Resolved==true).
-	// Loopback tests using srv.Handler() bypass this (Resolved=false → no-op).
-	if id := netid.IdentityFrom(r.Context()); id.Resolved && !id.Role.Allows(netid.RoleFlowsRun) {
+	// Fails closed on an unresolved identity (S-2 R17); Server.Handler()
+	// stamps the loopback identity for bare test mounts.
+	if id := netid.IdentityFrom(r.Context()); !id.Resolved || !id.Role.Allows(netid.RoleFlowsRun) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -525,9 +525,9 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Per-method role check: POST (run) requires RoleFlowsRun.
-	// Fires only when resolver middleware has run (Resolved==true).
+	// Fails closed on an unresolved identity (S-2 R17).
 	resolvedID := netid.IdentityFrom(r.Context())
-	if resolvedID.Resolved && !resolvedID.Role.Allows(netid.RoleFlowsRun) {
+	if !resolvedID.Resolved || !resolvedID.Role.Allows(netid.RoleFlowsRun) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -975,7 +975,7 @@ func (h *flowsHandlers) handleDeleteWorkflow(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Per-method role check: DELETE requires RoleFlowsRun.
-	if id := netid.IdentityFrom(r.Context()); id.Resolved && !id.Role.Allows(netid.RoleFlowsRun) {
+	if id := netid.IdentityFrom(r.Context()); !id.Resolved || !id.Role.Allows(netid.RoleFlowsRun) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -1043,8 +1043,8 @@ func (h *flowsHandlers) handleCancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Per-method role check: cancelling a run requires RoleFlowsRun.
-	// Fires only when resolver middleware has run (Resolved==true).
-	if id := netid.IdentityFrom(r.Context()); id.Resolved && !id.Role.Allows(netid.RoleFlowsRun) {
+	// Fails closed on an unresolved identity (S-2 R17).
+	if id := netid.IdentityFrom(r.Context()); !id.Resolved || !id.Role.Allows(netid.RoleFlowsRun) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

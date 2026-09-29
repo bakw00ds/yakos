@@ -166,7 +166,10 @@ func NewFlowsHandlerForTest(t *testing.T, workDir string, fn func(context.Contex
 	mux.HandleFunc("/flows/api/run/node", h.handleGetNodeOutput)
 	mux.HandleFunc("/flows/api/resume", h.handleResume)
 	mux.HandleFunc("/flows/api/cancel", h.handleCancel)
-	return mux, nil
+	// The role gates fail closed on an unresolved identity (S-2 R17); a
+	// request with no identity acts as the loopback operator, as it does on
+	// Server.Handler().
+	return stampLoopbackIfNoIdentity(mux), nil
 }
 
 // N.b. K2 (k82-security-review-2026-09-23.md) needed a way to drive a REAL
