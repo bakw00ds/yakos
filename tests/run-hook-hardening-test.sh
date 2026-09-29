@@ -325,6 +325,25 @@ hung_jq_suite() {
             fi
         done
     done
+    # Windows shape: a non-GNU `timeout` (timeout.exe: `/t` syntax, exit 1, no
+    # --version) sits on PATH ahead of anything else. It must be ignored, for a
+    # healthy jq (hook passes) and a hung jq (still bounded).
+    local bd="$TMP/bogus-timeout-$L"
+    mkdir -p "$bd"
+    printf '#!/bin/sh\necho "ERROR: Invalid syntax." >&2\nexit 1\n' > "$bd/timeout"; chmod +x "$bd/timeout"
+    sb="$(new_sandbox "hj-$L-bogus-ok")"
+    rc=0
+    printf '%s' "$GS_PASS_PAYLOAD" | env PATH="$bd:$PATH" HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" \
+        "$SH" "$HOOKS/secret-scan.sh" >/dev/null 2>"$sb/err" || rc=$?
+    if [ "$rc" = 0 ]; then ok "$L: non-GNU timeout on PATH + healthy jq -> hook passes (0)"; else bad "$L: non-GNU timeout broke a healthy hook rc=$rc err=[$(cat "$sb/err")]"; fi
+    cp "$TMP/hj-none/jq" "$bd/jq"
+    sb="$(new_sandbox "hj-$L-bogus-hung")"
+    t0="$(date +%s)"; rc=0
+    printf '%s' "$GS_PASS_PAYLOAD" | env PATH="$bd:$TMP/hj-none" HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" YAKOS_HOOK_JQ_TIMEOUT=1 \
+        "$SH" "$HOOKS/secret-scan.sh" >/dev/null 2>"$sb/err" || rc=$?
+    dur=$(( $(date +%s) - t0 ))
+    if [ "$rc" = 2 ] && [ "$dur" -lt 12 ]; then ok "$L: non-GNU timeout on PATH + hung jq -> 2 in ${dur}s"; else bad "$L: non-GNU timeout + hung jq rc=$rc dur=${dur}s"; fi
+
     # A healthy jq is unaffected, and a nonsense timeout value falls back to the default.
     sb="$(new_sandbox "hj-$L-healthy")"
     grun "$SH" "$HOOKS" secret-scan "$sb" "$GS_PASS_PAYLOAD" "YAKOS_HOOK_JQ_TIMEOUT=abc"
