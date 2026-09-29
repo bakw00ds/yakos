@@ -170,7 +170,11 @@ func (h *Hook) runPostToolUse(c context.Context, out hooktype.HookOutput, in hoo
 	projectDir := h.resolveProjectDir(in)
 
 	// Load plan_quality config (bash: awk over .yakos.yml).
-	cfg := h.loadConfig(projectDir)
+	cfg, cfgErr := h.loadConfig(projectDir)
+	if cfgErr != nil {
+		h.warnf(&out, "plan-quality-score: .yakos.yml is not a readable file; using defaults")
+		h.log(&out, in, "WARN", "pass", ".yakos.yml is not a readable file; using plan_quality defaults", map[string]any{})
+	}
 	if cfg.Enabled == "false" { // bash: [ "$PQ_ENABLED" = "false" ]
 		h.log(&out, in, "REPORT", "pass", "plan_quality.enabled=false; skipping",
 			map[string]any{"file_path": filePath})
@@ -179,7 +183,7 @@ func (h *Hook) runPostToolUse(c context.Context, out hooktype.HookOutput, in hoo
 	threshold := firstNonEmpty(cfg.Threshold, defaultThreshold)
 	// bash's awk `thr+0` turns a non-numeric threshold into 0, which would
 	// pass every plan. Fall back to the default and say so instead.
-	if _, err := strconv.ParseFloat(strings.TrimSpace(threshold), 64); err != nil {
+	if !isDecimal(threshold) {
 		h.warnf(&out, "plan-quality-score: plan_quality.threshold %q is not a number; using %s", threshold, defaultThreshold)
 		h.log(&out, in, "WARN", "pass",
 			fmt.Sprintf("plan_quality.threshold %q is not a number; using default %s", threshold, defaultThreshold),
@@ -506,14 +510,18 @@ func (h *Hook) warnf(out *hooktype.HookOutput, format string, args ...any) {
 // from the indented lines under it until the next unindented line. Inline
 // comments and quotes are stripped; a later duplicate key wins; an empty
 // value is ignored.
-func (h *Hook) loadConfig(projectDir string) planQualityConfig {
+func (h *Hook) loadConfig(projectDir string) (planQualityConfig, error) {
 	var cfg planQualityConfig
 	if projectDir == "" {
-		return cfg
+		return cfg, nil
 	}
 	data, err := os.ReadFile(filepath.Join(projectDir, ".yakos.yml")) //nolint:gosec
 	if err != nil {
-		return cfg
+		if errors.Is(err, os.ErrNotExist) {
+			return cfg, nil
+		}
+		// A directory or an unreadable file: fall back to defaults, but say so.
+		return cfg, err
 	}
 	inBlock := false
 	for _, line := range strings.Split(string(data), "\n") {
@@ -554,10 +562,16 @@ func (h *Hook) loadConfig(projectDir string) planQualityConfig {
 			break
 		}
 	}
-	return cfg
+	return cfg, nil
 }
 
+// isDecimal reports whether s is a plain finite decimal number. It rejects
+// what strconv.ParseFloat also accepts ("nan", "inf", hex floats), any of
+// which would make every plan pass or fail.
+func isDecimal(s string) bool { return reDecimal.MatchString(strings.TrimSpace(s)) }
+
 var (
+	reDecimal       = regexp.MustCompile(`^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$`)
 	reBlockStart    = regexp.MustCompile(`^[ \t]*plan_quality[ \t]*:`)
 	reInlineComment = regexp.MustCompile(`[ \t]+#.*$`)
 )

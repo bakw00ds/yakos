@@ -760,3 +760,75 @@ func TestConfigEmptyValueDoesNotEraseEarlierKey(t *testing.T) {
 		t.Fatal("empty mode: must not override the earlier mode: block")
 	}
 }
+
+func hasWarn(t *testing.T, e *env, needle string) bool {
+	t.Helper()
+	data, _ := os.ReadFile(filepath.Join(e.work, "logs", "plan-quality-score.ndjson"))
+	return strings.Contains(string(data), needle)
+}
+
+// A directory or unreadable .yakos.yml falls back to defaults, with a WARN.
+func TestConfigDirectoryWarnsAndUsesDefaults(t *testing.T) {
+	e := newEnv(t)
+	if err := os.Mkdir(filepath.Join(e.proj, ".yakos.yml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.writePlan(t, "0.10", "id: p-dir\n", old)
+	out := e.run(t, "Write", nil)
+	if !hasWarn(t, e, ".yakos.yml is not a readable file") || !strings.Contains(string(out.Stderr), ".yakos.yml is not a readable file") {
+		t.Fatalf("no WARN: stderr=%q", out.Stderr)
+	}
+	if _, ok := e.marker(t); ok {
+		t.Fatal("defaults are surface, not block")
+	}
+}
+
+func TestConfigUnreadableFileWarns(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads anything")
+	}
+	e := newEnv(t)
+	e.yml(t, "plan_quality:\n  mode: block\n")
+	if err := os.Chmod(filepath.Join(e.proj, ".yakos.yml"), 0); err != nil {
+		t.Fatal(err)
+	}
+	e.writePlan(t, "0.10", "", old)
+	e.run(t, "Write", nil)
+	if !hasWarn(t, e, ".yakos.yml is not a readable file") {
+		t.Fatal("no WARN for unreadable config")
+	}
+}
+
+func TestConfigMissingFileNoWarn(t *testing.T) {
+	e := newEnv(t)
+	e.writePlan(t, "0.9", "", old)
+	e.run(t, "Write", nil)
+	if hasWarn(t, e, "not a readable file") {
+		t.Fatal("a missing .yakos.yml is normal and must not warn")
+	}
+}
+
+// strconv.ParseFloat accepts nan/inf/hex; those must fall back to 0.75.
+func TestConfigNonFiniteThresholdFallsBack(t *testing.T) {
+	for _, v := range []string{"nan", "NaN", "inf", "+Inf", "-inf", "0x1p-2", "1_0", "0.5abc"} {
+		e := newEnv(t)
+		e.yml(t, "plan_quality:\n  mode: block\n  threshold: "+v+"\n")
+		e.writePlan(t, "0.80", "id: p-thr\n", old) // passes 0.75, fails "nan"
+		e.run(t, "Write", nil)
+		if _, ok := e.marker(t); ok {
+			t.Errorf("threshold %q: 0.80 must pass the 0.75 default", v)
+		}
+		if !hasWarn(t, e, `"key":"threshold"`) {
+			t.Errorf("threshold %q: no WARN", v)
+		}
+	}
+	for _, v := range []string{"0.5", ".5", "1", "5e-1", "+0.5"} {
+		e := newEnv(t)
+		e.yml(t, "plan_quality:\n  threshold: "+v+"\n")
+		e.writePlan(t, "0.9", "", old)
+		e.run(t, "Write", nil)
+		if hasWarn(t, e, `"key":"threshold"`) {
+			t.Errorf("threshold %q wrongly rejected", v)
+		}
+	}
+}

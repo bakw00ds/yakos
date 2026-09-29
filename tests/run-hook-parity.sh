@@ -1798,6 +1798,7 @@ setup_pqs_vague_block()   { _pqs_plan "$1" vague-plan.md 30 "$PQS_BLOCK_YML"; }
 setup_pqs_vague_surface() { _pqs_plan "$1" vague-plan.md 30 "$PQS_SURFACE_YML"; }
 setup_pqs_good_block()    { _pqs_plan "$1" good-plan.md 30 "$PQS_BLOCK_YML"; }
 setup_pqs_dissent_block() { _pqs_plan "$1" dissent-plan.md 30 "$PQS_BLOCK_YML"; }
+setup_pqs_yml_is_dir()   { _pqs_plan "$1" good-plan.md 30 ""; rm -f "$1/.yakos.yml"; mkdir "$1/.yakos.yml"; }
 setup_pqs_fresh_plan()    { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; }
 case_check plan-quality-score.sh posttooluse-write-plan-md-toolinput-only.json 0 plan-quality-score setup_pqs_disabled
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_vague_block   "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # below threshold + block: .plan-blocked, block_next_tool
@@ -1805,6 +1806,7 @@ case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-qual
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_good_block    "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/good"         "" pqs_home   # above threshold: pass
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_dissent_block "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/dissent"      "" pqs_home   # dissent: surface, never block
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_fresh_plan    "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"        "" pqs_home   # mtime < 5 s: debounced, nothing scored
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_yml_is_dir     "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/good"         "" pqs_home   # .yakos.yml is a directory: defaults + WARN on both sides
 case_check plan-quality-score.sh posttooluse-write-other-file.json   0 ""                 setup_pqs_vague_block   "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # non-plan.md write: silent no-op
 
 # ---- summary ------------------------------------------------------------
