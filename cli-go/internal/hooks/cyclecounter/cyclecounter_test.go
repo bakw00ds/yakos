@@ -551,3 +551,113 @@ func TestCycleCounter_HonorsGoRetroDisable(t *testing.T) {
 		t.Fatal("marker not written after `yakos retro enable`")
 	}
 }
+
+// ---- K-106: cycle_length guard ------------------------------------------------
+//
+// A settings-supplied cycle_length of 0 used to reach `count % cycleLen` and
+// panic (Go exit 2 = blocking error under Claude Code); bash's twin died on
+// the same division under `set -eu`. Every unusable value must fall back to
+// DefaultCycleLength with exactly ONE WARN naming the bad value, and the hook
+// must still count, log, and exit 0.
+
+func TestCycleCounter_K106_CycleLengthFallback(t *testing.T) {
+	cases := []struct {
+		name     string
+		settings string
+		wantWarn string // "" = no WARN expected (absent / null / valid)
+		wantLen  int
+	}{
+		{"zero", `{"retro":{"cycle_length":0}}`, "0", 10},
+		{"negative", `{"retro":{"cycle_length":-1}}`, "-1", 10},
+		{"non-integer string", `{"retro":{"cycle_length":"abc"}}`, "abc", 10},
+		{"empty string", `{"retro":{"cycle_length":""}}`, `""`, 10},
+		{"1e9", `{"retro":{"cycle_length":1e9}}`, "1000000000", 10},
+		{"just above max", `{"retro":{"cycle_length":100001}}`, "100001", 10},
+		{"fractional", `{"retro":{"cycle_length":2.5}}`, "2.5", 10},
+		{"bool", `{"retro":{"cycle_length":false}}`, "false", 10},
+		{"string zero", `{"retro":{"cycle_length":"0"}}`, "0", 10},
+		{"null", `{"retro":{"cycle_length":null}}`, "", 10},
+		{"missing key", `{"retro":{}}`, "", 10},
+		{"valid 10", `{"retro":{"cycle_length":10}}`, "", 10},
+		{"valid 1", `{"retro":{"cycle_length":1}}`, "", 1},
+		{"max", `{"retro":{"cycle_length":100000}}`, "", 100000},
+		{"leading zeros", `{"retro":{"cycle_length":"010"}}`, "", 10},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			workDir := filepath.Join(tmp, "work", "current")
+			if err := os.MkdirAll(workDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			stateDir := filepath.Join(tmp, "state")
+			writeSettings(t, stateDir, tc.settings)
+			h := cyclecounter.New(workDir, stateDir)
+			h.NowFn = func() time.Time { return time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC) }
+
+			out := runHook(t, h) // must not panic
+			if out.ExitCode != 0 {
+				t.Errorf("exit code = %d, want 0", out.ExitCode)
+			}
+			if got := readCount(t, workDir); got != 1 {
+				t.Errorf("count = %d, want 1", got)
+			}
+			warns := strings.Count(string(out.Stderr), "WARN")
+			if tc.wantWarn == "" && warns != 0 {
+				t.Errorf("unexpected WARN: %q", out.Stderr)
+			}
+			if tc.wantWarn != "" {
+				if warns != 1 {
+					t.Errorf("WARN count = %d, want exactly 1: %q", warns, out.Stderr)
+				}
+				if !strings.Contains(string(out.Stderr), "cycle_length "+tc.wantWarn) {
+					t.Errorf("WARN should name %q: %q", tc.wantWarn, out.Stderr)
+				}
+			}
+			data, err := os.ReadFile(filepath.Join(workDir, "logs", "cycle-counter.ndjson"))
+			if err != nil {
+				t.Fatalf("read log: %v", err)
+			}
+			var rec map[string]any
+			if err := json.Unmarshal(bytes.TrimSpace(data), &rec); err != nil {
+				t.Fatalf("log json: %v", err)
+			}
+			if got := int(rec["cycle_length"].(float64)); got != tc.wantLen {
+				t.Errorf("logged cycle_length = %d, want %d", got, tc.wantLen)
+			}
+		})
+	}
+}
+
+// A bad value degrades to the default cadence: the marker appears at the
+// 10th prompt, not before.
+func TestCycleCounter_K106_ZeroKeepsDefaultCadence(t *testing.T) {
+	tmp := t.TempDir()
+	workDir := filepath.Join(tmp, "work", "current")
+	_ = os.MkdirAll(workDir, 0755)
+	stateDir := filepath.Join(tmp, "state")
+	writeSettings(t, stateDir, `{"retro":{"cycle_length":0}}`)
+	h := cyclecounter.New(workDir, stateDir)
+	for i := 0; i < 9; i++ {
+		runHook(t, h)
+	}
+	if markerExists(workDir) {
+		t.Fatal("marker before cycle 10")
+	}
+	runHook(t, h)
+	if !markerExists(workDir) {
+		t.Fatal("expected .retro-due at cycle 10")
+	}
+}
+
+// Config.CycleLength (no settings file) of zero or negative also degrades.
+func TestCycleCounter_K106_ConfigNonPositive(t *testing.T) {
+	for _, n := range []int{0, -3} {
+		h, workDir := buildHook(t)
+		h.CycleLength = n
+		runHook(t, h)
+		if got := readCount(t, workDir); got != 1 {
+			t.Errorf("CycleLength=%d: count = %d", n, got)
+		}
+	}
+}

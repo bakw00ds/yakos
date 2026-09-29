@@ -4,7 +4,8 @@
 #
 # Hook context: UserPromptSubmit. Telemetry hook (always exit 0).
 # Reads:  <work>/current/.cycle-count
-#         ~/.yakos-state/settings.json (optional, for cycle_length override)
+#         ~/.yakos-state/settings.json (optional; .retro.cycle_length, integer
+#                                      1..100000, else WARN + default 10)
 # Writes: <work>/current/.cycle-count
 #         <work>/current/.retro-due (marker; created at every 10th cycle)
 #         <work>/current/logs/cycle-counter.ndjson
@@ -49,21 +50,53 @@ fi
 
 hi_init
 
-# Cycle length (default 10, operator-tunable via ~/.yakos-state/settings.json)
-CYCLE_LENGTH=10
+# Cycle length (default 10, operator-tunable via ~/.yakos-state/settings.json).
+#
+# K-106: the value feeds `count % CYCLE_LENGTH`, so it must be an integer in
+# 1..CYCLE_LENGTH_MAX. Anything else (0, negative, non-integer, empty string,
+# boolean, absurdly large like 1e9) falls back to the default with ONE WARN
+# naming the value; null/absent is the normal "not set" case and is silent.
+# The Go port (cyclecounter.settingsCycleLength) applies the same rules.
+CYCLE_LENGTH_DEFAULT=10
+CYCLE_LENGTH_MAX=100000
+CYCLE_LENGTH=$CYCLE_LENGTH_DEFAULT
 settings_file="$HOME/.yakos-state/settings.json"
 if [ -f "$settings_file" ] && command -v jq >/dev/null 2>&1; then
-    # `|| n=""` guards against malformed/wrong-shape settings.json: under
+    # `|| raw=absent` guards against malformed/wrong-shape settings.json: under
     # `set -eu` a bare assignment aborts the whole script on jq's non-zero
     # exit (parse error, or type error e.g. `.retro` not an object), which
     # would silently disable cycle counting (and retro auto-dispatch) for
     # the rest of the session since the file doesn't change between calls.
-    # Falling back to "" degrades to the default cadence, matching the Go
+    # Falling back to "absent" degrades to the default cadence, matching the Go
     # port's loadSettings/settingsCycleLength graceful-degradation.
-    n="$(jq -r '.retro.cycle_length // empty' "$settings_file" 2>/dev/null)" || n=""
-    case "$n" in
-        ''|*[!0-9]*) : ;;            # invalid / empty — keep default
-        *) CYCLE_LENGTH="$n" ;;
+    # Numbers are re-rendered via `. + 0` because jq 1.7 preserves the source
+    # literal ("1E+9") while the Go side prints 1000000000; the WARN text must
+    # match across implementations.
+    raw="$(jq -r '.retro.cycle_length | if . == null then "absent" elif type == "number" then "v " + (. + 0 | tostring) else "v " + tostring end' "$settings_file" 2>/dev/null)" || raw="absent"
+    case "$raw" in
+        "v "*)
+            n="${raw#v }"
+            n_ok=0
+            case "$n" in
+                ''|*[!0-9]*) : ;;
+                *)
+                    # <=6 digits keeps the arithmetic far from overflow; 10#
+                    # forces base 10 so "010"/"08" are not octal.
+                    if [ "${#n}" -le 6 ]; then
+                        v=$((10#$n))
+                        if [ "$v" -ge 1 ] && [ "$v" -le "$CYCLE_LENGTH_MAX" ]; then
+                            CYCLE_LENGTH="$v"; n_ok=1
+                        fi
+                    fi
+                    ;;
+            esac
+            if [ "$n_ok" = "0" ]; then
+                shown="$(printf '%s' "$n" | tr '\n' ' ')"
+                [ -n "$shown" ] || shown='""'
+                shown="${shown:0:40}"
+                ct_log "WARN: ignoring invalid retro.cycle_length $shown (need an integer 1..$CYCLE_LENGTH_MAX); using default $CYCLE_LENGTH_DEFAULT"
+            fi
+            ;;
     esac
 fi
 

@@ -189,6 +189,68 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Test 5 (K-106): retro.cycle_length guard. 0 / negative / non-integer /
+# empty / absurdly large values used to hit `count % 0` (bash aborted with
+# rc=1 under `set -eu`, silently stopping the retro cadence). Every unusable
+# value must fall back to the default 10 with exactly ONE WARN naming the
+# value, still count, still log, and exit 0. Valid values are honored.
+#   check_len <label> <settings-json> <warn-substring|-> <effective-length>
+# ---------------------------------------------------------------------------
+note ""
+note "=== Test 5: cycle_length guard (K-106) ==="
+
+check_len() {
+    local label="$1" json="$2" warn="$3" want="$4" rc=0 err warns logged
+    reset_all
+    rm -f "$LOGS_DIR/cycle-counter.ndjson"
+    printf '%s\n' "$json" > "$SETTINGS"
+    err="$(fixture_userprompt | bash "$HOOK" 2>&1 >/dev/null)" || rc=$?
+    if [ "$rc" -ne 0 ]; then bad "test 5 [$label]: expected rc=0, got rc=$rc"; return; fi
+    if [ "$(cat "$COUNTER" 2>/dev/null)" != "1" ]; then bad "test 5 [$label]: counter not written as 1"; return; fi
+    warns="$(printf '%s\n' "$err" | grep -c 'WARN' || true)"
+    if [ "$warn" = "-" ]; then
+        if [ "$warns" != "0" ]; then bad "test 5 [$label]: unexpected WARN: $err"; return; fi
+    else
+        if [ "$warns" != "1" ]; then bad "test 5 [$label]: expected exactly 1 WARN, got $warns: $err"; return; fi
+        case "$err" in
+            *"cycle_length $warn"*) : ;;
+            *) bad "test 5 [$label]: WARN must name '$warn': $err"; return ;;
+        esac
+    fi
+    logged="$(tail -n 1 "$LOGS_DIR/cycle-counter.ndjson" 2>/dev/null | jq -r '.cycle_length' 2>/dev/null || true)"
+    if [ "$logged" != "$want" ]; then bad "test 5 [$label]: logged cycle_length='$logged', want $want"; return; fi
+    ok "test 5 [$label]: rc=0, counted, cycle_length=$want, WARN=$warn"
+}
+
+check_len "zero"              '{"retro":{"cycle_length":0}}'        0          10
+check_len "negative"          '{"retro":{"cycle_length":-1}}'       -1         10
+check_len "non-integer str"   '{"retro":{"cycle_length":"abc"}}'   abc        10
+check_len "empty string"      '{"retro":{"cycle_length":""}}'       '""'       10
+check_len "1e9"               '{"retro":{"cycle_length":1e9}}'      1000000000 10
+check_len "above max"         '{"retro":{"cycle_length":100001}}'   100001     10
+check_len "fractional"        '{"retro":{"cycle_length":2.5}}'      2.5        10
+check_len "bool false"        '{"retro":{"cycle_length":false}}'    false      10
+check_len "string zero"       '{"retro":{"cycle_length":"0"}}'      0          10
+check_len "null"              '{"retro":{"cycle_length":null}}'     -          10
+check_len "missing key"       '{"retro":{}}'                        -          10
+check_len "valid 10"          '{"retro":{"cycle_length":10}}'       -          10
+check_len "valid 1"           '{"retro":{"cycle_length":1}}'        -          1
+check_len "max"               '{"retro":{"cycle_length":100000}}'   -          100000
+check_len "leading zeros"     '{"retro":{"cycle_length":"010"}}'    -          10
+check_len "octal-looking 08"  '{"retro":{"cycle_length":"08"}}'     -          8
+
+# Cadence stays at the default after a bad value: marker at prompt 10.
+reset_all
+printf '{"retro":{"cycle_length":0}}\n' > "$SETTINGS"
+printf '9\n' > "$COUNTER"
+rc="$(run_hook)"
+if [ "$rc" = "0" ] && [ -f "$MARKER" ]; then
+    ok "test 5 [cadence]: cycle_length=0 keeps default; marker at prompt 10"
+else
+    bad "test 5 [cadence]: rc=$rc marker=$([ -f "$MARKER" ] && echo yes || echo no)"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 note ""
