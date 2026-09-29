@@ -9,7 +9,11 @@
 # Usage:
 #     . "$HOOK_DIR/lib/secret-patterns.sh"      # sets YAKOS_SECRET_PATTERNS
 #
-# The regexes must stay free of "/" (supervisor-stream feeds them to sed s///).
+# The regexes must stay free of "#" (supervisor-stream feeds them to sed s###).
+#
+# YAKOS_REDACT_EXTRA_PATTERNS is REDACTION-ONLY (supervisor-stream previews):
+# generic Bearer / KEY=VALUE shapes too loose to block a write on. secret-scan
+# does not read it. Go twin: secretscan.redactExtra.
 
 if [ "${YAKOS_SECRET_PATTERNS_LOADED:-0}" = "1" ]; then
     return 0 2>/dev/null || exit 0
@@ -25,6 +29,12 @@ YAKOS_SECRET_PATTERNS=(
     'Stripe Secret Key|sk_live_[A-Za-z0-9]{24,}'
     'Anthropic API Key|sk-ant-[A-Za-z0-9_-]{93}'
     'Google API Key|AIza[0-9A-Za-z_-]{35}'
+)
+
+# shellcheck disable=SC2034  # consumed by supervisor-stream.sh
+YAKOS_REDACT_EXTRA_PATTERNS=(
+    'Bearer credential|[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:]]{8,}'
+    'KEY=VALUE credential|([Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww]([Oo][Rr])?[Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]).?[[:space:]]*[=:][[:space:]]*.?[^[:space:]]{8,}'
 )
 
 # Must stay the last statement: reaching it proves the whole file parsed.

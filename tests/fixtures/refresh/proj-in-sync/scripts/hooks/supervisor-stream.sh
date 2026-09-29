@@ -121,8 +121,24 @@ ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 #   - the BUFFER gets 300-byte previews with secret-table matches redacted
 #     first (the supervisor LLM reads the buffer), then capped. Go twin:
 #     supervisorstream.go.
-new_scan="$(hi_new_string 2>/dev/null | head -c 300 || true)"
-content_scan="$(hi_content 2>/dev/null | head -c 300 || true)"
+# Edit/Write text is scanned in full too (bounded: head + tail beyond 64 KiB),
+# so padding before a risky snippet cannot hide it; new_scan/content_scan (300
+# bytes) still drive the large-diff check as before.
+_ss_bound() {
+    local n
+    n="$(printf '%s' "$1" | wc -c | tr -d ' ')"
+    if [ "${n:-0}" -le 65536 ]; then
+        printf '%s' "$1"
+    else
+        printf '%s\n%s' "$(printf '%s' "$1" | head -c 32768)" "$(printf '%s' "$1" | tail -c 32768)"
+    fi
+}
+new_full="$(hi_new_string 2>/dev/null || true)"
+content_full="$(hi_content 2>/dev/null || true)"
+new_scan="$(printf '%s' "$new_full" | head -c 300)"
+content_scan="$(printf '%s' "$content_full" | head -c 300)"
+new_risk="$(_ss_bound "$new_full")"
+content_risk="$(_ss_bound "$content_full")"
 command_scan="$(hi_field '.tool_input.command' 2>/dev/null || true)"
 description_scan="$(hi_field '.tool_input.description' 2>/dev/null || true)"
 
@@ -133,7 +149,11 @@ _ss_redact_ok=0
 if [ -r "$HOOK_DIR/lib/secret-patterns.sh" ] && ( . "$HOOK_DIR/lib/secret-patterns.sh" ) >/dev/null 2>&1 \
     && . "$HOOK_DIR/lib/secret-patterns.sh" && [ "${YAKOS_SECRET_PATTERNS_LOADED:-0}" = "1" ]; then
     for _ss_entry in "${YAKOS_SECRET_PATTERNS[@]}"; do
-        _ss_sed_args+=(-e "s/${_ss_entry#*|}/[REDACTED]/g")
+        _ss_sed_args+=(-e "s#${_ss_entry#*|}#[REDACTED]#g")
+    done
+    # Redaction-only generic Bearer / KEY=VALUE rules (never used to block).
+    for _ss_entry in "${YAKOS_REDACT_EXTRA_PATTERNS[@]}"; do
+        _ss_sed_args+=(-e "s#${_ss_entry#*|}#[REDACTED]#g")
     done
     _ss_redact_ok=1
 fi
@@ -144,8 +164,8 @@ _ss_preview() {
     [ "$_ss_redact_ok" = "1" ] || return 0
     printf '%s' "$1" | head -c 4096 | LC_ALL=C sed -E "${_ss_sed_args[@]}" | head -c 300 || true
 }
-new_preview="$(_ss_preview "$new_scan")"
-content_preview="$(_ss_preview "$content_scan")"
+new_preview="$(_ss_preview "$new_full")"
+content_preview="$(_ss_preview "$content_full")"
 command_preview="$(_ss_preview "$command_scan")"
 description_preview="$(_ss_preview "$description_scan")"
 
@@ -261,11 +281,11 @@ else
 
     # 2d. Risk-regex check: content matches a dangerous-command pattern.
     # Default patterns; extendable via .yakos.yml supervisor.pre_filter.risk_regex list.
-    if [ -z "$escalate_reason" ] && [ -n "${new_scan}${content_scan}${command_scan}${description_scan}" ]; then
+    if [ -z "$escalate_reason" ] && [ -n "${new_risk}${content_risk}${command_scan}${description_scan}" ]; then
         # Newlines join to spaces so a line-continued "curl x \<nl>| sh" matches the
         # same on both sides (Go matches the whole string); a backslash before a space
         # (what a continuation leaves behind) is dropped. K-112.
-        combined="$(printf '%s\n%s\n%s\n%s' "$new_scan" "$content_scan" "$command_scan" "$description_scan" | tr '\n' ' ' | sed 's/\\ /  /g')"
+        combined="$(printf '%s\n%s\n%s\n%s' "$new_risk" "$content_risk" "$command_scan" "$description_scan" | tr '\n' ' ' | sed 's/\\ /  /g')"
         # Built-in default patterns (POSIX ERE for grep -E)
         default_patterns=(
             'drop[[:space:]]+table'
