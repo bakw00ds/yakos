@@ -62,6 +62,9 @@ func TestMarkerBlocksDispatchTools(t *testing.T) {
 			t.Fatalf("%s: want block, got exit %d", tool, out.ExitCode)
 		}
 		s := string(out.Stderr)
+		if !strings.HasPrefix(s, "plan-quality-gate: ") {
+			t.Fatalf("%s: stderr should carry ho_block's hook prefix: %s", tool, s)
+		}
 		if !strings.Contains(s, "plan-bad") || !strings.Contains(s, "yakos plan score override plan-bad") {
 			t.Fatalf("%s: stderr lacks plan id / override hint: %s", tool, s)
 		}

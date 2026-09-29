@@ -158,19 +158,28 @@ func (h *Hook) run(in hooktype.HookInput) hooktype.HookOutput {
 	h.appendLog(in, "BLOCK", "block", "plan quality gate: .plan-blocked marker present",
 		map[string]any{"plan_id": pidForLog, "reason": reason})
 
+	// bash's ho_block prefixes the message with "<hook>: ".
 	msg := fmt.Sprintf(
-		"Plan quality gate: plan scored below threshold — dispatch blocked.\n"+
+		hookName+": Plan quality gate: plan scored below threshold — dispatch blocked.\n"+
 			"Plan ID: %s\n"+
 			"Reason:  %s\n"+
 			"Override with:\n"+
 			"%s\n"+
 			"Or review the score:  yakos plan score show\n"+
 			"Or view history:      yakos plan score history",
-		planID, reason, overrideHint)
+		orDefault(planID, "unknown"), orDefault(reason, "plan scored below threshold"), overrideHint)
 	return hooktype.HookOutput{ExitCode: 2, Stderr: []byte(msg + "\n")}
 }
 
 // ---- helpers ----------------------------------------------------------------
+
+// orDefault mirrors bash's ${v:-default}.
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
 
 func isGateDisabledByYAML(projectDir string) bool {
 	data, err := os.ReadFile(filepath.Join(projectDir, ".yakos.yml")) //nolint:gosec
