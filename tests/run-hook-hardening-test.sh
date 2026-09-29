@@ -16,7 +16,7 @@
 #   4. K-107: every registry-fail-closed hook (not just plan-quality-gate) must
 #      exit 2 -- never 0/1/141/143 -- with stderr closed, a broken stderr pipe,
 #      SIGTERM/SIGHUP mid-run, a truncated lib, a lib that is a directory, and a
-#      lib with a syntax error.
+#      lib with a syntax error. (Also: a jq that hangs, see section 5.)
 #
 # Every case runs under `bash` (first on PATH) and /bin/bash (3.2 on macOS).
 # Usage: bash tests/run-hook-hardening-test.sh
@@ -261,6 +261,76 @@ gate_prologue_suite() {
     done
 }
 
+# ---- K-107: hung jq -----------------------------------------------------------
+# mk_hungjq <dir> <timeout-mode>: a PATH whose jq sleeps for 30s. timeout-mode:
+#   none  neither timeout nor gtimeout on PATH (macOS shape: background+poll path)
+#   real  whatever the system has (GNU timeout on Linux CI)
+#   stub  a python3 stand-in that follows GNU timeout's contract (rc 124)
+mk_hungjq() {
+    mkdir -p "$1"
+    local d b n
+    for d in /usr/bin /bin /usr/local/bin /opt/homebrew/bin; do
+        [ -d "$d" ] || continue
+        for b in "$d"/*; do
+            [ -x "$b" ] || continue
+            n="$(basename -- "$b")"
+            case "$n" in jq) continue ;; timeout|gtimeout) [ "$2" = real ] || continue ;; esac
+            [ -e "$1/$n" ] || ln -sf "$b" "$1/$n" 2>/dev/null || true
+        done
+    done
+    printf '#!/bin/sh\nexec sleep 30\n' > "$1/jq"; chmod +x "$1/jq"
+    if [ "$2" = stub ]; then
+        printf '#!%s\nimport subprocess, sys\np = subprocess.Popen(sys.argv[2:])\ntry:\n    sys.exit(p.wait(timeout=float(sys.argv[1])))\nexcept subprocess.TimeoutExpired:\n    p.terminate(); p.wait(); sys.exit(124)\n' "$(command -v python3)" > "$1/timeout"
+        chmod +x "$1/timeout"
+    fi
+}
+mk_hungjq "$TMP/hj-none" none
+mk_hungjq "$TMP/hj-real" real
+if command -v python3 >/dev/null 2>&1; then mk_hungjq "$TMP/hj-stub" stub; fi
+
+hung_jq_suite() {
+    local SH="$1" L="$2" mode h sb t0 t1 dur path
+    for mode in none real stub; do
+        [ -d "$TMP/hj-$mode" ] || { echo "  SKIP $L: hung jq ($mode): python3 unavailable"; continue; }
+        if [ "$mode" = real ] && ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then
+            echo "  SKIP $L: hung jq (real timeout): no timeout/gtimeout on this machine"; continue
+        fi
+        path="$TMP/hj-$mode"
+        for h in $BLOCKING; do
+            [ -f "$HOOKS/$h.sh" ] || continue
+            sb="$(new_sandbox "hj-$L-$mode-$h")"
+            t0="$(date +%s)"
+            rc=0
+            printf '%s' "$GS_PASS_PAYLOAD" | env PATH="$path" HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" \
+                YAKOS_COORD_ROOT="$sb/coord" YAKOS_HOOK_JQ_TIMEOUT=1 "$SH" "$HOOKS/$h.sh" >"$sb/out" 2>"$sb/err" || rc=$?
+            t1="$(date +%s)"; dur=$(( t1 - t0 )); err="$(cat "$sb/err")"
+            if [ "$rc" = 2 ] && [ "$dur" -lt 12 ] && printf '%s' "$err" | grep -q 'hung jq' && [ ! -s "$sb/out" ]; then
+                ok "$L: blocking $h + hung jq ($mode) -> 2 in ${dur}s with reason"
+            else
+                bad "$L: blocking $h + hung jq ($mode) rc=$rc dur=${dur}s err=[$err] (want 2, <12s, 'hung jq')"
+            fi
+            if grep -q 'hung jq' "$sb/work/current/logs/$h.ndjson" 2>/dev/null; then ok "$L: $h hung-jq BLOCK record written ($mode)"; else bad "$L: $h hung-jq left no log record ($mode)"; fi
+        done
+        for h in path-log cycle-counter mailbox-mirror; do
+            sb="$(new_sandbox "hj-$L-$mode-nb-$h")"
+            t0="$(date +%s)"
+            rc=0
+            printf '%s' "$GS_PASS_PAYLOAD" | env PATH="$path" HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" \
+                YAKOS_HOOK_JQ_TIMEOUT=1 "$SH" "$HOOKS/$h.sh" >"$sb/out" 2>"$sb/err" || rc=$?
+            t1="$(date +%s)"; dur=$(( t1 - t0 )); err="$(cat "$sb/err")"
+            if [ "$rc" = 0 ] && [ "$dur" -lt 12 ] && printf '%s' "$err" | grep -q 'WARN' && [ ! -s "$sb/out" ]; then
+                ok "$L: non-blocking $h + hung jq ($mode) -> 0 with WARN in ${dur}s"
+            else
+                bad "$L: non-blocking $h + hung jq ($mode) rc=$rc dur=${dur}s err=[$err]"
+            fi
+        done
+    done
+    # A healthy jq is unaffected, and a nonsense timeout value falls back to the default.
+    sb="$(new_sandbox "hj-$L-healthy")"
+    grun "$SH" "$HOOKS" secret-scan "$sb" "$GS_PASS_PAYLOAD" "YAKOS_HOOK_JQ_TIMEOUT=abc"
+    if [ "$rc" = 0 ]; then ok "$L: healthy jq + YAKOS_HOOK_JQ_TIMEOUT=abc -> 0 (default limit)"; else bad "$L: healthy jq with bad timeout value rc=$rc err=[$err]"; fi
+}
+
 run_suite() {
     local SH="$1" L="$2" fj h sb
     echo "== $L =="
@@ -423,6 +493,9 @@ run_suite() {
 
     # ---- 4. K-107: the same guarantees for every blocking hook ----------------
     gate_prologue_suite "$SH" "$L"
+
+    # ---- 5. K-107: a hung jq is bounded -----------------------------------------
+    hung_jq_suite "$SH" "$L"
 
     # ---- 3. helper-lib syntax error -------------------------------------------
     local lib
