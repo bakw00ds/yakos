@@ -489,8 +489,8 @@ parity_check() {
             # second boundary; Go's elapsed arithmetic is covered by its own
             # unit tests instead). plan-quality-score's debounce record carries
             # age=<n>s / age_s for the same wall-clock reason (K-99).
-            norm_bash="$(tail -n 1 "$bash_log" | sed "s|/private$bash_tmp|__SANDBOX__|g; s|$bash_tmp|__SANDBOX__|g; s|age=[0-9-]*s|age=Ns|g" | jq -cS 'del(.ts, .elapsed_seconds, .age_s)' 2>/dev/null || echo "__unparseable_bash__")"
-            norm_go="$(tail -n 1 "$go_log" | sed "s|/private$tmp2|__SANDBOX__|g; s|$tmp2|__SANDBOX__|g; s|age=[0-9-]*s|age=Ns|g" | jq -cS 'del(.ts, .elapsed_seconds, .age_s)' 2>/dev/null || echo "__unparseable_go__")"
+            norm_bash="$(tail -n 1 "$bash_log" | sed "s|/private$bash_tmp|__SANDBOX__|g; s|$bash_tmp|__SANDBOX__|g; s|age=[0-9-]*s|age=Ns|g" | jq -cS 'del(.ts, .elapsed_seconds, .age_s, .mtime)' 2>/dev/null || echo "__unparseable_bash__")"
+            norm_go="$(tail -n 1 "$go_log" | sed "s|/private$tmp2|__SANDBOX__|g; s|$tmp2|__SANDBOX__|g; s|age=[0-9-]*s|age=Ns|g" | jq -cS 'del(.ts, .elapsed_seconds, .age_s, .mtime)' 2>/dev/null || echo "__unparseable_go__")"
             [ "$norm_bash" != "$norm_go" ] && divergence="log-schema"
         fi
     fi
