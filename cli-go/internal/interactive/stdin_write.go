@@ -25,10 +25,24 @@ package interactive
 
 import "time"
 
+// closedWriteGrace is how long awaitStdinWrite waits for the write goroutine's
+// result after the engine-closed signal fires with no result yet.
+//
+// A write that landed in the pipe can be followed by the child reading it and
+// exiting, so the reader sees EOF and signals closed before the (possibly
+// descheduled) writer goroutine has sent on done. Peeking done once cannot
+// tell that apart from a write that is really stuck, and reported a completed
+// write as "session closed during write" (CI flake on TestSession_Turn2SameProcess).
+// Closing the session closes the pipe, which unblocks a truly stuck Write with
+// an error almost immediately, so a short wait is enough: a completed write
+// must win over a subsequent close.
+var closedWriteGrace = 500 * time.Millisecond
+
 // awaitStdinWrite blocks until the write behind done completes, closedC
 // fires, or timeoutC fires — whichever the runtime observes first — but
 // always prefers an already-available write result over a coincidentally
-// simultaneous close/timeout signal.
+// simultaneous close/timeout signal, and on close waits closedWriteGrace for
+// a write that completed just before the close.
 //
 // done must be buffered with capacity >= 1 (the writer goroutine must never
 // block sending its result). Exactly one of the three return groups is
@@ -48,7 +62,16 @@ func awaitStdinWrite(done <-chan error, closedC <-chan struct{}, timeoutC <-chan
 		if err, ok := peekWriteResult(done); ok {
 			return err, false, false
 		}
-		return nil, false, true
+		// Not ready yet: the write may have completed just before the close
+		// and its goroutine simply has not sent. Give it a bounded moment.
+		grace := time.NewTimer(closedWriteGrace)
+		defer grace.Stop()
+		select {
+		case err := <-done:
+			return err, false, false
+		case <-grace.C:
+			return nil, false, true
+		}
 	}
 }
 

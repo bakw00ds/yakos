@@ -148,6 +148,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file-watcher tests and supervisor prefilter case (h) no longer depend
   on fixed sleeps or a millisecond budget.
 
+- **A completed stdin write is no longer reported as "session closed
+  during write" (K-108).** When the child read the frame and exited
+  before the writer goroutine reported its result, the close signal won
+  and a successful turn was reported as failed
+  (`TestSession_Turn2SameProcess` on CI). The wait now gives a just-
+  completed write a bounded moment to report before deciding the session
+  closed. Applies to the CLI and SDK engines.
+
 - **Go hooks read identity and coord state like bash (K-100).**
   peer-claim, peer-claim-confirm, supervisor-stream and context-threshold
   take the agent and session id from the stdin payload, not

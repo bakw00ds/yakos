@@ -46,6 +46,12 @@ import (
 // this duration rather than wedging the caller goroutine forever.
 const stdinWriteTimeout = 10 * time.Second
 
+// afterStdinWriteHook, when non-nil, runs in the write goroutine between the
+// pipe write and reporting its result. Test seam: it lets a test hold the
+// goroutine there, as a busy CI scheduler does, so the child can consume the
+// frame and exit first. Nil in production.
+var afterStdinWriteHook func()
+
 // Session is one persistent multi-turn claude process.  All exported methods
 // are safe for concurrent use.
 type Session struct {
@@ -272,6 +278,9 @@ func (s *Session) SendUserTurn(frame []byte) error {
 	done := make(chan error, 1)
 	go func() {
 		_, err := stdin.Write(frame)
+		if afterStdinWriteHook != nil {
+			afterStdinWriteHook()
+		}
 		done <- err
 	}()
 

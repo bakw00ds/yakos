@@ -145,3 +145,22 @@ func TestAwaitStdinWrite_PlainSuccess(t *testing.T) {
 		t.Fatalf("expected plain success; got err=%v timedOut=%v closed=%v", err, timedOut, closed)
 	}
 }
+
+// TestAwaitStdinWrite_WriteCompletesJustAfterClose models the CI flake: the
+// child consumed the frame and exited, so closed fired, and only then does
+// the (descheduled) writer goroutine report its successful write. The write
+// must win.
+func TestAwaitStdinWrite_WriteCompletesJustAfterClose(t *testing.T) {
+	done := make(chan error, 1)
+	closedC := make(chan struct{})
+	close(closedC)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		done <- nil
+	}()
+
+	err, timedOut, closed := awaitStdinWrite(done, closedC, make(chan time.Time))
+	if err != nil || timedOut || closed {
+		t.Fatalf("expected the late write result to win; got err=%v timedOut=%v closed=%v", err, timedOut, closed)
+	}
+}
