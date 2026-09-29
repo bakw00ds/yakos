@@ -1,0 +1,48 @@
+{
+  "case_id": "perf-profile-cum-vs-flat-05",
+  "task": "Performance review. The code or data is supplied inline. This is a diagnosis-only task: do NOT edit or create any file and do not run commands; respond with findings and a proposed fix as text. Be explicit about what you measured versus what you are inferring.\n\n`yakos model-routing list` takes 1.8 s with a candidates file of about 20 MB. Here is `go tool pprof -top` output from a 30 s CPU profile of 40 invocations in a loop:\n\n```\nShowing nodes accounting for 5.61s, 78.4% of 7.15s total\n      flat  flat%   sum%        cum   cum%\n     0.92s 12.87% 12.87%      0.92s 12.87%  runtime.mallocgc\n     0.71s  9.93% 22.80%      0.71s  9.93%  runtime.memmove\n     0.55s  7.69% 30.49%      0.55s  7.69%  encoding/json.(*decodeState).scanWhile\n     0.48s  6.71% 37.20%      2.94s 41.12%  encoding/json.(*decodeState).object\n     0.44s  6.15% 43.35%      0.44s  6.15%  runtime.gcBgMarkWorker\n     0.31s  4.34% 47.69%      3.61s 50.49%  encoding/json.Unmarshal\n     0.05s  0.70% 48.39%      3.66s 51.19%  routing.readAllCandidates\n     0.02s  0.28% 48.67%      3.70s 51.75%  routing.runList\n     0.04s  0.56% 49.23%      1.90s 26.57%  routing.latestPerAgent\n     0.03s  0.42% 49.65%      1.05s 14.69%  os.ReadFile\n     0.01s  0.14% 49.79%      0.61s  8.53%  sort.Slice\n```\nWhat is the actual hot path, and what would you change first? Explain why the top flat entries are misleading here, and state what you cannot conclude from this profile alone.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "uses-cum-to-find-readAllCandidates",
+        "weight": 0.3,
+        "type": "binary"
+      },
+      {
+        "name": "explains-flat-misleading",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "first-change-is-avoid-full-decode",
+        "weight": 0.25,
+        "type": "scalar_0_1",
+        "anchor": "1.0: first change avoids decoding the whole file each run. 0.5: reduces per-record allocation only. 0.0: another change or none."
+      },
+      {
+        "name": "states-limits-of-profile",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: names at least two limits such as off-CPU or I/O wait, sample representativeness, wall vs CPU. 0.5: names one. 0.0: none."
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Identifies routing.readAllCandidates (json.Unmarshal per record over the whole file, ~51 percent cumulative) as the hot path, with latestPerAgent as the second at ~27 percent cumulative",
+    "Explains that mallocgc, memmove, and gcBgMarkWorker are symptoms of json decoding allocation churn and are not independently actionable, so flat ranking misleads",
+    "Proposes first change: avoid decoding the full 20 MB on every list, for example read only the tail or keep a per-agent latest index or compact the file, then reduce allocations by decoding into a slim struct",
+    "Says what the profile cannot show: I/O wait or off-CPU time, wall-clock versus CPU, whether the file size is representative, and that 1.8 s wall time should be confirmed with a trace or timing before and after",
+    "Does not claim a specific speedup as fact"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.4,
+  "tags": [
+    "performance",
+    "go",
+    "pprof",
+    "profile-reading",
+    "hard-for-cheap-tier",
+    "read-only"
+  ]
+}

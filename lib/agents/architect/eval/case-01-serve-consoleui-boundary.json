@@ -1,0 +1,53 @@
+{
+  "case_id": "architect-serve-consoleui-boundary-01",
+  "task": "ADR-style design question. In cli-go/internal, the packages `serve` (JSON-RPC daemon) and `consoleui` (HTTP/WS console) both need to derive the operator identity for the loopback path. Read the import statements of the non-test Go files in cli-go/internal/serve and cli-go/internal/consoleui, plus cli-go/internal/loopbackowner. Answer: (1) which direction does the import edge between serve and consoleui run, and is there a cycle? (2) why does the loopbackowner package exist as a third package rather than serve importing consoleui's helper? (3) recommend whether a future second consumer should import loopbackowner directly or go through consoleui, and state the tradeoff. Cite file paths for every claim. This is a read-only task: do not edit, write, or create any file.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "correct-import-direction",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "explains-extraction-rationale",
+        "weight": 0.25,
+        "type": "scalar_0_1",
+        "anchor": "1.0: states why the third package exists (avoid importing consoleui and avoid trusting a caller-supplied owner). 0.5: gives only one of the two. 0.0: none or wrong."
+      },
+      {
+        "name": "recommendation-with-tradeoff",
+        "weight": 0.25,
+        "type": "scalar_0_1",
+        "anchor": "1.0: gives a clear recommendation and at least one real tradeoff. 0.5: recommendation without tradeoff. 0.0: no recommendation."
+      },
+      {
+        "name": "no-fabricated-paths",
+        "weight": 0.25,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "States that serve imports consoleui (cli-go/internal/serve/serve.go) and that consoleui does NOT import serve, so there is no import cycle",
+    "States that consoleui/loopback_owner.go and serve/term_methods.go both import the loopbackowner package",
+    "Explains loopbackowner was extracted so the serve term RPC handler can derive the same authoritative owner ID as consoleui without accepting an owner from RPC params, which a hostile local caller could forge",
+    "Recommends new consumers import loopbackowner directly (small leaf package, no HTTP/UI dependency) rather than through consoleui, and names at least one tradeoff",
+    "Every cited file path exists in cli-go/internal; no invented package or file names",
+    "Does not modify any file"
+  ],
+  "context_files": [
+    "cli-go/internal/serve/serve.go",
+    "cli-go/internal/serve/term_methods.go",
+    "cli-go/internal/consoleui/loopback_owner.go",
+    "cli-go/internal/loopbackowner/loopbackowner.go"
+  ],
+  "max_duration_s": 300,
+  "max_cost_usd": 0.6,
+  "tags": [
+    "architecture",
+    "adr",
+    "go",
+    "package-boundaries",
+    "read-only"
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "case_id": "architect-package-survey-03",
+  "task": "Survey task. Read the package doc comments and exported API of cli-go/internal/pathsafe, cli-go/internal/loopbackowner, cli-go/internal/setuptoken and cli-go/internal/userstore. For each package give: one sentence on its responsibility, the on-disk artifact it owns (file name and permission mode) if any, and the security property it exists to protect. Keep to one short paragraph per package. This is a read-only task: do not edit, write, or create any file.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "responsibility-accuracy",
+        "weight": 0.4,
+        "type": "scalar_0_1",
+        "anchor": "1.0: all four package responsibilities correct. 0.5: one or two wrong or vague. 0.0: mostly wrong."
+      },
+      {
+        "name": "on-disk-artifact-facts",
+        "weight": 0.3,
+        "type": "scalar_0_1",
+        "anchor": "1.0: correct file names and permission modes for every package that owns a file. 0.5: half correct. 0.0: mostly wrong or missing."
+      },
+      {
+        "name": "no-fabrication",
+        "weight": 0.3,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "pathsafe: validates a project slug is a single path segment (rejects absolute paths, path separators and '..') to prevent path traversal from MCP/RPC/gRPC callers",
+    "loopbackowner: derives a stable file-persisted operator identity in <stateDir>/loopback-operator-id for the loopback single-user path",
+    "setuptoken: one-time first-admin setup token, 32 random bytes base64url, in-memory plus a 0600 marker file under the state dir",
+    "userstore: persistent file-backed user store at <dir>/users.json with permissions 0600 (parent 0700), passwords hashed with argon2id in PHC format",
+    "Does not attribute properties to a package that its doc comment does not state"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.4,
+  "tags": [
+    "survey",
+    "summarization",
+    "go",
+    "security-surface",
+    "read-only"
+  ]
+}

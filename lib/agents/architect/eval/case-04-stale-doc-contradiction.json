@@ -1,0 +1,52 @@
+{
+  "case_id": "architect-stale-doc-contradiction-04",
+  "task": "Documentation audit. At authoring time cli-go/internal/serve/README.md had a section headed 'RPC methods (11 total: 3 foundation + 8 expansion)'. Verify the README's method count and list against the code: find every method registered on the JSON-RPC server via `Register(\"...\"` in the non-test files of cli-go/internal/serve, group them by namespace, and report whether the README is accurate. List each method that is registered but absent from the README. Give the true total. If the README has since been corrected, say so instead of asserting it is stale. This is a read-only task: do not edit, write, or create any file.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "detects-stale-count-if-present",
+        "weight": 0.3,
+        "type": "binary"
+      },
+      {
+        "name": "lists-missing-methods",
+        "weight": 0.4,
+        "type": "scalar_0_1",
+        "anchor": "1.0: lists every registered method absent from the README, by namespace. 0.5: lists some. 0.0: lists none."
+      },
+      {
+        "name": "correct-total",
+        "weight": 0.2,
+        "type": "binary"
+      },
+      {
+        "name": "no-fabricated-methods",
+        "weight": 0.1,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "States whether the README's method count and list match the registered set; if unchanged from authoring time, states it is stale because the registered count exceeds the README's stated count",
+    "Identifies the yakos.workflow.* methods registered in methods.go that the README omits (if still omitted)",
+    "Identifies the yakos.term.* methods registered in term_methods.go that the README omits (if still omitted)",
+    "Confirms the foundation and expansion methods that the README does list are actually registered",
+    "Gives a true total that equals the number of Register(\"...\") calls in the non-test serve files at eval time (verify with grep) and invents no methods"
+  ],
+  "context_files": [
+    "cli-go/internal/serve/README.md",
+    "cli-go/internal/serve/methods.go",
+    "cli-go/internal/serve/term_methods.go"
+  ],
+  "max_duration_s": 300,
+  "max_cost_usd": 0.5,
+  "tags": [
+    "contradiction",
+    "docs-drift",
+    "go",
+    "hard-for-cheap-tier",
+    "read-only",
+    "recall",
+    "tree-dependent"
+  ]
+}

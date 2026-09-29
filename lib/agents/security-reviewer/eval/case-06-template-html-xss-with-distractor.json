@@ -1,0 +1,49 @@
+{
+  "case_id": "security-template-html-xss-06",
+  "task": "Security review of a pending change. The diff is supplied inline; review it as written and do not modify any file. Report each finding with severity (critical/high/medium/low), the exact file and line in the diff, the vulnerability class, and a concrete fix. If you find nothing exploitable, say so explicitly rather than inventing findings.\n\nNote: the diff is a self-contained excerpt prepared for this review. Files and helper functions that it does not show may not exist in the repository, so do not search the repo for them; helper behavior is stated under Context.\n\n```diff\ndiff --git a/cli-go/internal/consoleui/run_output.go b/cli-go/internal/consoleui/run_output.go\n--- a/cli-go/internal/consoleui/run_output.go\n+++ b/cli-go/internal/consoleui/run_output.go\n@@ -1,3 +1,61 @@\n+var runOutputTmpl = template.Must(template.New(\"run\").Parse(`\n+<section class=\"run\" data-run=\"{{.RunID}}\">\n+  <h3>{{.Agent}}</h3>\n+  <pre class=\"out\">{{.Output}}</pre>\n+</section>`))\n+\n+type runOutputView struct {\n+\tRunID  string\n+\tAgent  string\n+\tOutput template.HTML // agent stdout, rendered as-is to preserve ANSI-to-HTML colouring\n+}\n+\n+func newRunID() string {\n+\tb := make([]byte, 16)\n+\tif _, err := rand.Read(b); err != nil {\n+\t\tpanic(err)\n+\t}\n+\treturn hex.EncodeToString(b)\n+}\n+\n+func (s *Server) handleRunOutput(w http.ResponseWriter, r *http.Request) {\n+\tsess := authsession.FromContext(r.Context())\n+\tif sess == nil {\n+\t\thttp.Error(w, \"unauthorized\", http.StatusUnauthorized)\n+\t\treturn\n+\t}\n+\trun, ok := s.runs.Get(r.PathValue(\"id\"))\n+\tif !ok || run.OwnerID != sess.UserID {\n+\t\thttp.NotFound(w, r)\n+\t\treturn\n+\t}\n+\tv := runOutputView{\n+\t\tRunID:  run.ID,\n+\t\tAgent:  run.Agent,\n+\t\tOutput: template.HTML(ansiToHTML(run.Stdout)),\n+\t}\n+\tw.Header().Set(\"Content-Type\", \"text/html; charset=utf-8\")\n+\t_ = runOutputTmpl.Execute(w, v)\n+}\n```\n\nContext:\n- The file imports `html/template` (not text/template), `crypto/rand` and `encoding/hex`.\n- `ansiToHTML` converts ANSI colour escape codes to <span> tags and copies every other byte of its input unchanged. `run.Stdout` is the raw stdout of an LLM agent that may have read untrusted files or web pages.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "finds-stored-xss-via-template-HTML",
+        "weight": 0.4,
+        "type": "binary"
+      },
+      {
+        "name": "explains-untrusted-agent-output-source",
+        "weight": 0.2,
+        "type": "binary"
+      },
+      {
+        "name": "actionable-fix",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: a concrete fix that closes the issue, with the specific API or check. 0.5: right direction but vague or partial. 0.0: none or wrong."
+      },
+      {
+        "name": "no-false-positives-on-owner-check-or-rand",
+        "weight": 0.2,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Finds stored XSS: casting ansiToHTML output to template.HTML disables html/template autoescaping, and ansiToHTML passes every non-ANSI byte through unchanged, so <script> or event-handler markup in agent stdout executes in the operator's console origin",
+    "Explains the taint source: agent stdout can carry attacker-controlled content from files or web pages the agent read (prompt-injection-shaped payload)",
+    "Recommends HTML-escaping the raw text first and only then applying the ANSI-to-span conversion (or building the spans from a parsed token stream), and adding a Content-Security-Policy that forbids inline script",
+    "Does not flag the crypto/rand run-id generator, the owner check in handleRunOutput, or the panic on rand.Read failure as vulnerabilities",
+    "Rates it high"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.5,
+  "tags": [
+    "security",
+    "go",
+    "planted-vulnerability",
+    "read-only",
+    "xss",
+    "template-html",
+    "untrusted-llm-output",
+    "hard-for-cheap-tier"
+  ]
+}

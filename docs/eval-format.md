@@ -75,6 +75,7 @@ default mode warns.
 | `criteria[].name` | string | Short label shown in eval reports. |
 | `criteria[].weight` | number (0,1] | Relative importance. The judge normalises across criteria before computing a composite score. |
 | `criteria[].type` | enum | `"binary"` — the criterion is either met (1.0) or not (0.0). `"scalar_0_1"` — the judge assigns a continuous score. |
+| `criteria[].anchor` | string (optional) | Score anchors for a `scalar_0_1` criterion, for example `1.0: ... 0.5: ... 0.0: ...`. The judge receives the whole rubric object, so it sees the anchors. Recommended for every `scalar_0_1` criterion. |
 | `expected_outcomes` | string[] | Plain-English statements of what a correct response must include. The judge uses these as ground truth. Must be non-empty. |
 | `context_files` | string[] | Paths relative to the project root that the agent should have access to. May be empty; the harness makes them readable. |
 | `max_duration_s` | integer > 0 | Wall-clock budget for this case. Harness kills + fails the run if exceeded. |

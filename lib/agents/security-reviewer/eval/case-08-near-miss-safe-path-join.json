@@ -1,0 +1,41 @@
+{
+  "case_id": "security-near-miss-safe-path-08",
+  "task": "Security review of a pending change. The diff is supplied inline; review it as written and do not modify any file. Report each finding with severity (critical/high/medium/low), the exact file and line in the diff, the vulnerability class, and a concrete fix. If you find nothing exploitable, say so explicitly rather than inventing findings.\n\nNote: the diff is a self-contained excerpt prepared for this review. Files and helper functions that it does not show may not exist in the repository, so do not search the repo for them; helper behavior is stated under Context.\n\n```diff\ndiff --git a/cli-go/internal/consoleui/artifact.go b/cli-go/internal/consoleui/artifact.go\nnew file mode 100644\n--- /dev/null\n+++ b/cli-go/internal/consoleui/artifact.go\n@@ -0,0 +1,25 @@\n+// resolveArtifact maps a caller-supplied relative path to a file under base.\n+// base was passed through filepath.EvalSymlinks(filepath.Abs(...)) at startup.\n+func resolveArtifact(base, rel string) (string, error) {\n+\tjoined := filepath.Join(base, rel)\n+\tif joined != base && !strings.HasPrefix(joined, base+string(filepath.Separator)) {\n+\t\treturn \"\", ErrOutsideBase\n+\t}\n+\treal, err := filepath.EvalSymlinks(joined)\n+\tif err != nil {\n+\t\treturn \"\", err\n+\t}\n+\tif real != base && !strings.HasPrefix(real, base+string(filepath.Separator)) {\n+\t\treturn \"\", ErrOutsideBase\n+\t}\n+\treturn real, nil\n+}\n+\n+func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request) {\n+\tp, err := resolveArtifact(s.artifactDir, r.URL.Query().Get(\"path\"))\n+\tif err != nil {\n+\t\thttp.NotFound(w, r)\n+\t\treturn\n+\t}\n+\thttp.ServeFile(w, r, p)\n+}\n```\n\nContext:\n- `s.artifactDir` is an absolute, symlink-resolved directory owned by the daemon user with mode 0700; callers cannot create files or symlinks inside it.\n- Requests are authenticated before this handler runs.\n- Look for real exploitability, not merely the pattern of joining a caller-supplied path.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "no-critical-or-high-false-positive",
+        "weight": 0.45,
+        "type": "binary"
+      },
+      {
+        "name": "recognizes-containment-checks",
+        "weight": 0.35,
+        "type": "scalar_0_1",
+        "anchor": "1.0: explicitly credits the Clean/prefix-with-separator/EvalSymlinks/re-check sequence. 0.5: says it is safe without explaining why. 0.0: treats the pattern as vulnerable."
+      },
+      {
+        "name": "states-clean-or-approves",
+        "weight": 0.2,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Concludes the path handling is safe: the join is cleaned, prefix-checked with a trailing separator, symlink-resolved, and re-checked",
+    "Does not report path traversal or a symlink escape as a vulnerability",
+    "Does not report a sibling-prefix bypass: the check uses base plus a separator",
+    "Any TOCTOU remark is labelled low or theoretical and acknowledges the directory is not writable by callers"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.5,
+  "tags": [
+    "security",
+    "go",
+    "read-only",
+    "near-miss",
+    "false-positive-rate",
+    "hard-for-cheap-tier"
+  ]
+}

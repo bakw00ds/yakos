@@ -1,0 +1,42 @@
+{
+  "case_id": "architect-callsite-survey-02",
+  "task": "Survey task. Find every NON-TEST call site in cli-go of `pathsafe.ValidateProjectSlug` and every non-test call site of `WilsonLower`, and report each by file path and the enclosing function or line number. Then state which of the two functions has its definition in a different package than its callers. Do not include _test.go files. If a symbol has no callers outside its own file, say so. This is a read-only task: do not edit, write, or create any file.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "recall-of-callsites",
+        "weight": 0.5,
+        "type": "scalar_0_1",
+        "anchor": "1.0: every non-test call site of both symbols is named by file and enclosing function or line. 0.5: most are named. 0.0: few or none."
+      },
+      {
+        "name": "no-fabricated-locations",
+        "weight": 0.3,
+        "type": "binary"
+      },
+      {
+        "name": "format-file-and-function",
+        "weight": 0.2,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Lists every non-test call site of ValidateProjectSlug: the call sites are in the grpcserver, serve and supervise packages (three sites at authoring time)",
+    "Lists the WilsonLower definition and its non-test call sites, all in cli-go/internal/routing/routing.go and none outside that file",
+    "States ValidateProjectSlug is defined in internal/pathsafe (a different package from its callers) and WilsonLower's callers share a file with its definition",
+    "Excludes _test.go files",
+    "Reports each location by file plus enclosing function or a line number that matches the file at eval time (verify with grep); invents no locations"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.4,
+  "tags": [
+    "go",
+    "grep",
+    "read-only",
+    "recall",
+    "survey",
+    "tree-dependent"
+  ]
+}

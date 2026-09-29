@@ -1,0 +1,48 @@
+{
+  "case_id": "perf-regexp-hot-path-03",
+  "task": "Performance review. The code or data is supplied inline. This is a diagnosis-only task: do NOT edit or create any file and do not run commands; respond with findings and a proposed fix as text. Be explicit about what you measured versus what you are inferring.\n\nThis function runs for every line of every dispatch-log tail (millions of lines per day) in the metrics ingester.\n\n```go\nfunc classify(line string) (string, bool) {\n\tre := regexp.MustCompile(`\"agent\":\"([a-z0-9-]+)\",\"exit\":(\\d+)`)\n\tm := re.FindStringSubmatch(line)\n\tif m == nil {\n\t\treturn \"\", false\n\t}\n\tkey := fmt.Sprintf(\"%s|%s\", m[1], m[2])\n\ttags := []string{}\n\tfor _, t := range strings.Split(m[1], \"-\") {\n\t\ttags = append(tags, strings.ToUpper(t))\n\t}\n\treturn key + \"|\" + strings.Join(tags, \".\"), true\n}\n```\nList every allocation or CPU issue in priority order, give the corrected code, and say how you would confirm the improvement.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "finds-regexp-compile-per-call",
+        "weight": 0.4,
+        "type": "binary"
+      },
+      {
+        "name": "finds-secondary-allocations",
+        "weight": 0.25,
+        "type": "scalar_0_1",
+        "anchor": "1.0: names at least three of Sprintf, append growth, ToUpper, Join. 0.5: one or two. 0.0: none."
+      },
+      {
+        "name": "correct-fix",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: corrected code hoists the regexp and reduces allocations, and would compile. 0.5: partial or with errors. 0.0: none."
+      },
+      {
+        "name": "verification-method",
+        "weight": 0.15,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Identifies regexp.MustCompile being executed on every call as the dominant cost and hoists it to a package-level var",
+    "Notes secondary allocations: fmt.Sprintf for a simple concat, the tags slice grown by append without preallocation, repeated ToUpper allocations, and the final Join",
+    "Provides corrected code that compiles logically (package-level regexp, preallocated slice or a strings.Builder)",
+    "Says to confirm with a Go benchmark using -benchmem (allocs/op and ns/op before and after) and benchstat, not by inspection",
+    "Makes no file edits"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.4,
+  "tags": [
+    "performance",
+    "go",
+    "allocations",
+    "regexp",
+    "hot-path",
+    "read-only"
+  ]
+}

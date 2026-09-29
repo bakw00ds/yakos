@@ -1,0 +1,48 @@
+{
+  "case_id": "security-toctou-symlink-tmpdir-10",
+  "task": "Security review of a pending change. The diff is supplied inline; review it as written and do not modify any file. Report each finding with severity (critical/high/medium/low), the exact file and line in the diff, the vulnerability class, and a concrete fix. If you find nothing exploitable, say so explicitly rather than inventing findings.\n\nNote: the diff is a self-contained excerpt prepared for this review. Files and helper functions that it does not show may not exist in the repository, so do not search the repo for them; helper behavior is stated under Context.\n\n```diff\ndiff --git a/cli-go/internal/serve/rundir.go b/cli-go/internal/serve/rundir.go\nnew file mode 100644\n--- /dev/null\n+++ b/cli-go/internal/serve/rundir.go\n@@ -0,0 +1,16 @@\n+// prepareRunDir returns a per-user scratch directory for the daemon pidfile.\n+func prepareRunDir() (string, error) {\n+\tdir := filepath.Join(os.TempDir(), fmt.Sprintf(\"yakos-%d\", os.Getuid()))\n+\tif err := os.MkdirAll(dir, 0o755); err != nil {\n+\t\treturn \"\", err\n+\t}\n+\treturn dir, nil\n+}\n+\n+func writePidfile(dir string) error {\n+\tp := filepath.Join(dir, \"daemon.pid\")\n+\tif fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {\n+\t\treturn errors.New(\"pidfile is a symlink\")\n+\t}\n+\treturn os.WriteFile(p, []byte(strconv.Itoa(os.Getpid())), 0o600)\n+}\n```\n\nContext:\n- On Linux `os.TempDir()` is the world-writable, sticky `/tmp`; other local users can create entries there.\n- The daemon runs as a normal user, and other local users are untrusted.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "finds-symlink-or-race",
+        "weight": 0.4,
+        "type": "binary"
+      },
+      {
+        "name": "names-both-weaknesses",
+        "weight": 0.25,
+        "type": "scalar_0_1",
+        "anchor": "1.0: names both the check-then-write race and the unowned predictable /tmp dir. 0.5: names one. 0.0: neither."
+      },
+      {
+        "name": "correct-severity",
+        "weight": 0.15,
+        "type": "scalar_0_1",
+        "anchor": "1.0: medium or high. 0.5: low. 0.0: critical or informational."
+      },
+      {
+        "name": "actionable-fix",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: O_EXCL/O_NOFOLLOW or a private 0700 dir with ownership check. 0.5: only an unsafe mitigation such as re-running Lstat. 0.0: none."
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Finds a symlink/TOCTOU weakness: the Lstat check and WriteFile are separate steps, so an attacker can swap in a symlink between them and the write follows it, clobbering a file owned by the daemon user",
+    "Also notes the predictable directory name in /tmp is created with MkdirAll and never checked for ownership or mode, so another user can pre-create it (or a symlink) before the daemon starts",
+    "Rates it medium or high",
+    "Recommends a private directory (XDG_RUNTIME_DIR or a 0700 dir under the user's home), verifying owner and mode after creation, and opening the file with O_CREATE|O_EXCL|O_NOFOLLOW instead of check-then-write"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.5,
+  "tags": [
+    "security",
+    "go",
+    "read-only",
+    "toctou",
+    "symlink",
+    "hard-for-cheap-tier"
+  ]
+}

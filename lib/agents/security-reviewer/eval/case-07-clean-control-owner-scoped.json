@@ -1,0 +1,47 @@
+{
+  "case_id": "security-clean-owner-scoped-07",
+  "task": "Security review of a pending change. The diff is supplied inline; review it as written and do not modify any file. Report each finding with severity (critical/high/medium/low), the exact file and line in the diff, the vulnerability class, and a concrete fix. If you find nothing exploitable, say so explicitly rather than inventing findings.\n\nNote: the diff is a self-contained excerpt prepared for this review. Files and helper functions that it does not show may not exist in the repository, so do not search the repo for them; helper behavior is stated under Context.\n\n```diff\ndiff --git a/cli-go/internal/consoleui/flows_rename.go b/cli-go/internal/consoleui/flows_rename.go\nnew file mode 100644\n--- /dev/null\n+++ b/cli-go/internal/consoleui/flows_rename.go\n@@ -0,0 +1,33 @@\n+func (s *Server) handleFlowRename(w http.ResponseWriter, r *http.Request) {\n+\tsess := authsession.FromContext(r.Context())\n+\tif sess == nil {\n+\t\thttp.Error(w, \"unauthorized\", http.StatusUnauthorized)\n+\t\treturn\n+\t}\n+\tr.Body = http.MaxBytesReader(w, r.Body, 1<<10)\n+\tvar in struct {\n+\t\tName string `json:\"name\"`\n+\t}\n+\tdec := json.NewDecoder(r.Body)\n+\tdec.DisallowUnknownFields()\n+\tif err := dec.Decode(&in); err != nil {\n+\t\thttp.Error(w, \"bad request\", http.StatusBadRequest)\n+\t\treturn\n+\t}\n+\tif !flowNameRe.MatchString(in.Name) {\n+\t\thttp.Error(w, \"bad name\", http.StatusBadRequest)\n+\t\treturn\n+\t}\n+\tf, ok := s.flows.Get(r.PathValue(\"id\"))\n+\tif !ok || f.OwnerID != sess.UserID {\n+\t\thttp.NotFound(w, r)\n+\t\treturn\n+\t}\n+\tif err := s.flows.Rename(f.ID, in.Name); err != nil {\n+\t\thttp.Error(w, \"internal error\", http.StatusInternalServerError)\n+\t\treturn\n+\t}\n+\tw.WriteHeader(http.StatusNoContent)\n+}\n+\n+var flowNameRe = regexp.MustCompile(`^[A-Za-z0-9 _.-]{1,64}$`)\n```\n\nContext:\n- `authsession.FromContext` returns the authenticated session or nil; `sess.UserID` is the user id.\n- `s.flows.Get(id)` returns the flow and true if it exists regardless of owner; `f.OwnerID` is the creating user's id. `s.flows.Rename(id, name)` stores the name as data with a parameterised statement.\n- The router applies authentication, CSRF and Origin checks to every non-GET route, and names are rendered through html/template autoescaping.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "no-critical-or-high-false-positive",
+        "weight": 0.4,
+        "type": "binary"
+      },
+      {
+        "name": "states-clean-or-approves",
+        "weight": 0.3,
+        "type": "binary"
+      },
+      {
+        "name": "any-low-findings-are-reasonable",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: no findings or only clearly non-blocking hardening notes. 0.5: one questionable finding. 0.0: presents speculative findings as blocking."
+      },
+      {
+        "name": "read-only",
+        "weight": 0.1,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Concludes the diff has no exploitable vulnerability and approves or raises nothing blocking",
+    "Does not report an authorization gap: ownership is checked before Rename and mismatch returns 404",
+    "Does not report injection or XSS: the name is regex-constrained, Rename is parameterised, and output is autoescaped",
+    "Does not report request-size or unknown-field issues: the body is capped at 1 KiB and unknown fields are rejected",
+    "Any hardening suggestion is labelled low or non-blocking",
+    "Modifies no files"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.5,
+  "tags": [
+    "security",
+    "go",
+    "read-only",
+    "negative-control",
+    "false-positive-rate"
+  ]
+}

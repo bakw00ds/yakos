@@ -1,0 +1,48 @@
+{
+  "case_id": "security-fail-open-allowlist-03",
+  "task": "Security review of a pending change. The diff is supplied inline; review it as written and do not modify any file. Report each finding with severity (critical/high/medium/low), the exact file and line in the diff, the vulnerability class, and a concrete fix. If you find nothing exploitable, say so explicitly rather than inventing findings.\n\nNote: the diff is a self-contained excerpt prepared for this review. Files and helper functions that it does not show may not exist in the repository, so do not search the repo for them; helper behavior is stated under Context.\n\n```diff\ndiff --git a/lib/hooks/path-allowlist.go b/lib/hooks/path-allowlist.go\n--- a/lib/hooks/path-allowlist.go\n+++ b/lib/hooks/path-allowlist.go\n@@ -1,3 +1,52 @@\n+// pathAllowed reports whether an agent write to target is permitted.\n+// The allowlist lives in <work>/current/allowed-paths.json as a JSON array\n+// of directory prefixes relative to the project root.\n+func pathAllowed(root, target string) bool {\n+\tdata, err := os.ReadFile(filepath.Join(root, \"work\", \"current\", \"allowed-paths.json\"))\n+\tif err != nil {\n+\t\t// no allowlist configured: nothing to enforce\n+\t\treturn true\n+\t}\n+\tvar prefixes []string\n+\tif err := json.Unmarshal(data, &prefixes); err != nil {\n+\t\tlog.Printf(\"path-allowlist: bad allowlist: %v\", err)\n+\t\treturn true\n+\t}\n+\tabs, err := filepath.Abs(target)\n+\tif err != nil {\n+\t\treturn false\n+\t}\n+\tfor _, p := range prefixes {\n+\t\tif strings.HasPrefix(abs, filepath.Join(root, p)) {\n+\t\t\treturn true\n+\t\t}\n+\t}\n+\treturn false\n+}\n```\n\nContext:\n- The hook runs before every agent file write; returning true allows the write and false blocks it.\n- `<root>/work/current/allowed-paths.json` is written by the operator and is readable and writable by the agent user.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "finds-fail-open",
+        "weight": 0.45,
+        "type": "binary"
+      },
+      {
+        "name": "identifies-malformed-json-branch",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "actionable-fix",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: a concrete fix that closes the issue, with the specific API or check. 0.5: right direction but vague or partial. 0.0: none or wrong."
+      },
+      {
+        "name": "no-false-criticals",
+        "weight": 0.1,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Finds fail-open behavior: a read error or malformed JSON in the allowlist returns true (allow), so corrupting or deleting the file disables enforcement",
+    "Specifically calls out the unmarshal-error branch as the worse case because a present-but-corrupt allowlist is silently treated as allow-all while the log line hides it",
+    "Credit, but not required for a full score, if it also notes that strings.HasPrefix without a trailing separator lets 'src-evil' match prefix 'src' (sibling-directory bypass)",
+    "Recommends failing closed (return false and surface an error) at least on parse errors, distinguishing 'file absent by design' from 'file unreadable or corrupt'",
+    "Rates the fail-open finding high; does not invent unrelated issues"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.5,
+  "tags": [
+    "security",
+    "go",
+    "planted-vulnerability",
+    "read-only",
+    "fail-open",
+    "allowlist",
+    "hooks"
+  ]
+}
