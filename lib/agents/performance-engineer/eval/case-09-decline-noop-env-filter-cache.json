@@ -1,0 +1,60 @@
+{
+  "case_id": "perf-decline-noop-env-filter-09",
+  "task": "Performance review of a proposed change. You MAY read files and run shell commands (grep, go test -bench, etc.) in the current checkout, but must NOT create, edit, or delete any file inside the repository working tree; put scratch files under $TMPDIR. If you write a benchmark, do it outside the tree (for example with `go test -overlay=...`).\n\nA contributor opened a PR titled 'perf: cache parsed YAKOS_DISPATCH_ENV_PASSTHROUGH and precompute uppercased allowlist keys in filterEnv'. The PR description says: 'filterEnv runs strings.Split, ToUpper and TrimSpace for every environment variable on every call, which is wasteful; caching the parsed passthrough set in a package-level variable behind a sync.Once and precomputing the uppercase key tables makes it several times faster.' The function is `filterEnv` in `cli-go/internal/runtime/env.go`, with callers in `cli-go/internal/runtime/claude.go` (buildEnv, buildEnvChat) and the other runtimes.\n\nDecide whether this PR should be approved as a performance improvement. Read the code and its call sites to establish how often filterEnv runs and what surrounds it, and quote only numbers you measured yourself. State your verdict, the evidence for it, what the change would cost in complexity or behaviour (for example read-at-call-time semantics of the environment variable), and what evidence, if any, would change your mind. Do not propose or write an alternative optimisation unless you can justify it with a measurement.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "declines-optimisation",
+        "weight": 0.3,
+        "type": "binary"
+      },
+      {
+        "name": "grounds-in-call-frequency",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: shows from call sites that filterEnv runs once per spawned CLI subprocess (buildEnv/buildEnvChat and the codex/agy/interactive equivalents), not per message or per env var in a hot loop, and contrasts it with the cost of spawning the subprocess. 0.5: says it is infrequent without citing call sites. 0.0: does not examine call sites."
+      },
+      {
+        "name": "measurement-not-assertion",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: measures (or explicitly frames the need to measure) filterEnv cost against the workload and reports it as microseconds-scale, with real output quoted. 0.5: reasons qualitatively without measuring. 0.0: asserts a speedup or slowdown with no basis."
+      },
+      {
+        "name": "names-costs-of-change",
+        "weight": 0.15,
+        "type": "scalar_0_1",
+        "anchor": "1.0: names at least two costs, such as the environment variable no longer being read at call time, sync.Once/global state and test isolation, more code for no observable gain. 0.5: names one. 0.0: none."
+      },
+      {
+        "name": "no-invented-numbers-and-mind-changing-evidence",
+        "weight": 0.15,
+        "type": "scalar_0_1",
+        "anchor": "1.0: quotes no unmeasured numbers and states what profile or call pattern would justify revisiting (for example filterEnv appearing in a dispatch-latency profile or being called per message). 0.5: one of the two. 0.0: neither."
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Recommends not approving the change as a performance improvement: filterEnv is on a cold path relative to its surroundings",
+    "Shows from the code that filterEnv is invoked once per spawned dispatch/chat subprocess (claude.go buildEnv and buildEnvChat, plus the codex, agy, claude_interactive and FilterEnvFor callers), and that when YAKOS_DISPATCH_ENV_PASSTHROUGH is unset escapeHatchAllows returns after a TrimSpace of the empty string, and the output slice is already pre-sized with make([]string, 0, len(base))",
+    "If it measures, the result is on the order of ten microseconds per call for about 64 environment entries (authoring run on an Apple M4: about 10 us and 1 alloc/op with the variable unset; about 17-20 us and about 61 allocs/op with it set to a three-entry list); this is negligible next to spawning a CLI subprocess and network model latency, which are orders of magnitude larger. The judge should check consistency with the transcript, not these exact values",
+    "Names the costs of the change: the variable is currently read at call time via getenvPassthrough, so a package-level cached set changes semantics and complicates tests; extra global state and sync.Once for no observable gain",
+    "Does not quote a speedup it did not measure, and states what would change the verdict (a profile showing filterEnv in a latency-relevant path, or a change making it per-message)",
+    "Does not edit the repository"
+  ],
+  "context_files": [
+    "cli-go/internal/runtime/env.go",
+    "cli-go/internal/runtime/claude.go"
+  ],
+  "max_duration_s": 600,
+  "max_cost_usd": 1.0,
+  "tags": [
+    "performance",
+    "go",
+    "negative-control",
+    "decline",
+    "cold-path",
+    "real-code",
+    "tree-dependent"
+  ]
+}

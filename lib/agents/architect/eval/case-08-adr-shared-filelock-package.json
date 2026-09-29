@@ -1,0 +1,60 @@
+{
+  "case_id": "architect-adr-shared-filelock-08",
+  "task": "ADR-style design decision. The exclusive-append file lock helper (lockFile/unlockFile) is currently duplicated in cli-go/internal/dispatch, cli-go/internal/consoleui and cli-go/internal/mailbox, each with build-tagged unix and windows files. Two options: (A) leave the three copies as they are; (B) consolidate into one shared implementation. Read the lock_unix.go and lock_windows.go files in each of the three packages, the call sites (dispatch/events.go, consoleui/transcript.go, mailbox/mailbox.go), and the import blocks that decide which package may import which. Recommend A or B and, if B, say exactly where the shared code must live and what behaviour must be decided first. Write it as a short ADR: Context, Decision, Consequences. Cite files. This is a read-only task: do not edit, write, or create any file.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "makes-a-decision",
+        "weight": 0.15,
+        "type": "binary"
+      },
+      {
+        "name": "finds-windows-divergence",
+        "weight": 0.3,
+        "type": "scalar_0_1",
+        "anchor": "1.0: states that the Windows behaviour differs between copies (dispatch and mailbox are no-ops on Windows, consoleui uses LockFileEx) and that consolidating silently changes the dispatch-log or mailbox behaviour on Windows. 0.5: notes the copies differ without saying which is which or what the consequence is. 0.0: treats the copies as identical or does not read the Windows files."
+      },
+      {
+        "name": "finds-import-direction-constraint",
+        "weight": 0.3,
+        "type": "scalar_0_1",
+        "anchor": "1.0: states that consoleui imports dispatch, so the shared helper cannot live in consoleui and be used by dispatch; it must be in a leaf package (a new leaf package, or an existing leaf) or in dispatch. 0.5: mentions a cycle risk without naming the direction. 0.0: does not consider package placement."
+      },
+      {
+        "name": "signature-mismatch",
+        "weight": 0.15,
+        "type": "binary"
+      },
+      {
+        "name": "no-fabricated-paths",
+        "weight": 0.1,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Makes a clear recommendation (A or B) with reasoning",
+    "Reports that the Windows implementations are not equivalent: dispatch/lock_windows.go and mailbox/lock_windows.go are no-ops (dispatch documents it as Phase 1 / Decision Q8), while consoleui/lock_windows.go really locks with windows.LockFileEx; so consolidating requires an explicit decision on whether the dispatch-log and mailbox gain real Windows locking",
+    "Reports that consoleui already imports dispatch (verify with grep of consoleui non-test imports), so a shared helper cannot live in consoleui; a consolidated version must sit in a leaf package that its users can import (dispatch and consoleui already import statepath; mailbox does not) or be exported from a new package",
+    "Notes that mailbox's lockFile/unlockFile return an error (the caller proceeds without the lock only when lockFile fails) whereas dispatch and consoleui swallow the error and return nothing, so a shared API needs one signature",
+    "Cites only real files (verify the three lock_unix.go and lock_windows.go pairs and the three call sites exist) and invents no package"
+  ],
+  "context_files": [
+    "cli-go/internal/dispatch/lock_windows.go",
+    "cli-go/internal/consoleui/lock_windows.go",
+    "cli-go/internal/mailbox/lock_windows.go",
+    "cli-go/internal/mailbox/mailbox.go",
+    "cli-go/internal/dispatch/events.go"
+  ],
+  "max_duration_s": 420,
+  "max_cost_usd": 1.0,
+  "tags": [
+    "adr",
+    "hidden-constraint",
+    "cross-platform",
+    "build-tags",
+    "go",
+    "read-only",
+    "multi-file"
+  ]
+}

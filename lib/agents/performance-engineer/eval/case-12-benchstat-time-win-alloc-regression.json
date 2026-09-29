@@ -1,0 +1,56 @@
+{
+  "case_id": "perf-benchstat-alloc-regression-12",
+  "task": "Performance review. The data is supplied inline. This is a diagnosis-only task: do NOT edit or create any file in the repository. Do not run commands; respond with findings and a recommendation as text. Be explicit about what you measured versus what you are inferring.\n\nA PR titled 'perf: dedupe tags with a map instead of a linear scan' claims a 4x speedup and asks for approval. Below is the diff (a self-contained excerpt; only `dedupeTags` and the benchmark exist for this task) and the benchstat output (old = main, new = PR, 15 runs each, on a quiet machine, `-benchmem`, benchmarks run serially with a plain b.N loop).\n\n```diff\n func dedupeTags(tags []string) []string {\n+\tseen := make(map[string]struct{}, len(tags))\n \tout := make([]string, 0, len(tags))\n \tfor _, t := range tags {\n-\t\tif !contains(out, t) {\n-\t\t\tout = append(out, t)\n-\t\t}\n+\t\tif _, ok := seen[t]; !ok {\n+\t\t\tseen[t] = struct{}{}\n+\t\t\tout = append(out, t)\n+\t\t}\n \t}\n \treturn out\n }\n```\n\n```\n                     \u2502  old.txt   \u2502             new.txt              \u2502\n                     \u2502   sec/op   \u2502   sec/op     vs base             \u2502\nDedupeTags/n=8-8       118.4n \u00b1 1%   231.0n \u00b1 2%   +95.10% (p=0.000 n=15)\nDedupeTags/n=256-8     41.62\u00b5 \u00b1 2%   9.87\u00b5 \u00b1 3%   -76.28% (p=0.000 n=15)\ngeomean                2.220\u00b5        1.510\u00b5       -31.98%\n\n                     \u2502  old.txt   \u2502             new.txt              \u2502\n                     \u2502    B/op    \u2502    B/op      vs base             \u2502\nDedupeTags/n=8-8        128.0 \u00b1 0%    464.0 \u00b1 0%  +262.50% (p=0.000 n=15)\nDedupeTags/n=256-8    4.000Ki \u00b1 0%  17.50Ki \u00b1 0%  +337.50% (p=0.000 n=15)\n\n                     \u2502  old.txt   \u2502             new.txt              \u2502\n                     \u2502 allocs/op  \u2502  allocs/op   vs base             \u2502\nDedupeTags/n=8-8        1.000 \u00b1 0%    3.000 \u00b1 0%  +200.00% (p=0.000 n=15)\nDedupeTags/n=256-8      1.000 \u00b1 0%    8.000 \u00b1 0%  +700.00% (p=0.000 n=15)\n```\n\nWorkload facts from the service owner: dedupeTags is called about 3 times per request; the service handles about 2,000 requests per second across many goroutines in a 4-core container with a 256 MiB limit; per-request p99 budget is 40 ms; the tag-count distribution is not known, though the owner believes most requests carry fewer than 16 tags and a few carry hundreds.\n\nShould this PR be approved? Weigh the tradeoff for this workload, say what the benchstat output does and does not show, and specify exactly which further measurement you would ask for (with the commands or benchmark shape) before deciding.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "does-not-declare-victory",
+        "weight": 0.2,
+        "type": "binary"
+      },
+      {
+        "name": "reads-both-sizes-and-the-crossover",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: notes the PR is slower for n=8 (+95 percent) and faster only for n=256 (-76 percent), that the geomean is an artefact of the two chosen sizes, and that the tag-count distribution decides the net effect. 0.5: notes the alloc regression only. 0.0: repeats the 4x headline."
+      },
+      {
+        "name": "weighs-gc-pressure-under-concurrency",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: reasons that a serial b.N loop lets the concurrent GC run on idle cores and hides mark-assist and cache costs, that 3 calls x 2,000 req/s multiplies the extra allocations, and that B/op and allocs/op growth (about 4x bytes, 3-8x allocations) increases GC frequency in a memory-limited 4-core container. 0.5: mentions GC pressure generically. 0.0: ignores allocations."
+      },
+      {
+        "name": "asks-for-right-measurement",
+        "weight": 0.25,
+        "type": "scalar_0_1",
+        "anchor": "1.0: asks for a parallel benchmark (b.RunParallel or -cpu sweep) or load test with a realistic tag-count mix, with GC metrics (GODEBUG=gctrace or runtime/metrics GC CPU fraction), and end-to-end p99 before and after; optionally proposes an allocation-free alternative such as sort-and-compact or a small-n linear scan with a map only above a threshold. 0.5: asks for one of these. 0.0: asks only for more of the same serial runs."
+      },
+      {
+        "name": "no-invented-numbers",
+        "weight": 0.15,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Does not approve on the headline: the benchstat is coherent (p=0.000, n=15, low variance) so the deltas are real for the two microbenchmarks, but the 4x claim holds only at n=256; at n=8 the PR is about 95 percent slower and both sizes allocate 3-8x more objects and 3.6-4.4x more bytes",
+    "Notes the geomean of -31.98 percent is produced by only two arbitrary sizes and cannot represent the workload; the owner's belief that most requests carry fewer than 16 tags means the common case may regress while the rare large case improves",
+    "Weighs GC pressure: 3 calls per request at 2,000 req/s means the extra allocation volume scales with concurrency, and a serial b.N benchmark lets background GC run on otherwise idle cores so ns/op understates GC cost seen in a busy 4-core container; more allocations raise GC frequency and mark-assist risk for p99, not just p50",
+    "Requests concrete measurement: a benchmark over a realistic tag-count distribution (for example weighted 4/8/16/64/256), run with b.RunParallel or -cpu 1,2,4 and -benchmem, plus GC metrics (GODEBUG=gctrace=1 or runtime/metrics) and a load test comparing end-to-end p99 against the 40 ms budget; may suggest allocation-free variants (sort a copy and compact, or linear scan below a size threshold and a map above it) as candidates to be measured, not asserted",
+    "Does not invent measurements not in the supplied output (for example does not state the GC CPU fraction or end-to-end p99 impact as fact)"
+  ],
+  "context_files": [],
+  "max_duration_s": 300,
+  "max_cost_usd": 0.5,
+  "tags": [
+    "performance",
+    "go",
+    "benchstat",
+    "allocations",
+    "gc",
+    "tradeoff",
+    "trap",
+    "read-only"
+  ]
+}

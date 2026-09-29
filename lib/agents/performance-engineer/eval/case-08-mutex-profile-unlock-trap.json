@@ -1,0 +1,58 @@
+{
+  "case_id": "perf-mutex-profile-unlock-trap-08",
+  "task": "Performance review. The data is supplied inline. This is a diagnosis-only task: do NOT edit or create any file in the repository. Do not run commands; respond with findings and a proposed fix as text. Be explicit about what you measured versus what you are inferring.\n\nA service that appends audit events to a single on-disk log has p99 request latency of about 900 ms on writes against a 100 ms budget, but the container shows only about 8 percent CPU. Two profiles were captured over the same 30 s window.\n\nMutex profile (`go tool pprof -top mutex.pb.gz`, sample type `delay`):\n\n```\nType: delay\nDuration: 30.02s, Total samples = 41.87s\nShowing nodes accounting for 41.87s, 100% of 41.87s total\n      flat  flat%   sum%        cum   cum%\n    38.12s 91.04% 91.04%     38.12s 91.04%  sync.(*Mutex).Unlock\n     2.94s  7.02% 98.06%      2.94s  7.02%  sync.(*RWMutex).RUnlock\n     0.81s  1.93%   100%      0.81s  1.93%  sync.(*RWMutex).Unlock\n         0     0%   100%     38.12s 91.04%  audit.(*Log).Append\n         0     0%   100%      2.94s  7.02%  audit.(*Log).Tail\n         0     0%   100%      0.81s  1.93%  audit.(*Log).setCursor\n         0     0%   100%     38.12s 91.04%  api.(*Server).handleAppend\n         0     0%   100%      2.94s  7.02%  api.(*Server).handleTail\n```\n\nCPU profile over the same window (`go tool pprof -top cpu.pb.gz`, total samples 2.41s = 8.0 percent of 30 s on one core):\n\n```\nShowing nodes accounting for 1.98s, 82.2% of 2.41s total\n      flat  flat%   sum%        cum   cum%\n     0.71s 29.46% 29.46%      0.71s 29.46%  syscall.syscall\n     0.52s 21.58% 51.04%      0.52s 21.58%  encoding/json.(*encodeState).string\n     0.44s 18.26% 69.30%      0.99s 41.08%  encoding/json.Marshal\n     0.31s 12.86% 82.16%      0.31s 12.86%  runtime.mallocgc\n         0     0% 82.16%      1.74s 72.20%  audit.(*Log).Append\n```\n\nSelf-contained excerpt of the service code (only what is shown exists for this task; `l.f` is an `*os.File` opened O_APPEND on a local disk, `l.mu` is a `sync.Mutex`, `l.idx` is a small in-memory map, `l.rw` is a `sync.RWMutex` guarding cursor state):\n\n```go\nfunc (l *Log) Append(ev Event) error {\n\tl.mu.Lock()\n\tdefer l.mu.Unlock()\n\tb, err := json.Marshal(ev)\n\tif err != nil {\n\t\treturn err\n\t}\n\tif _, err := l.f.Write(append(b, '\\n')); err != nil {\n\t\treturn err\n\t}\n\tif err := l.f.Sync(); err != nil { // fsync per event\n\t\treturn err\n\t}\n\tl.idx[ev.ID] = l.size\n\tl.size += int64(len(b)) + 1\n\treturn nil\n}\n\nfunc (l *Log) Tail(n int) ([]Event, error) {\n\tl.rw.RLock()\n\tdefer l.rw.RUnlock()\n\treturn l.readLastLocked(n)\n}\n```\n\nContext: Append is called at roughly 400 events per second from many goroutines; readers (Tail) are rare. Which lock is actually the problem, why does the top flat entry mislead, how is this different from a CPU problem, and what would you change first? Say what you cannot conclude from these two profiles alone.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "identifies-append-mu-as-contended-lock",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "explains-unlock-flat-is-attribution-not-cause",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: explains that the mutex profile charges wait delay to the Unlock call site and that the cum/caller (Append via handleAppend) plus the code identifies the holder and the reason. 0.5: picks Append but does not explain why Unlock is at the top. 0.0: blames sync.Mutex itself or recommends replacing it."
+      },
+      {
+        "name": "distinguishes-contention-from-cpu",
+        "weight": 0.15,
+        "type": "scalar_0_1",
+        "anchor": "1.0: uses the 8 percent CPU and 38 s of delay in a 30 s window to conclude waiting, not computing, and notes fsync/I/O is off-CPU. 0.5: notes low CPU only. 0.0: proposes CPU optimisation such as faster JSON."
+      },
+      {
+        "name": "first-fix-shrinks-critical-section-or-batches-fsync",
+        "weight": 0.25,
+        "type": "scalar_0_1",
+        "anchor": "1.0: first fix moves Write/Sync out of the lock or uses group commit / a single writer goroutine with batched fsync, keeping the lock only for index/size bookkeeping, and notes the durability tradeoff. 0.5: mentions batching but also leads with sharding or RWMutex. 0.0: leads with RWMutex, sync.Map, or sharding as the fix."
+      },
+      {
+        "name": "states-limits-no-invented-numbers",
+        "weight": 0.15,
+        "type": "scalar_0_1",
+        "anchor": "1.0: names at least two limits (mutex profile fraction/sampling, no block profile or fsync latency measurement, durability requirement unknown) and does not quote an unmeasured speedup. 0.5: one limit or a hedged numeric guess. 0.0: asserts a specific speedup as fact."
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Identifies audit.(*Log).Append holding l.mu as the contended lock: 38.12 s of the 41.87 s delay (91 percent) is attributed via handleAppend, far above the RWMutex entries",
+    "Explains that sync.(*Mutex).Unlock at the top of flat is where the mutex profile records the waiters' delay, so the flat leader is the symptom and the cum caller chain plus the code shows the holder; replacing or tuning the mutex type does not address it",
+    "Notes that only about 8 percent CPU is used while delay totals 38 s in a 30 s window (more than one goroutine waiting on average), so this is lock wait behind slow I/O (Sync inside the critical section), not a CPU-bound problem; syscall.syscall at 29 percent of a small CPU total is not the bottleneck",
+    "Proposes as the first change: do not fsync inside the lock; hold the lock only to update idx/size, or use a single writer goroutine with group commit (batch events then one Sync), noting the durability/ack-semantics tradeoff. Sharding or RWMutex are not first moves: writers need exclusion, and a single append-only file limits sharding; RWMutex does not help writers",
+    "Treats RUnlock (7 percent, from the rare Tail path) and setCursor as minor",
+    "States limits: mutex profile is sampled and shows waiting not wall latency composition, no fsync latency or block profile is provided, durability requirements are unknown, and any speedup must be measured before and after; does not claim a specific speedup as fact"
+  ],
+  "context_files": [],
+  "max_duration_s": 300,
+  "max_cost_usd": 0.5,
+  "tags": [
+    "performance",
+    "go",
+    "pprof",
+    "mutex-profile",
+    "contention",
+    "profile-reading",
+    "trap",
+    "read-only"
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "case_id": "model-routing-strict-floor-n6-02",
+  "task": "An eval of a backend-domain agent (current model: opus) finished with only 6 cases per tier. Results: opus 6/6 pass, mean cost per case $0.090; sonnet 6/6 pass, mean cost $0.030; haiku 4/6 pass, mean cost $0.010. Decide whether to emit a routing candidate. Note sonnet is 3x cheaper and matches opus perfectly, and its Wilson lower bound of 0.610 looks decent. State which gate applies, evaluate every condition for sonnet and haiku, and give the verdict with the refusal reason. This is a read-only analysis task: do not write, edit or append to any file, do not emit real log records, and do not dispatch any agent. Compute with Bash if helpful and describe any record you would emit inline.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "selects-strict-floor-gate",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "refuses-sonnet-no-margin",
+        "weight": 0.35,
+        "type": "binary"
+      },
+      {
+        "name": "refuses-haiku-both-conditions-checked",
+        "weight": 0.15,
+        "type": "scalar_0_1",
+        "anchor": "1.0: shows haiku fails margin (0.667 < 1.000+0.10) while its cost condition passes (0.010 <= 0.045), and that it is refused. 0.5: refuses haiku but skips one condition. 0.0: haiku promoted or not evaluated."
+      },
+      {
+        "name": "does-not-use-wilson-to-override",
+        "weight": 0.15,
+        "type": "binary"
+      },
+      {
+        "name": "no-file-writes-or-promotion",
+        "weight": 0.1,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Identifies that 5 <= n=6 < 12, so the strict floor applies (BOTH cost saving >= 2x AND pass-rate margin >= 0.10), not the Wilson CI gate",
+    "Sonnet: cost condition passes (0.030 <= 0.090/2 = 0.045, a 3x saving) but margin condition fails (candidate 1.000 is not >= current 1.000 + 0.10 = 1.100); verdict refuse, keep opus",
+    "Haiku: cost condition passes (0.010 <= 0.045) but margin fails (0.667 < 1.100); refused",
+    "Final verdict: no candidate emitted; refusal is a cost-only-no-quality case (cost_only_no_quality in the playbook); the 3x saving and sonnet's 6/6 do not override the failed margin requirement",
+    "Does not treat sonnet's Wilson lower bound (0.610, 6/6) as sufficient at n=6, and does not promote or write any file; recommends more cases (>=12) to use the CI gate"
+  ],
+  "context_files": [
+    "docs/eval-format.md",
+    "lib/agents/model-routing-eval.md",
+    "lib/playbooks/model-routing-eval.md"
+  ],
+  "max_duration_s": 90,
+  "max_cost_usd": 0.15,
+  "tags": [
+    "model-routing",
+    "strict-floor",
+    "n6",
+    "negative-control",
+    "cost-only-no-quality"
+  ]
+}
