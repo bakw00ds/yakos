@@ -1207,6 +1207,13 @@ setup_poc_complete() {
 # -- plan-quality-gate (PreToolUse marker path) --
 setup_pqg_blocked() { mkdir -p "$1/work/current"; printf '{"plan_id":"p-1","reason":"score 40 below threshold 70"}' > "$1/work/current/.plan-blocked"; }
 setup_pqg_blocked_but_disabled() { setup_pqg_blocked "$1"; printf 'plan_quality:\n  enabled: false\n' > "$1/.yakos.yml"; }
+# K-107 item 6: both sides read plan_quality per key (direct children only), so an
+# unrelated YAML error, an inline comment, a nested child map and a sibling under
+# a parent all resolve identically.
+setup_pqg_yaml_error_disabled() { setup_pqg_blocked "$1"; printf 'broken: [unclosed\nplan_quality:\n  enabled: false\n' > "$1/.yakos.yml"; }
+setup_pqg_disabled_comment() { setup_pqg_blocked "$1"; printf 'plan_quality:\n  enabled: false # off\n' > "$1/.yakos.yml"; }
+setup_pqg_child_map() { setup_pqg_blocked "$1"; printf 'plan_quality:\n  panel:\n    enabled: false\n  mode: block\n' > "$1/.yakos.yml"; }
+setup_pqg_sibling_parent() { setup_pqg_blocked "$1"; printf 'parent:\n  plan_quality:\n    mode: block\n  sibling:\n    enabled: false\n' > "$1/.yakos.yml"; }
 
 # -- peer-claim / peer-claim-confirm (coordination dir inside the sandbox) --
 setup_pc_coord() { mkdir -p "$1/coord/proj/coord"; }
@@ -1691,6 +1698,10 @@ case_check plan-quality-gate.sh teamcreate.json 0 plan-quality-gate
 case_check plan-quality-gate.sh teamcreate.json 2 plan-quality-gate setup_pqg_blocked
 case_check plan-quality-gate.sh agent-spawn.json 2 plan-quality-gate setup_pqg_blocked
 case_check plan-quality-gate.sh teamcreate.json 0 plan-quality-gate setup_pqg_blocked_but_disabled
+case_check plan-quality-gate.sh teamcreate.json 0 plan-quality-gate setup_pqg_yaml_error_disabled   # K-107: YAML error elsewhere must not defeat enabled:false
+case_check plan-quality-gate.sh teamcreate.json 0 plan-quality-gate setup_pqg_disabled_comment
+case_check plan-quality-gate.sh teamcreate.json 2 plan-quality-gate setup_pqg_child_map            # K-107: nested enabled:false does not bleed
+case_check plan-quality-gate.sh teamcreate.json 2 plan-quality-gate setup_pqg_sibling_parent       # K-107: sibling under a parent does not bleed
 case_check plan-quality-gate.sh teamcreate.json 0 "" setup_pqg_blocked "YAKOS_PLAN_QUALITY_DISABLE=1"
 case_check plan-quality-gate.sh pretooluse-generic-tool.json 0 "" setup_pqg_blocked
 
@@ -1819,12 +1830,17 @@ setup_pqs_good_block()    { _pqs_plan "$1" good-plan.md 30 "$PQS_BLOCK_YML"; }
 setup_pqs_dissent_block() { _pqs_plan "$1" dissent-plan.md 30 "$PQS_BLOCK_YML"; }
 setup_pqs_yml_is_dir()   { _pqs_plan "$1" good-plan.md 30 ""; rm -f "$1/.yakos.yml"; mkdir "$1/.yakos.yml"; }
 setup_pqs_fresh_plan()    { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; }
+# K-107 item 6: nested enabled:false must not disable scoring on either side.
+setup_pqs_child_disabled()   { _pqs_plan "$1" vague-plan.md 30 $'plan_quality:\n  panel:\n    enabled: false\n  mode: block\n  threshold: 0.75\n'; }
+setup_pqs_sibling_disabled() { _pqs_plan "$1" vague-plan.md 30 $'parent:\n  plan_quality:\n    mode: block\n    threshold: 0.75\n  sibling:\n    enabled: false\n'; }
 case_check plan-quality-score.sh posttooluse-write-plan-md-toolinput-only.json 0 plan-quality-score setup_pqs_disabled
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_vague_block   "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # below threshold + block: .plan-blocked, block_next_tool
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_vague_surface "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # below threshold + surface: notes only
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_good_block    "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/good"         "" pqs_home   # above threshold: pass
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_dissent_block "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/dissent"      "" pqs_home   # dissent: surface, never block
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_fresh_plan    "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"        "" pqs_home   # mtime < 5 s: debounced, nothing scored
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_child_disabled   "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # K-107: child-map enabled:false does not bleed: scored, .plan-blocked written
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_sibling_disabled "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # K-107: sibling under a parent does not bleed
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_yml_is_dir     "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/good"         "" pqs_home   # .yakos.yml is a directory: defaults + WARN on both sides
 case_check plan-quality-score.sh posttooluse-write-other-file.json   0 ""                 setup_pqs_vague_block   "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # non-plan.md write: silent no-op
 

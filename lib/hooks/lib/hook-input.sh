@@ -455,5 +455,51 @@ hi_msg_to()       { hi_field '.tool_input.to'; }
 hi_msg_summary()  { hi_field '.tool_input.summary'; }
 hi_msg_body()     { hi_field '.tool_input.message'; }
 
+# hi_yaml_block_children <file> <block>
+#   Print "key=value" for each DIRECT scalar child of the first `<block>:` block
+#   in <file>, without parsing the file as YAML (K-107). Go twin:
+#   cli-go/internal/hooks/yamlblock (Children); keep the two in step.
+#     - blank and comment-only lines are ignored everywhere
+#     - the block starts at the first line that is `<block>` + optional blanks +
+#       ":" (at any indent); that indent is the block indent
+#     - it ends at the first later line whose indent is <= the block indent
+#     - the first line inside the block fixes the child indent; only lines at
+#       exactly that indent are keys, so a child map's own keys and a sibling
+#       nested under a common parent never bleed in
+#     - value: trailing blanks trimmed, then an inline `blank+#...` comment
+#       removed, then every ' and " deleted
+#   Callers apply "later duplicate wins, empty value ignored" themselves.
+hi_yaml_block_children() {
+    awk -v blk="$2" '
+        BEGIN { in_block = 0; bi = 0; ci = -1 }
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            if (match(line, /[^ \t]/) == 0) next
+            n = RSTART - 1
+            rest = substr(line, n + 1)
+            if (substr(rest, 1, 1) == "#") next
+            if (!in_block) {
+                if (index(rest, blk) == 1) {
+                    r = substr(rest, length(blk) + 1)
+                    if (r ~ /^[ \t]*:/) { in_block = 1; bi = n }
+                }
+                next
+            }
+            if (n <= bi) exit
+            if (ci < 0) ci = n
+            if (n != ci) next
+            sub(/[ \t]+$/, "", rest)
+            sub(/[ \t]+#.*$/, "", rest)
+            if (match(rest, /^[A-Za-z0-9_.-]+[ \t]*:[ \t]*/) == 0) next
+            head = substr(rest, 1, RLENGTH)
+            val = substr(rest, RLENGTH + 1)
+            sub(/[ \t]*:[ \t]*$/, "", head)
+            gsub(/"/, "", val)
+            gsub(/'"'"'/, "", val)
+            print head "=" val
+        }' "$1" 2>/dev/null
+}
+
 # Must stay the last statement: reaching it proves the whole file parsed.
 HI_LOADED=1

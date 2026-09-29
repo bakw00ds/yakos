@@ -832,3 +832,30 @@ func TestConfigNonFiniteThresholdFallsBack(t *testing.T) {
 		}
 	}
 }
+
+// K-107 item 6: only the block's DIRECT children are config. A child map's own
+// `enabled:`/`mode:` keys and a sibling nested under a common parent must not
+// bleed into plan_quality (bash's awk reader has the same rule).
+func TestConfigNestedKeysDoNotBleed(t *testing.T) {
+	cases := []struct {
+		name, yml string
+	}{
+		{"child map enabled:false", "plan_quality:\n  panel:\n    enabled: false\n  mode: block\n  threshold: 0.75\n"},
+		{"sibling nested under a parent", "parent:\n  plan_quality:\n    mode: block\n    threshold: 0.75\n  sibling:\n    enabled: false\n"},
+		{"child map mode:surface", "plan_quality:\n  panel:\n    mode: surface\n  mode: block\n  threshold: 0.75\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.yml(t, c.yml)
+			e.writePlan(t, "0.40", "id: plan-nb\n", old)
+			e.run(t, "Write", nil)
+			if e.callCount(t) == 0 {
+				t.Fatal("a nested enabled:false must not skip scoring")
+			}
+			if _, ok := e.marker(t); !ok {
+				t.Fatal("mode: block at the child indent must still write .plan-blocked")
+			}
+		})
+	}
+}

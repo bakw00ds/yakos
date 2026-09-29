@@ -93,37 +93,9 @@ if [ "$event" = "PostToolUse" ]; then
     PQ_COST_CEILING="${YAKOS_PLAN_EVAL_MAX_COST_USD:-0.15}"
 
     if [ -f "$yakos_yml" ] && [ -r "$yakos_yml" ]; then
-        # Parse plan_quality: block using awk (avoids complex quoting in bash)
-        _pq_raw="$(awk '
-            /^[[:space:]]*plan_quality[[:space:]]*:/ { in_block=1; next }
-            in_block && /^[^[:space:]]/ && !/^[[:space:]]/ { exit }
-            in_block && /^[[:space:]]/ {
-                line = $0
-                # strip leading whitespace
-                sub(/^[[:space:]]+/, "", line)
-                # strip trailing whitespace
-                sub(/[[:space:]]+$/, "", line)
-                # strip inline comments
-                sub(/[[:space:]]+#.*$/, "", line)
-                if (line ~ /^enabled[[:space:]]*:/) {
-                    sub(/^enabled[[:space:]]*:[[:space:]]*/, "", line)
-                    gsub(/["'"'"']/, "", line)
-                    print "enabled=" line
-                } else if (line ~ /^mode[[:space:]]*:/) {
-                    sub(/^mode[[:space:]]*:[[:space:]]*/, "", line)
-                    gsub(/["'"'"']/, "", line)
-                    print "mode=" line
-                } else if (line ~ /^threshold[[:space:]]*:/) {
-                    sub(/^threshold[[:space:]]*:[[:space:]]*/, "", line)
-                    gsub(/["'"'"']/, "", line)
-                    print "threshold=" line
-                } else if (line ~ /^cost_ceiling_usd[[:space:]]*:/) {
-                    sub(/^cost_ceiling_usd[[:space:]]*:[[:space:]]*/, "", line)
-                    gsub(/["'"'"']/, "", line)
-                    print "cost_ceiling_usd=" line
-                }
-            }
-        ' "$yakos_yml" 2>/dev/null || true)"
+        # Parse the plan_quality: block with the shared per-key reader (K-107):
+        # direct children only, no whole-file YAML parse. Go twin: yamlblock.
+        _pq_raw="$(hi_yaml_block_children "$yakos_yml" plan_quality || true)"
 
         # Apply parsed values
         while IFS='=' read -r _k _v; do

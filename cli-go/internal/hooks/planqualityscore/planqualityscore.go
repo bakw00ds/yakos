@@ -48,6 +48,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
+	"github.com/bakw00ds/yakos/internal/hooks/yamlblock"
 )
 
 const hookName = "plan-quality-score"
@@ -503,13 +504,14 @@ func (h *Hook) warnf(out *hooktype.HookOutput, format string, args ...any) {
 
 // ---- config helpers ---------------------------------------------------------
 
-// loadConfig ports bash's awk block reader for .yakos.yml. It never parses
-// the file as YAML, so a syntax or type error in an unrelated key cannot
-// discard plan_quality settings (K-99 review): find the top-level
-// `plan_quality:` line, then read enabled/mode/threshold/cost_ceiling_usd
-// from the indented lines under it until the next unindented line. Inline
-// comments and quotes are stripped; a later duplicate key wins; an empty
-// value is ignored.
+// loadConfig ports bash's awk block reader for .yakos.yml (K-107: the reader
+// is shared with plan-quality-gate as internal/hooks/yamlblock). It never
+// parses the file as YAML, so a syntax or type error in an unrelated key cannot
+// discard plan_quality settings (K-99 review): find the `plan_quality:` block,
+// then read enabled/mode/threshold/cost_ceiling_usd from its DIRECT children
+// only. A child map's own keys, and keys of a sibling under a common parent,
+// never bleed in. Inline comments and quotes are stripped; a later duplicate
+// key wins; an empty value is ignored.
 func (h *Hook) loadConfig(projectDir string) (planQualityConfig, error) {
 	var cfg planQualityConfig
 	if projectDir == "" {
@@ -523,43 +525,19 @@ func (h *Hook) loadConfig(projectDir string) (planQualityConfig, error) {
 		// A directory or an unreadable file: fall back to defaults, but say so.
 		return cfg, err
 	}
-	inBlock := false
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if !inBlock {
-			if reBlockStart.MatchString(line) {
-				inBlock = true
-			}
-			continue
+	for _, kv := range yamlblock.Children(data, "plan_quality") {
+		if kv.Value == "" {
+			continue // bash: [ -n "$_v" ] && ...
 		}
-		if line == "" {
-			continue
-		}
-		if c := line[0]; c != ' ' && c != '\t' {
-			break
-		}
-		line = strings.TrimSpace(line)
-		line = reInlineComment.ReplaceAllString(line, "")
-		for _, key := range []string{"enabled", "mode", "threshold", "cost_ceiling_usd"} {
-			m := regexp.MustCompile(`^` + key + `[ \t]*:[ \t]*`).FindString(line)
-			if m == "" {
-				continue
-			}
-			v := strings.NewReplacer(`"`, "", `'`, "").Replace(line[len(m):])
-			if v == "" {
-				break // bash: [ -n "$_v" ] && ...
-			}
-			switch key {
-			case "enabled":
-				cfg.Enabled = v
-			case "mode":
-				cfg.Mode = v
-			case "threshold":
-				cfg.Threshold = v
-			case "cost_ceiling_usd":
-				cfg.CostCeilingUSD = v
-			}
-			break
+		switch kv.Key {
+		case "enabled":
+			cfg.Enabled = kv.Value
+		case "mode":
+			cfg.Mode = kv.Value
+		case "threshold":
+			cfg.Threshold = kv.Value
+		case "cost_ceiling_usd":
+			cfg.CostCeilingUSD = kv.Value
 		}
 	}
 	return cfg, nil
@@ -571,9 +549,7 @@ func (h *Hook) loadConfig(projectDir string) (planQualityConfig, error) {
 func isDecimal(s string) bool { return reDecimal.MatchString(strings.TrimSpace(s)) }
 
 var (
-	reDecimal       = regexp.MustCompile(`^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$`)
-	reBlockStart    = regexp.MustCompile(`^[ \t]*plan_quality[ \t]*:`)
-	reInlineComment = regexp.MustCompile(`[ \t]+#.*$`)
+	reDecimal = regexp.MustCompile(`^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$`)
 )
 
 // ---- persisted-record path -------------------------------------------------
