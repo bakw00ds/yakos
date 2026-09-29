@@ -390,7 +390,8 @@ func CNFromRequest(r *http.Request) (cn string, ok bool) {
 }
 
 // CNFromTLS extracts the client certificate CN from a TLS connection state.
-// Returns ("", false) if cs is nil or contains no verified peer certificates.
+// Returns ("", false) if cs is nil, contains no verified peer certificates, or
+// the leaf certificate has an empty Subject CN (SAN-only).
 func CNFromTLS(cs *tls.ConnectionState) (cn string, ok bool) {
 	if cs == nil {
 		return "", false
@@ -398,7 +399,15 @@ func CNFromTLS(cs *tls.ConnectionState) (cn string, ok bool) {
 	if len(cs.VerifiedChains) == 0 || len(cs.VerifiedChains[0]) == 0 {
 		return "", false
 	}
-	return cs.VerifiedChains[0][0].Subject.CommonName, true
+	cn = cs.VerifiedChains[0][0].Subject.CommonName
+	if cn == "" {
+		// A CN-less (SAN-only) certificate has no operator identity. Treating
+		// it as ("", true) would merge every such certificate into one shared
+		// anonymous principal and hand owner checks an authenticated-but-empty
+		// ID. Fall through to the fail-closed / session branches instead.
+		return "", false
+	}
+	return cn, true
 }
 
 // ---- Session lookup injection -----------------------------------------------
