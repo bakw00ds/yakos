@@ -14,6 +14,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/hooks/cyclecounter"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
+	"github.com/bakw00ds/yakos/internal/retro"
 )
 
 // ---- helpers ----------------------------------------------------------------
@@ -436,31 +437,48 @@ func TestCycleCounter_SettingsOverride_InvalidCycleLengthKeepsDefault(t *testing
 	}
 }
 
-func TestCycleCounter_SettingsOverride_AutoDispatchBooleanFalseIsIneffective(t *testing.T) {
-	// Reproduces the pre-existing bash bug (finding 4 side note): jq's `//`
-	// treats a literal JSON `false` as falsy, so `.retro.auto_dispatch:
-	// false` (what `yakos retro disable` actually writes) falls through to
-	// the `// true` default and auto-retro stays enabled. Go must
-	// replicate this, not "fix" it.
-	tmp := t.TempDir()
-	workDir := filepath.Join(tmp, "work", "current")
-	_ = os.MkdirAll(workDir, 0755)
-	stateDir := filepath.Join(tmp, "state")
-	writeSettings(t, stateDir, `{"retro":{"auto_dispatch":false,"cycle_length":1}}`)
+// TestCycleCounter_SettingsOverride_AutoDispatchMatrix pins K-89: an explicit
+// boolean false (what `yakos retro disable` writes) must disable auto-retro.
+// jq's `//` used to swallow it; bash and Go now share
+// `null/absent -> true, otherwise the value itself` semantics.
+func TestCycleCounter_SettingsOverride_AutoDispatchMatrix(t *testing.T) {
+	cases := []struct {
+		name       string
+		settings   string
+		wantMarker bool
+	}{
+		{"bool false disables", `{"retro":{"auto_dispatch":false,"cycle_length":1}}`, false},
+		{"string false disables", `{"retro":{"auto_dispatch":"false","cycle_length":1}}`, false},
+		{"bool true enables", `{"retro":{"auto_dispatch":true,"cycle_length":1}}`, true},
+		{"string true enables", `{"retro":{"auto_dispatch":"true","cycle_length":1}}`, true},
+		{"absent key enables", `{"retro":{"cycle_length":1}}`, true},
+		{"null enables", `{"retro":{"auto_dispatch":null,"cycle_length":1}}`, true},
+		{"retro not an object enables", `{"retro":"oops"}`, true},
+		{"empty object enables", `{}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			workDir := filepath.Join(tmp, "work", "current")
+			_ = os.MkdirAll(workDir, 0755)
+			stateDir := filepath.Join(tmp, "state")
+			writeSettings(t, stateDir, tc.settings)
 
-	h := cyclecounter.New(workDir, stateDir)
-	h.NowFn = func() time.Time { return time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC) }
+			h := cyclecounter.New(workDir, stateDir)
+			h.NowFn = func() time.Time { return time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC) }
+			h.CycleLength = 1
 
-	runHook(t, h)
-	if !markerExists(workDir) {
-		t.Error("expected .retro-due despite auto_dispatch:false — boolean false is jq-falsy and never disables (pre-existing bash quirk)")
+			runHook(t, h)
+			if got := markerExists(workDir); got != tc.wantMarker {
+				t.Errorf("marker exists = %v, want %v (settings %s)", got, tc.wantMarker, tc.settings)
+			}
+		})
 	}
 }
 
 func TestCycleCounter_SettingsOverride_AutoDispatchStringFalseDisables(t *testing.T) {
-	// The one shape that DOES disable auto-retro via this path: a literal
-	// JSON string "false" (not boolean) is truthy to jq's `//` and then
-	// string-compares equal to "false".
+	// A literal JSON string "false" still disables (jq -r renders it as
+	// the bare word false); kept alongside the boolean case.
 	tmp := t.TempDir()
 	workDir := filepath.Join(tmp, "work", "current")
 	_ = os.MkdirAll(workDir, 0755)
@@ -493,5 +511,43 @@ func TestCycleCounter_SettingsOverride_MissingFileKeepsConstructedDefaults(t *te
 	runHook(t, h)
 	if !markerExists(workDir) {
 		t.Error("expected .retro-due at cycle 2 (constructed CycleLength, no settings.json present)")
+	}
+}
+
+// TestCycleCounter_HonorsGoRetroDisable is the K-89 end-to-end check: the
+// state written by `yakos retro disable` (internal/retro) must be exactly
+// what the hook reads, and `enable` must restore it.
+func TestCycleCounter_HonorsGoRetroDisable(t *testing.T) {
+	tmp := t.TempDir()
+	workDir := filepath.Join(tmp, "work", "current")
+	_ = os.MkdirAll(workDir, 0755)
+	stateDir := filepath.Join(tmp, ".yakos-state")
+
+	var sink strings.Builder
+	retroCfg := func(sub string) retro.Config {
+		return retro.Config{Subcommand: sub, HomeDir: tmp, Writer: &sink, ErrWriter: &sink}
+	}
+
+	newHook := func() *cyclecounter.Hook {
+		h := cyclecounter.New(workDir, stateDir)
+		h.NowFn = func() time.Time { return time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC) }
+		h.CycleLength = 1
+		return h
+	}
+
+	if _, err := retro.Run(retroCfg("disable")); err != nil {
+		t.Fatalf("retro disable: %v", err)
+	}
+	runHook(t, newHook())
+	if markerExists(workDir) {
+		t.Fatal("marker written after `yakos retro disable`; hook ignored the CLI's state")
+	}
+
+	if _, err := retro.Run(retroCfg("enable")); err != nil {
+		t.Fatalf("retro enable: %v", err)
+	}
+	runHook(t, newHook())
+	if !markerExists(workDir) {
+		t.Fatal("marker not written after `yakos retro enable`")
 	}
 }

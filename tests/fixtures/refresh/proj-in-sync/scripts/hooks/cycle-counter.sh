@@ -90,7 +90,13 @@ if [ -f "$settings_file" ] && command -v jq >/dev/null 2>&1; then
     # Same crash guard as the cycle_length read above; fall back to "true"
     # so a malformed/wrong-shape settings.json degrades to auto_retro
     # staying at its default (true), matching the Go port.
-    val="$(jq -r '.retro.auto_dispatch // true' "$settings_file" 2>/dev/null)" || val="true"
+    #
+    # K-89: do NOT use `// true` here. jq's `//` treats boolean false as
+    # null, so an explicit `false` (what `yakos retro disable` writes) fell
+    # through to true and auto-dispatch could never be disabled. Only a
+    # null/absent value defaults to true; anything else is taken as-is
+    # (boolean false and the string "false" both render as `false`).
+    val="$(jq -r 'if .retro.auto_dispatch == null then true else .retro.auto_dispatch end' "$settings_file" 2>/dev/null)" || val="true"
     [ "$val" = "false" ] && auto_retro=false
 fi
 

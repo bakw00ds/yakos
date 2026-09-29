@@ -127,26 +127,41 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Test 3: auto_retro disabled via string "false" in settings
-# NOTE: jq's '//' operator treats boolean false as falsy, so
-# '.retro.auto_dispatch // true' returns true even when the value is false.
-# The hook reads the value literally as the string "false" and compares it;
-# this test documents that the disable path works when jq returns "false"
-# (which it does when the setting is the boolean false).
+# Test 3 (K-89): retro.auto_dispatch semantics at the cycle-10 boundary.
+# jq's `//` treats boolean false as null, so the old
+# '.retro.auto_dispatch // true' read never honored `false`. The hook now
+# distinguishes null/absent (default true) from an explicit value.
+#   false (bool)   -> disabled  (what `yakos retro disable` writes)
+#   "false" string -> disabled
+#   absent / null / true / "true" / non-object .retro -> enabled
 # ---------------------------------------------------------------------------
 note ""
-note "=== Test 3: auto_retro=false (settings disable) → rc=0 ==="
+note "=== Test 3: auto_dispatch settings matrix at cycle 10 ==="
 
-reset_all
-printf '9\n' > "$COUNTER"
-printf '{"retro":{"auto_dispatch":false}}\n' > "$SETTINGS"
+# check_auto <label> <settings-json|NONE> <expect: marker|nomarker>
+check_auto() {
+    local label="$1" json="$2" expect="$3" rc
+    reset_all
+    printf '9\n' > "$COUNTER"
+    if [ "$json" != "NONE" ]; then printf '%s\n' "$json" > "$SETTINGS"; fi
+    rc="$(run_hook)"
+    if [ "$rc" -ne 0 ]; then bad "test 3 [$label]: expected rc=0, got rc=$rc"; return; fi
+    if [ "$expect" = "marker" ]; then
+        if [ -f "$MARKER" ]; then ok "test 3 [$label]: marker created"; else bad "test 3 [$label]: expected .retro-due marker"; fi
+    else
+        if [ -f "$MARKER" ]; then bad "test 3 [$label]: marker must NOT exist (auto_dispatch disabled)"; else ok "test 3 [$label]: no marker"; fi
+    fi
+}
 
-rc="$(run_hook)"
-if [ "$rc" -eq 0 ]; then
-    ok "test 3: rc=0 (hook never blocks UserPromptSubmit)"
-else
-    bad "test 3: expected rc=0, got rc=$rc"
-fi
+check_auto "bool false"        '{"retro":{"auto_dispatch":false}}'   nomarker
+check_auto "string false"      '{"retro":{"auto_dispatch":"false"}}' nomarker
+check_auto "bool true"         '{"retro":{"auto_dispatch":true}}'    marker
+check_auto "absent key"        '{"retro":{"cycle_length":10}}'       marker
+check_auto "null"              '{"retro":{"auto_dispatch":null}}'    marker
+check_auto "no retro object"   '{}'                                  marker
+check_auto "no settings file"  NONE                                  marker
+check_auto "retro not object"  '{"retro":"oops"}'                    marker
+check_auto "malformed json"    '{not json'                           marker
 
 # ---------------------------------------------------------------------------
 # Test 4: Regression — no "ct_log: command not found" in stderr
