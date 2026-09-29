@@ -110,7 +110,7 @@ func newAnswerTestServer(t *testing.T, convID, ownerID string, answerErr error) 
 	})
 
 	wrapped := consoleui.RequireTokenForNonStatic(tok2,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts2 := httptest.NewServer(wrapped)
 	t.Cleanup(ts2.Close)
 
@@ -256,7 +256,7 @@ func TestChatAnswer_CustomAnswer_202(t *testing.T) {
 	consoleui.SetPendingQuestionForTest(srv, "conv-custom", "tool-custom", questionsJSON)
 
 	wrapped := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
@@ -312,7 +312,7 @@ func TestChatAnswer_MenuOption_202(t *testing.T) {
 	consoleui.SetPendingQuestionForTest(srv, "conv-menu", "tool-menu", questionsJSON)
 
 	wrapped := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
@@ -414,7 +414,7 @@ func TestChatAnswer_NoSession_404(t *testing.T) {
 	})
 
 	wrapped := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
@@ -458,7 +458,7 @@ func TestChatAnswer_InteractiveMgrNil_503(t *testing.T) {
 	consoleui.SetInteractiveMgrNilForTest(srv)
 
 	wrapped := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
@@ -775,7 +775,7 @@ func TestStructuredQuestions_NoFactory_503(t *testing.T) {
 	})
 
 	wrapped := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
@@ -837,7 +837,7 @@ func TestOneShotAndP1Interactive_Unchanged_Regression(t *testing.T) {
 	})
 
 	wrapped := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 

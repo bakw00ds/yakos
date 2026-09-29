@@ -71,7 +71,7 @@ func newChatTestServer(t *testing.T) (*httptest.Server, string) {
 	})
 
 	wrapped := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 	return ts, tok
@@ -368,7 +368,7 @@ func TestChatDispatch_403OnSessionOwnerConflict(t *testing.T) {
 
 	// Now bob tries to dispatch to sessionX — should get 403.
 	wrapped := consoleui.RequireTokenForNonStatic(realTok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts2 := httptest.NewServer(wrapped)
 	t.Cleanup(ts2.Close)
 
@@ -996,7 +996,7 @@ func TestChatCancel_403OnNonOwnerCancel(t *testing.T) {
 	}
 
 	wrapped := consoleui.RequireTokenForNonStatic(realTok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
@@ -1039,7 +1039,7 @@ func TestChatDispatch_NoResidualSessionOn503(t *testing.T) {
 		// No DispatchService → svc is nil → 503 on dispatch.
 	})
 	wrapped := consoleui.RequireTokenForNonStatic(realTok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
@@ -1227,7 +1227,7 @@ func TestChatShare_403OnNonOwner(t *testing.T) {
 	}
 
 	wrapped := consoleui.RequireTokenForNonStatic(realTok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
@@ -1264,7 +1264,7 @@ func TestChatShare_OwnerCanToggle(t *testing.T) {
 	}
 
 	wrapped := consoleui.RequireTokenForNonStatic(realTok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
@@ -1483,7 +1483,7 @@ func TestChatShare_200AfterSessionClose(t *testing.T) {
 	hub.CloseSession("sess-done-share") // turn complete — session gone, conversation persists
 
 	wrapped := consoleui.RequireTokenForNonStatic(realTok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
@@ -1602,7 +1602,7 @@ func TestAttach_RoleReadCanWatchSharedSession(t *testing.T) {
 	// Build the handler with bob's identity injected.
 	handler := consoleui.RequireTokenForNonStatic(realTok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(bobID, srv.Handler())))
+			injectIdentityMiddleware(bobID, srv.HandlerForTest())))
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
@@ -1717,7 +1717,7 @@ func TestAttach_RoleReadCannotReadUnsharedTranscript(t *testing.T) {
 	// Build the handler with bob's identity injected.
 	handler := consoleui.RequireTokenForNonStatic(realTok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(bobID, srv.Handler())))
+			injectIdentityMiddleware(bobID, srv.HandlerForTest())))
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
@@ -1778,7 +1778,7 @@ func TestAttach_NonOwnerCannotInterject(t *testing.T) {
 	t.Cleanup(func() { hub.CloseSession(sharedSessionID) })
 
 	wrapped := consoleui.RequireTokenForNonStatic(realTok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 
@@ -2005,7 +2005,7 @@ func TestAttach_ConversationBindingPoisoning(t *testing.T) {
 	}
 	handler := consoleui.RequireTokenForNonStatic(realTok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(bobID, srv.Handler())))
+			injectIdentityMiddleware(bobID, srv.HandlerForTest())))
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
@@ -2079,7 +2079,7 @@ func newChatTestServerWithValidation(t *testing.T, yakosRoot string) (*httptest.
 	})
 
 	wrapped := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(wrapped)
 	t.Cleanup(ts.Close)
 	return ts, tok

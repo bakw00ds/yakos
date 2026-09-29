@@ -161,7 +161,7 @@ func (ts *usersTestServer) doSessionRequest(t *testing.T, method, path, body str
 
 // doLoopbackRequest sends a request via the loopback bearer-token path.
 // The loopback path skips CSRF (AuthMethodNone); role is always admin on loopback.
-// This uses srv.Handler() (no outer middleware) so the bearer token requirement
+// This uses srv.HandlerForTest() (no outer middleware) so the bearer token requirement
 // is bypassed — matching the pattern in auth_3b_test.go for loopback tests.
 func (ts *usersTestServer) doLoopbackRequest(t *testing.T, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -175,7 +175,7 @@ func (ts *usersTestServer) doLoopbackRequest(t *testing.T, method, path, body st
 	req.Header.Set("Content-Type", "application/json")
 	req.RemoteAddr = "127.0.0.1:5555"
 	rr := httptest.NewRecorder()
-	ts.srv.Handler().ServeHTTP(rr, req)
+	ts.srv.HandlerForTest().ServeHTTP(rr, req)
 	return rr
 }
 

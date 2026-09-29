@@ -158,7 +158,7 @@ func newDiffEnv(t *testing.T) *diffEnv {
 		WorktreeManager:   mgr,
 	})
 
-	ts := httptest.NewServer(srv.Handler())
+	ts := httptest.NewServer(srv.HandlerForTest())
 	t.Cleanup(ts.Close)
 
 	hub := srv.ChatHub()
@@ -737,7 +737,7 @@ func TestDiffHandler_NonGitRepo_WorktreeModeGraceful(t *testing.T) {
 		WorkspaceRoot:     notARepo,
 		WorktreeManager:   mgr,
 	})
-	ts := httptest.NewServer(srv.Handler())
+	ts := httptest.NewServer(srv.HandlerForTest())
 	t.Cleanup(ts.Close)
 
 	// Calling Ensure on a non-git-repo should fail with ErrNotAGitRepo.

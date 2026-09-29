@@ -54,7 +54,7 @@ func doJSON(t *testing.T, h http.Handler, tk, method, path, body string) *httpte
 func TestRoleGates_UnresolvedIdentity_FailsClosed(t *testing.T) {
 	srv, tk := newRoleGateServer(t)
 	unresolved := netid.Identity{} // Resolved=false, injected explicitly
-	h := injectIdentityMiddleware(unresolved, srv.Handler())
+	h := injectIdentityMiddleware(unresolved, srv.HandlerForTest())
 
 	routes := []struct{ method, path, body string }{
 		{http.MethodPost, "/flows/api/workflow", `{"name":"x","yaml":"","version":""}`},
@@ -72,11 +72,11 @@ func TestRoleGates_UnresolvedIdentity_FailsClosed(t *testing.T) {
 	}
 }
 
-// A bare srv.Handler() (no identity in context at all) is treated as the
+// A bare srv.HandlerForTest() (no identity in context at all) is treated as the
 // loopback operator, so it does not 403 the same routes.
 func TestServerHandler_BareMount_IsLoopbackOperator(t *testing.T) {
 	srv, tk := newRoleGateServer(t)
-	rr := doJSON(t, srv.Handler(), tk, http.MethodPost, "/flows/api/workflow", `{"name":"x","yaml":"not: [valid","version":""}`)
+	rr := doJSON(t, srv.HandlerForTest(), tk, http.MethodPost, "/flows/api/workflow", `{"name":"x","yaml":"not: [valid","version":""}`)
 	if rr.Code == http.StatusForbidden {
 		t.Errorf("bare Server.Handler() request was forbidden (%s); it must act as the loopback operator", rr.Body.String())
 	}
@@ -86,7 +86,7 @@ func TestServerHandler_BareMount_IsLoopbackOperator(t *testing.T) {
 func TestServerHandler_InjectedIdentity_NotOverwritten(t *testing.T) {
 	srv, tk := newRoleGateServer(t)
 	readOnly := netid.Identity{OperatorID: "ro", Role: netid.RoleRead, Resolved: true, Authenticated: true}
-	h := injectIdentityMiddleware(readOnly, srv.Handler())
+	h := injectIdentityMiddleware(readOnly, srv.HandlerForTest())
 	rr := doJSON(t, h, tk, http.MethodPost, "/flows/api/workflow", `{"name":"x","yaml":"","version":""}`)
 	if rr.Code != http.StatusForbidden {
 		t.Errorf("read-only identity: status=%d; want 403 (Handler() must not upgrade an injected identity)", rr.Code)

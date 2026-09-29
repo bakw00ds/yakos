@@ -677,7 +677,7 @@ func TestCSRF_LoopbackBearer_Unchanged(t *testing.T) {
 	// The production loopback path adds RequireLocalHost on top of this; its
 	// behavior is tested separately in console_bind_test.go.
 	loopbackHandler := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(loopbackHandler)
 	t.Cleanup(ts.Close)
 
@@ -884,7 +884,7 @@ func TestLoopback_BearerToken_Unchanged(t *testing.T) {
 	// the loopback path test (skip RequireLocalHost to avoid port-mismatch in
 	// httptest; loopback Host-header enforcement is tested in console_bind_test.go).
 	loopbackHandler := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(loopbackHandler)
 	t.Cleanup(ts.Close)
 

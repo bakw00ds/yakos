@@ -67,7 +67,7 @@ func newFilesTestServer(t *testing.T, workspaceDir string) (*httptest.Server, st
 		WorkDir:           workDir,
 		WorkspaceRoot:     workspaceDir,
 	})
-	ts := httptest.NewServer(srv.Handler())
+	ts := httptest.NewServer(srv.HandlerForTest())
 	t.Cleanup(ts.Close)
 	return ts, tok
 }
@@ -98,7 +98,7 @@ func newFilesEnforcementServer(t *testing.T, workspaceDir string, id netid.Ident
 
 	handler := consoleui.RequireTokenForNonStatic(tok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(id, srv.Handler())))
+			injectIdentityMiddleware(id, srv.HandlerForTest())))
 
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
@@ -1002,7 +1002,7 @@ func TestFilesRoleGate_RoleReadPasses(t *testing.T) {
 }
 
 // TestFilesRoleGate_ZeroValueNotBlocked verifies the loopback invariant:
-// a zero-value Identity (Resolved=false, from srv.Handler() without the
+// a zero-value Identity (Resolved=false, from srv.HandlerForTest() without the
 // resolver middleware) must never cause a 403 on the file endpoints.
 func TestFilesRoleGate_ZeroValueNotBlocked(t *testing.T) {
 	t.Parallel()
@@ -1030,10 +1030,10 @@ func TestFilesRoleGate_ZeroValueNotBlocked(t *testing.T) {
 		WorkspaceRoot:     ws,
 	})
 
-	// Use srv.Handler() directly — no identity injection, no resolver middleware.
+	// Use srv.HandlerForTest() directly — no identity injection, no resolver middleware.
 	// Zero-value Identity (Resolved=false) → requireRole is a no-op.
 	handler := consoleui.RequireTokenForNonStatic(tok,
-		consoleui.RequireJSONForMutations(srv.Handler()))
+		consoleui.RequireJSONForMutations(srv.HandlerForTest()))
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 

@@ -857,7 +857,7 @@ func (h *filesHandlers) handleFilesWrite(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Per-handler role check: write requires RoleDispatch.
-	// Fails closed on an unresolved identity (S-2 R17); Server.Handler()
+	// Fails closed on an unresolved identity (S-2 R17); Server.HandlerForTest()
 	// stamps the loopback identity for bare test mounts.
 	if id := netid.IdentityFrom(r.Context()); !id.Resolved || !id.Role.Allows(netid.RoleDispatch) {
 		http.Error(w, "forbidden", http.StatusForbidden)

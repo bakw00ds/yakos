@@ -74,7 +74,7 @@ func TestBashHandler_BackgroundedGrandchild_IsReaped(t *testing.T) {
 
 	handler := consoleui.RequireTokenForNonStatic(tok,
 		consoleui.RequireJSONForMutations(
-			injectIdentityMiddleware(adminID, srv.Handler())))
+			injectIdentityMiddleware(adminID, srv.HandlerForTest())))
 
 	// "sleep 60 & echo $!" — sh backgrounds the 60-second sleep, prints its
 	// PID via $! (last-backgrounded-job PID), then exits 0 immediately.
