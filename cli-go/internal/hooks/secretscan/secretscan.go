@@ -273,12 +273,7 @@ func collectStringLeaves(v any) []string {
 // hi_field_or '.agent_type' 'lead' (top-level, fallback "lead" when
 // absent/empty), trimmed, then the "yakos:" namespace prefix stripped.
 func senderRole(in hooktype.HookInput) string {
-	raw := hookio.PayloadString(in, "agent_type")
-	if raw == "" {
-		raw = "lead"
-	}
-	raw = strings.TrimSpace(raw)
-	return strings.TrimPrefix(raw, "yakos:")
+	return hookio.SenderRole(in)
 }
 
 // fileFromPayload extracts the file path, matching hi_file_path:

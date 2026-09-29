@@ -343,3 +343,43 @@ func TestOptOutScopedToPlanQualitySection(t *testing.T) {
 		t.Fatalf("want block, got %d", out.ExitCode)
 	}
 }
+
+// K-107 item 6: the gate reads plan_quality per key (yamlblock), never as one
+// YAML document, so it agrees with bash on every one of these.
+func TestOptOutTable(t *testing.T) {
+	cases := []struct {
+		name, yml string
+		wantPass  bool // true: opt-out honoured (marker cleared, exit 0)
+	}{
+		{"yaml error elsewhere keeps enabled:false", "broken: [unclosed\nplan_quality:\n  enabled: false\n", true},
+		{"type error elsewhere keeps enabled:false", "count: [1,\nplan_quality:\n  enabled: false\n  mode: block\n", true},
+		{"inline comment", "plan_quality:\n  enabled: false # off for now\n", true},
+		{"quoted", "plan_quality:\n  enabled: \"false\"\n", true},
+		{"child map enabled does not bleed", "plan_quality:\n  panel:\n    enabled: false\n  mode: block\n", false},
+		{"sibling under a parent does not bleed", "parent:\n  plan_quality:\n    mode: block\n  sibling:\n    enabled: false\n", false},
+		{"sibling at the child indent does not bleed", "parent:\n  plan_quality:\n    mode: block\n  enabled: false\n", false},
+		{"other top-level section", "plan_quality:\n  mode: block\nother:\n  enabled: false\n", false},
+		{"enabled true wins over an earlier false", "plan_quality:\n  enabled: false\n  enabled: true\n", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			if err := os.WriteFile(filepath.Join(tmp, ".yakos.yml"), []byte(c.yml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			writeMarker(t, tmp, "p", "bad")
+			out := run(t, newHook(tmp, tmp), input("Agent", nil))
+			_, statErr := os.Stat(filepath.Join(tmp, ".plan-blocked"))
+			if c.wantPass {
+				if out.ExitCode != 0 {
+					t.Fatalf("want opt-out honoured, got exit=%d markerErr=%v", out.ExitCode, statErr)
+				}
+				if statErr == nil {
+					t.Fatal("marker should be cleared")
+				}
+			} else if out.ExitCode != 2 || statErr != nil {
+				t.Fatalf("want block with marker kept, got exit=%d markerErr=%v", out.ExitCode, statErr)
+			}
+		})
+	}
+}

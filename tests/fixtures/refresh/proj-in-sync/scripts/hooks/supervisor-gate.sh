@@ -24,16 +24,30 @@
 
 set -eu
 
+# K-107: this hook can block, and every exit other than 2 is non-blocking in
+# Claude Code. Until ho_install_gate_traps takes over (below), any exit is a
+# block; SIGPIPE is ignored so a closed stderr cannot kill the hook with 141.
+trap '' PIPE
+trap 'exit 2' TERM HUP INT EXIT
+
 # Read by hi_init in hook-input.sh, which shellcheck cannot statically
 # follow (HOOK_DIR is dynamic; excluded via -e SC1091 in CI).
 # shellcheck disable=SC2034
 HOOK_FAIL_CLOSED=1
 
 HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
-. "$HOOK_DIR/lib/hook-input.sh"
-. "$HOOK_DIR/lib/hook-output.sh"
-# shellcheck source=lib/paths.sh
-. "$HOOK_DIR/lib/paths.sh"
+# Bootstrap lib/hook-output.sh: it provides the gate helpers, so it cannot be
+# loaded by one. Checked explicitly because a failed `.` does not abort on bash
+# 3.2, and the last-line sentinel proves the file parsed to the end.
+# shellcheck disable=SC1090,SC1091
+if [ ! -r "$HOOK_DIR/lib/hook-output.sh" ] || ! . "$HOOK_DIR/lib/hook-output.sh" || [ "${HO_LOADED:-0}" != "1" ]; then
+    echo "supervisor-gate: BLOCKED — cannot load helper library '$HOOK_DIR/lib/hook-output.sh' (missing, a directory, or failed to parse to completion); failing closed." >&2 || true
+    exit 2
+fi
+ho_install_gate_traps "supervisor-gate"
+ho_source_lib "$HOOK_DIR/lib/hook-input.sh" HI_LOADED
+ho_source_lib "$HOOK_DIR/lib/paths.sh" YAKOS_PATHS_LOADED
+ho_gate_ready
 
 # Emergency bypass — checked BEFORE hi_init (security review N2) so a
 # missing jq / broken stdin doesn't make this override unreachable. It
@@ -76,8 +90,10 @@ findings="$current_dir/supervisor-findings.ndjson"
 last="$(tail -n 1 "$findings" 2>/dev/null)"
 [ -n "$last" ] || exit 0
 
-# Validate it parses as JSON
-if ! printf '%s' "$last" | jq empty 2>/dev/null; then
+# Validate it parses as a JSON OBJECT (K-107). `jq empty` accepts [] or 5, and the
+# field reads below then die under set -e; a corrupted supervisor log must warn
+# and pass, never lock the operator out. Same WARN as invalid JSON (Go twin too).
+if ! printf '%s' "$last" | jq -e 'type == "object"' >/dev/null 2>&1; then
     ho_log "supervisor-gate" "WARN" "pass" \
         "most-recent finding is not valid JSON; ignoring" "{}"
     exit 0

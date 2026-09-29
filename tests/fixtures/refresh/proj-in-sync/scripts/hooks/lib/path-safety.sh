@@ -20,7 +20,9 @@
 if [ "${PS_LOADED:-0}" = "1" ]; then
     return 0 2>/dev/null || exit 0
 fi
-PS_LOADED=1
+# PS_LOADED=1 is set on the LAST line of this file (K-107), not here: a guard set
+# up front made a parse error later in the file invisible to a caller that checks
+# the sentinel after `.`. Reaching the last line proves the whole file parsed.
 
 # ps_lexical_normalize <path>
 #   Collapse "." segments, drop duplicate "/"s, and resolve ".." against
@@ -229,3 +231,6 @@ ps_is_within() {
         *) return 1 ;;
     esac
 }
+
+# Must stay the last statement: reaching it proves the whole file parsed.
+PS_LOADED=1

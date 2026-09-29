@@ -13,6 +13,11 @@
 #   3. A helper lib with a syntax error must not load "successfully": the
 #      *_LOADED sentinels are set on the last line, and the gate checks them.
 #
+#   4. K-107: every registry-fail-closed hook (not just plan-quality-gate) must
+#      exit 2 -- never 0/1/141/143 -- with stderr closed, a broken stderr pipe,
+#      SIGTERM/SIGHUP mid-run, a truncated lib, a lib that is a directory, and a
+#      lib with a syntax error. (Also: a jq that hangs, see section 5.)
+#
 # Every case runs under `bash` (first on PATH) and /bin/bash (3.2 on macOS).
 # Usage: bash tests/run-hook-hardening-test.sh
 set -eu
@@ -122,6 +127,262 @@ else
 fi
 BLOCKING=$reg_closed
 NONBLOCKING="$(awk '/Name:[[:space:]]*"/ { gsub(/.*Name:[[:space:]]*"/,""); gsub(/".*/,""); n=$0 } /FailClosed:[[:space:]]*false/ { print n }' "$REG" | sort -u | tr '\n' ' ')"
+
+
+# ---- K-107: per-hook blocking scenarios -----------------------------------------
+# gate_scenario <hook> <sandbox>: prepares the sandbox and sets GS_PAYLOAD/GS_ENV
+# so that <hook> BLOCKS (exit 2, message on stderr). GS_ENV is a space-separated
+# list of KEY=VAL words (no value contains a space).
+GS_PASS_PAYLOAD='{"session_id":"gs1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"true"}}'
+gate_scenario() {
+    local h="$1" sb="$2"
+    GS_ENV="YAKOS_PROJECT_NAME=proj"
+    case "$h" in
+        budget-guard)
+            printf 'budget:\n  enabled: true\n  max_tool_calls: 1\n' > "$sb/proj/.yakos.yml"
+            printf '{"session_id":"gs1","started_at":%s,"tool_call_count":1,"last_tool":"Read","last_tool_run_count":1}\n' "$(date +%s)" > "$sb/work/current/.budget-state.json"
+            GS_PAYLOAD='{"session_id":"gs1","hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/x"}}' ;;
+        path-allowlist)
+            mkdir -p "$sb/proj/.claude"
+            printf '{"lead":{"allow":["**"],"deny":[]},"go-api":{"allow":["api/**"],"deny":[]}}\n' > "$sb/proj/.claude/path-allowlist.json"
+            GS_PAYLOAD='{"session_id":"gs1","hook_event_name":"PreToolUse","agent_type":"go-api","tool_name":"Edit","tool_input":{"file_path":"web/index.js","old_string":"a","new_string":"b"}}' ;;
+        peer-claim)
+            printf '{"generated_at":"2026-09-20T00:00:00Z","claims":[{"path":"src/auth/login.ts","owners":[{"user":"alice","host":"dev01","pid":1001,"agent":"frontend-pro","status":"confirmed","expires_at":"2099-01-01T00:00:00Z"}]}]}\n' > "$sb/coord/proj/coord/active-claims.json"
+            GS_ENV="YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
+            GS_PAYLOAD='{"session_id":"gs1","hook_event_name":"PreToolUse","agent_type":"backend-pro","tool_name":"Edit","tool_input":{"file_path":"src/auth/login.ts","old_string":"a","new_string":"b"}}' ;;
+        plan-quality-gate)
+            printf '{"plan_id":"plan-abc","reason":"low"}\n' > "$sb/work/current/.plan-blocked"
+            GS_PAYLOAD="$GATE_PAYLOAD" ;;
+        secret-scan)
+            GS_PAYLOAD="$(jq -nc --arg c "aws_access_key_id: $(printf '%s%s' AKIA 0123456789ABCDEF)" '{session_id:"gs1",hook_event_name:"PreToolUse",tool_name:"Write",tool_input:{file_path:"config.yaml",content:$c}}')" ;;
+        supervisor-ack-gate)
+            printf '{"ts":"2026-09-20T00:00:00Z","overall":"CRITICAL","rationale":"fixture critical","recommended_action":"halt"}\n' > "$sb/work/current/supervisor-findings.ndjson"
+            GS_PAYLOAD="$GATE_PAYLOAD" ;;
+        supervisor-gate)
+            printf '{"ts":"2026-09-20T00:00:00Z","overall":"CRITICAL","rationale":"fixture critical","recommended_action":"halt"}\n' > "$sb/work/current/supervisor-findings.ndjson"
+            GS_PAYLOAD='{"session_id":"gs1","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"api/x.go","old_string":"a","new_string":"b"}}' ;;
+        *) GS_PAYLOAD="$GATE_PAYLOAD" ;;
+    esac
+}
+
+# gate_libs <hook>: the libs the hook loads itself.
+gate_libs() {
+    case "$1" in
+        path-allowlist) echo "hook-input.sh hook-output.sh paths.sh path-safety.sh" ;;
+        *) echo "hook-input.sh hook-output.sh paths.sh" ;;
+    esac
+}
+
+# grun <shell> <hookdir> <hook> <sandbox> <payload> <env-words> [redir-mode]
+# redir-mode: "" (capture), noerr (2>&-), pipe (stderr into a reader that exits)
+grun() {
+    local sh="$1" hd="$2" hook="$3" sb="$4" payload="$5" words="$6" mode="${7:-}"
+    rc=0
+    # shellcheck disable=SC2086  # words are KEY=VAL without spaces
+    case "$mode" in
+        noerr) printf '%s' "$payload" | env HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" YAKOS_COORD_ROOT="$sb/coord" $words \
+                    "$sh" "$hd/$hook.sh" >/dev/null 2>&- || rc=$? ;;
+        pipe)  printf '%s' "$payload" | env HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" YAKOS_COORD_ROOT="$sb/coord" $words \
+                    "$sh" "$hd/$hook.sh" 2>&1 >/dev/null | true
+               rc="${PIPESTATUS[1]}" ;;
+        *)     printf '%s' "$payload" | env HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" YAKOS_COORD_ROOT="$sb/coord" $words \
+                    "$sh" "$hd/$hook.sh" >"$sb/out" 2>"$sb/err" || rc=$?
+               out="$(cat "$sb/out")"; err="$(cat "$sb/err")" ;;
+    esac
+}
+
+gate_prologue_suite() {
+    local SH="$1" L="$2" h sb lib kind hd sig
+    echo "== $L: K-107 gate prologue (all blocking hooks) =="
+
+    for h in $BLOCKING; do
+        [ -f "$HOOKS/$h.sh" ] || continue
+
+        # baseline: the scenario really blocks, and a plain Bash call passes.
+        sb="$(new_sandbox "g-$L-$h-base")"; gate_scenario "$h" "$sb"
+        grun "$SH" "$HOOKS" "$h" "$sb" "$GS_PAYLOAD" "$GS_ENV"
+        if [ "$rc" = 2 ] && [ -n "$err" ]; then ok "$L: $h blocking scenario -> 2 with stderr (control)"; else bad "$L: $h scenario did not block: rc=$rc err=[$err]"; continue; fi
+        sb="$(new_sandbox "g-$L-$h-pass")"
+        grun "$SH" "$HOOKS" "$h" "$sb" "$GS_PASS_PAYLOAD" "YAKOS_PROJECT_NAME=proj"
+        if [ "$rc" = 0 ]; then ok "$L: $h pass scenario -> 0 (control)"; else bad "$L: $h pass control rc=$rc err=[$err]"; fi
+
+        # closed stderr / broken stderr pipe on a real block
+        sb="$(new_sandbox "g-$L-$h-noerr")"; gate_scenario "$h" "$sb"
+        grun "$SH" "$HOOKS" "$h" "$sb" "$GS_PAYLOAD" "$GS_ENV" noerr
+        if [ "$rc" = 2 ]; then ok "$L: $h block + stderr closed -> 2"; else bad "$L: $h block + stderr closed rc=$rc (1 = fail-open)"; fi
+        sb="$(new_sandbox "g-$L-$h-pipe")"; gate_scenario "$h" "$sb"
+        grun "$SH" "$HOOKS" "$h" "$sb" "$GS_PAYLOAD" "$GS_ENV" pipe
+        if [ "$rc" = 2 ]; then ok "$L: $h block + broken stderr pipe -> 2"; else bad "$L: $h block + broken pipe rc=$rc (141 = SIGPIPE)"; fi
+
+        # signals mid-run (a jq shim that sleeps once gives a window)
+        for sig in TERM HUP; do
+            if [ "$sig" = HUP ] && [ "$(bash -c 'kill -HUP $$; sleep 0.3; echo alive' 2>/dev/null)" = alive ]; then
+                echo "  SKIP $L: $h SIGHUP (SIGHUP is ignored in this environment)"; continue
+            fi
+            sb="$(new_sandbox "g-$L-$h-sig-$sig")"; gate_scenario "$h" "$sb"
+            mkdir -p "$sb/slow"
+            printf '#!/bin/sh\nif [ ! -e "%s" ]; then : > "%s"; sleep 3; fi\nexec "%s" "$@"\n' "$sb/slow/once" "$sb/slow/once" "$REAL_JQ" > "$sb/slow/jq"
+            chmod +x "$sb/slow/jq"
+            printf '%s' "$GS_PASS_PAYLOAD" > "$sb/payload"
+            # shellcheck disable=SC2086
+            env PATH="$sb/slow:$PATH" HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" YAKOS_COORD_ROOT="$sb/coord" $GS_ENV \
+                "$SH" "$HOOKS/$h.sh" < "$sb/payload" >"$sb/out" 2>"$sb/err" &
+            local pid=$!
+            sleep 0.7
+            kill -"$sig" "$pid" 2>/dev/null || true
+            rc=0; wait "$pid" || rc=$?
+            if [ "$rc" = 2 ]; then ok "$L: $h SIG$sig mid-run -> 2"; else bad "$L: $h SIG$sig mid-run rc=$rc (143=TERM, 129=HUP)"; fi
+        done
+    done
+
+    # Library failures: one mutated hooks tree per (lib, kind), run by every
+    # blocking hook that loads that lib, on the PASS payload (rc 2 can then only
+    # come from the load failure, not from a legitimate block).
+    for lib in hook-input.sh hook-output.sh paths.sh path-safety.sh; do
+        for kind in truncated directory syntax; do
+            hd="$TMP/gp-$L-$lib-$kind"
+            copy_hooks "$hd"
+            case "$kind" in
+                truncated) grep -v '^[A-Z_]*LOADED=1$' "$hd/lib/$lib" > "$hd/lib/$lib.new" && mv "$hd/lib/$lib.new" "$hd/lib/$lib" ;;
+                directory) rm -f "$hd/lib/$lib"; mkdir "$hd/lib/$lib" ;;
+                syntax)    corrupt "$hd/lib/$lib" ;;
+            esac
+            for h in $BLOCKING; do
+                [ -f "$HOOKS/$h.sh" ] || continue
+                case " $(gate_libs "$h") " in *" $lib "*) ;; *) continue ;; esac
+                sb="$(new_sandbox "gp-$L-$h-$lib-$kind")"
+                grun "$SH" "$hd" "$h" "$sb" "$GS_PASS_PAYLOAD" "YAKOS_PROJECT_NAME=proj"
+                if [ "$rc" = 2 ]; then ok "$L: $h + lib/$lib $kind -> 2"; else bad "$L: $h + lib/$lib $kind rc=$rc err=[$err] (0/1 = fail-open)"; fi
+                # ...and with stderr closed, so the failure message cannot be delivered
+                grun "$SH" "$hd" "$h" "$sb" "$GS_PASS_PAYLOAD" "YAKOS_PROJECT_NAME=proj" noerr
+                if [ "$rc" = 2 ]; then ok "$L: $h + lib/$lib $kind + stderr closed -> 2"; else bad "$L: $h + lib/$lib $kind + stderr closed rc=$rc"; fi
+            done
+        done
+    done
+}
+
+# ---- K-107: hung jq -----------------------------------------------------------
+# mk_hungjq <dir> <timeout-mode>: a PATH whose jq sleeps for 30s. timeout-mode:
+#   none  neither timeout nor gtimeout on PATH (macOS shape: background+poll path)
+#   real  whatever the system has (GNU timeout on Linux CI)
+#   stub  a python3 stand-in that follows GNU timeout's contract (rc 124)
+mk_hungjq() {
+    mkdir -p "$1"
+    local d b n
+    for d in /usr/bin /bin /usr/local/bin /opt/homebrew/bin; do
+        [ -d "$d" ] || continue
+        for b in "$d"/*; do
+            [ -x "$b" ] || continue
+            n="$(basename -- "$b")"
+            case "$n" in jq) continue ;; timeout|gtimeout) [ "$2" = real ] || continue ;; esac
+            [ -e "$1/$n" ] || ln -sf "$b" "$1/$n" 2>/dev/null || true
+        done
+    done
+    printf '#!/bin/sh\nexec sleep 30\n' > "$1/jq"; chmod +x "$1/jq"
+    if [ "$2" = stub ]; then
+        printf '#!%s\nimport subprocess, sys\np = subprocess.Popen(sys.argv[2:])\ntry:\n    sys.exit(p.wait(timeout=float(sys.argv[1])))\nexcept subprocess.TimeoutExpired:\n    p.terminate(); p.wait(); sys.exit(124)\n' "$(command -v python3)" > "$1/timeout"
+        chmod +x "$1/timeout"
+    fi
+}
+mk_hungjq "$TMP/hj-none" none
+mk_hungjq "$TMP/hj-real" real
+if command -v python3 >/dev/null 2>&1; then mk_hungjq "$TMP/hj-stub" stub; fi
+
+hung_jq_suite() {
+    local SH="$1" L="$2" mode h sb t0 t1 dur path
+    for mode in none real stub; do
+        [ -d "$TMP/hj-$mode" ] || { echo "  SKIP $L: hung jq ($mode): python3 unavailable"; continue; }
+        if [ "$mode" = real ] && ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then
+            echo "  SKIP $L: hung jq (real timeout): no timeout/gtimeout on this machine"; continue
+        fi
+        path="$TMP/hj-$mode"
+        for h in $BLOCKING; do
+            [ -f "$HOOKS/$h.sh" ] || continue
+            sb="$(new_sandbox "hj-$L-$mode-$h")"
+            t0="$(date +%s)"
+            rc=0
+            printf '%s' "$GS_PASS_PAYLOAD" | env PATH="$path" HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" \
+                YAKOS_COORD_ROOT="$sb/coord" YAKOS_HOOK_JQ_TIMEOUT=1 "$SH" "$HOOKS/$h.sh" >"$sb/out" 2>"$sb/err" || rc=$?
+            t1="$(date +%s)"; dur=$(( t1 - t0 )); err="$(cat "$sb/err")"
+            if [ "$rc" = 2 ] && [ "$dur" -lt 12 ] && printf '%s' "$err" | grep -q 'hung jq' && [ ! -s "$sb/out" ]; then
+                ok "$L: blocking $h + hung jq ($mode) -> 2 in ${dur}s with reason"
+            else
+                bad "$L: blocking $h + hung jq ($mode) rc=$rc dur=${dur}s err=[$err] (want 2, <12s, 'hung jq')"
+            fi
+            if grep -q 'hung jq' "$sb/work/current/logs/$h.ndjson" 2>/dev/null; then ok "$L: $h hung-jq BLOCK record written ($mode)"; else bad "$L: $h hung-jq left no log record ($mode)"; fi
+        done
+        for h in path-log cycle-counter mailbox-mirror; do
+            sb="$(new_sandbox "hj-$L-$mode-nb-$h")"
+            t0="$(date +%s)"
+            rc=0
+            printf '%s' "$GS_PASS_PAYLOAD" | env PATH="$path" HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" \
+                YAKOS_HOOK_JQ_TIMEOUT=1 "$SH" "$HOOKS/$h.sh" >"$sb/out" 2>"$sb/err" || rc=$?
+            t1="$(date +%s)"; dur=$(( t1 - t0 )); err="$(cat "$sb/err")"
+            if [ "$rc" = 0 ] && [ "$dur" -lt 12 ] && printf '%s' "$err" | grep -q 'WARN' && [ ! -s "$sb/out" ]; then
+                ok "$L: non-blocking $h + hung jq ($mode) -> 0 with WARN in ${dur}s"
+            else
+                bad "$L: non-blocking $h + hung jq ($mode) rc=$rc dur=${dur}s err=[$err]"
+            fi
+        done
+    done
+    # Windows shape: a non-GNU `timeout` (timeout.exe: `/t` syntax, exit 1, no
+    # --version) sits on PATH ahead of anything else. It must be ignored, for a
+    # healthy jq (hook passes) and a hung jq (still bounded).
+    local bd="$TMP/bogus-timeout-$L"
+    mkdir -p "$bd"
+    printf '#!/bin/sh\necho "ERROR: Invalid syntax." >&2\nexit 1\n' > "$bd/timeout"; chmod +x "$bd/timeout"
+    sb="$(new_sandbox "hj-$L-bogus-ok")"
+    rc=0
+    printf '%s' "$GS_PASS_PAYLOAD" | env PATH="$bd:$PATH" HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" \
+        "$SH" "$HOOKS/secret-scan.sh" >/dev/null 2>"$sb/err" || rc=$?
+    if [ "$rc" = 0 ]; then ok "$L: non-GNU timeout on PATH + healthy jq -> hook passes (0)"; else bad "$L: non-GNU timeout broke a healthy hook rc=$rc err=[$(cat "$sb/err")]"; fi
+    cp "$TMP/hj-none/jq" "$bd/jq"
+    sb="$(new_sandbox "hj-$L-bogus-hung")"
+    t0="$(date +%s)"; rc=0
+    printf '%s' "$GS_PASS_PAYLOAD" | env PATH="$bd:$TMP/hj-none" HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" YAKOS_HOOK_JQ_TIMEOUT=1 \
+        "$SH" "$HOOKS/secret-scan.sh" >/dev/null 2>"$sb/err" || rc=$?
+    dur=$(( $(date +%s) - t0 ))
+    if [ "$rc" = 2 ] && [ "$dur" -lt 12 ]; then ok "$L: non-GNU timeout on PATH + hung jq -> 2 in ${dur}s"; else bad "$L: non-GNU timeout + hung jq rc=$rc dur=${dur}s"; fi
+
+    # K-107 review round: YAKOS_HOOK_JQ_TIMEOUT parsing. 08/09 are decimal (not
+    # octal), huge values do not overflow, garbage falls back to 5 with a WARN,
+    # and none of them makes a healthy blocking hook block.
+    local tv
+    for tv in 08 09 0 1 30 99999999999999999999 abc 1.5 -3; do
+        sb="$(new_sandbox "hj-$L-tv-$tv")"
+        grun "$SH" "$HOOKS" secret-scan "$sb" "$GS_PASS_PAYLOAD" "YAKOS_HOOK_JQ_TIMEOUT=$tv"
+        if [ "$rc" = 0 ]; then ok "$L: YAKOS_HOOK_JQ_TIMEOUT=$tv + healthy jq -> 0"; else bad "$L: YAKOS_HOOK_JQ_TIMEOUT=$tv rc=$rc err=[$err]"; fi
+        case "$tv" in
+            abc|1.5|-3)
+                if printf '%s' "$err" | grep -q 'not a whole number'; then ok "$L: YAKOS_HOOK_JQ_TIMEOUT=$tv warns"; else bad "$L: YAKOS_HOOK_JQ_TIMEOUT=$tv gave no WARN: [$err]"; fi ;;
+            *)
+                if [ -n "$err" ]; then bad "$L: YAKOS_HOOK_JQ_TIMEOUT=$tv must be accepted silently, stderr: [$err]"; else ok "$L: YAKOS_HOOK_JQ_TIMEOUT=$tv accepted silently"; fi ;;
+        esac
+    done
+    # The no-timeout watchdog path is silent: no job-control notice on stderr.
+    sb="$(new_sandbox "hj-$L-quiet")"
+    rc=0
+    printf '%s' "$GS_PASS_PAYLOAD" | env PATH="$TMP/hj-none" HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" YAKOS_HOOK_JQ_TIMEOUT=1 \
+        "$SH" "$HOOKS/secret-scan.sh" >/dev/null 2>"$sb/err" || rc=$?
+    if ! grep -qiE 'terminated|killed' "$sb/err"; then ok "$L: hung-jq watchdog leaves no job-control noise on stderr"; else bad "$L: watchdog noise: [$(cat "$sb/err")]"; fi
+
+    # ho_log's fallback record is valid JSON whatever the reason contains.
+    mkdir -p "$TMP/jqfail"; printf '#!/bin/sh\nexit 5\n' > "$TMP/jqfail/jq"; chmod +x "$TMP/jqfail/jq"
+    sb="$(new_sandbox "hj-$L-hologjson")"
+    env PATH="$TMP/jqfail:$PATH" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" "$SH" -c \
+        ". '$HOOKS/lib/hook-input.sh'; . '$HOOKS/lib/hook-output.sh'; ho_log t WARN pass \"line1
+line2\ttab \\\\ back \\\"quote\" '{}'" >/dev/null 2>&1 || true
+    if [ -s "$sb/work/current/logs/t.ndjson" ] && "$REAL_JQ" -e . "$sb/work/current/logs/t.ndjson" >/dev/null 2>&1; then
+        ok "$L: ho_log fallback record is valid JSON for a reason with newline/tab/backslash/quote"
+    else
+        bad "$L: ho_log fallback record invalid or missing: [$(cat "$sb/work/current/logs/t.ndjson" 2>/dev/null)]"
+    fi
+
+    # A healthy jq is unaffected, and a nonsense timeout value falls back to the default.
+    sb="$(new_sandbox "hj-$L-healthy")"
+    grun "$SH" "$HOOKS" secret-scan "$sb" "$GS_PASS_PAYLOAD" "YAKOS_HOOK_JQ_TIMEOUT=abc"
+    if [ "$rc" = 0 ]; then ok "$L: healthy jq + YAKOS_HOOK_JQ_TIMEOUT=abc -> 0 (default limit)"; else bad "$L: healthy jq with bad timeout value rc=$rc err=[$err]"; fi
+}
 
 run_suite() {
     local SH="$1" L="$2" fj h sb
@@ -282,6 +543,12 @@ run_suite() {
         rc=0; wait "$pid" || rc=$?
         if [ "$rc" = 2 ]; then ok "$L: gate SIG$sig mid-run -> 2"; else bad "$L: gate SIG$sig rc=$rc (143=TERM, 129=HUP)"; fi
     done
+
+    # ---- 4. K-107: the same guarantees for every blocking hook ----------------
+    gate_prologue_suite "$SH" "$L"
+
+    # ---- 5. K-107: a hung jq is bounded -----------------------------------------
+    hung_jq_suite "$SH" "$L"
 
     # ---- 3. helper-lib syntax error -------------------------------------------
     local lib

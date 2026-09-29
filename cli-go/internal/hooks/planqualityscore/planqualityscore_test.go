@@ -832,3 +832,73 @@ func TestConfigNonFiniteThresholdFallsBack(t *testing.T) {
 		}
 	}
 }
+
+// K-107 item 6: only the block's DIRECT children are config. A child map's own
+// `enabled:`/`mode:` keys and a sibling nested under a common parent must not
+// bleed into plan_quality (bash's awk reader has the same rule).
+func TestConfigNestedKeysDoNotBleed(t *testing.T) {
+	cases := []struct {
+		name, yml string
+	}{
+		{"child map enabled:false", "plan_quality:\n  panel:\n    enabled: false\n  mode: block\n  threshold: 0.75\n"},
+		{"sibling nested under a parent", "parent:\n  plan_quality:\n    mode: block\n    threshold: 0.75\n  sibling:\n    enabled: false\n"},
+		{"child map mode:surface", "plan_quality:\n  panel:\n    mode: surface\n  mode: block\n  threshold: 0.75\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.yml(t, c.yml)
+			e.writePlan(t, "0.40", "id: plan-nb\n", old)
+			e.run(t, "Write", nil)
+			if e.callCount(t) == 0 {
+				t.Fatal("a nested enabled:false must not skip scoring")
+			}
+			if _, ok := e.marker(t); !ok {
+				t.Fatal("mode: block at the child indent must still write .plan-blocked")
+			}
+		})
+	}
+}
+
+// K-107 item 8: "1e999" passes the decimal pattern but overflows ParseFloat.
+// It used to become 0 (every plan passed, while bash blocked every plan). Now
+// ParseFloat errors are rejected like any non-number, and finite values outside
+// 0..1 are clamped, each with a WARN.
+func TestThresholdOverflowAndOutOfRange(t *testing.T) {
+	cases := []struct {
+		name, thr     string
+		agg           string
+		wantThreshold string // threshold the record reports
+		wantBlocked   bool
+		wantWarn      string
+	}{
+		{"overflow rejected, default applies (blocks 0.60)", "1e999", "0.60", "0.75", true, "not a number"},
+		{"negative overflow rejected", "-1e999", "0.60", "0.75", true, "not a number"},
+		{"above range clamps to 1", "75", "0.90", "1", true, "clamped to 1"},
+		{"below range clamps to 0", "-3", "0.10", "0", false, "clamped to 0"},
+		{"in range untouched", "0.5", "0.60", "0.5", false, ""},
+		{"bound 1 untouched", "1", "0.60", "1", true, ""},
+		{"bound 0 untouched", "0", "0.00", "0", false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.yml(t, "plan_quality:\n  mode: block\n  threshold: "+c.thr+"\n")
+			e.writePlan(t, c.agg, "id: p-ov\n", old)
+			out := e.run(t, "Write", nil)
+			_, blocked := e.marker(t)
+			if blocked != c.wantBlocked {
+				t.Fatalf("blocked=%v want %v (stderr %q, log %v)", blocked, c.wantBlocked, out.Stderr, e.lastLog(t))
+			}
+			if got := e.lastLog(t)["threshold"]; got != c.wantThreshold {
+				t.Fatalf("record threshold=%v want %q", got, c.wantThreshold)
+			}
+			if c.wantWarn != "" && !strings.Contains(string(out.Stderr), c.wantWarn) {
+				t.Fatalf("stderr %q lacks %q", out.Stderr, c.wantWarn)
+			}
+			if c.wantWarn == "" && strings.Contains(string(out.Stderr), "plan_quality.threshold") {
+				t.Fatalf("unexpected threshold WARN: %q", out.Stderr)
+			}
+		})
+	}
+}

@@ -106,9 +106,9 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	// `jq empty` accepts any JSON value; the field reads below only make
-	// sense on an object. The bash script crashes (rc=5 under set -e) on a
-	// valid-JSON non-object such as [] or 5; Go treats it as the same
-	// "not a usable finding" case as invalid JSON and passes with a WARN.
+	// sense on an object. Both sides (bash since K-107) treat a valid-JSON
+	// non-object such as [] or 5 as the same "not a usable finding" case as
+	// invalid JSON and pass with a WARN.
 	var parsed any
 	obj, isObj := map[string]any(nil), false
 	if err := json.Unmarshal([]byte(last), &parsed); err == nil {
@@ -336,9 +336,5 @@ func (h *Hook) log(out *hooktype.HookOutput, in hooktype.HookInput, severity, de
 
 // senderRole mirrors hi_sender_role.
 func senderRole(in hooktype.HookInput) string {
-	raw := hookio.JQRawOrJSON(hookio.JQAlt(in.Payload["agent_type"]))
-	if raw == "" {
-		raw = "lead"
-	}
-	return strings.TrimPrefix(strings.TrimSpace(raw), "yakos:")
+	return hookio.SenderRole(in)
 }

@@ -24,26 +24,15 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
+	"github.com/bakw00ds/yakos/internal/hooks/yamlblock"
 )
 
 const hookName = "plan-quality-gate"
-
-// planQualityConfig holds the parsed plan_quality block from .yakos.yml.
-type planQualityConfig struct {
-	Enabled *bool `yaml:"enabled"`
-}
-
-type yakosYMLPlanQuality struct {
-	PlanQuality *planQualityConfig `yaml:"plan_quality"`
-}
 
 // planBlockedMarker is the JSON written to .plan-blocked by the scorer.
 type planBlockedMarker struct {
@@ -188,16 +177,19 @@ func orDefault(v, def string) string {
 	return v
 }
 
+// isGateDisabledByYAML reports plan_quality.enabled == "false" the way bash
+// does: the per-key block reader shared with plan-quality-score (yamlblock),
+// never a whole-file YAML parse. An unrelated YAML error elsewhere in
+// .yakos.yml must not make Go keep enforcing a marker that bash clears (K-107).
+// The comparison is the scorer's own: the value after comment and quote
+// stripping, exactly "false".
 func isGateDisabledByYAML(projectDir string) bool {
 	data, err := os.ReadFile(filepath.Join(projectDir, ".yakos.yml")) //nolint:gosec
 	if err != nil {
 		return false
 	}
-	var doc yakosYMLPlanQuality
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return false
-	}
-	return doc.PlanQuality != nil && doc.PlanQuality.Enabled != nil && !*doc.PlanQuality.Enabled
+	v, ok := yamlblock.Last(data, "plan_quality", "enabled")
+	return ok && v == "false"
 }
 
 func readBlockedMarker(path string) (planID, reason string) {
@@ -265,9 +257,5 @@ func (h *Hook) appendLog(in hooktype.HookInput, severity, decision, reason strin
 // senderRole matches hi_sender_role: agent_type (trimmed, "yakos:" prefix
 // stripped), or "lead" when absent.
 func senderRole(in hooktype.HookInput) string {
-	raw := strings.TrimSpace(hookio.PayloadString(in, "agent_type"))
-	if raw == "" {
-		raw = "lead"
-	}
-	return strings.TrimPrefix(raw, "yakos:")
+	return hookio.SenderRole(in)
 }

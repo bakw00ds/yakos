@@ -28,13 +28,13 @@ func TestSessionIDFromPayloadDecidesThreshold(t *testing.T) {
 	t.Run("payload id finds the transcript and crosses the notice threshold", func(t *testing.T) {
 		rec := run(t, map[string]any{"session_id": "sess-real"}, map[string]string{"CLAUDE_SESSION_ID": "sess-other"})
 		if rec["severity"] != "WARN" {
-			t.Fatalf("severity=%v action=%v, want WARN", rec["severity"], rec["action"])
+			t.Fatalf("severity=%v decision=%v, want WARN", rec["severity"], rec["decision"])
 		}
 	})
 	t.Run("env-only id is ignored: probe unavailable", func(t *testing.T) {
 		rec := run(t, map[string]any{}, map[string]string{"CLAUDE_SESSION_ID": "sess-real"})
-		if rec["action"] != "probe_unavailable" {
-			t.Fatalf("action=%v severity=%v, want probe_unavailable", rec["action"], rec["severity"])
+		if rec["decision"] != "probe_unavailable" {
+			t.Fatalf("decision=%v severity=%v, want probe_unavailable", rec["decision"], rec["severity"])
 		}
 	})
 }

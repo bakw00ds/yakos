@@ -233,9 +233,10 @@ func TestHooksImplE2E_HybridGoReadyHookRunsGoTier(t *testing.T) {
 }
 
 // The legacy flag-less command is what A-3 (#288) generated. With YAKOS_HOOKS
-// unset it is a silent no-op — this documents the bug — and the next refresh
-// must migrate it in place, then stay byte-stable.
-func TestHooksImplE2E_LegacyCommandIsNoOpAndMigrates(t *testing.T) {
+// unset it runs bash-only, and here no bash script exists: it used to be a
+// silent no-op (fail-open); since K-107 a blocking hook exits 2 with a reason.
+// The next refresh must migrate it in place, then stay byte-stable.
+func TestHooksImplE2E_LegacyCommandFailsClosedAndMigrates(t *testing.T) {
 	bin := hooksImplBinary(t)
 	home, proj := hooksImplProject(t)
 	work := filepath.Join(home, "work")
@@ -258,8 +259,8 @@ func TestHooksImplE2E_LegacyCommandIsNoOpAndMigrates(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := settingsGoCommand(t, []byte(legacy), "plan-quality-gate")
-	if code, _ := shRun(t, old, pqgPayload, env); code != 0 {
-		t.Errorf("legacy flag-less command: documented behavior is exit 0 (fail-open), got %d", code)
+	if code, stderr := shRun(t, old, pqgPayload, env); code != 2 || !strings.Contains(stderr, "refusing to fail open") {
+		t.Errorf("legacy flag-less command with no bash script: want exit 2 + reason (K-107), got %d %q", code, stderr)
 	}
 
 	migrated := hooksImplRefresh(t, bin, home, proj, "go")

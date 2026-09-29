@@ -153,6 +153,7 @@ func runHookRun(yakosRoot string, args []string) {
 	userHooksDir := filepath.Join(projectDir, "lib", "hooks-user")
 	r := runner.New(hooksDir, userHooksDir, workCurrentDir, nil, os.Stderr)
 	r.ModeOverride = override
+	r.FailClosed = entry.FailClosed
 
 	out, runErr := r.Run(context.Background(), hook, in)
 	if len(out.Stdout) > 0 {

@@ -31,10 +31,11 @@
 # Every other hook stays advisory: it appears in the matrix but cannot fail
 # the run, exactly as before.
 #
-# Accepted divergences. A tuple may carry a 9th argument "<go-rc>:<reason>"
-# documenting a KNOWN, INTENTIONAL bash-vs-Go difference. It pins Go's exit
-# code (so the case still guards Go's decision) and the reason is printed next
-# to the case. Two kinds are in use:
+# Accepted divergences. A tuple may carry a 9th argument
+# "<bash-rc>/<go-rc>:<reason>" documenting a KNOWN, INTENTIONAL bash-vs-Go
+# difference. It pins BOTH sides' exit codes (so the case still guards each
+# decision: a mismatch on either side fails the gate) and the reason is
+# printed next to the case. Two kinds are in use:
 #   * architectural: Go never shells out to jq, so a jq-less or jq-broken PATH
 #     cannot put it into bash's "degraded input" state; it evaluates the
 #     payload and decides on policy instead. Where bash fails closed the two
@@ -549,19 +550,34 @@ parity_check() {
     fi
 
     # Accepted (documented, intentional) divergences. A tuple carries an
-    # `accept` annotation of the form "<go-rc>:<reason>" when bash and Go are
-    # KNOWN to differ on purpose — e.g. Go never depends on jq, or Go is
-    # stricter than a bash weakness. The annotation pins Go's exit code, so an
-    # accepted case still guards Go's decision; it does not excuse it. If the
-    # two sides start agreeing, the stale annotation is itself flagged.
+    # `accept` annotation of the form "<bash-rc>/<go-rc>:<reason>" when bash
+    # and Go are KNOWN to differ on purpose — e.g. Go never depends on jq, or
+    # Go is stricter than a bash weakness. The annotation pins BOTH sides'
+    # exit codes, so an accepted case still guards each decision: if either
+    # side's rc moves (a future bash block on a pinned case, or a Go change)
+    # the case reads as a real divergence instead of "accepted". If the two
+    # sides start agreeing, the stale annotation is itself flagged. A
+    # malformed annotation (no "<n>/<n>:" prefix) fails the run.
     local raw_divergence="$divergence" accepted_reason=""
     if [ -n "$accept" ]; then
-        local acc_rc="${accept%%:*}"
+        case "$accept" in
+            [0-9]*/[0-9]*:*) ;;
+            *)
+                echo "PARITY HARNESS ERROR: malformed accept annotation for $hookname / $(basename "$fixture"): want '<bash-rc>/<go-rc>:<reason>', got '${accept%%:*}:...'" >&2
+                fail=$((fail + 1))
+                ;;
+        esac
+        local acc_pins="${accept%%:*}"
+        local acc_bash_rc="${acc_pins%%/*}" acc_go_rc="${acc_pins##*/}"
         accepted_reason="${accept#*:}"
         if [ "$divergence" = "-" ]; then
             divergence="accept-stale"
-        elif [ "$go_rc" = "$acc_rc" ]; then
+        elif [ "$bash_rc" = "$acc_bash_rc" ] && [ "$go_rc" = "$acc_go_rc" ]; then
             divergence="accepted"
+        else
+            # A pinned rc moved on either side: the annotation no longer
+            # describes reality. Fails the run for EVERY hook, gated or not.
+            divergence="accept-pin-mismatch"
         fi
     fi
 
@@ -1191,6 +1207,13 @@ setup_poc_complete() {
 # -- plan-quality-gate (PreToolUse marker path) --
 setup_pqg_blocked() { mkdir -p "$1/work/current"; printf '{"plan_id":"p-1","reason":"score 40 below threshold 70"}' > "$1/work/current/.plan-blocked"; }
 setup_pqg_blocked_but_disabled() { setup_pqg_blocked "$1"; printf 'plan_quality:\n  enabled: false\n' > "$1/.yakos.yml"; }
+# K-107 item 6: both sides read plan_quality per key (direct children only), so an
+# unrelated YAML error, an inline comment, a nested child map and a sibling under
+# a parent all resolve identically.
+setup_pqg_yaml_error_disabled() { setup_pqg_blocked "$1"; printf 'broken: [unclosed\nplan_quality:\n  enabled: false\n' > "$1/.yakos.yml"; }
+setup_pqg_disabled_comment() { setup_pqg_blocked "$1"; printf 'plan_quality:\n  enabled: false # off\n' > "$1/.yakos.yml"; }
+setup_pqg_child_map() { setup_pqg_blocked "$1"; printf 'plan_quality:\n  panel:\n    enabled: false\n  mode: block\n' > "$1/.yakos.yml"; }
+setup_pqg_sibling_parent() { setup_pqg_blocked "$1"; printf 'parent:\n  plan_quality:\n    mode: block\n  sibling:\n    enabled: false\n' > "$1/.yakos.yml"; }
 
 # -- peer-claim / peer-claim-confirm (coordination dir inside the sandbox) --
 setup_pc_coord() { mkdir -p "$1/coord/proj/coord"; }
@@ -1309,12 +1332,15 @@ case_check path-allowlist.sh   pretooluse-notebookedit-web-blocked.json 2 path-a
 # H5b: deny matching is case-insensitive (APFS/NTFS default to
 # case-insensitive filesystems, so ".env" vs ".ENV" is the same inode).
 case_check path-allowlist.sh   pretooluse-write-dotenv-upper.json 2 path-allowlist setup_allowlist_strict
+# K-107 item 1: a whitespace-only agent_type must resolve identically on both sides ("\n" is lead: blocked; "  " trims to an empty role: allowed).
+case_check path-allowlist.sh   pretooluse-write-dotenv-agent-newline.json 2 path-allowlist setup_allowlist_strict
+case_check path-allowlist.sh   pretooluse-write-dotenv-agent-spaces.json  0 path-allowlist setup_allowlist_strict
 case_check path-allowlist.sh   pretooluse-write-pem-upper.json    2 path-allowlist setup_allowlist_deny_pem
 # M7: a lexically-fine path that is a symlink resolving outside the
 # project root must be blocked regardless of what the allow list says.
 case_check path-allowlist.sh   pretooluse-write-symlink-escape.json 2 path-allowlist setup_symlink_escape
 # C5: missing jq must fail CLOSED (block), not silently pass every write.
-case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH" "" "" "2:Go never shells out to jq; a jq-less PATH cannot degrade it, so it decides on policy where bash fails closed on degraded input"
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH" "" "" "2/2:Go never shells out to jq; a jq-less PATH cannot degrade it, so it decides on policy where bash fails closed on degraded input"
 # N1 (round 2): an absolute out-of-root file_path — the shape Claude Code
 # actually sends — must be rejected even under an allow:["**"] policy or a
 # deny-only policy, and an in-root ABSOLUTE path must still PASS (the
@@ -1334,7 +1360,7 @@ case_check path-allowlist.sh   pretooluse-write-symlink-escape.json 2 path-allow
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json 2 path-allowlist setup_allowlist_corrupt_truncated
 # N2 (round 2): the emergency escape hatch must be honored even with jq
 # missing, and only when actually set.
-case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "2:Go never shells out to jq; a jq-less PATH cannot degrade it, so it decides on policy where bash fails closed on degraded input"
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "0/2:Go never shells out to jq; a jq-less PATH cannot degrade it, so it decides on policy where bash fails closed on degraded input"
 # C5 residue (round 2, addendum): same hi_init gap as secret-scan below —
 # an empty pipe and a non-object JSON payload must both fail closed.
 case_check path-allowlist.sh   pretooluse-write-empty-stdin.json      2 path-allowlist setup_allowlist_strict
@@ -1390,10 +1416,10 @@ case_check secret-scan.sh      pretooluse-write-stripe-key.json      2 secret-sc
 case_check secret-scan.sh      pretooluse-write-anthropic-key.json   2 secret-scan
 case_check secret-scan.sh      pretooluse-write-google-key.json      2 secret-scan
 # C5: missing jq must fail CLOSED (block), not silently pass every write.
-case_check secret-scan.sh      pretooluse-write-secret.json      2 secret-scan "" "PATH=$NOJQ_PATH" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
+case_check secret-scan.sh      pretooluse-write-secret.json      2 secret-scan "" "PATH=$NOJQ_PATH" "" "" "2/2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 # N2 (round 2): the emergency escape hatch must be honored even with jq
 # missing.
-case_check secret-scan.sh      pretooluse-write-secret.json      0 secret-scan "" "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
+case_check secret-scan.sh      pretooluse-write-secret.json      0 secret-scan "" "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "0/2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 # C5 residue (round 2, addendum): hi_init used to pass on an empty pipe
 # (the `[ -n "$HI_INPUT" ] &&` guard skipped validation on a zero-byte
 # read) and on valid-JSON-that-isn't-an-object (`jq empty` accepts an
@@ -1438,7 +1464,7 @@ case_check secret-scan.sh      pretooluse-multiedit-secret-newstring.json      2
 # missing-jq fail-closed case.
 case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard setup_budget_headroom
 case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_low_cap
-case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_low_cap "PATH=$NOJQ_PATH" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
+case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_low_cap "PATH=$NOJQ_PATH" "" "" "2/2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 # N2 (round 2): budget-guard matches EVERY tool call ("*"), so this is the
 # hook where a missing jq previously locked an operator out of the whole
 # session. Its own emergency var, YAKOS_BUDGET_DISABLE, is now checked
@@ -1453,7 +1479,7 @@ case_check budget-guard.sh     pretooluse-generic-tool.json      0 "" setup_budg
 # now be a clean rc=0 with no crash. This exact combination was
 # deliberately NOT asserted in round 2 (see the comment that used to sit
 # here) because it was known-broken; now fixed and locked in.
-case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard setup_budget_low_cap "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
+case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard setup_budget_low_cap "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "0/2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 
 # --- supervisor-gate ---
 # R2-2 (round 3): a second, independent instance of the same defect class
@@ -1461,7 +1487,7 @@ case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard 
 # and reaches unguarded `jq -r` calls once a supervisor-findings.ndjson
 # file exists (a common state in an active session, not a rare edge
 # case). Same fix, same fixture shape.
-case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_supervisor_findings_critical "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_supervisor_findings_critical "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "0/2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 
 # --- mailbox-mirror ---
 case_check mailbox-mirror.sh   sendmessage-peer.json             0 mailbox-mirror
@@ -1581,8 +1607,8 @@ case_check path-allowlist.sh   pretooluse-write-dotdot-after-symlink.json 2 path
 case_check path-allowlist.sh   pretooluse-write-nul-in-path.json 2 path-allowlist setup_allowlist_strict
 # Broken jq (present but misbehaving): bash now fails closed on a jq that prints garbage;
 # Go never shells out to jq.
-case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 "" setup_allowlist_strict "PATH=$FAKEJQ_GARBAGE_PATH" "" "" "2:bash fails closed on degraded input (jq printing garbage); Go is jq-independent and blocks on policy (same exit code, different log record)"
-case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict "PATH=$FAKEJQ_FAIL_PATH" "" "" "2:bash fails closed on a crashing jq (degraded input); Go is jq-independent and blocks on policy"
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 "" setup_allowlist_strict "PATH=$FAKEJQ_GARBAGE_PATH" "" "" "2/2:bash fails closed on degraded input (jq printing garbage); Go is jq-independent and blocks on policy (same exit code, different log record)"
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict "PATH=$FAKEJQ_FAIL_PATH" "" "" "2/2:bash fails closed on a crashing jq (degraded input); Go is jq-independent and blocks on policy"
 
 # --- supervisor-gate: K-87 A-2b -----------------------------------------------
 case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_sg_pass
@@ -1599,7 +1625,7 @@ case_check supervisor-gate.sh  pretooluse-edit-api.json          0 "" "" "YAKOS_
 # Accepted: a valid-JSON NON-object last line (e.g. []) crashes bash (jq error
 # under set -e, rc=5 — a non-blocking hook error); Go treats it as an unusable
 # finding, logs a WARN and passes (rc=0).
-case_check supervisor-gate.sh  pretooluse-edit-api.json          5 "" setup_sg_nonobject "" "" "" "0:bash crashes (rc=5, jq error under set -e) on a valid-JSON non-object last line; Go treats it as an unusable finding and passes with a WARN"
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_sg_nonobject   # K-107: a non-object last finding warns and passes on both sides
 
 # --- budget-guard: K-87 A-2b ----------------------------------------------------
 case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_repeat_cap
@@ -1672,6 +1698,10 @@ case_check plan-quality-gate.sh teamcreate.json 0 plan-quality-gate
 case_check plan-quality-gate.sh teamcreate.json 2 plan-quality-gate setup_pqg_blocked
 case_check plan-quality-gate.sh agent-spawn.json 2 plan-quality-gate setup_pqg_blocked
 case_check plan-quality-gate.sh teamcreate.json 0 plan-quality-gate setup_pqg_blocked_but_disabled
+case_check plan-quality-gate.sh teamcreate.json 0 plan-quality-gate setup_pqg_yaml_error_disabled   # K-107: YAML error elsewhere must not defeat enabled:false
+case_check plan-quality-gate.sh teamcreate.json 0 plan-quality-gate setup_pqg_disabled_comment
+case_check plan-quality-gate.sh teamcreate.json 2 plan-quality-gate setup_pqg_child_map            # K-107: nested enabled:false does not bleed
+case_check plan-quality-gate.sh teamcreate.json 2 plan-quality-gate setup_pqg_sibling_parent       # K-107: sibling under a parent does not bleed
 case_check plan-quality-gate.sh teamcreate.json 0 "" setup_pqg_blocked "YAKOS_PLAN_QUALITY_DISABLE=1"
 case_check plan-quality-gate.sh pretooluse-generic-tool.json 0 "" setup_pqg_blocked
 
@@ -1695,10 +1725,10 @@ case_check mailbox-mirror.sh   sendmessage-peer-prefixed-agent.json 0 mailbox-mi
 # log name is "" on purpose: the hooklog record schema differs (pre-existing, tracked
 # separately); the buffer comparison above is what pins the payload-derived identity.
 case_check supervisor-stream.sh pretooluse-edit-api.json   0 "" setup_ss_passfilter "YAKOS_AGENT_ROLE=decoy-role CLAUDE_SESSION_ID=decoy-sid"
-# bash context-threshold.sh now sources lib/compat.sh (K-101), so both sides probe
-# the transcript. The remaining divergence is the Go log schema (action/message
-# instead of decision/reason, no agent/session_id/event), tracked as K-107.
-case_check context-threshold.sh pretooluse-generic-tool.json 0 context-threshold "" "CLAUDE_SESSION_ID=decoy-sid" "" home_ct_notice "0:Go context-threshold log schema differs from bash: action/message instead of decision/reason, and no agent/session_id/event (K-107)"
+# bash context-threshold.sh sources lib/compat.sh (K-101), so both sides probe the
+# transcript. Since K-107 the Go side also encodes the project path like bash
+# ct_encode_project_path and writes bash's log schema, so this is an exact case.
+case_check context-threshold.sh pretooluse-generic-tool.json 0 context-threshold "" "CLAUDE_SESSION_ID=decoy-sid" "" home_ct_notice
 
 # K-100 item 5: undecodable stdin (0 bytes) on NON-BLOCKING hooks. The registry
 # FailClosed flag (checked against bash HOOK_FAIL_CLOSED=1 by
@@ -1706,7 +1736,7 @@ case_check context-threshold.sh pretooluse-generic-tool.json 0 context-threshold
 # WARN on stderr and pass with exit 0 and no stdout, exactly like bash's
 # _hi_fail_or_warn. Where the log record differs it is an accepted, pinned
 # divergence, see DEGRADED_ACCEPT below.
-DEGRADED_ACCEPT="0:bash continues into the hook body with EMPTY input after the WARN and appends a log or telemetry record built from empty fields; Go exits 0 right after the identical WARN. Neither blocks nor writes stdout."
+DEGRADED_ACCEPT="0/0:bash continues into the hook body with EMPTY input after the WARN and appends a log or telemetry record built from empty fields; Go exits 0 right after the identical WARN. Neither blocks nor writes stdout."
 case_check context-inject.sh        pretooluse-write-empty-stdin.json 0 ""
 case_check context-threshold.sh     pretooluse-write-empty-stdin.json 0 context-threshold "" "" "" "" "$DEGRADED_ACCEPT"
 case_check cycle-counter.sh         pretooluse-write-empty-stdin.json 0 cycle-counter "" "" "" "" "$DEGRADED_ACCEPT"
@@ -1741,14 +1771,14 @@ case_check path-allowlist.sh   pretooluse-write-rootlink-dotdot.json   2 path-al
 case_check path-allowlist.sh   pretooluse-write-midstar-deny.json      2 path-allowlist setup_allowlist_midstar_deny
 case_check path-allowlist.sh   pretooluse-write-midstar-ok.json        0 path-allowlist setup_allowlist_midstar_deny
 # jq missing / garbage on an ALLOWED path: bash fails closed (2), Go evaluates and allows (0).
-case_check path-allowlist.sh   pretooluse-edit-api.json                2 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH" "" "" "0:bash fails closed on degraded input (jq missing or printing garbage) even for an allowed path; Go never depends on jq, evaluates the payload and allows it"
-case_check path-allowlist.sh   pretooluse-edit-api.json                2 "" setup_allowlist_strict "PATH=$FAKEJQ_GARBAGE_PATH" "" "" "0:bash fails closed on degraded input (jq missing or printing garbage) even for an allowed path; Go never depends on jq, evaluates the payload and allows it"
+case_check path-allowlist.sh   pretooluse-edit-api.json                2 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH" "" "" "2/0:bash fails closed on degraded input (jq missing or printing garbage) even for an allowed path; Go never depends on jq, evaluates the payload and allows it"
+case_check path-allowlist.sh   pretooluse-edit-api.json                2 "" setup_allowlist_strict "PATH=$FAKEJQ_GARBAGE_PATH" "" "" "2/0:bash fails closed on degraded input (jq missing or printing garbage) even for an allowed path; Go never depends on jq, evaluates the payload and allows it"
 
 # realpath-fallback tail collapse (guards _ps_abs_normalize; only the NORESOLVE case reaches it).
 case_check path-allowlist.sh   pretooluse-write-fallback-tail-dotdot.json 2 path-allowlist setup_symlink_lnk_to_api
 case_check path-allowlist.sh   pretooluse-write-fallback-tail-dotdot.json 2 path-allowlist setup_symlink_lnk_to_api "PATH=$NORESOLVE_PATH"
 # Symlink cycle: not an escape (the OS returns ELOOP), so bash's pass is harmless; Go fails closed.
-case_check path-allowlist.sh   pretooluse-write-symlink-cycle.json 0 path-allowlist setup_symlink_cycle "" "" "" "2:a symlink cycle is not an escape (ELOOP on write) so bash passes; Go's resolver fails closed on an unresolvable chain"
+case_check path-allowlist.sh   pretooluse-write-symlink-cycle.json 0 path-allowlist setup_symlink_cycle "" "" "" "0/2:a symlink cycle is not an escape (ELOOP on write) so bash passes; Go's resolver fails closed on an unresolvable chain"
 
 # --- plan-quality-gate / plan-quality-score (K-81 split) ---
 # The gate is the fail-closed PreToolUse half; the scorer is the conservative
@@ -1800,12 +1830,17 @@ setup_pqs_good_block()    { _pqs_plan "$1" good-plan.md 30 "$PQS_BLOCK_YML"; }
 setup_pqs_dissent_block() { _pqs_plan "$1" dissent-plan.md 30 "$PQS_BLOCK_YML"; }
 setup_pqs_yml_is_dir()   { _pqs_plan "$1" good-plan.md 30 ""; rm -f "$1/.yakos.yml"; mkdir "$1/.yakos.yml"; }
 setup_pqs_fresh_plan()    { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; }
+# K-107 item 6: nested enabled:false must not disable scoring on either side.
+setup_pqs_child_disabled()   { _pqs_plan "$1" vague-plan.md 30 $'plan_quality:\n  panel:\n    enabled: false\n  mode: block\n  threshold: 0.75\n'; }
+setup_pqs_sibling_disabled() { _pqs_plan "$1" vague-plan.md 30 $'parent:\n  plan_quality:\n    mode: block\n    threshold: 0.75\n  sibling:\n    enabled: false\n'; }
 case_check plan-quality-score.sh posttooluse-write-plan-md-toolinput-only.json 0 plan-quality-score setup_pqs_disabled
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_vague_block   "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # below threshold + block: .plan-blocked, block_next_tool
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_vague_surface "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # below threshold + surface: notes only
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_good_block    "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/good"         "" pqs_home   # above threshold: pass
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_dissent_block "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/dissent"      "" pqs_home   # dissent: surface, never block
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_fresh_plan    "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"        "" pqs_home   # mtime < 5 s: debounced, nothing scored
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_child_disabled   "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # K-107: child-map enabled:false does not bleed: scored, .plan-blocked written
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_sibling_disabled "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # K-107: sibling under a parent does not bleed
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_yml_is_dir     "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/good"         "" pqs_home   # .yakos.yml is a directory: defaults + WARN on both sides
 case_check plan-quality-score.sh posttooluse-write-other-file.json   0 ""                 setup_pqs_vague_block   "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # non-plan.md write: silent no-op
 
@@ -1828,6 +1863,7 @@ total_cases="$(wc -l < "$REPORT_FILE" | tr -d ' ')"
 total_parity="$(jq -s '[.[] | select(.divergence == "-")] | length' "$REPORT_FILE" 2>/dev/null || echo 0)"
 total_accepted="$(jq -s '[.[] | select(.divergence == "accepted")] | length' "$REPORT_FILE" 2>/dev/null || echo 0)"
 total_stale="$(jq -s '[.[] | select(.divergence == "accept-stale")] | length' "$REPORT_FILE" 2>/dev/null || echo 0)"
+total_pin_mismatch="$(jq -s '[.[] | select(.divergence == "accept-pin-mismatch")] | length' "$REPORT_FILE" 2>/dev/null || echo 0)"
 
 jq -rs '
   group_by(.hook)
@@ -1876,6 +1912,11 @@ for _h in ${YAKOS_PARITY_REQUIRE_HOOKS-path-allowlist}; do
 done
 if [ "$total_stale" != "0" ]; then
     echo "PARITY GATE FAIL: $total_stale stale accept annotation(s) (the divergence no longer exists; remove the annotation)" >&2
+    gate_fail=1
+fi
+
+if [ "$total_pin_mismatch" != "0" ]; then
+    echo "PARITY GATE FAIL: $total_pin_mismatch accepted case(s) whose pinned bash/go exit code moved on either side (update the annotation only after re-reviewing the decision)" >&2
     gate_fail=1
 fi
 

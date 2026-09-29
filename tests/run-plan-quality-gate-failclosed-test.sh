@@ -247,6 +247,27 @@ run_suite() {
     run_hook "$SH" plan-quality-gate.sh "$sb" "$(pl_agent)"
     expect "enabled:false in a DIFFERENT section does not disable the gate" 2
 
+    # -- K-107: per-key block reader (shared with the scorer and the Go twins) ------
+    # opt_out_case <label> <yml> <want-rc>: marker present, Agent dispatched.
+    opt_out_case() {
+        local label="$1" yml="$2" want="$3" sbx
+        sbx="$(new_sandbox "g19b-$SHLABEL-$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '-')")"
+        marker_json > "$sbx/work/current/.plan-blocked"
+        printf '%s' "$yml" > "$sbx/proj/.yakos.yml"
+        run_hook "$SH" plan-quality-gate.sh "$sbx" "$(pl_agent)"
+        expect "opt-out reader: $label" "$want"
+        if [ "$want" = 0 ]; then
+            if [ ! -e "$sbx/work/current/.plan-blocked" ]; then ok "$SHLABEL: $label clears the marker"; else bad "$SHLABEL: $label left the marker"; fi
+        fi
+    }
+    opt_out_case "YAML error elsewhere keeps enabled:false" $'broken: [unclosed\nplan_quality:\n  enabled: false\n' 0
+    opt_out_case "inline comment after false" $'plan_quality:\n  enabled: false # off for now\n' 0
+    opt_out_case "quoted false" $'plan_quality:\n  enabled: "false"\n' 0
+    opt_out_case "child map enabled:false does not bleed" $'plan_quality:\n  panel:\n    enabled: false\n  mode: block\n' 2
+    opt_out_case "sibling under a parent does not bleed" $'parent:\n  plan_quality:\n    mode: block\n  sibling:\n    enabled: false\n' 2
+    opt_out_case "sibling at the child indent does not bleed" $'parent:\n  plan_quality:\n    mode: block\n  enabled: false\n' 2
+    opt_out_case "a later enabled:true wins" $'plan_quality:\n  enabled: false\n  enabled: true\n' 2
+
     # -- bypass leaves a record ----------------------------------------------------
     sb="$(new_sandbox g20-$SHLABEL-disable-log)"
     run_hook "$SH" plan-quality-gate.sh "$sb" "$(pl_agent)" YAKOS_PLAN_QUALITY_DISABLE=1

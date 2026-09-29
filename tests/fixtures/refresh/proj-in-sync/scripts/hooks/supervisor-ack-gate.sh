@@ -40,6 +40,12 @@
 
 set -eu
 
+# K-107: this hook can block, and every exit other than 2 is non-blocking in
+# Claude Code. Until ho_install_gate_traps takes over (below), any exit is a
+# block; SIGPIPE is ignored so a closed stderr cannot kill the hook with 141.
+trap '' PIPE
+trap 'exit 2' TERM HUP INT EXIT
+
 # This hook can BLOCK (ho_block below on unacknowledged escalations), so it
 # fails closed on a missing jq or malformed stdin rather than silently
 # passing every TeamCreate/Agent dispatch — see HOOK_FAIL_CLOSED in
@@ -50,10 +56,18 @@ set -eu
 HOOK_FAIL_CLOSED=1
 
 HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)"
-. "$HOOK_DIR/lib/hook-input.sh"
-. "$HOOK_DIR/lib/hook-output.sh"
-# shellcheck source=lib/paths.sh
-. "$HOOK_DIR/lib/paths.sh"
+# Bootstrap lib/hook-output.sh: it provides the gate helpers, so it cannot be
+# loaded by one. Checked explicitly because a failed `.` does not abort on bash
+# 3.2, and the last-line sentinel proves the file parsed to the end.
+# shellcheck disable=SC1090,SC1091
+if [ ! -r "$HOOK_DIR/lib/hook-output.sh" ] || ! . "$HOOK_DIR/lib/hook-output.sh" || [ "${HO_LOADED:-0}" != "1" ]; then
+    echo "supervisor-ack-gate: BLOCKED — cannot load helper library '$HOOK_DIR/lib/hook-output.sh' (missing, a directory, or failed to parse to completion); failing closed." >&2 || true
+    exit 2
+fi
+ho_install_gate_traps "supervisor-ack-gate"
+ho_source_lib "$HOOK_DIR/lib/hook-input.sh" HI_LOADED
+ho_source_lib "$HOOK_DIR/lib/paths.sh" YAKOS_PATHS_LOADED
+ho_gate_ready
 
 # --- Guard: emergency bypass --------------------------------------------------
 #

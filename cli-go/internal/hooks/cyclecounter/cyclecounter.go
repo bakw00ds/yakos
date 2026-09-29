@@ -190,12 +190,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 // hi_field_or '.agent_type' 'lead' (top-level, fallback "lead" when
 // absent/empty), trimmed, then the "yakos:" namespace prefix stripped.
 func senderRole(in hooktype.HookInput) string {
-	raw := hookio.PayloadString(in, "agent_type")
-	if raw == "" {
-		raw = "lead"
-	}
-	raw = strings.TrimSpace(raw)
-	return strings.TrimPrefix(raw, "yakos:")
+	return hookio.SenderRole(in)
 }
 
 // ---- settings.json overrides --------------------------------------------------

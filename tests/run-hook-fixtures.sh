@@ -193,7 +193,7 @@ case_check() {
     # HOME per-case here is what makes it safe to finally cover that path
     # without depending on the real machine's ~/.yakos-state contents.
     local hook="$1" fixture="$2" expected_rc="$3" log_name="$4" setup_fn="${5:-}" extra_env="${6:-}" cpd_suffix="${7:-}" home_fn="${8:-}"
-    # 9th arg (accept): "<go-rc>:<reason>" — used only by run-hook-parity.sh to
+    # 9th arg (accept): "<bash-rc>/<go-rc>:<reason>" — used only by run-hook-parity.sh to
     # document an intentional bash-vs-Go divergence. Ignored here (bash-only).
     # shellcheck disable=SC2034
     local accept="${9:-}"
@@ -970,7 +970,7 @@ case_check path-allowlist.sh   pretooluse-write-pem-upper.json    2 path-allowli
 # project root must be blocked regardless of what the allow list says.
 case_check path-allowlist.sh   pretooluse-write-symlink-escape.json 2 path-allowlist setup_symlink_escape
 # C5: missing jq must fail CLOSED (block), not silently pass every write.
-case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH" "" "" "2:Go never shells out to jq; a jq-less PATH cannot degrade it, so it decides on policy where bash fails closed on degraded input"
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH" "" "" "2/2:Go never shells out to jq; a jq-less PATH cannot degrade it, so it decides on policy where bash fails closed on degraded input"
 # N1 (round 2): an absolute out-of-root file_path — the shape Claude Code
 # actually sends — must be rejected even under an allow:["**"] policy or a
 # deny-only policy, and an in-root ABSOLUTE path must still PASS (the
@@ -990,7 +990,7 @@ case_check path-allowlist.sh   pretooluse-write-symlink-escape.json 2 path-allow
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json 2 path-allowlist setup_allowlist_corrupt_truncated
 # N2 (round 2): the emergency escape hatch must be honored even with jq
 # missing, and only when actually set.
-case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "2:Go never shells out to jq; a jq-less PATH cannot degrade it, so it decides on policy where bash fails closed on degraded input"
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "0/2:Go never shells out to jq; a jq-less PATH cannot degrade it, so it decides on policy where bash fails closed on degraded input"
 # C5 residue (round 2, addendum): same hi_init gap as secret-scan below —
 # an empty pipe and a non-object JSON payload must both fail closed.
 case_check path-allowlist.sh   pretooluse-write-empty-stdin.json      2 path-allowlist setup_allowlist_strict
@@ -1046,10 +1046,10 @@ case_check secret-scan.sh      pretooluse-write-stripe-key.json      2 secret-sc
 case_check secret-scan.sh      pretooluse-write-anthropic-key.json   2 secret-scan
 case_check secret-scan.sh      pretooluse-write-google-key.json      2 secret-scan
 # C5: missing jq must fail CLOSED (block), not silently pass every write.
-case_check secret-scan.sh      pretooluse-write-secret.json      2 secret-scan "" "PATH=$NOJQ_PATH" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
+case_check secret-scan.sh      pretooluse-write-secret.json      2 secret-scan "" "PATH=$NOJQ_PATH" "" "" "2/2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 # N2 (round 2): the emergency escape hatch must be honored even with jq
 # missing.
-case_check secret-scan.sh      pretooluse-write-secret.json      0 secret-scan "" "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
+case_check secret-scan.sh      pretooluse-write-secret.json      0 secret-scan "" "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "0/2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 # C5 residue (round 2, addendum): hi_init used to pass on an empty pipe
 # (the `[ -n "$HI_INPUT" ] &&` guard skipped validation on a zero-byte
 # read) and on valid-JSON-that-isn't-an-object (`jq empty` accepts an
@@ -1094,7 +1094,7 @@ case_check secret-scan.sh      pretooluse-multiedit-secret-newstring.json      2
 # missing-jq fail-closed case.
 case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard setup_budget_headroom
 case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_low_cap
-case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_low_cap "PATH=$NOJQ_PATH" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
+case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_low_cap "PATH=$NOJQ_PATH" "" "" "2/2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 # N2 (round 2): budget-guard matches EVERY tool call ("*"), so this is the
 # hook where a missing jq previously locked an operator out of the whole
 # session. Its own emergency var, YAKOS_BUDGET_DISABLE, is now checked
@@ -1109,7 +1109,7 @@ case_check budget-guard.sh     pretooluse-generic-tool.json      0 "" setup_budg
 # now be a clean rc=0 with no crash. This exact combination was
 # deliberately NOT asserted in round 2 (see the comment that used to sit
 # here) because it was known-broken; now fixed and locked in.
-case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard setup_budget_low_cap "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
+case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard setup_budget_low_cap "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "0/2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 
 # --- supervisor-gate ---
 # R2-2 (round 3): a second, independent instance of the same defect class
@@ -1117,7 +1117,7 @@ case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard 
 # and reaches unguarded `jq -r` calls once a supervisor-findings.ndjson
 # file exists (a common state in an active session, not a rare edge
 # case). Same fix, same fixture shape.
-case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_supervisor_findings_critical "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_supervisor_findings_critical "PATH=$NOJQ_PATH YAKOS_HOOKS_FAIL_OPEN=1" "" "" "0/2:Go never shells out to jq, so a jq-less PATH cannot degrade it; it evaluates the payload and enforces its decision where bash fails closed (or, with YAKOS_HOOKS_FAIL_OPEN=1, passes) on degraded input"
 
 # --- mailbox-mirror ---
 case_check mailbox-mirror.sh   sendmessage-peer.json             0 mailbox-mirror
@@ -1224,8 +1224,8 @@ case_check path-allowlist.sh   pretooluse-write-dotdot-after-symlink.json 2 path
 case_check path-allowlist.sh   pretooluse-write-nul-in-path.json 2 path-allowlist setup_allowlist_strict
 # Broken jq (present but misbehaving): bash now fails closed on a jq that prints garbage;
 # Go never shells out to jq.
-case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 "" setup_allowlist_strict "PATH=$FAKEJQ_GARBAGE_PATH" "" "" "2:bash fails closed on degraded input (jq printing garbage); Go is jq-independent and blocks on policy (same exit code, different log record)"
-case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict "PATH=$FAKEJQ_FAIL_PATH" "" "" "2:bash fails closed on a crashing jq (degraded input); Go is jq-independent and blocks on policy"
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 "" setup_allowlist_strict "PATH=$FAKEJQ_GARBAGE_PATH" "" "" "2/2:bash fails closed on degraded input (jq printing garbage); Go is jq-independent and blocks on policy (same exit code, different log record)"
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict "PATH=$FAKEJQ_FAIL_PATH" "" "" "2/2:bash fails closed on a crashing jq (degraded input); Go is jq-independent and blocks on policy"
 
 # --- supervisor-gate: K-87 A-2b -----------------------------------------------
 case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_sg_pass
@@ -1242,7 +1242,7 @@ case_check supervisor-gate.sh  pretooluse-edit-api.json          0 "" "" "YAKOS_
 # Accepted: a valid-JSON NON-object last line (e.g. []) crashes bash (jq error
 # under set -e, rc=5 — a non-blocking hook error); Go treats it as an unusable
 # finding, logs a WARN and passes (rc=0).
-case_check supervisor-gate.sh  pretooluse-edit-api.json          5 "" setup_sg_nonobject "" "" "" "0:bash crashes (rc=5, jq error under set -e) on a valid-JSON non-object last line; Go treats it as an unusable finding and passes with a WARN"
+case_check supervisor-gate.sh  pretooluse-edit-api.json          0 supervisor-gate setup_sg_nonobject   # K-107: a non-object last finding warns and passes on both sides
 
 # --- budget-guard: K-87 A-2b ----------------------------------------------------
 case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_repeat_cap
@@ -1345,14 +1345,14 @@ case_check path-allowlist.sh   pretooluse-write-rootlink-dotdot.json   2 path-al
 case_check path-allowlist.sh   pretooluse-write-midstar-deny.json      2 path-allowlist setup_allowlist_midstar_deny
 case_check path-allowlist.sh   pretooluse-write-midstar-ok.json        0 path-allowlist setup_allowlist_midstar_deny
 # jq missing / garbage on an ALLOWED path: bash fails closed (2), Go evaluates and allows (0).
-case_check path-allowlist.sh   pretooluse-edit-api.json                2 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH" "" "" "0:bash fails closed on degraded input (jq missing or printing garbage) even for an allowed path; Go never depends on jq, evaluates the payload and allows it"
-case_check path-allowlist.sh   pretooluse-edit-api.json                2 "" setup_allowlist_strict "PATH=$FAKEJQ_GARBAGE_PATH" "" "" "0:bash fails closed on degraded input (jq missing or printing garbage) even for an allowed path; Go never depends on jq, evaluates the payload and allows it"
+case_check path-allowlist.sh   pretooluse-edit-api.json                2 path-allowlist setup_allowlist_strict "PATH=$NOJQ_PATH" "" "" "2/0:bash fails closed on degraded input (jq missing or printing garbage) even for an allowed path; Go never depends on jq, evaluates the payload and allows it"
+case_check path-allowlist.sh   pretooluse-edit-api.json                2 "" setup_allowlist_strict "PATH=$FAKEJQ_GARBAGE_PATH" "" "" "2/0:bash fails closed on degraded input (jq missing or printing garbage) even for an allowed path; Go never depends on jq, evaluates the payload and allows it"
 
 # realpath-fallback tail collapse (guards _ps_abs_normalize; only the NORESOLVE case reaches it).
 case_check path-allowlist.sh   pretooluse-write-fallback-tail-dotdot.json 2 path-allowlist setup_symlink_lnk_to_api
 case_check path-allowlist.sh   pretooluse-write-fallback-tail-dotdot.json 2 path-allowlist setup_symlink_lnk_to_api "PATH=$NORESOLVE_PATH"
 # Symlink cycle: not an escape (the OS returns ELOOP), so bash's pass is harmless; Go fails closed.
-case_check path-allowlist.sh   pretooluse-write-symlink-cycle.json 0 path-allowlist setup_symlink_cycle "" "" "" "2:a symlink cycle is not an escape (ELOOP on write) so bash passes; Go's resolver fails closed on an unresolvable chain"
+case_check path-allowlist.sh   pretooluse-write-symlink-cycle.json 0 path-allowlist setup_symlink_cycle "" "" "" "0/2:a symlink cycle is not an escape (ELOOP on write) so bash passes; Go's resolver fails closed on an unresolvable chain"
 
 # ---- syntax pass (K-101) ------------------------------------------------------
 #

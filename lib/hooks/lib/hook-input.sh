@@ -177,8 +177,112 @@ _hi_decoder_sane() {
     a=$(( ($$ % 89) + 11 ))
     b=$(( (${RANDOM:-7} % 89) + 11 ))
     want=$(( a * b + a ))
-    got="$(jq -nr --argjson a "$a" --argjson b "$b" '$a * $b + $a' 2>/dev/null)" || return 1
+    got="$(_hi_jq -nr --argjson a "$a" --argjson b "$b" '$a * $b + $a' 2>/dev/null)" || return $?
     [ "$got" = "$want" ]
+}
+
+# _hi_jq [jq args...] — jq with a bounded wait (K-107). A hung jq would run into
+# Claude Code's own hook timeout, which is NON-blocking, so a blocking hook
+# would silently fail open. stdin/stdout/stderr pass straight through; the exit
+# status is jq's own, or 124 when jq did not finish within the limit (GNU
+# `timeout`'s convention).
+#
+# Uses a GNU `timeout` / `gtimeout` when there is one. Otherwise (macOS) jq runs
+# in the background and the shell `wait`s on it while a background watchdog
+# subshell sleeps for the limit and then TERMs (later KILLs) jq: nothing polls,
+# so a jq that finishes on time adds only the cost of forking the watchdog.
+# `<&0` is explicit because an asynchronous command otherwise gets /dev/null.
+#
+# YAKOS_HOOK_JQ_TIMEOUT: whole seconds, parsed base 10 (so 08 is 8), clamped to
+# 1..30; unset means 5; anything else means 5 with a one-time WARN from hi_init.
+_hi_jq_limit_parse() {
+    # sets _HI_JQ_LIMIT; returns 1 when the env value was unusable
+    local v="${YAKOS_HOOK_JQ_TIMEOUT:-}"
+    _HI_JQ_LIMIT=5
+    [ -n "$v" ] || return 0
+    case "$v" in
+        *[!0-9]*) return 1 ;;
+    esac
+    if [ "${#v}" -gt 3 ]; then _HI_JQ_LIMIT=30; return 0; fi
+    v=$(( 10#$v ))
+    if [ "$v" -lt 1 ]; then v=1; fi
+    if [ "$v" -gt 30 ]; then v=30; fi
+    _HI_JQ_LIMIT=$v
+    return 0
+}
+
+# _hi_pick_timeout: set _HI_JQ_TBIN to a GNU-compatible timeout ("timeout" or
+# "gtimeout") or "" when there is none, and _HI_JQ_LIMIT. `command -v timeout`
+# alone is not enough: Windows ships timeout.exe (a sleep with /t syntax) that
+# Git-bash finds first, and `timeout 5 jq ...` through it fails with exit 1
+# without running jq. GNU coreutils answers --version; anything else falls back
+# to the watchdog. hi_init calls this in the main shell so the answer is cached;
+# a $(...) subshell without a cached answer probes each time.
+_hi_pick_timeout() {
+    _HI_JQ_TBIN=""
+    local c
+    for c in timeout gtimeout; do
+        if command -v "$c" >/dev/null 2>&1 && "$c" --version 2>/dev/null | grep -q 'GNU coreutils'; then
+            _HI_JQ_TBIN="$c"
+            break
+        fi
+    done
+    if ! _hi_jq_limit_parse; then
+        echo "hook-input: WARN — YAKOS_HOOK_JQ_TIMEOUT='${YAKOS_HOOK_JQ_TIMEOUT:-}' is not a whole number of seconds; using 5." >&2 || true
+    fi
+    return 0
+}
+
+_hi_jq() {
+    # Once one call has timed out, every later call fails fast (rc 124): the
+    # exit path (ho_log's own jq) must not spend another full limit per call.
+    [ "${_HI_JQ_HUNG:-0}" = "1" ] && return 124
+    if [ "${_HI_JQ_TBIN+set}" != "set" ]; then
+        _hi_jq_limit_parse || true
+        _HI_JQ_TBIN=""
+        local c
+        for c in timeout gtimeout; do
+            if command -v "$c" >/dev/null 2>&1 && "$c" --version 2>/dev/null | grep -q 'GNU coreutils'; then _HI_JQ_TBIN="$c"; break; fi
+        done
+    fi
+    local limit="${_HI_JQ_LIMIT:-5}" tbin="$_HI_JQ_TBIN"
+    if [ -n "$tbin" ]; then
+        local trc=0
+        "$tbin" "$limit" jq "$@" || trc=$?
+        # 125-127: timeout itself could not run jq. Do not treat that as jq's
+        # answer; fall through to the watchdog below.
+        case "$trc" in 125|126|127) ;; *) return "$trc" ;; esac
+    fi
+
+    local pid wd rc=0
+    jq "$@" <&0 &
+    pid=$!
+    (
+        sp=""
+        trap 'kill "$sp" 2>/dev/null; exit 0' TERM
+        sleep "$limit" & sp=$!
+        wait "$sp"
+        kill -TERM "$pid" 2>/dev/null
+        sleep 1 & sp=$!
+        wait "$sp"
+        kill -KILL "$pid" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    wd=$!
+    { wait "$pid"; } 2>/dev/null || rc=$?
+    # Stop the watchdog (its TERM trap also kills its own sleep) and reap it
+    # quietly, so no "Terminated" job notice reaches stderr.
+    kill -TERM "$wd" 2>/dev/null || true
+    { wait "$wd"; } 2>/dev/null || true
+    # jq killed by the watchdog: 143 (TERM) or 137 (KILL).
+    case "$rc" in 143|137) return 124 ;; esac
+    return "$rc"
+}
+
+# _hi_jq_hung <rc>: 0 when <rc> is the timeout status (and remembers it).
+_hi_jq_hung() {
+    [ "$1" = "124" ] || return 1
+    _HI_JQ_HUNG=1
+    return 0
 }
 
 # hi_skip_if_no_jq — for NON-BLOCKING (telemetry / report-only) hooks.
@@ -236,7 +340,16 @@ hi_init() {
         return 0
     fi
 
-    if ! jq empty <<< "$HI_INPUT" >/dev/null 2>&1; then
+    # Every jq call below is bounded (_hi_jq, K-107): rc 124 = jq hung.
+    _hi_pick_timeout
+    local _hi_rc=0
+    _hi_jq empty <<< "$HI_INPUT" >/dev/null 2>&1 || _hi_rc=$?
+    if _hi_jq_hung "$_hi_rc"; then
+        HI_INPUT=""
+        _hi_fail_or_warn "jq did not answer within ${_HI_JQ_LIMIT:-5}s (hung jq)" exit
+        return 0
+    fi
+    if [ "$_hi_rc" -ne 0 ]; then
         HI_INPUT=""
         _hi_fail_or_warn "stdin did not parse as valid JSON"
         return 0
@@ -248,7 +361,14 @@ hi_init() {
     # `.tool_input.file_path`, ...), so a non-object payload silently
     # yielded empty fields everywhere, which is the same fail-open shape
     # as malformed JSON.
-    if ! jq -e 'type == "object"' <<< "$HI_INPUT" >/dev/null 2>&1; then
+    _hi_rc=0
+    _hi_jq -e 'type == "object"' <<< "$HI_INPUT" >/dev/null 2>&1 || _hi_rc=$?
+    if _hi_jq_hung "$_hi_rc"; then
+        HI_INPUT=""
+        _hi_fail_or_warn "jq did not answer within ${_HI_JQ_LIMIT:-5}s (hung jq)" exit
+        return 0
+    fi
+    if [ "$_hi_rc" -ne 0 ]; then
         HI_INPUT=""
         _hi_fail_or_warn "stdin parsed as JSON but is not a JSON object (hook payloads are always an object)"
         return 0
@@ -265,13 +385,27 @@ hi_init() {
     # (cli-go/internal/workflow/output_scan.go) invokes output-injection-scan.sh
     # with a synthetic {tool_name, tool_response, agent_type} payload that has
     # none, and requiring it turned every workflow node scan into a block.
-    if ! _hi_decoder_sane; then
+    _hi_rc=0
+    _hi_decoder_sane || _hi_rc=$?
+    if _hi_jq_hung "$_hi_rc"; then
+        HI_INPUT=""
+        _hi_fail_or_warn "jq did not answer within ${_HI_JQ_LIMIT:-5}s (hung jq)" exit
+        return 0
+    fi
+    if [ "$_hi_rc" -ne 0 ]; then
         HI_INPUT=""
         _hi_fail_or_warn "jq is present but returned a wrong answer for a known query (broken or shadowed jq)" exit
         return 0
     fi
     local _hi_ev
-    _hi_ev="$(jq -r 'if type == "object" then ((.hook_event_name // .tool_name // "") | if type == "string" then . else "" end) else "" end' <<< "$HI_INPUT" 2>/dev/null)" || _hi_ev=""
+    _hi_rc=0
+    _hi_ev="$(_hi_jq -r 'if type == "object" then ((.hook_event_name // .tool_name // "") | if type == "string" then . else "" end) else "" end' <<< "$HI_INPUT" 2>/dev/null)" || _hi_rc=$?
+    if _hi_jq_hung "$_hi_rc"; then
+        HI_INPUT=""
+        _hi_fail_or_warn "jq did not answer within ${_HI_JQ_LIMIT:-5}s (hung jq)" exit
+        return 0
+    fi
+    [ "$_hi_rc" -eq 0 ] || _hi_ev=""
     if [ -n "$_hi_ev" ]; then
         case "$HI_INPUT" in
             *"$_hi_ev"*) ;;
@@ -362,6 +496,52 @@ hi_notebook_path() { hi_field '.tool_input.notebook_path'; } # NotebookEdit
 hi_msg_to()       { hi_field '.tool_input.to'; }
 hi_msg_summary()  { hi_field '.tool_input.summary'; }
 hi_msg_body()     { hi_field '.tool_input.message'; }
+
+# hi_yaml_block_children <file> <block>
+#   Print "key=value" for each DIRECT scalar child of the first `<block>:` block
+#   in <file>, without parsing the file as YAML (K-107). Go twin:
+#   cli-go/internal/hooks/yamlblock (Children); keep the two in step.
+#     - blank and comment-only lines are ignored everywhere
+#     - the block starts at the first line that is `<block>` + optional blanks +
+#       ":" (at any indent); that indent is the block indent
+#     - it ends at the first later line whose indent is <= the block indent
+#     - the first line inside the block fixes the child indent; only lines at
+#       exactly that indent are keys, so a child map's own keys and a sibling
+#       nested under a common parent never bleed in
+#     - value: trailing blanks trimmed, then an inline `blank+#...` comment
+#       removed, then every ' and " deleted
+#   Callers apply "later duplicate wins, empty value ignored" themselves.
+hi_yaml_block_children() {
+    awk -v blk="$2" '
+        BEGIN { in_block = 0; bi = 0; ci = -1 }
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            if (match(line, /[^ \t]/) == 0) next
+            n = RSTART - 1
+            rest = substr(line, n + 1)
+            if (substr(rest, 1, 1) == "#") next
+            if (!in_block) {
+                if (index(rest, blk) == 1) {
+                    r = substr(rest, length(blk) + 1)
+                    if (r ~ /^[ \t]*:/) { in_block = 1; bi = n }
+                }
+                next
+            }
+            if (n <= bi) exit
+            if (ci < 0) ci = n
+            if (n != ci) next
+            sub(/[ \t]+$/, "", rest)
+            sub(/[ \t]+#.*$/, "", rest)
+            if (match(rest, /^[A-Za-z0-9_.-]+[ \t]*:[ \t]*/) == 0) next
+            head = substr(rest, 1, RLENGTH)
+            val = substr(rest, RLENGTH + 1)
+            sub(/[ \t]*:[ \t]*$/, "", head)
+            gsub(/"/, "", val)
+            gsub(/'"'"'/, "", val)
+            print head "=" val
+        }' "$1" 2>/dev/null
+}
 
 # Must stay the last statement: reaching it proves the whole file parsed.
 HI_LOADED=1
