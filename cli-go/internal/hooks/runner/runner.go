@@ -109,6 +109,12 @@ type Runner struct {
 	// log entries. Defaults to time.Now when nil.
 	NowFn func() time.Time
 
+	// FailClosed marks the hook being run as one that can BLOCK (registry
+	// FailClosed). In bash-only mode a missing bash script then exits 2 with
+	// a stderr reason instead of passing silently; a non-blocking hook exits 0
+	// with a WARN. `yakos hook run` sets it from the registry entry.
+	FailClosed bool
+
 	bashAvailable bool
 	bashPath      string
 }
@@ -210,12 +216,20 @@ func (r *Runner) runGoOnly(ctx context.Context, h Hook, in HookInput) (HookOutpu
 }
 
 // runBashOnly skips Tier 0 and runs only Tier 2 (bash user-hook).
-// If no .sh file exists the hook is a no-op (exit 0).
+// If no .sh file exists a non-blocking hook exits 0 with a WARN, and a
+// FailClosed hook exits 2 with a stderr reason (K-107): a missing script
+// would otherwise disable the enforcement hook without any signal.
 func (r *Runner) runBashOnly(ctx context.Context, h Hook, in HookInput) (HookOutput, error) {
 	out := HookOutput{ExitCode: 0}
 	shPath := r.shPath(h.Name())
 	if _, statErr := os.Stat(shPath); os.IsNotExist(statErr) {
-		// No bash hook present — no-op, not an error.
+		if r.FailClosed {
+			msg := fmt.Sprintf("%s: BLOCKED \u2014 bash script %s not found (YAKOS_HOOKS=bash); this hook enforces a security control and refusing to fail open. Re-provision the framework (yakos upgrade) or run with --impl go.\n", h.Name(), shPath)
+			out.ExitCode = 2
+			out.Stderr = []byte(msg)
+			return out, nil
+		}
+		fmt.Fprintf(r.writer(), "%s: WARN \u2014 bash script %s not found (YAKOS_HOOKS=bash); hook skipped for this event.\n", h.Name(), shPath)
 		return out, nil
 	}
 	if !r.bashAvailable {

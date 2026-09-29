@@ -1106,3 +1106,40 @@ func TestRunner_ModeOverrideBeatsEnv(t *testing.T) {
 		t.Errorf("control: bash mode without .sh should be a no-op, got %d", out.ExitCode)
 	}
 }
+
+// K-107 item 2: bash-only mode with no script on disk must not fail open for
+// a registry-fail-closed hook. It exits 2 with a stderr reason; a
+// non-blocking hook exits 0 and prints a WARN.
+func TestRunner_BashOnly_MissingScript_FailClosedBlocks(t *testing.T) {
+	r, _, _, _ := buildRunnerMode(t, "bash")
+	var w bytes.Buffer
+	r.Writer = &w
+	r.FailClosed = true
+	out, err := r.Run(context.Background(), newPassHook("secret-scan"), makeInput("PreToolUse", "Write"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.ExitCode != 2 {
+		t.Fatalf("fail-closed hook with no bash script: exit=%d want 2", out.ExitCode)
+	}
+	msg := string(out.Stderr) + w.String()
+	if !strings.Contains(msg, "secret-scan") || !strings.Contains(msg, "refusing to fail open") {
+		t.Fatalf("expected a stderr reason naming the hook, got %q", msg)
+	}
+}
+
+func TestRunner_BashOnly_MissingScript_NonBlockingWarns(t *testing.T) {
+	r, _, _, _ := buildRunnerMode(t, "bash")
+	var w bytes.Buffer
+	r.Writer = &w
+	out, err := r.Run(context.Background(), newPassHook("path-log"), makeInput("PostToolUse", "Write"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.ExitCode != 0 {
+		t.Fatalf("non-blocking hook with no bash script: exit=%d want 0", out.ExitCode)
+	}
+	if !strings.Contains(w.String(), "WARN") || !strings.Contains(w.String(), "path-log") {
+		t.Fatalf("expected a WARN naming the hook, got %q", w.String())
+	}
+}
