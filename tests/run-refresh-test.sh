@@ -494,6 +494,120 @@ else
 fi
 
 # ===========================================================================
+# Test 11 (K-94 / K-81): hook layout matches Go — legacy/ deploys flat, never
+# as a subdirectory; a refreshed project then reports "in sync".
+# ===========================================================================
+echo ""
+echo "Test 11: legacy/ hooks deploy flat; refreshed project reports in sync"
+T11="$(setup_project proj-missing-settings)"
+run_refresh "$T11" >/dev/null 2>&1 || true
+
+if [ -d "$T11/project/scripts/hooks/legacy" ]; then
+    fail "legacy/ was recreated as a subdirectory of scripts/hooks (Go flattens it)"
+else
+    ok "no scripts/hooks/legacy/ subdirectory created"
+fi
+if [ -f "$T11/project/scripts/hooks/auto-compact-trigger.sh" ]; then
+    ok "legacy-only hook auto-compact-trigger.sh deployed flat"
+else
+    fail "legacy-only hook auto-compact-trigger.sh was NOT deployed flat"
+fi
+OUT11="$(run_refresh "$T11" 2>&1 || true)"
+if echo "$OUT11" | grep -q "status:   in sync"; then
+    ok "second run reports 'in sync' (K-81)"
+else
+    fail "second run did not report 'in sync' (got: $(echo "$OUT11" | grep 'hooks:\|status:' | tr '\n' ' '))"
+fi
+
+# ===========================================================================
+# Test 12 (K-94): settings merge dedupes prefix drift and keys hooks by path
+# under scripts/hooks/, so same-named hooks in different subdirs stay distinct.
+# Uses a fake framework root with a purpose-built template.
+# ===========================================================================
+echo ""
+echo "Test 12: merge dedupes absolute-path form; same-named hooks in subdirs stay distinct"
+T12="$WORKDIR/t12"
+mkdir -p "$T12/root/lib/hooks" "$T12/root/lib/settings" "$T12/root/lib/agents" "$T12/project/.claude" "$T12/home"
+cat > "$T12/root/lib/settings/settings.template.json" <<'JSON'
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/a/check.sh"},
+          {"type": "command", "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/b/check.sh"},
+          {"type": "command", "command": "${CLAUDE_PROJECT_DIR}/scripts/hooks/top.sh"}
+        ]
+      }
+    ]
+  }
+}
+JSON
+cat > "$T12/project/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "/Users/x/repo/scripts/hooks/top.sh"}
+        ]
+      }
+    ]
+  }
+}
+JSON
+HOME="$T12/home" YAKOS_ROOT="$T12/root" YAKOS_LIB="$YAKOS_LIB" \
+    bash "$REFRESH_SH" --project "$T12/project" >/dev/null 2>&1 || true
+S12="$T12/project/.claude/settings.json"
+for name in a/check.sh b/check.sh top.sh; do
+    n="$(jq_count_commands "$S12" "scripts/hooks/$name")"
+    if [ "$n" = "1" ]; then
+        ok "exactly one registration for scripts/hooks/$name"
+    else
+        fail "expected 1 registration for scripts/hooks/$name, found $n"
+    fi
+done
+if grep -q '/Users/x/repo' "$S12"; then
+    fail "absolute-path registration not replaced by template form"
+else
+    ok "absolute-path registration replaced (no duplicate)"
+fi
+
+# ===========================================================================
+# Test 13 (K-94): agent symlinks are pinned to the canonical checkout when
+# YAKOS_ROOT is a git worktree.
+# ===========================================================================
+echo ""
+echo "Test 13: agent symlinks target canonical checkout when YAKOS_ROOT is a worktree"
+if command -v git >/dev/null 2>&1; then
+    T13="$WORKDIR/t13"
+    mkdir -p "$T13/main/lib/hooks" "$T13/main/lib/settings" "$T13/main/lib/agents" "$T13/project" "$T13/home"
+    echo "# agent" > "$T13/main/lib/agents/zed.md"
+    echo '{"hooks": {}}' > "$T13/main/lib/settings/settings.template.json"
+    : > "$T13/main/lib/hooks/.gitkeep"
+    (
+        cd "$T13/main"
+        git init -q .
+        git add lib
+        git -c user.name=t -c user.email=t@example.invalid commit -q -m init
+        git worktree add -q "$T13/wt" -b wt-branch
+    ) >/dev/null 2>&1
+    MAIN_REAL="$(cd "$T13/main" && pwd -P)"
+    HOME="$T13/home" YAKOS_ROOT="$T13/wt" YAKOS_LIB="$YAKOS_LIB" \
+        bash "$REFRESH_SH" --project "$T13/project" >/dev/null 2>&1 || true
+    LINK_TARGET="$(readlink "$T13/home/.claude/agents/zed.md" 2>/dev/null || true)"
+    if [ "$LINK_TARGET" = "$MAIN_REAL/lib/agents/zed.md" ]; then
+        ok "agent symlink points at the canonical checkout, not the worktree"
+    else
+        fail "agent symlink target is '$LINK_TARGET' (expected $MAIN_REAL/lib/agents/zed.md)"
+    fi
+else
+    skip "git not available — worktree symlink test skipped"
+fi
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""
