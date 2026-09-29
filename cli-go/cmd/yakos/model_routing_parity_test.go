@@ -251,8 +251,8 @@ func TestMR_Eval_BudgetCap(t *testing.T) {
 	cfg.JudgeFn = alwaysPassJudge
 
 	_, err := routing.Run(cfg)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if err == nil {
+		t.Fatal("a budget-hit run is partial and must return an error")
 	}
 	data, _ := os.ReadFile(cfg.EvalLog)
 	if !strings.Contains(string(data), "budget_exceeded") {
