@@ -122,3 +122,33 @@ func TestSensitivePathEscalatesOnAbsolutePath(t *testing.T) {
 		})
 	}
 }
+
+// Loads the REAL shipped template (copied verbatim by `yakos init`), which
+// has a top-level "_doc" string, and asserts escalation on absolute paths.
+func TestStockTemplateEscalatesAbsoluteSensitivePaths(t *testing.T) {
+	tpl, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "lib", "settings", "path-allowlist.template.json"))
+	if err != nil {
+		t.Fatalf("read stock template: %v", err)
+	}
+	if !strings.Contains(string(tpl), `"_doc"`) {
+		t.Log("note: template no longer has _doc; test still validates the stock file")
+	}
+	for _, file := range []string{"/abs/proj/.env", "/abs/proj/.git/config", "/abs/proj/credentials/x"} {
+		t.Run(file, func(t *testing.T) {
+			work, proj := t.TempDir(), t.TempDir()
+			writeYAML(t, proj, "supervisor:\n  enabled: true\n")
+			_ = os.MkdirAll(filepath.Join(proj, ".claude"), 0755)
+			if err := os.WriteFile(filepath.Join(proj, ".claude", "path-allowlist.json"), tpl, 0644); err != nil {
+				t.Fatal(err)
+			}
+			in := hooktype.HookInput{Event: "PreToolUse", Tool: "Write", Env: map[string]string{},
+				Payload: map[string]any{"tool_input": map[string]any{"file_path": file, "content": "x"}}}
+			if _, err := newHook(work, proj).Run(context.Background(), in); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(work, ".supervisor-counter")); err != nil {
+				t.Fatalf("no escalation with stock template for %s: %v", file, err)
+			}
+		})
+	}
+}

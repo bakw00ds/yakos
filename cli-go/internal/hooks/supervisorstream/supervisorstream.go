@@ -268,14 +268,20 @@ func (h *Hook) checkSensitivePath(filePath, projectDir string) string {
 	if err != nil {
 		return ""
 	}
-	var policies map[string]struct {
-		Deny []string `json:"deny"`
-	}
+	// Decode per key: the stock template carries a top-level "_doc" string
+	// that must not poison the whole document (bash: .lead.deny // []).
+	var policies map[string]json.RawMessage
 	if err := json.Unmarshal(data, &policies); err != nil {
 		return ""
 	}
-	leadPolicy, ok := policies["lead"]
+	raw, ok := policies["lead"]
 	if !ok {
+		return ""
+	}
+	var leadPolicy struct {
+		Deny []string `json:"deny"`
+	}
+	if err := json.Unmarshal(raw, &leadPolicy); err != nil {
 		return ""
 	}
 	for _, glob := range leadPolicy.Deny {

@@ -60,4 +60,9 @@ func TestCoordDirUnwritableNoOp(t *testing.T) {
 	if _, err := os.Stat(activity(root)); err == nil {
 		t.Fatal("unwritable coord dir must no-op")
 	}
+	// The hook must not even attempt the confirm: no audit log line either
+	// (an attempted-but-failed write would still log).
+	if _, err := os.Stat(filepath.Join(root, "logs", "peer-claim-confirm.ndjson")); err == nil {
+		t.Fatal("unwritable coord dir must not produce a peer-claim-confirm log line")
+	}
 }
