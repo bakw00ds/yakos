@@ -609,3 +609,40 @@ func TestReadCycleCount_Garbage(t *testing.T) {
 		t.Errorf("expected 0 for garbage; got %d", n)
 	}
 }
+
+func TestStatus_LegacySentinel_WarnsOnStderr(t *testing.T) {
+	home := t.TempDir()
+	p := filepath.Join(home, ".yakos-state", "retro-disabled")
+	_ = os.MkdirAll(filepath.Dir(p), 0755)
+	if err := os.WriteFile(p, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := newTestConfig(home, "status")
+	var errBuf strings.Builder
+	cfg.ErrWriter = &errBuf
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.AutoDispatch {
+		t.Error("legacy sentinel must not change reported state")
+	}
+	if !strings.Contains(errBuf.String(), "legacy sentinel") {
+		t.Errorf("expected legacy-sentinel note on stderr; got %q", errBuf.String())
+	}
+	if !fileExists(p) {
+		t.Error("status must not delete the sentinel")
+	}
+
+	// No sentinel -> no note.
+	home2 := t.TempDir()
+	cfg2 := newTestConfig(home2, "status")
+	var errBuf2 strings.Builder
+	cfg2.ErrWriter = &errBuf2
+	if _, err := Run(cfg2); err != nil {
+		t.Fatal(err)
+	}
+	if errBuf2.Len() != 0 {
+		t.Errorf("unexpected stderr without sentinel: %q", errBuf2.String())
+	}
+}

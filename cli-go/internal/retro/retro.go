@@ -218,6 +218,12 @@ func runStatus(cfg Config, home string) (*Result, error) {
 		AutoDispatch: autoDispatchEnabled(home),
 	}
 
+	if fileExists(legacyDisabledFlagPath(home)) {
+		_, _ = fmt.Fprintf(cfg.ErrWriter,
+			"retro: note: legacy sentinel %s exists but is ignored; run 'yakos retro disable' to actually disable auto-dispatch\n",
+			legacyDisabledFlagPath(home))
+	}
+
 	autoStr := "true"
 	if !res.AutoDispatch {
 		autoStr = "false"
