@@ -59,7 +59,10 @@ case "$tool" in
 esac
 
 agent="$(hi_sender_role)"
-file="$(hi_file_path)"
+# tr -d NUL before command substitution sees the bytes: bash would otherwise
+# print "ignored null byte in input" on stderr (bash-version-specific text).
+# The NUL itself is detected separately below, on the raw JSON string.
+file="$(hi_file_path | tr -d '\000')"
 
 # A NUL or newline anywhere in the path is refused outright, with no bypass.
 # Command substitution silently drops NUL (the hook would evaluate a
