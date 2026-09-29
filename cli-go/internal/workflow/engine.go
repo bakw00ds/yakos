@@ -80,6 +80,9 @@ type Engine struct {
 	// Tests inject a deterministic fake here to avoid live LLM calls.
 	// Must NOT be set in production; setting it bypasses the governed Service.
 	runFn EngineRunFn
+
+	// persist tracks run.json persistence failures for API consumers (K-95).
+	persist persistTracker
 }
 
 // EngineConfig groups the fields a production caller needs to construct an
@@ -328,6 +331,7 @@ func (e *Engine) run(
 
 	// Start debounce writer.
 	rs.startDebounce(ctx)
+	e.persist.track(rs)
 
 	// Publish run.started.
 	// K3 (k82-security-review-2026-09-23.md): PublishMeta carries the run's
@@ -354,7 +358,9 @@ func (e *Engine) run(
 	// means run.json on disk may not reflect rs.Status even though the run
 	// itself is genuinely done in memory — log it loudly rather than let a
 	// stuck-looking run.json go unexplained.
-	if err := rs.stopDebounce(); err != nil {
+	finalErr := rs.stopDebounce()
+	e.persist.finish(rs, finalErr)
+	if err := finalErr; err != nil {
 		slog.Error("workflow: run: final run.json persist failed; on-disk state may be stale",
 			"run_id", runID, "status", rs.Status, "err", err)
 	}

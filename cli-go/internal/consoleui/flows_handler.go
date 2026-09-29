@@ -857,6 +857,15 @@ func (h *flowsHandlers) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// K-95: a run whose persistence permanently failed never reached run.json,
+	// so the on-disk bytes look like an ordinary stuck run. Overlay the
+	// engine's in-memory knowledge (after the ownership check above).
+	if h.engine != nil {
+		if reason, failed := h.engine.PersistError(id); failed {
+			data = workflow.ApplyPersistFailure(data, reason)
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(data)

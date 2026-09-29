@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1892,4 +1893,116 @@ func TestResolveRunOperatorID(t *testing.T) {
 			t.Errorf("want error for unresolved identity; got nil (resolved %q)", got)
 		}
 	})
+}
+
+// ---- K-95: persist failures surface on GET /flows/api/run -------------------
+
+// breakRunJSONWrites makes every future persistNow fail by planting a
+// directory where its temp file goes (WriteFile fails; run.json itself keeps
+// the last good bytes). The returned func heals it.
+func breakRunJSONWrites(t *testing.T, workDir string) (heal func()) {
+	t.Helper()
+	runs := filepath.Join(workDir, "workflows", "runs")
+	ents, err := os.ReadDir(runs)
+	if err != nil || len(ents) != 1 {
+		t.Fatalf("expected exactly one run dir in %s: %v (%d)", runs, err, len(ents))
+	}
+	tmp := filepath.Join(runs, ents[0].Name(), "run.json.tmp")
+	if err := os.Mkdir(tmp, 0755); err != nil {
+		t.Fatalf("plant blocker: %v", err)
+	}
+	return func() { _ = os.Remove(tmp) }
+}
+
+func startPersistTestRun(t *testing.T, mk func(workDir string) workflow.EngineRunFn) (workDir, runID string, get func() (int, map[string]any)) {
+	t.Helper()
+	var inner atomic.Pointer[workflow.EngineRunFn]
+	workDir, doAs := newProductionEngineTestServer(t, func(ctx context.Context, p dispatch.Params) ([]byte, dispatch.Result, error) {
+		return (*inner.Load())(ctx, p)
+	})
+	f := mk(workDir)
+	inner.Store(&f)
+	writeWorkflow(t, workDir, "my-flow", minimalYAML)
+	id := netid.Identity{OperatorID: "alice", Role: netid.RoleAdmin, Authenticated: true, Resolved: true}
+	resp := doAs(id, http.MethodPost, "/flows/api/run?name=my-flow", `{}`)
+	body := bodyStr(t, resp)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	var rr map[string]string
+	if err := json.Unmarshal([]byte(body), &rr); err != nil {
+		t.Fatal(err)
+	}
+	runID = rr["run_id"]
+	get = func() (int, map[string]any) {
+		r := doAs(id, http.MethodGet, "/flows/api/run?id="+runID, "")
+		b := bodyStr(t, r)
+		var m map[string]any
+		_ = json.Unmarshal([]byte(b), &m)
+		return r.StatusCode, m
+	}
+	return workDir, runID, get
+}
+
+func TestFlows_GetRun_PermanentPersistFailureReadsFailed(t *testing.T) {
+	var once sync.Once
+	workDir, _, get := startPersistTestRun(t, func(wd string) workflow.EngineRunFn {
+		return func(ctx context.Context, _ dispatch.Params) ([]byte, dispatch.Result, error) {
+			once.Do(func() { breakRunJSONWrites(t, wd) })
+			return []byte("ok"), dispatch.Result{}, nil
+		}
+	})
+
+	deadline := time.Now().Add(flowsPollTimeout)
+	var m map[string]any
+	for time.Now().Before(deadline) {
+		_, m = get()
+		if m["persist_error"] != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if m["persist_error"] == nil {
+		t.Fatalf("persist_error never surfaced; last=%v", m)
+	}
+	if m["status"] != "failed" {
+		t.Errorf("status=%v; want failed", m["status"])
+	}
+	if s, _ := m["error"].(string); !strings.HasPrefix(s, "persist: ") {
+		t.Errorf("error=%v; want persist: prefix", m["error"])
+	}
+	if s, _ := m["persist_error"].(string); strings.Contains(s, workDir) {
+		t.Errorf("persist_error leaks server path: %q", s)
+	}
+	if m["run_id"] == nil || m["nodes"] == nil {
+		t.Errorf("existing run.json fields dropped: %v", m)
+	}
+}
+
+func TestFlows_GetRun_TransientPersistFailureDoesNotReadFailed(t *testing.T) {
+	var once sync.Once
+	workDir, runID, get := startPersistTestRun(t, func(wd string) workflow.EngineRunFn {
+		return func(ctx context.Context, _ dispatch.Params) ([]byte, dispatch.Result, error) {
+			once.Do(func() {
+				heal := breakRunJSONWrites(t, wd)
+				time.Sleep(600 * time.Millisecond) // let >=1 debounce tick fail
+				heal()
+			})
+			return []byte("ok"), dispatch.Result{}, nil
+		}
+	})
+
+	waitForRunStatus(t, workDir, runID, "completed")
+	deadline := time.Now().Add(flowsPollTimeout)
+	var m map[string]any
+	for time.Now().Before(deadline) {
+		_, m = get()
+		if m["persist_error"] == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if m["persist_error"] != nil || m["status"] != "completed" {
+		t.Fatalf("transient failure leaked: status=%v persist_error=%v", m["status"], m["persist_error"])
+	}
 }
