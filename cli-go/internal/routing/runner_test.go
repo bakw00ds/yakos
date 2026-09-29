@@ -32,6 +32,7 @@ func TestParseJudgeOutput_Table(t *testing.T) {
 		{name: "unbalanced opener then valid object", raw: `Note { unclosed. {"pass":false,"notes":"n"}`, wantPass: false, wantNotes: "n"},
 		{name: "first object lacks pass, second has it", raw: `{"thinking":"x"} then {"pass":true}`, wantPass: true},
 		{name: "nested object", raw: `{"pass":true,"criteria_scores":[{"a":{"b":1}}]}`, wantPass: true, wantScore: 1},
+		{name: "fenced block beats earlier decoy object", raw: "Format is {\"pass\":false}.\n```json\n{\"pass\":true,\"notes\":\"real\"}\n```", wantPass: true, wantNotes: "real"},
 		{name: "empty", raw: ``, wantErr: true},
 		{name: "prose only", raw: `The agent did fine. Pass.`, wantErr: true},
 		{name: "pass is a string", raw: `{"pass":"true"}`, wantErr: true},
@@ -290,6 +291,14 @@ func TestReadDispatchTelemetry_Table(t *testing.T) {
 			t.Fatalf("got %+v ok=%v", tel, ok)
 		}
 	})
+	t.Run("other agent record last does not win", func(t *testing.T) {
+		p := filepath.Join(dir, "otheragent.ndjson")
+		_ = os.WriteFile(p, []byte(finishedLine("backend", "r", 1, `{"total_cost_usd":0.1}`)+"\n"+finishedLine("other", "r", 1, `{"total_cost_usd":7}`)+"\n"), 0o600)
+		tel, ok := readDispatchTelemetry(p, 0, "r", "backend")
+		if !ok || tel.Cost == nil || *tel.Cost != 0.1 {
+			t.Fatalf("got %+v ok=%v", tel, ok)
+		}
+	})
 	t.Run("no usage means unknown cost, estimated tokens", func(t *testing.T) {
 		p := filepath.Join(dir, "nousage.ndjson")
 		_ = os.WriteFile(p, []byte(finishedLine("a", "r", 1, "")+"\n"), 0o600)
@@ -361,6 +370,23 @@ func TestRealDispatch_FillsTelemetryFromDispatchLog(t *testing.T) {
 	}
 	if !strings.Contains(dr.Stdout, "subject-output") {
 		t.Errorf("stdout lost: %q", dr.Stdout)
+	}
+}
+
+// A record for the same run and agent that predates this call (a retry, or a
+// reused run id) must not be attributed to a dispatch that logged nothing.
+func TestRealDispatch_StaleLogRecordNotReused(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logDir := filepath.Join(home, ".yakos-state")
+	_ = os.MkdirAll(logDir, 0o755)
+	_ = os.WriteFile(filepath.Join(logDir, "dispatch-log.ndjson"),
+		[]byte(finishedLine("backend", "run-9", 2, `{"total_cost_usd":9.99}`)+"\n"), 0o600)
+	root := t.TempDir()
+	writeFakeDispatchSh(t, root, "x") // logs nothing
+	dr, _ := realDispatch(root, "backend", "task", "sonnet", "run-9", "")
+	if !dr.CostUnknown || dr.Cost != 0 {
+		t.Errorf("stale record leaked into result: %+v", dr)
 	}
 }
 
