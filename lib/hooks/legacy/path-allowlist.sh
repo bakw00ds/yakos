@@ -283,7 +283,10 @@ if ! ps_is_within "$project_real" "$target_real" || ! ps_is_within "$project_rea
     if ! ps_is_within "$project_real" "$written_real"; then
         target_real="$written_real"
     fi
-    if ho_check_bypass_exact "path-allowlist" "$rel_file"; then
+    # K-99: probe with the path AS WRITTEN (like the traversal guard). The
+    # normalized path collapses "lnk/../a.txt" to "a.txt", so a benign exact
+    # entry for a.txt must not waive an escape that only exists as written.
+    if ho_check_bypass_exact "path-allowlist" "$as_written_rel"; then
         extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" --arg real "$target_real" \
             '{agent_type: $agent, file_path: $file, resolved: $real, note: "symlink escape but bypass active", bypass: true}')"
         ho_log "path-allowlist" "WARN" "pass" "symlink escape detected but bypass active" "$extra"

@@ -57,7 +57,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously read the last persisted score record, which caused false and
   missed `.plan-blocked` markers, and had no debounce. It now runs the
   scorer on `tool_input.file_path` with bash's threshold, dissent, marker
-  and 5 s mtime-debounce behavior.
+  and 5 s mtime-debounce behavior. The `plan_quality` settings are read
+  per key like bash, so a YAML error elsewhere in `.yakos.yml` cannot
+  discard them, and a non-numeric `threshold` falls back to 0.75 with a
+  WARN. `path-allowlist`'s symlink-escape bypass is now probed with the
+  path as written.
 
 ### Changed
 

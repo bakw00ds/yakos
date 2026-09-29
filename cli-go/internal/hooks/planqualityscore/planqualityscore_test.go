@@ -676,14 +676,87 @@ func TestName(t *testing.T) {
 	}
 }
 
-// A YAML type error must not silently turn mode: block into surface (bash's
-// awk reads the block leniently and would block). Fail closed to block.
-func TestUnparseableConfigFailsClosedToBlock(t *testing.T) {
+// Config is read per key like bash's awk, never as one YAML document: a
+// syntax or type error elsewhere in .yakos.yml must not discard plan_quality
+// settings, override an explicit enabled:false or mode:surface, or turn
+// "no plan_quality block" into block mode.
+func TestConfigBrokenElsewhereHonorsEnabledFalse(t *testing.T) {
 	e := newEnv(t)
-	e.yml(t, "plan_quality:\n  mode: block\n  enabled: notabool\n")
-	e.writePlan(t, "0.10", "id: p-bad-cfg\n", old)
+	e.yml(t, "broken: [unclosed\nplan_quality:\n  enabled: false\n  mode: block\n")
+	e.writePlan(t, "0.10", "", old)
+	e.run(t, "Write", nil)
+	if e.callCount(t) != 0 {
+		t.Fatal("explicit enabled:false must skip scoring despite a YAML error elsewhere")
+	}
+	if _, ok := e.marker(t); ok {
+		t.Fatal("no marker expected")
+	}
+}
+
+func TestConfigBrokenElsewhereNoBlockDefaultsToSurface(t *testing.T) {
+	e := newEnv(t)
+	e.yml(t, "broken: [unclosed\nother: {a: b\n")
+	e.writePlan(t, "0.10", "id: p-nocfg\n", old)
+	e.run(t, "Write", nil)
+	if _, ok := e.marker(t); ok {
+		t.Fatal("no plan_quality block must mean surface, not block")
+	}
+	if rec := e.lastLog(t); rec["decision"] != "surface_to_operator" {
+		t.Fatalf("log=%v", rec)
+	}
+}
+
+func TestConfigBadThresholdKeepsSurfaceAndWarns(t *testing.T) {
+	e := newEnv(t)
+	e.yml(t, "plan_quality:\n  mode: surface\n  threshold: [0.5]\n")
+	e.writePlan(t, "0.60", "id: p-thr\n", old)
+	out := e.run(t, "Write", nil)
+	if _, ok := e.marker(t); ok {
+		t.Fatal("mode:surface must never block")
+	}
+	if !strings.Contains(string(out.Stderr), "threshold") {
+		t.Fatalf("stderr must name the bad key: %q", out.Stderr)
+	}
+	// Default threshold 0.75 applies: 0.60 is below it, so the last record
+	// is a surface, not a pass.
+	if rec := e.lastLog(t); rec["decision"] != "surface_to_operator" || rec["threshold"] != "0.75" {
+		t.Fatalf("log=%v", rec)
+	}
+	data, _ := os.ReadFile(filepath.Join(e.work, "logs", "plan-quality-score.ndjson"))
+	if !strings.Contains(string(data), `"key":"threshold"`) {
+		t.Fatalf("no WARN record naming the key: %s", data)
+	}
+}
+
+func TestConfigExplicitBlockSurvivesBrokenSibling(t *testing.T) {
+	e := newEnv(t)
+	e.yml(t, "broken: [unclosed\nplan_quality:\n  mode: block\n  threshold: 0.75\n")
+	e.writePlan(t, "0.10", "id: p-blk\n", old)
 	e.run(t, "Write", nil)
 	if _, ok := e.marker(t); !ok {
-		t.Fatal("unparseable plan_quality config must fail closed to block")
+		t.Fatal("explicit mode: block must still block")
+	}
+}
+
+func TestConfigCommentsQuotesAndBlockEnd(t *testing.T) {
+	e := newEnv(t)
+	e.yml(t, "plan_quality:\n  mode: \"block\"   # strict\n  threshold: '0.9'\nother:\n  mode: surface\n")
+	e.writePlan(t, "0.80", "id: p-q\n", old)
+	e.run(t, "Write", nil)
+	m, ok := e.marker(t)
+	if !ok || m["threshold"] != "0.9" {
+		t.Fatalf("marker=%v ok=%v", m, ok)
+	}
+}
+
+// An empty value is ignored (bash: [ -n "$_v" ]), so it cannot erase an
+// earlier explicit setting.
+func TestConfigEmptyValueDoesNotEraseEarlierKey(t *testing.T) {
+	e := newEnv(t)
+	e.yml(t, "plan_quality:\n  mode: block\n  mode:\n")
+	e.writePlan(t, "0.10", "id: p-empty\n", old)
+	e.run(t, "Write", nil)
+	if _, ok := e.marker(t); !ok {
+		t.Fatal("empty mode: must not override the earlier mode: block")
 	}
 }

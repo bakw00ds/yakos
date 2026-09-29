@@ -45,8 +45,6 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
@@ -54,18 +52,14 @@ import (
 
 const hookName = "plan-quality-score"
 
-// planQualityConfig holds the parsed plan_quality block from .yakos.yml.
-// Threshold and CostCeilingUSD stay strings so the marker and log records
-// echo the operator's own text, as bash does.
+// planQualityConfig holds the raw plan_quality values from .yakos.yml, read
+// per key exactly as bash's awk does (see loadConfig). Values stay strings so
+// the marker and log records echo the operator's own text.
 type planQualityConfig struct {
-	Enabled        *bool  `yaml:"enabled"`
-	Mode           string `yaml:"mode"`
-	Threshold      string `yaml:"threshold"`
-	CostCeilingUSD string `yaml:"cost_ceiling_usd"`
-}
-
-type yakosYMLPlanQuality struct {
-	PlanQuality *planQualityConfig `yaml:"plan_quality"`
+	Enabled        string
+	Mode           string
+	Threshold      string
+	CostCeilingUSD string
 }
 
 // planBlockedMarker is the JSON written to .plan-blocked. Field types match
@@ -177,12 +171,21 @@ func (h *Hook) runPostToolUse(c context.Context, out hooktype.HookOutput, in hoo
 
 	// Load plan_quality config (bash: awk over .yakos.yml).
 	cfg := h.loadConfig(projectDir)
-	if cfg.Enabled != nil && !*cfg.Enabled {
+	if cfg.Enabled == "false" { // bash: [ "$PQ_ENABLED" = "false" ]
 		h.log(&out, in, "REPORT", "pass", "plan_quality.enabled=false; skipping",
 			map[string]any{"file_path": filePath})
 		return out, nil
 	}
 	threshold := firstNonEmpty(cfg.Threshold, defaultThreshold)
+	// bash's awk `thr+0` turns a non-numeric threshold into 0, which would
+	// pass every plan. Fall back to the default and say so instead.
+	if _, err := strconv.ParseFloat(strings.TrimSpace(threshold), 64); err != nil {
+		h.warnf(&out, "plan-quality-score: plan_quality.threshold %q is not a number; using %s", threshold, defaultThreshold)
+		h.log(&out, in, "WARN", "pass",
+			fmt.Sprintf("plan_quality.threshold %q is not a number; using default %s", threshold, defaultThreshold),
+			map[string]any{"key": "threshold", "value": threshold})
+		threshold = defaultThreshold
+	}
 	mode := firstNonEmpty(cfg.Mode, "surface")
 	costCeiling := firstNonEmpty(cfg.CostCeilingUSD, in.Env["YAKOS_PLAN_EVAL_MAX_COST_USD"], defaultCostCeiling)
 
@@ -496,26 +499,68 @@ func (h *Hook) warnf(out *hooktype.HookOutput, format string, args ...any) {
 
 // ---- config helpers ---------------------------------------------------------
 
+// loadConfig ports bash's awk block reader for .yakos.yml. It never parses
+// the file as YAML, so a syntax or type error in an unrelated key cannot
+// discard plan_quality settings (K-99 review): find the top-level
+// `plan_quality:` line, then read enabled/mode/threshold/cost_ceiling_usd
+// from the indented lines under it until the next unindented line. Inline
+// comments and quotes are stripped; a later duplicate key wins; an empty
+// value is ignored.
 func (h *Hook) loadConfig(projectDir string) planQualityConfig {
+	var cfg planQualityConfig
 	if projectDir == "" {
-		return planQualityConfig{}
+		return cfg
 	}
 	data, err := os.ReadFile(filepath.Join(projectDir, ".yakos.yml")) //nolint:gosec
 	if err != nil {
-		return planQualityConfig{}
+		return cfg
 	}
-	var doc yakosYMLPlanQuality
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		// bash's awk reads the block leniently, so a YAML/type error here
-		// would silently turn a configured mode: block into surface. Fail
-		// closed to block instead.
-		return planQualityConfig{Mode: "block"}
+	inBlock := false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if !inBlock {
+			if reBlockStart.MatchString(line) {
+				inBlock = true
+			}
+			continue
+		}
+		if line == "" {
+			continue
+		}
+		if c := line[0]; c != ' ' && c != '\t' {
+			break
+		}
+		line = strings.TrimSpace(line)
+		line = reInlineComment.ReplaceAllString(line, "")
+		for _, key := range []string{"enabled", "mode", "threshold", "cost_ceiling_usd"} {
+			m := regexp.MustCompile(`^` + key + `[ \t]*:[ \t]*`).FindString(line)
+			if m == "" {
+				continue
+			}
+			v := strings.NewReplacer(`"`, "", `'`, "").Replace(line[len(m):])
+			if v == "" {
+				break // bash: [ -n "$_v" ] && ...
+			}
+			switch key {
+			case "enabled":
+				cfg.Enabled = v
+			case "mode":
+				cfg.Mode = v
+			case "threshold":
+				cfg.Threshold = v
+			case "cost_ceiling_usd":
+				cfg.CostCeilingUSD = v
+			}
+			break
+		}
 	}
-	if doc.PlanQuality == nil {
-		return planQualityConfig{}
-	}
-	return *doc.PlanQuality
+	return cfg
 }
+
+var (
+	reBlockStart    = regexp.MustCompile(`^[ \t]*plan_quality[ \t]*:`)
+	reInlineComment = regexp.MustCompile(`[ \t]+#.*$`)
+)
 
 // ---- persisted-record path -------------------------------------------------
 

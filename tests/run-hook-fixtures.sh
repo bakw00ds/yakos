@@ -463,6 +463,8 @@ setup_bp_esc_abs_star()    { _bp_esc_setup "$1" '*' setup_allowlist_strict; }
 setup_bp_esc_abs_exact()   { _bp_esc_setup "$1" '/etc/cron.d/pwn' setup_allowlist_strict; }
 setup_bp_esc_sym_glob()    { _bp_esc_setup "$1" 'api/**' setup_symlink_escape; }
 setup_bp_esc_sym_exact()   { _bp_esc_setup "$1" 'api/escape-link' setup_symlink_escape; }
+setup_bp_esc_sym_norm()    { _bp_esc_setup "$1" 'api/secret.go' setup_symlink_dir_escape; }   # normalized form must NOT waive the as-written escape
+setup_bp_esc_sym_aswrit()  { _bp_esc_setup "$1" 'api/escape-dir/sub/../../secret.go' setup_symlink_dir_escape; }
 
 setup_with_decisions_stale() {
     mkdir -p "$1/work/current"
@@ -948,6 +950,8 @@ case_check path-allowlist.sh   pretooluse-write-absolute-outroot.json 2 path-all
 case_check path-allowlist.sh   pretooluse-write-absolute-outroot.json 0 path-allowlist setup_bp_esc_abs_exact
 case_check path-allowlist.sh   pretooluse-write-symlink-escape.json   2 path-allowlist setup_bp_esc_sym_glob     # K-99: glob must not bypass symlink escape
 case_check path-allowlist.sh   pretooluse-write-symlink-escape.json   0 path-allowlist setup_bp_esc_sym_exact
+case_check path-allowlist.sh   pretooluse-write-dotdot-after-symlink.json 2 path-allowlist setup_bp_esc_sym_norm    # K-99: symlink guard probes the as-written path
+case_check path-allowlist.sh   pretooluse-write-dotdot-after-symlink.json 0 path-allowlist setup_bp_esc_sym_aswrit
 case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlist setup_no_allowlist    # no allowlist → permissive WARN
 # namespaced agent ("yakos:go-api") must hit bare-keyed policy ("go-api")
 case_check path-allowlist.sh   pretooluse-edit-api-namespaced.json 0 path-allowlist setup_allowlist_strict_namespaced

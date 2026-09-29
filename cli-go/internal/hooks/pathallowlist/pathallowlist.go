@@ -262,7 +262,8 @@ func (c *ctx) run() {
 		if tok && wok && !isWithin(projectReal, writtenReal) {
 			resolved = writtenReal
 		}
-		if c.bypassedExact(relFile) {
+		// K-99: probe the path as written; the normalized path hides "lnk/..".
+		if c.bypassedExact(asWritten) {
 			c.log("WARN", "pass", "symlink escape detected but bypass active",
 				map[string]any{"agent_type": agent, "file_path": relFile, "resolved": resolved,
 					"note": "symlink escape but bypass active", "bypass": true})

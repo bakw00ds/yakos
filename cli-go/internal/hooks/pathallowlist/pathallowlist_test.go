@@ -540,3 +540,39 @@ func TestNameAndProjectDirFallback(t *testing.T) {
 		t.Fatalf("exit=%d", out.ExitCode)
 	}
 }
+
+// K-99: the root/absolute/".."/symlink escape guards accept only an EXACT
+// bypass Scope. A glob entry must never waive them.
+func TestEscapeGuardsRejectGlobBypass(t *testing.T) {
+	e := newEnv(t)
+	e.policy(goAPI)
+	e.symlink(e.outside, filepath.Join(e.proj, "api", "lnk"))
+	probes := []struct{ name, file, exact string }{
+		{"traversal", "api/../../../../etc/cron.d/pwn", "api/../../../../etc/cron.d/pwn"},
+		{"absolute", "/etc/passwd", "/etc/passwd"},
+		{"symlink", "api/lnk/x.go", "api/lnk/x.go"},
+		{"root", e.proj, e.proj},
+	}
+	for _, p := range probes {
+		for _, glob := range []string{"*", "**", "api/**", "/etc/*", e.proj + "*"} {
+			e.bypass(glob)
+			e.expect(p.name+" glob "+glob, e.input("Write", p.file, "go-api"), 2, "")
+		}
+		e.bypass(p.exact)
+		e.expect(p.name+" exact", e.input("Write", p.file, "go-api"), 0, "")
+	}
+}
+
+// K-99: the symlink guard probes the path AS WRITTEN. Normalization turns
+// "api/lnk/../secret.go" into "api/secret.go", so an exact entry for the
+// benign normalized path must not waive an escape that exists only as written.
+func TestSymlinkGuardProbesAsWrittenPath(t *testing.T) {
+	e := newEnv(t)
+	e.policy(goAPI)
+	e.symlink(e.outside, filepath.Join(e.proj, "api", "lnk"))
+	in := e.input("Write", "api/lnk/../secret.go", "go-api")
+	e.bypass("api/secret.go")
+	e.expect("normalized entry", in, 2, "path resolves outside project root via symlink")
+	e.bypass("api/lnk/../secret.go")
+	e.expect("as-written entry", in, 0, "symlink escape detected but bypass active")
+}
