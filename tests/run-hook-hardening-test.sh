@@ -145,12 +145,19 @@ run_suite() {
         done
     done
 
-    # A real-jq payload with no hook_event_name is not a hook payload.
-    sb="$(new_sandbox "j-$L-noevent")"
-    run "$SH" "$HOOKS" path-allowlist.sh "$sb" '{"tool_name":"Write","tool_input":{"file_path":"/x/a.go"}}'
-    if [ "$rc" = 2 ]; then ok "$L: blocking hook + object without hook_event_name -> exit 2"; else bad "$L: no hook_event_name rc=$rc err=[$err]"; fi
-    run "$SH" "$HOOKS" path-log.sh "$sb" '{"tool_name":"Write","tool_input":{"file_path":"/x/a.go"}}'
-    if [ "$rc" = 0 ] && [ -z "$out" ]; then ok "$L: non-blocking hook + object without hook_event_name -> exit 0 no stdout"; else bad "$L: non-blocking no hook_event_name rc=$rc out=[$out]"; fi
+    # The Flows engine invokes output-injection-scan.sh with a synthetic payload
+    # that has no hook_event_name (tool_name WorkflowNodeOutput) and
+    # HOOK_FAIL_CLOSED=1. hi_init must accept it with a real jq, and must still
+    # fail closed on it with a lying jq.
+    local WF='{"tool_name":"WorkflowNodeOutput","tool_response":"perfectly benign upstream output","agent_type":"flows:a"}'
+    sb="$(new_sandbox "j-$L-workflow")"
+    HOOK_FAIL_CLOSED=1 run "$SH" "$HOOKS" output-injection-scan.sh "$sb" "$WF"
+    if [ "$rc" = 0 ] && ! printf '%s' "$err" | grep -q 'BLOCKED'; then ok "$L: workflow payload without hook_event_name + real jq -> accepted (rc 0)"; else bad "$L: workflow payload rc=$rc err=[$err]"; fi
+    for fj in garbage array object; do
+        sb="$(new_sandbox "j-$L-workflow-$fj")"
+        HOOK_FAIL_CLOSED=1 run "$SH" "$HOOKS" output-injection-scan.sh "$sb" "$WF" "$TMP/fj-$fj"
+        if [ "$rc" = 2 ] && printf '%s' "$err" | grep -q 'BLOCKED'; then ok "$L: workflow payload + jq($fj) + HOOK_FAIL_CLOSED=1 -> exit 2"; else bad "$L: workflow payload + jq($fj) rc=$rc err=[$err]"; fi
+    done
 
     # ---- 2. plan-quality-gate exit-trap robustness ----------------------------
     sb="$(new_sandbox "t-$L-marker")"
