@@ -572,7 +572,12 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 	// The per-run context is still created and registered in activeRuns so that
 	// cancel tests can exercise handleCancel even with the fake node runner.
 	if h.nodeRunFn != nil {
-		runID := mintRunID()
+		runID, mintErr := mintRunID()
+		if mintErr != nil {
+			slog.Error("flows: mint run id failed", "err", mintErr)
+			writeGenericError(w, http.StatusInternalServerError, "failed to generate run id")
+			return
+		}
 		fn := h.nodeRunFn
 		nodeRunCtx, nodeRunCancel := context.WithCancel(h.serverCtx)
 
@@ -616,7 +621,12 @@ func (h *flowsHandlers) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Mint a run ID: timestamp + random suffix, path-safe.
-	runID := mintRunID()
+	runID, mintErr := mintRunID()
+	if mintErr != nil {
+		slog.Error("flows: mint run id failed", "err", mintErr)
+		writeGenericError(w, http.StatusInternalServerError, "failed to generate run id")
+		return
+	}
 
 	// R10 (round-1 security review): the run's owner comes from the
 	// resolved server-side identity only — see resolveRunOperatorID's doc
@@ -739,7 +749,12 @@ func (h *flowsHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	// take-over attack structurally impossible rather than merely rejected:
 	// there is no code path left that can turn a caller-supplied value into
 	// a filesystem write target.
-	newRunID := mintRunID()
+	newRunID, mintErr := mintRunID()
+	if mintErr != nil {
+		slog.Error("flows: mint run id failed", "err", mintErr)
+		writeGenericError(w, http.StatusInternalServerError, "failed to generate run id")
+		return
+	}
 
 	// Load the prior run to determine which workflow to use.
 	// Do this BEFORE the engine nil-check so 404 is returned for missing runs
@@ -1103,21 +1118,31 @@ func (h *flowsHandlers) handleRunDispatch(w http.ResponseWriter, r *http.Request
 
 // ---- Helpers -------------------------------------------------------------------
 
-// mintRunID generates a path-safe run ID of the form "run-<timestamp>-<rand6>".
-// The timestamp prefix makes runs sort chronologically; the random suffix
-// avoids collisions on concurrent triggers.
-func mintRunID() string {
+// runIDRandBytes is the width of the random suffix in a minted run ID:
+// 16 bytes = 128 bits, rendered as 32 lowercase hex characters. The full
+// ID ("run-" + 15-char timestamp + "-" + 32 hex = 52 chars) stays inside the
+// workflow ID pattern's 64-character cap (^[a-z0-9][a-z0-9-]{0,63}$).
+const runIDRandBytes = 16
+
+// mintRunID generates a path-safe run ID of the form
+// "run-<yyyymmdd-hhmmss>-<32 hex>". The timestamp prefix makes runs sort
+// chronologically; the suffix is 128 bits from crypto/rand.
+//
+// K-86 (k82-security-review-2026-09-23.md K3): the suffix used to be 24 bits
+// over a second-resolution timestamp, so IDs were guessable in a per-second
+// bucket, and a crypto/rand failure silently fell back to a clock-derived
+// suffix. Run IDs are write targets (resume) and authorization keys (run
+// lookups), so there is no safe weak fallback: on a randomness failure this
+// returns an error and the caller refuses the request. Uniqueness is still
+// enforced independently by the engine's exclusive run-directory create
+// (workflow.ErrRunIDExists).
+func mintRunID() (string, error) {
 	ts := time.Now().UTC().Format("20060102-150405")
-	randBytes := make([]byte, 3)
+	randBytes := make([]byte, runIDRandBytes)
 	if _, err := cryptoRead(randBytes); err != nil {
-		// Fallback to a simpler scheme using nanoseconds if crypto/rand fails.
-		ns := fmt.Sprintf("%d", time.Now().UnixNano())
-		if len(ns) > 6 {
-			ns = ns[len(ns)-6:]
-		}
-		return "run-" + ts + "-" + ns
+		return "", fmt.Errorf("flows: mint run id: %w", err)
 	}
-	return fmt.Sprintf("run-%s-%x", ts, randBytes)
+	return fmt.Sprintf("run-%s-%x", ts, randBytes), nil
 }
 
 // sanitizeErr strips newlines from error messages before sending to the client.

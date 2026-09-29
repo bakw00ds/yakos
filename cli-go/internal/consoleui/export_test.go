@@ -430,3 +430,14 @@ var ErrPendingAlreadyConsumed = errPendingAlreadyConsumed
 func LoadOrCreateLoopbackOwnerIDForTest(stateDir string) string {
 	return loadOrCreateLoopbackOwnerID(stateDir)
 }
+
+// MintRunIDForTest exposes mintRunID to the external test package.
+func MintRunIDForTest() (string, error) { return mintRunID() }
+
+// SetCryptoReadForTest swaps the randomness source behind mintRunID and
+// returns a restore func.
+func SetCryptoReadForTest(fn func([]byte) (int, error)) func() {
+	old := cryptoRead
+	cryptoRead = fn
+	return func() { cryptoRead = old }
+}
