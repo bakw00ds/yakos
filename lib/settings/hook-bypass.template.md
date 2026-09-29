@@ -61,8 +61,8 @@ A **Scope** covers an action only when it is the exact value the hook is
 checking, or an explicit glob over it. It is no longer a substring test.
 
 - **Exact:** the Scope equals the checked value byte for byte. Paths are
-  slash-normalized first (`web\secret.env` is checked as `web/secret.env`).
-  Matching is case-sensitive.
+  Matching is case-sensitive. On Windows a backslash probe is
+  slash-normalized first; on POSIX it is left as written.
 - **Glob:** a Scope containing `*` is matched with shell `case` semantics,
   the same matcher `path-allowlist` uses. `*` matches any run of
   characters including `/`, so `web/**` and `web/*` both cover everything
@@ -73,14 +73,22 @@ checking, or an explicit glob over it. It is no longer a substring test.
   `web/secret.env-rotation` does not cover `web/secret.env`, and
   `path=web/index.js reason=x` does not cover `web/index.js`.
 
-**Migration.** An entry written as a bare prefix (`web/`, `web`, or
-`api/legacy`) used to cover everything containing that text. It now
-covers nothing. Rewrite it as `web/**` (or list the exact paths). Entries
-that already spelled the exact path keep working unchanged. The
-`hook-bypass-review` skill flags entries that need rewriting.
+**Migration.** Entries that equal the checked value keep working. What
+stops matching is an entry with extra text around the value, for example
+`cap=max_tool_calls (long run)` or `path=web/index.js reason=x`, or a
+longer/trailing-slash variant of a path: the old test was "the Scope
+contains the value". Rewrite those as the exact value. A bare prefix such
+as `web/` never matched a longer path, so nothing regresses there; write
+`web/**` to cover a subtree. The `hook-bypass-review` skill flags entries
+that need rewriting.
 
-Checked values by hook: `path-allowlist` and `secret-scan` use the
-project-relative file path, `budget-guard` uses `cap=<name>`,
+**Escape guards are exact-only.** `path-allowlist`'s project-root,
+absolute-path, `..` traversal and symlink-escape refusals accept only an
+exact Scope, never a glob.
+
+Checked values by hook: `path-allowlist` uses the project-relative file
+path and `secret-scan` the path as the payload carries it (normally
+absolute), `budget-guard` uses `cap=<name>`,
 `supervisor-gate` uses `finding=<ts>`, `peer-claim` uses
 `file=<path> peer=<user>@<host>`, `task-complete-dispatch` uses the
 domain. The `degraded-input` sentinel is unchanged: exact match only.

@@ -18,7 +18,7 @@ A Scope covers a checked value (the "probe") only in these cases:
 | Probe is empty | Matches nothing. |
 | Scope merely contains the probe | No match. |
 
-The probe is slash-normalized (a backslash becomes `/`) before comparing.
+On Windows the probe is slash-normalized before comparing. On POSIX a backslash is an ordinary filename character and is left alone.
 The glob matcher is shared with `path-allowlist` (`internal/hooks/fnmatch`).
 
 The **Hook** field is unchanged: the entry's Hook value must still contain
@@ -33,28 +33,42 @@ free-text Scope such as `path=web/index.js reason=x` bypassed
 
 ## Migration
 
-An existing entry keeps working if its Scope is the exact checked value.
-A bare-prefix entry must be rewritten:
+Nothing that already matched by *equality* changes. What stops matching is
+an entry whose Scope carried **extra text around** the checked value,
+because the old test was "the Scope contains the probe":
 
 ```markdown
-# before: covered everything containing "web/"
-**Scope:** web/
+# before: matched cap=max_tool_calls by containment
+**Scope:** cap=max_tool_calls (long refactor run)
 
-# after
-**Scope:** web/**
+# after: write the exact value
+**Scope:** cap=max_tool_calls
 ```
 
-Free-text Scopes must become the exact value or a glob. The peer-claim
-probe is `file=<path> peer=<user>@<host>`, so "any file claimed by alice"
-is `file=* peer=alice@dev01`.
+The same applies to free text such as `path=web/index.js reason=x`, to a
+trailing-slash or longer variant of a path, and to the peer-claim
+`file=... peer=...` idiom when it carried extra words. A bare prefix such
+as `web/` never matched `web/index.js` under the old test (the Scope was
+shorter than the probe), so no bare-prefix entry regresses. To cover a
+whole subtree you can now write `web/**`.
 
 The `hook-bypass-review` skill flags entries that need rewriting.
+
+## Escape guards accept exact scopes only
+
+`path-allowlist` refuses four kinds of target regardless of policy: the
+project root itself, an absolute path outside the root, a `..` traversal,
+and a symlink escape. A bypass for one of these must be the **exact**
+path. A glob is never applied there, so `web/**` does not wave through
+`web/../../../tmp/x` and `*` does not wave through `/tmp/evil.env`.
+Globs still work for ordinary allow/deny policy decisions.
 
 ## Checked values by hook
 
 | Hook | Probe |
 |---|---|
-| `path-allowlist`, `secret-scan` | project-relative file path |
+| `path-allowlist` | project-relative file path (absolute for the escape guards) |
+| `secret-scan` | the file path exactly as the payload carries it, normally absolute |
 | `budget-guard` | `cap=max_tool_calls`, `cap=max_wall_seconds`, `cap=max_repeat_same_tool` |
 | `supervisor-gate` | `finding=<ts>` |
 | `peer-claim` | `file=<path> peer=<user>@<host>` |

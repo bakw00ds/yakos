@@ -47,8 +47,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `web/secret.env` and an empty probe matched every entry for the hook.
   A Scope now matches only when it equals the slash-normalized value
   (case-sensitive) or contains `*` and globs over it; a blank Scope and an
-  empty probe match nothing. **Migration:** a bare-prefix entry keeps
-  working only as `prefix/**`. See `docs/hook-bypass-scope.md`.
+  empty probe match nothing. `path-allowlist`'s root, absolute, `..` and
+  symlink-escape guards accept exact scopes only, never a glob.
+  **Migration:** entries equal to the checked value are unaffected;
+  entries with extra text around it (`cap=max_tool_calls (long run)`)
+  stop matching and must be rewritten as the exact value. Use `prefix/**`
+  to cover a subtree. See `docs/hook-bypass-scope.md`.
 - **Go plan-quality-score scores the file just written (K-99).** It
   previously read the last persisted score record, which caused false and
   missed `.plan-blocked` markers, and had no debounce. It now runs the

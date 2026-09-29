@@ -675,3 +675,15 @@ func TestName(t *testing.T) {
 		t.Fatalf("Name()=%q", got)
 	}
 }
+
+// A YAML type error must not silently turn mode: block into surface (bash's
+// awk reads the block leniently and would block). Fail closed to block.
+func TestUnparseableConfigFailsClosedToBlock(t *testing.T) {
+	e := newEnv(t)
+	e.yml(t, "plan_quality:\n  mode: block\n  enabled: notabool\n")
+	e.writePlan(t, "0.10", "id: p-bad-cfg\n", old)
+	e.run(t, "Write", nil)
+	if _, ok := e.marker(t); !ok {
+		t.Fatal("unparseable plan_quality config must fail closed to block")
+	}
+}

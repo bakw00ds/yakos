@@ -505,7 +505,13 @@ func (h *Hook) loadConfig(projectDir string) planQualityConfig {
 		return planQualityConfig{}
 	}
 	var doc yakosYMLPlanQuality
-	if err := yaml.Unmarshal(data, &doc); err != nil || doc.PlanQuality == nil {
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		// bash's awk reads the block leniently, so a YAML/type error here
+		// would silently turn a configured mode: block into surface. Fail
+		// closed to block instead.
+		return planQualityConfig{Mode: "block"}
+	}
+	if doc.PlanQuality == nil {
 		return planQualityConfig{}
 	}
 	return *doc.PlanQuality

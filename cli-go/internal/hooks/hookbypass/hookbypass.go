@@ -18,6 +18,7 @@ package hookbypass
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -52,7 +53,8 @@ const EmptyScopeWarning = "WARN: bypass entry has empty scope, ignored"
 // "web/secret.env-rotation" also cover "web/secret.env" and let an empty
 // probe scope match every entry for the hook):
 //
-//   - the probe is slash-normalized (backslash becomes "/");
+//   - on Windows the probe is slash-normalized; on POSIX a backslash is an
+//     ordinary filename character and is left alone;
 //   - an entry scope matches when it equals the probe, byte for byte
 //     (case-sensitive, like bash `[ = ]`);
 //   - otherwise, an entry scope containing '*' is a glob with bash `case`
@@ -61,7 +63,7 @@ const EmptyScopeWarning = "WARN: bypass entry has empty scope, ignored"
 //   - a blank entry scope matches nothing and logs EmptyScopeWarning;
 //   - an empty probe matches nothing.
 func Check(content, hook, scope string) bool {
-	probe := strings.ReplaceAll(scope, "\\", "/")
+	probe := filepath.ToSlash(scope) // only rewrites "\\" on Windows
 	if probe == "" {
 		return false
 	}

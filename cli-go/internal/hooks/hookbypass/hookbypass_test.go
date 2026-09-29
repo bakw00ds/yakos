@@ -1,6 +1,7 @@
 package hookbypass_test
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/bakw00ds/yakos/internal/hooks/hookbypass"
@@ -49,8 +50,9 @@ func TestCheck_PrefixScope_DoesNotCoverShorterPath(t *testing.T) {
 
 func TestCheck_ExactMatch_Normalized(t *testing.T) {
 	md := entry("secret-scan", "web/secret.env")
-	if !hookbypass.Check(md, "secret-scan", `web\secret.env`) {
-		t.Error("backslash probe must be slash-normalized before comparison")
+	// Backslash is normalized only on Windows; on POSIX it is a filename char.
+	if got := hookbypass.Check(md, "secret-scan", `web\secret.env`); got != (runtime.GOOS == "windows") {
+		t.Errorf("backslash probe match=%v on %s", got, runtime.GOOS)
 	}
 	if hookbypass.Check(md, "secret-scan", "web/secret.env2") {
 		t.Error("longer probe must not match")

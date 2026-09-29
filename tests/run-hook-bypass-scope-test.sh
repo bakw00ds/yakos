@@ -59,7 +59,7 @@ expect Y "leading glob"             secret-scan '*.env'                        '
 expect Y "bare star"                secret-scan '*'                            'any/thing'
 expect n "? alone is not a glob"    secret-scan 'web/sec?et.env'               'web/secret.env'
 expect n "case-sensitive"           secret-scan 'Web/Secret.env'               'web/secret.env'
-expect Y "backslash probe"          secret-scan 'web/secret.env'               'web\secret.env'
+expect n "backslash is not a slash" secret-scan 'web/secret.env'               'web\secret.env'
 expect n "empty entry ignored+warn" secret-scan ''                             'web/secret.env' "$W"
 expect n "blank entry ignored+warn" secret-scan '   '                          'web/secret.env' "$W"
 expect n "empty probe (exact entry)" secret-scan 'web/secret.env'              ''

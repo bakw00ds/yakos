@@ -99,7 +99,8 @@ ho_check_bypass() {
     # Scope matching (K-99). This used to be a substring test, so a scope of
     # `web/secret.env-rotation` also bypassed `web/secret.env`, and an empty
     # probe scope matched every entry for the hook. Now:
-    #   - the probe is slash-normalized (backslash -> /);
+    #   - the probe is compared as given (callers pass slash paths; a POSIX
+    #     file may legitimately contain a backslash);
     #   - an entry scope matches when it equals the probe (case-sensitive);
     #   - otherwise an entry scope containing `*` is a glob with bash `case`
     #     semantics (the matcher path-allowlist uses; `*` crosses `/`), so
@@ -121,7 +122,7 @@ ho_check_bypass() {
     fi
     [ -f "$bypass_file" ] || return 1
 
-    local probe="${scope//\\//}"
+    local probe="$scope"
     [ -n "$probe" ] || return 1
 
     # awk owns the entry state machine (identical to ho_check_bypass_exact)
@@ -182,12 +183,10 @@ ho_check_bypass_exact() {
     # EXACTLY (after trimming surrounding whitespace), not merely contain
     # it as a substring.
     #
-    # ho_check_bypass's substring matching is intentional and load-bearing
-    # for its normal callers — a path-scoped bypass like
-    # `Scope: src/auth/login.ts` is meant to match that path appearing
-    # anywhere in a longer candidate string, and the peer-claim idiom
-    # (`Scope: file=... peer=...`) relies on the same behavior. That is
-    # the wrong tool for an opt-in SENTINEL, though: a literal-string
+    # Since K-99 ho_check_bypass is itself exact-or-glob, but a glob is the
+    # wrong tool for an opt-in SENTINEL (and for the path-allowlist escape
+    # guards): a literal `*` scope would satisfy it. That call needs a
+    # strict literal comparison, so this helper stays separate: a literal-string
     # sentinel like "degraded-input" is meant to mean "the operator wrote
     # this exact word on purpose," and under substring matching an
     # unrelated Scope that happens to CONTAIN the sentinel — a real

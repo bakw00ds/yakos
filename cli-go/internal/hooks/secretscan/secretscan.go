@@ -169,10 +169,11 @@ func (h *Hook) scan(text string) *Pattern {
 	return nil
 }
 
-// isBypassed replicates ho_check_bypass("secret-scan", filePath) exactly:
-// an entry under the "## Active entries" heading whose **Hook:** value
-// CONTAINS "secret-scan" (substring) AND whose **Scope:** value CONTAINS
-// filePath (substring; empty scope always matches).
+// isBypassed replicates ho_check_bypass("secret-scan", filePath): an entry
+// under the "## Active entries" heading whose **Hook:** value CONTAINS
+// "secret-scan" AND whose **Scope:** equals filePath or is a glob over it
+// (K-99; no substring matching, empty scope matches nothing). filePath is
+// the path exactly as the payload carries it, normally ABSOLUTE.
 func (h *Hook) isBypassed(filePath string) bool {
 	if h.WorkCurrentDir == "" {
 		return false

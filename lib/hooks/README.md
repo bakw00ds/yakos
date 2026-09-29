@@ -215,8 +215,10 @@ twin `hookbypass.Check`) used to test whether the entry's Scope
 *contained* the checked value, so `web/secret.env-rotation` also bypassed
 `web/secret.env`. It now matches only when the Scope equals the
 slash-normalized value or is a `*` glob over it (`web/**`); a blank
-Scope, and an empty probe, match nothing. A bare-prefix entry keeps
-working only when rewritten as `prefix/**`. Details and the migration
+Scope, and an empty probe, match nothing. Entries with extra text
+around the value stop matching; rewrite them as the exact value or
+`prefix/**`. The escape guards in `path-allowlist` accept exact scopes
+only. Details and the migration
 note: `docs/hook-bypass-scope.md`.
 
 **Two hooks reach an unguarded `jq` call downstream of the escape

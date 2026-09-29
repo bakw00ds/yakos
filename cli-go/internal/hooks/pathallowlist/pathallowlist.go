@@ -190,7 +190,7 @@ func (c *ctx) run() {
 
 	// R2-5: the path IS the project root.
 	if cpd != "" && relFile == cpd {
-		if c.bypassed(relFile) {
+		if c.bypassedExact(relFile) {
 			c.log("WARN", "pass", "file_path is the project root but bypass active",
 				map[string]any{"agent_type": agent, "file_path": relFile,
 					"note": "file_path is the project root but bypass active", "bypass": true})
@@ -205,7 +205,7 @@ func (c *ctx) run() {
 	// N1: an absolute path that survived the prefix strip is outside the
 	// project root; refuse before normalization can rewrite it.
 	if isAbs(relFile) {
-		if c.bypassed(relFile) {
+		if c.bypassedExact(relFile) {
 			c.log("WARN", "pass", "absolute out-of-root path but bypass active",
 				map[string]any{"agent_type": agent, "file_path": relFile,
 					"note": "absolute out-of-root path but bypass active", "bypass": true})
@@ -221,7 +221,7 @@ func (c *ctx) run() {
 	asWritten := relFile
 	norm := lexicalNormalize(relFile)
 	if escapesRoot(norm) {
-		if c.bypassed(relFile) {
+		if c.bypassedExact(relFile) {
 			c.log("WARN", "pass", "path traversal detected but bypass active",
 				map[string]any{"agent_type": agent, "file_path": relFile, "normalized": norm,
 					"note": "traversal but bypass active", "bypass": true})
@@ -262,7 +262,7 @@ func (c *ctx) run() {
 		if tok && wok && !isWithin(projectReal, writtenReal) {
 			resolved = writtenReal
 		}
-		if c.bypassed(relFile) {
+		if c.bypassedExact(relFile) {
 			c.log("WARN", "pass", "symlink escape detected but bypass active",
 				map[string]any{"agent_type": agent, "file_path": relFile, "resolved": resolved,
 					"note": "symlink escape but bypass active", "bypass": true})
@@ -391,6 +391,20 @@ func (c *ctx) log(severity, decision, reason string, extra map[string]any) {
 	if err != nil {
 		c.out.Stderr = fmt.Appendf(c.out.Stderr, "%s: log: %v\n", hookName, err)
 	}
+}
+
+// bypassedExact mirrors ho_check_bypass_exact "path-allowlist" <scope>: the
+// escape guards (project root, absolute, "..", symlink) accept only a
+// literal Scope, never a glob (K-99).
+func (c *ctx) bypassedExact(scope string) bool {
+	if c.h.WorkCurrentDir == "" {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(c.h.WorkCurrentDir, "hook-bypass.md")) //nolint:gosec
+	if err != nil {
+		return false
+	}
+	return hookbypass.CheckExact(string(data), hookName, scope)
 }
 
 // bypassed mirrors ho_check_bypass "path-allowlist" <scope>.

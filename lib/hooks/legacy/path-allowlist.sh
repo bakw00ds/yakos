@@ -171,6 +171,11 @@ if ! jq -e 'type == "object"' <<< "$policy" >/dev/null 2>&1; then
     ho_block "path-allowlist" ".claude/path-allowlist.json's entry for '$agent' is not a JSON object ({\"allow\":[...],\"deny\":[...]}) — refusing rather than silently disabling enforcement."
 fi
 
+# K-99: the four escape guards below (project root, absolute path, ".."
+# traversal, symlink escape) accept only an EXACT bypass Scope
+# (ho_check_bypass_exact), never a glob. Otherwise a `web/**` entry would
+# also wave through `web/../../../tmp/x`, and `*.env` or `**` would wave
+# through `/tmp/evil.env`. Only the allow/deny policy decisions honor globs.
 # ---- R2-5: file_path exactly equal to the project root itself --------------
 #
 # The prefix-strip case above requires a "/" separator, so a file_path that
@@ -180,7 +185,7 @@ fi
 # the root, it IS the root. Give it its own accurate reason: you cannot
 # write a file over a directory.
 if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ "$rel_file" = "$CLAUDE_PROJECT_DIR" ]; then
-    if ho_check_bypass "path-allowlist" "$rel_file"; then
+    if ho_check_bypass_exact "path-allowlist" "$rel_file"; then
         extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" \
             '{agent_type: $agent, file_path: $file, note: "file_path is the project root but bypass active", bypass: true}')"
         ho_log "path-allowlist" "WARN" "pass" "file_path is the project root but bypass active" "$extra"
@@ -206,7 +211,7 @@ fi
 # regardless of allow/deny policy, before normalization ever sees it.
 case "$rel_file" in
     /*)
-        if ho_check_bypass "path-allowlist" "$rel_file"; then
+        if ho_check_bypass_exact "path-allowlist" "$rel_file"; then
             extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" \
                 '{agent_type: $agent, file_path: $file, note: "absolute out-of-root path but bypass active", bypass: true}')"
             ho_log "path-allowlist" "WARN" "pass" "absolute out-of-root path but bypass active" "$extra"
@@ -229,7 +234,7 @@ esac
 # legitimate edit target.
 norm_rel_file="$(ps_lexical_normalize "$rel_file")"
 if ps_escapes_root "$norm_rel_file"; then
-    if ho_check_bypass "path-allowlist" "$rel_file"; then
+    if ho_check_bypass_exact "path-allowlist" "$rel_file"; then
         extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" --arg norm "$norm_rel_file" \
             '{agent_type: $agent, file_path: $file, normalized: $norm, note: "traversal but bypass active", bypass: true}')"
         ho_log "path-allowlist" "WARN" "pass" "path traversal detected but bypass active" "$extra"
@@ -278,7 +283,7 @@ if ! ps_is_within "$project_real" "$target_real" || ! ps_is_within "$project_rea
     if ! ps_is_within "$project_real" "$written_real"; then
         target_real="$written_real"
     fi
-    if ho_check_bypass "path-allowlist" "$rel_file"; then
+    if ho_check_bypass_exact "path-allowlist" "$rel_file"; then
         extra="$(jq -nc --arg agent "$agent" --arg file "$rel_file" --arg real "$target_real" \
             '{agent_type: $agent, file_path: $file, resolved: $real, note: "symlink escape but bypass active", bypass: true}')"
         ho_log "path-allowlist" "WARN" "pass" "symlink escape detected but bypass active" "$extra"

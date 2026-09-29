@@ -59,11 +59,12 @@ For each:
   concrete action that's been done?
   - If no → the bypass is unaccounted for; surface to operator.
 - **Scope format:** is the Scope an exact value or an explicit glob?
-  - **NEEDS REWRITE** if it is blank, or a bare prefix such as `web/`
-    or `api/legacy`, or free text that merely contains the path
-    (`path=web/index.js reason=x`). Since K-99 these cover nothing
-    (exact-or-glob matching). Rewrite as the exact path or `prefix/**`.
-    See `docs/hook-bypass-scope.md`.
+  - **NEEDS REWRITE** if it is blank, or carries extra text around the
+    value (`path=web/index.js reason=x`, `cap=max_tool_calls (long run)`).
+    Since K-99 these cover nothing (exact-or-glob matching). Rewrite as the
+    exact value, or `prefix/**` for a subtree. Escape-guard bypasses
+    (absolute, `..`, symlink) must stay exact. See
+    `docs/hook-bypass-scope.md`.
 ```
 
 ## Manual pass
