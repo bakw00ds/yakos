@@ -182,7 +182,18 @@ type JudgeResult struct {
 	Pass           bool
 	CriteriaScores []json.RawMessage
 	Notes          string
+
+	// ParseErr is non-empty when the judge output could not be turned into
+	// a verdict (no valid JSON object, or the judge dispatch itself failed).
+	// Such a case is left unscored, not counted as a failure.
+	ParseErr string
+
+	// Raw is the judge's raw output, kept when ParseErr is set.
+	Raw string
 }
+
+// Unscored reports whether the judge produced no usable verdict.
+func (j JudgeResult) Unscored() bool { return j.ParseErr != "" }
 
 // Result summarises what Run did.
 type Result struct {
@@ -219,9 +230,10 @@ type Result struct {
 // ---- per-tier accumulator ---------------------------------------------------
 
 type tierStats struct {
-	pass  int
-	total int
-	cost  float64
+	pass     int
+	total    int
+	unscored int
+	cost     float64
 }
 
 func (s *tierStats) rate() float64 {
@@ -844,26 +856,137 @@ func realJudge(yakosRoot, judgeID, inputJSON, project string) (JudgeResult, erro
 	return parseJudgeOutput(raw), nil
 }
 
-// parseJudgeOutput extracts pass/criteria_scores/notes from judge JSON output.
+// parseJudgeOutput extracts pass/criteria_scores/notes from judge output.
+//
+// Judges frequently wrap their verdict JSON in prose or a fenced code block,
+// so the whole stdout is not required to be a bare object. Candidates are
+// tried in order: fenced ```json blocks, then every balanced top-level {...}
+// object found by scanning the text. The first candidate that is a JSON
+// object with a boolean "pass" (and, when present, an array
+// "criteria_scores") wins. When none validates, the result carries
+// ParseErr and the raw output so the caller can record it and leave the
+// case unscored rather than counting a formatting problem as a failure.
 func parseJudgeOutput(raw string) JudgeResult {
-	var rec map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &rec); err != nil {
-		return JudgeResult{}
-	}
-	var result JudgeResult
-	if passRaw, ok := rec["pass"]; ok {
-		_ = json.Unmarshal(passRaw, &result.Pass)
-	}
-	if scoresRaw, ok := rec["criteria_scores"]; ok {
-		var scores []json.RawMessage
-		if err := json.Unmarshal(scoresRaw, &scores); err == nil {
+	for _, cand := range judgeJSONCandidates(raw) {
+		var rec map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(cand), &rec); err != nil {
+			continue
+		}
+		passRaw, ok := rec["pass"]
+		if !ok {
+			continue
+		}
+		var pass bool
+		if err := json.Unmarshal(passRaw, &pass); err != nil {
+			continue
+		}
+		result := JudgeResult{Pass: pass}
+		if scoresRaw, ok := rec["criteria_scores"]; ok {
+			var scores []json.RawMessage
+			if err := json.Unmarshal(scoresRaw, &scores); err != nil {
+				continue
+			}
 			result.CriteriaScores = scores
 		}
+		if notesRaw, ok := rec["notes"]; ok {
+			_ = json.Unmarshal(notesRaw, &result.Notes)
+		}
+		return result
 	}
-	if notesRaw, ok := rec["notes"]; ok {
-		_ = json.Unmarshal(notesRaw, &result.Notes)
+	return JudgeResult{
+		ParseErr: "judge output contains no JSON object with a boolean \"pass\" field",
+		Raw:      raw,
 	}
-	return result
+}
+
+// judgeJSONCandidates lists candidate JSON object texts in priority order.
+func judgeJSONCandidates(raw string) []string {
+	var out []string
+	trimmed := strings.TrimSpace(raw)
+	// Fenced blocks: ```json ... ``` (or bare ```).
+	rest := raw
+	for {
+		i := strings.Index(rest, "```")
+		if i < 0 {
+			break
+		}
+		after := rest[i+3:]
+		j := strings.Index(after, "```")
+		if j < 0 {
+			break
+		}
+		body := after[:j]
+		// Drop an optional language tag on the first line.
+		if nl := strings.IndexByte(body, '\n'); nl >= 0 {
+			tag := strings.TrimSpace(body[:nl])
+			if tag == "" || strings.EqualFold(tag, "json") {
+				body = body[nl+1:]
+			}
+		}
+		body = strings.TrimSpace(body)
+		if strings.HasPrefix(body, "{") {
+			out = append(out, body)
+		}
+		rest = after[j+3:]
+	}
+	if strings.HasPrefix(trimmed, "{") {
+		out = append(out, trimmed)
+	}
+	out = append(out, balancedObjects(raw)...)
+	return out
+}
+
+// balancedObjects returns every top-level balanced {...} span in s. Braces
+// inside JSON strings are ignored. An unbalanced opener is skipped so a
+// stray "{" in prose does not hide a later valid object.
+func balancedObjects(s string) []string {
+	var out []string
+	i := 0
+	for i < len(s) {
+		if s[i] != '{' {
+			i++
+			continue
+		}
+		end := matchBrace(s, i)
+		if end < 0 {
+			i++
+			continue
+		}
+		out = append(out, s[i:end+1])
+		i = end + 1
+	}
+	return out
+}
+
+// matchBrace returns the index of the brace closing the one at s[start], or
+// -1 when the object never closes.
+func matchBrace(s string, start int) int {
+	depth := 0
+	inStr := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			switch c {
+			case '\\':
+				i++
+			case '"':
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // ---- subcommand: eval -------------------------------------------------------
@@ -1023,7 +1146,41 @@ outerLoop:
 				if errors.Is(err, ErrDispatchUnavailable) {
 					return Result{}, fmt.Errorf("model-routing eval: %w", err)
 				}
-				jr = JudgeResult{}
+				jr = JudgeResult{ParseErr: "judge dispatch failed: " + err.Error()}
+			}
+
+			// A judge verdict that could not be parsed leaves the case
+			// unscored: record the raw output, do not count a pass or a fail.
+			if jr.Unscored() {
+				logWrite(cfg.EvalLog, mustJSON(map[string]interface{}{
+					"type":           "eval_case",
+					"ts":             isoNow(cfg.Now),
+					"run_id":         runID,
+					"agent":          cfg.AgentID,
+					"case_id":        ec.CaseID,
+					"case_hash":      hash,
+					"tier":           tier,
+					"pass":           nil,
+					"scored":         false,
+					"judge_error":    jr.ParseErr,
+					"judge_raw":      jr.Raw,
+					"rubric_scores":  []interface{}{},
+					"total_cost_usd": dr.Cost,
+					"duration_s":     dr.DurationS,
+					"usage": map[string]interface{}{
+						"input_tokens":  dr.InputTokens,
+						"output_tokens": dr.OutputTokens,
+					},
+					"judge": judge,
+				}))
+				stats[tier].unscored++
+				stats[tier].cost += dr.Cost
+				totalSpent += dr.Cost
+				if totalSpent > maxCost {
+					budgetHit = tripBudget(cfg, runID, totalSpent, maxCost)
+					break
+				}
+				continue
 			}
 
 			// Build criteria_scores JSON for logging.
@@ -1068,17 +1225,7 @@ outerLoop:
 
 			// Cost cap check.
 			if totalSpent > maxCost {
-				budgetRec := mustJSON(map[string]interface{}{
-					"type":      "budget_exceeded",
-					"ts":        isoNow(cfg.Now),
-					"run_id":    runID,
-					"agent":     cfg.AgentID,
-					"spent_usd": totalSpent,
-					"cap_usd":   maxCost,
-				})
-				logWrite(cfg.EvalLog, budgetRec)
-				fmt.Fprintf(cfg.Writer, "  WARN: budget cap $%.2f exceeded after $%.6f spent; aborting run\n", maxCost, totalSpent)
-				budgetHit = true
+				budgetHit = tripBudget(cfg, runID, totalSpent, maxCost)
 				break
 			}
 		}
@@ -1316,6 +1463,21 @@ outerLoop:
 		CandidateTier:    candidateTier,
 		CandidateReason:  candidateReason,
 	}, nil
+}
+
+// tripBudget records the budget_exceeded event and warns. It returns true so
+// callers can assign it straight to the budget flag.
+func tripBudget(cfg Config, runID string, spent, maxCost float64) bool {
+	logWrite(cfg.EvalLog, mustJSON(map[string]interface{}{
+		"type":      "budget_exceeded",
+		"ts":        isoNow(cfg.Now),
+		"run_id":    runID,
+		"agent":     cfg.AgentID,
+		"spent_usd": spent,
+		"cap_usd":   maxCost,
+	}))
+	fmt.Fprintf(cfg.Writer, "  WARN: budget cap $%.2f exceeded after $%.6f spent; aborting run\n", maxCost, spent)
+	return true
 }
 
 // nilOrString returns the string as a Go interface (nil when empty) for JSON null.
