@@ -222,7 +222,7 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 		}
 	}
 
-	// Agent frontmatter enums: runtime / runtime-fallback.
+	// Agent frontmatter enums: runtime / runtime-fallback / model-policy.
 	checkAgentEnums(cfg, r, w, base)
 
 	// Line budget warnings
@@ -1021,12 +1021,16 @@ func checkDecisionGuards(r *Result, w io.Writer, base string) {
 	}
 }
 
-// ---- agent frontmatter enums (K-112 c) -----------------------------------
+// ---- agent frontmatter enums (K-112 c, d) -----------------------------------
 
 // knownRuntimes mirrors YK_RT_KNOWN_BUILTIN in cli/lib/runtime-resolve.sh
 // (a test keeps the two in step). Plugin runtimes under
 // ~/.yakos/plugins/<id>/runtime.sh are accepted too, like yk_rt_is_known.
 var knownRuntimes = []string{"claude", "claude-sdk", "codex", "agy", "antigravity-sdk", "gemini"}
+
+// modelTiers are the values dispatch accepts for a promoted model-policy (it
+// ct_die()s on anything else): cli/lib/dispatch.sh _validate_model_tier.
+var modelTiers = []string{"haiku", "sonnet", "opus", "fable"}
 
 func inSet(v string, set []string) bool {
 	for _, s := range set {
@@ -1050,7 +1054,8 @@ func runtimeKnown(id string) bool {
 	return false
 }
 
-// checkAgentEnums rejects agent frontmatter whose runtime or runtime-fallback value is not one the dispatcher can act on. A pinned-to-nothing
+// checkAgentEnums rejects agent frontmatter whose runtime, runtime-fallback or
+// model-policy value is not one the dispatcher can act on. A pinned-to-nothing
 // runtime silently fell through to the resolver default, and a non-tier
 // model-policy made `yakos dispatch` die with "invalid model tier".
 // Mirrors check_agent_enums in cli/lib/validate.sh.
@@ -1102,6 +1107,12 @@ func checkAgentEnums(cfg Config, r *Result, w io.Writer, base string) {
 						r.addErr(w, fmt.Sprintf("%s: runtime-fallback: entries must be strings, got %T", file, el))
 					}
 				}
+			}
+		}
+		if v, ok := fm["model-policy"]; ok && v != nil {
+			sv, isStr := v.(string)
+			if !isStr || !inSet(sv, modelTiers) {
+				r.addErr(w, fmt.Sprintf("%s: model-policy: %v is not a model tier (want one of: %s); it is the tier `yakos model-routing promote` wrote, not a policy name", file, v, strings.Join(modelTiers, ", ")))
 			}
 		}
 	}

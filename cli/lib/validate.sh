@@ -195,7 +195,7 @@ validate_tree() {
         fi
     fi
 
-    # Agent frontmatter enums: runtime / runtime-fallback.
+    # Agent frontmatter enums: runtime / runtime-fallback / model-policy.
     check_agent_enums "$base"
 
     # Line-budget WARNs (per Phase 1.5 §10 + STYLE.md §7)
@@ -210,14 +210,16 @@ validate_tree() {
 
 # ---- standards checks (framework-mode only; STYLE.md §1-§7) ----------------
 
-# ---- agent frontmatter enums (K-112 c) -----------------------------------
+# ---- agent frontmatter enums (K-112 c, d) -----------------------------------
 #
 # runtime / runtime-fallback must name a runtime the dispatcher knows
 # (YK_RT_KNOWN_BUILTIN in runtime-resolve.sh, or a plugin under
-# ~/.yakos/plugins/<id>/runtime.sh). Go twin: checkAgentEnums in
+# ~/.yakos/plugins/<id>/runtime.sh); model-policy must be a model tier, the
+# only thing dispatch.sh accepts. Go twin: checkAgentEnums in
 # cli-go/internal/validate/validate.go (keep the messages byte-identical).
 
 _VALIDATE_KNOWN_RUNTIMES="claude claude-sdk codex agy antigravity-sdk gemini"
+_VALIDATE_MODEL_TIERS="haiku sonnet opus fable"
 
 _validate_runtime_known() {
     case " $_VALIDATE_KNOWN_RUNTIMES " in *" $1 "*) return 0 ;; esac
@@ -276,6 +278,13 @@ check_agent_enums() {
                 fi
             done < <(_validate_fm_values "$fm" "$key")
         done
+        while IFS= read -r v; do
+            [ -n "$v" ] || continue
+            case " $_VALIDATE_MODEL_TIERS " in
+                *" $v "*) ;;
+                *) err "$agent_file: model-policy: $v is not a model tier (want one of: ${_VALIDATE_MODEL_TIERS// /, }); it is the tier \`yakos model-routing promote\` wrote, not a policy name" ;;
+            esac
+        done < <(_validate_fm_values "$fm" "model-policy")
     done < <(find "$base/agents" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort)
 }
 

@@ -79,6 +79,20 @@ func TestAgentEnums_RuntimeFallback(t *testing.T) {
 	}
 }
 
+func TestAgentEnums_ModelPolicy(t *testing.T) {
+	for _, tier := range []string{"haiku", "sonnet", "opus", "fable"} {
+		if out, errs, _, _ := enumProject(t, "model-policy: "+tier+"\n"); errs != 0 {
+			t.Errorf("tier %s rejected\n%s", tier, out)
+		}
+	}
+	for _, bad := range []string{"pinned", "eval-driven", "cheap", "prefer-haiku-if-eval-equal"} {
+		out, errs, _, _ := enumProject(t, "model-policy: "+bad+"\n")
+		if errs != 1 || !strings.Contains(out, "is not a model tier") {
+			t.Errorf("model-policy %s: errs=%d\n%s", bad, errs, out)
+		}
+	}
+}
+
 func TestAgentEnums_PluginRuntimeAccepted(t *testing.T) {
 	proj := t.TempDir()
 	dir := filepath.Join(proj, ".claude", "agents")

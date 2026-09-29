@@ -5,7 +5,6 @@ domain: cross-cutting
 mode: [report]
 tools: [Read, Bash, Grep]
 model: sonnet
-model-policy: pinned
 version: 1
 references:
   - rule:lead-dispatch-discipline
