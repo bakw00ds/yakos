@@ -151,6 +151,18 @@ Partial streaming is a claude-specific capability. The Chat UI labels buffered
 runtimes clearly so operators know to expect a single response rather than a
 live stream.
 
+## Jev is not a runtime
+
+TypeSafe's Jev is deliberately absent from this matrix. It has no session, no
+agent prompt, no tools, and no text output: it evaluates typed questions
+against a redacted state and returns probabilities. yakOS integrates it as a
+*decision provider* behind `yakos decide` (see
+[decision-providers.md](decision-providers.md) and
+[ADR-0009](adr/ADR-0009.md)), so it can never be selected with `--runtime`,
+named in `runtime:` or `runtime-fallback:` frontmatter, or offered in the
+console chat runtime list. `yakos validate` and `yakos agent lint` reject
+`runtime: jev` with a hard error.
+
 ## Adding a new runtime
 
 See [`cli/lib/runtimes/README.md`](../cli/lib/runtimes/README.md).

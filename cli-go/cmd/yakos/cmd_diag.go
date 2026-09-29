@@ -386,6 +386,8 @@ func runStatus(args []string) {
 func runDoctor(yakosRoot string, args []string) {
 	help := false
 	probeRuntime := false
+	probeDecision := false
+	live := false
 	production := false
 	fix := false
 	preflight := false
@@ -393,6 +395,8 @@ func runDoctor(yakosRoot string, args []string) {
 	fs := &cliflag.Set{Cmd: "doctor", Specs: []cliflag.Spec{
 		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
 		{Name: "--probe-runtime", Kind: cliflag.Bool, Bool: &probeRuntime},
+		{Name: "--probe-decision", Kind: cliflag.Bool, Bool: &probeDecision},
+		{Name: "--live", Kind: cliflag.Bool, Bool: &live},
 		{Name: "--production", Kind: cliflag.Bool, Bool: &production},
 		{Name: "--fix", Kind: cliflag.Bool, Bool: &fix},
 		{Name: "--preflight", Kind: cliflag.Bool, Bool: &preflight},
@@ -405,6 +409,10 @@ func runDoctor(yakosRoot string, args []string) {
 	if help {
 		doctor.PrintHelp(os.Stdout)
 		os.Exit(0)
+	}
+	if live && !probeDecision {
+		fmt.Fprintln(os.Stderr, "doctor: --live only applies to --probe-decision")
+		os.Exit(1)
 	}
 	if fix {
 		fmt.Fprintln(os.Stderr, "doctor: --fix is not yet implemented in the Go port (see ideas wishlist rank 5)")
@@ -447,14 +455,16 @@ func runDoctor(yakosRoot string, args []string) {
 	}
 
 	cfg := doctor.Config{
-		YakosRoot:     yakosRoot,
-		YakosLib:      yakosLib,
-		ProjectPath:   projectPath,
-		ProbeRuntime:  probeRuntime,
-		Production:    production,
-		PreflightOnly: preflight,
-		Writer:        os.Stdout,
-		ErrWriter:     os.Stderr,
+		YakosRoot:         yakosRoot,
+		YakosLib:          yakosLib,
+		ProjectPath:       projectPath,
+		ProbeRuntime:      probeRuntime,
+		ProbeDecision:     probeDecision,
+		ProbeDecisionLive: live,
+		Production:        production,
+		PreflightOnly:     preflight,
+		Writer:            os.Stdout,
+		ErrWriter:         os.Stderr,
 	}
 
 	report, err := doctor.Run(cfg)

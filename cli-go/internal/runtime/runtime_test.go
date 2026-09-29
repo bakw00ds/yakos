@@ -571,3 +571,19 @@ func assertContains(t *testing.T, s, substr, msg string) {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
+
+// TestJevIsNotARuntime pins ADR-0009: Jev is a decision provider, so it must
+// never appear in the runtime registry, resolve to an adapter, or pass
+// runtime validation. This is the structural half of the routing guardrail.
+func TestJevIsNotARuntime(t *testing.T) {
+	for _, k := range Known {
+		if strings.EqualFold(k, "jev") {
+			t.Fatalf("runtime.Known must not contain jev: %v", Known)
+		}
+	}
+	for _, name := range []string{"jev", "JEV", "jev-1.13.0", "typesafe"} {
+		if a, err := Resolve(name); err == nil || a != nil {
+			t.Errorf("Resolve(%q) must fail (got adapter %v)", name, a)
+		}
+	}
+}

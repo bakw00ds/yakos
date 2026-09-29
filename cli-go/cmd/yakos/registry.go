@@ -244,13 +244,18 @@ var commandRegistry = []commandEntry{
 		HelpFn: printCostHelp,
 	},
 	{
+		Name:   "decide",
+		Specs:  specSet("decide", "--provider", "--shadow", "--timeout", "--session", "--state-file", "--sets-dir", "--config", "--report"),
+		HelpFn: printDecideHelp,
+	},
+	{
 		Name:   "dispatch",
 		Specs:  specSet("dispatch", "--runtime", "--model", "--project", "--timeout", "--eval-run-id", "--allow-root"),
 		HelpFn: printDispatchHelp,
 	},
 	{
 		Name:   "doctor",
-		Specs:  specSet("doctor", "--probe-runtime", "--production", "--fix", "--preflight"),
+		Specs:  specSet("doctor", "--probe-runtime", "--probe-decision", "--live", "--production", "--fix", "--preflight"),
 		HelpFn: doctor.PrintHelp,
 		AllowUndocumented: []flagAllow{
 			{Flag: "--production", Reason: "doctor.PrintHelp (internal/doctor) documents --probe-runtime and --fix but never mentions --production; doc gap in a package this PR does not own"},

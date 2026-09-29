@@ -62,6 +62,7 @@ _yakos() {
         'metrics:collect and report per-project quality metrics'
         'telemetry:opt-in anonymised CLI telemetry'
         'model-routing:evaluate and promote per-task model assignments'
+        'decide:ask a typed decision provider (Jev or mock)'
         'plan:score and correlate plan quality'
         'work:record plan outcome and close work session'
         'workflow:run a named multi-step workflow'

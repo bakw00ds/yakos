@@ -165,6 +165,31 @@ profile:
 #   threshold: 0.75          # weighted aggregate pass threshold (0..1)
 #   cost_ceiling_usd: 0.15   # hard cost ceiling per scoring run
 
+# ---- decision providers (ADR-0009, K-111; off by default) ------------------
+# A decision provider (TypeSafe Jev) answers reviewed, typed questions from
+# lib/decisions/<surface>.yaml and returns probabilities. It is NOT an agent
+# runtime: no agent can be routed to it, and no answer may block a tool call
+# until `yakos decide promote` records an eval for the surface.
+#
+# The API key is NEVER stored here. Export TYPESAFE_API_KEY in your shell.
+# A project can only TIGHTEN the user-level ceiling (default 2000 calls, $1/day,
+# strict egress); to raise it edit ~/.yakos-state/decision-policy.yml.
+# Kill switch: export YAKOS_DECISION_DISABLE=1
+# Check health: yakos doctor --probe-decision   (add --live for one real call)
+#
+# decisions:
+#   provider: none            # none | jev | mock   (default: none)
+#   model: jev-1.13.0         # pinned version; aliases like jev-latest are rejected
+#   default_mode: shadow      # shadow | prefilter | off
+#   surfaces:
+#     supervisor-prefilter: { mode: shadow, min_confidence: 0.70 }
+#   budget:
+#     max_calls_per_session: 2000
+#     max_usd_per_day: 1.00
+#   egress:
+#     level: strict           # strict (2 KiB previews) | previews | full
+#     never_paths: ["**/.env*", "**/*.pem", "**/*.key", "**/credentials/**", "**/secrets/**"]
+
 # ---- environment workflows (Plan 3 M5 / v0.17+) ----------------------------
 # Uncomment + customize to enable dev→test→prod promotion gates.
 #

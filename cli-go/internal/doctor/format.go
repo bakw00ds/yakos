@@ -8,7 +8,7 @@ import (
 // PrintHelp writes the --help text for `yakos doctor` to w.
 // The output is byte-identical to doctor.sh --help (modulo the trailing EOF).
 func PrintHelp(w io.Writer) {
-	_, _ = fmt.Fprint(w, `yakos doctor [<project-path>] [--probe-runtime] [--preflight] — verify YakOS install + environment health
+	_, _ = fmt.Fprint(w, `yakos doctor [<project-path>] [--probe-runtime] [--probe-decision [--live]] [--preflight] — verify YakOS install + environment health
 
 Without arguments, checks:
     Required commands (bash, git, jq)
@@ -42,6 +42,16 @@ If --probe-runtime is passed, additionally reports:
     The exact prompt to ask in a Claude Code session to refresh the
     last-known state.
 
+If --probe-decision is passed, additionally reports on the decision provider
+(ADR-0009; a provider is not a runtime):
+    TYPESAFE_API_KEY set / not set (the value is never printed)
+    decisions: block in <project>/.yakos.yml and its pinned model
+    Question sets under lib/decisions/ (schema, pinned model, hash)
+    Circuit-breaker state and today's spend against the budget caps
+    With --live ONLY, one minimal real call (about $0.000002, not counted
+        against the budget) reporting the
+        HTTP outcome, latency, and drift between the served and pinned model
+
 If --preflight is passed, ONLY the Preflight section runs (fast path,
 skips every check above) — the session-start checks that catch common
 blockers before dispatch:
@@ -59,7 +69,7 @@ blockers before dispatch:
     <work>/current/kanban.md exists, parses, and has no IN PROGRESS
         item whose most recent embedded date is >7 days old
 
-Usage: yakos doctor [<project-path>] [--probe-runtime] [--preflight]
+Usage: yakos doctor [<project-path>] [--probe-runtime] [--probe-decision [--live]] [--preflight]
 
 Exit code:
     0   No errors (warnings/info/drift OK)
