@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# run-supervisor-stream-test.sh — K-112 (a) regression test for
+# run-supervisor-stream-test.sh — K-112 (a)+(b) regression test for
 # lib/hooks/supervisor-stream.sh and its Go twin.
 #
 # (a) Bash tool calls: tool_input.command / description reach the risk-regex
 #     pre-filter. rm -rf, curl | sh, git push --force and a `>` write to a
 #     sensitive path ESCALATE; a benign `ls` does not. The bash and Go sides
 #     must agree on the trigger and on the buffered event.
+# (b) At the score threshold BOTH sides launch `yakos dispatch <agent> <task>
+#     --runtime R --model M` (the Go side used to write a marker nobody read).
+#     A fake dispatcher script records the argv; the two argvs must match.
 #
 # The Go half runs only when bin/yakos exists (make build). Run under both
 # `bash` and `/bin/bash`.
@@ -75,6 +78,66 @@ for spec in "posttooluse-bash-ss-rm-rf.json:1" "posttooluse-bash-ss-curl-pipe-sh
         printf '%s' "$bufs" | sed -n 1p | jq -e '.input.command_preview != null' >/dev/null 2>&1 \
             && ok "(a) $fx command_preview buffered" || bad "(a) $fx command_preview missing"
     fi
+done
+
+# ---- (b) launch at threshold -------------------------------------------------
+mkfake() { # mkfake <record-file> -> path of a fake dispatcher
+    local f="$TMP/fake-yakos-$$-$RANDOM"
+    printf '#!/bin/sh\nfor a in "$@"; do printf "ARG:%%s\\n" "$a" >> "%s"; done\n' "$1" > "$f"
+    chmod +x "$f"; printf '%s' "$f"
+}
+wait_for() { # wait_for <file> <pattern>
+    local i=0
+    while [ "$i" -lt 100 ]; do
+        grep -q -- "$2" "$1" 2>/dev/null && return 0
+        sleep 0.1; i=$((i + 1))
+    done
+    return 1
+}
+argvs=""
+for side in $sides; do
+    sb="$(mksb "b-$side" $'supervisor:\n  score_every_n_calls: 1\n  model: sonnet\n  runtime: codex\n  agent: watcher\n')"
+    printf 'ship the thing\n' > "$sb/work/current/decisions.md"
+    rec="$TMP/argv-$side.txt"; : > "$rec"
+    fake="$(mkfake "$rec")"
+    run_side "$side" "$sb" posttooluse-bash-ss-rm-rf.json "YAKOS_CLI=$fake"
+    if wait_for "$rec" 'ARG:sonnet'; then
+        ok "(b) $side launched the dispatcher"
+    else
+        bad "(b) $side never launched the dispatcher (argv file empty)"
+    fi
+    grep -q 'forked async' "$sb/work/current/logs/supervisor-stream.ndjson" 2>/dev/null \
+        && ok "(b) $side logged the fork" || bad "(b) $side did not log the fork"
+    argvs="$argvs$(sed "s|$sb|<SB>|g" "$rec" | sed 's|^$||')"$'\n---\n'
+    # nothing left behind: no dead marker
+    [ ! -e "$sb/work/current/.supervisor-dispatch-ready" ] || bad "(b) $side wrote the dead .supervisor-dispatch-ready marker"
+done
+if [ "$HAVE_GO" = 1 ]; then
+    a="$(printf '%s' "$argvs" | awk 'BEGIN{n=0} /^---$/{n++; next} n==0{print}')"
+    b="$(printf '%s' "$argvs" | awk 'BEGIN{n=0} /^---$/{n++; next} n==1{print}')"
+    if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "(b) bash and Go dispatch argv identical"; else bad "(b) argv differs:
+--- bash
+$a
+--- go
+$b"; fi
+fi
+
+# no CLI: both sides WARN and exit 0. This PATH has every binary EXCEPT yakos.
+NOCLI="$TMP/nocli-bin"; mkdir -p "$NOCLI"
+for _dir in /usr/bin /bin /usr/local/bin /opt/homebrew/bin; do
+    [ -d "$_dir" ] || continue
+    for _bin in "$_dir"/*; do
+        [ -x "$_bin" ] || continue
+        _name="$(basename -- "$_bin")"
+        [ "$_name" = "yakos" ] && continue
+        ln -sf "$_bin" "$NOCLI/$_name" 2>/dev/null || true
+    done
+done
+for side in $sides; do
+    sb="$(mksb "c-$side" $'supervisor:\n  score_every_n_calls: 1\n')"
+    run_side "$side" "$sb" posttooluse-bash-ss-rm-rf.json "PATH=$NOCLI"
+    grep -q 'could not locate yakos CLI' "$sb/work/current/logs/supervisor-stream.ndjson" 2>/dev/null \
+        && ok "(b) $side no-CLI WARN" || bad "(b) $side no-CLI WARN missing"
 done
 
 printf '\nsupervisor-stream: %d passed, %d failed\n' "$pass" "$fail"

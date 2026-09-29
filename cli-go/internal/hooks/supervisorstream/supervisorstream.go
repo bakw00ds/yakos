@@ -15,10 +15,13 @@
 //  3. If no trigger fires → buffer-only, no counter tick, exit 0.
 //  4. If a trigger fires → increment escalation counter in
 //     work/current/.supervisor-counter.
-//  5. Every score_every_n_calls (default 10) escalations → write a
-//     "dispatch-ready" marker to work/current/.supervisor-dispatch-ready so
-//     that the Tier-2 bash hook or the lead monitor can invoke the supervisor.
-//     (The Go binary does not fork a subprocess. See package doc.)
+//  5. Every score_every_n_calls (default 10) escalations → launch the
+//     supervisor agent detached, exactly like the bash hook:
+//     `yakos dispatch <agent> <task> --runtime R --model M`, stdout/stderr
+//     appended to work/current/.supervisor-{stdout,stderr}.log. The CLI is
+//     found via $YAKOS_CLI, $YAKOS_ROOT/cli/yakos, then PATH. (K-112 b: this
+//     used to write a marker file nothing ever read, so the LLM tier never
+//     ran under YAKOS_HOOKS=go.)
 //
 // Never blocks. Always exits 0. This is telemetry, not policy.
 package supervisorstream
@@ -100,6 +103,11 @@ type Hook struct {
 
 	// NowFn is injected for tests.
 	NowFn func() time.Time
+
+	// Launch starts the supervisor dispatch at the score threshold. New sets
+	// the production detached launcher; a nil Launch (struct-literal Hooks in
+	// tests) never spawns a process and logs a WARN instead.
+	Launch Launcher
 }
 
 // New returns a Hook with sensible defaults.
@@ -108,6 +116,7 @@ func New(workCurrentDir, projectDir string) *Hook {
 		WorkCurrentDir: workCurrentDir,
 		ProjectDir:     projectDir,
 		NowFn:          time.Now,
+		Launch:         launchDetached,
 	}
 }
 
@@ -272,15 +281,60 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		return out, nil
 	}
 
-	// Threshold hit — write dispatch-ready marker.
-	dispatchMarker := filepath.Join(h.WorkCurrentDir, ".supervisor-dispatch-ready")
-	_ = atomicTouch(dispatchMarker)
-
+	// Threshold hit — fork the supervisor (bash: same log records, same order).
 	h.appendLog(&out, logFile, "REPORT", "pass",
-		"escalation score threshold hit; dispatch-ready marker written (async scoring expected from Tier-2 or lead monitor)",
-		map[string]any{"counter": cur, "score_every": scoreEvery, "will_score": true, "marker": dispatchMarker})
+		"escalation score threshold hit; forking supervisor dispatch (async)",
+		map[string]any{"counter": cur, "score_every": scoreEvery, "will_score": true})
+
+	h.launchSupervisor(&out, in, cfg, logFile, scoreEvery)
 
 	return out, nil
+}
+
+// launchSupervisor mirrors the tail of supervisor-stream.sh: resolve
+// runtime/agent/model (defaults claude / supervisor / haiku), locate the CLI,
+// build the task, start `dispatch` detached, and log the same records.
+func (h *Hook) launchSupervisor(out *hooktype.HookOutput, in hooktype.HookInput, cfg *supervisorConfig, logFile string, scoreEvery int) {
+	runtime, agent, model := "claude", "supervisor", "haiku"
+	if cfg != nil {
+		if cfg.Runtime != "" {
+			runtime = cfg.Runtime
+		}
+		if cfg.Agent != "" {
+			agent = cfg.Agent
+		}
+		if cfg.Model != "" {
+			model = cfg.Model
+		}
+	}
+
+	cli := findCLI(in.Env)
+	if cli == "" || h.Launch == nil {
+		h.appendLog(out, logFile, "WARN", "pass",
+			"could not locate yakos CLI to fork supervisor", map[string]any{})
+		return
+	}
+
+	task := buildTask(
+		filepath.Join(h.WorkCurrentDir, "supervisor-buffer.ndjson"),
+		filepath.Join(h.WorkCurrentDir, "supervisor-findings.ndjson"),
+		filepath.Join(h.WorkCurrentDir, "decisions.md"),
+		scoreEvery)
+	spec := LaunchSpec{
+		CLI:        cli,
+		Args:       []string{"dispatch", agent, task, "--runtime", runtime, "--model", model},
+		StdoutPath: filepath.Join(h.WorkCurrentDir, ".supervisor-stdout.log"),
+		StderrPath: filepath.Join(h.WorkCurrentDir, ".supervisor-stderr.log"),
+	}
+	if err := h.Launch(spec); err != nil {
+		h.appendLog(out, logFile, "WARN", "pass",
+			"supervisor dispatch launch failed",
+			map[string]any{"error": err.Error(), "model": model, "runtime": runtime})
+		return
+	}
+	h.appendLog(out, logFile, "REPORT", "pass",
+		fmt.Sprintf("supervisor dispatch forked async (model=%s runtime=%s)", model, runtime),
+		map[string]any{"dispatch": "async", "model": model, "runtime": runtime})
 }
 
 // ---- pre-filter checks -------------------------------------------------------
@@ -501,26 +555,6 @@ func (h *Hook) appendLog(out *hooktype.HookOutput, logFile, severity, action, me
 }
 
 // ---- helpers -----------------------------------------------------------------
-
-func atomicTouch(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil { //nolint:gosec
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".yakos-ss-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	return nil
-}
 
 // globMatch mirrors bash supervisor-stream.sh, which uses `case` patterns:
 // `*` matches any characters INCLUDING "/" (so "**" behaves as "*"), and the
