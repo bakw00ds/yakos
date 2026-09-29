@@ -639,3 +639,52 @@ func TestPersistHooksImpl_KeepsInlineCommentAndCRLF(t *testing.T) {
 		t.Fatalf("CRLF append: %q", got)
 	}
 }
+
+// A binary path with a single quote and a space must round-trip through the
+// quoting and the parser: no duplicates, reruns are no-ops, and switching
+// back to bash leaves no Go commands behind.
+func TestHooksImpl_QuotePathRoundTrip(t *testing.T) {
+	const weird = "/we ird/it's dir/yakos"
+	if n, ok := goHookName(goCommand(weird, "path-log")); !ok || n != "path-log" {
+		t.Fatalf("parse of %q: %q %v", goCommand(weird, "path-log"), n, ok)
+	}
+	proj, home := fixtureProject(t, "proj-missing-settings")
+	golden, _ := os.ReadFile(filepath.Join("testdata", "golden-bash", "proj-missing-settings.settings.json")) //nolint:gosec
+	want := len(commands(t, golden))
+	run := func(impl HooksImpl) string {
+		var buf bytes.Buffer
+		if _, err := Run(Config{YakosRoot: hooksImplRepoRoot(t), ProjectPaths: []string{proj}, HooksImpl: impl,
+			YakosBinary: weird, Writer: &buf, ErrWriter: &buf, HomeDir: home}); err != nil {
+			t.Fatal(err)
+		}
+		if n := len(commands(t, readSettings(t, proj))); n != want {
+			t.Fatalf("after %q: %d commands, want %d", impl, n, want)
+		}
+		return buf.String()
+	}
+	run(HooksImplHybrid)
+	run(HooksImplGo)
+	before := readSettings(t, proj)
+	if out := run(""); !strings.Contains(out, "added=0 removed=0") {
+		t.Fatalf("rerun not a no-op:\n%s", out)
+	}
+	if !bytes.Equal(before, readSettings(t, proj)) {
+		t.Fatal("rerun changed bytes")
+	}
+	run(HooksImplBash)
+	if !bytes.Equal(readSettings(t, proj), golden) {
+		t.Fatal("switch back to bash left leftovers / did not match golden")
+	}
+}
+
+func TestEphemeralBinary_CoversPrivateTmp(t *testing.T) {
+	t.Setenv("TMPDIR", "/elsewhere")
+	for _, p := range []string{"/private/tmp/x/yakos", "/tmp/x/yakos", "/Users/a/yakOS-wt-foo/bin/yakos"} {
+		if !ephemeralBinary(p) {
+			t.Errorf("%s not flagged ephemeral", p)
+		}
+	}
+	if ephemeralBinary("/opt/yakos/bin/yakos") {
+		t.Error("installed path flagged")
+	}
+}

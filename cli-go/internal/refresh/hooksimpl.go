@@ -97,24 +97,67 @@ func isGoCommand(command string) bool {
 	return ok
 }
 
-var goHookRe = regexp.MustCompile(`^(?:'([^']*)'|(\S+)) hook run (\S+)$`)
+// posixWords splits command like a POSIX shell for the subset shellQuote
+// emits: unquoted runs, single-quoted runs, and backslash escapes outside
+// quotes (so the `'\”` idiom decodes to a literal single quote). It
+// returns ok=false on anything else (double quotes, unterminated quotes),
+// so unknown command shapes are never mistaken for Go hook commands.
+func posixWords(command string) ([]string, bool) {
+	var words []string
+	var cur strings.Builder
+	inWord := false
+	rs := []rune(command)
+	for i := 0; i < len(rs); i++ {
+		c := rs[i]
+		switch {
+		case c == '\'':
+			inWord = true
+			i++
+			for i < len(rs) && rs[i] != '\'' {
+				cur.WriteRune(rs[i])
+				i++
+			}
+			if i >= len(rs) {
+				return nil, false
+			}
+		case c == '\\':
+			i++
+			if i >= len(rs) {
+				return nil, false
+			}
+			inWord = true
+			cur.WriteRune(rs[i])
+		case c == '"':
+			return nil, false
+		case c == ' ' || c == '\t':
+			if inWord {
+				words = append(words, cur.String())
+				cur.Reset()
+				inWord = false
+			}
+		default:
+			inWord = true
+			cur.WriteRune(c)
+		}
+	}
+	if inWord {
+		words = append(words, cur.String())
+	}
+	return words, true
+}
 
 // goHookName extracts <name> from `<path>/yakos hook run <name>` (the path
-// may be single-quoted, or the bare word `yakos`).
+// may be shell-quoted, or the bare word `yakos`).
 func goHookName(command string) (string, bool) {
-	m := goHookRe.FindStringSubmatch(strings.TrimSpace(command))
-	if m == nil {
+	w, ok := posixWords(command)
+	if !ok || len(w) != 4 || w[1] != "hook" || w[2] != "run" || w[3] == "" {
 		return "", false
 	}
-	bin := m[1]
-	if bin == "" {
-		bin = m[2]
-	}
-	base := filepath.Base(strings.ReplaceAll(bin, "\\", "/"))
+	base := filepath.Base(strings.ReplaceAll(w[0], "\\", "/"))
 	if base != "yakos" && base != "yakos.exe" {
 		return "", false
 	}
-	return m[3], true
+	return w[3], true
 }
 
 // hookNameFromTemplateCommand returns the hook name (no .sh) for a bash-form
@@ -329,6 +372,10 @@ func ephemeralBinary(bin string) bool {
 			return true
 		}
 	}
-	return strings.HasPrefix(slash, strings.TrimRight(tmp, "/")+"/") ||
-		strings.Contains(slash, "-wt-") || strings.Contains(slash, "/worktrees/")
+	for _, t := range []string{strings.TrimRight(tmp, "/"), "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"} {
+		if strings.HasPrefix(slash, t+"/") {
+			return true
+		}
+	}
+	return strings.Contains(slash, "-wt-") || strings.Contains(slash, "/worktrees/")
 }
