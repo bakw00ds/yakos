@@ -13,7 +13,6 @@ set -eu
 REPO_ROOT="$(cd "$(dirname -- "$0")/.." && pwd -P)"
 export YAKOS_ROOT="$REPO_ROOT"
 export YAKOS_LIB="$REPO_ROOT/cli/lib"
-FIXTURES_DIR="$REPO_ROOT/tests/fixtures/runtime-stderr"
 
 pass=0; fail=0
 ok()   { printf '  [ok]   %s\n' "$*"; pass=$((pass + 1)); }
