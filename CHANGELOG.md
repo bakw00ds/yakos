@@ -96,6 +96,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`yakos upgrade` rejected GitHub's new release-asset host (K-113).**
+  GitHub now redirects release assets to
+  `release-assets.githubusercontent.com`, which the self-updater's redirect
+  allowlist did not contain, so `yakos upgrade` failed while fetching
+  `checksums.txt`. The allowlist is now `github.com`, `codeload.github.com`
+  `objects.`, `releases.` and `release-assets.githubusercontent.com`, over
+  HTTPS on port 443 with no userinfo. Any other host, including other
+  `githubusercontent.com` subdomains, is rejected, and a 10-redirect cap is now
+  enforced explicitly (a custom `CheckRedirect` had silently dropped the
+  net/http default). Previously any depth under `github.com` was also
+  accepted; that is tightened. **v0.60.0.0 users:** the installed binary
+  cannot self-update to the fix; reinstall via `scripts/install.sh` (or
+  download the asset and verify the checksum). `yakos upgrade` works again
+  from v0.60.1.0. See UPGRADING.md.
+
 - **Hook-bypass scopes are exact-or-glob (K-99).** `ho_check_bypass` and
   the Go `hookbypass.Check` used to match when the entry's Scope merely
   contained the checked value, so `web/secret.env-rotation` also bypassed

@@ -47,6 +47,22 @@ yakos doctor <name> --fix      # auto-remediate gitignore, hashes, dirs
 yakos migrate <name>           # bump .yakos.yml schema if present
 ```
 
+### v0.60.0.0 users: `yakos upgrade` cannot self-update
+
+The v0.60.0.0 binary's self-updater rejects GitHub's new release-asset
+host (`release-assets.githubusercontent.com`) before any download, so
+`yakos upgrade` fails with `redirect to disallowed host ... rejected`.
+The fix ships in v0.60.1.0, but a v0.60.0.0 binary cannot fetch it.
+Reinstall once via the installer (curl follows the redirect fine):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bakw00ds/yakos/main/scripts/install.sh | sh
+```
+
+or download the release asset manually and verify it against
+`checksums.txt` yourself. `yakos upgrade` works again from v0.60.1.0
+onward.
+
 ## Cloned-repo / dev upgrade
 
 Use this path when you work with a live `lib/` tree — edits to agents,
