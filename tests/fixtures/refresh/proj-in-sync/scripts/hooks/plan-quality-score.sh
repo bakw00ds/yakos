@@ -139,11 +139,13 @@ EOF
     plan_file="$file_path"
     mtime1=0
     # Portable mtime
-    if stat -f "%m" "$plan_file" >/dev/null 2>&1; then
-        mtime1="$(stat -f "%m" "$plan_file" 2>/dev/null || echo 0)"
-    elif stat -c "%Y" "$plan_file" >/dev/null 2>&1; then
+    # GNU first: on Linux `stat -f` is filesystem mode and "succeeds" with garbage.
+    if stat -c "%Y" "$plan_file" >/dev/null 2>&1; then
         mtime1="$(stat -c "%Y" "$plan_file" 2>/dev/null || echo 0)"
+    elif stat -f "%m" "$plan_file" >/dev/null 2>&1; then
+        mtime1="$(stat -f "%m" "$plan_file" 2>/dev/null || echo 0)"
     fi
+    case "$mtime1" in ''|*[!0-9]*) mtime1=0 ;; esac
     now_s="$(date -u +%s 2>/dev/null || echo 0)"
     state_file="$current_dir/.plan-quality-last-scored"
     _pq_state_written=0
