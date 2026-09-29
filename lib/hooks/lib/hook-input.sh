@@ -69,8 +69,9 @@ if [ "${HI_LOADED:-0}" = "1" ]; then
 fi
 # NOTE: HI_LOADED=1 is set on the LAST line of this file, not here. Setting it
 # up front made a parse error later in the file invisible to a caller that
-# checks the sentinel after `.` (K-101): bash 5 keeps going past a syntax error
-# in a sourced file and returns 0, so "sourced OK" must mean "reached the end".
+# checks the sentinel after `.` (K-101). The sentinel proves the whole file was
+# consumed: it catches a file truncated at a statement boundary (where `.` still
+# returns 0), and a stale guard set by an earlier partial load.
 
 HI_INPUT=""
 # HI_DEGRADED=1 once hi_init decided the payload could not be trusted (missing
@@ -105,8 +106,8 @@ _hi_fail_or_warn() {
             if command -v ho_log >/dev/null 2>&1; then
                 ho_log "$name" "WARN" "pass" "degraded input ($reason) but YAKOS_HOOKS_FAIL_OPEN=1 override active" "{}" 2>/dev/null || true
             fi
-            echo "${name}: WARN — degraded input ($reason), but YAKOS_HOOKS_FAIL_OPEN=1 is set; passing through." >&2
-            echo "${name}: this is an emergency override — unset it once jq/stdin are fixed." >&2
+            echo "${name}: WARN — degraded input ($reason), but YAKOS_HOOKS_FAIL_OPEN=1 is set; passing through." >&2 || true
+            echo "${name}: this is an emergency override — unset it once jq/stdin are fixed." >&2 || true
             HI_INPUT=""
             return 0
         fi
@@ -135,7 +136,7 @@ _hi_fail_or_warn() {
             if command -v ho_log >/dev/null 2>&1; then
                 ho_log "$name" "WARN" "pass" "degraded input ($reason) but hook-bypass.md override active (scope: degraded-input)" "{}" 2>/dev/null || true
             fi
-            echo "${name}: WARN — degraded input ($reason), but a hook-bypass.md entry for '$name' scoped to 'degraded-input' is active; passing through." >&2
+            echo "${name}: WARN — degraded input ($reason), but a hook-bypass.md entry for '$name' scoped to 'degraded-input' is active; passing through." >&2 || true
             HI_INPUT=""
             return 0
         fi
@@ -145,12 +146,12 @@ _hi_fail_or_warn() {
         if command -v ho_log >/dev/null 2>&1; then
             ho_log "$name" "BLOCK" "block" "degraded input, failing closed: $reason" "{}" 2>/dev/null || true
         fi
-        echo "${name}: BLOCKED — cannot safely evaluate this tool call ($reason)." >&2
-        echo "${name}: this hook enforces a security control and refuses to fail open." >&2
-        echo "${name}: fix jq on PATH / the caller's JSON payload, then retry." >&2
-        echo "${name}: emergency overrides: export YAKOS_HOOKS_FAIL_OPEN=1, or add a" >&2
-        echo "${name}: work/current/hook-bypass.md entry with **Hook:** $name and" >&2
-        echo "${name}: **Scope:** degraded-input." >&2
+        echo "${name}: BLOCKED — cannot safely evaluate this tool call ($reason)." >&2 || true
+        echo "${name}: this hook enforces a security control and refuses to fail open." >&2 || true
+        echo "${name}: fix jq on PATH / the caller's JSON payload, then retry." >&2 || true
+        echo "${name}: emergency overrides: export YAKOS_HOOKS_FAIL_OPEN=1, or add a" >&2 || true
+        echo "${name}: work/current/hook-bypass.md entry with **Hook:** $name and" >&2 || true
+        echo "${name}: **Scope:** degraded-input." >&2 || true
         exit 2
     fi
 
@@ -158,10 +159,10 @@ _hi_fail_or_warn() {
         if command -v ho_log >/dev/null 2>&1; then
             ho_log "$name" "WARN" "pass" "degraded input ($reason); non-blocking hook skipped" "{}" 2>/dev/null || true
         fi
-        echo "${name}: WARN — $reason. Skipping this non-blocking hook (tool call not blocked)." >&2
+        echo "${name}: WARN — $reason. Skipping this non-blocking hook (tool call not blocked)." >&2 || true
         exit 0
     fi
-    echo "${name}: WARN — $reason. This hook is degraded for this event (jq unavailable or stdin unparseable); treating input as empty." >&2
+    echo "${name}: WARN — $reason. This hook is degraded for this event (jq unavailable or stdin unparseable); treating input as empty." >&2 || true
 }
 
 # _hi_decoder_sane — 0 when jq actually evaluates programs. A jq that prints
@@ -192,7 +193,7 @@ hi_skip_if_no_jq() {
     local name
     name="$(basename -- "${0:-hook}" 2>/dev/null || echo hook)"
     name="${name%.sh}"
-    echo "${name}: WARN — jq is not installed or not on PATH; skipping this non-blocking hook (tool call not blocked)." >&2
+    echo "${name}: WARN — jq is not installed or not on PATH; skipping this non-blocking hook (tool call not blocked)." >&2 || true
     if command -v ho_log >/dev/null 2>&1; then
         ho_log "$name" "WARN" "pass" "jq missing; non-blocking hook skipped" "{}" 2>/dev/null || true
     fi
