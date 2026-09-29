@@ -78,6 +78,9 @@ const (
 	SectionPreflightStaleWorktrees
 	SectionPreflightDaemonBuild
 	SectionPreflightKanban
+
+	// SectionDecisionProbe is appended last for the same reason (ADR-0009).
+	SectionDecisionProbe
 )
 
 // Finding is one reported item: a severity level plus a human-readable message.
@@ -108,6 +111,15 @@ type Config struct {
 
 	// ProbeRuntime enables the --probe-runtime section.
 	ProbeRuntime bool
+
+	// ProbeDecision enables the --probe-decision section (ADR-0009): decision
+	// provider key/config/question-set/budget health. Off by default so the
+	// default report is byte-for-byte unchanged.
+	ProbeDecision bool
+
+	// ProbeDecisionLive additionally makes ONE minimal real call to the
+	// provider (costs ~$0.000002). Only meaningful with ProbeDecision.
+	ProbeDecisionLive bool
 
 	// Production enables the --production section.
 	Production bool
@@ -218,6 +230,10 @@ func Run(cfg Config) (*Report, error) {
 
 	if cfg.ProbeRuntime {
 		r.checkRuntimeProbe()
+	}
+
+	if cfg.ProbeDecision {
+		r.checkDecisionProbe()
 	}
 
 	if cfg.Production {
