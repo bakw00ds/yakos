@@ -90,8 +90,10 @@ findings="$current_dir/supervisor-findings.ndjson"
 last="$(tail -n 1 "$findings" 2>/dev/null)"
 [ -n "$last" ] || exit 0
 
-# Validate it parses as JSON
-if ! printf '%s' "$last" | jq empty 2>/dev/null; then
+# Validate it parses as a JSON OBJECT (K-107). `jq empty` accepts [] or 5, and the
+# field reads below then die under set -e; a corrupted supervisor log must warn
+# and pass, never lock the operator out. Same WARN as invalid JSON (Go twin too).
+if ! printf '%s' "$last" | jq -e 'type == "object"' >/dev/null 2>&1; then
     ho_log "supervisor-gate" "WARN" "pass" \
         "most-recent finding is not valid JSON; ignoring" "{}"
     exit 0
