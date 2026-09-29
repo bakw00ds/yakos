@@ -11,7 +11,8 @@
       {
         "name": "two-options-with-tradeoffs",
         "weight": 0.3,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: at least two distinct options each with a tradeoff. 0.5: two options without tradeoffs, or one with. 0.0: none."
       },
       {
         "name": "measure-first",

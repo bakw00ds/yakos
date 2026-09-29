@@ -1,0 +1,47 @@
+{
+  "case_id": "security-round2-correct-fix-12",
+  "task": "Round-2 security re-review. In round 1 you reported: 'HIGH: handleFlowGet returns any flow by id to any authenticated user; there is no owner check (IDOR).' The implementer pushed the fix below. Decide (a) whether the original finding is closed, (b) whether the fix introduces any new problem, and (c) give a verdict of SHIP or BLOCK, with the concrete exploit input if you block. The diff is supplied inline; do not modify any file.\n\nNote: the diff is a self-contained excerpt prepared for this review. Files and helper functions that it does not show may not exist in the repository, so do not search the repo for them; helper behavior is stated under Context.\n\n```diff\n--- a/cli-go/internal/consoleui/flows_handler.go\n+++ b/cli-go/internal/consoleui/flows_handler.go\n@@ -34,7 +34,10 @@ func (s *Server) handleFlowGet(w http.ResponseWriter, r *http.Request) {\n \tf, ok := s.flows.Get(r.PathValue(\"id\"))\n-\tif !ok {\n+\tif !ok || f.OwnerID != sess.UserID {\n \t\thttp.NotFound(w, r)\n \t\treturn\n \t}\n@@ -58,7 +61,10 @@ func (s *Server) handleFlowExport(w http.ResponseWriter, r *http.Request) {\n \tf, ok := s.flows.Get(r.PathValue(\"id\"))\n-\tif !ok {\n+\tif !ok || f.OwnerID != sess.UserID {\n \t\thttp.NotFound(w, r)\n \t\treturn\n \t}\n--- /dev/null\n+++ b/cli-go/internal/consoleui/flows_handler_test.go\n@@ -0,0 +1,18 @@\n+func TestFlowGetAndExport_OtherUsersFlowIs404(t *testing.T) {\n+\ts := newTestServer(t)\n+\ts.flows.Put(&Flow{ID: \"f1\", OwnerID: \"alice\"})\n+\tfor _, path := range []string{\"/api/flows/f1\", \"/api/flows/f1/export\"} {\n+\t\treq := authedRequest(t, http.MethodGet, path, \"bob\")\n+\t\trec := httptest.NewRecorder()\n+\t\ts.Handler().ServeHTTP(rec, req)\n+\t\tif rec.Code != http.StatusNotFound {\n+\t\t\tt.Fatalf(\"%s: got %d, want 404\", path, rec.Code)\n+\t\t}\n+\t\treq = authedRequest(t, http.MethodGet, path, \"alice\")\n+\t\trec = httptest.NewRecorder()\n+\t\ts.Handler().ServeHTTP(rec, req)\n+\t\tif rec.Code != http.StatusOK {\n+\t\t\tt.Fatalf(\"%s: owner got %d, want 200\", path, rec.Code)\n+\t\t}\n+\t}\n+}\n```\n\nContext:\n- Both handlers already return early with 401 when `authsession.FromContext` is nil, so `sess` is non-nil at the changed lines.\n- `f.OwnerID` and `sess.UserID` are non-empty strings for every stored flow and every authenticated session.\n- `handleFlowDelete` and `handleFlowList` were already owner-scoped in the original change.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "ships-correct-fix",
+        "weight": 0.4,
+        "type": "binary"
+      },
+      {
+        "name": "verifies-fix-closes-finding",
+        "weight": 0.25,
+        "type": "scalar_0_1",
+        "anchor": "1.0: explains why the comparison closes the IDOR (owner mismatch is indistinguishable from not-found). 0.5: says fixed without reasoning. 0.0: says not closed."
+      },
+      {
+        "name": "no-invented-blocker",
+        "weight": 0.2,
+        "type": "binary"
+      },
+      {
+        "name": "notes-sibling-handler-and-test",
+        "weight": 0.15,
+        "type": "scalar_0_1",
+        "anchor": "1.0: mentions both the export handler fix and the test coverage. 0.5: mentions one. 0.0: neither."
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Verdict is SHIP: the owner check closes the original IDOR",
+    "Notes the same missing check in handleFlowExport was fixed as well and that the 404-on-mismatch response avoids id enumeration",
+    "Notes the new test covers both handlers and both the non-owner and owner paths",
+    "Does not invent a blocking issue; any remaining remark is labelled non-blocking"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.5,
+  "tags": [
+    "security",
+    "go",
+    "read-only",
+    "round-2-review",
+    "rubber-stamp-inverse",
+    "hard-for-cheap-tier"
+  ]
+}

@@ -6,12 +6,14 @@
       {
         "name": "responsibility-accuracy",
         "weight": 0.4,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: all four package responsibilities correct. 0.5: one or two wrong or vague. 0.0: mostly wrong."
       },
       {
         "name": "on-disk-artifact-facts",
         "weight": 0.3,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: correct file names and permission modes for every package that owns a file. 0.5: half correct. 0.0: mostly wrong or missing."
       },
       {
         "name": "no-fabrication",

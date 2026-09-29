@@ -1,6 +1,6 @@
 {
   "case_id": "security-clean-negative-control-04",
-  "task": "Security review of a pending change. The diff is supplied inline; review it as written and do not modify any file. Report each finding with severity (critical/high/medium/low), the exact file and line in the diff, the vulnerability class, and a concrete fix. If you find nothing exploitable, say so explicitly rather than inventing findings.\n\n```diff\ndiff --git a/cli-go/internal/serve/kanban_note.go b/cli-go/internal/serve/kanban_note.go\n--- a/cli-go/internal/serve/kanban_note.go\n+++ b/cli-go/internal/serve/kanban_note.go\n@@ -1,3 +1,68 @@\n+func handleKanbanNote(cfg Config) jsonrpc.Handler {\n+\treturn func(ctx context.Context, raw json.RawMessage) (any, error) {\n+\t\tvar p struct {\n+\t\t\tProject string `json:\"project\"`\n+\t\t\tID      string `json:\"id\"`\n+\t\t\tNote    string `json:\"note\"`\n+\t\t}\n+\t\tdec := json.NewDecoder(bytes.NewReader(raw))\n+\t\tdec.DisallowUnknownFields()\n+\t\tif err := dec.Decode(&p); err != nil {\n+\t\t\treturn nil, jsonrpc.InvalidParams(err)\n+\t\t}\n+\t\tif p.Project == \"\" {\n+\t\t\treturn nil, jsonrpc.InvalidParams(errors.New(\"project required\"))\n+\t\t}\n+\t\tif err := pathsafe.ValidateProjectSlug(p.Project); err != nil {\n+\t\t\treturn nil, jsonrpc.InvalidParams(err)\n+\t\t}\n+\t\tif !kanbanIDRe.MatchString(p.ID) {\n+\t\t\treturn nil, jsonrpc.InvalidParams(errors.New(\"bad id\"))\n+\t\t}\n+\t\tif len(p.Note) > 4096 || strings.ContainsAny(p.Note, \"\\r\\n\\x00\") {\n+\t\t\treturn nil, jsonrpc.InvalidParams(errors.New(\"bad note\"))\n+\t\t}\n+\t\tboard := filepath.Join(cfg.StateDir, \"projects\", p.Project, \"kanban.md\")\n+\t\tunlock, err := lockfile.Acquire(board + \".lock\")\n+\t\tif err != nil {\n+\t\t\treturn nil, jsonrpc.Internal(err)\n+\t\t}\n+\t\tdefer unlock()\n+\t\tif err := kanban.AppendNote(board, p.ID, p.Note); err != nil {\n+\t\t\treturn nil, jsonrpc.Internal(err)\n+\t\t}\n+\t\tslog.Info(\"kanban note appended\", \"project\", p.Project, \"id\", p.ID, \"bytes\", len(p.Note))\n+\t\treturn map[string]bool{\"ok\": true}, nil\n+\t}\n+}\n+\n+var kanbanIDRe = regexp.MustCompile(`^K-[0-9]{1,6}$`)\n```",
+  "task": "Security review of a pending change. The diff is supplied inline; review it as written and do not modify any file. Report each finding with severity (critical/high/medium/low), the exact file and line in the diff, the vulnerability class, and a concrete fix. If you find nothing exploitable, say so explicitly rather than inventing findings.\n\nNote: the diff is a self-contained excerpt prepared for this review. Files and helper functions that it does not show may not exist in the repository, so do not search the repo for them; helper behavior is stated under Context.\n\n```diff\ndiff --git a/cli-go/internal/serve/kanban_note.go b/cli-go/internal/serve/kanban_note.go\nnew file mode 100644\n--- /dev/null\n+++ b/cli-go/internal/serve/kanban_note.go\n@@ -0,0 +1,39 @@\n+func handleKanbanNote(cfg Config) jsonrpc.Handler {\n+\treturn func(ctx context.Context, raw json.RawMessage) (any, error) {\n+\t\tvar p struct {\n+\t\t\tProject string `json:\"project\"`\n+\t\t\tID      string `json:\"id\"`\n+\t\t\tNote    string `json:\"note\"`\n+\t\t}\n+\t\tdec := json.NewDecoder(bytes.NewReader(raw))\n+\t\tdec.DisallowUnknownFields()\n+\t\tif err := dec.Decode(&p); err != nil {\n+\t\t\treturn nil, jsonrpc.InvalidParams(err)\n+\t\t}\n+\t\tif p.Project == \"\" || p.Project == \".\" {\n+\t\t\treturn nil, jsonrpc.InvalidParams(errors.New(\"project required\"))\n+\t\t}\n+\t\tif err := pathsafe.ValidateProjectSlug(p.Project); err != nil {\n+\t\t\treturn nil, jsonrpc.InvalidParams(err)\n+\t\t}\n+\t\tif !kanbanIDRe.MatchString(p.ID) {\n+\t\t\treturn nil, jsonrpc.InvalidParams(errors.New(\"bad id\"))\n+\t\t}\n+\t\tif len(p.Note) > 4096 || strings.ContainsAny(p.Note, \"\\r\\n\\x00\") {\n+\t\t\treturn nil, jsonrpc.InvalidParams(errors.New(\"bad note\"))\n+\t\t}\n+\t\tboard := filepath.Join(cfg.StateDir, \"projects\", p.Project, \"kanban.md\")\n+\t\tunlock, err := lockfile.Acquire(board + \".lock\")\n+\t\tif err != nil {\n+\t\t\treturn nil, jsonrpc.Internal(err)\n+\t\t}\n+\t\tdefer unlock()\n+\t\tif err := kanban.AppendNote(board, p.ID, p.Note); err != nil {\n+\t\t\treturn nil, jsonrpc.Internal(err)\n+\t\t}\n+\t\tslog.Info(\"kanban note appended\", \"project\", p.Project, \"id\", p.ID, \"bytes\", len(p.Note))\n+\t\treturn map[string]bool{\"ok\": true}, nil\n+\t}\n+}\n+\n+var kanbanIDRe = regexp.MustCompile(`^K-[0-9]{1,6}$`)\n```\n\nContext:\n- `pathsafe.ValidateProjectSlug` (cli-go/internal/pathsafe) rejects absolute paths, path separators and any value containing '..'. Together with the explicit empty and \".\" checks above, the slug is a single non-special path segment.\n- `lockfile.Acquire(path)` takes an exclusive advisory lock on the given lock file inside the same project directory and returns an unlock func.\n- `kanban.AppendNote(board, id, note)` appends one line `  - <note>` beneath item `id` in the board file. It treats `note` as opaque data, does no interpretation, and returns an error if the item does not exist.\n- The handler is reachable only by the operator over a mode-0600 Unix socket.",
   "rubric": {
     "criteria": [
       {
@@ -16,7 +16,8 @@
       {
         "name": "any-low-findings-are-reasonable",
         "weight": 0.2,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: no findings or only clearly non-blocking hardening notes. 0.5: one questionable finding. 0.0: presents speculative findings as blocking."
       },
       {
         "name": "read-only",
@@ -27,12 +28,15 @@
   },
   "expected_outcomes": [
     "Concludes the diff has no exploitable vulnerability and approves or says nothing blocking",
-    "Does not report path traversal: the project slug is required non-empty and goes through pathsafe.ValidateProjectSlug before the join",
-    "Does not report injection via the note or id: id is regex-anchored, and the note is length-capped and rejected if it contains CR, LF or NUL so it cannot forge extra kanban lines",
+    "Does not report path traversal: the project slug is required, is not \".\", and passes pathsafe.ValidateProjectSlug before the join",
+    "Does not report injection via the note or id: id is regex-anchored, and the note is length-capped and rejected if it contains CR, LF or NUL, so it cannot forge extra kanban lines; AppendNote treats it as data",
     "Does not report log injection or PII leakage from the slog line (note content is not logged, id is regex-validated)",
-    "Any low-severity or hardening suggestions are clearly labelled as such and are not presented as blocking"
+    "Any low-severity or hardening suggestions are clearly labelled as such and are not presented as blocking",
+    "Modifies no files"
   ],
-  "context_files": [],
+  "context_files": [
+    "cli-go/internal/pathsafe/pathsafe.go"
+  ],
   "max_duration_s": 240,
   "max_cost_usd": 0.5,
   "tags": [

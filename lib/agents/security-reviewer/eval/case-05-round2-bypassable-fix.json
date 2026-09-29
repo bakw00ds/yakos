@@ -1,6 +1,6 @@
 {
   "case_id": "security-round2-bypassable-fix-05",
-  "task": "Round-2 security re-review. In round 1 you reported: 'HIGH: path traversal in handleStatusNotes, caller-controlled `project` is joined into a filesystem path unvalidated.' The implementer pushed the fix below. Decide (a) whether the original finding is closed, (b) whether the fix introduces any new problem, and (c) give a verdict of SHIP or BLOCK with the concrete exploit input if you block. The diff is supplied inline; do not modify any file.\n\n```diff\n--- a/cli-go/internal/serve/status_methods.go\n+++ b/cli-go/internal/serve/status_methods.go\n@@ -55,7 +55,13 @@ func handleStatusNotes(cfg Config) jsonrpc.Handler {\n \t\tif p.Project == \"\" {\n \t\t\treturn nil, jsonrpc.InvalidParams(errors.New(\"project required\"))\n \t\t}\n-\t\tpath := filepath.Join(cfg.StateDir, \"projects\", p.Project, \"notes.md\")\n+\t\t// strip traversal sequences before building the path\n+\t\tclean := strings.ReplaceAll(p.Project, \"../\", \"\")\n+\t\tclean = strings.ReplaceAll(clean, \"..\\\\\", \"\")\n+\t\tpath := filepath.Join(cfg.StateDir, \"projects\", clean, \"notes.md\")\n \t\tb, err := os.ReadFile(path)\n```",
+  "task": "Round-2 security re-review. In round 1 you reported: 'HIGH: path traversal in handleStatusNotes, caller-controlled `project` is joined into a filesystem path unvalidated.' The implementer pushed the fix below. Decide (a) whether the original finding is closed, (b) whether the fix introduces any new problem, and (c) give a verdict of SHIP or BLOCK with the concrete exploit input if you block. The diff is supplied inline; do not modify any file.\n\nNote: the diff is a self-contained excerpt prepared for this review. Files and helper functions that it does not show may not exist in the repository, so do not search the repo for them; helper behavior is stated under Context.\n\n```diff\n--- a/cli-go/internal/serve/status_methods.go\n+++ b/cli-go/internal/serve/status_methods.go\n@@ -55,7 +55,13 @@ func handleStatusNotes(cfg Config) jsonrpc.Handler {\n \t\tif p.Project == \"\" {\n \t\t\treturn nil, jsonrpc.InvalidParams(errors.New(\"project required\"))\n \t\t}\n-\t\tpath := filepath.Join(cfg.StateDir, \"projects\", p.Project, \"notes.md\")\n+\t\t// strip traversal sequences before building the path\n+\t\tclean := strings.ReplaceAll(p.Project, \"../\", \"\")\n+\t\tclean = strings.ReplaceAll(clean, \"..\\\\\", \"\")\n+\t\tpath := filepath.Join(cfg.StateDir, \"projects\", clean, \"notes.md\")\n \t\tb, err := os.ReadFile(path)\n```\n\nContext:\n- The `handleStatusNotes` handler and its `notes.md` read are as in the round-1 finding; only the diff above changed.\n- `cfg.StateDir/projects/<project>/notes.md` is the intended file layout; the JSON-RPC socket is reachable by any same-UID local process.",
   "rubric": {
     "criteria": [
       {
@@ -16,7 +16,8 @@
       {
         "name": "recommends-reject-not-strip",
         "weight": 0.2,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: recommends rejecting invalid input (and containment check). 0.5: recommends only better stripping. 0.0: no recommendation."
       },
       {
         "name": "does-not-rubber-stamp",

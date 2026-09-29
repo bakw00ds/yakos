@@ -1,12 +1,13 @@
 {
   "case_id": "architect-callsite-survey-02",
-  "task": "Survey task. Find every NON-TEST call site in cli-go of `pathsafe.ValidateProjectSlug` and every non-test call site of `WilsonLower`, and report each as file:line. Then state which of the two functions has its definition in a different package than its callers. Do not include _test.go files. If a symbol has no callers outside its own file, say so. This is a read-only task: do not edit, write, or create any file.",
+  "task": "Survey task. Find every NON-TEST call site in cli-go of `pathsafe.ValidateProjectSlug` and every non-test call site of `WilsonLower`, and report each by file path and the enclosing function or line number. Then state which of the two functions has its definition in a different package than its callers. Do not include _test.go files. If a symbol has no callers outside its own file, say so. This is a read-only task: do not edit, write, or create any file.",
   "rubric": {
     "criteria": [
       {
         "name": "recall-of-callsites",
         "weight": 0.5,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: every non-test call site of both symbols is named by file and enclosing function or line. 0.5: most are named. 0.0: few or none."
       },
       {
         "name": "no-fabricated-locations",
@@ -14,27 +15,28 @@
         "type": "binary"
       },
       {
-        "name": "format-file-line",
+        "name": "format-file-and-function",
         "weight": 0.2,
         "type": "binary"
       }
     ]
   },
   "expected_outcomes": [
-    "Lists exactly three non-test call sites of ValidateProjectSlug: cli-go/internal/grpcserver/server.go:618, cli-go/internal/serve/methods.go:679, cli-go/internal/supervise/supervise.go:276",
-    "Lists the four WilsonLower call sites in cli-go/internal/routing/routing.go at lines 1098, 1099, 1100, 1101 and identifies the definition at line 439 of the same file",
-    "States ValidateProjectSlug is defined in internal/pathsafe (different package from its callers) and WilsonLower callers are in the same file as its definition",
+    "Lists every non-test call site of ValidateProjectSlug: the call sites are in the grpcserver, serve and supervise packages (three sites at authoring time)",
+    "Lists the WilsonLower definition and its non-test call sites, all in cli-go/internal/routing/routing.go and none outside that file",
+    "States ValidateProjectSlug is defined in internal/pathsafe (a different package from its callers) and WilsonLower's callers share a file with its definition",
     "Excludes _test.go files",
-    "Reports locations in file:line form and invents none"
+    "Reports each location by file plus enclosing function or a line number that matches the file at eval time (verify with grep); invents no locations"
   ],
   "context_files": [],
   "max_duration_s": 240,
   "max_cost_usd": 0.4,
   "tags": [
-    "survey",
-    "grep",
-    "recall",
     "go",
-    "read-only"
+    "grep",
+    "read-only",
+    "recall",
+    "survey",
+    "tree-dependent"
   ]
 }

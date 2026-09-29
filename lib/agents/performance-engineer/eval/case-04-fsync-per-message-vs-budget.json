@@ -16,12 +16,14 @@
       {
         "name": "mitigation-options",
         "weight": 0.2,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: two or more mitigations such as batching, moving work off the lock, or opt-in durability. 0.5: one. 0.0: none."
       },
       {
         "name": "concrete-measurement-plan",
         "weight": 0.2,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: names the metric (p50/p99), load, hardware and before/after comparison. 0.5: says measure without specifics. 0.0: none."
       }
     ]
   },

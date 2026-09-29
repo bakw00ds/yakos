@@ -1,0 +1,47 @@
+{
+  "case_id": "security-two-hunk-loopback-header-09",
+  "task": "Security review of a pending change. The diff is supplied inline; review it as written and do not modify any file. Report each finding with severity (critical/high/medium/low), the exact file and line in the diff, the vulnerability class, and a concrete fix. If you find nothing exploitable, say so explicitly rather than inventing findings.\n\nNote: the diff is a self-contained excerpt prepared for this review. Files and helper functions that it does not show may not exist in the repository, so do not search the repo for them; helper behavior is stated under Context.\n\n```diff\ndiff --git a/cli-go/internal/consoleui/config.go b/cli-go/internal/consoleui/config.go\n--- a/cli-go/internal/consoleui/config.go\n+++ b/cli-go/internal/consoleui/config.go\n@@ -12,7 +12,7 @@ func DefaultConfig() Config {\n \treturn Config{\n \t\tMode:   ModeLoopback,\n-\t\tListen: \"127.0.0.1:7777\",\n+\t\tListen: \":7777\", // let containers and the LAN reach the console\n \t}\n }\ndiff --git a/cli-go/internal/consoleui/owner_mw.go b/cli-go/internal/consoleui/owner_mw.go\n--- a/cli-go/internal/consoleui/owner_mw.go\n+++ b/cli-go/internal/consoleui/owner_mw.go\n@@ -20,6 +20,20 @@ func (s *Server) ownerMiddleware(next http.Handler) http.Handler {\n \treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n+\t\tif s.cfg.Mode == ModeLoopback {\n+\t\t\t// single-user local trust: the CLI passes the operator id in a header\n+\t\t\tif id := r.Header.Get(\"X-Operator-Id\"); id != \"\" {\n+\t\t\t\tr = r.WithContext(withOwner(r.Context(), id))\n+\t\t\t\tnext.ServeHTTP(w, r)\n+\t\t\t\treturn\n+\t\t\t}\n+\t\t}\n \t\tsess := authsession.FromContext(r.Context())\n \t\tif sess == nil {\n \t\t\thttp.Error(w, \"unauthorized\", http.StatusUnauthorized)\n```\n\nContext:\n- `ModeLoopback` means single-user local trust; the operator id header was previously safe because the listener only accepted connections from 127.0.0.1.\n- `withOwner` stores the id in the request context; downstream handlers authorize using that owner id, as in `handleFlowGet`.\n- `s.cfg.Mode` is a configuration value, not derived from the connection's remote address.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "finds-cross-hunk-spoofing",
+        "weight": 0.45,
+        "type": "binary"
+      },
+      {
+        "name": "connects-both-hunks",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "correct-severity",
+        "weight": 0.15,
+        "type": "scalar_0_1",
+        "anchor": "1.0: critical or high. 0.5: medium. 0.0: low or informational."
+      },
+      {
+        "name": "actionable-fix",
+        "weight": 0.15,
+        "type": "scalar_0_1",
+        "anchor": "1.0: names both the bind revert and a remote-address or server-side owner derivation. 0.5: names only one. 0.0: vague."
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Finds authentication bypass: with the listener now bound to all interfaces, any network client can send X-Operator-Id and act as any owner because loopback mode trusts the header",
+    "Explains that neither hunk is exploitable alone and the flaw is the combination of the Listen change and the header trust that assumed a loopback-only bind",
+    "Rates it critical or high",
+    "Recommends reverting the bind to 127.0.0.1 and not trusting the header based on config mode; verify the connection's remote address (or derive the owner server-side as loopbackowner does)"
+  ],
+  "context_files": [],
+  "max_duration_s": 240,
+  "max_cost_usd": 0.5,
+  "tags": [
+    "security",
+    "go",
+    "read-only",
+    "multi-hunk",
+    "auth-bypass",
+    "hard-for-cheap-tier"
+  ]
+}

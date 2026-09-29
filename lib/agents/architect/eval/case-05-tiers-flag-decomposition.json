@@ -6,12 +6,14 @@
       {
         "name": "identifies-all-touch-points",
         "weight": 0.3,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: names the tier list, the config or options type, the command flag parsing, the bash twin and the docs. 0.5: names about half. 0.0: names one or none."
       },
       {
         "name": "contract-handoff-order",
         "weight": 0.25,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: publishes the contract (option and validation) before flag wiring, tests and docs, with explicit dependencies. 0.5: ordering present but implicit. 0.0: no ordering."
       },
       {
         "name": "spots-doc-code-drift",

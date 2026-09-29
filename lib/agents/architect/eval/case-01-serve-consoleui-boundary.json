@@ -11,12 +11,14 @@
       {
         "name": "explains-extraction-rationale",
         "weight": 0.25,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: states why the third package exists (avoid importing consoleui and avoid trusting a caller-supplied owner). 0.5: gives only one of the two. 0.0: none or wrong."
       },
       {
         "name": "recommendation-with-tradeoff",
         "weight": 0.25,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: gives a clear recommendation and at least one real tradeoff. 0.5: recommendation without tradeoff. 0.0: no recommendation."
       },
       {
         "name": "no-fabricated-paths",

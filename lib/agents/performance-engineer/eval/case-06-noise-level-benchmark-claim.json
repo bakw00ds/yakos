@@ -11,7 +11,8 @@
       {
         "name": "reads-p-values-correctly",
         "weight": 0.25,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: treats p=0.315 as no evidence, p=0.043 as marginal under noise, and insert as clear. 0.5: gets some wrong. 0.0: trusts headline percentages."
       },
       {
         "name": "notes-insert-regression",
@@ -26,7 +27,8 @@
       {
         "name": "weights-by-production-mix",
         "weight": 0.1,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: weighs the 100:1 lookup to insert ratio quantitatively. 0.5: mentions the mix qualitatively. 0.0: ignores it."
       }
     ]
   },

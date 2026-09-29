@@ -11,7 +11,8 @@
       {
         "name": "grounded-in-code",
         "weight": 0.3,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: cites real files and describes what they actually do. 0.5: cites files but generic. 0.0: cites nothing or invents."
       },
       {
         "name": "names-forgery-threat",
@@ -21,7 +22,8 @@
       {
         "name": "states-future-trigger",
         "weight": 0.25,
-        "type": "scalar_0_1"
+        "type": "scalar_0_1",
+        "anchor": "1.0: names a concrete condition that would change the decision. 0.5: vague trigger. 0.0: none."
       }
     ]
   },
