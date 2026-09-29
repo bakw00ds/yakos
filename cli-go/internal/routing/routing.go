@@ -175,6 +175,12 @@ type DispatchResult struct {
 	DurationS    float64
 	InputTokens  int64
 	OutputTokens int64
+
+	// CostUnknown is true when the dispatch produced no cost telemetry
+	// (no matching dispatch-log record, or a runtime that reports no
+	// total_cost_usd). The per-run cost cap cannot be enforced against an
+	// unknown cost, so runEval fails closed when it sees this.
+	CostUnknown bool
 }
 
 // JudgeResult holds the parsed scoring output from a judge dispatch.
@@ -835,6 +841,9 @@ func realDispatch(yakosRoot, agentID, task, tier, runID, project string) (Dispat
 		args = append(args, "--project", project)
 	}
 
+	logPath := dispatchLogPath()
+	offset := fileSize(logPath)
+
 	cmd := exec.Command("bash", args...)
 	cmd.Env = append(os.Environ(),
 		"YAKOS_ROOT="+yakosRoot,
@@ -842,12 +851,121 @@ func realDispatch(yakosRoot, agentID, task, tier, runID, project string) (Dispat
 	)
 	var outBuf bytes.Buffer
 	cmd.Stdout = &outBuf
+	start := time.Now()
 	_ = cmd.Run() // dispatch.sh's own non-zero exit is OK per dispatch contract
+	wall := time.Since(start).Seconds()
 
-	// We do not parse the dispatch-log here (keeping the scope small).
-	return DispatchResult{
-		Stdout: outBuf.String(),
-	}, nil
+	dr := DispatchResult{Stdout: outBuf.String()}
+	tel, ok := readDispatchTelemetry(logPath, offset, runID, agentID)
+	if !ok {
+		dr.DurationS = wall
+		dr.CostUnknown = true
+		return dr, nil
+	}
+	dr.DurationS = tel.DurationS
+	if dr.DurationS == 0 {
+		dr.DurationS = wall
+	}
+	dr.InputTokens = tel.InputTokens
+	dr.OutputTokens = tel.OutputTokens
+	if tel.Cost == nil {
+		dr.CostUnknown = true
+	} else {
+		dr.Cost = *tel.Cost
+	}
+	return dr, nil
+}
+
+// dispatchLogPath mirrors dispatch.sh, which appends to
+// $HOME/.yakos-state/dispatch-log.ndjson.
+func dispatchLogPath() string {
+	home := os.Getenv("HOME")
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".yakos-state", "dispatch-log.ndjson")
+}
+
+func fileSize(path string) int64 {
+	if path == "" {
+		return 0
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return st.Size()
+}
+
+// dispatchTelemetry is the slice of a dispatch_finished record eval needs.
+type dispatchTelemetry struct {
+	DurationS    float64
+	Cost         *float64 // nil when the runtime reported no total_cost_usd
+	InputTokens  int64
+	OutputTokens int64
+}
+
+// readDispatchTelemetry finds the last dispatch_finished record for
+// (runID, agentID) appended after byte offset. ok is false when there is
+// none. A shrunken file (log rotation) is read from the start.
+func readDispatchTelemetry(logPath string, offset int64, runID, agentID string) (dispatchTelemetry, bool) {
+	if logPath == "" {
+		return dispatchTelemetry{}, false
+	}
+	f, err := os.Open(logPath)
+	if err != nil {
+		return dispatchTelemetry{}, false
+	}
+	defer func() { _ = f.Close() }()
+	if st, err := f.Stat(); err == nil && st.Size() < offset {
+		offset = 0
+	}
+	if _, err := f.Seek(offset, 0); err != nil {
+		return dispatchTelemetry{}, false
+	}
+	var (
+		found bool
+		tel   dispatchTelemetry
+	)
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		var rec struct {
+			Type         string  `json:"type"`
+			Agent        string  `json:"agent"`
+			EvalRunID    *string `json:"eval_run_id"`
+			DurationS    float64 `json:"duration_s"`
+			EstInTokens  int64   `json:"est_input_tokens"`
+			EstOutTokens int64   `json:"est_output_tokens"`
+			Usage        *struct {
+				InputTokens  *int64   `json:"input_tokens"`
+				OutputTokens *int64   `json:"output_tokens"`
+				Cost         *float64 `json:"total_cost_usd"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
+			continue
+		}
+		if rec.Type != "dispatch_finished" || rec.Agent != agentID || rec.EvalRunID == nil || *rec.EvalRunID != runID {
+			continue
+		}
+		found = true
+		tel = dispatchTelemetry{
+			DurationS:    rec.DurationS,
+			InputTokens:  rec.EstInTokens,
+			OutputTokens: rec.EstOutTokens,
+		}
+		if rec.Usage != nil {
+			if rec.Usage.InputTokens != nil {
+				tel.InputTokens = *rec.Usage.InputTokens
+			}
+			if rec.Usage.OutputTokens != nil {
+				tel.OutputTokens = *rec.Usage.OutputTokens
+			}
+			tel.Cost = rec.Usage.Cost
+		}
+	}
+	return tel, found
 }
 
 // realJudge invokes dispatch.sh for the judge agent. See realDispatch for
@@ -1131,6 +1249,7 @@ func runEval(cfg Config) (Result, error) {
 	}
 	var totalSpent float64
 	budgetHit := false
+	costUnverifiable := false
 
 	tiers := []string{"haiku", "sonnet", "opus", "fable"}
 
@@ -1159,6 +1278,25 @@ outerLoop:
 				}
 				// Non-fatal: treat as failed case.
 				dr = DispatchResult{}
+			}
+
+			// Fail closed: with no cost telemetry the per-run cap cannot be
+			// enforced, so stop instead of spending blind.
+			if dr.CostUnknown {
+				costUnverifiable = true
+				logWrite(cfg.EvalLog, mustJSON(map[string]interface{}{
+					"type":      "budget_unverifiable",
+					"ts":        isoNow(cfg.Now),
+					"run_id":    runID,
+					"agent":     cfg.AgentID,
+					"case_id":   ec.CaseID,
+					"tier":      tier,
+					"spent_usd": totalSpent,
+					"cap_usd":   maxCost,
+					"reason":    "dispatch returned no cost telemetry (no dispatch-log record or no total_cost_usd)",
+				}))
+				fmt.Fprintf(cfg.Writer, "  ERROR: no cost telemetry for %s/%s; cost cap cannot be enforced; stopping run with partial results\n", ec.CaseID, tier)
+				break outerLoop
 			}
 
 			// Build judge input.
@@ -1261,6 +1399,12 @@ outerLoop:
 				break
 			}
 		}
+	}
+
+	if costUnverifiable {
+		return finishPartial(cfg, runID, stats, totalSpent), fmt.Errorf(
+			"model-routing eval: run %s stopped: dispatch returned no cost telemetry, so the $%.2f cap cannot be enforced (partial results logged; no candidate emitted)",
+			runID, maxCost)
 	}
 
 	// Compute rates and CI.
@@ -1495,6 +1639,49 @@ outerLoop:
 		CandidateTier:    candidateTier,
 		CandidateReason:  candidateReason,
 	}, nil
+}
+
+// finishPartial logs an eval_run_finished record for a run that stopped
+// early (no candidate is ever emitted from a partial run), prints the partial
+// per-tier results, and returns the Result.
+func finishPartial(cfg Config, runID string, stats map[string]*tierStats, spent float64) Result {
+	rates := map[string]float64{}
+	cis := map[string]float64{}
+	costs := map[string]float64{}
+	ns := map[string]int{}
+	for _, tier := range []string{"haiku", "sonnet", "opus", "fable"} {
+		st := stats[tier]
+		rates[tier] = st.rate()
+		cis[tier] = WilsonLower(st.pass, st.total)
+		costs[tier] = st.meanCost()
+		ns[tier] = st.total
+	}
+	logWrite(cfg.EvalLog, mustJSON(map[string]interface{}{
+		"type":              "eval_run_finished",
+		"ts":                isoNow(cfg.Now),
+		"run_id":            runID,
+		"agent":             cfg.AgentID,
+		"partial":           true,
+		"tier_pass_rates":   rates,
+		"tier_mean_costs":   costs,
+		"tier_ci_lower":     cis,
+		"tier_n_scored":     ns,
+		"candidate_emitted": false,
+		"candidate_tier":    nil,
+		"candidate_reason":  "partial run: stopped before completion",
+	}))
+	fmt.Fprintf(cfg.Writer, "  partial results (run stopped early):\n")
+	fmt.Fprintf(cfg.Writer, "  tier     n  pass-rate  ci-lower  mean-cost/case\n")
+	for _, tier := range []string{"haiku", "sonnet", "opus", "fable"} {
+		if stats[tier].total == 0 && stats[tier].unscored == 0 {
+			continue
+		}
+		fmt.Fprintf(cfg.Writer, "  %-8s %2d  %5.1f%%    %5.1f%%    $%.4f\n",
+			tier, ns[tier], rates[tier]*100, cis[tier]*100, costs[tier])
+	}
+	fmt.Fprintf(cfg.Writer, "  candidate: none (partial run)\n")
+	fmt.Fprintf(cfg.Writer, "  total spent (known): $%.6f\n", spent)
+	return Result{Subcommand: "eval", EvalRunID: runID}
 }
 
 // tripBudget records the budget_exceeded event and warns. It returns true so

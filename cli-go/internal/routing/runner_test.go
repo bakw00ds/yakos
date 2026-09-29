@@ -239,3 +239,217 @@ func TestEval_ExplicitSelfJudgeStillRefused(t *testing.T) {
 		t.Fatalf("explicit self judge must be refused, got %v", err)
 	}
 }
+
+// ---- defect 2: cost telemetry and fail-closed cap ---------------------------
+
+func finishedLine(agent, runID string, dur float64, usage string) string {
+	u := ""
+	if usage != "" {
+		u = `,"usage":` + usage
+	}
+	return `{"type":"dispatch_finished","agent":"` + agent + `","eval_run_id":"` + runID +
+		`","duration_s":` + strings.TrimRight(strings.TrimRight(fmtFloat(dur), "0"), ".") +
+		`,"est_input_tokens":11,"est_output_tokens":7` + u + `}`
+}
+
+func fmtFloat(f float64) string { return strings.TrimSpace(strings.Replace(jsonNum(f), "e+00", "", 1)) }
+
+func jsonNum(f float64) string { b, _ := json.Marshal(f); return string(b) }
+
+func TestReadDispatchTelemetry_Table(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "dispatch-log.ndjson")
+	old := finishedLine("backend", "run-A", 9, `{"total_cost_usd":9.99}`) + "\n"
+	body := old +
+		finishedLine("backend", "run-B", 3, `{"total_cost_usd":0.5}`) + "\n" + // other run
+		finishedLine("other", "run-A", 3, `{"total_cost_usd":0.6}`) + "\n" + // other agent
+		`{"type":"dispatch_started","agent":"backend","eval_run_id":"run-A"}` + "\n" +
+		"not json\n" +
+		finishedLine("backend", "run-A", 2.5, `{"input_tokens":100,"output_tokens":40,"total_cost_usd":0.0123}`) + "\n"
+	if err := os.WriteFile(logPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	off := int64(len(old))
+
+	t.Run("matches run+agent after offset", func(t *testing.T) {
+		tel, ok := readDispatchTelemetry(logPath, off, "run-A", "backend")
+		if !ok || tel.Cost == nil || *tel.Cost != 0.0123 || tel.DurationS != 2.5 || tel.InputTokens != 100 || tel.OutputTokens != 40 {
+			t.Fatalf("got %+v ok=%v", tel, ok)
+		}
+	})
+	t.Run("offset excludes earlier record", func(t *testing.T) {
+		if _, ok := readDispatchTelemetry(logPath, int64(len(body)), "run-A", "backend"); ok {
+			t.Fatal("record before offset must not match")
+		}
+	})
+	t.Run("rotated log read from start", func(t *testing.T) {
+		tel, ok := readDispatchTelemetry(logPath, int64(len(body))+1000, "run-B", "backend")
+		if !ok || tel.Cost == nil || *tel.Cost != 0.5 {
+			t.Fatalf("got %+v ok=%v", tel, ok)
+		}
+	})
+	t.Run("no usage means unknown cost, estimated tokens", func(t *testing.T) {
+		p := filepath.Join(dir, "nousage.ndjson")
+		_ = os.WriteFile(p, []byte(finishedLine("a", "r", 1, "")+"\n"), 0o600)
+		tel, ok := readDispatchTelemetry(p, 0, "r", "a")
+		if !ok || tel.Cost != nil || tel.InputTokens != 11 || tel.OutputTokens != 7 {
+			t.Fatalf("got %+v ok=%v", tel, ok)
+		}
+	})
+	t.Run("usage without total_cost_usd is unknown", func(t *testing.T) {
+		p := filepath.Join(dir, "nocost.ndjson")
+		_ = os.WriteFile(p, []byte(finishedLine("a", "r", 1, `{"input_tokens":5}`)+"\n"), 0o600)
+		tel, ok := readDispatchTelemetry(p, 0, "r", "a")
+		if !ok || tel.Cost != nil {
+			t.Fatalf("got %+v ok=%v", tel, ok)
+		}
+	})
+	t.Run("explicit zero cost is known", func(t *testing.T) {
+		p := filepath.Join(dir, "zero.ndjson")
+		_ = os.WriteFile(p, []byte(finishedLine("a", "r", 1, `{"total_cost_usd":0}`)+"\n"), 0o600)
+		tel, ok := readDispatchTelemetry(p, 0, "r", "a")
+		if !ok || tel.Cost == nil || *tel.Cost != 0 {
+			t.Fatalf("got %+v ok=%v", tel, ok)
+		}
+	})
+	t.Run("missing file", func(t *testing.T) {
+		if _, ok := readDispatchTelemetry(filepath.Join(dir, "nope"), 0, "r", "a"); ok {
+			t.Fatal("expected not found")
+		}
+	})
+}
+
+// writeTelemetryDispatchSh writes a stub dispatch.sh that appends a
+// dispatch_finished record to $HOME/.yakos-state/dispatch-log.ndjson, as the
+// real dispatch.sh does. usageJSON == "" omits the usage object.
+func writeTelemetryDispatchSh(t *testing.T, root, usageJSON string) {
+	t.Helper()
+	dir := filepath.Join(root, "cli", "lib")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	usage := ""
+	if usageJSON != "" {
+		usage = `,"usage":` + usageJSON
+	}
+	script := `#!/usr/bin/env bash
+agent="$1"; shift; shift
+run=""
+while [ "$#" -gt 0 ]; do case "$1" in --eval-run-id) run="$2"; shift;; esac; shift; done
+mkdir -p "$HOME/.yakos-state"
+printf '{"type":"dispatch_finished","agent":"%s","eval_run_id":"%s","duration_s":4.5,"est_input_tokens":1,"est_output_tokens":2%s}\n' "$agent" "$run" '` + usage + `' >> "$HOME/.yakos-state/dispatch-log.ndjson"
+echo subject-output
+`
+	if err := os.WriteFile(filepath.Join(dir, "dispatch.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRealDispatch_FillsTelemetryFromDispatchLog(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+	writeTelemetryDispatchSh(t, root, `{"input_tokens":123,"output_tokens":45,"total_cost_usd":0.25}`)
+	dr, err := realDispatch(root, "backend", "task", "sonnet", "run-9", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dr.CostUnknown || dr.Cost != 0.25 || dr.DurationS != 4.5 || dr.InputTokens != 123 || dr.OutputTokens != 45 {
+		t.Errorf("telemetry not filled: %+v", dr)
+	}
+	if !strings.Contains(dr.Stdout, "subject-output") {
+		t.Errorf("stdout lost: %q", dr.Stdout)
+	}
+}
+
+func TestRealDispatch_NoCostTelemetryIsUnknown(t *testing.T) {
+	t.Run("record without usage", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		root := t.TempDir()
+		writeTelemetryDispatchSh(t, root, "")
+		dr, _ := realDispatch(root, "backend", "task", "sonnet", "run-9", "")
+		if !dr.CostUnknown {
+			t.Errorf("want CostUnknown, got %+v", dr)
+		}
+	})
+	t.Run("no record at all", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		root := t.TempDir()
+		writeFakeDispatchSh(t, root, "x")
+		dr, _ := realDispatch(root, "backend", "task", "sonnet", "run-9", "")
+		if !dr.CostUnknown || dr.DurationS <= 0 {
+			t.Errorf("want CostUnknown with wall-clock duration, got %+v", dr)
+		}
+	})
+}
+
+// The cap must trip from costs recovered out of the real dispatch path.
+func TestEval_CapTripsFromRealDispatchTelemetry(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	cfg.MaxCostUSD = 5
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 5)
+	writeTelemetryDispatchSh(t, cfg.YakosRoot, `{"total_cost_usd":3.0}`)
+	cfg.JudgeFn = mockJudge(true)
+	if _, err := Run(cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(readRecords(t, cfg.EvalLog, "budget_exceeded")) != 1 {
+		t.Error("cap did not trip on real telemetry")
+	}
+	cases := readRecords(t, cfg.EvalLog, "eval_case")
+	if len(cases) != 2 {
+		t.Errorf("expected run to stop after 2 dispatches ($3 each, cap $5), got %d", len(cases))
+	}
+	if c := cases[0]["total_cost_usd"].(float64); c != 3.0 {
+		t.Errorf("cost not recorded: %v", c)
+	}
+}
+
+func TestEval_MissingCostTelemetry_FailsClosed(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand = "eval"
+	cfg.AgentID = "backend"
+	cfg.Judge = "code-reviewer"
+	setupEvalAgent(t, cfg, "backend", "opus", "backend", 6)
+	calls := 0
+	cfg.DispatchFn = func(agentID, task, tier, runID, project string) (DispatchResult, error) {
+		calls++
+		if calls >= 3 {
+			return DispatchResult{Stdout: "x", CostUnknown: true}, nil
+		}
+		return DispatchResult{Stdout: "x", Cost: 0.001, DurationS: 1}, nil
+	}
+	judged := 0
+	cfg.JudgeFn = func(string, string, string) (JudgeResult, error) { judged++; return JudgeResult{Pass: true}, nil }
+
+	res, err := Run(cfg)
+	if err == nil || !strings.Contains(err.Error(), "no cost telemetry") {
+		t.Fatalf("want fail-closed error, got %v", err)
+	}
+	if calls != 3 {
+		t.Errorf("run must stop at the first unknown-cost dispatch; dispatches=%d", calls)
+	}
+	if judged != 2 {
+		t.Errorf("the unknown-cost dispatch must not be judged/scored; judged=%d", judged)
+	}
+	if res.CandidateEmitted || res.EvalRunID == "" {
+		t.Errorf("partial result wrong: %+v", res)
+	}
+	if len(readRecords(t, cfg.EvalLog, "budget_unverifiable")) != 1 {
+		t.Error("budget_unverifiable not logged")
+	}
+	fin := lastRecord(t, cfg.EvalLog, "eval_run_finished")
+	if fin["partial"] != true || fin["candidate_emitted"] != false {
+		t.Errorf("finished record not marked partial: %v", fin)
+	}
+	if !strings.Contains(cfgOut(cfg), "partial results") {
+		t.Errorf("partial results not reported: %q", cfgOut(cfg))
+	}
+	if _, err := os.Stat(cfg.CandidatesFile); err == nil {
+		t.Error("candidate file must not be written for a partial run")
+	}
+}
