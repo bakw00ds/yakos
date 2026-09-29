@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not basename, so same-named hooks in different subdirectories no longer
   collapse into one merge key. Hook sync pass-2 dedupes by destination
   path for the same reason.
+- `yakos refresh` (Go) now writes `settings.json` without HTML escaping
+  (`<plan_id>` stays raw) and `.framework-hash` sidecars with a trailing
+  newline, matching bash byte for byte. Projects refreshed under the old
+  layout have their orphan `scripts/hooks/legacy/` removed once every file
+  in it has a flat counterpart.
 
 ## [0.59.0.0] — 2026-09-28
 
