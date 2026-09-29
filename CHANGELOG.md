@@ -147,6 +147,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports files that appeared before the watch became active. The
   file-watcher tests and supervisor prefilter case (h) no longer depend
   on fixed sleeps or a millisecond budget.
+  A "modified" event on a directory itself (Windows reports one when a
+  child changes) is now dropped, since only file events are surfaced. A
+  new directory holding more than 500 files produces one summary
+  `created` event for the directory with a `count`, not one event per
+  file.
 
 - **A completed stdin write is no longer reported as "session closed
   during write" (K-108).** When the child read the frame and exited

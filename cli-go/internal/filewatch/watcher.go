@@ -86,6 +86,10 @@ type ChangeEvent struct {
 	Action ChangeAction `json:"action"`
 	// TS is the server-side time at which the debounced event fired.
 	TS time.Time `json:"ts"`
+	// Count is set only on a directory summary event: a new directory held
+	// more than [rescanFileCap] files, so one "created" event for the
+	// directory stands in for a per-file event each. Omitted otherwise.
+	Count int `json:"count,omitempty"`
 }
 
 // maxWatchedDirs is the safety cap on the number of directories held in the
@@ -112,6 +116,12 @@ const debounceDuration = 100 * time.Millisecond
 // load). Add is idempotent and restores the flags, so one delayed Add after
 // the internal registration has settled closes the window.
 const newDirRearmDelay = 25 * time.Millisecond
+
+// rescanFileCap bounds the per-file events a rescan of one new directory may
+// produce. Above it the rescan emits a single summary event for the directory
+// instead, so moving a huge tree into the workspace cannot flood the event
+// channel (512 deep) and every downstream consumer.
+const rescanFileCap = 500
 
 // skipDirNames is the set of directory base-names that are never watched.
 // Must stay in sync with consoleui/files_handler.go skipDirs.
@@ -174,6 +184,8 @@ type pendingEvent struct {
 	// absPath is the absolute filesystem path; used at flush to stat-confirm
 	// that a created file still exists before emitting "created".
 	absPath string
+	// count is the file total for a directory summary event (see ChangeEvent.Count).
+	count int
 }
 
 // New constructs a Watcher rooted at root. root must be an existing directory.
@@ -347,12 +359,21 @@ func (w *Watcher) handleFSEvent(ev fsnotify.Event) {
 // Multiple calls within the window do NOT last-action-win; instead each
 // op-class flag is OR'd in so the flush closure has the full picture.
 func (w *Watcher) debounce(relPath string, absPath string, action ChangeAction) {
+	w.debounceCount(relPath, absPath, action, 0)
+}
+
+// debounceCount is debounce plus a file count carried onto the flushed event
+// (directory summary events only; 0 otherwise).
+func (w *Watcher) debounceCount(relPath string, absPath string, action ChangeAction, count int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	// Accumulate op-class flags into the pending entry for this path.
 	p := w.pending[relPath]
 	p.absPath = absPath
+	if count > p.count {
+		p.count = count
+	}
 	switch action {
 	case ActionCreated:
 		p.sawCreate = true
@@ -417,6 +438,13 @@ func (w *Watcher) debounce(relPath string, absPath string, action ChangeAction) 
 		case p.sawDelete:
 			action = ActionDeleted
 		default:
+			// Writes only. Some platforms (Windows ReadDirectoryChangesW)
+			// report a "modified" on the parent DIRECTORY whenever a child is
+			// created or written; only file events are surfaced, so drop it.
+			// One Lstat per flushed window, not per raw event.
+			if fi, err := os.Lstat(p.absPath); err != nil || fi.IsDir() {
+				return
+			}
 			action = ActionModified
 		}
 
@@ -432,6 +460,7 @@ func (w *Watcher) debounce(relPath string, absPath string, action ChangeAction) 
 			Path:   path,
 			Action: action,
 			TS:     time.Now().UTC(),
+			Count:  p.count,
 		}:
 		case <-w.closeCh:
 		default:
@@ -525,8 +554,12 @@ func (w *Watcher) rearmTree(dir string) {
 // created file. It covers files that appeared before the directory's watch
 // was active. Duplicates of files whose own raw events also arrive coalesce
 // in the debounce window. Secret-pattern names and skipped directories are
-// filtered exactly as for live events.
+// filtered exactly as for live events. Walk order is lexical, so the result
+// is deterministic. When more than [rescanFileCap] files are found, one
+// summary event for dir (with Count) replaces the per-file events.
 func (w *Watcher) rescanTree(dir string) {
+	type found struct{ rel, abs string }
+	var files []found
 	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return filepath.SkipDir
@@ -544,9 +577,19 @@ func (w *Watcher) rescanTree(dir string) {
 		if !ok || w.insideSkippedDir(rel) {
 			return nil
 		}
-		w.debounce(rel, path, ActionCreated)
+		files = append(files, found{rel, path})
 		return nil
 	})
+
+	if len(files) > rescanFileCap {
+		if rel, ok := w.toRelPath(dir); ok {
+			w.debounceCount(rel, dir, ActionCreated, len(files))
+		}
+		return
+	}
+	for _, f := range files {
+		w.debounce(f.rel, f.abs, ActionCreated)
+	}
 }
 
 // watchedDirCount returns the number of directories currently in the OS watch
