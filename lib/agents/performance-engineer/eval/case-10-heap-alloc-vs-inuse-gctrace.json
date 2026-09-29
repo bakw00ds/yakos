@@ -1,0 +1,64 @@
+{
+  "case_id": "perf-heap-alloc-vs-inuse-gctrace-10",
+  "task": "Performance review. The data is supplied inline. This is a diagnosis-only task: do NOT edit or create any file in the repository. Do not run commands; respond with findings and a proposed fix as text. Be explicit about what you measured versus what you are inferring.\n\nA log-shipping service (Go, 8 P, container memory limit 128 MiB, GOGC unset so 100, GOMEMLIMIT unset) misses its p99 budget of 60 ms (observed 180 ms) and an on-call engineer proposes 'just set GOGC=400, GC is obviously the problem'. A heap profile was taken 30 minutes after process start (uptime 1800 s).\n\n`go tool pprof -sample_index=alloc_space -top heap.pb.gz`:\n\n```\nShowing nodes accounting for 43.2GB, 100% of 43.2GB total\n      flat  flat%   sum%        cum   cum%\n   26.8GB 62.04% 62.04%     26.8GB 62.04%  shipper.(*Batcher).flush\n    9.9GB 22.92% 84.96%      9.9GB 22.92%  encoding/json.Marshal\n    4.6GB 10.65% 95.60%      4.6GB 10.65%  shipper.parseLine\n    1.9GB  4.40%   100%      1.9GB  4.40%  ingest.(*Server).handle\n```\n\n`go tool pprof -sample_index=inuse_space -top heap.pb.gz` (same profile file):\n\n```\nShowing nodes accounting for 38.4MB, 100% of 38.4MB total\n      flat  flat%   sum%        cum   cum%\n   31.2MB 81.25% 81.25%     31.2MB 81.25%  ingest.(*Cache).Put\n    4.0MB 10.42% 91.67%      4.0MB 10.42%  shipper.(*Batcher).flush\n    1.5MB  3.91% 95.57%      1.5MB  3.91%  encoding/json.Marshal\n    1.7MB  4.43%   100%      1.7MB  4.43%  shipper.parseLine\n```\n\nThree consecutive lines from `GODEBUG=gctrace=1` near uptime 1800 s:\n\n```\ngc 1131 @1794.812s 2%: 0.041+5.9+0.030 ms clock, 0.33+2.1/11/19+0.24 ms cpu, 76->77->38 MB, 77 MB goal, 0 MB stacks, 0 MB globals, 8 P\ngc 1132 @1796.408s 2%: 0.038+6.2+0.028 ms clock, 0.30+2.4/12/21+0.22 ms cpu, 76->77->38 MB, 77 MB goal, 0 MB stacks, 0 MB globals, 8 P\ngc 1133 @1798.011s 2%: 0.044+5.7+0.031 ms clock, 0.35+1.9/11/18+0.25 ms cpu, 76->77->38 MB, 77 MB goal, 0 MB stacks, 0 MB globals, 8 P\n```\n\nSelf-contained excerpt of the hot function (only what is shown exists for this task; `appendRecord` appends one encoded record to a byte slice; `b.out.Write` copies or sends the slice and does not retain it after returning; flush is called about 29 times per second and a typical encoded batch is 20-40 KB):\n\n```go\nfunc (b *Batcher) flush(recs []Record) error {\n\tbuf := make([]byte, 0, 512<<10) // 512 KiB scratch per flush\n\tfor _, r := range recs {\n\t\tbuf = appendRecord(buf, r)\n\t}\n\treturn b.out.Write(buf)\n}\n```\n\nQuestions: What does each profile view tell you and why do they point at different functions? Is there a leak? Where is the allocation churn coming from? What would you change first, and would you accept the GOGC=400 proposal? Say what these artifacts cannot prove about the p99 miss.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "distinguishes-alloc-space-from-inuse-space",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: explains alloc_space is cumulative bytes allocated (churn) and inuse_space is live heap at sample time, and uses that to say Cache.Put holds the steady live set while flush drives allocation volume. 0.5: states the definitions without applying them. 0.0: conflates them or calls Cache.Put the churn source."
+      },
+      {
+        "name": "no-leak-conclusion-supported",
+        "weight": 0.1,
+        "type": "binary"
+      },
+      {
+        "name": "identifies-flush-buffer-as-churn-source",
+        "weight": 0.2,
+        "type": "binary"
+      },
+      {
+        "name": "proposes-buffer-reuse-fix",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: proposes reusing or right-sizing the buffer (sync.Pool, a per-Batcher reusable slice reset with buf[:0], or capacity near the 20-40 KB typical batch) with the caveat that Write must not retain the slice. 0.5: proposes a fix but misses the retention caveat or the right size. 0.0: no allocation-side fix."
+      },
+      {
+        "name": "cautions-against-gogc-400",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: notes GOGC=400 would raise the heap goal to roughly 5x the 38 MB live set (about 190 MB), exceeding the 128 MiB limit with OOM risk, that it treats the symptom, and that GC CPU is only 2 percent. 0.5: cautions without the limit arithmetic. 0.0: accepts GOGC=400 or leads with it."
+      },
+      {
+        "name": "limits-of-artifacts-no-invented-numbers",
+        "weight": 0.1,
+        "type": "scalar_0_1",
+        "anchor": "1.0: says the artifacts do not show whether GC (mark assist, pauses) causes the p99 miss, asks for latency attribution or a before/after measurement, and quotes no unmeasured speedup. 0.5: one of these. 0.0: asserts GC causes p99 or claims a specific gain."
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Explains alloc_space (43.2 GB total since process start, cumulative allocations) versus inuse_space (38.4 MB live now): the churn source is shipper.(*Batcher).flush (62 percent of allocated bytes, 26.8 GB), while the live heap is dominated by ingest.(*Cache).Put (31.2 MB, 81 percent of in-use), which is a steady cache, not garbage generation",
+    "Concludes there is no evidence of a leak: in-use is stable at about 38 MB after GC in all three gctrace lines (76->77->38 MB) and does not grow across cycles",
+    "Ties the churn to the code: flush allocates a 512 KiB buffer on each of about 29 calls per second (about 14.9 MB/s, consistent with 26.8 GB over 1800 s) while a typical batch is 20-40 KB, so the buffer is a large, mostly empty allocation each time; cycles arrive about every 1.6 s at roughly 38 MB allocated per cycle, consistent with 43.2 GB over 1131 cycles",
+    "Proposes first change: reuse the buffer (sync.Pool or a reusable field reset with buf[:0]) or size it to the typical batch, with the caveat that b.out.Write must not retain the slice (given in the excerpt); secondary options include slimming records or encoding into the pooled buffer to cut json.Marshal allocations",
+    "Cautions against GOGC=400 as the first move: live heap 38 MB times (1+4) gives a heap goal near 190 MB, above the 128 MiB container limit, so OOM risk; GC CPU is only 2 percent so it treats a symptom; if a knob is wanted, GOMEMLIMIT with a modest GOGC is safer, still after reducing churn",
+    "States what the artifacts cannot prove: they do not show that GC causes the p99 miss (mark assists, pause distribution, or unrelated waits are not attributed), so measure p99 and gctrace before and after the buffer fix; does not quote an unmeasured speedup"
+  ],
+  "context_files": [],
+  "max_duration_s": 300,
+  "max_cost_usd": 0.5,
+  "tags": [
+    "performance",
+    "go",
+    "gc",
+    "heap-profile",
+    "gctrace",
+    "memory",
+    "trap",
+    "hard-for-cheap-tier",
+    "read-only"
+  ]
+}

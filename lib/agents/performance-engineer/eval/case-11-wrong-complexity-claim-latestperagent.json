@@ -1,0 +1,58 @@
+{
+  "case_id": "perf-wrong-complexity-latestperagent-11",
+  "task": "Performance review of a claim in a code review. You MAY read files and run shell commands in the current checkout, but must NOT create, edit, or delete any file inside the repository working tree; put scratch files under $TMPDIR (for example a benchmark injected with `go test -overlay=...`). Measurement is optional but encouraged; quote only numbers you observed.\n\nA reviewer commented on the function `latestPerAgent` in `cli-go/internal/routing/routing.go`, used by `yakos model-routing list` after `readAllCandidates` loads the candidates file (one JSON record per line, appended each eval run):\n\n> latestPerAgent is O(n log n) in the number of candidate records because it calls sort.Slice, so on a 20 MB candidates file that sort is the bottleneck. Replace it with a heap, or keep the file sorted on write.\n\nRead the function and decide whether the claim is correct. Give the actual time and space complexity in terms of n (records) and k (distinct agents), say what the realistic sizes of n and k are in this repo (check how many agents exist under lib/agents), identify what actually dominates `yakos model-routing list` for a large file (read the surrounding code, not only this function), and say whether the reviewer's proposed change is warranted. If you measure, state the exact command and observed output.",
+  "rubric": {
+    "criteria": [
+      {
+        "name": "rejects-nlogn-claim-with-code-evidence",
+        "weight": 0.25,
+        "type": "binary"
+      },
+      {
+        "name": "correct-complexity-in-n-and-k",
+        "weight": 0.25,
+        "type": "scalar_0_1",
+        "anchor": "1.0: states O(n) map pass plus O(k log k) for the sort with k the number of distinct agents (k at most n), O(k) extra space, and notes the worst case k=n degenerates to O(n log n). 0.5: says O(n) without separating k or the sort. 0.0: agrees with O(n log n) as stated or gives another wrong bound."
+      },
+      {
+        "name": "realistic-sizes-checked",
+        "weight": 0.15,
+        "type": "scalar_0_1",
+        "anchor": "1.0: checks the agent count (about 39 files in lib/agents) and concludes k is tiny relative to n. 0.5: says k is small without checking. 0.0: does not consider k."
+      },
+      {
+        "name": "finds-real-dominant-cost",
+        "weight": 0.2,
+        "type": "scalar_0_1",
+        "anchor": "1.0: identifies readAllCandidates line reading plus json.Unmarshal of every record (and per-record Evidence RawMessage retention) as the dominant cost and the sort/heap as not worth changing. 0.5: says the sort is not the bottleneck without naming the actual one. 0.0: endorses the heap/sorted-file change."
+      },
+      {
+        "name": "no-invented-numbers",
+        "weight": 0.15,
+        "type": "binary"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    "Reads latestPerAgent: it makes one pass over recs updating a map[string]candidateRecord keyed by Agent with a string compare on GeneratedAt (O(n) expected time), copies the map values to a slice, then sort.Slice by Agent over the k distinct agents (O(k log k)); it does not sort the n records. The reviewer's O(n log n) claim is wrong except in the degenerate case k close to n",
+    "States the space: O(k) for the map and output, plus the input slice; and that k is bounded by the number of agents (about 39 agent definitions in lib/agents in this checkout), so the sort is over tens of elements",
+    "If it measures, results are consistent with linear scaling in n for fixed k: on the authoring machine (Apple M4) k=40 gave about 0.24 ms at n=10,000, 1.8 ms at n=100,000 and 24 ms at n=1,000,000 with 16 allocs/op and about 22 KB/op independent of n, while k=n=100,000 gave about 65 ms and 82 MB/op. The judge should check consistency with the transcript, not these exact numbers",
+    "Identifies that the dominant cost of `model-routing list` on a large file is readAllCandidates: bufio.Scanner over every line and json.Unmarshal into candidateRecord for all n records (Evidence held as json.RawMessage), which is O(file bytes) with allocation per record, and is far larger than the in-memory reduction; note also that runList then calls nCases/ciLower which unmarshal Evidence again only for the k survivors",
+    "Concludes the heap/sorted-on-write change is not warranted for latestPerAgent; any optimisation should target decode volume (for example avoid decoding whole file, tail or index per agent) and should be justified by a profile of the real command",
+    "Does not quote numbers that were not measured"
+  ],
+  "context_files": [
+    "cli-go/internal/routing/routing.go"
+  ],
+  "max_duration_s": 600,
+  "max_cost_usd": 1.0,
+  "tags": [
+    "performance",
+    "go",
+    "complexity",
+    "claim-challenge",
+    "real-code",
+    "tree-dependent",
+    "hard-for-cheap-tier"
+  ]
+}
