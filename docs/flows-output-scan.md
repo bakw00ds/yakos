@@ -12,7 +12,10 @@ wrapper plus the standing preamble, not the scan.
    is normalized first: invisible characters (zero-width, soft hyphen,
    combining marks, bidi controls) are dropped or treated as spaces,
    fullwidth forms and common Cyrillic/Greek look-alikes are folded to
-   Latin. All patterns live in one table with one test per pattern.
+   Latin. Text is first NFKD-normalized (math-bold, circled, precomposed
+   accents), and Unicode tag characters (U+E0000-E007F) are decoded to ASCII and
+   flagged on their own. The Go table is a superset of the hook's patterns
+   (enforced by a test that enumerates the hook script's own regexps). All patterns live in one table with one test per pattern.
 2. **Bash hook** (`lib/hooks/output-injection-scan.sh`). Independent second
    opinion. The hook script set is sha256-pinned when the scan is created
    and re-checked on every call (and compared with the embedded framework
