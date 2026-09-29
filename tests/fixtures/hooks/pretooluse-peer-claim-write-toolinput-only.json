@@ -1,0 +1,15 @@
+{
+  "_doc": "Payload-shape regression: PreToolUse Write with the target ONLY at tool_input.file_path (no top-level path/file_path, as real Claude Code sends). Same claim setup as pretooluse-peer-claim-block: expect exit 2 on both bash and Go.",
+  "session_id": "fixture-peer-claim-write-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "backend-pro",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "src/auth/login.ts",
+    "content": "export const x = 1;\n"
+  },
+  "tool_use_id": "toolu_peer_claim_write_001"
+}

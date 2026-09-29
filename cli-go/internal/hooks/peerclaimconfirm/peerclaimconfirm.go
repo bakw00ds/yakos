@@ -8,7 +8,7 @@
 //  2. Rebuilds active-claims.json atomically (temp-rename, Q8) from the
 //     activity log — this is the canonical writer.
 //
-// No-op when YAKOS_COORD_ENABLED is not "1". Always exits 0. This hook is
+// No-op when the coord dir is absent or not writable (bash yakos_coord_enabled). Always exits 0. This hook is
 // telemetry, not policy. The PreToolUse gate (peerclaim) is where blocking
 // happens; by the time we run, the edit has already landed.
 package peerclaimconfirm
@@ -19,9 +19,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/mailbox"
 )
@@ -72,15 +74,13 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		return out, nil
 	}
 
-	// No-op when coord isn't enabled.
-	if in.Env["YAKOS_COORD_ENABLED"] != "1" {
+	// No-op when coord is not enabled (bash yakos_coord_enabled: dir exists+writable).
+	coordDir := h.resolveCoordDir(in)
+	if !hookio.CoordEnabled(coordDir) {
 		return out, nil
 	}
 
-	filePath := stringField(in.Payload, "path")
-	if filePath == "" {
-		filePath = stringField(in.Payload, "file_path")
-	}
+	filePath := hookio.ToolFilePath(in)
 	if filePath == "" {
 		return out, nil
 	}
@@ -98,7 +98,6 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	agent := senderRole(in)
 	sessionID := in.Env["CLAUDE_SESSION_ID"]
 
-	coordDir := h.resolveCoordDir(in)
 	activityLog := filepath.Join(coordDir, "activity.ndjson")
 	claimsFile := filepath.Join(coordDir, "active-claims.json")
 
@@ -296,20 +295,9 @@ func ttlForFile(relFile string) int {
 
 func (h *Hook) resolveCoordDir(in hooktype.HookInput) string {
 	if h.CoordDirFn != nil {
-		proj := in.Env["YAKOS_PROJECT_NAME"]
-		if proj == "" {
-			proj = "unknown"
-		}
-		return h.CoordDirFn(proj)
+		return h.CoordDirFn(hookio.CoordProjectName(in))
 	}
-	if d := in.Env["YAKOS_COORD_DIR"]; d != "" {
-		return d
-	}
-	proj := in.Env["YAKOS_PROJECT_NAME"]
-	if proj == "" {
-		proj = "unknown"
-	}
-	return filepath.Join("/var/lib/yakos", proj, "coord")
+	return hookio.CoordDir(in)
 }
 
 func (h *Hook) toRelative(filePath string, in hooktype.HookInput) string {
@@ -346,6 +334,11 @@ func (h *Hook) resolveHost(in hooktype.HookInput) string {
 func (h *Hook) resolvePID(in hooktype.HookInput) int {
 	if h.PID != 0 {
 		return h.PID
+	}
+	// bash: me_pid="${YAKOS_SESSION_PID:-$$}" — the durable session id used
+	// for own-claim matching.
+	if n, err := strconv.Atoi(in.Env["YAKOS_SESSION_PID"]); err == nil {
+		return n
 	}
 	return os.Getpid()
 }

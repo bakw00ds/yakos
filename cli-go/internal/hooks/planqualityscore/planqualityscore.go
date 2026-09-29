@@ -24,11 +24,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
@@ -124,10 +126,7 @@ func (h *Hook) runPostToolUse(out hooktype.HookOutput, in hooktype.HookInput) (h
 	}
 
 	// Only act when the write targets plan.md.
-	filePath := stringField(in.Payload, "path")
-	if filePath == "" {
-		filePath = stringField(in.Payload, "file_path")
-	}
+	filePath := hookio.ToolFilePath(in)
 	// Normalise to forward slashes before the suffix check so that Windows
 	// paths (which use "\") and mixed-separator paths both match the
 	// canonical "/work/current/plan.md" suffix.
@@ -179,13 +178,14 @@ func (h *Hook) runPostToolUse(out hooktype.HookOutput, in hooktype.HookInput) (h
 	// Dissent path (takes priority).
 	if dissent {
 		if currentDir != "" {
-			notesFile := filepath.Join(currentDir, "notes", fmt.Sprintf("plan-quality-%s.md", planID))
-			_ = os.MkdirAll(filepath.Dir(notesFile), 0755) //nolint:gosec
-			content := fmt.Sprintf("# Plan Quality Surface — %s\n\n"+
-				"**Reason:** Judge panel dissent\n\n"+
-				"## Score summary\n\nplan_id: %s\naggregate_score: %.4f\n",
-				planID, planID, aggregate)
-			_ = os.WriteFile(notesFile, []byte(content), 0644) //nolint:gosec
+			if notesFile, ok := h.notesFile(&out, currentDir, planID); ok {
+				_ = os.MkdirAll(filepath.Dir(notesFile), 0755) //nolint:gosec
+				content := fmt.Sprintf("# Plan Quality Surface — %s\n\n"+
+					"**Reason:** Judge panel dissent\n\n"+
+					"## Score summary\n\nplan_id: %s\naggregate_score: %.4f\n",
+					planID, planID, aggregate)
+				_ = os.WriteFile(notesFile, []byte(content), 0644) //nolint:gosec
+			}
 		}
 		h.appendLog(&out, "WARN", "surface_to_operator",
 			"plan-quality-score: dissent detected; surfaced to operator",
@@ -205,13 +205,14 @@ func (h *Hook) runPostToolUse(out hooktype.HookOutput, in hooktype.HookInput) (h
 
 	// Below threshold path.
 	if currentDir != "" {
-		notesFile := filepath.Join(currentDir, "notes", fmt.Sprintf("plan-quality-%s.md", planID))
-		_ = os.MkdirAll(filepath.Dir(notesFile), 0755) //nolint:gosec
-		content := fmt.Sprintf("# Plan Quality Surface — %s\n\n"+
-			"**Reason:** Aggregate score %.4f is below threshold %.4f.\n\n"+
-			"## Score summary\n\nplan_id: %s\naggregate_score: %.4f\n",
-			planID, aggregate, threshold, planID, aggregate)
-		_ = os.WriteFile(notesFile, []byte(content), 0644) //nolint:gosec
+		if notesFile, ok := h.notesFile(&out, currentDir, planID); ok {
+			_ = os.MkdirAll(filepath.Dir(notesFile), 0755) //nolint:gosec
+			content := fmt.Sprintf("# Plan Quality Surface — %s\n\n"+
+				"**Reason:** Aggregate score %.4f is below threshold %.4f.\n\n"+
+				"## Score summary\n\nplan_id: %s\naggregate_score: %.4f\n",
+				planID, aggregate, threshold, planID, aggregate)
+			_ = os.WriteFile(notesFile, []byte(content), 0644) //nolint:gosec
+		}
 	}
 
 	if mode == "block" && currentDir != "" {
@@ -338,6 +339,23 @@ func stringField(payload map[string]any, key string) string {
 	}
 	s, _ := v.(string)
 	return s
+}
+
+// safePlanID admits only [A-Za-z0-9._-]+ with no leading dot. plan_id is
+// model-written (plan.md frontmatter), so it must never reach a path join
+// unsanitized.
+var safePlanID = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]*$`)
+
+// notesFile returns the notes path for planID under currentDir/notes, or
+// ("", false) with a WARN log when planID is not a safe filename component.
+func (h *Hook) notesFile(out *hooktype.HookOutput, currentDir, planID string) (string, bool) {
+	if !safePlanID.MatchString(planID) {
+		h.appendLog(out, "WARN", "skip_notes",
+			"plan-quality-score: unsafe plan_id; notes file not written",
+			map[string]any{"plan_id": planID})
+		return "", false
+	}
+	return filepath.Join(currentDir, "notes", fmt.Sprintf("plan-quality-%s.md", planID)), true
 }
 
 func (h *Hook) appendLog(out *hooktype.HookOutput, severity, action, message string, extra map[string]any) {

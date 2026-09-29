@@ -33,10 +33,10 @@ func makeInput(tool, filePath string, env map[string]string) hooktype.HookInput 
 	if env == nil {
 		env = map[string]string{}
 	}
-	env["YAKOS_COORD_ENABLED"] = "1"
 	payload := map[string]any{}
 	if filePath != "" {
-		payload["path"] = filePath
+		// Real Claude Code shape: the target rides tool_input.file_path.
+		payload["tool_input"] = map[string]any{"file_path": filePath}
 	}
 	return hooktype.HookInput{
 		Event:   "PreToolUse",
@@ -73,8 +73,8 @@ func TestCoordDisabledNoOp(t *testing.T) {
 	in := hooktype.HookInput{
 		Event:   "PreToolUse",
 		Tool:    "Edit",
-		Payload: map[string]any{"path": filepath.Join(tmp, "foo.go")},
-		Env:     map[string]string{}, // no YAKOS_COORD_ENABLED
+		Payload: map[string]any{"tool_input": map[string]any{"file_path": filepath.Join(tmp, "foo.go")}},
+		Env:     map[string]string{}, // coord dir absent
 	}
 	out, err := h.Run(context.Background(), in)
 	if err != nil {
@@ -394,8 +394,8 @@ func TestNoFilePathNoOp(t *testing.T) {
 	in := hooktype.HookInput{
 		Event:   "PreToolUse",
 		Tool:    "Edit",
-		Payload: map[string]any{}, // no "path" key
-		Env:     map[string]string{"YAKOS_COORD_ENABLED": "1"},
+		Payload: map[string]any{}, // no tool_input
+		Env:     map[string]string{},
 	}
 	out, err := h.Run(context.Background(), in)
 	if err != nil {

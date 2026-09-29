@@ -33,7 +33,8 @@ func makeInput(event, tool, filePath string, env map[string]string) hooktype.Hoo
 	}
 	payload := map[string]any{}
 	if filePath != "" {
-		payload["path"] = filePath
+		// Real Claude Code shape: the target rides tool_input.file_path.
+		payload["tool_input"] = map[string]any{"file_path": filePath}
 	}
 	return hooktype.HookInput{
 		Event:   event,

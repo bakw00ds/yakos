@@ -1562,6 +1562,8 @@ case_check peer-claim.sh       pretooluse-peer-claim-block.json 0 "" setup_pc_ow
 case_check peer-claim.sh       pretooluse-peer-claim-block.json 0 "" setup_pc_expired_claim "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
 case_check peer-claim-confirm.sh posttooluse-peer-claim-confirm.json 0 peer-claim-confirm setup_pc_coord "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
 case_check peer-claim-confirm.sh posttooluse-peer-claim-confirm.json 0 "" "" "YAKOS_COORD_ROOT=__TMP__/nocoord YAKOS_PROJECT_NAME=proj"
+case_check peer-claim.sh       pretooluse-peer-claim-write-toolinput-only.json 2 peer-claim setup_pc_peer_claim "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
+case_check peer-claim-confirm.sh posttooluse-peer-claim-confirm-write-toolinput-only.json 0 peer-claim-confirm setup_pc_coord "YAKOS_COORD_ROOT=__TMP__/coord YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
 
 # --- task-complete-dispatch: K-87 A-2b (would_run is framework-root-relative on both sides) ---
 case_check task-complete-dispatch.sh  taskcompleted-backend.json   0 task-complete-dispatch setup_tcd_bypass
@@ -1612,6 +1614,11 @@ case_check plan-quality-gate.sh pretooluse-generic-tool.json         0 ""       
 case_check plan-quality-gate.sh pretooluse-json-array-not-object.json 2 plan-quality-gate
 case_check plan-quality-score.sh agent-spawn.json                    0 ""                  setup_plan_blocked
 case_check plan-quality-score.sh pretooluse-generic-tool.json        0 ""
+# Payload-shape regression (K-87): real payloads carry the target at
+# tool_input.file_path only. plan_quality.enabled=false makes the recognised
+# plan.md write observable as a "skipping" REPORT without invoking the scorer.
+setup_pqs_disabled() { printf 'plan_quality:\n  enabled: false\n' > "$1/.yakos.yml"; }
+case_check plan-quality-score.sh posttooluse-write-plan-md-toolinput-only.json 0 plan-quality-score setup_pqs_disabled
 
 # ---- summary ------------------------------------------------------------
 

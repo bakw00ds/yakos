@@ -36,6 +36,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
@@ -138,8 +139,8 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	sessionID := in.Env["CLAUDE_SESSION_ID"]
 
 	// Truncated previews to prevent buffer bloat.
-	newPreview := truncate(stringField(in.Payload, "new_string"), 300)
-	contentPreview := truncate(stringField(in.Payload, "content"), 300)
+	newPreview := truncate(hookio.ToolInputString(in, "new_string"), 300)
+	contentPreview := truncate(hookio.ToolInputString(in, "content"), 300)
 
 	// Build event JSON.
 	event := map[string]any{
@@ -267,14 +268,20 @@ func (h *Hook) checkSensitivePath(filePath, projectDir string) string {
 	if err != nil {
 		return ""
 	}
-	var policies map[string]struct {
-		Deny []string `json:"deny"`
-	}
+	// Decode per key: the stock template carries a top-level "_doc" string
+	// that must not poison the whole document (bash: .lead.deny // []).
+	var policies map[string]json.RawMessage
 	if err := json.Unmarshal(data, &policies); err != nil {
 		return ""
 	}
-	leadPolicy, ok := policies["lead"]
+	raw, ok := policies["lead"]
 	if !ok {
+		return ""
+	}
+	var leadPolicy struct {
+		Deny []string `json:"deny"`
+	}
+	if err := json.Unmarshal(raw, &leadPolicy); err != nil {
 		return ""
 	}
 	for _, glob := range leadPolicy.Deny {
@@ -479,19 +486,63 @@ func atomicTouch(path string) error {
 	return nil
 }
 
+// globMatch mirrors bash supervisor-stream.sh, which uses `case` patterns:
+// `*` matches any characters INCLUDING "/" (so "**" behaves as "*"), and the
+// glob is tried both as written and with a leading "**/" stripped, the latter
+// also as a "*/<bare>" suffix match. This is what makes ".env" or
+// "**/credentials/**" hit absolute paths.
 func globMatch(g, p string) bool {
-	if ok, _ := filepath.Match(g, p); ok {
-		return true
-	}
-	g2 := strings.ReplaceAll(g, "**", "*")
-	if ok, _ := filepath.Match(g2, p); ok {
+	if shellMatch(g, p) {
 		return true
 	}
 	bare := strings.TrimPrefix(g, "**/")
-	if ok, _ := filepath.Match("*/"+bare, p); ok {
-		return true
+	return shellMatch("*/"+bare, p) || shellMatch(bare, p)
+}
+
+// shellMatch reports whether s matches the shell case-pattern pat (whole
+// string): * any run, ? one char, [set] / [!set] classes, everything else
+// literal.
+func shellMatch(pat, s string) bool {
+	var b strings.Builder
+	b.WriteString("^(?s:")
+	rs := []rune(pat)
+	for i := 0; i < len(rs); i++ {
+		switch c := rs[i]; c {
+		case '*':
+			b.WriteString(".*")
+		case '?':
+			b.WriteString(".")
+		case '[':
+			j := i + 1
+			if j < len(rs) && (rs[j] == '!' || rs[j] == '^') {
+				j++
+			}
+			if j < len(rs) && rs[j] == ']' {
+				j++
+			}
+			for j < len(rs) && rs[j] != ']' {
+				j++
+			}
+			if j >= len(rs) {
+				b.WriteString(regexp.QuoteMeta("["))
+				continue
+			}
+			set := string(rs[i+1 : j])
+			if strings.HasPrefix(set, "!") {
+				set = "^" + set[1:]
+			}
+			b.WriteString("[" + strings.ReplaceAll(set, "\\", "\\\\") + "]")
+			i = j
+		default:
+			b.WriteString(regexp.QuoteMeta(string(c)))
+		}
 	}
-	return false
+	b.WriteString(")$")
+	re, err := regexp.Compile(b.String())
+	if err != nil {
+		return false
+	}
+	return re.MatchString(s)
 }
 
 func truncate(s string, maxBytes int) string {
@@ -519,12 +570,7 @@ func senderRole(in hooktype.HookInput) string {
 }
 
 func fileFromPayload(in hooktype.HookInput) string {
-	for _, key := range []string{"path", "file_path"} {
-		if s := stringField(in.Payload, key); s != "" {
-			return s
-		}
-	}
-	return ""
+	return hookio.ToolFilePath(in)
 }
 
 func stringField(payload map[string]any, key string) string {
