@@ -39,6 +39,12 @@ ok()   { printf '[ok]   %s\n' "$*";      PASS=$((PASS + 1)); }
 fail() { printf '[FAIL] %s\n' "$*" >&2;  FAIL=$((FAIL + 1)); FAIL_LOG="${FAIL_LOG}FAIL: $*\n"; }
 note() { printf '       %s\n' "$*"; }
 
+# Fixture timestamps are fixed calendar dates (2026-04-01/02). `correlate`
+# defaults to a rolling 90-day window, so those records aged out on
+# 2026-07-01 and every join returned n=0 (K-110: test rot, not a regression;
+# plan-score.sh's window logic is unchanged since Phase 3). Pin the window.
+_SINCE_ALL="1970-01-01T00:00:00Z"
+
 DIMENSIONS="acceptance_criteria_specificity assumption_surfacing decomposition_granularity dependency_clarity domain_boundaries_respected risk_rollback_honesty"
 
 # ============================================================================
@@ -141,7 +147,7 @@ jq -nc --arg pid "$PID_A" \
 
 # Run correlate with min-n=1 (only 1 joined record; normally need 20)
 _t2_out="$(YAKOS_PLAN_QUALITY_LOG="$_t2_log" \
-    bash "$CLI_LIB/plan-score.sh" score correlate --min-n 1 2>/dev/null || true)"
+    bash "$CLI_LIB/plan-score.sh" score correlate --since "$_SINCE_ALL" --min-n 1 2>/dev/null || true)"
 
 if printf '%s' "$_t2_out" | grep -q "n=1 joined"; then
     ok "test-2: correlate reports n=1 joined plans"
@@ -210,7 +216,7 @@ for i in $(seq 1 25); do
 done
 
 _t3_out="$(YAKOS_PLAN_QUALITY_LOG="$_t3_log" \
-    bash "$CLI_LIB/plan-score.sh" score correlate --min-n 20 2>/dev/null || true)"
+    bash "$CLI_LIB/plan-score.sh" score correlate --since "$_SINCE_ALL" --min-n 20 2>/dev/null || true)"
 
 if printf '%s' "$_t3_out" | grep -q "n=25 joined"; then
     ok "test-3: correlate reports n=25 joined records"
@@ -272,7 +278,7 @@ done
 
 _t4_rc=0
 YAKOS_PLAN_QUALITY_LOG="$_t4_log" \
-    bash "$CLI_LIB/plan-score.sh" score correlate --min-n 20 \
+    bash "$CLI_LIB/plan-score.sh" score correlate --since "$_SINCE_ALL" --min-n 20 \
     >/dev/null 2>/dev/null || _t4_rc=$?
 
 [ "$_t4_rc" -ne 0 ] && ok "test-4: correlate exits non-zero with n=3 < min-n=20" \
@@ -281,7 +287,7 @@ YAKOS_PLAN_QUALITY_LOG="$_t4_log" \
 # With min-n=3, same data should succeed
 _t4_rc2=0
 YAKOS_PLAN_QUALITY_LOG="$_t4_log" \
-    bash "$CLI_LIB/plan-score.sh" score correlate --min-n 3 \
+    bash "$CLI_LIB/plan-score.sh" score correlate --since "$_SINCE_ALL" --min-n 3 \
     >/dev/null 2>/dev/null || _t4_rc2=$?
 
 [ "$_t4_rc2" -eq 0 ] && ok "test-4: correlate succeeds with min-n=3 and 3 records" \
