@@ -198,18 +198,39 @@ _hi_jq_limit() {
     esac
 }
 
+# _hi_pick_timeout: set _HI_JQ_TBIN to a GNU-compatible timeout ("timeout" or
+# "gtimeout") or "" when there is none. `command -v timeout` alone is not enough:
+# Windows ships timeout.exe (a sleep with /t syntax) that Git-bash finds first,
+# and running `timeout 5 jq ...` through it fails with exit 1 without running jq.
+# GNU coreutils answers --version; anything else falls back to the poll loop.
+# hi_init calls this in the main shell so the answer is cached; _hi_jq called
+# from a $(...) subshell without a cached answer probes each time.
+_hi_pick_timeout() {
+    _HI_JQ_TBIN=""
+    local c
+    for c in timeout gtimeout; do
+        if command -v "$c" >/dev/null 2>&1 && "$c" --version 2>/dev/null | grep -q 'GNU coreutils'; then
+            _HI_JQ_TBIN="$c"
+            return 0
+        fi
+    done
+    return 0
+}
+
 _hi_jq() {
     # Once one call has timed out, every later call fails fast (rc 124): the
     # exit path (ho_log's own jq) must not spend another full limit per call.
     [ "${_HI_JQ_HUNG:-0}" = "1" ] && return 124
     local limit tbin
     limit="$(_hi_jq_limit)"
-    if command -v timeout >/dev/null 2>&1; then tbin=timeout
-    elif command -v gtimeout >/dev/null 2>&1; then tbin=gtimeout
-    else tbin=""; fi
+    if [ "${_HI_JQ_TBIN+set}" = "set" ]; then tbin="$_HI_JQ_TBIN"
+    else _hi_pick_timeout; tbin="$_HI_JQ_TBIN"; fi
     if [ -n "$tbin" ]; then
-        "$tbin" "$limit" jq "$@"
-        return $?
+        local trc=0
+        "$tbin" "$limit" jq "$@" || trc=$?
+        # 125-127: timeout itself could not run jq. Do not treat that as jq's
+        # answer; fall through to the poll loop below.
+        case "$trc" in 125|126|127) ;; *) return "$trc" ;; esac
     fi
 
     local pid rc=0 waited=0 step
@@ -300,6 +321,7 @@ hi_init() {
     fi
 
     # Every jq call below is bounded (_hi_jq, K-107): rc 124 = jq hung.
+    _hi_pick_timeout
     local _hi_rc=0
     _hi_jq empty <<< "$HI_INPUT" >/dev/null 2>&1 || _hi_rc=$?
     if _hi_jq_hung "$_hi_rc"; then
