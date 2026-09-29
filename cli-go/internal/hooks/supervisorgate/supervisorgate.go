@@ -336,9 +336,5 @@ func (h *Hook) log(out *hooktype.HookOutput, in hooktype.HookInput, severity, de
 
 // senderRole mirrors hi_sender_role.
 func senderRole(in hooktype.HookInput) string {
-	raw := hookio.JQRawOrJSON(hookio.JQAlt(in.Payload["agent_type"]))
-	if raw == "" {
-		raw = "lead"
-	}
-	return strings.TrimPrefix(strings.TrimSpace(raw), "yakos:")
+	return hookio.SenderRole(in)
 }

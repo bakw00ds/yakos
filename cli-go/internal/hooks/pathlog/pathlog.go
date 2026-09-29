@@ -15,7 +15,6 @@ package pathlog
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
@@ -103,12 +102,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 // NOT the old (pre-hookio) Env["YAKOS_AGENT_ROLE"] / Payload["agent_type"]
 // shape, which had no bash counterpart and defaulted to "unknown".
 func senderRole(in hooktype.HookInput) string {
-	raw := hookio.PayloadString(in, "agent_type")
-	if raw == "" {
-		raw = "lead"
-	}
-	raw = strings.TrimSpace(raw)
-	return strings.TrimPrefix(raw, "yakos:")
+	return hookio.SenderRole(in)
 }
 
 // fileFromPayload extracts the file path, matching hi_file_path:

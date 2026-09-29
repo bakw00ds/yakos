@@ -434,12 +434,7 @@ func (c *ctx) projectDirEnv() string {
 // senderRole mirrors hi_sender_role: .agent_type (default "lead"), trimmed,
 // "yakos:" prefix stripped.
 func senderRole(in hooktype.HookInput) string {
-	raw := hookio.JQRawOrJSON(hookio.JQAlt(in.Payload["agent_type"]))
-	if raw == "" {
-		raw = "lead"
-	}
-	raw = strings.TrimSpace(raw)
-	return strings.TrimPrefix(raw, "yakos:")
+	return hookio.SenderRole(in)
 }
 
 // rawFileFromPayload mirrors hi_file_path:

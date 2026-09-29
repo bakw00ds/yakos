@@ -576,3 +576,14 @@ func TestSymlinkGuardProbesAsWrittenPath(t *testing.T) {
 	e.bypass("api/lnk/../secret.go")
 	e.expect("as-written entry", in, 0, "symlink escape detected but bypass active")
 }
+
+// K-107 item 1: an agent_type that is only newlines is the lead role (bash
+// hi_field strips trailing newlines before its "lead" fallback), so .env is
+// denied. A spaces-only agent_type trims to an empty role with no policy.
+func TestNewlineAgentTypeIsLead(t *testing.T) {
+	e := newEnv(t)
+	e.policy(goAPI)
+	e.expect("newline agent is lead", e.input("Write", ".env", "\n"), 2, "deny pattern matched")
+	e.expect("crlf agent trims to empty (only LF is stripped first)", e.input("Write", ".env", "\r\n"), 0, "no policy for agent_type")
+	e.expect("spaces agent has no policy", e.input("Write", ".env", "  "), 0, "no policy for agent_type")
+}

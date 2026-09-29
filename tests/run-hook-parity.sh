@@ -1309,6 +1309,9 @@ case_check path-allowlist.sh   pretooluse-notebookedit-web-blocked.json 2 path-a
 # H5b: deny matching is case-insensitive (APFS/NTFS default to
 # case-insensitive filesystems, so ".env" vs ".ENV" is the same inode).
 case_check path-allowlist.sh   pretooluse-write-dotenv-upper.json 2 path-allowlist setup_allowlist_strict
+# K-107 item 1: a whitespace-only agent_type must resolve identically on both sides ("\n" is lead: blocked; "  " trims to an empty role: allowed).
+case_check path-allowlist.sh   pretooluse-write-dotenv-agent-newline.json 2 path-allowlist setup_allowlist_strict
+case_check path-allowlist.sh   pretooluse-write-dotenv-agent-spaces.json  0 path-allowlist setup_allowlist_strict
 case_check path-allowlist.sh   pretooluse-write-pem-upper.json    2 path-allowlist setup_allowlist_deny_pem
 # M7: a lexically-fine path that is a symlink resolving outside the
 # project root must be blocked regardless of what the allow list says.

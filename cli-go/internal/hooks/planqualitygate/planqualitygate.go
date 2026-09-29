@@ -24,7 +24,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -265,9 +264,5 @@ func (h *Hook) appendLog(in hooktype.HookInput, severity, decision, reason strin
 // senderRole matches hi_sender_role: agent_type (trimmed, "yakos:" prefix
 // stripped), or "lead" when absent.
 func senderRole(in hooktype.HookInput) string {
-	raw := strings.TrimSpace(hookio.PayloadString(in, "agent_type"))
-	if raw == "" {
-		raw = "lead"
-	}
-	return strings.TrimPrefix(raw, "yakos:")
+	return hookio.SenderRole(in)
 }
