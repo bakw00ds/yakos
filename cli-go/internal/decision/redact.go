@@ -233,8 +233,10 @@ func hasSecretPath(key string, v any, never []string) bool {
 }
 
 func pathIsNever(p string, patterns []string) bool {
-	p = strings.ReplaceAll(p, `\`, "/")
+	// Case-insensitive: macOS and Windows filesystems are, so a/b/.ENV is .env.
+	p = strings.ToLower(strings.ReplaceAll(p, `\`, "/"))
 	for _, pat := range patterns {
+		pat = strings.ToLower(pat)
 		if fnmatch.Match(pat, p) || fnmatch.Match(pat, "/"+strings.TrimPrefix(p, "/")) {
 			return true
 		}
@@ -259,7 +261,12 @@ func (s *sanitizer) walk(key string, v any) any {
 		sort.Strings(names)
 		out := make(map[string]any, len(t))
 		for _, k := range names {
-			nk := RedactText(truncateUTF8(k, 256), &s.st.Redactions)
+			// Redact the whole key first, then truncate (as for values), so a long
+			// key cannot cut a token in half.
+			nk := RedactText(truncateUTF8(k, preRedactCap), &s.st.Redactions)
+			if len(nk) > 256 {
+				nk = truncateUTF8(nk, 256)
+			}
 			for i := 2; ; i++ { // keep redacted keys from colliding
 				if _, dup := out[nk]; !dup {
 					break

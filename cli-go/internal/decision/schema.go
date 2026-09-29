@@ -441,13 +441,19 @@ var readOnlyTools = map[string]bool{"read": true, "grep": true, "glob": true, "l
 func CheckAgentFrontmatter(name string, fm map[string]any) []string {
 	var out []string
 	refs := false
-	for _, key := range []string{"runtime", "runtime-fallback", "decision-provider", "decision_provider", "decisions"} {
-		v, ok := fm[key]
+	// Keys are matched case-insensitively with - and _ ignored, so
+	// decisionProvider, decision_provider and decision-provider all count.
+	norm := map[string]any{}
+	for k, v := range fm {
+		norm[strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(k))] = v
+	}
+	for _, key := range []string{"runtime", "runtimefallback", "decisionprovider", "decisions"} {
+		v, ok := norm[key]
 		if !ok {
 			continue
 		}
 		flat := strings.ToLower(flattenValue(v))
-		if key == "decision-provider" || key == "decision_provider" || key == "decisions" {
+		if key == "decisionprovider" || key == "decisions" {
 			if strings.TrimSpace(flat) != "" && flat != "none" && flat != "false" {
 				refs = true
 			}
@@ -455,13 +461,13 @@ func CheckAgentFrontmatter(name string, fm map[string]any) []string {
 		}
 		for _, tok := range splitTokens(flat) {
 			if tok == ProviderJev {
-				out = append(out, fmt.Sprintf("agent %s: %s names jev; jev is a decision provider, not a runtime; see ADR-0009", name, key))
+				out = append(out, fmt.Sprintf("agent %s: %s names jev; jev is a decision provider, not a runtime; see ADR-0009", name, displayKey(key)))
 				refs = true
 			}
 		}
 	}
 	if refs {
-		if bad, ok := nonReadOnlyTools(fm["tools"]); !ok {
+		if bad, ok := nonReadOnlyTools(norm["tools"]); !ok {
 			out = append(out, fmt.Sprintf("agent %s: references a decision provider but is not provably read-only (%s); a provider is only allowed on agents whose tools line lists nothing beyond Read, Grep, Glob, LS, SendMessage, TaskList (ADR-0009)", name, bad))
 		}
 	}
@@ -522,4 +528,11 @@ func dedupe(in []string) []string {
 		}
 	}
 	return out
+}
+
+func displayKey(k string) string {
+	if k == "runtimefallback" {
+		return "runtime-fallback"
+	}
+	return k
 }

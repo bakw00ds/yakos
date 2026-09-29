@@ -168,6 +168,9 @@ func TestCheckAgentFrontmatter(t *testing.T) {
 		{"provider + mcp write tool", map[string]any{"decision-provider": "jev", "tools": "Read, mcp__github__create_issue"}, 1, "mcp__github__create_issue"},
 		{"provider + WebFetch (exfil)", map[string]any{"decision-provider": "jev", "tools": "Read, WebFetch"}, 1, "WebFetch"},
 		{"provider + lowercase bash", map[string]any{"decision-provider": "jev", "tools": "read, bash"}, 1, "bash"},
+		{"camelCase decisionProvider + Bash", map[string]any{"decisionProvider": "jev", "tools": "Read, Bash"}, 1, "Bash"},
+		{"camelCase decisionProvider no tools", map[string]any{"decisionProvider": "jev"}, 1, "no tools line"},
+		{"Runtime-Fallback mixed case", map[string]any{"Runtime-Fallback": "jev", "Tools": "Read"}, 1, "runtime-fallback"},
 		{"provider + NotebookEdit", map[string]any{"decision-provider": "jev", "tools": "Read, NotebookEdit"}, 1, "NotebookEdit"},
 	}
 	for _, c := range cases {

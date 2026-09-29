@@ -415,3 +415,45 @@ func TestSanitize_LongPathStringsSurviveWhole(t *testing.T) {
 		t.Error("a path under the path cap must not be truncated by the strict preview")
 	}
 }
+
+// Follow-ups from round 2.
+func TestSanitize_NeverPathsCaseInsensitiveAndCredentialFiles(t *testing.T) {
+	for _, p := range []string{"a/b/.ENV", "A/Secrets/x.txt", "Keys/ID.KEY", "C:\\Users\\me\\.AWS\\Credentials",
+		"~/.aws/credentials", "/home/u/.netrc", ".NETRC", "home/u/.git-credentials", "/root/.pgpass", "proj/.npmrc", "/home/u/.docker/config.json", ".docker/config.json"} {
+		out, s, err := Sanitize(map[string]any{"file_path": p, "body": "TOPSECRETBODY"}, allowAll("file_path", "body"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.(map[string]any)["body"] != withheldMarker || !s.Withheld {
+			t.Errorf("%q: sibling content not withheld: %v", p, out)
+		}
+	}
+	// Ordinary look-alikes are not withheld.
+	for _, p := range []string{"src/env.go", "docs/aws-credentials-guide.md", "cmd/netrc_test.go"} {
+		out, _, _ := Sanitize(map[string]any{"file_path": p, "body": "fine"}, allowAll("file_path", "body"))
+		if out.(map[string]any)["body"] != "fine" {
+			t.Errorf("%q wrongly withheld", p)
+		}
+	}
+}
+
+func TestSanitize_LongMapKeyCannotSplitAToken(t *testing.T) {
+	for back := 1; back <= len(fakeGH); back++ {
+		key := strings.Repeat("k", 256-back) + fakeGH
+		out, _, _ := Sanitize(map[string]any{"m": map[string]any{key: "v"}}, allowAll("m"))
+		b, _ := json.Marshal(out)
+		for i := 0; i+8 <= len(fakeGH); i++ {
+			if strings.Contains(string(b), fakeGH[i:i+8]) {
+				t.Fatalf("back=%d: fragment %q leaked through a truncated key", back, fakeGH[i:i+8])
+			}
+		}
+	}
+}
+
+func TestSanitize_OperatorPatternCaseInsensitive(t *testing.T) {
+	out, _, _ := Sanitize(map[string]any{"file_path": "infra/prod/vars.tf", "body": "x"},
+		SanitizeOptions{Level: EgressStrict, AllowedFields: []string{"file_path", "body"}, NeverPaths: []string{"Infra/PROD/*"}})
+	if out.(map[string]any)["body"] != withheldMarker {
+		t.Error("a mixed-case operator never_paths entry must match case-insensitively")
+	}
+}

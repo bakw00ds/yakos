@@ -229,6 +229,11 @@ var DefaultNeverPaths = []string{
 	"**/.env*", ".env*", "**/*.pem", "*.pem", "**/*.key", "*.key",
 	"**/credentials/**", "credentials/**", "**/secrets/**", "secrets/**",
 	"**/id_rsa*", "**/id_ed25519*",
+	// Credential FILES (not directories): ~/.aws/credentials, netrc, git,
+	// pgpass, npm and docker client credentials.
+	"**/.aws/credentials", ".aws/credentials", "**/.netrc", ".netrc",
+	"**/.git-credentials", ".git-credentials", "**/.pgpass", ".pgpass",
+	"**/.npmrc", ".npmrc", "**/.docker/config.json", ".docker/config.json",
 }
 
 // DefaultConfig is what an absent decisions: block means: provider none.
