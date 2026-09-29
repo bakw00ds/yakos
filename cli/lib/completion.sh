@@ -5,6 +5,7 @@
 # Subcommands:
 #   bash         Print the bash completion script to stdout.
 #   zsh          Print the zsh completion script to stdout.
+#   fish         Print the fish completion script to stdout.
 #   install      Auto-detect $SHELL and write the right completion file
 #                to a conventional path; print the source-line for the
 #                operator's shell rc.
@@ -18,6 +19,7 @@ set -eu
 
 BASH_COMP="$YAKOS_ROOT/cli/completions/yakos.bash"
 ZSH_COMP="$YAKOS_ROOT/cli/completions/yakos.zsh"
+FISH_COMP="$YAKOS_ROOT/cli/completions/yakos.fish"
 
 usage() {
     cat <<'EOF'
@@ -28,6 +30,7 @@ Emit or install shell tab-completion scripts for the yakos CLI.
 Subcommands:
   bash         Print the bash completion script to stdout.
   zsh          Print the zsh completion script to stdout.
+  fish         Print the fish completion script to stdout.
   install      Auto-detect your shell, write the completion file to a
                conventional path, and print the source-line for your
                shell rc.
@@ -46,6 +49,10 @@ Manual install (if you'd rather):
   # then in ~/.zshrc (before compinit):
   fpath=(~/.zsh/completions $fpath)
   autoload -U compinit && compinit
+
+  # fish:
+  mkdir -p ~/.config/fish/completions
+  yakos completion fish > ~/.config/fish/completions/yakos.fish
 EOF
 }
 
@@ -64,6 +71,11 @@ case "$SUB" in
         cat "$ZSH_COMP"
         exit 0
         ;;
+    fish)
+        [ -f "$FISH_COMP" ] || ct_die "completion: fish script missing at $FISH_COMP"
+        cat "$FISH_COMP"
+        exit 0
+        ;;
     install) ;;
     *) ct_die "completion: unknown subcommand '$SUB' (try --help)" ;;
 esac
@@ -76,8 +88,9 @@ if [ -z "$detected" ]; then
     case "${SHELL:-}" in
         */bash) detected=bash ;;
         */zsh)  detected=zsh ;;
+        */fish) detected=fish ;;
         *)
-            ct_die "completion install: could not detect shell from \$SHELL='$SHELL'. Override with YAKOS_COMPLETION_SHELL=bash|zsh."
+            ct_die "completion install: could not detect shell from \$SHELL='$SHELL'. Override with YAKOS_COMPLETION_SHELL=bash|zsh|fish."
             ;;
     esac
 fi
@@ -130,7 +143,21 @@ EOF
         fi
         echo "Then open a new shell. Try 'yakos <TAB><TAB>'."
         ;;
+    fish)
+        dst_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
+        mkdir -p "$dst_dir"
+        dst="$dst_dir/yakos.fish"
+        cp "$FISH_COMP" "$dst"
+        chmod 644 "$dst"
+        cat <<EOF
+yakos completion install — installed fish completion at:
+  $dst
+
+Fish auto-sources files from ~/.config/fish/completions/.
+Open a new shell. Try 'yakos <TAB>'.
+EOF
+        ;;
     *)
-        ct_die "completion install: unsupported shell '$detected' (bash or zsh)"
+        ct_die "completion install: unsupported shell '$detected' (bash, zsh, or fish)"
         ;;
 esac
