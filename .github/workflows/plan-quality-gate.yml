@@ -11,12 +11,14 @@ on:
     branches: [main]
     paths:
       - 'lib/hooks/**'
+      - 'cli/lib/**'
       - 'tests/run-plan-quality-gate*.sh'
       - '.github/workflows/plan-quality-gate.yml'
   pull_request:
     branches: [main]
     paths:
       - 'lib/hooks/**'
+      - 'cli/lib/**'
       - 'tests/run-plan-quality-gate*.sh'
       - '.github/workflows/plan-quality-gate.yml'
   workflow_dispatch:
@@ -35,6 +37,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Assert /bin/bash is 3.x on macOS
+        if: runner.os == 'macOS'
+        shell: /bin/bash {0}
+        run: |
+          echo "/bin/bash is ${BASH_VERSION}"
+          [ "${BASH_VERSINFO[0]}" = "3" ] || { echo "expected bash 3.x at /bin/bash"; exit 1; }
+
+      - name: Syntax pass (bash -n) over cli/lib and lib/hooks
+        shell: bash
+        run: |
+          rc=0
+          for f in cli/lib/*.sh $(find lib/hooks -name '*.sh' -not -type l); do
+            /bin/bash -n "$f" || { echo "syntax error under /bin/bash: $f"; rc=1; }
+          done
+          exit $rc
 
       - name: Fail-closed gate tests (bash on PATH and /bin/bash)
         shell: bash

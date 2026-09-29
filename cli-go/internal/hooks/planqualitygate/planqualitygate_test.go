@@ -118,6 +118,10 @@ func TestDisableEnvPasses(t *testing.T) {
 	if out.ExitCode != 0 {
 		t.Fatalf("want pass, got %d", out.ExitCode)
 	}
+	data, err := os.ReadFile(filepath.Join(tmp, "logs", "plan-quality-gate.ndjson"))
+	if err != nil || !strings.Contains(string(data), "gate bypassed") {
+		t.Fatalf("bypass must leave a WARN record: %v %s", err, data)
+	}
 }
 
 func TestOptOutClearsMarkerAndPasses(t *testing.T) {
@@ -325,5 +329,17 @@ func TestBlockLogRecordSchema(t *testing.T) {
 		if rec[k] != want {
 			t.Errorf("record[%q]=%v want %v", k, rec[k], want)
 		}
+	}
+}
+
+// enabled:false under a different top-level section must not disable the gate.
+func TestOptOutScopedToPlanQualitySection(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, ".yakos.yml"), []byte("plan_quality:\n  mode: block\nother:\n  enabled: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeMarker(t, tmp, "p", "bad")
+	if out := run(t, newHook(tmp, tmp), input("Agent", nil)); out.ExitCode != 2 {
+		t.Fatalf("want block, got %d", out.ExitCode)
 	}
 }

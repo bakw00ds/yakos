@@ -96,6 +96,7 @@ func blocked(reason string) hooktype.HookOutput {
 func (h *Hook) run(in hooktype.HookInput) hooktype.HookOutput {
 	// Emergency bypass, honored before anything else.
 	if in.Env["YAKOS_PLAN_QUALITY_DISABLE"] == "1" {
+		h.appendLog(in, "WARN", "pass", "YAKOS_PLAN_QUALITY_DISABLE=1: gate bypassed", nil)
 		return hooktype.HookOutput{ExitCode: 0}
 	}
 

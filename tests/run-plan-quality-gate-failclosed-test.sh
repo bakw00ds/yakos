@@ -228,6 +228,31 @@ run_suite() {
     rc=0; printf '%s' "$(pl_agent)" | env HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" "$SH" "$cp/plan-quality-gate.sh" >/dev/null 2>"$sb/err" || rc=$?
     err="$(cat "$sb/err")"; expect "internal helper failure (exit 7) -> exit 2" 2
 
+    # A READABLE helper lib with a syntax error: bash 3.2 exits 0 outright.
+    for lib in hook-output.sh hook-input.sh paths.sh; do
+        cp "$HOOKS/lib/hook-input.sh" "$HOOKS/lib/hook-output.sh" "$HOOKS/lib/paths.sh" "$cp/lib/"
+        printf 'if then fi fi (\n' > "$cp/lib/$lib"
+        for mk in yes no; do
+            sb="$(new_sandbox g17b-$SHLABEL-syntax-$lib-$mk)"
+            [ "$mk" = yes ] && marker_json > "$sb/work/current/.plan-blocked"
+            rc=0; printf '%s' "$(pl_agent)" | env HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" "$SH" "$cp/plan-quality-gate.sh" >/dev/null 2>"$sb/err" || rc=$?
+            err="$(cat "$sb/err")"; expect "syntax-error $lib (marker=$mk) -> exit 2, never 0" 2
+        done
+    done
+    cp "$HOOKS/lib/hook-input.sh" "$HOOKS/lib/hook-output.sh" "$HOOKS/lib/paths.sh" "$cp/lib/"
+
+    # -- opt-out grep is scoped to the plan_quality section ------------------------
+    sb="$(new_sandbox g19-$SHLABEL-optout-scope)"; marker_json > "$sb/work/current/.plan-blocked"
+    printf 'plan_quality:\n  mode: block\nother_section:\n  enabled: false\n' > "$sb/proj/.yakos.yml"
+    run_hook "$SH" plan-quality-gate.sh "$sb" "$(pl_agent)"
+    expect "enabled:false in a DIFFERENT section does not disable the gate" 2
+
+    # -- bypass leaves a record ----------------------------------------------------
+    sb="$(new_sandbox g20-$SHLABEL-disable-log)"
+    run_hook "$SH" plan-quality-gate.sh "$sb" "$(pl_agent)" YAKOS_PLAN_QUALITY_DISABLE=1
+    expect "disable switch -> pass" 0
+    if grep -q "gate bypassed" "$sb/work/current/logs/plan-quality-gate.ndjson" 2>/dev/null; then ok "$SHLABEL: disable switch logged a WARN record"; else bad "$SHLABEL: disable switch left no log record"; fi
+
     # -- concurrent override + gate ----------------------------------------------
     sb="$(new_sandbox g18-$SHLABEL-concurrent)"
     marker_json > "$sb/proto"
