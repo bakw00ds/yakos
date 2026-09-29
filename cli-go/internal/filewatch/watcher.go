@@ -115,12 +115,31 @@ type Watcher struct {
 	closeCh chan struct{}
 
 	mu          sync.Mutex
-	watchedDirs map[string]bool         // absolute paths of directories currently in the OS watch set
-	pending     map[string]pendingEvent // keyed by relative path
-	timers      map[string]*time.Timer  // debounce timers, keyed by relative path
+	watchedDirs map[string]bool           // absolute paths of directories currently in the OS watch set
+	pending     map[string]pendingEvent   // keyed by relative path
+	timers      map[string]*debounceTimer // debounce timers, keyed by relative path
+
+	genSeq uint64 // monotonic debounce generation counter; guarded by mu
+
+	// afterFunc schedules f after d. Defaults to time.AfterFunc; tests
+	// inject a manually-driven clock so debounce behavior is deterministic.
+	afterFunc func(d time.Duration, f func()) stopper
 
 	once sync.Once // guards Close
 }
+
+// stopper is the subset of *time.Timer the debouncer needs.
+type stopper interface{ Stop() bool }
+
+// debounceTimer is the live timer for one path. gen identifies the most
+// recent scheduling; a flush callback whose gen no longer matches is stale
+// (its window was superseded by a later event) and must do nothing.
+type debounceTimer struct {
+	t   stopper
+	gen uint64
+}
+
+func realAfterFunc(d time.Duration, f func()) stopper { return time.AfterFunc(d, f) }
 
 // pendingEvent accumulates the set of raw fsnotify op-classes observed for a
 // path during one debounce window.  The final action is resolved at flush time
@@ -155,7 +174,8 @@ func New(root string) (*Watcher, error) {
 		closeCh:     make(chan struct{}),
 		watchedDirs: make(map[string]bool),
 		pending:     make(map[string]pendingEvent),
-		timers:      make(map[string]*time.Timer),
+		timers:      make(map[string]*debounceTimer),
+		afterFunc:   realAfterFunc,
 	}
 
 	// Recursively add all existing subdirs to the watch set.
@@ -190,7 +210,7 @@ func (w *Watcher) Close() {
 		// Cancel all pending debounce timers.
 		w.mu.Lock()
 		for _, t := range w.timers {
-			t.Stop()
+			t.t.Stop()
 		}
 		w.mu.Unlock()
 	})
@@ -316,15 +336,29 @@ func (w *Watcher) debounce(relPath string, absPath string, action ChangeAction) 
 	}
 	w.pending[relPath] = p
 
-	if t, exists := w.timers[relPath]; exists {
-		t.Reset(debounceDuration)
-		return
+	// Restart the quiet window. We stop the old timer and schedule a fresh
+	// one under a new generation instead of calling Timer.Reset: Reset on a
+	// timer whose callback already fired (but is blocked on w.mu) re-arms the
+	// same callback, which would later flush a *newer* window's pending
+	// entry early and emit a second event for one burst. The generation
+	// check below makes any superseded callback a no-op.
+	// gen comes from a watcher-wide counter so a stale callback can never
+	// match a timer created after its own entry was flushed and deleted.
+	if old, exists := w.timers[relPath]; exists {
+		old.t.Stop()
 	}
+	w.genSeq++
+	gen := w.genSeq
 
 	// Capture path for the closure; don't capture the map value directly.
 	path := relPath
-	w.timers[path] = time.AfterFunc(debounceDuration, func() {
+	w.timers[path] = &debounceTimer{gen: gen, t: w.afterFunc(debounceDuration, func() {
 		w.mu.Lock()
+		if cur, live := w.timers[path]; !live || cur.gen != gen {
+			// Superseded by a later event (or already flushed).
+			w.mu.Unlock()
+			return
+		}
 		p, ok := w.pending[path]
 		delete(w.pending, path)
 		delete(w.timers, path)
@@ -377,7 +411,7 @@ func (w *Watcher) debounce(relPath string, absPath string, action ChangeAction) 
 			// eventCh full (slow consumer); drop and warn.
 			slog.Warn("filewatch: event channel full; dropping event", "path", path)
 		}
-	})
+	})}
 }
 
 // addDirRecursive adds dir and all non-skipped subdirectories to the OS watch
