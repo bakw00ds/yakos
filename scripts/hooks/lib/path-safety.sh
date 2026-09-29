@@ -40,20 +40,33 @@ ps_lexical_normalize() {
     # unquoted `(${input})` array assignment, which would glob-expand any
     # '*'/'?' in the path against the cwd — exactly the kind of surprise
     # this hook exists to avoid).
+    #
+    # Bash 3.2 compatibility (stock macOS /bin/bash): under `set -u` an
+    # empty array expanded as "${arr[@]}" is an "unbound variable" error, so
+    # every expansion below uses the ${arr[@]+"${arr[@]}"} idiom. The hook
+    # runs by shebang (#!/usr/bin/env bash), so on a host whose first bash is
+    # 3.2 the old code crashed with exit 1 (non-blocking in Claude Code) the
+    # moment a ".." popped the segment list to empty: a fail-open.
+    #
+    # `read -d ''` slurps the WHOLE input (a plain `read -a` stops at the
+    # first newline, which used to make "api/ok.go<LF>/../../etc/x" normalize
+    # as "api/ok.go"). path-allowlist.sh also rejects a newline outright.
     local old_ifs="$IFS"
     IFS='/'
-    read -r -a parts <<< "$input"
+    read -r -d '' -a parts < <(printf '%s' "$input") || true
     IFS="$old_ifs"
     local -a out=()
     local n=0
     local seg
-    for seg in "${parts[@]}"; do
+    for seg in ${parts[@]+"${parts[@]}"}; do
         case "$seg" in
             ''|'.') continue ;;
             '..')
                 if [ "$n" -gt 0 ] && [ "${out[$((n - 1))]}" != '..' ]; then
+                    # Pop the last element. Indices stay contiguous 0..n-1
+                    # because n is tracked separately, so no re-compaction
+                    # (the old `out=("${out[@]}")` crashed on bash 3.2).
                     unset "out[$((n - 1))]"
-                    out=("${out[@]}")
                     n=$((n - 1))
                 else
                     out[n]='..'
@@ -141,11 +154,18 @@ ps_realpath() {
     done
     if [ -n "$dir" ] && [ -d "$dir" ]; then
         local resolved
-        resolved="$(cd "$dir" 2>/dev/null && pwd -P)"
+        # cd -P: a plain `cd` resolves ".." LOGICALLY after a symlink
+        # ("link/.." lands on the link's parent, not its target's), which is
+        # exactly the escape this helper exists to catch.
+        resolved="$(cd -P "$dir" 2>/dev/null && pwd -P)"
         if [ -n "$resolved" ]; then
             tail="${tail%/}"
             if [ -n "$tail" ]; then
-                printf '%s/%s' "$resolved" "$tail"
+                # The unresolved tail may still hold "." / ".." segments (a
+                # non-existent component followed by ".."); collapse them so
+                # the containment check compares a real path, not a string
+                # that merely starts with the project root ("/root/x/../..").
+                _ps_abs_normalize "$resolved/$tail"
             else
                 printf '%s' "$resolved"
             fi
@@ -154,6 +174,26 @@ ps_realpath() {
     fi
     printf '%s' "$p"
     return 0
+}
+
+# _ps_abs_normalize <absolute-path>
+#   Lexically collapse "." and ".." in an absolute path. A ".." at the root
+#   stays at the root (POSIX). No filesystem access; array-free so it is safe
+#   under bash 3.2 with `set -u`.
+_ps_abs_normalize() {
+    local rest="${1#/}" seg result=""
+    while [ -n "$rest" ]; do
+        case "$rest" in
+            */*) seg="${rest%%/*}"; rest="${rest#*/}" ;;
+            *)   seg="$rest"; rest="" ;;
+        esac
+        case "$seg" in
+            ''|'.') ;;
+            '..') result="${result%/*}" ;;
+            *) result="$result/$seg" ;;
+        esac
+    done
+    printf '%s' "${result:-/}"
 }
 
 # _ps_resolve_final_symlink <path>

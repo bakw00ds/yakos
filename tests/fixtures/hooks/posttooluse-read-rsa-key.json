@@ -1,0 +1,15 @@
+{
+  "_doc": "K-87 A-2b: a BEGIN RSA PRIVATE KEY header — private-key-marker. WARN-only, rc=0.",
+  "session_id": "fixture-posttooluse-read-rsa-key-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "id_rsa"
+  },
+  "tool_response": "-----BEGIN RSA PRIVATE KEY-----\nMIIBuwIBAAKBgQ\n",
+  "tool_use_id": "toolu_fixture_posttooluse_read_rsa_key_001"
+}

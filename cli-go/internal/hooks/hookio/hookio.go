@@ -20,11 +20,24 @@
 package hookio
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
+)
+
+// Sentinel decode errors. DecodeBytes wraps one of these (errors.Is) so the
+// hook-run entrypoint can log the SAME degraded-input reason text bash's
+// hi_init does (empty stdin / not JSON / JSON but not an object) instead of
+// an implementation-specific error string.
+var (
+	ErrEmptyStdin = errors.New("hookio: empty stdin")
+	ErrNotJSON    = errors.New("hookio: stdin did not parse as JSON")
+	ErrNotObject  = errors.New("hookio: stdin is valid JSON but not a JSON object")
 )
 
 // claudeHookEnvelope mirrors the top-level fields Claude Code always (or
@@ -66,12 +79,12 @@ func Decode(r io.Reader) (hooktype.HookInput, error) {
 // io.Reader wrapper.
 func DecodeBytes(data []byte) (hooktype.HookInput, error) {
 	if len(data) == 0 {
-		return hooktype.HookInput{}, fmt.Errorf("hookio: empty stdin")
+		return hooktype.HookInput{}, ErrEmptyStdin
 	}
 
 	var raw any
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return hooktype.HookInput{}, fmt.Errorf("hookio: stdin did not parse as JSON: %w", err)
+		return hooktype.HookInput{}, fmt.Errorf("%w: %w", ErrNotJSON, err)
 	}
 	obj, ok := raw.(map[string]any)
 	if !ok {
@@ -80,7 +93,7 @@ func DecodeBytes(data []byte) (hooktype.HookInput, error) {
 		// string, a number, or null must not silently degrade to an empty
 		// object; every hi_* accessor (and every Payload lookup here)
 		// assumes an object.
-		return hooktype.HookInput{}, fmt.Errorf("hookio: stdin is valid JSON but not a JSON object")
+		return hooktype.HookInput{}, ErrNotObject
 	}
 
 	var env claudeHookEnvelope
@@ -221,9 +234,17 @@ func JQRawOrJSON(v any) string {
 	if s, ok := v.(string); ok {
 		return s
 	}
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
+	// jq prints '<', '>' and '&' raw; encoding/json's default HTML escaping
+	// would turn "<|im_start|>" into "\u003c|im_start|\u003e" and defeat any
+	// literal match downstream. (Known residual differences from jq: object
+	// keys come out sorted rather than in input order, and floats use Go's
+	// formatting.)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
 		return fmt.Sprintf("%v", v)
 	}
-	return string(b)
+	return strings.TrimSuffix(buf.String(), "\n")
 }

@@ -1,20 +1,35 @@
 // Package pathallowlist is the Go-native Tier-0 port of
 // lib/hooks/path-allowlist.sh.
 //
-// PreToolUse hook on Edit, Write, and MultiEdit. Enforces per-agent path
-// allowlists loaded from <project>/.claude/path-allowlist.json:
+// PreToolUse hook on Edit, Write, MultiEdit and NotebookEdit. Enforces
+// per-agent path allowlists loaded from
+// <project>/.claude/path-allowlist.json:
 //
 //	{ "<agent_type>": { "allow": [glob, ...], "deny": [glob, ...] }, ... }
 //
-// Decision rule (mirrors bash original exactly):
-//   - No policy for this agent → PASS (no enforcement).
-//   - deny glob matches → BLOCK (unless bypass active).
-//   - allow list present and no glob matches → BLOCK (unless bypass active).
-//   - Otherwise → PASS.
+// Decision order (mirrors the bash original, including its ordering):
 //
-// Glob matching uses Go's filepath.Match (same fnmatch semantics as bash's
-// case statement with `**` collapsed to `*` for v0.1 parity with the bash
-// implementation's known simplification).
+//  1. No file path in tool_input, or no policy file, or no policy for this
+//     agent: PASS.
+//  2. Policy file (or the agent's entry) that exists but is not a JSON
+//     object: BLOCK (fail closed, N4.1).
+//  3. Path IS the project root, or is absolute and outside it (R2-5, N1):
+//     BLOCK.
+//  4. Path lexically escapes the root after normalization (C3), or resolves
+//     through a symlink to outside it (M7): BLOCK. Both the lexically
+//     normalized path AND the as-written path are resolved physically, so
+//     "api/link/../x" (where the OS applies ".." to link's TARGET) cannot
+//     smuggle a write out of the tree.
+//  5. deny glob matches: BLOCK. allow present (an array, including the
+//     empty array, which means deny-all) and no glob matches: BLOCK.
+//  6. Otherwise PASS.
+//
+// Every BLOCK except the structural ones (malformed policy, NUL byte,
+// unusable project root, malformed allow) honors a matching
+// work/current/hook-bypass.md entry, exactly as bash does.
+//
+// Glob semantics are bash `case` semantics (see fnmatch.go), not Go's
+// path.Match: '*' spans '/'. Matching is case-insensitive (H5b).
 package pathallowlist
 
 import (
@@ -26,24 +41,26 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookbypass"
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
 const hookName = "path-allowlist"
 
-// Policy is the allowlist/denylist for one agent type.
-type Policy struct {
-	Allow []string `json:"allow"`
-	Deny  []string `json:"deny"`
-}
-
 // Hook implements runner.Hook for path allowlist enforcement.
 type Hook struct {
-	// WorkCurrentDir is the absolute path to work/current/ for bypass checks.
+	// WorkCurrentDir is the absolute path to work/current/ for bypass checks
+	// and the NDJSON log.
 	WorkCurrentDir string
 
-	// ProjectDir is the project root where .claude/path-allowlist.json is located.
-	// When empty, uses CLAUDE_PROJECT_DIR env var.
+	// ProjectDir is a fallback project root, used ONLY when the invocation
+	// carries no environment snapshot at all (in.Env == nil — unit tests
+	// and embedders). A real `yakos hook run` always snapshots the process
+	// environment, and then CLAUDE_PROJECT_DIR is read from it exactly as
+	// the bash hook reads $CLAUDE_PROJECT_DIR: unset means "no prefix to
+	// strip, policy file at ./.claude/", NOT "use the cwd as the root".
 	ProjectDir string
 
 	// NowFn is injected for tests.
@@ -62,249 +79,377 @@ func New(workCurrentDir, projectDir string) *Hook {
 // Name returns the canonical hook name.
 func (h *Hook) Name() string { return hookName }
 
+// decision is the bundle of fields every exit path logs.
+type ctx struct {
+	h     *Hook
+	in    hooktype.HookInput
+	out   hooktype.HookOutput
+	agent string
+	now   time.Time
+}
+
 // Run executes the path allowlist enforcement.
-// Returns ExitCode=2 (block) when a deny or out-of-allow policy matches.
 func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutput, error) {
-	out := hooktype.HookOutput{ExitCode: 0}
-
-	// Only fire on Edit, Write, MultiEdit.
 	switch in.Tool {
-	case "Edit", "Write", "MultiEdit":
+	case "Edit", "Write", "MultiEdit", "NotebookEdit":
 	default:
-		return out, nil
+		return hooktype.HookOutput{}, nil
 	}
 
-	agentType := senderRole(in)
-	filePath := fileFromPayload(in)
-	logFile := h.logFile()
+	now := time.Now()
+	if h.NowFn != nil {
+		now = h.NowFn()
+	}
+	c := &ctx{h: h, in: in, agent: senderRole(in), now: now}
+	c.run()
+	return c.out, nil
+}
 
-	if filePath == "" {
-		h.appendLog(&out, logFile, "REPORT", "pass", "no file_path in tool_input",
-			map[string]any{"agent_type": agentType, "tool": in.Tool})
-		return out, nil
+func (c *ctx) run() {
+	agent := c.agent
+	rawFile := rawFileFromPayload(c.in)
+
+	// A NUL or newline anywhere in the path is refused outright (no bypass).
+	// bash's command substitution drops NUL (so it would evaluate a different
+	// path than the tool receives) and its normalizer used to see only the
+	// first line of a path with a newline; both are rejected there too. The
+	// check runs on the raw string, before the trailing-newline strip. The
+	// logged path has NUL removed, as bash's command substitution leaves it.
+	if strings.ContainsAny(rawFile, "\x00\n") {
+		c.log("BLOCK", "block", "file_path contains a NUL or newline byte",
+			map[string]any{"agent_type": agent, "file_path": strings.TrimRight(strings.ReplaceAll(rawFile, "\x00", ""), "\n")})
+		c.block(fmt.Sprintf("agent '%s' file_path contains a NUL or newline byte \u2014 refused regardless of allow/deny policy", agent))
+		return
+	}
+	file := strings.TrimRight(rawFile, "\n")
+
+	if file == "" {
+		c.log("REPORT", "pass", "no file_path in tool_input",
+			map[string]any{"agent_type": agent, "tool": c.in.Tool})
+		return
 	}
 
-	// Make path repo-relative for matching.
-	// Normalise to forward slashes so glob patterns (which always use "/")
-	// match correctly on Windows where filepath.Join produces backslashes.
-	projectDir := h.resolveProjectDir(in)
-	relFile := filepath.ToSlash(filePath)
-	projSlash := filepath.ToSlash(projectDir)
-	if projSlash != "" && strings.HasPrefix(relFile, projSlash+"/") {
-		relFile = relFile[len(projSlash)+1:]
+	// CLAUDE_PROJECT_DIR with ALL trailing slashes stripped (R2-1/R3-1),
+	// never reducing "/" itself.
+	// Separators are normalized to "/" first (a no-op on POSIX, where a
+	// backslash is a legal filename character) so a Windows project dir
+	// compares equal to the "/"-normalized tool path below.
+	cpd := filepath.ToSlash(c.projectDirEnv())
+	for cpd != "" && cpd != "/" && strings.HasSuffix(cpd, "/") {
+		cpd = strings.TrimSuffix(cpd, "/")
 	}
 
-	// Load the allowlist.
-	allowlistFile := filepath.Join(projectDir, ".claude", "path-allowlist.json")
-	policies, err := loadPolicies(allowlistFile)
-	if err != nil || policies == nil {
-		h.appendLog(&out, logFile, "WARN", "pass",
-			"no allowlist file at .claude/path-allowlist.json",
-			map[string]any{"agent_type": agentType, "file_path": relFile, "note": "no path-allowlist.json"})
-		return out, nil
+	// Project-relative form: strip "<cpd>/" if it is a literal prefix.
+	file = filepath.ToSlash(file)
+	relFile := file
+	if cpd != "" && strings.HasPrefix(file, cpd+"/") {
+		relFile = file[len(cpd)+1:]
 	}
 
-	// Look up agent policy.
-	policy, ok := policies[agentType]
+	allowlistFile := filepath.Join(orDot(cpd), ".claude", "path-allowlist.json")
+	if fi, err := os.Stat(allowlistFile); err != nil || !fi.Mode().IsRegular() {
+		// Mirrors `[ ! -f ]`: absent, dangling, or a directory.
+		c.log("WARN", "pass", "no allowlist file at .claude/path-allowlist.json",
+			map[string]any{"agent_type": agent, "file_path": relFile, "note": "no path-allowlist.json"})
+		return
+	}
+
+	// N4.1: a policy file that exists but is unreadable / not a JSON object
+	// BLOCKS instead of disabling enforcement.
+	data, err := os.ReadFile(allowlistFile) //nolint:gosec
+	var root map[string]any
+	if err == nil {
+		var v any
+		if jerr := json.Unmarshal(data, &v); jerr == nil {
+			root, _ = v.(map[string]any)
+		}
+	}
+	if root == nil {
+		c.log("BLOCK", "block", "path-allowlist.json unreadable or not a JSON object",
+			map[string]any{"agent_type": agent, "file_path": relFile,
+				"note": "path-allowlist.json exists but did not parse as a JSON object"})
+		c.block(".claude/path-allowlist.json exists but could not be parsed as a JSON object (truncated write? bad permissions? wrong top-level type?) — refusing rather than silently disabling enforcement. Fix or remove the file.")
+		return
+	}
+
+	// `.[$agent] // empty`: jq's // treats null and false as absent.
+	pv := hookio.JQAlt(root[agent])
+	if pv == nil {
+		c.log("REPORT", "pass", "no policy for agent_type",
+			map[string]any{"agent_type": agent, "file_path": relFile, "note": "no policy for agent"})
+		return
+	}
+	policy, ok := pv.(map[string]any)
 	if !ok {
-		h.appendLog(&out, logFile, "REPORT", "pass", "no policy for agent_type",
-			map[string]any{"agent_type": agentType, "file_path": relFile, "note": "no policy for agent"})
-		return out, nil
+		c.log("BLOCK", "block", "policy value for agent_type is not a JSON object",
+			map[string]any{"agent_type": agent, "file_path": relFile,
+				"note": "policy value for agent_type is not a JSON object"})
+		c.block(fmt.Sprintf(".claude/path-allowlist.json's entry for '%s' is not a JSON object ({\"allow\":[...],\"deny\":[...]}) — refusing rather than silently disabling enforcement.", agent))
+		return
 	}
 
-	// ---- check deny patterns first ----
-	for _, g := range policy.Deny {
-		if globMatch(g, relFile) {
-			if h.isBypassed(relFile) {
-				h.appendLog(&out, logFile, "WARN", "pass", "deny matched but bypass active",
-					map[string]any{"agent_type": agentType, "file_path": relFile, "matched_deny": g, "bypass": true})
-				return out, nil
+	// R2-5: the path IS the project root.
+	if cpd != "" && relFile == cpd {
+		if c.bypassed(relFile) {
+			c.log("WARN", "pass", "file_path is the project root but bypass active",
+				map[string]any{"agent_type": agent, "file_path": relFile,
+					"note": "file_path is the project root but bypass active", "bypass": true})
+			return
+		}
+		c.log("BLOCK", "block", "file_path is the project root itself",
+			map[string]any{"agent_type": agent, "file_path": relFile})
+		c.block(fmt.Sprintf("agent '%s' path '%s' IS the project root — a file cannot be written over a directory", agent, relFile))
+		return
+	}
+
+	// N1: an absolute path that survived the prefix strip is outside the
+	// project root; refuse before normalization can rewrite it.
+	if isAbs(relFile) {
+		if c.bypassed(relFile) {
+			c.log("WARN", "pass", "absolute out-of-root path but bypass active",
+				map[string]any{"agent_type": agent, "file_path": relFile,
+					"note": "absolute out-of-root path but bypass active", "bypass": true})
+			return
+		}
+		c.log("BLOCK", "block", "absolute path outside project root",
+			map[string]any{"agent_type": agent, "file_path": relFile})
+		c.block(fmt.Sprintf("agent '%s' path '%s' is absolute and outside the project root — refused regardless of allow/deny policy", agent, relFile))
+		return
+	}
+
+	// C3: lexical traversal guard.
+	asWritten := relFile
+	norm := lexicalNormalize(relFile)
+	if escapesRoot(norm) {
+		if c.bypassed(relFile) {
+			c.log("WARN", "pass", "path traversal detected but bypass active",
+				map[string]any{"agent_type": agent, "file_path": relFile, "normalized": norm,
+					"note": "traversal but bypass active", "bypass": true})
+			return
+		}
+		c.log("BLOCK", "block", "path lexically escapes project root",
+			map[string]any{"agent_type": agent, "file_path": relFile, "normalized": norm})
+		c.block(fmt.Sprintf("agent '%s' path '%s' normalizes to '%s', which escapes the project root — refused regardless of allow/deny policy", agent, relFile, norm))
+		return
+	}
+	relFile = norm
+
+	// M7: symlink-escape guard. Unconditional: fall back to the cwd when
+	// CLAUDE_PROJECT_DIR is unusable; block if nothing usable exists.
+	projectRoot := cpd
+	if !isDir(projectRoot) {
+		if wd, werr := os.Getwd(); werr == nil {
+			projectRoot = wd
+		} else {
+			projectRoot = ""
+		}
+	}
+	if !isDir(projectRoot) {
+		c.log("BLOCK", "block", "no project root available to check for symlink escapes",
+			map[string]any{"agent_type": agent, "file_path": relFile,
+				"note": "no usable project root for symlink check"})
+		c.block(fmt.Sprintf("cannot determine a project root (CLAUDE_PROJECT_DIR unset/invalid, $PWD unusable) to check '%s' for a symlink escape — refusing rather than skipping the check", relFile))
+		return
+	}
+	projectReal, pok := realpathM(projectRoot)
+	targetReal, tok := realpathM(joinSlash(filepath.ToSlash(projectRoot), relFile))
+	// Also resolve the path AS WRITTEN: the OS applies ".." to the
+	// already-resolved prefix ("link/.." is the parent of link's target),
+	// which the lexical collapse above cannot see.
+	writtenReal, wok := realpathM(joinSlash(filepath.ToSlash(projectRoot), asWritten))
+	if !pok || !tok || !wok || !isWithin(projectReal, targetReal) || !isWithin(projectReal, writtenReal) {
+		resolved := targetReal
+		if tok && wok && !isWithin(projectReal, writtenReal) {
+			resolved = writtenReal
+		}
+		if c.bypassed(relFile) {
+			c.log("WARN", "pass", "symlink escape detected but bypass active",
+				map[string]any{"agent_type": agent, "file_path": relFile, "resolved": resolved,
+					"note": "symlink escape but bypass active", "bypass": true})
+			return
+		}
+		c.log("BLOCK", "block", "path resolves outside project root via symlink",
+			map[string]any{"agent_type": agent, "file_path": relFile, "resolved": resolved, "project_root": projectReal})
+		c.block(fmt.Sprintf("agent '%s' path '%s' resolves (following symlinks) to '%s', which is outside the project root — refused regardless of allow/deny policy", agent, relFile, resolved))
+		return
+	}
+
+	// ---- deny patterns first ----
+	denyRaw := policy["deny"]
+	if denyRaw != nil {
+		arr, isArr := denyRaw.([]any)
+		if !isArr {
+			// The bash hook's `.deny // [] | .[]` silently yields NO deny
+			// patterns for a non-array deny (string/number/bool) and
+			// iterates an object's VALUES. Fail closed instead: a deny key
+			// that is present but malformed must not disable enforcement.
+			c.log("BLOCK", "block", "policy 'deny' for agent_type is not an array",
+				map[string]any{"agent_type": agent, "file_path": relFile,
+					"note": "policy 'deny' is not a JSON array"})
+			c.block(fmt.Sprintf(".claude/path-allowlist.json's 'deny' for '%s' is not an array — refusing rather than silently disabling deny enforcement.", agent))
+			return
+		}
+		for _, g := range expandGlobs(arr) {
+			if !globMatchDeny(g, relFile) {
+				continue
 			}
-			h.appendLog(&out, logFile, "BLOCK", "block", "deny pattern matched",
-				map[string]any{"agent_type": agentType, "file_path": relFile, "matched_deny": g})
-			msg := fmt.Sprintf("path-allowlist: agent '%s' is forbidden from editing '%s' (deny: %s)",
-				agentType, relFile, g)
-			out.Stderr = append(out.Stderr, []byte(msg+"\n")...)
-			out.ExitCode = 2
-			return out, nil
+			if c.bypassed(relFile) {
+				c.log("WARN", "pass", "deny matched but bypass active",
+					map[string]any{"agent_type": agent, "file_path": relFile, "matched_deny": g, "bypass": true})
+				return
+			}
+			c.log("BLOCK", "block", "deny pattern matched",
+				map[string]any{"agent_type": agent, "file_path": relFile, "matched_deny": g})
+			c.block(fmt.Sprintf("agent '%s' is forbidden from editing '%s' (deny: %s)", agent, relFile, g))
+			return
 		}
 	}
 
-	// ---- check allow patterns ----
-	if len(policy.Allow) > 0 {
+	// ---- allow patterns ----
+	//
+	// K-81: an allow key that is an ARRAY constrains the agent — including
+	// the empty array, which means deny-all (bash used to read `allow: []`
+	// as "no constraint", silently granting every path). A missing or null
+	// allow means no allow-list. Any other type is malformed: block.
+	if allowRaw := policy["allow"]; allowRaw != nil {
+		arr, isArr := allowRaw.([]any)
+		if !isArr {
+			c.log("BLOCK", "block", "policy 'allow' for agent_type is not an array",
+				map[string]any{"agent_type": agent, "file_path": relFile,
+					"note": "policy 'allow' is not a JSON array"})
+			c.block(fmt.Sprintf(".claude/path-allowlist.json's 'allow' for '%s' is not an array — refusing rather than silently disabling allow enforcement.", agent))
+			return
+		}
 		matched := ""
-		for _, g := range policy.Allow {
-			if globMatch(g, relFile) {
+		for _, g := range expandGlobs(arr) {
+			if globMatchAllow(g, relFile) {
 				matched = g
 				break
 			}
 		}
 		if matched == "" {
-			if h.isBypassed(relFile) {
-				h.appendLog(&out, logFile, "WARN", "pass", "outside allow but bypass active",
-					map[string]any{"agent_type": agentType, "file_path": relFile, "note": "outside allow", "bypass": true})
-				return out, nil
+			if c.bypassed(relFile) {
+				c.log("WARN", "pass", "outside allow but bypass active",
+					map[string]any{"agent_type": agent, "file_path": relFile, "note": "outside allow", "bypass": true})
+				return
 			}
-			h.appendLog(&out, logFile, "BLOCK", "block", "path outside agent's allow-list",
-				map[string]any{"agent_type": agentType, "file_path": relFile, "note": "outside allow"})
-			msg := fmt.Sprintf("path-allowlist: agent '%s' may only edit paths in the allow-list; '%s' is outside it",
-				agentType, relFile)
-			out.Stderr = append(out.Stderr, []byte(msg+"\n")...)
-			out.ExitCode = 2
-			return out, nil
+			note := "outside allow"
+			msg := fmt.Sprintf("agent '%s' may only edit paths in the allow-list; '%s' is outside it", agent, relFile)
+			if len(arr) == 0 {
+				note = "allow-list is empty (deny-all)"
+				msg += " (the allow-list is empty: deny-all)"
+			}
+			c.log("BLOCK", "block", "path outside agent's allow-list",
+				map[string]any{"agent_type": agent, "file_path": relFile, "note": note})
+			c.block(msg)
+			return
 		}
-		h.appendLog(&out, logFile, "REPORT", "pass", "allow matched",
-			map[string]any{"agent_type": agentType, "file_path": relFile, "matched_allow": matched})
-		return out, nil
+		c.log("REPORT", "pass", "allow matched",
+			map[string]any{"agent_type": agent, "file_path": relFile, "matched_allow": matched})
+		return
 	}
 
-	// No allow/deny match — permissive pass.
-	h.appendLog(&out, logFile, "REPORT", "pass", "no allow/deny match",
-		map[string]any{"agent_type": agentType, "file_path": relFile})
-	return out, nil
+	c.log("REPORT", "pass", "no allow/deny match",
+		map[string]any{"agent_type": agent, "file_path": relFile})
 }
 
-// ---- glob matching -----------------------------------------------------------
-
-// globMatch returns true if g matches p using filepath.Match semantics,
-// with a v0.1 simplification: '**' is collapsed to '*' (parity with bash
-// implementation).
-//
-// Both g and p are expected to use forward slashes (callers normalise via
-// filepath.ToSlash before calling). We use path.Match (not filepath.Match) so
-// the separator is always "/" regardless of the host OS, making glob patterns
-// platform-agnostic.
-func globMatch(g, p string) bool {
-	// Normalise to forward slashes so patterns defined with "/" match on
-	// Windows where paths might still contain backslashes.
-	g = filepath.ToSlash(g)
-	p = filepath.ToSlash(p)
-
-	// Direct match.
-	if ok, _ := filepath.Match(g, p); ok {
-		return true
+// expandGlobs renders each array element the way `jq -r '.[]'` does and
+// splits on newlines (bash reads the result line by line), dropping empty
+// lines.
+func expandGlobs(arr []any) []string {
+	var out []string
+	for _, el := range arr {
+		for _, line := range strings.Split(hookio.JQRawOrJSON(el), "\n") {
+			if line != "" {
+				out = append(out, line)
+			}
+		}
 	}
-	// Collapse ** → * (v0.1 simplification).
-	g2 := strings.ReplaceAll(g, "**", "*")
-	if ok, _ := filepath.Match(g2, p); ok {
-		return true
-	}
-	// Try matching just the basename.
-	base := filepath.Base(p)
-	if ok, _ := filepath.Match(g, base); ok {
-		return true
-	}
-	return false
+	return out
 }
 
-// ---- bypass ------------------------------------------------------------------
+// ---- output helpers ---------------------------------------------------------
 
-func (h *Hook) isBypassed(filePath string) bool {
-	if h.WorkCurrentDir == "" {
+// block writes "path-allowlist: <reason>" to stderr and sets exit 2, like
+// ho_block. The log record must already have been written.
+func (c *ctx) block(reason string) {
+	c.out.Stderr = append(c.out.Stderr, []byte(hookName+": "+reason+"\n")...)
+	c.out.ExitCode = 2
+}
+
+func (c *ctx) log(severity, decision, reason string, extra map[string]any) {
+	err := hooklog.Append(c.h.WorkCurrentDir, hooklog.Entry{
+		Hook:      hookName,
+		Severity:  severity,
+		Decision:  decision,
+		Reason:    reason,
+		Agent:     c.agent,
+		SessionID: hookio.JQRawOrJSON(hookio.JQAlt(c.in.Payload["session_id"])),
+		Event:     c.in.Event,
+		Extra:     extra,
+	}, c.now)
+	if err != nil {
+		c.out.Stderr = fmt.Appendf(c.out.Stderr, "%s: log: %v\n", hookName, err)
+	}
+}
+
+// bypassed mirrors ho_check_bypass "path-allowlist" <scope>.
+func (c *ctx) bypassed(scope string) bool {
+	if c.h.WorkCurrentDir == "" {
 		return false
 	}
-	bypassFile := filepath.Join(h.WorkCurrentDir, "hook-bypass.md")
-	data, err := os.ReadFile(bypassFile) //nolint:gosec
+	data, err := os.ReadFile(filepath.Join(c.h.WorkCurrentDir, "hook-bypass.md")) //nolint:gosec
 	if err != nil {
 		return false
 	}
-	content := string(data)
-	return strings.Contains(content, hookName) && strings.Contains(content, filePath)
+	return hookbypass.Check(string(data), hookName, scope)
 }
 
-// ---- log helpers -------------------------------------------------------------
-
-func (h *Hook) logFile() string {
-	if h.WorkCurrentDir == "" {
-		return ""
+// projectDirEnv is $CLAUDE_PROJECT_DIR as the bash hook sees it. See
+// Hook.ProjectDir for the in.Env == nil fallback.
+func (c *ctx) projectDirEnv() string {
+	if c.in.Env == nil {
+		return c.h.ProjectDir
 	}
-	return filepath.Join(h.WorkCurrentDir, "logs", hookName+".ndjson")
+	return c.in.Env["CLAUDE_PROJECT_DIR"]
 }
 
-func (h *Hook) appendLog(out *hooktype.HookOutput, logFile, severity, action, message string, extra map[string]any) {
-	ts := h.NowFn().UTC().Format(time.RFC3339)
-	entry := map[string]any{
-		"ts":       ts,
-		"hook":     hookName,
-		"severity": severity,
-		"action":   action,
-		"message":  message,
-	}
-	for k, v := range extra {
-		entry[k] = v
-	}
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return
-	}
-	data = append(data, '\n')
-	if logFile == "" {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil { //nolint:gosec
-		return
-	}
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec
-	if err != nil {
-		return
-	}
-	defer f.Close() //nolint:errcheck
-	_, _ = f.Write(data)
-}
+// ---- payload helpers --------------------------------------------------------
 
-// ---- payload helpers ---------------------------------------------------------
-
+// senderRole mirrors hi_sender_role: .agent_type (default "lead"), trimmed,
+// "yakos:" prefix stripped.
 func senderRole(in hooktype.HookInput) string {
-	if r, ok := in.Env["YAKOS_AGENT_ROLE"]; ok && r != "" {
-		return r
+	raw := hookio.JQRawOrJSON(hookio.JQAlt(in.Payload["agent_type"]))
+	if raw == "" {
+		raw = "lead"
 	}
-	if r := stringField(in.Payload, "agent_type"); r != "" {
-		return r
-	}
-	return "lead"
+	raw = strings.TrimSpace(raw)
+	return strings.TrimPrefix(raw, "yakos:")
 }
 
-func fileFromPayload(in hooktype.HookInput) string {
-	for _, key := range []string{"path", "file_path"} {
-		if s := stringField(in.Payload, key); s != "" {
-			return s
-		}
-	}
-	return ""
+// rawFileFromPayload mirrors hi_file_path:
+// .tool_input.file_path // .tool_input.notebook_path, rendered as `jq -r`
+// does, with command-substitution's trailing-newline stripping.
+func rawFileFromPayload(in hooktype.HookInput) string {
+	v := hookio.JQAlt(hookio.ToolInputField(in, "file_path"), hookio.ToolInputField(in, "notebook_path"))
+	return hookio.JQRawOrJSON(v)
 }
 
-func stringField(payload map[string]any, key string) string {
-	v, ok := payload[key]
-	if !ok {
-		return ""
-	}
-	s, _ := v.(string)
-	return s
+func isAbs(p string) bool {
+	return strings.HasPrefix(p, "/") || filepath.VolumeName(p) != ""
 }
 
-func (h *Hook) resolveProjectDir(in hooktype.HookInput) string {
-	if h.ProjectDir != "" {
-		return h.ProjectDir
+func isDir(p string) bool {
+	if p == "" {
+		return false
 	}
-	if d := in.Env["CLAUDE_PROJECT_DIR"]; d != "" {
-		return d
-	}
-	return in.WorkDir
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
 }
 
-// loadPolicies reads and parses .claude/path-allowlist.json.
-// Returns nil when the file is absent.
-func loadPolicies(path string) (map[string]*Policy, error) {
-	data, err := os.ReadFile(path) //nolint:gosec
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
+func orDot(p string) string {
+	if p == "" {
+		return "."
 	}
-	var policies map[string]*Policy
-	if err := json.Unmarshal(data, &policies); err != nil {
-		return nil, err
-	}
-	return policies, nil
+	return p
 }

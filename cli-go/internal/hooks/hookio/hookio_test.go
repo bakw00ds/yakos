@@ -2,6 +2,7 @@ package hookio_test
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -254,4 +255,42 @@ func repoFixtureDir(t *testing.T, parts ...string) string {
 		dir = parent
 	}
 	return filepath.Join(parts...) // let the caller's Skip handle the miss
+}
+
+func TestDecodeBytesWrapsSentinelErrors(t *testing.T) {
+	cases := map[string]error{
+		"":          hookio.ErrEmptyStdin,
+		"{nope":     hookio.ErrNotJSON,
+		"[1]":       hookio.ErrNotObject,
+		"null":      hookio.ErrNotObject,
+		"\"s\"":     hookio.ErrNotObject,
+		"42":        hookio.ErrNotObject,
+		"{\"a\":1}": nil,
+	}
+	for in, want := range cases {
+		_, err := hookio.DecodeBytes([]byte(in))
+		if want == nil {
+			if err != nil {
+				t.Errorf("%q: unexpected error %v", in, err)
+			}
+			continue
+		}
+		if !errors.Is(err, want) {
+			t.Errorf("%q: err=%v want errors.Is %v", in, err, want)
+		}
+	}
+}
+
+func TestJQRawOrJSONDoesNotHTMLEscape(t *testing.T) {
+	got := hookio.JQRawOrJSON(map[string]any{"s": "a <|im_start|> & b > c"})
+	want := "{\n  \"s\": \"a <|im_start|> & b > c\"\n}"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	if hookio.JQRawOrJSON([]any{}) != "[]" {
+		t.Fatalf("empty array = %q", hookio.JQRawOrJSON([]any{}))
+	}
+	if hookio.JQRawOrJSON(float64(5)) != "5" {
+		t.Fatalf("number = %q", hookio.JQRawOrJSON(float64(5)))
+	}
 }

@@ -1,0 +1,14 @@
+{
+  "session_id": "fixture-newline-traversal-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "api/ok.go\n/../../../etc/x",
+    "content": "x\n"
+  },
+  "tool_use_id": "toolu_fixture_newline_traversal_001"
+}

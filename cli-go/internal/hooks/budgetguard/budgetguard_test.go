@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -201,10 +202,57 @@ func TestBudgetGuard_BypassMaxToolCalls(t *testing.T) {
 	if out.ExitCode != 0 {
 		t.Errorf("exit code %d, want 0 (bypass active)", out.ExitCode)
 	}
-	rec := readLastLog(t, filepath.Join(work, "logs", "budget-guard.ndjson"))
-	if rec["severity"] != "WARN" {
-		t.Errorf("severity=%v with bypass, want WARN", rec["severity"])
+	// Like bash: the bypassed cap logs a WARN, the remaining checks still
+	// run, and the run ends with the "within all budget caps" REPORT.
+	recs := readAllLogs(t, filepath.Join(work, "logs", "budget-guard.ndjson"))
+	if len(recs) < 3 {
+		t.Fatalf("want run1 REPORT + run2 WARN + run2 REPORT, got %d records: %v", len(recs), recs)
 	}
+	warn, final := recs[len(recs)-2], recs[len(recs)-1]
+	if warn["severity"] != "WARN" || warn["bypass"] != true || warn["cap"] != "max_tool_calls" {
+		t.Errorf("bypass record=%v", warn)
+	}
+	if final["severity"] != "REPORT" || final["reason"] != "within all budget caps" {
+		t.Errorf("final record=%v", final)
+	}
+}
+
+// A bypass for ONE cap must not waive the others (bash falls through to the
+// remaining checks after a bypassed cap). Regression: the Go port used to
+// return immediately after the bypass WARN.
+func TestBudgetGuard_BypassOfOneCapDoesNotWaiveTheOthers(t *testing.T) {
+	work := t.TempDir()
+	proj := t.TempDir()
+	writeYAML(t, proj, "budget:\n  enabled: true\n  max_tool_calls: 1\n  max_repeat_same_tool: 1\n")
+	_ = os.WriteFile(filepath.Join(work, "hook-bypass.md"),
+		[]byte("## Active entries\n## bypass: b1\n**Hook:** budget\n**Scope:** cap=max_tool_calls\n"), 0644)
+	h := makeHook(work, proj)
+	h.Run(context.Background(), makeInput("Edit", nil)) //nolint:errcheck
+	out, _ := h.Run(context.Background(), makeInput("Edit", nil))
+	if out.ExitCode != 2 {
+		t.Fatalf("exit=%d want 2: max_tool_calls is bypassed but max_repeat_same_tool (2 > 1) must still block", out.ExitCode)
+	}
+	rec := readLastLog(t, filepath.Join(work, "logs", "budget-guard.ndjson"))
+	if rec["cap"] != "max_repeat_same_tool" || rec["severity"] != "BLOCK" {
+		t.Fatalf("last record=%v", rec)
+	}
+}
+
+func readAllLogs(t *testing.T, logFile string) []map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	var recs []map[string]any
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("parse %q: %v", line, err)
+		}
+		recs = append(recs, rec)
+	}
+	return recs
 }
 
 func TestBudgetGuard_PassLogged(t *testing.T) {

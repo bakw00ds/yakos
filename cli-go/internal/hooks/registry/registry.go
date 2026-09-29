@@ -11,6 +11,7 @@ package registry
 
 import (
 	"context"
+	"path/filepath"
 	"sort"
 
 	"github.com/bakw00ds/yakos/internal/hooks/autocompacttrigger"
@@ -65,6 +66,14 @@ type Config struct {
 	// StateDir is the yakOS state directory (bash's ~/.yakos-state/),
 	// used by retro-dispatch for its PID file.
 	StateDir string
+
+	// HooksDir is the physical (symlink-resolved) directory holding the
+	// framework's hook scripts — the Go analogue of bash's
+	// HOOK_DIR="$(cd "$(dirname -- "$0")" && pwd -P)". Hooks that report the
+	// absolute path of a sibling script (task-complete-dispatch's
+	// would_run) derive it from here. Empty when no framework root could be
+	// resolved.
+	HooksDir string
 }
 
 // Entry describes one registered hook.
@@ -136,6 +145,7 @@ var entries = []Entry{
 	{
 		Name:       "output-injection-scan",
 		FailClosed: false,
+		GoReady:    true,
 		New:        func(cfg Config) Hook { return outputinjectionscan.New(cfg.WorkCurrentDir, cfg.ProjectDir) },
 	},
 	{
@@ -203,14 +213,17 @@ var entries = []Entry{
 	{
 		Name:       "task-complete-dispatch",
 		FailClosed: false,
-		// GoReady stays false: would_run resolves to an absolute
-		// $HOOK_DIR-relative path on the bash side (lib/hooks/lib/
-		// hook-input.sh-adjacent HOOK_DIR resolution), which this package
-		// cannot reproduce without a framework-root resolver plumbed in
-		// from cmd/yakos/cmd_hook.go (outside this package's ownership) —
-		// see tests/run-hook-parity.sh's task-complete-dispatch divergence
-		// (log-schema, would_run field only) and the S-6 A-2a report.
-		New: func(cfg Config) Hook { return taskcompletedispatch.New(cfg.WorkCurrentDir) },
+		GoReady:    true,
+		// would_run is derived from Config.HooksDir (cmd_hook.go's
+		// resolveHooksDir, the Go analogue of bash's `pwd -P` HOOK_DIR), so
+		// the logged absolute path matches the bash script's byte for byte.
+		New: func(cfg Config) Hook {
+			h := taskcompletedispatch.New(cfg.WorkCurrentDir)
+			if cfg.HooksDir != "" {
+				h.HooksDirHint = filepath.Join(cfg.HooksDir, "per-domain")
+			}
+			return h
+		},
 	},
 	{
 		Name:       "task-dependency-gate",

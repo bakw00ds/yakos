@@ -173,7 +173,7 @@ func TestCriticalBypassedPasses(t *testing.T) {
 	findingsFile := filepath.Join(tmp, "supervisor-findings.ndjson")
 	writeFinding(t, findingsFile, ts, "CRITICAL", "issue", "halt")
 	// Write bypass file.
-	bypassContent := "## bypass:supervisor-override-test\n**Hook:** supervisor\n**Scope:** finding=" + ts + "\n"
+	bypassContent := "# Active hook bypasses\n\n## Active entries\n\n## bypass:supervisor-override-test\n\n**Hook:** supervisor\n**Scope:** finding=" + ts + "\n"
 	if err := os.WriteFile(filepath.Join(tmp, "hook-bypass.md"), []byte(bypassContent), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -306,5 +306,217 @@ func in(t *testing.T, env map[string]string) hooktype.HookInput {
 		Tool:    "TeamCreate",
 		Payload: map[string]any{},
 		Env:     env,
+	}
+}
+
+// ---- K-87 A-2b: bash parity ---------------------------------------------------
+
+func lastLog(t *testing.T, work string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(work, "logs", "supervisor-gate.ndjson"))
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &rec); err != nil {
+		t.Fatal(err)
+	}
+	return rec
+}
+
+func TestLogRecordShapeMatchesBash(t *testing.T) {
+	tmp := t.TempDir()
+	writeFinding(t, filepath.Join(tmp, "supervisor-findings.ndjson"), "2026-01-15T10:00:00Z", "CRITICAL", "r", "halt")
+	h := newHook(tmp, tmp)
+	i := in(t, nil)
+	i.Payload = map[string]any{"session_id": "s-1", "agent_type": "yakos:backend"}
+	out, _ := h.Run(context.Background(), i)
+	if out.ExitCode != 2 {
+		t.Fatalf("exit=%d", out.ExitCode)
+	}
+	rec := lastLog(t, tmp)
+	want := map[string]any{
+		"hook": "supervisor-gate", "severity": "BLOCK", "decision": "block", "reason": "supervisor CRITICAL; blocking",
+		"agent": "backend", "session_id": "s-1", "event": "PreToolUse",
+		"finding_ts": "2026-01-15T10:00:00Z", "overall": "CRITICAL", "rationale": "r", "blocked": true,
+	}
+	for k, v := range want {
+		if rec[k] != v {
+			t.Errorf("log[%s]=%v want %v", k, rec[k], v)
+		}
+	}
+	if _, has := rec["action"]; has {
+		t.Error("legacy action field must be gone")
+	}
+}
+
+func TestBlockMessageIsBashExact(t *testing.T) {
+	tmp := t.TempDir()
+	ts := "T1"
+	writeFinding(t, filepath.Join(tmp, "supervisor-findings.ndjson"), ts, "CRITICAL", "the issue", "halt")
+	out, _ := newHook(tmp, tmp).Run(context.Background(), in(t, nil))
+	want := "supervisor-gate: supervisor flagged CRITICAL on finding T1:\n" +
+		"       the issue\n" +
+		"       Recommended action: halt\n" +
+		"       To proceed:\n" +
+		"         1. Review the finding in work/current/supervisor-findings.ndjson\n" +
+		"         2. If the supervisor is wrong, add a bypass entry:\n" +
+		"            ## bypass:supervisor-override-T1\n" +
+		"            **Hook:** supervisor\n" +
+		"            **Scope:** finding=T1\n" +
+		"            (plus the standard Hook/Reason/Approved/Created/Expires fields)\n" +
+		"         3. Or set supervisor.block_on_critical: false in .yakos.yml\n" +
+		"            for passive-mode warnings only.\n" +
+		"         4. Emergency bypass for this session only:\n" +
+		"            export YAKOS_SUPERVISOR_DISABLE=1\n"
+	if string(out.Stderr) != want {
+		t.Fatalf("stderr mismatch:\n%q\nwant\n%q", out.Stderr, want)
+	}
+}
+
+func TestBypassOnlyCountsRealActiveEntries(t *testing.T) {
+	tmp := t.TempDir()
+	ts := "T2"
+	writeFinding(t, filepath.Join(tmp, "supervisor-findings.ndjson"), ts, "CRITICAL", "x", "halt")
+	// A bare mention (no "## Active entries" heading) must not bypass.
+	if err := os.WriteFile(filepath.Join(tmp, "hook-bypass.md"), []byte("**Hook:** supervisor\n**Scope:** finding=T2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := newHook(tmp, tmp).Run(context.Background(), in(t, nil)); out.ExitCode != 2 {
+		t.Fatalf("informal bypass must not count, exit=%d", out.ExitCode)
+	}
+	// Hook name must be the literal "supervisor" via substring: "supervisor-gate" also contains it.
+	body := "## Active entries\n\n## bypass:x\n\n**Hook:** supervisor-gate\n**Scope:** finding=T2\n"
+	if err := os.WriteFile(filepath.Join(tmp, "hook-bypass.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := newHook(tmp, tmp).Run(context.Background(), in(t, nil))
+	if out.ExitCode != 0 || lastLog(t, tmp)["bypass"] != true {
+		t.Fatalf("exit=%d log=%v", out.ExitCode, lastLog(t, tmp))
+	}
+}
+
+func TestBlockOnCriticalIsGrepWindowNotYAML(t *testing.T) {
+	cases := []struct {
+		name string
+		yml  string
+		exit int
+	}{
+		{"false", "supervisor:\n  block_on_critical: false\n", 0},
+		{"true", "supervisor:\n  block_on_critical: true\n", 2},
+		{"trailing comment defeats awk/tr compare", "supervisor:\n  block_on_critical: false # passive\n", 2},
+		{"falsey suffix defeats compare", "supervisor:\n  block_on_critical: falsey\n", 2},
+		{"first match wins", "supervisor:\n  block_on_critical: true\n  block_on_critical: false\n", 2},
+		{"outside the 10-line window", "supervisor:\n" + strings.Repeat("  x: 1\n", 10) + "  block_on_critical: false\n", 2},
+		{"inside the 10-line window", "supervisor:\n" + strings.Repeat("  x: 1\n", 9) + "  block_on_critical: false\n", 0},
+		{"no supervisor section", "block_on_critical: false\n", 2},
+	}
+	for _, c := range cases {
+		tmp := t.TempDir()
+		writeYAML(t, tmp, c.yml)
+		writeFinding(t, filepath.Join(tmp, "supervisor-findings.ndjson"), "T", "CRITICAL", "r", "halt")
+		out, _ := newHook(tmp, tmp).Run(context.Background(), in(t, nil))
+		if out.ExitCode != c.exit {
+			t.Errorf("%s: exit=%d want %d", c.name, out.ExitCode, c.exit)
+		}
+	}
+}
+
+func TestEnabledFalseIsGrepWindowNotYAML(t *testing.T) {
+	for name, tc := range map[string]struct {
+		yml  string
+		skip bool
+	}{
+		"disabled":                 {"supervisor:\n  enabled: false\n", true},
+		"trailing comment":         {"supervisor:\n  enabled: false # off\n", false},
+		"other section":            {"budget:\n  enabled: false\n", false},
+		"trailing whitespace":      {"supervisor:\n  enabled: false   \n", true},
+		"nested under other block": {"supervisor:\n  sub:\n    enabled: false\n", true},
+	} {
+		tmp := t.TempDir()
+		writeYAML(t, tmp, tc.yml)
+		writeFinding(t, filepath.Join(tmp, "supervisor-findings.ndjson"), "T", "CRITICAL", "r", "halt")
+		out, _ := newHook(tmp, tmp).Run(context.Background(), in(t, nil))
+		if (out.ExitCode == 0) != tc.skip {
+			t.Errorf("%s: exit=%d want skip=%v", name, out.ExitCode, tc.skip)
+		}
+	}
+}
+
+func TestLastPhysicalLineOnly(t *testing.T) {
+	tmp := t.TempDir()
+	f := filepath.Join(tmp, "supervisor-findings.ndjson")
+	writeFinding(t, f, "T", "CRITICAL", "r", "halt")
+	// A trailing blank line is the last physical line: bash's tail -n 1
+	// yields "" and the hook has nothing to decide (exit 0), it does NOT
+	// walk back to the CRITICAL line above.
+	if err := os.WriteFile(f, append(mustRead(t, f), '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := newHook(tmp, tmp).Run(context.Background(), in(t, nil)); out.ExitCode != 0 {
+		t.Fatalf("blank last line must pass, exit=%d", out.ExitCode)
+	}
+}
+
+func mustRead(t *testing.T, p string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestMalformedLastLineWarnsAndPasses(t *testing.T) {
+	for name, body := range map[string]string{
+		"truncated json": "{\"overall\":\"CRITICAL\"\n",
+		"json array":     "[]\n",
+		"json number":    "5\n",
+		"json string":    "\"x\"\n",
+		"json null":      "null\n",
+	} {
+		tmp := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tmp, "supervisor-findings.ndjson"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out, _ := newHook(tmp, tmp).Run(context.Background(), in(t, nil))
+		if out.ExitCode != 0 {
+			t.Errorf("%s: exit=%d", name, out.ExitCode)
+			continue
+		}
+		if r := lastLog(t, tmp); r["reason"] != "most-recent finding is not valid JSON; ignoring" || r["severity"] != "WARN" {
+			t.Errorf("%s: log=%v", name, r)
+		}
+	}
+}
+
+func TestFieldDefaultsAndJQAlternative(t *testing.T) {
+	tmp := t.TempDir()
+	// overall false -> jq // -> "PASS"; ts absent -> "unknown".
+	if err := os.WriteFile(filepath.Join(tmp, "supervisor-findings.ndjson"), []byte("{\"overall\":false}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := newHook(tmp, tmp).Run(context.Background(), in(t, nil))
+	rec := lastLog(t, tmp)
+	if out.ExitCode != 0 || rec["reason"] != "supervisor finding: PASS" || rec["finding_ts"] != "unknown" {
+		t.Fatalf("exit=%d log=%v", out.ExitCode, rec)
+	}
+	// numeric overall -> rendered like jq -r -> unknown overall.
+	if err := os.WriteFile(filepath.Join(tmp, "supervisor-findings.ndjson"), []byte("{\"overall\":5}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newHook(tmp, tmp).Run(context.Background(), in(t, nil)) //nolint:errcheck
+	if r := lastLog(t, tmp); r["reason"] != "unknown supervisor overall: '5'" {
+		t.Fatalf("log=%v", r)
+	}
+}
+
+func TestWarnMarkerFormat(t *testing.T) {
+	tmp := t.TempDir()
+	writeFinding(t, filepath.Join(tmp, "supervisor-findings.ndjson"), "T9", "WARN", "careful", "continue")
+	newHook(tmp, tmp).Run(context.Background(), in(t, nil)) //nolint:errcheck
+	if got := string(mustRead(t, filepath.Join(tmp, ".supervisor-gate-last-surfaced"))); got != "T9\n" {
+		t.Fatalf("marker=%q want T9\\n", got)
 	}
 }

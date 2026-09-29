@@ -19,6 +19,12 @@
 //   - YAKOS_SUPERVISOR_DISABLE=1
 //   - .yakos.yml supervisor.enabled: false
 //   - .yakos.yml supervisor.block_on_critical: false (passive mode)
+//
+// Both .yakos.yml settings are read the way the bash script reads them — a
+// grep -A 10 window after a "supervisor:" line, not a YAML parse — so
+// (for example) "block_on_critical: false # note" is NOT passive mode, on
+// either side. Log records go through internal/hooks/hooklog and the stderr
+// text is byte-identical to lib/hooks/supervisor-gate.sh.
 package supervisorgate
 
 import (
@@ -27,32 +33,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
+	"github.com/bakw00ds/yakos/internal/hooks/hookbypass"
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
 const hookName = "supervisor-gate"
 
-type yakosYMLSupervisor struct {
-	Supervisor *supervisorConfig `yaml:"supervisor"`
-}
+// ws is grep's [[:space:]] within one line.
+const ws = `[ \t\v\f\r]`
 
-type supervisorConfig struct {
-	Enabled         *bool `yaml:"enabled"`
-	BlockOnCritical *bool `yaml:"block_on_critical"`
-}
-
-// supervisorFinding is the minimal parse of the most-recent finding.
-type supervisorFinding struct {
-	Ts                string `json:"ts"`
-	Overall           string `json:"overall"`
-	Rationale         string `json:"rationale"`
-	RecommendedAction string `json:"recommended_action"`
-}
+var (
+	reSupervisorStart = regexp.MustCompile(`^` + ws + `*supervisor:`)
+	reEnabledFalse    = regexp.MustCompile(`^` + ws + `*enabled:` + ws + `*false` + ws + `*$`)
+	reBlockOnCritical = regexp.MustCompile(`^` + ws + `*block_on_critical:` + ws + `*(true|false)`)
+)
 
 // Hook implements runner.Hook for the supervisor gate.
 type Hook struct {
@@ -78,21 +78,17 @@ func New(workCurrentDir, projectDir string) *Hook {
 // Name returns the canonical hook name.
 func (h *Hook) Name() string { return hookName }
 
-// Run executes the supervisor-gate logic.
-// Returns ExitCode=2 (block) only for CRITICAL findings when block_on_critical
-// is true and no bypass is present.
+// Run executes the supervisor-gate logic. ExitCode 2 only for a CRITICAL
+// finding when block_on_critical is not "false" and no bypass matches.
 func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutput, error) {
 	out := hooktype.HookOutput{ExitCode: 0}
 
-	// Emergency bypass.
 	if in.Env["YAKOS_SUPERVISOR_DISABLE"] == "1" {
 		return out, nil
 	}
 
-	// Config-level disable.
-	projectDir := h.resolveProjectDir(in)
-	cfg := h.loadConfig(projectDir)
-	if cfg != nil && cfg.Enabled != nil && !*cfg.Enabled {
+	yml := h.readYML(in)
+	if windowHasLine(yml, reEnabledFalse, 10) {
 		return out, nil
 	}
 
@@ -101,95 +97,88 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	findingsFile := filepath.Join(h.WorkCurrentDir, "supervisor-findings.ndjson")
-	if _, err := os.Stat(findingsFile); os.IsNotExist(err) {
+	if fi, err := os.Stat(findingsFile); err != nil || !fi.Mode().IsRegular() {
+		return out, nil
+	}
+	last := tailLine(findingsFile)
+	if last == "" {
 		return out, nil
 	}
 
-	// Read the most-recent finding.
-	last, err := lastFinding(findingsFile)
-	if err != nil || last == nil {
-		return out, nil
+	// `jq empty` accepts any JSON value; the field reads below only make
+	// sense on an object. The bash script crashes (rc=5 under set -e) on a
+	// valid-JSON non-object such as [] or 5; Go treats it as the same
+	// "not a usable finding" case as invalid JSON and passes with a WARN.
+	var parsed any
+	obj, isObj := map[string]any(nil), false
+	if err := json.Unmarshal([]byte(last), &parsed); err == nil {
+		obj, isObj = parsed.(map[string]any)
 	}
-	if !isValidJSON(findingsFile, last) {
-		h.appendLog(&out, "WARN", "pass",
-			"most-recent finding is not valid JSON; ignoring", map[string]any{})
+	if !isObj {
+		h.log(&out, in, "WARN", "pass", "most-recent finding is not valid JSON; ignoring", map[string]any{})
 		return out, nil
 	}
 
-	overall := last.Overall
-	if overall == "" {
-		overall = "PASS"
+	field := func(key, def string) string {
+		v := hookio.JQAlt(obj[key])
+		if v == nil {
+			return def
+		}
+		return strings.TrimRight(hookio.JQRawOrJSON(v), "\n")
 	}
-	rationale := last.Rationale
-	if rationale == "" {
-		rationale = "(no rationale)"
-	}
-	recommended := last.RecommendedAction
-	if recommended == "" {
-		recommended = "continue"
-	}
-	findingTS := last.Ts
-	if findingTS == "" {
-		findingTS = "unknown"
-	}
+	overall := field("overall", "PASS")
+	rationale := field("rationale", "(no rationale)")
+	findingTS := field("ts", "unknown")
+	recommended := field("recommended_action", "continue")
 
-	// Idempotency marker.
 	markerFile := filepath.Join(h.WorkCurrentDir, ".supervisor-gate-last-surfaced")
-	lastSurfaced := h.readMarker(markerFile)
+	lastSurfaced := ""
+	if data, err := os.ReadFile(markerFile); err == nil { //nolint:gosec
+		lastSurfaced = strings.TrimRight(string(data), "\n")
+	}
 
 	switch overall {
 	case "PASS":
-		h.appendLog(&out, "REPORT", "pass", "supervisor finding: PASS",
+		h.log(&out, in, "REPORT", "pass", "supervisor finding: PASS",
 			map[string]any{"finding_ts": findingTS, "overall": "PASS"})
 		return out, nil
 
 	case "WARN":
 		if findingTS != lastSurfaced {
-			h.appendLog(&out, "WARN", "pass",
-				"supervisor WARN: "+rationale,
+			h.log(&out, in, "WARN", "pass", "supervisor WARN: "+rationale,
 				map[string]any{"finding_ts": findingTS, "overall": "WARN", "rationale": rationale})
 			out.Stderr = fmt.Appendf(out.Stderr,
 				"supervisor-gate: WARN from supervisor (finding %s):\n  %s\n  Recommended action: %s\n  (passing through; this is informational only)\n",
 				findingTS, rationale, recommended)
-			h.writeMarker(markerFile, findingTS)
+			writeMarker(markerFile, findingTS)
 		}
 		return out, nil
 
 	case "CRITICAL":
-		// Check bypass.
-		bypassScope := "finding=" + findingTS
-		if h.isBypassed(bypassScope) {
-			h.appendLog(&out, "WARN", "pass",
-				"supervisor CRITICAL but bypass active for "+bypassScope,
+		blockOnCritical := blockOnCriticalFromYML(yml) != "false"
+
+		if h.bypassed("finding=" + findingTS) {
+			h.log(&out, in, "WARN", "pass", "supervisor CRITICAL but bypass active for finding="+findingTS,
 				map[string]any{"finding_ts": findingTS, "overall": "CRITICAL", "rationale": rationale, "bypass": true})
 			return out, nil
 		}
 
-		// Check block_on_critical.
-		blockOnCritical := true
-		if cfg != nil && cfg.BlockOnCritical != nil {
-			blockOnCritical = *cfg.BlockOnCritical
-		}
-
 		if !blockOnCritical {
-			// Passive mode: surface but don't block.
 			if findingTS != lastSurfaced {
 				out.Stderr = fmt.Appendf(out.Stderr,
 					"supervisor-gate: CRITICAL from supervisor (finding %s):\n  %s\n  Recommended action: %s\n  (passive mode: supervisor.block_on_critical=false; passing through)\n",
 					findingTS, rationale, recommended)
-				h.writeMarker(markerFile, findingTS)
+				writeMarker(markerFile, findingTS)
 			}
-			h.appendLog(&out, "WARN", "pass",
-				"supervisor CRITICAL but block_on_critical=false; surfaced only",
+			h.log(&out, in, "WARN", "pass", "supervisor CRITICAL but block_on_critical=false; surfaced only",
 				map[string]any{"finding_ts": findingTS, "overall": "CRITICAL", "rationale": rationale, "blocked": false})
 			return out, nil
 		}
 
-		// Active mode: block.
-		h.appendLog(&out, "BLOCK", "block", "supervisor CRITICAL; blocking",
+		h.log(&out, in, "BLOCK", "block", "supervisor CRITICAL; blocking",
 			map[string]any{"finding_ts": findingTS, "overall": "CRITICAL", "rationale": rationale, "blocked": true})
-		msg := fmt.Sprintf(
-			"supervisor flagged CRITICAL on finding %s:\n"+
+		out.Stderr = fmt.Appendf(out.Stderr,
+			"supervisor-gate: supervisor flagged CRITICAL on finding %s:\n"+
 				"       %s\n"+
 				"       Recommended action: %s\n"+
 				"       To proceed:\n"+
@@ -202,143 +191,154 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 				"         3. Or set supervisor.block_on_critical: false in .yakos.yml\n"+
 				"            for passive-mode warnings only.\n"+
 				"         4. Emergency bypass for this session only:\n"+
-				"            export YAKOS_SUPERVISOR_DISABLE=1",
+				"            export YAKOS_SUPERVISOR_DISABLE=1\n",
 			findingTS, rationale, recommended, findingTS, findingTS)
-		out.Stderr = append(out.Stderr, []byte(msg+"\n")...)
 		out.ExitCode = 2
 		return out, nil
 
 	default:
-		h.appendLog(&out, "WARN", "pass",
-			fmt.Sprintf("unknown supervisor overall: '%s'", overall), map[string]any{})
+		h.log(&out, in, "WARN", "pass", fmt.Sprintf("unknown supervisor overall: '%s'", overall), map[string]any{})
 		return out, nil
 	}
 }
 
-// ---- finding reader ----------------------------------------------------------
+// ---- bash-faithful readers ----------------------------------------------------
 
-// lastFinding returns the last non-empty finding from the findings file.
-func lastFinding(path string) (*supervisorFinding, error) {
+// tailLine mirrors `tail -n 1 file` inside a command substitution: the last
+// physical line (an empty last line means "nothing to decide"), trailing
+// newlines stripped, NUL bytes dropped.
+func tailLine(path string) string {
 	data, err := os.ReadFile(path) //nolint:gosec
-	if err != nil {
-		return nil, err
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	// Walk backwards to find the last non-empty line.
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" {
-			continue
-		}
-		var f supervisorFinding
-		if err := json.Unmarshal([]byte(line), &f); err != nil {
-			// Return something with an empty Overall so the caller marks invalid JSON.
-			return &supervisorFinding{}, nil
-		}
-		return &f, nil
-	}
-	return nil, nil
-}
-
-// isValidJSON checks whether the last line of the file is valid JSON.
-// Called after lastFinding to decide whether to emit the "invalid JSON" log.
-func isValidJSON(path string, f *supervisorFinding) bool {
-	// If Overall and Ts are both empty, it was an unmarshal failure.
-	return f.Overall != "" || f.Ts != ""
-}
-
-// ---- bypass check -----------------------------------------------------------
-
-func (h *Hook) isBypassed(scope string) bool {
-	if h.WorkCurrentDir == "" {
-		return false
-	}
-	bypassFile := filepath.Join(h.WorkCurrentDir, "hook-bypass.md")
-	data, err := os.ReadFile(bypassFile) //nolint:gosec
-	if err != nil {
-		return false
-	}
-	content := string(data)
-	return strings.Contains(content, "supervisor") && strings.Contains(content, scope)
-}
-
-// ---- idempotency marker -----------------------------------------------------
-
-func (h *Hook) readMarker(markerFile string) string {
-	data, err := os.ReadFile(markerFile) //nolint:gosec
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	lines := strings.Split(string(data), "\n")
+	if n := len(lines); n > 1 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	return strings.ReplaceAll(lines[len(lines)-1], "\x00", "")
 }
 
-func (h *Hook) writeMarker(markerFile, ts string) {
-	_ = os.MkdirAll(filepath.Dir(markerFile), 0755) //nolint:gosec
-	tmp := markerFile + ".tmp"
-	_ = os.WriteFile(tmp, []byte(ts+"\n"), 0644) //nolint:gosec
-	_ = os.Rename(tmp, markerFile)
+// windowLines returns, in file order and without repeats, the lines
+// `grep -A after <start>` would print.
+func windowLines(content string, after int) []string {
+	lines := strings.Split(content, "\n")
+	emit := make([]bool, len(lines))
+	for i, l := range lines {
+		if reSupervisorStart.MatchString(l) {
+			for j := i; j <= i+after && j < len(lines); j++ {
+				emit[j] = true
+			}
+		}
+	}
+	var out []string
+	for i, l := range lines {
+		if emit[i] {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
-// ---- config helpers ---------------------------------------------------------
+// windowHasLine mirrors `grep -A n '^[[:space:]]*supervisor:' | grep -q re`.
+func windowHasLine(content string, re *regexp.Regexp, after int) bool {
+	for _, l := range windowLines(content, after) {
+		if re.MatchString(l) {
+			return true
+		}
+	}
+	return false
+}
 
-func (h *Hook) loadConfig(projectDir string) *supervisorConfig {
+// blockOnCriticalFromYML mirrors
+//
+//	grep -A 10 supervisor: | grep -E '^ws*block_on_critical:ws*(true|false)' \
+//	  | head -1 | awk -F: '{print $2}' | tr -d '[:space:]'
+//
+// including its quirks: the value is field 2 of the first matching line
+// split on ':' with ALL whitespace removed, so "false # note" yields
+// "false#note" (not "false"). Returns "" when there is no match.
+func blockOnCriticalFromYML(content string) string {
+	for _, l := range windowLines(content, 10) {
+		if !reBlockOnCritical.MatchString(l) {
+			continue
+		}
+		fields := strings.Split(l, ":")
+		if len(fields) < 2 {
+			return ""
+		}
+		return strings.Map(func(r rune) rune {
+			switch r {
+			case ' ', '\t', '\n', '\v', '\f', '\r':
+				return -1
+			}
+			return r
+		}, fields[1])
+	}
+	return ""
+}
+
+func (h *Hook) readYML(in hooktype.HookInput) string {
+	projectDir := h.ProjectDir
 	if projectDir == "" {
-		return nil
+		projectDir = in.Env["CLAUDE_PROJECT_DIR"]
+	}
+	if projectDir == "" {
+		projectDir = in.WorkDir
+	}
+	if projectDir == "" {
+		return ""
 	}
 	data, err := os.ReadFile(filepath.Join(projectDir, ".yakos.yml")) //nolint:gosec
 	if err != nil {
-		return nil
+		return ""
 	}
-	var doc yakosYMLSupervisor
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil
-	}
-	return doc.Supervisor
+	return string(data)
 }
 
-// ---- resolution helpers -----------------------------------------------------
-
-func (h *Hook) resolveProjectDir(in hooktype.HookInput) string {
-	if h.ProjectDir != "" {
-		return h.ProjectDir
-	}
-	if d := in.Env["CLAUDE_PROJECT_DIR"]; d != "" {
-		return d
-	}
-	return in.WorkDir
-}
-
-// ---- log helper -------------------------------------------------------------
-
-func (h *Hook) appendLog(out *hooktype.HookOutput, severity, action, message string, extra map[string]any) {
+// bypassed mirrors ho_check_bypass "supervisor" <scope> — note the probe
+// hook name is the literal "supervisor", not "supervisor-gate".
+func (h *Hook) bypassed(scope string) bool {
 	if h.WorkCurrentDir == "" {
-		return
+		return false
 	}
-	logFile := filepath.Join(h.WorkCurrentDir, "logs", hookName+".ndjson")
-	ts := h.NowFn().UTC().Format(time.RFC3339)
-	entry := map[string]any{
-		"ts":       ts,
-		"hook":     hookName,
-		"severity": severity,
-		"action":   action,
-		"message":  message,
-	}
-	for k, v := range extra {
-		entry[k] = v
-	}
-	data, err := json.Marshal(entry)
+	data, err := os.ReadFile(filepath.Join(h.WorkCurrentDir, "hook-bypass.md")) //nolint:gosec
 	if err != nil {
-		return
+		return false
 	}
-	data = append(data, '\n')
-	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil { //nolint:gosec
-		return
+	return hookbypass.Check(string(data), "supervisor", scope)
+}
+
+func writeMarker(markerFile, ts string) {
+	// bash: printf '%s\n' "$ts" > "$marker" 2>/dev/null || true
+	_ = os.WriteFile(markerFile, []byte(ts+"\n"), 0o644) //nolint:gosec
+}
+
+func (h *Hook) log(out *hooktype.HookOutput, in hooktype.HookInput, severity, decision, reason string, extra map[string]any) {
+	now := time.Now()
+	if h.NowFn != nil {
+		now = h.NowFn()
 	}
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec
+	err := hooklog.Append(h.WorkCurrentDir, hooklog.Entry{
+		Hook:      hookName,
+		Severity:  severity,
+		Decision:  decision,
+		Reason:    reason,
+		Agent:     senderRole(in),
+		SessionID: hookio.JQRawOrJSON(hookio.JQAlt(in.Payload["session_id"])),
+		Event:     in.Event,
+		Extra:     extra,
+	}, now)
 	if err != nil {
-		out.Stderr = fmt.Appendf(out.Stderr, "%s: open log: %v\n", hookName, err)
-		return
+		out.Stderr = fmt.Appendf(out.Stderr, "%s: log: %v\n", hookName, err)
 	}
-	defer func() { _ = f.Close() }()
-	_, _ = f.Write(data)
+}
+
+// senderRole mirrors hi_sender_role.
+func senderRole(in hooktype.HookInput) string {
+	raw := hookio.JQRawOrJSON(hookio.JQAlt(in.Payload["agent_type"]))
+	if raw == "" {
+		raw = "lead"
+	}
+	return strings.TrimPrefix(strings.TrimSpace(raw), "yakos:")
 }
