@@ -262,30 +262,37 @@ func makeConsoleWSFunc(bus *wsbus.Bus, pm *PresenceManager, networked bool) webs
 		//     resolved from the session store before the upgrade.  This closes
 		//     the same forgeable-OperatorID finding as the cert path.
 		//
-		// (c) Fallthrough to hello.OperatorID: on the loopback path (networked=false)
-		//     or when neither cert nor session is present (should not reach here
-		//     in production — requireAuthOrRedirect rejects unauthenticated
-		//     requests upstream).
+		// (c) Bearer-only (K-98, K-86 review r1 finding 4): a connection that
+		//     carries neither a verified cert nor an authenticated session has
+		//     NO server-derived operator ID.  hello.OperatorID is attacker-
+		//     controlled there, so it is discarded (never used as the
+		//     connection's identity or for owner-scoped filtering); the
+		//     connection resolves to the unresolved viewer, which sees no
+		//     owner-scoped event.  A differing claim is logged.
 		//
 		// On the loopback path (networked=false) hello.OperatorID is used as-is
 		// (cooperative attribution; loopback = trusted network boundary).
 		if networked {
+			claimed := hello.OperatorID
+			serverID := ""
 			// (a) Cert CN — highest priority.
 			if tlsState := conn.Request().TLS; tlsState != nil {
 				if cn, ok := netid.CNFromTLS(tlsState); ok && cn != "" {
-					hello.OperatorID = cn
-					goto identityResolved
+					serverID = cn
 				}
 			}
-			// (b) Session identity — server-side authoritative OperatorID.
-			// sessionAuthedKey is set by consoleAuthSubprotocolOrSession only when
-			// the session lookup succeeded; IdentityFrom returns AuthMethodSession.
-			if conn.Request().Context().Value(sessionAuthedKey) == true {
+			// (b) Authenticated identity stamped by the resolver (session, or a
+			//     cert resolved upstream of a TLS-terminating hop).
+			if serverID == "" {
 				if id := netid.IdentityFrom(conn.Request().Context()); id.Authenticated && id.OperatorID != "" {
-					hello.OperatorID = id.OperatorID
+					serverID = id.OperatorID
 				}
 			}
-		identityResolved:
+			if claimed != "" && claimed != serverID {
+				slog.Warn("consoleui: WS hello operator_id ignored; using server-derived identity",
+					"claimed", claimed, "resolved", serverID, "remote", conn.Request().RemoteAddr)
+			}
+			hello.OperatorID = serverID
 		}
 
 		// ---- 2. Presence join -----------------------------------------------
