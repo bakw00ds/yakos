@@ -84,15 +84,19 @@ _retro_settings_get() {
 # falls back to 10, matching cycle-counter.sh. Base 10 (10#) so "010" is not
 # octal.
 _retro_cycle_length() {
-    local v
-    v="$(_retro_settings_get .retro.cycle_length 10)"
+    local v raw
+    raw="$(_retro_settings_get .retro.cycle_length 10)"
+    v="$raw"
     case "$v" in
-        ''|*[!0-9]*) printf '10\n'; return ;;
+        ''|*[!0-9]*) : ;;
+        *)
+            if [ "${#v}" -le 6 ]; then
+                v=$((10#$v))
+                if [ "$v" -ge 1 ] && [ "$v" -le 100000 ]; then printf '%s\n' "$v"; return; fi
+            fi
+            ;;
     esac
-    if [ "${#v}" -le 6 ]; then
-        v=$((10#$v))
-        if [ "$v" -ge 1 ] && [ "$v" -le 100000 ]; then printf '%s\n' "$v"; return; fi
-    fi
+    printf 'WARN: ignoring invalid retro.cycle_length %s (need an integer 1..100000); using default 10\n' "$raw" >&2
     printf '10\n'
 }
 
