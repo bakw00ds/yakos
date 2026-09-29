@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/bakw00ds/yakos/internal/agent"
+	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/memory"
 	"github.com/bakw00ds/yakos/internal/plugin"
 	"github.com/bakw00ds/yakos/internal/retro"
@@ -241,80 +242,39 @@ func runAgent(yakosRoot, cmdName string, args []string) {
 	}
 }
 
+// Ordering note (applies to every function converted in this file): like the
+// cmd_diag.go conversions, cliflag.Set.Parse separates recognized flags from
+// unrecognized tokens before either is acted on. A missing-value error is
+// therefore reported before an unknown-flag / extra-positional error that
+// appeared earlier in argv, and -h/--help wins over both. The exit code and
+// the text of each individual message are unchanged. See runValidate in
+// cmd_diag.go for the general rule.
+
 // parseAgentNewFlags parses flags for `yakos agent new`.
 func parseAgentNewFlags(cfg *agent.Config, args []string) {
-	i := 0
-	for i < len(args) {
-		arg := args[i]
+	help := false
+	fs := &cliflag.Set{Cmd: "agent new", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--runtime", Kind: cliflag.String, Str: &cfg.Runtime, ValueDesc: "an id"},
+		{Name: "--project", Kind: cliflag.String, Str: &cfg.Project, ValueDesc: "a path"},
+		{Name: "--extends", Kind: cliflag.String, Str: &cfg.Extends, ValueDesc: "an id"},
+		{Name: "--role", Kind: cliflag.String, Str: &cfg.Role, ValueDesc: "a value"},
+		{Name: "--domain", Kind: cliflag.String, Str: &cfg.Domain, ValueDesc: "a value"},
+		{Name: "--model", Kind: cliflag.String, Str: &cfg.Model, ValueDesc: "a value"},
+		{Name: "--tools", Kind: cliflag.String, Str: &cfg.Tools, ValueDesc: "a value"},
+		{Name: "--force", Kind: cliflag.Bool, Bool: &cfg.Force},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		agent.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
 		switch {
-		case arg == "-h" || arg == "--help":
-			agent.PrintHelp(os.Stdout)
-			os.Exit(0)
-		case arg == "--runtime":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "agent new: --runtime requires an id")
-				os.Exit(1)
-			}
-			cfg.Runtime = args[i]
-		case len(arg) > 10 && arg[:10] == "--runtime=":
-			cfg.Runtime = arg[10:]
-		case arg == "--project":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "agent new: --project requires a path")
-				os.Exit(1)
-			}
-			cfg.Project = args[i]
-		case len(arg) > 10 && arg[:10] == "--project=":
-			cfg.Project = arg[10:]
-		case arg == "--extends":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "agent new: --extends requires an id")
-				os.Exit(1)
-			}
-			cfg.Extends = args[i]
-		case len(arg) > 10 && arg[:10] == "--extends=":
-			cfg.Extends = arg[10:]
-		case arg == "--role":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "agent new: --role requires a value")
-				os.Exit(1)
-			}
-			cfg.Role = args[i]
-		case len(arg) > 7 && arg[:7] == "--role=":
-			cfg.Role = arg[7:]
-		case arg == "--domain":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "agent new: --domain requires a value")
-				os.Exit(1)
-			}
-			cfg.Domain = args[i]
-		case len(arg) > 9 && arg[:9] == "--domain=":
-			cfg.Domain = arg[9:]
-		case arg == "--model":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "agent new: --model requires a value")
-				os.Exit(1)
-			}
-			cfg.Model = args[i]
-		case len(arg) > 8 && arg[:8] == "--model=":
-			cfg.Model = arg[8:]
-		case arg == "--tools":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "agent new: --tools requires a value")
-				os.Exit(1)
-			}
-			cfg.Tools = args[i]
-		case len(arg) > 8 && arg[:8] == "--tools=":
-			cfg.Tools = arg[8:]
-		case arg == "--force":
-			cfg.Force = true
 		case len(arg) > 0 && arg[0] == '-':
 			fmt.Fprintf(os.Stderr, "agent new: unknown flag %q\n", arg)
 			os.Exit(1)
@@ -326,7 +286,6 @@ func parseAgentNewFlags(cfg *agent.Config, args []string) {
 				os.Exit(1)
 			}
 		}
-		i++
 	}
 	if cfg.Name == "" {
 		agent.PrintHelp(os.Stderr)
@@ -337,11 +296,21 @@ func parseAgentNewFlags(cfg *agent.Config, args []string) {
 
 // parseAgentLintFlags parses flags for `yakos agent lint`.
 func parseAgentLintFlags(cfg *agent.Config, args []string) {
-	for _, arg := range args {
+	help := false
+	fs := &cliflag.Set{Cmd: "agent lint", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		agent.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
 		switch {
-		case arg == "-h" || arg == "--help":
-			agent.PrintHelp(os.Stdout)
-			os.Exit(0)
 		case len(arg) > 0 && arg[0] == '-':
 			fmt.Fprintf(os.Stderr, "agent lint: unknown flag %q\n", arg)
 			os.Exit(1)
@@ -358,21 +327,22 @@ func parseAgentLintFlags(cfg *agent.Config, args []string) {
 
 // parseAgentDiffFlags parses flags for `yakos agent diff`.
 func parseAgentDiffFlags(cfg *agent.Config, args []string) {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
+	help := false
+	fs := &cliflag.Set{Cmd: "agent diff", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--project", Kind: cliflag.String, Str: &cfg.Project, ValueDesc: "a path"},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		agent.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
 		switch {
-		case arg == "-h" || arg == "--help":
-			agent.PrintHelp(os.Stdout)
-			os.Exit(0)
-		case arg == "--project":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "agent diff: --project requires a path")
-				os.Exit(1)
-			}
-			cfg.Project = args[i]
-		case len(arg) > 10 && arg[:10] == "--project=":
-			cfg.Project = arg[10:]
 		case len(arg) > 0 && arg[0] == '-':
 			fmt.Fprintf(os.Stderr, "agent diff: unknown flag %q\n", arg)
 			os.Exit(1)
@@ -393,31 +363,51 @@ func parseAgentDiffFlags(cfg *agent.Config, args []string) {
 
 // parseAgentListFlags parses flags for `yakos agent list`.
 func parseAgentListFlags(cfg *agent.Config, args []string) {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "-h" || arg == "--help":
-			agent.PrintHelp(os.Stdout)
-			os.Exit(0)
-		case arg == "--json":
-			cfg.JSON = true
-		case arg == "--project":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "agent list: --project requires a path")
-				os.Exit(1)
-			}
-			cfg.Project = args[i]
-		case len(arg) > 10 && arg[:10] == "--project=":
-			cfg.Project = arg[10:]
-		case len(arg) > 0 && arg[0] == '-':
+	help := false
+	fs := &cliflag.Set{Cmd: "agent list", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--json", Kind: cliflag.Bool, Bool: &cfg.JSON},
+		{Name: "--project", Kind: cliflag.String, Str: &cfg.Project, ValueDesc: "a path"},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		agent.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
+		if len(arg) > 0 && arg[0] == '-' {
 			fmt.Fprintf(os.Stderr, "agent list: unknown flag %q\n", arg)
-			os.Exit(1)
-		default:
+		} else {
 			fmt.Fprintf(os.Stderr, "agent list: unexpected argument %q\n", arg)
-			os.Exit(1)
+		}
+		os.Exit(1)
+	}
+}
+
+// agentDocsFormatForms replays args the way cliflag consumed them and
+// reports, for each --format occurrence in order, whether it was the
+// "--format=<v>" spelling (true) or "--format <v>" (false). The old
+// hand-rolled parser worded the invalid-format error differently for the
+// two spellings, and cliflag does not expose which spelling matched.
+func agentDocsFormatForms(args []string) []bool {
+	var forms []bool
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--format":
+			forms = append(forms, false)
+			i++
+		case a == "--project" || a == "--out":
+			i++
+		case len(a) > 9 && a[:9] == "--format=":
+			forms = append(forms, true)
 		}
 	}
+	return forms
 }
 
 // runAgentDocs implements `yakos agent docs [--format md|html]`.
@@ -426,63 +416,49 @@ func runAgentDocs(yakosRoot string, args []string) {
 	project := ""
 	outPath := ""
 
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "-h" || arg == "--help":
-			_, _ = fmt.Fprint(os.Stdout, "yakos agent docs [--format md|html] [--project <path>] [--out <file>]\n\n")
-			_, _ = fmt.Fprint(os.Stdout, "Render an auto-generated agent reference page from frontmatter.\n")
-			os.Exit(0)
-		case arg == "--format":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "agent docs: --format requires md or html")
-				os.Exit(1)
-			}
-			switch args[i] {
-			case "md", "markdown":
-				format = agent.DocsFormatMD
-			case "html":
-				format = agent.DocsFormatHTML
-			default:
-				fmt.Fprintf(os.Stderr, "agent docs: unknown format %q (md or html)\n", args[i])
-				os.Exit(1)
-			}
-		case len(arg) > 9 && arg[:9] == "--format=":
-			switch arg[9:] {
-			case "md", "markdown":
-				format = agent.DocsFormatMD
-			case "html":
-				format = agent.DocsFormatHTML
-			default:
-				fmt.Fprintf(os.Stderr, "agent docs: unknown format %q\n", arg[9:])
-				os.Exit(1)
-			}
-		case arg == "--project":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "agent docs: --project requires a path")
-				os.Exit(1)
-			}
-			project = args[i]
-		case len(arg) > 10 && arg[:10] == "--project=":
-			project = arg[10:]
-		case arg == "--out":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "agent docs: --out requires a path")
-				os.Exit(1)
-			}
-			outPath = args[i]
-		case len(arg) > 6 && arg[:6] == "--out=":
-			outPath = arg[6:]
-		case len(arg) > 0 && arg[0] == '-':
-			fmt.Fprintf(os.Stderr, "agent docs: unknown flag %q\n", arg)
-			os.Exit(1)
+	help := false
+	var formats []string
+	fs := &cliflag.Set{Cmd: "agent docs", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--format", Kind: cliflag.StringSlice, Slice: &formats, ValueDesc: "md or html"},
+		{Name: "--project", Kind: cliflag.String, Str: &project, ValueDesc: "a path"},
+		{Name: "--out", Kind: cliflag.String, Str: &outPath, ValueDesc: "a path"},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		_, _ = fmt.Fprint(os.Stdout, "yakos agent docs [--format md|html] [--project <path>] [--out <file>]\n\n")
+		_, _ = fmt.Fprint(os.Stdout, "Render an auto-generated agent reference page from frontmatter.\n")
+		os.Exit(0)
+	}
+	// Every --format occurrence is validated (first invalid one exits); the
+	// last valid one wins. The two spellings keep their historical wording.
+	forms := agentDocsFormatForms(args)
+	for n, f := range formats {
+		switch f {
+		case "md", "markdown":
+			format = agent.DocsFormatMD
+		case "html":
+			format = agent.DocsFormatHTML
 		default:
-			fmt.Fprintf(os.Stderr, "agent docs: unexpected argument %q\n", arg)
+			if n < len(forms) && forms[n] {
+				fmt.Fprintf(os.Stderr, "agent docs: unknown format %q\n", f)
+			} else {
+				fmt.Fprintf(os.Stderr, "agent docs: unknown format %q (md or html)\n", f)
+			}
 			os.Exit(1)
 		}
+	}
+	for _, arg := range rest {
+		if len(arg) > 0 && arg[0] == '-' {
+			fmt.Fprintf(os.Stderr, "agent docs: unknown flag %q\n", arg)
+		} else {
+			fmt.Fprintf(os.Stderr, "agent docs: unexpected argument %q\n", arg)
+		}
+		os.Exit(1)
 	}
 
 	var w = os.Stdout
@@ -560,23 +536,23 @@ func runPlugin(args []string) {
 		// No extra args needed.
 
 	case "install":
-		for i := 0; i < len(rest); i++ {
-			arg := rest[i]
+		help := false
+		fs := &cliflag.Set{Cmd: "plugin install", Specs: []cliflag.Spec{
+			{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+			{Name: "--force", Kind: cliflag.Bool, Bool: &cfg.Force},
+			{Name: "--id", Kind: cliflag.String, Str: &cfg.ID, ValueDesc: "a value"},
+		}}
+		pos, err := fs.Parse(rest)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if help {
+			plugin.PrintHelp(os.Stdout)
+			os.Exit(0)
+		}
+		for _, arg := range pos {
 			switch {
-			case arg == "-h" || arg == "--help":
-				plugin.PrintHelp(os.Stdout)
-				os.Exit(0)
-			case arg == "--force":
-				cfg.Force = true
-			case arg == "--id":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "plugin install: --id requires a value")
-					os.Exit(1)
-				}
-				cfg.ID = rest[i]
-			case len(arg) > 5 && arg[:5] == "--id=":
-				cfg.ID = arg[5:]
 			case len(arg) > 0 && arg[0] == '-':
 				fmt.Fprintf(os.Stderr, "plugin install: unknown flag %q (try --help)\n", arg)
 				os.Exit(1)
@@ -591,11 +567,17 @@ func runPlugin(args []string) {
 		}
 
 	case "remove":
-		for _, arg := range rest {
+		help := false
+		fs := &cliflag.Set{Cmd: "plugin remove", Specs: []cliflag.Spec{
+			{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		}}
+		pos, _ := fs.Parse(rest) // no value-taking flags, so Parse cannot fail
+		if help {
+			plugin.PrintHelp(os.Stdout)
+			os.Exit(0)
+		}
+		for _, arg := range pos {
 			switch {
-			case arg == "-h" || arg == "--help":
-				plugin.PrintHelp(os.Stdout)
-				os.Exit(0)
 			case len(arg) > 0 && arg[0] == '-':
 				fmt.Fprintf(os.Stderr, "plugin remove: unknown flag %q (try --help)\n", arg)
 				os.Exit(1)
@@ -610,21 +592,22 @@ func runPlugin(args []string) {
 		}
 
 	case "validate":
-		for i := 0; i < len(rest); i++ {
-			arg := rest[i]
+		help := false
+		fs := &cliflag.Set{Cmd: "plugin validate", Specs: []cliflag.Spec{
+			{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+			{Name: "--id", Kind: cliflag.String, Str: &cfg.ID, ValueDesc: "a value"},
+		}}
+		pos, err := fs.Parse(rest)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if help {
+			plugin.PrintHelp(os.Stdout)
+			os.Exit(0)
+		}
+		for _, arg := range pos {
 			switch {
-			case arg == "-h" || arg == "--help":
-				plugin.PrintHelp(os.Stdout)
-				os.Exit(0)
-			case arg == "--id":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "plugin validate: --id requires a value")
-					os.Exit(1)
-				}
-				cfg.ID = rest[i]
-			case len(arg) > 5 && arg[:5] == "--id=":
-				cfg.ID = arg[5:]
 			case len(arg) > 0 && arg[0] == '-':
 				fmt.Fprintf(os.Stderr, "plugin validate: unknown flag %q (try --help)\n", arg)
 				os.Exit(1)
@@ -640,12 +623,18 @@ func runPlugin(args []string) {
 
 	case "register":
 		// register <name> <dir>
+		help := false
+		fs := &cliflag.Set{Cmd: "plugin register", Specs: []cliflag.Spec{
+			{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		}}
+		pos, _ := fs.Parse(rest) // no value-taking flags, so Parse cannot fail
+		if help {
+			plugin.PrintHelp(os.Stdout)
+			os.Exit(0)
+		}
 		positionals := make([]string, 0, 2)
-		for _, arg := range rest {
+		for _, arg := range pos {
 			switch {
-			case arg == "-h" || arg == "--help":
-				plugin.PrintHelp(os.Stdout)
-				os.Exit(0)
 			case len(arg) > 0 && arg[0] == '-':
 				fmt.Fprintf(os.Stderr, "plugin register: unknown flag %q (try --help)\n", arg)
 				os.Exit(1)
@@ -699,36 +688,24 @@ func runTeach(args []string) {
 	section := ""
 	dryRun := false
 
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
+	help := false
+	fs := &cliflag.Set{Cmd: "teach", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--project", Kind: cliflag.String, Str: &project, ValueDesc: "a path"},
+		{Name: "--section", Kind: cliflag.String, Str: &section, ValueDesc: "a name"},
+		{Name: "--dry-run", Kind: cliflag.Bool, Bool: &dryRun},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if help {
+		teach.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+	for _, arg := range rest {
 		switch {
-		case arg == "-h" || arg == "--help":
-			teach.PrintHelp(os.Stdout)
-			os.Exit(0)
-
-		case arg == "--project":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "teach: --project requires a path")
-				os.Exit(1)
-			}
-			project = args[i]
-		case len(arg) > 10 && arg[:10] == "--project=":
-			project = arg[10:]
-
-		case arg == "--section":
-			i++
-			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "teach: --section requires a name")
-				os.Exit(1)
-			}
-			section = args[i]
-		case len(arg) > 10 && arg[:10] == "--section=":
-			section = arg[10:]
-
-		case arg == "--dry-run":
-			dryRun = true
-
 		case len(arg) > 0 && arg[0] == '-':
 			fmt.Fprintf(os.Stderr, "teach: unknown flag %q (try --help)\n", arg)
 			os.Exit(1)
@@ -920,30 +897,29 @@ func runSkill(yakosRoot string, args []string) {
 
 	switch sub {
 	case "candidates":
-		for _, arg := range rest {
-			if arg == "--review" {
-				cfg.Review = true
-			} else {
-				fmt.Fprintf(os.Stderr, "skill candidates: unknown flag %q (try --help)\n", arg)
-				os.Exit(1)
-			}
+		fs := &cliflag.Set{Cmd: "skill candidates", Specs: []cliflag.Spec{
+			{Name: "--review", Kind: cliflag.Bool, Bool: &cfg.Review},
+		}}
+		pos, _ := fs.Parse(rest) // no value-taking flags, so Parse cannot fail
+		// Everything that is not --review is rejected, flag-shaped or not
+		// (this subcommand has never accepted -h or positionals).
+		for _, arg := range pos {
+			fmt.Fprintf(os.Stderr, "skill candidates: unknown flag %q (try --help)\n", arg)
+			os.Exit(1)
 		}
 
 	case "promote":
-		for i := 0; i < len(rest); i++ {
-			arg := rest[i]
+		fs := &cliflag.Set{Cmd: "skill promote", Specs: []cliflag.Spec{
+			{Name: "--global", Kind: cliflag.Bool, Bool: &cfg.Global},
+			{Name: "--project", Kind: cliflag.String, Str: &cfg.ProjectPath, ValueDesc: "a path"},
+		}}
+		pos, err := fs.Parse(rest)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		for _, arg := range pos {
 			switch {
-			case arg == "--global":
-				cfg.Global = true
-			case arg == "--project":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "skill promote: --project requires a path")
-					os.Exit(1)
-				}
-				cfg.ProjectPath = rest[i]
-			case len(arg) > 10 && arg[:10] == "--project=":
-				cfg.ProjectPath = arg[10:]
 			case len(arg) > 0 && arg[0] == '-':
 				fmt.Fprintf(os.Stderr, "skill promote: unknown flag %q (try --help)\n", arg)
 				os.Exit(1)
@@ -963,18 +939,16 @@ func runSkill(yakosRoot string, args []string) {
 		}
 
 	case "reject":
-		for i := 0; i < len(rest); i++ {
-			arg := rest[i]
+		fs := &cliflag.Set{Cmd: "skill reject", Specs: []cliflag.Spec{
+			{Name: "--reason", Kind: cliflag.String, Str: &cfg.Reason, ValueDesc: "a value"},
+		}}
+		pos, err := fs.Parse(rest)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		for _, arg := range pos {
 			switch {
-			case arg == "--reason":
-				i++
-				if i >= len(rest) {
-					fmt.Fprintln(os.Stderr, "skill reject: --reason requires a value")
-					os.Exit(1)
-				}
-				cfg.Reason = rest[i]
-			case len(arg) > 9 && arg[:9] == "--reason=":
-				cfg.Reason = arg[9:]
 			case len(arg) > 0 && arg[0] == '-':
 				fmt.Fprintf(os.Stderr, "skill reject: unknown flag %q (try --help)\n", arg)
 				os.Exit(1)
