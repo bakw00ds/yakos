@@ -480,19 +480,63 @@ func atomicTouch(path string) error {
 	return nil
 }
 
+// globMatch mirrors bash supervisor-stream.sh, which uses `case` patterns:
+// `*` matches any characters INCLUDING "/" (so "**" behaves as "*"), and the
+// glob is tried both as written and with a leading "**/" stripped, the latter
+// also as a "*/<bare>" suffix match. This is what makes ".env" or
+// "**/credentials/**" hit absolute paths.
 func globMatch(g, p string) bool {
-	if ok, _ := filepath.Match(g, p); ok {
-		return true
-	}
-	g2 := strings.ReplaceAll(g, "**", "*")
-	if ok, _ := filepath.Match(g2, p); ok {
+	if shellMatch(g, p) {
 		return true
 	}
 	bare := strings.TrimPrefix(g, "**/")
-	if ok, _ := filepath.Match("*/"+bare, p); ok {
-		return true
+	return shellMatch("*/"+bare, p) || shellMatch(bare, p)
+}
+
+// shellMatch reports whether s matches the shell case-pattern pat (whole
+// string): * any run, ? one char, [set] / [!set] classes, everything else
+// literal.
+func shellMatch(pat, s string) bool {
+	var b strings.Builder
+	b.WriteString("^(?s:")
+	rs := []rune(pat)
+	for i := 0; i < len(rs); i++ {
+		switch c := rs[i]; c {
+		case '*':
+			b.WriteString(".*")
+		case '?':
+			b.WriteString(".")
+		case '[':
+			j := i + 1
+			if j < len(rs) && (rs[j] == '!' || rs[j] == '^') {
+				j++
+			}
+			if j < len(rs) && rs[j] == ']' {
+				j++
+			}
+			for j < len(rs) && rs[j] != ']' {
+				j++
+			}
+			if j >= len(rs) {
+				b.WriteString(regexp.QuoteMeta("["))
+				continue
+			}
+			set := string(rs[i+1 : j])
+			if strings.HasPrefix(set, "!") {
+				set = "^" + set[1:]
+			}
+			b.WriteString("[" + strings.ReplaceAll(set, "\\", "\\\\") + "]")
+			i = j
+		default:
+			b.WriteString(regexp.QuoteMeta(string(c)))
+		}
 	}
-	return false
+	b.WriteString(")$")
+	re, err := regexp.Compile(b.String())
+	if err != nil {
+		return false
+	}
+	return re.MatchString(s)
 }
 
 func truncate(s string, maxBytes int) string {
