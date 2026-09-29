@@ -183,13 +183,28 @@ func (h *Hook) runPostToolUse(c context.Context, out hooktype.HookOutput, in hoo
 	}
 	threshold := firstNonEmpty(cfg.Threshold, defaultThreshold)
 	// bash's awk `thr+0` turns a non-numeric threshold into 0, which would
-	// pass every plan. Fall back to the default and say so instead.
-	if !isDecimal(threshold) {
+	// pass every plan. Fall back to the default and say so instead. The same
+	// goes for a value the decimal pattern admits but ParseFloat rejects
+	// ("1e999" overflows to +Inf with a range error; treating that as 0 passed
+	// every plan while bash blocked every plan, K-107). A finite value outside
+	// 0..1 is clamped, with a WARN: the aggregate is always in 0..1, so
+	// anything beyond either end only ever means "always block" or "always pass".
+	if f, perr := strconv.ParseFloat(strings.TrimSpace(threshold), 64); !isDecimal(threshold) || perr != nil {
 		h.warnf(&out, "plan-quality-score: plan_quality.threshold %q is not a number; using %s", threshold, defaultThreshold)
 		h.log(&out, in, "WARN", "pass",
 			fmt.Sprintf("plan_quality.threshold %q is not a number; using default %s", threshold, defaultThreshold),
 			map[string]any{"key": "threshold", "value": threshold})
 		threshold = defaultThreshold
+	} else if f < 0 || f > 1 {
+		clamped := "1"
+		if f < 0 {
+			clamped = "0"
+		}
+		h.warnf(&out, "plan-quality-score: plan_quality.threshold %q is outside 0..1; clamped to %s", threshold, clamped)
+		h.log(&out, in, "WARN", "pass",
+			fmt.Sprintf("plan_quality.threshold %q is outside 0..1; clamped to %s", threshold, clamped),
+			map[string]any{"key": "threshold", "value": threshold})
+		threshold = clamped
 	}
 	mode := firstNonEmpty(cfg.Mode, "surface")
 	costCeiling := firstNonEmpty(cfg.CostCeilingUSD, in.Env["YAKOS_PLAN_EVAL_MAX_COST_USD"], defaultCostCeiling)
