@@ -159,6 +159,33 @@ run_suite() {
         if [ "$rc" = 2 ] && printf '%s' "$err" | grep -q 'BLOCKED'; then ok "$L: workflow payload + jq($fj) + HOOK_FAIL_CLOSED=1 -> exit 2"; else bad "$L: workflow payload + jq($fj) rc=$rc err=[$err]"; fi
     done
 
+    # context-threshold must source compat.sh: with a transcript present its
+    # probe has to produce a percentage, not probe_unavailable (K-101).
+    local ct_sb ct_proj ct_enc ct_sid=ct-sess ct_log
+    ct_sb="$(new_sandbox "ct-$L")"
+    ct_proj="$ct_sb/proj"
+    ct_enc="$(bash -c ". '$HOOKS/lib/compat.sh'; ct_encode_project_path '$ct_proj'")"
+    mkdir -p "$ct_sb/home/.claude/projects/$ct_enc"
+    head -c 700000 /dev/zero | tr '\0' 'x' > "$ct_sb/home/.claude/projects/$ct_enc/transcript-$ct_sid.jsonl"
+    run "$SH" "$HOOKS" context-threshold.sh "$ct_sb" "{\"session_id\":\"$ct_sid\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"p\"}"
+    ct_log="$ct_sb/work/current/logs/context-threshold.ndjson"
+    if [ "$rc" = 0 ] && grep -q '"pct": *87' "$ct_log" 2>/dev/null && ! grep -q probe_unavailable "$ct_log" 2>/dev/null \
+        && printf '%s' "$err" | grep -q 'NOTE: context at 87%'; then
+        ok "$L: context-threshold probe runs (pct=87, NOTE emitted, no probe_unavailable)"
+    else
+        bad "$L: context-threshold probe rc=$rc err=[$err] log=[$(cat "$ct_log" 2>/dev/null)]"
+    fi
+    # Broken compat.sh: warn, exit 0, no stdout.
+    local ct_hd="$TMP/ct-hd-$L"
+    copy_hooks "$ct_hd"; corrupt "$ct_hd/lib/compat.sh"
+    ct_sb="$(new_sandbox "ct-bad-$L")"
+    run "$SH" "$ct_hd" context-threshold.sh "$ct_sb" "$PAYLOAD"
+    if [ "$rc" = 0 ] && [ -z "$out" ] && printf '%s' "$err" | grep -q 'cannot load lib/compat.sh'; then
+        ok "$L: context-threshold + syntax error in compat.sh -> exit 0 with WARN"
+    else
+        bad "$L: context-threshold broken compat rc=$rc out=[$out] err=[$err]"
+    fi
+
     # ---- 2. plan-quality-gate exit-trap robustness ----------------------------
     sb="$(new_sandbox "t-$L-marker")"
     printf '{"plan_id":"plan-abc","reason":"low"}\n' > "$sb/work/current/.plan-blocked"
