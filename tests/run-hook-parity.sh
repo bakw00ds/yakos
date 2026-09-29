@@ -1725,10 +1725,10 @@ case_check mailbox-mirror.sh   sendmessage-peer-prefixed-agent.json 0 mailbox-mi
 # log name is "" on purpose: the hooklog record schema differs (pre-existing, tracked
 # separately); the buffer comparison above is what pins the payload-derived identity.
 case_check supervisor-stream.sh pretooluse-edit-api.json   0 "" setup_ss_passfilter "YAKOS_AGENT_ROLE=decoy-role CLAUDE_SESSION_ID=decoy-sid"
-# bash context-threshold.sh now sources lib/compat.sh (K-101), so both sides probe
-# the transcript. The remaining divergence is the Go log schema (action/message
-# instead of decision/reason, no agent/session_id/event), tracked as K-107.
-case_check context-threshold.sh pretooluse-generic-tool.json 0 context-threshold "" "CLAUDE_SESSION_ID=decoy-sid" "" home_ct_notice "0/0:Go context-threshold log schema differs from bash: action/message instead of decision/reason, and no agent/session_id/event (K-107)"
+# bash context-threshold.sh sources lib/compat.sh (K-101), so both sides probe the
+# transcript. Since K-107 the Go side also encodes the project path like bash
+# ct_encode_project_path and writes bash's log schema, so this is an exact case.
+case_check context-threshold.sh pretooluse-generic-tool.json 0 context-threshold "" "CLAUDE_SESSION_ID=decoy-sid" "" home_ct_notice
 
 # K-100 item 5: undecodable stdin (0 bytes) on NON-BLOCKING hooks. The registry
 # FailClosed flag (checked against bash HOOK_FAIL_CLOSED=1 by

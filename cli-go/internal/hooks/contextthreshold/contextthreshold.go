@@ -24,9 +24,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -110,7 +112,6 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		return out, nil
 	}
 
-	logFile := filepath.Join(h.WorkCurrentDir, "logs", hookName+".ndjson")
 	noticePct, warningPct, compactPct, autoDisabled := h.loadThresholds()
 	homeDir := h.homeDir()
 	runtime := in.Env["YAKOS_RUNTIME"]
@@ -126,7 +127,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	// Probe context usage.
 	pct, probeErr := h.probeContextPct(runtime, sessionID, projectDir, homeDir)
 	if probeErr != nil || pct < 0 {
-		h.appendLog(&out, logFile, "REPORT", "probe_unavailable",
+		h.appendLog(in, "REPORT", "probe_unavailable",
 			"runtime="+runtime,
 			map[string]any{"runtime": runtime})
 		return out, nil
@@ -164,20 +165,14 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		out.Stderr = fmt.Appendf(out.Stderr,
 			"WARN: context at %d%% (threshold %d%%). Auto-checkpoint created at %s. Recommend 'yakos compact now' or '/compact'.\n",
 			pct, warningPct, checkpointDir)
-		h.appendLog(&out, logFile, "WARN", "checked",
-			fmt.Sprintf("pct=%d notice=%d warning=%d auto=%d runtime=%s", pct, noticePct, warningPct, compactPct, runtime),
-			map[string]any{"pct": pct, "notice": noticePct, "warning": warningPct, "auto": compactPct, "runtime": runtime, "checkpoint": checkpointDir})
+		h.appendChecked(in, "WARN", pct, noticePct, warningPct, compactPct, runtime)
 	} else if pct >= noticePct {
 		out.Stderr = fmt.Appendf(out.Stderr,
 			"NOTE: context at %d%% (threshold %d%%). Recommend 'yakos compact now' or '/compact' before continuing.\n",
 			pct, noticePct)
-		h.appendLog(&out, logFile, "WARN", "checked",
-			fmt.Sprintf("pct=%d notice=%d warning=%d auto=%d runtime=%s", pct, noticePct, warningPct, compactPct, runtime),
-			map[string]any{"pct": pct, "notice": noticePct, "warning": warningPct, "auto": compactPct, "runtime": runtime})
+		h.appendChecked(in, "WARN", pct, noticePct, warningPct, compactPct, runtime)
 	} else {
-		h.appendLog(&out, logFile, "REPORT", "checked",
-			fmt.Sprintf("pct=%d notice=%d warning=%d auto=%d runtime=%s", pct, noticePct, warningPct, compactPct, runtime),
-			map[string]any{"pct": pct, "notice": noticePct, "warning": warningPct, "auto": compactPct, "runtime": runtime})
+		h.appendChecked(in, "REPORT", pct, noticePct, warningPct, compactPct, runtime)
 	}
 
 	return out, nil
@@ -322,49 +317,69 @@ func (h *Hook) homeDir() string {
 	return "."
 }
 
-// appendLog writes an NDJSON log entry.
-func (h *Hook) appendLog(out *hooktype.HookOutput, logFile, severity, action, message string, extra map[string]any) {
-	ts := h.NowFn().UTC().Format(time.RFC3339)
-	entry := map[string]any{
-		"ts":       ts,
-		"hook":     hookName,
-		"severity": severity,
-		"action":   action,
-		"message":  message,
+// appendChecked writes the "checked" record. Bash's record carries
+// pct/notice/warning/runtime only; auto-compact is a Go-only opt-in, so its
+// threshold is added (to reason and extra) only when it is enabled, which keeps
+// the default record byte-for-byte what bash writes.
+func (h *Hook) appendChecked(in hooktype.HookInput, severity string, pct, noticePct, warningPct, compactPct int, runtime string) {
+	reason := fmt.Sprintf("pct=%d notice=%d warning=%d runtime=%s", pct, noticePct, warningPct, runtime)
+	extra := map[string]any{"pct": pct, "notice": noticePct, "warning": warningPct, "runtime": runtime}
+	if compactPct > 0 {
+		reason = fmt.Sprintf("pct=%d notice=%d warning=%d auto=%d runtime=%s", pct, noticePct, warningPct, compactPct, runtime)
+		extra["auto"] = compactPct
 	}
-	for k, v := range extra {
-		entry[k] = v
-	}
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return
-	}
-	data = append(data, '\n')
-	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil { //nolint:gosec
-		return
-	}
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec
-	if err != nil {
-		return
-	}
-	defer f.Close() //nolint:errcheck
-	_, _ = f.Write(data)
+	h.appendLog(in, severity, "checked", reason, extra)
 }
+
+// appendLog writes an NDJSON log record through the shared hooklog writer, so
+// the field set and order are bash ho_log's: {ts, hook, severity, decision,
+// reason, agent, session_id, event} + extra (K-107; it used to write
+// action/message and no agent/session_id/event).
+func (h *Hook) appendLog(in hooktype.HookInput, severity, decision, reason string, extra map[string]any) {
+	// Best effort, like bash's `ho_log ... || true`: a log failure never changes
+	// the hook's decision or its stderr.
+	_ = hooklog.Append(h.WorkCurrentDir, hooklog.Entry{
+		Hook:      hookName,
+		Severity:  severity,
+		Decision:  decision,
+		Reason:    reason,
+		Agent:     senderRole(in),
+		SessionID: hookio.SessionID(in),
+		Event:     in.Event,
+		Extra:     extra,
+	}, h.NowFn())
+}
+
+// senderRole is bash hi_sender_role.
+func senderRole(in hooktype.HookInput) string { return hookio.SenderRole(in) }
 
 // ---- filesystem helpers ------------------------------------------------------
 
-// encodeProjectPath encodes a project directory path the same way Claude does:
-// replace path separators and colons with hyphens and strip leading slashes.
+// encodeProjectPath encodes a project directory path the way bash's
+// ct_encode_project_path (lib/compat.sh) does, which is how Claude Code names
+// ~/.claude/projects/<encoded>/: '/' and '.' become '-', one trailing '/' is
+// dropped, and the leading '/' becomes a leading '-'
+// (/Users/tw/code/panda-os-3.0 -> -Users-tw-code-panda-os-3-0). K-107: this used
+// to strip the leading '-' and keep dots, so Go never found the transcript bash
+// finds. A Windows drive colon (never present in bash's Unix paths) also
+// becomes '-'.
 func encodeProjectPath(projectDir string) string {
-	// Normalise to forward slashes so the encoding is identical on all platforms
-	// (Claude uses a forward-slash encoding regardless of the OS path separator).
 	s := filepath.ToSlash(projectDir)
-	// Replace Windows drive colon (e.g. "C:") with a hyphen.
-	s = strings.ReplaceAll(s, ":", "-")
-	// Strip leading slash (or the leading "-" that replaced a drive colon).
-	s = strings.TrimLeft(s, "/")
+	if !strings.HasPrefix(s, "/") && !hasDriveLetter(s) {
+		if abs, err := filepath.Abs(projectDir); err == nil {
+			s = filepath.ToSlash(abs)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		s = strings.ReplaceAll(s, ":", "-")
+	}
+	s = strings.TrimSuffix(s, "/")
 	s = strings.ReplaceAll(s, "/", "-")
-	return s
+	return strings.ReplaceAll(s, ".", "-")
+}
+
+func hasDriveLetter(s string) bool {
+	return len(s) >= 2 && s[1] == ':' && ((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z'))
 }
 
 type mtimeEntry struct {

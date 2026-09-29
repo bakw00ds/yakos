@@ -78,13 +78,15 @@ func itoa(n int) string {
 // writeClaudeTranscript creates a fake transcript file to drive the probe.
 func writeClaudeTranscript(t *testing.T, homeDir, projectDir, sessionID string, sizeBytes int) {
 	t.Helper()
-	// Claude encodes project path: normalise to forward slashes, strip leading /,
-	// replace / with -, replace : (Windows drive separator) with -.
-	// This must match encodeProjectPath in contextthreshold.go exactly.
+	// Claude encodes the project path like bash ct_encode_project_path: '/' and
+	// '.' become '-', the leading '/' becomes a leading '-', one trailing '/'
+	// is dropped (K-107). Spelled out here, not shared with the hook, so a
+	// change to the hook's encoder fails these tests.
 	project := filepath.ToSlash(projectDir)
 	project = strings.ReplaceAll(project, ":", "-")
-	project = strings.TrimLeft(project, "/")
+	project = strings.TrimSuffix(project, "/")
 	project = strings.ReplaceAll(project, "/", "-")
+	project = strings.ReplaceAll(project, ".", "-")
 	dir := filepath.Join(homeDir, ".claude", "projects", project)
 	_ = os.MkdirAll(dir, 0755)
 	data := make([]byte, sizeBytes)
@@ -110,8 +112,8 @@ func TestContextThreshold_ProbeUnavailableLogsReport(t *testing.T) {
 		t.Fatalf("err=%v code=%d", err, out.ExitCode)
 	}
 	rec := readLastLog(t, filepath.Join(work, "logs", "context-threshold.ndjson"))
-	if rec["action"] != "probe_unavailable" {
-		t.Errorf("action=%v, want probe_unavailable", rec["action"])
+	if rec["decision"] != "probe_unavailable" {
+		t.Errorf("decision=%v, want probe_unavailable", rec["decision"])
 	}
 }
 
@@ -287,8 +289,8 @@ func TestContextThreshold_UnknownRuntimeProbeUnavailable(t *testing.T) {
 	in := hooktype.HookInput{Env: map[string]string{"YAKOS_RUNTIME": "unknown-runtime-xyz"}}
 	_, _ = h.Run(context.Background(), in)
 	rec := readLastLog(t, filepath.Join(work, "logs", "context-threshold.ndjson"))
-	if rec["action"] != "probe_unavailable" {
-		t.Errorf("action=%v for unknown runtime", rec["action"])
+	if rec["decision"] != "probe_unavailable" {
+		t.Errorf("decision=%v for unknown runtime", rec["decision"])
 	}
 }
 
@@ -387,7 +389,7 @@ func TestContextThreshold_SettingsNoticeOverride(t *testing.T) {
 	_, _ = h.Run(context.Background(), in)
 	rec := readLastLog(t, filepath.Join(work, "logs", "context-threshold.ndjson"))
 	// probe_unavailable because no transcript, but settings were read.
-	if rec["action"] == nil {
+	if rec["decision"] == nil {
 		t.Error("expected log entry")
 	}
 }
@@ -606,5 +608,64 @@ func TestContextThreshold_AutoCompact_NoMarkerWhenNoWorkDir(t *testing.T) {
 	out, err := h.Run(context.Background(), hooktype.HookInput{Env: map[string]string{"YAKOS_RUNTIME": "claude"}})
 	if err != nil || out.ExitCode != 0 {
 		t.Fatalf("unexpected err=%v code=%d", err, out.ExitCode)
+	}
+}
+
+// K-107 item 7: the record has bash ho_log's schema: decision/reason plus
+// agent/session_id/event, never action/message.
+func TestContextThreshold_LogSchemaMatchesBash(t *testing.T) {
+	work := t.TempDir()
+	h := contextthreshold.New(work)
+	h.NowFn = fixedNow
+	in := hooktype.HookInput{
+		Event:   "PreToolUse",
+		Payload: map[string]any{"session_id": "sess-1", "agent_type": "yakos:backend"},
+		Env:     map[string]string{"YAKOS_RUNTIME": "claude"},
+	}
+	if _, err := h.Run(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	rec := readLastLog(t, filepath.Join(work, "logs", "context-threshold.ndjson"))
+	want := map[string]any{
+		"hook": "context-threshold", "severity": "REPORT", "decision": "probe_unavailable",
+		"reason": "runtime=claude", "agent": "backend", "session_id": "sess-1", "event": "PreToolUse",
+		"runtime": "claude",
+	}
+	for k, v := range want {
+		if rec[k] != v {
+			t.Errorf("record[%q]=%v want %v (record %v)", k, rec[k], v, rec)
+		}
+	}
+	for _, k := range []string{"action", "message"} {
+		if _, has := rec[k]; has {
+			t.Errorf("record must not carry %q (bash never writes it)", k)
+		}
+	}
+}
+
+// K-107: the transcript directory is encoded like bash ct_encode_project_path
+// ('/' and '.' -> '-', leading '/' -> leading '-'), so a project path with a dot
+// still finds its transcript.
+func TestContextThreshold_ProbeFindsTranscriptForDottedProjectPath(t *testing.T) {
+	work := t.TempDir()
+	home := t.TempDir()
+	proj := filepath.Join(t.TempDir(), "proj.v1")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := t.TempDir()
+	writeSettings(t, stateDir, 1, 90)
+	writeClaudeTranscript(t, home, proj, "sess-dot", 800_000)
+	h := &contextthreshold.Hook{WorkCurrentDir: work, HomeDir: home, StateDir: stateDir, NowFn: fixedNow}
+	in := hooktype.HookInput{
+		Payload: map[string]any{"session_id": "sess-dot"},
+		Env:     map[string]string{"YAKOS_RUNTIME": "claude", "CLAUDE_PROJECT_DIR": proj},
+	}
+	if _, err := h.Run(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	rec := readLastLog(t, filepath.Join(work, "logs", "context-threshold.ndjson"))
+	if rec["decision"] != "checked" {
+		t.Fatalf("decision=%v, want checked (transcript must be found); record %v", rec["decision"], rec)
 	}
 }
