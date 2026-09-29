@@ -1844,7 +1844,7 @@ setup_pqs_yml_is_dir()   { _pqs_plan "$1" good-plan.md 30 ""; rm -f "$1/.yakos.y
 # recorded score is scored on the triggering fire; the same version again, or a
 # re-save under 5 s after a scoring, is debounced (state: .plan-quality-last-scored).
 setup_pqs_fresh_plan()    { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; }
-_pqs_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"; }
+_pqs_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
 setup_pqs_fresh_scored()  { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; printf '%s %s\n' "$(_pqs_mtime "$1/work/current/plan.md")" "$(date -u +%s)" > "$1/work/current/.plan-quality-last-scored"; }
 setup_pqs_resave_collapsed() { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; printf '%s %s\n' "$(( $(_pqs_mtime "$1/work/current/plan.md") - 20 ))" "$(date -u +%s)" > "$1/work/current/.plan-quality-last-scored"; }
 setup_pqs_resave_after_window() { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; printf '%s %s\n' "$(( $(_pqs_mtime "$1/work/current/plan.md") - 30 ))" "$(( $(date -u +%s) - 20 ))" > "$1/work/current/.plan-quality-last-scored"; }
