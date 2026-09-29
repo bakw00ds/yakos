@@ -107,22 +107,25 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 func (c *ctx) run() {
 	agent := c.agent
-	file := fileFromPayload(c.in)
+	rawFile := rawFileFromPayload(c.in)
+
+	// A NUL or newline anywhere in the path is refused outright (no bypass).
+	// bash's command substitution drops NUL (so it would evaluate a different
+	// path than the tool receives) and its normalizer used to see only the
+	// first line of a path with a newline; both are rejected there too. The
+	// check runs on the raw string, before the trailing-newline strip. The
+	// logged path has NUL removed, as bash's command substitution leaves it.
+	if strings.ContainsAny(rawFile, "\x00\n") {
+		c.log("BLOCK", "block", "file_path contains a NUL or newline byte",
+			map[string]any{"agent_type": agent, "file_path": strings.TrimRight(strings.ReplaceAll(rawFile, "\x00", ""), "\n")})
+		c.block(fmt.Sprintf("agent '%s' file_path contains a NUL or newline byte \u2014 refused regardless of allow/deny policy", agent))
+		return
+	}
+	file := strings.TrimRight(rawFile, "\n")
 
 	if file == "" {
 		c.log("REPORT", "pass", "no file_path in tool_input",
 			map[string]any{"agent_type": agent, "tool": c.in.Tool})
-		return
-	}
-
-	// A NUL byte cannot survive bash's command substitution (it is
-	// silently dropped, so the hook would evaluate a DIFFERENT path than
-	// the one the tool receives), and no legitimate path contains one.
-	// Refuse outright; no bypass.
-	if strings.ContainsRune(file, 0) {
-		c.log("BLOCK", "block", "file_path contains a NUL byte",
-			map[string]any{"agent_type": agent, "file_path": file})
-		c.block(fmt.Sprintf("agent '%s' file_path contains a NUL byte — refused regardless of allow/deny policy", agent))
 		return
 	}
 
@@ -424,12 +427,12 @@ func senderRole(in hooktype.HookInput) string {
 	return strings.TrimPrefix(raw, "yakos:")
 }
 
-// fileFromPayload mirrors hi_file_path:
+// rawFileFromPayload mirrors hi_file_path:
 // .tool_input.file_path // .tool_input.notebook_path, rendered as `jq -r`
 // does, with command-substitution's trailing-newline stripping.
-func fileFromPayload(in hooktype.HookInput) string {
+func rawFileFromPayload(in hooktype.HookInput) string {
 	v := hookio.JQAlt(hookio.ToolInputField(in, "file_path"), hookio.ToolInputField(in, "notebook_path"))
-	return strings.TrimRight(hookio.JQRawOrJSON(v), "\n")
+	return hookio.JQRawOrJSON(v)
 }
 
 func isAbs(p string) bool {

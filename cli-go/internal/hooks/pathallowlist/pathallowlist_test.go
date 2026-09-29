@@ -446,17 +446,21 @@ func TestDotDotAfterSymlinkBlocks(t *testing.T) {
 func TestNULByteBlocks(t *testing.T) {
 	e := newEnv(t)
 	e.policy(goAPI)
-	e.expect("nul", e.input("Write", "api/ok.go\x00../../etc/passwd", "go-api"), 2, "file_path contains a NUL byte")
+	e.expect("nul", e.input("Write", "api/ok.go\x00../../etc/passwd", "go-api"), 2, "file_path contains a NUL or newline byte")
 	e.bypass("api/ok.go")
-	e.expect("nul ignores bypass", e.input("Write", "api/ok.go\x00", "go-api"), 2, "file_path contains a NUL byte")
+	e.expect("nul ignores bypass", e.input("Write", "api/ok.go\x00", "go-api"), 2, "file_path contains a NUL or newline byte")
 }
 
-func TestNewlineInPathNormalizedWhole(t *testing.T) {
-	// bash truncates at the first newline before normalizing; Go normalizes
-	// the whole string, so the segment after the newline still counts.
+func TestNewlineInPathBlocksOutright(t *testing.T) {
+	// bash's normalizer only saw the first line, so "api/ok.go<LF>/../../etc/x"
+	// was checked as "api/ok.go". Both sides now refuse any newline.
 	e := newEnv(t)
 	e.policy(goAPI)
-	e.expect("newline traversal", e.input("Write", "api/ok\n/../../../../etc/x", "go-api"), 2, "path lexically escapes project root")
+	for _, p := range []string{"api/ok\n/../../../../etc/x", "api/ok.go\n/../x.env", "api/a\nb.go", "\n", "api/ok.go\n"} {
+		e.expect("newline "+p, e.input("Write", p, "go-api"), 2, "file_path contains a NUL or newline byte")
+	}
+	e.bypass("api/ok.go")
+	e.expect("newline ignores bypass", e.input("Write", "api/ok.go\n", "go-api"), 2, "file_path contains a NUL or newline byte")
 }
 
 func TestNonStringFilePathRenderedLikeJQ(t *testing.T) {
