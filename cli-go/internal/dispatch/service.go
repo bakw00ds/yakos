@@ -230,10 +230,10 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 	}
 
 	// --- Resolve project and yakos root ---
-	if err := validateProjectPath(p.Project); err != nil {
+	project, err := resolveProjectPath(p.Project)
+	if err != nil {
 		return nil, Result{}, err
 	}
-	project := p.Project
 	if project == "" {
 		project = s.cfg.WorkspaceRoot
 	}
@@ -631,20 +631,49 @@ func checkBroadScopeIdentity(abs string) error {
 // mechanism — treat this as unverified rather than repeat a specific but
 // incorrect justification.)
 func validateProjectPath(project string) error {
+	_, err := resolveProjectPath(project)
+	return err
+}
+
+// hasDotDotElement reports whether path has a ".." path element.
+func hasDotDotElement(path string) bool {
+	for _, el := range strings.Split(filepath.ToSlash(path), "/") {
+		if el == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveProjectPath validates project (see validateProjectPath) and returns
+// the canonical path the dispatch must use: absolute, cleaned and
+// symlink-resolved when the path exists, or absolute and cleaned when it does
+// not. An empty project returns "" (the caller substitutes its workspace root).
+//
+// K-86 review round 1 (MEDIUM): callers used to validate a cleaned copy and
+// then pass the RAW string to --add-dir and as cwd. filepath.Clean removes
+// "<symlink>/.." lexically, but the kernel resolves the symlink first, so
+// "<dir>/<link-to-/>/.." validated as "<dir>" and executed as "/". Two rules
+// close that: any ".." element in the raw input is rejected, and callers use
+// the returned canonical path instead of the raw string.
+func resolveProjectPath(project string) (string, error) {
 	if project == "" {
-		return nil // caller falls back to the server-configured WorkspaceRoot
+		return "", nil // caller falls back to the server-configured WorkspaceRoot
+	}
+	if hasDotDotElement(project) {
+		return "", fmt.Errorf("dispatch: invalid project: %q must not contain '..' path elements", project)
 	}
 	clean := filepath.Clean(project)
 	if clean == string(filepath.Separator) || clean == "." {
-		return fmt.Errorf("dispatch: invalid project: must not be the filesystem root")
+		return "", fmt.Errorf("dispatch: invalid project: must not be the filesystem root")
 	}
 	if vol := filepath.VolumeName(clean); vol != "" && clean == vol+string(filepath.Separator) {
-		return fmt.Errorf("dispatch: invalid project: must not be a filesystem drive root")
+		return "", fmt.Errorf("dispatch: invalid project: must not be a filesystem drive root")
 	}
 
 	abs, err := filepath.Abs(clean)
 	if err != nil {
-		return fmt.Errorf("dispatch: invalid project: %w", err)
+		return "", fmt.Errorf("dispatch: invalid project: %w", err)
 	}
 	abs = filepath.Clean(abs)
 	// Check the unresolved absolute path against broadScopeDirsResolved
@@ -659,7 +688,7 @@ func validateProjectPath(project string) error {
 	// caller supplying the ALREADY-RESOLVED spelling directly, e.g.
 	// "/private/etc" (round-2 review N1) — see that map's doc comment.
 	if broadScopeDirsResolved[broadScopeKey(abs)] {
-		return fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", abs)
+		return "", fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", abs)
 	}
 	// Resolve symlinks when possible and check again: this is the
 	// complementary case, a project directory that does NOT look broad by
@@ -672,17 +701,20 @@ func validateProjectPath(project string) error {
 		resolved = filepath.Clean(real)
 	}
 	if resolved == string(filepath.Separator) {
-		return fmt.Errorf("dispatch: invalid project: must not be the filesystem root")
+		return "", fmt.Errorf("dispatch: invalid project: must not be the filesystem root")
 	}
 	if vol := filepath.VolumeName(resolved); vol != "" && resolved == vol+string(filepath.Separator) {
-		return fmt.Errorf("dispatch: invalid project: must not be a filesystem drive root")
+		return "", fmt.Errorf("dispatch: invalid project: must not be a filesystem drive root")
 	}
 	if broadScopeDirsResolved[broadScopeKey(resolved)] {
-		return fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", resolved)
+		return "", fmt.Errorf("dispatch: invalid project: %q grants scope materially equivalent to the filesystem root", resolved)
 	}
 	// K-86 (K5/K6): identity check last, catching what no spelling can —
 	// case variants on case-insensitive filesystems and macOS firmlinks.
-	return checkBroadScopeIdentity(abs)
+	if err := checkBroadScopeIdentity(abs); err != nil {
+		return "", err
+	}
+	return resolved, nil
 }
 
 // broadScopeKey normalizes an absolute, cleaned path for comparison against

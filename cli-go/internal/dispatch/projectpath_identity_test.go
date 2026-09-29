@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -176,5 +177,117 @@ func TestBroadScopeExtras_IncludeDataVolumeAndVarRoot(t *testing.T) {
 		if !found {
 			t.Errorf("broadScopeIdentityExtras missing %q", want)
 		}
+	}
+}
+
+// K-86 review round 1 (k86-security-review-2026-09-28.md, MEDIUM): a raw path
+// like "<dir>/<symlink-to-root>/.." is lexically clean (Clean drops the
+// symlink name with the ".."), so validation saw "<dir>" and allowed it,
+// while the kernel resolves the raw string to "/" and dispatch passed the RAW
+// string to --add-dir. ".." elements are rejected outright, and everything
+// downstream uses the canonical resolved path.
+
+func TestValidateProjectPath_RejectsDotDotElements(t *testing.T) {
+	base := t.TempDir()
+	for _, p := range []string{
+		filepath.Join(base, "a") + "/../b",
+		base + "/..",
+		base + "/x/../..",
+		"../relative",
+		"..",
+	} {
+		if err := validateProjectPath(p); err == nil {
+			t.Errorf("validateProjectPath(%q) = nil; want rejection of '..' element", p)
+		}
+	}
+	// A name that merely contains dots is fine.
+	ok := filepath.Join(base, "my..proj")
+	if err := os.Mkdir(ok, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProjectPath(ok); err != nil {
+		t.Errorf("dir named with embedded dots rejected: %v", err)
+	}
+}
+
+func TestValidateProjectPath_SymlinkThenDotDot_Hermetic(t *testing.T) {
+	denied := t.TempDir()
+	sub := filepath.Join(denied, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	withBroadScopeInfos(t, denied)
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(sub, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	// Lexically <tmp>, really <denied>.
+	wantDenied(t, link+"/..")
+}
+
+func TestValidateProjectPath_LinkToRootOrEtcThenDotDot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX paths")
+	}
+	base := t.TempDir()
+	for name, target := range map[string]string{"link-to-root": "/", "link-to-etc": "/etc"} {
+		if _, err := os.Stat(target); err != nil {
+			continue
+		}
+		link := filepath.Join(base, name)
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+		wantDenied(t, link+"/..")
+		wantDenied(t, link+"/../")
+		wantDenied(t, link+"/./..")
+	}
+}
+
+func TestResolveProjectPath_ReturnsCanonicalPath(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	got, err := resolveProjectPath(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := filepath.EvalSymlinks(real)
+	if got != want {
+		t.Errorf("resolveProjectPath(%q) = %q; want canonical %q", link, got, want)
+	}
+	// Nonexistent: absolute cleaned path, no error.
+	np := filepath.Join(t.TempDir(), "later")
+	if got, err := resolveProjectPath(np); err != nil || got != np {
+		t.Errorf("nonexistent: got (%q,%v); want (%q,nil)", got, err, np)
+	}
+	if got, err := resolveProjectPath(""); err != nil || got != "" {
+		t.Errorf("empty: got (%q,%v)", got, err)
+	}
+}
+
+// Run and RunStream must hand the canonical path, not the raw string, to the
+// executor (which passes it to --add-dir and as cwd).
+func TestRun_PassesCanonicalProjectToExecutor(t *testing.T) {
+	logDir := isolatedLogDir(t)
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	want, _ := filepath.EvalSymlinks(real)
+	var got string
+	setRunFn(t, func(ctx context.Context, req Request) ([]byte, Result, error) {
+		got = req.Project
+		return []byte("ok"), Result{}, nil
+	})
+	svc := NewService(ServiceConfig{YakosRoot: logDir, WorkspaceRoot: logDir})
+	if _, _, err := svc.Run(context.Background(), Params{Agent: "a", Task: "t", Project: link}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got != want {
+		t.Errorf("executor saw Project=%q; want canonical %q", got, want)
 	}
 }
