@@ -10,7 +10,8 @@
 //     a. sensitive-path: file matches a deny glob in .claude/path-allowlist.json
 //     b. large-diff: new_string/content line count > min_diff_lines (default 20)
 //     c. out-of-scope: touched file not referenced in decisions.md or plan.md
-//     d. risk-regex: content matches a dangerous-command pattern
+//     d. risk-regex: content, Bash command or description matches a
+//     dangerous-command pattern
 //  3. If no trigger fires → buffer-only, no counter tick, exit 0.
 //  4. If a trigger fires → increment escalation counter in
 //     work/current/.supervisor-counter.
@@ -45,6 +46,13 @@ const (
 	defaultMinDiffLines = 20
 	defaultScoreEvery   = 10
 	bufferMaxLines      = 50
+
+	// previewCap bounds every buffered preview. commandScanCap bounds the
+	// Bash command / description text the risk regexes inspect, so a
+	// dangerous tail behind a long prefix is still seen (K-112 a). Bash twin:
+	// the head -c calls in supervisor-stream.sh.
+	previewCap     = 300
+	commandScanCap = 2048
 )
 
 // built-in risk-regex patterns (case-insensitive)
@@ -54,6 +62,11 @@ var defaultRiskPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)rm\s+-rf`),
 	regexp.MustCompile(`(?i)chmod\s+777`),
 	regexp.MustCompile(`(?i)(password|secret|api_key|token)\s*=\s*[^$({][^\s]{8,}`),
+	// K-112 (a): Bash-command shapes the patterns above miss. Keep in step
+	// with default_patterns in supervisor-stream.sh.
+	regexp.MustCompile(`(?i)git\s+push\s+([^;&|]*\s)?(--force[a-z-]*|-f)(\s|$)`),
+	regexp.MustCompile(`(?i)(curl|wget)[^|]*[|]\s*(sudo\s+)?(ba|z|da)?sh(\s|$)`),
+	regexp.MustCompile(`(?i)>>?\s*[^\s]*(\.env|\.ssh/|\.pem|credentials|\.claude/settings|hook-bypass|/etc/)`),
 }
 
 // yakosYMLSupervisor holds the shape needed from .yakos.yml.
@@ -139,19 +152,31 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	sessionID := hookio.SessionID(in) // bash hi_session_id: payload, not env
 
 	// Truncated previews to prevent buffer bloat.
-	newPreview := truncate(hookio.ToolInputString(in, "new_string"), 300)
-	contentPreview := truncate(hookio.ToolInputString(in, "content"), 300)
+	newPreview := truncate(hookio.ToolInputString(in, "new_string"), previewCap)
+	contentPreview := truncate(hookio.ToolInputString(in, "content"), previewCap)
+	// K-112 (a): Bash tool calls carry tool_input.command / description.
+	commandScan := truncate(hookio.ToolInputString(in, "command"), commandScanCap)
+	descriptionScan := truncate(hookio.ToolInputString(in, "description"), commandScanCap)
+	commandPreview := truncate(commandScan, previewCap)
+	descriptionPreview := truncate(descriptionScan, previewCap)
 
 	// Build event JSON.
+	evInput := map[string]any{
+		"file_path":       filePath,
+		"new_preview":     nilIfEmpty(newPreview),
+		"content_preview": nilIfEmpty(contentPreview),
+	}
+	if commandPreview != "" {
+		evInput["command_preview"] = commandPreview
+	}
+	if descriptionPreview != "" {
+		evInput["description_preview"] = descriptionPreview
+	}
 	event := map[string]any{
-		"ts":    ts,
-		"agent": agentType,
-		"tool":  in.Tool,
-		"input": map[string]any{
-			"file_path":       filePath,
-			"new_preview":     nilIfEmpty(newPreview),
-			"content_preview": nilIfEmpty(contentPreview),
-		},
+		"ts":         ts,
+		"agent":      agentType,
+		"tool":       in.Tool,
+		"input":      evInput,
 		"session_id": sessionID,
 	}
 
@@ -207,7 +232,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 		// 2d. Risk-regex check.
 		if escalateReason == "" {
-			combined := newPreview + contentPreview
+			combined := newPreview + contentPreview + "\n" + commandScan + "\n" + descriptionScan
 			if combined != "" {
 				escalateReason = h.checkRiskRegex(combined, extraRiskPatterns)
 			}

@@ -1298,6 +1298,13 @@ case_check supervisor-stream.sh pretooluse-edit-risky.json 0 supervisor-stream s
 case_check supervisor-stream.sh pretooluse-edit-api.json   0 supervisor-stream setup_ss_prefilter_off
 case_check supervisor-stream.sh pretooluse-edit-api.json   0 "" setup_ss_disabled
 case_check supervisor-stream.sh pretooluse-edit-risky.json 0 "" setup_ss_passfilter "YAKOS_SUPERVISOR_DISABLE=1"
+# K-112 (a): Bash tool calls are inspected via tool_input.command (escalation itself is
+# asserted by tests/run-supervisor-stream-test.sh; these guard rc + log + buffer parity).
+case_check supervisor-stream.sh posttooluse-bash-ss-rm-rf.json          0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-curl-pipe-sh.json   0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-git-push-force.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-redirect-env.json   0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-ls.json             0 supervisor-stream setup_ss_passfilter
 
 # --- retro-dispatch ---------------------------------------------------------------
 case_check retro-dispatch.sh   pretooluse-generic-tool.json 0 "" "" "" "" home_noop
