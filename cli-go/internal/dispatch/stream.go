@@ -339,11 +339,11 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 
 	// --- Bus: dispatch started ---
 	if s.cfg.Bus != nil {
-		s.cfg.Bus.Publish(wsbus.TopicDispatchStarted, wsbus.DispatchStartedPayload{
+		s.cfg.Bus.PublishMeta(wsbus.TopicDispatchStarted, wsbus.DispatchStartedPayload{
 			Agent:   p.Agent,
 			Project: project,
 			TS:      time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: operatorID})
 	}
 
 	// --- Execute (streaming) ---
@@ -355,12 +355,12 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		if execErr != nil {
 			exitCode = -1
 		}
-		s.cfg.Bus.Publish(wsbus.TopicDispatchFinished, wsbus.DispatchFinishedPayload{
+		s.cfg.Bus.PublishMeta(wsbus.TopicDispatchFinished, wsbus.DispatchFinishedPayload{
 			Agent:    p.Agent,
 			Project:  project,
 			ExitCode: exitCode,
 			TS:       time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: operatorID})
 	}
 
 	return result, execErr

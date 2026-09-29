@@ -321,11 +321,11 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 
 	// --- Bus: dispatch started ---
 	if s.cfg.Bus != nil {
-		s.cfg.Bus.Publish(wsbus.TopicDispatchStarted, wsbus.DispatchStartedPayload{
+		s.cfg.Bus.PublishMeta(wsbus.TopicDispatchStarted, wsbus.DispatchStartedPayload{
 			Agent:   p.Agent,
 			Project: project,
 			TS:      time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: operatorID})
 	}
 
 	// --- Execute ---
@@ -337,12 +337,12 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 		if err != nil {
 			exitCode = -1
 		}
-		s.cfg.Bus.Publish(wsbus.TopicDispatchFinished, wsbus.DispatchFinishedPayload{
+		s.cfg.Bus.PublishMeta(wsbus.TopicDispatchFinished, wsbus.DispatchFinishedPayload{
 			Agent:    p.Agent,
 			Project:  project,
 			ExitCode: exitCode,
 			TS:       time.Now().UTC(),
-		})
+		}, wsbus.EventMeta{OwnerOperatorID: operatorID})
 	}
 
 	return stdout, result, err
