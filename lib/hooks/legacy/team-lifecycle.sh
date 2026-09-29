@@ -147,6 +147,11 @@ kanban_move_first() {
         { print }
 
         END {
+            # K-90: a task that is the last record of the file never meets
+            # a following non-indented line, so the capture was never
+            # committed (moved stayed 0) and the task was silently dropped.
+            # Flush the pending capture at end of input.
+            if (state == "capturing_cont" && !moved) moved = 1
             # If we captured but didnt emit (src found, dst missing), best
             # not to drop the task — emit a warning marker.
             if (moved && !moved_emitted) {
