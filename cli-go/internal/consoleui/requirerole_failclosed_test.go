@@ -92,3 +92,27 @@ func TestServerHandler_InjectedIdentity_NotOverwritten(t *testing.T) {
 		t.Errorf("read-only identity: status=%d; want 403 (Handler() must not upgrade an injected identity)", rr.Code)
 	}
 }
+
+// The per-handler role checks are defense in depth behind the mux-level
+// requireRole; a mutation of one alone is invisible through Server.Handler().
+// Drive the flows handlers directly (no outer gate) with an explicitly
+// unresolved identity so each inner check is tested on its own.
+func TestFlowsHandlers_InnerRoleChecks_FailClosedOnUnresolved(t *testing.T) {
+	h, _ := consoleui.NewFlowsHandlerForTest(t, t.TempDir(), nil)
+	wrapped := injectIdentityMiddleware(netid.Identity{}, h)
+	routes := []struct{ method, path, body string }{
+		{http.MethodPost, "/flows/api/workflow", `{"name":"x","yaml":"","version":""}`},
+		{http.MethodDelete, "/flows/api/workflow?name=x", ``},
+		{http.MethodPost, "/flows/api/run?name=x", `{}`},
+		{http.MethodPost, "/flows/api/cancel", `{"run_id":"run-19700101-000000-aa"}`},
+	}
+	for _, rt := range routes {
+		req := httptest.NewRequest(rt.method, rt.path, strings.NewReader(rt.body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		wrapped.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("SECURITY: %s %s inner role check: status=%d body=%s; want 403 for an unresolved identity", rt.method, rt.path, rr.Code, rr.Body.String())
+		}
+	}
+}
