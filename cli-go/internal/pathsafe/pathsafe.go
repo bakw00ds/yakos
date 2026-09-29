@@ -43,7 +43,8 @@ func ValidateProjectSlug(project string) error {
 	if project == "" {
 		return nil
 	}
-	if filepath.IsAbs(project) || strings.ContainsAny(project, "/\\") || strings.Contains(project, "..") {
+	// "." is the base directory itself, not a child of it (S-2 R21).
+	if project == "." || filepath.IsAbs(project) || strings.ContainsAny(project, "/\\") || strings.Contains(project, "..") {
 		return ErrInvalidProjectSlug
 	}
 	return nil

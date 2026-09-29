@@ -1139,3 +1139,51 @@ func TestRun_RejectsTraversalProject(t *testing.T) {
 		t.Errorf("Run error = %q; want it to mention 'invalid project'", err.Error())
 	}
 }
+
+// S-2 R21 (s2-daemon-security-review-2026-09-21.md): validation was lexical
+// only. A project slug whose <acRoot>/<slug> is a symlink out of acRoot passed
+// it and resolved fully, so supervise read/wrote outside agent-control.
+func TestResolveProjectPaths_RejectsSymlinkEscapingAcRoot(t *testing.T) {
+	base := t.TempDir()
+	acRoot := filepath.Join(base, "agent-control")
+	outside := filepath.Join(base, "outside")
+	repo := filepath.Join(base, "repo")
+	for _, d := range []string{acRoot, outside, repo} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(outside, ".project-path"), []byte(repo+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(acRoot, "evil")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if _, err := resolveProjectPaths(acRoot, "evil"); err == nil {
+		t.Fatal("resolveProjectPaths followed <acRoot>/evil -> outside acRoot")
+	}
+}
+
+// A symlink that stays inside acRoot, and an ordinary directory, still work.
+func TestResolveProjectPaths_AllowsContainedProjects(t *testing.T) {
+	base := t.TempDir()
+	acRoot := filepath.Join(base, "agent-control")
+	repo := filepath.Join(base, "repo")
+	real := filepath.Join(acRoot, "real")
+	for _, d := range []string{real, repo} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(real, ".project-path"), []byte(repo+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveProjectPaths(acRoot, "real"); err != nil {
+		t.Fatalf("ordinary project rejected: %v", err)
+	}
+	if err := os.Symlink(real, filepath.Join(acRoot, "alias")); err == nil {
+		if _, err := resolveProjectPaths(acRoot, "alias"); err != nil {
+			t.Fatalf("symlink contained in acRoot rejected: %v", err)
+		}
+	}
+}
