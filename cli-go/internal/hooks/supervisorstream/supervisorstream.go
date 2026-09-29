@@ -42,6 +42,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
+	"github.com/bakw00ds/yakos/internal/hooks/secretscan"
 )
 
 const (
@@ -50,12 +51,12 @@ const (
 	defaultScoreEvery   = 10
 	bufferMaxLines      = 50
 
-	// previewCap bounds every buffered preview. commandScanCap bounds the
-	// Bash command / description text the risk regexes inspect, so a
-	// dangerous tail behind a long prefix is still seen (K-112 a). Bash twin:
-	// the head -c calls in supervisor-stream.sh.
-	previewCap     = 300
-	commandScanCap = 2048
+	// previewCap bounds every buffered preview; redactWindow is how much text
+	// is redacted before that cut so a token cannot straddle it. The risk
+	// regexes see the FULL command and description (K-112). Bash twin: the
+	// head -c calls in supervisor-stream.sh.
+	previewCap   = 300
+	redactWindow = 4096
 )
 
 // built-in risk-regex patterns (case-insensitive)
@@ -68,8 +69,16 @@ var defaultRiskPatterns = []*regexp.Regexp{
 	// K-112 (a): Bash-command shapes the patterns above miss. Keep in step
 	// with default_patterns in supervisor-stream.sh.
 	regexp.MustCompile(`(?i)git\s+push\s+([^;&|]*\s)?(--force[a-z-]*|-f)(\s|$)`),
-	regexp.MustCompile(`(?i)(curl|wget)[^|]*[|]\s*(sudo\s+)?(ba|z|da)?sh(\s|$)`),
-	regexp.MustCompile(`(?i)>>?\s*[^\s]*(\.env|\.ssh/|\.pem|credentials|\.claude/settings|hook-bypass|/etc/)`),
+	regexp.MustCompile(`(?i)git\s+push\s+([^;&|]*\s)?[+][^\s]`),
+	regexp.MustCompile(`(?i)(curl|wget)[^|]*[|]\s*(sudo\s+)?((ba|z|da)?sh|python[0-9.]*|perl|ruby|node|php)(\s|$)`),
+	regexp.MustCompile(`(?i)(sh|source)\s+<[(][^)]*(curl|wget)`),
+	regexp.MustCompile(`(?i)base64[^|]*[|]\s*(sudo\s+)?(ba|z|da)?sh(\s|$)`),
+	regexp.MustCompile(`(?i)>[|>]?\s*[^\s]*(\.env|\.ssh/|\.pem|credentials|\.claude/settings|hook-bypass|/etc/)`),
+	regexp.MustCompile(`(?i)tee\s+([^;&|]*\s)?[^\s]*(\.env|\.ssh/|\.pem|credentials|\.claude/settings|hook-bypass|/etc/)`),
+	regexp.MustCompile(`(?i)rm\s+-[a-z]*(fr|rf)`),
+	regexp.MustCompile(`(?i)rm\s+-[a-z]*r[a-z]*\s+-[a-z]*f`),
+	regexp.MustCompile(`(?i)rm\s+-[a-z]*f[a-z]*\s+-[a-z]*r`),
+	regexp.MustCompile(`(?i)chmod\s+-[a-z]+\s+777`),
 }
 
 // yakosYMLSupervisor holds the shape needed from .yakos.yml.
@@ -160,14 +169,19 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	ts := h.NowFn().UTC().Format(time.RFC3339)
 	sessionID := hookio.SessionID(in) // bash hi_session_id: payload, not env
 
-	// Truncated previews to prevent buffer bloat.
-	newPreview := truncate(hookio.ToolInputString(in, "new_string"), previewCap)
-	contentPreview := truncate(hookio.ToolInputString(in, "content"), previewCap)
-	// K-112 (a): Bash tool calls carry tool_input.command / description.
-	commandScan := truncate(hookio.ToolInputString(in, "command"), commandScanCap)
-	descriptionScan := truncate(hookio.ToolInputString(in, "description"), commandScanCap)
-	commandPreview := truncate(commandScan, previewCap)
-	descriptionPreview := truncate(descriptionScan, previewCap)
+	// Scan text (unredacted, for the risk regexes) vs stored previews
+	// (secret-table matches redacted, then capped): K-112.
+	newScan := truncate(hookio.ToolInputString(in, "new_string"), previewCap)
+	contentScan := truncate(hookio.ToolInputString(in, "content"), previewCap)
+	commandScan := hookio.ToolInputString(in, "command")
+	descriptionScan := hookio.ToolInputString(in, "description")
+	preview := func(text string) string {
+		return truncate(secretscan.Redact(truncate(text, redactWindow)), previewCap)
+	}
+	newPreview := preview(newScan)
+	contentPreview := preview(contentScan)
+	commandPreview := preview(commandScan)
+	descriptionPreview := preview(descriptionScan)
 
 	// Build event JSON.
 	evInput := map[string]any{
@@ -225,7 +239,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 		// 2b. Diff-size check.
 		if escalateReason == "" {
-			combined := newPreview + contentPreview
+			combined := newScan + contentScan
 			if combined != "" {
 				lineCount := strings.Count(combined, "\n") + 1
 				if lineCount > minDiffLines {
@@ -241,8 +255,10 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 		// 2d. Risk-regex check.
 		if escalateReason == "" {
-			combined := newPreview + contentPreview + "\n" + commandScan + "\n" + descriptionScan
-			if combined != "" {
+			// Newlines join to spaces so a line-continued "curl x \<nl>| sh"
+			// matches like bash's joined text.
+			combined := strings.ReplaceAll(strings.ReplaceAll(newScan+"\n"+contentScan+"\n"+commandScan+"\n"+descriptionScan, "\n", " "), "\\ ", "  ")
+			if strings.TrimSpace(combined) != "" {
 				escalateReason = h.checkRiskRegex(combined, extraRiskPatterns)
 			}
 		}
@@ -466,11 +482,13 @@ func appendBufferLine(bufferFile string, event map[string]any) error {
 		return err
 	}
 	data = append(data, '\n')
-	f, err := os.OpenFile(bufferFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec
+	// Owner-only: the buffer holds command lines and feeds an LLM (K-112).
+	f, err := os.OpenFile(bufferFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) //nolint:gosec
 	if err != nil {
 		return err
 	}
 	defer f.Close() //nolint:errcheck
+	_ = f.Chmod(0600)
 	_, err = f.Write(data)
 	return err
 }
@@ -496,9 +514,10 @@ func trimBuffer(bufferFile string, maxLines int) {
 		buf.WriteByte('\n')
 	}
 	tmp := bufferFile + ".tmp"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0644); err != nil { //nolint:gosec
+	if err := os.WriteFile(tmp, buf.Bytes(), 0600); err != nil {
 		return
 	}
+	_ = os.Chmod(tmp, 0600)
 	_ = os.Rename(tmp, bufferFile)
 }
 

@@ -55,6 +55,20 @@ var DefaultPatterns = []Pattern{
 	{Name: "Google API Key", Source: `AIza[0-9A-Za-z_-]{35}`, Regex: regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`)},
 }
 
+// RedactToken replaces every DefaultPatterns match in text (bash twin:
+// supervisor-stream.sh, sed over lib/secret-patterns.sh).
+const RedactToken = "[REDACTED]"
+
+// Redact returns text with every DefaultPatterns match replaced by
+// RedactToken, applied in table order. Used by supervisor-stream so
+// secrets never reach the supervisor buffer (K-112).
+func Redact(text string) string {
+	for _, p := range DefaultPatterns {
+		text = p.Regex.ReplaceAllString(text, RedactToken)
+	}
+	return text
+}
+
 // Hook implements runner.Hook for secret scanning.
 type Hook struct {
 	// WorkCurrentDir is the absolute path to work/current/ for the active
