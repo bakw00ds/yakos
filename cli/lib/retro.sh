@@ -78,6 +78,24 @@ _retro_settings_get() {
     printf '%s\n' "$default"
 }
 
+# _retro_cycle_length
+# K-106: the cycle length feeds a division (`retro history`), so it must be an
+# integer 1..100000; anything else (0, negative, non-integer, empty, huge)
+# falls back to 10, matching cycle-counter.sh. Base 10 (10#) so "010" is not
+# octal.
+_retro_cycle_length() {
+    local v
+    v="$(_retro_settings_get .retro.cycle_length 10)"
+    case "$v" in
+        ''|*[!0-9]*) printf '10\n'; return ;;
+    esac
+    if [ "${#v}" -le 6 ]; then
+        v=$((10#$v))
+        if [ "$v" -ge 1 ] && [ "$v" -le 100000 ]; then printf '%s\n' "$v"; return; fi
+    fi
+    printf '10\n'
+}
+
 # _retro_settings_set <jq-expression>
 # Applies ONE jq expression to settings.json, creating `{}` first when the
 # file is absent. (K-89 review: this used to take (path, value) while both
@@ -129,7 +147,7 @@ cmd_history() {
         retro_count="$(jq -r 'select(.retro_due == true) | .cycle' "$log" 2>/dev/null | wc -l | tr -d ' ')"
         local current_cycle next_retro cycle_length
         current_cycle="$(cat "$cur/.cycle-count" 2>/dev/null || echo 0)"
-        cycle_length="$(_retro_settings_get .retro.cycle_length 10)"
+        cycle_length="$(_retro_cycle_length)"
         next_retro=$(( ((current_cycle / cycle_length) + 1) * cycle_length ))
         cat <<EOF
 Retro cadence stats (this session):
@@ -162,7 +180,7 @@ cmd_status() {
     if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
         auto="$(jq -r 'if .retro.auto_dispatch == null then true else .retro.auto_dispatch end' "$SETTINGS" 2>/dev/null)" || auto=true
     fi
-    cycle_length="$(_retro_settings_get .retro.cycle_length 10)"
+    cycle_length="$(_retro_cycle_length)"
     cur="$(_retro_current_dir)"
     if [ -n "$cur" ] && [ -d "$cur" ]; then
         current_cycle="$(cat "$cur/.cycle-count" 2>/dev/null || echo 0)"

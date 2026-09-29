@@ -54,5 +54,28 @@ for fresh in nofile withfile; do
     [ -f "$CUR/.retro-due" ] && ok "$fresh: .retro-due written after enable" || bad "$fresh: no .retro-due after enable"
 done
 
+# K-106: `retro status` / `retro history` divide by the settings cycle_length;
+# 0 (or any unusable value) must fall back to 10, not crash.
+echo "=== cycle_length guard (K-106) ==="
+printf '{"cycle":1}\n' > "$CUR/logs/cycle-counter.ndjson"
+printf '3\n' > "$CUR/.cycle-count"
+for raw in 0 -1 '"abc"' '""' 1000000000 null; do
+    echo "{\"retro\":{\"cycle_length\":$raw}}" > "$HOME/.yakos-state/settings.json"
+    for sub in status history; do
+        rc=0; out="$(retro "$sub")" || rc=$?
+        if [ "$rc" -ne 0 ]; then bad "cycle_length=$raw retro $sub: rc=$rc: $out"; continue; fi
+        case "$out" in
+            *"Cycle length:"*" 10"*) ok "cycle_length=$raw retro $sub: falls back to 10" ;;
+            *) bad "cycle_length=$raw retro $sub: no fallback to 10: $out" ;;
+        esac
+    done
+done
+echo '{"retro":{"cycle_length":"010"}}' > "$HOME/.yakos-state/settings.json"
+out="$(retro status)" || true
+case "$out" in *"Cycle length:"*" 10"*) ok "leading zeros read as decimal 10" ;; *) bad "leading zeros: $out" ;; esac
+echo '{"retro":{"cycle_length":5}}' > "$HOME/.yakos-state/settings.json"
+out="$(retro status)" || true
+case "$out" in *"Cycle length:"*" 5"*) ok "valid 5 honored" ;; *) bad "valid 5: $out" ;; esac
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

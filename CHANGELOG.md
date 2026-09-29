@@ -90,6 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   WARN naming the value; null or absent stays silent. Both implementations
   apply the same rules and exit 0. Leading zeros no longer make bash read
   the value as octal.
+  `yakos retro status` and `retro history` apply the same range and no
+  longer die on `count / 0`.
 
 - **Go hooks read identity and coord state like bash (K-100).**
   peer-claim, peer-claim-confirm, supervisor-stream and context-threshold
