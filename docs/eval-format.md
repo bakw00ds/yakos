@@ -162,14 +162,32 @@ promotion candidate (or a refused-reason).  Promotion itself is Phase 3.
 ```bash
 yakos model-routing eval <agent-id> [--judge <agent>] \
                                      [--max-cost-usd <n>] \
+                                     [--tiers haiku,sonnet] [--include-fable] \
+                                     [--cases <globs|ids>] \
                                      [--project <path>]
 ```
+
+- `--tiers` picks the tiers to run (default haiku,sonnet,opus). The agent's
+  current tier must be included, otherwise no candidate is emitted.
+  `--include-fable` adds fable.
+- `--cases` takes comma-separated filename globs and case ids (`01,02` or
+  `case-0*.json`); every entry must match. A subset below
+  `min_cases_for_eval` is still refused.
+- The default judge is `code-reviewer` (`architect` for cross-cutting and
+  design agents) and never the subject; when the default equals the
+  subject the runner falls back to another judge and logs it.
+- Cost, duration and tokens come from the run's `dispatch_finished`
+  dispatch-log record. If a dispatch reports no cost the run stops with
+  partial results and no candidate, since the cap cannot be enforced.
+- The summary prints each tier's Wilson 95% lower bound and a
+  `gate decision:` line (CI gate at `min_cases_for_confidence` scored
+  cases, strict floor below); `eval_run_finished` carries the same data.
 
 The harness:
 
 1. Validates `<agent>/eval/` cases against the schema above.
 2. Refuses if `n_cases < min_cases_for_eval` (default 5).
-3. Dispatches each case at haiku / sonnet / opus using
+3. Dispatches each case at each selected tier using
    `yakos dispatch --model <tier> --eval-run-id <run_id>`.
 4. Scores each response with a judge agent (never the same agent as the
    subject — this is a hard constraint with no `--force` override).

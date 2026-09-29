@@ -60,7 +60,13 @@ Follow `playbook:model-routing-eval` exactly.  Key steps:
 8. Emit `eval_run_finished`; emit candidate to
    `~/.yakos-state/model-routing-candidates.ndjson` or emit
    `candidate_refused` with reason.
-9. Print a one-paragraph human-readable summary to stdout.
+9. Print a one-paragraph human-readable summary to stdout, including the
+   per-tier Wilson lower bound and the gate decision.
+
+Runner flags: `--tiers <list>` (default haiku,sonnet,opus; the agent's
+current tier must be included), `--include-fable`, `--cases <globs|ids>`,
+`--judge`, `--max-cost-usd`. The runner stops with partial results and no
+candidate if a dispatch reports no cost.
 
 ## Special rules
 
