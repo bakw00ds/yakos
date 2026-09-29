@@ -507,6 +507,43 @@ _h_fire >/dev/null
 if [ "$(_h_scored)" = "2" ]; then ok "(h) new version after the window: scored again"; else bad "(h) new version after the window not scored (count=$(_h_scored))"; fi
 
 # ---------------------------------------------------------------------------
+# Test (h2): debounce state hardening (K-112 review round)
+# ---------------------------------------------------------------------------
+note ""
+note "=== Test (h2): state file: symlink refused, leading zeros are base 10, failed write warns ==="
+STATE_F="$WORK_CURRENT/.plan-quality-last-scored"
+
+reset_state
+VICTIM="$(mktemp -t yakos-victim.XXXXXX)"; printf 'precious\n' > "$VICTIM"
+ln -s "$VICTIM" "$STATE_F"
+write_fresh_plan "$PLAN_PATH" "$FIXTURES/vague-plan.md"
+_h_fire >/dev/null
+if [ "$(cat "$VICTIM")" = "precious" ]; then ok "(h2) symlinked state: target not overwritten"; else bad "(h2) symlink target overwritten: $(cat "$VICTIM")"; fi
+if [ "$(_h_scored)" = "1" ]; then ok "(h2) symlinked state: plan still scored"; else bad "(h2) symlinked state: not scored"; fi
+if grep -q 'debounce state file is a symlink' "$WORK_CURRENT/logs/plan-quality-score.ndjson" 2>/dev/null; then ok "(h2) symlinked state: WARN logged"; else bad "(h2) symlinked state: no WARN"; fi
+rm -f "$STATE_F" "$VICTIM"
+
+reset_state
+write_fresh_plan "$PLAN_PATH" "$FIXTURES/vague-plan.md"
+_h_m="$(stat -c %Y "$PLAN_PATH" 2>/dev/null || stat -f %m "$PLAN_PATH")"
+printf '0%s 0999\n' "$_h_m" > "$STATE_F"
+_h_rc=0; _h_fire >/dev/null || _h_rc=$?
+_h_sc="$(_h_scored)"
+if [ "${_h_sc:-0}" = "0" ] && grep -q 'unchanged since the last score' "$WORK_CURRENT/logs/plan-quality-score.ndjson" 2>/dev/null; then ok "(h2) leading-zero state parsed base 10 (debounced, no octal crash)"; else bad "(h2) leading-zero state: scored=$(_h_scored)"; fi
+printf '%s 0999\n' "$((_h_m - 30))" > "$STATE_F"
+_h_fire >/dev/null
+if [ "$(_h_scored)" = "1" ]; then ok "(h2) leading-zero scored-at (old): new version scored, no octal crash"; else bad "(h2) leading-zero scored-at: scored=$(_h_scored)"; fi
+rm -f "$STATE_F"
+
+reset_state
+mkdir "$STATE_F"
+write_fresh_plan "$PLAN_PATH" "$FIXTURES/vague-plan.md"
+_h_fire >/dev/null
+if [ "$(_h_scored)" = "1" ]; then ok "(h2) unwritable state: plan still scored"; else bad "(h2) unwritable state: not scored"; fi
+if grep -q 'cannot record debounce state' "$WORK_CURRENT/logs/plan-quality-score.ndjson" 2>/dev/null; then ok "(h2) unwritable state: WARN logged"; else bad "(h2) unwritable state: no WARN"; fi
+rmdir "$STATE_F" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
 # Test (i): PreToolUse gate — no .plan-blocked → PASS
 # ---------------------------------------------------------------------------
 note ""

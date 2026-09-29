@@ -230,7 +230,18 @@ func (h *Hook) runPostToolUse(c context.Context, out hooktype.HookOutput, in hoo
 	if h.WorkCurrentDir != "" {
 		statePath = filepath.Join(h.WorkCurrentDir, lastScoredFile)
 	}
-	if mtime > 0 && statePath != "" {
+	// A symlinked state file is never followed (its target would be
+	// overwritten): treat it as no state and do not write it (K-112).
+	stateLink := false
+	if statePath != "" {
+		if fi, err := os.Lstat(statePath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			stateLink = true
+			h.warnf(&out, "plan-quality-score: %s is a symlink; debounce state disabled", statePath)
+			h.log(&out, in, "WARN", "pass", "debounce state file is a symlink; not reading or writing it",
+				map[string]any{"path": statePath})
+		}
+	}
+	if mtime > 0 && statePath != "" && !stateLink {
 		lastMtime, lastAt, haveState := readLastScored(statePath)
 		if haveState && lastMtime == mtime {
 			h.log(&out, in, "REPORT", "pass",
@@ -275,8 +286,13 @@ func (h *Hook) runPostToolUse(c context.Context, out hooktype.HookOutput, in hoo
 	// Record this scoring BEFORE running it so a rapid re-save collapses into
 	// it; an infra failure forgets it again so the next write retries.
 	stateWritten, scored := false, false
-	if mtime > 0 && statePath != "" {
+	if mtime > 0 && statePath != "" && !stateLink {
 		stateWritten = writeLastScored(statePath, mtime, nowT.Unix())
+		if !stateWritten {
+			h.warnf(&out, "plan-quality-score: cannot record debounce state at %s; rapid re-saves will not be collapsed", statePath)
+			h.log(&out, in, "WARN", "pass", "cannot record debounce state; continuing without it",
+				map[string]any{"path": statePath})
+		}
 	}
 	defer func() {
 		if stateWritten && !scored {

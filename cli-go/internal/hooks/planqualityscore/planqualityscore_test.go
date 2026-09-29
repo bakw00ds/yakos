@@ -950,3 +950,66 @@ func TestThresholdOverflowAndOutOfRange(t *testing.T) {
 		})
 	}
 }
+
+// K-112 review round: the debounce state file is never followed through a
+// symlink, and a failed write is a WARN, not silence.
+func TestSymlinkedStateFileNotFollowed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on windows")
+	}
+	e := newEnv(t)
+	victim := filepath.Join(t.TempDir(), "victim.txt")
+	if err := os.WriteFile(victim, []byte("precious\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(e.work, ".plan-quality-last-scored")); err != nil {
+		t.Fatal(err)
+	}
+	e.writePlan(t, "0.9", "", 0)
+	e.run(t, "Write", nil)
+	got, _ := os.ReadFile(victim)
+	if string(got) != "precious\n" {
+		t.Fatalf("symlink target overwritten: %q", got)
+	}
+	if e.callCount(t) != 1 {
+		t.Fatalf("plan should still be scored: %d calls", e.callCount(t))
+	}
+	if !strings.Contains(e.lastLogs(t), "debounce state file is a symlink") {
+		t.Error("no WARN about the symlink")
+	}
+}
+
+func TestUnwritableStateWarns(t *testing.T) {
+	e := newEnv(t)
+	// A directory where the state file should be: the write fails.
+	if err := os.Mkdir(filepath.Join(e.work, ".plan-quality-last-scored"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.writePlan(t, "0.9", "", 0)
+	e.run(t, "Write", nil)
+	if e.callCount(t) != 1 {
+		t.Fatalf("plan should still be scored: %d calls", e.callCount(t))
+	}
+	if !strings.Contains(e.lastLogs(t), "cannot record debounce state") {
+		t.Error("no WARN about the failed state write")
+	}
+}
+
+func (e *env) lastLogs(t *testing.T) string {
+	t.Helper()
+	data, _ := os.ReadFile(filepath.Join(e.work, "logs", "plan-quality-score.ndjson"))
+	return string(data)
+}
+
+func TestLeadingZeroStateIsBase10(t *testing.T) {
+	e := newEnv(t)
+	e.writePlan(t, "0.9", "", 0)
+	fi, _ := os.Stat(e.plan)
+	m := fi.ModTime().Unix()
+	_ = os.WriteFile(filepath.Join(e.work, ".plan-quality-last-scored"),
+		[]byte(fmt.Sprintf("0%d 00999\n", m)), 0o644)
+	e.run(t, "Write", nil)
+	if e.callCount(t) != 0 {
+		t.Fatal("same mtime written with a leading zero must still debounce")
+	}
+}
