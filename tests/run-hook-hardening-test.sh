@@ -455,7 +455,10 @@ run_suite() {
     ct_proj="$ct_sb/proj"
     ct_enc="$(bash -c ". '$HOOKS/lib/compat.sh'; ct_encode_project_path '$ct_proj'")"
     mkdir -p "$ct_sb/home/.claude/projects/$ct_enc"
-    head -c 700000 /dev/zero | tr '\0' 'x' > "$ct_sb/home/.claude/projects/$ct_enc/transcript-$ct_sid.jsonl"
+    # Real-shaped transcript named <session_id>.jsonl (K-112), exactly 700000 bytes.
+    awk -v line="$(cat "$REPO_ROOT/tests/fixtures/hooks/claude-transcript-line.jsonl")" -v n=700000 \
+        'BEGIN { while (t < n) { l = line "\n"; if (t + length(l) > n) l = substr(l, 1, n - t); printf "%s", l; t += length(l) } }' \
+        > "$ct_sb/home/.claude/projects/$ct_enc/$ct_sid.jsonl"
     run "$SH" "$HOOKS" context-threshold.sh "$ct_sb" "{\"session_id\":\"$ct_sid\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"p\"}"
     ct_log="$ct_sb/work/current/logs/context-threshold.ndjson"
     if [ "$rc" = 0 ] && grep -q '"pct": *87' "$ct_log" 2>/dev/null && ! grep -q probe_unavailable "$ct_log" 2>/dev/null \

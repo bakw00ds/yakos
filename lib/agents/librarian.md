@@ -35,7 +35,7 @@ personality is calibrated against that failure mode.
 2. **Read inputs in this order** (stop early if any source is
    empty/missing — don't fabricate):
    - Last 10 user prompts + assistant responses from the active
-     runtime transcript (claude: `~/.claude/projects/<encoded>/transcript-<id>.jsonl`;
+     runtime transcript (claude: `~/.claude/projects/<encoded>/<id>.jsonl`;
      codex / agy: per-runtime path resolved via `paths.sh`)
    - `<work>/current/decisions.md` tail (last 30min of mtime)
    - `<work>/current/messages.ndjson` tail (last 100 events)

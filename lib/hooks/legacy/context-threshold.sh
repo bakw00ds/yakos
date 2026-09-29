@@ -59,8 +59,9 @@ current_dir="$(yakos_current_dir)"
 
 _probe_context_pct_claude() {
     # Estimate from transcript JSONL size. claude transcripts live at
-    # ~/.claude/projects/<encoded>/transcript-<id>.jsonl. The
-    # session_id is available via hi_session_id; the encoded project
+    # ~/.claude/projects/<encoded>/<id>.jsonl (K-112: not "transcript-<id>",
+    # a name Claude Code never wrote, so this probe always came back empty).
+    # The session_id is available via hi_session_id; the encoded project
     # path via ct_encode_project_path.
     local session_id encoded transcript size estimated_tokens window_size pct
     session_id="$(hi_session_id 2>/dev/null || true)"
@@ -68,7 +69,7 @@ _probe_context_pct_claude() {
 
     local project="${CLAUDE_PROJECT_DIR:-$PWD}"
     encoded="$(ct_encode_project_path "$project")"
-    transcript="$HOME/.claude/projects/$encoded/transcript-$session_id.jsonl"
+    transcript="$HOME/.claude/projects/$encoded/$session_id.jsonl"
     [ -f "$transcript" ] || return 1
 
     # Rough estimate: bytes / 4 = tokens. Refine in M3.1 with real probe.

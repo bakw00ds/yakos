@@ -803,7 +803,11 @@ _ct_transcript() {
     proj="$(dirname "$1")"
     enc="${proj//\//-}"; enc="${enc//./-}"
     mkdir -p "$1/.claude/projects/$enc"
-    head -c "$2" /dev/zero | tr '\0' 'x' > "$1/.claude/projects/$enc/transcript-fixture-generic-tool-0001.jsonl"
+    # Real-shaped transcript (K-112): JSONL lines from claude-transcript-line.jsonl in a
+    # file named <session_id>.jsonl, exactly N bytes.
+    awk -v line="$(cat "$FIXT/claude-transcript-line.jsonl")" -v n="$2" \
+        'BEGIN { while (t < n) { l = line "\n"; if (t + length(l) > n) l = substr(l, 1, n - t); printf "%s", l; t += length(l) } }' \
+        > "$1/.claude/projects/$enc/fixture-generic-tool-0001.jsonl"
 }
 home_ct_notice() { _ct_transcript "$1" 640000; }   # ~80% of the 200k-token window: over the 75% notice line
 home_ct_low() { _ct_transcript "$1" 80000; }       # ~10%
