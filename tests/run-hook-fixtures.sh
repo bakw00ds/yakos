@@ -404,6 +404,37 @@ setup_allowlist_bypass_substring_collision_scope() {
 EOF
 }
 
+# ---- K-99: hook-bypass Scope is exact-or-glob (was substring) -------------
+# Each setup writes the strict go-api allowlist (web/** is not allowed, so
+# web/index.js blocks) plus one active path-allowlist bypass entry with the
+# given Scope. Probe scope = "web/index.js".
+_bp_scope_setup() {
+    setup_allowlist_strict "$1"
+    mkdir -p "$1/work/current"
+    cat > "$1/work/current/hook-bypass.md" <<EOF
+# Active hook bypasses
+
+## Active entries
+
+## bypass:k99-scope-fixture
+
+**Hook:** path-allowlist
+**Reason:** K-99 scope-matching fixture
+**Approved by:** TestSuite
+**Created:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**Expires:** $(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+**Scope:** $2
+**Follow-up:** none — fixture only
+EOF
+}
+setup_bp_scope_exact()      { _bp_scope_setup "$1" 'web/index.js'; }
+setup_bp_scope_longer()     { _bp_scope_setup "$1" 'web/index.js-rotation'; }
+setup_bp_scope_freetext()   { _bp_scope_setup "$1" 'path=web/index.js reason=intentional'; }
+setup_bp_scope_glob()       { _bp_scope_setup "$1" 'web/**'; }
+setup_bp_scope_bare_prefix() { _bp_scope_setup "$1" 'web'; }
+setup_bp_scope_empty()      { _bp_scope_setup "$1" ''; }
+setup_bp_scope_case()       { _bp_scope_setup "$1" 'Web/Index.js'; }
+
 setup_with_decisions_stale() {
     mkdir -p "$1/work/current"
     # Touch decisions.md as 3h old
@@ -873,6 +904,13 @@ echo
 case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlist setup_allowlist_strict
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_with_bypass     # bypass dir + allowlist absent → permissive
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_bp_scope_exact       # K-99: exact scope bypasses
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_bp_scope_glob        # K-99: web/** glob bypasses
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_bp_scope_longer      # K-99: web/index.js-rotation must NOT bypass web/index.js
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_bp_scope_freetext    # K-99: free-text scope containing the path no longer bypasses
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_bp_scope_bare_prefix # K-99: bare prefix needs prefix/**
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_bp_scope_empty       # K-99: empty scope ignored
+case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_bp_scope_case        # K-99: case-sensitive, like bash
 case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlist setup_no_allowlist    # no allowlist → permissive WARN
 # namespaced agent ("yakos:go-api") must hit bare-keyed policy ("go-api")
 case_check path-allowlist.sh   pretooluse-edit-api-namespaced.json 0 path-allowlist setup_allowlist_strict_namespaced

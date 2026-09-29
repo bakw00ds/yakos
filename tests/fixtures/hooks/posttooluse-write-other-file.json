@@ -1,0 +1,18 @@
+{
+  "_doc": "K-99: PostToolUse Write to a file that is not work/current/plan.md; the plan-quality scorer must be a silent no-op.",
+  "session_id": "fixture-plan-score-0002",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "__CLAUDE_PROJECT_DIR__",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "__CLAUDE_PROJECT_DIR__/api/handler.go",
+    "content": "package main\n"
+  },
+  "tool_response": {
+    "filePath": "__CLAUDE_PROJECT_DIR__/api/handler.go",
+    "type": "update"
+  },
+  "tool_use_id": "toolu_plan_score_002"
+}
