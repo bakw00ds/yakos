@@ -45,7 +45,11 @@ func TestWorkFlagErrorText_BeforeAndAfterConversion(t *testing.T) {
 		// ---- compact threshold ----
 		{name: "compact_threshold_auto_missing", args: []string{"compact", "threshold", "--auto"}, wantStderr: "compact threshold: --auto requires a value (e.g. --auto 85)\n", wantExit: 1},
 		{name: "compact_threshold_too_many", args: []string{"compact", "threshold", "1", "2"}, wantStderr: "compact threshold: too many arguments\n", wantExit: 1},
-		{name: "compact_threshold_auto_eq_is_positional", args: []string{"compact", "threshold", "--auto=85", "1"}, wantStderr: "compact threshold: too many arguments\n", wantExit: 1},
+		// "--auto=85" is now recognized by cliflag (was an ordinary positional): with a
+		// second positional it is "too many"; alone it sets the threshold (covered below).
+		{name: "compact_threshold_auto_eq_two_positionals", args: []string{"compact", "threshold", "--auto=85", "1", "2"}, wantStderr: "compact threshold: too many arguments\n", wantExit: 1},
+		{name: "compact_threshold_auto_bare_eq_is_positional", args: []string{"compact", "threshold", "--auto=", "1"}, wantStderr: "compact threshold: too many arguments\n", wantExit: 1},
+		{name: "compact_threshold_auto_last_missing", args: []string{"compact", "threshold", "--auto", "85", "--auto"}, wantStderr: "compact threshold: --auto requires a value (e.g. --auto 85)\n", wantExit: 1},
 		// ---- supervise ----
 		{name: "supervise_tail_help_is_unknown_flag", args: []string{"supervise", "tail", "--help"}, wantStderr: "supervise tail: unknown flag \"--help\"\n", wantExit: 1},
 		{name: "supervise_status_unknown", args: []string{"supervise", "status", "--bogus"}, wantStderr: "supervise status: unknown flag \"--bogus\"\n", wantExit: 1},
@@ -84,7 +88,10 @@ func TestWorkFlagErrorText_BeforeAndAfterConversion(t *testing.T) {
 		{name: "plan_correlate_since_missing", args: []string{"plan", "correlate", "--since"}, wantStderr: "plan score correlate: --since requires a value\n", wantExit: 1},
 		{name: "plan_correlate_minn_missing", args: []string{"plan", "correlate", "--min-n"}, wantStderr: "plan score correlate: --min-n requires a value\n", wantExit: 1},
 		{name: "plan_correlate_minn_bad", args: []string{"plan", "correlate", "--min-n", "x"}, wantStderr: "plan score correlate: --min-n \"x\" must be a positive integer\n", wantExit: 1},
-		{name: "plan_correlate_minn_eq_bad", args: []string{"plan", "correlate", "--min-n=-1"}, wantStderr: "plan score correlate: unknown option \"--min-n=-1\" (try --help)\n", wantExit: 1}, // old prefix check arg[:7]=="--min-n=" is dead code: the "=" form was never accepted
+		{name: "plan_correlate_minn_eq_bad", args: []string{"plan", "correlate", "--min-n=-1"}, wantStderr: "plan score correlate: --min-n value \"-1\" must be a positive integer\n", wantExit: 1}, // "=" form is now accepted (the old prefix check was dead code)
+		{name: "plan_correlate_minn_zero", args: []string{"plan", "correlate", "--min-n", "0"}, wantStderr: "plan score correlate: --min-n \"0\" must be a positive integer\n", wantExit: 1},
+		{name: "plan_correlate_minn_last_bad_wins", args: []string{"plan", "correlate", "--min-n", "3", "--min-n", "0"}, wantStderr: "plan score correlate: --min-n \"0\" must be a positive integer\n", wantExit: 1},
+		{name: "plan_correlate_project_bare_eq", args: []string{"plan", "correlate", "--project="}, wantStderr: "plan score correlate: unknown option \"--project=\" (try --help)\n", wantExit: 1},
 		{name: "plan_correlate_unknown", args: []string{"plan", "correlate", "--bogus"}, wantStderr: "plan score correlate: unknown option \"--bogus\" (try --help)\n", wantExit: 1},
 		{name: "plan_correlate_double_dash", args: []string{"plan", "correlate", "--"}, wantStderr: "plan score correlate: unknown option \"--\" (try --help)\n", wantExit: 1},
 		// ---- work close ----
@@ -156,5 +163,35 @@ func TestWorkHelpFlagPrintsHelp(t *testing.T) {
 		if code != 0 || stdout == "" || stderr != "" {
 			t.Errorf("%v: code=%d stdout-empty=%v stderr=%q", args, code, stdout == "", stderr)
 		}
+	}
+}
+
+// TestWorkFlags_EqualsFormNowAccepted pins the deliberate behavior change of
+// converting `compact threshold --auto` and `plan score correlate --min-n`:
+// the "--name=value" spelling is recognized (both were "positional" /
+// "unknown option" before) and `--min-n 0 --help` now prints help.
+func TestWorkFlags_EqualsFormNowAccepted(t *testing.T) {
+	goBin := resolveGoBinary()
+	if _, err := os.Stat(goBin); err != nil {
+		t.Skipf("Go yakos binary not found at %q: %v (run `make build` first)", goBin, err)
+	}
+	env := map[string]string{"HOME": t.TempDir(), "YAKOS_ROOT": "", "YAKOS_LIB": ""}
+
+	stdout, stderr, code := runGoSplit(t, []string{"compact", "threshold", "--auto=85"}, env)
+	if code != 0 || !strings.Contains(stdout, "auto-compact threshold set to 85%") {
+		t.Errorf("--auto=85: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	stdout, stderr, code = runGoSplit(t, []string{"compact", "threshold", "--auto", "86", "85"}, env)
+	if code != 0 || !strings.Contains(stdout, "auto-compact threshold set to 86%") {
+		t.Errorf("--auto 86 85: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	// Valid --min-n reaches the scorer (no log in the temp HOME) instead of "unknown option".
+	_, stderr, code = runGoSplit(t, []string{"plan", "correlate", "--min-n=5"}, env)
+	if code != 1 || strings.Contains(stderr, "unknown option") || !strings.Contains(stderr, "No records found") {
+		t.Errorf("--min-n=5: exit=%d stderr=%q", code, stderr)
+	}
+	stdout, _, code = runGoSplit(t, []string{"plan", "correlate", "--min-n", "0", "--help"}, env)
+	if code != 0 || !strings.Contains(stdout, "Subcommands:") {
+		t.Errorf("--min-n 0 --help: exit=%d stdout=%q", code, stdout)
 	}
 }
