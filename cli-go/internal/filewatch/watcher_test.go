@@ -255,6 +255,18 @@ func newFakeWatcher(t *testing.T) (*Watcher, *fakeClock) {
 	return w, clk
 }
 
+// touch creates an empty file under the watcher root and returns its path. A
+// modified-only window stat-checks its path (directories and vanished files
+// are dropped), so debounce tests need a real file.
+func touch(t *testing.T, w *Watcher, name string) string {
+	t.Helper()
+	p := filepath.Join(w.root, name)
+	if err := os.WriteFile(p, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 // TestDebounceCollapses verifies that rapid writes to the same file within
 // the debounce window produce a single event, and that the window restarts on
 // every write. Driven by a fake clock: no real fsnotify delivery or sleeps,
@@ -262,9 +274,10 @@ func newFakeWatcher(t *testing.T) (*Watcher, *fakeClock) {
 func TestDebounceCollapses(t *testing.T) {
 	t.Parallel()
 	w, clk := newFakeWatcher(t)
+	burst := touch(t, w, "burst.txt")
 
 	for i := 0; i < 5; i++ {
-		w.debounce("burst.txt", "/x/burst.txt", ActionModified)
+		w.debounce("burst.txt", burst, ActionModified)
 		clk.advance(debounceDuration - 1) // just inside the window each time
 		if n := len(w.Events()); n != 0 {
 			t.Fatalf("event emitted mid-burst after write #%d", i)
@@ -288,11 +301,12 @@ func TestDebounceCollapses(t *testing.T) {
 func TestDebounceStaleCallbackIgnored(t *testing.T) {
 	t.Parallel()
 	w, clk := newFakeWatcher(t)
+	a := touch(t, w, "a.txt")
 
 	// Superseded before firing.
-	w.debounce("a.txt", "/x/a.txt", ActionModified)
+	w.debounce("a.txt", a, ActionModified)
 	stale := clk.lastCallback()
-	w.debounce("a.txt", "/x/a.txt", ActionModified)
+	w.debounce("a.txt", a, ActionModified)
 	stale() // late-running callback of the superseded window
 	if n := len(w.Events()); n != 0 {
 		t.Fatalf("stale callback flushed early: %d event(s)", n)
@@ -302,11 +316,11 @@ func TestDebounceStaleCallbackIgnored(t *testing.T) {
 
 	// Fired, flushed, then a new burst starts; the old callback runs again
 	// (as a Reset-rearmed timer would) and must not eat the new window.
-	w.debounce("a.txt", "/x/a.txt", ActionModified)
+	w.debounce("a.txt", a, ActionModified)
 	stale2 := clk.lastCallback()
 	clk.advance(debounceDuration)
 	waitForEvent(t, w.Events(), time.Second)
-	w.debounce("a.txt", "/x/a.txt", ActionModified)
+	w.debounce("a.txt", a, ActionModified)
 	stale2()
 	if n := len(w.Events()); n != 0 {
 		t.Fatalf("stale callback flushed next window early: %d event(s)", n)
@@ -557,6 +571,9 @@ func TestYakosSkipped(t *testing.T) {
 // starts is itself watched — files inside it emit events.
 //
 // It polls for the watch to be registered instead of sleeping, then writes.
+// Note this test alone cannot detect a lost watch, because the rescan after
+// registration would report the file anyway; TestNewSubdirRearmedAfterWatchLoss
+// is the guard for the lost-watch bug.
 func TestNewSubdirGetsWatched(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -663,6 +680,81 @@ func TestNewSubdirReportsFilesCreatedBeforeWatch(t *testing.T) {
 	}
 	awaitCond(t, "rescan to report the early file", func() bool { return w.hasPending("newpkg/early.go") })
 	requireOne(t, flushExpect(t, w, clk, 1), "newpkg/early.go", ActionCreated)
+}
+
+// TestDirectoryModifiedEventDropped: Windows reports "modified" on the parent
+// directory when a child changes. Only file events are surfaced, so a
+// modified-only window on a directory (or a vanished path) emits nothing.
+// Injecting the event keeps this platform-neutral.
+func TestDirectoryModifiedEventDropped(t *testing.T) {
+	t.Parallel()
+	w, clk := newFakeWatcher(t)
+	dir := filepath.Join(w.root, "newpkg")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	w.debounce("newpkg", dir, ActionModified)
+	w.debounce("gone.txt", filepath.Join(w.root, "gone.txt"), ActionModified)
+	clk.advance(debounceDuration)
+	if n := len(w.Events()); n != 0 {
+		t.Fatalf("%d event(s) emitted for a directory/vanished path; want none", n)
+	}
+	// A real file still flows.
+	f := filepath.Join(w.root, "f.txt")
+	if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	w.debounce("f.txt", f, ActionModified)
+	clk.advance(debounceDuration)
+	if ev := waitForEvent(t, w.Events(), time.Second); ev.Path != "f.txt" || ev.Action != ActionModified {
+		t.Errorf("event = %+v; want f.txt modified", ev)
+	}
+}
+
+// TestRescanCap checks both sides of rescanFileCap: at the cap every file is
+// reported individually; one over, a single summary event for the directory
+// carries the count.
+func TestRescanCap(t *testing.T) {
+	// Serial on purpose: it opens 500+ files, and a serial test runs before
+	// the parallel tests resume, so no sibling watcher is closing descriptors
+	// concurrently (seen once as EBADF on a write under heavy load).
+	for _, tc := range []struct {
+		name  string
+		files int
+	}{{"at-cap", rescanFileCap}, {"over-cap", rescanFileCap + 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, clk := newFakeWatcher(t)
+			dir := filepath.Join(w.root, "bulk")
+			if err := os.Mkdir(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < tc.files; i++ {
+				if err := os.WriteFile(filepath.Join(dir, "f"+strconv.Itoa(i)+".txt"), nil, 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w.rescanTree(dir)
+			clk.advance(debounceDuration)
+			var evs []ChangeEvent
+			for len(w.Events()) > 0 {
+				evs = append(evs, <-w.Events())
+			}
+			if tc.files <= rescanFileCap {
+				if len(evs) != tc.files {
+					t.Fatalf("got %d events; want %d per-file events", len(evs), tc.files)
+				}
+				for _, ev := range evs {
+					if ev.Count != 0 || ev.Action != ActionCreated {
+						t.Fatalf("unexpected event %+v", ev)
+					}
+				}
+				return
+			}
+			if len(evs) != 1 || evs[0].Path != "bulk" || evs[0].Action != ActionCreated || evs[0].Count != tc.files {
+				t.Fatalf("events = %d (first %+v); want one summary for bulk with Count=%d", len(evs), evs[0], tc.files)
+			}
+		})
+	}
 }
 
 // TestCloseIsClean verifies that Close() does not block or panic, is
