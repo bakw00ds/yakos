@@ -45,6 +45,14 @@ ho_logdir() {
     fi
 }
 
+# ho_json_str <text>: <text> as a JSON string literal, without jq. Control
+# characters (newline, tab, CR, ...) become spaces, then backslash and double
+# quote are escaped, so the result is always valid JSON. Used only for the
+# minimal records written when jq is missing, hung or failing.
+ho_json_str() {
+    printf '"%s"' "$(printf '%s' "$1" | tr '\000-\037' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
 ho_log() {
     # ho_log <hook-name> <severity> <decision> <reason> [extra-jq-object]
     # extra-jq-object defaults to {}; merged into the record.
@@ -60,7 +68,7 @@ ho_log() {
     if ! command -v jq >/dev/null 2>&1; then
         printf '{"ts":"%s","hook":"%s","severity":"%s","decision":"%s","reason":%s}\n' \
             "$(ho_now)" "$hook" "$severity" "$decision" \
-            "$(printf '%s' "$reason" | sed 's/"/\\"/g; s/^/"/; s/$/"/')" \
+            "$(ho_json_str "$reason")" \
             >> "$logfile"
         return 0
     fi
@@ -85,7 +93,7 @@ ho_log() {
         # jq timed out (124) or crashed: keep a minimal record rather than none.
         printf '{"ts":"%s","hook":"%s","severity":"%s","decision":"%s","reason":%s}\n' \
             "$(ho_now)" "$hook" "$severity" "$decision" \
-            "$(printf '%s' "$reason" | sed 's/"/\\"/g; s/^/"/; s/$/"/')" \
+            "$(ho_json_str "$reason")" \
             >> "$logfile"
         return 0
     fi
