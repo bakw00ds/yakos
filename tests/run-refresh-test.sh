@@ -608,6 +608,58 @@ else
 fi
 
 # ===========================================================================
+# Test 14 (K-94 review): <, > and & in a template doc string are written raw
+# (byte parity with Go, whose merge test asserts the same expected bytes).
+# ===========================================================================
+echo ""
+echo "Test 14: settings merge writes <, >, & unescaped"
+T14="$WORKDIR/t14"
+mkdir -p "$T14/root/lib/hooks" "$T14/root/lib/settings" "$T14/root/lib/agents" "$T14/project/.claude" "$T14/home"
+cat > "$T14/root/lib/settings/settings.template.json" <<'JSON'
+{"hooks":{"Stop":[{"_doc":"run <plan_id> && a > b","hooks":[{"type":"command","command":"${CLAUDE_PROJECT_DIR}/scripts/hooks/x.sh"}]}]}}
+JSON
+echo '{"hooks":{}}' > "$T14/project/.claude/settings.json"
+HOME="$T14/home" YAKOS_ROOT="$T14/root" YAKOS_LIB="$YAKOS_LIB" \
+    bash "$REFRESH_SH" --project "$T14/project" >/dev/null 2>&1 || true
+if grep -qF '"_doc": "run <plan_id> && a > b"' "$T14/project/.claude/settings.json"; then
+    ok "doc string written raw"
+else
+    fail "doc string not written raw: $(cat "$T14/project/.claude/settings.json")"
+fi
+
+# ===========================================================================
+# Test 15 (K-94 review): orphan scripts/hooks/legacy/ from the old layout is
+# pruned when every file has a flat counterpart; preserved otherwise.
+# ===========================================================================
+echo ""
+echo "Test 15: orphan legacy/ subdir pruned (covered) / preserved (uncovered)"
+T15="$(setup_project proj-in-sync)"
+mkdir -p "$T15/project/scripts/hooks/legacy"
+cp "$T15/project/scripts/hooks/cycle-counter.sh" "$T15/project/scripts/hooks/legacy/"
+cp "$T15/project/scripts/hooks/cycle-counter.sh.framework-hash" "$T15/project/scripts/hooks/legacy/"
+DRY15="$(run_refresh "$T15" --dry-run 2>&1 || true)"
+if echo "$DRY15" | grep -q "would remove orphan legacy/" && [ -d "$T15/project/scripts/hooks/legacy" ]; then
+    ok "dry-run reports the orphan and removes nothing"
+else
+    fail "dry-run did not report/preserve orphan legacy/"
+fi
+OUT15="$(run_refresh "$T15" 2>&1 || true)"
+if [ ! -d "$T15/project/scripts/hooks/legacy" ] && echo "$OUT15" | grep -q "removed orphan legacy/ subdir (2 files"; then
+    ok "orphan legacy/ removed with one log line"
+else
+    fail "orphan legacy/ not removed: $(echo "$OUT15" | grep legacy)"
+fi
+T15B="$(setup_project proj-in-sync)"
+mkdir -p "$T15B/project/scripts/hooks/legacy"
+echo "mine" > "$T15B/project/scripts/hooks/legacy/operator-owned.sh"
+run_refresh "$T15B" >/dev/null 2>&1 || true
+if [ -f "$T15B/project/scripts/hooks/legacy/operator-owned.sh" ]; then
+    ok "legacy/ with an uncovered file is preserved"
+else
+    fail "legacy/ with an uncovered file was removed"
+fi
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""

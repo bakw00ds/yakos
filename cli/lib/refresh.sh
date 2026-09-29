@@ -258,6 +258,31 @@ _sync_hooks() {
             _sync_one "$src" "$dst_root/$base" "$base"
         done < <(find -L "$src_root/legacy" -type f 2>/dev/null | LC_ALL=C sort)
     fi
+
+    _prune_legacy_mirror "$dst_root"
+}
+
+# _prune_legacy_mirror <dst_root> — one-shot cleanup for projects refreshed
+# under the old layout, which mirrored lib/hooks/legacy/ as
+# scripts/hooks/legacy/. If that subdirectory exists and every file in it has
+# a flat counterpart (same basename) directly under dst_root, it is a stale
+# orphan: remove it and log one line. Otherwise leave it alone.
+# Mirrors cli-go/internal/refresh/refresh.go pruneLegacyMirror.
+_prune_legacy_mirror() {
+    local dst_root="$1" legacy f count=0
+    legacy="$dst_root/legacy"
+    [ -d "$legacy" ] && [ ! -L "$legacy" ] || return 0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        count=$((count + 1))
+        [ -e "$dst_root/$(basename -- "$f")" ] || return 0
+    done < <(find "$legacy" ! -type d 2>/dev/null)
+    if [ "$DRY_RUN" = "1" ]; then
+        printf '    [dry-run] hooks: would remove orphan legacy/ subdir (%d files, all have flat counterparts)\n' "$count"
+        return 0
+    fi
+    rm -rf "$legacy"
+    printf '    [hooks] removed orphan legacy/ subdir (%d files, all have flat counterparts)\n' "$count"
 }
 
 # ---- settings.json smart merge (Phase 3) ------------------------------------
