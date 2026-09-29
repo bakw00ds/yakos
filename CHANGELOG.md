@@ -20,15 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   truncated or unparsable, via `ho_install_gate_traps` and
   `ho_source_lib` in `hook-output.sh`. A hung `jq` is bounded
   (`YAKOS_HOOK_JQ_TIMEOUT`, default 5 s): blocking hooks exit 2, non-
-  blocking hooks exit 0 with a WARN. `yakos hook run <name>` without
+  blocking hooks exit 0 with a WARN; the value is parsed base 10 and clamped to
+  1..30. `yakos hook run <name>` without
   `--impl` no longer exits 0 silently when a blocking hook's bash script
-  is missing; it exits 2 with a reason. Go `path-allowlist` (and 11 other
+  is missing or a directory; it exits 2 with a reason unless
+  `YAKOS_HOOKS_FAIL_OPEN=1` or a `degraded-input` bypass is active. Go `path-allowlist` (and 11 other
   hooks) now resolve `agent_type` through the shared `hookio.SenderRole`,
   so `agent_type: "\n"` is the lead role on both sides instead of Go
   allowing a `.env` write that bash blocks.
-  **Behavior change:** a crash inside a blocking bash hook (for example
-  `supervisor-gate` on a non-object last findings line, previously exit
-  5) now blocks with exit 2 and a reason. `YAKOS_HOOKS_FAIL_OPEN=1` and
+  **Behavior change:** an unexpected crash inside a blocking bash hook
+  now blocks with exit 2 and a reason instead of a non-blocking exit.
+  `supervisor-gate` treats a non-object last findings line as an
+  unusable finding (WARN, pass, like Go). `YAKOS_HOOKS_FAIL_OPEN=1` and
   `degraded-input` bypass scopes work as before.
 
 - **Unrecognised `users.json` role now resolves to no access (K-110).**
