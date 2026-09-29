@@ -98,6 +98,21 @@ const maxWatchedDirs = 8192
 // debounceDuration is the quiet-window before a coalesced event fires.
 const debounceDuration = 100 * time.Millisecond
 
+// newDirRearmDelay is how long after registering a newly created directory
+// the watcher re-registers it and rescans it. It must stay well below
+// debounceDuration so a rescan-reported file coalesces with the file's own
+// raw events into a single event.
+//
+// Why re-register at all: on BSD/macOS, fsnotify's kqueue backend reacts to
+// the parent's "new entry" event by watching the new directory itself with
+// only delete/rename flags, on its own goroutine and concurrently with our
+// Add. If that internal registration lands after ours it silently replaces
+// our flags, and writes inside the directory are never reported (observed as
+// a lost event in roughly 1 of 3000 create-dir-then-write sequences under
+// load). Add is idempotent and restores the flags, so one delayed Add after
+// the internal registration has settled closes the window.
+const newDirRearmDelay = 25 * time.Millisecond
+
 // skipDirNames is the set of directory base-names that are never watched.
 // Must stay in sync with consoleui/files_handler.go skipDirs.
 var skipDirNames = map[string]bool{
@@ -124,6 +139,11 @@ type Watcher struct {
 	// afterFunc schedules f after d. Defaults to time.AfterFunc; tests
 	// inject a manually-driven clock so debounce behavior is deterministic.
 	afterFunc func(d time.Duration, f func()) stopper
+
+	// addWatch registers one directory with the OS watcher. Defaults to
+	// fw.Add; tests wrap it to interleave filesystem changes or to model a
+	// watch that lost its flags.
+	addWatch func(dir string) error
 
 	once sync.Once // guards Close
 }
@@ -177,6 +197,7 @@ func New(root string) (*Watcher, error) {
 		timers:      make(map[string]*debounceTimer),
 		afterFunc:   realAfterFunc,
 	}
+	w.addWatch = fw.Add
 
 	// Recursively add all existing subdirs to the watch set.
 	if err := w.addDirRecursive(root); err != nil {
@@ -272,6 +293,12 @@ func (w *Watcher) handleFSEvent(ev fsnotify.Event) {
 			if err := w.addDirRecursive(ev.Name); err != nil {
 				slog.Warn("filewatch: could not add new dir", "path", ev.Name, "err", err)
 			}
+			// Files created inside the directory before its watch existed
+			// produced no raw events; report them now, and again after the
+			// re-arm below closes the kqueue flag race.
+			w.rescanTree(ev.Name)
+			dir := ev.Name
+			w.afterFunc(newDirRearmDelay, func() { w.rearmTree(dir) })
 			// Dir creation itself: don't emit a "created" event for the dir —
 			// only file events are surfaced. Skip.
 			return
@@ -450,7 +477,7 @@ func (w *Watcher) addDirRecursive(dir string) error {
 			return filepath.SkipAll
 		}
 
-		if err := w.fw.Add(path); err != nil {
+		if err := w.addWatch(path); err != nil {
 			slog.Warn("filewatch: could not add dir to watch set", "path", path, "err", err)
 			return nil // non-fatal; skip this dir
 		}
@@ -459,6 +486,65 @@ func (w *Watcher) addDirRecursive(dir string) error {
 		w.watchedDirs[path] = true
 		w.mu.Unlock()
 
+		return nil
+	})
+}
+
+// rearmTree re-registers every still-watched directory under dir with the OS
+// watcher and then rescans the tree. See [newDirRearmDelay].
+func (w *Watcher) rearmTree(dir string) {
+	select {
+	case <-w.closeCh:
+		return
+	default:
+	}
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if skipDirNames[d.Name()] {
+			return filepath.SkipDir
+		}
+		w.mu.Lock()
+		watched := w.watchedDirs[path]
+		w.mu.Unlock()
+		if watched {
+			if err := w.addWatch(path); err != nil {
+				slog.Debug("filewatch: re-arm failed", "path", path, "err", err)
+			}
+		}
+		return nil
+	})
+	w.rescanTree(dir)
+}
+
+// rescanTree reports every regular file already present under dir as a
+// created file. It covers files that appeared before the directory's watch
+// was active. Duplicates of files whose own raw events also arrive coalesce
+// in the debounce window. Secret-pattern names and skipped directories are
+// filtered exactly as for live events.
+func (w *Watcher) rescanTree(dir string) {
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return filepath.SkipDir
+		}
+		if d.IsDir() {
+			if skipDirNames[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() || isSecretPath(d.Name()) {
+			return nil
+		}
+		rel, ok := w.toRelPath(path)
+		if !ok || w.insideSkippedDir(rel) {
+			return nil
+		}
+		w.debounce(rel, path, ActionCreated)
 		return nil
 	})
 }

@@ -139,6 +139,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `yakos retro status` and `retro history` apply the same range and no
   longer die on `count / 0`.
 
+- **File watcher no longer loses writes in a newly created directory
+  (K-108).** On macOS/BSD the OS watcher could re-register a just-created
+  directory with fewer flags right after yakOS added it, so files written
+  inside were never reported (about 1 in 2,500 under load). The watcher
+  now re-registers new directories once the OS side has settled and
+  reports files that appeared before the watch became active. The
+  file-watcher tests and supervisor prefilter case (h) no longer depend
+  on fixed sleeps or a millisecond budget.
+
 - **Go hooks read identity and coord state like bash (K-100).**
   peer-claim, peer-claim-confirm, supervisor-stream and context-threshold
   take the agent and session id from the stdin payload, not
