@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`plan-quality-gate.sh` split into a fail-closed gate and a scorer
+  (K-81).** One script used to serve both the PreToolUse `.plan-blocked`
+  gate and the PostToolUse plan scorer, so the gate inherited the
+  scorer's fail-open posture: missing `jq`, malformed input, a directory
+  named `.plan-blocked`, or a crash all let the dispatch through. Now
+  `plan-quality-gate.sh` is the PreToolUse gate only and exits 2 with a
+  stderr reason on any degraded input or internal failure (including a
+  crash under bash 3.2), and the new `plan-quality-score.sh` carries the
+  scorer with its conservative WARN + PASS posture unchanged. The Go
+  twin is split the same way (`planqualitygate` fail-closed,
+  `planqualityscore`), and the registry gains `plan-quality-score`. The
+  scorer now logs to `logs/plan-quality-score.ndjson`. `yakos refresh`
+  (Go and bash) retires the old PostToolUse `plan-quality-gate.sh`
+  registration and adds the scorer, idempotently.
+
 ### Added
 
 - **`yakos refresh --hooks-impl bash|go|hybrid` (K-87 A-3).** Selects
