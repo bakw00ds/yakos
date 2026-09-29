@@ -90,7 +90,9 @@ _hi_fail_or_warn() {
     # non-blocking branch exits 0 (WARN, no stdout) instead of returning.
     local mode="${2:-}"
     local name
+    # shellcheck disable=SC2034  # read by the sourcing hook (public state)
     HI_DEGRADED=1
+    # shellcheck disable=SC2034
     HI_DEGRADED_REASON="$reason"
     name="$(basename -- "${0:-hook}" 2>/dev/null || echo hook)"
     name="${name%.sh}"
