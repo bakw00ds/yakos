@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`yakos refresh --hooks-impl bash|go|hybrid` (K-87 A-3).** Selects
+  which hook implementation the merged `settings.json` registers: the
+  bash scripts (default, byte-identical to before), `yakos hook run
+  <name>` for every hook (`go`), or `yakos hook run <name>` only for the
+  parity-verified allowlist (`hybrid`). The choice persists as
+  `hooks_impl` in `<project>/.yakos.yml`; the flag overrides and
+  re-persists. `go`/`hybrid` fail closed, before any write, when a hook
+  has no registered Go implementation. Switching replaces commands in
+  place, so hook order is preserved. Go refresh only; bash refresh stays
+  bash-only. See `docs/hooks-impl.md`.
+
 ### Fixed
 
 - **`yakos refresh` hook-mirror layout unified (K-94, K-81).** Bash

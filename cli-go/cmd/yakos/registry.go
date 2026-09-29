@@ -352,7 +352,7 @@ var commandRegistry = []commandEntry{
 	},
 	{
 		Name:   "refresh",
-		Specs:  specSet("refresh", "--dry-run", "--all", "--project"),
+		Specs:  specSet("refresh", "--dry-run", "--all", "--project", "--hooks-impl"),
 		HelpFn: printRefreshHelp,
 	},
 	{

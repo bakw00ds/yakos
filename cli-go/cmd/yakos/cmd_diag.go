@@ -488,12 +488,14 @@ func runRefresh(yakosRoot string, args []string) {
 	dryRun := false
 	allProjects := false
 	explicitProject := ""
+	hooksImpl := ""
 
 	fs := &cliflag.Set{Cmd: "refresh", Specs: []cliflag.Spec{
 		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
 		{Name: "--dry-run", Kind: cliflag.Bool, Bool: &dryRun},
 		{Name: "--all", Kind: cliflag.Bool, Bool: &allProjects},
 		{Name: "--project", Kind: cliflag.String, Str: &explicitProject, ValueDesc: "a path"},
+		{Name: "--hooks-impl", Kind: cliflag.String, Str: &hooksImpl, ValueDesc: "bash, go, or hybrid"},
 	}}
 	rest, err := fs.Parse(args)
 	if err != nil {
@@ -511,6 +513,13 @@ func runRefresh(yakosRoot string, args []string) {
 	if len(rest) > 0 {
 		fmt.Fprintf(os.Stderr, "refresh: unknown argument %q (try --help)\n", rest[0])
 		os.Exit(1)
+	}
+
+	if hooksImpl != "" {
+		if _, err := refresh.ParseHooksImpl(hooksImpl); err != nil {
+			fmt.Fprintf(os.Stderr, "refresh: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// Resolve YAKOS_ROOT from env (bash entry-point may set it).
@@ -586,6 +595,7 @@ func runRefresh(yakosRoot string, args []string) {
 		YakosRoot:    yakosRoot,
 		ProjectPaths: projectPaths,
 		DryRun:       dryRun,
+		HooksImpl:    refresh.HooksImpl(hooksImpl),
 		Writer:       os.Stdout,
 		ErrWriter:    os.Stderr,
 		HomeDir:      home,
@@ -613,6 +623,12 @@ Options:
   --all             Discover all wired projects (~/agent-control/*/ +
                     ~/github/*/.claude/settings.json) and refresh each.
   --dry-run         Print what WOULD change without writing anything.
+  --hooks-impl <m>  Hook implementation settings.json wires up (Go only):
+                    bash (default), go (yakos hook run <name> for every
+                    hook), or hybrid (Go only for parity-verified hooks).
+                    Persisted to <project>/.yakos.yml as hooks_impl and kept
+                    on later runs; go/hybrid fail if a hook has no
+                    registered Go implementation.
   --help, -h        Print this help.
 
 Without --project or --all, infers from cwd (same as yakos start).

@@ -39,6 +39,15 @@ type MergeStats struct {
 // Returns MergeStats and any error. A non-nil error means the merge was aborted;
 // the original deployed file is always preserved on error.
 func MergeSettingsFiles(templateFile, deployedFile string, dryRun bool, w io.Writer) (MergeStats, error) {
+	return MergeSettingsFilesImpl(templateFile, deployedFile, dryRun, w, HooksImplBash)
+}
+
+// MergeSettingsFilesImpl is MergeSettingsFiles with a hook-implementation
+// selector (see hooksimpl.go). HooksImplBash (or "") leaves the template
+// untouched, so output is byte-identical to MergeSettingsFiles. For go and
+// hybrid it validates against the Go registry first and returns an error
+// (writing nothing) when a hook has no registered Go implementation.
+func MergeSettingsFilesImpl(templateFile, deployedFile string, dryRun bool, w io.Writer, impl HooksImpl) (MergeStats, error) {
 	// Read and parse both files.
 	templateData, err := os.ReadFile(templateFile) //nolint:gosec
 	if err != nil {
@@ -56,6 +65,13 @@ func MergeSettingsFiles(templateFile, deployedFile string, dryRun bool, w io.Wri
 	var deployed map[string]any
 	if err := json.Unmarshal(deployedData, &deployed); err != nil {
 		return MergeStats{}, fmt.Errorf("deployed settings invalid JSON at %s: %w", deployedFile, err)
+	}
+
+	if impl != "" && impl != HooksImplBash {
+		if err := ValidateHooksImpl(impl, tmpl); err != nil {
+			return MergeStats{}, err
+		}
+		applyHooksImpl(tmpl, impl)
 	}
 
 	stats, err := performMerge(tmpl, deployed)
@@ -206,6 +222,18 @@ func performMerge(tmpl, deployed map[string]any) (MergeStats, error) {
 				if cmd != "" {
 					name := canonicalHookName(cmd)
 					if d, inTemplate := templateDesired[eventName{event, name}]; inTemplate {
+						if d.matcher == m && d.command != cmd && isGoCommand(d.command) != isGoCommand(cmd) {
+							// Implementation switch (bash <-> go) for the
+							// same hook in the same matcher block: replace
+							// the command IN PLACE so hook order within the
+							// block is preserved. Counted as one removal
+							// plus one addition, like any other replace.
+							h["command"] = d.command
+							stats.Removed++
+							stats.Added++
+							keptHooks = append(keptHooks, rawH)
+							continue
+						}
 						if d.matcher != m || d.command != cmd {
 							stats.Removed++
 							continue
@@ -345,6 +373,11 @@ const hooksDirMarker = "/scripts/hooks/"
 // reads its input from stdin), but this takes only the first
 // whitespace-separated field to be robust if one ever does.
 func canonicalHookName(command string) string {
+	// `yakos hook run <name>` (--hooks-impl go) is the same hook as
+	// scripts/hooks/<name>.sh, so a switch replaces rather than duplicates.
+	if n, ok := goHookName(command); ok {
+		return n + ".sh"
+	}
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
 		return ""
