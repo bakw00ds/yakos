@@ -35,8 +35,9 @@ Under `hybrid` the per-command flag is still `--impl go`: hybrid decides
 which hooks are rewritten, and a rewritten hook always runs in Go.
 `--impl` also accepts `bash` and `hybrid` for manual use; `YAKOS_HOOKS`
 keeps working when the flag is absent. A hook with no Go implementation
-run with `--impl` exits 2 with a reason on stderr. `yakos hook` is always
-routed to the Go implementation, because the bash CLI has no `hook`
+run with `--impl` exits 2 with a reason on stderr, as does a repeated
+`--impl`. `yakos hook` is always routed to the Go implementation, even
+when `YAKOS_IMPL=bash` is exported, because the bash CLI has no `hook`
 command and would answer exit 64, which Claude Code treats as
 non-blocking.
 
