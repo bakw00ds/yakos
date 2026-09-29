@@ -13,6 +13,11 @@
 #   3. A helper lib with a syntax error must not load "successfully": the
 #      *_LOADED sentinels are set on the last line, and the gate checks them.
 #
+#   4. K-107: every registry-fail-closed hook (not just plan-quality-gate) must
+#      exit 2 -- never 0/1/141/143 -- with stderr closed, a broken stderr pipe,
+#      SIGTERM/SIGHUP mid-run, a truncated lib, a lib that is a directory, and a
+#      lib with a syntax error.
+#
 # Every case runs under `bash` (first on PATH) and /bin/bash (3.2 on macOS).
 # Usage: bash tests/run-hook-hardening-test.sh
 set -eu
@@ -122,6 +127,139 @@ else
 fi
 BLOCKING=$reg_closed
 NONBLOCKING="$(awk '/Name:[[:space:]]*"/ { gsub(/.*Name:[[:space:]]*"/,""); gsub(/".*/,""); n=$0 } /FailClosed:[[:space:]]*false/ { print n }' "$REG" | sort -u | tr '\n' ' ')"
+
+
+# ---- K-107: per-hook blocking scenarios -----------------------------------------
+# gate_scenario <hook> <sandbox>: prepares the sandbox and sets GS_PAYLOAD/GS_ENV
+# so that <hook> BLOCKS (exit 2, message on stderr). GS_ENV is a space-separated
+# list of KEY=VAL words (no value contains a space).
+GS_PASS_PAYLOAD='{"session_id":"gs1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"true"}}'
+gate_scenario() {
+    local h="$1" sb="$2"
+    GS_ENV="YAKOS_PROJECT_NAME=proj"
+    case "$h" in
+        budget-guard)
+            printf 'budget:\n  enabled: true\n  max_tool_calls: 1\n' > "$sb/proj/.yakos.yml"
+            printf '{"session_id":"gs1","started_at":%s,"tool_call_count":1,"last_tool":"Read","last_tool_run_count":1}\n' "$(date +%s)" > "$sb/work/current/.budget-state.json"
+            GS_PAYLOAD='{"session_id":"gs1","hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/x"}}' ;;
+        path-allowlist)
+            mkdir -p "$sb/proj/.claude"
+            printf '{"lead":{"allow":["**"],"deny":[]},"go-api":{"allow":["api/**"],"deny":[]}}\n' > "$sb/proj/.claude/path-allowlist.json"
+            GS_PAYLOAD='{"session_id":"gs1","hook_event_name":"PreToolUse","agent_type":"go-api","tool_name":"Edit","tool_input":{"file_path":"web/index.js","old_string":"a","new_string":"b"}}' ;;
+        peer-claim)
+            printf '{"generated_at":"2026-09-20T00:00:00Z","claims":[{"path":"src/auth/login.ts","owners":[{"user":"alice","host":"dev01","pid":1001,"agent":"frontend-pro","status":"confirmed","expires_at":"2099-01-01T00:00:00Z"}]}]}\n' > "$sb/coord/proj/coord/active-claims.json"
+            GS_ENV="YAKOS_PROJECT_NAME=proj USER=bob HOSTNAME=dev01 YAKOS_SESSION_PID=2002"
+            GS_PAYLOAD='{"session_id":"gs1","hook_event_name":"PreToolUse","agent_type":"backend-pro","tool_name":"Edit","tool_input":{"file_path":"src/auth/login.ts","old_string":"a","new_string":"b"}}' ;;
+        plan-quality-gate)
+            printf '{"plan_id":"plan-abc","reason":"low"}\n' > "$sb/work/current/.plan-blocked"
+            GS_PAYLOAD="$GATE_PAYLOAD" ;;
+        secret-scan)
+            GS_PAYLOAD="$(jq -nc --arg c "aws_access_key_id: $(printf '%s%s' AKIA 0123456789ABCDEF)" '{session_id:"gs1",hook_event_name:"PreToolUse",tool_name:"Write",tool_input:{file_path:"config.yaml",content:$c}}')" ;;
+        supervisor-ack-gate)
+            printf '{"ts":"2026-09-20T00:00:00Z","overall":"CRITICAL","rationale":"fixture critical","recommended_action":"halt"}\n' > "$sb/work/current/supervisor-findings.ndjson"
+            GS_PAYLOAD="$GATE_PAYLOAD" ;;
+        supervisor-gate)
+            printf '{"ts":"2026-09-20T00:00:00Z","overall":"CRITICAL","rationale":"fixture critical","recommended_action":"halt"}\n' > "$sb/work/current/supervisor-findings.ndjson"
+            GS_PAYLOAD='{"session_id":"gs1","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"api/x.go","old_string":"a","new_string":"b"}}' ;;
+        *) GS_PAYLOAD="$GATE_PAYLOAD" ;;
+    esac
+}
+
+# gate_libs <hook>: the libs the hook loads itself.
+gate_libs() {
+    case "$1" in
+        path-allowlist) echo "hook-input.sh hook-output.sh paths.sh path-safety.sh" ;;
+        *) echo "hook-input.sh hook-output.sh paths.sh" ;;
+    esac
+}
+
+# grun <shell> <hookdir> <hook> <sandbox> <payload> <env-words> [redir-mode]
+# redir-mode: "" (capture), noerr (2>&-), pipe (stderr into a reader that exits)
+grun() {
+    local sh="$1" hd="$2" hook="$3" sb="$4" payload="$5" words="$6" mode="${7:-}"
+    rc=0
+    # shellcheck disable=SC2086  # words are KEY=VAL without spaces
+    case "$mode" in
+        noerr) printf '%s' "$payload" | env HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" YAKOS_COORD_ROOT="$sb/coord" $words \
+                    "$sh" "$hd/$hook.sh" >/dev/null 2>&- || rc=$? ;;
+        pipe)  printf '%s' "$payload" | env HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" YAKOS_COORD_ROOT="$sb/coord" $words \
+                    "$sh" "$hd/$hook.sh" 2>&1 >/dev/null | true
+               rc="${PIPESTATUS[1]}" ;;
+        *)     printf '%s' "$payload" | env HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" YAKOS_COORD_ROOT="$sb/coord" $words \
+                    "$sh" "$hd/$hook.sh" >"$sb/out" 2>"$sb/err" || rc=$?
+               out="$(cat "$sb/out")"; err="$(cat "$sb/err")" ;;
+    esac
+}
+
+gate_prologue_suite() {
+    local SH="$1" L="$2" h sb lib kind hd sig
+    echo "== $L: K-107 gate prologue (all blocking hooks) =="
+
+    for h in $BLOCKING; do
+        [ -f "$HOOKS/$h.sh" ] || continue
+
+        # baseline: the scenario really blocks, and a plain Bash call passes.
+        sb="$(new_sandbox "g-$L-$h-base")"; gate_scenario "$h" "$sb"
+        grun "$SH" "$HOOKS" "$h" "$sb" "$GS_PAYLOAD" "$GS_ENV"
+        if [ "$rc" = 2 ] && [ -n "$err" ]; then ok "$L: $h blocking scenario -> 2 with stderr (control)"; else bad "$L: $h scenario did not block: rc=$rc err=[$err]"; continue; fi
+        sb="$(new_sandbox "g-$L-$h-pass")"
+        grun "$SH" "$HOOKS" "$h" "$sb" "$GS_PASS_PAYLOAD" "YAKOS_PROJECT_NAME=proj"
+        if [ "$rc" = 0 ]; then ok "$L: $h pass scenario -> 0 (control)"; else bad "$L: $h pass control rc=$rc err=[$err]"; fi
+
+        # closed stderr / broken stderr pipe on a real block
+        sb="$(new_sandbox "g-$L-$h-noerr")"; gate_scenario "$h" "$sb"
+        grun "$SH" "$HOOKS" "$h" "$sb" "$GS_PAYLOAD" "$GS_ENV" noerr
+        if [ "$rc" = 2 ]; then ok "$L: $h block + stderr closed -> 2"; else bad "$L: $h block + stderr closed rc=$rc (1 = fail-open)"; fi
+        sb="$(new_sandbox "g-$L-$h-pipe")"; gate_scenario "$h" "$sb"
+        grun "$SH" "$HOOKS" "$h" "$sb" "$GS_PAYLOAD" "$GS_ENV" pipe
+        if [ "$rc" = 2 ]; then ok "$L: $h block + broken stderr pipe -> 2"; else bad "$L: $h block + broken pipe rc=$rc (141 = SIGPIPE)"; fi
+
+        # signals mid-run (a jq shim that sleeps once gives a window)
+        for sig in TERM HUP; do
+            if [ "$sig" = HUP ] && [ "$(bash -c 'kill -HUP $$; sleep 0.3; echo alive' 2>/dev/null)" = alive ]; then
+                echo "  SKIP $L: $h SIGHUP (SIGHUP is ignored in this environment)"; continue
+            fi
+            sb="$(new_sandbox "g-$L-$h-sig-$sig")"; gate_scenario "$h" "$sb"
+            mkdir -p "$sb/slow"
+            printf '#!/bin/sh\nif [ ! -e "%s" ]; then : > "%s"; sleep 3; fi\nexec "%s" "$@"\n' "$sb/slow/once" "$sb/slow/once" "$REAL_JQ" > "$sb/slow/jq"
+            chmod +x "$sb/slow/jq"
+            printf '%s' "$GS_PASS_PAYLOAD" > "$sb/payload"
+            # shellcheck disable=SC2086
+            env PATH="$sb/slow:$PATH" HOME="$sb/home" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb/proj" YAKOS_COORD_ROOT="$sb/coord" $GS_ENV \
+                "$SH" "$HOOKS/$h.sh" < "$sb/payload" >"$sb/out" 2>"$sb/err" &
+            local pid=$!
+            sleep 0.7
+            kill -"$sig" "$pid" 2>/dev/null || true
+            rc=0; wait "$pid" || rc=$?
+            if [ "$rc" = 2 ]; then ok "$L: $h SIG$sig mid-run -> 2"; else bad "$L: $h SIG$sig mid-run rc=$rc (143=TERM, 129=HUP)"; fi
+        done
+    done
+
+    # Library failures: one mutated hooks tree per (lib, kind), run by every
+    # blocking hook that loads that lib, on the PASS payload (rc 2 can then only
+    # come from the load failure, not from a legitimate block).
+    for lib in hook-input.sh hook-output.sh paths.sh path-safety.sh; do
+        for kind in truncated directory syntax; do
+            hd="$TMP/gp-$L-$lib-$kind"
+            copy_hooks "$hd"
+            case "$kind" in
+                truncated) grep -v '^[A-Z_]*LOADED=1$' "$hd/lib/$lib" > "$hd/lib/$lib.new" && mv "$hd/lib/$lib.new" "$hd/lib/$lib" ;;
+                directory) rm -f "$hd/lib/$lib"; mkdir "$hd/lib/$lib" ;;
+                syntax)    corrupt "$hd/lib/$lib" ;;
+            esac
+            for h in $BLOCKING; do
+                [ -f "$HOOKS/$h.sh" ] || continue
+                case " $(gate_libs "$h") " in *" $lib "*) ;; *) continue ;; esac
+                sb="$(new_sandbox "gp-$L-$h-$lib-$kind")"
+                grun "$SH" "$hd" "$h" "$sb" "$GS_PASS_PAYLOAD" "YAKOS_PROJECT_NAME=proj"
+                if [ "$rc" = 2 ]; then ok "$L: $h + lib/$lib $kind -> 2"; else bad "$L: $h + lib/$lib $kind rc=$rc err=[$err] (0/1 = fail-open)"; fi
+                # ...and with stderr closed, so the failure message cannot be delivered
+                grun "$SH" "$hd" "$h" "$sb" "$GS_PASS_PAYLOAD" "YAKOS_PROJECT_NAME=proj" noerr
+                if [ "$rc" = 2 ]; then ok "$L: $h + lib/$lib $kind + stderr closed -> 2"; else bad "$L: $h + lib/$lib $kind + stderr closed rc=$rc"; fi
+            done
+        done
+    done
+}
 
 run_suite() {
     local SH="$1" L="$2" fj h sb
@@ -282,6 +420,9 @@ run_suite() {
         rc=0; wait "$pid" || rc=$?
         if [ "$rc" = 2 ]; then ok "$L: gate SIG$sig mid-run -> 2"; else bad "$L: gate SIG$sig rc=$rc (143=TERM, 129=HUP)"; fi
     done
+
+    # ---- 4. K-107: the same guarantees for every blocking hook ----------------
+    gate_prologue_suite "$SH" "$L"
 
     # ---- 3. helper-lib syntax error -------------------------------------------
     local lib

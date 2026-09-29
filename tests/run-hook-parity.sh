@@ -1618,7 +1618,7 @@ case_check supervisor-gate.sh  pretooluse-edit-api.json          0 "" "" "YAKOS_
 # Accepted: a valid-JSON NON-object last line (e.g. []) crashes bash (jq error
 # under set -e, rc=5 — a non-blocking hook error); Go treats it as an unusable
 # finding, logs a WARN and passes (rc=0).
-case_check supervisor-gate.sh  pretooluse-edit-api.json          5 "" setup_sg_nonobject "" "" "" "5/0:bash crashes (rc=5, jq error under set -e) on a valid-JSON non-object last line; Go treats it as an unusable finding and passes with a WARN"
+case_check supervisor-gate.sh  pretooluse-edit-api.json          2 "" setup_sg_nonobject "" "" "" "2/0:bash crashes (jq error under set -e, exit 5) on a valid-JSON non-object last line and the K-107 gate exit trap turns the crash into a block; Go treats it as an unusable finding and passes with a WARN"
 
 # --- budget-guard: K-87 A-2b ----------------------------------------------------
 case_check budget-guard.sh     pretooluse-generic-tool.json      2 budget-guard setup_budget_repeat_cap
