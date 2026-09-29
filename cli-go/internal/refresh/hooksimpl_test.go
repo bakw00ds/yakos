@@ -3,6 +3,7 @@ package refresh
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,7 +151,7 @@ func TestHooksImpl_DefaultMatchesGoldenAt1837bee(t *testing.T) {
 					t.Fatal(err)
 				}
 				if got := readSettings(t, proj); !bytes.Equal(got, golden) {
-					t.Fatalf("impl=%q settings.json differs from 1837bee golden", impl)
+					t.Fatalf("impl=%q settings.json differs from 1837bee golden:\n%s", impl, byteDiff(golden, got))
 				}
 			}
 		})
@@ -696,4 +697,32 @@ func TestEphemeralBinary_CoversPrivateTmp(t *testing.T) {
 	if ephemeralBinary("/opt/yakos/bin/yakos") {
 		t.Error("installed path flagged")
 	}
+}
+
+// byteDiff renders a self-explaining difference between want and got: sizes,
+// CR counts (CRLF checkout problems), and the first differing lines.
+func byteDiff(want, got []byte) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "want %d bytes (%d CR), got %d bytes (%d CR)\n",
+		len(want), bytes.Count(want, []byte("\r")), len(got), bytes.Count(got, []byte("\r")))
+	wl := strings.Split(string(want), "\n")
+	gl := strings.Split(string(got), "\n")
+	shown := 0
+	for i := 0; i < len(wl) || i < len(gl); i++ {
+		var w, g string
+		if i < len(wl) {
+			w = wl[i]
+		}
+		if i < len(gl) {
+			g = gl[i]
+		}
+		if w != g {
+			fmt.Fprintf(&sb, "line %d:\n- %q\n+ %q\n", i+1, w, g)
+			if shown++; shown >= 8 {
+				sb.WriteString("... (more differences)\n")
+				break
+			}
+		}
+	}
+	return sb.String()
 }
