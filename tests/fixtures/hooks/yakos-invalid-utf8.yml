@@ -1,0 +1,9 @@
+# Latin-1 café and stray ÿþ bytes below are NOT valid UTF-8 (K-110 fixture)
+plan_quality:
+  enabled: false
+  owner: café
+  junk: ÿþ
+  mode: block
+  threshold: 0.9
+other:
+  x: 1

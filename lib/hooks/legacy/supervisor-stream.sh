@@ -49,7 +49,7 @@ yakos_yml="$project_dir/.yakos.yml"
 _supervisor_enabled() {
     # Extracts only the direct-child keys of supervisor: (those with exactly
     # 2-space indent). Returns "false" if enabled: false, "true" otherwise.
-    awk '
+    LC_ALL=C awk '
         /^supervisor:[[:space:]]*$/ { in_s=1; next }
         in_s && /^[^[:space:]#]/ { exit }
         in_s && /^  [a-z_][a-z_]*:/ { print; next }

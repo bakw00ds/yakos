@@ -620,6 +620,17 @@ run_suite() {
             bad "$L: $f with a syntax error still set $v"
         fi
     done
+
+    # K-110: invalid UTF-8 in .yakos.yml must not abort the awk reader. macOS awk
+    # exits 2 in a UTF-8 locale and used to drop every key after the bad line.
+    local iu_fix="$REPO_ROOT/tests/fixtures/hooks/yakos-invalid-utf8.yml"
+    printf 'enabled=false\nowner=caf\351\njunk=\377\376\nmode=block\nthreshold=0.9\n' > "$TMP/iu-want-$L"
+    if LC_ALL=en_US.UTF-8 "$SH" -c ". '$HOOKS/lib/hook-input.sh' >/dev/null 2>&1; hi_yaml_block_children '$iu_fix' plan_quality" > "$TMP/iu-got-$L" 2>/dev/null \
+        && cmp -s "$TMP/iu-want-$L" "$TMP/iu-got-$L"; then
+        ok "$L: hi_yaml_block_children reads every key past invalid UTF-8 (rc 0)"
+    else
+        bad "$L: hi_yaml_block_children with invalid UTF-8: got [$(od -c "$TMP/iu-got-$L" | head -3)]"
+    fi
 }
 
 run_suite bash bash5

@@ -1,6 +1,8 @@
 package yamlblock_test
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -51,5 +53,24 @@ func TestLast(t *testing.T) {
 	}
 	if _, ok := yamlblock.Last([]byte("plan_quality:\n  mode: block\n"), "plan_quality", "enabled"); ok {
 		t.Fatal("absent key must report ok=false")
+	}
+}
+
+// K-110: invalid UTF-8 is read as bytes; every key after it is still returned,
+// matching the bash reader (which runs awk under LC_ALL=C).
+func TestChildrenInvalidUTF8(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "tests", "fixtures", "hooks", "yakos-invalid-utf8.yml"))
+	if err != nil {
+		t.Skipf("fixture not reachable: %v", err)
+	}
+	want := []yamlblock.KV{
+		{"enabled", "false"}, {"owner", "caf\xe9"}, {"junk", "\xff\xfe"}, {"mode", "block"}, {"threshold", "0.9"},
+	}
+	got := yamlblock.Children(data, "plan_quality")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Children()=%#v want %#v", got, want)
+	}
+	if v, ok := yamlblock.Last(data, "plan_quality", "threshold"); !ok || v != "0.9" {
+		t.Errorf("Last threshold = %q,%v", v, ok)
 	}
 }
