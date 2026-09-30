@@ -42,12 +42,20 @@ YAKOS_REDACT_BLOCK_PATTERNS=(
     'PEM block (truncated)|-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----.*'
 )
 
+# YAKOS_REDACT_KEEP_PATTERNS is REDACTION-ONLY too, but each rule's group 1 is
+# context to KEEP: only the rest of the match is replaced (sed \1[REDACTED]),
+# so a preview still reads "curl -s -u [REDACTED] https://...". Go twin:
+# secretscan.redactKeepSources.
+# shellcheck disable=SC2034  # consumed by supervisor-stream.sh
+YAKOS_REDACT_KEEP_PATTERNS=(
+    "curl basic auth|((curl|wget|xh)[^|;&]*[[:space:]](-[A-Za-z]*[uU][[:space:]]*|--(proxy-)?user([[:space:]]+|=)))(\"[^\"]*:[^\"]*\"|'[^']*:[^']*'|[^[:space:]:\"']+:[^[:space:]]+)"
+)
+
 # shellcheck disable=SC2034  # consumed by supervisor-stream.sh
 YAKOS_REDACT_EXTRA_PATTERNS=(
     'Bearer credential|[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:]]{8,}'
     'KEY=VALUE credential|([Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww]([Oo][Rr])?[Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]).?[[:space:]]*[=:][[:space:]]*.?[^[:space:]]{8,}'
     'URL credentials|://[^[:space:]/@:]*:[^[:space:]@]+@'
-    "curl basic auth|(curl|wget|xh)[^|;&]*[[:space:]](-[A-Za-z]*[uU][[:space:]]*|--(proxy-)?user([[:space:]]+|=))(\"[^\"]*:[^\"]*\"|'[^']*:[^']*'|[^[:space:]:\"']+:[^[:space:]]+)"
 )
 
 # Must stay the last statement: reaching it proves the whole file parsed.

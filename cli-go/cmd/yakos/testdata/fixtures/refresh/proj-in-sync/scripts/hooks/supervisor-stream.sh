@@ -157,6 +157,10 @@ if [ -r "$HOOK_DIR/lib/secret-patterns.sh" ] && ( . "$HOOK_DIR/lib/secret-patter
     for _ss_entry in "${YAKOS_SECRET_PATTERNS[@]}"; do
         _ss_sed_args+=(-e "s#${_ss_entry#*|}#[REDACTED]#g")
     done
+    # Keep-context rules: group 1 (the command and flag) stays, the secret goes.
+    for _ss_entry in "${YAKOS_REDACT_KEEP_PATTERNS[@]}"; do
+        _ss_sed_args+=(-e "s#${_ss_entry#*|}#\\1[REDACTED]#g")
+    done
     # Redaction-only generic Bearer / KEY=VALUE rules (never used to block).
     for _ss_entry in "${YAKOS_REDACT_EXTRA_PATTERNS[@]}"; do
         _ss_sed_args+=(-e "s#${_ss_entry#*|}#[REDACTED]#g")
