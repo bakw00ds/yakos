@@ -44,11 +44,18 @@ YAKOS_REDACT_BLOCK_PATTERNS=(
 
 # YAKOS_REDACT_KEEP_PATTERNS is REDACTION-ONLY too, but each rule's group 1 is
 # context to KEEP: only the rest of the match is replaced (sed \1[REDACTED]),
-# so a preview still reads "curl -s -u [REDACTED] https://...". Go twin:
+# so a preview still reads "curl -s -u [REDACTED] https://...". Each rule is
+# applied repeatedly until nothing changes (the kept prefix is greedy, so one
+# pass redacts only the last credential of "-u a:PW1 -u b:PW2"). The third
+# rule has no command context, for "x=curl; $x -u u:pw"; it needs a standalone
+# -u/--user and a value that is not numeric:numeric, so docker -u 1000:1000,
+# sort -u 12:30 and ls -lu a:b stay readable. Go twin:
 # secretscan.redactKeepSources.
 # shellcheck disable=SC2034  # consumed by supervisor-stream.sh
 YAKOS_REDACT_KEEP_PATTERNS=(
-    "curl basic auth|((curl|wget|xh)[^|;&]*[[:space:]](-[A-Za-z]*[uU][[:space:]]*|--(proxy-)?user([[:space:]]+|=)))(\"[^\"]*:[^\"]*\"|'[^']*:[^']*'|[^[:space:]:\"']+:[^[:space:]]+)"
+    "curl basic auth|(([Cc][Uu][Rr][Ll]|[Ww][Gg][Ee][Tt]|[Xx][Hh])[^|;&]*[[:space:]](-[A-Za-z]*[uU][[:space:]]*|--(proxy-)?user([[:space:]]+|=)))(\"[^\"]*:[^\"]*\"|'[^']*:[^']*'|[^[:space:]:\"']+:[^[:space:]]+)"
+    "httpie basic auth|(([Hh][Tt][Tt][Pp][Ss]?|[Xx][Hh][Ss]?)[[:space:]]+([^|;&]*[[:space:]])?(-a|--auth)([[:space:]]+|=))(\"[^\"]*:[^\"]*\"|'[^']*:[^']*'|[^[:space:]:\"']+:[^[:space:]]+)"
+    "basic auth flag|([[:space:]](-u[[:space:]]*|--(proxy-)?user([[:space:]]+|=)))(\"[^\"]*:[^\"]*\"|'[^']*:[^']*'|([^[:space:]:]*[^[:space:][:digit:]:][^[:space:]:]*:[^[:space:]]+|[^[:space:]:]+:[^[:space:]]*[^[:space:][:digit:]][^[:space:]]*))"
 )
 
 # shellcheck disable=SC2034  # consumed by supervisor-stream.sh
