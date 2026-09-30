@@ -38,16 +38,16 @@ YAKOS_SECRET_PATTERNS=(
 
 # shellcheck disable=SC2034  # consumed by supervisor-stream.sh
 YAKOS_REDACT_BLOCK_PATTERNS=(
-    'PEM block|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*-----END [A-Z0-9 ]*PRIVATE KEY-----'
-    'PEM block (truncated)|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*'
+    'PEM block|-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----.*-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----'
+    'PEM block (truncated)|-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----.*'
 )
 
 # shellcheck disable=SC2034  # consumed by supervisor-stream.sh
 YAKOS_REDACT_EXTRA_PATTERNS=(
     'Bearer credential|[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:]]{8,}'
     'KEY=VALUE credential|([Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww]([Oo][Rr])?[Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]).?[[:space:]]*[=:][[:space:]]*.?[^[:space:]]{8,}'
-    'URL credentials|://[^[:space:]/@:]+:[^[:space:]@]+@'
-    'curl basic auth|(-[A-Za-z]*u|--user)([[:space:]]+|=)[^[:space:]:0-9][^[:space:]:]*:[^[:space:]]+'
+    'URL credentials|://[^[:space:]/@:]*:[^[:space:]@]+@'
+    'curl basic auth|(-[A-Za-z]*u[[:space:]]*|--user([[:space:]]+|=))[^[:space:]:]+:[^[:space:]]+'
 )
 
 # Must stay the last statement: reaching it proves the whole file parsed.

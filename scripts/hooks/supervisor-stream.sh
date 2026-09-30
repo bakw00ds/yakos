@@ -317,7 +317,9 @@ else
             'rm[[:space:]]+([^;&|]*[[:space:]])?(-[a-z]*r[a-z]*|--recursive)[[:space:]]([^;&|]*[[:space:]])?(-[a-z]*f[a-z]*|--force)([[:space:]]|$)'
             'rm[[:space:]]+([^;&|]*[[:space:]])?(-[a-z]*f[a-z]*|--force)[[:space:]]([^;&|]*[[:space:]])?(-[a-z]*r[a-z]*|--recursive)([[:space:]]|$)'
             "(ba|z|da)?sh[[:space:]]+-[a-z]*c[[:space:]]+[^[:space:]]?([\$][(]|${_ss_bt})[[:space:]]*(curl|wget)"
-            'cp[[:space:]]+([^;&|]*[[:space:]])?[^[:space:]]*\.env[^[:alnum:][:space:]._/-]?([[:space:]]|$)'
+            'cp[[:space:]]+([^;&|]*[[:space:]])?[^[:space:]]*\.env(\.[^[:space:]]*)?[^[:alnum:][:space:]._/-]?([[:space:]]|$)'
+            "eval[[:space:]]+[^[:space:]]?([\$][(]|${_ss_bt})[[:space:]]*(curl|wget)"
+            'find[[:space:]]+([^;&|]*[[:space:]])?-delete([[:space:]]|$)'
         )
         for pat in "${default_patterns[@]}"; do
             if printf '%s' "$combined" | grep -qiE "$pat" 2>/dev/null; then
@@ -374,30 +376,48 @@ fi
 _ss_lock="$counter.lock"
 _ss_locked=0
 _ss_try=0
-while [ "$_ss_try" -lt 150 ]; do
+_ss_deadline=$((SECONDS + 3))
+while [ "$_ss_try" -lt 150 ] && [ "$SECONDS" -lt "$_ss_deadline" ]; do
     if mkdir "$_ss_lock" 2>/dev/null; then
         _ss_locked=1
         break
     fi
-    # A holder that crashed leaves the lock behind: reap one older than 1 min.
-    if [ -n "$(find "$_ss_lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
-        rmdir "$_ss_lock" 2>/dev/null || true
-        continue
-    fi
+    # Every retry counts against the budget, reaping included, so a stale lock
+    # that cannot be removed can never spin this loop forever.
     _ss_try=$((_ss_try + 1))
+    # A holder that crashed leaves the lock behind: reap one older than 1 min.
+    # Rename first (atomic, one winner), then re-check the age of what we moved,
+    # so a waiter cannot delete a lock another hook just created.
+    if [ -n "$(find "$_ss_lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+        _ss_reap="$_ss_lock.reap.$$"
+        if mv "$_ss_lock" "$_ss_reap" 2>/dev/null; then
+            if [ -n "$(find "$_ss_reap" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+                rm -rf "$_ss_reap" 2>/dev/null || true
+            else
+                mv "$_ss_reap" "$_ss_lock" 2>/dev/null || rm -rf "$_ss_reap" 2>/dev/null || true
+            fi
+        fi
+    fi
     sleep 0.02 2>/dev/null || sleep 1
 done
 # Never block or double-count: no lock within ~3 s means skip this tick.
-[ "$_ss_locked" = "1" ] || exit 0
+if [ "$_ss_locked" != "1" ]; then
+    ho_log "supervisor-stream" "WARN" "pass" \
+        "counter lock busy or unremovable; skipping this escalation tick" \
+        "$(jq -nc --arg p "$_ss_lock" '{lock: $p}')"
+    exit 0
+fi
+# Release the lock on every exit path (kill, error) after this point.
+trap 'rmdir "$_ss_lock" 2>/dev/null || true' EXIT
 cur=0
 [ -f "$counter" ] && cur="$(cat "$counter" 2>/dev/null || echo 0)"
 case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
 cur=$((10#$cur + 1))
 if ! printf '%d\n' "$cur" > "$counter" 2>/dev/null; then
-    rmdir "$_ss_lock" 2>/dev/null || true
     exit 0
 fi
 rmdir "$_ss_lock" 2>/dev/null || true
+trap - EXIT
 
 # --- 4. Every N escalations, fork supervisor dispatch ----------------------
 
