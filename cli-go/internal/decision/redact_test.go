@@ -481,6 +481,18 @@ func TestRedact_CommandLineFlagCredentials(t *testing.T) {
 		{"curl -H 'X-Api-Key: XkeyValue12345' https://x", "XkeyValue12345"},
 		{"curl -H 'Authorization: Token AuthTok12345' https://x", "AuthTok12345"},
 		{"echo apikey_abcdef0123456789abcdef", "abcdef0123456789abcdef"},
+		// Re-review: tab separators and quoted values containing a space.
+		{"tool\t--password\tSEC15pw run", "SEC15pw"},
+		{"curl -u\tu:SEC16pw https://x", "SEC16pw"},
+		{"curl --user\tu:SEC16bpw https://x", "SEC16bpw"},
+		{`curl -u "u:SEC17a SEC17b" https://x`, "SEC17b"},
+		{`curl -u 'u:SEC18a SEC18b' https://x`, "SEC18b"},
+		{`curl --user "u:SEC19a SEC19b" https://x`, "SEC19b"},
+		{"tool --password \"SEC20a SEC20b\" run", "SEC20b"},
+		{"tool --api-key\t'SEC21a SEC21b' run", "SEC21b"},
+		{"sshpass -p\tSEC22pw ssh h", "SEC22pw"},
+		{"redis-cli -a\tSEC23pw ping", "SEC23pw"},
+		{"docker login -u me -p\tSEC24pw reg", "SEC24pw"},
 		{"echo apikey_" + strings.Repeat("Ab1", 15), "Ab1Ab1Ab1"},
 	}
 	for _, c := range cases {

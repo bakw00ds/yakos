@@ -115,14 +115,14 @@ var (
 	apikeyTokenRE = regexp.MustCompile(`\bapikey_[A-Za-z0-9_-]{6,}`)
 	// --password X, --api-key=X, --client-secret X ... (the name may be
 	// prefixed or suffixed with dash-separated words; "--author" is not one).
-	longSecretFlagRE = regexp.MustCompile(`(?i)(--(?:[a-z0-9]+-)*(?:password|passwd|pass|pwd|secret|api-?key|access-?key|token|auth|authorization)(?:-[a-z0-9]+)*[ =])("[^"]*"|'[^']*'|\S+)`)
+	longSecretFlagRE = regexp.MustCompile(`(?i)(--(?:[a-z0-9]+-)*(?:password|passwd|pass|pwd|secret|api-?key|access-?key|token|auth|authorization)(?:-[a-z0-9]+)*[\s=])("[^"]*"|'[^']*'|\S+)`)
 	// Short password flags of specific tools (the flag letter alone is too
 	// generic to match everywhere). Tool names are case-insensitive, the flag
 	// letter is not (mysql -P is a port).
 	mysqlPassRE = regexp.MustCompile(`((?i:\b(?:mysql|mysqldump|mariadb|mysqladmin)\b)[^\n;|&]*?\s-p)("[^"]*"|'[^']*'|\S+)`)
-	loginPassRE = regexp.MustCompile(`((?i:\b(?:docker|podman|helm|oras|buildah|skopeo)\b)[^\n;|&]*?\blogin\b[^\n;|&]*?\s-p[ =]?)("[^"]*"|'[^']*'|\S+)`)
-	sshpassRE   = regexp.MustCompile(`(\bsshpass\b[^\n;|&]*?\s-p[ =]?)("[^"]*"|'[^']*'|\S+)`)
-	redisAuthRE = regexp.MustCompile(`(\bredis-cli\b[^\n;|&]*?\s-a[ =]?)("[^"]*"|'[^']*'|\S+)`)
+	loginPassRE = regexp.MustCompile(`((?i:\b(?:docker|podman|helm|oras|buildah|skopeo)\b)[^\n;|&]*?\blogin\b[^\n;|&]*?\s-p[\s=]?)("[^"]*"|'[^']*'|\S+)`)
+	sshpassRE   = regexp.MustCompile(`(\bsshpass\b[^\n;|&]*?\s-p[\s=]?)("[^"]*"|'[^']*'|\S+)`)
+	redisAuthRE = regexp.MustCompile(`(\bredis-cli\b[^\n;|&]*?\s-a[\s=]?)("[^"]*"|'[^']*'|\S+)`)
 	htpasswdRE  = regexp.MustCompile(`(\bhtpasswd\b[^\n;|&]*?\s-[a-zA-Z]*b[a-zA-Z]*\s+\S+\s+\S+\s+)("[^"]*"|'[^']*'|\S+)`)
 	// X-Api-Key / X-Auth-Token style headers (whole rest of the line or quoted span).
 	xHeaderRE = regexp.MustCompile(`(?i)(\bx-[a-z0-9-]*(?:api-?key|token|secret|auth|password)[a-z0-9-]*\s*:\s*)[^\r\n']+`)
