@@ -10,8 +10,9 @@
 # Fires when a write targets a path ending in work/current/plan.md.
 #   1. Reads .yakos.yml plan_quality block (enabled, mode, threshold).
 #   2. Debounces on the last SCORED version (K-112): a plan.md written now is
-#      scored once; the same mtime is never scored twice, and a re-save within
-#      5 s of the last scoring is collapsed into it. The state lives in
+#      scored once; the same mtime is never scored twice, and a burst of
+#      re-saves within 5 s of the last scoring collapses into ONE trailing
+#      score of the latest version (K-110; .plan-quality-pending marker). The state lives in
 #      work/current/.plan-quality-last-scored ("<mtime> <scored-at>"). The
 #      old rule, "skip when mtime age < 5 s", skipped EVERY fire because the
 #      hook runs right after the write that set the mtime.
@@ -137,15 +138,19 @@ EOF
     # A missing file has mtime 0: no debounce, the scorer reports the error.
     # Go twin: planqualityscore.go (same state file, same format).
     plan_file="$file_path"
-    mtime1=0
-    # Portable mtime
-    # GNU first: on Linux `stat -f` is filesystem mode and "succeeds" with garbage.
-    if stat -c "%Y" "$plan_file" >/dev/null 2>&1; then
-        mtime1="$(stat -c "%Y" "$plan_file" 2>/dev/null || echo 0)"
-    elif stat -f "%m" "$plan_file" >/dev/null 2>&1; then
-        mtime1="$(stat -f "%m" "$plan_file" 2>/dev/null || echo 0)"
-    fi
-    case "$mtime1" in ''|*[!0-9]*) mtime1=0 ;; esac
+    # Portable mtime. GNU first: on Linux `stat -f` is filesystem mode and
+    # "succeeds" with garbage.
+    _pq_mtime() {
+        local m=0
+        if stat -c "%Y" "$1" >/dev/null 2>&1; then
+            m="$(stat -c "%Y" "$1" 2>/dev/null || echo 0)"
+        elif stat -f "%m" "$1" >/dev/null 2>&1; then
+            m="$(stat -f "%m" "$1" 2>/dev/null || echo 0)"
+        fi
+        case "$m" in ''|*[!0-9]*) m=0 ;; esac
+        printf '%s' "$m"
+    }
+    mtime1="$(_pq_mtime "$plan_file")"
     now_s="$(date -u +%s 2>/dev/null || echo 0)"
     state_file="$current_dir/.plan-quality-last-scored"
     _pq_state_written=0
@@ -160,7 +165,8 @@ EOF
             "debounce state file is a symlink; not reading or writing it" \
             "$(jq -nc --arg p "$state_file" '{path: $p}')"
     fi
-    if [ "$mtime1" -gt 0 ] && [ "$state_link" = "0" ]; then
+    # _pq_read_state: sets last_mtime / last_at from the state file ("" = none).
+    _pq_read_state() {
         last_mtime=""
         last_at=""
         if [ -f "$state_file" ]; then
@@ -177,6 +183,9 @@ EOF
             last_mtime=""
             last_at=""
         fi
+    }
+    if [ "$mtime1" -gt 0 ] && [ "$state_link" = "0" ]; then
+        _pq_read_state
         if [ -n "$last_mtime" ] && [ "$last_mtime" = "$mtime1" ]; then
             ho_log "plan-quality-score" "REPORT" "pass" \
                 "debounced: plan.md unchanged since the last score; skipping this fire" \
@@ -186,10 +195,39 @@ EOF
         if [ -n "$last_at" ]; then
             since_s=$((now_s - last_at))
             if [ "$since_s" -ge 0 ] && [ "$since_s" -lt 5 ]; then
+                # A NEW version inside the window. Collapse the burst into ONE
+                # trailing score of the latest version instead of dropping it
+                # (K-110: the last save of a burst used to go unscored, so a bad
+                # plan saved seconds after a good one was never blocked). The
+                # first collapsed fire claims a marker (atomic mkdir), waits out
+                # the window and scores whatever plan.md holds then; later fires
+                # in the window see the marker and skip. Go twin: same marker.
+                pending="$current_dir/.plan-quality-pending"
+                if [ -d "$pending" ] && [ -n "$(find "$pending" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+                    rmdir "$pending" 2>/dev/null || true   # crashed claimant
+                fi
+                if ! mkdir "$pending" 2>/dev/null; then
+                    ho_log "plan-quality-score" "REPORT" "pass" \
+                        "debounced: last score under 5s ago; rapid re-save collapsed into the pending trailing score; skipping this fire" \
+                        "$(jq -nc --arg f "$file_path" --argjson age "$since_s" '{file_path: $f, age_s: $age}')"
+                    exit 0
+                fi
+                wait_s=$((5 - since_s))
                 ho_log "plan-quality-score" "REPORT" "pass" \
-                    "debounced: last score under 5s ago; rapid re-save collapsed; skipping this fire" \
-                    "$(jq -nc --arg f "$file_path" --argjson age "$since_s" '{file_path: $f, age_s: $age}')"
-                exit 0
+                    "debounce: re-save under 5s after the last score; waiting ${wait_s}s, then scoring the latest version (trailing)" \
+                    "$(jq -nc --arg f "$file_path" --argjson age "$since_s" --argjson wait "$wait_s" '{file_path: $f, age_s: $age, wait_s: $wait}')"
+                sleep "$wait_s" 2>/dev/null || true
+                rmdir "$pending" 2>/dev/null || true
+                # Re-read: the plan may have changed again, or been scored meanwhile.
+                mtime1="$(_pq_mtime "$plan_file")"
+                now_s="$(date -u +%s 2>/dev/null || echo 0)"
+                _pq_read_state
+                if [ "$mtime1" -le 0 ] || { [ -n "$last_mtime" ] && [ "$last_mtime" = "$mtime1" ]; }; then
+                    ho_log "plan-quality-score" "REPORT" "pass" \
+                        "debounced: latest version already scored after the trailing wait; skipping" \
+                        "$(jq -nc --arg f "$file_path" --argjson m "$mtime1" '{file_path: $f, mtime: $m}')"
+                    exit 0
+                fi
             fi
         fi
     fi

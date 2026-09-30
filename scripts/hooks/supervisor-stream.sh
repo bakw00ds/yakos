@@ -49,7 +49,7 @@ yakos_yml="$project_dir/.yakos.yml"
 _supervisor_enabled() {
     # Extracts only the direct-child keys of supervisor: (those with exactly
     # 2-space indent). Returns "false" if enabled: false, "true" otherwise.
-    awk '
+    LC_ALL=C awk '
         /^supervisor:[[:space:]]*$/ { in_s=1; next }
         in_s && /^[^[:space:]#]/ { exit }
         in_s && /^  [a-z_][a-z_]*:/ { print; next }
@@ -144,10 +144,16 @@ description_scan="$(hi_field '.tool_input.description' 2>/dev/null || true)"
 
 # Redaction: one sed over the shared table lib/secret-patterns.sh. If the table
 # cannot be loaded the previews are withheld rather than stored unredacted.
-_ss_sed_args=()
+# Newline-slurp first (portable BSD/GNU loop) so multi-line PEM blocks match.
+_ss_sed_args=(-e ':a' -e '$!{N;ba' -e '}')
 _ss_redact_ok=0
 if [ -r "$HOOK_DIR/lib/secret-patterns.sh" ] && ( . "$HOOK_DIR/lib/secret-patterns.sh" ) >/dev/null 2>&1 \
     && . "$HOOK_DIR/lib/secret-patterns.sh" && [ "${YAKOS_SECRET_PATTERNS_LOADED:-0}" = "1" ]; then
+    # Multi-line blocks (PEM bodies) first: the blocking table would otherwise
+    # eat the header and leave the key body behind.
+    for _ss_entry in "${YAKOS_REDACT_BLOCK_PATTERNS[@]}"; do
+        _ss_sed_args+=(-e "s#${_ss_entry#*|}#[REDACTED]#g")
+    done
     for _ss_entry in "${YAKOS_SECRET_PATTERNS[@]}"; do
         _ss_sed_args+=(-e "s#${_ss_entry#*|}#[REDACTED]#g")
     done
@@ -287,6 +293,7 @@ else
         # (what a continuation leaves behind) is dropped. K-112.
         combined="$(printf '%s\n%s\n%s\n%s' "$new_risk" "$content_risk" "$command_scan" "$description_scan" | tr '\n' ' ' | sed 's/\\ /  /g')"
         # Built-in default patterns (POSIX ERE for grep -E)
+        _ss_bt='`'
         default_patterns=(
             'drop[[:space:]]+table'
             'force.*push'
@@ -305,6 +312,12 @@ else
             'rm[[:space:]]+-[a-z]*r[a-z]*[[:space:]]+-[a-z]*f'
             'rm[[:space:]]+-[a-z]*f[a-z]*[[:space:]]+-[a-z]*r'
             'chmod[[:space:]]+-[a-z]+[[:space:]]+777'
+            # K-110: long-flag rm, sh -c "$(curl ...)", cp of .env. sudo/env
+            # prefixes need no stripping: every pattern is an unanchored search.
+            'rm[[:space:]]+([^;&|]*[[:space:]])?(-[a-z]*r[a-z]*|--recursive)[[:space:]]([^;&|]*[[:space:]])?(-[a-z]*f[a-z]*|--force)([[:space:]]|$)'
+            'rm[[:space:]]+([^;&|]*[[:space:]])?(-[a-z]*f[a-z]*|--force)[[:space:]]([^;&|]*[[:space:]])?(-[a-z]*r[a-z]*|--recursive)([[:space:]]|$)'
+            "(ba|z|da)?sh[[:space:]]+-[a-z]*c[[:space:]]+[^[:space:]]?([\$][(]|${_ss_bt})[[:space:]]*(curl|wget)"
+            'cp[[:space:]]+([^;&|]*[[:space:]])?[^[:space:]]*\.env[^[:alnum:][:space:]._/-]?([[:space:]]|$)'
         )
         for pat in "${default_patterns[@]}"; do
             if printf '%s' "$combined" | grep -qiE "$pat" 2>/dev/null; then
@@ -353,10 +366,38 @@ fi
 # --- 3. Increment escalation counter ----------------------------------------
 # Only escalations (pre-filter triggers OR pre-filter disabled) reach here.
 
+# K-110: read-increment-write under an atomic mkdir lock. Without it two
+# concurrent hooks both read N, both write N+1, and both cross the same
+# score-every threshold (double supervisor launch). The increment is the
+# whole decision: each hook gets a unique value, so at most one sees a
+# multiple of score_every. Go twin: incrementCounter (same lock dir).
+_ss_lock="$counter.lock"
+_ss_locked=0
+_ss_try=0
+while [ "$_ss_try" -lt 150 ]; do
+    if mkdir "$_ss_lock" 2>/dev/null; then
+        _ss_locked=1
+        break
+    fi
+    # A holder that crashed leaves the lock behind: reap one older than 1 min.
+    if [ -n "$(find "$_ss_lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+        rmdir "$_ss_lock" 2>/dev/null || true
+        continue
+    fi
+    _ss_try=$((_ss_try + 1))
+    sleep 0.02 2>/dev/null || sleep 1
+done
+# Never block or double-count: no lock within ~3 s means skip this tick.
+[ "$_ss_locked" = "1" ] || exit 0
 cur=0
 [ -f "$counter" ] && cur="$(cat "$counter" 2>/dev/null || echo 0)"
-cur=$((cur + 1))
-printf '%d\n' "$cur" > "$counter" 2>/dev/null || exit 0
+case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
+cur=$((10#$cur + 1))
+if ! printf '%d\n' "$cur" > "$counter" 2>/dev/null; then
+    rmdir "$_ss_lock" 2>/dev/null || true
+    exit 0
+fi
+rmdir "$_ss_lock" 2>/dev/null || true
 
 # --- 4. Every N escalations, fork supervisor dispatch ----------------------
 
