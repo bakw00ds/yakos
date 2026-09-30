@@ -477,6 +477,20 @@ run_suite() {
     else
         bad "$L: context-threshold probe rc=$rc err=[$err] log=[$(cat "$ct_log" 2>/dev/null)]"
     fi
+    # K-110: the payload's transcript_path is used as-is, even when neither the
+    # session id nor the project path would derive it.
+    ct_sb="$(new_sandbox "ct-tp-$L")"
+    mkdir -p "$ct_sb/elsewhere"
+    awk -v line="$(cat "$REPO_ROOT/tests/fixtures/hooks/claude-transcript-line.jsonl")" -v n=700000 \
+        'BEGIN { while (t < n) { l = line "\n"; if (t + length(l) > n) l = substr(l, 1, n - t); printf "%s", l; t += length(l) } }' \
+        > "$ct_sb/elsewhere/renamed-transcript.jsonl"
+    run "$SH" "$HOOKS" context-threshold.sh "$ct_sb" "{\"session_id\":\"no-such-session\",\"transcript_path\":\"$ct_sb/elsewhere/renamed-transcript.jsonl\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"p\"}"
+    ct_log="$ct_sb/work/current/logs/context-threshold.ndjson"
+    if [ "$rc" = 0 ] && grep -q '"pct": *87' "$ct_log" 2>/dev/null && ! grep -q probe_unavailable "$ct_log" 2>/dev/null; then
+        ok "$L: context-threshold uses payload transcript_path (pct=87)"
+    else
+        bad "$L: context-threshold transcript_path rc=$rc err=[$err] log=[$(cat "$ct_log" 2>/dev/null)]"
+    fi
     # Broken compat.sh: warn, exit 0, no stdout.
     local ct_hd="$TMP/ct-hd-$L"
     copy_hooks "$ct_hd"; corrupt "$ct_hd/lib/compat.sh"
