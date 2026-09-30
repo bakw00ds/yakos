@@ -10,9 +10,10 @@ A decision provider is **not an agent runtime**. It cannot run an agent, it is
 not in `runtime.Known`, and no agent can be routed to it. See
 [runtime-matrix.md](runtime-matrix.md#jev-is-not-a-runtime).
 
-Nothing in this release calls a provider automatically. `yakos decide` is the
-only entry point, and no hook uses it yet. Hook wiring lands in later PRs, in
-shadow mode first.
+`yakos decide` is the entry point. The one automatic caller is the supervisor
+pre-filter hook, in shadow mode only (see
+[P2b shadow supervisor](#p2b-shadow-supervisor)). With provider `none`, the
+default, no hook calls anything.
 
 ## Quick start (no key needed)
 
@@ -44,7 +45,12 @@ followed.
 yakos decide <surface> [--provider jev|mock|none] [--shadow]
              [--timeout <dur>] [--session <id>] [--state-file <path>]
              [--sets-dir <dir>] [--config <path>]
+             [--local pass|escalate] [--local-trigger <kind>]
+yakos decide compare <surface> [--json] [--log <path>] [--sets-dir <dir>]
 ```
+
+`--local` and `--local-trigger` record what the caller's own heuristic decided
+for the same event. They go to the decision log only, never to the provider.
 
 It reads a JSON **object** of named fields on stdin, redacts it, asks the
 question set `lib/decisions/<surface>.yaml`, and prints one line of JSON.
@@ -169,6 +175,107 @@ data retention is available only under an enterprise agreement, not during
 early access. Check the current terms before enabling it on a client project.
 `provider: none` per project turns it off.
 
+## P2b shadow supervisor
+
+The `supervisor-stream` hook (PostToolUse on `Edit|Write|MultiEdit|Bash`, bash
+and Go twin) can ask the `supervisor-prefilter` question set about every
+mutation, in **shadow mode**. The local pre-filter still decides everything.
+The provider's verdict is only logged, next to the local verdict, so the two
+can be compared before anyone lets a provider influence escalation.
+
+Shadow means the call can never block, change or delay a tool call:
+
+- The hook starts `yakos decide supervisor-prefilter --shadow` detached, feeds
+  it the event on stdin, and returns. It never waits for or reads the result.
+  Exit code, buffer, escalation counter and supervisor dispatch are unchanged.
+- Any failure is a silent fail-open: no key, breaker open, budget exhausted,
+  timeout (1.5 s default, hard-enforced in the engine), HTTP error, missing
+  `yakos` binary. The reason is written to the decision log (`status`), and
+  the tool call proceeds.
+- With provider `none` (default) the hook does no extra work and is
+  byte-for-byte what it was before. Provider `jev` without `TYPESAFE_API_KEY`
+  also starts nothing, so a missing key does not spawn a process per tool call.
+- A pre-filter that is switched off (`supervisor.pre_filter.enabled: false`)
+  has no local verdict to compare, so it makes no shadow call.
+
+### Enable it
+
+Set the provider in the project `.yakos.yml` (block style, `provider` as a
+direct child of the top-level `decisions:` key), or override per shell:
+
+```yaml
+decisions:
+  provider: jev            # or mock, for a dry run with no key
+  surfaces:
+    supervisor-prefilter: { mode: shadow }
+```
+
+```sh
+export TYPESAFE_API_KEY=...            # shell profile only, never in a file
+yakos doctor --probe-decision          # key, config, set hash, breaker, budget
+```
+
+`YAKOS_DECISION_PROVIDER` overrides the file and `YAKOS_DECISION_DISABLE=1`
+turns it off. Budget, breaker and egress rules above apply unchanged.
+
+What leaves the machine per call: `tool`, `file_path`, a preview of the
+command or edit text, the head of `decisions.md` (1500 bytes, already sent to
+the LLM supervisor today) and `plan_mentions_path`, all redacted and cut to
+2 KiB previews under `strict` egress. Files under `never_paths` are sent by
+name only.
+
+### Read the results
+
+Each shadow call appends one decision-log record carrying the provider's
+answers, latency, cost, and the local verdict (`local_verdict`: `pass` or
+`escalate`, plus `local_trigger`: `sensitive-path`, `large-diff`,
+`out-of-scope` or `risk-regex`). Then:
+
+```sh
+yakos decide compare supervisor-prefilter          # add --json for scripts
+```
+
+```
+surface        supervisor-prefilter  (model jev-1.13.0)
+question set   <sha256>
+shadow calls   412 with a local verdict (0 from other question-set hashes, 0 without a local verdict; not counted)
+answered       398   fail-open 14  [timeout=9 http_529=5]
+agreement      93.2%  (371 of 398)
+  both escalate        41
+  both pass            330
+  shadow-only escalate 19   (candidates for review: the provider flagged what the local heuristic passed)
+  local-only escalate  8    (the provider would have passed what the local heuristic escalated)
+local escalations the provider also flags: 83.7%
+latency        mean 240 ms, p95 610 ms
+cost           $0.017000
+sample gate    398 of 200 answered decisions (reached)
+```
+
+(Illustrative numbers.) The provider "escalates" by the rule the prefilter
+mode would use: `risk_class` is `dangerous` at or above the set's
+`min_confidence`, or `bypasses_hard_control` is at or above its
+`min_probability`. Only records for the question set's current hash and
+`shadow` mode are counted, so re-wording a question or bumping the model
+starts a fresh comparison instead of mixing evidence.
+
+### Promotion criteria
+
+Shadow mode is the only mode the hook supports. Promoting the surface to
+`prefilter` (a provider hit adds an escalation, never removes one) is a later,
+separate change, and it needs, from the K-111 design (section 5):
+
+- at least 200 answered shadow decisions on the current set hash (the
+  `sample gate` line), and at least 30 labelled disagreements
+- Jev-only precision of at least 0.70 on those labelled disagreements
+- no labelled false "benign" on a locally escalated case at 0.9 confidence or
+  more
+- an eval report recorded with `yakos decide promote supervisor-prefilter`
+
+Labelling disagreements (`yakos decide label`) is not built yet, so the last
+three criteria are checked by hand from the `shadow-only escalate` and
+`local-only escalate` cases until it is. `compare` supplies the sample count,
+agreement, fail-open rate, latency and cost.
+
 ## Logs, breaker, budget
 
 All state lives in `~/.yakos-state/` (or `$YAKOS_DISPATCH_LOG`), mode 0600, and
@@ -176,7 +283,7 @@ never in the dispatch-log.
 
 | File | Contents |
 |---|---|
-| `decision-log.ndjson` | One record per call: surface, question-set hash, model, mode, latency, tokens, cost estimate, answers with confidence, error class. The raw state, the question text, and the key are never logged. |
+| `decision-log.ndjson` | One record per call: surface, question-set hash, model, mode, latency, tokens, cost estimate, answers with confidence, error class, and (from a hook) the local heuristic's verdict. The raw state, the question text, and the key are never logged. |
 | `decision-breaker.json` | 5 consecutive failures open the circuit for 10 minutes. |
 | `decision-budget-<day>.ndjson` | Append-only ledger, one line per reservation or spend, summed on read. Per-session call cap (default 2000) and per-UTC-day spend cap (default $1.00). Cost is estimated from reported input tokens at the documented $0.042 per million. Appends are atomic across hook processes, so concurrent hooks cannot lose counts. The call cap is never exceeded; the dollar cap can be overshot only by calls already in flight, well under $0.002. Ledgers older than two days are deleted. If the ledger cannot be written or read, the call is refused. |
 
@@ -201,6 +308,6 @@ re-evaluated before it is applied to another.
 
 ## Status
 
-No live call to TypeSafe has been made from this codebase. The client is
-written against the published API at https://docs.typesafe.ai/api and tested
-against local servers only.
+The client is written against the published API at
+https://docs.typesafe.ai/api and tested against local servers and the mock
+provider. CI has no key; live calls happen only on an operator machine.
