@@ -1710,6 +1710,16 @@ case_check supervisor-stream.sh posttooluse-bash-ss-find-delete.json 0 superviso
 case_check supervisor-stream.sh posttooluse-bash-ss-abs-eval-curl.json 0 supervisor-stream setup_ss_passfilter
 case_check supervisor-stream.sh posttooluse-bash-ss-abs-sh-c-wget.json 0 supervisor-stream setup_ss_passfilter
 case_check supervisor-stream.sh posttooluse-bash-ss-find-delete-chained.json 0 supervisor-stream setup_ss_passfilter
+# K-111 P2b: the shadow decision call must never change the hook's result. Provider none,
+# provider mock (a launched child that exits at once), a provider whose CLI is missing
+# (silent fail-open), and jev without a key all leave rc/stdout/log/buffer identical on
+# both sides. The launched call itself (argv, state, decision-log record) is asserted by
+# tests/run-supervisor-shadow-test.sh.
+case_check supervisor-stream.sh posttooluse-bash-ss-rm-rf.json          0 supervisor-stream setup_ss_passfilter "YAKOS_DECISION_PROVIDER=none"
+case_check supervisor-stream.sh posttooluse-bash-ss-rm-rf.json          0 supervisor-stream setup_ss_passfilter "YAKOS_DECISION_PROVIDER=mock YAKOS_CLI=/usr/bin/true"
+case_check supervisor-stream.sh posttooluse-bash-ss-ls.json             0 supervisor-stream setup_ss_passfilter "YAKOS_DECISION_PROVIDER=mock YAKOS_CLI=/usr/bin/true"
+case_check supervisor-stream.sh posttooluse-bash-ss-rm-rf.json          0 supervisor-stream setup_ss_passfilter "YAKOS_DECISION_PROVIDER=mock YAKOS_CLI=/nonexistent/yakos"
+case_check supervisor-stream.sh posttooluse-bash-ss-rm-rf.json          0 supervisor-stream setup_ss_passfilter "YAKOS_DECISION_PROVIDER=jev"
 
 # --- retro-dispatch ---------------------------------------------------------------
 case_check retro-dispatch.sh   pretooluse-generic-tool.json 0 "" "" "" "" home_noop
