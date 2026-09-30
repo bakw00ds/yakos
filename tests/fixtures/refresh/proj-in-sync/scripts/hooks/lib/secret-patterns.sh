@@ -47,7 +47,7 @@ YAKOS_REDACT_EXTRA_PATTERNS=(
     'Bearer credential|[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:]]{8,}'
     'KEY=VALUE credential|([Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww]([Oo][Rr])?[Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]).?[[:space:]]*[=:][[:space:]]*.?[^[:space:]]{8,}'
     'URL credentials|://[^[:space:]/@:]*:[^[:space:]@]+@'
-    'curl basic auth|(-[A-Za-z]*u[[:space:]]*|--user([[:space:]]+|=))[^[:space:]:]+:[^[:space:]]+'
+    'curl basic auth|(curl|wget|xh)[^|;&]*[[:space:]](-[A-Za-z]*u[[:space:]]*|--user([[:space:]]+|=))[^[:space:]:]+:[^[:space:]]+'
 )
 
 # Must stay the last statement: reaching it proves the whole file parsed.
