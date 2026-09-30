@@ -457,3 +457,76 @@ func TestSanitize_OperatorPatternCaseInsensitive(t *testing.T) {
 		t.Error("a mixed-case operator never_paths entry must match case-insensitively")
 	}
 }
+
+// K-111 P2b: credentials that ride on a command line as flags must not leave.
+func TestRedact_CommandLineFlagCredentials(t *testing.T) {
+	cases := []struct{ in, secret string }{
+		{"curl -u admin:Hunter2Secret! https://x.example", "Hunter2Secret"},
+		{"curl --user admin:Hunter2Secret! https://x.example", "Hunter2Secret"},
+		{"curl -uadmin:Hunter2Secret! https://x.example", "Hunter2Secret"},
+		{"curl -u bob:TAILSECRET99 https://x", "TAILSECRET99"},
+		{"tool --password Passw0rdSpace run", "Passw0rdSpace"},
+		{"tool --password=Passw0rdEq run", "Passw0rdEq"},
+		{"tool --api-key K3yValueABC999 run", "K3yValueABC999"},
+		{"tool --client-secret Cl1entSecretVal run", "Cl1entSecretVal"},
+		{"tool --access-token=Acc3ssTok3nVal run", "Acc3ssTok3nVal"},
+		{"docker login -u me -p DockerPw123 reg", "DockerPw123"},
+		{"podman login reg -p PodmanPw123", "PodmanPw123"},
+		{"mysql -u root -pS3cretPW db", "S3cretPW"},
+		{"mysqldump -uroot -pDumpPw123 db", "DumpPw123"},
+		{"redis-cli -a RedisPw123 ping", "RedisPw123"},
+		{"sshpass -p 'Sshpass999' ssh host", "Sshpass999"},
+		{"sshpass -pSshpassAttached1 ssh host", "SshpassAttached1"},
+		{"htpasswd -b /etc/htpasswd alice HtPw12345", "HtPw12345"},
+		{"curl -H 'X-Api-Key: XkeyValue12345' https://x", "XkeyValue12345"},
+		{"curl -H 'Authorization: Token AuthTok12345' https://x", "AuthTok12345"},
+		{"echo apikey_abcdef0123456789abcdef", "abcdef0123456789abcdef"},
+		{"echo apikey_" + strings.Repeat("Ab1", 15), "Ab1Ab1Ab1"},
+	}
+	for _, c := range cases {
+		n := 0
+		out := RedactText(c.in, &n)
+		if strings.Contains(out, c.secret) || n == 0 {
+			t.Errorf("credential survived (n=%d): %q -> %q", n, c.in, out)
+		}
+		// Redaction is idempotent: the second pass over a truncated preview
+		// must not re-count or corrupt an already redacted value.
+		if again := RedactText(out, nil); again != out {
+			t.Errorf("not idempotent: %q -> %q -> %q", c.in, out, again)
+		}
+	}
+	// Ordinary commands with lookalike flags are left alone.
+	for _, in := range []string{
+		"git commit --author=Bob -m fix",
+		"docker run -p 8080:80 img",
+		"mysql -P 3306 -h db",
+		"ls -p /tmp",
+		"curl -u",
+		"tail -a file",
+		"npm run build --pass-thru-x",
+	} {
+		n := 0
+		out := RedactText(in, &n)
+		if strings.Contains(in, "pass-thru") {
+			continue // over-redaction of a --pass* flag is acceptable
+		}
+		if out != in {
+			t.Errorf("false positive: %q -> %q", in, out)
+		}
+	}
+}
+
+// The flag credentials are also gone from the Sanitize output the provider gets.
+func TestSanitize_CommandFlagCredentialsNeverLeave(t *testing.T) {
+	out, _, err := Sanitize(map[string]any{"tool": "Bash", "command_or_diff_preview": "curl -u deploy:ProdPassw0rd https://api && mysql -pS3cretPW db"},
+		SanitizeOptions{Level: EgressStrict, AllowedFields: []string{"tool", "command_or_diff_preview"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(out)
+	for _, leak := range []string{"ProdPassw0rd", "S3cretPW"} {
+		if strings.Contains(string(b), leak) {
+			t.Errorf("%s leaked: %s", leak, b)
+		}
+	}
+}

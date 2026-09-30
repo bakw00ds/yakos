@@ -106,7 +106,40 @@ var (
 	// A standalone 40-char base64 token: the shape of a bare AWS secret key.
 	// Confirmed by mixed case + digit so 40-hex git SHAs are left alone.
 	awsSecretRE = regexp.MustCompile(`[A-Za-z0-9/+]{40}`)
+
+	// K-111 P2b: credentials that ride on a command line as FLAGS. The shadow
+	// call is the first surface to ship raw shell commands, so these shapes
+	// matter now. Each rule keeps its prefix (group 1) and drops the value.
+	//
+	// TypeSafe's own key shape, whatever its length.
+	apikeyTokenRE = regexp.MustCompile(`\bapikey_[A-Za-z0-9_-]{6,}`)
+	// --password X, --api-key=X, --client-secret X ... (the name may be
+	// prefixed or suffixed with dash-separated words; "--author" is not one).
+	longSecretFlagRE = regexp.MustCompile(`(?i)(--(?:[a-z0-9]+-)*(?:password|passwd|pass|pwd|secret|api-?key|access-?key|token|auth|authorization)(?:-[a-z0-9]+)*[ =])("[^"]*"|'[^']*'|\S+)`)
+	// Short password flags of specific tools (the flag letter alone is too
+	// generic to match everywhere). Tool names are case-insensitive, the flag
+	// letter is not (mysql -P is a port).
+	mysqlPassRE = regexp.MustCompile(`((?i:\b(?:mysql|mysqldump|mariadb|mysqladmin)\b)[^\n;|&]*?\s-p)("[^"]*"|'[^']*'|\S+)`)
+	loginPassRE = regexp.MustCompile(`((?i:\b(?:docker|podman|helm|oras|buildah|skopeo)\b)[^\n;|&]*?\blogin\b[^\n;|&]*?\s-p[ =]?)("[^"]*"|'[^']*'|\S+)`)
+	sshpassRE   = regexp.MustCompile(`(\bsshpass\b[^\n;|&]*?\s-p[ =]?)("[^"]*"|'[^']*'|\S+)`)
+	redisAuthRE = regexp.MustCompile(`(\bredis-cli\b[^\n;|&]*?\s-a[ =]?)("[^"]*"|'[^']*'|\S+)`)
+	htpasswdRE  = regexp.MustCompile(`(\bhtpasswd\b[^\n;|&]*?\s-[a-zA-Z]*b[a-zA-Z]*\s+\S+\s+\S+\s+)("[^"]*"|'[^']*'|\S+)`)
+	// X-Api-Key / X-Auth-Token style headers (whole rest of the line or quoted span).
+	xHeaderRE = regexp.MustCompile(`(?i)(\bx-[a-z0-9-]*(?:api-?key|token|secret|auth|password)[a-z0-9-]*\s*:\s*)[^\r\n']+`)
 )
+
+// redactPrefixed keeps group 1 (the flag) and replaces the rest of the match
+// with a marker, unless the match is already redacted.
+func redactPrefixed(s string, re *regexp.Regexp, kind string, bump func()) string {
+	return re.ReplaceAllStringFunc(s, func(m string) string {
+		if strings.Contains(m, "[REDACTED") {
+			return m
+		}
+		sub := re.FindStringSubmatch(m)
+		bump()
+		return sub[1] + "[REDACTED:" + kind + "]"
+	})
+}
 
 // sensitiveKeyRE matches JSON object keys whose value is redacted wholesale.
 var sensitiveKeyRE = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|token|credential|authorization|webhook|dsn)|(^|[_.-])(pass|auth|key)($|[_.-])`)
@@ -334,6 +367,7 @@ func RedactText(s string, count *int) string {
 	// Order matters: whole PEM blocks first, then the shared secret-scan
 	// table, then the egress-only shapes, then base64 runs.
 	s = pemBlockRE.ReplaceAllStringFunc(s, func(string) string { bump(); return "[REDACTED:pem-private-key]" })
+	s = apikeyTokenRE.ReplaceAllStringFunc(s, func(string) string { bump(); return "[REDACTED:apikey]" })
 	for _, p := range secretscan.DefaultPatterns {
 		name := kindName(p.Name)
 		s = p.Regex.ReplaceAllStringFunc(s, func(string) string { bump(); return "[REDACTED:" + name + "]" })
@@ -349,6 +383,13 @@ func RedactText(s string, count *int) string {
 		s, c = secretscan.RedactKeep(s, "[REDACTED:basic-auth]")
 		n += c
 	}
+	s = redactPrefixed(s, longSecretFlagRE, "flag-secret", bump)
+	s = redactPrefixed(s, mysqlPassRE, "password", bump)
+	s = redactPrefixed(s, loginPassRE, "password", bump)
+	s = redactPrefixed(s, sshpassRE, "password", bump)
+	s = redactPrefixed(s, redisAuthRE, "password", bump)
+	s = redactPrefixed(s, htpasswdRE, "password", bump)
+	s = redactPrefixed(s, xHeaderRE, "header", bump)
 	s = jwtRE.ReplaceAllStringFunc(s, func(string) string { bump(); return "[REDACTED:jwt]" })
 	s = authSchemeRE.ReplaceAllStringFunc(s, func(m string) string {
 		if strings.Contains(m, "[REDACTED") {
