@@ -293,6 +293,7 @@ else
         # (what a continuation leaves behind) is dropped. K-112.
         combined="$(printf '%s\n%s\n%s\n%s' "$new_risk" "$content_risk" "$command_scan" "$description_scan" | tr '\n' ' ' | sed 's/\\ /  /g')"
         # Built-in default patterns (POSIX ERE for grep -E)
+        _ss_bt='`'
         default_patterns=(
             'drop[[:space:]]+table'
             'force.*push'
@@ -311,6 +312,12 @@ else
             'rm[[:space:]]+-[a-z]*r[a-z]*[[:space:]]+-[a-z]*f'
             'rm[[:space:]]+-[a-z]*f[a-z]*[[:space:]]+-[a-z]*r'
             'chmod[[:space:]]+-[a-z]+[[:space:]]+777'
+            # K-110: long-flag rm, sh -c "$(curl ...)", cp of .env. sudo/env
+            # prefixes need no stripping: every pattern is an unanchored search.
+            'rm[[:space:]]+([^;&|]*[[:space:]])?(-[a-z]*r[a-z]*|--recursive)[[:space:]]([^;&|]*[[:space:]])?(-[a-z]*f[a-z]*|--force)([[:space:]]|$)'
+            'rm[[:space:]]+([^;&|]*[[:space:]])?(-[a-z]*f[a-z]*|--force)[[:space:]]([^;&|]*[[:space:]])?(-[a-z]*r[a-z]*|--recursive)([[:space:]]|$)'
+            "(ba|z|da)?sh[[:space:]]+-[a-z]*c[[:space:]]+[^[:space:]]?([\$][(]|${_ss_bt})[[:space:]]*(curl|wget)"
+            'cp[[:space:]]+([^;&|]*[[:space:]])?[^[:space:]]*\.env[^[:alnum:][:space:]._/-]?([[:space:]]|$)'
         )
         for pat in "${default_patterns[@]}"; do
             if printf '%s' "$combined" | grep -qiE "$pat" 2>/dev/null; then

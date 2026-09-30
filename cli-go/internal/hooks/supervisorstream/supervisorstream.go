@@ -79,6 +79,12 @@ var defaultRiskPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)rm\s+-[a-z]*r[a-z]*\s+-[a-z]*f`),
 	regexp.MustCompile(`(?i)rm\s+-[a-z]*f[a-z]*\s+-[a-z]*r`),
 	regexp.MustCompile(`(?i)chmod\s+-[a-z]+\s+777`),
+	// K-110: long-flag rm, sh -c "$(curl ...)", cp of .env. sudo/env prefixes
+	// need no stripping: every pattern is an unanchored search.
+	regexp.MustCompile(`(?i)rm\s+([^;&|]*\s)?(-[a-z]*r[a-z]*|--recursive)\s([^;&|]*\s)?(-[a-z]*f[a-z]*|--force)(\s|$)`),
+	regexp.MustCompile(`(?i)rm\s+([^;&|]*\s)?(-[a-z]*f[a-z]*|--force)\s([^;&|]*\s)?(-[a-z]*r[a-z]*|--recursive)(\s|$)`),
+	regexp.MustCompile(`(?i)(ba|z|da)?sh\s+-[a-z]*c\s+\S?([$][(]|\x60)\s*(curl|wget)`),
+	regexp.MustCompile(`(?i)cp\s+([^;&|]*\s)?[^\s]*\.env[^a-z0-9\s._/-]?(\s|$)`),
 }
 
 // yakosYMLSupervisor holds the shape needed from .yakos.yml.
