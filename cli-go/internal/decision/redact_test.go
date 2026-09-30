@@ -569,3 +569,28 @@ func TestRedactText_NormalisesWhitespace(t *testing.T) {
 		t.Errorf("env line handling: %q", out)
 	}
 }
+
+// Both PRs' rules compose: whitespace normalisation runs first, then the
+// keep-context basic-auth table, then the flag rules. The command and flag stay.
+func TestRedact_NormalisationComposesWithKeepContext(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"curl -s -u admin:Hunter2pw https://x", "curl -s -u [REDACTED:basic-auth] https://x"},
+		{"curl  -s\t-u   admin:Hunter2pw   https://x", "curl -s -u [REDACTED:basic-auth] https://x"},
+		{"curl -s -u \\\n admin:Hunter2pw https://x", "curl -s -u [REDACTED:basic-auth] https://x"},
+	}
+	for _, c := range cases {
+		if got := RedactText(c.in, nil); got != c.want {
+			t.Errorf("%q -> %q, want %q", c.in, got, c.want)
+		}
+	}
+	chain := "curl -u a:CHAIN1pw https://x && curl --user c:CHAIN2pw https://y && mysql -pCHAIN3pw db && tool --password  CHAIN4pw && sshpass -p CHAIN5pw ssh h"
+	out := RedactText(chain, nil)
+	for _, leak := range []string{"CHAIN1pw", "CHAIN2pw", "CHAIN3pw", "CHAIN4pw", "CHAIN5pw"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("%s leaked: %q", leak, out)
+		}
+	}
+	if !strings.Contains(out, "curl -u [REDACTED:basic-auth] https://x") || !strings.Contains(out, "curl --user [REDACTED:basic-auth] https://y") {
+		t.Errorf("keep-context output lost the command or flag: %q", out)
+	}
+}
