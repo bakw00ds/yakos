@@ -246,7 +246,7 @@ func TestDecide_PanicNeverBecomesExit2(t *testing.T) {
 		if code != want {
 			t.Errorf("shadow=%v: code=%d, want %d", shadow, code, want)
 		}
-		if nullReason(t, out) != decision.ClassInternal || !strings.Contains(errs, "internal error") {
+		if nullReason(t, out) != decision.ClassInternal || !(strings.Contains(errs, "internal error") || strings.Contains(errs, "provider panic")) {
 			t.Errorf("out=%q err=%q", out, errs)
 		}
 	}
@@ -464,6 +464,7 @@ func TestDecide_ProjectConfigCannotLoosenPolicy(t *testing.T) {
 	f := newDecideFixture(t)
 	f.env[decision.KeyEnv] = "k"
 	f.env[decision.BaseURLEnv] = srv.URL
+	f.env[decision.EnvProvider] = "jev" // the user, not the project, enables the provider
 	cfg := filepath.Join(t.TempDir(), ".yakos.yml")
 	_ = os.WriteFile(cfg, []byte("decisions:\n  provider: jev\n  budget: {max_calls_per_session: 999999, max_usd_per_day: 999}\n  egress: {level: full}\n"), 0o600)
 	long := strings.Repeat("a b ", 2000) // 8000 bytes: cut to 2 KiB under strict, kept under full

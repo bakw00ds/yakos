@@ -172,13 +172,17 @@ profile:
 # until `yakos decide promote` records an eval for the surface.
 #
 # The API key is NEVER stored here. Export TYPESAFE_API_KEY in your shell.
+# A project file cannot ENABLE a provider: turn it on with
+# `export YAKOS_DECISION_PROVIDER=jev` or `provider: jev` in
+# ~/.yakos-state/decision-policy.yml. Here only `provider: none` has an effect
+# (it opts this project out of the user-level switch); other values are ignored.
 # A project can only TIGHTEN the user-level ceiling (default 2000 calls, $1/day,
 # strict egress); to raise it edit ~/.yakos-state/decision-policy.yml.
 # Kill switch: export YAKOS_DECISION_DISABLE=1
 # Check health: yakos doctor --probe-decision   (add --live for one real call)
 #
 # decisions:
-#   provider: none            # none | jev | mock   (default: none)
+#   provider: none            # only "none" has an effect here (see above)
 #   model: jev-1.13.0         # pinned version; aliases like jev-latest are rejected
 #   default_mode: shadow      # shadow | prefilter | off
 #   surfaces:

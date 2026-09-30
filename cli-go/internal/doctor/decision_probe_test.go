@@ -232,3 +232,17 @@ func TestDecisionProbe_ProjectCapsAreClampedByPolicy(t *testing.T) {
 		t.Fatalf("the user-level policy raises the ceiling; the project value then applies:\n%s", out)
 	}
 }
+
+// A project .yakos.yml cannot enable a provider; the probe says so.
+func TestDecisionProbe_ProjectProviderIsIgnoredWithWarning(t *testing.T) {
+	lib, proj, home := probeFixture(t, probeSet, "decisions:\n  provider: jev\n")
+	cfg := Config{HomeDir: home, YakosLib: lib, Getwd: func() (string, error) { return proj, nil }}
+	out, rep := runProbe(t, cfg, map[string]string{"TYPESAFE_API_KEY": "k"})
+	if !strings.Contains(out, "provider configured: none") || !strings.Contains(out, "cannot enable a provider") || warnCount(rep) == 0 {
+		t.Errorf("project-only jev must resolve to none with a warning:\n%s", out)
+	}
+	out, _ = runProbe(t, cfg, map[string]string{"TYPESAFE_API_KEY": "k", "YAKOS_DECISION_PROVIDER": "jev"})
+	if !strings.Contains(out, "provider configured: jev") {
+		t.Errorf("the environment must enable it:\n%s", out)
+	}
+}

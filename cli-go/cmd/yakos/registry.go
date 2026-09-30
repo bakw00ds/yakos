@@ -245,7 +245,7 @@ var commandRegistry = []commandEntry{
 	},
 	{
 		Name:   "decide",
-		Specs:  specSet("decide", "--provider", "--shadow", "--timeout", "--session", "--state-file", "--sets-dir", "--config", "--report"),
+		Specs:  specSet("decide", "--provider", "--shadow", "--timeout", "--session", "--state-file", "--sets-dir", "--config", "--report", "--local", "--local-trigger", "--log", "--json", "--consume-state-file", "--tag", "--exclude-session", "--since", "--include-mock", "--include-tagged"),
 		HelpFn: printDecideHelp,
 	},
 	{

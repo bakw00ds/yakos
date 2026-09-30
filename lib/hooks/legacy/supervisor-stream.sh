@@ -216,6 +216,156 @@ if [ -f "$buffer" ]; then
     fi
 fi
 
+# --- K-111 P2b: shadow decision provider (async, never blocks) --------------
+# When a decision provider is configured, ask it the supervisor-prefilter
+# question set about this event in SHADOW mode and log its verdict next to the
+# local pre-filter verdict (`yakos decide compare` reads them back). The call
+# is detached: this hook never waits for it, never reads its result and never
+# changes its own exit code, buffer, counter or escalation path. With provider
+# none (the default) _ss_provider prints nothing and _ss_shadow returns before
+# doing any work. Go twin: internal/hooks/supervisorstream/shadow.go.
+#
+# Provider resolution matches `yakos decide` (decision.ResolveProvider):
+# YAKOS_DECISION_DISABLE=1, then $YAKOS_DECISION_PROVIDER, then the top-level
+# `provider:` in the USER-level ~/.yakos-state/decision-policy.yml. A project
+# .yakos.yml can never enable a provider; an explicit `decisions.provider: none`
+# there (a direct child of the top-level decisions: block) vetoes the policy
+# switch. The env var still wins over that veto.
+# The policy file can enable egress, so it is trusted only when it is a regular
+# file (not a symlink), ours, and not group/world writable. GNU stat first:
+# on Linux `stat -f` is the filesystem form and "succeeds" with garbage; BSD
+# `stat -c` fails, so the fallback runs. Go twin: decision.LoadPolicy.
+_ss_policy_trusted() {
+    local f="$1" mode uid g o
+    [ -L "$f" ] && return 1
+    mode="$(stat -c '%a' "$f" 2>/dev/null || stat -f '%Lp' "$f" 2>/dev/null || true)"
+    uid="$(stat -c '%u' "$f" 2>/dev/null || stat -f '%u' "$f" 2>/dev/null || true)"
+    case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+    case "$uid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$uid" = "$(id -u)" ] || return 1
+    mode="000$mode"; mode="${mode: -3}"
+    g="${mode:1:1}"; o="${mode:2:1}"
+    [ $(( (g & 2) | (o & 2) )) -eq 0 ] || return 1
+    return 0
+}
+
+_ss_provider() {
+    [ "${YAKOS_DECISION_DISABLE:-0}" = "1" ] && return 0
+    local p="${YAKOS_DECISION_PROVIDER:-}" pol line content="" proj=""
+    if [ -z "$p" ]; then
+        pol="${YAKOS_DISPATCH_LOG:-${HOME:-}/.yakos-state}/decision-policy.yml"
+        if [ -f "$pol" ] && _ss_policy_trusted "$pol"; then
+            while IFS= read -r line || [ -n "$line" ]; do
+                case "$line" in
+                    provider:*)
+                        p="${line#provider:}"
+                        p="${p%%#*}"
+                        p="$(printf '%s' "$p" | tr -d " \t\r\"'")"
+                        break
+                        ;;
+                esac
+            done < "$pol"
+        fi
+        if [ -n "$p" ] && [ -f "$yakos_yml" ]; then
+            # $(<file) is a builtin read (no exec).
+            content="$(<"$yakos_yml")" 2>/dev/null || content=""
+            case "$content" in
+                *decisions:*)
+                    proj="$(awk '
+                        /^decisions:[[:space:]]*(#.*)?$/ { in_d = 1; next }
+                        in_d && /^[^[:space:]#]/ { exit }
+                        in_d && /^[[:space:]]+[A-Za-z_]/ {
+                            match($0, /^[[:space:]]+/); ind = RLENGTH
+                            if (base == 0) base = ind
+                            if (ind == base && $0 ~ /^[[:space:]]+provider:/) {
+                                v = $0
+                                sub(/^[[:space:]]+provider:[[:space:]]*/, "", v)
+                                sub(/[[:space:]]+#.*$/, "", v)
+                                sub(/[[:space:]]+$/, "", v)
+                                print v
+                                exit
+                            }
+                        }
+                    ' "$yakos_yml" 2>/dev/null | tr -d "\"'" || true)"
+                    ;;
+            esac
+            [ "$proj" = "none" ] && p=""
+        fi
+    fi
+    printf '%s' "$p"
+}
+
+# _ss_shadow <pass|escalate> <escalate_reason>
+_ss_shadow() {
+    local verdict="$1" reason="${2:-}" prov cli state kind preview intent pm
+    local -a dargs
+    prov="$(_ss_provider)"
+    case "$prov" in
+        jev) [ -n "${TYPESAFE_API_KEY:-}" ] || return 0 ;;
+        mock) : ;;
+        *) return 0 ;;
+    esac
+
+    if [ -n "${YAKOS_CLI:-}" ]; then
+        cli="$YAKOS_CLI"
+    elif [ -n "${YAKOS_ROOT:-}" ] && [ -f "$YAKOS_ROOT/cli/yakos" ]; then
+        cli="$YAKOS_ROOT/cli/yakos"
+    else
+        cli="$(command -v yakos 2>/dev/null || true)"
+    fi
+    [ -n "$cli" ] || return 0
+
+    # State: only the fields lib/decisions/supervisor-prefilter.yaml allows.
+    # The child redacts every string and cuts it to a 2 KiB preview.
+    preview="$command_scan"
+    [ -n "$preview" ] || preview="$new_full"
+    [ -n "$preview" ] || preview="$content_full"
+    preview="$(printf '%s' "$preview" | head -c 4096)"
+    intent=""
+    if [ -f "$current_dir/decisions.md" ]; then
+        intent="$(head -c 1500 "$current_dir/decisions.md" 2>/dev/null || true)"
+    fi
+    pm=""
+    if [ -n "$file_path" ] && { [ -f "$current_dir/decisions.md" ] || [ -f "$current_dir/plan.md" ]; }; then
+        pm="false"
+        local ref bn rel
+        bn="$(basename -- "$file_path")"
+        rel="${file_path#$project_dir/}"
+        for ref in "$current_dir/decisions.md" "$current_dir/plan.md"; do
+            [ -f "$ref" ] || continue
+            if grep -qF "$bn" "$ref" 2>/dev/null || grep -qF "$rel" "$ref" 2>/dev/null; then
+                pm="true"
+                break
+            fi
+        done
+    fi
+    # The raw preview and intent go to jq through its ENVIRONMENT (owner-only),
+    # never argv (world-readable in /proc/*/cmdline on Linux); only the tool
+    # name, the path and the plan flag ride on argv, as before this hook
+    # shipped state.
+    state="$(_SS_PREV="$preview" _SS_INTENT="$intent" jq -nc --arg tool "$tool" --arg fp "$file_path" --arg pm "$pm" \
+        '($ENV._SS_PREV // "") as $prev | ($ENV._SS_INTENT // "") as $intent
+         | {tool: $tool}
+         + (if $prev == "" then {} else {command_or_diff_preview: $prev} end)
+         + (if $fp == "" then {} else {file_path: $fp} end)
+         + (if $intent == "" then {} else {stated_intent: $intent} end)
+         + (if $pm == "" then {} else {plan_mentions_path: ($pm == "true")} end)' 2>/dev/null)" || return 0
+    [ -n "$state" ] || return 0
+
+    dargs=(decide supervisor-prefilter --shadow --local "$verdict")
+    if [ "$verdict" = "escalate" ]; then
+        kind="${reason%%:*}"
+        [ -z "$kind" ] || dargs+=(--local-trigger "$kind")
+    fi
+    [ -z "$session_id" ] || dargs+=(--session "$session_id")
+    dargs+=(--config "$yakos_yml")
+
+    # Detached like the supervisor dispatch below; all fds closed to the hook.
+    printf '%s' "$state" | nohup "$cli" "${dargs[@]}" >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    return 0
+}
+
 # --- 2. Local pre-filter (shell-only, zero LLM cost) -----------------------
 
 # When pre_filter is disabled, every mutation counts toward the score counter
@@ -362,6 +512,7 @@ else
             "pre-filter: no trigger; buffered without dispatch" \
             "$(jq -nc --arg tool "$tool" --arg file "$file_path" \
                 '{pre_filter: "pass", tool: $tool, file: $file}')"
+        _ss_shadow pass "" || true
         exit 0
     fi
 
@@ -371,6 +522,7 @@ else
         "$(jq -nc --arg tool "$tool" --arg file "$file_path" \
             --arg reason "$escalate_reason" \
             '{pre_filter: "escalate", trigger: $reason, tool: $tool, file: $file}')"
+    _ss_shadow escalate "$escalate_reason" || true
 fi
 
 # --- 3. Increment escalation counter ----------------------------------------

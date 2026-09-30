@@ -92,6 +92,11 @@ var defaultRiskPatterns = []*regexp.Regexp{
 // yakosYMLSupervisor holds the shape needed from .yakos.yml.
 type yakosYMLSupervisor struct {
 	Supervisor *supervisorConfig `yaml:"supervisor"`
+	// Decisions carries only the provider name: the shadow call itself is a
+	// `yakos decide` child that reads the full decisions: block.
+	// Held as a raw node so a malformed decisions: block can never make the
+	// supervisor: block unreadable (provider none must stay unchanged).
+	Decisions yaml.Node `yaml:"decisions"`
 }
 
 type supervisorConfig struct {
@@ -163,7 +168,11 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	projectDir := h.resolveProjectDir(in)
 
 	// Config disable check.
-	cfg := h.loadConfig(projectDir)
+	doc := h.loadDoc(projectDir)
+	var cfg *supervisorConfig
+	if doc != nil {
+		cfg = doc.Supervisor
+	}
 	if cfg != nil && cfg.Enabled != nil && !*cfg.Enabled {
 		return out, nil
 	}
@@ -283,6 +292,10 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 			h.appendLog(&out, logFile, "REPORT", "pass",
 				"pre-filter: no trigger; buffered without dispatch",
 				map[string]any{"pre_filter": "pass", "tool": in.Tool, "file": filePath})
+			h.shadowDecision(in, doc, projectDir, shadowInput{
+				Tool: in.Tool, Verdict: "pass", FilePath: filePath, Command: commandScan,
+				New: newFull, Content: contentFull, Session: sessionID,
+			})
 			return out, nil
 		}
 
@@ -290,6 +303,10 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		h.appendLog(&out, logFile, "REPORT", "pass",
 			"pre-filter: ESCALATE ("+escalateReason+"); counting toward score threshold",
 			map[string]any{"pre_filter": "escalate", "trigger": escalateReason, "tool": in.Tool, "file": filePath})
+		h.shadowDecision(in, doc, projectDir, shadowInput{
+			Tool: in.Tool, Verdict: "escalate", Trigger: escalateReason, FilePath: filePath, Command: commandScan,
+			New: newFull, Content: contentFull, Session: sessionID,
+		})
 	}
 
 	// ---- 3. Increment escalation counter ----
@@ -477,7 +494,7 @@ func (h *Hook) checkRiskRegex(combined string, extras []string) string {
 
 // ---- config loading ----------------------------------------------------------
 
-func (h *Hook) loadConfig(projectDir string) *supervisorConfig {
+func (h *Hook) loadDoc(projectDir string) *yakosYMLSupervisor {
 	if projectDir == "" {
 		return nil
 	}
@@ -490,7 +507,7 @@ func (h *Hook) loadConfig(projectDir string) *supervisorConfig {
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil
 	}
-	return doc.Supervisor
+	return &doc
 }
 
 // ---- buffer management -------------------------------------------------------

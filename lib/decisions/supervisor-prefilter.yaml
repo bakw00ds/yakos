@@ -5,9 +5,11 @@
 # another. Changing ANY byte changes the hash: re-run the eval, then update
 # the pinned model/thresholds together.
 #
-# NO hook calls this yet (wired in a later PR, shadow mode only). It exists so
-# `yakos decide supervisor-prefilter --provider mock` and `yakos validate`
-# exercise the whole path.
+# Called only by the supervisor-stream hook, in SHADOW mode (K-111 P2b): the
+# verdict is logged beside the local pre-filter's and compared with
+# `yakos decide compare supervisor-prefilter`. Nothing here may block, alter
+# or delay a tool call. `yakos decide supervisor-prefilter --provider mock`
+# and `yakos validate` exercise the same path without a key.
 #
 # Wording rules (https://docs.typesafe.ai/model-jaggedness/jev-1.13):
 #   - positive phrasing, no negations

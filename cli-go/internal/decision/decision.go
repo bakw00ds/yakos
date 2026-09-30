@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -210,7 +211,12 @@ type EgressConfig struct {
 
 // Config is the `decisions:` block of .yakos.yml. It never holds a credential.
 type Config struct {
-	Provider    string                   `yaml:"provider"`
+	// Provider is what the project file says. A project file can only turn a
+	// provider OFF (provider: none); it can never turn one on. See
+	// ResolveProvider.
+	Provider string `yaml:"provider"`
+	// ProviderSet is true when the file carries an explicit provider value.
+	ProviderSet bool                     `yaml:"-"`
 	Model       string                   `yaml:"model"`
 	DefaultMode string                   `yaml:"default_mode"`
 	Surfaces    map[string]SurfaceConfig `yaml:"surfaces"`
@@ -272,6 +278,7 @@ func LoadConfig(path string) (Config, error) {
 	}
 	got := *doc.Decisions
 	def := DefaultConfig()
+	got.ProviderSet = got.Provider != ""
 	if got.Provider == "" {
 		got.Provider = def.Provider
 	}
@@ -293,8 +300,12 @@ const PolicyFileName = "decision-policy.yml"
 
 // Policy is the user-level ceiling for budget and egress.
 type Policy struct {
-	Budget BudgetConfig `yaml:"budget"`
-	Egress EgressConfig `yaml:"egress"`
+	// Provider is the user-level switch that turns a provider on ("jev", "mock").
+	// It lives here, outside any repository, because a cloned project must not
+	// be able to start sending data to a third party by itself.
+	Provider string       `yaml:"provider"`
+	Budget   BudgetConfig `yaml:"budget"`
+	Egress   EgressConfig `yaml:"egress"`
 }
 
 // DefaultPolicy is the documented ceiling: 2000 calls, $1/day, strict egress.
@@ -305,10 +316,29 @@ func DefaultPolicy() Policy {
 	}
 }
 
+// ErrUntrustedPolicy marks a policy file that was ignored for its ownership,
+// mode or type.
+var ErrUntrustedPolicy = errors.New("decision policy ignored")
+
 // LoadPolicy reads the user-level policy file; a missing file is the default.
 // The operator loosens the ceiling here, never in a project's .yakos.yml.
 func LoadPolicy(path string) (Policy, error) {
 	p := DefaultPolicy()
+	// The policy file can enable egress and raise the ceiling, so it is only
+	// trusted when it is a regular file, ours, and not writable by others. An
+	// untrusted file is ignored whole (default policy) and reported.
+	if fi, lerr := os.Lstat(path); lerr == nil {
+		switch {
+		case fi.Mode()&os.ModeSymlink != 0:
+			return DefaultPolicy(), fmt.Errorf("%w: %s is a symlink", ErrUntrustedPolicy, path)
+		case !fi.Mode().IsRegular():
+			return DefaultPolicy(), fmt.Errorf("%w: %s is not a regular file", ErrUntrustedPolicy, path)
+		case !OwnedByCurrentUser(fi):
+			return DefaultPolicy(), fmt.Errorf("%w: %s is owned by another user", ErrUntrustedPolicy, path)
+		case groupOrWorldWritable(fi):
+			return DefaultPolicy(), fmt.Errorf("%w: %s is group or world writable (chmod 600)", ErrUntrustedPolicy, path)
+		}
+	}
 	data, err := os.ReadFile(path) //nolint:gosec // state-dir file
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -330,7 +360,38 @@ func LoadPolicy(path string) (Policy, error) {
 		p.Egress.Level = got.Egress.Level
 	}
 	p.Egress.NeverPaths = got.Egress.NeverPaths
+	p.Provider = strings.TrimSpace(got.Provider)
 	return p, nil
+}
+
+// ResolveProvider picks the provider for one call. Enabling one is a USER
+// decision: --provider, then $YAKOS_DECISION_PROVIDER, then `provider:` in the
+// user-level policy file (~/.yakos-state/decision-policy.yml). A project
+// .yakos.yml may only veto: an explicit `provider: none` there turns the
+// user-level policy switch off for that project (an explicit flag or env var
+// in the shell still wins). Any other value
+// in the project file is ignored and reported in warning, because a cloned
+// repository must not be able to start egress on its own.
+func ResolveProvider(flag string, getenv func(string) string, project Config, policy Policy) (name, warning string) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if flag != "" {
+		return flag, ""
+	}
+	if project.ProviderSet && project.Provider != "" && project.Provider != ProviderNone {
+		warning = fmt.Sprintf("decisions.provider %q in the project .yakos.yml is ignored: a project file cannot enable a provider (set %s, or provider: in ~/.yakos-state/%s)", project.Provider, EnvProvider, PolicyFileName)
+	}
+	if v := getenv(EnvProvider); v != "" {
+		return v, warning // an explicit choice in this shell
+	}
+	if project.ProviderSet && project.Provider == ProviderNone {
+		return ProviderNone, "" // the project opts out of the user-level switch
+	}
+	if policy.Provider != "" {
+		return policy.Provider, warning
+	}
+	return ProviderNone, warning
 }
 
 // Tighten returns cfg with budget and egress clamped to the policy: caps are
@@ -408,6 +469,12 @@ type Engine struct {
 	Logger   *Logger // nil disables logging
 	Egress   EgressConfig
 	Now      func() time.Time
+	// LocalVerdict / LocalTrigger, when set, are copied into the decision-log
+	// record (shadow-vs-local comparison). They never reach the provider.
+	LocalVerdict string
+	LocalTrigger string
+	// Tag is copied into the record (see Record.Tag).
+	Tag string
 }
 
 // Outcome is what Execute returns. Exactly one of Result / Err is set.
@@ -444,6 +511,7 @@ func (e *Engine) Execute(ctx context.Context, set *QuestionSet, state any, mode,
 		Type: "decision", TS: start.UTC().Format(time.RFC3339Nano), ID: newID(),
 		Surface: set.Surface, SchemaID: set.SchemaID, SchemaHash: set.Hash,
 		Provider: e.Provider.Name(), Model: set.Model, Mode: mode, Session: session,
+		LocalVerdict: e.LocalVerdict, LocalTrigger: e.LocalTrigger, Tag: e.Tag,
 	}
 	finish := func(res *Result, err error) Outcome {
 		rec.LatencyMS = now().Sub(start).Milliseconds()
@@ -474,16 +542,40 @@ func (e *Engine) Execute(ctx context.Context, set *QuestionSet, state any, mode,
 		return finish(nil, err)
 	}
 
+	// Hard deadline for every provider, including one that ignores its
+	// context: the call runs in its own goroutine and Execute stops waiting at
+	// the deadline. (An abandoned call finishes or dies with the process; the
+	// caller is a short-lived CLI.)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	req := Request{
 		Surface: set.Surface, SchemaID: set.SchemaID, SchemaHash: set.Hash,
 		Model: set.Model, State: san, Questions: set.Questions,
 		Mode: mode, Timeout: timeout, Session: session,
 	}
-	res, err := e.Provider.Decide(ctx, req)
-	if err != nil {
-		return finish(nil, err)
+	type decided struct {
+		res *Result
+		err error
 	}
-	return finish(res, nil)
+	ch := make(chan decided, 1) // buffered: an abandoned call never leaks blocked on send
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				ch <- decided{err: newErr(ClassInternal, "provider panic")}
+			}
+		}()
+		res, err := e.Provider.Decide(ctx, req)
+		ch <- decided{res, err}
+	}()
+	select {
+	case d := <-ch:
+		if d.err != nil {
+			return finish(nil, d.err)
+		}
+		return finish(d.res, nil)
+	case <-ctx.Done():
+		return finish(nil, newErr(ClassTimeout, "deadline exceeded"))
+	}
 }
 
 func newID() string {

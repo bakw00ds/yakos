@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Shadow decision provider on the supervisor pre-filter (K-111 P2b).**
+  When `decisions.provider` is `jev` (or `mock`), or
+  `YAKOS_DECISION_PROVIDER` says so, `supervisor-stream` (bash and Go twin)
+  starts `yakos decide supervisor-prefilter --shadow` detached after the local
+  pre-filter decides, and the decision log records the provider's verdict
+  beside the local one. It never blocks, alters or delays a tool call: every
+  failure is a silent fail-open, the call has a 1.5 s hard deadline, and with
+  provider `none` (the default) the hook is unchanged. `yakos decide` gains
+  `--local` / `--local-trigger`, and a new `yakos decide compare <surface>`
+  prints shadow-vs-local agreement, fail-open counts, latency and cost, the
+  evidence that gates promotion out of shadow mode. See
+  `docs/decision-providers.md`.
+  A project `.yakos.yml` can no longer enable a decision provider: only
+  `YAKOS_DECISION_PROVIDER` or `provider:` in `~/.yakos-state/decision-policy.yml`
+  can (a project may set `provider: none` to opt out). The egress redaction
+  gains command-line credential shapes (`curl -u`, `--password X`, `mysql -p`,
+  `docker login -p`, `sshpass -p`, `redis-cli -a`, `htpasswd -b`, `X-Api-Key:`
+  headers, `apikey_` tokens). `yakos decide compare` skips mock and `--tag`ged
+  records and gains `--session`, `--exclude-session` and `--since`. The
+  engine deadline now holds for providers that ignore their context.
+  Changing the header comment of `lib/decisions/supervisor-prefilter.yaml`
+  changes its recorded hash.
+
 ### Fixed
 
 - **Survey bug batch (K-112).** Seven pre-existing bugs from the K-111

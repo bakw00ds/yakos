@@ -50,6 +50,7 @@ on:
       - 'tests/run-hook-parity.sh'
       - 'tests/run-hook-fixtures.sh'
       - 'tests/run-validator-fixtures.sh'
+      - 'tests/run-supervisor-shadow-test.sh'
       - 'tests/fixtures/hooks/**'
   pull_request:
     branches: [main]
@@ -62,6 +63,7 @@ on:
       - 'tests/run-hook-parity.sh'
       - 'tests/run-hook-fixtures.sh'
       - 'tests/run-validator-fixtures.sh'
+      - 'tests/run-supervisor-shadow-test.sh'
       - 'tests/fixtures/hooks/**'
   workflow_dispatch:
 
@@ -142,6 +144,14 @@ jobs:
       - name: Per-domain validator + promotion-gate fixtures
         shell: bash
         run: bash tests/run-validator-fixtures.sh
+
+      # K-111 P2b: the supervisor shadow decision call. Mock provider only, no
+      # key, no network: provider none starts nothing; mock starts the same
+      # `yakos decide` argv and state on both sides; an error is a silent
+      # fail-open; `decide compare` reads the records back.
+      - name: Supervisor shadow decision (bash vs Go, mock provider)
+        shell: bash
+        run: bash tests/run-supervisor-shadow-test.sh
 
       - name: Upload hook parity matrix
         if: always()
@@ -708,3 +718,7 @@ jobs:
         env:
           YAKOS_HOOK_BASH: /bin/bash
         run: /bin/bash tests/run-hook-fixtures.sh
+
+      - name: Supervisor shadow decision under /bin/bash (bash side)
+        shell: bash
+        run: /bin/bash tests/run-supervisor-shadow-test.sh
