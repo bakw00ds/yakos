@@ -231,12 +231,30 @@ fi
 # .yakos.yml can never enable a provider; an explicit `decisions.provider: none`
 # there (a direct child of the top-level decisions: block) vetoes the policy
 # switch. The env var still wins over that veto.
+# The policy file can enable egress, so it is trusted only when it is a regular
+# file (not a symlink), ours, and not group/world writable. GNU stat first:
+# on Linux `stat -f` is the filesystem form and "succeeds" with garbage; BSD
+# `stat -c` fails, so the fallback runs. Go twin: decision.LoadPolicy.
+_ss_policy_trusted() {
+    local f="$1" mode uid g o
+    [ -L "$f" ] && return 1
+    mode="$(stat -c '%a' "$f" 2>/dev/null || stat -f '%Lp' "$f" 2>/dev/null || true)"
+    uid="$(stat -c '%u' "$f" 2>/dev/null || stat -f '%u' "$f" 2>/dev/null || true)"
+    case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+    case "$uid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$uid" = "$(id -u)" ] || return 1
+    mode="000$mode"; mode="${mode: -3}"
+    g="${mode:1:1}"; o="${mode:2:1}"
+    [ $(( (g & 2) | (o & 2) )) -eq 0 ] || return 1
+    return 0
+}
+
 _ss_provider() {
     [ "${YAKOS_DECISION_DISABLE:-0}" = "1" ] && return 0
     local p="${YAKOS_DECISION_PROVIDER:-}" pol line content="" proj=""
     if [ -z "$p" ]; then
         pol="${YAKOS_DISPATCH_LOG:-${HOME:-}/.yakos-state}/decision-policy.yml"
-        if [ -f "$pol" ]; then
+        if [ -f "$pol" ] && _ss_policy_trusted "$pol"; then
             while IFS= read -r line || [ -n "$line" ]; do
                 case "$line" in
                     provider:*)
