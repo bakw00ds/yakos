@@ -408,6 +408,10 @@ type Engine struct {
 	Logger   *Logger // nil disables logging
 	Egress   EgressConfig
 	Now      func() time.Time
+	// LocalVerdict / LocalTrigger, when set, are copied into the decision-log
+	// record (shadow-vs-local comparison). They never reach the provider.
+	LocalVerdict string
+	LocalTrigger string
 }
 
 // Outcome is what Execute returns. Exactly one of Result / Err is set.
@@ -444,6 +448,7 @@ func (e *Engine) Execute(ctx context.Context, set *QuestionSet, state any, mode,
 		Type: "decision", TS: start.UTC().Format(time.RFC3339Nano), ID: newID(),
 		Surface: set.Surface, SchemaID: set.SchemaID, SchemaHash: set.Hash,
 		Provider: e.Provider.Name(), Model: set.Model, Mode: mode, Session: session,
+		LocalVerdict: e.LocalVerdict, LocalTrigger: e.LocalTrigger,
 	}
 	finish := func(res *Result, err error) Outcome {
 		rec.LatencyMS = now().Sub(start).Milliseconds()
@@ -474,6 +479,10 @@ func (e *Engine) Execute(ctx context.Context, set *QuestionSet, state any, mode,
 		return finish(nil, err)
 	}
 
+	// Hard deadline for every provider (the mock and any future provider do
+	// not enforce req.Timeout themselves): a shadow call can never outlive it.
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	req := Request{
 		Surface: set.Surface, SchemaID: set.SchemaID, SchemaHash: set.Hash,
 		Model: set.Model, State: san, Questions: set.Questions,

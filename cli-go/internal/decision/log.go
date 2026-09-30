@@ -45,6 +45,12 @@ type Record struct {
 	Status       string                   `json:"status"` // ok | <error class>
 	ErrorClass   string                   `json:"provider_error_class,omitempty"`
 	Answers      map[string]AnswerSummary `json:"answers,omitempty"`
+	// LocalVerdict / LocalTrigger record what the caller's own deterministic
+	// heuristic decided for the same event ("pass" or "escalate", and the
+	// trigger kind), so shadow and local verdicts can be compared later
+	// (`yakos decide compare`). Both are omitted when the caller gave none.
+	LocalVerdict string `json:"local_verdict,omitempty"`
+	LocalTrigger string `json:"local_trigger,omitempty"`
 }
 
 // SummarizeAnswers drops probabilities/legends; keeps the verdicts.

@@ -52,11 +52,22 @@ Flags:
                           (default $YAKOS_SESSION_ID, else "default").
     --state-file <path>   Read the state from a file instead of stdin.
     --sets-dir <dir>      Question-set directory (default <framework>/lib/decisions).
+    --local <verdict>     pass | escalate: what the caller's own deterministic
+                          heuristic decided for this event. Recorded in the
+                          decision log beside the answer, never sent to the
+                          provider (used by the supervisor shadow hook).
+    --local-trigger <k>   Trigger kind behind an escalate verdict (logged only).
     --config <path>       .yakos.yml to read the decisions: block from
                           (default $CLAUDE_PROJECT_DIR/.yakos.yml, then ./.yakos.yml).
                           A project may only TIGHTEN the user-level ceiling in
                           ~/.yakos-state/decision-policy.yml (default: 2000
                           calls, $1/day, strict egress).
+
+yakos decide compare <surface> [--json] [--log <path>] [--sets-dir <dir>]
+    Reads the decision log and prints how often the shadow verdict agreed with
+    the local heuristic recorded beside it (shadow-mode records for the surface's
+    current question-set hash only), plus fail-open counts, latency and cost.
+    This is the evidence that gates promotion out of shadow mode.
 
 yakos decide promote <surface> --report <eval report>
     Operator command: records a verified promotion for the surface's current
@@ -116,6 +127,8 @@ func decideMain(env decideEnv, args []string) (code int) {
 
 	var help bool
 	var providerFlag, timeoutFlag, sessionFlag, stateFile, setsDir, configPath, reportPath string
+	var localVerdict, localTrigger, logFlag string
+	var asJSON bool
 	fs := &cliflag.Set{Cmd: "decide", Specs: []cliflag.Spec{
 		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
 		{Name: "--shadow", Kind: cliflag.Bool, Bool: &shadow},
@@ -125,6 +138,10 @@ func decideMain(env decideEnv, args []string) (code int) {
 		{Name: "--state-file", Kind: cliflag.String, Str: &stateFile, ValueDesc: "a path"},
 		{Name: "--sets-dir", Kind: cliflag.String, Str: &setsDir, ValueDesc: "a directory"},
 		{Name: "--config", Kind: cliflag.String, Str: &configPath, ValueDesc: "a path"},
+		{Name: "--local", Kind: cliflag.String, Str: &localVerdict, ValueDesc: "pass or escalate"},
+		{Name: "--local-trigger", Kind: cliflag.String, Str: &localTrigger, ValueDesc: "a trigger kind"},
+		{Name: "--log", Kind: cliflag.String, Str: &logFlag, ValueDesc: "a decision-log path"},
+		{Name: "--json", Kind: cliflag.Bool, Bool: &asJSON},
 		{Name: "--report", Kind: cliflag.String, Str: &reportPath, ValueDesc: "an eval report path"},
 	}}
 	rest, err := fs.Parse(args)
@@ -138,6 +155,13 @@ func decideMain(env decideEnv, args []string) (code int) {
 	}
 	if len(rest) == 2 && rest[0] == "promote" {
 		return decidePromote(env, rest[1], reportPath, setsDir)
+	}
+	if len(rest) == 2 && rest[0] == "compare" {
+		return decideCompare(env, rest[1], logFlag, setsDir, asJSON)
+	}
+	if localVerdict != "" && !decision.ValidLocalVerdict(localVerdict) {
+		fmt.Fprintf(env.Stderr, "decide: invalid --local %q (pass or escalate)\n", localVerdict)
+		return decideExitUsage
 	}
 	if len(rest) != 1 || (len(rest[0]) > 0 && rest[0][0] == '-') {
 		fmt.Fprintln(env.Stderr, "decide: expected exactly one <surface> (try --help)")
@@ -255,7 +279,8 @@ func decideMain(env decideEnv, args []string) (code int) {
 	if env.StateDir != "" {
 		logPath = decision.StatePaths{Dir: env.StateDir}.Log()
 	}
-	eng := &decision.Engine{Provider: prov, Logger: decision.NewLogger(logPath), Egress: cfg.Egress}
+	eng := &decision.Engine{Provider: prov, Logger: decision.NewLogger(logPath), Egress: cfg.Egress,
+		LocalVerdict: localVerdict, LocalTrigger: sanitizeTrigger(localTrigger)}
 	out := eng.Execute(context.Background(), set, state, mode, session, timeout)
 	if out.Err != nil {
 		return fail(out.Class, "%s", out.Err.Error())
@@ -316,6 +341,66 @@ func decidePromote(env decideEnv, surface, report, setsDir string) int {
 	b, _ := json.Marshal(p)
 	fmt.Fprintln(env.Stdout, string(b))
 	return decideExitOK
+}
+
+// decideCompare implements `yakos decide compare <surface>`: shadow-vs-local
+// agreement from the decision log. Read-only; never calls a provider.
+func decideCompare(env decideEnv, surface, logPath, setsDir string, asJSON bool) int {
+	if !decision.ValidSurface(surface) {
+		fmt.Fprintf(env.Stderr, "decide compare: invalid surface name %q\n", surface)
+		return decideExitUsage
+	}
+	getenv := env.Getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if setsDir == "" {
+		root := env.YakosRoot
+		if r := getenv("YAKOS_ROOT"); r != "" {
+			root = r
+		}
+		setsDir = filepath.Join(resolveLibRoot(root, env.Home, env.Stderr), "lib", "decisions")
+	}
+	set, err := decision.LoadSet(setsDir, surface)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "decide compare: %v\n", err)
+		return decideExitUsage
+	}
+	if logPath == "" {
+		stateDir := env.StateDir
+		if stateDir == "" {
+			stateDir = statepath.Dir()
+		}
+		logPath = decision.StatePaths{Dir: stateDir}.Log()
+	}
+	rep, err := decision.Compare(logPath, set)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "decide compare: %v\n", err)
+		return decideExitUsage
+	}
+	if asJSON {
+		b, _ := json.Marshal(rep)
+		fmt.Fprintln(env.Stdout, string(b))
+		return decideExitOK
+	}
+	rep.WriteText(env.Stdout)
+	return decideExitOK
+}
+
+// sanitizeTrigger keeps the logged trigger kind to a short token: the log is
+// for aggregation, not for free text.
+func sanitizeTrigger(s string) string {
+	if len(s) > 40 {
+		s = s[:40]
+	}
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' {
+			out = append(out, c)
+		}
+	}
+	return string(out)
 }
 
 func decideFail(stdout io.Writer, shadow bool, class string) int {
