@@ -54,9 +54,11 @@ Flags:
     --session <id>        Session id for the per-session call cap
                           (default $YAKOS_SESSION_ID, else "default").
     --state-file <path>   Read the state from a file instead of stdin.
-    --consume-state-file  Delete the --state-file once it has been read (or on any
-                          failure). Used by hooks that hand the state over in a
-                          private temp file.
+    --consume-state-file  Delete the --state-file once it has been read. Only a
+                          shadow-state-*.json regular file of yours directly in
+                          the state directory is ever deleted; any other path is
+                          read and left alone. Used by hooks that hand the state
+                          over in a private temp file.
     --sets-dir <dir>      Question-set directory (default <framework>/lib/decisions).
     --tag <label>         Label the call as not real traffic (e.g. smoke); compare
                           leaves tagged records out by default.
@@ -169,11 +171,6 @@ func decideMain(env decideEnv, args []string) (code int) {
 		fmt.Fprintln(env.Stderr, err)
 		return decideExitUsage
 	}
-	// A handed-over state file is removed on every path out of here, including
-	// usage errors and provider failures.
-	if consumeState && stateFile != "" && stateFile != "-" {
-		defer os.Remove(stateFile) //nolint:errcheck
-	}
 	if help {
 		printDecideHelp(env.Stdout)
 		return decideExitOK
@@ -280,6 +277,9 @@ func decideMain(env decideEnv, args []string) (code int) {
 	state, rerr := readDecideState(env.Stdin, stateFile)
 	if rerr != nil {
 		return fail(decision.ClassBadRequest, "state: %v", rerr)
+	}
+	if consumeState && stateFile != "" && stateFile != "-" {
+		consumeStateFile(stateFile, stateDir, env.Stderr)
 	}
 
 	prov := env.Provider
@@ -421,6 +421,24 @@ func decideCompare(env decideEnv, surface, logPath, setsDir string, asJSON bool,
 	}
 	rep.WriteText(env.Stdout)
 	return decideExitOK
+}
+
+// consumeStateFile deletes a state file a hook handed over, after it was read.
+// It only ever deletes the hook's own temp files: directly inside the state
+// directory, named shadow-state-*.json, a regular file (never a symlink) owned
+// by the current user. Anything else is left alone and reported.
+func consumeStateFile(path, stateDir string, stderr io.Writer) {
+	clean := filepath.Clean(path)
+	if ok, _ := filepath.Match("shadow-state-*.json", filepath.Base(clean)); !ok || filepath.Dir(clean) != filepath.Clean(stateDir) {
+		fmt.Fprintf(stderr, "decide: --consume-state-file: %s is not a hook state file in %s; not deleted\n", path, stateDir)
+		return
+	}
+	fi, err := os.Lstat(clean)
+	if err != nil || !fi.Mode().IsRegular() || !decision.OwnedByCurrentUser(fi) {
+		fmt.Fprintf(stderr, "decide: --consume-state-file: %s is not a regular file of yours; not deleted\n", path)
+		return
+	}
+	_ = os.Remove(clean)
 }
 
 // parseSince accepts a duration back from now (72h) or an RFC 3339 instant.

@@ -145,33 +145,69 @@ func TestDecideCompare_UsageErrors(t *testing.T) {
 	}
 }
 
-func TestDecide_ConsumeStateFileDeletesItOnEveryPath(t *testing.T) {
+func TestDecide_ConsumeStateFileDeletesOnlyTheHooksOwnFilesAfterReading(t *testing.T) {
 	f := newDecideFixture(t)
 	f.mockFixture(decideAnswers)
-	write := func() string {
-		p := filepath.Join(t.TempDir(), "state.json")
+	mk := func(dir, name string) string {
+		p := filepath.Join(dir, name)
 		if err := os.WriteFile(p, []byte(`{"tool":"x"}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return p
 	}
-	p := write()
-	if code, _, _ := f.run("", "demo", "--provider", "mock", "--shadow", "--state-file", p, "--consume-state-file"); code != 0 {
-		t.Fatal(code)
+	gone := func(p string) bool { _, err := os.Lstat(p); return err != nil }
+	args := func(p string, extra ...string) []string {
+		return append([]string{"demo", "--provider", "mock", "--shadow", "--state-file", p, "--consume-state-file"}, extra...)
 	}
-	if _, err := os.Stat(p); err == nil {
-		t.Error("state file survived a successful call")
+
+	// Own file in the state dir: deleted after a successful read, even if the provider then fails.
+	p := mk(f.state, "shadow-state-abc.json")
+	if code, _, _ := f.run("", args(p)...); code != 0 || !gone(p) {
+		t.Errorf("own state file must be consumed (code %d)", code)
 	}
-	p = write()
 	f.mockFixture(`{"error":"timeout"}`)
-	f.run("", "demo", "--provider", "mock", "--shadow", "--state-file", p, "--consume-state-file")
-	if _, err := os.Stat(p); err == nil {
+	p = mk(f.state, "shadow-state-def.json")
+	f.run("", args(p)...)
+	if !gone(p) {
 		t.Error("state file survived a provider failure")
 	}
-	// Without the flag a user's file is left alone.
-	p = write()
+	f.mockFixture(decideAnswers)
+
+	// Outside the state dir, wrong name, symlink, unreadable JSON, usage error: nothing deleted.
+	other := t.TempDir()
+	cases := map[string]string{
+		"outside dir": mk(other, "shadow-state-x.json"),
+		"wrong name":  mk(f.state, "victim.txt"),
+	}
+	target := mk(other, "target.json")
+	link := filepath.Join(f.state, "shadow-state-link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	cases["symlink"] = link
+	for name, path := range cases {
+		f.run("", args(path)...)
+		if gone(path) {
+			t.Errorf("%s: %s was deleted", name, path)
+		}
+	}
+	if gone(target) {
+		t.Error("symlink target deleted")
+	}
+	bad := filepath.Join(f.state, "shadow-state-bad.json")
+	_ = os.WriteFile(bad, []byte("not json"), 0o600)
+	f.run("", args(bad)...)
+	if gone(bad) {
+		t.Error("a file that could not be read was deleted")
+	}
+	p = mk(f.state, "shadow-state-usage.json")
+	if code, _, _ := f.run("", args(p, "--local", "maybe")...); code != 1 || gone(p) {
+		t.Errorf("usage error must not delete (code %d)", code)
+	}
+	// Without the flag nothing is deleted.
+	p = mk(f.state, "shadow-state-keep.json")
 	f.run("", "demo", "--provider", "mock", "--shadow", "--state-file", p)
-	if _, err := os.Stat(p); err != nil {
+	if gone(p) {
 		t.Error("--state-file alone must not delete the file")
 	}
 }
