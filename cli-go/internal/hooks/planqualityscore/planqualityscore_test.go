@@ -47,6 +47,9 @@ type env struct {
 	calls string    // STUB_CALLS file
 	home  string    // HOME for persisted-record copy
 	now   time.Time // injected clock; zero means the real one
+
+	sleeps  []time.Duration // waits the hook asked for (trailing debounce)
+	onSleep func()          // runs while the hook "sleeps" (a concurrent save/fire)
 }
 
 func (e *env) setNow(t time.Time) { e.now = t }
@@ -105,7 +108,33 @@ func (e *env) hook() *planqualityscore.Hook {
 		now := e.now
 		h.NowFn = func() time.Time { return now }
 	}
+	// Never really sleep: record the wait and let a test act during it.
+	h.SleepFn = func(d time.Duration) {
+		e.sleeps = append(e.sleeps, d)
+		if e.onSleep != nil {
+			f := e.onSleep
+			e.onSleep = nil
+			f()
+		}
+	}
 	return h
+}
+
+// scoredIDs returns the plan ids of every persisted scoring, in order.
+func (e *env) scoredIDs(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(e.home, ".yakos-state", "plan-quality-log.ndjson"))
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var m map[string]any
+		if json.Unmarshal([]byte(line), &m) == nil {
+			ids = append(ids, fmt.Sprint(m["plan_id"]))
+		}
+	}
+	return ids
 }
 
 func (e *env) input(tool, file string, extra map[string]string) hooktype.HookInput {
@@ -377,9 +406,10 @@ func TestFreshWriteIsScoredOnce(t *testing.T) {
 	}
 }
 
-// A re-save inside 5 s of the last scoring is collapsed into it; one after
-// 5 s is scored again. Driven by the injected clock, not sleeps.
-func TestResaveWithinWindowCollapsedAfterWindowScored(t *testing.T) {
+// A re-save inside 5 s of the last scoring is not dropped (K-110): the fire
+// waits out the window and scores the latest version, once. A re-save after
+// 5 s is scored straight away. Driven by the injected clock, no real sleeps.
+func TestResaveWithinWindowScoredAsTrailingRun(t *testing.T) {
 	e := newEnv(t)
 	t0 := time.Now()
 	at := func(d time.Duration) { e.setNow(t0.Add(d)) }
@@ -389,18 +419,23 @@ func TestResaveWithinWindowCollapsedAfterWindowScored(t *testing.T) {
 	e.writePlan(t, "0.9", "id: v2\n", -2*time.Second) // new mtime, 2 s later
 	at(2 * time.Second)
 	e.run(t, "Edit", nil)
-	if got := e.callCount(t); got != 1 {
-		t.Fatalf("re-save 2 s after a score: %d calls, want 1 (collapsed)", got)
-	}
-	rec := e.lastLog(t)
-	if rec["reason"] != "debounced: last score under 5s ago; rapid re-save collapsed; skipping this fire" {
-		t.Fatalf("collapse log=%v", rec)
-	}
-	e.writePlan(t, "0.9", "id: v3\n", -7*time.Second) // new mtime, 7 s after the first score
-	at(7 * time.Second)
-	e.run(t, "Edit", nil)
 	if got := e.callCount(t); got != 2 {
-		t.Fatalf("re-save 7 s after a score: %d calls, want 2", got)
+		t.Fatalf("re-save 2 s after a score: %d calls, want 2 (leading + trailing)", got)
+	}
+	if len(e.sleeps) != 1 || e.sleeps[0] != 3*time.Second {
+		t.Fatalf("waits = %v, want one 3s wait (rest of the window)", e.sleeps)
+	}
+	if ids := e.scoredIDs(t); strings.Join(ids, ",") != "v1,v2" {
+		t.Fatalf("scored versions = %v, want v1,v2", ids)
+	}
+	if _, err := os.Stat(filepath.Join(e.work, ".plan-quality-pending")); err == nil {
+		t.Fatal("pending marker left behind")
+	}
+	e.writePlan(t, "0.9", "id: v3\n", -12*time.Second) // well after the window
+	at(12 * time.Second)
+	e.run(t, "Edit", nil)
+	if got := e.callCount(t); got != 3 || len(e.sleeps) != 1 {
+		t.Fatalf("re-save after the window: %d calls, %d waits; want 3 calls, no new wait", got, len(e.sleeps))
 	}
 }
 
@@ -432,19 +467,93 @@ func TestMalformedDebounceStateIgnored(t *testing.T) {
 	}
 }
 
-// A write landing inside the 5 s window of the previous modification is
-// skipped, so a burst of writes yields one scoring, not one per write.
-func TestBurstOfWritesScoresOnce(t *testing.T) {
+// A burst of saves costs two scorings, not one per save, and the LAST version
+// is the one scored last (K-110: the bad plan saved seconds after a good one
+// used to go unscored). Saves that land while the trailing run is waiting see
+// its marker and collapse into it.
+func TestBurstCollapsesIntoOneTrailingScoreOfTheLatest(t *testing.T) {
 	e := newEnv(t)
-	e.writePlan(t, "0.9", "id: a\n", old)
-	e.run(t, "Write", nil) // scored
-	e.writePlan(t, "0.9", "id: b\n", 0)
-	e.run(t, "Edit", nil) // mtime fresh: debounced
-	e.writePlan(t, "0.9", "id: c\n", time.Second)
-	e.run(t, "MultiEdit", nil) // still inside the window
-	if got := e.callCount(t); got != 1 {
-		t.Fatalf("burst produced %d scorings, want 1", got)
+	t0 := time.Now()
+	e.writePlan(t, "0.9", "id: a\n", 0)
+	e.setNow(t0)
+	e.run(t, "Write", nil) // leading: scored
+
+	e.writePlan(t, "0.1", "id: b\n", -1*time.Second)
+	e.setNow(t0.Add(1 * time.Second))
+	e.onSleep = func() {
+		// While the trailing run waits, two more saves arrive; each fires the
+		// hook, sees the pending marker and collapses.
+		for i, id := range []string{"c", "d"} {
+			e.writePlan(t, "0.05", "id: "+id+"\n", -time.Duration(2+i)*time.Second)
+			e.run(t, "Edit", nil)
+		}
 	}
+	e.run(t, "Edit", nil) // trailing run for b; wakes to find d
+
+	if got := e.callCount(t); got != 2 {
+		t.Fatalf("burst of 4 saves produced %d scorings, want 2 (leading + trailing)", got)
+	}
+	if ids := e.scoredIDs(t); strings.Join(ids, ",") != "a,d" {
+		t.Fatalf("scored versions = %v, want a,d (the latest, not b)", ids)
+	}
+	rec := e.lastLog(t)
+	if rec["decision"] == "" {
+		t.Fatalf("log=%v", rec)
+	}
+}
+
+// A trailing wait that ends with the latest version already scored (another
+// fire got there first) does not score it twice.
+func TestTrailingWaitSkipsAlreadyScoredVersion(t *testing.T) {
+	e := newEnv(t)
+	t0 := time.Now()
+	e.writePlan(t, "0.9", "id: a\n", 0)
+	e.setNow(t0)
+	e.run(t, "Write", nil)
+	e.writePlan(t, "0.9", "id: b\n", -time.Second)
+	e.setNow(t0.Add(time.Second))
+	e.onSleep = func() {
+		// Another process scores version b during our wait: it records state.
+		mt := fileMtime(t, e.plan)
+		_ = os.WriteFile(filepath.Join(e.work, ".plan-quality-last-scored"),
+			[]byte(fmt.Sprintf("%d %d\n", mt, t0.Add(time.Second).Unix())), 0o644)
+	}
+	e.run(t, "Edit", nil)
+	if got := e.callCount(t); got != 1 {
+		t.Fatalf("already-scored latest version rescored: %d calls, want 1", got)
+	}
+}
+
+// A marker left by a crashed claimant is reaped, so scoring is not blocked forever.
+func TestStalePendingMarkerIsReaped(t *testing.T) {
+	e := newEnv(t)
+	t0 := time.Now()
+	e.writePlan(t, "0.9", "id: a\n", 0)
+	e.setNow(t0)
+	e.run(t, "Write", nil)
+	pending := filepath.Join(e.work, ".plan-quality-pending")
+	if err := os.Mkdir(pending, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(pending, old, old); err != nil {
+		t.Fatal(err)
+	}
+	e.writePlan(t, "0.9", "id: b\n", -time.Second)
+	e.setNow(t0.Add(time.Second))
+	e.run(t, "Edit", nil)
+	if got := e.callCount(t); got != 2 {
+		t.Fatalf("stale marker blocked the trailing score: %d calls, want 2", got)
+	}
+}
+
+func fileMtime(t *testing.T, path string) int64 {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.ModTime().Unix()
 }
 
 // Future mtime (clock skew): negative age does not debounce, like bash.

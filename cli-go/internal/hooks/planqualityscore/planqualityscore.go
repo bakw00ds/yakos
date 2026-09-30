@@ -7,7 +7,8 @@
 // the bash hook does:
 //
 //  1. skip when plan_quality.enabled is false;
-//  2. debounce on the last SCORED version (K-112, same as bash): a plan.md
+//  2. debounce on the last SCORED version (K-112, same as bash; a burst of
+//     re-saves collapses into one trailing score of the latest, K-110): a plan.md
 //     written now is scored once; the same mtime is never scored twice and a
 //     re-save within 5 s of the last scoring is collapsed. State lives in
 //     work/current/.plan-quality-last-scored ("<mtime> <scored-at>"). The
@@ -100,6 +101,12 @@ const (
 
 	// lastScoredFile is the debounce state (bash: .plan-quality-last-scored).
 	lastScoredFile = ".plan-quality-last-scored"
+
+	// pendingDir is the trailing-score claim marker (bash: mkdir of
+	// .plan-quality-pending); pendingStale is when a crashed claim is reaped
+	// (bash: find -mmin +1).
+	pendingDir   = ".plan-quality-pending"
+	pendingStale = time.Minute
 )
 
 // Hook implements runner.Hook for plan quality scoring.
@@ -128,6 +135,10 @@ type Hook struct {
 
 	// NowFn is injected for tests.
 	NowFn func() time.Time
+
+	// SleepFn waits out the debounce window before a trailing score. Tests
+	// inject a fake that advances NowFn; the default is time.Sleep.
+	SleepFn func(time.Duration)
 }
 
 // New returns a Hook with sensible defaults.
@@ -250,10 +261,41 @@ func (h *Hook) runPostToolUse(c context.Context, out hooktype.HookOutput, in hoo
 			return out, nil
 		}
 		if since := nowT.Unix() - lastAt; haveState && since >= 0 && since < debounceSeconds {
+			// A NEW version inside the window. Collapse the burst into ONE
+			// trailing score of the latest version instead of dropping it
+			// (K-110: the last save of a burst used to go unscored). The first
+			// collapsed fire claims a marker (atomic mkdir, shared with bash),
+			// waits out the window and scores whatever plan.md holds then;
+			// later fires in the window see the marker and skip.
+			pending := filepath.Join(h.WorkCurrentDir, pendingDir)
+			if fi, err := os.Stat(pending); err == nil && time.Since(fi.ModTime()) > pendingStale {
+				_ = os.Remove(pending) // crashed claimant
+			}
+			if err := os.Mkdir(pending, 0o700); err != nil {
+				h.log(&out, in, "REPORT", "pass",
+					"debounced: last score under 5s ago; rapid re-save collapsed into the pending trailing score; skipping this fire",
+					map[string]any{"file_path": filePath, "age_s": since})
+				return out, nil
+			}
+			wait := debounceSeconds - since
 			h.log(&out, in, "REPORT", "pass",
-				"debounced: last score under 5s ago; rapid re-save collapsed; skipping this fire",
-				map[string]any{"file_path": filePath, "age_s": since})
-			return out, nil
+				fmt.Sprintf("debounce: re-save under 5s after the last score; waiting %ds, then scoring the latest version (trailing)", wait),
+				map[string]any{"file_path": filePath, "age_s": since, "wait_s": wait})
+			h.sleep(time.Duration(wait) * time.Second)
+			_ = os.Remove(pending)
+			// Re-read: the plan may have changed again, or been scored meanwhile.
+			mtime = 0
+			if fi, err := os.Stat(filePath); err == nil {
+				mtime = fi.ModTime().Unix()
+			}
+			nowT = h.now()
+			lastMtime, _, haveState = readLastScored(statePath)
+			if mtime <= 0 || (haveState && lastMtime == mtime) {
+				h.log(&out, in, "REPORT", "pass",
+					"debounced: latest version already scored after the trailing wait; skipping",
+					map[string]any{"file_path": filePath, "mtime": mtime})
+				return out, nil
+			}
 		}
 	}
 
@@ -551,6 +593,14 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func (h *Hook) sleep(d time.Duration) {
+	if h.SleepFn != nil {
+		h.SleepFn(d)
+		return
+	}
+	time.Sleep(d)
 }
 
 func (h *Hook) now() time.Time {

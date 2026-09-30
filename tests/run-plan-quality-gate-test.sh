@@ -14,8 +14,9 @@
 #   (f) Dissent fixture (regardless of aggregate) → surface_to_operator
 #       (NOT block)
 #   (g) Score script returns non-zero → WARN + PASS (no false block)
-#   (h) Debounce (K-112): a fresh plan.md IS scored once; the same version
-#       again, or a re-save within 5 s, is debounced
+#   (h) Debounce (K-112, K-110): a fresh plan.md IS scored once; the same
+#       version again is debounced, and a re-save within 5 s is scored as ONE
+#       trailing run of the latest version (others collapse into it)
 #   (i) PreToolUse gate: no .plan-blocked marker → PASS
 #   (j) PreToolUse gate: .plan-blocked present → BLOCK (rc=2)
 #   (k) PreToolUse gate: enabled=false in .yakos.yml → PASS (marker cleared)
@@ -490,21 +491,38 @@ _h_fire >/dev/null
 if [ "$(_h_scored)" = "1" ]; then ok "(h) duplicate fire on the same version: not rescored"; else bad "(h) duplicate fire rescored (count=$(_h_scored))"; fi
 if grep -q 'debounced: plan.md unchanged since the last score' "$WORK_CURRENT/logs/plan-quality-score.ndjson" 2>/dev/null; then ok "(h) duplicate fire: debounce logged"; else bad "(h) duplicate fire: no debounce record"; fi
 
-# A re-save with a new mtime 2 s later, inside the 5 s window: collapsed.
+# A re-save with a new mtime 2 s later, inside the 5 s window, is NOT dropped
+# (K-110): the fire claims the trailing marker, waits out the window and scores
+# the latest version. Age the recorded scoring to 4 s so the wait is 1 s.
 cp "$FIXTURES/vague-plan.md" "$PLAN_PATH"; printf '\n<!-- v2 -->\n' >> "$PLAN_PATH"
 _h_new="$(date -u -v+2S +%Y%m%d%H%M.%S 2>/dev/null || date -u -d '2 seconds' +%Y%m%d%H%M.%S)"
 touch -t "$_h_new" "$PLAN_PATH" 2>/dev/null || true
+if [ -f "$WORK_CURRENT/.plan-quality-last-scored" ]; then
+    read -r _h_m _h_a < "$WORK_CURRENT/.plan-quality-last-scored"
+    printf '%s %s\n' "$_h_m" "$(( $(date -u +%s) - 4 ))" > "$WORK_CURRENT/.plan-quality-last-scored"
+fi
 _h_fire >/dev/null
-if [ "$(_h_scored)" = "1" ]; then ok "(h) rapid re-save: collapsed"; else bad "(h) rapid re-save rescored (count=$(_h_scored))"; fi
-if grep -q 'debounced: last score under 5s ago' "$WORK_CURRENT/logs/plan-quality-score.ndjson" 2>/dev/null; then ok "(h) rapid re-save: collapse logged"; else bad "(h) rapid re-save: no collapse record"; fi
+if [ "$(_h_scored)" = "2" ]; then ok "(h) rapid re-save: latest version scored as the trailing run"; else bad "(h) rapid re-save not scored after the wait (count=$(_h_scored))"; fi
+if grep -q 'waiting 1s, then scoring the latest version' "$WORK_CURRENT/logs/plan-quality-score.ndjson" 2>/dev/null; then ok "(h) rapid re-save: trailing wait logged"; else bad "(h) rapid re-save: no trailing-wait record"; fi
+if [ ! -d "$WORK_CURRENT/.plan-quality-pending" ]; then ok "(h) trailing marker released"; else bad "(h) trailing marker left behind"; fi
 
-# Age the recorded scoring 10 s: the next new version is scored again.
+# A save that lands while another fire holds the trailing marker collapses into it.
+mkdir "$WORK_CURRENT/.plan-quality-pending"
+cp "$FIXTURES/vague-plan.md" "$PLAN_PATH"; printf '\n<!-- v3 -->\n' >> "$PLAN_PATH"
+_h_new="$(date -u -v+3S +%Y%m%d%H%M.%S 2>/dev/null || date -u -d '3 seconds' +%Y%m%d%H%M.%S)"
+touch -t "$_h_new" "$PLAN_PATH" 2>/dev/null || true
+_h_fire >/dev/null
+if [ "$(_h_scored)" = "2" ]; then ok "(h) save during a pending trailing run: collapsed"; else bad "(h) save during a pending trailing run rescored (count=$(_h_scored))"; fi
+if grep -q 'collapsed into the pending trailing score' "$WORK_CURRENT/logs/plan-quality-score.ndjson" 2>/dev/null; then ok "(h) collapse into the pending run logged"; else bad "(h) no collapse-into-pending record"; fi
+rmdir "$WORK_CURRENT/.plan-quality-pending"
+
+# Age the recorded scoring 10 s: the still-unscored latest version is scored.
 if [ -f "$WORK_CURRENT/.plan-quality-last-scored" ]; then
     read -r _h_m _h_a < "$WORK_CURRENT/.plan-quality-last-scored"
     printf '%s %s\n' "$_h_m" "$((_h_a - 10))" > "$WORK_CURRENT/.plan-quality-last-scored"
 fi
 _h_fire >/dev/null
-if [ "$(_h_scored)" = "2" ]; then ok "(h) new version after the window: scored again"; else bad "(h) new version after the window not scored (count=$(_h_scored))"; fi
+if [ "$(_h_scored)" = "3" ]; then ok "(h) new version after the window: scored again"; else bad "(h) new version after the window not scored (count=$(_h_scored))"; fi
 
 # ---------------------------------------------------------------------------
 # Test (h2): debounce state hardening (K-112 review round)

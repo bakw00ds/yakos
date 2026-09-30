@@ -103,16 +103,27 @@ debounce on the last scored version, not on the file's age (K-112):
   fire, even though its mtime is only milliseconds old.
 - A `plan.md` with the same mtime as the last score is skipped
   (`debounced: plan.md unchanged since the last score`).
-- A re-save whose last scoring was under 5 s ago is skipped
-  (`debounced: last score under 5s ago; rapid re-save collapsed`), so a
-  burst of quick saves costs one judge panel, not one per save. The last
-  version of a burst is scored by the next fire at least 5 s later.
+- A new version saved under 5 s after the last scoring is scored once, as
+  a trailing run (K-110). The first such fire claims the marker directory
+  `work/current/.plan-quality-pending`, waits out the rest of the window
+  (`debounce: re-save under 5s after the last score; waiting Ns, then
+  scoring the latest version`), then scores whatever `plan.md` holds. Any
+  other save that fires while the marker is held is skipped
+  (`debounced: ... collapsed into the pending trailing score`). A burst
+  therefore costs two judge panels, the first save and the last, and the
+  last version is always the one scored last. A bad plan saved seconds
+  after a good one is no longer missed. The waiting fire holds its tool
+  call for at most 5 s. A marker left by a crashed fire is reaped after a
+  minute, and one fire that finds the latest version already scored after
+  the wait skips it.
 - A scoring that fails for infrastructure reasons (scorer missing, exit
   2/3/4, no record) is forgotten, so the next fire retries the same version.
 
 State lives in `work/current/.plan-quality-last-scored` as
 `<mtime> <scored-at>` (epoch seconds), shared by both tiers. A missing or
-malformed file means "nothing scored yet".
+malformed file means "nothing scored yet". The mtime has one-second
+resolution, so two saves with different content inside the same second
+look like one version; only the first is scored.
 
 History: the earlier rule skipped any `plan.md` whose mtime was under 5 s
 old at hook time. The hook runs right after the write that set the mtime,
