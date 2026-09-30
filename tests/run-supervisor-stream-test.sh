@@ -123,6 +123,7 @@ EOF2
         run_payload "$side" "$sb" "$(bash_payload "$cmd")"
         if escalated "$sb"; then ok "(r) $side escalates: ${cmd:0:50}"; else bad "(r) $side did NOT escalate: ${cmd:0:50}"; fi
     done <<'EOF3'
+docker run -u 1000:1000 img sh -c 'rm -rf /'
 rm --recursive --force /tmp/x
 rm --force --recursive /tmp/x
 rm -r --force /tmp/x
@@ -301,9 +302,14 @@ for side in $sides; do
     else
         bad "(lock) $side held lock: elapsed=${el}s counter=$(cat "$cur/.supervisor-counter" 2>/dev/null) log=$(tail -2 "$cur/logs/supervisor-stream.ndjson" 2>/dev/null | cut -c1-200)"
     fi
-    # A hook killed while holding the lock releases it (EXIT trap): bash only,
-    # the Go side uses defer.
 done
+
+# A hook that errors out while HOLDING the lock must release it (EXIT trap):
+# make the counter path a directory so the increment write fails.
+sb="$(mksb "lk3-bash" $'supervisor:\n  score_every_n_calls: 1000\n')"
+cur="$sb/work/current"; mkdir -p "$cur/.supervisor-counter"
+run_payload bash "$sb" "$(bash_payload "rm -rf /tmp/k110-lock")"
+if [ ! -e "$cur/.supervisor-counter.lock" ]; then ok "(lock) bash lock released when the hook errors out holding it"; else bad "(lock) bash lock left behind after an error exit"; fi
 
 # no CLI: both sides WARN and exit 0. This PATH has every binary EXCEPT yakos.
 NOCLI="$TMP/nocli-bin"; mkdir -p "$NOCLI"

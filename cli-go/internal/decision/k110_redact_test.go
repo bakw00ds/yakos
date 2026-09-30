@@ -26,3 +26,18 @@ func TestRedactText_K110Shapes(t *testing.T) {
 		}
 	}
 }
+
+// The curl shape needs a curl-family command in front: container and sort
+// flags that look like user:pass are left alone.
+func TestRedactText_CurlShapeIgnoresOtherCommands(t *testing.T) {
+	for _, in := range []string{"docker run -u 1000:1000 img", "docker run --user 1000:1000 img", "sort -u 12:30", "ls -lu a:b"} {
+		var n int
+		if out := RedactText(in, &n); out != in || n != 0 {
+			t.Errorf("over-redacted %q -> %q (n=%d)", in, out, n)
+		}
+	}
+	var n int
+	if out := RedactText("curl -s -u 1admin:s3cretPw https://x.example", &n); strings.Contains(out, "s3cretPw") {
+		t.Errorf("digit-leading user leaked: %q", out)
+	}
+}

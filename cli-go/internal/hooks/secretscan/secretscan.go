@@ -86,9 +86,11 @@ var redactExtraSources = []string{
 	curlBasicAuthSource,
 }
 
-// curlBasicAuthSource matches curl -u/--user user:pass. Shared with decision
+// curlBasicAuthSource matches curl/wget/xh -u/--user user:pass. It needs the
+// command in front so docker run -u 1000:1000, sort -u 12:30 and ls -lu a:b
+// are left alone. Shared with decision
 // egress redaction through CurlBasicAuthRE so the shape lives in one place.
-const curlBasicAuthSource = `(-[A-Za-z]*u[[:space:]]*|--user([[:space:]]+|=))[^[:space:]:]+:[^[:space:]]+`
+const curlBasicAuthSource = `(curl|wget|xh)[^|;&]*[[:space:]](-[A-Za-z]*u[[:space:]]*|--user([[:space:]]+|=))[^[:space:]:]+:[^[:space:]]+`
 
 // CurlBasicAuthRE is the compiled curlBasicAuthSource.
 var CurlBasicAuthRE = regexp.MustCompile(curlBasicAuthSource)

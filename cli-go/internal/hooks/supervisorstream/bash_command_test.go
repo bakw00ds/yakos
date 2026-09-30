@@ -54,6 +54,8 @@ func TestBashCommandEscalates(t *testing.T) {
 		{"redirect-append-ssh", "echo key >> ~/.ssh/authorized_keys"},
 		{"redirect-etc", "printf 'x' > /etc/hosts"},
 		{"redirect-claude-settings", "cat s.json > .claude/settings.json"},
+		// Escalation runs on the raw command, never on the redacted preview.
+		{"raw-command-with-uid-gid-flag", "docker run -u 1000:1000 img sh -c 'rm -rf /'"},
 		{"rm-long-flags", "rm --recursive --force /tmp/x"},
 		{"rm-long-flags-swapped", "rm --force --recursive /tmp/x"},
 		{"rm-short-long-mix", "rm -r --force /tmp/x"},

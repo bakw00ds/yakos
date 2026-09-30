@@ -82,6 +82,8 @@ func TestRedactCredentialShapesK110(t *testing.T) {
 		{"curl -ualice:s3cretPw https://x.example", "s3cretPw"},
 		{"curl -fsSualice:s3cretPw https://x.example", "s3cretPw"},
 		{"curl -u 9lives:s3cretPw https://x.example", "s3cretPw"},
+		{"curl -s -X POST -u 1admin:s3cretPw https://x.example", "s3cretPw"},
+		{"wget --user=1admin:s3cretPw https://x.example", "s3cretPw"},
 		{"redis-cli -u redis://:s3cretPw@cache:6379", "s3cretPw"},
 		{"echo '-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQPGBFk2pgpBodyLine\n-----END PGP PRIVATE KEY BLOCK-----'", "lQPGBFk2pgpBodyLine"},
 		{"git clone https://bob:hunter2pass@github.com/o/r.git", "hunter2pass"},
@@ -98,6 +100,10 @@ func TestRedactCredentialShapesK110(t *testing.T) {
 	}
 	for _, benign := range []string{
 		"sort -u a.txt",
+		"docker run -u 1000:1000 img",
+		"docker run --user 1000:1000 img",
+		"sort -u 12:30",
+		"ls -lu a:b",
 		"git push -u origin main",
 		"open https://example.com/a/b",
 		"ssh git@github.com",
