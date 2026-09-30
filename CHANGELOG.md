@@ -96,6 +96,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     resolved tier), so eval runs can be attributed to a tier.
   - Eval case `architect-12` is retargeted to the fixed K-106
     `cycle_length: 0` behavior.
+  - Review round: the counter lock is bounded (a stale lock that cannot be
+    removed skips the tick with a WARN instead of spinning), `cp` of
+    `.env.<suffix>`, `eval "$(curl ...)"` and `find ... -delete` escalate,
+    redaction also covers `curl -uUSER:PW`, `redis://:pw@host` and PGP key
+    blocks, and `yakos upgrade` fsyncs the install directory after the rename.
 
 ## [0.60.1.0] — 2026-09-29
 
