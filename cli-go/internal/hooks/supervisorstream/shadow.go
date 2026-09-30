@@ -74,6 +74,21 @@ func shadowProvider(in hooktype.HookInput, doc *yakosYMLSupervisor) string {
 	return ""
 }
 
+// projectSurfaceOff reports `decisions.surfaces.supervisor-prefilter.mode: off`
+// in the project .yakos.yml. The call would only fail as "disabled", so the hook
+// skips it (and never writes a raw state file for it).
+func projectSurfaceOff(doc *yakosYMLSupervisor) bool {
+	if doc == nil || doc.Decisions.Kind != yaml.MappingNode {
+		return false
+	}
+	var d struct {
+		Surfaces map[string]struct {
+			Mode string `yaml:"mode"`
+		} `yaml:"surfaces"`
+	}
+	return doc.Decisions.Decode(&d) == nil && d.Surfaces[shadowSurface].Mode == "off"
+}
+
 // projectVetoesProvider reports an explicit `decisions.provider: none` in the
 // project .yakos.yml.
 func projectVetoesProvider(doc *yakosYMLSupervisor) bool {
@@ -157,7 +172,7 @@ func (h *Hook) planMentions(filePath, projectDir string) (mentioned, known bool)
 // it can never block, alter or delay the tool call.
 func (h *Hook) shadowDecision(in hooktype.HookInput, doc *yakosYMLSupervisor, projectDir string, si shadowInput) {
 	defer func() { _ = recover() }()
-	if h.Launch == nil || shadowProvider(in, doc) == "" {
+	if h.Launch == nil || shadowProvider(in, doc) == "" || projectSurfaceOff(doc) {
 		return
 	}
 	cli := findCLI(in.Env)

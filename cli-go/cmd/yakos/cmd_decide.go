@@ -226,6 +226,18 @@ func decideMain(env decideEnv, args []string) (code int) {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
+	stateDir := env.StateDir
+	if stateDir == "" {
+		stateDir = statepath.Dir()
+	}
+	// A handed-over state file holds raw, unredacted text: remove it on EVERY
+	// exit from here on (surface off, config or question-set error, disabled,
+	// provider failure, success). Usage errors above return before this point
+	// and delete nothing. consumeStateFile only ever deletes the hook's own
+	// temp file.
+	if consumeState && stateFile != "" && stateFile != "-" {
+		defer consumeStateFile(stateFile, stateDir, env.Stderr)
+	}
 	// Everything below is a decide FAILURE, not a usage error: the caller's
 	// existing path runs (exit 0 with --shadow, otherwise 3).
 	fail := func(class, format string, a ...any) int {
@@ -239,10 +251,6 @@ func decideMain(env decideEnv, args []string) (code int) {
 		return fail(decision.ClassDisabled, "YAKOS_DECISION_DISABLE=1")
 	}
 
-	stateDir := env.StateDir
-	if stateDir == "" {
-		stateDir = statepath.Dir()
-	}
 	paths := decision.StatePaths{Dir: stateDir}
 	cfg, cerr := decision.LoadConfig(decideConfigPath(configPath, getenv))
 	if cerr != nil {
@@ -277,9 +285,6 @@ func decideMain(env decideEnv, args []string) (code int) {
 	state, rerr := readDecideState(env.Stdin, stateFile)
 	if rerr != nil {
 		return fail(decision.ClassBadRequest, "state: %v", rerr)
-	}
-	if consumeState && stateFile != "" && stateFile != "-" {
-		consumeStateFile(stateFile, stateDir, env.Stderr)
 	}
 
 	prov := env.Provider
@@ -423,7 +428,7 @@ func decideCompare(env decideEnv, surface, logPath, setsDir string, asJSON bool,
 	return decideExitOK
 }
 
-// consumeStateFile deletes a state file a hook handed over, after it was read.
+// consumeStateFile deletes a state file a hook handed over.
 // It only ever deletes the hook's own temp files: directly inside the state
 // directory, named shadow-state-*.json, a regular file (never a symlink) owned
 // by the current user. Anything else is left alone and reported.

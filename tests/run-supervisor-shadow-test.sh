@@ -307,7 +307,7 @@ PY
         for side in $sides; do
             [ -n "$PORT" ] || break
             sb="$(mksb "s-cred-$side" "$YML_PLAIN")"
-            run_payload "$side" "$sb" "$(bash_payload "$(printf 'curl -u deploy:Hunter2Secret! https://x.example && mysql -uroot -pS3cretPW db && tool --api-key K3yValueABC999 run && sshpass -p Sshpass999 ssh h && echo apikey_abcdef0123456789abcdef && tool\t--password\tSEC15pw run && curl -u\tu:SEC16pw https://x && curl -u "u:SEC17a SEC17b" https://y')")" \
+            run_payload "$side" "$sb" "$(bash_payload "$(printf 'curl -u deploy:Hunter2Secret! https://x.example && mysql -uroot -pS3cretPW db && tool --api-key K3yValueABC999 run && sshpass -p Sshpass999 ssh h && echo apikey_abcdef0123456789abcdef && tool\t--password\tSEC15pw run && curl -u\tu:SEC16pw https://x && curl -u "u:SEC17a SEC17b" https://y && tool  --password   SEC50pw run && tool --password \\\n  SEC51pw run && tool --password \\\r\n SEC52pw run && tool --password\302\240SEC53pw run && curl -u  \302\240u:SEC54pw https://z')")" \
                 "YAKOS_CLI=$GO_BINARY" "YAKOS_ROOT=$REPO_ROOT" "YAKOS_DECISION_PROVIDER=jev" "TYPESAFE_API_KEY=fake-key-not-real" "TYPESAFE_BASE_URL=http://127.0.0.1:$PORT"
             [ "$(cat "$sb/rc")" = 0 ] && ok "(s) $side credential command: hook exit 0" || bad "(s) $side credential command: hook rc"
             # Poll (bounded) for the detached child's POST to land, then for its
@@ -322,7 +322,7 @@ PY
         n_req="$(wc -l < "$CAP" | tr -d ' ')"
         [ "$n_req" -ge 1 ] && ok "(s) capture server saw $n_req request(s)" || bad "(s) capture server saw no request"
         leaked=""
-        for secret in Hunter2Secret S3cretPW K3yValueABC999 Sshpass999 abcdef0123456789abcdef SEC15pw SEC16pw SEC17a SEC17b; do
+        for secret in Hunter2Secret S3cretPW K3yValueABC999 Sshpass999 abcdef0123456789abcdef SEC15pw SEC16pw SEC17a SEC17b SEC50pw SEC51pw SEC52pw SEC53pw SEC54pw; do
             grep -q "$secret" "$CAP" && leaked="$leaked $secret"
         done
         [ -z "$leaked" ] && ok "(s) no flag-borne credential left the machine (both sides)" || bad "(s) credentials reached the provider:$leaked"

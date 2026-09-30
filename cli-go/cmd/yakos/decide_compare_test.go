@@ -173,7 +173,7 @@ func TestDecide_ConsumeStateFileDeletesOnlyTheHooksOwnFilesAfterReading(t *testi
 	}
 	f.mockFixture(decideAnswers)
 
-	// Outside the state dir, wrong name, symlink, unreadable JSON, usage error: nothing deleted.
+	// Outside the state dir, wrong name, symlink, usage error: nothing deleted.
 	other := t.TempDir()
 	cases := map[string]string{
 		"outside dir": mk(other, "shadow-state-x.json"),
@@ -194,11 +194,36 @@ func TestDecide_ConsumeStateFileDeletesOnlyTheHooksOwnFilesAfterReading(t *testi
 	if gone(target) {
 		t.Error("symlink target deleted")
 	}
+	// Every exit after the usage checks removes the hook's raw state file.
 	bad := filepath.Join(f.state, "shadow-state-bad.json")
 	_ = os.WriteFile(bad, []byte("not json"), 0o600)
 	f.run("", args(bad)...)
-	if gone(bad) {
-		t.Error("a file that could not be read was deleted")
+	if !gone(bad) {
+		t.Error("an unreadable state file must still be removed")
+	}
+	for name, run := range map[string]func(p string){
+		"kill switch": func(p string) {
+			f.env["YAKOS_DECISION_DISABLE"] = "1"
+			f.run("", args(p)...)
+			delete(f.env, "YAKOS_DECISION_DISABLE")
+		},
+		"surface off": func(p string) {
+			cfg := filepath.Join(t.TempDir(), ".yakos.yml")
+			_ = os.WriteFile(cfg, []byte("decisions:\n  surfaces:\n    demo: {mode: off}\n"), 0o600)
+			f.run("", args(p, "--config", cfg)...)
+		},
+		"config error": func(p string) {
+			cfg := filepath.Join(t.TempDir(), ".yakos.yml")
+			_ = os.WriteFile(cfg, []byte("decisions: [unclosed\n"), 0o600)
+			f.run("", args(p, "--config", cfg)...)
+		},
+		"question set error": func(p string) { f.run("", args(p, "--sets-dir", t.TempDir())...) },
+	} {
+		p := mk(f.state, "shadow-state-early-"+strings.ReplaceAll(name, " ", "-")+".json")
+		run(p)
+		if !gone(p) {
+			t.Errorf("%s: the raw state file was left behind", name)
+		}
 	}
 	p = mk(f.state, "shadow-state-usage.json")
 	if code, _, _ := f.run("", args(p, "--local", "maybe")...); code != 1 || gone(p) {

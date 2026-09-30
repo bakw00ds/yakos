@@ -389,3 +389,21 @@ func TestShadow_UntrustedPolicyFileDoesNotEnable(t *testing.T) {
 		}
 	}
 }
+
+// With the surface off in the project config the hook never writes a state file.
+func TestShadow_SurfaceOffWritesNoStateFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	rec, _ := runShadowWithHome(t, ssYML+"decisions:\n  surfaces:\n    supervisor-prefilter: {mode: off}\n", bashInput("mysql -pRAWSECRET77 db"), shadowEnv("YAKOS_DECISION_PROVIDER", "mock"))
+	if len(rec.specs) != 0 {
+		t.Errorf("launches = %d, want 0", len(rec.specs))
+	}
+	if files, _ := filepath.Glob(filepath.Join(os.Getenv("HOME"), ".yakos-state", "shadow-state-*.json")); len(files) != 0 {
+		t.Errorf("raw state file left behind: %v", files)
+	}
+}
+
+func runShadowWithHome(t *testing.T, yml string, in hooktype.HookInput, env map[string]string) (*recorder, hooktype.HookOutput) {
+	t.Helper()
+	return runShadow(t, yml, in, env)
+}
