@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/bakw00ds/yakos/internal/buildinfo"
 	"io"
 	"os"
 	"path/filepath"
@@ -348,8 +349,7 @@ func runUpdate(yakosRoot string, args []string) {
 			fmt.Fprintf(os.Stderr, "update: %v\n", err)
 			os.Exit(1)
 		}
-		cur, _ := version.Read(yakosRoot)
-		fmt.Fprintf(os.Stdout, "current: %s\nlatest:  %s\n", cur, latest)
+		fmt.Fprintf(os.Stdout, "current: %s\nlatest:  %s\n", resolveCurrentVersion(yakosRoot), latest)
 		return
 	}
 
@@ -561,13 +561,7 @@ func runUpgrade(yakosRoot string, args []string) {
 			fmt.Fprintf(os.Stderr, "upgrade: %v\n", err)
 			os.Exit(1)
 		}
-		currentVersion := strings.TrimSpace(version.Version)
-		if currentVersion == "" {
-			if v, err := version.Read(yakosRoot); err == nil {
-				currentVersion = strings.TrimSuffix(strings.TrimSpace(v), " (go)")
-				currentVersion = strings.TrimSpace(currentVersion)
-			}
-		}
+		currentVersion := resolveCurrentVersion(yakosRoot)
 		fmt.Fprintf(os.Stdout, "current: %s\nlatest:  %s\n", currentVersion, latest)
 		return
 	}
@@ -901,4 +895,25 @@ func runMigrate(args []string) {
 		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// resolveCurrentVersion returns the running build's version for the
+// `current:` line of `upgrade --check` / `update --check`. The Makefile injects
+// the version into buildinfo.Version, so that is consulted first; then the
+// legacy version.Version ldflag, then the on-disk VERSION file. It never
+// returns an empty string.
+func resolveCurrentVersion(yakosRoot string) string {
+	if v := strings.TrimSpace(buildinfo.Version); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(version.Version); v != "" {
+		return v
+	}
+	if v, err := version.Read(yakosRoot); err == nil {
+		v = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(v), " (go)"))
+		if v != "" {
+			return v
+		}
+	}
+	return "unknown"
 }
