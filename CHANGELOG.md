@@ -87,7 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `context-threshold` uses the payload's `transcript_path` and only derives
     the path as a fallback.
   - `YAKOS_HOOK_JQ_TIMEOUT` is documented in the hook README and reported by
-    `yakos doctor` in a new "Hook environment" section.
+    `yakos doctor` in a "Hook environment" section when it is set.
   - Invalid UTF-8 in `.yakos.yml` no longer makes macOS awk drop every key
     after the bad line; the awk readers run under `LC_ALL=C`.
   - The hook fixture, parity and hardening runners skip (exit 0) when there

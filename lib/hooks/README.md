@@ -341,8 +341,8 @@ a blocking hook exits 2 and a non-blocking hook exits 0 with a WARN.
 - Only the bash hooks use it. The Go hooks parse the payload natively
   and never run `jq`.
 
-`yakos doctor` prints the effective value in its "Hook environment"
-section and warns when the value would be rejected.
+When the variable is set, `yakos doctor` prints the effective value in a
+"Hook environment" section and warns when the value would be rejected.
 
 ## Bypass mechanism
 
