@@ -320,6 +320,30 @@ the node can accomplish at all (`plan`), so this needs new plumbing
 and a policy decision about which tools are safe for an
 output-consuming node — not a safe one-line change.
 
+## Environment variables
+
+| Variable | Default | Effect |
+|---|---|---|
+| `YAKOS_HOOK_JQ_TIMEOUT` | `5` | Seconds a hook lets `jq` run on its input before giving up. |
+| `YAKOS_HOOKS_FAIL_OPEN` | unset | Emergency kill switch; see [Emergency escape hatches](#emergency-escape-hatches-yakos_hooks_fail_open). |
+
+**`YAKOS_HOOK_JQ_TIMEOUT`** bounds every `jq` call made through
+`hook-input.sh`, so a hung `jq` cannot hang the session. When it fires,
+a blocking hook exits 2 and a non-blocking hook exits 0 with a WARN.
+
+- The value is whole seconds, parsed base 10 (`08` is 8).
+- It is clamped to 1..25. The ceiling stays below the 30 s hook timeout
+  that `yakos refresh` writes into `settings.json`: at 30 the harness
+  timeout fires first and Claude Code lets the tool call through, so a
+  blocking hook could not block.
+- Unset means 5. Any other value (`abc`, `-3`, `1.5`) also means 5, with
+  a one-time WARN on stderr from `hi_init`.
+- Only the bash hooks use it. The Go hooks parse the payload natively
+  and never run `jq`.
+
+`yakos doctor` prints the effective value in its "Hook environment"
+section and warns when the value would be rejected.
+
 ## Bypass mechanism
 
 Every hook checks `work/current/hook-bypass.md` before deciding to block.

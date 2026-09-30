@@ -81,6 +81,9 @@ const (
 
 	// SectionDecisionProbe is appended last for the same reason (ADR-0009).
 	SectionDecisionProbe
+
+	// SectionHookEnv reports hook-runtime environment knobs (K-110).
+	SectionHookEnv
 )
 
 // Finding is one reported item: a severity level plus a human-readable message.
@@ -227,6 +230,7 @@ func Run(cfg Config) (*Report, error) {
 	r.checkMultiDevCoord()
 	r.checkLocalTooling()
 	r.checkAPIKeys()
+	r.checkHookEnv()
 
 	if cfg.ProbeRuntime {
 		r.checkRuntimeProbe()
