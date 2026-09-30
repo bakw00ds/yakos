@@ -280,14 +280,25 @@ PY
         CAP="$TMP/captured.ndjson"; : > "$CAP"
         python3 "$TMP/capture.py" "$CAP" "$TMP/port" &
         SRV=$!
-        i=0; while [ ! -s "$TMP/port" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+        # Readiness: the server writes its port only after binding. A slow runner
+        # can take seconds to start python, so wait (bounded) and fail loudly
+        # instead of firing the hooks at "http://127.0.0.1:".
+        i=0; while [ ! -s "$TMP/port" ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i + 1)); done
         PORT="$(cat "$TMP/port" 2>/dev/null)"
+        if [ -z "$PORT" ]; then bad "(s) capture server never became ready"; kill "$SRV" 2>/dev/null; fi
         for side in $sides; do
+            [ -n "$PORT" ] || break
             sb="$(mksb "s-cred-$side" "$YML_PLAIN")"
             run_payload "$side" "$sb" "$(bash_payload 'curl -u deploy:Hunter2Secret! https://x.example && mysql -uroot -pS3cretPW db && tool --api-key K3yValueABC999 run && sshpass -p Sshpass999 ssh h && echo apikey_abcdef0123456789abcdef')" \
                 "YAKOS_CLI=$GO_BINARY" "YAKOS_ROOT=$REPO_ROOT" "YAKOS_DECISION_PROVIDER=jev" "TYPESAFE_API_KEY=fake-key-not-real" "TYPESAFE_BASE_URL=http://127.0.0.1:$PORT"
             [ "$(cat "$sb/rc")" = 0 ] && ok "(s) $side credential command: hook exit 0" || bad "(s) $side credential command: hook rc"
-            wait_for "$sb/home/.yakos-state/decision-log.ndjson" 1 && ok "(s) $side call reached the provider" || bad "(s) $side call never completed"
+            # Poll (bounded) for the detached child's POST to land, then for its
+            # decision-log record, and report the record's status on failure.
+            n0="$(wc -l < "$CAP" | tr -d ' ')"
+            i=0; while [ "$(wc -l < "$CAP" | tr -d ' ')" -le "$n0" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+            wait_for "$sb/home/.yakos-state/decision-log.ndjson" 1 >/dev/null
+            st="$(tail -n 1 "$sb/home/.yakos-state/decision-log.ndjson" 2>/dev/null | jq -r '.status' 2>/dev/null)"
+            if [ "$(wc -l < "$CAP" | tr -d ' ')" -gt "$n0" ]; then ok "(s) $side call reached the provider (status $st)"; else bad "(s) $side call never reached the provider (decision-log status: ${st:-none})"; fi
         done
         kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
         n_req="$(wc -l < "$CAP" | tr -d ' ')"
