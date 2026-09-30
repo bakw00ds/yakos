@@ -41,19 +41,26 @@ func (r *runner) checkDecisionProbe() {
 	}
 	cfgPath := filepath.Join(proj, ".yakos.yml")
 	dc, cerr := decision.LoadConfig(cfgPath)
-	switch {
-	case cerr != nil:
+	if cerr != nil {
 		r.err(sec, "%s: decisions config unreadable: %v", cfgPath, cerr)
 		dc = decision.DefaultConfig()
-	default:
-		r.info(sec, "provider configured: %s (model %s)", dc.Provider, dc.Model)
 	}
-	if pol, perr := decision.LoadPolicy(decision.StatePaths{Dir: r.stateDir()}.Policy()); perr != nil {
+	pol, perr := decision.LoadPolicy(decision.StatePaths{Dir: r.stateDir()}.Policy())
+	if perr != nil {
 		r.err(sec, "%s: unreadable: %v", decision.PolicyFileName, perr)
-		dc = decision.Tighten(dc, decision.DefaultPolicy())
-	} else {
-		dc = decision.Tighten(dc, pol)
+		pol = decision.DefaultPolicy()
 	}
+	// A project file cannot enable a provider (ResolveProvider): what runs is
+	// the env var or the user-level policy, and a project `provider: none` vetoes the latter.
+	name, pwarn := decision.ResolveProvider("", r.env, dc, pol)
+	if pwarn != "" {
+		r.warn(sec, "%s", pwarn)
+	}
+	if cerr == nil {
+		r.info(sec, "provider configured: %s (model %s)", name, dc.Model)
+	}
+	dc.Provider = name
+	dc = decision.Tighten(dc, pol)
 	if keySet {
 		r.ok(sec, "%s: set", decision.KeyEnv)
 	} else if dc.Provider == decision.ProviderJev {

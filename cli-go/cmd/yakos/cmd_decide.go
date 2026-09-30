@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/cliflag"
@@ -44,14 +45,21 @@ reviewed questions and returns probabilities, never text.
 
 Flags:
     --provider <id>       jev | mock | none. Default: $YAKOS_DECISION_PROVIDER,
-                          then decisions.provider in .yakos.yml, then none.
+                          then provider: in ~/.yakos-state/decision-policy.yml,
+                          then none. A project .yakos.yml can only turn the
+                          provider off (provider: none), never on.
     --shadow              Advisory call: on any failure exit 0 with
                           {"answer":null,"reason":...} so a hook proceeds.
     --timeout <duration>  Overall deadline (default 1.5s in both modes; max 10s).
     --session <id>        Session id for the per-session call cap
                           (default $YAKOS_SESSION_ID, else "default").
     --state-file <path>   Read the state from a file instead of stdin.
+    --consume-state-file  Delete the --state-file once it has been read (or on any
+                          failure). Used by hooks that hand the state over in a
+                          private temp file.
     --sets-dir <dir>      Question-set directory (default <framework>/lib/decisions).
+    --tag <label>         Label the call as not real traffic (e.g. smoke); compare
+                          leaves tagged records out by default.
     --local <verdict>     pass | escalate: what the caller's own deterministic
                           heuristic decided for this event. Recorded in the
                           decision log beside the answer, never sent to the
@@ -64,10 +72,15 @@ Flags:
                           calls, $1/day, strict egress).
 
 yakos decide compare <surface> [--json] [--log <path>] [--sets-dir <dir>]
+             [--session <id>] [--exclude-session <id,id>] [--since <dur|time>]
+             [--include-mock] [--include-tagged]
     Reads the decision log and prints how often the shadow verdict agreed with
     the local heuristic recorded beside it (shadow-mode records for the surface's
     current question-set hash only), plus fail-open counts, latency and cost.
-    This is the evidence that gates promotion out of shadow mode.
+    Mock-provider and --tag'ged (smoke) records are not counted unless asked, so
+    the 200-decision sample gate reflects real traffic. --since takes a duration
+    such as 72h or an RFC 3339 time. This is the evidence that gates promotion
+    out of shadow mode.
 
 yakos decide promote <surface> --report <eval report>
     Operator command: records a verified promotion for the surface's current
@@ -128,7 +141,8 @@ func decideMain(env decideEnv, args []string) (code int) {
 	var help bool
 	var providerFlag, timeoutFlag, sessionFlag, stateFile, setsDir, configPath, reportPath string
 	var localVerdict, localTrigger, logFlag string
-	var asJSON bool
+	var asJSON, consumeState, includeMock, includeTagged bool
+	var tagFlag, excludeSessions, sinceFlag string
 	fs := &cliflag.Set{Cmd: "decide", Specs: []cliflag.Spec{
 		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
 		{Name: "--shadow", Kind: cliflag.Bool, Bool: &shadow},
@@ -138,6 +152,12 @@ func decideMain(env decideEnv, args []string) (code int) {
 		{Name: "--state-file", Kind: cliflag.String, Str: &stateFile, ValueDesc: "a path"},
 		{Name: "--sets-dir", Kind: cliflag.String, Str: &setsDir, ValueDesc: "a directory"},
 		{Name: "--config", Kind: cliflag.String, Str: &configPath, ValueDesc: "a path"},
+		{Name: "--tag", Kind: cliflag.String, Str: &tagFlag, ValueDesc: "a label"},
+		{Name: "--exclude-session", Kind: cliflag.String, Str: &excludeSessions, ValueDesc: "session ids, comma separated"},
+		{Name: "--since", Kind: cliflag.String, Str: &sinceFlag, ValueDesc: "a duration or RFC 3339 time"},
+		{Name: "--include-mock", Kind: cliflag.Bool, Bool: &includeMock},
+		{Name: "--include-tagged", Kind: cliflag.Bool, Bool: &includeTagged},
+		{Name: "--consume-state-file", Kind: cliflag.Bool, Bool: &consumeState},
 		{Name: "--local", Kind: cliflag.String, Str: &localVerdict, ValueDesc: "pass or escalate"},
 		{Name: "--local-trigger", Kind: cliflag.String, Str: &localTrigger, ValueDesc: "a trigger kind"},
 		{Name: "--log", Kind: cliflag.String, Str: &logFlag, ValueDesc: "a decision-log path"},
@@ -149,6 +169,11 @@ func decideMain(env decideEnv, args []string) (code int) {
 		fmt.Fprintln(env.Stderr, err)
 		return decideExitUsage
 	}
+	// A handed-over state file is removed on every path out of here, including
+	// usage errors and provider failures.
+	if consumeState && stateFile != "" && stateFile != "-" {
+		defer os.Remove(stateFile) //nolint:errcheck
+	}
 	if help {
 		printDecideHelp(env.Stdout)
 		return decideExitOK
@@ -157,7 +182,21 @@ func decideMain(env decideEnv, args []string) (code int) {
 		return decidePromote(env, rest[1], reportPath, setsDir)
 	}
 	if len(rest) == 2 && rest[0] == "compare" {
-		return decideCompare(env, rest[1], logFlag, setsDir, asJSON)
+		opts := decision.CompareOptions{Session: sessionFlag, IncludeMock: includeMock, IncludeTagged: includeTagged}
+		for _, x := range strings.Split(excludeSessions, ",") {
+			if x = strings.TrimSpace(x); x != "" {
+				opts.ExcludeSessions = append(opts.ExcludeSessions, x)
+			}
+		}
+		if sinceFlag != "" {
+			t, perr := parseSince(sinceFlag, time.Now())
+			if perr != nil {
+				fmt.Fprintf(env.Stderr, "decide compare: invalid --since %q (a duration such as 72h, or an RFC 3339 time)\n", sinceFlag)
+				return decideExitUsage
+			}
+			opts.Since = t
+		}
+		return decideCompare(env, rest[1], logFlag, setsDir, asJSON, opts)
 	}
 	if localVerdict != "" && !decision.ValidLocalVerdict(localVerdict) {
 		fmt.Fprintf(env.Stderr, "decide: invalid --local %q (pass or escalate)\n", localVerdict)
@@ -218,12 +257,9 @@ func decideMain(env decideEnv, args []string) (code int) {
 		fmt.Fprintf(env.Stderr, "decide: %v; using the default policy\n", perr)
 	}
 	cfg = decision.Tighten(cfg, policy)
-	name := providerFlag
-	if name == "" {
-		name = getenv(decision.EnvProvider)
-	}
-	if name == "" {
-		name = cfg.Provider
+	name, pwarn := decision.ResolveProvider(providerFlag, getenv, cfg, policy)
+	if pwarn != "" {
+		fmt.Fprintf(env.Stderr, "decide: %s\n", pwarn)
 	}
 	if sc, ok := cfg.Surfaces[surface]; ok && sc.Mode == "off" {
 		return fail(decision.ClassDisabled, "surface %s is off in .yakos.yml", surface)
@@ -280,7 +316,7 @@ func decideMain(env decideEnv, args []string) (code int) {
 		logPath = decision.StatePaths{Dir: env.StateDir}.Log()
 	}
 	eng := &decision.Engine{Provider: prov, Logger: decision.NewLogger(logPath), Egress: cfg.Egress,
-		LocalVerdict: localVerdict, LocalTrigger: sanitizeTrigger(localTrigger)}
+		LocalVerdict: localVerdict, LocalTrigger: sanitizeTrigger(localTrigger), Tag: sanitizeTrigger(tagFlag)}
 	out := eng.Execute(context.Background(), set, state, mode, session, timeout)
 	if out.Err != nil {
 		return fail(out.Class, "%s", out.Err.Error())
@@ -345,7 +381,7 @@ func decidePromote(env decideEnv, surface, report, setsDir string) int {
 
 // decideCompare implements `yakos decide compare <surface>`: shadow-vs-local
 // agreement from the decision log. Read-only; never calls a provider.
-func decideCompare(env decideEnv, surface, logPath, setsDir string, asJSON bool) int {
+func decideCompare(env decideEnv, surface, logPath, setsDir string, asJSON bool, opts decision.CompareOptions) int {
 	if !decision.ValidSurface(surface) {
 		fmt.Fprintf(env.Stderr, "decide compare: invalid surface name %q\n", surface)
 		return decideExitUsage
@@ -373,7 +409,7 @@ func decideCompare(env decideEnv, surface, logPath, setsDir string, asJSON bool)
 		}
 		logPath = decision.StatePaths{Dir: stateDir}.Log()
 	}
-	rep, err := decision.Compare(logPath, set)
+	rep, err := decision.Compare(logPath, set, opts)
 	if err != nil {
 		fmt.Fprintf(env.Stderr, "decide compare: %v\n", err)
 		return decideExitUsage
@@ -385,6 +421,14 @@ func decideCompare(env decideEnv, surface, logPath, setsDir string, asJSON bool)
 	}
 	rep.WriteText(env.Stdout)
 	return decideExitOK
+}
+
+// parseSince accepts a duration back from now (72h) or an RFC 3339 instant.
+func parseSince(v string, now time.Time) (time.Time, error) {
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return now.Add(-d), nil
+	}
+	return time.Parse(time.RFC3339, v)
 }
 
 // sanitizeTrigger keeps the logged trigger kind to a short token: the log is

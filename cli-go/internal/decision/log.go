@@ -51,6 +51,9 @@ type Record struct {
 	// (`yakos decide compare`). Both are omitted when the caller gave none.
 	LocalVerdict string `json:"local_verdict,omitempty"`
 	LocalTrigger string `json:"local_trigger,omitempty"`
+	// Tag labels calls that are not real traffic (e.g. "smoke"); compare
+	// leaves tagged records out of its promotion evidence by default.
+	Tag string `json:"tag,omitempty"`
 }
 
 // SummarizeAnswers drops probabilities/legends; keeps the verdicts.

@@ -98,7 +98,7 @@ func TestCompare_CountsAndAgreement(t *testing.T) {
 		Record{Surface: "other", SchemaHash: "hash-current", Mode: ModeShadow, LocalVerdict: LocalPass, Status: "ok", Answers: safe},                   // other surface
 		Record{Type: "something-else", Surface: "supervisor-prefilter", SchemaHash: "hash-current", Mode: ModeShadow, LocalVerdict: LocalPass},         // not a decision
 	)
-	r, err := Compare(path, prefilterSet())
+	r, err := Compare(path, prefilterSet(), CompareOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestCompare_CountsAndAgreement(t *testing.T) {
 }
 
 func TestCompare_MissingLogIsEmptyNotError(t *testing.T) {
-	r, err := Compare(filepath.Join(t.TempDir(), "nope.ndjson"), prefilterSet())
+	r, err := Compare(filepath.Join(t.TempDir(), "nope.ndjson"), prefilterSet(), CompareOptions{})
 	if err != nil || r.Records != 0 || r.Agreement != 0 {
 		t.Fatalf("got %+v, %v", r, err)
 	}
@@ -155,7 +155,7 @@ func TestCompare_SampleGate(t *testing.T) {
 	for i := 0; i < PromotionMinSample; i++ {
 		recs = append(recs, rec(LocalPass, "", ans("benign", 0.9, 0), "ok", 10))
 	}
-	r, err := Compare(writeLog(t, recs...), prefilterSet())
+	r, err := Compare(writeLog(t, recs...), prefilterSet(), CompareOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,5 +219,87 @@ func TestExecute_EnforcesDeadlineOnAnyProvider(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Execute did not return: the provider deadline is not enforced")
+	}
+}
+
+// Evidence must be about real traffic on the real provider: mock dry runs and
+// tagged smoke calls never inflate agreement or the 200-decision gate.
+func TestCompare_SkipsMockAndTaggedAndFilters(t *testing.T) {
+	safe := ans("benign", 0.95, 0)
+	mk := func(provider, tag, session, ts string) Record {
+		r := rec(LocalPass, "", safe, "ok", 10)
+		r.Provider, r.Tag, r.Session, r.TS = provider, tag, session, ts
+		return r
+	}
+	path := writeLog(t,
+		mk("jev", "", "real", "2026-09-30T12:00:00Z"),
+		mk("jev", "", "real", "2026-09-01T12:00:00Z"),
+		mk("mock", "", "real", "2026-09-30T12:00:00Z"),
+		mk("jev", "smoke", "p2b-smoke", "2026-09-30T12:00:00Z"),
+		mk("jev", "", "p2b-smoke", "2026-09-30T12:00:00Z"),
+	)
+	r, _ := Compare(path, prefilterSet(), CompareOptions{})
+	if r.Answered != 3 || r.MockSkipped != 1 || r.TaggedSkipped != 1 {
+		t.Errorf("default: answered=%d mock=%d tagged=%d", r.Answered, r.MockSkipped, r.TaggedSkipped)
+	}
+	r, _ = Compare(path, prefilterSet(), CompareOptions{IncludeMock: true, IncludeTagged: true})
+	if r.Answered != 5 {
+		t.Errorf("include: answered=%d", r.Answered)
+	}
+	r, _ = Compare(path, prefilterSet(), CompareOptions{ExcludeSessions: []string{"p2b-smoke"}})
+	if r.Answered != 2 || r.Filtered != 1 {
+		t.Errorf("exclude-session: answered=%d filtered=%d", r.Answered, r.Filtered)
+	}
+	r, _ = Compare(path, prefilterSet(), CompareOptions{Session: "real"})
+	if r.Answered != 2 {
+		t.Errorf("session: answered=%d", r.Answered)
+	}
+	since, _ := time.Parse(time.RFC3339, "2026-09-15T00:00:00Z")
+	r, _ = Compare(path, prefilterSet(), CompareOptions{Since: since})
+	if r.Answered != 2 || r.Filtered != 1 {
+		t.Errorf("since: answered=%d filtered=%d", r.Answered, r.Filtered)
+	}
+}
+
+// ignoreProvider never looks at its context.
+type ignoreProvider struct{ release chan struct{} }
+
+func (ignoreProvider) Name() string                    { return ProviderMock }
+func (ignoreProvider) Available(context.Context) error { return nil }
+func (p ignoreProvider) Decide(context.Context, Request) (*Result, error) {
+	<-p.release
+	return nil, nil
+}
+
+func TestExecute_DeadlineHoldsForAProviderThatIgnoresItsContext(t *testing.T) {
+	rel := make(chan struct{})
+	defer close(rel)
+	eng := &Engine{Provider: ignoreProvider{rel}}
+	done := make(chan Outcome, 1)
+	go func() {
+		done <- eng.Execute(context.Background(), testSet(t), map[string]any{"tool": "x"}, ModeShadow, "s", 50*time.Millisecond)
+	}()
+	select {
+	case out := <-done:
+		if out.Class != ClassTimeout {
+			t.Errorf("class = %q", out.Class)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Execute waited on a provider that ignores its context")
+	}
+}
+
+type panicProvider struct{}
+
+func (panicProvider) Name() string                    { return ProviderMock }
+func (panicProvider) Available(context.Context) error { return nil }
+func (panicProvider) Decide(context.Context, Request) (*Result, error) {
+	panic("boom")
+}
+
+func TestExecute_ProviderPanicIsAnInternalError(t *testing.T) {
+	out := (&Engine{Provider: panicProvider{}}).Execute(context.Background(), testSet(t), map[string]any{"tool": "x"}, ModeShadow, "s", time.Second)
+	if out.Class != ClassInternal {
+		t.Errorf("class = %q", out.Class)
 	}
 }

@@ -144,3 +144,77 @@ func TestDecideCompare_UsageErrors(t *testing.T) {
 		t.Errorf("unknown surface = %d", code)
 	}
 }
+
+func TestDecide_ConsumeStateFileDeletesItOnEveryPath(t *testing.T) {
+	f := newDecideFixture(t)
+	f.mockFixture(decideAnswers)
+	write := func() string {
+		p := filepath.Join(t.TempDir(), "state.json")
+		if err := os.WriteFile(p, []byte(`{"tool":"x"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	p := write()
+	if code, _, _ := f.run("", "demo", "--provider", "mock", "--shadow", "--state-file", p, "--consume-state-file"); code != 0 {
+		t.Fatal(code)
+	}
+	if _, err := os.Stat(p); err == nil {
+		t.Error("state file survived a successful call")
+	}
+	p = write()
+	f.mockFixture(`{"error":"timeout"}`)
+	f.run("", "demo", "--provider", "mock", "--shadow", "--state-file", p, "--consume-state-file")
+	if _, err := os.Stat(p); err == nil {
+		t.Error("state file survived a provider failure")
+	}
+	// Without the flag a user's file is left alone.
+	p = write()
+	f.run("", "demo", "--provider", "mock", "--shadow", "--state-file", p)
+	if _, err := os.Stat(p); err != nil {
+		t.Error("--state-file alone must not delete the file")
+	}
+}
+
+func TestDecide_TagIsRecorded(t *testing.T) {
+	f := newDecideFixture(t)
+	f.mockFixture(decideAnswers)
+	f.run(`{"tool":"x"}`, "demo", "--provider", "mock", "--shadow", "--tag", "smoke")
+	if lastLogRecord(t, f).Tag != "smoke" {
+		t.Error("tag not recorded")
+	}
+}
+
+// A project .yakos.yml must not be able to start egress on its own.
+func TestDecide_ProjectFileCannotEnableAProvider(t *testing.T) {
+	f := newDecideFixture(t)
+	f.mockFixture(decideAnswers)
+	cfg := filepath.Join(t.TempDir(), ".yakos.yml")
+	_ = os.WriteFile(cfg, []byte("decisions:\n  provider: mock\n"), 0o600)
+	run := func(args ...string) (int, string, string) {
+		var out, errb bytes.Buffer
+		code := decideMain(decideEnv{Stdin: strings.NewReader(`{"tool":"x"}`), Stdout: &out, Stderr: &errb,
+			Getenv: func(k string) string { return f.env[k] }, StateDir: f.state, YakosRoot: t.TempDir(), Home: t.TempDir()},
+			append([]string{"--sets-dir", f.sets, "--config", cfg, "demo", "--shadow"}, args...))
+		return code, out.String(), errb.String()
+	}
+	code, out, errs := run()
+	if code != 0 || nullReason(t, out) != "disabled" || !strings.Contains(errs, "cannot enable a provider") {
+		t.Fatalf("project-only provider must resolve to none with a warning: %d %q %q", code, out, errs)
+	}
+	// The user-level policy file turns it on.
+	_ = os.WriteFile(filepath.Join(f.state, decision.PolicyFileName), []byte("provider: mock\n"), 0o600)
+	if code, out, _ := run(); code != 0 || strings.Contains(out, `"answer":null`) {
+		t.Errorf("user policy provider must enable it: %d %q", code, out)
+	}
+	// An explicit provider: none in the project vetoes the user-level policy.
+	_ = os.WriteFile(cfg, []byte("decisions:\n  provider: none\n"), 0o600)
+	if _, out, _ := run(); nullReason(t, out) != "disabled" {
+		t.Errorf("project none must veto the policy switch: %q", out)
+	}
+	// The environment is an explicit per-shell choice and still wins.
+	f.env[decision.EnvProvider] = "mock"
+	if _, out, _ := run(); strings.Contains(out, `"answer":null`) {
+		t.Errorf("env must override the project veto: %q", out)
+	}
+}

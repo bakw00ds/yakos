@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 )
 
 // PromotionMinSample is the minimum number of answered shadow decisions
@@ -57,6 +58,11 @@ type CompareReport struct {
 	NoLocal   int `json:"no_local_verdict"` // shadow records skipped: no local verdict recorded
 	Answered  int `json:"answered"`         // provider returned a usable answer
 
+	// Skipped so that evidence stays about real traffic on the real provider.
+	MockSkipped   int `json:"mock_skipped"`   // records from the mock provider
+	TaggedSkipped int `json:"tagged_skipped"` // records tagged smoke (or any tag) by the caller
+	Filtered      int `json:"filtered"`       // dropped by --session / --exclude-session / --since
+
 	Errors map[string]int `json:"errors,omitempty"` // fail-open records by error class
 
 	BothEscalate int `json:"both_escalate"`
@@ -80,12 +86,40 @@ type CompareReport struct {
 	SampleReached bool `json:"sample_reached"`
 }
 
+// CompareOptions narrows what Compare counts. The zero value counts every real
+// (non-mock, untagged) shadow record for the surface's current hash.
+type CompareOptions struct {
+	Session         string    // only this session
+	ExcludeSessions []string  // never these sessions
+	Since           time.Time // only records at or after this instant (zero: all)
+	IncludeMock     bool      // count mock-provider records (tests, dry runs)
+	IncludeTagged   bool      // count tagged records (smoke runs)
+}
+
+func (o CompareOptions) keep(rec Record) bool {
+	if o.Session != "" && rec.Session != o.Session {
+		return false
+	}
+	for _, x := range o.ExcludeSessions {
+		if rec.Session == x {
+			return false
+		}
+	}
+	if !o.Since.IsZero() {
+		ts, err := time.Parse(time.RFC3339Nano, rec.TS)
+		if err != nil || ts.Before(o.Since) {
+			return false
+		}
+	}
+	return true
+}
+
 // Compare reads a decision log and summarises shadow-vs-local agreement for
 // set's surface and exact hash. Records from other hashes are counted but not
 // mixed in: a verdict earned under one question wording says nothing about
 // another. Unreadable or malformed lines are skipped. A missing log yields an
 // empty report.
-func Compare(logPath string, set *QuestionSet) (*CompareReport, error) {
+func Compare(logPath string, set *QuestionSet, opts CompareOptions) (*CompareReport, error) {
 	rep := &CompareReport{
 		Surface: set.Surface, SchemaHash: set.Hash, Model: set.Model,
 		Errors: map[string]int{}, RiskClass: map[string]int{}, LocalTrigger: map[string]int{},
@@ -99,13 +133,13 @@ func Compare(logPath string, set *QuestionSet) (*CompareReport, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck
-	if err := compareFrom(f, set, rep); err != nil {
+	if err := compareFrom(f, set, rep, opts); err != nil {
 		return nil, err
 	}
 	return rep, nil
 }
 
-func compareFrom(r io.Reader, set *QuestionSet, rep *CompareReport) error {
+func compareFrom(r io.Reader, set *QuestionSet, rep *CompareReport, opts CompareOptions) error {
 	var latencies []int64
 	var latencySum int64
 	br := bufio.NewReaderSize(r, 64*1024)
@@ -117,6 +151,12 @@ func compareFrom(r io.Reader, set *QuestionSet, rep *CompareReport) error {
 				switch {
 				case rec.SchemaHash != set.Hash:
 					rep.OtherHash++
+				case !opts.IncludeMock && rec.Provider == ProviderMock:
+					rep.MockSkipped++
+				case !opts.IncludeTagged && rec.Tag != "":
+					rep.TaggedSkipped++
+				case !opts.keep(rec):
+					rep.Filtered++
 				case !ValidLocalVerdict(rec.LocalVerdict):
 					rep.NoLocal++
 				default:
@@ -191,6 +231,9 @@ func (r *CompareReport) WriteText(w io.Writer) {
 	p("surface        %s  (model %s)", r.Surface, r.Model)
 	p("question set   %s", r.SchemaHash)
 	p("shadow calls   %d with a local verdict (%d from other question-set hashes, %d without a local verdict; not counted)", r.Records, r.OtherHash, r.NoLocal)
+	if r.MockSkipped+r.TaggedSkipped+r.Filtered > 0 {
+		p("not counted    %d mock-provider, %d tagged, %d filtered out by --session/--exclude-session/--since", r.MockSkipped, r.TaggedSkipped, r.Filtered)
+	}
 	p("answered       %d   fail-open %d%s", r.Answered, r.Records-r.Answered, formatCounts(r.Errors))
 	if r.Answered == 0 {
 		p("agreement      n/a (no answered shadow calls yet)")
