@@ -225,36 +225,54 @@ fi
 # none (the default) _ss_provider prints nothing and _ss_shadow returns before
 # doing any work. Go twin: internal/hooks/supervisorstream/shadow.go.
 #
-# Provider resolution matches `yakos decide`: YAKOS_DECISION_DISABLE=1, then
-# $YAKOS_DECISION_PROVIDER, then decisions.provider (a direct child of the
-# top-level decisions: block) in .yakos.yml.
+# Provider resolution matches `yakos decide` (decision.ResolveProvider):
+# YAKOS_DECISION_DISABLE=1, then $YAKOS_DECISION_PROVIDER, then the top-level
+# `provider:` in the USER-level ~/.yakos-state/decision-policy.yml. A project
+# .yakos.yml can never enable a provider; an explicit `decisions.provider: none`
+# there (a direct child of the top-level decisions: block) vetoes the policy
+# switch. The env var still wins over that veto.
 _ss_provider() {
     [ "${YAKOS_DECISION_DISABLE:-0}" = "1" ] && return 0
-    local p="${YAKOS_DECISION_PROVIDER:-}" content=""
-    if [ -z "$p" ] && [ -f "$yakos_yml" ]; then
-        # $(<file) is a builtin read (no exec): the common no-decisions: case
-        # costs no extra process.
-        content="$(<"$yakos_yml")" 2>/dev/null || content=""
-        case "$content" in
-            *decisions:*)
-                p="$(awk '
-                    /^decisions:[[:space:]]*(#.*)?$/ { in_d = 1; next }
-                    in_d && /^[^[:space:]#]/ { exit }
-                    in_d && /^[[:space:]]+[A-Za-z_]/ {
-                        match($0, /^[[:space:]]+/); ind = RLENGTH
-                        if (base == 0) base = ind
-                        if (ind == base && $0 ~ /^[[:space:]]+provider:/) {
-                            v = $0
-                            sub(/^[[:space:]]+provider:[[:space:]]*/, "", v)
-                            sub(/[[:space:]]+#.*$/, "", v)
-                            sub(/[[:space:]]+$/, "", v)
-                            print v
-                            exit
+    local p="${YAKOS_DECISION_PROVIDER:-}" pol line content="" proj=""
+    if [ -z "$p" ]; then
+        pol="${YAKOS_DISPATCH_LOG:-${HOME:-}/.yakos-state}/decision-policy.yml"
+        if [ -f "$pol" ]; then
+            while IFS= read -r line || [ -n "$line" ]; do
+                case "$line" in
+                    provider:*)
+                        p="${line#provider:}"
+                        p="${p%%#*}"
+                        p="$(printf '%s' "$p" | tr -d " \t\r\"'")"
+                        break
+                        ;;
+                esac
+            done < "$pol"
+        fi
+        if [ -n "$p" ] && [ -f "$yakos_yml" ]; then
+            # $(<file) is a builtin read (no exec).
+            content="$(<"$yakos_yml")" 2>/dev/null || content=""
+            case "$content" in
+                *decisions:*)
+                    proj="$(awk '
+                        /^decisions:[[:space:]]*(#.*)?$/ { in_d = 1; next }
+                        in_d && /^[^[:space:]#]/ { exit }
+                        in_d && /^[[:space:]]+[A-Za-z_]/ {
+                            match($0, /^[[:space:]]+/); ind = RLENGTH
+                            if (base == 0) base = ind
+                            if (ind == base && $0 ~ /^[[:space:]]+provider:/) {
+                                v = $0
+                                sub(/^[[:space:]]+provider:[[:space:]]*/, "", v)
+                                sub(/[[:space:]]+#.*$/, "", v)
+                                sub(/[[:space:]]+$/, "", v)
+                                print v
+                                exit
+                            }
                         }
-                    }
-                ' "$yakos_yml" 2>/dev/null | tr -d "\"'" || true)"
-                ;;
-        esac
+                    ' "$yakos_yml" 2>/dev/null | tr -d "\"'" || true)"
+                    ;;
+            esac
+            [ "$proj" = "none" ] && p=""
+        fi
     fi
     printf '%s' "$p"
 }
@@ -303,9 +321,13 @@ _ss_shadow() {
             fi
         done
     fi
-    state="$(jq -nc --arg tool "$tool" --arg fp "$file_path" --arg prev "$preview" \
-        --arg intent "$intent" --arg pm "$pm" \
-        '{tool: $tool}
+    # The raw preview and intent go to jq through its ENVIRONMENT (owner-only),
+    # never argv (world-readable in /proc/*/cmdline on Linux); only the tool
+    # name, the path and the plan flag ride on argv, as before this hook
+    # shipped state.
+    state="$(_SS_PREV="$preview" _SS_INTENT="$intent" jq -nc --arg tool "$tool" --arg fp "$file_path" --arg pm "$pm" \
+        '($ENV._SS_PREV // "") as $prev | ($ENV._SS_INTENT // "") as $intent
+         | {tool: $tool}
          + (if $prev == "" then {} else {command_or_diff_preview: $prev} end)
          + (if $fp == "" then {} else {file_path: $fp} end)
          + (if $intent == "" then {} else {stated_intent: $intent} end)
