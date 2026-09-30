@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/bakw00ds/yakos/internal/hooks/fnmatch"
@@ -362,6 +363,47 @@ func truncateUTF8(s string, n int) string {
 // RedactText replaces secret-shaped substrings with [REDACTED:<kind>] and adds
 // the number of replacements to *count (if non-nil).
 func RedactText(s string, count *int) string {
+	// Whitespace is normalised BEFORE any credential rule runs, so a flag and its
+	// value cannot be separated by anything the rules do not expect (two spaces,
+	// tabs, a backslash-newline continuation, CRLF, U+00A0). Pass 1 keeps
+	// newlines, so the line-aware rules (env files, PEM) stay exact. Pass 2
+	// joins the lines too, and its output is what is returned and sent: the
+	// provider only needs the gist of a command or diff.
+	s = redactPass(normalizeWhitespace(s, true), count)
+	return redactPass(normalizeWhitespace(s, false), count)
+}
+
+// normalizeWhitespace joins shell line continuations (backslash, optional CR,
+// LF) and collapses every run of whitespace, Unicode spaces included, to one
+// space. With keepNewlines a line feed stays a line feed (runs of horizontal
+// whitespace still collapse).
+func normalizeWhitespace(s string, keepNewlines bool) string {
+	s = lineContinuationRE.ReplaceAllString(s, " ")
+	var b strings.Builder
+	b.Grow(len(s))
+	space := false
+	for _, r := range s {
+		if keepNewlines && r == '\n' {
+			b.WriteByte('\n')
+			space = false
+			continue
+		}
+		if unicode.IsSpace(r) {
+			if !space {
+				b.WriteByte(' ')
+			}
+			space = true
+			continue
+		}
+		space = false
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+var lineContinuationRE = regexp.MustCompile(`\\\r?\n`)
+
+func redactPass(s string, count *int) string {
 	n := 0
 	bump := func() { n++ }
 	// Order matters: whole PEM blocks first, then the shared secret-scan

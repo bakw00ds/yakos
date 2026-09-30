@@ -493,6 +493,20 @@ func TestRedact_CommandLineFlagCredentials(t *testing.T) {
 		{"sshpass -p\tSEC22pw ssh h", "SEC22pw"},
 		{"redis-cli -a\tSEC23pw ping", "SEC23pw"},
 		{"docker login -u me -p\tSEC24pw reg", "SEC24pw"},
+		// Round 3: the class, not the variants. Any whitespace run, continuations, CRLF, NBSP.
+		{"tool --password  SEC30pw run", "SEC30pw"},
+		{"tool --password \t \t SEC31pw run", "SEC31pw"},
+		{"curl -u   u:SEC32pw https://x", "SEC32pw"},
+		{"tool --password \\\n  SEC33pw run", "SEC33pw"},
+		{"tool --password \\\r\n SEC34pw run", "SEC34pw"},
+		{"tool --password\u00a0SEC35pw run", "SEC35pw"},
+		{"tool --password\u2003\u00a0SEC36pw run", "SEC36pw"},
+		{"curl -u\u00a0u:SEC37pw https://x", "SEC37pw"},
+		{"curl -u \\\n \"u:SEC38a SEC38b\" https://x", "SEC38b"},
+		{"sshpass -p  SEC39pw ssh h", "SEC39pw"},
+		{"redis-cli -a \\\n SEC40pw ping", "SEC40pw"},
+		{"docker login -u me -p \u00a0 SEC41pw reg", "SEC41pw"},
+		{"mysql -u root \\\n -pSEC42pw db", "SEC42pw"},
 		{"echo apikey_" + strings.Repeat("Ab1", 15), "Ab1Ab1Ab1"},
 	}
 	for _, c := range cases {
@@ -540,5 +554,18 @@ func TestSanitize_CommandFlagCredentialsNeverLeave(t *testing.T) {
 		if strings.Contains(string(b), leak) {
 			t.Errorf("%s leaked: %s", leak, b)
 		}
+	}
+}
+
+// The redacted text is whitespace-normalised: that is what is sent.
+func TestRedactText_NormalisesWhitespace(t *testing.T) {
+	out := RedactText("a  b\t\tc\\\nd\r\ne\u00a0f", nil)
+	if out != "a b c d e f" {
+		t.Errorf("got %q", out)
+	}
+	// Env-file lines are still redacted to the end of the line before the join.
+	out = RedactText("DB_PASS=two words here\nPORT=8080\n", nil)
+	if strings.Contains(out, "words") || !strings.Contains(out, "PORT=8080") {
+		t.Errorf("env line handling: %q", out)
 	}
 }
