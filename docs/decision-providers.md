@@ -132,6 +132,13 @@ a token that straddles the cut cannot leave as a fragment. Default level
 `strict`: 2 KiB per string. `previews`: 8 KiB. `full`: no per-string cap.
 Redaction and the size cap apply at every level.
 
+**Whitespace is normalised before redaction, and the normalised text is what is
+sent.** Shell line continuations (backslash, optional CR, LF) are joined, and
+every run of whitespace, tabs, CR, LF and Unicode spaces such as U+00A0
+included, becomes one space. So a flag cannot be separated from its value by
+anything the rules do not expect. The provider only needs the gist of a command
+or diff, so the original layout is not preserved.
+
 **Redaction is best effort.** It is pattern-based, so a secret that matches no
 pattern and sits under no `never_paths` entry leaves verbatim. The allowlist,
 the previews and the size cap are the primary controls; keep `state_fields`
@@ -255,8 +262,11 @@ name only.
 ### Read the results
 
 The state reaches the child in a private 0600 file in the state directory
-(`shadow-state-*.json`), which `yakos decide --consume-state-file` deletes as
-soon as it has read it. A pipe would block the hook when the state outgrows the
+(`shadow-state-*.json`), which `yakos decide --consume-state-file` deletes on
+every exit (read, surface off, config error, disabled, provider failure), since
+it holds raw text. It deletes nothing else: only a regular `shadow-state-*.json`
+file of yours directly in the state directory. The hook also skips the call, and
+the file, when the project config turns the surface off. A pipe would block the hook when the state outgrows the
 pipe buffer (about 4 KiB on Windows). Stale files are swept after ten minutes.
 The bash hook passes the state on the child's stdin and keeps the raw preview
 off every argv.
