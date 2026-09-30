@@ -165,6 +165,18 @@ for side in $sides; do
     if grep -q 'opaqueTokenValue123\|abcdefgh12345' "$sb/work/current/supervisor-buffer.ndjson"; then bad "(e) $side unprefixed credential reached the buffer"; else ok "(e) $side unprefixed bearer/KEY=VALUE redacted"; fi
 done
 
+# ---- K-110: curl -u, scheme://user:pass@host, PEM bodies redacted -----------------
+for side in $sides; do
+    sb="$(mksb "k110-$side" $'supervisor:\n  score_every_n_calls: 1000\n')"
+    run_payload "$side" "$sb" "$(bash_payload "curl -u alice:k110CurlPw https://x.example/api")"
+    run_payload "$side" "$sb" "$(bash_payload "git clone https://bob:k110UrlPw@github.com/o/r.git")"
+    run_payload "$side" "$sb" "$(edit_payload new_string $'-----BEGIN RSA PRIVATE KEY-----\nk110PemBodyLineOne\nk110PemBodyLineTwo\n-----END RSA PRIVATE KEY-----')"
+    buf="$sb/work/current/supervisor-buffer.ndjson"
+    for leak in k110CurlPw k110UrlPw k110PemBodyLineOne k110PemBodyLineTwo; do
+        if grep -q "$leak" "$buf"; then bad "(k110) $side $leak reached the buffer"; else ok "(k110) $side $leak redacted"; fi
+    done
+done
+
 # ---- (b) launch at threshold -------------------------------------------------
 mkfake() { # mkfake <record-file> -> path of a fake dispatcher
     local f="$TMP/fake-yakos-$$-$RANDOM"

@@ -247,3 +247,19 @@ func TestGenericCredentialsRedactedInBuffer(t *testing.T) {
 		}
 	}
 }
+
+// K-110: curl basic auth, URL credentials and PEM bodies never reach the buffer.
+func TestK110CredentialShapesRedactedInBuffer(t *testing.T) {
+	work, proj := t.TempDir(), t.TempDir()
+	writeYAML(t, proj, "supervisor:\n  score_every_n_calls: 1000\n")
+	bashRun(t, work, proj, map[string]any{"command": "curl -u alice:k110CurlPw https://x.example/api"})
+	bashRun(t, work, proj, map[string]any{"command": "git clone https://bob:k110UrlPw@github.com/o/r.git"})
+	pem := "-----BEGIN RSA PRIVATE KEY-----\nk110PemBodyLineOne\nk110PemBodyLineTwo\n-----END RSA PRIVATE KEY-----"
+	bashRun(t, work, proj, map[string]any{"command": "echo '" + pem + "' > k.pem"})
+	data, _ := os.ReadFile(filepath.Join(work, "supervisor-buffer.ndjson"))
+	for _, leak := range []string{"k110CurlPw", "k110UrlPw", "k110PemBodyLineOne", "k110PemBodyLineTwo"} {
+		if strings.Contains(string(data), leak) {
+			t.Errorf("%s reached the buffer:\n%s", leak, data)
+		}
+	}
+}

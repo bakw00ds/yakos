@@ -35,6 +35,9 @@ func TestBashPatternTableMatchesGo(t *testing.T) {
 	if got := entries("YAKOS_SECRET_PATTERNS"); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("blocking table drift:\nbash %q\ngo   %q", got, want)
 	}
+	if got := entries("YAKOS_REDACT_BLOCK_PATTERNS"); strings.Join(got, "\n") != strings.Join(RedactBlockSources(), "\n") {
+		t.Errorf("redaction block table drift:\nbash %q\ngo   %q", got, RedactBlockSources())
+	}
 	if got := entries("YAKOS_REDACT_EXTRA_PATTERNS"); strings.Join(got, "\n") != strings.Join(RedactExtraSources(), "\n") {
 		t.Errorf("redaction-only table drift:\nbash %q\ngo   %q", got, RedactExtraSources())
 	}
@@ -63,5 +66,45 @@ func TestExtraRulesNotInBlockingTable(t *testing.T) {
 		if strings.Contains(p.Source, "Bearer") || strings.Contains(p.Source, "[Bb]") {
 			t.Errorf("generic rule leaked into blocking table: %s", p.Name)
 		}
+	}
+}
+
+// K-110: curl basic auth, scheme://user:pass@host URLs and PEM bodies are
+// redacted; benign look-alikes are left alone.
+func TestRedactCredentialShapesK110(t *testing.T) {
+	pemBody := "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7"
+	pem := "-----BEGIN RSA PRIVATE KEY-----\n" + pemBody + "\nAbCdEf123456\n-----END RSA PRIVATE KEY-----"
+	for _, tc := range []struct{ in, secret string }{
+		{"curl -u alice:s3cretPw https://x.example/api", "s3cretPw"},
+		{"curl -fsSu alice:s3cretPw https://x.example", "s3cretPw"},
+		{"curl --user alice:s3cretPw https://x.example", "s3cretPw"},
+		{"curl --user=alice:s3cretPw https://x.example", "s3cretPw"},
+		{"git clone https://bob:hunter2pass@github.com/o/r.git", "hunter2pass"},
+		{"psql postgres://svc:pgPassw0rd@db:5432/app", "pgPassw0rd"},
+		{"echo '" + pem + "' > k.pem", pemBody},
+		{"echo '" + pem + "' > k.pem", "AbCdEf123456"},
+		// Truncated block (no END marker): everything after the header goes.
+		{"-----BEGIN PRIVATE KEY-----\n" + pemBody, pemBody},
+	} {
+		out := Redact(tc.in)
+		if strings.Contains(out, tc.secret) || !strings.Contains(out, RedactToken) {
+			t.Errorf("not redacted: %q -> %q", tc.in, out)
+		}
+	}
+	for _, benign := range []string{
+		"docker run -u 1000:1000 img",
+		"sort -u a.txt",
+		"git push -u origin main",
+		"open https://example.com/a/b",
+		"ssh git@github.com",
+		"curl -s https://example.com",
+	} {
+		if out := Redact(benign); out != benign {
+			t.Errorf("over-redacted: %q -> %q", benign, out)
+		}
+	}
+	// Text after a complete PEM block survives.
+	if out := Redact(pem + "\ntrailing-text"); !strings.Contains(out, "trailing-text") {
+		t.Errorf("text after PEM lost: %q", out)
 	}
 }

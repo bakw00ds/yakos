@@ -63,6 +63,9 @@ const RedactToken = "[REDACTED]"
 // RedactToken, applied in table order. Used by supervisor-stream so
 // secrets never reach the supervisor buffer (K-112).
 func Redact(text string) string {
+	for _, re := range redactBlock {
+		text = re.ReplaceAllString(text, RedactToken)
+	}
 	for _, p := range DefaultPatterns {
 		text = p.Regex.ReplaceAllString(text, RedactToken)
 	}
@@ -79,7 +82,36 @@ func Redact(text string) string {
 var redactExtraSources = []string{
 	`[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:]]{8,}`,
 	`([Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww]([Oo][Rr])?[Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]).?[[:space:]]*[=:][[:space:]]*.?[^[:space:]]{8,}`,
+	`://[^[:space:]/@:]+:[^[:space:]@]+@`,
+	curlBasicAuthSource,
 }
+
+// curlBasicAuthSource matches curl -u/--user user:pass. Shared with decision
+// egress redaction through CurlBasicAuthRE so the shape lives in one place.
+const curlBasicAuthSource = `(-[A-Za-z]*u|--user)([[:space:]]+|=)[^[:space:]:0-9][^[:space:]:]*:[^[:space:]]+`
+
+// CurlBasicAuthRE is the compiled curlBasicAuthSource.
+var CurlBasicAuthRE = regexp.MustCompile(curlBasicAuthSource)
+
+// redactBlockSources are the redaction-only multi-line block rules, applied
+// before every other rule (the blocking table would otherwise eat the PEM
+// header and leave the key body). Compiled dot-all; the source text stays
+// byte-identical to YAKOS_REDACT_BLOCK_PATTERNS in secret-patterns.sh.
+var redactBlockSources = []string{
+	`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*-----END [A-Z0-9 ]*PRIVATE KEY-----`,
+	`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*`,
+}
+
+var redactBlock = func() []*regexp.Regexp {
+	out := make([]*regexp.Regexp, len(redactBlockSources))
+	for i, src := range redactBlockSources {
+		out[i] = regexp.MustCompile("(?s)" + src)
+	}
+	return out
+}()
+
+// RedactBlockSources exposes the block-rule regex text (drift test).
+func RedactBlockSources() []string { return append([]string(nil), redactBlockSources...) }
 
 var redactExtra = func() []*regexp.Regexp {
 	out := make([]*regexp.Regexp, len(redactExtraSources))

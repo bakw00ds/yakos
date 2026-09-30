@@ -144,10 +144,16 @@ description_scan="$(hi_field '.tool_input.description' 2>/dev/null || true)"
 
 # Redaction: one sed over the shared table lib/secret-patterns.sh. If the table
 # cannot be loaded the previews are withheld rather than stored unredacted.
-_ss_sed_args=()
+# Newline-slurp first (portable BSD/GNU loop) so multi-line PEM blocks match.
+_ss_sed_args=(-e ':a' -e '$!{N;ba' -e '}')
 _ss_redact_ok=0
 if [ -r "$HOOK_DIR/lib/secret-patterns.sh" ] && ( . "$HOOK_DIR/lib/secret-patterns.sh" ) >/dev/null 2>&1 \
     && . "$HOOK_DIR/lib/secret-patterns.sh" && [ "${YAKOS_SECRET_PATTERNS_LOADED:-0}" = "1" ]; then
+    # Multi-line blocks (PEM bodies) first: the blocking table would otherwise
+    # eat the header and leave the key body behind.
+    for _ss_entry in "${YAKOS_REDACT_BLOCK_PATTERNS[@]}"; do
+        _ss_sed_args+=(-e "s#${_ss_entry#*|}#[REDACTED]#g")
+    done
     for _ss_entry in "${YAKOS_SECRET_PATTERNS[@]}"; do
         _ss_sed_args+=(-e "s#${_ss_entry#*|}#[REDACTED]#g")
     done

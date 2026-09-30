@@ -344,6 +344,7 @@ func RedactText(s string, count *int) string {
 		bump()
 		return urlCredsRE.FindStringSubmatch(m)[1] + "[REDACTED:url-credentials]@"
 	})
+	s = secretscan.CurlBasicAuthRE.ReplaceAllStringFunc(s, func(string) string { bump(); return "[REDACTED:basic-auth]" })
 	s = jwtRE.ReplaceAllStringFunc(s, func(string) string { bump(); return "[REDACTED:jwt]" })
 	s = authSchemeRE.ReplaceAllStringFunc(s, func(m string) string {
 		if strings.Contains(m, "[REDACTED") {
