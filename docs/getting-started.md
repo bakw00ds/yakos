@@ -59,7 +59,8 @@ What the installer does, in order:
    the latest release from the GitHub API (or a specific version with
    `--version <X>`).
 2. Downloads the binary and a `checksums.txt` file; verifies the SHA256
-   before writing anything to disk.
+   before writing anything to disk. `checksums.txt` is unsigned; see
+   [self-update trust boundary](selfupdate-trust-boundary.md).
 3. Places the binary at `~/.local/bin/yakos` on Mac and Linux, or
    `%USERPROFILE%\bin\yakos.exe` on Windows Git Bash.
 4. Runs `yakos install` (best-effort, warns and continues on failure).

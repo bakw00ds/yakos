@@ -18,8 +18,11 @@
 //     any URL or filename, preventing path traversal.
 //   - Every downloaded binary is SHA-256 verified against the release's
 //     checksums.txt before the old binary is touched.
+//   - checksums.txt is NOT signed: it shares a trust root with the binary
+//     (the GitHub release publisher).  See docs/selfupdate-trust-boundary.md
+//     for the trust boundary and what signing would require.
 //   - The temp file is written into the same directory as the target binary
-//     (same filesystem) so os.Rename is atomic.
+//     (same filesystem) so os.Rename is atomic, and is fsynced first.
 //   - Permissions on the temp file are 0755 before rename.
 //   - The temp file is always removed on failure; no partial binary is left
 //     at the live path.
