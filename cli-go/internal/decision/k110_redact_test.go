@@ -44,3 +44,11 @@ func TestRedactText_CurlShapeIgnoresOtherCommands(t *testing.T) {
 		t.Errorf("digit-leading user leaked: %q", out)
 	}
 }
+
+func TestRedactText_CurlKeepsCommandAndFlag(t *testing.T) {
+	var n int
+	got := RedactText("curl -s -u alice:s3cretPw https://x.example", &n)
+	if got != "curl -s -u [REDACTED:basic-auth] https://x.example" {
+		t.Errorf("got %q", got)
+	}
+}

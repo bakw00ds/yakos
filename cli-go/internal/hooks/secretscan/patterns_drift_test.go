@@ -44,6 +44,9 @@ func TestBashPatternTableMatchesGo(t *testing.T) {
 	if got := entries("YAKOS_REDACT_BLOCK_PATTERNS"); strings.Join(got, "\n") != strings.Join(RedactBlockSources(), "\n") {
 		t.Errorf("redaction block table drift:\nbash %q\ngo   %q", got, RedactBlockSources())
 	}
+	if got := entries("YAKOS_REDACT_KEEP_PATTERNS"); strings.Join(got, "\n") != strings.Join(RedactKeepSources(), "\n") {
+		t.Errorf("keep-context table drift:\nbash %q\ngo   %q", got, RedactKeepSources())
+	}
 	if got := entries("YAKOS_REDACT_EXTRA_PATTERNS"); strings.Join(got, "\n") != strings.Join(RedactExtraSources(), "\n") {
 		t.Errorf("redaction-only table drift:\nbash %q\ngo   %q", got, RedactExtraSources())
 	}
@@ -109,6 +112,12 @@ func TestRedactCredentialShapesK110(t *testing.T) {
 		if strings.Contains(out, tc.secret) || !strings.Contains(out, RedactToken) {
 			t.Errorf("not redacted: %q -> %q", tc.in, out)
 		}
+		// Only the credential goes: the command and its flag stay readable.
+		if strings.HasPrefix(tc.in, "curl") || strings.HasPrefix(tc.in, "wget") {
+			if !strings.HasPrefix(out, strings.Fields(tc.in)[0]) || !strings.Contains(out, " -") {
+				t.Errorf("command/flag lost from preview: %q -> %q", tc.in, out)
+			}
+		}
 	}
 	for _, benign := range []string{
 		"sort -u a.txt",
@@ -128,5 +137,19 @@ func TestRedactCredentialShapesK110(t *testing.T) {
 	// Text after a complete PEM block survives.
 	if out := Redact(pem + "\ntrailing-text"); !strings.Contains(out, "trailing-text") {
 		t.Errorf("text after PEM lost: %q", out)
+	}
+}
+
+func TestRedactKeepsCurlCommandAndFlag(t *testing.T) {
+	cases := map[string]string{
+		"curl -s -u alice:s3cretPw https://x.example":    "curl -s -u [REDACTED] https://x.example",
+		`curl -u "alice:pw one sTail" https://x.example`: "curl -u [REDACTED] https://x.example",
+		"curl --proxy-user alice:s3cretPw https://p":     "curl --proxy-user [REDACTED] https://p",
+		"wget --user=alice:s3cretPw https://x.example":   "wget --user=[REDACTED] https://x.example",
+	}
+	for in, want := range cases {
+		if got := Redact(in); got != want {
+			t.Errorf("Redact(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

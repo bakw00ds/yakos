@@ -212,6 +212,8 @@ for side in $sides; do
     run_payload "$side" "$sb" "$(edit_payload new_string $'-----BEGIN PGP PRIVATE KEY BLOCK-----\nk110PgpBodyLine\n-----END PGP PRIVATE KEY BLOCK-----')"
     run_payload "$side" "$sb" "$(edit_payload new_string $'-----BEGIN RSA PRIVATE KEY-----\nk110PemBodyLineOne\nk110PemBodyLineTwo\n-----END RSA PRIVATE KEY-----')"
     buf="$sb/work/current/supervisor-buffer.ndjson"
+    # Only the credential is redacted: the command and flag stay readable.
+    if grep -q 'curl -u \[REDACTED\]' "$buf" && grep -q 'curl --proxy-user \[REDACTED\]' "$buf"; then ok "(k110) $side preview keeps curl and its flag"; else bad "(k110) $side preview lost the curl command/flag: $(grep -o 'command_preview[^,]*' "$buf" | head -3)"; fi
     for leak in k110CurlPw k110UrlPw k110PemBodyLineOne k110PemBodyLineTwo k110NoSpacePw k110QuotedTail k110ProxyPw k110EmptyUserPw k110PgpBodyLine; do
         if grep -q "$leak" "$buf"; then bad "(k110) $side $leak reached the buffer"; else ok "(k110) $side $leak redacted"; fi
     done

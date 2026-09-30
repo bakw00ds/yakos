@@ -69,6 +69,9 @@ func Redact(text string) string {
 	for _, p := range DefaultPatterns {
 		text = p.Regex.ReplaceAllString(text, RedactToken)
 	}
+	for _, re := range redactKeep {
+		text = re.ReplaceAllString(text, "${1}"+RedactToken)
+	}
 	for _, re := range redactExtra {
 		text = re.ReplaceAllString(text, RedactToken)
 	}
@@ -83,17 +86,32 @@ var redactExtraSources = []string{
 	`[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:]]{8,}`,
 	`([Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww]([Oo][Rr])?[Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]).?[[:space:]]*[=:][[:space:]]*.?[^[:space:]]{8,}`,
 	`://[^[:space:]/@:]*:[^[:space:]@]+@`,
-	curlBasicAuthSource,
 }
 
 // curlBasicAuthSource matches curl/wget/xh -u/-U/--user/--proxy-user user:pass, bare or quoted (a quoted value may contain spaces). It needs the
 // command in front so docker run -u 1000:1000, sort -u 12:30 and ls -lu a:b
 // are left alone. Shared with decision
 // egress redaction through CurlBasicAuthRE so the shape lives in one place.
-const curlBasicAuthSource = `(curl|wget|xh)[^|;&]*[[:space:]](-[A-Za-z]*[uU][[:space:]]*|--(proxy-)?user([[:space:]]+|=))("[^"]*:[^"]*"|'[^']*:[^']*'|[^[:space:]:"']+:[^[:space:]]+)`
+const curlBasicAuthSource = `((curl|wget|xh)[^|;&]*[[:space:]](-[A-Za-z]*[uU][[:space:]]*|--(proxy-)?user([[:space:]]+|=)))("[^"]*:[^"]*"|'[^']*:[^']*'|[^[:space:]:"']+:[^[:space:]]+)`
 
-// CurlBasicAuthRE is the compiled curlBasicAuthSource.
+// CurlBasicAuthRE is the compiled curlBasicAuthSource. Group 1 is the command
+// and flag, which redaction keeps; the rest of the match is the credential.
 var CurlBasicAuthRE = regexp.MustCompile(curlBasicAuthSource)
+
+// redactKeepSources are redaction-only rules whose group 1 is context to keep
+// (replacement "${1}[REDACTED]"). Bash twin: YAKOS_REDACT_KEEP_PATTERNS.
+var redactKeepSources = []string{curlBasicAuthSource}
+
+var redactKeep = func() []*regexp.Regexp {
+	out := make([]*regexp.Regexp, len(redactKeepSources))
+	for i, src := range redactKeepSources {
+		out[i] = regexp.MustCompile(src)
+	}
+	return out
+}()
+
+// RedactKeepSources exposes the keep-context regex text (drift test).
+func RedactKeepSources() []string { return append([]string(nil), redactKeepSources...) }
 
 // redactBlockSources are the redaction-only multi-line block rules, applied
 // before every other rule (the blocking table would otherwise eat the PEM
