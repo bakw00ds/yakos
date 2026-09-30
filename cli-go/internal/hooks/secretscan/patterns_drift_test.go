@@ -79,6 +79,11 @@ func TestRedactCredentialShapesK110(t *testing.T) {
 		{"curl -fsSu alice:s3cretPw https://x.example", "s3cretPw"},
 		{"curl --user alice:s3cretPw https://x.example", "s3cretPw"},
 		{"curl --user=alice:s3cretPw https://x.example", "s3cretPw"},
+		{"curl -ualice:s3cretPw https://x.example", "s3cretPw"},
+		{"curl -fsSualice:s3cretPw https://x.example", "s3cretPw"},
+		{"curl -u 9lives:s3cretPw https://x.example", "s3cretPw"},
+		{"redis-cli -u redis://:s3cretPw@cache:6379", "s3cretPw"},
+		{"echo '-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQPGBFk2pgpBodyLine\n-----END PGP PRIVATE KEY BLOCK-----'", "lQPGBFk2pgpBodyLine"},
 		{"git clone https://bob:hunter2pass@github.com/o/r.git", "hunter2pass"},
 		{"psql postgres://svc:pgPassw0rd@db:5432/app", "pgPassw0rd"},
 		{"echo '" + pem + "' > k.pem", pemBody},
@@ -92,7 +97,6 @@ func TestRedactCredentialShapesK110(t *testing.T) {
 		}
 	}
 	for _, benign := range []string{
-		"docker run -u 1000:1000 img",
 		"sort -u a.txt",
 		"git push -u origin main",
 		"open https://example.com/a/b",

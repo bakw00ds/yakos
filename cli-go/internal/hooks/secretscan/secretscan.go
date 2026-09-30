@@ -82,13 +82,13 @@ func Redact(text string) string {
 var redactExtraSources = []string{
 	`[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:]]{8,}`,
 	`([Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww]([Oo][Rr])?[Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]).?[[:space:]]*[=:][[:space:]]*.?[^[:space:]]{8,}`,
-	`://[^[:space:]/@:]+:[^[:space:]@]+@`,
+	`://[^[:space:]/@:]*:[^[:space:]@]+@`,
 	curlBasicAuthSource,
 }
 
 // curlBasicAuthSource matches curl -u/--user user:pass. Shared with decision
 // egress redaction through CurlBasicAuthRE so the shape lives in one place.
-const curlBasicAuthSource = `(-[A-Za-z]*u|--user)([[:space:]]+|=)[^[:space:]:0-9][^[:space:]:]*:[^[:space:]]+`
+const curlBasicAuthSource = `(-[A-Za-z]*u[[:space:]]*|--user([[:space:]]+|=))[^[:space:]:]+:[^[:space:]]+`
 
 // CurlBasicAuthRE is the compiled curlBasicAuthSource.
 var CurlBasicAuthRE = regexp.MustCompile(curlBasicAuthSource)
@@ -98,8 +98,8 @@ var CurlBasicAuthRE = regexp.MustCompile(curlBasicAuthSource)
 // header and leave the key body). Compiled dot-all; the source text stays
 // byte-identical to YAKOS_REDACT_BLOCK_PATTERNS in secret-patterns.sh.
 var redactBlockSources = []string{
-	`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*-----END [A-Z0-9 ]*PRIVATE KEY-----`,
-	`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*`,
+	`-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----.*-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----`,
+	`-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----.*`,
 }
 
 var redactBlock = func() []*regexp.Regexp {

@@ -12,6 +12,9 @@ func TestRedactText_K110Shapes(t *testing.T) {
 	for _, tc := range []struct{ in, secret string }{
 		{"curl -u alice:s3cretPw https://x.example", "s3cretPw"},
 		{"curl --user alice:s3cretPw https://x.example", "s3cretPw"},
+		{"curl -ualice:s3cretPw https://x.example", "s3cretPw"},
+		{"redis-cli -u redis://:s3cretPw@cache:6379", "s3cretPw"},
+		{"x -----BEGIN PGP PRIVATE KEY BLOCK-----\nlQPGBFk2pgpBodyLine\n-----END PGP PRIVATE KEY BLOCK----- y", "lQPGBFk2pgpBodyLine"},
 		{"git clone https://bob:hunter2pass@github.com/o/r.git", "hunter2pass"},
 		{"run " + pem + " end", "QWxwaGFCZXRhR2FtbWE"},
 		{"run " + pem + " end", "b3BlbnNzaC1rZXktdjEAAAAABG5vbmU"},
