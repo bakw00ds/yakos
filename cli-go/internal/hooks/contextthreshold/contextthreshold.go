@@ -125,7 +125,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	// Probe context usage.
-	pct, probeErr := h.probeContextPct(runtime, sessionID, projectDir, homeDir)
+	pct, probeErr := h.probeContextPct(runtime, sessionID, projectDir, homeDir, hookio.PayloadString(in, "transcript_path"))
 	if probeErr != nil || pct < 0 {
 		h.appendLog(in, "REPORT", "probe_unavailable",
 			"runtime="+runtime,
@@ -180,10 +180,10 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 // probeContextPct returns the estimated context usage percentage (0–100) for
 // the given runtime. Returns -1 on failure.
-func (h *Hook) probeContextPct(runtime, sessionID, projectDir, homeDir string) (int, error) {
+func (h *Hook) probeContextPct(runtime, sessionID, projectDir, homeDir, transcriptPath string) (int, error) {
 	switch runtime {
 	case "claude":
-		return h.probeClaude(sessionID, projectDir, homeDir)
+		return h.probeClaude(sessionID, projectDir, homeDir, transcriptPath)
 	case "codex":
 		return h.probeCodex(homeDir)
 	case "agy", "gemini":
@@ -193,18 +193,29 @@ func (h *Hook) probeContextPct(runtime, sessionID, projectDir, homeDir string) (
 }
 
 // probeClaude estimates usage from the transcript JSONL file size.
-func (h *Hook) probeClaude(sessionID, projectDir, homeDir string) (int, error) {
-	if sessionID == "" || projectDir == "" {
-		return -1, fmt.Errorf("session_id or project_dir missing")
+func (h *Hook) probeClaude(sessionID, projectDir, homeDir, transcriptPath string) (int, error) {
+	// K-110: the payload's transcript_path is the real path; prefer it when it
+	// names a regular file. Bash twin: _probe_context_pct_claude.
+	var info os.FileInfo
+	if transcriptPath != "" {
+		if fi, err := os.Stat(transcriptPath); err == nil && fi.Mode().IsRegular() {
+			info = fi
+		}
 	}
-	encoded := encodeProjectPath(projectDir)
-	// K-112: Claude Code names the file <session>.jsonl; "transcript-<session>"
-	// never existed, so this probe always failed.
-	transcript := filepath.Join(homeDir, ".claude", "projects", encoded,
-		sessionID+".jsonl")
-	info, err := os.Stat(transcript)
-	if err != nil {
-		return -1, err
+	if info == nil {
+		if sessionID == "" || projectDir == "" {
+			return -1, fmt.Errorf("session_id or project_dir missing")
+		}
+		encoded := encodeProjectPath(projectDir)
+		// K-112: Claude Code names the file <session>.jsonl; "transcript-<session>"
+		// never existed, so this probe always failed.
+		transcript := filepath.Join(homeDir, ".claude", "projects", encoded,
+			sessionID+".jsonl")
+		fi, err := os.Stat(transcript)
+		if err != nil {
+			return -1, err
+		}
+		info = fi
 	}
 	estimatedTokens := info.Size() / 4
 	pct := int(estimatedTokens * 100 / defaultWindowClaude)

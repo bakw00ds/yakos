@@ -58,6 +58,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     generated hook timeout is 30 s, so at 30 Claude Code's timeout fired
     first and let the tool call through.
 
+- **Hygiene batch 2 (K-110).** The low-severity backlog:
+  - `yakos upgrade` fsyncs the temp binary before the atomic rename, and
+    `--check` prints the built version on the `current:` line (it was
+    empty on release builds). The unsigned `checksums.txt` trust boundary
+    is written up in `docs/selfupdate-trust-boundary.md`.
+  - Redaction (supervisor buffer, decision egress) now also covers
+    `curl -u user:pass`, `scheme://user:pass@host` URLs and PEM private-key
+    bodies, not just the `-----BEGIN` line. One shared table in
+    `lib/hooks/lib/secret-patterns.sh` and its Go twin; the blocking table
+    is unchanged.
+  - `supervisor-stream` risk patterns (bash and Go) add `rm --recursive
+    --force` in any flag order, `sh -c "$(curl ...)"` and `bash -c "$(wget
+    ...)"`, and `cp` of a `.env` file. A `sudo` prefix already reached the
+    inner command because every pattern is an unanchored search; tests pin it.
+  - `plan-quality-score` scores the last version of a save burst. A save
+    inside 5 s of the last scoring used to be dropped, so a bad plan saved
+    seconds after a good one was never scored. The first such fire now waits
+    out the window and scores the latest version once (marker
+    `.plan-quality-pending`); other saves collapse into it. A burst costs
+    two judge panels. **Behavior change:** the waiting fire holds its tool
+    call for up to 5 s.
+  - The `supervisor-stream` counter is incremented under an atomic lock, so
+    two concurrent hooks no longer both launch a supervisor.
+  - The console file tree refreshes the subtree on a `files.changed`
+    `rescanned` event. The event and its `count` field are documented in
+    `docs/unified-console.md`; stale comments in `wsbus/event.go` fixed.
+  - `context-threshold` uses the payload's `transcript_path` and only derives
+    the path as a fallback.
+  - `YAKOS_HOOK_JQ_TIMEOUT` is documented in the hook README and reported by
+    `yakos doctor` in a "Hook environment" section when it is set.
+  - Invalid UTF-8 in `.yakos.yml` no longer makes macOS awk drop every key
+    after the bad line; the awk readers run under `LC_ALL=C`.
+  - The hook fixture, parity and hardening runners skip (exit 0) when there
+    is no bash on PATH.
+  - `dispatch_started` and `dispatch_finished` events carry `model` (the
+    resolved tier), so eval runs can be attributed to a tier.
+  - Eval case `architect-12` is retargeted to the fixed K-106
+    `cycle_length: 0` behavior.
+  - Review round: the counter lock is bounded (a stale lock that cannot be
+    removed skips the tick with a WARN instead of spinning), `cp` of
+    `.env.<suffix>`, `eval "$(curl ...)"` and `find ... -delete` escalate,
+    redaction also covers `curl -uUSER:PW`, `redis://:pw@host` and PGP key
+    blocks, and `yakos upgrade` fsyncs the install directory after the rename.
+
 ## [0.60.1.0] — 2026-09-29
 
 > **Breaking (K-98):** an unmapped client-cert CN now gets no access

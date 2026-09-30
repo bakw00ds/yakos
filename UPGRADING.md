@@ -47,6 +47,9 @@ yakos doctor <name> --fix      # auto-remediate gitignore, hashes, dirs
 yakos migrate <name>           # bump .yakos.yml schema if present
 ```
 
+> Trust note: `yakos upgrade` verifies a SHA-256 from an unsigned
+> `checksums.txt`. See [docs/selfupdate-trust-boundary.md](docs/selfupdate-trust-boundary.md).
+
 ### v0.60.0.0 users: `yakos upgrade` cannot self-update
 
 The v0.60.0.0 binary's self-updater rejects GitHub's new release-asset

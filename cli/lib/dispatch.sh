@@ -348,7 +348,9 @@ event_start="$(jq -cn \
     --arg runtime "$RUNTIME" \
     --arg project "$PROJECT" \
     --arg task "$(printf '%s' "$TASK" | head -c 200)" \
-    '{type:"dispatch_started", ts:$t, agent:$agent, runtime:$runtime, project:$project, task_preview:$task}')"
+    --arg model "$MODEL_RESOLVED" \
+    '{type:"dispatch_started", ts:$t, agent:$agent, runtime:$runtime, project:$project, task_preview:$task}
+      + (if $model != "" then {model:$model} else {} end)')"
 printf '%s\n' "$event_start" >> "$DISPATCH_LOG" 2>/dev/null || true
 
 # ---- run the dispatch ------------------------------------------------------
@@ -490,6 +492,7 @@ event_end="$(jq -cn \
       exit_code:$rc, duration_s:$dur,
       output_bytes:$out_b, task_bytes:$task_b,
       est_input_tokens:$in_tok, est_output_tokens:$out_tok,
+      model:$model_resolved,
       model_chosen_by:$model_chosen_by,
       model_resolved:$model_resolved,
       eval_run_id:$eval_run_id,

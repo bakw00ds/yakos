@@ -62,6 +62,14 @@
 #   YAKOS_HOOK_NOW     forwarded to both sides for deterministic timestamps
 #                      (masked out of the log comparison regardless).
 
+# K-110: with no bash on PATH (for example a Windows runner without Git-bash)
+# there is nothing to drive. Skip cleanly instead of failing on the first case.
+# POSIX sh only: this runs before anything bash-specific is parsed.
+if ! command -v "${YAKOS_HOOK_BASH:-bash}" >/dev/null 2>&1; then
+    echo "SKIP: ${0##*/}: no ${YAKOS_HOOK_BASH:-bash} on PATH; the hook fixtures need bash" >&2
+    exit 0
+fi
+
 set -eu
 
 REPO_ROOT="$(cd "$(dirname -- "$0")/.." && pwd -P)"
@@ -1692,6 +1700,16 @@ case_check supervisor-stream.sh posttooluse-bash-ss-curl-pipe-sh.json   0 superv
 case_check supervisor-stream.sh posttooluse-bash-ss-git-push-force.json 0 supervisor-stream setup_ss_passfilter
 case_check supervisor-stream.sh posttooluse-bash-ss-redirect-env.json   0 supervisor-stream setup_ss_passfilter
 case_check supervisor-stream.sh posttooluse-bash-ss-ls.json             0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-rm-long-flags.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-sh-c-curl-subst.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-cp-env.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-curl-basic-auth.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-sudo-cp-env-local.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-eval-curl-subst.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-find-delete.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-abs-eval-curl.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-abs-sh-c-wget.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-find-delete-chained.json 0 supervisor-stream setup_ss_passfilter
 
 # --- retro-dispatch ---------------------------------------------------------------
 case_check retro-dispatch.sh   pretooluse-generic-tool.json 0 "" "" "" "" home_noop
@@ -1846,7 +1864,11 @@ setup_pqs_yml_is_dir()   { _pqs_plan "$1" good-plan.md 30 ""; rm -f "$1/.yakos.y
 setup_pqs_fresh_plan()    { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; }
 _pqs_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
 setup_pqs_fresh_scored()  { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; printf '%s %s\n' "$(_pqs_mtime "$1/work/current/plan.md")" "$(date -u +%s)" > "$1/work/current/.plan-quality-last-scored"; }
-setup_pqs_resave_collapsed() { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; printf '%s %s\n' "$(( $(_pqs_mtime "$1/work/current/plan.md") - 20 ))" "$(date -u +%s)" > "$1/work/current/.plan-quality-last-scored"; }
+# K-110: a new version inside the window is scored as the TRAILING run after
+# waiting out the rest of the window (state aged to 4 s -> a 1 s wait); with a
+# trailing marker already held by another fire it collapses instead.
+setup_pqs_resave_collapsed() { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; printf '%s %s\n' "$(( $(_pqs_mtime "$1/work/current/plan.md") - 20 ))" "$(( $(date -u +%s) - 4 ))" > "$1/work/current/.plan-quality-last-scored"; }
+setup_pqs_resave_pending() { setup_pqs_resave_collapsed "$1"; mkdir "$1/work/current/.plan-quality-pending"; }
 setup_pqs_resave_after_window() { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; printf '%s %s\n' "$(( $(_pqs_mtime "$1/work/current/plan.md") - 30 ))" "$(( $(date -u +%s) - 20 ))" > "$1/work/current/.plan-quality-last-scored"; }
 setup_pqs_bad_state()     { _pqs_plan "$1" vague-plan.md 0 "$PQS_BLOCK_YML"; printf 'garbage\n' > "$1/work/current/.plan-quality-last-scored"; }
 # K-107 item 6: nested enabled:false must not disable scoring on either side.
@@ -1859,7 +1881,8 @@ case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-qual
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_dissent_block "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/dissent"      "" pqs_home   # dissent: surface, never block
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_fresh_plan    "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"        "" pqs_home   # K-112: fresh write, nothing scored yet: SCORED on the triggering fire
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_fresh_scored  "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"        "" pqs_home   # K-112: same version already scored: debounced
-case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_resave_collapsed "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"     "" pqs_home   # K-112: re-save < 5 s after a scoring: collapsed
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_resave_collapsed "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"     "" pqs_home   # K-110: re-save < 5 s after a scoring: waits, then scores the latest (trailing)
+case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_resave_pending "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"       "" pqs_home   # K-110: trailing marker held by another fire: collapsed into it
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_resave_after_window "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague" "" pqs_home   # K-112: re-save > 5 s after a scoring: scored
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_bad_state     "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/vague"        "" pqs_home   # K-112: malformed debounce state is ignored: scored
 case_check plan-quality-score.sh posttooluse-write-plan-md-real.json 0 plan-quality-score setup_pqs_child_disabled   "YAKOS_PLAN_JUDGE_MOCK=$PQS_MOCK/low-nodissent" "" pqs_home   # K-107: child-map enabled:false does not bleed: scored, .plan-blocked written

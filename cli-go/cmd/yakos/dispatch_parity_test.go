@@ -446,6 +446,15 @@ func TestDispatchParity_EvalRunID(t *testing.T) {
 	events := readDispatchLogEvents(t, logDir)
 	finished := events[len(events)-1]
 	assertDispatchField(t, finished, "model_chosen_by", "eval") // PR #32
+	// K-110: `model` is populated on both events of an eval run.
+	assertDispatchField(t, finished, "model", finished["model_resolved"])
+	if m, _ := finished["model"].(string); m == "" {
+		t.Errorf("eval run: dispatch_finished model is empty")
+	}
+	started := events[len(events)-2]
+	if m, _ := started["model"].(string); m == "" || m != finished["model"] {
+		t.Errorf("eval run: dispatch_started model = %v, want %v", started["model"], finished["model"])
+	}
 	if finished["eval_run_id"] != "e-abc123" {
 		t.Errorf("eval_run_id: got %v, want %q", finished["eval_run_id"], "e-abc123")
 	}

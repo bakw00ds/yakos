@@ -85,7 +85,7 @@ func pureFilePathKey(k string) bool {
 var (
 	// A whole PEM private key block; when the preview cut off the footer the
 	// rest of the string is consumed.
-	pemBlockRE = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)`)
+	pemBlockRE = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|$)`)
 	// name=value / name: value credential assignments, any case.
 	credAssignRE = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|token|credential|authorization|webhook|dsn)[A-Za-z0-9_.-]*)(\s*[=:]\s*)("[^"\n]*"|'[^'\n]*'|[^\s"',;]+)`)
 	// Env-style lines: any UPPER_SNAKE name containing a credential word has
@@ -95,7 +95,7 @@ var (
 	// credential whatever the scheme.
 	authHeaderRE = regexp.MustCompile(`(?i)(\bauthorization\s*[:=]\s*)[^\r\n']+`)
 	// scheme://user:password@host userinfo.
-	urlCredsRE = regexp.MustCompile(`\b([A-Za-z][A-Za-z0-9+.-]*://)[^/\s:@]+:[^@\s/]+@`)
+	urlCredsRE = regexp.MustCompile(`\b([A-Za-z][A-Za-z0-9+.-]*://)[^/\s:@]*:[^@\s/]+@`)
 	jwtRE      = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)
 	// Authorization schemes: Bearer / Basic / Token / Digest.
 	authSchemeRE = regexp.MustCompile(`(?i)\b(bearer|basic|token|digest)\s+[A-Za-z0-9._~+/=-]{8,}`)
@@ -344,6 +344,11 @@ func RedactText(s string, count *int) string {
 		bump()
 		return urlCredsRE.FindStringSubmatch(m)[1] + "[REDACTED:url-credentials]@"
 	})
+	{
+		var c int
+		s, c = secretscan.RedactKeep(s, "[REDACTED:basic-auth]")
+		n += c
+	}
 	s = jwtRE.ReplaceAllStringFunc(s, func(string) string { bump(); return "[REDACTED:jwt]" })
 	s = authSchemeRE.ReplaceAllStringFunc(s, func(m string) string {
 		if strings.Contains(m, "[REDACTED") {

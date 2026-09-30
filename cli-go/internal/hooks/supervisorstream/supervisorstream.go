@@ -79,6 +79,14 @@ var defaultRiskPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)rm\s+-[a-z]*r[a-z]*\s+-[a-z]*f`),
 	regexp.MustCompile(`(?i)rm\s+-[a-z]*f[a-z]*\s+-[a-z]*r`),
 	regexp.MustCompile(`(?i)chmod\s+-[a-z]+\s+777`),
+	// K-110: long-flag rm, sh -c "$(curl ...)", cp of .env. sudo/env prefixes
+	// need no stripping: every pattern is an unanchored search.
+	regexp.MustCompile(`(?i)rm\s+([^;&|]*\s)?(-[a-z]*r[a-z]*|--recursive)\s([^;&|]*\s)?(-[a-z]*f[a-z]*|--force)(\s|$)`),
+	regexp.MustCompile(`(?i)rm\s+([^;&|]*\s)?(-[a-z]*f[a-z]*|--force)\s([^;&|]*\s)?(-[a-z]*r[a-z]*|--recursive)(\s|$)`),
+	regexp.MustCompile(`(?i)(ba|z|da)?sh\s+-[a-z]*c\s+\S?([$][(]|\x60)\s*([^\s)]*/)?(curl|wget)`),
+	regexp.MustCompile(`(?i)cp\s+([^;&|]*\s)?[^\s]*\.env(\.[^\s]*)?[^a-z0-9\s._/-]?(\s|$)`),
+	regexp.MustCompile(`(?i)eval\s+\S?([$][(]|\x60)\s*([^\s)]*/)?(curl|wget)`),
+	regexp.MustCompile(`(?i)find\s+(([^;&|'"]|"[^"]*"|'[^']*')*\s)?-delete([\s;&|]|$)`),
 }
 
 // yakosYMLSupervisor holds the shape needed from .yakos.yml.
@@ -285,8 +293,15 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	// ---- 3. Increment escalation counter ----
-	cur := readCounter(counterFile) + 1
-	writeCounter(counterFile, cur)
+	cur, ok := incrementCounter(counterFile)
+	if !ok {
+		// No lock within the wait budget: skip this tick (bash: exit 0)
+		// rather than block the hook or risk a double launch.
+		h.appendLog(&out, logFile, "WARN", "pass",
+			"counter lock busy or unremovable; skipping this escalation tick",
+			map[string]any{"lock": counterFile + ".lock"})
+		return out, nil
+	}
 
 	// ---- 4. Every N escalations → write dispatch-ready marker ----
 	scoreEvery := defaultScoreEvery
@@ -540,6 +555,57 @@ func readCounter(counterFile string) int {
 		return 0
 	}
 	return n
+}
+
+// counterLockStale is how old an abandoned counter lock must be before it is
+// reaped (bash: find -mmin +1).
+const counterLockStale = time.Minute
+
+// incrementCounter is the K-110 atomic read-increment-write. It takes the
+// same mkdir lock as supervisor-stream.sh (<counter>.lock), so concurrent
+// bash and Go hooks serialize too: every caller gets a unique value and at
+// most one crosses a score-every multiple. ok is false when the lock could
+// not be taken within ~3 s.
+func incrementCounter(counterFile string) (cur int, ok bool) {
+	_ = os.MkdirAll(filepath.Dir(counterFile), 0755) //nolint:gosec
+	lock := counterFile + ".lock"
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if err := os.Mkdir(lock, 0700); err == nil {
+			break
+		}
+		// Every retry sleeps and is bounded by the deadline, reaping included,
+		// so a stale lock that cannot be removed never spins this loop.
+		if time.Now().After(deadline) {
+			return 0, false
+		}
+		reapStaleLock(lock)
+		time.Sleep(5 * time.Millisecond)
+	}
+	defer func() { _ = os.Remove(lock) }()
+	cur = readCounter(counterFile) + 1
+	writeCounter(counterFile, cur)
+	return cur, true
+}
+
+// reapStaleLock removes a lock older than counterLockStale. It renames first
+// (atomic, one winner) and re-checks the age of what it moved, so a waiter
+// never deletes a lock another hook has just created. Mirrors the bash hook.
+func reapStaleLock(lock string) {
+	fi, err := os.Lstat(lock)
+	if err != nil || time.Since(fi.ModTime()) <= counterLockStale {
+		return
+	}
+	moved := fmt.Sprintf("%s.reap.%d", lock, os.Getpid())
+	if os.Rename(lock, moved) != nil {
+		return
+	}
+	if mfi, merr := os.Lstat(moved); merr == nil && time.Since(mfi.ModTime()) <= counterLockStale {
+		if os.Rename(moved, lock) == nil {
+			return // was fresh after all; put it back
+		}
+	}
+	_ = os.RemoveAll(moved)
 }
 
 func writeCounter(counterFile string, n int) {

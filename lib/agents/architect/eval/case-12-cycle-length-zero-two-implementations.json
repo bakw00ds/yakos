@@ -1,16 +1,16 @@
 {
   "case_id": "architect-cycle-length-zero-parity-12",
-  "task": "Correctness question. The cycle-counter hook exists twice: lib/hooks/legacy/cycle-counter.sh and cli-go/internal/hooks/cyclecounter/cyclecounter.go, and the Go code claims to mirror bash. An operator writes {\"retro\":{\"cycle_length\":0}} to ~/.yakos-state/settings.json. Trace what each implementation does on the next user prompt: does the value pass validation, what is the value used at the modulo, is the Go `cycleLen <= 0` default guard reached for this value, what happens to the prompt counter file, and what does the hook process do (exit code or panic)? Is the Go port's zero-handling protective here? Also say whether existing tests cover this input (check cli-go/internal/hooks/cyclecounter/cyclecounter_test.go, tests/run-cycle-counter-test.sh and tests/run-hook-parity.sh). Cite files. Do not run the hooks; this is a read-only task: do not edit, write, or create any file.",
+  "task": "Correctness question. The cycle-counter hook exists twice: lib/hooks/legacy/cycle-counter.sh and cli-go/internal/hooks/cyclecounter/cyclecounter.go, and the Go code claims to mirror bash. An operator writes {\"retro\":{\"cycle_length\":0}} to ~/.yakos-state/settings.json. Trace what each implementation does on the next user prompt: does the value pass validation, what is the value used at the modulo, is the Go `cycleLen <= 0` default guard placed before or after the settings override and does this value ever reach it, what happens to the prompt counter file, what is emitted on stderr, and what does the hook process do (exit code or panic)? Is the zero-handling protective in both implementations? Then say what each implementation uses for the settings values \"010\" and \"08\", and which existing tests cover the zero input and whether each of the three named test files does (check cli-go/internal/hooks/cyclecounter/cyclecounter_test.go, tests/run-cycle-counter-test.sh and tests/run-hook-parity.sh). Cite files. Do not run the hooks; this is a read-only task: do not edit, write, or create any file.",
   "rubric": {
     "criteria": [
       {
         "name": "bash-trace",
         "weight": 0.2,
         "type": "scalar_0_1",
-        "anchor": "1.0: says the digit-only check accepts '0', CYCLE_LENGTH becomes 0, the counter file is already written, and `$((count % CYCLE_LENGTH))` aborts with a division-by-zero error (non-zero exit under set -eu) before the log line. 0.5: says it misbehaves without the mechanism. 0.0: says bash falls back to the default 10."
+        "anchor": "1.0: says '0' passes the digit-only case check but is rejected by the range check (>= 1 and <= CYCLE_LENGTH_MAX 100000), so CYCLE_LENGTH stays the default 10 and the modulo uses 10, with one ct_log WARN naming the value, the counter written, and exit 0. 0.5: says it falls back to the default without naming the range check. 0.0: says bash still divides by zero or aborts."
       },
       {
-        "name": "go-guard-not-reached",
+        "name": "go-guard-placement",
         "weight": 0.35,
         "type": "binary"
       },
@@ -20,7 +20,7 @@
         "type": "binary"
       },
       {
-        "name": "test-coverage-gap",
+        "name": "test-coverage-and-base10",
         "weight": 0.15,
         "type": "binary"
       },
@@ -32,10 +32,10 @@
     ]
   },
   "expected_outcomes": [
-    "Bash: '0' passes the `*[!0-9]*` case check, so CYCLE_LENGTH=0; count is incremented and written to .cycle-count first; then `$((count % CYCLE_LENGTH))` is a division-by-zero arithmetic error which aborts the script with non-zero status under `set -eu` (no ho_log record)",
-    "Go: settingsCycleLength returns (0, true) for the digit string '0', and Run assigns cycleLen = n AFTER the earlier `if cycleLen <= 0 { cycleLen = DefaultCycleLength }` guard, so the guard is not reached for a settings-supplied zero (it only protects a zero Config.CycleLength)",
-    "Go: `count%cycleLen` with cycleLen == 0 panics with 'integer divide by zero'; the counter file was already written; no recover() wraps the hook in the runner path (verify with grep for recover() in the non-test code under cli-go/internal/hooks and cli-go/cmd/yakos), so the process crashes rather than degrading; the two implementations 'agree' only in failing, and neither degrades to the default 10",
-    "Neither cyclecounter_test.go, run-cycle-counter-test.sh nor run-hook-parity.sh has a cycle_length: 0 case (verify with grep at eval time); recommends validating n >= 1 in both implementations and adding a parity case",
+    "Bash: '0' passes the `*[!0-9]*` case check but fails `[ \"$v\" -ge 1 ] && [ \"$v\" -le \"$CYCLE_LENGTH_MAX\" ]` (K-106), so n_ok stays 0, CYCLE_LENGTH keeps the default 10, exactly one WARN 'ignoring invalid retro.cycle_length 0 (need an integer 1..100000); using default 10' is logged, .cycle-count is written, `$((count % CYCLE_LENGTH))` divides by 10, and the hook exits 0",
+    "Go: settingsCycleLength rejects 0 (`n < 1` returns present=true, valid=false), so Run keeps cycleLen at the default 10 and writes the same WARN to stderr; the `if cycleLen <= 0 { cycleLen = DefaultCycleLength }` guard now sits AFTER the settings override (K-106 moved it), so no assignment can leave cycleLen at 0 before `count%cycleLen`; the earlier guard before the override still covers a zero Config.CycleLength",
+    "Both implementations degrade the same way: counter file written, cadence stays the default (retro due at prompt 10), log record has cycle_length 10, exit code 0, no panic or division-by-zero on either side",
+    "'010' is parsed base 10 (10#) in bash and strconv.Atoi in Go, so it means 10 with no WARN; '08' means 8 (not an octal error). Tests: tests/run-cycle-counter-test.sh Test 5 (check_len \"zero\", \"string zero\", \"leading zeros\", \"octal-looking 08\") and cyclecounter_test.go TestCycleCounter_K106_CycleLengthFallback / TestCycleCounter_K106_ZeroKeepsDefaultCadence cover zero; tests/run-hook-parity.sh also covers it (setup_cycle_counter_len_zero, a bash-vs-Go case_check). Verify with grep at eval time",
     "Cites only real files and functions; every path exists"
   ],
   "context_files": [
@@ -50,11 +50,11 @@
     "ordering",
     "parity",
     "edge-case",
-    "hidden-bug",
     "go",
     "bash",
     "read-only",
     "multi-file",
-    "tree-dependent"
+    "tree-dependent",
+    "regression-check"
   ]
 }

@@ -514,9 +514,14 @@ hi_msg_body()     { hi_field '.tool_input.message'; }
 #       nested under a common parent never bleed in
 #     - value: trailing blanks trimmed, then an inline `blank+#...` comment
 #       removed, then every ' and " deleted
+#     - bytes, not characters: invalid UTF-8 anywhere in the file is read as
+#       opaque bytes and never aborts the parse (awk runs under LC_ALL=C)
 #   Callers apply "later duplicate wins, empty value ignored" themselves.
 hi_yaml_block_children() {
-    awk -v blk="$2" '
+    # LC_ALL=C: byte semantics. macOS awk aborts (exit 2, output cut short) on
+    # invalid UTF-8 in a UTF-8 locale, which silently dropped every later key
+    # (K-110). The Go twin already treats the file as bytes.
+    LC_ALL=C awk -v blk="$2" '
         BEGIN { in_block = 0; bi = 0; ci = -1 }
         {
             line = $0

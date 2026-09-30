@@ -90,6 +90,10 @@ jobs:
       - name: Run hook fixture suite
         run: |
           ./tests/run-hook-fixtures.sh
+      # K-110: the fixture runners skip (exit 0) when there is no bash.
+      - name: Check hook fixtures skip cleanly without bash
+        run: |
+          ./tests/run-hook-nobash-skip-test.sh
       - name: Run refresh integration suite
         run: |
           ./tests/run-refresh-test.sh

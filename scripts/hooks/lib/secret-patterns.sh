@@ -14,6 +14,11 @@
 # YAKOS_REDACT_EXTRA_PATTERNS is REDACTION-ONLY (supervisor-stream previews):
 # generic Bearer / KEY=VALUE shapes too loose to block a write on. secret-scan
 # does not read it. Go twin: secretscan.redactExtra.
+#
+# YAKOS_REDACT_BLOCK_PATTERNS is REDACTION-ONLY and applied FIRST, over the
+# whole (newline-slurped) preview: multi-line PEM private-key blocks, so the
+# key BODY is redacted and not just the "-----BEGIN" header line the blocking
+# table catches. Go twin: secretscan.redactBlockSources ((?s) dot-all).
 
 if [ "${YAKOS_SECRET_PATTERNS_LOADED:-0}" = "1" ]; then
     return 0 2>/dev/null || exit 0
@@ -32,9 +37,32 @@ YAKOS_SECRET_PATTERNS=(
 )
 
 # shellcheck disable=SC2034  # consumed by supervisor-stream.sh
+YAKOS_REDACT_BLOCK_PATTERNS=(
+    'PEM block|-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----.*-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----'
+    'PEM block (truncated)|-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----.*'
+)
+
+# YAKOS_REDACT_KEEP_PATTERNS is REDACTION-ONLY too, but each rule's group 1 is
+# context to KEEP: only the rest of the match is replaced (sed \1[REDACTED]),
+# so a preview still reads "curl -s -u [REDACTED] https://...". Each rule is
+# applied repeatedly until nothing changes (the kept prefix is greedy, so one
+# pass redacts only the last credential of "-u a:PW1 -u b:PW2"). The third
+# rule has no command context, for "x=curl; $x -u u:pw"; it needs a standalone
+# -u/--user and a value that is not numeric:numeric, so docker -u 1000:1000,
+# sort -u 12:30 and ls -lu a:b stay readable. Go twin:
+# secretscan.redactKeepSources.
+# shellcheck disable=SC2034  # consumed by supervisor-stream.sh
+YAKOS_REDACT_KEEP_PATTERNS=(
+    "curl basic auth|(([Cc][Uu][Rr][Ll]|[Ww][Gg][Ee][Tt]|[Xx][Hh])[^|;&]*[[:space:]](-[A-Za-z]*[uU][[:space:]]*|--(proxy-)?user([[:space:]]+|=)))(\"[^\"]*:[^\"]*\"|'[^']*:[^']*'|[^[:space:]:\"']+:[^[:space:]]+)"
+    "httpie basic auth|(([Hh][Tt][Tt][Pp][Ss]?|[Xx][Hh][Ss]?)[[:space:]]+([^|;&]*[[:space:]])?(-a|--auth)([[:space:]]+|=))(\"[^\"]*:[^\"]*\"|'[^']*:[^']*'|[^[:space:]:\"']+:[^[:space:]]+)"
+    "basic auth flag|([[:space:]](-u[[:space:]]*|--(proxy-)?user([[:space:]]+|=)))(\"[^\"]*:[^\"]*\"|'[^']*:[^']*'|([^[:space:]:]*[^[:space:][:digit:]:][^[:space:]:]*:[^[:space:]]+|[^[:space:]:]+:[^[:space:]]*[^[:space:][:digit:]][^[:space:]]*))"
+)
+
+# shellcheck disable=SC2034  # consumed by supervisor-stream.sh
 YAKOS_REDACT_EXTRA_PATTERNS=(
     'Bearer credential|[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:]]{8,}'
     'KEY=VALUE credential|([Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww]([Oo][Rr])?[Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]).?[[:space:]]*[=:][[:space:]]*.?[^[:space:]]{8,}'
+    'URL credentials|://[^[:space:]/@:]*:[^[:space:]@]+@'
 )
 
 # Must stay the last statement: reaching it proves the whole file parsed.

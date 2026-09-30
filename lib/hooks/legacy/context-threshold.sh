@@ -63,14 +63,19 @@ _probe_context_pct_claude() {
     # a name Claude Code never wrote, so this probe always came back empty).
     # The session_id is available via hi_session_id; the encoded project
     # path via ct_encode_project_path.
+    # K-110: the hook payload carries the real path in .transcript_path; use it
+    # when it names a file and derive the path only as a fallback.
     local session_id encoded transcript size estimated_tokens window_size pct
-    session_id="$(hi_session_id 2>/dev/null || true)"
-    [ -n "$session_id" ] || return 1
+    transcript="$(hi_field '.transcript_path' 2>/dev/null || true)"
+    if [ -z "$transcript" ] || [ ! -f "$transcript" ]; then
+        session_id="$(hi_session_id 2>/dev/null || true)"
+        [ -n "$session_id" ] || return 1
 
-    local project="${CLAUDE_PROJECT_DIR:-$PWD}"
-    encoded="$(ct_encode_project_path "$project")"
-    transcript="$HOME/.claude/projects/$encoded/$session_id.jsonl"
-    [ -f "$transcript" ] || return 1
+        local project="${CLAUDE_PROJECT_DIR:-$PWD}"
+        encoded="$(ct_encode_project_path "$project")"
+        transcript="$HOME/.claude/projects/$encoded/$session_id.jsonl"
+        [ -f "$transcript" ] || return 1
+    fi
 
     # Rough estimate: bytes / 4 = tokens. Refine in M3.1 with real probe.
     size="$(wc -c < "$transcript" 2>/dev/null || echo 0)"

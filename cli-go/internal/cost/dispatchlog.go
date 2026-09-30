@@ -54,6 +54,11 @@ type Event struct {
 	// Usage is present when the runtime returned structured token telemetry.
 	Usage *Usage `json:"usage,omitempty"`
 
+	// Model is the concrete model tier the dispatch ran on (same value as
+	// ModelResolved). Present on dispatch_started AND dispatch_finished so a
+	// run, eval or not, can be attributed to a tier (K-110).
+	Model string `json:"model,omitempty"`
+
 	// Routing metadata (newer events).
 	ModelResolved string `json:"model_resolved,omitempty"`
 	ModelChosenBy string `json:"model_chosen_by,omitempty"`

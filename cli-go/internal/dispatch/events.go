@@ -86,6 +86,7 @@ func writeStarted(req Request, ts time.Time, logPath string) {
 		Runtime:        req.Runtime,
 		Project:        req.Project,
 		TaskPreview:    truncate(req.Task, 200),
+		Model:          req.ModelResolved,
 		OperatorID:     req.OperatorID,
 		ConversationID: req.ConversationID,
 		SessionID:      req.SessionID,
@@ -130,6 +131,7 @@ type finishedEvent struct {
 	TaskBytes       int64       `json:"task_bytes"`
 	EstInputTokens  int64       `json:"est_input_tokens"`
 	EstOutputTokens int64       `json:"est_output_tokens"`
+	Model           string      `json:"model,omitempty"`  // K-110: same value as model_resolved
 	ModelChosenBy   string      `json:"model_chosen_by"`  // PR #32
 	ModelResolved   string      `json:"model_resolved"`   // PR #32
 	EvalRunID       interface{} `json:"eval_run_id"`      // string | null
@@ -156,6 +158,7 @@ func writeFinished(req Request, res Result, ts time.Time, logPath string) {
 		TaskBytes:       res.TaskBytes,
 		EstInputTokens:  res.TaskBytes / 4,
 		EstOutputTokens: res.OutputBytes / 4,
+		Model:           res.ModelResolved,
 		ModelChosenBy:   res.ModelChosenBy,
 		ModelResolved:   res.ModelResolved,
 		StderrTruncated: res.StderrTrunc,

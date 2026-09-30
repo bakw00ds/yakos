@@ -63,9 +63,13 @@ const RedactToken = "[REDACTED]"
 // RedactToken, applied in table order. Used by supervisor-stream so
 // secrets never reach the supervisor buffer (K-112).
 func Redact(text string) string {
+	for _, re := range redactBlock {
+		text = re.ReplaceAllString(text, RedactToken)
+	}
 	for _, p := range DefaultPatterns {
 		text = p.Regex.ReplaceAllString(text, RedactToken)
 	}
+	text, _ = RedactKeep(text, RedactToken)
 	for _, re := range redactExtra {
 		text = re.ReplaceAllString(text, RedactToken)
 	}
@@ -79,7 +83,80 @@ func Redact(text string) string {
 var redactExtraSources = []string{
 	`[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:]]{8,}`,
 	`([Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww]([Oo][Rr])?[Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]).?[[:space:]]*[=:][[:space:]]*.?[^[:space:]]{8,}`,
+	`://[^[:space:]/@:]*:[^[:space:]@]+@`,
 }
+
+// redactKeepSources are redaction-only rules whose group 1 is context to keep
+// (replacement "${1}<token>"): a preview reads "curl -s -u [REDACTED] https://".
+// Bash twin: YAKOS_REDACT_KEEP_PATTERNS. Each rule is applied repeatedly until
+// nothing changes, because the kept prefix is greedy and one pass redacts only
+// the last credential of "-u a:PW1 -u b:PW2". The third rule has no command
+// context, for "x=curl; $x -u u:pw": it needs a standalone -u/--user and a
+// value that is not numeric:numeric, so docker -u 1000:1000, sort -u 12:30 and
+// ls -lu a:b stay readable. A command-name match is case-insensitive through
+// bracket classes so the text stays identical to the bash table.
+var redactKeepSources = []string{
+	`(([Cc][Uu][Rr][Ll]|[Ww][Gg][Ee][Tt]|[Xx][Hh])[^|;&]*[[:space:]](-[A-Za-z]*[uU][[:space:]]*|--(proxy-)?user([[:space:]]+|=)))("[^"]*:[^"]*"|'[^']*:[^']*'|[^[:space:]:"']+:[^[:space:]]+)`,
+	`(([Hh][Tt][Tt][Pp][Ss]?|[Xx][Hh][Ss]?)[[:space:]]+([^|;&]*[[:space:]])?(-a|--auth)([[:space:]]+|=))("[^"]*:[^"]*"|'[^']*:[^']*'|[^[:space:]:"']+:[^[:space:]]+)`,
+	`([[:space:]](-u[[:space:]]*|--(proxy-)?user([[:space:]]+|=)))("[^"]*:[^"]*"|'[^']*:[^']*'|([^[:space:]:]*[^[:space:][:digit:]:][^[:space:]:]*:[^[:space:]]+|[^[:space:]:]+:[^[:space:]]*[^[:space:][:digit:]][^[:space:]]*))`,
+}
+
+var redactKeep = func() []*regexp.Regexp {
+	out := make([]*regexp.Regexp, len(redactKeepSources))
+	for i, src := range redactKeepSources {
+		out[i] = regexp.MustCompile(src)
+	}
+	return out
+}()
+
+// maxKeepPasses bounds the apply-until-unchanged loop (bash loops to a
+// fixpoint; eight covers any realistic command line).
+const maxKeepPasses = 8
+
+// RedactKeep redacts the credential of every keep-context rule in text,
+// replacing only what follows group 1 with token, and returns the new text and
+// the number of replacements. Shared by Redact and decision egress.
+func RedactKeep(text, token string) (string, int) {
+	// Redact with a colon-free placeholder and swap in the real token at the
+	// end: a token such as "[REDACTED:basic-auth]" contains a colon, so the
+	// credential shape would match it again and starve earlier credentials.
+	const ph = "\x00REDACTED\x00"
+	n := 0
+	for _, re := range redactKeep {
+		for i := 0; i < maxKeepPasses; i++ {
+			c := len(re.FindAllStringIndex(text, -1))
+			if c == 0 {
+				break
+			}
+			text = re.ReplaceAllString(text, "${1}"+ph)
+			n += c
+		}
+	}
+	return strings.ReplaceAll(text, ph, token), n
+}
+
+// RedactKeepSources exposes the keep-context regex text (drift test).
+func RedactKeepSources() []string { return append([]string(nil), redactKeepSources...) }
+
+// redactBlockSources are the redaction-only multi-line block rules, applied
+// before every other rule (the blocking table would otherwise eat the PEM
+// header and leave the key body). Compiled dot-all; the source text stays
+// byte-identical to YAKOS_REDACT_BLOCK_PATTERNS in secret-patterns.sh.
+var redactBlockSources = []string{
+	`-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----.*-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----`,
+	`-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----.*`,
+}
+
+var redactBlock = func() []*regexp.Regexp {
+	out := make([]*regexp.Regexp, len(redactBlockSources))
+	for i, src := range redactBlockSources {
+		out[i] = regexp.MustCompile("(?s)" + src)
+	}
+	return out
+}()
+
+// RedactBlockSources exposes the block-rule regex text (drift test).
+func RedactBlockSources() []string { return append([]string(nil), redactBlockSources...) }
 
 var redactExtra = func() []*regexp.Regexp {
 	out := make([]*regexp.Regexp, len(redactExtraSources))

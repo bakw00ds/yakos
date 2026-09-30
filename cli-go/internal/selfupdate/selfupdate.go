@@ -18,8 +18,11 @@
 //     any URL or filename, preventing path traversal.
 //   - Every downloaded binary is SHA-256 verified against the release's
 //     checksums.txt before the old binary is touched.
+//   - checksums.txt is NOT signed: it shares a trust root with the binary
+//     (the GitHub release publisher).  See docs/selfupdate-trust-boundary.md
+//     for the trust boundary and what signing would require.
 //   - The temp file is written into the same directory as the target binary
-//     (same filesystem) so os.Rename is atomic.
+//     (same filesystem) so os.Rename is atomic, and is fsynced first.
 //   - Permissions on the temp file are 0755 before rename.
 //   - The temp file is always removed on failure; no partial binary is left
 //     at the live path.
@@ -412,6 +415,24 @@ func verifySHA256(data []byte, expected string) error {
 	return nil
 }
 
+// syncFile flushes f to stable storage. It is a variable so tests can
+// observe the call and inject failures.
+var syncFile = func(f *os.File) error { return f.Sync() }
+
+// syncDir flushes a directory entry change to stable storage. It is a variable
+// so tests can observe it. A no-op on Windows, which cannot sync a directory.
+var syncDir = func(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir) //nolint:gosec
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	return d.Sync()
+}
+
 // atomicReplace writes newBytes to a temp file in the same directory as
 // exePath, then renames it over exePath.  On Unix this is atomic even while
 // the old binary is running (the process holds an open fd to the old inode;
@@ -451,6 +472,12 @@ func atomicReplace(exePath string, newBytes []byte) error {
 		_ = tmp.Close()
 		return fmt.Errorf("chmod temp file: %w", err)
 	}
+	// fsync before rename so a crash right after the rename cannot leave a
+	// truncated binary under the final name.
+	if err := syncFile(tmp); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("fsync temp file: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp file: %w", err)
 	}
@@ -479,6 +506,9 @@ func atomicReplace(exePath string, newBytes []byte) error {
 		return fmt.Errorf("rename temp to %s: %w", exePath, err)
 	}
 	success = true
+	// Persist the rename itself: fsync the parent directory. Best effort, since
+	// the swap already happened and some filesystems refuse a directory sync.
+	_ = syncDir(dir)
 	return nil
 }
 

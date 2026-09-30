@@ -296,6 +296,25 @@ func TestWriteFinished_EvalRunID(t *testing.T) {
 		t.Errorf("eval_run_id: got %v, want %q", ev["eval_run_id"], "e-abc123")
 	}
 	assertField(t, ev, "model_chosen_by", "eval")
+	assertField(t, ev, "model", "sonnet") // K-110: model is populated for eval runs
+}
+
+// K-110: dispatch_started carries the resolved model too, so a run that never
+// reaches dispatch_finished is still attributable to a tier.
+func TestWriteStarted_CarriesModel(t *testing.T) {
+	logDir := isolatedLogDir(t)
+	logPath := filepath.Join(logDir, "dispatch-log.ndjson")
+	req := Request{AgentName: "backend", Runtime: "claude", Project: "/p", Task: "t", ModelResolved: "opus", EvalRunID: "e-1"}
+	writeStarted(req, fixedTime, logPath)
+	ev := readDispatchLog(t, logDir)[0]
+	assertField(t, ev, "model", "opus")
+
+	// Unresolved model: the key is omitted, never written empty.
+	logDir2 := isolatedLogDir(t)
+	writeStarted(Request{AgentName: "backend", Runtime: "claude", Project: "/p", Task: "t"}, fixedTime, filepath.Join(logDir2, "dispatch-log.ndjson"))
+	if _, ok := readDispatchLog(t, logDir2)[0]["model"]; ok {
+		t.Error("model key must be omitted when unresolved")
+	}
 }
 
 func TestWriteFinished_UsageField(t *testing.T) {
