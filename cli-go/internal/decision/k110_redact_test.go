@@ -52,3 +52,31 @@ func TestRedactText_CurlKeepsCommandAndFlag(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+func TestRedactText_AllCredentialsAndFormsKeepCommand(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		secrets []string
+		keep    string
+	}{
+		{"curl -u a:PW1 -u b:PW2 https://x.example", []string{"PW1", "PW2"}, "curl -u "},
+		{"curl -ua:PW1 -ub:PW2 https://x.example", []string{"PW1", "PW2"}, "curl -u"},
+		{"curl -U proxy:PW1 -u u:PW2 https://x.example", []string{"PW1", "PW2"}, "curl -U "},
+		{"wget --proxy-user=p:PW1 --user=u:PW2 https://x.example", []string{"PW1", "PW2"}, "wget --proxy-user="},
+		{"CURL -u u:PW1 https://x.example", []string{"PW1"}, "CURL -u "},
+		{"x=curl; $x -u u:PW1 https://x.example", []string{"PW1"}, "$x -u "},
+		{"http -a u:PW1 https://x.example", []string{"PW1"}, "http -a "},
+		{"xh --auth u:PW1 https://x.example", []string{"PW1"}, "xh --auth "},
+	} {
+		var n int
+		out := RedactText(tc.in, &n)
+		for _, sec := range tc.secrets {
+			if strings.Contains(out, sec) {
+				t.Errorf("%s survived: %q -> %q", sec, tc.in, out)
+			}
+		}
+		if !strings.Contains(out, tc.keep) || n == 0 {
+			t.Errorf("command/flag lost: %q -> %q", tc.in, out)
+		}
+	}
+}

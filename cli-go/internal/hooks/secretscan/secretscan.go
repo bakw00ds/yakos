@@ -69,9 +69,7 @@ func Redact(text string) string {
 	for _, p := range DefaultPatterns {
 		text = p.Regex.ReplaceAllString(text, RedactToken)
 	}
-	for _, re := range redactKeep {
-		text = re.ReplaceAllString(text, "${1}"+RedactToken)
-	}
+	text, _ = RedactKeep(text, RedactToken)
 	for _, re := range redactExtra {
 		text = re.ReplaceAllString(text, RedactToken)
 	}
@@ -88,19 +86,20 @@ var redactExtraSources = []string{
 	`://[^[:space:]/@:]*:[^[:space:]@]+@`,
 }
 
-// curlBasicAuthSource matches curl/wget/xh -u/-U/--user/--proxy-user user:pass, bare or quoted (a quoted value may contain spaces). It needs the
-// command in front so docker run -u 1000:1000, sort -u 12:30 and ls -lu a:b
-// are left alone. Shared with decision
-// egress redaction through CurlBasicAuthRE so the shape lives in one place.
-const curlBasicAuthSource = `((curl|wget|xh)[^|;&]*[[:space:]](-[A-Za-z]*[uU][[:space:]]*|--(proxy-)?user([[:space:]]+|=)))("[^"]*:[^"]*"|'[^']*:[^']*'|[^[:space:]:"']+:[^[:space:]]+)`
-
-// CurlBasicAuthRE is the compiled curlBasicAuthSource. Group 1 is the command
-// and flag, which redaction keeps; the rest of the match is the credential.
-var CurlBasicAuthRE = regexp.MustCompile(curlBasicAuthSource)
-
 // redactKeepSources are redaction-only rules whose group 1 is context to keep
-// (replacement "${1}[REDACTED]"). Bash twin: YAKOS_REDACT_KEEP_PATTERNS.
-var redactKeepSources = []string{curlBasicAuthSource}
+// (replacement "${1}<token>"): a preview reads "curl -s -u [REDACTED] https://".
+// Bash twin: YAKOS_REDACT_KEEP_PATTERNS. Each rule is applied repeatedly until
+// nothing changes, because the kept prefix is greedy and one pass redacts only
+// the last credential of "-u a:PW1 -u b:PW2". The third rule has no command
+// context, for "x=curl; $x -u u:pw": it needs a standalone -u/--user and a
+// value that is not numeric:numeric, so docker -u 1000:1000, sort -u 12:30 and
+// ls -lu a:b stay readable. A command-name match is case-insensitive through
+// bracket classes so the text stays identical to the bash table.
+var redactKeepSources = []string{
+	`(([Cc][Uu][Rr][Ll]|[Ww][Gg][Ee][Tt]|[Xx][Hh])[^|;&]*[[:space:]](-[A-Za-z]*[uU][[:space:]]*|--(proxy-)?user([[:space:]]+|=)))("[^"]*:[^"]*"|'[^']*:[^']*'|[^[:space:]:"']+:[^[:space:]]+)`,
+	`(([Hh][Tt][Tt][Pp][Ss]?|[Xx][Hh][Ss]?)[[:space:]]+([^|;&]*[[:space:]])?(-a|--auth)([[:space:]]+|=))("[^"]*:[^"]*"|'[^']*:[^']*'|[^[:space:]:"']+:[^[:space:]]+)`,
+	`([[:space:]](-u[[:space:]]*|--(proxy-)?user([[:space:]]+|=)))("[^"]*:[^"]*"|'[^']*:[^']*'|([^[:space:]:]*[^[:space:][:digit:]:][^[:space:]:]*:[^[:space:]]+|[^[:space:]:]+:[^[:space:]]*[^[:space:][:digit:]][^[:space:]]*))`,
+}
 
 var redactKeep = func() []*regexp.Regexp {
 	out := make([]*regexp.Regexp, len(redactKeepSources))
@@ -109,6 +108,32 @@ var redactKeep = func() []*regexp.Regexp {
 	}
 	return out
 }()
+
+// maxKeepPasses bounds the apply-until-unchanged loop (bash loops to a
+// fixpoint; eight covers any realistic command line).
+const maxKeepPasses = 8
+
+// RedactKeep redacts the credential of every keep-context rule in text,
+// replacing only what follows group 1 with token, and returns the new text and
+// the number of replacements. Shared by Redact and decision egress.
+func RedactKeep(text, token string) (string, int) {
+	// Redact with a colon-free placeholder and swap in the real token at the
+	// end: a token such as "[REDACTED:basic-auth]" contains a colon, so the
+	// credential shape would match it again and starve earlier credentials.
+	const ph = "\x00REDACTED\x00"
+	n := 0
+	for _, re := range redactKeep {
+		for i := 0; i < maxKeepPasses; i++ {
+			c := len(re.FindAllStringIndex(text, -1))
+			if c == 0 {
+				break
+			}
+			text = re.ReplaceAllString(text, "${1}"+ph)
+			n += c
+		}
+	}
+	return strings.ReplaceAll(text, ph, token), n
+}
 
 // RedactKeepSources exposes the keep-context regex text (drift test).
 func RedactKeepSources() []string { return append([]string(nil), redactKeepSources...) }

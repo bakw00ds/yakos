@@ -344,10 +344,11 @@ func RedactText(s string, count *int) string {
 		bump()
 		return urlCredsRE.FindStringSubmatch(m)[1] + "[REDACTED:url-credentials]@"
 	})
-	s = secretscan.CurlBasicAuthRE.ReplaceAllStringFunc(s, func(m string) string {
-		bump()
-		return secretscan.CurlBasicAuthRE.FindStringSubmatch(m)[1] + "[REDACTED:basic-auth]"
-	})
+	{
+		var c int
+		s, c = secretscan.RedactKeep(s, "[REDACTED:basic-auth]")
+		n += c
+	}
 	s = jwtRE.ReplaceAllStringFunc(s, func(string) string { bump(); return "[REDACTED:jwt]" })
 	s = authSchemeRE.ReplaceAllStringFunc(s, func(m string) string {
 		if strings.Contains(m, "[REDACTED") {

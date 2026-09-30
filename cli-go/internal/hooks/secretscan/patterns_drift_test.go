@@ -153,3 +153,40 @@ func TestRedactKeepsCurlCommandAndFlag(t *testing.T) {
 		}
 	}
 }
+
+// Every credential on the line goes, not just the last one (the kept prefix is
+// greedy, so the rule is applied until nothing changes), and the command stays.
+func TestRedactKeepMultipleAndContextFreeForms(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		secrets []string
+		keep    string
+	}{
+		{"curl -u a:PW1 -u b:PW2 https://x.example", []string{"PW1", "PW2"}, "curl -u "},
+		{"curl -ua:PW1 -ub:PW2 https://x.example", []string{"PW1", "PW2"}, "curl -u"},
+		{"curl -U proxy:PW1 -u u:PW2 https://x.example", []string{"PW1", "PW2"}, "curl -U "},
+		{"wget --proxy-user=p:PW1 --user=u:PW2 https://x.example", []string{"PW1", "PW2"}, "wget --proxy-user="},
+		{"curl -s -u a:PW1 --proxy-user p:PW2 -u c:PW3 -u d:PW4 https://x", []string{"PW1", "PW2", "PW3", "PW4"}, "curl -s -u "},
+		{"CURL -u u:PW1 https://x.example", []string{"PW1"}, "CURL -u "},
+		{"x=curl; $x -u u:PW1 https://x.example", []string{"PW1"}, "$x -u "},
+		{"http --auth u:PW1 https://x.example", []string{"PW1"}, "http --auth "},
+		{"http -a u:PW1 https://x.example", []string{"PW1"}, "http -a "},
+		{"xh -a u:PW1 https://x.example", []string{"PW1"}, "xh -a "},
+		{"https --auth=u:PW1 https://x.example", []string{"PW1"}, "https --auth="},
+	} {
+		out := Redact(tc.in)
+		for _, sec := range tc.secrets {
+			if strings.Contains(out, sec) {
+				t.Errorf("%s survived: %q -> %q", sec, tc.in, out)
+			}
+		}
+		if !strings.Contains(out, tc.keep) || !strings.Contains(out, RedactToken) {
+			t.Errorf("command/flag lost or nothing redacted: %q -> %q (want %q kept)", tc.in, out, tc.keep)
+		}
+	}
+	for _, benign := range []string{"docker run -u 1000:1000 img", "docker run --user 1000:1000 img", "sort -u 12:30", "ls -lu a:b", "git push -u origin main"} {
+		if out := Redact(benign); out != benign {
+			t.Errorf("over-redacted %q -> %q", benign, out)
+		}
+	}
+}

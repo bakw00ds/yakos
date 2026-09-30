@@ -208,13 +208,27 @@ for side in $sides; do
     run_payload "$side" "$sb" "$(bash_payload "curl -uk110user:k110NoSpacePw https://x.example")"
     run_payload "$side" "$sb" "$(bash_payload "curl -u \"k110q:k110QuotedPw k110QuotedTail\" https://x.example")"
     run_payload "$side" "$sb" "$(bash_payload "curl --proxy-user k110p:k110ProxyPw https://x.example")"
+    run_payload "$side" "$sb" "$(bash_payload "curl -u k110a:k110MultiPw1 -u k110b:k110MultiPw2 https://x.example")"
+    run_payload "$side" "$sb" "$(bash_payload "curl -uk110c:k110MultiPw3 -uk110d:k110MultiPw4 https://x.example")"
+    run_payload "$side" "$sb" "$(bash_payload "curl -U k110e:k110MultiPw5 -u k110f:k110MultiPw6 https://x.example")"
+    run_payload "$side" "$sb" "$(bash_payload "wget --proxy-user=k110g:k110MultiPw7 --user=k110h:k110MultiPw8 https://x.example")"
+    run_payload "$side" "$sb" "$(bash_payload "CURL -u k110i:k110UpperPw https://x.example")"
+    run_payload "$side" "$sb" "$(bash_payload 'x=curl; $x -u k110j:k110VarPw https://x.example')"
+    run_payload "$side" "$sb" "$(bash_payload "http --auth k110k:k110HttpiePw1 https://x.example")"
+    run_payload "$side" "$sb" "$(bash_payload "xh -a k110l:k110HttpiePw2 https://x.example")"
     run_payload "$side" "$sb" "$(bash_payload "redis-cli -u redis://:k110EmptyUserPw@cache:6379")"
     run_payload "$side" "$sb" "$(edit_payload new_string $'-----BEGIN PGP PRIVATE KEY BLOCK-----\nk110PgpBodyLine\n-----END PGP PRIVATE KEY BLOCK-----')"
     run_payload "$side" "$sb" "$(edit_payload new_string $'-----BEGIN RSA PRIVATE KEY-----\nk110PemBodyLineOne\nk110PemBodyLineTwo\n-----END RSA PRIVATE KEY-----')"
     buf="$sb/work/current/supervisor-buffer.ndjson"
+    # Look-alike flags that are not credentials stay readable.
+    sbn="$(mksb "k110n-$side" $'supervisor:\n  score_every_n_calls: 1000\n')"
+    for benign in "docker run -u 1000:1000 img" "docker run --user 1000:1000 img" "sort -u 12:30" "ls -lu a:b"; do
+        run_payload "$side" "$sbn" "$(bash_payload "$benign")"
+        if grep -qF "$benign" "$sbn/work/current/supervisor-buffer.ndjson"; then ok "(k110) $side not redacted: $benign"; else bad "(k110) $side over-redacted: $benign"; fi
+    done
     # Only the credential is redacted: the command and flag stay readable.
     if grep -q 'curl -u \[REDACTED\]' "$buf" && grep -q 'curl --proxy-user \[REDACTED\]' "$buf"; then ok "(k110) $side preview keeps curl and its flag"; else bad "(k110) $side preview lost the curl command/flag: $(grep -o 'command_preview[^,]*' "$buf" | head -3)"; fi
-    for leak in k110CurlPw k110UrlPw k110PemBodyLineOne k110PemBodyLineTwo k110NoSpacePw k110QuotedTail k110ProxyPw k110EmptyUserPw k110PgpBodyLine; do
+    for leak in k110CurlPw k110UrlPw k110PemBodyLineOne k110PemBodyLineTwo k110NoSpacePw k110QuotedTail k110ProxyPw k110MultiPw1 k110MultiPw2 k110MultiPw3 k110MultiPw4 k110MultiPw5 k110MultiPw6 k110MultiPw7 k110MultiPw8 k110UpperPw k110VarPw k110HttpiePw1 k110HttpiePw2 k110EmptyUserPw k110PgpBodyLine; do
         if grep -q "$leak" "$buf"; then bad "(k110) $side $leak reached the buffer"; else ok "(k110) $side $leak redacted"; fi
     done
 done
