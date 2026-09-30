@@ -24,6 +24,17 @@ func hookEnvFindings(t *testing.T, val string) (Severity, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if val == "" {
+		if strings.Contains(buf.String(), "Hook environment") {
+			t.Fatalf("unset value must not print a section (default doctor output is unchanged):\n%s", buf.String())
+		}
+		for _, f := range rep.Findings {
+			if f.Section == SectionHookEnv {
+				t.Fatalf("unset value produced a finding: %v", f)
+			}
+		}
+		return SeverityInfo, "unset"
+	}
 	if !strings.Contains(buf.String(), "Hook environment") {
 		t.Fatalf("Hook environment section missing:\n%s", buf.String())
 	}

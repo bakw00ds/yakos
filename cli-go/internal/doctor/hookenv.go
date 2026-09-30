@@ -16,16 +16,16 @@ const (
 )
 
 // checkHookEnv reports the hook-runtime environment knobs that change hook
-// behavior, so an operator can see what the hooks will actually use.
+// behavior, so an operator can see what the hooks will actually use. It only
+// prints when YAKOS_HOOK_JQ_TIMEOUT is set.
 func (r *runner) checkHookEnv() {
-	writeln(r, "Hook environment")
 	raw := strings.TrimSpace(r.env("YAKOS_HOOK_JQ_TIMEOUT"))
 	if raw == "" {
-		r.info(SectionHookEnv, "YAKOS_HOOK_JQ_TIMEOUT: unset (jq is bounded at %d s; set whole seconds %d..%d to change)",
-			hookJQTimeoutDefault, hookJQTimeoutMin, hookJQTimeoutMax)
-		writeln(r, "")
+		// Unset is the normal case: stay silent so a default install's
+		// doctor output is unchanged (the bash doctor has no such section).
 		return
 	}
+	writeln(r, "Hook environment")
 	n, err := strconv.ParseUint(raw, 10, 64)
 	switch {
 	case err != nil && isAllDigits(raw):
