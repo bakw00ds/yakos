@@ -5,10 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/bakw00ds/yakos/internal/decision"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 // K-111 P2b: shadow decision for the supervisor pre-filter.
@@ -42,20 +45,21 @@ type shadowInput struct {
 	Session  string
 }
 
-// shadowProvider resolves the configured provider exactly as `yakos decide`
-// does, minus the flag: kill switch, then $YAKOS_DECISION_PROVIDER, then
-// decisions.provider in .yakos.yml. Only "jev" and "mock" start a call.
+// shadowProvider resolves the provider as `yakos decide` does
+// (decision.ResolveProvider): kill switch, then $YAKOS_DECISION_PROVIDER, then
+// `provider:` in the USER-level policy file. A project .yakos.yml can never
+// enable a provider, only veto the policy switch with `provider: none`. Only
+// "jev" and "mock" start a call.
 func shadowProvider(in hooktype.HookInput, doc *yakosYMLSupervisor) string {
 	if in.Env["YAKOS_DECISION_DISABLE"] == "1" {
 		return ""
 	}
 	name := in.Env["YAKOS_DECISION_PROVIDER"]
-	if name == "" && doc != nil && doc.Decisions.Kind == yaml.MappingNode {
-		var d struct {
-			Provider string `yaml:"provider"`
-		}
-		if err := doc.Decisions.Decode(&d); err == nil {
-			name = d.Provider
+	if name == "" {
+		pol, _ := decision.LoadPolicy(filepath.Join(statepath.Dir(), decision.PolicyFileName))
+		name = pol.Provider
+		if name != "" && projectVetoesProvider(doc) {
+			return ""
 		}
 	}
 	switch name {
@@ -68,6 +72,18 @@ func shadowProvider(in hooktype.HookInput, doc *yakosYMLSupervisor) string {
 		return name
 	}
 	return ""
+}
+
+// projectVetoesProvider reports an explicit `decisions.provider: none` in the
+// project .yakos.yml.
+func projectVetoesProvider(doc *yakosYMLSupervisor) bool {
+	if doc == nil || doc.Decisions.Kind != yaml.MappingNode {
+		return false
+	}
+	var d struct {
+		Provider string `yaml:"provider"`
+	}
+	return doc.Decisions.Decode(&d) == nil && d.Provider == "none"
 }
 
 // shadowTriggerKind reduces an escalation reason to its kind
@@ -152,7 +168,15 @@ func (h *Hook) shadowDecision(in hooktype.HookInput, doc *yakosYMLSupervisor, pr
 	if err != nil {
 		return
 	}
-	args := []string{"decide", shadowSurface, "--shadow", "--local", si.Verdict}
+	// The state travels in a 0600 file in the 0700 state dir, not on a pipe: a
+	// pipe write before the child starts has no reader and blocks the hook once
+	// it exceeds the pipe buffer (about 4 KiB on Windows). `decide` deletes the
+	// file as soon as it has read it.
+	stateFile, err := writeShadowStateFile(state)
+	if err != nil {
+		return
+	}
+	args := []string{"decide", shadowSurface, "--shadow", "--state-file", stateFile, "--consume-state-file", "--local", si.Verdict}
 	if si.Verdict == "escalate" {
 		if k := shadowTriggerKind(si.Trigger); k != "" {
 			args = append(args, "--local-trigger", k)
@@ -164,8 +188,51 @@ func (h *Hook) shadowDecision(in hooktype.HookInput, doc *yakosYMLSupervisor, pr
 	if projectDir != "" {
 		args = append(args, "--config", filepath.Join(projectDir, ".yakos.yml"))
 	}
-	_ = h.Launch(LaunchSpec{
-		CLI: cli, Args: args, Stdin: state,
+	if err := h.Launch(LaunchSpec{
+		CLI: cli, Args: args,
 		StdoutPath: os.DevNull, StderrPath: os.DevNull,
-	})
+	}); err != nil {
+		_ = os.Remove(stateFile)
+	}
+}
+
+// shadowStatePrefix names the per-call state files; leftovers (a child that
+// never ran) older than shadowStateMaxAge are swept on the next call.
+const (
+	shadowStatePrefix = "shadow-state-"
+	shadowStateMaxAge = 10 * time.Minute
+)
+
+// writeShadowStateFile writes state to a fresh 0600 file in the state dir and
+// returns its path. It never blocks: a regular file has no reader to wait for.
+func writeShadowStateFile(state []byte) (string, error) {
+	dir := statepath.Dir()
+	if err := statepath.SecureDir(dir); err != nil {
+		return "", err
+	}
+	sweepShadowStateFiles(dir)
+	f, err := os.CreateTemp(dir, shadowStatePrefix+"*.json") // 0600
+	if err != nil {
+		return "", err
+	}
+	name := f.Name()
+	if _, err := f.Write(state); err != nil {
+		f.Close() //nolint:errcheck,gosec
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	return name, nil
+}
+
+func sweepShadowStateFiles(dir string) {
+	matches, _ := filepath.Glob(filepath.Join(dir, shadowStatePrefix+"*.json"))
+	for _, m := range matches {
+		if fi, err := os.Stat(m); err == nil && time.Since(fi.ModTime()) > shadowStateMaxAge {
+			_ = os.Remove(m)
+		}
+	}
 }

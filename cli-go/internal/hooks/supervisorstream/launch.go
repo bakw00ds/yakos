@@ -24,10 +24,6 @@ type LaunchSpec struct {
 	// StdoutPath / StderrPath are appended to (created when absent).
 	StdoutPath string
 	StderrPath string
-	// Stdin, when non-empty, is fed to the child's standard input (the shadow
-	// decision call reads its state there). It must stay small: it is written
-	// to a pipe before the child starts, and the hook never waits.
-	Stdin []byte
 }
 
 // Launcher starts spec detached and returns without waiting for it. The
@@ -127,22 +123,6 @@ func launchDetached(spec LaunchSpec) error {
 	cmd := exec.Command(spec.CLI, spec.Args...) //nolint:gosec
 	cmd.Stdout = out
 	cmd.Stderr = errf
-	if len(spec.Stdin) > 0 {
-		// A real pipe (an *os.File), written before Start: the hook exits right
-		// after Start, so a copy goroutine (what a bytes.Reader would use)
-		// would die with it and truncate the child's input.
-		pr, pw, err := os.Pipe()
-		if err != nil {
-			return err
-		}
-		defer pr.Close() //nolint:errcheck
-		if _, err := pw.Write(spec.Stdin); err != nil {
-			pw.Close() //nolint:errcheck,gosec
-			return err
-		}
-		pw.Close() //nolint:errcheck,gosec
-		cmd.Stdin = pr
-	}
 	detach(cmd)
 	if err := cmd.Start(); err != nil {
 		return err

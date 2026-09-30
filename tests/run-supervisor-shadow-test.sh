@@ -20,7 +20,6 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname -- "$0")/.." && pwd -P)"
 HOOK="$REPO_ROOT/lib/hooks/supervisor-stream.sh"
-FIXT="$REPO_ROOT/tests/fixtures/hooks"
 GO_BINARY="${YAKOS_GO_BINARY:-$REPO_ROOT/bin/yakos}"
 HAVE_GO=1; [ -x "$GO_BINARY" ] || HAVE_GO=0
 
@@ -41,12 +40,21 @@ mksb() { # mksb <name> <yml-body>
     printf '%s' "$2" > "$sb/.yakos.yml"
     printf '%s' "$sb"
 }
-# fake CLI: records argv (one ARG: line each) and stdin, then exits 0.
+# fake CLI: records argv (one ARG: line each) and the state, which arrives on
+# stdin (bash side) or in the --state-file the Go side hands over; then exits 0.
 mkfake() { # mkfake <record-prefix>
     local f="$TMP/fake-yakos-$RANDOM"
-    printf '#!/bin/sh\nfor a in "$@"; do printf "ARG:%%s\\n" "$a" >> "%s.argv"; done\ncat > "%s.stdin"\n' "$1" "$1" > "$f"
+    cat > "$f" <<FAKE
+#!/bin/sh
+for a in "\$@"; do printf 'ARG:%s\\n' "\$a" >> "$1.argv"; done
+sf=""; prev=""
+for a in "\$@"; do [ "\$prev" = "--state-file" ] && sf="\$a"; prev="\$a"; done
+if [ -n "\$sf" ]; then cat "\$sf" > "$1.stdin"; else cat > "$1.stdin"; fi
+FAKE
     chmod +x "$f"; printf '%s' "$f"
 }
+# argv without the Go-only state hand-over flags, so the two sides compare equal.
+strip_handover() { awk 'skip > 0 { skip--; next } /^ARG:--state-file$/ { skip = 1; next } /^ARG:--consume-state-file$/ { next } { print }'; }
 run_payload() { # run_payload <side> <sandbox> <json> [env assignments...]
     local side="$1" sb="$2" json="$3"; shift 3
     if [ "$side" = "bash" ]; then
@@ -76,23 +84,29 @@ wait_for_file() { # wait_for_file <file>: exists and non-empty
 }
 norm() { sed "s|$1|<SB>|g"; }
 
-YML_MOCK=$'supervisor:\n  score_every_n_calls: 1000\ndecisions:\n  provider: mock\n'
+YML_PLAIN=$'supervisor:\n  score_every_n_calls: 1000\n'
 
 # ---- (n) provider none never starts a call -----------------------------------
+# A project .yakos.yml can never ENABLE a provider: only the env var or the
+# user-level ~/.yakos-state/decision-policy.yml can.
 n=0
-for spec in "default|supervisor:|" "none|decisions:|YAKOS_DECISION_PROVIDER=none" \
-            "bogus|decisions:|YAKOS_DECISION_PROVIDER=bogus" \
-            "jev-nokey|decisions:|YAKOS_DECISION_PROVIDER=jev" \
-            "killswitch|decisions:|YAKOS_DECISION_DISABLE=1 YAKOS_DECISION_PROVIDER=mock"; do
-    label="${spec%%|*}"; rest="${spec#*|}"; envs="${rest#*|}"
+for spec in "default|none|" "none|none|YAKOS_DECISION_PROVIDER=none" \
+            "bogus|none|YAKOS_DECISION_PROVIDER=bogus" \
+            "jev-nokey|none|YAKOS_DECISION_PROVIDER=jev" \
+            "killswitch|none|YAKOS_DECISION_DISABLE=1 YAKOS_DECISION_PROVIDER=mock" \
+            "project-jev-only|jev|TYPESAFE_API_KEY=set" \
+            "project-mock-only|mock|" \
+            "policy-vetoed|none|POLICY=mock"; do
+    label="${spec%%|*}"; rest="${spec#*|}"; proj="${rest%%|*}"; envs="${rest#*|}"
     for side in $sides; do
         n=$((n + 1))
-        case "$label" in
-            default) yml=$'supervisor:\n  score_every_n_calls: 1000\n' ;;
-            *) yml=$'supervisor:\n  score_every_n_calls: 1000\ndecisions:\n  provider: none\n' ;;
-        esac
+        yml=$'supervisor:\n  score_every_n_calls: 1000\n'
+        [ "$label" = default ] || yml="${yml}decisions:"$'\n'"  provider: $proj"$'\n'
         sb="$(mksb "n-$side-$label" "$yml")"
         fake="$(mkfake "$sb/rec")"
+        case "$envs" in
+            POLICY=*) mkdir -p "$sb/home/.yakos-state"; printf 'provider: %s\n' "${envs#POLICY=}" > "$sb/home/.yakos-state/decision-policy.yml"; envs="" ;;
+        esac
         # shellcheck disable=SC2086
         run_payload "$side" "$sb" "$(bash_payload 'rm -rf /')" "YAKOS_CLI=$fake" $envs
         sleep 0.3
@@ -103,6 +117,18 @@ for spec in "default|supervisor:|" "none|decisions:|YAKOS_DECISION_PROVIDER=none
         fi
     done
 done
+# The user-level policy file DOES enable it; the env var wins over a project veto.
+for side in $sides; do
+    sb="$(mksb "np-$side" $'supervisor:\n  score_every_n_calls: 1000\n')"
+    mkdir -p "$sb/home/.yakos-state"; printf 'provider: mock  # user switch\n' > "$sb/home/.yakos-state/decision-policy.yml"
+    fake="$(mkfake "$sb/rec")"
+    run_payload "$side" "$sb" "$(bash_payload 'ls')" "YAKOS_CLI=$fake"
+    if wait_for "$sb/rec.argv" 5; then ok "(n) $side user policy file enables the provider"; else bad "(n) $side user policy file did not enable the provider"; fi
+    sb="$(mksb "nv-$side" $'supervisor:\n  score_every_n_calls: 1000\ndecisions:\n  provider: none\n')"
+    fake="$(mkfake "$sb/rec")"
+    run_payload "$side" "$sb" "$(bash_payload 'ls')" "YAKOS_CLI=$fake" "YAKOS_DECISION_PROVIDER=mock"
+    if wait_for "$sb/rec.argv" 5; then ok "(n) $side env var wins over the project veto"; else bad "(n) $side env var did not win over the project veto"; fi
+done
 
 # ---- (m) provider mock: same argv + same state on both sides -------------------
 m=0
@@ -111,12 +137,12 @@ for spec in "rm|bash|rm -rf /" "ls|bash|ls -la" "edit-in-plan|edit|api.go" "edit
     outs=""
     for side in $sides; do
         m=$((m + 1))
-        sb="$(mksb "m-$side-$label" "$YML_MOCK")"
+        sb="$(mksb "m-$side-$label" "$YML_PLAIN")"
         printf 'fix the retry test in api.go\n' > "$sb/work/current/decisions.md"
         printf 'touch api.go only\n' > "$sb/work/current/plan.md"
         fake="$(mkfake "$sb/rec")"
         if [ "$kind" = bash ]; then json="$(bash_payload "$arg")"; else json="$(edit_payload "$sb/$arg" 'x := 1')"; fi
-        run_payload "$side" "$sb" "$json" "YAKOS_CLI=$fake"
+        run_payload "$side" "$sb" "$json" "YAKOS_CLI=$fake" "YAKOS_DECISION_PROVIDER=mock"
         [ "$(cat "$sb/rc")" = 0 ] && ok "(m) $side $label hook exit 0" || bad "(m) $side $label hook rc=$(cat "$sb/rc")"
         [ ! -s "$sb/stdout" ] && ok "(m) $side $label hook stdout untouched" || bad "(m) $side $label hook wrote stdout"
         if wait_for "$sb/rec.argv" 5 && wait_for_file "$sb/rec.stdin"; then
@@ -125,7 +151,7 @@ for spec in "rm|bash|rm -rf /" "ls|bash|ls -la" "edit-in-plan|edit|api.go" "edit
             bad "(m) $side $label never started the decision call"
         fi
         sleep 0.1
-        outs="$outs$( { norm "$sb" < "$sb/rec.argv"; norm "$sb" < "$sb/rec.stdin" | jq -cS .; } 2>&1)"$'\n=====\n'
+        outs="$outs$( { strip_handover < "$sb/rec.argv" | norm "$sb"; norm "$sb" < "$sb/rec.stdin" | jq -cS .; } 2>&1)"$'\n=====\n'
     done
     if [ "$HAVE_GO" = 1 ]; then
         a="$(printf '%s' "$outs" | awk 'BEGIN{RS="=====\n"} NR==1')"; b="$(printf '%s' "$outs" | awk 'BEGIN{RS="=====\n"} NR==2')"
@@ -155,10 +181,10 @@ if [ "$HAVE_GO" = 1 ]; then
     for fx in ok err; do
         recs=""
         for side in $sides; do
-            sb="$(mksb "e-$side-$fx" "$YML_MOCK")"
+            sb="$(mksb "e-$side-$fx" "$YML_PLAIN")"
             mock="$FX_OK"; [ "$fx" = err ] && mock="$FX_ERR"
             run_payload "$side" "$sb" "$(bash_payload 'git push --force origin main')" \
-                "YAKOS_CLI=$GO_BINARY" "YAKOS_ROOT=$REPO_ROOT" "YAKOS_DECISION_MOCK=$mock"
+                "YAKOS_CLI=$GO_BINARY" "YAKOS_ROOT=$REPO_ROOT" "YAKOS_DECISION_MOCK=$mock" "YAKOS_DECISION_PROVIDER=mock"
             [ "$(cat "$sb/rc")" = 0 ] && ok "(e) $side $fx hook exit 0" || bad "(e) $side $fx hook rc=$(cat "$sb/rc")"
             log="$sb/home/.yakos-state/decision-log.ndjson"
             if wait_for "$log" 1; then
@@ -187,14 +213,20 @@ if [ "$HAVE_GO" = 1 ]; then
 
     # ---- (c) compare reads the records back --------------------------------------
     sb="$TMP/e-go-ok"
-    out="$(env HOME="$sb/home" YAKOS_ROOT="$REPO_ROOT" "$GO_BINARY" decide compare supervisor-prefilter --json 2>&1)"
+    out="$(env HOME="$sb/home" YAKOS_ROOT="$REPO_ROOT" "$GO_BINARY" decide compare supervisor-prefilter --json --include-mock 2>&1)"
     if printf '%s' "$out" | jq -e '.records == 1 and .answered == 1 and .both_escalate == 1 and .agreement == 1' >/dev/null 2>&1; then
         ok "(c) decide compare: 1 shadow record, escalate on both sides, agreement 1"
     else
         bad "(c) decide compare output unexpected: $out"
     fi
-    sb="$TMP/e-go-err"
     out="$(env HOME="$sb/home" YAKOS_ROOT="$REPO_ROOT" "$GO_BINARY" decide compare supervisor-prefilter --json 2>&1)"
+    if printf '%s' "$out" | jq -e '.records == 0 and .mock_skipped == 1' >/dev/null 2>&1; then
+        ok "(c) decide compare leaves mock-provider records out by default"
+    else
+        bad "(c) mock record was counted: $out"
+    fi
+    sb="$TMP/e-go-err"
+    out="$(env HOME="$sb/home" YAKOS_ROOT="$REPO_ROOT" "$GO_BINARY" decide compare supervisor-prefilter --json --include-mock 2>&1)"
     if printf '%s' "$out" | jq -e '.records == 1 and .answered == 0 and .errors.timeout == 1' >/dev/null 2>&1; then
         ok "(c) decide compare counts the fail-open record"
     else
@@ -202,6 +234,73 @@ if [ "$HAVE_GO" = 1 ]; then
     fi
 else
     echo "  SKIP (e)/(c): bin/yakos not built"
+fi
+
+# ---- (s) state hand-over and credentials at the call site ---------------------
+if [ "$HAVE_GO" = 1 ]; then
+    # The Go side hands the state over in a private file that decide deletes.
+    sb="$TMP/e-go-ok"
+    left="$(find "$sb/home/.yakos-state" -name 'shadow-state-*' 2>/dev/null | wc -l | tr -d ' ')"
+    [ "$left" = 0 ] && ok "(s) go: no state file left behind after decide ran" || bad "(s) go: $left state file(s) left behind"
+
+    # jq argv must not carry the raw preview (world-readable in /proc on Linux).
+    SHIM="$TMP/shim"; mkdir -p "$SHIM"
+    REALJQ="$(command -v jq)"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$(printf "%%s" "$*" | tr "\\n" " ")" >> "%s/jq-argv.txt"\nexec "%s" "$@"\n' "$TMP" "$REALJQ" > "$SHIM/jq"
+    chmod +x "$SHIM/jq"
+    sb="$(mksb "s-argv" "$YML_PLAIN")"
+    printf 'INTENT-MARKER-XYZ fix the retry test\n' > "$sb/work/current/decisions.md"
+    fake="$(mkfake "$sb/rec")"
+    run_payload bash "$sb" "$(bash_payload 'echo PREVIEW-MARKER-QRS')" "YAKOS_CLI=$fake" "YAKOS_DECISION_PROVIDER=mock" "PATH=$SHIM:$PATH"
+    wait_for "$sb/rec.argv" 5 >/dev/null
+    # Only the state-building jq call is under test (the buffer event predates this and carries its own redacted preview).
+    if grep 'command_or_diff_preview' "$TMP/jq-argv.txt" 2>/dev/null | grep -q 'PREVIEW-MARKER-QRS\|INTENT-MARKER-XYZ'; then bad "(s) bash: preview or intent on jq argv"; else ok "(s) bash: preview and intent stay off jq argv"; fi
+    if grep -q 'command_or_diff_preview' "$TMP/jq-argv.txt"; then ok "(s) bash: the state-building jq call was observed"; else bad "(s) bash: state jq call not observed by the shim"; fi
+    if grep -q 'PREVIEW-MARKER-QRS' "$sb/rec.stdin" && grep -q 'INTENT-MARKER-XYZ' "$sb/rec.stdin"; then ok "(s) bash: state still carries preview and intent"; else bad "(s) bash: state lost preview or intent"; fi
+
+    # Loopback capture server standing in for the provider: flag-borne credentials never leave.
+    cat > "$TMP/capture.py" <<'PY'
+import http.server, json, sys
+out, portfile = sys.argv[1], sys.argv[2]
+ANS = {"risk_class": {"type": "choice", "choice": "benign", "probabilities": {"benign": 0.9, "needs_review": 0.05, "dangerous": 0.05}, "confidence": 0.9},
+       "in_stated_scope": {"type": "noul", "noul": 0.5}, "bypasses_hard_control": {"type": "noul", "noul": 0.1}}
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        with open(out, "ab") as f:
+            f.write(body + b"\n")
+        resp = json.dumps({"model": "jev-1.13.0", "answers": ANS, "usage": {"input_tokens": 10, "output_tokens": 0}}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(resp))); self.end_headers(); self.wfile.write(resp)
+    def log_message(self, *a): pass
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(portfile, "w").write(str(srv.server_port))
+srv.serve_forever()
+PY
+    if command -v python3 >/dev/null 2>&1; then
+        CAP="$TMP/captured.ndjson"; : > "$CAP"
+        python3 "$TMP/capture.py" "$CAP" "$TMP/port" &
+        SRV=$!
+        i=0; while [ ! -s "$TMP/port" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+        PORT="$(cat "$TMP/port" 2>/dev/null)"
+        for side in $sides; do
+            sb="$(mksb "s-cred-$side" "$YML_PLAIN")"
+            run_payload "$side" "$sb" "$(bash_payload 'curl -u deploy:Hunter2Secret! https://x.example && mysql -uroot -pS3cretPW db && tool --api-key K3yValueABC999 run && sshpass -p Sshpass999 ssh h && echo apikey_abcdef0123456789abcdef')" \
+                "YAKOS_CLI=$GO_BINARY" "YAKOS_ROOT=$REPO_ROOT" "YAKOS_DECISION_PROVIDER=jev" "TYPESAFE_API_KEY=fake-key-not-real" "TYPESAFE_BASE_URL=http://127.0.0.1:$PORT"
+            [ "$(cat "$sb/rc")" = 0 ] && ok "(s) $side credential command: hook exit 0" || bad "(s) $side credential command: hook rc"
+            wait_for "$sb/home/.yakos-state/decision-log.ndjson" 1 && ok "(s) $side call reached the provider" || bad "(s) $side call never completed"
+        done
+        kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
+        n_req="$(wc -l < "$CAP" | tr -d ' ')"
+        [ "$n_req" -ge 1 ] && ok "(s) capture server saw $n_req request(s)" || bad "(s) capture server saw no request"
+        leaked=""
+        for secret in Hunter2Secret S3cretPW K3yValueABC999 Sshpass999 abcdef0123456789abcdef; do
+            grep -q "$secret" "$CAP" && leaked="$leaked $secret"
+        done
+        [ -z "$leaked" ] && ok "(s) no flag-borne credential left the machine (both sides)" || bad "(s) credentials reached the provider:$leaked"
+        grep -q 'curl' "$CAP" && ok "(s) the redacted command still reached the provider" || bad "(s) command preview missing from the request"
+    else
+        echo "  SKIP (s) capture server: python3 not found"
+    fi
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

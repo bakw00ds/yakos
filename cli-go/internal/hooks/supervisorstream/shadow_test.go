@@ -25,8 +25,26 @@ func shadowEnv(kv ...string) map[string]string {
 	return env
 }
 
+// specState returns the state JSON a launch handed over: the shadow call gets
+// it in a private file named by --state-file, never on a pipe.
+func specState(t *testing.T, sp supervisorstream.LaunchSpec) []byte {
+	t.Helper()
+	for i, a := range sp.Args {
+		if a == "--state-file" && i+1 < len(sp.Args) {
+			b, err := os.ReadFile(sp.Args[i+1])
+			if err != nil {
+				t.Fatalf("state file: %v", err)
+			}
+			return b
+		}
+	}
+	t.Fatalf("no --state-file in %v", sp.Args)
+	return nil
+}
+
 func runShadow(t *testing.T, yml string, in hooktype.HookInput, env map[string]string) (*recorder, hooktype.HookOutput) {
 	t.Helper()
+	t.Setenv("HOME", t.TempDir())
 	work, proj := t.TempDir(), t.TempDir()
 	writeYAML(t, proj, yml)
 	if err := os.WriteFile(filepath.Join(work, "decisions.md"), []byte("fix the retry test\n"), 0o644); err != nil {
@@ -55,13 +73,15 @@ func TestShadow_ProviderNoneNeverLaunches(t *testing.T) {
 		yml string
 		env map[string]string
 	}{
-		"absent":          {ssYML, shadowEnv()},
-		"none in yml":     {ssYML + "decisions:\n  provider: none\n", shadowEnv()},
-		"env none":        {ssYML, shadowEnv("YAKOS_DECISION_PROVIDER", "none")},
-		"unknown":         {ssYML + "decisions:\n  provider: bogus\n", shadowEnv()},
-		"jev without key": {ssYML + "decisions:\n  provider: jev\n", shadowEnv()},
-		"kill switch":     {ssYML + "decisions:\n  provider: mock\n", shadowEnv("YAKOS_DECISION_DISABLE", "1")},
-		"malformed block": {ssYML + "decisions: [1, 2]\n", shadowEnv()},
+		"absent":             {ssYML, shadowEnv()},
+		"none in yml":        {ssYML + "decisions:\n  provider: none\n", shadowEnv()},
+		"project jev alone":  {ssYML + "decisions:\n  provider: jev\n", shadowEnv("TYPESAFE_API_KEY", "set")},
+		"project mock alone": {ssYML + "decisions:\n  provider: mock\n", shadowEnv()},
+		"env none":           {ssYML, shadowEnv("YAKOS_DECISION_PROVIDER", "none")},
+		"unknown":            {ssYML + "decisions:\n  provider: bogus\n", shadowEnv()},
+		"jev without key":    {ssYML, shadowEnv("YAKOS_DECISION_PROVIDER", "jev")},
+		"kill switch":        {ssYML, shadowEnv("YAKOS_DECISION_DISABLE", "1", "YAKOS_DECISION_PROVIDER", "mock")},
+		"malformed block":    {ssYML + "decisions: [1, 2]\n", shadowEnv()},
 	} {
 		rec, out := runShadow(t, tc.yml, bashInput("rm -rf /"), tc.env)
 		if len(rec.specs) != 0 || out.ExitCode != 0 {
@@ -71,7 +91,7 @@ func TestShadow_ProviderNoneNeverLaunches(t *testing.T) {
 }
 
 func TestShadow_MockProviderLaunchesDecideWithLocalVerdict(t *testing.T) {
-	rec, out := runShadow(t, ssYML+"decisions:\n  provider: mock\n", bashInput("git push --force origin main"), shadowEnv())
+	rec, out := runShadow(t, ssYML, bashInput("git push --force origin main"), shadowEnv("YAKOS_DECISION_PROVIDER", "mock"))
 	if out.ExitCode != 0 || out.Stdout != nil && len(out.Stdout) != 0 {
 		t.Fatalf("exit=%d stdout=%q: shadow must not change the hook result", out.ExitCode, out.Stdout)
 	}
@@ -86,8 +106,8 @@ func TestShadow_MockProviderLaunchesDecideWithLocalVerdict(t *testing.T) {
 		}
 	}
 	var st map[string]any
-	if err := json.Unmarshal(sp.Stdin, &st); err != nil {
-		t.Fatalf("stdin is not JSON: %v (%q)", err, sp.Stdin)
+	if err := json.Unmarshal(specState(t, sp), &st); err != nil {
+		t.Fatalf("state is not JSON: %v", err)
 	}
 	if st["tool"] != "Bash" || st["command_or_diff_preview"] != "git push --force origin main" || st["stated_intent"] != "fix the retry test" {
 		t.Errorf("state = %v", st)
@@ -119,28 +139,28 @@ func TestShadow_PassVerdictAndEnvProviderOverridesYML(t *testing.T) {
 }
 
 func TestShadow_JevNeedsKeyAndQuotedProviderIsRead(t *testing.T) {
-	yml := ssYML + "decisions:\n  provider: \"jev\"   # shadow only\n"
-	if rec, _ := runShadow(t, yml, bashInput("ls"), shadowEnv()); len(rec.specs) != 0 {
+	if rec, _ := runShadow(t, ssYML, bashInput("ls"), shadowEnv("YAKOS_DECISION_PROVIDER", "jev")); len(rec.specs) != 0 {
 		t.Error("jev without TYPESAFE_API_KEY must not launch")
 	}
-	rec, _ := runShadow(t, yml, bashInput("ls"), shadowEnv("TYPESAFE_API_KEY", "set"))
+	rec, _ := runShadow(t, ssYML, bashInput("ls"), shadowEnv("YAKOS_DECISION_PROVIDER", "jev", "TYPESAFE_API_KEY", "set"))
 	if len(rec.specs) != 1 {
 		t.Fatalf("jev with a key: launches = %d", len(rec.specs))
 	}
 	// The key is never forwarded on the command line or stdin.
-	if strings.Contains(strings.Join(rec.specs[0].Args, " ")+string(rec.specs[0].Stdin), "TYPESAFE") {
+	if strings.Contains(strings.Join(rec.specs[0].Args, " ")+string(specState(t, rec.specs[0])), "TYPESAFE") {
 		t.Error("key material in the launch spec")
 	}
 }
 
 func TestShadow_LaunchFailureIsSilentFailOpen(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	work, proj := t.TempDir(), t.TempDir()
 	writeYAML(t, proj, ssYML+"decisions:\n  provider: mock\n")
 	rec := &recorder{err: errors.New("exec: no such file")}
 	h := newHook(work, proj)
 	h.Launch = rec.launch
 	in := bashInput("rm -rf /")
-	in.Env = shadowEnv()
+	in.Env = shadowEnv("YAKOS_DECISION_PROVIDER", "mock")
 	out, err := h.Run(context.Background(), in)
 	if err != nil || out.ExitCode != 0 || len(out.Stderr) != 0 {
 		t.Fatalf("err=%v exit=%d stderr=%q", err, out.ExitCode, out.Stderr)
@@ -155,20 +175,21 @@ func TestShadow_LaunchFailureIsSilentFailOpen(t *testing.T) {
 }
 
 func TestShadow_NoCLIMeansNoLaunch(t *testing.T) {
-	rec, out := runShadow(t, ssYML+"decisions:\n  provider: mock\n", bashInput("ls"), map[string]string{"PATH": t.TempDir()})
+	rec, out := runShadow(t, ssYML, bashInput("ls"), map[string]string{"PATH": t.TempDir(), "YAKOS_DECISION_PROVIDER": "mock"})
 	if len(rec.specs) != 0 || out.ExitCode != 0 {
 		t.Errorf("launches=%d exit=%d", len(rec.specs), out.ExitCode)
 	}
 }
 
 func TestShadow_PreFilterDisabledHasNoLocalVerdictSoNoCall(t *testing.T) {
-	rec, _ := runShadow(t, "supervisor:\n  score_every_n_calls: 1000\n  pre_filter:\n    enabled: false\ndecisions:\n  provider: mock\n", bashInput("ls"), shadowEnv())
+	rec, _ := runShadow(t, "supervisor:\n  score_every_n_calls: 1000\n  pre_filter:\n    enabled: false\ndecisions:\n  provider: mock\n", bashInput("ls"), shadowEnv("YAKOS_DECISION_PROVIDER", "mock"))
 	if len(rec.specs) != 0 {
 		t.Errorf("launches = %d, want 0 (no local verdict to compare)", len(rec.specs))
 	}
 }
 
 func TestShadow_EditStateCarriesPathAndPlanMention(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	work, proj := t.TempDir(), t.TempDir()
 	writeYAML(t, proj, ssYML+"decisions:\n  provider: mock\n")
 	if err := os.WriteFile(filepath.Join(work, "plan.md"), []byte("touch api.go only\n"), 0o644); err != nil {
@@ -179,7 +200,7 @@ func TestShadow_EditStateCarriesPathAndPlanMention(t *testing.T) {
 	h.Launch = rec.launch
 	for _, f := range []string{"api.go", "other.go"} {
 		in := makeInput("Edit", f, "x := 1")
-		in.Env = shadowEnv()
+		in.Env = shadowEnv("YAKOS_DECISION_PROVIDER", "mock")
 		if _, err := h.Run(context.Background(), in); err != nil {
 			t.Fatal(err)
 		}
@@ -190,7 +211,7 @@ func TestShadow_EditStateCarriesPathAndPlanMention(t *testing.T) {
 	want := []bool{true, false}
 	for i, sp := range rec.specs {
 		var st map[string]any
-		_ = json.Unmarshal(sp.Stdin, &st)
+		_ = json.Unmarshal(specState(t, sp), &st)
 		if st["plan_mentions_path"] != want[i] || st["command_or_diff_preview"] != "x := 1" || st["file_path"] == nil {
 			t.Errorf("state %d = %v", i, st)
 		}
@@ -216,36 +237,119 @@ func TestShadow_MalformedDecisionsBlockKeepsSupervisorConfig(t *testing.T) {
 	}
 }
 
-// End to end through the production launcher: the child really receives the state on stdin.
-func TestShadow_ProductionLauncherFeedsStateOnStdin(t *testing.T) {
+// End to end through the production launcher: the child gets the state as a
+// private file and the hook returns at once, however large the state and
+// however slow (or absent) the reader.
+func TestShadow_HugeStateNeverBlocksTheHook(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script child")
 	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	work, proj := t.TempDir(), t.TempDir()
 	writeYAML(t, proj, ssYML+"decisions:\n  provider: mock\n")
-	out := filepath.Join(t.TempDir(), "stdin.txt")
 	script := filepath.Join(t.TempDir(), "yakos")
-	body := "#!/bin/sh\ncat > " + out + "\nprintf '%s ' \"$@\" > " + out + ".args\n"
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+	// A child that never reads anything and never exits within the test.
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	h := supervisorstream.New(work, proj)
 	h.NowFn = fixedNow
-	in := bashInput("git push --force")
-	in.Env = map[string]string{"YAKOS_CLI": script}
+	in := bashInput(strings.Repeat("x", 128*1024) + " git push --force")
+	in.Payload["tool_input"].(map[string]any)["file_path"] = "/p/" + strings.Repeat("d/", 100*1024)
+	in.Env = map[string]string{"YAKOS_CLI": script, "YAKOS_DECISION_PROVIDER": "mock"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := h.Run(context.Background(), in); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the hook blocked on the shadow launch")
+	}
+	files, _ := filepath.Glob(filepath.Join(home, ".yakos-state", "shadow-state-*.json"))
+	if len(files) != 1 {
+		t.Fatalf("state files = %v", files)
+	}
+	fi, _ := os.Stat(files[0])
+	if fi.Mode().Perm() != 0o600 || fi.Size() < 64*1024 {
+		t.Errorf("state file mode %v size %d", fi.Mode().Perm(), fi.Size())
+	}
+}
+
+// A leftover state file (child never ran) is swept on a later call.
+func TestShadow_StaleStateFilesAreSwept(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".yakos-state")
+	_ = os.MkdirAll(dir, 0o700)
+	stale := filepath.Join(dir, "shadow-state-old.json")
+	_ = os.WriteFile(stale, []byte("{}"), 0o600)
+	old := time.Now().Add(-time.Hour)
+	_ = os.Chtimes(stale, old, old)
+	work, proj := t.TempDir(), t.TempDir()
+	writeYAML(t, proj, ssYML+"decisions:\n  provider: mock\n")
+	rec := &recorder{}
+	h := newHook(work, proj)
+	h.Launch = rec.launch
+	in := bashInput("ls")
+	in.Env = shadowEnv("YAKOS_DECISION_PROVIDER", "mock")
 	if _, err := h.Run(context.Background(), in); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		b, _ := os.ReadFile(out)
-		a, _ := os.ReadFile(out + ".args")
-		if strings.Contains(string(b), "git push --force") && strings.Contains(string(a), "--shadow") {
-			return
+	if _, err := os.Stat(stale); err == nil {
+		t.Error("stale state file was not swept")
+	}
+}
+
+// A failed launch leaves no state file behind.
+func TestShadow_FailedLaunchRemovesStateFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	work, proj := t.TempDir(), t.TempDir()
+	writeYAML(t, proj, ssYML+"decisions:\n  provider: mock\n")
+	rec := &recorder{err: errors.New("boom")}
+	h := newHook(work, proj)
+	h.Launch = rec.launch
+	in := bashInput("ls")
+	in.Env = shadowEnv("YAKOS_DECISION_PROVIDER", "mock")
+	_, _ = h.Run(context.Background(), in)
+	if files, _ := filepath.Glob(filepath.Join(home, ".yakos-state", "shadow-state-*.json")); len(files) != 0 {
+		t.Errorf("leftover %v", files)
+	}
+}
+
+// The user-level policy file is what enables a provider without an env var; a
+// project `provider: none` vetoes it, and the env var still wins over the veto.
+func TestShadow_UserPolicyEnablesAndProjectNoneVetoes(t *testing.T) {
+	run := func(yml string, env map[string]string) int {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		_ = os.MkdirAll(filepath.Join(home, ".yakos-state"), 0o700)
+		_ = os.WriteFile(filepath.Join(home, ".yakos-state", "decision-policy.yml"), []byte("provider: mock\n"), 0o600)
+		work, proj := t.TempDir(), t.TempDir()
+		writeYAML(t, proj, yml)
+		rec := &recorder{}
+		h := newHook(work, proj)
+		h.Launch = rec.launch
+		in := bashInput("ls")
+		in.Env = env
+		if _, err := h.Run(context.Background(), in); err != nil {
+			t.Fatal(err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("child never got the state; stdin=%q args=%q", b, a)
-		}
-		time.Sleep(20 * time.Millisecond)
+		return len(rec.specs)
+	}
+	if n := run(ssYML, shadowEnv()); n != 1 {
+		t.Errorf("user policy provider: launches = %d, want 1", n)
+	}
+	if n := run(ssYML+"decisions:\n  provider: none\n", shadowEnv()); n != 0 {
+		t.Errorf("project none must veto the policy switch: launches = %d", n)
+	}
+	if n := run(ssYML+"decisions:\n  provider: none\n", shadowEnv("YAKOS_DECISION_PROVIDER", "mock")); n != 1 {
+		t.Errorf("env still wins over the project veto: launches = %d", n)
 	}
 }
