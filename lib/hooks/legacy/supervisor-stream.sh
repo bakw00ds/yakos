@@ -366,10 +366,38 @@ fi
 # --- 3. Increment escalation counter ----------------------------------------
 # Only escalations (pre-filter triggers OR pre-filter disabled) reach here.
 
+# K-110: read-increment-write under an atomic mkdir lock. Without it two
+# concurrent hooks both read N, both write N+1, and both cross the same
+# score-every threshold (double supervisor launch). The increment is the
+# whole decision: each hook gets a unique value, so at most one sees a
+# multiple of score_every. Go twin: incrementCounter (same lock dir).
+_ss_lock="$counter.lock"
+_ss_locked=0
+_ss_try=0
+while [ "$_ss_try" -lt 150 ]; do
+    if mkdir "$_ss_lock" 2>/dev/null; then
+        _ss_locked=1
+        break
+    fi
+    # A holder that crashed leaves the lock behind: reap one older than 1 min.
+    if [ -n "$(find "$_ss_lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+        rmdir "$_ss_lock" 2>/dev/null || true
+        continue
+    fi
+    _ss_try=$((_ss_try + 1))
+    sleep 0.02 2>/dev/null || sleep 1
+done
+# Never block or double-count: no lock within ~3 s means skip this tick.
+[ "$_ss_locked" = "1" ] || exit 0
 cur=0
 [ -f "$counter" ] && cur="$(cat "$counter" 2>/dev/null || echo 0)"
-cur=$((cur + 1))
-printf '%d\n' "$cur" > "$counter" 2>/dev/null || exit 0
+case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
+cur=$((10#$cur + 1))
+if ! printf '%d\n' "$cur" > "$counter" 2>/dev/null; then
+    rmdir "$_ss_lock" 2>/dev/null || true
+    exit 0
+fi
+rmdir "$_ss_lock" 2>/dev/null || true
 
 # --- 4. Every N escalations, fork supervisor dispatch ----------------------
 

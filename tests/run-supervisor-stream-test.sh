@@ -240,6 +240,33 @@ $a
 $b"; fi
 fi
 
+# ---- K-110: concurrent hooks must not double-launch or lose increments --------------
+# 12 escalating hooks at once with score_every=4: exactly 3 launches and the
+# counter ends at 12. Unlocked read-increment-write collapses increments, so
+# two hooks see the same value and launch twice (or a launch is lost).
+for side in $sides; do
+    sb="$(mksb "c-$side" $'supervisor:\n  score_every_n_calls: 4\n  model: sonnet\n  runtime: codex\n  agent: watcher\n')"
+    rec="$TMP/conc-$side.txt"; : > "$rec"
+    fake="$(mkfake "$rec")"
+    payload="$(bash_payload "rm -rf /tmp/k110-concurrent")"
+    _pids=""
+    for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        if [ "$side" = "bash" ]; then
+            printf '%s' "$payload" | env YAKOS_CLI="$fake" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" "${BASH:-bash}" "$HOOK" >/dev/null 2>&1 &
+        else
+            printf '%s' "$payload" | env YAKOS_IMPL=go YAKOS_HOOKS=go YAKOS_CLI="$fake" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" "$GO_BINARY" hook run supervisor-stream >/dev/null 2>&1 &
+        fi
+        _pids="$_pids $!"
+    done
+    for _p in $_pids; do wait "$_p" 2>/dev/null || true; done
+    sleep 1
+    launches="$(grep -c '^ARG:sonnet$' "$rec" 2>/dev/null || true)"
+    final="$(tr -d '[:space:]' < "$sb/work/current/.supervisor-counter" 2>/dev/null || true)"
+    if [ "$final" = "12" ]; then ok "(c110) $side concurrent counter ends at 12"; else bad "(c110) $side counter=$final want 12 (lost increments)"; fi
+    if [ "${launches:-0}" = "3" ]; then ok "(c110) $side exactly 3 launches"; else bad "(c110) $side launches=$launches want 3"; fi
+    [ ! -d "$sb/work/current/.supervisor-counter.lock" ] && ok "(c110) $side lock released" || bad "(c110) $side lock dir left behind"
+done
+
 # no CLI: both sides WARN and exit 0. This PATH has every binary EXCEPT yakos.
 NOCLI="$TMP/nocli-bin"; mkdir -p "$NOCLI"
 for _dir in /usr/bin /bin /usr/local/bin /opt/homebrew/bin; do

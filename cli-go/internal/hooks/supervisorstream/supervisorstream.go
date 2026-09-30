@@ -291,8 +291,12 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	// ---- 3. Increment escalation counter ----
-	cur := readCounter(counterFile) + 1
-	writeCounter(counterFile, cur)
+	cur, ok := incrementCounter(counterFile)
+	if !ok {
+		// No lock within the wait budget: skip this tick (bash: exit 0)
+		// rather than block the hook or risk a double launch.
+		return out, nil
+	}
 
 	// ---- 4. Every N escalations → write dispatch-ready marker ----
 	scoreEvery := defaultScoreEvery
@@ -546,6 +550,39 @@ func readCounter(counterFile string) int {
 		return 0
 	}
 	return n
+}
+
+// counterLockStale is how old an abandoned counter lock must be before it is
+// reaped (bash: find -mmin +1).
+const counterLockStale = time.Minute
+
+// incrementCounter is the K-110 atomic read-increment-write. It takes the
+// same mkdir lock as supervisor-stream.sh (<counter>.lock), so concurrent
+// bash and Go hooks serialize too: every caller gets a unique value and at
+// most one crosses a score-every multiple. ok is false when the lock could
+// not be taken within ~3 s.
+func incrementCounter(counterFile string) (cur int, ok bool) {
+	_ = os.MkdirAll(filepath.Dir(counterFile), 0755) //nolint:gosec
+	lock := counterFile + ".lock"
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		err := os.Mkdir(lock, 0700)
+		if err == nil {
+			break
+		}
+		if fi, serr := os.Stat(lock); serr == nil && time.Since(fi.ModTime()) > counterLockStale {
+			_ = os.Remove(lock)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return 0, false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	defer func() { _ = os.Remove(lock) }()
+	cur = readCounter(counterFile) + 1
+	writeCounter(counterFile, cur)
+	return cur, true
 }
 
 func writeCounter(counterFile string, n int) {
