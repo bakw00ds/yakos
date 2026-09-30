@@ -353,3 +353,39 @@ func TestShadow_UserPolicyEnablesAndProjectNoneVetoes(t *testing.T) {
 		t.Errorf("env still wins over the project veto: launches = %d", n)
 	}
 }
+
+// A policy file that others can write must not enable egress.
+func TestShadow_UntrustedPolicyFileDoesNotEnable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits are not modelled on windows")
+	}
+	for name, setup := range map[string]func(path string){
+		"world-writable": func(p string) { _ = os.Chmod(p, 0o666) },
+		"group-writable": func(p string) { _ = os.Chmod(p, 0o660) },
+		"symlink": func(p string) {
+			real := p + ".real"
+			_ = os.Rename(p, real)
+			_ = os.Symlink(real, p)
+		},
+	} {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		_ = os.MkdirAll(filepath.Join(home, ".yakos-state"), 0o700)
+		pol := filepath.Join(home, ".yakos-state", "decision-policy.yml")
+		_ = os.WriteFile(pol, []byte("provider: mock\n"), 0o600)
+		setup(pol)
+		work, proj := t.TempDir(), t.TempDir()
+		writeYAML(t, proj, ssYML)
+		rec := &recorder{}
+		h := newHook(work, proj)
+		h.Launch = rec.launch
+		in := bashInput("ls")
+		in.Env = shadowEnv()
+		if _, err := h.Run(context.Background(), in); err != nil {
+			t.Fatal(err)
+		}
+		if len(rec.specs) != 0 {
+			t.Errorf("%s policy file enabled the provider", name)
+		}
+	}
+}

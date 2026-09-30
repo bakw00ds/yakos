@@ -96,7 +96,10 @@ for spec in "default|none|" "none|none|YAKOS_DECISION_PROVIDER=none" \
             "killswitch|none|YAKOS_DECISION_DISABLE=1 YAKOS_DECISION_PROVIDER=mock" \
             "project-jev-only|jev|TYPESAFE_API_KEY=set" \
             "project-mock-only|mock|" \
-            "policy-vetoed|none|POLICY=mock"; do
+            "policy-vetoed|none|POLICY=mock" \
+            "policy-world-writable|none|POLICYWW=mock" \
+            "policy-group-writable|none|POLICYGW=mock" \
+            "policy-symlink|none|POLICYLN=mock"; do
     label="${spec%%|*}"; rest="${spec#*|}"; proj="${rest%%|*}"; envs="${rest#*|}"
     for side in $sides; do
         n=$((n + 1))
@@ -105,6 +108,21 @@ for spec in "default|none|" "none|none|YAKOS_DECISION_PROVIDER=none" \
         sb="$(mksb "n-$side-$label" "$yml")"
         fake="$(mkfake "$sb/rec")"
         case "$envs" in
+            POLICYWW=*|POLICYGW=*|POLICYLN=*)
+                # An untrusted policy file must not enable the provider (and the
+                # project file is irrelevant: provider none there is not a veto
+                # under test, the file's trust is).
+                mkdir -p "$sb/home/.yakos-state"
+                pf="$sb/home/.yakos-state/decision-policy.yml"
+                printf 'provider: mock\n' > "$pf"
+                case "$envs" in
+                    POLICYWW=*) chmod 666 "$pf" ;;
+                    POLICYGW=*) chmod 660 "$pf" ;;
+                    POLICYLN=*) mv "$pf" "$pf.real"; ln -s "$pf.real" "$pf" ;;
+                esac
+                envs=""
+                rm -f "$sb/.yakos.yml"
+                ;;
             POLICY=*) mkdir -p "$sb/home/.yakos-state"; printf 'provider: %s\n' "${envs#POLICY=}" > "$sb/home/.yakos-state/decision-policy.yml"; envs="" ;;
         esac
         # shellcheck disable=SC2086
@@ -289,7 +307,7 @@ PY
         for side in $sides; do
             [ -n "$PORT" ] || break
             sb="$(mksb "s-cred-$side" "$YML_PLAIN")"
-            run_payload "$side" "$sb" "$(bash_payload 'curl -u deploy:Hunter2Secret! https://x.example && mysql -uroot -pS3cretPW db && tool --api-key K3yValueABC999 run && sshpass -p Sshpass999 ssh h && echo apikey_abcdef0123456789abcdef')" \
+            run_payload "$side" "$sb" "$(bash_payload "$(printf 'curl -u deploy:Hunter2Secret! https://x.example && mysql -uroot -pS3cretPW db && tool --api-key K3yValueABC999 run && sshpass -p Sshpass999 ssh h && echo apikey_abcdef0123456789abcdef && tool\t--password\tSEC15pw run && curl -u\tu:SEC16pw https://x && curl -u "u:SEC17a SEC17b" https://y')")" \
                 "YAKOS_CLI=$GO_BINARY" "YAKOS_ROOT=$REPO_ROOT" "YAKOS_DECISION_PROVIDER=jev" "TYPESAFE_API_KEY=fake-key-not-real" "TYPESAFE_BASE_URL=http://127.0.0.1:$PORT"
             [ "$(cat "$sb/rc")" = 0 ] && ok "(s) $side credential command: hook exit 0" || bad "(s) $side credential command: hook rc"
             # Poll (bounded) for the detached child's POST to land, then for its
@@ -304,7 +322,7 @@ PY
         n_req="$(wc -l < "$CAP" | tr -d ' ')"
         [ "$n_req" -ge 1 ] && ok "(s) capture server saw $n_req request(s)" || bad "(s) capture server saw no request"
         leaked=""
-        for secret in Hunter2Secret S3cretPW K3yValueABC999 Sshpass999 abcdef0123456789abcdef; do
+        for secret in Hunter2Secret S3cretPW K3yValueABC999 Sshpass999 abcdef0123456789abcdef SEC15pw SEC16pw SEC17a SEC17b; do
             grep -q "$secret" "$CAP" && leaked="$leaked $secret"
         done
         [ -z "$leaked" ] && ok "(s) no flag-borne credential left the machine (both sides)" || bad "(s) credentials reached the provider:$leaked"

@@ -316,10 +316,29 @@ func DefaultPolicy() Policy {
 	}
 }
 
+// ErrUntrustedPolicy marks a policy file that was ignored for its ownership,
+// mode or type.
+var ErrUntrustedPolicy = errors.New("decision policy ignored")
+
 // LoadPolicy reads the user-level policy file; a missing file is the default.
 // The operator loosens the ceiling here, never in a project's .yakos.yml.
 func LoadPolicy(path string) (Policy, error) {
 	p := DefaultPolicy()
+	// The policy file can enable egress and raise the ceiling, so it is only
+	// trusted when it is a regular file, ours, and not writable by others. An
+	// untrusted file is ignored whole (default policy) and reported.
+	if fi, lerr := os.Lstat(path); lerr == nil {
+		switch {
+		case fi.Mode()&os.ModeSymlink != 0:
+			return DefaultPolicy(), fmt.Errorf("%w: %s is a symlink", ErrUntrustedPolicy, path)
+		case !fi.Mode().IsRegular():
+			return DefaultPolicy(), fmt.Errorf("%w: %s is not a regular file", ErrUntrustedPolicy, path)
+		case !OwnedByCurrentUser(fi):
+			return DefaultPolicy(), fmt.Errorf("%w: %s is owned by another user", ErrUntrustedPolicy, path)
+		case groupOrWorldWritable(fi):
+			return DefaultPolicy(), fmt.Errorf("%w: %s is group or world writable (chmod 600)", ErrUntrustedPolicy, path)
+		}
+	}
 	data, err := os.ReadFile(path) //nolint:gosec // state-dir file
 	if err != nil {
 		if os.IsNotExist(err) {

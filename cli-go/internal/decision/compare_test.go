@@ -3,8 +3,10 @@ package decision
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -301,5 +303,42 @@ func TestExecute_ProviderPanicIsAnInternalError(t *testing.T) {
 	out := (&Engine{Provider: panicProvider{}}).Execute(context.Background(), testSet(t), map[string]any{"tool": "x"}, ModeShadow, "s", time.Second)
 	if out.Class != ClassInternal {
 		t.Errorf("class = %q", out.Class)
+	}
+}
+
+// An untrusted policy file (symlink, group/world writable) is ignored whole.
+func TestLoadPolicy_IgnoresUntrustedFiles(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.yml")
+	_ = os.WriteFile(good, []byte("provider: mock\n"), 0o600)
+	if p, err := LoadPolicy(good); err != nil || p.Provider != "mock" {
+		t.Fatalf("trusted file: %+v %v", p, err)
+	}
+	for name, mk := range map[string]func() string{
+		"world-writable": func() string {
+			p := filepath.Join(dir, "ww.yml")
+			_ = os.WriteFile(p, []byte("provider: mock\n"), 0o600)
+			_ = os.Chmod(p, 0o666)
+			return p
+		},
+		"group-writable": func() string {
+			p := filepath.Join(dir, "gw.yml")
+			_ = os.WriteFile(p, []byte("provider: mock\n"), 0o600)
+			_ = os.Chmod(p, 0o620)
+			return p
+		},
+		"symlink": func() string {
+			p := filepath.Join(dir, "link.yml")
+			_ = os.Symlink(good, p)
+			return p
+		},
+	} {
+		if runtime.GOOS == "windows" {
+			t.Skip("mode bits are not modelled on windows")
+		}
+		p, err := LoadPolicy(mk())
+		if !errors.Is(err, ErrUntrustedPolicy) || p.Provider != "" {
+			t.Errorf("%s: provider=%q err=%v, want ignored", name, p.Provider, err)
+		}
 	}
 }

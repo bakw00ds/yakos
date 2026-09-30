@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"time"
@@ -47,7 +48,11 @@ func (r *runner) checkDecisionProbe() {
 	}
 	pol, perr := decision.LoadPolicy(decision.StatePaths{Dir: r.stateDir()}.Policy())
 	if perr != nil {
-		r.err(sec, "%s: unreadable: %v", decision.PolicyFileName, perr)
+		if errors.Is(perr, decision.ErrUntrustedPolicy) {
+			r.warn(sec, "%v", perr)
+		} else {
+			r.err(sec, "%s: unreadable: %v", decision.PolicyFileName, perr)
+		}
 		pol = decision.DefaultPolicy()
 	}
 	// A project file cannot enable a provider (ResolveProvider): what runs is
