@@ -412,6 +412,10 @@ func verifySHA256(data []byte, expected string) error {
 	return nil
 }
 
+// syncFile flushes f to stable storage. It is a variable so tests can
+// observe the call and inject failures.
+var syncFile = func(f *os.File) error { return f.Sync() }
+
 // atomicReplace writes newBytes to a temp file in the same directory as
 // exePath, then renames it over exePath.  On Unix this is atomic even while
 // the old binary is running (the process holds an open fd to the old inode;
@@ -450,6 +454,12 @@ func atomicReplace(exePath string, newBytes []byte) error {
 	if err := tmp.Chmod(0755); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	// fsync before rename so a crash right after the rename cannot leave a
+	// truncated binary under the final name.
+	if err := syncFile(tmp); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("fsync temp file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp file: %w", err)
