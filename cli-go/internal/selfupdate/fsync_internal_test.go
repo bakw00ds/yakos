@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -48,5 +49,30 @@ func TestAtomicReplace_FsyncsBeforeRename(t *testing.T) {
 	ents, _ := os.ReadDir(dir)
 	if len(ents) != 1 {
 		t.Fatalf("temp file leaked: %v", ents)
+	}
+}
+
+// The parent directory is synced after the rename, so the swap itself is durable.
+func TestAtomicReplace_SyncsParentDirAfterRename(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "yakos")
+	if err := os.WriteFile(exe, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := syncDir
+	defer func() { syncDir = orig }()
+	var got string
+	syncDir = func(d string) error {
+		got = d
+		if b, _ := os.ReadFile(exe); string(b) != "new" {
+			t.Errorf("directory synced before the rename landed: %q", b)
+		}
+		return nil
+	}
+	if err := atomicReplace(exe, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && got != dir {
+		t.Fatalf("syncDir called with %q, want %q", got, dir)
 	}
 }

@@ -419,6 +419,20 @@ func verifySHA256(data []byte, expected string) error {
 // observe the call and inject failures.
 var syncFile = func(f *os.File) error { return f.Sync() }
 
+// syncDir flushes a directory entry change to stable storage. It is a variable
+// so tests can observe it. A no-op on Windows, which cannot sync a directory.
+var syncDir = func(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir) //nolint:gosec
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	return d.Sync()
+}
+
 // atomicReplace writes newBytes to a temp file in the same directory as
 // exePath, then renames it over exePath.  On Unix this is atomic even while
 // the old binary is running (the process holds an open fd to the old inode;
@@ -492,6 +506,9 @@ func atomicReplace(exePath string, newBytes []byte) error {
 		return fmt.Errorf("rename temp to %s: %w", exePath, err)
 	}
 	success = true
+	// Persist the rename itself: fsync the parent directory. Best effort, since
+	// the swap already happened and some filesystems refuse a directory sync.
+	_ = syncDir(dir)
 	return nil
 }
 
