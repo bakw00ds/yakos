@@ -62,6 +62,14 @@
 #   YAKOS_HOOK_NOW     forwarded to both sides for deterministic timestamps
 #                      (masked out of the log comparison regardless).
 
+# K-110: with no bash on PATH (for example a Windows runner without Git-bash)
+# there is nothing to drive. Skip cleanly instead of failing on the first case.
+# POSIX sh only: this runs before anything bash-specific is parsed.
+if ! command -v "${YAKOS_HOOK_BASH:-bash}" >/dev/null 2>&1; then
+    echo "SKIP: ${0##*/}: no ${YAKOS_HOOK_BASH:-bash} on PATH; the hook fixtures need bash" >&2
+    exit 0
+fi
+
 set -eu
 
 REPO_ROOT="$(cd "$(dirname -- "$0")/.." && pwd -P)"
