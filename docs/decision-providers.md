@@ -141,7 +141,7 @@ explicitly; anything else on a command line (a password as a bare positional
 argument, a custom flag) is not. What is matched:
 
 - credentials on a command line: `curl -u user:pass`, `--user user:pass`,
-  `-uuser:pass`; `--password X` and `--password=X` (and other `--*-secret`,
+  `-uuser:pass` (quoted values with spaces included, and tab separators); `--password X` and `--password=X` (and other `--*-secret`,
   `--*-token`, `--api-key`, `--access-key`, `--auth` flags); `mysql`,
   `mysqldump`, `mariadb -pPASS`; `docker`, `podman`, `helm`, `oras login -p X`;
   `sshpass -p X`; `redis-cli -a X`; `htpasswd -b file user pass`;
@@ -229,6 +229,10 @@ export YAKOS_DECISION_PROVIDER=jev     # or mock, for a dry run with no key
 # ~/.yakos-state/decision-policy.yml
 provider: jev
 ```
+
+The policy file is trusted only when it is a regular file (not a symlink), owned
+by you, and not group or world writable (`chmod 600`). Otherwise it is ignored
+whole, and `yakos decide` and `yakos doctor` say so.
 
 A project can opt out with `decisions: { provider: none }` in its
 `.yakos.yml` (block style for the hooks). A project value of `jev` or `mock`
