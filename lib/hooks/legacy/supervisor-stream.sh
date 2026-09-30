@@ -316,10 +316,10 @@ else
             # prefixes need no stripping: every pattern is an unanchored search.
             'rm[[:space:]]+([^;&|]*[[:space:]])?(-[a-z]*r[a-z]*|--recursive)[[:space:]]([^;&|]*[[:space:]])?(-[a-z]*f[a-z]*|--force)([[:space:]]|$)'
             'rm[[:space:]]+([^;&|]*[[:space:]])?(-[a-z]*f[a-z]*|--force)[[:space:]]([^;&|]*[[:space:]])?(-[a-z]*r[a-z]*|--recursive)([[:space:]]|$)'
-            "(ba|z|da)?sh[[:space:]]+-[a-z]*c[[:space:]]+[^[:space:]]?([\$][(]|${_ss_bt})[[:space:]]*(curl|wget)"
+            "(ba|z|da)?sh[[:space:]]+-[a-z]*c[[:space:]]+[^[:space:]]?([\$][(]|${_ss_bt})[[:space:]]*([^[:space:])]*/)?(curl|wget)"
             'cp[[:space:]]+([^;&|]*[[:space:]])?[^[:space:]]*\.env(\.[^[:space:]]*)?[^[:alnum:][:space:]._/-]?([[:space:]]|$)'
-            "eval[[:space:]]+[^[:space:]]?([\$][(]|${_ss_bt})[[:space:]]*(curl|wget)"
-            'find[[:space:]]+([^;&|]*[[:space:]])?-delete([[:space:]]|$)'
+            "eval[[:space:]]+[^[:space:]]?([\$][(]|${_ss_bt})[[:space:]]*([^[:space:])]*/)?(curl|wget)"
+            "find[[:space:]]+(([^;&|'\"]|\"[^\"]*\"|'[^']*')*[[:space:]])?-delete([[:space:];&|]|\$)"
         )
         for pat in "${default_patterns[@]}"; do
             if printf '%s' "$combined" | grep -qiE "$pat" 2>/dev/null; then

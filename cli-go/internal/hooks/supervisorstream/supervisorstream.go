@@ -83,10 +83,10 @@ var defaultRiskPatterns = []*regexp.Regexp{
 	// need no stripping: every pattern is an unanchored search.
 	regexp.MustCompile(`(?i)rm\s+([^;&|]*\s)?(-[a-z]*r[a-z]*|--recursive)\s([^;&|]*\s)?(-[a-z]*f[a-z]*|--force)(\s|$)`),
 	regexp.MustCompile(`(?i)rm\s+([^;&|]*\s)?(-[a-z]*f[a-z]*|--force)\s([^;&|]*\s)?(-[a-z]*r[a-z]*|--recursive)(\s|$)`),
-	regexp.MustCompile(`(?i)(ba|z|da)?sh\s+-[a-z]*c\s+\S?([$][(]|\x60)\s*(curl|wget)`),
+	regexp.MustCompile(`(?i)(ba|z|da)?sh\s+-[a-z]*c\s+\S?([$][(]|\x60)\s*([^\s)]*/)?(curl|wget)`),
 	regexp.MustCompile(`(?i)cp\s+([^;&|]*\s)?[^\s]*\.env(\.[^\s]*)?[^a-z0-9\s._/-]?(\s|$)`),
-	regexp.MustCompile(`(?i)eval\s+\S?([$][(]|\x60)\s*(curl|wget)`),
-	regexp.MustCompile(`(?i)find\s+([^;&|]*\s)?-delete(\s|$)`),
+	regexp.MustCompile(`(?i)eval\s+\S?([$][(]|\x60)\s*([^\s)]*/)?(curl|wget)`),
+	regexp.MustCompile(`(?i)find\s+(([^;&|'"]|"[^"]*"|'[^']*')*\s)?-delete([\s;&|]|$)`),
 }
 
 // yakosYMLSupervisor holds the shape needed from .yakos.yml.

@@ -23,8 +23,14 @@ func TestBashPatternTableMatchesGo(t *testing.T) {
 		}
 		block := src[i : i+strings.Index(src[i:], "\n)")]
 		var out []string
-		for _, m := range regexp.MustCompile(`(?m)^\s+'([^']*)'\s*$`).FindAllStringSubmatch(block, -1) {
-			out = append(out, m[1][strings.Index(m[1], "|")+1:])
+		// Entries are single-quoted, or double-quoted with \" escapes when the
+		// pattern itself holds a single quote.
+		for _, m := range regexp.MustCompile(`(?m)^\s+(?:'([^']*)'|"((?:[^"\\]|\\")*)")\s*$`).FindAllStringSubmatch(block, -1) {
+			e := m[1]
+			if e == "" {
+				e = strings.ReplaceAll(m[2], `\"`, `"`)
+			}
+			out = append(out, e[strings.Index(e, "|")+1:])
 		}
 		return out
 	}
@@ -82,6 +88,12 @@ func TestRedactCredentialShapesK110(t *testing.T) {
 		{"curl -ualice:s3cretPw https://x.example", "s3cretPw"},
 		{"curl -fsSualice:s3cretPw https://x.example", "s3cretPw"},
 		{"curl -u 9lives:s3cretPw https://x.example", "s3cretPw"},
+		{`curl -u "alice:pw one sTail" https://x.example`, "sTail"},
+		{`curl -u 'alice:pw one sTail' https://x.example`, "sTail"},
+		{`curl -u"alice:pw one sTail" https://x.example`, "sTail"},
+		{"curl -U alice:s3cretPw https://x.example", "s3cretPw"},
+		{"curl --proxy-user alice:s3cretPw https://x.example", "s3cretPw"},
+		{"curl --proxy-user=alice:s3cretPw https://x.example", "s3cretPw"},
 		{"curl -s -X POST -u 1admin:s3cretPw https://x.example", "s3cretPw"},
 		{"wget --user=1admin:s3cretPw https://x.example", "s3cretPw"},
 		{"redis-cli -u redis://:s3cretPw@cache:6379", "s3cretPw"},
