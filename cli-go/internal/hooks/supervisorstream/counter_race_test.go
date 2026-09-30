@@ -57,3 +57,56 @@ func TestIncrementCounterReapsStaleLock(t *testing.T) {
 		t.Fatalf("incrementCounter = %d,%v; want 1,true", v, ok)
 	}
 }
+
+// A stale lock that is a NON-EMPTY directory (a killed holder plus debris) is
+// reaped, the counter proceeds, and nothing spins.
+func TestIncrementCounterReapsStaleNonEmptyLock(t *testing.T) {
+	counter := filepath.Join(t.TempDir(), ".supervisor-counter")
+	lock := counter + ".lock"
+	if err := os.MkdirAll(filepath.Join(lock, "debris"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * counterLockStale)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if v, ok := incrementCounter(counter); !ok || v != 1 {
+		t.Fatalf("incrementCounter = %d,%v; want 1,true", v, ok)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("recovery took %v", time.Since(start))
+	}
+}
+
+// A fresh lock held by someone else is never stolen; the caller gives up
+// after the bounded wait instead of spinning, and the lock is left intact.
+func TestIncrementCounterBoundedWaitOnHeldLock(t *testing.T) {
+	counter := filepath.Join(t.TempDir(), ".supervisor-counter")
+	lock := counter + ".lock"
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if _, ok := incrementCounter(counter); ok {
+		t.Fatal("took a lock that is held")
+	}
+	if d := time.Since(start); d < 2*time.Second || d > 6*time.Second {
+		t.Fatalf("waited %v, want about 3s", d)
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatalf("held lock was removed: %v", err)
+	}
+}
+
+// reapStaleLock puts back a lock that turned out to be fresh.
+func TestReapStaleLockKeepsFreshLock(t *testing.T) {
+	lock := filepath.Join(t.TempDir(), "x.lock")
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	reapStaleLock(lock)
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatalf("fresh lock removed: %v", err)
+	}
+}

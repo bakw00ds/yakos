@@ -84,7 +84,9 @@ var defaultRiskPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)rm\s+([^;&|]*\s)?(-[a-z]*r[a-z]*|--recursive)\s([^;&|]*\s)?(-[a-z]*f[a-z]*|--force)(\s|$)`),
 	regexp.MustCompile(`(?i)rm\s+([^;&|]*\s)?(-[a-z]*f[a-z]*|--force)\s([^;&|]*\s)?(-[a-z]*r[a-z]*|--recursive)(\s|$)`),
 	regexp.MustCompile(`(?i)(ba|z|da)?sh\s+-[a-z]*c\s+\S?([$][(]|\x60)\s*(curl|wget)`),
-	regexp.MustCompile(`(?i)cp\s+([^;&|]*\s)?[^\s]*\.env[^a-z0-9\s._/-]?(\s|$)`),
+	regexp.MustCompile(`(?i)cp\s+([^;&|]*\s)?[^\s]*\.env(\.[^\s]*)?[^a-z0-9\s._/-]?(\s|$)`),
+	regexp.MustCompile(`(?i)eval\s+\S?([$][(]|\x60)\s*(curl|wget)`),
+	regexp.MustCompile(`(?i)find\s+([^;&|]*\s)?-delete(\s|$)`),
 }
 
 // yakosYMLSupervisor holds the shape needed from .yakos.yml.
@@ -295,6 +297,9 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	if !ok {
 		// No lock within the wait budget: skip this tick (bash: exit 0)
 		// rather than block the hook or risk a double launch.
+		h.appendLog(&out, logFile, "WARN", "pass",
+			"counter lock busy or unremovable; skipping this escalation tick",
+			map[string]any{"lock": counterFile + ".lock"})
 		return out, nil
 	}
 
@@ -566,23 +571,41 @@ func incrementCounter(counterFile string) (cur int, ok bool) {
 	lock := counterFile + ".lock"
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		err := os.Mkdir(lock, 0700)
-		if err == nil {
+		if err := os.Mkdir(lock, 0700); err == nil {
 			break
 		}
-		if fi, serr := os.Stat(lock); serr == nil && time.Since(fi.ModTime()) > counterLockStale {
-			_ = os.Remove(lock)
-			continue
-		}
+		// Every retry sleeps and is bounded by the deadline, reaping included,
+		// so a stale lock that cannot be removed never spins this loop.
 		if time.Now().After(deadline) {
 			return 0, false
 		}
+		reapStaleLock(lock)
 		time.Sleep(5 * time.Millisecond)
 	}
 	defer func() { _ = os.Remove(lock) }()
 	cur = readCounter(counterFile) + 1
 	writeCounter(counterFile, cur)
 	return cur, true
+}
+
+// reapStaleLock removes a lock older than counterLockStale. It renames first
+// (atomic, one winner) and re-checks the age of what it moved, so a waiter
+// never deletes a lock another hook has just created. Mirrors the bash hook.
+func reapStaleLock(lock string) {
+	fi, err := os.Lstat(lock)
+	if err != nil || time.Since(fi.ModTime()) <= counterLockStale {
+		return
+	}
+	moved := fmt.Sprintf("%s.reap.%d", lock, os.Getpid())
+	if os.Rename(lock, moved) != nil {
+		return
+	}
+	if mfi, merr := os.Lstat(moved); merr == nil && time.Since(mfi.ModTime()) <= counterLockStale {
+		if os.Rename(moved, lock) == nil {
+			return // was fresh after all; put it back
+		}
+	}
+	_ = os.RemoveAll(moved)
 }
 
 func writeCounter(counterFile string, n int) {

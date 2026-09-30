@@ -1704,6 +1704,9 @@ case_check supervisor-stream.sh posttooluse-bash-ss-rm-long-flags.json 0 supervi
 case_check supervisor-stream.sh posttooluse-bash-ss-sh-c-curl-subst.json 0 supervisor-stream setup_ss_passfilter
 case_check supervisor-stream.sh posttooluse-bash-ss-cp-env.json 0 supervisor-stream setup_ss_passfilter
 case_check supervisor-stream.sh posttooluse-bash-ss-curl-basic-auth.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-sudo-cp-env-local.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-eval-curl-subst.json 0 supervisor-stream setup_ss_passfilter
+case_check supervisor-stream.sh posttooluse-bash-ss-find-delete.json 0 supervisor-stream setup_ss_passfilter
 
 # --- retro-dispatch ---------------------------------------------------------------
 case_check retro-dispatch.sh   pretooluse-generic-tool.json 0 "" "" "" "" home_noop
