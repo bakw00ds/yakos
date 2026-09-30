@@ -277,33 +277,31 @@ if [ "$HAVE_GO" = 1 ]; then
     if grep -q 'PREVIEW-MARKER-QRS' "$sb/rec.stdin" && grep -q 'INTENT-MARKER-XYZ' "$sb/rec.stdin"; then ok "(s) bash: state still carries preview and intent"; else bad "(s) bash: state lost preview or intent"; fi
 
     # Loopback capture server standing in for the provider: flag-borne credentials never leave.
-    cat > "$TMP/capture.py" <<'PY'
-import http.server, json, sys
-out, portfile = sys.argv[1], sys.argv[2]
-ANS = {"risk_class": {"type": "choice", "choice": "benign", "probabilities": {"benign": 0.9, "needs_review": 0.05, "dangerous": 0.05}, "confidence": 0.9},
-       "in_stated_scope": {"type": "noul", "noul": 0.5}, "bypasses_hard_control": {"type": "noul", "noul": 0.1}}
-class H(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        with open(out, "ab") as f:
-            f.write(body + b"\n")
-        resp = json.dumps({"model": "jev-1.13.0", "answers": ANS, "usage": {"input_tokens": 10, "output_tokens": 0}}).encode()
-        self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(resp))); self.end_headers(); self.wfile.write(resp)
-    def log_message(self, *a): pass
-srv = http.server.HTTPServer(("127.0.0.1", 0), H)
-open(portfile, "w").write(str(srv.server_port))
-srv.serve_forever()
-PY
-    if command -v python3 >/dev/null 2>&1; then
+    # A tiny Go helper (cli-go/internal/testcapture), built here, so the test needs no python3.
+    GOBIN_="$(command -v go 2>/dev/null || true)"
+    if [ -z "$GOBIN_" ]; then
+        for c in /usr/local/go/bin/go /opt/homebrew/bin/go "$HOME/go/bin/go"; do [ -x "$c" ] && GOBIN_="$c" && break; done
+    fi
+    if [ -z "$GOBIN_" ]; then
+        bad "(s) capture helper: no go toolchain found (PATH=$PATH)"
+    elif ! (cd "$REPO_ROOT/cli-go" && "$GOBIN_" build -o "$TMP/testcapture" ./internal/testcapture) >"$TMP/capture.build" 2>&1; then
+        bad "(s) capture helper failed to build: $(tr '\n' ' ' < "$TMP/capture.build")"
+    else
         CAP="$TMP/captured.ndjson"; : > "$CAP"
-        python3 "$TMP/capture.py" "$CAP" "$TMP/port" &
+        "$TMP/testcapture" "$CAP" "$TMP/port" 2>"$TMP/capture.err" &
         SRV=$!
-        # Readiness: the server writes its port only after binding. A slow runner
-        # can take seconds to start python, so wait (bounded) and fail loudly
-        # instead of firing the hooks at "http://127.0.0.1:".
-        i=0; while [ ! -s "$TMP/port" ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i + 1)); done
+        # Readiness: the helper renames the port file into place after binding.
+        # Fail at once if it dies; otherwise wait (bounded) and say why on timeout.
+        i=0
+        while [ ! -s "$TMP/port" ] && [ "$i" -lt 150 ]; do
+            kill -0 "$SRV" 2>/dev/null || break
+            sleep 0.1; i=$((i + 1))
+        done
         PORT="$(cat "$TMP/port" 2>/dev/null)"
-        if [ -z "$PORT" ]; then bad "(s) capture server never became ready"; kill "$SRV" 2>/dev/null; fi
+        if [ -z "$PORT" ]; then
+            bad "(s) capture server never became ready (alive: $(kill -0 "$SRV" 2>/dev/null && echo yes || echo no); helper: $TMP/testcapture; go: $GOBIN_ $("$GOBIN_" version 2>&1); stderr: $(tr '\n' ' ' < "$TMP/capture.err"))"
+            kill "$SRV" 2>/dev/null
+        fi
         for side in $sides; do
             [ -n "$PORT" ] || break
             sb="$(mksb "s-cred-$side" "$YML_PLAIN")"
@@ -319,6 +317,7 @@ PY
             if [ "$(wc -l < "$CAP" | tr -d ' ')" -gt "$n0" ]; then ok "(s) $side call reached the provider (status $st)"; else bad "(s) $side call never reached the provider (decision-log status: ${st:-none})"; fi
         done
         kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
+        [ -n "$PORT" ] || { printf '\n%d passed, %d failed\n' "$pass" "$fail"; exit 1; }
         n_req="$(wc -l < "$CAP" | tr -d ' ')"
         [ "$n_req" -ge 1 ] && ok "(s) capture server saw $n_req request(s)" || bad "(s) capture server saw no request"
         leaked=""
@@ -327,8 +326,6 @@ PY
         done
         [ -z "$leaked" ] && ok "(s) no flag-borne credential left the machine (both sides)" || bad "(s) credentials reached the provider:$leaked"
         grep -q 'curl' "$CAP" && ok "(s) the redacted command still reached the provider" || bad "(s) command preview missing from the request"
-    else
-        echo "  SKIP (s) capture server: python3 not found"
     fi
 fi
 
