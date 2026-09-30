@@ -11,7 +11,8 @@
 // # Topics
 //
 // Topics use a dot-separated hierarchy: "kanban.added", "dispatch.started",
-// "presence".  Subscribers may filter to a single topic; a wildcard ("*" or
+// "presence", "workflow.run.started", "files.changed", "fleet.started".
+// Subscribers may filter to a single topic; a wildcard ("*" or
 // empty) receives all events.
 //
 // # Event ordering + delivery
@@ -27,7 +28,7 @@ import (
 	"time"
 )
 
-// Topic constants for all Phase-2 event types.
+// Topic constants for the kanban, dispatch and presence event types.
 const (
 	TopicKanbanAdded      = "kanban.added"
 	TopicKanbanMoved      = "kanban.moved"
@@ -54,21 +55,24 @@ const (
 
 // Topic constants for Phase-2 IDE file-watcher events.
 //
-// Invariant: files.changed carries ONLY path/action/ts.
-// File contents MUST NEVER appear in this payload.
+// Invariant: files.changed carries ONLY path/action/ts, plus count when
+// action is "rescanned". File contents MUST NEVER appear in this payload.
 // Secret-pattern paths are filtered at the source (filewatch.Watcher) and
 // must not appear in published events.
 const (
 	// TopicFilesChanged is emitted when a workspace file is created,
-	// modified, or deleted. Payload: FilesChangedPayload.
+	// modified, or deleted, or when a new directory that arrived with many
+	// files is rescanned (action "rescanned"; the console then refreshes
+	// that subtree). Payload: FilesChangedPayload.
 	TopicFilesChanged = "files.changed"
 )
 
 // FilesChangedPayload is the payload for [TopicFilesChanged].
 //
 // Invariant: this struct MUST NOT contain a Content, Data, Body, or any other
-// field that carries file bytes. The path/action/ts triad is the complete
-// payload. This invariant is enforced by TestFilesChangedPayloadNoContent.
+// field that carries file bytes. Path, Action and TS (plus Count, a file
+// count, for "rescanned") are the complete payload. This invariant is
+// enforced by TestFilesChangedPayloadNoContent.
 type FilesChangedPayload struct {
 	// Path is the workspace-relative path of the changed file (forward slashes).
 	Path string `json:"path"`

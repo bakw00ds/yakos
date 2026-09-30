@@ -126,6 +126,10 @@
   var ideFollowToggle = false;
   var IDE_FOLLOW_LS_KEY = 'yakos_ide_follow';
   var ideTreeModified = null; // set to new Set() in IDE section init
+  // ideTreeDirs: Map<dirPath, rescanFn> for every directory row currently in
+  //   the tree. A files.changed "rescanned" event refreshes a subtree through
+  //   it (K-110). Cleared whenever the tree is rebuilt from the root.
+  var ideTreeDirs = new Map();
 
   // ── Phase 3 diff-review state (hoisted for TDZ safety) ───────────────────
   //
@@ -7892,18 +7896,55 @@
     notice.appendChild(reloadBtn);
   }
 
+  // ideTreeDirsForget drops the registry entries for every directory below
+  // dirPath (they are about to be discarded and re-rendered).
+  function ideTreeDirsForget(dirPath) {
+    var prefix = dirPath + '/';
+    Array.from(ideTreeDirs.keys()).forEach(function(k) {
+      if (k.indexOf(prefix) === 0) ideTreeDirs.delete(k);
+    });
+  }
+
+  // ideRescanSubtree refreshes the part of the file tree a "rescanned"
+  // files.changed event points at. dirPath is workspace-relative and may name
+  // a directory the tree has not rendered yet (the event fires when a NEW
+  // directory appears), so walk up to the nearest rendered ancestor and
+  // refresh that; a rendered-but-never-expanded directory has nothing stale.
+  // Nothing rendered above it means the root listing is what changed.
+  function ideRescanSubtree(dirPath) {
+    var p = String(dirPath || '').replace(/^\/+|\/+$/g, '');
+    while (p) {
+      var rescan = ideTreeDirs.get(p);
+      if (rescan) { rescan(); return; }
+      var cut = p.lastIndexOf('/');
+      p = cut < 0 ? '' : p.slice(0, cut);
+    }
+    loadIdeTree('');
+  }
+  window.__yakosIdeTree = { // test hook (app-smoke.js)
+    buildTreeList: function() { return buildTreeList.apply(null, arguments); },
+    handleFilesChanged: function(pl) { return handleFilesChangedEvent(pl); },
+    dirs: ideTreeDirs,
+  };
+
   // ── handleFilesChangedEvent ───────────────────────────────────────────────
   //
   // Called from handleWsMessage when topic === 'files.changed'.
   // payload: { path: string (workspace-relative), action: 'created'|'modified'|'deleted'|'rescanned', ts, count? }
   // 'rescanned' means path is a DIRECTORY that arrived with many files; it is
-  // not a file, so it must not reach the tab/follow logic below.
+  // not a file, so it must not reach the tab/follow logic below. The tree
+  // refreshes that subtree instead (ideRescanSubtree).
 
   function handleFilesChangedEvent(payload) {
     var fPath   = typeof payload.path   === 'string' ? payload.path   : '';
     var fAction = typeof payload.action === 'string' ? payload.action : '';
     if (!fPath) return;
-    if (fAction === 'rescanned') return;
+    if (fAction === 'rescanned') {
+      // Path is a directory that arrived with many files: refresh that
+      // subtree (K-110). It is not a file, so skip the tab/follow logic.
+      ideRescanSubtree(fPath);
+      return;
+    }
 
     // 1. Tree modified indicator: mark & re-render relevant tree node.
     if (fAction === 'created' || fAction === 'modified') {
@@ -8223,6 +8264,7 @@
     }).then((data) => {
       if (!data) return;
       treeEl.innerHTML = '';
+      ideTreeDirs.clear();
 
       if (!data.entries || data.entries.length === 0) {
         const p = document.createElement('p');
@@ -8306,6 +8348,58 @@
         let loading = false;
         let expanded = false;
 
+        // loadChildren lazy-loads this directory at depth=1 and renders it.
+        // Used by the first expand and by a "rescanned" subtree refresh.
+        function loadChildren() {
+          loading = true;
+          const spinner = document.createElement('div');
+          spinner.className = 'ide-tree-loading';
+          spinner.setAttribute('aria-label', 'Loading');
+          spinner.textContent = 'Loading…';
+          li.appendChild(spinner);
+
+          // Session mode: send cookie; SW handles bearer mode automatically.
+          const lazyTreeOpts = AUTH_MODE === 'session' ? { credentials: 'same-origin' } : {};
+          return fetch('/api/files/tree?dir=' + encodeURIComponent(entry.path) + '&depth=1', lazyTreeOpts)
+            .then((r) => r.ok ? r.json() : null)
+            .then((data) => {
+              li.removeChild(spinner);
+              loading = false;
+              if (!data) {
+                // S3: surface fetch error — revert toggle and show inline note.
+                expanded = false;
+                li.setAttribute('aria-expanded', 'false');
+                iconSpan.textContent = '▶';
+                const errNote = document.createElement('div');
+                errNote.className = 'ide-tree-error';
+                errNote.textContent = 'Failed to load ' + entry.name;
+                li.appendChild(errNote);
+                return;
+              }
+              childUl = buildTreeList(data.entries || [], depth + 1);
+              li.appendChild(childUl);
+              if (data.truncated) {
+                const truncNote = document.createElement('div');
+                truncNote.className = 'ide-tree-truncated';
+                truncNote.style.paddingLeft = ((depth + 1) * 12) + 'px';
+                truncNote.textContent = '… (truncated)';
+                li.appendChild(truncNote);
+              }
+            })
+            .catch(() => {
+              if (li.contains(spinner)) li.removeChild(spinner);
+              loading = false;
+              // S3: network error — revert toggle and show inline note.
+              expanded = false;
+              li.setAttribute('aria-expanded', 'false');
+              iconSpan.textContent = '▶';
+              const errNote = document.createElement('div');
+              errNote.className = 'ide-tree-error';
+              errNote.textContent = 'Network error loading ' + entry.name;
+              li.appendChild(errNote);
+            });
+        }
+
         toggle.addEventListener('click', () => {
           if (loading) return; // ignore clicks while fetching
           expanded = !expanded;
@@ -8320,57 +8414,25 @@
               // Explicitly empty dir — nothing to show.
             } else {
               // Lazy-load: depth=1 for this subdirectory.
-              loading = true;
-              const spinner = document.createElement('div');
-              spinner.className = 'ide-tree-loading';
-              spinner.setAttribute('aria-label', 'Loading');
-              spinner.textContent = 'Loading…';
-              li.appendChild(spinner);
-
-              // Session mode: send cookie; SW handles bearer mode automatically.
-              const lazyTreeOpts = AUTH_MODE === 'session' ? { credentials: 'same-origin' } : {};
-              fetch('/api/files/tree?dir=' + encodeURIComponent(entry.path) + '&depth=1', lazyTreeOpts)
-                .then((r) => r.ok ? r.json() : null)
-                .then((data) => {
-                  li.removeChild(spinner);
-                  loading = false;
-                  if (!data) {
-                    // S3: surface fetch error — revert toggle and show inline note.
-                    expanded = false;
-                    li.setAttribute('aria-expanded', 'false');
-                    iconSpan.textContent = '▶';
-                    const errNote = document.createElement('div');
-                    errNote.className = 'ide-tree-error';
-                    errNote.textContent = 'Failed to load ' + entry.name;
-                    li.appendChild(errNote);
-                    return;
-                  }
-                  childUl = buildTreeList(data.entries || [], depth + 1);
-                  li.appendChild(childUl);
-                  if (data.truncated) {
-                    const truncNote = document.createElement('div');
-                    truncNote.className = 'ide-tree-truncated';
-                    truncNote.style.paddingLeft = ((depth + 1) * 12) + 'px';
-                    truncNote.textContent = '… (truncated)';
-                    li.appendChild(truncNote);
-                  }
-                })
-                .catch(() => {
-                  if (li.contains(spinner)) li.removeChild(spinner);
-                  loading = false;
-                  // S3: network error — revert toggle and show inline note.
-                  expanded = false;
-                  li.setAttribute('aria-expanded', 'false');
-                  iconSpan.textContent = '▶';
-                  const errNote = document.createElement('div');
-                  errNote.className = 'ide-tree-error';
-                  errNote.textContent = 'Network error loading ' + entry.name;
-                  li.appendChild(errNote);
-                });
+              loadChildren();
             }
           } else {
             if (childUl) childUl.style.display = 'none';
           }
+        });
+
+        // rescan: a files.changed "rescanned" event says this directory's
+        // contents changed wholesale (K-110). Drop what was rendered below it;
+        // if it is open, reload it now, otherwise the next expand lazy-loads
+        // fresh data. A directory that was never loaded has nothing stale.
+        ideTreeDirs.set(entry.path, function rescan() {
+          if (loading) return;
+          if (childUl === null && entry.children == null) return;
+          ideTreeDirsForget(entry.path);
+          Array.from(li.children || []).forEach((c) => { if (c !== toggle) li.removeChild(c); });
+          childUl = null;
+          entry.children = null; // force lazy-load; the prefetched list is stale
+          if (expanded) loadChildren();
         });
       } else {
         // File entry.

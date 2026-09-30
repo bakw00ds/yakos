@@ -594,6 +594,31 @@ xterm.js.
 - **Output is live.** The tab shows the stream from the daemon-owned
   PTY as it arrives — same content you see in your local terminal.
 
+### IDE file events (`files.changed`)
+
+The IDE tab's file tree stays current through the `files.changed` bus
+topic. Every payload carries only `path`, `action` and `ts`; file
+contents never appear on the bus. `action` is one of:
+
+| `action` | `path` is | Console behavior |
+|---|---|---|
+| `created`, `modified`, `deleted` | a file | Marks the tree row, live-applies or flags an open tab, and follows the file when "Follow agent" is on. |
+| `rescanned` | a directory | Refreshes that subtree. Adds a `count` field: the number of files the directory held. |
+
+`rescanned` is sent instead of one event per file when a new directory
+arrives already holding many files (for example a `git checkout` or an
+unpacked archive). The console refreshes the subtree:
+
+- A directory the tree already loaded is dropped and re-fetched at once
+  if it is open, or on its next expand if it is collapsed.
+- A directory the tree has not rendered yet (the usual case, since it
+  is new) refreshes its nearest rendered parent so the new entry
+  appears.
+- If no ancestor is rendered, the root listing reloads. That collapses
+  open folders, since the whole tree is rebuilt.
+- Open editor tabs and the follow toggle are not touched, because
+  `path` is not a file.
+
 ---
 
 ## Flows orchestration

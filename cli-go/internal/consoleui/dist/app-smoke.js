@@ -193,8 +193,97 @@ bw.observeId('C');                     // further rebuild re-shows
 if (!st().shown) fail('new id after dismissal must re-show');
 bw.dismiss();
 
-process.stdout.write(
-  'PASS: app.js loaded without error; data-theme="' + _themeAttr +
-  '"; DOMContentLoaded registered.\n'
-);
-process.exit(0);
+// ── K-110: files.changed "rescanned" refreshes the file-tree subtree ─────────
+function ftFail(m) { process.stderr.write('FAIL: tree-rescan: ' + m + '\n'); process.exit(1); }
+function mkEl(tag) {
+  return { tag: tag, children: [], attrs: {}, style: {}, listeners: {}, className: '',
+    textContent: '', parentNode: null,
+    setAttribute: function(k, v) { this.attrs[k] = String(v); },
+    getAttribute: function(k) { return this.attrs[k]; },
+    addEventListener: function(t, f) { this.listeners[t] = f; },
+    querySelector: function() { return null; },
+    appendChild: function(c) { c.parentNode = this; this.children.push(c); return c; },
+    removeChild: function(c) { var i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); return c; },
+    contains: function(c) { return this.children.indexOf(c) >= 0; } };
+}
+var treeRoot = mkEl('div');
+document.createElement = mkEl;
+document.getElementById = function(id) { return id === 'ide-tree-root' ? treeRoot : null; };
+var fsTree = {
+  '.':   [{ type: 'dir', name: 'src', path: 'src' }, { type: 'dir', name: 'docs', path: 'docs' }],
+  'src': [{ type: 'file', name: 'a.go', path: 'src/a.go' }],
+  'docs': [{ type: 'file', name: 'x.md', path: 'docs/x.md' }],
+};
+var fetched = [];
+global.fetch = function(url) {
+  var m = /dir=([^&]*)/.exec(url), d = decodeURIComponent(m ? m[1] : '.');
+  fetched.push(d);
+  return Promise.resolve({ ok: true, status: 200, json: function() { return Promise.resolve({ entries: fsTree[d] || [] }); } });
+};
+function tick() { return new Promise(function(r) { setTimeout(r, 5); }); }
+function names(li) { // file/dir names rendered under a directory row
+  var out = [];
+  li.children.forEach(function(c) {
+    if (c.className === 'ide-tree-list') c.children.forEach(function(row) {
+      var b = row.children[0]; out.push(b.children[1].textContent);
+    });
+  });
+  return out;
+}
+async function treeRescanTest() {
+  var it = global.__yakosIdeTree;
+  if (!it) ftFail('window.__yakosIdeTree not exposed');
+  var ul = it.buildTreeList(fsTree['.'], 0);
+  treeRoot.appendChild(ul);
+  var srcLi = ul.children[0], docsLi = ul.children[1];
+  srcLi.children[0].listeners.click();            // expand src: lazy-loads it
+  await tick();
+  if (names(srcLi).join() !== 'a.go') ftFail('initial src listing: ' + names(srcLi));
+
+  // Never-loaded directory: nothing stale, no fetch.
+  fetched.length = 0;
+  it.handleFilesChanged({ path: 'docs', action: 'rescanned', count: 80 });
+  await tick();
+  if (fetched.length !== 0) ftFail('never-loaded dir must not refetch: ' + fetched);
+
+  // Open, loaded directory: contents replaced with fresh data.
+  fsTree.src = [{ type: 'file', name: 'a.go', path: 'src/a.go' }, { type: 'file', name: 'new.go', path: 'src/new.go' }];
+  it.handleFilesChanged({ path: 'src', action: 'rescanned', count: 120 });
+  await tick();
+  if (fetched.join() !== 'src') ftFail('rescanned src must refetch src once: ' + fetched);
+  if (names(srcLi).join() !== 'a.go,new.go') ftFail('src not refreshed: ' + names(srcLi));
+  if (srcLi.children.filter(function(c) { return c.className === 'ide-tree-list'; }).length !== 1) ftFail('stale list not removed');
+
+  // A NEW directory the tree has not rendered: refresh its nearest rendered ancestor.
+  fetched.length = 0;
+  fsTree.src.push({ type: 'dir', name: 'pkg', path: 'src/pkg' });
+  it.handleFilesChanged({ path: 'src/pkg', action: 'rescanned', count: 60 });
+  await tick();
+  if (fetched.join() !== 'src') ftFail('new dir must refresh ancestor src: ' + fetched);
+  if (names(srcLi).join() !== 'a.go,new.go,pkg') ftFail('new dir not listed: ' + names(srcLi));
+
+  // Collapsed loaded directory: dropped now, lazy-loaded fresh on next expand.
+  srcLi.children[0].listeners.click();            // collapse
+  fetched.length = 0;
+  fsTree.src = [{ type: 'file', name: 'only.go', path: 'src/only.go' }];
+  it.handleFilesChanged({ path: 'src', action: 'rescanned', count: 10 });
+  await tick();
+  if (fetched.length !== 0) ftFail('collapsed dir must not fetch until expanded: ' + fetched);
+  srcLi.children[0].listeners.click();            // expand
+  await tick();
+  if (names(srcLi).join() !== 'only.go') ftFail('expand after rescan shows stale data: ' + names(srcLi));
+
+  // Nothing rendered above the path: the root listing is what changed.
+  fetched.length = 0;
+  it.handleFilesChanged({ path: 'brand-new', action: 'rescanned', count: 99 });
+  await tick();
+  if (fetched.join() !== '.') ftFail('unrendered top-level dir must reload the root: ' + fetched);
+}
+
+treeRescanTest().then(function() {
+  process.stdout.write(
+    'PASS: app.js loaded without error; data-theme="' + _themeAttr +
+    '"; DOMContentLoaded registered.\n'
+  );
+  process.exit(0);
+}, function(e) { ftFail(String(e && e.stack || e)); });
