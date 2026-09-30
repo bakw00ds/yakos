@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prints shadow-vs-local agreement, fail-open counts, latency and cost, the
   evidence that gates promotion out of shadow mode. See
   `docs/decision-providers.md`.
+  A project `.yakos.yml` can no longer enable a decision provider: only
+  `YAKOS_DECISION_PROVIDER` or `provider:` in `~/.yakos-state/decision-policy.yml`
+  can (a project may set `provider: none` to opt out). The egress redaction
+  gains command-line credential shapes (`curl -u`, `--password X`, `mysql -p`,
+  `docker login -p`, `sshpass -p`, `redis-cli -a`, `htpasswd -b`, `X-Api-Key:`
+  headers, `apikey_` tokens). `yakos decide compare` skips mock and `--tag`ged
+  records and gains `--session`, `--exclude-session` and `--since`. The
+  engine deadline now holds for providers that ignore their context.
   Changing the header comment of `lib/decisions/supervisor-prefilter.yaml`
   changes its recorded hash.
 

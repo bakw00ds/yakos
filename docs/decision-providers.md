@@ -28,8 +28,13 @@ YAKOS_DECISION_MOCK=lib/decisions/examples/supervisor-prefilter.mock.json \
 1. Export `TYPESAFE_API_KEY` in your shell profile. yakOS reads it at call time
    only. It is never written to `.yakos.yml`, `settings.json`, the decision
    log, or stdout, and it is not forwarded to dispatched runtimes.
-2. Enable it per project in `.yakos.yml`. The default is `provider: none`.
-   See the commented `decisions:` block in `lib/settings/yakos.yml.template`.
+2. Turn it on as a **user** decision: `export YAKOS_DECISION_PROVIDER=jev`, or
+   put `provider: jev` in `~/.yakos-state/decision-policy.yml`. A project
+   `.yakos.yml` cannot enable a provider. It may only set `provider: none` to
+   opt that project out of the user-level switch; any other value there is
+   ignored, with a warning from `yakos decide` and `yakos doctor`. The default
+   is `none`. See the commented `decisions:` block in
+   `lib/settings/yakos.yml.template` for the rest of the project settings.
 3. Run `yakos doctor --probe-decision` to check the key, config, question-set
    hashes, breaker, and budget. Add `--live` for one real call.
 
@@ -55,8 +60,10 @@ for the same event. They go to the decision log only, never to the provider.
 It reads a JSON **object** of named fields on stdin, redacts it, asks the
 question set `lib/decisions/<surface>.yaml`, and prints one line of JSON.
 
-Provider selection: `--provider`, then `$YAKOS_DECISION_PROVIDER`, then
-`decisions.provider` in `.yakos.yml`, then `none`.
+Provider selection: `--provider`, then `$YAKOS_DECISION_PROVIDER`, then an
+explicit `provider: none` in the project `.yakos.yml` (a veto), then `provider:`
+in `~/.yakos-state/decision-policy.yml`, then `none`. A project file never
+turns a provider on.
 
 ### Output
 
@@ -129,7 +136,17 @@ Redaction and the size cap apply at every level.
 pattern and sits under no `never_paths` entry leaves verbatim. The allowlist,
 the previews and the size cap are the primary controls; keep `state_fields`
 small and leave `provider: none` on repositories you would not send to a third
-party. What is matched:
+party. Command lines are the weakest input, so the shapes below are matched
+explicitly; anything else on a command line (a password as a bare positional
+argument, a custom flag) is not. What is matched:
+
+- credentials on a command line: `curl -u user:pass`, `--user user:pass`,
+  `-uuser:pass`; `--password X` and `--password=X` (and other `--*-secret`,
+  `--*-token`, `--api-key`, `--access-key`, `--auth` flags); `mysql`,
+  `mysqldump`, `mariadb -pPASS`; `docker`, `podman`, `helm`, `oras login -p X`;
+  `sshpass -p X`; `redis-cli -a X`; `htpasswd -b file user pass`;
+  `X-Api-Key:`, `X-Auth-Token:` style headers; and TypeSafe's own
+  `apikey_...` tokens of any length
 
 - the `secret-scan` table (AWS, GitHub, Slack, Stripe, Anthropic and Google
   keys, PEM headers), plus whole PEM private-key blocks
@@ -200,15 +217,22 @@ Shadow means the call can never block, change or delay a tool call:
 
 ### Enable it
 
-Set the provider in the project `.yakos.yml` (block style, `provider` as a
-direct child of the top-level `decisions:` key), or override per shell:
+The provider is enabled by you, not by a repository. Either export it in your
+shell, or put it in the user-level policy file (both hooks read it in block
+style, as a top-level `provider:` key):
+
+```sh
+export YAKOS_DECISION_PROVIDER=jev     # or mock, for a dry run with no key
+```
 
 ```yaml
-decisions:
-  provider: jev            # or mock, for a dry run with no key
-  surfaces:
-    supervisor-prefilter: { mode: shadow }
+# ~/.yakos-state/decision-policy.yml
+provider: jev
 ```
+
+A project can opt out with `decisions: { provider: none }` in its
+`.yakos.yml` (block style for the hooks). A project value of `jev` or `mock`
+is ignored.
 
 ```sh
 export TYPESAFE_API_KEY=...            # shell profile only, never in a file
@@ -226,6 +250,14 @@ name only.
 
 ### Read the results
 
+The state reaches the child in a private 0600 file in the state directory
+(`shadow-state-*.json`), which `yakos decide --consume-state-file` deletes as
+soon as it has read it. A pipe would block the hook when the state outgrows the
+pipe buffer (about 4 KiB on Windows). Stale files are swept after ten minutes.
+The bash hook passes the state on the child's stdin and keeps the raw preview
+off every argv.
+
+
 Each shadow call appends one decision-log record carrying the provider's
 answers, latency, cost, and the local verdict (`local_verdict`: `pass` or
 `escalate`, plus `local_trigger`: `sensitive-path`, `large-diff`,
@@ -234,6 +266,12 @@ answers, latency, cost, and the local verdict (`local_verdict`: `pass` or
 ```sh
 yakos decide compare supervisor-prefilter          # add --json for scripts
 ```
+
+Mock-provider records and records labelled with `--tag` (use `--tag smoke` for
+hand-run smoke tests) are left out, so agreement and the sample gate reflect
+real traffic. Narrow further with `--session`, `--exclude-session a,b` and
+`--since 72h` (or an RFC 3339 time); `--include-mock` and `--include-tagged`
+bring the skipped records back.
 
 ```
 surface        supervisor-prefilter  (model jev-1.13.0)
