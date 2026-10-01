@@ -1,4 +1,5 @@
 {
+  "autoCompactWindow": 150000,
   "_doc": "Project-level settings.json template installed by 'yakos init'. Hook commands resolve to <project>/scripts/hooks/. Remove this _doc key after customizing — it is informational only and unused by Claude Code.",
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"

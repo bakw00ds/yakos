@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -209,9 +210,12 @@ func TestHooksImplE2E_HybridGoReadyHookRunsGoTier(t *testing.T) {
 	settings := hooksImplRefresh(t, bin, home, proj, "hybrid")
 	env := hooksImplEnv(home, work, proj)
 
-	// Non-GoReady gates stay bash under hybrid.
-	if strings.Contains(string(settings), " hook run --impl go secret-scan") {
-		t.Fatal("hybrid moved non-GoReady secret-scan to Go")
+	// Non-GoReady gates stay bash under hybrid; parity-verified ones move.
+	if strings.Contains(string(settings), " hook run --impl go budget-guard") {
+		t.Fatal("hybrid moved non-GoReady budget-guard to Go")
+	}
+	if !strings.Contains(string(settings), " hook run --impl go secret-scan") {
+		t.Fatal("hybrid left GoReady secret-scan on bash")
 	}
 
 	// cycle-counter is GoReady; its Go tier writes work/current/.cycle-count.
@@ -243,7 +247,9 @@ func TestHooksImplE2E_LegacyCommandFailsClosedAndMigrates(t *testing.T) {
 	fixed := hooksImplRefresh(t, bin, home, proj, "go")
 	env := hooksImplEnv(home, work, proj)
 
-	legacy := strings.ReplaceAll(string(fixed), " hook run --impl go ", " hook run ")
+	// A-3 (#288) predates the fail-closed guard: its commands were plain.
+	plain := regexp.MustCompile(`\[ -x \S+ \] \|\| exec \\"[^"]*\\"; exec `).ReplaceAllString(string(fixed), "")
+	legacy := strings.ReplaceAll(plain, " hook run --impl go ", " hook run ")
 	if legacy == string(fixed) {
 		t.Fatal("test setup: no --impl go to strip")
 	}

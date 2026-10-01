@@ -684,7 +684,7 @@ func TestHookBinaries_WarnsOnMissingPinnedBinary(t *testing.T) {
 		Environ: func(string) string { return "" }, Writer: &buf})
 	out := buf.String()
 	if !strings.Contains(out, gone) || !strings.Contains(out, noexec) ||
-		!strings.Contains(out, "yakos refresh --hooks-impl go") {
+		!strings.Contains(out, "yakos refresh") {
 		t.Errorf("expected warn naming both bad binaries and the fix; got:\n%s", out)
 	}
 	if strings.Contains(out, good) {
@@ -706,5 +706,35 @@ func TestHookBinaries_SilentWhenHealthy(t *testing.T) {
 		Environ: func(string) string { return "" }, Writer: &buf}) //nolint:errcheck
 	if strings.Contains(buf.String(), "Project hook binaries") {
 		t.Errorf("unexpected output:\n%s", buf.String())
+	}
+}
+
+// K-118: doctor reports the go/bash mix and understands guarded commands.
+func TestHookImplMix_ReportsGuardedAndBash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits are not meaningful on Windows")
+	}
+	home := makeTmpHome(t)
+	projectPath := t.TempDir()
+	bin := filepath.Join(projectPath, "bin", "yakos")
+	writeFile(t, bin, "#!/bin/sh\n")
+	if err := os.Chmod(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	guarded := `[ -x ` + bin + ` ] || exec \"${CLAUDE_PROJECT_DIR}/scripts/hooks/secret-scan.sh\"; exec ` + bin + ` hook run --impl go secret-scan`
+	settings := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[
+	 {"type":"command","command":"` + guarded + `"},
+	 {"type":"command","command":"` + bin + ` hook run --impl go path-log"},
+	 {"type":"command","command":"${CLAUDE_PROJECT_DIR}/scripts/hooks/supervisor-gate.sh"}]}]}}`
+	writeFile(t, filepath.Join(projectPath, ".claude", "settings.json"), settings)
+	var buf bytes.Buffer
+	Run(Config{HomeDir: home, ProjectPath: projectPath, LookPath: noLookPath,
+		Environ: func(string) string { return "" }, Writer: &buf}) //nolint:errcheck
+	out := buf.String()
+	if !strings.Contains(out, "hook implementations: 2 go (path-log, secret-scan), 1 bash; 1 fail-closed go hook(s) fall back to their bash twin") {
+		t.Errorf("mix not reported:\n%s", out)
+	}
+	if strings.Contains(out, "binary missing") {
+		t.Errorf("healthy guarded binary reported missing:\n%s", out)
 	}
 }

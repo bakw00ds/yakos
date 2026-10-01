@@ -544,12 +544,21 @@ func (r *runner) checkHookDrift() {
 // nothing unless triggered, which keeps output identical to bash doctor.sh
 // on healthy projects.
 func (r *runner) checkHookBinaries() {
+	mix := readHookImplMix(r.cfg.ProjectPath)
 	missing := missingHookBinaries(r.cfg.ProjectPath)
-	if len(missing) == 0 {
+	if len(mix.Go) == 0 && len(missing) == 0 {
 		return
 	}
 	_, _ = fmt.Fprintf(r.w, "Project hook binaries: %s/.claude/settings.json\n", r.cfg.ProjectPath)
-	r.warn(SectionHookDrift, "hook binary missing or not executable (exit 127 = silent fail-open): %s; run 'yakos refresh --hooks-impl go' to re-pin",
+	if len(mix.Go) > 0 {
+		r.info(SectionHookDrift, "hook implementations: %d go (%s), %d bash; %d fail-closed go hook(s) fall back to their bash twin if the binary is missing (%s)",
+			len(mix.Go), strings.Join(mix.Go, ", "), len(mix.Bash), len(mix.Guarded), strings.Join(mix.Guarded, ", "))
+	}
+	if len(missing) == 0 {
+		_, _ = fmt.Fprintln(r.w, "")
+		return
+	}
+	r.warn(SectionHookDrift, "hook binary missing or not executable (exit 127 = silent fail-open; guarded fail-closed hooks fall back to bash): %s; run 'yakos refresh' to re-pin",
 		strings.Join(missing, ", "))
 	_, _ = fmt.Fprintln(r.w, "")
 }

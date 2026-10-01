@@ -10,9 +10,20 @@ yakos refresh --hooks-impl bash|go|hybrid
 
 | Value | What `settings.json` registers |
 |---|---|
-| `bash` (default) | `${CLAUDE_PROJECT_DIR}/scripts/hooks/<name>.sh` for every hook. Byte-identical to refresh before this switch existed. |
+| `bash` | `${CLAUDE_PROJECT_DIR}/scripts/hooks/<name>.sh` for every hook. Byte-identical to refresh before this switch existed. The explicit escape hatch. |
 | `go` | `<yakos> hook run --impl go <name>` for every hook, GoReady or not. Refresh prints a warning naming the non-GoReady hooks it switched. |
-| `hybrid` | `<yakos> hook run --impl go <name>` only for hooks the registry marks `GoReady`; every other hook stays bash. |
+| `hybrid` (default) | `<yakos> hook run --impl go <name>` only for hooks the registry marks `GoReady`; every other hook stays bash. |
+
+Since K-118 the default is `hybrid`. Nothing is persisted for a default run.
+Two safety valves keep it from surprising anyone:
+
+- A default run whose `yakos` binary looks temporary (OS temp dir or a
+  worktree build) keeps bash and says so on the project's `hooks-impl:` line.
+  Only an explicit `--hooks-impl` pins such a path.
+- An unreadable settings template also keeps bash; the settings phase then
+  reports the template problem itself.
+
+A project with `hooks_impl: bash` persisted keeps bash.
 
 `<yakos>` is the absolute path of the running binary (`os.Executable`,
 symlinks evaluated), not a bare `yakos`. Claude Code launched from a GUI
@@ -20,6 +31,42 @@ or IDE may not have `yakos` on its `PATH`. A missing command exits 127,
 which Claude Code treats as non-blocking, so gates such as `secret-scan`
 and `budget-guard` would silently stop enforcing. A path containing shell
 special characters is single-quoted.
+
+## Fail-closed hooks carry a guard
+
+An absolute path does not help once the binary is gone (uninstall, moved
+checkout, a reinstall elsewhere). The shell exits 127 and Claude Code lets
+the call through. For hooks the registry marks `FailClosed` (today
+`path-allowlist` and `secret-scan` in the default set; `budget-guard`,
+`supervisor-gate`, `peer-claim`, `supervisor-ack-gate` and
+`plan-quality-gate` under `--hooks-impl go`) the command is:
+
+```
+[ -x '<abs>/yakos' ] || exec "${CLAUDE_PROJECT_DIR}/scripts/hooks/<name>.sh"; exec '<abs>/yakos' hook run --impl go <name>
+```
+
+With the binary present it is the Go hook. Without it the bash twin that the
+same refresh deployed runs and keeps blocking (tested end to end: a missing
+binary still exits 2 on a secret). `exec` keeps stdin and the exit code
+intact, and there is no `||` chain that could run both twins. Telemetry
+hooks keep the plain command, because a missing binary costs them a log
+line, not a gate. Refresh and `yakos doctor` recognize the guarded form
+exactly; any other shape is not mistaken for a Go hook.
+
+`yakos doctor <project>` prints the mix, for example `10 go (...), 13 bash; 2
+fail-closed go hook(s) fall back to their bash twin if the binary is missing`,
+and still warns when a pinned binary is missing so you re-run `yakos refresh`.
+
+## Why not every hook
+
+Go starts in about 40 ms. A cheap bash hook (`peer-claim` 16 ms,
+`context-inject` 25 ms) is faster in bash. The default moves the hooks where
+Go wins and parity holds. `supervisor-stream` is the biggest win (about 149
+ms bash, 40 ms Go) but its Go twin writes a different log record, so it
+stays on bash until `tests/run-hook-parity.sh` shows no non-accepted
+divergence; the registry's `GoReady` flag then switches it with no other
+change. `yakos hook list` shows `go` for parity-verified hooks and
+`go-unverified` for the rest.
 
 ## The tier is pinned in the command
 
@@ -55,8 +102,9 @@ rewritten in place. Refresh warns when the resolved path looks temporary
 There is no separate list. `hybrid` uses every registry entry marked
 `GoReady` in `cli-go/internal/hooks/registry`, the flag set by the A-1
 parity work (`tests/run-hook-parity.sh`). Today that is `cycle-counter`,
-`mailbox-mirror`, `path-log`, `session-end-check`, `task-dependency-gate`,
-and `team-lifecycle`.
+`mailbox-mirror`, `output-injection-scan`, `path-allowlist`, `path-log`,
+`secret-scan`, `session-end-check`, `task-complete-dispatch`,
+`task-dependency-gate`, and `team-lifecycle`.
 
 ## Persistence
 

@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Heavy hooks run on Go by default; auto-compaction on by default (K-118).**
+  `yakos refresh` now defaults to `--hooks-impl hybrid`: `path-allowlist`
+  and `secret-scan` join `output-injection-scan` and the other parity-
+  verified hooks on `yakos hook run --impl go` (zero non-accepted divergences
+  in `tests/run-hook-parity.sh`). `supervisor-stream` stays on bash until its
+  Go log record reaches parity. A fail-closed Go hook is wrapped in a guard,
+  so a missing or non-executable `yakos` falls back to the bash twin instead
+  of exiting 127 (non-blocking, silent fail-open). A default run never pins a
+  temporary binary (temp dir, worktree build) and keeps bash. `yakos doctor`
+  reports the go/bash mix. `--hooks-impl bash` (or a persisted `hooks_impl:
+  bash`) is the escape hatch. `yakos hook list` now says `go-unverified`
+  instead of `bash-only` for a hook that has a Go twin but no parity proof.
+  Refresh also writes Claude Code's own `autoCompactWindow: 150000` into
+  `.claude/settings.json` when the key is absent, so the lead session
+  compacts itself near 150K tokens. Tune or switch it off with
+  `auto_compact_window: <tokens>|off` in `.yakos.yml`; the
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` env var still wins. See
+  `docs/hooks-impl.md` and `docs/auto-compact.md`.
+
 - **Shadow decision provider on the supervisor pre-filter (K-111 P2b).**
   When `decisions.provider` is `jev` (or `mock`), or
   `YAKOS_DECISION_PROVIDER` says so, `supervisor-stream` (bash and Go twin)

@@ -57,6 +57,7 @@ func hookBinaryWords(command string) ([]string, bool) {
 // the `<abs>/yakos hook run ...` form written by `refresh --hooks-impl
 // go|hybrid`. Bare `yakos` (resolved through PATH) is not reported.
 func hookCommandBinary(command string) (string, bool) {
+	command, _ = stripHookGuard(command)
 	w, ok := hookBinaryWords(command)
 	if !ok || len(w) < 4 || w[1] != "hook" || w[2] != "run" {
 		return "", false
@@ -118,4 +119,77 @@ func missingHookBinaries(projectPath string) []string {
 	}
 	sort.Strings(missing)
 	return missing
+}
+
+// stripHookGuard removes the `[ -x <bin> ] || exec <bash twin>; exec ` guard
+// `yakos refresh` puts in front of fail-closed Go hooks, so the rest parses as
+// a plain Go hook command. guarded reports whether a guard was present.
+func stripHookGuard(command string) (plain string, guarded bool) {
+	if !strings.HasPrefix(command, "[ -x ") {
+		return command, false
+	}
+	const sep = "; exec "
+	if i := strings.Index(command, sep); i >= 0 {
+		return command[i+len(sep):], true
+	}
+	return command, false
+}
+
+// hookImplMix is the per-implementation tally of a project's registered hooks.
+type hookImplMix struct {
+	Go      []string // hook names running on `yakos hook run --impl go`
+	Guarded []string // subset of Go that falls back to the bash twin if the binary is missing
+	Bash    []string // hook names running as scripts/hooks/<name>.sh
+}
+
+// readHookImplMix classifies every hook command in the project's
+// .claude/settings.json. Unreadable or malformed settings yield an empty mix.
+func readHookImplMix(projectPath string) hookImplMix {
+	var mix hookImplMix
+	data, err := os.ReadFile(filepath.Join(projectPath, ".claude", "settings.json")) //nolint:gosec
+	if err != nil {
+		return mix
+	}
+	var parsed struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if json.Unmarshal(data, &parsed) != nil {
+		return mix
+	}
+	goSeen, guardSeen, bashSeen := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for _, entries := range parsed.Hooks {
+		for _, e := range entries {
+			for _, h := range e.Hooks {
+				plain, guarded := stripHookGuard(h.Command)
+				if w, ok := hookBinaryWords(plain); ok && len(w) >= 4 && w[1] == "hook" && w[2] == "run" {
+					name := w[len(w)-1]
+					if !goSeen[name] {
+						goSeen[name] = true
+						mix.Go = append(mix.Go, name)
+					}
+					if guarded && !guardSeen[name] {
+						guardSeen[name] = true
+						mix.Guarded = append(mix.Guarded, name)
+					}
+					continue
+				}
+				p := "/" + strings.ReplaceAll(h.Command, "\\", "/")
+				if i := strings.Index(p, "/scripts/hooks/"); i >= 0 {
+					name := strings.TrimSuffix(filepath.Base(p[i:]), ".sh")
+					if !bashSeen[name] {
+						bashSeen[name] = true
+						mix.Bash = append(mix.Bash, name)
+					}
+				}
+			}
+		}
+	}
+	sort.Strings(mix.Go)
+	sort.Strings(mix.Guarded)
+	sort.Strings(mix.Bash)
+	return mix
 }

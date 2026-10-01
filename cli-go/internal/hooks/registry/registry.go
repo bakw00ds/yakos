@@ -152,6 +152,7 @@ var entries = []Entry{
 	{
 		Name:       "path-allowlist",
 		FailClosed: true,
+		GoReady:    true,
 		New:        func(cfg Config) Hook { return pathallowlist.New(cfg.WorkCurrentDir, cfg.ProjectDir) },
 	},
 	{
@@ -203,6 +204,7 @@ var entries = []Entry{
 	{
 		Name:       "secret-scan",
 		FailClosed: true,
+		GoReady:    true,
 		New:        func(cfg Config) Hook { return secretscan.New(cfg.WorkCurrentDir) },
 	},
 	{

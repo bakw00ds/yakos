@@ -252,7 +252,18 @@ func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, ri resolv
 		}
 	}
 
-	hasDrift := hookRpt.New > 0 || hookRpt.Synced > 0 || settingsRpt.Added > 0 || settingsRpt.Removed > 0
+	// Phase 3b: default-on auto-compaction window (K-118).
+	compactStatus, compactChanged := "", false
+	if !settingsRpt.Skipped {
+		var cerr error
+		compactStatus, compactChanged, cerr = applyAutoCompact(absPath, deployedSettings, dryRun)
+		if cerr != nil {
+			_, _ = fmt.Fprintf(ew, "refresh: auto-compact error for %s: %v\n", absPath, cerr)
+			compactStatus = ""
+		}
+	}
+
+	hasDrift := hookRpt.New > 0 || hookRpt.Synced > 0 || settingsRpt.Added > 0 || settingsRpt.Removed > 0 || compactChanged
 
 	driftStatus := "in sync"
 	if hasDrift {
@@ -273,6 +284,9 @@ func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, ri resolv
 
 	_, _ = fmt.Fprintf(w, "    hooks:    %s\n", hooksSummary)
 	_, _ = fmt.Fprintf(w, "    settings: %s\n", settingsSummary)
+	if compactStatus != "" {
+		_, _ = fmt.Fprintf(w, "    auto-compact-window: %s\n", compactStatus)
+	}
 	_, _ = fmt.Fprintf(w, "    status:   %s\n", driftStatus)
 	_, _ = fmt.Fprintln(w, "")
 
@@ -800,7 +814,7 @@ type resolvedImpl struct {
 }
 
 // resolveProjectImpls decides each project's impl (flag > persisted >
-// bash) and validates go/hybrid against the Go registry. Any failure aborts
+// DefaultHooksImpl) and validates go/hybrid against the Go registry. Any failure aborts
 // the run before a byte is written.
 func resolveProjectImpls(cfg Config, templateFile string) (map[string]resolvedImpl, error) {
 	out := make(map[string]resolvedImpl, len(cfg.ProjectPaths))
@@ -812,7 +826,7 @@ func resolveProjectImpls(cfg Config, templateFile string) (map[string]resolvedIm
 		if err != nil {
 			abs = p
 		}
-		ri := resolvedImpl{impl: HooksImplBash, source: "default"}
+		ri := resolvedImpl{impl: DefaultHooksImpl, source: "default"}
 		if cfg.HooksImpl != "" {
 			impl, err := ParseHooksImpl(string(cfg.HooksImpl))
 			if err != nil {
@@ -827,11 +841,17 @@ func resolveProjectImpls(cfg Config, templateFile string) (map[string]resolvedIm
 		if ri.impl != HooksImplBash {
 			if !loaded {
 				data, err := os.ReadFile(templateFile) //nolint:gosec
-				if err != nil {
-					return nil, fmt.Errorf("reading template %s: %w", templateFile, err)
+				if err == nil {
+					err = json.Unmarshal(data, &tmpl)
 				}
-				if err := json.Unmarshal(data, &tmpl); err != nil {
-					return nil, fmt.Errorf("template JSON invalid at %s: %w", templateFile, err)
+				if err != nil {
+					if ri.source == "default" {
+						// The default is best-effort: the settings phase reports a
+						// bad template itself. Only an explicit choice fails here.
+						out[p] = resolvedImpl{impl: HooksImplBash, source: "default; template unreadable, keeping bash"}
+						continue
+					}
+					return nil, fmt.Errorf("reading template %s: %w", templateFile, err)
 				}
 				loaded = true
 			}
@@ -843,6 +863,13 @@ func resolveProjectImpls(cfg Config, templateFile string) (map[string]resolvedIm
 				}
 			}
 			ri.bin = bin
+			if ri.source == "default" && ephemeralBinary(bin) {
+				// Nothing asked for Go hooks, so never pin a path that may
+				// vanish (temp dir, worktree build): stay on bash.
+				ri = resolvedImpl{impl: HooksImplBash, source: "default; yakos binary at " + bin + " looks temporary, keeping bash"}
+				out[p] = ri
+				continue
+			}
 			if !warnedTemp && ephemeralBinary(bin) {
 				warnedTemp = true
 				_, _ = fmt.Fprintf(cfg.ErrWriter, "refresh: warning: Go hook commands will point at %s, which looks temporary (temp dir or worktree); re-run refresh from an installed yakos\n", bin)

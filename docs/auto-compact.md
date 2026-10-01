@@ -1,4 +1,58 @@
-# Auto-compact (M3.1)
+# Auto-compact
+
+## Default: the harness compacts at ~150K tokens (K-118)
+
+`yakos refresh` writes Claude Code's own `autoCompactWindow` setting into the
+project's `.claude/settings.json` when the key is absent:
+
+```json
+{ "autoCompactWindow": 150000 }
+```
+
+Claude Code then summarizes the conversation by itself as context approaches
+that window. This is a harness feature (setting, `--autocompact`, the
+`/autocompact` command and the `CLAUDE_CODE_AUTO_COMPACT_WINDOW` env var), so
+no hook and no `/compact` injection is involved. Measured on Claude Code
+2.1.286 with `--debug`: a project with the key logs `autocompact: ...
+effectiveWindow=130000` (the window minus the harness's summary buffer), and
+`DISABLE_AUTO_COMPACT=1` silences it. The harness sets the exact
+trigger point; expect it at or below the configured window.
+
+Why: the lead averaged 447K cache-read tokens per turn over 832 turns, and the
+cache-read bill grows with context. Compacting near 150K cuts it by roughly
+two thirds.
+
+It applies to every Claude Code session in the project, including dispatched
+`claude -p` runs, not only the interactive lead. The allowed range is 100K to
+1M tokens.
+
+| Want | Do |
+|---|---|
+| Default | nothing; refresh adds `autoCompactWindow: 150000` if absent |
+| Another window | `auto_compact_window: 200k` (or `200000`) in `<project>/.yakos.yml`, then `yakos refresh` |
+| Off | `auto_compact_window: off` in `.yakos.yml`, then `yakos refresh`; refresh removes the key and the harness default applies |
+| One session only | `claude --autocompact auto` or `/autocompact`; `CLAUDE_CODE_AUTO_COMPACT_WINDOW` beats every setting |
+| Never compact | `DISABLE_AUTO_COMPACT=1` in the environment (harness switch) |
+
+A value you set by hand in `settings.json` is kept; refresh only overwrites it
+when `.yakos.yml` names one. A bad `.yakos.yml` value fails refresh for that
+project with the allowed range and leaves the file untouched. `yakos refresh`
+prints `auto-compact-window: <value> (<source>)` per project.
+
+## The older marker/Stop-hook path (M3.1) is opt-in and unverified
+
+The rest of this page describes an earlier mechanism: `context-threshold`
+writes `.compact-pending` and a Stop hook answers `{"decision":"block",
+"reason":"/compact"}`. Claude Code feeds a Stop hook's `reason` back to the
+model as text; a hook cannot run a built-in slash command, and nothing here
+shows the harness executing `/compact` from it. It also sizes context from
+transcript bytes, and a transcript keeps growing after a compaction, so it can
+re-trigger. It stays off unless `context_thresholds.auto` is set, and it is not
+what the default relies on. Prefer the native setting above.
+
+---
+
+# Auto-compact via marker and Stop hook (M3.1, opt-in)
 
 yakOS M3.1 adds automatic context compaction: when the context window crosses
 a configurable threshold, the yakos hook system automatically injects `/compact`
