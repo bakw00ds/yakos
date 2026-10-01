@@ -53,6 +53,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
@@ -222,6 +223,15 @@ type SDKEngine struct {
 	// readyOnce ensures the ready gate fires at most once.
 	readyCh   chan struct{}
 	readyOnce sync.Once
+	// gotReady is set only when the sidecar's real "ready" frame arrives,
+	// before readyCh is closed. doClose also closes readyCh to unblock Start,
+	// so readyCh alone cannot distinguish "ready" from "died before ready".
+	gotReady atomic.Bool
+
+	// afterSpawnHook, when non-nil, runs in Start right after readLoop is
+	// launched and before Start waits for ready. Test seam only: lets a test
+	// deterministically hold Start until the sidecar's exit has fully landed.
+	afterSpawnHook func()
 
 	// turnMu enforces one-at-a-time SendUserTurn (same pattern as Session).
 	turnMu sync.Mutex
@@ -366,11 +376,20 @@ func (e *SDKEngine) Start(ctx context.Context) error {
 	// The lock is NOT held here — readLoop acquires it separately.
 	go e.readLoop()
 
+	if e.afterSpawnHook != nil {
+		e.afterSpawnHook()
+	}
+
 	// Wait for "ready" (sidecar authenticated) or timeout/cancel.
 	// e.mu is NOT held while we wait, so readLoop can proceed.
 	const readyTimeout = 30 * time.Second
 	select {
 	case <-e.readyCh:
+		// doClose closes readyCh after closed to unblock this wait; when both
+		// are ready, select picks at random. Only a real ready frame counts.
+		if !e.gotReady.Load() {
+			return fmt.Errorf("interactive: sdk engine: sidecar exited before emitting ready")
+		}
 		return nil
 	case <-e.closed:
 		return fmt.Errorf("interactive: sdk engine: sidecar exited before emitting ready")
@@ -578,6 +597,7 @@ func (e *SDKEngine) dispatchLine(line []byte) {
 	switch env.Kind {
 	case "ready":
 		e.readyOnce.Do(func() {
+			e.gotReady.Store(true)
 			close(e.readyCh)
 		})
 
