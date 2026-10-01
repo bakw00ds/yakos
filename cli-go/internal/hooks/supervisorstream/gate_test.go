@@ -367,6 +367,10 @@ func TestGateConcurrentHooksLaunchOnce(t *testing.T) {
 	// 10 hooks cross the threshold at once with a run in flight afterwards:
 	// exactly one launch and nine coalesced (the lock serializes the gate).
 	h, rec, work, env := gateHook(t, "min_launch_interval_s: 0\n", "")
+	// The seam holds every hook between the state load and save, so without the
+	// gate lock all ten would see "nothing in flight" and launch.
+	t.Setenv("YAKOS_TEST_SEAMS", "1")
+	t.Setenv("YAKOS_TEST_GATE_HOLD_MS", "150")
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(1)

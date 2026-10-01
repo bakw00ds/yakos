@@ -53,6 +53,7 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 	defer release()
 	now := h.NowFn().Unix()
 	st := loadRunState(statePath)
+	gateHold(in.Env)
 	if st.hasStart && now-st.start > int64(lim.deadline+lim.interval+60) {
 		h.appendLog(out, logFile, "WARN", "pass",
 			"in-flight supervisor run is older than its deadline; treating it as dead",
@@ -200,4 +201,24 @@ func writeSynthFinding(path string, ceiling int, now time.Time) {
 	}
 	_, _ = f.Write(append(data, '\n'))
 	_ = f.Close()
+}
+
+// gateHold is a test seam: with YAKOS_TEST_SEAMS=1 it sleeps
+// YAKOS_TEST_GATE_HOLD_MS between the state load and save, so a missing gate
+// lock is deterministic. It reads the process environment only (a project
+// .yakos.yml cannot set it) and is a no-op otherwise. Bash twin: the seam in
+// _ss_gate.
+func gateHold(env map[string]string) {
+	get := func(k string) string {
+		if v := env[k]; v != "" {
+			return v
+		}
+		return os.Getenv(k)
+	}
+	if get("YAKOS_TEST_SEAMS") != "1" {
+		return
+	}
+	if ms, ok := parseDecimal(get("YAKOS_TEST_GATE_HOLD_MS")); ok && ms > 0 {
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+	}
 }
