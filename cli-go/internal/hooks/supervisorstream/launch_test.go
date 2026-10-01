@@ -57,6 +57,7 @@ func logMessages(t *testing.T, work string) []string {
 
 func TestLaunchAtThreshold_MatchesBash(t *testing.T) {
 	work, proj := t.TempDir(), t.TempDir()
+	loosen(t, "min_launch_interval_s: 0\n")
 	writeYAML(t, proj, "supervisor:\n  score_every_n_calls: 3\n  model: sonnet\n  runtime: codex\n  agent: watcher\n")
 	if err := os.WriteFile(filepath.Join(work, "decisions.md"), []byte("ship the thing\n\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -105,6 +106,9 @@ func TestLaunchAtThreshold_MatchesBash(t *testing.T) {
 		t.Errorf("forked record lacks dispatch=async:\n%s", all)
 	}
 	// Second threshold (6th escalation) launches again; 4th and 5th do not.
+	// The first run must have finished (the wrapper clears the in-flight
+	// state), or the K-117 gate coalesces the second trigger instead.
+	finishRuns(t, work)
 	bigEdit(t, h, env, 3)
 	if len(rec.specs) != 2 {
 		t.Errorf("launches after 6 escalations = %d, want 2", len(rec.specs))
@@ -233,6 +237,10 @@ func TestProductionLauncherRunsFakeDispatcher(t *testing.T) {
 	}
 	h := supervisorstream.New(work, proj)
 	h.NowFn = fixedNow
+	// Under `go test` the running executable is the test binary, not yakos, so
+	// the wrapper re-exec is off here: this runs the unwrapped fallback. The
+	// wrapper itself is covered by TestWrapper* and the coalesce script.
+	h.Self = ""
 	in := hooktype.HookInput{
 		Event: "PostToolUse", Tool: "Edit",
 		Payload: map[string]any{"tool_input": map[string]any{"file_path": "big.go", "new_string": strings.Repeat("line\n", 25)}},
@@ -265,6 +273,29 @@ func TestProductionLauncherRunsFakeDispatcher(t *testing.T) {
 				t.Fatalf("%s never received %q", f.name, f.want)
 			}
 			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+// finishRuns simulates the detached wrapper completing: it clears the
+// in-flight marker of every session state file (the wrapper does the same).
+func finishRuns(t *testing.T, work string) {
+	t.Helper()
+	files, _ := filepath.Glob(filepath.Join(work, ".supervisor-run.*"))
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, l := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+			if strings.HasPrefix(l, "start=") {
+				l = "start="
+			}
+			out = append(out, l)
+		}
+		if err := os.WriteFile(f, []byte(strings.Join(out, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

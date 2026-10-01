@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -24,6 +25,20 @@ type LaunchSpec struct {
 	// StdoutPath / StderrPath are appended to (created when absent).
 	StdoutPath string
 	StderrPath string
+
+	// Wrapper settings (K-117). The production launcher re-executes Self as
+	// `hook supervisor-wrap`: a Go process (no bash, so it also works on
+	// Windows) that runs Args under a wall-clock deadline, clears the
+	// in-flight state and starts the follow-up for coalesced triggers. State
+	// and Lock are the shared state file and mkdir lock, Pending the
+	// per-session pending-events file and Log the hook ndjson log.
+	Self                  string
+	State, Lock, Log      string
+	Pending               string
+	Findings              string // supervisor-findings.ndjson (synthetic finding at the ceiling)
+	DeadlineS, Cap, Ceil  int
+	IntervalS, BackoffMin int
+	DelayS                int
 }
 
 // Launcher starts spec detached and returns without waiting for it. The
@@ -120,7 +135,18 @@ func launchDetached(spec LaunchSpec) error {
 	}
 	defer errf.Close() //nolint:errcheck
 
-	cmd := exec.Command(spec.CLI, spec.Args...) //nolint:gosec
+	var cmd *exec.Cmd
+	if spec.Self != "" && spec.State != "" {
+		args := append([]string{"hook", "supervisor-wrap", spec.CLI}, spec.Args...)
+		cmd = exec.Command(spec.Self, args...) //nolint:gosec
+		cmd.Env = append(os.Environ(),
+			"_SSW_STATE="+spec.State, "_SSW_LOCK="+spec.Lock, "_SSW_LOG="+spec.Log, "_SSW_PENDING="+spec.Pending, "_SSW_FINDINGS="+spec.Findings, "_SSW_CEIL="+strconv.Itoa(spec.Ceil),
+			"_SSW_DEADLINE="+strconv.Itoa(spec.DeadlineS), "_SSW_CAP="+strconv.Itoa(spec.Cap),
+			"_SSW_INTERVAL="+strconv.Itoa(spec.IntervalS), "_SSW_BACKOFF="+strconv.Itoa(spec.BackoffMin),
+			"_SSW_DELAY="+strconv.Itoa(spec.DelayS))
+	} else {
+		cmd = exec.Command(spec.CLI, spec.Args...) //nolint:gosec
+	}
 	cmd.Stdout = out
 	cmd.Stderr = errf
 	detach(cmd)
@@ -128,4 +154,14 @@ func launchDetached(spec LaunchSpec) error {
 		return err
 	}
 	return cmd.Process.Release()
+}
+
+// selfExecutable returns the running yakos binary ("" when unknown, in which
+// case the launcher runs the dispatch directly, unwrapped).
+func selfExecutable() string {
+	p, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return p
 }
