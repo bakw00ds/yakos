@@ -494,6 +494,30 @@ func TestSDKEngine_StartCrashBeforeReady(t *testing.T) {
 	}
 }
 
+// TestSDKEngine_StartCrashBeforeReady_ExitLandsFirst pins the CI flake (K-123):
+// when the sidecar's exit is fully processed (closed AND readyCh both closed
+// by doClose) before Start reaches its wait, select picks either case at
+// random, so Start used to return nil about half the time. The hook holds
+// Start until the exit has landed, making that interleaving deterministic.
+func TestSDKEngine_StartCrashBeforeReady_ExitLandsFirst(t *testing.T) {
+	// select is random when both cases are ready, so loop: with the bug each
+	// iteration fails ~50%, so 50 iterations make a miss astronomically rare.
+	for i := 0; i < 50; i++ {
+		onChunk, _ := collectSDKChunks()
+		eng := newFakeSDKEngine(t, fakeSidecarCrash(), onChunk)
+		interactive.SetAfterSpawnHook(eng, func() {
+			select {
+			case <-eng.Closed():
+			case <-time.After(10 * time.Second):
+				t.Error("engine never observed sidecar exit")
+			}
+		})
+		if err := eng.Start(context.Background()); err == nil {
+			t.Fatalf("iter %d: expected Start to return an error when sidecar exits before ready", i)
+		}
+	}
+}
+
 // TestSDKEngine_OwnerConversation verifies OwnerOperatorID and ConversationID.
 func TestSDKEngine_OwnerConversation(t *testing.T) {
 	onChunk, _ := collectSDKChunks()

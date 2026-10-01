@@ -10,3 +10,7 @@ func ParseNodeMajorExported(version string) int {
 	return parseNodeMajor(version)
 }
 
+
+// SetAfterSpawnHook installs a hook that Start runs after launching the
+// readLoop and before waiting for ready.
+func SetAfterSpawnHook(e *SDKEngine, f func()) { e.afterSpawnHook = f }
