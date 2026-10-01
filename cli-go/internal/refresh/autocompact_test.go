@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -124,6 +125,9 @@ func TestAutoCompact_InsertKeepsFormattingOfTheRestOfTheFile(t *testing.T) {
 }
 
 func TestAutoCompact_KeepsFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no POSIX permission bits to preserve")
+	}
 	for _, mode := range []os.FileMode{0o600, 0o640} {
 		proj, file := acProject(t, `{"hooks":{}}`, "")
 		if err := os.Chmod(file, mode); err != nil {
