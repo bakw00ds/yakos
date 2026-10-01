@@ -98,6 +98,12 @@ runtime-specific: parallelism applies to claude (Agent calls), codex
   on base commit, or the failing package is outside the diff. Rerun
   only after that check; otherwise dispatch a fix (`rule:verification-
   discipline`).
+- **Re-reviews after a fixup round are narrow:** verify only the prior
+  findings against the new sha; never repeat a full-suite run.
+- **Implementers run the full gate once before each push**, not after
+  every edit; while iterating, run the targeted package and test.
+- **Reviewers check CI first** (`gh pr checks`) and skip suites CI
+  already ran green on the same sha.
 - **Name the pushed sha in the review brief and require a scratch
   checkout.** If the implementer is still active on the branch, say so
   in the brief so the reviewer doesn't build against a moving tree.

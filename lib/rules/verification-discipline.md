@@ -36,6 +36,9 @@ is the definition of done that closes that gap, before a PR is opened.
 - **Tests write only to `t.TempDir()`.** Never `repoRoot(t)` or a real
   checkout; never derive a path from `YAKOS_ROOT`/`YAKOS_LIB`
   (`rule:git-hygiene`).
+- **The full suite runs once per push, by the implementer.** Reviewers
+  do not re-run it: CI green on the same sha satisfies it, and reviewers
+  run only targeted tests, mutation checks, and adversarial probes.
 - **Known pre-existing failures are classified, not re-litigated.**
   Reproduce on the base commit in a scratch worktree, cite it by name,
   and never re-investigate it once listed in the brief.
