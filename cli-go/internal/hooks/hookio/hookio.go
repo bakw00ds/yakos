@@ -96,11 +96,22 @@ func DecodeBytes(data []byte) (hooktype.HookInput, error) {
 		return hooktype.HookInput{}, ErrNotObject
 	}
 
+	// Read the envelope fields by EXACT key from the decoded object, like jq's
+	// `.tool_name`. A struct decode matches keys case-insensitively and lets a
+	// later "TOOL_NAME" shadow the real "tool_name", so a payload could show
+	// the hook a different tool than the one bash evaluates.
 	var env claudeHookEnvelope
-	if err := json.Unmarshal(data, &env); err != nil {
-		// Unreachable in practice (the first Unmarshal above already
-		// succeeded into `any`), kept for defense in depth.
-		return hooktype.HookInput{}, fmt.Errorf("hookio: stdin did not parse as JSON: %w", err)
+	for _, f := range []struct {
+		key string
+		dst *string
+	}{{"hook_event_name", &env.HookEventName}, {"tool_name", &env.ToolName}, {"cwd", &env.CWD}} {
+		switch v := obj[f.key].(type) {
+		case nil:
+		case string:
+			*f.dst = v
+		default:
+			return hooktype.HookInput{}, fmt.Errorf("hookio: stdin did not parse as JSON: %s is not a string", f.key)
+		}
 	}
 
 	return hooktype.HookInput{

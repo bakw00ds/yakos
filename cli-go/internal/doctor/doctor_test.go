@@ -3,6 +3,7 @@ package doctor
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/bakw00ds/yakos/internal/hookguard"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -661,7 +662,7 @@ func TestHookBinaries_WarnsOnMissingPinnedBinary(t *testing.T) {
 	home := makeTmpHome(t)
 	projectPath := t.TempDir()
 	good := filepath.Join(projectPath, "bin ary", "yakos")
-	writeFile(t, good, "#!/bin/sh\n")
+	writeFile(t, good, "#!/bin/sh\ncase \"$1\" in hook) echo \"no Go implementation\" >&2; exit 2;; esac\necho 0.60.1.0\n")
 	if err := os.Chmod(good, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -684,7 +685,7 @@ func TestHookBinaries_WarnsOnMissingPinnedBinary(t *testing.T) {
 		Environ: func(string) string { return "" }, Writer: &buf})
 	out := buf.String()
 	if !strings.Contains(out, gone) || !strings.Contains(out, noexec) ||
-		!strings.Contains(out, "yakos refresh --hooks-impl go") {
+		!strings.Contains(out, "yakos refresh") {
 		t.Errorf("expected warn naming both bad binaries and the fix; got:\n%s", out)
 	}
 	if strings.Contains(out, good) {
@@ -706,5 +707,64 @@ func TestHookBinaries_SilentWhenHealthy(t *testing.T) {
 		Environ: func(string) string { return "" }, Writer: &buf}) //nolint:errcheck
 	if strings.Contains(buf.String(), "Project hook binaries") {
 		t.Errorf("unexpected output:\n%s", buf.String())
+	}
+}
+
+// K-118: doctor reports the go/bash mix and understands guarded commands.
+func TestHookImplMix_ReportsGuardedAndBash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits are not meaningful on Windows")
+	}
+	home := makeTmpHome(t)
+	projectPath := t.TempDir()
+	bin := filepath.Join(projectPath, "bin", "yakos")
+	writeFile(t, bin, "#!/bin/sh\ncase \"$1\" in hook) echo \"no Go implementation\" >&2; exit 2;; esac\necho 0.60.1.0\n")
+	if err := os.Chmod(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	guarded := strings.ReplaceAll(hookguard.Build(bin, "secret-scan"), `"`, `\"`)
+	settings := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[
+	 {"type":"command","command":"` + guarded + `"},
+	 {"type":"command","command":"` + bin + ` hook run --impl go path-log"},
+	 {"type":"command","command":"${CLAUDE_PROJECT_DIR}/scripts/hooks/supervisor-gate.sh"}]}]}}`
+	writeFile(t, filepath.Join(projectPath, ".claude", "settings.json"), settings)
+	var buf bytes.Buffer
+	Run(Config{HomeDir: home, ProjectPath: projectPath, LookPath: noLookPath,
+		Environ: func(string) string { return "" }, Writer: &buf}) //nolint:errcheck
+	out := buf.String()
+	if !strings.Contains(out, "hook implementations: 2 go (path-log, secret-scan), 1 bash; 1 fail-closed go hook(s) fall back to their bash twin") {
+		t.Errorf("mix not reported:\n%s", out)
+	}
+	if strings.Contains(out, "binary missing") {
+		t.Errorf("healthy guarded binary reported missing:\n%s", out)
+	}
+}
+
+// K-118 sec-review F3: doctor errors on a pinned binary too old for --impl.
+func TestHookBinaries_ErrorsOnStalePinnedBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX sh")
+	}
+	home := makeTmpHome(t)
+	projectPath := t.TempDir()
+	bin := filepath.Join(projectPath, "bin", "yakos")
+	writeFile(t, bin, "#!/bin/sh\necho '0.59.0.0 (go)'\n")
+	if err := os.Chmod(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[
+	 {"type":"command","command":"` + bin + ` hook run --impl go path-log"}]}]}}`
+	writeFile(t, filepath.Join(projectPath, ".claude", "settings.json"), settings)
+	var buf bytes.Buffer
+	report, _ := Run(Config{HomeDir: home, ProjectPath: projectPath, LookPath: noLookPath,
+		Environ: func(string) string { return "" }, Writer: &buf})
+	if !strings.Contains(buf.String(), "too old for `hook run --impl`") || !strings.Contains(buf.String(), "0.59.0.0") {
+		t.Errorf("stale binary not reported:\n%s", buf.String())
+	}
+	if report.Errors == 0 {
+		t.Error("expected an error to be counted")
+	}
+	if p := HookBinaryProblems(projectPath); len(p) != 1 || !strings.Contains(p[0], "too old") {
+		t.Errorf("HookBinaryProblems = %v", p)
 	}
 }

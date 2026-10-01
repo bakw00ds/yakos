@@ -30,8 +30,9 @@ import (
 //	                          code.
 //	yakos hook list           print every registered hook name and its
 //	                          readiness ("go" = parity-verified, safe for
-//	                          `refresh --hooks-impl=go`; "bash-only" = not
-//	                          yet).
+//	                          `refresh --hooks-impl=hybrid`; "go-unverified" =
+//	                          a Go twin exists but parity is not verified, so
+//	                          hybrid keeps it on bash).
 //	yakos hook mode           print the effective YAKOS_HOOKS mode and why.
 func runHookCmd(yakosRoot string, args []string) {
 	if len(args) == 0 || isHelpArg(args[0]) {
@@ -301,7 +302,7 @@ func runHookList(args []string) {
 		os.Exit(0)
 	}
 	for _, e := range registry.All() {
-		status := "bash-only"
+		status := "go-unverified"
 		if e.GoReady {
 			status = "go"
 		}

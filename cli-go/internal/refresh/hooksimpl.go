@@ -31,6 +31,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bakw00ds/yakos/internal/hookguard"
 	"github.com/bakw00ds/yakos/internal/hooks/registry"
 )
 
@@ -41,6 +42,12 @@ const (
 	HooksImplBash   HooksImpl = "bash"
 	HooksImplGo     HooksImpl = "go"
 	HooksImplHybrid HooksImpl = "hybrid"
+
+	// DefaultHooksImpl is what refresh uses when neither --hooks-impl nor a
+	// persisted hooks_impl says otherwise (K-118): the parity-verified GoReady
+	// hooks run on their Go twins, everything else stays bash. `--hooks-impl
+	// bash` is the explicit escape hatch.
+	DefaultHooksImpl = HooksImplHybrid
 
 	// hooksImplYAMLKey is the top-level key persisted in <project>/.yakos.yml.
 	hooksImplYAMLKey = "hooks_impl"
@@ -86,17 +93,34 @@ var registeredHooks = func() []string { return registry.Names() }
 // command run with the variable unset would look for lib/hooks-user/<name>.sh,
 // find nothing, and exit 0, silently disabling every gate (fail-open).
 func goCommand(bin, name string) string {
-	return shellQuote(bin) + " hook run --impl go " + name
+	if needsGuard(name) {
+		return hookguard.Build(bin, name)
+	}
+	return hookguard.Plain(bin, name)
+}
+
+// needsGuard reports whether the Go command for name must carry the
+// fail-closed wrapper: every hook that can block (registry FailClosed) and
+// every other hook that can exit 2 or is a detector (registry Guard). A
+// variable so tests can simulate registry states.
+var needsGuard = func(name string) bool {
+	for _, e := range registry.All() {
+		if e.Name == name {
+			return e.FailClosed || e.Guard
+		}
+	}
+	return false
+}
+
+// stripGuard returns the plain Go command inside a guarded command (see
+// internal/hookguard); ok is false for anything refresh did not generate.
+func stripGuard(command string) (plain string, ok bool) {
+	return hookguard.Strip(command)
 }
 
 // shellQuote single-quotes s only when it contains characters a shell would
 // treat specially, so ordinary paths stay readable.
-func shellQuote(s string) string {
-	if s != "" && !strings.ContainsAny(s, " \t\"'$`\\&;|<>(){}[]*?!#~") {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
+func shellQuote(s string) string { return hookguard.ShellQuote(s) }
 
 // isGoCommand reports whether command is a `yakos hook run <name>` form.
 func isGoCommand(command string) bool {
@@ -158,6 +182,9 @@ func posixWords(command string) ([]string, bool) {
 // flag-less form `<path>/yakos hook run <name>` is also recognized so a
 // project refreshed before the flag existed is migrated in place.
 func goHookName(command string) (string, bool) {
+	if plain, ok := stripGuard(command); ok {
+		command = plain
+	}
 	w, ok := posixWords(command)
 	if !ok || len(w) < 4 || w[1] != "hook" || w[2] != "run" {
 		return "", false
@@ -345,7 +372,11 @@ func PersistHooksImpl(projPath string, impl HooksImpl) error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	if err := os.Chmod(tmpPath, 0o644); err != nil { //nolint:gosec
+	mode := os.FileMode(0o644)
+	if fi, serr := os.Stat(path); serr == nil {
+		mode = fi.Mode().Perm()
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
 	}

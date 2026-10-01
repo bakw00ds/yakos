@@ -199,12 +199,12 @@ func TestGoReady_S6A2bSet(t *testing.T) {
 	}
 	// S-6 A-2b added output-injection-scan (20/20 fixtures at exact parity)
 	// and task-complete-dispatch (framework-root resolver wired, 4/4).
-	// path-allowlist, secret-scan, budget-guard and supervisor-gate reach
-	// full decision parity except for documented, exit-code-pinned "accepted"
-	// divergences (Go never depends on jq; Go is stricter than a bash bug),
-	// and are deliberately NOT flipped here: that call belongs to the
-	// security review of this change, not to the change itself.
-	want := []string{"cycle-counter", "mailbox-mirror", "output-injection-scan", "path-log", "session-end-check", "task-complete-dispatch", "task-dependency-gate", "team-lifecycle"}
+	// K-118 added path-allowlist (69/76 +7 accepted) and secret-scan (21/23
+	// +2 accepted): zero non-accepted divergences in tests/run-hook-parity.sh,
+	// so the default hybrid refresh runs them on Go (guarded by a bash
+	// fallback). budget-guard and supervisor-gate stay on bash: their
+	// parity is not complete or their Go twin is slower than bash.
+	want := []string{"cycle-counter", "mailbox-mirror", "output-injection-scan", "path-allowlist", "path-log", "secret-scan", "session-end-check", "task-complete-dispatch", "task-dependency-gate", "team-lifecycle"}
 	if len(goReady) != len(want) {
 		t.Fatalf("GoReady hooks=%v, want %v", goReady, want)
 	}
