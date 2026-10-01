@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,7 +118,7 @@ func (a *ClaudeAdapter) ExecCmd(ctx context.Context, req DispatchRequest) *exec.
 	}
 	// K-116 W1: pin the outer relay session to the dispatched agent's resolved
 	// tier. Without this the relay runs on the user's default model (opus).
-	if m := claudeModelFlag(req.ModelOverride); m != "" {
+	if m := claudeModelFlag(req.AgentName, req.ModelOverride); m != "" {
 		args = append(args, "--model", m)
 	}
 	args = append(args, "-p", framed)
@@ -169,18 +171,24 @@ func buildEnv(req DispatchRequest) []string {
 	return appendDispatchEnv(env, req)
 }
 
-// claudeModelFlag maps a yakOS tier name to the value the claude CLI accepts
-// for --model. fable has no bare alias in the CLI (probed 2026-06-11), so it
-// maps to its concrete ID. Empty in, empty out (no flag).
-func claudeModelFlag(tier string) string {
-	// Never emit an abstract alias (balanced, cheap, ...) or an unknown name:
-	// the CLI rejects it and the session loops on model selection (K-117).
-	tier = ResolveAlias(tier)
-	if !ValidateTier(tier) {
+// modelDropLog receives the one-line notice when a model name cannot be
+// passed to the claude CLI. Replaced in tests.
+var modelDropLog io.Writer = os.Stderr
+
+// claudeModelFlag maps a model name to the bare tier alias the claude CLI
+// resolves itself (haiku|sonnet|opus|fable). The CLI owns alias-to-id
+// resolution, so no concrete id is pinned here. Abstract aliases (balanced,
+// cheap, ...) are expanded first; anything that is still not a tier (for
+// example gemini-3.5 or gpt-5 on a non-claude agent) is dropped with a log
+// line and no --model is passed. Empty in, empty out (no flag, no log).
+func claudeModelFlag(agent, model string) string {
+	if model == "" {
 		return ""
 	}
-	if tier == "fable" {
-		return "claude-fable-5"
+	tier := ResolveAlias(model)
+	if !ValidateTier(tier) {
+		_, _ = fmt.Fprintf(modelDropLog, "yakos: agent %q model %q is not a claude tier (haiku|sonnet|opus|fable); not pinning --model\n", agent, model)
+		return ""
 	}
 	return tier
 }
@@ -220,7 +228,7 @@ func (a *ClaudeAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest
 	// K-116 W1: pin the model only when the agent or caller chose one
 	// explicitly; unpinned chat keeps the user's default model.
 	if req.ModelExplicit {
-		if m := claudeModelFlag(req.ModelOverride); m != "" {
+		if m := claudeModelFlag("(chat)", req.ModelOverride); m != "" {
 			args = append(args, "--model", m)
 		}
 	}

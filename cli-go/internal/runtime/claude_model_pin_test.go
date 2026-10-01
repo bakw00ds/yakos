@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -37,7 +38,7 @@ func baseReq() DispatchRequest {
 func TestClaudeExecCmd_PinsModel(t *testing.T) {
 	a := &ClaudeAdapter{}
 	for tier, want := range map[string]string{
-		"haiku": "haiku", "sonnet": "sonnet", "opus": "opus", "fable": "claude-fable-5",
+		"haiku": "haiku", "sonnet": "sonnet", "opus": "opus", "fable": "fable",
 	} {
 		req := baseReq()
 		req.ModelOverride = tier
@@ -99,7 +100,7 @@ func TestClaudeChatExecCmd_ModelPinOnlyWhenExplicit(t *testing.T) {
 // K-117: abstract aliases must never reach --model; unknown names are dropped.
 func TestClaudeExecCmd_ModelAliasNeverAbstract(t *testing.T) {
 	a := &ClaudeAdapter{}
-	for in, want := range map[string]string{"balanced": "sonnet", "cheap": "haiku", "best": "opus", "frontier": "claude-fable-5"} {
+	for in, want := range map[string]string{"balanced": "sonnet", "cheap": "haiku", "best": "opus", "frontier": "fable"} {
 		req := baseReq()
 		req.AgentName = "supervisor"
 		req.ModelOverride = in
@@ -108,11 +109,22 @@ func TestClaudeExecCmd_ModelAliasNeverAbstract(t *testing.T) {
 			t.Errorf("%q -> --model %q, want %q", in, got, want)
 		}
 	}
-	req := baseReq()
-	req.ModelOverride = "gpt-5"
-	if hasArg(a.ExecCmd(context.Background(), req).Args, "--model") {
-		t.Error("unknown model name must not be passed through")
+	var logBuf bytes.Buffer
+	old := modelDropLog
+	modelDropLog = &logBuf
+	defer func() { modelDropLog = old }()
+	for _, agent := range []struct{ name, model string }{{"general-codex", "gpt-5"}, {"general-agy", "gemini-3.5"}} {
+		logBuf.Reset()
+		req := baseReq()
+		req.AgentName, req.ModelOverride = agent.name, agent.model
+		if hasArg(a.ExecCmd(context.Background(), req).Args, "--model") {
+			t.Errorf("%s: foreign model must not be passed through", agent.name)
+		}
+		if !strings.Contains(logBuf.String(), agent.name) || !strings.Contains(logBuf.String(), agent.model) {
+			t.Errorf("%s: expected one log line naming agent and model, got %q", agent.name, logBuf.String())
+		}
 	}
+	req := baseReq()
 	req.AgentName, req.ModelOverride = "supervisor", "haiku"
 	if got, _ := argAfter(a.ExecCmd(context.Background(), req).Args, "--model"); got != "haiku" {
 		t.Errorf("supervisor haiku -> %q", got)
