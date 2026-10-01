@@ -752,7 +752,7 @@ while :; do
                 st_ceillog=1
                 _ssw_log WARN "high-risk supervisor launch ceiling reached for this session" "\"ceiling\":$_SSW_CEIL"
                 echo "supervisor-stream: high-risk launch ceiling reached for this session; skipping further supervisor runs" >&2
-                printf '{"ts":"%s","batch_size":0,"scores":{},"overall":"CRITICAL","synthetic":true,"rationale":"High-risk supervisor launch ceiling (%s) reached for this session: further high-risk events are recorded but no longer supervised. Review the session and the pending events file.","recommended_action":"surface_to_operator"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_SSW_CEIL" >> "$_SSW_FINDINGS" 2>/dev/null
+                ( umask 077; printf '{"ts":"%s","batch_size":0,"scores":{},"overall":"CRITICAL","synthetic":true,"rationale":"High-risk supervisor launch ceiling (%s) reached for this session: further high-risk events are recorded but no longer supervised. Review the session and the pending events file.","recommended_action":"surface_to_operator"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_SSW_CEIL" >> "$_SSW_FINDINGS" ) 2>/dev/null
             fi
         elif [ "$_SSW_CAP" -eq 0 ] || [ "$st_launches" -lt "$_SSW_CAP" ]; then
             follow=routine
@@ -925,6 +925,16 @@ _ss_gate() {
     fi
     trap 'rmdir "$_ss_lock" 2>/dev/null || true' EXIT
     _ss_load_state
+    # Test seam (K-117): widen the load-then-save window so a missing gate lock
+    # is deterministic. Read from the process environment only (a project
+    # .yakos.yml cannot set it) and only with YAKOS_TEST_SEAMS=1; a no-op in
+    # production. Go twin: gateHold.
+    if [ "${YAKOS_TEST_SEAMS:-}" = 1 ]; then
+        case "${YAKOS_TEST_GATE_HOLD_MS:-}" in
+            ''|*[!0-9]*) : ;;
+            *) sleep "$((YAKOS_TEST_GATE_HOLD_MS / 1000)).$(printf '%03d' "$((YAKOS_TEST_GATE_HOLD_MS % 1000))")" ;;
+        esac
+    fi
     now="$(date +%s)"
     stale=$((sup_deadline + sup_interval + 60))
     if [ -n "$st_start" ] && [ $((now - st_start)) -gt "$stale" ]; then
