@@ -36,9 +36,17 @@ is the definition of done that closes that gap, before a PR is opened.
 - **Tests write only to `t.TempDir()`.** Never `repoRoot(t)` or a real
   checkout; never derive a path from `YAKOS_ROOT`/`YAKOS_LIB`
   (`rule:git-hygiene`).
-- **The full suite runs once per push, by the implementer.** Reviewers
-  do not re-run it: CI green on the same sha satisfies it, and reviewers
-  run only targeted tests, mutation checks, and adversarial probes.
+- **The full suite runs once per push, by the implementer.** A reviewer
+  skips it only when ALL hold: every CI job covering the touched area is
+  green on the SAME sha (not pending, not just "CI green" overall), and
+  CI actually exercises that area. Otherwise run it locally.
+- **Known CI gaps a reviewer still runs locally:**
+  - Hook changes: fixtures under macOS `/bin/bash` 3.2 (CI runs bash 5
+    for most hook jobs); skip only if the bash32 fixtures job covers
+    that specific suite.
+  - Windows-only paths, unless the Windows job ran on the sha.
+  - Anything CI skips by path filter.
+  Even when skipping: targeted tests, mutation checks, adversarial probes.
 - **Known pre-existing failures are classified, not re-litigated.**
   Reproduce on the base commit in a scratch worktree, cite it by name,
   and never re-investigate it once listed in the brief.

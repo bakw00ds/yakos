@@ -102,8 +102,10 @@ runtime-specific: parallelism applies to claude (Agent calls), codex
   findings against the new sha; never repeat a full-suite run.
 - **Implementers run the full gate once before each push**, not after
   every edit; while iterating, run the targeted package and test.
-- **Reviewers check CI first** (`gh pr checks`) and skip suites CI
-  already ran green on the same sha.
+- **Reviewers check CI first** (`gh pr checks`) and skip a full suite
+  only if every relevant job is green on the same sha and CI exercises
+  the touched area; hooks (bash 3.2), Windows-only, and path-filtered
+  areas still run locally (`rule:verification-discipline`).
 - **Name the pushed sha in the review brief and require a scratch
   checkout.** If the implementer is still active on the branch, say so
   in the brief so the reviewer doesn't build against a moving tree.
