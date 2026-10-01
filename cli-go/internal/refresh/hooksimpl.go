@@ -31,6 +31,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bakw00ds/yakos/internal/hookguard"
 	"github.com/bakw00ds/yakos/internal/hooks/registry"
 )
 
@@ -92,67 +93,34 @@ var registeredHooks = func() []string { return registry.Names() }
 // command run with the variable unset would look for lib/hooks-user/<name>.sh,
 // find nothing, and exit 0, silently disabling every gate (fail-open).
 func goCommand(bin, name string) string {
-	plain := shellQuote(bin) + " hook run --impl go " + name
-	if !hookFailClosed(name) {
-		return plain
+	if needsGuard(name) {
+		return hookguard.Build(bin, name)
 	}
-	return guardPrefix(bin, name) + "exec " + plain
+	return hookguard.Plain(bin, name)
 }
 
-// hookFailClosed reports whether the registry marks name as a hook that can
-// block (exit 2). A variable so tests can simulate registry states.
-var hookFailClosed = func(name string) bool {
+// needsGuard reports whether the Go command for name must carry the
+// fail-closed wrapper: every hook that can block (registry FailClosed) and
+// every other hook that can exit 2 or is a detector (registry Guard). A
+// variable so tests can simulate registry states.
+var needsGuard = func(name string) bool {
 	for _, e := range registry.All() {
 		if e.Name == name {
-			return e.FailClosed
+			return e.FailClosed || e.Guard
 		}
 	}
 	return false
 }
 
-// guardPrefix is the shell guard in front of a fail-closed hook's Go command.
-// A missing or non-executable yakos binary makes the shell exit 127, which
-// Claude Code treats as non-blocking, so a security gate would silently stop
-// enforcing. The guard falls back to the bash twin the same refresh deployed
-// (scripts/hooks/<name>.sh), so the gate keeps running. exec keeps stdin and
-// the exit code intact (no `||` chain that could run both twins).
-func guardPrefix(bin, name string) string {
-	return "[ -x " + shellQuote(bin) + ` ] || exec "${CLAUDE_PROJECT_DIR}/scripts/hooks/` + name + `.sh"; `
-}
-
-// guardSep separates the guard from the Go command it protects.
-const guardSep = "; exec "
-
-// stripGuard returns the plain Go command inside a guarded command. ok is
-// false unless command is EXACTLY what goCommand emits for that binary and
-// hook, so unknown shapes are never mistaken for a guarded hook.
+// stripGuard returns the plain Go command inside a guarded command (see
+// internal/hookguard); ok is false for anything refresh did not generate.
 func stripGuard(command string) (plain string, ok bool) {
-	if !strings.HasPrefix(command, "[ -x ") {
-		return "", false
-	}
-	i := strings.Index(command, guardSep)
-	if i < 0 {
-		return "", false
-	}
-	rest := command[i+len(guardSep):]
-	w, wok := posixWords(rest)
-	if !wok || len(w) != 6 || w[1] != "hook" || w[2] != "run" || w[3] != "--impl" || w[4] != "go" {
-		return "", false
-	}
-	if command != guardPrefix(w[0], w[5])+"exec "+rest {
-		return "", false
-	}
-	return rest, true
+	return hookguard.Strip(command)
 }
 
 // shellQuote single-quotes s only when it contains characters a shell would
 // treat specially, so ordinary paths stay readable.
-func shellQuote(s string) string {
-	if s != "" && !strings.ContainsAny(s, " \t\"'$`\\&;|<>(){}[]*?!#~") {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
+func shellQuote(s string) string { return hookguard.ShellQuote(s) }
 
 // isGoCommand reports whether command is a `yakos hook run <name>` form.
 func isGoCommand(command string) bool {
@@ -404,7 +372,11 @@ func PersistHooksImpl(projPath string, impl HooksImpl) error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	if err := os.Chmod(tmpPath, 0o644); err != nil { //nolint:gosec
+	mode := os.FileMode(0o644)
+	if fi, serr := os.Stat(path); serr == nil {
+		mode = fi.Mode().Perm()
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
 	}

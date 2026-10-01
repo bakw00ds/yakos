@@ -155,6 +155,9 @@ done
 # the __CLAUDE_PROJECT_DIR__ substitution, so no file in this tree and no
 # line in this script contains a contiguous detector-matching string.
 _secret_aws() { printf '%s%s' 'AKIA' '0123456789ABCDEF'; }
+_secret_aws_u16le() { _secret_aws | sed 's/./&\\u0000/g'; }
+_secret_aws_u16be() { _secret_aws | sed 's/./\\u0000&/g'; }
+_secret_aws_nulmid() { _secret_aws | sed 's/^\(AKIA\)/\1\\u0000/'; }
 _secret_stripe() { printf '%s%s' 'sk_live' '_0123456789abcdefghijklmn'; }
 _secret_slack() { printf '%s%s' 'xox' 'b-0123456789-abcdefghijklmnop'; }
 _secret_anthropic() { printf '%s%s%s' 'sk-ant' '-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRST' 'UVWXYZ0123456789_-abcdefghijklmnopqrstuvwxyzABC'; }
@@ -236,6 +239,9 @@ case_check() {
     # tokens), so this is safe even though some assembled values themselves
     # contain regex-special characters.
     payload="${payload//__SECRET_AWS__/$(_secret_aws)}"
+    payload="${payload//__SECRET_AWS_U16LE__/$(_secret_aws_u16le)}"
+    payload="${payload//__SECRET_AWS_U16BE__/$(_secret_aws_u16be)}"
+    payload="${payload//__SECRET_AWS_NULMID__/$(_secret_aws_nulmid)}"
     payload="${payload//__SECRET_STRIPE__/$(_secret_stripe)}"
     payload="${payload//__SECRET_SLACK__/$(_secret_slack)}"
     payload="${payload//__SECRET_ANTHROPIC__/$(_secret_anthropic)}"
@@ -946,6 +952,8 @@ echo
 # --- path-allowlist ---
 case_check path-allowlist.sh   pretooluse-edit-api.json          0 path-allowlist setup_allowlist_strict
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  2 path-allowlist setup_allowlist_strict
+# K-118 sec-review F5: a later "TOOL_NAME" key must not shadow tool_name (jq reads the exact key).
+case_check path-allowlist.sh   pretooluse-edit-web-blocked-casefold.json  2 path-allowlist setup_allowlist_strict
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_with_bypass     # bypass dir + allowlist absent → permissive
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_bp_scope_exact       # K-99: exact scope bypasses
 case_check path-allowlist.sh   pretooluse-edit-web-blocked.json  0 path-allowlist setup_bp_scope_glob        # K-99: web/** glob bypasses
@@ -1090,6 +1098,15 @@ case_check secret-scan.sh      pretooluse-notebookedit-edits-object-secret-newso
 case_check secret-scan.sh      pretooluse-write-content-array-secret.json 2 secret-scan
 case_check secret-scan.sh      pretooluse-notebookedit-newsource-array-secret.json 2 secret-scan
 case_check secret-scan.sh      pretooluse-edit-no-content-fields.json 0 secret-scan
+# K-118 sec-review F1/F5: bash drops NUL bytes before grep, so a UTF-16 or
+# NUL-split secret is still caught there; the Go twin must scan the same
+# bytes. Malformed shapes fail closed in bash (jq error) and must in Go.
+case_check secret-scan.sh      pretooluse-write-secret-u16le.json    2 secret-scan
+case_check secret-scan.sh      pretooluse-write-secret-u16be.json    2 secret-scan
+case_check secret-scan.sh      pretooluse-write-secret-nulmid.json   2 secret-scan
+case_check secret-scan.sh      pretooluse-write-toolinput-string.json 2 secret-scan
+case_check secret-scan.sh      pretooluse-multiedit-edits-string-element.json 2 secret-scan
+case_check secret-scan.sh      pretooluse-write-toolname-casefold.json 2 secret-scan
 # R3-3 (round 4, regression from round 3): the R2-4 recursive walk
 # scanned .edits WHOLE, so a MultiEdit redacting a leaked secret (secret
 # only in old_string, clean new_string) was blocked, while the identical

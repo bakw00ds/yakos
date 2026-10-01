@@ -33,6 +33,8 @@ package doctor
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/bakw00ds/yakos/internal/binver"
+	"github.com/bakw00ds/yakos/internal/passthrough"
 	"io"
 	"os"
 	"path/filepath"
@@ -546,13 +548,19 @@ func (r *runner) checkHookDrift() {
 func (r *runner) checkHookBinaries() {
 	mix := readHookImplMix(r.cfg.ProjectPath)
 	missing := missingHookBinaries(r.cfg.ProjectPath)
-	if len(mix.Go) == 0 && len(missing) == 0 {
+	stale := staleHookBinaries(r.cfg.ProjectPath)
+	if len(mix.Go) == 0 && len(missing) == 0 && len(stale) == 0 {
 		return
 	}
 	_, _ = fmt.Fprintf(r.w, "Project hook binaries: %s/.claude/settings.json\n", r.cfg.ProjectPath)
+	r.info(SectionHookDrift, "%s", refreshPathNote(r.yakosRoot, r.cfg.Environ))
 	if len(mix.Go) > 0 {
 		r.info(SectionHookDrift, "hook implementations: %d go (%s), %d bash; %d fail-closed go hook(s) fall back to their bash twin if the binary is missing (%s)",
 			len(mix.Go), strings.Join(mix.Go, ", "), len(mix.Bash), len(mix.Guarded), strings.Join(mix.Guarded, ", "))
+	}
+	if len(stale) > 0 {
+		r.err(SectionHookDrift, "hook binary too old for `hook run --impl` (reads --impl as a hook name and exits 0, so its Go hooks silently stop enforcing; needs %s or newer): %s; install a current yakos and run 'yakos refresh'",
+			binver.MinHookRun, strings.Join(stale, ", "))
 	}
 	if len(missing) == 0 {
 		_, _ = fmt.Fprintln(r.w, "")
@@ -1131,4 +1139,24 @@ func (r *runner) checkProduction() {
 	_, _ = fmt.Fprintln(r.w, "Non-automated items (operator responsibility) — see")
 	_, _ = fmt.Fprintln(r.w, "  lib/settings/harness-checklist.template.md sections under")
 	_, _ = fmt.Fprintln(r.w, "  'Non-automated checks' for the full list.")
+}
+
+// refreshPathNote says which `yakos refresh` implementation is active. The
+// hybrid default (K-118) lives in the Go refresh only; with the bash CLI tree
+// present and YAKOS_IMPL unset, refresh is proxied to bash, which stays
+// all-bash and rejects --hooks-impl.
+func refreshPathNote(yakosRoot string, environ func(string) string) string {
+	if environ == nil {
+		environ = os.Getenv
+	}
+	impl := environ("YAKOS_IMPL")
+	switch {
+	case impl == "go":
+		return "yakos refresh: Go-native (YAKOS_IMPL=go); the hybrid hook default applies"
+	case impl == "bash":
+		return "yakos refresh: bash (YAKOS_IMPL=bash); hooks stay bash and --hooks-impl is rejected"
+	case passthrough.BashYakosExists(yakosRoot):
+		return "yakos refresh: proxied to bash (bash CLI tree present, YAKOS_IMPL unset); hooks stay bash and --hooks-impl is rejected. Set YAKOS_IMPL=go for the hybrid hook default"
+	}
+	return "yakos refresh: Go-native (no bash CLI tree); the hybrid hook default applies"
 }

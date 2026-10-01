@@ -160,7 +160,12 @@ func applyAutoCompact(projPath, settingsFile string, dryRun bool) (status string
 		_ = os.Remove(tmpPath)
 		return "", false, err
 	}
-	if err := os.Chmod(tmpPath, 0o644); err != nil { //nolint:gosec
+	// Keep the file's existing mode: a 0600 settings.json must not widen.
+	mode := os.FileMode(0o644)
+	if fi, serr := os.Stat(settingsFile); serr == nil {
+		mode = fi.Mode().Perm()
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
 		_ = os.Remove(tmpPath)
 		return "", false, err
 	}

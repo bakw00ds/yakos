@@ -122,3 +122,33 @@ func TestAutoCompact_InsertKeepsFormattingOfTheRestOfTheFile(t *testing.T) {
 		t.Fatalf("got %q want %q", got, want)
 	}
 }
+
+func TestAutoCompact_KeepsFileMode(t *testing.T) {
+	for _, mode := range []os.FileMode{0o600, 0o640} {
+		proj, file := acProject(t, `{"hooks":{}}`, "")
+		if err := os.Chmod(file, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, changed, err := applyAutoCompact(proj, file, false); err != nil || !changed {
+			t.Fatal(err, changed)
+		}
+		if fi, _ := os.Stat(file); fi.Mode().Perm() != mode {
+			t.Errorf("mode %v became %v", mode, fi.Mode().Perm())
+		}
+	}
+}
+
+func TestAutoCompact_InvalidYMLAbortsRefresh(t *testing.T) {
+	proj, home := fixtureProject(t, "proj-missing-settings")
+	if err := os.WriteFile(filepath.Join(proj, ".yakos.yml"), []byte("auto_compact_window: 50k\n"), 0o644); err != nil { //nolint:gosec
+		t.Fatal(err)
+	}
+	before := readSettings(t, proj)
+	_, err := runImpl(t, proj, home, "")
+	if err == nil || !strings.Contains(err.Error(), "auto_compact_window") {
+		t.Fatalf("want an auto_compact_window error, got %v", err)
+	}
+	if string(readSettings(t, proj)) != string(before) {
+		t.Fatal("settings.json written despite the error")
+	}
+}

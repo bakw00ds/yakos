@@ -93,6 +93,11 @@ type Entry struct {
 	// bash README's "no-block policy for telemetry hooks".
 	FailClosed bool
 
+	// Guard marks a hook that is not FailClosed (degraded input passes) but
+	// can still exit 2 or is a detector, so its Go command in settings.json
+	// must carry the fail-closed wrapper (K-118; see internal/hookguard).
+	Guard bool
+
 	// GoReady marks a hook whose Go output has been brought to parity with
 	// its bash counterpart (verified by tests/run-hook-parity.sh) and is
 	// therefore safe for `yakos refresh --hooks-impl=hybrid` to register as
@@ -146,6 +151,7 @@ var entries = []Entry{
 	{
 		Name:       "output-injection-scan",
 		FailClosed: false,
+		Guard:      true,
 		GoReady:    true,
 		New:        func(cfg Config) Hook { return outputinjectionscan.New(cfg.WorkCurrentDir, cfg.ProjectDir) },
 	},
@@ -246,6 +252,7 @@ var entries = []Entry{
 	{
 		Name:       "task-dependency-gate",
 		FailClosed: false,
+		Guard:      true,
 		GoReady:    true,
 		New:        func(cfg Config) Hook { return taskdependencygate.New(cfg.WorkCurrentDir) },
 	},

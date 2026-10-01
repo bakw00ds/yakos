@@ -17,6 +17,7 @@ package refresh
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/bakw00ds/yakos/internal/binver"
 	"io"
 	"os"
 	"os/exec"
@@ -826,6 +827,12 @@ func resolveProjectImpls(cfg Config, templateFile string) (map[string]resolvedIm
 		if err != nil {
 			abs = p
 		}
+		// An invalid auto_compact_window aborts the run before a byte is
+		// written, like an invalid hooks_impl, so it cannot hide behind an
+		// "in sync" report and a zero exit.
+		if _, err := readAutoCompactSetting(abs); err != nil {
+			return nil, err
+		}
 		ri := resolvedImpl{impl: DefaultHooksImpl, source: "default"}
 		if cfg.HooksImpl != "" {
 			impl, err := ParseHooksImpl(string(cfg.HooksImpl))
@@ -863,6 +870,14 @@ func resolveProjectImpls(cfg Config, templateFile string) (map[string]resolvedIm
 				}
 			}
 			ri.bin = bin
+			if ok, detail := pinnedBinarySupportsHooks(bin); !ok {
+				// A binary older than 0.60.0.0 reads "--impl" as a hook name and
+				// exits 0, so pinned gates would silently stop enforcing.
+				_, _ = fmt.Fprintf(cfg.ErrWriter, "refresh: warning: %s cannot run `hook run --impl` (%s; needs %s or newer); keeping bash hooks. Install a current yakos and re-run refresh.\n", bin, detail, binver.MinHookRun)
+				ri = resolvedImpl{impl: HooksImplBash, source: ri.source + "; yakos binary too old for Go hooks, keeping bash"}
+				out[p] = ri
+				continue
+			}
 			if ri.source == "default" && ephemeralBinary(bin) {
 				// Nothing asked for Go hooks, so never pin a path that may
 				// vanish (temp dir, worktree build): stay on bash.
@@ -887,4 +902,19 @@ func resolveProjectImpls(cfg Config, templateFile string) (map[string]resolvedIm
 		out[p] = ri
 	}
 	return out, nil
+}
+
+// pinnedBinarySupportsHooks checks that bin can run `hook run --impl`. The
+// running binary is current by construction, and a path that does not exist
+// yet cannot be probed (doctor warns about it); only an existing binary that
+// is too old or unreadable is refused.
+var pinnedBinarySupportsHooks = func(bin string) (bool, string) {
+	if self, err := runningBinary(); err == nil && self == bin {
+		return true, ""
+	}
+	fi, err := os.Stat(bin)
+	if err != nil || fi.IsDir() || fi.Mode().Perm()&0o111 == 0 {
+		return true, ""
+	}
+	return binver.SupportsHookRun(bin)
 }

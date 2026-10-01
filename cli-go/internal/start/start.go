@@ -36,6 +36,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/claudeauth"
+	"github.com/bakw00ds/yakos/internal/doctor"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	runtimeenv "github.com/bakw00ds/yakos/internal/runtime"
 )
@@ -458,6 +459,14 @@ func Run(cfg Config) (*Banner, error) {
 			WebConsoleURL:     consoleURL,
 			WebConsoleRunning: consoleRunning,
 		}, nil
+	}
+
+	// ---- hook binaries ---------------------------------------------------------
+
+	// A pinned yakos that is missing or older than `hook run --impl` makes Go
+	// hooks stop enforcing (K-118). Warn before the session starts.
+	for _, p := range doctor.HookBinaryProblems(projectRepo) {
+		_, _ = fmt.Fprintf(ew, "WARN: %s\n", p)
 	}
 
 	// ---- materialize agents ----------------------------------------------------

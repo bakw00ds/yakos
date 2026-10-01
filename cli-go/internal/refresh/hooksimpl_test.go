@@ -763,7 +763,7 @@ func byteDiff(want, got []byte) string {
 // falls back to the bash twin instead of exiting 127 (non-blocking fail-open).
 func TestHooksImpl_GuardRoundTripAndTamperRejected(t *testing.T) {
 	c := goCommand("/Users/a b/bin/yakos", "secret-scan")
-	if !strings.HasPrefix(c, "[ -x '/Users/a b/bin/yakos' ] || exec ") {
+	if !strings.HasPrefix(c, "if [ -f '/Users/a b/bin/yakos' ] && ") {
 		t.Fatalf("fail-closed hook not guarded: %s", c)
 	}
 	if n, ok := goHookName(c); !ok || n != "secret-scan" {
@@ -773,7 +773,7 @@ func TestHooksImpl_GuardRoundTripAndTamperRejected(t *testing.T) {
 		t.Fatalf("guarded command has the wrong merge identity: %s", canonicalHookName(c))
 	}
 	// A guard that does not name the same hook twice must not parse.
-	bad := strings.Replace(c, "scripts/hooks/secret-scan.sh", "scripts/hooks/other.sh", 1)
+	bad := strings.Replace(c, "exit 2; else", "exit 0; else", 1)
 	if _, ok := goHookName(bad); ok {
 		t.Fatalf("tampered guard parsed as a Go hook command: %s", bad)
 	}
@@ -838,5 +838,41 @@ func TestHooksImpl_DefaultIsHybridUnlessBinaryIsTemporary(t *testing.T) {
 	}
 	if strings.Contains(string(readSettings(t, proj2)), "hook run") || !strings.Contains(buf.String(), "looks temporary, keeping bash") {
 		t.Fatalf("default pinned a temporary binary:\n%s", buf.String())
+	}
+}
+
+// K-118 sec-review F3: a pinned yakos older than `hook run --impl` (0.60.0.0)
+// would read --impl as a hook name and exit 0. Refresh must not generate Go
+// commands for it.
+func TestHooksImpl_OldPinnedBinaryKeepsBash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX sh")
+	}
+	for _, c := range []struct {
+		name   string
+		script string
+		wantGo bool
+	}{
+		{"old reads --impl as a hook", "#!/bin/sh\necho 'unknown hook' >&2\nexit 0\n", false},
+		{"cannot run", "#!/bin/sh\nexit 139\n", false},
+		{"current", "#!/bin/sh\necho 'no Go implementation' >&2\nexit 2\n", true},
+	} {
+		bin := filepath.Join(t.TempDir(), "yakos")
+		if err := os.WriteFile(bin, []byte(c.script), 0o755); err != nil { //nolint:gosec
+			t.Fatal(err)
+		}
+		proj, home := fixtureProject(t, "proj-missing-settings")
+		var buf bytes.Buffer
+		if _, err := Run(Config{YakosRoot: hooksImplRepoRoot(t), ProjectPaths: []string{proj}, HooksImpl: HooksImplHybrid,
+			YakosBinary: bin, Writer: &buf, ErrWriter: &buf, HomeDir: home}); err != nil {
+			t.Fatal(err)
+		}
+		gotGo := strings.Contains(string(readSettings(t, proj)), "hook run --impl go")
+		if gotGo != c.wantGo {
+			t.Errorf("%s: go commands = %v, want %v\n%s", c.name, gotGo, c.wantGo, buf.String())
+		}
+		if !c.wantGo && !strings.Contains(buf.String(), "keeping bash hooks") {
+			t.Errorf("%s: no warning:\n%s", c.name, buf.String())
+		}
 	}
 }

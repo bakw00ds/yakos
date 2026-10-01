@@ -219,7 +219,10 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	// replaced is never scanned) and recursively collects every string
 	// leaf, mirroring `.. | strings` exactly (a nested array/object under
 	// any of those fields is still fully explored).
-	text := extractWriteText(in)
+	text, degraded := extractWriteText(in)
+	if degraded != "" {
+		return h.failDegraded(out, in, now), nil
+	}
 	if text == "" {
 		h.appendLog(&out, in, now, "REPORT", "pass", "no content-bearing string fields to scan", map[string]any{
 			"agent_type": agent,
@@ -267,6 +270,47 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	out.Stderr = append(out.Stderr, []byte(msg+"\n")...)
 	out.ExitCode = 2
 	return out, nil
+}
+
+// failDegraded mirrors lib/hooks/lib/hook-input.sh's _hi_fail_or_warn for a
+// payload shape jq cannot evaluate: block (exit 2) unless the operator set
+// YAKOS_HOOKS_FAIL_OPEN=1 or an active hook-bypass.md entry scoped
+// "degraded-input" exists.
+func (h *Hook) failDegraded(out hooktype.HookOutput, in hooktype.HookInput, now time.Time) hooktype.HookOutput {
+	// Same record and text as hook-input.sh's _hi_fail_or_warn after secret-
+	// scan.sh's own jq-error branch, so the two tiers stay byte-identical.
+	const reason = "could not evaluate tool_input for secret patterns (jq error)"
+	if os.Getenv("YAKOS_HOOKS_FAIL_OPEN") == "1" {
+		h.appendLog(&out, in, now, "WARN", "pass", "degraded input ("+reason+") but YAKOS_HOOKS_FAIL_OPEN=1 override active", nil)
+		out.Stderr = fmt.Appendf(out.Stderr, "%s: WARN \u2014 degraded input (%s), but YAKOS_HOOKS_FAIL_OPEN=1 is set; passing through.\n", hookName, reason)
+		out.Stderr = fmt.Appendf(out.Stderr, "%s: this is an emergency override \u2014 unset it once jq/stdin are fixed.\n", hookName)
+		return out
+	}
+	if h.degradedBypass() {
+		h.appendLog(&out, in, now, "WARN", "pass", "degraded input ("+reason+") but hook-bypass.md override active (scope: degraded-input)", nil)
+		out.Stderr = fmt.Appendf(out.Stderr, "%s: WARN \u2014 degraded input (%s), but a hook-bypass.md entry for '%s' scoped to 'degraded-input' is active; passing through.\n", hookName, reason, hookName)
+		return out
+	}
+	h.appendLog(&out, in, now, "BLOCK", "block", "degraded input, failing closed: "+reason, nil)
+	out.Stderr = fmt.Appendf(out.Stderr, "%s: BLOCKED \u2014 cannot safely evaluate this tool call (%s).\n", hookName, reason)
+	out.Stderr = fmt.Appendf(out.Stderr, "%s: this hook enforces a security control and refuses to fail open.\n", hookName)
+	out.Stderr = fmt.Appendf(out.Stderr, "%s: fix jq on PATH / the caller's JSON payload, then retry.\n", hookName)
+	out.Stderr = fmt.Appendf(out.Stderr, "%s: emergency overrides: export YAKOS_HOOKS_FAIL_OPEN=1, or add a\n", hookName)
+	out.Stderr = fmt.Appendf(out.Stderr, "%s: work/current/hook-bypass.md entry with **Hook:** %s and\n", hookName, hookName)
+	out.Stderr = fmt.Appendf(out.Stderr, "%s: **Scope:** degraded-input.\n", hookName)
+	out.ExitCode = 2
+	return out
+}
+
+func (h *Hook) degradedBypass() bool {
+	if h.WorkCurrentDir == "" {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(h.WorkCurrentDir, "hook-bypass.md")) //nolint:gosec
+	if err != nil {
+		return false
+	}
+	return hookbypass.CheckExact(string(data), hookName, "degraded-input")
 }
 
 // scan returns the first pattern that matches text, or nil.
@@ -336,10 +380,17 @@ func (h *Hook) appendLog(out *hooktype.HookOutput, in hooktype.HookInput, now ti
 // NOT switched on tool name, so a payload with a "swapped" shape (e.g. a
 // Write carrying .new_string) is still caught. edits[].old_string (the
 // text being REPLACED, not written) is never scanned.
-func extractWriteText(in hooktype.HookInput) string {
+func extractWriteText(in hooktype.HookInput) (string, string) {
+	if raw, present := in.Payload["tool_input"]; present && raw != nil {
+		if _, isObj := raw.(map[string]any); !isObj {
+			// jq: `.content` on a string/array/number/bool is an error, which
+			// bash turns into a fail-closed degraded-input block.
+			return "", "tool_input is not a JSON object (jq cannot index it)"
+		}
+	}
 	ti := hookio.ToolInput(in)
 	if ti == nil {
-		return ""
+		return "", ""
 	}
 	var leaves []string
 	leaves = append(leaves, collectStringLeaves(ti["content"])...)
@@ -348,13 +399,21 @@ func extractWriteText(in hooktype.HookInput) string {
 	if editsRaw, ok := ti["edits"]; ok {
 		if edits, ok := editsRaw.([]any); ok {
 			for _, e := range edits {
-				if m, ok := e.(map[string]any); ok {
+				switch m := e.(type) {
+				case map[string]any:
 					leaves = append(leaves, collectStringLeaves(m["new_string"])...)
+				case nil:
+					// jq: null | .new_string is null.
+				default:
+					return "", "an edits[] element is not a JSON object (jq cannot index it)"
 				}
 			}
 		}
 	}
-	return strings.Join(leaves, "\n")
+	// Bash reads jq's output through $(...), which drops NUL bytes before grep
+	// sees them, so a UTF-16 or NUL-interleaved secret still matches there.
+	// Scan the same bytes.
+	return strings.ReplaceAll(strings.Join(leaves, "\n"), "\x00", ""), ""
 }
 
 // collectStringLeaves is the Go equivalent of jq's `.. | strings`: recurse

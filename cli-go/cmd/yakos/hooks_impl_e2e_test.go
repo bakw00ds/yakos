@@ -15,11 +15,12 @@ package main
 // it is absent, like the other binary-driven tests in this package.
 
 import (
+	"bytes"
 	"encoding/json"
+	"github.com/bakw00ds/yakos/internal/hookguard"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -96,7 +97,8 @@ func settingsGoCommand(t *testing.T, settings []byte, name string) string {
 	for _, entries := range doc.Hooks {
 		for _, e := range entries {
 			for _, h := range e.Hooks {
-				if strings.Contains(h.Command, " hook run ") && strings.HasSuffix(h.Command, " "+name) {
+				if strings.Contains(h.Command, " hook run ") &&
+					(strings.HasSuffix(h.Command, " "+name) || strings.Contains(h.Command, " hook run --impl go "+name+";")) {
 					return h.Command
 				}
 			}
@@ -248,7 +250,32 @@ func TestHooksImplE2E_LegacyCommandFailsClosedAndMigrates(t *testing.T) {
 	env := hooksImplEnv(home, work, proj)
 
 	// A-3 (#288) predates the fail-closed guard: its commands were plain.
-	plain := regexp.MustCompile(`\[ -x \S+ \] \|\| exec \\"[^"]*\\"; exec `).ReplaceAllString(string(fixed), "")
+	plain := string(fixed)
+	{
+		var doc map[string]any
+		if err := json.Unmarshal(fixed, &doc); err != nil {
+			t.Fatal(err)
+		}
+		hooks, _ := doc["hooks"].(map[string]any)
+		for _, ev := range hooks {
+			for _, e := range ev.([]any) {
+				for _, h := range e.(map[string]any)["hooks"].([]any) {
+					hm := h.(map[string]any)
+					if p, ok := hookguard.Strip(hm["command"].(string)); ok {
+						hm["command"] = p
+					}
+				}
+			}
+		}
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(doc); err != nil {
+			t.Fatal(err)
+		}
+		plain = buf.String()
+	}
 	legacy := strings.ReplaceAll(plain, " hook run --impl go ", " hook run ")
 	if legacy == string(fixed) {
 		t.Fatal("test setup: no --impl go to strip")

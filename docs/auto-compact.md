@@ -35,8 +35,10 @@ It applies to every Claude Code session in the project, including dispatched
 | Never compact | `DISABLE_AUTO_COMPACT=1` in the environment (harness switch) |
 
 A value you set by hand in `settings.json` is kept; refresh only overwrites it
-when `.yakos.yml` names one. A bad `.yakos.yml` value fails refresh for that
-project with the allowed range and leaves the file untouched. `yakos refresh`
+when `.yakos.yml` names one. A bad `.yakos.yml` value aborts the whole refresh with a non-zero exit and the
+allowed range, before anything is written. `auto` and an empty value mean the
+yakos default (150000), not Claude Code's own `auto`. The file mode of
+`settings.json` is preserved. `yakos refresh`
 prints `auto-compact-window: <value> (<source>)` per project.
 
 ## The older marker/Stop-hook path (M3.1) is opt-in and unverified
