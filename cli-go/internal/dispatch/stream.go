@@ -323,6 +323,7 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		UserText:          p.Task,
 		AgentSystemPrompt: targetAgent.Prompt,
 		ModelOverride:     modelResolved,
+		ModelExplicit:     p.Model != "" || targetAgent.Model != "",
 		WorkDirOverride:   p.WorkDirOverride,
 		Effort:            p.Effort,
 		// AllowRoot is not plumbed through Params (CLI-only flag); defaults to

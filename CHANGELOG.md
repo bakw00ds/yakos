@@ -128,6 +128,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Changing the header comment of `lib/decisions/supervisor-prefilter.yaml`
   changes its recorded hash.
 
+
+### Changed
+
+- **Framed dispatch pins the relay model and trims the prefix (K-116).**
+  `yakos dispatch` on the claude runtime now passes `--model <tier>` to the
+  outer relay session, resolved exactly like the dispatch-log
+  `model_resolved` (override, then agent frontmatter, then the sonnet
+  default; fable maps to `claude-fable-5`). Before, the relay ran on the
+  operator's default model (opus). It also passes `--setting-sources
+  project --strict-mcp-config --disable-slash-commands`, dropping user-level
+  rules, skills listing and MCP servers from the cached prefix (about 32K to
+  24K tokens). Project hooks still fire. Console chat (`ChatExecCmd`) keeps
+  user settings and pins `--model` only when the agent or caller chose a
+  model explicitly. Sending the full roster `--agents` JSON on every
+  dispatch was measured and not adopted: no cache benefit.
+
 ### Fixed
 
 - **Survey bug batch (K-112).** Seven pre-existing bugs from the K-111
