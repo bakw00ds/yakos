@@ -143,6 +143,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user settings and pins `--model` only when the agent or caller chose a
   model explicitly. Sending the full roster `--agents` JSON on every
   dispatch was measured and not adopted: no cache benefit.
+  Because `--setting-sources project` drops `~/.claude/rules`, `yakos refresh`
+  now copies the specialist rules into each project's `.claude/rules/`
+  (managed copies, project-owned files untouched). Existing projects need one
+  `yakos refresh --apply` (see UPGRADING.md).
 
 ### Fixed
 

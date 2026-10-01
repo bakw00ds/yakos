@@ -112,6 +112,7 @@ type ProjectReport struct {
 	ProjectPath string
 	Hooks       HookPhaseReport
 	Settings    SettingsPhaseReport
+	Rules       RulesPhaseReport
 	HasDrift    bool // true when any count > 0
 }
 
@@ -264,7 +265,19 @@ func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, ri resolv
 		}
 	}
 
-	hasDrift := hookRpt.New > 0 || hookRpt.Synced > 0 || settingsRpt.Added > 0 || settingsRpt.Removed > 0 || compactChanged
+	// Phase 4 (K-116): specialist rules into the project's .claude/rules/.
+	// Symlinks must never target a deletable worktree: redirect to the
+	// canonical checkout exactly as the agent symlinks do.
+	rulesRoot, rerr := resolveAgentsSourceRoot(filepath.Dir(filepath.Dir(hooksRoot)), io.Discard)
+	var rulesRpt RulesPhaseReport
+	if rerr == nil {
+		rulesRpt, rerr = syncProjectRules(rulesRoot, absPath, dryRun, w)
+	}
+	if rerr != nil {
+		_, _ = fmt.Fprintf(ew, "refresh: rules sync error for %s: %v\n", absPath, rerr)
+	}
+
+	hasDrift := rulesRpt.New > 0 || hookRpt.New > 0 || hookRpt.Synced > 0 || settingsRpt.Added > 0 || settingsRpt.Removed > 0 || compactChanged
 
 	driftStatus := "in sync"
 	if hasDrift {
@@ -288,6 +301,7 @@ func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, ri resolv
 	if compactStatus != "" {
 		_, _ = fmt.Fprintf(w, "    auto-compact-window: %s\n", compactStatus)
 	}
+	_, _ = fmt.Fprintf(w, "    rules:    new=%d ok=%d warns=%d\n", rulesRpt.New, rulesRpt.OK, rulesRpt.Warns)
 	_, _ = fmt.Fprintf(w, "    status:   %s\n", driftStatus)
 	_, _ = fmt.Fprintln(w, "")
 
@@ -295,6 +309,7 @@ func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, ri resolv
 		ProjectPath: absPath,
 		Hooks:       hookRpt,
 		Settings:    settingsRpt,
+		Rules:       rulesRpt,
 		HasDrift:    hasDrift,
 	}, nil
 }
