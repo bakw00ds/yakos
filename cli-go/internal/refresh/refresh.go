@@ -266,13 +266,8 @@ func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, ri resolv
 	}
 
 	// Phase 4 (K-116): specialist rules into the project's .claude/rules/.
-	// Symlinks must never target a deletable worktree: redirect to the
-	// canonical checkout exactly as the agent symlinks do.
-	rulesRoot, rerr := resolveAgentsSourceRoot(filepath.Dir(filepath.Dir(hooksRoot)), io.Discard)
-	var rulesRpt RulesPhaseReport
-	if rerr == nil {
-		rulesRpt, rerr = syncProjectRules(rulesRoot, absPath, dryRun, w)
-	}
+	// Copies (not symlinks), so a worktree YakosRoot is safe to read from.
+	rulesRpt, rerr := syncProjectRules(filepath.Dir(filepath.Dir(hooksRoot)), absPath, dryRun, w)
 	if rerr != nil {
 		_, _ = fmt.Fprintf(ew, "refresh: rules sync error for %s: %v\n", absPath, rerr)
 	}

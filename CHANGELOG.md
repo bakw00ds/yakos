@@ -135,7 +135,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `yakos dispatch` on the claude runtime now passes `--model <tier>` to the
   outer relay session, resolved exactly like the dispatch-log
   `model_resolved` (override, then agent frontmatter, then the sonnet
-  default; fable maps to `claude-fable-5`). Before, the relay ran on the
+  default). The bare tier alias is passed and the CLI resolves it; names that
+  are not claude tiers are dropped with one log line. The bash dispatch path
+  (`cli/lib/runtimes/claude.sh`) gets the same flags and resolution, and bash
+  `--model balanced` now resolves instead of dying. Before, the relay ran on the
   operator's default model (opus). It also passes `--setting-sources
   project --strict-mcp-config --disable-slash-commands`, dropping user-level
   rules, skills listing and MCP servers from the cached prefix (about 32K to
