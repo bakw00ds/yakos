@@ -256,6 +256,30 @@ yk_rt_claude_launch() {
     exec claude "${args[@]}"
 }
 
+# yk_rt_claude_model_flag <agent> <model>
+#   Print the bare tier (haiku|sonnet|opus|fable) to pass as the outer relay
+#   session's --model, or nothing. Mirrors Go claudeModelFlag
+#   (cli-go/internal/runtime/claude.go): abstract aliases are expanded first,
+#   and a name that is still not a claude tier (e.g. gemini-3.5, gpt-5) is
+#   dropped with one log line. The CLI resolves bare tiers itself, so no
+#   concrete model id is pinned here (K-116).
+yk_rt_claude_model_flag() {
+    local agent="$1" model="${2:-}"
+    [ -n "$model" ] || return 0
+    case "$model" in
+        cheap)          model=haiku  ;;
+        balanced)       model=sonnet ;;
+        best|reasoning) model=opus   ;;
+        frontier)       model=fable  ;;
+    esac
+    case "$model" in
+        haiku|sonnet|opus|fable) printf '%s' "$model" ;;
+        *)
+            ct_log "yakos: agent \"$agent\" model \"$model\" is not a claude tier (haiku|sonnet|opus|fable); not pinning --model"
+            ;;
+    esac
+}
+
 # yk_rt_claude_dispatch <project> <agent-name> <task-prompt>
 #   One-shot dispatch via `claude -p`. The agent body becomes the
 #   --agents JSON payload, and the task is sent as the prompt.
@@ -276,22 +300,23 @@ yk_rt_claude_dispatch() {
     fi
 
     # If dispatch.sh set YAKOS_MODEL_OVERRIDE, patch the agent's model field
-    # in the single-agent JSON so the runtime uses the requested tier.
-    # Fable tier maps to the full model id "claude-fable-5" because the claude
-    # CLI does not expose "fable" as an alias (probed 2026-06-11; the installed
-    # claude CLI did not resolve the bare alias). Other tiers (haiku, sonnet,
-    # opus) are accepted as-is by the claude CLI.
+    # in the single-agent JSON so the runtime uses the requested tier, and
+    # pin the outer relay session to the same tier (K-116). Bare tier names
+    # are passed through: the claude CLI resolves them to the current model.
+    local _model_tier="" _model_args=()
     if [ -n "${YAKOS_MODEL_OVERRIDE:-}" ]; then
-        local _model_id
-        case "${YAKOS_MODEL_OVERRIDE}" in
-            fable) _model_id="claude-fable-5" ;;
-            *)     _model_id="${YAKOS_MODEL_OVERRIDE}" ;;
-        esac
-        single="$(printf '%s' "$single" | jq \
-            --arg n "$agent_name" \
-            --arg m "$_model_id" \
-            '.[$n].model = $m')"
+        _model_tier="$(yk_rt_claude_model_flag "$agent_name" "$YAKOS_MODEL_OVERRIDE")"
+        if [ -n "$_model_tier" ]; then
+            single="$(printf '%s' "$single" | jq \
+                --arg n "$agent_name" \
+                --arg m "$_model_tier" \
+                '.[$n].model = $m')"
+            _model_args=(--model "$_model_tier")
+        fi
     fi
+    # K-116 W5: project settings only (they carry the yakOS hooks), no user
+    # MCP servers, no skills listing. Same flags as the Go ExecCmd.
+    local _trim_args=(--setting-sources project --strict-mcp-config --disable-slash-commands)
 
     local framed
     framed="Use the Agent tool to dispatch the following task to subagent_type=\"$agent_name\". Return only the subagent's final report.
@@ -328,7 +353,9 @@ $task"
                --output-format stream-json \
                --verbose \
                --exclude-dynamic-system-prompt-sections \
-               "${resume_args[@]}" \
+               "${_trim_args[@]}" \
+               ${_model_args[@]+"${_model_args[@]}"} \
+               ${resume_args[@]+"${resume_args[@]}"} \
                -p "$framed" > "$raw_tmp" 2>/dev/null
         else
             claude --agents "$single" \
@@ -337,7 +364,9 @@ $task"
                --output-format stream-json \
                --verbose \
                --exclude-dynamic-system-prompt-sections \
-               "${resume_args[@]}" \
+               "${_trim_args[@]}" \
+               ${_model_args[@]+"${_model_args[@]}"} \
+               ${resume_args[@]+"${resume_args[@]}"} \
                -p "$framed" > "$raw_tmp" 2>/dev/null
         fi
         local rc=$?
@@ -371,14 +400,18 @@ $task"
                --permission-mode bypassPermissions \
                --add-dir "$project" \
                --exclude-dynamic-system-prompt-sections \
-               "${resume_args[@]}" \
+               "${_trim_args[@]}" \
+               ${_model_args[@]+"${_model_args[@]}"} \
+               ${resume_args[@]+"${resume_args[@]}"} \
                -p "$framed"
     else
         claude --agents "$single" \
                --permission-mode bypassPermissions \
                --add-dir "$project" \
                --exclude-dynamic-system-prompt-sections \
-               "${resume_args[@]}" \
+               "${_trim_args[@]}" \
+               ${_model_args[@]+"${_model_args[@]}"} \
+               ${resume_args[@]+"${resume_args[@]}"} \
                -p "$framed"
     fi
 }
