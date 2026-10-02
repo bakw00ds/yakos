@@ -750,6 +750,16 @@ else
     fail "symlinked rules dir was not refused: $out18b"
 fi
 
+# CRLF copies (Windows autocrlf) must still be "in sync" (no false drift)
+T18C="$(setup_project proj-in-sync)"
+for f in "$T18C"/project/.claude/rules/*.md; do sed 's/$/\r/' "$f" > "$f.crlf" && mv "$f.crlf" "$f"; done
+out18c="$(run_refresh "$T18C")"
+if printf '%s' "$out18c" | grep -q 'status:   in sync'; then
+    ok "CRLF-installed rules report in sync"
+else
+    fail "CRLF rules cause false drift: $out18c"
+fi
+
 # ===========================================================================
 # Summary
 # ===========================================================================

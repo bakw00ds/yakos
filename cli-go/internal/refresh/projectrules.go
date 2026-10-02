@@ -65,6 +65,14 @@ func isManaged(b []byte) bool {
 	return ok
 }
 
+// normalizeEOL converts CRLF to LF. A Windows checkout (autocrlf) can turn
+// lib/rules/*.md or an installed copy into CRLF; hashing and comparing the
+// normalized bytes keeps refresh idempotent there. Installed copies are
+// always written with LF.
+func normalizeEOL(b []byte) []byte {
+	return []byte(strings.ReplaceAll(string(b), "\r\n", "\n"))
+}
+
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
@@ -108,6 +116,7 @@ func CheckProjectRules(yakosRoot, projPath string) []RuleIssue {
 			continue
 		}
 		cur, _ := os.ReadFile(p) //nolint:gosec
+		cur = normalizeEOL(cur)
 		marker, ok := markerLine(cur)
 		if !ok {
 			out = append(out, RuleIssue{name, "marker-stripped"})
@@ -119,7 +128,7 @@ func CheckProjectRules(yakosRoot, projPath string) []RuleIssue {
 			out = append(out, RuleIssue{name, "edited"})
 			continue
 		}
-		if up, uerr := os.ReadFile(filepath.Join(yakosRoot, "lib", "rules", name)); uerr == nil && sha256Hex(up) != marker { //nolint:gosec
+		if up, uerr := os.ReadFile(filepath.Join(yakosRoot, "lib", "rules", name)); uerr == nil && sha256Hex(normalizeEOL(up)) != marker { //nolint:gosec
 			out = append(out, RuleIssue{name, "stale"})
 		}
 	}
@@ -147,6 +156,7 @@ func syncProjectRules(yakosRoot, projPath string, dryRun bool, w io.Writer) (Rul
 	}
 	for _, name := range specialistRules {
 		upstream, err := os.ReadFile(filepath.Join(src, name)) //nolint:gosec
+		upstream = normalizeEOL(upstream)
 		if err != nil {
 			_, _ = fmt.Fprintf(w, "    [warn] rules: framework rule %s missing\n", name)
 			rpt.Warns++
@@ -163,6 +173,7 @@ func syncProjectRules(yakosRoot, projPath string, dryRun bool, w io.Writer) (Rul
 			}
 		} else if lerr == nil {
 			cur, _ := os.ReadFile(link) //nolint:gosec
+			cur = normalizeEOL(cur)
 			if string(cur) == string(want) {
 				rpt.OK++
 				continue

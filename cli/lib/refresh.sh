@@ -678,18 +678,18 @@ _sync_project_rules() {
             echo "    [warn] rules: framework rule $name.md missing"
             R_WARN=$((R_WARN + 1)); continue
         fi
-        sum="$(shasum -a 256 "$src" | awk '{print $1}')"
+        sum="$(tr -d '\r' < "$src" | shasum -a 256 | awk '{print $1}')"
         # Same bytes as Go managedContent: source, a newline only if the
         # source lacks one, then the marker.
         local tmp; tmp="$(mktemp -t yakos-rule.XXXXXX)"
-        cat "$src" > "$tmp"
-        if [ -n "$(tail -c1 "$src")" ]; then printf '\n' >> "$tmp"; fi
+        tr -d '\r' < "$src" > "$tmp"
+        if [ -n "$(tail -c1 "$tmp")" ]; then printf '\n' >> "$tmp"; fi
         printf '<!-- yakos:managed sha256=%s -->\n' "$sum" >> "$tmp"
         if [ -L "$dstf" ]; then
             R_NEW=$((R_NEW + 1))
             [ "$DRY_RUN" = "1" ] || rm -f "$dstf"
         elif [ -f "$dstf" ]; then
-            if cmp -s "$tmp" "$dstf"; then
+            if tr -d '\r' < "$dstf" | cmp -s "$tmp" -; then
                 R_OK=$((R_OK + 1)); rm -f "$tmp"; continue
             fi
             # Only a well-formed marker on the LAST line counts (same as Go).

@@ -190,3 +190,37 @@ func TestCheckProjectRules(t *testing.T) {
 		t.Errorf("untouched rule reported: %v", got)
 	}
 }
+
+// Windows autocrlf can check lib/rules (and installed copies) out as CRLF.
+// Refresh must stay idempotent and honest, not report drift forever.
+func TestSyncProjectRules_CRLFIdempotent(t *testing.T) {
+	root, proj := setupRulesFixture(t)
+	crlf := func(p string) {
+		b, _ := os.ReadFile(p)
+		_ = os.WriteFile(p, []byte(strings.ReplaceAll(string(b), "\n", "\r\n")), 0o644)
+	}
+	// 1. CRLF upstream: copies are written LF, second run is a no-op.
+	for _, n := range specialistRules {
+		crlf(filepath.Join(root, "lib", "rules", n))
+	}
+	if rpt, _ := syncProjectRules(root, proj, false, io.Discard); rpt.New != len(specialistRules) {
+		t.Fatalf("first run: %+v", rpt)
+	}
+	b, _ := os.ReadFile(filepath.Join(proj, ".claude", "rules", "git-hygiene.md"))
+	if strings.Contains(string(b), "\r") {
+		t.Error("installed copy must be LF")
+	}
+	if rpt, _ := syncProjectRules(root, proj, false, io.Discard); rpt.New != 0 || rpt.OK != len(specialistRules) || rpt.Warns != 0 {
+		t.Fatalf("CRLF upstream not idempotent: %+v", rpt)
+	}
+	// 2. CRLF installed copy (autocrlf on the project checkout): still current.
+	for _, n := range specialistRules {
+		crlf(filepath.Join(proj, ".claude", "rules", n))
+	}
+	if rpt, _ := syncProjectRules(root, proj, false, io.Discard); rpt.New != 0 || rpt.Warns != 0 {
+		t.Fatalf("CRLF copy reported drift: %+v", rpt)
+	}
+	if issues := CheckProjectRules(root, proj); len(issues) != 0 {
+		t.Fatalf("doctor check false positive on CRLF: %v", issues)
+	}
+}
