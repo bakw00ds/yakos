@@ -239,10 +239,11 @@ jobs:
   # when the hook's gate lock is removed? Runs on a scratch copy with the lock
   # acquisition replaced by an unconditional success; the Go twin is skipped
   # (the suite only runs it when bin/yakos exists). All runs must go red, and
-  # specifically in the concurrency (9) rounds.
+  # specifically in the concurrency (9) rounds. Evidence on PR #319 (50 ms hold,
+  # macos-latest, bash 3.2): red in 5 of 5 runs. Dispatch with lock_mutation=true to rerun.
   coalesce-lock-mutation:
     name: coalesce lock mutation (macos-latest)
-    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.lock_mutation) }}  # TEMP-EVIDENCE
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.lock_mutation }}
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
