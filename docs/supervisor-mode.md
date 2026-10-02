@@ -121,6 +121,10 @@ supervisor:
   runtime: claude              # which runtime to dispatch supervisor on
   agent: supervisor            # agent file id (rarely overridden)
   score_every_n_calls: 10      # cost vs latency tradeoff
+  max_launches_per_session: 30 # routine launches per session (0 = unlimited)
+  min_launch_interval_s: 120   # minimum seconds between routine launches (0 = off)
+  run_deadline_s: 240          # wall-clock kill for one run (default scales with model)
+  session_limit_backoff_min: 30 # pause after an account session-limit failure
   block_on_critical: false     # surface-only (default for new projects);
                                # set true for active mode (hard block on CRITICAL)
 ```
@@ -131,6 +135,42 @@ supervisor:
   Override to use a project-customized supervisor.
 - **`score_every_n_calls`** — higher = less cost, more drift slips
   through. Lower = catches drift fast, more API spend.
+- **`max_launches_per_session`**, **`min_launch_interval_s`**,
+  **`run_deadline_s`**, **`session_limit_backoff_min`** — the launch gate
+  (K-117), per session:
+  - A trigger that arrives while a run is in flight launches nothing. Its
+    redacted preview is appended to `work/current/.supervisor-pending.<session>`
+    (mode 0600) and one follow-up run starts when the first ends; its task
+    says how many events were coalesced and points at that file.
+  - **High-risk triggers** (a sensitive-path or risk-regex match) bypass the
+    cap and the interval, up to a ceiling of 3x the trusted cap, and only
+    routine launches count toward the cap, so benign escalations can never
+    exhaust supervision. Hitting the cap logs a WARN and prints one stderr
+    line; hitting the ceiling also appends a synthetic CRITICAL finding, so
+    `block_on_critical` operators are stopped and told.
+  - A routine trigger inside the interval starts a deferred run that waits
+    out the rest of the interval instead of being dropped.
+  - A run past the deadline is killed with its child processes. The default
+    is 240 s for haiku, 480 s for sonnet and 600 s for opus/fable: a 240 s
+    limit would kill about 9% of historical sonnet-path runs. A deadline
+    below 30 s (or 0) is invalid and falls back to the default with a WARN.
+  - After an account session-limit failure launches pause for
+    `session_limit_backoff_min` minutes.
+  - **A project `.yakos.yml` can only make supervision STRICTER**: raise the
+    cap (or 0), lower the interval, lengthen the deadline, lower the
+    backoff. The reverse is ignored with a WARN, because it would cut
+    supervision (a 1 s deadline kills every run). The high-risk ceiling is
+    computed from the trusted cap only. To move a limit the other way, use
+    the user-level `~/.yakos-state/supervisor-policy.yml` (same keys at the
+    top level; it must be your own regular file, not group or world
+    writable).
+  - Values are plain decimal numbers. A trailing `# comment` is fine;
+    quoted, hex or signed values are ignored for that key alone.
+  - Everything is fail-open: the hook still exits 0. State lives in
+    `work/current/.supervisor-run.<session>`.
+- **`model`** — a tier (`haiku|sonnet|opus|fable`) or an alias
+  (`cheap`, `balanced`, `best`, `reasoning`, `frontier`); anything else
+  falls back to haiku with a WARN (dispatch rejects unknown tiers).
 - **`block_on_critical`** — `true` (active mode, hard block) or
   `false` (passive, surface CRITICAL via stderr but don't stop the
   lead).

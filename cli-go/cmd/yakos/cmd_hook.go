@@ -15,6 +15,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/registry"
 	"github.com/bakw00ds/yakos/internal/hooks/runner"
+	"github.com/bakw00ds/yakos/internal/hooks/supervisorstream"
 	"github.com/bakw00ds/yakos/internal/install"
 	"github.com/bakw00ds/yakos/internal/statepath"
 	"github.com/bakw00ds/yakos/internal/version"
@@ -47,6 +48,10 @@ func runHookCmd(yakosRoot string, args []string) {
 		runHookList(args[1:])
 	case "mode":
 		runHookMode(args[1:])
+	case "supervisor-wrap":
+		// Internal: the detached supervisor run wrapper (K-117), started by the
+		// supervisor-stream hook. Configured through _SSW_* env; always exits 0.
+		os.Exit(supervisorstream.RunWrapper(supervisorstream.WrapperConfigFromEnv(os.Getenv), args[1:], os.Stdout, os.Stderr))
 	default:
 		fmt.Fprintf(os.Stderr, "hook: unknown subcommand %q (try --help)\n", args[0])
 		os.Exit(1)

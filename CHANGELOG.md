@@ -37,6 +37,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refresh with a non-zero exit. The `CLAUDE_CODE_AUTO_COMPACT_WINDOW` env var
   still wins. See `docs/hooks-impl.md` and `docs/auto-compact.md`.
 
+- **Supervisor launch gate: coalescing, per-session cap, run deadline (K-117).**
+  The supervisor was 82% of logged dispatch spend (5,094 runs, $1,763).
+  `supervisor-stream` (bash and Go twin) now launches at most one run per
+  session at a time: a trigger that arrives while one is in flight is
+  recorded (a redacted preview goes to a per-session pending file) and one
+  follow-up covers all of them. New `.yakos.yml` keys under `supervisor:` cap
+  routine launches per session (`max_launches_per_session`, default 30), space
+  them (`min_launch_interval_s`, default 120; a trigger inside it is deferred,
+  not dropped), kill a run past `run_deadline_s` with its child processes
+  (default 240 s for haiku, 480 s sonnet, 600 s opus) and pause after an
+  account session-limit failure (`session_limit_backoff_min`, default 30).
+  High-risk triggers (risk regex or sensitive path) bypass the cap and the
+  interval up to 3x the trusted cap, so benign escalations cannot end
+  supervision; at that ceiling a synthetic CRITICAL finding alerts
+  `block_on_critical` operators. A project file can only make the limits
+  stricter (more supervision: longer deadline, higher cap, shorter interval);
+  anything else needs the user-level `~/.yakos-state/supervisor-policy.yml`,
+  and a deadline under 30 s is invalid. The bare `force.*push` risk pattern is
+  gone (it matched "enforce push notification"); real `git push --force`
+  shapes still escalate. The deadline uses a
+  portable watchdog (bash) or a Go process (`yakos hook supervisor-wrap`, also
+  on Windows), never GNU `timeout`. `supervisor.model` aliases (`balanced`)
+  now resolve and unknown names fall back to haiku. Apart from that pattern,
+  what the pre-filter escalates is unchanged. See `docs/supervisor-mode.md`.
+
 - **Shadow decision provider on the supervisor pre-filter (K-111 P2b).**
   When `decisions.provider` is `jev` (or `mock`), or
   `YAKOS_DECISION_PROVIDER` says so, `supervisor-stream` (bash and Go twin)

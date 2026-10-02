@@ -276,7 +276,9 @@ $b"; fi
 fi
 
 # ---- K-110: concurrent hooks must not double-launch or lose increments --------------
-# 12 escalating hooks at once with score_every=4: exactly 3 launches and the
+# 12 escalating hooks at once with score_every=4: exactly 3 threshold crossings
+# (K-117: each ends as one launch, one coalesced or one throttled trigger, so the
+# crossings are counted from the log rather than from launches) and the
 # counter ends at 12. Unlocked read-increment-write collapses increments, so
 # two hooks see the same value and launch twice (or a launch is lost).
 for side in $sides; do
@@ -294,11 +296,21 @@ for side in $sides; do
         _pids="$_pids $!"
     done
     for _p in $_pids; do wait "$_p" 2>/dev/null || true; done
+    # The detached wrapper starts the dispatcher a moment after the hook exits.
+    for _w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+        grep -q '^ARG:sonnet$' "$rec" 2>/dev/null && break
+        sleep 0.2
+    done
     sleep 1
     launches="$(grep -c '^ARG:sonnet$' "$rec" 2>/dev/null || true)"
     final="$(tr -d '[:space:]' < "$sb/work/current/.supervisor-counter" 2>/dev/null || true)"
     if [ "$final" = "12" ]; then ok "(c110) $side concurrent counter ends at 12"; else bad "(c110) $side counter=$final want 12 (lost increments)"; fi
-    if [ "${launches:-0}" = "3" ]; then ok "(c110) $side exactly 3 launches"; else bad "(c110) $side launches=$launches want 3"; fi
+    clog="$sb/work/current/logs/supervisor-stream.ndjson"
+    cross="$(grep -c 'score threshold hit' "$clog" 2>/dev/null || true)"
+    if [ "${cross:-0}" = "3" ]; then ok "(c110) $side exactly 3 threshold crossings"; else bad "(c110) $side crossings=$cross want 3"; fi
+    # Each crossing launches, coalesces or defers, and these are all high-risk
+    # (rm -rf), so a follow-up may add runs: only "at least one launch" is fixed.
+    if [ "${launches:-0}" -ge 1 ]; then ok "(c110) $side the dispatcher ran ($launches runs)"; else bad "(c110) $side no launch at all"; fi
     [ ! -d "$sb/work/current/.supervisor-counter.lock" ] && ok "(c110) $side lock released" || bad "(c110) $side lock dir left behind"
 done
 

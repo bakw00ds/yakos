@@ -49,7 +49,8 @@ const (
 	hookName            = "supervisor-stream"
 	defaultMinDiffLines = 20
 	defaultScoreEvery   = 10
-	bufferMaxLines      = 50
+
+	bufferMaxLines = 50
 
 	// previewCap bounds every buffered preview; redactWindow is how much text
 	// is redacted before that cut so a token cannot straddle it. The risk
@@ -62,7 +63,9 @@ const (
 // built-in risk-regex patterns (case-insensitive)
 var defaultRiskPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)drop\s+table`),
-	regexp.MustCompile(`(?i)force.*push`),
+	// K-117: the bare `force.*push` matched prose ("enforce push notification")
+	// and could burn the high-risk ceiling; the git-command shapes below cover
+	// real pushes.
 	regexp.MustCompile(`(?i)rm\s+-rf`),
 	regexp.MustCompile(`(?i)chmod\s+777`),
 	regexp.MustCompile(`(?i)(password|secret|api_key|token)\s*=\s*[^$({][^\s]{8,}`),
@@ -100,12 +103,18 @@ type yakosYMLSupervisor struct {
 }
 
 type supervisorConfig struct {
-	Enabled     *bool            `yaml:"enabled"`
-	Model       string           `yaml:"model"`
-	Runtime     string           `yaml:"runtime"`
-	Agent       string           `yaml:"agent"`
-	ScoreEveryN *int             `yaml:"score_every_n_calls"`
-	PreFilter   *preFilterConfig `yaml:"pre_filter"`
+	Enabled     *bool  `yaml:"enabled"`
+	Model       string `yaml:"model"`
+	Runtime     string `yaml:"runtime"`
+	Agent       string `yaml:"agent"`
+	ScoreEveryN optInt `yaml:"score_every_n_calls"`
+	// K-117 launch gate: plain decimal whole numbers only; an invalid value is
+	// ignored on its own (the rest of the block still applies).
+	MaxLaunches    optInt           `yaml:"max_launches_per_session"`
+	MinInterval    optInt           `yaml:"min_launch_interval_s"`
+	RunDeadline    optInt           `yaml:"run_deadline_s"`
+	SessionBackoff optInt           `yaml:"session_limit_backoff_min"`
+	PreFilter      *preFilterConfig `yaml:"pre_filter"`
 }
 
 type preFilterConfig struct {
@@ -130,6 +139,10 @@ type Hook struct {
 	// the production detached launcher; a nil Launch (struct-literal Hooks in
 	// tests) never spawns a process and logs a WARN instead.
 	Launch Launcher
+
+	// Self is this yakos executable, re-run as `hook supervisor-wrap` by the
+	// production launcher. New sets it from os.Executable.
+	Self string
 }
 
 // New returns a Hook with sensible defaults.
@@ -139,6 +152,7 @@ func New(workCurrentDir, projectDir string) *Hook {
 		ProjectDir:     projectDir,
 		NowFn:          time.Now,
 		Launch:         launchDetached,
+		Self:           selfExecutable(),
 	}
 }
 
@@ -247,6 +261,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		extraRiskPatterns = cfg.PreFilter.RiskRegex
 	}
 
+	triggerHigh := false
 	if !pfEnabled {
 		// Pre-filter disabled: every mutation counts.
 		h.appendLog(&out, logFile, "REPORT", "pass",
@@ -299,6 +314,19 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 			return out, nil
 		}
 
+		// K-117: a trigger is HIGH-risk when a sensitive-path or risk-regex match
+		// exists, whichever check fired first (a curl|sh inside a large diff is
+		// still high-risk). High-risk triggers bypass the launch cap.
+		triggerHigh = strings.HasPrefix(escalateReason, "risk-regex:") || strings.HasPrefix(escalateReason, "sensitive-path:")
+		if !triggerHigh {
+			var scratch hooktype.HookOutput
+			if filePath != "" && h.checkSensitivePath(&scratch, filePath, projectDir) != "" {
+				triggerHigh = true
+			} else if c := strings.ReplaceAll(strings.ReplaceAll(newRisk+"\n"+contentRisk+"\n"+commandScan+"\n"+descriptionScan, "\n", " "), "\\ ", "  "); strings.TrimSpace(c) != "" && h.checkRiskRegex(c, extraRiskPatterns) != "" {
+				triggerHigh = true
+			}
+		}
+
 		// Trigger fired.
 		h.appendLog(&out, logFile, "REPORT", "pass",
 			"pre-filter: ESCALATE ("+escalateReason+"); counting toward score threshold",
@@ -322,17 +350,19 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 	// ---- 4. Every N escalations → write dispatch-ready marker ----
 	scoreEvery := defaultScoreEvery
-	if cfg != nil && cfg.ScoreEveryN != nil {
-		scoreEvery = *cfg.ScoreEveryN
-	}
-	if scoreEvery <= 0 {
-		scoreEvery = defaultScoreEvery
+	if cfg != nil && cfg.ScoreEveryN.ok && cfg.ScoreEveryN.v > 0 {
+		scoreEvery = cfg.ScoreEveryN.v
 	}
 
 	if cur%scoreEvery != 0 {
 		h.appendLog(&out, logFile, "REPORT", "pass",
 			"escalation buffered; not yet at score-every threshold",
 			map[string]any{"counter": cur, "score_every": scoreEvery, "will_score": false})
+		// A high-risk event is still recorded (and bumps the high-risk flag) so
+		// the next run covers it even if the cap has been reached by then.
+		if triggerHigh {
+			h.gateNote(&out, in, cfg, logFile, event)
+		}
 		return out, nil
 	}
 
@@ -341,15 +371,15 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		"escalation score threshold hit; forking supervisor dispatch (async)",
 		map[string]any{"counter": cur, "score_every": scoreEvery, "will_score": true})
 
-	h.launchSupervisor(&out, in, cfg, logFile, scoreEvery)
+	h.launchSupervisor(&out, in, cfg, logFile, scoreEvery, triggerHigh, event)
 
 	return out, nil
 }
 
 // launchSupervisor mirrors the tail of supervisor-stream.sh: resolve
 // runtime/agent/model (defaults claude / supervisor / haiku), locate the CLI,
-// build the task, start `dispatch` detached, and log the same records.
-func (h *Hook) launchSupervisor(out *hooktype.HookOutput, in hooktype.HookInput, cfg *supervisorConfig, logFile string, scoreEvery int) {
+// build the task, then hand the launch to the K-117 gate.
+func (h *Hook) launchSupervisor(out *hooktype.HookOutput, in hooktype.HookInput, cfg *supervisorConfig, logFile string, scoreEvery int, high bool, event map[string]any) {
 	runtime, agent, model := "claude", "supervisor", "haiku"
 	if cfg != nil {
 		if cfg.Runtime != "" {
@@ -362,6 +392,7 @@ func (h *Hook) launchSupervisor(out *hooktype.HookOutput, in hooktype.HookInput,
 			model = cfg.Model
 		}
 	}
+	model, badModel := resolveModel(model)
 
 	cli := findCLI(in.Env)
 	if cli == "" || h.Launch == nil {
@@ -375,21 +406,32 @@ func (h *Hook) launchSupervisor(out *hooktype.HookOutput, in hooktype.HookInput,
 		filepath.Join(h.WorkCurrentDir, "supervisor-findings.ndjson"),
 		filepath.Join(h.WorkCurrentDir, "decisions.md"),
 		scoreEvery)
-	spec := LaunchSpec{
-		CLI:        cli,
-		Args:       []string{"dispatch", agent, task, "--runtime", runtime, "--model", model},
-		StdoutPath: filepath.Join(h.WorkCurrentDir, ".supervisor-stdout.log"),
-		StderrPath: filepath.Join(h.WorkCurrentDir, ".supervisor-stderr.log"),
-	}
-	if err := h.Launch(spec); err != nil {
+	if badModel != "" {
 		h.appendLog(out, logFile, "WARN", "pass",
-			"supervisor dispatch launch failed",
-			map[string]any{"error": err.Error(), "model": model, "runtime": runtime})
-		return
+			"supervisor.model is not a known tier or alias; using haiku",
+			map[string]any{"model": badModel})
 	}
-	h.appendLog(out, logFile, "REPORT", "pass",
-		fmt.Sprintf("supervisor dispatch forked async (model=%s runtime=%s)", model, runtime),
-		map[string]any{"dispatch": "async", "model": model, "runtime": runtime})
+	h.launchGate(out, in, cfg, logFile, gateCall{
+		crossed: true, high: high, event: event,
+		spec: LaunchSpec{
+			CLI:        cli,
+			Args:       []string{"dispatch", agent, task, "--runtime", runtime, "--model", model},
+			StdoutPath: filepath.Join(h.WorkCurrentDir, ".supervisor-stdout.log"),
+			StderrPath: filepath.Join(h.WorkCurrentDir, ".supervisor-stderr.log"),
+		},
+		runtime: runtime, model: model,
+	})
+}
+
+// gateNote records a high-risk escalation that did not cross the score
+// threshold: bump the high-risk flag and keep its preview for the next run.
+func (h *Hook) gateNote(out *hooktype.HookOutput, in hooktype.HookInput, cfg *supervisorConfig, logFile string, event map[string]any) {
+	model := "haiku"
+	if cfg != nil && cfg.Model != "" {
+		model = cfg.Model
+	}
+	model, _ = resolveModel(model)
+	h.launchGate(out, in, cfg, logFile, gateCall{crossed: false, high: true, event: event, model: model})
 }
 
 // ---- pre-filter checks -------------------------------------------------------
@@ -584,8 +626,20 @@ const counterLockStale = time.Minute
 // most one crosses a score-every multiple. ok is false when the lock could
 // not be taken within ~3 s.
 func incrementCounter(counterFile string) (cur int, ok bool) {
-	_ = os.MkdirAll(filepath.Dir(counterFile), 0755) //nolint:gosec
-	lock := counterFile + ".lock"
+	release, ok := acquireLock(counterFile + ".lock")
+	if !ok {
+		return 0, false
+	}
+	defer release()
+	cur = readCounter(counterFile) + 1
+	writeCounter(counterFile, cur)
+	return cur, true
+}
+
+// acquireLock takes the mkdir lock (rename-then-recheck stale reap, ~3 s
+// budget) shared with supervisor-stream.sh. release removes it.
+func acquireLock(lock string) (release func(), ok bool) {
+	_ = os.MkdirAll(filepath.Dir(lock), 0755) //nolint:gosec
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		if err := os.Mkdir(lock, 0700); err == nil {
@@ -594,15 +648,12 @@ func incrementCounter(counterFile string) (cur int, ok bool) {
 		// Every retry sleeps and is bounded by the deadline, reaping included,
 		// so a stale lock that cannot be removed never spins this loop.
 		if time.Now().After(deadline) {
-			return 0, false
+			return nil, false
 		}
 		reapStaleLock(lock)
 		time.Sleep(5 * time.Millisecond)
 	}
-	defer func() { _ = os.Remove(lock) }()
-	cur = readCounter(counterFile) + 1
-	writeCounter(counterFile, cur)
-	return cur, true
+	return func() { _ = os.Remove(lock) }, true
 }
 
 // reapStaleLock removes a lock older than counterLockStale. It renames first
