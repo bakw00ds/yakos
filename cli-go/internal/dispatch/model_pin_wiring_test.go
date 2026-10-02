@@ -29,6 +29,7 @@ func pinRoot(t *testing.T) string {
 		"aliased":    "model: balanced\n",
 		"foreign":    "model: gpt-5\n",
 		"fableagent": "model: fable\n",
+		"supervisor": "model: haiku\n",
 	}
 	for name, fm := range agents {
 		body := "---\nid: " + name + "\n" + fm + "---\n\n## Purpose\n\nTest agent " + name + ".\n"
