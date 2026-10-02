@@ -629,10 +629,10 @@ func TestHooksImpl_GoWarnsAboutNonGoReadyHooks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "not yet marked GoReady") || !strings.Contains(out, "supervisor-stream") {
+	if !strings.Contains(out, "not yet marked GoReady") || !strings.Contains(out, "supervisor-gate") {
 		t.Fatalf("go mode did not warn naming non-GoReady hooks:\n%s", out)
 	}
-	if strings.Contains(out, "path-log,") || strings.Contains(out, ": path-log") {
+	if strings.Contains(out, "path-log,") || strings.Contains(out, ": path-log") || strings.Contains(out, "supervisor-stream") {
 		t.Fatalf("warning lists a GoReady hook:\n%s", out)
 	}
 	proj2, home2 := fixtureProject(t, "proj-missing-settings")
@@ -804,6 +804,61 @@ func TestHooksImpl_GuardFallsBackToBashTwinWhenBinaryMissing(t *testing.T) {
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) || ee.ExitCode() != 2 || !strings.Contains(stderr.String(), "twin-ran") {
 		t.Fatalf("missing binary must fall back to the bash twin (exit 2), got err=%v stderr=%q", err, stderr.String())
+	}
+}
+
+// K-122: supervisor-stream is a never-blocking PostToolUse observer, so it
+// takes the fallback-only wrapper (bash twin when the binary is unusable, any
+// Go failure mapped to exit 0), not the fail-closed one.
+func TestHooksImpl_FallbackWrapperForSupervisorStream(t *testing.T) {
+	c := goCommand("/Users/a b/bin/yakos", "supervisor-stream")
+	if !strings.HasPrefix(c, "if [ -f '/Users/a b/bin/yakos' ] && ") || strings.Contains(c, "exit 2") {
+		t.Fatalf("supervisor-stream must use the fallback wrapper and never exit 2: %s", c)
+	}
+	if !strings.Contains(c, `exec "${CLAUDE_PROJECT_DIR}/scripts/hooks/supervisor-stream.sh"`) {
+		t.Fatalf("no bash-twin fallback: %s", c)
+	}
+	if n, ok := goHookName(c); !ok || n != "supervisor-stream" {
+		t.Fatalf("fallback command not recognized: %q %v", n, ok)
+	}
+	if canonicalHookName(c) != "supervisor-stream.sh" {
+		t.Fatalf("wrong merge identity: %s", canonicalHookName(c))
+	}
+	if _, ok := goHookName(strings.Replace(c, "exit 0; else", "exit 2; else", 1)); ok {
+		t.Fatal("tampered fallback parsed as a Go hook command")
+	}
+}
+
+func TestHooksImpl_HybridRegistersSupervisorStreamWithFallback(t *testing.T) {
+	proj, home := fixtureProject(t, "proj-missing-settings")
+	if _, err := runImpl(t, proj, home, ""); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(readSettings(t, proj), &doc); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entries := range doc.Hooks {
+		for _, e := range entries {
+			for _, h := range e.Hooks {
+				if strings.Contains(h.Command, "hook run --impl go supervisor-stream") {
+					found = true
+					if !strings.Contains(h.Command, `if [ "$rc" -eq 0 ]; then exit 0; fi;`) || strings.Contains(h.Command, "exit 2") {
+						t.Errorf("not the fallback wrapper: %s", h.Command)
+					}
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("supervisor-stream not registered on Go")
 	}
 }
 

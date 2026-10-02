@@ -1,0 +1,12 @@
+{
+  "_doc": "K-122: duplicate tool_name (Bash then Read). jq takes the last, so bash still scans command; Go skips on the last name. Claude Code emits exactly one.",
+  "session_id": "fixture-ss-envelope",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_name": "Read",
+  "tool_input": {"command": "rm -rf /var/lib/app/cache"}
+}

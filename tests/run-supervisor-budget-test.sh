@@ -150,5 +150,15 @@ for side in bash go; do
     [ "$(findings "$sb" | grep -c CRITICAL)" = 2 ] && ok "(8) $side neither repeats" || bad "(8) $side repeated findings"
 done
 
+# 9. K-122: the two twins write the same hook-log records, field for field AND in
+# the same order (jq keeps an object literal's insertion order, so `jq -c` of each
+# record is a byte comparison with only the timestamp removed).
+for scen in routine high ceil warn proj quiet flags; do
+    b="$(logs "$TMP/$scen-bash" | jq -c 'del(.ts)' 2>&1)"
+    g="$(logs "$TMP/$scen-go" | jq -c 'del(.ts)' 2>&1)"
+    if [ -n "$b" ] && [ "$b" = "$g" ]; then ok "(9) $scen hook-log records are byte-identical across twins"; else
+        bad "(9) $scen hook-log records differ"; printf '    bash: %s\n    go:   %s\n' "$b" "$g"; fi
+done
+
 echo "supervisor budget: $pass passed, $fail failed"
 [ "$fail" = 0 ]

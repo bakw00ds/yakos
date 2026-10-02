@@ -1,11 +1,13 @@
 package supervisorstream
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -38,16 +40,53 @@ func WrapperConfigFromEnv(get func(string) string) WrapperConfig {
 	return c
 }
 
+// wrapLogOrder is the order bash's _ssw_log writes its extras in (a printf
+// template, so insertion order). The record has no agent, session_id or event:
+// the wrapper is detached and bash writes the minimal shape.
+var wrapLogOrder = []string{"rc", "deadline_s", "duration_s", "session_limit", "backoff_min", "ceiling", "cap", "coalesced", "kind"}
+
 func (c WrapperConfig) log(severity, reason string, extra map[string]any) {
-	rec := map[string]any{
-		"ts": time.Now().UTC().Format(time.RFC3339), "hook": hookName,
-		"severity": severity, "decision": "pass", "reason": reason,
+	var buf bytes.Buffer
+	put := func(k string, v any, first bool) bool {
+		kb, _ := json.Marshal(k)
+		vb, err := json.Marshal(v)
+		if err != nil {
+			return false
+		}
+		if !first {
+			buf.WriteByte(',')
+		}
+		buf.Write(kb)
+		buf.WriteByte(':')
+		buf.Write(vb)
+		return true
 	}
-	for k, v := range extra {
-		rec[k] = v
+	buf.WriteByte('{')
+	put("ts", time.Now().UTC().Format(time.RFC3339), true)
+	put("hook", hookName, false)
+	put("severity", severity, false)
+	put("decision", "pass", false)
+	put("reason", reason, false)
+	done := map[string]bool{}
+	for _, k := range wrapLogOrder {
+		if v, ok := extra[k]; ok {
+			put(k, v, false)
+			done[k] = true
+		}
 	}
-	data, err := json.Marshal(rec)
-	if err != nil || c.Log == "" {
+	var rest []string
+	for k := range extra {
+		if !done[k] {
+			rest = append(rest, k)
+		}
+	}
+	sort.Strings(rest)
+	for _, k := range rest {
+		put(k, extra[k], false)
+	}
+	buf.WriteByte('}')
+	data := buf.Bytes()
+	if c.Log == "" {
 		return
 	}
 	f, err := os.OpenFile(c.Log, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec

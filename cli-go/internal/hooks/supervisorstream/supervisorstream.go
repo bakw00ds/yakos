@@ -41,6 +41,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/hooks/secretscan"
 )
@@ -90,6 +91,35 @@ var defaultRiskPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)cp\s+([^;&|]*\s)?[^\s]*\.env(\.[^\s]*)?[^a-z0-9\s._/-]?(\s|$)`),
 	regexp.MustCompile(`(?i)eval\s+\S?([$][(]|\x60)\s*([^\s)]*/)?(curl|wget)`),
 	regexp.MustCompile(`(?i)find\s+(([^;&|'"]|"[^"]*"|'[^']*')*\s)?-delete([\s;&|]|$)`),
+}
+
+// defaultRiskLabels is each defaultRiskPatterns entry spelled the way the bash
+// twin spells it (POSIX ERE), index for index. The escalation trigger is logged
+// as "risk-regex:<label>", so Go and bash write identical bytes; matching still
+// uses the compiled RE2 form. TestRiskLabelsMatchBash keeps the list in step
+// with default_patterns in supervisor-stream.sh.
+var defaultRiskLabels = []string{
+	`drop[[:space:]]+table`,
+	`rm[[:space:]]+-rf`,
+	`chmod[[:space:]]+777`,
+	`(password|secret|api_key|token)[[:space:]]*=[[:space:]]*[^$({][^[:space:]]{8,}`,
+	`git[[:space:]]+push[[:space:]]([^;&|]*[[:space:]])?(--force[a-z-]*|-f)([[:space:]]|$)`,
+	`git[[:space:]]+push[[:space:]]([^;&|]*[[:space:]])?[+][^[:space:]]`,
+	`(curl|wget)[^|]*[|][[:space:]]*(sudo[[:space:]]+)?((ba|z|da)?sh|python[0-9.]*|perl|ruby|node|php)([[:space:]]|$)`,
+	`(sh|source)[[:space:]]+<[(][^)]*(curl|wget)`,
+	`base64[^|]*[|][[:space:]]*(sudo[[:space:]]+)?(ba|z|da)?sh([[:space:]]|$)`,
+	`>[|>]?[[:space:]]*[^[:space:]]*(\.env|\.ssh/|\.pem|credentials|\.claude/settings|hook-bypass|/etc/)`,
+	`tee[[:space:]]+([^;&|]*[[:space:]])?[^[:space:]]*(\.env|\.ssh/|\.pem|credentials|\.claude/settings|hook-bypass|/etc/)`,
+	`rm[[:space:]]+-[a-z]*(fr|rf)`,
+	`rm[[:space:]]+-[a-z]*r[a-z]*[[:space:]]+-[a-z]*f`,
+	`rm[[:space:]]+-[a-z]*f[a-z]*[[:space:]]+-[a-z]*r`,
+	`chmod[[:space:]]+-[a-z]+[[:space:]]+777`,
+	`rm[[:space:]]+([^;&|]*[[:space:]])?(-[a-z]*r[a-z]*|--recursive)[[:space:]]([^;&|]*[[:space:]])?(-[a-z]*f[a-z]*|--force)([[:space:]]|$)`,
+	`rm[[:space:]]+([^;&|]*[[:space:]])?(-[a-z]*f[a-z]*|--force)[[:space:]]([^;&|]*[[:space:]])?(-[a-z]*r[a-z]*|--recursive)([[:space:]]|$)`,
+	"(ba|z|da)?sh[[:space:]]+-[a-z]*c[[:space:]]+[^[:space:]]?([$][(]|`)[[:space:]]*([^[:space:])]*/)?(curl|wget)",
+	`cp[[:space:]]+([^;&|]*[[:space:]])?[^[:space:]]*\.env(\.[^[:space:]]*)?[^[:alnum:][:space:]._/-]?([[:space:]]|$)`,
+	"eval[[:space:]]+[^[:space:]]?([$][(]|`)[[:space:]]*([^[:space:])]*/)?(curl|wget)",
+	`find[[:space:]]+(([^;&|'"]|"[^"]*"|'[^']*')*[[:space:]])?-delete([[:space:];&|]|$)`,
 }
 
 // yakosYMLSupervisor holds the shape needed from .yakos.yml.
@@ -196,7 +226,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	counterFile := filepath.Join(h.WorkCurrentDir, ".supervisor-counter")
 
 	agentType := senderRole(in)
-	filePath := fileFromPayload(in)
+	filePath := bashStr(fileFromPayload(in))
 	ts := h.NowFn().UTC().Format(time.RFC3339)
 	sessionID := hookio.SessionID(in) // bash hi_session_id: payload, not env
 
@@ -205,14 +235,14 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	// Edit/Write text is scanned in full for risk (bounded: head + tail beyond
 	// 64 KiB) so padding cannot hide a snippet; the 300-byte newScan/contentScan
 	// still drive the large-diff check as before.
-	newFull := hookio.ToolInputString(in, "new_string")
-	contentFull := hookio.ToolInputString(in, "content")
+	newFull := bashStr(hookio.ToolInputString(in, "new_string"))
+	contentFull := bashStr(hookio.ToolInputString(in, "content"))
 	newScan := truncate(newFull, previewCap)
 	contentScan := truncate(contentFull, previewCap)
 	newRisk := boundRisk(newFull)
 	contentRisk := boundRisk(contentFull)
-	commandScan := hookio.ToolInputString(in, "command")
-	descriptionScan := hookio.ToolInputString(in, "description")
+	commandScan := bashStr(hookio.ToolInputString(in, "command"))
+	descriptionScan := bashStr(hookio.ToolInputString(in, "description"))
 	preview := func(text string) string {
 		return truncate(secretscan.Redact(truncate(text, redactWindow)), previewCap)
 	}
@@ -264,7 +294,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	triggerHigh := false
 	if !pfEnabled {
 		// Pre-filter disabled: every mutation counts.
-		h.appendLog(&out, logFile, "REPORT", "pass",
+		h.appendLog(&out, in, logFile, "REPORT", "pass",
 			"pre-filter disabled; counting toward score threshold",
 			map[string]any{"pre_filter": "disabled", "tool": in.Tool, "file": filePath})
 		// Fall through to counter logic.
@@ -280,7 +310,8 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		if escalateReason == "" {
 			combined := newScan + contentScan
 			if combined != "" {
-				lineCount := strings.Count(combined, "\n") + 1
+				// bash: printf '%s' | wc -l counts newlines, not lines.
+				lineCount := strings.Count(combined, "\n")
 				if lineCount > minDiffLines {
 					escalateReason = fmt.Sprintf("large-diff:%d-lines", lineCount)
 				}
@@ -304,7 +335,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 		if escalateReason == "" {
 			// No trigger — buffer-only, no counter tick.
-			h.appendLog(&out, logFile, "REPORT", "pass",
+			h.appendLog(&out, in, logFile, "REPORT", "pass",
 				"pre-filter: no trigger; buffered without dispatch",
 				map[string]any{"pre_filter": "pass", "tool": in.Tool, "file": filePath})
 			h.shadowDecision(in, doc, projectDir, shadowInput{
@@ -328,7 +359,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		}
 
 		// Trigger fired.
-		h.appendLog(&out, logFile, "REPORT", "pass",
+		h.appendLog(&out, in, logFile, "REPORT", "pass",
 			"pre-filter: ESCALATE ("+escalateReason+"); counting toward score threshold",
 			map[string]any{"pre_filter": "escalate", "trigger": escalateReason, "tool": in.Tool, "file": filePath})
 		h.shadowDecision(in, doc, projectDir, shadowInput{
@@ -342,7 +373,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	if !ok {
 		// No lock within the wait budget: skip this tick (bash: exit 0)
 		// rather than block the hook or risk a double launch.
-		h.appendLog(&out, logFile, "WARN", "pass",
+		h.appendLog(&out, in, logFile, "WARN", "pass",
 			"counter lock busy or unremovable; skipping this escalation tick",
 			map[string]any{"lock": counterFile + ".lock"})
 		return out, nil
@@ -355,7 +386,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	if cur%scoreEvery != 0 {
-		h.appendLog(&out, logFile, "REPORT", "pass",
+		h.appendLog(&out, in, logFile, "REPORT", "pass",
 			"escalation buffered; not yet at score-every threshold",
 			map[string]any{"counter": cur, "score_every": scoreEvery, "will_score": false})
 		// A high-risk event is still recorded (and bumps the high-risk flag) so
@@ -367,7 +398,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	// Threshold hit — fork the supervisor (bash: same log records, same order).
-	h.appendLog(&out, logFile, "REPORT", "pass",
+	h.appendLog(&out, in, logFile, "REPORT", "pass",
 		"escalation score threshold hit; forking supervisor dispatch (async)",
 		map[string]any{"counter": cur, "score_every": scoreEvery, "will_score": true})
 
@@ -396,7 +427,7 @@ func (h *Hook) launchSupervisor(out *hooktype.HookOutput, in hooktype.HookInput,
 
 	cli := findCLI(in.Env)
 	if cli == "" || h.Launch == nil {
-		h.appendLog(out, logFile, "WARN", "pass",
+		h.appendLog(out, in, logFile, "WARN", "pass",
 			"could not locate yakos CLI to fork supervisor", map[string]any{})
 		return
 	}
@@ -407,7 +438,7 @@ func (h *Hook) launchSupervisor(out *hooktype.HookOutput, in hooktype.HookInput,
 		filepath.Join(h.WorkCurrentDir, "decisions.md"),
 		scoreEvery)
 	if badModel != "" {
-		h.appendLog(out, logFile, "WARN", "pass",
+		h.appendLog(out, in, logFile, "WARN", "pass",
 			"supervisor.model is not a known tier or alias; using haiku",
 			map[string]any{"model": badModel})
 	}
@@ -517,9 +548,9 @@ func (h *Hook) checkOutOfScope(filePath, projectDir string) string {
 // checkRiskRegex returns an escalation reason if combined text matches any
 // built-in or extra risk patterns.
 func (h *Hook) checkRiskRegex(combined string, extras []string) string {
-	for _, re := range defaultRiskPatterns {
+	for i, re := range defaultRiskPatterns {
 		if re.MatchString(combined) {
-			return "risk-regex:" + re.String()
+			return "risk-regex:" + defaultRiskLabels[i]
 		}
 	}
 	for _, pat := range extras {
@@ -685,33 +716,39 @@ func writeCounter(counterFile string, n int) {
 
 // ---- log helper --------------------------------------------------------------
 
-func (h *Hook) appendLog(out *hooktype.HookOutput, logFile, severity, action, message string, extra map[string]any) {
-	ts := h.NowFn().UTC().Format(time.RFC3339)
-	entry := map[string]any{
-		"ts":       ts,
-		"hook":     hookName,
-		"severity": severity,
-		"action":   action,
-		"message":  message,
-	}
-	for k, v := range extra {
-		entry[k] = v
-	}
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return
-	}
-	data = append(data, '\n')
-	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil { //nolint:gosec
-		return
-	}
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec
-	if err != nil {
+// logExtraOrder is the order bash's ho_log extras appear in (jq keeps the
+// object literal's insertion order). One list covers every record because no
+// two records order the same pair of keys differently; TestLogExtraOrder
+// compares each record against bash's literal order. Keep it in step with
+// lib/hooks/legacy/supervisor-stream.sh.
+var logExtraOrder = []string{
+	"ignored_keys", "invalid_keys", "lock", "age_s",
+	"coalesced", "high_risk", "throttled", "backoff_until", "capped", "cap", "ceiling",
+	"agent", "spent_usd", "limit_usd", "ceiling_usd", "budget_reason",
+	"pre_filter", "trigger", "tool", "file",
+	"counter", "score_every", "will_score",
+	"dispatch", "model", "runtime", "deadline_s", "deferred_s", "pending", "session_key", "kind",
+}
+
+// appendLog writes one record through the shared hooklog writer, so the
+// field set (ts, hook, severity, decision, reason, agent, session_id, event,
+// then extras) matches bash's ho_log. decision and reason replace the old
+// action/message names; agent, session_id and event come from the payload
+// exactly as bash's hi_sender_role / hi_session_id / hi_event do.
+func (h *Hook) appendLog(out *hooktype.HookOutput, in hooktype.HookInput, _ string, severity, decision, reason string, extra map[string]any) {
+	if err := hooklog.Append(h.WorkCurrentDir, hooklog.Entry{
+		Hook:       hookName,
+		Severity:   severity,
+		Decision:   decision,
+		Reason:     reason,
+		Agent:      senderRole(in),
+		SessionID:  hookio.SessionID(in),
+		Event:      in.Event,
+		Extra:      extra,
+		ExtraOrder: logExtraOrder,
+	}, h.NowFn()); err != nil {
 		out.Stderr = fmt.Appendf(out.Stderr, "%s: open log: %v\n", hookName, err)
-		return
 	}
-	defer f.Close() //nolint:errcheck
-	_, _ = f.Write(data)
 }
 
 // ---- helpers -----------------------------------------------------------------
@@ -804,6 +841,15 @@ func nilIfEmpty(s string) any {
 // when absent), whitespace-trimmed, "yakos:" prefix stripped. Env is not read.
 func senderRole(in hooktype.HookInput) string {
 	return hookio.SenderRole(in)
+}
+
+// bashStr mirrors how bash reads a payload string: through $(jq ...), which
+// drops NUL bytes and trailing newlines before the risk regexes and the
+// redactor run. sh drops NUL when it executes a script, so a NUL-split
+// `cu\0rl ... | sh` is a real risk and must still escalate (K-122 security
+// review). Scan and store the same bytes bash does.
+func bashStr(s string) string {
+	return strings.TrimRight(strings.ReplaceAll(s, "\x00", ""), "\n")
 }
 
 func fileFromPayload(in hooktype.HookInput) string {

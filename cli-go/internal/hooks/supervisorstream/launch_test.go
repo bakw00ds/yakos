@@ -50,6 +50,7 @@ func logMessages(t *testing.T, work string) []string {
 	}
 	var msgs []string
 	for _, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		checkRecordShape(t, l)
 		msgs = append(msgs, l)
 	}
 	return msgs
@@ -194,7 +195,7 @@ func TestLaunchFindsCLIViaYakosRootThenPath(t *testing.T) {
 	}
 }
 
-func TestLaunchFailureIsLoggedNotFatal(t *testing.T) {
+func TestLaunchFailureIsReportedOnStderrNotFatal(t *testing.T) {
 	work, proj := t.TempDir(), t.TempDir()
 	writeYAML(t, proj, "supervisor:\n  score_every_n_calls: 1\n")
 	rec := &recorder{err: os.ErrPermission}
@@ -206,8 +207,13 @@ func TestLaunchFailureIsLoggedNotFatal(t *testing.T) {
 	if err != nil || out.ExitCode != 0 {
 		t.Fatalf("err=%v code=%d", err, out.ExitCode)
 	}
-	if !strings.Contains(strings.Join(logMessages(t, work), "\n"), "supervisor dispatch launch failed") {
-		t.Error("launch failure not logged")
+	// Bash cannot observe a spawn failure, so it never logs one; Go keeps the
+	// hook log identical and reports on stderr (K-122).
+	if !strings.Contains(string(out.Stderr), "supervisor dispatch launch failed") {
+		t.Errorf("launch failure not reported on stderr: %q", out.Stderr)
+	}
+	if strings.Contains(strings.Join(logMessages(t, work), "\n"), "launch failed") {
+		t.Error("launch failure must not be written to the hook log (bash never writes it)")
 	}
 }
 

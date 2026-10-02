@@ -9,12 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`supervisor-stream` runs on Go by default (K-122).** The Go twin's log
+  records now use the bash schema (`decision`, `reason`, `agent`,
+  `session_id`, `event`, then the extra fields) through the shared hooklog
+  writer, covering every record including the launch-gate, coalescing,
+  ceiling and budget ones. Parity in `tests/run-hook-parity.sh` went from 3 to
+  26 of 27 rows (the 27th is the shared empty-stdin accept) and the registry
+  marks the hook `GoReady`, so hybrid refresh registers it as
+  `yakos hook run --impl go supervisor-stream` (about 149 ms to about 40 ms
+  per call). It carries a fallback-only wrapper (bash twin if the binary is
+  unusable, any Go failure mapped to exit 0, never exit 2). Each absorbed failure is
+  logged to `~/.yakos-state/hook-fallback.log` and `yakos doctor` warns on
+  entries from the last 7 days, so a crashing hook cannot hide). NUL bytes are now
+  stripped from the scanned strings, as bash's `$(jq)` does, so a NUL-split
+  `cu\0rl ... | sh` still escalates and a NUL-split secret is still redacted.
+  Log records now match bash byte for byte, extras order and risk-pattern
+  spelling included (checked in the budget and coalesce suites), and the
+  large-diff line count counts newlines like bash's `wc -l`.
+
 - **Heavy hooks run on Go by default; auto-compaction on by default (K-118).**
   The Go `yakos refresh` now defaults to `--hooks-impl hybrid`: `path-allowlist`
   and `secret-scan` join `output-injection-scan` and the other parity-
   verified hooks on `yakos hook run --impl go` (zero non-accepted divergences
-  in `tests/run-hook-parity.sh`). `supervisor-stream` stays on bash until its
-  Go log record reaches parity. The default applies to Go-native installs or
+  in `tests/run-hook-parity.sh`). `supervisor-stream` followed in K-122
+  once its Go log record reached parity (see below). The default applies to Go-native installs or
   `YAKOS_IMPL=go`; with the bash CLI tree present and `YAKOS_IMPL` unset,
   refresh is proxied to bash and stays all-bash (`yakos doctor` says which
   path is active). Enforcing Go hooks (fail-closed ones, plus

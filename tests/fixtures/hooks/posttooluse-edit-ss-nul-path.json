@@ -1,0 +1,13 @@
+{
+  "_doc": "K-122: NUL inside a sensitive file_path; with a deny list for .env both twins must escalate on sensitive-path.",
+  "session_id": "fixture-ss-nul",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Edit",
+  "tool_input": {"file_path": ".e\u0000nv", "old_string": "a", "new_string": "b"},
+  "tool_response": "",
+  "tool_use_id": "toolu_fixture_ss_nul"
+}

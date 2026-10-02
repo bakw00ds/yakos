@@ -66,6 +66,13 @@ type Entry struct {
 	// bash's `{...} + $extra` jq merge: a key in Extra overrides the base
 	// field of the same name.
 	Extra map[string]any
+
+	// ExtraOrder, when set, lists Extra keys in the order they must appear
+	// after the base fields, for hooks whose bash twin writes its extras in a
+	// fixed, non-alphabetical order (jq keeps an object literal's insertion
+	// order). Extra keys not named here follow, sorted. A fixed list keeps the
+	// output deterministic (rule:cache-stability) without map iteration.
+	ExtraOrder []string
 }
 
 // Append writes one NDJSON record to <workDir>/logs/<hook>.ndjson. It is a
@@ -131,6 +138,19 @@ func marshalEntry(e Entry, now time.Time) ([]byte, error) {
 		}
 	}
 	sort.Strings(extraKeys)
+	if len(e.ExtraOrder) > 0 {
+		ranked := make(map[string]int, len(e.ExtraOrder))
+		for i, k := range e.ExtraOrder {
+			ranked[k] = i + 1 // 0 means "not listed"
+		}
+		sort.SliceStable(extraKeys, func(i, j int) bool {
+			ri, rj := ranked[extraKeys[i]], ranked[extraKeys[j]]
+			if ri == 0 || rj == 0 {
+				return ri != 0 && rj == 0
+			}
+			return ri < rj
+		})
+	}
 
 	order := make([]string, 0, len(baseFieldOrder)+len(extraKeys))
 	order = append(order, baseFieldOrder...)

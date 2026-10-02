@@ -363,6 +363,9 @@ func truncateUTF8(s string, n int) string {
 // RedactText replaces secret-shaped substrings with [REDACTED:<kind>] and adds
 // the number of replacements to *count (if non-nil).
 func RedactText(s string, count *int) string {
+	// A NUL inside a secret splits it for the regexes; sh and the bash twin both
+	// drop it, so drop it here too, at the egress boundary (K-122 review).
+	s = strings.ReplaceAll(s, "\x00", "")
 	// Whitespace is normalised BEFORE any credential rule runs, so a flag and its
 	// value cannot be separated by anything the rules do not expect (two spaces,
 	// tabs, a backslash-newline continuation, CRLF, U+00A0). Pass 1 keeps
