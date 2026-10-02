@@ -115,7 +115,7 @@ var helpGroups = []helpGroup{
 	{
 		Title: "LLM Ops & Metrics",
 		Commands: []string{
-			"cost", "metrics", "telemetry", "model-routing", "decide",
+			"cost", "budget", "metrics", "telemetry", "model-routing", "decide",
 			"plan score", "work close",
 		},
 	},
@@ -137,6 +137,7 @@ var builtinDescs = map[string]string{
 	"--version": "Print version string",
 	"--help":    "Print this help",
 	"workflow":  "Run a named multi-step workflow",
+	"budget":    "Per-agent dollar budgets with a hard stop (status | set | reset | check)",
 	"decide":    "Ask a typed decision provider (Jev/mock) a reviewed question set",
 	"serve":     "Run the daemon + web console (requires daemon running)",
 	"console":   "Manage console users and bootstrap tokens (run on daemon host)",

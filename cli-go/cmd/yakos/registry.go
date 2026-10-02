@@ -216,6 +216,11 @@ var commandRegistry = []commandEntry{
 		},
 	},
 	{
+		Name:   "budget",
+		Specs:  specSet("budget", "--json", "--window", "--project", "--by-project", "--max-model"),
+		HelpFn: printBudgetHelp,
+	},
+	{
 		Name:   "checkpoint",
 		Specs:  specSet("checkpoint", "--age"),
 		HelpFn: checkpoint.PrintHelp,

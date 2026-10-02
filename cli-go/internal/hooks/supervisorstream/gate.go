@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
@@ -19,6 +20,7 @@ type gateCall struct {
 	spec    LaunchSpec // dispatch to run; zero when !crossed
 	runtime string
 	model   string
+	agent   string // dispatch agent (budget key); "supervisor" by default
 }
 
 // launchGate is the K-117 gate: coalesce into an in-flight run, cap routine
@@ -83,12 +85,53 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 			map[string]any{"high_risk": true, "pending": st.pending})
 		return
 	}
+	if c.agent == "" {
+		c.agent = "supervisor"
+	}
+	lim.bud = h.evalBudget(c.agent, in)
 	highKind := st.high > 0
 	kind := "routine"
 	if highKind {
 		kind = "high"
 	}
-	switch allowLaunch(st, lim, highKind, now) {
+	deny := allowLaunch(st, lim, highKind, now)
+	// Budget warning: every launch decision at warning level says so. At
+	// hard_stop the deny cases below say it instead (or, for a high-risk
+	// launch under the ceiling, the exempt note here).
+	if b := lim.bud; b.state == string(budget.StateWarning) {
+		h.appendLog(out, logFile, "WARN", "pass",
+			"supervisor budget at warning level",
+			map[string]any{"agent": c.agent, "spent_usd": b.spent, "limit_usd": b.limit, "budget_reason": budget.ReasonWarning})
+		out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget at %.0f%% ($%.2f of $%.2f); at 100%% routine supervisor runs stop\n", b.spent/b.limit*100, b.spent, b.limit)
+	} else if b.hard && deny == denyNone {
+		h.appendLog(out, logFile, "WARN", "pass",
+			"supervisor budget exhausted; high-risk launch allowed under the ceiling",
+			map[string]any{"agent": c.agent, "spent_usd": b.spent, "limit_usd": b.limit, "ceiling_usd": b.stop, "budget_reason": budget.ReasonExhausted})
+		out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget exhausted ($%.2f of $%.2f); launching high-risk supervision under the $%.2f ceiling\n", b.spent, b.limit, b.stop)
+	}
+	switch deny {
+	case denyBudget:
+		record()
+		_ = st.save(statePath)
+		b := lim.bud
+		h.appendLog(out, logFile, "WARN", "pass",
+			"supervisor budget exhausted; skipping this routine supervisor launch (high-risk events still launch)",
+			map[string]any{"agent": c.agent, "spent_usd": b.spent, "limit_usd": b.limit, "budget_reason": budget.ReasonExhausted, "kind": kind})
+		out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget exhausted ($%.2f of $%.2f); routine supervisor runs are skipped until it is raised, reset, or the month rolls over (yakos budget status)\n", b.spent, b.limit)
+		return
+	case denyBudgetCeiling:
+		record()
+		b := lim.bud
+		if st.budgetlog != 1 {
+			st.budgetlog = 1
+			h.appendLog(out, logFile, "WARN", "pass",
+				"supervisor budget ceiling reached; high-risk launches are no longer supervised",
+				map[string]any{"agent": c.agent, "spent_usd": b.spent, "ceiling_usd": b.stop, "budget_reason": budget.ReasonExhausted})
+			out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget ceiling ($%.2f) reached; high-risk supervisor runs are skipped\n", b.stop)
+			writeSynthBudgetFinding(filepath.Join(h.WorkCurrentDir, "supervisor-findings.ndjson"), b.stop, h.NowFn())
+		}
+		_ = st.save(statePath)
+		return
 	case denyBackoff:
 		record()
 		_ = st.save(statePath)
@@ -185,10 +228,21 @@ func joinKeys(k []string) string {
 // ceiling is reached: further high-risk events are no longer supervised, so
 // block_on_critical operators must be told. Bash twin: _ss_synth_finding.
 func writeSynthFinding(path string, ceiling int, now time.Time) {
+	appendSynth(path, now, fmt.Sprintf("High-risk supervisor launch ceiling (%d) reached for this session: further high-risk events are recorded but no longer supervised. Review the session and the pending events file.", ceiling))
+}
+
+// writeSynthBudgetFinding is the same CRITICAL alert for the dollar-budget
+// ceiling, so block_on_critical operators are stopped and told. Bash twin:
+// _ss_synth_budget_finding.
+func writeSynthBudgetFinding(path string, ceilingUSD float64, now time.Time) {
+	appendSynth(path, now, fmt.Sprintf("Supervisor dollar-budget ceiling ($%.2f) reached: further high-risk events are recorded but no longer supervised. Raise or reset the budget (yakos budget status) and review the session and the pending events file.", ceilingUSD))
+}
+
+func appendSynth(path string, now time.Time, rationale string) {
 	rec := map[string]any{
 		"ts": now.UTC().Format(time.RFC3339), "batch_size": 0, "scores": map[string]any{},
 		"overall": "CRITICAL", "synthetic": true,
-		"rationale":          fmt.Sprintf("High-risk supervisor launch ceiling (%d) reached for this session: further high-risk events are recorded but no longer supervised. Review the session and the pending events file.", ceiling),
+		"rationale":          rationale,
 		"recommended_action": "surface_to_operator",
 	}
 	data, err := json.Marshal(rec)
@@ -201,6 +255,21 @@ func writeSynthFinding(path string, ceiling int, now time.Time) {
 	}
 	_, _ = f.Write(append(data, '\n'))
 	_ = f.Close()
+}
+
+// evalBudget reads the supervisor's dollar budget in-process (no fork). Any
+// problem fails open: a zero budgetGate allows the launch. The project's
+// agent_budgets can only lower the limit, never loosen it (budget.Resolve).
+func (h *Hook) evalBudget(agent string, in hooktype.HookInput) budgetGate {
+	st, err := budget.Evaluate(agent, budget.Options{Project: h.resolveProjectDir(in), Now: h.NowFn})
+	if err != nil || st.LimitUSD <= 0 {
+		return budgetGate{}
+	}
+	return budgetGate{
+		hard:  st.State == budget.StateHardStop,
+		over:  st.State == budget.StateHardStop && st.SpentUSD+1e-9 >= st.StopUSD,
+		state: string(st.State), spent: st.SpentUSD, limit: st.LimitUSD, stop: st.StopUSD,
+	}
 }
 
 // gateHold is a test seam: with YAKOS_TEST_SEAMS=1 it sleeps

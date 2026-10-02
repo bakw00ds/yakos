@@ -62,6 +62,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now resolve and unknown names fall back to haiku. Apart from that pattern,
   what the pre-filter escalates is unchanged. See `docs/supervisor-mode.md`.
 
+- **Per-agent dollar budgets with a hard stop (K-119).** An agent can have a
+  dollar limit over a monthly (local calendar) or lifetime window. At 80% it
+  warns (stderr, `yakos doctor`); at 100% new dispatches are refused with exit
+  4 until the limit is raised, `yakos budget reset <agent>` is run, or the month
+  rolls over. A run in flight is never killed. New `yakos budget
+  status|set|reset|check`; `check` is the hook-callable pre-flight (exit 0 or
+  4, never 2). Spend comes from the dispatch-log cost fields through an
+  incremental 0600 cache (about 0.1 ms per pre-flight, rebuilt from the log when
+  missing or corrupt). Limits live in `~/.yakos-state/budget-policy.yml`; a
+  project `.yakos.yml` `agent_budgets:` can only lower a limit. Off by default
+  except `supervisor` ($100/month) and `librarian` ($40/month). Enforced in
+  `dispatch.Run` and before the bash passthrough. See `docs/budgets.md`.
+  Review follow-ups: `budget check` prints a stable `reason=` line; doctor reports
+  an exhausted supervisor budget as an error ("LLM supervision disabled");
+  per-project spend in `budget status --by-project`; an optional `max_model`
+  ceiling stops a project raising cost with a dearer model; the spend cache and
+  resets file get the policy file's trust check; `status` lists project-limited
+  agents; `budget set` is locked; monthly buckets are rebuilt on a time-zone
+  change; `budget-guard` blocks agent-issued `yakos budget set|reset` and edits
+  to the budget state files. The supervisor-stream launch gate (both twins)
+  refuses routine supervisor launches at the supervisor's hard stop and lets
+  high-risk ones run up to 2x the limit, then writes a synthetic CRITICAL
+  finding; `yakos dispatch` refuses the supervisor only at 2x so no env var or
+  flag carries the exemption.
+
 - **Shadow decision provider on the supervisor pre-filter (K-111 P2b).**
   When `decisions.provider` is `jev` (or `mock`), or
   `YAKOS_DECISION_PROVIDER` says so, `supervisor-stream` (bash and Go twin)

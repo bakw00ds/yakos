@@ -51,6 +51,7 @@ on:
       - 'tests/run-hook-fixtures.sh'
       - 'tests/run-validator-fixtures.sh'
       - 'tests/run-supervisor-shadow-test.sh'
+      - 'tests/run-supervisor-budget-test.sh'
       - 'tests/fixtures/hooks/**'
   pull_request:
     branches: [main]
@@ -64,6 +65,7 @@ on:
       - 'tests/run-hook-fixtures.sh'
       - 'tests/run-validator-fixtures.sh'
       - 'tests/run-supervisor-shadow-test.sh'
+      - 'tests/run-supervisor-budget-test.sh'
       - 'tests/fixtures/hooks/**'
   workflow_dispatch:
 
@@ -74,6 +76,7 @@ jobs:
     # True Windows-native parity (no bash) is not tested here — that is the
     # Phase 3 goal state, not the compat-window baseline.
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -152,6 +155,14 @@ jobs:
       - name: Supervisor shadow decision (bash vs Go, mock provider)
         shell: bash
         run: bash tests/run-supervisor-shadow-test.sh
+
+      # K-119: the supervisor dollar budget in the launch gate (routine refused
+      # at hard stop, high-risk exempt to 2x then a CRITICAL, warning, project
+      # cannot loosen, hung CLI fails open). Bash and Go twins; needs bin/yakos.
+      - name: Supervisor dollar budget (bash vs Go)
+        shell: bash
+        timeout-minutes: 10
+        run: bash tests/run-supervisor-budget-test.sh
 
       - name: Upload hook parity matrix
         if: always()
@@ -696,6 +707,7 @@ jobs:
   hook-fixtures-bash32:
     name: hook fixtures under stock bash 3.2 (macos)
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -722,3 +734,20 @@ jobs:
       - name: Supervisor shadow decision under /bin/bash (bash side)
         shell: bash
         run: /bin/bash tests/run-supervisor-shadow-test.sh
+
+      # K-119: the budget test needs the Go binary (the bash hook reads the
+      # budget through `yakos budget check`), so build it first.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: cli-go/go.sum
+
+      - name: Build yakos
+        shell: bash
+        run: make build
+
+      - name: Supervisor dollar budget under /bin/bash (3.2 hook, Go twin)
+        shell: bash
+        timeout-minutes: 10
+        run: /bin/bash tests/run-supervisor-budget-test.sh

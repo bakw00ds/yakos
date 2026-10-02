@@ -18,6 +18,7 @@ import (
 //	high       high-risk events not yet claimed by a run
 //	caplog     1 once the cap was reported;  ceillog: the same for the ceiling
 //	backoff    epoch until which launches pause (account session limit)
+//	budgetlog  1 once the dollar-budget ceiling was reported (separate from ceillog)
 type runState struct {
 	hasStart  bool
 	start     int64
@@ -29,6 +30,7 @@ type runState struct {
 	caplog    int
 	ceillog   int
 	backoff   int64
+	budgetlog int // 1 once the dollar-budget ceiling was reported (its own flag)
 }
 
 // sessionKey sanitizes a session id for use in a file name: every byte
@@ -100,6 +102,8 @@ func loadRunState(path string) runState {
 			st.ceillog = int(n)
 		case "backoff":
 			st.backoff = n
+		case "budgetlog":
+			st.budgetlog = int(n)
 		}
 	}
 	return st
@@ -114,7 +118,8 @@ func (st runState) save(path string) error {
 		"\nhlaunches=" + strconv.Itoa(st.hlaunches) +
 		"\nlast=" + strconv.FormatInt(st.last, 10) + "\npending=" + strconv.Itoa(st.pending) +
 		"\nhigh=" + strconv.Itoa(st.high) + "\ncaplog=" + strconv.Itoa(st.caplog) +
-		"\nceillog=" + strconv.Itoa(st.ceillog) + "\nbackoff=" + strconv.FormatInt(st.backoff, 10) + "\n"
+		"\nceillog=" + strconv.Itoa(st.ceillog) + "\nbackoff=" + strconv.FormatInt(st.backoff, 10) +
+		"\nbudgetlog=" + strconv.Itoa(st.budgetlog) + "\n"
 	tmp := path + ".tmp." + strconv.Itoa(os.Getpid())
 	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
 		return err

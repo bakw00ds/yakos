@@ -78,6 +78,58 @@ hi_init
 # recovery into a wall of shell errors.
 command -v jq >/dev/null 2>&1 || exit 0
 
+# K-119 F4: dollar budgets (yakos budget) are an operator control. An agent must
+# not lift its own stop by running `yakos budget set|reset` or by editing the
+# budget state files. This runs BEFORE the project-config early exits below (it
+# needs no .yakos.yml), and there is deliberately no hook-bypass.md scope for it:
+# an agent can write that file. The operator runs these from their own shell.
+# Heuristic speed bump, not a sandbox (same-user code can always evade).
+_bg_files='budget-(policy\.yml|spend\.json|resets\.json)|budget\.lock|dispatch-log[^[:space:]/]*\.ndjson'
+_bg_tool="$(hi_tool)"
+_bg_hit=""
+case "$_bg_tool" in
+    Bash)
+        # Normalise: drop quotes and backslashes so `yakos budget "set"` and
+        # `re\set` match. Variable indirection and $(...) stay out of reach of
+        # text matching (documented limit).
+        _bg_cmd="$(hi_field '.tool_input.command' | tr -d "\"'\\\\")"
+        if printf '%s\n' "$_bg_cmd" | grep -Eq 'yakos[[:space:]]+budget[[:space:]]+(set|reset)([[:space:]]|$)'; then
+            _bg_hit="yakos budget set|reset"
+        elif printf '%s\n' "$_bg_cmd" | grep -Eq 'yakos[[:space:]]+dispatch[[:space:]]+(--?[A-Za-z-]+([[:space:]]+[^-[:space:]][^[:space:]]*)?[[:space:]]+)*supervisor([[:space:]]|$)'; then
+            # The supervisor's dispatch stop is 2x its limit, so a same-user
+            # `yakos dispatch supervisor` could spend between 1x and 2x. The
+            # hook launches it itself (not through a tool call); agents may not.
+            _bg_hit="yakos dispatch supervisor"
+        elif printf '%s\n' "$_bg_cmd" | grep -Eq "$_bg_files"; then
+            # Only a single-line, metacharacter-free read command is exempt.
+            case "$_bg_cmd" in
+                *$'\n'*) _bg_hit="budget state file" ;;
+                *)
+                    if printf '%s\n' "$_bg_cmd" | grep -Eq '^[[:space:]]*(cat|head|tail|less|more|ls|stat|wc|grep|jq|file)[[:space:]][^;&|><$`()]*$'; then
+                        _bg_hit=""
+                    else
+                        _bg_hit="budget state file"
+                    fi
+                    ;;
+            esac
+        fi
+        ;;
+    Write|Edit|MultiEdit|NotebookEdit)
+        _bg_path="$(hi_file_path)"
+        if printf '%s\n' "${_bg_path##*/}" | grep -Eq "^($_bg_files)\$"; then
+            _bg_hit="budget state file"
+        fi
+        ;;
+esac
+if [ -n "$_bg_hit" ]; then
+    ho_log "budget-guard" "BLOCK" "block" \
+        "agent attempted to change dollar budgets ($_bg_hit)" \
+        "$(jq -nc --arg t "$_bg_tool" --arg h "$_bg_hit" '{rule: "budget-state-protected", tool: $t, match: $h}')"
+    ho_block "budget-guard" \
+"dollar budgets are an operator control: agents may not run 'yakos budget set|reset' or 'yakos dispatch supervisor', or edit the budget state files ($_bg_hit).
+       Ask the operator to run it from their own shell."
+fi
+
 project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 yakos_yml="$project_dir/.yakos.yml"
 if [ ! -f "$yakos_yml" ]; then

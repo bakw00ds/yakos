@@ -419,7 +419,7 @@ func (h *Hook) launchSupervisor(out *hooktype.HookOutput, in hooktype.HookInput,
 			StdoutPath: filepath.Join(h.WorkCurrentDir, ".supervisor-stdout.log"),
 			StderrPath: filepath.Join(h.WorkCurrentDir, ".supervisor-stderr.log"),
 		},
-		runtime: runtime, model: model,
+		runtime: runtime, model: model, agent: agent,
 	})
 }
 

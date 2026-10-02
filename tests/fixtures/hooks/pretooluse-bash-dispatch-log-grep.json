@@ -1,0 +1,11 @@
+{
+  "session_id": "fixture-pretooluse-bash-dispatch-log-grep-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {"command": "grep supervisor ~/.yakos-state/dispatch-log.ndjson"},
+  "tool_use_id": "toolu_fixture_pretooluse-bash-dispatch-log-grep"
+}

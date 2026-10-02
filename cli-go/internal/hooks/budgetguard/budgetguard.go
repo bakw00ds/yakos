@@ -91,6 +91,25 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		return out, nil
 	}
 
+	// K-119 F4: agents may not change dollar budgets. Runs before the config
+	// early exits (it needs no .yakos.yml) and has no hook-bypass scope.
+	if hit := protectedBudgetOp(in); hit != "" {
+		now := time.Now()
+		if h.NowFn != nil {
+			now = h.NowFn()
+		}
+		if h.WorkCurrentDir != "" {
+			h.appendLog(&out, in, now, "BLOCK", "block",
+				"agent attempted to change dollar budgets ("+hit+")",
+				map[string]any{"rule": "budget-state-protected", "tool": in.Tool, "match": hit})
+		}
+		msg := "budget-guard: dollar budgets are an operator control: agents may not run 'yakos budget set|reset' or 'yakos dispatch supervisor', or edit the budget state files (" + hit + ").\n" +
+			"       Ask the operator to run it from their own shell."
+		out.Stderr = append(out.Stderr, []byte(msg+"\n")...)
+		out.ExitCode = 2
+		return out, nil
+	}
+
 	// No active session.
 	if h.WorkCurrentDir == "" {
 		return out, nil

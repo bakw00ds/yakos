@@ -63,6 +63,7 @@ _yakos() {
         'telemetry:opt-in anonymised CLI telemetry'
         'model-routing:evaluate and promote per-task model assignments'
         'decide:ask a typed decision provider (Jev or mock)'
+        'budget:per-agent dollar budgets with a hard stop'
         'plan:score and correlate plan quality'
         'work:record plan outcome and close work session'
         'workflow:run a named multi-step workflow'

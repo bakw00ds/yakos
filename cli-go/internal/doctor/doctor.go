@@ -86,6 +86,9 @@ const (
 
 	// SectionHookEnv reports hook-runtime environment knobs (K-110).
 	SectionHookEnv
+
+	// SectionAgentBudgets reports agents in warning or hard_stop (K-119).
+	SectionAgentBudgets
 )
 
 // Finding is one reported item: a severity level plus a human-readable message.
@@ -233,6 +236,7 @@ func Run(cfg Config) (*Report, error) {
 	r.checkLocalTooling()
 	r.checkAPIKeys()
 	r.checkHookEnv()
+	r.checkAgentBudgets()
 
 	if cfg.ProbeRuntime {
 		r.checkRuntimeProbe()
