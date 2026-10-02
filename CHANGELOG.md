@@ -141,8 +141,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--model balanced` now resolves instead of dying. Before, the relay ran on the
   operator's default model (opus). It also passes `--setting-sources
   project --strict-mcp-config --disable-slash-commands`, dropping user-level
-  rules, skills listing and MCP servers from the cached prefix (about 32K to
-  24K tokens). Project hooks still fire. Console chat (`ChatExecCmd`) keeps
+  rules, skills listing and MCP servers from the cached prefix. Measured
+  (median of 3, trivial haiku agent): relay cost cold $0.257 to $0.033, warm
+  $0.040 to $0.021; outer prompt tokens 79.6K to 28.7K, including about 4K
+  tokens that the installed specialist rules add back. Project hooks still fire. Console chat (`ChatExecCmd`) keeps
   user settings and pins `--model` only when the agent or caller chose a
   model explicitly. Sending the full roster `--agents` JSON on every
   dispatch was measured and not adopted: no cache benefit.
