@@ -74,6 +74,8 @@ COUNTER="$WORK_CURRENT/.supervisor-counter"
 cat > "$MOCK_BIN/yakos" <<'MOCK'
 #!/usr/bin/env bash
 # Mock yakos: record call and exit 0 immediately (simulates async fast path).
+# `budget check` (K-119, read by the hook at launch time) is not a dispatch.
+[ "${1:-}" = budget ] && exit 0
 printf 'called: %s\n' "$*" >> "${YAKOS_DISPATCH_LOG}"
 exit 0
 MOCK
@@ -427,6 +429,7 @@ H_DONE="$MOCK_BIN/h-done"
 rm -f "$H_STARTED" "$H_RELEASE" "$H_DONE"
 cat > "$MOCK_BIN/yakos" <<SLOW_MOCK
 #!/usr/bin/env bash
+[ "\${1:-}" = budget ] && exit 0
 printf 'called: %s\n' "\$*" >> "\${YAKOS_DISPATCH_LOG}"
 : > "$H_STARTED"
 i=0

@@ -236,7 +236,7 @@ done
 # ---- (b) launch at threshold -------------------------------------------------
 mkfake() { # mkfake <record-file> -> path of a fake dispatcher
     local f="$TMP/fake-yakos-$$-$RANDOM"
-    printf '#!/bin/sh\nfor a in "$@"; do printf "ARG:%%s\\n" "$a" >> "%s"; done\n' "$1" > "$f"
+    printf '#!/bin/sh\n[ "$1" = budget ] && exit 0\nfor a in "$@"; do printf "ARG:%%s\\n" "$a" >> "%s"; done\n' "$1" > "$f"
     chmod +x "$f"; printf '%s' "$f"
 }
 wait_for() { # wait_for <file> <pattern>

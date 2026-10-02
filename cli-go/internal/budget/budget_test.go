@@ -82,8 +82,17 @@ func TestBuiltinDefaults(t *testing.T) {
 		t.Fatalf("librarian default: %+v", st)
 	}
 	appendLog(t, dir, finished("supervisor", octMid, 100.5))
+	if st := mustEval(t, "supervisor", o); st.State != StateHardStop || st.StopUSD != 200 {
+		t.Fatalf("supervisor over its default is hard_stop with a 2x dispatch stop: %+v", st)
+	}
+	// Dispatch itself refuses the supervisor only at 2x: the hook refuses
+	// routine launches at 1x and must still be able to launch high-risk ones.
+	if _, err := Enforce("supervisor", o); err != nil {
+		t.Fatalf("supervisor between 1x and 2x must still dispatch: %v", err)
+	}
+	appendLog(t, dir, finished("supervisor", octMid, 100))
 	if _, err := Enforce("supervisor", o); !IsRefused(err) {
-		t.Fatalf("supervisor over its default must be refused, got %v", err)
+		t.Fatalf("supervisor at 2x must be refused, got %v", err)
 	}
 	// The operator can turn the default off explicitly.
 	setLimit(t, dir, "supervisor", 0, Monthly)

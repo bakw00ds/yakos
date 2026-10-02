@@ -15,14 +15,14 @@ import (
 func TestRunRefusesAgentInHardStop(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("YAKOS_DISPATCH_LOG", state)
-	if err := budget.SetLimit(state, "supervisor", 5, budget.Monthly); err != nil {
+	if err := budget.SetLimit(state, "backend", 5, budget.Monthly); err != nil {
 		t.Fatal(err)
 	}
-	line := fmt.Sprintf(`{"type":"dispatch_finished","ts":%q,"agent":"supervisor","usage":{"total_cost_usd":5.5}}`+"\n", time.Now().UTC().Format(time.RFC3339))
+	line := fmt.Sprintf(`{"type":"dispatch_finished","ts":%q,"agent":"backend","usage":{"total_cost_usd":5.5}}`+"\n", time.Now().UTC().Format(time.RFC3339))
 	if err := os.WriteFile(filepath.Join(state, "dispatch-log.ndjson"), []byte(line), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := Run(context.Background(), Request{AgentName: "supervisor", Task: "t", Project: t.TempDir(), YakosRoot: t.TempDir()})
+	_, _, err := Run(context.Background(), Request{AgentName: "backend", Task: "t", Project: t.TempDir(), YakosRoot: t.TempDir()})
 	if !budget.IsRefused(err) {
 		t.Fatalf("want a budget refusal, got %v", err)
 	}

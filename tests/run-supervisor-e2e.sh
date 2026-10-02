@@ -158,6 +158,7 @@ EOF
 FAKE_CLI="$TMP/fake-yakos"
 cat > "$FAKE_CLI" <<'EOF'
 #!/usr/bin/env bash
+[ "${1:-}" = budget ] && exit 0
 echo "FAKE: $*" >> "$YAKOS_FAKE_INVOCATIONS"
 EOF
 chmod +x "$FAKE_CLI"

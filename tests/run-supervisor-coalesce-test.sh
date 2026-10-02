@@ -57,7 +57,7 @@ mksb() {
     mkdir -p "$sb/.claude" "$sb/work/current/logs" "$sb/bin" "$sb/state"
     printf 'supervisor:\n  score_every_n_calls: 1\n%s' "$2" > "$sb/.yakos.yml"
     if [ -n "$3" ]; then printf '%s' "$3" > "$sb/state/supervisor-policy.yml"; chmod 600 "$sb/state/supervisor-policy.yml"; fi
-    printf '#!/bin/sh\nprintf "run @%%s %%s\\n" "$(date +%%s)" "$(printf %%s "$3" | tr "\\n" " ")" >> "%s/runs"\nprintf "%%s\\n" "$@" > "%s/last-argv"\n%s\n' "$sb" "$sb" "$4" > "$sb/bin/fakeyakos"
+    printf '#!/bin/sh\n[ "$1" = budget ] && exit 0\nprintf "run @%%s %%s\\n" "$(date +%%s)" "$(printf %%s "$3" | tr "\\n" " ")" >> "%s/runs"\nprintf "%%s\\n" "$@" > "%s/last-argv"\n%s\n' "$sb" "$sb" "$4" > "$sb/bin/fakeyakos"
     chmod +x "$sb/bin/fakeyakos"
     printf '%s' "$sb"
 }

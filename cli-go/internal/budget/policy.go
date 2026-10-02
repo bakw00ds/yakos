@@ -57,6 +57,14 @@ var builtinLimits = map[string]float64{
 	"librarian":  40,
 }
 
+// builtinStopFactor lets an agent run past its limit up to factor x limit
+// before `yakos dispatch` refuses it. Only the supervisor has one: the
+// supervisor-stream hook refuses ROUTINE launches at 1x (state hard_stop) but
+// keeps launching HIGH-risk ones, so the dispatch it forks must not refuse
+// them between 1x and the ceiling. No flag or env var carries the exemption:
+// the dispatch-level stop is simply later for this agent.
+var builtinStopFactor = map[string]float64{"supervisor": 2}
+
 // BuiltinLimit returns the built-in default monthly limit for agent, if any.
 func BuiltinLimit(agent string) (float64, bool) {
 	v, ok := builtinLimits[agent]
@@ -250,6 +258,9 @@ type Limit struct {
 	WarnPct  int
 	Source   string // builtin | policy | policy-default | project | none
 	Warnings []string
+	// StopFactor scales the dispatch-level stop: dispatch refuses at
+	// StopFactor x USD (1 for every agent but the supervisor).
+	StopFactor float64
 }
 
 func parseWindow(s string, fallback Window) Window {
@@ -267,7 +278,10 @@ func parseWindow(s string, fallback Window) Window {
 // default, else off. projectUSD is the project's requested limit (nil when
 // the project sets none) and can only lower the result.
 func Resolve(agent string, p Policy, projectUSD *float64) Limit {
-	l := Limit{Window: Monthly, WarnPct: DefaultWarnPct, Source: "none"}
+	l := Limit{Window: Monthly, WarnPct: DefaultWarnPct, Source: "none", StopFactor: 1}
+	if f, ok := builtinStopFactor[agent]; ok {
+		l.StopFactor = f
+	}
 	apply := func(a AgentLimit, src string) {
 		if a.WarnPct > 0 && a.WarnPct <= 100 {
 			l.WarnPct = a.WarnPct

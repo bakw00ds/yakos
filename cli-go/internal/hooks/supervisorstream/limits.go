@@ -70,7 +70,10 @@ type limits struct {
 	cap, interval, deadline, backoffMin int
 	// ceil is the high-risk launch ceiling: 3x the TRUSTED cap (policy or
 	// default), never reduced by a project value. 0 means unlimited.
-	ceil    int
+	ceil int
+	// bud is the supervisor's dollar-budget position (K-119), evaluated
+	// in-process at launch time. Zero value = no budget in force.
+	bud     budgetGate
 	ignored []string // project values refused because they reduce supervision
 	invalid []string // values below their minimum, replaced by the default
 }
@@ -236,6 +239,18 @@ func resolveLimits(cfg *supervisorConfig, model string, env map[string]string) l
 	return l
 }
 
+// budgetGate is the supervisor budget as the launch gate sees it. hard is
+// state hard_stop (spent >= limit); over is spent >= the dispatch stop (2x the
+// limit), the ceiling for high-risk launches. Both false when the budget is
+// off or the read failed (fail open). Bash twin: _ss_budget.
+type budgetGate struct {
+	hard, over bool
+	state      string
+	spent      float64
+	limit      float64
+	stop       float64
+}
+
 // denyReason is why allowLaunch refused ("" means allow).
 type denyReason string
 
@@ -245,13 +260,19 @@ const (
 	denyCeiling  denyReason = "ceiling"
 	denyCap      denyReason = "cap"
 	denyInterval denyReason = "interval"
+	// denyBudget: routine launch refused at the supervisor's hard_stop.
+	denyBudget denyReason = "budget"
+	// denyBudgetCeiling: high-risk launch refused past 2x the limit.
+	denyBudgetCeiling denyReason = "budget-ceiling"
 )
 
 // allowLaunch is the single gate decision. High-risk launches bypass the cap
 // and the interval up to a ceiling of 3x the cap; routine launches count
 // against the cap and wait out the interval; an account session limit pauses
-// both. The #316 budget check plugs in here and exempts high-risk the same way.
-// Bash twin: _ss_allow.
+// both. The #316 dollar budget plugs in here and exempts high-risk the same
+// way: routine launches are refused at the supervisor's hard_stop, high-risk
+// ones run on up to 2x the limit (decided here, in-process: no env var or flag
+// carries the exemption). Bash twin: _ss_allow.
 func allowLaunch(st runState, lim limits, high bool, now int64) denyReason {
 	if st.backoff > now {
 		return denyBackoff
@@ -260,7 +281,13 @@ func allowLaunch(st runState, lim limits, high bool, now int64) denyReason {
 		if lim.ceil > 0 && st.hlaunches >= lim.ceil {
 			return denyCeiling
 		}
+		if lim.bud.over {
+			return denyBudgetCeiling
+		}
 		return denyNone
+	}
+	if lim.bud.hard {
+		return denyBudget
 	}
 	if lim.cap > 0 && st.launches >= lim.cap {
 		return denyCap

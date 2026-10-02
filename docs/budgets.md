@@ -17,7 +17,7 @@ flagged.
 | `warning` | At or above `warn_pct` (default 80%) | A line on stderr at dispatch, a warning in `yakos doctor`, a row in `yakos budget status`. |
 | `hard_stop` | At or above 100% of the limit | `yakos dispatch` refuses the run and exits 4. |
 
-A run already in flight is never killed. Spend is recorded when a run finishes
+A run already in flight is never killed. (The supervisor is the one exception to the 1x refusal in `yakos dispatch`; see "The supervisor at hard stop".) Spend is recorded when a run finishes
 (the `usage.total_cost_usd` on its `dispatch_finished` event), so two
 dispatches started together near the limit both pass the pre-flight, and the
 next dispatch after they finish is refused. The overshoot is bounded by the cost
@@ -70,7 +70,7 @@ the dispatch-log (efficiency audit 2026-10-01):
 
 | Agent | Default | Observed | Basis |
 |---|---|---|---|
-| `supervisor` | $100 per month | $58 in Sep 2026 (107 calls on haiku); $800-900 per month before the switch | About 1.7x the current rate. It would have stopped the May and June burn in the first week. |
+| `supervisor` | $100 per month (dispatch stops at 2x) | $58 in Sep 2026 (107 calls on haiku); $800-900 per month before the switch | About 1.7x the current rate. It would have stopped the May and June burn in the first week. |
 | `librarian` | $40 per month | $22 in May, $159 in Jun (36% of runs failed); none since | About 1.8x the healthy May figure. |
 
 The supervisor limit is a placeholder sized for today's rate. Once K-116 and
@@ -209,8 +209,30 @@ and the dispatch proceeds. Only a computed `hard_stop` refuses.
   and never exits 2. A hook that wants to skip the launch cleanly can call
   `yakos budget check supervisor`, which exits 0 or 4 and never 2.
 
-When the supervisor is in `hard_stop`, only the LLM tier stops. The local
-pre-filter and its logging, and the Jev shadow decision, keep running.
+### The supervisor at hard stop
+
+The supervisor-stream hook (bash and Go twin) wires the budget into its launch
+gate, next to the launch cap:
+
+| Supervisor spend | Routine launch | High-risk launch (risk regex or sensitive path) |
+|---|---|---|
+| below the warning level | runs | runs |
+| warning (default 80%) | runs, with a WARN in the hook log and one stderr line | same |
+| at the limit (`hard_stop`) | **refused**: WARN in the hook log, one stderr line, hook exits 0, no "forked async" | runs, with a WARN noting the exemption |
+| at 2x the limit | refused | **refused**, and one synthetic CRITICAL finding is written so `block_on_critical` operators are alerted |
+
+The exemption is decided inside the hook. There is no env var or flag that
+carries it. To make that work without one, `yakos dispatch` itself refuses the
+supervisor only at 2x its limit (every other agent at 1x): the hook is the 1x
+gate for routine launches and `dispatch` is the 2x backstop. The Go twin
+evaluates the budget in-process. The bash twin cannot, so at each launch
+decision (never per event) it runs `yakos budget check supervisor --json`, and
+fails open if the CLI is missing or too old to have `budget`. A project's
+`agent_budgets:` can only lower the limit, never loosen it. Log records carry a
+stable `budget_reason` (`budget_warning` or `budget_exhausted`).
+
+Only the LLM tier stops at hard stop. The local pre-filter and its logging, and
+the Jev shadow decision, keep running.
 
 ## Not covered
 

@@ -52,11 +52,15 @@ func (o Options) now() time.Time {
 
 // Status is the evaluated budget of one agent.
 type Status struct {
-	Agent     string   `json:"agent"`
-	State     State    `json:"state"`
-	Window    Window   `json:"window"`
-	WindowKey string   `json:"window_key"`
-	LimitUSD  float64  `json:"limit_usd"`
+	Agent     string  `json:"agent"`
+	State     State   `json:"state"`
+	Window    Window  `json:"window"`
+	WindowKey string  `json:"window_key"`
+	LimitUSD  float64 `json:"limit_usd"`
+	// StopUSD is where `yakos dispatch` refuses: the limit, or for the
+	// supervisor twice it (state hard_stop at the limit refuses routine hook
+	// launches only; see builtinStopFactor).
+	StopUSD   float64  `json:"stop_usd"`
 	SpentUSD  float64  `json:"spent_usd"`
 	Pct       float64  `json:"pct"`
 	WarnPct   int      `json:"warn_pct"`
@@ -153,7 +157,7 @@ func Evaluate(agent string, o Options) (Status, error) {
 	lim := Resolve(agent, pol, projectUSD)
 	st := Status{
 		Agent: agent, State: StateOff, Window: lim.Window, WindowKey: WindowKey(lim.Window, now),
-		LimitUSD: lim.USD, WarnPct: lim.WarnPct, Source: lim.Source, Warnings: append(warns, lim.Warnings...),
+		LimitUSD: lim.USD, StopUSD: lim.USD * lim.StopFactor, WarnPct: lim.WarnPct, Source: lim.Source, Warnings: append(warns, lim.Warnings...),
 	}
 	st.Reason = ReasonOff
 	if lim.USD <= 0 {
@@ -202,11 +206,11 @@ func Evaluate(agent string, o Options) (Status, error) {
 }
 
 // Enforce is the dispatch pre-flight: it returns a *RefusedError when agent is
-// in hard_stop and nil otherwise. Every other failure (unreadable log,
+// in hard_stop and past its dispatch stop (StopUSD), nil otherwise. Every other failure (unreadable log,
 // untrusted policy file) fails open; the returned Status carries the details.
 func Enforce(agent string, o Options) (Status, error) {
 	st, err := Evaluate(agent, o)
-	if st.Refused() {
+	if st.State == StateHardStop && st.SpentUSD+1e-9 >= st.StopUSD {
 		return st, &RefusedError{Status: st}
 	}
 	return st, err

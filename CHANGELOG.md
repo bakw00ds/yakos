@@ -81,7 +81,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resets file get the policy file's trust check; `status` lists project-limited
   agents; `budget set` is locked; monthly buckets are rebuilt on a time-zone
   change; `budget-guard` blocks agent-issued `yakos budget set|reset` and edits
-  to the budget state files.
+  to the budget state files. The supervisor-stream launch gate (both twins)
+  refuses routine supervisor launches at the supervisor's hard stop and lets
+  high-risk ones run up to 2x the limit, then writes a synthetic CRITICAL
+  finding; `yakos dispatch` refuses the supervisor only at 2x so no env var or
+  flag carries the exemption.
 
 - **Shadow decision provider on the supervisor pre-filter (K-111 P2b).**
   When `decisions.provider` is `jev` (or `mock`), or
