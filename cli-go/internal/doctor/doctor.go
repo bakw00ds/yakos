@@ -89,6 +89,10 @@ const (
 
 	// SectionAgentBudgets reports agents in warning or hard_stop (K-119).
 	SectionAgentBudgets
+
+	// SectionHookFallback reports Go hook failures the fallback wrapper
+	// absorbed (supervisor-stream, K-122).
+	SectionHookFallback
 )
 
 // Finding is one reported item: a severity level plus a human-readable message.
@@ -237,6 +241,7 @@ func Run(cfg Config) (*Report, error) {
 	r.checkAPIKeys()
 	r.checkHookEnv()
 	r.checkAgentBudgets()
+	r.checkHookFallback()
 
 	if cfg.ProbeRuntime {
 		r.checkRuntimeProbe()

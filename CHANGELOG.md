@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   marks the hook `GoReady`, so hybrid refresh registers it as
   `yakos hook run --impl go supervisor-stream` (about 149 ms to about 40 ms
   per call). It carries a fallback-only wrapper (bash twin if the binary is
-  unusable, any Go failure mapped to exit 0, never exit 2). NUL bytes are now
+  unusable, any Go failure mapped to exit 0, never exit 2). Each absorbed failure is
+  logged to `~/.yakos-state/hook-fallback.log` and `yakos doctor` warns on
+  entries from the last 7 days, so a crashing hook cannot hide). NUL bytes are now
   stripped from the scanned strings, as bash's `$(jq)` does, so a NUL-split
   `cu\0rl ... | sh` still escalates and a NUL-split secret is still redacted.
   Log records now match bash byte for byte, extras order and risk-pattern

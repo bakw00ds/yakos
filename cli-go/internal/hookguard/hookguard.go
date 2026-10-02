@@ -45,6 +45,10 @@ func Build(bin, name string) string {
 		`else exec "${CLAUDE_PROJECT_DIR}/scripts/hooks/` + name + `.sh"; fi`
 }
 
+// FallbackLogName is the file under the user state dir that BuildFallback
+// appends one line to per Go-hook failure, and `yakos doctor` reads.
+const FallbackLogName = "hook-fallback.log"
+
 // BuildFallback is the guarded command for a PostToolUse observer that must
 // never block (supervisor-stream, K-122). It differs from Build in two ways:
 //
@@ -64,6 +68,12 @@ func BuildFallback(bin, name string) string {
 	return "if [ -f " + q + " ] && [ -x " + q + " ] && [ -s " + q + " ]; then " +
 		Plain(bin, name) + `; rc=$?; ` +
 		`if [ "$rc" -eq 0 ]; then exit 0; fi; ` +
+		// One line per failure in a fixed user-state file (0600), so a crashing Go
+		// hook cannot hide: `yakos doctor` reads it. Skipped once the file passes
+		// 64 KiB; doctor trims it. Never lets a write failure change the exit.
+		`( umask 077; d="${YAKOS_DISPATCH_LOG:-$HOME/.yakos-state}"; mkdir -p "$d"; ` +
+		`if [ "$(( $(wc -c < "$d/` + FallbackLogName + `" 2>/dev/null || echo 0) ))" -lt 65536 ]; then ` +
+		`printf '%s ` + name + ` rc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" >> "$d/` + FallbackLogName + `"; fi ) 2>/dev/null; ` +
 		"echo \"" + name + ": WARN yakos exited $rc (crash or an incompatible binary); this call was not supervised. Run 'yakos doctor', then 'yakos refresh'.\" >&2; exit 0; " +
 		`else exec "${CLAUDE_PROJECT_DIR}/scripts/hooks/` + name + `.sh"; fi`
 }
