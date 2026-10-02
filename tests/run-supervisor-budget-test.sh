@@ -22,7 +22,11 @@ set -u
 REPO_ROOT="$(cd "$(dirname -- "$0")/.." && pwd -P)"
 HOOK="$REPO_ROOT/lib/hooks/supervisor-stream.sh"
 GO_BINARY="${YAKOS_GO_BINARY:-$REPO_ROOT/bin/yakos}"
-if [ ! -x "$GO_BINARY" ]; then echo "SKIP: $GO_BINARY not built"; exit 0; fi
+if [ ! -x "$GO_BINARY" ]; then
+    # CI must never skip silently (the bash twin needs the Go CLI for its budget read).
+    if [ "${CI:-}" = true ]; then echo "FAIL: $GO_BINARY not built in CI"; exit 1; fi
+    echo "SKIP: $GO_BINARY not built"; exit 0
+fi
 
 unset YAKOS_ROOT YAKOS_LIB YAKOS_CLI YAKOS_SUPERVISOR_DISABLE YAKOS_DISPATCH_LOG
 pass=0; fail=0
@@ -120,6 +124,31 @@ fire bash "$sb" "$TMP/benign.json"; rc=$?
 elapsed=$((SECONDS - start)); sleep 0.4
 [ "$rc" = 0 ] && [ "$elapsed" -le 6 ] && ok "(7) bash a hung budget CLI cannot stall the hook (${elapsed}s)" || bad "(7) bash hook took ${elapsed}s rc=$rc"
 [ "$(runs "$sb")" = 1 ] && ok "(7) bash fails open: the launch still happens" || bad "(7) bash runs=$(runs "$sb")"
+
+# 8. the count ceiling and the dollar ceiling each report once, independently:
+# the first CRITICAL must not suppress the other. Spend is past 2x (dollar ceiling
+# hit) AND the high-risk launch count is at its ceiling (3x cap = 3, cap 1).
+for side in bash go; do
+    sb="$(mksb "flags-$side" 100 0 $'max_launches_per_session: 1\n')"
+    printf 'min_launch_interval_s: 0\nmax_launches_per_session: 1\n' > "$sb/state/supervisor-policy.yml"; chmod 600 "$sb/state/supervisor-policy.yml"
+    # hlaunches=3 (the count ceiling), no run in flight, then the spend crosses 2x.
+    printf 'start=\nlaunches=0\nhlaunches=3\nlast=0\npending=0\nhigh=0\ncaplog=0\nceillog=0\nbackoff=0\nbudgetlog=0\n' > "$sb/work/current/.supervisor-run.$SID"
+    fire "$side" "$sb" "$TMP/high.json"; settle
+    f="$(findings "$sb")"
+    [ "$(printf '%s\n' "$f" | grep -c 'launch ceiling (3)')" = 1 ] && ok "(8) $side count-ceiling CRITICAL written" || bad "(8) $side no count-ceiling finding: $f"
+    printf '{"type":"dispatch_finished","ts":"%s","agent":"supervisor","usage":{"total_cost_usd":250}}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$sb/state/dispatch-log.ndjson"
+    fire "$side" "$sb" "$TMP/high.json"; settle
+    f="$(findings "$sb")"
+    # ceiling is checked before the dollar ceiling, so the count ceiling still wins here;
+    # drop the count ceiling to let the dollar ceiling decide, keeping ceillog=1.
+    sed -i.bak 's/^hlaunches=.*/hlaunches=0/' "$sb/work/current/.supervisor-run.$SID"; rm -f "$sb/work/current/.supervisor-run.$SID.bak"
+    fire "$side" "$sb" "$TMP/high.json"; settle
+    f="$(findings "$sb")"
+    printf '%s\n' "$f" | grep -q 'dollar-budget ceiling' && ok "(8) $side dollar-ceiling CRITICAL still written after the count one" || bad "(8) $side dollar finding suppressed: $f"
+    [ "$(printf '%s\n' "$f" | grep -c CRITICAL)" = 2 ] && ok "(8) $side each ceiling reported exactly once" || bad "(8) $side findings: $f"
+    fire "$side" "$sb" "$TMP/high.json"; settle
+    [ "$(findings "$sb" | grep -c CRITICAL)" = 2 ] && ok "(8) $side neither repeats" || bad "(8) $side repeated findings"
+done
 
 echo "supervisor budget: $pass passed, $fail failed"
 [ "$fail" = 0 ]

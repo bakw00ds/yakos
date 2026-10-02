@@ -149,7 +149,7 @@ that is not one of the four tiers is left alone. Unset means no ceiling.
 `yakos budget set` and `reset`, and edits to the budget state files
 (`budget-policy.yml`, `budget-spend.json`, `budget-resets.json`, `budget.lock`,
 and the dispatch log `dispatch-log*.ndjson`, whose truncation would wipe spend),
-are blocked for agents by the `budget-guard` hook (both twins), in every
+and `yakos dispatch supervisor`, are blocked for agents by the `budget-guard` hook (both twins), in every
 project and without any `.yakos.yml`. There is no `hook-bypass.md` scope for it,
 because an agent can write that file. Read-only commands (`budget status`,
 `budget check`, `cat` of a state file) pass. The operator runs the blocked ones
@@ -230,6 +230,17 @@ decision (never per event) it runs `yakos budget check supervisor --json`, and
 fails open if the CLI is missing or too old to have `budget`. A project's
 `agent_budgets:` can only lower the limit, never loosen it. Log records carry a
 stable `budget_reason` (`budget_warning` or `budget_exhausted`).
+
+Because `yakos dispatch` refuses the supervisor only at 2x, any same-user caller
+can run `yakos dispatch supervisor` between 1x and 2x, so routine supervisor
+spend can overshoot its limit by at most one limit. This is accepted: the hook
+and agents run as the same user, so no check here could tell them apart. The
+`budget-guard` hook does block an agent-issued `yakos dispatch supervisor`,
+as a speed bump.
+
+The count ceiling (3x the launch cap) and the dollar ceiling (2x the limit)
+each write their own synthetic CRITICAL finding, once per session, with
+separate flags, so one never suppresses the other.
 
 Only the LLM tier stops at hard stop. The local pre-filter and its logging, and
 the Jev shadow decision, keep running.

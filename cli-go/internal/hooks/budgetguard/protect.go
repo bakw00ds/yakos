@@ -17,6 +17,7 @@ import (
 // It is a speed bump, not a sandbox: same-user code can always evade it.
 var (
 	budgetCmdRE   = regexp.MustCompile(`yakos[[:space:]]+budget[[:space:]]+(set|reset)([[:space:]]|$)`)
+	dispatchSupRE = regexp.MustCompile(`yakos[[:space:]]+dispatch[[:space:]]+(--?[A-Za-z-]+([[:space:]]+[^-[:space:]][^[:space:]]*)?[[:space:]]+)*supervisor([[:space:]]|$)`)
 	budgetFilesRE = regexp.MustCompile(`budget-(policy\.yml|spend\.json|resets\.json)|budget\.lock|dispatch-log[^[:space:]/]*\.ndjson`)
 	budgetBaseRE  = regexp.MustCompile(`^(budget-(policy\.yml|spend\.json|resets\.json)|budget\.lock|dispatch-log[^[:space:]/]*\.ndjson)$`)
 	// readOnlyRE is the only exemption: a single-line read command with no
@@ -47,6 +48,12 @@ func protectedBudgetOp(in hooktype.HookInput) string {
 		cmd := normalizer.Replace(hookio.ToolInputString(in, "command"))
 		if anyLine(budgetCmdRE, cmd) {
 			return "yakos budget set|reset"
+		}
+		// The supervisor's dispatch stop is 2x its limit, so a same-user
+		// `yakos dispatch supervisor` could spend between 1x and 2x. The hook
+		// launches it itself (not through a tool call); agents may not.
+		if anyLine(dispatchSupRE, cmd) {
+			return "yakos dispatch supervisor"
 		}
 		if anyLine(budgetFilesRE, cmd) {
 			if !strings.Contains(strings.TrimRight(cmd, "\n"), "\n") && readOnlyRE.MatchString(strings.TrimRight(cmd, "\n")) {

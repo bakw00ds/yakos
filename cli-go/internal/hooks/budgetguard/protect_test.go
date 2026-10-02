@@ -46,6 +46,10 @@ func TestProtectsBudgetState(t *testing.T) {
 		{"grep dispatch log is fine", "Bash", map[string]any{"command": "grep supervisor ~/.yakos-state/dispatch-log.ndjson"}, false},
 		{"edit dispatch log", "Edit", map[string]any{"file_path": "/home/u/.yakos-state/dispatch-log.ndjson"}, true},
 		{"write rotated dispatch log", "Write", map[string]any{"file_path": "/home/u/.yakos-state/dispatch-log-2026-09.ndjson"}, true},
+		{"dispatch supervisor", "Bash", map[string]any{"command": `yakos dispatch supervisor "review this"`}, true},
+		{"dispatch supervisor with flags first", "Bash", map[string]any{"command": `./bin/yakos dispatch --model haiku supervisor x --project /p`}, true},
+		{"dispatch supervisor quoted", "Bash", map[string]any{"command": `yakos dispatch "supervisor" x`}, true},
+		{"dispatch another agent is fine", "Bash", map[string]any{"command": `yakos dispatch backend "supervisor notes"`}, false},
 		{"unrelated bash", "Bash", map[string]any{"command": "ls -la"}, false},
 	}
 	for _, c := range cases {

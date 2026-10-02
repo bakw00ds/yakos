@@ -498,6 +498,7 @@ _ss_risk_reason() {
 # trusted user-level policy (~/.yakos-state/supervisor-policy.yml) or the
 # built-in defaults; a project .yakos.yml may only make them STRICTER.
 # State (key=value): start launches hlaunches last pending high caplog ceillog
+# (the count ceiling's report flag) backoff budgetlog (the dollar ceiling's own flag)
 # backoff. Go twin: supervisorstream.go (launchGate, allowLaunch) and wrap.go.
 _ss_cfg_raw() { # <key>: raw text after "key:" of the first match under supervisor:
     [ -f "$yakos_yml" ] || return 0
@@ -636,7 +637,7 @@ _ssw_lock() {
 _ssw_unlock() { if [ "$_ssw_locked" = 1 ]; then rmdir "$_SSW_LOCK" 2>/dev/null; fi; _ssw_locked=0; return 0; }
 _ssw_load() {
     st_start=""; st_launches=0; st_hlaunches=0; st_last=0; st_pending=0; st_high=0
-    st_caplog=0; st_ceillog=0; st_backoff=0
+    st_caplog=0; st_ceillog=0; st_backoff=0; st_budgetlog=0
     [ -f "$_SSW_STATE" ] || return 0
     local k v
     while IFS='=' read -r k v || [ -n "$k" ]; do
@@ -650,15 +651,16 @@ _ssw_load() {
             caplog) st_caplog="$(_ssw_num "$v" 0)" ;;
             ceillog) st_ceillog="$(_ssw_num "$v" 0)" ;;
             backoff) st_backoff="$(_ssw_num "$v" 0)" ;;
+            budgetlog) st_budgetlog="$(_ssw_num "$v" 0)" ;;
         esac
     done < "$_SSW_STATE"
     return 0
 }
 _ssw_save() {
     local tmp="$_SSW_STATE.tmp.$$"
-    if printf 'start=%s\nlaunches=%s\nhlaunches=%s\nlast=%s\npending=%s\nhigh=%s\ncaplog=%s\nceillog=%s\nbackoff=%s\n' \
+    if printf 'start=%s\nlaunches=%s\nhlaunches=%s\nlast=%s\npending=%s\nhigh=%s\ncaplog=%s\nceillog=%s\nbackoff=%s\nbudgetlog=%s\n' \
         "$st_start" "$st_launches" "$st_hlaunches" "$st_last" "$st_pending" "$st_high" \
-        "$st_caplog" "$st_ceillog" "$st_backoff" > "$tmp" 2>/dev/null \
+        "$st_caplog" "$st_ceillog" "$st_backoff" "$st_budgetlog" > "$tmp" 2>/dev/null \
         && mv "$tmp" "$_SSW_STATE" 2>/dev/null; then
         return 0
     fi
@@ -786,7 +788,7 @@ _ss_locked=0
 
 _ss_load_state() {
     st_start=""; st_launches=0; st_hlaunches=0; st_last=0; st_pending=0; st_high=0
-    st_caplog=0; st_ceillog=0; st_backoff=0
+    st_caplog=0; st_ceillog=0; st_backoff=0; st_budgetlog=0
     [ -f "$_ss_state" ] || return 0
     local k v
     while IFS='=' read -r k v || [ -n "$k" ]; do
@@ -802,19 +804,20 @@ _ss_load_state() {
             caplog) st_caplog="${v:-0}" ;;
             ceillog) st_ceillog="${v:-0}" ;;
             backoff) st_backoff="${v:-0}" ;;
+            budgetlog) st_budgetlog="${v:-0}" ;;
         esac
     done < "$_ss_state"
     st_launches=$((10#$st_launches)); st_hlaunches=$((10#$st_hlaunches)); st_last=$((10#$st_last))
     st_pending=$((10#$st_pending)); st_high=$((10#$st_high)); st_caplog=$((10#$st_caplog))
-    st_ceillog=$((10#$st_ceillog)); st_backoff=$((10#$st_backoff))
+    st_ceillog=$((10#$st_ceillog)); st_backoff=$((10#$st_backoff)); st_budgetlog=$((10#$st_budgetlog))
     [ -z "$st_start" ] || st_start=$((10#$st_start))
     return 0
 }
 _ss_save_state() {
     local tmp="$_ss_state.tmp.$$"
-    if printf 'start=%s\nlaunches=%s\nhlaunches=%s\nlast=%s\npending=%s\nhigh=%s\ncaplog=%s\nceillog=%s\nbackoff=%s\n' \
+    if printf 'start=%s\nlaunches=%s\nhlaunches=%s\nlast=%s\npending=%s\nhigh=%s\ncaplog=%s\nceillog=%s\nbackoff=%s\nbudgetlog=%s\n' \
         "$st_start" "$st_launches" "$st_hlaunches" "$st_last" "$st_pending" "$st_high" \
-        "$st_caplog" "$st_ceillog" "$st_backoff" > "$tmp" 2>/dev/null \
+        "$st_caplog" "$st_ceillog" "$st_backoff" "$st_budgetlog" > "$tmp" 2>/dev/null \
         && mv "$tmp" "$_ss_state" 2>/dev/null; then
         return 0
     fi
@@ -1044,8 +1047,8 @@ _ss_gate() {
             _ss_lock_drop; return 0 ;;
         budgetceil)
             st_pending=$((st_pending + 1)); _ss_pend_append
-            if [ "$st_ceillog" != 1 ]; then
-                st_ceillog=1
+            if [ "$st_budgetlog" != 1 ]; then
+                st_budgetlog=1
                 ho_log "supervisor-stream" "WARN" "pass" \
                     "supervisor budget ceiling reached; high-risk launches are no longer supervised" \
                     "$(jq -nc --arg a "$sup_agent" --argjson s "$_ss_bud_spent" --argjson c "$_ss_bud_stop" '{agent: $a, spent_usd: $s, ceiling_usd: $c, budget_reason: "budget_exhausted"}')"

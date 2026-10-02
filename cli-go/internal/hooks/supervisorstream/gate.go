@@ -122,8 +122,8 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 	case denyBudgetCeiling:
 		record()
 		b := lim.bud
-		if st.ceillog != 1 {
-			st.ceillog = 1
+		if st.budgetlog != 1 {
+			st.budgetlog = 1
 			h.appendLog(out, logFile, "WARN", "pass",
 				"supervisor budget ceiling reached; high-risk launches are no longer supervised",
 				map[string]any{"agent": c.agent, "spent_usd": b.spent, "ceiling_usd": b.stop, "budget_reason": budget.ReasonExhausted})

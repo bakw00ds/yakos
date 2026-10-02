@@ -123,6 +123,10 @@ type RefusedError struct{ Status Status }
 func (e *RefusedError) Error() string {
 	s := e.Status
 	msg := fmt.Sprintf("budget: dispatch refused: agent %q has spent $%.2f of its $%.2f %s budget", s.Agent, s.SpentUSD, s.LimitUSD, s.Window)
+	if s.StopUSD > s.LimitUSD {
+		// The supervisor's dispatch stop is 2x its limit (high-risk exemption ceiling).
+		msg = fmt.Sprintf("budget: dispatch refused: agent %q exceeded 2x the $%.2f %s supervisor budget (high-risk exemption ceiling, $%.2f spent)", s.Agent, s.LimitUSD, s.Window, s.SpentUSD)
+	}
 	hints := []string{fmt.Sprintf("raise it with `yakos budget set %s <usd>`", s.Agent), fmt.Sprintf("run `yakos budget reset %s`", s.Agent)}
 	if s.RollsOver != "" {
 		hints = append(hints, "or wait for the window to roll over on "+s.RollsOver)

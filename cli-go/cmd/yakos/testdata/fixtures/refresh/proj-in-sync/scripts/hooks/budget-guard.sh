@@ -95,6 +95,11 @@ case "$_bg_tool" in
         _bg_cmd="$(hi_field '.tool_input.command' | tr -d "\"'\\\\")"
         if printf '%s\n' "$_bg_cmd" | grep -Eq 'yakos[[:space:]]+budget[[:space:]]+(set|reset)([[:space:]]|$)'; then
             _bg_hit="yakos budget set|reset"
+        elif printf '%s\n' "$_bg_cmd" | grep -Eq 'yakos[[:space:]]+dispatch[[:space:]]+(--?[A-Za-z-]+([[:space:]]+[^-[:space:]][^[:space:]]*)?[[:space:]]+)*supervisor([[:space:]]|$)'; then
+            # The supervisor's dispatch stop is 2x its limit, so a same-user
+            # `yakos dispatch supervisor` could spend between 1x and 2x. The
+            # hook launches it itself (not through a tool call); agents may not.
+            _bg_hit="yakos dispatch supervisor"
         elif printf '%s\n' "$_bg_cmd" | grep -Eq "$_bg_files"; then
             # Only a single-line, metacharacter-free read command is exempt.
             case "$_bg_cmd" in
@@ -121,7 +126,7 @@ if [ -n "$_bg_hit" ]; then
         "agent attempted to change dollar budgets ($_bg_hit)" \
         "$(jq -nc --arg t "$_bg_tool" --arg h "$_bg_hit" '{rule: "budget-state-protected", tool: $t, match: $h}')"
     ho_block "budget-guard" \
-"dollar budgets are an operator control: agents may not run 'yakos budget set|reset' or edit the budget state files ($_bg_hit).
+"dollar budgets are an operator control: agents may not run 'yakos budget set|reset' or 'yakos dispatch supervisor', or edit the budget state files ($_bg_hit).
        Ask the operator to run it from their own shell."
 fi
 

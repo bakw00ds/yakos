@@ -91,8 +91,12 @@ func TestBuiltinDefaults(t *testing.T) {
 		t.Fatalf("supervisor between 1x and 2x must still dispatch: %v", err)
 	}
 	appendLog(t, dir, finished("supervisor", octMid, 100))
-	if _, err := Enforce("supervisor", o); !IsRefused(err) {
+	_, err := Enforce("supervisor", o)
+	if !IsRefused(err) {
 		t.Fatalf("supervisor at 2x must be refused, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "exceeded 2x the $100.00 monthly supervisor budget (high-risk exemption ceiling") || strings.Contains(err.Error(), "of its $100.00") {
+		t.Fatalf("2x refusal message: %v", err)
 	}
 	// The operator can turn the default off explicitly.
 	setLimit(t, dir, "supervisor", 0, Monthly)

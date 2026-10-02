@@ -1685,6 +1685,8 @@ case_check budget-guard.sh     pretooluse-bash-budget-backslash-reset.json   2 b
 case_check budget-guard.sh     pretooluse-bash-dispatch-log-truncate.json    2 budget-guard setup_no_allowlist
 case_check budget-guard.sh     pretooluse-write-dispatch-log.json            2 budget-guard setup_no_allowlist
 case_check budget-guard.sh     pretooluse-bash-dispatch-log-grep.json        0 "" setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-dispatch-supervisor.json      2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-dispatch-other-agent.json     0 "" setup_no_allowlist
 
 # --- output-injection-scan: K-87 A-2b -------------------------------------------
 case_check output-injection-scan.sh posttooluse-bash-clean.json               0 output-injection-scan
