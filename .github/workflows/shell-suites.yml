@@ -264,7 +264,7 @@ jobs:
           # shellcheck disable=SC2016
           scratch="$RUNNER_TEMP/mutant"
           mkdir -p "$scratch"
-          cp -R lib tests cli "$scratch"/ 2>/dev/null || cp -R lib tests "$scratch"/
+          cp -RL lib tests cli "$scratch"/   # -L: lib/hooks entries are symlinks, sed -i needs real files
           hook="$scratch/lib/hooks/supervisor-stream.sh"
           line='        if mkdir "$_ss_lock" 2>/dev/null; then _ss_locked=1; return 0; fi'
           grep -qxF "$line" "$hook" || { echo "::error::lock line not found; update the mutation"; exit 1; }
