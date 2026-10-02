@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unusable, any Go failure mapped to exit 0, never exit 2). NUL bytes are now
   stripped from the scanned strings, as bash's `$(jq)` does, so a NUL-split
   `cu\0rl ... | sh` still escalates and a NUL-split secret is still redacted.
+  Log records now match bash byte for byte, extras order and risk-pattern
+  spelling included (checked in the budget and coalesce suites), and the
+  large-diff line count counts newlines like bash's `wc -l`.
 
 - **Heavy hooks run on Go by default; auto-compaction on by default (K-118).**
   The Go `yakos refresh` now defaults to `--hooks-impl hybrid`: `path-allowlist`

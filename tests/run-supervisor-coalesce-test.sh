@@ -282,5 +282,19 @@ else
     ok "(9) supervisor-stream.sh does not invoke timeout"
 fi
 
+# 10. K-122: both twins write the same hook-log records, field for field and in the same
+# order (`jq -c` keeps insertion order, so equal lines are equal bytes). Only the timestamp, the backoff deadline and
+# the wall-clock-derived values (duration, deferral, age) are removed, the sandbox path is masked, and the lines are sorted
+# because the detached wrapper's records interleave with the hook's by timing.
+if [ "$HAVE_GO" = 1 ]; then
+    for scen in inflight cap interval failed slimit slimit2 badmodel trust strict floor hex quoted comment prose; do
+        [ -d "$TMP/$scen-bash" ] && [ -d "$TMP/$scen-go" ] || continue
+        norm() { jq -c 'del(.ts, .duration_s, .backoff_until, .deferred_s, .age_s)' "$TMP/$1/work/current/logs/supervisor-stream.ndjson" 2>&1 | sed "s#$TMP/$1#<sb>#g" | sort; }
+        b="$(norm "$scen-bash")"; g="$(norm "$scen-go")"
+        if [ -n "$b" ] && [ "$b" = "$g" ]; then ok "(10) $scen hook-log records are byte-identical across twins"; else
+            bad "(10) $scen hook-log records differ"; diff <(printf '%s\n' "$b") <(printf '%s\n' "$g") | cut -c1-300 | head -8; fi
+    done
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

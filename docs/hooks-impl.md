@@ -106,10 +106,11 @@ stderr. An unusable binary (missing, directory, empty, not executable) execs the
 bash twin instead, because a skipped supervisor-stream starves `supervisor-gate`,
 which only reads the findings that stream-launched runs write. A crash after Go
 consumed stdin cannot be replayed into bash, so that one call is unsupervised.
-Known, accepted differences from bash: malformed envelopes Claude Code cannot
+Known, accepted difference from bash: malformed envelopes Claude Code cannot
 produce (a BOM, a duplicate or missing `tool_name`, an object-valued `command`)
-escalate in bash but not in Go, and the `trigger` log value spells a risk
-pattern in RE2 (`\s`) where bash spells it in POSIX (`[[:space:]]`).
+escalate in bash but not in Go. The hook log is otherwise byte-identical to
+bash: same fields, same extras order, same `trigger` spelling. A failed
+wrapper spawn is reported on stderr only, because bash cannot observe one.
 `yakos hook list` shows `go` for parity-verified hooks and
 `go-unverified` for the rest.
 

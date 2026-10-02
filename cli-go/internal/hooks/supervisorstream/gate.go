@@ -172,8 +172,7 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 		if err := h.startWrapper(c, lim, statePath, lockPath, pendingPath, logFile, delay); err != nil {
 			st = prev
 			_ = st.save(statePath)
-			h.appendLog(out, in, logFile, "WARN", "pass", "supervisor dispatch launch failed",
-				map[string]any{"error": err.Error(), "model": c.model, "runtime": c.runtime})
+			launchFailed(out, err)
 			return
 		}
 		h.appendLog(out, in, logFile, "REPORT", "pass",
@@ -194,9 +193,7 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 		// Give the launch back so a failed spawn neither counts nor blocks.
 		st = prev
 		_ = st.save(statePath)
-		h.appendLog(out, in, logFile, "WARN", "pass",
-			"supervisor dispatch launch failed",
-			map[string]any{"error": err.Error(), "model": c.model, "runtime": c.runtime})
+		launchFailed(out, err)
 		return
 	}
 	h.appendLog(out, in, logFile, "REPORT", "pass",
@@ -290,4 +287,12 @@ func gateHold(env map[string]string) {
 	if ms, ok := parseDecimal(get("YAKOS_TEST_GATE_HOLD_MS")); ok && ms > 0 {
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
+}
+
+// launchFailed reports a failed wrapper spawn on stderr only. Bash backgrounds
+// the wrapper with `&` and cannot observe a spawn failure, so it never writes a
+// "launch failed" record; Go keeps the hook log identical to bash and surfaces
+// the error here instead (the launch is already rolled back by the caller).
+func launchFailed(out *hooktype.HookOutput, err error) {
+	out.Stderr = fmt.Appendf(out.Stderr, "%s: supervisor dispatch launch failed: %v\n", hookName, err)
 }
