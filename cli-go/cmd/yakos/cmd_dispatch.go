@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/runtime"
@@ -197,6 +198,9 @@ func runDispatch(yakosRoot string, args []string) {
 	stdout, _, err := dispatch.Run(context.Background(), req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dispatch: %v\n", err)
+		if budget.IsRefused(err) {
+			os.Exit(budget.ExitHardStop)
+		}
 		os.Exit(1)
 	}
 

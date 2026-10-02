@@ -88,6 +88,13 @@ func isDecideForceGo(args []string) bool {
 	return len(args) > 0 && args[0] == "decide"
 }
 
+// isBudgetForceGo reports whether this invocation is `yakos budget ...`. It has
+// no bash equivalent and hooks call `yakos budget check`, so it is always
+// Go-native (same reasoning as decide).
+func isBudgetForceGo(args []string) bool {
+	return len(args) > 0 && args[0] == "budget"
+}
+
 // selectImpl encodes the YAKOS_IMPL gate decision as a pure function so it
 // can be unit-tested without touching the filesystem or spawning processes.
 //
@@ -176,9 +183,11 @@ func main() {
 	//
 	// `doctor` is a deliberate exception to this gate (unless YAKOS_IMPL=bash
 	// is explicit): see isDoctorForceGo's doc comment.
-	if !isDoctorForceGo(os.Getenv("YAKOS_IMPL"), args) && !isHookForceGo(args) && !isDecideForceGo(args) {
+	if !isDoctorForceGo(os.Getenv("YAKOS_IMPL"), args) && !isHookForceGo(args) && !isDecideForceGo(args) && !isBudgetForceGo(args) {
 		switch selectImpl(os.Getenv("YAKOS_IMPL"), passthrough.BashYakosExists(yakosRoot)) {
 		case implPassthrough:
+			// The bash dispatch has no dollar budget; enforce it here (K-119).
+			args = budgetGateBeforePassthrough(args)
 			exitWith(passthrough.Run(yakosRoot, args))
 		case implGoNative:
 			// no-op: execution continues to the Go-native router below
@@ -202,6 +211,8 @@ func main() {
 		runValidate(yakosRoot, args[1:])
 	case "decide":
 		runDecide(yakosRoot, args[1:])
+	case "budget":
+		runBudget(args[1:])
 	case "cost":
 		runCost(args[1:])
 	case "status":

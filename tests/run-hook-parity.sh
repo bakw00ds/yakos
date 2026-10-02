@@ -1671,6 +1671,21 @@ case_check budget-guard.sh     pretooluse-generic-tool.json      0 "" setup_budg
 case_check budget-guard.sh     pretooluse-generic-tool.json      0 budget-guard setup_budget_corrupt_state
 case_check budget-guard.sh     pretooluse-generic-tool.json      0 "" setup_no_allowlist
 
+# --- budget-guard: K-119 F4 (agents may not change dollar budgets) -------------
+case_check budget-guard.sh     pretooluse-bash-budget-set.json         2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-budget-reset-path.json  2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-budget-file-sed.json    2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-budget-file-multiline.json 2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-write-budget-policy.json     2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-budget-status.json      0 "" setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-budget-file-cat.json    0 "" setup_no_allowlist
+case_check budget-guard.sh     pretooluse-write-budget-notes.json      0 "" setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-budget-quoted-set.json        2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-budget-backslash-reset.json   2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-dispatch-log-truncate.json    2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-write-dispatch-log.json            2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-dispatch-log-grep.json        0 "" setup_no_allowlist
+
 # --- output-injection-scan: K-87 A-2b -------------------------------------------
 case_check output-injection-scan.sh posttooluse-bash-clean.json               0 output-injection-scan
 case_check output-injection-scan.sh posttooluse-mcp-injected.json             0 output-injection-scan

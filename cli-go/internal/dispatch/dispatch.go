@@ -5,10 +5,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
+	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
@@ -40,6 +42,13 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	}
 	if req.YakosRoot == "" {
 		return nil, Result{}, fmt.Errorf("dispatch: yakos root is required")
+	}
+
+	// --- 1b. Per-agent dollar budget pre-flight (K-119) ---
+	// Refuses a NEW dispatch for an agent in hard_stop; a run already in flight
+	// is never touched. Any other budget problem fails open.
+	if err := budgetPreflight(req); err != nil {
+		return nil, Result{}, err
 	}
 
 	timeout := req.Timeout
@@ -86,6 +95,13 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	// Apply agent's model: frontmatter if no override was given.
 	if req.Model == "" && targetAgent.Model != "" {
 		modelResolved = targetAgent.Model
+	}
+
+	// A user-level max_model ceiling (K-119) lowers a dearer model, whether it
+	// came from a project's supervisor.model or the agent's frontmatter.
+	if clamped, note := budget.ClampModel(req.AgentName, modelResolved, budget.Options{}); note != "" {
+		modelResolved = clamped
+		fmt.Fprintf(os.Stderr, "yakos budget: %s\n", note)
 	}
 
 	// --- 5. Resolve runtime ---
