@@ -98,10 +98,18 @@ Go starts in about 40 ms. A cheap bash hook (`peer-claim` 16 ms,
 Go wins and parity holds. `supervisor-stream` is the biggest win (about 149
 ms bash, 40 ms Go). Its Go twin now writes the same log record as bash
 (`decision`, `reason`, `agent`, `session_id`, `event`), so it is `GoReady` and
-runs on Go in the hybrid default. It is not wrapped in the fail-closed guard:
-it never exits 2 and is not a detector, and the guard turns a crash into a
-block, which would stop every Edit, Write and Bash call. A missing binary
-therefore skips supervision for that call instead of falling back to bash.
+runs on Go in the hybrid default. It gets a fallback-only wrapper, not the
+fail-closed guard. It is a PostToolUse observer, so exit 2 would only inject
+stderr into the model, and the wrapper never exits 2: any non-zero exit of the
+Go hook (a panic exits 2) becomes exit 0 with a `WARN yakos exited <rc>` line on
+stderr. An unusable binary (missing, directory, empty, not executable) execs the
+bash twin instead, because a skipped supervisor-stream starves `supervisor-gate`,
+which only reads the findings that stream-launched runs write. A crash after Go
+consumed stdin cannot be replayed into bash, so that one call is unsupervised.
+Known, accepted differences from bash: malformed envelopes Claude Code cannot
+produce (a BOM, a duplicate or missing `tool_name`, an object-valued `command`)
+escalate in bash but not in Go, and the `trigger` log value spells a risk
+pattern in RE2 (`\s`) where bash spells it in POSIX (`[[:space:]]`).
 `yakos hook list` shows `go` for parity-verified hooks and
 `go-unverified` for the rest.
 

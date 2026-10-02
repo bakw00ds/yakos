@@ -1,0 +1,11 @@
+﻿{
+  "_doc": "K-122: UTF-8 BOM before the JSON. Claude Code never emits one. bash (jq) tolerates it and escalates; Go rejects the payload as undecodable.",
+  "session_id": "fixture-ss-envelope",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {"command": "rm -rf /var/lib/app/cache", "description": "run a command"}
+}

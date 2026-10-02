@@ -98,6 +98,13 @@ type Entry struct {
 	// must carry the fail-closed wrapper (K-118; see internal/hookguard).
 	Guard bool
 
+	// Fallback marks a PostToolUse observer that must never block but must
+	// not be silently skipped either (supervisor-stream, K-122). Its Go
+	// command carries hookguard.BuildFallback: an unusable binary execs the
+	// bash twin, and any non-zero exit of the Go hook (2 included) becomes
+	// exit 0 plus a stderr warning. FailClosed and Guard win if both are set.
+	Fallback bool
+
 	// GoReady marks a hook whose Go output has been brought to parity with
 	// its bash counterpart (verified by tests/run-hook-parity.sh) and is
 	// therefore safe for `yakos refresh --hooks-impl=hybrid` to register as
@@ -232,10 +239,13 @@ var entries = []Entry{
 	{
 		Name:       "supervisor-stream",
 		FailClosed: false,
-		// Never exits 2 and is not a detector, so no Guard: a crash must not block
-		// every Edit/Write/Bash call. Log records go through hooklog (K-122).
-		GoReady: true,
-		New:     func(cfg Config) Hook { return supervisorstream.New(cfg.WorkCurrentDir, cfg.ProjectDir) },
+		// Never exits 2 and is not a detector, so not Guard: PostToolUse exit 2
+		// only injects stderr into the model. But a skipped supervisor-stream
+		// starves supervisor-gate, so Fallback: the bash twin runs if the binary
+		// is unusable, and any Go failure is mapped to exit 0 (K-122).
+		Fallback: true,
+		GoReady:  true,
+		New:      func(cfg Config) Hook { return supervisorstream.New(cfg.WorkCurrentDir, cfg.ProjectDir) },
 	},
 	{
 		Name:       "task-complete-dispatch",

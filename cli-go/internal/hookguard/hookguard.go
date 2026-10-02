@@ -45,6 +45,29 @@ func Build(bin, name string) string {
 		`else exec "${CLAUDE_PROJECT_DIR}/scripts/hooks/` + name + `.sh"; fi`
 }
 
+// BuildFallback is the guarded command for a PostToolUse observer that must
+// never block (supervisor-stream, K-122). It differs from Build in two ways:
+//
+//   - when the binary is unusable it still execs the bash twin, so supervision
+//     is never silently skipped (a skipped supervisor-stream starves
+//     supervisor-gate, which only reads the findings that stream-launched runs
+//     write);
+//   - any non-zero exit of the Go hook, INCLUDING 2, becomes exit 0 with a
+//     warning on stderr. Exit 2 on PostToolUse only feeds stderr to the model,
+//     and an unrecovered Go panic exits 2, so passing 2 through would inject an
+//     error into every tool result.
+//
+// A crash after the Go hook consumed stdin cannot be replayed into bash
+// without buffering stdin, so that call is skipped and the warning says so.
+func BuildFallback(bin, name string) string {
+	q := ShellQuote(bin)
+	return "if [ -f " + q + " ] && [ -x " + q + " ] && [ -s " + q + " ]; then " +
+		Plain(bin, name) + `; rc=$?; ` +
+		`if [ "$rc" -eq 0 ]; then exit 0; fi; ` +
+		"echo \"" + name + ": WARN yakos exited $rc (crash or an incompatible binary); this call was not supervised. Run 'yakos doctor', then 'yakos refresh'.\" >&2; exit 0; " +
+		`else exec "${CLAUDE_PROJECT_DIR}/scripts/hooks/` + name + `.sh"; fi`
+}
+
 var guardRe = regexp.MustCompile(`^if \[ -f .* \] && \[ -x .* \] && \[ -s .* \]; then (.*) hook run --impl go (\S+); rc=\$\?; `)
 
 // Strip returns the plain Go command inside a guarded command. ok is true
@@ -62,7 +85,7 @@ func Strip(command string) (plain string, ok bool) {
 	// command and compare, so only an exact Build() output passes.
 	binWord, name := m[1], m[2]
 	for _, bin := range candidates(binWord) {
-		if Build(bin, name) == command {
+		if Build(bin, name) == command || BuildFallback(bin, name) == command {
 			return binWord + " hook run --impl go " + name, true
 		}
 	}

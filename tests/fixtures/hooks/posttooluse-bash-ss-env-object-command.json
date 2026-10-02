@@ -1,0 +1,11 @@
+{
+  "_doc": "K-122: tool_input.command is an object, not a string. bash jq stringifies it and escalates; Go ignores a non-string command. The tool schema makes command a string.",
+  "session_id": "fixture-ss-envelope",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {"command": {"x": "rm -rf /var/lib/app/cache"}}
+}

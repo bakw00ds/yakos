@@ -96,6 +96,9 @@ func goCommand(bin, name string) string {
 	if needsGuard(name) {
 		return hookguard.Build(bin, name)
 	}
+	if needsFallback(name) {
+		return hookguard.BuildFallback(bin, name)
+	}
 	return hookguard.Plain(bin, name)
 }
 
@@ -107,6 +110,18 @@ var needsGuard = func(name string) bool {
 	for _, e := range registry.All() {
 		if e.Name == name {
 			return e.FailClosed || e.Guard
+		}
+	}
+	return false
+}
+
+// needsFallback reports whether name takes the fallback-only wrapper (registry
+// Fallback) instead of the fail-closed one. A variable so tests can simulate
+// registry states.
+var needsFallback = func(name string) bool {
+	for _, e := range registry.All() {
+		if e.Name == name {
+			return e.Fallback && !e.FailClosed && !e.Guard
 		}
 	}
 	return false

@@ -1,0 +1,10 @@
+{
+  "_doc": "K-122: tool_name missing. bash scans command for any tool and escalates; Go skips an unlisted tool.",
+  "session_id": "fixture-ss-envelope",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PostToolUse",
+  "tool_input": {"command": "rm -rf /var/lib/app/cache"}
+}

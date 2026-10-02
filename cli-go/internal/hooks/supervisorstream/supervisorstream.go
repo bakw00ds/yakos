@@ -197,7 +197,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	counterFile := filepath.Join(h.WorkCurrentDir, ".supervisor-counter")
 
 	agentType := senderRole(in)
-	filePath := fileFromPayload(in)
+	filePath := bashStr(fileFromPayload(in))
 	ts := h.NowFn().UTC().Format(time.RFC3339)
 	sessionID := hookio.SessionID(in) // bash hi_session_id: payload, not env
 
@@ -206,14 +206,14 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	// Edit/Write text is scanned in full for risk (bounded: head + tail beyond
 	// 64 KiB) so padding cannot hide a snippet; the 300-byte newScan/contentScan
 	// still drive the large-diff check as before.
-	newFull := hookio.ToolInputString(in, "new_string")
-	contentFull := hookio.ToolInputString(in, "content")
+	newFull := bashStr(hookio.ToolInputString(in, "new_string"))
+	contentFull := bashStr(hookio.ToolInputString(in, "content"))
 	newScan := truncate(newFull, previewCap)
 	contentScan := truncate(contentFull, previewCap)
 	newRisk := boundRisk(newFull)
 	contentRisk := boundRisk(contentFull)
-	commandScan := hookio.ToolInputString(in, "command")
-	descriptionScan := hookio.ToolInputString(in, "description")
+	commandScan := bashStr(hookio.ToolInputString(in, "command"))
+	descriptionScan := bashStr(hookio.ToolInputString(in, "description"))
 	preview := func(text string) string {
 		return truncate(secretscan.Redact(truncate(text, redactWindow)), previewCap)
 	}
@@ -796,6 +796,15 @@ func nilIfEmpty(s string) any {
 // when absent), whitespace-trimmed, "yakos:" prefix stripped. Env is not read.
 func senderRole(in hooktype.HookInput) string {
 	return hookio.SenderRole(in)
+}
+
+// bashStr mirrors how bash reads a payload string: through $(jq ...), which
+// drops NUL bytes and trailing newlines before the risk regexes and the
+// redactor run. sh drops NUL when it executes a script, so a NUL-split
+// `cu\0rl ... | sh` is a real risk and must still escalate (K-122 security
+// review). Scan and store the same bytes bash does.
+func bashStr(s string) string {
+	return strings.TrimRight(strings.ReplaceAll(s, "\x00", ""), "\n")
 }
 
 func fileFromPayload(in hooktype.HookInput) string {
