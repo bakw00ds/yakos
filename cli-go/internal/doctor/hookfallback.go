@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,7 +14,49 @@ import (
 const (
 	hookFallbackWindow   = 7 * 24 * time.Hour
 	hookFallbackMaxLines = 200
+	hookFallbackMaxBytes = 1 << 20
 )
+
+// readTail reads at most max bytes from the end of the regular file at path.
+// ok is false when it cannot be read or turns out not to be regular after the
+// open; truncated reports that bytes before the window were skipped.
+func readTail(path string, max int64) (data []byte, truncated, ok bool) {
+	f, err := os.Open(path) //nolint:gosec
+	if err != nil {
+		return nil, false, false
+	}
+	defer f.Close() //nolint:errcheck
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() {
+		return nil, false, false
+	}
+	if st.Size() > max {
+		if _, err := f.Seek(st.Size()-max, io.SeekStart); err != nil {
+			return nil, false, false
+		}
+		truncated = true
+	}
+	b, err := io.ReadAll(io.LimitReader(f, max))
+	if err != nil {
+		return nil, false, false
+	}
+	return b, truncated, true
+}
+
+// trimLog replaces path with lines via a 0600 temp file in the same directory
+// and a rename, so a link swapped in meanwhile is replaced, never written
+// through. Best effort.
+func trimLog(path string, lines []string) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".hook-fallback-*")
+	if err != nil {
+		return
+	}
+	_, werr := tmp.WriteString(strings.Join(lines, "\n") + "\n")
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil || os.Rename(tmp.Name(), path) != nil {
+		_ = os.Remove(tmp.Name())
+	}
+}
 
 // checkHookFallback warns when the fallback wrapper around a Go hook
 // (supervisor-stream) absorbed failures in the last 7 days. The wrapper maps a
@@ -23,15 +66,31 @@ const (
 // Silent when the file is absent or has no recent entries.
 func (r *runner) checkHookFallback() {
 	path := filepath.Join(r.stateDir(), hookguard.FallbackLogName)
-	data, err := os.ReadFile(path) //nolint:gosec
+	// Lstat, not Stat: a symlink (or FIFO, or device such as /dev/zero) must never
+	// be read or trimmed, since the trim would rewrite whatever it points at.
+	fi, err := os.Lstat(path)
 	if err != nil {
 		return
 	}
+	if !fi.Mode().IsRegular() {
+		writeln(r, "Hook fallback")
+		r.warn(SectionHookFallback, "%s is not a regular file (symlink, FIFO or device); ignoring it. Remove it so Go hook failures can be recorded", path)
+		writeln(r, "")
+		return
+	}
+	data, truncated, ok := readTail(path, hookFallbackMaxBytes)
+	if !ok {
+		return
+	}
 	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	if len(lines) > hookFallbackMaxLines {
-		lines = lines[len(lines)-hookFallbackMaxLines:]
-		// Best effort: keep owner-only mode, ignore failure.
-		_ = os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+	if truncated {
+		lines = lines[1:] // the first line of a mid-file read is partial
+	}
+	if truncated || len(lines) > hookFallbackMaxLines {
+		if len(lines) > hookFallbackMaxLines {
+			lines = lines[len(lines)-hookFallbackMaxLines:]
+		}
+		trimLog(path, lines)
 	}
 	type tally struct {
 		n    int

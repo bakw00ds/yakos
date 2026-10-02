@@ -69,9 +69,13 @@ func BuildFallback(bin, name string) string {
 	// subshell with all output discarded and ends in `true`, so it can never change
 	// the exit code. POSIX sh only (bash 3.2, dash, zsh).
 	logLine := func(field string) string {
-		return `( umask 077; d="${YAKOS_DISPATCH_LOG:-$HOME/.yakos-state}"; mkdir -p "$d"; ` +
-			`if [ "$(( $(wc -c < "$d/` + FallbackLogName + `" 2>/dev/null || echo 0) ))" -lt 65536 ]; then ` +
-			`printf '%s ` + name + ` ` + field + `\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"` + ` >> "$d/` + FallbackLogName + `"; fi ) 2>/dev/null; `
+		// Only a regular file (or no file yet) is written: a symlink would be
+		// appended through (a dangling one would create its target) and a FIFO
+		// would block `wc`. The type test runs before the size check, so wc never
+		// sees a non-regular file; anything else is skipped silently.
+		return `( umask 077; d="${YAKOS_DISPATCH_LOG:-$HOME/.yakos-state}"; mkdir -p "$d"; f="$d/` + FallbackLogName + `"; ` +
+			`if [ ! -L "$f" ] && { [ ! -e "$f" ] || [ -f "$f" ]; } && [ "$(( $(wc -c < "$f" 2>/dev/null || echo 0) ))" -lt 65536 ]; then ` +
+			`printf '%s ` + name + ` ` + field + `\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"` + ` >> "$f"; fi ) 2>/dev/null; `
 	}
 	return "if [ -f " + q + " ] && [ -x " + q + " ] && [ -s " + q + " ]; then " +
 		Plain(bin, name) + `; rc=$?; ` +
