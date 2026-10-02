@@ -65,7 +65,7 @@ jobs:
             expect: 837
           - os: macos-latest
             shell: /bin/bash
-            expect: 403
+            expect: 419
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -203,6 +203,12 @@ jobs:
         timeout-minutes: 12
         env:
           SUITE: ${{ matrix.suite }}
+          # The coalesce suite releases 10 hooks at once and holds the launch
+          # lock 150 ms each. The hook's lock wait is 3 s / 150 tries, which a
+          # 3-core macOS runner exhausts (a hook then skips and coalesced counts
+          # come up 7-8 of 9). A shorter hold keeps the exact-accounting check
+          # inside the lock budget; the lock-less detection stays deterministic.
+          YAKOS_COALESCE_HOLD_MS: ${{ runner.os == 'macOS' && '50' || '' }}
         run: |
           case "$SUITE" in
             e2e) script=tests/run-supervisor-e2e.sh ;;

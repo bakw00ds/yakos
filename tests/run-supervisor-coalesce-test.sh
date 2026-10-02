@@ -223,7 +223,7 @@ wait')"
     #    barrier, one launch (the lock). The test seam holds each hook 150 ms
     #    between the state load and save, so without the gate lock every round
     #    launches several runs.
-    HOLD=150
+    HOLD="${YAKOS_COALESCE_HOLD_MS:-150}"   # CI knob: a shorter hold on the 3-core macOS runner (see shell-suites.yml)
     for _round in 1 2 3; do
         sb="$(mksb "conc$_round-$side" '' $'min_launch_interval_s: 0\n' 'sleep 6')"
         _p=""
