@@ -127,9 +127,8 @@ yk_rt_claude_write_plugin_dir() {
         desc="$(printf '%s' "$agent_obj" | jq -r '.description // ""')"
         prompt="$(printf '%s' "$agent_obj" | jq -r '.prompt // ""')"
         model="$(printf '%s' "$agent_obj" | jq -r '.model // ""')"
-        # Map the fable tier to the full model id for claude's plugin-dir.
-        # The claude CLI does not expose "fable" as a bare alias.
-        [ "$model" = "fable" ] && model="claude-fable-5"
+        # Bare tier aliases (incl. fable) are resolved by the claude CLI itself;
+        # never pin a concrete model id here (K-116).
 
         # tools in composed JSON is a JSON array: ["Read", "Edit", ...].
         # Plugin agent frontmatter expects a comma-separated inline list.
