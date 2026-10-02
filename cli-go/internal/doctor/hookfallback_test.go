@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -77,7 +78,8 @@ func TestDoctorTrimsHookFallbackLogToLast200Lines(t *testing.T) {
 	if len(lines) != 200 || !strings.HasSuffix(lines[199], "rc=449") || !strings.HasSuffix(lines[0], "rc=250") {
 		t.Fatalf("want the last 200 lines, got %d (%s .. %s)", len(lines), lines[0], lines[len(lines)-1])
 	}
-	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+	// Windows has no POSIX permission bits; keep the rest of the test there.
+	if fi, _ := os.Stat(path); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Errorf("trim changed the mode to %v", fi.Mode().Perm())
 	}
 }

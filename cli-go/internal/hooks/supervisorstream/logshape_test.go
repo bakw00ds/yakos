@@ -10,15 +10,23 @@ import (
 	"github.com/bakw00ds/yakos/internal/hooks/supervisorstream"
 )
 
-// bashLiteralKeys parses every single-line jq object literal passed to ho_log
-// in the bash twin and returns the key lists in source order. These literals
-// are the ground truth for the extras' names and order.
-func bashLiteralKeys(t *testing.T) [][]string {
+// bashSource reads the bash twin with CRLF normalised: a Windows checkout may
+// convert line endings, and the parsers below split on "\n".
+func bashSource(t *testing.T) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "lib", "hooks", "legacy", "supervisor-stream.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	return []byte(strings.ReplaceAll(string(data), "\r\n", "\n"))
+}
+
+// bashLiteralKeys parses every single-line jq object literal passed to ho_log
+// in the bash twin and returns the key lists in source order. These literals
+// are the ground truth for the extras' names and order.
+func bashLiteralKeys(t *testing.T) [][]string {
+	t.Helper()
+	data := bashSource(t)
 	lit := regexp.MustCompile(`'\{([a-z_]+: [^'\n]*)\}'`)
 	key := regexp.MustCompile(`(?:^|, )([a-z_]+): `)
 	var out [][]string
@@ -171,13 +179,16 @@ func TestCheckRecordShapeRejectsRenamedAndReordered(t *testing.T) {
 // TestRiskLabelsMatchBash: the logged trigger spells each built-in risk pattern
 // exactly as bash's default_patterns array does, in the same order.
 func TestRiskLabelsMatchBash(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "lib", "hooks", "legacy", "supervisor-stream.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := bashSource(t)
 	src := string(data)
 	start := strings.Index(src, "default_patterns=(")
+	if start < 0 {
+		t.Fatal("default_patterns=( not found in the bash twin; the parser is stale")
+	}
 	end := strings.Index(src[start:], "\n        )\n")
+	if end < 0 {
+		t.Fatal("end of default_patterns not found in the bash twin; the parser is stale")
+	}
 	var want []string
 	for _, l := range strings.Split(src[start:start+end], "\n")[1:] {
 		l = strings.TrimSpace(l)
@@ -204,10 +215,7 @@ func TestRiskLabelsMatchBash(t *testing.T) {
 // TestWrapperLogOrderMatchesBash: the detached wrapper's records list extras in
 // the order bash's _ssw_log call sites write them.
 func TestWrapperLogOrderMatchesBash(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "lib", "hooks", "legacy", "supervisor-stream.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := bashSource(t)
 	call := regexp.MustCompile(`_ssw_log (?:WARN|REPORT) "[^"]*" "((?:\\"[a-z_]+\\":[^,"]*,?)+)"`)
 	key := regexp.MustCompile(`\\"([a-z_]+)\\":`)
 	order := supervisorstream.WrapLogOrderForTest()
