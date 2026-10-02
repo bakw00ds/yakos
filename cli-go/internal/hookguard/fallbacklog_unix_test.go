@@ -94,3 +94,68 @@ func TestFallbackLogRefusesNonRegularFiles(t *testing.T) {
 		})
 	}
 }
+
+// On the unusable-binary path the log write happens BEFORE the bash twin is
+// exec'd, so a blocked or misdirected write would skip supervision entirely.
+// A FIFO, a symlink and a dangling symlink at the log path must neither hang
+// nor write, and the twin must still run promptly.
+func TestUnusableBinaryPathStillRunsTwinWithNonRegularLog(t *testing.T) {
+	for _, shell := range shells() {
+		t.Run(filepath.Base(shell), func(t *testing.T) {
+			for name, mk := range map[string]func(t *testing.T, log string) (check func()){
+				"fifo": func(t *testing.T, log string) func() {
+					if err := syscall.Mkfifo(log, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					return func() {}
+				},
+				"symlink": func(t *testing.T, log string) func() {
+					outside := filepath.Join(t.TempDir(), "important")
+					_ = os.WriteFile(outside, []byte("keep me\n"), 0o600)
+					if err := os.Symlink(outside, log); err != nil {
+						t.Fatal(err)
+					}
+					return func() {
+						if b, _ := os.ReadFile(outside); string(b) != "keep me\n" {
+							t.Errorf("symlink target written: %q", b)
+						}
+					}
+				},
+				"dangling": func(t *testing.T, log string) func() {
+					target := filepath.Join(t.TempDir(), "created")
+					if err := os.Symlink(target, log); err != nil {
+						t.Fatal(err)
+					}
+					return func() {
+						if _, err := os.Lstat(target); err == nil {
+							t.Error("dangling target created")
+						}
+					}
+				},
+			} {
+				state := t.TempDir()
+				check := mk(t, filepath.Join(state, FallbackLogName))
+				proj := t.TempDir()
+				hooks := filepath.Join(proj, "scripts", "hooks")
+				_ = os.MkdirAll(hooks, 0o755)                                                                                                           //nolint:gosec
+				_ = os.WriteFile(filepath.Join(hooks, "supervisor-stream.sh"), []byte("#!/bin/sh\ncat >/dev/null\necho twin-ran >&2\nexit 0\n"), 0o755) //nolint:gosec
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				cmd := exec.CommandContext(ctx, shell, "-c", BuildFallback(filepath.Join(t.TempDir(), "missing"), "supervisor-stream")) //nolint:gosec
+				cmd.Env = append(os.Environ(), "CLAUDE_PROJECT_DIR="+proj, "HOME="+t.TempDir(), "YAKOS_DISPATCH_LOG="+state)
+				cmd.Stdin = strings.NewReader("{}")
+				var se strings.Builder
+				cmd.Stderr = &se
+				err := cmd.Run()
+				hung := ctx.Err() != nil
+				cancel()
+				if hung {
+					t.Fatalf("%s: unusable-binary path hung before the bash twin ran", name)
+				}
+				if err != nil || !strings.Contains(se.String(), "twin-ran") {
+					t.Errorf("%s: want the twin to run and exit 0, got %v %q", name, err, se.String())
+				}
+				check()
+			}
+		})
+	}
+}
