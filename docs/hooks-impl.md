@@ -102,8 +102,8 @@ runs on Go in the hybrid default. It gets a fallback-only wrapper, not the
 fail-closed guard. It is a PostToolUse observer, so exit 2 would only inject
 stderr into the model, and the wrapper never exits 2: any non-zero exit of the
 Go hook (a panic exits 2) becomes exit 0 with a `WARN yakos exited <rc>` line on
-stderr and one line in `~/.yakos-state/hook-fallback.log` (0600, capped at 64 KiB). `yakos doctor` warns when that file has entries from the last 7 days, with the count and last exit code, and trims it to its last 200 lines. An unusable binary (missing, directory, empty, not executable) execs the
-bash twin instead, because a skipped supervisor-stream starves `supervisor-gate`,
+stderr and one line in `~/.yakos-state/hook-fallback.log` (0600, capped at 64 KiB). `yakos doctor` warns when that file has entries from the last 7 days, with the count and last exit code, and trims it to its last 200 lines. An unusable binary (missing, directory, empty, not executable) logs
+`reason=unusable` to the same file and execs the bash twin instead, because a skipped supervisor-stream starves `supervisor-gate`,
 which only reads the findings that stream-launched runs write. A crash after Go
 consumed stdin cannot be replayed into bash, so that one call is unsupervised.
 Known, accepted difference from bash: malformed envelopes Claude Code cannot

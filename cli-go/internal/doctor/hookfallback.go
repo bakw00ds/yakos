@@ -41,8 +41,8 @@ func (r *runner) checkHookFallback() {
 	cutoff := time.Now().UTC().Add(-hookFallbackWindow)
 	by := map[string]*tally{}
 	for _, ln := range lines {
-		f := strings.Fields(ln) // <ts> <hook> rc=<n>
-		if len(f) != 3 || !strings.HasPrefix(f[2], "rc=") {
+		f := strings.Fields(ln) // <ts> <hook> rc=<n> | reason=unusable
+		if len(f) != 3 || !(strings.HasPrefix(f[2], "rc=") || f[2] == "reason=unusable") {
 			continue
 		}
 		t, err := time.Parse(time.RFC3339, f[0])
@@ -55,7 +55,7 @@ func (r *runner) checkHookFallback() {
 			by[f[1]] = e
 		}
 		e.n++
-		e.last, e.ts = strings.TrimPrefix(f[2], "rc="), f[0]
+		e.last, e.ts = f[2], f[0]
 	}
 	if len(by) == 0 {
 		return
@@ -68,7 +68,7 @@ func (r *runner) checkHookFallback() {
 	sort.Strings(names)
 	for _, n := range names {
 		e := by[n]
-		r.warn(SectionHookFallback, "%s: the Go hook failed %d time(s) in the last 7 days (last rc=%s at %s); the wrapper let the call continue unsupervised. Run 'yakos refresh', or 'yakos hook run --impl go %s' to see the error (log: %s)",
+		r.warn(SectionHookFallback, "%s: the Go hook failed %d time(s) in the last 7 days (last entry %s at %s). rc=N means the Go hook crashed and that call was unsupervised; reason=unusable means the binary was missing or unusable and the bash twin ran instead. Run 'yakos refresh', or 'yakos hook run --impl go %s' to see the error (log: %s)",
 			n, e.n, e.last, e.ts, n, path)
 	}
 	writeln(r, "")

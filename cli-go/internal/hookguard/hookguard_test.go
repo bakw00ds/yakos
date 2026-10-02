@@ -73,6 +73,18 @@ func shells() []string {
 			out = append(out, p)
 		}
 	}
+	// Stock macOS bash is 3.2; run it explicitly when `bash` on PATH is newer.
+	if _, err := os.Stat("/bin/bash"); err == nil {
+		dup := false
+		for _, o := range out {
+			if o == "/bin/bash" {
+				dup = true
+			}
+		}
+		if !dup {
+			out = append(out, "/bin/bash")
+		}
+	}
 	return out
 }
 

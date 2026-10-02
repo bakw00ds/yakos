@@ -100,3 +100,33 @@ func TestFallbackLogDefaultsToHomeStateAndSurvivesUnwritableState(t *testing.T) 
 		t.Errorf("oversized log grew to %d", len(b))
 	}
 }
+
+func TestFallbackLogsUnusableBinaryAndStillRunsTheTwin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX sh")
+	}
+	for _, shell := range shells() {
+		t.Run(filepath.Base(shell), func(t *testing.T) {
+			proj := t.TempDir()
+			hooks := filepath.Join(proj, "scripts", "hooks")
+			_ = os.MkdirAll(hooks, 0o755)                                                                                                           //nolint:gosec
+			_ = os.WriteFile(filepath.Join(hooks, "supervisor-stream.sh"), []byte("#!/bin/sh\ncat >/dev/null\necho twin-ran >&2\nexit 0\n"), 0o755) //nolint:gosec
+			state := filepath.Join(t.TempDir(), "state")
+			cmd := exec.Command(shell, "-c", BuildFallback(filepath.Join(t.TempDir(), "missing"), "supervisor-stream")) //nolint:gosec
+			cmd.Env = append(os.Environ(), "CLAUDE_PROJECT_DIR="+proj, "YAKOS_DISPATCH_LOG="+state, "HOME="+t.TempDir())
+			cmd.Stdin = strings.NewReader("{}")
+			var se bytes.Buffer
+			cmd.Stderr = &se
+			if err := cmd.Run(); err != nil || !strings.Contains(se.String(), "twin-ran") {
+				t.Fatalf("want the twin and exit 0, got %v %q", err, se.String())
+			}
+			b, err := os.ReadFile(filepath.Join(state, FallbackLogName))
+			if err != nil || !strings.HasSuffix(strings.TrimSpace(string(b)), " supervisor-stream reason=unusable") {
+				t.Fatalf("unusable fallback not logged: %q %v", b, err)
+			}
+			if fi, _ := os.Stat(filepath.Join(state, FallbackLogName)); fi.Mode().Perm() != 0o600 {
+				t.Errorf("mode %v", fi.Mode().Perm())
+			}
+		})
+	}
+}

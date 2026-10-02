@@ -35,11 +35,19 @@ func TestDoctorWarnsOnRecentHookFallback(t *testing.T) {
 	r, buf, _ := fallbackRunner(t, log)
 	r.checkHookFallback()
 	out := buf.String()
-	if !strings.Contains(out, "supervisor-stream: the Go hook failed 2 time(s) in the last 7 days (last rc=137") {
+	if !strings.Contains(out, "supervisor-stream: the Go hook failed 2 time(s) in the last 7 days (last entry rc=137") {
 		t.Fatalf("want count 2 (the 30-day-old entry excluded) and last rc 137:\n%s", out)
 	}
 	if r.report.Warnings != 1 || r.report.Errors != 0 {
 		t.Fatalf("want exactly one warning: %+v", r.report)
+	}
+}
+
+func TestDoctorReportsUnusableFallback(t *testing.T) {
+	r, buf, _ := fallbackRunner(t, fmt.Sprintf("%s supervisor-stream reason=unusable\n", ago(time.Hour)))
+	r.checkHookFallback()
+	if !strings.Contains(buf.String(), "last entry reason=unusable") || r.report.Warnings != 1 {
+		t.Fatalf("unusable entry not reported:\n%s", buf.String())
 	}
 }
 
