@@ -39,6 +39,7 @@ jobs:
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -130,6 +131,7 @@ jobs:
     name: Sign macOS binaries
     needs: build
     runs-on: macos-latest
+    timeout-minutes: 10
     outputs:
       signed: ${{ steps.sign.outputs.signed }}
 
@@ -252,6 +254,7 @@ jobs:
     name: Sign Windows binary
     needs: build
     runs-on: windows-latest
+    timeout-minutes: 10
     outputs:
       signed: ${{ steps.sign.outputs.signed }}
 
@@ -332,6 +335,7 @@ jobs:
     name: Create GitHub Release
     needs: [build, sign-macos, sign-windows]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write  # required for creating the GitHub Release + uploading assets
 
