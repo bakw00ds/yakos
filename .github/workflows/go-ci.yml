@@ -47,6 +47,7 @@ jobs:
   go-build-test:
     name: build + test (${{ matrix.os }}, go ${{ matrix.go }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -166,6 +167,7 @@ jobs:
     # the platform-detection and argument-parsing paths.
     name: install.sh smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -236,6 +238,7 @@ jobs:
     # merge so the dep can be updated before shipping.
     name: govulncheck
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout

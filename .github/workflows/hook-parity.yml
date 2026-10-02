@@ -76,7 +76,7 @@ jobs:
     # True Windows-native parity (no bash) is not tested here — that is the
     # Phase 3 goal state, not the compat-window baseline.
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -707,7 +707,7 @@ jobs:
   hook-fixtures-bash32:
     name: hook fixtures under stock bash 3.2 (macos)
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -724,6 +724,7 @@ jobs:
       - name: Install jq
         shell: bash
         run: command -v jq >/dev/null 2>&1 || brew install jq
+        timeout-minutes: 5
 
       - name: Bash fixture suite under /bin/bash
         shell: bash

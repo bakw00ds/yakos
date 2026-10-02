@@ -1,0 +1,203 @@
+# K-124: shell suites that guard the hooks, run under both shells that matter.
+#
+#   ubuntu-latest  bash 5
+#   macos-latest   stock /bin/bash 3.2
+#
+# Why: a bash 3.2 crash in a hook exits 1, which Claude Code treats as
+# non-blocking, so a crash is a fail-open. Reviewers had been running the hook
+# hardening suite and the supervisor shell suites by hand because no workflow
+# ran them (the Go twins ran via go test, the shell halves ran nowhere).
+#
+# hook-hardening   tests/run-hook-hardening-test.sh. The suite itself runs every
+#                  case under `bash` first on PATH and again under /bin/bash, so
+#                  on macOS it covers brew bash 5 and stock 3.2 in one run.
+# supervisor       the supervisor shell suites, one matrix job each. Every
+#                  suite starts hooks as `bash <hook>`, so on macOS stock 3.2 is
+#                  put FIRST on PATH; otherwise the runner's brew bash 5 would
+#                  quietly run the hooks and the 3.2 job would test nothing.
+#
+# The Go half of each supervisor suite needs bin/yakos, so each job builds it
+# once. Existing coverage is untouched: hook-parity.yml still runs the budget
+# and shadow suites, ci.yml still runs the e2e suite on bash 5.
+name: shell-suites
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lib/hooks/**'
+      - 'cli/lib/**'
+      - 'cli-go/internal/hooks/**'
+      - 'cli-go/internal/supervise/**'
+      - 'cli-go/internal/decision/**'
+      - 'cli-go/internal/budget/**'
+      - 'cli-go/cmd/yakos/cmd_hook*.go'
+      - 'tests/**'
+      - '.github/workflows/shell-suites.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'lib/hooks/**'
+      - 'cli/lib/**'
+      - 'cli-go/internal/hooks/**'
+      - 'cli-go/internal/supervise/**'
+      - 'cli-go/internal/decision/**'
+      - 'cli-go/internal/budget/**'
+      - 'cli-go/cmd/yakos/cmd_hook*.go'
+      - 'tests/**'
+      - '.github/workflows/shell-suites.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hook-hardening:
+    name: hook hardening (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            shell: bash
+            expect: 805
+          - os: macos-latest
+            shell: /bin/bash
+            expect: 803
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Require bash 3.x at /bin/bash (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          /bin/bash --version | head -1
+          [ "$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"')" = 3 ] || { echo "ERROR: /bin/bash is not bash 3.x" >&2; exit 1; }
+          echo "bash on PATH: $(command -v bash) $(bash -c 'echo $BASH_VERSION')"
+
+      - name: Install jq (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 5
+        run: command -v jq >/dev/null 2>&1 || brew install jq
+
+      - name: Install jq and python3 (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 5
+        run: if ! command -v jq >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y jq python3; fi
+
+      # The suite skips its SIGHUP cases when SIGHUP is ignored (nohup, a
+      # backgrounded parent). A skip there would hide a fail-open, so refuse to
+      # start rather than pass with 16 cases silently not run.
+      - name: Require SIGHUP to be deliverable
+        shell: bash
+        run: |
+          out="$(bash -c 'kill -HUP $$; sleep 0.3; echo alive' 2>/dev/null || true)"
+          if [ "$out" = alive ]; then
+            echo "ERROR: SIGHUP is ignored in this job; the hardening suite would skip its SIGHUP cases" >&2
+            exit 1
+          fi
+
+      - name: Hook hardening suite
+        shell: bash
+        timeout-minutes: 25
+        env:
+          EXPECT: ${{ matrix.expect }}
+          SUITE_SHELL: ${{ matrix.shell }}
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/hardening.log"
+          "$SUITE_SHELL" tests/run-hook-hardening-test.sh 2>&1 | tee "$log"
+          rc=0
+          if grep -E '^  SKIP .*SIGHUP' "$log"; then
+            echo "::error::SIGHUP cases were skipped; they must run in CI"; rc=1
+          fi
+          if grep -E '^  SKIP ' "$log" | grep -vq SIGHUP; then
+            echo "::warning::hardening suite skipped non-SIGHUP cases:"; grep -E '^  SKIP ' "$log" || true
+          fi
+          line="$(grep -E '^hook-hardening: [0-9]+ passed, [0-9]+ failed' "$log" | tail -1)"
+          passed="$(printf '%s' "$line" | sed -E 's/^hook-hardening: ([0-9]+) passed.*/\1/')"
+          echo "hardening result: $line (expected $EXPECT passed)"
+          [ "$passed" = "$EXPECT" ] || { echo "::error::expected $EXPECT passed hardening cases, got '$passed'"; rc=1; }
+          # The 3.2 half must really have run, with the same case count as bash on PATH.
+          stock="$(grep -c '^  OK   bin-bash:' "$log" || true)"
+          onpath="$(grep -c '^  OK   bash5:' "$log" || true)"
+          echo "cases passed under /bin/bash: $stock; under bash on PATH: $onpath"
+          [ "$stock" -gt 0 ] && [ "$stock" = "$onpath" ] || { echo "::error::/bin/bash and PATH bash case counts differ or are zero"; rc=1; }
+          exit "$rc"
+
+  supervisor:
+    name: supervisor ${{ matrix.suite }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        suite: [stream, coalesce, shadow, prefilter, ack-gate, e2e]
+        exclude:
+          # ci.yml's supervisor-e2e already runs this suite on ubuntu under bash 5.
+          - os: ubuntu-latest
+            suite: e2e
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Put stock bash 3.2 first on PATH (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          [ "$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"')" = 3 ] || { echo "ERROR: /bin/bash is not bash 3.x" >&2; exit 1; }
+          mkdir -p "$RUNNER_TEMP/bash32"
+          ln -sf /bin/bash "$RUNNER_TEMP/bash32/bash"
+          echo "$RUNNER_TEMP/bash32" >> "$GITHUB_PATH"
+
+      - name: Report the bash the suite will use
+        shell: bash
+        run: |
+          echo "bash on PATH: $(command -v bash)  $(bash -c 'echo $BASH_VERSION')"
+          if [ "$RUNNER_OS" = macOS ]; then
+            [ "$(bash -c 'echo "${BASH_VERSINFO[0]}"')" = 3 ] || { echo "ERROR: bash on PATH is not 3.x" >&2; exit 1; }
+          fi
+
+      - name: Install jq (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 5
+        run: command -v jq >/dev/null 2>&1 || brew install jq
+
+      - name: Install jq and python3 (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 5
+        run: if ! command -v jq >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y jq python3; fi
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: cli-go/go.sum
+
+      - name: Build yakos
+        shell: bash
+        timeout-minutes: 10
+        run: make build
+
+      - name: Supervisor ${{ matrix.suite }} suite
+        shell: bash
+        timeout-minutes: 12
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          case "$SUITE" in
+            e2e) script=tests/run-supervisor-e2e.sh ;;
+            ack-gate) script=tests/run-supervisor-ack-gate-test.sh ;;
+            *) script="tests/run-supervisor-$SUITE-test.sh" ;;
+          esac
+          [ -f "$script" ] || { echo "::error::missing $script"; exit 1; }
+          # Run the harness itself under the stock shell on macOS.
+          if [ "$RUNNER_OS" = macOS ]; then /bin/bash "$script"; else bash "$script"; fi

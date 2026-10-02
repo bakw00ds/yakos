@@ -71,6 +71,7 @@ jobs:
   dispatch:
     name: yakos dispatch ${{ inputs.agent }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     outputs:
       agent_response: ${{ steps.run.outputs.agent_response }}
       exit_code: ${{ steps.run.outputs.exit_code }}
@@ -84,6 +85,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install yakOS
+        timeout-minutes: 5
         run: |
           set -e
           sudo apt-get update -y && sudo apt-get install -y jq python3
