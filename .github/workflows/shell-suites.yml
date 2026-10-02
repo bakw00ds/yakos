@@ -62,10 +62,10 @@ jobs:
         include:
           - os: ubuntu-latest
             shell: bash
-            expect: 805
+            expect: 837
           - os: macos-latest
             shell: /bin/bash
-            expect: 803
+            expect: 403
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -78,11 +78,16 @@ jobs:
           [ "$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"')" = 3 ] || { echo "ERROR: /bin/bash is not bash 3.x" >&2; exit 1; }
           echo "bash on PATH: $(command -v bash) $(bash -c 'echo $BASH_VERSION')"
 
-      - name: Install jq (macOS)
+      # coreutils provides gtimeout; without it the suite skips its hung-jq
+      # cases ("no timeout/gtimeout on this machine"), which is fail-open
+      # coverage we want to keep.
+      - name: Install jq and coreutils (macOS)
         if: runner.os == 'macOS'
         shell: bash
         timeout-minutes: 5
-        run: command -v jq >/dev/null 2>&1 || brew install jq
+        run: |
+          command -v jq >/dev/null 2>&1 || brew install jq
+          command -v gtimeout >/dev/null 2>&1 || brew install coreutils
 
       - name: Install jq and python3 (Linux)
         if: runner.os == 'Linux'
@@ -116,18 +121,24 @@ jobs:
           if grep -E '^  SKIP .*SIGHUP' "$log"; then
             echo "::error::SIGHUP cases were skipped; they must run in CI"; rc=1
           fi
-          if grep -E '^  SKIP ' "$log" | grep -vq SIGHUP; then
-            echo "::warning::hardening suite skipped non-SIGHUP cases:"; grep -E '^  SKIP ' "$log" || true
+          if grep -E '^  SKIP ' "$log"; then
+            echo "::error::hardening suite skipped cases; every case must run in CI"; rc=1
           fi
           line="$(grep -E '^hook-hardening: [0-9]+ passed, [0-9]+ failed' "$log" | tail -1)"
           passed="$(printf '%s' "$line" | sed -E 's/^hook-hardening: ([0-9]+) passed.*/\1/')"
           echo "hardening result: $line (expected $EXPECT passed)"
           [ "$passed" = "$EXPECT" ] || { echo "::error::expected $EXPECT passed hardening cases, got '$passed'"; rc=1; }
-          # The 3.2 half must really have run, with the same case count as bash on PATH.
+          # Both shells must really have run. On Linux that is bash on PATH plus
+          # /bin/bash (equal counts). On macOS the runner's bash on PATH IS stock
+          # /bin/bash 3.2, so the suite runs once, under 3.2.
           stock="$(grep -c '^  OK   bin-bash:' "$log" || true)"
           onpath="$(grep -c '^  OK   bash5:' "$log" || true)"
-          echo "cases passed under /bin/bash: $stock; under bash on PATH: $onpath"
-          [ "$stock" -gt 0 ] && [ "$stock" = "$onpath" ] || { echo "::error::/bin/bash and PATH bash case counts differ or are zero"; rc=1; }
+          echo "cases passed under /bin/bash: $stock; under bash on PATH ($(command -v bash)): $onpath"
+          if [ "$(command -v bash)" = /bin/bash ]; then
+            [ "$onpath" -gt 0 ] && [ "$stock" = 0 ] || { echo "::error::expected a single run under /bin/bash"; rc=1; }
+          else
+            [ "$stock" -gt 0 ] && [ "$stock" = "$onpath" ] || { echo "::error::/bin/bash and PATH bash case counts differ or are zero"; rc=1; }
+          fi
           exit "$rc"
 
   supervisor:
