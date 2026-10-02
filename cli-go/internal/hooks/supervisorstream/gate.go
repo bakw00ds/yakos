@@ -30,12 +30,12 @@ type gateCall struct {
 func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *supervisorConfig, logFile string, c gateCall) {
 	lim := resolveLimits(cfg, c.model, in.Env)
 	if len(lim.ignored) > 0 {
-		h.appendLog(out, logFile, "WARN", "pass",
+		h.appendLog(out, in, logFile, "WARN", "pass",
 			"project supervisor limit would reduce supervision; ignored (only a stricter value is accepted; loosen in ~/.yakos-state/supervisor-policy.yml)",
 			map[string]any{"ignored_keys": joinKeys(lim.ignored)})
 	}
 	if len(lim.invalid) > 0 {
-		h.appendLog(out, logFile, "WARN", "pass",
+		h.appendLog(out, in, logFile, "WARN", "pass",
 			"supervisor limit below its minimum is invalid; using the default",
 			map[string]any{"invalid_keys": joinKeys(lim.invalid)})
 	}
@@ -47,7 +47,7 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 
 	release, locked := acquireLock(lockPath)
 	if !locked {
-		h.appendLog(out, logFile, "WARN", "pass",
+		h.appendLog(out, in, logFile, "WARN", "pass",
 			"launch-state lock busy or unremovable; skipping this supervisor launch",
 			map[string]any{"lock": lockPath})
 		return
@@ -57,7 +57,7 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 	st := loadRunState(statePath)
 	gateHold(in.Env)
 	if st.hasStart && now-st.start > int64(lim.deadline+lim.interval+60) {
-		h.appendLog(out, logFile, "WARN", "pass",
+		h.appendLog(out, in, logFile, "WARN", "pass",
 			"in-flight supervisor run is older than its deadline; treating it as dead",
 			map[string]any{"age_s": now - st.start})
 		st.hasStart = false
@@ -72,7 +72,7 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 	if st.hasStart {
 		record()
 		_ = st.save(statePath)
-		h.appendLog(out, logFile, "REPORT", "pass",
+		h.appendLog(out, in, logFile, "REPORT", "pass",
 			"supervisor run already in flight for this session; trigger coalesced into one follow-up",
 			map[string]any{"coalesced": true, "pending": st.pending, "session_key": key})
 		return
@@ -80,7 +80,7 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 	if !c.crossed {
 		record()
 		_ = st.save(statePath)
-		h.appendLog(out, logFile, "REPORT", "pass",
+		h.appendLog(out, in, logFile, "REPORT", "pass",
 			"high-risk event recorded; the next supervisor run will cover it",
 			map[string]any{"high_risk": true, "pending": st.pending})
 		return
@@ -99,12 +99,12 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 	// hard_stop the deny cases below say it instead (or, for a high-risk
 	// launch under the ceiling, the exempt note here).
 	if b := lim.bud; b.state == string(budget.StateWarning) {
-		h.appendLog(out, logFile, "WARN", "pass",
+		h.appendLog(out, in, logFile, "WARN", "pass",
 			"supervisor budget at warning level",
 			map[string]any{"agent": c.agent, "spent_usd": b.spent, "limit_usd": b.limit, "budget_reason": budget.ReasonWarning})
 		out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget at %.0f%% ($%.2f of $%.2f); at 100%% routine supervisor runs stop\n", b.spent/b.limit*100, b.spent, b.limit)
 	} else if b.hard && deny == denyNone {
-		h.appendLog(out, logFile, "WARN", "pass",
+		h.appendLog(out, in, logFile, "WARN", "pass",
 			"supervisor budget exhausted; high-risk launch allowed under the ceiling",
 			map[string]any{"agent": c.agent, "spent_usd": b.spent, "limit_usd": b.limit, "ceiling_usd": b.stop, "budget_reason": budget.ReasonExhausted})
 		out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget exhausted ($%.2f of $%.2f); launching high-risk supervision under the $%.2f ceiling\n", b.spent, b.limit, b.stop)
@@ -114,7 +114,7 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 		record()
 		_ = st.save(statePath)
 		b := lim.bud
-		h.appendLog(out, logFile, "WARN", "pass",
+		h.appendLog(out, in, logFile, "WARN", "pass",
 			"supervisor budget exhausted; skipping this routine supervisor launch (high-risk events still launch)",
 			map[string]any{"agent": c.agent, "spent_usd": b.spent, "limit_usd": b.limit, "budget_reason": budget.ReasonExhausted, "kind": kind})
 		out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget exhausted ($%.2f of $%.2f); routine supervisor runs are skipped until it is raised, reset, or the month rolls over (yakos budget status)\n", b.spent, b.limit)
@@ -124,7 +124,7 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 		b := lim.bud
 		if st.budgetlog != 1 {
 			st.budgetlog = 1
-			h.appendLog(out, logFile, "WARN", "pass",
+			h.appendLog(out, in, logFile, "WARN", "pass",
 				"supervisor budget ceiling reached; high-risk launches are no longer supervised",
 				map[string]any{"agent": c.agent, "spent_usd": b.spent, "ceiling_usd": b.stop, "budget_reason": budget.ReasonExhausted})
 			out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget ceiling ($%.2f) reached; high-risk supervisor runs are skipped\n", b.stop)
@@ -135,7 +135,7 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 	case denyBackoff:
 		record()
 		_ = st.save(statePath)
-		h.appendLog(out, logFile, "REPORT", "pass",
+		h.appendLog(out, in, logFile, "REPORT", "pass",
 			"supervisor launch paused after an account session limit",
 			map[string]any{"backoff_until": st.backoff})
 		return
@@ -143,7 +143,7 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 		record()
 		if st.caplog != 1 {
 			st.caplog = 1
-			h.appendLog(out, logFile, "WARN", "pass",
+			h.appendLog(out, in, logFile, "WARN", "pass",
 				"supervisor launch cap reached for this session; skipping further routine launches",
 				map[string]any{"capped": true, "cap": lim.cap, "session_key": key})
 			out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: launch cap (%d) reached for this session; routine supervisor runs are skipped (high-risk events still launch)\n", lim.cap)
@@ -154,7 +154,7 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 		record()
 		if st.ceillog != 1 {
 			st.ceillog = 1
-			h.appendLog(out, logFile, "WARN", "pass",
+			h.appendLog(out, in, logFile, "WARN", "pass",
 				"high-risk supervisor launch ceiling reached for this session",
 				map[string]any{"ceiling": lim.ceil})
 			out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: high-risk launch ceiling (%d) reached for this session; supervisor runs are skipped\n", lim.ceil)
@@ -172,11 +172,11 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 		if err := h.startWrapper(c, lim, statePath, lockPath, pendingPath, logFile, delay); err != nil {
 			st = prev
 			_ = st.save(statePath)
-			h.appendLog(out, logFile, "WARN", "pass", "supervisor dispatch launch failed",
+			h.appendLog(out, in, logFile, "WARN", "pass", "supervisor dispatch launch failed",
 				map[string]any{"error": err.Error(), "model": c.model, "runtime": c.runtime})
 			return
 		}
-		h.appendLog(out, logFile, "REPORT", "pass",
+		h.appendLog(out, in, logFile, "REPORT", "pass",
 			"supervisor launch deferred to the end of the minimum interval",
 			map[string]any{"throttled": true, "deferred_s": delay, "pending": st.pending})
 		return
@@ -194,12 +194,12 @@ func (h *Hook) launchGate(out *hooktype.HookOutput, in hooktype.HookInput, cfg *
 		// Give the launch back so a failed spawn neither counts nor blocks.
 		st = prev
 		_ = st.save(statePath)
-		h.appendLog(out, logFile, "WARN", "pass",
+		h.appendLog(out, in, logFile, "WARN", "pass",
 			"supervisor dispatch launch failed",
 			map[string]any{"error": err.Error(), "model": c.model, "runtime": c.runtime})
 		return
 	}
-	h.appendLog(out, logFile, "REPORT", "pass",
+	h.appendLog(out, in, logFile, "REPORT", "pass",
 		fmt.Sprintf("supervisor dispatch forked async (model=%s runtime=%s)", c.model, c.runtime),
 		map[string]any{"dispatch": "async", "model": c.model, "runtime": c.runtime, "deadline_s": lim.deadline, "kind": kind})
 }

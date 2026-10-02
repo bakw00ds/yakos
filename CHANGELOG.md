@@ -9,12 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`supervisor-stream` runs on Go by default (K-122).** The Go twin's log
+  records now use the bash schema (`decision`, `reason`, `agent`,
+  `session_id`, `event`, then the extra fields) through the shared hooklog
+  writer, covering every record including the launch-gate, coalescing,
+  ceiling and budget ones. Parity in `tests/run-hook-parity.sh` went from 3 to
+  26 of 27 rows (the 27th is the shared empty-stdin accept) and the registry
+  marks the hook `GoReady`, so hybrid refresh registers it as
+  `yakos hook run --impl go supervisor-stream` (about 149 ms to about 40 ms
+  per call). It is deliberately not guard-wrapped: it never blocks.
+
 - **Heavy hooks run on Go by default; auto-compaction on by default (K-118).**
   The Go `yakos refresh` now defaults to `--hooks-impl hybrid`: `path-allowlist`
   and `secret-scan` join `output-injection-scan` and the other parity-
   verified hooks on `yakos hook run --impl go` (zero non-accepted divergences
-  in `tests/run-hook-parity.sh`). `supervisor-stream` stays on bash until its
-  Go log record reaches parity. The default applies to Go-native installs or
+  in `tests/run-hook-parity.sh`). `supervisor-stream` followed in K-122
+  once its Go log record reached parity (see below). The default applies to Go-native installs or
   `YAKOS_IMPL=go`; with the bash CLI tree present and `YAKOS_IMPL` unset,
   refresh is proxied to bash and stays all-bash (`yakos doctor` says which
   path is active). Enforcing Go hooks (fail-closed ones, plus

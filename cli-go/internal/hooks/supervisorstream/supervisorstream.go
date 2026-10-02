@@ -41,6 +41,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/hooks/secretscan"
 )
@@ -264,7 +265,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	triggerHigh := false
 	if !pfEnabled {
 		// Pre-filter disabled: every mutation counts.
-		h.appendLog(&out, logFile, "REPORT", "pass",
+		h.appendLog(&out, in, logFile, "REPORT", "pass",
 			"pre-filter disabled; counting toward score threshold",
 			map[string]any{"pre_filter": "disabled", "tool": in.Tool, "file": filePath})
 		// Fall through to counter logic.
@@ -304,7 +305,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 
 		if escalateReason == "" {
 			// No trigger — buffer-only, no counter tick.
-			h.appendLog(&out, logFile, "REPORT", "pass",
+			h.appendLog(&out, in, logFile, "REPORT", "pass",
 				"pre-filter: no trigger; buffered without dispatch",
 				map[string]any{"pre_filter": "pass", "tool": in.Tool, "file": filePath})
 			h.shadowDecision(in, doc, projectDir, shadowInput{
@@ -328,7 +329,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		}
 
 		// Trigger fired.
-		h.appendLog(&out, logFile, "REPORT", "pass",
+		h.appendLog(&out, in, logFile, "REPORT", "pass",
 			"pre-filter: ESCALATE ("+escalateReason+"); counting toward score threshold",
 			map[string]any{"pre_filter": "escalate", "trigger": escalateReason, "tool": in.Tool, "file": filePath})
 		h.shadowDecision(in, doc, projectDir, shadowInput{
@@ -342,7 +343,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	if !ok {
 		// No lock within the wait budget: skip this tick (bash: exit 0)
 		// rather than block the hook or risk a double launch.
-		h.appendLog(&out, logFile, "WARN", "pass",
+		h.appendLog(&out, in, logFile, "WARN", "pass",
 			"counter lock busy or unremovable; skipping this escalation tick",
 			map[string]any{"lock": counterFile + ".lock"})
 		return out, nil
@@ -355,7 +356,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	if cur%scoreEvery != 0 {
-		h.appendLog(&out, logFile, "REPORT", "pass",
+		h.appendLog(&out, in, logFile, "REPORT", "pass",
 			"escalation buffered; not yet at score-every threshold",
 			map[string]any{"counter": cur, "score_every": scoreEvery, "will_score": false})
 		// A high-risk event is still recorded (and bumps the high-risk flag) so
@@ -367,7 +368,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	// Threshold hit — fork the supervisor (bash: same log records, same order).
-	h.appendLog(&out, logFile, "REPORT", "pass",
+	h.appendLog(&out, in, logFile, "REPORT", "pass",
 		"escalation score threshold hit; forking supervisor dispatch (async)",
 		map[string]any{"counter": cur, "score_every": scoreEvery, "will_score": true})
 
@@ -396,7 +397,7 @@ func (h *Hook) launchSupervisor(out *hooktype.HookOutput, in hooktype.HookInput,
 
 	cli := findCLI(in.Env)
 	if cli == "" || h.Launch == nil {
-		h.appendLog(out, logFile, "WARN", "pass",
+		h.appendLog(out, in, logFile, "WARN", "pass",
 			"could not locate yakos CLI to fork supervisor", map[string]any{})
 		return
 	}
@@ -407,7 +408,7 @@ func (h *Hook) launchSupervisor(out *hooktype.HookOutput, in hooktype.HookInput,
 		filepath.Join(h.WorkCurrentDir, "decisions.md"),
 		scoreEvery)
 	if badModel != "" {
-		h.appendLog(out, logFile, "WARN", "pass",
+		h.appendLog(out, in, logFile, "WARN", "pass",
 			"supervisor.model is not a known tier or alias; using haiku",
 			map[string]any{"model": badModel})
 	}
@@ -685,33 +686,24 @@ func writeCounter(counterFile string, n int) {
 
 // ---- log helper --------------------------------------------------------------
 
-func (h *Hook) appendLog(out *hooktype.HookOutput, logFile, severity, action, message string, extra map[string]any) {
-	ts := h.NowFn().UTC().Format(time.RFC3339)
-	entry := map[string]any{
-		"ts":       ts,
-		"hook":     hookName,
-		"severity": severity,
-		"action":   action,
-		"message":  message,
-	}
-	for k, v := range extra {
-		entry[k] = v
-	}
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return
-	}
-	data = append(data, '\n')
-	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil { //nolint:gosec
-		return
-	}
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec
-	if err != nil {
+// appendLog writes one record through the shared hooklog writer, so the
+// field set (ts, hook, severity, decision, reason, agent, session_id, event,
+// then extras) matches bash's ho_log. decision and reason replace the old
+// action/message names; agent, session_id and event come from the payload
+// exactly as bash's hi_sender_role / hi_session_id / hi_event do.
+func (h *Hook) appendLog(out *hooktype.HookOutput, in hooktype.HookInput, _ string, severity, decision, reason string, extra map[string]any) {
+	if err := hooklog.Append(h.WorkCurrentDir, hooklog.Entry{
+		Hook:      hookName,
+		Severity:  severity,
+		Decision:  decision,
+		Reason:    reason,
+		Agent:     senderRole(in),
+		SessionID: hookio.SessionID(in),
+		Event:     in.Event,
+		Extra:     extra,
+	}, h.NowFn()); err != nil {
 		out.Stderr = fmt.Appendf(out.Stderr, "%s: open log: %v\n", hookName, err)
-		return
 	}
-	defer f.Close() //nolint:errcheck
-	_, _ = f.Write(data)
 }
 
 // ---- helpers -----------------------------------------------------------------

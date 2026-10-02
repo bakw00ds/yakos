@@ -232,7 +232,10 @@ var entries = []Entry{
 	{
 		Name:       "supervisor-stream",
 		FailClosed: false,
-		New:        func(cfg Config) Hook { return supervisorstream.New(cfg.WorkCurrentDir, cfg.ProjectDir) },
+		// Never exits 2 and is not a detector, so no Guard: a crash must not block
+		// every Edit/Write/Bash call. Log records go through hooklog (K-122).
+		GoReady: true,
+		New:     func(cfg Config) Hook { return supervisorstream.New(cfg.WorkCurrentDir, cfg.ProjectDir) },
 	},
 	{
 		Name:       "task-complete-dispatch",

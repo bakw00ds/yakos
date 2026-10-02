@@ -96,10 +96,13 @@ and still warns when a pinned binary is missing so you re-run `yakos refresh`.
 Go starts in about 40 ms. A cheap bash hook (`peer-claim` 16 ms,
 `context-inject` 25 ms) is faster in bash. The default moves the hooks where
 Go wins and parity holds. `supervisor-stream` is the biggest win (about 149
-ms bash, 40 ms Go) but its Go twin writes a different log record, so it
-stays on bash until `tests/run-hook-parity.sh` shows no non-accepted
-divergence; the registry's `GoReady` flag then switches it with no other
-change. `yakos hook list` shows `go` for parity-verified hooks and
+ms bash, 40 ms Go). Its Go twin now writes the same log record as bash
+(`decision`, `reason`, `agent`, `session_id`, `event`), so it is `GoReady` and
+runs on Go in the hybrid default. It is not wrapped in the fail-closed guard:
+it never exits 2 and is not a detector, and the guard turns a crash into a
+block, which would stop every Edit, Write and Bash call. A missing binary
+therefore skips supervision for that call instead of falling back to bash.
+`yakos hook list` shows `go` for parity-verified hooks and
 `go-unverified` for the rest.
 
 ## The tier is pinned in the command

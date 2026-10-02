@@ -629,10 +629,10 @@ func TestHooksImpl_GoWarnsAboutNonGoReadyHooks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "not yet marked GoReady") || !strings.Contains(out, "supervisor-stream") {
+	if !strings.Contains(out, "not yet marked GoReady") || !strings.Contains(out, "supervisor-gate") {
 		t.Fatalf("go mode did not warn naming non-GoReady hooks:\n%s", out)
 	}
-	if strings.Contains(out, "path-log,") || strings.Contains(out, ": path-log") {
+	if strings.Contains(out, "path-log,") || strings.Contains(out, ": path-log") || strings.Contains(out, "supervisor-stream") {
 		t.Fatalf("warning lists a GoReady hook:\n%s", out)
 	}
 	proj2, home2 := fixtureProject(t, "proj-missing-settings")

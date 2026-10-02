@@ -204,7 +204,7 @@ func TestGoReady_S6A2bSet(t *testing.T) {
 	// so the default hybrid refresh runs them on Go (guarded by a bash
 	// fallback). budget-guard and supervisor-gate stay on bash: their
 	// parity is not complete or their Go twin is slower than bash.
-	want := []string{"cycle-counter", "mailbox-mirror", "output-injection-scan", "path-allowlist", "path-log", "secret-scan", "session-end-check", "task-complete-dispatch", "task-dependency-gate", "team-lifecycle"}
+	want := []string{"cycle-counter", "mailbox-mirror", "output-injection-scan", "path-allowlist", "path-log", "secret-scan", "session-end-check", "supervisor-stream", "task-complete-dispatch", "task-dependency-gate", "team-lifecycle"}
 	if len(goReady) != len(want) {
 		t.Fatalf("GoReady hooks=%v, want %v", goReady, want)
 	}
