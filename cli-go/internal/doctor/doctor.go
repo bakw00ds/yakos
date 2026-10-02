@@ -93,6 +93,9 @@ const (
 	// SectionHookFallback reports Go hook failures the fallback wrapper
 	// absorbed (supervisor-stream, K-122).
 	SectionHookFallback
+
+	// SectionProjectRules reports missing/edited/stale managed rules (K-116).
+	SectionProjectRules
 )
 
 // Finding is one reported item: a severity level plus a human-readable message.
@@ -234,6 +237,7 @@ func Run(cfg Config) (*Report, error) {
 		r.checkHookDrift()
 		r.checkHookBinaries()
 		r.checkPrePushGate()
+		r.checkProjectRules()
 	}
 
 	r.checkMultiDevCoord()

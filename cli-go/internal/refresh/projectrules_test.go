@@ -106,3 +106,87 @@ func TestSpecialistRules_ExistInFramework(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncProjectRules_RefusesSymlinkedRulesDir(t *testing.T) {
+	root, proj := setupRulesFixture(t)
+	outside := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(proj, ".claude"), 0o755)
+	if err := os.Symlink(outside, filepath.Join(proj, ".claude", "rules")); err != nil {
+		t.Skip("symlinks unsupported")
+	}
+	_, err := syncProjectRules(root, proj, false, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("want symlink refusal, got %v", err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Errorf("wrote outside the project: %v", entries)
+	}
+}
+
+func TestSyncProjectRules_RefusesSymlinkedClaudeDir(t *testing.T) {
+	root, proj := setupRulesFixture(t)
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(proj, ".claude")); err != nil {
+		t.Skip("symlinks unsupported")
+	}
+	if _, err := syncProjectRules(root, proj, false, io.Discard); err == nil {
+		t.Fatal("want refusal for symlinked .claude")
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Errorf("wrote outside the project: %v", entries)
+	}
+}
+
+// Go and bash must agree: only a marker on the LAST line makes a file managed.
+func TestIsManaged_MarkerOnlyOnLastLine(t *testing.T) {
+	m := managedMarkerPrefix + "abc -->"
+	if isManaged([]byte(m + "\nproject text\n")) {
+		t.Error("marker on line 1 must not count as managed")
+	}
+	if !isManaged([]byte("text\n" + m + "\n")) {
+		t.Error("marker on last line must count as managed")
+	}
+	if isManaged([]byte("text\n" + m + "\nmore\n")) {
+		t.Error("marker followed by more text must not count")
+	}
+}
+
+func TestCheckProjectRules(t *testing.T) {
+	root, proj := setupRulesFixture(t)
+	kinds := func() map[string]string {
+		m := map[string]string{}
+		for _, i := range CheckProjectRules(root, proj) {
+			m[i.Rule] = i.Kind
+		}
+		return m
+	}
+	if got := kinds(); len(got) != len(specialistRules) || got["git-hygiene.md"] != "missing" {
+		t.Fatalf("fresh project: %v", got)
+	}
+	if _, err := syncProjectRules(root, proj, false, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if got := kinds(); len(got) != 0 {
+		t.Fatalf("clean install should have no issues: %v", got)
+	}
+	d := filepath.Join(proj, ".claude", "rules")
+	// edited
+	b, _ := os.ReadFile(filepath.Join(d, "commit-format.md"))
+	_ = os.WriteFile(filepath.Join(d, "commit-format.md"), []byte("EDIT"+string(b)), 0o644)
+	// marker stripped
+	_ = os.WriteFile(filepath.Join(d, "pr-conventions.md"), []byte("no marker here\n"), 0o644)
+	// stale (upstream changed)
+	_ = os.WriteFile(filepath.Join(root, "lib", "rules", "git-hygiene.md"), []byte("NEW"), 0o644)
+	// removed
+	_ = os.Remove(filepath.Join(d, "secret-handling.md"))
+	got := kinds()
+	want := map[string]string{"commit-format.md": "edited", "pr-conventions.md": "marker-stripped", "git-hygiene.md": "stale", "secret-handling.md": "missing"}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s: got %q want %q (all: %v)", k, got[k], v, got)
+		}
+	}
+	if _, ok := got["verification-discipline.md"]; ok {
+		t.Errorf("untouched rule reported: %v", got)
+	}
+}

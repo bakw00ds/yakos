@@ -270,11 +270,15 @@ func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, ri resolv
 	rulesRpt, rerr := syncProjectRules(filepath.Dir(filepath.Dir(hooksRoot)), absPath, dryRun, w)
 	if rerr != nil {
 		_, _ = fmt.Fprintf(ew, "refresh: rules sync error for %s: %v\n", absPath, rerr)
+		rulesRpt.Warns++ // an unresolved rules problem is drift, never "in sync"
 	}
 
 	hasDrift := rulesRpt.New > 0 || hookRpt.New > 0 || hookRpt.Synced > 0 || settingsRpt.Added > 0 || settingsRpt.Removed > 0 || compactChanged
 
 	driftStatus := "in sync"
+	if !hasDrift && rulesRpt.Warns > 0 {
+		driftStatus = "drift (rules need attention; see warnings above, `yakos doctor`)"
+	}
 	if hasDrift {
 		if dryRun {
 			driftStatus = "drift detected (dry-run)"
@@ -305,7 +309,7 @@ func refreshOne(projPath, hooksRoot, templateFile string, dryRun bool, ri resolv
 		Hooks:       hookRpt,
 		Settings:    settingsRpt,
 		Rules:       rulesRpt,
-		HasDrift:    hasDrift,
+		HasDrift:    hasDrift || rulesRpt.Warns > 0,
 	}, nil
 }
 

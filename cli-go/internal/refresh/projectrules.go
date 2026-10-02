@@ -40,16 +40,90 @@ const managedMarkerPrefix = "<!-- yakos:managed sha256="
 // the upstream hash, so a later refresh can tell a stale managed copy (safe
 // to update) from a project-owned file (never touched).
 func managedContent(upstream []byte) []byte {
-	sum := sha256.Sum256(upstream)
 	out := append([]byte{}, upstream...)
 	if len(out) > 0 && out[len(out)-1] != '\n' {
 		out = append(out, '\n')
 	}
-	return append(out, []byte(managedMarkerPrefix+hex.EncodeToString(sum[:])+" -->\n")...)
+	return append(out, []byte(managedMarkerPrefix+sha256Hex(upstream)+" -->\n")...)
+}
+
+// markerLine returns the sha256 recorded in the file's trailing marker and
+// whether the LAST line is a well-formed marker. Only the last line counts, so
+// Go and bash agree and a marker pasted elsewhere (line 1) never makes a
+// project-owned file look managed.
+func markerLine(b []byte) (sha string, ok bool) {
+	lines := strings.Split(strings.TrimRight(string(b), "\r\n"), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if !strings.HasPrefix(last, managedMarkerPrefix) || !strings.HasSuffix(last, " -->") {
+		return "", false
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(last, managedMarkerPrefix), " -->"), true
 }
 
 func isManaged(b []byte) bool {
-	return strings.Contains(string(b), "\n"+managedMarkerPrefix)
+	_, ok := markerLine(b)
+	return ok
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// RuleIssue is one problem found by CheckProjectRules.
+type RuleIssue struct {
+	Rule string
+	Kind string // missing | marker-stripped | edited | stale | symlink
+}
+
+func (i RuleIssue) String() string {
+	switch i.Kind {
+	case "missing":
+		return i.Rule + ": missing (run `yakos refresh --apply`)"
+	case "marker-stripped":
+		return i.Rule + ": no yakos marker (project-owned, or marker stripped); dispatched specialists get this file as-is"
+	case "edited":
+		return i.Rule + ": edited since install (content does not match its marker sha256)"
+	case "stale":
+		return i.Rule + ": out of date with the framework rule (run `yakos refresh --apply`)"
+	case "symlink":
+		return i.Rule + ": is a symlink; claude ignores project rules that link outside the project (run `yakos refresh --apply`)"
+	}
+	return i.Rule + ": " + i.Kind
+}
+
+// CheckProjectRules inspects the five managed rules in <proj>/.claude/rules
+// without writing anything. A nil result means all are present and current.
+func CheckProjectRules(yakosRoot, projPath string) []RuleIssue {
+	var out []RuleIssue
+	for _, name := range specialistRules {
+		p := filepath.Join(projPath, ".claude", "rules", name)
+		fi, err := os.Lstat(p)
+		if err != nil {
+			out = append(out, RuleIssue{name, "missing"})
+			continue
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			out = append(out, RuleIssue{name, "symlink"})
+			continue
+		}
+		cur, _ := os.ReadFile(p) //nolint:gosec
+		marker, ok := markerLine(cur)
+		if !ok {
+			out = append(out, RuleIssue{name, "marker-stripped"})
+			continue
+		}
+		body := strings.TrimRight(string(cur), "\r\n")
+		body = body[:strings.LastIndex(body, "\n")+1] // drop the marker line
+		if sha256Hex([]byte(body)) != marker && sha256Hex([]byte(strings.TrimSuffix(body, "\n"))) != marker {
+			out = append(out, RuleIssue{name, "edited"})
+			continue
+		}
+		if up, uerr := os.ReadFile(filepath.Join(yakosRoot, "lib", "rules", name)); uerr == nil && sha256Hex(up) != marker { //nolint:gosec
+			out = append(out, RuleIssue{name, "stale"})
+		}
+	}
+	return out
 }
 
 // syncProjectRules installs the specialist rules into <proj>/.claude/rules/
@@ -63,6 +137,13 @@ func syncProjectRules(yakosRoot, projPath string, dryRun bool, w io.Writer) (Rul
 	dst := filepath.Join(projPath, ".claude", "rules")
 	if fi, err := os.Stat(src); err != nil || !fi.IsDir() {
 		return rpt, nil
+	}
+	// Refuse to write through a symlinked .claude or .claude/rules: that would
+	// land files outside the project.
+	for _, d := range []string{filepath.Join(projPath, ".claude"), dst} {
+		if fi, err := os.Lstat(d); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return rpt, fmt.Errorf("refusing to install rules: %s is a symlink", d)
+		}
 	}
 	for _, name := range specialistRules {
 		upstream, err := os.ReadFile(filepath.Join(src, name)) //nolint:gosec

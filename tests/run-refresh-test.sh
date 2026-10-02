@@ -715,6 +715,42 @@ else
 fi
 
 # ===========================================================================
+# Test 18 (K-116): specialist rules install, marker/last-line rule, symlink
+# refusal, and warnings are never reported as "in sync"
+# ===========================================================================
+echo ""
+echo "Test 18: project rules install"
+T18="$(setup_project proj-in-sync)"
+rm -rf "$T18/project/.claude/rules"
+out18="$(run_refresh "$T18")"
+if [ -f "$T18/project/.claude/rules/git-hygiene.md" ] && [ ! -L "$T18/project/.claude/rules/git-hygiene.md" ] \
+   && tail -n 1 "$T18/project/.claude/rules/git-hygiene.md" | grep -q '^<!-- yakos:managed sha256='; then
+    ok "rules installed as managed regular-file copies"
+else
+    fail "rules not installed as managed copies"
+fi
+# marker on line 1 => project-owned (matches Go): left alone, warned, not "in sync"
+printf '<!-- yakos:managed sha256=abc -->\nmine\n' > "$T18/project/.claude/rules/commit-format.md"
+out18="$(run_refresh "$T18")"
+if [ "$(sed -n 2p "$T18/project/.claude/rules/commit-format.md")" = "mine" ] \
+   && printf '%s' "$out18" | grep -q 'project-owned' \
+   && ! printf '%s' "$out18" | grep -q 'status:   in sync'; then
+    ok "line-1 marker file stays project-owned and refresh reports drift"
+else
+    fail "line-1 marker handling differs from Go: $out18"
+fi
+# symlinked rules dir is refused and nothing is written outside
+T18B="$(setup_project proj-in-sync)"
+rm -rf "$T18B/project/.claude/rules"; mkdir -p "$T18B/outside"
+ln -s "$T18B/outside" "$T18B/project/.claude/rules"
+out18b="$(run_refresh "$T18B")"
+if [ -z "$(ls -A "$T18B/outside")" ] && printf '%s' "$out18b" | grep -q 'refusing'; then
+    ok "symlinked .claude/rules refused; nothing written outside the project"
+else
+    fail "symlinked rules dir was not refused: $out18b"
+fi
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""

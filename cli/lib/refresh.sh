@@ -665,6 +665,12 @@ _sync_project_rules() {
     R_NEW=0; R_OK=0; R_WARN=0
     [ -d "$src_root/lib/rules" ] || return 0
     dst="$proj/.claude/rules"
+    # Never write through a symlinked .claude or .claude/rules.
+    if [ -L "$proj/.claude" ] || [ -L "$dst" ]; then
+        echo "refresh: rules: refusing to install, $dst is under a symlink" >&2
+        R_WARN=$((R_WARN + 1))
+        return 0
+    fi
     for name in $SPECIALIST_RULES; do
         src="$src_root/lib/rules/$name.md"
         dstf="$dst/$name.md"
@@ -686,7 +692,8 @@ _sync_project_rules() {
             if cmp -s "$tmp" "$dstf"; then
                 R_OK=$((R_OK + 1)); rm -f "$tmp"; continue
             fi
-            if ! grep -q '^<!-- yakos:managed sha256=' "$dstf"; then
+            # Only a well-formed marker on the LAST line counts (same as Go).
+            if ! tail -n 1 "$dstf" | grep -q '^<!-- yakos:managed sha256=.* -->$'; then
                 echo "    [warn] rules: $name.md is project-owned (no yakos marker); leaving it"
                 R_WARN=$((R_WARN + 1)); rm -f "$tmp"; continue
             fi
@@ -748,6 +755,8 @@ _refresh_one() {
        [ "$S_ADDED" -gt 0 ] || [ "$S_REMOVED" -gt 0 ] || [ "$R_NEW" -gt 0 ]; then
         drift="drift detected + repaired"
         [ "$DRY_RUN" = "1" ] && drift="drift detected (dry-run)"
+    elif [ "$R_WARN" -gt 0 ]; then
+        drift="drift (rules need attention; see warnings above, 'yakos doctor')"
     fi
 
     echo "    hooks:    $hooks_summary"
