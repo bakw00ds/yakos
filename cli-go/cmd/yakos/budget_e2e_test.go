@@ -137,7 +137,7 @@ func TestBudgetGateReturnsClampedArgs(t *testing.T) {
 	}
 	t.Setenv("YAKOS_DISPATCH_LOG", state)
 	in := []string{"dispatch", "backend", "t", "--model", "opus", "--project", t.TempDir()}
-	got := budgetGateBeforePassthrough(in)
+	got := budgetGateBeforePassthrough(in, "")
 	if got[4] != "haiku" {
 		t.Fatalf("gate returned %v, want --model haiku", got)
 	}
@@ -145,8 +145,34 @@ func TestBudgetGateReturnsClampedArgs(t *testing.T) {
 		t.Fatal("the caller's slice must not be mutated")
 	}
 	// The built-in supervisor ceiling applies with no policy file at all.
-	got = budgetGateBeforePassthrough([]string{"dispatch", "supervisor", "t", "--model", "opus", "--project", t.TempDir()})
+	got = budgetGateBeforePassthrough([]string{"dispatch", "supervisor", "t", "--model", "opus", "--project", t.TempDir()}, "")
 	if got[4] != "sonnet" {
 		t.Fatalf("built-in supervisor ceiling not applied: %v", got)
+	}
+}
+
+// K-116 round 2: a passthrough dispatch with NO --model whose agent is pinned
+// to opus in frontmatter must still be clamped to the ceiling.
+func TestBudgetGateClampsFrontmatterPin(t *testing.T) {
+	t.Setenv("YAKOS_DISPATCH_LOG", t.TempDir())
+	root := t.TempDir()
+	dir := filepath.Join(root, "lib", "agents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"supervisor", "backend"} {
+		body := "---\nid: " + n + "\nmodel: opus\n---\n\n## Purpose\n\nx.\n"
+		if err := os.WriteFile(filepath.Join(dir, n+".md"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	proj := t.TempDir()
+	got := budgetGateBeforePassthrough([]string{"dispatch", "supervisor", "t", "--project", proj}, root)
+	if strings.Join(got[len(got)-2:], " ") != "--model sonnet" {
+		t.Fatalf("opus-pinned supervisor not clamped: %v", got)
+	}
+	got = budgetGateBeforePassthrough([]string{"dispatch", "backend", "t", "--project", proj}, root)
+	if hasModelFlag(got) {
+		t.Fatalf("agent without a ceiling must be untouched: %v", got)
 	}
 }

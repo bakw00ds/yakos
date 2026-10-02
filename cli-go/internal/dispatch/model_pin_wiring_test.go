@@ -150,3 +150,44 @@ func TestRunStream_ModelPinWiring(t *testing.T) {
 		}
 	}
 }
+
+func opusSupervisorRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "lib", "agents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nid: supervisor\nmodel: opus\n---\n\n## Purpose\n\nSupervisor.\n"
+	if err := os.WriteFile(filepath.Join(dir, "supervisor.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// K-119 + K-116: a supervisor PINNED to opus is clamped to the built-in
+// sonnet ceiling AFTER pin resolution (the clamp must actually fire).
+func TestRun_OpusPinnedSupervisorClampedToSonnet(t *testing.T) {
+	argv := framedArgv(t, opusSupervisorRoot(t), "supervisor", "")
+	if got, ok := modelArg(argv); !ok || got != "sonnet" {
+		t.Fatalf("framed: --model=%q ok=%v want sonnet; argv=%v", got, ok, argv)
+	}
+}
+
+func TestRunStream_OpusPinnedSupervisorClampedToSonnet(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	svc := NewService(ServiceConfig{YakosRoot: opusSupervisorRoot(t), WorkspaceRoot: t.TempDir()})
+	var chat rt.ChatDispatchRequest
+	withStreamRunFn(func(_ context.Context, _ Request, _ rt.Adapter, cr rt.ChatDispatchRequest, _ func(StreamChunk)) (Result, error) {
+		chat = cr
+		return Result{}, nil
+	}, func() {
+		if _, err := svc.RunStream(context.Background(), Params{Agent: "supervisor", Task: "hi", Project: t.TempDir()}, func(StreamChunk) {}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	got, ok := modelArg((&rt.ClaudeAdapter{}).ChatExecCmd(context.Background(), chat).Args)
+	if !ok || got != "sonnet" {
+		t.Fatalf("chat: --model=%q ok=%v want sonnet", got, ok)
+	}
+}

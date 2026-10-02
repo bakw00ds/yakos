@@ -187,7 +187,7 @@ func main() {
 		switch selectImpl(os.Getenv("YAKOS_IMPL"), passthrough.BashYakosExists(yakosRoot)) {
 		case implPassthrough:
 			// The bash dispatch has no dollar budget; enforce it here (K-119).
-			args = budgetGateBeforePassthrough(args)
+			args = budgetGateBeforePassthrough(args, yakosRoot)
 			exitWith(passthrough.Run(yakosRoot, args))
 		case implGoNative:
 			// no-op: execution continues to the Go-native router below
