@@ -7,78 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.61.0.0] — 2026-10-03
+
+Minor release: per-agent dollar budgets, hybrid Go hooks by default, the
+supervisor launch gate, project-installed specialist rules and a pinned
+relay model. Existing projects need one `yakos refresh --project <path>`;
+see UPGRADING.md.
+
 ### Added
-
-- **`supervisor-stream` runs on Go by default (K-122).** The Go twin's log
-  records now use the bash schema (`decision`, `reason`, `agent`,
-  `session_id`, `event`, then the extra fields) through the shared hooklog
-  writer, covering every record including the launch-gate, coalescing,
-  ceiling and budget ones. Parity in `tests/run-hook-parity.sh` went from 3 to
-  26 of 27 rows (the 27th is the shared empty-stdin accept) and the registry
-  marks the hook `GoReady`, so hybrid refresh registers it as
-  `yakos hook run --impl go supervisor-stream` (about 149 ms to about 40 ms
-  per call). It carries a fallback-only wrapper (bash twin if the binary is
-  unusable, any Go failure mapped to exit 0, never exit 2). Each absorbed failure is
-  logged to `~/.yakos-state/hook-fallback.log` and `yakos doctor` warns on
-  entries from the last 7 days, so a crashing hook cannot hide). NUL bytes are now
-  stripped from the scanned strings, as bash's `$(jq)` does, so a NUL-split
-  `cu\0rl ... | sh` still escalates and a NUL-split secret is still redacted.
-  Log records now match bash byte for byte, extras order and risk-pattern
-  spelling included (checked in the budget and coalesce suites), and the
-  large-diff line count counts newlines like bash's `wc -l`.
-
-- **Heavy hooks run on Go by default; auto-compaction on by default (K-118).**
-  The Go `yakos refresh` now defaults to `--hooks-impl hybrid`: `path-allowlist`
-  and `secret-scan` join `output-injection-scan` and the other parity-
-  verified hooks on `yakos hook run --impl go` (zero non-accepted divergences
-  in `tests/run-hook-parity.sh`). `supervisor-stream` followed in K-122
-  once its Go log record reached parity (see below). The default applies to Go-native installs or
-  `YAKOS_IMPL=go`; with the bash CLI tree present and `YAKOS_IMPL` unset,
-  refresh is proxied to bash and stays all-bash (`yakos doctor` says which
-  path is active). Enforcing Go hooks (fail-closed ones, plus
-  `task-dependency-gate` and `output-injection-scan`) are wrapped in a guard:
-  a missing, empty, non-executable or directory binary falls back to the bash
-  twin, and any exit other than 0 or 2 (a crash or signal) becomes a block
-  instead of a silent pass. Refresh, `yakos doctor` and `yakos start` check
-  that a pinned binary is 0.60.0.0 or newer, the first release with
-  `hook run --impl`. A default run never pins a temporary binary. `--hooks-impl
-  bash` is the escape hatch. `yakos hook list` says `go-unverified` instead of
-  `bash-only` for a hook that has a Go twin but no parity proof.
-  Security fixes in the Go hooks: `secret-scan` drops NUL bytes before
-  matching, like bash, so a UTF-16 or NUL-split secret in `Write` content is
-  caught; malformed `tool_input` or `edits` shapes fail closed like bash; and
-  a later case-variant key such as `TOOL_NAME` no longer shadows `tool_name`.
-  Refresh also writes Claude Code's own `autoCompactWindow: 150000` into
-  `.claude/settings.json` when the key is absent (file mode preserved), so the
-  lead session compacts itself near 150K tokens. Tune or switch it off with
-  `auto_compact_window: <tokens>|off` in `.yakos.yml`; an invalid value aborts
-  refresh with a non-zero exit. The `CLAUDE_CODE_AUTO_COMPACT_WINDOW` env var
-  still wins. See `docs/hooks-impl.md` and `docs/auto-compact.md`.
-
-- **Supervisor launch gate: coalescing, per-session cap, run deadline (K-117).**
-  The supervisor was 82% of logged dispatch spend (5,094 runs, $1,763).
-  `supervisor-stream` (bash and Go twin) now launches at most one run per
-  session at a time: a trigger that arrives while one is in flight is
-  recorded (a redacted preview goes to a per-session pending file) and one
-  follow-up covers all of them. New `.yakos.yml` keys under `supervisor:` cap
-  routine launches per session (`max_launches_per_session`, default 30), space
-  them (`min_launch_interval_s`, default 120; a trigger inside it is deferred,
-  not dropped), kill a run past `run_deadline_s` with its child processes
-  (default 240 s for haiku, 480 s sonnet, 600 s opus) and pause after an
-  account session-limit failure (`session_limit_backoff_min`, default 30).
-  High-risk triggers (risk regex or sensitive path) bypass the cap and the
-  interval up to 3x the trusted cap, so benign escalations cannot end
-  supervision; at that ceiling a synthetic CRITICAL finding alerts
-  `block_on_critical` operators. A project file can only make the limits
-  stricter (more supervision: longer deadline, higher cap, shorter interval);
-  anything else needs the user-level `~/.yakos-state/supervisor-policy.yml`,
-  and a deadline under 30 s is invalid. The bare `force.*push` risk pattern is
-  gone (it matched "enforce push notification"); real `git push --force`
-  shapes still escalate. The deadline uses a
-  portable watchdog (bash) or a Go process (`yakos hook supervisor-wrap`, also
-  on Windows), never GNU `timeout`. `supervisor.model` aliases (`balanced`)
-  now resolve and unknown names fall back to haiku. Apart from that pattern,
-  what the pre-filter escalates is unchanged. See `docs/supervisor-mode.md`.
 
 - **Per-agent dollar budgets with a hard stop (K-119).** An agent can have a
   dollar limit over a monthly (local calendar) or lifetime window. At 80% it
@@ -105,6 +41,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finding; `yakos dispatch` refuses the supervisor only at 2x so no env var or
   flag carries the exemption.
 
+- **Supervisor launch gate: coalescing, per-session cap, run deadline (K-117).**
+  The supervisor was 82% of logged dispatch spend (5,094 runs, $1,763).
+  `supervisor-stream` (bash and Go twin) now launches at most one run per
+  session at a time: a trigger that arrives while one is in flight is
+  recorded (a redacted preview goes to a per-session pending file) and one
+  follow-up covers all of them. New `.yakos.yml` keys under `supervisor:` cap
+  routine launches per session (`max_launches_per_session`, default 30), space
+  them (`min_launch_interval_s`, default 120; a trigger inside it is deferred,
+  not dropped), kill a run past `run_deadline_s` with its child processes
+  (default 240 s for haiku, 480 s sonnet, 600 s opus) and pause after an
+  account session-limit failure (`session_limit_backoff_min`, default 30).
+  High-risk triggers (risk regex or sensitive path) bypass the cap and the
+  interval up to 3x the trusted cap, so benign escalations cannot end
+  supervision; at that ceiling a synthetic CRITICAL finding alerts
+  `block_on_critical` operators. A project file can only make the limits
+  stricter (more supervision: longer deadline, higher cap, shorter interval);
+  anything else needs the user-level `~/.yakos-state/supervisor-policy.yml`,
+  and a deadline under 30 s is invalid. The bare `force.*push` risk pattern is
+  gone (it matched "enforce push notification"); real `git push --force`
+  shapes still escalate. The deadline uses a
+  portable watchdog (bash) or a Go process (`yakos hook supervisor-wrap`, also
+  on Windows), never GNU `timeout`. `supervisor.model` aliases (`balanced`)
+  now resolve and unknown names fall back to haiku. Apart from that pattern,
+  what the pre-filter escalates is unchanged. See `docs/supervisor-mode.md`.
+
+- **Heavy hooks run on Go by default; auto-compaction on by default (K-118).**
+  The Go `yakos refresh` now defaults to `--hooks-impl hybrid`: `path-allowlist`
+  and `secret-scan` join `output-injection-scan` and the other parity-
+  verified hooks on `yakos hook run --impl go` (zero non-accepted divergences
+  in `tests/run-hook-parity.sh`). `supervisor-stream` followed in K-122
+  once its Go log record reached parity (see the next entry). The default applies to Go-native installs or
+  `YAKOS_IMPL=go`; with the bash CLI tree present and `YAKOS_IMPL` unset,
+  refresh is proxied to bash and stays all-bash (`yakos doctor` says which
+  path is active). Enforcing Go hooks (fail-closed ones, plus
+  `task-dependency-gate` and `output-injection-scan`) are wrapped in a guard:
+  a missing, empty, non-executable or directory binary falls back to the bash
+  twin, and any exit other than 0 or 2 (a crash or signal) becomes a block
+  instead of a silent pass. Refresh, `yakos doctor` and `yakos start` check
+  that a pinned binary is 0.60.0.0 or newer, the first release with
+  `hook run --impl`. A default run never pins a temporary binary. `--hooks-impl
+  bash` is the escape hatch. `yakos hook list` says `go-unverified` instead of
+  `bash-only` for a hook that has a Go twin but no parity proof.
+  Security fixes in the Go hooks: `secret-scan` drops NUL bytes before
+  matching, like bash, so a UTF-16 or NUL-split secret in `Write` content is
+  caught; malformed `tool_input` or `edits` shapes fail closed like bash; and
+  a later case-variant key such as `TOOL_NAME` no longer shadows `tool_name`.
+  Refresh also writes Claude Code's own `autoCompactWindow: 150000` into
+  `.claude/settings.json` when the key is absent (file mode preserved), so the
+  lead session compacts itself near 150K tokens. Tune or switch it off with
+  `auto_compact_window: <tokens>|off` in `.yakos.yml`; an invalid value aborts
+  refresh with a non-zero exit. The `CLAUDE_CODE_AUTO_COMPACT_WINDOW` env var
+  still wins. See `docs/hooks-impl.md` and `docs/auto-compact.md`.
+
+- **`supervisor-stream` runs on Go by default (K-122).** The Go twin's log
+  records now use the bash schema (`decision`, `reason`, `agent`,
+  `session_id`, `event`, then the extra fields) through the shared hooklog
+  writer, covering every record including the launch-gate, coalescing,
+  ceiling and budget ones. Parity in `tests/run-hook-parity.sh` went from 3 to
+  26 of 27 rows (the 27th is the shared empty-stdin accept) and the registry
+  marks the hook `GoReady`, so hybrid refresh registers it as
+  `yakos hook run --impl go supervisor-stream` (about 149 ms to about 40 ms
+  per call). It carries a fallback-only wrapper (bash twin if the binary is
+  unusable, any Go failure mapped to exit 0, never exit 2). Each absorbed failure is
+  logged to `~/.yakos-state/hook-fallback.log` and `yakos doctor` warns on
+  entries from the last 7 days, so a crashing hook cannot hide. NUL bytes are now
+  stripped from the scanned strings, as bash's `$(jq)` does, so a NUL-split
+  `cu\0rl ... | sh` still escalates and a NUL-split secret is still redacted.
+  Log records now match bash byte for byte, extras order and risk-pattern
+  spelling included (checked in the budget and coalesce suites), and the
+  large-diff line count counts newlines like bash's `wc -l`.
+
 - **Shadow decision provider on the supervisor pre-filter (K-111 P2b).**
   When `decisions.provider` is `jev` (or `mock`), or
   `YAKOS_DECISION_PROVIDER` says so, `supervisor-stream` (bash and Go twin)
@@ -127,7 +134,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine deadline now holds for providers that ignore their context.
   Changing the header comment of `lib/decisions/supervisor-prefilter.yaml`
   changes its recorded hash.
-
 
 ### Changed
 
@@ -247,6 +253,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `.env.<suffix>`, `eval "$(curl ...)"` and `find ... -delete` escalate,
     redaction also covers `curl -uUSER:PW`, `redis://:pw@host` and PGP key
     blocks, and `yakos upgrade` fsyncs the install directory after the rename.
+
+### Security
+
+Security-relevant changes in this release. Each is described in full in the
+entry named in brackets.
+
+- **Launch and budget limits can only tighten from a project (K-117, K-119).**
+  A project `.yakos.yml` can make supervisor launch limits and agent budgets
+  stricter, never looser. Loosening goes through the user-level policy files
+  under `~/.yakos-state/`, which get a trust check. `budget-guard` stops agents
+  from changing budgets or editing the budget state files.
+- **A project can no longer enable a decision provider (K-111 P2b).** Only
+  `YAKOS_DECISION_PROVIDER` or the user-level `decision-policy.yml` can. The
+  egress redaction gains command-line credential shapes.
+- **Go hook fixes (K-118, K-122).** `secret-scan` drops NUL bytes before
+  matching, so a UTF-16 or NUL-split secret in `Write` content is caught.
+  Malformed `tool_input` or `edits` shapes fail closed, and a case-variant key
+  such as `TOOL_NAME` no longer shadows `tool_name`. Enforcing Go hooks are
+  wrapped so a missing or crashing binary falls back to bash or blocks, never
+  passes silently. `supervisor-stream` strips NUL bytes from scanned strings.
+- **Supervisor visibility fixes (K-112, K-110).** Bash commands and
+  descriptions now reach the risk patterns. Every buffered preview is
+  redacted and the buffer is mode 0600. Redaction gains `curl -u`, URL
+  userinfo, PEM and PGP key bodies. New risk patterns cover `rm --recursive
+  --force`, `sh -c "$(curl ...)"`, `eval "$(curl ...)"`, `find ... -delete` and
+  `cp` of `.env` files.
+- **Hook timeout and lock hardening (K-112, K-110).** `YAKOS_HOOK_JQ_TIMEOUT`
+  is clamped so Claude Code's own hook timeout can no longer fire first and
+  let a tool call through. The supervisor counter lock is atomic and bounded.
+- **Self-update integrity (K-110).** `yakos upgrade` fsyncs the binary and
+  the install directory around the atomic rename. The unsigned
+  `checksums.txt` trust boundary is documented in
+  `docs/selfupdate-trust-boundary.md`.
+
 
 ## [0.60.1.0] — 2026-09-29
 
