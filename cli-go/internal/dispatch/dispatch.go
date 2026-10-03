@@ -121,13 +121,9 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	agentJSON := ""
 	if runtimeName == "claude" {
 		agentWithModel := *targetAgent
-		// Map yakOS tier names to claude CLI model IDs where the CLI does not
-		// accept the bare tier alias. fable → claude-fable-5 (probed 2026-06-11;
-		// the claude CLI does not resolve "fable" as a bare alias).
+		// Bare tier alias: the claude CLI resolves haiku|sonnet|opus|fable
+		// to the current model id itself (no stale pinned ids).
 		claudeModelID := modelResolved
-		if claudeModelID == "fable" {
-			claudeModelID = "claude-fable-5"
-		}
 		agentWithModel.Model = claudeModelID
 		agentJSON, err = agentscompose.AgentToJSON(agentWithModel)
 		if err != nil {

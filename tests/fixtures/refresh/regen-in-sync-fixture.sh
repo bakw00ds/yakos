@@ -50,3 +50,18 @@ done < <(find "$FIXTURE_HOOKS" -name '*.sh' | sort)
 
 echo ""
 echo "regen-in-sync-fixture: $updated updated, $skipped skipped"
+
+# K-116: specialist rules are installed into each project's .claude/rules/ as
+# managed copies (source + trailing sha256 marker). Regenerate them with the
+# exact bytes cli-go/internal/refresh/projectrules.go managedContent writes.
+RULES_SRC="$REPO_ROOT/lib/rules"
+FIXTURE_RULES="$REPO_ROOT/tests/fixtures/refresh/proj-in-sync/.claude/rules"
+mkdir -p "$FIXTURE_RULES"
+for name in git-hygiene commit-format pr-conventions secret-handling verification-discipline; do
+    src="$RULES_SRC/$name.md"
+    sum="$(shasum -a 256 "$src" | awk '{print $1}')"
+    cat "$src" > "$FIXTURE_RULES/$name.md"
+    if [ -n "$(tail -c1 "$src")" ]; then printf '\n' >> "$FIXTURE_RULES/$name.md"; fi
+    printf '<!-- yakos:managed sha256=%s -->\n' "$sum" >> "$FIXTURE_RULES/$name.md"
+    echo "  rule: $name.md"
+done

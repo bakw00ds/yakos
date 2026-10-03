@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,8 +109,19 @@ func (a *ClaudeAdapter) ExecCmd(ctx context.Context, req DispatchRequest) *exec.
 		"--output-format", "stream-json",
 		"--verbose",
 		"--exclude-dynamic-system-prompt-sections", // PR #31
-		"-p", framed,
+		// K-116 W5: the relay session needs only project settings (which carry
+		// the yakOS hooks), no user MCP servers and no user skills listing.
+		// Trims ~8K tokens from the cached prefix of every framed dispatch.
+		"--setting-sources", "project",
+		"--strict-mcp-config",
+		"--disable-slash-commands",
 	}
+	// K-116 W1: pin the outer relay session to the dispatched agent's resolved
+	// tier. Without this the relay runs on the user's default model (opus).
+	if m := claudeModelFlag(req.AgentName, req.ModelOverride); m != "" {
+		args = append(args, "--model", m)
+	}
+	args = append(args, "-p", framed)
 
 	if req.ConversationID != "" {
 		args = append(args, "--resume", req.ConversationID)
@@ -158,6 +171,28 @@ func buildEnv(req DispatchRequest) []string {
 	return appendDispatchEnv(env, req)
 }
 
+// modelDropLog receives the one-line notice when a model name cannot be
+// passed to the claude CLI. Replaced in tests.
+var modelDropLog io.Writer = os.Stderr
+
+// claudeModelFlag maps a model name to the bare tier alias the claude CLI
+// resolves itself (haiku|sonnet|opus|fable). The CLI owns alias-to-id
+// resolution, so no concrete id is pinned here. Abstract aliases (balanced,
+// cheap, ...) are expanded first; anything that is still not a tier (for
+// example gemini-3.5 or gpt-5 on a non-claude agent) is dropped with a log
+// line and no --model is passed. Empty in, empty out (no flag, no log).
+func claudeModelFlag(agent, model string) string {
+	if model == "" {
+		return ""
+	}
+	tier := ResolveAlias(model)
+	if !ValidateTier(tier) {
+		_, _ = fmt.Fprintf(modelDropLog, "yakos: agent %q model %q is not a claude tier (haiku|sonnet|opus|fable); not pinning --model\n", agent, model)
+		return ""
+	}
+	return tier
+}
+
 // ChatExecCmd returns the exec.Cmd for unframed chat dispatch.
 //
 // Unlike ExecCmd (which frames the task via Agent-tool dispatch), ChatExecCmd
@@ -189,6 +224,13 @@ func (a *ClaudeAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest
 	}
 	if req.AgentSystemPrompt != "" {
 		args = append(args, "--append-system-prompt", req.AgentSystemPrompt)
+	}
+	// K-116 W1: pin the model only when the agent or caller chose one
+	// explicitly; unpinned chat keeps the user's default model.
+	if req.ModelExplicit {
+		if m := claudeModelFlag("(chat)", req.ModelOverride); m != "" {
+			args = append(args, "--model", m)
+		}
 	}
 	// Effort passthrough: when non-empty, append --effort <level> so the claude
 	// CLI adjusts reasoning intensity.  At high+ the CLI also enables extended
@@ -749,6 +791,12 @@ type ChatDispatchRequest struct {
 	// ModelOverride is the concrete model tier (haiku|sonnet|opus|fable).
 	// Exported as YAKOS_MODEL_OVERRIDE in the subprocess env.
 	ModelOverride string
+
+	// ModelExplicit is true when ModelOverride came from a caller override or
+	// the agent's frontmatter model: field (not the dispatch layer's default).
+	// Only then does ChatExecCmd pass --model; otherwise chat keeps the
+	// user's default model.
+	ModelExplicit bool
 
 	// AllowRoot enables IS_SANDBOX=1 in the subprocess env (PR #17).
 	AllowRoot bool

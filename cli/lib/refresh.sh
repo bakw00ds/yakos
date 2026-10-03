@@ -650,6 +650,65 @@ _sync_agents() {
     done < <(find "$agents_src" -maxdepth 1 -name "*.md" ! -type d 2>/dev/null | LC_ALL=C sort)
 }
 
+# ---- specialist rules (K-116) ----------------------------------------------
+# Framed dispatch runs claude with --setting-sources project, which drops
+# ~/.claude/rules. Copy the specialist rules into <proj>/.claude/rules/ as
+# MANAGED copies (trailing marker with the upstream sha256). Copies, not
+# symlinks: claude ignores a project rule symlinked outside the project.
+# A real file without the marker is project-owned and left alone.
+# Mirrors cli-go/internal/refresh/projectrules.go (keep in lockstep).
+SPECIALIST_RULES="git-hygiene commit-format pr-conventions secret-handling verification-discipline"
+R_NEW=0; R_OK=0; R_WARN=0
+
+_sync_project_rules() {
+    local proj="$1" src_root="$YAKOS_ROOT" dst name src dstf sum
+    R_NEW=0; R_OK=0; R_WARN=0
+    [ -d "$src_root/lib/rules" ] || return 0
+    dst="$proj/.claude/rules"
+    # Never write through a symlinked .claude or .claude/rules.
+    if [ -L "$proj/.claude" ] || [ -L "$dst" ]; then
+        echo "refresh: rules: refusing to install, $dst is under a symlink" >&2
+        R_WARN=$((R_WARN + 1))
+        return 0
+    fi
+    for name in $SPECIALIST_RULES; do
+        src="$src_root/lib/rules/$name.md"
+        dstf="$dst/$name.md"
+        if [ ! -f "$src" ]; then
+            echo "    [warn] rules: framework rule $name.md missing"
+            R_WARN=$((R_WARN + 1)); continue
+        fi
+        sum="$(tr -d '\r' < "$src" | shasum -a 256 | awk '{print $1}')"
+        # Same bytes as Go managedContent: source, a newline only if the
+        # source lacks one, then the marker.
+        local tmp; tmp="$(mktemp -t yakos-rule.XXXXXX)"
+        tr -d '\r' < "$src" > "$tmp"
+        if [ -n "$(tail -c1 "$tmp")" ]; then printf '\n' >> "$tmp"; fi
+        printf '<!-- yakos:managed sha256=%s -->\n' "$sum" >> "$tmp"
+        if [ -L "$dstf" ]; then
+            R_NEW=$((R_NEW + 1))
+            [ "$DRY_RUN" = "1" ] || rm -f "$dstf"
+        elif [ -f "$dstf" ]; then
+            if tr -d '\r' < "$dstf" | cmp -s "$tmp" -; then
+                R_OK=$((R_OK + 1)); rm -f "$tmp"; continue
+            fi
+            # Only a well-formed marker on the LAST line counts (same as Go).
+            if ! tail -n 1 "$dstf" | tr -d '\r' | grep -q '^<!-- yakos:managed sha256=.* -->$'; then
+                echo "    [warn] rules: $name.md is project-owned (no yakos marker); leaving it"
+                R_WARN=$((R_WARN + 1)); rm -f "$tmp"; continue
+            fi
+            R_NEW=$((R_NEW + 1))
+        else
+            R_NEW=$((R_NEW + 1))
+        fi
+        if [ "$DRY_RUN" != "1" ]; then
+            mkdir -p "$dst"
+            cp "$tmp" "$dstf"
+        fi
+        rm -f "$tmp"
+    done
+}
+
 # ---- refresh a single project -----------------------------------------------
 
 _refresh_one() {
@@ -685,19 +744,24 @@ _refresh_one() {
         settings_summary="skipped (no .claude/settings.json)"
     fi
 
-    # Phase 4: agent symlinks (done once globally, not per-project)
-    # Caller handles this.
+    # Phase 4: specialist rules into the project's .claude/rules/ (K-116)
+    _sync_project_rules "$proj_abs"
+
+    # (agent symlinks are done once globally by the caller)
 
     # Summary line
     local drift="in sync"
     if [ "$H_NEW" -gt 0 ] || [ "$H_SYNC" -gt 0 ] || \
-       [ "$S_ADDED" -gt 0 ] || [ "$S_REMOVED" -gt 0 ]; then
+       [ "$S_ADDED" -gt 0 ] || [ "$S_REMOVED" -gt 0 ] || [ "$R_NEW" -gt 0 ]; then
         drift="drift detected + repaired"
         [ "$DRY_RUN" = "1" ] && drift="drift detected (dry-run)"
+    elif [ "$R_WARN" -gt 0 ]; then
+        drift="drift (rules need attention; see warnings above, 'yakos doctor')"
     fi
 
     echo "    hooks:    $hooks_summary"
     echo "    settings: $settings_summary"
+    echo "    rules:    new=$R_NEW ok=$R_OK warns=$R_WARN"
     echo "    status:   $drift"
 }
 

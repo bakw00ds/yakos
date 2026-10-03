@@ -9,6 +9,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/cliflag"
 )
@@ -271,7 +272,7 @@ func dispatchAgentAndProject(args []string) (agent, project string) {
 // budgetGateBeforePassthrough applies the dollar-budget pre-flight to a
 // `yakos dispatch` that is about to be handed to the bash implementation. A
 // hard_stop exits 4 with the refusal; every other outcome falls through.
-func budgetGateBeforePassthrough(args []string) []string {
+func budgetGateBeforePassthrough(args []string, yakosRoot string) []string {
 	agent, project := dispatchAgentAndProject(args)
 	if agent == "" {
 		return args
@@ -287,7 +288,46 @@ func budgetGateBeforePassthrough(args []string) []string {
 	if st.State == budget.StateWarning {
 		fmt.Fprintf(os.Stderr, "yakos budget: %s\n", st.Message())
 	}
-	return clampDispatchModel(args, agent)
+	out := clampDispatchModel(args, agent)
+	if !hasModelFlag(out) {
+		out = clampFrontmatterModel(out, agent, project, yakosRoot)
+	}
+	return out
+}
+
+func hasModelFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--model" || strings.HasPrefix(a, "--model=") {
+			return true
+		}
+	}
+	return false
+}
+
+// clampFrontmatterModel covers a passthrough dispatch with no --model: the
+// bash dispatch would resolve the agent's frontmatter model and pin the relay
+// to it, bypassing the max_model ceiling. When the composed frontmatter model
+// exceeds the ceiling, an explicit --model <ceiling> is appended (K-116).
+func clampFrontmatterModel(args []string, agent, project, yakosRoot string) []string {
+	if yakosRoot == "" {
+		return args
+	}
+	roster, err := agentscompose.Compose(yakosRoot, project)
+	if err != nil {
+		return args
+	}
+	for _, a := range roster {
+		if a.ID != agent || a.Model == "" {
+			continue
+		}
+		clamped, note := budget.ClampModel(agent, a.Model, budget.Options{})
+		if note == "" {
+			return args
+		}
+		fmt.Fprintf(os.Stderr, "yakos budget: %s\n", note)
+		return append(append([]string(nil), args...), "--model", clamped)
+	}
+	return args
 }
 
 // clampDispatchModel lowers an explicit --model on a passthrough dispatch to

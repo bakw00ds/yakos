@@ -41,3 +41,9 @@ cli-go/cmd/yakos/testdata/fixtures/refresh/*/.claude/settings.json text eol=lf
 
 # K-110: the invalid-UTF-8 fixture must keep its raw bytes on every platform.
 tests/fixtures/hooks/yakos-invalid-utf8.yml binary
+# Specialist rules are hashed (sha256 marker) and copied into projects by
+# `yakos refresh`; force LF so a Windows autocrlf checkout cannot make every
+# refresh report drift (K-116). Installed copies and fixtures are LF too.
+lib/rules/*.md text eol=lf
+tests/fixtures/refresh/**/.claude/rules/*.md text eol=lf
+cli-go/cmd/yakos/testdata/fixtures/refresh/**/.claude/rules/*.md text eol=lf

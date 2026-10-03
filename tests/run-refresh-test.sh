@@ -715,6 +715,64 @@ else
 fi
 
 # ===========================================================================
+# Test 18 (K-116): specialist rules install, marker/last-line rule, symlink
+# refusal, and warnings are never reported as "in sync"
+# ===========================================================================
+echo ""
+echo "Test 18: project rules install"
+T18="$(setup_project proj-in-sync)"
+rm -rf "$T18/project/.claude/rules"
+out18="$(run_refresh "$T18")"
+if [ -f "$T18/project/.claude/rules/git-hygiene.md" ] && [ ! -L "$T18/project/.claude/rules/git-hygiene.md" ] \
+   && tail -n 1 "$T18/project/.claude/rules/git-hygiene.md" | grep -q '^<!-- yakos:managed sha256='; then
+    ok "rules installed as managed regular-file copies"
+else
+    fail "rules not installed as managed copies"
+fi
+# marker on line 1 => project-owned (matches Go): left alone, warned, not "in sync"
+printf '<!-- yakos:managed sha256=abc -->\nmine\n' > "$T18/project/.claude/rules/commit-format.md"
+out18="$(run_refresh "$T18")"
+if [ "$(sed -n 2p "$T18/project/.claude/rules/commit-format.md")" = "mine" ] \
+   && printf '%s' "$out18" | grep -q 'project-owned' \
+   && ! printf '%s' "$out18" | grep -q 'status:   in sync'; then
+    ok "line-1 marker file stays project-owned and refresh reports drift"
+else
+    fail "line-1 marker handling differs from Go: $out18"
+fi
+# symlinked rules dir is refused and nothing is written outside
+T18B="$(setup_project proj-in-sync)"
+rm -rf "$T18B/project/.claude/rules"; mkdir -p "$T18B/outside"
+ln -s "$T18B/outside" "$T18B/project/.claude/rules"
+out18b="$(run_refresh "$T18B")"
+if [ -z "$(ls -A "$T18B/outside")" ] && printf '%s' "$out18b" | grep -q 'refusing'; then
+    ok "symlinked .claude/rules refused; nothing written outside the project"
+else
+    fail "symlinked rules dir was not refused: $out18b"
+fi
+
+# CRLF copies (Windows autocrlf) must still be "in sync" (no false drift)
+T18C="$(setup_project proj-in-sync)"
+for f in "$T18C"/project/.claude/rules/*.md; do sed 's/$/\r/' "$f" > "$f.crlf" && mv "$f.crlf" "$f"; done
+out18c="$(run_refresh "$T18C")"
+if printf '%s' "$out18c" | grep -q 'status:   in sync'; then
+    ok "CRLF-installed rules report in sync"
+else
+    fail "CRLF rules cause false drift: $out18c"
+fi
+
+# A weakened CRLF managed copy must be REPAIRED (marker found despite \r), as in Go
+T18D="$(setup_project proj-in-sync)"
+f18d="$T18D/project/.claude/rules/git-hygiene.md"
+{ printf 'weakened rule\r\n'; tail -n 1 "$f18d" | sed 's/$/\r/'; } > "$f18d.new" && mv "$f18d.new" "$f18d"
+out18d="$(run_refresh "$T18D")"
+if grep -q 'Never `git add -A`' "$f18d" && ! grep -q 'weakened rule' "$f18d" \
+   && ! printf '%s' "$out18d" | grep -q 'project-owned'; then
+    ok "weakened CRLF managed copy repaired"
+else
+    fail "weakened CRLF managed copy left unrepaired: $out18d"
+fi
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""

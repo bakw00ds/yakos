@@ -31,12 +31,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
+	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/runtime"
@@ -294,6 +296,15 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		_ = modelChosenBy // keep "frontmatter"
 	}
 
+	// max_model ceiling (K-119), applied after pin resolution exactly as in
+	// Run. A clamped model is an explicit pin for the chat argv.
+	clampedModel := false
+	if clamped, note := budget.ClampModel(p.Agent, modelResolved, budget.Options{}); note != "" {
+		modelResolved = clamped
+		clampedModel = true
+		fmt.Fprintf(os.Stderr, "yakos budget: %s\n", note)
+	}
+
 	// See resolve.go for precedence (override → known-runtime name → "claude").
 	runtimeName := resolveRuntime(p.Agent, p.Runtime)
 	adapter, err := runtime.Resolve(runtimeName)
@@ -323,6 +334,7 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		UserText:          p.Task,
 		AgentSystemPrompt: targetAgent.Prompt,
 		ModelOverride:     modelResolved,
+		ModelExplicit:     p.Model != "" || targetAgent.Model != "" || clampedModel,
 		WorkDirOverride:   p.WorkDirOverride,
 		Effort:            p.Effort,
 		// AllowRoot is not plumbed through Params (CLI-only flag); defaults to

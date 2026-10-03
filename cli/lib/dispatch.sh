@@ -245,6 +245,7 @@ fi
 
 # Promoted policy overrides frontmatter (Phase 3 sets model-policy:)
 if [ -n "$AGENT_MODEL_POLICY" ]; then
+    AGENT_MODEL_POLICY="$(_resolve_model_alias "$AGENT_MODEL_POLICY")"
     _validate_model_tier "$AGENT_MODEL_POLICY"
     MODEL_RESOLVED="$AGENT_MODEL_POLICY"
     if [ "$MODEL_CHOSEN_BY" != "eval" ]; then
@@ -254,6 +255,8 @@ fi
 
 # CLI --model flag overrides everything
 if [ -n "$MODEL_OVERRIDE" ]; then
+    # Aliases (balanced, cheap, ...) resolve exactly as in Go cmd_dispatch.
+    MODEL_OVERRIDE="$(_resolve_model_alias "$MODEL_OVERRIDE")"
     _validate_model_tier "$MODEL_OVERRIDE"
     MODEL_RESOLVED="$MODEL_OVERRIDE"
     MODEL_CHOSEN_BY="override"
