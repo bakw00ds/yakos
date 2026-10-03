@@ -87,15 +87,15 @@ type RuleIssue struct {
 func (i RuleIssue) String() string {
 	switch i.Kind {
 	case "missing":
-		return i.Rule + ": missing (run `yakos refresh --apply`)"
+		return i.Rule + ": missing (run `yakos refresh --project <path>`)"
 	case "marker-stripped":
 		return i.Rule + ": no yakos marker (project-owned, or marker stripped); dispatched specialists get this file as-is"
 	case "edited":
 		return i.Rule + ": edited since install (content does not match its marker sha256)"
 	case "stale":
-		return i.Rule + ": out of date with the framework rule (run `yakos refresh --apply`)"
+		return i.Rule + ": out of date with the framework rule (run `yakos refresh --project <path>`)"
 	case "symlink":
-		return i.Rule + ": is a symlink; claude ignores project rules that link outside the project (run `yakos refresh --apply`)"
+		return i.Rule + ": is a symlink; claude ignores project rules that link outside the project (run `yakos refresh --project <path>`)"
 	}
 	return i.Rule + ": " + i.Kind
 }

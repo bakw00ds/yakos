@@ -760,6 +760,18 @@ else
     fail "CRLF rules cause false drift: $out18c"
 fi
 
+# A weakened CRLF managed copy must be REPAIRED (marker found despite \r), as in Go
+T18D="$(setup_project proj-in-sync)"
+f18d="$T18D/project/.claude/rules/git-hygiene.md"
+{ printf 'weakened rule\r\n'; tail -n 1 "$f18d" | sed 's/$/\r/'; } > "$f18d.new" && mv "$f18d.new" "$f18d"
+out18d="$(run_refresh "$T18D")"
+if grep -q 'Never `git add -A`' "$f18d" && ! grep -q 'weakened rule' "$f18d" \
+   && ! printf '%s' "$out18d" | grep -q 'project-owned'; then
+    ok "weakened CRLF managed copy repaired"
+else
+    fail "weakened CRLF managed copy left unrepaired: $out18d"
+fi
+
 # ===========================================================================
 # Summary
 # ===========================================================================

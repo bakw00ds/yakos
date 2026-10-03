@@ -9,16 +9,16 @@ CHANGELOG point here. Last updated for v0.39.
 ## Specialist rules now live in each project (K-116)
 
 Framed `yakos dispatch` runs claude with `--setting-sources project`, so
-dispatched specialists no longer read `~/.claude/rules`. `yakos refresh
---apply` now copies the specialist rules (git-hygiene, commit-format,
+dispatched specialists no longer read `~/.claude/rules`. `yakos refresh`
+now copies the specialist rules (git-hygiene, commit-format,
 pr-conventions, secret-handling, verification-discipline) into each
 project's `.claude/rules/`. Copies carry a trailing `yakos:managed` marker
 and are updated on every refresh; a file without the marker is
 project-owned and never overwritten. They are copies, not symlinks, because
 claude ignores a project rule that symlinks outside the project.
 
-Existing projects must re-run `yakos refresh --apply` once after upgrading,
-or their dispatched specialists will run without these rules.
+Existing projects must re-run `yakos refresh --project <path>` (or `yakos refresh --all`) once
+after upgrading, or their dispatched specialists will run without these rules.
 
 ## Binary install upgrade (curl|sh — recommended)
 

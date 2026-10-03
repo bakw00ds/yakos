@@ -151,7 +151,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Because `--setting-sources project` drops `~/.claude/rules`, `yakos refresh`
   now copies the specialist rules into each project's `.claude/rules/`
   (managed copies, project-owned files untouched). Existing projects need one
-  `yakos refresh --apply` (see UPGRADING.md).
+  `yakos refresh --project <path>` (see UPGRADING.md).
 
 ### Fixed
 

@@ -693,7 +693,7 @@ _sync_project_rules() {
                 R_OK=$((R_OK + 1)); rm -f "$tmp"; continue
             fi
             # Only a well-formed marker on the LAST line counts (same as Go).
-            if ! tail -n 1 "$dstf" | grep -q '^<!-- yakos:managed sha256=.* -->$'; then
+            if ! tail -n 1 "$dstf" | tr -d '\r' | grep -q '^<!-- yakos:managed sha256=.* -->$'; then
                 echo "    [warn] rules: $name.md is project-owned (no yakos marker); leaving it"
                 R_WARN=$((R_WARN + 1)); rm -f "$tmp"; continue
             fi
