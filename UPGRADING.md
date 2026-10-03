@@ -6,6 +6,76 @@ current release, what survives, and how to fully uninstall when needed.
 This doc is the **upgrade authority** — `yakos --help`, README, and
 CHANGELOG point here. Last updated for v0.39.
 
+## Upgrading to v0.61.0.0
+
+v0.61.0.0 is a minor release. A v0.60.1.0 binary upgrades in place with
+`yakos upgrade` (a v0.60.0.0 binary cannot; see the v0.60.1.0 note below).
+Then do the per-project step.
+
+### 1. Refresh every project once
+
+```sh
+yakos refresh --project <path>      # or: yakos refresh --all
+```
+
+Use `--dry-run` first to see what would change. One refresh picks up:
+
+- **Hybrid Go hooks.** `path-allowlist`, `secret-scan`,
+  `output-injection-scan` and `supervisor-stream` now run through
+  `yakos hook run --impl go`, with a bash fallback guard on the enforcing
+  ones. `--hooks-impl bash` is the escape hatch; the choice is saved to the
+  project's `.yakos.yml` as `hooks_impl`.
+- **Auto-compaction.** `autoCompactWindow: 150000` is written to
+  `.claude/settings.json` when the key is absent. Tune or disable it with
+  `auto_compact_window: <tokens>|off` in `.yakos.yml`.
+- **Managed specialist rules.** The five rules (git-hygiene, commit-format,
+  pr-conventions, secret-handling, verification-discipline) are copied into
+  `.claude/rules/`. Files without the trailing `yakos:managed` marker are
+  project-owned and left alone.
+
+Hybrid hooks apply only to Go-native installs or when `YAKOS_IMPL=go` is
+set. With the bash CLI tree present and `YAKOS_IMPL` unset, refresh is
+proxied to bash and stays all-bash. A yakos binary that looks temporary is
+never pinned into a project; the refresh output says so.
+
+### 2. Dollar budgets are on for two agents
+
+Defaults: `supervisor` $100/month and `librarian` $40/month, in local
+calendar months. At 80% you get a warning. At 100% new dispatches are
+refused with exit code 4. A run in flight is never killed.
+
+```sh
+yakos budget status [--json] [--by-project]
+yakos budget set <agent> <usd> [--window monthly|lifetime]
+```
+
+`yakos budget set <agent> 0` switches a limit off. A project `.yakos.yml`
+`agent_budgets:` block can only lower a limit. See `docs/budgets.md`.
+
+### 3. Policy files are now stricter-only per project
+
+- **Supervisor launch limits** (`max_launches_per_session`,
+  `min_launch_interval_s`, `run_deadline_s`) in a project `.yakos.yml` can
+  only make supervision stricter. To loosen them, edit the user-level
+  `~/.yakos-state/supervisor-policy.yml`. A deadline under 30 s is invalid.
+- **Decision provider.** A project `.yakos.yml` cannot enable one (it may set
+  `provider: none`). Only `YAKOS_DECISION_PROVIDER` or
+  `~/.yakos-state/decision-policy.yml` can. This has been the rule since
+  0.60.x; nothing to migrate unless a project relied on the old behavior.
+
+### 4. New doctor checks
+
+Run `yakos doctor <project-path>` after refreshing. It now reports:
+
+- **Project rules drift.** A "Project rules (.claude/rules)" section warns
+  when a managed rule is missing, edited, stale or a symlink. Fix with
+  `yakos refresh --project <path>`.
+- **Hook fallback log.** A warning when `~/.yakos-state/hook-fallback.log`
+  has entries from the last 7 days, meaning a Go hook crashed and the guard
+  absorbed it.
+- **Budgets.** Agents at warning or hard stop. An exhausted supervisor
+  budget is an error ("LLM supervision disabled").
+
 ## Specialist rules now live in each project (K-116)
 
 Framed `yakos dispatch` runs claude with `--setting-sources project`, so
