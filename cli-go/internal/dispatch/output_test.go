@@ -269,10 +269,10 @@ func TestRunStream_CodexJSONLArrivesAsTextWithUsage(t *testing.T) {
 	if sum.Usage == nil || sum.Usage.InputTokens != 3002 || sum.Usage.OutputTokens != 50 || sum.Usage.CacheRead != 27392 {
 		t.Errorf("summary usage = %+v", sum.Usage)
 	}
-	if sum.SessionID != "01a10c3a-86a8-7ba3-ac6f-d3e51daa8d78" {
-		t.Errorf("summary SessionID = %q", sum.SessionID)
+	if sum.NativeSessionID != "01a10c3a-86a8-7ba3-ac6f-d3e51daa8d78" {
+		t.Errorf("summary NativeSessionID = %q", sum.NativeSessionID)
 	}
-	if res.Text != chunks[0].Text || !res.Parsed || res.Runtime != "codex" || res.Provider != "openai" || res.SessionID != sum.SessionID {
+	if res.Text != chunks[0].Text || !res.Parsed || res.Runtime != "codex" || res.Provider != "openai" || res.SessionID != sum.NativeSessionID {
 		t.Errorf("Result = %+v", res)
 	}
 	if res.Usage == nil || *res.Usage != *sum.Usage {
@@ -302,8 +302,8 @@ func TestRunStream_AgyStreamJSONArrivesAsText(t *testing.T) {
 	if strings.Join(chunkTypes(chunks), ",") != "token,summary" || chunks[0].Text != "done" {
 		t.Fatalf("chunks = %+v", chunks)
 	}
-	if chunks[1].SessionID != "1f18ba00-a3ce-4a9e-8200-fdf181ecaeb6" || res.ModelID != "gemini-3.8-flash-low" {
-		t.Errorf("SessionID/ModelID = %q/%q", chunks[1].SessionID, res.ModelID)
+	if chunks[1].NativeSessionID != "1f18ba00-a3ce-4a9e-8200-fdf181ecaeb6" || res.ModelID != "gemini-3.8-flash-low" {
+		t.Errorf("NativeSessionID/ModelID = %q/%q", chunks[1].NativeSessionID, res.ModelID)
 	}
 	if chunks[1].Usage == nil || chunks[1].Usage.InputTokens != 25958 || chunks[1].Usage.OutputTokens != 128 {
 		t.Errorf("summary usage = %+v", chunks[1].Usage)

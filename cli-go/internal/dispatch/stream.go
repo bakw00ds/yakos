@@ -162,9 +162,9 @@ type StreamChunk struct {
 	// cache counts. Counts follow runtime.Usage's convention.
 	Usage *cost.Usage
 
-	// SessionID is the harness-native session id (summary chunks only), "" when
-	// the stream carried none. It is NOT the console UI session id.
-	SessionID string
+	// NativeSessionID is the harness-native session id (summary chunks only), ""
+	// when the stream carried none. It is NOT the console UI session id.
+	NativeSessionID string
 
 	// AskUserQuestion fields — populated only when Type=="ask_user_question".
 	// These are emitted by the SDK engine (P2b) when the model invokes the
@@ -615,14 +615,14 @@ func execWithStreaming(
 
 	// Emit the terminal summary chunk.
 	onChunk(StreamChunk{
-		Type:          "summary",
-		ExitCode:      exitCode,
-		DurationS:     durationS,
-		OutputBytes:   outputBytes,
-		ModelResolved: req.ModelResolved,
-		TotalCostUSD:  costUSD,
-		Usage:         usageCost,
-		SessionID:     result.SessionID,
+		Type:            "summary",
+		ExitCode:        exitCode,
+		DurationS:       durationS,
+		OutputBytes:     outputBytes,
+		ModelResolved:   req.ModelResolved,
+		TotalCostUSD:    costUSD,
+		Usage:           usageCost,
+		NativeSessionID: result.SessionID,
 	})
 
 	if execErr != nil {
