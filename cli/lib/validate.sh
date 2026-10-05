@@ -22,6 +22,9 @@ set -eu
 : "${YAKOS_LIB:?YAKOS_LIB must be set; run via 'yakos validate'}"
 # shellcheck source=./compat.sh
 . "$YAKOS_LIB/compat.sh"
+# The agent-file rules (bare extends ids, symlinks) are the composer's own.
+# shellcheck source=./agents-compose.sh
+. "$YAKOS_LIB/agents-compose.sh"
 
 ALL=0
 STRICT=0
@@ -262,53 +265,20 @@ _validate_fm_values() {
     '
 }
 
-# _validate_real_dir <path>
-#   The physical directory that holds the file <path> finally names, following a
-#   chain of symlinks (a relative link is read from the physical directory of the
-#   link, as the kernel does). Fails on a loop or a directory that is missing.
-_validate_real_dir() {
-    local p="$1" n=0 d l
-    while [ -L "$p" ]; do
-        n=$((n + 1))
-        if [ "$n" -gt 40 ]; then return 1; fi
-        d="$(cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P)" || return 1
-        l="$(readlink -- "$p")" || return 1
-        case "$l" in
-            /*) p="$l" ;;
-            *) p="$d/$l" ;;
-        esac
-    done
-    (cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P)
-}
-
 # _validate_agent_file_problem <file> <lib-root> <project-root or empty>
 #   Prints why the Go dispatcher would skip the agent file, or nothing when it
 #   would read it. Go twin: agentFileFinding in
 #   cli-go/internal/validate/agentfiles.go, which calls agentscompose; the rules
-#   are InspectAgentFile's and LongLine's and the text is byte-identical. A line
-#   is refused when it is 1048576 bytes or longer, a carriage return before the
+#   are InspectAgentFile's and LongLine's and the text is byte-identical. The
+#   symlink rule is yk_agents_symlink_problem's, the composer's own. A line is
+#   refused when it is 1048576 bytes or longer, a carriage return before the
 #   newline counted, which is what awk's length() sees with LC_ALL=C.
 _validate_agent_file_problem() {
-    local f="$1" lib_root="$2" project_root="${3:-}" dir root d size n inside=0
+    local f="$1" lib_root="$2" project_root="${3:-}" reason size n
     if [ -L "$f" ]; then
-        if [ ! -f "$f" ] || ! dir="$(_validate_real_dir "$f")"; then
-            echo "symlink does not resolve to a regular file; the Go dispatcher skips it"
-            return 0
-        fi
-        # Inside a root when an ancestor directory of the target IS the root
-        # (same device and inode), so a differently spelled path still matches.
-        for root in "$lib_root" "$project_root"; do
-            if [ -z "$root" ] || [ ! -d "$root" ]; then continue; fi
-            d="$dir"
-            while :; do
-                if [ "$d" -ef "$root" ]; then inside=1; break; fi
-                if [ "$d" = "/" ] || [ "$d" = "." ]; then break; fi
-                d="$(dirname -- "$d")"
-            done
-            if [ "$inside" = 1 ]; then break; fi
-        done
-        if [ "$inside" != 1 ]; then
-            echo "symlink resolves outside the framework lib/ and the project directory; the Go dispatcher skips it"
+        reason="$(yk_agents_symlink_problem "$f" "$lib_root" "$project_root")"
+        if [ -n "$reason" ]; then
+            echo "$reason; the Go dispatcher skips it"
             return 0
         fi
     elif [ ! -f "$f" ]; then

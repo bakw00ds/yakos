@@ -470,7 +470,11 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   once-per-file warning that names the file and the value, and does not fail the
   roster. A missing template still means the agent's own body alone, and a
   template with a line over 1 MiB stays an error: it is the framework's own
-  file, which a clone cannot change.
+  file, which a clone cannot change. The bash composer
+  (`cli/lib/agents-compose.sh`, behind `yakos start`, `yakos doctor` and the
+  bash dispatchers) had the same hole, for `extends:` and for a symlinked agent
+  file, and now applies the same rules and prints the same warning text. A Go
+  test runs both composers on one fixture, under bash 3.2 and bash 5.
 
 - **`yakos validate` rejects the agent files the Go dispatcher skips (K-132
   follow-up, sec-324).** A skipped project file that overrides a framework agent

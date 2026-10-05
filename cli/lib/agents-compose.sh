@@ -119,6 +119,99 @@ yk_agents_derive_description() {
     ' | cut -c1-200
 }
 
+# ---- which agent files are read (sec-324) -----------------------------------
+# A cloned repository controls a project's .claude/agents, so a file there is
+# read only when that is safe: `extends:` is a bare agent id and nothing else (a
+# path let a project extend any .md file the daemon can reach), and a symlink is
+# followed only to a regular file inside the framework's lib/ or the project
+# directory (a link to ~/.aws/credentials became an agent's prompt). A file that
+# fails a rule is skipped with one warning, and the other agents still compose.
+# Go twin: cli-go/internal/agentscompose/agentfile.go (BareAgentID, DisplayValue,
+# InspectAgentFile). The text of every message here is byte-identical to the Go
+# twin's; compose_bash_parity_test.go and tests/run-agent-enums-test.sh keep it so.
+# `yakos validate` sources this file for the same functions.
+
+YK_AGENTS_BARE_ID_RULE='1 to 128 of A-Z a-z 0-9 . _ -, starting with a letter or digit, no ".."'
+
+# yk_agents_bare_id <value>
+#   Exit 0 when the value is a bare agent id: 1 to 128 of A-Z a-z 0-9 . _ -,
+#   starting with a letter or digit, with no "..". Bytes, whatever the locale.
+yk_agents_bare_id() {
+    local LC_ALL=C v="$1"
+    [ -n "$v" ] || return 1
+    [ "${#v}" -le 128 ] || return 1
+    case "$v" in *..*) return 1 ;; esac
+    case "$v" in [A-Za-z0-9]*) ;; *) return 1 ;; esac
+    case "$v" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+    return 0
+}
+
+# yk_agents_display_value <value>
+#   The value as a message shows it: every byte outside printable ASCII becomes
+#   "?", at most 64 bytes are shown and "..." says there were more, in double
+#   quotes. The value is untrusted, so no escape sequence reaches a log line.
+yk_agents_display_value() {
+    local LC_ALL=C v="$1" more=""
+    if [ "${#v}" -gt 64 ]; then
+        v="${v:0:64}"
+        more="..."
+    fi
+    v="$(printf '%s' "$v" | LC_ALL=C tr -c '\040-\176' '?')"
+    printf '"%s%s"' "$v" "$more"
+}
+
+# yk_agents_warn_skip <file> <reason>
+yk_agents_warn_skip() {
+    printf 'yakos: WARN: ignoring agent file %s: %s\n' "$1" "$2" >&2
+}
+
+# yk_agents_real_dir <path>
+#   The physical directory that holds the file <path> finally names, following a
+#   chain of symlinks (a relative link is read from the physical directory of the
+#   link, as the kernel does). Fails on a loop or a directory that is missing.
+yk_agents_real_dir() {
+    local p="$1" n=0 d l
+    while [ -L "$p" ]; do
+        n=$((n + 1))
+        if [ "$n" -gt 40 ]; then return 1; fi
+        d="$(cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P)" || return 1
+        l="$(readlink -- "$p")" || return 1
+        case "$l" in
+            /*) p="$l" ;;
+            *) p="$d/$l" ;;
+        esac
+    done
+    (cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P)
+}
+
+# yk_agents_symlink_problem <file> <lib-root> <project-root or empty>
+#   For a symlink that may not be followed, print why; print nothing for a file
+#   that is not a symlink and for a link to a regular file inside <lib-root> or
+#   <project-root>. Inside means an ancestor directory of the target IS the root
+#   (same device and inode), so a differently spelled path still matches.
+yk_agents_symlink_problem() {
+    local f="$1" lib_root="$2" project_root="${3:-}" dir root d inside=0
+    [ -L "$f" ] || return 0
+    if [ ! -f "$f" ] || ! dir="$(yk_agents_real_dir "$f")"; then
+        echo "symlink does not resolve to a regular file"
+        return 0
+    fi
+    for root in "$lib_root" "$project_root"; do
+        if [ -z "$root" ] || [ ! -d "$root" ]; then continue; fi
+        d="$dir"
+        while :; do
+            if [ "$d" -ef "$root" ]; then inside=1; break; fi
+            if [ "$d" = "/" ] || [ "$d" = "." ]; then break; fi
+            d="$(dirname -- "$d")"
+        done
+        if [ "$inside" = 1 ]; then break; fi
+    done
+    if [ "$inside" != 1 ]; then
+        echo "symlink resolves outside the framework lib/ and the project directory"
+    fi
+    return 0
+}
+
 # yk_agents_resolve_extends <yakos-root> <project-body> <extends-name>
 #   When a project agent declares `extends: <framework-name>`, prepend
 #   the framework template's body to the project body. The combined
@@ -203,19 +296,26 @@ yk_agents_compose_one() {
 yk_agents_compose_dir() {
     local yakos_root="$1"
     local agents_dir="$2"
-    # third positional (project_dir) reserved for future per-project filtering;
-    # currently unused — kept to keep the signature stable.
+    # third positional: the project root, one of the two directories a symlinked
+    # agent file or template may resolve into (the other is <yakos-root>/lib).
 
     [ -d "$agents_dir" ] || return 0
 
     local file
     for file in "$agents_dir"/*.md; do
-        [ -f "$file" ] || continue
-        local base
+        local base reason
         base="$(basename -- "$file")"
         case "$base" in
             README.md|lead-template.md) continue ;;
         esac
+        # A symlink is followed only to a regular file inside the framework's lib/
+        # or the project; anything else is skipped with a warning, unread.
+        reason="$(yk_agents_symlink_problem "$file" "$yakos_root/lib" "${3:-}")"
+        if [ -n "$reason" ]; then
+            yk_agents_warn_skip "$file" "$reason"
+            continue
+        fi
+        [ -f "$file" ] || continue
 
         local fm body id model extends_name tools_list desc
         fm="$(yk_agents_extract_frontmatter "$file")"
@@ -234,8 +334,20 @@ yk_agents_compose_dir() {
         extends_name="$(yk_agents_fm_get "$fm" "extends")"
         tools_list="$(yk_agents_fm_list "$fm" "tools" || true)"
 
-        # Resolve extends:
+        # Resolve extends: the value is a bare agent id and the template is the
+        # framework's lib/agents/<id>.md, read under the symlink rule above. A bad
+        # value or an unsafe template skips this agent; a missing template means
+        # the agent's own body alone.
         if [ -n "$extends_name" ]; then
+            if ! yk_agents_bare_id "$extends_name"; then
+                yk_agents_warn_skip "$file" "extends value $(yk_agents_display_value "$extends_name") is not a bare agent id ($YK_AGENTS_BARE_ID_RULE)"
+                continue
+            fi
+            reason="$(yk_agents_symlink_problem "$yakos_root/lib/agents/${extends_name}.md" "$yakos_root/lib" "${3:-}")"
+            if [ -n "$reason" ]; then
+                yk_agents_warn_skip "$file" "extends $(yk_agents_display_value "$extends_name"): $reason"
+                continue
+            fi
             body="$(yk_agents_resolve_extends "$yakos_root" "$body" "$extends_name")"
         fi
 

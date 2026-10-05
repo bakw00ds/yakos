@@ -52,6 +52,16 @@ func mkfifoOrSkip(t *testing.T, path string) {
 
 func rosterString(roster []ComposedAgent) string { return strings.Join(rosterIDs(roster), ",") }
 
+func afterSeconds(n int) <-chan time.Time { return time.After(time.Duration(n) * time.Second) }
+
+// releaseFIFOForTest opens a FIFO for writing so a reader blocked in open(2) on it
+// returns.
+func releaseFIFOForTest(path string) {
+	if w, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+		_ = w.Close()
+	}
+}
+
 // A symlink to a FIFO: opening it for reading waits for a writer that never
 // comes. Compose must not open it.
 func TestCompose_SkipsASymlinkToAFIFO(t *testing.T) {
