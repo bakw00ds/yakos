@@ -85,6 +85,22 @@ func checkInfo(path string, fi os.FileInfo) error {
 	return nil
 }
 
+// CheckFile applies the policy file's trust rules to path without reading it:
+// not a symlink, a regular file, owned by the current user, and not group or
+// world writable. An absent file returns the os.Lstat error (os.IsNotExist), so
+// a caller can tell absent from refused; a refused file wraps ErrUntrusted.
+//
+// It exists so `yakos doctor --policy` can apply the same rule to the other
+// owner-only state file that steers dispatch (default-runtime) instead of
+// carrying a second copy of it.
+func CheckFile(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	return checkInfo(path, fi)
+}
+
 // Load reads the policy from stateDir. A missing file is an empty policy with
 // no error. An untrusted, oversized or unparsable file yields an empty policy
 // plus an error the caller should report; the empty policy allows nothing, so
