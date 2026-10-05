@@ -145,8 +145,9 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   and always after two failed resumes in a row, so a reworded message cannot
   leave a dead id failing every follow-up. A single unrelated failure keeps it.
 
-- **CLI errors print one `dispatch:` prefix.** New errors from the dispatch
-  package already begin with it, which printed `dispatch: dispatch: ...`.
+- **CLI errors and the REST 502 body carry one `dispatch:` prefix.** New errors
+  from the dispatch package already begin with it, which printed
+  `dispatch: dispatch: ...` from `yakos dispatch` and from `POST /v1/dispatches`.
 
 - **An agent or skill file with a very long line is no longer silently cut
   off (K-132 follow-up).** The roster reader used a line scanner whose default

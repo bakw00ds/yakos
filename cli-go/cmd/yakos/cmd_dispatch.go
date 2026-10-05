@@ -262,11 +262,7 @@ func runDispatch(yakosRoot string, args []string) {
 // as they are by the daemon). A runtime the operator named that cannot run gets
 // a second line saying how to allow a fallback, which only the CLI can do.
 func printDispatchError(w io.Writer, err error) {
-	msg := err.Error()
-	if !strings.HasPrefix(msg, "dispatch:") {
-		msg = "dispatch: " + msg
-	}
-	fmt.Fprintln(w, msg)
+	fmt.Fprintln(w, dispatch.PrefixedMessage(err))
 	if ee, ok := dispatch.AsExplicitRuntimeError(err); ok {
 		// Only runtimes the flag accepts: a fallback list may also name a bash-only
 		// runtime such as claude-sdk, and suggesting it would be a command that fails.

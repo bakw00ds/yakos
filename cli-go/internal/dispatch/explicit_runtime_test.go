@@ -586,3 +586,23 @@ func TestRoute_ProjectAgentNamedAfterARuntimeCannotHijackThePane(t *testing.T) {
 		}
 	}
 }
+
+func TestPrefixedMessage(t *testing.T) {
+	cases := map[string]string{
+		"dispatch: no runtime available":   "dispatch: no runtime available",
+		"dispatch:no space":                "dispatch:no space",
+		"exec: \"claude\": not found":      "dispatch: exec: \"claude\": not found",
+		"plain failure":                    "dispatch: plain failure",
+		"the dispatch: word later on only": "dispatch: the dispatch: word later on only",
+	}
+	for in, want := range cases {
+		if got := PrefixedMessage(errors.New(in)); got != want {
+			t.Errorf("PrefixedMessage(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// An error this package raises is not prefixed twice.
+	_, err := route(t, routingRoot(t), projectWithYML(t, ""), "no-such-agent", nil)
+	if err == nil || strings.Contains(PrefixedMessage(err), "dispatch: dispatch:") {
+		t.Errorf("a dispatch error was prefixed twice: %v", err)
+	}
+}

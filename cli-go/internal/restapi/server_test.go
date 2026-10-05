@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/restapi"
 )
 
@@ -570,6 +571,35 @@ func TestDispatchCreate_NoYakosRoot(t *testing.T) {
 		t.Errorf("status=%d; want error response when yakos_root is invalid", resp.StatusCode)
 	}
 	_ = resp.Body.Close()
+}
+
+// A dispatch the service refuses is a 502 whose body carries the error. Errors
+// from the dispatch package already begin with "dispatch: ", and the handler used
+// to add the prefix again ("dispatch: dispatch: agent ... not found").
+func TestDispatchCreate_ErrorBodyHasOneDispatchPrefix(t *testing.T) {
+	t.Setenv("YAKOS_DISPATCH_LOG", t.TempDir())
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "lib", "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := t.TempDir()
+	svc := dispatch.NewService(dispatch.ServiceConfig{YakosRoot: root, WorkspaceRoot: ws})
+	ts, toks := newTestServer(t, restapi.Config{YakosRoot: root, WorkspaceRoot: ws, DispatchService: svc})
+
+	resp := postJSON(t, ts.URL+"/v1/dispatches", toks.Write, map[string]string{"agent": "no-such-agent", "task": "t"})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status=%d; want 502", resp.StatusCode)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(body.Error, "dispatch: ") || strings.Contains(body.Error, "dispatch: dispatch:") {
+		t.Errorf("error body %q should start with one \"dispatch: \"", body.Error)
+	}
 }
 
 // ---- auth edge cases -------------------------------------------------------
