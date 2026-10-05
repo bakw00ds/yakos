@@ -1,0 +1,17 @@
+yakos: 0.9
+default-runtime: codex
+default-fallback: [claude, agy]
+default-permission: safe
+
+per-domain:
+  code-review: codex
+  ui: "agy"
+  security: claude
+
+# Keys owned by other readers must not disturb this one.
+model-aliases:
+  cheap:
+    claude: haiku
+    codex: gpt-5-nano
+decisions:
+  provider: none

@@ -1,0 +1,7 @@
+default-runtime: [codex]
+default-fallback: [claude, 7, "not a runtime", agy]
+per-domain:
+  code-review: codex
+  bad domain: claude
+  docs: Codex
+  ui: agy

@@ -16,9 +16,12 @@ package agentscompose
 import (
 	"bufio"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/bakw00ds/yakos/internal/runtime"
@@ -31,7 +34,7 @@ import (
 const genericAgentPrompt = "You are a helpful AI assistant. Answer the user's request clearly and concisely."
 
 // IsKnownRuntime reports whether name equals a known yakOS runtime identifier
-// (claude, codex, agy, gemini). Used by the dispatch layer to decide whether a
+// (claude, codex, agy). Used by the dispatch layer to decide whether a
 // missing agent name should resolve to a generic catch-all rather than error.
 func IsKnownRuntime(name string) bool {
 	for _, r := range runtime.Known {
@@ -47,10 +50,10 @@ func IsKnownRuntime(name string) bool {
 // requests a bare runtime name ("claude", "codex", etc.) that has no
 // corresponding agent .md file in the composed roster.
 //
-// The returned agent's ID equals name.  ComposedAgent has no Runtime field;
-// the runtime is inferred from the agent ID by the dispatch layer (dispatch.go
-// step 5: IsKnownRuntime check).  Model is left empty so the runtime picks its
-// default.
+// The returned agent's ID equals name.  Its Runtime is left empty on purpose:
+// the dispatch layer infers the runtime from the agent ID (an agent named
+// after a runtime runs on it unless the caller overrides), see
+// dispatch.resolve.go.  Model is left empty so the runtime picks its default.
 //
 // Callers must verify IsKnownRuntime(name) before calling this function; it
 // panics on an unknown name to surface programming errors early.
@@ -81,9 +84,50 @@ type ComposedAgent struct {
 	// Empty slice means no tool restriction.
 	Tools []string
 
-	// Model is the resolved concrete tier name (haiku|sonnet|opus|fable) or "".
-	// Empty means the runtime picks its default.
+	// Model is the resolved concrete Claude tier name (haiku|sonnet|opus|fable)
+	// or "". Empty means the runtime picks its default. It is "" for a model
+	// that is not a Claude tier (gpt-5, gemini-3.5); ModelRaw carries that id.
+	// AgentToJSON reads only this field, which keeps the claude --agents
+	// payload byte-stable (rule:cache-stability).
 	Model string
+
+	// ---- Routing fields (K-132) ---------------------------------------------
+	//
+	// Read from frontmatter so the dispatch layer can route on them. None of
+	// them is part of the claude --agents JSON (AgentToJSON ignores them), so
+	// adding or changing one never changes a cached prefix.
+
+	// Runtime is the agent's pinned runtime (frontmatter `runtime:`), or "".
+	// Only the id shape is checked here; whether the runtime exists and is
+	// usable is the dispatch layer's call (yakos validate reports bad values).
+	Runtime string
+
+	// RuntimeFallback is the ordered frontmatter `runtime-fallback:` list. Order
+	// is meaningful: the first available entry wins.
+	RuntimeFallback []string
+
+	// Domain is the frontmatter `domain:` tag, used for .yakos.yml per-domain
+	// runtime rules.
+	Domain string
+
+	// ModelRaw is the frontmatter `model:` scalar as written (quotes and a
+	// trailing comment removed), before alias expansion and tier validation. It
+	// is how a non-Claude model id survives composition: `model: gpt-5` leaves
+	// Model empty and ModelRaw "gpt-5".
+	ModelRaw string
+
+	// ModelPolicy is the frontmatter `model-policy:` value, unresolved. Parsed
+	// for the router; dispatch does not apply it yet.
+	ModelPolicy string
+
+	// MaxCostPerTask (USD), MaxTokensPerTask and MaxDurationS are the
+	// frontmatter `max-cost-per-task:`, `max-tokens-per-task:` and
+	// `max-duration-s:` ceilings. 0 means unset (also for an unparsable,
+	// negative or non-finite value). Parsed for the router; dispatch does not
+	// enforce them yet.
+	MaxCostPerTask   float64
+	MaxTokensPerTask int
+	MaxDurationS     int
 }
 
 // Compose walks lib/agents/*.md and <project>/.claude/agents/*.md, parses
@@ -200,7 +244,108 @@ func parseAgent(yakosRoot, id, path string) (ComposedAgent, error) {
 		Prompt:      strings.TrimSpace(body),
 		Tools:       tools,
 		Model:       model,
+
+		// Routing fields (K-132). The model above is resolved from the raw
+		// frontmatter string exactly as before; ModelRaw is the same value
+		// with quotes and a trailing comment removed.
+		Runtime:          fmRuntimeID(fields["runtime"]),
+		RuntimeFallback:  fmRuntimeList(fields["runtime-fallback"]),
+		Domain:           fmScalar(fields["domain"]),
+		ModelRaw:         fmScalar(fields["model"]),
+		ModelPolicy:      fmScalar(fields["model-policy"]),
+		MaxCostPerTask:   fmFloat(fields["max-cost-per-task"]),
+		MaxTokensPerTask: fmInt(fields["max-tokens-per-task"]),
+		MaxDurationS:     fmInt(fields["max-duration-s"]),
 	}, nil
+}
+
+// runtimeIDRe is the shape of a runtime identifier taken from frontmatter. It
+// is deliberately the same alphabet as projectcfg's: the value reaches log
+// lines and error text, so nothing outside [a-z0-9._-] is kept.
+var runtimeIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
+// fmScalar returns a frontmatter scalar as YAML would read it for the simple
+// `key: value` lines parseFrontmatter produces: surrounding whitespace, one
+// pair of matching quotes and a trailing ` # comment` are removed.
+func fmScalar(raw string) string {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return ""
+	}
+	if q := v[0]; q == '"' || q == '\'' {
+		// Quoted: the value ends at the closing quote; anything after it
+		// (a comment) is dropped.
+		if end := strings.IndexByte(v[1:], q); end >= 0 {
+			return v[1 : 1+end]
+		}
+		return strings.TrimSpace(v[1:])
+	}
+	if i := strings.Index(v, " #"); i >= 0 {
+		v = v[:i]
+	} else if v[0] == '#' {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
+// fmRuntimeID returns raw as a runtime id, or "" when it is empty or not shaped
+// like one.
+func fmRuntimeID(raw string) string {
+	v := fmScalar(raw)
+	if !runtimeIDRe.MatchString(v) {
+		return ""
+	}
+	return v
+}
+
+// fmRuntimeList parses an inline `[a, b]` runtime list, keeping order, dropping
+// entries that are not runtime ids and repeated entries.
+func fmRuntimeList(raw string) []string {
+	items := parseToolsList(stripTrailingComment(raw))
+	if len(items) == 0 {
+		return nil
+	}
+	var out []string
+	seen := make(map[string]struct{}, len(items))
+	for _, it := range items {
+		id := fmRuntimeID(it)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+// stripTrailingComment removes a ` # comment` that follows an inline list.
+func stripTrailingComment(raw string) string {
+	v := strings.TrimSpace(raw)
+	if i := strings.LastIndex(v, "]"); i >= 0 {
+		return v[:i+1]
+	}
+	return v
+}
+
+// fmFloat parses a non-negative, finite frontmatter number; anything else is 0.
+func fmFloat(raw string) float64 {
+	f, err := strconv.ParseFloat(fmScalar(raw), 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 {
+		return 0
+	}
+	return f
+}
+
+// fmInt parses a non-negative frontmatter integer; anything else is 0.
+func fmInt(raw string) int {
+	n, err := strconv.Atoi(fmScalar(raw))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // splitFrontmatter splits a markdown file into (frontmatter, body).
