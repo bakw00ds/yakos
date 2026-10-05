@@ -17,8 +17,15 @@ func buildEnvAgy(req DispatchRequest) []string {
 
 // AgyAdapter implements Adapter for the Antigravity (agy) CLI.
 //
-// agy uses @-mention syntax for workspace skill invocation. Unlike claude, agy
-// does NOT accept a --model flag; the model is picked via plugin file metadata.
+// agy 1.2.x accepts --model, --effort, --sandbox, --conversation and
+// --output-format text|json|stream-json (verified against the agy 1.2.17 help
+// text; the signed-in behaviour is not verified on this machine, see
+// docs/runtime-matrix.md). A framed dispatch invokes the workspace skill
+// @yakos-<agent>, which the dispatch layer materializes to
+// <workdir>/.agents/skills/yakos-<id>/SKILL.md first
+// (agentscompose.MaterializeAgyAgent). Chat has no skill file: agy has no
+// system-prompt flag, so the persona is prepended to the user text.
+//
 // ExecCmd is implemented for PR #34 stderr capture.
 type AgyAdapter struct{}
 
@@ -30,35 +37,73 @@ func (a *AgyAdapter) Available(_ context.Context) bool {
 	return err == nil
 }
 
+// agyModelFlag returns the value for --model, or "" to omit the flag. See
+// HarnessModelID: aliases resolve through the agy column of the alias table
+// (best is claude-opus-4.6, because Antigravity can front Anthropic models)
+// and a Claude tier (the dispatch default) is dropped.
+func agyModelFlag(model string) string { return HarnessModelID("agy", model) }
+
+// agyEffort returns the --effort value, or "" for none. agy takes the same
+// five levels the dispatch layer validates.
+func agyEffort(effort string) string {
+	switch effort {
+	case "low", "medium", "high", "xhigh", "max":
+		return effort
+	}
+	return ""
+}
+
+// agyCommonArgs returns the flags shared by framed and chat invocations, in
+// the order they appear in argv. -p and its prompt are appended last by the
+// caller: agy's -p takes the NEXT argv element as its value, so a prompt that
+// begins with '-' cannot be read as a flag, and nothing may follow it.
+//
+// --dangerously-skip-permissions stays: headless agy has no approval surface,
+// so without it any permission request would stall. --sandbox restricts the
+// terminal commands the model runs. The operator can drop --sandbox only
+// through the trusted router policy (allow_unsandboxed_runtimes). Caveat: with
+// permissions auto-approved, a model request to run a command outside the
+// sandbox is approved too, so agy's containment is weaker than codex's.
+func agyCommonArgs(workDir, model, effort string) []string {
+	var args []string
+	if workDir != "" {
+		args = append(args, "--add-dir", workDir)
+	}
+	if !unsandboxedAllowed("agy") {
+		args = append(args, "--sandbox")
+	}
+	args = append(args, "--dangerously-skip-permissions")
+	if m := agyModelFlag(model); m != "" {
+		args = append(args, "--model", m)
+	}
+	if e := agyEffort(effort); e != "" {
+		args = append(args, "--effort", e)
+	}
+	return append(args, "--output-format", "stream-json")
+}
+
 // ExecCmd returns the exec.Cmd for dispatch, without running it (PR #34).
 func (a *AgyAdapter) ExecCmd(ctx context.Context, req DispatchRequest) *exec.Cmd {
 	// @-mention syntax routes the task to the materialized workspace skill.
 	framed := "@yakos-" + req.AgentName + " " + req.Task
 
-	args := []string{
-		"--add-dir", req.Project,
-		"--dangerously-skip-permissions",
-		"-p", framed,
-	}
-
+	workDir := adapterWorkDir(req.WorkDirOverride, req.Project)
+	args := agyCommonArgs(workDir, req.ModelOverride, req.Effort)
 	if req.ConversationID != "" {
 		args = append(args, "--conversation", req.ConversationID)
 	}
+	args = append(args, "-p", framed)
 
 	cmd := exec.CommandContext(ctx, "agy", args...) //nolint:gosec
 	cmd.Env = buildEnvAgy(req)
-	if req.WorkDirOverride != "" {
-		cmd.Dir = req.WorkDirOverride
-	}
+	cmd.Dir = workDir
 	return cmd
 }
 
 // ChatExecCmd returns the exec.Cmd for unframed chat dispatch on agy.
 //
-// agy/gemini do not support partial streaming (buffer to completion) and emit
-// plain text (no JSON).  This method exists so the streaming layer can exec
-// them uniformly.  The caller degrades to one "token" chunk (buffered path)
-// and reports "cost unavailable" since agy emits no usage JSON.
+// The output is agy's stream-json. Until the agy stream parser lands the
+// caller degrades to one "token" chunk (buffered path).
 func (a *AgyAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *exec.Cmd {
 	prompt := req.UserText
 	if req.AgentSystemPrompt != "" {
@@ -70,11 +115,9 @@ func (a *AgyAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *
 	// to the '-p' flag (two separate argv elements), not as a bare positional.
 	// exec.Command does not invoke a shell; a value beginning with '-' cannot
 	// be reinterpreted as a flag by the agy process when passed this way.
-	args := []string{
-		"--add-dir", req.Project,
-		"--dangerously-skip-permissions",
-		"-p", prompt,
-	}
+	workDir := adapterWorkDir(req.WorkDirOverride, req.Project)
+	args := agyCommonArgs(workDir, req.ModelOverride, req.Effort)
+	args = append(args, "-p", prompt)
 
 	cmd := exec.CommandContext(ctx, "agy", args...) //nolint:gosec
 	cmd.Env = buildEnvAgy(DispatchRequest{
@@ -82,9 +125,7 @@ func (a *AgyAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *
 		ModelOverride: req.ModelOverride,
 		AllowRoot:     req.AllowRoot,
 	})
-	if req.WorkDirOverride != "" {
-		cmd.Dir = req.WorkDirOverride
-	}
+	cmd.Dir = workDir
 	return cmd
 }
 

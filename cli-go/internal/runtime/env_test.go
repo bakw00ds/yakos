@@ -44,6 +44,7 @@ func TestBuildEnv_Claude_DropsOtherProvidersCredentials(t *testing.T) {
 // TestBuildEnvCodex_DropsOtherProvidersCredentials mirrors the claude test
 // for the codex adapter.
 func TestBuildEnvCodex_DropsOtherProvidersCredentials(t *testing.T) {
+	useEmptyHome(t) // no yakOS codex profile: CODEX_HOME is forwarded untouched
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
 	t.Setenv("OPENAI_API_KEY", "sk-openai-secret")
 	t.Setenv("CODEX_HOME", "/some/codex/home")
