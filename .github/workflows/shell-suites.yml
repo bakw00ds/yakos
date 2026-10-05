@@ -218,12 +218,15 @@ jobs:
         env:
           SUITE: ${{ matrix.suite }}
           # The coalesce suite releases 10 hooks at once and each holds the launch
-          # lock for the hold time. The hook's lock wait is 3 s / 150 tries, which
-          # a 3-core macOS runner exhausts at 150 ms (coalesced counts 7-8 of 9),
-          # so macOS uses 50 ms. Treat the split plainly: ubuntu at 150 ms is the
-          # run that proves the gate lock; macOS under bash 3.2 proves exact
-          # accounting and that the hook does not crash. Whether 50 ms still
-          # catches a removed lock is checked by the lock-mutation job below.
+          # lock for the hold time, so the seam alone serialises 10 x the hold. The
+          # hook waits at most 3 s for the lock; K-128 shrank a real hold to a few
+          # builtins and one rename and made waiters back off, but 10 x 150 ms plus
+          # a 3-core macOS runner's fork cost still leaves little margin (before
+          # K-128 it was exhausted at 150 ms: coalesced counts 7-8 of 9), so macOS
+          # keeps 50 ms. Treat the split plainly: ubuntu at 150 ms is the run that
+          # proves the gate lock; macOS under bash 3.2 proves exact accounting and
+          # that the hook does not crash. Whether 50 ms still catches a removed
+          # lock is checked by the lock-mutation job below.
           YAKOS_COALESCE_HOLD_MS: ${{ runner.os == 'macOS' && '50' || '' }}
         run: |
           case "$SUITE" in
@@ -267,9 +270,9 @@ jobs:
           mkdir -p "$scratch"
           cp -RL lib tests cli "$scratch"/   # -L: lib/hooks entries are symlinks, sed -i needs real files
           hook="$scratch/lib/hooks/supervisor-stream.sh"
-          line='        if mkdir "$_ss_lock" 2>/dev/null; then _ss_locked=1; return 0; fi'
+          line='        if _ss_try_lock; then _ss_locked=1; return 0; fi'
           grep -qxF "$line" "$hook" || { echo "::error::lock line not found; update the mutation"; exit 1; }
-          sed -i '' 's|^        if mkdir "\$_ss_lock" 2>/dev/null; then _ss_locked=1; return 0; fi$|        _ss_locked=1; return 0|' "$hook"
+          sed -i '' 's|^        if _ss_try_lock; then _ss_locked=1; return 0; fi$|        _ss_locked=1; return 0|' "$hook"
           grep -qxF "$line" "$hook" && { echo "::error::mutation did not apply"; exit 1; }
           echo "mutated: $(grep -n '^        _ss_locked=1; return 0$' "$hook")"
           ls "$scratch/bin/yakos" 2>/dev/null && { echo "::error::Go binary present; bash side only"; exit 1; }

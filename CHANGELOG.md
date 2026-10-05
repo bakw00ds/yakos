@@ -272,6 +272,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent's text is invalid TOML (and invalid in a YAML double-quoted scalar), so
   both emitters now write it as `\u00XX`, as the chat path already did.
 
+- **supervisor-stream: ten concurrent hooks no longer exhaust the lock budget
+  (K-128).** Under load (a 3-core macOS runner, or a team of agents sharing one
+  `work/current/`) the bash hook's lock was held across the budget CLI, several
+  `jq` forks and the log writes, so a hold took 100-300 ms and the tenth hook
+  gave up after its 3 s wait: the coalesce suite counted 7-8 of 9 coalesced
+  hooks, the stream suite lost increments (counter 11 of 12), and a launch was
+  skipped. Both twins now hold the lock only for the counter / run-state
+  read-modify-write (a temp file and a rename) and the wrapper spawn, and do
+  everything else outside it: the budget read, every log record and the
+  synthetic findings. The lock is an `O_EXCL` file create instead of `mkdir`
+  (no fork to take it; the path is unchanged, so old and new hooks still
+  exclude each other), and waiters back off from 5 ms to 160 ms with jitter
+  instead of polling every 20 ms. A hook whose 3 s wait still expires journals
+  its increment (and, for a high-risk trigger, its run-state record) for the
+  next lock holder instead of dropping it; the folder covers any score-every
+  crossing the records skipped, and the session's wrapper folds trigger records
+  too, so a trigger journaled while a run is in flight still gets its follow-up.
+  Taking the lock also survives POSIX-mode bash, and the clock is read after the
+  lock is held. Projects pick up the bash hook with `yakos refresh --project
+  <path>`; the Go twin ships in the binary. See `docs/supervisor-mode.md`
+  "Lock protocol".
+- **`yakos supervise clear` removes journaled counter increments** with the
+  counter, so the next hook cannot fold them into a counter that was just cleared.
+- **The bounded budget read is bounded in time.** `yakos budget check` was
+  waited on for 40 polls of `sleep 0.05`, which counts iterations: on a loaded
+  runner each poll cost a fork on top of its 50 ms and the "2 s" read took 4 s
+  or more (the budget suite's "hook took 7s"). A watchdog now enforces 2 s of
+  wall-clock time.
+- **Timing-dependent supervisor tests.** The strict-config twin-log comparison
+  decided launch-or-defer by how long each twin took, the in-flight windows
+  were barely wider than a slow bash hook, and the budget suite compared the
+  detached wrapper's records by position and duration. Each is now independent
+  of speed.
+
 ## [0.61.0.0] — 2026-10-03
 
 Minor release: per-agent dollar budgets, hybrid Go hooks by default, the
