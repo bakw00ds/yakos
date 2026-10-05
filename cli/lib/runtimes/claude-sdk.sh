@@ -188,20 +188,45 @@ yk_rt_claude_sdk_key_refusal() {
     return 1
 }
 
+# _yk_rt_claude_sdk_is_oauth_name <name>
+#   Exit 0 for CLAUDE_CODE_OAUTH* in any case (CLAUDE_CODE_OAUTH_TOKEN and its
+#   siblings: refresh token, scopes, client id).
+_yk_rt_claude_sdk_is_oauth_name() {
+    case "$1" in
+        [Cc][Ll][Aa][Uu][Dd][Ee]_[Cc][Oo][Dd][Ee]_[Oo][Aa][Uu][Tt][Hh]*) return 0 ;;
+    esac
+    return 1
+}
+
 # yk_rt_claude_sdk_oauth_env_names
 #   Print, one per line, the NAME of every exported variable that carries
-#   subscription OAuth material: any CLAUDE_CODE_OAUTH* name, and any variable
-#   whose value contains an OAuth token marker. Names only, never values.
+#   subscription OAuth material: any CLAUDE_CODE_OAUTH* name in any case, and any
+#   variable whose value contains an OAuth token marker. Names only, never values.
+#
+#   The environment is read as NUL-delimited `env -0` entries, not from `compgen
+#   -e`, because compgen lists only names a shell can hold as variables: bash 5
+#   still hands a variable named A.B to its children, so a token in one would
+#   pass. Where `env -0` is unavailable it falls back to compgen -e, which covers
+#   identifier names only. A name that holds a newline cannot be listed one per
+#   line and is skipped.
 yk_rt_claude_sdk_oauth_env_names() {
-    local name
-    for name in $(compgen -e); do
-        case "$name" in
-            CLAUDE_CODE_OAUTH*) printf '%s\n' "$name"; continue ;;
-        esac
-        if _yk_rt_claude_sdk_is_oauth_value "${!name-}"; then
-            printf '%s\n' "$name"
-        fi
-    done
+    local entry name
+    if env -0 >/dev/null 2>&1; then
+        while IFS= read -r -d '' entry; do
+            name="${entry%%=*}"
+            [ -n "$name" ] || continue # a Windows "=C:=C:\..." entry has no name to unset
+            case "$name" in *$'\n'*) continue ;; esac
+            if _yk_rt_claude_sdk_is_oauth_name "$name" || _yk_rt_claude_sdk_is_oauth_value "${entry#*=}"; then
+                printf '%s\n' "$name"
+            fi
+        done < <(env -0)
+    else
+        for name in $(compgen -e); do
+            if _yk_rt_claude_sdk_is_oauth_name "$name" || _yk_rt_claude_sdk_is_oauth_value "${!name-}"; then
+                printf '%s\n' "$name"
+            fi
+        done
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -232,9 +257,9 @@ yk_rt_claude_sdk_dispatch() {
     # subscription OAuth material. `env -u` removes it from the child only.
     local -a scrub=()
     local oauth_name
-    for oauth_name in $(yk_rt_claude_sdk_oauth_env_names); do
+    while IFS= read -r oauth_name; do
         scrub+=( -u "$oauth_name" )
-    done
+    done < <(yk_rt_claude_sdk_oauth_env_names)
 
     YAKOS_AGENT_ID="$agent_name" \
     YAKOS_PROJECT_DIR="$project" \

@@ -1110,14 +1110,20 @@ t20_expect_refusal "an OAuth refresh token in the key slot is refused" "OAuth to
 t20_rc=0
 t20_dispatch "ANTHROPIC_API_KEY=sk-ant-api03-t20-fake-key" \
     "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-$t20_secret" "CLAUDE_CODE_OAUTH_REFRESH_TOKEN=sk-ant-ort01-$t20_secret" \
-    "CLAUDE_CODE_OAUTH_SCOPES=user:inference" \
+    "CLAUDE_CODE_OAUTH_SCOPES=user:inference" "claude_code_oauth_client_id=lowercase-name" \
     "ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-$t20_secret" "T20_MISFILED=Bearer sk-ant-ort01-$t20_secret" \
+    "T20.DOTTED=Bearer sk-ant-oat01-$t20_secret" "t20_lower_misfiled=SK-ANT-ORT01-$t20_secret" \
     "T20_BENIGN=hello" || t20_rc=$?
 if [ "$t20_rc" -ne 0 ] || ! grep -q 'fake sdk output' "$t20/out"; then
     fail "with an API key the dispatch must reach python (exit $t20_rc): $(cat "$t20/err")"
 else
     ok "with an API key the dispatch reaches python"
-    for banned in CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_REFRESH_TOKEN CLAUDE_CODE_OAUTH_SCOPES ANTHROPIC_AUTH_TOKEN T20_MISFILED; do
+    # claude_code_oauth_client_id is a lowercase name with a non-token value, T20.DOTTED a
+    # name a shell cannot hold as a variable (bash 5 passes it to children, bash 3.2 drops
+    # it, so the check is "never inherited" on both), t20_lower_misfiled a token in a
+    # lowercase name and upper-case token marker.
+    for banned in CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_REFRESH_TOKEN CLAUDE_CODE_OAUTH_SCOPES claude_code_oauth_client_id \
+                  ANTHROPIC_AUTH_TOKEN T20_MISFILED T20.DOTTED t20_lower_misfiled; do
         if grep -qx "$banned" "$t20/seen.env"; then
             fail "python inherited $banned (OAuth material must not reach the Agent SDK)"
         else
