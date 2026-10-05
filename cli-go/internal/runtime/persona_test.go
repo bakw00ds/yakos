@@ -13,6 +13,10 @@ import (
 // agy -p prefix). A cap with a clear error replaces the operating system's bare
 // "argument list too long".
 
+// personaEchoMarker is plain text that no escaping changes, so it shows up in a
+// refusal or in argv whether the persona is echoed as given or as encoded.
+const personaEchoMarker = "SECRET-PERSONA-TEXT"
+
 func chatCmdFor(runtimeName string, persona string) *exec.Cmd {
 	req := ChatDispatchRequest{Project: "", UserText: "hello", AgentSystemPrompt: persona}
 	if runtimeName == "codex" {
@@ -48,7 +52,7 @@ func TestChatPersona_OverTheCapIsRefusedBeforeArgv(t *testing.T) {
 	// No codex or agy can be found: if the cap ever stops working, Start fails
 	// with "not found" and this test fails, instead of launching a real harness.
 	t.Setenv("PATH", t.TempDir())
-	persona := "SECRET-PERSONA-TEXT" + strings.Repeat("x", MaxPersonaBytes)
+	persona := personaEchoMarker + strings.Repeat("x", MaxPersonaBytes)
 	for _, rt := range []string{"codex", "agy"} {
 		t.Run(rt, func(t *testing.T) {
 			cmd := chatCmdFor(rt, persona)
@@ -66,7 +70,7 @@ func TestChatPersona_OverTheCapIsRefusedBeforeArgv(t *testing.T) {
 					t.Errorf("the error should say %q, got %q", want, msg)
 				}
 			}
-			if strings.Contains(msg, "SECRET-PERSONA-TEXT") {
+			if strings.Contains(msg, personaEchoMarker) {
 				t.Errorf("the error must not echo the persona: %q", msg)
 			}
 			// Plain text does not grow when escaped, so this is the raw refusal.
@@ -74,7 +78,7 @@ func TestChatPersona_OverTheCapIsRefusedBeforeArgv(t *testing.T) {
 				t.Errorf("a persona over the raw cap is refused as such, not for its escaped size: %q", msg)
 			}
 			for _, a := range cmd.Args {
-				if strings.Contains(a, "SECRET-PERSONA-TEXT") {
+				if strings.Contains(a, personaEchoMarker) {
 					t.Errorf("the rejected persona must not be in argv: %q", cmd.Args)
 				}
 			}
@@ -164,6 +168,31 @@ func TestChatPersona_CodexEncodedLengthIsCapped(t *testing.T) {
 			}
 			if len(cmd.Args) != 1 {
 				t.Errorf("the refused persona must not reach argv, got %d arguments", len(cmd.Args))
+			}
+
+			// The refusal never echoes the persona, as given or as encoded, in the
+			// error or in argv. A marker at both ends of a persona that is refused for
+			// its encoded size must come back in neither.
+			probe := personaEchoMarker + strings.Repeat(g.unit, fits) + personaEchoMarker
+			if len(probe) > MaxPersonaBytes {
+				t.Fatalf("the probe must be under the raw cap to prove the encoded check, it is %d bytes", len(probe))
+			}
+			cmd = chatCmdFor("codex", probe)
+			err = cmd.Start()
+			if err == nil {
+				_ = cmd.Process.Kill()
+				t.Fatal("a persona that encodes past the cap must not start a process")
+			}
+			if !errors.Is(err, ErrPersonaTooLarge) || !strings.Contains(err.Error(), "once escaped") {
+				t.Fatalf("want the encoded-size refusal, got %v", err)
+			}
+			if strings.Contains(err.Error(), personaEchoMarker) {
+				t.Errorf("the encoded-size refusal must not echo the persona: %.200q", err.Error())
+			}
+			for _, a := range cmd.Args {
+				if strings.Contains(a, personaEchoMarker) {
+					t.Errorf("the refused persona must not be in argv: %.200q", cmd.Args)
+				}
 			}
 		})
 	}
