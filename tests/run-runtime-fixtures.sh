@@ -1149,6 +1149,31 @@ else
     done
 fi
 
+# The listing the scrub is built from has two branches: NUL-delimited `env -0`, and `compgen -e`
+# where `env -0` is unavailable. A stand-in `env` that refuses -0 forces the second one. Both must
+# name the same identifier-named variables: OAuth names and values go, yakOS's own YAKOS_ names stay.
+t20_names() {
+    env -i HOME="$t20/home" PATH="$PATH" YAKOS_LIB="$YAKOS_LIB" \
+        "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-$t20_secret" "T20_MISFILED=Bearer sk-ant-ort01-$t20_secret" \
+        "claude_code_oauth_scopes=user:inference" "YAKOS_T20_PROSE=never paste sk-ant-oat tokens" \
+        "T20_YAKOS_MID=Bearer sk-ant-oat01-$t20_secret" "yakos_t20_lower=Bearer sk-ant-oat01-$t20_secret" \
+        T20_BENIGN=hello \
+        bash -c ". \"\$YAKOS_LIB/runtimes/claude-sdk.sh\"; $1 yk_rt_claude_sdk_oauth_env_names | LC_ALL=C sort | tr '\\n' ,"
+}
+t20_want_names="CLAUDE_CODE_OAUTH_TOKEN,T20_MISFILED,T20_YAKOS_MID,claude_code_oauth_scopes,yakos_t20_lower,"
+t20_got="$(t20_names '' 2>&1)" || true
+if [ "$t20_got" = "$t20_want_names" ]; then
+    ok "the OAuth listing (env -0) names OAuth variables and leaves YAKOS_ names alone"
+else
+    fail "the OAuth listing (env -0) = $t20_got, want $t20_want_names"
+fi
+t20_got="$(t20_names 'env() { if [ "${1:-}" = "-0" ]; then return 1; fi; command env "$@"; };' 2>&1)" || true
+if [ "$t20_got" = "$t20_want_names" ]; then
+    ok "the OAuth listing falls back to compgen -e and agrees with the env -0 branch"
+else
+    fail "the OAuth listing (compgen fallback) = $t20_got, want $t20_want_names"
+fi
+
 # Nothing to scrub: the empty scrub list must expand cleanly under `set -u` on bash 3.2.
 t20_rc=0
 t20_dispatch "ANTHROPIC_API_KEY=sk-ant-api03-t20-fake-key" || t20_rc=$?
