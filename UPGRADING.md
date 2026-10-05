@@ -6,6 +6,63 @@ current release, what survives, and how to fully uninstall when needed.
 This doc is the **upgrade authority** — `yakos --help`, README, and
 CHANGELOG point here. Last updated for v0.39.
 
+## Unreleased: codex and agy are sandboxed by default (K-133)
+
+The Go dispatcher (the console, MCP, Flows, JSON-RPC, and `yakos dispatch` with
+`YAKOS_IMPL=go`) now runs codex with `--sandbox workspace-write` and an approval
+policy that cannot prompt, and agy with `--sandbox`. Before, both ran with
+approvals and sandbox off. The bash `yakos dispatch` path, used when the bash
+tree is present and `YAKOS_IMPL` is unset, is unchanged until the Go dispatcher
+becomes the default.
+
+What you will notice with codex:
+
+- Commands the model runs can write only inside the project, `$TMPDIR` and
+  `/tmp`. Other writes fail with "Operation not permitted".
+- The project's `.git` directory is read-only, so a codex agent cannot commit or
+  switch branches. `git status`, `git diff` and `git log` work. Have the lead do
+  the commit.
+- The network is off, so `npm install`, `go get` and `git push` fail. To allow
+  it, set `[sandbox_workspace_write]` `network_access = true` in the
+  `config.toml` of the `CODEX_HOME` yakOS uses.
+- agy's sandbox restricts terminal commands but is probably weaker, because
+  headless agy keeps `--dangerously-skip-permissions` (auto-approve).
+
+To opt a runtime out, create `~/.yakos-state/router-policy.yml`:
+
+```yaml
+allow_unsandboxed_runtimes: [codex, agy]
+```
+
+```sh
+chmod 600 ~/.yakos-state/router-policy.yml
+```
+
+The file must be a regular file you own, not group or world writable, and not a
+symlink; otherwise it is ignored and `yakos doctor` says why. A project
+`.yakos.yml` cannot turn the sandbox off, and `YAKOS_DISPATCH_LOG` does not move
+this file. While a runtime is unsandboxed, yakOS prints a line on stderr once per
+process and `yakos doctor` warns.
+
+Other changes in this release for codex and agy:
+
+- **Own codex login (optional).** Run `yakos auth login codex` once to give
+  yakOS its own login in `~/.yakos-state/codex-home`, so dispatches and your
+  interactive codex stop sharing one `auth.json`. Until you do, dispatch keeps
+  using `$CODEX_HOME` or `~/.codex`. `yakos doctor` prints a hint.
+- **agy skill files move.** The generated skills are now
+  `.agents/skills/yakos-<id>/SKILL.md` directories, the layout agy 1.2.x loads.
+  Old flat `yakos-<id>.md` files are not used and can be deleted; they are
+  already gitignored. The new directories ignore themselves, so no `.gitignore`
+  change is needed.
+- **Generated agent files are protected.** `.codex/agents/yakos-<id>.toml` and
+  the agy skills start with a `yakos-generated:` marker. A file without it is
+  yours and is never overwritten; delete the marker line to keep edits to a
+  generated file.
+- **Model ids.** The codex ids in `lib/settings/model-aliases.json` predate the
+  current codex catalog (`codex debug models`). Pin a concrete id in an agent's
+  `model:` until the registry replaces the table.
+
 ## Upgrading to v0.61.0.0
 
 v0.61.0.0 is a minor release. A v0.60.1.0 binary upgrades in place with

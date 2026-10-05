@@ -5,25 +5,78 @@ sessions on multiple agentic CLIs. This document tracks which features
 each adapter supports, what gets soft-degraded, and the operator-facing
 trade-offs.
 
-Last updated: 2026-06-12 (v0.40.0.0 — unified console + Flows; fable tier
-added in v0.38; codex adapter shipped in v0.4.0; gemini in v0.4.1).
+Last updated: 2026-10-05 (K-133/K-134: Go adapters for codex 0.154.0 and
+agy 1.2.x, sandbox by default; the capability matrix drops gemini, whose shim
+was removed on 2026-09-01 in favor of agy).
 
 ## Capability matrix
 
-| Capability | claude | codex | gemini |
+| Capability | claude | codex (0.154.0) | agy (1.2.x) |
 |---|---|---|---|
-| Adapter shipping | v0.3 (always) | **v0.4.0** | **v0.4.1** |
+| Adapter shipping | v0.3 (always) | v0.4.0 | with the gemini shim's replacement (see CHANGELOG) |
 | `inline-agents` (CLI-flag JSON injection) | ✅ `--agents` | ❌ file-based only | ❌ file-based only |
-| `path-allowlist-hard` | ✅ `--add-dir` | ✅ `--add-dir` | ✅ `--include-directories` |
-| `hooks` | ✅ 7 events | ✅ 6 events | ✅ 11 events |
-| `mcp-flag` (CLI flag) | ✅ `--mcp-config` | ❌ via `config.toml` | ❌ inline in `settings.json` |
-| `system-prompt-flag` | ✅ `--system-prompt` / `--append-system-prompt` | ❌ via `AGENTS.md` / `-c` | ❌ via `GEMINI_SYSTEM_MD` env var |
+| `path-allowlist-hard` | ✅ `--add-dir` | ✅ the sandbox workspace is the working directory | ✅ `--add-dir` |
+| `hooks` | ✅ 7 events | ⚠ manual install, 2 of 24 hooks ported | ⚠ manual install, 2 of 24 hooks ported |
+| `mcp-flag` (CLI flag) | ✅ `--mcp-config` | ❌ via `config.toml` | ❌ via `.agents/mcp_config.json` |
+| `system-prompt-flag` | ✅ `--append-system-prompt` | ❌ no flag; `-c developer_instructions="..."` works (verified) | ❌ no flag; persona prepended to the prompt |
+| Model flag | ✅ `--model <tier>` | ✅ `-m <id>` | ✅ `--model <id>` |
+| Reasoning effort | ✅ `--effort` | ✅ `-c model_reasoning_effort="..."` | ✅ `--effort low\|medium\|high\|xhigh\|max` |
 | `fork-headless` | ✅ `--fork-session` | ✅ `codex fork` | ⚠ unverified — interactive only |
-| Non-interactive print mode | ✅ `claude -p` | ✅ `codex exec` | ✅ `gemini -p` |
-| Default agent file location | (none — JSON injection) | `.codex/agents/*.toml` | `.gemini/agents/*.md` |
-| yakOS-emitted file prefix | n/a | `yakos-*.toml` | `yakos-*.md` |
+| Non-interactive print mode | ✅ `claude -p` | ✅ `codex exec` | ✅ `agy -p` |
+| Machine-readable stream | ✅ `--output-format stream-json` | ✅ `exec --json` (JSONL) | ⚠ `--output-format stream-json` (not recorded; agy is not signed in here) |
+| Headless resume | ✅ `--resume <id>` | ✅ `codex exec resume <thread_id>` | ✅ `--conversation <id>` |
+| Sandbox by default (K-133) | n/a (permission mode) | ✅ `--sandbox workspace-write` | ✅ `--sandbox` (weaker, see below) |
+| Agent file yakOS writes | (none — JSON injection) | `.codex/agents/yakos-<id>.toml` | `.agents/skills/yakos-<id>/SKILL.md` |
 
-✅ = supported. ❌ = not supported (degrade or workaround). ⚠ = unverified.
+✅ = supported. ❌ = not supported (degrade or workaround). ⚠ = partial or unverified.
+
+## Sandbox and approvals (K-133)
+
+codex and agy used to be dispatched with approvals and sandbox switched off. The
+Go dispatcher (console, MCP, Flows, JSON-RPC, `YAKOS_IMPL=go yakos dispatch`) now
+runs them sandboxed unless the operator opts out.
+
+| | default | flags | opt-out |
+|---|---|---|---|
+| codex | sandboxed, cannot prompt | `exec --sandbox workspace-write -c approval_policy="never"`; `exec resume` takes `-c sandbox_mode="workspace-write"` (it has no `--sandbox`) | `--dangerously-bypass-approvals-and-sandbox` |
+| agy | sandboxed terminal | `--sandbox --dangerously-skip-permissions` | `--dangerously-skip-permissions` only |
+
+Opt-out is one file, read only from `~/.yakos-state/router-policy.yml`:
+
+```yaml
+allow_unsandboxed_runtimes: [codex, agy]   # runtimes named here run without their sandbox
+```
+
+The file must be a regular file owned by you and not group or world writable, and
+not a symlink; otherwise it is ignored (one stderr note says why, and
+`yakos doctor` reports it). On Windows the owner and mode checks cannot run, so
+only the regular-file and not-a-symlink rules apply. A project `.yakos.yml` cannot enable it, and
+`YAKOS_DISPATCH_LOG` does not relocate it (a project can set environment
+variables for the processes it starts, K-129). When the bypass is active yakOS
+prints one stderr line per process, and `yakos doctor` warns.
+
+What codex's `workspace-write` sandbox does on macOS (checked with `codex
+sandbox`): commands may write inside the working directory, `$TMPDIR` and
+`/tmp`; writes elsewhere fail with "Operation not permitted"; the project's
+`.git` directory is read-only, so an agent cannot `git commit` or switch
+branches (read-only git commands work); network access is off, so `npm install`,
+`go get` and `git push` fail. Network can be switched on in
+`$CODEX_HOME/config.toml` with `[sandbox_workspace_write]` `network_access = true`.
+Work that needs git writes or the network is what the opt-out is for; the safer
+alternative is to have the lead do the commit and push.
+
+agy's `--sandbox` restricts the terminal commands the model runs. Headless agy
+has no approval surface, so `--dangerously-skip-permissions` stays. Its help text
+says it auto-approves all tool permission requests, which would include a model
+request to run a command outside the sandbox (inferred from the help text and the
+binary's prompts, not observed). Treat agy's containment as weaker than codex's.
+Whether `--mode accept-edits` without `--dangerously-skip-permissions` is a
+tighter headless setting is untested (agy is not signed in on the build machine).
+
+The bash adapters (`cli/lib/runtimes/{codex,agy}.sh`, used by `yakos dispatch`
+when the bash tree is present and `YAKOS_IMPL` is unset) still run with the
+bypass flags; that path retires when the Go dispatcher becomes the default
+(K-143).
 
 ## What yakOS does per-runtime
 
@@ -36,33 +89,97 @@ added in v0.38; codex adapter shipped in v0.4.0; gemini in v0.4.1).
   session's lifetime.
 - Auto-detects `<project>/.mcp.json` for `--mcp-config`.
 
-### codex (v0.4.0)
+### codex (0.154.0)
 
-- Materializes each yakOS agent as a TOML file at
-  `<project>/.codex/agents/yakos-<name>.toml` (gitignored at init).
-- Schema: `name`, `description`, `developer_instructions` (the
-  agent body), optional `model`.
-- Exec's `codex --add-dir <repo>
-  --dangerously-bypass-approvals-and-sandbox`.
-- One-shot dispatch via `codex exec` (used by `yakos dispatch` in
-  v0.4.2).
-- Auth detected at `$CODEX_HOME/auth.json` or `OPENAI_API_KEY`.
+Framed dispatch (`yakos dispatch`, Flows, MCP) writes the agent as
+`<workdir>/.codex/agents/yakos-<id>.toml` (`agentscompose.MaterializeCodexAgent`)
+and runs:
 
-### gemini (v0.4.1)
+```
+codex exec --json [-m <id>] [-c model_reasoning_effort="<level>"] \
+  --sandbox workspace-write -c approval_policy="never" -- "<framed prompt>"
+codex exec resume --json ... -c sandbox_mode="workspace-write" -c approval_policy="never" -- <thread_id> "<framed prompt>"
+```
 
-- Materializes to `<project>/.gemini/agents/yakos-<name>.md`
-  (markdown with YAML frontmatter — closest format to yakOS
-  source; minimal translation needed).
-- When `<project>/.mcp.json` is present, merges its `mcpServers`
-  block into `<project>/.gemini/settings.json` (gemini-cli has no
-  `--mcp-config` flag — MCP is inline). A timestamped backup is
-  written before the merge.
-- Exec's `gemini --include-directories <repo> --approval-mode=yolo`.
-- Dispatch (v0.4.2) uses gemini's native `@<agent-name>`
-  delegation syntax: `gemini -p "@yakos-<agent> <task>"`.
-- Auth: OAuth (free tier, `~/.gemini/` creds files),
-  `GEMINI_API_KEY` env, or Vertex AI
-  (`GOOGLE_GENAI_USE_VERTEXAI=true` + gcloud).
+The framed prompt asks codex to delegate to the subagent named `<id>`; codex
+finds the agent file from the working directory (verified in a scratch git
+repository: a delegated subagent answered with the token its
+`developer_instructions` demanded). codex documents project-scoped config as
+loading only for projects it trusts and this was not checked for an untrusted
+path, so if a delegation seems to ignore the agent, mark the project trusted
+(`[projects."<path>"]` `trust_level = "trusted"`) in the `config.toml` of the
+`CODEX_HOME` in use. The resume form is `codex exec resume`; the top-level
+`codex resume` is the interactive picker. The thread id is the `thread_id` of the
+previous run's `thread.started` event.
+
+Chat (console panes) has no agent file. The persona is passed as
+`-c developer_instructions="<TOML-quoted persona>"`; codex has no
+`--system-prompt` flag, and the old adapter passed one, which made every agent
+chat on codex fail. The persona is encoded as a TOML string because codex parses
+the value of `-c` as TOML and a prompt that parses as a number or `true` would
+otherwise change type. The encoding was checked by round-tripping a persona with
+quotes, backslashes, control characters and unicode through `codex debug
+prompt-input`. Chat runs in the project directory (`cmd.Dir`), so the project's
+rules load as they do in a terminal.
+
+- The agent file carries a `# yakos-generated:` first line. A file without it is
+  yours and is never overwritten; delete the line to take ownership of a
+  generated file. An unchanged file is not rewritten.
+- `-m` takes a concrete model id. A semantic alias (`cheap`, `balanced`, `best`,
+  `reasoning`, `frontier`) resolves through the codex column of
+  `lib/settings/model-aliases.json`; the dispatch default, the Claude tier
+  `sonnet`, is not a codex model and is dropped. **The ids in that table
+  (`gpt-5`, `gpt-5-mini`, ...) are not in the current codex model catalog
+  (`codex debug models` lists `gpt-5.5`, `gpt-5.6-*`, `gpt-6-astra`); refresh
+  them before relying on an alias.** codex rejects a model outside the catalog
+  with HTTP 400 ("The '<id>' model is not supported when using Codex with a
+  ChatGPT account"), so an unpinned dispatch should pass no model at all.
+- The effort levels `low|medium|high|xhigh|max` pass through to
+  `model_reasoning_effort`; whether a model supports one is codex's call.
+- Stream: `exec --json` emits JSONL (`thread.started`, `turn.started`,
+  `item.*`, `turn.completed` with `usage`, `turn.failed`). Recordings and the
+  commands are in `tests/fixtures/runtime-streams/`. Until the codex stream parser
+  lands (K-135) the Chat pane shows the raw lines as one block.
+- Auth: `OPENAI_API_KEY`, or the login in the `CODEX_HOME` dispatch uses. See
+  Auth model.
+
+### agy (1.2.x)
+
+Framed dispatch writes `<workdir>/.agents/skills/yakos-<id>/SKILL.md` (and a
+`.gitignore` containing `*` beside it, so the generated directory never shows in
+`git status`) and runs:
+
+```
+agy --add-dir <workdir> --sandbox --dangerously-skip-permissions [--model <id>] [--effort <level>] \
+  --output-format stream-json [--conversation <id>] -p "@yakos-<id> <task>"
+```
+
+- agy 1.2.x loads a workspace skill from `.agents/skills/<name>/SKILL.md`, a
+  directory per skill with the skill's `name` equal to the directory name
+  (checked against the strings in the agy 1.2.17 binary and its changelog). The
+  old flat `yakos-<id>.md` layout is not discovered. Leftover flat files can be
+  deleted (the bash `yakos archive` cleanup removes them; the `.gitignore` entry
+  `.agents/skills/yakos-*.md` from `yakos init` is harmless). The skill name carries the `yakos-` prefix so the `@yakos-<id>`
+  mention resolves by directory or by name.
+- Chat has no skill file: agy has no system-prompt flag, so the persona is
+  prepended to the user text under a `---` separator.
+- `--model` takes a concrete id; aliases resolve through the agy column of the
+  alias table (`best` is `claude-opus-4.6`: Antigravity can front Anthropic
+  models). Claude tiers are dropped, as for codex.
+- **Not verified on the build machine** (agy is installed but not signed in, and
+  `agy models` requires sign-in): the `stream-json` event shapes (nothing was
+  recorded), whether `@yakos-<id>` resolves in print mode, which `--model` ids
+  are accepted, and `--sandbox` behavior in print mode. Treat agy dispatch as
+  experimental until a signed-in run confirms them.
+- Auth: `agy` signs in once, interactively (browser OAuth into the keychain and
+  `~/.gemini/`), or `ANTIGRAVITY_API_KEY` for headless use. yakOS never drives
+  or caches that login.
+
+### gemini (removed)
+
+The gemini shim was disabled on 2026-09-01; Gemini CLI stopped serving
+individual accounts on 2026-06-18. Use `agy`. `runtime: gemini` in agent
+frontmatter still validates, as a deprecation warning.
 
 ## Soft-degrade rules
 
@@ -91,16 +208,39 @@ behave differently per runtime:
 
 ## Auth model
 
-Implemented in [`cli/lib/auth.sh`](../cli/lib/auth.sh). yakOS NEVER
-stores or rotates credentials. `yakos auth login <runtime>` shells
-into the runtime's own login flow:
+Implemented in [`cli/lib/auth.sh`](../cli/lib/auth.sh) and `internal/auth`. yakOS
+NEVER stores or rotates credentials. `yakos auth login <runtime>` shells into the
+runtime's own login flow:
 
 - claude: prints `/login` instructions (no headless login flag).
-- codex: exec's `codex login`.
-- gemini: prints OAuth / API key / Vertex AI options.
+- codex: exec's `codex login` against a yakOS-owned profile, below.
+- agy: prints the one-time interactive sign-in steps (`agy`, complete the
+  browser OAuth) and the `ANTIGRAVITY_API_KEY` alternative.
 
 `yakos auth status` reports per-runtime CLI presence + auth
 configuration without revealing credentials.
+
+### codex: the yakOS-owned `CODEX_HOME`
+
+`yakos auth login codex` creates `~/.yakos-state/codex-home` (mode 0700) and runs
+`codex login` with `CODEX_HOME` pointed at it. Once that directory holds an
+`auth.json`, every yakOS-run codex uses it (an inherited `CODEX_HOME` is replaced,
+with a stderr note) and your own `~/.codex` login is never touched. Until you run
+the command nothing changes: dispatch keeps using `$CODEX_HOME` or `~/.codex`, and
+`yakos doctor` prints a hint.
+
+The reason is that a yakOS dispatch and your interactive codex would otherwise
+share one `auth.json`, and concurrent token refreshes, or a login call that
+rewrites the shared file ([openai/codex#48465](https://github.com/openai/codex/issues/48465)),
+can sign you out of one of them. For the same reason yakOS never calls the codex
+app-server `account/login` method, and it runs only the official `codex login`.
+The profile's `config.toml` is separate from `~/.codex/config.toml`: put settings
+you want for yakOS dispatches (for example `[sandbox_workspace_write]`) there.
+`yakos auth logout codex` signs out of the yakOS profile only.
+
+The profile location is always `$HOME/.yakos-state/codex-home`, not
+`YAKOS_DISPATCH_LOG`'s directory: a `CODEX_HOME` carries a `config.toml` (notify
+commands, MCP servers), so a project must not be able to point codex at one.
 
 ## Mixed-runtime dispatch (v0.4.2, planned)
 
@@ -143,9 +283,8 @@ as system prompt, direct `-p`, `--include-partial-messages`):
 | Runtime | Streaming behavior |
 |---|---|
 | `claude` | Token-by-token streaming via SSE. First token latency governed by `--include-partial-messages` mode. |
-| `codex` | Buffered — full response arrives as one chunk + summary. |
-| `agy` | Buffered — full response arrives as one chunk + summary. |
-| `gemini` | Buffered — full response arrives as one chunk + summary. |
+| `codex` | Buffered — the full response arrives as one chunk + summary. The chunk is codex's raw `--json` lines until the stream parser lands (K-135). |
+| `agy` | Buffered — the full response arrives as one chunk + summary. The chunk is agy's raw `stream-json` lines until the stream parser lands (K-135). |
 
 Partial streaming is a claude-specific capability. The Chat UI labels buffered
 runtimes clearly so operators know to expect a single response rather than a

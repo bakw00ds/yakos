@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **codex and agy dispatch is sandboxed by default (K-133).** The Go dispatcher
+  (console, MCP, Flows, JSON-RPC, `YAKOS_IMPL=go yakos dispatch`) ran both
+  harnesses with approvals and sandbox switched off, so any task text or file
+  the model read could drive arbitrary commands as the operator. codex now runs
+  `exec --sandbox workspace-write -c approval_policy="never"` (a policy that
+  cannot prompt; `exec resume`, which has no `--sandbox`, takes
+  `-c sandbox_mode="workspace-write"`), and agy runs `--sandbox`. The old bypass
+  returns only when `~/.yakos-state/router-policy.yml` lists the runtime in
+  `allow_unsandboxed_runtimes`. That file is read from `$HOME/.yakos-state` only
+  (not `YAKOS_DISPATCH_LOG`, K-129), must be a regular file you own that is not
+  group or world writable and not a symlink, and cannot be enabled from a
+  project `.yakos.yml`; an ignored file is explained on stderr and in `yakos
+  doctor`, and an active bypass prints one stderr line per process and a doctor
+  warning. Inside codex's sandbox writes outside the project fail, `.git` is
+  read-only (no `git commit`) and the network is off. agy's sandbox is probably
+  weaker because headless agy keeps `--dangerously-skip-permissions`. See
+  `docs/runtime-matrix.md` and UPGRADING.md. The bash adapters used by the bash
+  `yakos dispatch` path are unchanged until K-143.
+- **yakOS-owned `CODEX_HOME` (K-133).** `yakos auth login codex` (Go and bash)
+  now signs codex in to `~/.yakos-state/codex-home` (0700) instead of the
+  operator's `~/.codex`. Once that profile holds a login, every yakOS-run codex
+  uses it (an inherited `CODEX_HOME` is replaced, with a stderr note), so a
+  dispatch and an interactive codex never share one `auth.json`
+  (openai/codex#48465). Until the command is run nothing changes. `yakos auth
+  status` says which login dispatch will use, `yakos auth logout codex` signs
+  out of the profile only, and yakOS never calls the codex app-server
+  `account/login` method.
+
+### Changed
+
+- **codex adapter rewritten against codex-cli 0.154.0 (K-133).** Framed dispatch
+  runs `codex exec --json [-m id] [-c model_reasoning_effort=...]` and resumes
+  with `codex exec resume <thread_id>`; chat passes the agent persona as
+  `-c developer_instructions="..."` (a TOML string, verified live). Both run in
+  the project directory and take `-m` and the effort level from the request. A
+  semantic model alias resolves through the codex column of
+  `lib/settings/model-aliases.json` (a Go copy, kept in step by a test) and the
+  dispatch default Claude tier is not passed as a codex model.
+- **agy adapter updated for agy 1.2.x (K-133).** Both paths pass
+  `--output-format stream-json`, `--model` and `--effort` when set, `--sandbox`,
+  and run in the project directory. The raw stream is returned until the stream
+  parsers land (K-135). The comment claiming agy has no `--model` is gone.
+- **agy workspace skills use the directory layout (K-134).** agy 1.2.x loads a
+  skill from `.agents/skills/<name>/SKILL.md`; the emitter wrote a flat
+  `yakos-<id>.md` it does not discover. Both the bash emitter and the new Go
+  materializer now write `.agents/skills/yakos-<id>/SKILL.md` with `name:
+  yakos-<id>` (matching the `@yakos-<id>` mention) and a `.gitignore` containing
+  `*` beside it, so no project `.gitignore` edit is needed. Leftover flat files
+  are removed by the bash cleanup.
+
+### Added
+
+- **Go materializers for codex and agy agent files (K-134).**
+  `agentscompose.MaterializeCodexAgent` and `MaterializeAgyAgent` write
+  `.codex/agents/yakos-<id>.toml` and `.agents/skills/yakos-<id>/SKILL.md` for
+  the dispatched agent before codex or agy starts, byte-identical to the bash
+  emitters (a Go test and `tests/run-runtime-fixtures.sh` under `YAKOS_IMPL=go`
+  compare them over a corpus). Generated files carry a `yakos-generated:`
+  marker; a file without it is never overwritten (bash and Go agree), unchanged
+  files are not rewritten, writes are atomic 0644, and a symlinked directory
+  component or target is refused. A write failure never stops the dispatch. The
+  per-dispatch model is not written into the file, so concurrent dispatches of
+  one agent never rewrite it.
+- **`yakos doctor` "Runtime isolation" section (K-133).** Hints at `yakos auth
+  login codex` when codex shares `~/.codex`, and warns when the router policy
+  unsandboxes a harness or was ignored. Silent on a machine with neither.
+- **codex stream recordings.** Real codex-cli 0.154.0 `exec --json` output for
+  the argv the adapter builds (a plain turn, `exec resume`, a framed subagent
+  delegation, an unauthenticated failure) in `tests/fixtures/runtime-streams/`,
+  with the command for each. No agy recording exists: agy is not signed in.
+
+### Fixed
+
+- **codex agent chat and resume.** The old chat command passed `--system-prompt`
+  (codex has no such flag), the framed resume used the interactive `codex
+  resume` picker, and `--output-last-message -` named a file called `-`.
+- **Generated TOML and skills survive odd descriptions.** A description with a
+  backslash or a line break produced an invalid TOML string; both emitters now
+  escape and collapse it, and write UTF-8 with `\n` line endings regardless of
+  locale.
+
 ## [0.61.0.0] — 2026-10-03
 
 Minor release: per-agent dollar budgets, hybrid Go hooks by default, the
