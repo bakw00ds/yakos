@@ -231,6 +231,8 @@ func routingRoot(t *testing.T) string {
 		// A pin this dispatcher cannot run (bash-only runtime).
 		"sdk-pinned":  "runtime: claude-sdk\n",
 		"sdk-with-fb": "runtime: claude-sdk\nruntime-fallback: [claude]\n",
+		// A pin to the runtime that was removed.
+		"gemini-pinned": "runtime: gemini\n",
 	}
 	for id, fm := range agents {
 		body := "---\nid: " + id + "\n" + fm + "---\n\n## Purpose\n\nRouting test agent " + id + ".\n"
@@ -594,6 +596,16 @@ func TestRoute_UnsupportedPinsAreSkipped(t *testing.T) {
 	got, err := route(t, root, projectWithYML(t, ""), "sdk-with-fb", nil)
 	if err != nil || got.Runtime != "claude" || got.RuntimeChosenBy != RuntimeByFallback || got.FallbackFrom != "claude-sdk" {
 		t.Errorf("sdk-with-fb: %+v %v, want claude by fallback from claude-sdk", got, err)
+	}
+}
+
+// An agent still pinned to the removed gemini runtime fails with the way out,
+// not with a bare "unsupported".
+func TestRoute_GeminiPinSaysToUseAgy(t *testing.T) {
+	root := routingRoot(t)
+	_, err := route(t, root, projectWithYML(t, ""), "gemini-pinned", nil)
+	if err == nil || !strings.Contains(err.Error(), "gemini: gemini was removed; use agy") {
+		t.Errorf("err = %v, want it to say gemini was removed and to use agy", err)
 	}
 }
 

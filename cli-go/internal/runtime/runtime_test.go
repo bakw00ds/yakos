@@ -82,8 +82,8 @@ func TestGeminiRetired(t *testing.T) {
 	}
 	if _, err := Resolve("gemini"); err == nil {
 		t.Error("Resolve(gemini): expected an unknown-runtime error, got nil")
-	} else if !strings.Contains(err.Error(), "unknown runtime") {
-		t.Errorf("Resolve(gemini) error = %q, want it to say unknown runtime", err)
+	} else if !strings.Contains(err.Error(), "unknown runtime") || !strings.Contains(err.Error(), "use agy") {
+		t.Errorf("Resolve(gemini) error = %q, want it to say unknown runtime and to use agy", err)
 	}
 	if want := []string{"claude", "codex", "agy"}; strings.Join(Known, ",") != strings.Join(want, ",") {
 		t.Errorf("Known = %v, want %v", Known, want)

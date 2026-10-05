@@ -199,7 +199,7 @@ var routeLog io.Writer = os.Stderr
 func defaultRuntimeProbe(name string) probeResult {
 	adapter, err := runtime.Resolve(name)
 	if err != nil {
-		return probeResult{Reason: unsupportedReason}
+		return probeResult{Reason: unsupportedReasonFor(name)}
 	}
 	p := auth.ProbeRuntime(name)
 	switch {
@@ -224,6 +224,15 @@ func defaultRuntimeProbe(name string) probeResult {
 // unsupportedReason is why a runtime id that parses but has no Go adapter
 // (claude-sdk, antigravity-sdk, plugin ids) is skipped.
 const unsupportedReason = "not supported by the Go dispatcher (bash only)"
+
+// unsupportedReasonFor is unsupportedReason, with the migration hint for the
+// one runtime that used to be supported and was removed.
+func unsupportedReasonFor(name string) string {
+	if name == "gemini" {
+		return "gemini was removed; use agy"
+	}
+	return unsupportedReason
+}
 
 // chainInput is everything the chain needs, already loaded, so the resolver
 // itself is a pure function of its inputs.
@@ -272,19 +281,19 @@ func preferred(in chainInput) (candidate, []string) {
 		if by == RuntimeByPerDomain || supportedRuntime(name) {
 			return candidate{name, by}, nil
 		}
-		notes = append(notes, fmt.Sprintf("ignoring default-runtime %q in .yakos.yml: %s", name, unsupportedReason))
+		notes = append(notes, fmt.Sprintf("ignoring default-runtime %q in .yakos.yml: %s", name, unsupportedReasonFor(name)))
 	}
 	if in.envDefault != "" {
 		if supportedRuntime(in.envDefault) {
 			return candidate{in.envDefault, RuntimeByEnv}, notes
 		}
-		notes = append(notes, fmt.Sprintf("ignoring YAKOS_RUNTIME %q: %s", in.envDefault, unsupportedReason))
+		notes = append(notes, fmt.Sprintf("ignoring YAKOS_RUNTIME %q: %s", in.envDefault, unsupportedReasonFor(in.envDefault)))
 	}
 	if in.stateDefault != "" {
 		if supportedRuntime(in.stateDefault) {
 			return candidate{in.stateDefault, RuntimeByStateDefault}, notes
 		}
-		notes = append(notes, fmt.Sprintf("ignoring default-runtime %q in the state dir: %s", in.stateDefault, unsupportedReason))
+		notes = append(notes, fmt.Sprintf("ignoring default-runtime %q in the state dir: %s", in.stateDefault, unsupportedReasonFor(in.stateDefault)))
 	}
 	return candidate{"claude", RuntimeByDefault}, notes
 }
@@ -326,7 +335,7 @@ func chooseRuntime(in chainInput, probe func(string) probeResult) (RuntimeChoice
 				_, err := runtime.Resolve(c.name)
 				return choice, notes, fmt.Errorf("dispatch: %w", err)
 			}
-			choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, unsupportedReason})
+			choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, unsupportedReasonFor(c.name)})
 			continue
 		}
 		if probe != nil {

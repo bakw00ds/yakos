@@ -105,7 +105,8 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   gone from the console runtime selector and the known runtimes of
   `yakos start`; its deprecation shim was past its 2026-09-01 removal date.
   Use `agy`. `yakos validate` still accepts `runtime: gemini` in agent
-  frontmatter, as a warning, for one more release.
+  frontmatter, as a warning, for one more release. A dispatch to gemini, or
+  to an agent still pinned to it, fails with `gemini was removed; use agy`.
 
 ### Fixed
 
