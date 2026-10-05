@@ -47,6 +47,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says which login dispatch will use, `yakos auth logout codex` signs out of the
   profile only, and yakOS never calls the codex app-server `account/login`
   method.
+- **The Agent-SDK sidecar refuses to start without `ANTHROPIC_API_KEY`
+  (K-137).** Anthropic's terms of 2026-02-19 allow a Pro or Max subscription's
+  OAuth only in Claude Code and claude.ai, not in the Agent SDK. The Node
+  sidecar behind `yakos serve --console-structured-questions` is the Agent SDK,
+  and with no key in its environment it ran on your claude.ai login.
+  `SDKEngine.Start` now refuses before it spawns anything unless
+  `ANTHROPIC_API_KEY` holds an API key. A missing, blank or OAuth-shaped value
+  (`sk-ant-oat...`) is refused with an error that names the variable and points
+  at the CLI engine, which is Claude Code itself and stays the interactive path
+  for subscription users. The console shows the error in the pane and the
+  transcript; nothing falls back to another engine. The sidecar's environment
+  also loses every `CLAUDE_CODE_OAUTH*` variable and any value that holds an
+  OAuth token, even one added through `YAKOS_DISPATCH_ENV_PASSTHROUGH`, and
+  `sidecar.mjs` repeats the key check (exit status 78, one stderr line, no
+  credential material) for a sidecar started any other way. The claude CLI
+  adapters still forward `CLAUDE_CODE_OAUTH_TOKEN`, because they run Claude
+  Code. See UPGRADING.md.
 
 ### Changed
 
@@ -128,6 +145,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`yakos doctor` "Runtime isolation" section (K-133).** Hints at `yakos auth
   login codex` when codex shares `~/.codex`, and warns when the router policy
   unsandboxes a harness or was ignored. Silent on a machine with neither.
+- **`yakos doctor --policy` (K-137).** A report of risky configurations, one
+  line each with a severity (high, medium, low) and a fix hint. It always exits
+  0 and names environment variables and booleans only, never a value. It flags
+  the SDK sidecar selectable without `ANTHROPIC_API_KEY`;
+  `allow_unsandboxed_runtimes` in `~/.yakos-state/router-policy.yml`, or that
+  file refused by its owner-only trust check; a `default-runtime` file that
+  fails the same check; `YAKOS_IMPL` not set to `go` with the bash CLI tree
+  installed, because the bash adapters still start codex and agy with the bypass
+  flags until K-143; agy on PATH with no sign-in; codex with no yakOS-owned
+  login profile; and `YAKOS_DISPATCH_LOG` and the other `YAKOS_*` variables that
+  move state (K-129). The checks sit behind `doctor.CheckPolicy` so the console
+  can show them later.
 - **Stream recordings from the adapters' argv.** Real codex-cli 0.154.0
   `exec --json` output (a plain turn, `exec resume`, a framed subagent
   delegation, an unauthenticated failure) and real agy 1.2.17 `stream-json`

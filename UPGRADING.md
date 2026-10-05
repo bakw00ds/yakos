@@ -94,6 +94,41 @@ Other changes in this release for codex and agy:
   persona is escaped for the command line, which grows quotes, backslashes,
   newlines and control characters).
 
+## Unreleased: the SDK sidecar needs `ANTHROPIC_API_KEY` (K-137)
+
+`yakos serve --console-structured-questions` runs a Node sidecar built on the
+Anthropic Agent SDK so the console can show `AskUserQuestion` as an answerable
+widget. Anthropic's terms of 2026-02-19 allow a Pro or Max subscription's login
+only in Claude Code and claude.ai, not in the Agent SDK, and until now the
+sidecar fell back to your claude.ai login when no API key was set.
+
+It no longer does. The sidecar starts only when `ANTHROPIC_API_KEY` is set to an
+API key in the daemon's environment (Anthropic Console billing applies). With no
+key, a blank one, or an OAuth token (`sk-ant-oat...`) in the variable, a chat
+dispatch with `structuredQuestions: true` fails at once and the pane shows an
+error that begins like this:
+
+```text
+interactive: SDK start failed: ... ANTHROPIC_API_KEY is not set: the Agent SDK engine does not run on a claude.ai subscription login ...
+```
+
+Nothing falls back to another engine, and the daemon itself starts as before.
+
+What to do:
+
+- **Subscription login only:** use the CLI engine, which is interactive chat
+  without structured questions. It runs the `claude` CLI, Claude Code itself,
+  under your own login and does not change. `AskUserQuestion` shows as text.
+- **You have an API key:** export `ANTHROPIC_API_KEY` in the shell that starts
+  `yakos serve`.
+- **Bedrock or Vertex:** the sidecar checks `ANTHROPIC_API_KEY` only, so those
+  deployments use the CLI engine too.
+
+The sidecar's environment also drops every `CLAUDE_CODE_OAUTH*` variable and any
+value that holds an OAuth token. Runs of the `claude` CLI are unaffected.
+`yakos doctor --policy` lists an SDK sidecar that can be selected without a key,
+along with the other risky settings it finds (see CHANGELOG).
+
 ## Upgrading to v0.61.0.0
 
 v0.61.0.0 is a minor release. A v0.60.1.0 binary upgrades in place with

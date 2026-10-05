@@ -28,6 +28,12 @@
 // slow down every plain `yakos doctor` run, and keeping the default report
 // unchanged preserves its bash/Go parity (doctor_parity_test.go CompareExact
 // cases) without needing a from-scratch bash port of the daemon handshake.
+//
+// `yakos doctor --policy` (Config.PolicyOnly, K-137) is a second opt-in
+// report-only mode: risky configurations, one line each with a severity and a
+// fix hint, produced by CheckPolicy (policy.go) so the console can call the same
+// checks. Like --preflight it skips every section above and stays out of the
+// default report; unlike it, the policy report never fails the run.
 package doctor
 
 import (
