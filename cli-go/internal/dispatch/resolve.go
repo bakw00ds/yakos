@@ -11,10 +11,13 @@ package dispatch
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -263,6 +266,12 @@ func probeMachine(ctx context.Context, name string) probeResult {
 // so every dispatch of a long-lived daemon should not pay for it again. The
 // price is that a daemon notices an install or a sign-in up to this long after
 // it happens; a one-shot CLI process never reuses an answer. Tests set it to 0.
+//
+// An answer is only reused while the process environment is the same (PATH,
+// HOME, CODEX_HOME and every credential variable the probe reads are part of
+// it): a daemon's environment does not change, so that costs nothing there, and
+// a change of it, which only a test or an operator's os.Setenv makes, is never
+// answered from the past.
 var probeTTL = 30 * time.Second
 
 // probeClock is the clock the cache reads. Tests replace it.
@@ -278,13 +287,26 @@ var probeCache = struct {
 	m map[string]cachedProbeEntry
 }{m: make(map[string]cachedProbeEntry)}
 
+// probeKey names a cache entry: the runtime plus a digest of the environment.
+func probeKey(name string) string {
+	env := os.Environ()
+	sort.Strings(env)
+	h := sha256.New()
+	for _, e := range env {
+		h.Write([]byte(e))
+		h.Write([]byte{0})
+	}
+	return name + "\x00" + hex.EncodeToString(h.Sum(nil))
+}
+
 func cachedProbe(name string) (probeResult, bool) {
 	if probeTTL <= 0 {
 		return probeResult{}, false
 	}
+	key := probeKey(name)
 	probeCache.Lock()
 	defer probeCache.Unlock()
-	e, ok := probeCache.m[name]
+	e, ok := probeCache.m[key]
 	if !ok || probeClock().Sub(e.at) >= probeTTL {
 		return probeResult{}, false
 	}
@@ -295,8 +317,9 @@ func storeProbe(name string, r probeResult) {
 	if probeTTL <= 0 {
 		return
 	}
+	key := probeKey(name)
 	probeCache.Lock()
-	probeCache.m[name] = cachedProbeEntry{res: r, at: probeClock()}
+	probeCache.m[key] = cachedProbeEntry{res: r, at: probeClock()}
 	probeCache.Unlock()
 }
 

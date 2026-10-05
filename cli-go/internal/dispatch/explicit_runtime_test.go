@@ -395,6 +395,31 @@ func TestDefaultRuntimeProbe_ReusesAnswersForTheTTL(t *testing.T) {
 	}
 }
 
+// An answer is for the environment it was given in: a different PATH or a
+// credential that appeared is never answered from the cache.
+func TestDefaultRuntimeProbe_DoesNotReuseAnAnswerAcrossEnvironments(t *testing.T) {
+	origOnce, origTTL := probeOnce, probeTTL
+	t.Cleanup(func() { probeOnce, probeTTL = origOnce, origTTL; resetProbeCache() })
+	resetProbeCache()
+	probeTTL = time.Minute
+	calls := 0
+	probeOnce = func(context.Context, string) probeResult {
+		calls++
+		return probeResult{Reason: "not signed in"}
+	}
+	t.Setenv("OPENAI_API_KEY", "")
+	_ = defaultRuntimeProbe(context.Background(), "codex")
+	_ = defaultRuntimeProbe(context.Background(), "codex")
+	if calls != 1 {
+		t.Fatalf("an unchanged environment probed %d times, want 1", calls)
+	}
+	t.Setenv("OPENAI_API_KEY", "sk-new") // the operator signs in
+	_ = defaultRuntimeProbe(context.Background(), "codex")
+	if calls != 2 {
+		t.Errorf("a changed environment was answered from the cache: %d calls", calls)
+	}
+}
+
 func TestDefaultRuntimeProbe_DoesNotCacheACancelledAnswer(t *testing.T) {
 	origOnce, origTTL := probeOnce, probeTTL
 	t.Cleanup(func() { probeOnce, probeTTL = origOnce, origTTL; resetProbeCache() })
