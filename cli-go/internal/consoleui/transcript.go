@@ -33,6 +33,8 @@
 package consoleui
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -360,27 +362,33 @@ func (tr *Transcripts) FirstUserOwner(conversationID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path) //nolint:gosec // path built and validated by transcriptPath
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
 		}
 		return "", fmt.Errorf("transcript: read: %w", err)
 	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	for _, line := range lines {
-		if line == "" {
-			continue
+	defer func() { _ = f.Close() }()
+	// The owner is on the first user turn, which is the first line of a real
+	// transcript, so stop there instead of reading a conversation that may be
+	// many megabytes: every dispatch asks (see handleChatDispatch).
+	r := bufio.NewReaderSize(f, 64<<10)
+	for {
+		line, readErr := r.ReadBytes('\n')
+		if len(bytes.TrimSpace(line)) > 0 {
+			var entry TranscriptEntry
+			if json.Unmarshal(line, &entry) == nil && entry.Role == RoleUser && entry.OperatorID != "" {
+				return entry.OperatorID, nil
+			}
 		}
-		var entry TranscriptEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
-		}
-		if entry.Role == RoleUser && entry.OperatorID != "" {
-			return entry.OperatorID, nil
+		if readErr != nil {
+			if readErr == io.EOF {
+				return "", nil
+			}
+			return "", fmt.Errorf("transcript: read: %w", readErr)
 		}
 	}
-	return "", nil
 }
 
 // errTranscriptForbidden is returned by Read when the caller's operatorID does

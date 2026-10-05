@@ -84,28 +84,28 @@ func TestReadTrusted_RefusesPlantedFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 			return link
-		}, "symlink"},
+		}, ": is a symlink"},
 		{"world-writable file", func(t *testing.T) string {
 			_, p := trustedState(t, "default-runtime", "agy\n")
 			if err := os.Chmod(p, 0o666); err != nil {
 				t.Fatal(err)
 			}
 			return p
-		}, "writable"},
+		}, ": is group or world writable"},
 		{"group-writable file", func(t *testing.T) string {
 			_, p := trustedState(t, "default-runtime", "agy\n")
 			if err := os.Chmod(p, 0o660); err != nil {
 				t.Fatal(err)
 			}
 			return p
-		}, "writable"},
+		}, ": is group or world writable"},
 		{"world-writable directory", func(t *testing.T) string {
 			dir, p := trustedState(t, "default-runtime", "agy\n")
 			if err := os.Chmod(dir, 0o777); err != nil {
 				t.Fatal(err)
 			}
 			return p
-		}, "writable"},
+		}, ": is group or world writable"},
 		{"symlinked directory", func(t *testing.T) string {
 			real, _ := trustedState(t, "default-runtime", "codex\n")
 			link := filepath.Join(t.TempDir(), "state-link")
@@ -113,7 +113,7 @@ func TestReadTrusted_RefusesPlantedFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 			return filepath.Join(link, "default-runtime")
-		}, "symlink"},
+		}, ": is a symlink (possible planted-directory attack)"},
 		{"directory in place of the file", func(t *testing.T) string {
 			dir, _ := trustedState(t, "unused", "x")
 			p := filepath.Join(dir, "default-runtime")
@@ -121,10 +121,13 @@ func TestReadTrusted_RefusesPlantedFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 			return p
-		}, "not a regular file"},
+		}, ": is not a regular file"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// want is the reason itself, with the ": " that follows the path: the
+			// temp directory is named after this subtest ("symlinked_file"), so a
+			// bare word would match the path and not the reason.
 			path := tc.setup(t)
 			data, err := ReadTrusted(path, 256)
 			if err == nil {

@@ -253,7 +253,7 @@ func TestReadDefaultRuntime_RefusesPlantedFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		name, warn := ReadDefaultRuntime(state)
-		if name != "" || !strings.Contains(warn, "symlink") {
+		if name != "" || !strings.Contains(warn, ": is a symlink") {
 			t.Errorf("= %q, %q; want it ignored with a symlink warning", name, warn)
 		}
 	})
@@ -267,7 +267,7 @@ func TestReadDefaultRuntime_RefusesPlantedFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		name, warn := ReadDefaultRuntime(state)
-		if name != "" || !strings.Contains(warn, "writable") {
+		if name != "" || !strings.Contains(warn, ": is group or world writable") {
 			t.Errorf("= %q, %q; want it ignored with a writable warning", name, warn)
 		}
 	})
@@ -279,8 +279,8 @@ func TestReadDefaultRuntime_RefusesPlantedFiles(t *testing.T) {
 		if err := os.Chmod(state, 0o777); err != nil {
 			t.Fatal(err)
 		}
-		if name, warn := ReadDefaultRuntime(state); name != "" || warn == "" {
-			t.Errorf("= %q, %q; want it ignored with a warning", name, warn)
+		if name, warn := ReadDefaultRuntime(state); name != "" || !strings.Contains(warn, ": is group or world writable") {
+			t.Errorf("= %q, %q; want it ignored with a writable-directory warning", name, warn)
 		}
 	})
 	t.Run("symlinked state directory", func(t *testing.T) {
@@ -292,7 +292,7 @@ func TestReadDefaultRuntime_RefusesPlantedFiles(t *testing.T) {
 		if err := os.Symlink(real, link); err != nil {
 			t.Fatal(err)
 		}
-		if name, warn := ReadDefaultRuntime(link); name != "" || !strings.Contains(warn, "symlink") {
+		if name, warn := ReadDefaultRuntime(link); name != "" || !strings.Contains(warn, ": is a symlink") {
 			t.Errorf("= %q, %q; want it ignored with a symlink warning", name, warn)
 		}
 	})
