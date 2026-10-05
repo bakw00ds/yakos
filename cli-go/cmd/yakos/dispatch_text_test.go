@@ -43,6 +43,10 @@ func TestDispatchCLI_PrintsAgentTextNotRawStream(t *testing.T) {
 			"YAKOS_ROOT":         root,
 			"PATH":               stubDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"YAKOS_DISPATCH_LOG": t.TempDir(),
+			// The fake runtime counts as signed in. Dispatch refuses a codex or agy
+			// that is not (K-132), and HOME is empty here, so no login file exists.
+			"OPENAI_API_KEY":      "test-key",
+			"ANTIGRAVITY_API_KEY": "test-key",
 		})
 	if exit != 0 {
 		t.Fatalf("exit = %d\nstderr:\n%s", exit, stderr)
