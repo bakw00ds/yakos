@@ -94,13 +94,16 @@ func TestCodexExecCmd_ModelFlag(t *testing.T) {
 		want    string // "" means -m must be absent
 		wantLog bool
 	}{
-		{"gpt-5", "gpt-5", false},
+		{"gpt-5.5", "gpt-5.5", false}, // a real catalog id passes through
+		{"gpt-5.6-terra", "gpt-5.6-terra", false},
 		{"gpt-5.1-codex-max", "gpt-5.1-codex-max", false},
-		{"balanced", "gpt-5-mini", false}, // semantic alias resolves through the codex column
-		{"cheap", "gpt-5-nano", false},
-		{"best", "gpt-5", false},
-		{"reasoning", "o4-mini", false},
-		{"frontier", "gpt-5", false},
+		// A semantic alias has no codex mapping (the catalog's tier semantics are
+		// undocumented): it resolves to the harness default, silently.
+		{"cheap", "", false},
+		{"balanced", "", false},
+		{"best", "", false},
+		{"reasoning", "", false},
+		{"frontier", "", false},
 		{"", "", false},
 		{"sonnet", "", false}, // the dispatch layer's Claude default is not a codex model
 		{"haiku", "", false},
@@ -455,6 +458,8 @@ func TestAgyExecCmd_ModelEffortConversation(t *testing.T) {
 	skipOnWindows(t)
 	useEmptyHome(t)
 	project := t.TempDir()
+	// balanced resolves to gemini-3.8-flash-high. The id carries its own effort,
+	// and agy rejects --effort next to it, so --effort is not passed.
 	cmd := (&AgyAdapter{}).ExecCmd(context.Background(), DispatchRequest{
 		Project: project, AgentName: "backend", Task: "t",
 		ModelOverride: "balanced", Effort: "xhigh", ConversationID: "conv-123",
@@ -464,8 +469,7 @@ func TestAgyExecCmd_ModelEffortConversation(t *testing.T) {
 		"--add-dir", project,
 		"--sandbox",
 		"--dangerously-skip-permissions",
-		"--model", "gemini-3.1-pro",
-		"--effort", "xhigh",
+		"--model", "gemini-3.8-flash-high",
 		"--output-format", "stream-json",
 		"--conversation", "conv-123",
 		"-p", "@yakos-backend t",
@@ -477,15 +481,18 @@ func TestAgyExecCmd_ModelResolution(t *testing.T) {
 	useEmptyHome(t)
 	captureModelDrops(t)
 	for model, want := range map[string]string{
-		"gemini-3.1-pro": "gemini-3.1-pro",
-		"balanced":       "gemini-3.1-pro",
-		"cheap":          "gemini-3.5-flash",
-		"best":           "claude-opus-4.6", // Antigravity can front Anthropic models
-		"frontier":       "claude-fable-5",
-		"sonnet":         "", // the dispatch layer's Claude default is not an agy model
-		"":               "",
-		"--sandbox":      "", // never a flag
-		"Gemini 3.1 Pro": "",
+		"gemini-3.8-flash-low":   "gemini-3.8-flash-low", // ids come from `agy models`
+		"claude-sonnet-5-5-high": "claude-sonnet-5-5-high",
+		"gpt-oss-120b-medium":    "gpt-oss-120b-medium",
+		"cheap":                  "gemini-3.8-flash-low",
+		"balanced":               "gemini-3.8-flash-high",
+		"best":                   "claude-opus-5-5-medium", // Antigravity can front Anthropic models
+		"reasoning":              "gemini-3.1-pro-high",
+		"frontier":               "claude-opus-5-5-high",
+		"sonnet":                 "", // the dispatch layer's Claude default is not an agy model
+		"":                       "",
+		"--sandbox":              "", // never a flag
+		"Gemini 3.1 Pro":         "",
 	} {
 		cmd := (&AgyAdapter{}).ExecCmd(context.Background(), DispatchRequest{
 			Project: t.TempDir(), AgentName: "backend", Task: "t", ModelOverride: model,
@@ -496,6 +503,61 @@ func TestAgyExecCmd_ModelResolution(t *testing.T) {
 			t.Errorf("model %q: --model must be absent, got %q", model, cmd.Args)
 		case want != "" && (i < 0 || cmd.Args[i+1] != want):
 			t.Errorf("model %q: want --model %s in %q", model, want, cmd.Args)
+		}
+	}
+}
+
+// TestAgyEffortIsOmittedWhenTheModelIDCarriesIt pins the live finding: agy 1.2.17
+// answers `--model gemini-3.8-flash-low --effort high` with "invalid model
+// selection ... conflicts with --effort=high" (exit 1), while --effort alone,
+// with no --model, works. Every id agy lists ends in -low, -medium or -high.
+func TestAgyEffortIsOmittedWhenTheModelIDCarriesIt(t *testing.T) {
+	skipOnWindows(t)
+	useEmptyHome(t)
+	captureModelDrops(t)
+	for _, tc := range []struct {
+		name, model string
+		wantEffort  bool
+	}{
+		{"suffixed id", "gemini-3.8-flash-low", false},
+		{"suffixed id, other family", "claude-opus-5-5-medium", false},
+		{"suffixed id, oss", "gpt-oss-120b-medium", false},
+		{"alias that resolves to a suffixed id", "best", false},
+		{"no model at all", "", true},
+		{"Claude tier (dropped, so no model)", "sonnet", true},
+		{"an id without a suffix", "some-future-model", true},
+	} {
+		for _, chat := range []bool{false, true} {
+			var args []string
+			if chat {
+				args = (&AgyAdapter{}).ChatExecCmd(context.Background(), ChatDispatchRequest{
+					Project: t.TempDir(), UserText: "hi", ModelOverride: tc.model, Effort: "high",
+				}).Args
+			} else {
+				args = (&AgyAdapter{}).ExecCmd(context.Background(), DispatchRequest{
+					Project: t.TempDir(), AgentName: "backend", Task: "t", ModelOverride: tc.model, Effort: "high",
+				}).Args
+			}
+			i := indexOf(args, "--effort")
+			if tc.wantEffort && (i < 0 || args[i+1] != "high") {
+				t.Errorf("%s (chat=%v): want --effort high in %q", tc.name, chat, args)
+			}
+			if !tc.wantEffort && i >= 0 {
+				t.Errorf("%s (chat=%v): agy rejects --effort next to a suffixed id; got %q", tc.name, chat, args)
+			}
+		}
+	}
+}
+
+func TestAgyIDCarriesEffort(t *testing.T) {
+	for id, want := range map[string]bool{
+		"gemini-3.8-flash-high": true, "gemini-3.7-flash-medium": true, "gemini-3.6-flash-low": true,
+		"gemini-3.1-pro-high": true, "gemini-3.1-pro-low": true, "claude-opus-5-5-low": true,
+		"claude-sonnet-5-5-medium": true, "gpt-oss-120b-medium": true,
+		"": false, "gemini-3.8-flash": false, "high": false, "flash-highest": false, "x-low-y": false,
+	} {
+		if got := agyIDCarriesEffort(id); got != want {
+			t.Errorf("agyIDCarriesEffort(%q) = %v, want %v", id, got, want)
 		}
 	}
 }
@@ -551,15 +613,14 @@ func TestAgyChatExecCmd_PersonaPrefixAndStreamJSON(t *testing.T) {
 	project := t.TempDir()
 	cmd := (&AgyAdapter{}).ChatExecCmd(context.Background(), ChatDispatchRequest{
 		Project: project, UserText: "hello", AgentSystemPrompt: "You are the lead.",
-		ModelOverride: "gemini-3.1-pro", Effort: "medium",
+		ModelOverride: "gemini-3.1-pro-high", Effort: "medium",
 	})
 	assertArgv(t, cmd.Args, []string{
 		"agy",
 		"--add-dir", project,
 		"--sandbox",
 		"--dangerously-skip-permissions",
-		"--model", "gemini-3.1-pro",
-		"--effort", "medium",
+		"--model", "gemini-3.1-pro-high", // carries its own effort: no --effort
 		"--output-format", "stream-json",
 		"-p", "You are the lead.\n\n---\n\nhello",
 	})
@@ -620,12 +681,34 @@ func TestHarnessModelAliasesMatchSettingsFile(t *testing.T) {
 }
 
 func TestHarnessModelIDResolvesOnlyKnownRuntimes(t *testing.T) {
-	captureModelDrops(t)
-	if got := HarnessModelID("codex", "balanced"); got != "gpt-5-mini" {
-		t.Errorf("codex balanced = %q", got)
+	drops := captureModelDrops(t)
+	if got := HarnessModelID("agy", "balanced"); got != "gemini-3.8-flash-high" {
+		t.Errorf("agy balanced = %q", got)
 	}
 	// A runtime without a table passes a well-formed id through unchanged.
 	if got := HarnessModelID("other", "some-model-1"); got != "some-model-1" {
 		t.Errorf("unknown runtime passthrough = %q", got)
+	}
+	if drops.Len() != 0 {
+		t.Errorf("unexpected drop note: %q", drops.String())
+	}
+}
+
+// TestCodexAliasesAreEmptyOnPurpose: every codex alias maps to the empty string
+// (harness default). The old gpt-5 / gpt-5-mini / gpt-5-nano / o4-mini ids are
+// not in the live ChatGPT-login catalog, and codex rejects an unknown id with
+// HTTP 400, so an alias must never turn into a -m the account cannot use.
+func TestCodexAliasesAreEmptyOnPurpose(t *testing.T) {
+	drops := captureModelDrops(t)
+	for _, alias := range []string{"cheap", "balanced", "best", "reasoning", "frontier"} {
+		if v, ok := harnessModelAliases["codex"][alias]; !ok || v != "" {
+			t.Errorf("codex alias %q = %q (present=%v), want the empty string", alias, v, ok)
+		}
+		if got := HarnessModelID("codex", alias); got != "" {
+			t.Errorf("HarnessModelID(codex, %q) = %q, want no model", alias, got)
+		}
+	}
+	if drops.Len() != 0 {
+		t.Errorf("an empty alias is the harness default, not a mistake; got note %q", drops.String())
 	}
 }

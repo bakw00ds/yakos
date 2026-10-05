@@ -25,6 +25,7 @@
 #       and — critically — does not exit the test runner process
 #   7. runtime-resolve: yk_rt_default falls back to claude
 #   8. runtime-resolve: yk_rt_capability returns 0/1 correctly
+#  11. general-codex / general-agy model pins and the alias file's agy / codex columns
 #  17. codex emitter: marker, operator files left alone, legacy upgrade (K-134)
 #  18. agy emitter: <skills>/yakos-<id>/SKILL.md layout, marker, .gitignore, cleanup
 #  19. Go materializers byte-identical to the bash emitters under YAKOS_IMPL=go;
@@ -374,9 +375,13 @@ done
 
 # ---- 11. runtime: + model: fields pinned to expected values -----------------
 echo
-echo "Test 11: runtime: pinned (not claude); model: set to concrete model IDs"
+echo "Test 11: runtime: pinned (not claude); model: matches what the runtime can use"
+# general-codex pins the alias `balanced`: lib/settings/model-aliases.json maps
+# every codex alias to "" (harness default) because the ChatGPT-login catalog has
+# no documented tiers and codex rejects an unknown id with HTTP 400. general-agy
+# pins a real id from `agy models` (gemini-3.8-flash-high is the `balanced` alias).
 # Format: "agent-id:expected-runtime:expected-model"
-for check in "general-codex:codex:gpt-5" "general-agy:agy:gemini-3.5"; do
+for check in "general-codex:codex:balanced" "general-agy:agy:gemini-3.8-flash-high"; do
     agent_id="${check%%:*}"
     rest="${check#*:}"
     expected_rt="${rest%%:*}"
@@ -399,22 +404,48 @@ for check in "general-codex:codex:gpt-5" "general-agy:agy:gemini-3.5"; do
         fail "$agent_id: runtime must not be 'claude' (defeats the purpose)"
     fi
 
-    # model check — must be the concrete ID, not a semantic alias
     actual_model="$(yk_agents_fm_get "$fm" "model")"
     if [ "$actual_model" = "$expected_model" ]; then
         ok "$agent_id: model = $actual_model (expected $expected_model)"
     else
         fail "$agent_id: model = '$actual_model' (expected '$expected_model')"
     fi
-    # model must not be a semantic alias (balanced/cheap/best/reasoning)
+    # The pinned model must resolve to something real for that runtime: an alias
+    # whose column is "" means the harness default; any other value must be the
+    # id the alias file lists for that runtime, or an id that is not an alias.
+    aliases_file="$REPO_ROOT/lib/settings/model-aliases.json"
     case "$actual_model" in
-        balanced|cheap|best|reasoning)
-            fail "$agent_id: model '$actual_model' is a semantic alias, not a concrete model ID"
+        cheap|balanced|best|reasoning|frontier)
+            mapped="$(jq -r --arg a "$actual_model" --arg r "$actual_rt" '.aliases[$a][$r] // "<unmapped>"' "$aliases_file")"
+            if [ "$actual_rt" = "codex" ] && [ -z "$mapped" ]; then
+                ok "$agent_id: alias '$actual_model' deliberately maps to the codex harness default"
+            elif [ "$mapped" != "<unmapped>" ] && [ -n "$mapped" ]; then
+                ok "$agent_id: alias '$actual_model' maps to '$mapped' for $actual_rt"
+            else
+                fail "$agent_id: alias '$actual_model' has no mapping for $actual_rt in model-aliases.json"
+            fi
             ;;
         *)
             ok "$agent_id: model '$actual_model' is a concrete model ID (not a semantic alias)"
             ;;
     esac
+done
+# The ids the alias file names for agy must be ones `agy models` lists (2026-10-05).
+for alias_name in cheap balanced best reasoning frontier; do
+    got="$(jq -r --arg a "$alias_name" '.aliases[$a].agy' "$REPO_ROOT/lib/settings/model-aliases.json")"
+    case "$got" in
+        gemini-3.8-flash-low|gemini-3.8-flash-high|claude-opus-5-5-medium|claude-opus-5-5-high|gemini-3.1-pro-high)
+            ok "model-aliases.json: agy $alias_name = $got (a real agy model id)" ;;
+        *) fail "model-aliases.json: agy $alias_name = '$got' is not an id agy lists" ;;
+    esac
+done
+for alias_name in cheap balanced best reasoning frontier; do
+    got="$(jq -r --arg a "$alias_name" '.aliases[$a].codex' "$REPO_ROOT/lib/settings/model-aliases.json")"
+    if [ -z "$got" ]; then
+        ok "model-aliases.json: codex $alias_name is empty (harness default)"
+    else
+        fail "model-aliases.json: codex $alias_name = '$got' (codex aliases must stay empty until the registry fills them)"
+    fi
 done
 
 # ---- 12. find_agent_file resolves general-codex + general-agy ------------

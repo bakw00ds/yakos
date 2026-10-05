@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 // buildEnvAgy constructs the subprocess environment for agy dispatch: an
@@ -39,8 +40,9 @@ func (a *AgyAdapter) Available(_ context.Context) bool {
 
 // agyModelFlag returns the value for --model, or "" to omit the flag. See
 // HarnessModelID: aliases resolve through the agy column of the alias table
-// (best is claude-opus-4.6, because Antigravity can front Anthropic models)
-// and a Claude tier (the dispatch default) is dropped.
+// (best is claude-opus-5-5-medium, because Antigravity can front Anthropic
+// models) and a Claude tier (the dispatch default) is dropped. The ids are the
+// ones `agy models` lists for the signed-in account.
 func agyModelFlag(model string) string { return HarnessModelID("agy", model) }
 
 // agyEffort returns the --effort value, or "" for none. agy takes the same
@@ -51,6 +53,26 @@ func agyEffort(effort string) string {
 		return effort
 	}
 	return ""
+}
+
+// agyIDCarriesEffort reports whether an agy model id already encodes a
+// reasoning effort as its -low, -medium or -high suffix. Every id `agy models`
+// lists does (gemini-3.8-flash-low, claude-opus-5-5-high, gpt-oss-120b-medium).
+// agy rejects such an id combined with --effort: with agy 1.2.17,
+// `--model gemini-3.8-flash-low --effort high` exits 1 with "invalid model
+// selection ... --model gemini-3.8-flash-low conflicts with --effort=high" and a
+// stream-json result event of status ERROR. `--effort` on its own, with no
+// --model, works (it applies to the default model), so the flag is passed only
+// when no id carrying an effort is. (The binary also has a message `--model %s
+// requires --effort`, so a bare base id without a suffix presumably needs the
+// flag; that was not observed.)
+func agyIDCarriesEffort(id string) bool {
+	for _, suffix := range []string{"-low", "-medium", "-high"} {
+		if strings.HasSuffix(id, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // agyCommonArgs returns the flags shared by framed and chat invocations, in
@@ -73,10 +95,11 @@ func agyCommonArgs(workDir, model, effort string) []string {
 		args = append(args, "--sandbox")
 	}
 	args = append(args, "--dangerously-skip-permissions")
-	if m := agyModelFlag(model); m != "" {
+	m := agyModelFlag(model)
+	if m != "" {
 		args = append(args, "--model", m)
 	}
-	if e := agyEffort(effort); e != "" {
+	if e := agyEffort(effort); e != "" && !agyIDCarriesEffort(m) {
 		args = append(args, "--effort", e)
 	}
 	return append(args, "--output-format", "stream-json")
