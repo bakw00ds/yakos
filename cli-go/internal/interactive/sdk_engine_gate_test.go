@@ -129,7 +129,7 @@ func TestSDKEngineStart_RefusesWithoutAPIKeyBeforeSpawning(t *testing.T) {
 
 			err := eng.Start(startCtx(t))
 			if err == nil {
-				eng.Close()
+				_ = eng.Close()
 				t.Fatal("Start succeeded without ANTHROPIC_API_KEY: the sidecar would run on the claude.ai login")
 			}
 			if !errors.Is(err, yakruntime.ErrSDKAPIKeyRequired) {
@@ -158,7 +158,7 @@ func TestSDKEngineStart_RefusesAnOAuthTokenInTheAPIKeySlot(t *testing.T) {
 
 	err := eng.Start(startCtx(t))
 	if err == nil {
-		eng.Close()
+		_ = eng.Close()
 		t.Fatal("Start accepted a subscription OAuth token as the API key")
 	}
 	if !errors.Is(err, yakruntime.ErrSDKAPIKeyIsOAuthToken) {
@@ -206,7 +206,7 @@ func TestSDKEngineStart_SpawnsWithTheKeyAndWithoutOAuthMaterial(t *testing.T) {
 	if err := eng.Start(startCtx(t)); err != nil {
 		t.Fatalf("Start with a key set: %v", err)
 	}
-	defer eng.Close()
+	defer func() { _ = eng.Close() }()
 
 	raw, err := os.ReadFile(out)
 	if err != nil {

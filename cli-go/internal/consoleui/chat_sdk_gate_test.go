@@ -80,7 +80,7 @@ func TestStructuredQuestions_StartWithoutAPIKeyIsSurfacedAndNothingIsSpawned(t *
 	if err != nil {
 		t.Fatalf("open SSE: %v", err)
 	}
-	defer sse.Body.Close()
+	defer func() { _ = sse.Body.Close() }()
 	frames := make(chan consoleui.SSEEvent, 16)
 	go func() {
 		sc := bufio.NewScanner(sse.Body)
@@ -112,7 +112,7 @@ func TestStructuredQuestions_StartWithoutAPIKeyIsSurfacedAndNothingIsSpawned(t *
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("dispatch status = %d, want 202 (the failure is reported on the stream)", resp.StatusCode)
 	}
@@ -146,7 +146,7 @@ func TestStructuredQuestions_StartWithoutAPIKeyIsSurfacedAndNothingIsSpawned(t *
 		tr := get(t, ts.URL+"/api/chat/transcript?conversationId=conv-sdk-gate&operatorId=alice", tok)
 		var entries []consoleui.TranscriptEntry
 		_ = json.NewDecoder(tr.Body).Decode(&entries)
-		tr.Body.Close()
+		_ = tr.Body.Close()
 		var errText string
 		for _, e := range entries {
 			if e.Role == consoleui.RoleError {
