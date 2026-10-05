@@ -243,6 +243,42 @@ func TestSuperviseParity_Clear_RemovesFiles(t *testing.T) {
 	}
 }
 
+// K-128: a hook that could not take the counter lock journals its increment next to
+// the counter; clear removes those records with the counter, or the next hook would
+// fold them into a counter that was just cleared.
+func TestSuperviseParity_Clear_RemovesJournaledIncrements(t *testing.T) {
+	cfg := newSuperviseCfg(t, "clear")
+	cfg, repo := makeSuperviseProject(t, cfg, "proj")
+	writeSuperviseYAML(t, repo, "supervisor:\n  enabled: true\n")
+
+	wc := filepath.Join(cfg.AgentControlRoot, "proj", "work", "current")
+	for name, body := range map[string]string{
+		".supervisor-counter":            "7\n",
+		".supervisor-counter.add.11.1.1": "1\n",
+		".supervisor-counter.add.12.1.2": "1\n",
+		".supervisor-run.s.add.11.1.3":   "high=1\n{}\n", // a session's run-state record is not the counter's
+	} {
+		if err := os.WriteFile(filepath.Join(wc, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := supervise.Run(cfg)
+	if err != nil {
+		t.Fatalf("Run clear: %v", err)
+	}
+	if res.ClearedCount != 3 {
+		t.Errorf("ClearedCount = %d, want 3 (counter + two records)", res.ClearedCount)
+	}
+	for _, gone := range []string{".supervisor-counter", ".supervisor-counter.add.11.1.1", ".supervisor-counter.add.12.1.2"} {
+		if _, err := os.Stat(filepath.Join(wc, gone)); err == nil {
+			t.Errorf("%s survived clear", gone)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(wc, ".supervisor-run.s.add.11.1.3")); err != nil {
+		t.Errorf("clear removed a session's run-state record: %v", err)
+	}
+}
+
 // ---- scenario (f): set known key --------------------------------------------
 
 func TestSuperviseParity_Set_KnownKey(t *testing.T) {
