@@ -915,8 +915,8 @@ _ss_pend_put() { # <line>: append one preview line
     { printf '%s\n' "$1" >> "$_ss_pending"; } 2>/dev/null || return 0
     return 0
 }
-_ss_pend_append() { # [event-json]: defaults to $event
-    _ss_pend_put "${1-$event}"
+_ss_pend_append() { # append $event (the trigger being recorded) to the pending file
+    _ss_pend_put "$event"
     if [ "$st_pending" -gt 100 ]; then _ss_pend_trim; fi
     return 0
 }
