@@ -15,7 +15,7 @@ approvals and sandbox off. The bash `yakos dispatch` path, used when the
 bash tree is present and `YAKOS_IMPL` is unset, is unchanged until the Go
 dispatcher becomes the default.
 
-What you will notice:
+What you will notice with codex:
 
 - Commands the model runs can write only inside the project, `$TMPDIR` and
   `/tmp`. Other writes fail with "Operation not permitted".
@@ -25,6 +25,9 @@ What you will notice:
 - The network is off, so `npm install`, `go get` and `git push` fail. To allow
   it, set `[sandbox_workspace_write]` `network_access = true` in the
   `config.toml` of the `CODEX_HOME` yakOS uses.
+
+What to know about agy, which none of the above applies to:
+
 - agy still gets `--sandbox`, because it blocks the default write path.
   Under `--sandbox --dangerously-skip-permissions`, agy's macOS Seatbelt sandbox
   blocks writes outside the workspace by default but leaves file reads and
