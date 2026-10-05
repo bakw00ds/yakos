@@ -16,6 +16,7 @@ import (
 
 func policyBinary(t testing.TB) string {
 	t.Helper()
+	skipOnWindows(t)
 	return requireBinaryAt(t, resolveGoBinary(), os.Getenv("CI"))
 }
 

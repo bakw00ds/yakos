@@ -1,10 +1,10 @@
 package main
 
 // binary_requirement_test.go — K-137: a test that needs the built bin/yakos must
-// not skip quietly in CI. go-ci.yml runs `make build` before `go test` and says a
-// missing binary FAILS under CI=true; on a developer machine it skips with a
-// hint. The K-137 binary-driven tests share this one rule instead of each
-// deciding for itself.
+// not skip quietly in CI. go-ci.yml runs `make build` before `go test` (except on
+// Windows) and says a missing binary FAILS under CI=true; on a developer machine
+// it skips with a hint. The K-137 binary-driven tests share this one rule instead
+// of each deciding for itself.
 
 import (
 	"os"
@@ -12,6 +12,21 @@ import (
 	"runtime"
 	"testing"
 )
+
+// testGOOS is the OS the binary-driven tests believe they run on. A test
+// overrides it to exercise the Windows rule on any host.
+var testGOOS = runtime.GOOS
+
+// skipOnWindows skips a binary-driven test on Windows, in CI too: go-ci.yml
+// builds bin/yakos before go test only where runner.os is not Windows, so there
+// the binary is never present and "fail when it is missing" would fail every
+// such test.
+func skipOnWindows(t testing.TB) {
+	t.Helper()
+	if testGOOS == "windows" {
+		t.Skip("binary-driven tests do not run on Windows: go-ci.yml builds no binary there before go test")
+	}
+}
 
 // skipOrFailInCI skips the test, or fails it when ci is "true" (the value GitHub
 // Actions sets): a precondition the CI workflow guarantees has to be a failure
@@ -37,17 +52,30 @@ func requireBinaryAt(t testing.TB, bin, ci string) string {
 }
 
 // recordingTB lets a test watch what a helper does to the test it is given
-// without ending itself: Skipf and Fatalf are recorded, and the helper's own
-// return statements stop it (the real ones call runtime.Goexit).
+// without ending itself. Like the real one, Skip and Fatal stop the goroutine
+// they are called on, so use record to run a helper against it.
 type recordingTB struct {
 	testing.TB
 	skipped, failed bool
 }
 
 func (r *recordingTB) Helper()               {}
-func (r *recordingTB) Skip(...any)           { r.skipped = true }
-func (r *recordingTB) Skipf(string, ...any)  { r.skipped = true }
-func (r *recordingTB) Fatalf(string, ...any) { r.failed = true }
+func (r *recordingTB) Skip(...any)           { r.skipped = true; runtime.Goexit() }
+func (r *recordingTB) Skipf(string, ...any)  { r.skipped = true; runtime.Goexit() }
+func (r *recordingTB) Fatalf(string, ...any) { r.failed = true; runtime.Goexit() }
+
+// record runs fn against a fresh recordingTB on a goroutine of its own, as the
+// testing package runs a test, so a Skip or Fatal inside fn stops fn where it is.
+func record(fn func(t testing.TB)) *recordingTB {
+	rec := &recordingTB{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn(rec)
+	}()
+	<-done
+	return rec
+}
 
 func TestRequireBinaryAt_FailsUnderCIAndSkipsElsewhere(t *testing.T) {
 	dir := t.TempDir()
@@ -60,7 +88,7 @@ func TestRequireBinaryAt_FailsUnderCIAndSkipsElsewhere(t *testing.T) {
 	cases := []struct {
 		name, bin, ci      string
 		wantSkip, wantFail bool
-		wantReturnsThePath bool
+		wantTheBinaryBack  bool
 	}{
 		{"missing under CI=true fails", missing, "true", false, true, false},
 		{"missing on a developer machine skips", missing, "", true, false, false},
@@ -70,12 +98,12 @@ func TestRequireBinaryAt_FailsUnderCIAndSkipsElsewhere(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			rec := &recordingTB{}
-			got := requireBinaryAt(rec, c.bin, c.ci)
+			var got string
+			rec := record(func(tb testing.TB) { got = requireBinaryAt(tb, c.bin, c.ci) })
 			if rec.skipped != c.wantSkip || rec.failed != c.wantFail {
 				t.Errorf("skipped=%v failed=%v, want skipped=%v failed=%v", rec.skipped, rec.failed, c.wantSkip, c.wantFail)
 			}
-			if (got == c.bin) != c.wantReturnsThePath {
+			if (got == c.bin) != c.wantTheBinaryBack {
 				t.Errorf("returned %q, want the path back only when the binary exists", got)
 			}
 		})
@@ -87,8 +115,7 @@ func TestSkipOrFailInCI_OnlyTheExactCIValueFails(t *testing.T) {
 		ci       string
 		wantFail bool
 	}{{"true", true}, {"", false}, {"false", false}, {"1", false}} {
-		rec := &recordingTB{}
-		skipOrFailInCI(rec, c.ci, "needs a thing")
+		rec := record(func(tb testing.TB) { skipOrFailInCI(tb, c.ci, "needs a thing") })
 		if rec.failed != c.wantFail || rec.skipped == c.wantFail {
 			t.Errorf("CI=%q: failed=%v skipped=%v, want failed=%v", c.ci, rec.failed, rec.skipped, c.wantFail)
 		}
@@ -97,15 +124,31 @@ func TestSkipOrFailInCI_OnlyTheExactCIValueFails(t *testing.T) {
 
 // The two K-137 binary-driven helpers must use the shared rule, not a skip of their own.
 
+func TestPolicyBinary_SkipsOnWindowsEvenInCI(t *testing.T) {
+	// go-ci.yml builds no binary on Windows before go test, so a missing binary there is
+	// expected and must not become a failure. testGOOS makes the rule testable on any host.
+	old := testGOOS
+	testGOOS = "windows"
+	t.Cleanup(func() { testGOOS = old })
+	t.Setenv("YAKOS_GO_BINARY", filepath.Join(t.TempDir(), "no-such-yakos"))
+	t.Setenv("CI", "true")
+	rec := record(func(tb testing.TB) { _ = policyBinary(tb) })
+	if !rec.skipped || rec.failed {
+		t.Errorf("on Windows in CI: skipped=%v failed=%v, want skipped and not failed", rec.skipped, rec.failed)
+	}
+}
+
 func TestPolicyBinary_FailsInCIAndSkipsLocallyWhenTheBinaryIsMissing(t *testing.T) {
+	old := testGOOS
+	testGOOS = "linux" // the rule under test applies off Windows, whatever the host
+	t.Cleanup(func() { testGOOS = old })
 	t.Setenv("YAKOS_GO_BINARY", filepath.Join(t.TempDir(), "no-such-yakos"))
 	for _, c := range []struct {
 		ci       string
 		wantFail bool
 	}{{"true", true}, {"", false}} {
 		t.Setenv("CI", c.ci)
-		rec := &recordingTB{}
-		_ = policyBinary(rec)
+		rec := record(func(tb testing.TB) { _ = policyBinary(tb) })
 		if rec.failed != c.wantFail || rec.skipped == c.wantFail {
 			t.Errorf("CI=%q: failed=%v skipped=%v, want failed=%v", c.ci, rec.failed, rec.skipped, c.wantFail)
 		}
@@ -136,8 +179,7 @@ func TestTwinSetup_FailsInCIAndSkipsLocallyWithoutTheBinaryOrTheBashTree(t *test
 			wantFail bool
 		}{{"true", true}, {"", false}} {
 			t.Setenv("CI", ci.val)
-			rec := &recordingTB{}
-			_ = twinSetup(rec)
+			rec := record(func(tb testing.TB) { _ = twinSetup(tb) })
 			if rec.failed != ci.wantFail || rec.skipped == ci.wantFail {
 				t.Errorf("%s, CI=%q: failed=%v skipped=%v, want failed=%v", c.name, ci.val, rec.failed, rec.skipped, ci.wantFail)
 			}
