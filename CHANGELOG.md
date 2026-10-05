@@ -439,6 +439,24 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   warning and rejected by `yakos validate`. The chat summary event also
   carries `runtime_resolved`, the runtime that actually ran the turn.
 
+- **Compose no longer follows a symlinked agent file out of the project, or
+  blocks or exhausts memory on a special file (K-132 follow-up, sec-324).** A
+  cloned repository controls the project's `.claude/agents`, and the roster
+  reader followed whatever a link there pointed at. A link to a file such as
+  `~/.aws/credentials` became an agent's persona: its first line was the
+  description `/api/skills` returns to every reader of the endpoint, and the
+  daemon sent the whole file to the model vendor as the system prompt. A
+  dangling link or a link to a directory emptied the roster, a link to a FIFO
+  blocked it for good, and a link to `/dev/zero` would have used up the daemon's
+  memory. A symlinked agent file is now followed only to a regular file inside
+  the framework's `lib/` or the project directory, so the per-file links an
+  install makes into `lib/agents` keep working. Anything else that is not a
+  regular file is skipped without being opened, a file over 4 MiB is skipped,
+  and the read itself is bounded. Each is skipped with the same once-per-file
+  warning that names the file, and so is any failure to read a file in the
+  project directory, so one bad file no longer stops the other agents. A
+  framework file that cannot be read is still an error.
+
 - **codex dispatch is sandboxed by default; agy gets `--sandbox` but is not
   contained (K-133, K-158).** The Go dispatcher (console, MCP, Flows, JSON-RPC,
   `YAKOS_IMPL=go yakos dispatch`) ran both harnesses with approvals and sandbox

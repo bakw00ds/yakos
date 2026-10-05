@@ -146,6 +146,13 @@ type ComposedAgent struct {
 // a cloned repository controls the project's, must not stop every other agent
 // from composing. The extends step is different: an agent cannot be composed
 // without the template it extends, so that stays an error.
+//
+// Files are read by readAgentFile (see agentfile.go): a symlink is followed only
+// to a regular file inside the framework's lib/ or the project directory,
+// anything that is not a regular file is skipped unopened, and a file over
+// MaxAgentFileBytes is skipped. Each is a skip with the same once-per-file
+// warning, and so is any failure to read a file in the project directory. Only
+// a failure to read a framework file is an error.
 func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 	fwDir := filepath.Join(yakosRoot, "lib", "agents")
 	projDir := ""
@@ -160,7 +167,9 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 	index := make(map[string]ComposedAgent)
 	var order []string // tracks insertion order for stable output
 
-	addDir := func(dir string) error {
+	roots := AgentFileRoots(yakosRoot, project)
+
+	addDir := func(dir string, fromProject bool) error {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -190,7 +199,21 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 				continue
 			}
 
-			agent, err := parseAgent(yakosRoot, id, path)
+			data, skip, readErr := readAgentFile(path, roots)
+			switch {
+			case skip != "":
+				warnSkippedAgentFile(path, skip)
+				continue
+			case readErr != nil && fromProject:
+				// A cloned repository controls this file, so a failure to read it
+				// must not take the whole roster down.
+				warnSkippedAgentFile(path, "cannot be read: "+readErr.Error())
+				continue
+			case readErr != nil:
+				return fmt.Errorf("agentscompose: parse %s: read: %w", path, readErr)
+			}
+
+			agent, err := parseAgentContent(yakosRoot, id, string(data))
 			var tooLong *lineTooLongError
 			if errors.As(err, &tooLong) {
 				warnSkippedAgentFile(path, tooLong.Error())
@@ -207,11 +230,11 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 		return nil
 	}
 
-	if err := addDir(fwDir); err != nil {
+	if err := addDir(fwDir, false); err != nil {
 		return nil, err
 	}
 	if projDir != "" {
-		if err := addDir(projDir); err != nil {
+		if err := addDir(projDir, true); err != nil {
 			return nil, err
 		}
 	}
@@ -243,14 +266,9 @@ func warnSkippedAgentFile(path, reason string) {
 	fmt.Fprintf(WarnWriter, "yakos: WARN: ignoring agent file %s: %s\n", path, reason)
 }
 
-// parseAgent reads, parses, and resolves a single agent .md file.
-func parseAgent(yakosRoot, id, path string) (ComposedAgent, error) {
-	data, err := os.ReadFile(path) //nolint:gosec
-	if err != nil {
-		return ComposedAgent{}, fmt.Errorf("read: %w", err)
-	}
-	content := string(data)
-
+// parseAgentContent parses and resolves the content of a single agent .md file.
+// The file is read by readAgentFile, which is where what may be read is decided.
+func parseAgentContent(yakosRoot, id, content string) (ComposedAgent, error) {
 	fm, body, err := splitFrontmatter(content)
 	if err != nil {
 		return ComposedAgent{}, err
