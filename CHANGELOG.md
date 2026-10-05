@@ -351,8 +351,12 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   off (K-132 follow-up).** The roster reader used a line scanner whose default
   limit is 64 KiB, so a line over it stopped the scan without a word and
   everything after it, in practice the rest of the agent's persona, vanished
-  from the prompt. Lines up to 1 MiB are now read whole, and a longer one makes
-  composing the roster fail with an error naming the file and the line.
+  from the prompt. Lines up to 1 MiB are now read whole. An agent file with a
+  longer line is skipped with one warning that names the file and the line, so
+  the other agents still dispatch (a cloned repository controls the project's
+  agent files, and one bad file must not stop them all). An agent that extends a
+  template with such a line, and the skills listing for a skill file with one,
+  still fail with an error that names the file.
 
 - **claude chat refuses an agent persona over 64 KiB before it starts
   (K-132 follow-up).** The persona is an argument of the claude command

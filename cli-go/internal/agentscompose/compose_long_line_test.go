@@ -63,30 +63,103 @@ func TestCompose_ReadsALongFrontmatterLine(t *testing.T) {
 	}
 }
 
-// A line over the bound is refused, and the error names the file and the line.
-func TestCompose_RefusesALineOverTheBound(t *testing.T) {
+// rosterIDs lists the ids of a roster, in order.
+func rosterIDs(roster []ComposedAgent) []string {
+	ids := make([]string, 0, len(roster))
+	for _, a := range roster {
+		ids = append(ids, a.ID)
+	}
+	return ids
+}
+
+// A file with a line over the bound is skipped with one warning that names the
+// file and the line, and the other agents still compose. It used to be an error
+// from Compose, which stopped every dispatch in the project (rev-324).
+func TestCompose_SkipsAFileWithALineOverTheBound(t *testing.T) {
+	warnings := captureWarnings(t)
 	root := t.TempDir()
 	writeFileT(t, filepath.Join(root, "lib", "agents", "ok.md"), longLineAgentHead+"fine\n")
 	bad := filepath.Join(root, "lib", "agents", "huge.md")
 	writeFileT(t, bad, longLineAgentHead+strings.Repeat("y", maxLineBytes+1)+"\n")
 
 	roster, err := Compose(root, "")
-	if err == nil {
-		t.Fatalf("a %d byte line was accepted (roster of %d)", maxLineBytes+1, len(roster))
+	if err != nil {
+		t.Fatalf("Compose = %v; one broken file must not fail the whole roster", err)
 	}
-	for _, want := range []string{"huge.md", "line 10", "longer than"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not mention %q", err, want)
+	if got := rosterIDs(roster); len(got) != 1 || got[0] != "ok" {
+		t.Fatalf("roster = %v, want only ok", got)
+	}
+	got := warnings.String()
+	for _, want := range []string{"WARN", bad, "line 10", "longer than"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("warning %q does not mention %q", got, want)
 		}
 	}
-	if roster != nil {
-		t.Errorf("a partial roster was returned alongside the error: %d agents", len(roster))
+	if n := strings.Count(got, "WARN"); n != 1 {
+		t.Errorf("%d warnings, want one: %q", n, got)
+	}
+
+	// Once per file: a daemon composes the roster on every request.
+	warnings.Reset()
+	if _, err := Compose(root, ""); err != nil {
+		t.Fatal(err)
+	}
+	if warnings.Len() != 0 {
+		t.Errorf("the second Compose warned again: %q", warnings.String())
 	}
 }
 
-// The framework template an agent extends is read the same way. lead-template.md
-// is not a roster entry, so only the extends step reads it here: the error must
-// come from that step and name the template.
+// A cloned repository controls the project's agent files, so one file with a
+// 2 MiB line must not stop the project's other agents, or the framework's, from
+// composing (rev-324 reproduced it with `yakos dispatch backend`).
+func TestCompose_AHugeLineInAProjectFileDoesNotStopOtherAgents(t *testing.T) {
+	warnings := captureWarnings(t)
+	root, project := t.TempDir(), t.TempDir()
+	writeAgentDir(t, filepath.Join(root, "lib", "agents"), map[string]string{"backend": "model: sonnet\n"})
+	writeAgentDir(t, filepath.Join(project, ".claude", "agents"), map[string]string{"helper": "model: haiku\n"})
+	huge := filepath.Join(project, ".claude", "agents", "huge.md")
+	writeFileT(t, huge, longLineAgentHead+strings.Repeat("z", 2<<20)+"\n")
+
+	roster, err := Compose(root, project)
+	if err != nil {
+		t.Fatalf("Compose = %v; the other agents must still compose", err)
+	}
+	if got := strings.Join(rosterIDs(roster), ","); got != "backend,helper" {
+		t.Errorf("roster = %q, want backend,helper (framework first, then the project's)", got)
+	}
+	if got := warnings.String(); !strings.Contains(got, huge) || !strings.Contains(got, "line 10") {
+		t.Errorf("warning %q does not name the file and the line", got)
+	}
+}
+
+// A project file that would have overridden a framework agent is ignored when
+// it has a line over the bound, so the framework agent stays. That is the same
+// trade as for a runtime-named file: one warning, and nothing else is stopped.
+func TestCompose_AnOversizedOverrideLeavesTheFrameworkAgentInPlace(t *testing.T) {
+	warnings := captureWarnings(t)
+	root, project := t.TempDir(), t.TempDir()
+	writeAgentDir(t, filepath.Join(root, "lib", "agents"), map[string]string{"backend": "model: sonnet\n"})
+	override := filepath.Join(project, ".claude", "agents", "backend.md")
+	writeFileT(t, override, "---\nid: backend\nmodel: opus\n---\n\n## Purpose\n\nProject override.\n\n"+strings.Repeat("o", maxLineBytes+1)+"\n")
+
+	roster, err := Compose(root, project)
+	if err != nil || len(roster) != 1 {
+		t.Fatalf("Compose = %v, %v", rosterIDs(roster), err)
+	}
+	if roster[0].Model != "sonnet" || !strings.Contains(roster[0].Prompt, "Fixture backend") || strings.Contains(roster[0].Prompt, "Project override") {
+		t.Errorf("the framework backend was replaced by the broken override: model %q, prompt %.60q", roster[0].Model, roster[0].Prompt)
+	}
+	if !strings.Contains(warnings.String(), override) {
+		t.Errorf("warning %q does not name the override", warnings.String())
+	}
+}
+
+// The framework template an agent extends is read the same way, but a template
+// over the bound is refused, not skipped: the agent cannot be composed without it,
+// and composing it without would drop part of the persona. lead-template.md is
+// not a roster entry, so only the extends step reads it here: the error must come
+// from that step and name the template and the agent. This also pins that the
+// skip above does not swallow it.
 func TestCompose_RefusesALongLineInAnExtendedTemplate(t *testing.T) {
 	root := t.TempDir()
 	tmpl := filepath.Join(root, "lib", "agents", "lead-template.md")

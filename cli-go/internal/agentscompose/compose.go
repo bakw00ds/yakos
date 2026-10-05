@@ -140,6 +140,12 @@ type ComposedAgent struct {
 //
 // Skips README.md and lead-template.md (template files not addressable as
 // subagent_type).
+//
+// An agent file with a line over maxLineBytes is skipped with one warning that
+// names the file and the line, as a runtime-named file is. One broken file, and
+// a cloned repository controls the project's, must not stop every other agent
+// from composing. The extends step is different: an agent cannot be composed
+// without the template it extends, so that stays an error.
 func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 	fwDir := filepath.Join(yakosRoot, "lib", "agents")
 	projDir := ""
@@ -185,6 +191,11 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 			}
 
 			agent, err := parseAgent(yakosRoot, id, path)
+			var tooLong *lineTooLongError
+			if errors.As(err, &tooLong) {
+				warnSkippedAgentFile(path, tooLong.Error())
+				continue
+			}
 			if err != nil {
 				return fmt.Errorf("agentscompose: parse %s: %w", path, err)
 			}
@@ -221,10 +232,15 @@ var WarnWriter io.Writer = os.Stderr
 var warnedPaths sync.Map
 
 func warnRuntimeNamedAgent(path, id string) {
+	warnSkippedAgentFile(path, fmt.Sprintf("%q is a runtime name and would shadow the runtime's own agent; rename it", id))
+}
+
+// warnSkippedAgentFile says once per file why Compose left it out.
+func warnSkippedAgentFile(path, reason string) {
 	if _, seen := warnedPaths.LoadOrStore(path, struct{}{}); seen {
 		return
 	}
-	fmt.Fprintf(WarnWriter, "yakos: WARN: ignoring agent file %s: %q is a runtime name and would shadow the runtime's own agent; rename it\n", path, id)
+	fmt.Fprintf(WarnWriter, "yakos: WARN: ignoring agent file %s: %s\n", path, reason)
 }
 
 // parseAgent reads, parses, and resolves a single agent .md file.
@@ -248,7 +264,12 @@ func parseAgent(yakosRoot, id, path string) (ComposedAgent, error) {
 		if err == nil {
 			_, fwBody, splitErr := splitFrontmatter(string(fwData))
 			if splitErr != nil {
-				return ComposedAgent{}, fmt.Errorf("extends %s: %w", fwFile, splitErr)
+				// A refusal, not a skip: this agent cannot be composed without its
+				// template, and composing it without would drop part of the persona.
+				// %v and not %w on purpose. A *lineTooLongError found by errors.As
+				// means "skip this one file" in addDir, and the file at fault here is
+				// the template, not the agent.
+				return ComposedAgent{}, fmt.Errorf("extends %s: %v", fwFile, splitErr)
 			}
 			body = fwBody + "\n\n---\n\n" + body
 		}
@@ -400,7 +421,7 @@ func splitFrontmatter(content string) (frontmatter, body string, err error) {
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
 		if errors.Is(scanErr, bufio.ErrTooLong) {
-			return "", "", fmt.Errorf("line %d is longer than %d bytes; split it across lines", len(lines)+1, maxLineBytes)
+			return "", "", &lineTooLongError{Line: len(lines) + 1}
 		}
 		return "", "", scanErr
 	}
@@ -431,6 +452,16 @@ func splitFrontmatter(content string) (frontmatter, body string, err error) {
 // on the chat paths), so 1 MiB is far beyond sane and still bounds what one
 // malformed line can make the roster reader hold.
 const maxLineBytes = 1 << 20
+
+// lineTooLongError reports a line over maxLineBytes and where it is. Compose
+// skips an agent whose own file returns it (see addDir) and refuses when the
+// file at fault is an extended template, which is why the type exists: the two
+// cases need telling apart.
+type lineTooLongError struct{ Line int }
+
+func (e *lineTooLongError) Error() string {
+	return fmt.Sprintf("line %d is longer than %d bytes; split it across lines", e.Line, maxLineBytes)
+}
 
 // parseFrontmatter parses simple key: value YAML lines from frontmatter.
 // Returns a map of key → raw value. Lists (tools: [a, b]) are stored as-is.
