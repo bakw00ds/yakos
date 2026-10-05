@@ -13,6 +13,7 @@ package consoleui_test
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/dispatch"
@@ -102,4 +103,73 @@ func TestChatDispatch_ASuccessfulTurnResetsTheFailureCount(t *testing.T) {
 		{wantID: "sess-2"},
 		{failWith: "Error: unable to continue", wantID: "sess-2", wantFailures: 1}, // 1st again, so kept
 	})
+}
+
+// Cancelling a resumed turn is not a failed resume. The cancel kills claude, so
+// the turn ends non-zero, and counting that would forget the stored session after
+// two cancelled turns. The handler skips the failure accounting for a turn whose
+// context was cancelled; this pins that guard.
+//
+// Each turn has its own session id. A cancel removes the session's entry at once
+// and the old goroutine removes it again when it finishes, so reusing the id right
+// after a cancel would let the old goroutine delete the new turn's entry (and the
+// new turn could no longer be cancelled). The failure accounting runs after the
+// turn's summary is written, so the test waits for the summaries and then gives the
+// bad state, if the guard is gone, time to appear before it looks.
+func TestChatDispatch_CancelledResumedTurnsDoNotForgetTheSession(t *testing.T) {
+	root := routingYakosRoot(t)
+	fake := installFakeChatClaude(t)
+	svc := dispatch.NewService(dispatch.ServiceConfig{YakosRoot: root, WorkspaceRoot: t.TempDir()})
+	ts, tok, workDir, _ := newRoutingServer(t, root, svc)
+	store := consoleui.NewTranscripts(workDir)
+	const conv = "conv-cancel-resume"
+
+	dispatchTurn := func(sess string) {
+		t.Helper()
+		if code, body := postDispatch(t, ts, tok, map[string]any{"agent": "backend", "conversationId": conv, "sessionId": sess}); code != http.StatusAccepted {
+			t.Fatalf("dispatch %s: %d %s", sess, code, body)
+		}
+	}
+
+	// Turn 0 stores the session.
+	fake.set(t, "ok", "sess-A")
+	dispatchTurn("s-0")
+	waitUntil(t, "turn 0 to store its session id", func() bool { return store.NativeSession(conv, "claude", "alice") == "sess-A" })
+	waitForTurns(t, store, conv, 1)
+
+	// Two resumed turns, each cancelled while claude is running.
+	fake.set(t, "hang", "unused")
+	for i := 1; i <= 2; i++ {
+		sess := "s-cancel-" + string(rune('0'+i))
+		dispatchTurn(sess)
+		want := i + 1
+		waitUntil(t, "the resumed claude to start", func() bool { return len(fake.calls(t)) >= want })
+		resp := post(t, ts.URL+"/api/chat/cancel", tok, `{"sessionId":"`+sess+`","operatorId":"alice"}`)
+		drainClose(resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("cancel %s: status %d", sess, resp.StatusCode)
+		}
+		waitForTurns(t, store, conv, 1+i) // the cancelled turn's summary is written
+	}
+
+	// If the guard were gone, the failure accounting now runs and, after the second
+	// cancelled turn, forgets the session. Give it time to show.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if store.NativeSession(conv, "claude", "alice") != "sess-A" || store.ResumeFailures(conv, "claude", "alice") != 0 {
+			t.Fatalf("cancelled turns were counted as failed resumes: session %q, %d failures",
+				store.NativeSession(conv, "claude", "alice"), store.ResumeFailures(conv, "claude", "alice"))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The next turn still resumes turn 0's session.
+	fake.set(t, "ok", "sess-B")
+	dispatchTurn("s-last")
+	waitUntil(t, "the last turn to store its session id", func() bool { return store.NativeSession(conv, "claude", "alice") == "sess-B" })
+	calls := fake.calls(t)
+	if last := calls[len(calls)-1]; !hasResume(last, "sess-A") {
+		t.Errorf("the turn after two cancelled turns did not resume the stored session: %v", last)
+	}
+	waitForTurns(t, store, conv, 4)
 }

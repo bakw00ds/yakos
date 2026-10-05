@@ -254,6 +254,9 @@ func installFakeChatClaude(t *testing.T) *fakeChatClaude {
 MODE=$(cat '` + f.modeFile + `' 2>/dev/null)
 SID=$(cat '` + f.sidFile + `' 2>/dev/null)
 case " $* " in *" --resume "*) RESUMED=1 ;; esac
+# "hang": run until killed. exec replaces the shell, so the kill a cancel sends
+# reaches the sleep itself and the stdout pipe closes.
+if [ "$MODE" = "hang" ]; then exec sleep 120; fi
 if [ "$MODE" = "stale" ] && [ -n "$RESUMED" ]; then
   echo "No conversation found with session ID: gone" >&2
   printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"gone","total_cost_usd":0,"usage":{}}'
