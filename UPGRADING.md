@@ -6,14 +6,14 @@ current release, what survives, and how to fully uninstall when needed.
 This doc is the **upgrade authority** — `yakos --help`, README, and
 CHANGELOG point here. Last updated for v0.39.
 
-## Unreleased: codex and agy are sandboxed by default (K-133)
+## Unreleased: codex is sandboxed by default, agy runs with `--sandbox` requested (K-133)
 
 The Go dispatcher (the console, MCP, Flows, JSON-RPC, and `yakos dispatch` with
 `YAKOS_IMPL=go`) now runs codex with `--sandbox workspace-write` and an approval
-policy that cannot prompt, and agy with `--sandbox`. Before, both ran with
-approvals and sandbox off. The bash `yakos dispatch` path, used when the bash
-tree is present and `YAKOS_IMPL` is unset, is unchanged until the Go dispatcher
-becomes the default.
+policy that cannot prompt, and agy with `--sandbox` requested. Before, both ran
+with approvals and sandbox off. The bash `yakos dispatch` path, used when the
+bash tree is present and `YAKOS_IMPL` is unset, is unchanged until the Go
+dispatcher becomes the default.
 
 What you will notice with codex:
 
@@ -25,8 +25,10 @@ What you will notice with codex:
 - The network is off, so `npm install`, `go get` and `git push` fail. To allow
   it, set `[sandbox_workspace_write]` `network_access = true` in the
   `config.toml` of the `CODEX_HOME` yakOS uses.
-- agy's sandbox restricts terminal commands but is probably weaker, because
-  headless agy keeps `--dangerously-skip-permissions` (auto-approve).
+- agy gets `--sandbox`, but its containment is under dedicated review (K-158):
+  one write outside the workspace was denied, nothing more was probed, and
+  headless agy keeps `--dangerously-skip-permissions` (auto-approve). Do not
+  rely on it as a boundary yet.
 
 To opt a runtime out, create `~/.yakos-state/router-policy.yml`:
 
@@ -48,8 +50,10 @@ Other changes in this release for codex and agy:
 
 - **Own codex login (optional).** Run `yakos auth login codex` once to give
   yakOS its own login in `~/.yakos-state/codex-home`, so dispatches and your
-  interactive codex stop sharing one `auth.json`. Until you do, dispatch keeps
-  using `$CODEX_HOME` or `~/.codex`. `yakos doctor` prints a hint.
+  interactive codex stop sharing one `auth.json`. Dispatch (Go and bash), Go chat
+  and the bash `yakos start` use it; Go `yakos start` still launches the
+  interactive codex with your own `CODEX_HOME`. Until you run the command,
+  dispatch keeps using `$CODEX_HOME` or `~/.codex`. `yakos doctor` prints a hint.
 - **agy skill files move.** The generated skills are now
   `.agents/skills/yakos-<id>/SKILL.md` directories, the layout agy 1.2.x loads.
   Old flat `yakos-<id>.md` files are not used and can be deleted; they are
@@ -65,10 +69,21 @@ Other changes in this release for codex and agy:
   (`codex debug models`) and codex answers an unknown id with HTTP 400. For agy
   they map to real `agy models` ids, whose `-low`/`-medium`/`-high` suffix is the
   reasoning effort: choose the effort by choosing the id, because agy rejects
-  `--effort` next to such an id and yakOS no longer passes it then.
-  `general-codex` now pins `balanced` and `general-agy` pins
+  `--effort` next to such an id and yakOS no longer passes it then. With no
+  suffixed id, agy takes `--effort low|medium|high` only; yakOS sends the
+  console's `xhigh` and `max` as `high` (with one stderr note) because agy exits
+  1 on them. `general-codex` now pins `balanced` and `general-agy` pins
   `gemini-3.8-flash-high` (its old pin, `gemini-3.5`, does not exist). To pick a
   specific model, put its id in an agent's `model:`.
+- **Agent files never name a Claude tier.** The generated codex and agy files
+  carry a `model` line only for a model that is not `haiku`, `sonnet`, `opus` or
+  `fable`. Before, an agent pinned to an alias (`general-codex` pins `balanced`)
+  got `model = "sonnet"` from the bash emitter, and codex refused to run it.
+  Run any dispatch once and the files are rewritten; nothing to do by hand.
+- **Odd agent text.** A control character in an agent's text is written as a
+  `\u00XX` escape instead of producing an invalid file, an agent whose text
+  holds a NUL byte is skipped with a note, and chat on codex and agy refuses an
+  agent persona over 64 KiB with a clear error.
 
 ## Upgrading to v0.61.0.0
 

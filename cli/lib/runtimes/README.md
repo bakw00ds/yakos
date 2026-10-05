@@ -64,8 +64,20 @@ line of the TOML, an HTML comment after the SKILL.md frontmatter). An emitter
 must not overwrite an existing file that lacks the marker (it is the operator's
 own); deleting the marker line is how an operator takes ownership of a generated
 file. The Go materializers in `cli-go/internal/agentscompose` emit identical
-bytes, and `tests/run-runtime-fixtures.sh` plus a Go parity test keep the two in
-step.
+bytes for the same agent JSON, and `tests/run-runtime-fixtures.sh` plus the Go
+parity tests keep the three implementations (the python emitter, its jq fallback
+for hosts without python3, and Go) in step. Three rules hold in all of them:
+
+- A `model` line is written only for a model that is not a Claude tier
+  (`haiku`, `sonnet`, `opus`, `fable`). The composer turns an alias such as
+  `balanced` into a tier, which neither codex nor agy has; codex fails a
+  subagent whose model it lacks.
+- A control character, DEL or a lone CR in the text is written as `\u00XX`,
+  which TOML and a YAML double-quoted scalar require. A NUL byte makes the
+  emitter refuse the agent (no file, status 0, one log line).
+- Leading line breaks of the prompt are dropped, so the bash composer (which
+  keeps the blank line after the frontmatter) and the Go composer (which trims
+  it) produce the same file.
 
 `yakos init` adds `**/yakos-*.toml`, `**/yakos-*.md` to the project
 `.gitignore` so emitted files don't accidentally land in commits.

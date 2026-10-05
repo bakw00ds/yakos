@@ -43,20 +43,33 @@ used `--output-format stream-json --sandbox --dangerously-skip-permissions
 - **Resume.** The second turn keeps the `conversation_id`, continues `step_index`
   (turn 1 used 0-1, turn 2 uses 2-4, including a `system_message` step), and its
   `result` reports `num_turns: 2` with usage that is **cumulative** across both
-  turns (turn 2's own usage is on its `agent_response` step). A parser that
-  accounts per turn must subtract the previous total.
+  turns (turn 2's own usage is on its `agent_response` step). The two turns were
+  separate processes, so the running total survives a process restart: turn 2's
+  `result.usage` is turn 1's result plus turn 2's own step usage, field by field.
+  A parser that accounts per run must not take `result.usage` of a resumed turn
+  as that turn's usage: use the sum of the DONE step usage seen in the run's own
+  stream (equal to the turn's own usage, and to `result.usage` on a first turn),
+  or subtract the previous total for the `conversation_id`.
 - **Effort and model ids.** agy ids carry their effort as a suffix
   (`gemini-3.8-flash-low`). Combined with `--effort` they are rejected: the
   process exits 1 and the only stdout line is a `result` with `status: "ERROR"`,
   an `error` message (`invalid model selection ... conflicts with --effort=high`),
   an empty `conversation_id`, zero usage and no `init` or step events. `--effort`
-  with no `--model` works, and `init` then has no `model` key (the turn files).
+  with no `--model` works, and `init` then has no `model` key (the turn files),
+  but only for the levels the default model offers: agy takes `low`, `medium` and
+  `high` and rejects `xhigh` and `max` (`invalid model selection (--model ""
+  --effort "max"): gemini-3.8-flash has no "max" effort (available: low, medium,
+  high)`; observed in review of this change, not recorded as a file). A bare base
+  id with no suffix needs `--effort`: `--model gemini-3.1-pro` alone exits 1 with
+  `requires --effort (available: low, high)`. The adapter sends `xhigh` and `max`
+  as `high`.
 - **Sandbox.** With `--sandbox --dangerously-skip-permissions` (`init.permission_mode`
-  is `always-proceed`) a command run through the `run_command` tool is still
-  sandboxed: the write outside the workspace fails with `Operation not permitted`
-  and exit code 1, and no file is created. The prompt told the model not to retry,
-  so this does not show whether the model would ask to run the command outside
-  the sandbox on its own.
+  is `always-proceed`) one write outside the workspace, made through the
+  `run_command` tool, failed with `Operation not permitted` and exit code 1, and
+  no file was created. That is a single observation, not a containment guarantee:
+  the prompt told the model not to retry, so it does not show whether the model
+  would ask to run the command outside the sandbox on its own, and nothing else
+  was probed. Containment under dedicated review (K-158).
 
 - **Skill discovery and the `@yakos-<id>` mention.** In a repository holding the
   generated `.agents/skills/yakos-probe/SKILL.md`, `agy -p "/skills"` lists it

@@ -6,8 +6,9 @@ each adapter supports, what gets soft-degraded, and the operator-facing
 trade-offs.
 
 Last updated: 2026-10-05 (K-133/K-134: Go adapters for codex 0.154.0 and
-agy 1.2.x, sandbox by default; the capability matrix drops gemini, whose shim
-was removed on 2026-09-01 in favor of agy).
+agy 1.2.x, codex sandboxed by default and agy started with `--sandbox`; the
+capability matrix drops gemini, whose shim was removed on 2026-09-01 in favor of
+agy).
 
 ## Capability matrix
 
@@ -20,12 +21,12 @@ was removed on 2026-09-01 in favor of agy).
 | `mcp-flag` (CLI flag) | ✅ `--mcp-config` | ❌ via `config.toml` | ❌ via `.agents/mcp_config.json` |
 | `system-prompt-flag` | ✅ `--append-system-prompt` | ❌ no flag; `-c developer_instructions="..."` works (verified) | ❌ no flag; persona prepended to the prompt |
 | Model flag | ✅ `--model <tier>` | ✅ `-m <id>` | ✅ `--model <id>` |
-| Reasoning effort | ✅ `--effort` | ✅ `-c model_reasoning_effort="..."` (low..max) | ⚠ the model id carries it (`-low`/`-medium`/`-high`); `--effort` only without `--model` |
+| Reasoning effort | ✅ `--effort` | ✅ `-c model_reasoning_effort="..."` (low..max) | ⚠ the model id carries it (`-low`/`-medium`/`-high`); `--effort` only without a suffixed id, and only `low`/`medium`/`high` (`xhigh` and `max` are sent as `high`) |
 | `fork-headless` | ✅ `--fork-session` | ✅ `codex fork` | ⚠ unverified — interactive only |
 | Non-interactive print mode | ✅ `claude -p` | ✅ `codex exec` | ✅ `agy -p` |
 | Machine-readable stream | ✅ `--output-format stream-json` | ✅ `exec --json` (JSONL) | ✅ `--output-format stream-json` (NDJSON, `event` key; recorded) |
 | Headless resume | ✅ `--resume <id>` | ✅ `codex exec resume <thread_id>` | ✅ `--conversation <id>` |
-| Sandbox by default (K-133) | n/a (permission mode) | ✅ `--sandbox workspace-write` | ✅ `--sandbox` (blocks writes outside the workspace; escalation untested) |
+| Sandbox by default (K-133) | n/a (permission mode) | ✅ `--sandbox workspace-write` | ⚠ `--sandbox` requested; containment under dedicated review (K-158) |
 | Agent file yakOS writes | (none — JSON injection) | `.codex/agents/yakos-<id>.toml` | `.agents/skills/yakos-<id>/SKILL.md` |
 
 ✅ = supported. ❌ = not supported (degrade or workaround). ⚠ = partial or unverified.
@@ -34,12 +35,14 @@ was removed on 2026-09-01 in favor of agy).
 
 codex and agy used to be dispatched with approvals and sandbox switched off. The
 Go dispatcher (console, MCP, Flows, JSON-RPC, `YAKOS_IMPL=go yakos dispatch`) now
-runs them sandboxed unless the operator opts out.
+runs codex sandboxed and starts agy with `--sandbox`, unless the operator opts
+out. For agy that is a request, not a verified boundary: containment under
+dedicated review (K-158).
 
 | | default | flags | opt-out |
 |---|---|---|---|
 | codex | sandboxed, cannot prompt | `exec --sandbox workspace-write -c approval_policy="never"`; `exec resume` takes `-c sandbox_mode="workspace-write"` (it has no `--sandbox`) | `--dangerously-bypass-approvals-and-sandbox` |
-| agy | sandboxed terminal | `--sandbox --dangerously-skip-permissions` | `--dangerously-skip-permissions` only |
+| agy | `--sandbox` requested; containment under dedicated review (K-158) | `--sandbox --dangerously-skip-permissions` | `--dangerously-skip-permissions` only |
 
 Opt-out is one file, read only from `~/.yakos-state/router-policy.yml`:
 
@@ -65,17 +68,18 @@ branches (read-only git commands work); network access is off, so `npm install`,
 Work that needs git writes or the network is what the opt-out is for; the safer
 alternative is to have the lead do the commit and push.
 
-agy's `--sandbox` restricts the terminal commands the model runs. Headless agy
-has no approval surface, so `--dangerously-skip-permissions` stays
-(`init.permission_mode` is then `always-proceed`). Checked live with agy 1.2.17:
-a `run_command` that writes outside the workspace fails with "Operation not
-permitted" (exit 1) and creates nothing. The probe told the model not to retry,
-so it does not show whether the model would, on its own, ask to run a command
-outside the sandbox and have that auto-approved; agy's help text says
-`--dangerously-skip-permissions` auto-approves all tool permission requests, so
-treat agy's containment as weaker than codex's until that is tested. Whether
-`--mode accept-edits` without `--dangerously-skip-permissions` is a tighter
-headless setting is untested.
+agy is started with `--sandbox` requested; containment under dedicated review
+(K-158). What is known: headless agy has no approval surface, so
+`--dangerously-skip-permissions` stays (`init.permission_mode` is then
+`always-proceed`), and with agy 1.2.17 one `run_command` that wrote outside the
+workspace failed with "Operation not permitted" (exit 1) and created nothing.
+That is a single observation. The probe told the model not to retry, so it does
+not show whether the model would, on its own, ask to run a command outside the
+sandbox and have that auto-approved (agy's help text says
+`--dangerously-skip-permissions` auto-approves all tool permission requests), and
+no other escape was tried. Do not treat agy dispatch as contained until K-158
+reports. Whether `--mode accept-edits` without `--dangerously-skip-permissions`
+is a tighter headless setting is untested.
 
 The bash adapters (`cli/lib/runtimes/{codex,agy}.sh`, used by `yakos dispatch`
 when the bash tree is present and `YAKOS_IMPL` is unset) still run with the
@@ -124,7 +128,10 @@ the value of `-c` as TOML and a prompt that parses as a number or `true` would
 otherwise change type. The encoding was checked by round-tripping a persona with
 quotes, backslashes, control characters and unicode through `codex debug
 prompt-input`. Chat runs in the project directory (`cmd.Dir`), so the project's
-rules load as they do in a terminal.
+rules load as they do in a terminal. The persona travels in argv, so it is limited
+to 64 KiB (the largest framework agent is about 7 KiB); a larger one is refused
+with a clear error before any process starts, instead of the operating system's
+"argument list too long". The same limit applies to agy chat.
 
 - The agent file carries a `# yakos-generated:` first line. A file without it is
   yours and is never overwritten; delete the line to take ownership of a
@@ -141,6 +148,17 @@ rules load as they do in a terminal.
   default, the Claude tier `sonnet`, is not a codex model and is dropped. An
   unpinned dispatch therefore passes no model; pin an id in an agent's `model:`
   to choose one. `general-codex` pins `balanced`, so it runs on the default.
+- The agent file names a model only when the model is not a Claude tier. The bash
+  composer resolves `balanced` to the tier `sonnet` on its own, and an emitter that
+  wrote it made codex fail the subagent ("its fixed `sonnet` model is not
+  supported with this Codex ChatGPT account", observed with codex-cli 0.154.0
+  while reviewing this change); with no line the subagent uses the default model.
+  The Go and bash emitters apply the same rule, so neither writes a tier into a
+  codex or agy file.
+- Control characters, DEL and a lone CR in the agent's text are written as
+  `\u00XX` escapes (valid TOML), a NUL byte makes yakOS skip the agent's file
+  with a note, and leading line breaks of the prompt are dropped so the bash and
+  Go composers yield the same file.
 - The effort levels `low|medium|high|xhigh|max` pass through to
   `model_reasoning_effort`; whether a model supports one is codex's call (the
   catalog lists `low` to `max` for most entries, `low` to `xhigh` for `gpt-5.5`,
@@ -193,15 +211,27 @@ agy --add-dir <workdir> --sandbox --dangerously-skip-permissions [--model <id>] 
   model). The adapter therefore passes `--effort` only when the resolved id does
   not end in `-low`, `-medium` or `-high`. To change the effort on agy, choose the
   id with the suffix you want.
+- **Without a suffixed id, agy takes `low`, `medium` and `high` only.** The console
+  and the dispatch layer offer `xhigh` and `max` for every runtime, and agy 1.2.17
+  rejects both before any model call (`invalid model selection (--model ""
+  --effort "max"): gemini-3.8-flash has no "max" effort (available: low, medium,
+  high)`, exit 1). The adapter sends them as `high` and prints one note per level.
+  The reverse also holds: a bare base id needs `--effort` (`--model gemini-3.1-pro`
+  alone exits 1 with `requires --effort (available: low, high)`). yakOS never
+  builds such an id; an operator who pins one chooses an effort that model offers.
 - Resume: `--conversation <id>` keeps the `conversation_id`, continues the step
-  numbering, and reports usage cumulatively across turns (recorded).
-- **Checked live with agy 1.2.17** (six invocations from scratch directories):
-  the `stream-json` shape (`tests/fixtures/runtime-streams/`), the effort
-  conflict, a resumed conversation, the sandbox denying a write outside the
-  workspace, skill discovery and the `@yakos-<id>` mention. **Not verified:**
-  `--effort` values above `high` with no `--model`, and whether the model can
-  escalate out of the sandbox on its own. Treat agy dispatch as experimental
-  until they are.
+  numbering, and reports usage cumulatively across turns (recorded). The total
+  spans separate processes: turn 2's `result.usage` is turn 1's result plus turn
+  2's own step usage. Account one run from the DONE step usage in its own stream
+  (it equals the run's own usage), not from `result.usage` of a resumed turn.
+- **Checked live with agy 1.2.17:** the `stream-json` shape
+  (`tests/fixtures/runtime-streams/`), the effort conflict, `--effort xhigh|max`
+  being rejected, a resumed conversation, skill discovery and the `@yakos-<id>`
+  mention in print mode (plain directory and git repository), and one write
+  outside the workspace denied under `--sandbox`. **Not verified:** whether
+  `--sandbox` contains anything else, in particular whether the model can escalate
+  out of it on its own (K-158). Treat agy dispatch as experimental, and as
+  uncontained, until that reports.
 - Auth: `agy` signs in once, interactively (browser OAuth into the keychain and
   `~/.gemini/`), or `ANTIGRAVITY_API_KEY` for headless use. yakOS never drives
   or caches that login.
@@ -255,10 +285,12 @@ configuration without revealing credentials.
 
 `yakos auth login codex` creates `~/.yakos-state/codex-home` (mode 0700) and runs
 `codex login` with `CODEX_HOME` pointed at it. Once that directory holds an
-`auth.json`, every yakOS-run codex uses it (an inherited `CODEX_HOME` is replaced,
-with a stderr note) and your own `~/.codex` login is never touched. Until you run
-the command nothing changes: dispatch keeps using `$CODEX_HOME` or `~/.codex`, and
-`yakos doctor` prints a hint.
+`auth.json`, dispatch (Go and bash), Go chat and the bash `yakos start` run codex
+under it (an inherited `CODEX_HOME` is replaced, with a stderr note) and
+your own `~/.codex` login is never touched. Go `yakos start` does not use the
+profile yet: it launches the interactive codex with your own `CODEX_HOME`. Until
+you run the command nothing changes: dispatch keeps using `$CODEX_HOME` or
+`~/.codex`, and `yakos doctor` prints a hint.
 
 The reason is that a yakOS dispatch and your interactive codex would otherwise
 share one `auth.json`, and concurrent token refreshes, or a login call that
