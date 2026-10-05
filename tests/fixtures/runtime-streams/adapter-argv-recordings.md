@@ -1,0 +1,67 @@
+# Recordings made with the codex and agy adapters' argv (K-133)
+
+Real stdout of the two harnesses, recorded with the argv the Go adapters build
+(codex-cli 0.154.0 and agy 1.2.17, ChatGPT and Antigravity logins, 2026-10-05).
+They pin what the adapters rely on: the flags are accepted, resume echoes the
+session id, a delegated subagent runs, the sandbox denies a write outside the
+workspace, and the failure modes look the way the adapters expect. Stream
+parsers should also read the other recordings in this directory.
+
+## codex 0.154.0
+
+| File | Command (the prompt is the only variable part) |
+|---|---|
+| `codex-exec-json-0.154.0.ndjson` | `codex exec --json --sandbox workspace-write -c 'approval_policy="never"' -- "Reply with the single word ok."` |
+| `codex-exec-json-0.154.0-resume.ndjson` | `codex exec resume --json -c 'sandbox_mode="workspace-write"' -c 'approval_policy="never"' -- <thread_id> "<prompt>"`, resuming the thread recorded in the first file |
+| `codex-exec-json-0.154.0-subagent.ndjson` | the first command with the framed prompt `Delegate this task to subagent named 'probe'. Use the agent's discipline and report only the final result.` in a git repository holding `.codex/agents/yakos-probe.toml` (written by the bash emitter); the subagent's `developer_instructions` demanded a fixed token and the final message is that token |
+| `codex-exec-json-0.154.0-auth-failure.ndjson` | the first command with an empty `CODEX_HOME` (no login); the requests are rejected with 401, so no model call is made |
+
+- `exec resume` reports the resumed `thread_id` in `thread.started`, so the id
+  captured from a first run is the one to pass again.
+- A framed delegation appears as `collab_tool_call` items (`tool`,
+  `sender_thread_id`, `receiver_thread_ids`, `agents_states`, `status`) around
+  the final `agent_message`; usage is for the whole tree of threads.
+- A run with no login emits `error` events (`Reconnecting... n/5`), an
+  `item.completed` of type `error` (transport fallback), then `turn.failed` with
+  `error.message`, no `turn.completed`, and exits 1. Tracing log lines and
+  `Reading additional input from stdin...` go to stderr.
+
+## agy 1.2.17
+
+Each line is `{"event":"init|step_update|result", "<event>":{...}}`. All of these
+used `--output-format stream-json --sandbox --dangerously-skip-permissions
+--print-timeout 60s` from a scratch directory.
+
+| File | Command (the prompt is the only variable part) |
+|---|---|
+| `agy-stream-json-1.2.17-conversation-turn1.ndjson` | `agy -p "reply with the single word ok" --effort high ...` (no `--model`) |
+| `agy-stream-json-1.2.17-conversation-turn2.ndjson` | `agy -p "reply with the single word again" --effort high --conversation <conversation_id of turn 1> ...` |
+| `agy-stream-json-1.2.17-effort-conflict.ndjson` | `agy -p "reply with the single word ok" --model gemini-3.8-flash-low --effort high ...` |
+| `agy-stream-json-1.2.17-sandbox-denied.ndjson` | `agy -p "<run sh -c 'echo x > \"$HOME/p0b-agy-probe.txt\"' once and report its exit code>" --model gemini-3.8-flash-low ...` |
+
+- **Resume.** The second turn keeps the `conversation_id`, continues `step_index`
+  (turn 1 used 0-1, turn 2 uses 2-4, including a `system_message` step), and its
+  `result` reports `num_turns: 2` with usage that is **cumulative** across both
+  turns (turn 2's own usage is on its `agent_response` step). A parser that
+  accounts per turn must subtract the previous total.
+- **Effort and model ids.** agy ids carry their effort as a suffix
+  (`gemini-3.8-flash-low`). Combined with `--effort` they are rejected: the
+  process exits 1 and the only stdout line is a `result` with `status: "ERROR"`,
+  an `error` message (`invalid model selection ... conflicts with --effort=high`),
+  an empty `conversation_id`, zero usage and no `init` or step events. `--effort`
+  with no `--model` works, and `init` then has no `model` key (the turn files).
+- **Sandbox.** With `--sandbox --dangerously-skip-permissions` (`init.permission_mode`
+  is `always-proceed`) a command run through the `run_command` tool is still
+  sandboxed: the write outside the workspace fails with `Operation not permitted`
+  and exit code 1, and no file is created. The prompt told the model not to retry,
+  so this does not show whether the model would ask to run the command outside
+  the sandbox on its own.
+
+## Provenance and redaction
+
+The codex files are unedited. The agy files have two edits: `init.cwd` is
+rewritten to `/work/project` (it was the scratch directory) and, in
+`sandbox-denied`, the home directory in the error message is `/Users/user`. The
+files contain thread and conversation ids, token counts, tool names and, for the
+codex auth failure, the request ids of rejected unauthenticated requests. Nothing
+else identifying; checked for credentials, e-mail addresses and the user name.
