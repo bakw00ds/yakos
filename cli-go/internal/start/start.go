@@ -1212,16 +1212,15 @@ format, and exec's the session. <name> is inferred from the cwd if
 not supplied.
 
 Runtime selection:
-    --runtime <id>        claude (default) | codex | gemini | agy
+    --runtime <id>        claude (default) | codex | agy
                           Falls back to YAKOS_RUNTIME env or
                           ~/.yakos-state/default-runtime.
 
 Permission mode:
     --safe                Prompts on (claude: --permission-mode default;
-                          codex: default sandbox; gemini: default).
+                          codex: default sandbox).
     (default)             bypass — claude bypassPermissions / codex
-                          --dangerously-bypass-approvals-and-sandbox /
-                          gemini --approval-mode=yolo.
+                          --dangerously-bypass-approvals-and-sandbox.
     --allow-root          Opt-in: allow bypass mode when running as root
                           (e.g. inside a container). Has no effect with --safe.
 
@@ -1302,7 +1301,7 @@ Examples:
     yakos start                       # auto-detect, claude (default)
     yakos start myapp
     yakos start myapp --runtime codex
-    yakos start myapp --runtime gemini --safe
+    yakos start myapp --runtime agy
     yakos start myapp --dry-run
     yakos start myapp --allow-root    # container/root bypass mode
     yakos start myapp --no-repl       # web console only, no REPL

@@ -512,7 +512,7 @@ func TestPrintHelp(t *testing.T) {
 		"--model",
 		"claude",
 		"codex",
-		"gemini",
+		"agy",
 		// share-terminal: must mention auto-start behavior and stop command
 		"--share-terminal",
 		"--direct",
@@ -521,6 +521,12 @@ func TestPrintHelp(t *testing.T) {
 		if !strings.Contains(got, phrase) {
 			t.Errorf("help text missing %q;\nfull output:\n%s", phrase, got)
 		}
+	}
+
+	// gemini was removed (K-132): the help must not offer it, or show it in an
+	// example, because `--runtime gemini` is rejected as unknown.
+	if strings.Contains(got, "gemini") {
+		t.Errorf("help text still mentions the removed gemini runtime:\n%s", got)
 	}
 
 	// The share-terminal section must NOT tell users to run yakos serve manually.

@@ -15,9 +15,9 @@ import (
 )
 
 // modelAliasesJSON is a byte-for-byte copy of lib/settings/model-aliases.json.
-// go:embed cannot reach outside the package directory and the staged framework
-// copy (internal/framework/embedded) is empty in a source checkout, so the
-// table the Go dispatcher reads lives here too. TestEmbeddedAliasTableMatchesLib
+// The embed directive cannot reach outside the package directory and the staged
+// framework copy (internal/framework/embedded) is empty in a source checkout,
+// so the table the Go dispatcher reads lives here too. TestEmbeddedAliasTableMatchesLib
 // fails when the two files drift; refresh with
 //
 //	cp lib/settings/model-aliases.json cli-go/internal/runtime/model-aliases.json
