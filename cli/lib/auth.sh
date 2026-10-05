@@ -35,6 +35,8 @@ Subcommands:
                                      profile, ~/.yakos-state/codex-home (your own
                                      ~/.codex login is left alone)
                           - gemini:  prints OAuth / API key options
+                          - claude-sdk: prints how to set ANTHROPIC_API_KEY (the
+                                     SDK engine does not use the claude login)
                           With --as-default, also persist the runtime as the
                           yakos start default.
   logout <runtime>        Best-effort credential removal:
@@ -78,6 +80,7 @@ print_runtime_status() {
     local auth_state="not configured"
     local cli_hint=""
     local auth_hint=""
+    local note=""
 
     if yk_rt_check_cli 2>/dev/null; then
         cli_state="OK"
@@ -105,7 +108,26 @@ print_runtime_status() {
         esac
     fi
 
-    if [ "$cli_state" = "OK" ] && yk_rt_check_auth 2>/dev/null; then
+    if [ "$id" = "claude-sdk" ]; then
+        # K-137: claude-sdk is the Agent SDK. It runs on ANTHROPIC_API_KEY and never
+        # uses the claude login, so its auth is reported from the key (a boolean, never
+        # the value) whatever the CLI state. check_auth stays claude's chain because
+        # `yakos start --runtime claude-sdk` launches Claude Code through claude.sh.
+        # The wording is byte-identical to cli-go/internal/auth/claude_sdk.go.
+        case "$(yk_rt_claude_sdk_key_state)" in
+            ok)
+                auth_state="OK"
+                auth_hint="ANTHROPIC_API_KEY is set; the SDK engine uses it, not the claude login"
+                ;;
+            oauth)
+                auth_hint="ANTHROPIC_API_KEY holds a subscription OAuth token, not an API key; the SDK engine needs an API key (run: yakos auth login claude-sdk)"
+                ;;
+            *)
+                auth_hint="ANTHROPIC_API_KEY is not set; the SDK engine needs an API key and does not use the claude login (run: yakos auth login claude-sdk)"
+                ;;
+        esac
+        note="'yakos start --runtime claude-sdk' launches Claude Code, which uses the claude login; the SDK engine does not"
+    elif [ "$cli_state" = "OK" ] && yk_rt_check_auth 2>/dev/null; then
         auth_state="OK"
     elif [ "$cli_state" = "OK" ]; then
         auth_hint="run: yakos auth login $id"
@@ -120,6 +142,9 @@ print_runtime_status() {
     printf '    cli:    %-15s %s\n' "$cli_state" "$cli_hint"
     printf '    auth:   %-15s %s\n' "$auth_state" "$auth_hint"
     printf '    caps:   %s\n' "$(yk_rt_capabilities)"
+    if [ -n "$note" ]; then
+        printf '    note:   %s\n' "$note"
+    fi
     echo
 }
 
@@ -185,7 +210,12 @@ if [ "$SUB" = "login" ]; then
             # CLI — logging into claude covers claude-sdk; logging into
             # agy covers antigravity-sdk.
             case "$id" in
-                claude-sdk|antigravity-sdk)
+                claude-sdk)
+                    echo "  $id: skip (needs ANTHROPIC_API_KEY in the environment, which yakOS never stores; see 'yakos auth login claude-sdk')"
+                    n_skip=$((n_skip + 1))
+                    continue
+                    ;;
+                antigravity-sdk)
                     echo "  $id: skip (shares credentials with bundled CLI; covered by sibling)"
                     n_skip=$((n_skip + 1))
                     continue
@@ -226,13 +256,37 @@ if [ "$SUB" = "login" ]; then
     [ -n "$target" ] || ct_die "auth login: <runtime> required (claude|claude-sdk|codex|gemini|agy|antigravity-sdk), or pass --all"
     yk_rt_is_known "$target" || ct_die "auth login: unknown runtime '$target'"
 
-    # SDK adapters delegate their login UX to the underlying CLI's flow
-    # since they share credentials with the bundled binary.
+    # claude-sdk is the Agent SDK: it needs an API key and does not use the claude
+    # login, so it has guidance of its own and needs no CLI installed (K-137). The
+    # text is byte-identical to cli-go/internal/auth/claude_sdk.go.
+    if [ "$target" = "claude-sdk" ]; then
+        cat <<'EOF'
+claude-sdk runs the Anthropic Agent SDK, which needs an API key in the environment.
+Anthropic does not allow a claude.ai subscription login in the Agent SDK, so the
+SDK engine does not use the claude login.
+
+  1. Set an API key from the Anthropic Console in the shell that starts yakOS:
+        export ANTHROPIC_API_KEY="sk-ant-api03-..."
+     yakOS never stores it.
+
+  2. Subscription login only? Use the claude runtime, which is Claude Code itself:
+        yakos auth login claude
+     In the console, use the CLI engine (interactive chat without structured questions).
+
+After setting the key, run 'yakos auth status claude-sdk' to verify.
+'yakos start --runtime claude-sdk' launches Claude Code, which does use the claude login.
+EOF
+        if [ "$AS_DEFAULT" = "1" ]; then
+            yk_rt_set_default "$target"
+            echo
+            echo "default runtime set to: $target"
+        fi
+        exit 0
+    fi
+
+    # The other SDK adapter delegates its login UX to the underlying CLI's flow
+    # since it shares credentials with the bundled binary.
     case "$target" in
-        claude-sdk)
-            ct_log "claude-sdk: bundles Claude Code CLI; using claude auth flow"
-            target_for_login=claude
-            ;;
         antigravity-sdk)
             ct_log "antigravity-sdk: shares Google auth posture; using agy auth flow"
             ct_log "antigravity-sdk: SDK additionally reads GEMINI_API_KEY directly"

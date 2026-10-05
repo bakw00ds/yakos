@@ -151,23 +151,41 @@ _yk_rt_claude_sdk_is_oauth_value() {
     return 1
 }
 
+# yk_rt_claude_sdk_key_state
+#   Print ok, unset or oauth for ANTHROPIC_API_KEY: an API key, nothing usable
+#   (missing or blank), or a subscription OAuth token in the key slot. Never
+#   prints any part of the value. `yakos auth status claude-sdk` and the dispatch
+#   gate below both read it.
+yk_rt_claude_sdk_key_state() {
+    local key="${ANTHROPIC_API_KEY:-}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    if [ -z "$key" ]; then
+        printf 'unset\n'
+    elif _yk_rt_claude_sdk_is_oauth_value "$key"; then
+        printf 'oauth\n'
+    else
+        printf 'ok\n'
+    fi
+}
+
 # yk_rt_claude_sdk_key_refusal
 #   Exit 0, printing nothing, when ANTHROPIC_API_KEY holds an API key. Otherwise
 #   print the one-line reason on stdout and exit 1. Never prints any part of the
 #   value.
 yk_rt_claude_sdk_key_refusal() {
-    local key="${ANTHROPIC_API_KEY:-}"
-    key="${key#"${key%%[![:space:]]*}"}"
-    key="${key%"${key##*[![:space:]]}"}"
-    if [ -z "$key" ]; then
-        printf '%s\n' "claude-sdk: refusing to run: ANTHROPIC_API_KEY is not set; the Agent SDK does not run on a claude.ai subscription login (set an API key, or use the claude runtime, which is Claude Code itself)"
-        return 1
-    fi
-    if _yk_rt_claude_sdk_is_oauth_value "$key"; then
-        printf '%s\n' "claude-sdk: refusing to run: ANTHROPIC_API_KEY holds a subscription OAuth token, not an API key; the Agent SDK does not accept those (set an API key, or use the claude runtime, which is Claude Code itself)"
-        return 1
-    fi
-    return 0
+    case "$(yk_rt_claude_sdk_key_state)" in
+        ok)
+            return 0
+            ;;
+        oauth)
+            printf '%s\n' "claude-sdk: refusing to run: ANTHROPIC_API_KEY holds a subscription OAuth token, not an API key; the Agent SDK does not accept those (set an API key, or use the claude runtime, which is Claude Code itself)"
+            ;;
+        *)
+            printf '%s\n' "claude-sdk: refusing to run: ANTHROPIC_API_KEY is not set; the Agent SDK does not run on a claude.ai subscription login (set an API key, or use the claude runtime, which is Claude Code itself)"
+            ;;
+    esac
+    return 1
 }
 
 # yk_rt_claude_sdk_oauth_env_names
