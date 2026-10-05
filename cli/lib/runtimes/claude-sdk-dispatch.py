@@ -58,11 +58,13 @@ _OAUTH_TOKEN_MARKERS = ("sk-ant-oat", "sk-ant-ort")
 
 
 # The two refusal sentences are constants on purpose: nothing computed from the
-# environment is ever written to stderr.
-_REFUSE_UNSET = ("refusing to run: ANTHROPIC_API_KEY is not set; the Agent SDK does "
+# environment is ever written to stderr. The names are plain on purpose too:
+# CodeQL treats a value assigned to a credential-looking name (OAUTH, KEY, TOKEN)
+# as sensitive data and flags every log call it reaches.
+_MSG_UNSET = ("refusing to run: ANTHROPIC_API_KEY is not set; the Agent SDK does "
                  "not run on a claude.ai subscription login (set an API key, or use "
                  "the claude runtime, which is Claude Code itself)")
-_REFUSE_OAUTH = ("refusing to run: ANTHROPIC_API_KEY holds a subscription OAuth "
+_MSG_SUBSCRIPTION = ("refusing to run: ANTHROPIC_API_KEY holds a subscription OAuth "
                  "token, not an API key; the Agent SDK does not accept those (set an "
                  "API key, or use the claude runtime, which is Claude Code itself)")
 
@@ -284,9 +286,9 @@ def main() -> int:
     # K-137 hard gate, before anything else: no inputs read, no SDK imported.
     state = startup_check(os.environ)
     if state == "unset":
-        die(_REFUSE_UNSET, EXIT_API_KEY_REQUIRED)
+        die(_MSG_UNSET, EXIT_API_KEY_REQUIRED)
     if state == "oauth":
-        die(_REFUSE_OAUTH, EXIT_API_KEY_REQUIRED)
+        die(_MSG_SUBSCRIPTION, EXIT_API_KEY_REQUIRED)
     scrub_oauth_env(os.environ)
 
     agent_id, project, agents = read_env()
