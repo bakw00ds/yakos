@@ -27,7 +27,9 @@ var materializeNoteWriter io.Writer = os.Stderr
 // The file is a function of the agent definition alone. The per-dispatch model
 // rides -m / --model, so Model is cleared here: it would otherwise let one
 // dispatch's override rewrite the file under a concurrent dispatch of the same
-// agent, and the composed Model is a Claude tier that codex and agy cannot use.
+// agent. (The composed Model is a Claude tier, which the emitters never write
+// into a codex or agy file anyway, so for a composed agent the clearing is
+// belt and braces.)
 //
 // Failures never stop the dispatch. The file only adds the agent's persona, and
 // refusing to run a task because a project directory is read-only would turn a

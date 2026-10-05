@@ -22,29 +22,36 @@ func AgySkillPath(workDir, id string) string {
 }
 
 // yamlQuote renders s as a YAML double-quoted scalar on one line, applying the
-// escapes the bash emitter's yq() applies.
-func yamlQuote(s string) string { return `"` + escapeBackslashQuote(oneLine(s)) + `"` }
+// escapes the bash emitter's yq() applies (backslash, quote, and \u00XX for
+// control characters, which a YAML double-quoted scalar may not hold raw).
+func yamlQuote(s string) string { return `"` + quoteLine(s) + `"` }
 
 // EmitAgySkill returns the bytes of the agy workspace skill for agent. It is a
 // port of yk_rt_agy_emit_md (cli/lib/runtimes/agy.sh, python path) and must
-// stay byte-identical to it:
+// stay byte-identical to it for the same agent JSON:
 //
 //	---
 //	name: yakos-<id>
 //	description: "<one line>"
-//	model: "<model>"             (only when agent.Model is set)
+//	model: "<model>"             (only for a model that is not a Claude tier)
 //	tools: ["Read", "Edit"]      (only when agent.Tools is non-empty)
 //	---
 //	<!-- yakos-generated: ... -->
 //
-//	<prompt, trailing newlines trimmed>
+//	<prompt: leading line breaks and trailing newlines dropped>
+//
+// An agent text that holds a NUL byte is refused with an error. The model line
+// is omitted for a Claude tier, as in the codex file (see writesModelLine).
 //
 // The skill name carries the yakos- prefix, equal to the directory name as the
 // Agent Skills layout requires, so that the framed prompt's @yakos-<id> mention
 // resolves by either name. Note this is NOT what the bash emitter wrote before
 // K-134: it wrote a flat yakos-<id>.md with name: <id>, a layout agy 1.2.x does
 // not discover (it loads <dir>/<skill>/SKILL.md).
-func EmitAgySkill(agent ComposedAgent) []byte {
+func EmitAgySkill(agent ComposedAgent) ([]byte, error) {
+	if err := checkAgentText(agent, true); err != nil {
+		return nil, err
+	}
 	desc := agent.Description
 	if desc == "" {
 		desc = "Agent: " + agent.ID
@@ -54,7 +61,7 @@ func EmitAgySkill(agent ComposedAgent) []byte {
 		"name: yakos-" + agent.ID,
 		"description: " + yamlQuote(desc),
 	}
-	if agent.Model != "" {
+	if writesModelLine(agent.Model) {
 		lines = append(lines, "model: "+yamlQuote(agent.Model))
 	}
 	if len(agent.Tools) > 0 {
@@ -68,9 +75,9 @@ func EmitAgySkill(agent ComposedAgent) []byte {
 		"---",
 		agyMarkerLine,
 		"",
-		strings.TrimRight(agent.Prompt, "\n"),
+		promptBody(agent.Prompt),
 	)
-	return []byte(strings.Join(lines, "\n") + "\n")
+	return []byte(strings.Join(lines, "\n") + "\n"), nil
 }
 
 // MaterializeAgyAgent writes <workDir>/.agents/skills/yakos-<id>/SKILL.md (and
@@ -82,10 +89,14 @@ func MaterializeAgyAgent(workDir string, agent ComposedAgent) (MaterializeResult
 		return MaterializeResult{}, err
 	}
 	skillPath := AgySkillPath(workDir, agent.ID)
+	want, err := EmitAgySkill(agent)
+	if err != nil {
+		return MaterializeResult{Path: skillPath}, err
+	}
 	if _, err := ensureDirNoSymlinks(workDir, ".agents", "skills", "yakos-"+agent.ID); err != nil {
 		return MaterializeResult{Path: skillPath}, err
 	}
-	res, err := syncManagedFile(skillPath, EmitAgySkill(agent), hasMarker)
+	res, err := syncManagedFile(skillPath, want, hasMarker)
 	if err != nil || res.Skipped == SkipNotYakosManaged {
 		return res, err
 	}

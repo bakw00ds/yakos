@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
 // Shared plumbing for the codex and agy agent-file materializers (K-134).
@@ -18,9 +20,12 @@ import (
 //	codex: <workdir>/.codex/agents/yakos-<id>.toml
 //	agy:   <workdir>/.agents/skills/yakos-<id>/SKILL.md
 //
-// The files are ports of the bash emitters (cli/lib/runtimes/codex.sh
-// yk_rt_codex_emit_toml and agy.sh yk_rt_agy_emit_md) and are byte-identical to
-// them; TestMaterializeParity_* and tests/run-runtime-fixtures.sh prove it.
+// The emitters are ports of the bash emitters (cli/lib/runtimes/codex.sh
+// yk_rt_codex_emit_toml and agy.sh yk_rt_agy_emit_md) and write the same bytes
+// for the same agent JSON; TestMaterializeParity_* and
+// tests/run-runtime-fixtures.sh prove it, over a corpus and over every framework
+// agent (the two composers feed the emitters different JSON, which the emitters
+// absorb: see promptBody and writesModelLine).
 //
 // Safety rules, all enforced here:
 //   - A file is rewritten only if it carries the yakos-generated marker. A file
@@ -100,6 +105,106 @@ func oneLine(s string) string { return lineBreaks.Replace(s) }
 func escapeBackslashQuote(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	return strings.ReplaceAll(s, `"`, `\"`)
+}
+
+// escapeControls rewrites the characters a TOML basic string or a YAML
+// double-quoted scalar may not hold raw as \u00XX, in the upper-case hex the
+// chat path's tomlString (runtime/codex.go) uses: the C0 controls and DEL. TAB
+// is legal in both and stays. A multi-line TOML string (multiline = true) also
+// keeps LF and a CR that starts a CRLF pair, which TOML reads as newlines; a
+// lone CR is not a newline there and is escaped. Everything else, including
+// all non-ASCII, passes through. The result is only valid input to those two
+// quoting forms; apply it after the backslash and quote escaping.
+//
+// The bash emitters (python, and the jq fallback) apply the same rule, and
+// TestMaterializeParity_* holds the three in step.
+func escapeControls(s string, multiline bool) string {
+	clean := true
+	for i := 0; i < len(s); i++ {
+		if needsControlEscape(s, i, multiline) {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 16)
+	for i := 0; i < len(s); i++ {
+		if needsControlEscape(s, i, multiline) {
+			fmt.Fprintf(&b, `\u%04X`, s[i])
+		} else {
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
+// needsControlEscape reports whether the byte at s[i] must be written as an
+// escape. Bytes below 0x80 are whole characters in UTF-8 and every byte of a
+// multi-byte character is >= 0x80, so scanning bytes cannot split a rune.
+func needsControlEscape(s string, i int, multiline bool) bool {
+	c := s[i]
+	switch {
+	case c == '\t':
+		return false
+	case c == '\n':
+		return !multiline
+	case c == '\r':
+		return !multiline || i+1 >= len(s) || s[i+1] != '\n'
+	}
+	return c < 0x20 || c == 0x7f
+}
+
+// quoteLine is the body (without the surrounding quotes) of a one-line TOML
+// basic string or YAML double-quoted scalar holding s.
+func quoteLine(s string) string {
+	return escapeControls(escapeBackslashQuote(oneLine(s)), false)
+}
+
+// promptBody normalises an agent prompt for the generated file: leading line
+// breaks and trailing newlines are dropped. The bash composer keeps the blank
+// line that follows the frontmatter in a prompt and the Go composer trims it, so
+// without this the two would write different files for the same agent. Both
+// emitters apply the same rule (TestMaterializeParity_RealFrameworkAgents).
+func promptBody(prompt string) string {
+	return strings.TrimRight(strings.TrimLeft(prompt, "\r\n"), "\n")
+}
+
+// writesModelLine reports whether the generated file gets a model line for
+// model. A Claude tier (haiku, sonnet, opus, fable) never does: it is what the
+// composers produce for an agent pinned to a semantic alias such as balanced
+// (the bash composer resolves aliases to tiers itself), and neither codex nor
+// agy has a model by that name. codex fails such a subagent ("its fixed `sonnet`
+// model is not supported with this Codex ChatGPT account", checked live with
+// codex-cli 0.154.0). With no line the harness default applies, which is what
+// an empty alias for the runtime means.
+func writesModelLine(model string) bool {
+	return model != "" && !runtime.ValidateTier(model)
+}
+
+// checkAgentText refuses an agent whose text holds a NUL byte. There is no
+// legitimate persona with one, and neither TOML files nor argv carry it. The
+// tools are checked only when the file lists them (the agy skill does, the
+// codex agent does not).
+func checkAgentText(agent ComposedAgent, withTools bool) error {
+	fields := []struct{ name, text string }{
+		{"description", agent.Description},
+		{"prompt", agent.Prompt},
+		{"model", agent.Model},
+	}
+	if withTools {
+		for _, t := range agent.Tools {
+			fields = append(fields, struct{ name, text string }{"tool", t})
+		}
+	}
+	for _, f := range fields {
+		if strings.IndexByte(f.text, 0) >= 0 {
+			return fmt.Errorf("agentscompose: agent %q: %s contains a NUL byte", agent.ID, f.name)
+		}
+	}
+	return nil
 }
 
 // ensureDirNoSymlinks creates root/rel... one component at a time, refusing a

@@ -1,6 +1,7 @@
 package agentscompose
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -10,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func sampleAgent() ComposedAgent {
@@ -29,6 +32,25 @@ func skipWindows(t *testing.T) {
 	}
 }
 
+// emitCodex and emitAgy run an emitter that must succeed.
+func emitCodex(t *testing.T, a ComposedAgent) string {
+	t.Helper()
+	b, err := EmitCodexTOML(a)
+	if err != nil {
+		t.Fatalf("EmitCodexTOML: %v", err)
+	}
+	return string(b)
+}
+
+func emitAgy(t *testing.T, a ComposedAgent) string {
+	t.Helper()
+	b, err := EmitAgySkill(a)
+	if err != nil {
+		t.Fatalf("EmitAgySkill: %v", err)
+	}
+	return string(b)
+}
+
 func mustRead(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -41,7 +63,7 @@ func mustRead(t *testing.T, path string) string {
 // ---- golden bytes --------------------------------------------------------------
 
 func TestEmitCodexTOML_Golden(t *testing.T) {
-	got := string(EmitCodexTOML(sampleAgent()))
+	got := emitCodex(t, sampleAgent())
 	want := "# yakos-generated: rewritten on every dispatch. Delete this line to keep your edits.\n" +
 		"name = \"backend\"\n" +
 		"description = \"Implements \\\"server\\\" code, C:\\\\x\"\n" +
@@ -54,7 +76,7 @@ func TestEmitCodexTOML_Golden(t *testing.T) {
 }
 
 func TestEmitCodexTOML_ModelEmptyDescriptionAndTripleQuotes(t *testing.T) {
-	got := string(EmitCodexTOML(ComposedAgent{ID: "x", Model: "gpt-5", Prompt: `a """ b`}))
+	got := emitCodex(t, ComposedAgent{ID: "x", Model: "gpt-5", Prompt: `a """ b`})
 	want := "# yakos-generated: rewritten on every dispatch. Delete this line to keep your edits.\n" +
 		"name = \"x\"\n" +
 		"description = \"Agent: x\"\n" +
@@ -68,7 +90,7 @@ func TestEmitCodexTOML_ModelEmptyDescriptionAndTripleQuotes(t *testing.T) {
 }
 
 func TestEmitCodexTOML_DescriptionStaysOnOneLine(t *testing.T) {
-	got := string(EmitCodexTOML(ComposedAgent{ID: "x", Description: "line one\nline two\r\nline three\rend"}))
+	got := emitCodex(t, ComposedAgent{ID: "x", Description: "line one\nline two\r\nline three\rend"})
 	if !strings.Contains(got, "description = \"line one line two line three end\"\n") {
 		t.Errorf("description must be collapsed to one line, got %q", got)
 	}
@@ -77,7 +99,7 @@ func TestEmitCodexTOML_DescriptionStaysOnOneLine(t *testing.T) {
 func TestEmitAgySkill_Golden(t *testing.T) {
 	a := sampleAgent()
 	a.Model = "gemini-3.1-pro"
-	got := string(EmitAgySkill(a))
+	got := emitAgy(t, a)
 	want := "---\n" +
 		"name: yakos-backend\n" +
 		"description: \"Implements \\\"server\\\" code, C:\\\\x\"\n" +
@@ -93,11 +115,249 @@ func TestEmitAgySkill_Golden(t *testing.T) {
 }
 
 func TestEmitAgySkill_MinimalAgent(t *testing.T) {
-	got := string(EmitAgySkill(ComposedAgent{ID: "x"}))
+	got := emitAgy(t, ComposedAgent{ID: "x"})
 	want := "---\nname: yakos-x\ndescription: \"Agent: x\"\n---\n" +
 		"<!-- yakos-generated: rewritten on every dispatch. Delete this line to keep your edits. -->\n\n\n"
 	if got != want {
 		t.Errorf("mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// ---- the model line: a Claude tier never reaches a non-claude agent file -------
+
+var claudeTiers = []string{"haiku", "sonnet", "opus", "fable"}
+
+// TestEmitters_NeverWriteAClaudeTierAsTheModel pins the regression found in
+// review: general-codex is pinned to the alias balanced, the bash composer turns
+// that into the tier "sonnet", and the emitter wrote model = "sonnet" into the
+// codex agent file, which codex then refused to run ("its fixed `sonnet` model
+// is not supported with this Codex ChatGPT account").
+func TestEmitters_NeverWriteAClaudeTierAsTheModel(t *testing.T) {
+	skipWindows(t)
+	for _, tier := range claudeTiers {
+		a := ComposedAgent{ID: "pinned", Description: "d", Prompt: "p\n", Model: tier, Tools: []string{"Read"}}
+		for _, runtimeName := range []string{"codex", "agy"} {
+			t.Run(runtimeName+"/"+tier, func(t *testing.T) {
+				work := t.TempDir()
+				res, err := MaterializeRuntimeAgent(runtimeName, work, a)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, line := range strings.Split(mustRead(t, res.Path), "\n") {
+					if isModelLine(line) {
+						t.Errorf("%s file for model %q has a model line: %q", runtimeName, tier, line)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestEmitters_WriteAModelThatIsNotATier(t *testing.T) {
+	a := ComposedAgent{ID: "x", Description: "d", Prompt: "p\n", Model: "gemini-3.8-flash-high"}
+	if got := emitCodex(t, a); !strings.Contains(got, "\nmodel = \"gemini-3.8-flash-high\"\n") {
+		t.Errorf("a non-tier model must still be written to the codex file:\n%s", got)
+	}
+	if got := emitAgy(t, a); !strings.Contains(got, "\nmodel: \"gemini-3.8-flash-high\"\n") {
+		t.Errorf("a non-tier model must still be written to the agy skill:\n%s", got)
+	}
+}
+
+// TestFrameworkAgentsNeverGetAModelLine runs every framework agent through both
+// materializers. general-codex and general-agy are the two runtime-pinned ones;
+// the rest carry Claude tiers, which no codex or agy file may name.
+func TestFrameworkAgentsNeverGetAModelLine(t *testing.T) {
+	skipWindows(t)
+	root := filepath.Join("..", "..", "..")
+	agents, err := Compose(root, "")
+	if err != nil || len(agents) < 30 {
+		t.Skipf("framework agents not reachable from the package dir (%d, %v)", len(agents), err)
+	}
+	sawTier := map[string]bool{}
+	for _, a := range agents {
+		if a.Model != "" {
+			sawTier[a.Model] = true
+		}
+		for _, runtimeName := range []string{"codex", "agy"} {
+			res, err := MaterializeRuntimeAgent(runtimeName, t.TempDir(), a)
+			if err != nil {
+				t.Fatalf("%s/%s: %v", runtimeName, a.ID, err)
+			}
+			for _, line := range strings.Split(mustRead(t, res.Path), "\n") {
+				if isModelLine(line) {
+					t.Errorf("%s/%s: a model line reached a non-claude agent file: %q", runtimeName, a.ID, line)
+				}
+			}
+		}
+	}
+	if !sawTier["sonnet"] {
+		t.Errorf("the sweep saw no agent composed with a Claude tier (%v); it would pass vacuously", sawTier)
+	}
+}
+
+// ---- control characters, lone CR and NUL -------------------------------------
+
+// tomlRoundTrip decodes a generated codex file with python's tomllib (3.11+),
+// the only TOML parser available to the tests, and returns the document.
+func tomlRoundTrip(t *testing.T, content string) map[string]any {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("python3 may be a Store stub on Windows; the TOML round trip runs on the POSIX runners")
+	}
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not on PATH")
+	}
+	// A python that cannot import tomllib (before 3.11) skips; one that can must
+	// parse the file, and a failure from then on is the file's.
+	if err := exec.Command(py, "-c", "import tomllib").Run(); err != nil {
+		t.Skipf("python3 has no tomllib (needs 3.11+): %v", err)
+	}
+	cmd := exec.Command(py, "-c", "import sys, json, tomllib\nprint(json.dumps(tomllib.loads(sys.stdin.read(), parse_float=str)))")
+	cmd.Stdin = strings.NewReader(content)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("the generated codex file is not valid TOML: %v\n%s", err, content)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+func TestEmitCodexTOML_ControlCharactersAreEscaped(t *testing.T) {
+	a := ComposedAgent{
+		ID:          "ctl",
+		Description: "d\x01e\x1b\x7ff",
+		Prompt:      "a\x01b\x7fc \x1b[0m\rlone\r\ncrlf\tTAB\n\x0b\x0c",
+		Model:       "m\x02",
+	}
+	got := emitCodex(t, a)
+	for _, want := range []string{
+		`description = "d\u0001e\u001B\u007Ff"`,
+		"model = \"m\\u0002\"",
+		"a\\u0001b\\u007Fc \\u001B[0m\\u000Dlone\r\ncrlf\tTAB\n\\u000B\\u000C\n\"\"\"\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in\n%q", want, got)
+		}
+	}
+	// No raw C0 control other than TAB, LF and a CR that starts a CRLF.
+	for i := 0; i < len(got); i++ {
+		c := got[i]
+		switch {
+		case c == '\t' || c == '\n':
+		case c == '\r' && i+1 < len(got) && got[i+1] == '\n':
+		case c < 0x20 || c == 0x7f:
+			t.Fatalf("raw control byte %#x at %d in %q", c, i, got)
+		}
+	}
+	doc := tomlRoundTrip(t, got)
+	if doc["description"] != "d\x01e\x1b\x7ff" {
+		t.Errorf("description decoded as %q", doc["description"])
+	}
+	if doc["model"] != "m\x02" {
+		t.Errorf("model decoded as %q", doc["model"])
+	}
+	// TOML reads a raw CRLF as LF; the escaped lone CR and the controls survive.
+	wantBody := "a\x01b\x7fc \x1b[0m\rlone\ncrlf\tTAB\n\x0b\x0c\n"
+	if doc["developer_instructions"] != wantBody {
+		t.Errorf("developer_instructions decoded as %q, want %q", doc["developer_instructions"], wantBody)
+	}
+}
+
+// TestEmitCodexTOML_EveryC0ByteSurvivesTheRoundTrip decodes the file for a
+// persona holding each control character and compares the text.
+func TestEmitCodexTOML_EveryC0ByteSurvivesTheRoundTrip(t *testing.T) {
+	var prompt strings.Builder
+	for c := 1; c < 0x20; c++ {
+		prompt.WriteString("x")
+		prompt.WriteByte(byte(c))
+	}
+	prompt.WriteString("x\x7fy")
+	doc := tomlRoundTrip(t, emitCodex(t, ComposedAgent{ID: "c0", Description: "d", Prompt: prompt.String()}))
+	// A raw LF stays LF and a CR that is not followed by LF is escaped, so the
+	// decoded text equals the persona, plus the newline before the closing quotes.
+	if got, want := doc["developer_instructions"], prompt.String()+"\n"; got != want {
+		t.Errorf("decoded persona differs:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestEmitAgySkill_FrontmatterIsValidYAMLWithControlCharacters(t *testing.T) {
+	a := ComposedAgent{
+		ID:          "ctl",
+		Description: "d\x01e \"q\" \\ \x1b\x7f\ttab",
+		Prompt:      "body \x01 stays raw in the markdown\n",
+		Model:       "m\x02\"x",
+		Tools:       []string{"Read", "b\x7f", "c\"d"},
+	}
+	got := emitAgy(t, a)
+	front, _, ok := strings.Cut(strings.TrimPrefix(got, "---\n"), "\n---\n")
+	if !ok {
+		t.Fatalf("no frontmatter in %q", got)
+	}
+	var fm struct {
+		Name        string   `yaml:"name"`
+		Description string   `yaml:"description"`
+		Model       string   `yaml:"model"`
+		Tools       []string `yaml:"tools"`
+	}
+	if err := yaml.Unmarshal([]byte(front), &fm); err != nil {
+		t.Fatalf("frontmatter is not valid YAML: %v\n%q", err, front)
+	}
+	if fm.Name != "yakos-ctl" || fm.Description != a.Description || fm.Model != a.Model {
+		t.Errorf("frontmatter decoded as %+v", fm)
+	}
+	if strings.Join(fm.Tools, "|") != strings.Join(a.Tools, "|") {
+		t.Errorf("tools decoded as %q, want %q", fm.Tools, a.Tools)
+	}
+	if strings.ContainsAny(front, "\x01\x02\x1b\x7f") {
+		t.Errorf("the frontmatter holds a raw control character: %q", front)
+	}
+}
+
+func TestEmitters_RefuseNULAndMaterializeWritesNothing(t *testing.T) {
+	skipWindows(t)
+	for _, tc := range []struct {
+		field string
+		agent ComposedAgent
+		codex bool // refused for codex too (it does not list tools)
+	}{
+		{"prompt", ComposedAgent{ID: "n", Prompt: "a\x00b"}, true},
+		{"description", ComposedAgent{ID: "n", Description: "a\x00b"}, true},
+		{"model", ComposedAgent{ID: "n", Model: "a\x00b"}, true},
+		{"tool", ComposedAgent{ID: "n", Tools: []string{"a\x00b"}}, false},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			if _, err := EmitAgySkill(tc.agent); err == nil || !strings.Contains(err.Error(), "NUL") {
+				t.Errorf("EmitAgySkill: want an error naming NUL, got %v", err)
+			}
+			if _, err := EmitCodexTOML(tc.agent); (err != nil) != tc.codex {
+				t.Errorf("EmitCodexTOML err = %v, want refusal = %v", err, tc.codex)
+			}
+			work := t.TempDir()
+			if _, err := MaterializeAgyAgent(work, tc.agent); err == nil {
+				t.Errorf("MaterializeAgyAgent must refuse")
+			}
+			if entries, _ := os.ReadDir(work); len(entries) != 0 {
+				t.Errorf("a refused agent must leave the project untouched, found %v", entries)
+			}
+		})
+	}
+}
+
+func TestEmitters_PromptLeadingLineBreaksAreDropped(t *testing.T) {
+	// The bash composer keeps the blank line after the frontmatter, the Go
+	// composer drops it. Either way the file is the same.
+	with := ComposedAgent{ID: "x", Description: "d", Prompt: "\n\r\n# Title\n\n"}
+	without := ComposedAgent{ID: "x", Description: "d", Prompt: "# Title"}
+	if emitCodex(t, with) != emitCodex(t, without) || emitAgy(t, with) != emitAgy(t, without) {
+		t.Errorf("leading line breaks and trailing newlines must not change the file")
+	}
+	// Spaces are not line breaks: an indented first line keeps its indent.
+	if got := emitCodex(t, ComposedAgent{ID: "x", Description: "d", Prompt: "\n  indented"}); !strings.Contains(got, "\"\"\"\n  indented\n\"\"\"\n") {
+		t.Errorf("indent lost: %q", got)
 	}
 }
 
@@ -114,7 +374,7 @@ func TestMaterializeCodexAgent_WritesPublicFileUnderCodexAgents(t *testing.T) {
 	if res.Path != want || !res.Written || res.Skipped != "" {
 		t.Fatalf("result = %+v, want a fresh write of %s", res, want)
 	}
-	if got := mustRead(t, want); got != string(EmitCodexTOML(sampleAgent())) {
+	if got := mustRead(t, want); got != emitCodex(t, sampleAgent()) {
 		t.Errorf("file content differs from EmitCodexTOML:\n%s", got)
 	}
 	fi, _ := os.Stat(want)
@@ -338,7 +598,7 @@ func TestMaterializeCodexAgent_ConcurrentDispatchesOfOneAgent(t *testing.T) {
 	for err := range errs {
 		t.Errorf("concurrent materialize: %v", err)
 	}
-	if got := mustRead(t, CodexAgentPath(work, "backend")); got != string(EmitCodexTOML(sampleAgent())) {
+	if got := mustRead(t, CodexAgentPath(work, "backend")); got != emitCodex(t, sampleAgent()) {
 		t.Error("file is not the complete expected content after concurrent writes")
 	}
 	if left, _ := filepath.Glob(filepath.Join(work, ".codex", "agents", ".yakos-tmp-*")); len(left) != 0 {
@@ -359,7 +619,7 @@ func TestMaterializeAgyAgent_WritesSkillDirectory(t *testing.T) {
 	if res.Path != skill || !res.Written {
 		t.Fatalf("result = %+v, want a fresh write of %s", res, skill)
 	}
-	if got := mustRead(t, skill); got != string(EmitAgySkill(sampleAgent())) {
+	if got := mustRead(t, skill); got != emitAgy(t, sampleAgent()) {
 		t.Errorf("SKILL.md differs from EmitAgySkill:\n%s", got)
 	}
 	gi := filepath.Join(filepath.Dir(skill), ".gitignore")

@@ -88,8 +88,15 @@ yk_rt_agy_check_auth() {
 #
 # SKILL.md carries a yakos-generated marker. A SKILL.md without it is the
 # operator's own and is never overwritten. The Go materializer
-# (cli-go/internal/agentscompose/materialize_agy.go) emits identical bytes;
-# tests/run-runtime-fixtures.sh and the Go parity test keep the two in step.
+# (cli-go/internal/agentscompose/materialize_agy.go) emits identical bytes for
+# the same agent JSON; tests/run-runtime-fixtures.sh and the Go parity tests
+# keep the three implementations (python, jq fallback, Go) in step.
+#
+# The model line is written only for a model that is not a Claude tier: the
+# composer resolves an alias such as balanced to a tier (sonnet) itself, and agy
+# has no model by that name. Frontmatter values are one-line YAML double-quoted
+# scalars, so a control character in one is written as \u00XX (see
+# _emitter-shared.sh). An agent text holding a NUL byte is refused (status 3).
 #
 # Before K-134 this wrote a flat yakos-<id>.md with `name: <id>`; agy 1.2.x does
 # not load that layout. The flat files are removed by yk_rt_agy_cleanup_agents.
@@ -102,23 +109,43 @@ import json, re, sys
 agent_id, out_file, json_path = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(json_path, encoding="utf-8") as f:
     data = json.load(f)
-def yq(s):
-    return "\"" + re.sub(r"\r\n|\r|\n", " ", s).replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 desc = data.get("description") or ("Agent: " + agent_id)
 body = data.get("prompt") or ""
-model = data.get("model")
+model = data.get("model") or ""
 tools = data.get("tools") or []
+for text in [desc, body, model] + [t for t in tools if isinstance(t, str)]:
+    if "\x00" in text:
+        sys.stderr.write("agent text contains a NUL byte\n")
+        sys.exit(3)
+def ctl(m):
+    return "\\u%04X" % ord(m.group())
+def yq(s):
+    s = re.sub(r"\r\n|\r|\n", " ", s).replace("\\", "\\\\").replace("\"", "\\\"")
+    return "\"" + re.sub(r"[\x00-\x08\x0a-\x1f\x7f]", ctl, s) + "\""
 lines = ["---", "name: yakos-" + agent_id, "description: " + yq(desc)]
-if model:
+if model and model not in ("haiku", "sonnet", "opus", "fable"):
     lines.append("model: " + yq(model))
 if tools:
     lines.append("tools: [" + ", ".join(yq(t) for t in tools) + "]")
 lines.append("---")
 lines.append("<!-- yakos-generated: rewritten on every dispatch. Delete this line to keep your edits. -->")
 lines.append("")
-lines.append(body.rstrip("\n"))
+lines.append(body.lstrip("\r\n").rstrip("\n"))
 with open(out_file, "w", encoding="utf-8", newline="\n") as f:
     f.write("\n".join(lines) + "\n")
+'
+
+# The same file built by jq alone (python3 absent). _YK_EMIT_JQ_DEFS carries the
+# escaping rules; see _emitter-shared.sh.
+_yk_agy_emit_jq='
+(.description // "") as $d | (.prompt // "") as $p | (.model // "") as $m | (.tools // []) as $t
+| [ "---",
+    "name: yakos-" + $id,
+    "description: \"" + (($d | if . == "" then "Agent: " + $id else . end) | quoteline) + "\"" ]
+  + (if $m != "" and ($m | tier | not) then ["model: \"" + ($m | quoteline) + "\""] else [] end)
+  + (if ($t | length) > 0 then ["tools: [" + ($t | map("\"" + quoteline + "\"") | join(", ")) + "]"] else [] end)
+  + [ "---", $marker, "", ($p | promptbody) ]
+| join("\n") + "\n"
 '
 
 # _yk_agy_is_generated <skill-md>
@@ -140,22 +167,28 @@ yk_rt_agy_emit_md() {
     fi
 
     if yk_emit_check_python; then
-        yk_emit_run_python "$id" "$out_file" "$agent_json" "$_yk_agy_emit_py"
+        local rc=0
+        yk_emit_run_python "$id" "$out_file" "$agent_json" "$_yk_agy_emit_py" || rc=$?
+        if [ "$rc" -eq 3 ]; then
+            ct_log "agy: not writing $out_file (the agent's text contains a NUL byte)"
+            rmdir "$skill_dir" 2>/dev/null || true
+            return 0
+        fi
+        [ "$rc" -eq 0 ] || return "$rc"
     else
-        local desc body model
-        desc="$(printf '%s' "$agent_json" | jq -r '.description // ""')"
-        [ -n "$desc" ] || desc="Agent: $id"
-        desc="${desc//$'\r\n'/ }"; desc="${desc//$'\n'/ }"; desc="${desc//$'\r'/ }"
-        desc="${desc//\\/\\\\}"; desc="${desc//\"/\\\"}"
-        body="$(printf '%s' "$agent_json" | jq -r '.prompt // ""')"
-        model="$(printf '%s' "$agent_json" | jq -r '.model // ""')"
-        {
-            printf -- '---\n'
-            printf 'name: yakos-%s\n' "$id"
-            printf 'description: "%s"\n' "$desc"
-            [ -n "$model" ] && [ "$model" != "null" ] && printf 'model: "%s"\n' "$model"
-            printf -- '---\n%s\n\n%s\n' "$_YK_AGY_MARKER" "$body"
-        } > "$out_file"
+        if yk_emit_nul_in_agent "$agent_json" tools; then
+            ct_log "agy: not writing $out_file (the agent's text contains a NUL byte)"
+            rmdir "$skill_dir" 2>/dev/null || true
+            return 0
+        fi
+        local tmp="$out_file.tmp.$$"
+        if ! printf '%s' "$agent_json" \
+            | jq -j --arg id "$id" --arg marker "$_YK_AGY_MARKER" "$_YK_EMIT_JQ_DEFS $_yk_agy_emit_jq" > "$tmp"; then
+            rm -f "$tmp" 2>/dev/null || true
+            ct_log "agy: jq failed to emit $out_file"
+            return 1
+        fi
+        mv -f "$tmp" "$out_file"
         ct_log "agy: emitted $out_file via jq fallback (install python3 for fidelity)"
     fi
     printf '*\n' > "$skill_dir/.gitignore"

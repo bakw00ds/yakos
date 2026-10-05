@@ -17,21 +17,31 @@ func CodexAgentPath(workDir, id string) string {
 
 // EmitCodexTOML returns the bytes of the codex agent definition for agent. It
 // is a port of yk_rt_codex_emit_toml (cli/lib/runtimes/codex.sh, python path)
-// and must stay byte-identical to it:
+// and must stay byte-identical to it for the same agent JSON:
 //
 //	# yakos-generated: ...
 //	name = "<id>"
 //	description = "<one line, \ and " escaped>"
-//	model = "<model>"            (only when agent.Model is set)
+//	model = "<model>"            (only for a model that is not a Claude tier)
 //	developer_instructions = """
-//	<prompt, \ escaped and """ broken up, trailing newlines trimmed>
+//	<prompt: leading line breaks and trailing newlines dropped, \ escaped,
+//	 """ broken up, control characters and a lone CR written as \u00XX>
 //	"""
+//
+// An agent text that holds a NUL byte is refused with an error: the file would
+// not be valid TOML and no persona has one.
+//
+// The model line is omitted for the Claude tiers the composers produce (see
+// writesModelLine): a file must never name a model the runtime does not have.
 //
 // codex-cli 0.154.0 discovers the file by this layout and delegates to the
 // agent by its name = "<id>" (verified live: a delegated subagent answered with
 // the token its developer_instructions demanded). Tools are not emitted;
 // codex agents have no tool list in this format.
-func EmitCodexTOML(agent ComposedAgent) []byte {
+func EmitCodexTOML(agent ComposedAgent) ([]byte, error) {
+	if err := checkAgentText(agent, false); err != nil {
+		return nil, err
+	}
 	desc := agent.Description
 	if desc == "" {
 		desc = "Agent: " + agent.ID
@@ -39,19 +49,19 @@ func EmitCodexTOML(agent ComposedAgent) []byte {
 	lines := []string{
 		codexMarkerLine,
 		`name = "` + agent.ID + `"`,
-		`description = "` + escapeBackslashQuote(oneLine(desc)) + `"`,
+		`description = "` + quoteLine(desc) + `"`,
 	}
-	if agent.Model != "" {
-		lines = append(lines, `model = "`+escapeBackslashQuote(oneLine(agent.Model))+`"`)
+	if writesModelLine(agent.Model) {
+		lines = append(lines, `model = "`+quoteLine(agent.Model)+`"`)
 	}
-	body := strings.ReplaceAll(agent.Prompt, `\`, `\\`)
+	body := strings.ReplaceAll(promptBody(agent.Prompt), `\`, `\\`)
 	body = strings.ReplaceAll(body, `"""`, `\"\"\"`)
 	lines = append(lines,
 		`developer_instructions = """`,
-		strings.TrimRight(body, "\n"),
+		escapeControls(body, true),
 		`"""`,
 	)
-	return []byte(strings.Join(lines, "\n") + "\n")
+	return []byte(strings.Join(lines, "\n") + "\n"), nil
 }
 
 // isCodexGenerated reports whether an existing file at the codex agent path may
@@ -77,8 +87,12 @@ func MaterializeCodexAgent(workDir string, agent ComposedAgent) (MaterializeResu
 	if err := checkMaterializeArgs(workDir, agent); err != nil {
 		return MaterializeResult{}, err
 	}
+	want, err := EmitCodexTOML(agent)
+	if err != nil {
+		return MaterializeResult{Path: CodexAgentPath(workDir, agent.ID)}, err
+	}
 	if _, err := ensureDirNoSymlinks(workDir, codexAgentRelDir...); err != nil {
 		return MaterializeResult{Path: CodexAgentPath(workDir, agent.ID)}, err
 	}
-	return syncManagedFile(CodexAgentPath(workDir, agent.ID), EmitCodexTOML(agent), isCodexGenerated(agent.ID))
+	return syncManagedFile(CodexAgentPath(workDir, agent.ID), want, isCodexGenerated(agent.ID))
 }

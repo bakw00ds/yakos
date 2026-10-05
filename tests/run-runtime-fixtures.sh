@@ -25,11 +25,16 @@
 #       and — critically — does not exit the test runner process
 #   7. runtime-resolve: yk_rt_default falls back to claude
 #   8. runtime-resolve: yk_rt_capability returns 0/1 correctly
-#  11. general-codex / general-agy model pins and the alias file's agy / codex columns
-#  17. codex emitter: marker, operator files left alone, legacy upgrade (K-134)
-#  18. agy emitter: <skills>/yakos-<id>/SKILL.md layout, marker, .gitignore, cleanup
-#  19. Go materializers byte-identical to the bash emitters under YAKOS_IMPL=go;
-#      codex/agy dispatch is sandboxed by default (needs bin/yakos; skipped if absent)
+#  11. general-codex / general-agy model pins and the alias file's agy / codex columns;
+#      11b. a pinned alias never puts a Claude tier into a codex or agy agent file
+#  17. codex emitter: marker, operator files left alone, legacy upgrade (K-134);
+#      Claude tier omitted, control characters escaped, NUL refused, python == jq
+#  18. agy emitter: <skills>/yakos-<id>/SKILL.md layout, marker, .gitignore, cleanup;
+#      the same model, escaping and refusal rules
+#  19. Go materializers write the same files as the bash emitters under YAKOS_IMPL=go,
+#      for a probe agent and for real framework agents; codex/agy dispatch is
+#      sandboxed by default. Needs bin/yakos (`make build`); skipped when absent
+#      unless YAKOS_REQUIRE_GO_BINARY is set, which CI sets so it cannot be skipped.
 set -eu
 
 REPO_ROOT="$(cd "$(dirname -- "$0")/.." && pwd -P)"
@@ -183,6 +188,13 @@ if [ "$emitted_count" -ge 11 ]; then
 else
     fail "codex emitter wrote $emitted_count TOML files (expected ≥ 11)"
 fi
+# The bash composer resolves model aliases to Claude tiers, and codex fails a
+# subagent whose model it does not have, so no generated file may name one.
+if grep -lE '^model = ' "$codex_out"/yakos-*.toml >/dev/null 2>&1; then
+    fail "a codex agent file names a model: $(grep -lE '^model = ' "$codex_out"/yakos-*.toml | tr '\n' ' ')"
+else
+    ok "no codex agent file written for the framework roster names a model"
+fi
 sample="$codex_out/yakos-architect.toml"
 if [ -f "$sample" ]; then
     if grep -qE '^name = "architect"$' "$sample" \
@@ -215,6 +227,11 @@ if [ "$emitted_count" -ge 11 ]; then
     ok "gemini emitter wrote $emitted_count markdown files (expected ≥ 11)"
 else
     fail "gemini emitter wrote $emitted_count markdown files (expected ≥ 11)"
+fi
+if grep -lE '^model: ' "$gemini_out"/yakos-*/SKILL.md >/dev/null 2>&1; then
+    fail "an agy skill names a model: $(grep -lE '^model: ' "$gemini_out"/yakos-*/SKILL.md | tr '\n' ' ')"
+else
+    ok "no agy skill written for the framework roster names a model"
 fi
 sample="$gemini_out/yakos-architect/SKILL.md"
 if [ -f "$sample" ]; then
@@ -448,6 +465,84 @@ for alias_name in cheap balanced best reasoning frontier; do
     fi
 done
 
+# ---- 11b. a pinned alias never puts a Claude tier into an agent file --------
+echo
+echo "Test 11b: a pinned alias never puts a Claude tier into a codex or agy agent file"
+# general-codex pins the alias balanced. The bash composer resolves aliases to Claude
+# tiers itself, so the composed agent carries model "sonnet", and the emitter used to
+# write model = "sonnet" into .codex/agents/yakos-general-codex.toml. codex-cli 0.154.0
+# then failed the subagent: its fixed `sonnet` model is not supported with this Codex
+# ChatGPT account. A file must name a model only when it is one the runtime has.
+# shellcheck source=../cli/lib/runtimes/codex.sh
+. "$YAKOS_LIB/runtimes/codex.sh"
+# shellcheck source=../cli/lib/runtimes/agy.sh
+. "$YAKOS_LIB/runtimes/agy.sh"
+
+# t_emit <py|jq> <codex|agy> <id> <agent-json> <out-dir>
+#   Run one bash emitter on the python path, or on the jq fallback (python3 reported
+#   absent). The emitter's stderr goes to <out-dir>/.last.err.
+t_emit() {
+    local mode="$1" rt="$2" id="$3" json="$4" out="$5"
+    mkdir -p "$out"
+    (
+        if [ "$mode" = jq ]; then yk_emit_check_python() { return 1; }; fi
+        case "$rt" in
+            codex) yk_rt_codex_emit_toml "$id" "$json" "$out" ;;
+            agy)   yk_rt_agy_emit_md "$id" "$json" "$out" ;;
+        esac
+    ) >/dev/null 2>"$out/.last.err"
+}
+# t_file <codex|agy> <id> <out-dir>: where the emitter put the agent file
+t_file() {
+    case "$1" in
+        codex) printf '%s\n' "$3/yakos-$2.toml" ;;
+        agy)   printf '%s\n' "$3/yakos-$2/SKILL.md" ;;
+    esac
+}
+# t_has_model_line <file>: 0 when the file sets a model (TOML `model = ` or YAML `model: `)
+t_has_model_line() { grep -Eq '^model( =|:) ' "$1"; }
+
+t11="$WORKDIR/t11"
+t11_roster="$(yk_agents_compose "$REPO_ROOT" "" 2>/dev/null)"
+t11_gc="$(printf '%s' "$t11_roster" | jq -c '."general-codex"')"
+for mode in py jq; do
+    for rt in codex agy; do
+        t_emit "$mode" "$rt" general-codex "$t11_gc" "$t11/gc-$mode-$rt" || true
+        f="$(t_file "$rt" general-codex "$t11/gc-$mode-$rt")"
+        if [ ! -f "$f" ]; then
+            fail "general-codex: the $rt emitter ($mode) wrote no file"
+        elif t_has_model_line "$f"; then
+            fail "general-codex: the $rt file ($mode) names a model:"; grep -E '^model( =|:) ' "$f" | sed 's/^/    /' >&2
+        else
+            ok "general-codex: the $rt file ($mode) names no model (composed model: '$(printf '%s' "$t11_gc" | jq -r '.model // "none"')')"
+        fi
+    done
+done
+for tier in haiku sonnet opus fable; do
+    for mode in py jq; do
+        for rt in codex agy; do
+            t_emit "$mode" "$rt" tier "{\"description\":\"d\",\"prompt\":\"p\",\"model\":\"$tier\"}" "$t11/tier-$tier-$mode-$rt" || true
+            f="$(t_file "$rt" tier "$t11/tier-$tier-$mode-$rt")"
+            if [ -f "$f" ] && ! t_has_model_line "$f"; then
+                ok "model $tier is not written to the $rt file ($mode)"
+            else
+                fail "model $tier reached the $rt file ($mode)"
+            fi
+        done
+    done
+done
+for mode in py jq; do
+    for rt in codex agy; do
+        t_emit "$mode" "$rt" real '{"description":"d","prompt":"p","model":"gemini-3.8-flash-high"}' "$t11/real-$mode-$rt" || true
+        f="$(t_file "$rt" real "$t11/real-$mode-$rt")"
+        if [ -f "$f" ] && grep -Eq '^model( =|:) "gemini-3.8-flash-high"$' "$f"; then
+            ok "a model that is not a Claude tier is still written to the $rt file ($mode)"
+        else
+            fail "a non-tier model was dropped from the $rt file ($mode)"
+        fi
+    done
+done
+
 # ---- 12. find_agent_file resolves general-codex + general-agy ------------
 echo
 echo "Test 12: find_agent_file resolves general-codex and general-agy"
@@ -637,6 +732,57 @@ else
     fail "a legacy generated file was not upgraded"
 fi
 
+# Escaping, refusal and normalisation. The python path and the jq fallback (python3
+# absent) must write the same bytes, so a host without python3 gets the same file.
+# t_toml_ok <file>: 0 when the file is valid TOML. python 3.11+ parses it; older
+# pythons get the weaker check that no raw control character other than TAB, LF and
+# CR is present.
+t_toml_ok() {
+    if python3 -c 'import tomllib' 2>/dev/null; then
+        python3 -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$1" 2>/dev/null
+    else
+        ! LC_ALL=C grep -q "[$(printf '\001-\010\013\014\016-\037\177')]" "$1"
+    fi
+}
+t17_nasty='{"description":"d\u0001e \"q\" \\ \u001b","prompt":"\n\n# Probe\r\nlone\rcr \u0001 \u007f \u001b[0m\n\"\"\"\" tab\t end\r\n\n","model":"sonnet"}'
+for mode in py jq; do
+    t_emit "$mode" codex nasty "$t17_nasty" "$t17/nasty-$mode" || true
+    f="$t17/nasty-$mode/yakos-nasty.toml"
+    if [ -f "$f" ] && t_toml_ok "$f"; then
+        ok "codex ($mode): control characters, a lone CR and quotes produce valid TOML"
+    else
+        fail "codex ($mode): the TOML for a persona with control characters is missing or invalid"
+        cat -v "$f" 2>/dev/null | sed 's/^/    /' >&2
+    fi
+    if [ -f "$f" ] && grep -Fq 'lone\u000Dcr \u0001 \u007F \u001B[0m' "$f" && ! t_has_model_line "$f"; then
+        ok "codex ($mode): escapes are \u00XX in upper-case hex, and the tier model is omitted"
+    else
+        fail "codex ($mode): expected \\u00XX escapes and no model line"
+    fi
+done
+if cmp -s "$t17/nasty-py/yakos-nasty.toml" "$t17/nasty-jq/yakos-nasty.toml"; then
+    ok "codex: the jq fallback writes the same bytes as the python path"
+else
+    fail "codex: the jq fallback and the python path differ"
+    diff "$t17/nasty-py/yakos-nasty.toml" "$t17/nasty-jq/yakos-nasty.toml" | sed 's/^/    /' >&2 || true
+fi
+for mode in py jq; do
+    rc=0
+    t_emit "$mode" codex nul '{"description":"d","prompt":"a\u0000b"}' "$t17/nul-$mode" || rc=$?
+    if [ "$rc" -eq 0 ] && [ ! -e "$t17/nul-$mode/yakos-nul.toml" ] && grep -q 'NUL byte' "$t17/nul-$mode/.last.err"; then
+        ok "codex ($mode): a persona with a NUL byte is refused, nothing is written, the status is 0"
+    else
+        fail "codex ($mode): NUL handling wrong (status $rc, file present: $([ -e "$t17/nul-$mode/yakos-nul.toml" ] && echo yes || echo no))"
+    fi
+done
+t_emit py codex lead '{"description":"d","prompt":"\r\n\n# X\n\n"}' "$t17/lead-a" || true
+t_emit py codex lead '{"description":"d","prompt":"# X"}' "$t17/lead-b" || true
+if cmp -s "$t17/lead-a/yakos-lead.toml" "$t17/lead-b/yakos-lead.toml"; then
+    ok "codex: leading line breaks of the prompt are dropped (bash composer keeps the blank line after the frontmatter, the Go composer drops it)"
+else
+    fail "codex: leading line breaks change the file"
+fi
+
 # ---- 18. agy emitter: skill directory layout, marker, cleanup (K-134) --------
 echo
 echo "Test 18: agy emitter writes <skills>/yakos-<id>/SKILL.md with marker and .gitignore"
@@ -686,18 +832,61 @@ else
     fail "cleanup removed the wrong things"
 fi
 
+# Escaping, refusal and normalisation, as for codex in Test 17.
+t18_nasty='{"description":"d\u0001e \"q\" \\ \u001b","prompt":"\n\n# Probe\r\nlone\rcr\n","model":"opus","tools":["Read","a\u0002b"]}'
+for mode in py jq; do
+    t_emit "$mode" agy nasty "$t18_nasty" "$WORKDIR/t18n-$mode" || true
+    f="$WORKDIR/t18n-$mode/yakos-nasty/SKILL.md"
+    if [ -f "$f" ] && ! t_has_model_line "$f" \
+       && grep -Fq 'description: "d\u0001e \"q\" \\ \u001B"' "$f" \
+       && grep -Fq 'tools: ["Read", "a\u0002b"]' "$f" \
+       && ! head -n 6 "$f" | LC_ALL=C grep -q "[$(printf '\001-\010\013\014\016-\037\177')]"; then
+        ok "agy ($mode): frontmatter escapes control characters, lists the tools, omits the tier model"
+    else
+        fail "agy ($mode): frontmatter wrong for a description with control characters"
+        head -n 8 "$f" 2>/dev/null | cat -v | sed 's/^/    /' >&2
+    fi
+done
+if cmp -s "$WORKDIR/t18n-py/yakos-nasty/SKILL.md" "$WORKDIR/t18n-jq/yakos-nasty/SKILL.md"; then
+    ok "agy: the jq fallback writes the same bytes as the python path"
+else
+    fail "agy: the jq fallback and the python path differ"
+    diff "$WORKDIR/t18n-py/yakos-nasty/SKILL.md" "$WORKDIR/t18n-jq/yakos-nasty/SKILL.md" | sed 's/^/    /' >&2 || true
+fi
+for mode in py jq; do
+    for field in prompt tool; do
+        case "$field" in
+            prompt) nul_json='{"description":"d","prompt":"a\u0000b"}' ;;
+            tool)   nul_json='{"description":"d","prompt":"p","tools":["a\u0000b"]}' ;;
+        esac
+        rc=0
+        t_emit "$mode" agy nul "$nul_json" "$WORKDIR/t18nul-$mode-$field" || rc=$?
+        if [ "$rc" -eq 0 ] && [ ! -e "$WORKDIR/t18nul-$mode-$field/yakos-nul" ] \
+           && grep -q 'NUL byte' "$WORKDIR/t18nul-$mode-$field/.last.err"; then
+            ok "agy ($mode): a NUL byte in the $field is refused and leaves no directory behind"
+        else
+            fail "agy ($mode): NUL in the $field mishandled (status $rc)"
+        fi
+    done
+done
+
 # ---- 19. Go materializer parity under YAKOS_IMPL=go (K-133 / K-134) ----------
 echo
 echo "Test 19: Go dispatch materializes byte-identical agent files and runs sandboxed"
 GO_BINARY="${YAKOS_GO_BINARY:-$REPO_ROOT/bin/yakos}"
-if [ ! -x "$GO_BINARY" ]; then
+if [ ! -x "$GO_BINARY" ] && [ -n "${YAKOS_REQUIRE_GO_BINARY:-}" ]; then
+    # CI sets YAKOS_REQUIRE_GO_BINARY after building bin/yakos, so this check cannot
+    # silently turn into a skip (it did once: the job never built the binary).
+    fail "$GO_BINARY is not built and YAKOS_REQUIRE_GO_BINARY is set; run 'make build' first"
+elif [ ! -x "$GO_BINARY" ]; then
     echo "  [skip] $GO_BINARY not built (run 'make build'); the Go half of the parity check is skipped"
 else
     t19="$WORKDIR/t19"
     mkdir -p "$t19/home" "$t19/state" "$t19/shim" "$t19/rec" "$t19/proj/.claude/agents"
-    # No blank line after the frontmatter: the bash composer keeps that line in the
-    # prompt and the Go composer drops it, which is a compose difference, not an
-    # emitter one.
+    # Shaped like a real agent on purpose: a blank line after the frontmatter (the bash
+    # composer keeps it in the prompt, the Go composer drops it) and a model alias (the
+    # bash composer resolves it to the tier sonnet). The emitters absorb both, so the
+    # files still match; a probe that avoided them would hide exactly that.
     cat > "$t19/proj/.claude/agents/parity-probe.md" <<'AGENT_EOF'
 ---
 id: parity-probe
@@ -705,8 +894,10 @@ role: specialist
 domain: parity
 mode: [feature]
 tools: [Read, Edit]
+model: balanced
 references: []
 ---
+
 # Parity probe
 
 ## Purpose
@@ -737,30 +928,42 @@ SHIM_EOF
         . "$YAKOS_LIB/agents-compose.sh"
         yk_agents_compose "$YAKOS_ROOT" "'"$t19"'/proj" 2>/dev/null
     ')"
-    t19_agent_json="$(printf '%s' "$t19_composed" | jq -c '."parity-probe"')"
+    # The probe plus real framework agents: general-codex is the one pinned to an alias
+    # (composed as the tier sonnet by bash), the others carry tiers and the blank line
+    # after the frontmatter that every framework agent file has.
+    t19_agents="parity-probe general-codex general-agy architect backend security-reviewer planner"
     mkdir -p "$t19/ref/codex" "$t19/ref/agy"
-    yk_rt_codex_emit_toml parity-probe "$t19_agent_json" "$t19/ref/codex" >/dev/null 2>&1
-    yk_rt_agy_emit_md parity-probe "$t19_agent_json" "$t19/ref/agy" >/dev/null 2>&1
+    for aid in $t19_agents; do
+        t19_agent_json="$(printf '%s' "$t19_composed" | jq -c --arg n "$aid" '.[$n]')"
+        yk_rt_codex_emit_toml "$aid" "$t19_agent_json" "$t19/ref/codex" >/dev/null 2>&1
+        yk_rt_agy_emit_md "$aid" "$t19_agent_json" "$t19/ref/agy" >/dev/null 2>&1
+    done
 
-    for rt in codex agy; do
-        if ! t19_env dispatch parity-probe "hello world" --runtime "$rt" --project "$t19/proj" >"$t19/$rt.out" 2>"$t19/$rt.err"; then
-            fail "$rt: yakos dispatch (YAKOS_IMPL=go) failed"
-            sed 's/^/    /' "$t19/$rt.err" >&2
+    for aid in $t19_agents; do
+        for rt in codex agy; do
+            if ! t19_env dispatch "$aid" "hello world" --runtime "$rt" --project "$t19/proj" >"$t19/$aid.$rt.out" 2>"$t19/$aid.$rt.err"; then
+                fail "$aid on $rt: yakos dispatch (YAKOS_IMPL=go) failed"
+                sed 's/^/    /' "$t19/$aid.$rt.err" >&2
+            fi
+        done
+        if cmp -s "$t19/proj/.codex/agents/yakos-$aid.toml" "$t19/ref/codex/yakos-$aid.toml"; then
+            ok "$aid: Go-materialized codex TOML is byte-identical to the bash emitter's"
+        else
+            fail "$aid: Go and bash codex TOML differ"
+            diff "$t19/proj/.codex/agents/yakos-$aid.toml" "$t19/ref/codex/yakos-$aid.toml" | sed 's/^/    /' >&2 || true
+        fi
+        if cmp -s "$t19/proj/.agents/skills/yakos-$aid/SKILL.md" "$t19/ref/agy/yakos-$aid/SKILL.md" \
+           && cmp -s "$t19/proj/.agents/skills/yakos-$aid/.gitignore" "$t19/ref/agy/yakos-$aid/.gitignore"; then
+            ok "$aid: Go-materialized agy SKILL.md and .gitignore are byte-identical to the bash emitter's"
+        else
+            fail "$aid: Go and bash agy skill files differ"
+            diff "$t19/proj/.agents/skills/yakos-$aid/SKILL.md" "$t19/ref/agy/yakos-$aid/SKILL.md" | sed 's/^/    /' >&2 || true
+        fi
+        if t_has_model_line "$t19/proj/.codex/agents/yakos-$aid.toml" || t_has_model_line "$t19/proj/.agents/skills/yakos-$aid/SKILL.md"; then
+            fail "$aid: a Go-materialized agent file names a model"
         fi
     done
-    if cmp -s "$t19/proj/.codex/agents/yakos-parity-probe.toml" "$t19/ref/codex/yakos-parity-probe.toml"; then
-        ok "codex: Go-materialized TOML is byte-identical to the bash emitter's"
-    else
-        fail "codex: Go and bash TOML differ"
-        diff "$t19/proj/.codex/agents/yakos-parity-probe.toml" "$t19/ref/codex/yakos-parity-probe.toml" | sed 's/^/    /' >&2 || true
-    fi
-    if cmp -s "$t19/proj/.agents/skills/yakos-parity-probe/SKILL.md" "$t19/ref/agy/yakos-parity-probe/SKILL.md" \
-       && cmp -s "$t19/proj/.agents/skills/yakos-parity-probe/.gitignore" "$t19/ref/agy/yakos-parity-probe/.gitignore"; then
-        ok "agy: Go-materialized SKILL.md and .gitignore are byte-identical to the bash emitter's"
-    else
-        fail "agy: Go and bash skill files differ"
-        diff "$t19/proj/.agents/skills/yakos-parity-probe/SKILL.md" "$t19/ref/agy/yakos-parity-probe/SKILL.md" | sed 's/^/    /' >&2 || true
-    fi
+    ok "no Go-materialized agent file names a model"
     if grep -qx -- '--sandbox' "$t19/rec/codex.argv" && grep -qx 'workspace-write' "$t19/rec/codex.argv" \
        && grep -qx 'approval_policy="never"' "$t19/rec/codex.argv" \
        && ! grep -q -- 'dangerously-bypass' "$t19/rec/codex.argv"; then
