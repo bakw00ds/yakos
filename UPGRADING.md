@@ -15,7 +15,7 @@ approvals and sandbox off. The bash `yakos dispatch` path, used when the
 bash tree is present and `YAKOS_IMPL` is unset, is unchanged until the Go
 dispatcher becomes the default.
 
-What you will notice:
+What you will notice with codex:
 
 - Commands the model runs can write only inside the project, `$TMPDIR` and
   `/tmp`. Other writes fail with "Operation not permitted".
@@ -25,6 +25,9 @@ What you will notice:
 - The network is off, so `npm install`, `go get` and `git push` fail. To allow
   it, set `[sandbox_workspace_write]` `network_access = true` in the
   `config.toml` of the `CODEX_HOME` yakOS uses.
+
+What to know about agy, which none of the above applies to:
+
 - agy still gets `--sandbox`, because it blocks the default write path.
   Under `--sandbox --dangerously-skip-permissions`, agy's macOS Seatbelt sandbox
   blocks writes outside the workspace by default but leaves file reads and
@@ -87,7 +90,9 @@ Other changes in this release for codex and agy:
 - **Odd agent text.** A control character in an agent's text is written as a
   `\u00XX` escape instead of producing an invalid file, an agent whose text
   holds a NUL byte is skipped with a note, and chat on codex and agy refuses an
-  agent persona over 64 KiB with a clear error.
+  agent persona over 64 KiB with a clear error (for codex, 64 KiB after the
+  persona is escaped for the command line, which grows quotes, backslashes,
+  newlines and control characters).
 
 ## Upgrading to v0.61.0.0
 

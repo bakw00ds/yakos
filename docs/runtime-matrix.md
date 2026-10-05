@@ -154,7 +154,11 @@ prompt-input`. Chat runs in the project directory (`cmd.Dir`), so the project's
 rules load as they do in a terminal. The persona travels in argv, so it is limited
 to 64 KiB (the largest framework agent is about 7 KiB); a larger one is refused
 with a clear error before any process starts, instead of the operating system's
-"argument list too long". The same limit applies to agy chat.
+"argument list too long". For codex the limit applies to the persona and to its
+TOML-escaped form, because escaping grows it: a quote, a backslash or a newline
+becomes two bytes and another control character six, so 64 KiB of quotes would be
+a 128 KiB argument, past the 131072 bytes Linux allows for one. agy writes the
+persona as it is, so its limit is the raw size.
 
 - The agent file carries a `# yakos-generated:` first line. A file without it is
   yours and is never overwritten; delete the line to take ownership of a
