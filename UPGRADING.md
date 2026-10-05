@@ -59,9 +59,16 @@ Other changes in this release for codex and agy:
   the agy skills start with a `yakos-generated:` marker. A file without it is
   yours and is never overwritten; delete the marker line to keep edits to a
   generated file.
-- **Model ids.** The codex ids in `lib/settings/model-aliases.json` predate the
-  current codex catalog (`codex debug models`). Pin a concrete id in an agent's
-  `model:` until the registry replaces the table.
+- **Model ids.** The semantic aliases (`cheap`, `balanced`, `best`, `reasoning`,
+  `frontier`) now mean "the harness default" for codex (no `-m`), because the old
+  ids (`gpt-5`, `gpt-5-mini`, ...) are not in the current codex catalog
+  (`codex debug models`) and codex answers an unknown id with HTTP 400. For agy
+  they map to real `agy models` ids, whose `-low`/`-medium`/`-high` suffix is the
+  reasoning effort: choose the effort by choosing the id, because agy rejects
+  `--effort` next to such an id and yakOS no longer passes it then.
+  `general-codex` now pins `balanced` and `general-agy` pins
+  `gemini-3.8-flash-high` (its old pin, `gemini-3.5`, does not exist). To pick a
+  specific model, put its id in an agent's `model:`.
 
 ## Upgrading to v0.61.0.0
 

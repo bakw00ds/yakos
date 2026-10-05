@@ -43,14 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs `codex exec --json [-m id] [-c model_reasoning_effort=...]` and resumes
   with `codex exec resume <thread_id>`; chat passes the agent persona as
   `-c developer_instructions="..."` (a TOML string, verified live). Both run in
-  the project directory and take `-m` and the effort level from the request. A
-  semantic model alias resolves through the codex column of
-  `lib/settings/model-aliases.json` (a Go copy, kept in step by a test) and the
-  dispatch default Claude tier is not passed as a codex model.
+  the project directory and take `-m` and the effort level from the request. The
+  dispatch default Claude tier is not passed as a codex model, and the codex
+  semantic aliases are now empty (see Fixed).
 - **agy adapter updated for agy 1.2.x (K-133).** Both paths pass
-  `--output-format stream-json`, `--model` and `--effort` when set, `--sandbox`,
-  and run in the project directory. The raw stream is returned until the stream
-  parsers land (K-135). The comment claiming agy has no `--model` is gone.
+  `--output-format stream-json`, `--model` when set, `--sandbox`, and run in the
+  project directory; `--effort` is passed only when the model id carries no
+  effort suffix, because agy rejects the combination (`--model
+  gemini-3.8-flash-low --effort high` exits 1, checked live). The raw stream is
+  returned until the stream parsers land (K-135). The comment claiming agy has no
+  `--model` is gone.
 - **agy workspace skills use the directory layout (K-134).** agy 1.2.x loads a
   skill from `.agents/skills/<name>/SKILL.md`; the emitter wrote a flat
   `yakos-<id>.md` it does not discover. Both the bash emitter and the new Go
@@ -75,13 +77,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`yakos doctor` "Runtime isolation" section (K-133).** Hints at `yakos auth
   login codex` when codex shares `~/.codex`, and warns when the router policy
   unsandboxes a harness or was ignored. Silent on a machine with neither.
-- **codex stream recordings.** Real codex-cli 0.154.0 `exec --json` output for
-  the argv the adapter builds (a plain turn, `exec resume`, a framed subagent
-  delegation, an unauthenticated failure) in `tests/fixtures/runtime-streams/`,
-  with the command for each. No agy recording exists: agy is not signed in.
+- **Stream recordings from the adapters' argv.** Real codex-cli 0.154.0
+  `exec --json` output (a plain turn, `exec resume`, a framed subagent
+  delegation, an unauthenticated failure) and real agy 1.2.17 `stream-json`
+  output (two turns of one conversation, the `--model`/`--effort` conflict error,
+  a write denied by the sandbox) in `tests/fixtures/runtime-streams/`, with the
+  command for each in `adapter-argv-recordings.md`. The agy resume recording shows
+  usage that is cumulative across turns.
 
 ### Fixed
 
+- **Model aliases and the two general agents named models that do not exist.**
+  `lib/settings/model-aliases.json`: the agy and antigravity-sdk columns now map to
+  ids `agy models` lists (`cheap` `gemini-3.8-flash-low`, `balanced`
+  `gemini-3.8-flash-high`, `best` `claude-opus-5-5-medium`, `reasoning`
+  `gemini-3.1-pro-high`, `frontier` `claude-opus-5-5-high`; the old
+  `gemini-3.5-flash`, `gemini-3.1-pro`, `claude-opus-4.6` and `claude-fable-5`
+  are not ids agy lists). The
+  codex column is empty on purpose, meaning the harness default (no `-m`): its old
+  `gpt-5`, `gpt-5-mini`, `gpt-5-nano` and `o4-mini` are not in the ChatGPT-login
+  catalog and codex rejects an unknown id with HTTP 400. `general-agy` pinned
+  `gemini-3.5`, which does not exist, and now pins `gemini-3.8-flash-high`;
+  `general-codex` pinned `gpt-5` and now pins the alias `balanced`, which resolves
+  to codex's default model. Nothing in the bash dispatcher reads these columns
+  (the helper that does, `yk_pcfg_resolve_model`, has no callers), so only the
+  Go adapters are affected.
 - **codex agent chat and resume.** The old chat command passed `--system-prompt`
   (codex has no such flag), the framed resume used the interactive `codex
   resume` picker, and `--output-last-message -` named a file called `-`.

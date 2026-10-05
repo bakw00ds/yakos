@@ -20,12 +20,12 @@ was removed on 2026-09-01 in favor of agy).
 | `mcp-flag` (CLI flag) | ✅ `--mcp-config` | ❌ via `config.toml` | ❌ via `.agents/mcp_config.json` |
 | `system-prompt-flag` | ✅ `--append-system-prompt` | ❌ no flag; `-c developer_instructions="..."` works (verified) | ❌ no flag; persona prepended to the prompt |
 | Model flag | ✅ `--model <tier>` | ✅ `-m <id>` | ✅ `--model <id>` |
-| Reasoning effort | ✅ `--effort` | ✅ `-c model_reasoning_effort="..."` | ✅ `--effort low\|medium\|high\|xhigh\|max` |
+| Reasoning effort | ✅ `--effort` | ✅ `-c model_reasoning_effort="..."` (low..max) | ⚠ the model id carries it (`-low`/`-medium`/`-high`); `--effort` only without `--model` |
 | `fork-headless` | ✅ `--fork-session` | ✅ `codex fork` | ⚠ unverified — interactive only |
 | Non-interactive print mode | ✅ `claude -p` | ✅ `codex exec` | ✅ `agy -p` |
-| Machine-readable stream | ✅ `--output-format stream-json` | ✅ `exec --json` (JSONL) | ⚠ `--output-format stream-json` (not recorded; agy is not signed in here) |
+| Machine-readable stream | ✅ `--output-format stream-json` | ✅ `exec --json` (JSONL) | ✅ `--output-format stream-json` (NDJSON, `event` key; recorded) |
 | Headless resume | ✅ `--resume <id>` | ✅ `codex exec resume <thread_id>` | ✅ `--conversation <id>` |
-| Sandbox by default (K-133) | n/a (permission mode) | ✅ `--sandbox workspace-write` | ✅ `--sandbox` (weaker, see below) |
+| Sandbox by default (K-133) | n/a (permission mode) | ✅ `--sandbox workspace-write` | ✅ `--sandbox` (blocks writes outside the workspace; escalation untested) |
 | Agent file yakOS writes | (none — JSON injection) | `.codex/agents/yakos-<id>.toml` | `.agents/skills/yakos-<id>/SKILL.md` |
 
 ✅ = supported. ❌ = not supported (degrade or workaround). ⚠ = partial or unverified.
@@ -66,12 +66,16 @@ Work that needs git writes or the network is what the opt-out is for; the safer
 alternative is to have the lead do the commit and push.
 
 agy's `--sandbox` restricts the terminal commands the model runs. Headless agy
-has no approval surface, so `--dangerously-skip-permissions` stays. Its help text
-says it auto-approves all tool permission requests, which would include a model
-request to run a command outside the sandbox (inferred from the help text and the
-binary's prompts, not observed). Treat agy's containment as weaker than codex's.
-Whether `--mode accept-edits` without `--dangerously-skip-permissions` is a
-tighter headless setting is untested (agy is not signed in on the build machine).
+has no approval surface, so `--dangerously-skip-permissions` stays
+(`init.permission_mode` is then `always-proceed`). Checked live with agy 1.2.17:
+a `run_command` that writes outside the workspace fails with "Operation not
+permitted" (exit 1) and creates nothing. The probe told the model not to retry,
+so it does not show whether the model would, on its own, ask to run a command
+outside the sandbox and have that auto-approved; agy's help text says
+`--dangerously-skip-permissions` auto-approves all tool permission requests, so
+treat agy's containment as weaker than codex's until that is tested. Whether
+`--mode accept-edits` without `--dangerously-skip-permissions` is a tighter
+headless setting is untested.
 
 The bash adapters (`cli/lib/runtimes/{codex,agy}.sh`, used by `yakos dispatch`
 when the bash tree is present and `YAKOS_IMPL` is unset) still run with the
@@ -125,17 +129,22 @@ rules load as they do in a terminal.
 - The agent file carries a `# yakos-generated:` first line. A file without it is
   yours and is never overwritten; delete the line to take ownership of a
   generated file. An unchanged file is not rewritten.
-- `-m` takes a concrete model id. A semantic alias (`cheap`, `balanced`, `best`,
-  `reasoning`, `frontier`) resolves through the codex column of
-  `lib/settings/model-aliases.json`; the dispatch default, the Claude tier
-  `sonnet`, is not a codex model and is dropped. **The ids in that table
-  (`gpt-5`, `gpt-5-mini`, ...) are not in the current codex model catalog
-  (`codex debug models` lists `gpt-5.5`, `gpt-5.6-*`, `gpt-6-astra`); refresh
-  them before relying on an alias.** codex rejects a model outside the catalog
-  with HTTP 400 ("The '<id>' model is not supported when using Codex with a
-  ChatGPT account"), so an unpinned dispatch should pass no model at all.
+- `-m` takes a model id from the account's catalog (`codex debug models`:
+  `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`; the
+  catalog is per login and the full record is in
+  `work/current/reports/codex-models-2026-10-05.txt`). codex rejects an id outside
+  the catalog with HTTP 400 ("The '<id>' model is not supported when using Codex
+  with a ChatGPT account"). The semantic aliases (`cheap`, `balanced`, `best`,
+  `reasoning`, `frontier`) are **empty for codex** in
+  `lib/settings/model-aliases.json`: an empty value means the harness default and
+  no `-m` is passed, because the catalog gives no documented tiers. The dispatch
+  default, the Claude tier `sonnet`, is not a codex model and is dropped. An
+  unpinned dispatch therefore passes no model; pin an id in an agent's `model:`
+  to choose one. `general-codex` pins `balanced`, so it runs on the default.
 - The effort levels `low|medium|high|xhigh|max` pass through to
-  `model_reasoning_effort`; whether a model supports one is codex's call.
+  `model_reasoning_effort`; whether a model supports one is codex's call (the
+  catalog lists `low` to `max` for most entries, `low` to `xhigh` for `gpt-5.5`,
+  and `ultra` for three).
 - Stream: `exec --json` emits JSONL (`thread.started`, `turn.started`,
   `item.*`, `turn.completed` with `usage`, `turn.failed`). Recordings and the
   commands are in `tests/fixtures/runtime-streams/`. Until the codex stream parser
@@ -163,14 +172,30 @@ agy --add-dir <workdir> --sandbox --dangerously-skip-permissions [--model <id>] 
   mention resolves by directory or by name.
 - Chat has no skill file: agy has no system-prompt flag, so the persona is
   prepended to the user text under a `---` separator.
-- `--model` takes a concrete id; aliases resolve through the agy column of the
-  alias table (`best` is `claude-opus-4.6`: Antigravity can front Anthropic
-  models). Claude tiers are dropped, as for codex.
-- **Not verified on the build machine** (agy is installed but not signed in, and
-  `agy models` requires sign-in): the `stream-json` event shapes (nothing was
-  recorded), whether `@yakos-<id>` resolves in print mode, which `--model` ids
-  are accepted, and `--sandbox` behavior in print mode. Treat agy dispatch as
-  experimental until a signed-in run confirms them.
+- `--model` takes an id from `agy models`. On the checked account these are
+  `gemini-3.8-flash-{high,medium,low}`, `gemini-3.7-flash-*`, `gemini-3.6-flash-*`,
+  `gemini-3.1-pro-{high,low}`, `claude-opus-5-5-{low,medium,high}`,
+  `claude-sonnet-5-5-{low,medium,high}` and `gpt-oss-120b-medium`. The aliases
+  resolve to `cheap` `gemini-3.8-flash-low`, `balanced` `gemini-3.8-flash-high`,
+  `best` `claude-opus-5-5-medium`, `reasoning` `gemini-3.1-pro-high` and
+  `frontier` `claude-opus-5-5-high` (Antigravity can front Anthropic models).
+  Claude tiers are dropped, as for codex. `general-agy` pins
+  `gemini-3.8-flash-high`; its old pin `gemini-3.5` does not exist.
+- **The effort is part of the id.** agy rejects `--effort` next to such an id:
+  `--model gemini-3.8-flash-low --effort high` exits 1 with "invalid model
+  selection ... conflicts with --effort=high" and a stream-json `result` event of
+  status ERROR. `--effort` with no `--model` works (it applies to the default
+  model). The adapter therefore passes `--effort` only when the resolved id does
+  not end in `-low`, `-medium` or `-high`. To change the effort on agy, choose the
+  id with the suffix you want.
+- Resume: `--conversation <id>` keeps the `conversation_id`, continues the step
+  numbering, and reports usage cumulatively across turns (recorded).
+- **Checked live with agy 1.2.17** (four calls, scratch directory): the
+  `stream-json` shape (`tests/fixtures/runtime-streams/`), the effort conflict, a
+  resumed conversation, and the sandbox denying a write outside the workspace.
+  **Not verified:** whether `@yakos-<id>` resolves in print mode, `--effort`
+  values above `high` with no `--model`, and whether the model can escalate out
+  of the sandbox on its own. Treat agy dispatch as experimental until they are.
 - Auth: `agy` signs in once, interactively (browser OAuth into the keychain and
   `~/.gemini/`), or `ANTIGRAVITY_API_KEY` for headless use. yakOS never drives
   or caches that login.
