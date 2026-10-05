@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
 )
 
@@ -33,11 +34,15 @@ var AliasNames = []string{"cheap", "balanced", "best", "reasoning", "frontier"}
 // names a model. codex and agy have no default model (see DefaultModelFor).
 const DefaultAlias = "balanced"
 
-// modelIDRe is the shape of a model id accepted for the non-Claude runtimes.
-// The id travels as one argv element to a third-party CLI, so it is kept to a
-// conservative alphabet (no spaces, no leading '-', bounded length). Examples:
-// gpt-5, gemini-3.1-pro, claude-opus-4.6, o4-mini, qwen3-coder:30b.
-var modelIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,63}$`)
+// ModelIDPattern is the shape of a model id accepted for the non-Claude
+// runtimes. The id travels as one argv element to a third-party CLI, so it is
+// kept to a conservative alphabet (no spaces, no leading '-', bounded length).
+// Examples: gpt-5, gemini-3.1-pro, claude-opus-4.6, o4-mini, qwen3-coder:30b.
+// It is exported so the MCP tool schema advertises the same rule dispatch
+// enforces; it is also valid ECMA-262, which JSON Schema requires.
+const ModelIDPattern = `^[a-z0-9][a-z0-9._:-]{0,63}$`
+
+var modelIDRe = regexp.MustCompile(ModelIDPattern)
 
 var (
 	aliasMu sync.RWMutex
@@ -226,7 +231,7 @@ func ModelHint(rt string) string {
 	if rt == "claude" {
 		return "haiku|sonnet|opus|fable"
 	}
-	return "an alias (cheap|balanced|best|reasoning|frontier) or a model id from the harness's own catalog"
+	return "an alias (" + strings.Join(AliasNames, "|") + ") or a model id from the harness's own catalog"
 }
 
 // IsClaudeTier reports whether name is one of the bare Claude tier names. A

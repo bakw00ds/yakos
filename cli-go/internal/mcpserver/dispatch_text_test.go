@@ -47,6 +47,10 @@ func dispatchCfgWithFake(t *testing.T, bin string, lines ...string) mcpserver.Co
 	}
 	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("HOME", t.TempDir())
+	// The fake runtime counts as signed in. Dispatch refuses a codex or agy that
+	// is not (K-132), and HOME is empty here, so no login file exists.
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("ANTIGRAVITY_API_KEY", "test-key")
 	t.Setenv("YAKOS_ROOT", "")
 	t.Setenv("YAKOS_DISPATCH_LOG", t.TempDir())
 
@@ -181,64 +185,92 @@ func TestDispatchTool_DurationKeepsTwoDecimals(t *testing.T) {
 	}
 }
 
-// The dispatch tool's schema offers exactly what dispatch accepts today: the
-// runtimes that exist (no gemini) and the four model tiers. It once advertised
-// aliases and concrete ids that Run refuses ("invalid model tier"). wp-p0a
-// widens the model property when per-runtime validation lands (K-132) and
-// changes this test with it.
-func TestDispatchToolSchema_OffersWhatDispatchAccepts(t *testing.T) {
+// dispatchToolProps returns the properties of the yakos.dispatch input schema.
+func dispatchToolProps(t *testing.T) map[string]interface{} {
+	t.Helper()
 	resp := findByID(t, session(t, defaultCfg(t), listReq(1)), 1)
 	result, _ := resp["result"].(map[string]interface{})
 	tools, _ := result["tools"].([]interface{})
-	var schema map[string]interface{}
 	for _, raw := range tools {
 		tool, _ := raw.(map[string]interface{})
 		if tool["name"] == "yakos.dispatch" {
-			schema, _ = tool["inputSchema"].(map[string]interface{})
+			schema, _ := tool["inputSchema"].(map[string]interface{})
+			props, _ := schema["properties"].(map[string]interface{})
+			if props == nil {
+				t.Fatal("yakos.dispatch has no input properties")
+			}
+			return props
 		}
 	}
-	if schema == nil {
-		t.Fatal("yakos.dispatch not listed")
-	}
-	props, _ := schema["properties"].(map[string]interface{})
-	enumOf := func(prop string) []string {
-		p, _ := props[prop].(map[string]interface{})
-		raw, ok := p["enum"].([]interface{})
-		if !ok {
-			t.Fatalf("%s has no enum: %v", prop, p)
-		}
-		var out []string
-		for _, v := range raw {
-			name, _ := v.(string)
-			out = append(out, name)
-		}
-		return out
-	}
+	t.Fatal("yakos.dispatch not listed")
+	return nil
+}
 
-	if got := strings.Join(enumOf("runtime"), ","); got != "claude,codex,agy" {
+// The dispatch tool's schema offers what dispatch accepts: the runtimes that
+// exist (no gemini) and, for model, the values dispatch takes on some runtime.
+// It once advertised aliases and ids that Run refused ("invalid model tier");
+// then, with only the four Claude tiers valid, it was an enum of them. Per-runtime
+// models (K-132) made it a pattern: which ids are valid depends on the runtime
+// the dispatch resolves to (the agent's pin, the project config, fallbacks), so
+// the schema states the id alphabet and dispatch checks the value against the
+// runtime that runs, with an error that says what that runtime accepts.
+func TestDispatchToolSchema_OffersWhatDispatchAccepts(t *testing.T) {
+	props := dispatchToolProps(t)
+
+	rt, _ := props["runtime"].(map[string]interface{})
+	raw, ok := rt["enum"].([]interface{})
+	if !ok {
+		t.Fatalf("runtime has no enum: %v", rt)
+	}
+	var names []string
+	for _, v := range raw {
+		name, _ := v.(string)
+		names = append(names, name)
+	}
+	if got := strings.Join(names, ","); got != "claude,codex,agy" {
 		t.Errorf("runtime enum = %s, want claude,codex,agy", got)
 	}
 
-	tiers := enumOf("model")
-	if got := strings.Join(tiers, ","); got != "haiku,sonnet,opus,fable" {
-		t.Errorf("model enum = %s, want haiku,sonnet,opus,fable", got)
+	model, _ := props["model"].(map[string]interface{})
+	if _, has := model["enum"]; has {
+		t.Error("model must not be an enum: a codex or agy model id is not one of four Claude tiers")
 	}
-	// Every tier the schema offers is one dispatch accepts, and every tier
-	// dispatch accepts is offered: the two cannot drift apart again.
-	offered := map[string]bool{}
-	for _, tier := range tiers {
-		offered[tier] = true
-		if !runtime.ValidateTier(tier) {
-			t.Errorf("schema offers model %q but dispatch refuses it", tier)
+	pattern, _ := model["pattern"].(string)
+	if pattern != runtime.ModelIDPattern {
+		t.Fatalf("model pattern = %q, want dispatch's own %q", pattern, runtime.ModelIDPattern)
+	}
+	re := regexp.MustCompile(pattern)
+
+	// Everything dispatch accepts on some runtime matches: the four Claude
+	// tiers, every alias, and the ids the harnesses publish.
+	accepted := []string{"haiku", "sonnet", "opus", "fable", "gemini-3.8-flash-high", "gpt-5.5", "claude-opus-5-5-medium", "qwen3-coder:30b"}
+	accepted = append(accepted, runtime.AliasNames...)
+	for _, v := range accepted {
+		if !re.MatchString(v) {
+			t.Errorf("schema pattern refuses %q, which dispatch accepts", v)
 		}
 	}
-	for _, tier := range []string{"haiku", "sonnet", "opus", "fable"} {
-		if runtime.ValidateTier(tier) && !offered[tier] {
-			t.Errorf("dispatch accepts %q but the schema does not offer it", tier)
+	// Nothing dispatch refuses on every runtime matches, so the schema never
+	// advertises a value that fails the argv-safety rule.
+	refused := []string{"", "-m", "--model", "Sonnet", "a b", "x;y", "$(id)", strings.Repeat("a", 65)}
+	for _, v := range refused {
+		if re.MatchString(v) {
+			t.Errorf("schema pattern admits %q, which dispatch refuses", v)
 		}
 	}
-	if _, has := props["model"].(map[string]interface{})["pattern"]; has {
-		t.Error("model must not carry a pattern that admits ids dispatch refuses")
+	// The schema and the check cannot drift apart.
+	for _, v := range append(accepted, refused...) {
+		if re.MatchString(v) != runtime.ValidateModelFor("agy", v) {
+			t.Errorf("schema pattern and ValidateModelFor disagree about %q", v)
+		}
+	}
+
+	// The description tells a caller what to pass: every tier and every alias.
+	desc, _ := model["description"].(string)
+	for _, name := range append([]string{"haiku", "sonnet", "opus", "fable"}, runtime.AliasNames...) {
+		if !strings.Contains(desc, name) {
+			t.Errorf("model description does not mention %q: %s", name, desc)
+		}
 	}
 }
 

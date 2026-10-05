@@ -37,7 +37,7 @@ var harnessModelAliases = map[string]map[string]string{
 // modelIDPattern is the argv-safety rule for a model id: it is passed as the
 // value of -m / --model, so it must start with an alphanumeric (never a dash)
 // and contain only characters model ids use.
-var modelIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,63}$`)
+var modelIDPattern = regexp.MustCompile(ModelIDPattern)
 
 // ValidModelID reports whether id is safe to pass as a model flag value.
 func ValidModelID(id string) bool { return modelIDPattern.MatchString(id) }

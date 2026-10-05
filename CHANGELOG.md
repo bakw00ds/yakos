@@ -150,12 +150,18 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   old and new rows.
 - `output_bytes` of a streamed codex or agy chat turn now measures the text the
   console received, not the raw JSONL.
-- **MCP `yakos.dispatch` no longer offers `gemini`, and lists all four model
-  tiers.** The runtime is retired, and the `model` list now names every tier
-  dispatch accepts (`haiku`, `sonnet`, `opus`, `fable`; it omitted `fable`). A
-  test ties the list to dispatch's own validation so the two cannot drift.
-  Widening `model` to other runtimes' ids waits for per-runtime validation
-  (K-132).
+- **MCP `yakos.dispatch` takes a model for any runtime, and says a named
+  runtime is used as named (K-132 P0a).** The tool no longer offers `gemini`
+  (retired). `model` was an enum of the four Claude tiers, so a client could
+  not name a codex or agy model. It is now the id pattern dispatch enforces
+  (`^[a-z0-9][a-z0-9._:-]{0,63}$`), with a description that lists the aliases
+  and what each runtime accepts. The value is checked against the runtime the
+  call resolves to: an alias or a model id from the harness's own catalog goes
+  through on codex and agy, a Claude tier is refused there, and claude takes
+  only a tier. The `runtime` description now says a runtime named in the call
+  is used as named, and that the call fails instead of falling back when it
+  cannot run. JSON-RPC `yakos.dispatch.run` applies the same check. A test ties
+  the schema pattern to dispatch's own validation so the two cannot drift.
 
 ### Added
 
