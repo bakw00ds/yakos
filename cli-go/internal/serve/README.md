@@ -42,7 +42,7 @@ Stable per workspace; no collisions in practice.
 |--------|--------|---------|------------|
 | `yakos.version` | none | `{version: string}` | Yes |
 | `yakos.kanban.summary` | none | `{summary, todo, in_progress, done}` | Yes |
-| `yakos.dispatch.run` | `{agent, task, project?, runtime?, model?, yakos_root?, timeout?}` | `{exit_code, duration_s, output_bytes, model_resolved}` | No (each call spawns) |
+| `yakos.dispatch.run` | `{agent, task, project?, runtime?, model?, yakos_root?, timeout?}` | `{text, scan, exit_code, duration_s, output_bytes, runtime, model_resolved, model_id?, provider?, session_id?, usage?, text_truncated?, error?}` (the same object the MCP `yakos.dispatch` tool returns; field table in `../mcpserver/README.md`) | No (each call spawns) |
 
 ### Expansion methods (Phase 2 dispatch)
 

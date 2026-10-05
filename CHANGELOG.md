@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Every dispatch transport returns the agent's text, its token usage and the
+  runtime's session id (K-135).** Until now `dispatch.Run` handed back the
+  runtime's raw stdout (claude stream-json, codex JSONL), the MCP
+  `yakos.dispatch` tool and JSON-RPC `yakos.dispatch.run` discarded it, Flows
+  spliced the raw NDJSON into `${nodes.<id>.output}`, and the console showed
+  raw codex JSONL. A new `runtime.LineParser` (selected by `ParserFor`)
+  normalizes each harness's own output into the agent's text, token usage, the
+  harness-native session id and the model id: a wrapper over the existing
+  claude stream-json parser, a `codex exec --json` parser and an agy
+  `--output-format stream-json` parser, plus a plain-text parser for any other
+  runtime (and as the fallback when a stream turns out not to be JSON, so
+  today's agy adapter keeps working). Parsers are deterministic, bounded (a
+  2 MiB line cap, a 1 MiB text cap), strip NUL bytes like the Go hook twins,
+  and never retain the line they are fed.
+  - `dispatch.Run` fills new `Result` fields (`Text`, `SessionID`, `ModelID`,
+    `Provider`, `Runtime`, `Truncated`, `Parsed`, `Error`; `Usage` now carries
+    tokens, cache counts and, for claude, the cost) and still returns the raw
+    stdout.
+  - The MCP `yakos.dispatch` tool and `yakos.dispatch.run` return one shared
+    object: `{text, scan, exit_code, duration_s, output_bytes, runtime,
+    model_resolved, model_id, provider, session_id, usage, error}`. `text` is
+    capped at 64 KiB and passed through the Go output-injection scan; `scan`
+    lists the hits (detection only). Every field the old result had is kept.
+  - Flows splice the text, so the untrusted-output scan now examines the real
+    payload (line-anchored patterns could not match inside JSON-escaped
+    NDJSON), and each node's token usage is recorded in the per-run
+    `node-dispatch.ndjson`. A failed node's error carries the runtime's own
+    message.
+  - The console receives codex and agy answers as text (one chunk, as before)
+    with a summary chunk carrying the usage and session id; a failed turn adds
+    an error chunk. `yakos dispatch` (Go) prints the text.
+  - Token counts follow one convention for every harness: `input_tokens` is
+    the fresh prompt and cache reads and writes are separate (codex reports its
+    input total with the cached part inside it, and is normalized). No price is
+    computed.
+  - Fixtures under `tests/fixtures/runtime-streams`: three real codex 0.154.0
+    recordings; the claude one-shot and agy streams are synthetic (agy was not
+    signed in), marked as such in the folder's README, and agy's must be
+    re-recorded after sign-in. `docs/mcp-integration.md`,
+    `docs/unified-console.md` and both package READMEs document the new
+    results.
+
+### Changed
+
+- **One-shot Go dispatches now write a `usage` object to the dispatch-log.**
+  `dispatch.Run` never filled `Result.Usage`, so a `dispatch_finished` line it
+  wrote had no tokens or cost (the bash path always had them). It now carries
+  what the runtime reported, so `yakos cost`, the Cost tab and the per-agent
+  budgets see these runs. Lines for runtimes that report nothing are unchanged.
+- `output_bytes` of a streamed codex or agy chat turn now measures the text the
+  console received, not the raw JSONL.
+
 ## [0.61.0.0] — 2026-10-03
 
 Minor release: per-agent dollar budgets, hybrid Go hooks by default, the

@@ -38,7 +38,7 @@ server ← {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":".
 
 | Tool | Args | Returns | Idempotent |
 |------|------|---------|------------|
-| `yakos.dispatch` | `{agent, task, project?, runtime?, model?, timeout?}` | `{exit_code, duration_s, output_bytes, model_resolved}` | No |
+| `yakos.dispatch` | `{agent, task, project?, runtime?, model?, timeout?}` | `{text, scan, exit_code, duration_s, output_bytes, runtime, model_resolved, model_id?, provider?, session_id?, usage?, text_truncated?, error?}` (see below) | No |
 | `yakos.kanban.list` | `{column?, limit?}` | `{items:[{id, title, column}]}` | Yes |
 | `yakos.kanban.add` | `{title, category?, notes?}` | `{id}` | Conditionally |
 | `yakos.kanban.move` | `{id, to}` | `{ok:bool}` | Yes |
@@ -46,6 +46,25 @@ server ← {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":".
 | `yakos.refresh` | `{dryRun?}` | text report | Yes when dryRun=true |
 | `yakos.supervise.run` | `{project?, scope?}` | findings text | Yes |
 | `yakos.supervise.ack` | `{finding_id, project?, note?}` | confirmation text | Yes |
+
+### `yakos.dispatch` result
+
+The result is the agent's **text**, not the runtime's raw stdout (claude
+stream-json, codex JSONL and agy stream-json are parsed by
+`internal/runtime`'s `LineParser`; any other runtime's prose is passed
+through). It is the same object `yakos.dispatch.run` returns over JSON-RPC
+(`dispatch.TransportSummary`).
+
+| Field | Meaning |
+|-------|---------|
+| `text` | The agent's answer, at most 64 KiB (marker included). **Untrusted model output.** |
+| `text_truncated` | Present and true when `text` is incomplete (cut at 64 KiB here, or at the parser's 1 MiB cap). |
+| `scan` | Injection patterns the Go `output-injection-scan` found in `text`; `[]` when clean. Detection only: the text is returned either way. |
+| `exit_code`, `duration_s`, `output_bytes` | As before. `output_bytes` is the size of the raw capture, not of `text`. A non-zero `exit_code` is not a tool error. |
+| `runtime`, `provider`, `model_resolved`, `model_id` | The runtime that ran, its provider (anthropic, openai, google), the requested tier, and the concrete model id when the stream reported one. |
+| `session_id` | The runtime's own session id (claude `session_id`, codex `thread_id`, agy `conversation_id`). The tool does not take a resume id yet. |
+| `usage` | `{input_tokens, output_tokens, cache_read, cache_creation}`, plus `total_cost_usd` only for claude (the one harness that reports a dollar figure). `input_tokens` is the fresh prompt for every harness; cached tokens are counted separately. Omitted when the runtime reported no usage. |
+| `error` | The failure message the runtime reported, if any (for example a codex `turn.failed`). |
 
 ## Error semantics
 
