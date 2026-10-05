@@ -1106,6 +1106,11 @@ t20_expect_refusal "blank key: refused" "is not set" "ANTHROPIC_API_KEY=   "
 t20_expect_refusal "a subscription token alone is not a key" "is not set" "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-$t20_secret"
 t20_expect_refusal "an OAuth token in the key slot is refused and not echoed" "OAuth token" "ANTHROPIC_API_KEY=sk-ant-oat01-$t20_secret"
 t20_expect_refusal "an OAuth refresh token in the key slot is refused" "OAuth token" "ANTHROPIC_API_KEY=SK-ANT-ORT01-$t20_secret"
+# The refusal comes before anything is composed. A framework root with no agents makes the
+# compose step fail with a message of its own, so the key reason still being the only line
+# shows the gate ran first. A gate placed after the compose step prints the compose error.
+mkdir -p "$t20/emptyroot/lib/agents"
+t20_expect_refusal "no key and nothing to compose: the refusal still comes first" "is not set" YAKOS_ROOT="$t20/emptyroot"
 
 t20_rc=0
 t20_dispatch "ANTHROPIC_API_KEY=sk-ant-api03-t20-fake-key" \
