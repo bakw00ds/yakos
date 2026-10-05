@@ -37,18 +37,66 @@ func providerForRuntime(name string) string {
 	}
 }
 
+// resumesNativeSession reports whether a framed one-shot dispatch continues a
+// native harness session. DispatchRequest.ConversationID is the harness's own
+// session id: the adapters hand it over as the resume argument (agy
+// --conversation <id>), so a request without one begins a native conversation.
+// It is not the yakOS conversation id of a console pane, which the console
+// always sets and a chat turn never passes on (see chatResumesNativeSession).
+func resumesNativeSession(req runtime.DispatchRequest) bool {
+	return req.ConversationID != ""
+}
+
+// chatResumesNativeSession reports whether a chat turn continues a native
+// harness session. ChatDispatchRequest carries no resume id and the adapters'
+// ChatExecCmd pass none, so no chat turn does, whatever conversation id the
+// console tracks for the pane: every chat turn begins a native conversation.
+// When the chat request gains a native resume id, this is where it is read.
+func chatResumesNativeSession(_ runtime.ChatDispatchRequest) bool {
+	return false
+}
+
+// runUsage picks the usage to report for a run from the figures a parser can
+// expose: Usage, the sum of the stream's own events, and CumulativeUsage, a
+// conversation total that agy's result frame keeps (it counts every turn of the
+// conversation, not only this run). handed says whether the harness was handed
+// a native session id to continue.
+//
+// A run is resumed when either signal says so: it was handed an id, or the
+// stream's own turn count says a later turn (ParseResult.LaterTurn). The turn
+// count is the stream's word for what it is, so a later turn is not taken for
+// the whole conversation when a caller hands over no id, as agy chat continuity
+// will let happen. The handed id covers the other direction: a frame without a
+// turn count cannot hide a resume that was asked for.
+//
+// A run that is not resumed began a native conversation, so there are no
+// earlier turns: the total is its own tokens, and the more complete figure. It
+// survives a step line lost to corruption, and it is all a stream without steps
+// (the single JSON envelope) has. A resumed run's total also holds the turns
+// before it, so only the steps' sum is its own and reporting the total would
+// count those turns again. A resumed run whose stream carries no steps reports
+// no tokens; Result's CumulativeUsage still holds the total.
+func runUsage(pr runtime.ParseResult, handed bool) runtime.Usage {
+	resumed := handed || pr.LaterTurn()
+	if !resumed && pr.CumulativeUsage != (runtime.Usage{}) {
+		return pr.CumulativeUsage
+	}
+	return pr.Usage
+}
+
 // applyOutput parses a completed stdout capture with the runtime's LineParser
 // and records the outcome on r. The raw bytes are the caller's to keep.
-func (r *Result) applyOutput(runtimeName string, stdout []byte) {
-	r.applyParsed(runtimeName, runtime.ParseOutput(runtime.ParserFor(runtimeName), stdout))
+// handed says whether the harness was handed a native session id to continue
+// (see runUsage).
+func (r *Result) applyOutput(runtimeName string, stdout []byte, handed bool) {
+	r.applyParsed(runtimeName, runtime.ParseOutput(runtime.ParserFor(runtimeName), stdout), handed)
 }
 
 // applyParsed records a parse on r. A parse that reported no usage leaves
 // Usage nil, so a log line written from r carries a usage object only when the
-// runtime reported one. Usage is the parser's figure for the run, which for agy
-// follows the result frame's own turn count rather than anything about the
-// request (see runtime.ParseResult.Usage).
-func (r *Result) applyParsed(runtimeName string, pr runtime.ParseResult) {
+// runtime reported one. Which usage that is depends on whether the run resumed a
+// conversation (see runUsage).
+func (r *Result) applyParsed(runtimeName string, pr runtime.ParseResult, handed bool) {
 	r.Runtime = runtimeName
 	r.Provider = providerForRuntime(runtimeName)
 	r.Parsed = true
@@ -61,8 +109,7 @@ func (r *Result) applyParsed(runtimeName string, pr runtime.ParseResult) {
 	r.TextAllCapped = pr.TextAllCapped
 	r.LinesDropped = pr.LinesDropped
 	r.Error = pr.Error
-	if pr.Usage != (runtime.Usage{}) {
-		u := pr.Usage
+	if u := runUsage(pr, handed); u != (runtime.Usage{}) {
 		r.Usage = &u
 	}
 	if pr.CumulativeUsage != (runtime.Usage{}) {
