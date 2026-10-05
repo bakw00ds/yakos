@@ -149,8 +149,12 @@ session id:
 }
 ```
 
-- **`text`** is at most 64 KiB (`text_truncated` says when it was cut) and is
-  **untrusted model output**. It is passed through the Go
+- **`text`** is the agent's answer. For claude that is the final text of the
+  stream's result frame: the relay's lead-in ("Dispatching to ...") and a
+  sub-agent's narration are not in it, and neither is anything else the run
+  printed along the way. Without a result frame (a killed run) it falls back to
+  the top-level assistant text. It is at most 64 KiB (`text_truncated` says when
+  it was cut) and is **untrusted model output**. It is passed through the Go
   `output-injection-scan` before it is returned; `scan` lists the patterns
   that matched (`[]` when clean). The scan only reports. A client that feeds
   `text` to another model should treat a non-empty `scan` as a warning, as the
@@ -159,8 +163,11 @@ session id:
   the fresh (uncached) prompt, `cache_read` and `cache_creation` are the
   cached remainder, `output_tokens` includes reasoning. `total_cost_usd` is
   present only for claude, the one harness that reports a dollar figure;
-  codex and agy report tokens only. `usage` is omitted when the runtime
-  reported none.
+  codex and agy report tokens only. For agy the counts cover the whole
+  conversation up to this call, not this call alone, and `usage` then carries
+  `"cumulative": true`: a client that adds calls up subtracts the total it last
+  saw for the same `session_id`. `usage` is omitted when the runtime reported
+  none.
 - **`session_id`** is the runtime's own id (claude `session_id`, codex
   `thread_id`, agy `conversation_id`). The tool does not accept a resume id
   yet; use `yakos dispatch` with `YAKOS_CONVERSATION_ID` to continue one.

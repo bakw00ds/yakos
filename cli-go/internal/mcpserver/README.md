@@ -57,13 +57,13 @@ through). It is the same object `yakos.dispatch.run` returns over JSON-RPC
 
 | Field | Meaning |
 |-------|---------|
-| `text` | The agent's answer, at most 64 KiB (marker included). **Untrusted model output.** |
+| `text` | The agent's answer, at most 64 KiB (marker included). For claude it is the final text of the stream's result frame, not the relay's lead-in or a sub-agent's narration; the full join of every assistant message is deliberately not a field of the result. **Untrusted model output.** |
 | `text_truncated` | Present and true when `text` is incomplete (cut at 64 KiB here, or at the parser's 1 MiB cap). |
 | `scan` | Injection patterns the Go `output-injection-scan` found in `text`; `[]` when clean. Detection only: the text is returned either way. |
 | `exit_code`, `duration_s`, `output_bytes` | As before. `output_bytes` is the size of the raw capture, not of `text`. A non-zero `exit_code` is not a tool error. |
 | `runtime`, `provider`, `model_resolved`, `model_id` | The runtime that ran, its provider (anthropic, openai, google), the requested tier, and the concrete model id when the stream reported one. |
 | `session_id` | The runtime's own session id (claude `session_id`, codex `thread_id`, agy `conversation_id`). The tool does not take a resume id yet. |
-| `usage` | `{input_tokens, output_tokens, cache_read, cache_creation}`, plus `total_cost_usd` only for claude (the one harness that reports a dollar figure). `input_tokens` is the fresh prompt for every harness; cached tokens are counted separately. Omitted when the runtime reported no usage. |
+| `usage` | `{input_tokens, output_tokens, cache_read, cache_creation}`, plus `total_cost_usd` only for claude (the one harness that reports a dollar figure). `input_tokens` is the fresh prompt for every harness; cached tokens are counted separately. `cumulative: true` is added for agy, whose counts cover the whole conversation up to this call rather than this call alone: subtract the total last seen for the same `session_id`. Omitted when the runtime reported no usage. |
 | `error` | The failure message the runtime reported, if any (for example a codex `turn.failed`). |
 
 ## Error semantics

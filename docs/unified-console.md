@@ -684,7 +684,9 @@ Two substitution forms are supported in `prompt`:
   named upstream node. The output is the agent's **text**: the dispatch layer
   parses each runtime's own stream (claude stream-json, codex JSONL, agy
   stream-json; prose from any other runtime) and Flows keep only the text,
-  never the raw stream. The untrusted-output scan now examines that
+  never the raw stream. For claude that is the final text of the result frame,
+  so a framed node's output is the sub-agent's final report, not the relay's
+  lead-in or any narration. The untrusted-output scan now examines that
   text. Only nodes listed in `needs` (directly or
   transitively) may be referenced; the validator rejects forward
   references and undeclared IDs.
