@@ -418,7 +418,7 @@ func execWithStreaming(
 		stderrBuf      bytes.Buffer
 		costUSD        float64
 		usageCost      *cost.Usage
-		nativeSession  string // claude session_id from the result frame
+		nativeSession  string               // claude session_id from the result frame
 		parsed         *runtime.ParseResult // buffered runtimes: the LineParser's outcome
 		textBlocks     = make(map[int]struct{})
 		toolUseBlocks  = make(map[int]*runtime.ToolEvent)          // index → in-progress tool_use
