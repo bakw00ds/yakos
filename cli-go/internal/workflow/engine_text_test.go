@@ -301,10 +301,12 @@ func TestEngine_EndToEndRealDispatchSplicesText(t *testing.T) {
 	}
 }
 
-// The node's model reaches dispatch exactly as the workflow wrote it. Alias
-// resolution is dispatch's job, per runtime: pre-resolving "balanced" to the
-// Claude tier here would hand a codex node "sonnet".
-func TestEngine_PassesNodeModelVerbatimToDispatch(t *testing.T) {
+// Until per-runtime model resolution (K-132) moves into dispatch, which only
+// accepts the four Claude tiers, the engine resolves a node's alias to its tier
+// before dispatch. This pins that contract so a workflow with `model: balanced`
+// keeps working on main; K-132 flips it when it starts passing the model through
+// verbatim.
+func TestEngine_ResolvesNodeModelAliasBeforeDispatch(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
 	got := map[string]string{}
@@ -317,8 +319,8 @@ func TestEngine_PassesNodeModelVerbatimToDispatch(t *testing.T) {
 	eng, _ := newTestEngine(t, fn)
 	wf := &workflow.Workflow{Version: 1, Name: "models", Nodes: []workflow.Node{
 		{ID: "a", Agent: "agent-a", Prompt: "p", OutputLimit: 100, Model: "balanced"},
-		{ID: "b", Agent: "agent-b", Prompt: "p", OutputLimit: 100, Model: "sonnet"},
-		{ID: "c", Agent: "agent-c", Prompt: "p", OutputLimit: 100, Model: "gpt-5"},
+		{ID: "b", Agent: "agent-b", Prompt: "p", OutputLimit: 100, Model: "best"},
+		{ID: "c", Agent: "agent-c", Prompt: "p", OutputLimit: 100, Model: "sonnet"},
 		{ID: "d", Agent: "agent-d", Prompt: "p", OutputLimit: 100},
 	}}
 	if _, err := eng.Run(context.Background(), wf, "run-text-model", "tester", dispatch.IdentityCarrier{}); err != nil {
@@ -326,7 +328,7 @@ func TestEngine_PassesNodeModelVerbatimToDispatch(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	for agent, want := range map[string]string{"agent-a": "balanced", "agent-b": "sonnet", "agent-c": "gpt-5", "agent-d": ""} {
+	for agent, want := range map[string]string{"agent-a": "sonnet", "agent-b": "opus", "agent-c": "sonnet", "agent-d": ""} {
 		if got[agent] != want {
 			t.Errorf("%s was dispatched with model %q, want %q", agent, got[agent], want)
 		}
