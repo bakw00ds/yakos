@@ -128,8 +128,19 @@ yk_rt_default() {
 yk_rt_set_default() {
     local id="$1"
     yk_rt_is_known "$id" || ct_die "runtime-resolve: unknown runtime '$id'"
-    mkdir -p "$HOME/.yakos-state" 2>/dev/null || true
-    printf '%s\n' "$id" > "$HOME/.yakos-state/default-runtime"
+    local dir="$HOME/.yakos-state"
+    local file="$dir/default-runtime"
+    mkdir -p "$dir" 2>/dev/null || true
+    # The Go dispatcher honours this file only when no one else could have
+    # written it: not group or world writable, in a directory with the same
+    # property (sec-324 F2). A shell redirection creates 0666 minus the umask, so
+    # under umask 002 the file (and a directory made by mkdir -p) came out
+    # group-writable and was refused with a warning. Set the modes instead of
+    # trusting the umask: create the file 0600, and repair one an older version
+    # left permissive, since a redirect does not change an existing file's mode.
+    chmod go-w "$dir" 2>/dev/null || true
+    ( umask 077; printf '%s\n' "$id" > "$file" )
+    chmod 0600 "$file" 2>/dev/null || true
 }
 
 # yk_rt_capability <runtime-id> <capability-name>

@@ -162,7 +162,10 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   every unpinned dispatch to a vendor. It is now read only as a regular file
   owned by you, not group or world writable, in a directory with the same
   properties and not a symlink; otherwise it is reported and ignored. Matters
-  where the state directory falls back to the shared temp directory.
+  where the state directory falls back to the shared temp directory. Both
+  writers of the file (`yakos auth set-default` in bash and in Go) now create
+  it 0600 whatever the umask and repair a group-writable one, so a umask of 002
+  no longer produces a file the dispatcher refuses.
 
 - **The sign-in probe cannot hang a dispatch (K-132 P0a, sec-324 F3).** The agy
   OS-keyring lookup (a process spawn on macOS, a possible unlock prompt on
