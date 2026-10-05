@@ -5,12 +5,14 @@ package runtime
 // the single-envelope `--output-format json` form and plain text (what the
 // adapter emitted before it switched to stream-json).
 //
-// SOURCE OF TRUTH: the vendor's published schema,
-// https://antigravity.google/docs/cli/headless/ (read 2026-10-05, agy 1.2.17).
-// agy was not signed in on the build machine, so no live capture exists; the
-// fixture under tests/fixtures/runtime-streams is marked
-// SYNTHETIC-PENDING-SIGN-IN and is built from that page's own examples. It
-// must be re-recorded after an interactive `agy` sign-in (K-133 follow-up).
+// SOURCE OF TRUTH: two real recordings from agy 1.2.17 (2026-10-05, signed in
+// under the operator's login): a plain reply and a run with a shell tool step,
+// both on gemini-3.8-flash-low. They match the vendor's published schema,
+// https://antigravity.google/docs/cli/headless/, which remains the reference for
+// what was not recorded: checkpoint steps, multi-turn stdin sessions, tool
+// errors and the --output-format json envelope. Those cases are covered by
+// fixtures marked SYNTHETIC built from the vendor's own examples; see
+// tests/fixtures/runtime-streams/README.md.
 //
 // Every line is {"event": "<type>", "<type>": {payload}}:
 //
@@ -107,6 +109,7 @@ type agyToolInfo struct {
 
 type agyResult struct {
 	ConversationID  string          `json:"conversation_id"`
+	Model           string          `json:"model"`
 	Status          string          `json:"status"`
 	Response        string          `json:"response"`
 	Error           json.RawMessage `json:"error"`
@@ -254,7 +257,7 @@ func (p *agyLineParser) step(st agyStep) []NativeEvent {
 
 // result maps a terminal result payload to events and records its outcome.
 func (p *agyLineParser) result(r agyResult) []NativeEvent {
-	p.learn(r.ConversationID, "")
+	p.learn(r.ConversationID, r.Model)
 	p.resp = textAccumulator{}
 	p.resp.add(r.Response)
 	if r.Usage != nil {

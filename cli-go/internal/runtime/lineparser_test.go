@@ -279,7 +279,7 @@ func TestParsers_ToolPayloadIsCapped(t *testing.T) {
 var fixtureFor = map[string]string{
 	"claude": "claude-stream-json-oneshot-SYNTHETIC.ndjson",
 	"codex":  "codex-exec-json-0.154.0-SYNTHETIC-items.ndjson",
-	"agy":    "agy-stream-json-1.2.17-SYNTHETIC-PENDING-SIGN-IN-tool.ndjson",
+	"agy":    "agy-stream-json-1.2.17-tool.ndjson",
 }
 
 // The shared line reader reuses one buffer; a parser that kept a reference to

@@ -5,19 +5,112 @@ import (
 	"testing"
 )
 
-// The agy fixtures are SYNTHETIC-PENDING-SIGN-IN: the vendor's own published
-// examples (see tests/fixtures/runtime-streams/README.md). These goldens pin
-// the parser to that published schema; they must be re-checked against a real
-// recording once agy is signed in.
-
+// agyReal* replay REAL recordings from agy 1.2.17 (gemini-3.8-flash-low); the
+// only edit is that init.cwd was rewritten to /work/project. The agySynthetic*
+// fixtures are the vendor's published examples (see
+// tests/fixtures/runtime-streams/README.md) for the cases not recorded:
+// checkpoint steps, a two-turn stdin session, tool errors and the
+// --output-format json envelope.
 const (
-	agySingle    = "agy-stream-json-1.2.17-SYNTHETIC-PENDING-SIGN-IN.ndjson"
-	agyMultiturn = "agy-stream-json-1.2.17-SYNTHETIC-PENDING-SIGN-IN-multiturn.ndjson"
-	agyTool      = "agy-stream-json-1.2.17-SYNTHETIC-PENDING-SIGN-IN-tool.ndjson"
-	agyEnvelope1 = "agy-json-1.2.17-SYNTHETIC-PENDING-SIGN-IN.ndjson"
+	agyRealOK        = "agy-stream-json-1.2.17-ok.ndjson"
+	agyRealTool      = "agy-stream-json-1.2.17-tool.ndjson"
+	agySingle        = "agy-stream-json-1.2.17-SYNTHETIC-checkpoint.ndjson"
+	agyMultiturn     = "agy-stream-json-1.2.17-SYNTHETIC-multiturn.ndjson"
+	agyToolErrorFix  = "agy-stream-json-1.2.17-SYNTHETIC-tool-error.ndjson"
+	agyEnvelopeFixed = "agy-json-1.2.17-SYNTHETIC-envelope.ndjson"
 )
 
-func TestAgyLineParser_SingleTurn(t *testing.T) {
+// ---- real recordings ----------------------------------------------------------
+
+func TestAgyLineParser_RealOK(t *testing.T) {
+	pr, evs := parse("agy", readFixture(t, agyRealOK))
+	if pr.Text != "ok" {
+		t.Errorf("Text = %q", pr.Text)
+	}
+	if pr.SessionID != "45b505d2-bbd2-46e2-ad18-6557161bf134" {
+		t.Errorf("SessionID = %q", pr.SessionID)
+	}
+	// The model id is whatever the init frame reports, verbatim, effort suffix included.
+	if pr.ModelID != "gemini-3.8-flash-low" {
+		t.Errorf("ModelID = %q", pr.ModelID)
+	}
+	want := Usage{InputTokens: 12863, OutputTokens: 1, DurationMs: 2055}
+	if pr.Usage != want {
+		t.Errorf("Usage = %+v, want %+v", pr.Usage, want)
+	}
+	if pr.Error != "" || pr.Truncated {
+		t.Errorf("unexpected: %+v", pr)
+	}
+	// "ok" arrives as an ACTIVE fragment, then a DONE step carrying "\n".
+	wantKinds(t, evs, EventSession, EventToken, EventToken, EventResult)
+	if evs[0].Model != "gemini-3.8-flash-low" || evs[1].Text != "ok" || evs[2].Text != "\n" {
+		t.Errorf("events = %+v", evs)
+	}
+}
+
+// A run with a shell tool step: the first agent_response step carries usage but
+// no text (the model's tool call), the tool step is seen ACTIVE then DONE, and
+// the answer comes from the last agent_response step.
+func TestAgyLineParser_RealToolRun(t *testing.T) {
+	pr, evs := parse("agy", readFixture(t, agyRealTool))
+	if pr.Text != "done" {
+		t.Errorf("Text = %q", pr.Text)
+	}
+	if pr.SessionID != "1f18ba00-a3ce-4a9e-8200-fdf181ecaeb6" || pr.ModelID != "gemini-3.8-flash-low" {
+		t.Errorf("SessionID/ModelID = %q/%q", pr.SessionID, pr.ModelID)
+	}
+	want := Usage{InputTokens: 25958, OutputTokens: 128, DurationMs: 8730}
+	if pr.Usage != want {
+		t.Errorf("Usage = %+v, want %+v", pr.Usage, want)
+	}
+	wantKinds(t, evs, EventSession, EventToolUse, EventToolResult, EventToken, EventToken, EventResult)
+	if u := evs[1]; u.ToolName != "run_command" || u.ToolInput != `{"CommandLine":"echo hello_p0c"}` {
+		t.Errorf("tool_use = %+v", u)
+	}
+	if r := evs[2]; r.ToolName != "run_command" || r.ToolOutput != "hello_p0c\r\n" || r.IsError {
+		t.Errorf("tool_result = %+v", r)
+	}
+}
+
+// Recorded evidence for the fallback: summing the DONE steps' usage reproduces
+// the terminal result's totals exactly (12870 + 13088 input, 127 + 1 output).
+func TestAgyLineParser_RealRunStepUsageSumMatchesResult(t *testing.T) {
+	var kept []string
+	for _, l := range strings.Split(strings.TrimRight(string(readFixture(t, agyRealTool)), "\n"), "\n") {
+		if !strings.Contains(l, `"event":"result"`) {
+			kept = append(kept, l)
+		}
+	}
+	pr, _ := parse("agy", []byte(strings.Join(kept, "\n")))
+	if want := (Usage{InputTokens: 25958, OutputTokens: 128}); pr.Usage != want {
+		t.Errorf("fallback Usage = %+v, want %+v", pr.Usage, want)
+	}
+}
+
+// A model id with an effort suffix is carried verbatim; the result frame may
+// report one too.
+func TestAgyLineParser_ModelIDIsVerbatim(t *testing.T) {
+	for _, id := range []string{"gemini-3.8-flash-high", "claude-opus-5-5-medium"} {
+		init := `{"event":"init","conversation_id":"c","init":{"model":"` + id + `"}}`
+		if pr, _ := parse("agy", []byte(init)); pr.ModelID != id {
+			t.Errorf("init model %q -> ModelID %q", id, pr.ModelID)
+		}
+		res := `{"event":"result","result":{"conversation_id":"c","status":"SUCCESS","response":"x","model":"` + id + `"}}`
+		if pr, _ := parse("agy", []byte(res)); pr.ModelID != id {
+			t.Errorf("result model %q -> ModelID %q", id, pr.ModelID)
+		}
+	}
+	// init wins when both report one.
+	both := `{"event":"init","conversation_id":"c","init":{"model":"from-init"}}` + "\n" +
+		`{"event":"result","result":{"conversation_id":"c","status":"SUCCESS","model":"from-result"}}`
+	if pr, _ := parse("agy", []byte(both)); pr.ModelID != "from-init" {
+		t.Errorf("ModelID = %q, want from-init", pr.ModelID)
+	}
+}
+
+// ---- vendor examples (synthetic) -----------------------------------------------
+
+func TestAgyLineParser_VendorExampleWithCheckpoint(t *testing.T) {
 	pr, evs := parse("agy", readFixture(t, agySingle))
 	const text = "Git rebase destructively rewrites a branch's commit history by systematically detaching its unique commits and sequentially reapplying them onto a new base commit."
 	if pr.Text != text {
@@ -77,8 +170,8 @@ func TestAgyLineParser_MultiTurnFragments(t *testing.T) {
 	}
 }
 
-func TestAgyLineParser_ToolSteps(t *testing.T) {
-	pr, evs := parse("agy", readFixture(t, agyTool))
+func TestAgyLineParser_ToolFailureStep(t *testing.T) {
+	pr, evs := parse("agy", readFixture(t, agyToolErrorFix))
 	if pr.Text != "Running the command.\nThe command printed hello_headless_demo." {
 		t.Errorf("Text = %q", pr.Text)
 	}
@@ -109,7 +202,7 @@ func TestAgyLineParser_ToolStepActiveThenDone(t *testing.T) {
 
 // --output-format json: one envelope, no event key.
 func TestAgyLineParser_JSONEnvelope(t *testing.T) {
-	pr, evs := parse("agy", readFixture(t, agyEnvelope1))
+	pr, evs := parse("agy", readFixture(t, agyEnvelopeFixed))
 	if !strings.HasPrefix(pr.Text, "A git rebase rewrites the commit history") || strings.HasSuffix(pr.Text, "\n") {
 		t.Errorf("Text = %q", pr.Text)
 	}

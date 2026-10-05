@@ -137,15 +137,15 @@ func TestRun_CodexJSONLBecomesText(t *testing.T) {
 }
 
 func TestRun_AgyStreamJSONBecomesText(t *testing.T) {
-	fakeRuntimeBin(t, "agy", "agy-stream-json-1.2.17-SYNTHETIC-PENDING-SIGN-IN.ndjson", "", 0)
+	fakeRuntimeBin(t, "agy", "agy-stream-json-1.2.17-ok.ndjson", "", 0) // a real recording
 	_, res, _ := runOnce(t, "agy")
-	if !strings.HasPrefix(res.Text, "Git rebase destructively rewrites") || strings.HasSuffix(res.Text, "\n") {
+	if res.Text != "ok" {
 		t.Errorf("Text = %q", res.Text)
 	}
-	if res.Provider != "google" || res.SessionID != "c3b66b04-872b-4fbe-a3a4-058a026ef20a" {
-		t.Errorf("Provider/SessionID = %q/%q", res.Provider, res.SessionID)
+	if res.Provider != "google" || res.SessionID != "45b505d2-bbd2-46e2-ad18-6557161bf134" || res.ModelID != "gemini-3.8-flash-low" {
+		t.Errorf("Provider/SessionID/ModelID = %q/%q/%q", res.Provider, res.SessionID, res.ModelID)
 	}
-	if res.Usage == nil || res.Usage.InputTokens != 10418 || res.Usage.CacheRead != 8113 {
+	if res.Usage == nil || res.Usage.InputTokens != 12863 || res.Usage.OutputTokens != 1 {
 		t.Errorf("Usage = %+v", res.Usage)
 	}
 }
@@ -298,12 +298,15 @@ func TestRunStream_CodexFailureSurfacesAsErrorChunk(t *testing.T) {
 }
 
 func TestRunStream_AgyStreamJSONArrivesAsText(t *testing.T) {
-	chunks, res := runBuffered(t, "agy", readFixtureBytes(t, "agy-stream-json-1.2.17-SYNTHETIC-PENDING-SIGN-IN-multiturn.ndjson"))
-	if strings.Join(chunkTypes(chunks), ",") != "token,summary" || chunks[0].Text != "apple\napple" {
+	chunks, res := runBuffered(t, "agy", readFixtureBytes(t, "agy-stream-json-1.2.17-tool.ndjson")) // a real recording
+	if strings.Join(chunkTypes(chunks), ",") != "token,summary" || chunks[0].Text != "done" {
 		t.Fatalf("chunks = %+v", chunks)
 	}
-	if chunks[1].SessionID != "9ec58bfd-4d67-4f5e-83a5-9d907e9c6b1f" || res.ModelID != "gemini-3-pro" {
+	if chunks[1].SessionID != "1f18ba00-a3ce-4a9e-8200-fdf181ecaeb6" || res.ModelID != "gemini-3.8-flash-low" {
 		t.Errorf("SessionID/ModelID = %q/%q", chunks[1].SessionID, res.ModelID)
+	}
+	if chunks[1].Usage == nil || chunks[1].Usage.InputTokens != 25958 || chunks[1].Usage.OutputTokens != 128 {
+		t.Errorf("summary usage = %+v", chunks[1].Usage)
 	}
 }
 

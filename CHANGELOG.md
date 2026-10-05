@@ -45,11 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     input total with the cached part inside it, and is normalized). No price is
     computed.
   - Fixtures under `tests/fixtures/runtime-streams`: three real codex 0.154.0
-    recordings; the claude one-shot and agy streams are synthetic (agy was not
-    signed in), marked as such in the folder's README, and agy's must be
-    re-recorded after sign-in. `docs/mcp-integration.md`,
-    `docs/unified-console.md` and both package READMEs document the new
-    results.
+    recordings and two real agy 1.2.17 recordings (a plain reply and a shell
+    tool step, both on `gemini-3.8-flash-low`; `ModelID` carries the id the
+    `init` frame reports, effort suffix included). The claude one-shot streams
+    and the cases that were not recorded (agy checkpoint steps, multi-turn
+    stdin sessions, tool errors and the `--output-format json` envelope) are
+    synthetic and marked as such in the folder's README.
+    `docs/mcp-integration.md`, `docs/unified-console.md` and both package
+    READMEs document the new results.
 
 ### Changed
 
