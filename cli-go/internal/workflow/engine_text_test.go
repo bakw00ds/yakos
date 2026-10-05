@@ -300,3 +300,35 @@ func TestEngine_EndToEndRealDispatchSplicesText(t *testing.T) {
 		t.Errorf("node a usage record = %v", finishedA)
 	}
 }
+
+// The node's model reaches dispatch exactly as the workflow wrote it. Alias
+// resolution is dispatch's job, per runtime: pre-resolving "balanced" to the
+// Claude tier here would hand a codex node "sonnet".
+func TestEngine_PassesNodeModelVerbatimToDispatch(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	got := map[string]string{}
+	fn := func(_ context.Context, p dispatch.Params) ([]byte, dispatch.Result, error) {
+		mu.Lock()
+		got[p.Agent] = p.Model
+		mu.Unlock()
+		return []byte("x"), dispatch.Result{ExitCode: 0}, nil
+	}
+	eng, _ := newTestEngine(t, fn)
+	wf := &workflow.Workflow{Version: 1, Name: "models", Nodes: []workflow.Node{
+		{ID: "a", Agent: "agent-a", Prompt: "p", OutputLimit: 100, Model: "balanced"},
+		{ID: "b", Agent: "agent-b", Prompt: "p", OutputLimit: 100, Model: "sonnet"},
+		{ID: "c", Agent: "agent-c", Prompt: "p", OutputLimit: 100, Model: "gpt-5"},
+		{ID: "d", Agent: "agent-d", Prompt: "p", OutputLimit: 100},
+	}}
+	if _, err := eng.Run(context.Background(), wf, "run-text-model", "tester", dispatch.IdentityCarrier{}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for agent, want := range map[string]string{"agent-a": "balanced", "agent-b": "sonnet", "agent-c": "gpt-5", "agent-d": ""} {
+		if got[agent] != want {
+			t.Errorf("%s was dispatched with model %q, want %q", agent, got[agent], want)
+		}
+	}
+}

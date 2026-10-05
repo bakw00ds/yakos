@@ -9,8 +9,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	goruntime "runtime"
 	"regexp"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -177,5 +177,53 @@ func TestDispatchTool_DurationKeepsTwoDecimals(t *testing.T) {
 	_, raw := callDispatch(t, cfg, map[string]interface{}{"agent": "worker", "task": "t"})
 	if !regexp.MustCompile(`"duration_s":\d+(\.\d{1,2})?[,}]`).MatchString(raw) {
 		t.Errorf("duration_s is not rounded to two decimals: %s", raw)
+	}
+}
+
+// The dispatch tool's schema offers the runtimes that exist (no gemini) and
+// takes a model id for any runtime, not only the Claude tiers.
+func TestDispatchToolSchema_RuntimesAndModels(t *testing.T) {
+	resp := findByID(t, session(t, defaultCfg(t), listReq(1)), 1)
+	result, _ := resp["result"].(map[string]interface{})
+	tools, _ := result["tools"].([]interface{})
+	var schema map[string]interface{}
+	for _, raw := range tools {
+		tool, _ := raw.(map[string]interface{})
+		if tool["name"] == "yakos.dispatch" {
+			schema, _ = tool["inputSchema"].(map[string]interface{})
+		}
+	}
+	if schema == nil {
+		t.Fatal("yakos.dispatch not listed")
+	}
+	props, _ := schema["properties"].(map[string]interface{})
+
+	rt, _ := props["runtime"].(map[string]interface{})
+	var runtimes []string
+	for _, v := range rt["enum"].([]interface{}) {
+		runtimes = append(runtimes, v.(string))
+	}
+	if strings.Join(runtimes, ",") != "claude,codex,agy" {
+		t.Errorf("runtime enum = %v, want [claude codex agy]", runtimes)
+	}
+
+	model, _ := props["model"].(map[string]interface{})
+	if _, hasEnum := model["enum"]; hasEnum {
+		t.Error("model must not be limited to the Claude tiers")
+	}
+	pat, _ := model["pattern"].(string)
+	re, err := regexp.Compile(pat)
+	if err != nil {
+		t.Fatalf("model pattern %q: %v", pat, err)
+	}
+	for _, ok := range []string{"haiku", "balanced", "gpt-5", "gemini-3.8-flash-low", "claude-opus-5-5-medium", "o3:mini"} {
+		if !re.MatchString(ok) {
+			t.Errorf("model %q should match %q", ok, pat)
+		}
+	}
+	for _, bad := range []string{"", "-flag", "--model", "Sonnet", "a b", "x;y", strings.Repeat("a", 65)} {
+		if re.MatchString(bad) {
+			t.Errorf("model %q must not match %q", bad, pat)
+		}
 	}
 }

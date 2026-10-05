@@ -63,6 +63,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budgets see these runs. Lines for runtimes that report nothing are unchanged.
 - `output_bytes` of a streamed codex or agy chat turn now measures the text the
   console received, not the raw JSONL.
+- **MCP `yakos.dispatch` takes any model id, and Flows pass a node's `model`
+  through as written (needed by K-132).** The tool's schema no longer offers
+  `gemini` (the runtime is retired) and `model` accepts any model id that is a
+  valid argument (`^[a-z0-9][a-z0-9._:-]{0,63}$`: a tier, an alias or a runtime's
+  own id), where it listed only `haiku`, `sonnet` and `opus`. The Flows engine no
+  longer turns an alias such as `balanced` into the Claude tier before dispatch
+  sees it, because a codex node would then receive `sonnet`; dispatch resolves
+  aliases per runtime from K-132 on. Until K-132 is in, dispatch still accepts
+  only the four tiers, so land this after it.
 
 ## [0.61.0.0] — 2026-10-03
 
