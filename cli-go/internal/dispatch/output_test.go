@@ -59,6 +59,27 @@ func fakeRuntimeBin(t *testing.T, bin, fixture, literal string, exitCode int) {
 	t.Setenv("YAKOS_ROOT", "")
 }
 
+// fakeRuntimeBinData is fakeRuntimeBin for output built in the test: it prints
+// data (written to a file the stub cats, so size is no problem) and exits.
+func fakeRuntimeBinData(t *testing.T, bin string, data []byte, exitCode int) {
+	t.Helper()
+	if goruntime.GOOS == "windows" {
+		t.Skip("shell stub")
+	}
+	dir := t.TempDir()
+	dataFile := filepath.Join(dir, "out.dat")
+	if err := os.WriteFile(dataFile, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\ncat '" + dataFile + "'\nexit " + strconv.Itoa(exitCode) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, bin), []byte(script), 0o755); err != nil { //nolint:gosec
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("YAKOS_ROOT", "")
+}
+
 func runOnce(t *testing.T, runtimeName string) (stdout []byte, res Result, logDir string) {
 	t.Helper()
 	logDir = isolatedLogDir(t)
@@ -197,6 +218,42 @@ func TestRun_EmptyTextOfAStructuredRunIsStillParsed(t *testing.T) {
 	}
 }
 
+// A plain-text runtime that prints more than the text cap: Run says why the text
+// is incomplete, and the raw capture is still whole.
+func TestRun_TextCapIsReportedOnTheResult(t *testing.T) {
+	var data []byte
+	for i := 0; i < 1500; i++ { // 1.5 MiB in 1 KiB lines
+		data = append(data, bytes.Repeat([]byte("a"), 1023)...)
+		data = append(data, '\n')
+	}
+	fakeRuntimeBinData(t, "agy", data, 0)
+	stdout, res, _ := runOnce(t, "agy")
+	if !res.Truncated || !res.TextCapped || res.LinesDropped != 0 {
+		t.Errorf("Truncated/TextCapped/LinesDropped = %v/%v/%d, want true/true/0", res.Truncated, res.TextCapped, res.LinesDropped)
+	}
+	// The cut can land just after a line break, which is trimmed from Text.
+	if len(res.Text) < runtime.MaxParsedTextBytes-2 || len(res.Text) > runtime.MaxParsedTextBytes {
+		t.Errorf("len(Text) = %d, want about %d", len(res.Text), runtime.MaxParsedTextBytes)
+	}
+	if len(stdout) != len(data) {
+		t.Errorf("raw stdout is %d bytes, want the whole %d", len(stdout), len(data))
+	}
+}
+
+// A single line over the per-line cap is skipped, which is not the text cap.
+func TestRun_DroppedLineIsReportedOnTheResult(t *testing.T) {
+	data := append(bytes.Repeat([]byte("x"), 3*1024*1024), '\n')
+	data = append(data, []byte("after\n")...)
+	fakeRuntimeBinData(t, "agy", data, 0)
+	_, res, _ := runOnce(t, "agy")
+	if res.Text != "after" {
+		t.Errorf("Text = %q", res.Text)
+	}
+	if !res.Truncated || res.TextCapped || res.LinesDropped != 1 {
+		t.Errorf("Truncated/TextCapped/LinesDropped = %v/%v/%d, want true/false/1", res.Truncated, res.TextCapped, res.LinesDropped)
+	}
+}
+
 // ---- OutputText -------------------------------------------------------------
 
 func TestResultOutputText(t *testing.T) {
@@ -329,8 +386,8 @@ func TestRunStream_DroppedLineMarksTheTextTruncated(t *testing.T) {
 	if !strings.HasPrefix(chunks[0].Text, "after") || !strings.HasSuffix(chunks[0].Text, bufferedTruncationMarker) {
 		t.Errorf("token text = %q", chunks[0].Text)
 	}
-	if !res.Truncated {
-		t.Error("Result.Truncated must be set")
+	if !res.Truncated || res.LinesDropped != 1 || res.TextCapped {
+		t.Errorf("Truncated/LinesDropped/TextCapped = %v/%d/%v, want true/1/false", res.Truncated, res.LinesDropped, res.TextCapped)
 	}
 }
 

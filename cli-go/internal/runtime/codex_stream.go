@@ -39,7 +39,7 @@ type codexLineParser struct {
 	messages   textAccumulator
 	plain      plainBuffer
 	structured bool
-	truncated  bool
+	dropped    int // lines dropped for length
 
 	threadID  string
 	usage     Usage
@@ -148,7 +148,7 @@ type codexChange struct {
 func (p *codexLineParser) Feed(line []byte) []NativeEvent {
 	line, overlong := prepLine(line)
 	if overlong {
-		p.truncated = true
+		p.dropped++
 		return nil
 	}
 	if !isJSONObjectLine(line) {
@@ -396,13 +396,13 @@ func (p *codexLineParser) plainLine(line []byte) []NativeEvent {
 
 // Finish implements LineParser.
 func (p *codexLineParser) Finish() ParseResult {
-	pr := ParseResult{SessionID: p.threadID, Usage: p.usage, Truncated: p.truncated}
+	pr := ParseResult{SessionID: p.threadID, Usage: p.usage}
 	chosen := &p.messages
 	if !p.structured {
 		chosen = &p.plain.acc
 	}
 	pr.Text = chosen.text()
-	pr.Truncated = pr.Truncated || chosen.truncated
+	pr.noteTruncation(chosen.truncated, p.dropped)
 	switch {
 	case p.failedMsg != "":
 		pr.Error = p.failedMsg

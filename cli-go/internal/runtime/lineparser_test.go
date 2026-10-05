@@ -186,6 +186,9 @@ func TestParsers_OverlongLineIsDroppedAndFlagged(t *testing.T) {
 			if !pr.Truncated {
 				t.Error("Truncated must be set when a line was dropped for length")
 			}
+			if pr.LinesDropped != 1 || pr.TextCapped {
+				t.Errorf("LinesDropped/TextCapped = %d/%v, want 1/false", pr.LinesDropped, pr.TextCapped)
+			}
 			if pr.Text != "after" {
 				t.Errorf("a line after the dropped one must still parse; Text = %q", pr.Text)
 			}
@@ -230,6 +233,9 @@ func TestParsers_TextCapIsOneMiB(t *testing.T) {
 			pr, _ := parse(rt, mk())
 			if !pr.Truncated {
 				t.Error("Truncated must be set past the text cap")
+			}
+			if !pr.TextCapped || pr.LinesDropped != 0 {
+				t.Errorf("TextCapped/LinesDropped = %v/%d, want true/0", pr.TextCapped, pr.LinesDropped)
 			}
 			// Message separators count toward the cap, so the cut lands inside a chunk.
 			if len(pr.Text) > MaxParsedTextBytes || len(pr.Text) < MaxParsedTextBytes-16 {
@@ -385,6 +391,60 @@ func TestParsers_FailureMessagesAreBounded(t *testing.T) {
 				if e.Kind == EventError && len(e.Text) > maxErrorBytes+len("...") {
 					t.Errorf("error event text is %d bytes", len(e.Text))
 				}
+			}
+		})
+	}
+}
+
+// ---- why a parse is truncated -------------------------------------------------
+
+// Truncated is exactly "the text cap was hit or a line was dropped", and the two
+// reasons are reported separately so a caller can tell a user which one it was.
+func TestParsers_TruncationReasonsAreReportedSeparately(t *testing.T) {
+	long := bytes.Repeat([]byte("x"), MaxStreamLineBytes+1)
+	chunk := strings.Repeat("a", 100_000)
+	for _, rt := range []string{"claude", "codex", "agy", "plain"} {
+		t.Run(rt, func(t *testing.T) {
+			// A clean parse reports nothing.
+			p := ParserFor(rt)
+			p.Feed([]byte(goodLine[rt]))
+			if pr := p.Finish(); pr.Truncated || pr.TextCapped || pr.LinesDropped != 0 {
+				t.Errorf("clean parse: %+v", pr)
+			}
+
+			// Three dropped lines are counted, and are not a text cap.
+			p = ParserFor(rt)
+			for i := 0; i < 3; i++ {
+				p.Feed(long)
+			}
+			p.Feed([]byte(goodLine[rt]))
+			if pr := p.Finish(); pr.LinesDropped != 3 || pr.TextCapped || !pr.Truncated {
+				t.Errorf("dropped lines: LinesDropped=%d TextCapped=%v Truncated=%v", pr.LinesDropped, pr.TextCapped, pr.Truncated)
+			}
+
+			// Hitting the text cap is not a dropped line.
+			p = ParserFor(rt)
+			line := map[string]string{
+				"claude": `{"type":"assistant","message":{"content":[{"type":"text","text":"` + chunk + `"}]}}`,
+				"codex":  `{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"` + chunk + `"}}`,
+				"agy":    `{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"` + chunk + `"}}`,
+				"plain":  chunk,
+			}[rt]
+			for i := 0; i < 12; i++ {
+				p.Feed([]byte(line))
+			}
+			if pr := p.Finish(); !pr.TextCapped || pr.LinesDropped != 0 || !pr.Truncated {
+				t.Errorf("text cap: TextCapped=%v LinesDropped=%d Truncated=%v", pr.TextCapped, pr.LinesDropped, pr.Truncated)
+			}
+
+			// Both at once.
+			p = ParserFor(rt)
+			p.Feed(long)
+			for i := 0; i < 12; i++ {
+				p.Feed([]byte(line))
+			}
+			if pr := p.Finish(); !pr.TextCapped || pr.LinesDropped != 1 || !pr.Truncated {
+				t.Errorf("both: TextCapped=%v LinesDropped=%d Truncated=%v", pr.TextCapped, pr.LinesDropped, pr.Truncated)
 			}
 		})
 	}

@@ -183,14 +183,30 @@ type ParseResult struct {
 	// ModelID is the concrete model id when the stream reported one, else "".
 	ModelID string
 
-	// Truncated is true when text was dropped: the accumulated text hit
-	// MaxParsedTextBytes or a line longer than MaxStreamLineBytes was skipped.
+	// Truncated is true when text was dropped. It is exactly TextCapped or
+	// LinesDropped > 0; those two say which limit was hit.
 	Truncated bool
+
+	// TextCapped is true when the accumulated text reached MaxParsedTextBytes and
+	// the rest was dropped.
+	TextCapped bool
+
+	// LinesDropped counts the lines skipped because they were longer than
+	// MaxStreamLineBytes. A dropped line contributes nothing to Text.
+	LinesDropped int
 
 	// Error is the harness-reported failure message of a run that did not
 	// complete ("" for a run that did). It is diagnostic text, never part of
 	// Text.
 	Error string
+}
+
+// noteTruncation records why a parse is incomplete and keeps Truncated equal to
+// "the text cap was hit or at least one line was dropped".
+func (r *ParseResult) noteTruncation(textCapped bool, linesDropped int) {
+	r.TextCapped = textCapped
+	r.LinesDropped = linesDropped
+	r.Truncated = textCapped || linesDropped > 0
 }
 
 // LineParser parses one harness stdout stream. See the file comment for the
@@ -439,7 +455,7 @@ func capThinking(s string) string {
 // plainLineParser is the parser for any runtime whose stdout is prose.
 type plainLineParser struct {
 	buf     plainBuffer
-	dropped bool // a line was dropped for length
+	dropped int // lines dropped for length
 }
 
 func newPlainLineParser() *plainLineParser { return &plainLineParser{} }
@@ -448,7 +464,7 @@ func newPlainLineParser() *plainLineParser { return &plainLineParser{} }
 func (p *plainLineParser) Feed(line []byte) []NativeEvent {
 	line, overlong := prepLine(line)
 	if overlong {
-		p.dropped = true
+		p.dropped++
 		return nil
 	}
 	return plainFallbackLine(false, &p.buf, line)
@@ -456,5 +472,7 @@ func (p *plainLineParser) Feed(line []byte) []NativeEvent {
 
 // Finish implements LineParser.
 func (p *plainLineParser) Finish() ParseResult {
-	return ParseResult{Text: p.buf.acc.text(), Truncated: p.buf.acc.truncated || p.dropped}
+	pr := ParseResult{Text: p.buf.acc.text()}
+	pr.noteTruncation(p.buf.acc.truncated, p.dropped)
+	return pr
 }

@@ -52,7 +52,7 @@ type claudeLineParser struct {
 
 	structured bool // at least one recognised claude event was seen
 	partial    bool // the stream carries stream_event lines (partial messages)
-	truncated  bool // a line was dropped for length
+	dropped    int  // lines dropped for length
 
 	sessionID string
 	modelID   string
@@ -111,7 +111,7 @@ type claudeResultLine struct {
 func (p *claudeLineParser) Feed(line []byte) []NativeEvent {
 	line, overlong := prepLine(line)
 	if overlong {
-		p.truncated = true
+		p.dropped++
 		return nil
 	}
 	if !isJSONObjectLine(line) {
@@ -290,7 +290,6 @@ func (p *claudeLineParser) Finish() ParseResult {
 		ModelID:   p.modelID,
 		Usage:     p.usage,
 		Error:     p.errMsg,
-		Truncated: p.truncated,
 	}
 	var chosen *textAccumulator
 	switch {
@@ -304,7 +303,7 @@ func (p *claudeLineParser) Finish() ParseResult {
 		chosen = &p.resultText
 	}
 	pr.Text = chosen.text()
-	pr.Truncated = pr.Truncated || chosen.truncated
+	pr.noteTruncation(chosen.truncated, p.dropped)
 	return pr
 }
 

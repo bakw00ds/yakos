@@ -42,7 +42,7 @@ type agyLineParser struct {
 	plain  plainBuffer
 
 	structured bool
-	truncated  bool
+	dropped    int // lines dropped for length
 
 	conversationID string
 	modelID        string
@@ -121,7 +121,7 @@ type agyResult struct {
 func (p *agyLineParser) Feed(line []byte) []NativeEvent {
 	line, overlong := prepLine(line)
 	if overlong {
-		p.truncated = true
+		p.dropped++
 		return nil
 	}
 	if !isJSONObjectLine(line) {
@@ -332,7 +332,7 @@ func (p *agyLineParser) plainLine(line []byte) []NativeEvent {
 
 // Finish implements LineParser.
 func (p *agyLineParser) Finish() ParseResult {
-	pr := ParseResult{SessionID: p.conversationID, ModelID: p.modelID, Truncated: p.truncated, Error: p.statusErr}
+	pr := ParseResult{SessionID: p.conversationID, ModelID: p.modelID, Error: p.statusErr}
 	var chosen *textAccumulator
 	switch {
 	case !p.structured:
@@ -343,7 +343,7 @@ func (p *agyLineParser) Finish() ParseResult {
 		chosen = &p.resp
 	}
 	pr.Text = chosen.text()
-	pr.Truncated = pr.Truncated || chosen.truncated
+	pr.noteTruncation(chosen.truncated, p.dropped)
 	if p.haveResultUse {
 		pr.Usage = p.resultUsage
 	} else {

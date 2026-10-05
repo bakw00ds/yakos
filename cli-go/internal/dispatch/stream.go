@@ -479,6 +479,7 @@ func execWithStreaming(
 		var bufParser runtime.LineParser
 		bufferedInputBytes := 0
 		inputCeilingHit := false
+		readerDropped := 0 // lines the reader dropped for length before the parser saw them
 		if !isClaudeRuntime {
 			bufParser = runtime.ParserFor(adapter.Name())
 		}
@@ -496,7 +497,10 @@ func execWithStreaming(
 		ReadLineLoop(stdoutPipe, ReadLineLoopConfig{
 			AgentName:      req.AgentName,
 			KeepEmptyLines: !isClaudeRuntime, // plain text keeps its paragraph breaks
-			OnOverlong:     func() { bufferedOutputTruncated = true },
+			OnOverlong: func() {
+				bufferedOutputTruncated = true
+				readerDropped++
+			},
 		}, func(line []byte) {
 			if isClaudeRuntime {
 				res := ParseAndDispatch(line, ps, onChunk)
@@ -536,6 +540,7 @@ func execWithStreaming(
 		// reported a failure, an error chunk the UI renders as "Error: ...".
 		if !isClaudeRuntime {
 			pr := bufParser.Finish()
+			pr.LinesDropped += readerDropped
 			parsed = &pr
 			if pr.Usage != (runtime.Usage{}) {
 				u := pr.Usage

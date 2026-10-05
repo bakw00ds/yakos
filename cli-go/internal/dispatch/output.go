@@ -54,6 +54,8 @@ func (r *Result) applyParsed(runtimeName string, pr runtime.ParseResult) {
 	r.SessionID = pr.SessionID
 	r.ModelID = pr.ModelID
 	r.Truncated = pr.Truncated
+	r.TextCapped = pr.TextCapped
+	r.LinesDropped = pr.LinesDropped
 	r.Error = pr.Error
 	if pr.Usage != (runtime.Usage{}) {
 		u := pr.Usage

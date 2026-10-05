@@ -150,9 +150,18 @@ type Result struct {
 	// ModelID is the concrete model id the stream reported, "" when none.
 	ModelID string
 
-	// Truncated is true when Text is incomplete: it hit the parser's 1 MiB cap or
-	// an over-long output line was dropped.
+	// Truncated is true when Text is incomplete. TextCapped and LinesDropped say
+	// why; a streamed turn can also be truncated by the 32 MB input ceiling,
+	// which sets neither.
 	Truncated bool
+
+	// TextCapped is true when Text reached the parser's 1 MiB cap and the rest
+	// was dropped.
+	TextCapped bool
+
+	// LinesDropped counts output lines skipped for exceeding the per-line cap
+	// (runtime.MaxStreamLineBytes). A dropped line contributes nothing to Text.
+	LinesDropped int
 
 	// Error is the failure message the harness itself reported, "" for a run
 	// that did not report one. Diagnostic only; never part of Text.
