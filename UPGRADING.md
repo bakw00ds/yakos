@@ -6,6 +6,65 @@ current release, what survives, and how to fully uninstall when needed.
 This doc is the **upgrade authority** — `yakos --help`, README, and
 CHANGELOG point here. Last updated for v0.39.
 
+## Upgrading to the next release (unreleased)
+
+Changes since v0.61.0.0 that may need action. The first is a behavior
+change.
+
+### 1. Agents with `runtime:` now run on that runtime
+
+`general-codex`, `general-agy` and any project agent with `runtime:` set
+now run on the runtime they declare instead of claude. Before, the Go
+dispatcher (the daemon, MCP, console chat, Flows and the `YAKOS_IMPL=go`
+CLI) ignored `runtime:` and ran everything on claude (K-127). The full
+resolution order is in
+[docs/runtime-matrix.md](docs/runtime-matrix.md#go-dispatch-now-honors-runtime).
+
+To keep the old behavior:
+
+```sh
+# one call
+yakos dispatch general-codex "<task>" --runtime claude
+```
+
+- In the console, set the Chat pane runtime to `claude`. New panes default to
+  `auto`, which follows the agent's pin.
+- To keep it permanently, remove the `runtime:` line from the agent's
+  frontmatter.
+
+### 2. A runtime that is not signed in now fails fast
+
+If codex or agy is not installed or not signed in, dispatch now fails fast
+(or falls back per the agent's `runtime-fallback`, then the project's
+`default-fallback`) instead of running on claude. The error names each
+runtime it skipped and why:
+
+```text
+agy: not signed in; run: yakos auth login agy
+```
+
+To have a pinned agent fall back to claude instead of failing, add this to
+its frontmatter:
+
+```yaml
+runtime: codex
+runtime-fallback: [claude]
+```
+
+### 3. Pins the Go dispatcher skips
+
+Agents that pin `runtime: claude-sdk`, `antigravity-sdk` or a plugin id are
+skipped by the Go dispatcher, because those runtimes only exist in the bash
+path. Give such an agent a `runtime-fallback`, or use `YAKOS_IMPL=bash`.
+
+### 4. `gemini` is gone from the Go side
+
+`gemini` is no longer a runtime in the Go runtime registry, the console
+runtime selector or `yakos start`'s known runtimes.
+Change `runtime: gemini` pins to `runtime: agy`. `yakos validate` still
+accepts `runtime: gemini` in agent frontmatter, as a warning, for one more
+release.
+
 ## Upgrading to v0.61.0.0
 
 v0.61.0.0 is a minor release. A v0.60.1.0 binary upgrades in place with

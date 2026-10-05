@@ -5,8 +5,9 @@ sessions on multiple agentic CLIs. This document tracks which features
 each adapter supports, what gets soft-degraded, and the operator-facing
 trade-offs.
 
-Last updated: 2026-06-12 (v0.40.0.0 — unified console + Flows; fable tier
-added in v0.38; codex adapter shipped in v0.4.0; gemini in v0.4.1).
+Last updated: 2026-10-05 (K-132 P0a — Go dispatch honors `runtime:`;
+v0.40.0.0 — unified console + Flows; fable tier added in v0.38; codex
+adapter shipped in v0.4.0; gemini in v0.4.1).
 
 ## Capability matrix
 
@@ -70,7 +71,7 @@ When the operator passes a flag the chosen runtime can't honor,
 `yakos start` prints a NOTE-level warning and proceeds without
 that flag. Examples:
 
-- `--ide` is claude-only. On codex/gemini, prints
+- `--ide` is claude-only. On codex/agy, prints
   `NOTE: --ide is claude-specific; ignored for <runtime>.`
 - `--bare` is claude-only. Same treatment.
 - `--strict-mcp` is claude-only.
@@ -118,7 +119,41 @@ model: o4-mini
 right CLI in non-interactive mode, captures the output, and returns
 to the caller. The lead (in any runtime) calls this via Bash. This
 lets a project mix runtimes per-agent — e.g., orchestration on
-claude, code-review on codex, doc-writing on gemini.
+claude, code-review on codex, doc-writing on agy.
+
+### Go dispatch now honors `runtime:`
+
+On every Go transport (daemon, MCP, console chat, Flows, `YAKOS_IMPL=go`
+CLI) the runtime is picked in this order, highest first, the same as
+`cli/lib/dispatch.sh`:
+
+1. An explicit runtime: `yakos dispatch --runtime`, `Params.Runtime`, or
+   a console pane set to a specific runtime.
+2. The agent's `runtime:` frontmatter.
+3. `.yakos.yml` `per-domain.<agent domain>`.
+4. `.yakos.yml` `default-runtime`.
+5. `YAKOS_RUNTIME` (CLI one-shot path only; the daemon never reads it).
+6. `~/.yakos-state/default-runtime`.
+7. `claude`.
+
+A bare agent name that is itself a runtime (`yakos dispatch codex "..."`)
+selects that runtime when the agent has no pin of its own.
+
+The candidate chain is the chosen runtime, then the agent's
+`runtime-fallback`, then `.yakos.yml` `default-fallback`. The first
+candidate whose CLI is on PATH and that looks signed in wins:
+
+| Runtime | Looks signed in when |
+|---|---|
+| claude | The CLI is installed (credentials can live in the keychain or env, so they are not probed). |
+| codex | `OPENAI_API_KEY` is set, or `$CODEX_HOME/auth.json` exists. |
+| agy | `ANTIGRAVITY_API_KEY` or `GEMINI_API_KEY` is set, a yakos keyring entry exists, or `~/.gemini/antigravity-cli/` exists. |
+
+If nothing passes, dispatch fails fast naming each skipped runtime and why
+(e.g. `agy: not signed in; run: yakos auth login agy`). A fallback prints
+one line on stderr and is recorded in the dispatch-log (`runtime_chosen_by`,
+`fallback_from`). `gemini` is no longer a Go runtime; use `agy`. Upgrade
+impact: [UPGRADING.md](../UPGRADING.md).
 
 ## Model tiers
 
@@ -145,7 +180,6 @@ as system prompt, direct `-p`, `--include-partial-messages`):
 | `claude` | Token-by-token streaming via SSE. First token latency governed by `--include-partial-messages` mode. |
 | `codex` | Buffered — full response arrives as one chunk + summary. |
 | `agy` | Buffered — full response arrives as one chunk + summary. |
-| `gemini` | Buffered — full response arrives as one chunk + summary. |
 
 Partial streaming is a claude-specific capability. The Chat UI labels buffered
 runtimes clearly so operators know to expect a single response rather than a

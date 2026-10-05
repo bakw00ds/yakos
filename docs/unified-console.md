@@ -521,12 +521,15 @@ the ring are not available without restarting the daemon.
 The Chat tab provides per-model REPL panes. Each pane is independently
 configured:
 
-- **Runtime:** claude / codex / agy / gemini
-- **Model tier:** haiku / sonnet / opus / fable (fable requires explicit
-  opt-in; see [runtime-matrix.md](runtime-matrix.md))
+- **Runtime:** auto / claude / codex / agy (`auto` resolves from the agent's `runtime:` pin)
+- **Model:** `default` (the agent's own pin, else the runtime default), or
+  for claude haiku / sonnet / opus / fable (fable requires explicit opt-in;
+  see [runtime-matrix.md](runtime-matrix.md)); every runtime also takes the
+  aliases cheap / balanced / best / reasoning / frontier, which resolve per
+  runtime.
 
 **Streaming behavior:** claude panes stream tokens as they arrive
-(`--include-partial-messages` unframed mode). codex, agy, and gemini
+(`--include-partial-messages` unframed mode). codex and agy
 panes receive a single buffered response. The UI labels buffered panes
 so you know to wait for the full response.
 
@@ -660,7 +663,7 @@ Node fields:
 |---|---|---|
 | `id` | yes | Node identifier. Must match `^[a-z0-9][a-z0-9-]{0,63}$`. Unique within the workflow. |
 | `agent` | yes | Agent name (must exist in the agent roster). |
-| `runtime` | no | Runtime override (`claude`/`codex`/`agy`/`gemini`). Resolved from agent frontmatter when absent. |
+| `runtime` | no | Runtime override (`claude`/`codex`/`agy`). Empty or `auto` resolves from the agent's frontmatter pin, then `.yakos.yml`. |
 | `model` | no | Model tier/alias (`haiku`/`sonnet`/`opus`/`fable`). Resolved from agent frontmatter when absent. |
 | `timeout` | no | Per-node dispatch timeout in seconds. Default: 600. Use 900 for long synthesis nodes. |
 | `prompt` | yes | Task prompt. Supports `${inputs.<key>}` and `${nodes.<id>.output}` substitution (only declared references are valid). |

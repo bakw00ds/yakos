@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Routing P0a (K-132): the Go dispatcher now honors agent runtime pins, picks a
+runtime that is installed and signed in, and resolves models per runtime.
+Agents that declare `runtime:` (`general-codex`, `general-agy` and any project
+agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
+
+### Changed
+
+- **Go dispatch honors agent `runtime:` and `runtime-fallback:` (K-127,
+  K-132 P0a).** Frontmatter `runtime:` and `runtime-fallback:` now select the
+  runtime adapter on every Go transport: the daemon (REST, JSON-RPC, gRPC),
+  MCP, console chat, Flows and the `YAKOS_IMPL=go` CLI. Before, the Go
+  dispatcher ignored them and ran everything on claude, so `general-codex`
+  now really runs on codex and `general-agy` on agy. Resolution order (the
+  same as `cli/lib/dispatch.sh`), highest first: an explicit runtime
+  (`yakos dispatch --runtime`, `Params.Runtime`, a console pane set to a
+  specific runtime), the agent's `runtime:`, `.yakos.yml`
+  `per-domain.<agent domain>`, `.yakos.yml` `default-runtime`,
+  `YAKOS_RUNTIME` (read by the CLI one-shot path only, never by the daemon),
+  `~/.yakos-state/default-runtime`, then claude. A bare agent name that is
+  itself a runtime (`yakos dispatch codex "..."`) selects that runtime when
+  the agent has no pin of its own. **Behavior change:** see UPGRADING.md.
+  Reference: `docs/runtime-matrix.md`.
+
+- **Dispatch picks the first runtime that is installed and signed in
+  (K-132 P0a).** The candidate chain is the chosen runtime, then the agent's
+  `runtime-fallback`, then `.yakos.yml` `default-fallback`. The first
+  candidate whose CLI is on PATH and that looks signed in wins. Signed in
+  means: for codex, `OPENAI_API_KEY` or `$CODEX_HOME/auth.json`; for agy,
+  `ANTIGRAVITY_API_KEY` or `GEMINI_API_KEY`, a yakos keyring entry, or
+  `~/.gemini/antigravity-cli/`; for claude, only that the CLI is installed
+  (its credentials can live in the keychain or env, so they cannot be
+  probed). If nothing in the chain passes, dispatch fails fast naming each
+  runtime it skipped and why, for example
+  `agy: not signed in; run: yakos auth login agy`. A fallback prints one
+  line on stderr and is recorded in the dispatch-log (see
+  `runtime_chosen_by` under Added).
+
+- **The default model resolves per runtime; non-Claude model ids survive
+  (K-132 P0a).** The default is no longer the literal `sonnet` for every
+  runtime: it comes from the `balanced` alias in
+  `lib/settings/model-aliases.json` (claude `sonnet`, codex `gpt-5-mini`,
+  agy `gemini-3.1-pro`). Non-Claude ids in agent frontmatter
+  (`model: gpt-5`), in `--model` and in console chat requests now survive and
+  are validated per runtime: claude accepts only `haiku|sonnet|opus|fable`
+  (aliases resolve first); codex and agy accept an alias or an id matching
+  `^[a-z0-9][a-z0-9._:-]{0,63}$`. A Claude tier in the frontmatter of an
+  agent that resolves to codex or agy is ignored (the runtime default
+  applies), and a non-Claude id on an agent that resolves to claude is
+  ignored, as before. This change resolves and records the model id (it
+  reaches the runtime request); wiring the `-m`/`--model` flags into the
+  codex and agy adapters is a separate change.
+
+- **Console Chat pane: `auto` runtime and model tiers for non-Claude
+  runtimes (K-132 P0a).** The runtime select gains `auto`, the default for
+  new panes, which resolves from the agent's pin. The model select gains a
+  `default` entry and the five aliases (cheap, balanced, best, reasoning,
+  frontier), so non-Claude panes can pick a tier. `/api/chat/dispatch`
+  accepts an empty runtime or `auto` and validates the model after the
+  runtime is resolved. `/api/skills` reports each agent's real runtime.
+  Interactive chat on a pane that resolves to a non-claude runtime is refused
+  with a clear 400 instead of silently starting claude.
+
+### Added
+
+- **The dispatch-log records why a runtime was chosen (K-132 P0a).**
+  `dispatch_finished` events gain two additive fields, both omitted when
+  empty: `runtime_chosen_by` (one of `override`, `agent-name`, `frontmatter`,
+  `per-domain`, `project-default`, `env`, `state-default`, `default`,
+  `fallback`) and `fallback_from` (the preferred runtime that was skipped,
+  set only when `runtime_chosen_by` is `fallback`). Older readers ignore
+  them.
+
+- **Go dispatch reads the `.yakos.yml` routing keys (K-132 P0a).**
+  `default-runtime`, `default-fallback` (inline or block list) and
+  `per-domain` are read by a new tolerant reader (`internal/projectcfg`). A
+  malformed file is ignored with a warning rather than failing dispatch.
+
+### Removed
+
+- **`gemini` is gone from the Go runtime registry (K-132 P0a).** It is also
+  gone from the console runtime selector and the known runtimes of
+  `yakos start`; its deprecation shim was past its 2026-09-01 removal date.
+  Use `agy`. `yakos validate` still accepts `runtime: gemini` in agent
+  frontmatter, as a warning, for one more release.
+
+### Fixed
+
+- **Claude chat runs in the project and remembers the conversation (K-132
+  P0a).** One-shot chat now runs in the project directory, and the first
+  turn's claude `session_id` is stored with the conversation so later turns
+  pass `--resume` (not in IDE review mode, where each turn gets its own
+  worktree). A saved session that claude no longer has is forgotten, so the
+  next turn starts fresh. Interactive chat sessions now pass `--model`
+  instead of relying on an env var the claude CLI ignores.
+
 ## [0.61.0.0] — 2026-10-03
 
 Minor release: per-agent dollar budgets, hybrid Go hooks by default, the

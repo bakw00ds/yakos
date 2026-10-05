@@ -91,12 +91,12 @@ When adding a new generic agent:
 | `domain` | yes | Free-form domain tag (`backend-service`, `release`, `cross-cutting`). |
 | `mode` | yes | Inline list of operating modes (`[feature, fix]`). |
 | `tools` | yes | Inline list of tool names the agent may use. |
-| `model` | yes | One of `opus`, `sonnet`, `haiku`. |
+| `model` | yes | A Claude tier (`opus`, `sonnet`, `haiku`, `fable`), an alias (`cheap`, `balanced`, `best`, `reasoning`, `frontier`; resolved per runtime), or, for an agent that runs on codex or agy, a model id such as `gpt-5`. A Claude tier on a non-Claude agent, and a non-Claude id on a Claude agent, are ignored and the runtime default applies. |
 | `references` | yes | List of `rule:`, `playbook:`, `incident:` references. |
 | `version` | optional, v0.9+ | Integer version of THIS agent. Framework agents bump on substantive changes. Projects can use this for their own versioning too. |
 | `extends` | optional | Parent template id (e.g. `extends: backend`). |
 | `extends-version` | optional, v0.9+ | The framework parent's `version:` at the time this project agent was written. `yakos agents lint` warns when the framework parent has bumped (so the project knows to review the new parent body). |
-| `runtime` | optional, v0.4.2+ | Preferred runtime: `claude` \| `claude-sdk` \| `codex` \| `agy` \| `antigravity-sdk` (or a plugin id under `~/.yakos/plugins/`). `gemini` is a deprecated shim for `agy`. Used by `yakos dispatch` to pick the CLI. Default: yakOS's runtime resolver (env var → state file → claude). `yakos validate` rejects any other value. |
+| `runtime` | optional, v0.4.2+ | Preferred runtime: `claude` \| `claude-sdk` \| `codex` \| `agy` \| `antigravity-sdk` (or a plugin id under `~/.yakos/plugins/`). `gemini` is a deprecated shim for `agy`. Used by `yakos dispatch` to pick the CLI. Default: yakOS's runtime resolver (`.yakos.yml` per-domain, then default-runtime → `YAKOS_RUNTIME` → `~/.yakos-state/default-runtime` → claude). `yakos validate` rejects any other value. |
 | `runtime-fallback` | optional, v0.5+ | List of fallback runtimes, e.g. `[codex, claude]`. If the preferred runtime fails check_cli or check_auth, `yakos dispatch` walks this list. |
 | `max-cost-per-task` | optional, v0.8+ | Cost ceiling in USD (e.g. `0.50`). When the runtime returns real `total_cost_usd` telemetry and exceeds this value, dispatch-log emits a `budget_violation` event. Observation-only post-call; pre-flight is v0.9+. |
 | `max-duration-s` | optional, v0.8+ | Per-dispatch timeout in seconds (e.g. `300`). Applied if smaller than the global `--timeout`. |
