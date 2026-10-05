@@ -6,6 +6,89 @@ current release, what survives, and how to fully uninstall when needed.
 This doc is the **upgrade authority** — `yakos --help`, README, and
 CHANGELOG point here. Last updated for v0.39.
 
+## Unreleased: codex runs in an OS sandbox, agy gets `--sandbox` but is not contained (K-133)
+
+The Go dispatcher (the console, MCP, Flows, JSON-RPC, and `yakos dispatch` with
+`YAKOS_IMPL=go`) now runs codex with `--sandbox workspace-write` and an approval
+policy that cannot prompt, and agy with `--sandbox`. Before, both ran with
+approvals and sandbox off. The bash `yakos dispatch` path, used when the
+bash tree is present and `YAKOS_IMPL` is unset, is unchanged until the Go
+dispatcher becomes the default.
+
+What you will notice:
+
+- Commands the model runs can write only inside the project, `$TMPDIR` and
+  `/tmp`. Other writes fail with "Operation not permitted".
+- The project's `.git` directory is read-only, so a codex agent cannot commit or
+  switch branches. `git status`, `git diff` and `git log` work. Have the lead do
+  the commit.
+- The network is off, so `npm install`, `go get` and `git push` fail. To allow
+  it, set `[sandbox_workspace_write]` `network_access = true` in the
+  `config.toml` of the `CODEX_HOME` yakOS uses.
+- agy still gets `--sandbox`, because it blocks the default write path.
+  Under `--sandbox --dangerously-skip-permissions`, agy's macOS Seatbelt sandbox
+  blocks writes outside the workspace by default but leaves file reads and
+  outbound network unrestricted, and the model can escalate out of the sandbox
+  at will via `run_command(BypassSandbox=true)`, which
+  `--dangerously-skip-permissions` auto-approves; agy dispatch is therefore not
+  a containment boundary for reads, network or writes and must only receive
+  non-sensitive work or run inside an external OS sandbox (K-159).
+
+To opt a runtime out, create `~/.yakos-state/router-policy.yml`:
+
+```yaml
+allow_unsandboxed_runtimes: [codex, agy]
+```
+
+```sh
+chmod 600 ~/.yakos-state/router-policy.yml
+```
+
+The file must be a regular file you own, not group or world writable, and not a
+symlink; otherwise it is ignored and `yakos doctor` says why. A project
+`.yakos.yml` cannot turn the sandbox off, and `YAKOS_DISPATCH_LOG` does not move
+this file. While a runtime is unsandboxed, yakOS prints a line on stderr once per
+process and `yakos doctor` warns.
+
+Other changes in this release for codex and agy:
+
+- **Own codex login (optional).** Run `yakos auth login codex` once to give
+  yakOS its own login in `~/.yakos-state/codex-home`, so dispatches and your
+  interactive codex stop sharing one `auth.json`. Dispatch (Go and bash), Go chat
+  and the bash `yakos start` use it; Go `yakos start` still launches the
+  interactive codex with your own `CODEX_HOME`. Until you run the command,
+  dispatch keeps using `$CODEX_HOME` or `~/.codex`. `yakos doctor` prints a hint.
+- **agy skill files move.** The generated skills are now
+  `.agents/skills/yakos-<id>/SKILL.md` directories, the layout agy 1.2.x loads.
+  Old flat `yakos-<id>.md` files are not used and can be deleted; they are
+  already gitignored. The new directories ignore themselves, so no `.gitignore`
+  change is needed.
+- **Generated agent files are protected.** `.codex/agents/yakos-<id>.toml` and
+  the agy skills start with a `yakos-generated:` marker. A file without it is
+  yours and is never overwritten; delete the marker line to keep edits to a
+  generated file.
+- **Model ids.** The semantic aliases (`cheap`, `balanced`, `best`, `reasoning`,
+  `frontier`) now mean "the harness default" for codex (no `-m`), because the old
+  ids (`gpt-5`, `gpt-5-mini`, ...) are not in the current codex catalog
+  (`codex debug models`) and codex answers an unknown id with HTTP 400. For agy
+  they map to real `agy models` ids, whose `-low`/`-medium`/`-high` suffix is the
+  reasoning effort: choose the effort by choosing the id, because agy rejects
+  `--effort` next to such an id and yakOS no longer passes it then. With no
+  suffixed id, agy takes `--effort low|medium|high` only; yakOS sends the
+  console's `xhigh` and `max` as `high` (with one stderr note) because agy exits
+  1 on them. `general-codex` now pins `balanced` and `general-agy` pins
+  `gemini-3.8-flash-high` (its old pin, `gemini-3.5`, does not exist). To pick a
+  specific model, put its id in an agent's `model:`.
+- **Agent files never name a Claude tier.** The generated codex and agy files
+  carry a `model` line only for a model that is not `haiku`, `sonnet`, `opus` or
+  `fable`. Before, an agent pinned to an alias (`general-codex` pins `balanced`)
+  got `model = "sonnet"` from the bash emitter, and codex refused to run it.
+  Run any dispatch once and the files are rewritten; nothing to do by hand.
+- **Odd agent text.** A control character in an agent's text is written as a
+  `\u00XX` escape instead of producing an invalid file, an agent whose text
+  holds a NUL byte is skipped with a note, and chat on codex and agy refuses an
+  agent persona over 64 KiB with a clear error.
+
 ## Upgrading to v0.61.0.0
 
 v0.61.0.0 is a minor release. A v0.60.1.0 binary upgrades in place with

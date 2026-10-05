@@ -28,8 +28,29 @@ yk_rt_codex_check_cli() {
     return 1
 }
 
+# yakOS-owned codex profile (K-133). `yakos auth login codex` signs codex in to
+# ~/.yakos-state/codex-home so a yakOS dispatch and the operator's interactive
+# codex never share one auth.json (openai/codex#48465: concurrent refreshes and
+# a login call rewriting the shared file can sign the operator out). Once the
+# profile holds a login, every yakOS-run codex uses it; until then codex keeps
+# using $CODEX_HOME or ~/.codex. The Go adapter applies the same order.
+_yk_codex_profile_dir() { printf '%s\n' "$HOME/.yakos-state/codex-home"; }
+
+# yk_rt_codex_exec <codex args...>
+#   Run codex under the yakOS profile when it holds a login.
+yk_rt_codex_exec() {
+    local profile
+    profile="$(_yk_codex_profile_dir)"
+    if [ -f "$profile/auth.json" ]; then
+        CODEX_HOME="$profile" codex "$@"
+    else
+        codex "$@"
+    fi
+}
+
 yk_rt_codex_check_auth() {
     if [ -n "${OPENAI_API_KEY:-}" ]; then return 0; fi
+    if [ -f "$(_yk_codex_profile_dir)/auth.json" ]; then return 0; fi
     local home="${CODEX_HOME:-$HOME/.codex}"
     if [ -f "$home/auth.json" ]; then return 0; fi
     ct_log "codex: no auth configured (run 'yakos auth login codex' or 'codex login')"
@@ -40,44 +61,112 @@ yk_rt_codex_check_auth() {
 # optional model. python3 path is preferred; jq fallback for portability.
 # The python script is bash-single-quoted so its string-literal backslashes
 # pass through verbatim to python -c.
+#
+# The first line is a marker comment. A file carrying it is yakOS-generated
+# and is rewritten on every dispatch; a file without it (an operator's own
+# agent that uses the yakos- prefix) is never overwritten. Delete the marker
+# line to take ownership of a generated file. The Go materializer
+# (cli-go/internal/agentscompose/materialize_codex.go) emits identical bytes
+# for the same agent JSON; tests/run-runtime-fixtures.sh and the Go parity
+# tests keep the three implementations (python, jq fallback, Go) in step.
+#
+# Escaping: the file must be valid TOML. Backslash and quote are escaped as
+# before; a C0 control character other than TAB, DEL and a lone CR (one that
+# does not start a CRLF) are written as \u00XX, as the chat path's tomlString
+# does. An agent text holding a NUL byte is refused (exit status 3).
+#
+# The model line is written only for a model that is not a Claude tier. The
+# composer resolves an alias such as balanced to a tier (sonnet) itself, and
+# codex fails a subagent whose model it does not have, so a tier never reaches
+# the file.
+_YK_CODEX_MARKER='# yakos-generated: rewritten on every dispatch. Delete this line to keep your edits.'
+
 _yk_codex_emit_py='
-import json, sys
+import json, re, sys
 agent_id, out_file, json_path = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(json_path) as f:
+with open(json_path, encoding="utf-8") as f:
     data = json.load(f)
-def esc(s):
-    return s.replace("\\", "\\\\").replace("\"\"\"", "\\\"\\\"\\\"")
-desc = (data.get("description") or "Agent: " + agent_id).replace("\"", "\\\"")
+desc = data.get("description") or "Agent: " + agent_id
 body = data.get("prompt") or ""
-model = data.get("model")
-lines = ["name = \"" + agent_id + "\"", "description = \"" + desc + "\""]
-if model:
-    lines.append("model = \"" + model + "\"")
+model = data.get("model") or ""
+for text in (desc, body, model):
+    if "\x00" in text:
+        sys.stderr.write("agent text contains a NUL byte\n")
+        sys.exit(3)
+def ctl(m):
+    return "\\u%04X" % ord(m.group())
+def one(s):
+    s = re.sub(r"\r\n|\r|\n", " ", s).replace("\\", "\\\\").replace("\"", "\\\"")
+    return re.sub(r"[\x00-\x08\x0a-\x1f\x7f]", ctl, s)
+def esc(s):
+    s = s.replace("\\", "\\\\").replace("\"\"\"", "\\\"\\\"\\\"")
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|\r(?!\n)", ctl, s)
+lines = ["# yakos-generated: rewritten on every dispatch. Delete this line to keep your edits.",
+         "name = \"" + agent_id + "\"", "description = \"" + one(desc) + "\""]
+if model and model not in ("haiku", "sonnet", "opus", "fable"):
+    lines.append("model = \"" + one(model) + "\"")
 lines.append("developer_instructions = \"\"\"")
-lines.append(esc(body).rstrip("\n"))
+lines.append(esc(body.lstrip("\r\n").rstrip("\n")))
 lines.append("\"\"\"")
-with open(out_file, "w") as f:
+with open(out_file, "w", encoding="utf-8", newline="\n") as f:
     f.write("\n".join(lines) + "\n")
 '
+
+# The same file built by jq alone (python3 absent). _YK_EMIT_JQ_DEFS carries the
+# escaping rules; see _emitter-shared.sh.
+_yk_codex_emit_jq='
+(.description // "") as $d | (.prompt // "") as $p | (.model // "") as $m
+| [ $marker,
+    "name = \"" + $id + "\"",
+    "description = \"" + (($d | if . == "" then "Agent: " + $id else . end) | quoteline) + "\"" ]
+  + (if $m != "" and ($m | tier | not) then ["model = \"" + ($m | quoteline) + "\""] else [] end)
+  + [ "developer_instructions = \"\"\"", ($p | promptbody | bs | tq | ctlblock), "\"\"\"" ]
+| join("\n") + "\n"
+'
+
+# _yk_codex_is_generated <file> <id>
+#   0 when <file> may be overwritten: it carries the marker in its first 12
+#   lines, or it is a legacy yakOS file written before the marker existed
+#   (name = "<id>" on line 1, description = "..." on line 2).
+_yk_codex_is_generated() {
+    local f="$1" id="$2"
+    if head -n 12 "$f" 2>/dev/null | grep -q 'yakos-generated:'; then return 0; fi
+    [ "$(head -n 1 "$f" 2>/dev/null | tr -d '\r')" = "name = \"$id\"" ] || return 1
+    head -n 2 "$f" 2>/dev/null | tail -n 1 | grep -q '^description = "'
+}
 
 yk_rt_codex_emit_toml() {
     local id="$1" agent_json="$2" out_dir="$3"
     local out_file="$out_dir/yakos-${id}.toml"
     mkdir -p "$out_dir"
 
+    if [ -f "$out_file" ] && ! _yk_codex_is_generated "$out_file" "$id"; then
+        ct_log "codex: not overwriting $out_file (no yakos-generated marker; delete it, or add the marker line to let yakOS manage it)"
+        printf '%s\n' "$out_file"
+        return 0
+    fi
+
     if yk_emit_check_python; then
-        yk_emit_run_python "$id" "$out_file" "$agent_json" "$_yk_codex_emit_py"
+        local rc=0
+        yk_emit_run_python "$id" "$out_file" "$agent_json" "$_yk_codex_emit_py" || rc=$?
+        if [ "$rc" -eq 3 ]; then
+            ct_log "codex: not writing $out_file (the agent's text contains a NUL byte)"
+            return 0
+        fi
+        [ "$rc" -eq 0 ] || return "$rc"
     else
-        local desc body model
-        desc="$(printf '%s' "$agent_json" | jq -r '.description // ""')"
-        body="$(printf '%s' "$agent_json" | jq -r '.prompt // ""')"
-        model="$(printf '%s' "$agent_json" | jq -r '.model // ""')"
-        {
-            printf 'name = "%s"\n' "$id"
-            printf 'description = "%s"\n' "${desc//\"/\\\"}"
-            [ -n "$model" ] && [ "$model" != "null" ] && printf 'model = "%s"\n' "$model"
-            printf 'developer_instructions = """\n%s\n"""\n' "$body"
-        } > "$out_file"
+        if yk_emit_nul_in_agent "$agent_json"; then
+            ct_log "codex: not writing $out_file (the agent's text contains a NUL byte)"
+            return 0
+        fi
+        local tmp="$out_file.tmp.$$"
+        if ! printf '%s' "$agent_json" \
+            | jq -j --arg id "$id" --arg marker "$_YK_CODEX_MARKER" "$_YK_EMIT_JQ_DEFS $_yk_codex_emit_jq" > "$tmp"; then
+            rm -f "$tmp" 2>/dev/null || true
+            ct_log "codex: jq failed to emit $out_file"
+            return 1
+        fi
+        mv -f "$tmp" "$out_file"
         ct_log "codex: emitted $out_file via jq fallback (install python3 for fidelity)"
     fi
     printf '%s\n' "$out_file"
@@ -121,6 +210,11 @@ yk_rt_codex_launch() {
     esac
 
     [ "$#" -gt 0 ] && args+=( "$@" )
+    local profile
+    profile="$(_yk_codex_profile_dir)"
+    if [ -f "$profile/auth.json" ]; then
+        CODEX_HOME="$profile" exec codex "${args[@]}"
+    fi
     exec codex "${args[@]}"
 }
 
@@ -150,7 +244,7 @@ $task"
         local raw_tmp
         raw_tmp="$(mktemp -t yakos-codex-raw.XXXXXX)"
 
-        codex "${resume_args[@]}" \
+        yk_rt_codex_exec "${resume_args[@]}" \
                    --add-dir "$project" \
                    --dangerously-bypass-approvals-and-sandbox \
                    --json \
@@ -180,7 +274,7 @@ $task"
         return "$rc"
     fi
 
-    codex "${resume_args[@]}" \
+    yk_rt_codex_exec "${resume_args[@]}" \
                --add-dir "$project" \
                --dangerously-bypass-approvals-and-sandbox \
                --output-last-message - \

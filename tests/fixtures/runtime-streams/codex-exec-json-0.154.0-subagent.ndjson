@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a10c43-0bcc-7270-8422-075fabf96cd4"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"collab_tool_call","tool":"wait","sender_thread_id":"01a10c43-0bcc-7270-8422-075fabf96cd4","receiver_thread_ids":[],"prompt":null,"agents_states":{},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"collab_tool_call","tool":"wait","sender_thread_id":"01a10c43-0bcc-7270-8422-075fabf96cd4","receiver_thread_ids":[],"prompt":null,"agents_states":{},"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"OMEGA-5521"}}
+{"type":"turn.completed","usage":{"input_tokens":50003,"cached_input_tokens":32896,"cache_write_input_tokens":0,"output_tokens":103,"reasoning_output_tokens":21}}
