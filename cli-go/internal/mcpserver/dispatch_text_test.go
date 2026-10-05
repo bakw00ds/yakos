@@ -16,6 +16,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/mcpserver"
+	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
 // dispatchCfgWithFake returns a Config whose Service dispatches to a stub
@@ -94,7 +95,7 @@ func TestDispatchTool_ReturnsTextUsageAndSession(t *testing.T) {
 	if got["text"] != "The answer is 42." {
 		t.Errorf("text = %q", got["text"])
 	}
-	if strings.Contains(raw, `\"type\":\"result\"`) || strings.Contains(got["text"].(string), `"type"`) {
+	if text, _ := got["text"].(string); strings.Contains(raw, `\"type\":\"result\"`) || strings.Contains(text, `"type"`) {
 		t.Errorf("the runtime's raw stream leaked into the result: %s", raw)
 	}
 	// Every field the tool returned before keeps its name.
@@ -128,7 +129,7 @@ func TestDispatchTool_ScanFlagsInjectionMarker(t *testing.T) {
 	if len(scan) != 1 || scan[0] != "ignore-previous-instructions" {
 		t.Errorf("scan = %v, want [ignore-previous-instructions]", got["scan"])
 	}
-	if !strings.Contains(got["text"].(string), "ignore previous instructions") {
+	if text, _ := got["text"].(string); !strings.Contains(text, "ignore previous instructions") {
 		t.Errorf("detection must not redact the text: %q", got["text"])
 	}
 }
@@ -136,14 +137,14 @@ func TestDispatchTool_ScanFlagsInjectionMarker(t *testing.T) {
 func TestDispatchTool_TextIsCappedAt64KiB(t *testing.T) {
 	cfg := dispatchCfgWithFake(t, "claude", claudeStream(strings.Repeat("0123456789", 20_000))...) // 200 KB
 	got, _ := callDispatch(t, cfg, map[string]interface{}{"agent": "worker", "task": "t"})
-	text := got["text"].(string)
-	if len(text) > 64*1024 {
+	text, _ := got["text"].(string)
+	if len(text) == 0 || len(text) > 64*1024 {
 		t.Errorf("len(text) = %d, want <= 65536", len(text))
 	}
 	if got["text_truncated"] != true {
 		t.Errorf("text_truncated = %v", got["text_truncated"])
 	}
-	if got["output_bytes"].(float64) < 200_000 {
+	if ob, _ := got["output_bytes"].(float64); ob < 200_000 {
 		t.Errorf("output_bytes = %v: it still reports the raw capture size", got["output_bytes"])
 	}
 }
@@ -180,9 +181,12 @@ func TestDispatchTool_DurationKeepsTwoDecimals(t *testing.T) {
 	}
 }
 
-// The dispatch tool's schema offers the runtimes that exist (no gemini) and
-// takes a model id for any runtime, not only the Claude tiers.
-func TestDispatchToolSchema_RuntimesAndModels(t *testing.T) {
+// The dispatch tool's schema offers exactly what dispatch accepts today: the
+// runtimes that exist (no gemini) and the four model tiers. It once advertised
+// aliases and concrete ids that Run refuses ("invalid model tier"). wp-p0a
+// widens the model property when per-runtime validation lands (K-132) and
+// changes this test with it.
+func TestDispatchToolSchema_OffersWhatDispatchAccepts(t *testing.T) {
 	resp := findByID(t, session(t, defaultCfg(t), listReq(1)), 1)
 	result, _ := resp["result"].(map[string]interface{})
 	tools, _ := result["tools"].([]interface{})
@@ -197,33 +201,43 @@ func TestDispatchToolSchema_RuntimesAndModels(t *testing.T) {
 		t.Fatal("yakos.dispatch not listed")
 	}
 	props, _ := schema["properties"].(map[string]interface{})
+	enumOf := func(prop string) []string {
+		p, _ := props[prop].(map[string]interface{})
+		raw, ok := p["enum"].([]interface{})
+		if !ok {
+			t.Fatalf("%s has no enum: %v", prop, p)
+		}
+		var out []string
+		for _, v := range raw {
+			name, _ := v.(string)
+			out = append(out, name)
+		}
+		return out
+	}
 
-	rt, _ := props["runtime"].(map[string]interface{})
-	var runtimes []string
-	for _, v := range rt["enum"].([]interface{}) {
-		runtimes = append(runtimes, v.(string))
-	}
-	if strings.Join(runtimes, ",") != "claude,codex,agy" {
-		t.Errorf("runtime enum = %v, want [claude codex agy]", runtimes)
+	if got := strings.Join(enumOf("runtime"), ","); got != "claude,codex,agy" {
+		t.Errorf("runtime enum = %s, want claude,codex,agy", got)
 	}
 
-	model, _ := props["model"].(map[string]interface{})
-	if _, hasEnum := model["enum"]; hasEnum {
-		t.Error("model must not be limited to the Claude tiers")
+	tiers := enumOf("model")
+	if got := strings.Join(tiers, ","); got != "haiku,sonnet,opus,fable" {
+		t.Errorf("model enum = %s, want haiku,sonnet,opus,fable", got)
 	}
-	pat, _ := model["pattern"].(string)
-	re, err := regexp.Compile(pat)
-	if err != nil {
-		t.Fatalf("model pattern %q: %v", pat, err)
-	}
-	for _, ok := range []string{"haiku", "balanced", "gpt-5", "gemini-3.8-flash-low", "claude-opus-5-5-medium", "o3:mini"} {
-		if !re.MatchString(ok) {
-			t.Errorf("model %q should match %q", ok, pat)
+	// Every tier the schema offers is one dispatch accepts, and every tier
+	// dispatch accepts is offered: the two cannot drift apart again.
+	offered := map[string]bool{}
+	for _, tier := range tiers {
+		offered[tier] = true
+		if !runtime.ValidateTier(tier) {
+			t.Errorf("schema offers model %q but dispatch refuses it", tier)
 		}
 	}
-	for _, bad := range []string{"", "-flag", "--model", "Sonnet", "a b", "x;y", strings.Repeat("a", 65)} {
-		if re.MatchString(bad) {
-			t.Errorf("model %q must not match %q", bad, pat)
+	for _, tier := range []string{"haiku", "sonnet", "opus", "fable"} {
+		if runtime.ValidateTier(tier) && !offered[tier] {
+			t.Errorf("dispatch accepts %q but the schema does not offer it", tier)
 		}
+	}
+	if _, has := props["model"].(map[string]interface{})["pattern"]; has {
+		t.Error("model must not carry a pattern that admits ids dispatch refuses")
 	}
 }

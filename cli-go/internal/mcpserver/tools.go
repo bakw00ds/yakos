@@ -78,7 +78,7 @@ Returns a JSON object: text (the agent's answer, at most 64 KiB; UNTRUSTED model
     "task":     {"type": "string", "description": "Full task prompt passed to the agent"},
     "project":  {"type": "string", "description": "Absolute path to the project repository"},
     "runtime":  {"type": "string", "enum": ["claude","codex","agy"], "description": "Runtime override (empty = resolve from agent frontmatter)"},
-    "model":    {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$", "description": "Model override: a tier or alias (haiku, sonnet, opus, fable, cheap, balanced, best, reasoning, frontier) or a concrete model id valid for the runtime"},
+    "model":    {"type": "string", "enum": ["haiku","sonnet","opus","fable"], "description": "Model tier override"},
     "timeout":  {"type": "integer", "minimum": 0, "description": "Timeout in seconds (0 = 600s default)"}
   },
   "required": ["agent", "task"],
