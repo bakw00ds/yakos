@@ -159,6 +159,10 @@ func TestRunAgy_MaterializesSkillBeforeExec(t *testing.T) {
 func TestRunClaude_WritesNoAgentFiles(t *testing.T) {
 	isolateHome(t)
 	fakeRuntime(t, "claude")
+	var notes bytes.Buffer
+	prev := materializeNoteWriter
+	materializeNoteWriter = &notes
+	t.Cleanup(func() { materializeNoteWriter = prev })
 	project := t.TempDir()
 	_, _, err := Run(context.Background(), Request{
 		AgentName: "backend", Task: "t", Project: project,
@@ -171,6 +175,9 @@ func TestRunClaude_WritesNoAgentFiles(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(project, p)); !os.IsNotExist(err) {
 			t.Errorf("claude dispatch must not create %s (err=%v)", p, err)
 		}
+	}
+	if notes.Len() != 0 {
+		t.Errorf("a claude dispatch must not say an agent file was not written, got %q", notes.String())
 	}
 }
 
@@ -263,12 +270,24 @@ func TestRunCodex_WorkDirOverrideReceivesTheAgentFile(t *testing.T) {
 	}
 }
 
+// TestMaterializeAgentFiles_IgnoresOtherRuntimes: a runtime with no agent-file
+// layout is skipped silently. The note matters as much as the absence of files:
+// without the runtime filter, claude would reach agentscompose and every claude
+// dispatch would print "claude agent file for ... not written".
 func TestMaterializeAgentFiles_IgnoresOtherRuntimes(t *testing.T) {
+	var notes bytes.Buffer
+	prev := materializeNoteWriter
+	materializeNoteWriter = &notes
+	t.Cleanup(func() { materializeNoteWriter = prev })
+
 	project := t.TempDir()
 	for _, rt := range []string{"claude", "gemini", "", "x"} {
 		materializeAgentFiles(rt, project, "", agentscompose.ComposedAgent{ID: "backend", Prompt: "p"})
 	}
 	if entries, _ := os.ReadDir(project); len(entries) != 0 {
 		t.Errorf("unexpected files written: %v", entries)
+	}
+	if notes.Len() != 0 {
+		t.Errorf("a runtime without agent files must not produce a note, got %q", notes.String())
 	}
 }

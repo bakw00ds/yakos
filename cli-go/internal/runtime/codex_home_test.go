@@ -64,7 +64,6 @@ func TestCodexHome_ProfileReplacesAmbientCodexHomeAndSaysSo(t *testing.T) {
 	notes := captureSandboxNotes(t)
 	profile := seedCodexProfile(t, home)
 	t.Setenv("CODEX_HOME", "/project/supplied/home")
-	t.Setenv("codex_home_unrelated", "x")
 
 	env := buildEnvCodex(DispatchRequest{})
 	got := envValues(env, "CODEX_HOME")
@@ -74,8 +73,36 @@ func TestCodexHome_ProfileReplacesAmbientCodexHomeAndSaysSo(t *testing.T) {
 	if !strings.Contains(notes.String(), "ignoring CODEX_HOME=/project/supplied/home") {
 		t.Errorf("replacing an operator-set CODEX_HOME must be explained, got %q", notes.String())
 	}
-	if !hasEnvKey(env, "OPENAI_API_KEY") && os.Getenv("OPENAI_API_KEY") != "" {
-		t.Error("other CODEX_*/OPENAI_* variables must still be forwarded")
+}
+
+// TestCodexHome_ProfileKeepsTheRestOfTheEnvironment: swapping CODEX_HOME must not
+// drop anything else the codex subprocess needs. useEmptyHome clears
+// OPENAI_API_KEY, so set it (and another allowlisted codex variable) here, then
+// require them, PATH and HOME to come through next to the profile.
+func TestCodexHome_ProfileKeepsTheRestOfTheEnvironment(t *testing.T) {
+	home := useEmptyHome(t)
+	profile := seedCodexProfile(t, home)
+	t.Setenv("OPENAI_API_KEY", "sk-test-not-a-real-key")
+	t.Setenv("CODEX_SOMETHING_ELSE", "kept")
+	t.Setenv("PATH", "/usr/bin:/bin:/opt/test-bin")
+	t.Setenv("ANTHROPIC_API_KEY", "must-not-leak")
+
+	env := buildEnvCodex(DispatchRequest{})
+	if got := envValues(env, "CODEX_HOME"); len(got) != 1 || got[0] != profile {
+		t.Fatalf("CODEX_HOME = %v, want %q", got, profile)
+	}
+	for key, want := range map[string]string{
+		"OPENAI_API_KEY":       "sk-test-not-a-real-key",
+		"CODEX_SOMETHING_ELSE": "kept",
+		"PATH":                 "/usr/bin:/bin:/opt/test-bin",
+		"HOME":                 home,
+	} {
+		if got := envValues(env, key); len(got) != 1 || got[0] != want {
+			t.Errorf("%s = %v, want the inherited %q to be forwarded next to CODEX_HOME", key, got, want)
+		}
+	}
+	if hasEnvKey(env, "ANTHROPIC_API_KEY") {
+		t.Error("another provider's credential must stay out of the codex environment")
 	}
 }
 

@@ -15,9 +15,10 @@
 //
 // Runtimes named there may be dispatched without their sandbox (codex
 // --dangerously-bypass-approvals-and-sandbox, agy without --sandbox). Every
-// other runtime, and every runtime when the file is missing or untrusted, runs
-// sandboxed. The router (P1) will add its rules to the same File; unknown keys
-// are ignored so a policy written for a newer yakOS never fails this check.
+// other runtime, and every runtime when the file is missing or untrusted, keeps
+// its sandbox flags. The router (P1) will add its rules to the same File;
+// unknown keys are ignored so a policy written for a newer yakOS never fails
+// this check.
 package routerpolicy
 
 import (
@@ -62,6 +63,11 @@ func StateDir() string { return statepath.TrustedDir() }
 // Path returns the policy file path inside stateDir.
 func Path(stateDir string) string { return filepath.Join(stateDir, FileName) }
 
+// afterLstat runs in Load between the Lstat that vets the path and the Open that
+// reads it. It does nothing in production; a test swaps the file there, the way
+// a racing process would, to prove the descriptor check below catches it.
+var afterLstat = func(path string) {}
+
 // checkInfo applies the budget policy trust rules to an already-stat'ed file.
 func checkInfo(path string, fi os.FileInfo) error {
 	if fi.Mode()&os.ModeSymlink != 0 {
@@ -98,6 +104,7 @@ func Load(stateDir string) (File, error) {
 	if err := checkInfo(path, lfi); err != nil {
 		return File{}, err
 	}
+	afterLstat(path)
 	f, err := os.Open(path) //nolint:gosec // state-dir file, checked above
 	if err != nil {
 		return File{}, err

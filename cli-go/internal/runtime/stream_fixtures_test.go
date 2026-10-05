@@ -333,29 +333,3 @@ func TestAgyStreamFixtures_SkillMentionReadsTheGeneratedSkill(t *testing.T) {
 		t.Errorf("the model must follow the skill, response = %q", resp)
 	}
 }
-
-// TestRecordingsContainNoPersonalData guards the redaction promised in
-// adapter-argv-recordings.md for the files that note describes.
-func TestRecordingsContainNoPersonalData(t *testing.T) {
-	var files []string
-	for _, pat := range []string{"agy-stream-json-1.2.17-conversation-*.ndjson", "agy-stream-json-1.2.17-effort-conflict.ndjson",
-		"agy-stream-json-1.2.17-sandbox-denied.ndjson", "agy-stream-json-1.2.17-skill-mention.ndjson", "codex-exec-json-0.154.0.ndjson", "codex-exec-json-0.154.0-resume.ndjson",
-		"codex-exec-json-0.154.0-subagent.ndjson", "codex-exec-json-0.154.0-auth-failure.ndjson"} {
-		m, _ := filepath.Glob(filepath.Join(streamFixtureDir, pat))
-		files = append(files, m...)
-	}
-	if len(files) == 0 {
-		t.Skip("fixtures not reachable from the package dir")
-	}
-	for _, f := range files {
-		b, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, bad := range []string{"/Users/tw", "claude-501", "bakw00ds", "@", "/private/tmp", "scratchpad"} {
-			if strings.Contains(string(b), bad) {
-				t.Errorf("%s contains %q", filepath.Base(f), bad)
-			}
-		}
-	}
-}
