@@ -65,9 +65,9 @@ import (
 const sidecarWriteTimeout = 10 * time.Second
 
 // sdkSidecarEnv returns the environment for the spawned Node sidecar process
-// (see Start, below). Extracted to a standalone function so the M4/R7
-// allowlisting is directly unit-testable without spawning a real node
-// process.
+// (see Start, below), or the reason the sidecar must not start. Extracted to a
+// standalone function so the M4/R7 allowlisting and the K-137 key gate are
+// directly unit-testable without spawning a real node process.
 //
 // SECURITY (M4/R7, security-review-2026-09-14.md + round-2 review): this
 // sidecar runs the @anthropic-ai/claude-agent-sdk Node bundle, i.e. the
@@ -77,8 +77,17 @@ const sidecarWriteTimeout = 10 * time.Second
 // every other configured runtime's credentials reached this sidecar. This
 // applies the same claude allowlist the dispatch adapters in
 // internal/runtime use.
-func sdkSidecarEnv() []string {
-	return yakruntime.FilterEnvFor("claude", os.Environ())
+//
+// SECURITY (K-137): Anthropic does not allow a Pro/Max subscription's OAuth in
+// the Agent SDK (terms of 2026-02-19), and with no key in its environment this
+// sidecar used to fall back to the operator's claude.ai login. The environment
+// is therefore built by runtime.SDKSidecarEnv, which strips every subscription
+// OAuth variable and returns runtime.ErrSDKAPIKeyRequired (or
+// ErrSDKAPIKeyIsOAuthToken) unless ANTHROPIC_API_KEY holds an API key. The CLI
+// engine, which is Claude Code itself, remains the interactive path for
+// subscription users.
+func sdkSidecarEnv() ([]string, error) {
+	return yakruntime.SDKSidecarEnv(os.Environ())
 }
 
 // ---------------------------------------------------------------------------
@@ -316,10 +325,14 @@ func (e *SDKEngine) Closed() <-chan struct{} { return e.closed }
 // Start launches the node sidecar process and the readLoop goroutine.
 // Must be called exactly once after NewSDKEngine.
 //
-// Start blocks until the sidecar emits a "ready" frame (indicating it has
-// authenticated with the claude CLI keychain) or until ctx is cancelled.
-// Returns an error if the process cannot be started or the ready frame is
-// not received within a reasonable timeout (readyTimeout).
+// Start first applies the K-137 gate: without an Anthropic API key in the
+// environment (ANTHROPIC_API_KEY; see sdkSidecarEnv) it returns an error that
+// wraps runtime.ErrSDKAPIKeyRequired and spawns nothing.
+//
+// Start then blocks until the sidecar emits a "ready" frame (it has checked its
+// own key and is accepting turns) or until ctx is cancelled. Returns an error
+// if the process cannot be started or the ready frame is not received within a
+// reasonable timeout (readyTimeout).
 func (e *SDKEngine) Start(ctx context.Context) error {
 	// Guard: already started.
 	e.mu.Lock()
@@ -327,6 +340,15 @@ func (e *SDKEngine) Start(ctx context.Context) error {
 	e.mu.Unlock()
 	if alreadyStarted {
 		return fmt.Errorf("interactive: sdk engine already started")
+	}
+
+	// K-137 hard gate: refuse before anything is built or spawned, including
+	// through the test seam below, so no path starts the Agent SDK without an
+	// API key. The error names ANTHROPIC_API_KEY and the CLI engine, carries no
+	// token material, and reaches the console through Manager.EnsureSDK.
+	env, err := sdkSidecarEnv()
+	if err != nil {
+		return fmt.Errorf("interactive: sdk engine: refusing to start: %w", err)
 	}
 
 	var cmd *exec.Cmd
@@ -340,8 +362,8 @@ func (e *SDKEngine) Start(ctx context.Context) error {
 		cmd = exec.CommandContext(ctx, e.params.NodePath, args...) //nolint:gosec
 
 		// A nil Env is never intentional in a security-reviewed spawn — see
-		// sdkSidecarEnv's doc comment (M4/R7).
-		cmd.Env = sdkSidecarEnv()
+		// sdkSidecarEnv's doc comment (M4/R7, K-137).
+		cmd.Env = env
 	}
 
 	// Forward sidecar stderr to our slog at DEBUG level.

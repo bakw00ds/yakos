@@ -18,8 +18,15 @@
  *   {"v":1,"kind":"summary","totalCostUsd":0.0,"usage":{...}}
  *   {"v":1,"kind":"error","text":"..."}
  *
- * Auth: apiKeySource:"none" reuses the installed claude CLI keychain credentials.
- * No API key needed in the environment.
+ * Auth (K-137): ANTHROPIC_API_KEY is REQUIRED. Anthropic does not allow a Pro/Max
+ * subscription's OAuth in the Agent SDK (terms of 2026-02-19), and without a key
+ * the SDK would fall back to the operator's claude.ai login. main() therefore
+ * refuses to start, before it announces "ready", unless ANTHROPIC_API_KEY holds
+ * an API key: exit status 78 and a one-line reason on stderr that never contains
+ * any part of a credential. The Go side (SDKEngine.Start) refuses first and also
+ * strips subscription OAuth variables from this process's environment; this is
+ * the second anchor for a sidecar launched any other way. The CLI engine is the
+ * interactive path for subscription users.
  *
  * AskUserQuestion flow:
  *   1. canUseTool callback receives tool_use for "AskUserQuestion".
@@ -402,16 +409,59 @@ function startStdinReader(onUserTurn, onAnswer, onShutdown) {
 }
 
 // ---------------------------------------------------------------------------
+// API-key gate (K-137)
+// ---------------------------------------------------------------------------
+
+/** Exit status when the gate refuses: sysexits EX_CONFIG. Pinned by the Go tests. */
+const EXIT_API_KEY_REQUIRED = 78;
+
+/** Prefixes of subscription OAuth tokens: access (oat) and refresh (ort). */
+const OAUTH_TOKEN_MARKERS = ["sk-ant-oat", "sk-ant-ort"];
+
+/**
+ * apiKeyRefusal returns why this sidecar must not start, or "" when it may.
+ *
+ * It reads only ANTHROPIC_API_KEY and returns a constant sentence: no part of
+ * the value, and no other variable, is ever echoed.
+ */
+function apiKeyRefusal(env) {
+  const key = String(env.ANTHROPIC_API_KEY ?? "").trim();
+  if (key === "") {
+    return (
+      "ANTHROPIC_API_KEY is not set; the Agent SDK engine does not run on a claude.ai subscription login " +
+      "(set an API key, or use the CLI engine for interactive chat)"
+    );
+  }
+  const lower = key.toLowerCase();
+  if (OAUTH_TOKEN_MARKERS.some((marker) => lower.includes(marker))) {
+    return (
+      "ANTHROPIC_API_KEY holds a subscription OAuth token, not an API key; the Agent SDK engine does not accept " +
+      "those (set an API key, or use the CLI engine for interactive chat)"
+    );
+  }
+  return "";
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 async function main() {
-  // Build the options for query().
-  // apiKeySource:"none" reuses the installed claude CLI keychain credentials.
+  // K-137 hard gate, before anything else: no "ready" frame, no SDK, no login
+  // fallback. Set the exit code and return instead of calling process.exit() so
+  // the stderr line is flushed; nothing is listening yet, so the process ends.
+  const refusal = apiKeyRefusal(process.env);
+  if (refusal !== "") {
+    process.stderr.write(`[sidecar] refusing to start: ${refusal}\n`);
+    process.exitCode = EXIT_API_KEY_REQUIRED;
+    return;
+  }
+
+  // Build the options for query(). Auth is the ANTHROPIC_API_KEY checked above;
+  // no keychain or login fallback is configured.
   const options = {
     permissionMode: "bypassPermissions",
     includePartialMessages: true,
-    apiKeySource: "none",
     canUseTool,
   };
 

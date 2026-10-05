@@ -19755,11 +19755,30 @@ function startStdinReader(onUserTurn, onAnswer, onShutdown) {
     });
   });
 }
+var EXIT_API_KEY_REQUIRED = 78;
+var OAUTH_TOKEN_MARKERS = ["sk-ant-oat", "sk-ant-ort"];
+function apiKeyRefusal(env) {
+  const key = String(env.ANTHROPIC_API_KEY ?? "").trim();
+  if (key === "") {
+    return "ANTHROPIC_API_KEY is not set; the Agent SDK engine does not run on a claude.ai subscription login (set an API key, or use the CLI engine for interactive chat)";
+  }
+  const lower = key.toLowerCase();
+  if (OAUTH_TOKEN_MARKERS.some((marker) => lower.includes(marker))) {
+    return "ANTHROPIC_API_KEY holds a subscription OAuth token, not an API key; the Agent SDK engine does not accept those (set an API key, or use the CLI engine for interactive chat)";
+  }
+  return "";
+}
 async function main() {
+  const refusal = apiKeyRefusal(process.env);
+  if (refusal !== "") {
+    process.stderr.write(`[sidecar] refusing to start: ${refusal}
+`);
+    process.exitCode = EXIT_API_KEY_REQUIRED;
+    return;
+  }
   const options = {
     permissionMode: "bypassPermissions",
     includePartialMessages: true,
-    apiKeySource: "none",
     canUseTool
   };
   for (let i = 2; i < process.argv.length; i++) {

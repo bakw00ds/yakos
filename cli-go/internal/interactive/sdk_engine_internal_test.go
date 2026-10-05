@@ -29,7 +29,10 @@ func TestSdkSidecarEnv_FiltersOtherRuntimesCredentials(t *testing.T) {
 	t.Setenv("ANTIGRAVITY_API_KEY", "agy-secret")
 	t.Setenv("GEMINI_API_KEY", "gemini-secret")
 
-	env := sdkSidecarEnv()
+	env, err := sdkSidecarEnv()
+	if err != nil {
+		t.Fatalf("sdkSidecarEnv with ANTHROPIC_API_KEY set: %v", err)
+	}
 
 	if !hasEnvVar(env, "ANTHROPIC_API_KEY") {
 		t.Error("sdkSidecarEnv: ANTHROPIC_API_KEY missing; the claude SDK sidecar needs its own credential")
