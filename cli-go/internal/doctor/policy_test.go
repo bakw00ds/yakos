@@ -325,6 +325,40 @@ func TestCheckPolicy_BashDispatchRunsHarnessesWithoutTheirSandbox(t *testing.T) 
 	}
 }
 
+// YAKOS_IMPL is project-settable (a committed .claude/settings.json env block can set
+// it, K-129), so whatever it holds must never reach the report: the finding names the
+// variable and one of two fixed states, never a value.
+func TestCheckPolicy_BashDispatchNeverPrintsTheYakosImplValue(t *testing.T) {
+	const marker = "SENTINELIMPLVALUE0123"
+	cases := []struct {
+		impl string
+		want string // fixed wording the finding must use instead
+	}{
+		{marker, "YAKOS_IMPL is not set to go"},
+		{"go-" + marker, "YAKOS_IMPL is not set to go"},
+		{"  " + marker + "  ", "YAKOS_IMPL is not set to go"},
+		{"bash", "YAKOS_IMPL=bash"},
+		{"", "YAKOS_IMPL is not set to go"},
+	}
+	for _, tc := range cases {
+		f := newPolicyFixture(t)
+		f.bash = true
+		f.found["codex"] = "/x/codex"
+		f.env["YAKOS_IMPL"] = tc.impl
+		f.env["OPENAI_API_KEY"] = "set" // keep the codex profile finding out of the way
+		got, ok := byID(f.check())["bash-dispatch-unsandboxed"]
+		if !ok {
+			t.Fatalf("YAKOS_IMPL=%q: want the bash-dispatch finding", tc.impl)
+		}
+		if strings.Contains(got.Message+got.Fix, marker) {
+			t.Errorf("YAKOS_IMPL=%q: the finding printed the variable's value: %+v", tc.impl, got)
+		}
+		if !strings.Contains(got.Message, tc.want) {
+			t.Errorf("YAKOS_IMPL=%q: want the fixed wording %q, got %q", tc.impl, tc.want, got.Message)
+		}
+	}
+}
+
 // ---- codex profile -------------------------------------------------------------
 
 func TestCheckPolicy_CodexOnPathWithoutAYakosProfile(t *testing.T) {
