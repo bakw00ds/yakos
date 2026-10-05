@@ -1033,8 +1033,28 @@ echo "Test 20: the claude-sdk runtime refuses to run without an Anthropic API ke
 # carries no token material, and the python it does start must not inherit subscription
 # OAuth variables. Twins: cli-go/internal/runtime/sdk_env.go and sidecar.mjs.
 t20="$WORKDIR/t20"
-mkdir -p "$t20/home" "$t20/py" "$t20/proj"
+mkdir -p "$t20/home" "$t20/py" "$t20/proj" "$t20/root/lib/agents"
 t20_secret="T20SECRET0123456789"
+# A one-agent roster as the framework root. The real roster is about 196 KB, which the
+# adapter passes to python in one environment variable; Linux caps one string at 128 KiB
+# (MAX_ARG_STRLEN) and the exec fails with E2BIG, so a test of the gate must not depend on it.
+cat > "$t20/root/lib/agents/probe.md" <<'AGENT_EOF'
+---
+id: probe
+role: specialist
+domain: test
+mode: [feature]
+tools: [Read]
+model: haiku
+references: []
+---
+
+# Probe
+
+## Purpose
+
+A one-agent roster for the claude-sdk gate fixture.
+AGENT_EOF
 cat > "$t20/py/fakepython" <<'PY_EOF'
 #!/bin/sh
 # Stands in for the interpreter: records the NAMES of the variables it was started with.
@@ -1052,9 +1072,9 @@ fi
 # t20_dispatch VAR=value...: the real dispatch verb, in an otherwise empty environment.
 t20_dispatch() {
     rm -f "$t20/seen.env" "$t20/out" "$t20/err"
-    env -i HOME="$t20/home" PATH="$PATH" YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$YAKOS_LIB" \
+    env -i HOME="$t20/home" PATH="$PATH" YAKOS_ROOT="$t20/root" YAKOS_LIB="$YAKOS_LIB" \
         YAKOS_PYTHON="$t20/py/fakepython" T20_SEEN="$t20/seen.env" "$@" \
-        bash -c '. "$YAKOS_LIB/runtimes/claude-sdk.sh"; yk_rt_claude_sdk_dispatch "$1" backend "hello"' _ "$t20/proj" \
+        bash -c '. "$YAKOS_LIB/runtimes/claude-sdk.sh"; yk_rt_claude_sdk_dispatch "$1" probe "hello"' _ "$t20/proj" \
         >"$t20/out" 2>"$t20/err"
 }
 
