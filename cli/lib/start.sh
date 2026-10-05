@@ -199,6 +199,16 @@ fi
 yk_rt_is_known "$RUNTIME" || ct_die "start: unknown runtime '$RUNTIME' (known: $(yk_rt_known | tr '\n' ' '))"
 yk_rt_load "$RUNTIME"
 
+# The runtime to name in a "yakos auth login <id>" hint. `yakos start --runtime
+# claude-sdk` launches Claude Code, which runs on the claude login, and `yakos
+# auth login claude-sdk` no longer logs anything in (the Agent SDK needs
+# ANTHROPIC_API_KEY, K-137), so that hint names claude. The Go start does the
+# same (authLoginTarget).
+case "$RUNTIME" in
+    claude-sdk) AUTH_LOGIN_TARGET="claude" ;;
+    *)          AUTH_LOGIN_TARGET="$RUNTIME" ;;
+esac
+
 # ---- preflight checks -------------------------------------------------------
 
 CLI_OK=1; AUTH_OK=1
@@ -212,7 +222,7 @@ if [ "$DRY_RUN" != "1" ] && [ "$PRINT_AGENTS" != "1" ]; then
         ct_die "start: '$RUNTIME' CLI not on PATH. Install it, then retry. (--dry-run works without the CLI installed.)"
     fi
     if [ "$AUTH_OK" != "1" ]; then
-        ct_log "WARN: '$RUNTIME' auth not detected; the runtime may prompt or fail. Run 'yakos auth login $RUNTIME' to fix."
+        ct_log "WARN: '$RUNTIME' auth not detected; the runtime may prompt or fail. Run 'yakos auth login $AUTH_LOGIN_TARGET' to fix."
     fi
 fi
 
@@ -247,7 +257,7 @@ yakos start — preflight
   control dir:    $CONTROL_DIR
   runtime:        $RUNTIME ($CAPS)
   cli:            $( [ "$CLI_OK" = "1" ] && printf 'OK' || printf 'NOT FOUND (--dry-run only)' )
-  auth:           $( [ "$AUTH_OK" = "1" ] && printf 'OK' || printf 'NOT CONFIGURED (run: yakos auth login %s)' "$RUNTIME" )
+  auth:           $( [ "$AUTH_OK" = "1" ] && printf 'OK' || printf 'NOT CONFIGURED (run: yakos auth login %s)' "$AUTH_LOGIN_TARGET" )
   permission:     $( [ "$PERM_MODE" = "bypass" ] && printf 'bypassPermissions' || printf 'default' )$( [ "$ALLOW_ROOT" = "1" ] && printf ' (allow-root)' || true )
   agents:         $AGENT_COUNT registered$( [ "$NO_AGENTS" = "1" ] && printf ' (--no-agents: suppressed)' || true )
   mode flags:     $( [ "$BARE" = "1" ] && printf 'bare ' || true )$( [ "$IDE" = "1" ] && printf 'ide ' || true )$( [ "$CONTINUE" = "1" ] && printf 'continue ' || true )$( [ -n "$RESUME" ] && printf 'resume=%s ' "$RESUME" || true )$( [ "$FORK" = "1" ] && printf 'fork ' || true )$( [ -n "$MODEL" ] && printf 'model=%s ' "$MODEL" || true )
