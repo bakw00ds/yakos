@@ -94,6 +94,15 @@ func TestReportDispatchOutcome(t *testing.T) {
 			absent:   []string{"exceeded"},
 		},
 		{
+			// The CLI prints the full join, so the cut of the full join is the one to
+			// report even when the final report itself is whole.
+			name:     "full join cap",
+			res:      dispatch.Result{Runtime: "claude", Parsed: true, Text: "the short report", TextAllCapped: true},
+			wantCode: 0,
+			want:     []string{"dispatch: output truncated at 1 MiB"},
+			absent:   []string{"exceeded"},
+		},
+		{
 			name:     "one dropped line",
 			res:      dispatch.Result{Runtime: "agy", Truncated: true, LinesDropped: 1},
 			wantCode: 0,
@@ -277,6 +286,32 @@ func TestDispatchCLI_HarnessTextCarryingEscapesIsPrintedAsPlainText(t *testing.T
 	}
 	if !strings.Contains(stderr, "codex stderr (last lines):\nwarn now done\n") {
 		t.Errorf("stderr lacks the stderr tail as plain text:\n%q", stderr)
+	}
+}
+
+// Sub-agent narration past 1 MiB cuts the full join the terminal gets, while the
+// final report is whole: the operator is told all the same.
+func TestDispatchCLI_NoticeWhenTheFullJoinIsCutAtOneMiB(t *testing.T) {
+	var data bytes.Buffer
+	data.WriteString(`{"type":"system","subtype":"init","session_id":"s1"}` + "\n")
+	line := `{"type":"assistant","parent_tool_use_id":"toolu_task1","session_id":"s1","message":{"content":[{"type":"text","text":"` +
+		strings.Repeat("n", 100*1024) + `"}]}}` + "\n"
+	for i := 0; i < 12; i++ { // 12 lines of 100 KB, past the cap
+		data.WriteString(line)
+	}
+	data.WriteString(`{"type":"assistant","session_id":"s1","message":{"content":[{"type":"text","text":"the short report"}]}}` + "\n")
+	data.WriteString(`{"type":"result","subtype":"success","is_error":false,"result":"the short report","session_id":"s1","usage":{"input_tokens":1,"output_tokens":1}}` + "\n")
+
+	stdout, stderr, exit := runDispatchWithStub(t, "claude", dataCat(t, data.Bytes()))
+	if exit != 0 {
+		t.Errorf("exit = %d, want 0 (the run succeeded)", exit)
+	}
+	if len(stdout) < rt.MaxParsedTextBytes-2 || len(stdout) > rt.MaxParsedTextBytes+2 {
+		t.Errorf("stdout is %d bytes, want about %d", len(stdout), rt.MaxParsedTextBytes)
+	}
+	const notice = "dispatch: output truncated at 1 MiB"
+	if strings.Count(stderr, notice) != 1 {
+		t.Errorf("stderr must carry the notice once:\n%s", stderr)
 	}
 }
 

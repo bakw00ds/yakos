@@ -137,7 +137,9 @@ func TestAgyLineParser_ResumedTurnReportsItsOwnUsage(t *testing.T) {
 	if want := (Usage{InputTokens: 12859, OutputTokens: 26, DurationMs: 1994}); r1.Usage != want {
 		t.Errorf("turn 1 Usage = %+v, want %+v", r1.Usage, want)
 	}
-	if want := (Usage{InputTokens: 13091, OutputTokens: 693, DurationMs: 35865}); r2.Usage != want {
+	// Turn 2 carries no duration: its frame's 35865 ms is the session's clock (the
+	// step itself took about 4 seconds), so the figure stays in CumulativeUsage.
+	if want := (Usage{InputTokens: 13091, OutputTokens: 693}); r2.Usage != want {
 		t.Errorf("turn 2 Usage = %+v, want %+v", r2.Usage, want)
 	}
 	// The conversation total, as the result frames report it.
@@ -410,7 +412,7 @@ func TestAgyLineParser_MultiTurnFragments(t *testing.T) {
 	if pr.Text != "apple\napple" {
 		t.Errorf("Text = %q", pr.Text)
 	}
-	want := Usage{InputTokens: 30662, OutputTokens: 8, CacheRead: 30214, DurationMs: 2548}
+	want := Usage{InputTokens: 30662, OutputTokens: 8, CacheRead: 30214}
 	if pr.Usage != want {
 		t.Errorf("Usage = %+v, want %+v", pr.Usage, want)
 	}
@@ -425,7 +427,8 @@ func TestAgyLineParser_MultiTurnFragments(t *testing.T) {
 
 // Two turns in one process: each result event carries its own turn's usage and
 // the running total, and the run's usage is the process's. The frames' counts are
-// the conversation's, so the second one totals both turns.
+// the conversation's, so the second one totals both turns. The first turn carries
+// its duration; the second frame's is the session's, so it stays in the total.
 func TestAgyLineParser_MultiTurnProcessReportsEachTurn(t *testing.T) {
 	pr, evs := parse("agy", readFixture(t, agyMultiturn))
 	wantKinds(t, evs, EventSession, EventToken, EventToken, EventResult, EventToken, EventResult)
@@ -436,16 +439,20 @@ func TestAgyLineParser_MultiTurnProcessReportsEachTurn(t *testing.T) {
 		t.Errorf("turn 1 event: Usage %+v, CumulativeUsage %+v, want %+v for both", first.Usage, first.CumulativeUsage, turn1)
 	}
 	// Turn 2's own step: 278 fresh input beside 30214 read from the cache.
-	if want := (Usage{InputTokens: 278, OutputTokens: 4, CacheRead: 30214, DurationMs: 2548}); second.Usage != want {
+	if want := (Usage{InputTokens: 278, OutputTokens: 4, CacheRead: 30214}); second.Usage != want {
 		t.Errorf("turn 2 event Usage = %+v, want %+v", second.Usage, want)
 	}
 	total := Usage{InputTokens: 30662, OutputTokens: 8, CacheRead: 30214, DurationMs: 2548}
 	if second.CumulativeUsage != total {
 		t.Errorf("turn 2 event CumulativeUsage = %+v, want %+v", second.CumulativeUsage, total)
 	}
-	// The process is both turns' steps, which here is also the conversation total.
-	if pr.Usage != total || pr.CumulativeUsage != total {
-		t.Errorf("Usage = %+v, CumulativeUsage = %+v, want %+v for both", pr.Usage, pr.CumulativeUsage, total)
+	// The process is both turns' steps, which here is also the conversation total,
+	// less the duration of a turn after the first.
+	if want := (Usage{InputTokens: 30662, OutputTokens: 8, CacheRead: 30214}); pr.Usage != want {
+		t.Errorf("Usage = %+v, want %+v", pr.Usage, want)
+	}
+	if pr.CumulativeUsage != total {
+		t.Errorf("CumulativeUsage = %+v, want %+v", pr.CumulativeUsage, total)
 	}
 }
 

@@ -34,12 +34,20 @@ package runtime
 // exposes both figures and leaves the choice to its caller, which knows whether
 // the run began a conversation. ParseResult.Usage is the sum of the usage
 // carried by the DONE steps seen in THIS stream: the run's own tokens, equal to
-// the result frame's on every first-turn recording, with the frame's duration,
-// and zero when no step carried usage (the single --output-format json envelope
-// has no steps). ParseResult.CumulativeUsage is the frame's total.
-// internal/dispatch reports the total for a run that began a new conversation,
-// where it is the run's own and survives a step line lost to corruption, and
-// the step sum for a resumed run.
+// the result frame's on every first-turn recording, and zero when no step
+// carried usage (the single --output-format json envelope has no steps).
+// ParseResult.CumulativeUsage is the frame's total. internal/dispatch reports
+// the total for a run that began a new conversation, where it is the run's own
+// and survives a step line lost to corruption, and the step sum for a resumed
+// run.
+//
+// The frame's duration_seconds is the session's too: the recorded second turn
+// reports 35.9 seconds for a step of about 4, because the clock runs from the
+// start of the conversation. It is therefore the run's own duration only on a
+// first turn (num_turns of 1 or less). Usage.DurationMs carries it there and is
+// left zero on every later turn, and the frame's figure stays in
+// CumulativeUsage. The measured duration of the process, which the dispatch
+// layer records itself, is the source for latency.
 //
 // agy's input_tokens already EXCLUDES cache_read_tokens (a second-turn step
 // reports 278 input and 30214 cache read), which is the package's Usage
@@ -104,24 +112,26 @@ func (t *agyTally) add(u Usage) {
 
 // agyFrame is what a result frame reported about usage.
 type agyFrame struct {
-	usage Usage // the counts as reported, a conversation total; DurationMs from duration_seconds
-	have  bool  // the frame carried a usage object
+	usage    Usage // the counts as reported, a conversation total; DurationMs from duration_seconds
+	numTurns int   // turns in the conversation so far, 1 on a first turn
+	have     bool  // the frame carried a usage object
 }
 
 // own is the usage of the run whose DONE steps the tally holds, given the result
 // frame that closed it (the zero frame when there was none). The steps' sum is
 // the run's own tokens whatever the conversation did before it; the frame's
 // counts are not, they are the conversation's running total. The frame
-// therefore supplies only the duration. With no step usage there is no figure of
-// the run's own, and the zero value says so: the frame's total is still in
-// ParseResult.CumulativeUsage for a caller that knows the run began the
-// conversation.
+// therefore supplies only the duration, and that only on a first turn: after it
+// the frame's duration is the session's (see the header), so DurationMs stays
+// zero. With no step usage there is no figure of the run's own, and the zero
+// value says so: the frame's total is still in ParseResult.CumulativeUsage for a
+// caller that knows the run began the conversation.
 func (t agyTally) own(f agyFrame) Usage {
 	if !t.seen {
 		return Usage{}
 	}
 	own := t.sum
-	if f.have {
+	if f.have && f.numTurns <= 1 {
 		own.DurationMs = f.usage.DurationMs
 	}
 	return own
@@ -170,6 +180,7 @@ type agyResult struct {
 	Response        string          `json:"response"`
 	Error           json.RawMessage `json:"error"`
 	DurationSeconds float64         `json:"duration_seconds"`
+	NumTurns        int             `json:"num_turns"`
 	Usage           *agyUsage       `json:"usage"`
 }
 
@@ -328,7 +339,7 @@ func (p *agyLineParser) result(r agyResult) []NativeEvent {
 	p.resp.add(r.Response)
 	var frame agyFrame
 	if r.Usage != nil {
-		frame = agyFrame{usage: r.Usage.usage(), have: true}
+		frame = agyFrame{usage: r.Usage.usage(), numTurns: r.NumTurns, have: true}
 		frame.usage.DurationMs = int64(r.DurationSeconds * 1000)
 		p.frame = frame
 	}

@@ -332,11 +332,20 @@ func TestRun_AgyResumedTurnReportsAndLogsItsOwnUsage(t *testing.T) {
 	if res.CumulativeUsage == nil || res.CumulativeUsage.InputTokens != 25950 || res.CumulativeUsage.OutputTokens != 719 {
 		t.Errorf("CumulativeUsage = %+v, want the conversation total 25950 in / 719 out", res.CumulativeUsage)
 	}
+	// The frame's duration is the session's clock, not this turn's, so the turn
+	// reports none and the figure stays with the total. The measured duration of
+	// the process is the latency source.
+	if res.Usage.DurationMs != 0 || res.CumulativeUsage.DurationMs != 35865 {
+		t.Errorf("DurationMs: Usage %d, CumulativeUsage %d, want 0 and 35865", res.Usage.DurationMs, res.CumulativeUsage.DurationMs)
+	}
 	// The record a cost reader sums holds the turn's own tokens, and nothing of
 	// the total, so adding rows up never counts a turn twice.
 	u, ok := finishedUsage(t, logDir)
 	if !ok || u["input_tokens"] != float64(13091) || u["output_tokens"] != float64(693) {
 		t.Errorf("logged usage = %v", u)
+	}
+	if d, _ := u["duration_ms"].(float64); d != 0 {
+		t.Errorf("logged duration_ms = %v, want none for a resumed turn", u["duration_ms"])
 	}
 	for k := range u {
 		if strings.Contains(k, "cumulative") || strings.Contains(k, "total_tokens") {
@@ -415,6 +424,43 @@ func TestRun_AgyEnvelopeUsageDependsOnWhetherTheRunBeganTheConversation(t *testi
 	}
 	if u, ok := finishedUsage(t, logDir); ok {
 		t.Errorf("the dispatch record must carry no usage object for a resumed envelope run: %v", u)
+	}
+}
+
+// subagentFloodStream is a claude run whose sub-agent narration is 12 lines of
+// 100 KB, past the 1 MiB cap on the full join, followed by a short final report.
+func subagentFloodStream() []byte {
+	var b bytes.Buffer
+	b.WriteString(`{"type":"system","subtype":"init","session_id":"s1","model":"claude-sonnet-4-5"}` + "\n")
+	line := `{"type":"assistant","parent_tool_use_id":"toolu_task1","session_id":"s1","message":{"content":[{"type":"text","text":"` +
+		strings.Repeat("n", 100*1024) + `"}]}}` + "\n"
+	for i := 0; i < 12; i++ {
+		b.WriteString(line)
+	}
+	b.WriteString(`{"type":"assistant","session_id":"s1","message":{"content":[{"type":"text","text":"the short report"}]}}` + "\n")
+	b.WriteString(`{"type":"result","subtype":"success","is_error":false,"result":"the short report","session_id":"s1","usage":{"input_tokens":1,"output_tokens":1}}` + "\n")
+	return b.Bytes()
+}
+
+// The full join is capped on its own. Sub-agent narration past 1 MiB cuts
+// TextAll while the final report, which is what the transports carry, stays
+// whole. The CLI prints TextAll, so it has to be told: TextAllCapped is the flag.
+func TestRun_ClaudeNarrationPastTheCapCutsOnlyTheFullJoin(t *testing.T) {
+	fakeRuntimeBinData(t, "claude", subagentFloodStream(), 0)
+	_, res, _ := runOnce(t, "claude")
+
+	if res.Text != "the short report" || res.TextCapped || res.Truncated {
+		t.Errorf("Text = %q, TextCapped = %v, Truncated = %v: the final report is complete", res.Text, res.TextCapped, res.Truncated)
+	}
+	if !res.TextAllCapped {
+		t.Error("TextAllCapped must say the full join was cut")
+	}
+	if n := len(res.TextAll); n < runtime.MaxParsedTextBytes-4 || n > runtime.MaxParsedTextBytes+4 {
+		t.Errorf("TextAll is %d bytes, want about %d", n, runtime.MaxParsedTextBytes)
+	}
+	// What a transport hands on is the short report and nothing of the flood.
+	if got := Summarize(nil, res); got.Text != "the short report" || got.TextTruncated {
+		t.Errorf("summary text = %q truncated = %v", got.Text, got.TextTruncated)
 	}
 }
 

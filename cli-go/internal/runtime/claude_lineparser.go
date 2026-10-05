@@ -19,13 +19,14 @@ package runtime
 // Final text (ParseResult.Text) is the result frame's own string: the framed
 // prompt asks the relay to "return only the subagent's final report", and the
 // result frame is the stream's contract for the final response. When that frame
-// is absent or empty (a killed run) the text falls back to the text blocks of
-// the TOP-LEVEL assistant messages, then to the incremental text_delta
-// fragments of a partial-messages stream. An error result's message is never
-// the answer, and sub-agent narration is never part of it: an assistant line
-// carrying parent_tool_use_id is a sub-agent's, and claude forwards those only
-// when CLAUDE_CODE_FORWARD_SUBAGENT_TEXT (or --forward-subagent-text) is set,
-// which claudeEnvSpec lets through to the child.
+// is absent or blank (a killed run, or a result that says nothing) the text
+// falls back to the text blocks of the TOP-LEVEL assistant messages, then to the
+// incremental text_delta fragments of a partial-messages stream. An error
+// result's message is never the answer, and sub-agent narration is never part of
+// it: an assistant line carrying parent_tool_use_id is a sub-agent's, and claude
+// forwards those only when CLAUDE_CODE_FORWARD_SUBAGENT_TEXT (or
+// --forward-subagent-text) is set, which claudeEnvSpec lets through to the
+// child.
 //
 // ParseResult.TextAll keeps the old extractClaudeText semantics for a person
 // reading a terminal: the text blocks of EVERY assistant message, sub-agent
@@ -237,7 +238,9 @@ func (p *claudeLineParser) Feed(line []byte) []NativeEvent {
 		p.resultText = textAccumulator{}
 		if failed {
 			p.errMsg = claudeResultError(r)
-		} else {
+		} else if strings.TrimSpace(r.Result) != "" {
+			// A blank result is not an answer: kept, it would shadow the assistant
+			// text the fallback stands on.
 			p.resultText.add(r.Result)
 		}
 		add(NativeEvent{Kind: EventResult, Text: stripNUL(r.Result), Usage: p.usage, SessionID: p.sessionID, Model: p.modelID})

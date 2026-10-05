@@ -120,6 +120,8 @@ type Result struct {
 	// token once. For agy, whose result frame totals the whole conversation, it
 	// is the frame's total when the run began a conversation (the request had no
 	// ConversationID), and the sum of the run's DONE steps when it resumed one.
+	// Its DurationMs is zero for an agy turn after the first, whose frame reports
+	// the session's clock; DurationS is the measured duration.
 	Usage *cost.Usage
 
 	// CumulativeUsage is the running total of the whole native conversation up to

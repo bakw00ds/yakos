@@ -174,10 +174,11 @@ type ParseResult struct {
 	//
 	// For claude it is the final text of the result frame: the framed prompt asks
 	// the relay for the sub-agent's final report, and that is the frame's
-	// contract. When the result frame is absent or empty (a killed run) it falls
-	// back to the text blocks of the top-level assistant messages, and an error
-	// result's message is never taken as the answer. Sub-agent narration (an
-	// assistant line carrying parent_tool_use_id, which claude forwards when
+	// contract. When the result frame is absent or blank (a killed run, or a
+	// result that says nothing) it falls back to the text blocks of the top-level
+	// assistant messages, and an error result's message is never taken as the
+	// answer. Sub-agent narration (an assistant line carrying
+	// parent_tool_use_id, which claude forwards when
 	// CLAUDE_CODE_FORWARD_SUBAGENT_TEXT or --forward-subagent-text is set) is
 	// never part of it.
 	//
@@ -200,7 +201,9 @@ type ParseResult struct {
 	// usage, because the result frame totals the whole conversation (see
 	// CumulativeUsage). That sum falls short when a step line was lost and is
 	// empty for a stream without steps, so internal/dispatch decides which of the
-	// two figures it reports as the run's usage.
+	// two figures it reports as the run's usage. Its DurationMs is left zero for
+	// an agy run after the first turn, whose frame reports the session's duration
+	// rather than the run's; the measured process duration is the latency source.
 	Usage Usage
 
 	// CumulativeUsage is the running total of the whole native conversation up to
@@ -209,8 +212,8 @@ type ParseResult struct {
 	// new conversation it is also that run's own usage, and complete even when a
 	// step line was lost. Do NOT add it up across runs: for a resumed run it
 	// counts the earlier turns again. Zero when the harness reports no total.
-	// Only the token counts are cumulative; DurationMs is passed through as the
-	// harness reports it.
+	// DurationMs is cumulative too: agy's frame reports the session's duration so
+	// far, which Usage.DurationMs only carries for a first turn.
 	CumulativeUsage Usage
 
 	// SessionID is the harness-native session id, "" when none was seen. Pass it

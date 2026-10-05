@@ -69,7 +69,9 @@ Every parser reports tokens in the Anthropic convention (see `runtime.Usage`):
   and the frame's total is exposed as `ParseResult.CumulativeUsage`. The
   dispatch layer reports the total for a run that began a conversation and the
   step sum for a resumed one, so adding runs up needs no subtraction. The single
-  envelope has no steps: its `Usage` is zero and only the total is exposed.
+  envelope has no steps: its `Usage` is zero and only the total is exposed. The
+  frame's `duration_seconds` is the session's clock (turn 2 reports 35.9 s for a
+  step of about 4 s), so `Usage.DurationMs` is left zero after the first turn.
 
 ## Claude text
 

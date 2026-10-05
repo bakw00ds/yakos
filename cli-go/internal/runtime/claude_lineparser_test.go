@@ -294,6 +294,26 @@ func TestClaudeLineParser_EmptyResultFrameFallsBack(t *testing.T) {
 	}
 }
 
+// A whitespace-only result is not an answer either: kept, it would shadow the
+// text the run did say. The assistant text stands in, and so do the deltas of a
+// partial-messages stream.
+func TestClaudeLineParser_BlankResultFrameFallsBack(t *testing.T) {
+	for _, blank := range []string{`\n`, ` `, `  \t\n `, `\r\n`} {
+		result := `{"type":"result","subtype":"success","is_error":false,"result":"` + blank + `","usage":{"input_tokens":1,"output_tokens":1}}`
+
+		assistant := `{"type":"assistant","message":{"content":[{"type":"text","text":"real answer"}]}}` + "\n" + result
+		if pr, _ := parse("claude", []byte(assistant)); pr.Text != "real answer" || pr.TextAll != "real answer" {
+			t.Errorf("result %q: Text = %q, TextAll = %q, want the assistant text", blank, pr.Text, pr.TextAll)
+		}
+
+		partial := `{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}` + "\n" +
+			`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"streamed answer"}}}` + "\n" + result
+		if pr, _ := parse("claude", []byte(partial)); pr.Text != "streamed answer" {
+			t.Errorf("result %q: Text = %q, want the streamed text", blank, pr.Text)
+		}
+	}
+}
+
 // An error result's message is the failure, never the answer; whatever the run
 // said before it failed is still its text.
 func TestClaudeLineParser_ErrorResultMessageIsNeverTheAnswer(t *testing.T) {

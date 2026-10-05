@@ -38,8 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     stream's contract for it. The relay's lead-in and a sub-agent's narration
     (claude forwards the latter when `CLAUDE_CODE_FORWARD_SUBAGENT_TEXT` is set,
     which the daemon's env allowlist lets through) are not part of `text`.
-    Without a result frame (a killed run) `text` falls back to the top-level
-    assistant text, and an error result's message is never taken as the answer.
+    Without a result frame (a killed run), or with a blank one, `text` falls back
+    to the top-level assistant text, and an error result's message is never
+    taken as the answer.
     `TextAll` keeps every assistant text block, as the bash dispatcher printed
     them: `yakos dispatch` prints it, and no MCP, JSON-RPC or Flows result
     carries it (a second long field would double the injection surface and the
@@ -57,7 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     corruption. For a resumed run it is the step sum, so adding runs up needs no
     subtraction. A resumed run whose stream has no steps (the single
     `--output-format json` envelope) reports no tokens. `Result.CumulativeUsage`
-    keeps the frame's total for reference and is not logged or sent. The parser
+    keeps the frame's total for reference and is not logged or sent. The frame's
+    duration is the session's clock (turn 2 of the recorded pair reports 35.9
+    seconds for a step of about 4), so `Usage.DurationMs` is left zero after the
+    first turn and the figure stays in `CumulativeUsage`; the measured duration
+    of the process is the latency source. The parser
     also takes agy's slash-command reply (a `command_result` frame and a result
     with no session) and a stream in a different schema, which now comes back as
     its raw lines instead of empty.
@@ -80,10 +85,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     so they are printed with every escape sequence (CSI, OSC and the other
     string sequences, short forms such as a terminal reset) and every control
     character removed except newline and tab; the agent text itself is printed
-    as it is, as the bash path prints it. Text cut at the 1 MiB cap, or
-    a line skipped for exceeding 2 MiB, prints one stderr notice
-    (`output truncated at 1 MiB`, `line exceeded N bytes and was skipped`);
-    `Result.TextCapped` and `Result.LinesDropped` say which.
+    as it is, as the bash path prints it. Text cut at the 1 MiB cap (the final
+    text, or the full join the CLI prints), or a line skipped for exceeding
+    2 MiB, prints one stderr notice (`output truncated at 1 MiB`,
+    `line exceeded N bytes and was skipped`); `Result.TextCapped`,
+    `Result.TextAllCapped` and `Result.LinesDropped` say which.
   - Token counts follow one convention for every harness: `input_tokens` is
     the fresh prompt and cache reads and writes are separate (codex reports its
     input total with the cached part inside it, and is normalized). No price is
