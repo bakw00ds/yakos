@@ -67,7 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call ("gemini-3.8-flash has no "max" effort (available: low, medium, high)"), so
   they are sent as `high` with one stderr note. codex takes all five levels
   unchanged. A persona passed on the command line in chat is limited to 64 KiB
-  (codex and agy); a larger one is refused with a clear error before any process
+  (codex and agy). For codex the limit also applies to the persona once it is
+  escaped for `-c developer_instructions` (a quote, backslash or newline takes
+  two bytes, another control character six), so a quote-heavy persona under the
+  raw limit is refused too, instead of failing in the exec with "argument list
+  too long". A larger persona is refused with a clear error before any process
   starts. The raw stream is returned until the stream parsers land (K-135). The
   comment claiming agy has no `--model` is gone.
 - **agy workspace skills use the directory layout (K-134).** agy 1.2.x loads a

@@ -87,7 +87,9 @@ Other changes in this release for codex and agy:
 - **Odd agent text.** A control character in an agent's text is written as a
   `\u00XX` escape instead of producing an invalid file, an agent whose text
   holds a NUL byte is skipped with a note, and chat on codex and agy refuses an
-  agent persona over 64 KiB with a clear error.
+  agent persona over 64 KiB with a clear error (for codex, 64 KiB after the
+  persona is escaped for the command line, which grows quotes, backslashes,
+  newlines and control characters).
 
 ## Upgrading to v0.61.0.0
 
