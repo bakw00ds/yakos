@@ -73,12 +73,16 @@ If --policy is passed, ONLY the policy report runs (skips every check above
 and takes no project path): risky configurations, one line each with a severity
 (high, medium, low) and a fix hint. It reports environment variable names and
 booleans only, never a value:
-    SDK sidecar (structured questions) selectable without ANTHROPIC_API_KEY
+    SDK sidecar (structured questions) installed without ANTHROPIC_API_KEY (low
+        here; medium where a console reports that it enabled the engine)
     allow_unsandboxed_runtimes set in ~/.yakos-state/router-policy.yml, or that
         file refused by its owner-only trust check
+    the default-runtime file in the yakOS state directory refused by the same
+        owner-only trust check, so dispatch ignores the default it holds
     YAKOS_IMPL unset with the bash CLI tree present, so yakos dispatch runs
         codex and agy through the bash adapters without their sandbox flags
     codex on PATH with no yakOS-owned login profile
+    agy on PATH that does not look signed in
     YAKOS_DISPATCH_LOG, YAKOS_STATE_DIR and other state-path variables set in
         the environment (a project's .claude/settings.json env block can set them)
     Always exits 0: it is a report, not a gate.

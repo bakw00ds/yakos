@@ -37,6 +37,7 @@
 package doctor
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/bakw00ds/yakos/internal/binver"
@@ -190,6 +191,10 @@ type Config struct {
 	// engine is installed, not that a console enabled it. See policy.go.
 	PolicyBashTreePresent      bool
 	PolicySDKSidecarSelectable bool
+
+	// PolicyProbeRuntime is the sign-in probe the policy report uses for agy
+	// (cmd/yakos wraps auth.ProbeRuntime). Nil skips that check. See policy.go.
+	PolicyProbeRuntime func(ctx context.Context, id string) RuntimeProbe
 
 	// PreflightFast skips the Preflight sub-checks that make a network call
 	// (gh auth status) or dial the daemon socket — used by `yakos start`'s

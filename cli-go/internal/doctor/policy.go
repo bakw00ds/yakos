@@ -12,6 +12,7 @@ package doctor
 // later; Run's --policy mode only formats its result.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -19,10 +20,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/bakw00ds/yakos/internal/codexhome"
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
 	yakruntime "github.com/bakw00ds/yakos/internal/runtime"
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 // PolicySeverity ranks a finding. High means a protection is off or bypassable
@@ -85,6 +88,24 @@ type PolicyEnv struct {
 	// doctor` cannot and leaves it false, which is why it reports the missing key
 	// as a low heads-up there. It implies SDKSidecarSelectable.
 	SDKSidecarEnabled bool
+
+	// ProbeRuntime reports whether a runtime's CLI is on PATH and looks signed in.
+	// The caller wraps auth.ProbeRuntime: its OS keyring read is bounded by the
+	// context it is given, and where that read runs belongs to the caller, not to
+	// this package. Nil skips the sign-in check.
+	ProbeRuntime func(ctx context.Context, id string) RuntimeProbe
+}
+
+// RuntimeProbe is what a caller-supplied probe learned about one runtime CLI.
+type RuntimeProbe struct {
+	// CLIPresent is true when the runtime's CLI is on PATH.
+	CLIPresent bool
+	// Authed is true when credentials look configured. The check is best effort,
+	// like `yakos auth status`: it reads no credential and makes no network call.
+	Authed bool
+	// Note says something the probe could not settle, for the report (the OS
+	// keyring did not answer in time). Empty when there is nothing to add.
+	Note string
 }
 
 func (e PolicyEnv) withDefaults() PolicyEnv {
@@ -110,8 +131,10 @@ func CheckPolicy(env PolicyEnv) []PolicyFinding {
 	var out []PolicyFinding
 	out = append(out, checkSDKSidecar(e)...)
 	out = append(out, checkRouterPolicy(e)...)
+	out = append(out, checkDefaultRuntime(e)...)
 	out = append(out, checkBashDispatch(e)...)
 	out = append(out, checkCodexProfile(e)...)
+	out = append(out, checkAgySignIn(e)...)
 	out = append(out, checkStatePathOverrides(e)...)
 	sort.SliceStable(out, func(i, j int) bool {
 		if ri, rj := out[i].Severity.rank(), out[j].Severity.rank(); ri != rj {
@@ -229,6 +252,99 @@ func trustReason(err error, path string) string {
 	return strings.TrimPrefix(err.Error(), routerpolicy.ErrUntrusted.Error()+": "+path+" ")
 }
 
+// ---- default runtime ---------------------------------------------------------------
+
+const (
+	defaultRuntimeFile = "default-runtime" // auth.ReadDefaultRuntime reads <state dir>/default-runtime
+	// defaultRuntimeMaxBytes is the read cap auth.ReadDefaultRuntime uses. The trust
+	// decision does not depend on it.
+	defaultRuntimeMaxBytes = 256
+	defaultRuntimeLabel    = "the default runtime file in the yakOS state directory"
+)
+
+// checkDefaultRuntime reports a default-runtime file that dispatch refuses. The
+// default steers every unpinned dispatch to a vendor, so the Go dispatcher reads
+// it only when no one else could have written it (statepath.ReadTrusted, through
+// auth.ReadDefaultRuntime) and ignores it otherwise, with a line on stderr that
+// carries the path. This reads the same file in the same directory through the
+// same trust check and says why it was refused, without printing a path.
+func checkDefaultRuntime(e PolicyEnv) []PolicyFinding {
+	dir := e.dispatchStateDir()
+	if dir == "" {
+		return nil
+	}
+	path := filepath.Join(dir, defaultRuntimeFile)
+	_, err := statepath.ReadTrusted(path, defaultRuntimeMaxBytes)
+	var untrusted *statepath.UntrustedError
+	if !errors.As(err, &untrusted) {
+		return nil // absent, unreadable, or trusted: nothing refused
+	}
+	subject := "it"
+	if untrusted.Path != path {
+		subject = "its directory" // the directory half of the trust check
+	}
+	return []PolicyFinding{{
+		ID:       "default-runtime-refused",
+		Severity: PolicyMedium,
+		Message:  fmt.Sprintf("%s was refused and is ignored: %s %s; the default you set with 'yakos auth set-default' does not apply to dispatch", defaultRuntimeLabel, subject, untrusted.Reason),
+		Fix:      "make it a regular file you own with mode 600 in a directory only you can write, or run 'yakos auth set-default <runtime>' to write it again",
+	}}
+}
+
+// dispatchStateDir is the directory dispatch reads the default runtime from,
+// statepath.Dir() resolved from this environment: YAKOS_DISPATCH_LOG when set,
+// else $HOME/.yakos-state. Empty when there is no home to resolve.
+func (e PolicyEnv) dispatchStateDir() string {
+	if v := e.Getenv("YAKOS_DISPATCH_LOG"); v != "" {
+		return v
+	}
+	if e.Home == "" {
+		return ""
+	}
+	return filepath.Join(e.Home, ".yakos-state")
+}
+
+// ---- agy sign-in ---------------------------------------------------------------------
+
+// agyProbeTimeout bounds the sign-in probe. auth.ProbeRuntime caps its own OS
+// keyring read at two seconds; the report must stay quick even so. A variable so
+// a test can shorten it.
+var agyProbeTimeout = 3 * time.Second
+
+// checkAgySignIn reports agy on PATH that does not look signed in, so the
+// operator learns before a dispatch fails. It needs a caller-supplied probe and
+// is silent without one.
+func checkAgySignIn(e PolicyEnv) []PolicyFinding {
+	if e.ProbeRuntime == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), agyProbeTimeout)
+	defer cancel()
+	// The probe gets the deadline, but one that ignores its context must not hang
+	// the report either: past the deadline the check says nothing rather than guess.
+	done := make(chan RuntimeProbe, 1)
+	go func() { done <- e.ProbeRuntime(ctx, "agy") }()
+	var p RuntimeProbe
+	select {
+	case p = <-done:
+	case <-ctx.Done():
+		return nil
+	}
+	if !p.CLIPresent || p.Authed {
+		return nil
+	}
+	msg := "agy is on PATH but does not look signed in, so a dispatch to it fails until it is"
+	if p.Note != "" {
+		msg += " (" + p.Note + ")"
+	}
+	return []PolicyFinding{{
+		ID:       "agy-not-signed-in",
+		Severity: PolicyLow,
+		Message:  msg,
+		Fix:      "run 'yakos auth login agy'; this check is best effort and reads no credential",
+	}}
+}
+
 // ---- bash dispatch ----------------------------------------------------------------
 
 // checkBashDispatch reports `yakos dispatch` reaching the bash CLI while codex or
@@ -343,6 +459,7 @@ func (r *runner) runPolicy() {
 		LookPath:             r.lookPath,
 		BashTreePresent:      r.cfg.PolicyBashTreePresent,
 		SDKSidecarSelectable: r.cfg.PolicySDKSidecarSelectable,
+		ProbeRuntime:         r.cfg.PolicyProbeRuntime,
 	})
 	r.report.Policy = findings
 

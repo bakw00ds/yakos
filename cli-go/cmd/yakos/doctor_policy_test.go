@@ -78,6 +78,38 @@ func TestDoctor_GoNative_PolicyReportsAndExitsZero(t *testing.T) {
 	}
 }
 
+func TestDoctor_GoNative_PolicyReportsARefusedDefaultRuntime(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	goBin := policyBinary(t)
+
+	// A default-runtime file anyone can write is refused by dispatch's owner-only trust check,
+	// and the report says so, with the reason and no path.
+	home := t.TempDir()
+	writeStateFile(t, home, "default-runtime", "codex\n", 0o666)
+	out, code := runGoDoctor(t, goBin, []string{"doctor", "--policy"}, policyEnv(home))
+	if code != 0 {
+		t.Fatalf("--policy must exit 0 whatever it finds; got %d\n%s", code, out)
+	}
+	for _, want := range []string{"[medium]", "default runtime file", "is group or world writable", "yakos auth set-default"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, home) {
+		t.Errorf("the report printed the absolute home path:\n%s", out)
+	}
+
+	// The same file with mode 600 is trusted: nothing to report.
+	clean := t.TempDir()
+	writeStateFile(t, clean, "default-runtime", "codex\n", 0o600)
+	out, code = runGoDoctor(t, goBin, []string{"doctor", "--policy"}, policyEnv(clean))
+	if code != 0 || strings.Contains(out, "default runtime file") {
+		t.Errorf("a trusted default-runtime file must not be reported (exit %d):\n%s", code, out)
+	}
+}
+
 func TestDoctor_GoNative_PolicyOnACleanHomeStillExitsZero(t *testing.T) {
 	goBin := policyBinary(t)
 	out, code := runGoDoctor(t, goBin, []string{"doctor", "--policy"}, policyEnv(t.TempDir()))

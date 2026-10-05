@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 
+	"github.com/bakw00ds/yakos/internal/auth"
 	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/doctor"
@@ -490,13 +491,7 @@ func runDoctor(yakosRoot string, args []string) {
 		ErrWriter:         os.Stderr,
 	}
 	if policy {
-		// Machine facts the doctor package cannot compute itself.
-		cfg.PolicyBashTreePresent = passthrough.BashYakosExists(exeRoot)
-		// Installed (node and the bundle), not enabled: only a running console knows
-		// whether it was started with --console-structured-questions, so here a
-		// missing key is reported as the low heads-up, not the medium finding.
-		_, sdkErr := interactive.NewSDKEngineFactory(yakosRoot)
-		cfg.PolicySDKSidecarSelectable = sdkErr == nil
+		applyPolicyFacts(&cfg, yakosRoot, exeRoot)
 	}
 
 	report, err := doctor.Run(cfg)
@@ -508,6 +503,29 @@ func runDoctor(yakosRoot string, args []string) {
 		os.Exit(1)
 	}
 	os.Exit(0)
+}
+
+// authProbeRuntime is auth.ProbeRuntime. A test replaces it so the policy report's
+// agy check never reads the real OS keyring.
+var authProbeRuntime = auth.ProbeRuntime
+
+// policyProbeRuntime adapts auth.ProbeRuntime to the probe the policy report takes.
+func policyProbeRuntime(ctx context.Context, id string) doctor.RuntimeProbe {
+	r := authProbeRuntime(ctx, id)
+	return doctor.RuntimeProbe{CLIPresent: r.CLIPresent, Authed: r.Authed, Note: r.Note}
+}
+
+// applyPolicyFacts sets what the --policy report needs and the doctor package
+// cannot compute itself: where the binary lives, what the interactive package
+// can start, and the sign-in probe.
+func applyPolicyFacts(cfg *doctor.Config, yakosRoot, exeRoot string) {
+	cfg.PolicyBashTreePresent = passthrough.BashYakosExists(exeRoot)
+	// Installed (node and the bundle), not enabled: only a running console knows
+	// whether it was started with --console-structured-questions, so here a
+	// missing key is reported as the low heads-up, not the medium finding.
+	_, sdkErr := interactive.NewSDKEngineFactory(yakosRoot)
+	cfg.PolicySDKSidecarSelectable = sdkErr == nil
+	cfg.PolicyProbeRuntime = policyProbeRuntime
 }
 
 // runRefresh implements `yakos refresh` natively in Go.

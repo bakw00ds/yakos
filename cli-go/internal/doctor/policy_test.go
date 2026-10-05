@@ -7,6 +7,7 @@ package doctor
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -33,6 +34,8 @@ type policyFixture struct {
 	// sdkEnabled: the console was started with --console-structured-questions. Only the
 	// daemon knows; `yakos doctor` cannot, so it never sets it.
 	sdkEnabled bool
+	// probe is the caller-supplied sign-in probe; nil means the caller supplied none.
+	probe func(ctx context.Context, id string) RuntimeProbe
 }
 
 func newPolicyFixture(t *testing.T) *policyFixture {
@@ -48,6 +51,7 @@ func (f *policyFixture) policyEnv() PolicyEnv {
 		BashTreePresent:      f.bash,
 		SDKSidecarSelectable: f.sdk,
 		SDKSidecarEnabled:    f.sdkEnabled,
+		ProbeRuntime:         f.probe,
 	}
 }
 
