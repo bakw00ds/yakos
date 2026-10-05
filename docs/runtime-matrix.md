@@ -398,7 +398,11 @@ only when `ANTHROPIC_API_KEY` holds an API key, it never receives
 `CLAUDE_CODE_OAUTH*` variables or OAuth tokens, and without a key the console
 shows the refusal instead of falling back to the CLI engine or to your login.
 Subscription users stay on the CLI engine. `yakos doctor --policy` reports an SDK
-engine that can be selected without a key.
+engine that can be selected without a key. The bash `claude-sdk` runtime (the
+Python Agent SDK, `yakos dispatch --runtime claude-sdk`) follows the same rule:
+its dispatch refuses unless `ANTHROPIC_API_KEY` holds an API key, and the python
+it starts inherits no OAuth variables; its `launch` is claude.sh and is
+unchanged.
 
 ## Jev is not a runtime
 

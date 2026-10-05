@@ -47,23 +47,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says which login dispatch will use, `yakos auth logout codex` signs out of the
   profile only, and yakOS never calls the codex app-server `account/login`
   method.
-- **The Agent-SDK sidecar refuses to start without `ANTHROPIC_API_KEY`
-  (K-137).** Anthropic's terms of 2026-02-19 allow a Pro or Max subscription's
-  OAuth only in Claude Code and claude.ai, not in the Agent SDK. The Node
-  sidecar behind `yakos serve --console-structured-questions` is the Agent SDK,
-  and with no key in its environment it ran on your claude.ai login.
-  `SDKEngine.Start` now refuses before it spawns anything unless
-  `ANTHROPIC_API_KEY` holds an API key. A missing, blank or OAuth-shaped value
-  (`sk-ant-oat...`) is refused with an error that names the variable and points
-  at the CLI engine, which is Claude Code itself and stays the interactive path
-  for subscription users. The console shows the error in the pane and the
-  transcript; nothing falls back to another engine. The sidecar's environment
-  also loses every `CLAUDE_CODE_OAUTH*` variable and any value that holds an
-  OAuth token, even one added through `YAKOS_DISPATCH_ENV_PASSTHROUGH`, and
-  `sidecar.mjs` repeats the key check (exit status 78, one stderr line, no
-  credential material) for a sidecar started any other way. The claude CLI
-  adapters still forward `CLAUDE_CODE_OAUTH_TOKEN`, because they run Claude
-  Code. See UPGRADING.md.
+- **The Agent SDK refuses to run without `ANTHROPIC_API_KEY` (K-137).**
+  Anthropic's terms of 2026-02-19 allow a Pro or Max subscription's OAuth only
+  in Claude Code and claude.ai, not in the Agent SDK. yakOS runs the Agent SDK in
+  two places, and both ran on your claude.ai login when no key was set. The Node
+  sidecar behind `yakos serve --console-structured-questions`: `SDKEngine.Start`
+  now refuses before it spawns anything unless `ANTHROPIC_API_KEY` holds an API
+  key. A missing, blank or OAuth-shaped value (`sk-ant-oat...`) is refused with
+  an error that names the variable and points at the CLI engine, which is Claude
+  Code itself and stays the interactive path for subscription users. The console
+  shows the error in the pane and the transcript; nothing falls back to another
+  engine. The sidecar's environment also loses every `CLAUDE_CODE_OAUTH*`
+  variable and any value that holds an OAuth token, even one added through
+  `YAKOS_DISPATCH_ENV_PASSTHROUGH`, and `sidecar.mjs` repeats the key check (exit
+  status 78, one stderr line, no credential material) for a sidecar started any
+  other way. The bash `claude-sdk` runtime (the Python Agent SDK behind
+  `yakos dispatch --runtime claude-sdk`) has the same gate:
+  `yk_rt_claude_sdk_dispatch` stops with one FATAL line before it composes
+  agents or starts python, runs python under `env -u` for the same OAuth
+  variables, and `claude-sdk-dispatch.py` repeats the check (exit 78). The claude
+  CLI adapters, `launch` and `yakos start --runtime claude-sdk` are unchanged and
+  still forward `CLAUDE_CODE_OAUTH_TOKEN`, because they run Claude Code. See
+  UPGRADING.md.
 
 ### Changed
 

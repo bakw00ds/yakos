@@ -126,6 +126,15 @@ What to do:
 
 The sidecar's environment also drops every `CLAUDE_CODE_OAUTH*` variable and any
 value that holds an OAuth token. Runs of the `claude` CLI are unaffected.
+
+The bash `claude-sdk` runtime, which runs the Python Agent SDK, has the same
+rule. `yakos dispatch --runtime claude-sdk` on the bash CLI now stops with one
+line (`claude-sdk: refusing to run: ANTHROPIC_API_KEY is not set; ...`) unless
+`ANTHROPIC_API_KEY` holds an API key, and the python it starts gets no
+`CLAUDE_CODE_OAUTH*` or OAuth-token variables. Export a key, or use
+`--runtime claude`, which is Claude Code itself. `yakos start --runtime
+claude-sdk` is unchanged: it launches Claude Code.
+
 `yakos doctor --policy` lists an SDK sidecar that can be selected without a key,
 along with the other risky settings it finds (see CHANGELOG).
 
