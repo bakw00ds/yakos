@@ -49,25 +49,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `--conversation` a result frame reports the whole conversation's tokens so
     far (recorded: turn 2 reports turn 1's tokens plus its own), which would
     count every earlier turn again each time a conversation is resumed. The
-    parser exposes both figures: `ParseResult.Usage` is the sum of the usage
-    carried by the DONE steps in the stream, and `ParseResult.CumulativeUsage`
-    is the frame's total. The dispatch layer picks the run's `Usage`, which is
-    what the logs, the MCP and JSON-RPC results and the Flows node log carry.
-    The choice turns on whether the harness was handed a native session to
-    continue (agy's `--conversation <id>`), not on the yakOS conversation id.
-    Without one, as for MCP, Flows and every console chat turn, `Usage` is the
-    frame's total, which is that run's own and survives a step line lost to
-    corruption. With one it is the step sum, so adding runs up needs no
-    subtraction, and a resumed run whose stream has no steps (the single
-    `--output-format json` envelope) reports no tokens. `Result.CumulativeUsage`
-    keeps the frame's total for reference and is not logged or sent. The frame's
-    duration is the session's clock (turn 2 of the recorded pair reports 35.9
-    seconds for a step of about 4), so `Usage.DurationMs` is left zero after the
-    first turn and the figure stays in `CumulativeUsage`; the measured duration
-    of the process is the latency source. The parser also takes agy's
-    slash-command reply (a `command_result` frame and a result with no session)
-    and a stream in a different schema, which now comes back as its raw lines
-    instead of empty.
+    parser exposes the run's own figure as `ParseResult.Usage` and the frame's
+    total as `ParseResult.CumulativeUsage`, and the frame's own `num_turns`
+    decides which counts as the run's own. On a first turn (`num_turns` of 1 or
+    less) it is the frame's counts, which are complete even when a step line was
+    lost and are all the single `--output-format json` envelope has. After the
+    first turn it is the sum of the usage carried by the DONE steps, so adding
+    runs up needs no subtraction, and a stream without steps reports no tokens.
+    The rule reads the stream, not the request, so it holds for MCP, Flows,
+    every console chat turn and any way of resuming a conversation.
+    `Result.CumulativeUsage` keeps the frame's total for reference and is not
+    logged or sent. The frame's duration is the session's clock (turn 2 of the
+    recorded pair reports 35.9 seconds for a step of about 4), so
+    `Usage.DurationMs` is carried on a first turn and left zero after it; the
+    measured duration of the process is the latency source. The parser also
+    takes agy's slash-command reply (a `command_result` frame and a result with
+    no session) and a stream in a different schema, which now comes back as its
+    raw lines instead of empty.
   - Flows splice the text, so the untrusted-output scan now examines the real
     payload (line-anchored patterns could not match inside JSON-escaped
     NDJSON), and each node's token usage is recorded in the per-run

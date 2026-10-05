@@ -195,25 +195,25 @@ type ParseResult struct {
 	// not tell the two apart (everything but claude).
 	TextAll string
 
-	// Usage is the token usage of THIS run as the stream's own events add up; the
-	// zero value means the stream did not report any (killed run, harness without
-	// usage telemetry, plain text). For agy it is the sum of the DONE steps'
-	// usage, because the result frame totals the whole conversation (see
-	// CumulativeUsage). That sum falls short when a step line was lost and is
-	// empty for a stream without steps, so internal/dispatch decides which of the
-	// two figures it reports as the run's usage. Its DurationMs is left zero for
-	// an agy run after the first turn, whose frame reports the session's duration
-	// rather than the run's; the measured process duration is the latency source.
+	// Usage is the token usage of THIS run; the zero value means the stream did
+	// not report any (killed run, harness without usage telemetry, plain text).
+	// Runs of one conversation can be added up as they are: a consumer never
+	// subtracts an earlier total. agy needs a rule for that, because its result
+	// frame totals the whole conversation (see CumulativeUsage), and the frame's
+	// own num_turns decides it. On a first turn (num_turns of 1 or less) Usage is
+	// the frame's counts and duration, which are the run's own and complete even
+	// when a step line was lost. After the first turn it is the sum of the DONE
+	// steps' usage with DurationMs left zero, because the frame's duration is the
+	// session's, and a stream without steps reports no tokens. The measured
+	// process duration is the latency source.
 	Usage Usage
 
 	// CumulativeUsage is the running total of the whole native conversation up to
-	// and including this run, for the harness that reports one: agy's result
-	// frame keeps counting across --conversation turns. For a run that began a
-	// new conversation it is also that run's own usage, and complete even when a
-	// step line was lost. Do NOT add it up across runs: for a resumed run it
-	// counts the earlier turns again. Zero when the harness reports no total.
-	// DurationMs is cumulative too: agy's frame reports the session's duration so
-	// far, which Usage.DurationMs only carries for a first turn.
+	// and including this run, for the harness that reports one: agy's result frame
+	// keeps counting across --conversation turns. It is a reference value. Do NOT
+	// add it up across runs: it counts the earlier turns again. Zero when the
+	// harness reports no total. DurationMs is cumulative too: agy's frame reports
+	// the session's duration so far.
 	CumulativeUsage Usage
 
 	// SessionID is the harness-native session id, "" when none was seen. Pass it

@@ -26,28 +26,28 @@ package runtime
 // Final text is the concatenation of the agent_response text_delta fragments
 // (the vendor's own jq recipe), falling back to result.response.
 //
-// USAGE. The result frame's usage is CUMULATIVE over the whole conversation, not
-// this run: with --conversation the second turn of a recorded pair reports 25950
-// input tokens, which is the first turn's 12859 plus the second turn's own
-// 13091, and its num_turns is 2. Taken as the run's usage it would count every
-// earlier turn again each time a conversation is resumed. The parser therefore
-// exposes both figures and leaves the choice to its caller, which knows whether
-// the harness was handed a native session to continue (--conversation <id>).
-// ParseResult.Usage is the sum of the usage carried by the DONE steps seen in
-// THIS stream: the run's own tokens, equal to the result frame's on every
-// first-turn recording, and zero when no step carried usage (the single
-// --output-format json envelope has no steps). ParseResult.CumulativeUsage is
-// the frame's total. internal/dispatch reports the total when the harness was
-// not resumed, where it is the run's own and survives a step line lost to
-// corruption, and the step sum when it was.
+// USAGE. The result frame's usage is CUMULATIVE over the whole conversation,
+// not this run: with --conversation the second turn of a recorded pair reports
+// 25950 input tokens, which is the first turn's 12859 plus the second turn's
+// own 13091, and its num_turns is 2. Taken as the run's usage it would count
+// every earlier turn again each time a conversation is resumed. The frame's own
+// num_turns says which case a stream is, so ParseResult.Usage follows it. On a
+// first turn (num_turns of 1 or less) it is the frame's counts and duration:
+// they are the run's own, they are complete even when a step line was lost, and
+// they are all the single --output-format json envelope has, which carries no
+// steps. After the first turn it is the sum of the usage carried by the DONE
+// steps seen in THIS stream, which is the run's own tokens, and a stream
+// without steps then reports no tokens. ParseResult.CumulativeUsage is the
+// frame's total either way. The rule reads the stream, not the request, so it
+// holds whatever conversation id a caller tracks and however a conversation is
+// resumed.
 //
 // The frame's duration_seconds is the session's too: the recorded second turn
 // reports 35.9 seconds for a step of about 4, because the clock runs from the
-// start of the conversation. It is therefore the run's own duration only on a
-// first turn (num_turns of 1 or less). Usage.DurationMs carries it there and is
-// left zero on every later turn, and the frame's figure stays in
-// CumulativeUsage. The measured duration of the process, which the dispatch
-// layer records itself, is the source for latency.
+// start of the conversation. It is the run's own duration only on a first turn,
+// so Usage.DurationMs carries it there and is left zero after it, and the
+// frame's figure stays in CumulativeUsage. The measured duration of the
+// process, which the dispatch layer records itself, is the source for latency.
 //
 // agy's input_tokens already EXCLUDES cache_read_tokens (a second-turn step
 // reports 278 input and 30214 cache read), which is the package's Usage
@@ -117,24 +117,32 @@ type agyFrame struct {
 	have     bool  // the frame carried a usage object
 }
 
+// firstTurn reports whether the frame closes the first turn of its conversation:
+// num_turns of 1 or less, since a frame with nothing to count carries none. On a
+// first turn nothing came before the run, so the frame's counts and its duration
+// are the run's own. This is the one place the question is answered, for the
+// usage figure and the duration alike, so the two cannot drift.
+func (f agyFrame) firstTurn() bool { return f.numTurns <= 1 }
+
 // own is the usage of the run whose DONE steps the tally holds, given the result
-// frame that closed it (the zero frame when there was none). The steps' sum is
-// the run's own tokens whatever the conversation did before it; the frame's
-// counts are not, they are the conversation's running total. The frame
-// therefore supplies only the duration, and that only on a first turn: after it
-// the frame's duration is the session's (see the header), so DurationMs stays
-// zero. With no step usage there is no figure of the run's own, and the zero
-// value says so: the frame's total is still in ParseResult.CumulativeUsage for a
-// caller that knows the run began the conversation.
+// frame that closed it (the zero frame when there was none).
+//
+// On a first turn it is the frame's counts and duration: they are complete even
+// when a step line was lost, and they are all a stream without steps (the single
+// JSON envelope) has. After the first turn the frame's counts are the
+// conversation's running total and its duration is the session's, so the run's
+// own tokens are the sum of the DONE steps' usage, with no duration, and a
+// stream without steps reports none. The frame's total is in
+// ParseResult.CumulativeUsage either way. Without a usage-bearing frame (a
+// killed run) the steps' sum is all there is.
 func (t agyTally) own(f agyFrame) Usage {
-	if !t.seen {
-		return Usage{}
+	switch {
+	case f.have && f.firstTurn():
+		return f.usage
+	case t.seen:
+		return t.sum
 	}
-	own := t.sum
-	if f.have && f.numTurns <= 1 {
-		own.DurationMs = f.usage.DurationMs
-	}
-	return own
+	return Usage{}
 }
 
 type agyEnvelope struct {

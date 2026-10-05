@@ -1,7 +1,10 @@
 package runtime
 
 import (
+	"bytes"
 	"encoding/json"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -229,10 +232,11 @@ func readAgyRecording(t *testing.T, name string) agyRecording {
 	return rec
 }
 
-// Every agy recording and vendor example, against the rule: Usage is the DONE
-// steps' sum (zero for a stream whose steps carry no usage), CumulativeUsage is
-// the frame's counts, and on a first turn with steps the two are equal.
-func TestAgyLineParser_OwnUsageIsTheStepSumOnEveryRecording(t *testing.T) {
+// Every agy recording and vendor example, against the rule the frame's own
+// num_turns decides: on a first turn Usage is the frame's counts, after it the
+// DONE steps' sum, and CumulativeUsage is the frame's counts either way. On every
+// first-turn recording with steps the two figures agree.
+func TestAgyLineParser_UsageRuleOnEveryRecording(t *testing.T) {
 	for _, name := range []string{
 		agyRealOK, agyRealTool, agyConvTurn1, agyConvTurn2, agyEffortFail, agySandboxDenied,
 		agySingle, agyMultiturn, agyToolErrorFix, agyEnvelopeFixed,
@@ -241,10 +245,14 @@ func TestAgyLineParser_OwnUsageIsTheStepSumOnEveryRecording(t *testing.T) {
 			rec := readAgyRecording(t, name)
 			pr, _ := parse("agy", readFixture(t, name))
 			got := [3]int64{pr.Usage.InputTokens, pr.Usage.OutputTokens, pr.Usage.CacheRead}
+			stepSum := [3]int64{rec.stepIn, rec.stepOut, rec.stepCache}
 
 			var want [3]int64
-			if rec.stepsSeen {
-				want = [3]int64{rec.stepIn, rec.stepOut, rec.stepCache}
+			switch {
+			case rec.frame != nil && rec.numTurns <= 1: // a first turn: the frame's counts
+				want = [3]int64{rec.frame.in, rec.frame.out, rec.frame.cache}
+			case rec.stepsSeen: // after it: the steps' sum
+				want = stepSum
 			}
 			if got != want {
 				t.Errorf("Usage tokens = %v, want %v", got, want)
@@ -260,11 +268,23 @@ func TestAgyLineParser_OwnUsageIsTheStepSumOnEveryRecording(t *testing.T) {
 			if total != [3]int64{rec.frame.in, rec.frame.out, rec.frame.cache} {
 				t.Errorf("CumulativeUsage tokens = %v, want the frame's %v", total, rec.frame)
 			}
-			if rec.stepsSeen && rec.numTurns <= 1 && got != total {
-				t.Errorf("a first turn's own usage %v must equal its total %v", got, total)
+			// The recordings are intact, so on a first turn the two figures agree.
+			if rec.stepsSeen && rec.numTurns <= 1 && stepSum != total {
+				t.Errorf("a first-turn recording's steps add up to %v, its frame says %v", stepSum, total)
 			}
 		})
 	}
+}
+
+// withNumTurns rewrites the turn count of every result frame in a stream.
+func withNumTurns(t *testing.T, raw []byte, n int) []byte {
+	t.Helper()
+	re := regexp.MustCompile(`"num_turns"\s*:\s*\d+`)
+	out := re.ReplaceAll(raw, []byte(`"num_turns":`+strconv.Itoa(n)))
+	if bytes.Equal(out, raw) && !bytes.Contains(raw, []byte(`"num_turns":`+strconv.Itoa(n))) {
+		t.Fatal("the stream has no num_turns to rewrite")
+	}
+	return out
 }
 
 // A failed run on a real recording: a lone result frame with status ERROR, an
@@ -456,18 +476,32 @@ func TestAgyLineParser_MultiTurnProcessReportsEachTurn(t *testing.T) {
 	}
 }
 
-// A single envelope has no steps, so there is no figure of the run's own: Usage
-// stays zero, first turn or not, and the frame's counts are exposed as the
-// conversation total, for the caller that knows the run began the conversation
-// (internal/dispatch reports it as the run's usage then).
-func TestAgyLineParser_EnvelopeExposesOnlyTheTotal(t *testing.T) {
+// A single envelope has no steps, so the frame's counts are all there is, and
+// whether they are the run's own turns on its num_turns: on a first turn (or with
+// no count at all) they are, with the frame's duration; after it they are the
+// conversation's running total, so Usage reports no tokens and only the total is
+// exposed.
+func TestAgyLineParser_EnvelopeUsageFollowsNumTurns(t *testing.T) {
 	envelope := func(numTurns string) []byte {
-		return []byte(`{"conversation_id":"c","status":"SUCCESS","response":"x","duration_seconds":2.5,"num_turns":` + numTurns +
-			`,"usage":{"input_tokens":1000,"output_tokens":50,"thinking_tokens":0,"cache_read_tokens":200,"total_tokens":1050}}`)
+		return []byte(`{"conversation_id":"c","status":"SUCCESS","response":"x","duration_seconds":2.5,` + numTurns +
+			`"usage":{"input_tokens":1000,"output_tokens":50,"thinking_tokens":0,"cache_read_tokens":200,"total_tokens":1050}}`)
 	}
 	reported := Usage{InputTokens: 1000, OutputTokens: 50, CacheRead: 200, DurationMs: 2500}
-	for _, turns := range []string{"1", "3"} {
-		pr, evs := parse("agy", envelope(turns))
+	for _, c := range []struct{ name, numTurns string }{
+		{"num_turns 1", `"num_turns":1,`},
+		{"num_turns absent", ``},
+		{"num_turns 0", `"num_turns":0,`},
+	} {
+		pr, evs := parse("agy", envelope(c.numTurns))
+		if pr.Usage != reported || pr.CumulativeUsage != reported {
+			t.Errorf("%s: Usage %+v, CumulativeUsage %+v, want %+v for both", c.name, pr.Usage, pr.CumulativeUsage, reported)
+		}
+		if evs[0].Usage != reported || evs[0].CumulativeUsage != reported {
+			t.Errorf("%s: result event = %+v", c.name, evs[0])
+		}
+	}
+	for _, turns := range []string{"2", "3"} {
+		pr, evs := parse("agy", envelope(`"num_turns":`+turns+`,`))
 		if pr.Usage != (Usage{}) {
 			t.Errorf("num_turns %s: Usage = %+v, want the zero value", turns, pr.Usage)
 		}
@@ -546,12 +580,10 @@ func TestAgyLineParser_JSONEnvelope(t *testing.T) {
 	if pr.SessionID != "055a398f-db14-4c5f-abbb-1bf03f8120a7" {
 		t.Errorf("SessionID = %q", pr.SessionID)
 	}
-	// No steps, so no figure of the run's own; the frame's counts are the total.
-	if pr.Usage != (Usage{}) {
-		t.Errorf("Usage = %+v, want the zero value (the envelope has no steps)", pr.Usage)
-	}
-	if want := (Usage{InputTokens: 10415, OutputTokens: 657, CacheRead: 8113, DurationMs: 7160}); pr.CumulativeUsage != want {
-		t.Errorf("CumulativeUsage = %+v, want %+v", pr.CumulativeUsage, want)
+	// No steps, but a first turn (num_turns 1): the frame's counts are the run's own.
+	want := Usage{InputTokens: 10415, OutputTokens: 657, CacheRead: 8113, DurationMs: 7160}
+	if pr.Usage != want || pr.CumulativeUsage != want {
+		t.Errorf("Usage = %+v, CumulativeUsage = %+v, want %+v for both", pr.Usage, pr.CumulativeUsage, want)
 	}
 	wantKinds(t, evs, EventResult)
 }
@@ -611,19 +643,29 @@ func TestAgyLineParser_UsageAbsent(t *testing.T) {
 func TestAgyLineParser_TruncatedLineInStructuredStream(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(string(readFixture(t, agySingle)), "\n"), "\n")
 	lines[2] = lines[2][:len(lines[2])/2] // the agent_response step, cut in half
-	pr, _ := parse("agy", []byte(strings.Join(lines, "\n")))
+	damaged := []byte(strings.Join(lines, "\n"))
+	total := Usage{InputTokens: 10418, OutputTokens: 589, CacheRead: 8113, DurationMs: 6880}
+
+	pr, _ := parse("agy", damaged)
 	// The cut step is lost; the result's response still supplies the text.
 	if !strings.HasPrefix(pr.Text, "Git rebase destructively") {
 		t.Errorf("Text = %q", pr.Text)
 	}
-	// Usage is the sum of the DONE steps that survived, here only the checkpoint
-	// step's, so it falls short: the price of counting steps. The result frame's
-	// conversation total is untouched and stays in CumulativeUsage.
-	if want := (Usage{InputTokens: 116, OutputTokens: 7, DurationMs: 6880}); pr.Usage != want {
-		t.Errorf("Usage = %+v, want the surviving steps' sum %+v", pr.Usage, want)
+	// A first turn (num_turns 1): the frame's counts are the run's own, so the lost
+	// step costs nothing.
+	if pr.Usage != total || pr.CumulativeUsage != total {
+		t.Errorf("first turn: Usage = %+v, CumulativeUsage = %+v, want %+v for both", pr.Usage, pr.CumulativeUsage, total)
 	}
-	if want := (Usage{InputTokens: 10418, OutputTokens: 589, CacheRead: 8113, DurationMs: 6880}); pr.CumulativeUsage != want {
-		t.Errorf("CumulativeUsage = %+v, want the frame's %+v", pr.CumulativeUsage, want)
+
+	// The same damage after the first turn leaves only the steps that survived, here
+	// the checkpoint step's, with no duration; the frame's total stays in
+	// CumulativeUsage.
+	resumed, _ := parse("agy", withNumTurns(t, damaged, 2))
+	if want := (Usage{InputTokens: 116, OutputTokens: 7}); resumed.Usage != want {
+		t.Errorf("num_turns 2: Usage = %+v, want the surviving steps' sum %+v", resumed.Usage, want)
+	}
+	if resumed.CumulativeUsage != total {
+		t.Errorf("num_turns 2: CumulativeUsage = %+v, want %+v", resumed.CumulativeUsage, total)
 	}
 }
 
