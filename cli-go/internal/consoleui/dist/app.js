@@ -1016,15 +1016,41 @@
 
   // ---- Chat constants --------------------------------------------------------
 
-  const RUNTIMES = ['claude', 'codex', 'agy', 'gemini'];
+  // Runtimes the pane header offers.  'auto' (the default) means "no explicit
+  // pick": the pane dispatches runtime:'' and the server resolves the real
+  // runtime from the agent's frontmatter pin / project config.  The other
+  // three override that.  ('gemini' no longer exists; a stale persisted
+  // 'gemini' pane is normalised to 'auto' by normalizePaneItem.)
+  const RUNTIMES = ['auto', 'claude', 'codex', 'agy'];
 
-  // Model tiers valid for each runtime (derived from runtime.ValidateTier):
-  //   haiku, sonnet, opus, fable.
-  // All runtimes accept all tiers; codex/agy/gemini show "cost unavailable".
+  // Model names the server accepts depend on the runtime it RESOLVES:
+  //   claude       - a tier (MODEL_TIERS) or an alias (MODEL_ALIASES)
+  //   codex / agy  - an alias or a model id
+  //   ''           - no override; the agent / runtime default decides
+  // Tiers are claude-only.  Aliases are valid on every runtime, so they are the
+  // only named choices offered for any other runtime, including 'auto' (whose
+  // real runtime is not known until the server resolves it at dispatch).
   const MODEL_TIERS = ['haiku', 'sonnet', 'opus', 'fable'];
+  const MODEL_ALIASES = ['cheap', 'balanced', 'best', 'reasoning', 'frontier'];
+
+  // modelOptionsFor returns the model values the header offers for a runtime,
+  // '' (default / no override) first.
+  function modelOptionsFor(runtime) {
+    return runtime === 'claude'
+      ? ['', ...MODEL_TIERS, ...MODEL_ALIASES]
+      : ['', ...MODEL_ALIASES];
+  }
 
   // Runtimes that stream incrementally (token events):
   const STREAMING_RUNTIMES = new Set(['claude']);
+
+  // runtimeStreams reports whether a pane on `runtime` is treated as streaming.
+  // 'auto' counts: the UI cannot know the real runtime before dispatch, so it
+  // must not show the buffered-runtime affordances ("tool output not available",
+  // "cost unavailable") for a pane that may well resolve to claude.
+  function runtimeStreams(runtime) {
+    return runtime === 'auto' || STREAMING_RUNTIMES.has(runtime);
+  }
 
   // Effort levels accepted by the backend (empty string = omit from dispatch body = default).
   // Values map directly to --effort flag values accepted by the claude runtime.
@@ -1040,8 +1066,8 @@
   // PaneState {
   //   id:             string (stable pane identifier)
   //   conversationId: string (generated once, persisted to localStorage)
-  //   runtime:        string
-  //   model:          string
+  //   runtime:        string  ('auto' | 'claude' | 'codex' | 'agy'; 'auto' dispatches runtime:'')
+  //   model:          string  ('' = no override, else a value from modelOptionsFor(runtime))
   //   agent:          string
   //   activeSessionId: string | null  (in-flight dispatch session)
   //   status:         'idle' | 'streaming' | 'done' | 'error'
@@ -1124,6 +1150,27 @@
     try { localStorage.setItem(CHAT_PANEL_LS_KEY, JSON.stringify(serializable)); } catch { /* ignore */ }
   }
 
+  // normalizePaneItem maps one persisted pane record onto valid pane settings.
+  // localStorage is untrusted (it may hold a shape written by an older build),
+  // so every field is re-validated:
+  //   - a runtime that is no longer offered (e.g. a stale 'gemini') -> 'auto'
+  //   - a model the resulting runtime does not accept (e.g. 'opus' on a codex
+  //     pane) -> '' (no override)
+  // Pure: no DOM, no storage.
+  function normalizePaneItem(item) {
+    item = item || {};
+    const runtime = RUNTIMES.includes(item.runtime) ? item.runtime : 'auto';
+    return {
+      runtime: runtime,
+      model: modelOptionsFor(runtime).includes(item.model) ? item.model : '',
+      agent: item.agent || 'claude',
+      effort: EFFORT_LEVELS.includes(item.effort) ? item.effort : '',
+      // Restore interactive toggle preference; interactiveLive always starts
+      // false because the server session cannot survive a page reload.
+      interactive: !!item.interactive,
+    };
+  }
+
   function loadPaneStateFromStorage() {
     let stored = null;
     try { stored = JSON.parse(localStorage.getItem(CHAT_PANEL_LS_KEY) || 'null'); } catch { /* ignore */ }
@@ -1131,13 +1178,7 @@
     for (const item of stored) {
       if (!item.id || !item.conversationId) continue;
       const p = makePane(item.id, item.conversationId);
-      p.runtime = RUNTIMES.includes(item.runtime) ? item.runtime : 'claude';
-      p.model = MODEL_TIERS.includes(item.model) ? item.model : 'sonnet';
-      p.agent = item.agent || 'claude';
-      p.effort = EFFORT_LEVELS.includes(item.effort) ? item.effort : '';
-      // Restore interactive toggle preference; interactiveLive always starts false
-      // because the server session cannot survive a page reload.
-      p.interactive = !!item.interactive;
+      Object.assign(p, normalizePaneItem(item));
       chatPanes.set(item.id, p);
     }
   }
@@ -1146,8 +1187,8 @@
     return {
       id,
       conversationId: conversationId || newConversationId(),
-      runtime: 'claude',
-      model: 'sonnet',
+      runtime: 'auto',   // 'auto' = dispatch runtime:'' (server resolves it from the agent's pin / project config)
+      model: '',         // '' = no override (the agent / runtime default decides)
       agent: 'claude',
       effort: '',        // '' = omit from dispatch (backend default); else 'low'|'medium'|'high'|'xhigh'|'max'
       // Interactive-P1 fields.
@@ -1181,6 +1222,36 @@
       shared: false,
     };
   }
+
+  // Test-hook support: the real builders and handlers look a pane up by id in
+  // chatPanes, so register `pane` for the duration of one call and then put the
+  // map back as it was.
+  function withRegisteredPane(pane, fn) {
+    const prev = chatPanes.get(pane.id);
+    chatPanes.set(pane.id, pane);
+    try { return fn(pane.id); } finally { if (prev) chatPanes.set(pane.id, prev); else chatPanes.delete(pane.id); }
+  }
+
+  window.__yakosChatPanes = { // test hook (app-smoke.js)
+    RUNTIMES: RUNTIMES,
+    MODEL_TIERS: MODEL_TIERS,
+    MODEL_ALIASES: MODEL_ALIASES,
+    modelOptionsFor: modelOptionsFor,
+    normalizePaneItem: normalizePaneItem,
+    makePane: makePane,
+    buildPaneHeaderHTML: function(pane) { return withRegisteredPane(pane, buildPaneHeaderHTML); },
+    changeRuntime: function(pane, runtime) { withRegisteredPane(pane, function(id) { onPaneRuntimeChange(id, runtime); }); },
+    // The task is read from the pane's #pane-input-<id> textarea, which the caller stubs.
+    sendPaneMessage: function(pane) { withRegisteredPane(pane, sendPaneMessage); },
+    // Runs the real localStorage restore against an empty pane map and returns
+    // the panes it built; the live map is put back untouched.
+    loadPanes: function() {
+      const live = chatPanes;
+      chatPanes = new Map();
+      try { loadPaneStateFromStorage(); return Array.from(chatPanes.values()); } finally { chatPanes = live; }
+    },
+    buildDispatchBody: buildDispatchBody,
+  };
 
   // ---- Phase 3: openAttachPane ------------------------------------------------
   //
@@ -2165,12 +2236,18 @@
         '</div>';
     }
 
+    // 'auto' carries a hover hint explaining what it resolves to.
     const runtimeOpts = RUNTIMES.map((r) =>
-      '<option value="' + esc(r) + '"' + (r === pane.runtime ? ' selected' : '') + '>' + esc(r) + '</option>'
+      '<option value="' + esc(r) + '"' + (r === pane.runtime ? ' selected' : '') +
+      (r === 'auto' ? ' title="Use the agent\'s own runtime pin (or the project default)"' : '') +
+      '>' + esc(r) + '</option>'
     ).join('');
 
-    const modelOpts = MODEL_TIERS.map((m) =>
-      '<option value="' + esc(m) + '"' + (m === pane.model ? ' selected' : '') + '>' + esc(m) + '</option>'
+    // Model options depend on the runtime; '' (no override) shows as "default",
+    // the same convention as the effort selector below.
+    const modelOpts = modelOptionsFor(pane.runtime).map((m) =>
+      '<option value="' + esc(m) + '"' + (m === pane.model ? ' selected' : '') + '>' +
+      esc(m === '' ? 'default' : m) + '</option>'
     ).join('');
 
     // Effort selector: 'default' shown for '' (omit); else the exact backend value.
@@ -2196,7 +2273,7 @@
         '<select class="pane-runtime-select" id="pane-runtime-' + esc(paneId) + '" ' +
           'aria-label="Runtime">' + runtimeOpts + '</select>' +
         '<select class="pane-model-select" id="pane-model-' + esc(paneId) + '" ' +
-          'aria-label="Model tier">' + modelOpts + '</select>' +
+          'aria-label="Model">' + modelOpts + '</select>' +
         '<select class="pane-effort-select" id="pane-effort-' + esc(paneId) + '" ' +
           'aria-label="Effort level">' + effortOpts + '</select>' +
         '<input class="pane-agent-input" id="pane-agent-' + esc(paneId) + '" ' +
@@ -2225,13 +2302,11 @@
     const pane = chatPanes.get(paneId);
     if (!pane) return;
 
-    // Runtime → model dependency: when runtime changes, update model options.
+    // Runtime → model dependency: when runtime changes, drop a model the new
+    // runtime does not accept and refresh the model options.
     const runtimeSel = document.getElementById('pane-runtime-' + paneId);
     if (runtimeSel) {
-      runtimeSel.addEventListener('change', () => {
-        pane.runtime = runtimeSel.value;
-        savePaneState();
-      });
+      runtimeSel.addEventListener('change', () => onPaneRuntimeChange(paneId, runtimeSel.value));
     }
 
     const modelSel = document.getElementById('pane-model-' + paneId);
@@ -2650,10 +2725,32 @@
     const effortSelH = document.getElementById('pane-effort-' + paneId);
     const agentIn = document.getElementById('pane-agent-' + paneId);
     const pane = chatPanes.get(paneId);
-    if (pane && runtimeSel) runtimeSel.addEventListener('change', () => { pane.runtime = runtimeSel.value; savePaneState(); });
+    if (pane && runtimeSel) runtimeSel.addEventListener('change', () => onPaneRuntimeChange(paneId, runtimeSel.value));
     if (pane && modelSel) modelSel.addEventListener('change', () => { pane.model = modelSel.value; savePaneState(); });
     if (pane && effortSelH) effortSelH.addEventListener('change', () => { pane.effort = EFFORT_LEVELS.includes(effortSelH.value) ? effortSelH.value : ''; savePaneState(); });
     if (pane && agentIn) agentIn.addEventListener('change', () => { pane.agent = agentIn.value.trim() || 'claude'; savePaneState(); });
+  }
+
+  // onPaneRuntimeChange applies a pick from a pane header's runtime select.
+  // The valid model names depend on the runtime (modelOptionsFor), so a model
+  // the new runtime does not accept (e.g. 'opus' after claude -> codex) resets
+  // to '' (default).  The header is re-rendered so the model select offers the
+  // new runtime's options; that replaces the runtime select itself, so keyboard
+  // focus is put back on it.  Shared by both places that wire the header
+  // selects (wirePaneEvents and renderPaneHeader) so they cannot drift.
+  function onPaneRuntimeChange(paneId, runtime) {
+    const pane = chatPanes.get(paneId);
+    if (!pane) return;
+    pane.runtime = runtime;
+    if (!modelOptionsFor(pane.runtime).includes(pane.model)) pane.model = '';
+    savePaneState();
+    const selId = 'pane-runtime-' + paneId;
+    const hadFocus = !!document.activeElement && document.activeElement.id === selId;
+    renderPaneHeader(paneId);
+    if (hadFocus) {
+      const sel = document.getElementById(selId);
+      if (sel) sel.focus();
+    }
   }
 
   // ---- Messages rendering ---------------------------------------------------
@@ -3259,6 +3356,38 @@
 
   // ---- Dispatch a message from a pane ----------------------------------------
 
+  // buildDispatchBody builds the POST /api/chat/dispatch body for one turn.
+  //   runtime: 'auto' is sent as '' (no explicit runtime); the server resolves
+  //            it from the agent's frontmatter pin / project config.
+  //   model:   sent as-is; '' = no override (the agent / runtime default decides).
+  // Reads the operator id and the IDE review-mode flag; touches no DOM.
+  function buildDispatchBody(pane, task, sessionId) {
+    const body = {
+      runtime: pane.runtime === 'auto' ? '' : pane.runtime,
+      model: pane.model,
+      agent: pane.agent,
+      task: task,
+      sessionId: sessionId,
+      operatorId: getChatOperatorId(),
+      conversationId: pane.conversationId,
+    };
+    // Effort: only include when non-empty (empty = backend default; omitting is cleaner).
+    if (pane.effort) {
+      body.effort = pane.effort;
+    }
+    // Interactive-P1: tag the first-turn dispatch so the server starts a
+    // persistent session.  Subsequent turns will use /api/chat/send.
+    if (pane.interactive) {
+      body.interactive = true;
+    }
+    // Phase 3: if this pane is the IDE embedded pane and review mode is ON,
+    // signal to the server that edits should land in an isolated worktree.
+    if (pane.ideEmbedded && ideReviewMode) {
+      body.worktreeMode = true;
+    }
+    return body;
+  }
+
   function sendPaneMessage(paneId) {
     const pane = chatPanes.get(paneId);
     if (!pane) return;
@@ -3451,34 +3580,13 @@
 
     startElapsedTimer(pane, paneId);
 
-    const dispatchBody = {
-      runtime: pane.runtime,
-      model: pane.model,
-      agent: pane.agent,
-      task: task,
-      sessionId: sessionId,
-      operatorId: getChatOperatorId(),
-      conversationId: pane.conversationId,
-    };
-    // Effort: only include when non-empty (empty = backend default; omitting is cleaner).
-    if (pane.effort) {
-      dispatchBody.effort = pane.effort;
-    }
-    // Interactive-P1: tag the first-turn dispatch so the server starts a
-    // persistent session.  Subsequent turns will use /api/chat/send.
-    if (pane.interactive) {
-      dispatchBody.interactive = true;
-    }
-    // Phase 3: if this pane is the IDE embedded pane and review mode is ON,
-    // signal to the server that edits should land in an isolated worktree.
-    if (pane.ideEmbedded && ideReviewMode) {
-      dispatchBody.worktreeMode = true;
-    }
+    const dispatchBody = buildDispatchBody(pane, task, sessionId);
 
     // Phase 4: for non-claude runtimes (buffered path), tool events are never
     // emitted by the server.  Show a one-time static affordance so the operator
     // understands tool output is unavailable.  Do NOT fabricate tool events.
-    if (!STREAMING_RUNTIMES.has(pane.runtime)) {
+    // 'auto' is exempt: its real runtime is unknown here, so claim nothing.
+    if (!runtimeStreams(pane.runtime)) {
       pane.messages.push({
         role: 'tool_use',
         toolName: '',
@@ -3946,7 +4054,8 @@
     // Non-streaming runtimes report "cost unavailable" (server never sends a cost).
     // Streaming runtimes (claude) will eventually report a cost; until then show
     // '–' to distinguish "not yet known" from "$0.0000" (which would be a real cost).
-    if (STREAMING_RUNTIMES.has(runtime)) return '–'; // en-dash
+    // 'auto' is treated like claude: the UI does not know the real runtime yet.
+    if (runtimeStreams(runtime)) return '–'; // en-dash
     return 'cost unavailable';
   }
 
@@ -4936,7 +5045,7 @@
               '<div class="flows-node-edit-row">' +
                 '<label class="flows-node-edit-label" for="fne-runtime">Runtime (optional)</label>' +
                 '<input id="fne-runtime" class="flows-node-edit-input" type="text" ' +
-                  'autocomplete="off" spellcheck="false" placeholder="claude | codex | gemini">' +
+                  'autocomplete="off" spellcheck="false" placeholder="claude | codex | agy">' +
               '</div>' +
               '<div class="flows-node-edit-row">' +
                 '<label class="flows-node-edit-label" for="fne-timeout">Timeout s (optional)</label>' +

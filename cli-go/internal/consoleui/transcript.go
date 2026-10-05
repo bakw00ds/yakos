@@ -4,11 +4,20 @@
 //
 // # Storage layout
 //
-//	<workDir>/chats/<conversationId>.ndjson
+//	<workDir>/chats/<conversationId>.ndjson      the transcript
+//	<workDir>/chats/<conversationId>.meta.json   per-conversation meta (below)
 //
 // Each NDJSON line is a TranscriptEntry.  New lines are appended with O_APPEND
 // so concurrent writers from the same process are safe; flock provides
 // cross-process safety for tools that read/tail the file.
+//
+// # Conversation meta
+//
+// The meta file maps a runtime to that runtime's own session id for the
+// conversation (today only claude's, so a follow-up one-shot turn can pass
+// `--resume`). It is a small JSON object rewritten atomically, kept out of the
+// transcript so readers of the transcript (the UI backfill, share, export) see
+// no new entry kinds.
 //
 // # Path traversal guard
 //
@@ -27,14 +36,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
@@ -117,6 +129,10 @@ type TranscriptEntry struct {
 type Transcripts struct {
 	// chatsDir is the absolute path to <workDir>/chats/.
 	chatsDir string
+
+	// metaMu serializes read-modify-write of the per-conversation meta files
+	// within this process.
+	metaMu sync.Mutex
 }
 
 // NewTranscripts constructs a Transcripts rooted at <workDir>/chats.
@@ -370,3 +386,144 @@ func (tr *Transcripts) FirstUserOwner(conversationID string) (string, error) {
 // errTranscriptForbidden is returned by Read when the caller's operatorID does
 // not match the conversation owner.  HTTP handler must return 403.
 var errTranscriptForbidden = errors.New("transcript: access denied (operator mismatch)")
+
+// ---- conversation meta: native session ids -------------------------------------
+
+// maxMetaBytes bounds how much of a meta file is read. Real files are under a
+// hundred bytes.
+const maxMetaBytes = 64 << 10
+
+// conversationMeta is the content of <conversationId>.meta.json.
+type conversationMeta struct {
+	// NativeSessions maps a runtime name to that runtime's own session id for
+	// this conversation.
+	NativeSessions map[string]string `json:"native_sessions,omitempty"`
+}
+
+// metaPath returns the meta file path for a conversation, validated exactly like
+// transcriptPath.
+func (tr *Transcripts) metaPath(id string) (string, error) {
+	if err := validateConversationID(id); err != nil {
+		return "", err
+	}
+	clean := filepath.Clean(filepath.Join(tr.chatsDir, id+".meta.json"))
+	if !strings.HasPrefix(clean, tr.chatsDir+string(filepath.Separator)) {
+		return "", errors.New("transcript: conversation_id escapes chats directory")
+	}
+	return clean, nil
+}
+
+// readMeta loads a meta file. Anything unreadable, oversize or malformed is an
+// empty meta (the file is rewritten whole on the next change), and any stored
+// session id that fails the argv-safety check is dropped: the file is local
+// state, but its ids end up on a command line.
+func readMeta(path string) conversationMeta {
+	var m conversationMeta
+	f, err := os.Open(path) //nolint:gosec // path built by metaPath
+	if err != nil {
+		return m
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, maxMetaBytes+1))
+	if err != nil || len(data) > maxMetaBytes {
+		return conversationMeta{}
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return conversationMeta{}
+	}
+	for rt, id := range m.NativeSessions {
+		if !isKnownRuntime(rt) || !runtime.ValidSessionID(id) {
+			delete(m.NativeSessions, rt)
+		}
+	}
+	return m
+}
+
+// writeMeta replaces the meta file atomically (temp file in the same directory,
+// then rename) with owner-only permissions, like the transcript itself.
+func (tr *Transcripts) writeMeta(path string, m conversationMeta) error {
+	dir := filepath.Dir(path)
+	if err := statepath.SecureDir(dir); err != nil {
+		return fmt.Errorf("transcript: %w", err)
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("transcript: marshal meta: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".meta-*.tmp") // 0600
+	if err != nil {
+		return fmt.Errorf("transcript: meta temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("transcript: write meta: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("transcript: write meta: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("transcript: replace meta: %w", err)
+	}
+	return nil
+}
+
+// NativeSession returns the runtime's own session id stored for the
+// conversation, or "" when there is none (a first turn, an unknown runtime, an
+// invalid conversation id or a damaged file).
+func (tr *Transcripts) NativeSession(conversationID, rt string) string {
+	path, err := tr.metaPath(conversationID)
+	if err != nil {
+		return ""
+	}
+	tr.metaMu.Lock()
+	defer tr.metaMu.Unlock()
+	return readMeta(path).NativeSessions[rt]
+}
+
+// SetNativeSession records the runtime's own session id for the conversation. It
+// refuses a runtime this package does not know and an id that is not safe to put
+// on a command line, so what is stored can always be used as it stands.
+func (tr *Transcripts) SetNativeSession(conversationID, rt, sessionID string) error {
+	if !isKnownRuntime(rt) {
+		return errors.New("transcript: unknown runtime for native session")
+	}
+	if !runtime.ValidSessionID(sessionID) {
+		return errors.New("transcript: invalid native session id")
+	}
+	path, err := tr.metaPath(conversationID)
+	if err != nil {
+		return err
+	}
+	tr.metaMu.Lock()
+	defer tr.metaMu.Unlock()
+	m := readMeta(path)
+	if m.NativeSessions == nil {
+		m.NativeSessions = make(map[string]string)
+	}
+	if m.NativeSessions[rt] == sessionID {
+		return nil
+	}
+	m.NativeSessions[rt] = sessionID
+	return tr.writeMeta(path, m)
+}
+
+// ClearNativeSession forgets the runtime's stored session id, so the next turn
+// starts a fresh native session. Clearing what is not stored is not an error.
+func (tr *Transcripts) ClearNativeSession(conversationID, rt string) error {
+	path, err := tr.metaPath(conversationID)
+	if err != nil {
+		return err
+	}
+	tr.metaMu.Lock()
+	defer tr.metaMu.Unlock()
+	m := readMeta(path)
+	if _, ok := m.NativeSessions[rt]; !ok {
+		return nil
+	}
+	delete(m.NativeSessions, rt)
+	return tr.writeMeta(path, m)
+}

@@ -374,9 +374,10 @@ type DispatchResponse struct {
 //   - Agent system-prompt is resolved server-side via the roster.
 //   - A sessionId already owned by a DIFFERENT operatorId → 403.
 //   - A sessionId with an active in-flight dispatch → 409.
-//   - runtime must be in runtime.Known; model must pass ValidateTier after
-//     ResolveAlias; agent name must resolve in the roster (generic 400 on
-//     failure — no path/roster leak in error messages).
+//   - runtime must be in runtime.Known, or empty/"auto" to resolve from the
+//     agent's pin; the model must be valid for the runtime the request
+//     resolves to (K-132); agent name must resolve in the roster (generic 400
+//     on failure — no path/roster leak in error messages).
 func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -392,24 +393,19 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	}
 
 	// --- Validate runtime ---
-	runtimeName := req.Runtime
-	if runtimeName == "" {
-		runtimeName = "claude"
+	// An empty runtime (or "auto") asks the dispatcher to resolve the runtime
+	// from the agent's frontmatter pin and the project config. It is passed
+	// through as "" instead of being forced to claude (K-127: the pane could
+	// never reach a pinned agent's runtime). An explicit runtime must be known.
+	requestedRuntime := strings.TrimSpace(req.Runtime)
+	if requestedRuntime == "auto" {
+		requestedRuntime = ""
 	}
-	if !isKnownRuntime(runtimeName) {
+	if requestedRuntime != "" && !isKnownRuntime(requestedRuntime) {
 		http.Error(w, "invalid runtime", http.StatusBadRequest)
 		return
 	}
-
-	// --- Validate model ---
-	modelName := req.Model
-	if modelName != "" {
-		modelName = runtime.ResolveAlias(modelName)
-		if !runtime.ValidateTier(modelName) {
-			http.Error(w, "invalid model", http.StatusBadRequest)
-			return
-		}
-	}
+	requestedModel := strings.TrimSpace(req.Model)
 
 	// --- Validate effort ---
 	// Empty string is valid (means "no override — omit the flag").
@@ -441,6 +437,41 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"error": fmt.Sprintf("unknown agent %q; not in roster and not a known runtime", req.Agent),
 		})
+		return
+	}
+
+	// --- Resolve the runtime, then validate the model against it (K-132) ---
+	// A model id means something only to the runtime that runs it, and with an
+	// auto pane that runtime is known only once the agent's pin is read.
+	// PreferredRuntime names the runtime this request is headed for without
+	// touching the machine (no CLI or sign-in probe), so the model can be
+	// checked and a bad one rejected with 400 before the 202. RunStream makes
+	// the real choice, probe and fallbacks included, from the same inputs.
+	pref, prefErr := dispatch.PreferredRuntime(dispatch.RouteQuery{
+		YakosRoot: ch.yakosRoot,
+		Project:   ch.workspaceRoot,
+		Agent:     req.Agent,
+		Override:  requestedRuntime,
+	})
+	if prefErr != nil {
+		http.Error(w, "invalid runtime", http.StatusBadRequest)
+		return
+	}
+	runtimeName := pref.Runtime
+	modelName := requestedModel
+	if modelName != "" {
+		resolved, ok := dispatch.CheckModelOverride(runtimeName, modelName)
+		if !ok {
+			http.Error(w, "invalid model", http.StatusBadRequest)
+			return
+		}
+		modelName = resolved
+	}
+	// The persistent interactive session (CLI and SDK engines) is a claude
+	// process. Until codex/agy have their own engines, refuse the toggle for any
+	// other resolved runtime instead of quietly answering from claude.
+	if req.Interactive && runtimeName != "claude" {
+		http.Error(w, "interactive mode is only available for the claude runtime", http.StatusBadRequest)
 		return
 	}
 
@@ -753,6 +784,16 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 					exitStatus = dispatch.StatusFailed
 				}
 
+				// Continuity (K-132): remember claude's own session id so the
+				// next one-shot turn of this conversation can --resume it. Not
+				// in worktree mode: a per-turn worktree is a different working
+				// directory each time, and claude files sessions by directory.
+				if chunk.NativeSessionID != "" && chunk.RuntimeResolved == "claude" && capturedWorktreeOverride == "" {
+					if err := ch.transcripts.SetNativeSession(conversationID, "claude", chunk.NativeSessionID); err != nil {
+						slog.Warn("consoleui: store native session id", "conversation", conversationID, "err", err)
+					}
+				}
+
 				// Append coalesced assistant turn, then summary turn.
 				if text := assistantBuf.String(); text != "" {
 					_ = ch.transcripts.Append(TranscriptEntry{
@@ -1009,14 +1050,26 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
+		// Continuity (K-132): a follow-up one-shot turn on claude resumes the
+		// conversation's native session, so it remembers the previous turn.
+		resumeID := ""
+		if runtimeName == "claude" && capturedWorktreeOverride == "" {
+			resumeID = ch.transcripts.NativeSession(conversationID, "claude")
+		}
+
 		params := dispatch.Params{
-			Agent:          dispReq.Agent,
-			Task:           dispReq.Task,
-			Runtime:        runtimeName,
-			Model:          modelName,
-			OperatorID:     capturedOperatorID,
-			ConversationID: conversationID,
-			SessionID:      dispReq.SessionID,
+			Agent: dispReq.Agent,
+			Task:  dispReq.Task,
+			// The request's own runtime ("" for auto) and model, not the values
+			// resolved above for validation: the dispatcher resolves both again
+			// against the runtime it actually picks, so an alias follows a
+			// fallback and an auto pane lands where the agent's pin says.
+			Runtime:         requestedRuntime,
+			Model:           requestedModel,
+			ResumeSessionID: resumeID,
+			OperatorID:      capturedOperatorID,
+			ConversationID:  conversationID,
+			SessionID:       dispReq.SessionID,
 			// Effort was validated in the handler (ValidateEffort); empty = no flag.
 			Effort: dispReq.Effort,
 			// Project is intentionally omitted: Service.RunStream pins it to
@@ -1031,7 +1084,17 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			WorkDirOverride: capturedWorktreeOverride,
 		}
 
-		if _, err := ch.svc.RunStream(ctx, params, onChunk); err != nil {
+		res, err := ch.svc.RunStream(ctx, params, onChunk)
+		// A saved session can disappear (claude prunes old ones, or the project
+		// moved). The failed resume leaves the stored id pointing at nothing, so
+		// forget it and let the next turn start a fresh session rather than fail
+		// the same way forever.
+		if resumeID != "" && res.ExitCode != 0 && strings.Contains(res.StderrTail, "No conversation found") {
+			if clrErr := ch.transcripts.ClearNativeSession(conversationID, "claude"); clrErr != nil {
+				slog.Warn("consoleui: clear native session id", "conversation", conversationID, "err", clrErr)
+			}
+		}
+		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				slog.Error("consoleui: chat RunStream error",
 					"session", dispReq.SessionID,
