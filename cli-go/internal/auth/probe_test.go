@@ -1,11 +1,16 @@
 package auth
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // fakeBins puts empty executables named after each runtime on a private PATH.
@@ -167,7 +172,7 @@ func TestProbeRuntime_NoHomeDoesNotReadRelativePaths(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(old) }()
 
-	if r := ProbeRuntime("codex"); r.Authed {
+	if r := ProbeRuntime(context.Background(), "codex"); r.Authed {
 		t.Errorf("a credential file in the working directory must not count: %+v", r)
 	}
 }
@@ -226,5 +231,208 @@ func TestDefaultRuntimeIn_ReadsSetDefaultOutput(t *testing.T) {
 	}
 	if got := DefaultRuntimeIn(filepath.Join(home, ".yakos-state")); got != "codex" {
 		t.Errorf("DefaultRuntimeIn = %q, want codex", got)
+	}
+}
+
+// ---- the default-runtime state file is only trusted when no one else wrote it ----
+
+// sec-324 F2: the file steers every unpinned dispatch to a vendor, so a planted
+// one (a symlink, a world-writable file, a link or world-writable directory)
+// must not be honoured, and the operator is told why.
+func TestReadDefaultRuntime_RefusesPlantedFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks and mode bits")
+	}
+	t.Run("symlinked file", func(t *testing.T) {
+		state := t.TempDir()
+		elsewhere := filepath.Join(t.TempDir(), "planted")
+		if err := os.WriteFile(elsewhere, []byte("codex\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(elsewhere, filepath.Join(state, "default-runtime")); err != nil {
+			t.Fatal(err)
+		}
+		name, warn := ReadDefaultRuntime(state)
+		if name != "" || !strings.Contains(warn, "symlink") {
+			t.Errorf("= %q, %q; want it ignored with a symlink warning", name, warn)
+		}
+	})
+	t.Run("world-writable file", func(t *testing.T) {
+		state := t.TempDir()
+		p := filepath.Join(state, "default-runtime")
+		if err := os.WriteFile(p, []byte("agy\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, 0o666); err != nil {
+			t.Fatal(err)
+		}
+		name, warn := ReadDefaultRuntime(state)
+		if name != "" || !strings.Contains(warn, "writable") {
+			t.Errorf("= %q, %q; want it ignored with a writable warning", name, warn)
+		}
+	})
+	t.Run("world-writable directory", func(t *testing.T) {
+		state := t.TempDir()
+		if err := os.WriteFile(filepath.Join(state, "default-runtime"), []byte("agy\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(state, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		if name, warn := ReadDefaultRuntime(state); name != "" || warn == "" {
+			t.Errorf("= %q, %q; want it ignored with a warning", name, warn)
+		}
+	})
+	t.Run("symlinked state directory", func(t *testing.T) {
+		real := t.TempDir()
+		if err := os.WriteFile(filepath.Join(real, "default-runtime"), []byte("codex\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(t.TempDir(), "state-link")
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatal(err)
+		}
+		if name, warn := ReadDefaultRuntime(link); name != "" || !strings.Contains(warn, "symlink") {
+			t.Errorf("= %q, %q; want it ignored with a symlink warning", name, warn)
+		}
+	})
+	t.Run("an absent file is not a warning", func(t *testing.T) {
+		if name, warn := ReadDefaultRuntime(t.TempDir()); name != "" || warn != "" {
+			t.Errorf("= %q, %q; want neither", name, warn)
+		}
+	})
+}
+
+// ---- the keyring read is bounded and cancellable (sec-324 F3) ----
+
+// blockingKeyring never answers until released, like a Secret Service waiting
+// on an unlock prompt.
+type blockingKeyring struct {
+	release chan struct{}
+	calls   atomic.Int32
+	val     string
+}
+
+func (b *blockingKeyring) Get(service, account string) (string, error) {
+	b.calls.Add(1)
+	<-b.release
+	return b.val, nil
+}
+func (b *blockingKeyring) Set(string, string, string) error { return nil }
+func (b *blockingKeyring) Delete(string, string) error      { return nil }
+
+func TestBoundedKeyring_GivesUpAfterTheTimeout(t *testing.T) {
+	inner := &blockingKeyring{release: make(chan struct{})}
+	defer close(inner.release)
+	b := boundedKeyring{inner: inner, ctx: context.Background(), timeout: 40 * time.Millisecond}
+	start := time.Now()
+	_, err := b.Get("svc-timeout", "acct")
+	if !keyringTimedOut(err) {
+		t.Fatalf("err = %v, want a timeout", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("returned after %v; the read was not bounded", d)
+	}
+}
+
+func TestBoundedKeyring_EndsWhenTheContextEnds(t *testing.T) {
+	inner := &blockingKeyring{release: make(chan struct{})}
+	defer close(inner.release)
+	ctx, cancel := context.WithCancel(context.Background())
+	b := boundedKeyring{inner: inner, ctx: ctx, timeout: time.Minute}
+	go func() { time.Sleep(30 * time.Millisecond); cancel() }()
+	start := time.Now()
+	_, err := b.Get("svc-cancel", "acct")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("returned after %v; cancellation did not end the read", d)
+	}
+}
+
+// A read stuck on a prompt holds one goroutine however many dispatches probe it.
+func TestBoundedKeyring_SharesOneReadAmongCallers(t *testing.T) {
+	inner := &blockingKeyring{release: make(chan struct{}), val: "token"}
+	b := boundedKeyring{inner: inner, ctx: context.Background(), timeout: 5 * time.Second}
+	var wg sync.WaitGroup
+	vals := make([]string, 5)
+	for i := range vals {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			vals[i], _ = b.Get("svc-share", "acct")
+		}(i)
+	}
+	time.Sleep(60 * time.Millisecond) // let every caller join the one read
+	close(inner.release)
+	wg.Wait()
+	if n := inner.calls.Load(); n != 1 {
+		t.Errorf("the keyring was read %d times for 5 concurrent callers, want 1", n)
+	}
+	for i, v := range vals {
+		if v != "token" {
+			t.Errorf("caller %d got %q, want the shared answer", i, v)
+		}
+	}
+}
+
+func TestBoundedKeyring_ReturnsTheAnswerWhenItIsPrompt(t *testing.T) {
+	mock := NewMockKeyring()
+	_ = mock.Set("svc-ok", "acct", "secret")
+	b := boundedKeyring{inner: mock, ctx: context.Background(), timeout: time.Second}
+	if v, err := b.Get("svc-ok", "acct"); err != nil || v != "secret" {
+		t.Fatalf("= %q, %v", v, err)
+	}
+	if _, err := b.Get("svc-ok", "missing"); err == nil || keyringTimedOut(err) {
+		t.Errorf("a missing entry must be an ordinary error, got %v", err)
+	}
+}
+
+// ProbeRuntime itself: a stuck keyring neither hangs the probe nor reads as
+// signed in, and the reason says what happened.
+func TestProbeRuntime_StuckKeyringDoesNotHang(t *testing.T) {
+	cleanAuthEnv(t)
+	fakeBins(t, "agy")
+	inner := &blockingKeyring{release: make(chan struct{})}
+	defer close(inner.release)
+	origBackend, origTimeout := probeKeyringBackend, keyringProbeTimeout
+	probeKeyringBackend = func() KeyringBackend { return inner }
+	keyringProbeTimeout = 40 * time.Millisecond
+	defer func() { probeKeyringBackend, keyringProbeTimeout = origBackend, origTimeout }()
+
+	start := time.Now()
+	r := ProbeRuntime(context.Background(), "agy")
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("the probe took %v with a stuck keyring", d)
+	}
+	if !r.CLIPresent || r.Authed {
+		t.Errorf("a stuck keyring with no other credential must not read as signed in: %+v", r)
+	}
+	if !strings.Contains(r.Note, "keyring") {
+		t.Errorf("Note = %q, want it to say the keyring did not answer", r.Note)
+	}
+}
+
+func TestProbeRuntime_CancelledContextEndsTheProbe(t *testing.T) {
+	cleanAuthEnv(t)
+	fakeBins(t, "agy")
+	inner := &blockingKeyring{release: make(chan struct{})}
+	defer close(inner.release)
+	origBackend := probeKeyringBackend
+	probeKeyringBackend = func() KeyringBackend { return inner }
+	defer func() { probeKeyringBackend = origBackend }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(30 * time.Millisecond); cancel() }()
+	done := make(chan ProbeResult, 1)
+	go func() { done <- ProbeRuntime(ctx, "agy") }()
+	select {
+	case r := <-done:
+		if r.Authed {
+			t.Errorf("a cancelled probe must not read as signed in: %+v", r)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the probe did not end when its context was cancelled")
 	}
 }
