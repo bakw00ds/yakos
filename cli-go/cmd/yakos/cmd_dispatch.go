@@ -218,6 +218,60 @@ func runDispatch(yakosRoot string, args []string) {
 			os.Exit(1)
 		}
 	}
+
+	// What the run says about itself goes to stderr, and a failed run exits
+	// non-zero. The agent text above no longer carries the runtime's raw stream,
+	// which is where a failure message used to show up.
+	if code := reportDispatchOutcome(os.Stderr, res); code != 0 {
+		os.Exit(code)
+	}
+}
+
+// reportDispatchOutcome writes to w what a finished run says about itself and
+// returns the process exit code (K-135).
+//
+//   - A runtime that exits non-zero keeps its exit code. An exit code the
+//     dispatch layer could not read (a runtime killed by a signal) becomes 1.
+//   - A runtime that reported a failure in its own output (a codex turn.failed,
+//     a claude error result) but exited 0 makes dispatch exit 1: the run did not
+//     succeed.
+//   - The failure message, the exit code and the runtime's stderr tail are
+//     printed. The agent text on stdout does not carry them.
+//   - Text that is incomplete says why, once per cause: the 1 MiB text cap, and
+//     lines skipped for exceeding the per-line cap.
+func reportDispatchOutcome(w io.Writer, res dispatch.Result) int {
+	name := res.Runtime
+	if name == "" {
+		name = "runtime"
+	}
+
+	if res.TextCapped {
+		fmt.Fprintf(w, "dispatch: output truncated at %d MiB\n", runtime.MaxParsedTextBytes>>20)
+	}
+	switch {
+	case res.LinesDropped == 1:
+		fmt.Fprintf(w, "dispatch: line exceeded %d bytes and was skipped\n", runtime.MaxStreamLineBytes)
+	case res.LinesDropped > 1:
+		fmt.Fprintf(w, "dispatch: %d lines exceeded %d bytes and were skipped\n", res.LinesDropped, runtime.MaxStreamLineBytes)
+	}
+
+	if res.Error != "" {
+		fmt.Fprintf(w, "dispatch: %s reported an error: %s\n", name, res.Error)
+	}
+	code := res.ExitCode
+	switch {
+	case code != 0:
+		fmt.Fprintf(w, "dispatch: %s exited with code %d\n", name, code)
+		if tail := strings.TrimSpace(res.StderrTail); tail != "" {
+			fmt.Fprintf(w, "dispatch: %s stderr (last lines):\n%s\n", name, tail)
+		}
+		if code < 0 {
+			code = 1
+		}
+	case res.Error != "":
+		code = 1
+	}
+	return code
 }
 
 // inferProjectFromCWD attempts to resolve a project path from cwd using the
