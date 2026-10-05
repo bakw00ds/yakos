@@ -237,7 +237,9 @@ func runDispatch(yakosRoot string, args []string) {
 //     a claude error result) but exited 0 makes dispatch exit 1: the run did not
 //     succeed.
 //   - The failure message, the exit code and the runtime's stderr tail are
-//     printed. The agent text on stdout does not carry them.
+//     printed. The agent text on stdout does not carry them. The message and
+//     the tail come from the harness, so they pass through sanitizeForTerminal:
+//     no escape sequence or other control character reaches the terminal.
 //   - Text that is incomplete says why, once per cause: the 1 MiB text cap, and
 //     lines skipped for exceeding the per-line cap.
 func reportDispatchOutcome(w io.Writer, res dispatch.Result) int {
@@ -257,13 +259,13 @@ func reportDispatchOutcome(w io.Writer, res dispatch.Result) int {
 	}
 
 	if res.Error != "" {
-		fmt.Fprintf(w, "dispatch: %s reported an error: %s\n", name, res.Error)
+		fmt.Fprintf(w, "dispatch: %s reported an error: %s\n", name, sanitizeForTerminal(res.Error))
 	}
 	code := res.ExitCode
 	switch {
 	case code != 0:
 		fmt.Fprintf(w, "dispatch: %s exited with code %d\n", name, code)
-		if tail := strings.TrimSpace(res.StderrTail); tail != "" {
+		if tail := strings.TrimSpace(sanitizeForTerminal(res.StderrTail)); tail != "" {
 			fmt.Fprintf(w, "dispatch: %s stderr (last lines):\n%s\n", name, tail)
 		}
 		if code < 0 {

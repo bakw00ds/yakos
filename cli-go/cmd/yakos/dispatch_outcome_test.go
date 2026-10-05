@@ -9,6 +9,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -65,6 +66,25 @@ func TestReportDispatchOutcome(t *testing.T) {
 			res:      dispatch.Result{ExitCode: 2},
 			wantCode: 2,
 			want:     []string{"dispatch: runtime exited with code 2"},
+		},
+		{
+			// The harness's words reach the terminal as plain text: an OSC title
+			// change and a screen clear in the message, and an OSC (which the stderr
+			// tail processing leaves alone) beside colour codes in the tail.
+			name: "terminal escapes in the harness message and stderr tail are not printed",
+			res: dispatch.Result{
+				Runtime:    "codex",
+				ExitCode:   1,
+				Error:      "model \x1b]0;title\x07not\x1b[2J supported",
+				StderrTail: "warn \x1b]0;owned\x07now \x1b[2J done\n\x1b[31mred\x1b[0m\r\n",
+			},
+			wantCode: 1,
+			want: []string{
+				"dispatch: codex reported an error: model not supported\n",
+				"dispatch: codex exited with code 1",
+				"dispatch: codex stderr (last lines):\nwarn now  done\nred\n",
+			},
+			absent: []string{"\x1b", "\x07", "\r", "title", "owned"},
 		},
 		{
 			name:     "text cap",
@@ -228,6 +248,35 @@ func TestDispatchCLI_RuntimeExitCodeAndStderrTailAreKept(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "agy exited with code 7") || !strings.Contains(stderr, "boom") {
 		t.Errorf("stderr lacks the exit code or the stderr tail:\n%s", stderr)
+	}
+}
+
+// The harness's own words reach the terminal as plain text. A codex failure
+// message carrying an OSC title change and a screen clear, and a stderr tail
+// carrying an OSC, arrive without a single control byte.
+func TestDispatchCLI_HarnessTextCarryingEscapesIsPrintedAsPlainText(t *testing.T) {
+	msg, err := json.Marshal("model \x1b]0;title\x07not\x1b[2J supported")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := `{"type":"thread.started","thread_id":"t"}` + "\n" +
+		`{"type":"turn.started"}` + "\n" +
+		`{"type":"turn.failed","error":{"message":` + string(msg) + `}}` + "\n"
+	script := dataCat(t, []byte(stream)) + "\n" +
+		`printf 'warn \033]0;owned\007now\033[2J done\n' >&2` + "\nexit 1"
+	stdout, stderr, exit := runDispatchWithStub(t, "codex", script)
+
+	if exit != 1 || stdout != "" {
+		t.Errorf("exit=%d stdout=%q", exit, stdout)
+	}
+	if strings.ContainsAny(stderr, "\x1b\x07") {
+		t.Errorf("a control byte reached the terminal: %q", stderr)
+	}
+	if !strings.Contains(stderr, "codex reported an error: model not supported\n") {
+		t.Errorf("stderr lacks the harness error as plain text:\n%q", stderr)
+	}
+	if !strings.Contains(stderr, "codex stderr (last lines):\nwarn now done\n") {
+		t.Errorf("stderr lacks the stderr tail as plain text:\n%q", stderr)
 	}
 }
 

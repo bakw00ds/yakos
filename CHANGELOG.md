@@ -73,7 +73,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     bash path does), not the raw stream. A failed run prints the runtime's own
     error message and its stderr tail to stderr and exits non-zero (the
     runtime's exit code, or 1 when the runtime reported a failure but exited 0),
-    where the raw JSONL used to carry the message. Text cut at the 1 MiB cap, or
+    where the raw JSONL used to carry the message. Both come from the harness,
+    so they are printed with every escape sequence (CSI, OSC and the other
+    string sequences, short forms such as a terminal reset) and every control
+    character removed except newline and tab; the agent text itself is printed
+    as it is, as the bash path prints it. Text cut at the 1 MiB cap, or
     a line skipped for exceeding 2 MiB, prints one stderr notice
     (`output truncated at 1 MiB`, `line exceeded N bytes and was skipped`);
     `Result.TextCapped` and `Result.LinesDropped` say which.
@@ -98,14 +102,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **One-shot Go dispatches now write a `usage` object to the dispatch-log.**
   `dispatch.Run` never filled `Result.Usage`, so a `dispatch_finished` line it
   wrote had no tokens or cost (the bash path always had them). It now carries
-  what the runtime reported, so the per-agent budgets and the readers of
-  `usage` (the Performance dashboard, the metrics readers) see these runs.
-  `yakos cost` rolls up the `est_*` fields and is unchanged. Lines for
-  runtimes that report nothing are unchanged. `cost.Usage` now documents the
-  token convention (fresh input plus separate cache counts) and one known gap:
-  for codex the bash dispatcher wrote the raw input total with `cache_read` 0
-  under the same keys, so the two writers disagree until K-136 aligns them. A
-  test reads a log mixing both writers and old and new rows.
+  what the runtime reported, so the readers of `usage` see these runs: the
+  Performance dashboard, the metrics readers, and the per-agent budgets, which
+  sum the dollar figure that only claude reports. `yakos cost` does not read
+  `usage` until P0d. Lines for runtimes that report nothing are unchanged.
+  `cost.Usage` now documents the token convention (fresh input plus separate
+  cache counts) and one known gap: for codex the bash dispatcher wrote the raw
+  input total with `cache_read` 0 under the same keys, so the two writers
+  disagree until K-136 aligns them. A test reads a log mixing both writers and
+  old and new rows.
 - `output_bytes` of a streamed codex or agy chat turn now measures the text the
   console received, not the raw JSONL.
 - **MCP `yakos.dispatch` no longer offers `gemini`, and lists all four model
