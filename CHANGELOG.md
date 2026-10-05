@@ -60,12 +60,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine. The sidecar's environment also loses every `CLAUDE_CODE_OAUTH*`
   variable and any value that holds an OAuth token, even one added through
   `YAKOS_DISPATCH_ENV_PASSTHROUGH`, and `sidecar.mjs` repeats the key check (exit
-  status 78, one stderr line, no credential material) for a sidecar started any
-  other way. The bash `claude-sdk` runtime (the Python Agent SDK behind
+  status 78, one stderr line, no credential material) and strips the same
+  variables from its own environment, for a sidecar started any other way. The
+  bash `claude-sdk` runtime (the Python Agent SDK behind
   `yakos dispatch --runtime claude-sdk`) has the same gate:
   `yk_rt_claude_sdk_dispatch` stops with one FATAL line before it composes
   agents or starts python, runs python under `env -u` for the same OAuth
-  variables, and `claude-sdk-dispatch.py` repeats the check (exit 78). The claude
+  variables (names matched in any letter case), and `claude-sdk-dispatch.py`
+  repeats the check (exit 78). The claude
   CLI adapters, `launch` and `yakos start --runtime claude-sdk` are unchanged and
   still forward `CLAUDE_CODE_OAUTH_TOKEN`, because they run Claude Code.
   `yakos auth` no longer says the claude login covers claude-sdk: `status`
