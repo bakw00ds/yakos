@@ -402,10 +402,18 @@ func TestAgentToJSON_NoTools(t *testing.T) {
 // ---- IsKnownRuntime + GenericAgentForRuntime ---------------------------------
 
 func TestIsKnownRuntime_KnownNames(t *testing.T) {
-	for _, name := range []string{"claude", "codex", "agy", "gemini"} {
+	for _, name := range []string{"claude", "codex", "agy"} {
 		if !IsKnownRuntime(name) {
 			t.Errorf("IsKnownRuntime(%q) = false, want true", name)
 		}
+	}
+}
+
+// gemini was retired from the runtime registry (K-132); a bare "gemini" agent
+// name is no longer a catch-all.
+func TestIsKnownRuntime_GeminiRetired(t *testing.T) {
+	if IsKnownRuntime("gemini") {
+		t.Error("IsKnownRuntime(\"gemini\") = true, want false: the shim is retired")
 	}
 }
 
@@ -422,7 +430,7 @@ func TestIsKnownRuntime_UnknownName(t *testing.T) {
 }
 
 func TestGenericAgentForRuntime_Fields(t *testing.T) {
-	for _, name := range []string{"claude", "codex", "agy", "gemini"} {
+	for _, name := range []string{"claude", "codex", "agy"} {
 		agent := GenericAgentForRuntime(name)
 		if agent.ID != name {
 			t.Errorf("GenericAgentForRuntime(%q).ID = %q, want %q", name, agent.ID, name)

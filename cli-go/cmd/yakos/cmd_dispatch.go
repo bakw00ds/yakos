@@ -6,15 +6,18 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/dispatch"
-	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/team"
 )
+
+// runtimeIDRe is the shape of a runtime id taken from the environment.
+var runtimeIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
 // runDispatch implements `yakos dispatch` natively in Go.
 //
@@ -25,7 +28,9 @@ import (
 // Flags:
 //
 //	--runtime <id>       Override the agent's frontmatter runtime: field
-//	--model <tier>       Override the model tier (haiku|sonnet|opus|fable); aliases expanded
+//	--model <name>       Override the model: a Claude tier (haiku|sonnet|opus|fable),
+//	                     an alias (cheap|balanced|best|reasoning|frontier) or, for
+//	                     codex and agy, a model id; validated per resolved runtime
 //	--project <path>     Project repo path
 //	--timeout <secs>     Max time to wait (default 600)
 //	--eval-run-id <id>   Mark as model-routing eval dispatch
@@ -142,15 +147,33 @@ func runDispatch(yakosRoot string, args []string) {
 		os.Exit(1)
 	}
 
-	// Resolve model alias (e.g. "balanced" → "sonnet").
-	// The runtime package validates only concrete tiers; we expand aliases here.
-	if modelOverride != "" {
-		modelOverride = runtime.ResolveAlias(modelOverride)
-		if !runtime.ValidateTier(modelOverride) {
-			fmt.Fprintf(os.Stderr, "dispatch: invalid model tier %q (must be haiku|sonnet|opus|fable)\n", modelOverride)
-			os.Exit(1)
-		}
+	// YAKOS_RUNTIME is an ambient default read here, on the CLI one-shot path
+	// only; the daemon never reads it. It ranks below the agent's pin and the
+	// project's .yakos.yml, where cli/lib/dispatch.sh reads it.
+	envRuntime := strings.TrimSpace(os.Getenv("YAKOS_RUNTIME"))
+	if envRuntime != "" && !runtimeIDRe.MatchString(envRuntime) {
+		fmt.Fprintln(os.Stderr, "dispatch: ignoring YAKOS_RUNTIME: not a runtime id")
+		envRuntime = ""
 	}
+
+	// The model override is an alias or an id whose meaning depends on the
+	// runtime the agent resolves to, which is not known until the agent's pin is
+	// read. dispatch.Run therefore expands aliases and validates the model
+	// against the resolved runtime; nothing is decided about it here.
+
+	// Resolve the runtime now so the log line below names the runtime that will
+	// actually run (and why), not "(from frontmatter)". dispatch.Run resolves
+	// it again from the same inputs. A failure here is not reported: Run owns
+	// the authoritative errors and runs the budget preflight first (a
+	// hard-stopped agent must exit 4 whether or not a runtime is installed), so
+	// the line just says none was available.
+	choice, rerr := dispatch.ResolveRuntime(dispatch.RouteQuery{
+		YakosRoot:  yakosRoot,
+		Project:    project,
+		Agent:      agentName,
+		Override:   runtimeOverride,
+		EnvDefault: envRuntime,
+	})
 
 	// Log the dispatch parameters to stderr (mirrors dispatch.sh:347).
 	resolvedModel := modelOverride
@@ -163,9 +186,12 @@ func runDispatch(yakosRoot string, args []string) {
 	} else if evalRunID != "" {
 		chosenBy = "eval"
 	}
-	runtimeDesc := runtimeOverride
-	if runtimeDesc == "" {
-		runtimeDesc = "(from frontmatter)"
+	runtimeDesc := "(none available)"
+	if rerr == nil {
+		runtimeDesc = choice.Runtime + " (by:" + choice.ChosenBy + ")"
+		if choice.FallbackFrom != "" {
+			runtimeDesc += " (fallback from " + choice.FallbackFrom + ")"
+		}
 	}
 	fmt.Fprintf(os.Stderr, "yakos dispatch: agent=%s runtime=%s model=%s (by:%s) project=%s\n",
 		agentName, runtimeDesc, resolvedModel, chosenBy, project)
@@ -183,16 +209,17 @@ func runDispatch(yakosRoot string, args []string) {
 	}
 
 	req := dispatch.Request{
-		AgentName:      agentName,
-		Task:           task,
-		Project:        project,
-		Runtime:        runtimeOverride,
-		Model:          modelOverride,
-		EvalRunID:      evalRunID,
-		AllowRoot:      allowRoot,
-		Timeout:        timeoutSecs,
-		YakosRoot:      yakosRoot,
-		ConversationID: cliConvID,
+		AgentName:         agentName,
+		Task:              task,
+		Project:           project,
+		Runtime:           runtimeOverride,
+		RuntimeEnvDefault: envRuntime,
+		Model:             modelOverride,
+		EvalRunID:         evalRunID,
+		AllowRoot:         allowRoot,
+		Timeout:           timeoutSecs,
+		YakosRoot:         yakosRoot,
+		ConversationID:    cliConvID,
 	}
 
 	stdout, _, err := dispatch.Run(context.Background(), req)
@@ -269,6 +296,11 @@ Spawn a yakOS agent on the runtime its frontmatter declares (or a
 runtime override). One-shot, non-interactive — captures stdout and
 returns the runtime's exit code.
 
+Runtime order: --runtime, the agent's `+"`"+`runtime:`+"`"+`, .yakos.yml per-domain,
+.yakos.yml default-runtime, $YAKOS_RUNTIME, ~/.yakos-state/default-runtime,
+then claude. The agent's runtime-fallback and .yakos.yml default-fallback
+are tried, in that order, when the choice is not installed or signed in.
+
 Arguments:
   <agent-name>      The agent's id (e.g. backend, security-reviewer,
                     pandaos-database). Must exist in the composed agent
@@ -278,8 +310,12 @@ Arguments:
 
 Flags:
   --runtime <id>    Override the agent's frontmatter `+"`"+`runtime:`+"`"+` field.
-  --model <tier>    Override the model tier for this dispatch only.
-                    Accepted values: haiku | sonnet | opus | fable.
+  --model <tier>    Override the model for this dispatch only.
+                    claude: haiku | sonnet | opus | fable. Any runtime
+                    also takes an alias (cheap | balanced | best |
+                    reasoning | frontier); codex and agy take a model id
+                    such as gpt-5. Validated against the runtime the
+                    agent resolves to.
                     Recorded as model_chosen_by:"override" in the
                     dispatch-log. Does not affect the runtime selection.
   --project <path>  Project repo path. Defaults to inferring from cwd

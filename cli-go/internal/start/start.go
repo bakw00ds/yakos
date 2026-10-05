@@ -41,9 +41,11 @@ import (
 	runtimeenv "github.com/bakw00ds/yakos/internal/runtime"
 )
 
-// KnownRuntimes is the ordered list of built-in runtime IDs. Mirrors
-// YK_RT_KNOWN_BUILTIN in runtime-resolve.sh.
-var KnownRuntimes = []string{"claude", "claude-sdk", "codex", "agy", "antigravity-sdk", "gemini"}
+// KnownRuntimes is the ordered list of built-in runtime IDs `yakos start` can
+// launch. It mirrors YK_RT_KNOWN_BUILTIN in runtime-resolve.sh minus gemini: the
+// deprecation shim is past its removal date, so `--runtime gemini` is rejected
+// as unknown and agy is the successor (K-132).
+var KnownRuntimes = []string{"claude", "claude-sdk", "codex", "agy", "antigravity-sdk"}
 
 // Config controls all inputs to the start command.
 type Config struct {

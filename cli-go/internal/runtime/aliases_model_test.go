@@ -72,6 +72,7 @@ func TestDefaultModelFor(t *testing.T) {
 		{"claude", "sonnet"},
 		{"codex", "gpt-5-mini"},
 		{"agy", "gemini-3.1-pro"},
+		{"gemini", ""}, // retired
 		{"nope", ""},
 		{"", ""},
 	}
@@ -105,8 +106,8 @@ func TestValidateModelFor(t *testing.T) {
 		{"codex", "../etc/passwd", false},        // path chars
 		{"agy", strings.Repeat("a", 65), false},  // too long
 		{"codex", strings.Repeat("a", 64), true}, // exactly at the bound
-		// Unknown runtimes accept nothing.
-		{"nope", "gpt-5", false}, {"", "gpt-5", false},
+		// Retired and unknown runtimes accept nothing.
+		{"gemini", "gemini-2.5-pro", false}, {"nope", "gpt-5", false}, {"", "gpt-5", false},
 	}
 	for _, tc := range cases {
 		if got := ValidateModelFor(tc.rt, tc.model); got != tc.want {

@@ -86,8 +86,9 @@ type Adapter interface {
 	Dispatch(ctx context.Context, req DispatchRequest) (*DispatchResult, error)
 }
 
-// Known lists all registered runtime names.
-var Known = []string{"claude", "codex", "agy", "gemini"}
+// Known lists all registered runtime names. gemini is not among them: the
+// deprecation shim was past its removal date, and agy is its successor.
+var Known = []string{"claude", "codex", "agy"}
 
 // Resolve returns the Adapter for the given runtime name, or an error if the
 // name is not recognized.
@@ -99,9 +100,7 @@ func Resolve(name string) (Adapter, error) {
 		return &CodexAdapter{}, nil
 	case "agy":
 		return &AgyAdapter{}, nil
-	case "gemini":
-		return &GeminiAdapter{}, nil
 	default:
-		return nil, fmt.Errorf("runtime: unknown runtime %q (known: claude, codex, agy, gemini)", name)
+		return nil, fmt.Errorf("runtime: unknown runtime %q (known: claude, codex, agy)", name)
 	}
 }

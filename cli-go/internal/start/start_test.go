@@ -400,13 +400,25 @@ func TestRuntimeCapabilities(t *testing.T) {
 // ---- (l) known runtimes list ------------------------------------------------
 
 func TestKnownRuntimes(t *testing.T) {
-	for _, rt := range []string{"claude", "codex", "gemini", "agy"} {
+	for _, rt := range []string{"claude", "codex", "agy"} {
 		if !isKnownRuntime(rt) {
 			t.Errorf("isKnownRuntime(%q) = false; want true", rt)
 		}
 	}
 	if isKnownRuntime("badruntime") {
 		t.Error("isKnownRuntime(badruntime) = true; want false")
+	}
+}
+
+// gemini was retired (K-132): `yakos start --runtime gemini` is an unknown runtime.
+func TestKnownRuntimes_GeminiRetired(t *testing.T) {
+	if isKnownRuntime("gemini") {
+		t.Error("isKnownRuntime(gemini) = true; want false: the shim is retired")
+	}
+	for _, k := range KnownRuntimes {
+		if k == "gemini" {
+			t.Errorf("KnownRuntimes must not list gemini: %v", KnownRuntimes)
+		}
 	}
 }
 

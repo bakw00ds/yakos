@@ -110,6 +110,12 @@ type Result struct {
 	ModelChosenBy string
 	ModelResolved string
 	EvalRunID     string
+
+	// RuntimeChosenBy and FallbackFrom record how the runtime was picked
+	// (K-132): which rule chose it, and the preferred runtime that was skipped
+	// when the chain fell back. Empty on results that never reached routing.
+	RuntimeChosenBy string
+	FallbackFrom    string
 }
 
 // finishedEvent is the full dispatch_finished schema (PR #40 + #31 + #34 + #32 + Phase 2).
@@ -142,6 +148,10 @@ type finishedEvent struct {
 	OperatorID     string `json:"operator_id,omitempty"`
 	ConversationID string `json:"conversation_id,omitempty"`
 	SessionID      string `json:"session_id,omitempty"`
+	// K-132 routing fields — additive-optional; absent on legacy lines and on
+	// events that never reached runtime resolution.
+	RuntimeChosenBy string `json:"runtime_chosen_by,omitempty"`
+	FallbackFrom    string `json:"fallback_from,omitempty"`
 }
 
 // writeFinished writes a dispatch_finished event to the dispatch-log.
@@ -167,6 +177,10 @@ func writeFinished(req Request, res Result, ts time.Time, logPath string) {
 		OperatorID:     req.OperatorID,
 		ConversationID: req.ConversationID,
 		SessionID:      req.SessionID,
+		// Routing fields come from the request: it is stamped once by
+		// routeDispatch, so every Result constructor stays untouched.
+		RuntimeChosenBy: req.RuntimeChosenBy,
+		FallbackFrom:    req.FallbackFrom,
 	}
 
 	// eval_run_id: null when empty, string when set.

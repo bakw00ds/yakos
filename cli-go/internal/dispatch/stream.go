@@ -31,14 +31,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
 	"unicode/utf8"
 
-	"github.com/bakw00ds/yakos/internal/agentscompose"
-	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/runtime"
@@ -142,6 +139,16 @@ type StreamChunk struct {
 	ModelResolved string
 	TotalCostUSD  float64
 
+	// RuntimeResolved is the runtime that actually ran the turn (an `auto` pane
+	// learns it here). Summary only.
+	RuntimeResolved string
+
+	// NativeSessionID is the runtime's own session id for the turn, when its
+	// result frame carries one (claude's session_id). A chat handler stores it
+	// so the next one-shot turn can resume the conversation. It is already
+	// checked with runtime.ValidSessionID. Summary only; empty otherwise.
+	NativeSessionID string
+
 	// AskUserQuestion fields — populated only when Type=="ask_user_question".
 	// These are emitted by the SDK engine (P2b) when the model invokes the
 	// AskUserQuestion tool and needs operator input before continuing.
@@ -238,6 +245,11 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 	if err := validateIdentityField("session_id", p.SessionID); err != nil {
 		return Result{}, err
 	}
+	// The resume id is claude's own session id; it ends up on argv as
+	// `--resume <id>`, so it gets the same alphabet check as the identity fields.
+	if err := validateIdentityField("resume_session_id", p.ResumeSessionID); err != nil {
+		return Result{}, err
+	}
 
 	// --- Dual-regime operator_id (mirrors Service.Run) ---
 	var operatorID string
@@ -268,63 +280,38 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		return Result{}, fmt.Errorf("dispatch: task is required")
 	}
 
-	// --- Resolve model and agent (mirrors Run steps 2-5) ---
-	modelChosenBy := "frontmatter"
-	modelResolved := "sonnet"
-
-	if p.Model != "" {
-		if !runtime.ValidateTier(p.Model) {
-			return Result{}, fmt.Errorf("dispatch: invalid model tier %q (must be haiku|sonnet|opus|fable)", p.Model)
-		}
-		modelResolved = p.Model
-		modelChosenBy = "override"
-	}
-
-	roster, err := agentscompose.Compose(yakosRoot, project)
-	if err != nil {
-		return Result{}, fmt.Errorf("dispatch: compose agents: %w", err)
-	}
-
-	// See resolve.go for resolution order (specialist → generic runtime → error).
-	targetAgent, err := resolveAgent(roster, p.Agent, yakosRoot, project)
+	// --- Route: roster, agent, runtime, model (mirrors Run steps 2-5) ---
+	// resolve.go routeDispatch is shared with Run, so both paths pick the
+	// runtime and model by one rule. The daemon never supplies a
+	// YAKOS_RUNTIME default (RuntimeEnvDefault stays empty here).
+	rr, err := routeDispatch(routeInput{
+		YakosRoot:       yakosRoot,
+		Project:         project,
+		Agent:           p.Agent,
+		RuntimeOverride: p.Runtime,
+		ModelOverride:   p.Model,
+	})
 	if err != nil {
 		return Result{}, err
 	}
-
-	if p.Model == "" && targetAgent.Model != "" {
-		modelResolved = targetAgent.Model
-		_ = modelChosenBy // keep "frontmatter"
-	}
-
-	// max_model ceiling (K-119), applied after pin resolution exactly as in
-	// Run. A clamped model is an explicit pin for the chat argv.
-	clampedModel := false
-	if clamped, note := budget.ClampModel(p.Agent, modelResolved, budget.Options{}); note != "" {
-		modelResolved = clamped
-		clampedModel = true
-		fmt.Fprintf(os.Stderr, "yakos budget: %s\n", note)
-	}
-
-	// See resolve.go for precedence (override → known-runtime name → "claude").
-	runtimeName := resolveRuntime(p.Agent, p.Runtime)
-	adapter, err := runtime.Resolve(runtimeName)
-	if err != nil {
-		return Result{}, fmt.Errorf("dispatch: %w", err)
-	}
+	targetAgent := rr.Agent
+	adapter := rr.Adapter
 
 	req := Request{
 		AgentName:       p.Agent,
 		Task:            p.Task,
 		Project:         project,
-		Runtime:         runtimeName,
+		Runtime:         rr.Runtime,
+		RuntimeChosenBy: rr.RuntimeChosenBy,
+		FallbackFrom:    rr.FallbackFrom,
 		Model:           p.Model,
 		YakosRoot:       yakosRoot,
 		Timeout:         p.Timeout,
 		OperatorID:      operatorID,
 		ConversationID:  p.ConversationID,
 		SessionID:       p.SessionID,
-		ModelChosenBy:   modelChosenBy,
-		ModelResolved:   modelResolved,
+		ModelChosenBy:   rr.ModelChosenBy,
+		ModelResolved:   rr.Model,
 		WorkDirOverride: p.WorkDirOverride,
 		Effort:          p.Effort,
 	}
@@ -333,12 +320,17 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		Project:           project,
 		UserText:          p.Task,
 		AgentSystemPrompt: targetAgent.Prompt,
-		ModelOverride:     modelResolved,
-		ModelExplicit:     p.Model != "" || targetAgent.Model != "" || clampedModel,
+		ModelOverride:     rr.Model,
+		ModelExplicit:     rr.ModelExplicit,
 		WorkDirOverride:   p.WorkDirOverride,
 		Effort:            p.Effort,
 		// AllowRoot is not plumbed through Params (CLI-only flag); defaults to
 		// false for console/gRPC-originated streaming dispatches.
+	}
+	// Continuity: only the claude adapter resumes a native session. The id was
+	// format-checked above; other runtimes ignore the field anyway.
+	if rr.Runtime == "claude" {
+		chatReq.ResumeSessionID = p.ResumeSessionID
 	}
 
 	// --- Acquire governor slot (mirrors Service.Run) ---
@@ -406,6 +398,7 @@ func execWithStreaming(
 		stderrBuf      bytes.Buffer
 		costUSD        float64
 		usageCost      *cost.Usage
+		nativeSession  string // claude session_id from the result frame
 		textBlocks     = make(map[int]struct{})
 		toolUseBlocks  = make(map[int]*runtime.ToolEvent)          // index → in-progress tool_use
 		toolIDToName   = make(map[string]string)                    // tool-use id → name for tool_result correlation
@@ -468,6 +461,7 @@ func execWithStreaming(
 				if res.IsResult {
 					costUSD = res.CostUSD
 					usageCost = res.Usage
+					nativeSession = res.SessionID
 				}
 			} else {
 				// Buffered path: accumulate with ceiling check.
@@ -533,15 +527,17 @@ func execWithStreaming(
 	}
 
 	result := Result{
-		ExitCode:      exitCode,
-		DurationS:     durationS,
-		OutputBytes:   outputBytes,
-		TaskBytes:     int64(len(req.Task)),
-		StderrTail:    stderrTail,
-		StderrTrunc:   stderrTrunc,
-		Usage:         usageCost,
-		ModelChosenBy: req.ModelChosenBy,
-		ModelResolved: req.ModelResolved,
+		ExitCode:        exitCode,
+		DurationS:       durationS,
+		OutputBytes:     outputBytes,
+		TaskBytes:       int64(len(req.Task)),
+		StderrTail:      stderrTail,
+		StderrTrunc:     stderrTrunc,
+		Usage:           usageCost,
+		ModelChosenBy:   req.ModelChosenBy,
+		ModelResolved:   req.ModelResolved,
+		RuntimeChosenBy: req.RuntimeChosenBy,
+		FallbackFrom:    req.FallbackFrom,
 	}
 
 	// Write dispatch_finished identically to Run (parity invariant).
@@ -549,12 +545,14 @@ func execWithStreaming(
 
 	// Emit the terminal summary chunk.
 	onChunk(StreamChunk{
-		Type:          "summary",
-		ExitCode:      exitCode,
-		DurationS:     durationS,
-		OutputBytes:   outputBytes,
-		ModelResolved: req.ModelResolved,
-		TotalCostUSD:  costUSD,
+		Type:            "summary",
+		ExitCode:        exitCode,
+		DurationS:       durationS,
+		OutputBytes:     outputBytes,
+		ModelResolved:   req.ModelResolved,
+		TotalCostUSD:    costUSD,
+		RuntimeResolved: req.Runtime,
+		NativeSessionID: nativeSession,
 	})
 
 	if execErr != nil {

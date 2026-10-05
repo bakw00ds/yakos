@@ -61,6 +61,9 @@ type StreamLineResult struct {
 	ToolEvent *runtime.ToolEvent
 	// ThinkingEvent is non-nil when a thinking delta was decoded.
 	ThinkingEvent *runtime.ThinkingEvent
+	// SessionID is the claude session id carried by the terminal result line
+	// ("" on every other line, and when the id fails runtime.ValidSessionID).
+	SessionID string
 }
 
 // ParseAndDispatch parses one NDJSON line from a claude stream-json output and
@@ -102,6 +105,11 @@ func ParseAndDispatch(line []byte, ps *StreamParserState, onChunk func(StreamChu
 	// and delete it here to keep the map bounded across long sessions.
 	cleanupTextBlockOnStop(line, ps.TextBlocks)
 
+	sessionID := ""
+	if isResult {
+		sessionID = runtime.ResultSessionID(line)
+	}
+
 	return StreamLineResult{
 		Token:         tok,
 		IsResult:      isResult,
@@ -109,6 +117,7 @@ func ParseAndDispatch(line []byte, ps *StreamParserState, onChunk func(StreamChu
 		Usage:         usage,
 		ToolEvent:     toolEv,
 		ThinkingEvent: thinkEv,
+		SessionID:     sessionID,
 	}
 }
 

@@ -66,11 +66,27 @@ func TestResolve(t *testing.T) {
 			continue
 		}
 		if adapter.Name() != name {
-			// gemini is a special case: its Name() is "gemini" (shim)
-			if name != "gemini" || adapter.Name() != "gemini" {
-				t.Errorf("Resolve(%q).Name() = %q, want %q", name, adapter.Name(), name)
-			}
+			t.Errorf("Resolve(%q).Name() = %q, want %q", name, adapter.Name(), name)
 		}
+	}
+}
+
+// TestGeminiRetired pins the retirement: gemini is not a registered runtime
+// and cannot be resolved. The deprecation shim was past its 2026-09-01 removal
+// date; agy is the successor. (K-132 / D14)
+func TestGeminiRetired(t *testing.T) {
+	for _, k := range Known {
+		if k == "gemini" {
+			t.Fatalf("Known must not contain gemini: %v", Known)
+		}
+	}
+	if _, err := Resolve("gemini"); err == nil {
+		t.Error("Resolve(gemini): expected an unknown-runtime error, got nil")
+	} else if !strings.Contains(err.Error(), "unknown runtime") {
+		t.Errorf("Resolve(gemini) error = %q, want it to say unknown runtime", err)
+	}
+	if want := []string{"claude", "codex", "agy"}; strings.Join(Known, ",") != strings.Join(want, ",") {
+		t.Errorf("Known = %v, want %v", Known, want)
 	}
 }
 
