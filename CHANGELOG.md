@@ -24,9 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2 MiB line cap, a 1 MiB text cap), strip NUL bytes like the Go hook twins,
   and never retain the line they are fed.
   - `dispatch.Run` fills new `Result` fields (`Text`, `SessionID`, `ModelID`,
-    `Provider`, `Runtime`, `Truncated`, `Parsed`, `Error`; `Usage` now carries
-    tokens, cache counts and, for claude, the cost) and still returns the raw
-    stdout.
+    `Provider`, `Runtime`, `Parsed`, `Error`, and `Truncated` with its reasons
+    `TextCapped` and `LinesDropped`; `Usage` now carries tokens, cache counts
+    and, for claude, the cost) and still returns the raw stdout.
   - The MCP `yakos.dispatch` tool and `yakos.dispatch.run` return one shared
     object: `{text, scan, exit_code, duration_s, output_bytes, runtime,
     model_resolved, model_id, provider, session_id, usage, error}`. `text` is
@@ -37,9 +37,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     NDJSON), and each node's token usage is recorded in the per-run
     `node-dispatch.ndjson`. A failed node's error carries the runtime's own
     message.
-  - The console receives codex and agy answers as text (one chunk, as before)
-    with a summary chunk carrying the usage and session id; a failed turn adds
-    an error chunk. `yakos dispatch` (Go) prints the text.
+  - The Chat handler now receives codex and agy answers as text (one chunk, as
+    before) instead of raw JSONL, and a failed turn adds an error chunk, which
+    the pane renders as an error message. The summary chunk carries the usage
+    and the native session id for the handler, but the handler does not forward
+    them to the browser yet; that lands with the P0a and P0d work, so the
+    console shows neither today.
+  - `yakos dispatch` (Go) prints the text. A failed run prints the runtime's own
+    error message and its stderr tail to stderr and exits non-zero (the
+    runtime's exit code, or 1 when the runtime reported a failure but exited 0),
+    where the raw JSONL used to carry the message. Text cut at the 1 MiB cap, or
+    a line skipped for exceeding 2 MiB, prints one stderr notice
+    (`output truncated at 1 MiB`, `line exceeded N bytes and was skipped`);
+    `Result.TextCapped` and `Result.LinesDropped` say which.
   - Token counts follow one convention for every harness: `input_tokens` is
     the fresh prompt and cache reads and writes are separate (codex reports its
     input total with the cached part inside it, and is normalized). No price is
@@ -63,12 +73,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budgets see these runs. Lines for runtimes that report nothing are unchanged.
 - `output_bytes` of a streamed codex or agy chat turn now measures the text the
   console received, not the raw JSONL.
-- **MCP `yakos.dispatch` takes any model id.** The tool's schema no longer
-  offers `gemini` (the runtime is retired) and `model` accepts any
-  argument-safe model id (`^[a-z0-9][a-z0-9._:-]{0,63}$`: a tier, an alias or a
-  runtime's own id), where it listed only `haiku`, `sonnet` and `opus`. The
-  schema is advisory; dispatch itself still validates the four Claude tiers
-  until per-runtime model validation (K-132) lands.
+- **MCP `yakos.dispatch` no longer offers `gemini`, and lists all four model
+  tiers.** The runtime is retired, and the `model` list now names every tier
+  dispatch accepts (`haiku`, `sonnet`, `opus`, `fable`; it omitted `fable`). A
+  test ties the list to dispatch's own validation so the two cannot drift.
+  Widening `model` to other runtimes' ids waits for per-runtime validation
+  (K-132).
 
 ## [0.61.0.0] — 2026-10-03
 

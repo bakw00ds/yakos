@@ -530,10 +530,12 @@ configured:
 panes receive a single buffered response. The UI labels buffered panes
 so you know to wait for the full response. A buffered response is the
 agent's text, parsed from the runtime's own output (codex JSONL, agy
-stream-json), never the raw stream; the closing summary chunk carries the
-token usage (`input_tokens` is the fresh prompt, cache counts are separate)
-and the runtime's session id, and a turn the runtime reports as failed adds
-an error chunk with its message.
+stream-json), never the raw stream. A turn the runtime reports as failed adds
+an error chunk, which the pane renders as an error message. The dispatch
+layer's closing summary chunk now also carries the token usage (`input_tokens`
+is the fresh prompt, cache counts are separate) and the runtime's session id,
+but the chat handler does not forward them to the browser yet, so the pane
+shows neither today; that lands with the P0a and P0d work.
 
 Each pane is **multi-turn** with a persisted transcript at
 `<work>/current/chats/<conversationID>.ndjson`. Refreshing the browser
