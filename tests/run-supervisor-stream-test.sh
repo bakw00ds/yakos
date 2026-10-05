@@ -39,6 +39,27 @@ run_side() {
     fi
 }
 
+# nrec <dir> <name-prefix>: how many entries (dotfiles too) start with the prefix. nadds <dir> <session>:
+# the K-128 journal records of the counter and of that session's run state.
+nrec() {
+    local n=0 f
+    for f in "$1"/"$2"*; do [ -e "$f" ] && n=$((n + 1)); done
+    printf '%s' "$n"
+}
+nadds() { printf '%s' "$(( $(nrec "$1" .supervisor-counter.add.) + $(nrec "$1" ".supervisor-run.$2.add.") ))"; }
+# lock_gone <work/current>: 0 once the lock path has been seen ABSENT (30 s at most). "Absent at the instant of the
+# check" is not the property: a launched run's detached wrapper takes the lock for its first claim and its end-of-run
+# decision, so it can reappear a few ms after the last hook released it. A LEAKED lock is never absent, so this
+# still catches one (K-128: the first version of this check failed on exactly that race, in 2 of 40 loaded runs).
+lock_gone() {
+    local w=0
+    while [ "$w" -lt 300 ]; do
+        [ -e "$1/.supervisor-counter.lock" ] || return 0
+        sleep 0.1; w=$((w + 1))
+    done
+    return 1
+}
+
 mksb() { # mksb <name> <yml-body>
     local sb="$TMP/$1"
     mkdir -p "$sb/.claude" "$sb/work/current/logs"
@@ -304,14 +325,23 @@ for side in $sides; do
     sleep 1
     launches="$(grep -c '^ARG:sonnet$' "$rec" 2>/dev/null || true)"
     final="$(tr -d '[:space:]' < "$sb/work/current/.supervisor-counter" 2>/dev/null || true)"
-    if [ "$final" = "12" ]; then ok "(c110) $side concurrent counter ends at 12"; else bad "(c110) $side counter=$final want 12 (lost increments)"; fi
     clog="$sb/work/current/logs/supervisor-stream.ndjson"
     cross="$(grep -c 'score threshold hit' "$clog" 2>/dev/null || true)"
-    if [ "${cross:-0}" = "3" ]; then ok "(c110) $side exactly 3 threshold crossings"; else bad "(c110) $side crossings=$cross want 3"; fi
+    crec="$(nrec "$sb/work/current" .supervisor-counter.add.)"
+    if [ "$crec" = 0 ]; then
+        if [ "$final" = "12" ]; then ok "(c110) $side concurrent counter ends at 12"; else bad "(c110) $side counter=$final want 12 (lost increments)"; fi
+        if [ "${cross:-0}" = "3" ]; then ok "(c110) $side exactly 3 threshold crossings"; else bad "(c110) $side crossings=$cross want 3"; fi
+    else
+        # A hook reached the 3 s lock ceiling on a very slow runner. K-128 journals its increment instead of
+        # dropping it, so the invariants are: nothing lost (counter + waiting records = 12) and never a
+        # double crossing (a journaled tick can only merge two crossings into one, never add one).
+        if [ $((${final:-0} + crec)) = 12 ]; then ok "(c110) $side $crec tick(s) journaled at the lock ceiling, none lost (counter ${final:-0} + $crec records = 12)"; else bad "(c110) $side counter=$final records=$crec want 12 in total (lost increments)"; fi
+        if [ "${cross:-0}" -le 3 ]; then ok "(c110) $side no double crossing (${cross} of at most 3)"; else bad "(c110) $side crossings=$cross, more than 3"; fi
+    fi
     # Each crossing launches, coalesces or defers, and these are all high-risk
     # (rm -rf), so a follow-up may add runs: only "at least one launch" is fixed.
     if [ "${launches:-0}" -ge 1 ]; then ok "(c110) $side the dispatcher ran ($launches runs)"; else bad "(c110) $side no launch at all"; fi
-    [ ! -d "$sb/work/current/.supervisor-counter.lock" ] && ok "(c110) $side lock released" || bad "(c110) $side lock dir left behind"
+    lock_gone "$sb/work/current" && ok "(c110) $side lock released" || bad "(c110) $side lock left behind"
 done
 
 # ---- K-110 review: stale and held counter locks -------------------------------
@@ -333,12 +363,27 @@ for side in $sides; do
     t0=$SECONDS
     run_payload "$side" "$sb" "$(bash_payload "rm -rf /tmp/k110-lock")"
     el=$((SECONDS - t0))
-    if [ "$el" -le 8 ] && [ ! -e "$cur/.supervisor-counter" ] && [ -d "$cur/.supervisor-counter.lock" ] \
+    if [ "$el" -le 20 ] && [ ! -e "$cur/.supervisor-counter" ] && [ -d "$cur/.supervisor-counter.lock" ] \
         && grep -q 'counter lock busy or unremovable' "$cur/logs/supervisor-stream.ndjson" 2>/dev/null; then
         ok "(lock) $side held lock: skipped with WARN in ${el}s, lock untouched"
     else
         bad "(lock) $side held lock: elapsed=${el}s counter=$(cat "$cur/.supervisor-counter" 2>/dev/null) log=$(tail -2 "$cur/logs/supervisor-stream.ndjson" 2>/dev/null | cut -c1-200)"
     fi
+    # K-128: the skipped tick is journaled, not dropped: one "+1" for the counter and, because this
+    # payload is high-risk, one record for the session's run state; both owner-only.
+    nc="$(nrec "$cur" .supervisor-counter.add.)"; ng="$(nrec "$cur" .supervisor-run.s.add.)"
+    rmode="$(stat -c %a "$cur"/.supervisor-counter.add.* 2>/dev/null || stat -f %Lp "$cur"/.supervisor-counter.add.* 2>/dev/null)"
+    if [ "$nc" = 1 ] && [ "$ng" = 1 ] && [ "$rmode" = 600 ] && head -c 7 "$cur"/.supervisor-run.s.add.* | grep -q '^high=1'; then
+        ok "(lock) $side the skipped tick was journaled (counter record + high-risk gate record, mode 600)"
+    else bad "(lock) $side journal: counter records=$nc gate records=$ng mode=$rmode"; fi
+    # Releasing the lock lets the next hook fold both: counter 2 (1 folded + own), pending 2, high 2.
+    rmdir "$cur/.supervisor-counter.lock"
+    run_payload "$side" "$sb" "$(bash_payload "rm -rf /tmp/k110-lock")"
+    if [ "$(tr -d '[:space:]' < "$cur/.supervisor-counter" 2>/dev/null)" = "2" ] \
+        && [ "$(sed -n 's/^pending=//p' "$cur/.supervisor-run.s")" = 2 ] && [ "$(sed -n 's/^high=//p' "$cur/.supervisor-run.s")" = 2 ] \
+        && [ "$(wc -l < "$cur/.supervisor-pending.s" | tr -d ' ')" = 2 ] && [ "$(nadds "$cur" s)" = 0 ]; then
+        ok "(lock) $side the next hook folded the journal (counter 2, pending 2, high 2, 2 previews, no records left)"
+    else bad "(lock) $side fold: counter=$(cat "$cur/.supervisor-counter" 2>/dev/null) state=$(tr '\n' ' ' < "$cur/.supervisor-run.s" 2>/dev/null) records=$(nadds "$cur" s)"; fi
 done
 
 # A hook that errors out while HOLDING the lock must release it (EXIT trap):
@@ -347,6 +392,218 @@ sb="$(mksb "lk3-bash" $'supervisor:\n  score_every_n_calls: 1000\n')"
 cur="$sb/work/current"; mkdir -p "$cur/.supervisor-counter"
 run_payload bash "$sb" "$(bash_payload "rm -rf /tmp/k110-lock")"
 if [ ! -e "$cur/.supervisor-counter.lock" ]; then ok "(lock) bash lock released when the hook errors out holding it"; else bad "(lock) bash lock left behind after an error exit"; fi
+
+# ---- K-128: lock budget, journal records and the concurrency timing ----------------
+# The hook holds the lock only for the counter / run-state read-modify-write; a hook
+# whose wait ceiling (~3 s) expires journals its tick for the next lock holder instead
+# of dropping it; and the budget CLI is read outside the lock. Bash twin of
+# cli-go/internal/hooks/supervisorstream/gate_lock_test.go.
+now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time()*1000' 2>/dev/null || python3 -c 'import time; print(int(time.time()*1000))'; }
+# lock_stats <file>: "ok fail max-hold-ms sum-hold-ms" of the hooks' counter and gate takes, from the
+# YAKOS_TEST_LOCK_STATS=1 seam (work/current/.supervisor-lock-stats; the Go wrapper's own takes are not counted). Bash 3.2 forks perl per
+# probe, which inflates the holds it reports by ~10-20 ms each.
+lock_stats() {
+    awk '$3 != "counter" && $3 != "gate" { next }
+         $4 == "OK" { ok++; for (i = 5; i <= NF; i++) { split($i, a, "="); if (a[1] == "hold_us") { s += a[2]; if (a[2] > m) m = a[2] } } }
+         $4 == "FAIL" { f++ }
+         END { printf "%d %d %d %d\n", ok + 0, f + 0, m / 1000, s / 1000 }' "$1" 2>/dev/null
+}
+# burst <side> <sandbox> <payload-file> <n> [VAR=val ...]: n hooks released together by a
+# barrier; waits for all and sets BURST_MS to the wall time from the release.
+burst() {
+    local side="$1" sb="$2" payload="$3" n="$4" pids="" i t0; shift 4
+    rm -f "$sb/go"
+    for i in $(seq 1 "$n"); do
+        (
+            while [ ! -f "$sb/go" ]; do :; done
+            if [ "$side" = "bash" ]; then
+                env "$@" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" "${BASH:-bash}" "$HOOK" < "$payload" >/dev/null 2>&1
+            else
+                env "$@" YAKOS_IMPL=go YAKOS_HOOKS=go YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" "$GO_BINARY" hook run supervisor-stream < "$payload" >/dev/null 2>&1
+            fi
+        ) &
+        pids="$pids $!"
+    done
+    sleep 0.3; t0="$(now_ms)"; : > "$sb/go"
+    for i in $pids; do wait "$i" 2>/dev/null || true; done
+    BURST_MS=$(( $(now_ms) - t0 ))
+}
+# k128sb <name> <supervisor yml lines> <fake-dispatcher body>: sandbox with a pinned state dir and a fake CLI
+k128sb() {
+    local sb; sb="$(mksb "$1" "$2")"
+    mkdir -p "$sb/state"; printf 'min_launch_interval_s: 0\n' > "$sb/state/supervisor-policy.yml"; chmod 600 "$sb/state/supervisor-policy.yml"
+    printf '#!/bin/sh\n%s\n' "$3" > "$sb/fake"; chmod +x "$sb/fake"
+    printf '%s' "$sb"
+}
+# K128HOLD: a fake-dispatcher body that stays "in flight" until the test creates $0.release, however slow the
+# hooks are (a fixed sleep raced the slowest of ten hooks on a loaded runner); the 120 s cap bounds a leftover.
+K128HOLD='n=0; while [ ! -f "$0.release" ] && [ "$n" -lt 1200 ]; do sleep 0.1; n=$((n + 1)); done'
+jq -nc --arg b "$(awk 'BEGIN { for (i = 0; i < 25; i++) print "line" }')" '{session_id:"k128",hook_event_name:"PostToolUse",tool_name:"Edit",tool_input:{file_path:"big.go",new_string:$b}}' > "$TMP/k128-benign.json"
+bash_payload "rm -rf /tmp/k128" > "$TMP/k128-high.json"
+nlog() { grep -c "$2" "$1/work/current/logs/supervisor-stream.ndjson" 2>/dev/null || true; }
+
+for side in $sides; do
+    # (k1) a stale FILE lock (what current hooks create) is reaped like the directory kind above.
+    sb="$(mksb "k1-$side" $'supervisor:\n  score_every_n_calls: 1000\n')"
+    cur="$sb/work/current"; : > "$cur/.supervisor-counter.lock"; touch -t "$_old_ts" "$cur/.supervisor-counter.lock"
+    run_payload "$side" "$sb" "$(bash_payload "rm -rf /tmp/k128-stale")"
+    if [ "$(tr -d '[:space:]' < "$cur/.supervisor-counter" 2>/dev/null)" = "1" ] && [ ! -e "$cur/.supervisor-counter.lock" ]; then
+        ok "(k128) $side stale file lock reaped, counter advanced, lock released"
+    else bad "(k128) $side stale file lock not recovered (counter=$(cat "$cur/.supervisor-counter" 2>/dev/null))"; fi
+
+    # (k2) a hook that cannot take the lock owes its increment: the next holder folds it in and
+    # covers the crossing the plain modulo would miss (counter 1, score_every 2: the owed increment
+    # is value 2, the next hook gets 3, and 3 is not a multiple of 2 although 2 was passed).
+    sb="$(k128sb "k2-$side" $'supervisor:\n  score_every_n_calls: 2\n  model: sonnet\n' '[ "$1" = budget ] && exit 0
+printf "ARG:%s\n" "$@" >> "$0.rec"')"
+    cur="$sb/work/current"; printf '1\n' > "$cur/.supervisor-counter"; mkdir "$cur/.supervisor-counter.lock"
+    t0=$SECONDS
+    if [ "$side" = bash ]; then
+        env YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/fake" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" "${BASH:-bash}" "$HOOK" < "$TMP/k128-benign.json" >/dev/null 2>&1
+    else
+        env YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/fake" YAKOS_IMPL=go YAKOS_HOOKS=go YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" "$GO_BINARY" hook run supervisor-stream < "$TMP/k128-benign.json" >/dev/null 2>&1
+    fi
+    el=$((SECONDS - t0)); rmdir "$cur/.supervisor-counter.lock"
+    [ "$el" -le 15 ] && [ "$(tr -d '[:space:]' < "$cur/.supervisor-counter")" = "1" ] && [ "$(nrec "$cur" .supervisor-counter.add.)" = 1 ] \
+        && ok "(k128) $side lock wait expired in ${el}s: increment journaled, counter untouched" \
+        || bad "(k128) $side expiry: elapsed=${el}s counter=$(cat "$cur/.supervisor-counter") records=$(nrec "$cur" .supervisor-counter.add.)"
+    if [ "$side" = bash ]; then
+        env YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/fake" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" "${BASH:-bash}" "$HOOK" < "$TMP/k128-benign.json" >/dev/null 2>&1
+    else
+        env YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/fake" YAKOS_IMPL=go YAKOS_HOOKS=go YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" "$GO_BINARY" hook run supervisor-stream < "$TMP/k128-benign.json" >/dev/null 2>&1
+    fi
+    [ "$(tr -d '[:space:]' < "$cur/.supervisor-counter")" = "3" ] && [ "$(nadds "$cur" k128)" = 0 ] \
+        && ok "(k128) $side next holder folded the record: counter 3 (1 + 1 folded + own), none left" \
+        || bad "(k128) $side fold: counter=$(cat "$cur/.supervisor-counter") records left=$(nadds "$cur" k128)"
+    [ "$(nlog "$sb" '"counter":3,"score_every":2,"will_score":true')" = 1 ] \
+        && ok "(k128) $side the fold covered the crossing it skipped over (threshold hit at 3)" \
+        || bad "(k128) $side no threshold record for counter 3: $(tail -3 "$cur/logs/supervisor-stream.ndjson" | cut -c1-160)"
+    for _w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -f "$sb/fake.rec" ] && break; sleep 0.2; done
+    [ -f "$sb/fake.rec" ] && ok "(k128) $side the dispatcher ran for the covered crossing" || bad "(k128) $side no dispatch for the covered crossing"
+done
+
+for side in $sides; do
+    # (k3) ten hooks released together: nobody runs out of lock budget, every hold is short, the
+    # counter is exact, one launch, nine coalesced. No hold seam here: this measures the real holds.
+    sb="$(k128sb "k3-$side" $'supervisor:\n  score_every_n_calls: 1\n' "[ \"\$1\" = budget ] && exit 0
+printf 'run\\n' >> \"\$0.runs\"; $K128HOLD")"
+    stats="$sb/work/current/.supervisor-lock-stats"
+    burst "$side" "$sb" "$TMP/k128-benign.json" 10 YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/fake" YAKOS_TEST_SEAMS=1 YAKOS_TEST_LOCK_STATS=1
+    read -r lok lfail lmax lsum <<< "$(lock_stats "$stats")"; lok="${lok:-0}"; lfail="${lfail:-0}"; lmax="${lmax:-0}"; lsum="${lsum:-0}"
+    [ "$(nlog "$sb" 'lock busy')" = 0 ] && [ "$lfail" = 0 ] && ok "(k128) $side 10 concurrent hooks: no hook ran out of lock budget (${BURST_MS} ms for all)" || bad "(k128) $side lock skips=$(nlog "$sb" 'lock busy') failed takes=$lfail"
+    [ "$(tr -d '[:space:]' < "$sb/work/current/.supervisor-counter")" = 10 ] && [ "$(nlog "$sb" 'forked async')" = 1 ] && [ "$(nlog "$sb" 'coalesced into one follow-up')" = 9 ] \
+        && ok "(k128) $side 10 concurrent hooks: counter 10, one launch, nine coalesced" || bad "(k128) $side counter=$(cat "$sb/work/current/.supervisor-counter") forked=$(nlog "$sb" 'forked async') coalesced=$(nlog "$sb" 'coalesced into one follow-up')"
+    # Before K-128 the bash holds were 100-300 ms of forks each (80-150 ms on a fast Mac); now a hold is a
+    # few builtins and one rename. The bounds are 2-3x the worst a loaded 3-core runner has shown.
+    [ "$lok" = 20 ] && [ "$lmax" -le 600 ] && [ "$lsum" -le 2500 ] \
+        && ok "(k128) $side lock holds: 20 takes, longest ${lmax} ms, all together ${lsum} ms (<= 600 / 2500)" || bad "(k128) $side lock holds: takes=$lok longest=${lmax} ms total=${lsum} ms (want 20, <= 600, <= 2500)"
+    : > "$sb/fake.release"
+done
+
+if [ "$HAVE_GO" = 1 ]; then
+    # (k4) the two twins share the lock: 6 bash + 6 Go hooks at once, counter exact, 3 crossings.
+    sb="$(k128sb "k4-mixed" $'supervisor:\n  score_every_n_calls: 4\n' 'true')"
+    rm -f "$sb/go"; pids=""
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        (
+            while [ ! -f "$sb/go" ]; do :; done
+            if [ $((i % 2)) = 0 ]; then
+                env YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/fake" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" "${BASH:-bash}" "$HOOK" < "$TMP/k128-high.json" >/dev/null 2>&1
+            else
+                env YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/fake" YAKOS_IMPL=go YAKOS_HOOKS=go YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" "$GO_BINARY" hook run supervisor-stream < "$TMP/k128-high.json" >/dev/null 2>&1
+            fi
+        ) & pids="$pids $!"
+    done
+    sleep 0.3; : > "$sb/go"; for i in $pids; do wait "$i" 2>/dev/null || true; done
+    lock_gone "$sb/work/current"; _gone=$?
+    [ "$(tr -d '[:space:]' < "$sb/work/current/.supervisor-counter")" = 12 ] && [ "$(nlog "$sb" 'score threshold hit')" = 3 ] && [ "$_gone" = 0 ] \
+        && ok "(k128) bash and Go hooks serialise on one lock: counter 12, 3 crossings, lock released" \
+        || bad "(k128) mixed twins: counter=$(cat "$sb/work/current/.supervisor-counter") crossings=$(nlog "$sb" 'score threshold hit') lock=$(nrec "$sb/work/current" .supervisor-counter.lock)"
+fi
+
+# (k5) the budget CLI is read OUTSIDE the lock: ten hooks that each wait ~2 s on a hung budget CLI
+# overlap instead of queueing behind one another (before K-128 the first held the lock for its
+# whole read, so hooks 2..10 waited 2 s apiece and the later ones gave up). The bash twin forks
+# the CLI; the Go twin evaluates in process, so there is nothing to hang there.
+sb="$(k128sb "k5-bash" $'supervisor:\n  score_every_n_calls: 1\n' "if [ \"\$1\" = budget ]; then exec sleep 30; fi
+printf 'run\\n' >> \"\$0.runs\"; $K128HOLD")"
+burst bash "$sb" "$TMP/k128-benign.json" 10 YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/fake"
+[ "$(nlog "$sb" 'lock busy')" = 0 ] && [ "$(tr -d '[:space:]' < "$sb/work/current/.supervisor-counter")" = 10 ] && [ "$(nlog "$sb" 'forked async')" = 1 ] && [ "$(nlog "$sb" 'coalesced into one follow-up')" = 9 ] \
+    && ok "(k128) bash 10 hooks on a hung budget CLI: all counted, one launch, none gave up (${BURST_MS} ms)" \
+    || bad "(k128) bash hung budget CLI: skips=$(nlog "$sb" 'lock busy') counter=$(cat "$sb/work/current/.supervisor-counter") forked=$(nlog "$sb" 'forked async') coalesced=$(nlog "$sb" 'coalesced into one follow-up')"
+: > "$sb/fake.release"
+
+# (k6) the design property behind all of this, checked deterministically instead of by timing: while the hook
+# holds the lock nothing runs that it did not before K-128 have to wait for. Shims for the commands the old code ran
+# under the lock (jq, date, wc, tr, chmod, head, cat) and the budget CLI note a violation if the lock exists when they
+# start; the one hook per path below (launch, coalesce, counter only) must leave none. The detached wrapper has
+# its own lock sections and is excluded (it carries _SSW_LOCK), but a wrapper that STARTS at once takes the lock
+# the instant the hook spawns it, which would look like the hook holding it: so the launch path is a DEFERRED
+# launch (a launch 1 s ago and a 20 s interval), whose wrapper sleeps before it touches the lock. Everything the
+# gate does under the lock is the same (budget read, pending append, state save, spawn). Bash only: the Go twin
+# forks nothing.
+K6="$TMP/k6"; mkdir -p "$K6/shims"
+for _t in jq date wc tr chmod head cat; do
+    printf '#!/bin/sh\n[ -z "${_SSW_LOCK:-}" ] && [ -e "$K6_LOCK" ] && printf "%%s\\n" "${0##*/}" >> "$K6_VIOL"\nexec "$(PATH="$K6_REAL_PATH" command -v "${0##*/}")" "$@"\n' > "$K6/shims/$_t"
+    chmod +x "$K6/shims/$_t"
+done
+sb="$(k128sb "k6-bash" $'supervisor:\n  score_every_n_calls: 1\n' "if [ \"\$1\" = budget ]; then [ -e \"\$K6_LOCK\" ] && echo budget >> \"\$K6_VIOL\"; exit 0; fi
+printf 'run\\n' >> \"\$0.runs\"; $K128HOLD")"
+printf 'min_launch_interval_s: 20\n' > "$sb/state/supervisor-policy.yml"
+printf 'start=\nlaunches=1\nhlaunches=0\nlast=%s\npending=0\nhigh=0\ncaplog=0\nceillog=0\nbackoff=0\nbudgetlog=0\n' "$(date +%s)" > "$sb/work/current/.supervisor-run.k128"
+: > "$K6/viol"
+for _path in defer coalesce; do   # the first hook defers a launch (budget read, spawn), the second coalesces into it
+    env PATH="$K6/shims:$PATH" K6_REAL_PATH="$PATH" K6_LOCK="$sb/work/current/.supervisor-counter.lock" K6_VIOL="$K6/viol" \
+        YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/fake" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" "${BASH:-bash}" "$HOOK" < "$TMP/k128-benign.json" >/dev/null 2>&1
+done
+printf 'supervisor:\n  score_every_n_calls: 1000\n' > "$sb/.yakos.yml"   # a counter-only hook: no crossing, no gate
+env PATH="$K6/shims:$PATH" K6_REAL_PATH="$PATH" K6_LOCK="$sb/work/current/.supervisor-counter.lock" K6_VIOL="$K6/viol" \
+    YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/fake" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" "${BASH:-bash}" "$HOOK" < "$TMP/k128-benign.json" >/dev/null 2>&1
+if [ ! -s "$K6/viol" ] && [ "$(nlog "$sb" 'deferred to the end of the minimum interval')" = 1 ] && [ "$(nlog "$sb" 'coalesced into one follow-up')" = 1 ]; then
+    ok "(k128) bash no jq/date/wc/tr/chmod/head/cat and no budget CLI ran under the lock (deferred-launch, coalesce and counter-only paths)"
+else bad "(k128) bash forks under the lock: [$(tr '\n' ' ' < "$K6/viol")] deferred=$(nlog "$sb" 'deferred to the end of the minimum interval') coalesced=$(nlog "$sb" 'coalesced into one follow-up')"; fi
+: > "$sb/fake.release"
+
+# (k7) taking the lock must survive POSIX mode (bash --posix, POSIXLY_CORRECT, run as sh): a failed redirection on
+# a special builtin such as `:` ends a non-interactive shell there, and losing the create race is exactly when it
+# fails. The two functions are lifted out of the hook text and run with the lock already held.
+for _fn in _ss_try_lock _ssw_try_lock; do
+    case "$_fn" in _ss_try_lock) _var=_ss_lock ;; *) _var=_SSW_LOCK ;; esac
+    _def="$(sed -n "/^$_fn() {\$/,/^}\$/p" "$HOOK")"
+    : > "$TMP/k7.lock"
+    _out="$(POSIXLY_CORRECT=1 "${BASH:-bash}" -c "$_def
+$_var=\"\$1\"; $_fn; echo \"rc=\$?\"; echo survived" _ "$TMP/k7.lock" 2>&1)"
+    case "$_out" in
+        *rc=1*survived*) ok "(k128) bash $_fn survives a lost create race in POSIX mode (returns 1)" ;;
+        *) bad "(k128) bash $_fn in POSIX mode: [$_out]" ;;
+    esac
+    rm -f "$TMP/k7.lock"
+done
+
+# (k8) a trigger that a hook journaled while a run was in flight (it could not take the lock) is folded by the run's
+# WRAPPER at the end of the run, so it still gets its follow-up (both twins have their own wrapper).
+for side in $sides; do
+    # One line per run (the task itself spans lines), then wait to be released.
+    K8BODY='[ "$1" = budget ] && exit 0
+printf "run %s\n" "$(printf %s "$3" | tr "\n" " ")" >> "$0.runs"
+'"$K128HOLD"
+    sb="$(k128sb "k8-$side" $'supervisor:\n  score_every_n_calls: 1\n' "$K8BODY")"
+    if [ "$side" = bash ]; then
+        env YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/fake" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" "${BASH:-bash}" "$HOOK" < "$TMP/k128-benign.json" >/dev/null 2>&1
+    else
+        env YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/fake" YAKOS_IMPL=go YAKOS_HOOKS=go YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" "$GO_BINARY" hook run supervisor-stream < "$TMP/k128-benign.json" >/dev/null 2>&1
+    fi
+    # (60 s: a bash hook plus its wrapper's start can take 10 s on an overloaded machine; if the record arrived
+    # before the run started the wrapper would fold it at its first claim and there would be no follow-up.)
+    for _w in $(seq 1 600); do [ -f "$sb/fake.runs" ] && break; sleep 0.1; done
+    printf 'high=1\n{"e":"k8-journaled"}\n' > "$sb/work/current/.supervisor-run.k128.add.9.1"
+    : > "$sb/fake.release"
+    for _w in $(seq 1 600); do [ "$(wc -l < "$sb/fake.runs" 2>/dev/null | tr -d ' ')" = 2 ] && break; sleep 0.1; done
+    [ "$(wc -l < "$sb/fake.runs" | tr -d ' ')" = 2 ] && grep -q 'Coalesced events: 1' "$sb/fake.runs" && [ ! -e "$sb/work/current/.supervisor-run.k128.add.9.1" ] \
+        && ok "(k128) $side the wrapper folded a trigger journaled mid-run: one follow-up carrying it, record removed" \
+        || bad "(k128) $side wrapper fold: runs=$(wc -l < "$sb/fake.runs" | tr -d ' ') record=$(nrec "$sb/work/current" .supervisor-run.k128.add.) $(tail -c 200 "$sb/fake.runs" | tr '\n' ' ')"
+    for _w in $(seq 1 600); do [ -z "$(sed -n 's/^start=//p' "$sb/work/current/.supervisor-run.k128" 2>/dev/null)" ] && break; sleep 0.1; done
+done
 
 # no CLI: both sides WARN and exit 0. This PATH has every binary EXCEPT yakos.
 NOCLI="$TMP/nocli-bin"; mkdir -p "$NOCLI"

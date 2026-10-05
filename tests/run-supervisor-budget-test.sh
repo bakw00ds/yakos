@@ -58,6 +58,7 @@ mksb() {
 # fire <side> <sb> <payload>; stderr -> $sb/hook.stderr; returns the hook's exit code
 fire() {
     local side="$1" sb="$2" payload="$3"
+    LAST_SB="$sb"
     if [ "$side" = bash ]; then
         env YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/bin/fakeyakos" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" \
             "${BASH:-bash}" "$HOOK" < "$payload" >/dev/null 2>>"$sb/hook.stderr"
@@ -69,7 +70,17 @@ fire() {
 runs() { [ -f "$1/runs" ] && wc -l < "$1/runs" | tr -d ' ' || echo 0; }
 logs() { cat "$1/work/current/logs/supervisor-stream.ndjson" 2>/dev/null; }
 findings() { cat "$1/work/current/supervisor-findings.ndjson" 2>/dev/null; }
-settle() { sleep 0.4; }
+# settle: wait for the wrapper of the last fired hook to finish (its in-flight marker clears; the
+# wrapper's own log records are written before that), instead of a blind 0.4 s that a slow runner
+# outran: the twin-log comparison below then saw the wrapper's records on one side only (K-128).
+settle() {
+    local st="${LAST_SB:-/nonexistent}/work/current/.supervisor-run.$SID" i=0
+    while [ "$i" -lt 150 ]; do
+        if [ ! -f "$st" ] || [ -z "$(sed -n 's/^start=//p' "$st")" ]; then break; fi
+        sleep 0.1; i=$((i + 1))
+    done
+    sleep 0.1
+}
 
 for side in bash go; do
     # 1. routine refused at hard_stop
@@ -115,14 +126,49 @@ for side in bash go; do
     [ "$(runs "$sb")" = 1 ] && ! grep -qi budget "$sb/hook.stderr" && ! logs "$sb" | grep -qi 'budget' && ok "(6) $side nothing budget-related below the warning level" || bad "(6) $side noisy or no launch"
 done
 
-# 7. a hung CLI cannot stall the bash hook: the budget read is bounded (~2 s) and
-# fails open, so the launch still happens.
-sb="$(mksb hung-bash 100 100)"
-printf '#!/bin/sh\nif [ "$1" = budget ]; then sleep 30; exit 0; fi\nprintf "run\\n" >> "%s/runs"\n' "$sb" > "$sb/bin/fakeyakos"
+# 7. a hung CLI cannot stall the bash hook: the budget read is bounded by WALL-CLOCK time (~2 s) and fails
+# open, so the launch still happens. K-128: the old read was 40 polls of `sleep 0.05`, i.e. iterations, not
+# time, so on a loaded runner each poll cost its 50 ms plus a fork and the "2 s" read took 4 s or more (the
+# suite once saw "hook took 7s"). Elapsed time of the whole hook is a poor check, because a bash hook alone takes
+# 1-9 s depending on the machine, so the properties are checked directly: the fake CLI records when it started
+# and when the watchdog's TERM reached it (about 2 s later), and a PATH shim for `sleep` proves nothing polls.
+# The whole-hook elapsed time keeps only a generous bound, nowhere near the CLI's 30 s hang.
+sb="$(mksb base-bash 100 0)"
 start=$SECONDS
-fire bash "$sb" "$TMP/benign.json"; rc=$?
-elapsed=$((SECONDS - start)); sleep 0.4
-[ "$rc" = 0 ] && [ "$elapsed" -le 6 ] && ok "(7) bash a hung budget CLI cannot stall the hook (${elapsed}s)" || bad "(7) bash hook took ${elapsed}s rc=$rc"
+fire bash "$sb" "$TMP/benign.json"; settle
+base=$((SECONDS - start))
+sb="$(mksb hung-bash 100 0)"
+cat > "$sb/bin/fakeyakos" <<EOF_FAKE
+#!/bin/sh
+if [ "\$1" = budget ]; then
+    now() { perl -MTime::HiRes=time -e 'printf "%.3f\n", time'; }
+    now > "$sb/cli.start"
+    trap 'now > "$sb/cli.killed"; kill "\$spid" 2>/dev/null; exit 0' TERM
+    sleep 30 &
+    spid=\$!
+    wait "\$spid"
+    exit 0
+fi
+printf "run\n" >> "$sb/runs"
+EOF_FAKE
+chmod +x "$sb/bin/fakeyakos"
+mkdir -p "$TMP/shim7"
+cat > "$TMP/shim7/sleep" <<'EOF_SHIM'
+#!/bin/sh
+printf '%s\n' "$*" >> "$SLEEPLOG"
+exec "$(PATH="$REALPATH" command -v sleep)" "$@"
+EOF_SHIM
+chmod +x "$TMP/shim7/sleep"
+start=$SECONDS
+env PATH="$TMP/shim7:$PATH" REALPATH="$PATH" SLEEPLOG="$sb/sleeps" YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/bin/fakeyakos" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" \
+    "${BASH:-bash}" "$HOOK" < "$TMP/benign.json" >/dev/null 2>>"$sb/hook.stderr"; rc=$?
+elapsed=$((SECONDS - start)); settle
+[ "$rc" = 0 ] && [ "$elapsed" -le $((base + 12)) ] && ok "(7) bash a hung budget CLI cannot stall the hook (${elapsed}s; ${base}s with a healthy CLI)" || bad "(7) bash hook took ${elapsed}s rc=$rc (${base}s with a healthy CLI)"
+if [ -f "$sb/cli.start" ] && [ -f "$sb/cli.killed" ] && awk -v s="$(cat "$sb/cli.start")" -v k="$(cat "$sb/cli.killed")" 'BEGIN { d = k - s; exit !(d >= 1.9 && d <= 8) }'; then
+    ok "(7) bash the watchdog ended the hung CLI after $(awk -v s="$(cat "$sb/cli.start")" -v k="$(cat "$sb/cli.killed")" 'BEGIN { printf "%.1f", k - s }') s of wall clock"
+else bad "(7) bash the hung CLI was not killed by the watchdog at ~2 s (start=$(cat "$sb/cli.start" 2>/dev/null) killed=$(cat "$sb/cli.killed" 2>/dev/null))"; fi
+polls="$(grep -c '^0\.05$' "$sb/sleeps" 2>/dev/null || true)"
+[ "${polls:-0}" = 0 ] && ok "(7) bash the budget read does not poll (no sleep 0.05 spawned)" || bad "(7) bash the budget read polled: ${polls} x sleep 0.05 (the iteration-counted bound)"
 [ "$(runs "$sb")" = 1 ] && ok "(7) bash fails open: the launch still happens" || bad "(7) bash runs=$(runs "$sb")"
 
 # 8. the count ceiling and the dollar ceiling each report once, independently:
@@ -153,9 +199,12 @@ done
 # 9. K-122: the two twins write the same hook-log records, field for field AND in
 # the same order (jq keeps an object literal's insertion order, so `jq -c` of each
 # record is a byte comparison with only the timestamp removed).
+# The records are compared as a sorted set with the wall-clock duration removed: the detached wrapper's
+# "run finished" record lands after the hook's own and carries the run time, so neither its position nor
+# its duration_s is part of the contract (K-128).
 for scen in routine high ceil warn proj quiet flags; do
-    b="$(logs "$TMP/$scen-bash" | jq -c 'del(.ts)' 2>&1)"
-    g="$(logs "$TMP/$scen-go" | jq -c 'del(.ts)' 2>&1)"
+    b="$(logs "$TMP/$scen-bash" | jq -c 'del(.ts, .duration_s)' 2>&1 | sort)"
+    g="$(logs "$TMP/$scen-go" | jq -c 'del(.ts, .duration_s)' 2>&1 | sort)"
     if [ -n "$b" ] && [ "$b" = "$g" ]; then ok "(9) $scen hook-log records are byte-identical across twins"; else
         bad "(9) $scen hook-log records differ"; printf '    bash: %s\n    go:   %s\n' "$b" "$g"; fi
 done
