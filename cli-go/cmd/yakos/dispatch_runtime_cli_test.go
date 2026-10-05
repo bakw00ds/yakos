@@ -14,7 +14,8 @@ import (
 	"testing"
 )
 
-// routingCLIRoot is a yakOS root with two agents: plain (no pin) and agy-pinned.
+// routingCLIRoot is a yakOS root with a few agents: plain (no pin), agy-pinned and
+// two whose fallback lists name the bash-only claude-sdk.
 func routingCLIRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -22,7 +23,13 @@ func routingCLIRoot(t *testing.T) string {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for id, fm := range map[string]string{"plain": "domain: misc\n", "agy-pinned": "domain: misc\nruntime: agy\n"} {
+	for id, fm := range map[string]string{
+		"plain":      "domain: misc\n",
+		"agy-pinned": "domain: misc\nruntime: agy\n",
+		// fallback lists that name a bash-only runtime, which --runtime-fallback rejects
+		"sdk-fb":   "domain: misc\nruntime-fallback: [claude-sdk, claude]\n",
+		"sdk-only": "domain: misc\nruntime-fallback: [claude-sdk]\n",
+	} {
 		body := "---\nid: " + id + "\n" + fm + "---\n\n## Purpose\n\nCLI routing fixture " + id + ".\n"
 		if err := os.WriteFile(filepath.Join(dir, id+".md"), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
@@ -178,6 +185,37 @@ func TestDispatchCLI_ExplicitRuntimeFailsFastUnlessTheFlagOptsIn(t *testing.T) {
 			t.Errorf("exit %d:\n%s", code, out)
 		}
 	})
+}
+
+// The hint that tells the operator how to opt in only suggests runtimes the flag
+// accepts: a fallback list may name claude-sdk, which --runtime-fallback rejects
+// as unknown, and a hint that is itself an error is worse than none.
+func TestDispatchCLI_OptInHintOnlyNamesRunnableRuntimes(t *testing.T) {
+	root := routingCLIRoot(t)
+	binDir, _ := fakeClaudeBin(t)
+
+	_, out := dispatchCLI(t, root, cliProject(t, ""), []string{"PATH=" + binDir}, "sdk-fb", "do it", "--runtime", "codex")
+	if !strings.Contains(out, "Not falling back to claude-sdk, claude") {
+		t.Errorf("the error should still list every unused fallback:\n%s", out)
+	}
+	if !strings.Contains(out, "pass --runtime-fallback claude\n") {
+		t.Errorf("the hint should suggest only claude:\n%s", out)
+	}
+	if strings.Contains(out, "--runtime-fallback claude-sdk") {
+		t.Errorf("the hint suggests a runtime the flag rejects:\n%s", out)
+	}
+
+	// With nothing runnable to suggest, the hint says what the flag takes.
+	_, out = dispatchCLI(t, root, cliProject(t, ""), []string{"PATH=" + binDir}, "sdk-only", "do it", "--runtime", "codex")
+	if !strings.Contains(out, "pass --runtime-fallback <runtime>[,<runtime>]") || strings.Contains(out, "--runtime-fallback claude-sdk") {
+		t.Errorf("with no runnable fallback the hint should be generic:\n%s", out)
+	}
+
+	// And the hint's own advice works.
+	code, out := dispatchCLI(t, root, cliProject(t, ""), []string{"PATH=" + binDir}, "sdk-fb", "do it", "--runtime", "codex", "--runtime-fallback", "claude")
+	if code != 0 || !strings.Contains(out, "falling back to 'claude'") {
+		t.Errorf("following the hint did not work: exit %d\n%s", code, out)
+	}
 }
 
 // Errors print one "dispatch:" prefix, whatever package raised them.

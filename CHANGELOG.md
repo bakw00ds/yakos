@@ -49,7 +49,9 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   operator intent, including intent about where the task goes. If that
   runtime cannot run, dispatch fails naming the runtime, why, and the
   fallbacks it did not use; only the CLI can opt in, with the new
-  `--runtime-fallback <list>`. Pins and `.yakos.yml` defaults keep walking the
+  `--runtime-fallback <list>` (the hint it prints names only runtimes the flag
+  accepts, not a bash-only one such as `claude-sdk`). Pins and `.yakos.yml`
+  defaults keep walking the
   fallback lists. This deliberately differs from `cli/lib/dispatch.sh`, which
   falls back for an explicit `--runtime` too (recorded for K-143). The probe
   now ends when the dispatch is cancelled, bounds the agy keyring lookup to

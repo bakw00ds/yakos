@@ -268,7 +268,9 @@ func printDispatchError(w io.Writer, err error) {
 	}
 	fmt.Fprintln(w, msg)
 	if ee, ok := dispatch.AsExplicitRuntimeError(err); ok {
-		list := strings.Join(ee.NotUsed, ",")
+		// Only runtimes the flag accepts: a fallback list may also name a bash-only
+		// runtime such as claude-sdk, and suggesting it would be a command that fails.
+		list := strings.Join(ee.RunnableFallbacks(), ",")
 		if list == "" {
 			list = "<runtime>[,<runtime>]"
 		}

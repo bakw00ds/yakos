@@ -552,6 +552,21 @@ func (e *ExplicitRuntimeError) Error() string {
 	return b.String()
 }
 
+// RunnableFallbacks are the runtimes in NotUsed that this dispatcher can run, in
+// order: the ones the CLI's --runtime-fallback accepts. An agent's or a
+// project's fallback list may name a bash-only runtime (claude-sdk), which the
+// flag rejects as unknown, so a hint built from NotUsed could suggest a command
+// that fails.
+func (e *ExplicitRuntimeError) RunnableFallbacks() []string {
+	var out []string
+	for _, name := range e.NotUsed {
+		if supportedRuntime(name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // AsExplicitRuntimeError reports whether err is (or wraps) an
 // *ExplicitRuntimeError, and returns it.
 func AsExplicitRuntimeError(err error) (*ExplicitRuntimeError, bool) {

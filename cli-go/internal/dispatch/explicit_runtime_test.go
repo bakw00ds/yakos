@@ -230,6 +230,26 @@ func TestExplicitRuntimeError_FormatsOneLine(t *testing.T) {
 	}
 }
 
+// The CLI's opt-in hint names only runtimes --runtime-fallback accepts. A fallback
+// list can also name a bash-only runtime (claude-sdk) or a removed one (gemini).
+func TestExplicitRuntimeError_RunnableFallbacks(t *testing.T) {
+	e := &ExplicitRuntimeError{Runtime: "codex", Reason: signedOut, NotUsed: []string{"claude-sdk", "claude", "gemini", "agy", "antigravity-sdk"}}
+	if got := strings.Join(e.RunnableFallbacks(), ","); got != "claude,agy" {
+		t.Errorf("RunnableFallbacks = %q, want claude,agy", got)
+	}
+	// Everything it suggests is something the flag takes.
+	if _, err := ParseRuntimeList(strings.Join(e.RunnableFallbacks(), ",")); err != nil {
+		t.Errorf("the suggested list is rejected by --runtime-fallback: %v", err)
+	}
+	// The message still says what was configured and not used.
+	if !strings.Contains(e.Error(), "claude-sdk, claude, gemini") {
+		t.Errorf("the error should list every unused fallback: %s", e)
+	}
+	if none := (&ExplicitRuntimeError{NotUsed: []string{"claude-sdk"}}).RunnableFallbacks(); len(none) != 0 {
+		t.Errorf("RunnableFallbacks = %v, want none", none)
+	}
+}
+
 func TestParseRuntimeList(t *testing.T) {
 	good := map[string][]string{
 		"":                  nil,
