@@ -357,8 +357,9 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   longer line is skipped with one warning that names the file and the line, so
   the other agents still dispatch (a cloned repository controls the project's
   agent files, and one bad file must not stop them all). An agent that extends a
-  template with such a line, and the skills listing for a skill file with one,
-  still fail with an error that names the file.
+  template with such a line still fails with an error that names the file. A
+  skill file with such a line is skipped with a warning and the skills listing
+  goes on.
 
 - **claude chat refuses an agent persona over 64 KiB before it starts
   (K-132 follow-up).** The persona is an argument of the claude command
@@ -456,6 +457,18 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   warning that names the file, and so is any failure to read a file in the
   project directory, so one bad file no longer stops the other agents. A
   framework file that cannot be read is still an error.
+
+- **The skills listing skips a `SKILL.md` it may not read instead of failing
+  (K-132 follow-up, sec-324).** `ComposeSkills`, behind `GET /api/skills`, read a
+  symlinked `SKILL.md` wherever it led, and one that pointed at a directory failed
+  the whole listing, which the console served as an empty one. A `SKILL.md` is now
+  read under the rules for an agent file: a symlink only to a regular file inside
+  the framework's `lib/` or the project directory, nothing that is not a regular
+  file, nothing over 4 MiB, no line of 1 MiB or more, and a failure to read a file
+  in the project directory is a skip. Each is skipped with a once-per-file
+  warning that names the file, and the rest of the listing is served. A framework
+  skill that cannot be read is still an error. A skill directory without a
+  `SKILL.md` is skipped silently, as before.
 
 - **`extends:` names a framework template and nothing else (K-132 follow-up,
   sec-324, rev-324).** The value came from the agent's own file and went into a

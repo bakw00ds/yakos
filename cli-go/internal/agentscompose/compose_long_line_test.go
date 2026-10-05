@@ -188,8 +188,11 @@ func TestCompose_ExtendsATemplateWithALongLine(t *testing.T) {
 	}
 }
 
-// Skills are read the same way.
+// Skills are read the same way, except that a skill with a line over the bound is
+// skipped with a warning and the listing goes on: a cloned repository controls
+// the project's SKILL.md files, and one must not take the whole listing with it.
 func TestComposeSkills_LongLines(t *testing.T) {
+	warnings := captureWarnings(t)
 	root := t.TempDir()
 	writeFileT(t, filepath.Join(root, "lib", "skills", "fine", "SKILL.md"),
 		"---\nname: fine\ndescription: ok\n---\n\n"+strings.Repeat("s", 70<<10)+"\n")
@@ -199,9 +202,17 @@ func TestComposeSkills_LongLines(t *testing.T) {
 
 	bad := filepath.Join(root, "lib", "skills", "huge", "SKILL.md")
 	writeFileT(t, bad, "---\nname: huge\n---\n\n"+strings.Repeat("s", maxLineBytes+1)+"\n")
-	_, err := ComposeSkills(root, "")
-	if err == nil || !strings.Contains(err.Error(), filepath.Join("huge", "SKILL.md")) {
-		t.Errorf("err = %v, want it to name the skill file", err)
+	skills, err := ComposeSkills(root, "")
+	if err != nil {
+		t.Fatalf("ComposeSkills = %v; one bad skill must not fail the listing", err)
+	}
+	if len(skills) != 1 || skills[0].Slug != "fine" {
+		t.Errorf("skills = %+v, want only fine", skills)
+	}
+	for _, want := range []string{"WARN", "ignoring skill file " + bad, "longer than"} {
+		if !strings.Contains(warnings.String(), want) {
+			t.Errorf("warning %q does not mention %q", warnings.String(), want)
+		}
 	}
 }
 

@@ -270,12 +270,16 @@ func warnRuntimeNamedAgent(path, id string) {
 	warnSkippedAgentFile(path, fmt.Sprintf("%q is a runtime name and would shadow the runtime's own agent; rename it", id))
 }
 
-// warnSkippedAgentFile says once per file why Compose left it out.
-func warnSkippedAgentFile(path, reason string) {
+// warnSkippedAgentFile says once per file why Compose left an agent file out.
+func warnSkippedAgentFile(path, reason string) { warnSkippedFile("agent", path, reason) }
+
+// warnSkippedFile says once per file why Compose or ComposeSkills left a file
+// out. kind is "agent" or "skill".
+func warnSkippedFile(kind, path, reason string) {
 	if _, seen := warnedPaths.LoadOrStore(path, struct{}{}); seen {
 		return
 	}
-	fmt.Fprintf(WarnWriter, "yakos: WARN: ignoring agent file %s: %s\n", path, reason)
+	fmt.Fprintf(WarnWriter, "yakos: WARN: ignoring %s file %s: %s\n", kind, path, reason)
 }
 
 // parseAgentContent parses and resolves the content of a single agent .md file.
@@ -607,6 +611,16 @@ type ComposedSkill struct {
 //
 // Returns an empty (non-nil) slice when either directory is absent — callers
 // should not treat a missing skills dir as an error.
+//
+// A SKILL.md is read like an agent file (readAgentFile, see agentfile.go), and
+// one that may not be read is skipped with the same once-per-file warning, so a
+// bad entry, and a cloned repository controls the project's, does not take the
+// whole listing with it. That covers a symlink that does not end at a regular
+// file inside the framework's lib/ or the project directory, an entry that is not
+// a regular file, a file over MaxAgentFileBytes, a line over the bound, and a
+// failure to read a file in the project directory. Only a failure to read a
+// framework file is an error. A skill directory without a SKILL.md is skipped
+// silently, as before.
 func ComposeSkills(yakosRoot, project string) ([]ComposedSkill, error) {
 	fwDir := filepath.Join(yakosRoot, "lib", "skills")
 	projDir := ""
@@ -616,6 +630,8 @@ func ComposeSkills(yakosRoot, project string) ([]ComposedSkill, error) {
 			projDir = candidate
 		}
 	}
+
+	roots := AgentFileRoots(yakosRoot, project)
 
 	// index by slug; source tracks whether it came from framework or project.
 	type entry struct {
@@ -638,15 +654,26 @@ func ComposeSkills(yakosRoot, project string) ([]ComposedSkill, error) {
 			}
 			slug := e.Name()
 			skillPath := filepath.Join(dir, slug, "SKILL.md")
-			data, err := os.ReadFile(skillPath) //nolint:gosec
-			if err != nil {
-				if os.IsNotExist(err) {
-					continue // dir exists but no SKILL.md — skip silently
-				}
-				return fmt.Errorf("agentscompose: read %s: %w", skillPath, err)
+			data, skip, readErr := readAgentFile(skillPath, roots)
+			switch {
+			case errors.Is(readErr, fs.ErrNotExist):
+				continue // dir exists but no SKILL.md — skip silently
+			case skip != "":
+				warnSkippedFile("skill", skillPath, skip)
+				continue
+			case readErr != nil && source == "project":
+				warnSkippedFile("skill", skillPath, "cannot be read: "+readErr.Error())
+				continue
+			case readErr != nil:
+				return fmt.Errorf("agentscompose: read %s: %w", skillPath, readErr)
 			}
 
 			fm, _, splitErr := splitFrontmatter(string(data))
+			var tooLong *lineTooLongError
+			if errors.As(splitErr, &tooLong) {
+				warnSkippedFile("skill", skillPath, tooLong.Error())
+				continue
+			}
 			if splitErr != nil {
 				return fmt.Errorf("agentscompose: parse %s: %w", skillPath, splitErr)
 			}
