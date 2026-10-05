@@ -48,6 +48,14 @@ After setting the key, run 'yakos auth status claude-sdk' to verify.
 'yakos start --runtime claude-sdk' launches Claude Code, which does use the claude login.
 `
 
+// claudeSDKLogoutText is what `yakos auth logout claude-sdk` prints. The SDK engine
+// never used the claude login, so logging out of claude-sdk must not remove it.
+const claudeSDKLogoutText = `claude-sdk uses ANTHROPIC_API_KEY from your environment, which yakOS never stores.
+To stop using it, unset ANTHROPIC_API_KEY and remove it from your shell rc.
+The claude login is not used by the SDK engine, so it was left alone.
+'yakos auth logout claude' signs out of it.
+`
+
 // claudeSDKAuth reports whether ANTHROPIC_API_KEY holds an API key, as the state
 // and hint `auth status` prints. It reads only that variable and never returns
 // its value.

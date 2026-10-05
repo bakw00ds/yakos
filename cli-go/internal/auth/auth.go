@@ -162,6 +162,8 @@ Subcommands:
                           yakos start default.
   logout <runtime>        Best-effort credential removal:
                           - claude:  unset ANTHROPIC_API_KEY hint; remove ~/.claude/auth.json
+                          - claude-sdk: unset ANTHROPIC_API_KEY hint; the claude
+                                     login is left alone
                           - codex:   exec 'codex logout' (against the yakOS profile
                                      when one exists) and remove its auth.json
                           - gemini:  point at gemini's logout flow
@@ -462,8 +464,12 @@ func runLogout(cfg Config) (*Result, error) {
 
 	var err error
 	switch cfg.Target {
-	case "claude", "claude-sdk":
+	case "claude":
 		err = logoutClaude(cfg)
+	case "claude-sdk":
+		// The SDK engine never used the claude login, so there is nothing of its own
+		// to remove and the claude login is left alone (claude_sdk.go).
+		_, _ = fmt.Fprint(cfg.Writer, claudeSDKLogoutText)
 	case "codex":
 		err = logoutCodex(cfg)
 	case "gemini":
@@ -478,9 +484,6 @@ func runLogout(cfg Config) (*Result, error) {
 }
 
 func logoutClaude(cfg Config) error {
-	if cfg.Target == "claude-sdk" {
-		logLine(cfg.ErrWriter, "claude-sdk: shares credentials with claude (bundled CLI); routing logout to claude")
-	}
 	authFile := filepath.Join(cfg.HomeDir, ".claude", "auth.json")
 	if _, err := os.Stat(authFile); err == nil {
 		if err2 := os.Remove(authFile); err2 != nil {

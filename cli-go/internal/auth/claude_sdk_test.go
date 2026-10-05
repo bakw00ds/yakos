@@ -198,3 +198,44 @@ func TestPrintHelp_NamesClaudeSDK(t *testing.T) {
 		t.Errorf("help must say what login and logout do for claude-sdk:\n%s", buf.String())
 	}
 }
+
+func TestLogout_ClaudeSDK_LeavesTheClaudeLoginAlone(t *testing.T) {
+	var out, errOut bytes.Buffer
+	cfg := newCfg(t, &out, &errOut)
+	plantClaudeLogin(t, cfg.HomeDir)
+	cfg.Subcommand, cfg.Target = "logout", "claude-sdk"
+
+	if _, err := Run(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.HomeDir, ".claude", "auth.json")); err != nil {
+		t.Errorf("logging out of claude-sdk must not sign out of claude (the SDK engine never used that login): %v", err)
+	}
+	if out.String() != claudeSDKLogoutText {
+		t.Errorf("stdout is not the claude-sdk logout text:\n%s", out.String())
+	}
+	if errOut.Len() != 0 {
+		t.Errorf("nothing goes to stderr (the old 'routing logout to claude' line is gone), got %q", errOut.String())
+	}
+	for _, want := range []string{"ANTHROPIC_API_KEY", "unset", "yakos auth logout claude"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the logout text must mention %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestLogout_Claude_StillSignsOutOfTheClaudeLogin(t *testing.T) {
+	var out, errOut bytes.Buffer
+	cfg := newCfg(t, &out, &errOut)
+	plantClaudeLogin(t, cfg.HomeDir)
+	cfg.Subcommand, cfg.Target = "logout", "claude"
+	if _, err := Run(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.HomeDir, ".claude", "auth.json")); err == nil {
+		t.Error("logout claude must still remove ~/.claude/auth.json")
+	}
+	if !strings.Contains(out.String(), "removed ~/.claude/auth.json") {
+		t.Errorf("claude logout output changed:\n%s", out.String())
+	}
+}

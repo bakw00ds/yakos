@@ -41,6 +41,8 @@ Subcommands:
                           yakos start default.
   logout <runtime>        Best-effort credential removal:
                           - claude:  unset ANTHROPIC_API_KEY hint; remove ~/.claude/auth.json
+                          - claude-sdk: unset ANTHROPIC_API_KEY hint; the claude
+                                     login is left alone
                           - codex:   exec 'codex logout' (against the yakOS profile
                                      when one exists) and remove its auth.json
                           - gemini:  point at gemini's logout flow
@@ -384,10 +386,18 @@ if [ "$SUB" = "logout" ]; then
     yk_rt_is_known "$target" || ct_die "auth logout: unknown runtime '$target'"
 
     case "$target" in
-        claude|claude-sdk)
-            if [ "$target" = "claude-sdk" ]; then
-                ct_log "claude-sdk: shares credentials with claude (bundled CLI); routing logout to claude"
-            fi
+        claude-sdk)
+            # The SDK engine never used the claude login, so there is nothing of its own
+            # to remove and the claude login is left alone (K-137). The text is
+            # byte-identical to cli-go/internal/auth/claude_sdk.go.
+            cat <<'EOF'
+claude-sdk uses ANTHROPIC_API_KEY from your environment, which yakOS never stores.
+To stop using it, unset ANTHROPIC_API_KEY and remove it from your shell rc.
+The claude login is not used by the SDK engine, so it was left alone.
+'yakos auth logout claude' signs out of it.
+EOF
+            ;;
+        claude)
             if [ -f "$HOME/.claude/auth.json" ]; then
                 rm -f "$HOME/.claude/auth.json"
                 echo "removed ~/.claude/auth.json"

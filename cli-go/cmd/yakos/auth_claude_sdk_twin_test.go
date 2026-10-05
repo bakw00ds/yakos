@@ -208,3 +208,72 @@ func TestAuthTwins_OtherRuntimesCarryNoSDKNote(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthTwins_LogoutClaudeSDKIsByteIdenticalAndLeavesTheClaudeLogin(t *testing.T) {
+	bin := twinSetup(t)
+	outs := map[string]string{}
+	for _, impl := range []string{"go", "bash"} {
+		home := t.TempDir()
+		login := filepath.Join(home, ".claude", "auth.json")
+		if err := os.MkdirAll(filepath.Dir(login), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(login, []byte(`{"token":"x"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		so, se, code := twinRun(t, bin, impl, home, nil, "auth", "logout", "claude-sdk")
+		if code != 0 || se != "" {
+			t.Fatalf("%s: exit %d, stderr %q", impl, code, se)
+		}
+		if _, err := os.Stat(login); err != nil {
+			t.Errorf("%s: logout claude-sdk removed the claude login, which the SDK engine never used: %v", impl, err)
+		}
+		outs[impl] = so
+	}
+	if outs["go"] != outs["bash"] {
+		t.Errorf("stdout differs between the twins\n--- go ---\n%s\n--- bash ---\n%s", outs["go"], outs["bash"])
+	}
+	for _, want := range []string{"ANTHROPIC_API_KEY", "yakos auth logout claude"} {
+		if !strings.Contains(outs["go"], want) {
+			t.Errorf("the logout text must mention %q:\n%s", want, outs["go"])
+		}
+	}
+	if strings.Contains(outs["go"], "routing logout to claude") {
+		t.Error("the old routing line is gone")
+	}
+}
+
+func TestAuthTwins_LogoutClaudeStillSignsOutOfTheLoginInBoth(t *testing.T) {
+	bin := twinSetup(t)
+	for _, impl := range []string{"go", "bash"} {
+		home := t.TempDir()
+		login := filepath.Join(home, ".claude", "auth.json")
+		if err := os.MkdirAll(filepath.Dir(login), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(login, []byte(`{"token":"x"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		so, _, code := twinRun(t, bin, impl, home, nil, "auth", "logout", "claude")
+		if code != 0 || !strings.Contains(so, "removed ~/.claude/auth.json") {
+			t.Errorf("%s: exit %d, output %q", impl, code, so)
+		}
+		if _, err := os.Stat(login); err == nil {
+			t.Errorf("%s: logout claude must remove ~/.claude/auth.json", impl)
+		}
+	}
+}
+
+// The usage text is one block both CLIs print; it now says what login and logout do for
+// claude-sdk, so it must stay byte-identical.
+func TestAuthTwins_HelpIsByteIdentical(t *testing.T) {
+	bin := twinSetup(t)
+	gout, _, gcode := twinRun(t, bin, "go", t.TempDir(), nil, "auth", "--help")
+	bout, _, bcode := twinRun(t, bin, "bash", t.TempDir(), nil, "auth", "--help")
+	if gcode != 0 || bcode != 0 || gout != bout {
+		t.Fatalf("exit %d/%d; help differs between the twins\n--- go ---\n%s\n--- bash ---\n%s", gcode, bcode, gout, bout)
+	}
+	if !strings.Contains(gout, "claude-sdk: prints how to set ANTHROPIC_API_KEY") || !strings.Contains(gout, "claude-sdk: unset ANTHROPIC_API_KEY hint") {
+		t.Errorf("the help must describe login and logout for claude-sdk:\n%s", gout)
+	}
+}
