@@ -133,6 +133,9 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 		}
 	}
 
+	// --- 6b. File-based agent registration for codex and agy (K-134) ---
+	materializeAgentFiles(runtimeName, req.Project, req.WorkDirOverride, *targetAgent)
+
 	// --- 7. Write dispatch_started (PR #40: includes project field) ---
 	logPath := dispatchLogPath()
 	tsStart := time.Now()
@@ -162,6 +165,7 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 		ConversationID:  convID,
 		Timeout:         timeout,
 		WorkDirOverride: req.WorkDirOverride,
+		Effort:          req.Effort,
 	}
 
 	var stderrBuf bytes.Buffer

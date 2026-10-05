@@ -20,10 +20,10 @@ binary. A filename says how trustworthy a capture is:
 | `codex-exec-json-0.154.0-SYNTHETIC-items.ndjson` | synthetic | `reasoning`, `file_change`, a failing command, `mcp_tool_call`, `web_search`, `todo_list` items and cache-write usage |
 | `agy-stream-json-1.2.17-ok.ndjson` | real, agy 1.2.17, `gemini-3.8-flash-low` | `init` with the model id, an ACTIVE text fragment then a DONE step carrying the trailing newline, `result` with usage |
 | `agy-stream-json-1.2.17-tool.ndjson` | real, agy 1.2.17, `gemini-3.8-flash-low` | an `agent_response` step with usage and no text (the tool call), a `run_command` tool step seen ACTIVE then DONE, the answer, `result` usage equal to the two model steps' sum |
-| `agy-stream-json-1.2.17-conversation-turn1.ndjson` | real, agy 1.2.17, recorded by wp-p0b (K-133, copied unchanged from `feat/routing-p0b-adapters`) | first turn of a conversation: a reply with usage |
-| `agy-stream-json-1.2.17-conversation-turn2.ndjson` | real, agy 1.2.17, recorded by wp-p0b (same source) | second turn with `--conversation`: a `system_message` step, and a result whose usage is **cumulative** (turn 1's 12859 input plus its own 13091, `num_turns` 2) |
-| `agy-stream-json-1.2.17-effort-conflict.ndjson` | real, agy 1.2.17, recorded by wp-p0b (same source) | a run refused before it started: a lone `result` frame with status `ERROR`, an `error` message, an empty `conversation_id`, no init and no steps |
-| `agy-stream-json-1.2.17-sandbox-denied.ndjson` | real, agy 1.2.17, recorded by wp-p0b (same source) | a tool step whose command the sandbox refused: no `error` object, the refusal is in the output |
+| `agy-stream-json-1.2.17-conversation-turn1.ndjson` | real, agy 1.2.17, recorded by wp-p0b (K-133, described in `adapter-argv-recordings.md`) | first turn of a conversation: a reply with usage |
+| `agy-stream-json-1.2.17-conversation-turn2.ndjson` | real, agy 1.2.17, recorded by wp-p0b (K-133, same) | second turn with `--conversation`: a `system_message` step, and a result whose usage is **cumulative** (turn 1's 12859 input plus its own 13091, `num_turns` 2) |
+| `agy-stream-json-1.2.17-effort-conflict.ndjson` | real, agy 1.2.17, recorded by wp-p0b (K-133, same) | a run refused before it started: a lone `result` frame with status `ERROR`, an `error` message, an empty `conversation_id`, no init and no steps |
+| `agy-stream-json-1.2.17-sandbox-denied.ndjson` | real, agy 1.2.17, recorded by wp-p0b (K-133, same) | a tool step whose command the sandbox refused: no `error` object, the refusal is in the output |
 | `agy-stream-json-1.2.17-SYNTHETIC-checkpoint.ndjson` | vendor example | a `checkpoint` step with usage, text delivered in one DONE step |
 | `agy-stream-json-1.2.17-SYNTHETIC-multiturn.ndjson` | vendor example | two turns in one process (`--input-format stream-json`): two result frames, the second totalling both turns (`num_turns` 2), `init.model` |
 | `agy-stream-json-1.2.17-SYNTHETIC-tool-error.ndjson` | vendor example + invention | a tool step that failed (`tool_info.error`); the successful step is the vendor's |
@@ -33,6 +33,10 @@ binary. A filename says how trustworthy a capture is:
 | `claude-stream-json-subagent-SYNTHETIC.ndjson` | synthetic | a framed run with the sub-agent's text forwarded (`CLAUDE_CODE_FORWARD_SUBAGENT_TEXT`): assistant lines carrying `parent_tool_use_id`, the sub-agent's tool calls, the relay's lead-in and final report, a result frame |
 
 The vendor examples are from <https://antigravity.google/docs/cli/headless/>.
+The recordings made with the codex and agy adapters' argv (K-133:
+`codex-exec-json-0.154.0.ndjson` and its `-resume`, `-subagent` and
+`-auth-failure` siblings, `agy-stream-json-1.2.17-skill-mention.ndjson`, and the
+four agy files above) are described in `adapter-argv-recordings.md`.
 The older partial-messages claude fixtures live in
 `cli-go/internal/runtime/testdata/`.
 
@@ -41,7 +45,7 @@ The older partial-messages claude fixtures live in
 The two agy files recorded for this folder (`-ok`, `-tool`) had `init.cwd` (the
 scratch directory the run happened in, a local path) rewritten to
 `/work/project`. Nothing else was changed. The four agy files from wp-p0b are
-copied byte for byte from its branch, where `cwd` and the home directory in the
+its recordings byte for byte, where `cwd` and the home directory in the
 sandbox output were already neutral. None of them contains an account
 identifier, token or credential, which was checked before they were committed;
 they do contain conversation ids and the harness's tool list. The codex files

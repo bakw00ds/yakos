@@ -53,6 +53,12 @@ type DispatchRequest struct {
 	// of Project. Set exclusively by server-side code (IDE worktree path);
 	// never derived from client request bodies.
 	WorkDirOverride string
+
+	// Effort is the reasoning effort level (low|medium|high|xhigh|max),
+	// already validated by the dispatch layer. Empty means no override. The
+	// codex adapter passes it as -c model_reasoning_effort and the agy
+	// adapter as --effort; the claude framed path does not use it.
+	Effort string
 }
 
 // DispatchResult captures the outcome of a runtime dispatch call. The stdout

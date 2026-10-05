@@ -234,7 +234,9 @@ Roughly: every Nth tool call = one supervisor dispatch. On default
 
 Cheaper alternatives:
 - Raise `score_every_n_calls` to 20 or 30
-- Use `runtime: codex` with `model: cheap` for gpt-5-nano-tier judging
+- Use `runtime: codex` for the judge (it runs on codex's default model; pin a
+  cheaper id from `codex debug models` in the agent's `model:` once you have
+  chosen one)
 - Use passive mode (`block_on_critical: false`) — you still get the
   surface signal without the hard block, and you can lower the
   scoring frequency without losing safety
