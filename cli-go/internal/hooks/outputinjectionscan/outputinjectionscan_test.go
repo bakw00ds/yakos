@@ -476,7 +476,7 @@ func TestScan_LabelsAndOrder(t *testing.T) {
 }
 
 func TestScan_ZeroWidthCountIsReported(t *testing.T) {
-	got := outputinjectionscan.Scan(strings.Repeat("​", 11))
+	got := outputinjectionscan.Scan(strings.Repeat("\u200b", 11))
 	if len(got) != 1 || got[0] != "zero-width-unicode-steganography(11 chars)" {
 		t.Errorf("Scan = %v", got)
 	}
