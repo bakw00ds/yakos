@@ -341,7 +341,9 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   resend on the same session id, but the cancelled turn's goroutine freed "its"
   slot again when it ended, and keyed by session id that was the new turn's.
   The new turn could then no longer be cancelled, and a third turn was accepted
-  while it ran. Slots are now keyed by generation.
+  while it ran. Slots are now keyed by generation. The hub's own `CloseSession`
+  has the same shape (the old goroutine closes the new turn's hub entry) and is
+  left alone here; it is tracked on K-148.
 
 - **CLI errors and the REST 502 body carry one `dispatch:` prefix.** New errors
   from the dispatch package already begin with it, which printed
