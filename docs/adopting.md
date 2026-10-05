@@ -87,6 +87,11 @@ audit-log-on-mutation). Adds MyProject-specific stack: Node.js +
 Fastify + Prisma + Postgres, the `apps/api/` layout...
 ```
 
+`extends:` takes the bare id of a framework agent, as above, and never a path:
+letters, digits, `.`, `_` and `-`, starting with a letter or digit. A value with a
+slash, a `..`, a leading dot, quotes or a trailing comment makes the dispatcher
+skip that agent with a warning, and `yakos validate` reports it as an error.
+
 Note: project-level agents are NOT currently runtime-discoverable as
 `subagent_type` values (Phase 0.5 finding). The on-disk discipline
 documents intent; live dispatch goes through
