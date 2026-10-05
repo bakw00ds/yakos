@@ -457,6 +457,21 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   project directory, so one bad file no longer stops the other agents. A
   framework file that cannot be read is still an error.
 
+- **`extends:` names a framework template and nothing else (K-132 follow-up,
+  sec-324, rev-324).** The value came from the agent's own file and went into a
+  path as it stood, so a project agent could extend any `.md` file the daemon
+  could read (a file outside `lib/agents` put its text into claude's command
+  line) or point the extends step at a huge file to fail every dispatch. The
+  value must now be a bare agent id: 1 to 128 of letters, digits, `.`, `_` and
+  `-`, starting with a letter or digit, with no `..`. The template is read from
+  `lib/agents` under the same rules as an agent file, so one that is a symlink
+  out of the framework's `lib/` and the project directory, or not a regular
+  file, is refused. A bad value or an unsafe template skips that agent with a
+  once-per-file warning that names the file and the value, and does not fail the
+  roster. A missing template still means the agent's own body alone, and a
+  template with a line over 1 MiB stays an error: it is the framework's own
+  file, which a clone cannot change.
+
 - **`yakos validate` rejects the agent files the Go dispatcher skips (K-132
   follow-up, sec-324).** A skipped project file that overrides a framework agent
   leaves the framework's version in place with only a warning on stderr, so CI

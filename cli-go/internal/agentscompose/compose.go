@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -144,8 +145,15 @@ type ComposedAgent struct {
 // An agent file with a line over maxLineBytes is skipped with one warning that
 // names the file and the line, as a runtime-named file is. One broken file, and
 // a cloned repository controls the project's, must not stop every other agent
-// from composing. The extends step is different: an agent cannot be composed
-// without the template it extends, so that stays an error.
+// from composing. A template with a line over the bound is different: an agent
+// cannot be composed without the template it extends, so that stays an error,
+// and it is the framework's own file, which a clone cannot change.
+//
+// `extends:` must be a bare agent id (BareAgentID), and the template is the
+// framework's lib/agents/<id>.md read like an agent file. A bad value, or a
+// template that may not be read, skips that agent with the same warning, naming
+// the file and the value. A template that does not exist means the agent's own
+// body alone.
 //
 // Files are read by readAgentFile (see agentfile.go): a symlink is followed only
 // to a regular file inside the framework's lib/ or the project directory,
@@ -213,13 +221,17 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 				return fmt.Errorf("agentscompose: parse %s: read: %w", path, readErr)
 			}
 
-			agent, err := parseAgentContent(yakosRoot, id, string(data))
+			agent, err := parseAgentContent(yakosRoot, id, string(data), roots)
 			var tooLong *lineTooLongError
-			if errors.As(err, &tooLong) {
+			var skipped *skipAgentError
+			switch {
+			case errors.As(err, &tooLong):
 				warnSkippedAgentFile(path, tooLong.Error())
 				continue
-			}
-			if err != nil {
+			case errors.As(err, &skipped):
+				warnSkippedAgentFile(path, skipped.reason)
+				continue
+			case err != nil:
 				return fmt.Errorf("agentscompose: parse %s: %w", path, err)
 			}
 			if _, exists := index[id]; !exists {
@@ -268,7 +280,7 @@ func warnSkippedAgentFile(path, reason string) {
 
 // parseAgentContent parses and resolves the content of a single agent .md file.
 // The file is read by readAgentFile, which is where what may be read is decided.
-func parseAgentContent(yakosRoot, id, content string) (ComposedAgent, error) {
+func parseAgentContent(yakosRoot, id, content string, roots []string) (ComposedAgent, error) {
 	fm, body, err := splitFrontmatter(content)
 	if err != nil {
 		return ComposedAgent{}, err
@@ -276,23 +288,38 @@ func parseAgentContent(yakosRoot, id, content string) (ComposedAgent, error) {
 	fields := parseFrontmatter(fm)
 
 	// Resolve extends: inheritance — prepend framework template body.
+	//
+	// The value is a bare agent id and nothing else, and the template is the
+	// framework's lib/agents/<id>.md read under the same rules as an agent file
+	// (see agentfile.go). Anything else skips this agent, with a warning, and
+	// never fails the roster: a cloned repository controls the value.
 	if extendsName := fields["extends"]; extendsName != "" {
+		if !BareAgentID(extendsName) {
+			return ComposedAgent{}, &skipAgentError{reason: fmt.Sprintf("extends value %s is not a bare agent id (%s)", DisplayValue(extendsName), BareIDRule)}
+		}
 		fwFile := filepath.Join(yakosRoot, "lib", "agents", extendsName+".md")
-		fwData, err := os.ReadFile(fwFile) //nolint:gosec
-		if err == nil {
-			_, fwBody, splitErr := splitFrontmatter(string(fwData))
+		template, skip, readErr := readAgentFile(fwFile, roots)
+		switch {
+		case errors.Is(readErr, fs.ErrNotExist):
+			// If the framework file doesn't exist, use the project body alone
+			// (matches agents-compose.sh:yk_agents_resolve_extends behavior).
+		case skip != "":
+			return ComposedAgent{}, &skipAgentError{reason: fmt.Sprintf("extends %s: %s", DisplayValue(extendsName), skip)}
+		case readErr != nil:
+			return ComposedAgent{}, &skipAgentError{reason: fmt.Sprintf("extends %s: cannot be read: %v", DisplayValue(extendsName), readErr)}
+		default:
+			_, fwBody, splitErr := splitFrontmatter(string(template))
 			if splitErr != nil {
 				// A refusal, not a skip: this agent cannot be composed without its
 				// template, and composing it without would drop part of the persona.
 				// %v and not %w on purpose. A *lineTooLongError found by errors.As
 				// means "skip this one file" in addDir, and the file at fault here is
-				// the template, not the agent.
+				// the template, not the agent. The template is the framework's own,
+				// which a clone cannot change.
 				return ComposedAgent{}, fmt.Errorf("extends %s: %v", fwFile, splitErr)
 			}
 			body = fwBody + "\n\n---\n\n" + body
 		}
-		// If the framework file doesn't exist, use the project body alone
-		// (matches agents-compose.sh:yk_agents_resolve_extends behavior).
 	}
 
 	// Model alias expansion (PR #32/#39): translate semantic aliases to concrete tiers.

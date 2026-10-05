@@ -28,6 +28,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // MaxAgentFileBytes bounds one agent file. A real one is a few KiB, and the chat
@@ -190,3 +191,69 @@ func LongLine(content string) int {
 	}
 	return 0
 }
+
+// BareIDRule says what BareAgentID accepts, for messages. cli/lib/agent-files.sh
+// keeps the same text and the tests compare the two.
+const BareIDRule = `1 to 128 of A-Z a-z 0-9 . _ -, starting with a letter or digit, no ".."`
+
+// BareAgentID reports whether v is a bare agent id, the only form `extends:` may
+// take: a file name stem and nothing that can reach another directory. It has
+// no "/" or "\", does not start with a dot, and has no "..". Without this an
+// agent could extend any .md file the daemon can read, such as one outside
+// lib/agents, or aim the extends step at a huge file to fail every dispatch.
+func BareAgentID(v string) bool {
+	if v == "" || len(v) > 128 || strings.Contains(v, "..") {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case i > 0 && (c == '.' || c == '_' || c == '-'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// DisplayValue renders a frontmatter value for a message. The value comes from a
+// file the operator may not have written, and the bash twin has to print the same
+// bytes, so the rule is simple: every byte outside printable ASCII becomes "?",
+// at most 64 bytes are shown and "..." says there were more, and the whole is
+// in double quotes.
+func DisplayValue(v string) string {
+	const shown = 64
+	more := len(v) > shown
+	if more {
+		v = v[:shown]
+	}
+	b := []byte(v)
+	for i, c := range b {
+		if c < 0x20 || c > 0x7e {
+			b[i] = '?'
+		}
+	}
+	if more {
+		return `"` + string(b) + `..."`
+	}
+	return `"` + string(b) + `"`
+}
+
+// ExtendsValue returns the `extends:` value of an agent file as Compose reads it,
+// raw: the text after the colon, trimmed, quotes and a trailing comment kept. It
+// is "" when there is none, and so when the frontmatter is unreadable.
+func ExtendsValue(content string) string {
+	fm, _, err := splitFrontmatter(content)
+	if err != nil {
+		return ""
+	}
+	return parseFrontmatter(fm)["extends"]
+}
+
+// skipAgentError says why one agent is left out of the roster although its own
+// file was read: an `extends:` that is not a bare agent id, or a template that
+// may not be read. Compose skips the agent with a warning and goes on.
+type skipAgentError struct{ reason string }
+
+func (e *skipAgentError) Error() string { return e.reason }
