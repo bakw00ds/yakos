@@ -26,9 +26,13 @@ the Agent SDK, which this script runs. main() refuses first thing, before it
 reads its other inputs or imports the SDK: exit status 78 (sysexits EX_CONFIG)
 and one stderr line that never contains any part of a credential. It then removes
 subscription OAuth variables from its own environment, which the SDK and the
-Claude Code CLI it bundles inherit. claude-sdk.sh (yk_rt_claude_sdk_dispatch)
-gates and scrubs first; this is the second anchor for a script started any other
-way. Twins: cli-go/internal/interactive/sidecar/sidecar.mjs and
+Claude Code CLI it bundles inherit. Names that start with YAKOS_ are yakOS's own
+and are never judged by their value: YAKOS_AGENTS_JSON is the composed agent
+roster, whose text can mention a token prefix in prose, and the yakOS hooks the
+bundled CLI runs read other YAKOS_ variables. claude-sdk.sh
+(yk_rt_claude_sdk_dispatch) gates and scrubs first; this is the second anchor for
+a script started any other way. Twins:
+cli-go/internal/interactive/sidecar/sidecar.mjs and
 cli-go/internal/runtime/sdk_env.go.
 
 v0.26 (Plan 5 M3) — verified against the SDK's examples/ + types.py
@@ -100,9 +104,18 @@ def scrub_oauth_env(environ):
     Any CLAUDE_CODE_OAUTH* name goes, in any case, and so does any variable whose
     value contains an OAuth token marker. The SDK and the Claude Code CLI it
     bundles inherit this environment.
+
+    A name that starts with YAKOS_ (exact case) is never judged by its value.
+    Those are yakOS's own inputs and state: the composed agent roster in
+    YAKOS_AGENTS_JSON can mention a token prefix in prose, and the yakOS hooks the
+    bundled CLI runs read other YAKOS_ variables. Nothing reads one as a
+    credential. A name that only contains YAKOS_, or spells it in lowercase, is an
+    ordinary name.
     """
     for name in list(environ):
-        if name.upper().startswith("CLAUDE_CODE_OAUTH") or _is_oauth_value(environ[name]):
+        if name.upper().startswith("CLAUDE_CODE_OAUTH"):
+            del environ[name]
+        elif not name.startswith("YAKOS_") and _is_oauth_value(environ[name]):
             del environ[name]
 
 

@@ -198,10 +198,29 @@ _yk_rt_claude_sdk_is_oauth_name() {
     return 1
 }
 
+# _yk_rt_claude_sdk_carries_oauth <name> <value>
+#   Exit 0 when the variable carries subscription OAuth material: a
+#   CLAUDE_CODE_OAUTH* name, or a value that contains a token marker. A name that
+#   starts with YAKOS_ (exact case) is never judged by its value: those are
+#   yakOS's own inputs and state (the composed agent roster can mention a token
+#   prefix in prose, and the yakOS hooks run by the bundled CLI read other YAKOS_
+#   variables), and nothing reads one as a credential. A name that only contains
+#   YAKOS_, or spells it in lowercase, is an ordinary name.
+_yk_rt_claude_sdk_carries_oauth() {
+    if _yk_rt_claude_sdk_is_oauth_name "$1"; then
+        return 0
+    fi
+    case "$1" in
+        YAKOS_*) return 1 ;;
+    esac
+    _yk_rt_claude_sdk_is_oauth_value "$2"
+}
+
 # yk_rt_claude_sdk_oauth_env_names
 #   Print, one per line, the NAME of every exported variable that carries
-#   subscription OAuth material: any CLAUDE_CODE_OAUTH* name in any case, and any
-#   variable whose value contains an OAuth token marker. Names only, never values.
+#   subscription OAuth material (see _yk_rt_claude_sdk_carries_oauth): any
+#   CLAUDE_CODE_OAUTH* name in any case, and any variable whose value contains an
+#   OAuth token marker, except YAKOS_ names. Names only, never values.
 #
 #   The environment is read as NUL-delimited `env -0` entries, not from `compgen
 #   -e`, because compgen lists only names a shell can hold as variables: bash 5
@@ -216,13 +235,13 @@ yk_rt_claude_sdk_oauth_env_names() {
             name="${entry%%=*}"
             [ -n "$name" ] || continue # a Windows "=C:=C:\..." entry has no name to unset
             case "$name" in *$'\n'*) continue ;; esac
-            if _yk_rt_claude_sdk_is_oauth_name "$name" || _yk_rt_claude_sdk_is_oauth_value "${entry#*=}"; then
+            if _yk_rt_claude_sdk_carries_oauth "$name" "${entry#*=}"; then
                 printf '%s\n' "$name"
             fi
         done < <(env -0)
     else
         for name in $(compgen -e); do
-            if _yk_rt_claude_sdk_is_oauth_name "$name" || _yk_rt_claude_sdk_is_oauth_value "${!name-}"; then
+            if _yk_rt_claude_sdk_carries_oauth "$name" "${!name-}"; then
                 printf '%s\n' "$name"
             fi
         done

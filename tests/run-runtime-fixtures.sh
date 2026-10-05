@@ -1118,6 +1118,8 @@ t20_dispatch "ANTHROPIC_API_KEY=sk-ant-api03-t20-fake-key" \
     "CLAUDE_CODE_OAUTH_SCOPES=user:inference" "claude_code_oauth_client_id=lowercase-name" \
     "ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-$t20_secret" "T20_MISFILED=Bearer sk-ant-ort01-$t20_secret" \
     "T20.DOTTED=Bearer sk-ant-oat01-$t20_secret" "t20_lower_misfiled=SK-ANT-ORT01-$t20_secret" \
+    "YAKOS_T20_PROSE=never paste sk-ant-oat or SK-ANT-ORT tokens" \
+    "T20_YAKOS_MID=Bearer sk-ant-oat01-$t20_secret" "yakos_t20_lower=Bearer sk-ant-oat01-$t20_secret" \
     "T20_BENIGN=hello" || t20_rc=$?
 if [ "$t20_rc" -ne 0 ] || ! grep -q 'fake sdk output' "$t20/out"; then
     fail "with an API key the dispatch must reach python (exit $t20_rc): $(cat "$t20/err")"
@@ -1126,16 +1128,19 @@ else
     # claude_code_oauth_client_id is a lowercase name with a non-token value, T20.DOTTED a
     # name a shell cannot hold as a variable (bash 5 passes it to children, bash 3.2 drops
     # it, so the check is "never inherited" on both), t20_lower_misfiled a token in a
-    # lowercase name and upper-case token marker.
+    # lowercase name and upper-case token marker. A name that starts with YAKOS_ (exact case) is
+    # yakOS's own and is never judged by value (YAKOS_T20_PROSE mentions the prefixes in prose,
+    # as a composed agent roster can); a name that merely contains YAKOS_ (T20_YAKOS_MID) or
+    # spells it in lowercase (yakos_t20_lower) is an ordinary name and a token in it goes.
     for banned in CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_REFRESH_TOKEN CLAUDE_CODE_OAUTH_SCOPES claude_code_oauth_client_id \
-                  ANTHROPIC_AUTH_TOKEN T20_MISFILED T20.DOTTED t20_lower_misfiled; do
+                  ANTHROPIC_AUTH_TOKEN T20_MISFILED T20.DOTTED t20_lower_misfiled T20_YAKOS_MID yakos_t20_lower; do
         if grep -qx "$banned" "$t20/seen.env"; then
             fail "python inherited $banned (OAuth material must not reach the Agent SDK)"
         else
             ok "python does not inherit $banned"
         fi
     done
-    for kept in ANTHROPIC_API_KEY T20_BENIGN; do
+    for kept in ANTHROPIC_API_KEY T20_BENIGN YAKOS_T20_PROSE; do
         if grep -qx "$kept" "$t20/seen.env"; then
             ok "python still receives $kept"
         else
@@ -1237,16 +1242,22 @@ PY_EOF
     t20_rc=0
     rm -f "$t20/seen.env"
     printf 'hello\n' | env -i HOME="$t20/home" PATH="$PATH" PYTHONPATH="$t20/fakesdk" T20_SEEN="$t20/seen.env" \
-        YAKOS_AGENT_ID=probe YAKOS_PROJECT_DIR="$t20/proj" YAKOS_AGENTS_JSON='{"probe":{"prompt":"p"}}' \
+        YAKOS_AGENT_ID=probe YAKOS_PROJECT_DIR="$t20/proj" \
+        YAKOS_AGENTS_JSON='{"probe":{"prompt":"p. Never paste a sk-ant-oat or sk-ant-ort token."}}' \
         ANTHROPIC_API_KEY=sk-ant-api03-t20-fake-key \
         "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-$t20_secret" "claude_code_oauth_scopes=user:inference" \
         "T20_MISFILED=Bearer sk-ant-ort01-$t20_secret" T20_BENIGN=hello \
+        "T20_PROSE_NOTE=never paste sk-ant-oat tokens" "YAKOS_T20_NOTE=never paste sk-ant-oat tokens" \
+        "T20_YAKOS_MID=Bearer sk-ant-oat01-$t20_secret" "yakos_t20_lower=Bearer sk-ant-oat01-$t20_secret" \
         python3 -B "$YAKOS_LIB/runtimes/claude-sdk-dispatch.py" >"$t20/pyout" 2>"$t20/pyerr" || t20_rc=$?
     if [ "$t20_rc" -ne 0 ] || ! grep -q 'fake sdk text' "$t20/pyout"; then
         fail "claude-sdk-dispatch.py with a key must run end to end against a stand-in SDK (exit $t20_rc): $(cat "$t20/pyerr")"
     else
         ok "claude-sdk-dispatch.py runs end to end with an API key"
-        for banned in CLAUDE_CODE_OAUTH_TOKEN claude_code_oauth_scopes T20_MISFILED; do
+        # The roster above mentions the token prefixes in prose and still reached the SDK: the
+        # strip must not judge a YAKOS_ name by value. T20_PROSE_NOTE, which mentions them the
+        # same way under an ordinary name, goes with the other OAuth-looking values.
+        for banned in CLAUDE_CODE_OAUTH_TOKEN claude_code_oauth_scopes T20_MISFILED T20_PROSE_NOTE T20_YAKOS_MID yakos_t20_lower; do
             if grep -qx "$banned" "$t20/seen.env"; then
                 fail "the SDK would inherit $banned from claude-sdk-dispatch.py"
             else
@@ -1258,6 +1269,32 @@ PY_EOF
         else
             fail "claude-sdk-dispatch.py dropped the key or an unrelated variable"
         fi
+        if grep -qx YAKOS_T20_NOTE "$t20/seen.env"; then
+            ok "claude-sdk-dispatch.py keeps a YAKOS_ variable that mentions a token prefix in prose"
+        else
+            fail "claude-sdk-dispatch.py dropped YAKOS_T20_NOTE: yakOS's own variables are not judged by value"
+        fi
+    fi
+    # The hand-off the real adapter uses: dispatch composes the roster from the framework root
+    # and passes it to the real script in YAKOS_AGENTS_JSON. A roster whose agent text mentions
+    # a token prefix in prose must reach the SDK; the strip once emptied it and the dispatch
+    # died with "YAKOS_AGENTS_JSON env var required".
+    mkdir -p "$t20/rootprose/lib/agents"
+    sed 's/^A one-agent roster for the claude-sdk gate fixture\.$/Never paste a sk-ant-oat or sk-ant-ort token into a prompt./' \
+        "$t20/root/lib/agents/probe.md" > "$t20/rootprose/lib/agents/probe.md"
+    cat > "$t20/py/sdkpython" <<'PY_EOF'
+#!/bin/sh
+# Runs the real claude-sdk-dispatch.py against the stand-in SDK modules.
+PYTHONPATH="$T20_FAKESDK" exec python3 -B "$@"
+PY_EOF
+    chmod +x "$t20/py/sdkpython"
+    t20_rc=0
+    t20_dispatch "ANTHROPIC_API_KEY=sk-ant-api03-t20-fake-key" YAKOS_ROOT="$t20/rootprose" \
+        YAKOS_PYTHON="$t20/py/sdkpython" T20_FAKESDK="$t20/fakesdk" || t20_rc=$?
+    if [ "$t20_rc" -eq 0 ] && grep -q 'fake sdk text' "$t20/out"; then
+        ok "a roster that mentions a token prefix in prose reaches the SDK through the real dispatch"
+    else
+        fail "a roster that mentions a token prefix in prose must reach the SDK (exit $t20_rc): $(cat "$t20/err")"
     fi
     t20_scrubbed="$(python3 -B - "$YAKOS_LIB/runtimes/claude-sdk-dispatch.py" <<'PY_EOF'
 import importlib.util, sys
@@ -1265,13 +1302,15 @@ spec = importlib.util.spec_from_file_location("claude_sdk_dispatch", sys.argv[1]
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 env = {"ANTHROPIC_API_KEY": "sk-ant-api03-k", "CLAUDE_CODE_OAUTH_TOKEN": "x",
-       "claude_code_oauth_scopes": "y", "MISFILED": "Bearer sk-ant-oat01-z", "PATH": "/usr/bin"}
+       "claude_code_oauth_scopes": "y", "MISFILED": "Bearer sk-ant-oat01-z", "PATH": "/usr/bin",
+       "YAKOS_AGENTS_JSON": '{"a": "never paste sk-ant-oat tokens"}',
+       "T_YAKOS_MID": "Bearer sk-ant-oat01-z", "yakos_lower": "Bearer sk-ant-oat01-z"}
 mod.scrub_oauth_env(env)
 print(",".join(sorted(env)))
 PY_EOF
 )" || t20_scrubbed="python failed: $t20_scrubbed"
-    if [ "$t20_scrubbed" = "ANTHROPIC_API_KEY,PATH" ]; then
-        ok "claude-sdk-dispatch.py scrub_oauth_env drops OAuth names and values, keeps the rest"
+    if [ "$t20_scrubbed" = "ANTHROPIC_API_KEY,PATH,YAKOS_AGENTS_JSON" ]; then
+        ok "claude-sdk-dispatch.py scrub_oauth_env drops OAuth names and values, keeps the rest and YAKOS_ names"
     else
         fail "claude-sdk-dispatch.py scrub_oauth_env left: $t20_scrubbed"
     fi
