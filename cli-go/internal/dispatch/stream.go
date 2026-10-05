@@ -422,6 +422,9 @@ func execWithStreaming(
 	writeStarted(req, tsStart, logPath)
 
 	cp, hasChatCmd := adapter.(chatCmdProvider)
+	// Whether the harness is handed a native session to continue decides which
+	// usage figure a buffered runtime reports (see runUsage).
+	resumed := chatResumesNativeSession(chatReq)
 
 	var (
 		allText        []byte
@@ -542,7 +545,7 @@ func execWithStreaming(
 			pr := bufParser.Finish()
 			pr.LinesDropped += readerDropped
 			parsed = &pr
-			if u := runUsage(pr, newConversation(req)); u != (runtime.Usage{}) {
+			if u := runUsage(pr, resumed); u != (runtime.Usage{}) {
 				usageCost = &u
 			}
 			text := pr.Text
@@ -606,7 +609,7 @@ func execWithStreaming(
 	// K-135 typed output. A buffered runtime's parse is authoritative; for claude
 	// the streamed text is what the deltas delivered.
 	if parsed != nil {
-		result.applyParsed(adapter.Name(), *parsed, newConversation(req))
+		result.applyParsed(adapter.Name(), *parsed, resumed)
 	} else {
 		result.Runtime = adapter.Name()
 		result.Provider = providerForRuntime(result.Runtime)

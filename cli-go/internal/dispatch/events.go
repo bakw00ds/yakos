@@ -118,8 +118,9 @@ type Result struct {
 	// the run reported none. Counts follow runtime.Usage's convention across every
 	// harness. It is what gets logged and summed, so adding runs up counts every
 	// token once. For agy, whose result frame totals the whole conversation, it
-	// is the frame's total when the run began a conversation (the request had no
-	// ConversationID), and the sum of the run's DONE steps when it resumed one.
+	// is the frame's total when the harness was not resumed (the request handed
+	// it no native session id, as for MCP and for every chat turn), and the sum
+	// of the run's DONE steps when it was (agy --conversation <id>).
 	// Its DurationMs is zero for an agy turn after the first, whose frame reports
 	// the session's clock; DurationS is the measured duration.
 	Usage *cost.Usage

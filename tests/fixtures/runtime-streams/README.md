@@ -67,8 +67,9 @@ Every parser reports tokens in the Anthropic convention (see `runtime.Usage`):
   therefore the sum of the usage carried by the DONE steps in the stream (13091
   and 693 for turn 2, equal to the result frame on every first-turn recording),
   and the frame's total is exposed as `ParseResult.CumulativeUsage`. The
-  dispatch layer reports the total for a run that began a conversation and the
-  step sum for a resumed one, so adding runs up needs no subtraction. The single
+  dispatch layer reports the total when the harness was not handed a native
+  session to continue and the step sum when it was, so adding runs up needs no
+  subtraction. The single
   envelope has no steps: its `Usage` is zero and only the total is exposed. The
   frame's `duration_seconds` is the session's clock (turn 2 reports 35.9 s for a
   step of about 4 s), so `Usage.DurationMs` is left zero after the first turn.

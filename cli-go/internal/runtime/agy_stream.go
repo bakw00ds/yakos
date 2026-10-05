@@ -32,14 +32,14 @@ package runtime
 // 13091, and its num_turns is 2. Taken as the run's usage it would count every
 // earlier turn again each time a conversation is resumed. The parser therefore
 // exposes both figures and leaves the choice to its caller, which knows whether
-// the run began a conversation. ParseResult.Usage is the sum of the usage
-// carried by the DONE steps seen in THIS stream: the run's own tokens, equal to
-// the result frame's on every first-turn recording, and zero when no step
-// carried usage (the single --output-format json envelope has no steps).
-// ParseResult.CumulativeUsage is the frame's total. internal/dispatch reports
-// the total for a run that began a new conversation, where it is the run's own
-// and survives a step line lost to corruption, and the step sum for a resumed
-// run.
+// the harness was handed a native session to continue (--conversation <id>).
+// ParseResult.Usage is the sum of the usage carried by the DONE steps seen in
+// THIS stream: the run's own tokens, equal to the result frame's on every
+// first-turn recording, and zero when no step carried usage (the single
+// --output-format json envelope has no steps). ParseResult.CumulativeUsage is
+// the frame's total. internal/dispatch reports the total when the harness was
+// not resumed, where it is the run's own and survives a step line lost to
+// corruption, and the step sum when it was.
 //
 // The frame's duration_seconds is the session's too: the recorded second turn
 // reports 35.9 seconds for a step of about 4, because the clock runs from the
