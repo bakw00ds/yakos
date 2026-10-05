@@ -284,7 +284,7 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 	// resolve.go routeDispatch is shared with Run, so both paths pick the
 	// runtime and model by one rule. The daemon never supplies a
 	// YAKOS_RUNTIME default (RuntimeEnvDefault stays empty here).
-	rr, err := routeDispatch(routeInput{
+	rr, err := routeDispatch(ctx, routeInput{
 		YakosRoot:       yakosRoot,
 		Project:         project,
 		Agent:           p.Agent,

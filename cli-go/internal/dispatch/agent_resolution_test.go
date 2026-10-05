@@ -271,7 +271,7 @@ func route(t *testing.T, root, project, agent string, mut func(*routeInput)) (*r
 	if mut != nil {
 		mut(&in)
 	}
-	return routeDispatch(in)
+	return routeDispatch(context.Background(), in)
 }
 
 // K-127: an agent's `runtime:` pin selects the adapter, and its non-Claude model
@@ -620,23 +620,6 @@ func TestRoute_ExplicitUnknownRuntimeIsAnError(t *testing.T) {
 	}
 }
 
-// Matches cli/lib/dispatch.sh: an explicit runtime that is unavailable also
-// walks the fallback lists, and says so.
-func TestRoute_UnavailableOverrideWalksFallbacks(t *testing.T) {
-	root := routingRoot(t)
-	captureRouteLog(t)
-	withProbe(t, func(name string) probeResult {
-		if name == "codex" {
-			return probeResult{Reason: "CLI not found on PATH"}
-		}
-		return probeResult{OK: true}
-	})
-	got, err := route(t, root, projectWithYML(t, "default-fallback: [claude]\n"), "plain", func(in *routeInput) { in.RuntimeOverride = "codex" })
-	if err != nil || got.Runtime != "claude" || got.RuntimeChosenBy != RuntimeByFallback || got.FallbackFrom != "codex" {
-		t.Errorf("got %+v %v, want claude by fallback from codex", got, err)
-	}
-}
-
 // A broken .yakos.yml is reported once and never breaks dispatch.
 func TestRoute_MalformedProjectConfigWarnsAndContinues(t *testing.T) {
 	root := routingRoot(t)
@@ -835,7 +818,7 @@ func TestChooseRuntime_PrecedenceTable(t *testing.T) {
 		{"nil agent", chainInput{agentName: "a"}, "claude", RuntimeByDefault},
 	}
 	for _, c := range cases {
-		got, _, err := chooseRuntime(c.in, func(string) probeResult { return probeResult{OK: true} })
+		got, _, err := chooseRuntime(context.Background(), c.in, func(context.Context, string) probeResult { return probeResult{OK: true} })
 		if err != nil || got.Runtime != c.wantRT || got.ChosenBy != c.wantBy {
 			t.Errorf("%s: %+v %v, want %q by %q", c.name, got, err, c.wantRT, c.wantBy)
 		}
@@ -874,7 +857,7 @@ func TestResolveRuntime_AppliesProbeAndAuto(t *testing.T) {
 		}
 		return probeResult{OK: true}
 	})
-	got, err := ResolveRuntime(RouteQuery{YakosRoot: root, Project: projectWithYML(t, ""), Agent: "pinned-fb", Override: "auto"})
+	got, err := ResolveRuntime(context.Background(), RouteQuery{YakosRoot: root, Project: projectWithYML(t, ""), Agent: "pinned-fb", Override: "auto"})
 	if err != nil || got.Runtime != "codex" || got.FallbackFrom != "agy" || len(got.Skipped) != 1 || got.Skipped[0].Runtime != "agy" {
 		t.Errorf("got %+v %v", got, err)
 	}
@@ -1131,10 +1114,10 @@ func TestDefaultRuntimeProbe(t *testing.T) {
 
 	// Nothing installed.
 	t.Setenv("PATH", t.TempDir())
-	if p := defaultRuntimeProbe("codex"); p.OK || !strings.Contains(p.Reason, "not found on PATH") {
+	if p := defaultRuntimeProbe(context.Background(), "codex"); p.OK || !strings.Contains(p.Reason, "not found on PATH") {
 		t.Errorf("codex missing: %+v", p)
 	}
-	if p := defaultRuntimeProbe("claude-sdk"); p.OK || !strings.Contains(p.Reason, "not supported") {
+	if p := defaultRuntimeProbe(context.Background(), "claude-sdk"); p.OK || !strings.Contains(p.Reason, "not supported") {
 		t.Errorf("claude-sdk: %+v", p)
 	}
 
@@ -1146,24 +1129,24 @@ func TestDefaultRuntimeProbe(t *testing.T) {
 		}
 	}
 	t.Setenv("PATH", bin)
-	if p := defaultRuntimeProbe("codex"); p.OK || !strings.Contains(p.Reason, "not signed in") || !strings.Contains(p.Reason, "yakos auth login codex") {
+	if p := defaultRuntimeProbe(context.Background(), "codex"); p.OK || !strings.Contains(p.Reason, "not signed in") || !strings.Contains(p.Reason, "yakos auth login codex") {
 		t.Errorf("codex signed out: %+v", p)
 	}
-	if p := defaultRuntimeProbe("agy"); p.OK || !strings.Contains(p.Reason, "not signed in") {
+	if p := defaultRuntimeProbe(context.Background(), "agy"); p.OK || !strings.Contains(p.Reason, "not signed in") {
 		t.Errorf("agy signed out: %+v", p)
 	}
 	// claude's credentials cannot be probed: installed counts.
-	if p := defaultRuntimeProbe("claude"); !p.OK {
+	if p := defaultRuntimeProbe(context.Background(), "claude"); !p.OK {
 		t.Errorf("claude installed: %+v", p)
 	}
 
 	// Signed in.
 	t.Setenv("OPENAI_API_KEY", "sk-test")
-	if p := defaultRuntimeProbe("codex"); !p.OK {
+	if p := defaultRuntimeProbe(context.Background(), "codex"); !p.OK {
 		t.Errorf("codex with a key: %+v", p)
 	}
 	t.Setenv("ANTIGRAVITY_API_KEY", "k")
-	if p := defaultRuntimeProbe("agy"); !p.OK {
+	if p := defaultRuntimeProbe(context.Background(), "agy"); !p.OK {
 		t.Errorf("agy with a key: %+v", p)
 	}
 }

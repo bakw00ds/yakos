@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -29,14 +30,21 @@ func testAliasTable() map[string]map[string]string {
 // counts as available and no state default is set. Tests that exercise the
 // probe or the state default install their own via withProbe / withStateDefault.
 func TestMain(m *testing.M) {
-	runtimeProbe = func(string) probeResult { return probeResult{OK: true} }
-	stateDefaultRuntime = func() string { return "" }
+	runtimeProbe = func(context.Context, string) probeResult { return probeResult{OK: true} }
+	stateDefaultRuntime = func() (string, string) { return "", "" }
+	probeTTL = 0 // no answer is reused between tests
 	rt.SetAliasTableForTest(testAliasTable())
 	os.Exit(m.Run())
 }
 
 // withProbe installs a probe for one test.
 func withProbe(t *testing.T, fn func(name string) probeResult) {
+	t.Helper()
+	withProbeCtx(t, func(_ context.Context, name string) probeResult { return fn(name) })
+}
+
+// withProbeCtx installs a probe that sees the dispatch's context.
+func withProbeCtx(t *testing.T, fn func(ctx context.Context, name string) probeResult) {
 	t.Helper()
 	orig := runtimeProbe
 	runtimeProbe = fn
@@ -46,7 +54,14 @@ func withProbe(t *testing.T, fn func(name string) probeResult) {
 // withStateDefault sets the state-dir default runtime for one test.
 func withStateDefault(t *testing.T, name string) {
 	t.Helper()
+	withStateDefaultWarn(t, name, "")
+}
+
+// withStateDefaultWarn is withStateDefault with a warning the reader reports for
+// a file it refused.
+func withStateDefaultWarn(t *testing.T, name, warning string) {
+	t.Helper()
 	orig := stateDefaultRuntime
-	stateDefaultRuntime = func() string { return name }
+	stateDefaultRuntime = func() (string, string) { return name, warning }
 	t.Cleanup(func() { stateDefaultRuntime = orig })
 }

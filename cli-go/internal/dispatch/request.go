@@ -39,6 +39,15 @@ type Request struct {
 	// steer remote callers.
 	RuntimeEnvDefault string
 
+	// RuntimeFallbackOptIn are the runtimes the operator listed to fall back to
+	// when the chosen runtime cannot run (the CLI's --runtime-fallback). A
+	// runtime the operator named (Runtime, or a bare runtime name as the agent)
+	// does not fall back at all unless this lists somewhere to go; for any other
+	// choice the list is tried after the agent's runtime-fallback and the
+	// project's default-fallback. Only the CLI sets it, as Service.Run builds its
+	// Request without it: no API caller can widen where a task is sent.
+	RuntimeFallbackOptIn []string
+
 	// RuntimeChosenBy and FallbackFrom are populated by the orchestrator after
 	// runtime resolution (see the RuntimeBy* constants). Not caller inputs.
 	// FallbackFrom names the preferred runtime that could not be used and is

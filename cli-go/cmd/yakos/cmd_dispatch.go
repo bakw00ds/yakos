@@ -27,7 +27,9 @@ var runtimeIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 //
 // Flags:
 //
-//	--runtime <id>       Override the agent's frontmatter runtime: field
+//	--runtime <id>       Run on this runtime. It does not fall back if it cannot run
+//	--runtime-fallback <list>
+//	                     Runtimes to fall back to when the chosen one cannot run
 //	--model <name>       Override the model: a Claude tier (haiku|sonnet|opus|fable),
 //	                     an alias (cheap|balanced|best|reasoning|frontier) or, for
 //	                     codex and agy, a model id from their own catalog;
@@ -43,6 +45,7 @@ func runDispatch(yakosRoot string, args []string) {
 	agentName := ""
 	task := ""
 	runtimeOverride := ""
+	runtimeFallbackRaw := ""
 	modelOverride := ""
 	evalRunID := ""
 	project := ""
@@ -61,6 +64,7 @@ func runDispatch(yakosRoot string, args []string) {
 	fs := &cliflag.Set{Cmd: "dispatch", Specs: []cliflag.Spec{
 		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
 		{Name: "--runtime", Kind: cliflag.String, Str: &runtimeOverride, ValueDesc: "an id"},
+		{Name: "--runtime-fallback", Kind: cliflag.String, Str: &runtimeFallbackRaw, ValueDesc: "a list like claude,codex"},
 		{Name: "--model", Kind: cliflag.String, Str: &modelOverride, ValueDesc: "a tier (haiku|sonnet|opus|fable)"},
 		{Name: "--eval-run-id", Kind: cliflag.String, Str: &evalRunID, ValueDesc: "an id string"},
 		{Name: "--project", Kind: cliflag.String, Str: &project, ValueDesc: "a path"},
@@ -157,6 +161,15 @@ func runDispatch(yakosRoot string, args []string) {
 		envRuntime = ""
 	}
 
+	// --runtime-fallback is the operator's opt-in to fall back when a runtime
+	// they named cannot run; for any other choice it extends the agent's and the
+	// project's own fallback lists.
+	fallbackOptIn, ferr := dispatch.ParseRuntimeList(runtimeFallbackRaw)
+	if ferr != nil {
+		fmt.Fprintf(os.Stderr, "dispatch: --runtime-fallback: %v\n", ferr)
+		os.Exit(1)
+	}
+
 	// The model override is an alias or an id whose meaning depends on the
 	// runtime the agent resolves to, which is not known until the agent's pin is
 	// read. dispatch.Run therefore expands aliases and validates the model
@@ -168,12 +181,13 @@ func runDispatch(yakosRoot string, args []string) {
 	// the authoritative errors and runs the budget preflight first (a
 	// hard-stopped agent must exit 4 whether or not a runtime is installed), so
 	// the line just says none was available.
-	choice, rerr := dispatch.ResolveRuntime(dispatch.RouteQuery{
-		YakosRoot:  yakosRoot,
-		Project:    project,
-		Agent:      agentName,
-		Override:   runtimeOverride,
-		EnvDefault: envRuntime,
+	choice, rerr := dispatch.ResolveRuntime(context.Background(), dispatch.RouteQuery{
+		YakosRoot:     yakosRoot,
+		Project:       project,
+		Agent:         agentName,
+		Override:      runtimeOverride,
+		EnvDefault:    envRuntime,
+		FallbackOptIn: fallbackOptIn,
 	})
 
 	// Log the dispatch parameters to stderr (mirrors dispatch.sh:347).
@@ -210,22 +224,23 @@ func runDispatch(yakosRoot string, args []string) {
 	}
 
 	req := dispatch.Request{
-		AgentName:         agentName,
-		Task:              task,
-		Project:           project,
-		Runtime:           runtimeOverride,
-		RuntimeEnvDefault: envRuntime,
-		Model:             modelOverride,
-		EvalRunID:         evalRunID,
-		AllowRoot:         allowRoot,
-		Timeout:           timeoutSecs,
-		YakosRoot:         yakosRoot,
-		ConversationID:    cliConvID,
+		AgentName:            agentName,
+		Task:                 task,
+		Project:              project,
+		Runtime:              runtimeOverride,
+		RuntimeEnvDefault:    envRuntime,
+		RuntimeFallbackOptIn: fallbackOptIn,
+		Model:                modelOverride,
+		EvalRunID:            evalRunID,
+		AllowRoot:            allowRoot,
+		Timeout:              timeoutSecs,
+		YakosRoot:            yakosRoot,
+		ConversationID:       cliConvID,
 	}
 
 	stdout, _, err := dispatch.Run(context.Background(), req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dispatch: %v\n", err)
+		printDispatchError(os.Stderr, err)
 		if budget.IsRefused(err) {
 			os.Exit(budget.ExitHardStop)
 		}
@@ -238,6 +253,26 @@ func runDispatch(yakosRoot string, args []string) {
 			fmt.Fprintf(os.Stderr, "dispatch: write stdout: %v\n", err)
 			os.Exit(1)
 		}
+	}
+}
+
+// printDispatchError writes a dispatch failure as one "dispatch: ..." line.
+// Errors from the dispatch package already begin with "dispatch:", so adding the
+// prefix again printed "dispatch: dispatch: ..." (those messages are also shown
+// as they are by the daemon). A runtime the operator named that cannot run gets
+// a second line saying how to allow a fallback, which only the CLI can do.
+func printDispatchError(w io.Writer, err error) {
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "dispatch:") {
+		msg = "dispatch: " + msg
+	}
+	fmt.Fprintln(w, msg)
+	if ee, ok := dispatch.AsExplicitRuntimeError(err); ok {
+		list := strings.Join(ee.NotUsed, ",")
+		if list == "" {
+			list = "<runtime>[,<runtime>]"
+		}
+		fmt.Fprintf(w, "dispatch: to allow a fallback for this run, pass --runtime-fallback %s\n", list)
 	}
 }
 
@@ -299,8 +334,11 @@ returns the runtime's exit code.
 
 Runtime order: --runtime, the agent's `+"`"+`runtime:`+"`"+`, .yakos.yml per-domain,
 .yakos.yml default-runtime, $YAKOS_RUNTIME, ~/.yakos-state/default-runtime,
-then claude. The agent's runtime-fallback and .yakos.yml default-fallback
-are tried, in that order, when the choice is not installed or signed in.
+then claude. When a choice is not installed or signed in, the agent's
+runtime-fallback and .yakos.yml default-fallback are tried, in that order.
+A runtime you name yourself (--runtime, or a runtime name as the agent, as
+in `+"`"+`yakos dispatch codex "..."`+"`"+`) is never replaced by one of those: it
+fails with the reason unless you pass --runtime-fallback.
 
 Arguments:
   <agent-name>      The agent's id (e.g. backend, security-reviewer,
@@ -310,7 +348,15 @@ Arguments:
                     multi-line description.
 
 Flags:
-  --runtime <id>    Override the agent's frontmatter `+"`"+`runtime:`+"`"+` field.
+  --runtime <id>    Run on this runtime (claude, codex or agy), whatever the
+                    agent's frontmatter `+"`"+`runtime:`+"`"+` says. If it is not
+                    installed or not signed in, dispatch fails; it does not
+                    answer from another vendor.
+  --runtime-fallback <list>
+                    Comma-separated runtimes to try, in order, when the chosen
+                    one cannot run, e.g. --runtime-fallback claude. With
+                    --runtime it replaces the (unused) fallback lists; for any
+                    other choice it is tried after them.
   --model <tier>    Override the model for this dispatch only.
                     claude: haiku | sonnet | opus | fable. Any runtime
                     also takes an alias (cheap | balanced | best |

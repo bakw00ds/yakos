@@ -262,8 +262,8 @@ func TestResolveRuntime_DirectUnit(t *testing.T) {
 		{"codex", "auto", "codex"},
 	}
 	for _, tc := range cases {
-		in := loadChainInput(nil, tc.agentName, "", tc.override, "", false)
-		choice, _, err := chooseRuntime(in, nil)
+		in := loadChainInput(nil, tc.agentName, "", tc.override, "", nil, false)
+		choice, _, err := chooseRuntime(context.Background(), in, nil)
 		if err != nil {
 			t.Errorf("resolve(%q, %q): %v", tc.agentName, tc.override, err)
 			continue
@@ -274,8 +274,8 @@ func TestResolveRuntime_DirectUnit(t *testing.T) {
 	}
 
 	// gemini was retired: asking for it is an error, not a silent claude run.
-	in := loadChainInput(nil, "backend", "", "gemini", "", false)
-	if _, _, err := chooseRuntime(in, nil); err == nil || !strings.Contains(err.Error(), "unknown runtime") {
+	in := loadChainInput(nil, "backend", "", "gemini", "", nil, false)
+	if _, _, err := chooseRuntime(context.Background(), in, nil); err == nil || !strings.Contains(err.Error(), "unknown runtime") {
 		t.Errorf("override gemini: want unknown-runtime error, got %v", err)
 	}
 }

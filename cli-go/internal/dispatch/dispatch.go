@@ -62,14 +62,15 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	// default-fallback filtered by an availability + sign-in probe. Model
 	// precedence (mirrors dispatch.sh): --model > --eval-run-id (label only) >
 	// agent frontmatter model: > the runtime's default; validated per runtime.
-	rr, err := routeDispatch(routeInput{
-		YakosRoot:         req.YakosRoot,
-		Project:           req.Project,
-		Agent:             req.AgentName,
-		RuntimeOverride:   req.Runtime,
-		RuntimeEnvDefault: req.RuntimeEnvDefault,
-		ModelOverride:     req.Model,
-		EvalRunID:         req.EvalRunID,
+	rr, err := routeDispatch(ctx, routeInput{
+		YakosRoot:            req.YakosRoot,
+		Project:              req.Project,
+		Agent:                req.AgentName,
+		RuntimeOverride:      req.Runtime,
+		RuntimeEnvDefault:    req.RuntimeEnvDefault,
+		RuntimeFallbackOptIn: req.RuntimeFallbackOptIn,
+		ModelOverride:        req.Model,
+		EvalRunID:            req.EvalRunID,
 	})
 	if err != nil {
 		return nil, Result{}, err

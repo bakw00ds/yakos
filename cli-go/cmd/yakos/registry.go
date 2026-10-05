@@ -255,7 +255,7 @@ var commandRegistry = []commandEntry{
 	},
 	{
 		Name:   "dispatch",
-		Specs:  specSet("dispatch", "--runtime", "--model", "--project", "--timeout", "--eval-run-id", "--allow-root"),
+		Specs:  specSet("dispatch", "--runtime", "--runtime-fallback", "--model", "--project", "--timeout", "--eval-run-id", "--allow-root"),
 		HelpFn: printDispatchHelp,
 	},
 	{

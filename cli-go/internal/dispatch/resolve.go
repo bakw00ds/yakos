@@ -11,10 +11,13 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/auth"
@@ -123,6 +126,17 @@ func ValidateAgentName(name, yakosRoot, project string) error {
 // not the first). If none passes, dispatch fails fast and names why each was
 // skipped, instead of starting a process that cannot work.
 //
+// An EXPLICIT choice (rules 1 and 2: the operator named the runtime) does not
+// fall back. It is operator intent, including intent about where the task is
+// sent, and answering from another vendor instead would be the silent switch
+// the operator reported. If the named runtime cannot run, dispatch fails with an
+// ExplicitRuntimeError naming the runtime, why, and the fallbacks it did not
+// use. The CLI's --runtime-fallback opts in (Request.RuntimeFallbackOptIn).
+// DELIBERATE DIVERGENCE from cli/lib/dispatch.sh, which walks the fallback lists
+// for an explicit --runtime too (K-143 encodes it in the parity matrix).
+// Pins (rule 3) and project defaults (rules 4 to 8) keep walking the lists, as
+// bash does.
+//
 // The daemon never reads YAKOS_RUNTIME: only the CLI path passes it, in
 // Request.RuntimeEnvDefault, and it ranks below the project file exactly where
 // bash reads the variable.
@@ -173,6 +187,9 @@ type RouteQuery struct {
 	// EnvDefault is the ambient YAKOS_RUNTIME value. Only the CLI one-shot path
 	// sets it; every daemon transport leaves it empty.
 	EnvDefault string
+	// FallbackOptIn are the runtimes the operator listed to fall back to (the
+	// CLI's --runtime-fallback). Only the CLI sets it.
+	FallbackOptIn []string
 }
 
 // probeResult is the outcome of checking one chain candidate.
@@ -181,12 +198,14 @@ type probeResult struct {
 	Reason string
 }
 
-// runtimeProbe decides whether a candidate can run now. Tests replace it.
+// runtimeProbe decides whether a candidate can run now. It ends when ctx does.
+// Tests replace it.
 var runtimeProbe = defaultRuntimeProbe
 
 // stateDefaultRuntime reads ~/.yakos-state/default-runtime (the preference
-// `yakos auth set-default` writes). Tests replace it.
-var stateDefaultRuntime = func() string { return auth.DefaultRuntimeIn(statepath.Dir()) }
+// `yakos auth set-default` writes) and returns it with a warning when the file
+// exists but is not trusted (see auth.ReadDefaultRuntime). Tests replace it.
+var stateDefaultRuntime = func() (name, warning string) { return auth.ReadDefaultRuntime(statepath.Dir()) }
 
 // routeLog receives the one-line notices the resolver prints: a fallback, an
 // ignored default, a broken .yakos.yml. Tests replace it.
@@ -195,13 +214,27 @@ var routeLog io.Writer = os.Stderr
 // defaultRuntimeProbe is the production probe: the adapter must exist, its CLI
 // must be on PATH, and the runtime must look signed in (auth.ProbeRuntime).
 // agy.Available is PATH-only, so without the sign-in half a signed-out agy
-// would be selected and then fail (D13).
-func defaultRuntimeProbe(name string) probeResult {
+// would be selected and then fail (D13). The answer is reused for probeTTL.
+func defaultRuntimeProbe(ctx context.Context, name string) probeResult {
+	if r, ok := cachedProbe(name); ok {
+		return r
+	}
+	r := probeOnce(ctx, name)
+	if ctx.Err() == nil { // an answer cut short by a cancel is not an answer
+		storeProbe(name, r)
+	}
+	return r
+}
+
+// probeOnce asks the machine, uncached. Tests replace it to count the asks.
+var probeOnce = probeMachine
+
+func probeMachine(ctx context.Context, name string) probeResult {
 	adapter, err := runtime.Resolve(name)
 	if err != nil {
 		return probeResult{Reason: unsupportedReasonFor(name)}
 	}
-	p := auth.ProbeRuntime(name)
+	p := auth.ProbeRuntime(ctx, name)
 	switch {
 	case !p.CLIPresent:
 		reason := "CLI not found on PATH"
@@ -214,11 +247,64 @@ func defaultRuntimeProbe(name string) probeResult {
 		if p.AuthHint != "" {
 			reason += "; " + p.AuthHint
 		}
+		if p.Note != "" {
+			reason += " (" + p.Note + ")"
+		}
 		return probeResult{Reason: reason}
-	case !adapter.Available(context.Background()):
+	case !adapter.Available(ctx):
 		return probeResult{Reason: "the adapter reports it unavailable"}
 	}
 	return probeResult{OK: true}
+}
+
+// probeTTL is how long a runtime's probe answer is reused. What the probe reads
+// (PATH, the environment, a few files and, for agy, the OS keyring) does not
+// change between the turns of a conversation, and the keyring read can be slow,
+// so every dispatch of a long-lived daemon should not pay for it again. The
+// price is that a daemon notices an install or a sign-in up to this long after
+// it happens; a one-shot CLI process never reuses an answer. Tests set it to 0.
+var probeTTL = 30 * time.Second
+
+// probeClock is the clock the cache reads. Tests replace it.
+var probeClock = time.Now
+
+type cachedProbeEntry struct {
+	res probeResult
+	at  time.Time
+}
+
+var probeCache = struct {
+	sync.Mutex
+	m map[string]cachedProbeEntry
+}{m: make(map[string]cachedProbeEntry)}
+
+func cachedProbe(name string) (probeResult, bool) {
+	if probeTTL <= 0 {
+		return probeResult{}, false
+	}
+	probeCache.Lock()
+	defer probeCache.Unlock()
+	e, ok := probeCache.m[name]
+	if !ok || probeClock().Sub(e.at) >= probeTTL {
+		return probeResult{}, false
+	}
+	return e.res, true
+}
+
+func storeProbe(name string, r probeResult) {
+	if probeTTL <= 0 {
+		return
+	}
+	probeCache.Lock()
+	probeCache.m[name] = cachedProbeEntry{res: r, at: probeClock()}
+	probeCache.Unlock()
+}
+
+// resetProbeCache forgets every cached answer (tests).
+func resetProbeCache() {
+	probeCache.Lock()
+	probeCache.m = make(map[string]cachedProbeEntry)
+	probeCache.Unlock()
 }
 
 // unsupportedReason is why a runtime id that parses but has no Go adapter
@@ -243,9 +329,19 @@ type chainInput struct {
 	project      projectcfg.Config
 	envDefault   string
 	stateDefault string
+	// optIn are fallbacks the operator listed for this dispatch (the CLI's
+	// --runtime-fallback). An explicit runtime uses only these; any other
+	// choice tries them after the agent's and the project's own lists.
+	optIn []string
 }
 
 type candidate struct{ name, by string }
+
+// explicit reports whether the operator named this runtime: an override, or a
+// bare runtime name used as the agent (`yakos dispatch codex "..."`).
+func (c candidate) explicit() bool {
+	return c.by == RuntimeByOverride || c.by == RuntimeByAgentName
+}
 
 func supportedRuntime(name string) bool {
 	_, err := runtime.Resolve(name)
@@ -298,8 +394,11 @@ func preferred(in chainInput) (candidate, []string) {
 	return candidate{"claude", RuntimeByDefault}, notes
 }
 
-// buildChain returns the ordered, de-duplicated candidates: the preferred
-// runtime, then the agent's runtime-fallback, then the project default-fallback.
+// buildChain returns the ordered, de-duplicated candidates. For a runtime the
+// operator named it is that runtime and then only the fallbacks the operator
+// listed for this dispatch (optIn), if any. Otherwise it is the preferred
+// runtime, then the agent's runtime-fallback, then the project default-fallback,
+// then optIn.
 func buildChain(in chainInput) ([]candidate, []string) {
 	first, notes := preferred(in)
 	chain := []candidate{first}
@@ -311,6 +410,38 @@ func buildChain(in chainInput) ([]candidate, []string) {
 		}
 		chain = append(chain, candidate{name, RuntimeByFallback})
 	}
+	if !first.explicit() {
+		if in.agent != nil {
+			for _, f := range in.agent.RuntimeFallback {
+				add(f)
+			}
+		}
+		for _, f := range in.project.DefaultFallback {
+			add(f)
+		}
+	}
+	for _, f := range in.optIn {
+		add(f)
+	}
+	return chain, notes
+}
+
+// implicitFallbacks are the runtimes the agent's runtime-fallback and the
+// project's default-fallback name, in order and without repeats, minus the
+// runtime already chosen. For an explicit choice they are the ones NOT used.
+func implicitFallbacks(in chainInput, chosen string) []string {
+	var out []string
+	add := func(name string) {
+		if name == chosen {
+			return
+		}
+		for _, o := range out {
+			if o == name {
+				return
+			}
+		}
+		out = append(out, name)
+	}
 	if in.agent != nil {
 		for _, f := range in.agent.RuntimeFallback {
 			add(f)
@@ -319,12 +450,13 @@ func buildChain(in chainInput) ([]candidate, []string) {
 	for _, f := range in.project.DefaultFallback {
 		add(f)
 	}
-	return chain, notes
+	return out
 }
 
 // chooseRuntime walks the chain. probe == nil skips the availability check
-// (used to learn the preferred runtime without touching the machine).
-func chooseRuntime(in chainInput, probe func(string) probeResult) (RuntimeChoice, []string, error) {
+// (used to learn the preferred runtime without touching the machine). A
+// cancelled ctx ends the walk with its error.
+func chooseRuntime(ctx context.Context, in chainInput, probe func(context.Context, string) probeResult) (RuntimeChoice, []string, error) {
 	chain, notes := buildChain(in)
 	var choice RuntimeChoice
 	for i, c := range chain {
@@ -339,7 +471,13 @@ func chooseRuntime(in chainInput, probe func(string) probeResult) (RuntimeChoice
 			continue
 		}
 		if probe != nil {
-			if p := probe(c.name); !p.OK {
+			if p := probe(ctx, c.name); !p.OK {
+				// A probe cut short by a cancel says "no" because it was
+				// stopped, not because the runtime is unusable: end the walk
+				// instead of reporting that as a skipped runtime.
+				if err := ctx.Err(); err != nil {
+					return choice, notes, err
+				}
 				choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, p.Reason})
 				continue
 			}
@@ -350,7 +488,55 @@ func chooseRuntime(in chainInput, probe func(string) probeResult) (RuntimeChoice
 		}
 		return choice, notes, nil
 	}
+	if chain[0].explicit() && len(choice.Skipped) > 0 {
+		return choice, notes, &ExplicitRuntimeError{
+			Runtime:   choice.Skipped[0].Runtime,
+			Reason:    choice.Skipped[0].Reason,
+			AlsoTried: choice.Skipped[1:],
+			NotUsed:   implicitFallbacks(in, chain[0].name),
+		}
+	}
 	return choice, notes, noRuntimeError(in.agentName, choice.Skipped)
+}
+
+// ExplicitRuntimeError is the failure of a runtime the operator named: with
+// --runtime, a console pane's runtime, the runtime parameter of an API call or
+// MCP tool, or a bare runtime name used as the agent. Such a choice does not
+// fall back to another vendor behind the operator's back; this error says what
+// stopped it and what was deliberately not used. Only the CLI can opt in
+// (--runtime-fallback), so the hint for that is the CLI's to add.
+type ExplicitRuntimeError struct {
+	// Runtime is the runtime that was named, and Reason why it cannot run.
+	Runtime string
+	Reason  string
+	// AlsoTried are fallbacks the operator opted into that were skipped too.
+	AlsoTried []SkippedRuntime
+	// NotUsed are the runtimes of the agent's runtime-fallback and the project's
+	// default-fallback, which an explicit runtime does not use.
+	NotUsed []string
+}
+
+func (e *ExplicitRuntimeError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "dispatch: runtime %s was requested explicitly but cannot run: %s", e.Runtime, e.Reason)
+	for _, sk := range e.AlsoTried {
+		fmt.Fprintf(&b, "; %s: %s", sk.Runtime, sk.Reason)
+	}
+	if len(e.NotUsed) > 0 {
+		fmt.Fprintf(&b, ". Not falling back to %s: an explicit runtime does not use the agent's or the project's fallback list",
+			strings.Join(e.NotUsed, ", "))
+	}
+	return b.String()
+}
+
+// AsExplicitRuntimeError reports whether err is (or wraps) an
+// *ExplicitRuntimeError, and returns it.
+func AsExplicitRuntimeError(err error) (*ExplicitRuntimeError, bool) {
+	var e *ExplicitRuntimeError
+	if errors.As(err, &e) {
+		return e, true
+	}
+	return nil, false
 }
 
 // noRuntimeError is the fail-fast error when nothing in the chain can run.
@@ -372,8 +558,12 @@ func noRuntimeError(agent string, skipped []SkippedRuntime) error {
 // reported (logWarnings) only by the resolution that precedes real work, so a
 // handler that merely asks "what would run?" does not repeat the warning on
 // every request.
-func loadChainInput(agent *agentscompose.ComposedAgent, agentName, project, override, envDefault string, logWarnings bool) chainInput {
+func loadChainInput(agent *agentscompose.ComposedAgent, agentName, project, override, envDefault string, optIn []string, logWarnings bool) chainInput {
 	pcfg, warns := projectcfg.Load(project)
+	stateDefault, stateWarn := stateDefaultRuntime()
+	if stateWarn != "" {
+		warns = append(warns, stateWarn)
+	}
 	if logWarnings {
 		for _, w := range warns {
 			fmt.Fprintf(routeLog, "yakos dispatch: %s\n", w)
@@ -389,7 +579,8 @@ func loadChainInput(agent *agentscompose.ComposedAgent, agentName, project, over
 		agent:        agent,
 		project:      pcfg,
 		envDefault:   strings.TrimSpace(envDefault),
-		stateDefault: stateDefaultRuntime(),
+		stateDefault: stateDefault,
+		optIn:        optIn,
 	}
 }
 
@@ -415,9 +606,9 @@ func agentForQuery(q RouteQuery) *agentscompose.ComposedAgent {
 // including the availability and sign-in checks and the fallback chain. The CLI
 // uses it to print the runtime it is about to dispatch to. It prints nothing
 // about fallbacks itself.
-func ResolveRuntime(q RouteQuery) (RuntimeChoice, error) {
-	in := loadChainInput(agentForQuery(q), q.Agent, q.Project, q.Override, q.EnvDefault, false)
-	choice, _, err := chooseRuntime(in, runtimeProbe)
+func ResolveRuntime(ctx context.Context, q RouteQuery) (RuntimeChoice, error) {
+	in := loadChainInput(agentForQuery(q), q.Agent, q.Project, q.Override, q.EnvDefault, q.FallbackOptIn, false)
+	choice, _, err := chooseRuntime(ctx, in, runtimeProbe)
 	return choice, err
 }
 
@@ -427,8 +618,8 @@ func ResolveRuntime(q RouteQuery) (RuntimeChoice, error) {
 // per runtime) before the work is queued; the real choice, with probing and
 // fallback, is made again by Run and RunStream.
 func PreferredRuntime(q RouteQuery) (RuntimeChoice, error) {
-	in := loadChainInput(agentForQuery(q), q.Agent, q.Project, q.Override, q.EnvDefault, false)
-	choice, _, err := chooseRuntime(in, nil)
+	in := loadChainInput(agentForQuery(q), q.Agent, q.Project, q.Override, q.EnvDefault, q.FallbackOptIn, false)
+	choice, _, err := chooseRuntime(context.Background(), in, nil)
 	return choice, err
 }
 
@@ -438,7 +629,7 @@ func PreferredRuntime(q RouteQuery) (RuntimeChoice, error) {
 // is for display (the skills popover); a pin is reported as written, even one
 // this dispatcher cannot run.
 func RosterRuntimes(roster []agentscompose.ComposedAgent, project string) map[string]string {
-	in := loadChainInput(nil, "", project, "", "", false)
+	in := loadChainInput(nil, "", project, "", "", nil, false)
 	out := make(map[string]string, len(roster))
 	for i := range roster {
 		in.agent, in.agentName = &roster[i], roster[i].ID
@@ -591,6 +782,7 @@ type routeInput struct {
 	YakosRoot, Project, Agent string
 	RuntimeOverride           string
 	RuntimeEnvDefault         string
+	RuntimeFallbackOptIn      []string
 	ModelOverride             string
 	EvalRunID                 string
 }
@@ -613,7 +805,7 @@ type routed struct {
 // routeDispatch is the one place that turns (agent, overrides, project state)
 // into (agent, runtime, model). Run and RunStream both call it, so the one-shot
 // and streaming paths cannot drift apart (the PR #203 class of bug).
-func routeDispatch(in routeInput) (*routed, error) {
+func routeDispatch(ctx context.Context, in routeInput) (*routed, error) {
 	roster, err := agentscompose.Compose(in.YakosRoot, in.Project)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch: compose agents: %w", err)
@@ -624,8 +816,8 @@ func routeDispatch(in routeInput) (*routed, error) {
 		return nil, err
 	}
 
-	ci := loadChainInput(agent, in.Agent, in.Project, in.RuntimeOverride, in.RuntimeEnvDefault, true)
-	choice, notes, err := chooseRuntime(ci, runtimeProbe)
+	ci := loadChainInput(agent, in.Agent, in.Project, in.RuntimeOverride, in.RuntimeEnvDefault, in.RuntimeFallbackOptIn, true)
+	choice, notes, err := chooseRuntime(ctx, ci, runtimeProbe)
 	for _, n := range notes {
 		fmt.Fprintf(routeLog, "yakos dispatch: %s\n", n)
 	}
@@ -675,4 +867,28 @@ func skippedSummary(skipped []SkippedRuntime) string {
 		parts[i] = sk.Runtime + ": " + sk.Reason
 	}
 	return strings.Join(parts, ", ")
+}
+
+// ParseRuntimeList parses a comma-separated list of runtime ids (the value of
+// the CLI's --runtime-fallback). Every entry must be a runtime this dispatcher
+// can run; the empty string is the empty list.
+func ParseRuntimeList(raw string) ([]string, error) {
+	var out []string
+	for _, f := range strings.Split(raw, ",") {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if _, err := runtime.Resolve(f); err != nil {
+			return nil, err
+		}
+		dup := false
+		for _, o := range out {
+			dup = dup || o == f
+		}
+		if !dup {
+			out = append(out, f)
+		}
+	}
+	return out, nil
 }
