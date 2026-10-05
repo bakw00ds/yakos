@@ -27,7 +27,7 @@ const (
 )
 
 // twinSetup returns the Go binary and skips when the bash tree is not beside it.
-func twinSetup(t *testing.T) string {
+func twinSetup(t testing.TB) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the bash CLI is not run on Windows")

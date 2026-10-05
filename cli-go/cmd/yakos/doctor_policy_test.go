@@ -14,7 +14,7 @@ import (
 	"testing"
 )
 
-func policyBinary(t *testing.T) string {
+func policyBinary(t testing.TB) string {
 	t.Helper()
 	return requireBinaryAt(t, resolveGoBinary(), os.Getenv("CI"))
 }

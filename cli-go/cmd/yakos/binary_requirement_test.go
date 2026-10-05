@@ -9,6 +9,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -44,6 +45,7 @@ type recordingTB struct {
 }
 
 func (r *recordingTB) Helper()               {}
+func (r *recordingTB) Skip(...any)           { r.skipped = true }
 func (r *recordingTB) Skipf(string, ...any)  { r.skipped = true }
 func (r *recordingTB) Fatalf(string, ...any) { r.failed = true }
 
@@ -89,6 +91,56 @@ func TestSkipOrFailInCI_OnlyTheExactCIValueFails(t *testing.T) {
 		skipOrFailInCI(rec, c.ci, "needs a thing")
 		if rec.failed != c.wantFail || rec.skipped == c.wantFail {
 			t.Errorf("CI=%q: failed=%v skipped=%v, want failed=%v", c.ci, rec.failed, rec.skipped, c.wantFail)
+		}
+	}
+}
+
+// The two K-137 binary-driven helpers must use the shared rule, not a skip of their own.
+
+func TestPolicyBinary_FailsInCIAndSkipsLocallyWhenTheBinaryIsMissing(t *testing.T) {
+	t.Setenv("YAKOS_GO_BINARY", filepath.Join(t.TempDir(), "no-such-yakos"))
+	for _, c := range []struct {
+		ci       string
+		wantFail bool
+	}{{"true", true}, {"", false}} {
+		t.Setenv("CI", c.ci)
+		rec := &recordingTB{}
+		_ = policyBinary(rec)
+		if rec.failed != c.wantFail || rec.skipped == c.wantFail {
+			t.Errorf("CI=%q: failed=%v skipped=%v, want failed=%v", c.ci, rec.failed, rec.skipped, c.wantFail)
+		}
+	}
+}
+
+func TestTwinSetup_FailsInCIAndSkipsLocallyWithoutTheBinaryOrTheBashTree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("twinSetup skips on Windows before it looks for anything")
+	}
+	root := t.TempDir()
+	withBinary := filepath.Join(root, "bin", "yakos") // exists, but no cli/yakos tree beside it
+	if err := os.MkdirAll(filepath.Dir(withBinary), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(withBinary, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name, bin string
+	}{
+		{"no binary", filepath.Join(root, "bin", "no-such-yakos")},
+		{"binary but no bash tree", withBinary},
+	} {
+		t.Setenv("YAKOS_GO_BINARY", c.bin)
+		for _, ci := range []struct {
+			val      string
+			wantFail bool
+		}{{"true", true}, {"", false}} {
+			t.Setenv("CI", ci.val)
+			rec := &recordingTB{}
+			_ = twinSetup(rec)
+			if rec.failed != ci.wantFail || rec.skipped == ci.wantFail {
+				t.Errorf("%s, CI=%q: failed=%v skipped=%v, want failed=%v", c.name, ci.val, rec.failed, rec.skipped, ci.wantFail)
+			}
 		}
 	}
 }
