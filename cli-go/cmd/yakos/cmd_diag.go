@@ -492,6 +492,9 @@ func runDoctor(yakosRoot string, args []string) {
 	if policy {
 		// Machine facts the doctor package cannot compute itself.
 		cfg.PolicyBashTreePresent = passthrough.BashYakosExists(exeRoot)
+		// Installed (node and the bundle), not enabled: only a running console knows
+		// whether it was started with --console-structured-questions, so here a
+		// missing key is reported as the low heads-up, not the medium finding.
 		_, sdkErr := interactive.NewSDKEngineFactory(yakosRoot)
 		cfg.PolicySDKSidecarSelectable = sdkErr == nil
 	}

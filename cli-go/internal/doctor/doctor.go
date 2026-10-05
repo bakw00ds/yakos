@@ -186,7 +186,8 @@ type Config struct {
 
 	// PolicyBashTreePresent and PolicySDKSidecarSelectable are two machine facts
 	// only the caller can compute (they depend on where the binary lives and on
-	// the interactive package); they feed PolicyEnv. See policy.go.
+	// the interactive package); they feed PolicyEnv. The second means the SDK
+	// engine is installed, not that a console enabled it. See policy.go.
 	PolicyBashTreePresent      bool
 	PolicySDKSidecarSelectable bool
 

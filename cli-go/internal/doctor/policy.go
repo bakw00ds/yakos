@@ -72,10 +72,19 @@ type PolicyEnv struct {
 	// route to is installed (passthrough.BashYakosExists on the executable's
 	// root). The caller computes it because it depends on where the binary lives.
 	BashTreePresent bool
-	// SDKSidecarSelectable reports that the Agent-SDK engine can be selected:
-	// node and the sidecar bundle are installed (the conditions under which
-	// interactive.NewSDKEngineFactory succeeds). The caller computes it.
+	// SDKSidecarSelectable reports that the Agent-SDK engine is installed: node
+	// and the sidecar bundle are present (the conditions under which
+	// interactive.NewSDKEngineFactory succeeds). That is true on most developer
+	// machines and is not a risk by itself, because the engine runs only when the
+	// console is started with --console-structured-questions. The caller computes
+	// it.
 	SDKSidecarSelectable bool
+	// SDKSidecarEnabled reports that the console was started with
+	// --console-structured-questions and built its engine factory, so structured
+	// questions go through the SDK sidecar. Only the daemon knows this: `yakos
+	// doctor` cannot and leaves it false, which is why it reports the missing key
+	// as a low heads-up there. It implies SDKSidecarSelectable.
+	SDKSidecarEnabled bool
 }
 
 func (e PolicyEnv) withDefaults() PolicyEnv {
@@ -115,12 +124,17 @@ func CheckPolicy(env PolicyEnv) []PolicyFinding {
 
 // ---- SDK sidecar ---------------------------------------------------------------
 
-// checkSDKSidecar reports an Agent-SDK engine that can be selected but would
-// refuse to start. Since the K-137 gate it cannot run on a claude.ai login, so
-// this is the operator-facing half: they would otherwise find out from a failed
-// chat turn.
+// checkSDKSidecar reports an Agent-SDK engine that would refuse to start. Since
+// the K-137 gate it cannot run on a claude.ai login, so this is the
+// operator-facing half: they would otherwise find out from a failed chat turn.
+//
+// The severity follows whether the engine is actually in use. node and the
+// bundle exist on most developer machines, so "installed and no key" is only a
+// low heads-up: nothing runs until the console is started with
+// --console-structured-questions. When the daemon says it enabled the engine
+// (SDKSidecarEnabled) structured questions will fail, which is medium.
 func checkSDKSidecar(e PolicyEnv) []PolicyFinding {
-	if !e.SDKSidecarSelectable {
+	if !e.SDKSidecarSelectable && !e.SDKSidecarEnabled {
 		return nil
 	}
 	err := yakruntime.CheckSDKAPIKey(e.Getenv)
@@ -135,11 +149,19 @@ func checkSDKSidecar(e PolicyEnv) []PolicyFinding {
 			Fix:      "put an API key from the Anthropic Console in ANTHROPIC_API_KEY, or unset it and use the CLI engine (interactive chat without structured questions)",
 		}}
 	}
+	if e.SDKSidecarEnabled {
+		return []PolicyFinding{{
+			ID:       "sdk-sidecar-no-api-key",
+			Severity: PolicyMedium,
+			Message:  "the console's SDK sidecar (structured questions) is enabled, but ANTHROPIC_API_KEY is not set in this environment: it will refuse to start rather than run on your claude.ai login",
+			Fix:      "export ANTHROPIC_API_KEY for the daemon, or use the CLI engine (interactive chat without structured questions)",
+		}}
+	}
 	return []PolicyFinding{{
 		ID:       "sdk-sidecar-no-api-key",
-		Severity: PolicyMedium,
-		Message:  "the SDK sidecar (structured questions) can be selected, but ANTHROPIC_API_KEY is not set in this environment: it will refuse to start rather than run on your claude.ai login",
-		Fix:      "export ANTHROPIC_API_KEY for the daemon, or use the CLI engine (interactive chat without structured questions)",
+		Severity: PolicyLow,
+		Message:  "the SDK sidecar (structured questions) is installed, and ANTHROPIC_API_KEY is not set in this environment: if the console is started with --console-structured-questions it will refuse to start rather than run on your claude.ai login",
+		Fix:      "export ANTHROPIC_API_KEY for the daemon before you enable it, or keep using the CLI engine (interactive chat without structured questions)",
 	}}
 }
 
@@ -281,6 +303,7 @@ var statePathOverrides = []struct{ name, what string }{
 	{"YAKOS_MR_GRAVEYARD", "the model-routing graveyard file"},
 	{"YAKOS_MR_BACKUPS_DIR", "the model-routing backups directory"},
 	{"YAKOS_COORD_ROOT", "the multi-developer coordination directory"},
+	{"YAKOS_WORK_DIR", "the work directory (plan, decisions, kanban and reports)"},
 }
 
 func checkStatePathOverrides(e PolicyEnv) []PolicyFinding {

@@ -30,6 +30,9 @@ type policyFixture struct {
 	found map[string]string // command -> path on PATH
 	bash  bool              // the bash CLI tree is installed
 	sdk   bool              // node and the sidecar bundle are installed
+	// sdkEnabled: the console was started with --console-structured-questions. Only the
+	// daemon knows; `yakos doctor` cannot, so it never sets it.
+	sdkEnabled bool
 }
 
 func newPolicyFixture(t *testing.T) *policyFixture {
@@ -44,6 +47,7 @@ func (f *policyFixture) policyEnv() PolicyEnv {
 		LookPath:             singleLookPath(f.found),
 		BashTreePresent:      f.bash,
 		SDKSidecarSelectable: f.sdk,
+		SDKSidecarEnabled:    f.sdkEnabled,
 	}
 }
 
@@ -91,21 +95,55 @@ func TestCheckPolicy_NothingToReportOnACleanMachine(t *testing.T) {
 
 // ---- SDK sidecar selectable without ANTHROPIC_API_KEY -------------------------
 
-func TestCheckPolicy_SDKSidecarSelectableWithoutAPIKey(t *testing.T) {
+func TestCheckPolicy_SDKSidecarInstalledButNotEnabledIsOnlyALowHeadsUp(t *testing.T) {
+	// node and the bundle exist on every developer machine, so being installed is not a
+	// risk by itself: the engine runs only when the console is started with
+	// --console-structured-questions, and without a key it refuses rather than runs.
 	f := newPolicyFixture(t)
 	f.sdk = true
 	got, ok := byID(f.check())["sdk-sidecar-no-api-key"]
 	if !ok {
-		t.Fatal("the SDK sidecar can be selected but no ANTHROPIC_API_KEY is set: want sdk-sidecar-no-api-key")
+		t.Fatal("the SDK sidecar is installed and no ANTHROPIC_API_KEY is set: want sdk-sidecar-no-api-key")
+	}
+	requireOneLine(t, got)
+	if got.Severity != PolicyLow {
+		t.Errorf("severity = %s, want low while nothing says the engine is enabled", got.Severity)
+	}
+	for _, want := range []string{"ANTHROPIC_API_KEY", "CLI engine", "--console-structured-questions"} {
+		if !strings.Contains(got.Message+" "+got.Fix, want) {
+			t.Errorf("the finding must mention %q: %+v", want, got)
+		}
+	}
+}
+
+func TestCheckPolicy_SDKSidecarEnabledWithoutAPIKeyIsMedium(t *testing.T) {
+	f := newPolicyFixture(t)
+	f.sdk, f.sdkEnabled = true, true
+	got, ok := byID(f.check())["sdk-sidecar-no-api-key"]
+	if !ok {
+		t.Fatal("the console enabled the SDK sidecar and no ANTHROPIC_API_KEY is set: want sdk-sidecar-no-api-key")
 	}
 	requireOneLine(t, got)
 	if got.Severity != PolicyMedium {
-		t.Errorf("severity = %s, want medium", got.Severity)
+		t.Errorf("severity = %s, want medium: structured questions will fail", got.Severity)
+	}
+	if !strings.Contains(got.Message, "enabled") {
+		t.Errorf("the finding must say the engine is enabled: %+v", got)
 	}
 	for _, want := range []string{"ANTHROPIC_API_KEY", "CLI engine"} {
 		if !strings.Contains(got.Message+" "+got.Fix, want) {
 			t.Errorf("the finding must mention %q: %+v", want, got)
 		}
+	}
+}
+
+func TestCheckPolicy_SDKSidecarEnabledImpliesInstalled(t *testing.T) {
+	// A console that enabled the engine has a working factory, so it is installed even if
+	// the caller forgot to say so.
+	f := newPolicyFixture(t)
+	f.sdkEnabled = true
+	if _, ok := byID(f.check())["sdk-sidecar-no-api-key"]; !ok {
+		t.Fatal("an enabled SDK sidecar with no key must be reported whether or not the caller also set Selectable")
 	}
 }
 
@@ -406,7 +444,7 @@ func TestCheckPolicy_StatePathOverridesAreReportedByNameNeverByValue(t *testing.
 	names := []string{
 		"YAKOS_DISPATCH_LOG", "YAKOS_STATE_DIR", "YAKOS_MEMORY_DIR", "YAKOS_PLAN_QUALITY_LOG",
 		"YAKOS_MR_STATE_DIR", "YAKOS_MR_EVAL_LOG", "YAKOS_MR_CANDIDATES", "YAKOS_MR_HISTORY",
-		"YAKOS_MR_GRAVEYARD", "YAKOS_MR_BACKUPS_DIR", "YAKOS_COORD_ROOT",
+		"YAKOS_MR_GRAVEYARD", "YAKOS_MR_BACKUPS_DIR", "YAKOS_COORD_ROOT", "YAKOS_WORK_DIR",
 	}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
@@ -443,7 +481,7 @@ func TestCheckPolicy_StatePathOverridesAreReportedByNameNeverByValue(t *testing.
 func TestCheckPolicy_OrderedBySeverityThenIDAndDeterministic(t *testing.T) {
 	skipWithoutPosixModes(t)
 	f := newPolicyFixture(t)
-	f.sdk = true                                                           // medium: sdk-sidecar-no-api-key
+	f.sdk, f.sdkEnabled = true, true                                       // medium: sdk-sidecar-no-api-key
 	f.found["codex"] = "/x/codex"                                          // low: codex-shared-login
 	f.bash = true                                                          // high: bash-dispatch-unsandboxed
 	f.env["YAKOS_STATE_DIR"] = "/x"                                        // medium: state-path-override
