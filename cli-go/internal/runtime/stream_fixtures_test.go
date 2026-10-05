@@ -171,15 +171,17 @@ func readAgyFixture(t *testing.T, name string) []map[string]any {
 	return events
 }
 
-func agyPayload(ev map[string]any) map[string]any { return ev[ev["event"].(string)].(map[string]any) }
+func agyFixturePayload(ev map[string]any) map[string]any {
+	return ev[ev["event"].(string)].(map[string]any)
+}
 
-func agyResult(t *testing.T, events []map[string]any) map[string]any {
+func agyFixtureResult(t *testing.T, events []map[string]any) map[string]any {
 	t.Helper()
 	last := events[len(events)-1]
 	if last["event"] != "result" {
 		t.Fatalf("the last event must be the result, got %v", last["event"])
 	}
-	return agyPayload(last)
+	return agyFixturePayload(last)
 }
 
 func TestAgyStreamFixtures_SuccessShape(t *testing.T) {
@@ -196,7 +198,7 @@ func TestAgyStreamFixtures_SuccessShape(t *testing.T) {
 			if id, _ := ev[0]["conversation_id"].(string); len(id) != 36 {
 				t.Errorf("init must carry the conversation id: %v", ev[0]["conversation_id"])
 			}
-			init := agyPayload(ev[0])
+			init := agyFixturePayload(ev[0])
 			for _, k := range []string{"cwd", "permission_mode", "tools"} {
 				if _, ok := init[k]; !ok {
 					t.Errorf("init lacks %s", k)
@@ -205,7 +207,7 @@ func TestAgyStreamFixtures_SuccessShape(t *testing.T) {
 			if init["permission_mode"] != "always-proceed" {
 				t.Errorf("--dangerously-skip-permissions shows as permission_mode always-proceed, got %v", init["permission_mode"])
 			}
-			res := agyResult(t, ev)
+			res := agyFixtureResult(t, ev)
 			if res["status"] != "SUCCESS" {
 				t.Errorf("result.status = %v", res["status"])
 			}
@@ -234,7 +236,7 @@ func TestAgyStreamFixtures_ResumeContinuesTheConversation(t *testing.T) {
 			if e["event"] != "step_update" {
 				continue
 			}
-			i, _ := agyPayload(e)["step_index"].(float64)
+			i, _ := agyFixturePayload(e)["step_index"].(float64)
 			if i > hi {
 				hi = i
 			}
@@ -249,7 +251,7 @@ func TestAgyStreamFixtures_ResumeContinuesTheConversation(t *testing.T) {
 	if lo2 <= hi1 {
 		t.Errorf("step_index must continue across turns: turn 1 ends at %v, turn 2 starts at %v", hi1, lo2)
 	}
-	r1, r2 := agyResult(t, t1), agyResult(t, t2)
+	r1, r2 := agyFixtureResult(t, t1), agyFixtureResult(t, t2)
 	if r2["num_turns"] != float64(2) || r1["num_turns"] != float64(1) {
 		t.Errorf("num_turns = %v then %v, want 1 then 2", r1["num_turns"], r2["num_turns"])
 	}
@@ -265,7 +267,7 @@ func TestAgyStreamFixtures_EffortConflictIsASingleErrorResult(t *testing.T) {
 	if len(ev) != 1 {
 		t.Fatalf("a rejected invocation prints only the result event, got %d events", len(ev))
 	}
-	res := agyResult(t, ev)
+	res := agyFixtureResult(t, ev)
 	if res["status"] != "ERROR" {
 		t.Errorf("status = %v, want ERROR", res["status"])
 	}
@@ -283,7 +285,7 @@ func TestAgyStreamFixtures_SandboxDeniesAnOutsideWrite(t *testing.T) {
 		if e["event"] != "step_update" {
 			continue
 		}
-		p := agyPayload(e)
+		p := agyFixturePayload(e)
 		if p["step_type"] != "tool" || p["state"] != "DONE" {
 			continue
 		}

@@ -51,7 +51,7 @@ func assertArgv(t *testing.T, got, want []string) {
 	}
 }
 
-func indexOf(args []string, want string) int {
+func argvIndex(args []string, want string) int {
 	for i, a := range args {
 		if a == want {
 			return i
@@ -79,7 +79,7 @@ func TestCodexExecCmd_DefaultIsSandboxed(t *testing.T) {
 		t.Errorf("cmd.Dir = %q, want the project %q (agent files are looked up from the working directory)", cmd.Dir, project)
 	}
 	for _, bad := range []string{"--dangerously-bypass-approvals-and-sandbox", "--output-last-message", "--system-prompt", "--add-dir"} {
-		if indexOf(cmd.Args, bad) >= 0 {
+		if argvIndex(cmd.Args, bad) >= 0 {
 			t.Errorf("argv must not contain %s: %q", bad, cmd.Args)
 		}
 	}
@@ -119,7 +119,7 @@ func TestCodexExecCmd_ModelFlag(t *testing.T) {
 		cmd := (&CodexAdapter{}).ExecCmd(context.Background(), DispatchRequest{
 			Project: t.TempDir(), AgentName: "backend", Task: "t", ModelOverride: tc.model,
 		})
-		i := indexOf(cmd.Args, "-m")
+		i := argvIndex(cmd.Args, "-m")
 		if tc.want == "" {
 			if i >= 0 {
 				t.Errorf("model %q: -m must be absent, got %q", tc.model, cmd.Args)
@@ -174,7 +174,7 @@ func TestCodexExecCmd_ResumeUsesExecResumeNotTopLevelResume(t *testing.T) {
 	if cmd.Args[1] != "exec" {
 		t.Errorf("the top-level `codex resume` is the interactive picker; argv[1] = %q", cmd.Args[1])
 	}
-	if indexOf(cmd.Args, "--sandbox") >= 0 || indexOf(cmd.Args, "--add-dir") >= 0 {
+	if argvIndex(cmd.Args, "--sandbox") >= 0 || argvIndex(cmd.Args, "--add-dir") >= 0 {
 		t.Errorf("`exec resume` rejects --sandbox and --add-dir: %q", cmd.Args)
 	}
 }
@@ -238,10 +238,10 @@ func TestCodexBypass_NotGrantedByOtherRuntimeEntry(t *testing.T) {
 	home := useEmptyHome(t)
 	writeRouterPolicy(t, home, "allow_unsandboxed_runtimes: [agy]\n", 0o600)
 	cmd := (&CodexAdapter{}).ExecCmd(context.Background(), DispatchRequest{Project: t.TempDir(), AgentName: "backend", Task: "t"})
-	if indexOf(cmd.Args, "--dangerously-bypass-approvals-and-sandbox") >= 0 {
+	if argvIndex(cmd.Args, "--dangerously-bypass-approvals-and-sandbox") >= 0 {
 		t.Errorf("an agy entry must not unsandbox codex: %q", cmd.Args)
 	}
-	if indexOf(cmd.Args, "--sandbox") < 0 {
+	if argvIndex(cmd.Args, "--sandbox") < 0 {
 		t.Errorf("codex must stay sandboxed: %q", cmd.Args)
 	}
 }
@@ -277,17 +277,17 @@ func TestCodexBypass_RefusedForUntrustedPolicyFiles(t *testing.T) {
 			notes := captureSandboxNotes(t)
 			setup(t, home)
 			cmd := (&CodexAdapter{}).ExecCmd(context.Background(), DispatchRequest{Project: t.TempDir(), AgentName: "backend", Task: "t"})
-			if indexOf(cmd.Args, "--dangerously-bypass-approvals-and-sandbox") >= 0 {
+			if argvIndex(cmd.Args, "--dangerously-bypass-approvals-and-sandbox") >= 0 {
 				t.Errorf("an untrusted policy file must not unsandbox codex: %q", cmd.Args)
 			}
-			if indexOf(cmd.Args, "--sandbox") < 0 {
+			if argvIndex(cmd.Args, "--sandbox") < 0 {
 				t.Errorf("codex must stay sandboxed: %q", cmd.Args)
 			}
 			if !strings.Contains(notes.String(), "stays sandboxed") {
 				t.Errorf("an ignored policy file must be explained on stderr, got %q", notes.String())
 			}
 			agyCmd := (&AgyAdapter{}).ExecCmd(context.Background(), DispatchRequest{Project: t.TempDir(), AgentName: "backend", Task: "t"})
-			if indexOf(agyCmd.Args, "--sandbox") < 0 {
+			if argvIndex(agyCmd.Args, "--sandbox") < 0 {
 				t.Errorf("agy must stay sandboxed too: %q", agyCmd.Args)
 			}
 		})
@@ -320,7 +320,7 @@ func TestBypass_ProjectCannotEnable(t *testing.T) {
 		(&CodexAdapter{}).ExecCmd(context.Background(), DispatchRequest{Project: project, AgentName: "backend", Task: "t"}).Args,
 		(&CodexAdapter{}).ChatExecCmd(context.Background(), ChatDispatchRequest{Project: project, UserText: "t"}).Args,
 	} {
-		if indexOf(argv, "--dangerously-bypass-approvals-and-sandbox") >= 0 || indexOf(argv, "--sandbox") < 0 {
+		if argvIndex(argv, "--dangerously-bypass-approvals-and-sandbox") >= 0 || argvIndex(argv, "--sandbox") < 0 {
 			t.Errorf("project-supplied policy unsandboxed codex: %q", argv)
 		}
 	}
@@ -328,7 +328,7 @@ func TestBypass_ProjectCannotEnable(t *testing.T) {
 		(&AgyAdapter{}).ExecCmd(context.Background(), DispatchRequest{Project: project, AgentName: "backend", Task: "t"}).Args,
 		(&AgyAdapter{}).ChatExecCmd(context.Background(), ChatDispatchRequest{Project: project, UserText: "t"}).Args,
 	} {
-		if indexOf(argv, "--sandbox") < 0 {
+		if argvIndex(argv, "--sandbox") < 0 {
 			t.Errorf("project-supplied policy unsandboxed agy: %q", argv)
 		}
 	}
@@ -352,7 +352,7 @@ func TestCodexChatExecCmd_Default(t *testing.T) {
 	if cmd.Dir != project {
 		t.Errorf("cmd.Dir = %q, want project %q: chat must run where the project's rules and hooks load", cmd.Dir, project)
 	}
-	if indexOf(cmd.Args, "--system-prompt") >= 0 {
+	if argvIndex(cmd.Args, "--system-prompt") >= 0 {
 		t.Errorf("codex has no --system-prompt flag: %q", cmd.Args)
 	}
 }
@@ -497,7 +497,7 @@ func TestAgyExecCmd_ModelResolution(t *testing.T) {
 		cmd := (&AgyAdapter{}).ExecCmd(context.Background(), DispatchRequest{
 			Project: t.TempDir(), AgentName: "backend", Task: "t", ModelOverride: model,
 		})
-		i := indexOf(cmd.Args, "--model")
+		i := argvIndex(cmd.Args, "--model")
 		switch {
 		case want == "" && i >= 0:
 			t.Errorf("model %q: --model must be absent, got %q", model, cmd.Args)
@@ -538,7 +538,7 @@ func TestAgyEffortIsOmittedWhenTheModelIDCarriesIt(t *testing.T) {
 					Project: t.TempDir(), AgentName: "backend", Task: "t", ModelOverride: tc.model, Effort: "high",
 				}).Args
 			}
-			i := indexOf(args, "--effort")
+			i := argvIndex(args, "--effort")
 			if tc.wantEffort && (i < 0 || args[i+1] != "high") {
 				t.Errorf("%s (chat=%v): want --effort high in %q", tc.name, chat, args)
 			}
@@ -572,7 +572,7 @@ func TestAgyEffort(t *testing.T) {
 		cmd := (&AgyAdapter{}).ExecCmd(context.Background(), DispatchRequest{
 			Project: t.TempDir(), AgentName: "backend", Task: "t", Effort: effort,
 		})
-		i := indexOf(cmd.Args, "--effort")
+		i := argvIndex(cmd.Args, "--effort")
 		switch {
 		case want == "" && i >= 0:
 			t.Errorf("effort %q: --effort must be absent, got %q", effort, cmd.Args)
@@ -602,7 +602,7 @@ func TestAgyBypassOnlyViaTrustedPolicyKeepsSkipPermissions(t *testing.T) {
 	// A codex-only entry does not unsandbox agy.
 	writeRouterPolicy(t, home, "allow_unsandboxed_runtimes: [codex]\n", 0o600)
 	cmd = (&AgyAdapter{}).ExecCmd(context.Background(), DispatchRequest{Project: project, AgentName: "backend", Task: "t"})
-	if indexOf(cmd.Args, "--sandbox") < 0 {
+	if argvIndex(cmd.Args, "--sandbox") < 0 {
 		t.Errorf("a codex entry must not unsandbox agy: %q", cmd.Args)
 	}
 }
@@ -640,7 +640,7 @@ func TestAgyWorkDirOverrideIsTheWorkspace(t *testing.T) {
 		if cmd.Dir != worktree {
 			t.Errorf("cmd.Dir = %q, want worktree %q", cmd.Dir, worktree)
 		}
-		i := indexOf(cmd.Args, "--add-dir")
+		i := argvIndex(cmd.Args, "--add-dir")
 		if i < 0 || cmd.Args[i+1] != worktree {
 			t.Errorf("--add-dir must be the worktree, not the main checkout: %q", cmd.Args)
 		}
