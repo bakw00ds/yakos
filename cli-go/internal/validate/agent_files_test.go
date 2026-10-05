@@ -189,3 +189,46 @@ func TestAgentFiles_FrameworkModeAcceptsOnlyLibAsARoot(t *testing.T) {
 		t.Errorf("symlink errors = %q, want only %q", got, notLib+": "+msgOutside)
 	}
 }
+
+// extends: is a bare agent id (sec-324). The value is printed the way the
+// dispatcher's warning prints it, which the bash validator reproduces byte for
+// byte: bytes outside printable ASCII become "?", 64 bytes at most.
+func TestAgentFiles_ANonBareExtendsIsRejected(t *testing.T) {
+	root, proj, agents := agentFilesProject(t)
+	rule := agentscompose.BareIDRule
+	cases := []struct{ file, value, shown string }{
+		{"up.md", "../outside", `"../outside"`},
+		{"abs.md", "/etc/passwd", `"/etc/passwd"`},
+		{"sub.md", "sub/dir", `"sub/dir"`},
+		{"dot.md", ".hidden", `".hidden"`},
+		{"tab.md", "a\tb", `"a?b"`},
+		{"utf.md", "caf\u00e9", `"caf??"`},
+		{"long.md", strings.Repeat("a", 80) + "/x", `"` + strings.Repeat("a", 64) + `..."`},
+	}
+	var want []string
+	for _, c := range cases {
+		writeFile(t, filepath.Join(agents, c.file), "---\nid: x\nrole: specialist\nextends: "+c.value+"\n---\n\n# x\n"+strings.Repeat("filler\n", 90))
+	}
+	// Bare ids are fine, whatever they name: a missing template is not a finding.
+	for _, ok := range []string{"backend", "a_b.c-d", "Upper1"} {
+		writeFile(t, filepath.Join(agents, "ok-"+ok+".md"), "---\nid: x\nrole: specialist\nextends: "+ok+"\n---\n\n# x\n"+strings.Repeat("filler\n", 90))
+	}
+	sorted := append([]struct{ file, value, shown string }(nil), cases...)
+	for i := range sorted {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[j].file < sorted[i].file {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+	for _, c := range sorted {
+		want = append(want, filepath.Join(agents, c.file)+": extends value "+c.shown+" is not a bare agent id ("+rule+"); the Go dispatcher skips it")
+	}
+	out, errs := validateProject(t, root, proj)
+	if strings.Join(errs, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("errors differ\n got:\n%s\nwant:\n%s\nfull output:\n%s", strings.Join(errs, "\n"), strings.Join(want, "\n"), out)
+	}
+	if strings.Contains(out, "[warn]") {
+		t.Errorf("unexpected warning:\n%s", out)
+	}
+}

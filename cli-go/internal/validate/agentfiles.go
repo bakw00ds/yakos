@@ -4,7 +4,8 @@ package validate
 // the Go dispatcher does (sec-324). Compose leaves an agent file out, with a
 // warning, when it has a line over the cap, is a symlink that resolves outside
 // the framework's lib/ and the project directory or to anything but a regular
-// file, is not a regular file, or is over the size cap. The persona that file
+// file, is not a regular file, is over the size cap, or has an extends: that is
+// not a bare agent id. The persona that file
 // would have supplied is then silently the framework agent's, or nothing, so
 // validate turns each of those into an error, and CI sees it.
 //
@@ -42,8 +43,14 @@ func agentFileFinding(path string, roots []string) string {
 	if err != nil {
 		return ""
 	}
-	if n := agentscompose.LongLine(string(data)); n > 0 {
+	content := string(data)
+	if n := agentscompose.LongLine(content); n > 0 {
 		return fmt.Sprintf("line %d is longer than %d bytes; the Go dispatcher skips it; split the line", n, agentscompose.MaxLineBytes)
+	}
+	// extends: is a bare agent id and nothing else. The value is read as Compose
+	// reads it, raw, so a quoted value or one with a trailing comment is not one.
+	if v := agentscompose.ExtendsValue(content); v != "" && !agentscompose.BareAgentID(v) {
+		return fmt.Sprintf("extends value %s is not a bare agent id (%s); the Go dispatcher skips it", agentscompose.DisplayValue(v), agentscompose.BareIDRule)
 	}
 	return ""
 }

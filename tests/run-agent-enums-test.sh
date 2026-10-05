@@ -8,9 +8,10 @@
 #   agent id                    must not be a runtime name (claude, codex, agy)
 #   model-policy                must be a model tier (haiku|sonnet|opus|fable)
 #   agent file                  must be one the Go dispatcher reads: no line of 1 MiB or
-#                               more, at most 4 MiB, and a symlink must resolve to a
-#                               regular file inside the framework lib/ or the project
-#                               (sec-324; the second fixture project below)
+#                               more, at most 4 MiB, a symlink that resolves to a
+#                               regular file inside the framework lib/ or the project,
+#                               and an extends: that is a bare agent id (sec-324; the
+#                               second fixture project below)
 #
 # Asserts on both implementations (Go half only when bin/yakos exists), that
 # their findings are byte-identical, and that the shipped framework agents pass
@@ -45,6 +46,9 @@ run_bash() { YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$REPO_ROOT/cli/lib" "${BASH:-bas
 run_go()   { YAKOS_IMPL=go "$GO_BINARY" validate "$@" 2>&1; }
 norm()     { sed "s|$P|<P>|g" | grep -E '\[err\]|\[warn\]|Summary' | sort; }
 
+want_err_f() { # <output> <fixed text of one [err] line> <label>
+    printf '%s\n' "$1" | grep -F -- "$2" | grep -q '\[err\]' && ok "$3" || bad "$3 (no [err] line containing: $2)"
+}
 want_err() { # <output> <substr> <label>
     printf '%s' "$1" | grep -q -- "\[err\].*$2" && ok "$3" || bad "$3 (no [err] matching: $2)"
 }
@@ -87,6 +91,15 @@ longline() { head -c "$1" /dev/zero | tr '\0' 'a'; }
 # 5 MiB in lines each one byte under the bound, so only the size cap can refuse it.
 { head5 big; printf '%s\n' "$filler"; for _i in 1 2 3 4 5; do longline 1048575; printf '\n'; done; } > "$A/big.md"
 { head5 shared; printf '%s\n' "$filler"; } > "$Q/shared/shared.md"
+# extends: is a bare agent id. The value is shown as the dispatcher's warning shows
+# it, so non-ASCII bytes and a long value are in the fixture on purpose. (A tab is
+# not: PyYAML rejects one in a plain scalar and Go's parser does not, which is a
+# difference of the frontmatter pass. The tab is in the Go validator's own test and
+# in the composer parity test.)
+head5x() { printf -- '---\nid: %s\nrole: specialist\nextends: %s\n---\n# %s\n' "$1" "$2" "$1"; }
+for ext in 'ext-up|../outside' 'ext-abs|/etc/passwd' 'ext-sub|sub/dir' 'ext-dot|.hidden' $'ext-utf|caf\xc3\xa9' "ext-long|$(longline 80)/x" 'ext-ok|backend' 'ext-ok2|a_b.c-d'; do
+    { head5x "${ext%%|*}" "${ext#*|}"; printf '%s\n' "$filler"; } > "$A/${ext%%|*}.md"
+done
 { head5 outside; printf '%s\n' "$filler"; } > "$TMP/outside/outside.md"
 links=1
 ln -s ../../shared/shared.md "$A/inproject.md"            2>/dev/null || links=0   # inside the project: accepted
@@ -111,12 +124,19 @@ for side in $sides; do
         want_err "$out" "agents/dirlink.md: symlink does not resolve to a regular file; $SKIP"  "$side: a symlink to a directory is rejected"
         want_err "$out" "agents/pipelink.md: symlink does not resolve to a regular file; $SKIP" "$side: a symlink to a FIFO is rejected"
         want_err "$out" "agents/leak.md: symlink resolves outside the framework lib/ and the project directory; $SKIP" "$side: a symlink outside the roots is rejected"
-        want_n=8
+        want_n=14
     else
-        want_n=4   # no symlinks or FIFOs here (the file system refused them)
+        want_n=10   # no symlinks or FIFOs here (the file system refused them)
     fi
-    if printf '%s' "$out" | grep -Eq "agents/(good|under|crlf-under|tail-under|inproject|inlib)\.md"; then
-        bad "$side: an agent file the dispatcher reads was flagged"; printf '%s\n' "$out" | grep -E 'agents/(good|under|crlf-under|tail-under|inproject|inlib)\.md' | head -3
+    EXTRULE='is not a bare agent id (1 to 128 of A-Z a-z 0-9 . _ -, starting with a letter or digit, no ".."); '"$SKIP"
+    want_err_f "$out" "agents/ext-up.md: extends value \"../outside\" $EXTRULE"   "$side: extends with .. is rejected"
+    want_err_f "$out" "agents/ext-abs.md: extends value \"/etc/passwd\" $EXTRULE"  "$side: an absolute extends is rejected"
+    want_err_f "$out" "agents/ext-sub.md: extends value \"sub/dir\" $EXTRULE"      "$side: extends with a slash is rejected"
+    want_err_f "$out" "agents/ext-dot.md: extends value \".hidden\" $EXTRULE"      "$side: a leading dot is rejected"
+    want_err_f "$out" "agents/ext-utf.md: extends value \"caf??\" $EXTRULE"        "$side: non-ASCII bytes are shown as ?, one each"
+    want_err_f "$out" "agents/ext-long.md: extends value \"$(longline 64)...\" $EXTRULE" "$side: a long value is cut at 64 bytes"
+    if printf '%s' "$out" | grep -Eq "agents/(good|under|crlf-under|tail-under|inproject|inlib|ext-ok|ext-ok2)\.md"; then
+        bad "$side: an agent file the dispatcher reads was flagged"; printf '%s\n' "$out" | grep -E 'agents/(good|under|crlf-under|tail-under|inproject|inlib|ext-ok|ext-ok2)\.md' | head -3
     else
         ok "$side: lines under the bound, links inside the project and the framework lib, and a good file are clean"
     fi

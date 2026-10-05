@@ -481,8 +481,9 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   leaves the framework's version in place with only a warning on stderr, so CI
   could not see it. The bash and the Go validator now both report, with the same
   text, an agent file with a line of 1 MiB or more, a file over 4 MiB, an entry
-  that is not a regular file, and a symlink that does not end at a regular file
-  inside the framework's `lib/` or the project directory. The bash validator also
+  that is not a regular file, a symlink that does not end at a regular file
+  inside the framework's `lib/` or the project directory, and an `extends:` that
+  is not a bare agent id. The bash validator also
   checks the `runtime` and `model-policy` of an agent reached through a symlink
   it accepts, as the Go one always did. The Go validator no longer reads a symlink
   to a FIFO or a device in any pass over agent files, where it would have blocked

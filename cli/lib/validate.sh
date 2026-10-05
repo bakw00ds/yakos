@@ -298,7 +298,7 @@ _validate_agent_file_problem() {
 }
 
 check_agent_enums() {
-    local base="$1" project_dir="${2:-}" agent_file name fm v problem
+    local base="$1" project_dir="${2:-}" agent_file name fm v problem ext
     [ -d "$base/agents" ] || return 0
     while IFS= read -r agent_file; do
         [ -n "$agent_file" ] || continue
@@ -321,6 +321,13 @@ check_agent_enums() {
             in_fm==1 && /^---[[:space:]]*$/ { exit }
             in_fm==1 { print }
         ' "$agent_file")"
+        # extends: is a bare agent id and nothing else (the composer's rule, with
+        # the same raw reading of the value), or the dispatcher skips the agent.
+        ext="$(yk_agents_fm_get "$fm" "extends")"
+        if [ -n "$ext" ] && ! yk_agents_bare_id "$ext"; then
+            err "$agent_file: extends value $(yk_agents_display_value "$ext") is not a bare agent id ($YK_AGENTS_BARE_ID_RULE); the Go dispatcher skips it"
+            continue
+        fi
         for key in runtime runtime-fallback; do
             while IFS= read -r v; do
                 [ -n "$v" ] || continue
