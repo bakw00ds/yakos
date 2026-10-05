@@ -57,6 +57,16 @@ EXIT_API_KEY_REQUIRED = 78  # sysexits EX_CONFIG, as in sidecar.mjs
 _OAUTH_TOKEN_MARKERS = ("sk-ant-oat", "sk-ant-ort")
 
 
+# The two refusal sentences are constants on purpose: nothing computed from the
+# environment is ever written to stderr.
+_REFUSE_UNSET = ("refusing to run: ANTHROPIC_API_KEY is not set; the Agent SDK does "
+                 "not run on a claude.ai subscription login (set an API key, or use "
+                 "the claude runtime, which is Claude Code itself)")
+_REFUSE_OAUTH = ("refusing to run: ANTHROPIC_API_KEY holds a subscription OAuth "
+                 "token, not an API key; the Agent SDK does not accept those (set an "
+                 "API key, or use the claude runtime, which is Claude Code itself)")
+
+
 def die(msg, code=1):
     sys.stderr.write(f"claude-sdk-dispatch: {msg}\n")
     sys.exit(code)
@@ -67,22 +77,19 @@ def _is_oauth_value(value):
     return any(marker in low for marker in _OAUTH_TOKEN_MARKERS)
 
 
-def api_key_refusal(environ):
-    """Return why this script must not run, or "" when it may.
+def startup_check(environ):
+    """Return "ok", "unset" or "oauth": whether this script may run.
 
-    Reads only ANTHROPIC_API_KEY and returns a constant sentence: no part of the
-    value, and no other variable, is ever echoed.
+    Reads only ANTHROPIC_API_KEY and returns a bare state word. main() turns the
+    state into one of two constant sentences, so no part of the value, and no
+    other variable, is ever echoed.
     """
     key = (environ.get("ANTHROPIC_API_KEY") or "").strip()
     if not key:
-        return ("ANTHROPIC_API_KEY is not set; the Agent SDK does not run on a "
-                "claude.ai subscription login (set an API key, or use the claude "
-                "runtime, which is Claude Code itself)")
+        return "unset"
     if _is_oauth_value(key):
-        return ("ANTHROPIC_API_KEY holds a subscription OAuth token, not an API "
-                "key; the Agent SDK does not accept those (set an API key, or use "
-                "the claude runtime, which is Claude Code itself)")
-    return ""
+        return "oauth"
+    return "ok"
 
 
 def scrub_oauth_env(environ):
@@ -275,9 +282,11 @@ async def run(agent_id: str, project: str, agents: dict, task: str) -> int:
 
 def main() -> int:
     # K-137 hard gate, before anything else: no inputs read, no SDK imported.
-    refusal = api_key_refusal(os.environ)
-    if refusal:
-        die(f"refusing to run: {refusal}", EXIT_API_KEY_REQUIRED)
+    state = startup_check(os.environ)
+    if state == "unset":
+        die(_REFUSE_UNSET, EXIT_API_KEY_REQUIRED)
+    if state == "oauth":
+        die(_REFUSE_OAUTH, EXIT_API_KEY_REQUIRED)
     scrub_oauth_env(os.environ)
 
     agent_id, project, agents = read_env()
