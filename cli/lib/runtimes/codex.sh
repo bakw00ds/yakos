@@ -28,8 +28,29 @@ yk_rt_codex_check_cli() {
     return 1
 }
 
+# yakOS-owned codex profile (K-133). `yakos auth login codex` signs codex in to
+# ~/.yakos-state/codex-home so a yakOS dispatch and the operator's interactive
+# codex never share one auth.json (openai/codex#48465: concurrent refreshes and
+# a login call rewriting the shared file can sign the operator out). Once the
+# profile holds a login, every yakOS-run codex uses it; until then codex keeps
+# using $CODEX_HOME or ~/.codex. The Go adapter applies the same order.
+_yk_codex_profile_dir() { printf '%s\n' "$HOME/.yakos-state/codex-home"; }
+
+# yk_rt_codex_exec <codex args...>
+#   Run codex under the yakOS profile when it holds a login.
+yk_rt_codex_exec() {
+    local profile
+    profile="$(_yk_codex_profile_dir)"
+    if [ -f "$profile/auth.json" ]; then
+        CODEX_HOME="$profile" codex "$@"
+    else
+        codex "$@"
+    fi
+}
+
 yk_rt_codex_check_auth() {
     if [ -n "${OPENAI_API_KEY:-}" ]; then return 0; fi
+    if [ -f "$(_yk_codex_profile_dir)/auth.json" ]; then return 0; fi
     local home="${CODEX_HOME:-$HOME/.codex}"
     if [ -f "$home/auth.json" ]; then return 0; fi
     ct_log "codex: no auth configured (run 'yakos auth login codex' or 'codex login')"
@@ -121,6 +142,11 @@ yk_rt_codex_launch() {
     esac
 
     [ "$#" -gt 0 ] && args+=( "$@" )
+    local profile
+    profile="$(_yk_codex_profile_dir)"
+    if [ -f "$profile/auth.json" ]; then
+        CODEX_HOME="$profile" exec codex "${args[@]}"
+    fi
     exec codex "${args[@]}"
 }
 
@@ -150,7 +176,7 @@ $task"
         local raw_tmp
         raw_tmp="$(mktemp -t yakos-codex-raw.XXXXXX)"
 
-        codex "${resume_args[@]}" \
+        yk_rt_codex_exec "${resume_args[@]}" \
                    --add-dir "$project" \
                    --dangerously-bypass-approvals-and-sandbox \
                    --json \
@@ -180,7 +206,7 @@ $task"
         return "$rc"
     fi
 
-    codex "${resume_args[@]}" \
+    yk_rt_codex_exec "${resume_args[@]}" \
                --add-dir "$project" \
                --dangerously-bypass-approvals-and-sandbox \
                --output-last-message - \

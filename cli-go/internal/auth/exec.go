@@ -21,3 +21,14 @@ func defaultExecImpl(name string, args []string) error {
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
+
+// defaultExecEnvImpl is defaultExecImpl with extra KEY=VALUE variables added to
+// the inherited environment.
+func defaultExecEnvImpl(name string, args []string, extraEnv []string) error {
+	cmd := exec.Command(name, args...) //nolint:gosec
+	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}

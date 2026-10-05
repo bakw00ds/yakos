@@ -27,6 +27,8 @@ import (
 	"path/filepath"
 
 	"github.com/bakw00ds/yakos/internal/claudeauth"
+	"github.com/bakw00ds/yakos/internal/codexhome"
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 // Config holds all parameters for the auth subcommand.
@@ -56,6 +58,13 @@ type Config struct {
 	// ExecFn is the function used to exec a subprocess (e.g. "codex login").
 	// Defaults to DefaultExecFn. Injected in tests to avoid spawning processes.
 	ExecFn func(name string, args []string) error
+
+	// ExecEnvFn is like ExecFn but adds extra KEY=VALUE variables to the
+	// inherited environment. `login codex` uses it so codex runs against the
+	// yakOS-owned CODEX_HOME. It defaults to DefaultExecEnvFn only when ExecFn
+	// is also defaulted: a test that injects just ExecFn keeps a fully mocked
+	// exec and never creates the profile directory.
+	ExecEnvFn func(name string, args []string, extraEnv []string) error
 
 	// KeyringFn is the keyring adapter used to read/write/delete tokens.
 	// Defaults to the go-keyring backend. Injected in tests for mocking.
@@ -104,6 +113,9 @@ func Run(cfg Config) (*Result, error) {
 	}
 	if cfg.ExecFn == nil {
 		cfg.ExecFn = DefaultExecFn
+		if cfg.ExecEnvFn == nil {
+			cfg.ExecEnvFn = DefaultExecEnvFn
+		}
 	}
 	if cfg.KeyringFn == nil {
 		cfg.KeyringFn = defaultKeyringBackend()
@@ -140,13 +152,16 @@ Subcommands:
   status [<runtime>]      Report cli + auth state. Defaults to all known runtimes.
   login <runtime>         Run the runtime's login flow:
                           - claude:  prints '/login' instruction + opens claude
-                          - codex:   exec 'codex login'
+                          - codex:   exec 'codex login' against a yakOS-owned
+                                     profile, ~/.yakos-state/codex-home (your own
+                                     ~/.codex login is left alone)
                           - gemini:  prints OAuth / API key options
                           With --as-default, also persist the runtime as the
                           yakos start default.
   logout <runtime>        Best-effort credential removal:
                           - claude:  unset ANTHROPIC_API_KEY hint; remove ~/.claude/auth.json
-                          - codex:   exec 'codex logout' if the binary supports it
+                          - codex:   exec 'codex logout' (against the yakOS profile
+                                     when one exists) and remove its auth.json
                           - gemini:  point at gemini's logout flow
   set-default <runtime>   Persist the runtime as yakos start's default
                           (writes ~/.yakos-state/default-runtime).
@@ -212,6 +227,9 @@ func checkRuntime(id, defaultRuntime string, cfg Config) RuntimeStatus {
 
 	if checkAuth(id, cfg) {
 		s.AuthState = "OK"
+		if id == "codex" {
+			s.AuthHint = codexAuthNote(cfg)
+		}
 	} else {
 		s.AuthHint = fmt.Sprintf("run: yakos auth login %s", id)
 	}
@@ -270,7 +288,15 @@ func runLogin(cfg Config) (*Result, error) {
 		return nil, fmt.Errorf("auth login: %q CLI not on PATH; install it first", cfg.Target)
 	}
 
-	if err := printLoginInstructions(cfg.Writer, targetForLogin, cfg.ExecFn); err != nil {
+	execFn := cfg.ExecFn
+	if targetForLogin == "codex" {
+		fn, err := codexLoginExec(cfg)
+		if err != nil {
+			return nil, err
+		}
+		execFn = fn
+	}
+	if err := printLoginInstructions(cfg.Writer, targetForLogin, execFn); err != nil {
 		return nil, err
 	}
 
@@ -439,6 +465,29 @@ func logoutClaude(cfg Config) error {
 }
 
 func logoutCodex(cfg Config) error {
+	// A yakOS-owned profile holds the login dispatch uses. Log out of that and
+	// leave the operator's own ~/.codex login alone.
+	if profile := codexhome.ProfileDir(cfg.HomeDir); codexhome.ProfileHasAuth(cfg.HomeDir) {
+		if cliPresent("codex") {
+			run := cfg.ExecFn
+			if cfg.ExecEnvFn != nil {
+				run = func(name string, args []string) error {
+					return cfg.ExecEnvFn(name, args, []string{"CODEX_HOME=" + profile})
+				}
+			}
+			if err := run("codex", []string{"logout"}); err != nil {
+				logLine(cfg.ErrWriter, "codex logout returned non-zero (may not be supported in this version)")
+			}
+		}
+		authFile := filepath.Join(profile, "auth.json")
+		if err := os.Remove(authFile); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("auth logout codex: remove auth.json: %w", err)
+		}
+		_, _ = fmt.Fprintf(cfg.Writer, "removed %s\n", authFile)
+		return nil
+	}
+
+	// No yakOS profile: the login dispatch uses is $CODEX_HOME or ~/.codex.
 	// Try exec 'codex logout' if present.
 	if cliPresent("codex") {
 		if err := cfg.ExecFn("codex", []string{"logout"}); err != nil {
@@ -458,6 +507,46 @@ func logoutCodex(cfg Config) error {
 		_, _ = fmt.Fprintf(cfg.Writer, "removed %s\n", authFile)
 	}
 	return nil
+}
+
+// codexLoginExec returns the function that runs `codex login`. It points codex
+// at the yakOS-owned profile (~/.yakos-state/codex-home) so the login lands
+// there, never in the operator's ~/.codex: yakOS dispatches and the operator's
+// interactive codex then do not share one auth.json (openai/codex#48465).
+// yakOS runs the official `codex login` only; it never calls the app-server
+// account/login method. With an injected ExecFn (tests) it returns that
+// function unchanged and creates nothing.
+func codexLoginExec(cfg Config) (func(string, []string) error, error) {
+	dir := codexhome.ProfileDir(cfg.HomeDir)
+	if dir == "" || cfg.ExecEnvFn == nil {
+		return cfg.ExecFn, nil
+	}
+	if err := statepath.SecureDir(dir); err != nil {
+		return nil, fmt.Errorf("auth login codex: prepare the yakOS codex profile: %w", err)
+	}
+	_, _ = fmt.Fprintf(cfg.Writer, "yakos: signing codex in to the yakOS-owned profile %s\n"+
+		"  your own ~/.codex login is not touched; dispatches use this profile once it holds a login\n", dir)
+	return func(name string, args []string) error {
+		if err := cfg.ExecEnvFn(name, args, []string{"CODEX_HOME=" + dir}); err != nil {
+			return err
+		}
+		if !codexhome.ProfileHasAuth(cfg.HomeDir) {
+			logLine(cfg.ErrWriter, "yakos: codex login finished but wrote no auth.json in "+dir+
+				"; dispatch keeps using your default codex login until it does")
+		}
+		return nil
+	}, nil
+}
+
+// codexAuthNote says which login a codex dispatch will use, for `auth status`.
+func codexAuthNote(cfg Config) string {
+	if _, isolated := codexhome.Effective(cfg.HomeDir, os.Getenv); isolated {
+		return "(yakOS-owned profile " + codexhome.ProfileDir(cfg.HomeDir) + ")"
+	}
+	if os.Getenv("OPENAI_API_KEY") != "" {
+		return ""
+	}
+	return "(shared with your own codex; run: yakos auth login codex for a yakOS-owned profile)"
 }
 
 func logoutGemini(cfg Config) error {
@@ -593,15 +682,13 @@ func checkAuth(id string, cfg Config) bool {
 		return claudeauth.IsAuthed(cfg.HomeDir, os.Getenv("ANTHROPIC_API_KEY"))
 
 	case "codex":
-		// Auth is OPENAI_API_KEY env var or ~/.codex/auth.json.
+		// Auth is OPENAI_API_KEY, or the auth.json in the CODEX_HOME a dispatch
+		// will use: the yakOS-owned profile once it holds a login, else
+		// $CODEX_HOME, else ~/.codex.
 		if os.Getenv("OPENAI_API_KEY") != "" {
 			return true
 		}
-		codexHome := os.Getenv("CODEX_HOME")
-		if codexHome == "" {
-			codexHome = filepath.Join(cfg.HomeDir, ".codex")
-		}
-		authFile := filepath.Join(codexHome, "auth.json")
+		authFile := filepath.Join(codexhome.AuthDir(cfg.HomeDir, os.Getenv), "auth.json")
 		_, err := os.Stat(authFile)
 		return err == nil
 
@@ -653,6 +740,12 @@ func runtimeCaps(id string) string {
 // DefaultExecFn runs name with args using os/exec, forwarding stdin/stdout/stderr.
 func DefaultExecFn(name string, args []string) error {
 	return defaultExecImpl(name, args)
+}
+
+// DefaultExecEnvFn is DefaultExecFn with extra KEY=VALUE variables added to the
+// inherited environment.
+func DefaultExecEnvFn(name string, args []string, extraEnv []string) error {
+	return defaultExecEnvImpl(name, args, extraEnv)
 }
 
 // ---- misc helpers -----------------------------------------------------------

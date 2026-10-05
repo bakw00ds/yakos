@@ -96,6 +96,10 @@ const (
 
 	// SectionProjectRules reports missing/edited/stale managed rules (K-116).
 	SectionProjectRules
+
+	// SectionRuntimeIsolation reports the codex CODEX_HOME profile and the
+	// sandbox policy for codex and agy (K-133).
+	SectionRuntimeIsolation
 )
 
 // Finding is one reported item: a severity level plus a human-readable message.
@@ -246,6 +250,7 @@ func Run(cfg Config) (*Report, error) {
 	r.checkHookEnv()
 	r.checkAgentBudgets()
 	r.checkHookFallback()
+	r.checkRuntimeIsolation()
 
 	if cfg.ProbeRuntime {
 		r.checkRuntimeProbe()

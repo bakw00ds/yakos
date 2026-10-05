@@ -31,13 +31,16 @@ Subcommands:
   status [<runtime>]      Report cli + auth state. Defaults to all known runtimes.
   login <runtime>         Run the runtime's login flow:
                           - claude:  prints '/login' instruction + opens claude
-                          - codex:   exec 'codex login'
+                          - codex:   exec 'codex login' against a yakOS-owned
+                                     profile, ~/.yakos-state/codex-home (your own
+                                     ~/.codex login is left alone)
                           - gemini:  prints OAuth / API key options
                           With --as-default, also persist the runtime as the
                           yakos start default.
   logout <runtime>        Best-effort credential removal:
                           - claude:  unset ANTHROPIC_API_KEY hint; remove ~/.claude/auth.json
-                          - codex:   exec 'codex logout' if the binary supports it
+                          - codex:   exec 'codex logout' (against the yakOS profile
+                                     when one exists) and remove its auth.json
                           - gemini:  point at gemini's logout flow
   set-default <runtime>   Persist the runtime as yakos start's default
                           (writes ~/.yakos-state/default-runtime).
@@ -258,8 +261,18 @@ After either, run 'yakos auth status claude' to verify.
 EOF
             ;;
         codex)
-            echo "Launching 'codex login'..."
-            codex login
+            # K-133: sign in to the yakOS-owned profile, never the operator's
+            # own ~/.codex, so a yakOS dispatch and an interactive codex do not
+            # share one auth.json (openai/codex#48465).
+            codex_profile="$HOME/.yakos-state/codex-home"
+            ( umask 077; mkdir -p "$codex_profile" )
+            chmod 700 "$codex_profile"
+            echo "Launching 'codex login' for the yakOS-owned profile $codex_profile ..."
+            echo "  your own ~/.codex login is not touched; dispatches use this profile once it holds a login"
+            CODEX_HOME="$codex_profile" codex login
+            if [ ! -f "$codex_profile/auth.json" ]; then
+                ct_log "codex login finished but wrote no auth.json in $codex_profile; dispatch keeps using your default codex login until it does"
+            fi
             ;;
         gemini)
             cat <<'EOF'
@@ -330,13 +343,24 @@ if [ "$SUB" = "logout" ]; then
             echo "if ANTHROPIC_API_KEY is set in your shell rc, unset it manually."
             ;;
         codex)
-            if command -v codex >/dev/null 2>&1; then
-                codex logout 2>/dev/null || ct_log "codex logout returned non-zero (may not be supported in this version)"
-            fi
-            codex_home="${CODEX_HOME:-$HOME/.codex}"
-            if [ -f "$codex_home/auth.json" ]; then
-                rm -f "$codex_home/auth.json"
-                echo "removed $codex_home/auth.json"
+            codex_profile="$HOME/.yakos-state/codex-home"
+            if [ -f "$codex_profile/auth.json" ]; then
+                # The yakOS profile holds the login dispatch uses: log out of
+                # that and leave the operator's own ~/.codex login alone.
+                if command -v codex >/dev/null 2>&1; then
+                    CODEX_HOME="$codex_profile" codex logout 2>/dev/null || ct_log "codex logout returned non-zero (may not be supported in this version)"
+                fi
+                rm -f "$codex_profile/auth.json"
+                echo "removed $codex_profile/auth.json"
+            else
+                if command -v codex >/dev/null 2>&1; then
+                    codex logout 2>/dev/null || ct_log "codex logout returned non-zero (may not be supported in this version)"
+                fi
+                codex_home="${CODEX_HOME:-$HOME/.codex}"
+                if [ -f "$codex_home/auth.json" ]; then
+                    rm -f "$codex_home/auth.json"
+                    echo "removed $codex_home/auth.json"
+                fi
             fi
             ;;
         gemini)
