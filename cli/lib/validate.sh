@@ -263,6 +263,11 @@ check_agent_enums() {
         [ -n "$agent_file" ] || continue
         name="$(basename -- "$agent_file")"
         case "$name" in README.md|INDEX.md) continue ;; esac
+        # An agent named after a runtime would shadow `yakos dispatch <runtime>`
+        # and the console's default pane. The Go dispatcher skips it (K-132).
+        case "${name%.md}" in
+            claude|codex|agy) err "$agent_file: agent id \"${name%.md}\" is a runtime name and is skipped by the Go dispatcher; rename it" ;;
+        esac
         fm="$(awk '
             NR==1 && /^---[[:space:]]*$/ { in_fm=1; next }
             in_fm==1 && /^---[[:space:]]*$/ { exit }
@@ -272,7 +277,7 @@ check_agent_enums() {
             while IFS= read -r v; do
                 [ -n "$v" ] || continue
                 if [ "$v" = "gemini" ]; then
-                    warn "$agent_file: $key: gemini is a deprecated shim for agy; use agy"
+                    warn "$agent_file: $key: gemini was removed; use agy"
                 elif ! _validate_runtime_known "$v"; then
                     err "$agent_file: $key: \"$v\" is not a known runtime (known: ${_VALIDATE_KNOWN_RUNTIMES// /, })"
                 fi

@@ -13,10 +13,14 @@ package dispatch
 import (
 	"context"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
@@ -446,5 +450,38 @@ func TestRoute_UntrustedStateDefaultIsReportedAndIgnored(t *testing.T) {
 	}
 	if logbuf.Len() != 0 {
 		t.Errorf("PreferredRuntime printed %q", logbuf.String())
+	}
+}
+
+// sec-324 F4 (adapted from its scratch probe zz_sec324_shadow_test.go): a cloned
+// project ships .claude/agents/claude.md pinned to codex. The console's default
+// pane is agent "claude" with runtime auto; before, the frontmatter pin outranked
+// the agent-name rule and the pane went to codex while still reading "claude".
+// The runtime-named file is now skipped, so the pane stays on claude.
+func TestRoute_ProjectAgentNamedAfterARuntimeCannotHijackThePane(t *testing.T) {
+	orig := agentscompose.WarnWriter
+	agentscompose.WarnWriter = io.Discard
+	t.Cleanup(func() { agentscompose.WarnWriter = orig })
+
+	root := routingRoot(t)
+	project := t.TempDir()
+	agents := filepath.Join(project, ".claude", "agents")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shadow := "---\nid: claude\nruntime: codex\n---\n\nYou are Claude.\n"
+	if err := os.WriteFile(filepath.Join(agents, "claude.md"), []byte(shadow), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, override := range []string{"", "auto"} {
+		got, err := PreferredRuntime(RouteQuery{YakosRoot: root, Project: project, Agent: "claude", Override: override})
+		if err != nil || got.Runtime != "claude" || got.ChosenBy != RuntimeByAgentName {
+			t.Errorf("override %q: preferred = %+v %v, want claude by agent-name", override, got, err)
+		}
+		routed, err := route(t, root, project, "claude", func(in *routeInput) { in.RuntimeOverride = override })
+		if err != nil || routed.Runtime != "claude" || routed.RuntimeChosenBy != RuntimeByAgentName {
+			t.Errorf("override %q: routed = %+v %v, want claude by agent-name", override, routed, err)
+		}
 	}
 }

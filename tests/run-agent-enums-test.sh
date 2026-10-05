@@ -4,7 +4,8 @@
 # frontmatter enum checks in `yakos validate` (bash: cli/lib/validate.sh
 # check_agent_enums; Go: internal/validate checkAgentEnums).
 #
-#   runtime / runtime-fallback  must be a known runtime (gemini = deprecated warn)
+#   runtime / runtime-fallback  must be a known runtime (gemini = removed, warn)
+#   agent id                    must not be a runtime name (claude, codex, agy)
 #   model-policy                must be a model tier (haiku|sonnet|opus|fable)
 #
 # Asserts on both implementations (Go half only when bin/yakos exists), that
@@ -34,6 +35,7 @@ mk bad-fallback    $'runtime-fallback: [codex, bard]\n'
 mk bad-fallback-bl $'runtime-fallback:\n  - codex\n  - "nope"\n'
 mk bad-policy      $'model-policy: pinned\n'
 mk bad-policy2     $'model-policy: eval-driven\n'
+mk claude          $'runtime: codex\n'
 
 run_bash() { YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$REPO_ROOT/cli/lib" "${BASH:-bash}" "$REPO_ROOT/cli/lib/validate.sh" "$@" 2>&1; }
 run_go()   { YAKOS_IMPL=go "$GO_BINARY" validate "$@" 2>&1; }
@@ -50,8 +52,9 @@ for side in $sides; do
     want_err "$out" 'bad-fallback-bl.md: runtime-fallback: "nope" is not a known'  "$side: unknown block fallback rejected"
     want_err "$out" 'bad-policy.md: model-policy: pinned is not a model tier'      "$side: model-policy pinned rejected"
     want_err "$out" 'bad-policy2.md: model-policy: eval-driven is not a model tier' "$side: model-policy eval-driven rejected"
-    printf '%s' "$out" | grep -q '\[warn\].*warn-gemini.md: runtime: gemini is a deprecated shim' \
-        && ok "$side: gemini is a deprecation warning" || bad "$side: gemini warning missing"
+    printf '%s' "$out" | grep -q '\[warn\].*warn-gemini.md: runtime: gemini was removed; use agy' \
+        && ok "$side: gemini is a removal warning" || bad "$side: gemini warning missing"
+    want_err "$out" 'claude.md: agent id "claude" is a runtime name'             "$side: an agent named after a runtime rejected"
     if printf '%s' "$out" | grep -Eq 'good-(agy|tier)\.md: (runtime|runtime-fallback|model-policy):'; then bad "$side: valid agent flagged"; else ok "$side: valid agents clean"; fi
     printf '%s' "$out" > "$TMP/out-$side.txt"
 done

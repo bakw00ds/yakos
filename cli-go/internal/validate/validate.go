@@ -1085,6 +1085,11 @@ func checkAgentEnums(cfg Config, r *Result, w io.Writer, base string) {
 			continue
 		}
 		file := filepath.Join(agentsDir, name)
+		// An agent named after a runtime would shadow `yakos dispatch <runtime>`
+		// and the console's default pane. The dispatcher skips it (K-132).
+		if id := strings.TrimSuffix(name, ".md"); inSet(id, []string{"claude", "codex", "agy"}) {
+			r.addErr(w, fmt.Sprintf("%s: agent id %q is a runtime name and is skipped by the Go dispatcher; rename it", file, id))
+		}
 		fm, err := parseFrontmatter(file)
 		if err != nil || fm == nil {
 			continue // reported by the frontmatter pass
@@ -1092,7 +1097,7 @@ func checkAgentEnums(cfg Config, r *Result, w io.Writer, base string) {
 		checkRuntimeValue := func(key, v string) {
 			switch {
 			case v == "gemini":
-				r.addWarn(cfg, w, fmt.Sprintf("%s: %s: gemini is a deprecated shim for agy; use agy", file, key))
+				r.addWarn(cfg, w, fmt.Sprintf("%s: %s: gemini was removed; use agy", file, key))
 			case !runtimeKnown(v):
 				r.addErr(w, fmt.Sprintf("%s: %s: %q is not a known runtime (known: %s)", file, key, v, strings.Join(knownRuntimes, ", ")))
 			}

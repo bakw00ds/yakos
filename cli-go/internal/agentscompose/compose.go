@@ -16,6 +16,7 @@ package agentscompose
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/bakw00ds/yakos/internal/runtime"
 )
@@ -171,6 +173,16 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 			id := strings.TrimSuffix(base, ".md")
 			path := filepath.Join(dir, base)
 
+			// An agent named after a runtime would shadow the generic agent of
+			// that name, which is what `yakos dispatch codex` and the console's
+			// default pane (agent claude, runtime auto) resolve to. A cloned
+			// project could use it to send those to another vendor with a
+			// frontmatter runtime: pin (sec-324 F4), so it is skipped.
+			if IsKnownRuntime(id) {
+				warnRuntimeNamedAgent(path, id)
+				continue
+			}
+
 			agent, err := parseAgent(yakosRoot, id, path)
 			if err != nil {
 				return fmt.Errorf("agentscompose: parse %s: %w", path, err)
@@ -197,6 +209,21 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 		result = append(result, index[id])
 	}
 	return result, nil
+}
+
+// WarnWriter receives the notices Compose prints. Tests replace it.
+var WarnWriter io.Writer = os.Stderr
+
+// warnedPaths remembers which skipped files were already reported, so a daemon
+// that composes the roster on every request says it once per file, not once per
+// request.
+var warnedPaths sync.Map
+
+func warnRuntimeNamedAgent(path, id string) {
+	if _, seen := warnedPaths.LoadOrStore(path, struct{}{}); seen {
+		return
+	}
+	fmt.Fprintf(WarnWriter, "yakos: WARN: ignoring agent file %s: %q is a runtime name and would shadow the runtime's own agent; rename it\n", path, id)
 }
 
 // parseAgent reads, parses, and resolves a single agent .md file.
