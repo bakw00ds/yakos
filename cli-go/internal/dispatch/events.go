@@ -117,20 +117,16 @@ type Result struct {
 	// creation, and the dollar cost for the one harness that reports it). Nil when
 	// the run reported none. Counts follow runtime.Usage's convention across every
 	// harness. It is what gets logged and summed, so adding runs up counts every
-	// token once. For agy, whose result frame totals the whole conversation, it
-	// is the frame's total when neither signal says the run resumed a conversation
-	// (the harness was handed no native session id, as for MCP and every chat
-	// turn, and the stream's own turn count says a first turn), and the sum of the
-	// run's DONE steps when either does. Its DurationMs is zero for an agy turn
-	// after the first, whose frame reports the session's clock; DurationS is the
-	// measured duration.
+	// token once. For agy, whose result frame totals the whole conversation, the
+	// parser decides from the frame's own turn count: the frame's counts on a
+	// first turn, the sum of the run's DONE steps after it, with DurationMs zero
+	// (see runtime.ParseResult.Usage). DurationS is the measured duration.
 	Usage *cost.Usage
 
 	// CumulativeUsage is the running total of the whole native conversation up to
 	// and including this run, for the harness that reports one (agy), else nil.
-	// It is for reference and cross-checking. Do not add it up across runs: for a
-	// resumed run it counts the earlier turns again. Not written to the dispatch
-	// records.
+	// It is for reference and cross-checking. Do not add it up across runs: it
+	// counts the earlier turns again. Not written to the dispatch records.
 	CumulativeUsage *cost.Usage
 
 	ModelChosenBy string

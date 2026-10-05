@@ -67,18 +67,16 @@ Every parser reports tokens in the Anthropic convention (see `runtime.Usage`):
 - agy's `result` usage is **cumulative over the conversation**, not per turn
   (`num_turns` counts the conversation's turns). In the recorded
   `conversation-turn1/turn2` pair, turn 2 reports 25950 input and 719 output:
-  turn 1's 12859 and 26 plus its own 13091 and 693. `ParseResult.Usage` is the
-  sum of the usage carried by the DONE steps in the stream (13091 and 693 for
-  turn 2, equal to the result frame on every first-turn recording),
-  `ParseResult.CumulativeUsage` is the frame's total, and `ParseResult.NumTurns`
-  is its `num_turns`. The dispatch layer reports the total only when neither
-  signal says the run resumed a conversation: the harness was not handed a
-  native session id, and `num_turns` is not above 1. Either signal alone makes
-  it the step sum, so adding runs up needs no subtraction, and the single
-  envelope, which has no steps, then reports no tokens. The frame's
-  `duration_seconds` is the session's clock (turn 2 reports 35.9 s for a step of
-  about 4 s), so `Usage.DurationMs` is left zero after the first turn, by the
-  same turn-count helper.
+  turn 1's 12859 and 26 plus its own 13091 and 693. The frame's own `num_turns`
+  decides what `ParseResult.Usage` is. On a first turn (`num_turns` of 1 or
+  less) it is the frame's counts, equal to the sum of the DONE steps on every
+  first-turn recording here, and the only figure the single envelope has, since
+  it carries no steps. After the first turn it is the sum of the DONE steps'
+  usage (13091 and 693 for turn 2), so adding runs up needs no subtraction, and
+  an envelope reports no tokens. The frame's total is always exposed as
+  `ParseResult.CumulativeUsage`. The rule reads the stream, not the request. The
+  frame's `duration_seconds` is the session's clock (turn 2 reports 35.9 s for a
+  step of about 4 s), so `Usage.DurationMs` is left zero after the first turn.
 
 ## Claude text
 
