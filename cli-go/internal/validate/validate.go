@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/decision"
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
@@ -222,8 +223,14 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 		}
 	}
 
-	// Agent frontmatter enums: runtime / runtime-fallback / model-policy.
-	checkAgentEnums(cfg, r, w, base)
+	// Agent frontmatter enums: runtime / runtime-fallback / model-policy, and the
+	// agent files the Go dispatcher would skip. A symlink may resolve into the
+	// framework's lib/, and into the project directory in project mode.
+	roots := agentscompose.AgentFileRoots(cfg.YakosRoot, "")
+	if label == "project" {
+		roots = agentscompose.AgentFileRoots(cfg.YakosRoot, filepath.Dir(base))
+	}
+	checkAgentEnums(cfg, r, w, base, roots)
 
 	// Line budget warnings
 	checkLineBudgets(cfg, r, w, base)
@@ -248,7 +255,7 @@ func collectMDFiles(base string) []string {
 				return nil
 			}
 			name := de.Name()
-			if strings.HasSuffix(name, ".md") && name != "README.md" {
+			if strings.HasSuffix(name, ".md") && name != "README.md" && readableAgentFile(p) {
 				files = append(files, p)
 			}
 			return nil
@@ -333,7 +340,7 @@ func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
 		if err != nil || de.IsDir() {
 			return nil
 		}
-		if !strings.HasSuffix(de.Name(), ".md") || de.Name() == "README.md" {
+		if !strings.HasSuffix(de.Name(), ".md") || de.Name() == "README.md" || !readableAgentFile(p) {
 			return nil
 		}
 		n := countLines(p)
@@ -376,6 +383,9 @@ func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
 }
 
 func countLines(path string) int {
+	if !readableAgentFile(path) {
+		return 0
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0
@@ -403,7 +413,7 @@ func checkPlaybookReferences(cfg Config, r *Result, w io.Writer, base string) {
 			if err != nil || de.IsDir() {
 				return nil
 			}
-			if !strings.HasSuffix(de.Name(), ".md") {
+			if !strings.HasSuffix(de.Name(), ".md") || !readableAgentFile(p) {
 				return nil
 			}
 			data, readErr := os.ReadFile(p)
@@ -781,7 +791,7 @@ func checkAgentMDSections(cfg Config, r *Result, w io.Writer) {
 			return nil
 		}
 		// Skip lead-template until Batch 3 ships content.
-		if name == "lead-template.md" {
+		if name == "lead-template.md" || !readableAgentFile(p) {
 			return nil
 		}
 		data, readErr := os.ReadFile(p)
@@ -993,7 +1003,7 @@ func checkDecisionGuards(r *Result, w io.Writer, base string) {
 		if err != nil || de.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(de.Name(), ".md") && de.Name() != "README.md" {
+		if strings.HasSuffix(de.Name(), ".md") && de.Name() != "README.md" && readableAgentFile(p) {
 			agentFiles = append(agentFiles, p)
 		}
 		return nil
@@ -1068,7 +1078,7 @@ func runtimeKnown(id string) bool {
 // runtime silently fell through to the resolver default, and a non-tier
 // model-policy made `yakos dispatch` die with "invalid model tier".
 // Mirrors check_agent_enums in cli/lib/validate.sh.
-func checkAgentEnums(cfg Config, r *Result, w io.Writer, base string) {
+func checkAgentEnums(cfg Config, r *Result, w io.Writer, base string, roots []string) {
 	agentsDir := filepath.Join(base, "agents")
 	entries, err := os.ReadDir(agentsDir)
 	if err != nil {
@@ -1089,6 +1099,12 @@ func checkAgentEnums(cfg Config, r *Result, w io.Writer, base string) {
 		// and the console's default pane. The dispatcher skips it (K-132).
 		if id := strings.TrimSuffix(name, ".md"); inSet(id, []string{"claude", "codex", "agy"}) {
 			r.addErr(w, fmt.Sprintf("%s: agent id %q is a runtime name and is skipped by the Go dispatcher; rename it", file, id))
+		}
+		// A file the dispatcher would skip is an error, and nothing else is read
+		// from it: its frontmatter says nothing about what runs.
+		if msg := agentFileFinding(file, roots); msg != "" {
+			r.addErr(w, fmt.Sprintf("%s: %s", file, msg))
+			continue
 		}
 		fm, err := parseFrontmatter(file)
 		if err != nil || fm == nil {

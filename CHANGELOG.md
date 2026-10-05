@@ -457,6 +457,18 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   project directory, so one bad file no longer stops the other agents. A
   framework file that cannot be read is still an error.
 
+- **`yakos validate` rejects the agent files the Go dispatcher skips (K-132
+  follow-up, sec-324).** A skipped project file that overrides a framework agent
+  leaves the framework's version in place with only a warning on stderr, so CI
+  could not see it. The bash and the Go validator now both report, with the same
+  text, an agent file with a line of 1 MiB or more, a file over 4 MiB, an entry
+  that is not a regular file, and a symlink that does not end at a regular file
+  inside the framework's `lib/` or the project directory. The bash validator also
+  checks the `runtime` and `model-policy` of an agent reached through a symlink
+  it accepts, as the Go one always did. The Go validator no longer reads a symlink
+  to a FIFO or a device in any pass over agent files, where it would have blocked
+  or read without end.
+
 - **codex dispatch is sandboxed by default; agy gets `--sandbox` but is not
   contained (K-133, K-158).** The Go dispatcher (console, MCP, Flows, JSON-RPC,
   `YAKOS_IMPL=go yakos dispatch`) ran both harnesses with approvals and sandbox

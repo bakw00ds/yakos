@@ -195,8 +195,14 @@ validate_tree() {
         fi
     fi
 
-    # Agent frontmatter enums: runtime / runtime-fallback / model-policy.
-    check_agent_enums "$base"
+    # Agent frontmatter enums: runtime / runtime-fallback / model-policy, and the
+    # agent files the Go dispatcher would skip. A symlink may resolve into the
+    # framework's lib/, and into the project directory in project mode.
+    local project_dir=""
+    if [ "$label" = "project" ]; then
+        project_dir="$(dirname -- "$base")"
+    fi
+    check_agent_enums "$base" "$project_dir"
 
     # Line-budget WARNs (per Phase 1.5 §10 + STYLE.md §7)
     check_line_budgets "$base"
@@ -256,8 +262,73 @@ _validate_fm_values() {
     '
 }
 
+# _validate_real_dir <path>
+#   The physical directory that holds the file <path> finally names, following a
+#   chain of symlinks (a relative link is read from the physical directory of the
+#   link, as the kernel does). Fails on a loop or a directory that is missing.
+_validate_real_dir() {
+    local p="$1" n=0 d l
+    while [ -L "$p" ]; do
+        n=$((n + 1))
+        if [ "$n" -gt 40 ]; then return 1; fi
+        d="$(cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P)" || return 1
+        l="$(readlink -- "$p")" || return 1
+        case "$l" in
+            /*) p="$l" ;;
+            *) p="$d/$l" ;;
+        esac
+    done
+    (cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P)
+}
+
+# _validate_agent_file_problem <file> <lib-root> <project-root or empty>
+#   Prints why the Go dispatcher would skip the agent file, or nothing when it
+#   would read it. Go twin: agentFileFinding in
+#   cli-go/internal/validate/agentfiles.go, which calls agentscompose; the rules
+#   are InspectAgentFile's and LongLine's and the text is byte-identical. A line
+#   is refused when it is 1048576 bytes or longer, a carriage return before the
+#   newline counted, which is what awk's length() sees with LC_ALL=C.
+_validate_agent_file_problem() {
+    local f="$1" lib_root="$2" project_root="${3:-}" dir root d size n inside=0
+    if [ -L "$f" ]; then
+        if [ ! -f "$f" ] || ! dir="$(_validate_real_dir "$f")"; then
+            echo "symlink does not resolve to a regular file; the Go dispatcher skips it"
+            return 0
+        fi
+        # Inside a root when an ancestor directory of the target IS the root
+        # (same device and inode), so a differently spelled path still matches.
+        for root in "$lib_root" "$project_root"; do
+            if [ -z "$root" ] || [ ! -d "$root" ]; then continue; fi
+            d="$dir"
+            while :; do
+                if [ "$d" -ef "$root" ]; then inside=1; break; fi
+                if [ "$d" = "/" ] || [ "$d" = "." ]; then break; fi
+                d="$(dirname -- "$d")"
+            done
+            if [ "$inside" = 1 ]; then break; fi
+        done
+        if [ "$inside" != 1 ]; then
+            echo "symlink resolves outside the framework lib/ and the project directory; the Go dispatcher skips it"
+            return 0
+        fi
+    elif [ ! -f "$f" ]; then
+        echo "not a regular file; the Go dispatcher skips it"
+        return 0
+    fi
+    size="$(wc -c < "$f" 2>/dev/null | tr -d ' ')" || size=0
+    if [ "${size:-0}" -gt 4194304 ]; then
+        echo "file is larger than 4194304 bytes; the Go dispatcher skips it"
+        return 0
+    fi
+    n="$(LC_ALL=C awk 'length($0) >= 1048576 { print NR; exit }' "$f" 2>/dev/null)" || n=""
+    if [ -n "$n" ]; then
+        echo "line $n is longer than 1048576 bytes; the Go dispatcher skips it; split the line"
+    fi
+    return 0
+}
+
 check_agent_enums() {
-    local base="$1" agent_file name fm v
+    local base="$1" project_dir="${2:-}" agent_file name fm v problem
     [ -d "$base/agents" ] || return 0
     while IFS= read -r agent_file; do
         [ -n "$agent_file" ] || continue
@@ -268,6 +339,13 @@ check_agent_enums() {
         case "${name%.md}" in
             claude|codex|agy) err "$agent_file: agent id \"${name%.md}\" is a runtime name and is skipped by the Go dispatcher; rename it" ;;
         esac
+        # A file the dispatcher would skip is an error, and nothing else is read
+        # from it: its frontmatter says nothing about what runs.
+        problem="$(_validate_agent_file_problem "$agent_file" "$YAKOS_ROOT/lib" "$project_dir")"
+        if [ -n "$problem" ]; then
+            err "$agent_file: $problem"
+            continue
+        fi
         fm="$(awk '
             NR==1 && /^---[[:space:]]*$/ { in_fm=1; next }
             in_fm==1 && /^---[[:space:]]*$/ { exit }
@@ -290,7 +368,7 @@ check_agent_enums() {
                 *) err "$agent_file: model-policy: $v is not a model tier (want one of: ${_VALIDATE_MODEL_TIERS// /, }); it is the tier \`yakos model-routing promote\` wrote, not a policy name" ;;
             esac
         done < <(_validate_fm_values "$fm" "model-policy")
-    done < <(find "$base/agents" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort)
+    done < <(find "$base/agents" -maxdepth 1 ! -type d -name '*.md' 2>/dev/null | sort)
 }
 
 check_line_budgets() {

@@ -7,6 +7,10 @@
 #   runtime / runtime-fallback  must be a known runtime (gemini = removed, warn)
 #   agent id                    must not be a runtime name (claude, codex, agy)
 #   model-policy                must be a model tier (haiku|sonnet|opus|fable)
+#   agent file                  must be one the Go dispatcher reads: no line of 1 MiB or
+#                               more, at most 4 MiB, and a symlink must resolve to a
+#                               regular file inside the framework lib/ or the project
+#                               (sec-324; the second fixture project below)
 #
 # Asserts on both implementations (Go half only when bin/yakos exists), that
 # their findings are byte-identical, and that the shipped framework agents pass
@@ -60,6 +64,68 @@ for side in $sides; do
 done
 if [ "$sides" = "bash go" ]; then
     if diff "$TMP/out-bash.txt" "$TMP/out-go.txt" >/dev/null; then ok "bash and Go findings identical"; else bad "bash/go findings differ:"; diff "$TMP/out-bash.txt" "$TMP/out-go.txt"; fi
+fi
+
+# ---- agent files the Go dispatcher skips (sec-324) ---------------------------
+# Compose leaves out a file with a line of 1048576 bytes or more (a carriage return
+# before the newline counts), a file over 4194304 bytes, anything that is not a
+# regular file, and a symlink that does not end at a regular file inside the
+# framework lib/ or the project. validate reports each as an error, and both twins
+# print the same text. The bash twin measures lines with awk and cannot call the Go
+# code, so the edges of the line bound are in the fixture: a line of the bound is
+# refused, one byte less is not, with LF and CRLF and as the last line of a file.
+Q="$TMP/proj2"; A="$Q/.claude/agents"; mkdir -p "$A" "$Q/shared" "$TMP/outside"
+head5()    { printf -- '---\nid: %s\nrole: specialist\n---\n# %s\n' "$1" "$1"; }
+longline() { head -c "$1" /dev/zero | tr '\0' 'a'; }
+{ head5 good;       printf '%s\n' "$filler"; } > "$A/good.md"
+{ head5 under;      longline 1048575; printf '\n';   printf '%s\n' "$filler"; } > "$A/under.md"
+{ head5 bound;      longline 1048576; printf '\n';   printf '%s\n' "$filler"; } > "$A/bound.md"
+{ head5 crlf-under; longline 1048574; printf '\r\n'; printf '%s\n' "$filler"; } > "$A/crlf-under.md"
+{ head5 crlf;       longline 1048575; printf '\r\n'; printf '%s\n' "$filler"; } > "$A/crlf.md"
+{ head5 tail-under; printf '%s\n' "$filler"; longline 1048575; } > "$A/tail-under.md"
+{ head5 tail-bound; printf '%s\n' "$filler"; longline 1048576; } > "$A/tail-bound.md"
+# 5 MiB in lines each one byte under the bound, so only the size cap can refuse it.
+{ head5 big; printf '%s\n' "$filler"; for _i in 1 2 3 4 5; do longline 1048575; printf '\n'; done; } > "$A/big.md"
+{ head5 shared; printf '%s\n' "$filler"; } > "$Q/shared/shared.md"
+{ head5 outside; printf '%s\n' "$filler"; } > "$TMP/outside/outside.md"
+links=1
+ln -s ../../shared/shared.md "$A/inproject.md"            2>/dev/null || links=0   # inside the project: accepted
+ln -s "$REPO_ROOT/lib/agents/architect.md" "$A/inlib.md" 2>/dev/null || links=0    # the installed layout: accepted
+ln -s ../../nowhere.md "$A/ghost.md"                      2>/dev/null || links=0   # dangling
+ln -s "$Q/shared" "$A/dirlink.md"                         2>/dev/null || links=0   # a directory
+ln -s "$TMP/outside/outside.md" "$A/leak.md"              2>/dev/null || links=0   # outside both roots
+if mkfifo "$Q/pipe" 2>/dev/null; then ln -s "$Q/pipe" "$A/pipelink.md" 2>/dev/null || links=0; else links=0; fi
+
+norm2() { sed "s|$Q|<Q>|g" | grep -E '\[err\]|\[warn\]|Summary' | sort; }
+run_bash2() { YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$REPO_ROOT/cli/lib" "${BASH:-bash}" "$REPO_ROOT/cli/lib/validate.sh" "$@" 2>&1; }
+run_go2()   { YAKOS_ROOT="$REPO_ROOT" YAKOS_IMPL=go "$GO_BINARY" validate "$@" 2>&1; }
+SKIP='the Go dispatcher skips it'
+for side in $sides; do
+    out="$(run_${side}2 "$Q" | norm2)"
+    want_err "$out" "agents/bound.md: line 6 is longer than 1048576 bytes; $SKIP; split the line"       "$side: a line of the bound is rejected"
+    want_err "$out" "agents/crlf.md: line 6 is longer than 1048576 bytes; $SKIP; split the line"        "$side: a CRLF line of the bound is rejected"
+    want_err "$out" "agents/tail-bound.md: line 96 is longer than 1048576 bytes; $SKIP; split the line" "$side: a last line of the bound is rejected"
+    want_err "$out" "agents/big.md: file is larger than 4194304 bytes; $SKIP"                           "$side: a file over the size cap is rejected"
+    if [ "$links" = 1 ]; then
+        want_err "$out" "agents/ghost.md: symlink does not resolve to a regular file; $SKIP"    "$side: a dangling symlink is rejected"
+        want_err "$out" "agents/dirlink.md: symlink does not resolve to a regular file; $SKIP"  "$side: a symlink to a directory is rejected"
+        want_err "$out" "agents/pipelink.md: symlink does not resolve to a regular file; $SKIP" "$side: a symlink to a FIFO is rejected"
+        want_err "$out" "agents/leak.md: symlink resolves outside the framework lib/ and the project directory; $SKIP" "$side: a symlink outside the roots is rejected"
+        want_n=8
+    else
+        want_n=4   # no symlinks or FIFOs here (the file system refused them)
+    fi
+    if printf '%s' "$out" | grep -Eq "agents/(good|under|crlf-under|tail-under|inproject|inlib)\.md"; then
+        bad "$side: an agent file the dispatcher reads was flagged"; printf '%s\n' "$out" | grep -E 'agents/(good|under|crlf-under|tail-under|inproject|inlib)\.md' | head -3
+    else
+        ok "$side: lines under the bound, links inside the project and the framework lib, and a good file are clean"
+    fi
+    printf '%s' "$out" | grep -q "Summary: $want_n error(s), 0 warning(s)" && ok "$side: exactly $want_n errors for the agent-file fixture" \
+        || bad "$side: wrong error count for the agent-file fixture: $(printf '%s' "$out" | grep Summary)"
+    printf '%s' "$out" > "$TMP/out2-$side.txt"
+done
+if [ "$sides" = "bash go" ]; then
+    if diff "$TMP/out2-bash.txt" "$TMP/out2-go.txt" >/dev/null; then ok "bash and Go agent-file findings identical"; else bad "bash/go agent-file findings differ:"; diff "$TMP/out2-bash.txt" "$TMP/out2-go.txt"; fi
 fi
 
 # The shipped framework passes strict on both sides.

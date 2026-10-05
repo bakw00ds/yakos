@@ -23,6 +23,11 @@ import (
 //   - Within the next 200 lines there must be a line that is exactly "---"
 //   - The body between the fences must be valid YAML
 func parseFrontmatter(path string) (map[string]any, error) {
+	if !readableAgentFile(path) {
+		// Not read at all: a FIFO would block here for good, and a device or a huge
+		// file would never end. checkAgentEnums reports such an agent file.
+		return nil, fmt.Errorf("read error: not a regular file within the size cap")
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read error: %w", err)

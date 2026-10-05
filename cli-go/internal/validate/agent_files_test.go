@@ -1,0 +1,191 @@
+package validate
+
+// agent_files_test.go — `yakos validate` rejects the agent files the Go
+// dispatcher would skip (sec-324): a line over the cap, a symlink that does not
+// resolve to a regular file or resolves outside the framework's lib/ and the
+// project directory, a file over the size cap. Without it a skipped override
+// silently falls back to the framework's agent, and nothing tells the operator.
+//
+// The bash validator prints the same text; tests/run-agent-enums-test.sh runs
+// both on the same fixtures and compares them byte for byte.
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/bakw00ds/yakos/internal/agentscompose"
+)
+
+// agentBody is a valid agent file that stays inside the line budget.
+func agentBody(id string) string {
+	return "---\nid: " + id + "\nrole: specialist\n---\n\n# " + id + "\n" + strings.Repeat("filler\n", 90)
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create symlinks here: %v", err)
+	}
+}
+
+// agentFilesProject is a project with one good agent. root is a framework root
+// whose lib/agents holds one good agent too.
+func agentFilesProject(t *testing.T) (root, proj, agents string) {
+	t.Helper()
+	root, proj = t.TempDir(), t.TempDir()
+	agents = filepath.Join(proj, ".claude", "agents")
+	writeFile(t, filepath.Join(agents, "good.md"), agentBody("good"))
+	writeFile(t, filepath.Join(root, "lib", "agents", "framework.md"), agentBody("framework"))
+	return root, proj, agents
+}
+
+func validateProject(t *testing.T, root, proj string) (out string, errs []string) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir()) // no plugins
+	var buf bytes.Buffer
+	res := RunProject(Config{YakosRoot: root, Writer: &buf, ErrWriter: &buf}, proj)
+	for _, f := range res.Findings {
+		if f.Level == LevelErr {
+			errs = append(errs, f.Message)
+		}
+	}
+	return buf.String(), errs
+}
+
+// wantOneError requires exactly one error, which is the given text for file, and
+// no warning: the file is not also reported as having bad frontmatter, or as
+// being a file of 0 lines, or anything else. The bash twin prints neither.
+func wantOneError(t *testing.T, out string, errs []string, file, text string) {
+	t.Helper()
+	if len(errs) != 1 || errs[0] != file+": "+text {
+		t.Fatalf("errors = %q\nwant exactly one: %q\nfull output:\n%s", errs, file+": "+text, out)
+	}
+	if strings.Contains(out, "[warn]") {
+		t.Fatalf("the rejected file also produced a warning:\n%s", out)
+	}
+}
+
+const (
+	msgUnresolved = "symlink does not resolve to a regular file; the Go dispatcher skips it"
+	msgOutside    = "symlink resolves outside the framework lib/ and the project directory; the Go dispatcher skips it"
+)
+
+func TestAgentFiles_ALongLineIsRejected(t *testing.T) {
+	root, proj, agents := agentFilesProject(t)
+	bad := filepath.Join(agents, "wide.md")
+	writeFile(t, bad, "---\nid: wide\nrole: specialist\n---\n\n"+strings.Repeat("y", 2<<20)+"\n"+strings.Repeat("filler\n", 90))
+	out, errs := validateProject(t, root, proj)
+	wantOneError(t, out, errs, bad, "line 6 is longer than 1048576 bytes; the Go dispatcher skips it; split the line")
+}
+
+// The edge is Compose's: a line of the bound is refused, one byte less is not.
+func TestAgentFiles_TheLineBoundIsComposes(t *testing.T) {
+	root, proj, agents := agentFilesProject(t)
+	head := "---\nid: edge\nrole: specialist\n---\n\n"
+	filler := strings.Repeat("filler\n", 90)
+	writeFile(t, filepath.Join(agents, "under.md"), head+strings.Repeat("a", agentscompose.MaxLineBytes-1)+"\n"+filler)
+	atBound := filepath.Join(agents, "bound.md")
+	writeFile(t, atBound, head+strings.Repeat("a", agentscompose.MaxLineBytes)+"\n"+filler)
+	crlf := filepath.Join(agents, "crlf.md")
+	writeFile(t, crlf, head+strings.Repeat("a", agentscompose.MaxLineBytes-1)+"\r\n"+filler)
+	out, errs := validateProject(t, root, proj)
+	if len(errs) != 2 ||
+		errs[0] != atBound+": line 6 is longer than 1048576 bytes; the Go dispatcher skips it; split the line" ||
+		errs[1] != crlf+": line 6 is longer than 1048576 bytes; the Go dispatcher skips it; split the line" {
+		t.Fatalf("errors = %q\n%s", errs, out)
+	}
+}
+
+func TestAgentFiles_AFileOverTheSizeCapIsRejected(t *testing.T) {
+	root, proj, agents := agentFilesProject(t)
+	big := filepath.Join(agents, "big.md")
+	writeFile(t, big, agentBody("big")+strings.Repeat("x", agentscompose.MaxAgentFileBytes)+"\n")
+	out, errs := validateProject(t, root, proj)
+	wantOneError(t, out, errs, big, "file is larger than 4194304 bytes; the Go dispatcher skips it")
+}
+
+func TestAgentFiles_ADanglingSymlinkIsRejected(t *testing.T) {
+	root, proj, agents := agentFilesProject(t)
+	link := filepath.Join(agents, "ghost.md")
+	symlinkOrSkip(t, filepath.Join(proj, "does-not-exist.md"), link)
+	out, errs := validateProject(t, root, proj)
+	wantOneError(t, out, errs, link, msgUnresolved)
+}
+
+func TestAgentFiles_ASymlinkToADirectoryIsRejected(t *testing.T) {
+	root, proj, agents := agentFilesProject(t)
+	dir := filepath.Join(proj, "somedir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(agents, "dir.md")
+	symlinkOrSkip(t, dir, link)
+	out, errs := validateProject(t, root, proj)
+	wantOneError(t, out, errs, link, msgUnresolved)
+}
+
+func TestAgentFiles_ASymlinkOutsideTheRootsIsRejected(t *testing.T) {
+	root, proj, agents := agentFilesProject(t)
+	outside := filepath.Join(t.TempDir(), "outside.md")
+	writeFile(t, outside, agentBody("outside")) // a valid agent: only where it lives is wrong
+	link := filepath.Join(agents, "leak.md")
+	symlinkOrSkip(t, outside, link)
+	out, errs := validateProject(t, root, proj)
+	wantOneError(t, out, errs, link, msgOutside)
+}
+
+// Links the dispatcher follows are not findings: into the project directory, and
+// into the framework's lib/ (the layout an install makes).
+func TestAgentFiles_SymlinksInsideTheRootsAreAccepted(t *testing.T) {
+	root, proj, agents := agentFilesProject(t)
+	writeFile(t, filepath.Join(proj, "shared", "shared.md"), agentBody("shared"))
+	symlinkOrSkip(t, filepath.Join(proj, "shared", "shared.md"), filepath.Join(agents, "abs.md"))
+	symlinkOrSkip(t, filepath.Join("..", "..", "shared", "shared.md"), filepath.Join(agents, "rel.md"))
+	symlinkOrSkip(t, filepath.Join(root, "lib", "agents", "framework.md"), filepath.Join(agents, "framework.md"))
+	out, errs := validateProject(t, root, proj)
+	if len(errs) != 0 || strings.Contains(out, "[warn]") {
+		t.Fatalf("errors = %q\n%s", errs, out)
+	}
+}
+
+// In framework mode only lib/ is a root: the project directory is not.
+func TestAgentFiles_FrameworkModeAcceptsOnlyLibAsARoot(t *testing.T) {
+	root := t.TempDir()
+	agents := filepath.Join(root, "lib", "agents")
+	writeFile(t, filepath.Join(agents, "real.md"), agentBody("real"))
+	writeFile(t, filepath.Join(root, "lib", "agents-extra", "extra.md"), agentBody("extra"))
+	symlinkOrSkip(t, filepath.Join(root, "lib", "agents-extra", "extra.md"), filepath.Join(agents, "inlib.md"))
+	elsewhere := filepath.Join(root, "docs", "notes.md")
+	writeFile(t, elsewhere, agentBody("notes"))
+	notLib := filepath.Join(agents, "notlib.md")
+	symlinkOrSkip(t, elsewhere, notLib)
+
+	t.Setenv("HOME", t.TempDir())
+	var buf bytes.Buffer
+	res := RunFramework(Config{YakosRoot: root, Writer: &buf, ErrWriter: &buf})
+	var got []string
+	for _, f := range res.Findings {
+		if f.Level == LevelErr && strings.Contains(f.Message, "symlink") {
+			got = append(got, f.Message)
+		}
+	}
+	if len(got) != 1 || got[0] != notLib+": "+msgOutside {
+		t.Errorf("symlink errors = %q, want only %q", got, notLib+": "+msgOutside)
+	}
+}
