@@ -9,15 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **codex dispatch is sandboxed by default, and agy is started with `--sandbox`
-  (K-133).** The Go dispatcher (console, MCP, Flows, JSON-RPC, `YAKOS_IMPL=go
-  yakos dispatch`) ran both harnesses with approvals and sandbox switched off,
-  so any task text or file the model read could drive arbitrary commands as the
-  operator. codex now runs `exec --sandbox workspace-write -c
-  approval_policy="never"` (a policy that cannot prompt; `exec resume`, which has
-  no `--sandbox`, takes `-c sandbox_mode="workspace-write"`). agy now runs with
-  `--sandbox` requested; containment under dedicated review (K-158), so do not
-  rely on it as a boundary yet. The old bypass returns only when
+- **codex dispatch is sandboxed by default; agy gets `--sandbox` but is not
+  contained (K-133, K-158).** The Go dispatcher (console, MCP, Flows, JSON-RPC,
+  `YAKOS_IMPL=go yakos dispatch`) ran both harnesses with approvals and sandbox
+  switched off, so any task text or file the model read could drive arbitrary
+  commands as the operator. codex now runs `exec --sandbox workspace-write -c
+  approval_policy="never"`, an OS sandbox with the network off by default whose
+  policy the model cannot change (`exec resume`, which has no `--sandbox`, takes
+  `-c sandbox_mode="workspace-write"`). agy still gets `--sandbox`, because it
+  blocks the default write path.
+  Under `--sandbox --dangerously-skip-permissions`, agy's macOS Seatbelt sandbox
+  blocks writes outside the workspace by default but leaves file reads and
+  outbound network unrestricted, and the model can escalate out of the sandbox
+  at will via `run_command(BypassSandbox=true)`, which
+  `--dangerously-skip-permissions` auto-approves; agy dispatch is therefore not
+  a containment boundary for reads, network or writes and must only receive
+  non-sensitive work or run inside an external OS sandbox (K-159).
+  The old bypass returns only when
   `~/.yakos-state/router-policy.yml` lists the runtime in
   `allow_unsandboxed_runtimes`. That file is read from `$HOME/.yakos-state` only
   (not `YAKOS_DISPATCH_LOG`, K-129), must be a regular file you own that is not
@@ -50,8 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dispatch default Claude tier is not passed as a codex model, and the codex
   semantic aliases are now empty (see Fixed).
 - **agy adapter updated for agy 1.2.x (K-133).** Both paths pass
-  `--output-format stream-json`, `--model` when set, `--sandbox` (requested; see
-  Security), and run in the project directory. `--effort` is passed only when the
+  `--output-format stream-json`, `--model` when set, `--sandbox` (not a
+  containment boundary; see Security), and run in the project directory. `--effort` is passed only when the
   model id carries no effort suffix, because agy rejects the combination
   (`--model gemini-3.8-flash-low --effort high` exits 1, checked live), and agy
   takes only `low`, `medium` and `high`: `xhigh` and `max`, which the console and

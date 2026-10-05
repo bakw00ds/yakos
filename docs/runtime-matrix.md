@@ -6,9 +6,9 @@ each adapter supports, what gets soft-degraded, and the operator-facing
 trade-offs.
 
 Last updated: 2026-10-05 (K-133/K-134: Go adapters for codex 0.154.0 and
-agy 1.2.x, codex sandboxed by default and agy started with `--sandbox`; the
-capability matrix drops gemini, whose shim was removed on 2026-09-01 in favor of
-agy).
+agy 1.2.x; codex runs in its OS sandbox and agy gets `--sandbox`, which K-158
+measured not to be containment; the capability matrix drops gemini, whose shim
+was removed on 2026-09-01 in favor of agy).
 
 ## Capability matrix
 
@@ -16,7 +16,7 @@ agy).
 |---|---|---|---|
 | Adapter shipping | v0.3 (always) | v0.4.0 | with the gemini shim's replacement (see CHANGELOG) |
 | `inline-agents` (CLI-flag JSON injection) | ✅ `--agents` | ❌ file-based only | ❌ file-based only |
-| `path-allowlist-hard` | ✅ `--add-dir` | ✅ the sandbox workspace is the working directory | ✅ `--add-dir` |
+| `path-allowlist-hard` | ✅ `--add-dir` | ✅ the sandbox workspace is the working directory | ⚠ `--add-dir` sets the workspace, but reads and network are not restricted (K-158) |
 | `hooks` | ✅ 7 events | ⚠ manual install, 2 of 24 hooks ported | ⚠ manual install, 2 of 24 hooks ported |
 | `mcp-flag` (CLI flag) | ✅ `--mcp-config` | ❌ via `config.toml` | ❌ via `.agents/mcp_config.json` |
 | `system-prompt-flag` | ✅ `--append-system-prompt` | ❌ no flag; `-c developer_instructions="..."` works (verified) | ❌ no flag; persona prepended to the prompt |
@@ -26,7 +26,7 @@ agy).
 | Non-interactive print mode | ✅ `claude -p` | ✅ `codex exec` | ✅ `agy -p` |
 | Machine-readable stream | ✅ `--output-format stream-json` | ✅ `exec --json` (JSONL) | ✅ `--output-format stream-json` (NDJSON, `event` key; recorded) |
 | Headless resume | ✅ `--resume <id>` | ✅ `codex exec resume <thread_id>` | ✅ `--conversation <id>` |
-| Sandbox by default (K-133) | n/a (permission mode) | ✅ `--sandbox workspace-write` | ⚠ `--sandbox` requested; containment under dedicated review (K-158) |
+| Sandbox flag (K-133) | n/a (permission mode) | ✅ `--sandbox workspace-write`: an OS sandbox, network off by default | ⚠ `--sandbox` blocks writes outside the workspace by default only; not a containment boundary (K-158, below) |
 | Agent file yakOS writes | (none — JSON injection) | `.codex/agents/yakos-<id>.toml` | `.agents/skills/yakos-<id>/SKILL.md` |
 
 ✅ = supported. ❌ = not supported (degrade or workaround). ⚠ = partial or unverified.
@@ -35,14 +35,23 @@ agy).
 
 codex and agy used to be dispatched with approvals and sandbox switched off. The
 Go dispatcher (console, MCP, Flows, JSON-RPC, `YAKOS_IMPL=go yakos dispatch`) now
-runs codex sandboxed and starts agy with `--sandbox`, unless the operator opts
-out. For agy that is a request, not a verified boundary: containment under
-dedicated review (K-158).
+runs codex in its workspace-write sandbox and passes `--sandbox` to agy, unless
+the operator opts out. The two are not alike. codex's sandbox is an OS sandbox
+with the network off by default, set by the operator at launch, and the model
+cannot change it. agy's is not a containment boundary.
+
+**agy is not contained.** Under `--sandbox --dangerously-skip-permissions`,
+agy's macOS Seatbelt sandbox blocks writes outside the workspace by default but
+leaves file reads and outbound network unrestricted, and the model can escalate
+out of the sandbox at will via `run_command(BypassSandbox=true)`, which
+`--dangerously-skip-permissions` auto-approves; agy dispatch is therefore not a
+containment boundary for reads, network or writes and must only receive
+non-sensitive work or run inside an external OS sandbox (K-159).
 
 | | default | flags | opt-out |
 |---|---|---|---|
 | codex | sandboxed, cannot prompt | `exec --sandbox workspace-write -c approval_policy="never"`; `exec resume` takes `-c sandbox_mode="workspace-write"` (it has no `--sandbox`) | `--dangerously-bypass-approvals-and-sandbox` |
-| agy | `--sandbox` requested; containment under dedicated review (K-158) | `--sandbox --dangerously-skip-permissions` | `--dangerously-skip-permissions` only |
+| agy | `--sandbox` passed; blocks writes outside the workspace by default, not a containment boundary (K-158) | `--sandbox --dangerously-skip-permissions` | `--dangerously-skip-permissions` only |
 
 Opt-out is one file, read only from `~/.yakos-state/router-policy.yml`:
 
@@ -68,18 +77,32 @@ branches (read-only git commands work); network access is off, so `npm install`,
 Work that needs git writes or the network is what the opt-out is for; the safer
 alternative is to have the lead do the commit and push.
 
-agy is started with `--sandbox` requested; containment under dedicated review
-(K-158). What is known: headless agy has no approval surface, so
-`--dangerously-skip-permissions` stays (`init.permission_mode` is then
-`always-proceed`), and with agy 1.2.17 one `run_command` that wrote outside the
-workspace failed with "Operation not permitted" (exit 1) and created nothing.
-That is a single observation. The probe told the model not to retry, so it does
-not show whether the model would, on its own, ask to run a command outside the
-sandbox and have that auto-approved (agy's help text says
-`--dangerously-skip-permissions` auto-approves all tool permission requests), and
-no other escape was tried. Do not treat agy dispatch as contained until K-158
-reports. Whether `--mode accept-edits` without `--dangerously-skip-permissions`
-is a tighter headless setting is untested.
+What K-158 measured for agy 1.2.17 under `--sandbox --dangerously-skip-permissions`
+(2026-10-05; report `work/current/reports/k158-agy-containment-2026-10-05.md`).
+Headless agy has no approval surface, which is why `--dangerously-skip-permissions`
+stays (`init.permission_mode` is then `always-proceed`).
+
+- A write outside the workspace, made directly or from a subprocess, fails with
+  "Operation not permitted" and creates nothing.
+- Reads outside the workspace succeed, including a path that is not a temporary
+  directory (`/Users/Shared`), and an outbound fetch of `example.com` succeeds.
+  Neither needed any escalation.
+- A `run_command` the model sent with `BypassSandbox=true` wrote outside the
+  workspace with no prompt, because `--dangerously-skip-permissions` auto-approves
+  it. agy's own tool text says the standard sandbox has no network and no access
+  outside the workspace, and that the bypass needs manual approval. None of that
+  holds headless, which is either an agy 1.2.17 regression or stale documentation.
+  Re-check after any agy upgrade.
+- `--sandbox` without `--dangerously-skip-permissions` fails closed: headless agy
+  cannot prompt, so any tool that needs a permission is auto-denied and the turn
+  produces nothing. It is not a usable worker mode.
+
+Keep `--sandbox` on, because it still blocks the default write path, but count it
+as defence in depth. A scratch worktree does not help for reads or network, and
+yakOS hooks do not see agy's own tool calls. Contain agy with an external OS
+sandbox around the whole process (K-159), or send it only non-sensitive work.
+Listing agy in `allow_unsandboxed_runtimes` removes the default write block and
+changes nothing else.
 
 The bash adapters (`cli/lib/runtimes/{codex,agy}.sh`, used by `yakos dispatch`
 when the bash tree is present and `YAKOS_IMPL` is unset) still run with the
@@ -224,14 +247,19 @@ agy --add-dir <workdir> --sandbox --dangerously-skip-permissions [--model <id>] 
   spans separate processes: turn 2's `result.usage` is turn 1's result plus turn
   2's own step usage. Account one run from the DONE step usage in its own stream
   (it equals the run's own usage), not from `result.usage` of a resumed turn.
+- **Containment.** Under `--sandbox --dangerously-skip-permissions`, agy's macOS
+  Seatbelt sandbox blocks writes outside the workspace by default but leaves
+  file reads and outbound network unrestricted, and the model can escalate out
+  of the sandbox at will via `run_command(BypassSandbox=true)`, which
+  `--dangerously-skip-permissions` auto-approves; agy dispatch is therefore not
+  a containment boundary for reads, network or writes and must only receive
+  non-sensitive work or run inside an external OS sandbox (K-159). Details are
+  in Sandbox and approvals, above.
 - **Checked live with agy 1.2.17:** the `stream-json` shape
   (`tests/fixtures/runtime-streams/`), the effort conflict, `--effort xhigh|max`
   being rejected, a resumed conversation, skill discovery and the `@yakos-<id>`
-  mention in print mode (plain directory and git repository), and one write
-  outside the workspace denied under `--sandbox`. **Not verified:** whether
-  `--sandbox` contains anything else, in particular whether the model can escalate
-  out of it on its own (K-158). Treat agy dispatch as experimental, and as
-  uncontained, until that reports.
+  mention in print mode (plain directory and git repository), and, in K-158, the
+  containment probes listed above.
 - Auth: `agy` signs in once, interactively (browser OAuth into the keychain and
   `~/.gemini/`), or `ANTIGRAVITY_API_KEY` for headless use. yakOS never drives
   or caches that login.

@@ -224,7 +224,7 @@ func TestAgyDispatch_MockRuntime(t *testing.T) {
 
 	argv := readMockArgv(t, agyScript)
 	assertContains(t, argv, "--dangerously-skip-permissions", "agy skip-permissions flag missing")
-	assertContains(t, argv, "--sandbox", "agy --sandbox flag missing (sandbox by default)")
+	assertContains(t, argv, "--sandbox", "agy --sandbox flag missing")
 	assertContains(t, argv, "--output-format", "agy --output-format flag missing")
 	assertContains(t, argv, "--add-dir", "--add-dir flag missing")
 	// The task framing uses @yakos-<name> mention.

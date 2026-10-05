@@ -21,15 +21,15 @@ func buildEnvAgy(req DispatchRequest) []string {
 // agy 1.2.x accepts --model, --effort, --sandbox, --conversation and
 // --output-format text|json|stream-json. Checked live with agy 1.2.17 (see
 // docs/runtime-matrix.md and tests/fixtures/runtime-streams): the stream shape,
-// resume, the --model/--effort conflict (agyIDCarriesEffort), the sandbox
-// denying one write outside the workspace (containment itself is unverified,
-// K-158), and the skill below. A framed dispatch invokes the workspace skill
-// @yakos-<agent>, which the dispatch layer materializes to
-// <workdir>/.agents/skills/yakos-<id>/SKILL.md first
-// (agentscompose.MaterializeAgyAgent); in print mode agy lists that skill and the
-// mention makes the model read it with a view_file step and follow it. Chat has
-// no skill file: agy has no system-prompt flag, so the persona is prepended to
-// the user text, and a persona over MaxPersonaBytes is refused before argv.
+// resume, the --model/--effort conflict (agyIDCarriesEffort), and the skill
+// below; what --sandbox does and does not contain is on agyCommonArgs (K-158).
+// A framed dispatch invokes the workspace skill @yakos-<agent>, which the
+// dispatch layer materializes to <workdir>/.agents/skills/yakos-<id>/SKILL.md
+// first (agentscompose.MaterializeAgyAgent); in print mode agy lists that skill
+// and the mention makes the model read it with a view_file step and follow it.
+// Chat has no skill file: agy has no system-prompt flag, so the persona is
+// prepended to the user text, and a persona over MaxPersonaBytes is refused
+// before argv.
 //
 // ExecCmd is implemented for PR #34 stderr capture.
 type AgyAdapter struct{}
@@ -107,12 +107,21 @@ func agyIDCarriesEffort(id string) bool {
 // begins with '-' cannot be read as a flag, and nothing may follow it.
 //
 // --dangerously-skip-permissions stays: headless agy has no approval surface,
-// so without it any permission request would stall. --sandbox is requested;
-// containment under dedicated review (K-158). One write outside the workspace
-// was observed to be denied, nothing more, and with permissions auto-approved a
-// model request to run a command outside the sandbox may be approved too, so
-// nothing may rely on agy dispatch being contained. The operator can drop
-// --sandbox only through the trusted router policy (allow_unsandboxed_runtimes).
+// so without it any permission request would stall (and --sandbox alone fails
+// closed: every tool that needs a permission is auto-denied). --sandbox stays
+// too, because it still blocks the default write path, but it is defence in
+// depth and nothing may rely on it. K-158 measured it on agy 1.2.17:
+//
+// Under `--sandbox --dangerously-skip-permissions`, agy's macOS Seatbelt
+// sandbox blocks writes outside the workspace by default but leaves file reads
+// and outbound network unrestricted, and the model can escalate out of the
+// sandbox at will via `run_command(BypassSandbox=true)`, which
+// `--dangerously-skip-permissions` auto-approves; agy dispatch is therefore not
+// a containment boundary for reads, network or writes and must only receive
+// non-sensitive work or run inside an external OS sandbox (K-159).
+//
+// The operator can drop --sandbox only through the trusted router policy
+// (allow_unsandboxed_runtimes).
 func agyCommonArgs(workDir, model, effort string) []string {
 	var args []string
 	if workDir != "" {

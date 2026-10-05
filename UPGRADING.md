@@ -6,16 +6,16 @@ current release, what survives, and how to fully uninstall when needed.
 This doc is the **upgrade authority** — `yakos --help`, README, and
 CHANGELOG point here. Last updated for v0.39.
 
-## Unreleased: codex is sandboxed by default, agy runs with `--sandbox` requested (K-133)
+## Unreleased: codex runs in an OS sandbox, agy gets `--sandbox` but is not contained (K-133)
 
 The Go dispatcher (the console, MCP, Flows, JSON-RPC, and `yakos dispatch` with
 `YAKOS_IMPL=go`) now runs codex with `--sandbox workspace-write` and an approval
-policy that cannot prompt, and agy with `--sandbox` requested. Before, both ran
-with approvals and sandbox off. The bash `yakos dispatch` path, used when the
+policy that cannot prompt, and agy with `--sandbox`. Before, both ran with
+approvals and sandbox off. The bash `yakos dispatch` path, used when the
 bash tree is present and `YAKOS_IMPL` is unset, is unchanged until the Go
 dispatcher becomes the default.
 
-What you will notice with codex:
+What you will notice:
 
 - Commands the model runs can write only inside the project, `$TMPDIR` and
   `/tmp`. Other writes fail with "Operation not permitted".
@@ -25,10 +25,14 @@ What you will notice with codex:
 - The network is off, so `npm install`, `go get` and `git push` fail. To allow
   it, set `[sandbox_workspace_write]` `network_access = true` in the
   `config.toml` of the `CODEX_HOME` yakOS uses.
-- agy gets `--sandbox`, but its containment is under dedicated review (K-158):
-  one write outside the workspace was denied, nothing more was probed, and
-  headless agy keeps `--dangerously-skip-permissions` (auto-approve). Do not
-  rely on it as a boundary yet.
+- agy still gets `--sandbox`, because it blocks the default write path.
+  Under `--sandbox --dangerously-skip-permissions`, agy's macOS Seatbelt sandbox
+  blocks writes outside the workspace by default but leaves file reads and
+  outbound network unrestricted, and the model can escalate out of the sandbox
+  at will via `run_command(BypassSandbox=true)`, which
+  `--dangerously-skip-permissions` auto-approves; agy dispatch is therefore not
+  a containment boundary for reads, network or writes and must only receive
+  non-sensitive work or run inside an external OS sandbox (K-159).
 
 To opt a runtime out, create `~/.yakos-state/router-policy.yml`:
 

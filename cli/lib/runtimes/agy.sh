@@ -27,7 +27,22 @@
 # skill; flat .md files are not loaded). This bash adapter still runs plain
 # text and does not pass --model; the Go adapter does (see docs/runtime-matrix.md).
 #
-# Capability tag: path-allowlist-hard (--add-dir is real scope, not soft).
+# agy 1.2.17 containment, measured by K-158 (2026-10-05):
+#
+# Under `--sandbox --dangerously-skip-permissions`, agy's macOS Seatbelt
+# sandbox blocks writes outside the workspace by default but leaves file reads
+# and outbound network unrestricted, and the model can escalate out of the
+# sandbox at will via `run_command(BypassSandbox=true)`, which
+# `--dangerously-skip-permissions` auto-approves; agy dispatch is therefore
+# not a containment boundary for reads, network or writes and must only
+# receive non-sensitive work or run inside an external OS sandbox (K-159).
+#
+# The dispatch below passes --dangerously-skip-permissions and no --sandbox (the
+# bash dispatch path retires with K-143), so it has not even the default write
+# block.
+#
+# Capability tag: path-allowlist-hard (--add-dir sets the workspace; per K-158 it
+# does not restrict reads or network, so the tag is generous for agy).
 
 set -eu
 

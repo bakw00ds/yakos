@@ -32,9 +32,10 @@
 #  18. agy emitter: <skills>/yakos-<id>/SKILL.md layout, marker, .gitignore, cleanup;
 #      the same model, escaping and refusal rules
 #  19. Go materializers write the same files as the bash emitters under YAKOS_IMPL=go,
-#      for a probe agent and for real framework agents; codex/agy dispatch is
-#      sandboxed by default. Needs bin/yakos (`make build`); skipped when absent
-#      unless YAKOS_REQUIRE_GO_BINARY is set, which CI sets so it cannot be skipped.
+#      for a probe agent and for real framework agents; codex dispatch is
+#      sandboxed by default and agy gets --sandbox (which is not containment,
+#      K-158). Needs bin/yakos (`make build`); skipped when absent unless
+#      YAKOS_REQUIRE_GO_BINARY is set, which CI sets so it cannot be skipped.
 set -eu
 
 REPO_ROOT="$(cd "$(dirname -- "$0")/.." && pwd -P)"

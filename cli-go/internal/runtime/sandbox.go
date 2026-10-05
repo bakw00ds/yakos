@@ -10,17 +10,26 @@ import (
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
-// Sandbox-by-default for the third-party harnesses (K-133).
+// Sandbox flags for the third-party harnesses (K-133).
 //
 // codex and agy used to be dispatched with their approvals and sandbox
 // switched off, so any task text or file the model read could drive arbitrary
-// commands as the operator. codex now runs in its workspace-write sandbox and
-// agy is started with --sandbox, unless the operator explicitly allows
-// otherwise in the owner-only ~/.yakos-state/router-policy.yml
-// (allow_unsandboxed_runtimes). For agy the flag is a request, not a verified
-// boundary: containment is under dedicated review (K-158). A project .yakos.yml
-// cannot enable the bypass, and the file is read from $HOME/.yakos-state only
-// (see statepath.TrustedDir).
+// commands as the operator. codex now runs in its workspace-write sandbox, an OS
+// sandbox with the network off by default that the model cannot change, and agy
+// is passed --sandbox, unless the operator explicitly allows otherwise in the
+// owner-only ~/.yakos-state/router-policy.yml (allow_unsandboxed_runtimes). The
+// two are not alike (K-158):
+//
+// Under `--sandbox --dangerously-skip-permissions`, agy's macOS Seatbelt
+// sandbox blocks writes outside the workspace by default but leaves file reads
+// and outbound network unrestricted, and the model can escalate out of the
+// sandbox at will via `run_command(BypassSandbox=true)`, which
+// `--dangerously-skip-permissions` auto-approves; agy dispatch is therefore not
+// a containment boundary for reads, network or writes and must only receive
+// non-sensitive work or run inside an external OS sandbox (K-159).
+//
+// A project .yakos.yml cannot enable the bypass, and the file is read from
+// $HOME/.yakos-state only (see statepath.TrustedDir).
 const (
 	// codexSandboxMode is the codex sandbox policy used for every dispatch.
 	codexSandboxMode = "workspace-write"

@@ -66,10 +66,15 @@ used `--output-format stream-json --sandbox --dangerously-skip-permissions
 - **Sandbox.** With `--sandbox --dangerously-skip-permissions` (`init.permission_mode`
   is `always-proceed`) one write outside the workspace, made through the
   `run_command` tool, failed with `Operation not permitted` and exit code 1, and
-  no file was created. That is a single observation, not a containment guarantee:
-  the prompt told the model not to retry, so it does not show whether the model
-  would ask to run the command outside the sandbox on its own, and nothing else
-  was probed. Containment under dedicated review (K-158).
+  no file was created. The recording shows only that denied write; the prompt
+  told the model not to retry. K-158 (2026-10-05) probed the rest:
+  Under `--sandbox --dangerously-skip-permissions`, agy's macOS Seatbelt sandbox
+  blocks writes outside the workspace by default but leaves file reads and
+  outbound network unrestricted, and the model can escalate out of the sandbox
+  at will via `run_command(BypassSandbox=true)`, which
+  `--dangerously-skip-permissions` auto-approves; agy dispatch is therefore not
+  a containment boundary for reads, network or writes and must only receive
+  non-sensitive work or run inside an external OS sandbox (K-159).
 
 - **Skill discovery and the `@yakos-<id>` mention.** In a repository holding the
   generated `.agents/skills/yakos-probe/SKILL.md`, `agy -p "/skills"` lists it
