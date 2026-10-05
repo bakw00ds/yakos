@@ -164,9 +164,14 @@ agy --add-dir <workdir> --sandbox --dangerously-skip-permissions [--model <id>] 
 ```
 
 - agy 1.2.x loads a workspace skill from `.agents/skills/<name>/SKILL.md`, a
-  directory per skill with the skill's `name` equal to the directory name
-  (checked against the strings in the agy 1.2.17 binary and its changelog). The
-  old flat `yakos-<id>.md` layout is not discovered. Leftover flat files can be
+  directory per skill with the skill's `name` equal to the directory name.
+  Verified live with agy 1.2.17: in a git repository holding the generated
+  `yakos-probe` skill, `agy -p "/skills"` lists it (`model_invocable: true`), and
+  `@yakos-probe hello` makes the model read the file with a `view_file` step and
+  answer with the token the skill demands. So the framed `@yakos-<id> <task>` form
+  works in print mode; the skill reaches the model by that tool call, so it costs
+  one extra step. The old flat `yakos-<id>.md` layout is not discovered (from the
+  binary's strings and changelog; not tried). Leftover flat files can be
   deleted (the bash `yakos archive` cleanup removes them; the `.gitignore` entry
   `.agents/skills/yakos-*.md` from `yakos init` is harmless). The skill name carries the `yakos-` prefix so the `@yakos-<id>`
   mention resolves by directory or by name.
@@ -190,12 +195,13 @@ agy --add-dir <workdir> --sandbox --dangerously-skip-permissions [--model <id>] 
   id with the suffix you want.
 - Resume: `--conversation <id>` keeps the `conversation_id`, continues the step
   numbering, and reports usage cumulatively across turns (recorded).
-- **Checked live with agy 1.2.17** (four calls, scratch directory): the
-  `stream-json` shape (`tests/fixtures/runtime-streams/`), the effort conflict, a
-  resumed conversation, and the sandbox denying a write outside the workspace.
-  **Not verified:** whether `@yakos-<id>` resolves in print mode, `--effort`
-  values above `high` with no `--model`, and whether the model can escalate out
-  of the sandbox on its own. Treat agy dispatch as experimental until they are.
+- **Checked live with agy 1.2.17** (six invocations from scratch directories):
+  the `stream-json` shape (`tests/fixtures/runtime-streams/`), the effort
+  conflict, a resumed conversation, the sandbox denying a write outside the
+  workspace, skill discovery and the `@yakos-<id>` mention. **Not verified:**
+  `--effort` values above `high` with no `--model`, and whether the model can
+  escalate out of the sandbox on its own. Treat agy dispatch as experimental
+  until they are.
 - Auth: `agy` signs in once, interactively (browser OAuth into the keychain and
   `~/.gemini/`), or `ANTIGRAVITY_API_KEY` for headless use. yakOS never drives
   or caches that login.

@@ -19,13 +19,16 @@ func buildEnvAgy(req DispatchRequest) []string {
 // AgyAdapter implements Adapter for the Antigravity (agy) CLI.
 //
 // agy 1.2.x accepts --model, --effort, --sandbox, --conversation and
-// --output-format text|json|stream-json (verified against the agy 1.2.17 help
-// text; the signed-in behaviour is not verified on this machine, see
-// docs/runtime-matrix.md). A framed dispatch invokes the workspace skill
-// @yakos-<agent>, which the dispatch layer materializes to
-// <workdir>/.agents/skills/yakos-<id>/SKILL.md first
-// (agentscompose.MaterializeAgyAgent). Chat has no skill file: agy has no
-// system-prompt flag, so the persona is prepended to the user text.
+// --output-format text|json|stream-json. Checked live with agy 1.2.17 (see
+// docs/runtime-matrix.md and tests/fixtures/runtime-streams): the stream shape,
+// resume, the --model/--effort conflict (agyIDCarriesEffort), the sandbox
+// denying a write outside the workspace, and the skill below. A framed dispatch
+// invokes the workspace skill @yakos-<agent>, which the dispatch layer
+// materializes to <workdir>/.agents/skills/yakos-<id>/SKILL.md first
+// (agentscompose.MaterializeAgyAgent); in print mode agy lists that skill and the
+// mention makes the model read it with a view_file step and follow it. Chat has
+// no skill file: agy has no system-prompt flag, so the persona is prepended to
+// the user text.
 //
 // ExecCmd is implemented for PR #34 stderr capture.
 type AgyAdapter struct{}

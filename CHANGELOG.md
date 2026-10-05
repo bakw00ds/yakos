@@ -58,7 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `yakos-<id>.md` it does not discover. Both the bash emitter and the new Go
   materializer now write `.agents/skills/yakos-<id>/SKILL.md` with `name:
   yakos-<id>` (matching the `@yakos-<id>` mention) and a `.gitignore` containing
-  `*` beside it, so no project `.gitignore` edit is needed. Leftover flat files
+  `*` beside it, so no project `.gitignore` edit is needed. Checked live with agy
+  1.2.17: `agy -p "/skills"` lists the generated skill, and `@yakos-<id> <task>`
+  in print mode makes the model read the skill and follow it. Leftover flat files
   are removed by the bash cleanup.
 
 ### Added
