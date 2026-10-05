@@ -292,7 +292,8 @@ command line, use `yakos dispatch`:
 # One-shot dispatch to a named specialist
 yakos dispatch doc-writer "Update the README for the new v2 API"
 
-# Dispatch to a specific runtime
+# Dispatch to a specific runtime. If codex is not installed or not signed in
+# this fails with the reason; add --runtime-fallback claude to allow a fallback.
 yakos dispatch backend "Add the /v1/orders POST endpoint" --runtime codex
 
 # Dispatch with a task file
