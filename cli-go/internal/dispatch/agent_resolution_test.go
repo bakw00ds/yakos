@@ -209,16 +209,20 @@ func routingRoot(t *testing.T) string {
 	}
 	agents := map[string]string{
 		// The two framework agents that carry pins (lib/agents/general-*.md).
-		"general-codex": "domain: cross-cutting\nruntime: codex\nmodel: gpt-5\n",
-		"general-agy":   "domain: cross-cutting\nruntime: agy\nmodel: gemini-3.5\n",
+		"general-codex": "domain: cross-cutting\nruntime: codex\nmodel: gpt-5.5\n",
+		"general-agy":   "domain: cross-cutting\nruntime: agy\nmodel: gemini-3.8-flash-high\n",
 		// A pin with a fallback chain.
 		"pinned-fb": "domain: platform\nruntime: agy\nruntime-fallback: [codex, claude]\n",
 		// No pin: the project file and defaults decide.
 		"reviewer": "domain: code-review\nmodel: sonnet\n",
 		"plain":    "domain: misc\nmodel: sonnet\n",
 		"bare":     "domain: misc\n",
+		// Pinned to a runtime but naming no model: nothing may reach the CLI.
+		"codex-bare": "runtime: codex\n",
+		"agy-bare":   "runtime: agy\n",
 		// Models that only mean something on one runtime.
 		"alias-codex": "runtime: codex\nmodel: balanced\n",
+		"alias-agy":   "runtime: agy\nmodel: balanced\n",
 		"tier-codex":  "runtime: codex\nmodel: opus\n",
 		"gpt-claude":  "model: gpt-5\n",
 		// Pinned to codex, but with a Claude-tier model of its own for when it
@@ -271,6 +275,7 @@ func route(t *testing.T, root, project, agent string, mut func(*routeInput)) (*r
 // K-127: an agent's `runtime:` pin selects the adapter, and its non-Claude model
 // survives.
 func TestRoute_AgentPinSelectsRuntimeAndModel(t *testing.T) {
+	captureRouteLog(t) // the alias-codex row warns by design
 	root := routingRoot(t)
 	project := projectWithYML(t, "")
 	cases := []struct {
@@ -281,18 +286,23 @@ func TestRoute_AgentPinSelectsRuntimeAndModel(t *testing.T) {
 		wantExpl    bool
 		wantModelBy string
 	}{
-		{"general-codex", "codex", RuntimeByFrontmatter, "gpt-5", true, "frontmatter"},
-		{"general-agy", "agy", RuntimeByFrontmatter, "gemini-3.5", true, "frontmatter"},
+		{"general-codex", "codex", RuntimeByFrontmatter, "gpt-5.5", true, "frontmatter"},
+		{"general-agy", "agy", RuntimeByFrontmatter, "gemini-3.8-flash-high", true, "frontmatter"},
 		// No pin: claude by default, the agent's own tier.
 		{"plain", "claude", RuntimeByDefault, "sonnet", true, "frontmatter"},
 		// No pin, no model: claude's default, not passed to the CLI.
 		{"bare", "claude", RuntimeByDefault, "sonnet", false, "frontmatter"},
 		// A non-Claude model on an agent that resolves to claude is ignored, as before.
 		{"gpt-claude", "claude", RuntimeByDefault, "sonnet", false, "frontmatter"},
-		// An alias resolves against the runtime that runs it (D4).
-		{"alias-codex", "codex", RuntimeByFrontmatter, "gpt-5-mini", true, "frontmatter"},
-		// A Claude tier means nothing to codex: the codex default applies instead.
-		{"tier-codex", "codex", RuntimeByFrontmatter, "gpt-5-mini", false, "frontmatter"},
+		// An alias resolves against the runtime that runs it (D4): agy has a
+		// mapping; codex has none, so no model is sent (the harness picks).
+		{"alias-agy", "agy", RuntimeByFrontmatter, "agy-balanced-x", true, "frontmatter"},
+		{"alias-codex", "codex", RuntimeByFrontmatter, "", false, "frontmatter"},
+		// A Claude tier means nothing to codex: no model is sent either.
+		{"tier-codex", "codex", RuntimeByFrontmatter, "", false, "frontmatter"},
+		// Pinned to codex or agy with no model: only claude has a default.
+		{"codex-bare", "codex", RuntimeByFrontmatter, "", false, "frontmatter"},
+		{"agy-bare", "agy", RuntimeByFrontmatter, "", false, "frontmatter"},
 	}
 	for _, c := range cases {
 		got, err := route(t, root, project, c.agent, nil)
@@ -320,8 +330,8 @@ func TestRoute_ComposedAgentCarriesModelRaw(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Agent.ModelRaw != "gpt-5" || got.Agent.Model != "" || got.Agent.Runtime != "codex" {
-		t.Errorf("agent = %+v, want Runtime codex, ModelRaw gpt-5, Model blank", got.Agent)
+	if got.Agent.ModelRaw != "gpt-5.5" || got.Agent.Model != "" || got.Agent.Runtime != "codex" {
+		t.Errorf("agent = %+v, want Runtime codex, ModelRaw gpt-5.5, Model blank", got.Agent)
 	}
 }
 
@@ -634,17 +644,20 @@ func TestRoute_ExplicitModelIsValidatedPerRuntime(t *testing.T) {
 	root := routingRoot(t)
 	project := projectWithYML(t, "")
 
-	// codex: an alias resolves against codex's column; an id passes through.
-	for _, c := range []struct{ override, want string }{{"balanced", "gpt-5-mini"}, {"best", "gpt-5"}, {"gpt-5", "gpt-5"}, {"o4-mini", "o4-mini"}} {
+	// codex: an id passes through; an alias with no codex mapping means the
+	// harness default (no model), with one warning, not an error.
+	for _, c := range []struct{ override, want string }{{"gpt-5.5", "gpt-5.5"}, {"o4-mini", "o4-mini"}, {"gpt-5.6-sol", "gpt-5.6-sol"}} {
 		got, err := route(t, root, project, "general-codex", func(in *routeInput) { in.ModelOverride = c.override })
 		if err != nil || got.Model != c.want || got.ModelChosenBy != "override" || !got.ModelExplicit {
 			t.Errorf("codex %q: %+v %v, want %q by override", c.override, got, err, c.want)
 		}
 	}
-	// agy
-	got, err := route(t, root, project, "general-agy", func(in *routeInput) { in.ModelOverride = "frontier" })
-	if err != nil || got.Model != "claude-fable-5" {
-		t.Errorf("agy frontier: %+v %v", got, err)
+	// agy: aliases resolve through its column, ids pass through.
+	for _, c := range []struct{ override, want string }{{"frontier", "agy-frontier-x"}, {"best", "agy-best-x"}, {"gemini-3.8-flash-high", "gemini-3.8-flash-high"}, {"claude-opus-5-5-medium", "claude-opus-5-5-medium"}} {
+		got, err := route(t, root, project, "general-agy", func(in *routeInput) { in.ModelOverride = c.override })
+		if err != nil || got.Model != c.want || !got.ModelExplicit {
+			t.Errorf("agy %q: %+v %v, want %q", c.override, got, err, c.want)
+		}
 	}
 	// claude keeps the tier rule and its old error text.
 	if _, err := route(t, root, project, "plain", func(in *routeInput) { in.ModelOverride = "gpt-5" }); err == nil ||
@@ -669,6 +682,79 @@ func TestRoute_ExplicitModelIsValidatedPerRuntime(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "invalid model") || !strings.Contains(err.Error(), "runtime codex") {
 			t.Errorf("codex %q: err = %v, want an invalid-model error naming the runtime", bad, err)
 		}
+	}
+}
+
+// D4: an alias the table has no entry for means "use the harness default". The
+// request goes through with no model, and one WARN says so.
+func TestRoute_UnmappedAliasWarnsAndSendsNoModel(t *testing.T) {
+	root := routingRoot(t)
+	project := projectWithYML(t, "")
+
+	// A pane choice: balanced on codex.
+	logbuf := captureRouteLog(t)
+	got, err := route(t, root, project, "general-codex", func(in *routeInput) { in.ModelOverride = "balanced" })
+	if err != nil {
+		t.Fatalf("an unmapped alias is not an error: %v", err)
+	}
+	if got.Model != "" || got.ModelExplicit || got.ModelChosenBy != "override" {
+		t.Errorf("got model %q explicit=%v by %q, want no model, chosen by override", got.Model, got.ModelExplicit, got.ModelChosenBy)
+	}
+	const want = "alias balanced has no codex mapping; using harness default"
+	if n := strings.Count(logbuf.String(), want); n != 1 {
+		t.Errorf("want exactly one WARN %q, got %d in %q", want, n, logbuf.String())
+	}
+
+	// A frontmatter pin: model: balanced on a codex agent.
+	logbuf = captureRouteLog(t)
+	got, err = route(t, root, project, "alias-codex", nil)
+	if err != nil || got.Model != "" || got.ModelExplicit {
+		t.Errorf("frontmatter alias on codex: %+v %v, want no model", got, err)
+	}
+	if n := strings.Count(logbuf.String(), want); n != 1 {
+		t.Errorf("want exactly one WARN %q, got %d in %q", want, n, logbuf.String())
+	}
+
+	// A mapped alias, and the unpinned and id cases, are silent.
+	logbuf = captureRouteLog(t)
+	for _, agent := range []string{"alias-agy", "codex-bare", "agy-bare", "general-codex", "general-agy", "plain", "bare"} {
+		if _, err := route(t, root, project, agent, nil); err != nil {
+			t.Fatalf("%s: %v", agent, err)
+		}
+	}
+	if strings.Contains(logbuf.String(), "WARN") {
+		t.Errorf("only an unmapped alias warns, got %q", logbuf.String())
+	}
+}
+
+// The handler-facing check never prints, and says "ok, harness default" for an
+// unmapped alias.
+func TestCheckModelOverride(t *testing.T) {
+	logbuf := captureRouteLog(t)
+	cases := []struct {
+		rt, model, want string
+		ok              bool
+	}{
+		{"claude", "balanced", "sonnet", true},
+		{"claude", "opus", "opus", true},
+		{"claude", "gpt-5", "gpt-5", false},
+		{"agy", "best", "agy-best-x", true},
+		{"agy", "gemini-3.8-flash-high", "gemini-3.8-flash-high", true},
+		{"codex", "balanced", "", true}, // no mapping: harness default
+		{"codex", "gpt-5.5", "gpt-5.5", true},
+		{"codex", "sonnet", "", false}, // a Claude tier is not a codex model
+		{"agy", "opus", "", false},
+		{"codex", "Bad Model", "Bad Model", false},
+		{"gemini", "gemini-2.5-pro", "gemini-2.5-pro", false}, // retired runtime
+	}
+	for _, c := range cases {
+		got, ok := CheckModelOverride(c.rt, c.model)
+		if got != c.want || ok != c.ok {
+			t.Errorf("CheckModelOverride(%q, %q) = (%q, %v), want (%q, %v)", c.rt, c.model, got, ok, c.want, c.ok)
+		}
+	}
+	if logbuf.Len() != 0 {
+		t.Errorf("the pre-queue check must not print: %q", logbuf.String())
 	}
 }
 
@@ -880,10 +966,30 @@ func TestRun_NonClaudeModelIsResolvedAndLogged(t *testing.T) {
 	}
 	events := readDispatchLog(t, logDir)
 	fin := events[len(events)-1]
-	assertField(t, fin, "model_resolved", "gpt-5")
+	assertField(t, fin, "model_resolved", "gpt-5.5")
 	assertField(t, fin, "model_chosen_by", "frontmatter")
 	started := events[len(events)-2]
-	assertField(t, started, "model", "gpt-5")
+	assertField(t, started, "model", "gpt-5.5")
+}
+
+// D4 end to end: a codex agent that pins no model records none, and the
+// dispatch_started event omits the key rather than writing it empty.
+func TestRun_UnpinnedCodexRecordsNoModel(t *testing.T) {
+	root := routingRoot(t)
+	rec := fakeCLIs(t)
+	logDir := isolatedLogDir(t)
+	if _, _, err := Run(context.Background(), Request{AgentName: "codex-bare", Task: "hi", Project: t.TempDir(), YakosRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	if got := invoked(t, rec); strings.Join(got, ",") != "codex" {
+		t.Fatalf("executed %v, want codex", got)
+	}
+	events := readDispatchLog(t, logDir)
+	fin, started := events[len(events)-1], events[len(events)-2]
+	assertField(t, fin, "model_resolved", "")
+	if _, ok := started["model"]; ok {
+		t.Errorf("an unresolved model must be omitted from dispatch_started: %v", started)
+	}
 }
 
 // The fallback is executed, recorded in the log, and printed once.
@@ -946,10 +1052,14 @@ func TestRunStream_PinnedAgentRoutesAndCarriesModel(t *testing.T) {
 		agent, runtimeParam, wantRT, wantModel string
 		wantExplicit                           bool
 	}{
-		{"general-codex", "", "codex", "gpt-5", true},
-		{"general-agy", "auto", "agy", "gemini-3.5", true},
+		{"general-codex", "", "codex", "gpt-5.5", true},
+		{"general-agy", "auto", "agy", "gemini-3.8-flash-high", true},
 		{"general-codex", "claude", "claude", "sonnet", false},
-		{"bare", "codex", "codex", "gpt-5-mini", false},
+		// D4: a codex or agy dispatch with no pin carries no model at all.
+		{"bare", "codex", "codex", "", false},
+		{"codex-bare", "", "codex", "", false},
+		{"agy-bare", "", "agy", "", false},
+		{"alias-agy", "", "agy", "agy-balanced-x", true},
 		{"plain", "", "claude", "sonnet", true},
 	}
 	for _, c := range cases {
@@ -973,11 +1083,13 @@ func TestRunStream_PinnedAgentRoutesAndCarriesModel(t *testing.T) {
 	}
 }
 
-// Defaults are resolved per runtime, not the literal "sonnet" (D4).
+// D4: only claude has a default model. A codex or agy dispatch with no pin
+// leaves the model empty so the adapter sends no flag, instead of carrying the
+// literal "sonnet" or an id from a static table.
 func TestRunStream_DefaultModelIsPerRuntime(t *testing.T) {
 	root := routingRoot(t)
 	svc := newResolutionSvc(t, root)
-	for rtName, want := range map[string]string{"claude": "sonnet", "codex": "gpt-5-mini", "agy": "gemini-3.1-pro"} {
+	for rtName, want := range map[string]string{"claude": "sonnet", "codex": "", "agy": ""} {
 		var req Request
 		withStreamRunFn(func(_ context.Context, r Request, _ rt.Adapter, _ rt.ChatDispatchRequest, _ func(StreamChunk)) (Result, error) {
 			req = r

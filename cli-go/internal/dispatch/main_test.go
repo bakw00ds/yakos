@@ -3,7 +3,21 @@ package dispatch
 import (
 	"os"
 	"testing"
+
+	rt "github.com/bakw00ds/yakos/internal/runtime"
 )
+
+// testAliasTable is the alias table these tests run against, so none of them
+// depends on the model ids in lib/settings/model-aliases.json (vendors rename
+// models). claude maps as in production; codex has no mapping (an empty entry
+// means "use the harness default"); agy has recognisable fake ids.
+func testAliasTable() map[string]map[string]string {
+	t := map[string]map[string]string{}
+	for alias, tier := range map[string]string{"cheap": "haiku", "balanced": "sonnet", "best": "opus", "reasoning": "opus", "frontier": "fable"} {
+		t[alias] = map[string]string{"claude": tier, "codex": "", "agy": "agy-" + alias + "-x"}
+	}
+	return t
+}
 
 // TestMain makes runtime resolution hermetic for the whole test binary.
 //
@@ -17,6 +31,7 @@ import (
 func TestMain(m *testing.M) {
 	runtimeProbe = func(string) probeResult { return probeResult{OK: true} }
 	stateDefaultRuntime = func() string { return "" }
+	rt.SetAliasTableForTest(testAliasTable())
 	os.Exit(m.Run())
 }
 

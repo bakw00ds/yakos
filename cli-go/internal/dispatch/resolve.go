@@ -441,22 +441,54 @@ func RosterRuntimes(roster []agentscompose.ComposedAgent, project string) map[st
 
 // ---- model resolution (K-132) -------------------------------------------------
 
-// CheckModelOverride resolves an explicitly requested model (an alias or an id)
-// for runtime rt and reports whether the result is acceptable there. Callers
-// that validate a request before queueing it use it; Run and RunStream apply
-// the same rule.
+// modelCheck is the verdict on an explicitly requested model for one runtime.
+type modelCheck struct {
+	// resolved is the model id to use; "" means the harness default (no model
+	// flag).
+	resolved string
+	// ok is false when the request cannot be honoured on this runtime.
+	ok bool
+	// unmapped is true when the request was an alias the table has no entry for
+	// on this runtime. It is ok, resolves to "", and the caller warns once.
+	unmapped bool
+}
+
+// checkModel resolves and validates an explicitly requested model (an alias or
+// an id) for runtime rt. It prints nothing, so a handler can call it before the
+// work is queued.
 //
-// Beyond runtime.ValidateModelFor it refuses a bare Claude tier name (haiku,
-// sonnet, opus, fable) for any other runtime. Those four words match the
-// model-id alphabet but name no codex or agy model, so passing one through
-// would only fail later inside the CLI; an alias (balanced) is the portable
-// spelling.
-func CheckModelOverride(rt, model string) (resolved string, ok bool) {
-	resolved = runtime.ResolveAliasFor(rt, model)
-	if rt != "claude" && runtime.IsClaudeTier(resolved) {
-		return resolved, false
+//   - claude: the four tiers, after alias expansion (ValidateTier).
+//   - codex, agy: an alias, expanded through that runtime's column (an alias
+//     with no mapping is "use the harness default", not an error), or a model
+//     id in the safe alphabet. A bare Claude tier (haiku, sonnet, opus, fable)
+//     is refused: it matches the id alphabet but names no codex or agy model, so
+//     passing it through would only fail later inside the CLI. An alias is the
+//     portable spelling.
+func checkModel(rt, model string) modelCheck {
+	if rt == "claude" {
+		r := runtime.ResolveAlias(model)
+		return modelCheck{resolved: r, ok: runtime.ValidateTier(r)}
 	}
-	return resolved, runtime.ValidateModelFor(rt, resolved)
+	if runtime.IsClaudeTier(model) {
+		return modelCheck{}
+	}
+	if runtime.IsAlias(model) {
+		id, found := runtime.AliasModelFor(rt, model)
+		if !found {
+			return modelCheck{ok: true, unmapped: true}
+		}
+		return modelCheck{resolved: id, ok: runtime.ValidateModelFor(rt, id) && !runtime.IsClaudeTier(id)}
+	}
+	return modelCheck{resolved: model, ok: runtime.ValidateModelFor(rt, model)}
+}
+
+// CheckModelOverride reports whether an explicitly requested model is acceptable
+// on runtime rt and what it resolves to (see checkModel; "" with ok true means
+// the harness default). Callers that validate a request before queueing it use
+// it; Run and RunStream apply the same rule.
+func CheckModelOverride(rt, model string) (resolved string, ok bool) {
+	c := checkModel(rt, model)
+	return c.resolved, c.ok
 }
 
 // invalidModelError is the error for an explicit model that does not fit rt.
@@ -468,19 +500,25 @@ func invalidModelError(rt, model string) error {
 	return fmt.Errorf("dispatch: invalid model %q for runtime %s (want %s)", model, rt, runtime.ModelHint(rt))
 }
 
+// warnUnmapped prints the one-line notice for an alias with no mapping.
+func warnUnmapped(alias, rt string) {
+	fmt.Fprintf(routeLog, "yakos dispatch: WARN: alias %s has no %s mapping; using harness default\n", alias, rt)
+}
+
 // modelChoice is the model a dispatch will use.
 type modelChoice struct {
-	model    string
+	model    string // "" = no model flag; the harness picks
 	chosenBy string // override | eval | frontmatter
-	explicit bool   // true unless the runtime default was used
+	explicit bool   // true when a pin put a model here (never for a default)
 }
 
 // agentModelFor is the model an agent's frontmatter pins for runtime rt, or ""
 // when it pins none that means anything there. For claude that is the resolved
-// tier (ComposedAgent.Model). For any other runtime it is ModelRaw resolved
-// against that runtime's alias column; a bare Claude tier name (opus) means
-// nothing to codex or agy and is ignored, as a non-Claude id has always been
-// ignored on claude.
+// tier (ComposedAgent.Model). For any other runtime it is ModelRaw: a
+// semantic alias is expanded through that runtime's column (an alias with no
+// mapping warns once and yields ""), and an id passes through when it is safe.
+// A bare Claude tier name (opus) means nothing to codex or agy and is ignored,
+// as a non-Claude id has always been ignored on claude.
 func agentModelFor(rt string, a *agentscompose.ComposedAgent) string {
 	if a == nil {
 		return ""
@@ -488,31 +526,40 @@ func agentModelFor(rt string, a *agentscompose.ComposedAgent) string {
 	if rt == "claude" {
 		return a.Model
 	}
-	if a.ModelRaw == "" || runtime.IsClaudeTier(a.ModelRaw) {
+	raw := a.ModelRaw
+	if raw == "" || runtime.IsClaudeTier(raw) {
 		return ""
 	}
-	m := runtime.ResolveAliasFor(rt, a.ModelRaw)
-	if m == "" || !runtime.ValidateModelFor(rt, m) {
+	c := checkModel(rt, raw)
+	if c.unmapped {
+		warnUnmapped(raw, rt)
+	}
+	if !c.ok {
 		return ""
 	}
-	return m
+	return c.resolved
 }
 
 // resolveModel applies the precedence override > agent frontmatter > the
-// runtime's default, per runtime. viaFallback is true when rt was reached by
-// falling back: an explicit model that does not fit the fallback runtime is
-// then dropped (with a notice) and the choice continues with the agent's own
-// pin for that runtime and then its default, rather than failing a request
-// whose runtime was already changed under it.
+// runtime's default, per runtime. Only a pin (override or frontmatter) puts a
+// model on a codex or agy command line; their default is no model at all.
+// viaFallback is true when rt was reached by falling back: an explicit model
+// that does not fit the fallback runtime is then dropped (with a notice) and the
+// choice continues with the agent's own pin for that runtime and then its
+// default, rather than failing a request whose runtime was already changed
+// under it.
 func resolveModel(rt string, viaFallback bool, override, evalRunID string, a *agentscompose.ComposedAgent) (modelChoice, error) {
 	mc := modelChoice{chosenBy: "frontmatter"}
 	if evalRunID != "" {
 		mc.chosenBy = "eval"
 	}
 	if override != "" {
-		resolved, ok := CheckModelOverride(rt, override)
-		if ok {
-			mc.model, mc.chosenBy, mc.explicit = resolved, "override", true
+		c := checkModel(rt, override)
+		if c.ok {
+			if c.unmapped {
+				warnUnmapped(override, rt)
+			}
+			mc.model, mc.chosenBy, mc.explicit = c.resolved, "override", c.resolved != ""
 			return mc, nil
 		}
 		if !viaFallback {

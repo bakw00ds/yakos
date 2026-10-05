@@ -30,7 +30,8 @@ var runtimeIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 //	--runtime <id>       Override the agent's frontmatter runtime: field
 //	--model <name>       Override the model: a Claude tier (haiku|sonnet|opus|fable),
 //	                     an alias (cheap|balanced|best|reasoning|frontier) or, for
-//	                     codex and agy, a model id; validated per resolved runtime
+//	                     codex and agy, a model id from their own catalog;
+//	                     validated per resolved runtime
 //	--project <path>     Project repo path
 //	--timeout <secs>     Max time to wait (default 600)
 //	--eval-run-id <id>   Mark as model-routing eval dispatch
@@ -313,9 +314,10 @@ Flags:
   --model <tier>    Override the model for this dispatch only.
                     claude: haiku | sonnet | opus | fable. Any runtime
                     also takes an alias (cheap | balanced | best |
-                    reasoning | frontier); codex and agy take a model id
-                    such as gpt-5. Validated against the runtime the
-                    agent resolves to.
+                    reasoning | frontier); an alias with no mapping for
+                    the runtime means its own default model. codex and
+                    agy also take a model id from their own catalog.
+                    Validated against the runtime the agent resolves to.
                     Recorded as model_chosen_by:"override" in the
                     dispatch-log. Does not affect the runtime selection.
   --project <path>  Project repo path. Defaults to inferring from cwd

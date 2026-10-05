@@ -22,23 +22,69 @@ func TestEmbeddedAliasTableMatchesLib(t *testing.T) {
 	}
 }
 
-// The claude column of the table is what ResolveAlias hard-codes; they must
-// agree, since ResolveAliasFor("claude", ...) is defined as ResolveAlias.
-func TestAliasTableClaudeColumnMatchesResolveAlias(t *testing.T) {
+// The claude column of the table is what ResolveAlias hard-codes, so the two
+// must agree. Every other column may only hold safe, non-Claude ids or be empty
+// (empty means "no mapping: use the harness default"): a typo in the shared file
+// must not become an argv value.
+func TestAliasTableShape(t *testing.T) {
 	tab := aliasTab()
 	for _, a := range AliasNames {
 		if got, want := tab[a]["claude"], ResolveAlias(a); got != want {
 			t.Errorf("alias %q: table claude=%q, ResolveAlias=%q", a, got, want)
 		}
 		for _, rt := range Known {
-			if tab[a][rt] == "" {
-				t.Errorf("alias %q has no entry for runtime %q", a, rt)
+			if rt == "claude" {
+				continue
+			}
+			id := tab[a][rt]
+			if id == "" {
+				continue
+			}
+			if !ValidateModelFor(rt, id) || IsClaudeTier(id) {
+				t.Errorf("alias %q on %s maps to %q, which is not a usable model id", a, rt, id)
 			}
 		}
 	}
 }
 
-func TestResolveAliasFor(t *testing.T) {
+// testAliases is a table with known data, so these tests do not depend on the
+// model ids in lib/settings/model-aliases.json (vendors rename models).
+func testAliases() map[string]map[string]string {
+	return map[string]map[string]string{
+		"cheap":     {"claude": "haiku", "codex": "", "agy": "agy-cheap-x"},
+		"balanced":  {"claude": "sonnet", "codex": "", "agy": "agy-balanced-x"},
+		"best":      {"claude": "opus", "codex": "", "agy": "agy-best-x"},
+		"reasoning": {"claude": "opus", "codex": "", "agy": "agy-reasoning-x"},
+		"frontier":  {"claude": "fable", "codex": "", "agy": "agy-frontier-x"},
+	}
+}
+
+func TestAliasModelFor(t *testing.T) {
+	defer SetAliasTableForTest(testAliases())()
+	cases := []struct {
+		rt, in, want string
+		found        bool
+	}{
+		{"claude", "balanced", "sonnet", true},
+		{"claude", "frontier", "fable", true},
+		{"agy", "balanced", "agy-balanced-x", true},
+		{"agy", "best", "agy-best-x", true},
+		{"codex", "balanced", "", false}, // an empty column entry is "no mapping"
+		{"nope", "balanced", "", false},  // no column at all
+		{"agy", "gemini-3.8-flash-high", "", false},
+		{"claude", "opus", "", false}, // a tier is not an alias
+		{"agy", "", "", false},
+	}
+	for _, c := range cases {
+		got, found := AliasModelFor(c.rt, c.in)
+		if got != c.want || found != c.found {
+			t.Errorf("AliasModelFor(%q, %q) = (%q, %v), want (%q, %v)", c.rt, c.in, got, found, c.want, c.found)
+		}
+	}
+}
+
+func TestResolveModelFor(t *testing.T) {
+	defer SetAliasTableForTest(testAliases())()
 	cases := []struct{ rt, in, want string }{
 		{"claude", "balanced", "sonnet"},
 		{"claude", "cheap", "haiku"},
@@ -46,32 +92,83 @@ func TestResolveAliasFor(t *testing.T) {
 		{"claude", "frontier", "fable"},
 		{"claude", "opus", "opus"},
 		{"claude", "gpt-5", "gpt-5"}, // not an alias: untouched, the validator rejects it
-		{"codex", "balanced", "gpt-5-mini"},
-		{"codex", "cheap", "gpt-5-nano"},
-		{"codex", "best", "gpt-5"},
-		{"codex", "reasoning", "o4-mini"},
-		{"agy", "balanced", "gemini-3.1-pro"},
-		{"agy", "cheap", "gemini-3.5-flash"},
-		{"agy", "frontier", "claude-fable-5"},
-		{"codex", "gpt-5", "gpt-5"},         // a model id passes through
-		{"agy", "gemini-3.5", "gemini-3.5"}, // ditto
-		{"codex", "", ""},                   // nothing in, nothing out
-		{"nope", "balanced", ""},            // alias with no mapping for the runtime
-		{"nope", "gpt-5", "gpt-5"},          // non-alias still passes through
+		{"agy", "balanced", "agy-balanced-x"},
+		{"agy", "reasoning", "agy-reasoning-x"},
+		{"agy", "gemini-3.8-flash-high", "gemini-3.8-flash-high"}, // an id passes through
+		{"codex", "gpt-5.6-sol", "gpt-5.6-sol"},                   // ditto
+		{"codex", "", ""},                                         // nothing in, nothing out
+		{"nope", "gpt-5", "gpt-5"},                                // non-alias still passes through
 	}
 	for _, c := range cases {
-		if got := ResolveAliasFor(c.rt, c.in); got != c.want {
-			t.Errorf("ResolveAliasFor(%q, %q) = %q, want %q", c.rt, c.in, got, c.want)
+		var warn strings.Builder
+		if got := ResolveModelForTo(&warn, c.rt, c.in); got != c.want {
+			t.Errorf("ResolveModelFor(%q, %q) = %q, want %q", c.rt, c.in, got, c.want)
+		}
+		if warn.Len() != 0 {
+			t.Errorf("ResolveModelFor(%q, %q) must not warn when the alias maps or the name is not an alias: %q", c.rt, c.in, warn.String())
 		}
 	}
 }
 
-// D4: the default model used to be the literal "sonnet" for every runtime.
+// An alias with no entry for the runtime resolves to "" with exactly one WARN,
+// so the alias word is never mistaken for a model id by a CLI.
+func TestResolveModelFor_UnmappedAliasWarnsAndYieldsHarnessDefault(t *testing.T) {
+	defer SetAliasTableForTest(testAliases())()
+	for _, rt := range []string{"codex", "nope"} {
+		var warn strings.Builder
+		if got := ResolveModelForTo(&warn, rt, "balanced"); got != "" {
+			t.Errorf("%s balanced = %q, want the harness default (empty)", rt, got)
+		}
+		want := "alias balanced has no " + rt + " mapping; using harness default"
+		if !strings.Contains(warn.String(), want) || !strings.Contains(warn.String(), "WARN") {
+			t.Errorf("%s: warning = %q, want it to contain %q", rt, warn.String(), want)
+		}
+		if n := strings.Count(warn.String(), "\n"); n != 1 {
+			t.Errorf("%s: want exactly one warning line, got %d: %q", rt, n, warn.String())
+		}
+	}
+}
+
+// The exported form writes the same line to stderr.
+func TestResolveModelFor_WritesToStderr(t *testing.T) {
+	defer SetAliasTableForTest(testAliases())()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	got := ResolveModelFor("codex", "best")
+	os.Stderr = old
+	_ = w.Close()
+	buf := make([]byte, 512)
+	n, _ := r.Read(buf)
+	_ = r.Close()
+	if got != "" || !strings.Contains(string(buf[:n]), "alias best has no codex mapping; using harness default") {
+		t.Errorf("got %q, stderr %q", got, buf[:n])
+	}
+}
+
+func TestSetAliasTableForTest_Restores(t *testing.T) {
+	before, _ := AliasModelFor("agy", "balanced")
+	restore := SetAliasTableForTest(map[string]map[string]string{"balanced": {"agy": "swapped"}})
+	if got, _ := AliasModelFor("agy", "balanced"); got != "swapped" {
+		t.Errorf("hook not applied: %q", got)
+	}
+	restore()
+	if got, _ := AliasModelFor("agy", "balanced"); got != before {
+		t.Errorf("restore failed: got %q, want %q", got, before)
+	}
+}
+
+// D4: an unpinned dispatch used to carry the literal "sonnet" for every runtime,
+// which codex and agy then ignored. claude keeps its default; codex and agy have
+// none, so their adapters omit the flag and the harness picks.
 func TestDefaultModelFor(t *testing.T) {
 	cases := []struct{ rt, want string }{
 		{"claude", "sonnet"},
-		{"codex", "gpt-5-mini"},
-		{"agy", "gemini-3.1-pro"},
+		{"codex", ""},
+		{"agy", ""},
 		{"gemini", ""}, // retired
 		{"nope", ""},
 		{"", ""},
@@ -141,7 +238,7 @@ func TestModelHint(t *testing.T) {
 	if got := ModelHint("claude"); got != "haiku|sonnet|opus|fable" {
 		t.Errorf("ModelHint(claude) = %q", got)
 	}
-	if got := ModelHint("codex"); !strings.Contains(got, "alias") || !strings.Contains(got, "gpt-5") {
+	if got := ModelHint("codex"); !strings.Contains(got, "alias") || !strings.Contains(got, "model id") {
 		t.Errorf("ModelHint(codex) = %q", got)
 	}
 }

@@ -44,20 +44,26 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   line on stderr and is recorded in the dispatch-log (see
   `runtime_chosen_by` under Added).
 
-- **The default model resolves per runtime; non-Claude model ids survive
-  (K-132 P0a).** The default is no longer the literal `sonnet` for every
-  runtime: it comes from the `balanced` alias in
-  `lib/settings/model-aliases.json` (claude `sonnet`, codex `gpt-5-mini`,
-  agy `gemini-3.1-pro`). Non-Claude ids in agent frontmatter
-  (`model: gpt-5`), in `--model` and in console chat requests now survive and
-  are validated per runtime: claude accepts only `haiku|sonnet|opus|fable`
-  (aliases resolve first); codex and agy accept an alias or an id matching
-  `^[a-z0-9][a-z0-9._:-]{0,63}$`. A Claude tier in the frontmatter of an
-  agent that resolves to codex or agy is ignored (the runtime default
-  applies), and a non-Claude id on an agent that resolves to claude is
-  ignored, as before. This change resolves and records the model id (it
-  reaches the runtime request); wiring the `-m`/`--model` flags into the
-  codex and agy adapters is a separate change.
+- **Models are resolved per runtime; non-Claude model ids survive (K-132
+  P0a).** The default model is no longer the literal `sonnet` for every
+  runtime. claude keeps `sonnet`. codex and agy have no default: an unpinned
+  dispatch carries no model, so the adapter sends no model flag and the
+  harness picks its own (a static table cannot know which ids exist in your
+  account). Only a pin puts a model on a codex or agy command line: the
+  `--model` flag, a console pane choice, or the agent's frontmatter
+  `model:`. Non-Claude ids in agent frontmatter (`model: gpt-5.5`), in
+  `--model` and in console chat requests now survive and are validated per
+  runtime: claude accepts only `haiku|sonnet|opus|fable` (aliases resolve
+  first); codex and agy accept an alias or an id matching
+  `^[a-z0-9][a-z0-9._:-]{0,63}$`. An alias resolves through that runtime's
+  column of `lib/settings/model-aliases.json`; an alias with no mapping
+  (codex has none) means the harness default and prints one
+  `WARN: alias <x> has no <runtime> mapping; using harness default` line. A
+  Claude tier is never sent to codex or agy: in frontmatter it is ignored, and
+  as an explicit `--model` or pane choice it is refused. A non-Claude id on an
+  agent that resolves to claude is ignored, as before. The resolved id
+  reaches the runtime request; the `-m`/`--model` flags themselves are wired
+  in the codex and agy adapters by a separate change.
 
 - **Console Chat pane: `auto` runtime and model tiers for non-Claude
   runtimes (K-132 P0a).** The runtime select gains `auto`, the default for

@@ -91,7 +91,7 @@ When adding a new generic agent:
 | `domain` | yes | Free-form domain tag (`backend-service`, `release`, `cross-cutting`). |
 | `mode` | yes | Inline list of operating modes (`[feature, fix]`). |
 | `tools` | yes | Inline list of tool names the agent may use. |
-| `model` | yes | A Claude tier (`opus`, `sonnet`, `haiku`, `fable`), an alias (`cheap`, `balanced`, `best`, `reasoning`, `frontier`; resolved per runtime), or, for an agent that runs on codex or agy, a model id such as `gpt-5`. A Claude tier on a non-Claude agent, and a non-Claude id on a Claude agent, are ignored and the runtime default applies. |
+| `model` | yes | A Claude tier (`opus`, `sonnet`, `haiku`, `fable`), an alias (`cheap`, `balanced`, `best`, `reasoning`, `frontier`; resolved per runtime), or, for an agent that runs on codex or agy, a model id from that harness's own catalog (for example `gemini-3.8-flash-high`). A Claude tier on a non-Claude agent, and a non-Claude id on a Claude agent, are ignored. An agent with no usable model runs on claude's default (`sonnet`) or, on codex and agy, sends no model flag so the harness picks. |
 | `references` | yes | List of `rule:`, `playbook:`, `incident:` references. |
 | `version` | optional, v0.9+ | Integer version of THIS agent. Framework agents bump on substantive changes. Projects can use this for their own versioning too. |
 | `extends` | optional | Parent template id (e.g. `extends: backend`). |

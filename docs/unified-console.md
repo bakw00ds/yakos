@@ -522,11 +522,13 @@ The Chat tab provides per-model REPL panes. Each pane is independently
 configured:
 
 - **Runtime:** auto / claude / codex / agy (`auto` resolves from the agent's `runtime:` pin)
-- **Model:** `default` (the agent's own pin, else the runtime default), or
-  for claude haiku / sonnet / opus / fable (fable requires explicit opt-in;
-  see [runtime-matrix.md](runtime-matrix.md)); every runtime also takes the
+- **Model:** `default` (the agent's own pin, else the runtime's own default:
+  `sonnet` on claude, none on codex and agy so the harness picks), or for
+  claude haiku / sonnet / opus / fable (fable requires explicit opt-in; see
+  [runtime-matrix.md](runtime-matrix.md)); every runtime also takes the
   aliases cheap / balanced / best / reasoning / frontier, which resolve per
-  runtime.
+  runtime (an alias with no mapping, such as any alias on codex, means the
+  harness default).
 
 **Streaming behavior:** claude panes stream tokens as they arrive
 (`--include-partial-messages` unframed mode). codex and agy

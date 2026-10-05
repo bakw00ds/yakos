@@ -7,6 +7,9 @@ package runtime
 import (
 	_ "embed" // model-aliases.json
 	"encoding/json"
+	"fmt"
+	"io"
+	"os"
 	"regexp"
 	"sync"
 )
@@ -26,8 +29,8 @@ var modelAliasesJSON []byte
 // names a quality class; each runtime maps it to its own model id.
 var AliasNames = []string{"cheap", "balanced", "best", "reasoning", "frontier"}
 
-// DefaultAlias is the alias a dispatch uses when neither the caller nor the
-// agent names a model.
+// DefaultAlias is the alias claude uses when neither the caller nor the agent
+// names a model. codex and agy have no default model (see DefaultModelFor).
 const DefaultAlias = "balanced"
 
 // modelIDRe is the shape of a model id accepted for the non-Claude runtimes.
@@ -37,27 +40,57 @@ const DefaultAlias = "balanced"
 var modelIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,63}$`)
 
 var (
-	aliasTableOnce sync.Once
-	aliasTable     map[string]map[string]string // alias -> runtime -> model id
+	aliasMu sync.RWMutex
+	// aliasTable maps alias -> runtime -> model id. nil until first use.
+	aliasTable map[string]map[string]string
 )
 
-// aliasTab returns the parsed alias table. A table that fails to parse falls
+// parseAliasTable reads the embedded table. A table that fails to parse falls
 // back to the Claude column alone, so a damaged file degrades to the previous
 // Claude-only behaviour instead of panicking in a hot path.
+func parseAliasTable() map[string]map[string]string {
+	var doc struct {
+		Aliases map[string]map[string]string `json:"aliases"`
+	}
+	if err := json.Unmarshal(modelAliasesJSON, &doc); err != nil || len(doc.Aliases) == 0 {
+		doc.Aliases = map[string]map[string]string{}
+		for _, a := range AliasNames {
+			doc.Aliases[a] = map[string]string{"claude": ResolveAlias(a)}
+		}
+	}
+	return doc.Aliases
+}
+
 func aliasTab() map[string]map[string]string {
-	aliasTableOnce.Do(func() {
-		var doc struct {
-			Aliases map[string]map[string]string `json:"aliases"`
-		}
-		if err := json.Unmarshal(modelAliasesJSON, &doc); err != nil || len(doc.Aliases) == 0 {
-			doc.Aliases = map[string]map[string]string{}
-			for _, a := range AliasNames {
-				doc.Aliases[a] = map[string]string{"claude": ResolveAlias(a)}
-			}
-		}
-		aliasTable = doc.Aliases
-	})
+	aliasMu.RLock()
+	t := aliasTable
+	aliasMu.RUnlock()
+	if t != nil {
+		return t
+	}
+	aliasMu.Lock()
+	defer aliasMu.Unlock()
+	if aliasTable == nil {
+		aliasTable = parseAliasTable()
+	}
 	return aliasTable
+}
+
+// SetAliasTableForTest replaces the alias table (alias -> runtime -> model id)
+// and returns a function that restores the previous one. It exists so tests in
+// other packages can assert alias handling against known data instead of the
+// ids in lib/settings/model-aliases.json, which change as vendors rename
+// models. Not for production use.
+func SetAliasTableForTest(table map[string]map[string]string) (restore func()) {
+	aliasMu.Lock()
+	prev := aliasTable
+	aliasTable = table
+	aliasMu.Unlock()
+	return func() {
+		aliasMu.Lock()
+		aliasTable = prev
+		aliasMu.Unlock()
+	}
 }
 
 // ResolveAlias translates semantic model aliases used in agent frontmatter into
@@ -112,33 +145,64 @@ func IsAlias(name string) bool {
 	return false
 }
 
-// ResolveAliasFor resolves a semantic alias to the model id of the given
-// runtime (balanced is sonnet on claude and gpt-5-mini on codex). A name that
-// is not an alias passes through unchanged. An alias the table has no entry for
-// on that runtime resolves to "" so a caller can never hand the alias word
-// itself to a CLI as if it were a model id.
+// AliasModelFor returns the model id a semantic alias maps to on runtime rt.
+// found is false when name is not an alias, or when the table has no entry for
+// that runtime or an empty one. An empty entry is deliberate: codex's column is
+// empty because the ids in its catalog change faster than a table can track,
+// and an alias with no mapping means "use the harness default" (no model flag).
+// claude's column is the ResolveAlias switch, which a test keeps equal to the
+// table.
+func AliasModelFor(rt, name string) (id string, found bool) {
+	if !IsAlias(name) {
+		return "", false
+	}
+	if rt == "claude" {
+		return ResolveAlias(name), true
+	}
+	id = aliasTab()[name][rt]
+	return id, id != ""
+}
+
+// ResolveModelFor resolves a requested model for runtime rt. A semantic alias
+// becomes that runtime's model id (balanced is sonnet on claude); a name that
+// is not an alias passes through unchanged. An alias with no mapping for rt
+// resolves to "" (the harness default) and prints one line on stderr:
 //
-// For claude the result is always identical to ResolveAlias.
-func ResolveAliasFor(rt, name string) string {
+//	yakos: WARN: alias balanced has no codex mapping; using harness default
+//
+// so an alias word is never handed to a CLI as if it were a model id. For
+// claude the result is always identical to ResolveAlias.
+func ResolveModelFor(rt, name string) string {
+	return ResolveModelForTo(os.Stderr, rt, name)
+}
+
+// ResolveModelForTo is ResolveModelFor with the warning written to w.
+func ResolveModelForTo(w io.Writer, rt, name string) string {
 	if rt == "claude" {
 		return ResolveAlias(name)
 	}
 	if !IsAlias(name) {
 		return name
 	}
-	return aliasTab()[name][rt]
+	if id, ok := AliasModelFor(rt, name); ok {
+		return id
+	}
+	_, _ = fmt.Fprintf(w, "yakos: WARN: alias %s has no %s mapping; using harness default\n", name, rt)
+	return ""
 }
 
-// DefaultModelFor is the model a dispatch to rt uses when nothing names one:
-// the runtime's balanced alias. It is "" for a runtime this package does not
-// know. The value is what the dispatch log records; whether it is also passed
-// to the CLI is the adapter's call (an unpinned chat keeps the CLI's own
-// default).
+// DefaultModelFor is the model a dispatch to rt carries when nothing names one.
+// claude defaults to its balanced tier (sonnet), which keeps the relay session
+// pinned (K-116). codex and agy have no default: it is "" so the adapter omits
+// the model flag and the harness picks its own, because no id in a static table
+// can be trusted to exist in the operator's account. Only an explicit pin (a
+// flag, a pane choice or an agent's frontmatter) puts a model on a codex or agy
+// command line. "" for a runtime this package does not know.
 func DefaultModelFor(rt string) string {
-	if !isKnownRuntime(rt) {
-		return ""
+	if rt == "claude" {
+		return ResolveAlias(DefaultAlias)
 	}
-	return ResolveAliasFor(rt, DefaultAlias)
+	return ""
 }
 
 // ValidateModelFor reports whether model, already alias-resolved for rt, is
@@ -162,7 +226,7 @@ func ModelHint(rt string) string {
 	if rt == "claude" {
 		return "haiku|sonnet|opus|fable"
 	}
-	return "an alias (cheap|balanced|best|reasoning|frontier) or a model id like gpt-5"
+	return "an alias (cheap|balanced|best|reasoning|frontier) or a model id from the harness's own catalog"
 }
 
 // IsClaudeTier reports whether name is one of the bare Claude tier names. A

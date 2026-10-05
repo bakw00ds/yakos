@@ -36,7 +36,7 @@ func routingYakosRoot(t *testing.T) string {
 	agents := map[string]string{
 		"backend":       "domain: backend-service\nmodel: sonnet\n",
 		"general-codex": "domain: cross-cutting\nruntime: codex\nmodel: gpt-5\n",
-		"general-agy":   "domain: cross-cutting\nruntime: agy\nmodel: gemini-3.5\n",
+		"general-agy":   "domain: cross-cutting\nruntime: agy\nmodel: gemini-3.8-flash-high\n",
 	}
 	for id, fm := range agents {
 		body := "---\nid: " + id + "\n" + fm + "---\n\n## Purpose\n\nRouting test agent " + id + ".\n"
@@ -110,10 +110,10 @@ func TestChatDispatch_EmptyRuntimeResolvesFromAgentPin(t *testing.T) {
 		fields map[string]any
 		want   int // 503 = every validation passed, no service configured
 	}{
-		// gpt-5 is codex's model: valid only because "" resolved to codex.
-		{"empty runtime, codex-pinned agent, codex model", map[string]any{"runtime": "", "agent": "general-codex", "model": "gpt-5", "sessionId": "s-a"}, http.StatusServiceUnavailable},
-		{"auto runtime, codex-pinned agent, codex model", map[string]any{"runtime": "auto", "agent": "general-codex", "model": "gpt-5", "sessionId": "s-b"}, http.StatusServiceUnavailable},
-		{"omitted runtime, agy-pinned agent, agy model", map[string]any{"agent": "general-agy", "model": "gemini-3.5", "sessionId": "s-c"}, http.StatusServiceUnavailable},
+		// gpt-5.5 is a codex model id: valid only because "" resolved to codex.
+		{"empty runtime, codex-pinned agent, codex model", map[string]any{"runtime": "", "agent": "general-codex", "model": "gpt-5.5", "sessionId": "s-a"}, http.StatusServiceUnavailable},
+		{"auto runtime, codex-pinned agent, codex model", map[string]any{"runtime": "auto", "agent": "general-codex", "model": "gpt-5.5", "sessionId": "s-b"}, http.StatusServiceUnavailable},
+		{"omitted runtime, agy-pinned agent, agy model", map[string]any{"agent": "general-agy", "model": "gemini-3.8-flash-high", "sessionId": "s-c"}, http.StatusServiceUnavailable},
 		{"empty runtime, alias on a pinned runtime", map[string]any{"runtime": "", "agent": "general-agy", "model": "best", "sessionId": "s-d"}, http.StatusServiceUnavailable},
 		{"empty runtime, no model", map[string]any{"runtime": "", "agent": "general-codex", "model": "", "sessionId": "s-e"}, http.StatusServiceUnavailable},
 		// An unpinned agent resolves to claude: a Claude tier is fine.
@@ -315,6 +315,24 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+// waitForTurns blocks until the conversation's transcript holds n summary
+// entries, i.e. n dispatch goroutines have finished writing. A test must not
+// return earlier: the goroutine would still be writing into a temp directory the
+// test framework is trying to remove.
+func waitForTurns(t *testing.T, store *consoleui.Transcripts, conv string, n int) {
+	t.Helper()
+	waitUntil(t, "the dispatch goroutine to finish", func() bool {
+		entries, _ := store.Read(conv, "")
+		count := 0
+		for _, e := range entries {
+			if e.Role == consoleui.RoleSummary {
+				count++
+			}
+		}
+		return count >= n
+	})
+}
+
 // The symptom: "follow-ups forget the conversation". Turn 1 stores claude's
 // session id; turn 2 resumes it; a session that has vanished is forgotten
 // rather than breaking every later turn.
@@ -379,6 +397,7 @@ func TestChatDispatch_ClaudeFollowUpsResumeTheConversation(t *testing.T) {
 			t.Errorf("turn 4 must start a fresh session after the stale one was dropped: %v", calls[3])
 		}
 	}
+	waitForTurns(t, store, conv, 4)
 }
 
 // Conversations do not share sessions.
@@ -405,6 +424,8 @@ func TestChatDispatch_ResumeIsPerConversation(t *testing.T) {
 	if len(calls) != 2 || hasResume(calls[1], "sess-one") {
 		t.Errorf("conv-two's first turn resumed another conversation's session: %v", calls)
 	}
+	waitForTurns(t, store, "conv-one", 1)
+	waitForTurns(t, store, "conv-two", 1)
 }
 
 // Codex and agy panes run the pinned agent's runtime, not claude.
@@ -430,9 +451,10 @@ func TestChatDispatch_PinnedAgentRunsOnItsRuntime(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-test")
 
 	svc := dispatch.NewService(dispatch.ServiceConfig{YakosRoot: root, WorkspaceRoot: t.TempDir()})
-	ts, tok, _, _ := newRoutingServer(t, root, svc)
+	ts, tok, workDir, _ := newRoutingServer(t, root, svc)
+	store := consoleui.NewTranscripts(workDir)
 
-	if got, body := postDispatch(t, ts, tok, map[string]any{"runtime": "", "agent": "general-codex", "model": "gpt-5", "sessionId": "s-pin", "conversationId": "conv-pin"}); got != http.StatusAccepted {
+	if got, body := postDispatch(t, ts, tok, map[string]any{"runtime": "", "agent": "general-codex", "model": "gpt-5.5", "sessionId": "s-pin", "conversationId": "conv-pin"}); got != http.StatusAccepted {
 		t.Fatalf("status %d %s", got, body)
 	}
 	waitUntil(t, "the pinned runtime to run", func() bool {
@@ -443,4 +465,5 @@ func TestChatDispatch_PinnedAgentRunsOnItsRuntime(t *testing.T) {
 	if got := strings.Fields(string(b)); len(got) != 1 || got[0] != "codex" {
 		t.Errorf("a pane with runtime auto and agent general-codex executed %v, want only codex", got)
 	}
+	waitForTurns(t, store, "conv-pin", 1)
 }
