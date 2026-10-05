@@ -126,8 +126,9 @@ What to do:
 
 The sidecar's environment also drops every `CLAUDE_CODE_OAUTH*` variable and any
 value that holds an OAuth token, except variables named `YAKOS_*`: those are
-yakOS's own and are never dropped for what they contain. Runs of the `claude`
-CLI are unaffected.
+yakOS's own and are never dropped for what they contain, so never put a
+credential in a `YAKOS_*` variable; it is passed through unchanged. Runs of the
+`claude` CLI are unaffected.
 
 The bash `claude-sdk` runtime, which runs the Python Agent SDK, has the same
 rule. `yakos dispatch --runtime claude-sdk` on the bash CLI now stops with one
