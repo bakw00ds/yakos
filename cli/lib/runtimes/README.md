@@ -54,7 +54,18 @@ agent name + the runtime's native extension:
 
 - claude: composes JSON via `--agents` (no on-disk file).
 - codex: `<project>/.codex/agents/yakos-<name>.toml`.
-- gemini: `<project>/.gemini/agents/yakos-<name>.md`.
+- agy: `<project>/.agents/skills/yakos-<name>/SKILL.md` (one directory per
+  skill, which is the layout agy 1.2.x loads; the directory carries its own
+  `.gitignore` containing `*`).
+- gemini (deprecated shim, delegates to agy): same as agy.
+
+Generated files carry a `yakos-generated:` marker (a `#` comment on the first
+line of the TOML, an HTML comment after the SKILL.md frontmatter). An emitter
+must not overwrite an existing file that lacks the marker (it is the operator's
+own); deleting the marker line is how an operator takes ownership of a generated
+file. The Go materializers in `cli-go/internal/agentscompose` emit identical
+bytes, and `tests/run-runtime-fixtures.sh` plus a Go parity test keep the two in
+step.
 
 `yakos init` adds `**/yakos-*.toml`, `**/yakos-*.md` to the project
 `.gitignore` so emitted files don't accidentally land in commits.

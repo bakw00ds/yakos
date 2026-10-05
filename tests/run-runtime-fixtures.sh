@@ -25,6 +25,10 @@
 #       and — critically — does not exit the test runner process
 #   7. runtime-resolve: yk_rt_default falls back to claude
 #   8. runtime-resolve: yk_rt_capability returns 0/1 correctly
+#  17. codex emitter: marker, operator files left alone, legacy upgrade (K-134)
+#  18. agy emitter: <skills>/yakos-<id>/SKILL.md layout, marker, .gitignore, cleanup
+#  19. Go materializers byte-identical to the bash emitters under YAKOS_IMPL=go;
+#      codex/agy dispatch is sandboxed by default (needs bin/yakos; skipped if absent)
 set -eu
 
 REPO_ROOT="$(cd "$(dirname -- "$0")/.." && pwd -P)"
@@ -203,17 +207,19 @@ mkdir -p "$gemini_out"
 # any CI run from here on, so exercise the materialize path under the
 # documented operator override rather than relying on the wall clock.
 YAKOS_GEMINI_SHIM_FORCE=1 yk_rt_gemini_materialize_agents "$REPO_ROOT" "" "$gemini_out" >/dev/null 2>&1 || true
-emitted_count="$(find "$gemini_out" -name 'yakos-*.md' -type f 2>/dev/null | wc -l | tr -d ' ')"
+# The gemini shim delegates to the agy materializer, which (K-134) writes one
+# <out>/yakos-<id>/SKILL.md per agent, the layout agy 1.2.x discovers.
+emitted_count="$(find "$gemini_out" -name 'SKILL.md' -type f 2>/dev/null | wc -l | tr -d ' ')"
 if [ "$emitted_count" -ge 11 ]; then
     ok "gemini emitter wrote $emitted_count markdown files (expected ≥ 11)"
 else
     fail "gemini emitter wrote $emitted_count markdown files (expected ≥ 11)"
 fi
-sample="$gemini_out/yakos-architect.md"
+sample="$gemini_out/yakos-architect/SKILL.md"
 if [ -f "$sample" ]; then
     # Frontmatter open + name + frontmatter close + body
     if grep -qE '^---$' "$sample" \
-       && grep -qE '^name: architect$' "$sample" \
+       && grep -qE '^name: yakos-architect$' "$sample" \
        && grep -qE '^description: ' "$sample"; then
         ok "gemini markdown has frontmatter (---, name, description)"
     else
@@ -247,7 +253,7 @@ else
     fail "gemini shim did not print an expected migration hint"
     sed 's/^/    /' "$blocked_err" >&2
 fi
-blocked_count="$(find "$blocked_out" -name 'yakos-*.md' -type f 2>/dev/null | wc -l | tr -d ' ')"
+blocked_count="$(find "$blocked_out" \( -name 'yakos-*.md' -o -name 'SKILL.md' \) -type f 2>/dev/null | wc -l | tr -d ' ')"
 if [ "$blocked_count" -eq 0 ]; then
     ok "gemini shim past removal date wrote no agent files (no silent partial materialize)"
 else
@@ -562,6 +568,222 @@ if [ -n "$_found2" ] && [ -f "$_found2" ]; then
     ok "dual-stat loop (GNU fallback): find+loop returns non-empty file path ($( basename "$_found2" ))"
 else
     fail "dual-stat loop (GNU fallback): find+loop returned empty or non-existent file ('$_found2')"
+fi
+
+# ---- 17. codex emitter: marker, operator files, legacy upgrade (K-134) -------
+echo
+echo "Test 17: codex emitter marker, no-overwrite of operator files, legacy upgrade"
+t17="$WORKDIR/t17"
+mkdir -p "$t17"
+t17_json='{"description":"Probe.","prompt":"# Probe\n\nBody.\n","tools":[]}'
+t17_marker='# yakos-generated: rewritten on every dispatch. Delete this line to keep your edits.'
+t17_file="$(yk_rt_codex_emit_toml probe "$t17_json" "$t17" 2>/dev/null)"
+if [ "$t17_file" = "$t17/yakos-probe.toml" ] && [ "$(head -n 1 "$t17_file")" = "$t17_marker" ]; then
+    ok "generated TOML starts with the yakos-generated marker"
+else
+    fail "generated TOML missing the marker (path='$t17_file')"
+fi
+cp "$t17_file" "$t17/first.copy"
+yk_rt_codex_emit_toml probe "$t17_json" "$t17" >/dev/null 2>&1
+if cmp -s "$t17_file" "$t17/first.copy"; then
+    ok "re-emitting an unchanged agent yields identical bytes"
+else
+    fail "re-emitting changed the bytes"
+fi
+printf 'name = "mine"\ndescription = "hand written"\ndeveloper_instructions = """\nmy rules\n"""\n' > "$t17/yakos-own.toml"
+cp "$t17/yakos-own.toml" "$t17/own.before"
+yk_rt_codex_emit_toml own "$t17_json" "$t17" >/dev/null 2>"$t17/own.err"
+if cmp -s "$t17/yakos-own.toml" "$t17/own.before" && grep -q "not overwriting" "$t17/own.err"; then
+    ok "an operator's yakos-*.toml without the marker is left alone and the skip is logged"
+else
+    fail "an operator's yakos-*.toml was overwritten or the skip was not logged"
+fi
+printf 'name = "legacy"\ndescription = "old"\ndeveloper_instructions = """\nold\n"""\n' > "$t17/yakos-legacy.toml"
+yk_rt_codex_emit_toml legacy "$t17_json" "$t17" >/dev/null 2>&1
+if [ "$(head -n 1 "$t17/yakos-legacy.toml")" = "$t17_marker" ]; then
+    ok "a legacy generated file (no marker, name = \"<id>\" first) is upgraded in place"
+else
+    fail "a legacy generated file was not upgraded"
+fi
+
+# ---- 18. agy emitter: skill directory layout, marker, cleanup (K-134) --------
+echo
+echo "Test 18: agy emitter writes <skills>/yakos-<id>/SKILL.md with marker and .gitignore"
+# shellcheck source=../cli/lib/runtimes/agy.sh
+. "$YAKOS_LIB/runtimes/agy.sh"
+t18="$WORKDIR/t18/.agents/skills"
+mkdir -p "$t18"
+t18_json='{"description":"Probe.","prompt":"# Probe\n\nBody.\n","tools":["Read"]}'
+t18_file="$(yk_rt_agy_emit_md probe "$t18_json" "$t18" 2>/dev/null)"
+if [ "$t18_file" = "$t18/yakos-probe/SKILL.md" ] && [ -f "$t18_file" ] && [ ! -e "$t18/yakos-probe.md" ]; then
+    ok "skill is a directory with SKILL.md (agy loads <dir>/<skill>/SKILL.md), no flat .md"
+else
+    fail "unexpected agy layout (path='$t18_file')"
+fi
+if grep -qx 'name: yakos-probe' "$t18_file" && grep -q 'yakos-generated:' "$t18_file"; then
+    ok "SKILL.md name equals the directory name and carries the marker"
+else
+    fail "SKILL.md name/marker wrong"
+fi
+if [ "$(cat "$t18/yakos-probe/.gitignore")" = "*" ]; then
+    ok "the skill directory carries a self-ignoring .gitignore"
+else
+    fail "missing or wrong .gitignore in the skill directory"
+fi
+if command -v git >/dev/null 2>&1; then
+    git -C "$WORKDIR/t18" init -q 2>/dev/null
+    if [ -z "$(git -C "$WORKDIR/t18" status --porcelain -uall 2>/dev/null)" ]; then
+        ok "generated skill files are invisible to git status"
+    else
+        fail "generated skill files show up in git status"
+    fi
+fi
+mkdir -p "$t18/yakos-own"
+printf -- '---\nname: yakos-own\n---\nmine\n' > "$t18/yakos-own/SKILL.md"
+cp "$t18/yakos-own/SKILL.md" "$WORKDIR/t18/own.before"
+yk_rt_agy_emit_md own "$t18_json" "$t18" >/dev/null 2>&1
+if cmp -s "$t18/yakos-own/SKILL.md" "$WORKDIR/t18/own.before" && [ ! -e "$t18/yakos-own/.gitignore" ]; then
+    ok "an operator's SKILL.md without the marker is left alone"
+else
+    fail "an operator's SKILL.md was overwritten"
+fi
+printf -- '---\nname: old\n---\n' > "$t18/yakos-flat.md"
+yk_rt_agy_cleanup_agents "$WORKDIR/t18"
+if [ ! -e "$t18/yakos-probe" ] && [ ! -e "$t18/yakos-flat.md" ] && [ -f "$t18/yakos-own/SKILL.md" ]; then
+    ok "cleanup removes generated skill dirs and legacy flat files, keeps the operator's"
+else
+    fail "cleanup removed the wrong things"
+fi
+
+# ---- 19. Go materializer parity under YAKOS_IMPL=go (K-133 / K-134) ----------
+echo
+echo "Test 19: Go dispatch materializes byte-identical agent files and runs sandboxed"
+GO_BINARY="${YAKOS_GO_BINARY:-$REPO_ROOT/bin/yakos}"
+if [ ! -x "$GO_BINARY" ]; then
+    echo "  [skip] $GO_BINARY not built (run 'make build'); the Go half of the parity check is skipped"
+else
+    t19="$WORKDIR/t19"
+    mkdir -p "$t19/home" "$t19/state" "$t19/shim" "$t19/rec" "$t19/proj/.claude/agents"
+    # No blank line after the frontmatter: the bash composer keeps that line in the
+    # prompt and the Go composer drops it, which is a compose difference, not an
+    # emitter one.
+    cat > "$t19/proj/.claude/agents/parity-probe.md" <<'AGENT_EOF'
+---
+id: parity-probe
+role: specialist
+domain: parity
+mode: [feature]
+tools: [Read, Edit]
+references: []
+---
+# Parity probe
+
+## Purpose
+
+Probe agent used by the runtime fixtures to compare the bash and Go materializers.
+
+## Rules
+
+- Quote "carefully" and keep C:\paths intact.
+AGENT_EOF
+    for rt in codex agy; do
+        cat > "$t19/shim/$rt" <<SHIM_EOF
+#!/bin/sh
+printf '%s\n' "\$@" > "$t19/rec/$rt.argv"
+echo "fake $rt output"
+SHIM_EOF
+        chmod +x "$t19/shim/$rt"
+    done
+    t19_env() {
+        env -u YAKOS_LIB HOME="$t19/home" YAKOS_DISPATCH_LOG="$t19/state" PATH="$t19/shim:$PATH" \
+            YAKOS_IMPL=go YAKOS_ROOT="$REPO_ROOT" "$GO_BINARY" "$@"
+    }
+    # bash reference: the composed agent JSON through the bash emitters
+    t19_composed="$(bash -c '
+        set -eu
+        export YAKOS_ROOT="'"$REPO_ROOT"'" YAKOS_LIB="'"$YAKOS_LIB"'"
+        . "$YAKOS_LIB/compat.sh"
+        . "$YAKOS_LIB/agents-compose.sh"
+        yk_agents_compose "$YAKOS_ROOT" "'"$t19"'/proj" 2>/dev/null
+    ')"
+    t19_agent_json="$(printf '%s' "$t19_composed" | jq -c '."parity-probe"')"
+    mkdir -p "$t19/ref/codex" "$t19/ref/agy"
+    yk_rt_codex_emit_toml parity-probe "$t19_agent_json" "$t19/ref/codex" >/dev/null 2>&1
+    yk_rt_agy_emit_md parity-probe "$t19_agent_json" "$t19/ref/agy" >/dev/null 2>&1
+
+    for rt in codex agy; do
+        if ! t19_env dispatch parity-probe "hello world" --runtime "$rt" --project "$t19/proj" >"$t19/$rt.out" 2>"$t19/$rt.err"; then
+            fail "$rt: yakos dispatch (YAKOS_IMPL=go) failed"
+            sed 's/^/    /' "$t19/$rt.err" >&2
+        fi
+    done
+    if cmp -s "$t19/proj/.codex/agents/yakos-parity-probe.toml" "$t19/ref/codex/yakos-parity-probe.toml"; then
+        ok "codex: Go-materialized TOML is byte-identical to the bash emitter's"
+    else
+        fail "codex: Go and bash TOML differ"
+        diff "$t19/proj/.codex/agents/yakos-parity-probe.toml" "$t19/ref/codex/yakos-parity-probe.toml" | sed 's/^/    /' >&2 || true
+    fi
+    if cmp -s "$t19/proj/.agents/skills/yakos-parity-probe/SKILL.md" "$t19/ref/agy/yakos-parity-probe/SKILL.md" \
+       && cmp -s "$t19/proj/.agents/skills/yakos-parity-probe/.gitignore" "$t19/ref/agy/yakos-parity-probe/.gitignore"; then
+        ok "agy: Go-materialized SKILL.md and .gitignore are byte-identical to the bash emitter's"
+    else
+        fail "agy: Go and bash skill files differ"
+        diff "$t19/proj/.agents/skills/yakos-parity-probe/SKILL.md" "$t19/ref/agy/yakos-parity-probe/SKILL.md" | sed 's/^/    /' >&2 || true
+    fi
+    if grep -qx -- '--sandbox' "$t19/rec/codex.argv" && grep -qx 'workspace-write' "$t19/rec/codex.argv" \
+       && grep -qx 'approval_policy="never"' "$t19/rec/codex.argv" \
+       && ! grep -q -- 'dangerously-bypass' "$t19/rec/codex.argv"; then
+        ok "codex argv: --sandbox workspace-write with a non-prompting approval policy, no bypass flag"
+    else
+        fail "codex argv is not sandboxed by default:"; sed 's/^/    /' "$t19/rec/codex.argv" >&2
+    fi
+    if grep -qx -- '--sandbox' "$t19/rec/agy.argv" && grep -qx 'stream-json' "$t19/rec/agy.argv"; then
+        ok "agy argv: --sandbox and --output-format stream-json"
+    else
+        fail "agy argv is missing --sandbox or stream-json:"; sed 's/^/    /' "$t19/rec/agy.argv" >&2
+    fi
+
+    # An operator-owned file at the generated path is left alone by the Go side too.
+    mkdir -p "$t19/proj2/.claude/agents" "$t19/proj2/.codex/agents"
+    cp "$t19/proj/.claude/agents/parity-probe.md" "$t19/proj2/.claude/agents/"
+    printf 'name = "mine"\ndescription = "hand written"\n' > "$t19/proj2/.codex/agents/yakos-parity-probe.toml"
+    cp "$t19/proj2/.codex/agents/yakos-parity-probe.toml" "$t19/own.before"
+    t19_env dispatch parity-probe "hi" --runtime codex --project "$t19/proj2" >/dev/null 2>"$t19/own.err" || true
+    if cmp -s "$t19/proj2/.codex/agents/yakos-parity-probe.toml" "$t19/own.before" && grep -q "no yakos-generated marker" "$t19/own.err"; then
+        ok "Go dispatch leaves an operator's agent file alone and says so"
+    else
+        fail "Go dispatch overwrote an operator's agent file or did not explain the skip"
+    fi
+
+    # The bypass is only granted by the owner-only policy in the user's own
+    # ~/.yakos-state; a project-controlled state directory is ignored (K-129).
+    mkdir -p "$t19/home/.yakos-state" "$t19/planted"
+    printf 'allow_unsandboxed_runtimes: [codex]\n' > "$t19/planted/router-policy.yml"
+    chmod 600 "$t19/planted/router-policy.yml"
+    env -u YAKOS_LIB HOME="$t19/home" YAKOS_DISPATCH_LOG="$t19/planted" PATH="$t19/shim:$PATH" YAKOS_IMPL=go \
+        YAKOS_ROOT="$REPO_ROOT" "$GO_BINARY" dispatch parity-probe "x" --runtime codex --project "$t19/proj" >/dev/null 2>&1 || true
+    if grep -qx -- '--sandbox' "$t19/rec/codex.argv"; then
+        ok "a router-policy.yml in a relocated state directory does not unsandbox codex"
+    else
+        fail "a relocated state directory unsandboxed codex"
+    fi
+    printf 'allow_unsandboxed_runtimes: [codex]\n' > "$t19/home/.yakos-state/router-policy.yml"
+    chmod 600 "$t19/home/.yakos-state/router-policy.yml"
+    env -u YAKOS_LIB HOME="$t19/home" YAKOS_DISPATCH_LOG="$t19/state" PATH="$t19/shim:$PATH" YAKOS_IMPL=go \
+        YAKOS_ROOT="$REPO_ROOT" "$GO_BINARY" dispatch parity-probe "x" --runtime codex --project "$t19/proj" >/dev/null 2>"$t19/bypass.err" || true
+    if grep -qx -- '--dangerously-bypass-approvals-and-sandbox' "$t19/rec/codex.argv" && grep -q "WITHOUT its sandbox" "$t19/bypass.err"; then
+        ok "the owner-only ~/.yakos-state/router-policy.yml re-enables the bypass and says so on stderr"
+    else
+        fail "the owner-only policy did not enable the bypass"
+    fi
+    chmod 666 "$t19/home/.yakos-state/router-policy.yml"
+    env -u YAKOS_LIB HOME="$t19/home" YAKOS_DISPATCH_LOG="$t19/state" PATH="$t19/shim:$PATH" YAKOS_IMPL=go \
+        YAKOS_ROOT="$REPO_ROOT" "$GO_BINARY" dispatch parity-probe "x" --runtime codex --project "$t19/proj" >/dev/null 2>/dev/null || true
+    if grep -qx -- '--sandbox' "$t19/rec/codex.argv"; then
+        ok "a world-writable policy file is ignored and codex stays sandboxed"
+    else
+        fail "a world-writable policy file unsandboxed codex"
+    fi
 fi
 
 # ---- summary -----------------------------------------------------------------

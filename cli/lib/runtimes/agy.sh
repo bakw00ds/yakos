@@ -21,6 +21,12 @@
 #   auth                              ~/.gemini/<...>/ via keyring (OAuth)
 #   MCP                              ~/.gemini/config/mcp_config.json
 #
+# agy 1.2.17 (2026-10) supersedes the 1.0.1 notes above: it has --model,
+# --effort, --output-format text|json|stream-json and --conversation, and it
+# discovers workspace skills at .agents/skills/<name>/SKILL.md (a directory per
+# skill; flat .md files are not loaded). This bash adapter still runs plain
+# text and does not pass --model; the Go adapter does (see docs/runtime-matrix.md).
+#
 # Capability tag: path-allowlist-hard (--add-dir is real scope, not soft).
 
 set -eu
@@ -75,55 +81,84 @@ yk_rt_agy_check_auth() {
 }
 
 # ---------------------------------------------------------------------------
-# Agent materialization — markdown-with-frontmatter (same shape as Gemini's
-# replaced format; agy 'plugin import' migrates gemini plugins so the file
-# format is preserved between the two).
+# Agent materialization — one workspace skill per agent:
+#   <project>/.agents/skills/yakos-<id>/SKILL.md   (agy discovers <dir>/<skill>/SKILL.md)
+#   <project>/.agents/skills/yakos-<id>/.gitignore  ("*": keeps the generated
+#       directory out of git status without editing the project's .gitignore)
+#
+# SKILL.md carries a yakos-generated marker. A SKILL.md without it is the
+# operator's own and is never overwritten. The Go materializer
+# (cli-go/internal/agentscompose/materialize_agy.go) emits identical bytes;
+# tests/run-runtime-fixtures.sh and the Go parity test keep the two in step.
+#
+# Before K-134 this wrote a flat yakos-<id>.md with `name: <id>`; agy 1.2.x does
+# not load that layout. The flat files are removed by yk_rt_agy_cleanup_agents.
 # ---------------------------------------------------------------------------
 
+_YK_AGY_MARKER='<!-- yakos-generated: rewritten on every dispatch. Delete this line to keep your edits. -->'
+
 _yk_agy_emit_py='
-import json, sys
+import json, re, sys
 agent_id, out_file, json_path = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(json_path) as f:
+with open(json_path, encoding="utf-8") as f:
     data = json.load(f)
 def yq(s):
-    return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+    return "\"" + re.sub(r"\r\n|\r|\n", " ", s).replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 desc = data.get("description") or ("Agent: " + agent_id)
 body = data.get("prompt") or ""
 model = data.get("model")
 tools = data.get("tools") or []
-lines = ["---", "name: " + agent_id, "description: " + yq(desc)]
+lines = ["---", "name: yakos-" + agent_id, "description: " + yq(desc)]
 if model:
     lines.append("model: " + yq(model))
 if tools:
     lines.append("tools: [" + ", ".join(yq(t) for t in tools) + "]")
 lines.append("---")
+lines.append("<!-- yakos-generated: rewritten on every dispatch. Delete this line to keep your edits. -->")
 lines.append("")
 lines.append(body.rstrip("\n"))
-with open(out_file, "w") as f:
+with open(out_file, "w", encoding="utf-8", newline="\n") as f:
     f.write("\n".join(lines) + "\n")
 '
 
+# _yk_agy_is_generated <skill-md>
+#   0 when the marker is in the first 12 lines (the file is yakOS-generated).
+_yk_agy_is_generated() {
+    head -n 12 "$1" 2>/dev/null | grep -q 'yakos-generated:'
+}
+
 yk_rt_agy_emit_md() {
     local id="$1" agent_json="$2" out_dir="$3"
-    local out_file="$out_dir/yakos-${id}.md"
-    mkdir -p "$out_dir"
+    local skill_dir="$out_dir/yakos-${id}"
+    local out_file="$skill_dir/SKILL.md"
+    mkdir -p "$skill_dir"
+
+    if [ -f "$out_file" ] && ! _yk_agy_is_generated "$out_file"; then
+        ct_log "agy: not overwriting $out_file (no yakos-generated marker; delete it, or add the marker line to let yakOS manage it)"
+        printf '%s\n' "$out_file"
+        return 0
+    fi
 
     if yk_emit_check_python; then
         yk_emit_run_python "$id" "$out_file" "$agent_json" "$_yk_agy_emit_py"
     else
         local desc body model
         desc="$(printf '%s' "$agent_json" | jq -r '.description // ""')"
+        [ -n "$desc" ] || desc="Agent: $id"
+        desc="${desc//$'\r\n'/ }"; desc="${desc//$'\n'/ }"; desc="${desc//$'\r'/ }"
+        desc="${desc//\\/\\\\}"; desc="${desc//\"/\\\"}"
         body="$(printf '%s' "$agent_json" | jq -r '.prompt // ""')"
         model="$(printf '%s' "$agent_json" | jq -r '.model // ""')"
         {
             printf -- '---\n'
-            printf 'name: %s\n' "$id"
-            printf 'description: "%s"\n' "${desc//\"/\\\"}"
+            printf 'name: yakos-%s\n' "$id"
+            printf 'description: "%s"\n' "$desc"
             [ -n "$model" ] && [ "$model" != "null" ] && printf 'model: "%s"\n' "$model"
-            printf -- '---\n\n%s\n' "$body"
+            printf -- '---\n%s\n\n%s\n' "$_YK_AGY_MARKER" "$body"
         } > "$out_file"
         ct_log "agy: emitted $out_file via jq fallback (install python3 for fidelity)"
     fi
+    printf '*\n' > "$skill_dir/.gitignore"
     printf '%s\n' "$out_file"
 }
 
@@ -154,7 +189,18 @@ yk_rt_agy_cleanup_agents() {
     local project="$1"
     local dir="$project/.agents/skills"
     [ -d "$dir" ] || return 0
+    # Legacy flat files from before K-134.
     find "$dir" -maxdepth 1 -type f -name 'yakos-*.md' -delete 2>/dev/null || true
+    # Generated skill directories: only those whose SKILL.md carries the
+    # marker, and only the two files this adapter writes.
+    local d
+    for d in "$dir"/yakos-*/; do
+        [ -d "$d" ] || continue
+        if _yk_agy_is_generated "${d}SKILL.md"; then
+            rm -f "${d}SKILL.md" "${d}.gitignore" 2>/dev/null || true
+            rmdir "$d" 2>/dev/null || true
+        fi
+    done
 }
 
 # ---------------------------------------------------------------------------

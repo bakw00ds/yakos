@@ -61,41 +61,75 @@ yk_rt_codex_check_auth() {
 # optional model. python3 path is preferred; jq fallback for portability.
 # The python script is bash-single-quoted so its string-literal backslashes
 # pass through verbatim to python -c.
+#
+# The first line is a marker comment. A file carrying it is yakOS-generated
+# and is rewritten on every dispatch; a file without it (an operator's own
+# agent that uses the yakos- prefix) is never overwritten. Delete the marker
+# line to take ownership of a generated file. The Go materializer
+# (cli-go/internal/agentscompose/materialize_codex.go) emits identical bytes;
+# tests/run-runtime-fixtures.sh and the Go parity test keep the two in step.
+_YK_CODEX_MARKER='# yakos-generated: rewritten on every dispatch. Delete this line to keep your edits.'
+
 _yk_codex_emit_py='
-import json, sys
+import json, re, sys
 agent_id, out_file, json_path = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(json_path) as f:
+with open(json_path, encoding="utf-8") as f:
     data = json.load(f)
 def esc(s):
     return s.replace("\\", "\\\\").replace("\"\"\"", "\\\"\\\"\\\"")
-desc = (data.get("description") or "Agent: " + agent_id).replace("\"", "\\\"")
+def one(s):
+    return re.sub(r"\r\n|\r|\n", " ", s).replace("\\", "\\\\").replace("\"", "\\\"")
+desc = one(data.get("description") or "Agent: " + agent_id)
 body = data.get("prompt") or ""
 model = data.get("model")
-lines = ["name = \"" + agent_id + "\"", "description = \"" + desc + "\""]
+lines = ["# yakos-generated: rewritten on every dispatch. Delete this line to keep your edits.",
+         "name = \"" + agent_id + "\"", "description = \"" + desc + "\""]
 if model:
-    lines.append("model = \"" + model + "\"")
+    lines.append("model = \"" + one(model) + "\"")
 lines.append("developer_instructions = \"\"\"")
 lines.append(esc(body).rstrip("\n"))
 lines.append("\"\"\"")
-with open(out_file, "w") as f:
+with open(out_file, "w", encoding="utf-8", newline="\n") as f:
     f.write("\n".join(lines) + "\n")
 '
+
+# _yk_codex_is_generated <file> <id>
+#   0 when <file> may be overwritten: it carries the marker in its first 12
+#   lines, or it is a legacy yakOS file written before the marker existed
+#   (name = "<id>" on line 1, description = "..." on line 2).
+_yk_codex_is_generated() {
+    local f="$1" id="$2"
+    if head -n 12 "$f" 2>/dev/null | grep -q 'yakos-generated:'; then return 0; fi
+    [ "$(head -n 1 "$f" 2>/dev/null | tr -d '\r')" = "name = \"$id\"" ] || return 1
+    head -n 2 "$f" 2>/dev/null | tail -n 1 | grep -q '^description = "'
+}
 
 yk_rt_codex_emit_toml() {
     local id="$1" agent_json="$2" out_dir="$3"
     local out_file="$out_dir/yakos-${id}.toml"
     mkdir -p "$out_dir"
 
+    if [ -f "$out_file" ] && ! _yk_codex_is_generated "$out_file" "$id"; then
+        ct_log "codex: not overwriting $out_file (no yakos-generated marker; delete it, or add the marker line to let yakOS manage it)"
+        printf '%s\n' "$out_file"
+        return 0
+    fi
+
     if yk_emit_check_python; then
         yk_emit_run_python "$id" "$out_file" "$agent_json" "$_yk_codex_emit_py"
     else
         local desc body model
         desc="$(printf '%s' "$agent_json" | jq -r '.description // ""')"
+        [ -n "$desc" ] || desc="Agent: $id"
+        desc="${desc//$'\r\n'/ }"; desc="${desc//$'\n'/ }"; desc="${desc//$'\r'/ }"
+        desc="${desc//\\/\\\\}"; desc="${desc//\"/\\\"}"
         body="$(printf '%s' "$agent_json" | jq -r '.prompt // ""')"
+        body="${body//\\/\\\\}"; body="${body//\"\"\"/\\\"\\\"\\\"}"
         model="$(printf '%s' "$agent_json" | jq -r '.model // ""')"
         {
+            printf '%s\n' "$_YK_CODEX_MARKER"
             printf 'name = "%s"\n' "$id"
-            printf 'description = "%s"\n' "${desc//\"/\\\"}"
+            printf 'description = "%s"\n' "$desc"
             [ -n "$model" ] && [ "$model" != "null" ] && printf 'model = "%s"\n' "$model"
             printf 'developer_instructions = """\n%s\n"""\n' "$body"
         } > "$out_file"
