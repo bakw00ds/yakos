@@ -302,12 +302,44 @@ func TestAgyStreamFixtures_SandboxDeniesAnOutsideWrite(t *testing.T) {
 	}
 }
 
+// TestAgyStreamFixtures_SkillMentionReadsTheGeneratedSkill pins the live finding
+// that `@yakos-<id> <task>` works in print mode: agy reads the generated
+// SKILL.md with a view_file tool step and the model follows it (the skill in the
+// recording demands a fixed token, and the prompt was only "hello").
+func TestAgyStreamFixtures_SkillMentionReadsTheGeneratedSkill(t *testing.T) {
+	ev := readAgyFixture(t, "agy-stream-json-1.2.17-skill-mention.ndjson")
+	if m := agyFixturePayload(ev[0])["model"]; m != "gemini-3.8-flash-low" {
+		t.Errorf("init.model = %v, want the --model given", m)
+	}
+	var read bool
+	for _, e := range ev {
+		if e["event"] != "step_update" {
+			continue
+		}
+		p := agyFixturePayload(e)
+		if p["step_type"] != "tool" || p["state"] != "DONE" {
+			continue
+		}
+		info, _ := p["tool_info"].(map[string]any)
+		params, _ := info["parameters"].(map[string]any)
+		if path, _ := params["AbsolutePath"].(string); info["name"] == "view_file" && strings.HasSuffix(path, "/.agents/skills/yakos-probe/SKILL.md") {
+			read = true
+		}
+	}
+	if !read {
+		t.Error("the mention must make the model view_file the generated skill")
+	}
+	if resp, _ := agyFixtureResult(t, ev)["response"].(string); strings.TrimSpace(resp) != "OMEGA-5521" {
+		t.Errorf("the model must follow the skill, response = %q", resp)
+	}
+}
+
 // TestRecordingsContainNoPersonalData guards the redaction promised in
 // adapter-argv-recordings.md for the files that note describes.
 func TestRecordingsContainNoPersonalData(t *testing.T) {
 	var files []string
 	for _, pat := range []string{"agy-stream-json-1.2.17-conversation-*.ndjson", "agy-stream-json-1.2.17-effort-conflict.ndjson",
-		"agy-stream-json-1.2.17-sandbox-denied.ndjson", "codex-exec-json-0.154.0.ndjson", "codex-exec-json-0.154.0-resume.ndjson",
+		"agy-stream-json-1.2.17-sandbox-denied.ndjson", "agy-stream-json-1.2.17-skill-mention.ndjson", "codex-exec-json-0.154.0.ndjson", "codex-exec-json-0.154.0-resume.ndjson",
 		"codex-exec-json-0.154.0-subagent.ndjson", "codex-exec-json-0.154.0-auth-failure.ndjson"} {
 		m, _ := filepath.Glob(filepath.Join(streamFixtureDir, pat))
 		files = append(files, m...)

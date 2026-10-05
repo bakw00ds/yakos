@@ -38,6 +38,7 @@ used `--output-format stream-json --sandbox --dangerously-skip-permissions
 | `agy-stream-json-1.2.17-conversation-turn2.ndjson` | `agy -p "reply with the single word again" --effort high --conversation <conversation_id of turn 1> ...` |
 | `agy-stream-json-1.2.17-effort-conflict.ndjson` | `agy -p "reply with the single word ok" --model gemini-3.8-flash-low --effort high ...` |
 | `agy-stream-json-1.2.17-sandbox-denied.ndjson` | `agy -p "<run sh -c 'echo x > \"$HOME/p0b-agy-probe.txt\"' once and report its exit code>" --model gemini-3.8-flash-low ...` |
+| `agy-stream-json-1.2.17-skill-mention.ndjson` | `agy -p "@yakos-probe hello" --model gemini-3.8-flash-low ...` in a git repository holding `.agents/skills/yakos-probe/SKILL.md` written by the Go materializer; the skill says to answer every message with a fixed token |
 
 - **Resume.** The second turn keeps the `conversation_id`, continues `step_index`
   (turn 1 used 0-1, turn 2 uses 2-4, including a `system_message` step), and its
@@ -57,11 +58,27 @@ used `--output-format stream-json --sandbox --dangerously-skip-permissions
   so this does not show whether the model would ask to run the command outside
   the sandbox on its own.
 
+- **Skill discovery and the `@yakos-<id>` mention.** In a repository holding the
+  generated `.agents/skills/yakos-probe/SKILL.md`, `agy -p "/skills"` lists it
+  (`name: yakos-probe`, `model_invocable: true`) next to agy's built-in and plugin
+  skills. `@yakos-probe hello` then makes the model read the file with a
+  `view_file` tool step and answer with the token the skill demands, so the
+  mention works in print mode. The skill reaches the model by that tool call, not
+  by prompt injection.
+- **Slash commands in print mode** are handled by agy itself and make no model
+  call. `-p "/skills"` prints two lines: `{"event":"command_result","command":{...}}`
+  (the payload key is `command`, not `command_result`) and an `event: result`
+  whose `result` has `status: SUCCESS`, an empty `conversation_id`, `num_turns: 0`,
+  zero usage, the listing text in `response`, and a `command` object
+  (`name`, `data`). No `init` event, no steps. It is not recorded here because the
+  listing includes the user's installed plugins.
+
 ## Provenance and redaction
 
-The codex files are unedited. The agy files have two edits: `init.cwd` is
-rewritten to `/work/project` (it was the scratch directory) and, in
-`sandbox-denied`, the home directory in the error message is `/Users/user`. The
+The codex files are unedited. The agy files have two edits: `init.cwd` (and, in
+`skill-mention`, the `view_file` path) is rewritten to `/work/project` (it was the
+scratch directory) and, in `sandbox-denied`, the home directory in the error
+message is `/Users/user`. The
 files contain thread and conversation ids, token counts, tool names and, for the
 codex auth failure, the request ids of rejected unauthenticated requests. Nothing
 else identifying; checked for credentials, e-mail addresses and the user name.
