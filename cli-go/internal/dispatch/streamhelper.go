@@ -148,6 +148,14 @@ type ReadLineLoopConfig struct {
 	AgentName string
 	// BufSize is the I/O read granule (bytes).  0 defaults to 64 KiB.
 	BufSize int
+	// KeepEmptyLines delivers blank lines to onLine instead of dropping them.
+	// A plain-text stream needs them to keep paragraph breaks; a JSON stream
+	// does not care. Off by default so existing callers see no change.
+	KeepEmptyLines bool
+	// OnOverlong, when set, is called once for each line dropped for exceeding
+	// maxStreamLineBytes, so a caller that builds a result from the lines can
+	// say that it is incomplete.
+	OnOverlong func()
 }
 
 // ReadLineLoop reads lines from r and calls onLine for each complete NDJSON
@@ -208,11 +216,14 @@ func ReadLineLoop(r io.Reader, cfg ReadLineLoopConfig, onLine func(line []byte))
 						)
 						lineBuf = lineBuf[:0]
 						overlong = !haveNewline
+						if cfg.OnOverlong != nil {
+							cfg.OnOverlong()
+						}
 					} else {
 						lineBuf = append(lineBuf, segment...)
 						if haveNewline {
 							line := bytes.TrimRight(lineBuf, "\r")
-							if len(line) > 0 {
+							if len(line) > 0 || cfg.KeepEmptyLines {
 								onLine(line)
 							}
 							lineBuf = lineBuf[:0]

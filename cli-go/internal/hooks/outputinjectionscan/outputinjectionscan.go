@@ -153,40 +153,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		return out, nil
 	}
 
-	var matches []string
-	if reIgnorePrev.MatchString(output) {
-		matches = append(matches, "ignore-previous-instructions")
-	}
-	if reIgnoreAll.MatchString(output) {
-		matches = append(matches, "ignore-everything-above")
-	}
-	if reDisregard.MatchString(output) {
-		matches = append(matches, "disregard-system-prompt")
-	}
-	if reRoleOverride.MatchString(output) {
-		matches = append(matches, "role-override-attempt")
-	}
-	if reSystemLine.MatchString(output) {
-		matches = append(matches, "system-prompt-impersonation")
-	}
-	for _, tok := range modelFormatTokens {
-		if strings.Contains(output, tok) {
-			matches = append(matches, "model-format-token-injection")
-			break
-		}
-	}
-	if rePrivKey.MatchString(output) {
-		matches = append(matches, "private-key-marker")
-	}
-	if reAPIKey.MatchString(output) {
-		matches = append(matches, "leaked-api-key-shape")
-	}
-	if reBase64Long.MatchString(output) {
-		matches = append(matches, "long-base64-payload")
-	}
-	if n := countSuspiciousRunes(output); n > zwCharsThreshold {
-		matches = append(matches, fmt.Sprintf("zero-width-unicode-steganography(%d chars)", n))
-	}
+	matches := Scan(output)
 
 	if len(matches) == 0 {
 		h.log(&out, in, "REPORT", "pass", "no injection patterns matched",
@@ -224,6 +191,53 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 			"  Reference: lib/playbooks/09-prompt-injection-defense.md\n",
 		in.Tool, matchStr, agent)
 	return out, nil
+}
+
+// Scan reports which injection patterns match output, as the hook's own
+// labels in the hook's own order (an empty result means a clean scan). It is
+// the pure core of Run: no hook payload, no logging, no environment or config
+// reads, no byte cap (Run caps what it scans at maxScanBytes; a caller of Scan
+// that wants a cap applies it to the bytes it will also forward, so what is
+// scanned is exactly what is delivered).
+//
+// Transports that hand model output to another agent (the MCP dispatch tool,
+// JSON-RPC dispatch.run) call it so their result can carry the hits.
+func Scan(output string) []string {
+	var matches []string
+	if reIgnorePrev.MatchString(output) {
+		matches = append(matches, "ignore-previous-instructions")
+	}
+	if reIgnoreAll.MatchString(output) {
+		matches = append(matches, "ignore-everything-above")
+	}
+	if reDisregard.MatchString(output) {
+		matches = append(matches, "disregard-system-prompt")
+	}
+	if reRoleOverride.MatchString(output) {
+		matches = append(matches, "role-override-attempt")
+	}
+	if reSystemLine.MatchString(output) {
+		matches = append(matches, "system-prompt-impersonation")
+	}
+	for _, tok := range modelFormatTokens {
+		if strings.Contains(output, tok) {
+			matches = append(matches, "model-format-token-injection")
+			break
+		}
+	}
+	if rePrivKey.MatchString(output) {
+		matches = append(matches, "private-key-marker")
+	}
+	if reAPIKey.MatchString(output) {
+		matches = append(matches, "leaked-api-key-shape")
+	}
+	if reBase64Long.MatchString(output) {
+		matches = append(matches, "long-base64-payload")
+	}
+	if n := countSuspiciousRunes(output); n > zwCharsThreshold {
+		matches = append(matches, fmt.Sprintf("zero-width-unicode-steganography(%d chars)", n))
+	}
+	return matches
 }
 
 // extractOutput mirrors

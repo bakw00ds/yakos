@@ -25,7 +25,9 @@ const defaultTimeout = 600
 //  5. Write dispatch_started event to the log.
 //  6. Exec the runtime with stderr split to capture (PR #34).
 //  7. Write dispatch_finished event with full schema (PR #40).
-//  8. Return stdout bytes and Result.
+//  8. Return stdout bytes and Result. stdout is the runtime's raw capture
+//     (stream-json, JSONL or prose); Result carries what it means: the
+//     agent's Text, the token Usage and the native SessionID (K-135).
 //
 // Logging errors are non-fatal (silently dropped). A non-zero exit code from
 // the runtime is returned as Result.ExitCode (not as a Go error).
@@ -188,6 +190,15 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 		ModelResolved: modelResolved,
 		EvalRunID:     req.EvalRunID,
 	}
+
+	// --- 9b. Normalize the runtime's stdout (K-135) ---
+	// The runtime's own format (claude stream-json, codex JSONL, agy
+	// stream-json, or prose) becomes res.Text, res.Usage, res.SessionID and
+	// res.ModelID. dispatchOut stays raw: it is returned unchanged below for
+	// callers that want the bytes. Usage is set only when the runtime reported
+	// some, so the dispatch_finished line below gains a usage object exactly
+	// when there is something to record.
+	res.applyOutput(adapter.Name(), dispatchOut)
 
 	// --- 10. Write dispatch_finished (PR #40) ---
 	writeFinished(req, res, tsEnd, logPath)

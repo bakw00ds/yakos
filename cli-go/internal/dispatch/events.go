@@ -99,17 +99,64 @@ func writeStarted(req Request, ts time.Time, logPath string) {
 }
 
 // Result is the outcome of a dispatch Run, used to build the dispatch_finished event.
+//
+// The fields from Runtime down are the typed output of the run (K-135): what
+// the agent said, what it cost in tokens, and the handle to resume it. They are
+// filled by Run and by the streaming path from the runtime's own stdout format
+// (claude stream-json, codex JSONL, agy stream-json, or plain text) so every
+// transport receives text instead of raw NDJSON. They are NOT written to the
+// dispatch-log by writeFinished; the log keeps its schema.
 type Result struct {
-	ExitCode      int
-	DurationS     float64
-	OutputBytes   int64
-	TaskBytes     int64
-	StderrTail    string // empty → null in JSON
-	StderrTrunc   bool
+	ExitCode    int
+	DurationS   float64
+	OutputBytes int64
+	TaskBytes   int64
+	StderrTail  string // empty → null in JSON
+	StderrTrunc bool
+	// Usage is the token usage the runtime reported (input, output, cache read,
+	// cache creation, and the dollar cost for the one harness that reports it).
+	// Nil when the run reported none. Counts follow runtime.Usage's convention
+	// across every harness.
 	Usage         *cost.Usage
 	ModelChosenBy string
 	ModelResolved string
 	EvalRunID     string
+
+	// Runtime is the runtime that ran the dispatch ("claude", "codex", "agy").
+	Runtime string
+
+	// Provider is the model provider behind Runtime (anthropic, openai,
+	// google); "" for a runtime with no known provider. Derived from the
+	// runtime name for now; the registry will refine it.
+	Provider string
+
+	// Text is the agent's text, parsed out of the runtime's stdout. For a
+	// stream that is not a recognised JSON format it is the stdout text itself.
+	// Trailing newlines are trimmed. See Parsed.
+	Text string
+
+	// Parsed is true when Text came from the runtime's LineParser. A consumer
+	// must then prefer Text over raw stdout even when Text is empty (an agent
+	// that answered nothing); a Result built by a fake or a legacy caller leaves
+	// it false and the raw stdout stands (see OutputText).
+	Parsed bool
+
+	// SessionID is the harness-native session id (claude session_id, codex
+	// thread_id, agy conversation_id), usable to resume the conversation. It is
+	// NOT Request.SessionID, which is the console UI session. "" when the
+	// stream carried none.
+	SessionID string
+
+	// ModelID is the concrete model id the stream reported, "" when none.
+	ModelID string
+
+	// Truncated is true when Text is incomplete: it hit the parser's 1 MiB cap or
+	// an over-long output line was dropped.
+	Truncated bool
+
+	// Error is the failure message the harness itself reported, "" for a run
+	// that did not report one. Diagnostic only; never part of Text.
+	Error string
 }
 
 // finishedEvent is the full dispatch_finished schema (PR #40 + #31 + #34 + #32 + Phase 2).
