@@ -208,9 +208,11 @@ if [ "$SUB" = "login" ]; then
         echo
         n_ok=0; n_fail=0; n_skip=0
         for id in $(yk_rt_known); do
-            # Skip SDK adapters since they share creds with their bundled
-            # CLI — logging into claude covers claude-sdk; logging into
-            # agy covers antigravity-sdk.
+            # Skip the SDK adapters. claude-sdk is the Anthropic Agent SDK, which
+            # does not run on the claude login: it needs ANTHROPIC_API_KEY in the
+            # environment (K-137), so it is skipped with that reason.
+            # antigravity-sdk shares credentials with its bundled agy CLI, so
+            # logging into agy covers it.
             case "$id" in
                 claude-sdk)
                     echo "  $id: skip (needs ANTHROPIC_API_KEY in the environment, which yakOS never stores; see 'yakos auth login claude-sdk')"
