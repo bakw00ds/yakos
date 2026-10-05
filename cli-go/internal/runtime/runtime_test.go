@@ -192,12 +192,14 @@ func TestClaudeDispatch_NonZeroExit(t *testing.T) {
 }
 
 // TestCodexDispatch_MockRuntime verifies CodexAdapter.Dispatch passes expected flags.
+// The default is sandboxed (K-133): the old bypass flag must NOT be present.
 func TestCodexDispatch_MockRuntime(t *testing.T) {
+	useEmptyHome(t)
 	mockDir, codexScript := writeMockRuntime(t, "codex", 0, "codex output\n")
 	t.Setenv("PATH", mockDir+":"+os.Getenv("PATH"))
 
 	req := DispatchRequest{
-		Project:   "/tmp/project",
+		Project:   t.TempDir(),
 		AgentName: "backend",
 		Task:      "some task",
 	}
@@ -209,18 +211,23 @@ func TestCodexDispatch_MockRuntime(t *testing.T) {
 	}
 
 	argv := readMockArgv(t, codexScript)
-	assertContains(t, argv, "--dangerously-bypass-approvals-and-sandbox", "codex bypass flag missing")
-	assertContains(t, argv, "--add-dir", "--add-dir flag missing")
 	assertContains(t, argv, "exec", "exec subcommand missing")
+	assertContains(t, argv, "--json", "--json flag missing")
+	assertContains(t, argv, "--sandbox", "--sandbox flag missing")
+	assertContains(t, argv, "workspace-write", "sandbox policy missing")
+	if strings.Contains(argv, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Errorf("codex dispatch must be sandboxed by default; got bypass flag in argv:\n%s", argv)
+	}
 }
 
 // TestAgyDispatch_MockRuntime verifies AgyAdapter.Dispatch passes expected flags.
 func TestAgyDispatch_MockRuntime(t *testing.T) {
+	useEmptyHome(t)
 	mockDir, agyScript := writeMockRuntime(t, "agy", 0, "agy output\n")
 	t.Setenv("PATH", mockDir+":"+os.Getenv("PATH"))
 
 	req := DispatchRequest{
-		Project:   "/tmp/project",
+		Project:   t.TempDir(),
 		AgentName: "security-reviewer",
 		Task:      "review auth middleware",
 	}
@@ -233,6 +240,8 @@ func TestAgyDispatch_MockRuntime(t *testing.T) {
 
 	argv := readMockArgv(t, agyScript)
 	assertContains(t, argv, "--dangerously-skip-permissions", "agy skip-permissions flag missing")
+	assertContains(t, argv, "--sandbox", "agy --sandbox flag missing")
+	assertContains(t, argv, "--output-format", "agy --output-format flag missing")
 	assertContains(t, argv, "--add-dir", "--add-dir flag missing")
 	// The task framing uses @yakos-<name> mention.
 	assertContains(t, argv, "@yakos-security-reviewer", "agy @-mention missing")
@@ -445,36 +454,39 @@ func TestAgyChatExecCmd_NoSentinel_PMinusPTakesValueDirectly(t *testing.T) {
 }
 
 // TestCodexChatExecCmd_NoEffortFlag verifies that CodexAdapter.ChatExecCmd
-// does NOT pass --effort even when the ChatDispatchRequest carries Effort.
-// Codex does not support this flag; the adapter should ignore it.
+// never passes --effort (codex has no such flag) and instead carries the level
+// as the model_reasoning_effort config override.
 func TestCodexChatExecCmd_NoEffortFlag(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("exec.Cmd inspection requires sh; skipping on Windows")
 	}
+	useEmptyHome(t)
 	a := &CodexAdapter{}
 	req := ChatDispatchRequest{
 		Project:  "/tmp/project",
 		UserText: "task",
-		Effort:   "high", // set but must be ignored by codex
+		Effort:   "high",
 	}
 	cmd := a.ChatExecCmd(context.Background(), req)
 	argv := strings.Join(cmd.Args, " ")
 	if strings.Contains(argv, "--effort") {
-		t.Errorf("CodexAdapter.ChatExecCmd: --effort in argv (should be ignored): %s", argv)
+		t.Errorf("CodexAdapter.ChatExecCmd: --effort in argv (codex has no such flag): %s", argv)
 	}
+	assertContains(t, argv, `model_reasoning_effort="high"`, "codex effort override missing")
 }
 
 // TestAgyDispatch_NoEffortFlag verifies that AgyAdapter.Dispatch does not pass
-// --effort; agy does not support this flag.
+// --effort when the request carries no effort level.
 func TestAgyDispatch_NoEffortFlag(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mock runtime scripts require bash; skipping on Windows")
 	}
+	useEmptyHome(t)
 	mockDir, agyScript := writeMockRuntime(t, "agy", 0, "agy output\n")
 	t.Setenv("PATH", mockDir+":"+os.Getenv("PATH"))
 
 	req := DispatchRequest{
-		Project:   "/tmp/project",
+		Project:   t.TempDir(),
 		AgentName: "security-reviewer",
 		Task:      "audit",
 	}

@@ -5,7 +5,7 @@ domain: cross-cutting
 mode: [author, review, report]
 tools: [Read, Edit, Write, Bash, Grep, SendMessage]
 runtime: agy
-model: gemini-3.5
+model: gemini-3.8-flash-high
 version: 1
 references:
   - rule:lead-dispatch-discipline

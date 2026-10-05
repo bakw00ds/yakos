@@ -22,8 +22,12 @@ package dispatch
 //
 // Per-runtime streaming behaviour:
 //   - claude: true incremental streaming (multiple token chunks via ParseStreamLine).
-//   - codex: buffered (one token chunk emitted when process exits).
-//   - agy/gemini: buffered plaintext (one token chunk, cost unavailable).
+//   - codex, agy: buffered. Every stdout line goes through the runtime's
+//     LineParser (runtime.ParserFor); one token chunk with the agent's TEXT
+//     (not the raw JSONL) is emitted when the process exits, then a summary
+//     chunk carrying the token usage and the native session id. A failed turn
+//     adds an "error" chunk. Full incremental streaming is a later phase.
+//   - gemini and plugin runtimes: buffered plaintext (the plain-text parser).
 //
 // Test seam: streamRunFn (parallel to runFn) can be swapped in tests.
 
@@ -48,13 +52,23 @@ import (
 // resumes at the next '\n'.  2MB is generous enough for the claude system/init
 // event (~50KB with a full skill roster) while remaining well within normal
 // heap budgets.
-const maxStreamLineBytes = 2 * 1024 * 1024
+//
+// Defined as runtime.MaxStreamLineBytes, the cap the LineParsers enforce on the
+// lines they are fed, so the reader and the parsers can never disagree.
+const maxStreamLineBytes = runtime.MaxStreamLineBytes
 
-// maxBufferedOutputBytes is the ceiling for the total accumulated output on the
-// buffered (codex/agy) path.  A runtime that emits more than this will have its
-// output silently truncated at this limit.  The truncation marker
-// "[...output truncated...]" is appended so callers know data was dropped.
+// maxBufferedOutputBytes is the ceiling for the total stdout fed to the
+// LineParser on the buffered (codex/agy) path.  Lines past it are read and
+// discarded rather than parsed, so a runaway runtime costs neither memory nor
+// parser time.  The parser separately caps the TEXT it keeps
+// (runtime.MaxParsedTextBytes).  Either limit appends bufferedTruncationMarker
+// so callers know data was dropped.
 const maxBufferedOutputBytes = 32 * 1024 * 1024 // 32 MB
+
+// bufferedTruncationMarker is appended to buffered-path text that is
+// incomplete: the input ceiling or the parser's text cap was hit, or an
+// over-long line was dropped.
+const bufferedTruncationMarker = "\n[...output truncated...]"
 
 // MaxTaskBytes is the facade-level limit on Task / UserText size.  Enforced in
 // RunStream (and separately in Run) before any subprocess is forked, and in
@@ -143,10 +157,16 @@ type StreamChunk struct {
 	// learns it here). Summary only.
 	RuntimeResolved string
 
-	// NativeSessionID is the runtime's own session id for the turn, when its
-	// result frame carries one (claude's session_id). A chat handler stores it
-	// so the next one-shot turn can resume the conversation. It is already
-	// checked with runtime.ValidSessionID. Summary only; empty otherwise.
+	// Usage is the token usage the runtime reported (summary chunks only); nil
+	// when it reported none. For claude it is the result event's input/output
+	// tokens and cost; for the buffered runtimes it is the parsed usage with
+	// cache counts. Counts follow runtime.Usage's convention.
+	Usage *cost.Usage
+
+	// NativeSessionID is the harness-native session id (summary chunks only), ""
+	// when the stream carried none. It is NOT the console UI session id. A chat
+	// handler stores claude's so the next one-shot turn can resume the
+	// conversation; it is already checked with runtime.ValidSessionID.
 	NativeSessionID string
 
 	// AskUserQuestion fields — populated only when Type=="ask_user_question".
@@ -399,6 +419,7 @@ func execWithStreaming(
 		costUSD        float64
 		usageCost      *cost.Usage
 		nativeSession  string // claude session_id from the result frame
+		parsed         *runtime.ParseResult // buffered runtimes: the LineParser's outcome
 		textBlocks     = make(map[int]struct{})
 		toolUseBlocks  = make(map[int]*runtime.ToolEvent)          // index → in-progress tool_use
 		toolIDToName   = make(map[string]string)                    // tool-use id → name for tool_result correlation
@@ -442,6 +463,16 @@ func execWithStreaming(
 		bufferedOutputTruncated := false
 		isClaudeRuntime := adapter.Name() == "claude"
 
+		// K-135: every non-claude harness is normalized by its LineParser, so the
+		// console receives the agent's text and token usage, not raw JSONL.
+		var bufParser runtime.LineParser
+		bufferedInputBytes := 0
+		inputCeilingHit := false
+		readerDropped := 0 // lines the reader dropped for length before the parser saw them
+		if !isClaudeRuntime {
+			bufParser = runtime.ParserFor(adapter.Name())
+		}
+
 		// Wire the parser state maps into a StreamParserState so ParseAndDispatch
 		// can manage them.  The maps were already allocated above; we wrap them so
 		// both paths share the same underlying maps (no copy).
@@ -452,7 +483,14 @@ func execWithStreaming(
 			ThinkingBlocks: thinkingBlocks,
 		}
 
-		ReadLineLoop(stdoutPipe, ReadLineLoopConfig{AgentName: req.AgentName}, func(line []byte) {
+		ReadLineLoop(stdoutPipe, ReadLineLoopConfig{
+			AgentName:      req.AgentName,
+			KeepEmptyLines: !isClaudeRuntime, // plain text keeps its paragraph breaks
+			OnOverlong: func() {
+				bufferedOutputTruncated = true
+				readerDropped++
+			},
+		}, func(line []byte) {
 			if isClaudeRuntime {
 				res := ParseAndDispatch(line, ps, onChunk)
 				if res.Token != "" {
@@ -463,16 +501,16 @@ func execWithStreaming(
 					usageCost = res.Usage
 					nativeSession = res.SessionID
 				}
-			} else {
-				// Buffered path: accumulate with ceiling check.
-				if !bufferedOutputTruncated {
-					if len(allText)+len(line)+1 > maxBufferedOutputBytes {
-						allText = append(allText, []byte("\n[...output truncated...]")...)
-						bufferedOutputTruncated = true
-					} else {
-						allText = append(allText, line...)
-						allText = append(allText, '\n')
-					}
+			} else if !inputCeilingHit {
+				// Buffered path: feed the harness's LineParser, within the input
+				// ceiling (once it is hit the rest is read and discarded). The
+				// parser does not retain line; ReadLineLoop reuses its buffer.
+				if bufferedInputBytes+len(line)+1 > maxBufferedOutputBytes {
+					inputCeilingHit = true
+					bufferedOutputTruncated = true
+				} else {
+					bufferedInputBytes += len(line) + 1
+					bufParser.Feed(line)
 				}
 			}
 		})
@@ -487,10 +525,29 @@ func execWithStreaming(
 			}
 		}
 
-		// For non-claude runtimes: emit the accumulated text as one token chunk.
-		if !isClaudeRuntime && len(allText) > 0 {
-			text := string(bytes.TrimRight(allText, "\n"))
-			onChunk(StreamChunk{Type: "token", Text: text})
+		// For non-claude runtimes: emit the agent's text as one token chunk (the
+		// real incremental stream is a later phase), then, if the harness
+		// reported a failure, an error chunk the UI renders as "Error: ...".
+		if !isClaudeRuntime {
+			pr := bufParser.Finish()
+			pr.LinesDropped += readerDropped
+			parsed = &pr
+			if pr.Usage != (runtime.Usage{}) {
+				u := pr.Usage
+				usageCost = &u
+			}
+			text := pr.Text
+			if pr.Truncated || bufferedOutputTruncated {
+				parsed.Truncated = true
+				text += bufferedTruncationMarker
+			}
+			allText = []byte(text)
+			if len(allText) > 0 {
+				onChunk(StreamChunk{Type: "token", Text: text})
+			}
+			if pr.Error != "" {
+				onChunk(StreamChunk{Type: "error", Text: pr.Error})
+			}
 		}
 
 	} else {
@@ -539,6 +596,22 @@ func execWithStreaming(
 		RuntimeChosenBy: req.RuntimeChosenBy,
 		FallbackFrom:    req.FallbackFrom,
 	}
+	// K-135 typed output. A buffered runtime's parse is authoritative; for claude
+	// the streamed text is what the deltas delivered.
+	if parsed != nil {
+		result.applyParsed(adapter.Name(), *parsed)
+	} else {
+		result.Runtime = adapter.Name()
+		result.Provider = providerForRuntime(result.Runtime)
+		result.Parsed = true
+		result.Text = string(allText)
+		// A streamed turn carries the text its deltas delivered, every message of
+		// it; the result frame's final report is not separated out on this path.
+		result.TextAll = result.Text
+		// claude's own session id, from the result frame, for a chat handler to
+		// resume the conversation with.
+		result.SessionID = nativeSession
+	}
 
 	// Write dispatch_finished identically to Run (parity invariant).
 	writeFinished(req, result, tsEnd, logPath)
@@ -552,7 +625,8 @@ func execWithStreaming(
 		ModelResolved:   req.ModelResolved,
 		TotalCostUSD:    costUSD,
 		RuntimeResolved: req.Runtime,
-		NativeSessionID: nativeSession,
+		Usage:           usageCost,
+		NativeSessionID: result.SessionID,
 	})
 
 	if execErr != nil {

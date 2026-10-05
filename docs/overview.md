@@ -82,8 +82,8 @@ cli/yakos ──► cli/lib/start.sh ──► cli/lib/runtime-resolve.sh
 2. The chosen runtime adapter materializes agents in the runtime's
    native format. Claude takes a JSON injection
    (`--agents '<json>'`); codex consumes TOML files at
-   `<project>/.codex/agents/yakos-*.toml`; gemini consumes
-   markdown at `<project>/.gemini/agents/yakos-*.md`.
+   `<project>/.codex/agents/yakos-*.toml`; agy consumes
+   skills at `<project>/.agents/skills/yakos-<name>/SKILL.md`.
 3. The runtime CLI is exec'd with the right flags
    (`--add-dir <repo>`, `--permission-mode bypassPermissions` or
    the per-runtime equivalent, `--mcp-config` if a `.mcp.json`

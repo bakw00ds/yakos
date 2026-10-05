@@ -102,6 +102,61 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   Interactive chat on a pane that resolves to a non-claude runtime is refused
   with a clear 400 instead of silently starting claude.
 
+- **codex adapter rewritten against codex-cli 0.154.0 (K-133).** Framed dispatch
+  runs `codex exec --json [-m id] [-c model_reasoning_effort=...]` and resumes
+  with `codex exec resume <thread_id>`; chat passes the agent persona as
+  `-c developer_instructions="..."` (a TOML string, verified live). Both run in
+  the project directory and take `-m` and the effort level from the request. The
+  dispatch default Claude tier is not passed as a codex model, and the codex
+  semantic aliases are now empty (see Fixed).
+- **agy adapter updated for agy 1.2.x (K-133).** Both paths pass
+  `--output-format stream-json`, `--model` when set, `--sandbox` (not a
+  containment boundary; see Security), and run in the project directory. `--effort` is passed only when the
+  model id carries no effort suffix, because agy rejects the combination
+  (`--model gemini-3.8-flash-low --effort high` exits 1, checked live), and agy
+  takes only `low`, `medium` and `high`: `xhigh` and `max`, which the console and
+  the dispatch layer offer for every runtime, make agy exit 1 before any model
+  call ("gemini-3.8-flash has no "max" effort (available: low, medium, high)"), so
+  they are sent as `high` with one stderr note. codex takes all five levels
+  unchanged. A persona passed on the command line in chat is limited to 64 KiB
+  (codex and agy). For codex the limit also applies to the persona once it is
+  escaped for `-c developer_instructions` (a quote, backslash or newline takes
+  two bytes, another control character six), so a quote-heavy persona under the
+  raw limit is refused too, instead of failing in the exec with "argument list
+  too long". A larger persona is refused with a clear error before any process
+  starts. The raw stream is returned until the stream parsers land (K-135). The
+  comment claiming agy has no `--model` is gone.
+- **agy workspace skills use the directory layout (K-134).** agy 1.2.x loads a
+  skill from `.agents/skills/<name>/SKILL.md`; the emitter wrote a flat
+  `yakos-<id>.md` it does not discover. Both the bash emitter and the new Go
+  materializer now write `.agents/skills/yakos-<id>/SKILL.md` with `name:
+  yakos-<id>` (matching the `@yakos-<id>` mention) and a `.gitignore` containing
+  `*` beside it, so no project `.gitignore` edit is needed. Checked live with agy
+  1.2.17: `agy -p "/skills"` lists the generated skill, and `@yakos-<id> <task>`
+  in print mode makes the model read the skill and follow it. Leftover flat files
+  are removed by the bash cleanup.
+
+- **One-shot Go dispatches now write a `usage` object to the dispatch-log.**
+  `dispatch.Run` never filled `Result.Usage`, so a `dispatch_finished` line it
+  wrote had no tokens or cost (the bash path always had them). It now carries
+  what the runtime reported, so the readers of `usage` see these runs: the
+  Performance dashboard, the metrics readers, and the per-agent budgets, which
+  sum the dollar figure that only claude reports. `yakos cost` does not read
+  `usage` until P0d. Lines for runtimes that report nothing are unchanged.
+  `cost.Usage` now documents the token convention (fresh input plus separate
+  cache counts) and one known gap: for codex the bash dispatcher wrote the raw
+  input total with `cache_read` 0 under the same keys, so the two writers
+  disagree until K-136 aligns them. A test reads a log mixing both writers and
+  old and new rows.
+- `output_bytes` of a streamed codex or agy chat turn now measures the text the
+  console received, not the raw JSONL.
+- **MCP `yakos.dispatch` no longer offers `gemini`, and lists all four model
+  tiers.** The runtime is retired, and the `model` list now names every tier
+  dispatch accepts (`haiku`, `sonnet`, `opus`, `fable`; it omitted `fable`). A
+  test ties the list to dispatch's own validation so the two cannot drift.
+  Widening `model` to other runtimes' ids waits for per-runtime validation
+  (K-132).
+
 ### Added
 
 - **The dispatch-log records why a runtime was chosen (K-132 P0a).**
@@ -121,6 +176,136 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   `default-runtime`, `default-fallback` (inline or block list) and
   `per-domain` are read by a new tolerant reader (`internal/projectcfg`). A
   malformed file is ignored with a warning rather than failing dispatch.
+
+- **Go materializers for codex and agy agent files (K-134).**
+  `agentscompose.MaterializeCodexAgent` and `MaterializeAgyAgent` write
+  `.codex/agents/yakos-<id>.toml` and `.agents/skills/yakos-<id>/SKILL.md` for
+  the dispatched agent before codex or agy starts. The emitters are
+  byte-identical for the same agent JSON: the Go emitter, the bash python path
+  and the bash jq fallback (used when python3 is absent) write the same bytes for
+  every agent in a test corpus and for every framework agent, and `yakos
+  dispatch` under `YAKOS_IMPL=go` writes the files the bash emitters write for
+  the same agents (`tests/run-runtime-fixtures.sh` Test 19; CI builds the binary
+  for it and fails if it is missing). The two composers hand the emitters
+  different JSON (the bash one keeps a Claude tier in `model` and the blank line
+  after the frontmatter), and the emitters absorb both, so the files agree.
+  Generated files carry a `yakos-generated:` marker; a file without it is never
+  overwritten (bash and Go agree), unchanged files are not rewritten, writes are
+  atomic 0644, and a symlinked directory component or target is refused. A write
+  failure never stops the dispatch. The per-dispatch model is not written into
+  the file, so concurrent dispatches of one agent never rewrite it. A NUL byte in
+  an agent's text makes both implementations skip that agent's file with a note.
+- **`yakos doctor` "Runtime isolation" section (K-133).** Hints at `yakos auth
+  login codex` when codex shares `~/.codex`, and warns when the router policy
+  unsandboxes a harness or was ignored. Silent on a machine with neither.
+- **Stream recordings from the adapters' argv.** Real codex-cli 0.154.0
+  `exec --json` output (a plain turn, `exec resume`, a framed subagent
+  delegation, an unauthenticated failure) and real agy 1.2.17 `stream-json`
+  output (two turns of one conversation, the `--model`/`--effort` conflict error,
+  one write outside the workspace denied under `--sandbox`, an `@yakos-<id>` skill
+  mention) in `tests/fixtures/runtime-streams/`, with the command for each in
+  `adapter-argv-recordings.md`. The agy resume recording shows usage that is
+  cumulative across turns, including turns run by separate processes, so a parser
+  must not read `result.usage` of a resumed turn as that turn's own usage. A guard
+  test keeps every recording free of home directories, temporary paths, `@`
+  handles and the name of the account running the test.
+
+- **Every dispatch transport returns the agent's text, its token usage and the
+  runtime's session id (K-135).** Until now `dispatch.Run` handed back the
+  runtime's raw stdout (claude stream-json, codex JSONL), the MCP
+  `yakos.dispatch` tool and JSON-RPC `yakos.dispatch.run` discarded it, Flows
+  spliced the raw NDJSON into `${nodes.<id>.output}`, and the console showed
+  raw codex JSONL. A new `runtime.LineParser` (selected by `ParserFor`)
+  normalizes each harness's own output into the agent's text, token usage, the
+  harness-native session id and the model id: a wrapper over the existing
+  claude stream-json parser, a `codex exec --json` parser and an agy
+  `--output-format stream-json` parser, plus a plain-text parser for any other
+  runtime (and as the fallback when a stream turns out not to be JSON, so
+  today's agy adapter keeps working). Parsers are deterministic, bounded (a
+  2 MiB line cap, a 1 MiB text cap), strip NUL bytes like the Go hook twins,
+  and never retain the line they are fed.
+  - `dispatch.Run` fills new `Result` fields (`Text`, `TextAll`, `SessionID`,
+    `ModelID`, `Provider`, `Runtime`, `Parsed`, `Error`, `CumulativeUsage`, and
+    `Truncated` with its reasons `TextCapped`, `TextAllCapped` and
+    `LinesDropped`; `Usage` now carries tokens, cache counts and, for claude,
+    the cost) and still returns the raw stdout.
+  - The MCP `yakos.dispatch` tool and `yakos.dispatch.run` return one shared
+    object: `{text, scan, exit_code, duration_s, output_bytes, runtime,
+    model_resolved, model_id, provider, session_id, usage, error}`. `text` is
+    capped at 64 KiB and passed through the Go output-injection scan; `scan`
+    lists the hits (detection only). Every field the old result had is kept.
+  - **Claude's answer is the result frame's final text.** The framed prompt asks
+    the relay for the sub-agent's final report, and the result frame is the
+    stream's contract for it. The relay's lead-in and a sub-agent's narration
+    (claude forwards the latter when `CLAUDE_CODE_FORWARD_SUBAGENT_TEXT` is set,
+    which the daemon's env allowlist lets through) are not part of `text`.
+    Without a result frame (a killed run), or with a blank one, `text` falls back
+    to the top-level assistant text, and an error result's message is never
+    taken as the answer.
+    `TextAll` keeps every assistant text block, as the bash dispatcher printed
+    them: `yakos dispatch` prints it, and no MCP, JSON-RPC or Flows result
+    carries it (a second long field would double the injection surface and the
+    tokens a calling agent reads).
+  - **agy usage is the run's own, not the conversation's.** With
+    `--conversation` a result frame reports the whole conversation's tokens so
+    far (recorded: turn 2 reports turn 1's tokens plus its own), which would
+    count every earlier turn again each time a conversation is resumed. The
+    parser exposes the run's own figure as `ParseResult.Usage` and the frame's
+    total as `ParseResult.CumulativeUsage`, and the frame's own `num_turns`
+    decides which counts as the run's own. On a first turn (`num_turns` of 1 or
+    less) it is the frame's counts, which are complete even when a step line was
+    lost and are all the single `--output-format json` envelope has. After the
+    first turn it is the sum of the usage carried by the DONE steps, so adding
+    runs up needs no subtraction, and a stream without steps reports no tokens.
+    The rule reads the stream, not the request, so it holds for MCP, Flows,
+    every console chat turn and any way of resuming a conversation.
+    `Result.CumulativeUsage` keeps the frame's total for reference and is not
+    logged or sent. The frame's duration is the session's clock (turn 2 of the
+    recorded pair reports 35.9 seconds for a step of about 4), so
+    `Usage.DurationMs` is carried on a first turn and left zero after it; the
+    measured duration of the process is the latency source. The parser also
+    takes agy's slash-command reply (a `command_result` frame and a result with
+    no session) and a stream in a different schema, which now comes back as its
+    raw lines instead of empty.
+  - Flows splice the text, so the untrusted-output scan now examines the real
+    payload (line-anchored patterns could not match inside JSON-escaped
+    NDJSON), and each node's token usage is recorded in the per-run
+    `node-dispatch.ndjson`. A failed node's error carries the runtime's own
+    message.
+  - The Chat handler now receives codex and agy answers as text (one chunk, as
+    before) instead of raw JSONL, and a failed turn adds an error chunk, which
+    the pane renders as an error message. The summary chunk carries the usage
+    and the native session id for the handler, but the handler does not forward
+    them to the browser yet; that lands with the P0a and P0d work, so the
+    console shows neither today.
+  - `yakos dispatch` (Go) prints everything the agent said (`TextAll`, as the
+    bash path does), not the raw stream. A failed run prints the runtime's own
+    error message and its stderr tail to stderr and exits non-zero (the
+    runtime's exit code, or 1 when the runtime reported a failure but exited 0),
+    where the raw JSONL used to carry the message. Both come from the harness,
+    so they are printed with every escape sequence (CSI, OSC and the other
+    string sequences, short forms such as a terminal reset) and every control
+    character removed except newline and tab; the agent text itself is printed
+    as it is, as the bash path prints it. Text cut at the 1 MiB cap (the final
+    text, or the full join the CLI prints), or a line skipped for exceeding
+    2 MiB, prints one stderr notice (`output truncated at 1 MiB`,
+    `line exceeded N bytes and was skipped`); `Result.TextCapped`,
+    `Result.TextAllCapped` and `Result.LinesDropped` say which.
+  - Token counts follow one convention for every harness: `input_tokens` is
+    the fresh prompt and cache reads and writes are separate (codex reports its
+    input total with the cached part inside it, and is normalized). No price is
+    computed.
+  - Fixtures under `tests/fixtures/runtime-streams`: three real codex 0.154.0
+    recordings and six real agy 1.2.17 recordings (a plain reply and a shell
+    tool step, both on `gemini-3.8-flash-low`, and four recorded by wp-p0b for
+    K-133: a two-turn conversation, a run refused before it started, and a
+    sandbox refusal; `ModelID` carries the id the `init` frame reports, effort
+    suffix included). The claude streams and the cases that were not recorded
+    (agy checkpoint steps, multi-turn stdin sessions, tool errors and the
+    `--output-format json` envelope) are synthetic and marked as such in the
+    folder's README.
+    `docs/mcp-integration.md`, `docs/unified-console.md` and both package
+    READMEs document the new results.
 
 ### Removed
 
@@ -163,6 +348,39 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   from the prompt. Lines up to 1 MiB are now read whole, and a longer one makes
   composing the roster fail with an error naming the file and the line.
 
+- **Model aliases and the two general agents named models that do not exist.**
+  `lib/settings/model-aliases.json`: the agy and antigravity-sdk columns now map to
+  ids `agy models` lists (`cheap` `gemini-3.8-flash-low`, `balanced`
+  `gemini-3.8-flash-high`, `best` `claude-opus-5-5-medium`, `reasoning`
+  `gemini-3.1-pro-high`, `frontier` `claude-opus-5-5-high`; the old
+  `gemini-3.5-flash`, `gemini-3.1-pro`, `claude-opus-4.6` and `claude-fable-5`
+  are not ids agy lists). The
+  codex column is empty on purpose, meaning the harness default (no `-m`): its old
+  `gpt-5`, `gpt-5-mini`, `gpt-5-nano` and `o4-mini` are not in the ChatGPT-login
+  catalog and codex rejects an unknown id with HTTP 400. `general-agy` pinned
+  `gemini-3.5`, which does not exist, and now pins `gemini-3.8-flash-high`;
+  `general-codex` pinned `gpt-5` and now pins the alias `balanced`, which resolves
+  to codex's default model. The Go adapters read these columns; the bash
+  dispatcher does not (the helper that does, `yk_pcfg_resolve_model`, has no
+  callers) and resolves the alias to a Claude tier on its own (next entry).
+- **A model alias no longer writes a Claude tier into a codex or agy agent file.**
+  The bash composer turns `balanced` into the tier `sonnet`, and the emitter wrote
+  `model = "sonnet"` into `.codex/agents/yakos-general-codex.toml`, which codex
+  0.154.0 then refused to run ("its fixed `sonnet` model is not supported with
+  this Codex ChatGPT account"). Both emitters (Go, bash python and bash jq) now
+  write a model line only for a model that is not `haiku`, `sonnet`, `opus` or
+  `fable`; with none, the harness default applies, which is what an empty alias
+  for the runtime means. The `general-codex` pin stays `balanced`.
+- **codex agent chat and resume.** The old chat command passed `--system-prompt`
+  (codex has no such flag), the framed resume used the interactive `codex
+  resume` picker, and `--output-last-message -` named a file called `-`.
+- **Generated TOML and skills survive odd descriptions and personas.** A
+  description with a backslash or a line break produced an invalid TOML string; both
+  emitters now escape and collapse it, and write UTF-8 with `\n` line endings
+  regardless of locale. A control character, DEL or a lone carriage return in an
+  agent's text is invalid TOML (and invalid in a YAML double-quoted scalar), so
+  both emitters now write it as `\u00XX`, as the chat path already did.
+
 ### Security
 
 - **A conversation, and the claude session its follow-ups resume, belong to
@@ -200,6 +418,45 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   claude. Agent files named `claude`, `codex` or `agy` are now skipped with a
   warning and rejected by `yakos validate`. The chat summary event also
   carries `runtime_resolved`, the runtime that actually ran the turn.
+
+- **codex dispatch is sandboxed by default; agy gets `--sandbox` but is not
+  contained (K-133, K-158).** The Go dispatcher (console, MCP, Flows, JSON-RPC,
+  `YAKOS_IMPL=go yakos dispatch`) ran both harnesses with approvals and sandbox
+  switched off, so any task text or file the model read could drive arbitrary
+  commands as the operator. codex now runs `exec --sandbox workspace-write -c
+  approval_policy="never"`, an OS sandbox with the network off by default whose
+  policy the model cannot change (`exec resume`, which has no `--sandbox`, takes
+  `-c sandbox_mode="workspace-write"`). agy still gets `--sandbox`, because it
+  blocks the default write path.
+  Under `--sandbox --dangerously-skip-permissions`, agy's macOS Seatbelt sandbox
+  blocks writes outside the workspace by default but leaves file reads and
+  outbound network unrestricted, and the model can escalate out of the sandbox
+  at will via `run_command(BypassSandbox=true)`, which
+  `--dangerously-skip-permissions` auto-approves; agy dispatch is therefore not
+  a containment boundary for reads, network or writes and must only receive
+  non-sensitive work or run inside an external OS sandbox (K-159).
+  The old bypass returns only when
+  `~/.yakos-state/router-policy.yml` lists the runtime in
+  `allow_unsandboxed_runtimes`. That file is read from `$HOME/.yakos-state` only
+  (not `YAKOS_DISPATCH_LOG`, K-129), must be a regular file you own that is not
+  group or world writable and not a symlink, and cannot be enabled from a
+  project `.yakos.yml`; an ignored file is explained on stderr and in `yakos
+  doctor`, and an active bypass prints one stderr line per process and a doctor
+  warning. Inside codex's sandbox writes outside the project fail, `.git` is
+  read-only (no `git commit`) and the network is off. See
+  `docs/runtime-matrix.md` and UPGRADING.md. The bash adapters used by the bash
+  `yakos dispatch` path are unchanged until K-143.
+- **yakOS-owned `CODEX_HOME` (K-133).** `yakos auth login codex` (Go and bash)
+  now signs codex in to `~/.yakos-state/codex-home` (0700) instead of the
+  operator's `~/.codex`. Once that profile holds a login, dispatch (Go and bash),
+  Go chat and the bash `yakos start` run codex under it (an inherited
+  `CODEX_HOME` is replaced, with a stderr note), so they never share one
+  `auth.json` with your own codex (openai/codex#48465). Go `yakos start` does
+  not use the profile yet: it launches the interactive codex with your own
+  `CODEX_HOME`. Until the command is run nothing changes. `yakos auth status`
+  says which login dispatch will use, `yakos auth logout codex` signs out of the
+  profile only, and yakOS never calls the codex app-server `account/login`
+  method.
 
 ## [0.61.0.0] — 2026-10-03
 

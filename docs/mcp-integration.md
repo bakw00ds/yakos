@@ -123,6 +123,57 @@ The lead can chain these naturally — telling claude "have codex review
 this, then ask agy to fuzz the inputs" works because both tools are in
 the same response surface.
 
+## The native `yakos.dispatch` tool (Go MCP server)
+
+Separately from the Python server above, the daemon's own MCP server
+(`yakos serve --mcp-http-addr`, default `127.0.0.1:7894`; see
+`cli-go/internal/mcpserver/README.md`) exposes a `yakos.dispatch` tool that
+runs any roster agent on any runtime. Its result used to carry only the exit
+code and sizes; it is now the agent's **text**, parsed out of the runtime's
+own output (claude stream-json, `codex exec --json` JSONL, agy stream-json;
+prose from any other runtime), with the token usage and the runtime's own
+session id:
+
+```json
+{
+  "text": "ok",
+  "scan": [],
+  "exit_code": 0,
+  "duration_s": 6.41,
+  "output_bytes": 764,
+  "runtime": "codex",
+  "model_resolved": "sonnet",
+  "provider": "openai",
+  "session_id": "01a10c3a-338e-71f3-a8b8-6aef08430c40",
+  "usage": {"input_tokens": 7707, "output_tokens": 5, "cache_read": 7424, "cache_creation": 0}
+}
+```
+
+- **`text`** is the agent's answer. For claude that is the final text of the
+  stream's result frame: the relay's lead-in ("Dispatching to ...") and a
+  sub-agent's narration are not in it, and neither is anything else the run
+  printed along the way. Without a result frame (a killed run) it falls back to
+  the top-level assistant text. It is at most 64 KiB (`text_truncated` says when
+  it was cut) and is **untrusted model output**. It is passed through the Go
+  `output-injection-scan` before it is returned; `scan` lists the patterns
+  that matched (`[]` when clean). The scan only reports. A client that feeds
+  `text` to another model should treat a non-empty `scan` as a warning, as the
+  Claude Code `output-injection-scan` hook does for `mcp__` tool output.
+- **`usage`** counts tokens the same way for every runtime: `input_tokens` is
+  the fresh (uncached) prompt, `cache_read` and `cache_creation` are the
+  cached remainder, `output_tokens` includes reasoning. `total_cost_usd` is
+  present only for claude, the one harness that reports a dollar figure;
+  codex and agy report tokens only. The counts are this call's own, so a
+  client can add calls up. agy also reports a conversation total, which the
+  result does not carry. `usage` is omitted when the runtime reported none.
+- **`session_id`** is the runtime's own id (claude `session_id`, codex
+  `thread_id`, agy `conversation_id`). The tool does not accept a resume id
+  yet; use `yakos dispatch` with `YAKOS_CONVERSATION_ID` to continue one.
+- A non-zero **`exit_code`** is a result, not a tool error; when the runtime
+  said why it failed, **`error`** carries the message and `text` is empty.
+
+The JSON-RPC method `yakos.dispatch.run` returns the same object.
+
 ## Conversation state
 
 MCP server state lives at `~/.yakos-state/mcp-conversations.json`:

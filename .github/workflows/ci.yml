@@ -68,13 +68,28 @@ jobs:
   runtime-fixtures:
     name: runtime adapter fixtures
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - name: Install jq + python3
         run: sudo apt-get update -y && sudo apt-get install -y jq python3
         timeout-minutes: 5
+      # Test 19 of the suite runs `YAKOS_IMPL=go yakos dispatch` and compares the
+      # agent files it writes with the bash emitters', so it needs bin/yakos. The
+      # job did not build it, and the test skipped itself in CI.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: cli-go/go.sum
+      - name: Build the yakos binary
+        run: make build
+        timeout-minutes: 8
       - name: Run runtime fixture suite
+        # YAKOS_REQUIRE_GO_BINARY turns a missing bin/yakos into a failure
+        # instead of a skip, so Test 19 cannot quietly stop running.
+        env:
+          YAKOS_REQUIRE_GO_BINARY: "1"
         run: |
           ./tests/run-runtime-fixtures.sh
 

@@ -99,14 +99,36 @@ func writeStarted(req Request, ts time.Time, logPath string) {
 }
 
 // Result is the outcome of a dispatch Run, used to build the dispatch_finished event.
+//
+// The fields from Runtime down are the typed output of the run (K-135): what
+// the agent said, what it cost in tokens, and the handle to resume it. They are
+// filled by Run and by the streaming path from the runtime's own stdout format
+// (claude stream-json, codex JSONL, agy stream-json, or plain text) so every
+// transport receives text instead of raw NDJSON. They are NOT written to the
+// dispatch-log by writeFinished; the log keeps its schema.
 type Result struct {
-	ExitCode      int
-	DurationS     float64
-	OutputBytes   int64
-	TaskBytes     int64
-	StderrTail    string // empty → null in JSON
-	StderrTrunc   bool
-	Usage         *cost.Usage
+	ExitCode    int
+	DurationS   float64
+	OutputBytes int64
+	TaskBytes   int64
+	StderrTail  string // empty → null in JSON
+	StderrTrunc bool
+	// Usage is the token usage of this run (input, output, cache read, cache
+	// creation, and the dollar cost for the one harness that reports it). Nil when
+	// the run reported none. Counts follow runtime.Usage's convention across every
+	// harness. It is what gets logged and summed, so adding runs up counts every
+	// token once. For agy, whose result frame totals the whole conversation, the
+	// parser decides from the frame's own turn count: the frame's counts on a
+	// first turn, the sum of the run's DONE steps after it, with DurationMs zero
+	// (see runtime.ParseResult.Usage). DurationS is the measured duration.
+	Usage *cost.Usage
+
+	// CumulativeUsage is the running total of the whole native conversation up to
+	// and including this run, for the harness that reports one (agy), else nil.
+	// It is for reference and cross-checking. Do not add it up across runs: it
+	// counts the earlier turns again. Not written to the dispatch records.
+	CumulativeUsage *cost.Usage
+
 	ModelChosenBy string
 	ModelResolved string
 	EvalRunID     string
@@ -116,6 +138,61 @@ type Result struct {
 	// when the chain fell back. Empty on results that never reached routing.
 	RuntimeChosenBy string
 	FallbackFrom    string
+
+	// Runtime is the runtime that ran the dispatch ("claude", "codex", "agy").
+	Runtime string
+
+	// Provider is the model provider behind Runtime (anthropic, openai,
+	// google); "" for a runtime with no known provider. Derived from the
+	// runtime name for now; the registry will refine it.
+	Provider string
+
+	// Text is the agent's answer, parsed out of the runtime's stdout: for claude
+	// the result frame's final text (never sub-agent narration), for codex and
+	// agy every assistant message, for a stream that is not a recognised JSON
+	// format the stdout text itself. Trailing newlines are trimmed. This is what
+	// the transports and Flows hand on. See Parsed and runtime.ParseResult.Text.
+	Text string
+
+	// TextAll is everything the agent said, sub-agent narration included, the way
+	// the bash dispatcher printed it. It contains Text and is for a person at a
+	// terminal (yakos dispatch prints it); transports that hand a result to
+	// another agent return Text only. Equal to Text for runtimes that do not
+	// tell the two apart.
+	TextAll string
+
+	// Parsed is true when Text came from the runtime's LineParser. A consumer
+	// must then prefer Text over raw stdout even when Text is empty (an agent
+	// that answered nothing); a Result built by a fake or a legacy caller leaves
+	// it false and the raw stdout stands (see OutputText).
+	Parsed bool
+
+	// SessionID is the harness-native session id (claude session_id, codex
+	// thread_id, agy conversation_id), usable to resume the conversation. It is
+	// NOT Request.SessionID, which is the console UI session. "" when the
+	// stream carried none.
+	SessionID string
+
+	// ModelID is the concrete model id the stream reported, "" when none.
+	ModelID string
+
+	// Truncated is true when Text is incomplete. TextCapped and LinesDropped say
+	// why; a streamed turn can also be truncated by the 32 MB input ceiling,
+	// which sets neither.
+	Truncated bool
+
+	// TextCapped is true when Text reached the parser's 1 MiB cap and the rest
+	// was dropped; TextAllCapped says the same of TextAll.
+	TextCapped    bool
+	TextAllCapped bool
+
+	// LinesDropped counts output lines skipped for exceeding the per-line cap
+	// (runtime.MaxStreamLineBytes). A dropped line contributes nothing to Text.
+	LinesDropped int
+
+	// Error is the failure message the harness itself reported, "" for a run
+	// that did not report one. Diagnostic only; never part of Text.
+	Error string
 }
 
 // finishedEvent is the full dispatch_finished schema (PR #40 + #31 + #34 + #32 + Phase 2).

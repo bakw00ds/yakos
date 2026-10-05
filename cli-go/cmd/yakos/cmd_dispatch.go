@@ -13,6 +13,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/team"
 )
 
@@ -238,7 +239,7 @@ func runDispatch(yakosRoot string, args []string) {
 		ConversationID:       cliConvID,
 	}
 
-	stdout, _, err := dispatch.Run(context.Background(), req)
+	stdout, res, err := dispatch.Run(context.Background(), req)
 	if err != nil {
 		printDispatchError(os.Stderr, err)
 		if budget.IsRefused(err) {
@@ -247,13 +248,77 @@ func runDispatch(yakosRoot string, args []string) {
 		os.Exit(1)
 	}
 
-	// Write captured stdout to the terminal.
-	if len(stdout) > 0 {
-		if _, err := os.Stdout.Write(stdout); err != nil {
+	// Write the agent's text to the terminal (K-135): the runtime's raw
+	// stream-json / JSONL is not what a person running `yakos dispatch` wants,
+	// and the bash path prints text too. It prints everything the agent said
+	// (TextAll), as bash does; the transports hand on only the final answer. A
+	// result the dispatch layer did not parse keeps its raw stdout.
+	out := res.OutputTextAll(stdout)
+	if res.Parsed && len(out) > 0 {
+		out = append(append([]byte(nil), out...), '\n') // Text has trailing newlines trimmed
+	}
+	if len(out) > 0 {
+		if _, err := os.Stdout.Write(out); err != nil {
 			fmt.Fprintf(os.Stderr, "dispatch: write stdout: %v\n", err)
 			os.Exit(1)
 		}
 	}
+
+	// What the run says about itself goes to stderr, and a failed run exits
+	// non-zero. The agent text above no longer carries the runtime's raw stream,
+	// which is where a failure message used to show up.
+	if code := reportDispatchOutcome(os.Stderr, res); code != 0 {
+		os.Exit(code)
+	}
+}
+
+// reportDispatchOutcome writes to w what a finished run says about itself and
+// returns the process exit code (K-135).
+//
+//   - A runtime that exits non-zero keeps its exit code. An exit code the
+//     dispatch layer could not read (a runtime killed by a signal) becomes 1.
+//   - A runtime that reported a failure in its own output (a codex turn.failed,
+//     a claude error result) but exited 0 makes dispatch exit 1: the run did not
+//     succeed.
+//   - The failure message, the exit code and the runtime's stderr tail are
+//     printed. The agent text on stdout does not carry them. The message and
+//     the tail come from the harness, so they pass through sanitizeForTerminal:
+//     no escape sequence or other control character reaches the terminal.
+//   - Text that is incomplete says why, once per cause: the 1 MiB text cap, and
+//     lines skipped for exceeding the per-line cap.
+func reportDispatchOutcome(w io.Writer, res dispatch.Result) int {
+	name := res.Runtime
+	if name == "" {
+		name = "runtime"
+	}
+
+	if res.TextCapped || res.TextAllCapped {
+		fmt.Fprintf(w, "dispatch: output truncated at %d MiB\n", runtime.MaxParsedTextBytes>>20)
+	}
+	switch {
+	case res.LinesDropped == 1:
+		fmt.Fprintf(w, "dispatch: line exceeded %d bytes and was skipped\n", runtime.MaxStreamLineBytes)
+	case res.LinesDropped > 1:
+		fmt.Fprintf(w, "dispatch: %d lines exceeded %d bytes and were skipped\n", res.LinesDropped, runtime.MaxStreamLineBytes)
+	}
+
+	if res.Error != "" {
+		fmt.Fprintf(w, "dispatch: %s reported an error: %s\n", name, sanitizeForTerminal(res.Error))
+	}
+	code := res.ExitCode
+	switch {
+	case code != 0:
+		fmt.Fprintf(w, "dispatch: %s exited with code %d\n", name, code)
+		if tail := strings.TrimSpace(sanitizeForTerminal(res.StderrTail)); tail != "" {
+			fmt.Fprintf(w, "dispatch: %s stderr (last lines):\n%s\n", name, tail)
+		}
+		if code < 0 {
+			code = 1
+		}
+	case res.Error != "":
+		code = 1
+	}
+	return code
 }
 
 // printDispatchError writes a dispatch failure as one "dispatch: ..." line.

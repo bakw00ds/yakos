@@ -48,3 +48,28 @@ func Dir() string {
 func DispatchLog() string {
 	return filepath.Join(Dir(), dispatchLogName)
 }
+
+// TrustedDir returns the user's real state directory, $HOME/.yakos-state,
+// resolved from the home directory only. Unlike Dir it deliberately ignores
+// YAKOS_DISPATCH_LOG.
+//
+// Use it for files that loosen a security default (the owner-only router
+// policy) or that choose which credentials a subprocess runs under (the
+// yakOS-owned CODEX_HOME profile). A project can set environment variables
+// for the processes it spawns (a committed .claude/settings.json env block,
+// K-129), so letting YAKOS_DISPATCH_LOG relocate those files would let a
+// cloned repository plant its own policy or credential profile.
+//
+// It returns "" when no home directory can be determined; callers must then
+// treat the feature as off rather than fall back to a temp directory.
+func TrustedDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, stateDirName)
+}
+
+// OwnedByCurrentUser reports whether fi is owned by the effective user. It is
+// a no-op (true) on Windows, where ownership is expressed through ACLs.
+func OwnedByCurrentUser(fi os.FileInfo) bool { return ownedByCurrentUser(fi) }

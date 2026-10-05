@@ -22,6 +22,24 @@ import (
 // Usage holds the optional per-invocation token/cost data reported by the
 // runtime adapter (available on events where the runtime returned structured
 // telemetry).
+//
+// Token convention (K-135). InputTokens counts only FRESH prompt tokens, those
+// not served from a cache; CacheRead and CacheCreation count the cached
+// remainder, so the whole prompt is InputTokens + CacheRead + CacheCreation.
+// OutputTokens includes reasoning tokens. TotalCostUSD is whatever the harness
+// itself reported, which only claude does; no price is computed anywhere. This
+// is the Anthropic convention, and the Go dispatcher normalizes every harness to
+// it (runtime.Usage is an alias of this type). codex counts its cached tokens
+// INSIDE its input total natively, and the Go parser subtracts them.
+//
+// The convention is not uniform across the log. For claude the bash and Go
+// writers agree. For codex they do not: rows the bash dispatcher wrote copied
+// codex's own fields, so input_tokens holds the whole prompt, cached tokens
+// included, and cache_read is 0; rows the Go dispatcher writes hold the fresh
+// remainder in input_tokens and the cached part in cache_read. A reader that
+// adds prompt tokens up per row must not infer the convention from the keys
+// alone. Aligning the two writers is K-136; this comment records the fact and
+// no reader changes with it.
 type Usage struct {
 	InputTokens   int64   `json:"input_tokens"`
 	OutputTokens  int64   `json:"output_tokens"`

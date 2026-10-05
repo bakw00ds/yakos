@@ -124,6 +124,32 @@ func normalizeDoctorOutput(home, yakosRoot string) func([]byte) []byte {
 	}
 }
 
+// stripGoOnlyDoctorSections removes the doctor sections the bash doctor does not
+// have (the bash doctor is only the parity oracle; `yakos doctor` always runs
+// Go-native). Such a section can appear on a host that qualifies, for example
+// "Runtime isolation" prints a hint when codex is on PATH, so the byte-exact
+// fresh-install case must not depend on the host. A section runs from its header
+// line to the next blank line, which is consumed with it.
+func stripGoOnlyDoctorSections(b []byte) []byte {
+	goOnly := map[string]bool{"Runtime isolation": true}
+	var out []string
+	skipping := false
+	for _, line := range strings.Split(string(b), "\n") {
+		if goOnly[line] {
+			skipping = true
+			continue
+		}
+		if skipping {
+			if line == "" {
+				skipping = false
+			}
+			continue
+		}
+		out = append(out, line)
+	}
+	return []byte(strings.Join(out, "\n"))
+}
+
 // ---- (a) fresh-install -------------------------------------------------------
 
 // TestDoctorParity_FreshInstall verifies doctor output against a fresh isolated
@@ -149,7 +175,7 @@ func TestDoctorParity_FreshInstall(t *testing.T) {
 		ExitCodeMatch: true,
 
 		StdoutTransformBash: normalizeDoctorFull(tmpHome, root),
-		StdoutTransformGo:   norm,
+		StdoutTransformGo:   func(b []byte) []byte { return stripGoOnlyDoctorSections(norm(b)) },
 	})
 }
 

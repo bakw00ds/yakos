@@ -572,6 +572,20 @@ type nodeDispatchEvent struct {
 	NodeID string `json:"node_id"` // workflow node identifier
 	Agent  string `json:"agent"`   // agent name (informational)
 	Ts     string `json:"ts"`      // RFC3339 UTC timestamp
+
+	// K-135: what the node's dispatch consumed, written on dispatch_finished
+	// only and omitted when the runtime reported nothing. Tokens are the
+	// primary unit (counts follow runtime.Usage's convention: input_tokens is
+	// the fresh prompt, the cache counts are separate); no dollar figure is
+	// recorded. The native session id is deliberately NOT written: this file is
+	// world-readable (0644), unlike the global dispatch-log.
+	Runtime       string `json:"runtime,omitempty"`
+	Provider      string `json:"provider,omitempty"`
+	ModelID       string `json:"model_id,omitempty"`
+	InputTokens   int64  `json:"input_tokens,omitempty"`
+	OutputTokens  int64  `json:"output_tokens,omitempty"`
+	CacheRead     int64  `json:"cache_read,omitempty"`
+	CacheCreation int64  `json:"cache_creation,omitempty"`
 }
 
 // nodeDispatchLogPath returns the path to the per-run node dispatch log.
@@ -757,18 +771,36 @@ func (e *Engine) runNode(
 	// Dispatch through the governed Service (or injected test fake).
 	stdout, result, err := e.dispatchNode(ctx, params)
 
-	// Write dispatch_finished to the per-run node dispatch log.
+	// Write dispatch_finished to the per-run node dispatch log, with the token
+	// usage the runtime reported (K-135).
 	// Non-fatal: even if this fails, run.json still captures the node outcome.
-	appendNodeDispatchEvent(nodeLogPath, nodeDispatchEvent{
-		Type:   "dispatch_finished",
-		RunID:  rs.RunID,
-		NodeID: node.ID,
-		Agent:  node.Agent,
-		Ts:     time.Now().UTC().Format(time.RFC3339),
-	})
+	finished := nodeDispatchEvent{
+		Type:     "dispatch_finished",
+		RunID:    rs.RunID,
+		NodeID:   node.ID,
+		Agent:    node.Agent,
+		Ts:       time.Now().UTC().Format(time.RFC3339),
+		Runtime:  result.Runtime,
+		Provider: result.Provider,
+		ModelID:  result.ModelID,
+	}
+	if u := result.Usage; u != nil {
+		finished.InputTokens = u.InputTokens
+		finished.OutputTokens = u.OutputTokens
+		finished.CacheRead = u.CacheRead
+		finished.CacheCreation = u.CacheCreation
+	}
+	appendNodeDispatchEvent(nodeLogPath, finished)
+
+	// K-135: the node's output is the agent's TEXT, parsed out of the runtime's
+	// own stream by the dispatch layer, never the raw stream-json / JSONL. This
+	// is what ${nodes.<id>.output} splices into a downstream prompt, and what
+	// OutputScanFn scans before it does. A result the dispatch layer did not
+	// parse (a test fake) keeps its raw stdout.
+	body := result.OutputText(stdout)
 
 	// Truncate output to OutputLimit (tail-truncate: keep the last N bytes).
-	output, wasTruncated := tailTruncate(stdout, node.OutputLimit)
+	output, wasTruncated := tailTruncate(body, node.OutputLimit)
 	outputTruncated := truncated || wasTruncated
 
 	// Store node output (even on failure — partial output is useful for debugging).
@@ -783,6 +815,13 @@ func (e *Engine) runNode(
 	// Check ExitCode separately from err (per dispatch contract).
 	if result.ExitCode != 0 {
 		errMsg := fmt.Sprintf("exit code %d", result.ExitCode)
+		// K-135: a harness that reports why it failed in its own stream (codex
+		// turn.failed, claude is_error result) no longer leaves that message in
+		// the node output, which is now the agent's text; keep it on the
+		// failure so the run shows the cause.
+		if result.Error != "" {
+			errMsg += ": " + truncateRunes(result.Error, maxNodeErrorRunes)
+		}
 		e.nodeFailure(rs, node.ID, result.ExitCode, errMsg, runFailed, failedSet, queueMu, wf.Name)
 		return
 	}
@@ -797,14 +836,15 @@ func (e *Engine) runNode(
 			RunID:       rs.RunID,
 			Workflow:    wf.Name,
 			NodeID:      node.ID,
-			OriginalLen: len(stdout),
+			OriginalLen: len(body),
 			TruncatedTo: len(output),
 			TS:          time.Now().UTC(),
 		}, wsbus.EventMeta{OwnerOperatorID: rs.OwnerOpID})
 	}
 
 	// Extract cost from the dispatch result. TotalCostUSD is only present for
-	// claude (streaming) dispatches; non-claude runtimes leave Usage nil.
+	// claude dispatches (the one harness that reports a dollar figure); the
+	// other runtimes report tokens only.
 	// Emit cost_usd only when we have a real value; absent = "unavailable".
 	var nodeCostUSD *float64
 	if result.Usage != nil && result.Usage.TotalCostUSD > 0 {
@@ -824,6 +864,19 @@ func (e *Engine) runNode(
 			TS:       time.Now().UTC(),
 		}, wsbus.EventMeta{OwnerOperatorID: rs.OwnerOpID})
 	}
+}
+
+// maxNodeErrorRunes bounds the harness failure message appended to a node's
+// error in run.json.
+const maxNodeErrorRunes = 512
+
+// truncateRunes returns s cut to at most n runes, with an ellipsis when cut.
+func truncateRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	r := []rune(s)
+	return string(r[:n]) + "..."
 }
 
 // nodeFailure marks a node as failed, updates the run-failed flag, propagates
