@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
@@ -23,7 +24,10 @@ var varRefRe = regexp.MustCompile(`\$\{(inputs|nodes)\.([^}]+?)(?:\.(output))?\}
 //  5. Every ${inputs.<key>} reference resolves to a declared input key.
 //  6. Every ${nodes.<id>.output} reference resolves to a declared node ID.
 //  7. The dependency graph is acyclic (Kahn's algorithm).
-//  8. Model (when non-empty) is valid after alias resolution.
+//  8. Model (when non-empty) is valid for the node's runtime: a Claude tier or
+//     alias on claude, an alias or a model id on codex and agy. A node with no
+//     runtime takes its runtime from the agent's pin at run time, so its model
+//     must be valid on at least one runtime.
 //  9. Runtime (when non-empty) is a known runtime name.
 //  10. scan_allow (when non-empty) lists only known, unique scan pattern IDs.
 //
@@ -83,9 +87,8 @@ func Validate(wf *Workflow) error {
 
 		// --- 8. Model validation ---
 		if n.Model != "" {
-			resolved := runtime.ResolveAlias(n.Model)
-			if !runtime.ValidateTier(resolved) {
-				return fmt.Errorf("workflow: node %q: model %q is not a valid tier or alias (resolved: %q)", n.ID, n.Model, resolved)
+			if err := validateNodeModel(n); err != nil {
+				return err
 			}
 		}
 
@@ -252,4 +255,44 @@ func TopoOrder(wf *Workflow) []string {
 		}
 	}
 	return result
+}
+
+// validateNodeModel checks a node's model against its runtime. The model is
+// passed to dispatch verbatim (the dispatcher resolves aliases against the
+// runtime that actually runs), so this only has to know whether it can be
+// valid.
+//
+//   - A node that names a runtime is checked against it with the dispatcher's
+//     own rule (dispatch.CheckModelOverride): claude takes tiers and aliases;
+//     codex and agy take aliases and model ids, never a bare Claude tier. A
+//     runtime that is not known is reported by the runtime check, not here.
+//   - A node with no runtime runs on whatever the agent's pin, the project
+//     config or the operator's default resolves to, which is not known until
+//     dispatch. Its model must be valid on at least one runtime.
+func validateNodeModel(n Node) error {
+	if n.Runtime != "" {
+		if !knownRuntime(n.Runtime) {
+			return nil
+		}
+		if _, ok := dispatch.CheckModelOverride(n.Runtime, n.Model); !ok {
+			return fmt.Errorf("workflow: node %q: model %q is not valid for runtime %s (want %s)",
+				n.ID, n.Model, n.Runtime, runtime.ModelHint(n.Runtime))
+		}
+		return nil
+	}
+	for _, rt := range runtime.Known {
+		if _, ok := dispatch.CheckModelOverride(rt, n.Model); ok {
+			return nil
+		}
+	}
+	return fmt.Errorf("workflow: node %q: model %q is not a Claude tier, an alias or a model id", n.ID, n.Model)
+}
+
+func knownRuntime(name string) bool {
+	for _, r := range runtime.Known {
+		if r == name {
+			return true
+		}
+	}
+	return false
 }

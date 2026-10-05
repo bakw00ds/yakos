@@ -665,8 +665,8 @@ Node fields:
 |---|---|---|
 | `id` | yes | Node identifier. Must match `^[a-z0-9][a-z0-9-]{0,63}$`. Unique within the workflow. |
 | `agent` | yes | Agent name (must exist in the agent roster). |
-| `runtime` | no | Runtime override (`claude`/`codex`/`agy`). Empty or `auto` resolves from the agent's frontmatter pin, then `.yakos.yml`. |
-| `model` | no | Model tier/alias (`haiku`/`sonnet`/`opus`/`fable`). Resolved from agent frontmatter when absent. |
+| `runtime` | no | Runtime override (`claude`/`codex`/`agy`). When absent, resolved from the agent's frontmatter pin, then `.yakos.yml`. |
+| `model` | no | On claude, a tier (`haiku`/`sonnet`/`opus`/`fable`) or an alias (`cheap`/`balanced`/`best`/`reasoning`/`frontier`); on codex and agy, an alias or a model id. Checked against the node's runtime and passed to dispatch as written, which resolves an alias for the runtime that runs the node. Resolved from agent frontmatter when absent. |
 | `timeout` | no | Per-node dispatch timeout in seconds. Default: 600. Use 900 for long synthesis nodes. |
 | `prompt` | yes | Task prompt. Supports `${inputs.<key>}` and `${nodes.<id>.output}` substitution (only declared references are valid). |
 | `output_limit` | yes | Total tail-truncate budget in bytes for all upstream outputs substituted into this node's prompt. Mandatory — validate rejects a missing or zero value. |

@@ -65,6 +65,15 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   reaches the runtime request; the `-m`/`--model` flags themselves are wired
   in the codex and agy adapters by a separate change.
 
+- **Flows nodes: the model is checked against the node's runtime and passed
+  to dispatch as written (K-132 P0a).** Before, the engine turned an alias
+  into a Claude tier (`balanced` became `sonnet`) before dispatch, so a codex
+  or agy node was handed a model it cannot run, and validation rejected any
+  model id. Now `yakos workflow validate` accepts a tier or alias on claude and
+  an alias or a model id on codex and agy (never a bare Claude tier), and a
+  node with no runtime needs a model that is valid on at least one runtime.
+  Dispatch resolves an alias for the runtime that actually runs the node.
+
 - **Console Chat pane: `auto` runtime and model tiers for non-Claude
   runtimes (K-132 P0a).** The runtime select gains `auto`, the default for
   new panes, which resolves from the agent's pin. The model select gains a

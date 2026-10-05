@@ -5040,7 +5040,7 @@
               '<div class="flows-node-edit-row">' +
                 '<label class="flows-node-edit-label" for="fne-model">Model (optional)</label>' +
                 '<input id="fne-model" class="flows-node-edit-input" type="text" ' +
-                  'autocomplete="off" spellcheck="false" placeholder="haiku | sonnet | opus">' +
+                  'autocomplete="off" spellcheck="false" placeholder="tier, alias or model id">' +
               '</div>' +
               '<div class="flows-node-edit-row">' +
                 '<label class="flows-node-edit-label" for="fne-runtime">Runtime (optional)</label>' +
