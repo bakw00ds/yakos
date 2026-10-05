@@ -144,6 +144,13 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
 - **CLI errors print one `dispatch:` prefix.** New errors from the dispatch
   package already begin with it, which printed `dispatch: dispatch: ...`.
 
+- **An agent or skill file with a very long line is no longer silently cut
+  off (K-132 follow-up).** The roster reader used a line scanner whose default
+  limit is 64 KiB, so a line over it stopped the scan without a word and
+  everything after it, in practice the rest of the agent's persona, vanished
+  from the prompt. Lines up to 1 MiB are now read whole, and a longer one makes
+  composing the roster fail with an error naming the file and the line.
+
 ### Security
 
 - **A conversation, and the claude session its follow-ups resume, belong to

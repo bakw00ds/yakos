@@ -15,6 +15,7 @@ package agentscompose
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -234,7 +235,10 @@ func parseAgent(yakosRoot, id, path string) (ComposedAgent, error) {
 	}
 	content := string(data)
 
-	fm, body := splitFrontmatter(content)
+	fm, body, err := splitFrontmatter(content)
+	if err != nil {
+		return ComposedAgent{}, err
+	}
 	fields := parseFrontmatter(fm)
 
 	// Resolve extends: inheritance — prepend framework template body.
@@ -242,7 +246,10 @@ func parseAgent(yakosRoot, id, path string) (ComposedAgent, error) {
 		fwFile := filepath.Join(yakosRoot, "lib", "agents", extendsName+".md")
 		fwData, err := os.ReadFile(fwFile) //nolint:gosec
 		if err == nil {
-			_, fwBody := splitFrontmatter(string(fwData))
+			_, fwBody, splitErr := splitFrontmatter(string(fwData))
+			if splitErr != nil {
+				return ComposedAgent{}, fmt.Errorf("extends %s: %w", fwFile, splitErr)
+			}
 			body = fwBody + "\n\n---\n\n" + body
 		}
 		// If the framework file doesn't exist, use the project body alone
@@ -379,15 +386,27 @@ func fmInt(raw string) int {
 // frontmatter is the YAML between the opening and closing --- markers.
 // body is everything after the closing ---.
 // If there is no frontmatter, frontmatter is "" and body is the full content.
-func splitFrontmatter(content string) (frontmatter, body string) {
+//
+// The file is read line by line, and a line longer than maxLineBytes is an
+// error: bufio.Scanner's default 64 KiB limit used to stop the scan there
+// without a word, so the rest of the file, the agent's persona after that line
+// included, silently vanished from the prompt.
+func splitFrontmatter(content string) (frontmatter, body string, err error) {
 	scanner := bufio.NewScanner(strings.NewReader(content))
+	scanner.Buffer(make([]byte, 0, 4096), maxLineBytes)
 	var lines []string
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())
 	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		if errors.Is(scanErr, bufio.ErrTooLong) {
+			return "", "", fmt.Errorf("line %d is longer than %d bytes; split it across lines", len(lines)+1, maxLineBytes)
+		}
+		return "", "", scanErr
+	}
 
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return "", content
+		return "", content, nil
 	}
 
 	// Find the closing ---.
@@ -399,13 +418,19 @@ func splitFrontmatter(content string) (frontmatter, body string) {
 		}
 	}
 	if closeIdx < 0 {
-		return "", content
+		return "", content, nil
 	}
 
 	fm := strings.Join(lines[1:closeIdx], "\n")
 	bd := strings.Join(lines[closeIdx+1:], "\n")
-	return fm, bd
+	return fm, bd, nil
 }
+
+// maxLineBytes bounds one line of an agent or skill definition. A real file's
+// longest line is a few hundred bytes (the persona is capped at 64 KiB in total
+// on the chat paths), so 1 MiB is far beyond sane and still bounds what one
+// malformed line can make the roster reader hold.
+const maxLineBytes = 1 << 20
 
 // parseFrontmatter parses simple key: value YAML lines from frontmatter.
 // Returns a map of key → raw value. Lists (tools: [a, b]) are stored as-is.
@@ -545,7 +570,10 @@ func ComposeSkills(yakosRoot, project string) ([]ComposedSkill, error) {
 				return fmt.Errorf("agentscompose: read %s: %w", skillPath, err)
 			}
 
-			fm, _ := splitFrontmatter(string(data))
+			fm, _, splitErr := splitFrontmatter(string(data))
+			if splitErr != nil {
+				return fmt.Errorf("agentscompose: parse %s: %w", skillPath, splitErr)
+			}
 			fields := parseFrontmatter(fm)
 
 			name := fields["name"]

@@ -11,7 +11,10 @@ import (
 
 func TestSplitFrontmatter_WithFrontmatter(t *testing.T) {
 	content := "---\nid: backend\nmodel: sonnet\n---\n\nBody text here.\n"
-	fm, body := splitFrontmatter(content)
+	fm, body, err := splitFrontmatter(content)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(fm, "model: sonnet") {
 		t.Errorf("frontmatter should contain 'model: sonnet', got %q", fm)
 	}
@@ -22,7 +25,10 @@ func TestSplitFrontmatter_WithFrontmatter(t *testing.T) {
 
 func TestSplitFrontmatter_NoFrontmatter(t *testing.T) {
 	content := "Just prose\nno frontmatter"
-	fm, body := splitFrontmatter(content)
+	fm, body, err := splitFrontmatter(content)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if fm != "" {
 		t.Errorf("expected empty frontmatter, got %q", fm)
 	}
@@ -32,7 +38,10 @@ func TestSplitFrontmatter_NoFrontmatter(t *testing.T) {
 }
 
 func TestSplitFrontmatter_EmptyFile(t *testing.T) {
-	fm, body := splitFrontmatter("")
+	fm, body, err := splitFrontmatter("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if fm != "" || body != "" {
 		t.Errorf("empty file: expected empty fm and body, got fm=%q body=%q", fm, body)
 	}
