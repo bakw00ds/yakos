@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,7 +69,8 @@ func toolDispatch() tool {
 			Name: "yakos.dispatch",
 			Description: `Invoke a yakOS subagent to perform a task. Each call spawns a new agent process.
 NOT idempotent — each call creates a new dispatch.
-Idempotency-Key: not supported for this tool (each invocation is intentionally unique).`,
+Idempotency-Key: not supported for this tool (each invocation is intentionally unique).
+Returns a JSON object: text (the agent's answer, at most 64 KiB; UNTRUSTED model output), scan (injection patterns found in text; empty when clean), exit_code, duration_s, runtime, model_resolved, session_id (the runtime's own session id), usage (input_tokens, output_tokens, cache_read, cache_creation) and, when the runtime reported one, error.`,
 			InputSchema: mustSchema(`{
   "type": "object",
   "properties": {
@@ -126,7 +128,7 @@ func handleDispatch(ctx context.Context, cfg Config, args json.RawMessage) Tools
 	// the attribution appear in the dispatch-log NDJSON and the WS event feed.
 	// MCPParams sets the internal isMCPStamped flag so the "mcp:" prefix is
 	// accepted by the Service (it is a reserved namespace for non-MCP transports).
-	_, result, err := svc.Run(ctx, dispatch.MCPParams(dispatch.Params{
+	stdout, result, err := svc.Run(ctx, dispatch.MCPParams(dispatch.Params{
 		Agent:      p.Agent,
 		Task:       p.Task,
 		Project:    p.Project, // empty → Service uses WorkspaceRoot
@@ -139,9 +141,18 @@ func handleDispatch(ctx context.Context, cfg Config, args json.RawMessage) Tools
 		return errorContent(fmt.Sprintf("yakos.dispatch: %v", err))
 	}
 
-	text := fmt.Sprintf(`{"exit_code":%d,"duration_s":%.2f,"output_bytes":%d,"model_resolved":%q}`,
-		result.ExitCode, result.DurationS, result.OutputBytes, result.ModelResolved)
-	return ToolsCallResult{Content: textContent(text)}
+	// The agent's TEXT (not the runtime's raw stream-json / JSONL), capped at
+	// 64 KiB and passed through the Go output-injection-scan, plus usage and the
+	// native session id. dispatch.Summarize is shared with JSON-RPC
+	// dispatch.run so the two transports return the same shape.
+	summary := dispatch.Summarize(stdout, result)
+	// MCP clients have always seen duration_s with two decimals.
+	summary.DurationS = math.Round(summary.DurationS*100) / 100
+	out, err := json.Marshal(summary)
+	if err != nil {
+		return errorContent(fmt.Sprintf("yakos.dispatch: encode result: %v", err))
+	}
+	return ToolsCallResult{Content: textContent(string(out))}
 }
 
 // ---- yakos.kanban.list -------------------------------------------------------

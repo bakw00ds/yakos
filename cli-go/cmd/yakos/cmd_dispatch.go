@@ -195,7 +195,7 @@ func runDispatch(yakosRoot string, args []string) {
 		ConversationID: cliConvID,
 	}
 
-	stdout, _, err := dispatch.Run(context.Background(), req)
+	stdout, res, err := dispatch.Run(context.Background(), req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dispatch: %v\n", err)
 		if budget.IsRefused(err) {
@@ -204,9 +204,16 @@ func runDispatch(yakosRoot string, args []string) {
 		os.Exit(1)
 	}
 
-	// Write captured stdout to the terminal.
-	if len(stdout) > 0 {
-		if _, err := os.Stdout.Write(stdout); err != nil {
+	// Write the agent's text to the terminal (K-135): the runtime's raw
+	// stream-json / JSONL is not what a person running `yakos dispatch` wants,
+	// and the bash path prints text too. A result the dispatch layer did not
+	// parse keeps its raw stdout.
+	out := res.OutputText(stdout)
+	if res.Parsed && len(out) > 0 {
+		out = append(append([]byte(nil), out...), '\n') // Text has trailing newlines trimmed
+	}
+	if len(out) > 0 {
+		if _, err := os.Stdout.Write(out); err != nil {
 			fmt.Fprintf(os.Stderr, "dispatch: write stdout: %v\n", err)
 			os.Exit(1)
 		}
