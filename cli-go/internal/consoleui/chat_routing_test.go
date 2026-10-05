@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -235,6 +236,9 @@ func TestSkillsHandler_ReportsAgentRuntime(t *testing.T) {
 // from claude 2.1.289); sidFile is the session id it stamps on a good result.
 type fakeChatClaude struct {
 	argvLog, modeFile, sidFile, failFile string
+	// pidsFile gets the pid of every stub run (one per line); lingerFile the pid
+	// of the background process mode "linger" leaves holding claude's stdout.
+	pidsFile, lingerFile string
 }
 
 func installFakeChatClaude(t *testing.T) *fakeChatClaude {
@@ -244,19 +248,30 @@ func installFakeChatClaude(t *testing.T) *fakeChatClaude {
 	}
 	bin := t.TempDir()
 	f := &fakeChatClaude{
-		argvLog:  filepath.Join(t.TempDir(), "argv.log"),
-		modeFile: filepath.Join(t.TempDir(), "mode"),
-		sidFile:  filepath.Join(t.TempDir(), "sid"),
-		failFile: filepath.Join(t.TempDir(), "failmsg"),
+		argvLog:    filepath.Join(t.TempDir(), "argv.log"),
+		modeFile:   filepath.Join(t.TempDir(), "mode"),
+		sidFile:    filepath.Join(t.TempDir(), "sid"),
+		failFile:   filepath.Join(t.TempDir(), "failmsg"),
+		pidsFile:   filepath.Join(t.TempDir(), "pids"),
+		lingerFile: filepath.Join(t.TempDir(), "linger.pid"),
 	}
 	script := `#!/bin/sh
 { echo "--- call"; for a in "$@"; do printf '%s\n' "$a"; done; } >> '` + f.argvLog + `'
+echo $$ >> '` + f.pidsFile + `'
 MODE=$(cat '` + f.modeFile + `' 2>/dev/null)
 SID=$(cat '` + f.sidFile + `' 2>/dev/null)
 case " $* " in *" --resume "*) RESUMED=1 ;; esac
 # "hang": run until killed. exec replaces the shell, so the kill a cancel sends
 # reaches the sleep itself and the stdout pipe closes.
 if [ "$MODE" = "hang" ]; then exec sleep 120; fi
+# "linger": like hang, but a background child inherits stdout, so the pipe stays
+# open after claude itself is killed and the dispatch goroutine reading it cannot
+# finish until the test kills that child (its pid is in lingerFile).
+if [ "$MODE" = "linger" ]; then
+  sleep 300 &
+  echo $! > '` + f.lingerFile + `'
+  exec sleep 120
+fi
 if [ "$MODE" = "stale" ] && [ -n "$RESUMED" ]; then
   echo "No conversation found with session ID: gone" >&2
   printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"gone","total_cost_usd":0,"usage":{}}'
@@ -277,6 +292,42 @@ printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\
 	t.Setenv("YAKOS_ROOT", "")
 	t.Setenv("YAKOS_DISPATCH_LOG", t.TempDir())
 	return f
+}
+
+// killStubsAtCleanup kills every stub the test started and the lingering child,
+// so a failing test leaves no sleep processes behind.
+func (f *fakeChatClaude) killStubsAtCleanup(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		for _, file := range []string{f.pidsFile, f.lingerFile} {
+			raw, err := os.ReadFile(file)
+			if err != nil {
+				continue
+			}
+			for _, field := range strings.Fields(string(raw)) {
+				if pid, err := strconv.Atoi(field); err == nil && pid > 1 {
+					killPID(pid)
+				}
+			}
+		}
+	})
+}
+
+// killPID kills a process by pid; a process that is already gone is not an error.
+func killPID(pid int) {
+	if p, err := os.FindProcess(pid); err == nil {
+		_ = p.Kill()
+	}
+}
+
+// lingerPID returns the pid of the background child mode "linger" started, or 0.
+func (f *fakeChatClaude) lingerPID() int {
+	raw, err := os.ReadFile(f.lingerFile)
+	if err != nil {
+		return 0
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	return pid
 }
 
 // failResumes makes every --resume call fail with msg on stderr (mode "fail").

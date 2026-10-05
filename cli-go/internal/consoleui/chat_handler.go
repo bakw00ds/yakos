@@ -85,45 +85,64 @@ import (
 
 // chatState is the in-process registry of active RunStream goroutines.
 // It maps sessionID → cancel function so pane-close can kill the subprocess.
+//
+// Each entry carries a generation. A cancel removes the session's entry at once
+// (so the pane can send its next turn right away, with the same sessionId), but
+// the cancelled turn's goroutine is still unwinding and removes "its" entry when
+// it ends. Keyed by sessionId alone, that late remove deleted the NEW turn's
+// entry: the new turn could no longer be cancelled, and a third turn on the same
+// session was accepted while it ran. A goroutine removes only the generation it
+// registered.
 type chatState struct {
 	mu      sync.Mutex
-	cancels map[string]context.CancelFunc
+	cancels map[string]chatEntry
+	nextGen uint64
+}
+
+type chatEntry struct {
+	cancel context.CancelFunc
+	gen    uint64
 }
 
 func newChatState() *chatState {
-	return &chatState{cancels: make(map[string]context.CancelFunc)}
+	return &chatState{cancels: make(map[string]chatEntry)}
 }
 
-// add registers a cancel function for a session.  Returns false if the
+// add registers a cancel function for a session and returns the entry's
+// generation, which its goroutine hands back to remove.  Returns false if the
 // sessionID already has an in-flight dispatch (caller returns 409).
-func (cs *chatState) add(sessionID string, cancel context.CancelFunc) bool {
+func (cs *chatState) add(sessionID string, cancel context.CancelFunc) (gen uint64, ok bool) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	if _, exists := cs.cancels[sessionID]; exists {
-		return false
+		return 0, false
 	}
-	cs.cancels[sessionID] = cancel
-	return true
+	cs.nextGen++
+	cs.cancels[sessionID] = chatEntry{cancel: cancel, gen: cs.nextGen}
+	return cs.nextGen, true
 }
 
-// remove deletes the cancel entry when the goroutine exits.
-func (cs *chatState) remove(sessionID string) {
+// remove deletes the entry registered under gen when its goroutine exits. An
+// entry of a later generation (the next turn on the same session) is left alone.
+func (cs *chatState) remove(sessionID string, gen uint64) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-	delete(cs.cancels, sessionID)
+	if e, ok := cs.cancels[sessionID]; ok && e.gen == gen {
+		delete(cs.cancels, sessionID)
+	}
 }
 
 // cancel cancels the in-flight dispatch and removes it.
 // No-op if the session is not active.
 func (cs *chatState) cancel(sessionID string) {
 	cs.mu.Lock()
-	fn, ok := cs.cancels[sessionID]
+	e, ok := cs.cancels[sessionID]
 	if ok {
 		delete(cs.cancels, sessionID)
 	}
 	cs.mu.Unlock()
 	if ok {
-		fn()
+		e.cancel()
 	}
 }
 
@@ -592,7 +611,8 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	// immediately kill the dispatch goroutine.  The server-lifetime context is
 	// only cancelled on Server.Shutdown, keeping the goroutine alive as intended.
 	ctx, cancel := context.WithCancel(ch.serverCtx)
-	if !ch.state.add(req.SessionID, cancel) {
+	stateGen, registered := ch.state.add(req.SessionID, cancel)
+	if !registered {
 		cancel()
 		// Session already has an active dispatch — close the hub entry we just
 		// opened so the sessionId is not permanently squatted (H1 fix).
@@ -766,9 +786,9 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				})
 			}
 		}()
-		defer cancel()                               // 1. stop any pending RunStream
-		defer ch.state.remove(dispReq.SessionID)     // 2. release slot
-		defer ch.hub.CloseSession(dispReq.SessionID) // 3. remove hub entry
+		defer cancel()                                     // 1. stop any pending RunStream
+		defer ch.state.remove(dispReq.SessionID, stateGen) // 2. release slot
+		defer ch.hub.CloseSession(dispReq.SessionID)       // 3. remove hub entry
 		// 5. Remove the per-session worktree on session close (if any was provisioned).
 		// Registered after hub.CloseSession defer; in LIFO order this runs BEFORE
 		// hub.CloseSession — acceptable because the worktree path is independent of the

@@ -145,6 +145,13 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   and always after two failed resumes in a row, so a reworded message cannot
   leave a dead id failing every follow-up. A single unrelated failure keeps it.
 
+- **A console turn sent right after a cancel can still be cancelled (K-132
+  follow-up).** A cancel frees the session's slot at once so the pane can
+  resend on the same session id, but the cancelled turn's goroutine freed "its"
+  slot again when it ended, and keyed by session id that was the new turn's.
+  The new turn could then no longer be cancelled, and a third turn was accepted
+  while it ran. Slots are now keyed by generation.
+
 - **CLI errors and the REST 502 body carry one `dispatch:` prefix.** New errors
   from the dispatch package already begin with it, which printed
   `dispatch: dispatch: ...` from `yakos dispatch` and from `POST /v1/dispatches`.
