@@ -150,13 +150,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0 and names environment variables and booleans only, never a value. It flags
   the SDK sidecar selectable without `ANTHROPIC_API_KEY`;
   `allow_unsandboxed_runtimes` in `~/.yakos-state/router-policy.yml`, or that
-  file refused by its owner-only trust check; a `default-runtime` file that
-  fails the same check; `YAKOS_IMPL` not set to `go` with the bash CLI tree
-  installed, because the bash adapters still start codex and agy with the bypass
-  flags until K-143; agy on PATH with no sign-in; codex with no yakOS-owned
-  login profile; and `YAKOS_DISPATCH_LOG` and the other `YAKOS_*` variables that
-  move state (K-129). The checks sit behind `doctor.CheckPolicy` so the console
-  can show them later.
+  file refused by its owner-only trust check; `YAKOS_IMPL` not set to `go` with
+  the bash CLI tree installed, because the bash adapters still start codex and
+  agy with the bypass flags until K-143; codex with no yakOS-owned login
+  profile; and `YAKOS_DISPATCH_LOG` and the other `YAKOS_*` variables that move
+  state (K-129). The checks sit behind `doctor.CheckPolicy` so the console can
+  show them later.
 - **Stream recordings from the adapters' argv.** Real codex-cli 0.154.0
   `exec --json` output (a plain turn, `exec resume`, a framed subagent
   delegation, an unauthenticated failure) and real agy 1.2.17 `stream-json`

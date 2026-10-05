@@ -101,9 +101,7 @@ func CheckPolicy(env PolicyEnv) []PolicyFinding {
 	var out []PolicyFinding
 	out = append(out, checkSDKSidecar(e)...)
 	out = append(out, checkRouterPolicy(e)...)
-	out = append(out, checkDefaultRuntimeFile(e)...)
 	out = append(out, checkBashDispatch(e)...)
-	out = append(out, checkAgySignIn(e)...)
 	out = append(out, checkCodexProfile(e)...)
 	out = append(out, checkStatePathOverrides(e)...)
 	sort.SliceStable(out, func(i, j int) bool {
@@ -147,10 +145,7 @@ func checkSDKSidecar(e PolicyEnv) []PolicyFinding {
 
 // ---- router policy ---------------------------------------------------------------
 
-const (
-	routerPolicyLabel   = "~/.yakos-state/router-policy.yml"
-	defaultRuntimeLabel = "~/.yakos-state/default-runtime"
-)
+const routerPolicyLabel = "~/.yakos-state/router-policy.yml"
 
 // checkRouterPolicy reads the owner-only policy through the loader dispatch
 // uses (routerpolicy.Load: same trust check, $HOME/.yakos-state only, never
@@ -206,27 +201,6 @@ func checkRouterPolicy(e PolicyEnv) []PolicyFinding {
 	}}
 }
 
-// checkDefaultRuntimeFile applies the policy file's trust rule to the
-// default-runtime file, which chooses the vendor that receives every unpinned
-// task. It reads no content.
-func checkDefaultRuntimeFile(e PolicyEnv) []PolicyFinding {
-	if e.Home == "" {
-		return nil
-	}
-	path := filepath.Join(e.Home, ".yakos-state", "default-runtime")
-	err := routerpolicy.CheckFile(path)
-	if !errors.Is(err, routerpolicy.ErrUntrusted) {
-		return nil // trusted, absent or unreadable: nothing to report
-	}
-	return []PolicyFinding{{
-		ID:       "default-runtime-refused",
-		Severity: PolicyMedium,
-		Message: fmt.Sprintf("%s fails the owner-only trust check: it %s, so another local user could choose which vendor receives your unpinned tasks",
-			defaultRuntimeLabel, trustReason(err, path)),
-		Fix: "make it a regular file you own that others cannot write (chmod 600 " + defaultRuntimeLabel + ")",
-	}}
-}
-
 // trustReason turns the loader's "router policy ignored: <path> is a symlink"
 // into "is a symlink": the absolute path stays out of the report.
 func trustReason(err error, path string) string {
@@ -266,33 +240,7 @@ func checkBashDispatch(e PolicyEnv) []PolicyFinding {
 	}}
 }
 
-// ---- agy and codex readiness ---------------------------------------------------------
-
-// checkAgySignIn reports agy on PATH with no sign-in evidence. The evidence is
-// the one `yakos auth status agy` accepts, minus the OS keyring (yakOS never
-// writes the entry it reads, and a keyring read can block on a prompt): an
-// ANTIGRAVITY_API_KEY or GEMINI_API_KEY, or the agy config directory. The
-// directory outlives a sign-out, so this can miss a signed-out agy, never the
-// reverse.
-func checkAgySignIn(e PolicyEnv) []PolicyFinding {
-	if _, err := e.LookPath("agy"); err != nil {
-		return nil
-	}
-	if e.Getenv("ANTIGRAVITY_API_KEY") != "" || e.Getenv("GEMINI_API_KEY") != "" {
-		return nil
-	}
-	if e.Home != "" {
-		if fi, err := os.Stat(filepath.Join(e.Home, ".gemini", "antigravity-cli")); err == nil && fi.IsDir() {
-			return nil
-		}
-	}
-	return []PolicyFinding{{
-		ID:       "agy-not-signed-in",
-		Severity: PolicyLow,
-		Message:  "agy is on PATH but shows no sign-in (no ANTIGRAVITY_API_KEY or GEMINI_API_KEY, no ~/.gemini/antigravity-cli directory): agy dispatch will fail",
-		Fix:      "run 'agy' once and complete the browser sign-in, or export ANTIGRAVITY_API_KEY",
-	}}
-}
+// ---- codex readiness ---------------------------------------------------------------
 
 // checkCodexProfile reports codex on PATH with no yakOS-owned login profile and
 // no API key: dispatch then shares the operator's own codex login, and

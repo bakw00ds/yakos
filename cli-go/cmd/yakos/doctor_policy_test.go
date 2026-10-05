@@ -54,16 +54,17 @@ func TestDoctor_GoNative_PolicyReportsAndExitsZero(t *testing.T) {
 	goBin := policyBinary(t)
 	home := t.TempDir()
 	writeStateFile(t, home, "router-policy.yml", "allow_unsandboxed_runtimes: [codex]\n", 0o600)
-	writeStateFile(t, home, "default-runtime", "codex\n", 0o666)
+	env := policyEnv(home)
+	env["YAKOS_STATE_DIR"] = "/relocated/SENTINELPATH"
 
-	out, code := runGoDoctor(t, goBin, []string{"doctor", "--policy"}, policyEnv(home))
+	out, code := runGoDoctor(t, goBin, []string{"doctor", "--policy"}, env)
 	if code != 0 {
 		t.Fatalf("--policy is a report and must exit 0 whatever it finds; got %d\n%s", code, out)
 	}
 	for _, want := range []string{
 		"Risky configurations",
 		"[high]", "codex run WITHOUT their sandbox flags", "allow_unsandboxed_runtimes",
-		"[medium]", "~/.yakos-state/default-runtime fails the owner-only trust check",
+		"[medium]", "YAKOS_STATE_DIR is set in the environment",
 		"Fix:", "Policy:",
 	} {
 		if !strings.Contains(out, want) {
@@ -75,8 +76,8 @@ func TestDoctor_GoNative_PolicyReportsAndExitsZero(t *testing.T) {
 			t.Errorf("--policy runs only the policy report, but printed %q:\n%s", other, out)
 		}
 	}
-	if strings.Contains(out, home) {
-		t.Errorf("the report printed the absolute home path:\n%s", out)
+	if strings.Contains(out, home) || strings.Contains(out, "SENTINELPATH") {
+		t.Errorf("the report printed the absolute home path or an environment value:\n%s", out)
 	}
 }
 

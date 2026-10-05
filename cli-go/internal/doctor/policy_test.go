@@ -72,22 +72,6 @@ func skipWithoutPosixModes(t *testing.T) {
 	}
 }
 
-func writeDefaultRuntimeFile(t *testing.T, home, body string, mode os.FileMode) string {
-	t.Helper()
-	dir := filepath.Join(home, ".yakos-state")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	p := filepath.Join(dir, "default-runtime")
-	if err := os.WriteFile(p, []byte(body), mode); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(p, mode); err != nil {
-		t.Fatal(err)
-	}
-	return p
-}
-
 func requireOneLine(t *testing.T, f PolicyFinding) {
 	t.Helper()
 	if f.Message == "" || f.Fix == "" {
@@ -229,6 +213,9 @@ func TestCheckPolicy_RouterPolicyRefusedIsReportedAsRefused(t *testing.T) {
 			if strings.Contains(got.Message+got.Fix, "SECRETCONTENT") {
 				t.Errorf("file content leaked into the finding: %+v", got)
 			}
+			if strings.Contains(got.Message+got.Fix, f.home) {
+				t.Errorf("the absolute home path leaked into the finding: %+v", got)
+			}
 			if _, bypass := fs["router-policy-unsandboxed"]; bypass {
 				t.Error("a refused policy allows nothing: it must not also report an active bypass")
 			}
@@ -288,60 +275,6 @@ func TestCheckPolicy_PolicyInARelocatedStateDirIsNotRead(t *testing.T) {
 	}
 }
 
-// ---- default-runtime file ------------------------------------------------------
-
-func TestCheckPolicy_DefaultRuntimeFileFailingTheTrustCheck(t *testing.T) {
-	skipWithoutPosixModes(t)
-	f := newPolicyFixture(t)
-	writeDefaultRuntimeFile(t, f.home, "codex SECRETDEFAULT\n", 0o666)
-	got, ok := byID(f.check())["default-runtime-refused"]
-	if !ok {
-		t.Fatal("a world-writable default-runtime file must be reported")
-	}
-	requireOneLine(t, got)
-	if got.Severity != PolicyMedium {
-		t.Errorf("severity = %s, want medium", got.Severity)
-	}
-	if !strings.Contains(got.Message, "writable") || !strings.Contains(got.Message, "~/.yakos-state/default-runtime") {
-		t.Errorf("name the file and the reason: %q", got.Message)
-	}
-	if strings.Contains(got.Message+got.Fix, "SECRETDEFAULT") || strings.Contains(got.Message+got.Fix, f.home) {
-		t.Errorf("the finding must not echo the file content or the absolute home path: %+v", got)
-	}
-}
-
-func TestCheckPolicy_DefaultRuntimeFileThatIsATrustedOrAbsentIsQuiet(t *testing.T) {
-	skipWithoutPosixModes(t)
-	f := newPolicyFixture(t)
-	if fs := f.check(); len(fs) != 0 {
-		t.Errorf("absent: %v", ids(fs))
-	}
-	writeDefaultRuntimeFile(t, f.home, "codex\n", 0o600)
-	if fs := f.check(); len(fs) != 0 {
-		t.Errorf("trusted: %v", ids(fs))
-	}
-}
-
-func TestCheckPolicy_DefaultRuntimeSymlinkIsRefused(t *testing.T) {
-	skipWithoutPosixModes(t)
-	f := newPolicyFixture(t)
-	real := filepath.Join(t.TempDir(), "elsewhere")
-	if err := os.WriteFile(real, []byte("codex\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Join(f.home, ".yakos-state")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(real, filepath.Join(dir, "default-runtime")); err != nil {
-		t.Skip("symlinks unavailable")
-	}
-	got, ok := byID(f.check())["default-runtime-refused"]
-	if !ok || !strings.Contains(got.Message, "symlink") {
-		t.Fatalf("a symlinked default-runtime must be reported as a symlink, got %+v", got)
-	}
-}
-
 // ---- bash dispatch -------------------------------------------------------------
 
 func TestCheckPolicy_BashDispatchRunsHarnessesWithoutTheirSandbox(t *testing.T) {
@@ -371,7 +304,6 @@ func TestCheckPolicy_BashDispatchRunsHarnessesWithoutTheirSandbox(t *testing.T) 
 			}
 			// Keep unrelated checks out of the way.
 			f.env["OPENAI_API_KEY"] = "set"
-			f.env["ANTIGRAVITY_API_KEY"] = "set"
 			got, ok := byID(f.check())["bash-dispatch-unsandboxed"]
 			if ok != tc.want {
 				t.Fatalf("reported = %v, want %v (%v)", ok, tc.want, ids(f.check()))
@@ -390,49 +322,6 @@ func TestCheckPolicy_BashDispatchRunsHarnessesWithoutTheirSandbox(t *testing.T) 
 				t.Errorf("the fix is YAKOS_IMPL=go: %q", got.Fix)
 			}
 		})
-	}
-}
-
-// ---- agy sign-in ---------------------------------------------------------------
-
-func TestCheckPolicy_AgyOnPathButNotSignedIn(t *testing.T) {
-	f := newPolicyFixture(t)
-	f.found["agy"] = "/x/agy"
-	got, ok := byID(f.check())["agy-not-signed-in"]
-	if !ok {
-		t.Fatal("agy on PATH with no sign-in evidence must be reported")
-	}
-	requireOneLine(t, got)
-	if got.Severity != PolicyLow {
-		t.Errorf("severity = %s, want low", got.Severity)
-	}
-	if !strings.Contains(got.Fix, "agy") {
-		t.Errorf("the fix tells the operator to sign in with agy: %q", got.Fix)
-	}
-}
-
-func TestCheckPolicy_AgySignInEvidence(t *testing.T) {
-	for name, setup := range map[string]func(f *policyFixture){
-		"ANTIGRAVITY_API_KEY": func(f *policyFixture) { f.env["ANTIGRAVITY_API_KEY"] = "k" },
-		"GEMINI_API_KEY":      func(f *policyFixture) { f.env["GEMINI_API_KEY"] = "k" },
-		"agy config directory": func(f *policyFixture) {
-			if err := os.MkdirAll(filepath.Join(f.home, ".gemini", "antigravity-cli"), 0o700); err != nil {
-				f.t.Fatal(err)
-			}
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := newPolicyFixture(t)
-			f.found["agy"] = "/x/agy"
-			setup(f)
-			if _, flagged := byID(f.check())["agy-not-signed-in"]; flagged {
-				t.Errorf("%s is sign-in evidence (the same evidence `yakos auth status agy` accepts)", name)
-			}
-		})
-	}
-	f := newPolicyFixture(t)
-	if _, flagged := byID(f.check())["agy-not-signed-in"]; flagged {
-		t.Error("agy is not installed: nothing to sign in to")
 	}
 }
 
@@ -521,7 +410,6 @@ func TestCheckPolicy_OrderedBySeverityThenIDAndDeterministic(t *testing.T) {
 	skipWithoutPosixModes(t)
 	f := newPolicyFixture(t)
 	f.sdk = true                                                           // medium: sdk-sidecar-no-api-key
-	f.found["agy"] = "/x/agy"                                              // low: agy-not-signed-in
 	f.found["codex"] = "/x/codex"                                          // low: codex-shared-login
 	f.bash = true                                                          // high: bash-dispatch-unsandboxed
 	f.env["YAKOS_STATE_DIR"] = "/x"                                        // medium: state-path-override
@@ -530,7 +418,7 @@ func TestCheckPolicy_OrderedBySeverityThenIDAndDeterministic(t *testing.T) {
 	want := []string{
 		"bash-dispatch-unsandboxed", "router-policy-unsandboxed", // high, by id
 		"sdk-sidecar-no-api-key", "state-path-override:YAKOS_STATE_DIR", // medium, by id
-		"agy-not-signed-in", "codex-shared-login", // low, by id
+		"codex-shared-login", // low
 	}
 	if !reflect.DeepEqual(ids(first), want) {
 		t.Fatalf("order = %v\nwant    %v", ids(first), want)

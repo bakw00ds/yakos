@@ -76,10 +76,9 @@ booleans only, never a value:
     SDK sidecar (structured questions) selectable without ANTHROPIC_API_KEY
     allow_unsandboxed_runtimes set in ~/.yakos-state/router-policy.yml, or that
         file refused by its owner-only trust check
-    ~/.yakos-state/default-runtime failing the same trust check
     YAKOS_IMPL unset with the bash CLI tree present, so yakos dispatch runs
         codex and agy through the bash adapters without their sandbox flags
-    agy on PATH with no sign-in; codex on PATH with no yakOS-owned login profile
+    codex on PATH with no yakOS-owned login profile
     YAKOS_DISPATCH_LOG, YAKOS_STATE_DIR and other state-path variables set in
         the environment (a project's .claude/settings.json env block can set them)
     Always exits 0: it is a report, not a gate.
