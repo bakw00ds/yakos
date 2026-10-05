@@ -270,7 +270,10 @@ func TestEngine_EndToEndRealDispatchSplicesText(t *testing.T) {
 		t.Fatalf("Run: status=%v err=%v", rs.Status, err)
 	}
 
-	const want = "Dispatching to the backend agent.\nThe backend agent reports: all handlers registered."
+	// The node's output is the result frame's final report. The relay's lead-in
+	// ("Dispatching to ...") is in the stream but is not the node's answer, so it
+	// is not spliced into the next node's prompt either.
+	const want = "The backend agent reports: all handlers registered."
 	out, err := os.ReadFile(filepath.Join(workDir, "workflows", "runs", "run-text-e2e", "nodes", "a.stdout"))
 	if err != nil {
 		t.Fatal(err)
@@ -285,6 +288,9 @@ func TestEngine_EndToEndRealDispatchSplicesText(t *testing.T) {
 	}
 	if !strings.Contains(string(seen), "all handlers registered") {
 		t.Errorf("node b was never given node a's text; argv:\n%s", seen)
+	}
+	if strings.Contains(string(seen), "Dispatching to the backend agent") {
+		t.Errorf("the relay's lead-in was spliced into node b's prompt; argv:\n%s", seen)
 	}
 	if strings.Contains(string(seen), `"type":"assistant"`) || strings.Contains(string(seen), `"session_id"`) {
 		t.Errorf("raw stream-json reached node b's prompt; argv:\n%s", seen)

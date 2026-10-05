@@ -71,7 +71,7 @@ func claudeStreamScript(t *testing.T, text string) string {
 	q, _ := json.Marshal(text)
 	stream := `{"type":"system","subtype":"init","session_id":"rpc-sess","model":"claude-sonnet-4-5"}` + "\n" +
 		`{"type":"assistant","message":{"content":[{"type":"text","text":` + string(q) + `}]}}` + "\n" +
-		`{"type":"result","subtype":"success","result":"x","session_id":"rpc-sess","duration_ms":5,"usage":{"input_tokens":3,"output_tokens":2}}` + "\n"
+		`{"type":"result","subtype":"success","result":` + string(q) + `,"session_id":"rpc-sess","duration_ms":5,"usage":{"input_tokens":3,"output_tokens":2}}` + "\n"
 	p := filepath.Join(t.TempDir(), "stream.ndjson")
 	if err := os.WriteFile(p, []byte(stream), 0o644); err != nil {
 		t.Fatal(err)
@@ -174,5 +174,22 @@ func TestMethod_DispatchRun_ScanFlagsInjectionMarker(t *testing.T) {
 	}
 	if text, _ := got["text"].(string); !strings.Contains(text, "ignore previous instructions") {
 		t.Errorf("detection must not redact the text: %q", got["text"])
+	}
+}
+
+// The answer is the result frame's final report. The relay's lead-in and a
+// sub-agent's narration are not in `text`, and the full join is not a field of
+// the result at all: a calling agent reads the answer once.
+func TestMethod_DispatchRun_ReturnsTheFinalReportNotTheNarration(t *testing.T) {
+	client := newDispatchDaemon(t, "claude", catFixture(t, "claude-stream-json-subagent-SYNTHETIC.ndjson"))
+	got, raw := callRun(t, client, map[string]string{"agent": "worker", "task": "t"})
+
+	if got["text"] != "The backend agent reports: all handlers registered." {
+		t.Errorf("text = %q", got["text"])
+	}
+	for _, leaked := range []string{"Dispatching to the backend agent", "Let me look at the handlers", "text_all", "TextAll"} {
+		if strings.Contains(raw, leaked) {
+			t.Errorf("the result must not carry %q: %s", leaked, raw)
+		}
 	}
 }

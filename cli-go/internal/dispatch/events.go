@@ -117,7 +117,13 @@ type Result struct {
 	// cache creation, and the dollar cost for the one harness that reports it).
 	// Nil when the run reported none. Counts follow runtime.Usage's convention
 	// across every harness.
-	Usage         *cost.Usage
+	Usage *cost.Usage
+
+	// UsageCumulative is true when Usage counts the whole native conversation up
+	// to this run (agy), not this run alone. The counts are verbatim; an
+	// accounting layer subtracts the total it last recorded for SessionID.
+	UsageCumulative bool
+
 	ModelChosenBy string
 	ModelResolved string
 	EvalRunID     string
@@ -130,10 +136,19 @@ type Result struct {
 	// runtime name for now; the registry will refine it.
 	Provider string
 
-	// Text is the agent's text, parsed out of the runtime's stdout. For a
-	// stream that is not a recognised JSON format it is the stdout text itself.
-	// Trailing newlines are trimmed. See Parsed.
+	// Text is the agent's answer, parsed out of the runtime's stdout: for claude
+	// the result frame's final text (never sub-agent narration), for codex and
+	// agy every assistant message, for a stream that is not a recognised JSON
+	// format the stdout text itself. Trailing newlines are trimmed. This is what
+	// the transports and Flows hand on. See Parsed and runtime.ParseResult.Text.
 	Text string
+
+	// TextAll is everything the agent said, sub-agent narration included, the way
+	// the bash dispatcher printed it. It contains Text and is for a person at a
+	// terminal (yakos dispatch prints it); transports that hand a result to
+	// another agent return Text only. Equal to Text for runtimes that do not
+	// tell the two apart.
+	TextAll string
 
 	// Parsed is true when Text came from the runtime's LineParser. A consumer
 	// must then prefer Text over raw stdout even when Text is empty (an agent
@@ -156,8 +171,9 @@ type Result struct {
 	Truncated bool
 
 	// TextCapped is true when Text reached the parser's 1 MiB cap and the rest
-	// was dropped.
-	TextCapped bool
+	// was dropped; TextAllCapped says the same of TextAll.
+	TextCapped    bool
+	TextAllCapped bool
 
 	// LinesDropped counts output lines skipped for exceeding the per-line cap
 	// (runtime.MaxStreamLineBytes). A dropped line contributes nothing to Text.

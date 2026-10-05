@@ -16,10 +16,21 @@ package runtime
 //     answer, and
 //   - tool_use / thinking blocks inside those complete messages.
 //
-// Final text follows extractClaudeText: the text blocks of every assistant
-// message, in order. Two fallbacks keep a degraded stream useful: the
-// incremental text_delta fragments (a partial-messages stream killed before
-// its closing assistant message) and the result event's own `result` string.
+// Final text (ParseResult.Text) is the result frame's own string: the framed
+// prompt asks the relay to "return only the subagent's final report", and the
+// result frame is the stream's contract for the final response. When that frame
+// is absent or empty (a killed run) the text falls back to the text blocks of
+// the TOP-LEVEL assistant messages, then to the incremental text_delta
+// fragments of a partial-messages stream. An error result's message is never
+// the answer, and sub-agent narration is never part of it: an assistant line
+// carrying parent_tool_use_id is a sub-agent's, and claude forwards those only
+// when CLAUDE_CODE_FORWARD_SUBAGENT_TEXT (or --forward-subagent-text) is set,
+// which claudeEnvSpec lets through to the child.
+//
+// ParseResult.TextAll keeps the old extractClaudeText semantics for a person
+// reading a terminal: the text blocks of EVERY assistant message, sub-agent
+// narration included, which is what the bash dispatcher prints.
+//
 // A stream with no recognisable event at all is plain text.
 
 import (
@@ -45,10 +56,11 @@ type claudeLineParser struct {
 	toolIDToName   map[string]string
 	thinkingBlocks map[int]*ThinkingBlockEntry
 
-	assistant  textAccumulator // text blocks of complete assistant messages
-	deltas     textAccumulator // text_delta fragments of a partial-messages stream
-	resultText textAccumulator // the result event's own text
-	plain      plainBuffer
+	assistantTop textAccumulator // text blocks of top-level assistant messages
+	assistantAll textAccumulator // text blocks of every assistant message
+	deltas       textAccumulator // top-level text_delta fragments of a partial-messages stream
+	resultText   textAccumulator // the result event's own text (a successful run)
+	plain        plainBuffer
 
 	structured bool // at least one recognised claude event was seen
 	partial    bool // the stream carries stream_event lines (partial messages)
@@ -79,7 +91,9 @@ type claudeSystemLine struct {
 // beyond its text (which extractAssistantText already handles).
 type claudeAssistantLine struct {
 	SessionID string `json:"session_id"`
-	Message   struct {
+	// ParentToolUseID is set on a sub-agent's messages.
+	ParentToolUseID *string `json:"parent_tool_use_id"`
+	Message         struct {
 		Model   string `json:"model"`
 		Content []struct {
 			Type     string          `json:"type"`
@@ -156,8 +170,12 @@ func (p *claudeLineParser) Feed(line []byte) []NativeEvent {
 			add(NativeEvent{Kind: EventSession, SessionID: p.sessionID, Model: p.modelID})
 		}
 		if text := extractAssistantText(line); text != "" {
-			p.assistant.beginMessage()
-			p.assistant.add(text)
+			p.assistantAll.beginMessage()
+			p.assistantAll.add(text)
+			if a.ParentToolUseID == nil || *a.ParentToolUseID == "" {
+				p.assistantTop.beginMessage()
+				p.assistantTop.add(text)
+			}
 			if !p.partial {
 				add(NativeEvent{Kind: EventToken, Text: stripNUL(text)})
 			}
@@ -186,7 +204,9 @@ func (p *claudeLineParser) Feed(line []byte) []NativeEvent {
 			p.deltas.beginMessage() // keep messages apart in the delta-only fallback text
 		}
 		if tok != "" {
-			p.deltas.add(tok)
+			if !isSubAgentLine(line) {
+				p.deltas.add(tok)
+			}
 			add(NativeEvent{Kind: EventToken, Text: stripNUL(tok)})
 		}
 		if thinkEv != nil {
@@ -226,6 +246,15 @@ func (p *claudeLineParser) Feed(line []byte) []NativeEvent {
 		}
 	}
 	return evs
+}
+
+// isSubAgentLine reports whether a stream line belongs to a sub-agent: claude
+// stamps a sub-agent's messages with the id of the tool call that spawned it.
+func isSubAgentLine(line []byte) bool {
+	var env struct {
+		ParentToolUseID *string `json:"parent_tool_use_id"`
+	}
+	return json.Unmarshal(line, &env) == nil && env.ParentToolUseID != nil && *env.ParentToolUseID != ""
 }
 
 // streamEventType returns the inner event type of a stream_event line.
@@ -291,19 +320,35 @@ func (p *claudeLineParser) Finish() ParseResult {
 		Usage:     p.usage,
 		Error:     p.errMsg,
 	}
-	var chosen *textAccumulator
+	var text, all *textAccumulator
 	switch {
 	case !p.structured:
-		chosen = &p.plain.acc
-	case !p.assistant.empty():
-		chosen = &p.assistant
-	case !p.deltas.empty():
-		chosen = &p.deltas
+		text = &p.plain.acc
+		all = text
 	default:
-		chosen = &p.resultText
+		// Text: the result frame, then the top-level assistant join, then the
+		// top-level deltas (each may be empty).
+		switch {
+		case !p.resultText.empty():
+			text = &p.resultText
+		case !p.assistantTop.empty():
+			text = &p.assistantTop
+		default:
+			text = &p.deltas
+		}
+		// TextAll: every assistant message, else the deltas, else the answer.
+		switch {
+		case !p.assistantAll.empty():
+			all = &p.assistantAll
+		case !p.deltas.empty():
+			all = &p.deltas
+		default:
+			all = text
+		}
 	}
-	pr.Text = chosen.text()
-	pr.noteTruncation(chosen.truncated, p.dropped)
+	pr.Text = text.text()
+	pr.TextAll = all.text()
+	pr.noteTruncation(text.truncated, all.truncated, p.dropped)
 	return pr
 }
 

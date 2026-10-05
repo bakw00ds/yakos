@@ -14,6 +14,10 @@ import (
 const (
 	agyRealOK        = "agy-stream-json-1.2.17-ok.ndjson"
 	agyRealTool      = "agy-stream-json-1.2.17-tool.ndjson"
+	agyConvTurn1     = "agy-stream-json-1.2.17-conversation-turn1.ndjson" // recorded by wp-p0b (K-133)
+	agyConvTurn2     = "agy-stream-json-1.2.17-conversation-turn2.ndjson" // recorded by wp-p0b (K-133)
+	agyEffortFail    = "agy-stream-json-1.2.17-effort-conflict.ndjson"    // recorded by wp-p0b (K-133)
+	agySandboxDenied = "agy-stream-json-1.2.17-sandbox-denied.ndjson"     // recorded by wp-p0b (K-133)
 	agySingle        = "agy-stream-json-1.2.17-SYNTHETIC-checkpoint.ndjson"
 	agyMultiturn     = "agy-stream-json-1.2.17-SYNTHETIC-multiturn.ndjson"
 	agyToolErrorFix  = "agy-stream-json-1.2.17-SYNTHETIC-tool-error.ndjson"
@@ -105,6 +109,155 @@ func TestAgyLineParser_ModelIDIsVerbatim(t *testing.T) {
 		`{"event":"result","result":{"conversation_id":"c","status":"SUCCESS","model":"from-result"}}`
 	if pr, _ := parse("agy", []byte(both)); pr.ModelID != "from-init" {
 		t.Errorf("ModelID = %q, want from-init", pr.ModelID)
+	}
+}
+
+// ---- real recordings by wp-p0b (K-133) -----------------------------------------
+
+// With --conversation, the result frame's usage is CUMULATIVE over the
+// conversation: turn 2 reports turn 1's tokens plus its own. The parser reports
+// the counts verbatim and marks them, so an accounting layer can subtract.
+func TestAgyLineParser_RealConversationUsageIsCumulative(t *testing.T) {
+	r1, ev1 := parse("agy", readFixture(t, agyConvTurn1))
+	r2, ev2 := parse("agy", readFixture(t, agyConvTurn2))
+
+	if r1.Text != "ok" || r2.Text != "again" {
+		t.Errorf("Text = %q / %q", r1.Text, r2.Text)
+	}
+	const conv = "390dbd9d-ac3e-4fc9-9383-8f11318029e0"
+	if r1.SessionID != conv || r2.SessionID != conv {
+		t.Errorf("both turns share one conversation id: %q / %q", r1.SessionID, r2.SessionID)
+	}
+	// Verbatim from the result frames.
+	if want := (Usage{InputTokens: 12859, OutputTokens: 26, DurationMs: 1994}); r1.Usage != want {
+		t.Errorf("turn 1 Usage = %+v, want %+v", r1.Usage, want)
+	}
+	if want := (Usage{InputTokens: 25950, OutputTokens: 719, DurationMs: 35865}); r2.Usage != want {
+		t.Errorf("turn 2 Usage = %+v, want %+v", r2.Usage, want)
+	}
+	if !r1.UsageCumulative || !r2.UsageCumulative {
+		t.Errorf("UsageCumulative = %v / %v, want true for a result-frame total", r1.UsageCumulative, r2.UsageCumulative)
+	}
+	wantKinds(t, ev1, EventSession, EventToken, EventToken, EventResult)
+	wantKinds(t, ev2, EventSession, EventToken, EventToken, EventResult)
+	if !ev1[3].UsageCumulative || !ev2[3].UsageCumulative {
+		t.Error("the result event carries the marker too")
+	}
+
+	// The accounting rule the marker exists for: subtracting the previous total
+	// gives this turn's own tokens, and that equals what turn 2's own DONE steps
+	// report (13091 input, 693 output).
+	own := Usage{InputTokens: r2.Usage.InputTokens - r1.Usage.InputTokens, OutputTokens: r2.Usage.OutputTokens - r1.Usage.OutputTokens}
+	if want := (Usage{InputTokens: 13091, OutputTokens: 693}); own != want {
+		t.Errorf("turn 2 own tokens = %+v, want %+v", own, want)
+	}
+	var kept []string
+	for _, l := range strings.Split(strings.TrimRight(string(readFixture(t, agyConvTurn2)), "\n"), "\n") {
+		if !strings.Contains(l, `"event":"result"`) {
+			kept = append(kept, l)
+		}
+	}
+	steps, _ := parse("agy", []byte(strings.Join(kept, "\n")))
+	if steps.Usage != own {
+		t.Errorf("DONE-step sum = %+v, want the per-turn figure %+v", steps.Usage, own)
+	}
+	// Without a result frame the usage is this run's own and is not cumulative.
+	if steps.UsageCumulative {
+		t.Error("a step-sum fallback is this run only and must not be marked cumulative")
+	}
+}
+
+// A failed run on a real recording: a lone result frame with status ERROR, an
+// empty conversation id and all-zero usage, no init and no steps.
+func TestAgyLineParser_RealRunThatFailedBeforeStarting(t *testing.T) {
+	pr, evs := parse("agy", readFixture(t, agyEffortFail))
+	const want = `invalid model selection (--model "gemini-3.8-flash-low" --effort "high"): --model gemini-3.8-flash-low conflicts with --effort=high`
+	if pr.Error != want {
+		t.Errorf("Error = %q, want %q", pr.Error, want)
+	}
+	if pr.Text != "" || pr.SessionID != "" || pr.Usage != (Usage{}) || pr.UsageCumulative {
+		t.Errorf("a run that never started has no text, session or usage: %+v", pr)
+	}
+	wantKinds(t, evs, EventResult, EventError)
+	if !evs[1].Fatal {
+		t.Error("the error event is fatal")
+	}
+}
+
+// A tool step whose command was refused by the sandbox is a normal tool step to
+// agy: no error object, the refusal is in the output.
+func TestAgyLineParser_RealSandboxDeniedRun(t *testing.T) {
+	pr, evs := parse("agy", readFixture(t, agySandboxDenied))
+	if pr.Text != "1" || pr.ModelID != "gemini-3.8-flash-low" || pr.Error != "" {
+		t.Errorf("Text/ModelID/Error = %q/%q/%q", pr.Text, pr.ModelID, pr.Error)
+	}
+	if want := (Usage{InputTokens: 26152, OutputTokens: 236, DurationMs: 14062}); pr.Usage != want || !pr.UsageCumulative {
+		t.Errorf("Usage = %+v cumulative=%v, want %+v true", pr.Usage, pr.UsageCumulative, want)
+	}
+	wantKinds(t, evs, EventSession, EventToolUse, EventToolResult, EventToken, EventToken, EventResult)
+	use, res := evs[1], evs[2]
+	if use.ToolName != "run_command" || !strings.HasPrefix(use.ToolInput, `{"CommandLine":"sh -c`) || !strings.Contains(use.ToolInput, "p0b-agy-probe.txt") {
+		t.Errorf("tool_use = %+v", use)
+	}
+	if !strings.Contains(res.ToolOutput, "Operation not permitted") || res.IsError {
+		t.Errorf("tool_result = %+v", res)
+	}
+}
+
+// ---- other shapes ------------------------------------------------------------------
+
+// A stream in a different schema (a `type` key instead of `event`, a result line
+// with a status and a conversation id but no "response") is not agy's. Its lines
+// come back as the text instead of being swallowed by the json-envelope check.
+func TestAgyLineParser_ADifferentSchemaFallsBackToTheRawLines(t *testing.T) {
+	lines := []string{
+		`{"type":"init","conversation_id":"3f2a9c1e-7b4d-4e0a-9a51-2c6d8e1f0b73","model":"gemini-3.1-pro","cwd":"/work/project"}`,
+		`{"type":"step_update","conversation_id":"3f2a9c1e-7b4d-4e0a-9a51-2c6d8e1f0b73","step":{"index":1,"type":"planner_response","status":"done","text":"ok"}}`,
+		`{"type":"result","status":"success","conversation_id":"3f2a9c1e-7b4d-4e0a-9a51-2c6d8e1f0b73","result":"ok","usage":{"input_tokens":1234,"output_tokens":5,"total_tokens":1239},"duration_ms":2310}`,
+	}
+	pr, _ := parse("agy", []byte(strings.Join(lines, "\n")))
+	if pr.Text != strings.Join(lines, "\n") {
+		t.Errorf("Text = %q, want the raw lines", pr.Text)
+	}
+	if pr.SessionID != "" || pr.Usage != (Usage{}) || pr.Error != "" || pr.UsageCumulative {
+		t.Errorf("nothing in a foreign schema is interpreted: %+v", pr)
+	}
+}
+
+// The json envelope needs all three of its keys, but the values may be empty
+// (a failed run reports conversation_id "").
+func TestAgyLineParser_JSONEnvelopeNeedsItsKeysNotTheirValues(t *testing.T) {
+	failed := `{"conversation_id":"","status":"ERROR","response":"","error":"boom","duration_seconds":0,"num_turns":0}`
+	if pr, _ := parse("agy", []byte(failed)); pr.Error != "boom" || pr.Text != "" {
+		t.Errorf("failed envelope: Error=%q Text=%q", pr.Error, pr.Text)
+	}
+	noResponse := `{"conversation_id":"c","status":"SUCCESS","result":"x"}`
+	if pr, _ := parse("agy", []byte(noResponse)); pr.Text != noResponse {
+		t.Errorf("an object without a response key is not the envelope; Text = %q", pr.Text)
+	}
+}
+
+// A prompt that starts with a slash command is answered by agy itself: a
+// command_result frame, then a result frame with no session and zero usage.
+// (Shape reported by wp-p0b from a live run; not recorded, because the real
+// listing names the user's installed plugins.)
+func TestAgyLineParser_SlashCommandStream(t *testing.T) {
+	stream := `{"event":"command_result","command":{"name":"skills","data":{"skills":[{"name":"x","description":"d","path":"/p/x","builtin":true,"model_invocable":false}]}}}` + "\n" +
+		`{"event":"result","result":{"conversation_id":"","status":"SUCCESS","response":"Skills available: x\n","duration_seconds":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0},"command":{"name":"skills","data":{"skills":[]}}}}`
+	pr, evs := parse("agy", []byte(stream))
+	if pr.Text != "Skills available: x" {
+		t.Errorf("Text = %q", pr.Text)
+	}
+	if pr.SessionID != "" || pr.Usage != (Usage{}) || pr.UsageCumulative || pr.Error != "" {
+		t.Errorf("no session, no usage, no error expected: %+v", pr)
+	}
+	// The command frame is not text and not a token.
+	wantKinds(t, evs, EventResult)
+
+	// Even without the result frame (a killed run) the command JSON is not text.
+	alone, _ := parse("agy", []byte(strings.SplitN(stream, "\n", 2)[0]))
+	if alone.Text != "" {
+		t.Errorf("a lone command_result frame must not become text: %q", alone.Text)
 	}
 }
 

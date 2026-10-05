@@ -5,9 +5,11 @@ package runtime
 // the single-envelope `--output-format json` form and plain text (what the
 // adapter emitted before it switched to stream-json).
 //
-// SOURCE OF TRUTH: two real recordings from agy 1.2.17 (2026-10-05, signed in
-// under the operator's login): a plain reply and a run with a shell tool step,
-// both on gemini-3.8-flash-low. They match the vendor's published schema,
+// SOURCE OF TRUTH: six real recordings from agy 1.2.17 (2026-10-05, signed in
+// under the operator's login): a plain reply, a run with a shell tool step, a
+// two-turn --conversation pair, a run refused before it started (conflicting
+// flags) and a tool step the sandbox refused. The last four were recorded by
+// wp-p0b (K-133). They match the vendor's published schema,
 // https://antigravity.google/docs/cli/headless/, which remains the reference for
 // what was not recorded: checkpoint steps, multi-turn stdin sessions, tool
 // errors and the --output-format json envelope. Those cases are covered by
@@ -23,12 +25,22 @@ package runtime
 //
 // Final text is the concatenation of the agent_response text_delta fragments
 // (the vendor's own jq recipe), falling back to result.response. Usage is the
-// terminal result's (cumulative across the turns of one process), falling back
-// to the sum of the DONE steps' usage when the stream ended without a result;
-// the two agree in every documented example. agy's input_tokens already
-// EXCLUDES cache_read_tokens (a second-turn step reports 278 input and 30214
-// cache read), which is the package's Usage convention, and output_tokens
-// includes thinking_tokens, so no normalization is needed.
+// terminal result's, falling back to the sum of the DONE steps' usage when the
+// stream ended without a result.
+//
+// The result frame's usage is CUMULATIVE over the whole conversation, not this
+// run: with --conversation the second turn of a recorded pair reports 25950
+// input tokens, which is the first turn's 12859 plus the second turn's own
+// 13091. The parser reports the counts verbatim and marks them
+// (ParseResult.UsageCumulative) so the accounting layer can subtract the total
+// it recorded for the same session. A run's own tokens are the sum of its DONE
+// steps' usage, which is what the fallback computes; for a first turn the two
+// are equal in every recording.
+//
+// agy's input_tokens already EXCLUDES cache_read_tokens (a second-turn step
+// reports 278 input and 30214 cache read), which is the package's Usage
+// convention, and output_tokens includes thinking_tokens, so no normalization
+// is needed.
 
 import (
 	"encoding/json"
@@ -75,14 +87,16 @@ func (u *agyUsage) usage() Usage {
 
 type agyEnvelope struct {
 	Event          string          `json:"event"`
-	ConversationID string          `json:"conversation_id"`
+	ConversationID *string         `json:"conversation_id"`
 	Init           json.RawMessage `json:"init"`
 	StepUpdate     json.RawMessage `json:"step_update"`
 	Result         json.RawMessage `json:"result"`
 	// Top-level result fields: the --output-format json envelope has no
-	// "event" key and carries the result payload directly.
-	Status   string `json:"status"`
-	Response string `json:"response"`
+	// "event" key and carries the result payload directly. They are pointers so
+	// the parser can tell a key that is present but empty (a failed run reports
+	// conversation_id "") from a key that is absent (a different schema).
+	Status   *string `json:"status"`
+	Response *string `json:"response"`
 }
 
 type agyInit struct {
@@ -143,7 +157,7 @@ func (p *agyLineParser) Feed(line []byte) []NativeEvent {
 		p.markStructured()
 		var in agyInit
 		_ = json.Unmarshal(env.Init, &in)
-		if p.learn(env.ConversationID, in.Model) {
+		if p.learn(derefString(env.ConversationID), in.Model) {
 			add(NativeEvent{Kind: EventSession, SessionID: p.conversationID, Model: p.modelID})
 		}
 
@@ -170,9 +184,20 @@ func (p *agyLineParser) Feed(line []byte) []NativeEvent {
 			add(e)
 		}
 
-	case env.Event == "" && env.ConversationID != "" && env.Status != "":
-		// The --output-format json envelope (always has both keys; requiring
-		// both keeps a JSON example inside plain-text prose from matching).
+	case env.Event == "command_result":
+		// A prompt that starts with a slash command (/skills) is answered by agy
+		// itself: stdout is this frame, then a result frame, with no init and no
+		// steps. Its payload is the command's data; the text to show is on the
+		// result frame. Recognising it keeps the frame out of the plain-text
+		// fallback.
+		p.markStructured()
+
+	case env.Event == "" && env.ConversationID != nil && env.Status != nil && env.Response != nil:
+		// The --output-format json envelope. All three keys are always present
+		// (a failed run reports conversation_id ""), and requiring all three is
+		// what keeps other shapes from matching: JSON inside plain-text prose, or
+		// a stream in a different schema whose final line has a status and a
+		// conversation id but no "response" (it falls back to the raw lines).
 		p.markStructured()
 		var r agyResult
 		if err := json.Unmarshal(line, &r); err != nil {
@@ -265,7 +290,8 @@ func (p *agyLineParser) result(r agyResult) []NativeEvent {
 		p.resultUsage.DurationMs = int64(r.DurationSeconds * 1000)
 		p.haveResultUse = true
 	}
-	evs := []NativeEvent{{Kind: EventResult, Text: stripNUL(r.Response), Usage: p.resultUsage, SessionID: p.conversationID, Model: p.modelID}}
+	evs := []NativeEvent{{Kind: EventResult, Text: stripNUL(r.Response), Usage: p.resultUsage,
+		UsageCumulative: hasTokens(p.resultUsage), SessionID: p.conversationID, Model: p.modelID}}
 
 	p.statusErr = ""
 	if status := strings.TrimSpace(r.Status); status != "" && !strings.EqualFold(status, "SUCCESS") {
@@ -343,10 +369,13 @@ func (p *agyLineParser) Finish() ParseResult {
 		chosen = &p.resp
 	}
 	pr.Text = chosen.text()
-	pr.noteTruncation(chosen.truncated, p.dropped)
+	pr.TextAll = pr.Text
+	pr.noteTruncation(chosen.truncated, chosen.truncated, p.dropped)
 	if p.haveResultUse {
 		pr.Usage = p.resultUsage
+		pr.UsageCumulative = hasTokens(pr.Usage)
 	} else {
+		// The sum of this stream's DONE steps: this run only.
 		pr.Usage = p.stepUsage
 	}
 	return pr

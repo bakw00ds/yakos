@@ -291,3 +291,14 @@ func TestDispatchCLI_NoticeWhenALineIsSkipped(t *testing.T) {
 		t.Errorf("a run whose only line was skipped must say so:\n%s", stderr)
 	}
 }
+
+// The terminal gets everything the agent said, as the bash dispatcher printed it
+// (the relay's lead-in and the sub-agent's narration included), while the
+// transports hand on only the final answer.
+func TestDispatchCLI_PrintsEverythingTheAgentSaid(t *testing.T) {
+	stdout, stderr, exit := runDispatchWithStub(t, "claude", fixtureCat(t, "claude-stream-json-subagent-SYNTHETIC.ndjson"))
+	const want = "Dispatching to the backend agent.\nLet me look at the handlers.\nAll handlers are registered.\nThe backend agent reports: all handlers registered.\n"
+	if exit != 0 || stdout != want {
+		t.Errorf("exit=%d stdout=%q\nwant %q\nstderr:\n%s", exit, stdout, want, stderr)
+	}
+}

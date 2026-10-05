@@ -107,8 +107,16 @@ func TestRun_ClaudeStreamJSONBecomesTextUsageAndSession(t *testing.T) {
 	fakeRuntimeBin(t, "claude", "claude-stream-json-oneshot-SYNTHETIC.ndjson", "", 0)
 	stdout, res, logDir := runOnce(t, "")
 
-	if want := "Dispatching to the backend agent.\nThe backend agent reports: all handlers registered."; res.Text != want {
+	// Text is the result frame's final report; TextAll keeps every assistant
+	// message for the terminal.
+	if want := "The backend agent reports: all handlers registered."; res.Text != want {
 		t.Errorf("Text = %q, want %q", res.Text, want)
+	}
+	if want := "Dispatching to the backend agent.\nThe backend agent reports: all handlers registered."; res.TextAll != want {
+		t.Errorf("TextAll = %q, want %q", res.TextAll, want)
+	}
+	if res.UsageCumulative {
+		t.Error("claude reports per-run usage; it is not cumulative")
 	}
 	if !res.Parsed || res.Runtime != "claude" || res.Provider != "anthropic" {
 		t.Errorf("Parsed/Runtime/Provider = %v/%q/%q", res.Parsed, res.Runtime, res.Provider)
@@ -254,6 +262,76 @@ func TestRun_DroppedLineIsReportedOnTheResult(t *testing.T) {
 	}
 }
 
+// With CLAUDE_CODE_FORWARD_SUBAGENT_TEXT set, claude forwards a sub-agent's text
+// into the stream and the daemon's env allowlist lets the variable through to
+// the child. The answer is still the final report; the narration is only in
+// TextAll. The fake claude emits what the real one does under each setting.
+func TestRun_ForwardedSubagentTextIsNotTheAnswer(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("shell stub")
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ -n \"$CLAUDE_CODE_FORWARD_SUBAGENT_TEXT\" ]; then\n" +
+		"  cat '" + fixtureFile(t, "claude-stream-json-subagent-SYNTHETIC.ndjson") + "'\n" +
+		"else\n" +
+		"  cat '" + fixtureFile(t, "claude-stream-json-oneshot-SYNTHETIC.ndjson") + "'\n" +
+		"fi\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil { //nolint:gosec
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("YAKOS_ROOT", "")
+
+	const final = "The backend agent reports: all handlers registered."
+
+	// Default: no narration in the stream.
+	_, res, _ := runOnce(t, "")
+	if res.Text != final || strings.Contains(res.TextAll, "Let me look at the handlers.") {
+		t.Errorf("default: Text=%q TextAll=%q", res.Text, res.TextAll)
+	}
+
+	// The operator exports the variable: the narration reaches the stream.
+	t.Setenv("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT", "1")
+	stdout, res, _ := runOnce(t, "")
+	if !bytes.Contains(stdout, []byte("Let me look at the handlers.")) {
+		t.Fatal("the variable did not reach the child: the stream has no sub-agent narration")
+	}
+	if res.Text != final {
+		t.Errorf("Text = %q, want only the final report", res.Text)
+	}
+	if !strings.Contains(res.TextAll, "Let me look at the handlers.") || !strings.Contains(res.TextAll, "All handlers are registered.") {
+		t.Errorf("TextAll lost the narration: %q", res.TextAll)
+	}
+	if got := string(res.OutputTextAll(stdout)); got != res.TextAll {
+		t.Errorf("OutputTextAll = %q", got)
+	}
+	if got := string(res.OutputText(stdout)); got != final {
+		t.Errorf("OutputText = %q", got)
+	}
+}
+
+// agy's result frame is a conversation total: Run passes the counts through and
+// marks them, and says nothing of the kind for harnesses that report per run.
+func TestRun_AgyConversationUsageIsMarkedCumulative(t *testing.T) {
+	fakeRuntimeBin(t, "agy", "agy-stream-json-1.2.17-conversation-turn2.ndjson", "", 0)
+	_, res, _ := runOnce(t, "agy")
+	if res.Usage == nil || res.Usage.InputTokens != 25950 || res.Usage.OutputTokens != 719 {
+		t.Errorf("Usage = %+v, want the result frame's totals verbatim", res.Usage)
+	}
+	if !res.UsageCumulative {
+		t.Error("UsageCumulative must be set for agy")
+	}
+}
+
+func TestRun_PerRunUsageIsNotMarkedCumulative(t *testing.T) {
+	fakeRuntimeBin(t, "codex", "codex-exec-json-0.154.0-ok.ndjson", "", 0)
+	if _, res, _ := runOnce(t, "codex"); res.Usage == nil || res.UsageCumulative {
+		t.Errorf("codex: Usage=%+v cumulative=%v", res.Usage, res.UsageCumulative)
+	}
+}
+
 // ---- OutputText -------------------------------------------------------------
 
 func TestResultOutputText(t *testing.T) {
@@ -263,6 +341,24 @@ func TestResultOutputText(t *testing.T) {
 	}
 	if got := (Result{}).OutputText(raw); !bytes.Equal(got, raw) {
 		t.Errorf("unparsed result (a fake runFn) must fall back to stdout: %q", got)
+	}
+}
+
+func TestResultOutputTextAll(t *testing.T) {
+	raw := []byte(`{"type":"result"}`)
+	r := Result{Parsed: true, Text: "final", TextAll: "lead-in\nfinal"}
+	if got := string(r.OutputTextAll(raw)); got != "lead-in\nfinal" {
+		t.Errorf("parsed: %q", got)
+	}
+	if got := string(r.OutputText(raw)); got != "final" {
+		t.Errorf("OutputText must stay the answer only: %q", got)
+	}
+	// A result built without TextAll (an older caller) falls back to Text.
+	if got := string((Result{Parsed: true, Text: "only text"}).OutputTextAll(raw)); got != "only text" {
+		t.Errorf("no TextAll: %q", got)
+	}
+	if got := (Result{}).OutputTextAll(raw); !bytes.Equal(got, raw) {
+		t.Errorf("unparsed result must fall back to stdout: %q", got)
 	}
 }
 
@@ -507,5 +603,38 @@ func TestSummarize_UnparsedResultFallsBackToStdout(t *testing.T) {
 	s := Summarize([]byte("raw stdout"), Result{})
 	if s.Text != "raw stdout" {
 		t.Errorf("Text = %q", s.Text)
+	}
+}
+
+// The full join is for the terminal: neither transport result carries it, so a
+// calling agent reads the final answer once and the injection surface does not
+// double.
+func TestSummarize_DoesNotCarryTheFullJoin(t *testing.T) {
+	b, err := json.Marshal(Summarize(nil, Result{Parsed: true, Text: "final answer", TextAll: "narration and lead-in\nfinal answer"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(b)
+	if strings.Contains(out, "narration") || strings.Contains(strings.ToLower(out), "text_all") || strings.Contains(out, "TextAll") {
+		t.Errorf("the transport result must not carry TextAll: %s", out)
+	}
+	if !strings.Contains(out, `"text":"final answer"`) {
+		t.Errorf("the answer is missing: %s", out)
+	}
+}
+
+// A conversation total is marked as one, so a caller that adds calls up knows.
+func TestSummarize_MarksCumulativeUsage(t *testing.T) {
+	cum := Summarize(nil, Result{Parsed: true, Usage: &cost.Usage{InputTokens: 25950, OutputTokens: 719}, UsageCumulative: true})
+	if cum.Usage == nil || !cum.Usage.Cumulative {
+		t.Fatalf("Usage = %+v, want cumulative", cum.Usage)
+	}
+	b, _ := json.Marshal(cum)
+	if !strings.Contains(string(b), `"cumulative":true`) {
+		t.Errorf("usage lacks the cumulative marker: %s", b)
+	}
+	per := Summarize(nil, Result{Parsed: true, Usage: &cost.Usage{InputTokens: 1}})
+	if b, _ := json.Marshal(per); strings.Contains(string(b), "cumulative") {
+		t.Errorf("per-run usage must not carry the marker: %s", b)
 	}
 }

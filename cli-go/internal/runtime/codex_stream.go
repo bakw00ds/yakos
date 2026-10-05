@@ -402,7 +402,8 @@ func (p *codexLineParser) Finish() ParseResult {
 		chosen = &p.plain.acc
 	}
 	pr.Text = chosen.text()
-	pr.noteTruncation(chosen.truncated, p.dropped)
+	pr.TextAll = pr.Text
+	pr.noteTruncation(chosen.truncated, chosen.truncated, p.dropped)
 	switch {
 	case p.failedMsg != "":
 		pr.Error = p.failedMsg

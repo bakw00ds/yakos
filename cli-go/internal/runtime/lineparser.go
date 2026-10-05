@@ -150,8 +150,10 @@ type NativeEvent struct {
 	// Fatal marks an EventError that ended the turn.
 	Fatal bool
 
-	// Usage is set on EventResult.
-	Usage Usage
+	// Usage is set on EventResult. UsageCumulative says its token counts cover
+	// the whole conversation (see ParseResult.UsageCumulative).
+	Usage           Usage
+	UsageCumulative bool
 
 	// SessionID is the harness-native session id (claude session_id, codex
 	// thread_id, agy conversation_id). It is NOT the console UI session id.
@@ -166,15 +168,43 @@ type NativeEvent struct {
 
 // ParseResult is what a finished parse knows about the run.
 type ParseResult struct {
-	// Text is everything the agent said, in order, with trailing newlines
-	// trimmed. Separate assistant messages are joined with a newline when the
-	// previous one did not already end with one. For a stream that was never
-	// structured it is the stdout text itself.
+	// Text is the agent's answer, with trailing newlines trimmed. It is what a
+	// calling agent or a Flows node should read.
+	//
+	// For claude it is the final text of the result frame: the framed prompt asks
+	// the relay for the sub-agent's final report, and that is the frame's
+	// contract. When the result frame is absent or empty (a killed run) it falls
+	// back to the text blocks of the top-level assistant messages, and an error
+	// result's message is never taken as the answer. Sub-agent narration (an
+	// assistant line carrying parent_tool_use_id, which claude forwards when
+	// CLAUDE_CODE_FORWARD_SUBAGENT_TEXT or --forward-subagent-text is set) is
+	// never part of it.
+	//
+	// For codex and agy it is every assistant message in order, joined with a
+	// newline when the previous one did not already end with one. For a stream
+	// that was never structured it is the stdout text itself.
 	Text string
+
+	// TextAll is everything the agent said, in order, sub-agent narration
+	// included: the text blocks of every assistant message, which is what the
+	// bash dispatcher prints. It is for a person reading a terminal, and it
+	// contains Text. It is NOT for a calling agent; transports that hand a result
+	// to another agent return Text only. Equal to Text for the harnesses that do
+	// not tell the two apart (everything but claude).
+	TextAll string
 
 	// Usage is the reported token usage; the zero value means the stream did
 	// not report any (killed run, harness without usage telemetry, plain text).
 	Usage Usage
+
+	// UsageCumulative is true when Usage counts the whole native conversation
+	// up to and including this run rather than this run alone (agy's result
+	// frame). The counts are reported verbatim. A consumer that adds runs up must
+	// subtract the cumulative total it last recorded for the same SessionID;
+	// the first run of a conversation has nothing to subtract. Only the token
+	// counts are cumulative; DurationMs is passed through as the harness
+	// reports it. False for harnesses that report per-run usage.
+	UsageCumulative bool
 
 	// SessionID is the harness-native session id, "" when none was seen. Pass it
 	// back to the harness to resume the conversation.
@@ -183,13 +213,14 @@ type ParseResult struct {
 	// ModelID is the concrete model id when the stream reported one, else "".
 	ModelID string
 
-	// Truncated is true when text was dropped. It is exactly TextCapped or
+	// Truncated is true when Text is incomplete. It is exactly TextCapped or
 	// LinesDropped > 0; those two say which limit was hit.
 	Truncated bool
 
-	// TextCapped is true when the accumulated text reached MaxParsedTextBytes and
-	// the rest was dropped.
-	TextCapped bool
+	// TextCapped is true when Text reached MaxParsedTextBytes and the rest was
+	// dropped; TextAllCapped says the same of TextAll.
+	TextCapped    bool
+	TextAllCapped bool
 
 	// LinesDropped counts the lines skipped because they were longer than
 	// MaxStreamLineBytes. A dropped line contributes nothing to Text.
@@ -202,9 +233,10 @@ type ParseResult struct {
 }
 
 // noteTruncation records why a parse is incomplete and keeps Truncated equal to
-// "the text cap was hit or at least one line was dropped".
-func (r *ParseResult) noteTruncation(textCapped bool, linesDropped int) {
+// "the cap on Text was hit or at least one line was dropped".
+func (r *ParseResult) noteTruncation(textCapped, textAllCapped bool, linesDropped int) {
 	r.TextCapped = textCapped
+	r.TextAllCapped = textAllCapped
 	r.LinesDropped = linesDropped
 	r.Truncated = textCapped || linesDropped > 0
 }
@@ -269,6 +301,19 @@ func prepLine(line []byte) (out []byte, overlong bool) {
 		line = bytes.ReplaceAll(line, []byte{0}, nil)
 	}
 	return bytes.TrimRight(line, "\r"), false
+}
+
+// derefString reads an optional JSON string, "" when absent.
+func derefString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// hasTokens reports whether a usage record counts any tokens.
+func hasTokens(u Usage) bool {
+	return u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheRead != 0 || u.CacheCreation != 0
 }
 
 // stripNUL removes NUL bytes from a decoded string (a JSON \u0000 escape
@@ -473,6 +518,7 @@ func (p *plainLineParser) Feed(line []byte) []NativeEvent {
 // Finish implements LineParser.
 func (p *plainLineParser) Finish() ParseResult {
 	pr := ParseResult{Text: p.buf.acc.text()}
-	pr.noteTruncation(p.buf.acc.truncated, p.dropped)
+	pr.TextAll = pr.Text
+	pr.noteTruncation(p.buf.acc.truncated, p.buf.acc.truncated, p.dropped)
 	return pr
 }

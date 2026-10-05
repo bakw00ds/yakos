@@ -206,9 +206,10 @@ func runDispatch(yakosRoot string, args []string) {
 
 	// Write the agent's text to the terminal (K-135): the runtime's raw
 	// stream-json / JSONL is not what a person running `yakos dispatch` wants,
-	// and the bash path prints text too. A result the dispatch layer did not
-	// parse keeps its raw stdout.
-	out := res.OutputText(stdout)
+	// and the bash path prints text too. It prints everything the agent said
+	// (TextAll), as bash does; the transports hand on only the final answer. A
+	// result the dispatch layer did not parse keeps its raw stdout.
+	out := res.OutputTextAll(stdout)
 	if res.Parsed && len(out) > 0 {
 		out = append(append([]byte(nil), out...), '\n') // Text has trailing newlines trimmed
 	}
@@ -245,7 +246,7 @@ func reportDispatchOutcome(w io.Writer, res dispatch.Result) int {
 		name = "runtime"
 	}
 
-	if res.TextCapped {
+	if res.TextCapped || res.TextAllCapped {
 		fmt.Fprintf(w, "dispatch: output truncated at %d MiB\n", runtime.MaxParsedTextBytes>>20)
 	}
 	switch {

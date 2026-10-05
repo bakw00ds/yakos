@@ -8,9 +8,22 @@ import (
 )
 
 const (
-	claudeOneShot = "claude-stream-json-oneshot-SYNTHETIC.ndjson"
-	claudeErrFix  = "claude-stream-json-error-SYNTHETIC.ndjson"
+	claudeOneShot  = "claude-stream-json-oneshot-SYNTHETIC.ndjson"
+	claudeErrFix   = "claude-stream-json-error-SYNTHETIC.ndjson"
+	claudeSubagent = "claude-stream-json-subagent-SYNTHETIC.ndjson"
 )
+
+// withoutResultFrame drops the terminal result line, as a killed run would.
+func withoutResultFrame(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var kept []string
+	for _, l := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		if !strings.Contains(l, `"type":"result"`) {
+			kept = append(kept, l)
+		}
+	}
+	return []byte(strings.Join(kept, "\n"))
+}
 
 func readTestdata(t *testing.T, name string) []byte {
 	t.Helper()
@@ -26,8 +39,13 @@ func TestClaudeLineParser_OneShotGolden(t *testing.T) {
 	raw := readFixture(t, claudeOneShot)
 	pr, evs := parse("claude", raw)
 
-	if want := "Dispatching to the backend agent.\nThe backend agent reports: all handlers registered."; pr.Text != want {
+	// Text is the result frame's final report; the relay's lead-in is not part of
+	// it. TextAll keeps every assistant message, as the bash dispatcher printed.
+	if want := "The backend agent reports: all handlers registered."; pr.Text != want {
 		t.Errorf("Text = %q\nwant   %q", pr.Text, want)
+	}
+	if want := "Dispatching to the backend agent.\nThe backend agent reports: all handlers registered."; pr.TextAll != want {
+		t.Errorf("TextAll = %q\nwant      %q", pr.TextAll, want)
 	}
 	if pr.SessionID != "7f3c2a9e-1b4d-4c8e-9a10-0d5e6f7a8b9c" {
 		t.Errorf("SessionID = %q", pr.SessionID)
@@ -59,16 +77,19 @@ func TestClaudeLineParser_OneShotGolden(t *testing.T) {
 	}
 }
 
-// Final text keeps extractClaudeText semantics: the text blocks of the
-// assistant messages, in order (plus a newline between separate messages).
-func TestClaudeLineParser_MatchesExtractClaudeTextForOneMessage(t *testing.T) {
+// TextAll keeps extractClaudeText semantics: the text blocks of the assistant
+// messages, in order (plus a newline between separate messages).
+func TestClaudeLineParser_TextAllMatchesExtractClaudeTextForOneMessage(t *testing.T) {
 	stream := `{"type":"system","subtype":"init","session_id":"s"}` + "\n" +
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"line one\nline two\n"}]}}` + "\n" +
 		`{"type":"result","subtype":"success","result":"line one\nline two\n","usage":{"input_tokens":1,"output_tokens":2}}` + "\n"
 	pr, _ := parse("claude", []byte(stream))
 	want := strings.TrimRight(string(extractClaudeText([]byte(stream))), "\r\n")
+	if pr.TextAll != want {
+		t.Errorf("TextAll %q != extractClaudeText %q", pr.TextAll, want)
+	}
 	if pr.Text != want {
-		t.Errorf("parser text %q != extractClaudeText %q", pr.Text, want)
+		t.Errorf("Text %q != %q (the result frame carries the same text here)", pr.Text, want)
 	}
 }
 
@@ -89,12 +110,16 @@ func TestClaudeLineParser_ErrorResult(t *testing.T) {
 	}
 }
 
-// A partial-messages stream killed before its closing assistant message: the
-// text is rebuilt from the deltas, tool events come from the content blocks.
-func TestClaudeLineParser_PartialMessagesDeltaFallback(t *testing.T) {
+// A partial-messages stream with no closing assistant messages: Text is the
+// result frame's, TextAll is rebuilt from the deltas, tool events come from the
+// content blocks.
+func TestClaudeLineParser_PartialMessages(t *testing.T) {
 	pr, evs := parse("claude", readTestdata(t, "claude_tool_stream.ndjson"))
-	if want := "I'll run a command.\nDone."; pr.Text != want {
-		t.Errorf("Text = %q, want %q", pr.Text, want)
+	if pr.Text != "Done." {
+		t.Errorf("Text = %q, want the result frame's %q", pr.Text, "Done.")
+	}
+	if want := "I'll run a command.\nDone."; pr.TextAll != want {
+		t.Errorf("TextAll = %q, want %q", pr.TextAll, want)
 	}
 	wantUsage := Usage{InputTokens: 80, OutputTokens: 14, DurationMs: 2500, TotalCostUSD: 0.00125}
 	if pr.Usage != wantUsage {
@@ -241,5 +266,127 @@ func TestClaudeLineParser_ResultStringFallback(t *testing.T) {
 	pr, _ := parse("claude", []byte(`{"type":"result","result":"ok"}`))
 	if pr.Text != "ok" {
 		t.Errorf("Text = %q", pr.Text)
+	}
+}
+
+// ---- the text contract (result frame first) -----------------------------------------
+
+// Without a result frame (a killed run) the answer is the text blocks of the
+// top-level assistant messages.
+func TestClaudeLineParser_NoResultFrameFallsBackToTheTopLevelAssistantText(t *testing.T) {
+	pr, _ := parse("claude", withoutResultFrame(t, readFixture(t, claudeOneShot)))
+	const want = "Dispatching to the backend agent.\nThe backend agent reports: all handlers registered."
+	if pr.Text != want || pr.TextAll != want {
+		t.Errorf("Text = %q, TextAll = %q, want both %q", pr.Text, pr.TextAll, want)
+	}
+	if pr.Usage != (Usage{}) {
+		t.Errorf("no result frame, no usage: %+v", pr.Usage)
+	}
+}
+
+// An empty result string is not an answer: the assistant text stands in.
+func TestClaudeLineParser_EmptyResultFrameFallsBack(t *testing.T) {
+	stream := `{"type":"assistant","message":{"content":[{"type":"text","text":"the real answer"}]}}` + "\n" +
+		`{"type":"result","subtype":"success","is_error":false,"result":"","usage":{"input_tokens":1,"output_tokens":1}}`
+	pr, _ := parse("claude", []byte(stream))
+	if pr.Text != "the real answer" {
+		t.Errorf("Text = %q", pr.Text)
+	}
+}
+
+// An error result's message is the failure, never the answer; whatever the run
+// said before it failed is still its text.
+func TestClaudeLineParser_ErrorResultMessageIsNeverTheAnswer(t *testing.T) {
+	stream := `{"type":"assistant","message":{"content":[{"type":"text","text":"partial work before the failure"}]}}` + "\n" +
+		`{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Credit balance is too low","usage":{"input_tokens":1,"output_tokens":1}}`
+	pr, _ := parse("claude", []byte(stream))
+	if pr.Text != "partial work before the failure" {
+		t.Errorf("Text = %q", pr.Text)
+	}
+	if pr.Error != "Credit balance is too low" {
+		t.Errorf("Error = %q", pr.Error)
+	}
+}
+
+// Sub-agent narration (assistant lines carrying parent_tool_use_id, forwarded
+// when CLAUDE_CODE_FORWARD_SUBAGENT_TEXT is set) is not the answer. With the
+// result frame the answer is its string; without it, the top-level text only.
+// TextAll keeps everything.
+func TestClaudeLineParser_SubagentNarrationIsNotTheAnswer(t *testing.T) {
+	raw := readFixture(t, claudeSubagent)
+
+	withResult, evs := parse("claude", raw)
+	if withResult.Text != "The backend agent reports: all handlers registered." {
+		t.Errorf("Text = %q", withResult.Text)
+	}
+	const everything = "Dispatching to the backend agent.\nLet me look at the handlers.\nAll handlers are registered.\nThe backend agent reports: all handlers registered."
+	if withResult.TextAll != everything {
+		t.Errorf("TextAll = %q\nwant      %q", withResult.TextAll, everything)
+	}
+	if withResult.SessionID != "5a1e0c3f-9d2b-4e7a-8c41-1b2d3e4f5a6b" {
+		t.Errorf("SessionID = %q", withResult.SessionID)
+	}
+	// The live event feed still shows the narration and the sub-agent's tool calls.
+	wantKinds(t, evs, EventSession, EventToken, EventToolUse, EventToken, EventToolUse, EventToolResult, EventToken, EventToolResult, EventToken, EventResult)
+	if evs[5].ToolName != "Read" || evs[7].ToolName != "Task" {
+		t.Errorf("tool results are correlated to their calls: %q, %q", evs[5].ToolName, evs[7].ToolName)
+	}
+
+	// No result frame: the top-level text, still without the sub-agent's.
+	killed, _ := parse("claude", withoutResultFrame(t, raw))
+	const topLevel = "Dispatching to the backend agent.\nThe backend agent reports: all handlers registered."
+	if killed.Text != topLevel {
+		t.Errorf("Text without a result frame = %q\nwant %q", killed.Text, topLevel)
+	}
+	if killed.TextAll != everything {
+		t.Errorf("TextAll without a result frame = %q", killed.TextAll)
+	}
+}
+
+// Sub-agent text deltas of a partial-messages stream are left out of the
+// delta fallback too.
+func TestClaudeLineParser_SubagentDeltasAreNotTheFallbackAnswer(t *testing.T) {
+	delta := func(parent, text string) string {
+		return `{"type":"stream_event","parent_tool_use_id":` + parent + `,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"` + text + `"}}}`
+	}
+	start := `{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}`
+	stream := strings.Join([]string{start, delta(`"toolu_task1"`, "sub-agent narration. "), delta("null", "The answer.")}, "\n")
+	pr, _ := parse("claude", []byte(stream))
+	if pr.Text != "The answer." {
+		t.Errorf("Text = %q", pr.Text)
+	}
+}
+
+// Every other harness says one thing: TextAll is Text.
+func TestParsers_TextAllEqualsTextOutsideClaude(t *testing.T) {
+	for rt, name := range map[string]string{
+		"codex": "codex-exec-json-0.154.0-command.ndjson",
+		"agy":   "agy-stream-json-1.2.17-tool.ndjson",
+	} {
+		pr, _ := parse(rt, readFixture(t, name))
+		if pr.TextAll != pr.Text || pr.TextAllCapped != pr.TextCapped {
+			t.Errorf("%s: TextAll %q vs Text %q", rt, pr.TextAll, pr.Text)
+		}
+	}
+	if pr, _ := parse("gemini", []byte("plain\nprose")); pr.TextAll != "plain\nprose" || pr.Text != pr.TextAll {
+		t.Errorf("plain: %+v", pr)
+	}
+}
+
+// Text and TextAll are capped separately: a long run of narration must not mark
+// the (small) final report as incomplete.
+func TestClaudeLineParser_TextAllCapIsReportedSeparately(t *testing.T) {
+	chunk := strings.Repeat("n", 100_000)
+	var lines []string
+	for i := 0; i < 12; i++ {
+		lines = append(lines, `{"type":"assistant","parent_tool_use_id":"toolu_task1","message":{"content":[{"type":"text","text":"`+chunk+`"}]}}`)
+	}
+	lines = append(lines, `{"type":"result","subtype":"success","is_error":false,"result":"short final report","usage":{"input_tokens":1,"output_tokens":1}}`)
+	pr, _ := parse("claude", []byte(strings.Join(lines, "\n")))
+	if pr.Text != "short final report" || pr.TextCapped || pr.Truncated {
+		t.Errorf("Text=%q TextCapped=%v Truncated=%v: the final report is complete", pr.Text, pr.TextCapped, pr.Truncated)
+	}
+	if !pr.TextAllCapped || len(pr.TextAll) > MaxParsedTextBytes {
+		t.Errorf("TextAllCapped=%v len(TextAll)=%d", pr.TextAllCapped, len(pr.TextAll))
 	}
 }

@@ -51,11 +51,14 @@ func (r *Result) applyParsed(runtimeName string, pr runtime.ParseResult) {
 	r.Provider = providerForRuntime(runtimeName)
 	r.Parsed = true
 	r.Text = pr.Text
+	r.TextAll = pr.TextAll
 	r.SessionID = pr.SessionID
 	r.ModelID = pr.ModelID
 	r.Truncated = pr.Truncated
 	r.TextCapped = pr.TextCapped
+	r.TextAllCapped = pr.TextAllCapped
 	r.LinesDropped = pr.LinesDropped
+	r.UsageCumulative = pr.UsageCumulative
 	r.Error = pr.Error
 	if pr.Usage != (runtime.Usage{}) {
 		u := pr.Usage
@@ -75,6 +78,20 @@ func (r Result) OutputText(stdout []byte) []byte {
 	return stdout
 }
 
+// OutputTextAll is OutputText for a person at a terminal: TextAll (everything
+// the agent said) when the dispatch layer parsed the stream, otherwise stdout as
+// given. Only the CLI uses it; every transport that hands a result to another
+// agent uses OutputText.
+func (r Result) OutputTextAll(stdout []byte) []byte {
+	if !r.Parsed {
+		return stdout
+	}
+	if r.TextAll != "" {
+		return []byte(r.TextAll)
+	}
+	return []byte(r.Text)
+}
+
 // UsageSummary is the JSON view of a result's token usage. The names match the
 // dispatch-log's usage object. The dollar cost appears only when the harness
 // itself reported one (claude); tokens are the primary unit.
@@ -84,6 +101,11 @@ type UsageSummary struct {
 	CacheRead     int64   `json:"cache_read"`
 	CacheCreation int64   `json:"cache_creation"`
 	TotalCostUSD  float64 `json:"total_cost_usd,omitempty"`
+
+	// Cumulative is present and true when the counts cover the whole native
+	// conversation (agy) rather than this call alone, so a caller that adds calls
+	// up knows to subtract the total it last saw for the same session_id.
+	Cumulative bool `json:"cumulative,omitempty"`
 }
 
 // TransportSummary is what a transport that returns a dispatch to its caller
@@ -154,6 +176,7 @@ func Summarize(stdout []byte, res Result) TransportSummary {
 			CacheRead:     res.Usage.CacheRead,
 			CacheCreation: res.Usage.CacheCreation,
 			TotalCostUSD:  res.Usage.TotalCostUSD,
+			Cumulative:    res.UsageCumulative,
 		}
 	}
 	return s

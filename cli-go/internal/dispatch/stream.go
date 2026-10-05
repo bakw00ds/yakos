@@ -613,6 +613,9 @@ func execWithStreaming(
 		result.Provider = providerForRuntime(result.Runtime)
 		result.Parsed = true
 		result.Text = string(allText)
+		// A streamed turn carries the text its deltas delivered, every message of
+		// it; the result frame's final report is not separated out on this path.
+		result.TextAll = result.Text
 	}
 
 	// Write dispatch_finished identically to Run (parity invariant).

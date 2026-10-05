@@ -241,3 +241,40 @@ func TestDispatchToolSchema_OffersWhatDispatchAccepts(t *testing.T) {
 		t.Error("model must not carry a pattern that admits ids dispatch refuses")
 	}
 }
+
+// The answer is the result frame's final report, not the relay's lead-in or a
+// sub-agent's narration, and the full join is not part of the result.
+func TestDispatchTool_ReturnsTheFinalReportNotTheNarration(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "tests", "fixtures", "runtime-streams", "claude-stream-json-subagent-SYNTHETIC.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := dispatchCfgWithFake(t, "claude", strings.Split(strings.TrimRight(string(data), "\n"), "\n")...)
+	got, raw := callDispatch(t, cfg, map[string]interface{}{"agent": "worker", "task": "t"})
+
+	if got["text"] != "The backend agent reports: all handlers registered." {
+		t.Errorf("text = %q", got["text"])
+	}
+	for _, leaked := range []string{"Dispatching to the backend agent", "Let me look at the handlers", "text_all", "TextAll"} {
+		if strings.Contains(raw, leaked) {
+			t.Errorf("the result must not carry %q: %s", leaked, raw)
+		}
+	}
+}
+
+// agy's usage is a conversation total; the result says so.
+func TestDispatchTool_MarksAgyUsageCumulative(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "tests", "fixtures", "runtime-streams", "agy-stream-json-1.2.17-conversation-turn2.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := dispatchCfgWithFake(t, "agy", strings.Split(strings.TrimRight(string(data), "\n"), "\n")...)
+	got, _ := callDispatch(t, cfg, map[string]interface{}{"agent": "worker", "task": "t", "runtime": "agy"})
+	u, _ := got["usage"].(map[string]interface{})
+	if u["input_tokens"] != float64(25950) || u["cumulative"] != true {
+		t.Errorf("usage = %v, want the conversation total marked cumulative", u)
+	}
+	if got["session_id"] != "390dbd9d-ac3e-4fc9-9383-8f11318029e0" {
+		t.Errorf("session_id = %v", got["session_id"])
+	}
+}
