@@ -249,8 +249,10 @@ agy --add-dir <workdir> --sandbox --dangerously-skip-permissions [--model <id>] 
 - Resume: `--conversation <id>` keeps the `conversation_id`, continues the step
   numbering, and reports usage cumulatively across turns (recorded). The total
   spans separate processes: turn 2's `result.usage` is turn 1's result plus turn
-  2's own step usage. Account one run from the DONE step usage in its own stream
-  (it equals the run's own usage), not from `result.usage` of a resumed turn.
+  2's own step usage. After the first turn, account one run from the DONE step
+  usage in its own stream (it equals the run's own usage), not from
+  `result.usage` of a resumed turn. On the first turn `result.usage` is already
+  the run's own usage.
 - **Containment.** Under `--sandbox --dangerously-skip-permissions`, agy's macOS
   Seatbelt sandbox blocks writes outside the workspace by default but leaves
   file reads and outbound network unrestricted, and the model can escalate out

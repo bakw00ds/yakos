@@ -262,9 +262,11 @@ func TestDispatchTool_ReturnsTheFinalReportNotTheNarration(t *testing.T) {
 	}
 }
 
-// The tool takes no resume id, so every call begins a conversation, and for agy
-// the result frame's total is then the call's own usage. The result carries one
-// usage object and never a separate conversation total.
+// An agy result frame that closes the first turn (num_turns of 1 or less) holds
+// the run's own usage as its total, and this fixture is one, so the tool
+// reports the frame's counts. After the first turn the run's usage is the sum
+// of its DONE steps instead. The result carries one usage object and never a
+// separate conversation total.
 func TestDispatchTool_ReportsAgyUsage(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "tests", "fixtures", "runtime-streams", "agy-stream-json-1.2.17-conversation-turn1.ndjson"))
 	if err != nil {
