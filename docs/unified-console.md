@@ -528,7 +528,14 @@ configured:
 **Streaming behavior:** claude panes stream tokens as they arrive
 (`--include-partial-messages` unframed mode). codex, agy, and gemini
 panes receive a single buffered response. The UI labels buffered panes
-so you know to wait for the full response.
+so you know to wait for the full response. A buffered response is the
+agent's text, parsed from the runtime's own output (codex JSONL, agy
+stream-json), never the raw stream. A turn the runtime reports as failed adds
+an error chunk, which the pane renders as an error message. The dispatch
+layer's closing summary chunk now also carries the token usage (`input_tokens`
+is the fresh prompt, cache counts are separate) and the runtime's session id,
+but the chat handler does not forward them to the browser yet, so the pane
+shows neither today; that lands with the P0a and P0d work.
 
 Each pane is **multi-turn** with a persisted transcript at
 `<work>/current/chats/<conversationID>.ndjson`. Refreshing the browser
@@ -673,8 +680,14 @@ Two substitution forms are supported in `prompt`:
 
 - `${inputs.<key>}` — replaced with the value of the named input at run
   time (defaults from the YAML, overridable at the CLI).
-- `${nodes.<id>.output}` — replaced with the truncated stdout of the
-  named upstream node. Only nodes listed in `needs` (directly or
+- `${nodes.<id>.output}` — replaced with the truncated output of the
+  named upstream node. The output is the agent's **text**: the dispatch layer
+  parses each runtime's own stream (claude stream-json, codex JSONL, agy
+  stream-json; prose from any other runtime) and Flows keep only the text,
+  never the raw stream. For claude that is the final text of the result frame,
+  so a framed node's output is the sub-agent's final report, not the relay's
+  lead-in or any narration. The untrusted-output scan now examines that
+  text. Only nodes listed in `needs` (directly or
   transitively) may be referenced; the validator rejects forward
   references and undeclared IDs.
 
@@ -709,11 +722,22 @@ bytes substituted but does not sanitize the content.
 ```
 <work>/current/workflows/runs/<runId>/
   run.json                    # run status, timing, node states (debounced writes)
-  nodes/<id>.stdout           # per-node captured output
+  nodes/<id>.stdout           # per-node output: the agent's text
+  node-dispatch.ndjson        # per-node dispatch start/finish, with token usage
 ```
 
 `run.json` is written atomically via temp-file + rename. State is
 debounced ~200ms to avoid high-frequency I/O during parallel runs.
+
+`node-dispatch.ndjson` gets one line when a node's dispatch starts and one
+when it finishes. The finished line records what the runtime reported:
+`runtime`, `provider`, `model_id` and the token counts (`input_tokens`,
+`output_tokens`, `cache_read`, `cache_creation`; `input_tokens` is the fresh
+prompt and the cache counts are separate, for every runtime). Fields the
+runtime did not report are left out, and neither a dollar figure nor the
+runtime's session id is written (the file is world-readable). A node whose
+runtime reported why it failed shows that message in its error, for example
+`exit code 1: <message>`.
 
 ### CLI reference
 

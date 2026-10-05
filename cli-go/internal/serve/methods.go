@@ -182,17 +182,15 @@ type dispatchRunParams struct {
 	Timeout   int    `json:"timeout,omitempty"`
 }
 
-// dispatchRunResult is the response shape for yakos.dispatch.run.
-type dispatchRunResult struct {
-	ExitCode      int     `json:"exit_code"`
-	DurationS     float64 `json:"duration_s"`
-	OutputBytes   int64   `json:"output_bytes"`
-	ModelResolved string  `json:"model_resolved"`
-}
-
 // handleDispatchRun returns a handler that runs an agent dispatch and returns
 // the outcome. It delegates to dispatch.Service for identity stamping,
 // concurrency governance, and bus publishing.
+//
+// The response is a dispatch.TransportSummary, the same object the MCP
+// yakos.dispatch tool returns: the agent's text (at most 64 KiB,
+// injection-scanned), token usage and the runtime's own session id beside the
+// fields the method always returned (exit_code, duration_s, output_bytes,
+// model_resolved).
 func handleDispatchRun(cfg Config) jsonrpc.Handler {
 	return func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		var p dispatchRunParams
@@ -227,7 +225,7 @@ func handleDispatchRun(cfg Config) jsonrpc.Handler {
 			}
 		}
 
-		_, result, err := svc.Run(ctx, dispatch.Params{
+		stdout, result, err := svc.Run(ctx, dispatch.Params{
 			Agent:     p.Agent,
 			Task:      p.Task,
 			Project:   p.Project, // empty → Service uses WorkspaceRoot
@@ -246,12 +244,7 @@ func handleDispatchRun(cfg Config) jsonrpc.Handler {
 			}
 		}
 
-		return dispatchRunResult{
-			ExitCode:      result.ExitCode,
-			DurationS:     result.DurationS,
-			OutputBytes:   result.OutputBytes,
-			ModelResolved: result.ModelResolved,
-		}, nil
+		return dispatch.Summarize(stdout, result), nil
 	}
 }
 

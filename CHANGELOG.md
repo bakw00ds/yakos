@@ -84,6 +84,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in print mode makes the model read the skill and follow it. Leftover flat files
   are removed by the bash cleanup.
 
+- **One-shot Go dispatches now write a `usage` object to the dispatch-log.**
+  `dispatch.Run` never filled `Result.Usage`, so a `dispatch_finished` line it
+  wrote had no tokens or cost (the bash path always had them). It now carries
+  what the runtime reported, so the readers of `usage` see these runs: the
+  Performance dashboard, the metrics readers, and the per-agent budgets, which
+  sum the dollar figure that only claude reports. `yakos cost` does not read
+  `usage` until P0d. Lines for runtimes that report nothing are unchanged.
+  `cost.Usage` now documents the token convention (fresh input plus separate
+  cache counts) and one known gap: for codex the bash dispatcher wrote the raw
+  input total with `cache_read` 0 under the same keys, so the two writers
+  disagree until K-136 aligns them. A test reads a log mixing both writers and
+  old and new rows.
+- `output_bytes` of a streamed codex or agy chat turn now measures the text the
+  console received, not the raw JSONL.
+- **MCP `yakos.dispatch` no longer offers `gemini`, and lists all four model
+  tiers.** The runtime is retired, and the `model` list now names every tier
+  dispatch accepts (`haiku`, `sonnet`, `opus`, `fable`; it omitted `fable`). A
+  test ties the list to dispatch's own validation so the two cannot drift.
+  Widening `model` to other runtimes' ids waits for per-runtime validation
+  (K-132).
+
 ### Added
 
 - **Go materializers for codex and agy agent files (K-134).**
@@ -118,6 +139,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   must not read `result.usage` of a resumed turn as that turn's own usage. A guard
   test keeps every recording free of home directories, temporary paths, `@`
   handles and the name of the account running the test.
+
+- **Every dispatch transport returns the agent's text, its token usage and the
+  runtime's session id (K-135).** Until now `dispatch.Run` handed back the
+  runtime's raw stdout (claude stream-json, codex JSONL), the MCP
+  `yakos.dispatch` tool and JSON-RPC `yakos.dispatch.run` discarded it, Flows
+  spliced the raw NDJSON into `${nodes.<id>.output}`, and the console showed
+  raw codex JSONL. A new `runtime.LineParser` (selected by `ParserFor`)
+  normalizes each harness's own output into the agent's text, token usage, the
+  harness-native session id and the model id: a wrapper over the existing
+  claude stream-json parser, a `codex exec --json` parser and an agy
+  `--output-format stream-json` parser, plus a plain-text parser for any other
+  runtime (and as the fallback when a stream turns out not to be JSON, so
+  today's agy adapter keeps working). Parsers are deterministic, bounded (a
+  2 MiB line cap, a 1 MiB text cap), strip NUL bytes like the Go hook twins,
+  and never retain the line they are fed.
+  - `dispatch.Run` fills new `Result` fields (`Text`, `TextAll`, `SessionID`,
+    `ModelID`, `Provider`, `Runtime`, `Parsed`, `Error`, `CumulativeUsage`, and
+    `Truncated` with its reasons `TextCapped`, `TextAllCapped` and
+    `LinesDropped`; `Usage` now carries tokens, cache counts and, for claude,
+    the cost) and still returns the raw stdout.
+  - The MCP `yakos.dispatch` tool and `yakos.dispatch.run` return one shared
+    object: `{text, scan, exit_code, duration_s, output_bytes, runtime,
+    model_resolved, model_id, provider, session_id, usage, error}`. `text` is
+    capped at 64 KiB and passed through the Go output-injection scan; `scan`
+    lists the hits (detection only). Every field the old result had is kept.
+  - **Claude's answer is the result frame's final text.** The framed prompt asks
+    the relay for the sub-agent's final report, and the result frame is the
+    stream's contract for it. The relay's lead-in and a sub-agent's narration
+    (claude forwards the latter when `CLAUDE_CODE_FORWARD_SUBAGENT_TEXT` is set,
+    which the daemon's env allowlist lets through) are not part of `text`.
+    Without a result frame (a killed run), or with a blank one, `text` falls back
+    to the top-level assistant text, and an error result's message is never
+    taken as the answer.
+    `TextAll` keeps every assistant text block, as the bash dispatcher printed
+    them: `yakos dispatch` prints it, and no MCP, JSON-RPC or Flows result
+    carries it (a second long field would double the injection surface and the
+    tokens a calling agent reads).
+  - **agy usage is the run's own, not the conversation's.** With
+    `--conversation` a result frame reports the whole conversation's tokens so
+    far (recorded: turn 2 reports turn 1's tokens plus its own), which would
+    count every earlier turn again each time a conversation is resumed. The
+    parser exposes the run's own figure as `ParseResult.Usage` and the frame's
+    total as `ParseResult.CumulativeUsage`, and the frame's own `num_turns`
+    decides which counts as the run's own. On a first turn (`num_turns` of 1 or
+    less) it is the frame's counts, which are complete even when a step line was
+    lost and are all the single `--output-format json` envelope has. After the
+    first turn it is the sum of the usage carried by the DONE steps, so adding
+    runs up needs no subtraction, and a stream without steps reports no tokens.
+    The rule reads the stream, not the request, so it holds for MCP, Flows,
+    every console chat turn and any way of resuming a conversation.
+    `Result.CumulativeUsage` keeps the frame's total for reference and is not
+    logged or sent. The frame's duration is the session's clock (turn 2 of the
+    recorded pair reports 35.9 seconds for a step of about 4), so
+    `Usage.DurationMs` is carried on a first turn and left zero after it; the
+    measured duration of the process is the latency source. The parser also
+    takes agy's slash-command reply (a `command_result` frame and a result with
+    no session) and a stream in a different schema, which now comes back as its
+    raw lines instead of empty.
+  - Flows splice the text, so the untrusted-output scan now examines the real
+    payload (line-anchored patterns could not match inside JSON-escaped
+    NDJSON), and each node's token usage is recorded in the per-run
+    `node-dispatch.ndjson`. A failed node's error carries the runtime's own
+    message.
+  - The Chat handler now receives codex and agy answers as text (one chunk, as
+    before) instead of raw JSONL, and a failed turn adds an error chunk, which
+    the pane renders as an error message. The summary chunk carries the usage
+    and the native session id for the handler, but the handler does not forward
+    them to the browser yet; that lands with the P0a and P0d work, so the
+    console shows neither today.
+  - `yakos dispatch` (Go) prints everything the agent said (`TextAll`, as the
+    bash path does), not the raw stream. A failed run prints the runtime's own
+    error message and its stderr tail to stderr and exits non-zero (the
+    runtime's exit code, or 1 when the runtime reported a failure but exited 0),
+    where the raw JSONL used to carry the message. Both come from the harness,
+    so they are printed with every escape sequence (CSI, OSC and the other
+    string sequences, short forms such as a terminal reset) and every control
+    character removed except newline and tab; the agent text itself is printed
+    as it is, as the bash path prints it. Text cut at the 1 MiB cap (the final
+    text, or the full join the CLI prints), or a line skipped for exceeding
+    2 MiB, prints one stderr notice (`output truncated at 1 MiB`,
+    `line exceeded N bytes and was skipped`); `Result.TextCapped`,
+    `Result.TextAllCapped` and `Result.LinesDropped` say which.
+  - Token counts follow one convention for every harness: `input_tokens` is
+    the fresh prompt and cache reads and writes are separate (codex reports its
+    input total with the cached part inside it, and is normalized). No price is
+    computed.
+  - Fixtures under `tests/fixtures/runtime-streams`: three real codex 0.154.0
+    recordings and six real agy 1.2.17 recordings (a plain reply and a shell
+    tool step, both on `gemini-3.8-flash-low`, and four recorded by wp-p0b for
+    K-133: a two-turn conversation, a run refused before it started, and a
+    sandbox refusal; `ModelID` carries the id the `init` frame reports, effort
+    suffix included). The claude streams and the cases that were not recorded
+    (agy checkpoint steps, multi-turn stdin sessions, tool errors and the
+    `--output-format json` envelope) are synthetic and marked as such in the
+    folder's README.
+    `docs/mcp-integration.md`, `docs/unified-console.md` and both package
+    READMEs document the new results.
 
 ### Fixed
 

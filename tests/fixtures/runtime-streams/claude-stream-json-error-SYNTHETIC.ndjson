@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","cwd":"/work/project","session_id":"11111111-2222-4333-8444-555555555555","tools":["Bash"],"model":"claude-sonnet-4-5-20250929"}
+{"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":15,"num_turns":0,"result":"Credit balance is too low","session_id":"11111111-2222-4333-8444-555555555555","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}

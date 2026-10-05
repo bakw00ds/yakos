@@ -8,7 +8,12 @@ wrapper plus the standing preamble, not the scan.
 ## Stages
 
 1. **In-process Go scan** (`cli-go/internal/workflow/output_patterns.go`).
-   Runs over exactly the bytes being forwarded (post tail-truncation). Text
+   Runs over exactly the bytes being forwarded (post tail-truncation). Those
+   bytes are the agent's text: the dispatch layer parses each runtime's own
+   stream (K-135), so a node's output is no longer the raw stream-json or
+   JSONL. Before that change the scan read JSON-escaped text, where a newline
+   is the two characters `\n`, so line-anchored patterns such as a `SYSTEM:`
+   line could not match. Text
    is normalized first: invisible characters (zero-width, soft hyphen,
    combining marks, bidi controls) are dropped or treated as spaces,
    fullwidth forms and common Cyrillic/Greek look-alikes are folded to
