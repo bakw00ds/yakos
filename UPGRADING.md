@@ -125,7 +125,9 @@ What to do:
   deployments use the CLI engine too.
 
 The sidecar's environment also drops every `CLAUDE_CODE_OAUTH*` variable and any
-value that holds an OAuth token. Runs of the `claude` CLI are unaffected.
+value that holds an OAuth token, except variables named `YAKOS_*`: those are
+yakOS's own and are never dropped for what they contain. Runs of the `claude`
+CLI are unaffected.
 
 The bash `claude-sdk` runtime, which runs the Python Agent SDK, has the same
 rule. `yakos dispatch --runtime claude-sdk` on the bash CLI now stops with one
@@ -135,6 +137,12 @@ line (`claude-sdk: refusing to run: ANTHROPIC_API_KEY is not set; ...`) unless
 `--runtime claude`, which is Claude Code itself. `yakos start --runtime
 claude-sdk` is unchanged: it launches Claude Code.
 
+**Known limit on Linux:** the bash `claude-sdk` runtime cannot yet dispatch the
+full framework roster there. It hands the roster to python in one environment
+string, which is over the 128 KiB Linux allows for a single string, so the exec
+fails with `Argument list too long`. This is tracked on K-144; a key alone is not
+enough on Linux until it is fixed.
+
 `yakos auth` follows: `yakos auth status claude-sdk` reports whether
 `ANTHROPIC_API_KEY` is set (never its value) and says the claude login is not
 used by the SDK engine, `yakos auth login claude-sdk` prints how to set the key
@@ -142,8 +150,8 @@ instead of routing through the claude login flow, and `yakos auth logout
 claude-sdk` no longer removes `~/.claude/auth.json`; use `yakos auth logout
 claude` for that. The bash and Go CLIs print the same text.
 
-`yakos doctor --policy` lists an SDK sidecar that can be selected without a key,
-along with the other risky settings it finds (see CHANGELOG).
+`yakos doctor --policy` mentions an SDK sidecar that is installed without a key
+as a low heads-up, along with the other risky settings it finds (see CHANGELOG).
 
 ## Upgrading to v0.61.0.0
 

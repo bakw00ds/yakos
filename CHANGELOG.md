@@ -61,8 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variable and any value that holds an OAuth token, even one added through
   `YAKOS_DISPATCH_ENV_PASSTHROUGH`, and `sidecar.mjs` repeats the key check (exit
   status 78, one stderr line, no credential material) and strips the same
-  variables from its own environment, for a sidecar started any other way. The
-  bash `claude-sdk` runtime (the Python Agent SDK behind
+  variables from its own environment, for a sidecar started any other way.
+  Variables named `YAKOS_*` are yakOS's own and are never dropped for what they
+  contain, so an agent roster that mentions a token prefix in prose still reaches
+  the SDK. The bash `claude-sdk` runtime (the Python Agent SDK behind
   `yakos dispatch --runtime claude-sdk`) has the same gate:
   `yk_rt_claude_sdk_dispatch` stops with one FATAL line before it composes
   agents or starts python, runs python under `env -u` for the same OAuth
@@ -160,7 +162,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`yakos doctor --policy` (K-137).** A report of risky configurations, one
   line each with a severity (high, medium, low) and a fix hint. It always exits
   0 and names environment variables and booleans only, never a value. It flags
-  the SDK sidecar selectable without `ANTHROPIC_API_KEY`;
+  the SDK sidecar installed without `ANTHROPIC_API_KEY` (low: the command
+  cannot tell whether a console enabled it, and `doctor.CheckPolicy` reports
+  medium for a caller that knows);
   `allow_unsandboxed_runtimes` in `~/.yakos-state/router-policy.yml`, or that
   file refused by its owner-only trust check; `YAKOS_IMPL` not set to `go` with
   the bash CLI tree installed, because the bash adapters still start codex and
