@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2 MiB line cap, a 1 MiB text cap), strip NUL bytes like the Go hook twins,
   and never retain the line they are fed.
   - `dispatch.Run` fills new `Result` fields (`Text`, `TextAll`, `SessionID`,
-    `ModelID`, `Provider`, `Runtime`, `Parsed`, `Error`, `UsageCumulative`, and
+    `ModelID`, `Provider`, `Runtime`, `Parsed`, `Error`, `CumulativeUsage`, and
     `Truncated` with its reasons `TextCapped`, `TextAllCapped` and
     `LinesDropped`; `Usage` now carries tokens, cache counts and, for claude,
     the cost) and still returns the raw stdout.
@@ -44,14 +44,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     them: `yakos dispatch` prints it, and no MCP, JSON-RPC or Flows result
     carries it (a second long field would double the injection surface and the
     tokens a calling agent reads).
-  - **agy usage is cumulative per conversation.** With `--conversation` a result
-    frame reports the whole conversation's tokens so far (recorded: turn 2
-    reports turn 1's tokens plus its own). The parser reports the counts
-    verbatim and sets `UsageCumulative` (and `usage.cumulative` in the MCP and
-    JSON-RPC results) so the accounting layer can subtract the previous total
-    per native session. The parser also takes agy's slash-command reply (a
-    `command_result` frame and a result with no session) and a stream in a
-    different schema, which now comes back as its raw lines instead of empty.
+  - **agy usage is the run's own, not the conversation's.** With
+    `--conversation` a result frame reports the whole conversation's tokens so
+    far (recorded: turn 2 reports turn 1's tokens plus its own), which would
+    count every earlier turn again each time a conversation is resumed. `Usage`
+    is therefore the sum of the usage carried by the DONE steps seen in the
+    stream, which is what the logs, the MCP and JSON-RPC results and the Flows
+    node log carry, and adding runs up needs no subtraction. The frame's total is
+    kept in `Result.CumulativeUsage` (and `ParseResult.CumulativeUsage`) for
+    reference; it is not logged or sent. A step line lost to corruption is
+    missing from the sum, and the single `--output-format json` envelope has no
+    steps, so on a first turn its counts stand in. The parser also takes agy's
+    slash-command reply (a `command_result` frame and a result with no session)
+    and a stream in a different schema, which now comes back as its raw lines
+    instead of empty.
   - Flows splice the text, so the untrusted-output scan now examines the real
     payload (line-anchored patterns could not match inside JSON-escaped
     NDJSON), and each node's token usage is recorded in the per-run

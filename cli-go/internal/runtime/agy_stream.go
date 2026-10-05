@@ -24,18 +24,21 @@ package runtime
 //	{"event":"result","result":{"conversation_id":"<id>","status":"SUCCESS","response":"...","error":"...","duration_seconds":N,"num_turns":N,"usage":{"input_tokens":N,"output_tokens":N,"thinking_tokens":N,"cache_read_tokens":N,"total_tokens":N}}}
 //
 // Final text is the concatenation of the agent_response text_delta fragments
-// (the vendor's own jq recipe), falling back to result.response. Usage is the
-// terminal result's, falling back to the sum of the DONE steps' usage when the
-// stream ended without a result.
+// (the vendor's own jq recipe), falling back to result.response.
 //
-// The result frame's usage is CUMULATIVE over the whole conversation, not this
-// run: with --conversation the second turn of a recorded pair reports 25950
+// USAGE. The result frame's usage is CUMULATIVE over the whole conversation, not
+// this run: with --conversation the second turn of a recorded pair reports 25950
 // input tokens, which is the first turn's 12859 plus the second turn's own
-// 13091. The parser reports the counts verbatim and marks them
-// (ParseResult.UsageCumulative) so the accounting layer can subtract the total
-// it recorded for the same session. A run's own tokens are the sum of its DONE
-// steps' usage, which is what the fallback computes; for a first turn the two
-// are equal in every recording.
+// 13091, and its num_turns is 2. Taken as the run's usage it would count every
+// earlier turn again each time a conversation is resumed. So ParseResult.Usage
+// is the sum of the usage carried by the DONE steps seen in THIS stream, which
+// is the run's own tokens (it equals the result frame's on every first-turn
+// recording), and the frame's total is kept apart in ParseResult.CumulativeUsage
+// for reference. The frame still supplies the duration. A stream whose steps
+// carry no usage at all (the single --output-format json envelope has no steps)
+// falls back to the frame's counts on a first turn, num_turns of 1 or less. On a
+// later turn they cannot be told from the earlier turns' tokens, so Usage keeps
+// zero tokens and CumulativeUsage holds the total.
 //
 // agy's input_tokens already EXCLUDES cache_read_tokens (a second-turn step
 // reports 278 input and 30214 cache read), which is the package's Usage
@@ -59,13 +62,13 @@ type agyLineParser struct {
 	conversationID string
 	modelID        string
 
-	resultUsage   Usage
-	haveResultUse bool
-	stepUsage     Usage
-	statusErr     string
-	lastTextStep  int
-	haveTextStep  bool
-	toolStarted   map[int]struct{}
+	run          agyTally // usage of the DONE steps of the whole stream
+	turn         agyTally // usage of the DONE steps since the last result frame
+	frame        agyFrame // what the last result frame reported about usage
+	statusErr    string
+	lastTextStep int
+	haveTextStep bool
+	toolStarted  map[int]struct{}
 }
 
 func newAgyLineParser() *agyLineParser {
@@ -83,6 +86,46 @@ func (u *agyUsage) usage() Usage {
 		return Usage{}
 	}
 	return Usage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CacheRead: u.CacheReadTokens}
+}
+
+// agyTally sums the usage carried by the DONE steps seen so far.
+type agyTally struct {
+	sum  Usage
+	seen bool // at least one DONE step carried a usage object
+}
+
+func (t *agyTally) add(u Usage) {
+	t.sum.InputTokens += u.InputTokens
+	t.sum.OutputTokens += u.OutputTokens
+	t.sum.CacheRead += u.CacheRead
+	t.seen = true
+}
+
+// agyFrame is what a result frame reported about usage.
+type agyFrame struct {
+	usage    Usage // the counts as reported, a conversation total; DurationMs from duration_seconds
+	numTurns int   // turns in the conversation so far, 1 on a first turn
+	have     bool  // the frame carried a usage object
+}
+
+// own is the usage of the run whose DONE steps the tally holds, given the result
+// frame that closed it (the zero frame when there was none). The steps' sum is
+// the run's own tokens whatever the conversation did before it; the frame's
+// counts are not, they are the conversation's running total. The frame
+// therefore supplies only the duration. The exception is a stream whose steps
+// carried no usage: the frame's counts are then all there is, and on a first
+// turn they are the run's own. On a later turn they are not separable, so only
+// the duration is kept.
+func (t agyTally) own(f agyFrame) Usage {
+	own := t.sum
+	if !f.have {
+		return own
+	}
+	own.DurationMs = f.usage.DurationMs
+	if !t.seen && f.numTurns <= 1 {
+		return f.usage
+	}
+	return own
 }
 
 type agyEnvelope struct {
@@ -128,6 +171,7 @@ type agyResult struct {
 	Response        string          `json:"response"`
 	Error           json.RawMessage `json:"error"`
 	DurationSeconds float64         `json:"duration_seconds"`
+	NumTurns        int             `json:"num_turns"`
 	Usage           *agyUsage       `json:"usage"`
 }
 
@@ -273,9 +317,8 @@ func (p *agyLineParser) step(st agyStep) []NativeEvent {
 	}
 	if st.State == "DONE" && st.Usage != nil {
 		u := st.Usage.usage()
-		p.stepUsage.InputTokens += u.InputTokens
-		p.stepUsage.OutputTokens += u.OutputTokens
-		p.stepUsage.CacheRead += u.CacheRead
+		p.run.add(u)
+		p.turn.add(u)
 	}
 	return evs
 }
@@ -285,13 +328,17 @@ func (p *agyLineParser) result(r agyResult) []NativeEvent {
 	p.learn(r.ConversationID, r.Model)
 	p.resp = textAccumulator{}
 	p.resp.add(r.Response)
+	var frame agyFrame
 	if r.Usage != nil {
-		p.resultUsage = r.Usage.usage()
-		p.resultUsage.DurationMs = int64(r.DurationSeconds * 1000)
-		p.haveResultUse = true
+		frame = agyFrame{usage: r.Usage.usage(), numTurns: r.NumTurns, have: true}
+		frame.usage.DurationMs = int64(r.DurationSeconds * 1000)
+		p.frame = frame
 	}
-	evs := []NativeEvent{{Kind: EventResult, Text: stripNUL(r.Response), Usage: p.resultUsage,
-		UsageCumulative: hasTokens(p.resultUsage), SessionID: p.conversationID, Model: p.modelID}}
+	// The turn this frame closes: its own steps, not the conversation's total.
+	own := p.turn.own(frame)
+	p.turn = agyTally{}
+	evs := []NativeEvent{{Kind: EventResult, Text: stripNUL(r.Response), Usage: own, CumulativeUsage: frame.usage,
+		SessionID: p.conversationID, Model: p.modelID}}
 
 	p.statusErr = ""
 	if status := strings.TrimSpace(r.Status); status != "" && !strings.EqualFold(status, "SUCCESS") {
@@ -371,12 +418,8 @@ func (p *agyLineParser) Finish() ParseResult {
 	pr.Text = chosen.text()
 	pr.TextAll = pr.Text
 	pr.noteTruncation(chosen.truncated, chosen.truncated, p.dropped)
-	if p.haveResultUse {
-		pr.Usage = p.resultUsage
-		pr.UsageCumulative = hasTokens(pr.Usage)
-	} else {
-		// The sum of this stream's DONE steps: this run only.
-		pr.Usage = p.stepUsage
-	}
+	// This run's own tokens, and the conversation total the result frame kept.
+	pr.Usage = p.run.own(p.frame)
+	pr.CumulativeUsage = p.frame.usage
 	return pr
 }

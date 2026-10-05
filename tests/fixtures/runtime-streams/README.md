@@ -19,13 +19,13 @@ binary. A filename says how trustworthy a capture is:
 | `codex-exec-json-0.154.0-failed.ndjson` | real, codex 0.154.0 | `-m` with an unsupported model: a warning `error` item, a top-level `error` event whose message is a JSON document, `turn.failed`, no usage |
 | `codex-exec-json-0.154.0-SYNTHETIC-items.ndjson` | synthetic | `reasoning`, `file_change`, a failing command, `mcp_tool_call`, `web_search`, `todo_list` items and cache-write usage |
 | `agy-stream-json-1.2.17-ok.ndjson` | real, agy 1.2.17, `gemini-3.8-flash-low` | `init` with the model id, an ACTIVE text fragment then a DONE step carrying the trailing newline, `result` with usage |
-| `agy-stream-json-1.2.17-tool.ndjson` | real, agy 1.2.17, `gemini-3.8-flash-low` | an `agent_response` step with usage and no text (the tool call), a `run_command` tool step seen ACTIVE then DONE, the answer, cumulative `result` usage |
+| `agy-stream-json-1.2.17-tool.ndjson` | real, agy 1.2.17, `gemini-3.8-flash-low` | an `agent_response` step with usage and no text (the tool call), a `run_command` tool step seen ACTIVE then DONE, the answer, `result` usage equal to the two model steps' sum |
 | `agy-stream-json-1.2.17-conversation-turn1.ndjson` | real, agy 1.2.17, recorded by wp-p0b (K-133, copied unchanged from `feat/routing-p0b-adapters`) | first turn of a conversation: a reply with usage |
-| `agy-stream-json-1.2.17-conversation-turn2.ndjson` | real, agy 1.2.17, recorded by wp-p0b (same source) | second turn with `--conversation`: a `system_message` step, and a result whose usage is **cumulative** (turn 1's 12859 input plus its own 13091) |
+| `agy-stream-json-1.2.17-conversation-turn2.ndjson` | real, agy 1.2.17, recorded by wp-p0b (same source) | second turn with `--conversation`: a `system_message` step, and a result whose usage is **cumulative** (turn 1's 12859 input plus its own 13091, `num_turns` 2) |
 | `agy-stream-json-1.2.17-effort-conflict.ndjson` | real, agy 1.2.17, recorded by wp-p0b (same source) | a run refused before it started: a lone `result` frame with status `ERROR`, an `error` message, an empty `conversation_id`, no init and no steps |
 | `agy-stream-json-1.2.17-sandbox-denied.ndjson` | real, agy 1.2.17, recorded by wp-p0b (same source) | a tool step whose command the sandbox refused: no `error` object, the refusal is in the output |
 | `agy-stream-json-1.2.17-SYNTHETIC-checkpoint.ndjson` | vendor example | a `checkpoint` step with usage, text delivered in one DONE step |
-| `agy-stream-json-1.2.17-SYNTHETIC-multiturn.ndjson` | vendor example | two turns in one process (`--input-format stream-json`): cumulative usage, `init.model` |
+| `agy-stream-json-1.2.17-SYNTHETIC-multiturn.ndjson` | vendor example | two turns in one process (`--input-format stream-json`): two result frames, the second totalling both turns (`num_turns` 2), `init.model` |
 | `agy-stream-json-1.2.17-SYNTHETIC-tool-error.ndjson` | vendor example + invention | a tool step that failed (`tool_info.error`); the successful step is the vendor's |
 | `agy-json-1.2.17-SYNTHETIC-envelope.ndjson` | vendor example | the `--output-format json` single envelope |
 | `claude-stream-json-oneshot-SYNTHETIC.ndjson` | synthetic | a framed one-shot run (no partial messages): init, thinking, text, `tool_use`, an error `tool_result`, final text, result with cache usage |
@@ -60,12 +60,16 @@ Every parser reports tokens in the Anthropic convention (see `runtime.Usage`):
   `thinking_tokens`. Nothing to adjust. The terminal `result` usage equals the
   sum of the DONE steps' usage for a first turn; `agy-stream-json-1.2.17-tool.ndjson`
   shows it (12870 + 13088 input, 127 + 1 output).
-- agy's `result` usage is **cumulative over the conversation**, not per turn. In
-  the recorded `conversation-turn1/turn2` pair, turn 2 reports 25950 input and
-  719 output: turn 1's 12859 and 26 plus its own 13091 and 693, which is also the
-  sum of turn 2's DONE steps. The parser reports the counts verbatim and sets
-  `ParseResult.UsageCumulative`, so an accounting layer subtracts the total it
-  last recorded for the same conversation id.
+- agy's `result` usage is **cumulative over the conversation**, not per turn
+  (`num_turns` counts the conversation's turns). In the recorded
+  `conversation-turn1/turn2` pair, turn 2 reports 25950 input and 719 output:
+  turn 1's 12859 and 26 plus its own 13091 and 693. `ParseResult.Usage` is
+  therefore the sum of the usage carried by the DONE steps in the stream, which
+  is the run's own tokens (13091 and 693 for turn 2, and equal to the result
+  frame on every first-turn recording), and the frame's total is kept in
+  `ParseResult.CumulativeUsage` for reference. Adding runs up needs no
+  subtraction. A stream whose steps carry no usage (the single envelope) falls
+  back to the frame's counts on a first turn.
 
 ## Claude text
 

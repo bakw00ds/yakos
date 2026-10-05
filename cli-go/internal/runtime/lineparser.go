@@ -150,10 +150,11 @@ type NativeEvent struct {
 	// Fatal marks an EventError that ended the turn.
 	Fatal bool
 
-	// Usage is set on EventResult. UsageCumulative says its token counts cover
-	// the whole conversation (see ParseResult.UsageCumulative).
+	// Usage is set on EventResult: the usage of the run (turn) that just ended.
+	// CumulativeUsage is set beside it by a harness that also reports the running
+	// total of the whole conversation (agy); see ParseResult.CumulativeUsage.
 	Usage           Usage
-	UsageCumulative bool
+	CumulativeUsage Usage
 
 	// SessionID is the harness-native session id (claude session_id, codex
 	// thread_id, agy conversation_id). It is NOT the console UI session id.
@@ -193,18 +194,22 @@ type ParseResult struct {
 	// not tell the two apart (everything but claude).
 	TextAll string
 
-	// Usage is the reported token usage; the zero value means the stream did
+	// Usage is the token usage of THIS run; the zero value means the stream did
 	// not report any (killed run, harness without usage telemetry, plain text).
+	// Runs of one conversation can be added up as they are: a consumer never
+	// subtracts an earlier total. For agy it is rebuilt from the steps, because
+	// its result frame reports the whole conversation's tokens (see
+	// CumulativeUsage).
 	Usage Usage
 
-	// UsageCumulative is true when Usage counts the whole native conversation
-	// up to and including this run rather than this run alone (agy's result
-	// frame). The counts are reported verbatim. A consumer that adds runs up must
-	// subtract the cumulative total it last recorded for the same SessionID;
-	// the first run of a conversation has nothing to subtract. Only the token
-	// counts are cumulative; DurationMs is passed through as the harness
-	// reports it. False for harnesses that report per-run usage.
-	UsageCumulative bool
+	// CumulativeUsage is the running total of the whole native conversation up to
+	// and including this run, for the harness that reports one: agy's result
+	// frame keeps counting across --conversation turns. It is a reference value,
+	// for display or to cross-check accounting. Do NOT add it up across runs:
+	// that counts the earlier turns again. Zero when the harness reports no
+	// total. Only the token counts are cumulative; DurationMs is passed through
+	// as the harness reports it.
+	CumulativeUsage Usage
 
 	// SessionID is the harness-native session id, "" when none was seen. Pass it
 	// back to the harness to resume the conversation.
@@ -309,11 +314,6 @@ func derefString(p *string) string {
 		return ""
 	}
 	return *p
-}
-
-// hasTokens reports whether a usage record counts any tokens.
-func hasTokens(u Usage) bool {
-	return u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheRead != 0 || u.CacheCreation != 0
 }
 
 // stripNUL removes NUL bytes from a decoded string (a JSON \u0000 escape

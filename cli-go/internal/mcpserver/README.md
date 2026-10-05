@@ -63,7 +63,7 @@ through). It is the same object `yakos.dispatch.run` returns over JSON-RPC
 | `exit_code`, `duration_s`, `output_bytes` | As before. `output_bytes` is the size of the raw capture, not of `text`. A non-zero `exit_code` is not a tool error. |
 | `runtime`, `provider`, `model_resolved`, `model_id` | The runtime that ran, its provider (anthropic, openai, google), the requested tier, and the concrete model id when the stream reported one. |
 | `session_id` | The runtime's own session id (claude `session_id`, codex `thread_id`, agy `conversation_id`). The tool does not take a resume id yet. |
-| `usage` | `{input_tokens, output_tokens, cache_read, cache_creation}`, plus `total_cost_usd` only for claude (the one harness that reports a dollar figure). `input_tokens` is the fresh prompt for every harness; cached tokens are counted separately. `cumulative: true` is added for agy, whose counts cover the whole conversation up to this call rather than this call alone: subtract the total last seen for the same `session_id`. Omitted when the runtime reported no usage. |
+| `usage` | `{input_tokens, output_tokens, cache_read, cache_creation}`, plus `total_cost_usd` only for claude (the one harness that reports a dollar figure). `input_tokens` is the fresh prompt for every harness; cached tokens are counted separately. The counts are this call's own, so calls can be added up; for a resumed agy conversation that excludes the earlier turns, whose running total the harness reports but the result does not carry. Omitted when the runtime reported no usage. |
 | `error` | The failure message the runtime reported, if any (for example a codex `turn.failed`). |
 
 ## Error semantics

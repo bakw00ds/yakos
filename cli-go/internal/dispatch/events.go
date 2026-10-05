@@ -119,10 +119,12 @@ type Result struct {
 	// across every harness.
 	Usage *cost.Usage
 
-	// UsageCumulative is true when Usage counts the whole native conversation up
-	// to this run (agy), not this run alone. The counts are verbatim; an
-	// accounting layer subtracts the total it last recorded for SessionID.
-	UsageCumulative bool
+	// CumulativeUsage is the running total of the whole native conversation up to
+	// and including this run, for the harness that reports one (agy), else nil.
+	// It is for reference and cross-checking: Usage is this run's own and is what
+	// gets logged and summed, and adding CumulativeUsage up across runs would
+	// count the earlier turns again. Not written to the dispatch records.
+	CumulativeUsage *cost.Usage
 
 	ModelChosenBy string
 	ModelResolved string

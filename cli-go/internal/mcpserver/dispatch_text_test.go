@@ -262,17 +262,21 @@ func TestDispatchTool_ReturnsTheFinalReportNotTheNarration(t *testing.T) {
 	}
 }
 
-// agy's usage is a conversation total; the result says so.
-func TestDispatchTool_MarksAgyUsageCumulative(t *testing.T) {
+// agy's result frame totals the whole conversation. The result reports the
+// call's own tokens, so a caller can add calls up, and never sends the total.
+func TestDispatchTool_ReportsAgyTurnUsage(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "tests", "fixtures", "runtime-streams", "agy-stream-json-1.2.17-conversation-turn2.ndjson"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := dispatchCfgWithFake(t, "agy", strings.Split(strings.TrimRight(string(data), "\n"), "\n")...)
-	got, _ := callDispatch(t, cfg, map[string]interface{}{"agent": "worker", "task": "t", "runtime": "agy"})
+	got, raw := callDispatch(t, cfg, map[string]interface{}{"agent": "worker", "task": "t", "runtime": "agy"})
 	u, _ := got["usage"].(map[string]interface{})
-	if u["input_tokens"] != float64(25950) || u["cumulative"] != true {
-		t.Errorf("usage = %v, want the conversation total marked cumulative", u)
+	if u["input_tokens"] != float64(13091) || u["output_tokens"] != float64(693) {
+		t.Errorf("usage = %v, want this call's own 13091 in / 693 out", u)
+	}
+	if strings.Contains(raw, "25950") || strings.Contains(strings.ToLower(raw), "cumulative") {
+		t.Errorf("the conversation total must not be sent: %s", raw)
 	}
 	if got["session_id"] != "390dbd9d-ac3e-4fc9-9383-8f11318029e0" {
 		t.Errorf("session_id = %v", got["session_id"])

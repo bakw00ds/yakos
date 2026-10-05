@@ -115,8 +115,8 @@ func TestRun_ClaudeStreamJSONBecomesTextUsageAndSession(t *testing.T) {
 	if want := "Dispatching to the backend agent.\nThe backend agent reports: all handlers registered."; res.TextAll != want {
 		t.Errorf("TextAll = %q, want %q", res.TextAll, want)
 	}
-	if res.UsageCumulative {
-		t.Error("claude reports per-run usage; it is not cumulative")
+	if res.CumulativeUsage != nil {
+		t.Errorf("claude reports per-run usage and no conversation total: %+v", res.CumulativeUsage)
 	}
 	if !res.Parsed || res.Runtime != "claude" || res.Provider != "anthropic" {
 		t.Errorf("Parsed/Runtime/Provider = %v/%q/%q", res.Parsed, res.Runtime, res.Provider)
@@ -312,23 +312,36 @@ func TestRun_ForwardedSubagentTextIsNotTheAnswer(t *testing.T) {
 	}
 }
 
-// agy's result frame is a conversation total: Run passes the counts through and
-// marks them, and says nothing of the kind for harnesses that report per run.
-func TestRun_AgyConversationUsageIsMarkedCumulative(t *testing.T) {
+// agy's result frame is a conversation total. Run reports the turn's own tokens
+// as Usage, which is what the dispatch record carries and what a consumer sums,
+// and keeps the total apart for reference.
+func TestRun_AgyResumedTurnReportsAndLogsItsOwnUsage(t *testing.T) {
 	fakeRuntimeBin(t, "agy", "agy-stream-json-1.2.17-conversation-turn2.ndjson", "", 0)
-	_, res, _ := runOnce(t, "agy")
-	if res.Usage == nil || res.Usage.InputTokens != 25950 || res.Usage.OutputTokens != 719 {
-		t.Errorf("Usage = %+v, want the result frame's totals verbatim", res.Usage)
+	_, res, logDir := runOnce(t, "agy")
+	if res.Usage == nil || res.Usage.InputTokens != 13091 || res.Usage.OutputTokens != 693 {
+		t.Errorf("Usage = %+v, want the turn's own 13091 in / 693 out", res.Usage)
 	}
-	if !res.UsageCumulative {
-		t.Error("UsageCumulative must be set for agy")
+	if res.CumulativeUsage == nil || res.CumulativeUsage.InputTokens != 25950 || res.CumulativeUsage.OutputTokens != 719 {
+		t.Errorf("CumulativeUsage = %+v, want the conversation total 25950 in / 719 out", res.CumulativeUsage)
+	}
+	// The record a cost reader sums holds the turn's own tokens, and nothing of
+	// the total, so adding rows up never counts a turn twice.
+	u, ok := finishedUsage(t, logDir)
+	if !ok || u["input_tokens"] != float64(13091) || u["output_tokens"] != float64(693) {
+		t.Errorf("logged usage = %v", u)
+	}
+	for k := range u {
+		if strings.Contains(k, "cumulative") || strings.Contains(k, "total_tokens") {
+			t.Errorf("the record must not carry the conversation total: %s", k)
+		}
 	}
 }
 
-func TestRun_PerRunUsageIsNotMarkedCumulative(t *testing.T) {
+// Only agy reports a running total; every other runtime's usage is per run.
+func TestRun_OnlyAgyHasAConversationTotal(t *testing.T) {
 	fakeRuntimeBin(t, "codex", "codex-exec-json-0.154.0-ok.ndjson", "", 0)
-	if _, res, _ := runOnce(t, "codex"); res.Usage == nil || res.UsageCumulative {
-		t.Errorf("codex: Usage=%+v cumulative=%v", res.Usage, res.UsageCumulative)
+	if _, res, _ := runOnce(t, "codex"); res.Usage == nil || res.CumulativeUsage != nil {
+		t.Errorf("codex: Usage=%+v CumulativeUsage=%+v", res.Usage, res.CumulativeUsage)
 	}
 }
 
@@ -623,18 +636,22 @@ func TestSummarize_DoesNotCarryTheFullJoin(t *testing.T) {
 	}
 }
 
-// A conversation total is marked as one, so a caller that adds calls up knows.
-func TestSummarize_MarksCumulativeUsage(t *testing.T) {
-	cum := Summarize(nil, Result{Parsed: true, Usage: &cost.Usage{InputTokens: 25950, OutputTokens: 719}, UsageCumulative: true})
-	if cum.Usage == nil || !cum.Usage.Cumulative {
-		t.Fatalf("Usage = %+v, want cumulative", cum.Usage)
+// The transports' usage is the call's own tokens, so a caller can add calls up.
+// The conversation total never goes out.
+func TestSummarize_UsageIsTheCallsOwn(t *testing.T) {
+	b, err := json.Marshal(Summarize(nil, Result{
+		Parsed:          true,
+		Usage:           &cost.Usage{InputTokens: 13091, OutputTokens: 693},
+		CumulativeUsage: &cost.Usage{InputTokens: 25950, OutputTokens: 719},
+	}))
+	if err != nil {
+		t.Fatal(err)
 	}
-	b, _ := json.Marshal(cum)
-	if !strings.Contains(string(b), `"cumulative":true`) {
-		t.Errorf("usage lacks the cumulative marker: %s", b)
+	out := string(b)
+	if !strings.Contains(out, `"input_tokens":13091`) {
+		t.Errorf("usage is not the call's own: %s", out)
 	}
-	per := Summarize(nil, Result{Parsed: true, Usage: &cost.Usage{InputTokens: 1}})
-	if b, _ := json.Marshal(per); strings.Contains(string(b), "cumulative") {
-		t.Errorf("per-run usage must not carry the marker: %s", b)
+	if strings.Contains(out, "25950") || strings.Contains(strings.ToLower(out), "cumulative") {
+		t.Errorf("the conversation total must not be sent: %s", out)
 	}
 }

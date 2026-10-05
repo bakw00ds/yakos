@@ -58,11 +58,14 @@ func (r *Result) applyParsed(runtimeName string, pr runtime.ParseResult) {
 	r.TextCapped = pr.TextCapped
 	r.TextAllCapped = pr.TextAllCapped
 	r.LinesDropped = pr.LinesDropped
-	r.UsageCumulative = pr.UsageCumulative
 	r.Error = pr.Error
 	if pr.Usage != (runtime.Usage{}) {
 		u := pr.Usage
 		r.Usage = &u
+	}
+	if pr.CumulativeUsage != (runtime.Usage{}) {
+		u := pr.CumulativeUsage
+		r.CumulativeUsage = &u
 	}
 }
 
@@ -94,18 +97,16 @@ func (r Result) OutputTextAll(stdout []byte) []byte {
 
 // UsageSummary is the JSON view of a result's token usage. The names match the
 // dispatch-log's usage object. The dollar cost appears only when the harness
-// itself reported one (claude); tokens are the primary unit.
+// itself reported one (claude); tokens are the primary unit. The counts are this
+// call's own, so a caller can add calls up; for a resumed agy conversation that
+// excludes the earlier turns, and the conversation total (Result.CumulativeUsage)
+// is not sent.
 type UsageSummary struct {
 	InputTokens   int64   `json:"input_tokens"`
 	OutputTokens  int64   `json:"output_tokens"`
 	CacheRead     int64   `json:"cache_read"`
 	CacheCreation int64   `json:"cache_creation"`
 	TotalCostUSD  float64 `json:"total_cost_usd,omitempty"`
-
-	// Cumulative is present and true when the counts cover the whole native
-	// conversation (agy) rather than this call alone, so a caller that adds calls
-	// up knows to subtract the total it last saw for the same session_id.
-	Cumulative bool `json:"cumulative,omitempty"`
 }
 
 // TransportSummary is what a transport that returns a dispatch to its caller
@@ -176,7 +177,6 @@ func Summarize(stdout []byte, res Result) TransportSummary {
 			CacheRead:     res.Usage.CacheRead,
 			CacheCreation: res.Usage.CacheCreation,
 			TotalCostUSD:  res.Usage.TotalCostUSD,
-			Cumulative:    res.UsageCumulative,
 		}
 	}
 	return s
