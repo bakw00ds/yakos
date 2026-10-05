@@ -283,12 +283,12 @@ func TestCodexBypass_RefusedForUntrustedPolicyFiles(t *testing.T) {
 			if argvIndex(cmd.Args, "--sandbox") < 0 {
 				t.Errorf("codex must stay sandboxed: %q", cmd.Args)
 			}
-			if !strings.Contains(notes.String(), "stays sandboxed") {
+			if !strings.Contains(notes.String(), "keeps its sandbox flags") {
 				t.Errorf("an ignored policy file must be explained on stderr, got %q", notes.String())
 			}
 			agyCmd := (&AgyAdapter{}).ExecCmd(context.Background(), DispatchRequest{Project: t.TempDir(), AgentName: "backend", Task: "t"})
 			if argvIndex(agyCmd.Args, "--sandbox") < 0 {
-				t.Errorf("agy must stay sandboxed too: %q", agyCmd.Args)
+				t.Errorf("agy must keep --sandbox too: %q", agyCmd.Args)
 			}
 		})
 	}
@@ -566,7 +566,10 @@ func TestAgyEffort(t *testing.T) {
 	skipOnWindows(t)
 	useEmptyHome(t)
 	for effort, want := range map[string]string{
-		"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max",
+		"low": "low", "medium": "medium", "high": "high",
+		// agy 1.2.17 rejects --effort xhigh and --effort max ("gemini-3.8-flash has
+		// no "max" effort (available: low, medium, high)"), so both are clamped.
+		"xhigh": "high", "max": "high",
 		"": "", "minimal": "", "bogus": "", "--evil": "",
 	} {
 		cmd := (&AgyAdapter{}).ExecCmd(context.Background(), DispatchRequest{
@@ -579,6 +582,90 @@ func TestAgyEffort(t *testing.T) {
 		case want != "" && (i < 0 || cmd.Args[i+1] != want):
 			t.Errorf("effort %q: want --effort %s in %q", effort, want, cmd.Args)
 		}
+	}
+}
+
+// effortArg returns the reasoning effort the argv of runtimeName carries, or "".
+func effortArg(runtimeName string, args []string) string {
+	switch runtimeName {
+	case "agy":
+		if i := argvIndex(args, "--effort"); i >= 0 && i+1 < len(args) {
+			return args[i+1]
+		}
+	case "codex":
+		for i, a := range args {
+			if a == "-c" && i+1 < len(args) && strings.HasPrefix(args[i+1], "model_reasoning_effort=") {
+				v, err := strconv.Unquote(strings.TrimPrefix(args[i+1], "model_reasoning_effort="))
+				if err != nil {
+					return "<unparsable: " + args[i+1] + ">"
+				}
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// TestEffortIsMappedPerRuntime pins which dispatch effort levels each harness
+// receives, for framed and chat dispatch. codex takes all five unchanged (its
+// model catalog lists them up to max). agy takes low, medium and high; the two
+// highest levels would make agy exit 1 before any model call, so they become
+// high.
+func TestEffortIsMappedPerRuntime(t *testing.T) {
+	skipOnWindows(t)
+	useEmptyHome(t)
+	want := map[string]map[string]string{
+		"codex": {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max"},
+		"agy":   {"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"},
+	}
+	for _, runtimeName := range []string{"codex", "agy"} {
+		for _, chat := range []bool{false, true} {
+			for _, effort := range []string{"low", "medium", "high", "xhigh", "max"} {
+				var args []string
+				switch {
+				case runtimeName == "codex" && chat:
+					args = (&CodexAdapter{}).ChatExecCmd(context.Background(), ChatDispatchRequest{Project: t.TempDir(), UserText: "hi", Effort: effort}).Args
+				case runtimeName == "codex":
+					args = (&CodexAdapter{}).ExecCmd(context.Background(), DispatchRequest{Project: t.TempDir(), AgentName: "backend", Task: "t", Effort: effort}).Args
+				case chat:
+					args = (&AgyAdapter{}).ChatExecCmd(context.Background(), ChatDispatchRequest{Project: t.TempDir(), UserText: "hi", Effort: effort}).Args
+				default:
+					args = (&AgyAdapter{}).ExecCmd(context.Background(), DispatchRequest{Project: t.TempDir(), AgentName: "backend", Task: "t", Effort: effort}).Args
+				}
+				if got := effortArg(runtimeName, args); got != want[runtimeName][effort] {
+					t.Errorf("%s (chat=%v) effort %s: argv carries %q, want %q\n%q", runtimeName, chat, effort, got, want[runtimeName][effort], args)
+				}
+			}
+		}
+	}
+}
+
+// TestAgyEffortClampSaysSoOnce: the clamp prints one stderr note per level per
+// process, only when --effort is actually passed.
+func TestAgyEffortClampSaysSoOnce(t *testing.T) {
+	skipOnWindows(t)
+	useEmptyHome(t)
+	notes := captureSandboxNotes(t)
+	build := func(model, effort string) {
+		(&AgyAdapter{}).ExecCmd(context.Background(), DispatchRequest{
+			Project: t.TempDir(), AgentName: "backend", Task: "t", ModelOverride: model, Effort: effort,
+		})
+	}
+	build("", "high")
+	build("", "medium")
+	if notes.Len() != 0 {
+		t.Errorf("levels agy accepts need no note, got %q", notes.String())
+	}
+	build("balanced", "max") // gemini-3.8-flash-high carries its effort: no --effort, so nothing to clamp
+	if notes.Len() != 0 {
+		t.Errorf("no --effort is passed with a suffixed id, so no note: %q", notes.String())
+	}
+	build("", "max")
+	build("", "max")
+	build("", "xhigh")
+	got := notes.String()
+	if strings.Count(got, `"max"`) != 1 || strings.Count(got, `"xhigh"`) != 1 || !strings.Contains(got, "using high") {
+		t.Errorf("want exactly one note per clamped level, got %q", got)
 	}
 }
 

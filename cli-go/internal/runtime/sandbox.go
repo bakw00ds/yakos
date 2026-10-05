@@ -14,10 +14,13 @@ import (
 //
 // codex and agy used to be dispatched with their approvals and sandbox
 // switched off, so any task text or file the model read could drive arbitrary
-// commands as the operator. They now run sandboxed unless the operator
-// explicitly allows otherwise in the owner-only ~/.yakos-state/router-policy.yml
-// (allow_unsandboxed_runtimes). A project .yakos.yml cannot enable it, and the
-// file is read from $HOME/.yakos-state only (see statepath.TrustedDir).
+// commands as the operator. codex now runs in its workspace-write sandbox and
+// agy is started with --sandbox, unless the operator explicitly allows
+// otherwise in the owner-only ~/.yakos-state/router-policy.yml
+// (allow_unsandboxed_runtimes). For agy the flag is a request, not a verified
+// boundary: containment is under dedicated review (K-158). A project .yakos.yml
+// cannot enable the bypass, and the file is read from $HOME/.yakos-state only
+// (see statepath.TrustedDir).
 const (
 	// codexSandboxMode is the codex sandbox policy used for every dispatch.
 	codexSandboxMode = "workspace-write"
@@ -54,7 +57,7 @@ func unsandboxedAllowed(runtimeName string) bool {
 	}
 	ok, err := routerpolicy.AllowsUnsandboxed(dir, runtimeName)
 	if err != nil {
-		noteOnce("ignored:"+runtimeName, "yakos: %s stays sandboxed; ignoring router policy: %v\n", runtimeName, err)
+		noteOnce("ignored:"+runtimeName, "yakos: %s keeps its sandbox flags; ignoring router policy: %v\n", runtimeName, err)
 		return false
 	}
 	if ok {

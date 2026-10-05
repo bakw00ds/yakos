@@ -213,8 +213,13 @@ func (a *CodexAdapter) ExecCmd(ctx context.Context, req DispatchRequest) *exec.C
 //
 // The agent persona is passed as -c developer_instructions, encoded as a TOML
 // string. codex-cli has no --system-prompt flag; the old code passed one and
-// every agent chat on codex failed.
+// every agent chat on codex failed. The persona travels in argv, so one over
+// MaxPersonaBytes is refused before any argv is built: the returned command
+// fails in Start with ErrPersonaTooLarge.
 func (a *CodexAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *exec.Cmd {
+	if err := checkPersonaSize(req.AgentSystemPrompt); err != nil {
+		return rejectedCmd(ctx, "codex", err)
+	}
 	args := []string{"exec", "--json"}
 	args = append(args, codexCommonArgs(req.ModelOverride, req.Effort, false)...)
 	if req.AgentSystemPrompt != "" {

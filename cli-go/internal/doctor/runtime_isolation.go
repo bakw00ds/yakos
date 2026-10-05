@@ -45,7 +45,7 @@ func (r *runner) checkRuntimeIsolation() {
 	switch {
 	case perr != nil: // Load reports a missing file as an empty policy, so this is a real problem
 		lines = append(lines, func() {
-			r.warn(SectionRuntimeIsolation, "router policy ignored, codex and agy stay sandboxed: %v", perr)
+			r.warn(SectionRuntimeIsolation, "router policy ignored (codex stays sandboxed, agy keeps --sandbox): %v", perr)
 		})
 	case len(pol.AllowUnsandboxedRuntimes) > 0:
 		var harnesses []string

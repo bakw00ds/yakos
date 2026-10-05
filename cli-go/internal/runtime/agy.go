@@ -22,13 +22,14 @@ func buildEnvAgy(req DispatchRequest) []string {
 // --output-format text|json|stream-json. Checked live with agy 1.2.17 (see
 // docs/runtime-matrix.md and tests/fixtures/runtime-streams): the stream shape,
 // resume, the --model/--effort conflict (agyIDCarriesEffort), the sandbox
-// denying a write outside the workspace, and the skill below. A framed dispatch
-// invokes the workspace skill @yakos-<agent>, which the dispatch layer
-// materializes to <workdir>/.agents/skills/yakos-<id>/SKILL.md first
+// denying one write outside the workspace (containment itself is unverified,
+// K-158), and the skill below. A framed dispatch invokes the workspace skill
+// @yakos-<agent>, which the dispatch layer materializes to
+// <workdir>/.agents/skills/yakos-<id>/SKILL.md first
 // (agentscompose.MaterializeAgyAgent); in print mode agy lists that skill and the
 // mention makes the model read it with a view_file step and follow it. Chat has
 // no skill file: agy has no system-prompt flag, so the persona is prepended to
-// the user text.
+// the user text, and a persona over MaxPersonaBytes is refused before argv.
 //
 // ExecCmd is implemented for PR #34 stderr capture.
 type AgyAdapter struct{}
@@ -48,12 +49,30 @@ func (a *AgyAdapter) Available(_ context.Context) bool {
 // ones `agy models` lists for the signed-in account.
 func agyModelFlag(model string) string { return HarnessModelID("agy", model) }
 
-// agyEffort returns the --effort value, or "" for none. agy takes the same
-// five levels the dispatch layer validates.
+// agyEffort maps a dispatch effort level (low, medium, high, xhigh, max) to the
+// --effort value agy accepts, or "" for none.
+//
+// agy 1.2.17 takes low, medium and high. xhigh and max are rejected: with the
+// adapter's own chat argv and no --model, `--effort max` exits 1 with
+//
+//	invalid model selection (--model "" --effort "max"): gemini-3.8-flash has no
+//	"max" effort (available: low, medium, high)
+//
+// and stream-json reports a result event of status ERROR before any model call.
+// The dispatch layer accepts all five levels for every runtime (the console
+// offers them), so the two highest are clamped to the highest agy has, with one
+// stderr note per level and process. codex takes all five unchanged (see
+// codexEffort). Which levels one particular model offers is agy's call: a bare
+// base id such as gemini-3.1-pro offers only low and high, and agy reports a
+// level it lacks.
 func agyEffort(effort string) string {
 	switch effort {
-	case "low", "medium", "high", "xhigh", "max":
+	case "low", "medium", "high":
 		return effort
+	case "xhigh", "max":
+		noteOnce("agy-effort:"+effort,
+			"yakos: agy has no %q reasoning effort (it takes low, medium or high); using high\n", effort)
+		return "high"
 	}
 	return ""
 }
@@ -66,9 +85,13 @@ func agyEffort(effort string) string {
 // selection ... --model gemini-3.8-flash-low conflicts with --effort=high" and a
 // stream-json result event of status ERROR. `--effort` on its own, with no
 // --model, works (it applies to the default model), so the flag is passed only
-// when no id carrying an effort is. (The binary also has a message `--model %s
-// requires --effort`, so a bare base id without a suffix presumably needs the
-// flag; that was not observed.)
+// when no id carrying an effort is.
+//
+// The reverse also holds, and was observed: a bare base id (no suffix) needs the
+// flag. `--model gemini-3.1-pro` alone exits 1 with "requires --effort
+// (available: low, high)". yakOS never builds such an id itself (the aliases are
+// all suffixed); an operator who pins one must also set an effort that model
+// offers, and agy's own error says which levels those are.
 func agyIDCarriesEffort(id string) bool {
 	for _, suffix := range []string{"-low", "-medium", "-high"} {
 		if strings.HasSuffix(id, suffix) {
@@ -84,11 +107,12 @@ func agyIDCarriesEffort(id string) bool {
 // begins with '-' cannot be read as a flag, and nothing may follow it.
 //
 // --dangerously-skip-permissions stays: headless agy has no approval surface,
-// so without it any permission request would stall. --sandbox restricts the
-// terminal commands the model runs. The operator can drop --sandbox only
-// through the trusted router policy (allow_unsandboxed_runtimes). Caveat: with
-// permissions auto-approved, a model request to run a command outside the
-// sandbox is approved too, so agy's containment is weaker than codex's.
+// so without it any permission request would stall. --sandbox is requested;
+// containment under dedicated review (K-158). One write outside the workspace
+// was observed to be denied, nothing more, and with permissions auto-approved a
+// model request to run a command outside the sandbox may be approved too, so
+// nothing may rely on agy dispatch being contained. The operator can drop
+// --sandbox only through the trusted router policy (allow_unsandboxed_runtimes).
 func agyCommonArgs(workDir, model, effort string) []string {
 	var args []string
 	if workDir != "" {
@@ -102,8 +126,11 @@ func agyCommonArgs(workDir, model, effort string) []string {
 	if m != "" {
 		args = append(args, "--model", m)
 	}
-	if e := agyEffort(effort); e != "" && !agyIDCarriesEffort(m) {
-		args = append(args, "--effort", e)
+	if !agyIDCarriesEffort(m) {
+		// Only here is --effort passed, so the clamp note is printed only when it matters.
+		if e := agyEffort(effort); e != "" {
+			args = append(args, "--effort", e)
+		}
 	}
 	return append(args, "--output-format", "stream-json")
 }
@@ -131,6 +158,9 @@ func (a *AgyAdapter) ExecCmd(ctx context.Context, req DispatchRequest) *exec.Cmd
 // The output is agy's stream-json. Until the agy stream parser lands the
 // caller degrades to one "token" chunk (buffered path).
 func (a *AgyAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *exec.Cmd {
+	if err := checkPersonaSize(req.AgentSystemPrompt); err != nil {
+		return rejectedCmd(ctx, "agy", err)
+	}
 	prompt := req.UserText
 	if req.AgentSystemPrompt != "" {
 		// agy has no --system-prompt flag; prepend as a section separator.
