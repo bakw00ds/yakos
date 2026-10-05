@@ -124,7 +124,7 @@ func (st runState) save(path string) error {
 	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameReplace(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
@@ -141,20 +141,42 @@ func appendPending(path string, event map[string]any) {
 	if err != nil {
 		return
 	}
+	appendPendingLine(path, string(data))
+}
+
+// appendPendingLine appends one already-encoded preview line (a journal record
+// carries its own). An empty line is not recorded.
+func appendPendingLine(path, line string) { appendPendingLines(path, []string{line}) }
+
+// appendPendingLines appends already-encoded preview lines in one write and keeps
+// the file to its last 100 lines once it passes 150. Empty lines are not recorded.
+func appendPendingLines(path string, lines []string) {
+	var b strings.Builder
+	for _, l := range lines {
+		if l != "" {
+			b.WriteString(l)
+			b.WriteByte('\n')
+		}
+	}
+	if b.Len() == 0 {
+		return
+	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec
 	if err != nil {
 		return
 	}
-	_, _ = f.Write(append(data, '\n'))
+	_, _ = f.WriteString(b.String())
 	_ = f.Close()
 	_ = os.Chmod(path, 0o600)
 	if all, rerr := os.ReadFile(path); rerr == nil { //nolint:gosec
-		lines := strings.Split(strings.TrimRight(string(all), "\n"), "\n")
-		if len(lines) > 150 {
-			tail := strings.Join(lines[len(lines)-100:], "\n") + "\n"
+		all := strings.Split(strings.TrimRight(string(all), "\n"), "\n")
+		if len(all) > 150 {
+			tail := strings.Join(all[len(all)-100:], "\n") + "\n"
 			tmp := path + ".tmp." + strconv.Itoa(os.Getpid())
 			if os.WriteFile(tmp, []byte(tail), 0o600) == nil {
-				_ = os.Rename(tmp, path)
+				if renameReplace(tmp, path) != nil {
+					_ = os.Remove(tmp)
+				}
 			}
 		}
 	}
